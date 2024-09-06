@@ -41,79 +41,117 @@
 // - The `#[allow(dead_code)]` above various structs are to suppress warnings about only the Debug impl
 //   reading these fields. We use the Debug impl for semi-structured logging, though.
 
-use std::{
-    sync::Arc,
-    time::{Duration, SystemTime},
-};
+use std::{sync::Arc, time::SystemTime};
 
 use anyhow::Context;
-use pageserver_api::shard::TenantShardId;
+use pageserver_api::{config::DiskUsageEvictionTaskConfig, shard::TenantShardId};
 use remote_storage::GenericRemoteStorage;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn, Instrument};
-use utils::serde_percent::Percent;
 use utils::{completion, id::TimelineId};
 
 use crate::{
     config::PageServerConf,
-    task_mgr::{self, TaskKind, BACKGROUND_RUNTIME},
+    metrics::disk_usage_based_eviction::METRICS,
+    task_mgr::{self, BACKGROUND_RUNTIME},
     tenant::{
-        self,
         mgr::TenantManager,
         remote_timeline_client::LayerFileMetadata,
         secondary::SecondaryTenant,
-        storage_layer::{AsLayerDesc, EvictionError, Layer, LayerFileName},
-        Timeline,
+        storage_layer::{AsLayerDesc, EvictionError, Layer, LayerName, LayerVisibilityHint},
     },
+    CancellableTask, DiskUsageEvictionTask,
 };
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DiskUsageEvictionTaskConfig {
-    pub max_usage_pct: Percent,
-    pub min_avail_bytes: u64,
-    #[serde(with = "humantime_serde")]
-    pub period: Duration,
-    #[cfg(feature = "testing")]
-    pub mock_statvfs: Option<crate::statvfs::mock::Behavior>,
-    /// Select sorting for evicted layers
-    #[serde(default)]
-    pub eviction_order: EvictionOrder,
-}
 
 /// Selects the sort order for eviction candidates *after* per tenant `min_resident_size`
 /// partitioning.
-#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "args")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EvictionOrder {
-    /// Order the layers to be evicted by how recently they have been accessed in absolute
-    /// time.
-    ///
-    /// This strategy is unfair when some tenants grow faster than others towards the slower
-    /// growing.
-    #[default]
-    AbsoluteAccessed,
-
     /// Order the layers to be evicted by how recently they have been accessed relatively within
     /// the set of resident layers of a tenant.
-    ///
-    /// This strategy will evict layers more fairly but is untested.
     RelativeAccessed {
-        #[serde(default)]
+        /// Determines if the tenant with most layers should lose first.
+        ///
+        /// Having this enabled is currently the only reasonable option, because the order in which
+        /// we read tenants is deterministic. If we find the need to use this as `false`, we need
+        /// to ensure nondeterminism by adding in a random number to break the
+        /// `relative_last_activity==0.0` ties.
         highest_layer_count_loses_first: bool,
     },
 }
 
-impl EvictionOrder {
-    /// Return true, if with [`Self::RelativeAccessed`] order the tenants with the highest layer
-    /// counts should be the first ones to have their layers evicted.
-    fn highest_layer_count_loses_first(&self) -> bool {
-        match self {
-            EvictionOrder::AbsoluteAccessed => false,
-            EvictionOrder::RelativeAccessed {
+impl From<pageserver_api::config::EvictionOrder> for EvictionOrder {
+    fn from(value: pageserver_api::config::EvictionOrder) -> Self {
+        match value {
+            pageserver_api::config::EvictionOrder::RelativeAccessed {
                 highest_layer_count_loses_first,
-            } => *highest_layer_count_loses_first,
+            } => Self::RelativeAccessed {
+                highest_layer_count_loses_first,
+            },
+        }
+    }
+}
+
+impl EvictionOrder {
+    fn sort(&self, candidates: &mut [(EvictionPartition, EvictionCandidate)]) {
+        use EvictionOrder::*;
+
+        match self {
+            RelativeAccessed { .. } => candidates.sort_unstable_by_key(|(partition, candidate)| {
+                (*partition, candidate.relative_last_activity)
+            }),
+        }
+    }
+
+    /// Called to fill in the [`EvictionCandidate::relative_last_activity`] while iterating tenants
+    /// layers in **most** recently used order.
+    fn relative_last_activity(&self, total: usize, index: usize) -> finite_f32::FiniteF32 {
+        use EvictionOrder::*;
+
+        match self {
+            RelativeAccessed {
+                highest_layer_count_loses_first,
+            } => {
+                // keeping the -1 or not decides if every tenant should lose their least recently accessed
+                // layer OR if this should happen in the order of having highest layer count:
+                let fudge = if *highest_layer_count_loses_first {
+                    // relative_last_activity vs. tenant layer count:
+                    // - 0.1..=1.0 (10 layers)
+                    // - 0.01..=1.0 (100 layers)
+                    // - 0.001..=1.0 (1000 layers)
+                    //
+                    // leading to evicting less of the smallest tenants.
+                    0
+                } else {
+                    // use full 0.0..=1.0 range, which means even the smallest tenants could always lose a
+                    // layer. the actual ordering is unspecified: for 10k tenants on a pageserver it could
+                    // be that less than 10k layer evictions is enough, so we would not need to evict from
+                    // all tenants.
+                    //
+                    // as the tenant ordering is now deterministic this could hit the same tenants
+                    // disproportionetly on multiple invocations. alternative could be to remember how many
+                    // layers did we evict last time from this tenant, and inject that as an additional
+                    // fudge here.
+                    1
+                };
+
+                let total = total.checked_sub(fudge).filter(|&x| x > 1).unwrap_or(1);
+                let divider = total as f32;
+
+                // most recently used is always (total - 0) / divider == 1.0
+                // least recently used depends on the fudge:
+                // -       (total - 1) - (total - 1) / total => 0 / total
+                // -             total - (total - 1) / total => 1 / total
+                let distance = (total - index) as f32;
+
+                finite_f32::FiniteF32::try_from_normalized(distance / divider)
+                    .unwrap_or_else(|val| {
+                        tracing::warn!(%fudge, "calculated invalid relative_last_activity for i={index}, total={total}: {val}");
+                        finite_f32::FiniteF32::ZERO
+                    })
+            }
         }
     }
 }
@@ -130,36 +168,34 @@ pub fn launch_disk_usage_global_eviction_task(
     state: Arc<State>,
     tenant_manager: Arc<TenantManager>,
     background_jobs_barrier: completion::Barrier,
-) -> anyhow::Result<()> {
+) -> Option<DiskUsageEvictionTask> {
     let Some(task_config) = &conf.disk_usage_based_eviction else {
         info!("disk usage based eviction task not configured");
-        return Ok(());
+        return None;
     };
 
     info!("launching disk usage based eviction task");
 
-    task_mgr::spawn(
-        BACKGROUND_RUNTIME.handle(),
-        TaskKind::DiskUsageEviction,
-        None,
-        None,
+    let cancel = CancellationToken::new();
+    let task = BACKGROUND_RUNTIME.spawn(task_mgr::exit_on_panic_or_error(
         "disk usage based eviction",
-        false,
-        async move {
-            let cancel = task_mgr::shutdown_token();
+        {
+            let cancel = cancel.clone();
+            async move {
+                // wait until initial load is complete, because we cannot evict from loading tenants.
+                tokio::select! {
+                    _ = cancel.cancelled() => { return anyhow::Ok(()); },
+                    _ = background_jobs_barrier.wait() => { }
+                };
 
-            // wait until initial load is complete, because we cannot evict from loading tenants.
-            tokio::select! {
-                _ = cancel.cancelled() => { return Ok(()); },
-                _ = background_jobs_barrier.wait() => { }
-            };
-
-            disk_usage_eviction_task(&state, task_config, &storage, tenant_manager, cancel).await;
-            Ok(())
+                disk_usage_eviction_task(&state, task_config, &storage, tenant_manager, cancel)
+                    .await;
+                anyhow::Ok(())
+            }
         },
-    );
+    ));
 
-    Ok(())
+    Some(DiskUsageEvictionTask(CancellableTask { cancel, task }))
 }
 
 #[instrument(skip_all)]
@@ -240,7 +276,7 @@ async fn disk_usage_eviction_task_iteration(
         storage,
         usage_pre,
         tenant_manager,
-        task_config.eviction_order,
+        task_config.eviction_order.into(),
         cancel,
     )
     .await;
@@ -288,7 +324,6 @@ pub enum IterationOutcome<U> {
     Finished(IterationOutcomeFinished<U>),
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Serialize)]
 pub struct IterationOutcomeFinished<U> {
     /// The actual usage observed before we started the iteration.
@@ -303,7 +338,6 @@ pub struct IterationOutcomeFinished<U> {
 }
 
 #[derive(Debug, Serialize)]
-#[allow(dead_code)]
 struct AssumedUsage<U> {
     /// The expected value for `after`, after phase 2.
     projected_after: U,
@@ -311,14 +345,12 @@ struct AssumedUsage<U> {
     failed: LayerCount,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Serialize)]
 struct PlannedUsage<U> {
     respecting_tenant_min_resident_size: U,
     fallback_to_global_lru: Option<U>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Default, Serialize)]
 struct LayerCount {
     file_sizes: u64,
@@ -350,13 +382,23 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
         "running disk usage based eviction due to pressure"
     );
 
-    let candidates =
+    let (candidates, collection_time) = {
+        let started_at = std::time::Instant::now();
         match collect_eviction_candidates(tenant_manager, eviction_order, cancel).await? {
             EvictionCandidates::Cancelled => {
                 return Ok(IterationOutcome::Cancelled);
             }
-            EvictionCandidates::Finished(partitioned) => partitioned,
-        };
+            EvictionCandidates::Finished(partitioned) => (partitioned, started_at.elapsed()),
+        }
+    };
+
+    METRICS.layers_collected.inc_by(candidates.len() as u64);
+
+    tracing::info!(
+        elapsed_ms = collection_time.as_millis(),
+        total_layers = candidates.len(),
+        "collection completed"
+    );
 
     // Debug-log the list of candidates
     let now = SystemTime::now();
@@ -387,55 +429,10 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
     // the tenant's min-resident-size threshold, print a warning, and memorize the disk
     // usage at that point, in 'usage_planned_min_resident_size_respecting'.
 
-    let selection = select_victims(&candidates, usage_pre);
+    let (evicted_amount, usage_planned) =
+        select_victims(&candidates, usage_pre).into_amount_and_planned();
 
-    let mut candidates = candidates;
-
-    let selection = if matches!(eviction_order, EvictionOrder::RelativeAccessed { .. }) {
-        // we currently have the layers ordered by AbsoluteAccessed so that we can get the summary
-        // for comparison here. this is a temporary measure to develop alternatives.
-        use std::fmt::Write;
-
-        let mut summary_buf = String::with_capacity(256);
-
-        {
-            let absolute_summary = candidates
-                .iter()
-                .take(selection.amount)
-                .map(|(_, candidate)| candidate)
-                .collect::<summary::EvictionSummary>();
-
-            write!(summary_buf, "{absolute_summary}").expect("string grows");
-
-            info!("absolute accessed selection summary: {summary_buf}");
-        }
-
-        candidates.sort_unstable_by_key(|(partition, candidate)| {
-            (*partition, candidate.relative_last_activity)
-        });
-
-        let selection = select_victims(&candidates, usage_pre);
-
-        {
-            summary_buf.clear();
-
-            let relative_summary = candidates
-                .iter()
-                .take(selection.amount)
-                .map(|(_, candidate)| candidate)
-                .collect::<summary::EvictionSummary>();
-
-            write!(summary_buf, "{relative_summary}").expect("string grows");
-
-            info!("relative accessed selection summary: {summary_buf}");
-        }
-
-        selection
-    } else {
-        selection
-    };
-
-    let (evicted_amount, usage_planned) = selection.into_amount_and_planned();
+    METRICS.layers_selected.inc_by(evicted_amount as u64);
 
     // phase2: evict layers
 
@@ -464,9 +461,15 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
             if let Some(next) = next {
                 match next {
                     Ok(Ok(file_size)) => {
+                        METRICS.layers_evicted.inc();
                         usage_assumed.add_available_bytes(file_size);
                     }
-                    Ok(Err((file_size, EvictionError::NotFound | EvictionError::Downloaded))) => {
+                    Ok(Err((
+                        file_size,
+                        EvictionError::NotFound
+                        | EvictionError::Downloaded
+                        | EvictionError::Timeout,
+                    ))) => {
                         evictions_failed.file_sizes += file_size;
                         evictions_failed.count += 1;
                     }
@@ -482,7 +485,10 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
 
             // calling again when consumed_all is fine as evicted is fused.
             let Some((_partition, candidate)) = evicted.next() else {
-                consumed_all = true;
+                if !consumed_all {
+                    tracing::info!("all evictions started, waiting");
+                    consumed_all = true;
+                }
                 continue;
             };
 
@@ -490,21 +496,24 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
                 EvictionLayer::Attached(layer) => {
                     let file_size = layer.layer_desc().file_size;
                     js.spawn(async move {
-                        layer
-                            .evict_and_wait()
-                            .await
-                            .map(|()| file_size)
-                            .map_err(|e| (file_size, e))
+                        // have a low eviction waiting timeout because our LRU calculations go stale fast;
+                        // also individual layer evictions could hang because of bugs and we do not want to
+                        // pause disk_usage_based_eviction for such.
+                        let timeout = std::time::Duration::from_secs(5);
+
+                        match layer.evict_and_wait(timeout).await {
+                            Ok(()) => Ok(file_size),
+                            Err(e) => Err((file_size, e)),
+                        }
                     });
                 }
                 EvictionLayer::Secondary(layer) => {
-                    let file_size = layer.metadata.file_size();
-                    let tenant_manager = tenant_manager.clone();
+                    let file_size = layer.metadata.file_size;
 
                     js.spawn(async move {
                         layer
                             .secondary_tenant
-                            .evict_layer(tenant_manager.get_conf(), layer.timeline_id, layer.name)
+                            .evict_layer(layer.timeline_id, layer.name)
                             .await;
                         Ok(file_size)
                     });
@@ -515,6 +524,30 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
 
         (usage_assumed, evictions_failed)
     };
+
+    let started_at = std::time::Instant::now();
+
+    let evict_layers = async move {
+        let mut evict_layers = std::pin::pin!(evict_layers);
+
+        let maximum_expected = std::time::Duration::from_secs(10);
+
+        let res = tokio::time::timeout(maximum_expected, &mut evict_layers).await;
+        let tuple = if let Ok(tuple) = res {
+            tuple
+        } else {
+            let elapsed = started_at.elapsed();
+            tracing::info!(elapsed_ms = elapsed.as_millis(), "still ongoing");
+            evict_layers.await
+        };
+
+        let elapsed = started_at.elapsed();
+        tracing::info!(elapsed_ms = elapsed.as_millis(), "completed");
+        tuple
+    };
+
+    let evict_layers =
+        evict_layers.instrument(tracing::info_span!("evict_layers", layers=%evicted_amount));
 
     let (usage_assumed, evictions_failed) = tokio::select! {
         tuple = evict_layers => { tuple },
@@ -539,7 +572,7 @@ pub(crate) async fn disk_usage_eviction_task_iteration_impl<U: Usage>(
 pub(crate) struct EvictionSecondaryLayer {
     pub(crate) secondary_tenant: Arc<SecondaryTenant>,
     pub(crate) timeline_id: TimelineId,
-    pub(crate) name: LayerFileName,
+    pub(crate) name: LayerName,
     pub(crate) metadata: LayerFileMetadata,
 }
 
@@ -548,7 +581,6 @@ pub(crate) struct EvictionSecondaryLayer {
 #[derive(Clone)]
 pub(crate) enum EvictionLayer {
     Attached(Layer),
-    #[allow(dead_code)]
     Secondary(EvictionSecondaryLayer),
 }
 
@@ -573,9 +605,9 @@ impl EvictionLayer {
         }
     }
 
-    pub(crate) fn get_name(&self) -> LayerFileName {
+    pub(crate) fn get_name(&self) -> LayerName {
         match self {
-            Self::Attached(l) => l.layer_desc().filename(),
+            Self::Attached(l) => l.layer_desc().layer_name(),
             Self::Secondary(sl) => sl.name.clone(),
         }
     }
@@ -583,7 +615,7 @@ impl EvictionLayer {
     pub(crate) fn get_file_size(&self) -> u64 {
         match self {
             Self::Attached(l) => l.layer_desc().file_size,
-            Self::Secondary(sl) => sl.metadata.file_size(),
+            Self::Secondary(sl) => sl.metadata.file_size,
         }
     }
 }
@@ -593,6 +625,7 @@ pub(crate) struct EvictionCandidate {
     pub(crate) layer: EvictionLayer,
     pub(crate) last_activity_ts: SystemTime,
     pub(crate) relative_last_activity: finite_f32::FiniteF32,
+    pub(crate) visibility: LayerVisibilityHint,
 }
 
 impl std::fmt::Display for EvictionLayer {
@@ -606,6 +639,7 @@ impl std::fmt::Display for EvictionLayer {
     }
 }
 
+#[derive(Default)]
 pub(crate) struct DiskUsageEvictionInfo {
     /// Timeline's largest layer (remote or resident)
     pub max_layer_size: Option<u64>,
@@ -633,14 +667,22 @@ impl std::fmt::Debug for EvictionCandidate {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum MinResidentSizePartition {
+enum EvictionPartition {
+    // A layer that is un-wanted by the tenant: evict all these first, before considering
+    // any other layers
+    EvictNow,
+
+    // Above the minimum size threshold: this layer is a candidate for eviction.
     Above,
+
+    // Below the minimum size threshold: this layer should only be evicted if all the
+    // tenants' layers above the minimum size threshold have already been considered.
     Below,
 }
 
 enum EvictionCandidates {
     Cancelled,
-    Finished(Vec<(MinResidentSizePartition, EvictionCandidate)>),
+    Finished(Vec<(EvictionPartition, EvictionCandidate)>),
 }
 
 /// Gather the eviction candidates.
@@ -750,9 +792,11 @@ async fn collect_eviction_candidates(
     eviction_order: EvictionOrder,
     cancel: &CancellationToken,
 ) -> anyhow::Result<EvictionCandidates> {
+    const LOG_DURATION_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(10);
+
     // get a snapshot of the list of tenants
-    let tenants = tenant::mgr::list_tenants()
-        .await
+    let tenants = tenant_manager
+        .list_tenants()
         .context("get list of tenants")?;
 
     // TODO: avoid listing every layer in every tenant: this loop can block the executor,
@@ -764,8 +808,12 @@ async fn collect_eviction_candidates(
         if cancel.is_cancelled() {
             return Ok(EvictionCandidates::Cancelled);
         }
-        let tenant = match tenant::mgr::get_tenant(tenant_id, true) {
-            Ok(tenant) => tenant,
+        let tenant = match tenant_manager.get_attached_tenant_shard(tenant_id) {
+            Ok(tenant) if tenant.is_active() => tenant,
+            Ok(_) => {
+                debug!(tenant_id=%tenant_id.tenant_id, shard_id=%tenant_id.shard_slug(), "Tenant shard is not active");
+                continue;
+            }
             Err(e) => {
                 // this can happen if tenant has lifecycle transition after we fetched it
                 debug!("failed to get tenant: {e:#}");
@@ -777,6 +825,8 @@ async fn collect_eviction_candidates(
             info!(%tenant_id, "Skipping tenant for eviction, it is shutting down");
             continue;
         }
+
+        let started_at = std::time::Instant::now();
 
         // collect layers from all timelines in this tenant
         //
@@ -792,6 +842,7 @@ async fn collect_eviction_candidates(
             }
             let info = tl.get_local_layers_for_disk_usage_eviction().await;
             debug!(tenant_id=%tl.tenant_shard_id.tenant_id, shard_id=%tl.tenant_shard_id.shard_slug(), timeline_id=%tl.timeline_id, "timeline resident layers count: {}", info.resident_layers.len());
+
             tenant_candidates.extend(info.resident_layers.into_iter());
             max_layer_size = max_layer_size.max(info.max_layer_size.unwrap_or(0));
 
@@ -829,68 +880,65 @@ async fn collect_eviction_candidates(
             max_layer_size
         };
 
-        // Sort layers most-recently-used first, then partition by
-        // cumsum above/below min_resident_size.
+        // Sort layers most-recently-used first, then calculate [`EvictionPartition`] for each layer,
+        // where the inputs are:
+        //  - whether the layer is visible
+        //  - whether the layer is above/below the min_resident_size cutline
         tenant_candidates
             .sort_unstable_by_key(|layer_info| std::cmp::Reverse(layer_info.last_activity_ts));
         let mut cumsum: i128 = 0;
 
-        // keeping the -1 or not decides if every tenant should lose their least recently accessed
-        // layer OR if this should happen in the order of having highest layer count:
-        let fudge = if eviction_order.highest_layer_count_loses_first() {
-            // relative_age vs. tenant layer count:
-            // - 0.1..=1.0 (10 layers)
-            // - 0.01..=1.0 (100 layers)
-            // - 0.001..=1.0 (1000 layers)
-            //
-            // leading to evicting less of the smallest tenants.
-            0
-        } else {
-            // use full 0.0..=1.0 range, which means even the smallest tenants could always lose a
-            // layer. the actual ordering is unspecified: for 10k tenants on a pageserver it could
-            // be that less than 10k layer evictions is enough, so we would not need to evict from
-            // all tenants.
-            //
-            // as the tenant ordering is now deterministic this could hit the same tenants
-            // disproportionetly on multiple invocations. alternative could be to remember how many
-            // layers did we evict last time from this tenant, and inject that as an additional
-            // fudge here.
-            1
-        };
+        let total = tenant_candidates.len();
 
-        let total = tenant_candidates
-            .len()
-            .checked_sub(fudge)
-            .filter(|&x| x > 0)
-            // support 0 or 1 resident layer tenants as well
-            .unwrap_or(1);
-        let divider = total as f32;
+        let tenant_candidates =
+            tenant_candidates
+                .into_iter()
+                .enumerate()
+                .map(|(i, mut candidate)| {
+                    // as we iterate this reverse sorted list, the most recently accessed layer will always
+                    // be 1.0; this is for us to evict it last.
+                    candidate.relative_last_activity =
+                        eviction_order.relative_last_activity(total, i);
 
-        for (i, mut candidate) in tenant_candidates.into_iter().enumerate() {
-            // as we iterate this reverse sorted list, the most recently accessed layer will always
-            // be 1.0; this is for us to evict it last.
-            candidate.relative_last_activity = if matches!(
-                eviction_order,
-                EvictionOrder::RelativeAccessed { .. }
-            ) {
-                // another possibility: use buckets, like (256.0 * relative_last_activity) as u8 or
-                // similarly for u16. unsure how it would help.
-                finite_f32::FiniteF32::try_from_normalized((total - i) as f32 / divider)
-                    .unwrap_or_else(|val| {
-                        tracing::warn!(%fudge, "calculated invalid relative_last_activity for i={i}, total={total}: {val}");
-                        finite_f32::FiniteF32::ZERO
-                    })
-            } else {
-                finite_f32::FiniteF32::ZERO
-            };
+                    let partition = match candidate.visibility {
+                        LayerVisibilityHint::Covered => {
+                            // Covered layers are evicted first
+                            EvictionPartition::EvictNow
+                        }
+                        LayerVisibilityHint::Visible => {
+                            cumsum += i128::from(candidate.layer.get_file_size());
 
-            let partition = if cumsum > min_resident_size as i128 {
-                MinResidentSizePartition::Above
-            } else {
-                MinResidentSizePartition::Below
-            };
-            cumsum += i128::from(candidate.layer.get_file_size());
-            candidates.push((partition, candidate));
+                            if cumsum > min_resident_size as i128 {
+                                EvictionPartition::Above
+                            } else {
+                                // The most recent layers below the min_resident_size threshold
+                                // are the last to be evicted.
+                                EvictionPartition::Below
+                            }
+                        }
+                    };
+
+                    (partition, candidate)
+                });
+
+        METRICS
+            .tenant_layer_count
+            .observe(tenant_candidates.len() as f64);
+
+        candidates.extend(tenant_candidates);
+
+        let elapsed = started_at.elapsed();
+        METRICS
+            .tenant_collection_time
+            .observe(elapsed.as_secs_f64());
+
+        if elapsed > LOG_DURATION_THRESHOLD {
+            tracing::info!(
+                tenant_id=%tenant.tenant_shard_id().tenant_id,
+                shard_id=%tenant.tenant_shard_id().shard_slug(),
+                elapsed_ms = elapsed.as_millis(),
+                "collection took longer than threshold"
+            );
         }
     }
 
@@ -906,31 +954,70 @@ async fn collect_eviction_candidates(
         },
     );
 
-    for secondary_tenant in secondary_tenants {
-        let mut layer_info = secondary_tenant.get_layers_for_eviction();
+    for tenant in secondary_tenants {
+        // for secondary tenants we use a sum of on_disk layers and already evicted layers. this is
+        // to prevent repeated disk usage based evictions from completely draining less often
+        // updating secondaries.
+        let (mut layer_info, total_layers) = tenant.get_layers_for_eviction();
+
+        debug_assert!(
+            total_layers >= layer_info.resident_layers.len(),
+            "total_layers ({total_layers}) must be at least the resident_layers.len() ({})",
+            layer_info.resident_layers.len()
+        );
+
+        let started_at = std::time::Instant::now();
 
         layer_info
             .resident_layers
             .sort_unstable_by_key(|layer_info| std::cmp::Reverse(layer_info.last_activity_ts));
 
-        candidates.extend(layer_info.resident_layers.into_iter().map(|candidate| {
-            (
-                // Secondary locations' layers are always considered above the min resident size,
-                // i.e. secondary locations are permitted to be trimmed to zero layers if all
-                // the layers have sufficiently old access times.
-                MinResidentSizePartition::Above,
-                candidate,
-            )
-        }));
+        let tenant_candidates =
+            layer_info
+                .resident_layers
+                .into_iter()
+                .enumerate()
+                .map(|(i, mut candidate)| {
+                    candidate.relative_last_activity =
+                        eviction_order.relative_last_activity(total_layers, i);
+                    (
+                        // Secondary locations' layers are always considered above the min resident size,
+                        // i.e. secondary locations are permitted to be trimmed to zero layers if all
+                        // the layers have sufficiently old access times.
+                        EvictionPartition::Above,
+                        candidate,
+                    )
+                });
+
+        METRICS
+            .tenant_layer_count
+            .observe(tenant_candidates.len() as f64);
+        candidates.extend(tenant_candidates);
+
+        tokio::task::yield_now().await;
+
+        let elapsed = started_at.elapsed();
+
+        METRICS
+            .tenant_collection_time
+            .observe(elapsed.as_secs_f64());
+
+        if elapsed > LOG_DURATION_THRESHOLD {
+            tracing::info!(
+                tenant_id=%tenant.tenant_shard_id().tenant_id,
+                shard_id=%tenant.tenant_shard_id().shard_slug(),
+                elapsed_ms = elapsed.as_millis(),
+                "collection took longer than threshold"
+            );
+        }
     }
 
-    debug_assert!(MinResidentSizePartition::Above < MinResidentSizePartition::Below,
+    debug_assert!(EvictionPartition::Above < EvictionPartition::Below,
+        "as explained in the function's doc comment, layers that aren't in the tenant's min_resident_size are evicted first");
+    debug_assert!(EvictionPartition::EvictNow < EvictionPartition::Above,
         "as explained in the function's doc comment, layers that aren't in the tenant's min_resident_size are evicted first");
 
-    // always behave as if AbsoluteAccessed was selected. if RelativeAccessed is in use, we
-    // will sort later by candidate.relative_last_activity to get compare evictions.
-    candidates
-        .sort_unstable_by_key(|(partition, candidate)| (*partition, candidate.last_activity_ts));
+    eviction_order.sort(&mut candidates);
 
     Ok(EvictionCandidates::Finished(candidates))
 }
@@ -940,7 +1027,7 @@ async fn collect_eviction_candidates(
 ///
 /// Returns the amount of candidates selected, with the planned usage.
 fn select_victims<U: Usage>(
-    candidates: &[(MinResidentSizePartition, EvictionCandidate)],
+    candidates: &[(EvictionPartition, EvictionCandidate)],
     usage_pre: U,
 ) -> VictimSelection<U> {
     let mut usage_when_switched = None;
@@ -952,7 +1039,7 @@ fn select_victims<U: Usage>(
             break;
         }
 
-        if partition == &MinResidentSizePartition::Below && usage_when_switched.is_none() {
+        if partition == &EvictionPartition::Below && usage_when_switched.is_none() {
             usage_when_switched = Some((usage_planned, i));
         }
 
@@ -1001,30 +1088,6 @@ impl<U: Usage> VictimSelection<U> {
     }
 }
 
-struct TimelineKey(Arc<Timeline>);
-
-impl PartialEq for TimelineKey {
-    fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
-    }
-}
-
-impl Eq for TimelineKey {}
-
-impl std::hash::Hash for TimelineKey {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        Arc::as_ptr(&self.0).hash(state);
-    }
-}
-
-impl std::ops::Deref for TimelineKey {
-    type Target = Timeline;
-
-    fn deref(&self) -> &Self::Target {
-        self.0.as_ref()
-    }
-}
-
 /// A totally ordered f32 subset we can use with sorting functions.
 pub(crate) mod finite_f32 {
 
@@ -1070,6 +1133,12 @@ pub(crate) mod finite_f32 {
         }
     }
 
+    impl From<FiniteF32> for f32 {
+        fn from(value: FiniteF32) -> f32 {
+            value.0
+        }
+    }
+
     impl FiniteF32 {
         pub const ZERO: FiniteF32 = FiniteF32(0.0);
 
@@ -1082,136 +1151,9 @@ pub(crate) mod finite_f32 {
                 Err(value)
             }
         }
-    }
-}
 
-mod summary {
-    use super::finite_f32::FiniteF32;
-    use super::{EvictionCandidate, LayerCount};
-    use pageserver_api::shard::TenantShardId;
-    use std::collections::{BTreeMap, HashMap};
-    use std::time::SystemTime;
-
-    #[derive(Debug, Default)]
-    pub(super) struct EvictionSummary {
-        evicted_per_tenant: HashMap<TenantShardId, LayerCount>,
-        total: LayerCount,
-
-        last_absolute: Option<SystemTime>,
-        last_relative: Option<FiniteF32>,
-    }
-
-    impl<'a> FromIterator<&'a EvictionCandidate> for EvictionSummary {
-        fn from_iter<T: IntoIterator<Item = &'a EvictionCandidate>>(iter: T) -> Self {
-            let mut summary = EvictionSummary::default();
-            for item in iter {
-                let counts = summary
-                    .evicted_per_tenant
-                    .entry(*item.layer.get_tenant_shard_id())
-                    .or_default();
-
-                let sz = item.layer.get_file_size();
-
-                counts.file_sizes += sz;
-                counts.count += 1;
-
-                summary.total.file_sizes += sz;
-                summary.total.count += 1;
-
-                summary.last_absolute = Some(item.last_activity_ts);
-                summary.last_relative = Some(item.relative_last_activity);
-            }
-
-            summary
-        }
-    }
-
-    struct SiBytesAmount(u64);
-
-    impl std::fmt::Display for SiBytesAmount {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            if self.0 < 1024 {
-                return write!(f, "{}B", self.0);
-            }
-
-            let mut tmp = self.0;
-            let mut ch = 0;
-            let suffixes = b"KMGTPE";
-
-            while tmp > 1024 * 1024 && ch < suffixes.len() - 1 {
-                tmp /= 1024;
-                ch += 1;
-            }
-
-            let ch = suffixes[ch] as char;
-
-            write!(f, "{:.1}{ch}iB", tmp as f64 / 1024.0)
-        }
-    }
-
-    impl std::fmt::Display for EvictionSummary {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            // wasteful, but it's for testing
-
-            let mut sorted: BTreeMap<usize, Vec<(TenantShardId, u64)>> = BTreeMap::new();
-
-            for (tenant_shard_id, count) in &self.evicted_per_tenant {
-                sorted
-                    .entry(count.count)
-                    .or_default()
-                    .push((*tenant_shard_id, count.file_sizes));
-            }
-
-            let total_file_sizes = SiBytesAmount(self.total.file_sizes);
-
-            writeln!(
-                f,
-                "selected {} layers of {total_file_sizes} up to ({:?}, {:.2?}):",
-                self.total.count, self.last_absolute, self.last_relative,
-            )?;
-
-            for (count, per_tenant) in sorted.iter().rev().take(10) {
-                write!(f, "- {count} layers: ")?;
-
-                if per_tenant.len() < 3 {
-                    for (i, (tenant_shard_id, bytes)) in per_tenant.iter().enumerate() {
-                        if i > 0 {
-                            write!(f, ", ")?;
-                        }
-                        let bytes = SiBytesAmount(*bytes);
-                        write!(f, "{tenant_shard_id} ({bytes})")?;
-                    }
-                } else {
-                    let num_tenants = per_tenant.len();
-                    let total_bytes = per_tenant.iter().map(|(_id, bytes)| bytes).sum::<u64>();
-                    let total_bytes = SiBytesAmount(total_bytes);
-                    let layers = num_tenants * count;
-
-                    write!(
-                        f,
-                        "{num_tenants} tenants {total_bytes} in total {layers} layers",
-                    )?;
-                }
-
-                writeln!(f)?;
-            }
-
-            if sorted.len() > 10 {
-                let (rem_count, rem_bytes) = sorted
-                    .iter()
-                    .rev()
-                    .map(|(count, per_tenant)| {
-                        (
-                            count,
-                            per_tenant.iter().map(|(_id, bytes)| bytes).sum::<u64>(),
-                        )
-                    })
-                    .fold((0, 0), |acc, next| (acc.0 + next.0, acc.1 + next.1));
-                let rem_bytes = SiBytesAmount(rem_bytes);
-                writeln!(f, "- rest of tenants ({}) not shown ({rem_count} layers or {:.1}%, {rem_bytes} or {:.1}% bytes)", sorted.len() - 10, 100.0 * rem_count as f64 / self.total.count as f64, 100.0 * rem_bytes.0 as f64 / self.total.file_sizes as f64)?;
-            }
-
-            Ok(())
+        pub fn into_inner(self) -> f32 {
+            self.into()
         }
     }
 }
@@ -1225,7 +1167,6 @@ mod filesystem_level_usage {
     use super::DiskUsageEvictionTaskConfig;
 
     #[derive(Debug, Clone, Copy)]
-    #[allow(dead_code)]
     pub struct Usage<'a> {
         config: &'a DiskUsageEvictionTaskConfig,
 
@@ -1297,7 +1238,6 @@ mod filesystem_level_usage {
 
     #[test]
     fn max_usage_pct_pressure() {
-        use super::EvictionOrder;
         use super::Usage as _;
         use std::time::Duration;
         use utils::serde_percent::Percent;
@@ -1309,7 +1249,7 @@ mod filesystem_level_usage {
                 period: Duration::MAX,
                 #[cfg(feature = "testing")]
                 mock_statvfs: None,
-                eviction_order: EvictionOrder::default(),
+                eviction_order: pageserver_api::config::EvictionOrder::default(),
             },
             total_bytes: 100_000,
             avail_bytes: 0,
@@ -1334,5 +1274,42 @@ mod filesystem_level_usage {
 
         usage.add_available_bytes(16_000);
         assert!(!usage.has_pressure());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn relative_equal_bounds() {
+        let order = EvictionOrder::RelativeAccessed {
+            highest_layer_count_loses_first: false,
+        };
+
+        let len = 10;
+        let v = (0..len)
+            .map(|i| order.relative_last_activity(len, i).into_inner())
+            .collect::<Vec<_>>();
+
+        assert_eq!(v.first(), Some(&1.0));
+        assert_eq!(v.last(), Some(&0.0));
+        assert!(v.windows(2).all(|slice| slice[0] > slice[1]));
+    }
+
+    #[test]
+    fn relative_spare_bounds() {
+        let order = EvictionOrder::RelativeAccessed {
+            highest_layer_count_loses_first: true,
+        };
+
+        let len = 10;
+        let v = (0..len)
+            .map(|i| order.relative_last_activity(len, i).into_inner())
+            .collect::<Vec<_>>();
+
+        assert_eq!(v.first(), Some(&1.0));
+        assert_eq!(v.last(), Some(&0.1));
+        assert!(v.windows(2).all(|slice| slice[0] > slice[1]));
     }
 }

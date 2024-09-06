@@ -4,7 +4,12 @@
 //! This storage used in tests, but can also be used in cases when a certain persistent
 //! volume is mounted to the local FS.
 
-use std::{borrow::Cow, future::Future, io::ErrorKind, pin::Pin, time::SystemTime};
+use std::{
+    collections::HashSet,
+    io::ErrorKind,
+    num::NonZeroU32,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use anyhow::{bail, ensure, Context};
 use bytes::Bytes;
@@ -15,24 +20,28 @@ use tokio::{
     io::{self, AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
 };
 use tokio_util::{io::ReaderStream, sync::CancellationToken};
-use tracing::*;
-use utils::{crashsafe::path_with_suffix_extension, fs_ext::is_directory_empty};
+use utils::crashsafe::path_with_suffix_extension;
 
-use crate::{Download, DownloadError, DownloadStream, Listing, ListingMode, RemotePath};
+use crate::{
+    Download, DownloadError, Listing, ListingMode, ListingObject, RemotePath, TimeTravelError,
+    TimeoutOrCancel, REMOTE_STORAGE_PREFIX_SEPARATOR,
+};
 
 use super::{RemoteStorage, StorageMetadata};
+use crate::Etag;
 
 const LOCAL_FS_TEMP_FILE_SUFFIX: &str = "___temp";
 
 #[derive(Debug, Clone)]
 pub struct LocalFs {
     storage_root: Utf8PathBuf,
+    timeout: Duration,
 }
 
 impl LocalFs {
     /// Attempts to create local FS storage, along with its root directory.
     /// Storage root will be created (if does not exist) and transformed into an absolute path (if passed as relative).
-    pub fn new(mut storage_root: Utf8PathBuf) -> anyhow::Result<Self> {
+    pub fn new(mut storage_root: Utf8PathBuf, timeout: Duration) -> anyhow::Result<Self> {
         if !storage_root.exists() {
             std::fs::create_dir_all(&storage_root).with_context(|| {
                 format!("Failed to create all directories in the given root path {storage_root:?}")
@@ -44,7 +53,10 @@ impl LocalFs {
             })?;
         }
 
-        Ok(Self { storage_root })
+        Ok(Self {
+            storage_root,
+            timeout,
+        })
     }
 
     // mirrors S3Bucket::s3_object_to_relative_path
@@ -79,7 +91,47 @@ impl LocalFs {
 
     #[cfg(test)]
     async fn list_all(&self) -> anyhow::Result<Vec<RemotePath>> {
-        Ok(get_all_files(&self.storage_root, true)
+        use std::{future::Future, pin::Pin};
+        fn get_all_files<'a, P>(
+            directory_path: P,
+        ) -> Pin<Box<dyn Future<Output = anyhow::Result<Vec<Utf8PathBuf>>> + Send + Sync + 'a>>
+        where
+            P: AsRef<Utf8Path> + Send + Sync + 'a,
+        {
+            Box::pin(async move {
+                let directory_path = directory_path.as_ref();
+                if directory_path.exists() {
+                    if directory_path.is_dir() {
+                        let mut paths = Vec::new();
+                        let mut dir_contents = fs::read_dir(directory_path).await?;
+                        while let Some(dir_entry) = dir_contents.next_entry().await? {
+                            let file_type = dir_entry.file_type().await?;
+                            let entry_path =
+                                Utf8PathBuf::from_path_buf(dir_entry.path()).map_err(|pb| {
+                                    anyhow::Error::msg(format!(
+                                        "non-Unicode path: {}",
+                                        pb.to_string_lossy()
+                                    ))
+                                })?;
+                            if file_type.is_symlink() {
+                                tracing::debug!("{entry_path:?} is a symlink, skipping")
+                            } else if file_type.is_dir() {
+                                paths.extend(get_all_files(&entry_path).await?.into_iter())
+                            } else {
+                                paths.push(entry_path);
+                            }
+                        }
+                        Ok(paths)
+                    } else {
+                        bail!("Path {directory_path:?} is not a directory")
+                    }
+                } else {
+                    Ok(Vec::new())
+                }
+            })
+        }
+
+        Ok(get_all_files(&self.storage_root)
             .await?
             .into_iter()
             .map(|path| {
@@ -106,6 +158,14 @@ impl LocalFs {
         // S3 object list prefixes can be arbitrary strings, but when reading
         // the local filesystem we need a directory to start calling read_dir on.
         let mut initial_dir = full_path.clone();
+
+        // If there's no trailing slash, we have to start looking from one above: even if
+        // `initial_dir` is a directory, we should still list any prefixes in the parent
+        // that start with the same string.
+        if !full_path.to_string().ends_with('/') {
+            initial_dir.pop();
+        }
+
         loop {
             // Did we make it to the root?
             if initial_dir.parent().is_none() {
@@ -155,76 +215,14 @@ impl LocalFs {
 
         Ok(files)
     }
-}
 
-impl RemoteStorage for LocalFs {
-    async fn list(
-        &self,
-        prefix: Option<&RemotePath>,
-        mode: ListingMode,
-    ) -> Result<Listing, DownloadError> {
-        let mut result = Listing::default();
-
-        if let ListingMode::NoDelimiter = mode {
-            let keys = self
-                .list_recursive(prefix)
-                .await
-                .map_err(DownloadError::Other)?;
-
-            result.keys = keys
-                .into_iter()
-                .filter(|k| {
-                    let path = k.with_base(&self.storage_root);
-                    !path.is_dir()
-                })
-                .collect();
-
-            return Ok(result);
-        }
-
-        let path = match prefix {
-            Some(prefix) => Cow::Owned(prefix.with_base(&self.storage_root)),
-            None => Cow::Borrowed(&self.storage_root),
-        };
-
-        let prefixes_to_filter = get_all_files(path.as_ref(), false)
-            .await
-            .map_err(DownloadError::Other)?;
-
-        // filter out empty directories to mirror s3 behavior.
-        for prefix in prefixes_to_filter {
-            if prefix.is_dir()
-                && is_directory_empty(&prefix)
-                    .await
-                    .map_err(DownloadError::Other)?
-            {
-                continue;
-            }
-
-            let stripped = prefix
-                .strip_prefix(&self.storage_root)
-                .context("Failed to strip prefix")
-                .and_then(RemotePath::new)
-                .expect(
-                    "We list files for storage root, hence should be able to remote the prefix",
-                );
-
-            if prefix.is_dir() {
-                result.prefixes.push(stripped);
-            } else {
-                result.keys.push(stripped);
-            }
-        }
-
-        Ok(result)
-    }
-
-    async fn upload(
+    async fn upload0(
         &self,
         data: impl Stream<Item = std::io::Result<Bytes>> + Send + Sync,
         data_size_bytes: usize,
         to: &RemotePath,
         metadata: Option<StorageMetadata>,
+        cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
         let target_file_path = to.with_base(&self.storage_root);
         create_target_directory(&target_file_path).await?;
@@ -246,6 +244,7 @@ impl RemoteStorage for LocalFs {
             fs::OpenOptions::new()
                 .write(true)
                 .create(true)
+                .truncate(true)
                 .open(&temp_file_path)
                 .await
                 .with_context(|| {
@@ -259,9 +258,26 @@ impl RemoteStorage for LocalFs {
         let mut buffer_to_read = data.take(from_size_bytes);
 
         // alternatively we could just write the bytes to a file, but local_fs is a testing utility
-        let bytes_read = io::copy_buf(&mut buffer_to_read, &mut destination)
-            .await
-            .with_context(|| {
+        let copy = io::copy_buf(&mut buffer_to_read, &mut destination);
+
+        let bytes_read = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                let file = destination.into_inner();
+                // wait for the inflight operation(s) to complete so that there could be a next
+                // attempt right away and our writes are not directed to their file.
+                file.into_std().await;
+
+                // TODO: leave the temp or not? leaving is probably less racy. enabled truncate at
+                // least.
+                fs::remove_file(temp_file_path).await.context("remove temp_file_path after cancellation or timeout")?;
+                return Err(TimeoutOrCancel::Cancel.into());
+            }
+            read = copy => read,
+        };
+
+        let bytes_read =
+            bytes_read.with_context(|| {
                 format!(
                     "Failed to upload file (write temp) to the local storage at '{temp_file_path}'",
                 )
@@ -293,6 +309,9 @@ impl RemoteStorage for LocalFs {
             })?;
 
         if let Some(storage_metadata) = metadata {
+            // FIXME: we must not be using metadata much, since this would forget the old metadata
+            // for new writes? or perhaps metadata is sticky; could consider removing if it's never
+            // used.
             let storage_metadata_path = storage_metadata_path(&target_file_path);
             fs::write(
                 &storage_metadata_path,
@@ -309,34 +328,206 @@ impl RemoteStorage for LocalFs {
 
         Ok(())
     }
+}
 
-    async fn download(&self, from: &RemotePath) -> Result<Download, DownloadError> {
-        let target_path = from.with_base(&self.storage_root);
-        if file_exists(&target_path).map_err(DownloadError::BadInput)? {
-            let source = ReaderStream::new(
-                fs::OpenOptions::new()
-                    .read(true)
-                    .open(&target_path)
-                    .await
-                    .with_context(|| {
-                        format!("Failed to open source file {target_path:?} to use in the download")
-                    })
-                    .map_err(DownloadError::Other)?,
-            );
+impl RemoteStorage for LocalFs {
+    fn list_streaming(
+        &self,
+        prefix: Option<&RemotePath>,
+        mode: ListingMode,
+        max_keys: Option<NonZeroU32>,
+        cancel: &CancellationToken,
+    ) -> impl Stream<Item = Result<Listing, DownloadError>> {
+        let listing = self.list(prefix, mode, max_keys, cancel);
+        futures::stream::once(listing)
+    }
 
-            let metadata = self
-                .read_storage_metadata(&target_path)
+    async fn list(
+        &self,
+        prefix: Option<&RemotePath>,
+        mode: ListingMode,
+        max_keys: Option<NonZeroU32>,
+        cancel: &CancellationToken,
+    ) -> Result<Listing, DownloadError> {
+        let op = async {
+            let mut result = Listing::default();
+
+            // Filter out directories: in S3 directories don't exist, only the keys within them do.
+            let keys = self
+                .list_recursive(prefix)
                 .await
                 .map_err(DownloadError::Other)?;
-            Ok(Download {
-                metadata,
-                last_modified: None,
-                etag: None,
-                download_stream: Box::pin(source),
-            })
-        } else {
-            Err(DownloadError::NotFound)
+            let objects = keys
+                .into_iter()
+                .filter_map(|k| {
+                    let path = k.with_base(&self.storage_root);
+                    if path.is_dir() {
+                        None
+                    } else {
+                        Some(ListingObject {
+                            key: k.clone(),
+                            // LocalFs is just for testing, so just specify a dummy time
+                            last_modified: SystemTime::now(),
+                            size: 0,
+                        })
+                    }
+                })
+                .collect();
+
+            if let ListingMode::NoDelimiter = mode {
+                result.keys = objects;
+            } else {
+                let mut prefixes = HashSet::new();
+                for object in objects {
+                    let key = object.key;
+                    // If the part after the prefix includes a "/", take only the first part and put it in `prefixes`.
+                    let relative_key = if let Some(prefix) = prefix {
+                        let mut prefix = prefix.clone();
+                        // We only strip the dirname of the prefix, so that when we strip it from the start of keys we
+                        // end up with full file/dir names.
+                        let prefix_full_local_path = prefix.with_base(&self.storage_root);
+                        let has_slash = prefix.0.to_string().ends_with('/');
+                        let strip_prefix = if prefix_full_local_path.is_dir() && has_slash {
+                            prefix
+                        } else {
+                            prefix.0.pop();
+                            prefix
+                        };
+
+                        RemotePath::new(key.strip_prefix(&strip_prefix).unwrap()).unwrap()
+                    } else {
+                        key
+                    };
+
+                    let relative_key = format!("{}", relative_key);
+                    if relative_key.contains(REMOTE_STORAGE_PREFIX_SEPARATOR) {
+                        let first_part = relative_key
+                            .split(REMOTE_STORAGE_PREFIX_SEPARATOR)
+                            .next()
+                            .unwrap()
+                            .to_owned();
+                        prefixes.insert(first_part);
+                    } else {
+                        result.keys.push(ListingObject {
+                            key: RemotePath::from_string(&relative_key).unwrap(),
+                            // LocalFs is just for testing
+                            last_modified: SystemTime::now(),
+                            size: 0,
+                        });
+                    }
+                }
+                result.prefixes = prefixes
+                    .into_iter()
+                    .map(|s| RemotePath::from_string(&s).unwrap())
+                    .collect();
+            }
+
+            if let Some(max_keys) = max_keys {
+                result.keys.truncate(max_keys.get() as usize);
+            }
+            Ok(result)
+        };
+
+        let timeout = async {
+            tokio::time::sleep(self.timeout).await;
+            Err(DownloadError::Timeout)
+        };
+
+        let cancelled = async {
+            cancel.cancelled().await;
+            Err(DownloadError::Cancelled)
+        };
+
+        tokio::select! {
+            res = op => res,
+            res = timeout => res,
+            res = cancelled => res,
         }
+    }
+
+    async fn head_object(
+        &self,
+        key: &RemotePath,
+        _cancel: &CancellationToken,
+    ) -> Result<ListingObject, DownloadError> {
+        let target_file_path = key.with_base(&self.storage_root);
+        let metadata = file_metadata(&target_file_path).await?;
+        Ok(ListingObject {
+            key: key.clone(),
+            last_modified: metadata.modified()?,
+            size: metadata.len(),
+        })
+    }
+
+    async fn upload(
+        &self,
+        data: impl Stream<Item = std::io::Result<Bytes>> + Send + Sync,
+        data_size_bytes: usize,
+        to: &RemotePath,
+        metadata: Option<StorageMetadata>,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<()> {
+        let cancel = cancel.child_token();
+
+        let op = self.upload0(data, data_size_bytes, to, metadata, &cancel);
+        let mut op = std::pin::pin!(op);
+
+        // race the upload0 to the timeout; if it goes over, do a graceful shutdown
+        let (res, timeout) = tokio::select! {
+            res = &mut op => (res, false),
+            _ = tokio::time::sleep(self.timeout) => {
+                cancel.cancel();
+                (op.await, true)
+            }
+        };
+
+        match res {
+            Err(e) if timeout && TimeoutOrCancel::caused_by_cancel(&e) => {
+                // we caused this cancel (or they happened simultaneously) -- swap it out to
+                // Timeout
+                Err(TimeoutOrCancel::Timeout.into())
+            }
+            res => res,
+        }
+    }
+
+    async fn download(
+        &self,
+        from: &RemotePath,
+        cancel: &CancellationToken,
+    ) -> Result<Download, DownloadError> {
+        let target_path = from.with_base(&self.storage_root);
+
+        let file_metadata = file_metadata(&target_path).await?;
+
+        let source = ReaderStream::new(
+            fs::OpenOptions::new()
+                .read(true)
+                .open(&target_path)
+                .await
+                .with_context(|| {
+                    format!("Failed to open source file {target_path:?} to use in the download")
+                })
+                .map_err(DownloadError::Other)?,
+        );
+
+        let metadata = self
+            .read_storage_metadata(&target_path)
+            .await
+            .map_err(DownloadError::Other)?;
+
+        let cancel_or_timeout = crate::support::cancel_or_timeout(self.timeout, cancel.clone());
+        let source = crate::support::DownloadStream::new(cancel_or_timeout, source);
+
+        let etag = mock_etag(&file_metadata);
+        Ok(Download {
+            metadata,
+            last_modified: file_metadata
+                .modified()
+                .map_err(|e| DownloadError::Other(anyhow::anyhow!(e).context("Reading mtime")))?,
+            etag,
+            download_stream: Box::pin(source),
+        })
     }
 
     async fn download_byte_range(
@@ -344,6 +535,7 @@ impl RemoteStorage for LocalFs {
         from: &RemotePath,
         start_inclusive: u64,
         end_exclusive: Option<u64>,
+        cancel: &CancellationToken,
     ) -> Result<Download, DownloadError> {
         if let Some(end_exclusive) = end_exclusive {
             if end_exclusive <= start_inclusive {
@@ -353,44 +545,54 @@ impl RemoteStorage for LocalFs {
                 return Err(DownloadError::Other(anyhow::anyhow!("Invalid range, start ({start_inclusive}) and end_exclusive ({end_exclusive:?}) difference is zero bytes")));
             }
         }
-        let target_path = from.with_base(&self.storage_root);
-        if file_exists(&target_path).map_err(DownloadError::BadInput)? {
-            let mut source = tokio::fs::OpenOptions::new()
-                .read(true)
-                .open(&target_path)
-                .await
-                .with_context(|| {
-                    format!("Failed to open source file {target_path:?} to use in the download")
-                })
-                .map_err(DownloadError::Other)?;
-            source
-                .seek(io::SeekFrom::Start(start_inclusive))
-                .await
-                .context("Failed to seek to the range start in a local storage file")
-                .map_err(DownloadError::Other)?;
-            let metadata = self
-                .read_storage_metadata(&target_path)
-                .await
-                .map_err(DownloadError::Other)?;
 
-            let download_stream: DownloadStream = match end_exclusive {
-                Some(end_exclusive) => Box::pin(ReaderStream::new(
-                    source.take(end_exclusive - start_inclusive),
-                )),
-                None => Box::pin(ReaderStream::new(source)),
-            };
-            Ok(Download {
-                metadata,
-                last_modified: None,
-                etag: None,
-                download_stream,
+        let target_path = from.with_base(&self.storage_root);
+        let file_metadata = file_metadata(&target_path).await?;
+        let mut source = tokio::fs::OpenOptions::new()
+            .read(true)
+            .open(&target_path)
+            .await
+            .with_context(|| {
+                format!("Failed to open source file {target_path:?} to use in the download")
             })
-        } else {
-            Err(DownloadError::NotFound)
-        }
+            .map_err(DownloadError::Other)?;
+
+        let len = source
+            .metadata()
+            .await
+            .context("query file length")
+            .map_err(DownloadError::Other)?
+            .len();
+
+        source
+            .seek(io::SeekFrom::Start(start_inclusive))
+            .await
+            .context("Failed to seek to the range start in a local storage file")
+            .map_err(DownloadError::Other)?;
+
+        let metadata = self
+            .read_storage_metadata(&target_path)
+            .await
+            .map_err(DownloadError::Other)?;
+
+        let source = source.take(end_exclusive.unwrap_or(len) - start_inclusive);
+        let source = ReaderStream::new(source);
+
+        let cancel_or_timeout = crate::support::cancel_or_timeout(self.timeout, cancel.clone());
+        let source = crate::support::DownloadStream::new(cancel_or_timeout, source);
+
+        let etag = mock_etag(&file_metadata);
+        Ok(Download {
+            metadata,
+            last_modified: file_metadata
+                .modified()
+                .map_err(|e| DownloadError::Other(anyhow::anyhow!(e).context("Reading mtime")))?,
+            etag,
+            download_stream: Box::pin(source),
+        })
     }
 
-    async fn delete(&self, path: &RemotePath) -> anyhow::Result<()> {
+    async fn delete(&self, path: &RemotePath, _cancel: &CancellationToken) -> anyhow::Result<()> {
         let file_path = path.with_base(&self.storage_root);
         match fs::remove_file(&file_path).await {
             Ok(()) => Ok(()),
@@ -402,14 +604,23 @@ impl RemoteStorage for LocalFs {
         }
     }
 
-    async fn delete_objects<'a>(&self, paths: &'a [RemotePath]) -> anyhow::Result<()> {
+    async fn delete_objects<'a>(
+        &self,
+        paths: &'a [RemotePath],
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<()> {
         for path in paths {
-            self.delete(path).await?
+            self.delete(path, cancel).await?
         }
         Ok(())
     }
 
-    async fn copy(&self, from: &RemotePath, to: &RemotePath) -> anyhow::Result<()> {
+    async fn copy(
+        &self,
+        from: &RemotePath,
+        to: &RemotePath,
+        _cancel: &CancellationToken,
+    ) -> anyhow::Result<()> {
         let from_path = from.with_base(&self.storage_root);
         let to_path = to.with_base(&self.storage_root);
         create_target_directory(&to_path).await?;
@@ -423,64 +634,19 @@ impl RemoteStorage for LocalFs {
         Ok(())
     }
 
-    #[allow(clippy::diverging_sub_expression)]
     async fn time_travel_recover(
         &self,
         _prefix: Option<&RemotePath>,
         _timestamp: SystemTime,
         _done_if_after: SystemTime,
-        _cancel: CancellationToken,
-    ) -> anyhow::Result<()> {
-        unimplemented!()
+        _cancel: &CancellationToken,
+    ) -> Result<(), TimeTravelError> {
+        Err(TimeTravelError::Unimplemented)
     }
 }
 
 fn storage_metadata_path(original_path: &Utf8Path) -> Utf8PathBuf {
     path_with_suffix_extension(original_path, "metadata")
-}
-
-fn get_all_files<'a, P>(
-    directory_path: P,
-    recursive: bool,
-) -> Pin<Box<dyn Future<Output = anyhow::Result<Vec<Utf8PathBuf>>> + Send + Sync + 'a>>
-where
-    P: AsRef<Utf8Path> + Send + Sync + 'a,
-{
-    Box::pin(async move {
-        let directory_path = directory_path.as_ref();
-        if directory_path.exists() {
-            if directory_path.is_dir() {
-                let mut paths = Vec::new();
-                let mut dir_contents = fs::read_dir(directory_path).await?;
-                while let Some(dir_entry) = dir_contents.next_entry().await? {
-                    let file_type = dir_entry.file_type().await?;
-                    let entry_path =
-                        Utf8PathBuf::from_path_buf(dir_entry.path()).map_err(|pb| {
-                            anyhow::Error::msg(format!(
-                                "non-Unicode path: {}",
-                                pb.to_string_lossy()
-                            ))
-                        })?;
-                    if file_type.is_symlink() {
-                        debug!("{entry_path:?} is a symlink, skipping")
-                    } else if file_type.is_dir() {
-                        if recursive {
-                            paths.extend(get_all_files(&entry_path, true).await?.into_iter())
-                        } else {
-                            paths.push(entry_path)
-                        }
-                    } else {
-                        paths.push(entry_path);
-                    }
-                }
-                Ok(paths)
-            } else {
-                bail!("Path {directory_path:?} is not a directory")
-            }
-        } else {
-            Ok(Vec::new())
-        }
-    })
 }
 
 async fn create_target_directory(target_file_path: &Utf8Path) -> anyhow::Result<()> {
@@ -494,33 +660,39 @@ async fn create_target_directory(target_file_path: &Utf8Path) -> anyhow::Result<
     Ok(())
 }
 
-fn file_exists(file_path: &Utf8Path) -> anyhow::Result<bool> {
-    if file_path.exists() {
-        ensure!(file_path.is_file(), "file path '{file_path}' is not a file");
-        Ok(true)
-    } else {
-        Ok(false)
-    }
+async fn file_metadata(file_path: &Utf8Path) -> Result<std::fs::Metadata, DownloadError> {
+    tokio::fs::metadata(&file_path).await.map_err(|e| {
+        if e.kind() == ErrorKind::NotFound {
+            DownloadError::NotFound
+        } else {
+            DownloadError::BadInput(e.into())
+        }
+    })
+}
+
+// Use mtime as stand-in for ETag.  We could calculate a meaningful one by md5'ing the contents of files we
+// read, but that's expensive and the local_fs test helper's whole reason for existence is to run small tests
+// quickly, with less overhead than using a mock S3 server.
+fn mock_etag(meta: &std::fs::Metadata) -> Etag {
+    let mtime = meta.modified().expect("Filesystem mtime missing");
+    format!("{}", mtime.duration_since(UNIX_EPOCH).unwrap().as_millis()).into()
 }
 
 #[cfg(test)]
 mod fs_tests {
     use super::*;
 
-    use bytes::Bytes;
     use camino_tempfile::tempdir;
-    use futures_util::Stream;
     use std::{collections::HashMap, io::Write};
 
-    async fn read_and_assert_remote_file_contents(
+    async fn read_and_check_metadata(
         storage: &LocalFs,
-        #[allow(clippy::ptr_arg)]
-        // have to use &Utf8PathBuf due to `storage.local_path` parameter requirements
         remote_storage_path: &RemotePath,
         expected_metadata: Option<&StorageMetadata>,
     ) -> anyhow::Result<String> {
+        let cancel = CancellationToken::new();
         let download = storage
-            .download(remote_storage_path)
+            .download(remote_storage_path, &cancel)
             .await
             .map_err(|e| anyhow::anyhow!("Download failed: {e}"))?;
         ensure!(
@@ -535,16 +707,16 @@ mod fs_tests {
 
     #[tokio::test]
     async fn upload_file() -> anyhow::Result<()> {
-        let storage = create_storage()?;
+        let (storage, cancel) = create_storage()?;
 
-        let target_path_1 = upload_dummy_file(&storage, "upload_1", None).await?;
+        let target_path_1 = upload_dummy_file(&storage, "upload_1", None, &cancel).await?;
         assert_eq!(
             storage.list_all().await?,
             vec![target_path_1.clone()],
             "Should list a single file after first upload"
         );
 
-        let target_path_2 = upload_dummy_file(&storage, "upload_2", None).await?;
+        let target_path_2 = upload_dummy_file(&storage, "upload_2", None, &cancel).await?;
         assert_eq!(
             list_files_sorted(&storage).await?,
             vec![target_path_1.clone(), target_path_2.clone()],
@@ -556,7 +728,7 @@ mod fs_tests {
 
     #[tokio::test]
     async fn upload_file_negatives() -> anyhow::Result<()> {
-        let storage = create_storage()?;
+        let (storage, cancel) = create_storage()?;
 
         let id = RemotePath::new(Utf8Path::new("dummy"))?;
         let content = Bytes::from_static(b"12345");
@@ -565,36 +737,36 @@ mod fs_tests {
         // Check that you get an error if the size parameter doesn't match the actual
         // size of the stream.
         storage
-            .upload(content(), 0, &id, None)
+            .upload(content(), 0, &id, None, &cancel)
             .await
             .expect_err("upload with zero size succeeded");
         storage
-            .upload(content(), 4, &id, None)
+            .upload(content(), 4, &id, None, &cancel)
             .await
             .expect_err("upload with too short size succeeded");
         storage
-            .upload(content(), 6, &id, None)
+            .upload(content(), 6, &id, None, &cancel)
             .await
             .expect_err("upload with too large size succeeded");
 
         // Correct size is 5, this should succeed.
-        storage.upload(content(), 5, &id, None).await?;
+        storage.upload(content(), 5, &id, None, &cancel).await?;
 
         Ok(())
     }
 
-    fn create_storage() -> anyhow::Result<LocalFs> {
+    fn create_storage() -> anyhow::Result<(LocalFs, CancellationToken)> {
         let storage_root = tempdir()?.path().to_path_buf();
-        LocalFs::new(storage_root)
+        LocalFs::new(storage_root, Duration::from_secs(120)).map(|s| (s, CancellationToken::new()))
     }
 
     #[tokio::test]
     async fn download_file() -> anyhow::Result<()> {
-        let storage = create_storage()?;
+        let (storage, cancel) = create_storage()?;
         let upload_name = "upload_1";
-        let upload_target = upload_dummy_file(&storage, upload_name, None).await?;
+        let upload_target = upload_dummy_file(&storage, upload_name, None, &cancel).await?;
 
-        let contents = read_and_assert_remote_file_contents(&storage, &upload_target, None).await?;
+        let contents = read_and_check_metadata(&storage, &upload_target, None).await?;
         assert_eq!(
             dummy_contents(upload_name),
             contents,
@@ -602,7 +774,7 @@ mod fs_tests {
         );
 
         let non_existing_path = "somewhere/else";
-        match storage.download(&RemotePath::new(Utf8Path::new(non_existing_path))?).await {
+        match storage.download(&RemotePath::new(Utf8Path::new(non_existing_path))?, &cancel).await {
             Err(DownloadError::NotFound) => {} // Should get NotFound for non existing keys
             other => panic!("Should get a NotFound error when downloading non-existing storage files, but got: {other:?}"),
         }
@@ -611,12 +783,12 @@ mod fs_tests {
 
     #[tokio::test]
     async fn download_file_range_positive() -> anyhow::Result<()> {
-        let storage = create_storage()?;
+        let (storage, cancel) = create_storage()?;
         let upload_name = "upload_1";
-        let upload_target = upload_dummy_file(&storage, upload_name, None).await?;
+        let upload_target = upload_dummy_file(&storage, upload_name, None, &cancel).await?;
 
         let full_range_download_contents =
-            read_and_assert_remote_file_contents(&storage, &upload_target, None).await?;
+            read_and_check_metadata(&storage, &upload_target, None).await?;
         assert_eq!(
             dummy_contents(upload_name),
             full_range_download_contents,
@@ -627,7 +799,12 @@ mod fs_tests {
         let (first_part_local, second_part_local) = uploaded_bytes.split_at(3);
 
         let first_part_download = storage
-            .download_byte_range(&upload_target, 0, Some(first_part_local.len() as u64))
+            .download_byte_range(
+                &upload_target,
+                0,
+                Some(first_part_local.len() as u64),
+                &cancel,
+            )
             .await?;
         assert!(
             first_part_download.metadata.is_none(),
@@ -645,6 +822,7 @@ mod fs_tests {
                 &upload_target,
                 first_part_local.len() as u64,
                 Some((first_part_local.len() + second_part_local.len()) as u64),
+                &cancel,
             )
             .await?;
         assert!(
@@ -658,14 +836,30 @@ mod fs_tests {
             "Second part bytes should be returned when requested"
         );
 
+        let suffix_bytes = storage
+            .download_byte_range(&upload_target, 13, None, &cancel)
+            .await?
+            .download_stream;
+        let suffix_bytes = aggregate(suffix_bytes).await?;
+        let suffix = std::str::from_utf8(&suffix_bytes)?;
+        assert_eq!(upload_name, suffix);
+
+        let all_bytes = storage
+            .download_byte_range(&upload_target, 0, None, &cancel)
+            .await?
+            .download_stream;
+        let all_bytes = aggregate(all_bytes).await?;
+        let all_bytes = std::str::from_utf8(&all_bytes)?;
+        assert_eq!(dummy_contents("upload_1"), all_bytes);
+
         Ok(())
     }
 
     #[tokio::test]
     async fn download_file_range_negative() -> anyhow::Result<()> {
-        let storage = create_storage()?;
+        let (storage, cancel) = create_storage()?;
         let upload_name = "upload_1";
-        let upload_target = upload_dummy_file(&storage, upload_name, None).await?;
+        let upload_target = upload_dummy_file(&storage, upload_name, None, &cancel).await?;
 
         let start = 1_000_000_000;
         let end = start + 1;
@@ -674,6 +868,7 @@ mod fs_tests {
                 &upload_target,
                 start,
                 Some(end), // exclusive end
+                &cancel,
             )
             .await
         {
@@ -690,7 +885,7 @@ mod fs_tests {
         let end = 234;
         assert!(start > end, "Should test an incorrect range");
         match storage
-            .download_byte_range(&upload_target, start, Some(end))
+            .download_byte_range(&upload_target, start, Some(end), &cancel)
             .await
         {
             Ok(_) => panic!("Should not allow downloading wrong ranges"),
@@ -707,15 +902,15 @@ mod fs_tests {
 
     #[tokio::test]
     async fn delete_file() -> anyhow::Result<()> {
-        let storage = create_storage()?;
+        let (storage, cancel) = create_storage()?;
         let upload_name = "upload_1";
-        let upload_target = upload_dummy_file(&storage, upload_name, None).await?;
+        let upload_target = upload_dummy_file(&storage, upload_name, None, &cancel).await?;
 
-        storage.delete(&upload_target).await?;
+        storage.delete(&upload_target, &cancel).await?;
         assert!(storage.list_all().await?.is_empty());
 
         storage
-            .delete(&upload_target)
+            .delete(&upload_target, &cancel)
             .await
             .expect("Should allow deleting non-existing storage files");
 
@@ -724,17 +919,17 @@ mod fs_tests {
 
     #[tokio::test]
     async fn file_with_metadata() -> anyhow::Result<()> {
-        let storage = create_storage()?;
+        let (storage, cancel) = create_storage()?;
         let upload_name = "upload_1";
         let metadata = StorageMetadata(HashMap::from([
             ("one".to_string(), "1".to_string()),
             ("two".to_string(), "2".to_string()),
         ]));
         let upload_target =
-            upload_dummy_file(&storage, upload_name, Some(metadata.clone())).await?;
+            upload_dummy_file(&storage, upload_name, Some(metadata.clone()), &cancel).await?;
 
         let full_range_download_contents =
-            read_and_assert_remote_file_contents(&storage, &upload_target, Some(&metadata)).await?;
+            read_and_check_metadata(&storage, &upload_target, Some(&metadata)).await?;
         assert_eq!(
             dummy_contents(upload_name),
             full_range_download_contents,
@@ -745,7 +940,12 @@ mod fs_tests {
         let (first_part_local, _) = uploaded_bytes.split_at(3);
 
         let partial_download_with_metadata = storage
-            .download_byte_range(&upload_target, 0, Some(first_part_local.len() as u64))
+            .download_byte_range(
+                &upload_target,
+                0,
+                Some(first_part_local.len() as u64),
+                &cancel,
+            )
             .await?;
         let first_part_remote = aggregate(partial_download_with_metadata.download_stream).await?;
         assert_eq!(
@@ -766,16 +966,29 @@ mod fs_tests {
     #[tokio::test]
     async fn list() -> anyhow::Result<()> {
         // No delimiter: should recursively list everything
-        let storage = create_storage()?;
-        let child = upload_dummy_file(&storage, "grandparent/parent/child", None).await?;
-        let uncle = upload_dummy_file(&storage, "grandparent/uncle", None).await?;
+        let (storage, cancel) = create_storage()?;
+        let child = upload_dummy_file(&storage, "grandparent/parent/child", None, &cancel).await?;
+        let child_sibling =
+            upload_dummy_file(&storage, "grandparent/parent/child_sibling", None, &cancel).await?;
+        let uncle = upload_dummy_file(&storage, "grandparent/uncle", None, &cancel).await?;
 
-        let listing = storage.list(None, ListingMode::NoDelimiter).await?;
+        let listing = storage
+            .list(None, ListingMode::NoDelimiter, None, &cancel)
+            .await?;
         assert!(listing.prefixes.is_empty());
-        assert_eq!(listing.keys, [uncle.clone(), child.clone()].to_vec());
+        assert_eq!(
+            listing
+                .keys
+                .into_iter()
+                .map(|o| o.key)
+                .collect::<HashSet<_>>(),
+            HashSet::from([uncle.clone(), child.clone(), child_sibling.clone()])
+        );
 
         // Delimiter: should only go one deep
-        let listing = storage.list(None, ListingMode::WithDelimiter).await?;
+        let listing = storage
+            .list(None, ListingMode::WithDelimiter, None, &cancel)
+            .await?;
 
         assert_eq!(
             listing.prefixes,
@@ -783,19 +996,157 @@ mod fs_tests {
         );
         assert!(listing.keys.is_empty());
 
-        // Delimiter & prefix
+        // Delimiter & prefix with a trailing slash
+        let listing = storage
+            .list(
+                Some(&RemotePath::from_string("timelines/some_timeline/grandparent/").unwrap()),
+                ListingMode::WithDelimiter,
+                None,
+                &cancel,
+            )
+            .await?;
+        assert_eq!(
+            listing.keys.into_iter().map(|o| o.key).collect::<Vec<_>>(),
+            [RemotePath::from_string("uncle").unwrap()].to_vec()
+        );
+        assert_eq!(
+            listing.prefixes,
+            [RemotePath::from_string("parent").unwrap()].to_vec()
+        );
+
+        // Delimiter and prefix without a trailing slash
         let listing = storage
             .list(
                 Some(&RemotePath::from_string("timelines/some_timeline/grandparent").unwrap()),
                 ListingMode::WithDelimiter,
+                None,
+                &cancel,
             )
             .await?;
+        assert_eq!(listing.keys, vec![]);
         assert_eq!(
             listing.prefixes,
-            [RemotePath::from_string("timelines/some_timeline/grandparent/parent").unwrap()]
-                .to_vec()
+            [RemotePath::from_string("grandparent").unwrap()].to_vec()
         );
-        assert_eq!(listing.keys, [uncle.clone()].to_vec());
+
+        // Delimiter and prefix that's partway through a path component
+        let listing = storage
+            .list(
+                Some(&RemotePath::from_string("timelines/some_timeline/grandp").unwrap()),
+                ListingMode::WithDelimiter,
+                None,
+                &cancel,
+            )
+            .await?;
+        assert_eq!(listing.keys, vec![]);
+        assert_eq!(
+            listing.prefixes,
+            [RemotePath::from_string("grandparent").unwrap()].to_vec()
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn list_part_component() -> anyhow::Result<()> {
+        // No delimiter: should recursively list everything
+        let (storage, cancel) = create_storage()?;
+
+        // Imitates what happens in a tenant path when we have an unsharded path and a sharded path, and do a listing
+        // of the unsharded path: although there is a "directory" at the unsharded path, it should be handled as
+        // a freeform prefix.
+        let _child_a =
+            upload_dummy_file(&storage, "grandparent/tenant-01/child", None, &cancel).await?;
+        let _child_b =
+            upload_dummy_file(&storage, "grandparent/tenant/child", None, &cancel).await?;
+
+        // Delimiter and prefix that's partway through a path component
+        let listing = storage
+            .list(
+                Some(
+                    &RemotePath::from_string("timelines/some_timeline/grandparent/tenant").unwrap(),
+                ),
+                ListingMode::WithDelimiter,
+                None,
+                &cancel,
+            )
+            .await?;
+        assert_eq!(listing.keys, vec![]);
+
+        let mut found_prefixes = listing.prefixes.clone();
+        found_prefixes.sort();
+        assert_eq!(
+            found_prefixes,
+            [
+                RemotePath::from_string("tenant").unwrap(),
+                RemotePath::from_string("tenant-01").unwrap(),
+            ]
+            .to_vec()
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn overwrite_shorter_file() -> anyhow::Result<()> {
+        let (storage, cancel) = create_storage()?;
+
+        let path = RemotePath::new("does/not/matter/file".into())?;
+
+        let body = Bytes::from_static(b"long file contents is long");
+        {
+            let len = body.len();
+            let body =
+                futures::stream::once(futures::future::ready(std::io::Result::Ok(body.clone())));
+            storage.upload(body, len, &path, None, &cancel).await?;
+        }
+
+        let read = aggregate(storage.download(&path, &cancel).await?.download_stream).await?;
+        assert_eq!(body, read);
+
+        let shorter = Bytes::from_static(b"shorter body");
+        {
+            let len = shorter.len();
+            let body =
+                futures::stream::once(futures::future::ready(std::io::Result::Ok(shorter.clone())));
+            storage.upload(body, len, &path, None, &cancel).await?;
+        }
+
+        let read = aggregate(storage.download(&path, &cancel).await?.download_stream).await?;
+        assert_eq!(shorter, read);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelled_upload_can_later_be_retried() -> anyhow::Result<()> {
+        let (storage, cancel) = create_storage()?;
+
+        let path = RemotePath::new("does/not/matter/file".into())?;
+
+        let body = Bytes::from_static(b"long file contents is long");
+        {
+            let len = body.len();
+            let body =
+                futures::stream::once(futures::future::ready(std::io::Result::Ok(body.clone())));
+            let cancel = cancel.child_token();
+            cancel.cancel();
+            let e = storage
+                .upload(body, len, &path, None, &cancel)
+                .await
+                .unwrap_err();
+
+            assert!(TimeoutOrCancel::caused_by_cancel(&e));
+        }
+
+        {
+            let len = body.len();
+            let body =
+                futures::stream::once(futures::future::ready(std::io::Result::Ok(body.clone())));
+            storage.upload(body, len, &path, None, &cancel).await?;
+        }
+
+        let read = aggregate(storage.download(&path, &cancel).await?.download_stream).await?;
+        assert_eq!(body, read);
 
         Ok(())
     }
@@ -804,6 +1155,7 @@ mod fs_tests {
         storage: &LocalFs,
         name: &str,
         metadata: Option<StorageMetadata>,
+        cancel: &CancellationToken,
     ) -> anyhow::Result<RemotePath> {
         let from_path = storage
             .storage_root
@@ -825,7 +1177,9 @@ mod fs_tests {
 
         let file = tokio_util::io::ReaderStream::new(file);
 
-        storage.upload(file, size, &relative_path, metadata).await?;
+        storage
+            .upload(file, size, &relative_path, metadata, cancel)
+            .await?;
         Ok(relative_path)
     }
 

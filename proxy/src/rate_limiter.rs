@@ -1,7 +1,14 @@
-mod aimd;
+mod leaky_bucket;
 mod limit_algorithm;
 mod limiter;
-pub use aimd::Aimd;
-pub use limit_algorithm::{AimdConfig, Fixed, RateLimitAlgorithm, RateLimiterConfig};
-pub use limiter::Limiter;
-pub use limiter::{EndpointRateLimiter, RateBucketInfo};
+
+#[cfg(test)]
+pub(crate) use limit_algorithm::aimd::Aimd;
+
+pub(crate) use limit_algorithm::{
+    DynamicLimiter, Outcome, RateLimitAlgorithm, RateLimiterConfig, Token,
+};
+pub(crate) use limiter::GlobalRateLimiter;
+
+pub use leaky_bucket::{EndpointRateLimiter, LeakyBucketConfig, LeakyBucketRateLimiter};
+pub use limiter::{BucketRateLimiter, RateBucketInfo, WakeComputeRateLimiter};

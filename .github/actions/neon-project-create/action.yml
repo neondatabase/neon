@@ -3,22 +3,19 @@ description: 'Create Neon Project using API'
 
 inputs:
   api_key:
-    desctiption: 'Neon API key'
+    description: 'Neon API key'
     required: true
   region_id:
-    desctiption: 'Region ID, if not set the project will be created in the default region'
+    description: 'Region ID, if not set the project will be created in the default region'
     default: aws-us-east-2
   postgres_version:
-    desctiption: 'Postgres version; default is 15'
-    default: 15
+    description: 'Postgres version; default is 16'
+    default: '16'
   api_host:
-    desctiption: 'Neon API host'
-    default: console.stage.neon.tech
-  provisioner:
-    desctiption: 'k8s-pod or k8s-neonvm'
-    default: 'k8s-pod'
+    description: 'Neon API host'
+    default: console-stage.neon.build
   compute_units:
-    desctiption: '[Min, Max] compute units; Min and Max are used for k8s-neonvm with autoscaling, for k8s-pod values Min and Max should be equal'
+    description: '[Min, Max] compute units'
     default: '[1, 1]'
 
 outputs:
@@ -37,10 +34,6 @@ runs:
       # A shell without `set -x` to not to expose password/dsn in logs
       shell: bash -euo pipefail {0}
       run: |
-        if [ "${PROVISIONER}" == "k8s-pod" ] && [ "${MIN_CU}" != "${MAX_CU}" ]; then
-          echo >&2 "For k8s-pod provisioner MIN_CU should be equal to MAX_CU"
-        fi
-
         project=$(curl \
           "https://${API_HOST}/api/v2/projects" \
           --fail \
@@ -52,7 +45,7 @@ runs:
               \"name\": \"Created by actions/neon-project-create; GITHUB_RUN_ID=${GITHUB_RUN_ID}\",
               \"pg_version\": ${POSTGRES_VERSION},
               \"region_id\": \"${REGION_ID}\",
-              \"provisioner\": \"${PROVISIONER}\",
+              \"provisioner\": \"k8s-neonvm\",
               \"autoscaling_limit_min_cu\": ${MIN_CU},
               \"autoscaling_limit_max_cu\": ${MAX_CU},
               \"settings\": { }
@@ -75,6 +68,5 @@ runs:
         API_KEY: ${{ inputs.api_key }}
         REGION_ID: ${{ inputs.region_id }}
         POSTGRES_VERSION: ${{ inputs.postgres_version }}
-        PROVISIONER: ${{ inputs.provisioner }}
         MIN_CU: ${{ fromJSON(inputs.compute_units)[0] }}
         MAX_CU: ${{ fromJSON(inputs.compute_units)[1] }}

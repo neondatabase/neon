@@ -15,16 +15,20 @@ use postgres_ffi::v14::xlog_utils::{IsPartialXLogFileName, IsXLogFileName, XLogF
 use postgres_ffi::{dispatch_pgversion, XLogSegNo, PG_TLI};
 use remote_storage::RemotePath;
 use std::cmp::{max, min};
+use std::future::Future;
 use std::io::{self, SeekFrom};
 use std::pin::Pin;
 use tokio::fs::{self, remove_file, File, OpenOptions};
 use tokio::io::{AsyncRead, AsyncWriteExt};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tracing::*;
+use utils::crashsafe::durable_rename;
 
-use crate::metrics::{time_io_closure, WalStorageMetrics, REMOVED_WAL_SEGMENTS};
+use crate::metrics::{
+    time_io_closure, WalStorageMetrics, REMOVED_WAL_SEGMENTS, WAL_STORAGE_OPERATION_SECONDS,
+};
 use crate::state::TimelinePersistentState;
-use crate::wal_backup::read_object;
+use crate::wal_backup::{read_object, remote_timeline_path};
 use crate::SafeKeeperConf;
 use postgres_ffi::waldecoder::WalStreamDecoder;
 use postgres_ffi::XLogFileName;
@@ -32,19 +36,29 @@ use postgres_ffi::XLOG_BLCKSZ;
 use pq_proto::SystemId;
 use utils::{id::TenantTimelineId, lsn::Lsn};
 
-#[async_trait::async_trait]
 pub trait Storage {
+    // Last written LSN.
+    fn write_lsn(&self) -> Lsn;
     /// LSN of last durably stored WAL record.
     fn flush_lsn(&self) -> Lsn;
 
+    /// Initialize segment by creating proper long header at the beginning of
+    /// the segment and short header at the page of given LSN. This is only used
+    /// for timeline initialization because compute will stream data only since
+    /// init_lsn. Other segment headers are included in compute stream.
+    fn initialize_first_segment(
+        &mut self,
+        init_lsn: Lsn,
+    ) -> impl Future<Output = Result<()>> + Send;
+
     /// Write piece of WAL from buf to disk, but not necessarily sync it.
-    async fn write_wal(&mut self, startpos: Lsn, buf: &[u8]) -> Result<()>;
+    fn write_wal(&mut self, startpos: Lsn, buf: &[u8]) -> impl Future<Output = Result<()>> + Send;
 
     /// Truncate WAL at specified LSN, which must be the end of WAL record.
-    async fn truncate_wal(&mut self, end_pos: Lsn) -> Result<()>;
+    fn truncate_wal(&mut self, end_pos: Lsn) -> impl Future<Output = Result<()>> + Send;
 
     /// Durably store WAL on disk, up to the last written WAL record.
-    async fn flush_wal(&mut self) -> Result<()>;
+    fn flush_wal(&mut self) -> impl Future<Output = Result<()>> + Send;
 
     /// Remove all segments <= given segno. Returns function doing that as we
     /// want to perform it without timeline lock.
@@ -77,6 +91,8 @@ pub struct PhysicalStorage {
 
     /// Size of WAL segment in bytes.
     wal_seg_size: usize,
+    pg_version: u32,
+    system_id: u64,
 
     /// Written to disk, but possibly still in the cache and not fully persisted.
     /// Also can be ahead of record_lsn, if happen to be in the middle of a WAL record.
@@ -168,6 +184,8 @@ impl PhysicalStorage {
             timeline_dir,
             conf: conf.clone(),
             wal_seg_size,
+            pg_version: state.server.pg_version,
+            system_id: state.server.system_id,
             write_lsn,
             write_record_lsn: write_lsn,
             flush_record_lsn: flush_lsn,
@@ -196,20 +214,11 @@ impl PhysicalStorage {
         Ok(())
     }
 
-    /// Call fsync if config requires so.
-    async fn fsync_file(&mut self, file: &File) -> Result<()> {
-        if !self.conf.no_sync {
-            self.metrics
-                .observe_flush_seconds(time_io_closure(file.sync_all()).await?);
-        }
-        Ok(())
-    }
-
     /// Open or create WAL segment file. Caller must call seek to the wanted position.
     /// Returns `file` and `is_partial`.
     async fn open_or_create(&mut self, segno: XLogSegNo) -> Result<(File, bool)> {
         let (wal_file_path, wal_file_partial_path) =
-            wal_file_paths(&self.timeline_dir, segno, self.wal_seg_size)?;
+            wal_file_paths(&self.timeline_dir, segno, self.wal_seg_size);
 
         // Try to open already completed segment
         if let Ok(file) = OpenOptions::new().write(true).open(&wal_file_path).await {
@@ -223,15 +232,30 @@ impl PhysicalStorage {
             Ok((file, true))
         } else {
             // Create and fill new partial file
-            let mut file = OpenOptions::new()
-                .create(true)
-                .write(true)
-                .open(&wal_file_partial_path)
+            //
+            // We're using fdatasync during WAL writing, so file size must not
+            // change; to this end it is filled with zeros here. To avoid using
+            // half initialized segment, first bake it under tmp filename and
+            // then rename.
+            let tmp_path = self.timeline_dir.join("waltmp");
+            let mut file = File::create(&tmp_path)
                 .await
-                .with_context(|| format!("Failed to open log file {:?}", &wal_file_path))?;
+                .with_context(|| format!("Failed to open tmp wal file {:?}", &tmp_path))?;
 
             write_zeroes(&mut file, self.wal_seg_size).await?;
-            self.fsync_file(&file).await?;
+
+            // Note: this doesn't get into observe_flush_seconds metric. But
+            // segment init should be separate metric, if any.
+            if let Err(e) =
+                durable_rename(&tmp_path, &wal_file_partial_path, !self.conf.no_sync).await
+            {
+                // Probably rename succeeded, but fsync of it failed. Remove
+                // the file then to avoid using it.
+                remove_file(wal_file_partial_path)
+                    .await
+                    .or_else(utils::fs_ext::ignore_not_found)?;
+                return Err(e.into());
+            }
             Ok((file, true))
         }
     }
@@ -259,7 +283,7 @@ impl PhysicalStorage {
 
             // Rename partial file to completed file
             let (wal_file_path, wal_file_partial_path) =
-                wal_file_paths(&self.timeline_dir, segno, self.wal_seg_size)?;
+                wal_file_paths(&self.timeline_dir, segno, self.wal_seg_size);
             fs::rename(wal_file_partial_path, wal_file_path).await?;
         } else {
             // otherwise, file can be reused later
@@ -306,11 +330,32 @@ impl PhysicalStorage {
     }
 }
 
-#[async_trait::async_trait]
 impl Storage for PhysicalStorage {
+    // Last written LSN.
+    fn write_lsn(&self) -> Lsn {
+        self.write_lsn
+    }
     /// flush_lsn returns LSN of last durably stored WAL record.
     fn flush_lsn(&self) -> Lsn {
         self.flush_record_lsn
+    }
+
+    async fn initialize_first_segment(&mut self, init_lsn: Lsn) -> Result<()> {
+        let _timer = WAL_STORAGE_OPERATION_SECONDS
+            .with_label_values(&["initialize_first_segment"])
+            .start_timer();
+
+        let segno = init_lsn.segment_number(self.wal_seg_size);
+        let (mut file, _) = self.open_or_create(segno).await?;
+        let major_pg_version = self.pg_version / 10000;
+        let wal_seg =
+            postgres_ffi::generate_wal_segment(segno, self.system_id, major_pg_version, init_lsn)?;
+        file.seek(SeekFrom::Start(0)).await?;
+        file.write_all(&wal_seg).await?;
+        file.flush().await?;
+        info!("initialized segno {} at lsn {}", segno, init_lsn);
+        // note: file is *not* fsynced
+        Ok(())
     }
 
     /// Write WAL to disk.
@@ -391,6 +436,10 @@ impl Storage for PhysicalStorage {
     /// Truncate written WAL by removing all WAL segments after the given LSN.
     /// end_pos must point to the end of the WAL record.
     async fn truncate_wal(&mut self, end_pos: Lsn) -> Result<()> {
+        let _timer = WAL_STORAGE_OPERATION_SECONDS
+            .with_label_values(&["truncate_wal"])
+            .start_timer();
+
         // Streaming must not create a hole, so truncate cannot be called on non-written lsn
         if self.write_lsn != Lsn(0) && end_pos > self.write_lsn {
             bail!(
@@ -430,7 +479,7 @@ impl Storage for PhysicalStorage {
         if !is_partial {
             // Make segment partial once again
             let (wal_file_path, wal_file_partial_path) =
-                wal_file_paths(&self.timeline_dir, segno, self.wal_seg_size)?;
+                wal_file_paths(&self.timeline_dir, segno, self.wal_seg_size);
             fs::rename(wal_file_path, wal_file_partial_path).await?;
         }
 
@@ -466,6 +515,10 @@ async fn remove_segments_from_disk(
     wal_seg_size: usize,
     remove_predicate: impl Fn(XLogSegNo) -> bool,
 ) -> Result<()> {
+    let _timer = WAL_STORAGE_OPERATION_SECONDS
+        .with_label_values(&["remove_segments_from_disk"])
+        .start_timer();
+
     let mut n_removed = 0;
     let mut min_removed = u64::MAX;
     let mut max_removed = u64::MIN;
@@ -501,7 +554,7 @@ async fn remove_segments_from_disk(
 }
 
 pub struct WalReader {
-    workdir: Utf8PathBuf,
+    remote_path: RemotePath,
     timeline_dir: Utf8PathBuf,
     wal_seg_size: usize,
     pos: Lsn,
@@ -523,7 +576,7 @@ pub struct WalReader {
 
 impl WalReader {
     pub fn new(
-        workdir: Utf8PathBuf,
+        ttid: &TenantTimelineId,
         timeline_dir: Utf8PathBuf,
         state: &TimelinePersistentState,
         start_pos: Lsn,
@@ -551,7 +604,7 @@ impl WalReader {
         }
 
         Ok(Self {
-            workdir,
+            remote_path: remote_timeline_path(ttid)?,
             timeline_dir,
             wal_seg_size: state.server.wal_seg_size as usize,
             pos: start_pos,
@@ -649,13 +702,12 @@ impl WalReader {
         let xlogoff = self.pos.segment_offset(self.wal_seg_size);
         let segno = self.pos.segment_number(self.wal_seg_size);
         let wal_file_name = XLogFileName(PG_TLI, segno, self.wal_seg_size);
-        let wal_file_path = self.timeline_dir.join(wal_file_name);
 
         // Try to open local file, if we may have WAL locally
         if self.pos >= self.local_start_lsn {
-            let res = Self::open_wal_file(&wal_file_path).await;
+            let res = open_wal_file(&self.timeline_dir, segno, self.wal_seg_size).await;
             match res {
-                Ok(mut file) => {
+                Ok((mut file, _)) => {
                     file.seek(SeekFrom::Start(xlogoff as u64)).await?;
                     return Ok(Box::pin(file));
                 }
@@ -677,39 +729,11 @@ impl WalReader {
 
         // Try to open remote file, if remote reads are enabled
         if self.enable_remote_read {
-            let remote_wal_file_path = wal_file_path
-                .strip_prefix(&self.workdir)
-                .context("Failed to strip workdir prefix")
-                .and_then(RemotePath::new)
-                .with_context(|| {
-                    format!(
-                        "Failed to resolve remote part of path {:?} for base {:?}",
-                        wal_file_path, self.workdir,
-                    )
-                })?;
+            let remote_wal_file_path = self.remote_path.join(&wal_file_name);
             return read_object(&remote_wal_file_path, xlogoff as u64).await;
         }
 
         bail!("WAL segment is not found")
-    }
-
-    /// Helper function for opening a wal file.
-    async fn open_wal_file(wal_file_path: &Utf8Path) -> Result<tokio::fs::File> {
-        // First try to open the .partial file.
-        let mut partial_path = wal_file_path.to_owned();
-        partial_path.set_extension("partial");
-        if let Ok(opened_file) = tokio::fs::File::open(&partial_path).await {
-            return Ok(opened_file);
-        }
-
-        // If that failed, try it without the .partial extension.
-        tokio::fs::File::open(&wal_file_path)
-            .await
-            .with_context(|| format!("Failed to open WAL file {:?}", wal_file_path))
-            .map_err(|e| {
-                warn!("{}", e);
-                e
-            })
     }
 }
 
@@ -718,6 +742,11 @@ const ZERO_BLOCK: &[u8] = &[0u8; XLOG_BLCKSZ];
 
 /// Helper for filling file with zeroes.
 async fn write_zeroes(file: &mut File, mut count: usize) -> Result<()> {
+    fail::fail_point!("sk-write-zeroes", |_| {
+        info!("write_zeroes hit failpoint");
+        Err(anyhow::anyhow!("failpoint: sk-write-zeroes"))
+    });
+
     while count >= XLOG_BLCKSZ {
         file.write_all(ZERO_BLOCK).await?;
         count -= XLOG_BLCKSZ;
@@ -727,14 +756,42 @@ async fn write_zeroes(file: &mut File, mut count: usize) -> Result<()> {
     Ok(())
 }
 
+/// Helper function for opening WAL segment `segno` in `dir`. Returns file and
+/// whether it is .partial.
+pub(crate) async fn open_wal_file(
+    timeline_dir: &Utf8Path,
+    segno: XLogSegNo,
+    wal_seg_size: usize,
+) -> Result<(tokio::fs::File, bool)> {
+    let (wal_file_path, wal_file_partial_path) = wal_file_paths(timeline_dir, segno, wal_seg_size);
+
+    // First try to open the .partial file.
+    let mut partial_path = wal_file_path.to_owned();
+    partial_path.set_extension("partial");
+    if let Ok(opened_file) = tokio::fs::File::open(&wal_file_partial_path).await {
+        return Ok((opened_file, true));
+    }
+
+    // If that failed, try it without the .partial extension.
+    let pf = tokio::fs::File::open(&wal_file_path)
+        .await
+        .with_context(|| format!("failed to open WAL file {:#}", wal_file_path))
+        .map_err(|e| {
+            warn!("{}", e);
+            e
+        })?;
+
+    Ok((pf, false))
+}
+
 /// Helper returning full path to WAL segment file and its .partial brother.
 pub fn wal_file_paths(
     timeline_dir: &Utf8Path,
     segno: XLogSegNo,
     wal_seg_size: usize,
-) -> Result<(Utf8PathBuf, Utf8PathBuf)> {
+) -> (Utf8PathBuf, Utf8PathBuf) {
     let wal_file_name = XLogFileName(PG_TLI, segno, wal_seg_size);
     let wal_file_path = timeline_dir.join(wal_file_name.clone());
     let wal_file_partial_path = timeline_dir.join(wal_file_name + ".partial");
-    Ok((wal_file_path, wal_file_partial_path))
+    (wal_file_path, wal_file_partial_path)
 }

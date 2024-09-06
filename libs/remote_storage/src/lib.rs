@@ -10,23 +10,26 @@
 #![deny(clippy::undocumented_unsafe_blocks)]
 
 mod azure_blob;
+mod config;
+mod error;
 mod local_fs;
+mod metrics;
 mod s3_bucket;
 mod simulate_failures;
+mod support;
 
 use std::{
-    collections::HashMap, fmt::Debug, num::NonZeroUsize, pin::Pin, sync::Arc, time::SystemTime,
+    collections::HashMap, fmt::Debug, num::NonZeroU32, pin::Pin, sync::Arc, time::SystemTime,
 };
 
-use anyhow::{bail, Context};
+use anyhow::Context;
 use camino::{Utf8Path, Utf8PathBuf};
 
 use bytes::Bytes;
-use futures::stream::Stream;
+use futures::{stream::Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
-use toml_edit::Item;
 use tracing::info;
 
 pub use self::{
@@ -35,17 +38,26 @@ pub use self::{
 };
 use s3_bucket::RequestKind;
 
+pub use crate::config::{AzureConfig, RemoteStorageConfig, RemoteStorageKind, S3Config};
+
+/// Azure SDK's ETag type is a simple String wrapper: we use this internally instead of repeating it here.
+pub use azure_core::Etag;
+
+pub use error::{DownloadError, TimeTravelError, TimeoutOrCancel};
+
+/// Default concurrency limit for S3 operations
+///
 /// Currently, sync happens with AWS S3, that has two limits on requests per second:
 /// ~200 RPS for IAM services
 /// <https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/UsingWithRDS.IAMDBAuth.html>
 /// ~3500 PUT/COPY/POST/DELETE or 5500 GET/HEAD S3 requests
 /// <https://aws.amazon.com/premiumsupport/knowledge-center/s3-request-limit-avoid-throttling/>
 pub const DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT: usize = 100;
-/// We set this a little bit low as we currently buffer the entire file into RAM
+/// Set this limit analogously to the S3 limit
 ///
 /// Here, a limit of max 20k concurrent connections was noted.
 /// <https://learn.microsoft.com/en-us/answers/questions/1301863/is-there-any-limitation-to-concurrent-connections>
-pub const DEFAULT_REMOTE_STORAGE_AZURE_CONCURRENCY_LIMIT: usize = 30;
+pub const DEFAULT_REMOTE_STORAGE_AZURE_CONCURRENCY_LIMIT: usize = 100;
 /// No limits on the client side, which currenltly means 1000 for AWS S3.
 /// <https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html#API_ListObjectsV2_RequestSyntax>
 pub const DEFAULT_MAX_KEYS_PER_LIST_RESPONSE: Option<i32> = None;
@@ -107,8 +119,8 @@ impl RemotePath {
         self.0.file_name()
     }
 
-    pub fn join(&self, segment: &Utf8Path) -> Self {
-        Self(self.0.join(segment))
+    pub fn join(&self, path: impl AsRef<Utf8Path>) -> Self {
+        Self(self.0.join(path))
     }
 
     pub fn get_path(&self) -> &Utf8PathBuf {
@@ -122,6 +134,11 @@ impl RemotePath {
     pub fn strip_prefix(&self, p: &RemotePath) -> Result<&Utf8Path, std::path::StripPrefixError> {
         self.0.strip_prefix(&p.0)
     }
+
+    pub fn add_trailing_slash(&self) -> Self {
+        // Unwrap safety inputs are guararnteed to be valid UTF-8
+        Self(format!("{}/", self.0).try_into().unwrap())
+    }
 }
 
 /// We don't need callers to be able to pass arbitrary delimiters: just control
@@ -129,15 +146,23 @@ impl RemotePath {
 ///
 /// The WithDelimiter mode will populate `prefixes` and `keys` in the result.  The
 /// NoDelimiter mode will only populate `keys`.
+#[derive(Copy, Clone)]
 pub enum ListingMode {
     WithDelimiter,
     NoDelimiter,
 }
 
+#[derive(PartialEq, Eq, Debug, Clone)]
+pub struct ListingObject {
+    pub key: RemotePath,
+    pub last_modified: SystemTime,
+    pub size: u64,
+}
+
 #[derive(Default)]
 pub struct Listing {
     pub prefixes: Vec<RemotePath>,
-    pub keys: Vec<RemotePath>,
+    pub keys: Vec<ListingObject>,
 }
 
 /// Storage (potentially remote) API to manage its state.
@@ -145,43 +170,64 @@ pub struct Listing {
 /// providing basic CRUD operations for storage files.
 #[allow(async_fn_in_trait)]
 pub trait RemoteStorage: Send + Sync + 'static {
-    /// Lists all top level subdirectories for a given prefix
-    /// Note: here we assume that if the prefix is passed it was obtained via remote_object_id
-    /// which already takes into account any kind of global prefix (prefix_in_bucket for S3 or storage_root for LocalFS)
-    /// so this method doesnt need to.
-    async fn list_prefixes(
+    /// List objects in remote storage, with semantics matching AWS S3's [`ListObjectsV2`].
+    ///
+    /// The stream is guaranteed to return at least one element, even in the case of errors
+    /// (in that case it's an `Err()`), or an empty `Listing`.
+    ///
+    /// The stream is not ending if it returns an error, as long as [`is_permanent`] returns false on the error.
+    /// The `next` function can be retried, and maybe in a future retry, there will be success.
+    ///
+    /// Note that the prefix is relative to any `prefix_in_bucket` configured for the client, not
+    /// from the absolute root of the bucket.
+    ///
+    /// `mode` configures whether to use a delimiter.  Without a delimiter, all keys
+    /// within the prefix are listed in the `keys` of the result.  With a delimiter, any "directories" at the top level of
+    /// the prefix are returned in the `prefixes` of the result, and keys in the top level of the prefix are
+    /// returned in `keys` ().
+    ///
+    /// `max_keys` controls the maximum number of keys that will be returned.  If this is None, this function
+    /// will iteratively call listobjects until it runs out of keys.  Note that this is not safe to use on
+    /// unlimted size buckets, as the full list of objects is allocated into a monolithic data structure.
+    ///
+    /// [`ListObjectsV2`]: <https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html>
+    /// [`is_permanent`]: DownloadError::is_permanent
+    fn list_streaming(
         &self,
         prefix: Option<&RemotePath>,
-    ) -> Result<Vec<RemotePath>, DownloadError> {
-        let result = self
-            .list(prefix, ListingMode::WithDelimiter)
-            .await?
-            .prefixes;
-        Ok(result)
-    }
-    /// Lists all files in directory "recursively"
-    /// (not really recursively, because AWS has a flat namespace)
-    /// Note: This is subtely different than list_prefixes,
-    /// because it is for listing files instead of listing
-    /// names sharing common prefixes.
-    /// For example,
-    /// list_files("foo/bar") = ["foo/bar/cat123.txt",
-    /// "foo/bar/cat567.txt", "foo/bar/dog123.txt", "foo/bar/dog456.txt"]
-    /// whereas,
-    /// list_prefixes("foo/bar/") = ["cat", "dog"]
-    /// See `test_real_s3.rs` for more details.
-    async fn list_files(&self, prefix: Option<&RemotePath>) -> anyhow::Result<Vec<RemotePath>> {
-        let result = self.list(prefix, ListingMode::NoDelimiter).await?.keys;
-        Ok(result)
-    }
+        mode: ListingMode,
+        max_keys: Option<NonZeroU32>,
+        cancel: &CancellationToken,
+    ) -> impl Stream<Item = Result<Listing, DownloadError>> + Send;
 
     async fn list(
         &self,
         prefix: Option<&RemotePath>,
-        _mode: ListingMode,
-    ) -> anyhow::Result<Listing, DownloadError>;
+        mode: ListingMode,
+        max_keys: Option<NonZeroU32>,
+        cancel: &CancellationToken,
+    ) -> Result<Listing, DownloadError> {
+        let mut stream = std::pin::pin!(self.list_streaming(prefix, mode, max_keys, cancel));
+        let mut combined = stream.next().await.expect("At least one item required")?;
+        while let Some(list) = stream.next().await {
+            let list = list?;
+            combined.keys.extend(list.keys.into_iter());
+            combined.prefixes.extend_from_slice(&list.prefixes);
+        }
+        Ok(combined)
+    }
+
+    /// Obtain metadata information about an object.
+    async fn head_object(
+        &self,
+        key: &RemotePath,
+        cancel: &CancellationToken,
+    ) -> Result<ListingObject, DownloadError>;
 
     /// Streams the local file contents into remote into the remote storage entry.
+    ///
+    /// If the operation fails because of timeout or cancellation, the root cause of the error will be
+    /// set to `TimeoutOrCancel`.
     async fn upload(
         &self,
         from: impl Stream<Item = std::io::Result<Bytes>> + Send + Sync + 'static,
@@ -190,27 +236,61 @@ pub trait RemoteStorage: Send + Sync + 'static {
         data_size_bytes: usize,
         to: &RemotePath,
         metadata: Option<StorageMetadata>,
+        cancel: &CancellationToken,
     ) -> anyhow::Result<()>;
 
-    /// Streams the remote storage entry contents into the buffered writer given, returns the filled writer.
+    /// Streams the remote storage entry contents.
+    ///
+    /// The returned download stream will obey initial timeout and cancellation signal by erroring
+    /// on whichever happens first. Only one of the reasons will fail the stream, which is usually
+    /// enough for `tokio::io::copy_buf` usage. If needed the error can be filtered out.
+    ///
     /// Returns the metadata, if any was stored with the file previously.
-    async fn download(&self, from: &RemotePath) -> Result<Download, DownloadError>;
+    async fn download(
+        &self,
+        from: &RemotePath,
+        cancel: &CancellationToken,
+    ) -> Result<Download, DownloadError>;
 
-    /// Streams a given byte range of the remote storage entry contents into the buffered writer given, returns the filled writer.
+    /// Streams a given byte range of the remote storage entry contents.
+    ///
+    /// The returned download stream will obey initial timeout and cancellation signal by erroring
+    /// on whichever happens first. Only one of the reasons will fail the stream, which is usually
+    /// enough for `tokio::io::copy_buf` usage. If needed the error can be filtered out.
+    ///
     /// Returns the metadata, if any was stored with the file previously.
     async fn download_byte_range(
         &self,
         from: &RemotePath,
         start_inclusive: u64,
         end_exclusive: Option<u64>,
+        cancel: &CancellationToken,
     ) -> Result<Download, DownloadError>;
 
-    async fn delete(&self, path: &RemotePath) -> anyhow::Result<()>;
+    /// Delete a single path from remote storage.
+    ///
+    /// If the operation fails because of timeout or cancellation, the root cause of the error will be
+    /// set to `TimeoutOrCancel`. In such situation it is unknown if the deletion went through.
+    async fn delete(&self, path: &RemotePath, cancel: &CancellationToken) -> anyhow::Result<()>;
 
-    async fn delete_objects<'a>(&self, paths: &'a [RemotePath]) -> anyhow::Result<()>;
+    /// Delete a multiple paths from remote storage.
+    ///
+    /// If the operation fails because of timeout or cancellation, the root cause of the error will be
+    /// set to `TimeoutOrCancel`. In such situation it is unknown which deletions, if any, went
+    /// through.
+    async fn delete_objects<'a>(
+        &self,
+        paths: &'a [RemotePath],
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<()>;
 
     /// Copy a remote object inside a bucket from one path to another.
-    async fn copy(&self, from: &RemotePath, to: &RemotePath) -> anyhow::Result<()>;
+    async fn copy(
+        &self,
+        from: &RemotePath,
+        to: &RemotePath,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<()>;
 
     /// Resets the content of everything with the given prefix to the given state
     async fn time_travel_recover(
@@ -218,17 +298,25 @@ pub trait RemoteStorage: Send + Sync + 'static {
         prefix: Option<&RemotePath>,
         timestamp: SystemTime,
         done_if_after: SystemTime,
-        cancel: CancellationToken,
-    ) -> anyhow::Result<()>;
+        cancel: &CancellationToken,
+    ) -> Result<(), TimeTravelError>;
 }
 
-pub type DownloadStream = Pin<Box<dyn Stream<Item = std::io::Result<Bytes>> + Unpin + Send + Sync>>;
+/// Data part of an ongoing [`Download`].
+///
+/// `DownloadStream` is sensitive to the timeout and cancellation used with the original
+/// [`RemoteStorage::download`] request. The type yields `std::io::Result<Bytes>` to be compatible
+/// with `tokio::io::copy_buf`.
+// This has 'static because safekeepers do not use cancellation tokens (yet)
+pub type DownloadStream =
+    Pin<Box<dyn Stream<Item = std::io::Result<Bytes>> + Send + Sync + 'static>>;
+
 pub struct Download {
     pub download_stream: DownloadStream,
     /// The last time the file was modified (`last-modified` HTTP header)
-    pub last_modified: Option<SystemTime>,
+    pub last_modified: SystemTime,
     /// A way to identify this specific version of the resource (`etag` HTTP header)
-    pub etag: Option<String>,
+    pub etag: Etag,
     /// Extra key-value data, associated with the current remote file.
     pub metadata: Option<StorageMetadata>,
 }
@@ -241,38 +329,10 @@ impl Debug for Download {
     }
 }
 
-#[derive(Debug)]
-pub enum DownloadError {
-    /// Validation or other error happened due to user input.
-    BadInput(anyhow::Error),
-    /// The file was not found in the remote storage.
-    NotFound,
-    /// A cancellation token aborted the download, typically during
-    /// tenant detach or process shutdown.
-    Cancelled,
-    /// The file was found in the remote storage, but the download failed.
-    Other(anyhow::Error),
-}
-
-impl std::fmt::Display for DownloadError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            DownloadError::BadInput(e) => {
-                write!(f, "Failed to download a remote file due to user input: {e}")
-            }
-            DownloadError::Cancelled => write!(f, "Cancelled, shutting down"),
-            DownloadError::NotFound => write!(f, "No file found for the remote object id given"),
-            DownloadError::Other(e) => write!(f, "Failed to download a remote file: {e:?}"),
-        }
-    }
-}
-
-impl std::error::Error for DownloadError {}
-
 /// Every storage, currently supported.
 /// Serves as a simple way to pass around the [`RemoteStorage`] without dealing with generics.
-#[derive(Clone)]
 // Require Clone for `Other` due to https://github.com/rust-lang/rust/issues/26925
+#[derive(Clone)]
 pub enum GenericRemoteStorage<Other: Clone = Arc<UnreliableWrapper>> {
     LocalFs(LocalFs),
     AwsS3(Arc<S3Bucket>),
@@ -281,67 +341,80 @@ pub enum GenericRemoteStorage<Other: Clone = Arc<UnreliableWrapper>> {
 }
 
 impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
+    // See [`RemoteStorage::list`].
     pub async fn list(
         &self,
         prefix: Option<&RemotePath>,
         mode: ListingMode,
-    ) -> anyhow::Result<Listing, DownloadError> {
+        max_keys: Option<NonZeroU32>,
+        cancel: &CancellationToken,
+    ) -> Result<Listing, DownloadError> {
         match self {
-            Self::LocalFs(s) => s.list(prefix, mode).await,
-            Self::AwsS3(s) => s.list(prefix, mode).await,
-            Self::AzureBlob(s) => s.list(prefix, mode).await,
-            Self::Unreliable(s) => s.list(prefix, mode).await,
+            Self::LocalFs(s) => s.list(prefix, mode, max_keys, cancel).await,
+            Self::AwsS3(s) => s.list(prefix, mode, max_keys, cancel).await,
+            Self::AzureBlob(s) => s.list(prefix, mode, max_keys, cancel).await,
+            Self::Unreliable(s) => s.list(prefix, mode, max_keys, cancel).await,
         }
     }
 
-    // A function for listing all the files in a "directory"
-    // Example:
-    // list_files("foo/bar") = ["foo/bar/a.txt", "foo/bar/b.txt"]
-    pub async fn list_files(&self, folder: Option<&RemotePath>) -> anyhow::Result<Vec<RemotePath>> {
+    // See [`RemoteStorage::list_streaming`].
+    pub fn list_streaming<'a>(
+        &'a self,
+        prefix: Option<&'a RemotePath>,
+        mode: ListingMode,
+        max_keys: Option<NonZeroU32>,
+        cancel: &'a CancellationToken,
+    ) -> impl Stream<Item = Result<Listing, DownloadError>> + 'a + Send {
         match self {
-            Self::LocalFs(s) => s.list_files(folder).await,
-            Self::AwsS3(s) => s.list_files(folder).await,
-            Self::AzureBlob(s) => s.list_files(folder).await,
-            Self::Unreliable(s) => s.list_files(folder).await,
+            Self::LocalFs(s) => Box::pin(s.list_streaming(prefix, mode, max_keys, cancel))
+                as Pin<Box<dyn Stream<Item = Result<Listing, DownloadError>> + Send>>,
+            Self::AwsS3(s) => Box::pin(s.list_streaming(prefix, mode, max_keys, cancel)),
+            Self::AzureBlob(s) => Box::pin(s.list_streaming(prefix, mode, max_keys, cancel)),
+            Self::Unreliable(s) => Box::pin(s.list_streaming(prefix, mode, max_keys, cancel)),
         }
     }
 
-    // lists common *prefixes*, if any of files
-    // Example:
-    // list_prefixes("foo123","foo567","bar123","bar432") = ["foo", "bar"]
-    pub async fn list_prefixes(
+    // See [`RemoteStorage::head_object`].
+    pub async fn head_object(
         &self,
-        prefix: Option<&RemotePath>,
-    ) -> Result<Vec<RemotePath>, DownloadError> {
+        key: &RemotePath,
+        cancel: &CancellationToken,
+    ) -> Result<ListingObject, DownloadError> {
         match self {
-            Self::LocalFs(s) => s.list_prefixes(prefix).await,
-            Self::AwsS3(s) => s.list_prefixes(prefix).await,
-            Self::AzureBlob(s) => s.list_prefixes(prefix).await,
-            Self::Unreliable(s) => s.list_prefixes(prefix).await,
+            Self::LocalFs(s) => s.head_object(key, cancel).await,
+            Self::AwsS3(s) => s.head_object(key, cancel).await,
+            Self::AzureBlob(s) => s.head_object(key, cancel).await,
+            Self::Unreliable(s) => s.head_object(key, cancel).await,
         }
     }
 
+    /// See [`RemoteStorage::upload`]
     pub async fn upload(
         &self,
         from: impl Stream<Item = std::io::Result<Bytes>> + Send + Sync + 'static,
         data_size_bytes: usize,
         to: &RemotePath,
         metadata: Option<StorageMetadata>,
+        cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
         match self {
-            Self::LocalFs(s) => s.upload(from, data_size_bytes, to, metadata).await,
-            Self::AwsS3(s) => s.upload(from, data_size_bytes, to, metadata).await,
-            Self::AzureBlob(s) => s.upload(from, data_size_bytes, to, metadata).await,
-            Self::Unreliable(s) => s.upload(from, data_size_bytes, to, metadata).await,
+            Self::LocalFs(s) => s.upload(from, data_size_bytes, to, metadata, cancel).await,
+            Self::AwsS3(s) => s.upload(from, data_size_bytes, to, metadata, cancel).await,
+            Self::AzureBlob(s) => s.upload(from, data_size_bytes, to, metadata, cancel).await,
+            Self::Unreliable(s) => s.upload(from, data_size_bytes, to, metadata, cancel).await,
         }
     }
 
-    pub async fn download(&self, from: &RemotePath) -> Result<Download, DownloadError> {
+    pub async fn download(
+        &self,
+        from: &RemotePath,
+        cancel: &CancellationToken,
+    ) -> Result<Download, DownloadError> {
         match self {
-            Self::LocalFs(s) => s.download(from).await,
-            Self::AwsS3(s) => s.download(from).await,
-            Self::AzureBlob(s) => s.download(from).await,
-            Self::Unreliable(s) => s.download(from).await,
+            Self::LocalFs(s) => s.download(from, cancel).await,
+            Self::AwsS3(s) => s.download(from, cancel).await,
+            Self::AzureBlob(s) => s.download(from, cancel).await,
+            Self::Unreliable(s) => s.download(from, cancel).await,
         }
     }
 
@@ -350,61 +423,79 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
         from: &RemotePath,
         start_inclusive: u64,
         end_exclusive: Option<u64>,
+        cancel: &CancellationToken,
     ) -> Result<Download, DownloadError> {
         match self {
             Self::LocalFs(s) => {
-                s.download_byte_range(from, start_inclusive, end_exclusive)
+                s.download_byte_range(from, start_inclusive, end_exclusive, cancel)
                     .await
             }
             Self::AwsS3(s) => {
-                s.download_byte_range(from, start_inclusive, end_exclusive)
+                s.download_byte_range(from, start_inclusive, end_exclusive, cancel)
                     .await
             }
             Self::AzureBlob(s) => {
-                s.download_byte_range(from, start_inclusive, end_exclusive)
+                s.download_byte_range(from, start_inclusive, end_exclusive, cancel)
                     .await
             }
             Self::Unreliable(s) => {
-                s.download_byte_range(from, start_inclusive, end_exclusive)
+                s.download_byte_range(from, start_inclusive, end_exclusive, cancel)
                     .await
             }
         }
     }
 
-    pub async fn delete(&self, path: &RemotePath) -> anyhow::Result<()> {
+    /// See [`RemoteStorage::delete`]
+    pub async fn delete(
+        &self,
+        path: &RemotePath,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<()> {
         match self {
-            Self::LocalFs(s) => s.delete(path).await,
-            Self::AwsS3(s) => s.delete(path).await,
-            Self::AzureBlob(s) => s.delete(path).await,
-            Self::Unreliable(s) => s.delete(path).await,
+            Self::LocalFs(s) => s.delete(path, cancel).await,
+            Self::AwsS3(s) => s.delete(path, cancel).await,
+            Self::AzureBlob(s) => s.delete(path, cancel).await,
+            Self::Unreliable(s) => s.delete(path, cancel).await,
         }
     }
 
-    pub async fn delete_objects<'a>(&self, paths: &'a [RemotePath]) -> anyhow::Result<()> {
+    /// See [`RemoteStorage::delete_objects`]
+    pub async fn delete_objects(
+        &self,
+        paths: &[RemotePath],
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<()> {
         match self {
-            Self::LocalFs(s) => s.delete_objects(paths).await,
-            Self::AwsS3(s) => s.delete_objects(paths).await,
-            Self::AzureBlob(s) => s.delete_objects(paths).await,
-            Self::Unreliable(s) => s.delete_objects(paths).await,
+            Self::LocalFs(s) => s.delete_objects(paths, cancel).await,
+            Self::AwsS3(s) => s.delete_objects(paths, cancel).await,
+            Self::AzureBlob(s) => s.delete_objects(paths, cancel).await,
+            Self::Unreliable(s) => s.delete_objects(paths, cancel).await,
         }
     }
 
-    pub async fn copy_object(&self, from: &RemotePath, to: &RemotePath) -> anyhow::Result<()> {
+    /// See [`RemoteStorage::copy`]
+    pub async fn copy_object(
+        &self,
+        from: &RemotePath,
+        to: &RemotePath,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<()> {
         match self {
-            Self::LocalFs(s) => s.copy(from, to).await,
-            Self::AwsS3(s) => s.copy(from, to).await,
-            Self::AzureBlob(s) => s.copy(from, to).await,
-            Self::Unreliable(s) => s.copy(from, to).await,
+            Self::LocalFs(s) => s.copy(from, to, cancel).await,
+            Self::AwsS3(s) => s.copy(from, to, cancel).await,
+            Self::AzureBlob(s) => s.copy(from, to, cancel).await,
+            Self::Unreliable(s) => s.copy(from, to, cancel).await,
         }
     }
 
+    /// See [`RemoteStorage::time_travel_recover`].
     pub async fn time_travel_recover(
         &self,
         prefix: Option<&RemotePath>,
         timestamp: SystemTime,
         done_if_after: SystemTime,
-        cancel: CancellationToken,
-    ) -> anyhow::Result<()> {
+        cancel: &CancellationToken,
+    ) -> Result<(), TimeTravelError> {
         match self {
             Self::LocalFs(s) => {
                 s.time_travel_recover(prefix, timestamp, done_if_after, cancel)
@@ -427,21 +518,31 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
 }
 
 impl GenericRemoteStorage {
-    pub fn from_config(storage_config: &RemoteStorageConfig) -> anyhow::Result<Self> {
+    pub async fn from_config(storage_config: &RemoteStorageConfig) -> anyhow::Result<Self> {
+        let timeout = storage_config.timeout;
         Ok(match &storage_config.storage {
-            RemoteStorageKind::LocalFs(root) => {
-                info!("Using fs root '{root}' as a remote storage");
-                Self::LocalFs(LocalFs::new(root.clone())?)
+            RemoteStorageKind::LocalFs { local_path: path } => {
+                info!("Using fs root '{path}' as a remote storage");
+                Self::LocalFs(LocalFs::new(path.clone(), timeout)?)
             }
             RemoteStorageKind::AwsS3(s3_config) => {
-                info!("Using s3 bucket '{}' in region '{}' as a remote storage, prefix in bucket: '{:?}', bucket endpoint: '{:?}'",
+                // The profile and access key id are only printed here for debugging purposes,
+                // their values don't indicate the eventually taken choice for auth.
+                let profile = std::env::var("AWS_PROFILE").unwrap_or_else(|_| "<none>".into());
+                let access_key_id =
+                    std::env::var("AWS_ACCESS_KEY_ID").unwrap_or_else(|_| "<none>".into());
+                info!("Using s3 bucket '{}' in region '{}' as a remote storage, prefix in bucket: '{:?}', bucket endpoint: '{:?}', profile: {profile}, access_key_id: {access_key_id}",
                       s3_config.bucket_name, s3_config.bucket_region, s3_config.prefix_in_bucket, s3_config.endpoint);
-                Self::AwsS3(Arc::new(S3Bucket::new(s3_config)?))
+                Self::AwsS3(Arc::new(S3Bucket::new(s3_config, timeout).await?))
             }
             RemoteStorageKind::AzureContainer(azure_config) => {
-                info!("Using azure container '{}' in region '{}' as a remote storage, prefix in container: '{:?}'",
+                let storage_account = azure_config
+                    .storage_account
+                    .as_deref()
+                    .unwrap_or("<AZURE_STORAGE_ACCOUNT>");
+                info!("Using azure container '{}' in account '{storage_account}' in region '{}' as a remote storage, prefix in container: '{:?}'",
                       azure_config.container_name, azure_config.container_region, azure_config.prefix_in_container);
-                Self::AzureBlob(Arc::new(AzureBlobStorage::new(azure_config)?))
+                Self::AzureBlob(Arc::new(AzureBlobStorage::new(azure_config, timeout)?))
             }
         })
     }
@@ -450,18 +551,15 @@ impl GenericRemoteStorage {
         Self::Unreliable(Arc::new(UnreliableWrapper::new(s, fail_first)))
     }
 
-    /// Takes storage object contents and its size and uploads to remote storage,
-    /// mapping `from_path` to the corresponding remote object id in the storage.
-    ///
-    /// The storage object does not have to be present on the `from_path`,
-    /// this path is used for the remote object id conversion only.
+    /// See [`RemoteStorage::upload`], which this method calls with `None` as metadata.
     pub async fn upload_storage_object(
         &self,
         from: impl Stream<Item = std::io::Result<Bytes>> + Send + Sync + 'static,
         from_size_bytes: usize,
         to: &RemotePath,
+        cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
-        self.upload(from, from_size_bytes, to, None)
+        self.upload(from, from_size_bytes, to, None, cancel)
             .await
             .with_context(|| {
                 format!("Failed to upload data of length {from_size_bytes} to storage path {to:?}")
@@ -474,10 +572,21 @@ impl GenericRemoteStorage {
         &self,
         byte_range: Option<(u64, Option<u64>)>,
         from: &RemotePath,
+        cancel: &CancellationToken,
     ) -> Result<Download, DownloadError> {
         match byte_range {
-            Some((start, end)) => self.download_byte_range(from, start, end).await,
-            None => self.download(from).await,
+            Some((start, end)) => self.download_byte_range(from, start, end, cancel).await,
+            None => self.download(from, cancel).await,
+        }
+    }
+
+    /// The name of the bucket/container/etc.
+    pub fn bucket_name(&self) -> Option<&str> {
+        match self {
+            Self::LocalFs(_s) => None,
+            Self::AwsS3(s) => Some(s.bucket_name()),
+            Self::AzureBlob(s) => Some(s.container_name()),
+            Self::Unreliable(_s) => None,
         }
     }
 }
@@ -487,212 +596,14 @@ impl GenericRemoteStorage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StorageMetadata(HashMap<String, String>);
 
-/// External backup storage configuration, enough for creating a client for that storage.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RemoteStorageConfig {
-    /// The storage connection configuration.
-    pub storage: RemoteStorageKind,
-}
-
-/// A kind of a remote storage to connect to, with its connection configuration.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RemoteStorageKind {
-    /// Storage based on local file system.
-    /// Specify a root folder to place all stored files into.
-    LocalFs(Utf8PathBuf),
-    /// AWS S3 based storage, storing all files in the S3 bucket
-    /// specified by the config
-    AwsS3(S3Config),
-    /// Azure Blob based storage, storing all files in the container
-    /// specified by the config
-    AzureContainer(AzureConfig),
-}
-
-/// AWS S3 bucket coordinates and access credentials to manage the bucket contents (read and write).
-#[derive(Clone, PartialEq, Eq)]
-pub struct S3Config {
-    /// Name of the bucket to connect to.
-    pub bucket_name: String,
-    /// The region where the bucket is located at.
-    pub bucket_region: String,
-    /// A "subfolder" in the bucket, to use the same bucket separately by multiple remote storage users at once.
-    pub prefix_in_bucket: Option<String>,
-    /// A base URL to send S3 requests to.
-    /// By default, the endpoint is derived from a region name, assuming it's
-    /// an AWS S3 region name, erroring on wrong region name.
-    /// Endpoint provides a way to support other S3 flavors and their regions.
-    ///
-    /// Example: `http://127.0.0.1:5000`
-    pub endpoint: Option<String>,
-    /// AWS S3 has various limits on its API calls, we need not to exceed those.
-    /// See [`DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT`] for more details.
-    pub concurrency_limit: NonZeroUsize,
-    pub max_keys_per_list_response: Option<i32>,
-}
-
-impl Debug for S3Config {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("S3Config")
-            .field("bucket_name", &self.bucket_name)
-            .field("bucket_region", &self.bucket_region)
-            .field("prefix_in_bucket", &self.prefix_in_bucket)
-            .field("concurrency_limit", &self.concurrency_limit)
-            .field(
-                "max_keys_per_list_response",
-                &self.max_keys_per_list_response,
-            )
-            .finish()
+impl<const N: usize> From<[(&str, &str); N]> for StorageMetadata {
+    fn from(arr: [(&str, &str); N]) -> Self {
+        let map: HashMap<String, String> = arr
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        Self(map)
     }
-}
-
-/// Azure  bucket coordinates and access credentials to manage the bucket contents (read and write).
-#[derive(Clone, PartialEq, Eq)]
-pub struct AzureConfig {
-    /// Name of the container to connect to.
-    pub container_name: String,
-    /// The region where the bucket is located at.
-    pub container_region: String,
-    /// A "subfolder" in the container, to use the same container separately by multiple remote storage users at once.
-    pub prefix_in_container: Option<String>,
-    /// Azure has various limits on its API calls, we need not to exceed those.
-    /// See [`DEFAULT_REMOTE_STORAGE_AZURE_CONCURRENCY_LIMIT`] for more details.
-    pub concurrency_limit: NonZeroUsize,
-    pub max_keys_per_list_response: Option<i32>,
-}
-
-impl Debug for AzureConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AzureConfig")
-            .field("bucket_name", &self.container_name)
-            .field("bucket_region", &self.container_region)
-            .field("prefix_in_bucket", &self.prefix_in_container)
-            .field("concurrency_limit", &self.concurrency_limit)
-            .field(
-                "max_keys_per_list_response",
-                &self.max_keys_per_list_response,
-            )
-            .finish()
-    }
-}
-
-impl RemoteStorageConfig {
-    pub fn from_toml(toml: &toml_edit::Item) -> anyhow::Result<Option<RemoteStorageConfig>> {
-        let local_path = toml.get("local_path");
-        let bucket_name = toml.get("bucket_name");
-        let bucket_region = toml.get("bucket_region");
-        let container_name = toml.get("container_name");
-        let container_region = toml.get("container_region");
-
-        let use_azure = container_name.is_some() && container_region.is_some();
-
-        let default_concurrency_limit = if use_azure {
-            DEFAULT_REMOTE_STORAGE_AZURE_CONCURRENCY_LIMIT
-        } else {
-            DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT
-        };
-        let concurrency_limit = NonZeroUsize::new(
-            parse_optional_integer("concurrency_limit", toml)?.unwrap_or(default_concurrency_limit),
-        )
-        .context("Failed to parse 'concurrency_limit' as a positive integer")?;
-
-        let max_keys_per_list_response =
-            parse_optional_integer::<i32, _>("max_keys_per_list_response", toml)
-                .context("Failed to parse 'max_keys_per_list_response' as a positive integer")?
-                .or(DEFAULT_MAX_KEYS_PER_LIST_RESPONSE);
-
-        let endpoint = toml
-            .get("endpoint")
-            .map(|endpoint| parse_toml_string("endpoint", endpoint))
-            .transpose()?;
-
-        let storage = match (
-            local_path,
-            bucket_name,
-            bucket_region,
-            container_name,
-            container_region,
-        ) {
-            // no 'local_path' nor 'bucket_name' options are provided, consider this remote storage disabled
-            (None, None, None, None, None) => return Ok(None),
-            (_, Some(_), None, ..) => {
-                bail!("'bucket_region' option is mandatory if 'bucket_name' is given ")
-            }
-            (_, None, Some(_), ..) => {
-                bail!("'bucket_name' option is mandatory if 'bucket_region' is given ")
-            }
-            (None, Some(bucket_name), Some(bucket_region), ..) => {
-                RemoteStorageKind::AwsS3(S3Config {
-                    bucket_name: parse_toml_string("bucket_name", bucket_name)?,
-                    bucket_region: parse_toml_string("bucket_region", bucket_region)?,
-                    prefix_in_bucket: toml
-                        .get("prefix_in_bucket")
-                        .map(|prefix_in_bucket| {
-                            parse_toml_string("prefix_in_bucket", prefix_in_bucket)
-                        })
-                        .transpose()?,
-                    endpoint,
-                    concurrency_limit,
-                    max_keys_per_list_response,
-                })
-            }
-            (_, _, _, Some(_), None) => {
-                bail!("'container_name' option is mandatory if 'container_region' is given ")
-            }
-            (_, _, _, None, Some(_)) => {
-                bail!("'container_name' option is mandatory if 'container_region' is given ")
-            }
-            (None, None, None, Some(container_name), Some(container_region)) => {
-                RemoteStorageKind::AzureContainer(AzureConfig {
-                    container_name: parse_toml_string("container_name", container_name)?,
-                    container_region: parse_toml_string("container_region", container_region)?,
-                    prefix_in_container: toml
-                        .get("prefix_in_container")
-                        .map(|prefix_in_container| {
-                            parse_toml_string("prefix_in_container", prefix_in_container)
-                        })
-                        .transpose()?,
-                    concurrency_limit,
-                    max_keys_per_list_response,
-                })
-            }
-            (Some(local_path), None, None, None, None) => RemoteStorageKind::LocalFs(
-                Utf8PathBuf::from(parse_toml_string("local_path", local_path)?),
-            ),
-            (Some(_), Some(_), ..) => {
-                bail!("'local_path' and 'bucket_name' are mutually exclusive")
-            }
-            (Some(_), _, _, Some(_), Some(_)) => {
-                bail!("local_path and 'container_name' are mutually exclusive")
-            }
-        };
-
-        Ok(Some(RemoteStorageConfig { storage }))
-    }
-}
-
-// Helper functions to parse a toml Item
-fn parse_optional_integer<I, E>(name: &str, item: &toml_edit::Item) -> anyhow::Result<Option<I>>
-where
-    I: TryFrom<i64, Error = E>,
-    E: std::error::Error + Send + Sync + 'static,
-{
-    let toml_integer = match item.get(name) {
-        Some(item) => item
-            .as_integer()
-            .with_context(|| format!("configure option {name} is not an integer"))?,
-        None => return Ok(None),
-    };
-
-    I::try_from(toml_integer)
-        .map(Some)
-        .with_context(|| format!("configure option {name} is too large"))
-}
-
-fn parse_toml_string(name: &str, item: &Item) -> anyhow::Result<String> {
-    let s = item
-        .as_str()
-        .with_context(|| format!("configure option {name} is not a string"))?;
-    Ok(s.to_string())
 }
 
 struct ConcurrencyLimiter {
@@ -712,6 +623,7 @@ impl ConcurrencyLimiter {
             RequestKind::Delete => &self.write,
             RequestKind::Copy => &self.write,
             RequestKind::TimeTravel => &self.write,
+            RequestKind::Head => &self.read,
         }
     }
 

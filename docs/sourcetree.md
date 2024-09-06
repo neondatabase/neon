@@ -7,6 +7,11 @@ Below you will find a brief overview of each subdir in the source tree in alphab
 Neon storage broker, providing messaging between safekeepers and pageservers.
 [storage_broker.md](./storage_broker.md)
 
+`storage_controller`:
+
+Neon storage controller, manages a cluster of pageservers and exposes an API that enables
+managing a many-sharded tenant as a single entity.
+
 `/control_plane`:
 
 Local control plane.

@@ -16,8 +16,15 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  check-permissions:
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'run-no-ci') }}
+    uses: ./.github/workflows/check-permissions.yml
+    with:
+      github-event-name: ${{ github.event_name}}
+
   actionlint:
-    runs-on: ubuntu-latest
+    needs: [ check-permissions ]
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - uses: reviewdog/action-actionlint@v1
@@ -29,3 +36,16 @@ jobs:
           fail_on_error: true
           filter_mode: nofilter
           level: error
+
+      - name: Disallow 'ubuntu-latest' runners
+        run: |
+          PAT='^\s*runs-on:.*-latest'
+          if grep -ERq $PAT .github/workflows; then
+            grep -ERl $PAT .github/workflows |\
+            while read -r f
+            do
+              l=$(grep -nE $PAT $f | awk -F: '{print $1}' | head -1)
+              echo "::error file=$f,line=$l::Please use 'ubuntu-22.04' instead of 'ubuntu-latest'"
+            done
+            exit 1
+          fi

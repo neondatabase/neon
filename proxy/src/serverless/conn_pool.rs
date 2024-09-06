@@ -1,17 +1,8 @@
-use anyhow::Context;
-use async_trait::async_trait;
 use dashmap::DashMap;
 use futures::{future::poll_fn, Future};
-use metrics::{register_int_counter_pair, IntCounterPair, IntCounterPairGuard};
-use once_cell::sync::Lazy;
 use parking_lot::RwLock;
-use pbkdf2::{
-    password_hash::{PasswordHashString, PasswordHasher, PasswordVerifier, SaltString},
-    Params, Pbkdf2,
-};
-use prometheus::{exponential_buckets, register_histogram, Histogram};
 use rand::Rng;
-use smol_str::SmolStr;
+use smallvec::SmallVec;
 use std::{collections::HashMap, pin::pin, sync::Arc, sync::Weak, time::Duration};
 use std::{
     fmt,
@@ -21,40 +12,49 @@ use std::{
     ops::Deref,
     sync::atomic::{self, AtomicUsize},
 };
-use tokio::time::{self, Instant};
-use tokio_postgres::{AsyncMessage, ReadyForQueryStatus};
+use tokio::time::Instant;
+use tokio_postgres::tls::NoTlsStream;
+use tokio_postgres::{AsyncMessage, ReadyForQueryStatus, Socket};
+use tokio_util::sync::CancellationToken;
 
+use crate::console::messages::{ColdStartInfo, MetricsAuxInfo};
+use crate::metrics::{HttpEndpointPoolsGuard, Metrics};
+use crate::usage_metrics::{Ids, MetricCounter, USAGE_METRICS};
 use crate::{
-    auth::{self, backend::ComputeUserInfo, check_peer_addr_is_in_list},
-    console::{self, messages::MetricsAuxInfo},
-    context::RequestMonitoring,
-    metrics::NUM_DB_CONNECTIONS_GAUGE,
-    proxy::connect_compute::ConnectMechanism,
-    usage_metrics::{Ids, MetricCounter, USAGE_METRICS},
-    DbName, EndpointCacheKey, RoleName,
+    auth::backend::ComputeUserInfo, context::RequestMonitoring, DbName, EndpointCacheKey, RoleName,
 };
-use crate::{compute, config};
 
 use tracing::{debug, error, warn, Span};
 use tracing::{info, info_span, Instrument};
 
-pub const APP_NAME: SmolStr = SmolStr::new_inline("/sql_over_http");
+use super::backend::HttpConnError;
 
 #[derive(Debug, Clone)]
-pub struct ConnInfo {
-    pub user_info: ComputeUserInfo,
-    pub dbname: DbName,
-    pub password: SmolStr,
+pub(crate) struct ConnInfo {
+    pub(crate) user_info: ComputeUserInfo,
+    pub(crate) dbname: DbName,
+    pub(crate) auth: AuthData,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum AuthData {
+    Password(SmallVec<[u8; 16]>),
+    Jwt(String),
 }
 
 impl ConnInfo {
     // hm, change to hasher to avoid cloning?
-    pub fn db_and_user(&self) -> (DbName, RoleName) {
+    pub(crate) fn db_and_user(&self) -> (DbName, RoleName) {
         (self.dbname.clone(), self.user_info.user.clone())
     }
 
-    pub fn endpoint_cache_key(&self) -> EndpointCacheKey {
-        self.user_info.endpoint_cache_key()
+    pub(crate) fn endpoint_cache_key(&self) -> Option<EndpointCacheKey> {
+        // We don't want to cache http connections for ephemeral endpoints.
+        if self.user_info.options.is_ephemeral() {
+            None
+        } else {
+            Some(self.user_info.endpoint_cache_key())
+        }
     }
 }
 
@@ -72,39 +72,55 @@ impl fmt::Display for ConnInfo {
     }
 }
 
-struct ConnPoolEntry {
-    conn: ClientInner,
+struct ConnPoolEntry<C: ClientInnerExt> {
+    conn: ClientInner<C>,
     _last_access: std::time::Instant,
 }
 
 // Per-endpoint connection pool, (dbname, username) -> DbUserConnPool
 // Number of open connections is limited by the `max_conns_per_endpoint`.
-pub struct EndpointConnPool {
-    pools: HashMap<(DbName, RoleName), DbUserConnPool>,
+pub(crate) struct EndpointConnPool<C: ClientInnerExt> {
+    pools: HashMap<(DbName, RoleName), DbUserConnPool<C>>,
     total_conns: usize,
     max_conns: usize,
-    _guard: IntCounterPairGuard,
+    _guard: HttpEndpointPoolsGuard<'static>,
+    global_connections_count: Arc<AtomicUsize>,
+    global_pool_size_max_conns: usize,
 }
 
-impl EndpointConnPool {
-    fn get_conn_entry(&mut self, db_user: (DbName, RoleName)) -> Option<ConnPoolEntry> {
+impl<C: ClientInnerExt> EndpointConnPool<C> {
+    fn get_conn_entry(&mut self, db_user: (DbName, RoleName)) -> Option<ConnPoolEntry<C>> {
         let Self {
-            pools, total_conns, ..
+            pools,
+            total_conns,
+            global_connections_count,
+            ..
         } = self;
-        pools
-            .get_mut(&db_user)
-            .and_then(|pool_entries| pool_entries.get_conn_entry(total_conns))
+        pools.get_mut(&db_user).and_then(|pool_entries| {
+            pool_entries.get_conn_entry(total_conns, global_connections_count.clone())
+        })
     }
 
     fn remove_client(&mut self, db_user: (DbName, RoleName), conn_id: uuid::Uuid) -> bool {
         let Self {
-            pools, total_conns, ..
+            pools,
+            total_conns,
+            global_connections_count,
+            ..
         } = self;
         if let Some(pool) = pools.get_mut(&db_user) {
             let old_len = pool.conns.len();
             pool.conns.retain(|conn| conn.conn.conn_id != conn_id);
             let new_len = pool.conns.len();
             let removed = old_len - new_len;
+            if removed > 0 {
+                global_connections_count.fetch_sub(removed, atomic::Ordering::Relaxed);
+                Metrics::get()
+                    .proxy
+                    .http_pool_opened_connections
+                    .get_metric()
+                    .dec_by(removed as i64);
+            }
             *total_conns -= removed;
             removed > 0
         } else {
@@ -112,12 +128,22 @@ impl EndpointConnPool {
         }
     }
 
-    fn put(pool: &RwLock<Self>, conn_info: &ConnInfo, client: ClientInner) -> anyhow::Result<()> {
+    fn put(pool: &RwLock<Self>, conn_info: &ConnInfo, client: ClientInner<C>) {
         let conn_id = client.conn_id;
 
-        if client.inner.is_closed() {
+        if client.is_closed() {
             info!(%conn_id, "pool: throwing away connection '{conn_info}' because connection is closed");
-            return Ok(());
+            return;
+        }
+        let global_max_conn = pool.read().global_pool_size_max_conns;
+        if pool
+            .read()
+            .global_connections_count
+            .load(atomic::Ordering::Relaxed)
+            >= global_max_conn
+        {
+            info!(%conn_id, "pool: throwing away connection '{conn_info}' because pool is full");
+            return;
         }
 
         // return connection to the pool
@@ -127,18 +153,23 @@ impl EndpointConnPool {
             let mut pool = pool.write();
 
             if pool.total_conns < pool.max_conns {
-                // we create this db-user entry in get, so it should not be None
-                if let Some(pool_entries) = pool.pools.get_mut(&conn_info.db_and_user()) {
-                    pool_entries.conns.push(ConnPoolEntry {
-                        conn: client,
-                        _last_access: std::time::Instant::now(),
-                    });
+                let pool_entries = pool.pools.entry(conn_info.db_and_user()).or_default();
+                pool_entries.conns.push(ConnPoolEntry {
+                    conn: client,
+                    _last_access: std::time::Instant::now(),
+                });
 
-                    returned = true;
-                    per_db_size = pool_entries.conns.len();
+                returned = true;
+                per_db_size = pool_entries.conns.len();
 
-                    pool.total_conns += 1;
-                }
+                pool.total_conns += 1;
+                pool.global_connections_count
+                    .fetch_add(1, atomic::Ordering::Relaxed);
+                Metrics::get()
+                    .proxy
+                    .http_pool_opened_connections
+                    .get_metric()
+                    .inc();
             }
 
             pool.total_conns
@@ -150,54 +181,72 @@ impl EndpointConnPool {
         } else {
             info!(%conn_id, "pool: throwing away connection '{conn_info}' because pool is full, total_conns={total_conns}");
         }
-
-        Ok(())
     }
 }
 
-/// 4096 is the number of rounds that SCRAM-SHA-256 recommends.
-/// It's not the 600,000 that OWASP recommends... but our passwords are high entropy anyway.
-///
-/// Still takes 1.4ms to hash on my hardware.
-/// We don't want to ruin the latency improvements of using the pool by making password verification take too long
-const PARAMS: Params = Params {
-    rounds: 4096,
-    output_length: 32,
-};
-
-#[derive(Default)]
-pub struct DbUserConnPool {
-    conns: Vec<ConnPoolEntry>,
-    password_hash: Option<PasswordHashString>,
+impl<C: ClientInnerExt> Drop for EndpointConnPool<C> {
+    fn drop(&mut self) {
+        if self.total_conns > 0 {
+            self.global_connections_count
+                .fetch_sub(self.total_conns, atomic::Ordering::Relaxed);
+            Metrics::get()
+                .proxy
+                .http_pool_opened_connections
+                .get_metric()
+                .dec_by(self.total_conns as i64);
+        }
+    }
 }
 
-impl DbUserConnPool {
-    fn clear_closed_clients(&mut self, conns: &mut usize) {
+pub(crate) struct DbUserConnPool<C: ClientInnerExt> {
+    conns: Vec<ConnPoolEntry<C>>,
+}
+
+impl<C: ClientInnerExt> Default for DbUserConnPool<C> {
+    fn default() -> Self {
+        Self { conns: Vec::new() }
+    }
+}
+
+impl<C: ClientInnerExt> DbUserConnPool<C> {
+    fn clear_closed_clients(&mut self, conns: &mut usize) -> usize {
         let old_len = self.conns.len();
 
-        self.conns.retain(|conn| !conn.conn.inner.is_closed());
+        self.conns.retain(|conn| !conn.conn.is_closed());
 
         let new_len = self.conns.len();
         let removed = old_len - new_len;
         *conns -= removed;
+        removed
     }
 
-    fn get_conn_entry(&mut self, conns: &mut usize) -> Option<ConnPoolEntry> {
-        self.clear_closed_clients(conns);
+    fn get_conn_entry(
+        &mut self,
+        conns: &mut usize,
+        global_connections_count: Arc<AtomicUsize>,
+    ) -> Option<ConnPoolEntry<C>> {
+        let mut removed = self.clear_closed_clients(conns);
         let conn = self.conns.pop();
         if conn.is_some() {
             *conns -= 1;
+            removed += 1;
         }
+        global_connections_count.fetch_sub(removed, atomic::Ordering::Relaxed);
+        Metrics::get()
+            .proxy
+            .http_pool_opened_connections
+            .get_metric()
+            .dec_by(removed as i64);
         conn
     }
 }
 
-pub struct GlobalConnPool {
+pub(crate) struct GlobalConnPool<C: ClientInnerExt> {
     // endpoint -> per-endpoint connection pool
     //
     // That should be a fairly conteded map, so return reference to the per-endpoint
     // pool as early as possible and release the lock.
-    global_pool: DashMap<EndpointCacheKey, Arc<RwLock<EndpointConnPool>>>,
+    global_pool: DashMap<EndpointCacheKey, Arc<RwLock<EndpointConnPool<C>>>>,
 
     /// Number of endpoint-connection pools
     ///
@@ -206,7 +255,10 @@ pub struct GlobalConnPool {
     /// It's only used for diagnostics.
     global_pool_size: AtomicUsize,
 
-    proxy_config: &'static crate::config::ProxyConfig,
+    /// Total number of connections in the pool
+    global_connections_count: Arc<AtomicUsize>,
+
+    config: &'static crate::config::HttpConfig,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -224,45 +276,39 @@ pub struct GlobalConnPoolOptions {
     pub idle_timeout: Duration,
 
     pub opt_in: bool,
+
+    // Total number of connections in the pool.
+    pub max_total_conns: usize,
 }
 
-pub static GC_LATENCY: Lazy<Histogram> = Lazy::new(|| {
-    register_histogram!(
-        "proxy_http_pool_reclaimation_lag_seconds",
-        "Time it takes to reclaim unused connection pools",
-        // 1us -> 65ms
-        exponential_buckets(1e-6, 2.0, 16).unwrap(),
-    )
-    .unwrap()
-});
-
-pub static ENDPOINT_POOLS: Lazy<IntCounterPair> = Lazy::new(|| {
-    register_int_counter_pair!(
-        "proxy_http_pool_endpoints_registered_total",
-        "Number of endpoints we have registered pools for",
-        "proxy_http_pool_endpoints_unregistered_total",
-        "Number of endpoints we have unregistered pools for",
-    )
-    .unwrap()
-});
-
-impl GlobalConnPool {
-    pub fn new(config: &'static crate::config::ProxyConfig) -> Arc<Self> {
-        let shards = config.http_config.pool_options.pool_shards;
+impl<C: ClientInnerExt> GlobalConnPool<C> {
+    pub(crate) fn new(config: &'static crate::config::HttpConfig) -> Arc<Self> {
+        let shards = config.pool_options.pool_shards;
         Arc::new(Self {
             global_pool: DashMap::with_shard_amount(shards),
             global_pool_size: AtomicUsize::new(0),
-            proxy_config: config,
+            config,
+            global_connections_count: Arc::new(AtomicUsize::new(0)),
         })
     }
 
-    pub fn shutdown(&self) {
+    #[cfg(test)]
+    pub(crate) fn get_global_connections_count(&self) -> usize {
+        self.global_connections_count
+            .load(atomic::Ordering::Relaxed)
+    }
+
+    pub(crate) fn get_idle_timeout(&self) -> Duration {
+        self.config.pool_options.idle_timeout
+    }
+
+    pub(crate) fn shutdown(&self) {
         // drops all strong references to endpoint-pools
         self.global_pool.clear();
     }
 
-    pub async fn gc_worker(&self, mut rng: impl Rng) {
-        let epoch = self.proxy_config.http_config.pool_options.gc_epoch;
+    pub(crate) async fn gc_worker(&self, mut rng: impl Rng) {
+        let epoch = self.config.pool_options.gc_epoch;
         let mut interval = tokio::time::interval(epoch / (self.global_pool.shards().len()) as u32);
         loop {
             interval.tick().await;
@@ -278,8 +324,12 @@ impl GlobalConnPool {
         // acquire a random shard lock
         let mut shard = self.global_pool.shards()[shard].write();
 
-        let timer = GC_LATENCY.start_timer();
+        let timer = Metrics::get()
+            .proxy
+            .http_pool_reclaimation_lag_seconds
+            .start_timer();
         let current_len = shard.len();
+        let mut clients_removed = 0;
         shard.retain(|endpoint, x| {
             // if the current endpoint pool is unique (no other strong or weak references)
             // then it is currently not in use by any connections.
@@ -289,9 +339,9 @@ impl GlobalConnPool {
                 } = pool.get_mut();
 
                 // ensure that closed clients are removed
-                pools
-                    .iter_mut()
-                    .for_each(|(_, db_pool)| db_pool.clear_closed_clients(total_conns));
+                for db_pool in pools.values_mut() {
+                    clients_removed += db_pool.clear_closed_clients(total_conns);
+                }
 
                 // we only remove this pool if it has no active connections
                 if *total_conns == 0 {
@@ -302,10 +352,24 @@ impl GlobalConnPool {
 
             true
         });
+
         let new_len = shard.len();
         drop(shard);
-        timer.observe_duration();
+        timer.observe();
 
+        // Do logging outside of the lock.
+        if clients_removed > 0 {
+            let size = self
+                .global_connections_count
+                .fetch_sub(clients_removed, atomic::Ordering::Relaxed)
+                - clients_removed;
+            Metrics::get()
+                .proxy
+                .http_pool_opened_connections
+                .get_metric()
+                .dec_by(clients_removed as i64);
+            info!("pool: performed global pool gc. removed {clients_removed} clients, total number of clients in pool is {size}");
+        }
         let removed = current_len - new_len;
 
         if removed > 0 {
@@ -317,134 +381,52 @@ impl GlobalConnPool {
         }
     }
 
-    pub async fn get(
+    pub(crate) fn get(
         self: &Arc<Self>,
-        ctx: &mut RequestMonitoring,
-        conn_info: ConnInfo,
-        force_new: bool,
-    ) -> anyhow::Result<Client> {
-        let mut client: Option<ClientInner> = None;
+        ctx: &RequestMonitoring,
+        conn_info: &ConnInfo,
+    ) -> Result<Option<Client<C>>, HttpConnError> {
+        let mut client: Option<ClientInner<C>> = None;
+        let Some(endpoint) = conn_info.endpoint_cache_key() else {
+            return Ok(None);
+        };
 
-        let mut hash_valid = false;
-        let mut endpoint_pool = Weak::new();
-        if !force_new {
-            let pool = self.get_or_create_endpoint_pool(&conn_info.endpoint_cache_key());
-            endpoint_pool = Arc::downgrade(&pool);
-            let mut hash = None;
-
-            // find a pool entry by (dbname, username) if exists
-            {
-                let pool = pool.read();
-                if let Some(pool_entries) = pool.pools.get(&conn_info.db_and_user()) {
-                    if !pool_entries.conns.is_empty() {
-                        hash = pool_entries.password_hash.clone();
-                    }
-                }
-            }
-
-            // a connection exists in the pool, verify the password hash
-            if let Some(hash) = hash {
-                let pw = conn_info.password.clone();
-                let validate = tokio::task::spawn_blocking(move || {
-                    Pbkdf2.verify_password(pw.as_bytes(), &hash.password_hash())
-                })
-                .await?;
-
-                // if the hash is invalid, don't error
-                // we will continue with the regular connection flow
-                if validate.is_ok() {
-                    hash_valid = true;
-                    if let Some(entry) = pool.write().get_conn_entry(conn_info.db_and_user()) {
-                        client = Some(entry.conn)
-                    }
-                }
-            }
+        let endpoint_pool = self.get_or_create_endpoint_pool(&endpoint);
+        if let Some(entry) = endpoint_pool
+            .write()
+            .get_conn_entry(conn_info.db_and_user())
+        {
+            client = Some(entry.conn);
         }
+        let endpoint_pool = Arc::downgrade(&endpoint_pool);
 
         // ok return cached connection if found and establish a new one otherwise
-        let new_client = if let Some(client) = client {
-            ctx.set_project(client.aux.clone());
-            if client.inner.is_closed() {
-                let conn_id = uuid::Uuid::new_v4();
-                info!(%conn_id, "pool: cached connection '{conn_info}' is closed, opening a new one");
-                connect_to_compute(
-                    self.proxy_config,
-                    ctx,
-                    &conn_info,
-                    conn_id,
-                    endpoint_pool.clone(),
-                )
-                .await
-            } else {
-                info!("pool: reusing connection '{conn_info}'");
-                client.session.send(ctx.session_id)?;
-                tracing::Span::current().record(
-                    "pid",
-                    &tracing::field::display(client.inner.get_process_id()),
-                );
-                ctx.latency_timer.pool_hit();
-                ctx.latency_timer.success();
-                return Ok(Client::new(client, conn_info, endpoint_pool).await);
+        if let Some(client) = client {
+            if client.is_closed() {
+                info!("pool: cached connection '{conn_info}' is closed, opening a new one");
+                return Ok(None);
             }
-        } else {
-            let conn_id = uuid::Uuid::new_v4();
-            info!(%conn_id, "pool: opening a new connection '{conn_info}'");
-            connect_to_compute(
-                self.proxy_config,
-                ctx,
-                &conn_info,
-                conn_id,
-                endpoint_pool.clone(),
-            )
-            .await
-        };
-        if let Ok(client) = &new_client {
+            tracing::Span::current().record("conn_id", tracing::field::display(client.conn_id));
             tracing::Span::current().record(
                 "pid",
-                &tracing::field::display(client.inner.get_process_id()),
+                tracing::field::display(client.inner.get_process_id()),
             );
+            info!(
+                cold_start_info = ColdStartInfo::HttpPoolHit.as_str(),
+                "pool: reusing connection '{conn_info}'"
+            );
+            client.session.send(ctx.session_id())?;
+            ctx.set_cold_start_info(ColdStartInfo::HttpPoolHit);
+            ctx.success();
+            return Ok(Some(Client::new(client, conn_info.clone(), endpoint_pool)));
         }
-
-        match &new_client {
-            // clear the hash. it's no longer valid
-            // TODO: update tokio-postgres fork to allow access to this error kind directly
-            Err(err)
-                if hash_valid && err.to_string().contains("password authentication failed") =>
-            {
-                let pool = self.get_or_create_endpoint_pool(&conn_info.endpoint_cache_key());
-                let mut pool = pool.write();
-                if let Some(entry) = pool.pools.get_mut(&conn_info.db_and_user()) {
-                    entry.password_hash = None;
-                }
-            }
-            // new password is valid and we should insert/update it
-            Ok(_) if !force_new && !hash_valid => {
-                let pw = conn_info.password.clone();
-                let new_hash = tokio::task::spawn_blocking(move || {
-                    let salt = SaltString::generate(rand::rngs::OsRng);
-                    Pbkdf2
-                        .hash_password_customized(pw.as_bytes(), None, None, PARAMS, &salt)
-                        .map(|s| s.serialize())
-                })
-                .await??;
-
-                let pool = self.get_or_create_endpoint_pool(&conn_info.endpoint_cache_key());
-                let mut pool = pool.write();
-                pool.pools
-                    .entry(conn_info.db_and_user())
-                    .or_default()
-                    .password_hash = Some(new_hash);
-            }
-            _ => {}
-        }
-        let new_client = new_client?;
-        Ok(Client::new(new_client, conn_info, endpoint_pool).await)
+        Ok(None)
     }
 
     fn get_or_create_endpoint_pool(
-        &self,
+        self: &Arc<Self>,
         endpoint: &EndpointCacheKey,
-    ) -> Arc<RwLock<EndpointConnPool>> {
+    ) -> Arc<RwLock<EndpointConnPool<C>>> {
         // fast path
         if let Some(pool) = self.global_pool.get(endpoint) {
             return pool.clone();
@@ -454,12 +436,10 @@ impl GlobalConnPool {
         let new_pool = Arc::new(RwLock::new(EndpointConnPool {
             pools: HashMap::new(),
             total_conns: 0,
-            max_conns: self
-                .proxy_config
-                .http_config
-                .pool_options
-                .max_conns_per_endpoint,
-            _guard: ENDPOINT_POOLS.guard(),
+            max_conns: self.config.pool_options.max_conns_per_endpoint,
+            _guard: Metrics::get().proxy.http_endpoint_pools.guard(),
+            global_connections_count: self.global_connections_count.clone(),
+            global_pool_size_max_conns: self.config.pool_options.max_total_conns,
         }));
 
         // find or create a pool for this endpoint
@@ -488,279 +468,218 @@ impl GlobalConnPool {
     }
 }
 
-struct TokioMechanism<'a> {
-    pool: Weak<RwLock<EndpointConnPool>>,
-    conn_info: &'a ConnInfo,
+pub(crate) fn poll_client<C: ClientInnerExt>(
+    global_pool: Arc<GlobalConnPool<C>>,
+    ctx: &RequestMonitoring,
+    conn_info: ConnInfo,
+    client: C,
+    mut connection: tokio_postgres::Connection<Socket, NoTlsStream>,
     conn_id: uuid::Uuid,
-    idle: Duration,
-}
-
-#[async_trait]
-impl ConnectMechanism for TokioMechanism<'_> {
-    type Connection = ClientInner;
-    type ConnectError = tokio_postgres::Error;
-    type Error = anyhow::Error;
-
-    async fn connect_once(
-        &self,
-        ctx: &mut RequestMonitoring,
-        node_info: &console::CachedNodeInfo,
-        timeout: time::Duration,
-    ) -> Result<Self::Connection, Self::ConnectError> {
-        connect_to_compute_once(
-            ctx,
-            node_info,
-            self.conn_info,
-            timeout,
-            self.conn_id,
-            self.pool.clone(),
-            self.idle,
-        )
-        .await
-    }
-
-    fn update_connect_config(&self, _config: &mut compute::ConnCfg) {}
-}
-
-// Wake up the destination if needed. Code here is a bit involved because
-// we reuse the code from the usual proxy and we need to prepare few structures
-// that this code expects.
-#[tracing::instrument(fields(pid = tracing::field::Empty), skip_all)]
-async fn connect_to_compute(
-    config: &config::ProxyConfig,
-    ctx: &mut RequestMonitoring,
-    conn_info: &ConnInfo,
-    conn_id: uuid::Uuid,
-    pool: Weak<RwLock<EndpointConnPool>>,
-) -> anyhow::Result<ClientInner> {
-    ctx.set_application(Some(APP_NAME));
-    let backend = config
-        .auth_backend
-        .as_ref()
-        .map(|_| conn_info.user_info.clone());
-
-    if !config.disable_ip_check_for_http {
-        let allowed_ips = backend.get_allowed_ips(ctx).await?;
-        if !check_peer_addr_is_in_list(&ctx.peer_addr, &allowed_ips) {
-            return Err(auth::AuthError::ip_address_not_allowed().into());
-        }
-    }
-    let node_info = backend
-        .wake_compute(ctx)
-        .await?
-        .context("missing cache entry from wake_compute")?;
-
-    ctx.set_project(node_info.aux.clone());
-
-    crate::proxy::connect_compute::connect_to_compute(
-        ctx,
-        &TokioMechanism {
-            conn_id,
-            conn_info,
-            pool,
-            idle: config.http_config.pool_options.idle_timeout,
-        },
-        node_info,
-        &backend,
-    )
-    .await
-}
-
-async fn connect_to_compute_once(
-    ctx: &mut RequestMonitoring,
-    node_info: &console::CachedNodeInfo,
-    conn_info: &ConnInfo,
-    timeout: time::Duration,
-    conn_id: uuid::Uuid,
-    pool: Weak<RwLock<EndpointConnPool>>,
-    idle: Duration,
-) -> Result<ClientInner, tokio_postgres::Error> {
-    let mut config = (*node_info.config).clone();
-    let mut session = ctx.session_id;
-
-    let (client, mut connection) = config
-        .user(&conn_info.user_info.user)
-        .password(&*conn_info.password)
-        .dbname(&conn_info.dbname)
-        .connect_timeout(timeout)
-        .connect(tokio_postgres::NoTls)
-        .await?;
-
-    let conn_gauge = NUM_DB_CONNECTIONS_GAUGE
-        .with_label_values(&[ctx.protocol])
-        .guard();
-
-    tracing::Span::current().record("pid", &tracing::field::display(client.get_process_id()));
-
-    let (tx, mut rx) = tokio::sync::watch::channel(session);
+    aux: MetricsAuxInfo,
+) -> Client<C> {
+    let conn_gauge = Metrics::get().proxy.db_connections.guard(ctx.protocol());
+    let mut session_id = ctx.session_id();
+    let (tx, mut rx) = tokio::sync::watch::channel(session_id);
 
     let span = info_span!(parent: None, "connection", %conn_id);
+    let cold_start_info = ctx.cold_start_info();
     span.in_scope(|| {
-        info!(%conn_info, %session, "new connection");
+        info!(cold_start_info = cold_start_info.as_str(), %conn_info, %session_id, "new connection");
     });
+    let pool = match conn_info.endpoint_cache_key() {
+        Some(endpoint) => Arc::downgrade(&global_pool.get_or_create_endpoint_pool(&endpoint)),
+        None => Weak::new(),
+    };
+    let pool_clone = pool.clone();
 
     let db_user = conn_info.db_and_user();
+    let idle = global_pool.get_idle_timeout();
+    let cancel = CancellationToken::new();
+    let cancelled = cancel.clone().cancelled_owned();
+
     tokio::spawn(
-        async move {
-            let _conn_gauge = conn_gauge;
-            let mut idle_timeout = pin!(tokio::time::sleep(idle));
-            poll_fn(move |cx| {
-                if matches!(rx.has_changed(), Ok(true)) {
-                    session = *rx.borrow_and_update();
-                    info!(%session, "changed session");
+    async move {
+        let _conn_gauge = conn_gauge;
+        let mut idle_timeout = pin!(tokio::time::sleep(idle));
+        let mut cancelled = pin!(cancelled);
+
+        poll_fn(move |cx| {
+            if cancelled.as_mut().poll(cx).is_ready() {
+                info!("connection dropped");
+                return Poll::Ready(())
+            }
+
+            match rx.has_changed() {
+                Ok(true) => {
+                    session_id = *rx.borrow_and_update();
+                    info!(%session_id, "changed session");
                     idle_timeout.as_mut().reset(Instant::now() + idle);
                 }
-
-                // 5 minute idle connection timeout
-                if idle_timeout.as_mut().poll(cx).is_ready() {
-                    idle_timeout.as_mut().reset(Instant::now() + idle);
-                    info!("connection idle");
-                    if let Some(pool) = pool.clone().upgrade() {
-                        // remove client from pool - should close the connection if it's idle.
-                        // does nothing if the client is currently checked-out and in-use
-                        if pool.write().remove_client(db_user.clone(), conn_id) {
-                            info!("idle connection removed");
-                        }
-                    }
+                Err(_) => {
+                    info!("connection dropped");
+                    return Poll::Ready(())
                 }
+                _ => {}
+            }
 
-                loop {
-                    let message = ready!(connection.poll_message(cx));
-
-                    match message {
-                        Some(Ok(AsyncMessage::Notice(notice))) => {
-                            info!(%session, "notice: {}", notice);
-                        }
-                        Some(Ok(AsyncMessage::Notification(notif))) => {
-                            warn!(%session, pid = notif.process_id(), channel = notif.channel(), "notification received");
-                        }
-                        Some(Ok(_)) => {
-                            warn!(%session, "unknown message");
-                        }
-                        Some(Err(e)) => {
-                            error!(%session, "connection error: {}", e);
-                            break
-                        }
-                        None => {
-                            info!("connection closed");
-                            break
-                        }
-                    }
-                }
-
-                // remove from connection pool
+            // 5 minute idle connection timeout
+            if idle_timeout.as_mut().poll(cx).is_ready() {
+                idle_timeout.as_mut().reset(Instant::now() + idle);
+                info!("connection idle");
                 if let Some(pool) = pool.clone().upgrade() {
+                    // remove client from pool - should close the connection if it's idle.
+                    // does nothing if the client is currently checked-out and in-use
                     if pool.write().remove_client(db_user.clone(), conn_id) {
-                        info!("closed connection removed");
+                        info!("idle connection removed");
                     }
                 }
+            }
 
-                Poll::Ready(())
-            }).await;
+            loop {
+                let message = ready!(connection.poll_message(cx));
 
-        }
-        .instrument(span)
-    );
+                match message {
+                    Some(Ok(AsyncMessage::Notice(notice))) => {
+                        info!(%session_id, "notice: {}", notice);
+                    }
+                    Some(Ok(AsyncMessage::Notification(notif))) => {
+                        warn!(%session_id, pid = notif.process_id(), channel = notif.channel(), "notification received");
+                    }
+                    Some(Ok(_)) => {
+                        warn!(%session_id, "unknown message");
+                    }
+                    Some(Err(e)) => {
+                        error!(%session_id, "connection error: {}", e);
+                        break
+                    }
+                    None => {
+                        info!("connection closed");
+                        break
+                    }
+                }
+            }
 
-    Ok(ClientInner {
+            // remove from connection pool
+            if let Some(pool) = pool.clone().upgrade() {
+                if pool.write().remove_client(db_user.clone(), conn_id) {
+                    info!("closed connection removed");
+                }
+            }
+
+            Poll::Ready(())
+        }).await;
+
+    }
+    .instrument(span));
+    let inner = ClientInner {
         inner: client,
         session: tx,
-        aux: node_info.aux.clone(),
+        cancel,
+        aux,
         conn_id,
-    })
+    };
+    Client::new(inner, conn_info, pool_clone)
 }
 
-struct ClientInner {
-    inner: tokio_postgres::Client,
+struct ClientInner<C: ClientInnerExt> {
+    inner: C,
     session: tokio::sync::watch::Sender<uuid::Uuid>,
+    cancel: CancellationToken,
     aux: MetricsAuxInfo,
     conn_id: uuid::Uuid,
 }
 
-impl Client {
-    pub fn metrics(&self) -> Arc<MetricCounter> {
+impl<C: ClientInnerExt> Drop for ClientInner<C> {
+    fn drop(&mut self) {
+        // on client drop, tell the conn to shut down
+        self.cancel.cancel();
+    }
+}
+
+pub(crate) trait ClientInnerExt: Sync + Send + 'static {
+    fn is_closed(&self) -> bool;
+    fn get_process_id(&self) -> i32;
+}
+
+impl ClientInnerExt for tokio_postgres::Client {
+    fn is_closed(&self) -> bool {
+        self.is_closed()
+    }
+    fn get_process_id(&self) -> i32 {
+        self.get_process_id()
+    }
+}
+
+impl<C: ClientInnerExt> ClientInner<C> {
+    pub(crate) fn is_closed(&self) -> bool {
+        self.inner.is_closed()
+    }
+}
+
+impl<C: ClientInnerExt> Client<C> {
+    pub(crate) fn metrics(&self) -> Arc<MetricCounter> {
         let aux = &self.inner.as_ref().unwrap().aux;
         USAGE_METRICS.register(Ids {
-            endpoint_id: aux.endpoint_id.clone(),
-            branch_id: aux.branch_id.clone(),
+            endpoint_id: aux.endpoint_id,
+            branch_id: aux.branch_id,
         })
     }
 }
 
-pub struct Client {
-    conn_id: uuid::Uuid,
+pub(crate) struct Client<C: ClientInnerExt> {
     span: Span,
-    inner: Option<ClientInner>,
+    inner: Option<ClientInner<C>>,
     conn_info: ConnInfo,
-    pool: Weak<RwLock<EndpointConnPool>>,
+    pool: Weak<RwLock<EndpointConnPool<C>>>,
 }
 
-pub struct Discard<'a> {
-    conn_id: uuid::Uuid,
+pub(crate) struct Discard<'a, C: ClientInnerExt> {
     conn_info: &'a ConnInfo,
-    pool: &'a mut Weak<RwLock<EndpointConnPool>>,
+    pool: &'a mut Weak<RwLock<EndpointConnPool<C>>>,
 }
 
-impl Client {
-    pub(self) async fn new(
-        inner: ClientInner,
+impl<C: ClientInnerExt> Client<C> {
+    pub(self) fn new(
+        inner: ClientInner<C>,
         conn_info: ConnInfo,
-        pool: Weak<RwLock<EndpointConnPool>>,
+        pool: Weak<RwLock<EndpointConnPool<C>>>,
     ) -> Self {
         Self {
-            conn_id: inner.conn_id,
             inner: Some(inner),
             span: Span::current(),
             conn_info,
             pool,
         }
     }
-    pub fn inner(&mut self) -> (&mut tokio_postgres::Client, Discard<'_>) {
+    pub(crate) fn inner(&mut self) -> (&mut C, Discard<'_, C>) {
         let Self {
             inner,
             pool,
-            conn_id,
             conn_info,
             span: _,
         } = self;
-        (
-            &mut inner
-                .as_mut()
-                .expect("client inner should not be removed")
-                .inner,
-            Discard {
-                pool,
-                conn_info,
-                conn_id: *conn_id,
-            },
-        )
-    }
-
-    pub fn check_idle(&mut self, status: ReadyForQueryStatus) {
-        self.inner().1.check_idle(status)
-    }
-    pub fn discard(&mut self) {
-        self.inner().1.discard()
+        let inner = inner.as_mut().expect("client inner should not be removed");
+        (&mut inner.inner, Discard { conn_info, pool })
     }
 }
 
-impl Discard<'_> {
-    pub fn check_idle(&mut self, status: ReadyForQueryStatus) {
+impl<C: ClientInnerExt> Discard<'_, C> {
+    pub(crate) fn check_idle(&mut self, status: ReadyForQueryStatus) {
         let conn_info = &self.conn_info;
         if status != ReadyForQueryStatus::Idle && std::mem::take(self.pool).strong_count() > 0 {
-            info!(conn_id = %self.conn_id, "pool: throwing away connection '{conn_info}' because connection is not idle")
+            info!("pool: throwing away connection '{conn_info}' because connection is not idle");
         }
     }
-    pub fn discard(&mut self) {
+    pub(crate) fn discard(&mut self) {
         let conn_info = &self.conn_info;
         if std::mem::take(self.pool).strong_count() > 0 {
-            info!(conn_id = %self.conn_id, "pool: throwing away connection '{conn_info}' because connection is potentially in a broken state")
+            info!("pool: throwing away connection '{conn_info}' because connection is potentially in a broken state");
         }
     }
 }
 
-impl Deref for Client {
-    type Target = tokio_postgres::Client;
+impl<C: ClientInnerExt> Deref for Client<C> {
+    type Target = C;
 
     fn deref(&self) -> &Self::Target {
         &self
@@ -771,8 +690,8 @@ impl Deref for Client {
     }
 }
 
-impl Drop for Client {
-    fn drop(&mut self) {
+impl<C: ClientInnerExt> Client<C> {
+    fn do_drop(&mut self) -> Option<impl FnOnce()> {
         let conn_info = self.conn_info.clone();
         let client = self
             .inner
@@ -781,10 +700,174 @@ impl Drop for Client {
         if let Some(conn_pool) = std::mem::take(&mut self.pool).upgrade() {
             let current_span = self.span.clone();
             // return connection to the pool
-            tokio::task::spawn_blocking(move || {
+            return Some(move || {
                 let _span = current_span.enter();
-                let _ = EndpointConnPool::put(&conn_pool, &conn_info, client);
+                EndpointConnPool::put(&conn_pool, &conn_info, client);
             });
         }
+        None
+    }
+}
+
+impl<C: ClientInnerExt> Drop for Client<C> {
+    fn drop(&mut self) {
+        if let Some(drop) = self.do_drop() {
+            tokio::task::spawn_blocking(drop);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{mem, sync::atomic::AtomicBool};
+
+    use crate::{
+        proxy::NeonOptions, serverless::cancel_set::CancelSet, BranchId, EndpointId, ProjectId,
+    };
+
+    use super::*;
+
+    struct MockClient(Arc<AtomicBool>);
+    impl MockClient {
+        fn new(is_closed: bool) -> Self {
+            MockClient(Arc::new(is_closed.into()))
+        }
+    }
+    impl ClientInnerExt for MockClient {
+        fn is_closed(&self) -> bool {
+            self.0.load(atomic::Ordering::Relaxed)
+        }
+        fn get_process_id(&self) -> i32 {
+            0
+        }
+    }
+
+    fn create_inner() -> ClientInner<MockClient> {
+        create_inner_with(MockClient::new(false))
+    }
+
+    fn create_inner_with(client: MockClient) -> ClientInner<MockClient> {
+        ClientInner {
+            inner: client,
+            session: tokio::sync::watch::Sender::new(uuid::Uuid::new_v4()),
+            cancel: CancellationToken::new(),
+            aux: MetricsAuxInfo {
+                endpoint_id: (&EndpointId::from("endpoint")).into(),
+                project_id: (&ProjectId::from("project")).into(),
+                branch_id: (&BranchId::from("branch")).into(),
+                cold_start_info: crate::console::messages::ColdStartInfo::Warm,
+            },
+            conn_id: uuid::Uuid::new_v4(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_pool() {
+        let _ = env_logger::try_init();
+        let config = Box::leak(Box::new(crate::config::HttpConfig {
+            accept_websockets: false,
+            pool_options: GlobalConnPoolOptions {
+                max_conns_per_endpoint: 2,
+                gc_epoch: Duration::from_secs(1),
+                pool_shards: 2,
+                idle_timeout: Duration::from_secs(1),
+                opt_in: false,
+                max_total_conns: 3,
+            },
+            cancel_set: CancelSet::new(0),
+            client_conn_threshold: u64::MAX,
+        }));
+        let pool = GlobalConnPool::new(config);
+        let conn_info = ConnInfo {
+            user_info: ComputeUserInfo {
+                user: "user".into(),
+                endpoint: "endpoint".into(),
+                options: NeonOptions::default(),
+            },
+            dbname: "dbname".into(),
+            auth: AuthData::Password("password".as_bytes().into()),
+        };
+        let ep_pool = Arc::downgrade(
+            &pool.get_or_create_endpoint_pool(&conn_info.endpoint_cache_key().unwrap()),
+        );
+        {
+            let mut client = Client::new(create_inner(), conn_info.clone(), ep_pool.clone());
+            assert_eq!(0, pool.get_global_connections_count());
+            client.inner().1.discard();
+            // Discard should not add the connection from the pool.
+            assert_eq!(0, pool.get_global_connections_count());
+        }
+        {
+            let mut client = Client::new(create_inner(), conn_info.clone(), ep_pool.clone());
+            client.do_drop().unwrap()();
+            mem::forget(client); // drop the client
+            assert_eq!(1, pool.get_global_connections_count());
+        }
+        {
+            let mut closed_client = Client::new(
+                create_inner_with(MockClient::new(true)),
+                conn_info.clone(),
+                ep_pool.clone(),
+            );
+            closed_client.do_drop().unwrap()();
+            mem::forget(closed_client); // drop the client
+                                        // The closed client shouldn't be added to the pool.
+            assert_eq!(1, pool.get_global_connections_count());
+        }
+        let is_closed: Arc<AtomicBool> = Arc::new(false.into());
+        {
+            let mut client = Client::new(
+                create_inner_with(MockClient(is_closed.clone())),
+                conn_info.clone(),
+                ep_pool.clone(),
+            );
+            client.do_drop().unwrap()();
+            mem::forget(client); // drop the client
+
+            // The client should be added to the pool.
+            assert_eq!(2, pool.get_global_connections_count());
+        }
+        {
+            let mut client = Client::new(create_inner(), conn_info, ep_pool);
+            client.do_drop().unwrap()();
+            mem::forget(client); // drop the client
+
+            // The client shouldn't be added to the pool. Because the ep-pool is full.
+            assert_eq!(2, pool.get_global_connections_count());
+        }
+
+        let conn_info = ConnInfo {
+            user_info: ComputeUserInfo {
+                user: "user".into(),
+                endpoint: "endpoint-2".into(),
+                options: NeonOptions::default(),
+            },
+            dbname: "dbname".into(),
+            auth: AuthData::Password("password".as_bytes().into()),
+        };
+        let ep_pool = Arc::downgrade(
+            &pool.get_or_create_endpoint_pool(&conn_info.endpoint_cache_key().unwrap()),
+        );
+        {
+            let mut client = Client::new(create_inner(), conn_info.clone(), ep_pool.clone());
+            client.do_drop().unwrap()();
+            mem::forget(client); // drop the client
+            assert_eq!(3, pool.get_global_connections_count());
+        }
+        {
+            let mut client = Client::new(create_inner(), conn_info.clone(), ep_pool.clone());
+            client.do_drop().unwrap()();
+            mem::forget(client); // drop the client
+
+            // The client shouldn't be added to the pool. Because the global pool is full.
+            assert_eq!(3, pool.get_global_connections_count());
+        }
+
+        is_closed.store(true, atomic::Ordering::Relaxed);
+        // Do gc for all shards.
+        pool.gc(0);
+        pool.gc(1);
+        // Closed client should be removed from the pool.
+        assert_eq!(2, pool.get_global_connections_count());
     }
 }

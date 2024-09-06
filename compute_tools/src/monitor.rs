@@ -17,7 +17,11 @@ const MONITOR_CHECK_INTERVAL: Duration = Duration::from_millis(500);
 // should be handled gracefully.
 fn watch_compute_activity(compute: &ComputeNode) {
     // Suppose that `connstr` doesn't change
-    let connstr = compute.connstr.as_str();
+    let mut connstr = compute.connstr.clone();
+    connstr
+        .query_pairs_mut()
+        .append_pair("application_name", "compute_activity_monitor");
+    let connstr = connstr.as_str();
 
     // During startup and configuration we connect to every Postgres database,
     // but we don't want to count this as some user activity. So wait until
@@ -134,6 +138,34 @@ fn watch_compute_activity(compute: &ComputeNode) {
                     },
                     Err(e) => {
                         warn!("failed to get list of walsenders: {:?}", e);
+                        continue;
+                    }
+                }
+                //
+                // Don't suspend compute if there is an active logical replication subscription
+                //
+                // `where pid is not null` – to filter out read only computes and subscription on branches
+                //
+                let logical_subscriptions_query =
+                    "select count(*) from pg_stat_subscription where pid is not null;";
+                match cli.query_one(logical_subscriptions_query, &[]) {
+                    Ok(row) => match row.try_get::<&str, i64>("count") {
+                        Ok(num_subscribers) => {
+                            if num_subscribers > 0 {
+                                compute.update_last_active(Some(Utc::now()));
+                                continue;
+                            }
+                        }
+                        Err(e) => {
+                            warn!("failed to parse `pg_stat_subscription` count: {:?}", e);
+                            continue;
+                        }
+                    },
+                    Err(e) => {
+                        warn!(
+                            "failed to get list of active logical replication subscriptions: {:?}",
+                            e
+                        );
                         continue;
                     }
                 }

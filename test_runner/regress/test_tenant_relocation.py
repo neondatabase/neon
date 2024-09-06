@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 import pytest
+from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import Endpoint, NeonEnvBuilder, NeonPageserver
 from fixtures.pageserver.http import PageserverHttpClient
@@ -14,17 +15,13 @@ from fixtures.pageserver.utils import (
     assert_tenant_state,
     wait_for_last_record_lsn,
     wait_for_upload,
-    wait_tenant_status_404,
 )
-from fixtures.port_distributor import PortDistributor
 from fixtures.remote_storage import (
     LocalFsStorage,
     RemoteStorageKind,
 )
-from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import (
     query_scalar,
-    subprocess_capture,
     wait_until,
 )
 
@@ -157,10 +154,7 @@ def switch_pg_to_new_pageserver(
     timeline_to_detach_local_path = origin_ps.timeline_dir(tenant_id, timeline_id)
     files_before_detach = os.listdir(timeline_to_detach_local_path)
     assert (
-        "metadata" in files_before_detach
-    ), f"Regular timeline {timeline_to_detach_local_path} should have the metadata file, but got: {files_before_detach}"
-    assert (
-        len(files_before_detach) >= 2
+        len(files_before_detach) >= 1
     ), f"Regular timeline {timeline_to_detach_local_path} should have at least one layer file, but got {files_before_detach}"
 
     return timeline_to_detach_local_path
@@ -187,20 +181,14 @@ def post_migration_check(endpoint: Endpoint, sum_before_migration: int, old_loca
         # A minor migration involves no storage breaking changes.
         # It is done by attaching the tenant to a new pageserver.
         "minor",
-        # A major migration involves exporting a postgres datadir
-        # basebackup and importing it into the new pageserver.
-        # This kind of migration can tolerate breaking changes
-        # to storage format
-        "major",
+        # In the unlikely and unfortunate event that we have to break
+        # the storage format, extend this test with the param below.
+        # "major",
     ],
 )
 @pytest.mark.parametrize("with_load", ["with_load", "without_load"])
 def test_tenant_relocation(
     neon_env_builder: NeonEnvBuilder,
-    port_distributor: PortDistributor,
-    test_output_dir: Path,
-    neon_binpath: Path,
-    base_dir: Path,
     method: str,
     with_load: str,
 ):
@@ -213,12 +201,8 @@ def test_tenant_relocation(
 
     env.pageservers[0].allowed_errors.extend(
         [
-            # FIXME: Is this expected?
-            ".*init_tenant_mgr: marking .* as locally complete, while it doesnt exist in remote index.*",
             # Needed for detach polling on the original pageserver
             f".*NotFound: tenant {tenant_id}.*",
-            # We will dual-attach in this test, so stale generations are expected
-            ".*Dropped remote consistent LSN updates.*",
         ]
     )
 
@@ -304,40 +288,7 @@ def test_tenant_relocation(
         current_lsn=current_lsn_second,
     )
 
-    # Migrate either by attaching from s3 or import/export basebackup
-    if method == "major":
-        cmd = [
-            "poetry",
-            "run",
-            "python",
-            str(base_dir / "scripts/export_import_between_pageservers.py"),
-            "--tenant-id",
-            str(tenant_id),
-            "--from-host",
-            "localhost",
-            "--from-http-port",
-            str(origin_http.port),
-            "--from-pg-port",
-            str(origin_ps.service_port.pg),
-            "--to-host",
-            "localhost",
-            "--to-http-port",
-            str(destination_http.port),
-            "--to-pg-port",
-            str(destination_ps.service_port.pg),
-            "--pg-distrib-dir",
-            str(neon_env_builder.pg_distrib_dir),
-            "--work-dir",
-            str(test_output_dir),
-            "--tmp-pg-port",
-            str(port_distributor.get_port()),
-        ]
-        subprocess_capture(test_output_dir, cmd, check=True)
-
-        destination_ps.allowed_errors.append(
-            ".*ignored .* unexpected bytes after the tar archive.*"
-        )
-    elif method == "minor":
+    if method == "minor":
         # call to attach timeline to new pageserver
         destination_ps.tenant_attach(tenant_id)
 
@@ -393,9 +344,6 @@ def test_tenant_relocation(
     # that all the data is there to be sure that old pageserver
     # is no longer involved, and if it is, we will see the error
     origin_http.tenant_detach(tenant_id)
-
-    # Wait a little, so that the detach operation has time to finish.
-    wait_tenant_status_404(origin_http, tenant_id, iterations=100, interval=1)
 
     post_migration_check(ep_main, 500500, old_local_path_main)
     post_migration_check(ep_second, 1001000, old_local_path_second)
@@ -500,7 +448,7 @@ def test_emergency_relocate_with_branches_slow_replay(
         assert cur.fetchall() == [("before pause",), ("after pause",)]
 
     # Sanity check that the failpoint was reached
-    assert env.pageserver.log_contains('failpoint "wal-ingest-logical-message-sleep": sleep done')
+    env.pageserver.assert_log_contains('failpoint "wal-ingest-logical-message-sleep": sleep done')
     assert time.time() - before_attach_time > 5
 
     # Clean up
@@ -637,7 +585,7 @@ def test_emergency_relocate_with_branches_createdb(
         assert query_scalar(cur, "SELECT count(*) FROM test_migrate_one") == 200
 
     # Sanity check that the failpoint was reached
-    assert env.pageserver.log_contains('failpoint "wal-ingest-logical-message-sleep": sleep done')
+    env.pageserver.assert_log_contains('failpoint "wal-ingest-logical-message-sleep": sleep done')
     assert time.time() - before_attach_time > 5
 
     # Clean up

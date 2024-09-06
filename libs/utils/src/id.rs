@@ -249,8 +249,10 @@ macro_rules! id_newtype {
     };
 }
 
-/// Neon timeline IDs are different from PostgreSQL timeline
-/// IDs. They serve a similar purpose though: they differentiate
+/// Neon timeline ID.
+///
+/// They are different from PostgreSQL timeline
+/// IDs, but serve a similar purpose: they differentiate
 /// between different "histories" of the same cluster.  However,
 /// PostgreSQL timeline IDs are a bit cumbersome, because they are only
 /// 32-bits wide, and they must be in ascending order in any given
@@ -301,17 +303,6 @@ impl TryFrom<Option<&str>> for TimelineId {
 pub struct TenantId(Id);
 
 id_newtype!(TenantId);
-
-/// Neon Connection Id identifies long-lived connections (for example a pagestream
-/// connection with the page_service). Is used for better logging and tracing
-///
-/// NOTE: It (de)serializes as an array of hex bytes, so the string representation would look
-/// like `[173,80,132,115,129,226,72,254,170,201,135,108,199,26,228,24]`.
-/// See [`Id`] for alternative ways to serialize it.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
-pub struct ConnectionId(Id);
-
-id_newtype!(ConnectionId);
 
 // A pair uniquely identifying Neon instance.
 #[derive(Debug, Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Hash, Serialize, Deserialize)]

@@ -3,7 +3,7 @@ use std::cmp::Ordering;
 use std::fmt;
 
 use postgres_ffi::pg_constants::GLOBALTABLESPACE_OID;
-use postgres_ffi::relfile_utils::forknumber_to_name;
+use postgres_ffi::relfile_utils::{forkname_to_number, forknumber_to_name, MAIN_FORKNUM};
 use postgres_ffi::Oid;
 
 ///
@@ -68,6 +68,57 @@ impl fmt::Display for RelTag {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum ParseRelTagError {
+    #[error("invalid forknum")]
+    InvalidForknum(#[source] std::num::ParseIntError),
+    #[error("missing triplet member {}", .0)]
+    MissingTripletMember(usize),
+    #[error("invalid triplet member {}", .0)]
+    InvalidTripletMember(usize, #[source] std::num::ParseIntError),
+}
+
+impl std::str::FromStr for RelTag {
+    type Err = ParseRelTagError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        use ParseRelTagError::*;
+
+        // FIXME: in postgres logs this separator is dot
+        // Example:
+        //     could not read block 2 in rel 1663/208101/2620.1 from page server at lsn 0/2431E6F0
+        // with a regex we could get this more painlessly
+        let (triplet, forknum) = match s.split_once('_').or_else(|| s.split_once('.')) {
+            Some((t, f)) => {
+                let forknum = forkname_to_number(Some(f));
+                let forknum = if let Ok(f) = forknum {
+                    f
+                } else {
+                    f.parse::<u8>().map_err(InvalidForknum)?
+                };
+
+                (t, Some(forknum))
+            }
+            None => (s, None),
+        };
+
+        let mut split = triplet
+            .splitn(3, '/')
+            .enumerate()
+            .map(|(i, s)| s.parse::<u32>().map_err(|e| InvalidTripletMember(i, e)));
+        let spcnode = split.next().ok_or(MissingTripletMember(0))??;
+        let dbnode = split.next().ok_or(MissingTripletMember(1))??;
+        let relnode = split.next().ok_or(MissingTripletMember(2))??;
+
+        Ok(RelTag {
+            spcnode,
+            forknum: forknum.unwrap_or(MAIN_FORKNUM),
+            dbnode,
+            relnode,
+        })
+    }
+}
+
 impl RelTag {
     pub fn to_segfile_name(&self, segno: u32) -> String {
         let mut name = if self.spcnode == GLOBALTABLESPACE_OID {
@@ -123,9 +174,12 @@ impl RelTag {
     PartialOrd,
     Ord,
     strum_macros::EnumIter,
+    strum_macros::FromRepr,
+    enum_map::Enum,
 )]
+#[repr(u8)]
 pub enum SlruKind {
-    Clog,
+    Clog = 0,
     MultiXactMembers,
     MultiXactOffsets,
 }

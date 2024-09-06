@@ -3,23 +3,27 @@
 
 import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, DefaultDict, Dict, Tuple
 
+import pytest
+from fixtures.common_types import Lsn
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
+    flush_ep_to_pageserver,
     last_flush_lsn_upload,
     wait_for_last_flush_lsn,
 )
-from fixtures.pageserver.http import PageserverHttpClient
+from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
 from fixtures.pageserver.utils import (
     assert_tenant_state,
     wait_for_last_record_lsn,
     wait_for_upload,
     wait_for_upload_queue_empty,
+    wait_until_tenant_active,
 )
-from fixtures.remote_storage import RemoteStorageKind
-from fixtures.types import Lsn
+from fixtures.remote_storage import RemoteStorageKind, S3Storage, s3_storage
 from fixtures.utils import query_scalar, wait_until
 
 
@@ -165,6 +169,10 @@ def test_ondemand_download_timetravel(neon_env_builder: NeonEnvBuilder):
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
 
+    ####
+    # Produce layers
+    ####
+
     lsns = []
 
     table_len = 10000
@@ -194,11 +202,28 @@ def test_ondemand_download_timetravel(neon_env_builder: NeonEnvBuilder):
         # run checkpoint manually to be sure that data landed in remote storage
         client.timeline_checkpoint(tenant_id, timeline_id)
 
-    ##### Stop the first pageserver instance, erase all its data
+    # prevent new WAL from being produced, wait for layers to reach remote storage
     env.endpoints.stop_all()
-
-    # wait until pageserver has successfully uploaded all the data to remote storage
+    for sk in env.safekeepers:
+        sk.stop()
+    # NB: the wait_for_upload returns as soon as remote_consistent_lsn == current_lsn.
+    # But the checkpoint also triggers a compaction
+    # => image layer generation =>
+    # => doesn't advance LSN
+    # => but we want the remote state to deterministic, so additionally, wait for upload queue to drain
     wait_for_upload(client, tenant_id, timeline_id, current_lsn)
+    wait_for_upload_queue_empty(pageserver_http, env.initial_tenant, timeline_id)
+    client.deletion_queue_flush(execute=True)
+    env.pageserver.stop()
+    env.pageserver.start()
+    # We've shut down the SKs, then restarted the PSes to sever all walreceiver connections;
+    # This means pageserver's remote_consistent_lsn is now frozen to whatever it was after the pageserver.stop() call.
+    wait_until_tenant_active(client, tenant_id)
+
+    ###
+    # Produce layers complete;
+    # Start the actual testing.
+    ###
 
     def get_api_current_physical_size():
         d = client.timeline_detail(tenant_id, timeline_id)
@@ -215,9 +240,7 @@ def test_ondemand_download_timetravel(neon_env_builder: NeonEnvBuilder):
     log.info(filled_size)
     assert filled_current_physical == filled_size, "we don't yet do layer eviction"
 
-    # Wait until generated image layers are uploaded to S3
-    wait_for_upload_queue_empty(pageserver_http, env.initial_tenant, timeline_id)
-
+    # Stop the first pageserver instance, erase all its data
     env.pageserver.stop()
 
     # remove all the layer files
@@ -312,6 +335,17 @@ def test_download_remote_layers_api(
         }
     )
 
+    # This test triggers layer download failures on demand. It is possible to modify the failpoint
+    # during a `Timeline::get_vectored` right between the vectored read and it's validation read.
+    # This means that one of the reads can fail while the other one succeeds and vice versa.
+    # TODO(vlad): Remove this block once the vectored read path validation goes away.
+    env.pageserver.allowed_errors.extend(
+        [
+            ".*initial_size_calculation.*Vectored get failed with downloading evicted layer file failed, but sequential get did not.*"
+            ".*initial_size_calculation.*Sequential get failed with downloading evicted layer file failed, but vectored get did not.*"
+        ]
+    )
+
     endpoint = env.endpoints.create_start("main")
 
     client = env.pageserver.http_client()
@@ -370,7 +404,7 @@ def test_download_remote_layers_api(
     env.pageserver.allowed_errors.extend(
         [
             ".*download failed: downloading evicted layer file failed.*",
-            f".*initial_size_calculation.*{tenant_id}.*{timeline_id}.*initial size calculation failed: downloading evicted layer file failed",
+            f".*initial_size_calculation.*{tenant_id}.*{timeline_id}.*initial size calculation failed.*downloading evicted layer file failed",
         ]
     )
 
@@ -497,7 +531,7 @@ def test_compaction_downloads_on_demand_without_image_creation(neon_env_builder:
 
         with endpoint.cursor() as cur:
             cur.execute("update a set id = -id")
-        wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
+        flush_ep_to_pageserver(env, endpoint, tenant_id, timeline_id)
         pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
 
     layers = pageserver_http.layer_map_info(tenant_id, timeline_id)
@@ -508,7 +542,6 @@ def test_compaction_downloads_on_demand_without_image_creation(neon_env_builder:
 
     for layer in layers.historic_layers:
         log.info(f"pre-compact:  {layer}")
-        assert layer.layer_file_size is not None, "we must know layer file sizes"
         layer_sizes += layer.layer_file_size
         pageserver_http.evict_layer(tenant_id, timeline_id, layer.layer_file_name)
 
@@ -547,6 +580,8 @@ def test_compaction_downloads_on_demand_with_image_creation(neon_env_builder: Ne
         "image_creation_threshold": 100,
         # repartitioning parameter, unused
         "compaction_target_size": 128 * 1024**2,
+        # Always check if a new image layer can be created
+        "image_layer_creation_check_threshold": 0,
         # pitr_interval and gc_horizon are not interesting because we dont run gc
     }
 
@@ -611,7 +646,8 @@ def test_compaction_downloads_on_demand_with_image_creation(neon_env_builder: Ne
     # threshold to expose image creation to downloading all of the needed
     # layers -- threshold of 2 would sound more reasonable, but keeping it as 1
     # to be less flaky
-    env.neon_cli.config_tenant(tenant_id, {"image_creation_threshold": "1"})
+    conf["image_creation_threshold"] = "1"
+    env.neon_cli.config_tenant(tenant_id, {k: str(v) for k, v in conf.items()})
 
     pageserver_http.timeline_compact(tenant_id, timeline_id)
     layers = pageserver_http.layer_map_info(tenant_id, timeline_id)
@@ -620,6 +656,203 @@ def test_compaction_downloads_on_demand_with_image_creation(neon_env_builder: Ne
         kinds_after[layer.kind] += 1
 
     assert dict(kinds_after) == {"Delta": 4, "Image": 1}
+
+
+def test_layer_download_cancelled_by_config_location(neon_env_builder: NeonEnvBuilder):
+    """
+    Demonstrates that tenant shutdown will cancel on-demand download and secondary doing warmup.
+    """
+    neon_env_builder.enable_pageserver_remote_storage(s3_storage())
+
+    # turn off background tasks so that they don't interfere with the downloads
+    env = neon_env_builder.init_start(
+        initial_tenant_conf={
+            "gc_period": "0s",
+            "compaction_period": "0s",
+        }
+    )
+    client = env.pageserver.http_client()
+    failpoint = "before-downloading-layer-stream-pausable"
+    client.configure_failpoints((failpoint, "pause"))
+
+    env.pageserver.allowed_errors.extend(
+        [
+            ".*downloading failed, possibly for shutdown.*",
+        ]
+    )
+
+    info = client.layer_map_info(env.initial_tenant, env.initial_timeline)
+    assert len(info.delta_layers()) == 1
+
+    layer = info.delta_layers()[0]
+
+    client.tenant_heatmap_upload(env.initial_tenant)
+
+    # evict the initdb layer so we can download it
+    client.evict_layer(env.initial_tenant, env.initial_timeline, layer.layer_file_name)
+
+    with ThreadPoolExecutor(max_workers=2) as exec:
+        download = exec.submit(
+            client.download_layer,
+            env.initial_tenant,
+            env.initial_timeline,
+            layer.layer_file_name,
+        )
+
+        _, offset = wait_until(
+            20, 0.5, lambda: env.pageserver.assert_log_contains(f"at failpoint {failpoint}")
+        )
+
+        location_conf = {"mode": "Detached", "tenant_conf": {}}
+        # assume detach removes the layers
+        detach = exec.submit(client.tenant_location_conf, env.initial_tenant, location_conf)
+
+        _, offset = wait_until(
+            20,
+            0.5,
+            lambda: env.pageserver.assert_log_contains(
+                "closing is taking longer than expected", offset
+            ),
+        )
+
+        client.configure_failpoints((failpoint, "off"))
+
+        with pytest.raises(
+            PageserverApiException, match="downloading failed, possibly for shutdown"
+        ):
+            download.result()
+
+        env.pageserver.assert_log_contains(".*downloading failed, possibly for shutdown.*")
+
+        detach.result()
+
+        client.configure_failpoints((failpoint, "pause"))
+
+        _, offset = wait_until(
+            20,
+            0.5,
+            lambda: env.pageserver.assert_log_contains(f"cfg failpoint: {failpoint} pause", offset),
+        )
+
+        location_conf = {
+            "mode": "Secondary",
+            "secondary_conf": {"warm": True},
+            "tenant_conf": {},
+        }
+
+        client.tenant_location_conf(env.initial_tenant, location_conf)
+
+        warmup = exec.submit(client.tenant_secondary_download, env.initial_tenant, wait_ms=30000)
+
+        _, offset = wait_until(
+            20,
+            0.5,
+            lambda: env.pageserver.assert_log_contains(f"at failpoint {failpoint}", offset),
+        )
+
+        client.configure_failpoints((failpoint, "off"))
+        location_conf = {"mode": "Detached", "tenant_conf": {}}
+        client.tenant_location_conf(env.initial_tenant, location_conf)
+
+        client.configure_failpoints((failpoint, "off"))
+
+        # here we have nothing in the log, but we see that the warmup and conf location update worked
+        warmup.result()
+
+
+def test_layer_download_timeouted(neon_env_builder: NeonEnvBuilder):
+    """
+    Pause using a pausable_failpoint longer than the client timeout to simulate the timeout happening.
+    """
+    # running this test is not reliable against REAL_S3, because operations can
+    # take longer than 1s we want to use as a timeout
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.MOCK_S3)
+    assert isinstance(neon_env_builder.pageserver_remote_storage, S3Storage)
+    neon_env_builder.pageserver_remote_storage.custom_timeout = "1s"
+
+    # turn off background tasks so that they don't interfere with the downloads
+    env = neon_env_builder.init_start(
+        initial_tenant_conf={
+            "gc_period": "0s",
+            "compaction_period": "0s",
+        }
+    )
+    client = env.pageserver.http_client()
+    failpoint = "before-downloading-layer-stream-pausable"
+    client.configure_failpoints((failpoint, "pause"))
+
+    info = client.layer_map_info(env.initial_tenant, env.initial_timeline)
+    assert len(info.delta_layers()) == 1
+
+    layer = info.delta_layers()[0]
+
+    client.tenant_heatmap_upload(env.initial_tenant)
+
+    # evict so we can download it
+    client.evict_layer(env.initial_tenant, env.initial_timeline, layer.layer_file_name)
+
+    with ThreadPoolExecutor(max_workers=2) as exec:
+        download = exec.submit(
+            client.download_layer,
+            env.initial_tenant,
+            env.initial_timeline,
+            layer.layer_file_name,
+        )
+
+        _, offset = wait_until(
+            20, 0.5, lambda: env.pageserver.assert_log_contains(f"at failpoint {failpoint}")
+        )
+        # ensure enough time while paused to trip the timeout
+        time.sleep(2)
+
+        client.configure_failpoints((failpoint, "off"))
+        download.result()
+
+        _, offset = env.pageserver.assert_log_contains(
+            ".*failed, will retry \\(attempt 0\\): timeout.*"
+        )
+        _, offset = env.pageserver.assert_log_contains(".*succeeded after [0-9]+ retries.*", offset)
+
+        client.evict_layer(env.initial_tenant, env.initial_timeline, layer.layer_file_name)
+
+        client.configure_failpoints((failpoint, "pause"))
+
+        # capture the next offset for a new synchronization with the failpoint
+        _, offset = wait_until(
+            20,
+            0.5,
+            lambda: env.pageserver.assert_log_contains(f"cfg failpoint: {failpoint} pause", offset),
+        )
+
+        location_conf = {
+            "mode": "Secondary",
+            "secondary_conf": {"warm": True},
+            "tenant_conf": {},
+        }
+
+        client.tenant_location_conf(
+            env.initial_tenant,
+            location_conf,
+        )
+
+        started = time.time()
+
+        warmup = exec.submit(client.tenant_secondary_download, env.initial_tenant, wait_ms=30000)
+        # ensure enough time while paused to trip the timeout
+        time.sleep(2)
+
+        client.configure_failpoints((failpoint, "off"))
+
+        warmup.result()
+
+        elapsed = time.time() - started
+
+        _, offset = env.pageserver.assert_log_contains(
+            ".*failed, will retry \\(attempt 0\\): timeout.*", offset
+        )
+        _, offset = env.pageserver.assert_log_contains(".*succeeded after [0-9]+ retries.*", offset)
+
+        assert elapsed < 30, "too long passed: {elapsed=}"
 
 
 def stringify(conf: Dict[str, Any]) -> Dict[str, str]:

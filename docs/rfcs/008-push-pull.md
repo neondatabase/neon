@@ -7,22 +7,22 @@ Here is a proposal about implementing push/pull mechanics between pageservers. W
 The origin represents connection info for some remote pageserver. Let's use here same commands as git uses except using explicit list subcommand (git uses `origin -v` for that).
 
 ```
-zenith origin add <name> <connection_uri>
-zenith origin list
-zenith origin remove <name>
+neon origin add <name> <connection_uri>
+neon origin list
+neon origin remove <name>
 ```
 
 Connection URI a string of form `postgresql://user:pass@hostname:port` (https://www.postgresql.org/docs/13/libpq-connect.html#id-1.7.3.8.3.6). We can start with libpq password auth and later add support for client certs or require ssh as transport or invent some other kind of transport.
 
-Behind the scenes, this commands may update toml file inside .zenith directory.
+Behind the scenes, this commands may update toml file inside .neon directory.
 
 ## Push
 
 ### Pushing branch
 
 ```
-zenith push mybranch cloudserver # push to eponymous branch in cloudserver
-zenith push mybranch cloudserver:otherbranch # push to a different branch in cloudserver
+neon push mybranch cloudserver # push to eponymous branch in cloudserver
+neon push mybranch cloudserver:otherbranch # push to a different branch in cloudserver
 ```
 
 Exact mechanics would be slightly different in the following situations:

@@ -15,6 +15,7 @@
 
 #include "neon_pgversioncompat.h"
 
+#include "access/slru.h"
 #include "access/xlogdefs.h"
 #include RELFILEINFO_HDR
 #include "lib/stringinfo.h"
@@ -34,6 +35,7 @@ typedef enum
 	T_NeonNblocksRequest,
 	T_NeonGetPageRequest,
 	T_NeonDbSizeRequest,
+	T_NeonGetSlruSegmentRequest,
 
 	/* pagestore -> pagestore_client */
 	T_NeonExistsResponse = 100,
@@ -41,6 +43,7 @@ typedef enum
 	T_NeonGetPageResponse,
 	T_NeonErrorResponse,
 	T_NeonDbSizeResponse,
+	T_NeonGetSlruSegmentResponse,
 } NeonMessageTag;
 
 /* base struct for c-style inheritance */
@@ -59,18 +62,39 @@ typedef struct
 														(errmsg(NEON_TAG "[shard %d] " fmt, shard_no, ##__VA_ARGS__), \
 														 errhidestmt(true), errhidecontext(true), errposition(0), internalerrposition(0)))
 
-/*
- * supertype of all the Neon*Request structs below
+/* SLRUs downloadable from page server */
+typedef enum {
+	SLRU_CLOG,
+	SLRU_MULTIXACT_MEMBERS,
+	SLRU_MULTIXACT_OFFSETS
+} SlruKind;
+
+/*--
+ * supertype of all the Neon*Request structs below.
  *
- * If 'latest' is true, we are requesting the latest page version, and 'lsn'
- * is just a hint to the server that we know there are no versions of the page
- * (or relation size, for exists/nblocks requests) later than the 'lsn'.
+ * All requests contain two LSNs:
+ *
+ * lsn:                request page (or relation size, etc) at this LSN
+ * not_modified_since: Hint that the page hasn't been modified between
+ *                     this LSN and the request LSN (`lsn`).
+ *
+ * To request the latest version of a page, you can use MAX_LSN as the request
+ * LSN.
+ *
+ * If you don't know any better, you can always set 'not_modified_since' equal
+ * to 'lsn', but providing a lower value can speed up processing the request
+ * in the pageserver, as it doesn't need to wait for the WAL to arrive, and it
+ * can skip traversing through recent layers which we know to not contain any
+ * versions for the requested page.
+ *
+ * These structs describe the V2 of these requests. (The old now-defunct V1
+ * protocol contained just one LSN and a boolean 'latest' flag.)
  */
 typedef struct
 {
 	NeonMessageTag tag;
-	bool		latest;			/* if true, request latest page version */
-	XLogRecPtr	lsn;			/* request page version @ this LSN */
+	XLogRecPtr	lsn;
+	XLogRecPtr	not_modified_since;
 } NeonRequest;
 
 typedef struct
@@ -100,6 +124,13 @@ typedef struct
 	ForkNumber	forknum;
 	BlockNumber blkno;
 } NeonGetPageRequest;
+
+typedef struct
+{
+	NeonRequest req;
+	SlruKind kind;
+	int      segno;
+} NeonGetSlruSegmentRequest;
 
 /* supertype of all the Neon*Response structs below */
 typedef struct
@@ -140,6 +171,14 @@ typedef struct
 												 * message */
 } NeonErrorResponse;
 
+typedef struct
+{
+	NeonMessageTag tag;
+	int         n_blocks;
+	char		data[BLCKSZ * SLRU_PAGES_PER_SEGMENT];
+} NeonGetSlruSegmentResponse;
+
+
 extern StringInfoData nm_pack_request(NeonRequest *msg);
 extern NeonResponse *nm_unpack_response(StringInfo s);
 extern char *nm_to_string(NeonMessage *msg);
@@ -155,6 +194,7 @@ typedef struct
 	bool		(*send) (shardno_t  shard_no, NeonRequest * request);
 	NeonResponse *(*receive) (shardno_t shard_no);
 	bool		(*flush) (shardno_t shard_no);
+	void        (*disconnect) (shardno_t shard_no);
 } page_server_api;
 
 extern void prefetch_on_ps_disconnect(void);
@@ -167,6 +207,7 @@ extern int	readahead_buffer_size;
 extern char *neon_timeline;
 extern char *neon_tenant;
 extern int32 max_cluster_size;
+extern int  neon_protocol_version;
 
 extern shardno_t get_shard_number(BufferTag* tag);
 
@@ -195,18 +236,50 @@ extern void neon_zeroextend(SMgrRelation reln, ForkNumber forknum,
 extern bool neon_prefetch(SMgrRelation reln, ForkNumber forknum,
 						  BlockNumber blocknum);
 
+/*
+ * LSN values associated with each request to the pageserver
+ */
+typedef struct
+{
+	/*
+	 * 'request_lsn' is the main value that determines which page version to
+	 * fetch.
+	 */
+	XLogRecPtr request_lsn;
+
+	/*
+	 * A hint to the pageserver that the requested page hasn't been modified
+	 * between this LSN and 'request_lsn'. That allows the pageserver to
+	 * return the page faster, without waiting for 'request_lsn' to arrive in
+	 * the pageserver, as long as 'not_modified_since' has arrived.
+	 */
+	XLogRecPtr not_modified_since;
+
+	/*
+	 * 'effective_request_lsn' is not included in the request that's sent to
+	 * the pageserver, but is used to keep track of the latest LSN of when the
+	 * request was made. In a standby server, this is always the same as the
+	 * 'request_lsn', but in the primary we use UINT64_MAX as the
+	 * 'request_lsn' to request the latest page version, so we need this
+	 * separate field to remember that latest LSN was when the request was
+	 * made. It's needed to manage prefetch request, to verify if the response
+	 * to a prefetched request is still valid.
+	 */
+	XLogRecPtr effective_request_lsn;
+} neon_request_lsns;
+
 #if PG_MAJORVERSION_NUM < 16
 extern void neon_read(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 					  char *buffer);
 extern PGDLLEXPORT void neon_read_at_lsn(NRelFileInfo rnode, ForkNumber forkNum, BlockNumber blkno,
-										 XLogRecPtr request_lsn, bool request_latest, char *buffer);
+										 neon_request_lsns request_lsns, char *buffer);
 extern void neon_write(SMgrRelation reln, ForkNumber forknum,
 					   BlockNumber blocknum, char *buffer, bool skipFsync);
 #else
 extern void neon_read(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 					  void *buffer);
 extern PGDLLEXPORT void neon_read_at_lsn(NRelFileInfo rnode, ForkNumber forkNum, BlockNumber blkno,
-										 XLogRecPtr request_lsn, bool request_latest, void *buffer);
+										 neon_request_lsns request_lsns, void *buffer);
 extern void neon_write(SMgrRelation reln, ForkNumber forknum,
 					   BlockNumber blocknum, const void *buffer, bool skipFsync);
 #endif

@@ -21,19 +21,25 @@
 //! redo Postgres process, but some records it can handle directly with
 //! bespoken Rust code.
 
+use std::time::Duration;
+use std::time::SystemTime;
+
 use pageserver_api::shard::ShardIdentity;
 use postgres_ffi::v14::nonrelfile_utils::clogpage_precedes;
 use postgres_ffi::v14::nonrelfile_utils::slru_may_delete_clogsegment;
+use postgres_ffi::TimestampTz;
 use postgres_ffi::{fsm_logical_to_physical, page_is_new, page_set_lsn};
 
 use anyhow::{bail, Context, Result};
 use bytes::{Buf, Bytes, BytesMut};
 use tracing::*;
 use utils::failpoint_support;
+use utils::rate_limit::RateLimit;
 
 use crate::context::RequestContext;
 use crate::metrics::WAL_INGEST;
 use crate::pgdatadir_mapping::{DatadirModification, Version};
+use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::tenant::PageReconstructError;
 use crate::tenant::Timeline;
 use crate::walrecord::*;
@@ -51,8 +57,16 @@ use utils::lsn::Lsn;
 
 pub struct WalIngest {
     shard: ShardIdentity,
+    pg_version: u32,
     checkpoint: CheckPoint,
     checkpoint_modified: bool,
+    warn_ingest_lag: WarnIngestLag,
+}
+
+struct WarnIngestLag {
+    lag_msg_ratelimit: RateLimit,
+    future_lsn_msg_ratelimit: RateLimit,
+    timestamp_invalid_msg_ratelimit: RateLimit,
 }
 
 impl WalIngest {
@@ -69,8 +83,14 @@ impl WalIngest {
 
         Ok(WalIngest {
             shard: *timeline.get_shard_identity(),
+            pg_version: timeline.pg_version,
             checkpoint,
             checkpoint_modified: false,
+            warn_ingest_lag: WarnIngestLag {
+                lag_msg_ratelimit: RateLimit::new(std::time::Duration::from_secs(10)),
+                future_lsn_msg_ratelimit: RateLimit::new(std::time::Duration::from_secs(10)),
+                timestamp_invalid_msg_ratelimit: RateLimit::new(std::time::Duration::from_secs(10)),
+            },
         })
     }
 
@@ -86,10 +106,9 @@ impl WalIngest {
     ///
     pub async fn ingest_record(
         &mut self,
-        recdata: Bytes,
+        decoded: DecodedWALRecord,
         lsn: Lsn,
         modification: &mut DatadirModification<'_>,
-        decoded: &mut DecodedWALRecord,
         ctx: &RequestContext,
     ) -> anyhow::Result<bool> {
         WAL_INGEST.records_received.inc();
@@ -97,7 +116,12 @@ impl WalIngest {
         let prev_len = modification.len();
 
         modification.set_lsn(lsn)?;
-        decode_wal_record(recdata, decoded, pg_version)?;
+
+        if decoded.is_dbase_create_copy(self.pg_version) {
+            // Records of this type should always be preceded by a commit(), as they
+            // rely on reading data pages back from the Timeline.
+            assert!(!modification.has_dirty_data_pages());
+        }
 
         let mut buf = decoded.record.clone();
         buf.advance(decoded.main_data_offset);
@@ -109,15 +133,17 @@ impl WalIngest {
             self.checkpoint_modified = true;
         }
 
+        failpoint_support::sleep_millis_async!("wal-ingest-record-sleep");
+
         match decoded.xl_rmid {
             pg_constants::RM_HEAP_ID | pg_constants::RM_HEAP2_ID => {
                 // Heap AM records need some special handling, because they modify VM pages
                 // without registering them with the standard mechanism.
-                self.ingest_heapam_record(&mut buf, modification, decoded, ctx)
+                self.ingest_heapam_record(&mut buf, modification, &decoded, ctx)
                     .await?;
             }
             pg_constants::RM_NEON_ID => {
-                self.ingest_neonrmgr_record(&mut buf, modification, decoded, ctx)
+                self.ingest_neonrmgr_record(&mut buf, modification, &decoded, ctx)
                     .await?;
             }
             // Handle other special record types
@@ -232,6 +258,7 @@ impl WalIngest {
                         modification,
                         &parsed_xact,
                         info == pg_constants::XLOG_XACT_COMMIT,
+                        decoded.origin_id,
                         ctx,
                     )
                     .await?;
@@ -244,6 +271,7 @@ impl WalIngest {
                         modification,
                         &parsed_xact,
                         info == pg_constants::XLOG_XACT_COMMIT_PREPARED,
+                        decoded.origin_id,
                         ctx,
                     )
                     .await?;
@@ -303,7 +331,7 @@ impl WalIngest {
             }
             pg_constants::RM_RELMAP_ID => {
                 let xlrec = XlRelmapUpdate::decode(&mut buf);
-                self.ingest_relmap_page(modification, &xlrec, decoded, ctx)
+                self.ingest_relmap_page(modification, &xlrec, &decoded, ctx)
                     .await?;
             }
             pg_constants::RM_XLOG_ID => {
@@ -334,6 +362,38 @@ impl WalIngest {
                     {
                         self.checkpoint.oldestXid = xlog_checkpoint.oldestXid;
                     }
+                    trace!(
+                        "xlog_checkpoint.oldestActiveXid={}, checkpoint.oldestActiveXid={}",
+                        xlog_checkpoint.oldestActiveXid,
+                        self.checkpoint.oldestActiveXid
+                    );
+
+                    // A shutdown checkpoint has `oldestActiveXid == InvalidTransactionid`,
+                    // because at shutdown, all in-progress transactions will implicitly
+                    // end. Postgres startup code knows that, and allows hot standby to start
+                    // immediately from a shutdown checkpoint.
+                    //
+                    // In Neon, Postgres hot standby startup always behaves as if starting from
+                    // an online checkpoint. It needs a valid `oldestActiveXid` value, so
+                    // instead of overwriting self.checkpoint.oldestActiveXid with
+                    // InvalidTransactionid from the checkpoint WAL record, update it to a
+                    // proper value, knowing that there are no in-progress transactions at this
+                    // point, except for prepared transactions.
+                    //
+                    // See also the neon code changes in the InitWalRecovery() function.
+                    if xlog_checkpoint.oldestActiveXid == pg_constants::INVALID_TRANSACTION_ID
+                        && info == pg_constants::XLOG_CHECKPOINT_SHUTDOWN
+                    {
+                        let mut oldest_active_xid = self.checkpoint.nextXid.value as u32;
+                        for xid in modification.tline.list_twophase_files(lsn, ctx).await? {
+                            if (xid.wrapping_sub(oldest_active_xid) as i32) < 0 {
+                                oldest_active_xid = xid;
+                            }
+                        }
+                        self.checkpoint.oldestActiveXid = oldest_active_xid;
+                    } else {
+                        self.checkpoint.oldestActiveXid = xlog_checkpoint.oldestActiveXid;
+                    }
 
                     // Write a new checkpoint key-value pair on every checkpoint record, even
                     // if nothing really changed. Not strictly required, but it seems nice to
@@ -346,7 +406,7 @@ impl WalIngest {
                 let info = decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
 
                 if info == pg_constants::XLOG_LOGICAL_MESSAGE {
-                    let xlrec = XlLogicalMessage::decode(&mut buf);
+                    let xlrec = crate::walrecord::XlLogicalMessage::decode(&mut buf);
                     let prefix = std::str::from_utf8(&buf[0..xlrec.prefix_size - 1])?;
                     let message = &buf[xlrec.prefix_size..xlrec.prefix_size + xlrec.message_size];
                     if prefix == "neon-test" {
@@ -358,6 +418,26 @@ impl WalIngest {
                     } else if let Some(path) = prefix.strip_prefix("neon-file:") {
                         modification.put_file(path, message, ctx).await?;
                     }
+                }
+            }
+            pg_constants::RM_STANDBY_ID => {
+                let info = decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
+                if info == pg_constants::XLOG_RUNNING_XACTS {
+                    let xlrec = crate::walrecord::XlRunningXacts::decode(&mut buf);
+                    self.checkpoint.oldestActiveXid = xlrec.oldest_running_xid;
+                    self.checkpoint_modified = true;
+                }
+            }
+            pg_constants::RM_REPLORIGIN_ID => {
+                let info = decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
+                if info == pg_constants::XLOG_REPLORIGIN_SET {
+                    let xlrec = crate::walrecord::XlReploriginSet::decode(&mut buf);
+                    modification
+                        .set_replorigin(xlrec.node_id, xlrec.remote_lsn)
+                        .await?
+                } else if info == pg_constants::XLOG_REPLORIGIN_DROP {
+                    let xlrec = crate::walrecord::XlReploriginDrop::decode(&mut buf);
+                    modification.drop_replorigin(xlrec.node_id).await?
                 }
             }
             _x => {
@@ -388,7 +468,7 @@ impl WalIngest {
             );
 
             if !key_is_local {
-                if self.shard.is_zero() {
+                if self.shard.is_shard_zero() {
                     // Shard 0 tracks relation sizes.  Although we will not store this block, we will observe
                     // its blkno in case it implicitly extends a relation.
                     self.observe_decoded_block(modification, blk, ctx).await?;
@@ -396,7 +476,7 @@ impl WalIngest {
 
                 continue;
             }
-            self.ingest_decoded_block(modification, lsn, decoded, blk, ctx)
+            self.ingest_decoded_block(modification, lsn, &decoded, blk, ctx)
                 .await?;
         }
 
@@ -411,6 +491,8 @@ impl WalIngest {
         // Note that at this point this record is only cached in the modification
         // until commit() is called to flush the data into the repository and update
         // the latest LSN.
+
+        modification.on_record_end();
 
         Ok(modification.len() > prev_len)
     }
@@ -459,7 +541,7 @@ impl WalIngest {
             && (decoded.xl_info == pg_constants::XLOG_FPI
                 || decoded.xl_info == pg_constants::XLOG_FPI_FOR_HINT)
             // compression of WAL is not yet supported: fall back to storing the original WAL record
-            && !postgres_ffi::bkpimage_is_compressed(blk.bimg_info, modification.tline.pg_version)?
+            && !postgres_ffi::bkpimage_is_compressed(blk.bimg_info, modification.tline.pg_version)
             // do not materialize null pages because them most likely be soon replaced with real data
             && blk.bimg_len != 0
         {
@@ -483,6 +565,7 @@ impl WalIngest {
                 page_set_lsn(&mut image, lsn)
             }
             assert_eq!(image.len(), BLCKSZ as usize);
+
             self.put_rel_page_image(modification, rel, blk.blkno, image.freeze(), ctx)
                 .await?;
         } else {
@@ -562,7 +645,7 @@ impl WalIngest {
                                 // the offsets array is omitted if XLOG_HEAP_INIT_PAGE is set
                                 0
                             } else {
-                                std::mem::size_of::<u16>() * xlrec.ntuples as usize
+                                size_of::<u16>() * xlrec.ntuples as usize
                             };
                         assert_eq!(offset_array_len, buf.remaining());
 
@@ -629,7 +712,7 @@ impl WalIngest {
                                 // the offsets array is omitted if XLOG_HEAP_INIT_PAGE is set
                                 0
                             } else {
-                                std::mem::size_of::<u16>() * xlrec.ntuples as usize
+                                size_of::<u16>() * xlrec.ntuples as usize
                             };
                         assert_eq!(offset_array_len, buf.remaining());
 
@@ -696,7 +779,7 @@ impl WalIngest {
                                 // the offsets array is omitted if XLOG_HEAP_INIT_PAGE is set
                                 0
                             } else {
-                                std::mem::size_of::<u16>() * xlrec.ntuples as usize
+                                size_of::<u16>() * xlrec.ntuples as usize
                             };
                         assert_eq!(offset_array_len, buf.remaining());
 
@@ -864,7 +947,7 @@ impl WalIngest {
                                 // the offsets array is omitted if XLOG_HEAP_INIT_PAGE is set
                                 0
                             } else {
-                                std::mem::size_of::<u16>() * xlrec.ntuples as usize
+                                size_of::<u16>() * xlrec.ntuples as usize
                             };
                         assert_eq!(offset_array_len, buf.remaining());
 
@@ -1019,7 +1102,7 @@ impl WalIngest {
 
             let nblocks = modification
                 .tline
-                .get_rel_size(src_rel, Version::Modified(modification), true, ctx)
+                .get_rel_size(src_rel, Version::Modified(modification), ctx)
                 .await?;
             let dst_rel = RelTag {
                 spcnode: tablespace_id,
@@ -1033,17 +1116,27 @@ impl WalIngest {
             // Copy content
             debug!("copying rel {} to {}, {} blocks", src_rel, dst_rel, nblocks);
             for blknum in 0..nblocks {
-                debug!("copying block {} from {} to {}", blknum, src_rel, dst_rel);
+                // Sharding:
+                //  - src and dst are always on the same shard, because they differ only by dbNode, and
+                //    dbNode is not included in the hash inputs for sharding.
+                //  - This WAL command is replayed on all shards, but each shard only copies the blocks
+                //    that belong to it.
+                let src_key = rel_block_to_key(src_rel, blknum);
+                if !self.shard.is_key_local(&src_key) {
+                    debug!(
+                        "Skipping non-local key {} during XLOG_DBASE_CREATE",
+                        src_key
+                    );
+                    continue;
+                }
+                debug!(
+                    "copying block {} from {} ({}) to {}",
+                    blknum, src_rel, src_key, dst_rel
+                );
 
                 let content = modification
                     .tline
-                    .get_rel_page_at_lsn(
-                        src_rel,
-                        blknum,
-                        Version::Modified(modification),
-                        true,
-                        ctx,
-                    )
+                    .get_rel_page_at_lsn(src_rel, blknum, Version::Modified(modification), ctx)
                     .await?;
                 modification.put_rel_page_image(dst_rel, blknum, content)?;
                 num_blocks_copied += 1;
@@ -1111,7 +1204,7 @@ impl WalIngest {
             if rec.blkno % pg_constants::SLOTS_PER_FSM_PAGE != 0 {
                 // Tail of last remaining FSM page has to be zeroed.
                 // We are not precise here and instead of digging in FSM bitmap format just clear the whole page.
-                modification.put_rel_page_image(rel, fsm_physical_page_no, ZERO_PAGE.clone())?;
+                modification.put_rel_page_image_zero(rel, fsm_physical_page_no);
                 fsm_physical_page_no += 1;
             }
             let nblocks = get_relsize(modification, rel, ctx).await?;
@@ -1133,7 +1226,7 @@ impl WalIngest {
             if rec.blkno % pg_constants::VM_HEAPBLOCKS_PER_PAGE != 0 {
                 // Tail of last remaining vm page has to be zeroed.
                 // We are not precise here and instead of digging in VM bitmap format just clear the whole page.
-                modification.put_rel_page_image(rel, vm_page_no, ZERO_PAGE.clone())?;
+                modification.put_rel_page_image_zero(rel, vm_page_no);
                 vm_page_no += 1;
             }
             let nblocks = get_relsize(modification, rel, ctx).await?;
@@ -1146,6 +1239,48 @@ impl WalIngest {
         Ok(())
     }
 
+    fn warn_on_ingest_lag(
+        &mut self,
+        conf: &crate::config::PageServerConf,
+        wal_timestmap: TimestampTz,
+    ) {
+        debug_assert_current_span_has_tenant_and_timeline_id();
+        let now = SystemTime::now();
+        let rate_limits = &mut self.warn_ingest_lag;
+        match try_from_pg_timestamp(wal_timestmap) {
+            Ok(ts) => {
+                match now.duration_since(ts) {
+                    Ok(lag) => {
+                        if lag > conf.wait_lsn_timeout {
+                            rate_limits.lag_msg_ratelimit.call2(|rate_limit_stats| {
+                                let lag = humantime::format_duration(lag);
+                                warn!(%rate_limit_stats, %lag, "ingesting record with timestamp lagging more than wait_lsn_timeout");
+                            })
+                        }
+                    },
+                    Err(e) => {
+                        let delta_t = e.duration();
+                        // determined by prod victoriametrics query: 1000 * (timestamp(node_time_seconds{neon_service="pageserver"}) - node_time_seconds)
+                        // => https://www.robustperception.io/time-metric-from-the-node-exporter/
+                        const IGNORED_DRIFT: Duration = Duration::from_millis(100);
+                        if delta_t > IGNORED_DRIFT {
+                            let delta_t = humantime::format_duration(delta_t);
+                            rate_limits.future_lsn_msg_ratelimit.call2(|rate_limit_stats| {
+                                warn!(%rate_limit_stats, %delta_t, "ingesting record with timestamp from future");
+                            })
+                        }
+                    }
+                };
+
+            }
+            Err(error) => {
+                rate_limits.timestamp_invalid_msg_ratelimit.call2(|rate_limit_stats| {
+                    warn!(%rate_limit_stats, %error, "ingesting record with invalid timestamp, cannot calculate lag and will fail find-lsn-for-timestamp type queries");
+                })
+            }
+        }
+    }
+
     /// Subroutine of ingest_record(), to handle an XLOG_XACT_* records.
     ///
     async fn ingest_xact_record(
@@ -1153,6 +1288,7 @@ impl WalIngest {
         modification: &mut DatadirModification<'_>,
         parsed: &XlXactParsedRecord,
         is_commit: bool,
+        origin_id: u16,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         // Record update of CLOG pages
@@ -1160,6 +1296,8 @@ impl WalIngest {
         let mut segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
         let mut rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
         let mut page_xids: Vec<TransactionId> = vec![parsed.xid];
+
+        self.warn_on_ingest_lag(modification.tline.conf, parsed.xact_time);
 
         for subxact in &parsed.subxacts {
             let subxact_pageno = subxact / pg_constants::CLOG_XACTS_PER_PAGE;
@@ -1211,12 +1349,17 @@ impl WalIngest {
                 };
                 if modification
                     .tline
-                    .get_rel_exists(rel, Version::Modified(modification), true, ctx)
+                    .get_rel_exists(rel, Version::Modified(modification), ctx)
                     .await?
                 {
                     self.put_rel_drop(modification, rel, ctx).await?;
                 }
             }
+        }
+        if origin_id != 0 {
+            modification
+                .set_replorigin(origin_id, parsed.origin_lsn)
+                .await?;
         }
         Ok(())
     }
@@ -1232,13 +1375,10 @@ impl WalIngest {
             xlrec.pageno, xlrec.oldest_xid, xlrec.oldest_xid_db
         );
 
-        // Here we treat oldestXid and oldestXidDB
-        // differently from postgres redo routines.
-        // In postgres checkpoint.oldestXid lags behind xlrec.oldest_xid
-        // until checkpoint happens and updates the value.
-        // Here we can use the most recent value.
-        // It's just an optimization, though and can be deleted.
-        // TODO Figure out if there will be any issues with replica.
+        // In Postgres, oldestXid and oldestXidDB are updated in memory when the CLOG is
+        // truncated, but a checkpoint record with the updated values isn't written until
+        // later. In Neon, a server can start at any LSN, not just on a checkpoint record,
+        // so we keep the oldestXid and oldestXidDB up-to-date.
         self.checkpoint.oldestXid = xlrec.oldest_xid;
         self.checkpoint.oldestXidDB = xlrec.oldest_xid_db;
         self.checkpoint_modified = true;
@@ -1339,24 +1479,47 @@ impl WalIngest {
             // Note: The multixact members can wrap around, even within one WAL record.
             offset = offset.wrapping_add(n_this_page as u32);
         }
-        if xlrec.mid >= self.checkpoint.nextMulti {
-            self.checkpoint.nextMulti = xlrec.mid + 1;
+        let next_offset = offset;
+        assert!(xlrec.moff.wrapping_add(xlrec.nmembers) == next_offset);
+
+        // Update next-multi-xid and next-offset
+        //
+        // NB: In PostgreSQL, the next-multi-xid stored in the control file is allowed to
+        // go to 0, and it's fixed up by skipping to FirstMultiXactId in functions that
+        // read it, like GetNewMultiXactId(). This is different from how nextXid is
+        // incremented! nextXid skips over < FirstNormalTransactionId when the the value
+        // is stored, so it's never 0 in a checkpoint.
+        //
+        // I don't know why it's done that way, it seems less error-prone to skip over 0
+        // when the value is stored rather than when it's read. But let's do it the same
+        // way here.
+        let next_multi_xid = xlrec.mid.wrapping_add(1);
+
+        if self
+            .checkpoint
+            .update_next_multixid(next_multi_xid, next_offset)
+        {
             self.checkpoint_modified = true;
         }
-        if xlrec.moff + xlrec.nmembers > self.checkpoint.nextMultiOffset {
-            self.checkpoint.nextMultiOffset = xlrec.moff + xlrec.nmembers;
-            self.checkpoint_modified = true;
-        }
-        let max_mbr_xid = xlrec.members.iter().fold(0u32, |acc, mbr| {
-            if mbr.xid.wrapping_sub(acc) as i32 > 0 {
-                mbr.xid
+
+        // Also update the next-xid with the highest member. According to the comments in
+        // multixact_redo(), this shouldn't be necessary, but let's do the same here.
+        let max_mbr_xid = xlrec.members.iter().fold(None, |acc, mbr| {
+            if let Some(max_xid) = acc {
+                if mbr.xid.wrapping_sub(max_xid) as i32 > 0 {
+                    Some(mbr.xid)
+                } else {
+                    acc
+                }
             } else {
-                acc
+                Some(mbr.xid)
             }
         });
 
-        if self.checkpoint.update_next_xid(max_mbr_xid) {
-            self.checkpoint_modified = true;
+        if let Some(max_xid) = max_mbr_xid {
+            if self.checkpoint.update_next_xid(max_xid) {
+                self.checkpoint_modified = true;
+            }
         }
         Ok(())
     }
@@ -1504,7 +1667,7 @@ impl WalIngest {
             nblocks
         } else if !modification
             .tline
-            .get_rel_exists(rel, Version::Modified(modification), true, ctx)
+            .get_rel_exists(rel, Version::Modified(modification), ctx)
             .await?
         {
             // create it with 0 size initially, the logic below will extend it
@@ -1516,7 +1679,7 @@ impl WalIngest {
         } else {
             modification
                 .tline
-                .get_rel_size(rel, Version::Modified(modification), true, ctx)
+                .get_rel_size(rel, Version::Modified(modification), ctx)
                 .await?
         };
 
@@ -1533,7 +1696,7 @@ impl WalIngest {
                     continue;
                 }
 
-                modification.put_rel_page_image(rel, gap_blknum, ZERO_PAGE.clone())?;
+                modification.put_rel_page_image_zero(rel, gap_blknum);
             }
         }
         Ok(())
@@ -1599,7 +1762,7 @@ impl WalIngest {
 
             // fill the gap with zeros
             for gap_blknum in old_nblocks..blknum {
-                modification.put_slru_page_image(kind, segno, gap_blknum, ZERO_PAGE.clone())?;
+                modification.put_slru_page_image_zero(kind, segno, gap_blknum);
             }
         }
         Ok(())
@@ -1610,17 +1773,17 @@ async fn get_relsize(
     modification: &DatadirModification<'_>,
     rel: RelTag,
     ctx: &RequestContext,
-) -> anyhow::Result<BlockNumber> {
+) -> Result<BlockNumber, PageReconstructError> {
     let nblocks = if !modification
         .tline
-        .get_rel_exists(rel, Version::Modified(modification), true, ctx)
+        .get_rel_exists(rel, Version::Modified(modification), ctx)
         .await?
     {
         0
     } else {
         modification
             .tline
-            .get_rel_size(rel, Version::Modified(modification), true, ctx)
+            .get_rel_size(rel, Version::Modified(modification), ctx)
             .await?
     };
     Ok(nblocks)
@@ -1632,8 +1795,6 @@ mod tests {
     use super::*;
     use crate::tenant::harness::*;
     use crate::tenant::remote_timeline_client::{remote_initdb_archive_path, INITDB_PATH};
-    use crate::tenant::Timeline;
-    use postgres_ffi::v14::xlog_utils::SIZEOF_CHECKPOINT;
     use postgres_ffi::RELSEG_SIZE;
 
     use crate::DEFAULT_PG_VERSION;
@@ -1664,7 +1825,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_relsize() -> Result<()> {
-        let (tenant, ctx) = TenantHarness::create("test_relsize")?.load().await;
+        let (tenant, ctx) = TenantHarness::create("test_relsize").await?.load().await;
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(8), DEFAULT_PG_VERSION, &ctx)
             .await?;
@@ -1673,23 +1834,27 @@ mod tests {
         let mut m = tline.begin_modification(Lsn(0x20));
         walingest.put_rel_creation(&mut m, TESTREL_A, &ctx).await?;
         walingest
-            .put_rel_page_image(&mut m, TESTREL_A, 0, TEST_IMG("foo blk 0 at 2"), &ctx)
+            .put_rel_page_image(&mut m, TESTREL_A, 0, test_img("foo blk 0 at 2"), &ctx)
             .await?;
+        m.on_record_end();
         m.commit(&ctx).await?;
         let mut m = tline.begin_modification(Lsn(0x30));
         walingest
-            .put_rel_page_image(&mut m, TESTREL_A, 0, TEST_IMG("foo blk 0 at 3"), &ctx)
+            .put_rel_page_image(&mut m, TESTREL_A, 0, test_img("foo blk 0 at 3"), &ctx)
             .await?;
+        m.on_record_end();
         m.commit(&ctx).await?;
         let mut m = tline.begin_modification(Lsn(0x40));
         walingest
-            .put_rel_page_image(&mut m, TESTREL_A, 1, TEST_IMG("foo blk 1 at 4"), &ctx)
+            .put_rel_page_image(&mut m, TESTREL_A, 1, test_img("foo blk 1 at 4"), &ctx)
             .await?;
+        m.on_record_end();
         m.commit(&ctx).await?;
         let mut m = tline.begin_modification(Lsn(0x50));
         walingest
-            .put_rel_page_image(&mut m, TESTREL_A, 2, TEST_IMG("foo blk 2 at 5"), &ctx)
+            .put_rel_page_image(&mut m, TESTREL_A, 2, test_img("foo blk 2 at 5"), &ctx)
             .await?;
+        m.on_record_end();
         m.commit(&ctx).await?;
 
         assert_current_logical_size(&tline, Lsn(0x50));
@@ -1697,29 +1862,29 @@ mod tests {
         // The relation was created at LSN 2, not visible at LSN 1 yet.
         assert_eq!(
             tline
-                .get_rel_exists(TESTREL_A, Version::Lsn(Lsn(0x10)), false, &ctx)
+                .get_rel_exists(TESTREL_A, Version::Lsn(Lsn(0x10)), &ctx)
                 .await?,
             false
         );
         assert!(tline
-            .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x10)), false, &ctx)
+            .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x10)), &ctx)
             .await
             .is_err());
         assert_eq!(
             tline
-                .get_rel_exists(TESTREL_A, Version::Lsn(Lsn(0x20)), false, &ctx)
+                .get_rel_exists(TESTREL_A, Version::Lsn(Lsn(0x20)), &ctx)
                 .await?,
             true
         );
         assert_eq!(
             tline
-                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x20)), false, &ctx)
+                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x20)), &ctx)
                 .await?,
             1
         );
         assert_eq!(
             tline
-                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x50)), false, &ctx)
+                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x50)), &ctx)
                 .await?,
             3
         );
@@ -1727,48 +1892,48 @@ mod tests {
         // Check page contents at each LSN
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 0, Version::Lsn(Lsn(0x20)), false, &ctx)
+                .get_rel_page_at_lsn(TESTREL_A, 0, Version::Lsn(Lsn(0x20)), &ctx)
                 .await?,
-            TEST_IMG("foo blk 0 at 2")
+            test_img("foo blk 0 at 2")
         );
 
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 0, Version::Lsn(Lsn(0x30)), false, &ctx)
+                .get_rel_page_at_lsn(TESTREL_A, 0, Version::Lsn(Lsn(0x30)), &ctx)
                 .await?,
-            TEST_IMG("foo blk 0 at 3")
+            test_img("foo blk 0 at 3")
         );
 
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 0, Version::Lsn(Lsn(0x40)), false, &ctx)
+                .get_rel_page_at_lsn(TESTREL_A, 0, Version::Lsn(Lsn(0x40)), &ctx)
                 .await?,
-            TEST_IMG("foo blk 0 at 3")
+            test_img("foo blk 0 at 3")
         );
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 1, Version::Lsn(Lsn(0x40)), false, &ctx)
+                .get_rel_page_at_lsn(TESTREL_A, 1, Version::Lsn(Lsn(0x40)), &ctx)
                 .await?,
-            TEST_IMG("foo blk 1 at 4")
+            test_img("foo blk 1 at 4")
         );
 
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 0, Version::Lsn(Lsn(0x50)), false, &ctx)
+                .get_rel_page_at_lsn(TESTREL_A, 0, Version::Lsn(Lsn(0x50)), &ctx)
                 .await?,
-            TEST_IMG("foo blk 0 at 3")
+            test_img("foo blk 0 at 3")
         );
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 1, Version::Lsn(Lsn(0x50)), false, &ctx)
+                .get_rel_page_at_lsn(TESTREL_A, 1, Version::Lsn(Lsn(0x50)), &ctx)
                 .await?,
-            TEST_IMG("foo blk 1 at 4")
+            test_img("foo blk 1 at 4")
         );
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 2, Version::Lsn(Lsn(0x50)), false, &ctx)
+                .get_rel_page_at_lsn(TESTREL_A, 2, Version::Lsn(Lsn(0x50)), &ctx)
                 .await?,
-            TEST_IMG("foo blk 2 at 5")
+            test_img("foo blk 2 at 5")
         );
 
         // Truncate last block
@@ -1782,35 +1947,35 @@ mod tests {
         // Check reported size and contents after truncation
         assert_eq!(
             tline
-                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x60)), false, &ctx)
+                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x60)), &ctx)
                 .await?,
             2
         );
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 0, Version::Lsn(Lsn(0x60)), false, &ctx)
+                .get_rel_page_at_lsn(TESTREL_A, 0, Version::Lsn(Lsn(0x60)), &ctx)
                 .await?,
-            TEST_IMG("foo blk 0 at 3")
+            test_img("foo blk 0 at 3")
         );
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 1, Version::Lsn(Lsn(0x60)), false, &ctx)
+                .get_rel_page_at_lsn(TESTREL_A, 1, Version::Lsn(Lsn(0x60)), &ctx)
                 .await?,
-            TEST_IMG("foo blk 1 at 4")
+            test_img("foo blk 1 at 4")
         );
 
         // should still see the truncated block with older LSN
         assert_eq!(
             tline
-                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x50)), false, &ctx)
+                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x50)), &ctx)
                 .await?,
             3
         );
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 2, Version::Lsn(Lsn(0x50)), false, &ctx)
+                .get_rel_page_at_lsn(TESTREL_A, 2, Version::Lsn(Lsn(0x50)), &ctx)
                 .await?,
-            TEST_IMG("foo blk 2 at 5")
+            test_img("foo blk 2 at 5")
         );
 
         // Truncate to zero length
@@ -1821,7 +1986,7 @@ mod tests {
         m.commit(&ctx).await?;
         assert_eq!(
             tline
-                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x68)), false, &ctx)
+                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x68)), &ctx)
                 .await?,
             0
         );
@@ -1829,53 +1994,55 @@ mod tests {
         // Extend from 0 to 2 blocks, leaving a gap
         let mut m = tline.begin_modification(Lsn(0x70));
         walingest
-            .put_rel_page_image(&mut m, TESTREL_A, 1, TEST_IMG("foo blk 1"), &ctx)
+            .put_rel_page_image(&mut m, TESTREL_A, 1, test_img("foo blk 1"), &ctx)
             .await?;
+        m.on_record_end();
         m.commit(&ctx).await?;
         assert_eq!(
             tline
-                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x70)), false, &ctx)
+                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x70)), &ctx)
                 .await?,
             2
         );
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 0, Version::Lsn(Lsn(0x70)), false, &ctx)
+                .get_rel_page_at_lsn(TESTREL_A, 0, Version::Lsn(Lsn(0x70)), &ctx)
                 .await?,
             ZERO_PAGE
         );
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 1, Version::Lsn(Lsn(0x70)), false, &ctx)
+                .get_rel_page_at_lsn(TESTREL_A, 1, Version::Lsn(Lsn(0x70)), &ctx)
                 .await?,
-            TEST_IMG("foo blk 1")
+            test_img("foo blk 1")
         );
 
         // Extend a lot more, leaving a big gap that spans across segments
         let mut m = tline.begin_modification(Lsn(0x80));
         walingest
-            .put_rel_page_image(&mut m, TESTREL_A, 1500, TEST_IMG("foo blk 1500"), &ctx)
+            .put_rel_page_image(&mut m, TESTREL_A, 1500, test_img("foo blk 1500"), &ctx)
             .await?;
+        m.on_record_end();
         m.commit(&ctx).await?;
         assert_eq!(
             tline
-                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x80)), false, &ctx)
+                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x80)), &ctx)
                 .await?,
             1501
         );
         for blk in 2..1500 {
             assert_eq!(
                 tline
-                    .get_rel_page_at_lsn(TESTREL_A, blk, Version::Lsn(Lsn(0x80)), false, &ctx)
+                    .get_rel_page_at_lsn(TESTREL_A, blk, Version::Lsn(Lsn(0x80)), &ctx)
                     .await?,
                 ZERO_PAGE
             );
         }
         assert_eq!(
             tline
-                .get_rel_page_at_lsn(TESTREL_A, 1500, Version::Lsn(Lsn(0x80)), false, &ctx)
+                .get_rel_page_at_lsn(TESTREL_A, 1500, Version::Lsn(Lsn(0x80)), &ctx)
                 .await?,
-            TEST_IMG("foo blk 1500")
+            test_img("foo blk 1500")
         );
 
         Ok(())
@@ -1885,7 +2052,10 @@ mod tests {
     // and then created it again within the same layer.
     #[tokio::test]
     async fn test_drop_extend() -> Result<()> {
-        let (tenant, ctx) = TenantHarness::create("test_drop_extend")?.load().await;
+        let (tenant, ctx) = TenantHarness::create("test_drop_extend")
+            .await?
+            .load()
+            .await;
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(8), DEFAULT_PG_VERSION, &ctx)
             .await?;
@@ -1893,20 +2063,20 @@ mod tests {
 
         let mut m = tline.begin_modification(Lsn(0x20));
         walingest
-            .put_rel_page_image(&mut m, TESTREL_A, 0, TEST_IMG("foo blk 0 at 2"), &ctx)
+            .put_rel_page_image(&mut m, TESTREL_A, 0, test_img("foo blk 0 at 2"), &ctx)
             .await?;
         m.commit(&ctx).await?;
 
         // Check that rel exists and size is correct
         assert_eq!(
             tline
-                .get_rel_exists(TESTREL_A, Version::Lsn(Lsn(0x20)), false, &ctx)
+                .get_rel_exists(TESTREL_A, Version::Lsn(Lsn(0x20)), &ctx)
                 .await?,
             true
         );
         assert_eq!(
             tline
-                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x20)), false, &ctx)
+                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x20)), &ctx)
                 .await?,
             1
         );
@@ -1919,7 +2089,7 @@ mod tests {
         // Check that rel is not visible anymore
         assert_eq!(
             tline
-                .get_rel_exists(TESTREL_A, Version::Lsn(Lsn(0x30)), false, &ctx)
+                .get_rel_exists(TESTREL_A, Version::Lsn(Lsn(0x30)), &ctx)
                 .await?,
             false
         );
@@ -1930,20 +2100,20 @@ mod tests {
         // Re-create it
         let mut m = tline.begin_modification(Lsn(0x40));
         walingest
-            .put_rel_page_image(&mut m, TESTREL_A, 0, TEST_IMG("foo blk 0 at 4"), &ctx)
+            .put_rel_page_image(&mut m, TESTREL_A, 0, test_img("foo blk 0 at 4"), &ctx)
             .await?;
         m.commit(&ctx).await?;
 
         // Check that rel exists and size is correct
         assert_eq!(
             tline
-                .get_rel_exists(TESTREL_A, Version::Lsn(Lsn(0x40)), false, &ctx)
+                .get_rel_exists(TESTREL_A, Version::Lsn(Lsn(0x40)), &ctx)
                 .await?,
             true
         );
         assert_eq!(
             tline
-                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x40)), false, &ctx)
+                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x40)), &ctx)
                 .await?,
             1
         );
@@ -1956,7 +2126,10 @@ mod tests {
     // and then extended it again within the same layer.
     #[tokio::test]
     async fn test_truncate_extend() -> Result<()> {
-        let (tenant, ctx) = TenantHarness::create("test_truncate_extend")?.load().await;
+        let (tenant, ctx) = TenantHarness::create("test_truncate_extend")
+            .await?
+            .load()
+            .await;
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(8), DEFAULT_PG_VERSION, &ctx)
             .await?;
@@ -1968,7 +2141,7 @@ mod tests {
         for blkno in 0..relsize {
             let data = format!("foo blk {} at {}", blkno, Lsn(0x20));
             walingest
-                .put_rel_page_image(&mut m, TESTREL_A, blkno, TEST_IMG(&data), &ctx)
+                .put_rel_page_image(&mut m, TESTREL_A, blkno, test_img(&data), &ctx)
                 .await?;
         }
         m.commit(&ctx).await?;
@@ -1976,24 +2149,24 @@ mod tests {
         // The relation was created at LSN 20, not visible at LSN 1 yet.
         assert_eq!(
             tline
-                .get_rel_exists(TESTREL_A, Version::Lsn(Lsn(0x10)), false, &ctx)
+                .get_rel_exists(TESTREL_A, Version::Lsn(Lsn(0x10)), &ctx)
                 .await?,
             false
         );
         assert!(tline
-            .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x10)), false, &ctx)
+            .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x10)), &ctx)
             .await
             .is_err());
 
         assert_eq!(
             tline
-                .get_rel_exists(TESTREL_A, Version::Lsn(Lsn(0x20)), false, &ctx)
+                .get_rel_exists(TESTREL_A, Version::Lsn(Lsn(0x20)), &ctx)
                 .await?,
             true
         );
         assert_eq!(
             tline
-                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x20)), false, &ctx)
+                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x20)), &ctx)
                 .await?,
             relsize
         );
@@ -2004,9 +2177,9 @@ mod tests {
             let data = format!("foo blk {} at {}", blkno, lsn);
             assert_eq!(
                 tline
-                    .get_rel_page_at_lsn(TESTREL_A, blkno, Version::Lsn(lsn), false, &ctx)
+                    .get_rel_page_at_lsn(TESTREL_A, blkno, Version::Lsn(lsn), &ctx)
                     .await?,
-                TEST_IMG(&data)
+                test_img(&data)
             );
         }
 
@@ -2021,7 +2194,7 @@ mod tests {
         // Check reported size and contents after truncation
         assert_eq!(
             tline
-                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x60)), false, &ctx)
+                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x60)), &ctx)
                 .await?,
             1
         );
@@ -2031,16 +2204,16 @@ mod tests {
             let data = format!("foo blk {} at {}", blkno, lsn);
             assert_eq!(
                 tline
-                    .get_rel_page_at_lsn(TESTREL_A, blkno, Version::Lsn(Lsn(0x60)), false, &ctx)
+                    .get_rel_page_at_lsn(TESTREL_A, blkno, Version::Lsn(Lsn(0x60)), &ctx)
                     .await?,
-                TEST_IMG(&data)
+                test_img(&data)
             );
         }
 
         // should still see all blocks with older LSN
         assert_eq!(
             tline
-                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x50)), false, &ctx)
+                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x50)), &ctx)
                 .await?,
             relsize
         );
@@ -2049,9 +2222,9 @@ mod tests {
             let data = format!("foo blk {} at {}", blkno, lsn);
             assert_eq!(
                 tline
-                    .get_rel_page_at_lsn(TESTREL_A, blkno, Version::Lsn(Lsn(0x50)), false, &ctx)
+                    .get_rel_page_at_lsn(TESTREL_A, blkno, Version::Lsn(Lsn(0x50)), &ctx)
                     .await?,
-                TEST_IMG(&data)
+                test_img(&data)
             );
         }
 
@@ -2062,20 +2235,20 @@ mod tests {
         for blkno in 0..relsize {
             let data = format!("foo blk {} at {}", blkno, lsn);
             walingest
-                .put_rel_page_image(&mut m, TESTREL_A, blkno, TEST_IMG(&data), &ctx)
+                .put_rel_page_image(&mut m, TESTREL_A, blkno, test_img(&data), &ctx)
                 .await?;
         }
         m.commit(&ctx).await?;
 
         assert_eq!(
             tline
-                .get_rel_exists(TESTREL_A, Version::Lsn(Lsn(0x80)), false, &ctx)
+                .get_rel_exists(TESTREL_A, Version::Lsn(Lsn(0x80)), &ctx)
                 .await?,
             true
         );
         assert_eq!(
             tline
-                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x80)), false, &ctx)
+                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(0x80)), &ctx)
                 .await?,
             relsize
         );
@@ -2085,9 +2258,9 @@ mod tests {
             let data = format!("foo blk {} at {}", blkno, lsn);
             assert_eq!(
                 tline
-                    .get_rel_page_at_lsn(TESTREL_A, blkno, Version::Lsn(Lsn(0x80)), false, &ctx)
+                    .get_rel_page_at_lsn(TESTREL_A, blkno, Version::Lsn(Lsn(0x80)), &ctx)
                     .await?,
-                TEST_IMG(&data)
+                test_img(&data)
             );
         }
 
@@ -2098,7 +2271,7 @@ mod tests {
     /// split into multiple 1 GB segments in Postgres.
     #[tokio::test]
     async fn test_large_rel() -> Result<()> {
-        let (tenant, ctx) = TenantHarness::create("test_large_rel")?.load().await;
+        let (tenant, ctx) = TenantHarness::create("test_large_rel").await?.load().await;
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(8), DEFAULT_PG_VERSION, &ctx)
             .await?;
@@ -2108,7 +2281,7 @@ mod tests {
         for blknum in 0..RELSEG_SIZE + 1 {
             lsn += 0x10;
             let mut m = tline.begin_modification(Lsn(lsn));
-            let img = TEST_IMG(&format!("foo blk {} at {}", blknum, Lsn(lsn)));
+            let img = test_img(&format!("foo blk {} at {}", blknum, Lsn(lsn)));
             walingest
                 .put_rel_page_image(&mut m, TESTREL_A, blknum as BlockNumber, img, &ctx)
                 .await?;
@@ -2119,7 +2292,7 @@ mod tests {
 
         assert_eq!(
             tline
-                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(lsn)), false, &ctx)
+                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(lsn)), &ctx)
                 .await?,
             RELSEG_SIZE + 1
         );
@@ -2133,7 +2306,7 @@ mod tests {
         m.commit(&ctx).await?;
         assert_eq!(
             tline
-                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(lsn)), false, &ctx)
+                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(lsn)), &ctx)
                 .await?,
             RELSEG_SIZE
         );
@@ -2148,7 +2321,7 @@ mod tests {
         m.commit(&ctx).await?;
         assert_eq!(
             tline
-                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(lsn)), false, &ctx)
+                .get_rel_size(TESTREL_A, Version::Lsn(Lsn(lsn)), &ctx)
                 .await?,
             RELSEG_SIZE - 1
         );
@@ -2166,7 +2339,7 @@ mod tests {
             m.commit(&ctx).await?;
             assert_eq!(
                 tline
-                    .get_rel_size(TESTREL_A, Version::Lsn(Lsn(lsn)), false, &ctx)
+                    .get_rel_size(TESTREL_A, Version::Lsn(Lsn(lsn)), &ctx)
                     .await?,
                 size as BlockNumber
             );
@@ -2206,7 +2379,10 @@ mod tests {
         let startpoint = Lsn::from_hex("14AEC08").unwrap();
         let _endpoint = Lsn::from_hex("1FFFF98").unwrap();
 
-        let harness = TenantHarness::create("test_ingest_real_wal").unwrap();
+        let harness = TenantHarness::create("test_ingest_real_wal").await.unwrap();
+        let span = harness
+            .span()
+            .in_scope(|| info_span!("timeline_span", timeline_id=%TIMELINE_ID));
         let (tenant, ctx) = harness.load().await;
 
         let remote_initdb_path =
@@ -2248,7 +2424,6 @@ mod tests {
             .await
             .unwrap();
         let mut modification = tline.begin_modification(startpoint);
-        let mut decoded = DecodedWALRecord::default();
         println!("decoding {} bytes", bytes.len() - xlogoff);
 
         // Decode and ingest wal. We process the wal in chunks because
@@ -2256,8 +2431,11 @@ mod tests {
         for chunk in bytes[xlogoff..].chunks(50) {
             decoder.feed_bytes(chunk);
             while let Some((lsn, recdata)) = decoder.poll_decode().unwrap() {
+                let mut decoded = DecodedWALRecord::default();
+                decode_wal_record(recdata, &mut decoded, modification.tline.pg_version).unwrap();
                 walingest
-                    .ingest_record(recdata, lsn, &mut modification, &mut decoded, &ctx)
+                    .ingest_record(decoded, lsn, &mut modification, &ctx)
+                    .instrument(span.clone())
                     .await
                     .unwrap();
             }

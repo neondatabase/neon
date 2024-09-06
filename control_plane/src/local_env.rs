@@ -3,7 +3,7 @@
 //! Now it also provides init method which acts like a stub for proper installation
 //! script which will use local paths.
 
-use anyhow::{bail, ensure, Context};
+use anyhow::{bail, Context};
 
 use clap::ValueEnum;
 use postgres_backend::AuthType;
@@ -17,14 +17,17 @@ use std::net::Ipv4Addr;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 use utils::{
     auth::{encode_from_key_file, Claims},
     id::{NodeId, TenantId, TenantTimelineId, TimelineId},
 };
 
+use crate::pageserver::PageServerNode;
+use crate::pageserver::PAGESERVER_REMOTE_STORAGE_DIR;
 use crate::safekeeper::SafekeeperNode;
 
-pub const DEFAULT_PG_VERSION: u32 = 15;
+pub const DEFAULT_PG_VERSION: u32 = 16;
 
 //
 // This data structures represents neon_local CLI config
@@ -33,56 +36,105 @@ pub const DEFAULT_PG_VERSION: u32 = 15;
 // to 'neon_local init --config=<path>' option. See control_plane/simple.conf for
 // an example.
 //
-#[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
+#[derive(PartialEq, Eq, Clone, Debug)]
 pub struct LocalEnv {
     // Base directory for all the nodes (the pageserver, safekeepers and
     // compute endpoints).
     //
     // This is not stored in the config file. Rather, this is the path where the
-    // config file itself is. It is read from the NEON_REPO_DIR env variable or
-    // '.neon' if not given.
-    #[serde(skip)]
+    // config file itself is. It is read from the NEON_REPO_DIR env variable which
+    // must be an absolute path. If the env var is not set, $PWD/.neon is used.
     pub base_data_dir: PathBuf,
 
     // Path to postgres distribution. It's expected that "bin", "include",
     // "lib", "share" from postgres distribution are there. If at some point
     // in time we will be able to run against vanilla postgres we may split that
     // to four separate paths and match OS-specific installation layout.
-    #[serde(default)]
     pub pg_distrib_dir: PathBuf,
 
     // Path to pageserver binary.
-    #[serde(default)]
     pub neon_distrib_dir: PathBuf,
 
     // Default tenant ID to use with the 'neon_local' command line utility, when
     // --tenant_id is not explicitly specified.
-    #[serde(default)]
     pub default_tenant_id: Option<TenantId>,
 
     // used to issue tokens during e.g pg start
-    #[serde(default)]
     pub private_key_path: PathBuf,
 
     pub broker: NeonBroker,
 
+    // Configuration for the storage controller (1 per neon_local environment)
+    pub storage_controller: NeonStorageControllerConf,
+
     /// This Vec must always contain at least one pageserver
+    /// Populdated by [`Self::load_config`] from the individual `pageserver.toml`s.
+    /// NB: not used anymore except for informing users that they need to change their `.neon/config`.
     pub pageservers: Vec<PageServerConf>,
 
-    #[serde(default)]
     pub safekeepers: Vec<SafekeeperConf>,
 
-    // Control plane location: if None, we will not run attachment_service.  If set, this will
+    // Control plane upcall API for pageserver: if None, we will not run storage_controller  If set, this will
     // be propagated into each pageserver's configuration.
-    #[serde(default)]
     pub control_plane_api: Option<Url>,
 
+    // Control plane upcall API for storage controller.  If set, this will be propagated into the
+    // storage controller's configuration.
+    pub control_plane_compute_hook_api: Option<Url>,
+
     /// Keep human-readable aliases in memory (and persist them to config), to hide ZId hex strings from the user.
-    #[serde(default)]
     // A `HashMap<String, HashMap<TenantId, TimelineId>>` would be more appropriate here,
     // but deserialization into a generic toml object as `toml::Value::try_from` fails with an error.
     // https://toml.io/en/v1.0.0 does not contain a concept of "a table inside another table".
+    pub branch_name_mappings: HashMap<String, Vec<(TenantId, TimelineId)>>,
+}
+
+/// On-disk state stored in `.neon/config`.
+#[derive(PartialEq, Eq, Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct OnDiskConfig {
+    pub pg_distrib_dir: PathBuf,
+    pub neon_distrib_dir: PathBuf,
+    pub default_tenant_id: Option<TenantId>,
+    pub private_key_path: PathBuf,
+    pub broker: NeonBroker,
+    pub storage_controller: NeonStorageControllerConf,
+    #[serde(
+        skip_serializing,
+        deserialize_with = "fail_if_pageservers_field_specified"
+    )]
+    pub pageservers: Vec<PageServerConf>,
+    pub safekeepers: Vec<SafekeeperConf>,
+    pub control_plane_api: Option<Url>,
+    pub control_plane_compute_hook_api: Option<Url>,
     branch_name_mappings: HashMap<String, Vec<(TenantId, TimelineId)>>,
+}
+
+fn fail_if_pageservers_field_specified<'de, D>(_: D) -> Result<Vec<PageServerConf>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Err(serde::de::Error::custom(
+        "The 'pageservers' field is no longer used; pageserver.toml is now authoritative; \
+         Please remove the `pageservers` from your .neon/config.",
+    ))
+}
+
+/// The description of the neon_local env to be initialized by `neon_local init --config`.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NeonLocalInitConf {
+    // TODO: do we need this? Seems unused
+    pub pg_distrib_dir: Option<PathBuf>,
+    // TODO: do we need this? Seems unused
+    pub neon_distrib_dir: Option<PathBuf>,
+    pub default_tenant_id: TenantId,
+    pub broker: NeonBroker,
+    pub storage_controller: Option<NeonStorageControllerConf>,
+    pub pageservers: Vec<NeonLocalInitPageserverConf>,
+    pub safekeepers: Vec<SafekeeperConf>,
+    pub control_plane_api: Option<Option<Url>>,
+    pub control_plane_compute_hook_api: Option<Option<Url>>,
 }
 
 /// Broker config for cluster internal communication.
@@ -91,6 +143,55 @@ pub struct LocalEnv {
 pub struct NeonBroker {
     /// Broker listen address for storage nodes coordination, e.g. '127.0.0.1:50051'.
     pub listen_addr: SocketAddr,
+}
+
+/// Broker config for cluster internal communication.
+#[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
+#[serde(default)]
+pub struct NeonStorageControllerConf {
+    /// Heartbeat timeout before marking a node offline
+    #[serde(with = "humantime_serde")]
+    pub max_offline: Duration,
+
+    #[serde(with = "humantime_serde")]
+    pub max_warming_up: Duration,
+
+    pub start_as_candidate: bool,
+
+    /// Database url used when running multiple storage controller instances
+    pub database_url: Option<SocketAddr>,
+
+    /// Threshold for auto-splitting a tenant into shards
+    pub split_threshold: Option<u64>,
+
+    pub max_secondary_lag_bytes: Option<u64>,
+
+    #[serde(with = "humantime_serde")]
+    pub heartbeat_interval: Duration,
+}
+
+impl NeonStorageControllerConf {
+    // Use a shorter pageserver unavailability interval than the default to speed up tests.
+    const DEFAULT_MAX_OFFLINE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+
+    const DEFAULT_MAX_WARMING_UP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+    // Very tight heartbeat interval to speed up tests
+    const DEFAULT_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+}
+
+impl Default for NeonStorageControllerConf {
+    fn default() -> Self {
+        Self {
+            max_offline: Self::DEFAULT_MAX_OFFLINE_INTERVAL,
+            max_warming_up: Self::DEFAULT_MAX_WARMING_UP_INTERVAL,
+            start_as_candidate: false,
+            database_url: None,
+            split_threshold: None,
+            max_secondary_lag_bytes: None,
+            heartbeat_interval: Self::DEFAULT_HEARTBEAT_INTERVAL,
+        }
+    }
 }
 
 // Dummy Default impl to satisfy Deserialize derive.
@@ -108,17 +209,16 @@ impl NeonBroker {
     }
 }
 
+// neon_local needs to know this subset of pageserver configuration.
+// For legacy reasons, this information is duplicated from `pageserver.toml` into `.neon/config`.
+// It can get stale if `pageserver.toml` is changed.
+// TODO(christian): don't store this at all in `.neon/config`, always load it from `pageserver.toml`
 #[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct PageServerConf {
-    // node id
     pub id: NodeId,
-
-    // Pageserver connection settings
     pub listen_pg_addr: String,
     pub listen_http_addr: String,
-
-    // auth type used for the PG and HTTP ports
     pub pg_auth_type: AuthType,
     pub http_auth_type: AuthType,
 }
@@ -135,6 +235,40 @@ impl Default for PageServerConf {
     }
 }
 
+/// The toml that can be passed to `neon_local init --config`.
+/// This is a subset of the `pageserver.toml` configuration.
+// TODO(christian): use pageserver_api::config::ConfigToml (PR #7656)
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub struct NeonLocalInitPageserverConf {
+    pub id: NodeId,
+    pub listen_pg_addr: String,
+    pub listen_http_addr: String,
+    pub pg_auth_type: AuthType,
+    pub http_auth_type: AuthType,
+    #[serde(flatten)]
+    pub other: HashMap<String, toml::Value>,
+}
+
+impl From<&NeonLocalInitPageserverConf> for PageServerConf {
+    fn from(conf: &NeonLocalInitPageserverConf) -> Self {
+        let NeonLocalInitPageserverConf {
+            id,
+            listen_pg_addr,
+            listen_http_addr,
+            pg_auth_type,
+            http_auth_type,
+            other: _,
+        } = conf;
+        Self {
+            id: *id,
+            listen_pg_addr: listen_pg_addr.clone(),
+            listen_http_addr: listen_http_addr.clone(),
+            pg_auth_type: *pg_auth_type,
+            http_auth_type: *http_auth_type,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
 #[serde(default)]
 pub struct SafekeeperConf {
@@ -146,6 +280,7 @@ pub struct SafekeeperConf {
     pub remote_storage: Option<String>,
     pub backup_threads: Option<u32>,
     pub auth_enabled: bool,
+    pub listen_addr: Option<String>,
 }
 
 impl Default for SafekeeperConf {
@@ -159,6 +294,7 @@ impl Default for SafekeeperConf {
             remote_storage: None,
             backup_threads: None,
             auth_enabled: false,
+            listen_addr: None,
         }
     }
 }
@@ -211,19 +347,28 @@ impl LocalEnv {
         }
     }
 
-    pub fn pg_bin_dir(&self, pg_version: u32) -> anyhow::Result<PathBuf> {
-        Ok(self.pg_distrib_dir(pg_version)?.join("bin"))
+    pub fn pg_dir(&self, pg_version: u32, dir_name: &str) -> anyhow::Result<PathBuf> {
+        Ok(self.pg_distrib_dir(pg_version)?.join(dir_name))
     }
+
+    pub fn pg_bin_dir(&self, pg_version: u32) -> anyhow::Result<PathBuf> {
+        self.pg_dir(pg_version, "bin")
+    }
+
     pub fn pg_lib_dir(&self, pg_version: u32) -> anyhow::Result<PathBuf> {
-        Ok(self.pg_distrib_dir(pg_version)?.join("lib"))
+        self.pg_dir(pg_version, "lib")
     }
 
     pub fn pageserver_bin(&self) -> PathBuf {
         self.neon_distrib_dir.join("pageserver")
     }
 
-    pub fn attachment_service_bin(&self) -> PathBuf {
-        self.neon_distrib_dir.join("attachment_service")
+    pub fn storage_controller_bin(&self) -> PathBuf {
+        // Irrespective of configuration, storage controller binary is always
+        // run from the same location as neon_local.  This means that for compatibility
+        // tests that run old pageserver/safekeeper, they still run latest storage controller.
+        let neon_local_bin_dir = env::current_exe().unwrap().parent().unwrap().to_owned();
+        neon_local_bin_dir.join("storage_controller")
     }
 
     pub fn safekeeper_bin(&self) -> PathBuf {
@@ -259,6 +404,36 @@ impl LocalEnv {
             let joined = have_ids.join(",");
             bail!("could not find pageserver {id}, have ids {joined}")
         }
+    }
+
+    /// Inspect the base data directory and extract the instance id and instance directory path
+    /// for all storage controller instances
+    pub async fn storage_controller_instances(&self) -> std::io::Result<Vec<(u8, PathBuf)>> {
+        let mut instances = Vec::default();
+
+        let dir = std::fs::read_dir(self.base_data_dir.clone())?;
+        for dentry in dir {
+            let dentry = dentry?;
+            let is_dir = dentry.metadata()?.is_dir();
+            let filename = dentry.file_name().into_string().unwrap();
+            let parsed_instance_id = match filename.strip_prefix("storage_controller_") {
+                Some(suffix) => suffix.parse::<u8>().ok(),
+                None => None,
+            };
+
+            let is_instance_dir = is_dir && parsed_instance_id.is_some();
+
+            if !is_instance_dir {
+                continue;
+            }
+
+            instances.push((
+                parsed_instance_id.expect("Checked previously"),
+                dentry.path(),
+            ));
+        }
+
+        Ok(instances)
     }
 
     pub fn register_branch_mapping(
@@ -312,44 +487,8 @@ impl LocalEnv {
             .collect()
     }
 
-    /// Create a LocalEnv from a config file.
-    ///
-    /// Unlike 'load_config', this function fills in any defaults that are missing
-    /// from the config file.
-    pub fn parse_config(toml: &str) -> anyhow::Result<Self> {
-        let mut env: LocalEnv = toml::from_str(toml)?;
-
-        // Find postgres binaries.
-        // Follow POSTGRES_DISTRIB_DIR if set, otherwise look in "pg_install".
-        // Note that later in the code we assume, that distrib dirs follow the same pattern
-        // for all postgres versions.
-        if env.pg_distrib_dir == Path::new("") {
-            if let Some(postgres_bin) = env::var_os("POSTGRES_DISTRIB_DIR") {
-                env.pg_distrib_dir = postgres_bin.into();
-            } else {
-                let cwd = env::current_dir()?;
-                env.pg_distrib_dir = cwd.join("pg_install")
-            }
-        }
-
-        // Find neon binaries.
-        if env.neon_distrib_dir == Path::new("") {
-            env.neon_distrib_dir = env::current_exe()?.parent().unwrap().to_owned();
-        }
-
-        if env.pageservers.is_empty() {
-            anyhow::bail!("Configuration must contain at least one pageserver");
-        }
-
-        env.base_data_dir = base_path();
-
-        Ok(env)
-    }
-
-    /// Locate and load config
-    pub fn load_config() -> anyhow::Result<Self> {
-        let repopath = base_path();
-
+    ///  Construct `Self` from on-disk state.
+    pub fn load_config(repopath: &Path) -> anyhow::Result<Self> {
         if !repopath.exists() {
             bail!(
                 "Neon config is not found in {}. You need to run 'neon_local init' first",
@@ -360,38 +499,140 @@ impl LocalEnv {
         // TODO: check that it looks like a neon repository
 
         // load and parse file
-        let config = fs::read_to_string(repopath.join("config"))?;
-        let mut env: LocalEnv = toml::from_str(config.as_str())?;
+        let config_file_contents = fs::read_to_string(repopath.join("config"))?;
+        let on_disk_config: OnDiskConfig = toml::from_str(config_file_contents.as_str())?;
+        let mut env = {
+            let OnDiskConfig {
+                pg_distrib_dir,
+                neon_distrib_dir,
+                default_tenant_id,
+                private_key_path,
+                broker,
+                storage_controller,
+                pageservers,
+                safekeepers,
+                control_plane_api,
+                control_plane_compute_hook_api,
+                branch_name_mappings,
+            } = on_disk_config;
+            LocalEnv {
+                base_data_dir: repopath.to_owned(),
+                pg_distrib_dir,
+                neon_distrib_dir,
+                default_tenant_id,
+                private_key_path,
+                broker,
+                storage_controller,
+                pageservers,
+                safekeepers,
+                control_plane_api,
+                control_plane_compute_hook_api,
+                branch_name_mappings,
+            }
+        };
 
-        env.base_data_dir = repopath;
+        // The source of truth for pageserver configuration is the pageserver.toml.
+        assert!(
+            env.pageservers.is_empty(),
+            "we ensure this during deserialization"
+        );
+        env.pageservers = {
+            let iter = std::fs::read_dir(repopath).context("open dir")?;
+            let mut pageservers = Vec::new();
+            for res in iter {
+                let dentry = res?;
+                const PREFIX: &str = "pageserver_";
+                let dentry_name = dentry
+                    .file_name()
+                    .into_string()
+                    .ok()
+                    .with_context(|| format!("non-utf8 dentry: {:?}", dentry.path()))
+                    .unwrap();
+                if !dentry_name.starts_with(PREFIX) {
+                    continue;
+                }
+                if !dentry.file_type().context("determine file type")?.is_dir() {
+                    anyhow::bail!("expected a directory, got {:?}", dentry.path());
+                }
+                let id = dentry_name[PREFIX.len()..]
+                    .parse::<NodeId>()
+                    .with_context(|| format!("parse id from {:?}", dentry.path()))?;
+                // TODO(christian): use pageserver_api::config::ConfigToml (PR #7656)
+                #[derive(serde::Serialize, serde::Deserialize)]
+                // (allow unknown fields, unlike PageServerConf)
+                struct PageserverConfigTomlSubset {
+                    listen_pg_addr: String,
+                    listen_http_addr: String,
+                    pg_auth_type: AuthType,
+                    http_auth_type: AuthType,
+                }
+                let config_toml_path = dentry.path().join("pageserver.toml");
+                let config_toml: PageserverConfigTomlSubset = toml_edit::de::from_str(
+                    &std::fs::read_to_string(&config_toml_path)
+                        .with_context(|| format!("read {:?}", config_toml_path))?,
+                )
+                .context("parse pageserver.toml")?;
+                let identity_toml_path = dentry.path().join("identity.toml");
+                #[derive(serde::Serialize, serde::Deserialize)]
+                struct IdentityTomlSubset {
+                    id: NodeId,
+                }
+                let identity_toml: IdentityTomlSubset = toml_edit::de::from_str(
+                    &std::fs::read_to_string(&identity_toml_path)
+                        .with_context(|| format!("read {:?}", identity_toml_path))?,
+                )
+                .context("parse identity.toml")?;
+                let PageserverConfigTomlSubset {
+                    listen_pg_addr,
+                    listen_http_addr,
+                    pg_auth_type,
+                    http_auth_type,
+                } = config_toml;
+                let IdentityTomlSubset {
+                    id: identity_toml_id,
+                } = identity_toml;
+                let conf = PageServerConf {
+                    id: {
+                        anyhow::ensure!(
+                            identity_toml_id == id,
+                            "id mismatch: identity.toml:id={identity_toml_id} pageserver_(.*) id={id}",
+                        );
+                        id
+                    },
+                    listen_pg_addr,
+                    listen_http_addr,
+                    pg_auth_type,
+                    http_auth_type,
+                };
+                pageservers.push(conf);
+            }
+            pageservers
+        };
 
         Ok(env)
     }
 
-    pub fn persist_config(&self, base_path: &Path) -> anyhow::Result<()> {
-        // Currently, the user first passes a config file with 'neon_local init --config=<path>'
-        // We read that in, in `create_config`, and fill any missing defaults. Then it's saved
-        // to .neon/config. TODO: We lose any formatting and comments along the way, which is
-        // a bit sad.
-        let mut conf_content = r#"# This file describes a local deployment of the page server
-# and safekeeeper node. It is read by the 'neon_local' command-line
-# utility.
-"#
-        .to_string();
+    pub fn persist_config(&self) -> anyhow::Result<()> {
+        Self::persist_config_impl(
+            &self.base_data_dir,
+            &OnDiskConfig {
+                pg_distrib_dir: self.pg_distrib_dir.clone(),
+                neon_distrib_dir: self.neon_distrib_dir.clone(),
+                default_tenant_id: self.default_tenant_id,
+                private_key_path: self.private_key_path.clone(),
+                broker: self.broker.clone(),
+                storage_controller: self.storage_controller.clone(),
+                pageservers: vec![], // it's skip_serializing anyway
+                safekeepers: self.safekeepers.clone(),
+                control_plane_api: self.control_plane_api.clone(),
+                control_plane_compute_hook_api: self.control_plane_compute_hook_api.clone(),
+                branch_name_mappings: self.branch_name_mappings.clone(),
+            },
+        )
+    }
 
-        // Convert the LocalEnv to a toml file.
-        //
-        // This could be as simple as this:
-        //
-        // conf_content += &toml::to_string_pretty(env)?;
-        //
-        // But it results in a "values must be emitted before tables". I'm not sure
-        // why, AFAICS the table, i.e. 'safekeepers: Vec<SafekeeperConf>' is last.
-        // Maybe rust reorders the fields to squeeze avoid padding or something?
-        // In any case, converting to toml::Value first, and serializing that, works.
-        // See https://github.com/alexcrichton/toml-rs/issues/142
-        conf_content += &toml::to_string_pretty(&toml::Value::try_from(self)?)?;
-
+    pub fn persist_config_impl(base_path: &Path, config: &OnDiskConfig) -> anyhow::Result<()> {
+        let conf_content = &toml::to_string_pretty(config)?;
         let target_config_path = base_path.join("config");
         fs::write(&target_config_path, conf_content).with_context(|| {
             format!(
@@ -403,27 +644,26 @@ impl LocalEnv {
 
     // this function is used only for testing purposes in CLI e g generate tokens during init
     pub fn generate_auth_token(&self, claims: &Claims) -> anyhow::Result<String> {
-        let private_key_path = if self.private_key_path.is_absolute() {
-            self.private_key_path.to_path_buf()
-        } else {
-            self.base_data_dir.join(&self.private_key_path)
-        };
-
+        let private_key_path = self.get_private_key_path();
         let key_data = fs::read(private_key_path)?;
         encode_from_key_file(claims, &key_data)
     }
 
-    //
-    // Initialize a new Neon repository
-    //
-    pub fn init(&mut self, pg_version: u32, force: &InitForceMode) -> anyhow::Result<()> {
-        // check if config already exists
-        let base_path = &self.base_data_dir;
-        ensure!(
-            base_path != Path::new(""),
-            "repository base path is missing"
-        );
+    pub fn get_private_key_path(&self) -> PathBuf {
+        if self.private_key_path.is_absolute() {
+            self.private_key_path.to_path_buf()
+        } else {
+            self.base_data_dir.join(&self.private_key_path)
+        }
+    }
 
+    /// Materialize the [`NeonLocalInitConf`] to disk. Called during [`neon_local init`].
+    pub fn init(conf: NeonLocalInitConf, force: &InitForceMode) -> anyhow::Result<()> {
+        let base_path = base_path();
+        assert_ne!(base_path, Path::new(""));
+        let base_path = &base_path;
+
+        // create base_path dir
         if base_path.exists() {
             match force {
                 InitForceMode::MustNotExist => {
@@ -455,74 +695,115 @@ impl LocalEnv {
                 }
             }
         }
-
-        if !self.pg_bin_dir(pg_version)?.join("postgres").exists() {
-            bail!(
-                "Can't find postgres binary at {}",
-                self.pg_bin_dir(pg_version)?.display()
-            );
-        }
-        for binary in ["pageserver", "safekeeper"] {
-            if !self.neon_distrib_dir.join(binary).exists() {
-                bail!(
-                    "Can't find binary '{binary}' in neon distrib dir '{}'",
-                    self.neon_distrib_dir.display()
-                );
-            }
-        }
-
         if !base_path.exists() {
             fs::create_dir(base_path)?;
         }
+
+        let NeonLocalInitConf {
+            pg_distrib_dir,
+            neon_distrib_dir,
+            default_tenant_id,
+            broker,
+            storage_controller,
+            pageservers,
+            safekeepers,
+            control_plane_api,
+            control_plane_compute_hook_api,
+        } = conf;
+
+        // Find postgres binaries.
+        // Follow POSTGRES_DISTRIB_DIR if set, otherwise look in "pg_install".
+        // Note that later in the code we assume, that distrib dirs follow the same pattern
+        // for all postgres versions.
+        let pg_distrib_dir = pg_distrib_dir.unwrap_or_else(|| {
+            if let Some(postgres_bin) = env::var_os("POSTGRES_DISTRIB_DIR") {
+                postgres_bin.into()
+            } else {
+                let cwd = env::current_dir().unwrap();
+                cwd.join("pg_install")
+            }
+        });
+
+        // Find neon binaries.
+        let neon_distrib_dir = neon_distrib_dir
+            .unwrap_or_else(|| env::current_exe().unwrap().parent().unwrap().to_owned());
 
         // Generate keypair for JWT.
         //
         // The keypair is only needed if authentication is enabled in any of the
         // components. For convenience, we generate the keypair even if authentication
         // is not enabled, so that you can easily enable it after the initialization
-        // step. However, if the key generation fails, we treat it as non-fatal if
-        // authentication was not enabled.
-        if self.private_key_path == PathBuf::new() {
-            match generate_auth_keys(
-                base_path.join("auth_private_key.pem").as_path(),
-                base_path.join("auth_public_key.pem").as_path(),
-            ) {
-                Ok(()) => {
-                    self.private_key_path = PathBuf::from("auth_private_key.pem");
-                }
-                Err(e) => {
-                    if !self.auth_keys_needed() {
-                        eprintln!("Could not generate keypair for JWT authentication: {e}");
-                        eprintln!("Continuing anyway because authentication was not enabled");
-                        self.private_key_path = PathBuf::from("auth_private_key.pem");
-                    } else {
-                        return Err(e);
-                    }
-                }
-            }
+        // step.
+        generate_auth_keys(
+            base_path.join("auth_private_key.pem").as_path(),
+            base_path.join("auth_public_key.pem").as_path(),
+        )
+        .context("generate auth keys")?;
+        let private_key_path = PathBuf::from("auth_private_key.pem");
+
+        // create the runtime type because the remaining initialization code below needs
+        // a LocalEnv instance op operation
+        // TODO: refactor to avoid this, LocalEnv should only be constructed from on-disk state
+        let env = LocalEnv {
+            base_data_dir: base_path.clone(),
+            pg_distrib_dir,
+            neon_distrib_dir,
+            default_tenant_id: Some(default_tenant_id),
+            private_key_path,
+            broker,
+            storage_controller: storage_controller.unwrap_or_default(),
+            pageservers: pageservers.iter().map(Into::into).collect(),
+            safekeepers,
+            control_plane_api: control_plane_api.unwrap_or_default(),
+            control_plane_compute_hook_api: control_plane_compute_hook_api.unwrap_or_default(),
+            branch_name_mappings: Default::default(),
+        };
+
+        // create endpoints dir
+        fs::create_dir_all(env.endpoints_path())?;
+
+        // create safekeeper dirs
+        for safekeeper in &env.safekeepers {
+            fs::create_dir_all(SafekeeperNode::datadir_path_by_id(&env, safekeeper.id))?;
         }
 
-        fs::create_dir_all(self.endpoints_path())?;
-
-        for safekeeper in &self.safekeepers {
-            fs::create_dir_all(SafekeeperNode::datadir_path_by_id(self, safekeeper.id))?;
+        // initialize pageserver state
+        for (i, ps) in pageservers.into_iter().enumerate() {
+            let runtime_ps = &env.pageservers[i];
+            assert_eq!(&PageServerConf::from(&ps), runtime_ps);
+            fs::create_dir(env.pageserver_data_dir(ps.id))?;
+            PageServerNode::from_env(&env, runtime_ps)
+                .initialize(ps)
+                .context("pageserver init failed")?;
         }
 
-        self.persist_config(base_path)
-    }
+        // setup remote remote location for default LocalFs remote storage
+        std::fs::create_dir_all(env.base_data_dir.join(PAGESERVER_REMOTE_STORAGE_DIR))?;
 
-    fn auth_keys_needed(&self) -> bool {
-        self.pageservers.iter().any(|ps| {
-            ps.pg_auth_type == AuthType::NeonJWT || ps.http_auth_type == AuthType::NeonJWT
-        }) || self.safekeepers.iter().any(|sk| sk.auth_enabled)
+        env.persist_config()
     }
 }
 
-fn base_path() -> PathBuf {
-    match std::env::var_os("NEON_REPO_DIR") {
-        Some(val) => PathBuf::from(val),
-        None => PathBuf::from(".neon"),
-    }
+pub fn base_path() -> PathBuf {
+    let path = match std::env::var_os("NEON_REPO_DIR") {
+        Some(val) => {
+            let path = PathBuf::from(val);
+            if !path.is_absolute() {
+                // repeat the env var in the error because our default is always absolute
+                panic!("NEON_REPO_DIR must be an absolute path, got {path:?}");
+            }
+            path
+        }
+        None => {
+            let pwd = std::env::current_dir()
+                // technically this can fail but it's quite unlikeley
+                .expect("determine current directory");
+            let pwd_abs = pwd.canonicalize().expect("canonicalize current directory");
+            pwd_abs.join(".neon")
+        }
+    };
+    assert!(path.is_absolute());
+    path
 }
 
 /// Generate a public/private key pair for JWT authentication
@@ -560,32 +841,4 @@ fn generate_auth_keys(private_key_path: &Path, public_key_path: &Path) -> anyhow
         );
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn simple_conf_parsing() {
-        let simple_conf_toml = include_str!("../simple.conf");
-        let simple_conf_parse_result = LocalEnv::parse_config(simple_conf_toml);
-        assert!(
-            simple_conf_parse_result.is_ok(),
-            "failed to parse simple config {simple_conf_toml}, reason: {simple_conf_parse_result:?}"
-        );
-
-        let string_to_replace = "listen_addr = '127.0.0.1:50051'";
-        let spoiled_url_str = "listen_addr = '!@$XOXO%^&'";
-        let spoiled_url_toml = simple_conf_toml.replace(string_to_replace, spoiled_url_str);
-        assert!(
-            spoiled_url_toml.contains(spoiled_url_str),
-            "Failed to replace string {string_to_replace} in the toml file {simple_conf_toml}"
-        );
-        let spoiled_url_parse_result = LocalEnv::parse_config(&spoiled_url_toml);
-        assert!(
-            spoiled_url_parse_result.is_err(),
-            "expected toml with invalid Url {spoiled_url_toml} to fail the parsing, but got {spoiled_url_parse_result:?}"
-        );
-    }
 }

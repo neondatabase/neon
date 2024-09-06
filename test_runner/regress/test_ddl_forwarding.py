@@ -296,7 +296,6 @@ def test_ddl_forwarding_invalid_db(neon_simple_env: NeonEnv):
         # Some non-existent url
         config_lines=["neon.console_url=http://localhost:9999/unknown/api/v0/roles_and_databases"],
     )
-    log.info("postgres is running on 'test_ddl_forwarding_invalid_db' branch")
 
     with endpoint.cursor() as cur:
         cur.execute("SET neon.forward_ddl = false")

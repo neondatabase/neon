@@ -13,7 +13,6 @@ def test_twophase(neon_simple_env: NeonEnv):
     endpoint = env.endpoints.create_start(
         "test_twophase", config_lines=["max_prepared_transactions=5"]
     )
-    log.info("postgres is running on 'test_twophase' branch")
 
     conn = endpoint.connect()
     cur = conn.cursor()

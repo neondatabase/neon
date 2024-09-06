@@ -9,13 +9,14 @@ use futures::future::Either;
 use itertools::Itertools;
 use proxy::config::TlsServerEndPoint;
 use proxy::context::RequestMonitoring;
-use proxy::proxy::run_until_cancelled;
+use proxy::metrics::{Metrics, ThreadPoolMetrics};
+use proxy::proxy::{copy_bidirectional_client_compute, run_until_cancelled, ErrorSource};
+use rustls::pki_types::PrivateKeyDer;
 use tokio::net::TcpListener;
 
 use anyhow::{anyhow, bail, ensure, Context};
-use clap::{self, Arg};
+use clap::Arg;
 use futures::TryFutureExt;
-use proxy::console::messages::MetricsAuxInfo;
 use proxy::stream::{PqStream, Stream};
 
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -65,6 +66,8 @@ async fn main() -> anyhow::Result<()> {
     let _panic_hook_guard = utils::logging::replace_panic_hook_with_tracing_panic_hook();
     let _sentry_guard = init_sentry(Some(GIT_VERSION.into()), &[]);
 
+    Metrics::install(Arc::new(ThreadPoolMetrics::new(0)));
+
     let args = cli().get_matches();
     let destination: String = args.get_one::<String>("dest").unwrap().parse()?;
 
@@ -76,37 +79,40 @@ async fn main() -> anyhow::Result<()> {
         (Some(key_path), Some(cert_path)) => {
             let key = {
                 let key_bytes = std::fs::read(key_path).context("TLS key file")?;
-                let mut keys = rustls_pemfile::pkcs8_private_keys(&mut &key_bytes[..])
-                    .context(format!("Failed to read TLS keys at '{key_path}'"))?;
+
+                let mut keys =
+                    rustls_pemfile::pkcs8_private_keys(&mut &key_bytes[..]).collect_vec();
 
                 ensure!(keys.len() == 1, "keys.len() = {} (should be 1)", keys.len());
-                keys.pop().map(rustls::PrivateKey).unwrap()
+                PrivateKeyDer::Pkcs8(
+                    keys.pop()
+                        .unwrap()
+                        .context(format!("Failed to read TLS keys at '{key_path}'"))?,
+                )
             };
 
             let cert_chain_bytes = std::fs::read(cert_path)
                 .context(format!("Failed to read TLS cert file at '{cert_path}.'"))?;
 
-            let cert_chain = {
+            let cert_chain: Vec<_> = {
                 rustls_pemfile::certs(&mut &cert_chain_bytes[..])
-                    .context(format!(
-                        "Failed to read TLS certificate chain from bytes from file at '{cert_path}'."
-                    ))?
-                    .into_iter()
-                    .map(rustls::Certificate)
-                    .collect_vec()
+                .try_collect()
+                .with_context(|| {
+                    format!("Failed to read TLS certificate chain from bytes from file at '{cert_path}'.")
+                })?
             };
 
             // needed for channel bindings
             let first_cert = cert_chain.first().context("missing certificate")?;
             let tls_server_end_point = TlsServerEndPoint::new(first_cert)?;
 
-            let tls_config = rustls::ServerConfig::builder()
-                .with_safe_default_cipher_suites()
-                .with_safe_default_kx_groups()
-                .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])?
-                .with_no_client_auth()
-                .with_single_cert(cert_chain, key)?
-                .into();
+            let tls_config = rustls::ServerConfig::builder_with_protocol_versions(&[
+                &rustls::version::TLS13,
+                &rustls::version::TLS12,
+            ])
+            .with_no_client_auth()
+            .with_single_cert(cert_chain, key)?
+            .into();
 
             (tls_config, tls_server_end_point)
         }
@@ -127,7 +133,9 @@ async fn main() -> anyhow::Result<()> {
         proxy_listener,
         cancellation_token.clone(),
     ));
-    let signals_task = tokio::spawn(proxy::handle_signals(cancellation_token));
+    let signals_task = tokio::spawn(proxy::handle_signals(cancellation_token, || async {
+        Ok(())
+    }));
 
     // the signal task cant ever succeed.
     // the main task can error, or can succeed on cancellation.
@@ -171,16 +179,13 @@ async fn task_main(
                     .context("failed to set socket option")?;
 
                 info!(%peer_addr, "serving");
-                let mut ctx =
-                    RequestMonitoring::new(session_id, peer_addr.ip(), "sni_router", "sni");
-                handle_client(
-                    &mut ctx,
-                    dest_suffix,
-                    tls_config,
-                    tls_server_end_point,
-                    socket,
-                )
-                .await
+                let ctx = RequestMonitoring::new(
+                    session_id,
+                    peer_addr.ip(),
+                    proxy::metrics::Protocol::SniRouter,
+                    "sni",
+                );
+                handle_client(ctx, dest_suffix, tls_config, tls_server_end_point, socket).await
             }
             .unwrap_or_else(|e| {
                 // Acknowledge that the task has finished with an error.
@@ -202,6 +207,7 @@ async fn task_main(
 const ERR_INSECURE_CONNECTION: &str = "connection is insecure (try using `sslmode=require`)";
 
 async fn ssl_handshake<S: AsyncRead + AsyncWrite + Unpin>(
+    ctx: &RequestMonitoring,
     raw_stream: S,
     tls_config: Arc<rustls::ServerConfig>,
     tls_server_end_point: TlsServerEndPoint,
@@ -212,10 +218,11 @@ async fn ssl_handshake<S: AsyncRead + AsyncWrite + Unpin>(
     use pq_proto::FeStartupPacket::*;
 
     match msg {
-        SslRequest => {
+        SslRequest { direct: false } => {
             stream
                 .write_message(&pq_proto::BeMessage::EncryptionResponse(true))
                 .await?;
+
             // Upgrade raw stream into a secure TLS-backed stream.
             // NOTE: We've consumed `tls`; this fact will be used later.
 
@@ -231,7 +238,10 @@ async fn ssl_handshake<S: AsyncRead + AsyncWrite + Unpin>(
             }
 
             Ok(Stream::Tls {
-                tls: Box::new(raw.upgrade(tls_config).await?),
+                tls: Box::new(
+                    raw.upgrade(tls_config, !ctx.has_private_peer_addr())
+                        .await?,
+                ),
                 tls_server_end_point,
             })
         }
@@ -240,19 +250,21 @@ async fn ssl_handshake<S: AsyncRead + AsyncWrite + Unpin>(
                 ?unexpected,
                 "unexpected startup packet, rejecting connection"
             );
-            stream.throw_error_str(ERR_INSECURE_CONNECTION).await?
+            stream
+                .throw_error_str(ERR_INSECURE_CONNECTION, proxy::error::ErrorKind::User)
+                .await?
         }
     }
 }
 
 async fn handle_client(
-    ctx: &mut RequestMonitoring,
+    ctx: RequestMonitoring,
     dest_suffix: Arc<String>,
     tls_config: Arc<rustls::ServerConfig>,
     tls_server_end_point: TlsServerEndPoint,
     stream: impl AsyncRead + AsyncWrite + Unpin,
 ) -> anyhow::Result<()> {
-    let tls_stream = ssl_handshake(stream, tls_config, tls_server_end_point).await?;
+    let mut tls_stream = ssl_handshake(&ctx, stream, tls_config, tls_server_end_point).await?;
 
     // Cut off first part of the SNI domain
     // We receive required destination details in the format of
@@ -269,8 +281,18 @@ async fn handle_client(
 
     info!("destination: {}", destination);
 
-    let client = tokio::net::TcpStream::connect(destination).await?;
+    let mut client = tokio::net::TcpStream::connect(destination).await?;
 
-    let metrics_aux: MetricsAuxInfo = Default::default();
-    proxy::proxy::proxy_pass(ctx, tls_stream, client, metrics_aux).await
+    // doesn't yet matter as pg-sni-router doesn't report analytics logs
+    ctx.set_success();
+    ctx.log_connect();
+
+    // Starting from here we only proxy the client's traffic.
+    info!("performing the proxy pass...");
+
+    match copy_bidirectional_client_compute(&mut tls_stream, &mut client).await {
+        Ok(_) => Ok(()),
+        Err(ErrorSource::Client(err)) => Err(err).context("client"),
+        Err(ErrorSource::Compute(err)) => Err(err).context("compute"),
+    }
 }

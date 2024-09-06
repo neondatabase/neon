@@ -11,11 +11,11 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering as AtomicOrdering};
 /// Calculation consists of two stages:
 ///
 /// 1. Initial size calculation. That might take a long time, because it requires
-/// reading all layers containing relation sizes at `initial_part_end`.
+///    reading all layers containing relation sizes at `initial_part_end`.
 ///
 /// 2. Collecting an incremental part and adding that to the initial size.
-/// Increments are appended on walreceiver writing new timeline data,
-/// which result in increase or decrease of the logical size.
+///    Increments are appended on walreceiver writing new timeline data,
+///    which result in increase or decrease of the logical size.
 pub(super) struct LogicalSize {
     /// Size, potentially slow to compute. Calculating this might require reading multiple
     /// layers, and even ancestor's layers.
@@ -45,17 +45,17 @@ pub(super) struct LogicalSize {
     /// Size shouldn't ever be negative, but this is signed for two reasons:
     ///
     /// 1. If we initialized the "baseline" size lazily, while we already
-    /// process incoming WAL, the incoming WAL records could decrement the
-    /// variable and temporarily make it negative. (This is just future-proofing;
-    /// the initialization is currently not done lazily.)
+    ///    process incoming WAL, the incoming WAL records could decrement the
+    ///    variable and temporarily make it negative. (This is just future-proofing;
+    ///    the initialization is currently not done lazily.)
     ///
     /// 2. If there is a bug and we e.g. forget to increment it in some cases
-    /// when size grows, but remember to decrement it when it shrinks again, the
-    /// variable could go negative. In that case, it seems better to at least
-    /// try to keep tracking it, rather than clamp or overflow it. Note that
-    /// get_current_logical_size() will clamp the returned value to zero if it's
-    /// negative, and log an error. Could set it permanently to zero or some
-    /// special value to indicate "broken" instead, but this will do for now.
+    ///    when size grows, but remember to decrement it when it shrinks again, the
+    ///    variable could go negative. In that case, it seems better to at least
+    ///    try to keep tracking it, rather than clamp or overflow it. Note that
+    ///    get_current_logical_size() will clamp the returned value to zero if it's
+    ///    negative, and log an error. Could set it permanently to zero or some
+    ///    special value to indicate "broken" instead, but this will do for now.
     ///
     /// Note that we also expose a copy of this value as a prometheus metric,
     /// see `current_logical_size_gauge`. Use the `update_current_logical_size`
@@ -101,6 +101,14 @@ impl From<&Exact> for u64 {
     }
 }
 
+impl Approximate {
+    /// For use in situations where we don't have a sane logical size value but need
+    /// to return something, e.g. in HTTP API on shard >0 of a sharded tenant.
+    pub(crate) fn zero() -> Self {
+        Self(0)
+    }
+}
+
 impl CurrentLogicalSize {
     pub(crate) fn size_dont_care_about_accuracy(&self) -> u64 {
         match self {
@@ -113,6 +121,10 @@ impl CurrentLogicalSize {
             Self::Approximate(_) => Accuracy::Approximate,
             Self::Exact(_) => Accuracy::Exact,
         }
+    }
+
+    pub(crate) fn is_exact(&self) -> bool {
+        matches!(self, Self::Exact(_))
     }
 }
 

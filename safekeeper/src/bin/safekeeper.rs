@@ -12,31 +12,31 @@ use sd_notify::NotifyState;
 use tokio::runtime::Handle;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::task::JoinError;
-use toml_edit::Document;
+use utils::logging::SecretString;
 
+use std::env::{var, VarError};
 use std::fs::{self, File};
 use std::io::{ErrorKind, Write};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use storage_broker::Uri;
-use tokio::sync::mpsc;
 
 use tracing::*;
 use utils::pid_file;
 
 use metrics::set_build_info_metric;
 use safekeeper::defaults::{
-    DEFAULT_HEARTBEAT_TIMEOUT, DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_MAX_OFFLOADER_LAG_BYTES,
-    DEFAULT_PG_LISTEN_ADDR,
+    DEFAULT_CONTROL_FILE_SAVE_INTERVAL, DEFAULT_EVICTION_MIN_RESIDENT, DEFAULT_HEARTBEAT_TIMEOUT,
+    DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_MAX_OFFLOADER_LAG_BYTES, DEFAULT_PARTIAL_BACKUP_CONCURRENCY,
+    DEFAULT_PARTIAL_BACKUP_TIMEOUT, DEFAULT_PG_LISTEN_ADDR,
 };
+use safekeeper::http;
 use safekeeper::wal_service;
 use safekeeper::GlobalTimelines;
 use safekeeper::SafeKeeperConf;
 use safekeeper::{broker, WAL_SERVICE_RUNTIME};
 use safekeeper::{control_file, BROKER_RUNTIME};
-use safekeeper::{http, WAL_REMOVER_RUNTIME};
-use safekeeper::{remove_wal, WAL_BACKUP_RUNTIME};
 use safekeeper::{wal_backup, HTTP_RUNTIME};
 use storage_broker::DEFAULT_ENDPOINT;
 use utils::auth::{JwtAuth, Scope, SwappableJwtAuth};
@@ -125,7 +125,7 @@ struct Args {
     peer_recovery: bool,
     /// Remote storage configuration for WAL backup (offloading to s3) as TOML
     /// inline table, e.g.
-    ///   {"max_concurrent_syncs" = 17, "max_sync_errors": 13, "bucket_name": "<BUCKETNAME>", "bucket_region":"<REGION>", "concurrency_limit": 119}
+    ///   {max_concurrent_syncs = 17, max_sync_errors = 13, bucket_name = "<BUCKETNAME>", bucket_region = "<REGION>", concurrency_limit = 119}
     /// Safekeeper offloads WAL to
     ///   [prefix_in_bucket/]<tenant_id>/<timeline_id>/<segment_file>, mirroring
     /// structure on the file system.
@@ -166,6 +166,35 @@ struct Args {
     /// useful for debugging.
     #[arg(long)]
     current_thread_runtime: bool,
+    /// Keep horizon for walsenders, i.e. don't remove WAL segments that are
+    /// still needed for existing replication connection.
+    #[arg(long)]
+    walsenders_keep_horizon: bool,
+    /// Controls how long backup will wait until uploading the partial segment.
+    #[arg(long, value_parser = humantime::parse_duration, default_value = DEFAULT_PARTIAL_BACKUP_TIMEOUT, verbatim_doc_comment)]
+    partial_backup_timeout: Duration,
+    /// Disable task to push messages to broker every second. Supposed to
+    /// be used in tests.
+    #[arg(long)]
+    disable_periodic_broker_push: bool,
+    /// Enable automatic switching to offloaded state.
+    #[arg(long)]
+    enable_offload: bool,
+    /// Delete local WAL files after offloading. When disabled, they will be left on disk.
+    #[arg(long)]
+    delete_offloaded_wal: bool,
+    /// Pending updates to control file will be automatically saved after this interval.
+    #[arg(long, value_parser = humantime::parse_duration, default_value = DEFAULT_CONTROL_FILE_SAVE_INTERVAL)]
+    control_file_save_interval: Duration,
+    /// Number of allowed concurrent uploads of partial segments to remote storage.
+    #[arg(long, default_value = DEFAULT_PARTIAL_BACKUP_CONCURRENCY)]
+    partial_backup_concurrency: usize,
+    /// How long a timeline must be resident before it is eligible for eviction.
+    /// Usually, timeline eviction has to wait for `partial_backup_timeout` before being eligible for eviction,
+    /// but if a timeline is un-evicted and then _not_ written to, it would immediately flap to evicting again,
+    /// if it weren't for `eviction_min_resident` preventing that.
+    #[arg(long, value_parser = humantime::parse_duration, default_value = DEFAULT_EVICTION_MIN_RESIDENT)]
+    eviction_min_resident: Duration,
 }
 
 // Like PathBufValueParser, but allows empty string.
@@ -274,6 +303,22 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // Load JWT auth token to connect to other safekeepers for pull_timeline.
+    let sk_auth_token = match var("SAFEKEEPER_AUTH_TOKEN") {
+        Ok(v) => {
+            info!("loaded JWT token for authentication with safekeepers");
+            Some(SecretString::from(v))
+        }
+        Err(VarError::NotPresent) => {
+            info!("no JWT token for authentication with safekeepers detected");
+            None
+        }
+        Err(_) => {
+            warn!("JWT token for authentication with safekeepers is not unicode");
+            None
+        }
+    };
+
     let conf = SafeKeeperConf {
         workdir,
         my_id: id,
@@ -294,7 +339,16 @@ async fn main() -> anyhow::Result<()> {
         pg_auth,
         pg_tenant_only_auth,
         http_auth,
+        sk_auth_token,
         current_thread_runtime: args.current_thread_runtime,
+        walsenders_keep_horizon: args.walsenders_keep_horizon,
+        partial_backup_timeout: args.partial_backup_timeout,
+        disable_periodic_broker_push: args.disable_periodic_broker_push,
+        enable_offload: args.enable_offload,
+        delete_offloaded_wal: args.delete_offloaded_wal,
+        control_file_save_interval: args.control_file_save_interval,
+        partial_backup_concurrency: args.partial_backup_concurrency,
+        eviction_min_resident: args.eviction_min_resident,
     };
 
     // initialize sentry if SENTRY_DSN is provided
@@ -358,7 +412,7 @@ async fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
     let timeline_collector = safekeeper::metrics::TimelineCollector::new();
     metrics::register_internal(Box::new(timeline_collector))?;
 
-    let (wal_backup_launcher_tx, wal_backup_launcher_rx) = mpsc::channel(100);
+    wal_backup::init_remote_storage(&conf).await;
 
     // Keep handles to main tasks to die if any of them disappears.
     let mut tasks_handles: FuturesUnordered<BoxFuture<(String, JoinTaskRes)>> =
@@ -370,19 +424,9 @@ async fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
     let current_thread_rt = conf
         .current_thread_runtime
         .then(|| Handle::try_current().expect("no runtime in main"));
-    let conf_ = conf.clone();
-    let wal_backup_handle = current_thread_rt
-        .as_ref()
-        .unwrap_or_else(|| WAL_BACKUP_RUNTIME.handle())
-        .spawn(wal_backup::wal_backup_launcher_task_main(
-            conf_,
-            wal_backup_launcher_rx,
-        ))
-        .map(|res| ("WAL backup launcher".to_owned(), res));
-    tasks_handles.push(Box::pin(wal_backup_handle));
 
     // Load all timelines from disk to memory.
-    GlobalTimelines::init(conf.clone(), wal_backup_launcher_tx).await?;
+    GlobalTimelines::init(conf.clone()).await?;
 
     let conf_ = conf.clone();
     // Run everything in current thread rt, if asked.
@@ -401,6 +445,19 @@ async fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
         // wrap with task name for error reporting
         .map(|res| ("WAL service main".to_owned(), res));
     tasks_handles.push(Box::pin(wal_service_handle));
+
+    let timeline_housekeeping_handle = current_thread_rt
+        .as_ref()
+        .unwrap_or_else(|| WAL_SERVICE_RUNTIME.handle())
+        .spawn(async move {
+            const TOMBSTONE_TTL: Duration = Duration::from_secs(3600 * 24);
+            loop {
+                tokio::time::sleep(TOMBSTONE_TTL).await;
+                GlobalTimelines::housekeeping(&TOMBSTONE_TTL);
+            }
+        })
+        .map(|res| ("Timeline map housekeeping".to_owned(), res));
+    tasks_handles.push(Box::pin(timeline_housekeeping_handle));
 
     if let Some(pg_listener_tenant_only) = pg_listener_tenant_only {
         let conf_ = conf.clone();
@@ -432,14 +489,6 @@ async fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
         .spawn(broker::task_main(conf_).instrument(info_span!("broker")))
         .map(|res| ("broker main".to_owned(), res));
     tasks_handles.push(Box::pin(broker_task_handle));
-
-    let conf_ = conf.clone();
-    let wal_remover_handle = current_thread_rt
-        .as_ref()
-        .unwrap_or_else(|| WAL_REMOVER_RUNTIME.handle())
-        .spawn(remove_wal::task_main(conf_))
-        .map(|res| ("WAL remover".to_owned(), res));
-    tasks_handles.push(Box::pin(wal_remover_handle));
 
     set_build_info_metric(GIT_VERSION, BUILD_TAG);
 
@@ -517,16 +566,8 @@ fn set_id(workdir: &Utf8Path, given_id: Option<NodeId>) -> Result<NodeId> {
     Ok(my_id)
 }
 
-// Parse RemoteStorage from TOML table.
 fn parse_remote_storage(storage_conf: &str) -> anyhow::Result<RemoteStorageConfig> {
-    // funny toml doesn't consider plain inline table as valid document, so wrap in a key to parse
-    let storage_conf_toml = format!("remote_storage = {storage_conf}");
-    let parsed_toml = storage_conf_toml.parse::<Document>()?; // parse
-    let (_, storage_conf_parsed_toml) = parsed_toml.iter().next().unwrap(); // and strip key off again
-    RemoteStorageConfig::from_toml(storage_conf_parsed_toml).and_then(|parsed_config| {
-        // XXX: Don't print the original toml here, there might be some sensitive data
-        parsed_config.context("Incorrectly parsed remote storage toml as no remote storage config")
-    })
+    RemoteStorageConfig::from_toml(&storage_conf.parse()?)
 }
 
 #[test]

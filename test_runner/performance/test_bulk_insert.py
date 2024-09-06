@@ -1,10 +1,10 @@
 from contextlib import closing
 
 from fixtures.benchmark_fixture import MetricReport
+from fixtures.common_types import Lsn
 from fixtures.compare_fixtures import NeonCompare, PgCompare
-from fixtures.pageserver.utils import wait_tenant_status_404
+from fixtures.log_helper import log
 from fixtures.pg_version import PgVersion
-from fixtures.types import Lsn
 
 
 #
@@ -29,8 +29,8 @@ def test_bulk_insert(neon_with_baseline: PgCompare):
             # Run INSERT, recording the time and I/O it takes
             with env.record_pageserver_writes("pageserver_writes"):
                 with env.record_duration("insert"):
-                    cur.execute("insert into huge values (generate_series(1, 5000000), 0);")
-                    env.flush()
+                    cur.execute("insert into huge values (generate_series(1, 20000000), 0);")
+                    env.flush(compact=False, gc=False)
 
             env.report_peak_memory_use()
             env.report_size()
@@ -48,6 +48,9 @@ def test_bulk_insert(neon_with_baseline: PgCompare):
     if isinstance(env, NeonCompare):
         measure_recovery_time(env)
 
+    with env.record_duration("compaction"):
+        env.compact()
+
 
 def measure_recovery_time(env: NeonCompare):
     client = env.env.pageserver.http_client()
@@ -56,22 +59,23 @@ def measure_recovery_time(env: NeonCompare):
     # Delete the Tenant in the pageserver: this will drop local and remote layers, such that
     # when we "create" the Tenant again, we will replay the WAL from the beginning.
     #
-    # This is a "weird" thing to do, and can confuse the attachment service as we're re-using
+    # This is a "weird" thing to do, and can confuse the storage controller as we're re-using
     # the same tenant ID for a tenant that is logically different from the pageserver's point
     # of view, but the same as far as the safekeeper/WAL is concerned.  To work around that,
     # we will explicitly create the tenant in the same generation that it was previously
     # attached in.
-    attach_status = env.env.attachment_service.inspect(tenant_shard_id=env.tenant)
+    attach_status = env.env.storage_controller.inspect(tenant_shard_id=env.tenant)
     assert attach_status is not None
     (attach_gen, _) = attach_status
 
     client.tenant_delete(env.tenant)
-    wait_tenant_status_404(client, env.tenant, iterations=60, interval=0.5)
     env.env.pageserver.tenant_create(tenant_id=env.tenant, generation=attach_gen)
 
     # Measure recovery time
     with env.record_duration("wal_recovery"):
+        log.info("Entering recovery...")
         client.timeline_create(pg_version, env.tenant, env.timeline)
 
         # Flush, which will also wait for lsn to catch up
-        env.flush()
+        env.flush(compact=False, gc=False)
+        log.info("Finished recovery.")

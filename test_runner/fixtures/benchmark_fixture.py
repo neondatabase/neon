@@ -19,9 +19,9 @@ from _pytest.config.argparsing import Parser
 from _pytest.fixtures import FixtureRequest
 from _pytest.terminal import TerminalReporter
 
+from fixtures.common_types import TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonPageserver
-from fixtures.types import TenantId, TimelineId
 
 """
 This file contains fixtures for micro-benchmarks.
@@ -222,6 +222,8 @@ class NeonBenchmarker:
     function by the zenbenchmark fixture
     """
 
+    PROPERTY_PREFIX = "neon_benchmarker_"
+
     def __init__(self, property_recorder: Callable[[str, object], None]):
         # property recorder here is a pytest fixture provided by junitxml module
         # https://docs.pytest.org/en/6.2.x/reference.html#pytest.junitxml.record_property
@@ -238,7 +240,7 @@ class NeonBenchmarker:
         Record a benchmark result.
         """
         # just to namespace the value
-        name = f"neon_benchmarker_{metric_name}"
+        name = f"{self.PROPERTY_PREFIX}_{metric_name}"
         self.property_recorder(
             name,
             {
@@ -248,6 +250,18 @@ class NeonBenchmarker:
                 "report": report,
             },
         )
+
+    @classmethod
+    def records(
+        cls, user_properties: list[tuple[str, object]]
+    ) -> Iterator[tuple[str, dict[str, object]]]:
+        """
+        Yield all records related to benchmarks
+        """
+        for property_name, recorded_property in user_properties:
+            if property_name.startswith(cls.PROPERTY_PREFIX):
+                assert isinstance(recorded_property, dict)
+                yield recorded_property["name"], recorded_property
 
     @contextmanager
     def record_duration(self, metric_name: str) -> Iterator[None]:
@@ -425,10 +439,11 @@ def zenbenchmark(
     yield benchmarker
 
     results = {}
-    for _, recorded_property in request.node.user_properties:
+    for _, recorded_property in NeonBenchmarker.records(request.node.user_properties):
         name = recorded_property["name"]
         value = str(recorded_property["value"])
-        if (unit := recorded_property["unit"].strip()) != "":
+        unit = str(recorded_property["unit"]).strip()
+        if unit != "":
             value += f" {unit}"
         results[name] = value
 
@@ -477,25 +492,23 @@ def pytest_terminal_summary(
     for test_report in terminalreporter.stats.get("passed", []):
         result_entry = []
 
-        for _, recorded_property in test_report.user_properties:
+        for _, recorded_property in NeonBenchmarker.records(test_report.user_properties):
             if not is_header_printed:
                 terminalreporter.section("Benchmark results", "-")
                 is_header_printed = True
 
-            terminalreporter.write(
-                "{}.{}: ".format(test_report.head_line, recorded_property["name"])
-            )
+            terminalreporter.write(f"{test_report.head_line}.{recorded_property['name']}: ")
             unit = recorded_property["unit"]
             value = recorded_property["value"]
             if unit == "MB":
-                terminalreporter.write("{0:,.0f}".format(value), green=True)
+                terminalreporter.write(f"{value:,.0f}", green=True)
             elif unit in ("s", "ms") and isinstance(value, float):
-                terminalreporter.write("{0:,.3f}".format(value), green=True)
+                terminalreporter.write(f"{value:,.3f}", green=True)
             elif isinstance(value, float):
-                terminalreporter.write("{0:,.4f}".format(value), green=True)
+                terminalreporter.write(f"{value:,.4f}", green=True)
             else:
                 terminalreporter.write(str(value), green=True)
-            terminalreporter.line(" {}".format(unit))
+            terminalreporter.line(f" {unit}")
 
             result_entry.append(recorded_property)
 

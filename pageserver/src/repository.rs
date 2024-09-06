@@ -8,8 +8,7 @@ use std::time::Duration;
 pub use pageserver_api::key::{Key, KEY_SIZE};
 
 /// A 'value' stored for a one Key.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(test, derive(PartialEq))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Value {
     /// An Image value contains a full copy of the value
     Image(Bytes),
@@ -33,11 +32,53 @@ impl Value {
     }
 }
 
+#[derive(Debug, PartialEq)]
+pub(crate) enum InvalidInput {
+    TooShortValue,
+    TooShortPostgresRecord,
+}
+
+/// We could have a ValueRef where everything is `serde(borrow)`. Before implementing that, lets
+/// use this type for querying if a slice looks some particular way.
+pub(crate) struct ValueBytes;
+
+impl ValueBytes {
+    pub(crate) fn will_init(raw: &[u8]) -> Result<bool, InvalidInput> {
+        if raw.len() < 12 {
+            return Err(InvalidInput::TooShortValue);
+        }
+
+        let value_discriminator = &raw[0..4];
+
+        if value_discriminator == [0, 0, 0, 0] {
+            // Value::Image always initializes
+            return Ok(true);
+        }
+
+        if value_discriminator != [0, 0, 0, 1] {
+            // not a Value::WalRecord(..)
+            return Ok(false);
+        }
+
+        let walrecord_discriminator = &raw[4..8];
+
+        if walrecord_discriminator != [0, 0, 0, 0] {
+            // only NeonWalRecord::Postgres can have will_init
+            return Ok(false);
+        }
+
+        if raw.len() < 17 {
+            return Err(InvalidInput::TooShortPostgresRecord);
+        }
+
+        Ok(raw[8] == 1)
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
 
-    use bytes::Bytes;
     use utils::bin_ser::BeSer;
 
     macro_rules! roundtrip {
@@ -71,6 +112,8 @@ mod test {
         ];
 
         roundtrip!(image, expected);
+
+        assert!(ValueBytes::will_init(&expected).unwrap());
     }
 
     #[test]
@@ -94,6 +137,96 @@ mod test {
         ];
 
         roundtrip!(rec, expected);
+
+        assert!(ValueBytes::will_init(&expected).unwrap());
+    }
+
+    #[test]
+    fn bytes_inspection_too_short_image() {
+        let rec = Value::Image(Bytes::from_static(b""));
+
+        #[rustfmt::skip]
+        let expected = [
+            // top level discriminator of 4 bytes
+            0x00, 0x00, 0x00, 0x00,
+            // 8 byte length
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+
+        roundtrip!(rec, expected);
+
+        assert!(ValueBytes::will_init(&expected).unwrap());
+        assert_eq!(expected.len(), 12);
+        for len in 0..12 {
+            assert_eq!(
+                ValueBytes::will_init(&expected[..len]).unwrap_err(),
+                InvalidInput::TooShortValue
+            );
+        }
+    }
+
+    #[test]
+    fn bytes_inspection_too_short_postgres_record() {
+        let rec = NeonWalRecord::Postgres {
+            will_init: false,
+            rec: Bytes::from_static(b""),
+        };
+        let rec = Value::WalRecord(rec);
+
+        #[rustfmt::skip]
+        let expected = [
+            // flattened discriminator of total 8 bytes
+            0x00, 0x00, 0x00, 0x01,
+            0x00, 0x00, 0x00, 0x00,
+            // will_init
+            0x00,
+            // 8 byte length
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+
+        roundtrip!(rec, expected);
+
+        assert!(!ValueBytes::will_init(&expected).unwrap());
+        assert_eq!(expected.len(), 17);
+        for len in 12..17 {
+            assert_eq!(
+                ValueBytes::will_init(&expected[..len]).unwrap_err(),
+                InvalidInput::TooShortPostgresRecord
+            )
+        }
+        for len in 0..12 {
+            assert_eq!(
+                ValueBytes::will_init(&expected[..len]).unwrap_err(),
+                InvalidInput::TooShortValue
+            )
+        }
+    }
+
+    #[test]
+    fn clear_visibility_map_flags_example() {
+        let rec = NeonWalRecord::ClearVisibilityMapFlags {
+            new_heap_blkno: Some(0x11),
+            old_heap_blkno: None,
+            flags: 0x03,
+        };
+        let rec = Value::WalRecord(rec);
+
+        #[rustfmt::skip]
+        let expected = [
+            // discriminators
+            0x00, 0x00, 0x00, 0x01,
+            0x00, 0x00, 0x00, 0x01,
+            // Some == 1 followed by 4 bytes
+            0x01, 0x00, 0x00, 0x00, 0x11,
+            // None == 0
+            0x00,
+            // flags
+            0x03
+        ];
+
+        roundtrip!(rec, expected);
+
+        assert!(!ValueBytes::will_init(&expected).unwrap());
     }
 }
 
@@ -106,6 +239,7 @@ pub struct GcResult {
     pub layers_needed_by_cutoff: u64,
     pub layers_needed_by_pitr: u64,
     pub layers_needed_by_branches: u64,
+    pub layers_needed_by_leases: u64,
     pub layers_not_updated: u64,
     pub layers_removed: u64, // # of layer files removed because they have been made obsolete by newer ondisk files.
 
@@ -135,6 +269,7 @@ impl AddAssign for GcResult {
         self.layers_needed_by_pitr += other.layers_needed_by_pitr;
         self.layers_needed_by_cutoff += other.layers_needed_by_cutoff;
         self.layers_needed_by_branches += other.layers_needed_by_branches;
+        self.layers_needed_by_leases += other.layers_needed_by_leases;
         self.layers_not_updated += other.layers_not_updated;
         self.layers_removed += other.layers_removed;
 

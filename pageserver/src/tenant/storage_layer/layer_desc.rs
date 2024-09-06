@@ -5,17 +5,19 @@ use utils::{id::TimelineId, lsn::Lsn};
 
 use crate::repository::Key;
 
-use super::{DeltaFileName, ImageFileName, LayerFileName};
+use super::{DeltaLayerName, ImageLayerName, LayerName};
 
 use serde::{Deserialize, Serialize};
 
 #[cfg(test)]
 use utils::id::TenantId;
 
-/// A unique identifier of a persistent layer. This is different from `LayerDescriptor`, which is only used in the
-/// benchmarks. This struct contains all necessary information to find the image / delta layer. It also provides
+/// A unique identifier of a persistent layer.
+///
+/// This is different from `LayerDescriptor`, which is only used in the benchmarks.
+/// This struct contains all necessary information to find the image / delta layer. It also provides
 /// a unified way to generate layer information like file name.
-#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Hash)]
 pub struct PersistentLayerDesc {
     pub tenant_shard_id: TenantShardId,
     pub timeline_id: TimelineId,
@@ -25,7 +27,7 @@ pub struct PersistentLayerDesc {
     ///
     /// - For an open in-memory layer, the end bound is MAX_LSN
     /// - For a frozen in-memory layer or a delta layer, the end bound is a valid lsn after the
-    /// range start
+    ///   range start
     /// - An image layer represents snapshot at one LSN, so end_lsn is always the snapshot LSN + 1
     pub lsn_range: Range<Lsn>,
     /// Whether this is a delta layer, and also, is this incremental.
@@ -41,6 +43,20 @@ pub struct PersistentLayerKey {
     pub is_delta: bool,
 }
 
+impl std::fmt::Display for PersistentLayerKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}..{} {}..{} is_delta={}",
+            self.key_range.start,
+            self.key_range.end,
+            self.lsn_range.start,
+            self.lsn_range.end,
+            self.is_delta
+        )
+    }
+}
+
 impl PersistentLayerDesc {
     pub fn key(&self) -> PersistentLayerKey {
         PersistentLayerKey {
@@ -51,17 +67,17 @@ impl PersistentLayerDesc {
     }
 
     pub fn short_id(&self) -> impl Display {
-        self.filename()
+        self.layer_name()
     }
 
     #[cfg(test)]
-    pub fn new_test(key_range: Range<Key>) -> Self {
+    pub fn new_test(key_range: Range<Key>, lsn_range: Range<Lsn>, is_delta: bool) -> Self {
         Self {
             tenant_shard_id: TenantShardId::unsharded(TenantId::generate()),
             timeline_id: TimelineId::generate(),
             key_range,
-            lsn_range: Lsn(0)..Lsn(1),
-            is_delta: false,
+            lsn_range,
+            is_delta,
             file_size: 0,
         }
     }
@@ -103,14 +119,14 @@ impl PersistentLayerDesc {
     pub fn from_filename(
         tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
-        filename: LayerFileName,
+        filename: LayerName,
         file_size: u64,
     ) -> Self {
         match filename {
-            LayerFileName::Image(i) => {
+            LayerName::Image(i) => {
                 Self::new_img(tenant_shard_id, timeline_id, i.key_range, i.lsn, file_size)
             }
-            LayerFileName::Delta(d) => Self::new_delta(
+            LayerName::Delta(d) => Self::new_delta(
                 tenant_shard_id,
                 timeline_id,
                 d.key_range,
@@ -132,34 +148,34 @@ impl PersistentLayerDesc {
         lsn..(lsn + 1)
     }
 
-    /// Get a delta file name for this layer.
+    /// Get a delta layer name for this layer.
     ///
     /// Panic: if this is not a delta layer.
-    pub fn delta_file_name(&self) -> DeltaFileName {
+    pub fn delta_layer_name(&self) -> DeltaLayerName {
         assert!(self.is_delta);
-        DeltaFileName {
+        DeltaLayerName {
             key_range: self.key_range.clone(),
             lsn_range: self.lsn_range.clone(),
         }
     }
 
-    /// Get a delta file name for this layer.
+    /// Get a image layer name for this layer.
     ///
     /// Panic: if this is not an image layer, or the lsn range is invalid
-    pub fn image_file_name(&self) -> ImageFileName {
+    pub fn image_layer_name(&self) -> ImageLayerName {
         assert!(!self.is_delta);
         assert!(self.lsn_range.start + 1 == self.lsn_range.end);
-        ImageFileName {
+        ImageLayerName {
             key_range: self.key_range.clone(),
             lsn: self.lsn_range.start,
         }
     }
 
-    pub fn filename(&self) -> LayerFileName {
+    pub fn layer_name(&self) -> LayerName {
         if self.is_delta {
-            self.delta_file_name().into()
+            self.delta_layer_name().into()
         } else {
-            self.image_file_name().into()
+            self.image_layer_name().into()
         }
     }
 

@@ -17,17 +17,19 @@ use crate::metrics::{
     WALRECEIVER_ACTIVE_MANAGERS, WALRECEIVER_BROKER_UPDATES, WALRECEIVER_CANDIDATES_ADDED,
     WALRECEIVER_CANDIDATES_REMOVED, WALRECEIVER_SWITCHES,
 };
-use crate::task_mgr::{shutdown_token, TaskKind};
+use crate::task_mgr::TaskKind;
 use crate::tenant::{debug_assert_current_span_has_tenant_and_timeline_id, Timeline};
 use anyhow::Context;
 use chrono::{NaiveDateTime, Utc};
 use pageserver_api::models::TimelineState;
-use storage_broker::proto::subscribe_safekeeper_info_request::SubscriptionKey;
-use storage_broker::proto::SafekeeperTimelineInfo;
-use storage_broker::proto::SubscribeSafekeeperInfoRequest;
+
 use storage_broker::proto::TenantTimelineId as ProtoTenantTimelineId;
+use storage_broker::proto::{
+    FilterTenantTimelineId, MessageType, SafekeeperDiscoveryRequest, SafekeeperDiscoveryResponse,
+    SubscribeByFilterRequest, TypeSubscription, TypedMessage,
+};
 use storage_broker::{BrokerClientChannel, Code, Streaming};
-use tokio::select;
+use tokio_util::sync::CancellationToken;
 use tracing::*;
 
 use postgres_connection::PgConnectionConfig;
@@ -45,27 +47,33 @@ use super::{
     TaskEvent, TaskHandle,
 };
 
+pub(crate) struct Cancelled;
+
 /// Attempts to subscribe for timeline updates, pushed by safekeepers into the broker.
 /// Based on the updates, desides whether to start, keep or stop a WAL receiver task.
 /// If storage broker subscription is cancelled, exits.
+///
+/// # Cancel-Safety
+///
+/// Not cancellation-safe. Use `cancel` token to request cancellation.
 pub(super) async fn connection_manager_loop_step(
     broker_client: &mut BrokerClientChannel,
     connection_manager_state: &mut ConnectionManagerState,
     ctx: &RequestContext,
+    cancel: &CancellationToken,
     manager_status: &std::sync::RwLock<Option<ConnectionManagerStatus>>,
-) -> ControlFlow<(), ()> {
-    match connection_manager_state
-        .timeline
-        .wait_to_become_active(ctx)
-        .await
-    {
+) -> Result<(), Cancelled> {
+    match tokio::select! {
+        _ = cancel.cancelled() => { return Err(Cancelled); },
+        st = connection_manager_state.timeline.wait_to_become_active(ctx) => { st }
+    } {
         Ok(()) => {}
         Err(new_state) => {
             debug!(
                 ?new_state,
                 "state changed, stopping wal connection manager loop"
             );
-            return ControlFlow::Break(());
+            return Err(Cancelled);
         }
     }
 
@@ -83,17 +91,28 @@ pub(super) async fn connection_manager_loop_step(
         .timeline
         .subscribe_for_state_updates();
 
+    let mut wait_lsn_status = connection_manager_state
+        .timeline
+        .subscribe_for_wait_lsn_updates();
+
+    // TODO: create a separate config option for discovery request interval
+    let discovery_request_interval = connection_manager_state.conf.lagging_wal_timeout;
+    let mut last_discovery_ts: Option<std::time::Instant> = None;
+
     // Subscribe to the broker updates. Stream shares underlying TCP connection
     // with other streams on this client (other connection managers). When
     // object goes out of scope, stream finishes in drop() automatically.
-    let mut broker_subscription = subscribe_for_timeline_updates(broker_client, id).await;
+    let mut broker_subscription = subscribe_for_timeline_updates(broker_client, id, cancel).await?;
     debug!("Subscribed for broker timeline updates");
 
     loop {
         let time_until_next_retry = connection_manager_state.time_until_next_retry();
+        let any_activity = connection_manager_state.wal_connection.is_some()
+            || !connection_manager_state.wal_stream_candidates.is_empty();
 
         // These things are happening concurrently:
         //
+        //  - cancellation request
         //  - keep receiving WAL on the current connection
         //      - if the shared state says we need to change connection, disconnect and return
         //      - this runs in a separate task and we receive updates via a watch channel
@@ -101,7 +120,12 @@ pub(super) async fn connection_manager_loop_step(
         //  - receive updates from broker
         //      - this might change the current desired connection
         //  - timeline state changes to something that does not allow walreceiver to run concurrently
-        select! {
+        //  - if there's no connection and no candidates, try to send a discovery request
+
+        // NB: make sure each of the select expressions are cancellation-safe
+        // (no need for arms to be cancellation-safe).
+        tokio::select! {
+            _ = cancel.cancelled() => { return Err(Cancelled); }
             Some(wal_connection_update) = async {
                 match connection_manager_state.wal_connection.as_mut() {
                     Some(wal_connection) => Some(wal_connection.connection_task.next_task_event().await),
@@ -133,7 +157,7 @@ pub(super) async fn connection_manager_loop_step(
             },
 
             // Got a new update from the broker
-            broker_update = broker_subscription.message() => {
+            broker_update = broker_subscription.message() /* TODO: review cancellation-safety */ => {
                 match broker_update {
                     Ok(Some(broker_update)) => connection_manager_state.register_timeline_update(broker_update),
                     Err(status) => {
@@ -147,16 +171,17 @@ pub(super) async fn connection_manager_loop_step(
                                 warn!("broker subscription failed: {status}");
                             }
                         }
-                        return ControlFlow::Continue(());
+                        return Ok(());
                     }
                     Ok(None) => {
                         error!("broker subscription stream ended"); // can't happen
-                        return ControlFlow::Continue(());
+                        return Ok(());
                     }
                 }
             },
 
             new_event = async {
+                // Reminder: this match arm needs to be cancellation-safe.
                 loop {
                     if connection_manager_state.timeline.current_state() == TimelineState::Loading {
                         warn!("wal connection manager should only be launched after timeline has become active");
@@ -182,11 +207,11 @@ pub(super) async fn connection_manager_loop_step(
                 }
             } => match new_event {
                 ControlFlow::Continue(()) => {
-                    return ControlFlow::Continue(());
+                    return Ok(());
                 }
                 ControlFlow::Break(()) => {
                     debug!("Timeline is no longer active, stopping wal connection manager loop");
-                    return ControlFlow::Break(());
+                    return Err(Cancelled);
                 }
             },
 
@@ -202,6 +227,65 @@ pub(super) async fn connection_manager_loop_step(
                     }
                 }
             } => debug!("Waking up for the next retry after waiting for {time_until_next_retry:?}"),
+
+            Some(()) = async {
+                // Reminder: this match arm needs to be cancellation-safe.
+                // Calculating time needed to wait until sending the next discovery request.
+                // Current implementation is conservative and sends discovery requests only when there are no candidates.
+
+                if any_activity {
+                    // No need to send discovery requests if there is an active connection or candidates.
+                    return None;
+                }
+
+                // Waiting for an active wait_lsn request.
+                while wait_lsn_status.borrow().is_none() {
+                    if wait_lsn_status.changed().await.is_err() {
+                        // wait_lsn_status channel was closed, exiting
+                        warn!("wait_lsn_status channel was closed in connection_manager_loop_step");
+                        return None;
+                    }
+                }
+
+                // All preconditions met, preparing to send a discovery request.
+                let now = std::time::Instant::now();
+                let next_discovery_ts = last_discovery_ts
+                    .map(|ts| ts + discovery_request_interval)
+                    .unwrap_or_else(|| now);
+
+                if next_discovery_ts > now {
+                    // Prevent sending discovery requests too frequently.
+                    tokio::time::sleep(next_discovery_ts - now).await;
+                }
+
+                let tenant_timeline_id = Some(ProtoTenantTimelineId {
+                    tenant_id: id.tenant_id.as_ref().to_owned(),
+                    timeline_id: id.timeline_id.as_ref().to_owned(),
+                });
+                let request = SafekeeperDiscoveryRequest { tenant_timeline_id };
+                let msg = TypedMessage {
+                    r#type: MessageType::SafekeeperDiscoveryRequest as i32,
+                    safekeeper_timeline_info: None,
+                    safekeeper_discovery_request: Some(request),
+                    safekeeper_discovery_response: None,
+                    };
+
+                last_discovery_ts = Some(std::time::Instant::now());
+                debug!("No active connection and no candidates, sending discovery request to the broker");
+
+                // Cancellation safety: we want to send a message to the broker, but publish_one()
+                // function can get cancelled by the other select! arm. This is absolutely fine, because
+                // we just want to receive broker updates and discovery is not important if we already
+                // receive updates.
+                //
+                // It is possible that `last_discovery_ts` will be updated, but the message will not be sent.
+                // This is totally fine because of the reason above.
+
+                // This is a fire-and-forget request, we don't care about the response
+                let _ = broker_client.publish_one(msg).await;
+                debug!("Discovery request sent to the broker");
+                None
+            } => {}
         }
 
         if let Some(new_candidate) = connection_manager_state.next_connection_candidate() {
@@ -218,32 +302,46 @@ pub(super) async fn connection_manager_loop_step(
 async fn subscribe_for_timeline_updates(
     broker_client: &mut BrokerClientChannel,
     id: TenantTimelineId,
-) -> Streaming<SafekeeperTimelineInfo> {
+    cancel: &CancellationToken,
+) -> Result<Streaming<TypedMessage>, Cancelled> {
     let mut attempt = 0;
-    let cancel = shutdown_token();
-
     loop {
         exponential_backoff(
             attempt,
             DEFAULT_BASE_BACKOFF_SECONDS,
             DEFAULT_MAX_BACKOFF_SECONDS,
-            &cancel,
+            cancel,
         )
         .await;
         attempt += 1;
 
         // subscribe to the specific timeline
-        let key = SubscriptionKey::TenantTimelineId(ProtoTenantTimelineId {
-            tenant_id: id.tenant_id.as_ref().to_owned(),
-            timeline_id: id.timeline_id.as_ref().to_owned(),
-        });
-        let request = SubscribeSafekeeperInfoRequest {
-            subscription_key: Some(key),
+        let request = SubscribeByFilterRequest {
+            types: vec![
+                TypeSubscription {
+                    r#type: MessageType::SafekeeperTimelineInfo as i32,
+                },
+                TypeSubscription {
+                    r#type: MessageType::SafekeeperDiscoveryResponse as i32,
+                },
+            ],
+            tenant_timeline_id: Some(FilterTenantTimelineId {
+                enabled: true,
+                tenant_timeline_id: Some(ProtoTenantTimelineId {
+                    tenant_id: id.tenant_id.as_ref().to_owned(),
+                    timeline_id: id.timeline_id.as_ref().to_owned(),
+                }),
+            }),
         };
 
-        match broker_client.subscribe_safekeeper_info(request).await {
+        match {
+            tokio::select! {
+                r = broker_client.subscribe_by_filter(request) => { r }
+                _ = cancel.cancelled() => { return Err(Cancelled); }
+            }
+        } {
             Ok(resp) => {
-                return resp.into_inner();
+                return Ok(resp.into_inner());
             }
             Err(e) => {
                 // Safekeeper nodes can stop pushing timeline updates to the broker, when no new writes happen and
@@ -264,6 +362,8 @@ pub(super) struct ConnectionManagerState {
     id: TenantTimelineId,
     /// Use pageserver data about the timeline to filter out some of the safekeepers.
     timeline: Arc<Timeline>,
+    /// Child token of [`super::WalReceiver::cancel`], inherited to all tasks we spawn.
+    cancel: CancellationToken,
     conf: WalReceiverConf,
     /// Current connection to safekeeper for WAL streaming.
     wal_connection: Option<WalConnection>,
@@ -380,13 +480,17 @@ struct RetryInfo {
 /// Data about the timeline to connect to, received from the broker.
 #[derive(Debug, Clone)]
 struct BrokerSkTimeline {
-    timeline: SafekeeperTimelineInfo,
+    timeline: SafekeeperDiscoveryResponse,
     /// Time at which the data was fetched from the broker last time, to track the stale data.
     latest_update: NaiveDateTime,
 }
 
 impl ConnectionManagerState {
-    pub(super) fn new(timeline: Arc<Timeline>, conf: WalReceiverConf) -> Self {
+    pub(super) fn new(
+        timeline: Arc<Timeline>,
+        conf: WalReceiverConf,
+        cancel: CancellationToken,
+    ) -> Self {
         let id = TenantTimelineId {
             tenant_id: timeline.tenant_shard_id.tenant_id,
             timeline_id: timeline.timeline_id,
@@ -394,11 +498,28 @@ impl ConnectionManagerState {
         Self {
             id,
             timeline,
+            cancel,
             conf,
             wal_connection: None,
             wal_stream_candidates: HashMap::new(),
             wal_connection_retries: HashMap::new(),
         }
+    }
+
+    fn spawn<Fut>(
+        &self,
+        task: impl FnOnce(
+                tokio::sync::watch::Sender<TaskStateUpdate<WalConnectionStatus>>,
+                CancellationToken,
+            ) -> Fut
+            + Send
+            + 'static,
+    ) -> TaskHandle<WalConnectionStatus>
+    where
+        Fut: std::future::Future<Output = anyhow::Result<()>> + Send,
+    {
+        // TODO: get rid of TaskHandle
+        super::TaskHandle::spawn(&self.cancel, task)
     }
 
     /// Shuts down the current connection (if any) and immediately starts another one with the given connection string.
@@ -419,7 +540,7 @@ impl ConnectionManagerState {
         );
 
         let span = info_span!("connection", %node_id);
-        let connection_handle = TaskHandle::spawn(move |events_sender, cancellation| {
+        let connection_handle = self.spawn(move |events_sender, cancellation| {
             async move {
                 debug_assert_current_span_has_tenant_and_timeline_id();
 
@@ -445,6 +566,12 @@ impl ConnectionManagerState {
                             }
                             WalReceiverError::ExpectedSafekeeperError(e) => {
                                 info!("walreceiver connection handling ended: {e}");
+                                Ok(())
+                            }
+                            WalReceiverError::ClosedGate => {
+                                info!(
+                                    "walreceiver connection handling ended because of closed gate"
+                                );
                                 Ok(())
                             }
                             WalReceiverError::Other(e) => {
@@ -486,6 +613,10 @@ impl ConnectionManagerState {
 
     /// Drops the current connection (if any) and updates retry timeout for the next
     /// connection attempt to the same safekeeper.
+    ///
+    /// # Cancel-Safety
+    ///
+    /// Not cancellation-safe.
     async fn drop_old_connection(&mut self, needs_shutdown: bool) {
         let wal_connection = match self.wal_connection.take() {
             Some(wal_connection) => wal_connection,
@@ -493,7 +624,14 @@ impl ConnectionManagerState {
         };
 
         if needs_shutdown {
-            wal_connection.connection_task.shutdown().await;
+            wal_connection
+                .connection_task
+                .shutdown()
+                // This here is why this function isn't cancellation-safe.
+                // If we got cancelled here, then self.wal_connection is already None and we lose track of the task.
+                // Even if our caller diligently calls Self::shutdown(), it will find a self.wal_connection=None
+                // and thus be ineffective.
+                .await;
         }
 
         let retry = self
@@ -550,8 +688,58 @@ impl ConnectionManagerState {
     }
 
     /// Adds another broker timeline into the state, if its more recent than the one already added there for the same key.
-    fn register_timeline_update(&mut self, timeline_update: SafekeeperTimelineInfo) {
+    fn register_timeline_update(&mut self, typed_msg: TypedMessage) {
+        let mut is_discovery = false;
+        let timeline_update = match typed_msg.r#type() {
+            MessageType::SafekeeperTimelineInfo => {
+                let info = match typed_msg.safekeeper_timeline_info {
+                    Some(info) => info,
+                    None => {
+                        warn!("bad proto message from broker: no safekeeper_timeline_info");
+                        return;
+                    }
+                };
+                SafekeeperDiscoveryResponse {
+                    safekeeper_id: info.safekeeper_id,
+                    tenant_timeline_id: info.tenant_timeline_id,
+                    commit_lsn: info.commit_lsn,
+                    safekeeper_connstr: info.safekeeper_connstr,
+                    availability_zone: info.availability_zone,
+                    standby_horizon: info.standby_horizon,
+                }
+            }
+            MessageType::SafekeeperDiscoveryResponse => {
+                is_discovery = true;
+                match typed_msg.safekeeper_discovery_response {
+                    Some(response) => response,
+                    None => {
+                        warn!("bad proto message from broker: no safekeeper_discovery_response");
+                        return;
+                    }
+                }
+            }
+            _ => {
+                // unexpected message
+                return;
+            }
+        };
+
         WALRECEIVER_BROKER_UPDATES.inc();
+
+        trace!(
+            "safekeeper info update: standby_horizon(cutoff)={}",
+            timeline_update.standby_horizon
+        );
+        if timeline_update.standby_horizon != 0 {
+            // ignore reports from safekeepers not connected to replicas
+            self.timeline
+                .standby_horizon
+                .store(Lsn(timeline_update.standby_horizon));
+            self.timeline
+                .metrics
+                .standby_horizon_gauge
+                .set(timeline_update.standby_horizon as i64);
+        }
 
         let new_safekeeper_id = NodeId(timeline_update.safekeeper_id);
         let old_entry = self.wal_stream_candidates.insert(
@@ -563,7 +751,11 @@ impl ConnectionManagerState {
         );
 
         if old_entry.is_none() {
-            info!("New SK node was added: {new_safekeeper_id}");
+            info!(
+                ?is_discovery,
+                %new_safekeeper_id,
+                "New SK node was added",
+            );
             WALRECEIVER_CANDIDATES_ADDED.inc();
         }
     }
@@ -762,7 +954,7 @@ impl ConnectionManagerState {
     fn select_connection_candidate(
         &self,
         node_to_omit: Option<NodeId>,
-    ) -> Option<(NodeId, &SafekeeperTimelineInfo, PgConnectionConfig)> {
+    ) -> Option<(NodeId, &SafekeeperDiscoveryResponse, PgConnectionConfig)> {
         self.applicable_connection_candidates()
             .filter(|&(sk_id, _, _)| Some(sk_id) != node_to_omit)
             .max_by_key(|(_, info, _)| info.commit_lsn)
@@ -772,7 +964,7 @@ impl ConnectionManagerState {
     /// Some safekeepers are filtered by the retry cooldown.
     fn applicable_connection_candidates(
         &self,
-    ) -> impl Iterator<Item = (NodeId, &SafekeeperTimelineInfo, PgConnectionConfig)> {
+    ) -> impl Iterator<Item = (NodeId, &SafekeeperDiscoveryResponse, PgConnectionConfig)> {
         let now = Utc::now().naive_utc();
 
         self.wal_stream_candidates
@@ -838,6 +1030,9 @@ impl ConnectionManagerState {
         }
     }
 
+    /// # Cancel-Safety
+    ///
+    /// Not cancellation-safe.
     pub(super) async fn shutdown(mut self) {
         if let Some(wal_connection) = self.wal_connection.take() {
             wal_connection.connection_task.shutdown().await;
@@ -909,20 +1104,13 @@ mod tests {
         latest_update: NaiveDateTime,
     ) -> BrokerSkTimeline {
         BrokerSkTimeline {
-            timeline: SafekeeperTimelineInfo {
+            timeline: SafekeeperDiscoveryResponse {
                 safekeeper_id: 0,
                 tenant_timeline_id: None,
-                term: 0,
-                last_log_term: 0,
-                flush_lsn: 0,
                 commit_lsn,
-                backup_lsn: 0,
-                remote_consistent_lsn: 0,
-                peer_horizon_lsn: 0,
-                local_start_lsn: 0,
                 safekeeper_connstr: safekeeper_connstr.to_owned(),
-                http_connstr: safekeeper_connstr.to_owned(),
                 availability_zone: None,
+                standby_horizon: 0,
             },
             latest_update,
         }
@@ -930,7 +1118,7 @@ mod tests {
 
     #[tokio::test]
     async fn no_connection_no_candidate() -> anyhow::Result<()> {
-        let harness = TenantHarness::create("no_connection_no_candidate")?;
+        let harness = TenantHarness::create("no_connection_no_candidate").await?;
         let mut state = dummy_state(&harness).await;
         let now = Utc::now().naive_utc();
 
@@ -963,7 +1151,7 @@ mod tests {
 
     #[tokio::test]
     async fn connection_no_candidate() -> anyhow::Result<()> {
-        let harness = TenantHarness::create("connection_no_candidate")?;
+        let harness = TenantHarness::create("connection_no_candidate").await?;
         let mut state = dummy_state(&harness).await;
         let now = Utc::now().naive_utc();
 
@@ -986,7 +1174,7 @@ mod tests {
             sk_id: connected_sk_id,
             availability_zone: None,
             status: connection_status,
-            connection_task: TaskHandle::spawn(move |sender, _| async move {
+            connection_task: state.spawn(move |sender, _| async move {
                 sender
                     .send(TaskStateUpdate::Progress(connection_status))
                     .ok();
@@ -1028,7 +1216,7 @@ mod tests {
 
     #[tokio::test]
     async fn no_connection_candidate() -> anyhow::Result<()> {
-        let harness = TenantHarness::create("no_connection_candidate")?;
+        let harness = TenantHarness::create("no_connection_candidate").await?;
         let mut state = dummy_state(&harness).await;
         let now = Utc::now().naive_utc();
 
@@ -1091,7 +1279,7 @@ mod tests {
 
     #[tokio::test]
     async fn candidate_with_many_connection_failures() -> anyhow::Result<()> {
-        let harness = TenantHarness::create("candidate_with_many_connection_failures")?;
+        let harness = TenantHarness::create("candidate_with_many_connection_failures").await?;
         let mut state = dummy_state(&harness).await;
         let now = Utc::now().naive_utc();
 
@@ -1131,7 +1319,7 @@ mod tests {
 
     #[tokio::test]
     async fn lsn_wal_over_threshold_current_candidate() -> anyhow::Result<()> {
-        let harness = TenantHarness::create("lsn_wal_over_threshcurrent_candidate")?;
+        let harness = TenantHarness::create("lsn_wal_over_threshcurrent_candidate").await?;
         let mut state = dummy_state(&harness).await;
         let current_lsn = Lsn(100_000).align();
         let now = Utc::now().naive_utc();
@@ -1154,7 +1342,7 @@ mod tests {
             sk_id: connected_sk_id,
             availability_zone: None,
             status: connection_status,
-            connection_task: TaskHandle::spawn(move |sender, _| async move {
+            connection_task: state.spawn(move |sender, _| async move {
                 sender
                     .send(TaskStateUpdate::Progress(connection_status))
                     .ok();
@@ -1197,7 +1385,8 @@ mod tests {
 
     #[tokio::test]
     async fn timeout_connection_threshold_current_candidate() -> anyhow::Result<()> {
-        let harness = TenantHarness::create("timeout_connection_threshold_current_candidate")?;
+        let harness =
+            TenantHarness::create("timeout_connection_threshold_current_candidate").await?;
         let mut state = dummy_state(&harness).await;
         let current_lsn = Lsn(100_000).align();
         let now = Utc::now().naive_utc();
@@ -1221,7 +1410,7 @@ mod tests {
             sk_id: NodeId(1),
             availability_zone: None,
             status: connection_status,
-            connection_task: TaskHandle::spawn(move |sender, _| async move {
+            connection_task: state.spawn(move |sender, _| async move {
                 sender
                     .send(TaskStateUpdate::Progress(connection_status))
                     .ok();
@@ -1260,7 +1449,7 @@ mod tests {
 
     #[tokio::test]
     async fn timeout_wal_over_threshold_current_candidate() -> anyhow::Result<()> {
-        let harness = TenantHarness::create("timeout_wal_over_threshold_current_candidate")?;
+        let harness = TenantHarness::create("timeout_wal_over_threshold_current_candidate").await?;
         let mut state = dummy_state(&harness).await;
         let current_lsn = Lsn(100_000).align();
         let new_lsn = Lsn(100_100).align();
@@ -1285,7 +1474,7 @@ mod tests {
             sk_id: NodeId(1),
             availability_zone: None,
             status: connection_status,
-            connection_task: TaskHandle::spawn(move |_, _| async move { Ok(()) }),
+            connection_task: state.spawn(move |_, _| async move { Ok(()) }),
             discovered_new_wal: Some(NewCommittedWAL {
                 discovered_at: time_over_threshold,
                 lsn: new_lsn,
@@ -1341,6 +1530,7 @@ mod tests {
                 timeline_id: TIMELINE_ID,
             },
             timeline,
+            cancel: CancellationToken::new(),
             conf: WalReceiverConf {
                 wal_connect_timeout: Duration::from_secs(1),
                 lagging_wal_timeout: Duration::from_secs(1),
@@ -1361,9 +1551,9 @@ mod tests {
         // and pageserver should prefer to connect to it.
         let test_az = Some("test_az".to_owned());
 
-        let harness = TenantHarness::create("switch_to_same_availability_zone")?;
+        let harness = TenantHarness::create("switch_to_same_availability_zone").await?;
         let mut state = dummy_state(&harness).await;
-        state.conf.availability_zone = test_az.clone();
+        state.conf.availability_zone.clone_from(&test_az);
         let current_lsn = Lsn(100_000).align();
         let now = Utc::now().naive_utc();
 
@@ -1384,7 +1574,7 @@ mod tests {
             sk_id: connected_sk_id,
             availability_zone: None,
             status: connection_status,
-            connection_task: TaskHandle::spawn(move |sender, _| async move {
+            connection_task: state.spawn(move |sender, _| async move {
                 sender
                     .send(TaskStateUpdate::Progress(connection_status))
                     .ok();
@@ -1396,7 +1586,7 @@ mod tests {
         // We have another safekeeper with the same commit_lsn, and it have the same availability zone as
         // the current pageserver.
         let mut same_az_sk = dummy_broker_sk_timeline(current_lsn.0, "same_az", now);
-        same_az_sk.timeline.availability_zone = test_az.clone();
+        same_az_sk.timeline.availability_zone.clone_from(&test_az);
 
         state.wal_stream_candidates = HashMap::from([
             (

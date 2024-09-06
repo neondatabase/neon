@@ -3,8 +3,6 @@ import os
 from typing import Optional
 
 import pytest
-from _pytest.config import Config
-from _pytest.config.argparsing import Parser
 
 """
 This fixture is used to determine which version of Postgres to use for tests.
@@ -52,7 +50,7 @@ class PgVersion(str, enum.Enum):
         return None
 
 
-DEFAULT_VERSION: PgVersion = PgVersion.V14
+DEFAULT_VERSION: PgVersion = PgVersion.V16
 
 
 def skip_on_postgres(version: PgVersion, reason: str):
@@ -69,15 +67,8 @@ def xfail_on_postgres(version: PgVersion, reason: str):
     )
 
 
-def pytest_addoption(parser: Parser):
-    parser.addoption(
-        "--pg-version",
-        action="store",
-        type=PgVersion,
-        help="DEPRECATED: Postgres version to use for tests",
+def run_only_on_default_postgres(reason: str):
+    return pytest.mark.skipif(
+        PgVersion(os.environ.get("DEFAULT_PG_VERSION", DEFAULT_VERSION)) is not DEFAULT_VERSION,
+        reason=reason,
     )
-
-
-def pytest_configure(config: Config):
-    if config.getoption("--pg-version"):
-        raise Exception("--pg-version is deprecated, use DEFAULT_PG_VERSION env var instead")

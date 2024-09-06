@@ -59,3 +59,5 @@ def test_neon_two_primary_endpoints_fail(
     env.neon_cli.endpoint_stop("ep1")
     # ep1 is stopped so create ep2 will succeed
     env.neon_cli.endpoint_start("ep2")
+    # cleanup
+    env.neon_cli.endpoint_stop("ep2")

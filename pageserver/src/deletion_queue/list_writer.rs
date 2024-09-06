@@ -34,7 +34,7 @@ use crate::deletion_queue::TEMP_SUFFIX;
 use crate::metrics;
 use crate::tenant::remote_timeline_client::remote_layer_path;
 use crate::tenant::remote_timeline_client::LayerFileMetadata;
-use crate::tenant::storage_layer::LayerFileName;
+use crate::tenant::storage_layer::LayerName;
 use crate::virtual_file::on_fatal_io_error;
 use crate::virtual_file::MaybeFatalIo;
 
@@ -59,7 +59,7 @@ pub(super) struct DeletionOp {
     // `layers` and `objects` are both just lists of objects.  `layers` is used if you do not
     // have a config object handy to project it to a remote key, and need the consuming worker
     // to do it for you.
-    pub(super) layers: Vec<(LayerFileName, LayerFileMetadata)>,
+    pub(super) layers: Vec<(LayerName, LayerFileMetadata)>,
     pub(super) objects: Vec<RemotePath>,
 
     /// The _current_ generation of the Tenant shard attachment in which we are enqueuing

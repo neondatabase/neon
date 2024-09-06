@@ -20,13 +20,13 @@
 //!
 //! // Then, in the main code:
 //!
-//! let span = tracing::info_span!("TestSpan", test_id = 1);
+//! let span = tracing::info_span!("TestSpan", tenant_id = 1);
 //! let _guard = span.enter();
 //!
 //! // ... down the call stack
 //!
-//! use utils::tracing_span_assert::{check_fields_present, MultiNameExtractor};
-//! let extractor = MultiNameExtractor::new("TestExtractor", ["test", "test_id"]);
+//! use utils::tracing_span_assert::{check_fields_present, ConstExtractor};
+//! let extractor = ConstExtractor::new("tenant_id");
 //! if let Err(missing) = check_fields_present!([&extractor]) {
 //!    // if you copypaste this to a custom assert method, remember to add #[track_caller]
 //!    // to get the "user" code location for the panic.
@@ -45,27 +45,26 @@ pub enum ExtractionResult {
 }
 
 pub trait Extractor: Send + Sync + std::fmt::Debug {
-    fn name(&self) -> &str;
+    fn id(&self) -> &str;
     fn extract(&self, fields: &tracing::field::FieldSet) -> ExtractionResult;
 }
 
 #[derive(Debug)]
-pub struct MultiNameExtractor<const L: usize> {
-    name: &'static str,
-    field_names: [&'static str; L],
+pub struct ConstExtractor {
+    field_name: &'static str,
 }
 
-impl<const L: usize> MultiNameExtractor<L> {
-    pub fn new(name: &'static str, field_names: [&'static str; L]) -> MultiNameExtractor<L> {
-        MultiNameExtractor { name, field_names }
+impl ConstExtractor {
+    pub const fn new(field_name: &'static str) -> ConstExtractor {
+        ConstExtractor { field_name }
     }
 }
-impl<const L: usize> Extractor for MultiNameExtractor<L> {
-    fn name(&self) -> &str {
-        self.name
+impl Extractor for ConstExtractor {
+    fn id(&self) -> &str {
+        self.field_name
     }
     fn extract(&self, fields: &tracing::field::FieldSet) -> ExtractionResult {
-        if fields.iter().any(|f| self.field_names.contains(&f.name())) {
+        if fields.iter().any(|f| f.name() == self.field_name) {
             ExtractionResult::Present
         } else {
             ExtractionResult::Absent
@@ -203,19 +202,19 @@ mod tests {
     }
     impl<'a> fmt::Debug for MemoryIdentity<'a> {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "{:p}: {}", self.as_ptr(), self.0.name())
+            write!(f, "{:p}: {}", self.as_ptr(), self.0.id())
         }
     }
 
     struct Setup {
         _current_thread_subscriber_guard: tracing::subscriber::DefaultGuard,
-        tenant_extractor: MultiNameExtractor<2>,
-        timeline_extractor: MultiNameExtractor<2>,
+        tenant_extractor: ConstExtractor,
+        timeline_extractor: ConstExtractor,
     }
 
     fn setup_current_thread() -> Setup {
-        let tenant_extractor = MultiNameExtractor::new("TenantId", ["tenant_id", "tenant"]);
-        let timeline_extractor = MultiNameExtractor::new("TimelineId", ["timeline_id", "timeline"]);
+        let tenant_extractor = ConstExtractor::new("tenant_id");
+        let timeline_extractor = ConstExtractor::new("timeline_id");
 
         let registry = tracing_subscriber::registry()
             .with(tracing_subscriber::fmt::layer())
@@ -343,12 +342,12 @@ mod tests {
         let span = tracing::info_span!("foo", e = "some value");
         let _guard = span.enter();
 
-        let extractor = MultiNameExtractor::new("E", ["e"]);
+        let extractor = ConstExtractor::new("e");
         let res = check_fields_present0([&extractor]);
         assert!(matches!(res, Ok(Summary::Unconfigured)), "{res:?}");
 
         // similarly for a not found key
-        let extractor = MultiNameExtractor::new("F", ["foobar"]);
+        let extractor = ConstExtractor::new("foobar");
         let res = check_fields_present0([&extractor]);
         assert!(matches!(res, Ok(Summary::Unconfigured)), "{res:?}");
     }
@@ -368,16 +367,14 @@ mod tests {
         // normally this would work, but without any tracing-subscriber configured, both
         // check_field_present find nothing
         let _guard = subspan.enter();
-        let extractors: [&dyn Extractor; 2] = [
-            &MultiNameExtractor::new("E", ["e"]),
-            &MultiNameExtractor::new("F", ["f"]),
-        ];
+        let extractors: [&dyn Extractor; 2] =
+            [&ConstExtractor::new("e"), &ConstExtractor::new("f")];
 
         let res = check_fields_present0(extractors);
         assert!(matches!(res, Ok(Summary::Unconfigured)), "{res:?}");
 
         // similarly for a not found key
-        let extractor = MultiNameExtractor::new("G", ["g"]);
+        let extractor = ConstExtractor::new("g");
         let res = check_fields_present0([&extractor]);
         assert!(matches!(res, Ok(Summary::Unconfigured)), "{res:?}");
     }
@@ -410,7 +407,7 @@ mod tests {
         let span = tracing::info_span!("foo", e = "some value");
         let _guard = span.enter();
 
-        let extractors: [&dyn Extractor; 1] = [&MultiNameExtractor::new("E", ["e"])];
+        let extractors: [&dyn Extractor; 1] = [&ConstExtractor::new("e")];
 
         if span.is_disabled() {
             // the tests are running single threaded, or we got lucky and no other tests subscriber

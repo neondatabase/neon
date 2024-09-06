@@ -196,8 +196,13 @@ impl SubscriptionKey {
 
     /// Parse from FilterTenantTimelineId
     pub fn from_proto_filter_tenant_timeline_id(
-        f: &FilterTenantTimelineId,
+        opt: Option<&FilterTenantTimelineId>,
     ) -> Result<Self, Status> {
+        if opt.is_none() {
+            return Ok(SubscriptionKey::All);
+        }
+
+        let f = opt.unwrap();
         if !f.enabled {
             return Ok(SubscriptionKey::All);
         }
@@ -534,10 +539,7 @@ impl BrokerService for Broker {
             .remote_addr()
             .expect("TCPConnectInfo inserted by handler");
         let proto_filter = request.into_inner();
-        let ttid_filter = proto_filter
-            .tenant_timeline_id
-            .as_ref()
-            .ok_or_else(|| Status::new(Code::InvalidArgument, "missing tenant_timeline_id"))?;
+        let ttid_filter = proto_filter.tenant_timeline_id.as_ref();
 
         let sub_key = SubscriptionKey::from_proto_filter_tenant_timeline_id(ttid_filter)?;
         let types_set = proto_filter
@@ -640,8 +642,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     logging::replace_panic_hook_with_tracing_panic_hook().forget();
     // initialize sentry if SENTRY_DSN is provided
     let _sentry_guard = init_sentry(Some(GIT_VERSION.into()), &[]);
-    info!("version: {GIT_VERSION}");
-    info!("build_tag: {BUILD_TAG}");
+    info!("version: {GIT_VERSION} build_tag: {BUILD_TAG}");
     metrics::set_build_info_metric(GIT_VERSION, BUILD_TAG);
 
     // On any shutdown signal, log receival and exit.
@@ -734,6 +735,7 @@ mod tests {
             http_connstr: "neon-1-sk-1.local:7677".to_owned(),
             local_start_lsn: 0,
             availability_zone: None,
+            standby_horizon: 0,
         })
     }
 

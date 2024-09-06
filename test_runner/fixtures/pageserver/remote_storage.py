@@ -6,13 +6,13 @@ import threading
 from pathlib import Path
 from typing import Any, List, Tuple
 
+from fixtures.common_types import TenantId, TimelineId
 from fixtures.neon_fixtures import NeonEnv, Pagectl
-from fixtures.pageserver.types import (
+from fixtures.pageserver.common_types import (
     InvalidFileName,
     parse_layer_file_name,
 )
 from fixtures.remote_storage import LocalFsStorage
-from fixtures.types import TenantId, TimelineId
 
 
 def duplicate_one_tenant(env: NeonEnv, template_tenant: TenantId, new_tenant: TenantId):

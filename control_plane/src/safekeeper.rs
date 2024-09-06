@@ -5,8 +5,10 @@
 //! ```text
 //!   .neon/safekeepers/<safekeeper id>
 //! ```
+use std::future::Future;
 use std::io::Write;
 use std::path::PathBuf;
+use std::time::Duration;
 use std::{io, result};
 
 use anyhow::Context;
@@ -14,6 +16,7 @@ use camino::Utf8PathBuf;
 use postgres_connection::PgConnectionConfig;
 use reqwest::{IntoUrl, Method};
 use thiserror::Error;
+use utils::auth::{Claims, Scope};
 use utils::{http::error::HttpErrorBody, id::NodeId};
 
 use crate::{
@@ -32,12 +35,10 @@ pub enum SafekeeperHttpError {
 
 type Result<T> = result::Result<T, SafekeeperHttpError>;
 
-#[async_trait::async_trait]
-pub trait ResponseErrorMessageExt: Sized {
-    async fn error_from_body(self) -> Result<Self>;
+pub(crate) trait ResponseErrorMessageExt: Sized {
+    fn error_from_body(self) -> impl Future<Output = Result<Self>> + Send;
 }
 
-#[async_trait::async_trait]
 impl ResponseErrorMessageExt for reqwest::Response {
     async fn error_from_body(self) -> Result<Self> {
         let status = self.status();
@@ -70,24 +71,31 @@ pub struct SafekeeperNode {
     pub pg_connection_config: PgConnectionConfig,
     pub env: LocalEnv,
     pub http_client: reqwest::Client,
+    pub listen_addr: String,
     pub http_base_url: String,
 }
 
 impl SafekeeperNode {
     pub fn from_env(env: &LocalEnv, conf: &SafekeeperConf) -> SafekeeperNode {
+        let listen_addr = if let Some(ref listen_addr) = conf.listen_addr {
+            listen_addr.clone()
+        } else {
+            "127.0.0.1".to_string()
+        };
         SafekeeperNode {
             id: conf.id,
             conf: conf.clone(),
-            pg_connection_config: Self::safekeeper_connection_config(conf.pg_port),
+            pg_connection_config: Self::safekeeper_connection_config(&listen_addr, conf.pg_port),
             env: env.clone(),
             http_client: reqwest::Client::new(),
-            http_base_url: format!("http://127.0.0.1:{}/v1", conf.http_port),
+            http_base_url: format!("http://{}:{}/v1", listen_addr, conf.http_port),
+            listen_addr,
         }
     }
 
     /// Construct libpq connection string for connecting to this safekeeper.
-    fn safekeeper_connection_config(port: u16) -> PgConnectionConfig {
-        PgConnectionConfig::new_host_port(url::Host::parse("127.0.0.1").unwrap(), port)
+    fn safekeeper_connection_config(addr: &str, port: u16) -> PgConnectionConfig {
+        PgConnectionConfig::new_host_port(url::Host::parse(addr).unwrap(), port)
     }
 
     pub fn datadir_path_by_id(env: &LocalEnv, sk_id: NodeId) -> PathBuf {
@@ -103,16 +111,21 @@ impl SafekeeperNode {
             .expect("non-Unicode path")
     }
 
-    pub async fn start(&self, extra_opts: Vec<String>) -> anyhow::Result<()> {
+    pub async fn start(
+        &self,
+        extra_opts: Vec<String>,
+        retry_timeout: &Duration,
+    ) -> anyhow::Result<()> {
         print!(
-            "Starting safekeeper at '{}' in '{}'",
+            "Starting safekeeper at '{}' in '{}', retrying for {:?}",
             self.pg_connection_config.raw_address(),
-            self.datadir_path().display()
+            self.datadir_path().display(),
+            retry_timeout,
         );
         io::stdout().flush().unwrap();
 
-        let listen_pg = format!("127.0.0.1:{}", self.conf.pg_port);
-        let listen_http = format!("127.0.0.1:{}", self.conf.http_port);
+        let listen_pg = format!("{}:{}", self.listen_addr, self.conf.pg_port);
+        let listen_http = format!("{}:{}", self.listen_addr, self.conf.http_port);
         let id = self.id;
         let datadir = self.datadir_path();
 
@@ -139,7 +152,7 @@ impl SafekeeperNode {
             availability_zone,
         ];
         if let Some(pg_tenant_only_port) = self.conf.pg_tenant_only_port {
-            let listen_pg_tenant_only = format!("127.0.0.1:{}", pg_tenant_only_port);
+            let listen_pg_tenant_only = format!("{}:{}", self.listen_addr, pg_tenant_only_port);
             args.extend(["--listen-pg-tenant-only".to_owned(), listen_pg_tenant_only]);
         }
         if !self.conf.sync {
@@ -190,8 +203,9 @@ impl SafekeeperNode {
             &datadir,
             &self.env.safekeeper_bin(),
             &args,
-            [],
+            self.safekeeper_env_variables()?,
             background_process::InitialPidFile::Expect(self.pid_file()),
+            retry_timeout,
             || async {
                 match self.check_status().await {
                     Ok(()) => Ok(true),
@@ -201,6 +215,18 @@ impl SafekeeperNode {
             },
         )
         .await
+    }
+
+    fn safekeeper_env_variables(&self) -> anyhow::Result<Vec<(String, String)>> {
+        // Generate a token to connect from safekeeper to peers
+        if self.conf.auth_enabled {
+            let token = self
+                .env
+                .generate_auth_token(&Claims::new(None, Scope::SafekeeperData))?;
+            Ok(vec![("SAFEKEEPER_AUTH_TOKEN".to_owned(), token)])
+        } else {
+            Ok(Vec::new())
+        }
     }
 
     ///

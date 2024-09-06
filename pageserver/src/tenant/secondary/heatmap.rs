@@ -1,8 +1,6 @@
 use std::time::SystemTime;
 
-use crate::tenant::{
-    remote_timeline_client::index::IndexLayerMetadata, storage_layer::LayerFileName,
-};
+use crate::tenant::{remote_timeline_client::index::LayerFileMetadata, storage_layer::LayerName};
 
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr, TimestampSeconds};
@@ -17,22 +15,30 @@ pub(super) struct HeatMapTenant {
     pub(super) generation: Generation,
 
     pub(super) timelines: Vec<HeatMapTimeline>,
+
+    /// Uploaders provide their own upload period in the heatmap, as a hint to downloaders
+    /// of how frequently it is worthwhile to check for updates.
+    ///
+    /// This is optional for backward compat, and because we sometimes might upload
+    /// a heatmap explicitly via API for a tenant that has no periodic upload configured.
+    #[serde(default)]
+    pub(super) upload_period_ms: Option<u128>,
 }
 
 #[serde_as]
 #[derive(Serialize, Deserialize)]
 pub(crate) struct HeatMapTimeline {
     #[serde_as(as = "DisplayFromStr")]
-    pub(super) timeline_id: TimelineId,
+    pub(crate) timeline_id: TimelineId,
 
-    pub(super) layers: Vec<HeatMapLayer>,
+    pub(crate) layers: Vec<HeatMapLayer>,
 }
 
 #[serde_as]
 #[derive(Serialize, Deserialize)]
 pub(crate) struct HeatMapLayer {
-    pub(super) name: LayerFileName,
-    pub(super) metadata: IndexLayerMetadata,
+    pub(crate) name: LayerName,
+    pub(crate) metadata: LayerFileMetadata,
 
     #[serde_as(as = "TimestampSeconds<i64>")]
     pub(super) access_time: SystemTime,
@@ -42,8 +48,8 @@ pub(crate) struct HeatMapLayer {
 
 impl HeatMapLayer {
     pub(crate) fn new(
-        name: LayerFileName,
-        metadata: IndexLayerMetadata,
+        name: LayerName,
+        metadata: LayerFileMetadata,
         access_time: SystemTime,
     ) -> Self {
         Self {
@@ -59,6 +65,45 @@ impl HeatMapTimeline {
         Self {
             timeline_id,
             layers,
+        }
+    }
+}
+
+pub(crate) struct HeatMapStats {
+    pub(crate) bytes: u64,
+    pub(crate) layers: usize,
+}
+
+impl HeatMapTenant {
+    pub(crate) fn get_stats(&self) -> HeatMapStats {
+        let mut stats = HeatMapStats {
+            bytes: 0,
+            layers: 0,
+        };
+        for timeline in &self.timelines {
+            for layer in &timeline.layers {
+                stats.layers += 1;
+                stats.bytes += layer.metadata.file_size;
+            }
+        }
+
+        stats
+    }
+
+    pub(crate) fn strip_atimes(self) -> Self {
+        Self {
+            timelines: self
+                .timelines
+                .into_iter()
+                .map(|mut tl| {
+                    for layer in &mut tl.layers {
+                        layer.access_time = SystemTime::UNIX_EPOCH;
+                    }
+                    tl
+                })
+                .collect(),
+            generation: self.generation,
+            upload_period_ms: self.upload_period_ms,
         }
     }
 }

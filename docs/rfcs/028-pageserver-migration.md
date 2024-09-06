@@ -596,4 +596,4 @@ pageservers are updated to be aware of it.
 
 As well as simplifying implementation, putting heatmaps in S3 will be useful
 for future analytics purposes -- gathering aggregated statistics on activity
-pattersn across many tenants may be done directly from data in S3.
+patterns across many tenants may be done directly from data in S3.

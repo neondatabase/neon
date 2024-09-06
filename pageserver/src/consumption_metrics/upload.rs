@@ -1,4 +1,9 @@
+use std::time::SystemTime;
+
+use chrono::{DateTime, Utc};
 use consumption_metrics::{Event, EventChunk, IdempotencyKey, CHUNK_SIZE};
+use remote_storage::{GenericRemoteStorage, RemotePath};
+use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
@@ -13,21 +18,22 @@ struct Ids {
     pub(super) timeline_id: Option<TimelineId>,
 }
 
+/// Serialize and write metrics to an HTTP endpoint
 #[tracing::instrument(skip_all, fields(metrics_total = %metrics.len()))]
-pub(super) async fn upload_metrics(
+pub(super) async fn upload_metrics_http(
     client: &reqwest::Client,
     metric_collection_endpoint: &reqwest::Url,
     cancel: &CancellationToken,
-    node_id: &str,
     metrics: &[RawMetric],
     cached_metrics: &mut Cache,
+    idempotency_keys: &[IdempotencyKey<'_>],
 ) -> anyhow::Result<()> {
     let mut uploaded = 0;
     let mut failed = 0;
 
     let started_at = std::time::Instant::now();
 
-    let mut iter = serialize_in_chunks(CHUNK_SIZE, metrics, node_id);
+    let mut iter = serialize_in_chunks(CHUNK_SIZE, metrics, idempotency_keys);
 
     while let Some(res) = iter.next() {
         let (chunk, body) = res?;
@@ -74,29 +80,86 @@ pub(super) async fn upload_metrics(
     Ok(())
 }
 
-// The return type is quite ugly, but we gain testability in isolation
-fn serialize_in_chunks<'a, F>(
+/// Serialize and write metrics to a remote storage object
+#[tracing::instrument(skip_all, fields(metrics_total = %metrics.len()))]
+pub(super) async fn upload_metrics_bucket(
+    client: &GenericRemoteStorage,
+    cancel: &CancellationToken,
+    node_id: &str,
+    metrics: &[RawMetric],
+    idempotency_keys: &[IdempotencyKey<'_>],
+) -> anyhow::Result<()> {
+    if metrics.is_empty() {
+        // Skip uploads if we have no metrics, so that readers don't have to handle the edge case
+        // of an empty object.
+        return Ok(());
+    }
+
+    // Compose object path
+    let datetime: DateTime<Utc> = SystemTime::now().into();
+    let ts_prefix = datetime.format("year=%Y/month=%m/day=%d/%H:%M:%SZ");
+    let path = RemotePath::from_string(&format!("{ts_prefix}_{node_id}.ndjson.gz"))?;
+
+    // Set up a gzip writer into a buffer
+    let mut compressed_bytes: Vec<u8> = Vec::new();
+    let compressed_writer = std::io::Cursor::new(&mut compressed_bytes);
+    let mut gzip_writer = async_compression::tokio::write::GzipEncoder::new(compressed_writer);
+
+    // Serialize and write into compressed buffer
+    let started_at = std::time::Instant::now();
+    for res in serialize_in_chunks(CHUNK_SIZE, metrics, idempotency_keys) {
+        let (_chunk, body) = res?;
+        gzip_writer.write_all(&body).await?;
+    }
+    gzip_writer.flush().await?;
+    gzip_writer.shutdown().await?;
+    let compressed_length = compressed_bytes.len();
+
+    // Write to remote storage
+    client
+        .upload_storage_object(
+            futures::stream::once(futures::future::ready(Ok(compressed_bytes.into()))),
+            compressed_length,
+            &path,
+            cancel,
+        )
+        .await?;
+    let elapsed = started_at.elapsed();
+
+    tracing::info!(
+        compressed_length,
+        elapsed_ms = elapsed.as_millis(),
+        "write metrics bucket at {path}",
+    );
+
+    Ok(())
+}
+
+/// Serializes the input metrics as JSON in chunks of chunk_size. The provided
+/// idempotency keys are injected into the corresponding metric events (reused
+/// across different metrics sinks), and must have the same length as input.
+fn serialize_in_chunks<'a>(
     chunk_size: usize,
     input: &'a [RawMetric],
-    factory: F,
+    idempotency_keys: &'a [IdempotencyKey<'a>],
 ) -> impl ExactSizeIterator<Item = Result<(&'a [RawMetric], bytes::Bytes), serde_json::Error>> + 'a
-where
-    F: KeyGen<'a> + 'a,
 {
     use bytes::BufMut;
 
-    struct Iter<'a, F> {
+    assert_eq!(input.len(), idempotency_keys.len());
+
+    struct Iter<'a> {
         inner: std::slice::Chunks<'a, RawMetric>,
+        idempotency_keys: std::slice::Iter<'a, IdempotencyKey<'a>>,
         chunk_size: usize,
 
         // write to a BytesMut so that we can cheaply clone the frozen Bytes for retries
         buffer: bytes::BytesMut,
         // chunk amount of events are reused to produce the serialized document
         scratch: Vec<Event<Ids, Name>>,
-        factory: F,
     }
 
-    impl<'a, F: KeyGen<'a>> Iterator for Iter<'a, F> {
+    impl<'a> Iterator for Iter<'a> {
         type Item = Result<(&'a [RawMetric], bytes::Bytes), serde_json::Error>;
 
         fn next(&mut self) -> Option<Self::Item> {
@@ -107,17 +170,14 @@ where
                 self.scratch.extend(
                     chunk
                         .iter()
-                        .map(|raw_metric| raw_metric.as_event(&self.factory.generate())),
+                        .zip(&mut self.idempotency_keys)
+                        .map(|(raw_metric, key)| raw_metric.as_event(key)),
                 );
             } else {
                 // next rounds: update_in_place to reuse allocations
                 assert_eq!(self.scratch.len(), self.chunk_size);
-                self.scratch
-                    .iter_mut()
-                    .zip(chunk.iter())
-                    .for_each(|(slot, raw_metric)| {
-                        raw_metric.update_in_place(slot, &self.factory.generate())
-                    });
+                itertools::izip!(self.scratch.iter_mut(), chunk, &mut self.idempotency_keys)
+                    .for_each(|(slot, raw_metric, key)| raw_metric.update_in_place(slot, key));
             }
 
             let res = serde_json::to_writer(
@@ -138,18 +198,19 @@ where
         }
     }
 
-    impl<'a, F: KeyGen<'a>> ExactSizeIterator for Iter<'a, F> {}
+    impl<'a> ExactSizeIterator for Iter<'a> {}
 
     let buffer = bytes::BytesMut::new();
     let inner = input.chunks(chunk_size);
+    let idempotency_keys = idempotency_keys.iter();
     let scratch = Vec::new();
 
     Iter {
         inner,
+        idempotency_keys,
         chunk_size,
         buffer,
         scratch,
-        factory,
     }
 }
 
@@ -208,7 +269,7 @@ impl RawMetricExt for RawMetric {
     }
 }
 
-trait KeyGen<'a>: Copy {
+pub(crate) trait KeyGen<'a> {
     fn generate(&self) -> IdempotencyKey<'a>;
 }
 
@@ -262,35 +323,33 @@ async fn upload(
 ) -> Result<(), UploadError> {
     let warn_after = 3;
     let max_attempts = 10;
+
+    // this is used only with tests so far
+    let last_value = if is_last { "true" } else { "false" };
+
     let res = utils::backoff::retry(
-        move || {
-            let body = body.clone();
-            async move {
-                let res = client
-                    .post(metric_collection_endpoint.clone())
-                    .header(reqwest::header::CONTENT_TYPE, "application/json")
-                    .header(
-                        LAST_IN_BATCH.clone(),
-                        if is_last { "true" } else { "false" },
-                    )
-                    .body(body)
-                    .send()
-                    .await;
+        || async {
+            let res = client
+                .post(metric_collection_endpoint.clone())
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .header(LAST_IN_BATCH.clone(), last_value)
+                .body(body.clone())
+                .send()
+                .await;
 
-                let res = res.and_then(|res| res.error_for_status());
+            let res = res.and_then(|res| res.error_for_status());
 
-                // 10 redirects are normally allowed, so we don't need worry about 3xx
-                match res {
-                    Ok(_response) => Ok(()),
-                    Err(e) => {
-                        let status = e.status().filter(|s| s.is_client_error());
-                        if let Some(status) = status {
-                            // rejection used to be a thing when the server could reject a
-                            // whole batch of metrics if one metric was bad.
-                            Err(UploadError::Rejected(status))
-                        } else {
-                            Err(UploadError::Reqwest(e))
-                        }
+            // 10 redirects are normally allowed, so we don't need worry about 3xx
+            match res {
+                Ok(_response) => Ok(()),
+                Err(e) => {
+                    let status = e.status().filter(|s| s.is_client_error());
+                    if let Some(status) = status {
+                        // rejection used to be a thing when the server could reject a
+                        // whole batch of metrics if one metric was bad.
+                        Err(UploadError::Rejected(status))
+                    } else {
+                        Err(UploadError::Reqwest(e))
                     }
                 }
             }
@@ -299,9 +358,11 @@ async fn upload(
         warn_after,
         max_attempts,
         "upload consumption_metrics",
-        utils::backoff::Cancel::new(cancel.clone(), || UploadError::Cancelled),
+        cancel,
     )
-    .await;
+    .await
+    .ok_or_else(|| UploadError::Cancelled)
+    .and_then(|x| x);
 
     match &res {
         Ok(_) => {}
@@ -329,7 +390,10 @@ mod tests {
         let examples = metric_samples();
         assert!(examples.len() > 1);
 
-        let factory = FixedGen::new(Utc::now(), "1", 42);
+        let now = Utc::now();
+        let idempotency_keys = (0..examples.len())
+            .map(|i| FixedGen::new(now, "1", i as u16).generate())
+            .collect::<Vec<_>>();
 
         // need to use Event here because serde_json::Value uses default hashmap, not linked
         // hashmap
@@ -338,13 +402,13 @@ mod tests {
             events: Vec<Event<Ids, Name>>,
         }
 
-        let correct = serialize_in_chunks(examples.len(), &examples, factory)
+        let correct = serialize_in_chunks(examples.len(), &examples, &idempotency_keys)
             .map(|res| res.unwrap().1)
             .flat_map(|body| serde_json::from_slice::<EventChunk>(&body).unwrap().events)
             .collect::<Vec<_>>();
 
         for chunk_size in 1..examples.len() {
-            let actual = serialize_in_chunks(chunk_size, &examples, factory)
+            let actual = serialize_in_chunks(chunk_size, &examples, &idempotency_keys)
                 .map(|res| res.unwrap().1)
                 .flat_map(|body| serde_json::from_slice::<EventChunk>(&body).unwrap().events)
                 .collect::<Vec<_>>();

@@ -1,0 +1,26 @@
+[package]
+name = "storcon_cli"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+comfy-table.workspace = true
+futures.workspace = true
+humantime.workspace = true
+hyper.workspace = true
+pageserver_api.workspace = true
+pageserver_client.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
+storage_controller_client.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+utils.workspace = true
+workspace_hack.workspace = true
+

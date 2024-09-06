@@ -6,7 +6,6 @@
 //! local installations.
 #![deny(clippy::undocumented_unsafe_blocks)]
 
-pub mod attachment_service;
 mod background_process;
 pub mod broker;
 pub mod endpoint;
@@ -14,3 +13,4 @@ pub mod local_env;
 pub mod pageserver;
 pub mod postgresql_conf;
 pub mod safekeeper;
+pub mod storage_controller;

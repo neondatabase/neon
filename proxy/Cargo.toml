@@ -9,8 +9,16 @@ default = []
 testing = []
 
 [dependencies]
+ahash.workspace = true
 anyhow.workspace = true
+arc-swap.workspace = true
+async-compression.workspace = true
 async-trait.workspace = true
+atomic-take.workspace = true
+aws-config.workspace = true
+aws-sdk-iam.workspace = true
+aws-sigv4.workspace = true
+aws-types.workspace = true
 base64.workspace = true
 bstr.workspace = true
 bytes = { workspace = true, features = ["serde"] }
@@ -18,7 +26,10 @@ camino.workspace = true
 chrono.workspace = true
 clap.workspace = true
 consumption_metrics.workspace = true
+crossbeam-deque.workspace = true
 dashmap.workspace = true
+env_logger.workspace = true
+framed-websockets.workspace = true
 futures.workspace = true
 git-version.workspace = true
 hashbrown.workspace = true
@@ -26,19 +37,25 @@ hashlink.workspace = true
 hex.workspace = true
 hmac.workspace = true
 hostname.workspace = true
+http.workspace = true
 humantime.workspace = true
-hyper-tungstenite.workspace = true
+humantime-serde.workspace = true
 hyper.workspace = true
+hyper1 = { package = "hyper", version = "1.2", features = ["server"] }
+hyper-util = { version = "0.1", features = ["server", "http1", "http2", "tokio"] }
+http-body-util = { version = "0.1" }
+indexmap.workspace = true
 ipnet.workspace = true
 itertools.workspace = true
+lasso = { workspace = true, features = ["multi-threaded"] }
 md5.workspace = true
+measured = { workspace = true, features = ["lasso"] }
 metrics.workspace = true
 once_cell.workspace = true
 opentelemetry.workspace = true
 parking_lot.workspace = true
 parquet.workspace = true
 parquet_derive.workspace = true
-pbkdf2 = { workspace = true, features = ["simple", "std"] }
 pin-project-lite.workspace = true
 postgres_backend.workspace = true
 pq_proto.workspace = true
@@ -46,8 +63,8 @@ prometheus.workspace = true
 rand.workspace = true
 regex.workspace = true
 remote_storage = { version = "0.1", path = "../libs/remote_storage/" }
-reqwest = { workspace = true, features = ["json"] }
-reqwest-middleware.workspace = true
+reqwest.workspace = true
+reqwest-middleware = { workspace = true, features = ["json"] }
 reqwest-retry.workspace = true
 reqwest-tracing.workspace = true
 routerify.workspace = true
@@ -57,36 +74,53 @@ rustls.workspace = true
 scopeguard.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
+sha2 = { workspace = true, features = ["asm", "oid"] }
+smol_str.workspace = true
+smallvec.workspace = true
 socket2.workspace = true
-sync_wrapper.workspace = true
+subtle.workspace = true
 task-local-extensions.workspace = true
 thiserror.workspace = true
-tls-listener.workspace = true
+tikv-jemallocator.workspace = true
+tikv-jemalloc-ctl = { workspace = true, features = ["use_std"] }
 tokio-postgres.workspace = true
+tokio-postgres-rustls.workspace = true
 tokio-rustls.workspace = true
 tokio-util.workspace = true
 tokio = { workspace = true, features = ["signal"] }
+tower-service.workspace = true
 tracing-opentelemetry.workspace = true
 tracing-subscriber.workspace = true
 tracing-utils.workspace = true
 tracing.workspace = true
+try-lock.workspace = true
+typed-json.workspace = true
 url.workspace = true
+urlencoding.workspace = true
 utils.workspace = true
 uuid.workspace = true
-webpki-roots.workspace = true
+rustls-native-certs.workspace = true
 x509-parser.workspace = true
-native-tls.workspace = true
-postgres-native-tls.workspace = true
 postgres-protocol.workspace = true
 redis.workspace = true
-smol_str.workspace = true
+
+# jwt stuff
+jose-jwa = "0.1.2"
+jose-jwk = { version = "0.1.2", features = ["p256", "p384", "rsa"] }
+signature = "2"
+ecdsa = "0.16"
+p256 = "0.13"
+rsa = "0.9"
 
 workspace_hack.workspace = true
 
 [dev-dependencies]
 camino-tempfile.workspace = true
+fallible-iterator.workspace = true
+tokio-tungstenite.workspace = true
+pbkdf2 = { workspace = true, features = ["simple", "std"] }
 rcgen.workspace = true
 rstest.workspace = true
 tokio-postgres-rustls.workspace = true
 walkdir.workspace = true
+rand_distr = "0.4"

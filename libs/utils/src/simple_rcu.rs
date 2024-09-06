@@ -49,12 +49,11 @@ use std::sync::{RwLock, RwLockWriteGuard};
 
 use tokio::sync::watch;
 
-///
 /// Rcu allows multiple readers to read and hold onto a value without blocking
-/// (for very long).  Storing to the Rcu updates the value, making new readers
-/// immediately see the new value, but it also waits for all current readers to
-/// finish.
+/// (for very long).
 ///
+/// Storing to the Rcu updates the value, making new readers immediately see
+/// the new value, but it also waits for all current readers to finish.
 pub struct Rcu<V> {
     inner: RwLock<RcuInner<V>>,
 }
@@ -221,7 +220,7 @@ impl RcuWaitList {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Mutex;
     use std::time::Duration;
 
     #[tokio::test]

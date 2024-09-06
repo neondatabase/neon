@@ -4,18 +4,18 @@ use anyhow::{bail, Context, Result};
 use byteorder::{LittleEndian, ReadBytesExt};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
-use postgres_ffi::{TimeLineID, XLogSegNo, MAX_SEND_SIZE};
+use postgres_ffi::{TimeLineID, MAX_SEND_SIZE};
 use serde::{Deserialize, Serialize};
 use std::cmp::max;
 use std::cmp::min;
 use std::fmt;
 use std::io::Read;
-use std::time::Duration;
 use storage_broker::proto::SafekeeperTimelineInfo;
 
 use tracing::*;
 
 use crate::control_file;
+use crate::metrics::MISC_OPERATION_SECONDS;
 use crate::send_wal::HotStandbyFeedback;
 
 use crate::state::TimelineState;
@@ -92,7 +92,7 @@ impl TermHistory {
     }
 
     /// Find point of divergence between leader (walproposer) term history and
-    /// safekeeper. Arguments are not symmetrics as proposer history ends at
+    /// safekeeper. Arguments are not symmetric as proposer history ends at
     /// +infinity while safekeeper at flush_lsn.
     /// C version is at walproposer SendProposerElected.
     pub fn find_highest_common_point(
@@ -188,8 +188,8 @@ pub struct AcceptorState {
 }
 
 impl AcceptorState {
-    /// acceptor's epoch is the term of the highest entry in the log
-    pub fn get_epoch(&self, flush_lsn: Lsn) -> Term {
+    /// acceptor's last_log_term is the term of the highest entry in the log
+    pub fn get_last_log_term(&self, flush_lsn: Lsn) -> Term {
         let th = self.term_history.up_to(flush_lsn);
         match th.0.last() {
             Some(e) => e.term,
@@ -305,9 +305,9 @@ pub struct AppendRequest {
 pub struct AppendRequestHeader {
     // safekeeper's current term; if it is higher than proposer's, the compute is out of date.
     pub term: Term,
-    // TODO: remove this field, it in unused -- LSN of term switch can be taken
-    // from ProposerElected (as well as from term history).
-    pub epoch_start_lsn: Lsn,
+    // TODO: remove this field from the protocol, it in unused -- LSN of term
+    // switch can be taken from ProposerElected (as well as from term history).
+    pub term_start_lsn: Lsn,
     /// start position of message in WAL
     pub begin_lsn: Lsn,
     /// end position of message in WAL
@@ -321,20 +321,21 @@ pub struct AppendRequestHeader {
 }
 
 /// Report safekeeper state to proposer
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct AppendResponse {
     // Current term of the safekeeper; if it is higher than proposer's, the
     // compute is out of date.
     pub term: Term,
-    // NOTE: this is physical end of wal on safekeeper; currently it doesn't
-    // make much sense without taking epoch into account, as history can be
-    // diverged.
+    // Flushed end of wal on safekeeper; one should be always mindful from what
+    // term history this value comes, either checking history directly or
+    // observing term being set to one for which WAL truncation is known to have
+    // happened.
     pub flush_lsn: Lsn,
     // We report back our awareness about which WAL is committed, as this is
     // a criterion for walproposer --sync mode exit
     pub commit_lsn: Lsn,
     pub hs_feedback: HotStandbyFeedback,
-    pub pageserver_feedback: PageserverFeedback,
+    pub pageserver_feedback: Option<PageserverFeedback>,
 }
 
 impl AppendResponse {
@@ -344,7 +345,7 @@ impl AppendResponse {
             flush_lsn: Lsn(0),
             commit_lsn: Lsn(0),
             hs_feedback: HotStandbyFeedback::empty(),
-            pageserver_feedback: PageserverFeedback::empty(),
+            pageserver_feedback: None,
         }
     }
 }
@@ -462,7 +463,11 @@ impl AcceptorProposerMessage {
                 buf.put_u64_le(msg.hs_feedback.xmin);
                 buf.put_u64_le(msg.hs_feedback.catalog_xmin);
 
-                msg.pageserver_feedback.serialize(buf);
+                // AsyncReadMessage in walproposer.c will not try to decode pageserver_feedback
+                // if it is not present.
+                if let Some(ref msg) = msg.pageserver_feedback {
+                    msg.serialize(buf);
+                }
             }
         }
 
@@ -478,8 +483,8 @@ impl AcceptorProposerMessage {
 /// - messages from broker peers
 pub struct SafeKeeper<CTRL: control_file::Storage, WAL: wal_storage::Storage> {
     /// LSN since the proposer safekeeper currently talking to appends WAL;
-    /// determines epoch switch point.
-    pub epoch_start_lsn: Lsn,
+    /// determines last_log_term switch point.
+    pub term_start_lsn: Lsn,
 
     pub state: TimelineState<CTRL>, // persistent state storage
     pub wal_store: WAL,
@@ -495,7 +500,11 @@ where
     /// Accepts a control file storage containing the safekeeper state.
     /// State must be initialized, i.e. contain filled `tenant_id`, `timeline_id`
     /// and `server` (`wal_seg_size` inside it) fields.
-    pub fn new(state: CTRL, wal_store: WAL, node_id: NodeId) -> Result<SafeKeeper<CTRL, WAL>> {
+    pub fn new(
+        state: TimelineState<CTRL>,
+        wal_store: WAL,
+        node_id: NodeId,
+    ) -> Result<SafeKeeper<CTRL, WAL>> {
         if state.tenant_id == TenantId::from([0u8; 16])
             || state.timeline_id == TimelineId::from([0u8; 16])
         {
@@ -507,8 +516,8 @@ where
         }
 
         Ok(SafeKeeper {
-            epoch_start_lsn: Lsn(0),
-            state: TimelineState::new(state),
+            term_start_lsn: Lsn(0),
+            state,
             wal_store,
             node_id,
         })
@@ -522,13 +531,10 @@ where
             .up_to(self.flush_lsn())
     }
 
-    /// Get current term.
-    pub fn get_term(&self) -> Term {
-        self.state.acceptor_state.term
-    }
-
-    pub fn get_epoch(&self) -> Term {
-        self.state.acceptor_state.get_epoch(self.flush_lsn())
+    pub fn get_last_log_term(&self) -> Term {
+        self.state
+            .acceptor_state
+            .get_last_log_term(self.flush_lsn())
     }
 
     /// wal_store wrapper avoiding commit_lsn <= flush_lsn violation when we don't have WAL yet.
@@ -681,7 +687,7 @@ where
             commit_lsn: self.state.commit_lsn,
             // will be filled by the upper code to avoid bothering safekeeper
             hs_feedback: HotStandbyFeedback::empty(),
-            pageserver_feedback: PageserverFeedback::empty(),
+            pageserver_feedback: None,
         };
         trace!("formed AppendResponse {:?}", ar);
         ar
@@ -691,7 +697,17 @@ where
         &mut self,
         msg: &ProposerElected,
     ) -> Result<Option<AcceptorProposerMessage>> {
-        info!("received ProposerElected {:?}", msg);
+        let _timer = MISC_OPERATION_SECONDS
+            .with_label_values(&["handle_elected"])
+            .start_timer();
+
+        info!(
+            "received ProposerElected {:?}, term={}, last_log_term={}, flush_lsn={}",
+            msg,
+            self.state.acceptor_state.term,
+            self.get_last_log_term(),
+            self.flush_lsn()
+        );
         if self.state.acceptor_state.term < msg.term {
             let mut state = self.state.start_change();
             state.acceptor_state.term = msg.term;
@@ -703,26 +719,56 @@ where
             return Ok(None);
         }
 
-        // This might happen in a rare race when another (old) connection from
-        // the same walproposer writes + flushes WAL after this connection
-        // already sent flush_lsn in VoteRequest. It is generally safe to
-        // proceed, but to prevent commit_lsn surprisingly going down we should
-        // either refuse the session (simpler) or skip the part we already have
-        // from the stream (can be implemented).
-        if msg.term == self.get_epoch() && self.flush_lsn() > msg.start_streaming_at {
-            bail!("refusing ProposerElected which is going to overwrite correct WAL: term={}, flush_lsn={}, start_streaming_at={}; restarting the handshake should help",
-                   msg.term, self.flush_lsn(), msg.start_streaming_at)
+        // Before truncating WAL check-cross the check divergence point received
+        // from the walproposer.
+        let sk_th = self.get_term_history();
+        let last_common_point = match TermHistory::find_highest_common_point(
+            &msg.term_history,
+            &sk_th,
+            self.flush_lsn(),
+        ) {
+            // No common point. Expect streaming from the beginning of the
+            // history like walproposer while we don't have proper init.
+            None => *msg.term_history.0.first().ok_or(anyhow::anyhow!(
+                "empty walproposer term history {:?}",
+                msg.term_history
+            ))?,
+            Some(lcp) => lcp,
+        };
+        // This is expected to happen in a rare race when another connection
+        // from the same walproposer writes + flushes WAL after this connection
+        // sent flush_lsn in VoteRequest; for instance, very late
+        // ProposerElected message delivery after another connection was
+        // established and wrote WAL. In such cases error is transient;
+        // reconnection makes safekeeper send newest term history and flush_lsn
+        // and walproposer recalculates the streaming point. OTOH repeating
+        // error indicates a serious bug.
+        if last_common_point.lsn != msg.start_streaming_at {
+            bail!("refusing ProposerElected with unexpected truncation point: lcp={:?} start_streaming_at={}, term={}, sk_th={:?} flush_lsn={}, wp_th={:?}",
+                    last_common_point, msg.start_streaming_at,
+                    self.state.acceptor_state.term, sk_th, self.flush_lsn(), msg.term_history,
+            );
         }
-        // Otherwise we must never attempt to truncate committed data.
+
+        // We are also expected to never attempt to truncate committed data.
         assert!(
             msg.start_streaming_at >= self.state.inmem.commit_lsn,
-            "attempt to truncate committed data: start_streaming_at={}, commit_lsn={}",
-            msg.start_streaming_at,
-            self.state.inmem.commit_lsn
+            "attempt to truncate committed data: start_streaming_at={}, commit_lsn={}, term={}, sk_th={:?} flush_lsn={}, wp_th={:?}",
+            msg.start_streaming_at, self.state.inmem.commit_lsn,
+            self.state.acceptor_state.term, sk_th, self.flush_lsn(), msg.term_history,
         );
 
-        // TODO: cross check divergence point, check if msg.start_streaming_at corresponds to
-        // intersection of our history and history from msg
+        // Before first WAL write initialize its segment. It makes first segment
+        // pg_waldump'able because stream from compute doesn't include its
+        // segment and page headers.
+        //
+        // If we fail before first WAL write flush this action would be
+        // repeated, that's ok because it is idempotent.
+        if self.wal_store.flush_lsn() == Lsn::INVALID {
+            self.wal_store
+                .initialize_first_segment(msg.start_streaming_at)
+                .await?;
+        }
 
         // truncate wal, update the LSNs
         self.wal_store.truncate_wal(msg.start_streaming_at).await?;
@@ -762,6 +808,9 @@ where
 
             // Initializing backup_lsn is useful to avoid making backup think it should upload 0 segment.
             state.backup_lsn = max(state.backup_lsn, state.timeline_start_lsn);
+            // similar for remote_consistent_lsn
+            state.remote_consistent_lsn =
+                max(state.remote_consistent_lsn, state.timeline_start_lsn);
 
             state.acceptor_state.term_history = msg.term_history.clone();
             self.state.finish_change(&state).await?;
@@ -772,7 +821,7 @@ where
         // Cache LSN where term starts to immediately fsync control file with
         // commit_lsn once we reach it -- sync-safekeepers finishes when
         // persisted commit_lsn on majority of safekeepers aligns.
-        self.epoch_start_lsn = match msg.term_history.0.last() {
+        self.term_start_lsn = match msg.term_history.0.last() {
             None => bail!("proposer elected with empty term history"),
             Some(term_lsn_start) => term_lsn_start.lsn,
         };
@@ -798,32 +847,14 @@ where
 
         self.state.inmem.commit_lsn = commit_lsn;
 
-        // If new commit_lsn reached epoch switch, force sync of control
+        // If new commit_lsn reached term switch, force sync of control
         // file: walproposer in sync mode is very interested when this
         // happens. Note: this is for sync-safekeepers mode only, as
-        // otherwise commit_lsn might jump over epoch_start_lsn.
-        if commit_lsn >= self.epoch_start_lsn && self.state.commit_lsn < self.epoch_start_lsn {
+        // otherwise commit_lsn might jump over term_start_lsn.
+        if commit_lsn >= self.term_start_lsn && self.state.commit_lsn < self.term_start_lsn {
             self.state.flush().await?;
         }
 
-        Ok(())
-    }
-
-    /// Persist control file if there is something to save and enough time
-    /// passed after the last save.
-    pub async fn maybe_persist_inmem_control_file(&mut self) -> Result<()> {
-        const CF_SAVE_INTERVAL: Duration = Duration::from_secs(300);
-        if self.state.pers.last_persist_at().elapsed() < CF_SAVE_INTERVAL {
-            return Ok(());
-        }
-        let need_persist = self.state.inmem.commit_lsn > self.state.commit_lsn
-            || self.state.inmem.backup_lsn > self.state.backup_lsn
-            || self.state.inmem.peer_horizon_lsn > self.state.peer_horizon_lsn
-            || self.state.inmem.remote_consistent_lsn > self.state.remote_consistent_lsn;
-        if need_persist {
-            self.state.flush().await?;
-            trace!("saved control file: {CF_SAVE_INTERVAL:?} passed");
-        }
         Ok(())
     }
 
@@ -842,6 +873,29 @@ where
         if self.state.acceptor_state.term > msg.h.term {
             let resp = AppendResponse::term_only(self.state.acceptor_state.term);
             return Ok(Some(AcceptorProposerMessage::AppendResponse(resp)));
+        }
+
+        // Disallow any non-sequential writes, which can result in gaps or
+        // overwrites. If we need to move the pointer, ProposerElected message
+        // should have truncated WAL first accordingly. Note that the first
+        // condition (WAL rewrite) is quite expected in real world; it happens
+        // when walproposer reconnects to safekeeper and writes some more data
+        // while first connection still gets some packets later. It might be
+        // better to not log this as error! above.
+        let write_lsn = self.wal_store.write_lsn();
+        if write_lsn > msg.h.begin_lsn {
+            bail!(
+                "append request rewrites WAL written before, write_lsn={}, msg lsn={}",
+                write_lsn,
+                msg.h.begin_lsn
+            );
+        }
+        if write_lsn < msg.h.begin_lsn && write_lsn != Lsn(0) {
+            bail!(
+                "append request creates gap in written WAL, write_lsn={}, msg lsn={}",
+                write_lsn,
+                msg.h.begin_lsn,
+            );
         }
 
         // Now we know that we are in the same term as the proposer,
@@ -909,71 +963,27 @@ where
         )))
     }
 
-    /// Update timeline state with peer safekeeper data.
+    /// Update commit_lsn from peer safekeeper data.
     pub async fn record_safekeeper_info(&mut self, sk_info: &SafekeeperTimelineInfo) -> Result<()> {
-        let mut sync_control_file = false;
-
         if (Lsn(sk_info.commit_lsn) != Lsn::INVALID) && (sk_info.last_log_term != INVALID_TERM) {
             // Note: the check is too restrictive, generally we can update local
             // commit_lsn if our history matches (is part of) history of advanced
             // commit_lsn provider.
-            if sk_info.last_log_term == self.get_epoch() {
+            if sk_info.last_log_term == self.get_last_log_term() {
                 self.update_commit_lsn(Lsn(sk_info.commit_lsn)).await?;
             }
         }
-
-        self.state.inmem.backup_lsn = max(Lsn(sk_info.backup_lsn), self.state.inmem.backup_lsn);
-        sync_control_file |= self.state.backup_lsn + (self.state.server.wal_seg_size as u64)
-            < self.state.inmem.backup_lsn;
-
-        self.state.inmem.remote_consistent_lsn = max(
-            Lsn(sk_info.remote_consistent_lsn),
-            self.state.inmem.remote_consistent_lsn,
-        );
-        sync_control_file |= self.state.remote_consistent_lsn
-            + (self.state.server.wal_seg_size as u64)
-            < self.state.inmem.remote_consistent_lsn;
-
-        self.state.inmem.peer_horizon_lsn = max(
-            Lsn(sk_info.peer_horizon_lsn),
-            self.state.inmem.peer_horizon_lsn,
-        );
-        sync_control_file |= self.state.peer_horizon_lsn + (self.state.server.wal_seg_size as u64)
-            < self.state.inmem.peer_horizon_lsn;
-
-        if sync_control_file {
-            self.state.flush().await?;
-        }
         Ok(())
-    }
-
-    /// Get oldest segno we still need to keep. We hold WAL till it is consumed
-    /// by all of 1) pageserver (remote_consistent_lsn) 2) peers 3) s3
-    /// offloading.
-    /// While it is safe to use inmem values for determining horizon,
-    /// we use persistent to make possible normal states less surprising.
-    pub fn get_horizon_segno(&self, wal_backup_enabled: bool) -> XLogSegNo {
-        let mut horizon_lsn = min(
-            self.state.remote_consistent_lsn,
-            self.state.peer_horizon_lsn,
-        );
-        if wal_backup_enabled {
-            horizon_lsn = min(horizon_lsn, self.state.backup_lsn);
-        }
-        horizon_lsn.segment_number(self.state.server.wal_seg_size as usize)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use futures::future::BoxFuture;
-    use postgres_ffi::WAL_SEGMENT_SIZE;
+    use postgres_ffi::{XLogSegNo, WAL_SEGMENT_SIZE};
 
     use super::*;
-    use crate::{
-        state::{PersistedPeers, TimelinePersistentState},
-        wal_storage::Storage,
-    };
+    use crate::state::{EvictionState, PersistedPeers, TimelinePersistentState};
     use std::{ops::Deref, str::FromStr, time::Instant};
 
     // fake storage for tests
@@ -981,7 +991,6 @@ mod tests {
         persisted_state: TimelinePersistentState,
     }
 
-    #[async_trait::async_trait]
     impl control_file::Storage for InMemoryState {
         async fn persist(&mut self, s: &TimelinePersistentState) -> Result<()> {
             self.persisted_state = s.clone();
@@ -1013,10 +1022,17 @@ mod tests {
         lsn: Lsn,
     }
 
-    #[async_trait::async_trait]
     impl wal_storage::Storage for DummyWalStore {
+        fn write_lsn(&self) -> Lsn {
+            self.lsn
+        }
+
         fn flush_lsn(&self) -> Lsn {
             self.lsn
+        }
+
+        async fn initialize_first_segment(&mut self, _init_lsn: Lsn) -> Result<()> {
+            Ok(())
         }
 
         async fn write_wal(&mut self, startpos: Lsn, buf: &[u8]) -> Result<()> {
@@ -1048,7 +1064,7 @@ mod tests {
             persisted_state: test_sk_state(),
         };
         let wal_store = DummyWalStore { lsn: Lsn(0) };
-        let mut sk = SafeKeeper::new(storage, wal_store, NodeId(0)).unwrap();
+        let mut sk = SafeKeeper::new(TimelineState::new(storage), wal_store, NodeId(0)).unwrap();
 
         // check voting for 1 is ok
         let vote_request = ProposerAcceptorMessage::VoteRequest(VoteRequest { term: 1 });
@@ -1064,7 +1080,7 @@ mod tests {
             persisted_state: state,
         };
 
-        sk = SafeKeeper::new(storage, sk.wal_store, NodeId(0)).unwrap();
+        sk = SafeKeeper::new(TimelineState::new(storage), sk.wal_store, NodeId(0)).unwrap();
 
         // and ensure voting second time for 1 is not ok
         vote_resp = sk.process_msg(&vote_request).await;
@@ -1075,17 +1091,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_epoch_switch() {
+    async fn test_last_log_term_switch() {
         let storage = InMemoryState {
             persisted_state: test_sk_state(),
         };
         let wal_store = DummyWalStore { lsn: Lsn(0) };
 
-        let mut sk = SafeKeeper::new(storage, wal_store, NodeId(0)).unwrap();
+        let mut sk = SafeKeeper::new(TimelineState::new(storage), wal_store, NodeId(0)).unwrap();
 
         let mut ar_hdr = AppendRequestHeader {
-            term: 1,
-            epoch_start_lsn: Lsn(3),
+            term: 2,
+            term_start_lsn: Lsn(3),
             begin_lsn: Lsn(1),
             end_lsn: Lsn(2),
             commit_lsn: Lsn(0),
@@ -1098,38 +1114,94 @@ mod tests {
         };
 
         let pem = ProposerElected {
-            term: 1,
+            term: 2,
             start_streaming_at: Lsn(1),
-            term_history: TermHistory(vec![TermLsn {
-                term: 1,
-                lsn: Lsn(3),
-            }]),
-            timeline_start_lsn: Lsn(0),
+            term_history: TermHistory(vec![
+                TermLsn {
+                    term: 1,
+                    lsn: Lsn(1),
+                },
+                TermLsn {
+                    term: 2,
+                    lsn: Lsn(3),
+                },
+            ]),
+            timeline_start_lsn: Lsn(1),
         };
         sk.process_msg(&ProposerAcceptorMessage::Elected(pem))
             .await
             .unwrap();
 
-        // check that AppendRequest before epochStartLsn doesn't switch epoch
-        let resp = sk
-            .process_msg(&ProposerAcceptorMessage::AppendRequest(append_request))
-            .await;
-        assert!(resp.is_ok());
-        assert_eq!(sk.get_epoch(), 0);
+        // check that AppendRequest before term_start_lsn doesn't switch last_log_term.
+        sk.process_msg(&ProposerAcceptorMessage::AppendRequest(append_request))
+            .await
+            .unwrap();
+        assert_eq!(sk.get_last_log_term(), 1);
 
-        // but record at epochStartLsn does the switch
+        // but record at term_start_lsn does the switch
         ar_hdr.begin_lsn = Lsn(2);
         ar_hdr.end_lsn = Lsn(3);
         append_request = AppendRequest {
             h: ar_hdr,
             wal_data: Bytes::from_static(b"b"),
         };
-        let resp = sk
-            .process_msg(&ProposerAcceptorMessage::AppendRequest(append_request))
-            .await;
-        assert!(resp.is_ok());
-        sk.wal_store.truncate_wal(Lsn(3)).await.unwrap(); // imitate the complete record at 3 %)
-        assert_eq!(sk.get_epoch(), 1);
+        sk.process_msg(&ProposerAcceptorMessage::AppendRequest(append_request))
+            .await
+            .unwrap();
+        assert_eq!(sk.get_last_log_term(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_non_consecutive_write() {
+        let storage = InMemoryState {
+            persisted_state: test_sk_state(),
+        };
+        let wal_store = DummyWalStore { lsn: Lsn(0) };
+
+        let mut sk = SafeKeeper::new(TimelineState::new(storage), wal_store, NodeId(0)).unwrap();
+
+        let pem = ProposerElected {
+            term: 1,
+            start_streaming_at: Lsn(1),
+            term_history: TermHistory(vec![TermLsn {
+                term: 1,
+                lsn: Lsn(1),
+            }]),
+            timeline_start_lsn: Lsn(1),
+        };
+        sk.process_msg(&ProposerAcceptorMessage::Elected(pem))
+            .await
+            .unwrap();
+
+        let ar_hdr = AppendRequestHeader {
+            term: 1,
+            term_start_lsn: Lsn(3),
+            begin_lsn: Lsn(1),
+            end_lsn: Lsn(2),
+            commit_lsn: Lsn(0),
+            truncate_lsn: Lsn(0),
+            proposer_uuid: [0; 16],
+        };
+        let append_request = AppendRequest {
+            h: ar_hdr.clone(),
+            wal_data: Bytes::from_static(b"b"),
+        };
+
+        // do write ending at 2, it should be ok
+        sk.process_msg(&ProposerAcceptorMessage::AppendRequest(append_request))
+            .await
+            .unwrap();
+        let mut ar_hrd2 = ar_hdr.clone();
+        ar_hrd2.begin_lsn = Lsn(4);
+        ar_hrd2.end_lsn = Lsn(5);
+        let append_request = AppendRequest {
+            h: ar_hdr,
+            wal_data: Bytes::from_static(b"b"),
+        };
+        // and now starting at 4, it must fail
+        sk.process_msg(&ProposerAcceptorMessage::AppendRequest(append_request))
+            .await
+            .unwrap_err();
     }
 
     #[test]
@@ -1233,6 +1305,8 @@ mod tests {
                     commit_lsn: Lsn(1234567600),
                 },
             )]),
+            partial_backup: crate::wal_backup_partial::State::default(),
+            eviction_state: EvictionState::Present,
         };
 
         let ser = state.ser().unwrap();
@@ -1278,6 +1352,10 @@ mod tests {
             0x2a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             0x70, 0x02, 0x96, 0x49, 0x00, 0x00, 0x00, 0x00,
             0xb0, 0x01, 0x96, 0x49, 0x00, 0x00, 0x00, 0x00,
+            // partial_backup
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            // eviction_state
+            0x00, 0x00, 0x00, 0x00,
         ];
 
         assert_eq!(Hex(&ser), Hex(&expected));

@@ -1,4 +1,6 @@
+import random
 from contextlib import closing
+from typing import Optional
 
 import pytest
 from fixtures.log_helper import log
@@ -11,14 +13,20 @@ from fixtures.utils import wait_until
 # running.
 def test_pageserver_restart(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
-    neon_env_builder.enable_scrub_on_exit()
+
+    # We inject a delay of 15 seconds for tenant activation below.
+    # Hence, bump the max delay here to not skip over the activation.
+    neon_env_builder.pageserver_config_override = 'background_task_maximum_delay="20s"'
 
     env = neon_env_builder.init_start()
 
     endpoint = env.endpoints.create_start("main")
     pageserver_http = env.pageserver.http_client()
 
-    assert pageserver_http.get_metric_value("pageserver_tenant_manager_slots") == 1
+    assert (
+        pageserver_http.get_metric_value("pageserver_tenant_manager_slots", {"mode": "attached"})
+        == 1
+    )
 
     pg_conn = endpoint.connect()
     cur = pg_conn.cursor()
@@ -53,7 +61,10 @@ def test_pageserver_restart(neon_env_builder: NeonEnvBuilder):
     env.pageserver.start()
 
     # We reloaded our tenant
-    assert pageserver_http.get_metric_value("pageserver_tenant_manager_slots") == 1
+    assert (
+        pageserver_http.get_metric_value("pageserver_tenant_manager_slots", {"mode": "attached"})
+        == 1
+    )
 
     cur.execute("SELECT count(*) FROM foo")
     assert cur.fetchone() == (100000,)
@@ -62,7 +73,7 @@ def test_pageserver_restart(neon_env_builder: NeonEnvBuilder):
     # pageserver does if a compute node connects and sends a request for the tenant
     # while it's still in Loading state. (It waits for the loading to finish, and then
     # processes the request.)
-    tenant_load_delay_ms = 5000
+    tenant_load_delay_ms = 15000
     env.pageserver.stop()
     env.pageserver.start(
         extra_env_vars={"FAILPOINTS": f"before-attaching-tenant=return({tenant_load_delay_ms})"}
@@ -141,18 +152,20 @@ def test_pageserver_restart(neon_env_builder: NeonEnvBuilder):
 # Test that repeatedly kills and restarts the page server, while the
 # safekeeper and compute node keep running.
 @pytest.mark.timeout(540)
-def test_pageserver_chaos(neon_env_builder: NeonEnvBuilder, build_type: str):
+@pytest.mark.parametrize("shard_count", [None, 4])
+def test_pageserver_chaos(
+    neon_env_builder: NeonEnvBuilder, build_type: str, shard_count: Optional[int]
+):
     if build_type == "debug":
         pytest.skip("times out in debug builds")
 
+    # same rationale as with the immediate stop; we might leave orphan layers behind.
+    neon_env_builder.disable_scrub_on_exit()
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
-    neon_env_builder.enable_scrub_on_exit()
+    if shard_count is not None:
+        neon_env_builder.num_pageservers = shard_count
 
-    env = neon_env_builder.init_start()
-
-    # these can happen, if we shutdown at a good time. to be fixed as part of #5172.
-    message = ".*duplicated L1 layer layer=.*"
-    env.pageserver.allowed_errors.append(message)
+    env = neon_env_builder.init_start(initial_tenant_shard_count=shard_count)
 
     # Use a tiny checkpoint distance, to create a lot of layers quickly.
     # That allows us to stress the compaction and layer flushing logic more.
@@ -192,14 +205,28 @@ def test_pageserver_chaos(neon_env_builder: NeonEnvBuilder, build_type: str):
             log.info(f"shared_buffers is {row[0]}, table size {row[1]}")
             assert int(row[0]) < int(row[1])
 
+    # We run "random" kills using a fixed seed, to improve reproducibility if a test
+    # failure is related to a particular order of operations.
+    seed = 0xDEADBEEF
+    rng = random.Random(seed)
+
     # Update the whole table, then immediately kill and restart the pageserver
     for i in range(1, 15):
         endpoint.safe_psql("UPDATE foo set updates = updates + 1")
 
         # This kills the pageserver immediately, to simulate a crash
-        env.pageserver.stop(immediate=True)
-        env.pageserver.start()
+        to_kill = rng.choice(env.pageservers)
+        to_kill.stop(immediate=True)
+        to_kill.start()
 
         # Check that all the updates are visible
         num_updates = endpoint.safe_psql("SELECT sum(updates) FROM foo")[0][0]
         assert num_updates == i * 100000
+
+    # currently pageserver cannot tolerate the fact that "s3" goes away, and if
+    # we succeeded in a compaction before shutdown, there might be a lot of
+    # uploads pending, certainly more than what we can ingest with MOCK_S3
+    #
+    # so instead, do a fast shutdown for this one test.
+    # See https://github.com/neondatabase/neon/issues/8709
+    env.stop(immediate=True)

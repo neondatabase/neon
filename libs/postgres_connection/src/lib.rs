@@ -7,6 +7,7 @@ use std::fmt;
 use url::Host;
 
 /// Parses a string of format either `host:port` or `host` into a corresponding pair.
+///
 /// The `host` part should be a correct `url::Host`, while `port` (if present) should be
 /// a valid decimal u16 of digits only.
 pub fn parse_host_port<S: AsRef<str>>(host_port: S) -> Result<(Host, Option<u16>), anyhow::Error> {
@@ -175,6 +176,13 @@ impl PgConnectionConfig {
         self.to_tokio_postgres_config()
             .connect(postgres::NoTls)
             .await
+    }
+}
+
+impl fmt::Display for PgConnectionConfig {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        // The password is intentionally hidden and not part of this display string.
+        write!(f, "postgresql://{}:{}", self.host, self.port)
     }
 }
 

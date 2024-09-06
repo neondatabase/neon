@@ -6,10 +6,10 @@ mod scheduler;
 use std::{sync::Arc, time::SystemTime};
 
 use crate::{
-    config::PageServerConf,
+    context::RequestContext,
     disk_usage_eviction_task::DiskUsageEvictionInfo,
+    metrics::SECONDARY_HEATMAP_TOTAL_SIZE,
     task_mgr::{self, TaskKind, BACKGROUND_RUNTIME},
-    virtual_file::MaybeFatalIo,
 };
 
 use self::{
@@ -21,18 +21,21 @@ use super::{
     config::{SecondaryLocationConfig, TenantConfOpt},
     mgr::TenantManager,
     span::debug_assert_current_span_has_tenant_id,
-    storage_layer::LayerFileName,
+    storage_layer::LayerName,
 };
 
+use crate::metrics::SECONDARY_RESIDENT_PHYSICAL_SIZE;
+use metrics::UIntGauge;
 use pageserver_api::{
     models,
     shard::{ShardIdentity, TenantShardId},
 };
 use remote_storage::GenericRemoteStorage;
 
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::instrument;
-use utils::{completion::Barrier, fs_ext, id::TimelineId, sync::gate::Gate};
+use utils::{completion::Barrier, id::TimelineId, sync::gate::Gate};
 
 enum DownloadCommand {
     Download(TenantShardId),
@@ -95,7 +98,26 @@ pub(crate) struct SecondaryTenant {
     shard_identity: ShardIdentity,
     tenant_conf: std::sync::Mutex<TenantConfOpt>,
 
+    // Internal state used by the Downloader.
     detail: std::sync::Mutex<SecondaryDetail>,
+
+    // Public state indicating overall progress of downloads relative to the last heatmap seen
+    pub(crate) progress: std::sync::Mutex<models::SecondaryProgress>,
+
+    // Sum of layer sizes on local disk
+    pub(super) resident_size_metric: UIntGauge,
+
+    // Sum of layer sizes in the most recently downloaded heatmap
+    pub(super) heatmap_total_size_metric: UIntGauge,
+}
+
+impl Drop for SecondaryTenant {
+    fn drop(&mut self) {
+        let tenant_id = self.tenant_shard_id.tenant_id.to_string();
+        let shard_id = format!("{}", self.tenant_shard_id.shard_slug());
+        let _ = SECONDARY_RESIDENT_PHYSICAL_SIZE.remove_label_values(&[&tenant_id, &shard_id]);
+        let _ = SECONDARY_HEATMAP_TOTAL_SIZE.remove_label_values(&[&tenant_id, &shard_id]);
+    }
 }
 
 impl SecondaryTenant {
@@ -105,6 +127,16 @@ impl SecondaryTenant {
         tenant_conf: TenantConfOpt,
         config: &SecondaryLocationConfig,
     ) -> Arc<Self> {
+        let tenant_id = tenant_shard_id.tenant_id.to_string();
+        let shard_id = format!("{}", tenant_shard_id.shard_slug());
+        let resident_size_metric = SECONDARY_RESIDENT_PHYSICAL_SIZE
+            .get_metric_with_label_values(&[&tenant_id, &shard_id])
+            .unwrap();
+
+        let heatmap_total_size_metric = SECONDARY_HEATMAP_TOTAL_SIZE
+            .get_metric_with_label_values(&[&tenant_id, &shard_id])
+            .unwrap();
+
         Arc::new(Self {
             tenant_shard_id,
             // todo: shall we make this a descendent of the
@@ -112,13 +144,22 @@ impl SecondaryTenant {
             // on shutdown we walk the tenants and fire their
             // individual cancellations?
             cancel: CancellationToken::new(),
-            gate: Gate::new(format!("SecondaryTenant {tenant_shard_id}")),
+            gate: Gate::default(),
 
             shard_identity,
             tenant_conf: std::sync::Mutex::new(tenant_conf),
 
             detail: std::sync::Mutex::new(SecondaryDetail::new(config.clone())),
+
+            progress: std::sync::Mutex::default(),
+
+            resident_size_metric,
+            heatmap_total_size_metric,
         })
+    }
+
+    pub(crate) fn tenant_shard_id(&self) -> TenantShardId {
+        self.tenant_shard_id
     }
 
     pub(crate) async fn shutdown(&self) {
@@ -133,7 +174,7 @@ impl SecondaryTenant {
     }
 
     pub(crate) fn set_tenant_conf(&self, config: &TenantConfOpt) {
-        *(self.tenant_conf.lock().unwrap()) = *config;
+        *(self.tenant_conf.lock().unwrap()) = config.clone();
     }
 
     /// For API access: generate a LocationConfig equivalent to the one that would be used to
@@ -144,13 +185,13 @@ impl SecondaryTenant {
 
         let conf = models::LocationConfigSecondary { warm: conf.warm };
 
-        let tenant_conf = *self.tenant_conf.lock().unwrap();
+        let tenant_conf = self.tenant_conf.lock().unwrap().clone();
         models::LocationConfig {
             mode: models::LocationConfigMode::Secondary,
             generation: None,
             secondary_conf: Some(conf),
             shard_number: self.tenant_shard_id.shard_number.0,
-            shard_count: self.tenant_shard_id.shard_count.0,
+            shard_count: self.tenant_shard_id.shard_count.literal(),
             shard_stripe_size: self.shard_identity.stripe_size.0,
             tenant_conf: tenant_conf.into(),
         }
@@ -160,20 +201,16 @@ impl SecondaryTenant {
         &self.tenant_shard_id
     }
 
-    pub(crate) fn get_layers_for_eviction(self: &Arc<Self>) -> DiskUsageEvictionInfo {
+    pub(crate) fn get_layers_for_eviction(self: &Arc<Self>) -> (DiskUsageEvictionInfo, usize) {
         self.detail.lock().unwrap().get_layers_for_eviction(self)
     }
 
+    /// Cancellation safe, but on cancellation the eviction will go through
     #[instrument(skip_all, fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), timeline_id=%timeline_id, name=%name))]
-    pub(crate) async fn evict_layer(
-        &self,
-        conf: &PageServerConf,
-        timeline_id: TimelineId,
-        name: LayerFileName,
-    ) {
+    pub(crate) async fn evict_layer(self: &Arc<Self>, timeline_id: TimelineId, name: LayerName) {
         debug_assert_current_span_has_tenant_id();
 
-        let _guard = match self.gate.enter() {
+        let guard = match self.gate.enter() {
             Ok(g) => g,
             Err(_) => {
                 tracing::debug!("Dropping layer evictions, secondary tenant shutting down",);
@@ -182,47 +219,50 @@ impl SecondaryTenant {
         };
 
         let now = SystemTime::now();
+        tracing::info!("Evicting secondary layer");
 
-        let path = conf
-            .timeline_path(&self.tenant_shard_id, &timeline_id)
-            .join(name.file_name());
+        let this = self.clone();
 
-        // We tolerate ENOENT, because between planning eviction and executing
-        // it, the secondary downloader could have seen an updated heatmap that
-        // resulted in a layer being deleted.
-        // Other local I/O errors are process-fatal: these should never happen.
-        tokio::fs::remove_file(path)
-            .await
-            .or_else(fs_ext::ignore_not_found)
-            .fatal_err("Deleting layer during eviction");
+        // spawn it to be cancellation safe
+        tokio::task::spawn_blocking(move || {
+            let _guard = guard;
 
-        // Update the timeline's state.  This does not have to be synchronized with
-        // the download process, because:
-        // - If downloader is racing with us to remove a file (e.g. because it is
-        //   removed from heatmap), then our mutual .remove() operations will both
-        //   succeed.
-        // - If downloader is racing with us to download the object (this would require
-        //   multiple eviction iterations to race with multiple download iterations), then
-        //   if we remove it from the state, the worst that happens is the downloader
-        //   downloads it again before re-inserting, or we delete the file but it remains
-        //   in the state map (in which case it will be downloaded if this secondary
-        //   tenant transitions to attached and tries to access it)
-        //
-        // The important assumption here is that the secondary timeline state does not
-        // have to 100% match what is on disk, because it's a best-effort warming
-        // of the cache.
-        let mut detail = self.detail.lock().unwrap();
-        if let Some(timeline_detail) = detail.timelines.get_mut(&timeline_id) {
-            timeline_detail.on_disk_layers.remove(&name);
-            timeline_detail.evicted_at.insert(name, now);
-        }
+            // Update the timeline's state.  This does not have to be synchronized with
+            // the download process, because:
+            // - If downloader is racing with us to remove a file (e.g. because it is
+            //   removed from heatmap), then our mutual .remove() operations will both
+            //   succeed.
+            // - If downloader is racing with us to download the object (this would require
+            //   multiple eviction iterations to race with multiple download iterations), then
+            //   if we remove it from the state, the worst that happens is the downloader
+            //   downloads it again before re-inserting, or we delete the file but it remains
+            //   in the state map (in which case it will be downloaded if this secondary
+            //   tenant transitions to attached and tries to access it)
+            //
+            // The important assumption here is that the secondary timeline state does not
+            // have to 100% match what is on disk, because it's a best-effort warming
+            // of the cache.
+            let mut detail = this.detail.lock().unwrap();
+            if let Some(removed) =
+                detail.evict_layer(name, &timeline_id, now, &this.resident_size_metric)
+            {
+                // We might race with removal of the same layer during downloads, so finding the layer we
+                // were trying to remove is optional.  Only issue the disk I/O to remove it if we found it.
+                removed.remove_blocking();
+            }
+        })
+        .await
+        .expect("secondary eviction should not have panicked");
     }
 }
 
 /// The SecondaryController is a pseudo-rpc client for administrative control of secondary mode downloads,
-/// and heatmap uploads.  This is not a hot data path: it's primarily a hook for tests,
-/// where we want to immediately upload/download for a particular tenant.  In normal operation
-/// uploads & downloads are autonomous and not driven by this interface.
+/// and heatmap uploads.  This is not a hot data path: it's used for:
+/// - Live migrations, where we want to ensure a migration destination has the freshest possible
+///   content before trying to cut over.
+/// - Tests, where we want to immediately upload/download for a particular tenant.
+///
+/// In normal operations, outside of migrations, uploads & downloads are autonomous and not driven by this interface.
 pub struct SecondaryController {
     upload_req_tx: tokio::sync::mpsc::Sender<CommandRequest<UploadCommand>>,
     download_req_tx: tokio::sync::mpsc::Sender<CommandRequest<DownloadCommand>>,
@@ -264,15 +304,50 @@ impl SecondaryController {
     }
 }
 
+pub struct GlobalTasks {
+    cancel: CancellationToken,
+    uploader: JoinHandle<()>,
+    downloader: JoinHandle<()>,
+}
+
+impl GlobalTasks {
+    /// Caller is responsible for requesting shutdown via the cancellation token that was
+    /// passed to [`spawn_tasks`].
+    ///
+    /// # Panics
+    ///
+    /// This method panics if that token is not cancelled.
+    /// This is low-risk because we're calling this during process shutdown, so, a panic
+    /// will be informative but not cause undue downtime.
+    pub async fn wait(self) {
+        let Self {
+            cancel,
+            uploader,
+            downloader,
+        } = self;
+        assert!(
+            cancel.is_cancelled(),
+            "must cancel cancellation token, otherwise the tasks will not shut down"
+        );
+
+        let (uploader, downloader) = futures::future::join(uploader, downloader).await;
+        uploader.expect(
+            "unreachable: exit_on_panic_or_error would catch the panic and exit the process",
+        );
+        downloader.expect(
+            "unreachable: exit_on_panic_or_error would catch the panic and exit the process",
+        );
+    }
+}
+
 pub fn spawn_tasks(
     tenant_manager: Arc<TenantManager>,
     remote_storage: GenericRemoteStorage,
     background_jobs_can_start: Barrier,
     cancel: CancellationToken,
-) -> SecondaryController {
+) -> (SecondaryController, GlobalTasks) {
     let mgr_clone = tenant_manager.clone();
     let storage_clone = remote_storage.clone();
-    let cancel_clone = cancel.clone();
     let bg_jobs_clone = background_jobs_can_start.clone();
 
     let (download_req_tx, download_req_rx) =
@@ -280,13 +355,9 @@ pub fn spawn_tasks(
     let (upload_req_tx, upload_req_rx) =
         tokio::sync::mpsc::channel::<CommandRequest<UploadCommand>>(16);
 
-    task_mgr::spawn(
-        BACKGROUND_RUNTIME.handle(),
-        TaskKind::SecondaryDownloads,
-        None,
-        None,
+    let cancel_clone = cancel.clone();
+    let downloader = BACKGROUND_RUNTIME.spawn(task_mgr::exit_on_panic_or_error(
         "secondary tenant downloads",
-        false,
         async move {
             downloader_task(
                 mgr_clone,
@@ -294,48 +365,41 @@ pub fn spawn_tasks(
                 download_req_rx,
                 bg_jobs_clone,
                 cancel_clone,
+                RequestContext::new(
+                    TaskKind::SecondaryDownloads,
+                    crate::context::DownloadBehavior::Download,
+                ),
             )
             .await;
-
-            Ok(())
+            anyhow::Ok(())
         },
-    );
+    ));
 
-    task_mgr::spawn(
-        BACKGROUND_RUNTIME.handle(),
-        TaskKind::SecondaryUploads,
-        None,
-        None,
+    let cancel_clone = cancel.clone();
+    let uploader = BACKGROUND_RUNTIME.spawn(task_mgr::exit_on_panic_or_error(
         "heatmap uploads",
-        false,
         async move {
             heatmap_uploader_task(
                 tenant_manager,
                 remote_storage,
                 upload_req_rx,
                 background_jobs_can_start,
-                cancel,
+                cancel_clone,
             )
             .await;
-
-            Ok(())
+            anyhow::Ok(())
         },
-    );
+    ));
 
-    SecondaryController {
-        download_req_tx,
-        upload_req_tx,
-    }
-}
-
-/// For running with remote storage disabled: a SecondaryController that is connected to nothing.
-pub fn null_controller() -> SecondaryController {
-    let (download_req_tx, _download_req_rx) =
-        tokio::sync::mpsc::channel::<CommandRequest<DownloadCommand>>(16);
-    let (upload_req_tx, _upload_req_rx) =
-        tokio::sync::mpsc::channel::<CommandRequest<UploadCommand>>(16);
-    SecondaryController {
-        upload_req_tx,
-        download_req_tx,
-    }
+    (
+        SecondaryController {
+            upload_req_tx,
+            download_req_tx,
+        },
+        GlobalTasks {
+            cancel,
+            uploader,
+            downloader,
+        },
+    )
 }

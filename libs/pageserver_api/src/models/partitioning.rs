@@ -1,9 +1,11 @@
 use utils::lsn::Lsn;
 
+use crate::keyspace::SparseKeySpace;
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct Partitioning {
     pub keys: crate::keyspace::KeySpace,
-
+    pub sparse_keys: crate::keyspace::SparseKeySpace,
     pub at_lsn: Lsn,
 }
 
@@ -32,6 +34,8 @@ impl serde::Serialize for Partitioning {
         let mut map = serializer.serialize_map(Some(2))?;
         map.serialize_key("keys")?;
         map.serialize_value(&KeySpace(&self.keys))?;
+        map.serialize_key("sparse_keys")?;
+        map.serialize_value(&KeySpace(&self.sparse_keys.0))?;
         map.serialize_key("at_lsn")?;
         map.serialize_value(&WithDisplay(&self.at_lsn))?;
         map.end()
@@ -99,6 +103,7 @@ impl<'a> serde::Deserialize<'a> for Partitioning {
         #[derive(serde::Deserialize)]
         struct De {
             keys: KeySpace,
+            sparse_keys: KeySpace,
             #[serde_as(as = "serde_with::DisplayFromStr")]
             at_lsn: Lsn,
         }
@@ -107,6 +112,7 @@ impl<'a> serde::Deserialize<'a> for Partitioning {
         Ok(Self {
             at_lsn: de.at_lsn,
             keys: de.keys.0,
+            sparse_keys: SparseKeySpace(de.sparse_keys.0),
         })
     }
 }
@@ -131,6 +137,12 @@ mod tests {
               [
                 "030000000000000000000000000000000000",
                 "030000000000000000000000000000000003"
+              ]
+            ],
+            "sparse_keys": [
+              [
+                "620000000000000000000000000000000000",
+                "620000000000000000000000000000000003"
               ]
             ],
             "at_lsn": "0/2240160"

@@ -1,23 +1,37 @@
 //! Tools for client/server/stored key management.
 
-/// Faithfully taken from PostgreSQL.
-pub const SCRAM_KEY_LEN: usize = 32;
+use subtle::ConstantTimeEq;
 
-/// One of the keys derived from the [password](super::password::SaltedPassword).
+/// Faithfully taken from PostgreSQL.
+pub(crate) const SCRAM_KEY_LEN: usize = 32;
+
+/// One of the keys derived from the user's password.
 /// We use the same structure for all keys, i.e.
 /// `ClientKey`, `StoredKey`, and `ServerKey`.
-#[derive(Clone, Default, PartialEq, Eq, Debug)]
+#[derive(Clone, Default, Eq, Debug)]
 #[repr(transparent)]
-pub struct ScramKey {
+pub(crate) struct ScramKey {
     bytes: [u8; SCRAM_KEY_LEN],
 }
 
+impl PartialEq for ScramKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.ct_eq(other).into()
+    }
+}
+
+impl ConstantTimeEq for ScramKey {
+    fn ct_eq(&self, other: &Self) -> subtle::Choice {
+        self.bytes.ct_eq(&other.bytes)
+    }
+}
+
 impl ScramKey {
-    pub fn sha256(&self) -> Self {
+    pub(crate) fn sha256(&self) -> Self {
         super::sha256([self.as_ref()]).into()
     }
 
-    pub fn as_bytes(&self) -> [u8; SCRAM_KEY_LEN] {
+    pub(crate) fn as_bytes(&self) -> [u8; SCRAM_KEY_LEN] {
         self.bytes
     }
 }

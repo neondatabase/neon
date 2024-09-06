@@ -7,7 +7,9 @@ pub mod framed;
 
 use byteorder::{BigEndian, ReadBytesExt};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use std::{borrow::Cow, collections::HashMap, fmt, io, str};
+use itertools::Itertools;
+use serde::{Deserialize, Serialize};
+use std::{borrow::Cow, fmt, io, str};
 
 // re-export for use in utils pageserver_feedback.rs
 pub use postgres_protocol::PG_EPOCH;
@@ -37,27 +39,74 @@ pub enum FeMessage {
     PasswordMessage(Bytes),
 }
 
+#[derive(Clone, Copy, PartialEq, PartialOrd)]
+pub struct ProtocolVersion(u32);
+
+impl ProtocolVersion {
+    pub const fn new(major: u16, minor: u16) -> Self {
+        Self((major as u32) << 16 | minor as u32)
+    }
+    pub const fn minor(self) -> u16 {
+        self.0 as u16
+    }
+    pub const fn major(self) -> u16 {
+        (self.0 >> 16) as u16
+    }
+}
+
+impl fmt::Debug for ProtocolVersion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list()
+            .entry(&self.major())
+            .entry(&self.minor())
+            .finish()
+    }
+}
+
 #[derive(Debug)]
 pub enum FeStartupPacket {
     CancelRequest(CancelKeyData),
-    SslRequest,
+    SslRequest {
+        direct: bool,
+    },
     GssEncRequest,
     StartupMessage {
-        major_version: u32,
-        minor_version: u32,
+        version: ProtocolVersion,
         params: StartupMessageParams,
     },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Default)]
+pub struct StartupMessageParamsBuilder {
+    params: BytesMut,
+}
+
+impl StartupMessageParamsBuilder {
+    /// Set parameter's value by its name.
+    /// name and value must not contain a \0 byte
+    pub fn insert(&mut self, name: &str, value: &str) {
+        self.params.put(name.as_bytes());
+        self.params.put(&b"\0"[..]);
+        self.params.put(value.as_bytes());
+        self.params.put(&b"\0"[..]);
+    }
+
+    pub fn freeze(self) -> StartupMessageParams {
+        StartupMessageParams {
+            params: self.params.freeze(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct StartupMessageParams {
-    params: HashMap<String, String>,
+    params: Bytes,
 }
 
 impl StartupMessageParams {
     /// Get parameter's value by its name.
     pub fn get(&self, name: &str) -> Option<&str> {
-        self.params.get(name).map(|s| s.as_str())
+        self.iter().find_map(|(k, v)| (k == name).then_some(v))
     }
 
     /// Split command-line options according to PostgreSQL's logic,
@@ -111,19 +160,23 @@ impl StartupMessageParams {
 
     /// Iterate through key-value pairs in an arbitrary order.
     pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
-        self.params.iter().map(|(k, v)| (k.as_str(), v.as_str()))
+        let params =
+            std::str::from_utf8(&self.params).expect("should be validated as utf8 already");
+        params.split_terminator('\0').tuples()
     }
 
     // This function is mostly useful in tests.
     #[doc(hidden)]
     pub fn new<'a, const N: usize>(pairs: [(&'a str, &'a str); N]) -> Self {
-        Self {
-            params: pairs.map(|(k, v)| (k.to_owned(), v.to_owned())).into(),
+        let mut b = StartupMessageParamsBuilder::default();
+        for (k, v) in pairs {
+            b.insert(k, v)
         }
+        b.freeze()
     }
 }
 
-#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy, Serialize, Deserialize)]
 pub struct CancelKeyData {
     pub backend_pid: i32,
     pub cancel_key: i32,
@@ -273,11 +326,23 @@ impl FeStartupPacket {
     /// different from [`FeMessage::parse`] because startup messages don't have
     /// message type byte; otherwise, its comments apply.
     pub fn parse(buf: &mut BytesMut) -> Result<Option<FeStartupPacket>, ProtocolError> {
+        /// <https://github.com/postgres/postgres/blob/ca481d3c9ab7bf69ff0c8d71ad3951d407f6a33c/src/include/libpq/pqcomm.h#L118>
         const MAX_STARTUP_PACKET_LENGTH: usize = 10000;
-        const RESERVED_INVALID_MAJOR_VERSION: u32 = 1234;
-        const CANCEL_REQUEST_CODE: u32 = 5678;
-        const NEGOTIATE_SSL_CODE: u32 = 5679;
-        const NEGOTIATE_GSS_CODE: u32 = 5680;
+        const RESERVED_INVALID_MAJOR_VERSION: u16 = 1234;
+        /// <https://github.com/postgres/postgres/blob/ca481d3c9ab7bf69ff0c8d71ad3951d407f6a33c/src/include/libpq/pqcomm.h#L132>
+        const CANCEL_REQUEST_CODE: ProtocolVersion = ProtocolVersion::new(1234, 5678);
+        /// <https://github.com/postgres/postgres/blob/ca481d3c9ab7bf69ff0c8d71ad3951d407f6a33c/src/include/libpq/pqcomm.h#L166>
+        const NEGOTIATE_SSL_CODE: ProtocolVersion = ProtocolVersion::new(1234, 5679);
+        /// <https://github.com/postgres/postgres/blob/ca481d3c9ab7bf69ff0c8d71ad3951d407f6a33c/src/include/libpq/pqcomm.h#L167>
+        const NEGOTIATE_GSS_CODE: ProtocolVersion = ProtocolVersion::new(1234, 5680);
+
+        // <https://github.com/postgres/postgres/blob/04bcf9e19a4261fe9c7df37c777592c2e10c32a7/src/backend/tcop/backend_startup.c#L378-L382>
+        // First byte indicates standard SSL handshake message
+        // (It can't be a Postgres startup length because in network byte order
+        // that would be a startup packet hundreds of megabytes long)
+        if buf.first() == Some(&0x16) {
+            return Ok(Some(FeStartupPacket::SslRequest { direct: true }));
+        }
 
         // need at least 4 bytes with packet len
         if buf.len() < 4 {
@@ -310,12 +375,10 @@ impl FeStartupPacket {
         let mut msg = buf.split_to(len).freeze();
         msg.advance(4); // consume len
 
-        let request_code = msg.get_u32();
-        let req_hi = request_code >> 16;
-        let req_lo = request_code & ((1 << 16) - 1);
+        let request_code = ProtocolVersion(msg.get_u32());
         // StartupMessage, CancelRequest, SSLRequest etc are differentiated by request code.
-        let message = match (req_hi, req_lo) {
-            (RESERVED_INVALID_MAJOR_VERSION, CANCEL_REQUEST_CODE) => {
+        let message = match request_code {
+            CANCEL_REQUEST_CODE => {
                 if msg.remaining() != 8 {
                     return Err(ProtocolError::BadMessage(
                         "CancelRequest message is malformed, backend PID / secret key missing"
@@ -327,52 +390,38 @@ impl FeStartupPacket {
                     cancel_key: msg.get_i32(),
                 })
             }
-            (RESERVED_INVALID_MAJOR_VERSION, NEGOTIATE_SSL_CODE) => {
+            NEGOTIATE_SSL_CODE => {
                 // Requested upgrade to SSL (aka TLS)
-                FeStartupPacket::SslRequest
+                FeStartupPacket::SslRequest { direct: false }
             }
-            (RESERVED_INVALID_MAJOR_VERSION, NEGOTIATE_GSS_CODE) => {
+            NEGOTIATE_GSS_CODE => {
                 // Requested upgrade to GSSAPI
                 FeStartupPacket::GssEncRequest
             }
-            (RESERVED_INVALID_MAJOR_VERSION, unrecognized_code) => {
+            version if version.major() == RESERVED_INVALID_MAJOR_VERSION => {
                 return Err(ProtocolError::Protocol(format!(
-                    "Unrecognized request code {unrecognized_code}"
+                    "Unrecognized request code {}",
+                    version.minor()
                 )));
             }
             // TODO bail if protocol major_version is not 3?
-            (major_version, minor_version) => {
+            version => {
                 // StartupMessage
 
-                // Parse pairs of null-terminated strings (key, value).
-                // See `postgres: ProcessStartupPacket, build_startup_packet`.
-                let mut tokens = str::from_utf8(&msg)
-                    .map_err(|_e| {
-                        ProtocolError::BadMessage("StartupMessage params: invalid utf-8".to_owned())
-                    })?
-                    .strip_suffix('\0') // drop packet's own null
-                    .ok_or_else(|| {
-                        ProtocolError::Protocol(
-                            "StartupMessage params: missing null terminator".to_string(),
-                        )
-                    })?
-                    .split_terminator('\0');
-
-                let mut params = HashMap::new();
-                while let Some(name) = tokens.next() {
-                    let value = tokens.next().ok_or_else(|| {
-                        ProtocolError::Protocol(
-                            "StartupMessage params: key without value".to_string(),
-                        )
-                    })?;
-
-                    params.insert(name.to_owned(), value.to_owned());
-                }
+                let s = str::from_utf8(&msg).map_err(|_e| {
+                    ProtocolError::BadMessage("StartupMessage params: invalid utf-8".to_owned())
+                })?;
+                let s = s.strip_suffix('\0').ok_or_else(|| {
+                    ProtocolError::Protocol(
+                        "StartupMessage params: missing null terminator".to_string(),
+                    )
+                })?;
 
                 FeStartupPacket::StartupMessage {
-                    major_version,
-                    minor_version,
-                    params: StartupMessageParams { params },
+                    version,
+                    params: StartupMessageParams {
+                        params: msg.slice_ref(s.as_bytes()),
+                    },
                 }
             }
         };
@@ -508,6 +557,10 @@ pub enum BeMessage<'a> {
     RowDescription(&'a [RowDescriptor<'a>]),
     XLogData(XLogDataBody<'a>),
     NoticeResponse(&'a str),
+    NegotiateProtocolVersion {
+        version: ProtocolVersion,
+        options: &'a [&'a str],
+    },
     KeepAlive(WalSndKeepAlive),
 }
 
@@ -930,6 +983,18 @@ impl<'a> BeMessage<'a> {
                     buf.put_i64(req.timestamp);
                     buf.put_u8(u8::from(req.request_reply));
                 });
+            }
+
+            BeMessage::NegotiateProtocolVersion { version, options } => {
+                buf.put_u8(b'v');
+                write_body(buf, |buf| {
+                    buf.put_u32(version.0);
+                    buf.put_u32(options.len() as u32);
+                    for option in options.iter() {
+                        write_cstr(option, buf)?;
+                    }
+                    Ok(())
+                })?
             }
         }
         Ok(())

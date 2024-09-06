@@ -12,7 +12,7 @@ use axum::extract::ws::{Message, WebSocket};
 use futures::StreamExt;
 use tokio::sync::{broadcast, watch};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::cgroup::{self, CgroupWatcher};
 use crate::dispatcher::Dispatcher;
@@ -69,7 +69,7 @@ pub struct Config {
     /// should be removed once we have a better solution there.
     sys_buffer_bytes: u64,
 
-    /// Minimum fraction of total system memory reserved *before* the the cgroup threshold; in
+    /// Minimum fraction of total system memory reserved *before* the cgroup threshold; in
     /// other words, providing a ceiling for the highest value of the threshold by enforcing that
     /// there's at least `cgroup_min_overhead_fraction` of the total memory remaining beyond the
     /// threshold.
@@ -474,25 +474,28 @@ impl Runner {
                 // there is a message from the agent
                 msg = self.dispatcher.source.next() => {
                     if let Some(msg) = msg {
-                        // Don't use 'message' as a key as the string also uses
-                        // that for its key
-                        info!(?msg, "received message");
-                        match msg {
+                        match &msg {
                             Ok(msg) => {
                                 let message: InboundMsg = match msg {
                                     Message::Text(text) => {
-                                        serde_json::from_str(&text).context("failed to deserialize text message")?
+                                        serde_json::from_str(text).context("failed to deserialize text message")?
                                     }
                                     other => {
                                         warn!(
                                             // Don't use 'message' as a key as the
                                             // string also uses that for its key
                                             msg = ?other,
-                                            "agent should only send text messages but received different type"
+                                            "problem processing incoming message: agent should only send text messages but received different type"
                                         );
                                         continue
                                     },
                                 };
+
+                                if matches!(&message.inner, InboundMsgKind::HealthCheck { .. }) {
+                                    debug!(?msg, "received message");
+                                } else {
+                                    info!(?msg, "received message");
+                                }
 
                                 let out = match self.process_message(message.clone()).await {
                                     Ok(Some(out)) => out,
@@ -517,7 +520,11 @@ impl Runner {
                                     .await
                                     .context("failed to send message")?;
                             }
-                            Err(e) => warn!("{e}"),
+                            Err(e) => warn!(
+                                error = format!("{e}"),
+                                msg = ?msg,
+                                "received error message"
+                            ),
                         }
                     } else {
                         anyhow::bail!("dispatcher connection closed")

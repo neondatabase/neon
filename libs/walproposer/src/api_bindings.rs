@@ -22,6 +22,7 @@ use crate::bindings::WalProposerExecStatusType;
 use crate::bindings::WalproposerShmemState;
 use crate::bindings::XLogRecPtr;
 use crate::walproposer::ApiImpl;
+use crate::walproposer::StreamingCallback;
 use crate::walproposer::WaitResult;
 
 extern "C" fn get_shmem_state(wp: *mut WalProposer) -> *mut WalproposerShmemState {
@@ -32,11 +33,12 @@ extern "C" fn get_shmem_state(wp: *mut WalProposer) -> *mut WalproposerShmemStat
     }
 }
 
-extern "C" fn start_streaming(wp: *mut WalProposer, startpos: XLogRecPtr) {
+extern "C-unwind" fn start_streaming(wp: *mut WalProposer, startpos: XLogRecPtr) {
     unsafe {
         let callback_data = (*(*wp).config).callback_data;
         let api = callback_data as *mut Box<dyn ApiImpl>;
-        (*api).start_streaming(startpos)
+        let callback = StreamingCallback::new(wp);
+        (*api).start_streaming(startpos, &callback);
     }
 }
 
@@ -45,6 +47,14 @@ extern "C" fn get_flush_rec_ptr(wp: *mut WalProposer) -> XLogRecPtr {
         let callback_data = (*(*wp).config).callback_data;
         let api = callback_data as *mut Box<dyn ApiImpl>;
         (*api).get_flush_rec_ptr()
+    }
+}
+
+extern "C" fn update_donor(wp: *mut WalProposer, donor: *mut Safekeeper, donor_lsn: XLogRecPtr) {
+    unsafe {
+        let callback_data = (*(*wp).config).callback_data;
+        let api = callback_data as *mut Box<dyn ApiImpl>;
+        (*api).update_donor(&mut (*donor), donor_lsn)
     }
 }
 
@@ -134,19 +144,18 @@ extern "C" fn conn_async_read(
     unsafe {
         let callback_data = (*(*(*sk).wp).config).callback_data;
         let api = callback_data as *mut Box<dyn ApiImpl>;
-        let (res, result) = (*api).conn_async_read(&mut (*sk));
 
         // This function has guarantee that returned buf will be valid until
         // the next call. So we can store a Vec in each Safekeeper and reuse
         // it on the next call.
         let mut inbuf = take_vec_u8(&mut (*sk).inbuf).unwrap_or_default();
-
         inbuf.clear();
-        inbuf.extend_from_slice(res);
+
+        let result = (*api).conn_async_read(&mut (*sk), &mut inbuf);
 
         // Put a Vec back to sk->inbuf and return data ptr.
+        *amount = inbuf.len() as i32;
         *buf = store_vec_u8(&mut (*sk).inbuf, inbuf);
-        *amount = res.len() as i32;
 
         result
     }
@@ -178,10 +187,14 @@ extern "C" fn conn_blocking_write(
     }
 }
 
-extern "C" fn recovery_download(wp: *mut WalProposer, sk: *mut Safekeeper) -> bool {
+extern "C-unwind" fn recovery_download(wp: *mut WalProposer, sk: *mut Safekeeper) -> bool {
     unsafe {
         let callback_data = (*(*(*sk).wp).config).callback_data;
         let api = callback_data as *mut Box<dyn ApiImpl>;
+
+        // currently `recovery_download` is always called right after election
+        (*api).after_election(&mut (*wp));
+
         (*api).recovery_download(&mut (*wp), &mut (*sk))
     }
 }
@@ -259,7 +272,7 @@ extern "C" fn rm_safekeeper_event_set(sk: *mut Safekeeper) {
     }
 }
 
-extern "C" fn wait_event_set(
+extern "C-unwind" fn wait_event_set(
     wp: *mut WalProposer,
     timeout: ::std::os::raw::c_long,
     event_sk: *mut *mut Safekeeper,
@@ -277,7 +290,8 @@ extern "C" fn wait_event_set(
             }
             WaitResult::Timeout => {
                 *event_sk = std::ptr::null_mut();
-                *events = crate::bindings::WL_TIMEOUT;
+                // WaitEventSetWait returns 0 for timeout.
+                *events = 0;
                 0
             }
             WaitResult::Network(sk, event_mask) => {
@@ -310,7 +324,7 @@ extern "C" fn get_redo_start_lsn(wp: *mut WalProposer) -> XLogRecPtr {
     }
 }
 
-extern "C" fn finish_sync_safekeepers(wp: *mut WalProposer, lsn: XLogRecPtr) {
+extern "C-unwind" fn finish_sync_safekeepers(wp: *mut WalProposer, lsn: XLogRecPtr) {
     unsafe {
         let callback_data = (*(*wp).config).callback_data;
         let api = callback_data as *mut Box<dyn ApiImpl>;
@@ -318,15 +332,15 @@ extern "C" fn finish_sync_safekeepers(wp: *mut WalProposer, lsn: XLogRecPtr) {
     }
 }
 
-extern "C" fn process_safekeeper_feedback(wp: *mut WalProposer, commit_lsn: XLogRecPtr) {
+extern "C" fn process_safekeeper_feedback(wp: *mut WalProposer, sk: *mut Safekeeper) {
     unsafe {
         let callback_data = (*(*wp).config).callback_data;
         let api = callback_data as *mut Box<dyn ApiImpl>;
-        (*api).process_safekeeper_feedback(&mut (*wp), commit_lsn)
+        (*api).process_safekeeper_feedback(&mut (*wp), &mut (*sk));
     }
 }
 
-extern "C" fn log_internal(
+extern "C-unwind" fn log_internal(
     wp: *mut WalProposer,
     level: ::std::os::raw::c_int,
     line: *const ::std::os::raw::c_char,
@@ -340,7 +354,7 @@ extern "C" fn log_internal(
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum Level {
     Debug5,
     Debug4,
@@ -385,6 +399,7 @@ pub(crate) fn create_api() -> walproposer_api {
         get_shmem_state: Some(get_shmem_state),
         start_streaming: Some(start_streaming),
         get_flush_rec_ptr: Some(get_flush_rec_ptr),
+        update_donor: Some(update_donor),
         get_current_timestamp: Some(get_current_timestamp),
         conn_error_message: Some(conn_error_message),
         conn_status: Some(conn_status),
@@ -412,6 +427,32 @@ pub(crate) fn create_api() -> walproposer_api {
         finish_sync_safekeepers: Some(finish_sync_safekeepers),
         process_safekeeper_feedback: Some(process_safekeeper_feedback),
         log_internal: Some(log_internal),
+    }
+}
+
+pub fn empty_shmem() -> crate::bindings::WalproposerShmemState {
+    let empty_feedback = crate::bindings::PageserverFeedback {
+        present: false,
+        currentClusterSize: 0,
+        last_received_lsn: 0,
+        disk_consistent_lsn: 0,
+        remote_consistent_lsn: 0,
+        replytime: 0,
+        shard_number: 0,
+    };
+
+    crate::bindings::WalproposerShmemState {
+        propEpochStartLsn: crate::bindings::pg_atomic_uint64 { value: 0 },
+        donor_name: [0; 64],
+        donor_conninfo: [0; 1024],
+        donor_lsn: 0,
+        mutex: 0,
+        mineLastElectedTerm: crate::bindings::pg_atomic_uint64 { value: 0 },
+        backpressureThrottlingTime: crate::bindings::pg_atomic_uint64 { value: 0 },
+        currentClusterSize: crate::bindings::pg_atomic_uint64 { value: 0 },
+        shard_ps_feedback: [empty_feedback; 128],
+        num_shards: 0,
+        min_ps_feedback: empty_feedback,
     }
 }
 

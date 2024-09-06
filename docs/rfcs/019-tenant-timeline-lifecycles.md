@@ -74,7 +74,7 @@ TenantMaintenanceGuard: Like ActiveTenantGuard, but can be held even when the
 tenant is not in Active state. Used for operations like attach/detach. Perhaps
 allow only one such guard on a Tenant at a time.
 
-Similarly for Timelines. We don't currentl have a "state" on Timeline, but I think
+Similarly for Timelines. We don't currently have a "state" on Timeline, but I think
 we need at least two states: Active and Stopping. The Stopping state is used at
 deletion, to prevent new TimelineActiveGuards from appearing, while you wait for
 existing TimelineActiveGuards to die out.
@@ -85,7 +85,7 @@ have a TenantActiveGuard, and the tenant's state changes from Active to
 Stopping, the is_shutdown_requested() function should return true, and
 shutdown_watcher() future should return.
 
-This signaling doesn't neessarily need to cover all cases. For example, if you
+This signaling doesn't necessarily need to cover all cases. For example, if you
 have a block of code in spawn_blocking(), it might be acceptable if
 is_shutdown_requested() doesn't return true even though the tenant is in
 Stopping state, as long as the code finishes reasonably fast.

@@ -2,10 +2,10 @@ import time
 
 import psutil
 import pytest
+from fixtures.common_types import TenantId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder
 from fixtures.pageserver.http import PageserverApiException
-from fixtures.types import TenantId
 
 
 def assert_child_processes(pageserver_pid, wal_redo_present=False, defunct_present=False):
@@ -37,7 +37,7 @@ def test_walredo_not_left_behind_on_detach(neon_env_builder: NeonEnvBuilder):
         expected_exception=PageserverApiException,
         match=f"NotFound: tenant {tenant_id}",
     ):
-        pageserver_http.tenant_detach(tenant_id)
+        pageserver_http.tenant_status(tenant_id)
 
     # create new nenant
     tenant_id, _ = env.neon_cli.create_tenant()

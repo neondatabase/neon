@@ -21,9 +21,9 @@ implementation where we keep more data than we would need to, do not
 change the synthetic size or incur any costs to the user.
 
 The synthetic size is calculated for the whole project. It is not
-straighforward to attribute size to individual branches. See "What is
-the size of an individual branch?" for discussion on those
-difficulties.
+straightforward to attribute size to individual branches. See [What is
+the size of an individual branch?](#what-is-the-size-of-an-individual-branch)
+for a discussion of those difficulties.
 
 The synthetic size is designed to:
 
@@ -40,8 +40,9 @@ The synthetic size is designed to:
 - logical size is the size of a branch *at a given point in
   time*. It's the total size of all tables in all databases, as you
   see with "\l+" in psql for example, plus the Postgres SLRUs and some
-  small amount of metadata. NOTE that currently, Neon does not include
-  the SLRUs and metadata in the logical size. See comment to `get_current_logical_size_non_incremental()`.
+  small amount of metadata. Note that currently, Neon does not include
+  the SLRUs and metadata in the logical size. Refer to the comment in
+  [`get_current_logical_size_non_incremental()`](/pageserver/src/pgdatadir_mapping.rs#L813-L814).
 
 - a "point in time" is defined as an LSN value. You can convert a
   timestamp to an LSN, but the storage internally works with LSNs.
@@ -248,7 +249,7 @@ and truncate the WAL.
 
 Synthetic size is calculated for the whole project, and includes all
 branches. There is no such thing as the size of a branch, because it
-is not straighforward to attribute the parts of size to individual
+is not straightforward to attribute the parts of size to individual
 branches.
 
 ## Example: attributing size to branches

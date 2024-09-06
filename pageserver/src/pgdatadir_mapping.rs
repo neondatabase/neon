@@ -9,29 +9,40 @@
 use super::tenant::{PageReconstructError, Timeline};
 use crate::context::RequestContext;
 use crate::keyspace::{KeySpace, KeySpaceAccum};
-use crate::repository::*;
+use crate::span::debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id;
 use crate::walrecord::NeonWalRecord;
+use crate::{aux_file, repository::*};
 use anyhow::{ensure, Context};
-use bytes::{Buf, Bytes};
+use bytes::{Buf, Bytes, BytesMut};
+use enum_map::Enum;
 use pageserver_api::key::{
-    dbdir_key_range, is_rel_block_key, is_slru_block_key, rel_block_to_key, rel_dir_to_key,
-    rel_key_range, rel_size_to_key, relmap_file_key, slru_block_to_key, slru_dir_to_key,
+    dbdir_key_range, rel_block_to_key, rel_dir_to_key, rel_key_range, rel_size_to_key,
+    relmap_file_key, repl_origin_key, repl_origin_key_range, slru_block_to_key, slru_dir_to_key,
     slru_segment_key_range, slru_segment_size_to_key, twophase_file_key, twophase_key_range,
-    AUX_FILES_KEY, CHECKPOINT_KEY, CONTROLFILE_KEY, DBDIR_KEY, TWOPHASEDIR_KEY,
+    CompactKey, AUX_FILES_KEY, CHECKPOINT_KEY, CONTROLFILE_KEY, DBDIR_KEY, TWOPHASEDIR_KEY,
 };
+use pageserver_api::keyspace::SparseKeySpace;
+use pageserver_api::models::AuxFilePolicy;
 use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
 use postgres_ffi::relfile_utils::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
 use postgres_ffi::BLCKSZ;
-use postgres_ffi::{Oid, TimestampTz, TransactionId};
+use postgres_ffi::{Oid, RepOriginId, TimestampTz, TransactionId};
 use serde::{Deserialize, Serialize};
 use std::collections::{hash_map, HashMap, HashSet};
 use std::ops::ControlFlow;
 use std::ops::Range;
 use strum::IntoEnumIterator;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, trace, warn};
+use tracing::{debug, info, trace, warn};
 use utils::bin_ser::DeserializeError;
+use utils::pausable_failpoint;
 use utils::{bin_ser::BeSer, lsn::Lsn};
+
+/// Max delta records appended to the AUX_FILES_KEY (for aux v1). The write path will write a full image once this threshold is reached.
+pub const MAX_AUX_FILE_DELTAS: usize = 1024;
+
+/// Max number of aux-file-related delta layers. The compaction will create a new image layer once this threshold is reached.
+pub const MAX_AUX_FILE_V2_DELTAS: usize = 64;
 
 #[derive(Debug)]
 pub enum LsnForTimestamp {
@@ -66,11 +77,19 @@ pub enum LsnForTimestamp {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum CalculateLogicalSizeError {
+pub(crate) enum CalculateLogicalSizeError {
     #[error("cancelled")]
     Cancelled,
+
+    /// Something went wrong while reading the metadata we use to calculate logical size
+    /// Note that cancellation variants of `PageReconstructError` are transformed to [`Self::Cancelled`]
+    /// in the `From` implementation for this variant.
     #[error(transparent)]
-    Other(#[from] anyhow::Error),
+    PageRead(PageReconstructError),
+
+    /// Something went wrong deserializing metadata that we read to calculate logical size
+    #[error("decode error: {0}")]
+    Decode(#[from] DeserializeError),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -95,10 +114,8 @@ impl From<PageReconstructError> for CollectKeySpaceError {
 impl From<PageReconstructError> for CalculateLogicalSizeError {
     fn from(pre: PageReconstructError) -> Self {
         match pre {
-            PageReconstructError::AncestorStopping(_) | PageReconstructError::Cancelled => {
-                Self::Cancelled
-            }
-            _ => Self::Other(pre.into()),
+            PageReconstructError::Cancelled => Self::Cancelled,
+            _ => Self::PageRead(pre),
         }
     }
 }
@@ -151,9 +168,13 @@ impl Timeline {
         DatadirModification {
             tline: self,
             pending_lsns: Vec::new(),
-            pending_updates: HashMap::new(),
+            pending_metadata_pages: HashMap::new(),
+            pending_data_pages: Vec::new(),
+            pending_zero_data_pages: Default::default(),
             pending_deletions: Vec::new(),
             pending_nblocks: 0,
+            pending_directory_entries: Vec::new(),
+            pending_bytes: 0,
             lsn,
         }
     }
@@ -168,7 +189,6 @@ impl Timeline {
         tag: RelTag,
         blknum: BlockNumber,
         version: Version<'_>,
-        latest: bool,
         ctx: &RequestContext,
     ) -> Result<Bytes, PageReconstructError> {
         if tag.relnode == 0 {
@@ -177,7 +197,7 @@ impl Timeline {
             ));
         }
 
-        let nblocks = self.get_rel_size(tag, version, latest, ctx).await?;
+        let nblocks = self.get_rel_size(tag, version, ctx).await?;
         if blknum >= nblocks {
             debug!(
                 "read beyond EOF at {} blk {} at {}, size is {}: returning all-zeros page",
@@ -199,7 +219,6 @@ impl Timeline {
         spcnode: Oid,
         dbnode: Oid,
         version: Version<'_>,
-        latest: bool,
         ctx: &RequestContext,
     ) -> Result<usize, PageReconstructError> {
         let mut total_blocks = 0;
@@ -207,7 +226,7 @@ impl Timeline {
         let rels = self.list_rels(spcnode, dbnode, version, ctx).await?;
 
         for rel in rels {
-            let n_blocks = self.get_rel_size(rel, version, latest, ctx).await?;
+            let n_blocks = self.get_rel_size(rel, version, ctx).await?;
             total_blocks += n_blocks as usize;
         }
         Ok(total_blocks)
@@ -218,7 +237,6 @@ impl Timeline {
         &self,
         tag: RelTag,
         version: Version<'_>,
-        latest: bool,
         ctx: &RequestContext,
     ) -> Result<BlockNumber, PageReconstructError> {
         if tag.relnode == 0 {
@@ -232,7 +250,7 @@ impl Timeline {
         }
 
         if (tag.forknum == FSM_FORKNUM || tag.forknum == VISIBILITYMAP_FORKNUM)
-            && !self.get_rel_exists(tag, version, latest, ctx).await?
+            && !self.get_rel_exists(tag, version, ctx).await?
         {
             // FIXME: Postgres sometimes calls smgrcreate() to create
             // FSM, and smgrnblocks() on it immediately afterwards,
@@ -245,16 +263,8 @@ impl Timeline {
         let mut buf = version.get(self, key, ctx).await?;
         let nblocks = buf.get_u32_le();
 
-        if latest {
-            // Update relation size cache only if "latest" flag is set.
-            // This flag is set by compute when it is working with most recent version of relation.
-            // Typically master compute node always set latest=true.
-            // Please notice, that even if compute node "by mistake" specifies old LSN but set
-            // latest=true, then it can not cause cache corruption, because with latest=true
-            // pageserver choose max(request_lsn, last_written_lsn) and so cached value will be
-            // associated with most recent value of LSN.
-            self.update_cached_rel_size(tag, version.get_lsn(), nblocks);
-        }
+        self.update_cached_rel_size(tag, version.get_lsn(), nblocks);
+
         Ok(nblocks)
     }
 
@@ -263,7 +273,6 @@ impl Timeline {
         &self,
         tag: RelTag,
         version: Version<'_>,
-        _latest: bool,
         ctx: &RequestContext,
     ) -> Result<bool, PageReconstructError> {
         if tag.relnode == 0 {
@@ -276,17 +285,19 @@ impl Timeline {
         if let Some(_nblocks) = self.get_cached_rel_size(&tag, version.get_lsn()) {
             return Ok(true);
         }
+        // then check if the database was already initialized.
+        // get_rel_exists can be called before dbdir is created.
+        let buf = version.get(self, DBDIR_KEY, ctx).await?;
+        let dbdirs = DbDirectory::des(&buf)?.dbdirs;
+        if !dbdirs.contains_key(&(tag.spcnode, tag.dbnode)) {
+            return Ok(false);
+        }
         // fetch directory listing
         let key = rel_dir_to_key(tag.spcnode, tag.dbnode);
         let buf = version.get(self, key, ctx).await?;
 
-        match RelDirectory::des(&buf).context("deserialization failure") {
-            Ok(dir) => {
-                let exists = dir.rels.get(&(tag.relnode, tag.forknum)).is_some();
-                Ok(exists)
-            }
-            Err(e) => Err(PageReconstructError::from(e)),
-        }
+        let dir = RelDirectory::des(&buf)?;
+        Ok(dir.rels.contains(&(tag.relnode, tag.forknum)))
     }
 
     /// Get a list of all existing relations in given tablespace and database.
@@ -305,20 +316,37 @@ impl Timeline {
         let key = rel_dir_to_key(spcnode, dbnode);
         let buf = version.get(self, key, ctx).await?;
 
-        match RelDirectory::des(&buf).context("deserialization failure") {
-            Ok(dir) => {
-                let rels: HashSet<RelTag> =
-                    HashSet::from_iter(dir.rels.iter().map(|(relnode, forknum)| RelTag {
-                        spcnode,
-                        dbnode,
-                        relnode: *relnode,
-                        forknum: *forknum,
-                    }));
+        let dir = RelDirectory::des(&buf)?;
+        let rels: HashSet<RelTag> =
+            HashSet::from_iter(dir.rels.iter().map(|(relnode, forknum)| RelTag {
+                spcnode,
+                dbnode,
+                relnode: *relnode,
+                forknum: *forknum,
+            }));
 
-                Ok(rels)
-            }
-            Err(e) => Err(PageReconstructError::from(e)),
+        Ok(rels)
+    }
+
+    /// Get the whole SLRU segment
+    pub(crate) async fn get_slru_segment(
+        &self,
+        kind: SlruKind,
+        segno: u32,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<Bytes, PageReconstructError> {
+        let n_blocks = self
+            .get_slru_segment_size(kind, segno, Version::Lsn(lsn), ctx)
+            .await?;
+        let mut segment = BytesMut::with_capacity(n_blocks as usize * BLCKSZ as usize);
+        for blkno in 0..n_blocks {
+            let block = self
+                .get_slru_page_at_lsn(kind, segno, blkno, lsn, ctx)
+                .await?;
+            segment.extend_from_slice(&block[..BLCKSZ as usize]);
         }
+        Ok(segment.freeze())
     }
 
     /// Look up given SLRU page version.
@@ -359,13 +387,8 @@ impl Timeline {
         let key = slru_dir_to_key(kind);
         let buf = version.get(self, key, ctx).await?;
 
-        match SlruSegmentDirectory::des(&buf).context("deserialization failure") {
-            Ok(dir) => {
-                let exists = dir.segments.get(&segno).is_some();
-                Ok(exists)
-            }
-            Err(e) => Err(PageReconstructError::from(e)),
-        }
+        let dir = SlruSegmentDirectory::des(&buf)?;
+        Ok(dir.segments.contains(&segno))
     }
 
     /// Locate LSN, such that all transactions that committed before
@@ -381,6 +404,8 @@ impl Timeline {
         cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> Result<LsnForTimestamp, PageReconstructError> {
+        pausable_failpoint!("find-lsn-for-timestamp-pausable");
+
         let gc_cutoff_lsn_guard = self.get_latest_gc_cutoff_lsn();
         // We use this method to figure out the branching LSN for the new branch, but the
         // GC cutoff could be before the branching point and we cannot create a new branch
@@ -396,6 +421,7 @@ impl Timeline {
 
         let mut found_smaller = false;
         let mut found_larger = false;
+
         while low < high {
             if cancel.is_cancelled() {
                 return Err(PageReconstructError::Cancelled);
@@ -436,6 +462,12 @@ impl Timeline {
             }
             (false, true) => {
                 // Didn't find any commit timestamps smaller than the request
+                Ok(LsnForTimestamp::Past(min_lsn))
+            }
+            (true, _) if commit_lsn < min_lsn => {
+                // the search above did set found_smaller to true but it never increased the lsn.
+                // Then, low is still the old min_lsn, and the subtraction above gave a value
+                // below the min_lsn. We should never do that.
                 Ok(LsnForTimestamp::Past(min_lsn))
             }
             (true, false) => {
@@ -484,7 +516,7 @@ impl Timeline {
         ctx: &RequestContext,
     ) -> Result<Option<TimestampTz>, PageReconstructError> {
         let mut max: Option<TimestampTz> = None;
-        self.map_all_timestamps(probe_lsn, ctx, |timestamp| {
+        self.map_all_timestamps::<()>(probe_lsn, ctx, |timestamp| {
             if let Some(max_prev) = max {
                 max = Some(max_prev.max(timestamp));
             } else {
@@ -572,10 +604,7 @@ impl Timeline {
         let key = slru_dir_to_key(kind);
 
         let buf = version.get(self, key, ctx).await?;
-        match SlruSegmentDirectory::des(&buf).context("deserialization failure") {
-            Ok(dir) => Ok(dir.segments),
-            Err(e) => Err(PageReconstructError::from(e)),
-        }
+        Ok(SlruSegmentDirectory::des(&buf)?.segments)
     }
 
     pub(crate) async fn get_relmap_file(
@@ -599,10 +628,7 @@ impl Timeline {
         // fetch directory entry
         let buf = self.get(DBDIR_KEY, lsn, ctx).await?;
 
-        match DbDirectory::des(&buf).context("deserialization failure") {
-            Ok(dir) => Ok(dir.dbdirs),
-            Err(e) => Err(PageReconstructError::from(e)),
-        }
+        Ok(DbDirectory::des(&buf)?.dbdirs)
     }
 
     pub(crate) async fn get_twophase_file(
@@ -624,10 +650,7 @@ impl Timeline {
         // fetch directory entry
         let buf = self.get(TWOPHASEDIR_KEY, lsn, ctx).await?;
 
-        match TwoPhaseDirectory::des(&buf).context("deserialization failure") {
-            Ok(dir) => Ok(dir.xids),
-            Err(e) => Err(PageReconstructError::from(e)),
-        }
+        Ok(TwoPhaseDirectory::des(&buf)?.xids)
     }
 
     pub(crate) async fn get_control_file(
@@ -646,22 +669,128 @@ impl Timeline {
         self.get(CHECKPOINT_KEY, lsn, ctx).await
     }
 
-    pub(crate) async fn list_aux_files(
+    async fn list_aux_files_v1(
         &self,
         lsn: Lsn,
         ctx: &RequestContext,
     ) -> Result<HashMap<String, Bytes>, PageReconstructError> {
         match self.get(AUX_FILES_KEY, lsn, ctx).await {
-            Ok(buf) => match AuxFilesDirectory::des(&buf).context("deserialization failure") {
-                Ok(dir) => Ok(dir.files),
-                Err(e) => Err(PageReconstructError::from(e)),
-            },
+            Ok(buf) => Ok(AuxFilesDirectory::des(&buf)?.files),
             Err(e) => {
                 // This is expected: historical databases do not have the key.
                 debug!("Failed to get info about AUX files: {}", e);
                 Ok(HashMap::new())
             }
         }
+    }
+
+    async fn list_aux_files_v2(
+        &self,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<HashMap<String, Bytes>, PageReconstructError> {
+        let kv = self
+            .scan(KeySpace::single(Key::metadata_aux_key_range()), lsn, ctx)
+            .await?;
+        let mut result = HashMap::new();
+        let mut sz = 0;
+        for (_, v) in kv {
+            let v = v?;
+            let v = aux_file::decode_file_value_bytes(&v)
+                .context("value decode")
+                .map_err(PageReconstructError::Other)?;
+            for (fname, content) in v {
+                sz += fname.len();
+                sz += content.len();
+                result.insert(fname, content);
+            }
+        }
+        self.aux_file_size_estimator.on_initial(sz);
+        Ok(result)
+    }
+
+    pub(crate) async fn trigger_aux_file_size_computation(
+        &self,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<(), PageReconstructError> {
+        let current_policy = self.last_aux_file_policy.load();
+        if let Some(AuxFilePolicy::V2) | Some(AuxFilePolicy::CrossValidation) = current_policy {
+            self.list_aux_files_v2(lsn, ctx).await?;
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn list_aux_files(
+        &self,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<HashMap<String, Bytes>, PageReconstructError> {
+        let current_policy = self.last_aux_file_policy.load();
+        match current_policy {
+            Some(AuxFilePolicy::V1) => {
+                let res = self.list_aux_files_v1(lsn, ctx).await?;
+                let empty_str = if res.is_empty() { ", empty" } else { "" };
+                warn!(
+                    "this timeline is using deprecated aux file policy V1 (policy=v1{empty_str})"
+                );
+                Ok(res)
+            }
+            None => {
+                let res = self.list_aux_files_v1(lsn, ctx).await?;
+                if !res.is_empty() {
+                    warn!("this timeline is using deprecated aux file policy V1 (policy=None)");
+                }
+                Ok(res)
+            }
+            Some(AuxFilePolicy::V2) => self.list_aux_files_v2(lsn, ctx).await,
+            Some(AuxFilePolicy::CrossValidation) => {
+                let v1_result = self.list_aux_files_v1(lsn, ctx).await;
+                let v2_result = self.list_aux_files_v2(lsn, ctx).await;
+                match (v1_result, v2_result) {
+                    (Ok(v1), Ok(v2)) => {
+                        if v1 != v2 {
+                            tracing::error!(
+                                "unmatched aux file v1 v2 result:\nv1 {v1:?}\nv2 {v2:?}"
+                            );
+                            return Err(PageReconstructError::Other(anyhow::anyhow!(
+                                "unmatched aux file v1 v2 result"
+                            )));
+                        }
+                        Ok(v1)
+                    }
+                    (Ok(_), Err(v2)) => {
+                        tracing::error!("aux file v1 returns Ok while aux file v2 returns an err");
+                        Err(v2)
+                    }
+                    (Err(v1), Ok(_)) => {
+                        tracing::error!("aux file v2 returns Ok while aux file v1 returns an err");
+                        Err(v1)
+                    }
+                    (Err(_), Err(v2)) => Err(v2),
+                }
+            }
+        }
+    }
+
+    pub(crate) async fn get_replorigins(
+        &self,
+        lsn: Lsn,
+        ctx: &RequestContext,
+    ) -> Result<HashMap<RepOriginId, Lsn>, PageReconstructError> {
+        let kv = self
+            .scan(KeySpace::single(repl_origin_key_range()), lsn, ctx)
+            .await?;
+        let mut result = HashMap::new();
+        for (k, v) in kv {
+            let v = v?;
+            let origin_id = k.field6 as RepOriginId;
+            let origin_lsn = Lsn::des(&v).unwrap();
+            if origin_lsn != Lsn::INVALID {
+                result.insert(origin_id, origin_lsn);
+            }
+        }
+        Ok(result)
     }
 
     /// Does the same as get_current_logical_size but counted on demand.
@@ -673,16 +802,16 @@ impl Timeline {
     /// # Cancel-Safety
     ///
     /// This method is cancellation-safe.
-    pub async fn get_current_logical_size_non_incremental(
+    pub(crate) async fn get_current_logical_size_non_incremental(
         &self,
         lsn: Lsn,
         ctx: &RequestContext,
     ) -> Result<u64, CalculateLogicalSizeError> {
-        crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id();
+        debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id();
 
         // Fetch list of database dirs and iterate them
         let buf = self.get(DBDIR_KEY, lsn, ctx).await?;
-        let dbdir = DbDirectory::des(&buf).context("deserialize db directory")?;
+        let dbdir = DbDirectory::des(&buf)?;
 
         let mut total_size: u64 = 0;
         for (spcnode, dbnode) in dbdir.dbdirs.keys() {
@@ -707,11 +836,13 @@ impl Timeline {
     /// Get a KeySpace that covers all the Keys that are in use at the given LSN.
     /// Anything that's not listed maybe removed from the underlying storage (from
     /// that LSN forwards).
+    ///
+    /// The return value is (dense keyspace, sparse keyspace).
     pub(crate) async fn collect_keyspace(
         &self,
         lsn: Lsn,
         ctx: &RequestContext,
-    ) -> Result<KeySpace, CollectKeySpaceError> {
+    ) -> Result<(KeySpace, SparseKeySpace), CollectKeySpaceError> {
         // Iterate through key ranges, greedily packing them into partitions
         let mut result = KeySpaceAccum::new();
 
@@ -719,13 +850,14 @@ impl Timeline {
         result.add_key(DBDIR_KEY);
 
         // Fetch list of database dirs and iterate them
-        let buf = self.get(DBDIR_KEY, lsn, ctx).await?;
-        let dbdir = DbDirectory::des(&buf)?;
+        let dbdir = self.list_dbdirs(lsn, ctx).await?;
+        let mut dbs: Vec<((Oid, Oid), bool)> = dbdir.into_iter().collect();
 
-        let mut dbs: Vec<(Oid, Oid)> = dbdir.dbdirs.keys().cloned().collect();
-        dbs.sort_unstable();
-        for (spcnode, dbnode) in dbs {
-            result.add_key(relmap_file_key(spcnode, dbnode));
+        dbs.sort_unstable_by(|(k_a, _), (k_b, _)| k_a.cmp(k_b));
+        for ((spcnode, dbnode), has_relmap_file) in dbs {
+            if has_relmap_file {
+                result.add_key(relmap_file_key(spcnode, dbnode));
+            }
             result.add_key(rel_dir_to_key(spcnode, dbnode));
 
             let mut rels: Vec<RelTag> = self
@@ -783,13 +915,66 @@ impl Timeline {
         if self.get(AUX_FILES_KEY, lsn, ctx).await.is_ok() {
             result.add_key(AUX_FILES_KEY);
         }
-        Ok(result.to_keyspace())
+
+        // Add extra keyspaces in the test cases. Some test cases write keys into the storage without
+        // creating directory keys. These test cases will add such keyspaces into `extra_test_dense_keyspace`
+        // and the keys will not be garbage-colllected.
+        #[cfg(test)]
+        {
+            let guard = self.extra_test_dense_keyspace.load();
+            for kr in &guard.ranges {
+                result.add_range(kr.clone());
+            }
+        }
+
+        let dense_keyspace = result.to_keyspace();
+        let sparse_keyspace = SparseKeySpace(KeySpace {
+            ranges: vec![Key::metadata_aux_key_range(), repl_origin_key_range()],
+        });
+
+        if cfg!(debug_assertions) {
+            // Verify if the sparse keyspaces are ordered and non-overlapping.
+
+            // We do not use KeySpaceAccum for sparse_keyspace because we want to ensure each
+            // category of sparse keys are split into their own image/delta files. If there
+            // are overlapping keyspaces, they will be automatically merged by keyspace accum,
+            // and we want the developer to keep the keyspaces separated.
+
+            let ranges = &sparse_keyspace.0.ranges;
+
+            // TODO: use a single overlaps_with across the codebase
+            fn overlaps_with<T: Ord>(a: &Range<T>, b: &Range<T>) -> bool {
+                !(a.end <= b.start || b.end <= a.start)
+            }
+            for i in 0..ranges.len() {
+                for j in 0..i {
+                    if overlaps_with(&ranges[i], &ranges[j]) {
+                        panic!(
+                            "overlapping sparse keyspace: {}..{} and {}..{}",
+                            ranges[i].start, ranges[i].end, ranges[j].start, ranges[j].end
+                        );
+                    }
+                }
+            }
+            for i in 1..ranges.len() {
+                assert!(
+                    ranges[i - 1].end <= ranges[i].start,
+                    "unordered sparse keyspace: {}..{} and {}..{}",
+                    ranges[i - 1].start,
+                    ranges[i - 1].end,
+                    ranges[i].start,
+                    ranges[i].end
+                );
+            }
+        }
+
+        Ok((dense_keyspace, sparse_keyspace))
     }
 
     /// Get cached size of relation if it not updated after specified LSN
     pub fn get_cached_rel_size(&self, tag: &RelTag, lsn: Lsn) -> Option<BlockNumber> {
         let rel_size_cache = self.rel_size_cache.read().unwrap();
-        if let Some((cached_lsn, nblocks)) = rel_size_cache.get(tag) {
+        if let Some((cached_lsn, nblocks)) = rel_size_cache.map.get(tag) {
             if lsn >= *cached_lsn {
                 return Some(*nblocks);
             }
@@ -800,7 +985,16 @@ impl Timeline {
     /// Update cached relation size if there is no more recent update
     pub fn update_cached_rel_size(&self, tag: RelTag, lsn: Lsn, nblocks: BlockNumber) {
         let mut rel_size_cache = self.rel_size_cache.write().unwrap();
-        match rel_size_cache.entry(tag) {
+
+        if lsn < rel_size_cache.complete_as_of {
+            // Do not cache old values. It's safe to cache the size on read, as long as
+            // the read was at an LSN since we started the WAL ingestion. Reasoning: we
+            // never evict values from the cache, so if the relation size changed after
+            // 'lsn', the new value is already in the cache.
+            return;
+        }
+
+        match rel_size_cache.map.entry(tag) {
             hash_map::Entry::Occupied(mut entry) => {
                 let cached_lsn = entry.get_mut();
                 if lsn >= cached_lsn.0 {
@@ -816,20 +1010,21 @@ impl Timeline {
     /// Store cached relation size
     pub fn set_cached_rel_size(&self, tag: RelTag, lsn: Lsn, nblocks: BlockNumber) {
         let mut rel_size_cache = self.rel_size_cache.write().unwrap();
-        rel_size_cache.insert(tag, (lsn, nblocks));
+        rel_size_cache.map.insert(tag, (lsn, nblocks));
     }
 
     /// Remove cached relation size
     pub fn remove_cached_rel_size(&self, tag: &RelTag) {
         let mut rel_size_cache = self.rel_size_cache.write().unwrap();
-        rel_size_cache.remove(tag);
+        rel_size_cache.map.remove(tag);
     }
 }
 
 /// DatadirModification represents an operation to ingest an atomic set of
-/// updates to the repository. It is created by the 'begin_record'
-/// function. It is called for each WAL record, so that all the modifications
-/// by a one WAL record appear atomic.
+/// updates to the repository.
+///
+/// It is created by the 'begin_record' function. It is called for each WAL
+/// record, so that all the modifications by a one WAL record appear atomic.
 pub struct DatadirModification<'a> {
     /// The timeline this modification applies to. You can access this to
     /// read the state, but note that any pending updates are *not* reflected
@@ -843,15 +1038,49 @@ pub struct DatadirModification<'a> {
     // The put-functions add the modifications here, and they are flushed to the
     // underlying key-value store by the 'finish' function.
     pending_lsns: Vec<Lsn>,
-    pending_updates: HashMap<Key, Vec<(Lsn, Value)>>,
     pending_deletions: Vec<(Range<Key>, Lsn)>,
     pending_nblocks: i64,
+
+    /// Metadata writes, indexed by key so that they can be read from not-yet-committed modifications
+    /// while ingesting subsequent records. See [`Self::is_data_key`] for the definition of 'metadata'.
+    pending_metadata_pages: HashMap<CompactKey, Vec<(Lsn, usize, Value)>>,
+
+    /// Data writes, ready to be flushed into an ephemeral layer. See [`Self::is_data_key`] for
+    /// which keys are stored here.
+    pending_data_pages: Vec<(CompactKey, Lsn, usize, Value)>,
+
+    // Sometimes during ingest, for example when extending a relation, we would like to write a zero page.  However,
+    // if we encounter a write from postgres in the same wal record, we will drop this entry.
+    //
+    // Unlike other 'pending' fields, this does not last until the next call to commit(): it is flushed
+    // at the end of each wal record, and all these writes implicitly are at lsn Self::lsn
+    pending_zero_data_pages: HashSet<CompactKey>,
+
+    /// For special "directory" keys that store key-value maps, track the size of the map
+    /// if it was updated in this modification.
+    pending_directory_entries: Vec<(DirectoryKind, usize)>,
+
+    /// An **approximation** of how large our EphemeralFile write will be when committed.
+    pending_bytes: usize,
 }
 
 impl<'a> DatadirModification<'a> {
+    // When a DatadirModification is committed, we do a monolithic serialization of all its contents.  WAL records can
+    // contain multiple pages, so the pageserver's record-based batch size isn't sufficient to bound this allocation: we
+    // additionally specify a limit on how much payload a DatadirModification may contain before it should be committed.
+    pub(crate) const MAX_PENDING_BYTES: usize = 8 * 1024 * 1024;
+
     /// Get the current lsn
     pub(crate) fn get_lsn(&self) -> Lsn {
         self.lsn
+    }
+
+    pub(crate) fn approx_pending_bytes(&self) -> usize {
+        self.pending_bytes
+    }
+
+    pub(crate) fn has_dirty_data_pages(&self) -> bool {
+        (!self.pending_data_pages.is_empty()) || (!self.pending_zero_data_pages.is_empty())
     }
 
     /// Set the current lsn
@@ -862,11 +1091,26 @@ impl<'a> DatadirModification<'a> {
             lsn,
             self.lsn
         );
+
+        // If we are advancing LSN, then state from previous wal record should have been flushed.
+        assert!(self.pending_zero_data_pages.is_empty());
+
         if lsn > self.lsn {
             self.pending_lsns.push(self.lsn);
             self.lsn = lsn;
         }
         Ok(())
+    }
+
+    /// In this context, 'metadata' means keys that are only read by the pageserver internally, and 'data' means
+    /// keys that represent literal blocks that postgres can read.  So data includes relation blocks and
+    /// SLRU blocks, which are read directly by postgres, and everything else is considered metadata.
+    ///
+    /// The distinction is important because data keys are handled on a fast path where dirty writes are
+    /// not readable until this modification is committed, whereas metadata keys are visible for read
+    /// via [`Self::get`] as soon as their record has been ingested.
+    fn is_data_key(key: &Key) -> bool {
+        key.is_rel_block_key() || key.is_slru_block_key()
     }
 
     /// Initialize a completely new repository.
@@ -877,6 +1121,7 @@ impl<'a> DatadirModification<'a> {
         let buf = DbDirectory::ser(&DbDirectory {
             dbdirs: HashMap::new(),
         })?;
+        self.pending_directory_entries.push((DirectoryKind::Db, 0));
         self.put(DBDIR_KEY, Value::Image(buf.into()));
 
         // Create AuxFilesDirectory
@@ -885,16 +1130,24 @@ impl<'a> DatadirModification<'a> {
         let buf = TwoPhaseDirectory::ser(&TwoPhaseDirectory {
             xids: HashSet::new(),
         })?;
+        self.pending_directory_entries
+            .push((DirectoryKind::TwoPhase, 0));
         self.put(TWOPHASEDIR_KEY, Value::Image(buf.into()));
 
         let buf: Bytes = SlruSegmentDirectory::ser(&SlruSegmentDirectory::default())?.into();
         let empty_dir = Value::Image(buf);
         self.put(slru_dir_to_key(SlruKind::Clog), empty_dir.clone());
+        self.pending_directory_entries
+            .push((DirectoryKind::SlruSegment(SlruKind::Clog), 0));
         self.put(
             slru_dir_to_key(SlruKind::MultiXactMembers),
             empty_dir.clone(),
         );
+        self.pending_directory_entries
+            .push((DirectoryKind::SlruSegment(SlruKind::Clog), 0));
         self.put(slru_dir_to_key(SlruKind::MultiXactOffsets), empty_dir);
+        self.pending_directory_entries
+            .push((DirectoryKind::SlruSegment(SlruKind::MultiXactOffsets), 0));
 
         Ok(())
     }
@@ -967,6 +1220,31 @@ impl<'a> DatadirModification<'a> {
         Ok(())
     }
 
+    pub(crate) fn put_rel_page_image_zero(&mut self, rel: RelTag, blknum: BlockNumber) {
+        self.pending_zero_data_pages
+            .insert(rel_block_to_key(rel, blknum).to_compact());
+        self.pending_bytes += ZERO_PAGE.len();
+    }
+
+    pub(crate) fn put_slru_page_image_zero(
+        &mut self,
+        kind: SlruKind,
+        segno: u32,
+        blknum: BlockNumber,
+    ) {
+        self.pending_zero_data_pages
+            .insert(slru_block_to_key(kind, segno, blknum).to_compact());
+        self.pending_bytes += ZERO_PAGE.len();
+    }
+
+    /// Call this at the end of each WAL record.
+    pub(crate) fn on_record_end(&mut self) {
+        let pending_zero_data_pages = std::mem::take(&mut self.pending_zero_data_pages);
+        for key in pending_zero_data_pages {
+            self.put_data(key, Value::Image(ZERO_PAGE.clone()));
+        }
+    }
+
     /// Store a relmapper file (pg_filenode.map) in the repository
     pub async fn put_relmap_file(
         &mut self,
@@ -995,6 +1273,7 @@ impl<'a> DatadirModification<'a> {
             let buf = RelDirectory::ser(&RelDirectory {
                 rels: HashSet::new(),
             })?;
+            self.pending_directory_entries.push((DirectoryKind::Rel, 0));
             self.put(
                 rel_dir_to_key(spcnode, dbnode),
                 Value::Image(Bytes::from(buf)),
@@ -1017,6 +1296,8 @@ impl<'a> DatadirModification<'a> {
         if !dir.xids.insert(xid) {
             anyhow::bail!("twophase file for xid {} already exists", xid);
         }
+        self.pending_directory_entries
+            .push((DirectoryKind::TwoPhase, dir.xids.len()));
         self.put(
             TWOPHASEDIR_KEY,
             Value::Image(Bytes::from(TwoPhaseDirectory::ser(&dir)?)),
@@ -1024,6 +1305,20 @@ impl<'a> DatadirModification<'a> {
 
         self.put(twophase_file_key(xid), Value::Image(img));
         Ok(())
+    }
+
+    pub async fn set_replorigin(
+        &mut self,
+        origin_id: RepOriginId,
+        origin_lsn: Lsn,
+    ) -> anyhow::Result<()> {
+        let key = repl_origin_key(origin_id);
+        self.put(key, Value::Image(origin_lsn.ser().unwrap().into()));
+        Ok(())
+    }
+
+    pub async fn drop_replorigin(&mut self, origin_id: RepOriginId) -> anyhow::Result<()> {
+        self.set_replorigin(origin_id, Lsn::INVALID).await
     }
 
     pub fn put_control_file(&mut self, img: Bytes) -> anyhow::Result<()> {
@@ -1044,7 +1339,7 @@ impl<'a> DatadirModification<'a> {
     ) -> anyhow::Result<()> {
         let total_blocks = self
             .tline
-            .get_db_size(spcnode, dbnode, Version::Modified(self), true, ctx)
+            .get_db_size(spcnode, dbnode, Version::Modified(self), ctx)
             .await?;
 
         // Remove entry from dbdir
@@ -1052,6 +1347,8 @@ impl<'a> DatadirModification<'a> {
         let mut dir = DbDirectory::des(&buf)?;
         if dir.dbdirs.remove(&(spcnode, dbnode)).is_some() {
             let buf = DbDirectory::ser(&dir)?;
+            self.pending_directory_entries
+                .push((DirectoryKind::Db, dir.dbdirs.len()));
             self.put(DBDIR_KEY, Value::Image(buf.into()));
         } else {
             warn!(
@@ -1085,24 +1382,31 @@ impl<'a> DatadirModification<'a> {
         let mut dbdir = DbDirectory::des(&self.get(DBDIR_KEY, ctx).await.context("read db")?)
             .context("deserialize db")?;
         let rel_dir_key = rel_dir_to_key(rel.spcnode, rel.dbnode);
-        let mut rel_dir = if dbdir.dbdirs.get(&(rel.spcnode, rel.dbnode)).is_none() {
-            // Didn't exist. Update dbdir
-            dbdir.dbdirs.insert((rel.spcnode, rel.dbnode), false);
-            let buf = DbDirectory::ser(&dbdir).context("serialize db")?;
-            self.put(DBDIR_KEY, Value::Image(buf.into()));
+        let mut rel_dir =
+            if let hash_map::Entry::Vacant(e) = dbdir.dbdirs.entry((rel.spcnode, rel.dbnode)) {
+                // Didn't exist. Update dbdir
+                e.insert(false);
+                let buf = DbDirectory::ser(&dbdir).context("serialize db")?;
+                self.pending_directory_entries
+                    .push((DirectoryKind::Db, dbdir.dbdirs.len()));
+                self.put(DBDIR_KEY, Value::Image(buf.into()));
 
-            // and create the RelDirectory
-            RelDirectory::default()
-        } else {
-            // reldir already exists, fetch it
-            RelDirectory::des(&self.get(rel_dir_key, ctx).await.context("read db")?)
-                .context("deserialize db")?
-        };
+                // and create the RelDirectory
+                RelDirectory::default()
+            } else {
+                // reldir already exists, fetch it
+                RelDirectory::des(&self.get(rel_dir_key, ctx).await.context("read db")?)
+                    .context("deserialize db")?
+            };
 
         // Add the new relation to the rel directory entry, and write it back
         if !rel_dir.rels.insert((rel.relnode, rel.forknum)) {
             return Err(RelationError::AlreadyExists);
         }
+
+        self.pending_directory_entries
+            .push((DirectoryKind::Rel, rel_dir.rels.len()));
+
         self.put(
             rel_dir_key,
             Value::Image(Bytes::from(
@@ -1135,7 +1439,7 @@ impl<'a> DatadirModification<'a> {
         anyhow::ensure!(rel.relnode != 0, RelationError::InvalidRelnode);
         if self
             .tline
-            .get_rel_exists(rel, Version::Modified(self), true, ctx)
+            .get_rel_exists(rel, Version::Modified(self), ctx)
             .await?
         {
             let size_key = rel_size_to_key(rel);
@@ -1194,6 +1498,9 @@ impl<'a> DatadirModification<'a> {
         let buf = self.get(dir_key, ctx).await?;
         let mut dir = RelDirectory::des(&buf)?;
 
+        self.pending_directory_entries
+            .push((DirectoryKind::Rel, dir.rels.len()));
+
         if dir.rels.remove(&(rel.relnode, rel.forknum)) {
             self.put(dir_key, Value::Image(Bytes::from(RelDirectory::ser(&dir)?)));
         } else {
@@ -1229,6 +1536,8 @@ impl<'a> DatadirModification<'a> {
         if !dir.segments.insert(segno) {
             anyhow::bail!("slru segment {kind:?}/{segno} already exists");
         }
+        self.pending_directory_entries
+            .push((DirectoryKind::SlruSegment(kind), dir.segments.len()));
         self.put(
             dir_key,
             Value::Image(Bytes::from(SlruSegmentDirectory::ser(&dir)?)),
@@ -1273,6 +1582,8 @@ impl<'a> DatadirModification<'a> {
         if !dir.segments.remove(&segno) {
             warn!("slru segment {:?}/{} does not exist", kind, segno);
         }
+        self.pending_directory_entries
+            .push((DirectoryKind::SlruSegment(kind), dir.segments.len()));
         self.put(
             dir_key,
             Value::Image(Bytes::from(SlruSegmentDirectory::ser(&dir)?)),
@@ -1303,6 +1614,8 @@ impl<'a> DatadirModification<'a> {
         if !dir.xids.remove(&xid) {
             warn!("twophase file for xid {} does not exist", xid);
         }
+        self.pending_directory_entries
+            .push((DirectoryKind::TwoPhase, dir.xids.len()));
         self.put(
             TWOPHASEDIR_KEY,
             Value::Image(Bytes::from(TwoPhaseDirectory::ser(&dir)?)),
@@ -1315,9 +1628,14 @@ impl<'a> DatadirModification<'a> {
     }
 
     pub fn init_aux_dir(&mut self) -> anyhow::Result<()> {
+        if let AuxFilePolicy::V2 = self.tline.get_switch_aux_file_policy() {
+            return Ok(());
+        }
         let buf = AuxFilesDirectory::ser(&AuxFilesDirectory {
             files: HashMap::new(),
         })?;
+        self.pending_directory_entries
+            .push((DirectoryKind::AuxFiles, 0));
         self.put(AUX_FILES_KEY, Value::Image(Bytes::from(buf)));
         Ok(())
     }
@@ -1328,28 +1646,182 @@ impl<'a> DatadirModification<'a> {
         content: &[u8],
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        let mut dir = match self.get(AUX_FILES_KEY, ctx).await {
-            Ok(buf) => AuxFilesDirectory::des(&buf)?,
-            Err(e) => {
-                // This is expected: historical databases do not have the key.
-                debug!("Failed to get info about AUX files: {}", e);
-                AuxFilesDirectory {
-                    files: HashMap::new(),
+        let switch_policy = self.tline.get_switch_aux_file_policy();
+
+        let policy = {
+            let current_policy = self.tline.last_aux_file_policy.load();
+            // Allowed switch path:
+            // * no aux files -> v1/v2/cross-validation
+            // * cross-validation->v2
+
+            let current_policy = if current_policy.is_none() {
+                // This path will only be hit once per tenant: we will decide the final policy in this code block.
+                // The next call to `put_file` will always have `last_aux_file_policy != None`.
+                let lsn = Lsn::max(self.tline.get_last_record_lsn(), self.lsn);
+                let aux_files_key_v1 = self.tline.list_aux_files_v1(lsn, ctx).await?;
+                if aux_files_key_v1.is_empty() {
+                    None
+                } else {
+                    warn!("this timeline is using deprecated aux file policy V1 (detected existing v1 files)");
+                    self.tline.do_switch_aux_policy(AuxFilePolicy::V1)?;
+                    Some(AuxFilePolicy::V1)
                 }
+            } else {
+                current_policy
+            };
+
+            if AuxFilePolicy::is_valid_migration_path(current_policy, switch_policy) {
+                self.tline.do_switch_aux_policy(switch_policy)?;
+                info!(current=?current_policy, next=?switch_policy, "switching aux file policy");
+                switch_policy
+            } else {
+                // This branch handles non-valid migration path, and the case that switch_policy == current_policy.
+                // And actually, because the migration path always allow unspecified -> *, this unwrap_or will never be hit.
+                current_policy.unwrap_or(AuxFilePolicy::default_tenant_config())
             }
         };
-        let path = path.to_string();
-        if content.is_empty() {
-            dir.files.remove(&path);
-        } else {
-            dir.files.insert(path, Bytes::copy_from_slice(content));
+
+        if let AuxFilePolicy::V2 | AuxFilePolicy::CrossValidation = policy {
+            let key = aux_file::encode_aux_file_key(path);
+            // retrieve the key from the engine
+            let old_val = match self.get(key, ctx).await {
+                Ok(val) => Some(val),
+                Err(PageReconstructError::MissingKey(_)) => None,
+                Err(e) => return Err(e.into()),
+            };
+            let files: Vec<(&str, &[u8])> = if let Some(ref old_val) = old_val {
+                aux_file::decode_file_value(old_val)?
+            } else {
+                Vec::new()
+            };
+            let mut other_files = Vec::with_capacity(files.len());
+            let mut modifying_file = None;
+            for file @ (p, content) in files {
+                if path == p {
+                    assert!(
+                        modifying_file.is_none(),
+                        "duplicated entries found for {}",
+                        path
+                    );
+                    modifying_file = Some(content);
+                } else {
+                    other_files.push(file);
+                }
+            }
+            let mut new_files = other_files;
+            match (modifying_file, content.is_empty()) {
+                (Some(old_content), false) => {
+                    self.tline
+                        .aux_file_size_estimator
+                        .on_update(old_content.len(), content.len());
+                    new_files.push((path, content));
+                }
+                (Some(old_content), true) => {
+                    self.tline
+                        .aux_file_size_estimator
+                        .on_remove(old_content.len());
+                    // not adding the file key to the final `new_files` vec.
+                }
+                (None, false) => {
+                    self.tline.aux_file_size_estimator.on_add(content.len());
+                    new_files.push((path, content));
+                }
+                (None, true) => warn!("removing non-existing aux file: {}", path),
+            }
+            let new_val = aux_file::encode_file_value(&new_files)?;
+            self.put(key, Value::Image(new_val.into()));
         }
-        self.put(
-            AUX_FILES_KEY,
-            Value::Image(Bytes::from(
-                AuxFilesDirectory::ser(&dir).context("serialize")?,
-            )),
-        );
+
+        if let AuxFilePolicy::V1 | AuxFilePolicy::CrossValidation = policy {
+            let file_path = path.to_string();
+            let content = if content.is_empty() {
+                None
+            } else {
+                Some(Bytes::copy_from_slice(content))
+            };
+
+            let n_files;
+            let mut aux_files = self.tline.aux_files.lock().await;
+            if let Some(mut dir) = aux_files.dir.take() {
+                // We already updated aux files in `self`: emit a delta and update our latest value.
+                dir.upsert(file_path.clone(), content.clone());
+                n_files = dir.files.len();
+                if aux_files.n_deltas == MAX_AUX_FILE_DELTAS {
+                    self.put(
+                        AUX_FILES_KEY,
+                        Value::Image(Bytes::from(
+                            AuxFilesDirectory::ser(&dir).context("serialize")?,
+                        )),
+                    );
+                    aux_files.n_deltas = 0;
+                } else {
+                    self.put(
+                        AUX_FILES_KEY,
+                        Value::WalRecord(NeonWalRecord::AuxFile { file_path, content }),
+                    );
+                    aux_files.n_deltas += 1;
+                }
+                aux_files.dir = Some(dir);
+            } else {
+                // Check if the AUX_FILES_KEY is initialized
+                match self.get(AUX_FILES_KEY, ctx).await {
+                    Ok(dir_bytes) => {
+                        let mut dir = AuxFilesDirectory::des(&dir_bytes)?;
+                        // Key is already set, we may append a delta
+                        self.put(
+                            AUX_FILES_KEY,
+                            Value::WalRecord(NeonWalRecord::AuxFile {
+                                file_path: file_path.clone(),
+                                content: content.clone(),
+                            }),
+                        );
+                        dir.upsert(file_path, content);
+                        n_files = dir.files.len();
+                        aux_files.dir = Some(dir);
+                    }
+                    Err(
+                        e @ (PageReconstructError::Cancelled
+                        | PageReconstructError::AncestorLsnTimeout(_)),
+                    ) => {
+                        // Important that we do not interpret a shutdown error as "not found" and thereby
+                        // reset the map.
+                        return Err(e.into());
+                    }
+                    // Note: we added missing key error variant in https://github.com/neondatabase/neon/pull/7393 but
+                    // the original code assumes all other errors are missing keys. Therefore, we keep the code path
+                    // the same for now, though in theory, we should only match the `MissingKey` variant.
+                    Err(
+                        e @ (PageReconstructError::Other(_)
+                        | PageReconstructError::WalRedo(_)
+                        | PageReconstructError::MissingKey(_)),
+                    ) => {
+                        // Key is missing, we must insert an image as the basis for subsequent deltas.
+
+                        if !matches!(e, PageReconstructError::MissingKey(_)) {
+                            let e = utils::error::report_compact_sources(&e);
+                            tracing::warn!("treating error as if it was a missing key: {}", e);
+                        }
+
+                        let mut dir = AuxFilesDirectory {
+                            files: HashMap::new(),
+                        };
+                        dir.upsert(file_path, content);
+                        self.put(
+                            AUX_FILES_KEY,
+                            Value::Image(Bytes::from(
+                                AuxFilesDirectory::ser(&dir).context("serialize")?,
+                            )),
+                        );
+                        n_files = 1;
+                        aux_files.dir = Some(dir);
+                    }
+                }
+            }
+
+            self.pending_directory_entries
+                .push((DirectoryKind::AuxFiles, n_files));
+        }
+
         Ok(())
     }
 
@@ -1371,7 +1843,7 @@ impl<'a> DatadirModification<'a> {
     /// retains all the metadata, but data pages are flushed. That's again OK
     /// for bulk import, where you are just loading data pages and won't try to
     /// modify the same pages twice.
-    pub async fn flush(&mut self, ctx: &RequestContext) -> anyhow::Result<()> {
+    pub(crate) async fn flush(&mut self, ctx: &RequestContext) -> anyhow::Result<()> {
         // Unless we have accumulated a decent amount of changes, it's not worth it
         // to scan through the pending_updates list.
         let pending_nblocks = self.pending_nblocks;
@@ -1379,30 +1851,23 @@ impl<'a> DatadirModification<'a> {
             return Ok(());
         }
 
-        let writer = self.tline.writer().await;
+        let mut writer = self.tline.writer().await;
 
         // Flush relation and  SLRU data blocks, keep metadata.
-        let mut retained_pending_updates = HashMap::<_, Vec<_>>::new();
-        for (key, values) in self.pending_updates.drain() {
-            for (lsn, value) in values {
-                if is_rel_block_key(&key) || is_slru_block_key(key) {
-                    // This bails out on first error without modifying pending_updates.
-                    // That's Ok, cf this function's doc comment.
-                    writer.put(key, lsn, &value, ctx).await?;
-                } else {
-                    retained_pending_updates
-                        .entry(key)
-                        .or_default()
-                        .push((lsn, value));
-                }
-            }
-        }
+        let pending_data_pages = std::mem::take(&mut self.pending_data_pages);
 
-        self.pending_updates = retained_pending_updates;
+        // This bails out on first error without modifying pending_updates.
+        // That's Ok, cf this function's doc comment.
+        writer.put_batch(pending_data_pages, ctx).await?;
+        self.pending_bytes = 0;
 
         if pending_nblocks != 0 {
             writer.update_current_logical_size(pending_nblocks * i64::from(BLCKSZ));
             self.pending_nblocks = 0;
+        }
+
+        for (kind, count) in std::mem::take(&mut self.pending_directory_entries) {
+            writer.update_directory_entries_count(kind, count as u64);
         }
 
         Ok(())
@@ -1414,18 +1879,35 @@ impl<'a> DatadirModification<'a> {
     /// All the modifications in this atomic update are stamped by the specified LSN.
     ///
     pub async fn commit(&mut self, ctx: &RequestContext) -> anyhow::Result<()> {
-        let writer = self.tline.writer().await;
+        // Commit should never be called mid-wal-record
+        assert!(self.pending_zero_data_pages.is_empty());
+
+        let mut writer = self.tline.writer().await;
 
         let pending_nblocks = self.pending_nblocks;
         self.pending_nblocks = 0;
 
-        if !self.pending_updates.is_empty() {
-            writer.put_batch(&self.pending_updates, ctx).await?;
-            self.pending_updates.clear();
+        // Ordering: the items in this batch do not need to be in any global order, but values for
+        // a particular Key must be in Lsn order relative to one another.  InMemoryLayer relies on
+        // this to do efficient updates to its index.
+        let mut write_batch = std::mem::take(&mut self.pending_data_pages);
+
+        write_batch.extend(
+            self.pending_metadata_pages
+                .drain()
+                .flat_map(|(key, values)| {
+                    values
+                        .into_iter()
+                        .map(move |(lsn, value_size, value)| (key, lsn, value_size, value))
+                }),
+        );
+
+        if !write_batch.is_empty() {
+            writer.put_batch(write_batch, ctx).await?;
         }
 
         if !self.pending_deletions.is_empty() {
-            writer.delete_batch(&self.pending_deletions).await?;
+            writer.delete_batch(&self.pending_deletions, ctx).await?;
             self.pending_deletions.clear();
         }
 
@@ -1442,51 +1924,121 @@ impl<'a> DatadirModification<'a> {
             writer.update_current_logical_size(pending_nblocks * i64::from(BLCKSZ));
         }
 
+        for (kind, count) in std::mem::take(&mut self.pending_directory_entries) {
+            writer.update_directory_entries_count(kind, count as u64);
+        }
+
+        self.pending_bytes = 0;
+
         Ok(())
     }
 
     pub(crate) fn len(&self) -> usize {
-        self.pending_updates.len() + self.pending_deletions.len()
+        self.pending_metadata_pages.len()
+            + self.pending_data_pages.len()
+            + self.pending_deletions.len()
     }
 
-    // Internal helper functions to batch the modifications
-
+    /// Read a page from the Timeline we are writing to.  For metadata pages, this passes through
+    /// a cache in Self, which makes writes earlier in this modification visible to WAL records later
+    /// in the modification.
+    ///
+    /// For data pages, reads pass directly to the owning Timeline: any ingest code which reads a data
+    /// page must ensure that the pages they read are already committed in Timeline, for example
+    /// DB create operations are always preceded by a call to commit().  This is special cased because
+    /// it's rare: all the 'normal' WAL operations will only read metadata pages such as relation sizes,
+    /// and not data pages.
     async fn get(&self, key: Key, ctx: &RequestContext) -> Result<Bytes, PageReconstructError> {
-        // Have we already updated the same key? Read the latest pending updated
-        // version in that case.
-        //
-        // Note: we don't check pending_deletions. It is an error to request a
-        // value that has been removed, deletion only avoids leaking storage.
-        if let Some(values) = self.pending_updates.get(&key) {
-            if let Some((_, value)) = values.last() {
-                return if let Value::Image(img) = value {
-                    Ok(img.clone())
-                } else {
-                    // Currently, we never need to read back a WAL record that we
-                    // inserted in the same "transaction". All the metadata updates
-                    // work directly with Images, and we never need to read actual
-                    // data pages. We could handle this if we had to, by calling
-                    // the walredo manager, but let's keep it simple for now.
-                    Err(PageReconstructError::from(anyhow::anyhow!(
-                        "unexpected pending WAL record"
-                    )))
-                };
+        if !Self::is_data_key(&key) {
+            // Have we already updated the same key? Read the latest pending updated
+            // version in that case.
+            //
+            // Note: we don't check pending_deletions. It is an error to request a
+            // value that has been removed, deletion only avoids leaking storage.
+            if let Some(values) = self.pending_metadata_pages.get(&key.to_compact()) {
+                if let Some((_, _, value)) = values.last() {
+                    return if let Value::Image(img) = value {
+                        Ok(img.clone())
+                    } else {
+                        // Currently, we never need to read back a WAL record that we
+                        // inserted in the same "transaction". All the metadata updates
+                        // work directly with Images, and we never need to read actual
+                        // data pages. We could handle this if we had to, by calling
+                        // the walredo manager, but let's keep it simple for now.
+                        Err(PageReconstructError::Other(anyhow::anyhow!(
+                            "unexpected pending WAL record"
+                        )))
+                    };
+                }
+            }
+        } else {
+            // This is an expensive check, so we only do it in debug mode. If reading a data key,
+            // this key should never be present in pending_data_pages. We ensure this by committing
+            // modifications before ingesting DB create operations, which are the only kind that reads
+            // data pages during ingest.
+            if cfg!(debug_assertions) {
+                for (dirty_key, _, _, _) in &self.pending_data_pages {
+                    debug_assert!(&key.to_compact() != dirty_key);
+                }
+
+                debug_assert!(!self.pending_zero_data_pages.contains(&key.to_compact()))
             }
         }
+
+        // Metadata page cache miss, or we're reading a data page.
         let lsn = Lsn::max(self.tline.get_last_record_lsn(), self.lsn);
         self.tline.get(key, lsn, ctx).await
     }
 
+    /// Only used during unit tests, force putting a key into the modification.
+    #[cfg(test)]
+    pub(crate) fn put_for_test(&mut self, key: Key, val: Value) {
+        self.put(key, val);
+    }
+
     fn put(&mut self, key: Key, val: Value) {
-        let values = self.pending_updates.entry(key).or_default();
+        if Self::is_data_key(&key) {
+            self.put_data(key.to_compact(), val)
+        } else {
+            self.put_metadata(key.to_compact(), val)
+        }
+    }
+
+    fn put_data(&mut self, key: CompactKey, val: Value) {
+        let val_serialized_size = val.serialized_size().unwrap() as usize;
+
+        // If this page was previously zero'd in the same WalRecord, then drop the previous zero page write.  This
+        // is an optimization that avoids persisting both the zero page generated by us (e.g. during a relation extend),
+        // and the subsequent postgres-originating write
+        if self.pending_zero_data_pages.remove(&key) {
+            self.pending_bytes -= ZERO_PAGE.len();
+        }
+
+        self.pending_bytes += val_serialized_size;
+        self.pending_data_pages
+            .push((key, self.lsn, val_serialized_size, val))
+    }
+
+    fn put_metadata(&mut self, key: CompactKey, val: Value) {
+        let values = self.pending_metadata_pages.entry(key).or_default();
         // Replace the previous value if it exists at the same lsn
-        if let Some((last_lsn, last_value)) = values.last_mut() {
+        if let Some((last_lsn, last_value_ser_size, last_value)) = values.last_mut() {
             if *last_lsn == self.lsn {
+                // Update the pending_bytes contribution from this entry, and update the serialized size in place
+                self.pending_bytes -= *last_value_ser_size;
+                *last_value_ser_size = val.serialized_size().unwrap() as usize;
+                self.pending_bytes += *last_value_ser_size;
+
+                // Use the latest value, this replaces any earlier write to the same (key,lsn), such as much
+                // have been generated by synthesized zero page writes prior to the first real write to a page.
                 *last_value = val;
                 return;
             }
         }
-        values.push((self.lsn, val));
+
+        let val_serialized_size = val.serialized_size().unwrap() as usize;
+        self.pending_bytes += val_serialized_size;
+        values.push((self.lsn, val_serialized_size, val));
     }
 
     fn delete(&mut self, key_range: Range<Key>) {
@@ -1497,6 +2049,7 @@ impl<'a> DatadirModification<'a> {
 
 /// This struct facilitates accessing either a committed key from the timeline at a
 /// specific LSN, or the latest uncommitted key from a pending modification.
+///
 /// During WAL ingestion, the records from multiple LSNs may be batched in the same
 /// modification before being flushed to the timeline. Hence, the routines in WalIngest
 /// need to look up the keys in the modification first before looking them up in the
@@ -1550,9 +2103,19 @@ struct RelDirectory {
     rels: HashSet<(Oid, u8)>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Default)]
-struct AuxFilesDirectory {
-    files: HashMap<String, Bytes>,
+#[derive(Debug, Serialize, Deserialize, Default, PartialEq)]
+pub(crate) struct AuxFilesDirectory {
+    pub(crate) files: HashMap<String, Bytes>,
+}
+
+impl AuxFilesDirectory {
+    pub(crate) fn upsert(&mut self, key: String, value: Option<Bytes>) {
+        if let Some(value) = value {
+            self.files.insert(key, value);
+        } else {
+            self.files.remove(&key);
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1566,13 +2129,82 @@ struct SlruSegmentDirectory {
     segments: HashSet<u32>,
 }
 
+#[derive(Copy, Clone, PartialEq, Eq, Debug, enum_map::Enum)]
+#[repr(u8)]
+pub(crate) enum DirectoryKind {
+    Db,
+    TwoPhase,
+    Rel,
+    AuxFiles,
+    SlruSegment(SlruKind),
+}
+
+impl DirectoryKind {
+    pub(crate) const KINDS_NUM: usize = <DirectoryKind as Enum>::LENGTH;
+    pub(crate) fn offset(&self) -> usize {
+        self.into_usize()
+    }
+}
+
 static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; BLCKSZ as usize]);
 
 #[allow(clippy::bool_assert_comparison)]
 #[cfg(test)]
 mod tests {
-    //use super::repo_harness::*;
-    //use super::*;
+    use hex_literal::hex;
+    use utils::id::TimelineId;
+
+    use super::*;
+
+    use crate::{tenant::harness::TenantHarness, DEFAULT_PG_VERSION};
+
+    /// Test a round trip of aux file updates, from DatadirModification to reading back from the Timeline
+    #[tokio::test]
+    async fn aux_files_round_trip() -> anyhow::Result<()> {
+        let name = "aux_files_round_trip";
+        let harness = TenantHarness::create(name).await?;
+
+        pub const TIMELINE_ID: TimelineId =
+            TimelineId::from_array(hex!("11223344556677881122334455667788"));
+
+        let (tenant, ctx) = harness.load().await;
+        let tline = tenant
+            .create_empty_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
+            .await?;
+        let tline = tline.raw_timeline().unwrap();
+
+        // First modification: insert two keys
+        let mut modification = tline.begin_modification(Lsn(0x1000));
+        modification.put_file("foo/bar1", b"content1", &ctx).await?;
+        modification.set_lsn(Lsn(0x1008))?;
+        modification.put_file("foo/bar2", b"content2", &ctx).await?;
+        modification.commit(&ctx).await?;
+        let expect_1008 = HashMap::from([
+            ("foo/bar1".to_string(), Bytes::from_static(b"content1")),
+            ("foo/bar2".to_string(), Bytes::from_static(b"content2")),
+        ]);
+
+        let readback = tline.list_aux_files(Lsn(0x1008), &ctx).await?;
+        assert_eq!(readback, expect_1008);
+
+        // Second modification: update one key, remove the other
+        let mut modification = tline.begin_modification(Lsn(0x2000));
+        modification.put_file("foo/bar1", b"content3", &ctx).await?;
+        modification.set_lsn(Lsn(0x2008))?;
+        modification.put_file("foo/bar2", b"", &ctx).await?;
+        modification.commit(&ctx).await?;
+        let expect_2008 =
+            HashMap::from([("foo/bar1".to_string(), Bytes::from_static(b"content3"))]);
+
+        let readback = tline.list_aux_files(Lsn(0x2008), &ctx).await?;
+        assert_eq!(readback, expect_2008);
+
+        // Reading back in time works
+        let readback = tline.list_aux_files(Lsn(0x1008), &ctx).await?;
+        assert_eq!(readback, expect_1008);
+
+        Ok(())
+    }
 
     /*
         fn assert_current_logical_size<R: Repository>(timeline: &DatadirTimeline<R>, lsn: Lsn) {

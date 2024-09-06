@@ -1,20 +1,27 @@
 import contextlib
+import enum
 import json
 import os
 import re
 import subprocess
+import tarfile
 import threading
 import time
+from hashlib import sha256
 from pathlib import Path
 from typing import (
+    IO,
     TYPE_CHECKING,
     Any,
     Callable,
     Dict,
+    Iterable,
     List,
     Optional,
+    Set,
     Tuple,
     TypeVar,
+    Union,
 )
 from urllib.parse import urlencode
 
@@ -23,14 +30,14 @@ import zstandard
 from psycopg2.extensions import cursor
 
 from fixtures.log_helper import log
-from fixtures.pageserver.types import (
+from fixtures.pageserver.common_types import (
     parse_delta_layer,
     parse_image_layer,
 )
 
 if TYPE_CHECKING:
     from fixtures.neon_fixtures import PgBin
-from fixtures.types import TimelineId
+from fixtures.common_types import TimelineId
 
 Fn = TypeVar("Fn", bound=Callable[..., Any])
 
@@ -189,7 +196,7 @@ def query_scalar(cur: cursor, query: str) -> Any:
 
 
 # Traverse directory to get total size.
-def get_dir_size(path: str) -> int:
+def get_dir_size(path: Path) -> int:
     """Return size in bytes."""
     totalbytes = 0
     for root, _dirs, files in os.walk(path):
@@ -233,8 +240,17 @@ ATTACHMENT_NAME_REGEX: re.Pattern = re.compile(  # type: ignore[type-arg]
 )
 
 
-def allure_attach_from_dir(dir: Path):
+def allure_attach_from_dir(dir: Path, preserve_database_files: bool = False):
     """Attach all non-empty files from `dir` that matches `ATTACHMENT_NAME_REGEX` to Allure report"""
+
+    if preserve_database_files:
+        zst_file = dir.with_suffix(".tar.zst")
+        with zst_file.open("wb") as zst:
+            cctx = zstandard.ZstdCompressor()
+            with cctx.stream_writer(zst) as compressor:
+                with tarfile.open(fileobj=compressor, mode="w") as tar:
+                    tar.add(dir, arcname="")
+        allure.attach.file(zst_file, "everything.tar.zst", "application/zstd", "tar.zst")
 
     for attachment in Path(dir).glob("**/*"):
         if ATTACHMENT_NAME_REGEX.fullmatch(attachment.name) and attachment.stat().st_size > 0:
@@ -369,7 +385,15 @@ def start_in_background(
         return spawned_process
 
 
-def wait_until(number_of_iterations: int, interval: float, func: Fn):
+WaitUntilRet = TypeVar("WaitUntilRet")
+
+
+def wait_until(
+    number_of_iterations: int,
+    interval: float,
+    func: Callable[[], WaitUntilRet],
+    show_intermediate_error=False,
+) -> WaitUntilRet:
     """
     Wait until 'func' returns successfully, without exception. Returns the
     last return value from the function.
@@ -379,12 +403,26 @@ def wait_until(number_of_iterations: int, interval: float, func: Fn):
         try:
             res = func()
         except Exception as e:
-            log.info("waiting for %s iteration %s failed", func, i + 1)
+            log.info("waiting for %s iteration %s failed: %s", func, i + 1, e)
             last_exception = e
+            if show_intermediate_error:
+                log.info(e)
             time.sleep(interval)
             continue
         return res
     raise Exception("timed out while waiting for %s" % func) from last_exception
+
+
+def assert_eq(a, b) -> None:
+    assert a == b
+
+
+def assert_gt(a, b) -> None:
+    assert a > b
+
+
+def assert_ge(a, b) -> None:
+    assert a >= b
 
 
 def run_pg_bench_small(pg_bin: "PgBin", connstr: str):
@@ -430,3 +468,148 @@ def humantime_to_ms(humantime: str) -> float:
             )
 
     return round(total_ms, 3)
+
+
+def scan_log_for_errors(input: Iterable[str], allowed_errors: List[str]) -> List[Tuple[int, str]]:
+    # FIXME: this duplicates test_runner/fixtures/pageserver/allowed_errors.py
+    error_or_warn = re.compile(r"\s(ERROR|WARN)")
+    errors = []
+    for lineno, line in enumerate(input, start=1):
+        if len(line) == 0:
+            continue
+
+        if error_or_warn.search(line):
+            # Is this a torn log line?  This happens when force-killing a process and restarting
+            # Example: "2023-10-25T09:38:31.752314Z  WARN deletion executo2023-10-25T09:38:31.875947Z  INFO version: git-env:0f9452f76e8ccdfc88291bccb3f53e3016f40192"
+            if re.match("\\d{4}-\\d{2}-\\d{2}T.+\\d{4}-\\d{2}-\\d{2}T.+INFO version.+", line):
+                continue
+
+            # It's an ERROR or WARN. Is it in the allow-list?
+            for a in allowed_errors:
+                if re.match(a, line):
+                    break
+            else:
+                errors.append((lineno, line))
+    return errors
+
+
+def assert_no_errors(log_file, service, allowed_errors):
+    if not log_file.exists():
+        log.warning(f"Skipping {service} log check: {log_file} does not exist")
+        return
+
+    with log_file.open("r") as f:
+        errors = scan_log_for_errors(f, allowed_errors)
+
+    for _lineno, error in errors:
+        log.info(f"not allowed {service} error: {error.strip()}")
+
+    assert not errors, f"First log error on {service}: {errors[0]}\nHint: use scripts/check_allowed_errors.sh to test any new allowed_error you add"
+
+
+@enum.unique
+class AuxFileStore(str, enum.Enum):
+    V1 = "v1"
+    V2 = "v2"
+    CrossValidation = "cross-validation"
+
+    def __repr__(self) -> str:
+        return f"'aux-{self.value}'"
+
+    def __str__(self) -> str:
+        return f"'aux-{self.value}'"
+
+
+def assert_pageserver_backups_equal(left: Path, right: Path, skip_files: Set[str]):
+    """
+    This is essentially:
+
+    lines=$(comm -3 \
+        <(mkdir left && cd left && tar xf "$left" && find . -type f -print0 | xargs sha256sum | sort -k2) \
+        <(mkdir right && cd right && tar xf "$right" && find . -type f -print0 | xargs sha256sum | sort -k2) \
+        | wc -l)
+    [ "$lines" = "0" ]
+
+    But in a more mac friendly fashion.
+    """
+    started_at = time.time()
+
+    def hash_extracted(reader: Union[IO[bytes], None]) -> bytes:
+        assert reader is not None
+        digest = sha256(usedforsecurity=False)
+        while True:
+            buf = reader.read(64 * 1024)
+            if not buf:
+                break
+            digest.update(buf)
+        return digest.digest()
+
+    def build_hash_list(p: Path) -> List[Tuple[str, bytes]]:
+        with tarfile.open(p) as f:
+            matching_files = (info for info in f if info.isreg() and info.name not in skip_files)
+            ret = list(
+                map(lambda info: (info.name, hash_extracted(f.extractfile(info))), matching_files)
+            )
+            ret.sort(key=lambda t: t[0])
+            return ret
+
+    left_list, right_list = map(build_hash_list, [left, right])
+
+    assert len(left_list) == len(
+        right_list
+    ), f"unexpected number of files on tar files, {len(left_list)} != {len(right_list)}"
+
+    mismatching = set()
+
+    for left_tuple, right_tuple in zip(left_list, right_list):
+        left_path, left_hash = left_tuple
+        right_path, right_hash = right_tuple
+        assert (
+            left_path == right_path
+        ), f"file count matched, expected these to be same paths: {left_path}, {right_path}"
+        if left_hash != right_hash:
+            mismatching.add(left_path)
+
+    assert len(mismatching) == 0, f"files with hash mismatch: {mismatching}"
+
+    elapsed = time.time() - started_at
+    log.info(f"assert_pageserver_backups_equal completed in {elapsed}s")
+
+
+class PropagatingThread(threading.Thread):
+    _target: Any
+    _args: Any
+    _kwargs: Any
+    """
+    Simple Thread wrapper with join() propagating the possible exception in the thread.
+    """
+
+    def run(self):
+        self.exc = None
+        try:
+            self.ret = self._target(*self._args, **self._kwargs)
+        except BaseException as e:
+            self.exc = e
+
+    def join(self, timeout=None):
+        super(PropagatingThread, self).join(timeout)
+        if self.exc:
+            raise self.exc
+        return self.ret
+
+
+def human_bytes(amt: float) -> str:
+    """
+    Render a bytes amount into nice IEC bytes string.
+    """
+
+    suffixes = ["", "Ki", "Mi", "Gi"]
+
+    last = suffixes[-1]
+
+    for name in suffixes:
+        if amt < 1024 or name == last:
+            return f"{int(round(amt))} {name}B"
+        amt = amt / 1024
+
+    raise RuntimeError("unreachable")

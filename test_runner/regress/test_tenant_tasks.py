@@ -1,3 +1,4 @@
+from fixtures.common_types import TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder
 from fixtures.pageserver.utils import (
@@ -5,7 +6,6 @@ from fixtures.pageserver.utils import (
     timeline_delete_wait_completed,
     wait_until_tenant_active,
 )
-from fixtures.types import TenantId, TimelineId
 from fixtures.utils import wait_until
 
 

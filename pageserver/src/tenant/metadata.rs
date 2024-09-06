@@ -1,42 +1,62 @@
-//! Every image of a certain timeline from [`crate::tenant::Tenant`]
-//! has a metadata that needs to be stored persistently.
+//! Describes the legacy now hopefully no longer modified per-timeline metadata.
 //!
-//! Later, the file gets used in [`remote_timeline_client`] as a part of
-//! external storage import and export operations.
+//! It is stored in `index_part.json` managed by [`remote_timeline_client`]. For many tenants and
+//! their timelines, this struct and its original serialization format is still needed because
+//! they were written a long time ago.
 //!
-//! The module contains all structs and related helper methods related to timeline metadata.
+//! Instead of changing and adding versioning to this, just change [`IndexPart`] with soft json
+//! versioning.
+//!
+//! To clean up this module we need to migrate all index_part.json files to a later version.
+//! While doing this, we need to be mindful about s3 based recovery as well, so it might take
+//! however long we keep the old versions to be able to delete the old code. After that, we can
+//! remove everything else than [`TimelineMetadataBodyV2`], rename it as `TimelineMetadata` and
+//! move it to `index.rs`. Before doing all of this, we need to keep the structures for backwards
+//! compatibility.
 //!
 //! [`remote_timeline_client`]: super::remote_timeline_client
+//! [`IndexPart`]: super::remote_timeline_client::index::IndexPart
 
-use std::io::{self};
-
-use anyhow::{ensure, Context};
-use pageserver_api::shard::TenantShardId;
-use serde::{de::Error, Deserialize, Serialize, Serializer};
-use thiserror::Error;
+use anyhow::ensure;
+use serde::{Deserialize, Serialize};
 use utils::bin_ser::SerializeError;
-use utils::crashsafe::path_with_suffix_extension;
 use utils::{bin_ser::BeSer, id::TimelineId, lsn::Lsn};
-
-use crate::config::PageServerConf;
-use crate::virtual_file::VirtualFile;
-use crate::TEMP_FILE_SUFFIX;
 
 /// Use special format number to enable backward compatibility.
 const METADATA_FORMAT_VERSION: u16 = 4;
 
 /// Previous supported format versions.
+///
+/// In practice, none of these should remain, all are [`METADATA_FORMAT_VERSION`], but confirming
+/// that requires a scrubber run which is yet to be done.
 const METADATA_OLD_FORMAT_VERSION: u16 = 3;
 
-/// We assume that a write of up to METADATA_MAX_SIZE bytes is atomic.
+/// When the file existed on disk we assumed that a write of up to METADATA_MAX_SIZE bytes is atomic.
 ///
 /// This is the same assumption that PostgreSQL makes with the control file,
+///
 /// see PG_CONTROL_MAX_SAFE_SIZE
 const METADATA_MAX_SIZE: usize = 512;
 
-/// Metadata stored on disk for each timeline
+/// Legacy metadata stored as a component of `index_part.json` per timeline.
 ///
-/// The fields correspond to the values we hold in memory, in Timeline.
+/// Do not make new changes to this type or the module. In production, we have two different kinds
+/// of serializations of this type: bincode and json. Bincode version reflects what used to be
+/// stored on disk in earlier versions and does internal crc32 checksumming.
+///
+/// This type should not implement `serde::Serialize` or `serde::Deserialize` because there would
+/// be a confusion whether you want the old version ([`TimelineMetadata::from_bytes`]) or the modern
+/// as-exists in `index_part.json` ([`self::modern_serde`]).
+///
+/// ```compile_fail
+/// #[derive(serde::Serialize)]
+/// struct DoNotDoThis(pageserver::tenant::metadata::TimelineMetadata);
+/// ```
+///
+/// ```compile_fail
+/// #[derive(serde::Deserialize)]
+/// struct NeitherDoThis(pageserver::tenant::metadata::TimelineMetadata);
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TimelineMetadata {
     hdr: TimelineMetadataHeader,
@@ -49,7 +69,50 @@ struct TimelineMetadataHeader {
     size: u16,           // size of serialized metadata
     format_version: u16, // metadata format version (used for compatibility checks)
 }
-const METADATA_HDR_SIZE: usize = std::mem::size_of::<TimelineMetadataHeader>();
+
+impl TryFrom<&TimelineMetadataBodyV2> for TimelineMetadataHeader {
+    type Error = Crc32CalculationFailed;
+
+    fn try_from(value: &TimelineMetadataBodyV2) -> Result<Self, Self::Error> {
+        #[derive(Default)]
+        struct Crc32Sink {
+            crc: u32,
+            count: usize,
+        }
+
+        impl std::io::Write for Crc32Sink {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.crc = crc32c::crc32c_append(self.crc, buf);
+                self.count += buf.len();
+                Ok(buf.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        // jump through hoops to calculate the crc32 so that TimelineMetadata::ne works
+        // across serialization versions
+        let mut sink = Crc32Sink::default();
+        <TimelineMetadataBodyV2 as utils::bin_ser::BeSer>::ser_into(value, &mut sink)
+            .map_err(Crc32CalculationFailed)?;
+
+        let size = METADATA_HDR_SIZE + sink.count;
+
+        Ok(TimelineMetadataHeader {
+            checksum: sink.crc,
+            size: size as u16,
+            format_version: METADATA_FORMAT_VERSION,
+        })
+    }
+}
+
+#[derive(thiserror::Error, Debug)]
+#[error("re-serializing for crc32 failed")]
+struct Crc32CalculationFailed(#[source] utils::bin_ser::SerializeError);
+
+const METADATA_HDR_SIZE: usize = size_of::<TimelineMetadataHeader>();
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct TimelineMetadataBodyV2 {
@@ -118,6 +181,12 @@ impl TimelineMetadata {
                 pg_version,
             },
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_recalculated_checksum(mut self) -> anyhow::Result<Self> {
+        self.hdr = TimelineMetadataHeader::try_from(&self.body)?;
+        Ok(self)
     }
 
     fn upgrade_timeline_metadata(metadata_bytes: &[u8]) -> anyhow::Result<Self> {
@@ -216,6 +285,27 @@ impl TimelineMetadata {
         self.body.ancestor_lsn
     }
 
+    /// When reparenting, the `ancestor_lsn` does not change.
+    ///
+    /// Returns true if anything was changed.
+    pub fn reparent(&mut self, timeline: &TimelineId) {
+        assert!(self.body.ancestor_timeline.is_some());
+        // no assertion for redoing this: it's fine, we may have to repeat this multiple times over
+        self.body.ancestor_timeline = Some(*timeline);
+    }
+
+    /// Returns true if anything was changed
+    pub fn detach_from_ancestor(&mut self, branchpoint: &(TimelineId, Lsn)) {
+        if let Some(ancestor) = self.body.ancestor_timeline {
+            assert_eq!(ancestor, branchpoint.0);
+        }
+        if self.body.ancestor_lsn != Lsn(0) {
+            assert_eq!(self.body.ancestor_lsn, branchpoint.1);
+        }
+        self.body.ancestor_timeline = None;
+        self.body.ancestor_lsn = Lsn(0);
+    }
+
     pub fn latest_gc_cutoff_lsn(&self) -> Lsn {
         self.body.latest_gc_cutoff_lsn
     }
@@ -244,65 +334,123 @@ impl TimelineMetadata {
         let bytes = instance.to_bytes().unwrap();
         Self::from_bytes(&bytes).unwrap()
     }
-}
 
-impl<'de> Deserialize<'de> for TimelineMetadata {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let bytes = Vec::<u8>::deserialize(deserializer)?;
-        Self::from_bytes(bytes.as_slice()).map_err(|e| D::Error::custom(format!("{e}")))
+    pub(crate) fn apply(&mut self, update: &MetadataUpdate) {
+        self.body.disk_consistent_lsn = update.disk_consistent_lsn;
+        self.body.prev_record_lsn = update.prev_record_lsn;
+        self.body.latest_gc_cutoff_lsn = update.latest_gc_cutoff_lsn;
     }
 }
 
-impl Serialize for TimelineMetadata {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+pub(crate) mod modern_serde {
+    use super::{TimelineMetadata, TimelineMetadataBodyV2, TimelineMetadataHeader};
+    use serde::{Deserialize, Serialize};
+
+    pub(crate) fn deserialize<'de, D>(deserializer: D) -> Result<TimelineMetadata, D::Error>
     where
-        S: Serializer,
+        D: serde::de::Deserializer<'de>,
     {
-        let bytes = self
-            .to_bytes()
-            .map_err(|e| serde::ser::Error::custom(format!("{e}")))?;
-        bytes.serialize(serializer)
+        // for legacy reasons versions 1-5 had TimelineMetadata serialized as a Vec<u8> field with
+        // BeSer.
+        struct Visitor;
+
+        impl<'d> serde::de::Visitor<'d> for Visitor {
+            type Value = TimelineMetadata;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("BeSer bytes or json structure")
+            }
+
+            fn visit_seq<A>(self, seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::SeqAccess<'d>,
+            {
+                use serde::de::Error;
+                let de = serde::de::value::SeqAccessDeserializer::new(seq);
+                Vec::<u8>::deserialize(de)
+                    .map(|v| TimelineMetadata::from_bytes(&v).map_err(A::Error::custom))?
+            }
+
+            fn visit_map<A>(self, map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'d>,
+            {
+                use serde::de::Error;
+
+                let de = serde::de::value::MapAccessDeserializer::new(map);
+                let body = TimelineMetadataBodyV2::deserialize(de)?;
+                let hdr = TimelineMetadataHeader::try_from(&body).map_err(A::Error::custom)?;
+
+                Ok(TimelineMetadata { hdr, body })
+            }
+        }
+
+        deserializer.deserialize_any(Visitor)
+    }
+
+    pub(crate) fn serialize<S>(
+        metadata: &TimelineMetadata,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        // header is not needed, upon reading we've upgraded all v1 to v2
+        metadata.body.serialize(serializer)
+    }
+
+    #[test]
+    fn deserializes_bytes_as_well_as_equivalent_body_v2() {
+        #[derive(serde::Deserialize, serde::Serialize)]
+        struct Wrapper(
+            #[serde(deserialize_with = "deserialize", serialize_with = "serialize")]
+            TimelineMetadata,
+        );
+
+        let too_many_bytes = "[216,111,252,208,0,54,0,4,0,0,0,0,1,73,253,144,1,0,0,0,0,1,73,253,24,0,0,0,0,0,0,0,0,0,0,0,0,0,1,73,253,24,0,0,0,0,1,73,253,24,0,0,0,15,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]";
+
+        let wrapper_from_bytes = serde_json::from_str::<Wrapper>(too_many_bytes).unwrap();
+
+        let serialized = serde_json::to_value(&wrapper_from_bytes).unwrap();
+
+        assert_eq!(
+            serialized,
+            serde_json::json! {{
+                "disk_consistent_lsn": "0/149FD90",
+                "prev_record_lsn": "0/149FD18",
+                "ancestor_timeline": null,
+                "ancestor_lsn": "0/0",
+                "latest_gc_cutoff_lsn": "0/149FD18",
+                "initdb_lsn": "0/149FD18",
+                "pg_version": 15
+            }}
+        );
+
+        let wrapper_from_json = serde_json::value::from_value::<Wrapper>(serialized).unwrap();
+
+        assert_eq!(wrapper_from_bytes.0, wrapper_from_json.0);
     }
 }
 
-/// Save timeline metadata to file
-#[tracing::instrument(skip_all, fields(%tenant_id=tenant_shard_id.tenant_id, %shard_id=tenant_shard_id.shard_slug(), %timeline_id))]
-pub async fn save_metadata(
-    conf: &'static PageServerConf,
-    tenant_shard_id: &TenantShardId,
-    timeline_id: &TimelineId,
-    data: &TimelineMetadata,
-) -> anyhow::Result<()> {
-    let path = conf.metadata_path(tenant_shard_id, timeline_id);
-    let temp_path = path_with_suffix_extension(&path, TEMP_FILE_SUFFIX);
-    let metadata_bytes = data.to_bytes().context("serialize metadata")?;
-    VirtualFile::crashsafe_overwrite(&path, &temp_path, &metadata_bytes)
-        .await
-        .context("write metadata")?;
-    Ok(())
+/// Parts of the metadata which are regularly modified.
+pub(crate) struct MetadataUpdate {
+    disk_consistent_lsn: Lsn,
+    prev_record_lsn: Option<Lsn>,
+    latest_gc_cutoff_lsn: Lsn,
 }
 
-#[derive(Error, Debug)]
-pub enum LoadMetadataError {
-    #[error(transparent)]
-    Read(#[from] io::Error),
-
-    #[error(transparent)]
-    Decode(#[from] anyhow::Error),
-}
-
-pub fn load_metadata(
-    conf: &'static PageServerConf,
-    tenant_shard_id: &TenantShardId,
-    timeline_id: &TimelineId,
-) -> Result<TimelineMetadata, LoadMetadataError> {
-    let metadata_path = conf.metadata_path(tenant_shard_id, timeline_id);
-    let metadata_bytes = std::fs::read(metadata_path)?;
-
-    Ok(TimelineMetadata::from_bytes(&metadata_bytes)?)
+impl MetadataUpdate {
+    pub(crate) fn new(
+        disk_consistent_lsn: Lsn,
+        prev_record_lsn: Option<Lsn>,
+        latest_gc_cutoff_lsn: Lsn,
+    ) -> Self {
+        Self {
+            disk_consistent_lsn,
+            prev_record_lsn,
+            latest_gc_cutoff_lsn,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -405,59 +553,6 @@ mod tests {
     }
 
     #[test]
-    fn test_metadata_bincode_serde() {
-        let original_metadata = TimelineMetadata::new(
-            Lsn(0x200),
-            Some(Lsn(0x100)),
-            Some(TIMELINE_ID),
-            Lsn(0),
-            Lsn(0),
-            Lsn(0),
-            // Any version will do here, so use the default
-            crate::DEFAULT_PG_VERSION,
-        );
-        let metadata_bytes = original_metadata
-            .to_bytes()
-            .expect("Cannot create bytes array from metadata");
-
-        let metadata_bincode_be_bytes = original_metadata
-            .ser()
-            .expect("Cannot serialize the metadata");
-
-        // 8 bytes for the length of the vector
-        assert_eq!(metadata_bincode_be_bytes.len(), 8 + metadata_bytes.len());
-
-        let expected_bincode_bytes = {
-            let mut temp = vec![];
-            let len_bytes = metadata_bytes.len().to_be_bytes();
-            temp.extend_from_slice(&len_bytes);
-            temp.extend_from_slice(&metadata_bytes);
-            temp
-        };
-        assert_eq!(metadata_bincode_be_bytes, expected_bincode_bytes);
-
-        let deserialized_metadata = TimelineMetadata::des(&metadata_bincode_be_bytes).unwrap();
-        // Deserialized metadata has the metadata header, which is different from the serialized one.
-        //   Reference: TimelineMetaData::to_bytes()
-        let expected_metadata = {
-            let mut temp_metadata = original_metadata;
-            let body_bytes = temp_metadata
-                .body
-                .ser()
-                .expect("Cannot serialize the metadata body");
-            let metadata_size = METADATA_HDR_SIZE + body_bytes.len();
-            let hdr = TimelineMetadataHeader {
-                size: metadata_size as u16,
-                format_version: METADATA_FORMAT_VERSION,
-                checksum: crc32c::crc32c(&body_bytes),
-            };
-            temp_metadata.hdr = hdr;
-            temp_metadata
-        };
-        assert_eq!(deserialized_metadata, expected_metadata);
-    }
-
-    #[test]
     fn test_metadata_bincode_serde_ensure_roundtrip() {
         let original_metadata = TimelineMetadata::new(
             Lsn(0x200),
@@ -470,10 +565,8 @@ mod tests {
             crate::DEFAULT_PG_VERSION,
         );
         let expected_bytes = vec![
-            /* bincode length encoding bytes */
-            0, 0, 0, 0, 0, 0, 2, 0, // 8 bytes for the length of the serialized vector
             /* TimelineMetadataHeader */
-            4, 37, 101, 34, 0, 70, 0, 4, // checksum, size, format_version (4 + 2 + 2)
+            74, 104, 158, 105, 0, 70, 0, 4, // checksum, size, format_version (4 + 2 + 2)
             /* TimelineMetadataBodyV2 */
             0, 0, 0, 0, 0, 0, 2, 0, // disk_consistent_lsn (8 bytes)
             1, 0, 0, 0, 0, 0, 0, 1, 0, // prev_record_lsn (9 bytes)
@@ -482,7 +575,7 @@ mod tests {
             0, 0, 0, 0, 0, 0, 0, 0, // ancestor_lsn (8 bytes)
             0, 0, 0, 0, 0, 0, 0, 0, // latest_gc_cutoff_lsn (8 bytes)
             0, 0, 0, 0, 0, 0, 0, 0, // initdb_lsn (8 bytes)
-            0, 0, 0, 15, // pg_version (4 bytes)
+            0, 0, 0, 16, // pg_version (4 bytes)
             /* padding bytes */
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -501,7 +594,7 @@ mod tests {
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             0, 0, 0, 0, 0, 0, 0,
         ];
-        let metadata_ser_bytes = original_metadata.ser().unwrap();
+        let metadata_ser_bytes = original_metadata.to_bytes().unwrap();
         assert_eq!(metadata_ser_bytes, expected_bytes);
 
         let expected_metadata = {
@@ -519,7 +612,7 @@ mod tests {
             temp_metadata.hdr = hdr;
             temp_metadata
         };
-        let des_metadata = TimelineMetadata::des(&metadata_ser_bytes).unwrap();
+        let des_metadata = TimelineMetadata::from_bytes(&metadata_ser_bytes).unwrap();
         assert_eq!(des_metadata, expected_metadata);
     }
 }

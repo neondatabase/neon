@@ -52,10 +52,6 @@ DEFAULT_PAGESERVER_ALLOWED_ERRORS = (
     ".*Error processing HTTP request: Forbidden",
     # intentional failpoints
     ".*failpoint ",
-    # FIXME: These need investigation
-    ".*manual_gc.*is_shutdown_requested\\(\\) called in an unexpected task or thread.*",
-    ".*tenant_list: timeline is not found in remote index while it is present in the tenants registry.*",
-    ".*Removing intermediate uninit mark file.*",
     # Tenant::delete_timeline() can cause any of the four following errors.
     # FIXME: we shouldn't be considering it an error: https://github.com/neondatabase/neon/issues/2946
     ".*could not flush frozen layer.*queue is in state Stopped",  # when schedule layer upload fails because queued got closed before compaction got killed
@@ -67,10 +63,11 @@ DEFAULT_PAGESERVER_ALLOWED_ERRORS = (
     ".*query handler for 'pagestream.*failed: Timeline .* is not active",  # timeline delete in progress
     ".*task iteration took longer than the configured period.*",
     # these can happen anytime we do compactions from background task and shutdown pageserver
-    r".*ERROR.*ancestor timeline \S+ is being stopped",
+    ".*could not compact.*cancelled.*",
     # this is expected given our collaborative shutdown approach for the UploadQueue
     ".*Compaction failed.*, retrying in .*: Other\\(queue is in state Stopped.*",
     ".*Compaction failed.*, retrying in .*: ShuttingDown",
+    ".*Compaction failed.*, retrying in .*: Other\\(timeline shutting down.*",
     # Pageserver timeline deletion should be polled until it gets 404, so ignore it globally
     ".*Error processing HTTP request: NotFound: Timeline .* was not found",
     ".*took more than expected to complete.*",
@@ -82,7 +79,37 @@ DEFAULT_PAGESERVER_ALLOWED_ERRORS = (
     # During shutdown, DownloadError::Cancelled may be logged as an error.  Cleaning this
     # up is tracked in https://github.com/neondatabase/neon/issues/6096
     ".*Cancelled, shutting down.*",
+    # Open layers are only rolled at Lsn boundaries to avoid name clashses.
+    # Hence, we can overshoot the soft limit set by checkpoint distance.
+    # This is especially pronounced in tests that set small checkpoint
+    # distances.
+    ".*Flushed oversized open layer with size.*",
+    # During teardown, we stop the storage controller before the pageservers, so pageservers
+    # can experience connection errors doing background deletion queue work.
+    ".*WARN deletion backend: calling control plane generation validation API failed.*error sending request.*",
+    # Can happen when the test shuts down the storage controller while it is calling the utilization API
+    ".*WARN.*path=/v1/utilization .*request was dropped before completing",
+    # Can happen during shutdown
+    ".*scheduling deletion on drop failed: queue is in state Stopped.*",
 )
+
+
+DEFAULT_STORAGE_CONTROLLER_ALLOWED_ERRORS = [
+    # Many tests will take pageservers offline, resulting in log warnings on the controller
+    # failing to connect to them.
+    ".*Call to node.*management API.*failed.*receive body.*",
+    ".*Call to node.*management API.*failed.*ReceiveBody.*",
+    ".*Failed to update node .+ after heartbeat round.*error sending request for url.*",
+    # Many tests will start up with a node offline
+    ".*startup_reconcile: Could not scan node.*",
+    # Tests run in dev mode
+    ".*Starting in dev mode.*",
+    # Tests that stop endpoints & use the storage controller's neon_local notification
+    # mechanism might fail (neon_local's stopping and endpoint isn't atomic wrt the storage
+    # controller's attempts to notify the endpoint).
+    ".*reconciler.*neon_local notification hook failed.*",
+    ".*reconciler.*neon_local error.*",
+]
 
 
 def _check_allowed_errors(input):
@@ -110,9 +137,10 @@ if __name__ == "__main__":
         "-i",
         "--input",
         type=argparse.FileType("r"),
-        default=sys.stdin,
-        help="Pageserver logs file. Reads from stdin if no file is provided.",
+        help="Pageserver logs file. Use '-' for stdin.",
+        required=True,
     )
+
     args = parser.parse_args()
     errors = _check_allowed_errors(args.input)
 

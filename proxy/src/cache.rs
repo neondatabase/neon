@@ -1,6 +1,7 @@
-pub mod common;
-pub mod project_info;
+pub(crate) mod common;
+pub(crate) mod endpoints;
+pub(crate) mod project_info;
 mod timed_lru;
 
-pub use common::{Cache, Cached};
-pub use timed_lru::TimedLru;
+pub(crate) use common::{Cache, Cached};
+pub(crate) use timed_lru::TimedLru;

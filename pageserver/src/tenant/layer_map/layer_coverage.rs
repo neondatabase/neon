@@ -129,6 +129,42 @@ impl<Value: Clone> LayerCoverage<Value> {
             .map(|(k, v)| (*k, v.as_ref().map(|x| x.1.clone())))
     }
 
+    /// Returns an iterator which includes all coverage changes for layers that intersect
+    /// with the provided range.
+    pub fn range_overlaps(
+        &self,
+        key_range: &Range<i128>,
+    ) -> impl Iterator<Item = (i128, Option<Value>)> + '_
+    where
+        Value: Eq,
+    {
+        let first_change = self.query(key_range.start);
+        match first_change {
+            Some(change) => {
+                // If the start of the range is covered, we have to deal with two cases:
+                // 1. Start of the range is aligned with the start of a layer.
+                // In this case the return of `self.range` will contain the layer which aligns with the start of the key range.
+                // We advance said iterator to avoid duplicating the first change.
+                // 2. Start of the range is not aligned with the start of a layer.
+                let range = key_range.start..key_range.end;
+                let mut range_coverage = self.range(range).peekable();
+                if range_coverage
+                    .peek()
+                    .is_some_and(|c| c.1.as_ref() == Some(&change))
+                {
+                    range_coverage.next();
+                }
+                itertools::Either::Left(
+                    std::iter::once((key_range.start, Some(change))).chain(range_coverage),
+                )
+            }
+            None => {
+                let range = key_range.start..key_range.end;
+                let coverage = self.range(range);
+                itertools::Either::Right(coverage)
+            }
+        }
+    }
     /// O(1) clone
     pub fn clone(&self) -> Self {
         Self {

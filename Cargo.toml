@@ -3,21 +3,24 @@ resolver = "2"
 members = [
     "compute_tools",
     "control_plane",
-    "control_plane/attachment_service",
+    "control_plane/storcon_cli",
     "pageserver",
+    "pageserver/compaction",
     "pageserver/ctl",
     "pageserver/client",
     "pageserver/pagebench",
     "proxy",
     "safekeeper",
     "storage_broker",
-    "s3_scrubber",
+    "storage_controller",
+    "storage_controller/client",
+    "storage_scrubber",
     "workspace_hack",
-    "trace",
     "libs/compute_api",
     "libs/pageserver_api",
     "libs/postgres_ffi",
     "libs/safekeeper_api",
+    "libs/desim",
     "libs/utils",
     "libs/consumption_metrics",
     "libs/postgres_backend",
@@ -38,25 +41,31 @@ license = "Apache-2.0"
 
 ## All dependency versions, used in the project
 [workspace.dependencies]
+ahash = "0.8"
 anyhow = { version = "1.0", features = ["backtrace"] }
 arc-swap = "1.6"
 async-compression = { version = "0.4.0", features = ["tokio", "gzip", "zstd"] }
-azure_core = "0.18"
-azure_identity = "0.18"
-azure_storage = "0.18"
-azure_storage_blobs = "0.18"
+atomic-take = "1.1.0"
+azure_core = { version = "0.19", default-features = false, features = ["enable_reqwest_rustls", "hmac_rust"] }
+azure_identity = { version = "0.19", default-features = false, features = ["enable_reqwest_rustls"] }
+azure_storage = { version = "0.19", default-features = false, features = ["enable_reqwest_rustls"] }
+azure_storage_blobs = { version = "0.19", default-features = false, features = ["enable_reqwest_rustls"] }
 flate2 = "1.0.26"
 async-stream = "0.3"
 async-trait = "0.1"
-aws-config = { version = "1.0", default-features = false, features=["rustls"] }
-aws-sdk-s3 = "1.0"
-aws-smithy-async = { version = "1.0", default-features = false, features=["rt-tokio"] }
-aws-smithy-types = "1.0"
-aws-credential-types = "1.0"
+aws-config = { version = "1.3", default-features = false, features=["rustls"] }
+aws-sdk-s3 = "1.26"
+aws-sdk-iam = "1.15.0"
+aws-smithy-async = { version = "1.2.1", default-features = false, features=["rt-tokio"] }
+aws-smithy-types = "1.1.9"
+aws-credential-types = "1.2.0"
+aws-sigv4 = { version = "1.2.1", features = ["sign-http"] }
+aws-types = "1.2.0"
 axum = { version = "0.6.20", features = ["ws"] }
 base64 = "0.13.0"
 bincode = "1.3"
-bindgen = "0.65"
+bindgen = "0.70"
+bit_field = "0.10.2"
 bstr = "1.0"
 byteorder = "1.4"
 bytes = "1.0"
@@ -64,73 +73,81 @@ camino = "1.1.6"
 cfg-if = "1.0.0"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4.0", features = ["derive"] }
-close_fds = "0.3.2"
 comfy-table = "6.1"
 const_format = "0.2"
 crc32c = "0.6"
+crossbeam-deque = "0.8.5"
 crossbeam-utils = "0.8.5"
 dashmap = { version = "5.5.0", features = ["raw-api"] }
 either = "1.8"
 enum-map = "2.4.2"
 enumset = "1.0.12"
 fail = "0.5.0"
-fs2 = "0.4.3"
+fallible-iterator = "0.2"
+framed-websockets = { version = "0.1.0", git = "https://github.com/neondatabase/framed-websockets" }
 futures = "0.3"
 futures-core = "0.3"
 futures-util = "0.3"
 git-version = "0.3"
-hashbrown = "0.13"
-hashlink = "0.8.1"
+hashbrown = "0.14"
+hashlink = "0.9.1"
 hdrhistogram = "7.5.2"
 hex = "0.4"
 hex-literal = "0.4"
 hmac = "0.12.1"
 hostname = "0.3.1"
+http = {version = "1.1.0", features = ["std"]}
 http-types = { version = "2", default-features = false }
 humantime = "2.1"
 humantime-serde = "1.1.1"
 hyper = "0.14"
-hyper-tungstenite = "0.11"
+tokio-tungstenite = "0.20.0"
+indexmap = "2"
+indoc = "2"
 inotify = "0.10.2"
 ipnet = "2.9.0"
 itertools = "0.10"
 jsonwebtoken = "9"
+lasso = "0.7"
 libc = "0.2"
 md5 = "0.7.0"
+measured = { version = "0.0.22", features=["lasso"] }
+measured-process = { version = "0.0.22" }
 memoffset = "0.8"
-native-tls = "0.2"
-nix = { version = "0.27", features = ["fs", "process", "socket", "signal", "poll"] }
+nix = { version = "0.27", features = ["dir", "fs", "process", "socket", "signal", "poll"] }
 notify = "6.0.0"
 num_cpus = "1.15"
 num-traits = "0.2.15"
 once_cell = "1.13"
 opentelemetry = "0.20.0"
-opentelemetry-otlp = { version = "0.13.0", default_features=false, features = ["http-proto", "trace", "http", "reqwest-client"] }
+opentelemetry-otlp = { version = "0.13.0", default-features=false, features = ["http-proto", "trace", "http", "reqwest-client"] }
 opentelemetry-semantic-conventions = "0.12.0"
 parking_lot = "0.12"
-parquet = { version = "49.0.0", default-features = false, features = ["zstd"] }
-parquet_derive = "49.0.0"
+parquet = { version = "51.0.0", default-features = false, features = ["zstd"] }
+parquet_derive = "51.0.0"
 pbkdf2 = { version = "0.12.1", features = ["simple", "std"] }
 pin-project-lite = "0.2"
-prometheus = {version = "0.13", default_features=false, features = ["process"]} # removes protobuf dependency
+procfs = "0.16"
+prometheus = {version = "0.13", default-features=false, features = ["process"]} # removes protobuf dependency
 prost = "0.11"
 rand = "0.8"
-redis = { version = "0.24.0", features = ["tokio-rustls-comp", "keep-alive"] }
+redis = { version = "0.25.2", features = ["tokio-rustls-comp", "keep-alive"] }
 regex = "1.10.2"
-reqwest = { version = "0.11", default-features = false, features = ["rustls-tls"] }
-reqwest-tracing = { version = "0.4.7", features = ["opentelemetry_0_20"] }
-reqwest-middleware = "0.2.0"
-reqwest-retry = "0.2.2"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+reqwest-tracing = { version = "0.5", features = ["opentelemetry_0_20"] }
+reqwest-middleware = "0.3.0"
+reqwest-retry = "0.5"
 routerify = "3"
 rpds = "0.13"
 rustc-hash = "1.1.0"
-rustls = "0.21"
-rustls-pemfile = "1"
+rustls = "0.22"
+rustls-pemfile = "2"
 rustls-split = "0.3"
 scopeguard = "1.1"
 sysinfo = "0.29.2"
 sd-notify = "0.4.1"
-sentry = { version = "0.31", default-features = false, features = ["backtrace", "contexts", "panic", "rustls", "reqwest" ] }
+send-future = "0.1.0"
+sentry = { version = "0.32", default-features = false, features = ["backtrace", "contexts", "panic", "rustls", "reqwest" ] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1"
 serde_path_to_error = "0.1"
@@ -143,32 +160,41 @@ smol_str = { version = "0.2.0", features = ["serde"] }
 socket2 = "0.5"
 strum = "0.24"
 strum_macros = "0.24"
-svg_fmt = "0.4.1"
+"subtle"  = "2.5.0"
+svg_fmt = "0.4.3"
 sync_wrapper = "0.1.2"
 tar = "0.4"
 task-local-extensions = "0.1.4"
-test-context = "0.1"
+test-context = "0.3"
 thiserror = "1.0"
-tls-listener = { version = "0.7", features = ["rustls", "hyper-h1"] }
+tikv-jemallocator = "0.5"
+tikv-jemalloc-ctl = "0.5"
 tokio = { version = "1.17", features = ["macros"] }
+tokio-epoll-uring = { git = "https://github.com/neondatabase/tokio-epoll-uring.git" , branch = "main" }
 tokio-io-timeout = "1.2.0"
-tokio-postgres-rustls = "0.10.0"
-tokio-rustls = "0.24"
+tokio-postgres-rustls = "0.11.0"
+tokio-rustls = "0.25"
 tokio-stream = "0.1"
 tokio-tar = "0.3"
 tokio-util = { version = "0.7.10", features = ["io", "rt"] }
 toml = "0.7"
 toml_edit = "0.19"
 tonic = {version = "0.9", features = ["tls", "tls-roots"]}
+tower-service = "0.3.2"
 tracing = "0.1"
 tracing-error = "0.2.0"
-tracing-opentelemetry = "0.20.0"
-tracing-subscriber = { version = "0.3", default_features = false, features = ["smallvec", "fmt", "tracing-log", "std", "env-filter", "json"] }
+tracing-opentelemetry = "0.21.0"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["smallvec", "fmt", "tracing-log", "std", "env-filter", "json"] }
+try-lock = "0.2.5"
+twox-hash = { version = "1.6.3", default-features = false }
+typed-json = "0.1"
 url = "2.2"
+urlencoding = "2.1"
 uuid = { version = "1.6.1", features = ["v4", "v7", "serde"] }
 walkdir = "2.3.2"
-webpki-roots = "0.25"
+rustls-native-certs = "0.7"
 x509-parser = "0.15"
+whoami = "1.5.1"
 
 ## TODO replace this with tracing
 env_logger = "0.10"
@@ -176,13 +202,9 @@ log = "0.4"
 
 ## Libraries from neondatabase/ git forks, ideally with changes to be upstreamed
 postgres = { git = "https://github.com/neondatabase/rust-postgres.git", branch="neon" }
-postgres-native-tls = { git = "https://github.com/neondatabase/rust-postgres.git", branch="neon" }
 postgres-protocol = { git = "https://github.com/neondatabase/rust-postgres.git", branch="neon" }
 postgres-types = { git = "https://github.com/neondatabase/rust-postgres.git", branch="neon" }
 tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", branch="neon" }
-
-## Other git libraries
-heapless = { default-features=false, features=[], git = "https://github.com/japaric/heapless.git", rev = "644653bf3b831c6bb4963be2de24804acf5e5001" } # upstream release pending
 
 ## Local libraries
 compute_api = { version = "0.1", path = "./libs/compute_api/" }
@@ -190,13 +212,16 @@ consumption_metrics = { version = "0.1", path = "./libs/consumption_metrics/" }
 metrics = { version = "0.1", path = "./libs/metrics/" }
 pageserver_api = { version = "0.1", path = "./libs/pageserver_api/" }
 pageserver_client = { path = "./pageserver/client" }
+pageserver_compaction = { version = "0.1", path = "./pageserver/compaction/" }
 postgres_backend = { version = "0.1", path = "./libs/postgres_backend/" }
 postgres_connection = { version = "0.1", path = "./libs/postgres_connection/" }
 postgres_ffi = { version = "0.1", path = "./libs/postgres_ffi/" }
 pq_proto = { version = "0.1", path = "./libs/pq_proto/" }
 remote_storage = { version = "0.1", path = "./libs/remote_storage/" }
 safekeeper_api = { version = "0.1", path = "./libs/safekeeper_api" }
+desim = { version = "0.1", path = "./libs/desim" }
 storage_broker = { version = "0.1", path = "./storage_broker/" } # Note: main broker code is inside the binary crate, so linking with the library shouldn't be heavy.
+storage_controller_client = { path = "./storage_controller/client" }
 tenant_size_model = { version = "0.1", path = "./libs/tenant_size_model/" }
 tracing-utils = { version = "0.1", path = "./libs/tracing-utils/" }
 utils = { version = "0.1", path = "./libs/utils/" }
@@ -208,20 +233,19 @@ workspace_hack = { version = "0.1", path = "./workspace_hack/" }
 
 ## Build dependencies
 criterion = "0.5.1"
-rcgen = "0.11"
+rcgen = "0.12"
 rstest = "0.18"
 camino-tempfile = "1.0.2"
 tonic-build = "0.9"
 
 [patch.crates-io]
 
-# This is only needed for proxy's tests.
-# TODO: we should probably fork `tokio-postgres-rustls` instead.
+# Needed to get `tokio-postgres-rustls` to depend on our fork.
 tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", branch="neon" }
 
 # bug fixes for UUID
-parquet = { git = "https://github.com/neondatabase/arrow-rs", branch = "neon-fix-bugs" }
-parquet_derive = { git = "https://github.com/neondatabase/arrow-rs", branch = "neon-fix-bugs" }
+parquet = { git = "https://github.com/apache/arrow-rs", branch = "master" }
+parquet_derive = { git = "https://github.com/apache/arrow-rs", branch = "master" }
 
 ################# Binary contents sections
 

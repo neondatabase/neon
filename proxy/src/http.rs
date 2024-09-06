@@ -4,44 +4,48 @@
 
 pub mod health_server;
 
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 
-use futures::FutureExt;
-pub use reqwest::{Request, Response, StatusCode};
-pub use reqwest_middleware::{ClientWithMiddleware, Error};
-pub use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
-use tokio::time::Instant;
-use tracing::trace;
+use anyhow::bail;
+use bytes::Bytes;
+use http_body_util::BodyExt;
+use hyper1::body::Body;
+use serde::de::DeserializeOwned;
 
-use crate::{metrics::CONSOLE_REQUEST_LATENCY, rate_limiter, url::ApiUrl};
+pub(crate) use reqwest::{Request, Response};
+pub(crate) use reqwest_middleware::{ClientWithMiddleware, Error};
+pub(crate) use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
+
+use crate::{
+    metrics::{ConsoleRequest, Metrics},
+    url::ApiUrl,
+};
 use reqwest_middleware::RequestBuilder;
 
 /// This is the preferred way to create new http clients,
 /// because it takes care of observability (OpenTelemetry).
 /// We deliberately don't want to replace this with a public static.
-pub fn new_client(rate_limiter_config: rate_limiter::RateLimiterConfig) -> ClientWithMiddleware {
+pub fn new_client() -> ClientWithMiddleware {
     let client = reqwest::ClientBuilder::new()
-        .dns_resolver(Arc::new(GaiResolver::default()))
-        .connection_verbose(true)
         .build()
         .expect("Failed to create http client");
 
     reqwest_middleware::ClientBuilder::new(client)
         .with(reqwest_tracing::TracingMiddleware::default())
-        .with(rate_limiter::Limiter::new(rate_limiter_config))
         .build()
 }
 
-pub fn new_client_with_timeout(default_timout: Duration) -> ClientWithMiddleware {
+pub(crate) fn new_client_with_timeout(
+    request_timeout: Duration,
+    total_retry_duration: Duration,
+) -> ClientWithMiddleware {
     let timeout_client = reqwest::ClientBuilder::new()
-        .dns_resolver(Arc::new(GaiResolver::default()))
-        .connection_verbose(true)
-        .timeout(default_timout)
+        .timeout(request_timeout)
         .build()
         .expect("Failed to create http client with timeout");
 
     let retry_policy =
-        ExponentialBackoff::builder().build_with_total_retry_duration(default_timout);
+        ExponentialBackoff::builder().build_with_total_retry_duration(total_retry_duration);
 
     reqwest_middleware::ClientBuilder::new(timeout_client)
         .with(reqwest_tracing::TracingMiddleware::default())
@@ -76,59 +80,56 @@ impl Endpoint {
     }
 
     #[inline(always)]
-    pub fn url(&self) -> &ApiUrl {
+    pub(crate) fn url(&self) -> &ApiUrl {
         &self.endpoint
     }
 
     /// Return a [builder](RequestBuilder) for a `GET` request,
     /// appending a single `path` segment to the base endpoint URL.
-    pub fn get(&self, path: &str) -> RequestBuilder {
+    pub(crate) fn get(&self, path: &str) -> RequestBuilder {
         let mut url = self.endpoint.clone();
         url.path_segments_mut().push(path);
         self.client.get(url.into_inner())
     }
 
     /// Execute a [request](reqwest::Request).
-    pub async fn execute(&self, request: Request) -> Result<Response, Error> {
-        let path = request.url().path().to_string();
-        let start = Instant::now();
-        let res = self.client.execute(request).await;
-        CONSOLE_REQUEST_LATENCY
-            .with_label_values(&[&path])
-            .observe(start.elapsed().as_secs_f64());
-        res
+    pub(crate) async fn execute(&self, request: Request) -> Result<Response, Error> {
+        let _timer = Metrics::get()
+            .proxy
+            .console_request_latency
+            .start_timer(ConsoleRequest {
+                request: request.url().path(),
+            });
+
+        self.client.execute(request).await
     }
 }
 
-/// https://docs.rs/reqwest/0.11.18/src/reqwest/dns/gai.rs.html
-use hyper::{
-    client::connect::dns::{GaiResolver as HyperGaiResolver, Name},
-    service::Service,
-};
-use reqwest::dns::{Addrs, Resolve, Resolving};
-#[derive(Debug)]
-pub struct GaiResolver(HyperGaiResolver);
+pub(crate) async fn parse_json_body_with_limit<D: DeserializeOwned>(
+    mut b: impl Body<Data = Bytes, Error = reqwest::Error> + Unpin,
+    limit: usize,
+) -> anyhow::Result<D> {
+    // We could use `b.limited().collect().await.to_bytes()` here
+    // but this ends up being slightly more efficient as far as I can tell.
 
-impl Default for GaiResolver {
-    fn default() -> Self {
-        Self(HyperGaiResolver::new())
-    }
-}
+    // check the lower bound of the size hint.
+    // in reqwest, this value is influenced by the Content-Length header.
+    let lower_bound = match usize::try_from(b.size_hint().lower()) {
+        Ok(bound) if bound <= limit => bound,
+        _ => bail!("Content length exceeds limit of {limit} bytes"),
+    };
+    let mut bytes = Vec::with_capacity(lower_bound);
 
-impl Resolve for GaiResolver {
-    fn resolve(&self, name: Name) -> Resolving {
-        let this = &mut self.0.clone();
-        let start = Instant::now();
-        Box::pin(
-            Service::<Name>::call(this, name.clone()).map(move |result| {
-                let resolve_duration = start.elapsed();
-                trace!(duration = ?resolve_duration, addr = %name, "resolve host complete");
-                result
-                    .map(|addrs| -> Addrs { Box::new(addrs) })
-                    .map_err(|err| -> Box<dyn std::error::Error + Send + Sync> { Box::new(err) })
-            }),
-        )
+    while let Some(frame) = b.frame().await.transpose()? {
+        if let Ok(data) = frame.into_data() {
+            if bytes.len() + data.len() > limit {
+                bail!("Content length exceeds limit of {limit} bytes")
+            }
+            bytes.extend_from_slice(&data);
+        }
     }
+
+    Ok(serde_json::from_slice::<D>(&bytes)?)
 }
 
 #[cfg(test)]

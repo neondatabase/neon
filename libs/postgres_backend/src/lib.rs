@@ -6,7 +6,6 @@
 #![deny(clippy::undocumented_unsafe_blocks)]
 use anyhow::Context;
 use bytes::Bytes;
-use futures::pin_mut;
 use serde::{Deserialize, Serialize};
 use std::io::ErrorKind;
 use std::net::SocketAddr;
@@ -17,6 +16,7 @@ use std::{fmt, io};
 use std::{future::Future, str::FromStr};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_rustls::TlsAcceptor;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
 
 use pq_proto::framed::{ConnectionError, Framed, FramedReader, FramedWriter};
@@ -69,8 +69,10 @@ impl QueryError {
 }
 
 /// Returns true if the given error is a normal consequence of a network issue,
-/// or the client closing the connection. These errors can happen during normal
-/// operations, and don't indicate a bug in our code.
+/// or the client closing the connection.
+///
+/// These errors can happen during normal operations,
+/// and don't indicate a bug in our code.
 pub fn is_expected_io_error(e: &io::Error) -> bool {
     use io::ErrorKind::*;
     matches!(
@@ -378,8 +380,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
         &mut self,
         cx: &mut std::task::Context<'_>,
     ) -> Poll<Result<(), std::io::Error>> {
-        let flush_fut = self.flush();
-        pin_mut!(flush_fut);
+        let flush_fut = std::pin::pin!(self.flush());
         flush_fut.poll(cx)
     }
 
@@ -402,21 +403,15 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
     }
 
     /// Wrapper for run_message_loop() that shuts down socket when we are done
-    pub async fn run<F, S>(
+    pub async fn run(
         mut self,
         handler: &mut impl Handler<IO>,
-        shutdown_watcher: F,
-    ) -> Result<(), QueryError>
-    where
-        F: Fn() -> S + Clone,
-        S: Future,
-    {
-        let ret = self
-            .run_message_loop(handler, shutdown_watcher.clone())
-            .await;
+        cancel: &CancellationToken,
+    ) -> Result<(), QueryError> {
+        let ret = self.run_message_loop(handler, cancel).await;
 
         tokio::select! {
-            _ = shutdown_watcher() => {
+            _ = cancel.cancelled() => {
                 // do nothing; we most likely got already stopped by shutdown and will log it next.
             }
             _ = self.framed.shutdown() => {
@@ -446,21 +441,17 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
         }
     }
 
-    async fn run_message_loop<F, S>(
+    async fn run_message_loop(
         &mut self,
         handler: &mut impl Handler<IO>,
-        shutdown_watcher: F,
-    ) -> Result<(), QueryError>
-    where
-        F: Fn() -> S,
-        S: Future,
-    {
+        cancel: &CancellationToken,
+    ) -> Result<(), QueryError> {
         trace!("postgres backend to {:?} started", self.peer_addr);
 
         tokio::select!(
             biased;
 
-            _ = shutdown_watcher() => {
+            _ = cancel.cancelled() => {
                 // We were requested to shut down.
                 tracing::info!("shutdown request received during handshake");
                 return Err(QueryError::Shutdown)
@@ -475,7 +466,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
         let mut query_string = Bytes::new();
         while let Some(msg) = tokio::select!(
             biased;
-            _ = shutdown_watcher() => {
+            _ = cancel.cancelled() => {
                 // We were requested to shut down.
                 tracing::info!("shutdown request received in run_message_loop");
                 return Err(QueryError::Shutdown)
@@ -487,7 +478,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
             let result = self.process_message(handler, msg, &mut query_string).await;
             tokio::select!(
                 biased;
-                _ = shutdown_watcher() => {
+                _ = cancel.cancelled() => {
                     // We were requested to shut down.
                     tracing::info!("shutdown request received during response flush");
 
@@ -674,11 +665,17 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
         assert!(self.state < ProtoState::Authentication);
         let have_tls = self.tls_config.is_some();
         match msg {
-            FeStartupPacket::SslRequest => {
+            FeStartupPacket::SslRequest { direct } => {
                 debug!("SSL requested");
 
-                self.write_message(&BeMessage::EncryptionResponse(have_tls))
-                    .await?;
+                if !direct {
+                    self.write_message(&BeMessage::EncryptionResponse(have_tls))
+                        .await?;
+                } else if !have_tls {
+                    return Err(QueryError::Other(anyhow::anyhow!(
+                        "direct SSL negotiation but no TLS support"
+                    )));
+                }
 
                 if have_tls {
                     self.start_tls().await?;
@@ -822,10 +819,11 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
         Ok(ProcessMsgResult::Continue)
     }
 
-    /// Log as info/error result of handling COPY stream and send back
-    /// ErrorResponse if that makes sense. Shutdown the stream if we got
-    /// Terminate. TODO: transition into waiting for Sync msg if we initiate the
-    /// close.
+    /// - Log as info/error result of handling COPY stream and send back
+    ///   ErrorResponse if that makes sense.
+    /// - Shutdown the stream if we got Terminate.
+    /// - Then close the connection because we don't handle exiting from COPY
+    ///   stream normally.
     pub async fn handle_copy_stream_end(&mut self, end: CopyStreamHandlerEnd) {
         use CopyStreamHandlerEnd::*;
 
@@ -849,10 +847,6 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
             if let Err(e) = self.write_message(&BeMessage::CopyDone).await {
                 error!("failed to send CopyDone: {}", e);
             }
-        }
-
-        if let Terminate = &end {
-            self.state = ProtoState::Closed;
         }
 
         let err_to_send_and_errcode = match &end {
@@ -884,6 +878,12 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
                 error!("failed to send ErrorResponse: {}", ee);
             }
         }
+
+        // Proper COPY stream finishing to continue using the connection is not
+        // implemented at the server side (we don't need it so far). To prevent
+        // further usages of the connection, close it.
+        self.framed.shutdown().await.ok();
+        self.state = ProtoState::Closed;
     }
 }
 

@@ -1,10 +1,11 @@
 import time
 
+from fixtures.common_types import Lsn
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnvBuilder
-from fixtures.pageserver.types import (
-    DeltaLayerFileName,
-    ImageLayerFileName,
+from fixtures.neon_fixtures import NeonEnvBuilder, flush_ep_to_pageserver
+from fixtures.pageserver.common_types import (
+    DeltaLayerName,
+    ImageLayerName,
     is_future_layer,
 )
 from fixtures.pageserver.utils import (
@@ -13,7 +14,6 @@ from fixtures.pageserver.utils import (
     wait_until_tenant_active,
 )
 from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
-from fixtures.types import Lsn
 from fixtures.utils import query_scalar, wait_until
 
 
@@ -37,10 +37,8 @@ def test_issue_5878(neon_env_builder: NeonEnvBuilder):
     """
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
-    env = neon_env_builder.init_start()
-    env.pageserver.allowed_errors.extend(
-        [".*Dropped remote consistent LSN updates.*", ".*Dropping stale deletions.*"]
-    )
+    env = neon_env_builder.init_configs()
+    env.start()
 
     ps_http = env.pageserver.http_client()
 
@@ -53,6 +51,7 @@ def test_issue_5878(neon_env_builder: NeonEnvBuilder):
         "checkpoint_timeout": "24h",  # something we won't reach
         "checkpoint_distance": f"{50 * (1024**2)}",  # something we won't reach, we checkpoint manually
         "image_creation_threshold": "100",  # we want to control when image is created
+        "image_layer_creation_check_threshold": "0",
         "compaction_threshold": f"{l0_l1_threshold}",
         "compaction_target_size": f"{128 * (1024**3)}",  # make it so that we only have 1 partition => image coverage for delta layers => enables gc of delta layers
     }
@@ -80,7 +79,7 @@ def test_issue_5878(neon_env_builder: NeonEnvBuilder):
     current = get_index_part()
     assert len(set(current.layer_metadata.keys())) == 1
     layer_file_name = list(current.layer_metadata.keys())[0]
-    assert isinstance(layer_file_name, DeltaLayerFileName)
+    assert isinstance(layer_file_name, DeltaLayerName)
     assert layer_file_name.is_l0(), f"{layer_file_name}"
 
     log.info("force image layer creation in the future by writing some data into in-memory layer")
@@ -115,8 +114,7 @@ def test_issue_5878(neon_env_builder: NeonEnvBuilder):
                     )
                     == 0
                 )
-
-    endpoint.stop()
+    last_record_lsn = flush_ep_to_pageserver(env, endpoint, tenant_id, timeline_id)
 
     wait_for_upload_queue_empty(ps_http, tenant_id, timeline_id)
 
@@ -146,7 +144,7 @@ def test_issue_5878(neon_env_builder: NeonEnvBuilder):
     future_layers = get_future_layers()
     assert len(future_layers) == 1
     future_layer = future_layers[0]
-    assert isinstance(future_layer, ImageLayerFileName)
+    assert isinstance(future_layer, ImageLayerName)
     assert future_layer.lsn == last_record_lsn
     log.info(
         f"got layer from the future: lsn={future_layer.lsn} disk_consistent_lsn={ip.disk_consistent_lsn} last_record_lsn={last_record_lsn}"
@@ -160,7 +158,7 @@ def test_issue_5878(neon_env_builder: NeonEnvBuilder):
     time.sleep(1.1)  # so that we can use change in pre_stat.st_mtime to detect overwrites
 
     def get_generation_number():
-        attachment = env.attachment_service.inspect(tenant_id)
+        attachment = env.storage_controller.inspect(tenant_id)
         assert attachment is not None
         return attachment[0]
 
@@ -184,10 +182,13 @@ def test_issue_5878(neon_env_builder: NeonEnvBuilder):
 
     # NB: the layer file is unlinked index part now, but, because we made the delete
     # operation stuck, the layer file itself is still in the remote_storage
-    def delete_at_pause_point():
-        assert env.pageserver.log_contains(f".*{tenant_id}.*at failpoint.*{failpoint_name}")
-
-    wait_until(10, 0.5, delete_at_pause_point)
+    wait_until(
+        10,
+        0.5,
+        lambda: env.pageserver.assert_log_contains(
+            f".*{tenant_id}.*at failpoint.*{failpoint_name}"
+        ),
+    )
     future_layer_path = env.pageserver_remote_storage.remote_layer_path(
         tenant_id, timeline_id, future_layer.to_str(), generation=generation_before_detach
     )

@@ -5,24 +5,30 @@ use std::{
     time::Duration,
 };
 
+use async_trait::async_trait;
 use dashmap::DashMap;
 use rand::{thread_rng, Rng};
 use smol_str::SmolStr;
+use tokio::sync::Mutex;
 use tokio::time::Instant;
 use tracing::{debug, info};
 
 use crate::{
-    auth::IpPattern, config::ProjectInfoCacheOptions, console::AuthSecret, EndpointId, ProjectId,
-    RoleName,
+    auth::IpPattern,
+    config::ProjectInfoCacheOptions,
+    console::AuthSecret,
+    intern::{EndpointIdInt, ProjectIdInt, RoleNameInt},
+    EndpointId, RoleName,
 };
 
 use super::{Cache, Cached};
 
-pub trait ProjectInfoCache {
-    fn invalidate_allowed_ips_for_project(&self, project_id: &ProjectId);
-    fn invalidate_role_secret_for_project(&self, project_id: &ProjectId, role_name: &RoleName);
-    fn enable_ttl(&self);
-    fn disable_ttl(&self);
+#[async_trait]
+pub(crate) trait ProjectInfoCache {
+    fn invalidate_allowed_ips_for_project(&self, project_id: ProjectIdInt);
+    fn invalidate_role_secret_for_project(&self, project_id: ProjectIdInt, role_name: RoleNameInt);
+    async fn decrement_active_listeners(&self);
+    async fn increment_active_listeners(&self);
 }
 
 struct Entry<T> {
@@ -31,7 +37,7 @@ struct Entry<T> {
 }
 
 impl<T> Entry<T> {
-    pub fn new(value: T) -> Self {
+    pub(crate) fn new(value: T) -> Self {
         Self {
             created_at: Instant::now(),
             value,
@@ -47,7 +53,7 @@ impl<T> From<T> for Entry<T> {
 
 #[derive(Default)]
 struct EndpointInfo {
-    secret: std::collections::HashMap<RoleName, Entry<Option<AuthSecret>>>,
+    secret: std::collections::HashMap<RoleNameInt, Entry<Option<AuthSecret>>>,
     allowed_ips: Option<Entry<Arc<Vec<IpPattern>>>>,
 }
 
@@ -58,13 +64,13 @@ impl EndpointInfo {
             Some(t) => t < created_at,
         }
     }
-    pub fn get_role_secret(
+    pub(crate) fn get_role_secret(
         &self,
-        role_name: &RoleName,
+        role_name: RoleNameInt,
         valid_since: Instant,
         ignore_cache_since: Option<Instant>,
     ) -> Option<(Option<AuthSecret>, bool)> {
-        if let Some(secret) = self.secret.get(role_name) {
+        if let Some(secret) = self.secret.get(&role_name) {
             if valid_since < secret.created_at {
                 return Some((
                     secret.value.clone(),
@@ -75,7 +81,7 @@ impl EndpointInfo {
         None
     }
 
-    pub fn get_allowed_ips(
+    pub(crate) fn get_allowed_ips(
         &self,
         valid_since: Instant,
         ignore_cache_since: Option<Instant>,
@@ -90,11 +96,11 @@ impl EndpointInfo {
         }
         None
     }
-    pub fn invalidate_allowed_ips(&mut self) {
+    pub(crate) fn invalidate_allowed_ips(&mut self) {
         self.allowed_ips = None;
     }
-    pub fn invalidate_role_secret(&mut self, role_name: &RoleName) {
-        self.secret.remove(role_name);
+    pub(crate) fn invalidate_role_secret(&mut self, role_name: RoleNameInt) {
+        self.secret.remove(&role_name);
     }
 }
 
@@ -106,21 +112,23 @@ impl EndpointInfo {
 /// One may ask, why the data is stored per project, when on the user request there is only data about the endpoint available?
 /// On the cplane side updates are done per project (or per branch), so it's easier to invalidate the whole project cache.
 pub struct ProjectInfoCacheImpl {
-    cache: DashMap<EndpointId, EndpointInfo>,
+    cache: DashMap<EndpointIdInt, EndpointInfo>,
 
-    project2ep: DashMap<ProjectId, HashSet<EndpointId>>,
+    project2ep: DashMap<ProjectIdInt, HashSet<EndpointIdInt>>,
     config: ProjectInfoCacheOptions,
 
     start_time: Instant,
     ttl_disabled_since_us: AtomicU64,
+    active_listeners_lock: Mutex<usize>,
 }
 
+#[async_trait]
 impl ProjectInfoCache for ProjectInfoCacheImpl {
-    fn invalidate_allowed_ips_for_project(&self, project_id: &ProjectId) {
+    fn invalidate_allowed_ips_for_project(&self, project_id: ProjectIdInt) {
         info!("invalidating allowed ips for project `{}`", project_id);
         let endpoints = self
             .project2ep
-            .get(project_id)
+            .get(&project_id)
             .map(|kv| kv.value().clone())
             .unwrap_or_default();
         for endpoint_id in endpoints {
@@ -129,14 +137,14 @@ impl ProjectInfoCache for ProjectInfoCacheImpl {
             }
         }
     }
-    fn invalidate_role_secret_for_project(&self, project_id: &ProjectId, role_name: &RoleName) {
+    fn invalidate_role_secret_for_project(&self, project_id: ProjectIdInt, role_name: RoleNameInt) {
         info!(
             "invalidating role secret for project_id `{}` and role_name `{}`",
-            project_id, role_name
+            project_id, role_name,
         );
         let endpoints = self
             .project2ep
-            .get(project_id)
+            .get(&project_id)
             .map(|kv| kv.value().clone())
             .unwrap_or_default();
         for endpoint_id in endpoints {
@@ -145,43 +153,58 @@ impl ProjectInfoCache for ProjectInfoCacheImpl {
             }
         }
     }
-    fn enable_ttl(&self) {
-        self.ttl_disabled_since_us
-            .store(u64::MAX, std::sync::atomic::Ordering::Relaxed);
+    async fn decrement_active_listeners(&self) {
+        let mut listeners_guard = self.active_listeners_lock.lock().await;
+        if *listeners_guard == 0 {
+            tracing::error!("active_listeners count is already 0, something is broken");
+            return;
+        }
+        *listeners_guard -= 1;
+        if *listeners_guard == 0 {
+            self.ttl_disabled_since_us
+                .store(u64::MAX, std::sync::atomic::Ordering::SeqCst);
+        }
     }
 
-    fn disable_ttl(&self) {
-        let new_ttl = (self.start_time.elapsed() + self.config.ttl).as_micros() as u64;
-        self.ttl_disabled_since_us
-            .store(new_ttl, std::sync::atomic::Ordering::Relaxed);
+    async fn increment_active_listeners(&self) {
+        let mut listeners_guard = self.active_listeners_lock.lock().await;
+        *listeners_guard += 1;
+        if *listeners_guard == 1 {
+            let new_ttl = (self.start_time.elapsed() + self.config.ttl).as_micros() as u64;
+            self.ttl_disabled_since_us
+                .store(new_ttl, std::sync::atomic::Ordering::SeqCst);
+        }
     }
 }
 
 impl ProjectInfoCacheImpl {
-    pub fn new(config: ProjectInfoCacheOptions) -> Self {
+    pub(crate) fn new(config: ProjectInfoCacheOptions) -> Self {
         Self {
             cache: DashMap::new(),
             project2ep: DashMap::new(),
             config,
             ttl_disabled_since_us: AtomicU64::new(u64::MAX),
             start_time: Instant::now(),
+            active_listeners_lock: Mutex::new(0),
         }
     }
 
-    pub fn get_role_secret(
+    pub(crate) fn get_role_secret(
         &self,
         endpoint_id: &EndpointId,
         role_name: &RoleName,
     ) -> Option<Cached<&Self, Option<AuthSecret>>> {
+        let endpoint_id = EndpointIdInt::get(endpoint_id)?;
+        let role_name = RoleNameInt::get(role_name)?;
         let (valid_since, ignore_cache_since) = self.get_cache_times();
-        let endpoint_info = self.cache.get(endpoint_id)?;
+        let endpoint_info = self.cache.get(&endpoint_id)?;
         let (value, ignore_cache) =
             endpoint_info.get_role_secret(role_name, valid_since, ignore_cache_since)?;
         if !ignore_cache {
             let cached = Cached {
                 token: Some((
                     self,
-                    CachedLookupInfo::new_role_secret(endpoint_id.clone(), role_name.clone()),
+                    CachedLookupInfo::new_role_secret(endpoint_id, role_name),
                 )),
                 value,
             };
@@ -189,62 +212,60 @@ impl ProjectInfoCacheImpl {
         }
         Some(Cached::new_uncached(value))
     }
-    pub fn get_allowed_ips(
+    pub(crate) fn get_allowed_ips(
         &self,
         endpoint_id: &EndpointId,
     ) -> Option<Cached<&Self, Arc<Vec<IpPattern>>>> {
+        let endpoint_id = EndpointIdInt::get(endpoint_id)?;
         let (valid_since, ignore_cache_since) = self.get_cache_times();
-        let endpoint_info = self.cache.get(endpoint_id)?;
+        let endpoint_info = self.cache.get(&endpoint_id)?;
         let value = endpoint_info.get_allowed_ips(valid_since, ignore_cache_since);
         let (value, ignore_cache) = value?;
         if !ignore_cache {
             let cached = Cached {
-                token: Some((self, CachedLookupInfo::new_allowed_ips(endpoint_id.clone()))),
+                token: Some((self, CachedLookupInfo::new_allowed_ips(endpoint_id))),
                 value,
             };
             return Some(cached);
         }
         Some(Cached::new_uncached(value))
     }
-    pub fn insert_role_secret(
+    pub(crate) fn insert_role_secret(
         &self,
-        project_id: &ProjectId,
-        endpoint_id: &EndpointId,
-        role_name: &RoleName,
+        project_id: ProjectIdInt,
+        endpoint_id: EndpointIdInt,
+        role_name: RoleNameInt,
         secret: Option<AuthSecret>,
     ) {
         if self.cache.len() >= self.config.size {
             // If there are too many entries, wait until the next gc cycle.
             return;
         }
-        self.inser_project2endpoint(project_id, endpoint_id);
-        let mut entry = self.cache.entry(endpoint_id.clone()).or_default();
+        self.insert_project2endpoint(project_id, endpoint_id);
+        let mut entry = self.cache.entry(endpoint_id).or_default();
         if entry.secret.len() < self.config.max_roles {
-            entry.secret.insert(role_name.clone(), secret.into());
+            entry.secret.insert(role_name, secret.into());
         }
     }
-    pub fn insert_allowed_ips(
+    pub(crate) fn insert_allowed_ips(
         &self,
-        project_id: &ProjectId,
-        endpoint_id: &EndpointId,
+        project_id: ProjectIdInt,
+        endpoint_id: EndpointIdInt,
         allowed_ips: Arc<Vec<IpPattern>>,
     ) {
         if self.cache.len() >= self.config.size {
             // If there are too many entries, wait until the next gc cycle.
             return;
         }
-        self.inser_project2endpoint(project_id, endpoint_id);
-        self.cache
-            .entry(endpoint_id.clone())
-            .or_default()
-            .allowed_ips = Some(allowed_ips.into());
+        self.insert_project2endpoint(project_id, endpoint_id);
+        self.cache.entry(endpoint_id).or_default().allowed_ips = Some(allowed_ips.into());
     }
-    fn inser_project2endpoint(&self, project_id: &ProjectId, endpoint_id: &EndpointId) {
-        if let Some(mut endpoints) = self.project2ep.get_mut(project_id) {
-            endpoints.insert(endpoint_id.clone());
+    fn insert_project2endpoint(&self, project_id: ProjectIdInt, endpoint_id: EndpointIdInt) {
+        if let Some(mut endpoints) = self.project2ep.get_mut(&project_id) {
+            endpoints.insert(endpoint_id);
         } else {
             self.project2ep
-                .insert(project_id.clone(), HashSet::from([endpoint_id.clone()]));
+                .insert(project_id, HashSet::from([endpoint_id]));
         }
     }
     fn get_cache_times(&self) -> (Instant, Option<Instant>) {
@@ -253,13 +274,13 @@ impl ProjectInfoCacheImpl {
         let ttl_disabled_since_us = self
             .ttl_disabled_since_us
             .load(std::sync::atomic::Ordering::Relaxed);
-        let ignore_cache_since = if ttl_disabled_since_us != u64::MAX {
+        let ignore_cache_since = if ttl_disabled_since_us == u64::MAX {
+            None
+        } else {
             let ignore_cache_since = self.start_time + Duration::from_micros(ttl_disabled_since_us);
             // We are fine if entry is not older than ttl or was added before we are getting notifications.
             valid_since = valid_since.min(ignore_cache_since);
             Some(ignore_cache_since)
-        } else {
-            None
         };
         (valid_since, ignore_cache_since)
     }
@@ -285,7 +306,7 @@ impl ProjectInfoCacheImpl {
         let mut removed = 0;
         let shard = self.project2ep.shards()[shard].write();
         for (_, endpoints) in shard.iter() {
-            for endpoint in endpoints.get().iter() {
+            for endpoint in endpoints.get() {
                 self.cache.remove(endpoint);
                 removed += 1;
             }
@@ -298,20 +319,20 @@ impl ProjectInfoCacheImpl {
 
 /// Lookup info for project info cache.
 /// This is used to invalidate cache entries.
-pub struct CachedLookupInfo {
+pub(crate) struct CachedLookupInfo {
     /// Search by this key.
-    endpoint_id: EndpointId,
+    endpoint_id: EndpointIdInt,
     lookup_type: LookupType,
 }
 
 impl CachedLookupInfo {
-    pub(self) fn new_role_secret(endpoint_id: EndpointId, role_name: RoleName) -> Self {
+    pub(self) fn new_role_secret(endpoint_id: EndpointIdInt, role_name: RoleNameInt) -> Self {
         Self {
             endpoint_id,
             lookup_type: LookupType::RoleSecret(role_name),
         }
     }
-    pub(self) fn new_allowed_ips(endpoint_id: EndpointId) -> Self {
+    pub(self) fn new_allowed_ips(endpoint_id: EndpointIdInt) -> Self {
         Self {
             endpoint_id,
             lookup_type: LookupType::AllowedIps,
@@ -320,7 +341,7 @@ impl CachedLookupInfo {
 }
 
 enum LookupType {
-    RoleSecret(RoleName),
+    RoleSecret(RoleNameInt),
     AllowedIps,
 }
 
@@ -335,7 +356,7 @@ impl Cache for ProjectInfoCacheImpl {
         match &key.lookup_type {
             LookupType::RoleSecret(role_name) => {
                 if let Some(mut endpoint_info) = self.cache.get_mut(&key.endpoint_id) {
-                    endpoint_info.invalidate_role_secret(role_name);
+                    endpoint_info.invalidate_role_secret(*role_name);
                 }
             }
             LookupType::AllowedIps => {
@@ -350,8 +371,7 @@ impl Cache for ProjectInfoCacheImpl {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{console::AuthSecret, scram::ServerSecret};
-    use std::{sync::Arc, time::Duration};
+    use crate::{scram::ServerSecret, ProjectId};
 
     #[tokio::test]
     async fn test_project_info_cache_settings() {
@@ -362,22 +382,33 @@ mod tests {
             ttl: Duration::from_secs(1),
             gc_interval: Duration::from_secs(600),
         });
-        let project_id = "project".into();
-        let endpoint_id = "endpoint".into();
+        let project_id: ProjectId = "project".into();
+        let endpoint_id: EndpointId = "endpoint".into();
         let user1: RoleName = "user1".into();
         let user2: RoleName = "user2".into();
-        let secret1 = Some(AuthSecret::Scram(ServerSecret::mock(
-            user1.as_str(),
-            [1; 32],
-        )));
+        let secret1 = Some(AuthSecret::Scram(ServerSecret::mock([1; 32])));
         let secret2 = None;
         let allowed_ips = Arc::new(vec![
             "127.0.0.1".parse().unwrap(),
             "127.0.0.2".parse().unwrap(),
         ]);
-        cache.insert_role_secret(&project_id, &endpoint_id, &user1, secret1.clone());
-        cache.insert_role_secret(&project_id, &endpoint_id, &user2, secret2.clone());
-        cache.insert_allowed_ips(&project_id, &endpoint_id, allowed_ips.clone());
+        cache.insert_role_secret(
+            (&project_id).into(),
+            (&endpoint_id).into(),
+            (&user1).into(),
+            secret1.clone(),
+        );
+        cache.insert_role_secret(
+            (&project_id).into(),
+            (&endpoint_id).into(),
+            (&user2).into(),
+            secret2.clone(),
+        );
+        cache.insert_allowed_ips(
+            (&project_id).into(),
+            (&endpoint_id).into(),
+            allowed_ips.clone(),
+        );
 
         let cached = cache.get_role_secret(&endpoint_id, &user1).unwrap();
         assert!(cached.cached());
@@ -388,11 +419,13 @@ mod tests {
 
         // Shouldn't add more than 2 roles.
         let user3: RoleName = "user3".into();
-        let secret3 = Some(AuthSecret::Scram(ServerSecret::mock(
-            user3.as_str(),
-            [3; 32],
-        )));
-        cache.insert_role_secret(&project_id, &endpoint_id, &user3, secret3.clone());
+        let secret3 = Some(AuthSecret::Scram(ServerSecret::mock([3; 32])));
+        cache.insert_role_secret(
+            (&project_id).into(),
+            (&endpoint_id).into(),
+            (&user3).into(),
+            secret3.clone(),
+        );
         assert!(cache.get_role_secret(&endpoint_id, &user3).is_none());
 
         let cached = cache.get_allowed_ips(&endpoint_id).unwrap();
@@ -417,28 +450,36 @@ mod tests {
             ttl: Duration::from_secs(1),
             gc_interval: Duration::from_secs(600),
         }));
-        cache.clone().disable_ttl();
+        cache.clone().increment_active_listeners().await;
         tokio::time::advance(Duration::from_secs(2)).await;
 
-        let project_id = "project".into();
-        let endpoint_id = "endpoint".into();
+        let project_id: ProjectId = "project".into();
+        let endpoint_id: EndpointId = "endpoint".into();
         let user1: RoleName = "user1".into();
         let user2: RoleName = "user2".into();
-        let secret1 = Some(AuthSecret::Scram(ServerSecret::mock(
-            user1.as_str(),
-            [1; 32],
-        )));
-        let secret2 = Some(AuthSecret::Scram(ServerSecret::mock(
-            user2.as_str(),
-            [2; 32],
-        )));
+        let secret1 = Some(AuthSecret::Scram(ServerSecret::mock([1; 32])));
+        let secret2 = Some(AuthSecret::Scram(ServerSecret::mock([2; 32])));
         let allowed_ips = Arc::new(vec![
             "127.0.0.1".parse().unwrap(),
             "127.0.0.2".parse().unwrap(),
         ]);
-        cache.insert_role_secret(&project_id, &endpoint_id, &user1, secret1.clone());
-        cache.insert_role_secret(&project_id, &endpoint_id, &user2, secret2.clone());
-        cache.insert_allowed_ips(&project_id, &endpoint_id, allowed_ips.clone());
+        cache.insert_role_secret(
+            (&project_id).into(),
+            (&endpoint_id).into(),
+            (&user1).into(),
+            secret1.clone(),
+        );
+        cache.insert_role_secret(
+            (&project_id).into(),
+            (&endpoint_id).into(),
+            (&user2).into(),
+            secret2.clone(),
+        );
+        cache.insert_allowed_ips(
+            (&project_id).into(),
+            (&endpoint_id).into(),
+            allowed_ips.clone(),
+        );
 
         tokio::time::advance(Duration::from_secs(2)).await;
         // Nothing should be invalidated.
@@ -457,7 +498,7 @@ mod tests {
         assert_eq!(cached.value, secret2);
 
         // The only way to invalidate this value is to invalidate via the api.
-        cache.invalidate_role_secret_for_project(&project_id, &user2);
+        cache.invalidate_role_secret_for_project((&project_id).into(), (&user2).into());
         assert!(cache.get_role_secret(&endpoint_id, &user2).is_none());
 
         let cached = cache.get_allowed_ips(&endpoint_id).unwrap();
@@ -466,7 +507,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_disable_ttl_invalidate_added_before() {
+    async fn test_increment_active_listeners_invalidate_added_before() {
         tokio::time::pause();
         let cache = Arc::new(ProjectInfoCacheImpl::new(ProjectInfoCacheOptions {
             size: 2,
@@ -475,26 +516,30 @@ mod tests {
             gc_interval: Duration::from_secs(600),
         }));
 
-        let project_id = "project".into();
-        let endpoint_id = "endpoint".into();
+        let project_id: ProjectId = "project".into();
+        let endpoint_id: EndpointId = "endpoint".into();
         let user1: RoleName = "user1".into();
         let user2: RoleName = "user2".into();
-        let secret1 = Some(AuthSecret::Scram(ServerSecret::mock(
-            user1.as_str(),
-            [1; 32],
-        )));
-        let secret2 = Some(AuthSecret::Scram(ServerSecret::mock(
-            user2.as_str(),
-            [2; 32],
-        )));
+        let secret1 = Some(AuthSecret::Scram(ServerSecret::mock([1; 32])));
+        let secret2 = Some(AuthSecret::Scram(ServerSecret::mock([2; 32])));
         let allowed_ips = Arc::new(vec![
             "127.0.0.1".parse().unwrap(),
             "127.0.0.2".parse().unwrap(),
         ]);
-        cache.insert_role_secret(&project_id, &endpoint_id, &user1, secret1.clone());
-        cache.clone().disable_ttl();
+        cache.insert_role_secret(
+            (&project_id).into(),
+            (&endpoint_id).into(),
+            (&user1).into(),
+            secret1.clone(),
+        );
+        cache.clone().increment_active_listeners().await;
         tokio::time::advance(Duration::from_millis(100)).await;
-        cache.insert_role_secret(&project_id, &endpoint_id, &user2, secret2.clone());
+        cache.insert_role_secret(
+            (&project_id).into(),
+            (&endpoint_id).into(),
+            (&user2).into(),
+            secret2.clone(),
+        );
 
         // Added before ttl was disabled + ttl should be still cached.
         let cached = cache.get_role_secret(&endpoint_id, &user1).unwrap();
@@ -508,7 +553,11 @@ mod tests {
         assert!(cache.get_role_secret(&endpoint_id, &user2).is_none());
 
         // Added after ttl was disabled + ttl should not be cached.
-        cache.insert_allowed_ips(&project_id, &endpoint_id, allowed_ips.clone());
+        cache.insert_allowed_ips(
+            (&project_id).into(),
+            (&endpoint_id).into(),
+            allowed_ips.clone(),
+        );
         let cached = cache.get_allowed_ips(&endpoint_id).unwrap();
         assert!(!cached.cached());
 

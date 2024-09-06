@@ -5,7 +5,9 @@ use std::sync::{
 use tokio::sync::Semaphore;
 
 /// Custom design like [`tokio::sync::OnceCell`] but using [`OwnedSemaphorePermit`] instead of
-/// `SemaphorePermit`, allowing use of `take` which does not require holding an outer mutex guard
+/// `SemaphorePermit`.
+///
+/// Allows use of `take` which does not require holding an outer mutex guard
 /// for the duration of initialization.
 ///
 /// Has no unsafe, builds upon [`tokio::sync::Semaphore`] and [`std::sync::Mutex`].
@@ -69,37 +71,87 @@ impl<T> OnceCell<T> {
         F: FnOnce(InitPermit) -> Fut,
         Fut: std::future::Future<Output = Result<(T, InitPermit), E>>,
     {
-        let sem = {
+        loop {
+            let sem = {
+                let guard = self.inner.lock().unwrap();
+                if guard.value.is_some() {
+                    return Ok(Guard(guard));
+                }
+                guard.init_semaphore.clone()
+            };
+
+            {
+                let permit = {
+                    // increment the count for the duration of queued
+                    let _guard = CountWaitingInitializers::start(self);
+                    sem.acquire().await
+                };
+
+                let Ok(permit) = permit else {
+                    let guard = self.inner.lock().unwrap();
+                    if !Arc::ptr_eq(&sem, &guard.init_semaphore) {
+                        // there was a take_and_deinit in between
+                        continue;
+                    }
+                    assert!(
+                        guard.value.is_some(),
+                        "semaphore got closed, must be initialized"
+                    );
+                    return Ok(Guard(guard));
+                };
+
+                permit.forget();
+            }
+
+            let permit = InitPermit(sem);
+            let (value, _permit) = factory(permit).await?;
+
             let guard = self.inner.lock().unwrap();
-            if guard.value.is_some() {
-                return Ok(Guard(guard));
-            }
-            guard.init_semaphore.clone()
-        };
 
-        let permit = {
-            // increment the count for the duration of queued
-            let _guard = CountWaitingInitializers::start(self);
-            sem.acquire_owned().await
-        };
+            return Ok(Self::set0(value, guard));
+        }
+    }
 
-        match permit {
-            Ok(permit) => {
-                let permit = InitPermit(permit);
-                let (value, _permit) = factory(permit).await?;
-
+    /// Returns a guard to an existing initialized value, or returns an unique initialization
+    /// permit which can be used to initialize this `OnceCell` using `OnceCell::set`.
+    pub async fn get_or_init_detached(&self) -> Result<Guard<'_, T>, InitPermit> {
+        // It looks like OnceCell::get_or_init could be implemented using this method instead of
+        // duplication. However, that makes the future be !Send due to possibly holding on to the
+        // MutexGuard over an await point.
+        loop {
+            let sem = {
                 let guard = self.inner.lock().unwrap();
+                if guard.value.is_some() {
+                    return Ok(Guard(guard));
+                }
+                guard.init_semaphore.clone()
+            };
 
-                Ok(Self::set0(value, guard))
+            {
+                let permit = {
+                    // increment the count for the duration of queued
+                    let _guard = CountWaitingInitializers::start(self);
+                    sem.acquire().await
+                };
+
+                let Ok(permit) = permit else {
+                    let guard = self.inner.lock().unwrap();
+                    if !Arc::ptr_eq(&sem, &guard.init_semaphore) {
+                        // there was a take_and_deinit in between
+                        continue;
+                    }
+                    assert!(
+                        guard.value.is_some(),
+                        "semaphore got closed, must be initialized"
+                    );
+                    return Ok(Guard(guard));
+                };
+
+                permit.forget();
             }
-            Err(_closed) => {
-                let guard = self.inner.lock().unwrap();
-                assert!(
-                    guard.value.is_some(),
-                    "semaphore got closed, must be initialized"
-                );
-                return Ok(Guard(guard));
-            }
+
+            let permit = InitPermit(sem);
+            return Err(permit);
         }
     }
 
@@ -140,6 +192,14 @@ impl<T> OnceCell<T> {
         } else {
             None
         }
+    }
+
+    /// Like [`Guard::take_and_deinit`], but will return `None` if this OnceCell was never
+    /// initialized.
+    pub fn take_and_deinit(&mut self) -> Option<(T, InitPermit)> {
+        let inner = self.inner.get_mut().unwrap();
+
+        inner.take_and_deinit()
     }
 
     /// Return the number of [`Self::get_or_init`] calls waiting for initialization to complete.
@@ -195,30 +255,58 @@ impl<'a, T> Guard<'a, T> {
     ///
     /// The permit will be on a semaphore part of the new internal value, and any following
     /// [`OnceCell::get_or_init`] will wait on it to complete.
-    pub fn take_and_deinit(&mut self) -> (T, InitPermit) {
-        let mut swapped = Inner::default();
-        let permit = swapped
-            .init_semaphore
-            .clone()
-            .try_acquire_owned()
-            .expect("we just created this");
-        std::mem::swap(&mut *self.0, &mut swapped);
-        swapped
-            .value
-            .map(|v| (v, InitPermit(permit)))
+    pub fn take_and_deinit(mut self) -> (T, InitPermit) {
+        self.0
+            .take_and_deinit()
             .expect("guard is not created unless value has been initialized")
     }
 }
 
+impl<T> Inner<T> {
+    pub fn take_and_deinit(&mut self) -> Option<(T, InitPermit)> {
+        let value = self.value.take()?;
+
+        let mut swapped = Inner::default();
+        let sem = swapped.init_semaphore.clone();
+        // acquire and forget right away, moving the control over to InitPermit
+        sem.try_acquire().expect("we just created this").forget();
+        let permit = InitPermit(sem);
+        std::mem::swap(self, &mut swapped);
+        Some((value, permit))
+    }
+}
+
 /// Type held by OnceCell (de)initializing task.
-pub struct InitPermit(tokio::sync::OwnedSemaphorePermit);
+///
+/// On drop, this type will return the permit.
+pub struct InitPermit(Arc<tokio::sync::Semaphore>);
+
+impl std::fmt::Debug for InitPermit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let ptr = Arc::as_ptr(&self.0) as *const ();
+        f.debug_tuple("InitPermit").field(&ptr).finish()
+    }
+}
+
+impl Drop for InitPermit {
+    fn drop(&mut self) {
+        assert_eq!(
+            self.0.available_permits(),
+            0,
+            "InitPermit should only exist as the unique permit"
+        );
+        self.0.add_permits(1);
+    }
+}
 
 #[cfg(test)]
 mod tests {
+    use futures::Future;
+
     use super::*;
     use std::{
         convert::Infallible,
-        sync::atomic::{AtomicUsize, Ordering},
+        pin::{pin, Pin},
         time::Duration,
     };
 
@@ -379,5 +467,139 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(*g, "now initialized");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reproduce_init_take_deinit_race() {
+        init_take_deinit_scenario(|cell, factory| {
+            Box::pin(async {
+                cell.get_or_init(factory).await.unwrap();
+            })
+        })
+        .await;
+    }
+
+    type BoxedInitFuture<T, E> = Pin<Box<dyn Future<Output = Result<(T, InitPermit), E>>>>;
+    type BoxedInitFunction<T, E> = Box<dyn Fn(InitPermit) -> BoxedInitFuture<T, E>>;
+
+    /// Reproduce an assertion failure.
+    ///
+    /// This has interesting generics to be generic between `get_or_init` and `get_mut_or_init`.
+    /// We currently only have one, but the structure is kept.
+    async fn init_take_deinit_scenario<F>(init_way: F)
+    where
+        F: for<'a> Fn(
+            &'a OnceCell<&'static str>,
+            BoxedInitFunction<&'static str, Infallible>,
+        ) -> Pin<Box<dyn Future<Output = ()> + 'a>>,
+    {
+        let cell = OnceCell::default();
+
+        // acquire the init_semaphore only permit to drive initializing tasks in order to waiting
+        // on the same semaphore.
+        let permit = cell
+            .inner
+            .lock()
+            .unwrap()
+            .init_semaphore
+            .clone()
+            .try_acquire_owned()
+            .unwrap();
+
+        let mut t1 = pin!(init_way(
+            &cell,
+            Box::new(|permit| Box::pin(async move { Ok(("t1", permit)) })),
+        ));
+
+        let mut t2 = pin!(init_way(
+            &cell,
+            Box::new(|permit| Box::pin(async move { Ok(("t2", permit)) })),
+        ));
+
+        // drive t2 first to the init_semaphore -- the timeout will be hit once t2 future can
+        // no longer make progress
+        tokio::select! {
+            _ = &mut t2 => unreachable!("it cannot get permit"),
+            _ = tokio::time::sleep(Duration::from_secs(3600 * 24 * 7 * 365)) => {}
+        }
+
+        // followed by t1 in the init_semaphore
+        tokio::select! {
+            _ = &mut t1 => unreachable!("it cannot get permit"),
+            _ = tokio::time::sleep(Duration::from_secs(3600 * 24 * 7 * 365)) => {}
+        }
+
+        // now let t2 proceed and initialize
+        drop(permit);
+        t2.await;
+
+        let (s, permit) = { cell.get().unwrap().take_and_deinit() };
+        assert_eq!("t2", s);
+
+        // now originally t1 would see the semaphore it has as closed. it cannot yet get a permit from
+        // the new one.
+        tokio::select! {
+            _ = &mut t1 => unreachable!("it cannot get permit"),
+            _ = tokio::time::sleep(Duration::from_secs(3600 * 24 * 7 * 365)) => {}
+        }
+
+        // only now we get to initialize it
+        drop(permit);
+        t1.await;
+
+        assert_eq!("t1", *cell.get().unwrap());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn detached_init_smoke() {
+        let target = OnceCell::default();
+
+        let Err(permit) = target.get_or_init_detached().await else {
+            unreachable!("it is not initialized")
+        };
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3600 * 24 * 7 * 365),
+            target.get_or_init(|permit2| async { Ok::<_, Infallible>((11, permit2)) }),
+        )
+        .await
+        .expect_err("should timeout since we are already holding the permit");
+
+        target.set(42, permit);
+
+        let (_answer, permit) = {
+            let guard = target
+                .get_or_init(|permit| async { Ok::<_, Infallible>((11, permit)) })
+                .await
+                .unwrap();
+
+            assert_eq!(*guard, 42);
+
+            guard.take_and_deinit()
+        };
+
+        assert!(target.get().is_none());
+
+        target.set(11, permit);
+
+        assert_eq!(*target.get().unwrap(), 11);
+    }
+
+    #[tokio::test]
+    async fn take_and_deinit_on_mut() {
+        use std::convert::Infallible;
+
+        let mut target = OnceCell::<u32>::default();
+        assert!(target.take_and_deinit().is_none());
+
+        target
+            .get_or_init(|permit| async move { Ok::<_, Infallible>((42, permit)) })
+            .await
+            .unwrap();
+
+        let again = target.take_and_deinit();
+        assert!(matches!(again, Some((42, _))), "{again:?}");
+
+        assert!(target.take_and_deinit().is_none());
     }
 }

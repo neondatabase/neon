@@ -26,6 +26,8 @@ pub mod auth;
 // utility functions and helper traits for unified unique id generation/serialization etc.
 pub mod id;
 
+pub mod shard;
+
 mod hex;
 pub use hex::Hex;
 
@@ -57,12 +59,11 @@ pub mod signals;
 
 pub mod fs_ext;
 
-pub mod history_buffer;
-
 pub mod measured_stream;
 
 pub mod serde_percent;
 pub mod serde_regex;
+pub mod serde_system_time;
 
 pub mod pageserver_feedback;
 
@@ -70,6 +71,7 @@ pub mod postgres_client;
 
 pub mod tracing_span_assert;
 
+pub mod leaky_bucket;
 pub mod rate_limit;
 
 /// Simple once-barrier and a guard which keeps barrier awaiting.
@@ -86,6 +88,16 @@ pub mod sync;
 pub mod failpoint_support;
 
 pub mod yielding_loop;
+
+pub mod zstd;
+
+pub mod env;
+
+pub mod poison;
+
+pub mod toml_edit_ext;
+
+pub mod circuit_breaker;
 
 /// This is a shortcut to embed git sha into binaries and avoid copying the same build script to all packages
 ///
@@ -117,7 +129,7 @@ pub mod yielding_loop;
 ///
 /// #############################################################################################
 /// TODO this macro is not the way the library is intended to be used, see <https://github.com/neondatabase/neon/issues/1565> for details.
-/// We use `cachepot` to reduce our current CI build times: <https://github.com/neondatabase/cloud/pull/1033#issuecomment-1100935036>
+/// We used `cachepot` to reduce our current CI build times: <https://github.com/neondatabase/cloud/pull/1033#issuecomment-1100935036>
 /// Yet, it seems to ignore the GIT_VERSION env variable, passed to Docker build, even with build.rs that contains
 /// `println!("cargo:rerun-if-env-changed=GIT_VERSION");` code for cachepot cache invalidation.
 /// The problem needs further investigation and regular `const` declaration instead of a macro.

@@ -74,4 +74,4 @@ somewhat wasteful, but because most WAL records only affect one page,
 the overhead is acceptable.
 
 The WAL redo always happens for one particular page. If the WAL record
-coantains changes to other pages, they are ignored.
+contains changes to other pages, they are ignored.

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Iterable, Tuple
 
 import pytest
-import toml
+from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
@@ -17,10 +17,13 @@ from fixtures.neon_fixtures import (
 from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pageserver.utils import wait_for_upload_queue_empty
 from fixtures.remote_storage import RemoteStorageKind
-from fixtures.types import Lsn, TenantId, TenantShardId, TimelineId
-from fixtures.utils import wait_until
+from fixtures.utils import human_bytes, wait_until
 
 GLOBAL_LRU_LOG_LINE = "tenant_min_resident_size-respecting LRU would not relieve pressure, evicting more following global LRU policy"
+
+# access times in the pageserver are stored at a very low resolution: to generate meaningfully different
+# values, tests must inject sleeps
+ATIME_RESOLUTION = 2
 
 
 @pytest.mark.parametrize("config_level_override", [None, 400])
@@ -45,17 +48,16 @@ def test_min_resident_size_override_handling(
         ps_http.set_tenant_config(tenant_id, {})
         assert_config(tenant_id, None, default_tenant_conf_value)
 
-    env.pageserver.stop()
     if config_level_override is not None:
-        env.pageserver.start(
-            overrides=(
-                "--pageserver-config-override=tenant_config={ min_resident_size_override =  "
-                + str(config_level_override)
-                + " }",
-            )
-        )
-    else:
-        env.pageserver.start()
+
+        def set_min_resident_size(config):
+            tenant_config = config.get("tenant_config", {})
+            tenant_config["min_resident_size_override"] = config_level_override
+            config["tenant_config"] = tenant_config
+
+        env.pageserver.edit_config_toml(set_min_resident_size)
+    env.pageserver.stop()
+    env.pageserver.start()
 
     tenant_id, _ = env.neon_cli.create_tenant()
     assert_overrides(tenant_id, config_level_override)
@@ -69,14 +71,11 @@ def test_min_resident_size_override_handling(
 
 @enum.unique
 class EvictionOrder(str, enum.Enum):
-    ABSOLUTE_ORDER = "absolute"
     RELATIVE_ORDER_EQUAL = "relative_equal"
     RELATIVE_ORDER_SPARE = "relative_spare"
 
     def config(self) -> Dict[str, Any]:
-        if self == EvictionOrder.ABSOLUTE_ORDER:
-            return {"type": "AbsoluteAccessed"}
-        elif self == EvictionOrder.RELATIVE_ORDER_EQUAL:
+        if self == EvictionOrder.RELATIVE_ORDER_EQUAL:
             return {
                 "type": "RelativeAccessed",
                 "args": {"highest_layer_count_loses_first": False},
@@ -155,37 +154,52 @@ class EvictionEnv:
         mock_behavior,
         eviction_order: EvictionOrder,
     ):
-        disk_usage_config = {
-            "period": period,
-            "max_usage_pct": max_usage_pct,
-            "min_avail_bytes": min_avail_bytes,
-            "mock_statvfs": mock_behavior,
-            "eviction_order": eviction_order.config(),
-        }
+        """
+        Starts pageserver up with mocked statvfs setup. The startup is
+        problematic because of dueling initial logical size calculations
+        requiring layers and disk usage based task evicting.
 
-        enc = toml.TomlEncoder()
+        Returns after initial logical sizes are complete, but the phase of disk
+        usage eviction task is unknown; it might need to run one more iteration
+        before assertions can be made.
+        """
 
         # these can sometimes happen during startup before any tenants have been
         # loaded, so nothing can be evicted, we just wait for next iteration which
         # is able to evict.
         pageserver.allowed_errors.append(".*WARN.* disk usage still high.*")
 
-        pageserver.start(
-            overrides=(
-                "--pageserver-config-override=disk_usage_based_eviction="
-                + enc.dump_inline_table(disk_usage_config).replace("\n", " "),
+        pageserver.patch_config_toml_nonrecursive(
+            {
+                "disk_usage_based_eviction": {
+                    "period": period,
+                    "max_usage_pct": max_usage_pct,
+                    "min_avail_bytes": min_avail_bytes,
+                    "mock_statvfs": mock_behavior,
+                    "eviction_order": eviction_order.config(),
+                },
                 # Disk usage based eviction runs as a background task.
                 # But pageserver startup delays launch of background tasks for some time, to prioritize initial logical size calculations during startup.
                 # But, initial logical size calculation may not be triggered if safekeepers don't publish new broker messages.
                 # But, we only have a 10-second-timeout in this test.
                 # So, disable the delay for this test.
-                "--pageserver-config-override=background_task_maximum_delay='0s'",
-            ),
+                "background_task_maximum_delay": "0s",
+            }
         )
 
-        def statvfs_called():
-            assert pageserver.log_contains(".*running mocked statvfs.*")
+        pageserver.start()
 
+        # we now do initial logical size calculation on startup, which on debug builds can fight with disk usage based eviction
+        for tenant_id, timeline_id in self.timelines:
+            tenant_ps = self.neon_env.get_tenant_pageserver(tenant_id)
+            # Pageserver may be none if we are currently not attached anywhere, e.g. during secondary eviction test
+            if tenant_ps is not None:
+                tenant_ps.http_client().timeline_wait_logical_size(tenant_id, timeline_id)
+
+        def statvfs_called():
+            pageserver.assert_log_contains(".*running mocked statvfs.*")
+
+        # we most likely have already completed multiple runs
         wait_until(10, 1, statvfs_called)
 
 
@@ -205,19 +219,6 @@ def count_layers_per_tenant(
     return dict(ret)
 
 
-def human_bytes(amt: float) -> str:
-    suffixes = ["", "Ki", "Mi", "Gi"]
-
-    last = suffixes[-1]
-
-    for name in suffixes:
-        if amt < 1024 or name == last:
-            return f"{int(round(amt))} {name}B"
-        amt = amt / 1024
-
-    raise RuntimeError("unreachable")
-
-
 def _eviction_env(
     request, neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, num_pageservers: int
 ) -> EvictionEnv:
@@ -229,6 +230,9 @@ def _eviction_env(
 
     neon_env_builder.num_pageservers = num_pageservers
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
+
+    # Disable compression support for EvictionEnv to get larger layer sizes
+    neon_env_builder.pageserver_config_override = "image_compression='disabled'"
 
     # initial tenant will not be present on this pageserver
     env = neon_env_builder.init_configs()
@@ -281,7 +285,7 @@ def pgbench_init_tenant(
             "gc_period": "0s",
             "compaction_period": "0s",
             "checkpoint_distance": f"{layer_size}",
-            "image_creation_threshold": "100",
+            "image_creation_threshold": "999999",
             "compaction_target_size": f"{layer_size}",
         }
     )
@@ -381,7 +385,7 @@ def test_broken_tenants_are_skipped(eviction_env: EvictionEnv):
 
 @pytest.mark.parametrize(
     "order",
-    [EvictionOrder.ABSOLUTE_ORDER, EvictionOrder.RELATIVE_ORDER_EQUAL],
+    [EvictionOrder.RELATIVE_ORDER_EQUAL],
 )
 def test_pageserver_evicts_until_pressure_is_relieved(
     eviction_env: EvictionEnv, order: EvictionOrder
@@ -415,7 +419,7 @@ def test_pageserver_evicts_until_pressure_is_relieved(
 
 @pytest.mark.parametrize(
     "order",
-    [EvictionOrder.ABSOLUTE_ORDER, EvictionOrder.RELATIVE_ORDER_EQUAL],
+    [EvictionOrder.RELATIVE_ORDER_EQUAL],
 )
 def test_pageserver_respects_overridden_resident_size(
     eviction_env: EvictionEnv, order: EvictionOrder
@@ -492,7 +496,7 @@ def test_pageserver_respects_overridden_resident_size(
 
 @pytest.mark.parametrize(
     "order",
-    [EvictionOrder.ABSOLUTE_ORDER, EvictionOrder.RELATIVE_ORDER_EQUAL],
+    [EvictionOrder.RELATIVE_ORDER_EQUAL],
 )
 def test_pageserver_falls_back_to_global_lru(eviction_env: EvictionEnv, order: EvictionOrder):
     """
@@ -516,14 +520,13 @@ def test_pageserver_falls_back_to_global_lru(eviction_env: EvictionEnv, order: E
     assert actual_change >= target, "eviction must always evict more than target"
 
     time.sleep(1)  # give log time to flush
-    assert env.neon_env.pageserver.log_contains(GLOBAL_LRU_LOG_LINE)
+    env.neon_env.pageserver.assert_log_contains(GLOBAL_LRU_LOG_LINE)
     env.neon_env.pageserver.allowed_errors.append(".*" + GLOBAL_LRU_LOG_LINE)
 
 
 @pytest.mark.parametrize(
     "order",
     [
-        EvictionOrder.ABSOLUTE_ORDER,
         EvictionOrder.RELATIVE_ORDER_EQUAL,
         EvictionOrder.RELATIVE_ORDER_SPARE,
     ],
@@ -547,6 +550,7 @@ def test_partial_evict_tenant(eviction_env: EvictionEnv, order: EvictionOrder):
     (tenant_id, timeline_id) = warm
 
     # make picked tenant more recently used than the other one
+    time.sleep(ATIME_RESOLUTION)
     env.warm_up_tenant(tenant_id)
 
     # Build up enough pressure to require evictions from both tenants,
@@ -569,62 +573,38 @@ def test_partial_evict_tenant(eviction_env: EvictionEnv, order: EvictionOrder):
             later_tenant_usage < du_by_timeline[tenant]
         ), "all tenants should have lost some layers"
 
-    warm_size = later_du_by_timeline[warm]
-    cold_size = later_du_by_timeline[cold]
+    # with relative order what matters is the amount of layers, with a
+    # fudge factor of whether the eviction bothers tenants with highest
+    # layer count the most. last accessed times between tenants does not
+    # matter.
+    assert order in [EvictionOrder.RELATIVE_ORDER_EQUAL, EvictionOrder.RELATIVE_ORDER_SPARE]
+    layers_now = env.count_layers_per_tenant(env.pageserver)
 
-    if order == EvictionOrder.ABSOLUTE_ORDER:
-        # bounds for warmed_size
-        warm_lower = 0.5 * du_by_timeline[warm]
+    expected_ratio = later_total_on_disk / total_on_disk
+    log.info(
+        f"freed up {100 * expected_ratio}%, expecting the layer counts to decrease in similar ratio"
+    )
 
-        # We don't know exactly whether the cold tenant needs 2 or just 1 env.layer_size wiggle room.
-        # So, check for up to 3 here.
-        warm_upper = warm_lower + 3 * env.layer_size
+    for tenant_id, original_count in tenant_layers.items():
+        count_now = layers_now[tenant_id]
+        ratio = count_now / original_count
+        abs_diff = abs(ratio - expected_ratio)
+        assert original_count > count_now
 
-        cold_upper = 2 * env.layer_size
-        log.info(f"tenants: warm={warm[0]}, cold={cold[0]}")
+        expectation = 0.065
         log.info(
-            f"expecting for warm tenant: {human_bytes(warm_lower)} < {human_bytes(warm_size)} < {human_bytes(warm_upper)}"
+            f"tenant {tenant_id} layer count {original_count} -> {count_now}, ratio: {ratio}, expecting {abs_diff} < {expectation}"
         )
-        log.info(f"expecting for cold tenant: {human_bytes(cold_size)} < {human_bytes(cold_upper)}")
-
-        assert warm_size > warm_lower, "warmed up tenant should be at about half size (lower)"
-        assert warm_size < warm_upper, "warmed up tenant should be at about half size (upper)"
-
-        assert (
-            cold_size < cold_upper
-        ), "the cold tenant should be evicted to its min_resident_size, i.e., max layer file size"
-    else:
-        # with relative order what matters is the amount of layers, with a
-        # fudge factor of whether the eviction bothers tenants with highest
-        # layer count the most. last accessed times between tenants does not
-        # matter.
-        layers_now = env.count_layers_per_tenant(env.pageserver)
-
-        expected_ratio = later_total_on_disk / total_on_disk
-        log.info(
-            f"freed up {100 * expected_ratio}%, expecting the layer counts to decrease in similar ratio"
-        )
-
-        for tenant_id, original_count in tenant_layers.items():
-            count_now = layers_now[tenant_id]
-            ratio = count_now / original_count
-            abs_diff = abs(ratio - expected_ratio)
-            assert original_count > count_now
-            log.info(
-                f"tenant {tenant_id} layer count {original_count} -> {count_now}, ratio: {ratio}, expecting {abs_diff} < 0.1"
-            )
-
-            # in this test case both relative_spare and relative_equal produce
-            # the same outcomes; this must be a quantization effect of similar
-            # sizes (-s4 and -s6) and small (5MB) layer size.
-            # for pg15 and pg16 the absdiff is < 0.01, for pg14 it is closer to 0.02
-            assert abs_diff < 0.05
+        # in this test case both relative_spare and relative_equal produce
+        # the same outcomes; this must be a quantization effect of similar
+        # sizes (-s4 and -s6) and small (5MB) layer size.
+        # for pg15 and pg16 the absdiff is < 0.01, for pg14 it is closer to 0.02
+        assert abs_diff < expectation
 
 
 @pytest.mark.parametrize(
     "order",
     [
-        EvictionOrder.ABSOLUTE_ORDER,
         EvictionOrder.RELATIVE_ORDER_EQUAL,
         EvictionOrder.RELATIVE_ORDER_SPARE,
     ],
@@ -647,6 +627,10 @@ def test_fast_growing_tenant(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, or
     for scale in [1, 1, 1, 4]:
         timelines.append((pgbench_init_tenant(layer_size, scale, env, pg_bin), scale))
 
+        # Eviction times are stored at a low resolution.  We must ensure that the time between
+        # tenants is long enough for the pageserver to distinguish them.
+        time.sleep(ATIME_RESOLUTION)
+
     env.neon_cli.safekeeper_stop()
 
     for (tenant_id, timeline_id), scale in timelines:
@@ -654,11 +638,10 @@ def test_fast_growing_tenant(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, or
         finish_tenant_creation(env, tenant_id, timeline_id, min_expected_layers)
 
     tenant_layers = count_layers_per_tenant(env.pageserver, map(lambda x: x[0], timelines))
-    (total_on_disk, _, _) = poor_mans_du(env, map(lambda x: x[0], timelines), env.pageserver, False)
+    (total_on_disk, _, _) = poor_mans_du(env, map(lambda x: x[0], timelines), env.pageserver, True)
 
-    # cut 10 percent
     response = env.pageserver.http_client().disk_usage_eviction_run(
-        {"evict_bytes": total_on_disk // 10, "eviction_order": order.config()}
+        {"evict_bytes": total_on_disk // 5, "eviction_order": order.config()}
     )
     log.info(f"{response}")
 
@@ -677,14 +660,7 @@ def test_fast_growing_tenant(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, or
     ), "rest of the assertions expect 3 + 1 timelines, ratios, scales, all in order"
     log.info(f"{ratios}")
 
-    if order == EvictionOrder.ABSOLUTE_ORDER:
-        # first tenant loses most
-        assert ratios[0] <= ratios[1], "first should lose the most"
-        assert ratios[1] < ratios[2], "second should lose some"
-        assert ratios[1] < 1.0
-        assert ratios[2] <= ratios[3], "third might not lose"
-        assert ratios[3] == 1.0, "tenant created last does not lose"
-    elif order == EvictionOrder.RELATIVE_ORDER_EQUAL:
+    if order == EvictionOrder.RELATIVE_ORDER_EQUAL:
         assert all([x for x in ratios if x < 1.0]), "all tenants lose layers"
     elif order == EvictionOrder.RELATIVE_ORDER_SPARE:
         # with different layer sizes and pg versions, there are different combinations
@@ -747,10 +723,10 @@ def test_statvfs_error_handling(eviction_env: EvictionEnv):
             "type": "Failure",
             "mocked_error": "EIO",
         },
-        eviction_order=EvictionOrder.ABSOLUTE_ORDER,
+        eviction_order=EvictionOrder.RELATIVE_ORDER_SPARE,
     )
 
-    assert env.neon_env.pageserver.log_contains(".*statvfs failed.*EIO")
+    env.neon_env.pageserver.assert_log_contains(".*statvfs failed.*EIO")
     env.neon_env.pageserver.allowed_errors.append(".*statvfs failed.*EIO")
 
 
@@ -781,17 +757,28 @@ def test_statvfs_pressure_usage(eviction_env: EvictionEnv):
             # This avoids accounting for metadata files & tenant conf in the tests.
             "name_filter": ".*__.*",
         },
-        eviction_order=EvictionOrder.ABSOLUTE_ORDER,
+        eviction_order=EvictionOrder.RELATIVE_ORDER_SPARE,
     )
 
-    def relieved_log_message():
-        assert env.neon_env.pageserver.log_contains(".*disk usage pressure relieved")
+    wait_until(
+        10, 1, lambda: env.neon_env.pageserver.assert_log_contains(".*disk usage pressure relieved")
+    )
 
-    wait_until(10, 1, relieved_log_message)
+    def less_than_max_usage_pct():
+        post_eviction_total_size, _, _ = env.timelines_du(env.pageserver)
+        assert post_eviction_total_size < 0.33 * total_size, "we requested max 33% usage"
 
-    post_eviction_total_size, _, _ = env.timelines_du(env.pageserver)
+    wait_until(2, 2, less_than_max_usage_pct)
 
-    assert post_eviction_total_size <= 0.33 * total_size, "we requested max 33% usage"
+    # Disk usage candidate collection only takes into account active tenants.
+    # However, the statvfs call takes into account the entire tenants directory,
+    # which includes tenants which haven't become active yet.
+    #
+    # After re-starting the pageserver, disk usage eviction may kick in *before*
+    # both tenants have become active. Hence, the logic will try to satisfy the
+    # disk usage requirements by evicting everything belonging to the active tenant,
+    # and hence violating the tenant minimum resident size.
+    env.neon_env.pageserver.allowed_errors.append(".*" + GLOBAL_LRU_LOG_LINE)
 
 
 def test_statvfs_pressure_min_avail_bytes(eviction_env: EvictionEnv):
@@ -823,19 +810,20 @@ def test_statvfs_pressure_min_avail_bytes(eviction_env: EvictionEnv):
             # This avoids accounting for metadata files & tenant conf in the tests.
             "name_filter": ".*__.*",
         },
-        eviction_order=EvictionOrder.ABSOLUTE_ORDER,
+        eviction_order=EvictionOrder.RELATIVE_ORDER_SPARE,
     )
 
-    def relieved_log_message():
-        assert env.neon_env.pageserver.log_contains(".*disk usage pressure relieved")
+    wait_until(
+        10, 1, lambda: env.neon_env.pageserver.assert_log_contains(".*disk usage pressure relieved")
+    )
 
-    wait_until(10, 1, relieved_log_message)
+    def more_than_min_avail_bytes_freed():
+        post_eviction_total_size, _, _ = env.timelines_du(env.pageserver)
+        assert (
+            total_size - post_eviction_total_size >= min_avail_bytes
+        ), f"we requested at least {min_avail_bytes} worth of free space"
 
-    post_eviction_total_size, _, _ = env.timelines_du(env.pageserver)
-
-    assert (
-        total_size - post_eviction_total_size >= min_avail_bytes
-    ), "we requested at least min_avail_bytes worth of free space"
+    wait_until(2, 2, more_than_min_avail_bytes_freed)
 
 
 def test_secondary_mode_eviction(eviction_env_ha: EvictionEnv):
@@ -845,18 +833,18 @@ def test_secondary_mode_eviction(eviction_env_ha: EvictionEnv):
 
     # Set up a situation where one pageserver _only_ has secondary locations on it,
     # so that when we release space we are sure it is via secondary locations.
-
-    log.info("Setting up secondary location...")
-    ps_attached = env.neon_env.pageservers[0]
+    log.info("Setting up secondary locations...")
     ps_secondary = env.neon_env.pageservers[1]
     for tenant_id in tenant_ids:
-        # Migrate all attached tenants to the same pageserver, so that all the secondaries
-        # will run on the other pageserver.  This is necessary because when we create tenants,
-        # they are spread over pageservers by default.
-        env.neon_env.attachment_service.tenant_shard_migrate(
-            TenantShardId(tenant_id, 0, 0), ps_attached.id
-        )
+        # Find where it is attached
+        pageserver = env.neon_env.get_tenant_pageserver(tenant_id)
+        pageserver.http_client().tenant_heatmap_upload(tenant_id)
 
+        # Detach it
+        pageserver.tenant_detach(tenant_id)
+
+        # Create a secondary mode location for the tenant, all tenants on one pageserver that will only
+        # contain secondary locations: this is the one where we will exercise disk usage eviction
         ps_secondary.tenant_location_configure(
             tenant_id,
             {
@@ -868,41 +856,18 @@ def test_secondary_mode_eviction(eviction_env_ha: EvictionEnv):
         readback_conf = ps_secondary.read_tenant_location_conf(tenant_id)
         log.info(f"Read back conf: {readback_conf}")
 
-        # Request secondary location to download all layers that the attached location has
-        ps_attached.http_client().tenant_heatmap_upload(tenant_id)
+        # Request secondary location to download all layers that the attached location indicated
+        # in its heatmap
         ps_secondary.http_client().tenant_secondary_download(tenant_id)
 
-    # Configure the secondary pageserver to have a phony small disk size
-    ps_secondary.stop()
     total_size, _, _ = env.timelines_du(ps_secondary)
-    blocksize = 512
-    total_blocks = (total_size + (blocksize - 1)) // blocksize
+    evict_bytes = total_size // 3
 
-    min_avail_bytes = total_size // 3
-
-    env.pageserver_start_with_disk_usage_eviction(
-        ps_secondary,
-        period="1s",
-        max_usage_pct=100,
-        min_avail_bytes=min_avail_bytes,
-        mock_behavior={
-            "type": "Success",
-            "blocksize": blocksize,
-            "total_blocks": total_blocks,
-            # Only count layer files towards used bytes in the mock_statvfs.
-            # This avoids accounting for metadata files & tenant conf in the tests.
-            "name_filter": ".*__.*",
-        },
-        eviction_order=EvictionOrder.ABSOLUTE_ORDER,
-    )
-
-    def relieved_log_message():
-        assert ps_secondary.log_contains(".*disk usage pressure relieved")
-
-    wait_until(10, 1, relieved_log_message)
+    response = ps_secondary.http_client().disk_usage_eviction_run({"evict_bytes": evict_bytes})
+    log.info(f"{response}")
 
     post_eviction_total_size, _, _ = env.timelines_du(ps_secondary)
 
     assert (
-        total_size - post_eviction_total_size >= min_avail_bytes
-    ), "we requested at least min_avail_bytes worth of free space"
+        total_size - post_eviction_total_size >= evict_bytes
+    ), "we requested at least evict_bytes worth of free space"

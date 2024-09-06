@@ -2,8 +2,10 @@
 //! with the "START_REPLICATION" message, and registry of walsenders.
 
 use crate::handler::SafekeeperPostgresHandler;
+use crate::metrics::RECEIVED_PS_FEEDBACKS;
+use crate::receive_wal::WalReceivers;
 use crate::safekeeper::{Term, TermLsn};
-use crate::timeline::Timeline;
+use crate::timeline::WalResidentTimeline;
 use crate::wal_service::ConnectionId;
 use crate::wal_storage::WalReader;
 use crate::GlobalTimelines;
@@ -83,19 +85,30 @@ impl StandbyReply {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct StandbyFeedback {
-    reply: StandbyReply,
-    hs_feedback: HotStandbyFeedback,
+    pub reply: StandbyReply,
+    pub hs_feedback: HotStandbyFeedback,
+}
+
+impl StandbyFeedback {
+    pub fn empty() -> Self {
+        StandbyFeedback {
+            reply: StandbyReply::empty(),
+            hs_feedback: HotStandbyFeedback::empty(),
+        }
+    }
 }
 
 /// WalSenders registry. Timeline holds it (wrapped in Arc).
 pub struct WalSenders {
     mutex: Mutex<WalSendersShared>,
+    walreceivers: Arc<WalReceivers>,
 }
 
 impl WalSenders {
-    pub fn new() -> Arc<WalSenders> {
+    pub fn new(walreceivers: Arc<WalReceivers>) -> Arc<WalSenders> {
         Arc::new(WalSenders {
             mutex: Mutex::new(WalSendersShared::new()),
+            walreceivers,
         })
     }
 
@@ -136,28 +149,54 @@ impl WalSenders {
         self.mutex.lock().slots.iter().flatten().cloned().collect()
     }
 
-    /// Get aggregated pageserver feedback.
-    pub fn get_ps_feedback(self: &Arc<WalSenders>) -> PageserverFeedback {
-        self.mutex.lock().agg_ps_feedback
+    /// Get LSN of the most lagging pageserver receiver. Return None if there are no
+    /// active walsenders.
+    pub fn laggard_lsn(self: &Arc<WalSenders>) -> Option<Lsn> {
+        self.mutex
+            .lock()
+            .slots
+            .iter()
+            .flatten()
+            .filter_map(|s| match s.feedback {
+                ReplicationFeedback::Pageserver(feedback) => Some(feedback.last_received_lsn),
+                ReplicationFeedback::Standby(_) => None,
+            })
+            .min()
     }
 
-    /// Get aggregated pageserver and hot standby feedback (we send them to compute).
-    pub fn get_feedbacks(self: &Arc<WalSenders>) -> (PageserverFeedback, HotStandbyFeedback) {
+    /// Returns total counter of pageserver feedbacks received and last feedback.
+    pub fn get_ps_feedback_stats(self: &Arc<WalSenders>) -> (u64, PageserverFeedback) {
         let shared = self.mutex.lock();
-        (shared.agg_ps_feedback, shared.agg_hs_feedback)
+        (shared.ps_feedback_counter, shared.last_ps_feedback)
+    }
+
+    /// Get aggregated hot standby feedback (we send it to compute).
+    pub fn get_hotstandby(self: &Arc<WalSenders>) -> StandbyFeedback {
+        self.mutex.lock().agg_standby_feedback
     }
 
     /// Record new pageserver feedback, update aggregated values.
     fn record_ps_feedback(self: &Arc<WalSenders>, id: WalSenderId, feedback: &PageserverFeedback) {
         let mut shared = self.mutex.lock();
         shared.get_slot_mut(id).feedback = ReplicationFeedback::Pageserver(*feedback);
-        shared.update_ps_feedback();
+        shared.last_ps_feedback = *feedback;
+        shared.ps_feedback_counter += 1;
+        drop(shared);
+
+        RECEIVED_PS_FEEDBACKS.inc();
+
+        // send feedback to connected walproposers
+        self.walreceivers.broadcast_pageserver_feedback(*feedback);
     }
 
     /// Record standby reply.
     fn record_standby_reply(self: &Arc<WalSenders>, id: WalSenderId, reply: &StandbyReply) {
         let mut shared = self.mutex.lock();
         let slot = shared.get_slot_mut(id);
+        debug!(
+            "Record standby reply: ts={} apply_lsn={}",
+            reply.reply_ts, reply.apply_lsn
+        );
         match &mut slot.feedback {
             ReplicationFeedback::Standby(sf) => sf.reply = *reply,
             ReplicationFeedback::Pageserver(_) => {
@@ -182,7 +221,7 @@ impl WalSenders {
                 })
             }
         }
-        shared.update_hs_feedback();
+        shared.update_reply_feedback();
     }
 
     /// Get remote_consistent_lsn reported by the pageserver. Returns None if
@@ -200,23 +239,26 @@ impl WalSenders {
     fn unregister(self: &Arc<WalSenders>, id: WalSenderId) {
         let mut shared = self.mutex.lock();
         shared.slots[id] = None;
-        shared.update_hs_feedback();
+        shared.update_reply_feedback();
     }
 }
 
 struct WalSendersShared {
     // aggregated over all walsenders value
-    agg_hs_feedback: HotStandbyFeedback,
-    // aggregated over all walsenders value
-    agg_ps_feedback: PageserverFeedback,
+    agg_standby_feedback: StandbyFeedback,
+    // last feedback ever received from any pageserver, empty if none
+    last_ps_feedback: PageserverFeedback,
+    // total counter of pageserver feedbacks received
+    ps_feedback_counter: u64,
     slots: Vec<Option<WalSenderState>>,
 }
 
 impl WalSendersShared {
     fn new() -> Self {
         WalSendersShared {
-            agg_hs_feedback: HotStandbyFeedback::empty(),
-            agg_ps_feedback: PageserverFeedback::empty(),
+            agg_standby_feedback: StandbyFeedback::empty(),
+            last_ps_feedback: PageserverFeedback::empty(),
+            ps_feedback_counter: 0,
             slots: Vec::new(),
         }
     }
@@ -231,10 +273,11 @@ impl WalSendersShared {
         self.slots[id].as_mut().expect("walsender doesn't exist")
     }
 
-    /// Update aggregated hot standy feedback. We just take min of valid xmins
+    /// Update aggregated hot standy and normal reply feedbacks. We just take min of valid xmins
     /// and ts.
-    fn update_hs_feedback(&mut self) {
+    fn update_reply_feedback(&mut self) {
         let mut agg = HotStandbyFeedback::empty();
+        let mut reply_agg = StandbyReply::empty();
         for ws_state in self.slots.iter().flatten() {
             if let ReplicationFeedback::Standby(standby_feedback) = ws_state.feedback {
                 let hs_feedback = standby_feedback.hs_feedback;
@@ -247,7 +290,7 @@ impl WalSendersShared {
                     } else {
                         agg.xmin = hs_feedback.xmin;
                     }
-                    agg.ts = min(agg.ts, hs_feedback.ts);
+                    agg.ts = max(agg.ts, hs_feedback.ts);
                 }
                 if hs_feedback.catalog_xmin != INVALID_FULL_TRANSACTION_ID {
                     if agg.catalog_xmin != INVALID_FULL_TRANSACTION_ID {
@@ -255,42 +298,43 @@ impl WalSendersShared {
                     } else {
                         agg.catalog_xmin = hs_feedback.catalog_xmin;
                     }
-                    agg.ts = min(agg.ts, hs_feedback.ts);
+                    agg.ts = max(agg.ts, hs_feedback.ts);
+                }
+                let reply = standby_feedback.reply;
+                if reply.write_lsn != Lsn::INVALID {
+                    if reply_agg.write_lsn != Lsn::INVALID {
+                        reply_agg.write_lsn = Lsn::min(reply_agg.write_lsn, reply.write_lsn);
+                    } else {
+                        reply_agg.write_lsn = reply.write_lsn;
+                    }
+                }
+                if reply.flush_lsn != Lsn::INVALID {
+                    if reply_agg.flush_lsn != Lsn::INVALID {
+                        reply_agg.flush_lsn = Lsn::min(reply_agg.flush_lsn, reply.flush_lsn);
+                    } else {
+                        reply_agg.flush_lsn = reply.flush_lsn;
+                    }
+                }
+                if reply.apply_lsn != Lsn::INVALID {
+                    if reply_agg.apply_lsn != Lsn::INVALID {
+                        reply_agg.apply_lsn = Lsn::min(reply_agg.apply_lsn, reply.apply_lsn);
+                    } else {
+                        reply_agg.apply_lsn = reply.apply_lsn;
+                    }
+                }
+                if reply.reply_ts != 0 {
+                    if reply_agg.reply_ts != 0 {
+                        reply_agg.reply_ts = TimestampTz::min(reply_agg.reply_ts, reply.reply_ts);
+                    } else {
+                        reply_agg.reply_ts = reply.reply_ts;
+                    }
                 }
             }
         }
-        self.agg_hs_feedback = agg;
-    }
-
-    /// Update aggregated pageserver feedback. LSNs (last_received,
-    /// disk_consistent, remote_consistent) and reply timestamp are just
-    /// maximized; timeline_size if taken from feedback with highest
-    /// last_received lsn. This is generally reasonable, but we might want to
-    /// implement other policies once multiple pageservers start to be actively
-    /// used.
-    fn update_ps_feedback(&mut self) {
-        let init = PageserverFeedback::empty();
-        let acc =
-            self.slots
-                .iter()
-                .flatten()
-                .fold(init, |mut acc, ws_state| match ws_state.feedback {
-                    ReplicationFeedback::Pageserver(feedback) => {
-                        if feedback.last_received_lsn > acc.last_received_lsn {
-                            acc.current_timeline_size = feedback.current_timeline_size;
-                        }
-                        acc.last_received_lsn =
-                            max(feedback.last_received_lsn, acc.last_received_lsn);
-                        acc.disk_consistent_lsn =
-                            max(feedback.disk_consistent_lsn, acc.disk_consistent_lsn);
-                        acc.remote_consistent_lsn =
-                            max(feedback.remote_consistent_lsn, acc.remote_consistent_lsn);
-                        acc.replytime = max(feedback.replytime, acc.replytime);
-                        acc
-                    }
-                    ReplicationFeedback::Standby(_) => acc,
-                });
-        self.agg_ps_feedback = acc;
+        self.agg_standby_feedback = StandbyFeedback {
+            reply: reply_agg,
+            hs_feedback: agg,
+        };
     }
 }
 
@@ -342,12 +386,18 @@ impl SafekeeperPostgresHandler {
         start_pos: Lsn,
         term: Option<Term>,
     ) -> Result<(), QueryError> {
+        let tli = GlobalTimelines::get(self.ttid).map_err(|e| QueryError::Other(e.into()))?;
+        let residence_guard = tli.wal_residence_guard().await?;
+
         if let Err(end) = self
-            .handle_start_replication_guts(pgb, start_pos, term)
+            .handle_start_replication_guts(pgb, start_pos, term, residence_guard)
             .await
         {
+            let info = tli.get_safekeeper_info(&self.conf).await;
             // Log the result and probably send it to the client, closing the stream.
-            pgb.handle_copy_stream_end(end).await;
+            pgb.handle_copy_stream_end(end)
+            .instrument(info_span!("", term=%info.term, last_log_term=%info.last_log_term, flush_lsn=%Lsn(info.flush_lsn), commit_lsn=%Lsn(info.flush_lsn)))
+            .await;
         }
         Ok(())
     }
@@ -357,10 +407,9 @@ impl SafekeeperPostgresHandler {
         pgb: &mut PostgresBackend<IO>,
         start_pos: Lsn,
         term: Option<Term>,
+        tli: WalResidentTimeline,
     ) -> Result<(), CopyStreamHandlerEnd> {
         let appname = self.appname.clone();
-        let tli =
-            GlobalTimelines::get(self.ttid).map_err(|e| CopyStreamHandlerEnd::Other(e.into()))?;
 
         // Use a guard object to remove our entry from the timeline when we are done.
         let ws_guard = Arc::new(tli.get_walsenders().register(
@@ -401,14 +450,7 @@ impl SafekeeperPostgresHandler {
         // switch to copy
         pgb.write_message(&BeMessage::CopyBothResponse).await?;
 
-        let (_, persisted_state) = tli.get_state().await;
-        let wal_reader = WalReader::new(
-            self.conf.workdir.clone(),
-            self.conf.timeline_dir(&tli.ttid),
-            &persisted_state,
-            start_pos,
-            self.conf.is_wal_backup_enabled(),
-        )?;
+        let wal_reader = tli.get_walreader(start_pos).await?;
 
         // Split to concurrently receive and send data; replies are generally
         // not synchronized with sends, so this avoids deadlocks.
@@ -416,7 +458,8 @@ impl SafekeeperPostgresHandler {
 
         let mut sender = WalSender {
             pgb,
-            tli: tli.clone(),
+            // should succeed since we're already holding another guard
+            tli: tli.wal_residence_guard().await?,
             appname,
             start_pos,
             end_pos,
@@ -428,7 +471,7 @@ impl SafekeeperPostgresHandler {
         };
         let mut reply_reader = ReplyReader {
             reader,
-            ws_guard,
+            ws_guard: ws_guard.clone(),
             tli,
         };
 
@@ -437,6 +480,18 @@ impl SafekeeperPostgresHandler {
             r = sender.run() => r,
             r = reply_reader.run() => r,
         };
+
+        let ws_state = ws_guard
+            .walsenders
+            .mutex
+            .lock()
+            .get_slot(ws_guard.id)
+            .clone();
+        info!(
+            "finished streaming to {}, feedback={:?}",
+            ws_state.addr, ws_state.feedback,
+        );
+
         // Join pg backend back.
         pgb.unsplit(reply_reader.reader)?;
 
@@ -473,7 +528,7 @@ impl EndWatch {
 /// A half driving sending WAL.
 struct WalSender<'a, IO> {
     pgb: &'a mut PostgresBackend<IO>,
-    tli: Arc<Timeline>,
+    tli: WalResidentTimeline,
     appname: Option<String>,
     // Position since which we are sending next chunk.
     start_pos: Lsn,
@@ -495,6 +550,8 @@ struct WalSender<'a, IO> {
     // buffer for readling WAL into to send it
     send_buf: [u8; MAX_SEND_SIZE],
 }
+
+const POLL_STATE_TIMEOUT: Duration = Duration::from_secs(1);
 
 impl<IO: AsyncRead + AsyncWrite + Unpin> WalSender<'_, IO> {
     /// Send WAL until
@@ -574,14 +631,22 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> WalSender<'_, IO> {
     async fn wait_wal(&mut self) -> Result<(), CopyStreamHandlerEnd> {
         loop {
             self.end_pos = self.end_watch.get();
-            if self.end_pos > self.start_pos {
-                // We have something to send.
+            let have_something_to_send = (|| {
+                fail::fail_point!(
+                    "sk-pause-send",
+                    self.appname.as_deref() != Some("pageserver"),
+                    |_| { false }
+                );
+                self.end_pos > self.start_pos
+            })();
+
+            if have_something_to_send {
                 trace!("got end_pos {:?}, streaming", self.end_pos);
                 return Ok(());
             }
 
             // Wait for WAL to appear, now self.end_pos == self.start_pos.
-            if let Some(lsn) = wait_for_lsn(&mut self.end_watch, self.term, self.start_pos).await? {
+            if let Some(lsn) = self.wait_for_lsn().await? {
                 self.end_pos = lsn;
                 trace!("got end_pos {:?}, streaming", self.end_pos);
                 return Ok(());
@@ -618,13 +683,61 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> WalSender<'_, IO> {
                 .await?;
         }
     }
+
+    /// Wait until we have available WAL > start_pos or timeout expires. Returns
+    /// - Ok(Some(end_pos)) if needed lsn is successfully observed;
+    /// - Ok(None) if timeout expired;
+    /// - Err in case of error -- only if 1) term changed while fetching in recovery
+    ///   mode 2) watch channel closed, which must never happen.
+    async fn wait_for_lsn(&mut self) -> anyhow::Result<Option<Lsn>> {
+        let fp = (|| {
+            fail::fail_point!(
+                "sk-pause-send",
+                self.appname.as_deref() != Some("pageserver"),
+                |_| { true }
+            );
+            false
+        })();
+        if fp {
+            tokio::time::sleep(POLL_STATE_TIMEOUT).await;
+            return Ok(None);
+        }
+
+        let res = timeout(POLL_STATE_TIMEOUT, async move {
+            loop {
+                let end_pos = self.end_watch.get();
+                if end_pos > self.start_pos {
+                    return Ok(end_pos);
+                }
+                if let EndWatch::Flush(rx) = &self.end_watch {
+                    let curr_term = rx.borrow().term;
+                    if let Some(client_term) = self.term {
+                        if curr_term != client_term {
+                            bail!("term changed: requested {}, now {}", client_term, curr_term);
+                        }
+                    }
+                }
+                self.end_watch.changed().await?;
+            }
+        })
+        .await;
+
+        match res {
+            // success
+            Ok(Ok(commit_lsn)) => Ok(Some(commit_lsn)),
+            // error inside closure
+            Ok(Err(err)) => Err(err),
+            // timeout
+            Err(_) => Ok(None),
+        }
+    }
 }
 
 /// A half driving receiving replies.
 struct ReplyReader<IO> {
     reader: PostgresBackendReader<IO>,
     ws_guard: Arc<WalSenderGuard>,
-    tli: Arc<Timeline>,
+    tli: WalResidentTimeline,
 }
 
 impl<IO: AsyncRead + AsyncWrite + Unpin> ReplyReader<IO> {
@@ -639,8 +752,14 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> ReplyReader<IO> {
         match msg.first().cloned() {
             Some(HOT_STANDBY_FEEDBACK_TAG_BYTE) => {
                 // Note: deserializing is on m[1..] because we skip the tag byte.
-                let hs_feedback = HotStandbyFeedback::des(&msg[1..])
+                let mut hs_feedback = HotStandbyFeedback::des(&msg[1..])
                     .context("failed to deserialize HotStandbyFeedback")?;
+                // TODO: xmin/catalog_xmin are serialized by walreceiver.c in this way:
+                // pq_sendint32(&reply_message, xmin);
+                // pq_sendint32(&reply_message, xmin_epoch);
+                // So it is two big endian 32-bit words in low endian order!
+                hs_feedback.xmin = hs_feedback.xmin.rotate_left(32);
+                hs_feedback.catalog_xmin = hs_feedback.catalog_xmin.rotate_left(32);
                 self.ws_guard
                     .walsenders
                     .record_hs_feedback(self.ws_guard.id, &hs_feedback);
@@ -675,50 +794,8 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> ReplyReader<IO> {
     }
 }
 
-const POLL_STATE_TIMEOUT: Duration = Duration::from_secs(1);
-
-/// Wait until we have available WAL > start_pos or timeout expires. Returns
-/// - Ok(Some(end_pos)) if needed lsn is successfully observed;
-/// - Ok(None) if timeout expired;
-/// - Err in case of error -- only if 1) term changed while fetching in recovery
-///   mode 2) watch channel closed, which must never happen.
-async fn wait_for_lsn(
-    rx: &mut EndWatch,
-    client_term: Option<Term>,
-    start_pos: Lsn,
-) -> anyhow::Result<Option<Lsn>> {
-    let res = timeout(POLL_STATE_TIMEOUT, async move {
-        loop {
-            let end_pos = rx.get();
-            if end_pos > start_pos {
-                return Ok(end_pos);
-            }
-            if let EndWatch::Flush(rx) = rx {
-                let curr_term = rx.borrow().term;
-                if let Some(client_term) = client_term {
-                    if curr_term != client_term {
-                        bail!("term changed: requested {}, now {}", client_term, curr_term);
-                    }
-                }
-            }
-            rx.changed().await?;
-        }
-    })
-    .await;
-
-    match res {
-        // success
-        Ok(Ok(commit_lsn)) => Ok(Some(commit_lsn)),
-        // error inside closure
-        Ok(Err(err)) => Err(err),
-        // timeout
-        Err(_) => Ok(None),
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use postgres_protocol::PG_EPOCH;
     use utils::id::{TenantId, TimelineId};
 
     use super::*;
@@ -764,8 +841,11 @@ mod tests {
     fn test_hs_feedback_no_valid() {
         let mut wss = WalSendersShared::new();
         push_feedback(&mut wss, hs_feedback(1, INVALID_FULL_TRANSACTION_ID));
-        wss.update_hs_feedback();
-        assert_eq!(wss.agg_hs_feedback.xmin, INVALID_FULL_TRANSACTION_ID);
+        wss.update_reply_feedback();
+        assert_eq!(
+            wss.agg_standby_feedback.hs_feedback.xmin,
+            INVALID_FULL_TRANSACTION_ID
+        );
     }
 
     #[test]
@@ -774,30 +854,7 @@ mod tests {
         push_feedback(&mut wss, hs_feedback(1, INVALID_FULL_TRANSACTION_ID));
         push_feedback(&mut wss, hs_feedback(1, 42));
         push_feedback(&mut wss, hs_feedback(1, 64));
-        wss.update_hs_feedback();
-        assert_eq!(wss.agg_hs_feedback.xmin, 42);
-    }
-
-    // form pageserver feedback with given last_record_lsn / tli size and the
-    // rest set to dummy values.
-    fn ps_feedback(current_timeline_size: u64, last_received_lsn: Lsn) -> ReplicationFeedback {
-        ReplicationFeedback::Pageserver(PageserverFeedback {
-            current_timeline_size,
-            last_received_lsn,
-            disk_consistent_lsn: Lsn::INVALID,
-            remote_consistent_lsn: Lsn::INVALID,
-            replytime: *PG_EPOCH,
-        })
-    }
-
-    // test that ps aggregation works as expected
-    #[test]
-    fn test_ps_feedback() {
-        let mut wss = WalSendersShared::new();
-        push_feedback(&mut wss, ps_feedback(8, Lsn(42)));
-        push_feedback(&mut wss, ps_feedback(4, Lsn(84)));
-        wss.update_ps_feedback();
-        assert_eq!(wss.agg_ps_feedback.current_timeline_size, 4);
-        assert_eq!(wss.agg_ps_feedback.last_received_lsn, Lsn(84));
+        wss.update_reply_feedback();
+        assert_eq!(wss.agg_standby_feedback.hs_feedback.xmin, 42);
     }
 }

@@ -1,4 +1,5 @@
 import random
+import re
 import statistics
 import threading
 import time
@@ -7,11 +8,14 @@ from contextlib import closing
 from typing import List
 
 import pytest
-from fixtures.benchmark_fixture import MetricReport
+from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
+from fixtures.common_types import Lsn
 from fixtures.compare_fixtures import NeonCompare
 from fixtures.log_helper import log
+from fixtures.neon_fixtures import NeonPageserver
 from fixtures.pageserver.utils import wait_for_last_record_lsn
-from fixtures.types import Lsn
+from fixtures.utils import wait_until
+from prometheus_client.samples import Sample
 
 
 def _record_branch_creation_durations(neon_compare: NeonCompare, durs: List[float]):
@@ -74,7 +78,7 @@ def test_branch_creation_heavy_write(neon_compare: NeonCompare, n_branches: int)
         p = random.randint(0, i)
 
         timer = timeit.default_timer()
-        env.neon_cli.create_branch("b{}".format(i + 1), "b{}".format(p), tenant_id=tenant)
+        env.neon_cli.create_branch(f"b{i + 1}", f"b{p}", tenant_id=tenant)
         dur = timeit.default_timer() - timer
 
         log.info(f"Creating branch b{i+1} took {dur}s")
@@ -89,10 +93,16 @@ def test_branch_creation_heavy_write(neon_compare: NeonCompare, n_branches: int)
     _record_branch_creation_durations(neon_compare, branch_creation_durations)
 
 
-@pytest.mark.parametrize("n_branches", [1024])
-# Test measures the latency of branch creation when creating a lot of branches.
-def test_branch_creation_many(neon_compare: NeonCompare, n_branches: int):
+@pytest.mark.parametrize("n_branches", [500, 1024])
+@pytest.mark.parametrize("shape", ["one_ancestor", "random"])
+def test_branch_creation_many(neon_compare: NeonCompare, n_branches: int, shape: str):
+    """
+    Test measures the latency of branch creation when creating a lot of branches.
+    """
     env = neon_compare.env
+
+    # seed the prng so we will measure the same structure every time
+    rng = random.Random("2024-02-29")
 
     env.neon_cli.create_branch("b0")
 
@@ -102,14 +112,104 @@ def test_branch_creation_many(neon_compare: NeonCompare, n_branches: int):
     branch_creation_durations = []
 
     for i in range(n_branches):
-        # random a source branch
-        p = random.randint(0, i)
+        if shape == "random":
+            parent = f"b{rng.randint(0, i)}"
+        elif shape == "one_ancestor":
+            parent = "b0"
+        else:
+            raise RuntimeError(f"unimplemented shape: {shape}")
+
         timer = timeit.default_timer()
-        env.neon_cli.create_branch("b{}".format(i + 1), "b{}".format(p))
+        # each of these uploads to remote storage before completion
+        env.neon_cli.create_branch(f"b{i + 1}", parent)
         dur = timeit.default_timer() - timer
         branch_creation_durations.append(dur)
 
     _record_branch_creation_durations(neon_compare, branch_creation_durations)
+
+    endpoint.stop_and_destroy()
+
+    with neon_compare.record_duration("shutdown"):
+        # this sleeps 100ms between polls
+        env.pageserver.stop()
+
+    startup_line = "INFO version: git(-env)?:"
+
+    # find the first line of the log file so we can find the next start later
+    _, first_start = wait_until(5, 1, lambda: env.pageserver.assert_log_contains(startup_line))
+
+    # start without gc so we can time compaction with less noise; use shorter
+    # period for compaction so it starts earlier
+    def patch_default_tenant_config(config):
+        tenant_config = config.get("tenant_config", {})
+        tenant_config["compaction_period"] = "3s"
+        tenant_config["gc_period"] = "0s"
+        config["tenant_config"] = tenant_config
+
+    env.pageserver.edit_config_toml(patch_default_tenant_config)
+    env.pageserver.start(
+        # this does print more than we want, but the number should be comparable between runs
+        extra_env_vars={
+            "RUST_LOG": f"[compaction_loop{{tenant_id={env.initial_tenant}}}]=debug,info"
+        },
+    )
+
+    _, second_start = wait_until(
+        5, 1, lambda: env.pageserver.assert_log_contains(startup_line, first_start)
+    )
+    env.pageserver.quiesce_tenants()
+
+    wait_and_record_startup_metrics(env.pageserver, neon_compare.zenbenchmark, "restart_after")
+
+    # wait for compaction to complete, which most likely has already done so multiple times
+    msg, _ = wait_until(
+        30,
+        1,
+        lambda: env.pageserver.assert_log_contains(
+            f".*tenant_id={env.initial_tenant}.*: compaction iteration complete.*", second_start
+        ),
+    )
+    needle = re.search(" elapsed_ms=([0-9]+)", msg)
+    assert needle is not None, "failed to find the elapsed time"
+    duration = int(needle.group(1)) / 1000.0
+    neon_compare.zenbenchmark.record("compaction", duration, "s", MetricReport.LOWER_IS_BETTER)
+
+
+def wait_and_record_startup_metrics(
+    pageserver: NeonPageserver, target: NeonBenchmarker, prefix: str
+):
+    """
+    Waits until all startup metrics have non-zero values on the pageserver, then records them on the target
+    """
+
+    client = pageserver.http_client()
+
+    expected_labels = set(
+        [
+            "background_jobs_can_start",
+            "complete",
+            "initial",
+            "initial_tenant_load",
+            "initial_tenant_load_remote",
+        ]
+    )
+
+    def metrics_are_filled() -> List[Sample]:
+        m = client.get_metrics()
+        samples = m.query_all("pageserver_startup_duration_seconds")
+        # we should not have duplicate labels
+        matching = [
+            x for x in samples if x.labels.get("phase") in expected_labels and x.value > 0.0
+        ]
+        assert len(matching) == len(expected_labels)
+        return matching
+
+    samples = wait_until(10, 1, metrics_are_filled)
+
+    for sample in samples:
+        phase = sample.labels["phase"]
+        name = f"{prefix}.{phase}"
+        target.record(name, sample.value, "s", MetricReport.LOWER_IS_BETTER)
 
 
 # Test measures the branch creation time when branching from a timeline with a lot of relations.

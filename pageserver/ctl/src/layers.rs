@@ -59,15 +59,17 @@ pub(crate) enum LayerCmd {
 
 async fn read_delta_file(path: impl AsRef<Path>, ctx: &RequestContext) -> Result<()> {
     let path = Utf8Path::from_path(path.as_ref()).expect("non-Unicode path");
-    virtual_file::init(10);
+    virtual_file::init(10, virtual_file::api::IoEngineKind::StdFs, 1);
     page_cache::init(100);
-    let file = FileBlockReader::new(VirtualFile::open(path).await?);
-    let summary_blk = file.read_blk(0, ctx).await?;
+    let file = VirtualFile::open(path, ctx).await?;
+    let file_id = page_cache::next_file_id();
+    let block_reader = FileBlockReader::new(&file, file_id);
+    let summary_blk = block_reader.read_blk(0, ctx).await?;
     let actual_summary = Summary::des_prefix(summary_blk.as_ref())?;
     let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
         actual_summary.index_start_blk,
         actual_summary.index_root_blk,
-        &file,
+        &block_reader,
     );
     // TODO(chi): dedup w/ `delta_layer.rs` by exposing the API.
     let mut all = vec![];
@@ -83,10 +85,11 @@ async fn read_delta_file(path: impl AsRef<Path>, ctx: &RequestContext) -> Result
             ctx,
         )
         .await?;
-    let cursor = BlockCursor::new_fileblockreader(&file);
+    let cursor = BlockCursor::new_fileblockreader(&block_reader);
     for (k, v) in all {
         let value = cursor.read_blob(v.pos(), ctx).await?;
         println!("key:{} value_len:{}", k, value.len());
+        assert!(k.is_i128_representable(), "invalid key: ");
     }
     // TODO(chi): special handling for last key?
     Ok(())
@@ -187,7 +190,11 @@ pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
             new_tenant_id,
             new_timeline_id,
         } => {
-            pageserver::virtual_file::init(10);
+            pageserver::virtual_file::init(
+                10,
+                virtual_file::api::IoEngineKind::StdFs,
+                pageserver_api::config::defaults::DEFAULT_IO_BUFFER_ALIGNMENT,
+            );
             pageserver::page_cache::init(100);
 
             let ctx = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error);

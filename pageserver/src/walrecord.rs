@@ -9,10 +9,10 @@ use postgres_ffi::pg_constants;
 use postgres_ffi::BLCKSZ;
 use postgres_ffi::{BlockNumber, TimestampTz};
 use postgres_ffi::{MultiXactId, MultiXactOffset, MultiXactStatus, Oid, TransactionId};
-use postgres_ffi::{XLogRecord, XLOG_SIZE_OF_XLOG_RECORD};
+use postgres_ffi::{RepOriginId, XLogRecord, XLOG_SIZE_OF_XLOG_RECORD};
 use serde::{Deserialize, Serialize};
 use tracing::*;
-use utils::bin_ser::DeserializeError;
+use utils::{bin_ser::DeserializeError, lsn::Lsn};
 
 /// Each update to a page is represented by a NeonWalRecord. It can be a wrapper
 /// around a PostgreSQL WAL record, or a custom neon-specific "record".
@@ -44,17 +44,64 @@ pub enum NeonWalRecord {
         moff: MultiXactOffset,
         members: Vec<MultiXactMember>,
     },
+    /// Update the map of AUX files, either writing or dropping an entry
+    AuxFile {
+        file_path: String,
+        content: Option<Bytes>,
+    },
+
+    /// A testing record for unit testing purposes. It supports append data to an existing image, or clear it.
+    #[cfg(test)]
+    Test {
+        /// Append a string to the image.
+        append: String,
+        /// Clear the image before appending.
+        clear: bool,
+        /// Treat this record as an init record. `clear` should be set to true if this field is set
+        /// to true. This record does not need the history WALs to reconstruct. See [`NeonWalRecord::will_init`] and
+        /// its references in `timeline.rs`.
+        will_init: bool,
+    },
 }
 
 impl NeonWalRecord {
     /// Does replaying this WAL record initialize the page from scratch, or does
     /// it need to be applied over the previous image of the page?
     pub fn will_init(&self) -> bool {
+        // If you change this function, you'll also need to change ValueBytes::will_init
         match self {
             NeonWalRecord::Postgres { will_init, rec: _ } => *will_init,
-
+            #[cfg(test)]
+            NeonWalRecord::Test { will_init, .. } => *will_init,
             // None of the special neon record types currently initialize the page
             _ => false,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn wal_append(s: impl AsRef<str>) -> Self {
+        Self::Test {
+            append: s.as_ref().to_string(),
+            clear: false,
+            will_init: false,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn wal_clear() -> Self {
+        Self::Test {
+            append: "".to_string(),
+            clear: true,
+            will_init: false,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn wal_init() -> Self {
+        Self::Test {
+            append: "".to_string(),
+            clear: true,
+            will_init: true,
         }
     }
 }
@@ -110,6 +157,31 @@ pub struct DecodedWALRecord {
 
     pub blocks: Vec<DecodedBkpBlock>,
     pub main_data_offset: usize,
+    pub origin_id: u16,
+}
+
+impl DecodedWALRecord {
+    /// Check if this WAL record represents a legacy "copy" database creation, which populates new relations
+    /// by reading other existing relations' data blocks.  This is more complex to apply than new-style database
+    /// creations which simply include all the desired blocks in the WAL, so we need a helper function to detect this case.
+    pub(crate) fn is_dbase_create_copy(&self, pg_version: u32) -> bool {
+        if self.xl_rmid == pg_constants::RM_DBASE_ID {
+            let info = self.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
+            match pg_version {
+                14 => {
+                    // Postgres 14 database creations are always the legacy kind
+                    info == postgres_ffi::v14::bindings::XLOG_DBASE_CREATE
+                }
+                15 => info == postgres_ffi::v15::bindings::XLOG_DBASE_CREATE_FILE_COPY,
+                16 => info == postgres_ffi::v16::bindings::XLOG_DBASE_CREATE_FILE_COPY,
+                _ => {
+                    panic!("Unsupported postgres version {pg_version}")
+                }
+            }
+        } else {
+            false
+        }
+    }
 }
 
 #[repr(C)]
@@ -567,6 +639,7 @@ pub struct XlXactParsedRecord {
     pub subxacts: Vec<TransactionId>,
 
     pub xnodes: Vec<RelFileNode>,
+    pub origin_lsn: Lsn,
 }
 
 impl XlXactParsedRecord {
@@ -645,6 +718,11 @@ impl XlXactParsedRecord {
             debug!("XLOG_XACT_COMMIT-XACT_XINFO_HAS_TWOPHASE xid {}", xid);
         }
 
+        let origin_lsn = if xinfo & pg_constants::XACT_XINFO_HAS_ORIGIN != 0 {
+            Lsn(buf.get_u64_le())
+        } else {
+            Lsn::INVALID
+        };
         XlXactParsedRecord {
             xid,
             info,
@@ -654,6 +732,7 @@ impl XlXactParsedRecord {
             ts_id,
             subxacts,
             xnodes,
+            origin_lsn,
         }
     }
 }
@@ -768,6 +847,72 @@ impl XlLogicalMessage {
     }
 }
 
+#[repr(C)]
+#[derive(Debug)]
+pub struct XlRunningXacts {
+    pub xcnt: u32,
+    pub subxcnt: u32,
+    pub subxid_overflow: bool,
+    pub next_xid: TransactionId,
+    pub oldest_running_xid: TransactionId,
+    pub latest_completed_xid: TransactionId,
+    pub xids: Vec<TransactionId>,
+}
+
+impl XlRunningXacts {
+    pub fn decode(buf: &mut Bytes) -> XlRunningXacts {
+        let xcnt = buf.get_u32_le();
+        let subxcnt = buf.get_u32_le();
+        let subxid_overflow = buf.get_u32_le() != 0;
+        let next_xid = buf.get_u32_le();
+        let oldest_running_xid = buf.get_u32_le();
+        let latest_completed_xid = buf.get_u32_le();
+        let mut xids = Vec::new();
+        for _ in 0..(xcnt + subxcnt) {
+            xids.push(buf.get_u32_le());
+        }
+        XlRunningXacts {
+            xcnt,
+            subxcnt,
+            subxid_overflow,
+            next_xid,
+            oldest_running_xid,
+            latest_completed_xid,
+            xids,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug)]
+pub struct XlReploriginDrop {
+    pub node_id: RepOriginId,
+}
+
+impl XlReploriginDrop {
+    pub fn decode(buf: &mut Bytes) -> XlReploriginDrop {
+        XlReploriginDrop {
+            node_id: buf.get_u16_le(),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug)]
+pub struct XlReploriginSet {
+    pub remote_lsn: Lsn,
+    pub node_id: RepOriginId,
+}
+
+impl XlReploriginSet {
+    pub fn decode(buf: &mut Bytes) -> XlReploriginSet {
+        XlReploriginSet {
+            remote_lsn: Lsn(buf.get_u64_le()),
+            node_id: buf.get_u16_le(),
+        }
+    }
+}
+
 /// Main routine to decode a WAL record and figure out which blocks are modified
 //
 // See xlogrecord.h for details
@@ -802,6 +947,7 @@ pub fn decode_wal_record(
     let mut rnode_dbnode: u32 = 0;
     let mut rnode_relnode: u32 = 0;
     let mut got_rnode = false;
+    let mut origin_id: u16 = 0;
 
     let mut buf = record.clone();
 
@@ -849,7 +995,7 @@ pub fn decode_wal_record(
 
             pg_constants::XLR_BLOCK_ID_ORIGIN => {
                 // RepOriginId is uint16
-                buf.advance(2);
+                origin_id = buf.get_u16_le();
             }
 
             pg_constants::XLR_BLOCK_ID_TOPLEVEL_XID => {
@@ -896,7 +1042,7 @@ pub fn decode_wal_record(
                     );
 
                     let blk_img_is_compressed =
-                        postgres_ffi::bkpimage_is_compressed(blk.bimg_info, pg_version)?;
+                        postgres_ffi::bkpimage_is_compressed(blk.bimg_info, pg_version);
 
                     if blk_img_is_compressed {
                         debug!("compressed block image , pg_version = {}", pg_version);
@@ -1046,6 +1192,7 @@ pub fn decode_wal_record(
     decoded.xl_info = xlogrec.xl_info;
     decoded.xl_rmid = xlogrec.xl_rmid;
     decoded.record = record;
+    decoded.origin_id = origin_id;
     decoded.main_data_offset = main_data_offset;
 
     Ok(())

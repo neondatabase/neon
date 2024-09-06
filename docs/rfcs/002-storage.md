@@ -1,4 +1,4 @@
-# Zenith storage node — alternative
+# Neon storage node — alternative
 
 ## **Design considerations**
 

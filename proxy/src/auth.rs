@@ -1,38 +1,40 @@
 //! Client authentication mechanisms.
 
 pub mod backend;
-pub use backend::BackendType;
+pub use backend::Backend;
 
 mod credentials;
-pub use credentials::{
-    check_peer_addr_is_in_list, endpoint_sni, ComputeUserInfoMaybeEndpoint, IpPattern,
+pub(crate) use credentials::{
+    check_peer_addr_is_in_list, endpoint_sni, ComputeUserInfoMaybeEndpoint,
+    ComputeUserInfoParseError, IpPattern,
 };
 
 mod password_hack;
-pub use password_hack::parse_endpoint_param;
+pub(crate) use password_hack::parse_endpoint_param;
 use password_hack::PasswordHackPayload;
 
 mod flow;
-pub use flow::*;
+pub(crate) use flow::*;
+use tokio::time::error::Elapsed;
 
-use crate::{console, error::UserFacingError};
-use std::io;
+use crate::{
+    console,
+    error::{ReportableError, UserFacingError},
+};
+use std::{io, net::IpAddr};
 use thiserror::Error;
 
 /// Convenience wrapper for the authentication error.
-pub type Result<T> = std::result::Result<T, AuthError>;
+pub(crate) type Result<T> = std::result::Result<T, AuthError>;
 
 /// Common authentication error.
 #[derive(Debug, Error)]
-pub enum AuthErrorImpl {
+pub(crate) enum AuthErrorImpl {
     #[error(transparent)]
-    Link(#[from] backend::LinkAuthError),
+    Web(#[from] backend::WebAuthError),
 
     #[error(transparent)]
     GetAuthInfo(#[from] console::errors::GetAuthInfoError),
-
-    #[error(transparent)]
-    WakeCompute(#[from] console::errors::WakeComputeError),
 
     /// SASL protocol errors (includes [SCRAM](crate::scram)).
     #[error(transparent)]
@@ -60,38 +62,46 @@ pub enum AuthErrorImpl {
     Io(#[from] io::Error),
 
     #[error(
-        "This IP address is not allowed to connect to this endpoint. \
-        Please add it to the allowed list in the Neon console."
+        "This IP address {0} is not allowed to connect to this endpoint. \
+        Please add it to the allowed list in the Neon console. \
+        Make sure to check for IPv4 or IPv6 addresses."
     )]
-    IpAddressNotAllowed,
+    IpAddressNotAllowed(IpAddr),
 
     #[error("Too many connections to this endpoint. Please try again later.")]
     TooManyConnections,
+
+    #[error("Authentication timed out")]
+    UserTimeout(Elapsed),
 }
 
 #[derive(Debug, Error)]
 #[error(transparent)]
-pub struct AuthError(Box<AuthErrorImpl>);
+pub(crate) struct AuthError(Box<AuthErrorImpl>);
 
 impl AuthError {
-    pub fn bad_auth_method(name: impl Into<Box<str>>) -> Self {
+    pub(crate) fn bad_auth_method(name: impl Into<Box<str>>) -> Self {
         AuthErrorImpl::BadAuthMethod(name.into()).into()
     }
 
-    pub fn auth_failed(user: impl Into<Box<str>>) -> Self {
+    pub(crate) fn auth_failed(user: impl Into<Box<str>>) -> Self {
         AuthErrorImpl::AuthFailed(user.into()).into()
     }
 
-    pub fn ip_address_not_allowed() -> Self {
-        AuthErrorImpl::IpAddressNotAllowed.into()
+    pub(crate) fn ip_address_not_allowed(ip: IpAddr) -> Self {
+        AuthErrorImpl::IpAddressNotAllowed(ip).into()
     }
 
-    pub fn too_many_connections() -> Self {
+    pub(crate) fn too_many_connections() -> Self {
         AuthErrorImpl::TooManyConnections.into()
     }
 
-    pub fn is_auth_failed(&self) -> bool {
+    pub(crate) fn is_auth_failed(&self) -> bool {
         matches!(self.0.as_ref(), AuthErrorImpl::AuthFailed(_))
+    }
+
+    pub(crate) fn user_timeout(elapsed: Elapsed) -> Self {
+        AuthErrorImpl::UserTimeout(elapsed).into()
     }
 }
 
@@ -103,19 +113,36 @@ impl<E: Into<AuthErrorImpl>> From<E> for AuthError {
 
 impl UserFacingError for AuthError {
     fn to_string_client(&self) -> String {
-        use AuthErrorImpl::*;
         match self.0.as_ref() {
-            Link(e) => e.to_string_client(),
-            GetAuthInfo(e) => e.to_string_client(),
-            WakeCompute(e) => e.to_string_client(),
-            Sasl(e) => e.to_string_client(),
-            AuthFailed(_) => self.to_string(),
-            BadAuthMethod(_) => self.to_string(),
-            MalformedPassword(_) => self.to_string(),
-            MissingEndpointName => self.to_string(),
-            Io(_) => "Internal error".to_string(),
-            IpAddressNotAllowed => self.to_string(),
-            TooManyConnections => self.to_string(),
+            AuthErrorImpl::Web(e) => e.to_string_client(),
+            AuthErrorImpl::GetAuthInfo(e) => e.to_string_client(),
+            AuthErrorImpl::Sasl(e) => e.to_string_client(),
+            AuthErrorImpl::AuthFailed(_) => self.to_string(),
+            AuthErrorImpl::BadAuthMethod(_) => self.to_string(),
+            AuthErrorImpl::MalformedPassword(_) => self.to_string(),
+            AuthErrorImpl::MissingEndpointName => self.to_string(),
+            AuthErrorImpl::Io(_) => "Internal error".to_string(),
+            AuthErrorImpl::IpAddressNotAllowed(_) => self.to_string(),
+            AuthErrorImpl::TooManyConnections => self.to_string(),
+            AuthErrorImpl::UserTimeout(_) => self.to_string(),
+        }
+    }
+}
+
+impl ReportableError for AuthError {
+    fn get_error_kind(&self) -> crate::error::ErrorKind {
+        match self.0.as_ref() {
+            AuthErrorImpl::Web(e) => e.get_error_kind(),
+            AuthErrorImpl::GetAuthInfo(e) => e.get_error_kind(),
+            AuthErrorImpl::Sasl(e) => e.get_error_kind(),
+            AuthErrorImpl::AuthFailed(_) => crate::error::ErrorKind::User,
+            AuthErrorImpl::BadAuthMethod(_) => crate::error::ErrorKind::User,
+            AuthErrorImpl::MalformedPassword(_) => crate::error::ErrorKind::User,
+            AuthErrorImpl::MissingEndpointName => crate::error::ErrorKind::User,
+            AuthErrorImpl::Io(_) => crate::error::ErrorKind::ClientDisconnect,
+            AuthErrorImpl::IpAddressNotAllowed(_) => crate::error::ErrorKind::User,
+            AuthErrorImpl::TooManyConnections => crate::error::ErrorKind::RateLimit,
+            AuthErrorImpl::UserTimeout(_) => crate::error::ErrorKind::User,
         }
     }
 }

@@ -140,9 +140,44 @@ static XLogReaderState *reader_state;
 #define TRACE DEBUG5
 
 #ifdef HAVE_LIBSECCOMP
+
+
+/*
+ * https://man7.org/linux/man-pages/man2/close_range.2.html
+ *
+ * The `close_range` syscall is available as of Linux 5.9.
+ *
+ * The `close_range` libc wrapper is only available in glibc >= 2.34.
+ * Debian Bullseye ships a libc package based on glibc 2.31.
+ * => write the wrapper ourselves, using the syscall number from the kernel headers.
+ *
+ * If the Linux uAPI headers don't define the system call number,
+ * fail the build deliberately rather than ifdef'ing it to ENOSYS.
+ * We prefer a compile time over a runtime error for walredo.
+ */
+#include <unistd.h>
+#include <sys/syscall.h>
+#include <errno.h>
+
+static int
+close_range_syscall(unsigned int start_fd, unsigned int count, unsigned int flags)
+{
+    return syscall(__NR_close_range, start_fd, count, flags);
+}
+
 static void
 enter_seccomp_mode(void)
 {
+	/*
+	 * The pageserver process relies on us to close all the file descriptors
+	 * it potentially leaked to us, _before_ we start processing potentially dangerous
+	 * wal records. See the comment in the Rust code that launches this process.
+	 */
+	if (close_range_syscall(3, ~0U, 0) != 0)
+		ereport(FATAL,
+				(errcode(ERRCODE_SYSTEM_ERROR),
+				 errmsg("seccomp: could not close files >= fd 3")));
+
 	PgSeccompRule syscalls[] =
 	{
 		/* Hard requirements */
@@ -183,6 +218,9 @@ enter_seccomp_mode(void)
 	seccomp_load_rules(syscalls, lengthof(syscalls));
 }
 #endif /* HAVE_LIBSECCOMP */
+
+PGDLLEXPORT void
+WalRedoMain(int argc, char *argv[]);
 
 /*
  * Entry point for the WAL redo process.
@@ -771,6 +809,9 @@ ApplyRecord(StringInfo input_message)
 	ErrorContextCallback errcallback;
 #if PG_VERSION_NUM >= 150000
 	DecodedXLogRecord *decoded;
+#define STATIC_DECODEBUF_SIZE (64 * 1024)
+	static char *static_decodebuf = NULL;
+	size_t		required_space;
 #endif
 
 	/*
@@ -800,7 +841,19 @@ ApplyRecord(StringInfo input_message)
 	XLogBeginRead(reader_state, lsn);
 
 #if PG_VERSION_NUM >= 150000
-	decoded = (DecodedXLogRecord *) XLogReadRecordAlloc(reader_state, record->xl_tot_len, true);
+	/*
+	 * For reasonably small records, reuse a fixed size buffer to reduce
+	 * palloc overhead.
+	 */
+	required_space = DecodeXLogRecordRequiredSpace(record->xl_tot_len);
+	if (required_space <= STATIC_DECODEBUF_SIZE)
+	{
+		if (static_decodebuf == NULL)
+			static_decodebuf = MemoryContextAlloc(TopMemoryContext, STATIC_DECODEBUF_SIZE);
+		decoded = (DecodedXLogRecord *) static_decodebuf;
+	}
+	else
+		decoded = palloc(required_space);
 
 	if (!DecodeXLogRecord(reader_state, decoded, record, lsn, &errormsg))
 		elog(ERROR, "failed to decode WAL record: %s", errormsg);
@@ -810,36 +863,14 @@ ApplyRecord(StringInfo input_message)
 		decoded->next_lsn = reader_state->NextRecPtr;
 
 		/*
-		 * If it's in the decode buffer, mark the decode buffer space as
-		 * occupied.
-		 */
-		if (!decoded->oversized)
-		{
-			/* The new decode buffer head must be MAXALIGNed. */
-			Assert(decoded->size == MAXALIGN(decoded->size));
-			if ((char *) decoded == reader_state->decode_buffer)
-				reader_state->decode_buffer_tail = reader_state->decode_buffer + decoded->size;
-			else
-				reader_state->decode_buffer_tail += decoded->size;
-		}
-
-		/* Insert it into the queue of decoded records. */
-		Assert(reader_state->decode_queue_tail != decoded);
-		if (reader_state->decode_queue_tail)
-			reader_state->decode_queue_tail->next = decoded;
-		reader_state->decode_queue_tail = decoded;
-		if (!reader_state->decode_queue_head)
-			reader_state->decode_queue_head = decoded;
-
-		/*
 		 * Update the pointers to the beginning and one-past-the-end of this
 		 * record, again for the benefit of historical code that expected the
 		 * decoder to track this rather than accessing these fields of the record
 		 * itself.
 		 */
-		reader_state->record = reader_state->decode_queue_head;
-		reader_state->ReadRecPtr = reader_state->record->lsn;
-		reader_state->EndRecPtr = reader_state->record->next_lsn;
+		reader_state->record = decoded;
+		reader_state->ReadRecPtr = decoded->lsn;
+		reader_state->EndRecPtr = decoded->next_lsn;
 	}
 #else
 	/*
@@ -879,8 +910,9 @@ ApplyRecord(StringInfo input_message)
 
 	elog(TRACE, "applied WAL record with LSN %X/%X",
 		 (uint32) (lsn >> 32), (uint32) lsn);
+
 #if PG_VERSION_NUM >= 150000
-	if (decoded && decoded->oversized)
+	if ((char *) decoded != static_decodebuf)
 		pfree(decoded);
 #endif
 }

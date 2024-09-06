@@ -3,6 +3,9 @@ ROOT_PROJECT_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 # Where to install Postgres, default is ./pg_install, maybe useful for package managers
 POSTGRES_INSTALL_DIR ?= $(ROOT_PROJECT_DIR)/pg_install/
 
+OPENSSL_PREFIX_DIR := /usr/local/openssl
+ICU_PREFIX_DIR := /usr/local/icu
+
 #
 # We differentiate between release / debug build types using the BUILD_TYPE
 # environment variable.
@@ -20,19 +23,31 @@ else
 	$(error Bad build type '$(BUILD_TYPE)', see Makefile for options)
 endif
 
+ifeq ($(shell test -e /home/nonroot/.docker_build && echo -n yes),yes)
+	# Exclude static build openssl, icu for local build (MacOS, Linux)
+	# Only keep for build type release and debug
+	PG_CFLAGS += -I$(OPENSSL_PREFIX_DIR)/include
+	PG_CONFIGURE_OPTS += --with-icu
+	PG_CONFIGURE_OPTS += ICU_CFLAGS='-I/$(ICU_PREFIX_DIR)/include -DU_STATIC_IMPLEMENTATION'
+	PG_CONFIGURE_OPTS += ICU_LIBS='-L$(ICU_PREFIX_DIR)/lib -L$(ICU_PREFIX_DIR)/lib64 -licui18n -licuuc -licudata -lstdc++ -Wl,-Bdynamic -lm'
+	PG_CONFIGURE_OPTS += LDFLAGS='-L$(OPENSSL_PREFIX_DIR)/lib -L$(OPENSSL_PREFIX_DIR)/lib64 -L$(ICU_PREFIX_DIR)/lib -L$(ICU_PREFIX_DIR)/lib64 -Wl,-Bstatic -lssl -lcrypto -Wl,-Bdynamic -lrt -lm -ldl -lpthread'
+endif
+
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Linux)
 	# Seccomp BPF is only available for Linux
 	PG_CONFIGURE_OPTS += --with-libseccomp
 else ifeq ($(UNAME_S),Darwin)
-	# macOS with brew-installed openssl requires explicit paths
-	# It can be configured with OPENSSL_PREFIX variable
-	OPENSSL_PREFIX ?= $(shell brew --prefix openssl@3)
-	PG_CONFIGURE_OPTS += --with-includes=$(OPENSSL_PREFIX)/include --with-libraries=$(OPENSSL_PREFIX)/lib
-	PG_CONFIGURE_OPTS += PKG_CONFIG_PATH=$(shell brew --prefix icu4c)/lib/pkgconfig
-	# macOS already has bison and flex in the system, but they are old and result in postgres-v14 target failure
-	# brew formulae are keg-only and not symlinked into HOMEBREW_PREFIX, force their usage
-	EXTRA_PATH_OVERRIDES += $(shell brew --prefix bison)/bin/:$(shell brew --prefix flex)/bin/:
+	ifndef DISABLE_HOMEBREW
+		# macOS with brew-installed openssl requires explicit paths
+		# It can be configured with OPENSSL_PREFIX variable
+		OPENSSL_PREFIX := $(shell brew --prefix openssl@3)
+		PG_CONFIGURE_OPTS += --with-includes=$(OPENSSL_PREFIX)/include --with-libraries=$(OPENSSL_PREFIX)/lib
+		PG_CONFIGURE_OPTS += PKG_CONFIG_PATH=$(shell brew --prefix icu4c)/lib/pkgconfig
+		# macOS already has bison and flex in the system, but they are old and result in postgres-v14 target failure
+		# brew formulae are keg-only and not symlinked into HOMEBREW_PREFIX, force their usage
+		EXTRA_PATH_OVERRIDES += $(shell brew --prefix bison)/bin/:$(shell brew --prefix flex)/bin/:
+	endif
 endif
 
 # Use -C option so that when PostgreSQL "make install" installs the
@@ -51,6 +66,10 @@ CARGO_BUILD_FLAGS += $(filter -j1,$(MAKEFLAGS))
 CARGO_CMD_PREFIX += $(if $(filter n,$(MAKEFLAGS)),,+)
 # Force cargo not to print progress bar
 CARGO_CMD_PREFIX += CARGO_TERM_PROGRESS_WHEN=never CI=1
+# Set PQ_LIB_DIR to make sure `storage_controller` get linked with bundled libpq (through diesel)
+CARGO_CMD_PREFIX += PQ_LIB_DIR=$(POSTGRES_INSTALL_DIR)/v16/lib
+
+CACHEDIR_TAG_CONTENTS := "Signature: 8a477f597d28d172789f06886806bc55"
 
 #
 # Top level Makefile to build Neon and PostgreSQL
@@ -62,26 +81,38 @@ all: neon postgres neon-pg-ext
 #
 # The 'postgres_ffi' depends on the Postgres headers.
 .PHONY: neon
-neon: postgres-headers walproposer-lib
+neon: postgres-headers walproposer-lib cargo-target-dir
 	+@echo "Compiling Neon"
 	$(CARGO_CMD_PREFIX) cargo build $(CARGO_BUILD_FLAGS)
+.PHONY: cargo-target-dir
+cargo-target-dir:
+	# https://github.com/rust-lang/cargo/issues/14281
+	mkdir -p target
+	test -e target/CACHEDIR.TAG || echo "$(CACHEDIR_TAG_CONTENTS)" > target/CACHEDIR.TAG
 
 ### PostgreSQL parts
 # Some rules are duplicated for Postgres v14 and 15. We may want to refactor
 # to avoid the duplication in the future, but it's tolerable for now.
 #
 $(POSTGRES_INSTALL_DIR)/build/%/config.status:
+
+	mkdir -p $(POSTGRES_INSTALL_DIR)
+	test -e $(POSTGRES_INSTALL_DIR)/CACHEDIR.TAG || echo "$(CACHEDIR_TAG_CONTENTS)" > $(POSTGRES_INSTALL_DIR)/CACHEDIR.TAG
+
 	+@echo "Configuring Postgres $* build"
 	@test -s $(ROOT_PROJECT_DIR)/vendor/postgres-$*/configure || { \
 		echo "\nPostgres submodule not found in $(ROOT_PROJECT_DIR)/vendor/postgres-$*/, execute "; \
 		echo "'git submodule update --init --recursive --depth 2 --progress .' in project root.\n"; \
 		exit 1; }
 	mkdir -p $(POSTGRES_INSTALL_DIR)/build/$*
-	(cd $(POSTGRES_INSTALL_DIR)/build/$* && \
-	env PATH="$(EXTRA_PATH_OVERRIDES):$$PATH" $(ROOT_PROJECT_DIR)/vendor/postgres-$*/configure \
+
+	VERSION=$*; \
+	EXTRA_VERSION=$$(cd $(ROOT_PROJECT_DIR)/vendor/postgres-$$VERSION && git rev-parse HEAD); \
+	(cd $(POSTGRES_INSTALL_DIR)/build/$$VERSION && \
+	env PATH="$(EXTRA_PATH_OVERRIDES):$$PATH" $(ROOT_PROJECT_DIR)/vendor/postgres-$$VERSION/configure \
 		CFLAGS='$(PG_CFLAGS)' \
-		$(PG_CONFIGURE_OPTS) \
-		--prefix=$(abspath $(POSTGRES_INSTALL_DIR))/$* > configure.log)
+		$(PG_CONFIGURE_OPTS) --with-extra-version=" ($$EXTRA_VERSION)" \
+		--prefix=$(abspath $(POSTGRES_INSTALL_DIR))/$$VERSION > configure.log)
 
 # nicer alias to run 'configure'
 # Note: I've been unable to use templates for this part of our configuration.
@@ -117,6 +148,8 @@ postgres-%: postgres-configure-% \
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/contrib/pageinspect install
 	+@echo "Compiling amcheck $*"
 	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/contrib/amcheck install
+	+@echo "Compiling test_decoding $*"
+	$(MAKE) -C $(POSTGRES_INSTALL_DIR)/build/$*/contrib/test_decoding install
 
 .PHONY: postgres-clean-%
 postgres-clean-%:
@@ -157,8 +190,8 @@ neon-pg-ext-%: postgres-%
 		-C $(POSTGRES_INSTALL_DIR)/build/neon-utils-$* \
 		-f $(ROOT_PROJECT_DIR)/pgxn/neon_utils/Makefile install
 
-.PHONY: neon-pg-ext-clean-%
-neon-pg-ext-clean-%:
+.PHONY: neon-pg-clean-ext-%
+neon-pg-clean-ext-%:
 	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/$*/bin/pg_config \
 	-C $(POSTGRES_INSTALL_DIR)/build/neon-$* \
 	-f $(ROOT_PROJECT_DIR)/pgxn/neon/Makefile clean
@@ -174,10 +207,10 @@ neon-pg-ext-clean-%:
 
 # Build walproposer as a static library. walproposer source code is located
 # in the pgxn/neon directory.
-# 
+#
 # We also need to include libpgport.a and libpgcommon.a, because walproposer
 # uses some functions from those libraries.
-# 
+#
 # Some object files are removed from libpgport.a and libpgcommon.a because
 # they depend on openssl and other libraries that are not included in our
 # Rust build.
@@ -214,11 +247,11 @@ neon-pg-ext: \
 	neon-pg-ext-v15 \
 	neon-pg-ext-v16
 
-.PHONY: neon-pg-ext-clean
-neon-pg-ext-clean: \
-	neon-pg-ext-clean-v14 \
-	neon-pg-ext-clean-v15 \
-	neon-pg-ext-clean-v16
+.PHONY: neon-pg-clean-ext
+neon-pg-clean-ext: \
+	neon-pg-clean-ext-v14 \
+	neon-pg-clean-ext-v15 \
+	neon-pg-clean-ext-v16
 
 # shorthand to build all Postgres versions
 .PHONY: postgres
@@ -247,7 +280,7 @@ postgres-check: \
 
 # This doesn't remove the effects of 'configure'.
 .PHONY: clean
-clean: postgres-clean neon-pg-ext-clean
+clean: postgres-clean neon-pg-clean-ext
 	$(CARGO_CMD_PREFIX) cargo clean
 
 # This removes everything

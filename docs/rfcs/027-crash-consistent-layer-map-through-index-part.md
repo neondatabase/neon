@@ -54,7 +54,7 @@ If the compaction algorithm doesn't change between the two compaction runs, is d
 *However*:
 1. the file size of the overwritten L1s may not be identical, and
 2. the bit pattern of the overwritten L1s may not be identical, and,
-3. in the future, we may want to make the compaction code non-determinstic, influenced by past access patterns, or otherwise change it, resulting in L1 overwrites with a different set of delta records than before the overwrite
+3. in the future, we may want to make the compaction code non-deterministic, influenced by past access patterns, or otherwise change it, resulting in L1 overwrites with a different set of delta records than before the overwrite
 
 The items above are a problem for the [split-brain protection RFC](https://github.com/neondatabase/neon/pull/4919) because it assumes that layer files in S3 are only ever deleted, but never replaced (overPUTted).
 
@@ -63,7 +63,7 @@ But node B based its world view on the version of node A's `index_part.json` fro
 That earlier `index_part.json`` contained the file size of the pre-overwrite L1.
 If the overwritten L1 has a different file size, node B will refuse to read data from the overwritten L1.
 Effectively, the data in the L1 has become inaccessible to node B.
-If node B already uploaded an index part itself, all subsequent attachments will use node B's index part, and run into the same probem.
+If node B already uploaded an index part itself, all subsequent attachments will use node B's index part, and run into the same problem.
 
 If we ever introduce checksums instead of checking just the file size, then a mismatching bit pattern (2) will cause similar problems.
 
@@ -121,7 +121,7 @@ Multi-object changes that previously created and removed files in timeline dir a
 * atomic `index_part.json` update in S3, as per guarantee that S3 PUT is atomic
 * local timeline dir state:
   * irrelevant for layer map content => irrelevant for atomic updates / crash consistency
-  * if we crash after index part PUT, local layer files will be used, so, no on-demand downloads neede for them
+  * if we crash after index part PUT, local layer files will be used, so, no on-demand downloads needed for them
   * if we crash before index part PUT, local layer files will be deleted
 
 ## Trade-Offs
@@ -140,7 +140,7 @@ Assuming upload queue allows for unlimited queue depth (that's what it does toda
 * wal ingest: currently unbounded
 * L0 => L1 compaction: CPU time proportional to `O(sum(L0 size))` and upload work proportional to `O()`
   * Compaction threshold is 10 L0s and each L0 can be up to 256M in size. Target size for L1 is 128M.
-  * In practive, most L0s are tiny due to 10minute `DEFAULT_CHECKPOINT_TIMEOUT`.
+  * In practice, most L0s are tiny due to 10minute `DEFAULT_CHECKPOINT_TIMEOUT`.
 * image layer generation: CPU time `O(sum(input data))` + upload work `O(sum(new image layer size))`
   * I have no intuition how expensive / long-running it is in reality.
 * gc: `update_gc_info`` work (not substantial, AFAIK)
@@ -158,7 +158,7 @@ Pageserver crashes are very rare ; it would likely be acceptable to re-do the lo
 However, regular pageserver restart happen frequently, e.g., during weekly deploys.
 
 In general, pageserver restart faces the problem of tenants that "take too long" to shut down.
-They are a problem because other tenants that shut down quickly are unavailble while we wait for the slow tenants to shut down.
+They are a problem because other tenants that shut down quickly are unavailable while we wait for the slow tenants to shut down.
 We currently allot 10 seconds for graceful shutdown until we SIGKILL the pageserver process (as per `pageserver.service` unit file).
 A longer budget would expose tenants that are done early to a longer downtime.
 A short budget would risk throwing away more work that'd have to be re-done after restart.
@@ -236,7 +236,7 @@ tenants/$tenant/timelines/$timeline/$key_and_lsn_range
 tenants/$tenant/timelines/$timeline/$layer_file_id-$key_and_lsn_range
 ```
 
-To guarantee uniqueness, the unqiue number is a sequence number, stored in `index_part.json`.
+To guarantee uniqueness, the unique number is a sequence number, stored in `index_part.json`.
 
 This alternative does not solve atomic layer map updates.
 In our crash-during-compaction scenario above, the compaction run after the crash will not overwrite the L1s, but write/PUT new files with new sequence numbers.
@@ -246,11 +246,11 @@ We'd need to write a deduplication pass that checks if perfectly overlapping lay
 However, this alternative is appealing because it systematically prevents overwrites at a lower level than this RFC.
 
 So, this alternative is sufficient for the needs of the split-brain safety RFC (immutable layer files locally and in S3).
-But it doesn't solve the problems with crash-during-compaction outlined earlier in this RFC, and in fact, makes it much more accute.
+But it doesn't solve the problems with crash-during-compaction outlined earlier in this RFC, and in fact, makes it much more acute.
 The proposed design in this RFC addresses both.
 
 So, if this alternative sounds appealing, we should implement the proposal in this RFC first, then implement this alternative on top.
-That way, we avoid a phase where the crash-during-compaction problem is accute.
+That way, we avoid a phase where the crash-during-compaction problem is acute.
 
 ## Related issues
 

@@ -51,7 +51,10 @@ use crate::keyspace::KeyPartitioning;
 use crate::repository::Key;
 use crate::tenant::storage_layer::InMemoryLayer;
 use anyhow::Result;
-use std::collections::VecDeque;
+use pageserver_api::keyspace::{KeySpace, KeySpaceAccum};
+use range_set_blaze::{CheckSortedDisjoint, RangeSetBlaze};
+use std::collections::{HashMap, VecDeque};
+use std::iter::Peekable;
 use std::ops::Range;
 use std::sync::Arc;
 use utils::lsn::Lsn;
@@ -59,7 +62,7 @@ use utils::lsn::Lsn;
 use historic_layer_coverage::BufferedHistoricLayerCoverage;
 pub use historic_layer_coverage::LayerKey;
 
-use super::storage_layer::PersistentLayerDesc;
+use super::storage_layer::{LayerVisibilityHint, PersistentLayerDesc};
 
 ///
 /// LayerMap tracks what layers exist on a timeline.
@@ -144,9 +147,204 @@ impl Drop for BatchedUpdates<'_> {
 }
 
 /// Return value of LayerMap::search
+#[derive(Eq, PartialEq, Debug, Hash)]
 pub struct SearchResult {
     pub layer: Arc<PersistentLayerDesc>,
     pub lsn_floor: Lsn,
+}
+
+/// Return value of [`LayerMap::range_search`]
+///
+/// Contains a mapping from a layer description to a keyspace
+/// accumulator that contains all the keys which intersect the layer
+/// from the original search space. Keys that were not found are accumulated
+/// in a separate key space accumulator.
+#[derive(Debug)]
+pub struct RangeSearchResult {
+    pub found: HashMap<SearchResult, KeySpaceAccum>,
+    pub not_found: KeySpaceAccum,
+}
+
+impl RangeSearchResult {
+    fn new() -> Self {
+        Self {
+            found: HashMap::new(),
+            not_found: KeySpaceAccum::new(),
+        }
+    }
+}
+
+/// Collector for results of range search queries on the LayerMap.
+/// It should be provided with two iterators for the delta and image coverage
+/// that contain all the changes for layers which intersect the range.
+struct RangeSearchCollector<Iter>
+where
+    Iter: Iterator<Item = (i128, Option<Arc<PersistentLayerDesc>>)>,
+{
+    delta_coverage: Peekable<Iter>,
+    image_coverage: Peekable<Iter>,
+    key_range: Range<Key>,
+    end_lsn: Lsn,
+
+    current_delta: Option<Arc<PersistentLayerDesc>>,
+    current_image: Option<Arc<PersistentLayerDesc>>,
+
+    result: RangeSearchResult,
+}
+
+#[derive(Debug)]
+enum NextLayerType {
+    Delta(i128),
+    Image(i128),
+    Both(i128),
+}
+
+impl NextLayerType {
+    fn next_change_at_key(&self) -> Key {
+        match self {
+            NextLayerType::Delta(at) => Key::from_i128(*at),
+            NextLayerType::Image(at) => Key::from_i128(*at),
+            NextLayerType::Both(at) => Key::from_i128(*at),
+        }
+    }
+}
+
+impl<Iter> RangeSearchCollector<Iter>
+where
+    Iter: Iterator<Item = (i128, Option<Arc<PersistentLayerDesc>>)>,
+{
+    fn new(
+        key_range: Range<Key>,
+        end_lsn: Lsn,
+        delta_coverage: Iter,
+        image_coverage: Iter,
+    ) -> Self {
+        Self {
+            delta_coverage: delta_coverage.peekable(),
+            image_coverage: image_coverage.peekable(),
+            key_range,
+            end_lsn,
+            current_delta: None,
+            current_image: None,
+            result: RangeSearchResult::new(),
+        }
+    }
+
+    /// Run the collector. Collection is implemented via a two pointer algorithm.
+    /// One pointer tracks the start of the current range and the other tracks
+    /// the beginning of the next range which will overlap with the next change
+    /// in coverage across both image and delta.
+    fn collect(mut self) -> RangeSearchResult {
+        let next_layer_type = self.choose_next_layer_type();
+        let mut current_range_start = match next_layer_type {
+            None => {
+                // No changes for the range
+                self.pad_range(self.key_range.clone());
+                return self.result;
+            }
+            Some(layer_type) if self.key_range.end <= layer_type.next_change_at_key() => {
+                // Changes only after the end of the range
+                self.pad_range(self.key_range.clone());
+                return self.result;
+            }
+            Some(layer_type) => {
+                // Changes for the range exist. Record anything before the first
+                // coverage change as not found.
+                let coverage_start = layer_type.next_change_at_key();
+                let range_before = self.key_range.start..coverage_start;
+                self.pad_range(range_before);
+
+                self.advance(&layer_type);
+                coverage_start
+            }
+        };
+
+        while current_range_start < self.key_range.end {
+            let next_layer_type = self.choose_next_layer_type();
+            match next_layer_type {
+                Some(t) => {
+                    let current_range_end = t.next_change_at_key();
+                    self.add_range(current_range_start..current_range_end);
+                    current_range_start = current_range_end;
+
+                    self.advance(&t);
+                }
+                None => {
+                    self.add_range(current_range_start..self.key_range.end);
+                    current_range_start = self.key_range.end;
+                }
+            }
+        }
+
+        self.result
+    }
+
+    /// Mark a range as not found (i.e. no layers intersect it)
+    fn pad_range(&mut self, key_range: Range<Key>) {
+        if !key_range.is_empty() {
+            self.result.not_found.add_range(key_range);
+        }
+    }
+
+    /// Select the appropiate layer for the given range and update
+    /// the collector.
+    fn add_range(&mut self, covered_range: Range<Key>) {
+        let selected = LayerMap::select_layer(
+            self.current_delta.clone(),
+            self.current_image.clone(),
+            self.end_lsn,
+        );
+
+        match selected {
+            Some(search_result) => self
+                .result
+                .found
+                .entry(search_result)
+                .or_default()
+                .add_range(covered_range),
+            None => self.pad_range(covered_range),
+        }
+    }
+
+    /// Move to the next coverage change.
+    fn advance(&mut self, layer_type: &NextLayerType) {
+        match layer_type {
+            NextLayerType::Delta(_) => {
+                let (_, layer) = self.delta_coverage.next().unwrap();
+                self.current_delta = layer;
+            }
+            NextLayerType::Image(_) => {
+                let (_, layer) = self.image_coverage.next().unwrap();
+                self.current_image = layer;
+            }
+            NextLayerType::Both(_) => {
+                let (_, image_layer) = self.image_coverage.next().unwrap();
+                let (_, delta_layer) = self.delta_coverage.next().unwrap();
+
+                self.current_image = image_layer;
+                self.current_delta = delta_layer;
+            }
+        }
+    }
+
+    /// Pick the next coverage change: the one at the lesser key or both if they're alligned.
+    fn choose_next_layer_type(&mut self) -> Option<NextLayerType> {
+        let next_delta_at = self.delta_coverage.peek().map(|(key, _)| key);
+        let next_image_at = self.image_coverage.peek().map(|(key, _)| key);
+
+        match (next_delta_at, next_image_at) {
+            (None, None) => None,
+            (Some(next_delta_at), None) => Some(NextLayerType::Delta(*next_delta_at)),
+            (None, Some(next_image_at)) => Some(NextLayerType::Image(*next_image_at)),
+            (Some(next_delta_at), Some(next_image_at)) if next_image_at < next_delta_at => {
+                Some(NextLayerType::Image(*next_image_at))
+            }
+            (Some(next_delta_at), Some(next_image_at)) if next_delta_at < next_image_at => {
+                Some(NextLayerType::Delta(*next_delta_at))
+            }
+            (Some(next_delta_at), Some(_)) => Some(NextLayerType::Both(*next_delta_at)),
+        }
+    }
 }
 
 impl LayerMap {
@@ -186,7 +384,18 @@ impl LayerMap {
         let latest_delta = version.delta_coverage.query(key.to_i128());
         let latest_image = version.image_coverage.query(key.to_i128());
 
-        match (latest_delta, latest_image) {
+        Self::select_layer(latest_delta, latest_image, end_lsn)
+    }
+
+    fn select_layer(
+        delta_layer: Option<Arc<PersistentLayerDesc>>,
+        image_layer: Option<Arc<PersistentLayerDesc>>,
+        end_lsn: Lsn,
+    ) -> Option<SearchResult> {
+        assert!(delta_layer.as_ref().map_or(true, |l| l.is_delta()));
+        assert!(image_layer.as_ref().map_or(true, |l| !l.is_delta()));
+
+        match (delta_layer, image_layer) {
             (None, None) => None,
             (None, Some(image)) => {
                 let lsn_floor = image.get_lsn_range().start;
@@ -223,6 +432,24 @@ impl LayerMap {
         }
     }
 
+    pub fn range_search(&self, key_range: Range<Key>, end_lsn: Lsn) -> RangeSearchResult {
+        let version = match self.historic.get().unwrap().get_version(end_lsn.0 - 1) {
+            Some(version) => version,
+            None => {
+                let mut result = RangeSearchResult::new();
+                result.not_found.add_range(key_range);
+                return result;
+            }
+        };
+
+        let raw_range = key_range.start.to_i128()..key_range.end.to_i128();
+        let delta_changes = version.delta_coverage.range_overlaps(&raw_range);
+        let image_changes = version.image_coverage.range_overlaps(&raw_range);
+
+        let collector = RangeSearchCollector::new(key_range, end_lsn, delta_changes, image_changes);
+        collector.collect()
+    }
+
     /// Start a batch of updates, applied on drop
     pub fn batch_update(&mut self) -> BatchedUpdates<'_> {
         BatchedUpdates { layer_map: self }
@@ -237,7 +464,7 @@ impl LayerMap {
     pub(self) fn insert_historic_noflush(&mut self, layer_desc: PersistentLayerDesc) {
         // TODO: See #3869, resulting #4088, attempted fix and repro #4094
 
-        if Self::is_l0(&layer_desc) {
+        if Self::is_l0(&layer_desc.key_range, layer_desc.is_delta) {
             self.l0_delta_layers.push(layer_desc.clone().into());
         }
 
@@ -256,7 +483,7 @@ impl LayerMap {
         self.historic
             .remove(historic_layer_coverage::LayerKey::from(layer_desc));
         let layer_key = layer_desc.key();
-        if Self::is_l0(layer_desc) {
+        if Self::is_l0(&layer_desc.key_range, layer_desc.is_delta) {
             let len_before = self.l0_delta_layers.len();
             let mut l0_delta_layers = std::mem::take(&mut self.l0_delta_layers);
             l0_delta_layers.retain(|other| other.key() != layer_key);
@@ -321,6 +548,20 @@ impl LayerMap {
         self.historic.iter()
     }
 
+    /// Get a ref counted pointer for the first in memory layer that matches the provided predicate.
+    pub fn find_in_memory_layer<Pred>(&self, mut pred: Pred) -> Option<Arc<InMemoryLayer>>
+    where
+        Pred: FnMut(&Arc<InMemoryLayer>) -> bool,
+    {
+        if let Some(open) = &self.open_layer {
+            if pred(open) {
+                return Some(open.clone());
+            }
+        }
+
+        self.frozen_layers.iter().rfind(|l| pred(l)).cloned()
+    }
+
     ///
     /// Divide the whole given range of keys into sub-ranges based on the latest
     /// image layer that covers each range at the specified lsn (inclusive).
@@ -348,7 +589,7 @@ impl LayerMap {
             let kr = Key::from_i128(current_key)..Key::from_i128(change_key);
             coverage.push((kr, current_val.take()));
             current_key = change_key;
-            current_val = change_val.clone();
+            current_val.clone_from(&change_val);
         }
 
         // Add the final interval
@@ -358,8 +599,9 @@ impl LayerMap {
         coverage
     }
 
-    pub fn is_l0(layer: &PersistentLayerDesc) -> bool {
-        layer.get_key_range() == (Key::MIN..Key::MAX)
+    /// Check if the key range resembles that of an L0 layer.
+    pub fn is_l0(key_range: &Range<Key>, is_delta_layer: bool) -> bool {
+        is_delta_layer && key_range == &(Key::MIN..Key::MAX)
     }
 
     /// This function determines which layers are counted in `count_deltas`:
@@ -386,7 +628,7 @@ impl LayerMap {
     ///      than just the current partition_range.
     pub fn is_reimage_worthy(layer: &PersistentLayerDesc, partition_range: &Range<Key>) -> bool {
         // Case 1
-        if !Self::is_l0(layer) {
+        if !Self::is_l0(&layer.key_range, layer.is_delta) {
             return true;
         }
 
@@ -432,12 +674,12 @@ impl LayerMap {
         // Loop through the delta coverage and recurse on each part
         for (change_key, change_val) in version.delta_coverage.range(start..end) {
             // If there's a relevant delta in this part, add 1 and recurse down
-            if let Some(val) = current_val {
+            if let Some(val) = &current_val {
                 if val.get_lsn_range().end > lsn.start {
                     let kr = Key::from_i128(current_key)..Key::from_i128(change_key);
                     let lr = lsn.start..val.get_lsn_range().start;
                     if !kr.is_empty() {
-                        let base_count = Self::is_reimage_worthy(&val, key) as usize;
+                        let base_count = Self::is_reimage_worthy(val, key) as usize;
                         let new_limit = limit.map(|l| l - base_count);
                         let max_stacked_deltas_underneath = self.count_deltas(&kr, &lr, new_limit);
                         max_stacked_deltas = std::cmp::max(
@@ -449,17 +691,17 @@ impl LayerMap {
             }
 
             current_key = change_key;
-            current_val = change_val.clone();
+            current_val.clone_from(&change_val);
         }
 
         // Consider the last part
-        if let Some(val) = current_val {
+        if let Some(val) = &current_val {
             if val.get_lsn_range().end > lsn.start {
                 let kr = Key::from_i128(current_key)..Key::from_i128(end);
                 let lr = lsn.start..val.get_lsn_range().start;
 
                 if !kr.is_empty() {
-                    let base_count = Self::is_reimage_worthy(&val, key) as usize;
+                    let base_count = Self::is_reimage_worthy(val, key) as usize;
                     let new_limit = limit.map(|l| l - base_count);
                     let max_stacked_deltas_underneath = self.count_deltas(&kr, &lr, new_limit);
                     max_stacked_deltas = std::cmp::max(
@@ -604,8 +846,8 @@ impl LayerMap {
     }
 
     /// Return all L0 delta layers
-    pub fn get_level0_deltas(&self) -> Result<Vec<Arc<PersistentLayerDesc>>> {
-        Ok(self.l0_delta_layers.to_vec())
+    pub fn level0_deltas(&self) -> &Vec<Arc<PersistentLayerDesc>> {
+        &self.l0_delta_layers
     }
 
     /// debugging function to print out the contents of the layer map
@@ -629,5 +871,603 @@ impl LayerMap {
         }
         println!("End dump LayerMap");
         Ok(())
+    }
+
+    /// `read_points` represent the tip of a timeline and any branch points, i.e. the places
+    /// where we expect to serve reads.
+    ///
+    /// This function is O(N) and should be called infrequently.  The caller is responsible for
+    /// looking up and updating the Layer objects for these layer descriptors.
+    pub fn get_visibility(
+        &self,
+        mut read_points: Vec<Lsn>,
+    ) -> (
+        Vec<(Arc<PersistentLayerDesc>, LayerVisibilityHint)>,
+        KeySpace,
+    ) {
+        // This is like a KeySpace, but this type is intended for efficient unions with image layer ranges, whereas
+        // KeySpace is intended to be composed statically and iterated over.
+        struct KeyShadow {
+            // Map of range start to range end
+            inner: RangeSetBlaze<i128>,
+        }
+
+        impl KeyShadow {
+            fn new() -> Self {
+                Self {
+                    inner: Default::default(),
+                }
+            }
+
+            fn contains(&self, range: Range<Key>) -> bool {
+                let range_incl = range.start.to_i128()..=range.end.to_i128() - 1;
+                self.inner.is_superset(&RangeSetBlaze::from_sorted_disjoint(
+                    CheckSortedDisjoint::from([range_incl]),
+                ))
+            }
+
+            /// Add the input range to the keys covered by self.
+            ///
+            /// Return true if inserting this range covered some keys that were previously not covered
+            fn cover(&mut self, insert: Range<Key>) -> bool {
+                let range_incl = insert.start.to_i128()..=insert.end.to_i128() - 1;
+                self.inner.ranges_insert(range_incl)
+            }
+
+            fn reset(&mut self) {
+                self.inner = Default::default();
+            }
+
+            fn to_keyspace(&self) -> KeySpace {
+                let mut accum = KeySpaceAccum::new();
+                for range_incl in self.inner.ranges() {
+                    let range = Range {
+                        start: Key::from_i128(*range_incl.start()),
+                        end: Key::from_i128(range_incl.end() + 1),
+                    };
+                    accum.add_range(range)
+                }
+
+                accum.to_keyspace()
+            }
+        }
+
+        // The 'shadow' will be updated as we sweep through the layers: an image layer subtracts from the shadow,
+        // and a ReadPoint
+        read_points.sort_by_key(|rp| rp.0);
+        let mut shadow = KeyShadow::new();
+
+        // We will interleave all our read points and layers into a sorted collection
+        enum Item {
+            ReadPoint { lsn: Lsn },
+            Layer(Arc<PersistentLayerDesc>),
+        }
+
+        let mut items = Vec::with_capacity(self.historic.len() + read_points.len());
+        items.extend(self.iter_historic_layers().map(Item::Layer));
+        items.extend(
+            read_points
+                .into_iter()
+                .map(|rp| Item::ReadPoint { lsn: rp }),
+        );
+
+        // Ordering: we want to iterate like this:
+        // 1. Highest LSNs first
+        // 2. Consider images before deltas if they end at the same LSNs (images cover deltas)
+        // 3. Consider ReadPoints before image layers if they're at the same LSN (readpoints make that image visible)
+        items.sort_by_key(|item| {
+            std::cmp::Reverse(match item {
+                Item::Layer(layer) => {
+                    if layer.is_delta() {
+                        (Lsn(layer.get_lsn_range().end.0 - 1), 0)
+                    } else {
+                        (layer.image_layer_lsn(), 1)
+                    }
+                }
+                Item::ReadPoint { lsn } => (*lsn, 2),
+            })
+        });
+
+        let mut results = Vec::with_capacity(self.historic.len());
+
+        let mut maybe_covered_deltas: Vec<Arc<PersistentLayerDesc>> = Vec::new();
+
+        for item in items {
+            let (reached_lsn, is_readpoint) = match &item {
+                Item::ReadPoint { lsn } => (lsn, true),
+                Item::Layer(layer) => (&layer.lsn_range.start, false),
+            };
+            maybe_covered_deltas.retain(|d| {
+                if *reached_lsn >= d.lsn_range.start && is_readpoint {
+                    // We encountered a readpoint within the delta layer: it is visible
+
+                    results.push((d.clone(), LayerVisibilityHint::Visible));
+                    false
+                } else if *reached_lsn < d.lsn_range.start {
+                    // We passed the layer's range without encountering a read point: it is not visible
+                    results.push((d.clone(), LayerVisibilityHint::Covered));
+                    false
+                } else {
+                    // We're still in the delta layer: continue iterating
+                    true
+                }
+            });
+
+            match item {
+                Item::ReadPoint { lsn: _lsn } => {
+                    // TODO: propagate the child timeline's shadow from their own run of this function, so that we don't have
+                    // to assume that the whole key range is visible at the branch point.
+                    shadow.reset();
+                }
+                Item::Layer(layer) => {
+                    let visibility = if layer.is_delta() {
+                        if shadow.contains(layer.get_key_range()) {
+                            // If a layer isn't visible based on current state, we must defer deciding whether
+                            // it is truly not visible until we have advanced past the delta's range: we might
+                            // encounter another branch point within this delta layer's LSN range.
+                            maybe_covered_deltas.push(layer);
+                            continue;
+                        } else {
+                            LayerVisibilityHint::Visible
+                        }
+                    } else {
+                        let modified = shadow.cover(layer.get_key_range());
+                        if modified {
+                            // An image layer in a region which wasn't fully covered yet: this layer is visible, but layers below it will be covered
+                            LayerVisibilityHint::Visible
+                        } else {
+                            // An image layer in a region that was already covered
+                            LayerVisibilityHint::Covered
+                        }
+                    };
+
+                    results.push((layer, visibility));
+                }
+            }
+        }
+
+        // Drain any remaining maybe_covered deltas
+        results.extend(
+            maybe_covered_deltas
+                .into_iter()
+                .map(|d| (d, LayerVisibilityHint::Covered)),
+        );
+
+        (results, shadow.to_keyspace())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::tenant::{storage_layer::LayerName, IndexPart};
+    use pageserver_api::{
+        key::DBDIR_KEY,
+        keyspace::{KeySpace, KeySpaceRandomAccum},
+    };
+    use std::{collections::HashMap, path::PathBuf};
+    use utils::{
+        id::{TenantId, TimelineId},
+        shard::TenantShardId,
+    };
+
+    use super::*;
+
+    #[derive(Clone)]
+    struct LayerDesc {
+        key_range: Range<Key>,
+        lsn_range: Range<Lsn>,
+        is_delta: bool,
+    }
+
+    fn create_layer_map(layers: Vec<LayerDesc>) -> LayerMap {
+        let mut layer_map = LayerMap::default();
+
+        for layer in layers {
+            layer_map.insert_historic_noflush(PersistentLayerDesc::new_test(
+                layer.key_range,
+                layer.lsn_range,
+                layer.is_delta,
+            ));
+        }
+
+        layer_map.flush_updates();
+        layer_map
+    }
+
+    fn assert_range_search_result_eq(lhs: RangeSearchResult, rhs: RangeSearchResult) {
+        assert_eq!(lhs.not_found.to_keyspace(), rhs.not_found.to_keyspace());
+        let lhs: HashMap<SearchResult, KeySpace> = lhs
+            .found
+            .into_iter()
+            .map(|(search_result, accum)| (search_result, accum.to_keyspace()))
+            .collect();
+        let rhs: HashMap<SearchResult, KeySpace> = rhs
+            .found
+            .into_iter()
+            .map(|(search_result, accum)| (search_result, accum.to_keyspace()))
+            .collect();
+
+        assert_eq!(lhs, rhs);
+    }
+
+    #[cfg(test)]
+    fn brute_force_range_search(
+        layer_map: &LayerMap,
+        key_range: Range<Key>,
+        end_lsn: Lsn,
+    ) -> RangeSearchResult {
+        let mut range_search_result = RangeSearchResult::new();
+
+        let mut key = key_range.start;
+        while key != key_range.end {
+            let res = layer_map.search(key, end_lsn);
+            match res {
+                Some(res) => {
+                    range_search_result
+                        .found
+                        .entry(res)
+                        .or_default()
+                        .add_key(key);
+                }
+                None => {
+                    range_search_result.not_found.add_key(key);
+                }
+            }
+
+            key = key.next();
+        }
+
+        range_search_result
+    }
+
+    #[test]
+    fn ranged_search_on_empty_layer_map() {
+        let layer_map = LayerMap::default();
+        let range = Key::from_i128(100)..Key::from_i128(200);
+
+        let res = layer_map.range_search(range.clone(), Lsn(100));
+        assert_eq!(
+            res.not_found.to_keyspace(),
+            KeySpace {
+                ranges: vec![range]
+            }
+        );
+    }
+
+    #[test]
+    fn ranged_search() {
+        let layers = vec![
+            LayerDesc {
+                key_range: Key::from_i128(15)..Key::from_i128(50),
+                lsn_range: Lsn(0)..Lsn(5),
+                is_delta: false,
+            },
+            LayerDesc {
+                key_range: Key::from_i128(10)..Key::from_i128(20),
+                lsn_range: Lsn(5)..Lsn(20),
+                is_delta: true,
+            },
+            LayerDesc {
+                key_range: Key::from_i128(15)..Key::from_i128(25),
+                lsn_range: Lsn(20)..Lsn(30),
+                is_delta: true,
+            },
+            LayerDesc {
+                key_range: Key::from_i128(35)..Key::from_i128(40),
+                lsn_range: Lsn(25)..Lsn(35),
+                is_delta: true,
+            },
+            LayerDesc {
+                key_range: Key::from_i128(35)..Key::from_i128(40),
+                lsn_range: Lsn(35)..Lsn(40),
+                is_delta: false,
+            },
+        ];
+
+        let layer_map = create_layer_map(layers.clone());
+        for start in 0..60 {
+            for end in (start + 1)..60 {
+                let range = Key::from_i128(start)..Key::from_i128(end);
+                let result = layer_map.range_search(range.clone(), Lsn(100));
+                let expected = brute_force_range_search(&layer_map, range, Lsn(100));
+
+                assert_range_search_result_eq(result, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn layer_visibility_basic() {
+        // A simple synthetic input, as a smoke test.
+        let tenant_shard_id = TenantShardId::unsharded(TenantId::generate());
+        let timeline_id = TimelineId::generate();
+        let mut layer_map = LayerMap::default();
+        let mut updates = layer_map.batch_update();
+
+        const FAKE_LAYER_SIZE: u64 = 1024;
+
+        let inject_delta = |updates: &mut BatchedUpdates,
+                            key_start: i128,
+                            key_end: i128,
+                            lsn_start: u64,
+                            lsn_end: u64| {
+            let desc = PersistentLayerDesc::new_delta(
+                tenant_shard_id,
+                timeline_id,
+                Range {
+                    start: Key::from_i128(key_start),
+                    end: Key::from_i128(key_end),
+                },
+                Range {
+                    start: Lsn(lsn_start),
+                    end: Lsn(lsn_end),
+                },
+                1024,
+            );
+            updates.insert_historic(desc.clone());
+            desc
+        };
+
+        let inject_image =
+            |updates: &mut BatchedUpdates, key_start: i128, key_end: i128, lsn: u64| {
+                let desc = PersistentLayerDesc::new_img(
+                    tenant_shard_id,
+                    timeline_id,
+                    Range {
+                        start: Key::from_i128(key_start),
+                        end: Key::from_i128(key_end),
+                    },
+                    Lsn(lsn),
+                    FAKE_LAYER_SIZE,
+                );
+                updates.insert_historic(desc.clone());
+                desc
+            };
+
+        //
+        // Construct our scenario: the following lines go in backward-LSN order, constructing the various scenarios
+        // we expect to handle.  You can follow these examples through in the same order as they would be processed
+        // by the function under test.
+        //
+
+        let mut read_points = vec![Lsn(1000)];
+
+        // A delta ahead of any image layer
+        let ahead_layer = inject_delta(&mut updates, 10, 20, 101, 110);
+
+        // An image layer is visible and covers some layers beneath itself
+        let visible_covering_img = inject_image(&mut updates, 5, 25, 99);
+
+        // A delta layer covered by the image layer: should be covered
+        let covered_delta = inject_delta(&mut updates, 10, 20, 90, 100);
+
+        // A delta layer partially covered by an image layer: should be visible
+        let partially_covered_delta = inject_delta(&mut updates, 1, 7, 90, 100);
+
+        // A delta layer not covered by an image layer: should be visible
+        let not_covered_delta = inject_delta(&mut updates, 1, 4, 90, 100);
+
+        // An image layer covered by the image layer above: should be covered
+        let covered_image = inject_image(&mut updates, 10, 20, 89);
+
+        // An image layer partially covered by an image layer: should be visible
+        let partially_covered_image = inject_image(&mut updates, 1, 7, 89);
+
+        // An image layer not covered by an image layer: should be visible
+        let not_covered_image = inject_image(&mut updates, 1, 4, 89);
+
+        // A read point: this will make subsequent layers below here visible, even if there are
+        // more recent layers covering them.
+        read_points.push(Lsn(80));
+
+        // A delta layer covered by an earlier image layer, but visible to a readpoint below that covering layer
+        let covered_delta_below_read_point = inject_delta(&mut updates, 10, 20, 70, 79);
+
+        // A delta layer whose end LSN is covered, but where a read point is present partway through its LSN range:
+        // the read point should make it visible, even though its end LSN is covered
+        let covering_img_between_read_points = inject_image(&mut updates, 10, 20, 69);
+        let covered_delta_between_read_points = inject_delta(&mut updates, 10, 15, 67, 69);
+        read_points.push(Lsn(65));
+        let covered_delta_intersects_read_point = inject_delta(&mut updates, 15, 20, 60, 69);
+
+        let visible_img_after_last_read_point = inject_image(&mut updates, 10, 20, 65);
+
+        updates.flush();
+
+        let (layer_visibilities, shadow) = layer_map.get_visibility(read_points);
+        let layer_visibilities = layer_visibilities.into_iter().collect::<HashMap<_, _>>();
+
+        assert_eq!(
+            layer_visibilities.get(&ahead_layer),
+            Some(&LayerVisibilityHint::Visible)
+        );
+        assert_eq!(
+            layer_visibilities.get(&visible_covering_img),
+            Some(&LayerVisibilityHint::Visible)
+        );
+        assert_eq!(
+            layer_visibilities.get(&covered_delta),
+            Some(&LayerVisibilityHint::Covered)
+        );
+        assert_eq!(
+            layer_visibilities.get(&partially_covered_delta),
+            Some(&LayerVisibilityHint::Visible)
+        );
+        assert_eq!(
+            layer_visibilities.get(&not_covered_delta),
+            Some(&LayerVisibilityHint::Visible)
+        );
+        assert_eq!(
+            layer_visibilities.get(&covered_image),
+            Some(&LayerVisibilityHint::Covered)
+        );
+        assert_eq!(
+            layer_visibilities.get(&partially_covered_image),
+            Some(&LayerVisibilityHint::Visible)
+        );
+        assert_eq!(
+            layer_visibilities.get(&not_covered_image),
+            Some(&LayerVisibilityHint::Visible)
+        );
+        assert_eq!(
+            layer_visibilities.get(&covered_delta_below_read_point),
+            Some(&LayerVisibilityHint::Visible)
+        );
+        assert_eq!(
+            layer_visibilities.get(&covering_img_between_read_points),
+            Some(&LayerVisibilityHint::Visible)
+        );
+        assert_eq!(
+            layer_visibilities.get(&covered_delta_between_read_points),
+            Some(&LayerVisibilityHint::Covered)
+        );
+        assert_eq!(
+            layer_visibilities.get(&covered_delta_intersects_read_point),
+            Some(&LayerVisibilityHint::Visible)
+        );
+        assert_eq!(
+            layer_visibilities.get(&visible_img_after_last_read_point),
+            Some(&LayerVisibilityHint::Visible)
+        );
+
+        // Shadow should include all the images below the last read point
+        let expected_shadow = KeySpace {
+            ranges: vec![Key::from_i128(10)..Key::from_i128(20)],
+        };
+        assert_eq!(shadow, expected_shadow);
+    }
+
+    fn fixture_path(relative: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(relative)
+    }
+
+    #[test]
+    fn layer_visibility_realistic() {
+        // Load a large example layermap
+        let index_raw = std::fs::read_to_string(fixture_path(
+            "test_data/indices/mixed_workload/index_part.json",
+        ))
+        .unwrap();
+        let index: IndexPart = serde_json::from_str::<IndexPart>(&index_raw).unwrap();
+
+        let tenant_id = TenantId::generate();
+        let tenant_shard_id = TenantShardId::unsharded(tenant_id);
+        let timeline_id = TimelineId::generate();
+
+        let mut layer_map = LayerMap::default();
+        let mut updates = layer_map.batch_update();
+        for (layer_name, layer_metadata) in index.layer_metadata {
+            let layer_desc = match layer_name {
+                LayerName::Image(layer_name) => PersistentLayerDesc {
+                    key_range: layer_name.key_range.clone(),
+                    lsn_range: layer_name.lsn_as_range(),
+                    tenant_shard_id,
+                    timeline_id,
+                    is_delta: false,
+                    file_size: layer_metadata.file_size,
+                },
+                LayerName::Delta(layer_name) => PersistentLayerDesc {
+                    key_range: layer_name.key_range,
+                    lsn_range: layer_name.lsn_range,
+                    tenant_shard_id,
+                    timeline_id,
+                    is_delta: true,
+                    file_size: layer_metadata.file_size,
+                },
+            };
+            updates.insert_historic(layer_desc);
+        }
+        updates.flush();
+
+        let read_points = vec![index.metadata.disk_consistent_lsn()];
+        let (layer_visibilities, shadow) = layer_map.get_visibility(read_points);
+        for (layer_desc, visibility) in &layer_visibilities {
+            tracing::info!("{layer_desc:?}: {visibility:?}");
+            eprintln!("{layer_desc:?}: {visibility:?}");
+        }
+
+        // The shadow should be non-empty, since there were some image layers
+        assert!(!shadow.ranges.is_empty());
+
+        // At least some layers should be marked covered
+        assert!(layer_visibilities
+            .iter()
+            .any(|i| matches!(i.1, LayerVisibilityHint::Covered)));
+
+        let layer_visibilities = layer_visibilities.into_iter().collect::<HashMap<_, _>>();
+
+        // Brute force validation: a layer should be marked covered if and only if there are image layers above it in LSN order which cover it
+        for (layer_desc, visible) in &layer_visibilities {
+            let mut coverage = KeySpaceRandomAccum::new();
+            let mut covered_by = Vec::new();
+
+            for other_layer in layer_map.iter_historic_layers() {
+                if &other_layer == layer_desc {
+                    continue;
+                }
+                if !other_layer.is_delta()
+                    && other_layer.image_layer_lsn() >= Lsn(layer_desc.get_lsn_range().end.0 - 1)
+                    && other_layer.key_range.start <= layer_desc.key_range.end
+                    && layer_desc.key_range.start <= other_layer.key_range.end
+                {
+                    coverage.add_range(other_layer.get_key_range());
+                    covered_by.push((*other_layer).clone());
+                }
+            }
+            let coverage = coverage.to_keyspace();
+
+            let expect_visible = if coverage.ranges.len() == 1
+                && coverage.contains(&layer_desc.key_range.start)
+                && coverage.contains(&Key::from_i128(layer_desc.key_range.end.to_i128() - 1))
+            {
+                LayerVisibilityHint::Covered
+            } else {
+                LayerVisibilityHint::Visible
+            };
+
+            if expect_visible != *visible {
+                eprintln!(
+                    "Layer {}..{} @ {}..{} (delta={}) is {visible:?}, should be {expect_visible:?}",
+                    layer_desc.key_range.start,
+                    layer_desc.key_range.end,
+                    layer_desc.lsn_range.start,
+                    layer_desc.lsn_range.end,
+                    layer_desc.is_delta()
+                );
+                if expect_visible == LayerVisibilityHint::Covered {
+                    eprintln!("Covered by:");
+                    for other in covered_by {
+                        eprintln!(
+                            "  {}..{} @ {}",
+                            other.get_key_range().start,
+                            other.get_key_range().end,
+                            other.image_layer_lsn()
+                        );
+                    }
+                    if let Some(range) = coverage.ranges.first() {
+                        eprintln!(
+                            "Total coverage from contributing layers: {}..{}",
+                            range.start, range.end
+                        );
+                    } else {
+                        eprintln!(
+                            "Total coverage from contributing layers: {:?}",
+                            coverage.ranges
+                        );
+                    }
+                }
+            }
+            assert_eq!(expect_visible, *visible);
+        }
+
+        // Sanity: the layer that holds latest data for the DBDIR key should always be visible
+        // (just using this key as a key that will always exist for any layermap fixture)
+        let dbdir_layer = layer_map
+            .search(DBDIR_KEY, index.metadata.disk_consistent_lsn())
+            .unwrap();
+        assert!(matches!(
+            layer_visibilities.get(&dbdir_layer.layer).unwrap(),
+            LayerVisibilityHint::Visible
+        ));
     }
 }

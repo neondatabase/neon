@@ -2,13 +2,13 @@ from dataclasses import dataclass
 from typing import Generator, Optional
 
 import pytest
+from fixtures.common_types import TenantId
 from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
 )
-from fixtures.pageserver.http import PageserverApiException, TenantConfig
+from fixtures.pageserver.http import TenantConfig
 from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
-from fixtures.types import TenantId
 from fixtures.utils import wait_until
 
 
@@ -17,9 +17,11 @@ def positive_env(neon_env_builder: NeonEnvBuilder) -> NeonEnv:
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
     env = neon_env_builder.init_start()
 
-    # eviction might be the first one after an attach to access the layers
-    env.pageserver.allowed_errors.append(
-        ".*unexpectedly on-demand downloading remote layer .* for task kind Eviction"
+    env.pageserver.allowed_errors.extend(
+        [
+            # eviction might be the first one after an attach to access the layers
+            ".*unexpectedly on-demand downloading remote layer .* for task kind Eviction",
+        ]
     )
     assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
     return env
@@ -54,19 +56,16 @@ def negative_env(neon_env_builder: NeonEnvBuilder) -> Generator[NegativeTests, N
 
     env.pageserver.allowed_errors.extend(
         [
-            # This fixture detaches the tenant, and tests using it will tend to re-attach it
-            # shortly after. There may be un-processed deletion_queue validations from the
-            # initial attachment
-            ".*Dropped remote consistent LSN updates.*",
             # This fixture is for tests that will intentionally generate 400 responses
             ".*Error processing HTTP request: Bad request",
         ]
     )
 
-    def log_contains_bad_request():
-        env.pageserver.log_contains(".*Error processing HTTP request: Bad request")
-
-    wait_until(50, 0.1, log_contains_bad_request)
+    wait_until(
+        50,
+        0.1,
+        lambda: env.pageserver.assert_log_contains(".*Error processing HTTP request: Bad request"),
+    )
 
 
 def test_null_body(negative_env: NegativeTests):
@@ -77,8 +76,8 @@ def test_null_body(negative_env: NegativeTests):
     tenant_id = negative_env.tenant_id
     ps_http = env.pageserver.http_client()
 
-    res = ps_http.post(
-        f"{ps_http.base_url}/v1/tenant/{tenant_id}/attach",
+    res = ps_http.put(
+        f"{ps_http.base_url}/v1/tenant/{tenant_id}/location_config",
         data=b"null",
         headers={"Content-Type": "application/json"},
     )
@@ -94,35 +93,16 @@ def test_null_config(negative_env: NegativeTests):
     tenant_id = negative_env.tenant_id
     ps_http = env.pageserver.http_client()
 
-    res = ps_http.post(
-        f"{ps_http.base_url}/v1/tenant/{tenant_id}/attach",
-        data=b'{"config": null}',
+    res = ps_http.put(
+        f"{ps_http.base_url}/v1/tenant/{tenant_id}/location_config",
+        json={"mode": "AttachedSingle", "generation": 1, "tenant_conf": None},
         headers={"Content-Type": "application/json"},
     )
     assert res.status_code == 400
 
 
-def test_config_with_unknown_keys_is_bad_request(negative_env: NegativeTests):
-    """
-    If we send a config with unknown keys, the request should be rejected with status 400.
-    """
-
-    env = negative_env.neon_env
-    tenant_id = negative_env.tenant_id
-
-    config_with_unknown_keys = {
-        "compaction_period": "1h",
-        "this_key_does_not_exist": "some value",
-    }
-
-    with pytest.raises(PageserverApiException) as e:
-        env.pageserver.tenant_attach(tenant_id, config=config_with_unknown_keys)
-    assert e.type == PageserverApiException
-    assert e.value.status_code == 400
-
-
 @pytest.mark.parametrize("content_type", [None, "application/json"])
-def test_no_config(positive_env: NeonEnv, content_type: Optional[str]):
+def test_empty_config(positive_env: NeonEnv, content_type: Optional[str]):
     """
     When the 'config' body attribute is omitted, the request should be accepted
     and the tenant should use the default configuration
@@ -136,11 +116,13 @@ def test_no_config(positive_env: NeonEnv, content_type: Optional[str]):
     ps_http.tenant_detach(tenant_id)
     assert tenant_id not in [TenantId(t["id"]) for t in ps_http.tenant_list()]
 
-    body = {"generation": env.attachment_service.attach_hook_issue(tenant_id, env.pageserver.id)}
-
-    ps_http.post(
-        f"{ps_http.base_url}/v1/tenant/{tenant_id}/attach",
-        json=body,
+    ps_http.put(
+        f"{ps_http.base_url}/v1/tenant/{tenant_id}/location_config",
+        json={
+            "mode": "AttachedSingle",
+            "generation": env.storage_controller.attach_hook_issue(tenant_id, env.pageserver.id),
+            "tenant_conf": {},
+        },
         headers=None if content_type else {"Content-Type": "application/json"},
     ).raise_for_status()
 
@@ -160,23 +142,36 @@ def test_fully_custom_config(positive_env: NeonEnv):
         "compaction_target_size": 1048576,
         "checkpoint_distance": 10000,
         "checkpoint_timeout": "13m",
+        "compaction_algorithm": {
+            "kind": "tiered",
+        },
         "eviction_policy": {
             "kind": "LayerAccessThreshold",
             "period": "20s",
             "threshold": "23h",
         },
         "evictions_low_residence_duration_metric_threshold": "2days",
-        "gc_feedback": True,
         "gc_horizon": 23 * (1024 * 1024),
         "gc_period": "2h 13m",
         "heatmap_period": "10m",
         "image_creation_threshold": 7,
         "pitr_interval": "1m",
         "lagging_wal_timeout": "23m",
+        "lazy_slru_download": True,
         "max_lsn_wal_lag": 230000,
         "min_resident_size_override": 23,
-        "trace_read_requests": True,
+        "timeline_get_throttle": {
+            "task_kinds": ["PageRequestHandler"],
+            "initial": 0,
+            "refill_interval": "1s",
+            "refill_amount": 1000,
+            "max": 1000,
+        },
         "walreceiver_connect_timeout": "13m",
+        "image_layer_creation_check_threshold": 1,
+        "switch_aux_file_policy": "cross-validation",
+        "lsn_lease_length": "1m",
+        "lsn_lease_length_for_ts": "5s",
     }
 
     ps_http = env.pageserver.http_client()

@@ -1,7 +1,8 @@
+use criterion::measurement::WallTime;
 use pageserver::keyspace::{KeyPartitioning, KeySpace};
 use pageserver::repository::Key;
 use pageserver::tenant::layer_map::LayerMap;
-use pageserver::tenant::storage_layer::LayerFileName;
+use pageserver::tenant::storage_layer::LayerName;
 use pageserver::tenant::storage_layer::PersistentLayerDesc;
 use pageserver_api::shard::TenantShardId;
 use rand::prelude::{SeedableRng, SliceRandom, StdRng};
@@ -15,7 +16,11 @@ use utils::id::{TenantId, TimelineId};
 
 use utils::lsn::Lsn;
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkGroup, Criterion};
+
+fn fixture_path(relative: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(relative)
+}
 
 fn build_layer_map(filename_dump: PathBuf) -> LayerMap {
     let mut layer_map = LayerMap::default();
@@ -28,7 +33,7 @@ fn build_layer_map(filename_dump: PathBuf) -> LayerMap {
     let mut updates = layer_map.batch_update();
     for fname in filenames {
         let fname = fname.unwrap();
-        let fname = LayerFileName::from_str(&fname).unwrap();
+        let fname = LayerName::from_str(&fname).unwrap();
         let layer = PersistentLayerDesc::from(fname);
 
         let lsn_range = layer.get_lsn_range();
@@ -109,7 +114,7 @@ fn uniform_key_partitioning(layer_map: &LayerMap, _lsn: Lsn) -> KeyPartitioning 
 // between each test run.
 fn bench_from_captest_env(c: &mut Criterion) {
     // TODO consider compressing this file
-    let layer_map = build_layer_map(PathBuf::from("benches/odd-brook-layernames.txt"));
+    let layer_map = build_layer_map(fixture_path("benches/odd-brook-layernames.txt"));
     let queries: Vec<(Key, Lsn)> = uniform_query_pattern(&layer_map);
 
     // Test with uniform query pattern
@@ -139,7 +144,7 @@ fn bench_from_captest_env(c: &mut Criterion) {
 fn bench_from_real_project(c: &mut Criterion) {
     // Init layer map
     let now = Instant::now();
-    let layer_map = build_layer_map(PathBuf::from("benches/odd-brook-layernames.txt"));
+    let layer_map = build_layer_map(fixture_path("benches/odd-brook-layernames.txt"));
     println!("Finished layer map init in {:?}", now.elapsed());
 
     // Choose uniformly distributed queries
@@ -242,7 +247,72 @@ fn bench_sequential(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_visibility_with_map(
+    group: &mut BenchmarkGroup<WallTime>,
+    layer_map: LayerMap,
+    read_points: Vec<Lsn>,
+    bench_name: &str,
+) {
+    group.bench_function(bench_name, |b| {
+        b.iter(|| black_box(layer_map.get_visibility(read_points.clone())));
+    });
+}
+
+// Benchmark using synthetic data. Arrange image layers on stacked diagonal lines.
+fn bench_visibility(c: &mut Criterion) {
+    let mut group = c.benchmark_group("visibility");
+    {
+        // Init layer map. Create 100_000 layers arranged in 1000 diagonal lines.
+        let now = Instant::now();
+        let mut layer_map = LayerMap::default();
+        let mut updates = layer_map.batch_update();
+        for i in 0..100_000 {
+            let i32 = (i as u32) % 100;
+            let zero = Key::from_hex("000000000000000000000000000000000000").unwrap();
+            let layer = PersistentLayerDesc::new_img(
+                TenantShardId::unsharded(TenantId::generate()),
+                TimelineId::generate(),
+                zero.add(10 * i32)..zero.add(10 * i32 + 1),
+                Lsn(i),
+                0,
+            );
+            updates.insert_historic(layer);
+        }
+        updates.flush();
+        println!("Finished layer map init in {:?}", now.elapsed());
+
+        let mut read_points = Vec::new();
+        for i in (0..100_000).step_by(1000) {
+            read_points.push(Lsn(i));
+        }
+
+        bench_visibility_with_map(&mut group, layer_map, read_points, "sequential");
+    }
+
+    {
+        let layer_map = build_layer_map(fixture_path("benches/odd-brook-layernames.txt"));
+        let read_points = vec![Lsn(0x1C760FA190)];
+        bench_visibility_with_map(&mut group, layer_map, read_points, "real_map");
+
+        let layer_map = build_layer_map(fixture_path("benches/odd-brook-layernames.txt"));
+        let read_points = vec![
+            Lsn(0x1C760FA190),
+            Lsn(0x000000931BEAD539),
+            Lsn(0x000000931BF63011),
+            Lsn(0x000000931B33AE68),
+            Lsn(0x00000038E67ABFA0),
+            Lsn(0x000000931B33AE68),
+            Lsn(0x000000914E3F38F0),
+            Lsn(0x000000931B33AE68),
+        ];
+        bench_visibility_with_map(&mut group, layer_map, read_points, "real_map_many_branches");
+    }
+
+    group.finish();
+}
+
 criterion_group!(group_1, bench_from_captest_env);
 criterion_group!(group_2, bench_from_real_project);
 criterion_group!(group_3, bench_sequential);
-criterion_main!(group_1, group_2, group_3);
+criterion_group!(group_4, bench_visibility);
+criterion_main!(group_1, group_2, group_3, group_4);

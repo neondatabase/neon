@@ -1,6 +1,7 @@
 use anyhow::{bail, Result};
 use byteorder::{ByteOrder, BE};
 use postgres_ffi::relfile_utils::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
+use postgres_ffi::RepOriginId;
 use postgres_ffi::{Oid, TransactionId};
 use serde::{Deserialize, Serialize};
 use std::{fmt, ops::Range};
@@ -21,15 +22,128 @@ pub struct Key {
     pub field6: u32,
 }
 
+/// When working with large numbers of Keys in-memory, it is more efficient to handle them as i128 than as
+/// a struct of fields.
+#[derive(Clone, Copy, Hash, PartialEq, Eq, Ord, PartialOrd)]
+pub struct CompactKey(i128);
+
+/// The storage key size.
 pub const KEY_SIZE: usize = 18;
 
+/// The metadata key size. 2B fewer than the storage key size because field2 is not fully utilized.
+/// See [`Key::to_i128`] for more information on the encoding.
+pub const METADATA_KEY_SIZE: usize = 16;
+
+/// The key prefix start range for the metadata keys. All keys with the first byte >= 0x60 is a metadata key.
+pub const METADATA_KEY_BEGIN_PREFIX: u8 = 0x60;
+pub const METADATA_KEY_END_PREFIX: u8 = 0x7F;
+
+/// The (reserved) key prefix of relation sizes.
+pub const RELATION_SIZE_PREFIX: u8 = 0x61;
+
+/// The key prefix of AUX file keys.
+pub const AUX_KEY_PREFIX: u8 = 0x62;
+
+/// The key prefix of ReplOrigin keys.
+pub const REPL_ORIGIN_KEY_PREFIX: u8 = 0x63;
+
+/// Check if the key falls in the range of metadata keys.
+pub const fn is_metadata_key_slice(key: &[u8]) -> bool {
+    key[0] >= METADATA_KEY_BEGIN_PREFIX && key[0] < METADATA_KEY_END_PREFIX
+}
+
 impl Key {
+    /// Check if the key falls in the range of metadata keys.
+    pub const fn is_metadata_key(&self) -> bool {
+        self.field1 >= METADATA_KEY_BEGIN_PREFIX && self.field1 < METADATA_KEY_END_PREFIX
+    }
+
+    /// Encode a metadata key to a storage key.
+    pub fn from_metadata_key_fixed_size(key: &[u8; METADATA_KEY_SIZE]) -> Self {
+        assert!(is_metadata_key_slice(key), "key not in metadata key range");
+        // Metadata key space ends at 0x7F so it's fine to directly convert it to i128.
+        Self::from_i128(i128::from_be_bytes(*key))
+    }
+
+    /// Encode a metadata key to a storage key.
+    pub fn from_metadata_key(key: &[u8]) -> Self {
+        Self::from_metadata_key_fixed_size(key.try_into().expect("expect 16 byte metadata key"))
+    }
+
+    /// Get the range of metadata keys.
+    pub const fn metadata_key_range() -> Range<Self> {
+        Key {
+            field1: METADATA_KEY_BEGIN_PREFIX,
+            field2: 0,
+            field3: 0,
+            field4: 0,
+            field5: 0,
+            field6: 0,
+        }..Key {
+            field1: METADATA_KEY_END_PREFIX,
+            field2: 0,
+            field3: 0,
+            field4: 0,
+            field5: 0,
+            field6: 0,
+        }
+    }
+
+    /// Get the range of aux keys.
+    pub fn metadata_aux_key_range() -> Range<Self> {
+        Key {
+            field1: AUX_KEY_PREFIX,
+            field2: 0,
+            field3: 0,
+            field4: 0,
+            field5: 0,
+            field6: 0,
+        }..Key {
+            field1: AUX_KEY_PREFIX + 1,
+            field2: 0,
+            field3: 0,
+            field4: 0,
+            field5: 0,
+            field6: 0,
+        }
+    }
+
+    /// This function checks more extensively what keys we can take on the write path.
+    /// If a key beginning with 00 does not have a global/default tablespace OID, it
+    /// will be rejected on the write path.
+    #[allow(dead_code)]
+    pub fn is_valid_key_on_write_path_strong(&self) -> bool {
+        use postgres_ffi::pg_constants::{DEFAULTTABLESPACE_OID, GLOBALTABLESPACE_OID};
+        if !self.is_i128_representable() {
+            return false;
+        }
+        if self.field1 == 0
+            && !(self.field2 == GLOBALTABLESPACE_OID
+                || self.field2 == DEFAULTTABLESPACE_OID
+                || self.field2 == 0)
+        {
+            return false; // User defined tablespaces are not supported
+        }
+        true
+    }
+
+    /// This is a weaker version of `is_valid_key_on_write_path_strong` that simply
+    /// checks if the key is i128 representable. Note that some keys can be successfully
+    /// ingested into the pageserver, but will cause errors on generating basebackup.
+    pub fn is_valid_key_on_write_path(&self) -> bool {
+        self.is_i128_representable()
+    }
+
+    pub fn is_i128_representable(&self) -> bool {
+        self.field2 <= 0xFFFF || self.field2 == 0xFFFFFFFF || self.field2 == 0x22222222
+    }
+
     /// 'field2' is used to store tablespaceid for relations and small enum numbers for other relish.
     /// As long as Neon does not support tablespace (because of lack of access to local file system),
     /// we can assume that only some predefined namespace OIDs are used which can fit in u16
     pub fn to_i128(&self) -> i128 {
-        assert!(self.field2 < 0xFFFF || self.field2 == 0xFFFFFFFF || self.field2 == 0x22222222);
-        (((self.field1 & 0xf) as i128) << 120)
+        assert!(self.is_i128_representable(), "invalid key: {self}");
+        (((self.field1 & 0x7F) as i128) << 120)
             | (((self.field2 & 0xFFFF) as i128) << 104)
             | ((self.field3 as i128) << 72)
             | ((self.field4 as i128) << 40)
@@ -39,7 +153,7 @@ impl Key {
 
     pub const fn from_i128(x: i128) -> Self {
         Key {
-            field1: ((x >> 120) & 0xf) as u8,
+            field1: ((x >> 120) & 0x7F) as u8,
             field2: ((x >> 104) & 0xFFFF) as u32,
             field3: (x >> 72) as u32,
             field4: (x >> 40) as u32,
@@ -48,11 +162,19 @@ impl Key {
         }
     }
 
-    pub fn next(&self) -> Key {
+    pub fn to_compact(&self) -> CompactKey {
+        CompactKey(self.to_i128())
+    }
+
+    pub fn from_compact(k: CompactKey) -> Self {
+        Self::from_i128(k.0)
+    }
+
+    pub const fn next(&self) -> Key {
         self.add(1)
     }
 
-    pub fn add(&self, x: u32) -> Key {
+    pub const fn add(&self, x: u32) -> Key {
         let mut key = *self;
 
         let r = key.field6.overflowing_add(x);
@@ -81,6 +203,9 @@ impl Key {
         key
     }
 
+    /// Convert a 18B slice to a key. This function should not be used for 16B metadata keys because `field2` is handled differently.
+    /// Use [`Key::from_i128`] instead if you want to handle 16B keys (i.e., metadata keys). There are some restrictions on `field2`,
+    /// and therefore not all 18B slices are valid page server keys.
     pub fn from_slice(b: &[u8]) -> Self {
         Key {
             field1: b[0],
@@ -92,6 +217,8 @@ impl Key {
         }
     }
 
+    /// Convert a key to a 18B slice. This function should not be used for getting a 16B metadata key because `field2` is handled differently.
+    /// Use [`Key::to_i128`] instead if you want to get a 16B key (i.e., metadata keys).
     pub fn write_to_byte_slice(&self, buf: &mut [u8]) {
         buf[0] = self.field1;
         BE::write_u32(&mut buf[1..5], self.field2);
@@ -112,6 +239,13 @@ impl fmt::Display for Key {
     }
 }
 
+impl fmt::Display for CompactKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let k = Key::from_compact(*self);
+        k.fmt(f)
+    }
+}
+
 impl Key {
     pub const MIN: Key = Key {
         field1: u8::MIN,
@@ -128,6 +262,15 @@ impl Key {
         field4: u32::MAX,
         field5: u8::MAX,
         field6: u32::MAX,
+    };
+    /// A key slightly smaller than [`Key::MAX`] for use in layer key ranges to avoid them to be confused with L0 layers
+    pub const NON_L0_MAX: Key = Key {
+        field1: u8::MAX,
+        field2: u32::MAX,
+        field3: u32::MAX,
+        field4: u32::MAX,
+        field5: u8::MAX,
+        field6: u32::MAX - 1,
     };
 
     pub fn from_hex(s: &str) -> Result<Self> {
@@ -302,7 +445,14 @@ pub fn rel_size_to_key(rel: RelTag) -> Key {
         field3: rel.dbnode,
         field4: rel.relnode,
         field5: rel.forknum,
-        field6: 0xffffffff,
+        field6: 0xffff_ffff,
+    }
+}
+
+impl Key {
+    #[inline(always)]
+    pub fn is_rel_size_key(&self) -> bool {
+        self.field1 == 0 && self.field6 == u32::MAX
     }
 }
 
@@ -344,6 +494,25 @@ pub fn slru_dir_to_key(kind: SlruKind) -> Key {
 }
 
 #[inline(always)]
+pub fn slru_dir_kind(key: &Key) -> Option<Result<SlruKind, u32>> {
+    if key.field1 == 0x01
+        && key.field3 == 0
+        && key.field4 == 0
+        && key.field5 == 0
+        && key.field6 == 0
+    {
+        match key.field2 {
+            0 => Some(Ok(SlruKind::Clog)),
+            1 => Some(Ok(SlruKind::MultiXactMembers)),
+            2 => Some(Ok(SlruKind::MultiXactOffsets)),
+            x => Some(Err(x)),
+        }
+    } else {
+        None
+    }
+}
+
+#[inline(always)]
 pub fn slru_block_to_key(kind: SlruKind, segno: u32, blknum: BlockNumber) -> Key {
     Key {
         field1: 0x01,
@@ -371,7 +540,17 @@ pub fn slru_segment_size_to_key(kind: SlruKind, segno: u32) -> Key {
         field3: 1,
         field4: segno,
         field5: 0,
-        field6: 0xffffffff,
+        field6: 0xffff_ffff,
+    }
+}
+
+impl Key {
+    pub fn is_slru_segment_size_key(&self) -> bool {
+        self.field1 == 0x01
+            && self.field2 < 0x03
+            && self.field3 == 0x01
+            && self.field5 == 0
+            && self.field6 == u32::MAX
     }
 }
 
@@ -472,76 +651,117 @@ pub const AUX_FILES_KEY: Key = Key {
     field6: 2,
 };
 
+#[inline(always)]
+pub fn repl_origin_key(origin_id: RepOriginId) -> Key {
+    Key {
+        field1: REPL_ORIGIN_KEY_PREFIX,
+        field2: 0,
+        field3: 0,
+        field4: 0,
+        field5: 0,
+        field6: origin_id as u32,
+    }
+}
+
+/// Get the range of replorigin keys.
+pub fn repl_origin_key_range() -> Range<Key> {
+    Key {
+        field1: REPL_ORIGIN_KEY_PREFIX,
+        field2: 0,
+        field3: 0,
+        field4: 0,
+        field5: 0,
+        field6: 0,
+    }..Key {
+        field1: REPL_ORIGIN_KEY_PREFIX,
+        field2: 0,
+        field3: 0,
+        field4: 0,
+        field5: 0,
+        field6: 0x10000,
+    }
+}
+
 // Reverse mappings for a few Keys.
 // These are needed by WAL redo manager.
 
-// AUX_FILES currently stores only data for logical replication (slots etc), and
-// we don't preserve these on a branch because safekeepers can't follow timeline
-// switch (and generally it likely should be optional), so ignore these.
-#[inline(always)]
-pub fn is_inherited_key(key: Key) -> bool {
-    key != AUX_FILES_KEY
-}
+/// Non inherited range for vectored get.
+pub const NON_INHERITED_RANGE: Range<Key> = AUX_FILES_KEY..AUX_FILES_KEY.next();
+/// Sparse keyspace range for vectored get. Missing key error will be ignored for this range.
+pub const NON_INHERITED_SPARSE_RANGE: Range<Key> = Key::metadata_key_range();
 
-#[inline(always)]
-pub fn is_rel_fsm_block_key(key: Key) -> bool {
-    key.field1 == 0x00 && key.field4 != 0 && key.field5 == FSM_FORKNUM && key.field6 != 0xffffffff
-}
+impl Key {
+    // AUX_FILES currently stores only data for logical replication (slots etc), and
+    // we don't preserve these on a branch because safekeepers can't follow timeline
+    // switch (and generally it likely should be optional), so ignore these.
+    #[inline(always)]
+    pub fn is_inherited_key(self) -> bool {
+        !NON_INHERITED_RANGE.contains(&self) && !NON_INHERITED_SPARSE_RANGE.contains(&self)
+    }
 
-#[inline(always)]
-pub fn is_rel_vm_block_key(key: Key) -> bool {
-    key.field1 == 0x00
-        && key.field4 != 0
-        && key.field5 == VISIBILITYMAP_FORKNUM
-        && key.field6 != 0xffffffff
-}
+    #[inline(always)]
+    pub fn is_rel_fsm_block_key(self) -> bool {
+        self.field1 == 0x00
+            && self.field4 != 0
+            && self.field5 == FSM_FORKNUM
+            && self.field6 != 0xffffffff
+    }
 
-#[inline(always)]
-pub fn key_to_slru_block(key: Key) -> anyhow::Result<(SlruKind, u32, BlockNumber)> {
-    Ok(match key.field1 {
-        0x01 => {
-            let kind = match key.field2 {
-                0x00 => SlruKind::Clog,
-                0x01 => SlruKind::MultiXactMembers,
-                0x02 => SlruKind::MultiXactOffsets,
-                _ => anyhow::bail!("unrecognized slru kind 0x{:02x}", key.field2),
-            };
-            let segno = key.field4;
-            let blknum = key.field6;
+    #[inline(always)]
+    pub fn is_rel_vm_block_key(self) -> bool {
+        self.field1 == 0x00
+            && self.field4 != 0
+            && self.field5 == VISIBILITYMAP_FORKNUM
+            && self.field6 != 0xffffffff
+    }
 
-            (kind, segno, blknum)
-        }
-        _ => anyhow::bail!("unexpected value kind 0x{:02x}", key.field1),
-    })
-}
+    #[inline(always)]
+    pub fn to_slru_block(self) -> anyhow::Result<(SlruKind, u32, BlockNumber)> {
+        Ok(match self.field1 {
+            0x01 => {
+                let kind = match self.field2 {
+                    0x00 => SlruKind::Clog,
+                    0x01 => SlruKind::MultiXactMembers,
+                    0x02 => SlruKind::MultiXactOffsets,
+                    _ => anyhow::bail!("unrecognized slru kind 0x{:02x}", self.field2),
+                };
+                let segno = self.field4;
+                let blknum = self.field6;
 
-#[inline(always)]
-pub fn is_slru_block_key(key: Key) -> bool {
-    key.field1 == 0x01                // SLRU-related
-        && key.field3 == 0x00000001   // but not SlruDir
-        && key.field6 != 0xffffffff // and not SlruSegSize
-}
+                (kind, segno, blknum)
+            }
+            _ => anyhow::bail!("unexpected value kind 0x{:02x}", self.field1),
+        })
+    }
 
-#[inline(always)]
-pub fn is_rel_block_key(key: &Key) -> bool {
-    key.field1 == 0x00 && key.field4 != 0 && key.field6 != 0xffffffff
-}
+    #[inline(always)]
+    pub fn is_slru_block_key(self) -> bool {
+        self.field1 == 0x01                // SLRU-related
+        && self.field3 == 0x00000001   // but not SlruDir
+        && self.field6 != 0xffffffff // and not SlruSegSize
+    }
 
-/// Guaranteed to return `Ok()` if [[is_rel_block_key]] returns `true` for `key`.
-#[inline(always)]
-pub fn key_to_rel_block(key: Key) -> anyhow::Result<(RelTag, BlockNumber)> {
-    Ok(match key.field1 {
-        0x00 => (
-            RelTag {
-                spcnode: key.field2,
-                dbnode: key.field3,
-                relnode: key.field4,
-                forknum: key.field5,
-            },
-            key.field6,
-        ),
-        _ => anyhow::bail!("unexpected value kind 0x{:02x}", key.field1),
-    })
+    #[inline(always)]
+    pub fn is_rel_block_key(&self) -> bool {
+        self.field1 == 0x00 && self.field4 != 0 && self.field6 != 0xffffffff
+    }
+
+    /// Guaranteed to return `Ok()` if [`Self::is_rel_block_key`] returns `true` for `key`.
+    #[inline(always)]
+    pub fn to_rel_block(self) -> anyhow::Result<(RelTag, BlockNumber)> {
+        Ok(match self.field1 {
+            0x00 => (
+                RelTag {
+                    spcnode: self.field2,
+                    dbnode: self.field3,
+                    relnode: self.field4,
+                    forknum: self.field5,
+                },
+                self.field6,
+            ),
+            _ => anyhow::bail!("unexpected value kind 0x{:02x}", self.field1),
+        })
+    }
 }
 
 impl std::str::FromStr for Key {
@@ -556,10 +776,13 @@ impl std::str::FromStr for Key {
 mod tests {
     use std::str::FromStr;
 
+    use crate::key::is_metadata_key_slice;
     use crate::key::Key;
 
     use rand::Rng;
     use rand::SeedableRng;
+
+    use super::AUX_KEY_PREFIX;
 
     #[test]
     fn display_fromstr_bijection() {
@@ -575,5 +798,22 @@ mod tests {
         };
 
         assert_eq!(key, Key::from_str(&format!("{key}")).unwrap());
+    }
+
+    #[test]
+    fn test_metadata_keys() {
+        let mut metadata_key = vec![AUX_KEY_PREFIX];
+        metadata_key.extend_from_slice(&[0xFF; 15]);
+        let encoded_key = Key::from_metadata_key(&metadata_key);
+        let output_key = encoded_key.to_i128().to_be_bytes();
+        assert_eq!(metadata_key, output_key);
+        assert!(encoded_key.is_metadata_key());
+        assert!(is_metadata_key_slice(&metadata_key));
+    }
+
+    #[test]
+    fn test_possible_largest_key() {
+        Key::from_i128(0x7FFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF);
+        // TODO: put this key into the system and see if anything breaks.
     }
 }

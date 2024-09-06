@@ -1,6 +1,6 @@
+from fixtures.common_types import TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder
-from fixtures.types import TimelineId
 from fixtures.utils import query_scalar
 
 
@@ -20,7 +20,9 @@ def test_ancestor_branch(neon_env_builder: NeonEnvBuilder):
         }
     )
 
-    pageserver_http.configure_failpoints(("flush-frozen-pausable", "sleep(10000)"))
+    failpoint = "flush-frozen-pausable"
+
+    pageserver_http.configure_failpoints((failpoint, "sleep(10000)"))
 
     endpoint_branch0 = env.endpoints.create_start("main", tenant_id=tenant)
     branch0_cur = endpoint_branch0.connect().cursor()
@@ -45,7 +47,6 @@ def test_ancestor_branch(neon_env_builder: NeonEnvBuilder):
     # Create branch1.
     env.neon_cli.create_branch("branch1", "main", tenant_id=tenant, ancestor_start_lsn=lsn_100)
     endpoint_branch1 = env.endpoints.create_start("branch1", tenant_id=tenant)
-    log.info("postgres is running on 'branch1' branch")
 
     branch1_cur = endpoint_branch1.connect().cursor()
     branch1_timeline = TimelineId(query_scalar(branch1_cur, "SHOW neon.timeline_id"))
@@ -68,7 +69,6 @@ def test_ancestor_branch(neon_env_builder: NeonEnvBuilder):
     # Create branch2.
     env.neon_cli.create_branch("branch2", "branch1", tenant_id=tenant, ancestor_start_lsn=lsn_200)
     endpoint_branch2 = env.endpoints.create_start("branch2", tenant_id=tenant)
-    log.info("postgres is running on 'branch2' branch")
     branch2_cur = endpoint_branch2.connect().cursor()
 
     branch2_timeline = TimelineId(query_scalar(branch2_cur, "SHOW neon.timeline_id"))
@@ -98,3 +98,5 @@ def test_ancestor_branch(neon_env_builder: NeonEnvBuilder):
     assert query_scalar(branch1_cur, "SELECT count(*) FROM foo") == 200000
 
     assert query_scalar(branch2_cur, "SELECT count(*) FROM foo") == 300000
+
+    pageserver_http.configure_failpoints((failpoint, "off"))

@@ -2,19 +2,27 @@ import sys
 import tarfile
 import tempfile
 from pathlib import Path
+from typing import List
 
 import pytest
 import zstandard
+from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     PgBin,
     VanillaPostgres,
 )
-from fixtures.pageserver.utils import timeline_delete_wait_completed
+from fixtures.pageserver.utils import (
+    list_prefix,
+    remote_storage_delete_key,
+    timeline_delete_wait_completed,
+)
 from fixtures.port_distributor import PortDistributor
-from fixtures.remote_storage import LocalFsStorage
-from fixtures.types import Lsn, TenantId, TimelineId
+from fixtures.remote_storage import LocalFsStorage, S3Storage, s3_storage
+from mypy_boto3_s3.type_defs import (
+    ObjectTypeDef,
+)
 
 
 @pytest.mark.skipif(
@@ -128,7 +136,11 @@ def test_wal_restore_initdb(
         assert restored.safe_psql("select count(*) from t", user="cloud_admin") == [(300000,)]
 
 
-def test_wal_restore_http(neon_env_builder: NeonEnvBuilder):
+@pytest.mark.parametrize("broken_tenant", [True, False])
+def test_wal_restore_http(neon_env_builder: NeonEnvBuilder, broken_tenant: bool):
+    remote_storage_kind = s3_storage()
+    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
+
     env = neon_env_builder.init_start()
     endpoint = env.endpoints.create_start("main")
     endpoint.safe_psql("create table t as select generate_series(1,300000)")
@@ -137,15 +149,36 @@ def test_wal_restore_http(neon_env_builder: NeonEnvBuilder):
 
     ps_client = env.pageserver.http_client()
 
+    if broken_tenant:
+        env.pageserver.allowed_errors.append(
+            r".* Changing Active tenant to Broken state, reason: broken from test"
+        )
+        ps_client.tenant_break(tenant_id)
+
     # Mark the initdb archive for preservation
     ps_client.timeline_preserve_initdb_archive(tenant_id, timeline_id)
 
     # shut down the endpoint and delete the timeline from the pageserver
     endpoint.stop()
 
-    assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
+    assert isinstance(env.pageserver_remote_storage, S3Storage)
 
-    timeline_delete_wait_completed(ps_client, tenant_id, timeline_id)
+    if broken_tenant:
+        ps_client.tenant_detach(tenant_id)
+        objects: List[ObjectTypeDef] = list_prefix(
+            env.pageserver_remote_storage, f"tenants/{tenant_id}/timelines/{timeline_id}/"
+        ).get("Contents", [])
+        for obj in objects:
+            obj_key = obj["Key"]
+            if "initdb-preserved.tar.zst" in obj_key:
+                continue
+            log.info(f"Deleting key from remote storage: {obj_key}")
+            remote_storage_delete_key(env.pageserver_remote_storage, obj_key)
+            pass
+
+        ps_client.tenant_attach(tenant_id, generation=10)
+    else:
+        timeline_delete_wait_completed(ps_client, tenant_id, timeline_id)
 
     # issue the restoration command
     ps_client.timeline_create(

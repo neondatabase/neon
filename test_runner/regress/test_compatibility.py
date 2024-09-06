@@ -1,27 +1,29 @@
 import os
+import re
 import shutil
 import subprocess
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
 
 import pytest
 import toml
+from fixtures.common_types import TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
     PgBin,
+    flush_ep_to_pageserver,
 )
 from fixtures.pageserver.http import PageserverApiException
 from fixtures.pageserver.utils import (
     timeline_delete_wait_completed,
-    wait_for_last_record_lsn,
-    wait_for_upload,
 )
 from fixtures.pg_version import PgVersion
-from fixtures.remote_storage import RemoteStorageKind
-from fixtures.types import Lsn
+from fixtures.remote_storage import RemoteStorageKind, S3Storage, s3_storage
+from fixtures.workload import Workload
 
 #
 # A test suite that help to prevent unintentionally breaking backward or forward compatibility between Neon releases.
@@ -40,7 +42,7 @@ from fixtures.types import Lsn
 #
 # How to run `test_backward_compatibility` locally:
 #
-#    export DEFAULT_PG_VERSION=15
+#    export DEFAULT_PG_VERSION=16
 #    export BUILD_TYPE=release
 #    export CHECK_ONDISK_DATA_COMPATIBILITY=true
 #    export COMPATIBILITY_SNAPSHOT_DIR=test_output/compatibility_snapshot_pgv${DEFAULT_PG_VERSION}
@@ -62,7 +64,7 @@ from fixtures.types import Lsn
 #
 # How to run `test_forward_compatibility` locally:
 #
-#    export DEFAULT_PG_VERSION=15
+#    export DEFAULT_PG_VERSION=16
 #    export BUILD_TYPE=release
 #    export CHECK_ONDISK_DATA_COMPATIBILITY=true
 #    export COMPATIBILITY_NEON_BIN=neon_previous/target/${BUILD_TYPE}
@@ -112,11 +114,6 @@ def test_create_snapshot(
     env = neon_env_builder.init_start()
     endpoint = env.endpoints.create_start("main")
 
-    # FIXME: Is this expected?
-    env.pageserver.allowed_errors.append(
-        ".*init_tenant_mgr: marking .* as locally complete, while it doesnt exist in remote index.*"
-    )
-
     pg_bin.run_capture(["pgbench", "--initialize", "--scale=10", endpoint.connstr()])
     pg_bin.run_capture(["pgbench", "--time=60", "--progress=2", endpoint.connstr()])
     pg_bin.run_capture(
@@ -128,16 +125,15 @@ def test_create_snapshot(
     timeline_id = dict(snapshot_config["branch_name_mappings"]["main"])[tenant_id]
 
     pageserver_http = env.pageserver.http_client()
-    lsn = Lsn(endpoint.safe_psql("SELECT pg_current_wal_flush_lsn()")[0][0])
 
-    wait_for_last_record_lsn(pageserver_http, tenant_id, timeline_id, lsn)
-    pageserver_http.timeline_checkpoint(tenant_id, timeline_id)
-    wait_for_upload(pageserver_http, tenant_id, timeline_id, lsn)
+    flush_ep_to_pageserver(env, endpoint, tenant_id, timeline_id)
+    pageserver_http.timeline_checkpoint(tenant_id, timeline_id, wait_until_uploaded=True)
 
     env.endpoints.stop_all()
     for sk in env.safekeepers:
         sk.stop()
     env.pageserver.stop()
+    env.storage_controller.stop()
 
     # Directory `compatibility_snapshot_dir` is uploaded to S3 in a workflow, keep the name in sync with it
     compatibility_snapshot_dir = (
@@ -145,7 +141,16 @@ def test_create_snapshot(
     )
     if compatibility_snapshot_dir.exists():
         shutil.rmtree(compatibility_snapshot_dir)
-    shutil.copytree(test_output_dir, compatibility_snapshot_dir)
+
+    shutil.copytree(
+        test_output_dir,
+        compatibility_snapshot_dir,
+        ignore=shutil.ignore_patterns("pg_dynshmem"),
+    )
+
+
+# check_neon_works does recovery from WAL => the compatibility snapshot's WAL is old => will log this warning
+ingest_lag_log_line = ".*ingesting record with timestamp lagging more than wait_lsn_timeout.*"
 
 
 @check_ondisk_data_compatibility_if_enabled
@@ -172,6 +177,7 @@ def test_backward_compatibility(
     try:
         neon_env_builder.num_safekeepers = 3
         env = neon_env_builder.from_repo_dir(compatibility_snapshot_dir / "repo")
+        env.pageserver.allowed_errors.append(ingest_lag_log_line)
         neon_env_builder.start()
 
         check_neon_works(
@@ -180,6 +186,9 @@ def test_backward_compatibility(
             sql_dump_path=compatibility_snapshot_dir / "dump.sql",
             repo_dir=env.repo_dir,
         )
+
+        env.pageserver.assert_log_contains(ingest_lag_log_line)
+
     except Exception:
         if breaking_changes_allowed:
             pytest.xfail(
@@ -226,12 +235,40 @@ def test_forward_compatibility(
 
     try:
         neon_env_builder.num_safekeepers = 3
+
+        # Use previous version's production binaries (pageserver, safekeeper, pg_distrib_dir, etc.).
+        # But always use the current version's neon_local binary.
+        # This is because we want to test the compatibility of the data format, not the compatibility of the neon_local CLI.
+        neon_env_builder.neon_binpath = compatibility_neon_bin
+        neon_env_builder.pg_distrib_dir = compatibility_postgres_distrib_dir
+        neon_env_builder.neon_local_binpath = neon_env_builder.neon_local_binpath
+
         env = neon_env_builder.from_repo_dir(
             compatibility_snapshot_dir / "repo",
-            neon_binpath=compatibility_neon_bin,
-            pg_distrib_dir=compatibility_postgres_distrib_dir,
         )
+        # there may be an arbitrary number of unrelated tests run between create_snapshot and here
+        env.pageserver.allowed_errors.append(ingest_lag_log_line)
+
+        # not using env.pageserver.version because it was initialized before
+        prev_pageserver_version_str = env.get_binary_version("pageserver")
+        prev_pageserver_version_match = re.search(
+            "Neon page server git-env:(.*) failpoints: (.*), features: (.*)",
+            prev_pageserver_version_str,
+        )
+        if prev_pageserver_version_match is not None:
+            prev_pageserver_version = prev_pageserver_version_match.group(1)
+        else:
+            raise AssertionError(
+                "cannot find git hash in the version string: " + prev_pageserver_version_str
+            )
+
+        # does not include logs from previous runs
+        assert not env.pageserver.log_contains("git-env:" + prev_pageserver_version)
+
         neon_env_builder.start()
+
+        # ensure the specified pageserver is running
+        assert env.pageserver.log_contains("git-env:" + prev_pageserver_version)
 
         check_neon_works(
             env,
@@ -239,6 +276,7 @@ def test_forward_compatibility(
             sql_dump_path=compatibility_snapshot_dir / "dump.sql",
             repo_dir=env.repo_dir,
         )
+
     except Exception:
         if breaking_changes_allowed:
             pytest.xfail(
@@ -252,9 +290,10 @@ def test_forward_compatibility(
 
 def check_neon_works(env: NeonEnv, test_output_dir: Path, sql_dump_path: Path, repo_dir: Path):
     ep = env.endpoints.create_start("main")
+    connstr = ep.connstr()
+
     pg_bin = PgBin(test_output_dir, env.pg_distrib_dir, env.pg_version)
 
-    connstr = ep.connstr()
     pg_bin.run_capture(
         ["pg_dumpall", f"--dbname={connstr}", f"--file={test_output_dir / 'dump.sql'}"]
     )
@@ -270,6 +309,9 @@ def check_neon_works(env: NeonEnv, test_output_dir: Path, sql_dump_path: Path, r
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
     pg_version = env.pg_version
+
+    # Stop endpoint while we recreate timeline
+    flush_ep_to_pageserver(env, ep, tenant_id, timeline_id)
 
     try:
         pageserver_http.timeline_preserve_initdb_archive(tenant_id, timeline_id)
@@ -295,6 +337,9 @@ def check_neon_works(env: NeonEnv, test_output_dir: Path, sql_dump_path: Path, r
         existing_initdb_timeline_id=timeline_id,
     )
 
+    # Timeline exists again: restart the endpoint
+    ep.start()
+
     pg_bin.run_capture(
         ["pg_dumpall", f"--dbname={connstr}", f"--file={test_output_dir / 'dump-from-wal.sql'}"]
     )
@@ -313,6 +358,11 @@ def check_neon_works(env: NeonEnv, test_output_dir: Path, sql_dump_path: Path, r
 
     assert not dump_from_wal_differs, "dump from WAL differs"
     assert not initial_dump_differs, "initial dump differs"
+
+    flush_ep_to_pageserver(env, ep, tenant_id, timeline_id)
+    pageserver_http.timeline_checkpoint(
+        tenant_id, timeline_id, compact=False, wait_until_uploaded=True
+    )
 
 
 def dump_differs(
@@ -373,3 +423,132 @@ def dump_differs(
                     break
 
     return differs
+
+
+@dataclass
+class HistoricDataSet:
+    name: str
+    tenant_id: TenantId
+    pg_version: PgVersion
+    url: str
+
+    def __str__(self):
+        return self.name
+
+
+HISTORIC_DATA_SETS = [
+    # From before we enabled image layer compression.
+    # - IndexPart::LATEST_VERSION 7
+    # - STORAGE_FORMAT_VERSION 3
+    HistoricDataSet(
+        "2024-07-18",
+        TenantId("17bf64a53509714687664b3a84e9b3ba"),
+        PgVersion.V16,
+        "https://neon-github-public-dev.s3.eu-central-1.amazonaws.com/compatibility-data-snapshots/2024-07-18-pgv16.tar.zst",
+    ),
+]
+
+
+@pytest.mark.parametrize("dataset", HISTORIC_DATA_SETS)
+@pytest.mark.xdist_group("compatibility")
+def test_historic_storage_formats(
+    neon_env_builder: NeonEnvBuilder,
+    test_output_dir: Path,
+    pg_version: PgVersion,
+    dataset: HistoricDataSet,
+):
+    """
+    This test is like test_backward_compatibility, but it looks back further to examples of our storage format from long ago.
+    """
+
+    ARTIFACT_CACHE_DIR = "./artifact_cache"
+
+    import tarfile
+    from contextlib import closing
+
+    import requests
+    import zstandard
+
+    artifact_unpack_path = ARTIFACT_CACHE_DIR / Path("unpacked") / Path(dataset.name)
+
+    # Note: we assume that when running across a matrix of PG versions, the matrix includes all the versions needed by
+    # HISTORIC_DATA_SETS. If we ever remove a PG version from the matrix, then historic datasets built using that version
+    # will no longer be covered by this test.
+    if pg_version != dataset.pg_version:
+        pytest.skip(f"Dataset {dataset} is for different PG version, skipping")
+
+    with closing(requests.get(dataset.url, stream=True)) as r:
+        unzstd = zstandard.ZstdDecompressor()
+        with unzstd.stream_reader(r.raw) as stream:
+            with tarfile.open(mode="r|", fileobj=stream) as tf:
+                tf.extractall(artifact_unpack_path)
+
+    neon_env_builder.enable_pageserver_remote_storage(s3_storage())
+    neon_env_builder.pg_version = dataset.pg_version
+    env = neon_env_builder.init_configs()
+    env.start()
+    assert isinstance(env.pageserver_remote_storage, S3Storage)
+
+    # Link artifact data into test's remote storage.  We don't want the whole repo dir, just the remote storage part: we are not testing
+    # compat of local disk data across releases (test_backward_compat does that), we're testing really long-lived data in S3 like layer files and indices.
+    #
+    # The code generating the snapshot uses local_fs, but this test uses S3Storage, so we are copying a tree of files into a bucket.  We use
+    # S3Storage so that the scrubber can run (the scrubber doesn't speak local_fs)
+    artifact_pageserver_path = (
+        artifact_unpack_path / Path("repo") / Path("local_fs_remote_storage") / Path("pageserver")
+    )
+    for root, _dirs, files in os.walk(artifact_pageserver_path):
+        for file in files:
+            local_path = os.path.join(root, file)
+            remote_key = (
+                env.pageserver_remote_storage.prefix_in_bucket
+                + str(local_path)[len(str(artifact_pageserver_path)) :]
+            )
+            log.info(f"Uploading {local_path} -> {remote_key}")
+            env.pageserver_remote_storage.client.upload_file(
+                local_path, env.pageserver_remote_storage.bucket_name, remote_key
+            )
+
+    # Check the scrubber handles this old data correctly (can read it and doesn't consider it corrupt)
+    #
+    # Do this _before_ importing to the pageserver, as that import may start writing immediately
+    healthy, metadata_summary = env.storage_scrubber.scan_metadata()
+    assert healthy
+    assert metadata_summary["tenant_count"] >= 1
+    assert metadata_summary["timeline_count"] >= 1
+
+    env.neon_cli.import_tenant(dataset.tenant_id)
+
+    # Discover timelines
+    timelines = env.pageserver.http_client().timeline_list(dataset.tenant_id)
+    # All our artifacts should contain at least one timeline
+    assert len(timelines) > 0
+
+    # TODO: ensure that the snapshots we're importing contain a sensible variety of content, at the very
+    # least they should include a mixture of deltas and image layers.  Preferably they should also
+    # contain some "exotic" stuff like aux files from logical replication.
+
+    # Check we can start an endpoint and read the SQL that the artifact is meant to contain
+    reference_sql_dump = artifact_unpack_path / Path("dump.sql")
+    ep = env.endpoints.create_start("main", tenant_id=dataset.tenant_id)
+    pg_bin = PgBin(test_output_dir, env.pg_distrib_dir, env.pg_version)
+    pg_bin.run_capture(
+        ["pg_dumpall", f"--dbname={ep.connstr()}", f"--file={test_output_dir / 'dump.sql'}"]
+    )
+    assert not dump_differs(
+        reference_sql_dump,
+        test_output_dir / "dump.sql",
+        test_output_dir / "dump.filediff",
+    )
+    ep.stop()
+
+    # Check we can also do writes to the database
+    existing_timeline_id = TimelineId(timelines[0]["timeline_id"])
+    workload = Workload(env, dataset.tenant_id, existing_timeline_id)
+    workload.init()
+    workload.write_rows(100)
+
+    # Check that compaction works
+    env.pageserver.http_client().timeline_compact(
+        dataset.tenant_id, existing_timeline_id, force_image_layer_creation=True
+    )

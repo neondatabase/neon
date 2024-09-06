@@ -68,16 +68,29 @@ const parseReportJson = async ({ reportJsonUrl, fetch }) => {
                     console.info(`Cannot get BUILD_TYPE and Postgres Version from test name: "${test.name}", defaulting to "release" and "14"`)
 
                     buildType = "release"
-                    pgVersion = "14"
+                    pgVersion = "16"
                 }
 
                 pgVersions.add(pgVersion)
+
+                // We use `arch` as it is returned by GitHub Actions
+                //  (RUNNER_ARCH env var): X86, X64, ARM, or ARM64
+                // Ref https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/store-information-in-variables#default-environment-variables
+                let arch = ""
+                if (test.parameters.includes("'X64'")) {
+                    arch = "x86-64"
+                } else if (test.parameters.includes("'ARM64'")) {
+                    arch = "arm64"
+                } else {
+                    arch = "unknown"
+                }
 
                 // Removing build type and PostgreSQL version from the test name to make it shorter
                 const testName = test.name.replace(new RegExp(`${buildType}-pg${pgVersion}-?`), "").replace("[]", "")
                 test.pytestName = `${parentSuite.name.replace(".", "/")}/${suite.name}.py::${testName}`
                 test.pgVersion = pgVersion
                 test.buildType = buildType
+                test.arch = arch
 
                 if (test.status === "passed") {
                     passedTests[pgVersion][testName].push(test)
@@ -144,7 +157,7 @@ const reportSummary = async (params) => {
                 const links = []
                 for (const test of tests) {
                     const allureLink = `${reportUrl}#suites/${test.parentUid}/${test.uid}`
-                    links.push(`[${test.buildType}](${allureLink})`)
+                    links.push(`[${test.buildType}-${test.arch}](${allureLink})`)
                 }
                 summary += `- \`${testName}\`: ${links.join(", ")}\n`
             }
@@ -175,7 +188,7 @@ const reportSummary = async (params) => {
                     const links = []
                     for (const test of tests) {
                         const allureLink = `${reportUrl}#suites/${test.parentUid}/${test.uid}/retries`
-                        links.push(`[${test.buildType}](${allureLink})`)
+                        links.push(`[${test.buildType}-${test.arch}](${allureLink})`)
                     }
                     summary += `- \`${testName}\`: ${links.join(", ")}\n`
                 }
@@ -188,7 +201,7 @@ const reportSummary = async (params) => {
 }
 
 const parseCoverageSummary = async ({ summaryJsonUrl, coverageUrl, fetch }) => {
-    let summary = `\n### Code coverage ([full report](${coverageUrl}))\n`
+    let summary = `\n### Code coverage* ([full report](${coverageUrl}))\n`
 
     const coverage = await (await fetch(summaryJsonUrl)).json()
     for (const covType of Object.keys(coverage).sort()) {
@@ -198,7 +211,7 @@ const parseCoverageSummary = async ({ summaryJsonUrl, coverageUrl, fetch }) => {
 
         summary += `- \`${covType}s\`: \`${coverage[covType]["_summary"]}\`\n`
     }
-
+    summary += "\n\\* collected from Rust tests only\n"
     summary += `\n___\n`
 
     return summary

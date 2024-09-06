@@ -1,0 +1,62 @@
+diff --git a/src/hnswbuild.c b/src/hnswbuild.c
+index dcfb2bd..d5189ee 100644
+--- a/src/hnswbuild.c
++++ b/src/hnswbuild.c
+@@ -860,9 +860,17 @@ HnswParallelBuildMain(dsm_segment *seg, shm_toc *toc)
+ 
+ 	hnswarea = shm_toc_lookup(toc, PARALLEL_KEY_HNSW_AREA, false);
+ 
++#ifdef NEON_SMGR
++	smgr_start_unlogged_build(RelationGetSmgr(indexRel));
++#endif
++
+ 	/* Perform inserts */
+ 	HnswParallelScanAndInsert(heapRel, indexRel, hnswshared, hnswarea, false);
+ 
++#ifdef NEON_SMGR
++	smgr_finish_unlogged_build_phase_1(RelationGetSmgr(indexRel));
++#endif
++
+ 	/* Close relations within worker */
+ 	index_close(indexRel, indexLockmode);
+ 	table_close(heapRel, heapLockmode);
+@@ -1117,12 +1125,38 @@ BuildIndex(Relation heap, Relation index, IndexInfo *indexInfo,
+ 	SeedRandom(42);
+ #endif
+ 
++#ifdef NEON_SMGR
++	smgr_start_unlogged_build(RelationGetSmgr(index));
++#endif
++
+ 	InitBuildState(buildstate, heap, index, indexInfo, forkNum);
+ 
+ 	BuildGraph(buildstate, forkNum);
+ 
+-	if (RelationNeedsWAL(index) || forkNum == INIT_FORKNUM)
++#ifdef NEON_SMGR
++	smgr_finish_unlogged_build_phase_1(RelationGetSmgr(index));
++#endif
++
++	if (RelationNeedsWAL(index) || forkNum == INIT_FORKNUM) {
+ 		log_newpage_range(index, forkNum, 0, RelationGetNumberOfBlocksInFork(index, forkNum), true);
++#ifdef NEON_SMGR
++		{
++#if PG_VERSION_NUM >= 160000
++			RelFileLocator rlocator = RelationGetSmgr(index)->smgr_rlocator.locator;
++#else
++			RelFileNode rlocator = RelationGetSmgr(index)->smgr_rnode.node;
++#endif
++
++			SetLastWrittenLSNForBlockRange(XactLastRecEnd, rlocator,
++									   MAIN_FORKNUM, 0, RelationGetNumberOfBlocks(index));
++			SetLastWrittenLSNForRelation(XactLastRecEnd, rlocator, MAIN_FORKNUM);
++		}
++#endif
++	}
++
++#ifdef NEON_SMGR
++	smgr_end_unlogged_build(RelationGetSmgr(index));
++#endif
+ 
+ 	FreeBuildState(buildstate);
+ }

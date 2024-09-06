@@ -2,14 +2,19 @@
 
 use std::convert::Infallible;
 
-use postgres_protocol::authentication::sasl::ScramSha256;
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 
 use super::messages::{
     ClientFinalMessage, ClientFirstMessage, OwnedServerFirstMessage, SCRAM_RAW_NONCE_LEN,
 };
+use super::pbkdf2::Pbkdf2;
 use super::secret::ServerSecret;
 use super::signature::SignatureBuilder;
+use super::threadpool::ThreadPool;
+use super::ScramKey;
 use crate::config;
+use crate::intern::EndpointIdInt;
 use crate::sasl::{self, ChannelBinding, Error as SaslError};
 
 /// The only channel binding mode we currently support.
@@ -51,14 +56,14 @@ enum ExchangeState {
 }
 
 /// Server's side of SCRAM auth algorithm.
-pub struct Exchange<'a> {
+pub(crate) struct Exchange<'a> {
     state: ExchangeState,
     secret: &'a ServerSecret,
     tls_server_end_point: config::TlsServerEndPoint,
 }
 
 impl<'a> Exchange<'a> {
-    pub fn new(
+    pub(crate) fn new(
         secret: &'a ServerSecret,
         nonce: fn() -> [u8; SCRAM_RAW_NONCE_LEN],
         tls_server_end_point: config::TlsServerEndPoint,
@@ -71,40 +76,44 @@ impl<'a> Exchange<'a> {
     }
 }
 
-pub fn exchange(
+// copied from <https://github.com/neondatabase/rust-postgres/blob/20031d7a9ee1addeae6e0968e3899ae6bf01cee2/postgres-protocol/src/authentication/sasl.rs#L236-L248>
+async fn derive_client_key(
+    pool: &ThreadPool,
+    endpoint: EndpointIdInt,
+    password: &[u8],
+    salt: &[u8],
+    iterations: u32,
+) -> ScramKey {
+    let salted_password = pool
+        .spawn_job(endpoint, Pbkdf2::start(password, salt, iterations))
+        .await;
+
+    let make_key = |name| {
+        let key = Hmac::<Sha256>::new_from_slice(&salted_password)
+            .expect("HMAC is able to accept all key sizes")
+            .chain_update(name)
+            .finalize();
+
+        <[u8; 32]>::from(key.into_bytes())
+    };
+
+    make_key(b"Client Key").into()
+}
+
+pub(crate) async fn exchange(
+    pool: &ThreadPool,
+    endpoint: EndpointIdInt,
     secret: &ServerSecret,
-    mut client: ScramSha256,
-    tls_server_end_point: config::TlsServerEndPoint,
+    password: &[u8],
 ) -> sasl::Result<sasl::Outcome<super::ScramKey>> {
-    use sasl::Step::*;
+    let salt = base64::decode(&secret.salt_base64)?;
+    let client_key = derive_client_key(pool, endpoint, password, &salt, secret.iterations).await;
 
-    let init = SaslInitial {
-        nonce: rand::random,
-    };
-
-    let client_first = std::str::from_utf8(client.message())
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-    let sent = match init.transition(secret, &tls_server_end_point, client_first)? {
-        Continue(sent, server_first) => {
-            client.update(server_first.as_bytes())?;
-            sent
-        }
-        Success(x, _) => match x {},
-        Failure(msg) => return Ok(sasl::Outcome::Failure(msg)),
-    };
-
-    let client_final = std::str::from_utf8(client.message())
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-    let keys = match sent.transition(secret, &tls_server_end_point, client_final)? {
-        Success(keys, server_final) => {
-            client.finish(server_final.as_bytes())?;
-            keys
-        }
-        Continue(x, _) => match x {},
-        Failure(msg) => return Ok(sasl::Outcome::Failure(msg)),
-    };
-
-    Ok(sasl::Outcome::Success(keys))
+    if secret.is_password_invalid(&client_key).into() {
+        Ok(sasl::Outcome::Failure("password doesn't match"))
+    } else {
+        Ok(sasl::Outcome::Success(client_key))
+    }
 }
 
 impl SaslInitial {
@@ -185,7 +194,7 @@ impl SaslSentInner {
             .derive_client_key(&client_final_message.proof);
 
         // Auth fails either if keys don't match or it's pre-determined to fail.
-        if client_key.sha256() != secret.stored_key || secret.doomed {
+        if secret.is_password_invalid(&client_key).into() {
             return Ok(sasl::Step::Failure("password doesn't match"));
         }
 
@@ -200,23 +209,23 @@ impl sasl::Mechanism for Exchange<'_> {
     type Output = super::ScramKey;
 
     fn exchange(mut self, input: &str) -> sasl::Result<sasl::Step<Self, Self::Output>> {
-        use {sasl::Step::*, ExchangeState::*};
+        use {sasl::Step, ExchangeState};
         match &self.state {
-            Initial(init) => {
+            ExchangeState::Initial(init) => {
                 match init.transition(self.secret, &self.tls_server_end_point, input)? {
-                    Continue(sent, msg) => {
-                        self.state = SaltSent(sent);
-                        Ok(Continue(self, msg))
+                    Step::Continue(sent, msg) => {
+                        self.state = ExchangeState::SaltSent(sent);
+                        Ok(Step::Continue(self, msg))
                     }
-                    Success(x, _) => match x {},
-                    Failure(msg) => Ok(Failure(msg)),
+                    Step::Success(x, _) => match x {},
+                    Step::Failure(msg) => Ok(Step::Failure(msg)),
                 }
             }
-            SaltSent(sent) => {
+            ExchangeState::SaltSent(sent) => {
                 match sent.transition(self.secret, &self.tls_server_end_point, input)? {
-                    Success(keys, msg) => Ok(Success(keys, msg)),
-                    Continue(x, _) => match x {},
-                    Failure(msg) => Ok(Failure(msg)),
+                    Step::Success(keys, msg) => Ok(Step::Success(keys, msg)),
+                    Step::Continue(x, _) => match x {},
+                    Step::Failure(msg) => Ok(Step::Failure(msg)),
                 }
             }
         }

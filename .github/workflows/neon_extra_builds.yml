@@ -20,13 +20,31 @@ env:
   COPT: '-Werror'
 
 jobs:
+  check-permissions:
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'run-no-ci') }}
+    uses: ./.github/workflows/check-permissions.yml
+    with:
+      github-event-name: ${{ github.event_name}}
+
+  check-build-tools-image:
+    needs: [ check-permissions ]
+    uses: ./.github/workflows/check-build-tools-image.yml
+
+  build-build-tools-image:
+    needs: [ check-build-tools-image ]
+    uses: ./.github/workflows/build-build-tools-image.yml
+    with:
+      image-tag: ${{ needs.check-build-tools-image.outputs.image-tag }}
+    secrets: inherit
+
   check-macos-build:
+    needs: [ check-permissions ]
     if: |
       contains(github.event.pull_request.labels.*.name, 'run-extra-build-macos')  ||
       contains(github.event.pull_request.labels.*.name, 'run-extra-build-*') ||
       github.ref_name == 'main'
     timeout-minutes: 90
-    runs-on: macos-latest
+    runs-on: macos-14
 
     env:
       # Use release build only, to have less debug info around
@@ -38,7 +56,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: true
-          fetch-depth: 1
 
       - name: Install macOS postgres dependencies
         run: brew install flex bison openssl protobuf icu4c pkg-config
@@ -57,24 +74,24 @@ jobs:
 
       - name: Cache postgres v14 build
         id: cache_pg_14
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: pg_install/v14
-          key: v1-${{ runner.os }}-${{ env.BUILD_TYPE }}-pg-${{ steps.pg_v14_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
+          key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-${{ steps.pg_v14_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
 
       - name: Cache postgres v15 build
         id: cache_pg_15
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: pg_install/v15
-          key: v1-${{ runner.os }}-${{ env.BUILD_TYPE }}-pg-${{ steps.pg_v15_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
+          key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-${{ steps.pg_v15_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
 
       - name: Cache postgres v16 build
         id: cache_pg_16
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: pg_install/v16
-          key: v1-${{ runner.os }}-${{ env.BUILD_TYPE }}-pg-${{ steps.pg_v16_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
+          key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-${{ steps.pg_v16_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
 
       - name: Set extra env for macOS
         run: |
@@ -82,14 +99,14 @@ jobs:
           echo 'CPPFLAGS=-I/usr/local/opt/openssl@3/include' >> $GITHUB_ENV
 
       - name: Cache cargo deps
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             !~/.cargo/registry/src
             ~/.cargo/git
             target
-          key: v1-${{ runner.os }}-cargo-${{ hashFiles('./Cargo.lock') }}-${{ hashFiles('./rust-toolchain.toml') }}-rust
+          key: v1-${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('./Cargo.lock') }}-${{ hashFiles('./rust-toolchain.toml') }}-rust
 
       - name: Build postgres v14
         if: steps.cache_pg_14.outputs.cache-hit != 'true'
@@ -110,214 +127,27 @@ jobs:
         run: make walproposer-lib -j$(sysctl -n hw.ncpu)
 
       - name: Run cargo build
-        run: cargo build --all --release
+        run: PQ_LIB_DIR=$(pwd)/pg_install/v16/lib cargo build --all --release
 
       - name: Check that no warnings are produced
         run: ./run_clippy.sh
 
-  check-linux-arm-build:
-    timeout-minutes: 90
-    runs-on: [ self-hosted, dev, arm64 ]
-
-    env:
-      # Use release build only, to have less debug info around
-      # Hence keeping target/ (and general cache size) smaller
-      BUILD_TYPE: release
-      CARGO_FEATURES: --features testing
-      CARGO_FLAGS: --locked --release
-      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_DEV }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY_DEV }}
-
-    container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
-      options: --init
-
-    steps:
-      - name: Fix git ownership
-        run: |
-          # Workaround for `fatal: detected dubious ownership in repository at ...`
-          #
-          # Use both ${{ github.workspace }} and ${GITHUB_WORKSPACE} because they're different on host and in containers
-          #   Ref https://github.com/actions/checkout/issues/785
-          #
-          git config --global --add safe.directory ${{ github.workspace }}
-          git config --global --add safe.directory ${GITHUB_WORKSPACE}
-          for r in 14 15 16; do
-            git config --global --add safe.directory "${{ github.workspace }}/vendor/postgres-v$r"
-            git config --global --add safe.directory "${GITHUB_WORKSPACE}/vendor/postgres-v$r"
-          done
-
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          submodules: true
-          fetch-depth: 1
-
-      - name: Set pg 14 revision for caching
-        id: pg_v14_rev
-        run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-v14) >> $GITHUB_OUTPUT
-
-      - name: Set pg 15 revision for caching
-        id: pg_v15_rev
-        run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-v15) >> $GITHUB_OUTPUT
-
-      - name: Set pg 16 revision for caching
-        id: pg_v16_rev
-        run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-v16) >> $GITHUB_OUTPUT
-
-      - name: Set env variables
-        run: |
-          echo "CARGO_HOME=${GITHUB_WORKSPACE}/.cargo" >> $GITHUB_ENV
-
-      - name: Cache postgres v14 build
-        id: cache_pg_14
-        uses: actions/cache@v3
-        with:
-          path: pg_install/v14
-          key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-${{ steps.pg_v14_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
-
-      - name: Cache postgres v15 build
-        id: cache_pg_15
-        uses: actions/cache@v3
-        with:
-          path: pg_install/v15
-          key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-${{ steps.pg_v15_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
-
-      - name: Cache postgres v16 build
-        id: cache_pg_16
-        uses: actions/cache@v3
-        with:
-          path: pg_install/v16
-          key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-${{ steps.pg_v16_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
-
-      - name: Build postgres v14
-        if: steps.cache_pg_14.outputs.cache-hit != 'true'
-        run: mold -run make postgres-v14 -j$(nproc)
-
-      - name: Build postgres v15
-        if: steps.cache_pg_15.outputs.cache-hit != 'true'
-        run: mold -run make postgres-v15 -j$(nproc)
-
-      - name: Build postgres v16
-        if: steps.cache_pg_16.outputs.cache-hit != 'true'
-        run: mold -run make postgres-v16 -j$(nproc)
-
-      - name: Build neon extensions
-        run: mold -run make neon-pg-ext -j$(nproc)
-
-      - name: Build walproposer-lib
-        run: mold -run make walproposer-lib -j$(nproc)
-
-      - name: Run cargo build
-        run: |
-          mold -run cargo build $CARGO_FLAGS $CARGO_FEATURES --bins --tests
-
-      - name: Run cargo test
-        run: |
-          cargo test $CARGO_FLAGS $CARGO_FEATURES
-
-          # Run separate tests for real S3
-          export ENABLE_REAL_S3_REMOTE_STORAGE=nonempty
-          export REMOTE_STORAGE_S3_BUCKET=neon-github-ci-tests
-          export REMOTE_STORAGE_S3_REGION=eu-central-1
-          # Avoid `$CARGO_FEATURES` since there's no `testing` feature in the e2e tests now
-          cargo test $CARGO_FLAGS --package remote_storage --test test_real_s3
-
-          # Run separate tests for real Azure Blob Storage
-          # XXX: replace region with `eu-central-1`-like region
-          export ENABLE_REAL_AZURE_REMOTE_STORAGE=y
-          export AZURE_STORAGE_ACCOUNT="${{ secrets.AZURE_STORAGE_ACCOUNT_DEV }}"
-          export AZURE_STORAGE_ACCESS_KEY="${{ secrets.AZURE_STORAGE_ACCESS_KEY_DEV }}"
-          export REMOTE_STORAGE_AZURE_CONTAINER="${{ vars.REMOTE_STORAGE_AZURE_CONTAINER }}"
-          export REMOTE_STORAGE_AZURE_REGION="${{ vars.REMOTE_STORAGE_AZURE_REGION }}"
-          # Avoid `$CARGO_FEATURES` since there's no `testing` feature in the e2e tests now
-          cargo test $CARGO_FLAGS --package remote_storage --test test_real_azure
-
-  check-codestyle-rust-arm:
-    timeout-minutes: 90
-    runs-on: [ self-hosted, dev, arm64 ]
-
-    container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
-      options: --init
-
-    steps:
-      - name: Fix git ownership
-        run: |
-          # Workaround for `fatal: detected dubious ownership in repository at ...`
-          #
-          # Use both ${{ github.workspace }} and ${GITHUB_WORKSPACE} because they're different on host and in containers
-          #   Ref https://github.com/actions/checkout/issues/785
-          #
-          git config --global --add safe.directory ${{ github.workspace }}
-          git config --global --add safe.directory ${GITHUB_WORKSPACE}
-          for r in 14 15 16; do
-            git config --global --add safe.directory "${{ github.workspace }}/vendor/postgres-v$r"
-            git config --global --add safe.directory "${GITHUB_WORKSPACE}/vendor/postgres-v$r"
-          done
-
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          submodules: true
-          fetch-depth: 1
-
-      # Some of our rust modules use FFI and need those to be checked
-      - name: Get postgres headers
-        run: make postgres-headers -j$(nproc)
-
-      # cargo hack runs the given cargo subcommand (clippy in this case) for all feature combinations.
-      # This will catch compiler & clippy warnings in all feature combinations.
-      # TODO: use cargo hack for build and test as well, but, that's quite expensive.
-      # NB: keep clippy args in sync with ./run_clippy.sh
-      - run: |
-          CLIPPY_COMMON_ARGS="$( source .neon_clippy_args; echo "$CLIPPY_COMMON_ARGS")"
-          if [ "$CLIPPY_COMMON_ARGS" = "" ]; then
-            echo "No clippy args found in .neon_clippy_args"
-            exit 1
-          fi
-          echo "CLIPPY_COMMON_ARGS=${CLIPPY_COMMON_ARGS}" >> $GITHUB_ENV
-      - name: Run cargo clippy (debug)
-        run: cargo hack --feature-powerset clippy $CLIPPY_COMMON_ARGS
-      - name: Run cargo clippy (release)
-        run: cargo hack --feature-powerset clippy --release $CLIPPY_COMMON_ARGS
-
-      - name: Check documentation generation
-        run: cargo doc --workspace --no-deps --document-private-items
-        env:
-            RUSTDOCFLAGS: "-Dwarnings -Arustdoc::private_intra_doc_links"
-
-      # Use `${{ !cancelled() }}` to run quck tests after the longer clippy run
-      - name: Check formatting
-        if: ${{ !cancelled() }}
-        run: cargo fmt --all -- --check
-
-      # https://github.com/facebookincubator/cargo-guppy/tree/bec4e0eb29dcd1faac70b1b5360267fc02bf830e/tools/cargo-hakari#2-keep-the-workspace-hack-up-to-date-in-ci
-      - name: Check rust dependencies
-        if: ${{ !cancelled() }}
-        run: |
-          cargo hakari generate --diff  # workspace-hack Cargo.toml is up-to-date
-          cargo hakari manage-deps --dry-run  # all workspace crates depend on workspace-hack
-
-      # https://github.com/EmbarkStudios/cargo-deny
-      - name: Check rust licenses/bans/advisories/sources
-        if: ${{ !cancelled() }}
-        run: cargo deny check
-
   gather-rust-build-stats:
+    needs: [ check-permissions, build-build-tools-image ]
     if: |
       contains(github.event.pull_request.labels.*.name, 'run-extra-build-stats') ||
       contains(github.event.pull_request.labels.*.name, 'run-extra-build-*') ||
       github.ref_name == 'main'
-    runs-on: [ self-hosted, gen3, large ]
+    runs-on: [ self-hosted, large ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      image: ${{ needs.build-build-tools-image.outputs.image }}
+      credentials:
+        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
       options: --init
 
     env:
       BUILD_TYPE: release
-      # remove the cachepot wrapper and build without crate caches
-      RUSTC_WRAPPER: ""
       # build with incremental compilation produce partial results
       # so do not attempt to cache this build, also disable the incremental compilation
       CARGO_INCREMENTAL: 0
@@ -327,7 +157,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: true
-          fetch-depth: 1
 
       # Some of our rust modules use FFI and need those to be checked
       - name: Get postgres headers
@@ -337,7 +166,7 @@ jobs:
         run: make walproposer-lib -j$(nproc)
 
       - name: Produce the build stats
-        run: cargo build --all --release --timings
+        run: PQ_LIB_DIR=$(pwd)/pg_install/v16/lib cargo build --all --release --timings -j$(nproc)
 
       - name: Upload the build stats
         id: upload-stats
@@ -352,7 +181,7 @@ jobs:
           echo "report-url=${REPORT_URL}" >> $GITHUB_OUTPUT
 
       - name: Publish build stats report
-        uses: actions/github-script@v6
+        uses: actions/github-script@v7
         env:
           REPORT_URL: ${{ steps.upload-stats.outputs.report-url }}
           SHA: ${{ github.event.pull_request.head.sha || github.sha }}

@@ -10,6 +10,7 @@ use futures::stream::Stream;
 use once_cell::sync::OnceCell;
 use remote_storage::{Download, GenericRemoteStorage, RemotePath};
 use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
 
 static LOGGING_DONE: OnceCell<()> = OnceCell::new();
@@ -58,8 +59,12 @@ pub(crate) async fn upload_simple_remote_data(
 ) -> ControlFlow<HashSet<RemotePath>, HashSet<RemotePath>> {
     info!("Creating {upload_tasks_count} remote files");
     let mut upload_tasks = JoinSet::new();
+    let cancel = CancellationToken::new();
+
     for i in 1..upload_tasks_count + 1 {
         let task_client = Arc::clone(client);
+        let cancel = cancel.clone();
+
         upload_tasks.spawn(async move {
             let blob_path = PathBuf::from(format!("folder{}/blob_{}.txt", i / 7, i));
             let blob_path = RemotePath::new(
@@ -69,7 +74,9 @@ pub(crate) async fn upload_simple_remote_data(
             debug!("Creating remote item {i} at path {blob_path:?}");
 
             let (data, len) = upload_stream(format!("remote blob data {i}").into_bytes().into());
-            task_client.upload(data, len, &blob_path, None).await?;
+            task_client
+                .upload(data, len, &blob_path, None, &cancel)
+                .await?;
 
             Ok::<_, anyhow::Error>(blob_path)
         });
@@ -107,13 +114,15 @@ pub(crate) async fn cleanup(
         "Removing {} objects from the remote storage during cleanup",
         objects_to_delete.len()
     );
+    let cancel = CancellationToken::new();
     let mut delete_tasks = JoinSet::new();
     for object_to_delete in objects_to_delete {
         let task_client = Arc::clone(client);
+        let cancel = cancel.clone();
         delete_tasks.spawn(async move {
             debug!("Deleting remote item at path {object_to_delete:?}");
             task_client
-                .delete(&object_to_delete)
+                .delete(&object_to_delete, &cancel)
                 .await
                 .with_context(|| format!("{object_to_delete:?} removal"))
         });
@@ -141,8 +150,12 @@ pub(crate) async fn upload_remote_data(
 ) -> ControlFlow<Uploads, Uploads> {
     info!("Creating {upload_tasks_count} remote files");
     let mut upload_tasks = JoinSet::new();
-    for i in 1..upload_tasks_count + 1 {
+    let cancel = CancellationToken::new();
+
+    for i in 1..=upload_tasks_count {
         let task_client = Arc::clone(client);
+        let cancel = cancel.clone();
+
         upload_tasks.spawn(async move {
             let prefix = format!("{base_prefix_str}/sub_prefix_{i}/");
             let blob_prefix = RemotePath::new(Utf8Path::new(&prefix))
@@ -152,7 +165,9 @@ pub(crate) async fn upload_remote_data(
 
             let (data, data_len) =
                 upload_stream(format!("remote blob data {i}").into_bytes().into());
-            task_client.upload(data, data_len, &blob_path, None).await?;
+            task_client
+                .upload(data, data_len, &blob_path, None, &cancel)
+                .await?;
 
             Ok::<_, anyhow::Error>((blob_prefix, blob_path))
         });

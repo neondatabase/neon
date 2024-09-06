@@ -1,17 +1,23 @@
 use crate::{
-    auth,
+    auth::backend::ComputeCredentialKeys,
     compute::{self, PostgresConnection},
-    console::{self, errors::WakeComputeError, Api},
+    config::RetryConfig,
+    console::{self, errors::WakeComputeError, locks::ApiLocks, CachedNodeInfo, NodeInfo},
     context::RequestMonitoring,
-    metrics::{bool_to_str, NUM_CONNECTION_FAILURES, NUM_WAKEUP_FAILURES},
-    proxy::retry::{retry_after, ShouldRetry},
+    error::ReportableError,
+    metrics::{ConnectOutcome, ConnectionFailureKind, Metrics, RetriesMetricGroup, RetryType},
+    proxy::{
+        retry::{retry_after, should_retry, CouldRetry},
+        wake_compute::wake_compute,
+    },
+    Host,
 };
 use async_trait::async_trait;
-use hyper::StatusCode;
 use pq_proto::StartupMessageParams;
-use std::ops::ControlFlow;
 use tokio::time;
 use tracing::{error, info, warn};
+
+use super::retry::ShouldRetryWakeCompute;
 
 const CONNECT_TIMEOUT: time::Duration = time::Duration::from_secs(2);
 
@@ -19,43 +25,29 @@ const CONNECT_TIMEOUT: time::Duration = time::Duration::from_secs(2);
 /// (e.g. the compute node's address might've changed at the wrong time).
 /// Invalidate the cache entry (if any) to prevent subsequent errors.
 #[tracing::instrument(name = "invalidate_cache", skip_all)]
-pub fn invalidate_cache(node_info: console::CachedNodeInfo) -> compute::ConnCfg {
+pub(crate) fn invalidate_cache(node_info: console::CachedNodeInfo) -> NodeInfo {
     let is_cached = node_info.cached();
     if is_cached {
         warn!("invalidating stalled compute node info cache entry");
     }
-    let label = match is_cached {
-        true => "compute_cached",
-        false => "compute_uncached",
+    let label = if is_cached {
+        ConnectionFailureKind::ComputeCached
+    } else {
+        ConnectionFailureKind::ComputeUncached
     };
-    NUM_CONNECTION_FAILURES.with_label_values(&[label]).inc();
+    Metrics::get().proxy.connection_failures_total.inc(label);
 
-    node_info.invalidate().config
-}
-
-/// Try to connect to the compute node once.
-#[tracing::instrument(name = "connect_once", fields(pid = tracing::field::Empty), skip_all)]
-async fn connect_to_compute_once(
-    ctx: &mut RequestMonitoring,
-    node_info: &console::CachedNodeInfo,
-    timeout: time::Duration,
-) -> Result<PostgresConnection, compute::ConnectionError> {
-    let allow_self_signed_compute = node_info.allow_self_signed_compute;
-
-    node_info
-        .config
-        .connect(ctx, allow_self_signed_compute, timeout)
-        .await
+    node_info.invalidate()
 }
 
 #[async_trait]
-pub trait ConnectMechanism {
+pub(crate) trait ConnectMechanism {
     type Connection;
-    type ConnectError;
+    type ConnectError: ReportableError;
     type Error: From<Self::ConnectError>;
     async fn connect_once(
         &self,
-        ctx: &mut RequestMonitoring,
+        ctx: &RequestMonitoring,
         node_info: &console::CachedNodeInfo,
         timeout: time::Duration,
     ) -> Result<Self::Connection, Self::ConnectError>;
@@ -63,9 +55,22 @@ pub trait ConnectMechanism {
     fn update_connect_config(&self, conf: &mut compute::ConnCfg);
 }
 
-pub struct TcpMechanism<'a> {
+#[async_trait]
+pub(crate) trait ComputeConnectBackend {
+    async fn wake_compute(
+        &self,
+        ctx: &RequestMonitoring,
+    ) -> Result<CachedNodeInfo, console::errors::WakeComputeError>;
+
+    fn get_keys(&self) -> &ComputeCredentialKeys;
+}
+
+pub(crate) struct TcpMechanism<'a> {
     /// KV-dictionary with PostgreSQL connection params.
-    pub params: &'a StartupMessageParams,
+    pub(crate) params: &'a StartupMessageParams,
+
+    /// connect_to_compute concurrency lock
+    pub(crate) locks: &'static ApiLocks<Host>,
 }
 
 #[async_trait]
@@ -74,13 +79,16 @@ impl ConnectMechanism for TcpMechanism<'_> {
     type ConnectError = compute::ConnectionError;
     type Error = compute::ConnectionError;
 
+    #[tracing::instrument(fields(pid = tracing::field::Empty), skip_all)]
     async fn connect_once(
         &self,
-        ctx: &mut RequestMonitoring,
+        ctx: &RequestMonitoring,
         node_info: &console::CachedNodeInfo,
         timeout: time::Duration,
     ) -> Result<PostgresConnection, Self::Error> {
-        connect_to_compute_once(ctx, node_info, timeout).await
+        let host = node_info.config.get_host()?;
+        let permit = self.locks.get_permit(&host).await?;
+        permit.release_result(node_info.connect(ctx, timeout).await)
     }
 
     fn update_connect_config(&self, config: &mut compute::ConnCfg) {
@@ -88,156 +96,121 @@ impl ConnectMechanism for TcpMechanism<'_> {
     }
 }
 
-fn report_error(e: &WakeComputeError, retry: bool) {
-    use crate::console::errors::ApiError;
-    let retry = bool_to_str(retry);
-    let kind = match e {
-        WakeComputeError::BadComputeAddress(_) => "bad_compute_address",
-        WakeComputeError::ApiError(ApiError::Transport(_)) => "api_transport_error",
-        WakeComputeError::ApiError(ApiError::Console {
-            status: StatusCode::LOCKED,
-            ref text,
-        }) if text.contains("written data quota exceeded")
-            || text.contains("the limit for current plan reached") =>
-        {
-            "quota_exceeded"
-        }
-        WakeComputeError::ApiError(ApiError::Console {
-            status: StatusCode::LOCKED,
-            ..
-        }) => "api_console_locked",
-        WakeComputeError::ApiError(ApiError::Console {
-            status: StatusCode::BAD_REQUEST,
-            ..
-        }) => "api_console_bad_request",
-        WakeComputeError::ApiError(ApiError::Console { status, .. })
-            if status.is_server_error() =>
-        {
-            "api_console_other_server_error"
-        }
-        WakeComputeError::ApiError(ApiError::Console { .. }) => "api_console_other_error",
-        WakeComputeError::TimeoutError => "timeout_error",
-    };
-    NUM_WAKEUP_FAILURES.with_label_values(&[retry, kind]).inc();
-}
-
 /// Try to connect to the compute node, retrying if necessary.
-/// This function might update `node_info`, so we take it by `&mut`.
 #[tracing::instrument(skip_all)]
-pub async fn connect_to_compute<M: ConnectMechanism>(
-    ctx: &mut RequestMonitoring,
+pub(crate) async fn connect_to_compute<M: ConnectMechanism, B: ComputeConnectBackend>(
+    ctx: &RequestMonitoring,
     mechanism: &M,
-    mut node_info: console::CachedNodeInfo,
-    user_info: &auth::BackendType<'_, auth::backend::ComputeUserInfo>,
+    user_info: &B,
+    allow_self_signed_compute: bool,
+    wake_compute_retry_config: RetryConfig,
+    connect_to_compute_retry_config: RetryConfig,
 ) -> Result<M::Connection, M::Error>
 where
-    M::ConnectError: ShouldRetry + std::fmt::Debug,
+    M::ConnectError: CouldRetry + ShouldRetryWakeCompute + std::fmt::Debug,
     M::Error: From<WakeComputeError>,
 {
+    let mut num_retries = 0;
+    let mut node_info =
+        wake_compute(&mut num_retries, ctx, user_info, wake_compute_retry_config).await?;
+
+    node_info.set_keys(user_info.get_keys());
+    node_info.allow_self_signed_compute = allow_self_signed_compute;
+    // let mut node_info = credentials.get_node_info(ctx, user_info).await?;
     mechanism.update_connect_config(&mut node_info.config);
+    let retry_type = RetryType::ConnectToCompute;
 
     // try once
-    let (config, err) = match mechanism
+    let err = match mechanism
         .connect_once(ctx, &node_info, CONNECT_TIMEOUT)
         .await
     {
         Ok(res) => {
-            ctx.latency_timer.success();
+            ctx.success();
+            Metrics::get().proxy.retries_metric.observe(
+                RetriesMetricGroup {
+                    outcome: ConnectOutcome::Success,
+                    retry_type,
+                },
+                num_retries.into(),
+            );
             return Ok(res);
         }
-        Err(e) => {
-            error!(error = ?e, "could not connect to compute node");
-            (invalidate_cache(node_info), e)
-        }
+        Err(e) => e,
     };
 
-    ctx.latency_timer.cache_miss();
+    error!(error = ?err, "could not connect to compute node");
 
-    let mut num_retries = 1;
-
-    // if we failed to connect, it's likely that the compute node was suspended, wake a new compute node
-    info!("compute node's state has likely changed; requesting a wake-up");
-    let node_info = loop {
-        let wake_res = match user_info {
-            auth::BackendType::Console(api, user_info) => api.wake_compute(ctx, user_info).await,
-            // nothing to do?
-            auth::BackendType::Link(_) => return Err(err.into()),
-            // test backend
-            #[cfg(test)]
-            auth::BackendType::Test(x) => x.wake_compute(),
-        };
-
-        match handle_try_wake(wake_res, num_retries) {
-            Err(e) => {
-                error!(error = ?e, num_retries, retriable = false, "couldn't wake compute node");
-                report_error(&e, false);
-                return Err(e.into());
-            }
-            // failed to wake up but we can continue to retry
-            Ok(ControlFlow::Continue(e)) => {
-                report_error(&e, true);
-                warn!(error = ?e, num_retries, retriable = true, "couldn't wake compute node");
-            }
-            // successfully woke up a compute node and can break the wakeup loop
-            Ok(ControlFlow::Break(mut node_info)) => {
-                node_info.config.reuse_password(&config);
-                mechanism.update_connect_config(&mut node_info.config);
-                break node_info;
-            }
+    let node_info = if !node_info.cached() || !err.should_retry_wake_compute() {
+        // If we just recieved this from cplane and dodn't get it from cache, we shouldn't retry.
+        // Do not need to retrieve a new node_info, just return the old one.
+        if should_retry(&err, num_retries, connect_to_compute_retry_config) {
+            Metrics::get().proxy.retries_metric.observe(
+                RetriesMetricGroup {
+                    outcome: ConnectOutcome::Failed,
+                    retry_type,
+                },
+                num_retries.into(),
+            );
+            return Err(err.into());
         }
+        node_info
+    } else {
+        // if we failed to connect, it's likely that the compute node was suspended, wake a new compute node
+        info!("compute node's state has likely changed; requesting a wake-up");
+        let old_node_info = invalidate_cache(node_info);
+        let mut node_info =
+            wake_compute(&mut num_retries, ctx, user_info, wake_compute_retry_config).await?;
+        node_info.reuse_settings(old_node_info);
 
-        let wait_duration = retry_after(num_retries);
-        num_retries += 1;
-
-        time::sleep(wait_duration).await;
+        mechanism.update_connect_config(&mut node_info.config);
+        node_info
     };
 
     // now that we have a new node, try connect to it repeatedly.
     // this can error for a few reasons, for instance:
     // * DNS connection settings haven't quite propagated yet
     info!("wake_compute success. attempting to connect");
+    num_retries = 1;
     loop {
         match mechanism
             .connect_once(ctx, &node_info, CONNECT_TIMEOUT)
             .await
         {
             Ok(res) => {
-                ctx.latency_timer.success();
+                ctx.success();
+                Metrics::get().proxy.retries_metric.observe(
+                    RetriesMetricGroup {
+                        outcome: ConnectOutcome::Success,
+                        retry_type,
+                    },
+                    num_retries.into(),
+                );
+                info!(?num_retries, "connected to compute node after");
                 return Ok(res);
             }
             Err(e) => {
-                let retriable = e.should_retry(num_retries);
-                if !retriable {
-                    error!(error = ?e, num_retries, retriable, "couldn't connect to compute node");
+                if !should_retry(&e, num_retries, connect_to_compute_retry_config) {
+                    error!(error = ?e, num_retries, retriable = false, "couldn't connect to compute node");
+                    Metrics::get().proxy.retries_metric.observe(
+                        RetriesMetricGroup {
+                            outcome: ConnectOutcome::Failed,
+                            retry_type,
+                        },
+                        num_retries.into(),
+                    );
                     return Err(e.into());
                 }
-                warn!(error = ?e, num_retries, retriable, "couldn't connect to compute node");
-            }
-        }
 
-        let wait_duration = retry_after(num_retries);
+                warn!(error = ?e, num_retries, retriable = true, "couldn't connect to compute node");
+            }
+        };
+
+        let wait_duration = retry_after(num_retries, connect_to_compute_retry_config);
         num_retries += 1;
 
+        let pause = ctx.latency_timer_pause(crate::metrics::Waiting::RetryTimeout);
         time::sleep(wait_duration).await;
-    }
-}
-
-/// Attempts to wake up the compute node.
-/// * Returns Ok(Continue(e)) if there was an error waking but retries are acceptable
-/// * Returns Ok(Break(node)) if the wakeup succeeded
-/// * Returns Err(e) if there was an error
-pub fn handle_try_wake(
-    result: Result<console::CachedNodeInfo, WakeComputeError>,
-    num_retries: u32,
-) -> Result<ControlFlow<console::CachedNodeInfo, WakeComputeError>, WakeComputeError> {
-    match result {
-        Err(err) => match &err {
-            WakeComputeError::ApiError(api) if api.should_retry(num_retries) => {
-                Ok(ControlFlow::Continue(err))
-            }
-            _ => Err(err),
-        },
-        // Ready to try again.
-        Ok(new) => Ok(ControlFlow::Break(new)),
+        drop(pause);
     }
 }

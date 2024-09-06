@@ -4,9 +4,10 @@
 //!
 use anyhow::{Context, Result};
 use postgres_backend::QueryError;
-use std::{future, time::Duration};
+use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio_io_timeout::TimeoutReader;
+use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::{auth::Scope, measured_stream::MeasuredStream};
 
@@ -16,6 +17,7 @@ use crate::SafeKeeperConf;
 use postgres_backend::{AuthType, PostgresBackend};
 
 /// Accept incoming TCP connections and spawn them into a background thread.
+///
 /// allowed_auth_scope is either SafekeeperData (wide JWT tokens giving access
 /// to any tenant are allowed) or Tenant (only tokens giving access to specific
 /// tenant are allowed). Doesn't matter if auth is disabled in conf.
@@ -42,7 +44,7 @@ pub async fn task_main(
                     error!("connection handler exited: {}", err);
                 }
             }
-            .instrument(info_span!("", cid = %conn_id, ttid = field::Empty)),
+            .instrument(info_span!("", cid = %conn_id, ttid = field::Empty, application_name = field::Empty)),
         );
     }
 }
@@ -68,7 +70,7 @@ async fn handle_socket(
     // is not Unpin, and all pgbackend/framed/tokio dependencies require stream
     // to be Unpin. Which is reasonable, as indeed something like TimeoutReader
     // shouldn't be moved.
-    tokio::pin!(socket);
+    let socket = std::pin::pin!(socket);
 
     let traffic_metrics = TrafficMetrics::new();
     if let Some(current_az) = conf.availability_zone.as_deref() {
@@ -100,7 +102,7 @@ async fn handle_socket(
     // libpq protocol between safekeeper and walproposer / pageserver
     // We don't use shutdown.
     pgbackend
-        .run(&mut conn_handler, future::pending::<()>)
+        .run(&mut conn_handler, &CancellationToken::new())
         .await
 }
 

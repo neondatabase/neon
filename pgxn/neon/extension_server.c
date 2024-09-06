@@ -14,6 +14,9 @@
 
 #include "utils/guc.h"
 
+#include "extension_server.h" 
+#include "neon_utils.h"
+
 static int	extension_server_port = 0;
 
 static download_extension_file_hook_type prev_download_extension_file_hook = NULL;
@@ -31,15 +34,18 @@ static download_extension_file_hook_type prev_download_extension_file_hook = NUL
 static bool
 neon_download_extension_file_http(const char *filename, bool is_library)
 {
-	CURL	   *curl;
+	static CURL	   *handle = NULL;
+
 	CURLcode	res;
 	char	   *compute_ctl_url;
-	char	   *postdata;
 	bool		ret = false;
 
-	if ((curl = curl_easy_init()) == NULL)
+	if (handle == NULL)
 	{
-		elog(ERROR, "Failed to initialize curl handle");
+		handle = alloc_curl_handle();
+
+		curl_easy_setopt(handle, CURLOPT_CUSTOMREQUEST, "POST");
+		curl_easy_setopt(handle, CURLOPT_TIMEOUT, 3L /* seconds */ );
 	}
 
 	compute_ctl_url = psprintf("http://localhost:%d/extension_server/%s%s",
@@ -47,28 +53,22 @@ neon_download_extension_file_http(const char *filename, bool is_library)
 
 	elog(LOG, "Sending request to compute_ctl: %s", compute_ctl_url);
 
-	curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "POST");
-	curl_easy_setopt(curl, CURLOPT_URL, compute_ctl_url);
-	curl_easy_setopt(curl, CURLOPT_TIMEOUT, 3L /* seconds */ );
+	curl_easy_setopt(handle, CURLOPT_URL, compute_ctl_url);
 
-	if (curl)
+	/* Perform the request, res will get the return code */
+	res = curl_easy_perform(handle);
+	/* Check for errors */
+	if (res == CURLE_OK)
 	{
-		/* Perform the request, res will get the return code */
-		res = curl_easy_perform(curl);
-		/* Check for errors */
-		if (res == CURLE_OK)
-		{
-			ret = true;
-		}
-		else
-		{
-			/* Don't error here because postgres will try to find the file */
-			/* and will fail with some proper error message if it's not found. */
-			elog(WARNING, "neon_download_extension_file_http failed: %s\n", curl_easy_strerror(res));
-		}
-
-		/* always cleanup */
-		curl_easy_cleanup(curl);
+		ret = true;
+	}
+	else
+	{
+		/*
+		 * Don't error here because postgres will try to find the file and will
+		 * fail with some proper error message if it's not found.
+		 */
+		elog(WARNING, "neon_download_extension_file_http failed: %s\n", curl_easy_strerror(res));
 	}
 
 	return ret;

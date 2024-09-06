@@ -1,3 +1,5 @@
+import os
+import time
 from abc import ABC, abstractmethod
 from contextlib import _GeneratorContextManager, contextmanager
 
@@ -8,6 +10,7 @@ import pytest
 from _pytest.fixtures import FixtureRequest
 
 from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
+from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
     PgBin,
@@ -42,7 +45,11 @@ class PgCompare(ABC):
         pass
 
     @abstractmethod
-    def flush(self):
+    def flush(self, compact: bool = False, gc: bool = False):
+        pass
+
+    @abstractmethod
+    def compact(self):
         pass
 
     @abstractmethod
@@ -98,7 +105,6 @@ class NeonCompare(PgCompare):
         zenbenchmark: NeonBenchmarker,
         neon_simple_env: NeonEnv,
         pg_bin: PgBin,
-        branch_name: str,
     ):
         self.env = neon_simple_env
         self._zenbenchmark = zenbenchmark
@@ -106,18 +112,11 @@ class NeonCompare(PgCompare):
         self.pageserver_http_client = self.env.pageserver.http_client()
 
         # note that neon_simple_env now uses LOCAL_FS remote storage
-
-        # Create tenant
-        tenant_conf: Dict[str, str] = {}
-        if False:  # TODO add pytest setting for this
-            tenant_conf["trace_read_requests"] = "true"
-        self.tenant, _ = self.env.neon_cli.create_tenant(conf=tenant_conf)
-
-        # Create timeline
-        self.timeline = self.env.neon_cli.create_timeline(branch_name, tenant_id=self.tenant)
+        self.tenant = self.env.initial_tenant
+        self.timeline = self.env.initial_timeline
 
         # Start pg
-        self._pg = self.env.endpoints.create_start(branch_name, "main", self.tenant)
+        self._pg = self.env.endpoints.create_start("main", "main", self.tenant)
 
     @property
     def pg(self) -> PgProtocol:
@@ -131,13 +130,16 @@ class NeonCompare(PgCompare):
     def pg_bin(self) -> PgBin:
         return self._pg_bin
 
-    def flush(self):
+    def flush(self, compact: bool = True, gc: bool = True):
         wait_for_last_flush_lsn(self.env, self._pg, self.tenant, self.timeline)
-        self.pageserver_http_client.timeline_checkpoint(self.tenant, self.timeline)
-        self.pageserver_http_client.timeline_gc(self.tenant, self.timeline, 0)
+        self.pageserver_http_client.timeline_checkpoint(self.tenant, self.timeline, compact=compact)
+        if gc:
+            self.pageserver_http_client.timeline_gc(self.tenant, self.timeline, 0)
 
     def compact(self):
-        self.pageserver_http_client.timeline_compact(self.tenant, self.timeline)
+        self.pageserver_http_client.timeline_compact(
+            self.tenant, self.timeline, wait_until_uploaded=True
+        )
 
     def report_peak_memory_use(self):
         self.zenbenchmark.record(
@@ -155,12 +157,23 @@ class NeonCompare(PgCompare):
             "size", timeline_size / (1024 * 1024), "MB", report=MetricReport.LOWER_IS_BETTER
         )
 
-        metric_filters = {"tenant_id": str(self.tenant), "timeline_id": str(self.timeline)}
+        metric_filters = {
+            "tenant_id": str(self.tenant),
+            "timeline_id": str(self.timeline),
+            "file_kind": "layer",
+            "op_kind": "upload",
+        }
+        # use `started` (not `finished`) counters here, because some callers
+        # don't wait for upload queue to drain
         total_files = self.zenbenchmark.get_int_counter_value(
-            self.env.pageserver, "pageserver_created_persistent_files_total", metric_filters
+            self.env.pageserver,
+            "pageserver_remote_timeline_client_calls_started_total",
+            metric_filters,
         )
         total_bytes = self.zenbenchmark.get_int_counter_value(
-            self.env.pageserver, "pageserver_written_persistent_bytes_total", metric_filters
+            self.env.pageserver,
+            "pageserver_remote_timeline_client_bytes_started_total",
+            metric_filters,
         )
         self.zenbenchmark.record(
             "data_uploaded", total_bytes / (1024 * 1024), "MB", report=MetricReport.LOWER_IS_BETTER
@@ -206,8 +219,11 @@ class VanillaCompare(PgCompare):
     def pg_bin(self) -> PgBin:
         return self._pg.pg_bin
 
-    def flush(self):
+    def flush(self, compact: bool = False, gc: bool = False):
         self.cur.execute("checkpoint")
+
+    def compact(self):
+        pass
 
     def report_peak_memory_use(self):
         pass  # TODO find something
@@ -257,6 +273,9 @@ class RemoteCompare(PgCompare):
         # TODO: flush the remote pageserver
         pass
 
+    def compact(self):
+        pass
+
     def report_peak_memory_use(self):
         # TODO: get memory usage from remote pageserver
         pass
@@ -275,13 +294,11 @@ class RemoteCompare(PgCompare):
 
 @pytest.fixture(scope="function")
 def neon_compare(
-    request: FixtureRequest,
     zenbenchmark: NeonBenchmarker,
     pg_bin: PgBin,
     neon_simple_env: NeonEnv,
 ) -> NeonCompare:
-    branch_name = request.node.name
-    return NeonCompare(zenbenchmark, neon_simple_env, pg_bin, branch_name)
+    return NeonCompare(zenbenchmark, neon_simple_env, pg_bin)
 
 
 @pytest.fixture(scope="function")
@@ -319,3 +336,26 @@ def neon_with_baseline(request: FixtureRequest) -> PgCompare:
     fixture = request.getfixturevalue(request.param)
     assert isinstance(fixture, PgCompare), f"test error: fixture {fixture} is not PgCompare"
     return fixture
+
+
+@pytest.fixture(scope="function", autouse=True)
+def sync_after_each_test():
+    # The fixture calls `sync(2)` after each test if `SYNC_AFTER_EACH_TEST` env var is `true`
+    #
+    # In CI, `SYNC_AFTER_EACH_TEST` is set to `true` only for benchmarks (`test_runner/performance`)
+    # that are run on self-hosted runners because some of these tests are pretty write-heavy
+    # and create issues to start the processes within 10s
+    key = "SYNC_AFTER_EACH_TEST"
+    enabled = os.environ.get(key) == "true"
+
+    yield
+
+    if not enabled:
+        # regress test, or running locally
+        return
+
+    start = time.time()
+    # we only run benches on unices, the method might not exist on windows
+    os.sync()
+    elapsed = time.time() - start
+    log.info(f"called sync after test {elapsed=}")

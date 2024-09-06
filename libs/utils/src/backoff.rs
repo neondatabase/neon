@@ -37,69 +37,53 @@ pub fn exponential_backoff_duration_seconds(n: u32, base_increment: f64, max_sec
     }
 }
 
-/// Configure cancellation for a retried operation: when to cancel (the token), and
-/// what kind of error to return on cancellation
-pub struct Cancel<E, CF>
-where
-    E: Display + Debug + 'static,
-    CF: Fn() -> E,
-{
-    token: CancellationToken,
-    on_cancel: CF,
-}
-
-impl<E, CF> Cancel<E, CF>
-where
-    E: Display + Debug + 'static,
-    CF: Fn() -> E,
-{
-    pub fn new(token: CancellationToken, on_cancel: CF) -> Self {
-        Self { token, on_cancel }
-    }
-}
-
-/// retries passed operation until one of the following conditions are met:
-/// Encountered error is considered as permanent (non-retryable)
-/// Retries have been exhausted.
-/// `is_permanent` closure should be used to provide distinction between permanent/non-permanent errors
-/// When attempts cross `warn_threshold` function starts to emit log warnings.
+/// Retries passed operation until one of the following conditions are met:
+/// - encountered error is considered as permanent (non-retryable)
+/// - retries have been exhausted
+/// - cancellation token has been cancelled
+///
+/// `is_permanent` closure should be used to provide distinction between permanent/non-permanent
+/// errors. When attempts cross `warn_threshold` function starts to emit log warnings.
 /// `description` argument is added to log messages. Its value should identify the `op` is doing
-/// `cancel` argument is required: any time we are looping on retry, we should be using a CancellationToken
-/// to drop out promptly on shutdown.
-pub async fn retry<T, O, F, E, CF>(
+/// `cancel` cancels new attempts and the backoff sleep.
+///
+/// If attempts fail, they are being logged with `{:#}` which works for anyhow, but does not work
+/// for any other error type. Final failed attempt is logged with `{:?}`.
+///
+/// Returns `None` if cancellation was noticed during backoff or the terminal result.
+pub async fn retry<T, O, F, E>(
     mut op: O,
     is_permanent: impl Fn(&E) -> bool,
     warn_threshold: u32,
     max_retries: u32,
     description: &str,
-    cancel: Cancel<E, CF>,
-) -> Result<T, E>
+    cancel: &CancellationToken,
+) -> Option<Result<T, E>>
 where
     // Not std::error::Error because anyhow::Error doesnt implement it.
     // For context see https://github.com/dtolnay/anyhow/issues/63
     E: Display + Debug + 'static,
     O: FnMut() -> F,
     F: Future<Output = Result<T, E>>,
-    CF: Fn() -> E,
 {
     let mut attempts = 0;
     loop {
-        if cancel.token.is_cancelled() {
-            return Err((cancel.on_cancel)());
+        if cancel.is_cancelled() {
+            return None;
         }
 
         let result = op().await;
-        match result {
+        match &result {
             Ok(_) => {
                 if attempts > 0 {
                     tracing::info!("{description} succeeded after {attempts} retries");
                 }
-                return result;
+                return Some(result);
             }
 
             // These are "permanent" errors that should not be retried.
-            Err(ref e) if is_permanent(e) => {
-                return result;
+            Err(e) if is_permanent(e) => {
+                return Some(result);
             }
             // Assume that any other failure might be transient, and the operation might
             // succeed if we just keep trying.
@@ -109,12 +93,12 @@ where
             Err(err) if attempts < max_retries => {
                 tracing::warn!("{description} failed, will retry (attempt {attempts}): {err:#}");
             }
-            Err(ref err) => {
+            Err(err) => {
                 // Operation failed `max_attempts` times. Time to give up.
                 tracing::warn!(
                     "{description} still failed after {attempts} retries, giving up: {err:?}"
                 );
-                return result;
+                return Some(result);
             }
         }
         // sleep and retry
@@ -122,7 +106,7 @@ where
             attempts,
             DEFAULT_BASE_BACKOFF_SECONDS,
             DEFAULT_MAX_BACKOFF_SECONDS,
-            &cancel.token,
+            cancel,
         )
         .await;
         attempts += 1;
@@ -131,11 +115,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::io;
-
-    use tokio::sync::Mutex;
-
     use super::*;
+    use std::io;
+    use tokio::sync::Mutex;
 
     #[test]
     fn backoff_defaults_produce_growing_backoff_sequence() {
@@ -166,7 +148,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn retry_always_error() {
         let count = Mutex::new(0);
-        let err_result = retry(
+        retry(
             || async {
                 *count.lock().await += 1;
                 Result::<(), io::Error>::Err(io::Error::from(io::ErrorKind::Other))
@@ -175,11 +157,11 @@ mod tests {
             1,
             1,
             "work",
-            Cancel::new(CancellationToken::new(), || -> io::Error { unreachable!() }),
+            &CancellationToken::new(),
         )
-        .await;
-
-        assert!(err_result.is_err());
+        .await
+        .expect("not cancelled")
+        .expect_err("it can only fail");
 
         assert_eq!(*count.lock().await, 2);
     }
@@ -201,10 +183,11 @@ mod tests {
             2,
             2,
             "work",
-            Cancel::new(CancellationToken::new(), || -> io::Error { unreachable!() }),
+            &CancellationToken::new(),
         )
         .await
-        .unwrap();
+        .expect("not cancelled")
+        .expect("success on second try");
     }
 
     #[tokio::test(start_paused = true)]
@@ -224,10 +207,11 @@ mod tests {
             2,
             2,
             "work",
-            Cancel::new(CancellationToken::new(), || -> io::Error { unreachable!() }),
+            &CancellationToken::new(),
         )
         .await
-        .unwrap_err();
+        .expect("was not cancellation")
+        .expect_err("it was permanent error");
 
         assert_eq!(*count.lock().await, 1);
     }

@@ -1,0 +1,24 @@
+services:
+  zookeeper:
+    image: quay.io/debezium/zookeeper:2.7
+  kafka:
+    image: quay.io/debezium/kafka:2.7
+    environment:
+      ZOOKEEPER_CONNECT: "zookeeper:2181"
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_BROKER_ID: 1
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_JMX_PORT: 9991
+    ports:
+      - 127.0.0.1:9092:9092
+  debezium:
+    image: quay.io/debezium/connect:2.7
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: 1
+      CONFIG_STORAGE_TOPIC: debezium-config
+      OFFSET_STORAGE_TOPIC: debezium-offset
+      STATUS_STORAGE_TOPIC: debezium-status
+      DEBEZIUM_CONFIG_CONNECTOR_CLASS: io.debezium.connector.postgresql.PostgresConnector
+    ports:
+      - 127.0.0.1:8083:8083

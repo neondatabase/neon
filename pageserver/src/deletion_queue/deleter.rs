@@ -8,6 +8,7 @@
 
 use remote_storage::GenericRemoteStorage;
 use remote_storage::RemotePath;
+use remote_storage::TimeoutOrCancel;
 use remote_storage::MAX_KEYS_PER_DELETE;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -71,15 +72,19 @@ impl Deleter {
                     Err(anyhow::anyhow!("failpoint: deletion-queue-before-execute"))
                 });
 
-                self.remote_storage.delete_objects(&self.accumulator).await
+                self.remote_storage
+                    .delete_objects(&self.accumulator, &self.cancel)
+                    .await
             },
-            |_| false,
+            TimeoutOrCancel::caused_by_cancel,
             3,
             10,
             "executing deletion batch",
-            backoff::Cancel::new(self.cancel.clone(), || anyhow::anyhow!("Shutting down")),
+            &self.cancel,
         )
         .await
+        .ok_or_else(|| anyhow::anyhow!("Shutting down"))
+        .and_then(|x| x)
     }
 
     /// Block until everything in accumulator has been executed

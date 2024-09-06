@@ -1,0 +1,61 @@
+[package]
+name = "storage_controller"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "storage_controller"
+path = "src/main.rs"
+
+[features]
+default = []
+# Enables test-only APIs and behaviors
+testing = []
+
+[dependencies]
+anyhow.workspace = true
+aws-config.workspace = true
+bytes.workspace = true
+camino.workspace = true
+chrono.workspace = true
+clap.workspace = true
+fail.workspace = true
+futures.workspace = true
+git-version.workspace = true
+hex.workspace = true
+hyper.workspace = true
+humantime.workspace = true
+itertools.workspace = true
+lasso.workspace = true
+once_cell.workspace = true
+pageserver_api.workspace = true
+pageserver_client.workspace = true
+postgres_connection.workspace = true
+rand.workspace = true
+reqwest = { workspace = true, features = ["stream"] }
+routerify.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+measured.workspace = true
+scopeguard.workspace = true
+strum.workspace = true
+strum_macros.workspace = true
+
+diesel = { version = "2.1.4", features = [
+    "serde_json",
+    "postgres",
+    "r2d2",
+    "chrono",
+] }
+diesel_migrations = { version = "2.1.0" }
+r2d2 = { version = "0.8.10" }
+
+utils = { path = "../libs/utils/" }
+metrics = { path = "../libs/metrics/" }
+control_plane = { path = "../control_plane" }
+workspace_hack = { version = "0.1", path = "../workspace_hack" }

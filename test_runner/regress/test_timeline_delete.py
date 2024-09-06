@@ -6,6 +6,7 @@ import threading
 
 import pytest
 import requests
+from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
@@ -15,9 +16,9 @@ from fixtures.neon_fixtures import (
 )
 from fixtures.pageserver.http import PageserverApiException
 from fixtures.pageserver.utils import (
-    MANY_SMALL_LAYERS_TENANT_CONFIG,
     assert_prefix_empty,
     assert_prefix_not_empty,
+    many_small_layers_tenant_config,
     poll_for_remote_storage_iterations,
     timeline_delete_wait_completed,
     wait_for_last_record_lsn,
@@ -31,7 +32,6 @@ from fixtures.remote_storage import (
     RemoteStorageKind,
     s3_storage,
 )
-from fixtures.types import Lsn, TenantId, TimelineId
 from fixtures.utils import query_scalar, run_pg_bench_small, wait_until
 from urllib3.util.retry import Retry
 
@@ -89,6 +89,7 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
     assert timeline_path.exists()
 
     # retry deletes when compaction or gc is running in pageserver
+    # TODO: review whether this wait_until is actually necessary, we do an await() internally
     wait_until(
         number_of_iterations=3,
         interval=0.2,
@@ -136,12 +137,9 @@ DELETE_FAILPOINTS = [
     "timeline-delete-before-index-deleted-at",
     "timeline-delete-before-schedule",
     "timeline-delete-before-rm",
-    "timeline-delete-during-rm",
     "timeline-delete-after-rm",
     "timeline-delete-before-index-delete",
     "timeline-delete-after-index-delete",
-    "timeline-delete-after-rm-metadata",
-    "timeline-delete-after-rm-dir",
 ]
 
 
@@ -206,7 +204,7 @@ def test_delete_timeline_exercise_crash_safety_failpoints(
         [
             f".*{timeline_id}.*failpoint: {failpoint}",
             # It appears when we stopped flush loop during deletion and then pageserver is stopped
-            ".*shutdown_all_tenants:shutdown.*tenant_id.*shutdown.*timeline_id.*: failed to freeze and flush: cannot flush frozen layers when flush_loop is not running, state is Exited",
+            ".*shutdown.*tenant_id.*shutdown.*timeline_id.*: failed to freeze and flush: cannot flush frozen layers when flush_loop is not running, state is Exited",
             # This happens when we fail before scheduling background operation.
             # Timeline is left in stopping state and retry tries to stop it again.
             ".*Ignoring new state, equal to the existing one: Stopping",
@@ -215,7 +213,9 @@ def test_delete_timeline_exercise_crash_safety_failpoints(
             # This happens when timeline remains are cleaned up during loading
             ".*Timeline dir entry become invalid.*",
             # In one of the branches we poll for tenant to become active. Polls can generate this log message:
-            f".*Tenant {env.initial_tenant} is not active*",
+            f".*Tenant {env.initial_tenant} is not active.*",
+            # an on-demand is cancelled by shutdown
+            ".*initial size calculation failed: downloading failed, possibly for shutdown",
         ]
     )
 
@@ -398,7 +398,7 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
             ".*failpoint: timeline-delete-before-rm",
             ".*Ignoring new state, equal to the existing one: Stopping",
             # this happens, because the stuck timeline is visible to shutdown
-            ".*shutdown_all_tenants:shutdown.*tenant_id.*shutdown.*timeline_id.*: failed to freeze and flush: cannot flush frozen layers when flush_loop is not running, state is Exited",
+            ".*shutdown.*tenant_id.*shutdown.*timeline_id.*: failed to freeze and flush: cannot flush frozen layers when flush_loop is not running, state is Exited",
         ]
     )
 
@@ -485,6 +485,9 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
         lambda: assert_prefix_empty(neon_env_builder.pageserver_remote_storage),
     )
 
+    # We deleted our only tenant, and the scrubber fails if it detects nothing
+    neon_env_builder.disable_scrub_on_exit()
+
 
 @pytest.mark.parametrize(
     "stuck_failpoint",
@@ -534,7 +537,7 @@ def test_concurrent_timeline_delete_stuck_on(
     try:
 
         def first_call_hit_failpoint():
-            assert env.pageserver.log_contains(
+            env.pageserver.assert_log_contains(
                 f".*{child_timeline_id}.*at failpoint {stuck_failpoint}"
             )
 
@@ -605,7 +608,7 @@ def test_delete_timeline_client_hangup(neon_env_builder: NeonEnvBuilder):
     at_failpoint_log_message = f".*{child_timeline_id}.*at failpoint {failpoint_name}.*"
 
     def hit_failpoint():
-        assert env.pageserver.log_contains(at_failpoint_log_message)
+        env.pageserver.assert_log_contains(at_failpoint_log_message)
 
     wait_until(50, 0.1, hit_failpoint)
 
@@ -615,7 +618,7 @@ def test_delete_timeline_client_hangup(neon_env_builder: NeonEnvBuilder):
     env.pageserver.allowed_errors.append(hangup_log_message)
 
     def got_hangup_log_message():
-        assert env.pageserver.log_contains(hangup_log_message)
+        env.pageserver.assert_log_contains(hangup_log_message)
 
     wait_until(50, 0.1, got_hangup_log_message)
 
@@ -627,7 +630,7 @@ def test_delete_timeline_client_hangup(neon_env_builder: NeonEnvBuilder):
 
     def first_request_finished():
         message = f".*DELETE.*{child_timeline_id}.*Cancelled request finished"
-        assert env.pageserver.log_contains(message)
+        env.pageserver.assert_log_contains(message)
 
     wait_until(50, 0.1, first_request_finished)
 
@@ -651,9 +654,7 @@ def test_timeline_delete_works_for_remote_smoke(
     timeline_ids = [env.initial_timeline]
     for i in range(2):
         branch_timeline_id = env.neon_cli.create_branch(f"new{i}", "main")
-        pg = env.endpoints.create_start(f"new{i}")
-
-        with pg.cursor() as cur:
+        with env.endpoints.create_start(f"new{i}") as pg, pg.cursor() as cur:
             cur.execute("CREATE TABLE f (i integer);")
             cur.execute("INSERT INTO f VALUES (generate_series(1,1000));")
             current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
@@ -704,6 +705,9 @@ def test_timeline_delete_works_for_remote_smoke(
     # for some reason the check above doesnt immediately take effect for the below.
     # Assume it is mock server inconsistency and check twice.
     wait_until(2, 0.5, lambda: assert_prefix_empty(neon_env_builder.pageserver_remote_storage))
+
+    # We deleted our only tenant, and the scrubber fails if it detects nothing
+    neon_env_builder.disable_scrub_on_exit()
 
 
 def test_delete_orphaned_objects(
@@ -764,7 +768,7 @@ def test_delete_orphaned_objects(
 
     for orphan in orphans:
         assert not orphan.exists()
-        assert env.pageserver.log_contains(
+        env.pageserver.assert_log_contains(
             f"deleting a file not referenced from index_part.json name={orphan.stem}"
         )
 
@@ -778,7 +782,7 @@ def test_timeline_delete_resumed_on_attach(
     remote_storage_kind = s3_storage()
     neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
 
-    env = neon_env_builder.init_start(initial_tenant_conf=MANY_SMALL_LAYERS_TENANT_CONFIG)
+    env = neon_env_builder.init_start(initial_tenant_conf=many_small_layers_tenant_config())
 
     tenant_id = env.initial_tenant
 
@@ -803,7 +807,7 @@ def test_timeline_delete_resumed_on_attach(
         )
 
     # failpoint before we remove index_part from s3
-    failpoint = "timeline-delete-during-rm"
+    failpoint = "timeline-delete-after-rm"
     ps_http.configure_failpoints((failpoint, "return"))
 
     env.pageserver.allowed_errors.extend(
@@ -811,7 +815,7 @@ def test_timeline_delete_resumed_on_attach(
             # allow errors caused by failpoints
             f".*failpoint: {failpoint}",
             # It appears when we stopped flush loop during deletion (attempt) and then pageserver is stopped
-            ".*shutdown_all_tenants:shutdown.*tenant_id.*shutdown.*timeline_id.*: failed to freeze and flush: cannot flush frozen layers when flush_loop is not running, state is Exited",
+            ".*shutdown.*tenant_id.*shutdown.*timeline_id.*: failed to freeze and flush: cannot flush frozen layers when flush_loop is not running, state is Exited",
             # error from http response is also logged
             ".*InternalServerError\\(Tenant is marked as deleted on remote storage.*",
             # Polling after attach may fail with this

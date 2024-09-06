@@ -1,9 +1,9 @@
-use std::collections::HashSet;
 use std::env;
 use std::num::NonZeroUsize;
 use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
+use std::{collections::HashSet, time::Duration};
 
 use anyhow::Context;
 use remote_storage::{
@@ -31,12 +31,24 @@ struct EnabledAzure {
 impl EnabledAzure {
     async fn setup(max_keys_in_list_response: Option<i32>) -> Self {
         let client = create_azure_client(max_keys_in_list_response)
+            .await
             .context("Azure client creation")
             .expect("Azure client creation failed");
 
         EnabledAzure {
             client,
             base_prefix: BASE_PREFIX,
+        }
+    }
+
+    #[allow(unused)] // this will be needed when moving the timeout integration tests back
+    fn configure_request_timeout(&mut self, timeout: Duration) {
+        match Arc::get_mut(&mut self.client).expect("outer Arc::get_mut") {
+            GenericRemoteStorage::AzureBlob(azure) => {
+                let azure = Arc::get_mut(azure).expect("inner Arc::get_mut");
+                azure.timeout = timeout;
+            }
+            _ => unreachable!(),
         }
     }
 }
@@ -46,7 +58,6 @@ enum MaybeEnabledStorage {
     Disabled,
 }
 
-#[async_trait::async_trait]
 impl AsyncTestContext for MaybeEnabledStorage {
     async fn setup() -> Self {
         ensure_logging_ready();
@@ -75,7 +86,6 @@ struct AzureWithTestBlobs {
     remote_blobs: HashSet<RemotePath>,
 }
 
-#[async_trait::async_trait]
 impl AsyncTestContext for MaybeEnabledStorageWithTestBlobs {
     async fn setup() -> Self {
         ensure_logging_ready();
@@ -123,10 +133,6 @@ impl AsyncTestContext for MaybeEnabledStorageWithTestBlobs {
     }
 }
 
-// NOTE: the setups for the list_prefixes test and the list_files test are very similar
-// However, they are not idential. The list_prefixes function is concerned with listing prefixes,
-// whereas the list_files function is concerned with listing files.
-// See `RemoteStorage::list_files` documentation for more details
 enum MaybeEnabledStorageWithSimpleTestBlobs {
     Enabled(AzureWithSimpleTestBlobs),
     Disabled,
@@ -137,7 +143,6 @@ struct AzureWithSimpleTestBlobs {
     remote_blobs: HashSet<RemotePath>,
 }
 
-#[async_trait::async_trait]
 impl AsyncTestContext for MaybeEnabledStorageWithSimpleTestBlobs {
     async fn setup() -> Self {
         ensure_logging_ready();
@@ -183,7 +188,7 @@ impl AsyncTestContext for MaybeEnabledStorageWithSimpleTestBlobs {
     }
 }
 
-fn create_azure_client(
+async fn create_azure_client(
     max_keys_per_list_response: Option<i32>,
 ) -> anyhow::Result<Arc<GenericRemoteStorage>> {
     use rand::Rng;
@@ -208,13 +213,17 @@ fn create_azure_client(
     let remote_storage_config = RemoteStorageConfig {
         storage: RemoteStorageKind::AzureContainer(AzureConfig {
             container_name: remote_storage_azure_container,
+            storage_account: None,
             container_region: remote_storage_azure_region,
             prefix_in_container: Some(format!("test_{millis}_{random:08x}/")),
             concurrency_limit: NonZeroUsize::new(100).unwrap(),
             max_keys_per_list_response,
         }),
+        timeout: Duration::from_secs(120),
     };
     Ok(Arc::new(
-        GenericRemoteStorage::from_config(&remote_storage_config).context("remote storage init")?,
+        GenericRemoteStorage::from_config(&remote_storage_config)
+            .await
+            .context("remote storage init")?,
     ))
 }

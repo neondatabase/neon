@@ -1,5 +1,3 @@
-version: '3'
-
 services:
   minio:
     restart: always
@@ -33,25 +31,14 @@ services:
     restart: always
     image: ${REPOSITORY:-neondatabase}/neon:${TAG:-latest}
     environment:
-      - BROKER_ENDPOINT='http://storage_broker:50051'
       - AWS_ACCESS_KEY_ID=minio
       - AWS_SECRET_ACCESS_KEY=password
       #- RUST_BACKTRACE=1
     ports:
        #- 6400:6400  # pg protocol handler
        - 9898:9898 # http endpoints
-    entrypoint:
-      - "/bin/sh"
-      - "-c"
-    command:
-      - "/usr/local/bin/pageserver -D /data/.neon/
-                                   -c \"broker_endpoint=$$BROKER_ENDPOINT\"
-                                   -c \"listen_pg_addr='0.0.0.0:6400'\"
-                                   -c \"listen_http_addr='0.0.0.0:9898'\"
-                                   -c \"remote_storage={endpoint='http://minio:9000',
-                                                        bucket_name='neon',
-                                                        bucket_region='eu-north-1',
-                                                        prefix_in_bucket='/pageserver/'}\""
+    volumes:
+      - ./pageserver_config:/data/.neon/
     depends_on:
       - storage_broker
       - minio_create_buckets
@@ -161,12 +148,12 @@ services:
       context: ./compute_wrapper/
       args:
         - REPOSITORY=${REPOSITORY:-neondatabase}
-        - COMPUTE_IMAGE=compute-node-v${PG_VERSION:-14}
+        - COMPUTE_IMAGE=compute-node-v${PG_VERSION:-16}
         - TAG=${TAG:-latest}
         - http_proxy=$http_proxy
         - https_proxy=$https_proxy
     environment:
-      - PG_VERSION=${PG_VERSION:-14}
+      - PG_VERSION=${PG_VERSION:-16}
       #- RUST_BACKTRACE=1
     # Mount the test files directly, for faster editing cycle.
     volumes:
@@ -192,5 +179,16 @@ services:
       - "until pg_isready -h compute -p 55433 -U cloud_admin ; do
             echo 'Waiting to start compute...' && sleep 1;
          done"
+    depends_on:
+      - compute
+
+  neon-test-extensions:
+    profiles: ["test-extensions"]
+    image: ${REPOSITORY:-neondatabase}/neon-test-extensions-v${PG_TEST_VERSION:-16}:${TAG:-latest}
+    entrypoint:
+      - "/bin/bash"
+      - "-c"
+    command:
+      - sleep 1800
     depends_on:
       - compute

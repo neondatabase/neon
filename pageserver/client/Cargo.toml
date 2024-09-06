@@ -7,8 +7,7 @@ license.workspace = true
 [dependencies]
 pageserver_api.workspace = true
 thiserror.workspace = true
-async-trait.workspace = true
-reqwest.workspace = true
+reqwest = { workspace = true, features = [ "stream" ] }
 utils.workspace = true
 serde.workspace = true
 workspace_hack = { version = "0.1", path = "../../workspace_hack" }

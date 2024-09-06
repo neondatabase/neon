@@ -68,6 +68,51 @@ paths:
               schema:
                 $ref: "#/components/schemas/Info"
 
+  /dbs_and_roles:
+    get:
+      tags:
+        - Info
+      summary: Get databases and roles in the catalog.
+      description: ""
+      operationId: getDbsAndRoles
+      responses:
+        200:
+          description: Compute schema objects
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DbsAndRoles"
+
+  /database_schema:
+    get:
+      tags:
+        - Info
+      summary: Get schema dump
+      parameters:
+        - name: database
+          in: query
+          description: Database name to dump.
+          required: true
+          schema:
+            type: string
+          example: "postgres"
+      description: Get schema dump in SQL format.
+      operationId: getDatabaseSchema
+      responses:
+        200:
+          description: Schema dump
+          content:
+            text/plain:
+              schema:
+                type: string
+                description: Schema dump in SQL format.
+        404:
+          description: Non existing database.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericError"
+
   /check_writability:
     post:
       tags:
@@ -168,6 +213,29 @@ paths:
               schema:
                 $ref: "#/components/schemas/GenericError"
 
+  /terminate:
+    post:
+      tags:
+      - Terminate
+      summary: Terminate Postgres and wait for it to exit
+      description: ""
+      operationId: terminate
+      responses:
+        200:
+          description: Result
+        412:
+          description: "wrong state"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericError"
+        500:
+          description: "Unexpected error"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericError"
+
 components:
   securitySchemes:
     JWT:
@@ -205,6 +273,73 @@ components:
       properties:
         num_cpus:
           type: integer
+
+    DbsAndRoles:
+      type: object
+      description: Databases and Roles
+      required:
+        - roles
+        - databases
+      properties:
+        roles:
+          type: array
+          items:
+            $ref: "#/components/schemas/Role"
+        databases:
+          type: array
+          items:
+            $ref: "#/components/schemas/Database"
+
+    Database:
+      type: object
+      description: Database
+      required:
+        - name
+        - owner
+        - restrict_conn
+        - invalid
+      properties:
+        name:
+          type: string
+        owner:
+          type: string
+        options:
+          type: array
+          items:
+            $ref: "#/components/schemas/GenericOption"
+        restrict_conn:
+          type: boolean
+        invalid:
+          type: boolean
+
+    Role:
+      type: object
+      description: Role
+      required:
+        - name
+      properties:
+        name:
+          type: string
+        encrypted_password:
+          type: string
+        options:
+          type: array
+          items:
+            $ref: "#/components/schemas/GenericOption"
+
+    GenericOption:
+      type: object
+      description: Schema Generic option
+      required:
+        - name
+        - vartype
+      properties:
+        name:
+          type: string
+        value:
+          type: string
+        vartype:
+          type: string
 
     ComputeState:
       type: object

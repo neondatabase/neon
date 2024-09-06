@@ -2,13 +2,13 @@
 //! To do so, a current implementation needs to do the following:
 //!
 //! * acknowledge the timelines that it needs to stream WAL into.
-//! Pageserver is able to dynamically (un)load tenants on attach and detach,
-//! hence WAL receiver needs to react on such events.
+//!   Pageserver is able to dynamically (un)load tenants on attach and detach,
+//!   hence WAL receiver needs to react on such events.
 //!
 //! * get a broker subscription, stream data from it to determine that a timeline needs WAL streaming.
-//! For that, it watches specific keys in storage_broker and pulls the relevant data periodically.
-//! The data is produced by safekeepers, that push it periodically and pull it to synchronize between each other.
-//! Without this data, no WAL streaming is possible currently.
+//!   For that, it watches specific keys in storage_broker and pulls the relevant data periodically.
+//!   The data is produced by safekeepers, that push it periodically and pull it to synchronize between each other.
+//!   Without this data, no WAL streaming is possible currently.
 //!
 //! Only one active WAL streaming connection is allowed at a time.
 //! The connection is supposed to be updated periodically, based on safekeeper timeline data.
@@ -24,25 +24,20 @@ mod connection_manager;
 mod walreceiver_connection;
 
 use crate::context::{DownloadBehavior, RequestContext};
-use crate::task_mgr::{self, TaskKind, WALRECEIVER_RUNTIME};
+use crate::task_mgr::{TaskKind, WALRECEIVER_RUNTIME};
 use crate::tenant::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::tenant::timeline::walreceiver::connection_manager::{
     connection_manager_loop_step, ConnectionManagerState,
 };
 
-use pageserver_api::shard::TenantShardId;
 use std::future::Future;
 use std::num::NonZeroU64;
-use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::Duration;
 use storage_broker::BrokerClientChannel;
-use tokio::select;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
-
-use utils::id::TimelineId;
 
 use self::connection_manager::ConnectionManagerStatus;
 
@@ -62,9 +57,10 @@ pub struct WalReceiverConf {
 }
 
 pub struct WalReceiver {
-    tenant_shard_id: TenantShardId,
-    timeline_id: TimelineId,
     manager_status: Arc<std::sync::RwLock<Option<ConnectionManagerStatus>>>,
+    /// All task spawned by [`WalReceiver::start`] and its children are sensitive to this token.
+    /// It's a child token of [`Timeline`] so that timeline shutdown can cancel WalReceiver tasks early for `freeze_and_flush=true`.
+    cancel: CancellationToken,
 }
 
 impl WalReceiver {
@@ -78,65 +74,58 @@ impl WalReceiver {
         let timeline_id = timeline.timeline_id;
         let walreceiver_ctx =
             ctx.detached_child(TaskKind::WalReceiverManager, DownloadBehavior::Error);
-
         let loop_status = Arc::new(std::sync::RwLock::new(None));
         let manager_status = Arc::clone(&loop_status);
-        task_mgr::spawn(
-            WALRECEIVER_RUNTIME.handle(),
-            TaskKind::WalReceiverManager,
-            Some(timeline.tenant_shard_id),
-            Some(timeline_id),
-            &format!("walreceiver for timeline {tenant_shard_id}/{timeline_id}"),
-            false,
+        let cancel = timeline.cancel.child_token();
+        WALRECEIVER_RUNTIME.spawn({
+            let cancel = cancel.clone();
             async move {
                 debug_assert_current_span_has_tenant_and_timeline_id();
+                // acquire timeline gate so we know the task doesn't outlive the Timeline
+                let Ok(_guard) = timeline.gate.enter() else {
+                    debug!("WAL receiver manager could not enter the gate timeline gate, it's closed already");
+                    return;
+                };
                 debug!("WAL receiver manager started, connecting to broker");
                 let mut connection_manager_state = ConnectionManagerState::new(
                     timeline,
                     conf,
+                    cancel.clone(),
                 );
-                loop {
-                    select! {
-                        _ = task_mgr::shutdown_watcher() => {
-                            trace!("WAL receiver shutdown requested, shutting down");
+                while !cancel.is_cancelled() {
+                    let loop_step_result = connection_manager_loop_step(
+                        &mut broker_client,
+                        &mut connection_manager_state,
+                        &walreceiver_ctx,
+                        &cancel,
+                        &loop_status,
+                    ).await;
+                    match loop_step_result {
+                        Ok(()) => continue,
+                        Err(_cancelled) => {
+                            trace!("Connection manager loop ended, shutting down");
                             break;
-                        },
-                        loop_step_result = connection_manager_loop_step(
-                            &mut broker_client,
-                            &mut connection_manager_state,
-                            &walreceiver_ctx,
-                            &loop_status,
-                        ) => match loop_step_result {
-                            ControlFlow::Continue(()) => continue,
-                            ControlFlow::Break(()) => {
-                                trace!("Connection manager loop ended, shutting down");
-                                break;
-                            }
-                        },
+                        }
                     }
                 }
-
                 connection_manager_state.shutdown().await;
                 *loop_status.write().unwrap() = None;
-                Ok(())
+                debug!("task exits");
             }
             .instrument(info_span!(parent: None, "wal_connection_manager", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug(), timeline_id = %timeline_id))
-        );
+        });
 
         Self {
-            tenant_shard_id,
-            timeline_id,
             manager_status,
+            cancel,
         }
     }
 
-    pub async fn stop(self) {
-        task_mgr::shutdown_tasks(
-            Some(TaskKind::WalReceiverManager),
-            Some(self.tenant_shard_id),
-            Some(self.timeline_id),
-        )
-        .await;
+    #[instrument(skip_all, level = tracing::Level::DEBUG)]
+    pub fn cancel(&self) {
+        debug_assert_current_span_has_tenant_and_timeline_id();
+        debug!("cancelling walreceiver tasks");
+        self.cancel.cancel();
     }
 
     pub(crate) fn status(&self) -> Option<ConnectionManagerStatus> {
@@ -170,14 +159,18 @@ enum TaskStateUpdate<E> {
 
 impl<E: Clone> TaskHandle<E> {
     /// Initializes the task, starting it immediately after the creation.
+    ///
+    /// The second argument to `task` is a child token of `cancel_parent` ([`CancellationToken::child_token`]).
+    /// It being a child token enables us to provide a [`Self::shutdown`] method.
     fn spawn<Fut>(
+        cancel_parent: &CancellationToken,
         task: impl FnOnce(watch::Sender<TaskStateUpdate<E>>, CancellationToken) -> Fut + Send + 'static,
     ) -> Self
     where
         Fut: Future<Output = anyhow::Result<()>> + Send,
         E: Send + Sync + 'static,
     {
-        let cancellation = CancellationToken::new();
+        let cancellation = cancel_parent.child_token();
         let (events_sender, events_receiver) = watch::channel(TaskStateUpdate::Started);
 
         let cancellation_clone = cancellation.clone();
@@ -197,6 +190,9 @@ impl<E: Clone> TaskHandle<E> {
         }
     }
 
+    /// # Cancel-Safety
+    ///
+    /// Cancellation-safe.
     async fn next_task_event(&mut self) -> TaskEvent<E> {
         match self.events_receiver.changed().await {
             Ok(()) => TaskEvent::Update((self.events_receiver.borrow()).clone()),

@@ -11,13 +11,15 @@ use utils::const_assert;
 use utils::lsn::Lsn;
 
 fn init_logging() {
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(
-        format!("crate=info,postgres_ffi::{PG_MAJORVERSION}::xlog_utils=trace"),
-    ))
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(format!(
+        "crate=info,postgres_ffi::{PG_MAJORVERSION}::xlog_utils=trace"
+    )))
     .is_test(true)
     .try_init();
 }
 
+/// Test that find_end_of_wal returns the same results as pg_dump on various
+/// WALs created by Crafter.
 fn test_end_of_wal<C: crate::Crafter>(test_name: &str) {
     use crate::*;
 
@@ -38,13 +40,13 @@ fn test_end_of_wal<C: crate::Crafter>(test_name: &str) {
     }
     cfg.initdb().unwrap();
     let srv = cfg.start_server().unwrap();
-    let (intermediate_lsns, expected_end_of_wal_partial) =
-        C::craft(&mut srv.connect_with_timeout().unwrap()).unwrap();
+    let intermediate_lsns = C::craft(&mut srv.connect_with_timeout().unwrap()).unwrap();
     let intermediate_lsns: Vec<Lsn> = intermediate_lsns
         .iter()
         .map(|&lsn| u64::from(lsn).into())
         .collect();
-    let expected_end_of_wal: Lsn = u64::from(expected_end_of_wal_partial).into();
+    // Kill postgres. Note that it might have inserted to WAL something after
+    // 'craft' did its job.
     srv.kill();
 
     // Check find_end_of_wal on the initial WAL
@@ -56,7 +58,7 @@ fn test_end_of_wal<C: crate::Crafter>(test_name: &str) {
         .filter(|fname| IsXLogFileName(fname))
         .max()
         .unwrap();
-    check_pg_waldump_end_of_wal(&cfg, &last_segment, expected_end_of_wal);
+    let expected_end_of_wal = find_pg_waldump_end_of_wal(&cfg, &last_segment);
     for start_lsn in intermediate_lsns
         .iter()
         .chain(std::iter::once(&expected_end_of_wal))
@@ -91,11 +93,7 @@ fn test_end_of_wal<C: crate::Crafter>(test_name: &str) {
     }
 }
 
-fn check_pg_waldump_end_of_wal(
-    cfg: &crate::Conf,
-    last_segment: &str,
-    expected_end_of_wal: Lsn,
-) {
+fn find_pg_waldump_end_of_wal(cfg: &crate::Conf, last_segment: &str) -> Lsn {
     // Get the actual end of WAL by pg_waldump
     let waldump_output = cfg
         .pg_waldump("000000010000000000000001", last_segment)
@@ -113,11 +111,8 @@ fn check_pg_waldump_end_of_wal(
         }
     };
     let waldump_wal_end = Lsn::from_str(caps.get(1).unwrap().as_str()).unwrap();
-    info!(
-        "waldump erred on {}, expected wal end at {}",
-        waldump_wal_end, expected_end_of_wal
-    );
-    assert_eq!(waldump_wal_end, expected_end_of_wal);
+    info!("waldump erred on {}", waldump_wal_end);
+    waldump_wal_end
 }
 
 fn check_end_of_wal(
@@ -183,7 +178,7 @@ pub fn test_find_end_of_wal_last_crossing_segment() {
 /// currently 1024.
 #[test]
 pub fn test_update_next_xid() {
-    let checkpoint_buf = [0u8; std::mem::size_of::<CheckPoint>()];
+    let checkpoint_buf = [0u8; size_of::<CheckPoint>()];
     let mut checkpoint = CheckPoint::decode(&checkpoint_buf).unwrap();
 
     checkpoint.nextXid = FullTransactionId { value: 10 };
@@ -208,11 +203,58 @@ pub fn test_update_next_xid() {
 }
 
 #[test]
+pub fn test_update_next_multixid() {
+    let checkpoint_buf = [0u8; size_of::<CheckPoint>()];
+    let mut checkpoint = CheckPoint::decode(&checkpoint_buf).unwrap();
+
+    // simple case
+    checkpoint.nextMulti = 20;
+    checkpoint.nextMultiOffset = 20;
+    checkpoint.update_next_multixid(1000, 2000);
+    assert_eq!(checkpoint.nextMulti, 1000);
+    assert_eq!(checkpoint.nextMultiOffset, 2000);
+
+    // No change
+    checkpoint.update_next_multixid(500, 900);
+    assert_eq!(checkpoint.nextMulti, 1000);
+    assert_eq!(checkpoint.nextMultiOffset, 2000);
+
+    // Close to wraparound, but not wrapped around yet
+    checkpoint.nextMulti = 0xffff0000;
+    checkpoint.nextMultiOffset = 0xfffe0000;
+    checkpoint.update_next_multixid(0xffff00ff, 0xfffe00ff);
+    assert_eq!(checkpoint.nextMulti, 0xffff00ff);
+    assert_eq!(checkpoint.nextMultiOffset, 0xfffe00ff);
+
+    // Wraparound
+    checkpoint.update_next_multixid(1, 900);
+    assert_eq!(checkpoint.nextMulti, 1);
+    assert_eq!(checkpoint.nextMultiOffset, 900);
+
+    // Wraparound nextMulti to 0.
+    //
+    // It's a bit surprising that nextMulti can be 0, because that's a special value
+    // (InvalidMultiXactId). However, that's how Postgres does it at multi-xid wraparound:
+    // nextMulti wraps around to 0, but then when the next multi-xid is assigned, it skips
+    // the 0 and the next multi-xid actually assigned is 1.
+    checkpoint.nextMulti = 0xffff0000;
+    checkpoint.nextMultiOffset = 0xfffe0000;
+    checkpoint.update_next_multixid(0, 0xfffe00ff);
+    assert_eq!(checkpoint.nextMulti, 0);
+    assert_eq!(checkpoint.nextMultiOffset, 0xfffe00ff);
+
+    // Wraparound nextMultiOffset to 0
+    checkpoint.update_next_multixid(0, 0);
+    assert_eq!(checkpoint.nextMulti, 0);
+    assert_eq!(checkpoint.nextMultiOffset, 0);
+}
+
+#[test]
 pub fn test_encode_logical_message() {
     let expected = [
-        64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 21, 0, 0, 170, 34, 166, 227, 255,
-        38, 0, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 112, 114,
-        101, 102, 105, 120, 0, 109, 101, 115, 115, 97, 103, 101,
+        64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 21, 0, 0, 170, 34, 166, 227, 255, 38,
+        0, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 112, 114, 101, 102,
+        105, 120, 0, 109, 101, 115, 115, 97, 103, 101,
     ];
     let actual = encode_logical_message("prefix", "message");
     assert_eq!(expected, actual[..]);

@@ -1,6 +1,6 @@
+from fixtures.common_types import TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder
-from fixtures.types import TimelineId
 from fixtures.utils import print_gc_result, query_scalar
 
 
@@ -10,13 +10,10 @@ from fixtures.utils import print_gc_result, query_scalar
 #
 def test_pitr_gc(neon_env_builder: NeonEnvBuilder):
     # Set pitr interval such that we need to keep the data
-    neon_env_builder.pageserver_config_override = (
-        "tenant_config={pitr_interval = '1 day', gc_horizon = 0}"
+    env = neon_env_builder.init_start(
+        initial_tenant_conf={"pitr_interval": "1 day", "gc_horizon": "0"}
     )
-
-    env = neon_env_builder.init_start()
     endpoint_main = env.endpoints.create_start("main")
-    log.info("postgres is running on 'main' branch")
 
     main_pg_conn = endpoint_main.connect()
     main_cur = main_pg_conn.cursor()

@@ -1,7 +1,7 @@
 //! Man-in-the-middle tests
 //!
 //! Channel binding should prevent a proxy server
-//! - that has access to create valid certificates -
+//! *that has access to create valid certificates*
 //! from controlling the TLS connection.
 
 use std::fmt::Debug;
@@ -11,7 +11,6 @@ use bytes::{Bytes, BytesMut};
 use futures::{SinkExt, StreamExt};
 use postgres_protocol::message::frontend;
 use tokio::io::{AsyncReadExt, DuplexStream};
-use tokio_postgres::config::SslMode;
 use tokio_postgres::tls::TlsConnect;
 use tokio_util::codec::{Decoder, Encoder};
 
@@ -35,12 +34,18 @@ async fn proxy_mitm(
     tokio::spawn(async move {
         // begin handshake with end_server
         let end_server = connect_tls(server2, client_config2.make_tls_connect().unwrap()).await;
-        // process handshake with end_client
-        let (end_client, startup) =
-            handshake(client1, Some(&server_config1), &CancelMap::default())
-                .await
-                .unwrap()
-                .unwrap();
+        let (end_client, startup) = match handshake(
+            &RequestMonitoring::test(),
+            client1,
+            Some(&server_config1),
+            false,
+        )
+        .await
+        .unwrap()
+        {
+            HandshakeData::Startup(stream, params) => (stream, params),
+            HandshakeData::Cancel(_) => panic!("cancellation not supported"),
+        };
 
         let mut end_server = tokio_util::codec::Framed::new(end_server, PgFrame);
         let (end_client, buf) = end_client.framed.into_inner();
@@ -63,7 +68,7 @@ async fn proxy_mitm(
                                 end_client.send(Bytes::from_static(b"R\0\0\0\x17\0\0\0\x0aSCRAM-SHA-256\0\0")).await.unwrap();
                                 continue;
                             }
-                            end_client.send(message).await.unwrap()
+                            end_client.send(message).await.unwrap();
                         }
                         _ => break,
                     }
@@ -83,7 +88,7 @@ async fn proxy_mitm(
                                 end_server.send(buf.freeze()).await.unwrap();
                                 continue;
                             }
-                            end_server.send(message).await.unwrap()
+                            end_server.send(message).await.unwrap();
                         }
                         _ => break,
                     }
@@ -97,7 +102,7 @@ async fn proxy_mitm(
 }
 
 /// taken from tokio-postgres
-pub async fn connect_tls<S, T>(mut stream: S, tls: T) -> T::Stream
+pub(crate) async fn connect_tls<S, T>(mut stream: S, tls: T) -> T::Stream
 where
     S: AsyncRead + AsyncWrite + Unpin,
     T: TlsConnect<S>,
@@ -110,9 +115,7 @@ where
     let mut buf = [0];
     stream.read_exact(&mut buf).await.unwrap();
 
-    if buf[0] != b'S' {
-        panic!("ssl not supported by server");
-    }
+    assert!(buf[0] == b'S', "ssl not supported by server");
 
     tls.connect(stream).await.unwrap()
 }
@@ -151,7 +154,7 @@ async fn scram_auth_disable_channel_binding() -> anyhow::Result<()> {
     let proxy = tokio::spawn(dummy_proxy(
         client,
         Some(server_config),
-        Scram::new("password")?,
+        Scram::new("password").await?,
     ));
 
     let _client_err = tokio_postgres::Config::new()
@@ -234,7 +237,7 @@ async fn connect_failure(
     let proxy = tokio::spawn(dummy_proxy(
         client,
         Some(server_config),
-        Scram::new("password")?,
+        Scram::new("password").await?,
     ));
 
     let _client_err = tokio_postgres::Config::new()

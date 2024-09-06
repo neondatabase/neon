@@ -4,8 +4,9 @@ use log::*;
 use postgres::types::PgLsn;
 use postgres::Client;
 use postgres_ffi::{WAL_SEGMENT_SIZE, XLOG_BLCKSZ};
-use postgres_ffi::{XLOG_SIZE_OF_XLOG_RECORD, XLOG_SIZE_OF_XLOG_SHORT_PHD};
-use std::cmp::Ordering;
+use postgres_ffi::{
+    XLOG_SIZE_OF_XLOG_LONG_PHD, XLOG_SIZE_OF_XLOG_RECORD, XLOG_SIZE_OF_XLOG_SHORT_PHD,
+};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -232,59 +233,62 @@ pub fn ensure_server_config(client: &mut impl postgres::GenericClient) -> anyhow
 pub trait Crafter {
     const NAME: &'static str;
 
-    /// Generates WAL using the client `client`. Returns a pair of:
-    /// * A vector of some valid "interesting" intermediate LSNs which one may start reading from.
-    ///   May include or exclude Lsn(0) and the end-of-wal.
-    /// * The expected end-of-wal LSN.
-    fn craft(client: &mut impl postgres::GenericClient) -> anyhow::Result<(Vec<PgLsn>, PgLsn)>;
+    /// Generates WAL using the client `client`. Returns a vector of some valid
+    /// "interesting" intermediate LSNs which one may start reading from.
+    /// test_end_of_wal uses this to check various starting points.
+    ///
+    /// Note that postgres is generally keen about writing some WAL. While we
+    /// try to disable it (autovacuum, big wal_writer_delay, etc) it is always
+    /// possible, e.g. xl_running_xacts are dumped each 15s. So checks about
+    /// stable WAL end would be flaky unless postgres is shut down. For this
+    /// reason returning potential end of WAL here is pointless. Most of the
+    /// time this doesn't happen though, so it is reasonable to create needed
+    /// WAL structure and immediately kill postgres like test_end_of_wal does.
+    fn craft(client: &mut impl postgres::GenericClient) -> anyhow::Result<Vec<PgLsn>>;
 }
 
+/// Wraps some WAL craft function, providing current LSN to it before the
+/// insertion and flushing WAL afterwards. Also pushes initial LSN to the
+/// result.
 fn craft_internal<C: postgres::GenericClient>(
     client: &mut C,
-    f: impl Fn(&mut C, PgLsn) -> anyhow::Result<(Vec<PgLsn>, Option<PgLsn>)>,
-) -> anyhow::Result<(Vec<PgLsn>, PgLsn)> {
+    f: impl Fn(&mut C, PgLsn) -> anyhow::Result<Vec<PgLsn>>,
+) -> anyhow::Result<Vec<PgLsn>> {
     ensure_server_config(client)?;
 
     let initial_lsn = client.pg_current_wal_insert_lsn()?;
     info!("LSN initial = {}", initial_lsn);
 
-    let (mut intermediate_lsns, last_lsn) = f(client, initial_lsn)?;
-    let last_lsn = match last_lsn {
-        None => client.pg_current_wal_insert_lsn()?,
-        Some(last_lsn) => {
-            let insert_lsn = client.pg_current_wal_insert_lsn()?;
-            match last_lsn.cmp(&insert_lsn) {
-                Ordering::Less => bail!(
-                    "Some records were inserted after the crafted WAL: {} vs {}",
-                    last_lsn,
-                    insert_lsn
-                ),
-                Ordering::Equal => last_lsn,
-                Ordering::Greater => bail!("Reported LSN is greater than insert_lsn"),
-            }
-        }
-    };
+    let mut intermediate_lsns = f(client, initial_lsn)?;
     if !intermediate_lsns.starts_with(&[initial_lsn]) {
         intermediate_lsns.insert(0, initial_lsn);
     }
 
-    // Some records may be not flushed, e.g. non-transactional logical messages.
-    client.execute("select neon_xlogflush(pg_current_wal_insert_lsn())", &[])?;
-    match last_lsn.cmp(&client.pg_current_wal_flush_lsn()?) {
-        Ordering::Less => bail!("Some records were flushed after the crafted WAL"),
-        Ordering::Equal => {}
-        Ordering::Greater => bail!("Reported LSN is greater than flush_lsn"),
+    // Some records may be not flushed, e.g. non-transactional logical messages. Flush now.
+    //
+    // If the previous WAL record ended exactly at page boundary, pg_current_wal_insert_lsn
+    // returns the position just after the page header on the next page. That's where the next
+    // record will be inserted. But the page header hasn't actually been written to the WAL
+    // yet, and if you try to flush it, you get a "request to flush past end of generated WAL"
+    // error. Because of that, if the insert location is just after a page header, back off to
+    // previous page boundary.
+    let mut lsn = u64::from(client.pg_current_wal_insert_lsn()?);
+    if lsn % WAL_SEGMENT_SIZE as u64 == XLOG_SIZE_OF_XLOG_LONG_PHD as u64 {
+        lsn -= XLOG_SIZE_OF_XLOG_LONG_PHD as u64;
+    } else if lsn % XLOG_BLCKSZ as u64 == XLOG_SIZE_OF_XLOG_SHORT_PHD as u64 {
+        lsn -= XLOG_SIZE_OF_XLOG_SHORT_PHD as u64;
     }
-    Ok((intermediate_lsns, last_lsn))
+    client.execute("select neon_xlogflush($1)", &[&PgLsn::from(lsn)])?;
+    Ok(intermediate_lsns)
 }
 
 pub struct Simple;
 impl Crafter for Simple {
     const NAME: &'static str = "simple";
-    fn craft(client: &mut impl postgres::GenericClient) -> anyhow::Result<(Vec<PgLsn>, PgLsn)> {
+    fn craft(client: &mut impl postgres::GenericClient) -> anyhow::Result<Vec<PgLsn>> {
         craft_internal(client, |client, _| {
             client.execute("CREATE table t(x int)", &[])?;
-            Ok((Vec::new(), None))
+            Ok(Vec::new())
         })
     }
 }
@@ -292,97 +296,114 @@ impl Crafter for Simple {
 pub struct LastWalRecordXlogSwitch;
 impl Crafter for LastWalRecordXlogSwitch {
     const NAME: &'static str = "last_wal_record_xlog_switch";
-    fn craft(client: &mut impl postgres::GenericClient) -> anyhow::Result<(Vec<PgLsn>, PgLsn)> {
-        // Do not use generate_internal because here we end up with flush_lsn exactly on
+    fn craft(client: &mut impl postgres::GenericClient) -> anyhow::Result<Vec<PgLsn>> {
+        // Do not use craft_internal because here we end up with flush_lsn exactly on
         // the segment boundary and insert_lsn after the initial page header, which is unusual.
         ensure_server_config(client)?;
 
         client.execute("CREATE table t(x int)", &[])?;
         let before_xlog_switch = client.pg_current_wal_insert_lsn()?;
-        let after_xlog_switch: PgLsn = client.query_one("SELECT pg_switch_wal()", &[])?.get(0);
-        let next_segment = PgLsn::from(0x0200_0000);
+        // pg_switch_wal returns end of last record of the switched segment,
+        // i.e. end of SWITCH itself.
+        let xlog_switch_record_end: PgLsn = client.query_one("SELECT pg_switch_wal()", &[])?.get(0);
+        let before_xlog_switch_u64 = u64::from(before_xlog_switch);
+        let next_segment = PgLsn::from(
+            before_xlog_switch_u64 - (before_xlog_switch_u64 % WAL_SEGMENT_SIZE as u64)
+                + WAL_SEGMENT_SIZE as u64,
+        );
         ensure!(
-            after_xlog_switch <= next_segment,
-            "XLOG_SWITCH message ended after the expected segment boundary: {} > {}",
-            after_xlog_switch,
+            xlog_switch_record_end <= next_segment,
+            "XLOG_SWITCH record ended after the expected segment boundary: {} > {}",
+            xlog_switch_record_end,
             next_segment
         );
-        Ok((vec![before_xlog_switch, after_xlog_switch], next_segment))
+        Ok(vec![before_xlog_switch, xlog_switch_record_end])
     }
 }
 
 pub struct LastWalRecordXlogSwitchEndsOnPageBoundary;
+/// Craft xlog SWITCH record ending at page boundary.
 impl Crafter for LastWalRecordXlogSwitchEndsOnPageBoundary {
     const NAME: &'static str = "last_wal_record_xlog_switch_ends_on_page_boundary";
-    fn craft(client: &mut impl postgres::GenericClient) -> anyhow::Result<(Vec<PgLsn>, PgLsn)> {
+    fn craft(client: &mut impl postgres::GenericClient) -> anyhow::Result<Vec<PgLsn>> {
         // Do not use generate_internal because here we end up with flush_lsn exactly on
         // the segment boundary and insert_lsn after the initial page header, which is unusual.
         ensure_server_config(client)?;
 
         client.execute("CREATE table t(x int)", &[])?;
 
-        // Add padding so the XLOG_SWITCH record ends exactly on XLOG_BLCKSZ boundary.
-        // We will use logical message as the padding. We start with detecting how much WAL
-        // it takes for one logical message, considering all alignments and headers.
-        let base_wal_advance = {
+        // Add padding so the XLOG_SWITCH record ends exactly on XLOG_BLCKSZ boundary.  We
+        // will use carefully-sized logical messages to advance WAL insert location such
+        // that there is just enough space on the page for the XLOG_SWITCH record.
+        loop {
+            // We start with measuring how much WAL it takes for one logical message,
+            // considering all alignments and headers.
             let before_lsn = client.pg_current_wal_insert_lsn()?;
-            // Small non-empty message bigger than few bytes is more likely than an empty
-            // message to have the same format as the big padding message.
             client.execute(
                 "SELECT pg_logical_emit_message(false, 'swch', REPEAT('a', 10))",
                 &[],
             )?;
-            // The XLOG_SWITCH record has no data => its size is exactly XLOG_SIZE_OF_XLOG_RECORD.
-            (u64::from(client.pg_current_wal_insert_lsn()?) - u64::from(before_lsn)) as usize
-                + XLOG_SIZE_OF_XLOG_RECORD
-        };
-        let mut remaining_lsn =
-            XLOG_BLCKSZ - u64::from(client.pg_current_wal_insert_lsn()?) as usize % XLOG_BLCKSZ;
-        if remaining_lsn < base_wal_advance {
-            remaining_lsn += XLOG_BLCKSZ;
-        }
-        let repeats = 10 + remaining_lsn - base_wal_advance;
-        info!(
-            "current_wal_insert_lsn={}, remaining_lsn={}, base_wal_advance={}, repeats={}",
-            client.pg_current_wal_insert_lsn()?,
-            remaining_lsn,
-            base_wal_advance,
-            repeats
-        );
-        client.execute(
-            "SELECT pg_logical_emit_message(false, 'swch', REPEAT('a', $1))",
-            &[&(repeats as i32)],
-        )?;
-        info!(
-            "current_wal_insert_lsn={}, XLOG_SIZE_OF_XLOG_RECORD={}",
-            client.pg_current_wal_insert_lsn()?,
-            XLOG_SIZE_OF_XLOG_RECORD
-        );
+            let after_lsn = client.pg_current_wal_insert_lsn()?;
 
-        // Emit the XLOG_SWITCH
-        let before_xlog_switch = client.pg_current_wal_insert_lsn()?;
-        let after_xlog_switch: PgLsn = client.query_one("SELECT pg_switch_wal()", &[])?.get(0);
-        let next_segment = PgLsn::from(0x0200_0000);
-        ensure!(
-            after_xlog_switch < next_segment,
-            "XLOG_SWITCH message ended on or after the expected segment boundary: {} > {}",
-            after_xlog_switch,
-            next_segment
-        );
-        ensure!(
-            u64::from(after_xlog_switch) as usize % XLOG_BLCKSZ == XLOG_SIZE_OF_XLOG_SHORT_PHD,
-            "XLOG_SWITCH message ended not on page boundary: {}, offset = {}",
-            after_xlog_switch,
-            u64::from(after_xlog_switch) as usize % XLOG_BLCKSZ
-        );
-        Ok((vec![before_xlog_switch, after_xlog_switch], next_segment))
+            // Did the record cross a page boundary? If it did, start over. Crossing a
+            // page boundary adds to the apparent size of the record because of the page
+            // header, which throws off the calculation.
+            if u64::from(before_lsn) / XLOG_BLCKSZ as u64
+                != u64::from(after_lsn) / XLOG_BLCKSZ as u64
+            {
+                continue;
+            }
+            // base_size is the size of a logical message without the payload
+            let base_size = u64::from(after_lsn) - u64::from(before_lsn) - 10;
+
+            // Is there enough space on the page for another logical message and an
+            // XLOG_SWITCH? If not, start over.
+            let page_remain = XLOG_BLCKSZ as u64 - u64::from(after_lsn) % XLOG_BLCKSZ as u64;
+            if page_remain < base_size + XLOG_SIZE_OF_XLOG_RECORD as u64 {
+                continue;
+            }
+
+            // We will write another logical message, such that after the logical message
+            // record, there will be space for exactly one XLOG_SWITCH. How large should
+            // the logical message's payload be? An XLOG_SWITCH record has no data => its
+            // size is exactly XLOG_SIZE_OF_XLOG_RECORD.
+            let repeats = page_remain - base_size - XLOG_SIZE_OF_XLOG_RECORD as u64;
+
+            client.execute(
+                "SELECT pg_logical_emit_message(false, 'swch', REPEAT('a', $1))",
+                &[&(repeats as i32)],
+            )?;
+            info!(
+                "current_wal_insert_lsn={}, XLOG_SIZE_OF_XLOG_RECORD={}",
+                client.pg_current_wal_insert_lsn()?,
+                XLOG_SIZE_OF_XLOG_RECORD
+            );
+
+            // Emit the XLOG_SWITCH
+            let before_xlog_switch = client.pg_current_wal_insert_lsn()?;
+            let xlog_switch_record_end: PgLsn =
+                client.query_one("SELECT pg_switch_wal()", &[])?.get(0);
+
+            if u64::from(xlog_switch_record_end) as usize % XLOG_BLCKSZ
+                != XLOG_SIZE_OF_XLOG_SHORT_PHD
+            {
+                warn!(
+                    "XLOG_SWITCH message ended not on page boundary: {}, offset = {}, repeating",
+                    xlog_switch_record_end,
+                    u64::from(xlog_switch_record_end) as usize % XLOG_BLCKSZ
+                );
+                continue;
+            }
+            return Ok(vec![before_xlog_switch, xlog_switch_record_end]);
+        }
     }
 }
 
-fn craft_single_logical_message(
+/// Write ~16MB logical message; it should cross WAL segment.
+fn craft_seg_size_logical_message(
     client: &mut impl postgres::GenericClient,
     transactional: bool,
-) -> anyhow::Result<(Vec<PgLsn>, PgLsn)> {
+) -> anyhow::Result<Vec<PgLsn>> {
     craft_internal(client, |client, initial_lsn| {
         ensure!(
             initial_lsn < PgLsn::from(0x0200_0000 - 1024 * 1024),
@@ -405,34 +426,24 @@ fn craft_single_logical_message(
             "Logical message crossed two segments"
         );
 
-        if transactional {
-            // Transactional logical messages are part of a transaction, so the one above is
-            // followed by a small COMMIT record.
-
-            let after_message_lsn = client.pg_current_wal_insert_lsn()?;
-            ensure!(
-                message_lsn < after_message_lsn,
-                "No record found after the emitted message"
-            );
-            Ok((vec![message_lsn], Some(after_message_lsn)))
-        } else {
-            Ok((Vec::new(), Some(message_lsn)))
-        }
+        Ok(vec![message_lsn])
     })
 }
 
 pub struct WalRecordCrossingSegmentFollowedBySmallOne;
 impl Crafter for WalRecordCrossingSegmentFollowedBySmallOne {
     const NAME: &'static str = "wal_record_crossing_segment_followed_by_small_one";
-    fn craft(client: &mut impl postgres::GenericClient) -> anyhow::Result<(Vec<PgLsn>, PgLsn)> {
-        craft_single_logical_message(client, true)
+    fn craft(client: &mut impl postgres::GenericClient) -> anyhow::Result<Vec<PgLsn>> {
+        // Transactional message crossing WAL segment will be followed by small
+        // commit record.
+        craft_seg_size_logical_message(client, true)
     }
 }
 
 pub struct LastWalRecordCrossingSegment;
 impl Crafter for LastWalRecordCrossingSegment {
     const NAME: &'static str = "last_wal_record_crossing_segment";
-    fn craft(client: &mut impl postgres::GenericClient) -> anyhow::Result<(Vec<PgLsn>, PgLsn)> {
-        craft_single_logical_message(client, false)
+    fn craft(client: &mut impl postgres::GenericClient) -> anyhow::Result<Vec<PgLsn>> {
+        craft_seg_size_logical_message(client, false)
     }
 }

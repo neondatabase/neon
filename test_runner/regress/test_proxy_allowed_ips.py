@@ -24,7 +24,7 @@ async def test_proxy_psql_allowed_ips(static_proxy: NeonProxy, vanilla_pg: Vanil
         with pytest.raises(psycopg2.Error) as exprinfo:
             static_proxy.safe_psql(**kwargs)
         text = str(exprinfo.value).strip()
-        assert "This IP address is not allowed to connect" in text
+        assert "not allowed to connect" in text
 
     # no SNI, deprecated `options=project` syntax (before we had several endpoint in project)
     check_cannot_connect(query="select 1", sslsni=0, options="project=private-project")

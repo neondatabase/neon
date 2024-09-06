@@ -100,6 +100,30 @@ QUERIES: Tuple[LabelledQuery, ...] = (
 )
 # fmt: on
 
+# A list of pgvector HNSW index builds to run.
+# Please do not alter the label for the query, as it is used to identify it.
+#
+# Disable auto formatting for the list of queries so that it's easier to read
+# fmt: off
+PGVECTOR_QUERIES: Tuple[LabelledQuery, ...] = (
+    LabelledQuery("PGVPREP",  r"ALTER EXTENSION VECTOR UPDATE;"),
+    LabelledQuery("PGV0",  r"DROP TABLE IF EXISTS hnsw_test_table;"),
+    LabelledQuery("PGV1",  r"CREATE TABLE hnsw_test_table AS TABLE documents WITH NO DATA;"),
+    LabelledQuery("PGV2",  r"INSERT INTO hnsw_test_table SELECT * FROM documents;"),
+    LabelledQuery("PGV3",  r"CREATE INDEX ON hnsw_test_table (_id);"),
+    LabelledQuery("PGV4",  r"CREATE INDEX ON hnsw_test_table USING hnsw (embeddings vector_cosine_ops);"),
+    LabelledQuery("PGV5",  r"CREATE INDEX ON hnsw_test_table USING hnsw (embeddings vector_ip_ops);"),
+    LabelledQuery("PGV6",  r"CREATE INDEX ON hnsw_test_table USING hnsw (embeddings vector_l1_ops);"),
+    LabelledQuery("PGV7",  r"CREATE INDEX ON hnsw_test_table USING hnsw ((binary_quantize(embeddings)::bit(1536)) bit_hamming_ops);"),
+    LabelledQuery("PGV8",  r"CREATE INDEX ON hnsw_test_table USING hnsw ((binary_quantize(embeddings)::bit(1536)) bit_jaccard_ops);"),
+    LabelledQuery("PGV9",  r"DROP TABLE IF EXISTS halfvec_test_table;"),
+    LabelledQuery("PGV10", r"CREATE TABLE halfvec_test_table (_id text NOT NULL, title text, text text, embeddings halfvec(1536), PRIMARY KEY (_id));"),
+    LabelledQuery("PGV11", r"INSERT INTO halfvec_test_table (_id, title, text, embeddings) SELECT _id, title, text, embeddings::halfvec FROM documents;"),
+    LabelledQuery("PGV12", r"CREATE INDEX documents_half_precision_hnsw_idx ON halfvec_test_table USING hnsw (embeddings halfvec_cosine_ops) WITH (m = 64, ef_construction = 128);"),
+)
+# fmt: on
+
+
 EXPLAIN_STRING: str = "EXPLAIN (ANALYZE, VERBOSE, BUFFERS, COSTS, SETTINGS, FORMAT JSON)"
 
 
@@ -244,4 +268,19 @@ def test_user_examples(remote_compare: RemoteCompare):
 def test_clickbench_collect_pg_stat_statements(remote_compare: RemoteCompare):
     log.info("Collecting pg_stat_statements")
     query = LabelledQuery("Q_COLLECT_PG_STAT_STATEMENTS", r"SELECT * from pg_stat_statements;")
+    run_psql(remote_compare, query, times=1, explain=False)
+
+
+@pytest.mark.parametrize("query", PGVECTOR_QUERIES)
+@pytest.mark.remote_cluster
+def test_pgvector_indexing(query: LabelledQuery, remote_compare: RemoteCompare):
+    """
+    An pgvector test that tests HNSW index build performance and parallelism.
+
+    The DB prepared manually in advance.
+    See
+    - test_runner/performance/pgvector/README.md
+    - test_runner/performance/pgvector/loaddata.py
+    - test_runner/performance/pgvector/HNSW_build.sql
+    """
     run_psql(remote_compare, query, times=1, explain=False)

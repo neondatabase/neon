@@ -1,8 +1,9 @@
 import time
+from typing import Any, Dict
 
+from fixtures.common_types import Lsn, TenantId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder
-from fixtures.types import Lsn, TenantId
 
 
 # Checks that pageserver's walreceiver state is printed in the logs during WAL wait timeout.
@@ -42,10 +43,14 @@ def test_pageserver_lsn_wait_error_start(neon_env_builder: NeonEnvBuilder):
 # Kills one of the safekeepers and ensures that only the active ones are printed in the state.
 def test_pageserver_lsn_wait_error_safekeeper_stop(neon_env_builder: NeonEnvBuilder):
     # Trigger WAL wait timeout faster
-    neon_env_builder.pageserver_config_override = """
-        wait_lsn_timeout = "1s"
-        tenant_config={walreceiver_connect_timeout = "2s", lagging_wal_timeout = "2s"}
-    """
+    def customize_pageserver_toml(ps_cfg: Dict[str, Any]):
+        ps_cfg["wait_lsn_timeout"] = "1s"
+        tenant_config = ps_cfg.setdefault("tenant_config", {})
+        tenant_config["walreceiver_connect_timeout"] = "2s"
+        tenant_config["lagging_wal_timeout"] = "2s"
+
+    neon_env_builder.pageserver_config_override = customize_pageserver_toml
+
     # Have notable SK ids to ensure we check logs for their presence, not some other random numbers
     neon_env_builder.safekeepers_id_start = 12345
     neon_env_builder.num_safekeepers = 3
@@ -57,6 +62,12 @@ def test_pageserver_lsn_wait_error_safekeeper_stop(neon_env_builder: NeonEnvBuil
     elements_to_insert = 1_000_000
     expected_timeout_error = f"Timed out while waiting for WAL record at LSN {future_lsn} to arrive"
     env.pageserver.allowed_errors.append(f".*{expected_timeout_error}.*")
+    # we configure wait_lsn_timeout to a shorter value than the lagging_wal_timeout / walreceiver_connect_timeout
+    # => after we run into a timeout and reconnect to a different SK, more time than wait_lsn_timeout has passed
+    # ==> we log this error
+    env.pageserver.allowed_errors.append(
+        ".*ingesting record with timestamp lagging more than wait_lsn_timeout.*"
+    )
 
     insert_test_elements(env, tenant_id, start=0, count=elements_to_insert)
 

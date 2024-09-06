@@ -2,6 +2,7 @@ import asyncio
 import json
 import subprocess
 import time
+import urllib.parse
 from typing import Any, List, Optional, Tuple
 
 import psycopg2
@@ -275,6 +276,31 @@ def test_sql_over_http(static_proxy: NeonProxy):
     assert res["rowCount"] is None
 
 
+def test_sql_over_http_db_name_with_space(static_proxy: NeonProxy):
+    db = "db with spaces"
+    static_proxy.safe_psql_many(
+        (
+            f'create database "{db}"',
+            "create role http with login password 'http' superuser",
+        )
+    )
+
+    def q(sql: str, params: Optional[List[Any]] = None) -> Any:
+        params = params or []
+        connstr = f"postgresql://http:http@{static_proxy.domain}:{static_proxy.proxy_port}/{urllib.parse.quote(db)}"
+        response = requests.post(
+            f"https://{static_proxy.domain}:{static_proxy.external_http_port}/sql",
+            data=json.dumps({"query": sql, "params": params}),
+            headers={"Content-Type": "application/sql", "Neon-Connection-String": connstr},
+            verify=str(static_proxy.test_output_dir / "proxy.crt"),
+        )
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    rows = q("select 42 as answer")["rows"]
+    assert rows == [{"answer": 42}]
+
+
 def test_sql_over_http_output_options(static_proxy: NeonProxy):
     static_proxy.safe_psql("create role http2 with login password 'http2' superuser")
 
@@ -390,14 +416,47 @@ def test_sql_over_http_batch(static_proxy: NeonProxy):
     assert result[0]["rows"] == [{"answer": 42}]
 
 
+def test_sql_over_http_batch_output_options(static_proxy: NeonProxy):
+    static_proxy.safe_psql("create role http with login password 'http' superuser")
+
+    connstr = f"postgresql://http:http@{static_proxy.domain}:{static_proxy.proxy_port}/postgres"
+    response = requests.post(
+        f"https://{static_proxy.domain}:{static_proxy.external_http_port}/sql",
+        data=json.dumps(
+            {
+                "queries": [
+                    {"query": "select $1 as answer", "params": [42], "arrayMode": True},
+                    {"query": "select $1 as answer", "params": [42], "arrayMode": False},
+                ]
+            }
+        ),
+        headers={
+            "Content-Type": "application/sql",
+            "Neon-Connection-String": connstr,
+            "Neon-Batch-Isolation-Level": "Serializable",
+            "Neon-Batch-Read-Only": "false",
+            "Neon-Batch-Deferrable": "false",
+        },
+        verify=str(static_proxy.test_output_dir / "proxy.crt"),
+    )
+    assert response.status_code == 200
+    results = response.json()["results"]
+
+    assert results[0]["rowAsArray"]
+    assert results[0]["rows"] == [["42"]]
+
+    assert not results[1]["rowAsArray"]
+    assert results[1]["rows"] == [{"answer": "42"}]
+
+
 def test_sql_over_http_pool(static_proxy: NeonProxy):
     static_proxy.safe_psql("create user http_auth with password 'http' superuser")
 
-    def get_pid(status: int, pw: str) -> Any:
+    def get_pid(status: int, pw: str, user="http_auth") -> Any:
         return static_proxy.http_query(
             GET_CONNECTION_PID_QUERY,
             [],
-            user="http_auth",
+            user=user,
             password=pw,
             expected_code=status,
         )
@@ -418,21 +477,27 @@ def test_sql_over_http_pool(static_proxy: NeonProxy):
 
     static_proxy.safe_psql("alter user http_auth with password 'http2'")
 
-    # after password change, should open a new connection to verify it
-    pid2 = get_pid(200, "http2")["rows"][0]["pid"]
-    assert pid1 != pid2
+    # after password change, shouldn't open a new connection because it checks password in proxy.
+    rows = get_pid(200, "http2")["rows"]
+    assert rows == [{"pid": pid1}]
 
     time.sleep(0.02)
 
-    # query should be on an existing connection
-    pid = get_pid(200, "http2")["rows"][0]["pid"]
-    assert pid in [pid1, pid2]
-
-    time.sleep(0.02)
-
-    # old password should not work
-    res = get_pid(400, "http")
+    # incorrect user shouldn't reveal that the user doesn't exists
+    res = get_pid(400, "http", user="http_auth2")
     assert "password authentication failed for user" in res["message"]
+
+
+def test_sql_over_http_urlencoding(static_proxy: NeonProxy):
+    static_proxy.safe_psql("create user \"http+auth$$\" with password '%+$^&*@!' superuser")
+
+    static_proxy.http_query(
+        "select 1",
+        [],
+        user="http+auth$$",
+        password="%+$^&*@!",
+        expected_code=200,
+    )
 
 
 # Beginning a transaction should not impact the next query,
@@ -515,3 +580,49 @@ def test_sql_over_http_pool_custom_types(static_proxy: NeonProxy):
         "select array['foo'::foo, 'bar'::foo, 'baz'::foo] as data",
     )
     assert response["rows"][0]["data"] == ["foo", "bar", "baz"]
+
+
+@pytest.mark.asyncio
+async def test_sql_over_http2(static_proxy: NeonProxy):
+    static_proxy.safe_psql("create role http with login password 'http' superuser")
+
+    resp = await static_proxy.http2_query(
+        "select 42 as answer", [], user="http", password="http", expected_code=200
+    )
+    assert resp["rows"] == [{"answer": 42}]
+
+
+def test_sql_over_http_connection_cancel(static_proxy: NeonProxy):
+    static_proxy.safe_psql("create role http with login password 'http' superuser")
+
+    static_proxy.safe_psql("create table test_table ( id int primary key )")
+
+    # insert into a table, with a unique constraint, after sleeping for n seconds
+    query = "WITH temp AS ( \
+        SELECT pg_sleep($1) as sleep, $2::int as id \
+    ) INSERT INTO test_table (id) SELECT id FROM temp"
+
+    try:
+        # The request should complete before the proxy HTTP timeout triggers.
+        # Timeout and cancel the request on the client side before the query completes.
+        static_proxy.http_query(
+            query,
+            [static_proxy.http_timeout_seconds - 1, 1],
+            user="http",
+            password="http",
+            timeout=2,
+        )
+    except requests.exceptions.ReadTimeout:
+        pass
+
+    # wait until the query _would_ have been complete
+    time.sleep(static_proxy.http_timeout_seconds)
+
+    res = static_proxy.http_query(query, [1, 1], user="http", password="http", expected_code=200)
+    assert res["command"] == "INSERT", "HTTP query should insert"
+    assert res["rowCount"] == 1, "HTTP query should insert"
+
+    res = static_proxy.http_query(query, [0, 1], user="http", password="http", expected_code=400)
+    assert (
+        "duplicate key value violates unique constraint" in res["message"]
+    ), "HTTP query should conflict"

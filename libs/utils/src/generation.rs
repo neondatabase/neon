@@ -9,20 +9,11 @@ use serde::{Deserialize, Serialize};
 /// numbers are used.
 #[derive(Copy, Clone, Eq, PartialEq, PartialOrd, Ord, Hash)]
 pub enum Generation {
-    // Generations with this magic value will not add a suffix to S3 keys, and will not
-    // be included in persisted index_part.json.  This value is only to be used
-    // during migration from pre-generation metadata to generation-aware metadata,
-    // and should eventually go away.
-    //
-    // A special Generation is used rather than always wrapping Generation in an Option,
-    // so that code handling generations doesn't have to be aware of the legacy
-    // case everywhere it touches a generation.
+    // The None Generation is used in the metadata of layers written before generations were
+    // introduced.  A running Tenant always has a valid generation, but the layer metadata may
+    // include None generations.
     None,
-    // Generations with this magic value may never be used to construct S3 keys:
-    // we will panic if someone tries to.  This is for Tenants in the "Broken" state,
-    // so that we can satisfy their constructor with a Generation without risking
-    // a code bug using it in an S3 write (broken tenants should never write)
-    Broken,
+
     Valid(u32),
 }
 
@@ -34,18 +25,15 @@ pub enum Generation {
 /// scenarios where pageservers might otherwise issue conflicting writes to
 /// remote storage
 impl Generation {
+    pub const MAX: Self = Self::Valid(u32::MAX);
+
     /// Create a new Generation that represents a legacy key format with
     /// no generation suffix
     pub fn none() -> Self {
         Self::None
     }
 
-    // Create a new generation that will panic if you try to use get_suffix
-    pub fn broken() -> Self {
-        Self::Broken
-    }
-
-    pub fn new(v: u32) -> Self {
+    pub const fn new(v: u32) -> Self {
         Self::Valid(v)
     }
 
@@ -54,15 +42,10 @@ impl Generation {
     }
 
     #[track_caller]
-    pub fn get_suffix(&self) -> String {
+    pub fn get_suffix(&self) -> impl std::fmt::Display {
         match self {
-            Self::Valid(v) => {
-                format!("-{:08x}", v)
-            }
-            Self::None => "".into(),
-            Self::Broken => {
-                panic!("Tried to use a broken generation");
-            }
+            Self::Valid(v) => GenerationFileSuffix(Some(*v)),
+            Self::None => GenerationFileSuffix(None),
         }
     }
 
@@ -86,15 +69,14 @@ impl Generation {
                 }
             }
             Self::None => Self::None,
-            Self::Broken => panic!("Attempted to use a broken generation"),
         }
     }
 
+    #[track_caller]
     pub fn next(&self) -> Generation {
         match self {
             Self::Valid(n) => Self::Valid(*n + 1),
             Self::None => Self::Valid(1),
-            Self::Broken => panic!("Attempted to use a broken generation"),
         }
     }
 
@@ -107,6 +89,18 @@ impl Generation {
     }
 }
 
+struct GenerationFileSuffix(Option<u32>);
+
+impl std::fmt::Display for GenerationFileSuffix {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(g) = self.0 {
+            write!(f, "-{g:08x}")
+        } else {
+            Ok(())
+        }
+    }
+}
+
 impl Serialize for Generation {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -115,7 +109,7 @@ impl Serialize for Generation {
         if let Self::Valid(v) = self {
             v.serialize(serializer)
         } else {
-            // We should never be asked to serialize a None or Broken.  Structures
+            // We should never be asked to serialize a None. Structures
             // that include an optional generation should convert None to an
             // Option<Generation>::None
             Err(serde::ser::Error::custom(
@@ -146,9 +140,6 @@ impl Debug for Generation {
             Self::None => {
                 write!(f, "<none>")
             }
-            Self::Broken => {
-                write!(f, "<broken>")
-            }
         }
     }
 }
@@ -163,5 +154,25 @@ mod test {
         // pre-generation systems.
         assert!(Generation::none() < Generation::new(0));
         assert!(Generation::none() < Generation::new(1));
+    }
+
+    #[test]
+    fn suffix_is_stable() {
+        use std::fmt::Write as _;
+
+        // the suffix must remain stable through-out the pageserver remote storage evolution and
+        // not be changed accidentially without thinking about migration
+        let examples = [
+            (line!(), Generation::None, ""),
+            (line!(), Generation::Valid(0), "-00000000"),
+            (line!(), Generation::Valid(u32::MAX), "-ffffffff"),
+        ];
+
+        let mut s = String::new();
+        for (line, gen, expected) in examples {
+            s.clear();
+            write!(s, "{}", &gen.get_suffix()).expect("string grows");
+            assert_eq!(s, expected, "example on {line}");
+        }
     }
 }

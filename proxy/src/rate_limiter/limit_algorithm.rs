@@ -1,98 +1,262 @@
 //! Algorithms for controlling concurrency limits.
-use async_trait::async_trait;
-use std::time::Duration;
+use parking_lot::Mutex;
+use std::{pin::pin, sync::Arc, time::Duration};
+use tokio::{
+    sync::Notify,
+    time::{error::Elapsed, Instant},
+};
 
-use super::{limiter::Outcome, Aimd};
+use self::aimd::Aimd;
 
-/// An algorithm for controlling a concurrency limit.
-#[async_trait]
-pub trait LimitAlgorithm: Send + Sync + 'static {
-    /// Update the concurrency limit in response to a new job completion.
-    async fn update(&mut self, old_limit: usize, sample: Sample) -> usize;
+pub(crate) mod aimd;
+
+/// Whether a job succeeded or failed as a result of congestion/overload.
+///
+/// Errors not considered to be caused by overload should be ignored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Outcome {
+    /// The job succeeded, or failed in a way unrelated to overload.
+    Success,
+    /// The job failed because of overload, e.g. it timed out or an explicit backpressure signal
+    /// was observed.
+    Overload,
 }
 
-/// The result of a job (or jobs), including the [Outcome] (loss) and latency (delay).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Sample {
+/// An algorithm for controlling a concurrency limit.
+pub(crate) trait LimitAlgorithm: Send + Sync + 'static {
+    /// Update the concurrency limit in response to a new job completion.
+    fn update(&self, old_limit: usize, sample: Sample) -> usize;
+}
+
+/// The result of a job (or jobs), including the [`Outcome`] (loss) and latency (delay).
+#[derive(Debug, Clone, PartialEq, Eq, Copy)]
+pub(crate) struct Sample {
     pub(crate) latency: Duration,
     /// Jobs in flight when the sample was taken.
     pub(crate) in_flight: usize,
     pub(crate) outcome: Outcome,
 }
 
-#[derive(Clone, Copy, Debug, Default, clap::ValueEnum)]
-pub enum RateLimitAlgorithm {
-    Fixed,
+#[derive(Clone, Copy, Debug, Default, serde::Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RateLimitAlgorithm {
     #[default]
-    Aimd,
+    Fixed,
+    Aimd {
+        #[serde(flatten)]
+        conf: Aimd,
+    },
 }
 
-pub struct Fixed;
+pub(crate) struct Fixed;
 
-#[async_trait]
 impl LimitAlgorithm for Fixed {
-    async fn update(&mut self, old_limit: usize, _sample: Sample) -> usize {
+    fn update(&self, old_limit: usize, _sample: Sample) -> usize {
         old_limit
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Deserialize, PartialEq)]
 pub struct RateLimiterConfig {
-    pub disable: bool,
-    pub algorithm: RateLimitAlgorithm,
-    pub timeout: Duration,
-    pub initial_limit: usize,
-    pub aimd_config: Option<AimdConfig>,
+    #[serde(flatten)]
+    pub(crate) algorithm: RateLimitAlgorithm,
+    pub(crate) initial_limit: usize,
 }
 
 impl RateLimiterConfig {
-    pub fn create_rate_limit_algorithm(self) -> Box<dyn LimitAlgorithm> {
+    pub(crate) fn create_rate_limit_algorithm(self) -> Box<dyn LimitAlgorithm> {
         match self.algorithm {
             RateLimitAlgorithm::Fixed => Box::new(Fixed),
-            RateLimitAlgorithm::Aimd => Box::new(Aimd::new(self.aimd_config.unwrap())), // For aimd algorithm config is mandatory.
+            RateLimitAlgorithm::Aimd { conf } => Box::new(conf),
         }
     }
 }
 
-impl Default for RateLimiterConfig {
-    fn default() -> Self {
-        Self {
-            disable: true,
-            algorithm: RateLimitAlgorithm::Aimd,
-            timeout: Duration::from_secs(1),
-            initial_limit: 100,
-            aimd_config: Some(AimdConfig::default()),
+pub(crate) struct LimiterInner {
+    alg: Box<dyn LimitAlgorithm>,
+    available: usize,
+    limit: usize,
+    in_flight: usize,
+}
+
+impl LimiterInner {
+    fn update_limit(&mut self, latency: Duration, outcome: Option<Outcome>) {
+        if let Some(outcome) = outcome {
+            let sample = Sample {
+                latency,
+                in_flight: self.in_flight,
+                outcome,
+            };
+            self.limit = self.alg.update(self.limit, sample);
+        }
+    }
+
+    fn take(&mut self, ready: &Notify) -> Option<()> {
+        if self.available >= 1 {
+            self.available -= 1;
+            self.in_flight += 1;
+
+            // tell the next in the queue that there is a permit ready
+            if self.available >= 1 {
+                ready.notify_one();
+            }
+            Some(())
+        } else {
+            None
         }
     }
 }
 
-#[derive(clap::Parser, Clone, Copy, Debug)]
-pub struct AimdConfig {
-    /// Minimum limit for AIMD algorithm. Makes sense only if `rate_limit_algorithm` is `Aimd`.
-    #[clap(long, default_value_t = 1)]
-    pub aimd_min_limit: usize,
-    /// Maximum limit for AIMD algorithm. Makes sense only if `rate_limit_algorithm` is `Aimd`.
-    #[clap(long, default_value_t = 1500)]
-    pub aimd_max_limit: usize,
-    /// Increase AIMD increase by value in case of success. Makes sense only if `rate_limit_algorithm` is `Aimd`.
-    #[clap(long, default_value_t = 10)]
-    pub aimd_increase_by: usize,
-    /// Decrease AIMD decrease by value in case of timout/429. Makes sense only if `rate_limit_algorithm` is `Aimd`.
-    #[clap(long, default_value_t = 0.9)]
-    pub aimd_decrease_factor: f32,
-    /// A threshold below which the limit won't be increased. Makes sense only if `rate_limit_algorithm` is `Aimd`.
-    #[clap(long, default_value_t = 0.8)]
-    pub aimd_min_utilisation_threshold: f32,
+/// Limits the number of concurrent jobs.
+///
+/// Concurrency is limited through the use of [`Token`]s. Acquire a token to run a job, and release the
+/// token once the job is finished.
+///
+/// The limit will be automatically adjusted based on observed latency (delay) and/or failures
+/// caused by overload (loss).
+pub(crate) struct DynamicLimiter {
+    config: RateLimiterConfig,
+    inner: Mutex<LimiterInner>,
+    // to notify when a token is available
+    ready: Notify,
 }
 
-impl Default for AimdConfig {
-    fn default() -> Self {
-        Self {
-            aimd_min_limit: 1,
-            aimd_max_limit: 1500,
-            aimd_increase_by: 10,
-            aimd_decrease_factor: 0.9,
-            aimd_min_utilisation_threshold: 0.8,
+/// A concurrency token, required to run a job.
+///
+/// Release the token back to the [`DynamicLimiter`] after the job is complete.
+pub(crate) struct Token {
+    start: Instant,
+    limiter: Option<Arc<DynamicLimiter>>,
+}
+
+/// A snapshot of the state of the [`DynamicLimiter`].
+///
+/// Not guaranteed to be consistent under high concurrency.
+#[derive(Debug, Clone, Copy)]
+#[cfg(test)]
+struct LimiterState {
+    limit: usize,
+}
+
+impl DynamicLimiter {
+    /// Create a limiter with a given limit control algorithm.
+    pub(crate) fn new(config: RateLimiterConfig) -> Arc<Self> {
+        let ready = Notify::new();
+        ready.notify_one();
+
+        Arc::new(Self {
+            inner: Mutex::new(LimiterInner {
+                alg: config.create_rate_limit_algorithm(),
+                available: config.initial_limit,
+                limit: config.initial_limit,
+                in_flight: 0,
+            }),
+            ready,
+            config,
+        })
+    }
+
+    /// Try to acquire a concurrency [Token], waiting for `duration` if there are none available.
+    pub(crate) async fn acquire_timeout(
+        self: &Arc<Self>,
+        duration: Duration,
+    ) -> Result<Token, Elapsed> {
+        tokio::time::timeout(duration, self.acquire()).await?
+    }
+
+    /// Try to acquire a concurrency [Token].
+    async fn acquire(self: &Arc<Self>) -> Result<Token, Elapsed> {
+        if self.config.initial_limit == 0 {
+            // If the rate limiter is disabled, we can always acquire a token.
+            Ok(Token::disabled())
+        } else {
+            let mut notified = pin!(self.ready.notified());
+            let mut ready = notified.as_mut().enable();
+            loop {
+                if ready {
+                    let mut inner = self.inner.lock();
+                    if inner.take(&self.ready).is_some() {
+                        break Ok(Token::new(self.clone()));
+                    }
+                    notified.set(self.ready.notified());
+                }
+                notified.as_mut().await;
+                ready = true;
+            }
         }
+    }
+
+    /// Return the concurrency [Token], along with the outcome of the job.
+    ///
+    /// The [Outcome] of the job, and the time taken to perform it, may be used
+    /// to update the concurrency limit.
+    ///
+    /// Set the outcome to `None` to ignore the job.
+    fn release_inner(&self, start: Instant, outcome: Option<Outcome>) {
+        tracing::info!("outcome is {:?}", outcome);
+        if self.config.initial_limit == 0 {
+            return;
+        }
+
+        let mut inner = self.inner.lock();
+
+        inner.update_limit(start.elapsed(), outcome);
+
+        inner.in_flight -= 1;
+        if inner.in_flight < inner.limit {
+            inner.available = inner.limit - inner.in_flight;
+            // At least 1 permit is now available
+            self.ready.notify_one();
+        }
+    }
+
+    /// The current state of the limiter.
+    #[cfg(test)]
+    fn state(&self) -> LimiterState {
+        let inner = self.inner.lock();
+        LimiterState { limit: inner.limit }
+    }
+}
+
+impl Token {
+    fn new(limiter: Arc<DynamicLimiter>) -> Self {
+        Self {
+            start: Instant::now(),
+            limiter: Some(limiter),
+        }
+    }
+    pub(crate) fn disabled() -> Self {
+        Self {
+            start: Instant::now(),
+            limiter: None,
+        }
+    }
+
+    pub(crate) fn is_disabled(&self) -> bool {
+        self.limiter.is_none()
+    }
+
+    pub(crate) fn release(mut self, outcome: Outcome) {
+        self.release_mut(Some(outcome));
+    }
+
+    pub(crate) fn release_mut(&mut self, outcome: Option<Outcome>) {
+        if let Some(limiter) = self.limiter.take() {
+            limiter.release_inner(self.start, outcome);
+        }
+    }
+}
+
+impl Drop for Token {
+    fn drop(&mut self) {
+        self.release_mut(None);
+    }
+}
+
+#[cfg(test)]
+impl LimiterState {
+    /// The current concurrency limit.
+    fn limit(self) -> usize {
+        self.limit
     }
 }

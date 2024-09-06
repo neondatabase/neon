@@ -1,29 +1,34 @@
 import json
-from contextlib import closing
+from typing import Any, Dict
 
-import psycopg2.extras
-from fixtures.log_helper import log
+from fixtures.common_types import Lsn
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
 )
 from fixtures.pageserver.utils import assert_tenant_state, wait_for_upload
 from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
-from fixtures.types import Lsn
 from fixtures.utils import wait_until
+from fixtures.workload import Workload
 
 
 def test_tenant_config(neon_env_builder: NeonEnvBuilder):
     """Test per tenant configuration"""
-    # set some non-default global config
-    neon_env_builder.pageserver_config_override = """
-page_cache_size=444;
-wait_lsn_timeout='111 s';
-[tenant_config]
-checkpoint_distance = 10000
-compaction_target_size = 1048576
-evictions_low_residence_duration_metric_threshold = "2 days"
-eviction_policy = { "kind" = "LayerAccessThreshold", period = "20s", threshold = "23 hours" }
-"""
+
+    def set_some_nondefault_global_config(ps_cfg: Dict[str, Any]):
+        ps_cfg["page_cache_size"] = 444
+        ps_cfg["wait_lsn_timeout"] = "111 s"
+
+        tenant_config = ps_cfg.setdefault("tenant_config", {})
+        tenant_config["checkpoint_distance"] = 10000
+        tenant_config["compaction_target_size"] = 1048576
+        tenant_config["evictions_low_residence_duration_metric_threshold"] = "2 days"
+        tenant_config["eviction_policy"] = {
+            "kind": "LayerAccessThreshold",
+            "period": "20s",
+            "threshold": "23 hours",
+        }
+
+    neon_env_builder.pageserver_config_override = set_some_nondefault_global_config
 
     env = neon_env_builder.init_start()
     # we configure eviction but no remote storage, there might be error lines
@@ -56,25 +61,6 @@ eviction_policy = { "kind" = "LayerAccessThreshold", period = "20s", threshold =
 
     # check the configuration of the default tenant
     # it should match global configuration
-    with closing(env.pageserver.connect()) as psconn:
-        with psconn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as pscur:
-            log.info(f"show {env.initial_tenant}")
-            pscur.execute(f"show {env.initial_tenant}")
-            res = pscur.fetchone()
-            assert res is not None
-            assert all(
-                i in res.items()
-                for i in {
-                    "checkpoint_distance": 10000,
-                    "compaction_target_size": 1048576,
-                    "compaction_period": 20,
-                    "compaction_threshold": 10,
-                    "gc_horizon": 67108864,
-                    "gc_period": 60 * 60,
-                    "image_creation_threshold": 3,
-                    "pitr_interval": 604800,  # 7 days
-                }.items()
-            ), f"Unexpected res: {res}"
     default_tenant_config = http_client.tenant_config(tenant_id=env.initial_tenant)
     assert (
         not default_tenant_config.tenant_specific_overrides
@@ -96,25 +82,6 @@ eviction_policy = { "kind" = "LayerAccessThreshold", period = "20s", threshold =
     }
 
     # check the configuration of the new tenant
-    with closing(env.pageserver.connect()) as psconn:
-        with psconn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as pscur:
-            pscur.execute(f"show {tenant}")
-            res = pscur.fetchone()
-            log.info(f"res: {res}")
-            assert res is not None
-            assert all(
-                i in res.items()
-                for i in {
-                    "checkpoint_distance": 20000,
-                    "compaction_target_size": 1048576,
-                    "compaction_period": 20,
-                    "compaction_threshold": 10,
-                    "gc_horizon": 67108864,
-                    "gc_period": 30,
-                    "image_creation_threshold": 3,
-                    "pitr_interval": 604800,
-                }.items()
-            ), f"Unexpected res: {res}"
     new_tenant_config = http_client.tenant_config(tenant_id=tenant)
     new_specific_config = new_tenant_config.tenant_specific_overrides
     assert new_specific_config["checkpoint_distance"] == 20000
@@ -159,25 +126,6 @@ eviction_policy = { "kind" = "LayerAccessThreshold", period = "20s", threshold =
         conf=conf_update,
     )
 
-    with closing(env.pageserver.connect()) as psconn:
-        with psconn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as pscur:
-            pscur.execute(f"show {tenant}")
-            res = pscur.fetchone()
-            log.info(f"after config res: {res}")
-            assert res is not None
-            assert all(
-                i in res.items()
-                for i in {
-                    "checkpoint_distance": 15000,
-                    "compaction_target_size": 1048576,
-                    "compaction_period": 80,
-                    "compaction_threshold": 10,
-                    "gc_horizon": 67108864,
-                    "gc_period": 80,
-                    "image_creation_threshold": 2,
-                    "pitr_interval": 604800,
-                }.items()
-            ), f"Unexpected res: {res}"
     updated_tenant_config = http_client.tenant_config(tenant_id=tenant)
     updated_specific_config = updated_tenant_config.tenant_specific_overrides
     assert updated_specific_config["checkpoint_distance"] == 15000
@@ -215,25 +163,6 @@ eviction_policy = { "kind" = "LayerAccessThreshold", period = "20s", threshold =
     env.pageserver.stop()
     env.pageserver.start()
 
-    with closing(env.pageserver.connect()) as psconn:
-        with psconn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as pscur:
-            pscur.execute(f"show {tenant}")
-            res = pscur.fetchone()
-            log.info(f"after restart res: {res}")
-            assert res is not None
-            assert all(
-                i in res.items()
-                for i in {
-                    "checkpoint_distance": 15000,
-                    "compaction_target_size": 1048576,
-                    "compaction_period": 80,
-                    "compaction_threshold": 10,
-                    "gc_horizon": 67108864,
-                    "gc_period": 80,
-                    "image_creation_threshold": 2,
-                    "pitr_interval": 604800,
-                }.items()
-            ), f"Unexpected res: {res}"
     restarted_tenant_config = http_client.tenant_config(tenant_id=tenant)
     assert (
         restarted_tenant_config == updated_tenant_config
@@ -270,25 +199,16 @@ eviction_policy = { "kind" = "LayerAccessThreshold", period = "20s", threshold =
         "period": "20s",
         "threshold": "23h",
     }
-    assert final_effective_config["max_lsn_wal_lag"] == 10 * 1024 * 1024
+    assert final_effective_config["max_lsn_wal_lag"] == 1024 * 1024 * 1024
 
     # restart the pageserver and ensure that the config is still correct
     env.pageserver.stop()
     env.pageserver.start()
 
-    with closing(env.pageserver.connect()) as psconn:
-        with psconn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as pscur:
-            pscur.execute(f"show {tenant}")
-            res = pscur.fetchone()
-            log.info(f"after restart res: {res}")
-            assert res is not None
-            assert all(
-                i in res.items()
-                for i in {
-                    "compaction_period": 20,
-                    "pitr_interval": 60,
-                }.items()
-            ), f"Unexpected res: {res}"
+    restarted_final_tenant_config = http_client.tenant_config(tenant_id=tenant)
+    assert (
+        restarted_final_tenant_config == final_tenant_config
+    ), "Updated config should not change after the restart"
 
 
 def test_creating_tenant_conf_after_attach(neon_env_builder: NeonEnvBuilder):
@@ -299,8 +219,7 @@ def test_creating_tenant_conf_after_attach(neon_env_builder: NeonEnvBuilder):
 
     # tenant is created with defaults, as in without config file
     (tenant_id, timeline_id) = env.neon_cli.create_tenant()
-    config_path = env.pageserver.tenant_dir(tenant_id) / "config"
-    assert config_path.exists(), "config file is always initially created"
+    config_path = env.pageserver.tenant_dir(tenant_id) / "config-v1"
 
     http_client = env.pageserver.http_client()
 
@@ -313,10 +232,6 @@ def test_creating_tenant_conf_after_attach(neon_env_builder: NeonEnvBuilder):
     http_client.tenant_detach(tenant_id)
 
     assert not config_path.exists(), "detach did not remove config file"
-
-    # The re-attach's increment of the generation number may invalidate deletion queue
-    # updates in flight from the previous attachment.
-    env.pageserver.allowed_errors.append(".*Dropped remote consistent LSN updates.*")
 
     env.pageserver.tenant_attach(tenant_id)
     wait_until(
@@ -351,6 +266,13 @@ def test_live_reconfig_get_evictions_low_residence_duration_metric_threshold(
     (tenant_id, timeline_id) = env.initial_tenant, env.initial_timeline
     ps_http = env.pageserver.http_client()
 
+    # When we evict/download layers, we will use this Workload to generate getpage requests
+    # that touch some layers, as otherwise the pageserver doesn't report totally unused layers
+    # as problems when they have short residence duration.
+    workload = Workload(env, tenant_id, timeline_id)
+    workload.init()
+    workload.write_rows(100)
+
     def get_metric():
         metrics = ps_http.get_metrics()
         metric = metrics.query_one(
@@ -371,6 +293,7 @@ def test_live_reconfig_get_evictions_low_residence_duration_metric_threshold(
     assert default_value == "1day"
 
     ps_http.download_all_layers(tenant_id, timeline_id)
+    workload.validate()
     ps_http.evict_all_layers(tenant_id, timeline_id)
     metric = get_metric()
     assert int(metric.value) > 0, "metric is updated"
@@ -391,6 +314,7 @@ def test_live_reconfig_get_evictions_low_residence_duration_metric_threshold(
     assert int(metric.value) == 0
 
     ps_http.download_all_layers(tenant_id, timeline_id)
+    workload.validate()
     ps_http.evict_all_layers(tenant_id, timeline_id)
     metric = get_metric()
     assert int(metric.labels["low_threshold_secs"]) == 2 * 24 * 60 * 60
@@ -404,6 +328,7 @@ def test_live_reconfig_get_evictions_low_residence_duration_metric_threshold(
     assert int(metric.value) == 0, "value resets if label changes"
 
     ps_http.download_all_layers(tenant_id, timeline_id)
+    workload.validate()
     ps_http.evict_all_layers(tenant_id, timeline_id)
     metric = get_metric()
     assert int(metric.labels["low_threshold_secs"]) == 2 * 60 * 60

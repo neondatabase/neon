@@ -70,7 +70,7 @@ static bool SendAppendRequests(Safekeeper *sk);
 static bool RecvAppendResponses(Safekeeper *sk);
 static XLogRecPtr CalculateMinFlushLsn(WalProposer *wp);
 static XLogRecPtr GetAcknowledgedByQuorumWALPosition(WalProposer *wp);
-static void HandleSafekeeperResponse(WalProposer *wp);
+static void HandleSafekeeperResponse(WalProposer *wp, Safekeeper *sk);
 static bool AsyncRead(Safekeeper *sk, char **buf, int *buf_size);
 static bool AsyncReadMessage(Safekeeper *sk, AcceptorProposerMessage *anymsg);
 static bool BlockingWrite(Safekeeper *sk, void *msg, size_t msg_size, SafekeeperState success_state);
@@ -80,7 +80,7 @@ static int	CompareLsn(const void *a, const void *b);
 static char *FormatSafekeeperState(Safekeeper *sk);
 static void AssertEventsOkForState(uint32 events, Safekeeper *sk);
 static char *FormatEvents(WalProposer *wp, uint32 events);
-
+static void UpdateDonorShmem(WalProposer *wp);
 
 WalProposer *
 WalProposerCreate(WalProposerConfig *config, walproposer_api api)
@@ -688,7 +688,7 @@ RecvAcceptorGreeting(Safekeeper *sk)
 	if (!AsyncReadMessage(sk, (AcceptorProposerMessage *) &sk->greetResponse))
 		return;
 
-	wp_log(LOG, "received AcceptorGreeting from safekeeper %s:%s", sk->host, sk->port);
+	wp_log(LOG, "received AcceptorGreeting from safekeeper %s:%s, term=" INT64_FORMAT, sk->host, sk->port, sk->greetResponse.term);
 
 	/* Protocol is all good, move to voting. */
 	sk->state = SS_VOTING;
@@ -922,6 +922,8 @@ static void
 DetermineEpochStartLsn(WalProposer *wp)
 {
 	TermHistory *dth;
+	int			n_ready = 0;
+	WalproposerShmemState *walprop_shared;
 
 	wp->propEpochStartLsn = InvalidXLogRecPtr;
 	wp->donorEpoch = 0;
@@ -932,6 +934,8 @@ DetermineEpochStartLsn(WalProposer *wp)
 	{
 		if (wp->safekeeper[i].state == SS_IDLE)
 		{
+			n_ready++;
+
 			if (GetEpoch(&wp->safekeeper[i]) > wp->donorEpoch ||
 				(GetEpoch(&wp->safekeeper[i]) == wp->donorEpoch &&
 				 wp->safekeeper[i].voteResponse.flushLsn > wp->propEpochStartLsn))
@@ -958,9 +962,21 @@ DetermineEpochStartLsn(WalProposer *wp)
 		}
 	}
 
+	if (n_ready < wp->quorum)
+	{
+		/*
+		 * This is a rare case that can be triggered if safekeeper has voted
+		 * and disconnected. In this case, its state will not be SS_IDLE and
+		 * its vote cannot be used, because we clean up `voteResponse` in
+		 * `ShutdownConnection`.
+		 */
+		wp_log(FATAL, "missing majority of votes, collected %d, expected %d, got %d", wp->n_votes, wp->quorum, n_ready);
+	}
+
 	/*
-	 * If propEpochStartLsn is 0, it means flushLsn is 0 everywhere, we are bootstrapping
-	 * and nothing was committed yet. Start streaming then from the basebackup LSN.
+	 * If propEpochStartLsn is 0, it means flushLsn is 0 everywhere, we are
+	 * bootstrapping and nothing was committed yet. Start streaming then from
+	 * the basebackup LSN.
 	 */
 	if (wp->propEpochStartLsn == InvalidXLogRecPtr && !wp->config->syncSafekeepers)
 	{
@@ -971,11 +987,12 @@ DetermineEpochStartLsn(WalProposer *wp)
 		}
 		wp_log(LOG, "bumped epochStartLsn to the first record %X/%X", LSN_FORMAT_ARGS(wp->propEpochStartLsn));
 	}
+	pg_atomic_write_u64(&wp->api.get_shmem_state(wp)->propEpochStartLsn, wp->propEpochStartLsn);
 
 	/*
-	 * Safekeepers are setting truncateLsn after timelineStartLsn is known, so it
-	 * should never be zero at this point, if we know timelineStartLsn.
-	 * 
+	 * Safekeepers are setting truncateLsn after timelineStartLsn is known, so
+	 * it should never be zero at this point, if we know timelineStartLsn.
+	 *
 	 * timelineStartLsn can be zero only on the first syncSafekeepers run.
 	 */
 	Assert((wp->truncateLsn != InvalidXLogRecPtr) ||
@@ -1009,10 +1026,9 @@ DetermineEpochStartLsn(WalProposer *wp)
 	 * since which we are going to write according to the consensus. If not,
 	 * we must bail out, as clog and other non rel data is inconsistent.
 	 */
+	walprop_shared = wp->api.get_shmem_state(wp);
 	if (!wp->config->syncSafekeepers)
 	{
-		WalproposerShmemState *walprop_shared = wp->api.get_shmem_state(wp);
-
 		/*
 		 * Basebackup LSN always points to the beginning of the record (not
 		 * the page), as StartupXLOG most probably wants it this way.
@@ -1027,7 +1043,7 @@ DetermineEpochStartLsn(WalProposer *wp)
 			 * compute (who could generate WAL) is ok.
 			 */
 			if (!((dth->n_entries >= 1) && (dth->entries[dth->n_entries - 1].term ==
-											walprop_shared->mineLastElectedTerm)))
+											pg_atomic_read_u64(&walprop_shared->mineLastElectedTerm))))
 			{
 				/*
 				 * Panic to restart PG as we need to retake basebackup.
@@ -1041,8 +1057,8 @@ DetermineEpochStartLsn(WalProposer *wp)
 					   LSN_FORMAT_ARGS(wp->api.get_redo_start_lsn(wp)));
 			}
 		}
-		walprop_shared->mineLastElectedTerm = wp->propTerm;
 	}
+	pg_atomic_write_u64(&walprop_shared->mineLastElectedTerm, wp->propTerm);
 }
 
 /*
@@ -1092,9 +1108,13 @@ SendProposerElected(Safekeeper *sk)
 	{
 		/* safekeeper is empty or no common point, start from the beginning */
 		sk->startStreamingAt = wp->propTermHistory.entries[0].lsn;
-		wp_log(LOG, "no common point with sk %s:%s, streaming since first term at %X/%X, timelineStartLsn=%X/%X, termHistory.n_entries=%u" ,
-		 	 sk->host, sk->port, LSN_FORMAT_ARGS(sk->startStreamingAt), LSN_FORMAT_ARGS(wp->timelineStartLsn), wp->propTermHistory.n_entries);
-		/* wp->timelineStartLsn == InvalidXLogRecPtr can be only when timeline is created manually (test_s3_wal_replay) */
+		wp_log(LOG, "no common point with sk %s:%s, streaming since first term at %X/%X, timelineStartLsn=%X/%X, termHistory.n_entries=%u",
+			   sk->host, sk->port, LSN_FORMAT_ARGS(sk->startStreamingAt), LSN_FORMAT_ARGS(wp->timelineStartLsn), wp->propTermHistory.n_entries);
+
+		/*
+		 * wp->timelineStartLsn == InvalidXLogRecPtr can be only when timeline
+		 * is created manually (test_s3_wal_replay)
+		 */
 		Assert(sk->startStreamingAt == wp->timelineStartLsn || wp->timelineStartLsn == InvalidXLogRecPtr);
 	}
 	else
@@ -1164,6 +1184,12 @@ StartStreaming(Safekeeper *sk)
 	sk->active_state = SS_ACTIVE_SEND;
 	sk->streamingAt = sk->startStreamingAt;
 
+	/*
+	 * Donors can only be in SS_ACTIVE state, so we potentially update the
+	 * donor when we switch one to SS_ACTIVE.
+	 */
+	UpdateDonorShmem(sk->wp);
+
 	/* event set will be updated inside SendMessageToNode */
 	SendMessageToNode(sk);
 }
@@ -1207,7 +1233,7 @@ PrepareAppendRequest(WalProposer *wp, AppendRequestHeader *req, XLogRecPtr begin
 	req->epochStartLsn = wp->propEpochStartLsn;
 	req->beginLsn = beginLsn;
 	req->endLsn = endLsn;
-	req->commitLsn = GetAcknowledgedByQuorumWALPosition(wp);
+	req->commitLsn = wp->commitLsn;
 	req->truncateLsn = wp->truncateLsn;
 	req->proposerId = wp->greetRequest.proposerId;
 }
@@ -1392,7 +1418,6 @@ static bool
 RecvAppendResponses(Safekeeper *sk)
 {
 	WalProposer *wp = sk->wp;
-	XLogRecPtr	minQuorumLsn;
 	bool		readAnything = false;
 
 	while (true)
@@ -1412,6 +1437,8 @@ RecvAppendResponses(Safekeeper *sk)
 			   LSN_FORMAT_ARGS(sk->appendResponse.commitLsn),
 			   sk->host, sk->port);
 
+		readAnything = true;
+
 		if (sk->appendResponse.term > wp->propTerm)
 		{
 			/*
@@ -1420,39 +1447,33 @@ RecvAppendResponses(Safekeeper *sk)
 			 * core as this is kinda expected scenario.
 			 */
 			disable_core_dump();
-			wp_log(PANIC, "WAL acceptor %s:%s with term " INT64_FORMAT " rejected our request, our term " INT64_FORMAT "",
+			wp_log(PANIC, "WAL acceptor %s:%s with term " INT64_FORMAT " rejected our request, our term " INT64_FORMAT ", meaning another compute is running at the same time, and it conflicts with us",
 				   sk->host, sk->port,
 				   sk->appendResponse.term, wp->propTerm);
 		}
 
-		readAnything = true;
+		HandleSafekeeperResponse(wp, sk);
 	}
 
 	if (!readAnything)
 		return sk->state == SS_ACTIVE;
 
-	HandleSafekeeperResponse(wp);
-
-	/*
-	 * Also send the new commit lsn to all the safekeepers.
-	 */
-	minQuorumLsn = GetAcknowledgedByQuorumWALPosition(wp);
-	if (minQuorumLsn > wp->lastSentCommitLsn)
-	{
-		BroadcastAppendRequest(wp);
-		wp->lastSentCommitLsn = minQuorumLsn;
-	}
-
 	return sk->state == SS_ACTIVE;
 }
 
+#define psfeedback_log(fmt, key, ...) \
+	wp_log(DEBUG2, "ParsePageserverFeedbackMessage: %s " fmt, key, __VA_ARGS__)
+
 /* Parse a PageserverFeedback message, or the PageserverFeedback part of an AppendResponse */
-void
-ParsePageserverFeedbackMessage(WalProposer *wp, StringInfo reply_message, PageserverFeedback *rf)
+static void
+ParsePageserverFeedbackMessage(WalProposer *wp, StringInfo reply_message, PageserverFeedback *ps_feedback)
 {
 	uint8		nkeys;
 	int			i;
-	int32		len;
+
+	/* initialize the struct before parsing */
+	memset(ps_feedback, 0, sizeof(PageserverFeedback));
+	ps_feedback->present = true;
 
 	/* get number of custom keys */
 	nkeys = pq_getmsgbyte(reply_message);
@@ -1460,66 +1481,52 @@ ParsePageserverFeedbackMessage(WalProposer *wp, StringInfo reply_message, Pagese
 	for (i = 0; i < nkeys; i++)
 	{
 		const char *key = pq_getmsgstring(reply_message);
+		unsigned int value_len = pq_getmsgint(reply_message, sizeof(int32));
 
 		if (strcmp(key, "current_timeline_size") == 0)
 		{
-			pq_getmsgint(reply_message, sizeof(int32));
-			/* read value length */
-			rf->currentClusterSize = pq_getmsgint64(reply_message);
-			wp_log(DEBUG2, "ParsePageserverFeedbackMessage: current_timeline_size %lu",
-				   rf->currentClusterSize);
+			Assert(value_len == sizeof(int64));
+			ps_feedback->currentClusterSize = pq_getmsgint64(reply_message);
+			psfeedback_log(UINT64_FORMAT, key, ps_feedback->currentClusterSize);
 		}
 		else if ((strcmp(key, "ps_writelsn") == 0) || (strcmp(key, "last_received_lsn") == 0))
 		{
-			pq_getmsgint(reply_message, sizeof(int32));
-			/* read value length */
-			rf->last_received_lsn = pq_getmsgint64(reply_message);
-			wp_log(DEBUG2, "ParsePageserverFeedbackMessage: last_received_lsn %X/%X",
-				   LSN_FORMAT_ARGS(rf->last_received_lsn));
+			Assert(value_len == sizeof(int64));
+			ps_feedback->last_received_lsn = pq_getmsgint64(reply_message);
+			psfeedback_log("%X/%X", key, LSN_FORMAT_ARGS(ps_feedback->last_received_lsn));
 		}
 		else if ((strcmp(key, "ps_flushlsn") == 0) || (strcmp(key, "disk_consistent_lsn") == 0))
 		{
-			pq_getmsgint(reply_message, sizeof(int32));
-			/* read value length */
-			rf->disk_consistent_lsn = pq_getmsgint64(reply_message);
-			wp_log(DEBUG2, "ParsePageserverFeedbackMessage: disk_consistent_lsn %X/%X",
-				   LSN_FORMAT_ARGS(rf->disk_consistent_lsn));
+			Assert(value_len == sizeof(int64));
+			ps_feedback->disk_consistent_lsn = pq_getmsgint64(reply_message);
+			psfeedback_log("%X/%X", key, LSN_FORMAT_ARGS(ps_feedback->disk_consistent_lsn));
 		}
 		else if ((strcmp(key, "ps_applylsn") == 0) || (strcmp(key, "remote_consistent_lsn") == 0))
 		{
-			pq_getmsgint(reply_message, sizeof(int32));
-			/* read value length */
-			rf->remote_consistent_lsn = pq_getmsgint64(reply_message);
-			wp_log(DEBUG2, "ParsePageserverFeedbackMessage: remote_consistent_lsn %X/%X",
-				   LSN_FORMAT_ARGS(rf->remote_consistent_lsn));
+			Assert(value_len == sizeof(int64));
+			ps_feedback->remote_consistent_lsn = pq_getmsgint64(reply_message);
+			psfeedback_log("%X/%X", key, LSN_FORMAT_ARGS(ps_feedback->remote_consistent_lsn));
 		}
 		else if ((strcmp(key, "ps_replytime") == 0) || (strcmp(key, "replytime") == 0))
 		{
-			pq_getmsgint(reply_message, sizeof(int32));
-			/* read value length */
-			rf->replytime = pq_getmsgint64(reply_message);
-			{
-				char	   *replyTimeStr;
-
-				/* Copy because timestamptz_to_str returns a static buffer */
-				replyTimeStr = pstrdup(timestamptz_to_str(rf->replytime));
-				wp_log(DEBUG2, "ParsePageserverFeedbackMessage: replytime %lu reply_time: %s",
-					   rf->replytime, replyTimeStr);
-
-				pfree(replyTimeStr);
-			}
+			Assert(value_len == sizeof(int64));
+			ps_feedback->replytime = pq_getmsgint64(reply_message);
+			psfeedback_log("%s", key, timestamptz_to_str(ps_feedback->replytime));
+		}
+		else if (strcmp(key, "shard_number") == 0)
+		{
+			Assert(value_len == sizeof(uint32));
+			ps_feedback->shard_number = pq_getmsgint(reply_message, sizeof(uint32));
+			psfeedback_log("%u", key, ps_feedback->shard_number);
 		}
 		else
 		{
-			len = pq_getmsgint(reply_message, sizeof(int32));
-			/* read value length */
-
 			/*
 			 * Skip unknown keys to support backward compatibile protocol
 			 * changes
 			 */
-			wp_log(LOG, "ParsePageserverFeedbackMessage: unknown key: %s len %d", key, len);
-			pq_getmsgbytes(reply_message, len);
+			wp_log(LOG, "ParsePageserverFeedbackMessage: unknown key: %s len %d", key, value_len);
+			pq_getmsgbytes(reply_message, value_len);
 		};
 	}
 }
@@ -1574,17 +1581,17 @@ GetAcknowledgedByQuorumWALPosition(WalProposer *wp)
  * none if it doesn't exist. donor_lsn is set to end position of the donor to
  * the best of our knowledge.
  */
-Safekeeper *
-GetDonor(WalProposer *wp, XLogRecPtr *donor_lsn)
+static void
+UpdateDonorShmem(WalProposer *wp)
 {
-	*donor_lsn = InvalidXLogRecPtr;
 	Safekeeper *donor = NULL;
 	int			i;
+	XLogRecPtr	donor_lsn = InvalidXLogRecPtr;
 
 	if (wp->n_votes < wp->quorum)
 	{
-		wp_log(WARNING, "GetDonor called before elections are won");
-		return NULL;
+		wp_log(WARNING, "UpdateDonorShmem called before elections are won");
+		return;
 	}
 
 	/*
@@ -1595,7 +1602,7 @@ GetDonor(WalProposer *wp, XLogRecPtr *donor_lsn)
 	if (wp->safekeeper[wp->donor].state >= SS_IDLE)
 	{
 		donor = &wp->safekeeper[wp->donor];
-		*donor_lsn = wp->propEpochStartLsn;
+		donor_lsn = wp->propEpochStartLsn;
 	}
 
 	/*
@@ -1607,23 +1614,45 @@ GetDonor(WalProposer *wp, XLogRecPtr *donor_lsn)
 	{
 		Safekeeper *sk = &wp->safekeeper[i];
 
-		if (sk->state == SS_ACTIVE && sk->appendResponse.flushLsn > *donor_lsn)
+		if (sk->state == SS_ACTIVE && sk->appendResponse.flushLsn > donor_lsn)
 		{
 			donor = sk;
-			*donor_lsn = sk->appendResponse.flushLsn;
+			donor_lsn = sk->appendResponse.flushLsn;
 		}
 	}
-	return donor;
+
+	if (donor == NULL)
+	{
+		wp_log(WARNING, "UpdateDonorShmem didn't find a suitable donor, skipping");
+		return;
+	}
+	wp->api.update_donor(wp, donor, donor_lsn);
 }
 
+/*
+ * Process AppendResponse message from safekeeper.
+ */
 static void
-HandleSafekeeperResponse(WalProposer *wp)
+HandleSafekeeperResponse(WalProposer *wp, Safekeeper *sk)
 {
-	XLogRecPtr	minQuorumLsn;
 	XLogRecPtr	candidateTruncateLsn;
+	XLogRecPtr	newCommitLsn;
 
-	minQuorumLsn = GetAcknowledgedByQuorumWALPosition(wp);
-	wp->api.process_safekeeper_feedback(wp, minQuorumLsn);
+	newCommitLsn = GetAcknowledgedByQuorumWALPosition(wp);
+	if (newCommitLsn > wp->commitLsn)
+	{
+		wp->commitLsn = newCommitLsn;
+		/* Send new value to all safekeepers. */
+		BroadcastAppendRequest(wp);
+	}
+
+	/*
+	 * Unlock syncrep waiters, update ps_feedback, CheckGracefulShutdown().
+	 * The last one will terminate the process if the shutdown is requested
+	 * and WAL is committed by the quorum. BroadcastAppendRequest() should be
+	 * called to notify safekeepers about the new commitLsn.
+	 */
+	wp->api.process_safekeeper_feedback(wp, sk);
 
 	/*
 	 * Try to advance truncateLsn -- the last record flushed to all
@@ -1636,7 +1665,7 @@ HandleSafekeeperResponse(WalProposer *wp)
 	 * can't commit entries from previous term' in Raft); 2)
 	 */
 	candidateTruncateLsn = CalculateMinFlushLsn(wp);
-	candidateTruncateLsn = Min(candidateTruncateLsn, minQuorumLsn);
+	candidateTruncateLsn = Min(candidateTruncateLsn, wp->commitLsn);
 	if (candidateTruncateLsn > wp->truncateLsn)
 	{
 		wp->truncateLsn = candidateTruncateLsn;
@@ -1799,8 +1828,10 @@ AsyncReadMessage(Safekeeper *sk, AcceptorProposerMessage *anymsg)
 				msg->hs.ts = pq_getmsgint64_le(&s);
 				msg->hs.xmin.value = pq_getmsgint64_le(&s);
 				msg->hs.catalog_xmin.value = pq_getmsgint64_le(&s);
-				if (buf_size > APPENDRESPONSE_FIXEDPART_SIZE)
-					ParsePageserverFeedbackMessage(wp, &s, &msg->rf);
+				if (s.len > s.cursor)
+					ParsePageserverFeedbackMessage(wp, &s, &msg->ps_feedback);
+				else
+					msg->ps_feedback.present = false;
 				pq_getmsgend(&s);
 				return true;
 			}

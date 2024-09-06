@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use humantime::Duration;
+use pageserver_api::shard::TenantShardId;
 use tokio::task::JoinSet;
 use utils::id::TenantTimelineId;
 
@@ -59,7 +60,11 @@ async fn main_impl(args: Args) -> anyhow::Result<()> {
         let mgmt_api_client = Arc::clone(&mgmt_api_client);
         js.spawn(async move {
             let info = mgmt_api_client
-                .timeline_info(tl.tenant_id, tl.timeline_id, ForceAwaitLogicalSize::Yes)
+                .timeline_info(
+                    TenantShardId::unsharded(tl.tenant_id),
+                    tl.timeline_id,
+                    ForceAwaitLogicalSize::Yes,
+                )
                 .await
                 .unwrap();
 
@@ -74,7 +79,11 @@ async fn main_impl(args: Args) -> anyhow::Result<()> {
                 while !info.current_logical_size_is_accurate {
                     ticker.tick().await;
                     info = mgmt_api_client
-                        .timeline_info(tl.tenant_id, tl.timeline_id, ForceAwaitLogicalSize::Yes)
+                        .timeline_info(
+                            TenantShardId::unsharded(tl.tenant_id),
+                            tl.timeline_id,
+                            ForceAwaitLogicalSize::Yes,
+                        )
                         .await
                         .unwrap();
                 }

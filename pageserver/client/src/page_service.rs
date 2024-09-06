@@ -60,7 +60,7 @@ impl Client {
     ) -> anyhow::Result<PagestreamClient> {
         let copy_both: tokio_postgres::CopyBothDuplex<bytes::Bytes> = self
             .client
-            .copy_both_simple(&format!("pagestream {tenant_id} {timeline_id}"))
+            .copy_both_simple(&format!("pagestream_v2 {tenant_id} {timeline_id}"))
             .await?;
         let Client {
             cancel_on_client_drop,
@@ -156,7 +156,8 @@ impl PagestreamClient {
             PagestreamBeMessage::Error(e) => anyhow::bail!("Error: {:?}", e),
             PagestreamBeMessage::Exists(_)
             | PagestreamBeMessage::Nblocks(_)
-            | PagestreamBeMessage::DbSize(_) => {
+            | PagestreamBeMessage::DbSize(_)
+            | PagestreamBeMessage::GetSlruSegment(_) => {
                 anyhow::bail!(
                     "unexpected be message kind in response to getpage request: {}",
                     msg.kind()

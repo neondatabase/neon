@@ -9,6 +9,7 @@ test_output/
 neon.iml
 /.neon
 /integration_tests/.neon
+compaction-suite-results.*
 
 # Coverage
 *.profraw

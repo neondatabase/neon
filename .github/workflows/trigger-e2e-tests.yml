@@ -1,0 +1,147 @@
+name: Trigger E2E Tests
+
+on:
+  pull_request:
+    types:
+      - ready_for_review
+  workflow_call:
+
+defaults:
+  run:
+    shell: bash -euxo pipefail {0}
+
+env:
+  # A concurrency group that we use for e2e-tests runs, matches `concurrency.group` above with `github.repository` as a prefix
+  E2E_CONCURRENCY_GROUP: ${{ github.repository }}-e2e-tests-${{ github.ref_name }}-${{ github.ref_name == 'main' && github.sha || 'anysha' }}
+
+jobs:
+  cancel-previous-e2e-tests:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Cancel previous e2e-tests runs for this PR
+        env:
+          GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
+        run: |
+          gh workflow --repo neondatabase/cloud \
+            run cancel-previous-in-concurrency-group.yml \
+              --field concurrency_group="${{ env.E2E_CONCURRENCY_GROUP }}"
+
+  tag:
+    runs-on: ubuntu-22.04
+    outputs:
+      build-tag: ${{ steps.build-tag.outputs.tag }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get build tag
+        env:
+          GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
+          CURRENT_BRANCH: ${{ github.head_ref || github.ref_name }}
+          CURRENT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          if [[ "$GITHUB_REF_NAME" == "main" ]]; then
+            echo "tag=$(git rev-list --count HEAD)" | tee -a $GITHUB_OUTPUT
+          elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
+            echo "tag=release-$(git rev-list --count HEAD)" | tee -a $GITHUB_OUTPUT
+          elif [[ "$GITHUB_REF_NAME" == "release-proxy" ]]; then
+            echo "tag=release-proxy-$(git rev-list --count HEAD)" >> $GITHUB_OUTPUT
+          else
+            echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
+            BUILD_AND_TEST_RUN_ID=$(gh run list -b $CURRENT_BRANCH -c $CURRENT_SHA -w 'Build and Test' -L 1 --json databaseId --jq '.[].databaseId')
+            echo "tag=$BUILD_AND_TEST_RUN_ID" | tee -a $GITHUB_OUTPUT
+          fi
+        id: build-tag
+
+  trigger-e2e-tests:
+    needs: [ tag ]
+    runs-on: ubuntu-22.04
+    env:
+      EVENT_ACTION: ${{ github.event.action }}
+      GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
+      TAG: ${{ needs.tag.outputs.build-tag }}
+    steps:
+      - name: Wait for `promote-images` job to finish
+        # It's important to have a timeout here, the script in the step can run infinitely
+        timeout-minutes: 60
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" != "pull_request" ] || [ "${EVENT_ACTION}" != "ready_for_review" ]; then
+            exit 0
+          fi
+
+          # For PRs we use the run id as the tag
+          BUILD_AND_TEST_RUN_ID=${TAG}
+          while true; do
+            conclusion=$(gh run --repo ${GITHUB_REPOSITORY} view ${BUILD_AND_TEST_RUN_ID} --json jobs --jq '.jobs[] | select(.name == "promote-images") | .conclusion')
+            case "$conclusion" in
+              success)
+                break
+                ;;
+              failure | cancelled | skipped)
+                echo "The 'promote-images' job didn't succeed: '${conclusion}'. Exiting..."
+                exit 1
+                ;;
+              *)
+                echo "The 'promote-images' hasn't succeed yet. Waiting..."
+                sleep 60
+                ;;
+            esac
+          done
+
+      - name: Set e2e-platforms
+        id: e2e-platforms
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Default set of platforms to run e2e tests on
+          platforms='["docker", "k8s"]'
+
+          # If the PR changes vendor/, pgxn/ or libs/vm_monitor/ directories, or Dockerfile.compute-node, add k8s-neonvm to the list of platforms.
+          # If the workflow run is not a pull request, add k8s-neonvm to the list.
+          if [ "$GITHUB_EVENT_NAME" == "pull_request" ]; then
+            for f in $(gh api "/repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" --paginate --jq '.[].filename'); do
+              case "$f" in
+                vendor/*|pgxn/*|libs/vm_monitor/*|Dockerfile.compute-node)
+                  platforms=$(echo "${platforms}" | jq --compact-output '. += ["k8s-neonvm"] | unique')
+                  ;;
+                *)
+                  # no-op
+                  ;;
+              esac
+            done
+          else
+            platforms=$(echo "${platforms}" | jq --compact-output '. += ["k8s-neonvm"] | unique')
+          fi
+
+          echo "e2e-platforms=${platforms}" | tee -a $GITHUB_OUTPUT
+
+      - name: Set PR's status to pending and request a remote CI test
+        env:
+          E2E_PLATFORMS: ${{ steps.e2e-platforms.outputs.e2e-platforms }}
+          COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
+        run: |
+          REMOTE_REPO="${GITHUB_REPOSITORY_OWNER}/cloud"
+
+          gh api "/repos/${GITHUB_REPOSITORY}/statuses/${COMMIT_SHA}" \
+            --method POST \
+            --raw-field "state=pending" \
+            --raw-field "description=[$REMOTE_REPO] Remote CI job is about to start" \
+            --raw-field "context=neon-cloud-e2e"
+
+          gh workflow --repo ${REMOTE_REPO} \
+            run testing.yml \
+              --ref "main" \
+              --raw-field "ci_job_name=neon-cloud-e2e" \
+              --raw-field "commit_hash=$COMMIT_SHA" \
+              --raw-field "remote_repo=${GITHUB_REPOSITORY}" \
+              --raw-field "storage_image_tag=${TAG}" \
+              --raw-field "compute_image_tag=${TAG}" \
+              --raw-field "concurrency_group=${E2E_CONCURRENCY_GROUP}" \
+              --raw-field "e2e-platforms=${E2E_PLATFORMS}"

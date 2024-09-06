@@ -26,7 +26,7 @@ plane guarantee prevents robust response to failures, as if a pageserver is unre
 we may not detach from it. The mechanism in this RFC fixes this, by making it safe to
 attach to a new, different pageserver even if an unresponsive pageserver may be running.
 
-Futher, lack of safety during split-brain conditions blocks two important features where occasional
+Further lack of safety during split-brain conditions blocks two important features where occasional
 split-brain conditions are part of the design assumptions:
 
 - seamless tenant migration ([RFC PR](https://github.com/neondatabase/neon/pull/5029))
@@ -490,11 +490,11 @@ The above makes it safe for control plane to change the assignment of
 tenant to pageserver in control plane while a timeline creation is ongoing.
 The reason is that the creation request against the new assigned pageserver
 uses a new generation number. However, care must be taken by control plane
-to ensure that a "timeline creation successul" response from some pageserver
+to ensure that a "timeline creation successful" response from some pageserver
 is checked for the pageserver's generation for that timeline's tenant still being the latest.
 If it is not the latest, the response does not constitute a successful timeline creation.
 It is acceptable to discard such responses, the scrubber will clean up the S3 state.
-It is better to issue a timelien deletion request to the stale attachment.
+It is better to issue a timeline deletion request to the stale attachment.
 
 #### Timeline Deletion
 
@@ -633,7 +633,7 @@ As outlined in the Part 1 on correctness, it is critical that deletions are only
 executed once the key is not referenced anywhere in S3.
 This property is obviously upheld by the scheme above.
 
-#### We Accept Object Leakage In Acceptable Circumcstances
+#### We Accept Object Leakage In Acceptable Circumstances
 
 If we crash in the flow above between (2) and (3), we lose track of unreferenced object.
 Further, enqueuing a single to the persistent queue may not be durable immediately to amortize cost of flush to disk.

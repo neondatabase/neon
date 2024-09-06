@@ -1,5 +1,7 @@
-from typing import Optional
+import threading
+from typing import Any, Optional
 
+from fixtures.common_types import TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     Endpoint,
@@ -8,8 +10,11 @@ from fixtures.neon_fixtures import (
     tenant_get_shards,
     wait_for_last_flush_lsn,
 )
-from fixtures.pageserver.utils import wait_for_last_record_lsn, wait_for_upload
-from fixtures.types import TenantId, TimelineId
+from fixtures.pageserver.utils import wait_for_last_record_lsn
+
+# neon_local doesn't handle creating/modifying endpoints concurrently, so we use a mutex
+# to ensure we don't do that: this enables running lots of Workloads in parallel safely.
+ENDPOINT_LOCK = threading.Lock()
 
 
 class Workload:
@@ -21,28 +26,53 @@ class Workload:
     - reads, checking we get the right data (`validate`)
     """
 
-    def __init__(self, env: NeonEnv, tenant_id: TenantId, timeline_id: TimelineId):
+    def __init__(
+        self,
+        env: NeonEnv,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        branch_name: Optional[str] = None,
+        endpoint_opts: Optional[dict[str, Any]] = None,
+    ):
         self.env = env
         self.tenant_id = tenant_id
         self.timeline_id = timeline_id
         self.table = "foo"
 
+        # By default, use the default branch name for initial tenant in NeonEnv
+        self.branch_name = branch_name or "main"
+
         self.expect_rows = 0
         self.churn_cursor = 0
 
         self._endpoint: Optional[Endpoint] = None
+        self._endpoint_opts = endpoint_opts or {}
+
+    def reconfigure(self):
+        """
+        Request the endpoint to reconfigure based on location reported by storage controller
+        """
+        if self._endpoint is not None:
+            with ENDPOINT_LOCK:
+                self._endpoint.reconfigure()
 
     def endpoint(self, pageserver_id: Optional[int] = None) -> Endpoint:
-        if self._endpoint is None:
-            self._endpoint = self.env.endpoints.create(
-                "main",
-                tenant_id=self.tenant_id,
-                pageserver_id=pageserver_id,
-                endpoint_id="ep-workload",
-            )
-            self._endpoint.start(pageserver_id=pageserver_id)
-        else:
-            self._endpoint.reconfigure(pageserver_id=pageserver_id)
+        # We may be running alongside other Workloads for different tenants.  Full TTID is
+        # obnoxiously long for use here, but a cut-down version is still unique enough for tests.
+        endpoint_id = f"ep-workload-{str(self.tenant_id)[0:4]}-{str(self.timeline_id)[0:4]}"
+
+        with ENDPOINT_LOCK:
+            if self._endpoint is None:
+                self._endpoint = self.env.endpoints.create(
+                    self.branch_name,
+                    tenant_id=self.tenant_id,
+                    pageserver_id=pageserver_id,
+                    endpoint_id=endpoint_id,
+                    **self._endpoint_opts,
+                )
+                self._endpoint.start(pageserver_id=pageserver_id)
+            else:
+                self._endpoint.reconfigure(pageserver_id=pageserver_id)
 
         connstring = self._endpoint.safe_psql(
             "SELECT setting FROM pg_settings WHERE name='neon.pageserver_connstring'"
@@ -51,9 +81,13 @@ class Workload:
 
         return self._endpoint
 
-    def __del__(self):
+    def stop(self):
         if self._endpoint is not None:
             self._endpoint.stop()
+            self._endpoint = None
+
+    def __del__(self):
+        self.stop()
 
     def init(self, pageserver_id: Optional[int] = None):
         endpoint = self.endpoint(pageserver_id)
@@ -64,7 +98,7 @@ class Workload:
             self.env, endpoint, self.tenant_id, self.timeline_id, pageserver_id=pageserver_id
         )
 
-    def write_rows(self, n, pageserver_id: Optional[int] = None):
+    def write_rows(self, n, pageserver_id: Optional[int] = None, upload: bool = True):
         endpoint = self.endpoint(pageserver_id)
         start = self.expect_rows
         end = start + n - 1
@@ -78,11 +112,14 @@ class Workload:
             """
         )
 
-        return last_flush_lsn_upload(
-            self.env, endpoint, self.tenant_id, self.timeline_id, pageserver_id=pageserver_id
-        )
+        if upload:
+            return last_flush_lsn_upload(
+                self.env, endpoint, self.tenant_id, self.timeline_id, pageserver_id=pageserver_id
+            )
+        else:
+            return False
 
-    def churn_rows(self, n, pageserver_id: Optional[int] = None, upload=True):
+    def churn_rows(self, n, pageserver_id: Optional[int] = None, upload=True, ingest=True):
         assert self.expect_rows >= n
 
         max_iters = 10
@@ -120,33 +157,34 @@ class Workload:
                 ]
             )
 
-        for tenant_shard_id, pageserver in tenant_get_shards(
-            self.env, self.tenant_id, pageserver_id
-        ):
-            last_flush_lsn = wait_for_last_flush_lsn(
-                self.env, endpoint, self.tenant_id, self.timeline_id, pageserver_id=pageserver_id
-            )
-            ps_http = pageserver.http_client()
-            wait_for_last_record_lsn(ps_http, tenant_shard_id, self.timeline_id, last_flush_lsn)
+        if ingest:
+            # Wait for written data to be ingested by the pageserver
+            for tenant_shard_id, pageserver in tenant_get_shards(
+                self.env, self.tenant_id, pageserver_id
+            ):
+                last_flush_lsn = wait_for_last_flush_lsn(
+                    self.env,
+                    endpoint,
+                    self.tenant_id,
+                    self.timeline_id,
+                    pageserver_id=pageserver_id,
+                )
+                ps_http = pageserver.http_client()
+                wait_for_last_record_lsn(ps_http, tenant_shard_id, self.timeline_id, last_flush_lsn)
 
-            if upload:
-                # force a checkpoint to trigger upload
-                ps_http.timeline_checkpoint(tenant_shard_id, self.timeline_id)
-                wait_for_upload(ps_http, tenant_shard_id, self.timeline_id, last_flush_lsn)
-                log.info(f"Churn: waiting for remote LSN {last_flush_lsn}")
-            else:
-                log.info(f"Churn: not waiting for upload, disk LSN {last_flush_lsn}")
+                if upload:
+                    # Wait for written data to be uploaded to S3 (force a checkpoint to trigger upload)
+                    ps_http.timeline_checkpoint(
+                        tenant_shard_id, self.timeline_id, wait_until_uploaded=True
+                    )
+                    log.info(f"Churn: waiting for remote LSN {last_flush_lsn}")
+                else:
+                    log.info(f"Churn: not waiting for upload, disk LSN {last_flush_lsn}")
 
     def validate(self, pageserver_id: Optional[int] = None):
         endpoint = self.endpoint(pageserver_id)
-        result = endpoint.safe_psql_many(
-            [
-                "select clear_buffer_cache()",
-                f"""
-            SELECT COUNT(*) FROM {self.table}
-            """,
-            ]
-        )
+        endpoint.clear_shared_buffers()
+        result = endpoint.safe_psql(f"SELECT COUNT(*) FROM {self.table}")
 
         log.info(f"validate({self.expect_rows}): {result}")
-        assert result == [[("",)], [(self.expect_rows,)]]
+        assert result == [(self.expect_rows,)]

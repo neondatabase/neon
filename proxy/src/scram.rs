@@ -6,18 +6,18 @@
 //! * <https://github.com/postgres/postgres/blob/94226d4506e66d6e7cbf4b391f1e7393c1962841/src/backend/libpq/auth-scram.c>
 //! * <https://github.com/postgres/postgres/blob/94226d4506e66d6e7cbf4b391f1e7393c1962841/src/interfaces/libpq/fe-auth-scram.c>
 
+mod countmin;
 mod exchange;
 mod key;
 mod messages;
+mod pbkdf2;
 mod secret;
 mod signature;
+pub mod threadpool;
 
-#[cfg(any(test, doc))]
-mod password;
-
-pub use exchange::{exchange, Exchange};
-pub use key::ScramKey;
-pub use secret::ServerSecret;
+pub(crate) use exchange::{exchange, Exchange};
+pub(crate) use key::ScramKey;
+pub(crate) use secret::ServerSecret;
 
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
@@ -26,8 +26,8 @@ const SCRAM_SHA_256: &str = "SCRAM-SHA-256";
 const SCRAM_SHA_256_PLUS: &str = "SCRAM-SHA-256-PLUS";
 
 /// A list of supported SCRAM methods.
-pub const METHODS: &[&str] = &[SCRAM_SHA_256_PLUS, SCRAM_SHA_256];
-pub const METHODS_WITHOUT_PLUS: &[&str] = &[SCRAM_SHA_256];
+pub(crate) const METHODS: &[&str] = &[SCRAM_SHA_256_PLUS, SCRAM_SHA_256];
+pub(crate) const METHODS_WITHOUT_PLUS: &[&str] = &[SCRAM_SHA_256];
 
 /// Decode base64 into array without any heap allocations
 fn base64_decode_array<const N: usize>(input: impl AsRef<[u8]>) -> Option<[u8; N]> {
@@ -59,27 +59,23 @@ fn sha256<'a>(parts: impl IntoIterator<Item = &'a [u8]>) -> [u8; 32] {
 
 #[cfg(test)]
 mod tests {
-    use crate::sasl::{Mechanism, Step};
+    use crate::{
+        intern::EndpointIdInt,
+        sasl::{Mechanism, Step},
+        EndpointId,
+    };
 
-    use super::{password::SaltedPassword, Exchange, ServerSecret};
+    use super::{threadpool::ThreadPool, Exchange, ServerSecret};
 
     #[test]
-    fn happy_path() {
+    fn snapshot() {
         let iterations = 4096;
-        let salt_base64 = "QSXCR+Q6sek8bf92";
-        let pw = SaltedPassword::new(
-            b"pencil",
-            base64::decode(salt_base64).unwrap().as_slice(),
-            iterations,
-        );
+        let salt = "QSXCR+Q6sek8bf92";
+        let stored_key = "FO+9jBb3MUukt6jJnzjPZOWc5ow/Pu6JtPyju0aqaE8=";
+        let server_key = "qxJ1SbmSAi5EcS0J5Ck/cKAm/+Ixa+Kwp63f4OHDgzo=";
+        let secret = format!("SCRAM-SHA-256${iterations}:{salt}${stored_key}:{server_key}",);
+        let secret = ServerSecret::parse(&secret).unwrap();
 
-        let secret = ServerSecret {
-            iterations,
-            salt_base64: salt_base64.to_owned(),
-            stored_key: pw.client_key().sha256(),
-            server_key: pw.server_key(),
-            doomed: false,
-        };
         const NONCE: [u8; 18] = [
             1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18,
         ];
@@ -120,5 +116,33 @@ mod tests {
                 27, 125, 170, 232, 35, 171, 167, 166, 41, 70, 228, 182, 112,
             ]
         );
+    }
+
+    async fn run_round_trip_test(server_password: &str, client_password: &str) {
+        let pool = ThreadPool::new(1);
+
+        let ep = EndpointId::from("foo");
+        let ep = EndpointIdInt::from(ep);
+
+        let scram_secret = ServerSecret::build(server_password).await.unwrap();
+        let outcome = super::exchange(&pool, ep, &scram_secret, client_password.as_bytes())
+            .await
+            .unwrap();
+
+        match outcome {
+            crate::sasl::Outcome::Success(_) => {}
+            crate::sasl::Outcome::Failure(r) => panic!("{r}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn round_trip() {
+        run_round_trip_test("pencil", "pencil").await;
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "password doesn't match")]
+    async fn failure() {
+        run_round_trip_test("pencil", "eraser").await;
     }
 }

@@ -10,17 +10,17 @@ mod channel_binding;
 mod messages;
 mod stream;
 
-use crate::error::UserFacingError;
+use crate::error::{ReportableError, UserFacingError};
 use std::io;
 use thiserror::Error;
 
-pub use channel_binding::ChannelBinding;
-pub use messages::FirstMessage;
-pub use stream::{Outcome, SaslStream};
+pub(crate) use channel_binding::ChannelBinding;
+pub(crate) use messages::FirstMessage;
+pub(crate) use stream::{Outcome, SaslStream};
 
 /// Fine-grained auth errors help in writing tests.
 #[derive(Error, Debug)]
-pub enum Error {
+pub(crate) enum Error {
     #[error("Channel binding failed: {0}")]
     ChannelBindingFailed(&'static str),
 
@@ -33,27 +33,42 @@ pub enum Error {
     #[error("Internal error: missing digest")]
     MissingBinding,
 
+    #[error("could not decode salt: {0}")]
+    Base64(#[from] base64::DecodeError),
+
     #[error(transparent)]
     Io(#[from] io::Error),
 }
 
 impl UserFacingError for Error {
     fn to_string_client(&self) -> String {
-        use Error::*;
         match self {
-            ChannelBindingFailed(m) => m.to_string(),
-            ChannelBindingBadMethod(m) => format!("unsupported channel binding method {m}"),
+            Self::ChannelBindingFailed(m) => (*m).to_string(),
+            Self::ChannelBindingBadMethod(m) => format!("unsupported channel binding method {m}"),
             _ => "authentication protocol violation".to_string(),
         }
     }
 }
 
+impl ReportableError for Error {
+    fn get_error_kind(&self) -> crate::error::ErrorKind {
+        match self {
+            Error::ChannelBindingFailed(_) => crate::error::ErrorKind::User,
+            Error::ChannelBindingBadMethod(_) => crate::error::ErrorKind::User,
+            Error::BadClientMessage(_) => crate::error::ErrorKind::User,
+            Error::MissingBinding => crate::error::ErrorKind::Service,
+            Error::Base64(_) => crate::error::ErrorKind::ControlPlane,
+            Error::Io(_) => crate::error::ErrorKind::ClientDisconnect,
+        }
+    }
+}
+
 /// A convenient result type for SASL exchange.
-pub type Result<T> = std::result::Result<T, Error>;
+pub(crate) type Result<T> = std::result::Result<T, Error>;
 
 /// A result of one SASL exchange.
 #[must_use]
-pub enum Step<T, R> {
+pub(crate) enum Step<T, R> {
     /// We should continue exchanging messages.
     Continue(T, String),
     /// The client has been authenticated successfully.
@@ -63,7 +78,7 @@ pub enum Step<T, R> {
 }
 
 /// Every SASL mechanism (e.g. [SCRAM](crate::scram)) is expected to implement this trait.
-pub trait Mechanism: Sized {
+pub(crate) trait Mechanism: Sized {
     /// What's produced as a result of successful authentication.
     type Output;
 

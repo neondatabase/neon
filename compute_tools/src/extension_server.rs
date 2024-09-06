@@ -71,7 +71,7 @@ More specifically, here is an example ext_index.json
     }
 }
 */
-use anyhow::{self, Result};
+use anyhow::Result;
 use anyhow::{bail, Context};
 use bytes::Bytes;
 use compute_api::spec::RemoteExtSpec;

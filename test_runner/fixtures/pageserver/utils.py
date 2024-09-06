@@ -1,12 +1,17 @@
 import time
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
-from mypy_boto3_s3.type_defs import ListObjectsV2OutputTypeDef, ObjectTypeDef
+from mypy_boto3_s3.type_defs import (
+    DeleteObjectOutputTypeDef,
+    EmptyResponseMetadataTypeDef,
+    ListObjectsV2OutputTypeDef,
+    ObjectTypeDef,
+)
 
+from fixtures.common_types import Lsn, TenantId, TenantShardId, TimelineId
 from fixtures.log_helper import log
 from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
 from fixtures.remote_storage import RemoteStorage, RemoteStorageKind, S3Storage
-from fixtures.types import Lsn, TenantId, TenantShardId, TimelineId
 from fixtures.utils import wait_until
 
 
@@ -15,7 +20,7 @@ def assert_tenant_state(
     tenant: TenantId,
     expected_state: str,
     message: Optional[str] = None,
-):
+) -> None:
     tenant_status = pageserver_http.tenant_status(tenant)
     log.info(f"tenant_status: {tenant_status}")
     assert tenant_status["state"]["slug"] == expected_state, message or tenant_status
@@ -57,9 +62,7 @@ def wait_for_upload(
         )
         time.sleep(1)
     raise Exception(
-        "timed out while waiting for remote_consistent_lsn to reach {}, was {}".format(
-            lsn, current_lsn
-        )
+        f"timed out while waiting for {tenant}/{timeline} remote_consistent_lsn to reach {lsn}, was {current_lsn}"
     )
 
 
@@ -195,39 +198,62 @@ def wait_for_last_record_lsn(
     lsn: Lsn,
 ) -> Lsn:
     """waits for pageserver to catch up to a certain lsn, returns the last observed lsn."""
-    for i in range(100):
+    for i in range(1000):
         current_lsn = last_record_lsn(pageserver_http, tenant, timeline)
         if current_lsn >= lsn:
             return current_lsn
         if i % 10 == 0:
             log.info(
-                "waiting for last_record_lsn to reach {}, now {}, iteration {}".format(
-                    lsn, current_lsn, i + 1
-                )
+                f"{tenant}/{timeline} waiting for last_record_lsn to reach {lsn}, now {current_lsn}, iteration {i + 1}"
             )
         time.sleep(0.1)
     raise Exception(
-        "timed out while waiting for last_record_lsn to reach {}, was {}".format(lsn, current_lsn)
+        f"timed out while waiting for last_record_lsn to reach {lsn}, was {current_lsn}"
     )
 
 
 def wait_for_upload_queue_empty(
     pageserver_http: PageserverHttpClient, tenant_id: TenantId, timeline_id: TimelineId
 ):
+    wait_period_secs = 0.2
     while True:
         all_metrics = pageserver_http.get_metrics()
-        tl = all_metrics.query_all(
-            "pageserver_remote_timeline_client_calls_unfinished",
+        started = all_metrics.query_all(
+            "pageserver_remote_timeline_client_calls_started_total",
             {
                 "tenant_id": str(tenant_id),
                 "timeline_id": str(timeline_id),
             },
         )
-        assert len(tl) > 0
-        log.info(f"upload queue for {tenant_id}/{timeline_id}: {tl}")
-        if all(m.value == 0 for m in tl):
+        finished = all_metrics.query_all(
+            "pageserver_remote_timeline_client_calls_finished_total",
+            {
+                "tenant_id": str(tenant_id),
+                "timeline_id": str(timeline_id),
+            },
+        )
+
+        # this is `started left join finished`; if match, subtracting start from finished, resulting in queue depth
+        remaining_labels = ["shard_id", "file_kind", "op_kind"]
+        tl: List[Tuple[Any, float]] = []
+        for s in started:
+            found = False
+            for f in finished:
+                if all([s.labels[label] == f.labels[label] for label in remaining_labels]):
+                    assert (
+                        not found
+                    ), "duplicate match, remaining_labels don't uniquely identify sample"
+                    tl.append((s.labels, int(s.value) - int(f.value)))
+                    found = True
+            if not found:
+                tl.append((s.labels, int(s.value)))
+        assert len(tl) == len(started), "something broken with join logic"
+        log.info(f"upload queue for {tenant_id}/{timeline_id}:")
+        for labels, queue_count in tl:
+            log.info(f"  {labels}: {queue_count}")
+        if all(queue_count == 0 for (_, queue_count) in tl):
             return
-        time.sleep(0.2)
+        time.sleep(wait_period_secs)
 
 
 def wait_timeline_detail_404(
@@ -262,7 +288,7 @@ def timeline_delete_wait_completed(
     iterations: int = 20,
     interval: Optional[float] = None,
     **delete_args,
-):
+) -> None:
     pageserver_http.timeline_delete(tenant_id=tenant_id, timeline_id=timeline_id, **delete_args)
     wait_timeline_detail_404(pageserver_http, tenant_id, timeline_id, iterations, interval)
 
@@ -272,7 +298,7 @@ def assert_prefix_empty(
     remote_storage: Optional[RemoteStorage],
     prefix: Optional[str] = None,
     allowed_postfix: Optional[str] = None,
-):
+) -> None:
     assert remote_storage is not None
     response = list_prefix(remote_storage, prefix)
     keys = response["KeyCount"]
@@ -287,7 +313,7 @@ def assert_prefix_empty(
             # https://neon-github-public-dev.s3.amazonaws.com/reports/pr-5322/6207777020/index.html#suites/3556ed71f2d69272a7014df6dcb02317/53b5c368b5a68865
             # this seems like a mock_s3 issue
             log.warning(
-                f"contrading ListObjectsV2 response with KeyCount={keys} and Contents={objects}, CommonPrefixes={common_prefixes}, assuming this means KeyCount=0"
+                f"contradicting ListObjectsV2 response with KeyCount={keys} and Contents={objects}, CommonPrefixes={common_prefixes}, assuming this means KeyCount=0"
             )
             keys = 0
         elif keys != 0 and len(objects) == 0:
@@ -327,7 +353,6 @@ def list_prefix(
     """
     # For local_fs we need to properly handle empty directories, which we currently dont, so for simplicity stick to s3 api.
     assert isinstance(remote, S3Storage), "localfs is currently not supported"
-    assert remote.client is not None
 
     prefix_in_bucket = remote.prefix_in_bucket or ""
     if not prefix:
@@ -346,58 +371,76 @@ def list_prefix(
     return response
 
 
-def wait_tenant_status_404(
-    pageserver_http: PageserverHttpClient,
-    tenant_id: TenantId,
-    iterations: int,
-    interval: float = 0.250,
-):
-    def tenant_is_missing():
-        data = {}
-        try:
-            data = pageserver_http.tenant_status(tenant_id)
-            log.info(f"tenant status {data}")
-        except PageserverApiException as e:
-            log.debug(e)
-            if e.status_code == 404:
-                return
+def remote_storage_delete_key(
+    remote: RemoteStorage,
+    key: str,
+) -> DeleteObjectOutputTypeDef:
+    """
+    Note that this function takes into account prefix_in_bucket.
+    """
+    # For local_fs we need to use a different implementation. As we don't need local_fs, just don't support it for now.
+    assert isinstance(remote, S3Storage), "localfs is currently not supported"
 
-        raise RuntimeError(f"Timeline exists state {data.get('state')}")
+    prefix_in_bucket = remote.prefix_in_bucket or ""
 
-    wait_until(iterations, interval=interval, func=tenant_is_missing)
+    # real s3 tests have uniqie per test prefix
+    # mock_s3 tests use special pageserver prefix for pageserver stuff
+    key = "/".join((prefix_in_bucket, key))
 
-
-def tenant_delete_wait_completed(
-    pageserver_http: PageserverHttpClient,
-    tenant_id: TenantId,
-    iterations: int,
-    ignore_errors: bool = False,
-):
-    if not ignore_errors:
-        pageserver_http.tenant_delete(tenant_id=tenant_id)
-    else:
-        interval = 0.5
-
-        def delete_request_sent():
-            try:
-                pageserver_http.tenant_delete(tenant_id=tenant_id)
-            except PageserverApiException as e:
-                log.debug(e)
-                if e.status_code == 404:
-                    return
-            except Exception as e:
-                log.debug(e)
-
-        wait_until(iterations, interval=interval, func=delete_request_sent)
-    wait_tenant_status_404(pageserver_http, tenant_id=tenant_id, iterations=iterations)
+    response = remote.client.delete_object(
+        Bucket=remote.bucket_name,
+        Key=key,
+    )
+    return response
 
 
-MANY_SMALL_LAYERS_TENANT_CONFIG = {
-    "gc_period": "0s",
-    "compaction_period": "0s",
-    "checkpoint_distance": f"{1024**2}",
-    "image_creation_threshold": "100",
-}
+def enable_remote_storage_versioning(
+    remote: RemoteStorage,
+) -> EmptyResponseMetadataTypeDef:
+    """
+    Enable S3 versioning for the remote storage
+    """
+    # local_fs has no support for versioning
+    assert isinstance(remote, S3Storage), "localfs is currently not supported"
+
+    # The SDK supports enabling versioning on normal S3 as well but we don't want to change
+    # these settings from a test in a live bucket (also, our access isn't enough nor should it be)
+    assert not remote.real, "Enabling storage versioning only supported on Mock S3"
+
+    # Workaround to enable self-copy until upstream bug is fixed: https://github.com/getmoto/moto/issues/7300
+    remote.client.put_bucket_encryption(
+        Bucket=remote.bucket_name,
+        ServerSideEncryptionConfiguration={
+            "Rules": [
+                {
+                    "ApplyServerSideEncryptionByDefault": {"SSEAlgorithm": "AES256"},
+                    "BucketKeyEnabled": False,
+                },
+            ]
+        },
+    )
+    # Note that this doesnt use pagination, so list is not guaranteed to be exhaustive.
+    response = remote.client.put_bucket_versioning(
+        Bucket=remote.bucket_name,
+        VersioningConfiguration={
+            "MFADelete": "Disabled",
+            "Status": "Enabled",
+        },
+    )
+    return response
+
+
+def many_small_layers_tenant_config() -> Dict[str, Any]:
+    """
+    Create a new dict to avoid issues with deleting from the global value.
+    In python, the global is mutable.
+    """
+    return {
+        "gc_period": "0s",
+        "compaction_period": "0s",
+        "checkpoint_distance": 1024**2,
+        "image_creation_threshold": 100,
+    }
 
 
 def poll_for_remote_storage_iterations(remote_storage_kind: RemoteStorageKind) -> int:

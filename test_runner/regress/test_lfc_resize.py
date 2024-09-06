@@ -1,3 +1,7 @@
+import os
+import random
+import re
+import subprocess
 import threading
 import time
 
@@ -17,18 +21,17 @@ def test_lfc_resize(neon_simple_env: NeonEnv, pg_bin: PgBin):
         "test_lfc_resize",
         config_lines=[
             "neon.file_cache_path='file.cache'",
-            "neon.max_file_cache_size=1GB",
-            "neon.file_cache_size_limit=1GB",
+            "neon.max_file_cache_size=512MB",
+            "neon.file_cache_size_limit=512MB",
         ],
     )
     n_resize = 10
-    scale = 10
-    log.info("postgres is running on 'test_lfc_resize' branch")
+    scale = 100
 
     def run_pgbench(connstr: str):
         log.info(f"Start a pgbench workload on pg {connstr}")
         pg_bin.run_capture(["pgbench", "-i", f"-s{scale}", connstr])
-        pg_bin.run_capture(["pgbench", "-c4", f"-T{n_resize}", "-Mprepared", connstr])
+        pg_bin.run_capture(["pgbench", "-c10", f"-T{n_resize}", "-Mprepared", "-S", connstr])
 
     thread = threading.Thread(target=run_pgbench, args=(endpoint.connstr(),), daemon=True)
     thread.start()
@@ -36,9 +39,21 @@ def test_lfc_resize(neon_simple_env: NeonEnv, pg_bin: PgBin):
     conn = endpoint.connect()
     cur = conn.cursor()
 
-    for i in range(n_resize):
-        cur.execute(f"alter system set neon.file_cache_size_limit='{i*10}MB'")
+    for _ in range(n_resize):
+        size = random.randint(1, 512)
+        cur.execute(f"alter system set neon.file_cache_size_limit='{size}MB'")
         cur.execute("select pg_reload_conf()")
         time.sleep(1)
 
+    cur.execute("alter system set neon.file_cache_size_limit='100MB'")
+    cur.execute("select pg_reload_conf()")
+
     thread.join()
+
+    lfc_file_path = f"{endpoint.pg_data_dir_path()}/file.cache"
+    lfc_file_size = os.path.getsize(lfc_file_path)
+    res = subprocess.run(["ls", "-sk", lfc_file_path], check=True, text=True, capture_output=True)
+    lfc_file_blocks = re.findall("([0-9A-F]+)", res.stdout)[0]
+    log.info(f"Size of LFC file {lfc_file_size}, blocks {lfc_file_blocks}")
+    assert lfc_file_size <= 512 * 1024 * 1024
+    assert int(lfc_file_blocks) <= 128 * 1024

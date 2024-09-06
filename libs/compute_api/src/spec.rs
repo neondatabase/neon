@@ -33,6 +33,23 @@ pub struct ComputeSpec {
     #[serde(default)]
     pub features: Vec<ComputeFeature>,
 
+    /// If compute_ctl was passed `--resize-swap-on-bind`, a value of `Some(_)` instructs
+    /// compute_ctl to `/neonvm/bin/resize-swap` with the given size, when the spec is first
+    /// received.
+    ///
+    /// Both this field and `--resize-swap-on-bind` are required, so that the control plane's
+    /// spec generation doesn't need to be aware of the actual compute it's running on, while
+    /// guaranteeing gradual rollout of swap. Otherwise, without `--resize-swap-on-bind`, we could
+    /// end up trying to resize swap in VMs without it -- or end up *not* resizing swap, thus
+    /// giving every VM much more swap than it should have (32GiB).
+    ///
+    /// Eventually we may remove `--resize-swap-on-bind` and exclusively use `swap_size_bytes` for
+    /// enabling the swap resizing behavior once rollout is complete.
+    ///
+    /// See neondatabase/cloud#12047 for more.
+    #[serde(default)]
+    pub swap_size_bytes: Option<u64>,
+
     /// Expected cluster state at the end of transition process.
     pub cluster: Cluster,
     pub delta_operations: Option<Vec<DeltaOp>>,
@@ -90,8 +107,8 @@ pub enum ComputeFeature {
     /// track short-lived connections as user activity.
     ActivityMonitorExperimental,
 
-    /// Enable running migrations
-    Migrations,
+    /// Pre-install and initialize anon extension for every database in the cluster
+    AnonExtension,
 
     /// This is a special feature flag that is used to represent unknown feature flags.
     /// Basically all unknown to enum flags are represented as this one. See unit test

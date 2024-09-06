@@ -2,8 +2,8 @@ use std::{collections::hash_map::Entry, fs, sync::Arc};
 
 use anyhow::Context;
 use camino::Utf8PathBuf;
-use tracing::{error, info, info_span, warn};
-use utils::{crashsafe, fs_ext, id::TimelineId, lsn::Lsn};
+use tracing::{error, info, info_span};
+use utils::{fs_ext, id::TimelineId, lsn::Lsn};
 
 use crate::{context::RequestContext, import_datadir, tenant::Tenant};
 
@@ -11,22 +11,22 @@ use super::Timeline;
 
 /// A timeline with some of its files on disk, being initialized.
 /// This struct ensures the atomicity of the timeline init: it's either properly created and inserted into pageserver's memory, or
-/// its local files are removed. In the worst case of a crash, an uninit mark file is left behind, which causes the directory
-/// to be removed on next restart.
+/// its local files are removed.  If we crash while this class exists, then the timeline's local
+/// state is cleaned up during [`Tenant::clean_up_timelines`], because the timeline's content isn't in remote storage.
 ///
 /// The caller is responsible for proper timeline data filling before the final init.
 #[must_use]
 pub struct UninitializedTimeline<'t> {
     pub(crate) owning_tenant: &'t Tenant,
     timeline_id: TimelineId,
-    raw_timeline: Option<(Arc<Timeline>, TimelineUninitMark<'t>)>,
+    raw_timeline: Option<(Arc<Timeline>, TimelineCreateGuard<'t>)>,
 }
 
 impl<'t> UninitializedTimeline<'t> {
     pub(crate) fn new(
         owning_tenant: &'t Tenant,
         timeline_id: TimelineId,
-        raw_timeline: Option<(Arc<Timeline>, TimelineUninitMark<'t>)>,
+        raw_timeline: Option<(Arc<Timeline>, TimelineCreateGuard<'t>)>,
     ) -> Self {
         Self {
             owning_tenant,
@@ -35,8 +35,7 @@ impl<'t> UninitializedTimeline<'t> {
         }
     }
 
-    /// Finish timeline creation: insert it into the Tenant's timelines map and remove the
-    /// uninit mark file.
+    /// Finish timeline creation: insert it into the Tenant's timelines map
     ///
     /// This function launches the flush loop if not already done.
     ///
@@ -72,16 +71,9 @@ impl<'t> UninitializedTimeline<'t> {
             Entry::Vacant(v) => {
                 // after taking here should be no fallible operations, because the drop guard will not
                 // cleanup after and would block for example the tenant deletion
-                let (new_timeline, uninit_mark) =
+                let (new_timeline, _create_guard) =
                     self.raw_timeline.take().expect("already checked");
 
-                // this is the mutual exclusion between different retries to create the timeline;
-                // this should be an assertion.
-                uninit_mark.remove_uninit_mark().with_context(|| {
-                    format!(
-                        "Failed to remove uninit mark file for timeline {tenant_shard_id}/{timeline_id}"
-                    )
-                })?;
                 v.insert(Arc::clone(&new_timeline));
 
                 new_timeline.maybe_spawn_flush_loop();
@@ -94,6 +86,7 @@ impl<'t> UninitializedTimeline<'t> {
     /// Prepares timeline data by loading it from the basebackup archive.
     pub(crate) async fn import_basebackup_from_tar(
         self,
+        tenant: Arc<Tenant>,
         copyin_read: &mut (impl tokio::io::AsyncRead + Send + Sync + Unpin),
         base_lsn: Lsn,
         broker_client: storage_broker::BrokerClientChannel,
@@ -120,10 +113,9 @@ impl<'t> UninitializedTimeline<'t> {
             .await
             .context("Failed to flush after basebackup import")?;
 
-        // All the data has been imported. Insert the Timeline into the tenant's timelines
-        // map and remove the uninit mark file.
+        // All the data has been imported. Insert the Timeline into the tenant's timelines map
         let tl = self.finish_creation()?;
-        tl.activate(broker_client, None, ctx);
+        tl.activate(tenant, broker_client, None, ctx);
         Ok(tl)
     }
 
@@ -143,37 +135,35 @@ impl<'t> UninitializedTimeline<'t> {
 
 impl Drop for UninitializedTimeline<'_> {
     fn drop(&mut self) {
-        if let Some((_, uninit_mark)) = self.raw_timeline.take() {
+        if let Some((_, create_guard)) = self.raw_timeline.take() {
             let _entered = info_span!("drop_uninitialized_timeline", tenant_id = %self.owning_tenant.tenant_shard_id.tenant_id, shard_id = %self.owning_tenant.tenant_shard_id.shard_slug(), timeline_id = %self.timeline_id).entered();
             error!("Timeline got dropped without initializing, cleaning its files");
-            cleanup_timeline_directory(uninit_mark);
+            cleanup_timeline_directory(create_guard);
         }
     }
 }
 
-pub(crate) fn cleanup_timeline_directory(uninit_mark: TimelineUninitMark) {
-    let timeline_path = &uninit_mark.timeline_path;
+pub(crate) fn cleanup_timeline_directory(create_guard: TimelineCreateGuard) {
+    let timeline_path = &create_guard.timeline_path;
     match fs_ext::ignore_absent_files(|| fs::remove_dir_all(timeline_path)) {
         Ok(()) => {
-            info!("Timeline dir {timeline_path:?} removed successfully, removing the uninit mark")
+            info!("Timeline dir {timeline_path:?} removed successfully")
         }
         Err(e) => {
             error!("Failed to clean up uninitialized timeline directory {timeline_path:?}: {e:?}")
         }
     }
-    drop(uninit_mark); // mark handles its deletion on drop, gets retained if timeline dir exists
+    // Having cleaned up, we can release this TimelineId in `[Tenant::timelines_creating]` to allow other
+    // timeline creation attempts under this TimelineId to proceed
+    drop(create_guard);
 }
 
-/// An uninit mark file, created along the timeline dir to ensure the timeline either gets fully initialized and loaded into pageserver's memory,
-/// or gets removed eventually.
-///
-/// XXX: it's important to create it near the timeline dir, not inside it to ensure timeline dir gets removed first.
+/// A guard for timeline creations in process: as long as this object exists, the timeline ID
+/// is kept in `[Tenant::timelines_creating]` to exclude concurrent attempts to create the same timeline.
 #[must_use]
-pub(crate) struct TimelineUninitMark<'t> {
+pub(crate) struct TimelineCreateGuard<'t> {
     owning_tenant: &'t Tenant,
     timeline_id: TimelineId,
-    uninit_mark_deleted: bool,
-    uninit_mark_path: Utf8PathBuf,
     pub(crate) timeline_path: Utf8PathBuf,
 }
 
@@ -190,11 +180,10 @@ pub(crate) enum TimelineExclusionError {
     Other(#[from] anyhow::Error),
 }
 
-impl<'t> TimelineUninitMark<'t> {
+impl<'t> TimelineCreateGuard<'t> {
     pub(crate) fn new(
         owning_tenant: &'t Tenant,
         timeline_id: TimelineId,
-        uninit_mark_path: Utf8PathBuf,
         timeline_path: Utf8PathBuf,
     ) -> Result<Self, TimelineExclusionError> {
         // Lock order: this is the only place we take both locks.  During drop() we only
@@ -214,56 +203,14 @@ impl<'t> TimelineUninitMark<'t> {
             Ok(Self {
                 owning_tenant,
                 timeline_id,
-                uninit_mark_deleted: false,
-                uninit_mark_path,
                 timeline_path,
             })
         }
     }
-
-    fn remove_uninit_mark(mut self) -> anyhow::Result<()> {
-        if !self.uninit_mark_deleted {
-            self.delete_mark_file_if_present()?;
-        }
-
-        Ok(())
-    }
-
-    fn delete_mark_file_if_present(&mut self) -> anyhow::Result<()> {
-        let uninit_mark_file = &self.uninit_mark_path;
-        let uninit_mark_parent = uninit_mark_file
-            .parent()
-            .with_context(|| format!("Uninit mark file {uninit_mark_file:?} has no parent"))?;
-        fs_ext::ignore_absent_files(|| fs::remove_file(uninit_mark_file)).with_context(|| {
-            format!("Failed to remove uninit mark file at path {uninit_mark_file:?}")
-        })?;
-        crashsafe::fsync(uninit_mark_parent).context("Failed to fsync uninit mark parent")?;
-        self.uninit_mark_deleted = true;
-
-        Ok(())
-    }
 }
 
-impl Drop for TimelineUninitMark<'_> {
+impl Drop for TimelineCreateGuard<'_> {
     fn drop(&mut self) {
-        if !self.uninit_mark_deleted {
-            if self.timeline_path.exists() {
-                error!(
-                    "Uninit mark {} is not removed, timeline {} stays uninitialized",
-                    self.uninit_mark_path, self.timeline_path
-                )
-            } else {
-                // unblock later timeline creation attempts
-                warn!(
-                    "Removing intermediate uninit mark file {}",
-                    self.uninit_mark_path
-                );
-                if let Err(e) = self.delete_mark_file_if_present() {
-                    error!("Failed to remove the uninit mark file: {e}")
-                }
-            }
-        }
-
         self.owning_tenant
             .timelines_creating
             .lock()

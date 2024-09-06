@@ -14,7 +14,7 @@ impl ParseCallbacks for PostgresFfiCallbacks {
     fn include_file(&self, filename: &str) {
         // This does the equivalent of passing bindgen::CargoCallbacks
         // to the builder .parse_callbacks() method.
-        let cargo_callbacks = bindgen::CargoCallbacks;
+        let cargo_callbacks = bindgen::CargoCallbacks::new();
         cargo_callbacks.include_file(filename)
     }
 
@@ -126,6 +126,7 @@ fn main() -> anyhow::Result<()> {
             .allowlist_type("PageHeaderData")
             .allowlist_type("DBState")
             .allowlist_type("RelMapFile")
+            .allowlist_type("RepOriginId")
             // Because structs are used for serialization, tell bindgen to emit
             // explicit padding fields.
             .explicit_padding(true)

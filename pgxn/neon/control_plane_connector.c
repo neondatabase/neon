@@ -35,15 +35,17 @@
 #include "utils/memutils.h"
 #include "utils/jsonb.h"
 
+#include "control_plane_connector.h"
+#include "neon_utils.h"
+
 static ProcessUtility_hook_type PreviousProcessUtilityHook = NULL;
+
+static const char *jwt_token = NULL;
 
 /* GUCs */
 static char *ConsoleURL = NULL;
 static bool ForwardDDL = true;
-
-/* Curl structures for sending the HTTP requests */
-static CURL *CurlHandle;
-static struct curl_slist *ContentHeader = NULL;
+static bool RegressTestMode = false;
 
 /*
  * CURL docs say that this buffer must exist until we call curl_easy_cleanup
@@ -113,15 +115,14 @@ ConstructDeltaMessage()
 	if (RootTable.db_table)
 	{
 		JsonbValue	dbs;
+		HASH_SEQ_STATUS status;
+		DbEntry    *entry;
 
 		dbs.type = jbvString;
 		dbs.val.string.val = "dbs";
 		dbs.val.string.len = strlen(dbs.val.string.val);
 		pushJsonbValue(&state, WJB_KEY, &dbs);
 		pushJsonbValue(&state, WJB_BEGIN_ARRAY, NULL);
-
-		HASH_SEQ_STATUS status;
-		DbEntry    *entry;
 
 		hash_seq_init(&status, RootTable.db_table);
 		while ((entry = hash_seq_search(&status)) != NULL)
@@ -168,8 +169,9 @@ ConstructDeltaMessage()
 #else
 				const char *logdetail;
 #endif
+				char	   *encrypted_password;
 				PushKeyValue(&state, "password", (char *) entry->password);
-				char	   *encrypted_password = get_role_password(entry->name, &logdetail);
+				encrypted_password = get_role_password(entry->name, &logdetail);
 
 				if (encrypted_password)
 				{
@@ -226,6 +228,8 @@ ErrorWriteCallback(char *ptr, size_t size, size_t nmemb, void *userdata)
 static void
 SendDeltasToControlPlane()
 {
+	static CURL		*handle = NULL;
+
 	if (!RootTable.db_table && !RootTable.role_table)
 		return;
 	if (!ConsoleURL)
@@ -236,29 +240,57 @@ SendDeltasToControlPlane()
 	if (!ForwardDDL)
 		return;
 
-	char	   *message = ConstructDeltaMessage();
-	ErrorString str = {};
+	if (handle == NULL)
+	{
+		struct curl_slist *headers = NULL;
 
-	curl_easy_setopt(CurlHandle, CURLOPT_CUSTOMREQUEST, "PATCH");
-	curl_easy_setopt(CurlHandle, CURLOPT_HTTPHEADER, ContentHeader);
-	curl_easy_setopt(CurlHandle, CURLOPT_POSTFIELDS, message);
-	curl_easy_setopt(CurlHandle, CURLOPT_URL, ConsoleURL);
-	curl_easy_setopt(CurlHandle, CURLOPT_ERRORBUFFER, CurlErrorBuf);
-	curl_easy_setopt(CurlHandle, CURLOPT_TIMEOUT, 3L /* seconds */ );
-	curl_easy_setopt(CurlHandle, CURLOPT_WRITEDATA, &str);
-	curl_easy_setopt(CurlHandle, CURLOPT_WRITEFUNCTION, ErrorWriteCallback);
+		headers = curl_slist_append(headers, "Content-Type: application/json");
+		if (headers == NULL)
+		{
+			elog(ERROR, "Failed to set Content-Type header");
+		}
+
+		if (jwt_token)
+		{
+			char		auth_header[8192];
+
+			snprintf(auth_header, sizeof(auth_header), "Authorization: Bearer %s", jwt_token);
+			headers = curl_slist_append(headers, auth_header);
+			if (headers == NULL)
+			{
+				elog(ERROR, "Failed to set Authorization header");
+			}
+		}
+
+		handle = alloc_curl_handle();
+
+		curl_easy_setopt(handle, CURLOPT_CUSTOMREQUEST, "PATCH");
+		curl_easy_setopt(handle, CURLOPT_HTTPHEADER, headers);
+		curl_easy_setopt(handle, CURLOPT_URL, ConsoleURL);
+		curl_easy_setopt(handle, CURLOPT_ERRORBUFFER, CurlErrorBuf);
+		curl_easy_setopt(handle, CURLOPT_TIMEOUT, 3L /* seconds */ );
+		curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION, ErrorWriteCallback);
+	}
+
+	char	   *message = ConstructDeltaMessage();
+	ErrorString str;
+
+	str.size = 0;
+
+	curl_easy_setopt(handle, CURLOPT_POSTFIELDS, message);
+	curl_easy_setopt(handle, CURLOPT_WRITEDATA, &str);
 
 	const int	num_retries = 5;
-	int			curl_status;
+	CURLcode	curl_status;
 
 	for (int i = 0; i < num_retries; i++)
 	{
-		if ((curl_status = curl_easy_perform(CurlHandle)) == 0)
+		if ((curl_status = curl_easy_perform(handle)) == 0)
 			break;
 		elog(LOG, "Curl request failed on attempt %d: %s", i, CurlErrorBuf);
 		pg_usleep(1000 * 1000);
 	}
-	if (curl_status != 0)
+	if (curl_status != CURLE_OK)
 	{
 		elog(ERROR, "Failed to perform curl request: %s", CurlErrorBuf);
 	}
@@ -266,13 +298,11 @@ SendDeltasToControlPlane()
 	{
 		long		response_code;
 
-		if (curl_easy_getinfo(CurlHandle, CURLINFO_RESPONSE_CODE, &response_code) != CURLE_UNKNOWN_OPTION)
+		if (curl_easy_getinfo(handle, CURLINFO_RESPONSE_CODE, &response_code) != CURLE_UNKNOWN_OPTION)
 		{
-			bool		error_exists = str.size != 0;
-
 			if (response_code != 200)
 			{
-				if (error_exists)
+				if (str.size != 0)
 				{
 					elog(ERROR,
 						 "Received HTTP code %ld from control plane: %s",
@@ -773,6 +803,14 @@ NeonProcessUtility(
 		case T_DropRoleStmt:
 			HandleDropRole(castNode(DropRoleStmt, parseTree));
 			break;
+		case T_CreateTableSpaceStmt:
+			if (!RegressTestMode)
+			{
+				ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					errmsg("CREATE TABLESPACE is not supported on Neon")));
+			}
+   			break;
 		default:
 			break;
 	}
@@ -803,7 +841,7 @@ NeonProcessUtility(
 	}
 }
 
-extern void
+void
 InitControlPlaneConnector()
 {
 	PreviousProcessUtilityHook = ProcessUtility_hook;
@@ -835,34 +873,22 @@ InitControlPlaneConnector()
 							 NULL,
 							 NULL);
 
-	const char *jwt_token = getenv("NEON_CONTROL_PLANE_TOKEN");
+	DefineCustomBoolVariable(
+							 "neon.regress_test_mode",
+							 "Controls whether we are running in the regression test mode",
+							 NULL,
+							 &RegressTestMode,
+							 false,
+							 PGC_SUSET,
+							 0,
+							 NULL,
+							 NULL,
+							 NULL);
 
+	jwt_token = getenv("NEON_CONTROL_PLANE_TOKEN");
 	if (!jwt_token)
 	{
 		elog(LOG, "Missing NEON_CONTROL_PLANE_TOKEN environment variable, forwarding will not be authenticated");
 	}
 
-	if (curl_global_init(CURL_GLOBAL_DEFAULT))
-	{
-		elog(ERROR, "Failed to initialize curl");
-	}
-	if ((CurlHandle = curl_easy_init()) == NULL)
-	{
-		elog(ERROR, "Failed to initialize curl handle");
-	}
-	if ((ContentHeader = curl_slist_append(ContentHeader, "Content-Type: application/json")) == NULL)
-	{
-		elog(ERROR, "Failed to initialize content header");
-	}
-
-	if (jwt_token)
-	{
-		char		auth_header[8192];
-
-		snprintf(auth_header, sizeof(auth_header), "Authorization: Bearer %s", jwt_token);
-		if ((ContentHeader = curl_slist_append(ContentHeader, auth_header)) == NULL)
-		{
-			elog(ERROR, "Failed to initialize authorization header");
-		}
-	}
 }

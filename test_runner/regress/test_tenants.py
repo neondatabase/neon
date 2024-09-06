@@ -9,6 +9,7 @@ from typing import List
 
 import pytest
 import requests
+from fixtures.common_types import Lsn, TenantId
 from fixtures.log_helper import log
 from fixtures.metrics import (
     PAGESERVER_GLOBAL_METRICS,
@@ -18,12 +19,12 @@ from fixtures.metrics import (
 from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
+    wait_for_last_flush_lsn,
 )
 from fixtures.pageserver.http import PageserverApiException
 from fixtures.pageserver.utils import timeline_delete_wait_completed, wait_until_tenant_active
 from fixtures.pg_version import PgVersion
 from fixtures.remote_storage import RemoteStorageKind
-from fixtures.types import Lsn, TenantId
 from fixtures.utils import wait_until
 from prometheus_client.samples import Sample
 
@@ -35,21 +36,33 @@ def test_tenant_creation_fails(neon_simple_env: NeonEnv):
     )
     [d for d in tenants_dir.iterdir()]
 
-    neon_simple_env.pageserver.allowed_errors.append(".*tenant-config-before-write.*")
+    error_regexes = [".*tenant-config-before-write.*"]
+    neon_simple_env.pageserver.allowed_errors.extend(error_regexes)
+    neon_simple_env.storage_controller.allowed_errors.extend(error_regexes)
 
     pageserver_http = neon_simple_env.pageserver.http_client()
-    pageserver_http.configure_failpoints(("tenant-config-before-write", "return"))
-    with pytest.raises(Exception, match="tenant-config-before-write"):
-        _ = neon_simple_env.neon_cli.create_tenant()
 
+    # Failure to write a config to local disk makes the pageserver assume that local disk is bad and abort the process
+    pageserver_http.configure_failpoints(("tenant-config-before-write", "return"))
+
+    tenant_id = TenantId.generate()
+
+    with pytest.raises(requests.exceptions.ConnectionError, match="Connection aborted"):
+        neon_simple_env.pageserver.http_client().tenant_attach(tenant_id=tenant_id, generation=1)
+
+    # Any files left behind on disk during failed creation do not prevent
+    # a retry from succeeding.  Restart pageserver with no failpoints.
+    neon_simple_env.pageserver.running = False
+    neon_simple_env.pageserver.start()
+
+    # The failed creation should not be present in list of tenants, as when we start up we'll see
+    # an empty tenant dir with no config in it.
+    neon_simple_env.pageserver.allowed_errors.append(".*Failed to load tenant config.*")
     new_tenants = sorted(
         map(lambda t: t.split()[0], neon_simple_env.neon_cli.list_tenants().stdout.splitlines())
     )
     assert initial_tenants == new_tenants, "should not create new tenants"
 
-    # Any files left behind on disk during failed creation do not prevent
-    # a retry from succeeding.
-    pageserver_http.configure_failpoints(("tenant-config-before-write", "off"))
     neon_simple_env.neon_cli.create_tenant()
 
 
@@ -285,7 +298,6 @@ def test_pageserver_with_empty_tenants(neon_env_builder: NeonEnvBuilder):
 
     env.pageserver.allowed_errors.extend(
         [
-            ".*marking .* as locally complete, while it doesnt exist in remote index.*",
             ".*load failed.*list timelines directory.*",
         ]
     )
@@ -360,26 +372,19 @@ def test_create_churn_during_restart(neon_env_builder: NeonEnvBuilder):
     tenant_id: TenantId = env.initial_tenant
     timeline_id = env.initial_timeline
 
-    # Multiple creation requests which race will generate this error
+    # Multiple creation requests which race will generate this error on the pageserver
+    # and storage controller respectively
     env.pageserver.allowed_errors.append(".*Conflict: Tenant is already being modified.*")
+    env.storage_controller.allowed_errors.append(".*Conflict: Tenant is already being modified.*")
 
     # Tenant creation requests which arrive out of order will generate complaints about
     # generation nubmers out of order.
     env.pageserver.allowed_errors.append(".*Generation .+ is less than existing .+")
 
-    # Our multiple creation requests will advance generation quickly, and when we skip
-    # a generation number we can generate these warnings
-    env.pageserver.allowed_errors.append(".*Dropped remote consistent LSN updates for tenant .+")
-
     # Timeline::flush_and_shutdown cannot tell if it is hitting a failure because of
     # an incomplete attach, or some other problem.  In the field this should be rare,
     # so we allow it to log at WARN, even if it is occasionally a false positive.
     env.pageserver.allowed_errors.append(".*failed to freeze and flush.*")
-
-    # When we shut down a tenant during a timeline creation, initdb is not cancelled, we wait
-    # for it to complete (since https://github.com/neondatabase/neon/pull/6451).  This means
-    # that shutdown can be delayed by >=1s on debug builds where initdb takes a long time to run.
-    env.pageserver.allowed_errors.append(".*still waiting, taking longer than expected... gate.*")
 
     def create_bg(delay_ms):
         time.sleep(delay_ms / 1000.0)
@@ -391,6 +396,9 @@ def test_create_churn_during_restart(neon_env_builder: NeonEnvBuilder):
         except PageserverApiException as e:
             if e.status_code == 409:
                 log.info(f"delay_ms={delay_ms} 409")
+                pass
+            elif e.status_code == 429:
+                log.info(f"delay_ms={delay_ms} 429")
                 pass
             elif e.status_code == 400:
                 if "is less than existing" in e.message:
@@ -420,3 +428,50 @@ def test_create_churn_during_restart(neon_env_builder: NeonEnvBuilder):
 
     # The tenant should end up active
     wait_until_tenant_active(env.pageserver.http_client(), tenant_id, iterations=10, period=1)
+
+
+def test_pageserver_metrics_many_relations(neon_env_builder: NeonEnvBuilder):
+    """Test for the directory_entries_count metric"""
+
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.MOCK_S3)
+
+    env = neon_env_builder.init_start()
+    ps_http = env.pageserver.http_client()
+
+    endpoint_tenant = env.endpoints.create_start("main", tenant_id=env.initial_tenant)
+
+    # Not sure why but this many tables creates more relations than our limit
+    TABLE_COUNT = 1600
+    COUNT_AT_LEAST_EXPECTED = 5500
+
+    with endpoint_tenant.connect() as conn:
+        with conn.cursor() as cur:
+            # Wrapping begin; commit; around this and the loop below keeps the reproduction
+            # but it also doesn't have a performance benefit
+            cur.execute("CREATE TABLE template_tbl(key int primary key, value text);")
+            for i in range(TABLE_COUNT):
+                cur.execute(f"CREATE TABLE tbl_{i}(like template_tbl INCLUDING ALL);")
+    wait_for_last_flush_lsn(env, endpoint_tenant, env.initial_tenant, env.initial_timeline)
+    endpoint_tenant.stop()
+
+    m = ps_http.get_metrics()
+    directory_entries_count_metric = m.query_all(
+        "pageserver_directory_entries_count", {"tenant_id": str(env.initial_tenant)}
+    )
+
+    def only_int(samples: List[Sample]) -> int:
+        assert len(samples) == 1
+        return int(samples[0].value)
+
+    directory_entries_count = only_int(directory_entries_count_metric)
+
+    log.info(f"pageserver_directory_entries_count metric value: {directory_entries_count}")
+
+    assert directory_entries_count > COUNT_AT_LEAST_EXPECTED
+
+    timeline_detail = ps_http.timeline_detail(env.initial_tenant, env.initial_timeline)
+
+    counts = timeline_detail["directory_entries_counts"]
+    assert counts
+    log.info(f"directory counts: {counts}")
+    assert counts[2] > COUNT_AT_LEAST_EXPECTED

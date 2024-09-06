@@ -5,6 +5,7 @@ from typing import cast
 
 import pytest
 import requests
+from fixtures.common_types import TenantId, TimelineId
 from fixtures.neon_fixtures import (
     DEFAULT_BRANCH_NAME,
     NeonEnv,
@@ -13,7 +14,6 @@ from fixtures.neon_fixtures import (
 )
 from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pg_version import PgVersion, skip_on_postgres
-from fixtures.types import TenantId, TimelineId
 
 
 def helper_compare_timeline_list(
@@ -133,7 +133,7 @@ def test_cli_start_stop(neon_env_builder: NeonEnvBuilder):
     # Stop default ps/sk
     env.neon_cli.pageserver_stop(env.pageserver.id)
     env.neon_cli.safekeeper_stop()
-    env.neon_cli.attachment_service_stop(False)
+    env.neon_cli.storage_controller_stop(False)
 
     # Keep NeonEnv state up to date, it usually owns starting/stopping services
     env.pageserver.running = False
@@ -175,7 +175,7 @@ def test_cli_start_stop_multi(neon_env_builder: NeonEnvBuilder):
     env.neon_cli.safekeeper_stop(neon_env_builder.safekeepers_id_start + 2)
 
     # Stop this to get out of the way of the following `start`
-    env.neon_cli.attachment_service_stop(False)
+    env.neon_cli.storage_controller_stop(False)
 
     # Default start
     res = env.neon_cli.raw_cli(["start"])

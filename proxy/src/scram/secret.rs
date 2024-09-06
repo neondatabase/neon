@@ -1,27 +1,29 @@
 //! Tools for SCRAM server secret management.
 
+use subtle::{Choice, ConstantTimeEq};
+
 use super::base64_decode_array;
 use super::key::ScramKey;
 
-/// Server secret is produced from [password](super::password::SaltedPassword)
+/// Server secret is produced from user's password,
 /// and is used throughout the authentication process.
 #[derive(Clone, Eq, PartialEq, Debug)]
-pub struct ServerSecret {
+pub(crate) struct ServerSecret {
     /// Number of iterations for `PBKDF2` function.
-    pub iterations: u32,
+    pub(crate) iterations: u32,
     /// Salt used to hash user's password.
-    pub salt_base64: String,
+    pub(crate) salt_base64: String,
     /// Hashed `ClientKey`.
-    pub stored_key: ScramKey,
+    pub(crate) stored_key: ScramKey,
     /// Used by client to verify server's signature.
-    pub server_key: ScramKey,
+    pub(crate) server_key: ScramKey,
     /// Should auth fail no matter what?
     /// This is exactly the case for mocked secrets.
-    pub doomed: bool,
+    pub(crate) doomed: bool,
 }
 
 impl ServerSecret {
-    pub fn parse(input: &str) -> Option<Self> {
+    pub(crate) fn parse(input: &str) -> Option<Self> {
         // SCRAM-SHA-256$<iterations>:<salt>$<storedkey>:<serverkey>
         let s = input.strip_prefix("SCRAM-SHA-256$")?;
         let (params, keys) = s.split_once('$')?;
@@ -40,16 +42,21 @@ impl ServerSecret {
         Some(secret)
     }
 
+    pub(crate) fn is_password_invalid(&self, client_key: &ScramKey) -> Choice {
+        // constant time to not leak partial key match
+        client_key.sha256().ct_ne(&self.stored_key) | Choice::from(self.doomed as u8)
+    }
+
     /// To avoid revealing information to an attacker, we use a
     /// mocked server secret even if the user doesn't exist.
     /// See `auth-scram.c : mock_scram_secret` for details.
-    pub fn mock(user: &str, nonce: [u8; 32]) -> Self {
-        // Refer to `auth-scram.c : scram_mock_salt`.
-        let mocked_salt = super::sha256([user.as_bytes(), &nonce]);
-
+    pub(crate) fn mock(nonce: [u8; 32]) -> Self {
         Self {
-            iterations: 4096,
-            salt_base64: base64::encode(mocked_salt),
+            // this doesn't reveal much information as we're going to use
+            // iteration count 1 for our generated passwords going forward.
+            // PG16 users can set iteration count=1 already today.
+            iterations: 1,
+            salt_base64: base64::encode(nonce),
             stored_key: ScramKey::default(),
             server_key: ScramKey::default(),
             doomed: true,
@@ -59,21 +66,8 @@ impl ServerSecret {
     /// Build a new server secret from the prerequisites.
     /// XXX: We only use this function in tests.
     #[cfg(test)]
-    pub fn build(password: &str, salt: &[u8], iterations: u32) -> Option<Self> {
-        // TODO: implement proper password normalization required by the RFC
-        if !password.is_ascii() {
-            return None;
-        }
-
-        let password = super::password::SaltedPassword::new(password.as_bytes(), salt, iterations);
-
-        Some(Self {
-            iterations,
-            salt_base64: base64::encode(salt),
-            stored_key: password.client_key().sha256(),
-            server_key: password.server_key(),
-            doomed: false,
-        })
+    pub(crate) async fn build(password: &str) -> Option<Self> {
+        Self::parse(&postgres_protocol::password::scram_sha_256(password.as_bytes()).await)
     }
 }
 
@@ -88,13 +82,7 @@ mod tests {
         let stored_key = "D5h6KTMBlUvDJk2Y8ELfC1Sjtc6k9YHjRyuRZyBNJns=";
         let server_key = "Pi3QHbcluX//NDfVkKlFl88GGzlJ5LkyPwcdlN/QBvI=";
 
-        let secret = format!(
-            "SCRAM-SHA-256${iterations}:{salt}${stored_key}:{server_key}",
-            iterations = iterations,
-            salt = salt,
-            stored_key = stored_key,
-            server_key = server_key,
-        );
+        let secret = format!("SCRAM-SHA-256${iterations}:{salt}${stored_key}:{server_key}");
 
         let parsed = ServerSecret::parse(&secret).unwrap();
         assert_eq!(parsed.iterations, iterations);
@@ -102,21 +90,5 @@ mod tests {
 
         assert_eq!(base64::encode(parsed.stored_key), stored_key);
         assert_eq!(base64::encode(parsed.server_key), server_key);
-    }
-
-    #[test]
-    fn build_scram_secret() {
-        let salt = b"salt";
-        let secret = ServerSecret::build("password", salt, 4096).unwrap();
-        assert_eq!(secret.iterations, 4096);
-        assert_eq!(secret.salt_base64, base64::encode(salt));
-        assert_eq!(
-            base64::encode(secret.stored_key.as_ref()),
-            "lF4cRm/Jky763CN4HtxdHnjV4Q8AWTNlKvGmEFFU8IQ="
-        );
-        assert_eq!(
-            base64::encode(secret.server_key.as_ref()),
-            "ub8OgRsftnk2ccDMOt7ffHXNcikRkQkq1lh4xaAqrSw="
-        );
     }
 }

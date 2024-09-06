@@ -3,7 +3,6 @@ use utils::logging;
 
 /// Re-usable pieces of code that aren't CLI-specific.
 mod util {
-    pub(crate) mod connstring;
     pub(crate) mod request_stats;
     #[macro_use]
     pub(crate) mod tokio_thread_local_stats;
@@ -15,8 +14,10 @@ mod util {
 
 /// The pagebench CLI sub-commands, dispatched in [`main`] below.
 mod cmd {
+    pub(super) mod aux_files;
     pub(super) mod basebackup;
     pub(super) mod getpage_latest_lsn;
+    pub(super) mod ondemand_download_churn;
     pub(super) mod trigger_initial_size_calculation;
 }
 
@@ -26,6 +27,8 @@ enum Args {
     Basebackup(cmd::basebackup::Args),
     GetPageLatestLsn(cmd::getpage_latest_lsn::Args),
     TriggerInitialSizeCalculation(cmd::trigger_initial_size_calculation::Args),
+    OndemandDownloadChurn(cmd::ondemand_download_churn::Args),
+    AuxFiles(cmd::aux_files::Args),
 }
 
 fn main() {
@@ -44,6 +47,8 @@ fn main() {
         Args::TriggerInitialSizeCalculation(args) => {
             cmd::trigger_initial_size_calculation::main(args)
         }
+        Args::OndemandDownloadChurn(args) => cmd::ondemand_download_churn::main(args),
+        Args::AuxFiles(args) => cmd::aux_files::main(args),
     }
     .unwrap()
 }

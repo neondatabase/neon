@@ -6,24 +6,27 @@ use super::{
     ApiCaches, ApiLocks, AuthInfo, AuthSecret, CachedAllowedIps, CachedNodeInfo, CachedRoleSecret,
     NodeInfo,
 };
-use crate::{auth::backend::ComputeUserInfo, compute, http, scram};
 use crate::{
-    cache::Cached,
-    context::RequestMonitoring,
-    metrics::{ALLOWED_IPS_BY_CACHE_OUTCOME, ALLOWED_IPS_NUMBER},
+    auth::backend::ComputeUserInfo,
+    compute,
+    console::messages::{ColdStartInfo, Reason},
+    http,
+    metrics::{CacheOutcome, Metrics},
+    rate_limiter::WakeComputeRateLimiter,
+    scram, EndpointCacheKey,
 };
-use async_trait::async_trait;
+use crate::{cache::Cached, context::RequestMonitoring};
 use futures::TryFutureExt;
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use tokio::time::Instant;
 use tokio_postgres::config::SslMode;
-use tracing::{error, info, info_span, warn, Instrument};
+use tracing::{debug, error, info, info_span, warn, Instrument};
 
-#[derive(Clone)]
 pub struct Api {
     endpoint: http::Endpoint,
     pub caches: &'static ApiCaches,
-    locks: &'static ApiLocks,
+    pub(crate) locks: &'static ApiLocks<EndpointCacheKey>,
+    pub(crate) wake_compute_endpoint_rate_limiter: Arc<WakeComputeRateLimiter>,
     jwt: String,
 }
 
@@ -32,30 +35,38 @@ impl Api {
     pub fn new(
         endpoint: http::Endpoint,
         caches: &'static ApiCaches,
-        locks: &'static ApiLocks,
+        locks: &'static ApiLocks<EndpointCacheKey>,
+        wake_compute_endpoint_rate_limiter: Arc<WakeComputeRateLimiter>,
     ) -> Self {
-        let jwt: String = match std::env::var("NEON_PROXY_TO_CONTROLPLANE_TOKEN") {
-            Ok(v) => v,
-            Err(_) => "".to_string(),
-        };
+        let jwt = std::env::var("NEON_PROXY_TO_CONTROLPLANE_TOKEN").unwrap_or_default();
         Self {
             endpoint,
             caches,
             locks,
+            wake_compute_endpoint_rate_limiter,
             jwt,
         }
     }
 
-    pub fn url(&self) -> &str {
+    pub(crate) fn url(&self) -> &str {
         self.endpoint.url().as_str()
     }
 
     async fn do_get_auth_info(
         &self,
-        ctx: &mut RequestMonitoring,
+        ctx: &RequestMonitoring,
         user_info: &ComputeUserInfo,
     ) -> Result<AuthInfo, GetAuthInfoError> {
-        let request_id = uuid::Uuid::new_v4().to_string();
+        if !self
+            .caches
+            .endpoints_cache
+            .is_valid(ctx, &user_info.endpoint.normalize())
+            .await
+        {
+            info!("endpoint is not valid, skipping the request");
+            return Ok(AuthInfo::default());
+        }
+        let request_id = ctx.session_id().to_string();
         let application_name = ctx.console_application_name();
         async {
             let request = self
@@ -63,7 +74,7 @@ impl Api {
                 .get("proxy_get_role_secret")
                 .header("X-Request-ID", &request_id)
                 .header("Authorization", format!("Bearer {}", &self.jwt))
-                .query(&[("session_id", ctx.session_id)])
+                .query(&[("session_id", ctx.session_id())])
                 .query(&[
                     ("application_name", application_name.as_str()),
                     ("project", user_info.endpoint.as_str()),
@@ -73,15 +84,21 @@ impl Api {
 
             info!(url = request.url().as_str(), "sending http request");
             let start = Instant::now();
+            let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Cplane);
             let response = self.endpoint.execute(request).await?;
+            drop(pause);
             info!(duration = ?start.elapsed(), "received http response");
             let body = match parse_body::<GetRoleSecret>(response).await {
                 Ok(body) => body,
                 // Error 404 is special: it's ok not to have a secret.
-                Err(e) => match e.http_status_code() {
-                    Some(http::StatusCode::NOT_FOUND) => return Ok(AuthInfo::default()),
-                    _otherwise => return Err(e.into()),
-                },
+                // TODO(anna): retry
+                Err(e) => {
+                    return if e.get_reason().is_not_found() {
+                        Ok(AuthInfo::default())
+                    } else {
+                        Err(e.into())
+                    }
+                }
             };
 
             let secret = if body.role_secret.is_empty() {
@@ -93,7 +110,10 @@ impl Api {
                 Some(secret)
             };
             let allowed_ips = body.allowed_ips.unwrap_or_default();
-            ALLOWED_IPS_NUMBER.observe(allowed_ips.len() as f64);
+            Metrics::get()
+                .proxy
+                .allowed_ips_number
+                .observe(allowed_ips.len() as f64);
             Ok(AuthInfo {
                 secret,
                 allowed_ips,
@@ -107,10 +127,10 @@ impl Api {
 
     async fn do_wake_compute(
         &self,
-        ctx: &mut RequestMonitoring,
+        ctx: &RequestMonitoring,
         user_info: &ComputeUserInfo,
     ) -> Result<NodeInfo, WakeComputeError> {
-        let request_id = uuid::Uuid::new_v4().to_string();
+        let request_id = ctx.session_id().to_string();
         let application_name = ctx.console_application_name();
         async {
             let mut request_builder = self
@@ -118,7 +138,7 @@ impl Api {
                 .get("proxy_wake_compute")
                 .header("X-Request-ID", &request_id)
                 .header("Authorization", format!("Bearer {}", &self.jwt))
-                .query(&[("session_id", ctx.session_id)])
+                .query(&[("session_id", ctx.session_id())])
                 .query(&[
                     ("application_name", application_name.as_str()),
                     ("project", user_info.endpoint.as_str()),
@@ -133,7 +153,9 @@ impl Api {
 
             info!(url = request.url().as_str(), "sending http request");
             let start = Instant::now();
+            let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Cplane);
             let response = self.endpoint.execute(request).await?;
+            drop(pause);
             info!(duration = ?start.elapsed(), "received http response");
             let body = parse_body::<WakeCompute>(response).await?;
 
@@ -163,102 +185,176 @@ impl Api {
     }
 }
 
-#[async_trait]
 impl super::Api for Api {
     #[tracing::instrument(skip_all)]
     async fn get_role_secret(
         &self,
-        ctx: &mut RequestMonitoring,
+        ctx: &RequestMonitoring,
         user_info: &ComputeUserInfo,
     ) -> Result<CachedRoleSecret, GetAuthInfoError> {
-        let ep = &user_info.endpoint;
+        let normalized_ep = &user_info.endpoint.normalize();
         let user = &user_info.user;
-        if let Some(role_secret) = self.caches.project_info.get_role_secret(ep, user) {
+        if let Some(role_secret) = self
+            .caches
+            .project_info
+            .get_role_secret(normalized_ep, user)
+        {
             return Ok(role_secret);
         }
         let auth_info = self.do_get_auth_info(ctx, user_info).await?;
         if let Some(project_id) = auth_info.project_id {
+            let normalized_ep_int = normalized_ep.into();
             self.caches.project_info.insert_role_secret(
-                &project_id,
-                ep,
-                user,
+                project_id,
+                normalized_ep_int,
+                user.into(),
                 auth_info.secret.clone(),
             );
             self.caches.project_info.insert_allowed_ips(
-                &project_id,
-                ep,
+                project_id,
+                normalized_ep_int,
                 Arc::new(auth_info.allowed_ips),
             );
+            ctx.set_project_id(project_id);
         }
         // When we just got a secret, we don't need to invalidate it.
         Ok(Cached::new_uncached(auth_info.secret))
     }
 
-    async fn get_allowed_ips(
+    async fn get_allowed_ips_and_secret(
         &self,
-        ctx: &mut RequestMonitoring,
+        ctx: &RequestMonitoring,
         user_info: &ComputeUserInfo,
-    ) -> Result<CachedAllowedIps, GetAuthInfoError> {
-        let ep = &user_info.endpoint;
-        if let Some(allowed_ips) = self.caches.project_info.get_allowed_ips(ep) {
-            ALLOWED_IPS_BY_CACHE_OUTCOME
-                .with_label_values(&["hit"])
-                .inc();
-            return Ok(allowed_ips);
+    ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), GetAuthInfoError> {
+        let normalized_ep = &user_info.endpoint.normalize();
+        if let Some(allowed_ips) = self.caches.project_info.get_allowed_ips(normalized_ep) {
+            Metrics::get()
+                .proxy
+                .allowed_ips_cache_misses
+                .inc(CacheOutcome::Hit);
+            return Ok((allowed_ips, None));
         }
-        ALLOWED_IPS_BY_CACHE_OUTCOME
-            .with_label_values(&["miss"])
-            .inc();
+        Metrics::get()
+            .proxy
+            .allowed_ips_cache_misses
+            .inc(CacheOutcome::Miss);
         let auth_info = self.do_get_auth_info(ctx, user_info).await?;
         let allowed_ips = Arc::new(auth_info.allowed_ips);
         let user = &user_info.user;
         if let Some(project_id) = auth_info.project_id {
+            let normalized_ep_int = normalized_ep.into();
             self.caches.project_info.insert_role_secret(
-                &project_id,
-                ep,
-                user,
+                project_id,
+                normalized_ep_int,
+                user.into(),
                 auth_info.secret.clone(),
             );
-            self.caches
-                .project_info
-                .insert_allowed_ips(&project_id, ep, allowed_ips.clone());
+            self.caches.project_info.insert_allowed_ips(
+                project_id,
+                normalized_ep_int,
+                allowed_ips.clone(),
+            );
+            ctx.set_project_id(project_id);
         }
-        Ok(Cached::new_uncached(allowed_ips))
+        Ok((
+            Cached::new_uncached(allowed_ips),
+            Some(Cached::new_uncached(auth_info.secret)),
+        ))
     }
 
     #[tracing::instrument(skip_all)]
     async fn wake_compute(
         &self,
-        ctx: &mut RequestMonitoring,
+        ctx: &RequestMonitoring,
         user_info: &ComputeUserInfo,
     ) -> Result<CachedNodeInfo, WakeComputeError> {
         let key = user_info.endpoint_cache_key();
+
+        macro_rules! check_cache {
+            () => {
+                if let Some(cached) = self.caches.node_info.get(&key) {
+                    let (cached, info) = cached.take_value();
+                    let info = info.map_err(|c| {
+                        info!(key = &*key, "found cached wake_compute error");
+                        WakeComputeError::ApiError(ApiError::Console(*c))
+                    })?;
+
+                    debug!(key = &*key, "found cached compute node info");
+                    ctx.set_project(info.aux.clone());
+                    return Ok(cached.map(|()| info));
+                }
+            };
+        }
 
         // Every time we do a wakeup http request, the compute node will stay up
         // for some time (highly depends on the console's scale-to-zero policy);
         // The connection info remains the same during that period of time,
         // which means that we might cache it to reduce the load and latency.
-        if let Some(cached) = self.caches.node_info.get(&key) {
-            info!(key = &*key, "found cached compute node info");
-            return Ok(cached);
-        }
+        check_cache!();
 
-        let permit = self.locks.get_wake_compute_permit(&key).await?;
+        let permit = self.locks.get_permit(&key).await?;
 
         // after getting back a permit - it's possible the cache was filled
         // double check
         if permit.should_check_cache() {
-            if let Some(cached) = self.caches.node_info.get(&key) {
-                info!(key = &*key, "found cached compute node info");
-                return Ok(cached);
-            }
+            check_cache!();
         }
 
-        let node = self.do_wake_compute(ctx, user_info).await?;
-        let (_, cached) = self.caches.node_info.insert(key.clone(), node);
-        info!(key = &*key, "created a cache entry for compute node info");
+        // check rate limit
+        if !self
+            .wake_compute_endpoint_rate_limiter
+            .check(user_info.endpoint.normalize_intern(), 1)
+        {
+            return Err(WakeComputeError::TooManyConnections);
+        }
 
-        Ok(cached)
+        let node = permit.release_result(self.do_wake_compute(ctx, user_info).await);
+        match node {
+            Ok(node) => {
+                ctx.set_project(node.aux.clone());
+                debug!(key = &*key, "created a cache entry for woken compute node");
+
+                let mut stored_node = node.clone();
+                // store the cached node as 'warm_cached'
+                stored_node.aux.cold_start_info = ColdStartInfo::WarmCached;
+
+                let (_, cached) = self.caches.node_info.insert_unit(key, Ok(stored_node));
+
+                Ok(cached.map(|()| node))
+            }
+            Err(err) => match err {
+                WakeComputeError::ApiError(ApiError::Console(err)) => {
+                    let Some(status) = &err.status else {
+                        return Err(WakeComputeError::ApiError(ApiError::Console(err)));
+                    };
+
+                    let reason = status
+                        .details
+                        .error_info
+                        .map_or(Reason::Unknown, |x| x.reason);
+
+                    // if we can retry this error, do not cache it.
+                    if reason.can_retry() {
+                        return Err(WakeComputeError::ApiError(ApiError::Console(err)));
+                    }
+
+                    // at this point, we should only have quota errors.
+                    debug!(
+                        key = &*key,
+                        "created a cache entry for the wake compute error"
+                    );
+
+                    self.caches.node_info.insert_ttl(
+                        key,
+                        Err(Box::new(err.clone())),
+                        Duration::from_secs(30),
+                    );
+
+                    Err(WakeComputeError::ApiError(ApiError::Console(err)))
+                }
+                err => return Err(err),
+            },
+        }
     }
 }
 
@@ -272,19 +368,24 @@ async fn parse_body<T: for<'a> serde::Deserialize<'a>>(
         info!("request succeeded, processing the body");
         return Ok(response.json().await?);
     }
+    let s = response.bytes().await?;
+    // Log plaintext to be able to detect, whether there are some cases not covered by the error struct.
+    info!("response_error plaintext: {:?}", s);
 
     // Don't throw an error here because it's not as important
     // as the fact that the request itself has failed.
-    let body = response.json().await.unwrap_or_else(|e| {
+    let mut body = serde_json::from_slice(&s).unwrap_or_else(|e| {
         warn!("failed to parse error body: {e}");
         ConsoleError {
             error: "reason unclear (malformed error message)".into(),
+            http_status_code: status,
+            status: None,
         }
     });
+    body.http_status_code = status;
 
-    let text = body.error;
-    error!("console responded with an error ({status}): {text}");
-    Err(ApiError::Console { status, text })
+    error!("console responded with an error ({status}): {body:?}");
+    Err(ApiError::Console(body))
 }
 
 fn parse_host_port(input: &str) -> Option<(&str, u16)> {
