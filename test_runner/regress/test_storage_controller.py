@@ -1552,6 +1552,12 @@ def test_tenant_import(neon_env_builder: NeonEnvBuilder, shard_count, remote_sto
     literal_shard_count = 1 if shard_count is None else shard_count
     assert len(describe["shards"]) == literal_shard_count
 
+    nodes = env.storage_controller.nodes()
+    assert len(nodes) == 2
+    describe1 = env.storage_controller.node_shards(nodes[0]["id"])
+    describe2 = env.storage_controller.node_shards(nodes[1]["id"])
+    assert len(describe1["shards"]) + len(describe2["shards"]) == literal_shard_count
+
     # Check the data is still there: this implicitly proves that we recovered generation numbers
     # properly, for the timeline which was written to after a generation bump.
     for timeline, branch, expect_rows in [

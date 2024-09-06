@@ -41,11 +41,11 @@ use itertools::Itertools;
 use pageserver_api::{
     controller_api::{
         MetadataHealthRecord, MetadataHealthUpdateRequest, NodeAvailability, NodeRegisterRequest,
-        NodeSchedulingPolicy, PlacementPolicy, ShardSchedulingPolicy, ShardsPreferredAzsRequest,
-        ShardsPreferredAzsResponse, TenantCreateRequest, TenantCreateResponse,
-        TenantCreateResponseShard, TenantDescribeResponse, TenantDescribeResponseShard,
-        TenantLocateResponse, TenantPolicyRequest, TenantShardMigrateRequest,
-        TenantShardMigrateResponse,
+        NodeSchedulingPolicy, NodeShard, NodeShardResponse, PlacementPolicy, ShardSchedulingPolicy,
+        ShardsPreferredAzsRequest, ShardsPreferredAzsResponse, TenantCreateRequest,
+        TenantCreateResponse, TenantCreateResponseShard, TenantDescribeResponse,
+        TenantDescribeResponseShard, TenantLocateResponse, TenantPolicyRequest,
+        TenantShardMigrateRequest, TenantShardMigrateResponse,
     },
     models::{
         SecondaryProgress, TenantConfigRequest, TimelineArchivalConfigRequest,
@@ -4922,6 +4922,45 @@ impl Service {
             .ok_or(ApiError::NotFound(
                 format!("Node {node_id} not registered").into(),
             ))
+    }
+
+    pub(crate) async fn get_node_shards(
+        &self,
+        node_id: NodeId,
+    ) -> Result<NodeShardResponse, ApiError> {
+        let locked = self.inner.read().unwrap();
+        let mut shards = Vec::new();
+        for (tid, tenant) in locked.tenants.iter() {
+            let is_intended_secondary = match (
+                tenant.intent.get_attached() == &Some(node_id),
+                tenant.intent.get_secondary().contains(&node_id),
+            ) {
+                (true, true) => {
+                    return Err(ApiError::InternalServerError(anyhow::anyhow!(
+                        "{} attached as primary+secondary on the same node",
+                        tid
+                    )))
+                }
+                (true, false) => Some(false),
+                (false, true) => Some(true),
+                (false, false) => None,
+            };
+            let is_observed_secondary = if let Some(ObservedStateLocation { conf: Some(conf) }) =
+                tenant.observed.locations.get(&node_id)
+            {
+                Some(conf.secondary_conf.is_some())
+            } else {
+                None
+            };
+            if is_intended_secondary.is_some() || is_observed_secondary.is_some() {
+                shards.push(NodeShard {
+                    tenant_shard_id: *tid,
+                    is_intended_secondary,
+                    is_observed_secondary,
+                });
+            }
+        }
+        Ok(NodeShardResponse { node_id, shards })
     }
 
     pub(crate) async fn get_leader(&self) -> DatabaseResult<Option<ControllerPersistence>> {
