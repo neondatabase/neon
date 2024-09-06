@@ -2095,6 +2095,10 @@ impl Service {
                 .collect::<Vec<_>>()
         };
 
+        // Note that we persist the preferred AZ for the new shards separately.
+        // In theory, we could "peek" the scheduler to determine where the shard will
+        // land, but the subsequent "real" call into the scheduler might select a different
+        // node. Hence, we do this awkward update to keep things consistent.
         let updated = self
             .persistence
             .set_tenant_shard_preferred_azs(preferred_azs)
