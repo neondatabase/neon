@@ -37,6 +37,7 @@ def test_cloud_regress(remote_pg: RemotePostgres, pg_version: PgVersion, pg_dist
             artifact_prefix = f"/tmp/neon/pg_install/v{pg_version}"
             regress_bin = f"{artifact_prefix}/lib/postgresql/pgxs/src/test/regress/pg_regress"
             runpath = pg_distrib_dir / f"build/{pg_version.v_prefixed}/src/test/regress"
+            log.info(runpath)
 
             env_vars = {
                 "PGHOST": remote_pg.default_options["host"],
