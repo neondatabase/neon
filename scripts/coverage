@@ -134,7 +134,7 @@ class LLVM:
             # Show a user-friendly warning
             raise Exception(' '.join([
                 f"It appears that you don't have `{name}` installed.",
-                "Please execute `rustup component add llvm-tools-preview`,",
+                "Please execute `rustup component add llvm-tools`,",
                 "or install it via your package manager of choice.",
                 "LLVM tools should be the same version as LLVM in `rustc --version --verbose`.",
             ]))
@@ -518,7 +518,7 @@ def main() -> None:
     example = f"""
 prerequisites:
     # alternatively, install a system package for `llvm-tools`
-    rustup component add llvm-tools-preview
+    rustup component add llvm-tools
 
 self-contained example:
     {app} run make

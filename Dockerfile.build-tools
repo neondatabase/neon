@@ -207,7 +207,7 @@ RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux
     export PATH="$HOME/.cargo/bin:$PATH" && \
     . "$HOME/.cargo/env" && \
     cargo --version && rustup --version && \
-    rustup component add llvm-tools-preview rustfmt clippy && \
+    rustup component add llvm-tools rustfmt clippy && \
     cargo install rustfilt            --version ${RUSTFILT_VERSION} && \
     cargo install cargo-hakari        --version ${CARGO_HAKARI_VERSION} && \
     cargo install cargo-deny --locked --version ${CARGO_DENY_VERSION} && \
