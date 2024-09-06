@@ -109,11 +109,18 @@ class ManyPageservers:
             one.assert_log_does_not_contain(what)
 
     def restart(self):
+
+        def do_restart(x: ScrollableLog):
+            x.pageserver.restart()
+
         with ThreadPoolExecutor(max_workers=len(self.many)) as rt:
-            rt.map(lambda ps: ps.pageserver.restart(), self.many)
+            rt.map(do_restart, self.many)
             rt.shutdown(wait=True)
 
     def quiesce_tenants(self):
+        def do_quiesce(x: ScrollableLog):
+            x.pageserver.quiesce_tenants()
+
         with ThreadPoolExecutor(max_workers=len(self.many)) as rt:
-            rt.map(lambda ps: ps.pageserver.quiesce_tenants(), self.many)
+            rt.map(do_quiesce, self.many)
             rt.shutdown(wait=True)
