@@ -7,6 +7,7 @@ pub enum VecMapOrdering {
 }
 
 /// Ordered map datastructure implemented in a Vec.
+///
 /// Append only - can only add keys that are larger than the
 /// current max key.
 /// Ordering can be adjusted using [`VecMapOrdering`]

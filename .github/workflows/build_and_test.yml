@@ -286,6 +286,7 @@ jobs:
           PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
           TEST_RESULT_CONNSTR: "${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}"
           PAGESERVER_VIRTUAL_FILE_IO_ENGINE: tokio-epoll-uring
+          SYNC_AFTER_EACH_TEST: true
       # XXX: no coverage data handling here, since benchmarks are run on release builds,
       # while coverage is currently collected for the debug ones
 
@@ -1055,43 +1056,88 @@ jobs:
               generate_release_notes: true,
             })
 
+  # The job runs on `release` branch and copies compatibility data and Neon artifact from the last *release PR* to the latest directory
   promote-compatibility-data:
-    needs: [ check-permissions, promote-images, tag, build-and-test-locally ]
+    needs: [ deploy ]
     if: github.ref_name == 'release'
 
-    runs-on: [ self-hosted, small ]
-    container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
-      options: --init
+    runs-on: ubuntu-22.04
     steps:
-      - name: Promote compatibility snapshot for the release
+      - name: Fetch GITHUB_RUN_ID and COMMIT_SHA for the last merged release PR
+        id: fetch-last-release-pr-info
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          branch_name_and_pr_number=$(gh pr list \
+            --repo "${GITHUB_REPOSITORY}" \
+            --base release \
+            --state merged \
+            --limit 10 \
+            --json mergeCommit,headRefName,number \
+            --jq ".[] | select(.mergeCommit.oid==\"${GITHUB_SHA}\") | { branch_name: .headRefName, pr_number: .number }")
+          branch_name=$(echo "${branch_name_and_pr_number}" | jq -r '.branch_name')
+          pr_number=$(echo "${branch_name_and_pr_number}" | jq -r '.pr_number')
+
+          run_id=$(gh run list \
+            --repo "${GITHUB_REPOSITORY}" \
+            --workflow build_and_test.yml \
+            --branch "${branch_name}" \
+            --json databaseId \
+            --limit 1 \
+            --jq '.[].databaseId')
+
+          last_commit_sha=$(gh pr view "${pr_number}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --json commits \
+            --jq '.commits[-1].oid')
+
+          echo "run-id=${run_id}" | tee -a ${GITHUB_OUTPUT}
+          echo "commit-sha=${last_commit_sha}" | tee -a ${GITHUB_OUTPUT}
+
+      - name: Promote compatibility snapshot and Neon artifact
         env:
           BUCKET: neon-github-public-dev
-          PREFIX: artifacts/latest
-          COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          AWS_REGION: eu-central-1
+          COMMIT_SHA: ${{ steps.fetch-last-release-pr-info.outputs.commit-sha }}
+          RUN_ID: ${{ steps.fetch-last-release-pr-info.outputs.run-id }}
         run: |
-          # Update compatibility snapshot for the release
-          for pg_version in v14 v15 v16; do
-            for build_type in debug release; do
-              OLD_FILENAME=compatibility-snapshot-${build_type}-pg${pg_version}-${GITHUB_RUN_ID}.tar.zst
-              NEW_FILENAME=compatibility-snapshot-${build_type}-pg${pg_version}.tar.zst
+          old_prefix="artifacts/${COMMIT_SHA}/${RUN_ID}"
+          new_prefix="artifacts/latest"
 
-              time aws s3 mv --only-show-errors s3://${BUCKET}/${PREFIX}/${OLD_FILENAME} s3://${BUCKET}/${PREFIX}/${NEW_FILENAME}
+          files_to_promote=()
+          files_on_s3=$(aws s3api list-objects-v2 --bucket ${BUCKET} --prefix ${old_prefix} | jq -r '.Contents[]?.Key' || true)
+
+          for arch in X64 ARM64; do
+            for build_type in debug release; do
+              neon_artifact_filename="neon-Linux-${arch}-${build_type}-artifact.tar.zst"
+              s3_key=$(echo "${files_on_s3}" | grep ${neon_artifact_filename} | sort --version-sort | tail -1 || true)
+              if [ -z "${s3_key}" ]; then
+                echo >&2 "Neither s3://${BUCKET}/${old_prefix}/${neon_artifact_filename} nor its version from previous attempts exist"
+                exit 1
+              fi
+
+              files_to_promote+=("s3://${BUCKET}/${s3_key}")
+
+              for pg_version in v14 v15 v16; do
+                # We run less tests for debug builds, so we don't need to promote them
+                if [ "${build_type}" == "debug" ] && { [ "${arch}" == "ARM64" ] || [ "${pg_version}" != "v16" ] ; }; then
+                  continue
+                fi
+
+                compatibility_data_filename="compatibility-snapshot-${arch}-${build_type}-pg${pg_version}.tar.zst"
+                s3_key=$(echo "${files_on_s3}" | grep ${compatibility_data_filename} | sort --version-sort | tail -1 || true)
+                if [ -z "${s3_key}" ]; then
+                  echo >&2 "Neither s3://${BUCKET}/${old_prefix}/${compatibility_data_filename} nor its version from previous attempts exist"
+                  exit 1
+                fi
+
+                files_to_promote+=("s3://${BUCKET}/${s3_key}")
+              done
             done
           done
 
-          # Update Neon artifact for the release (reuse already uploaded artifact)
-          for build_type in debug release; do
-            OLD_PREFIX=artifacts/${COMMIT_SHA}/${GITHUB_RUN_ID}
-            FILENAME=neon-${{ runner.os }}-${{ runner.arch }}-${build_type}-artifact.tar.zst
-
-            S3_KEY=$(aws s3api list-objects-v2 --bucket ${BUCKET} --prefix ${OLD_PREFIX} | jq -r '.Contents[]?.Key' | grep ${FILENAME} | sort --version-sort | tail -1 || true)
-            if [ -z "${S3_KEY}" ]; then
-              echo >&2 "Neither s3://${BUCKET}/${OLD_PREFIX}/${FILENAME} nor its version from previous attempts exist"
-              exit 1
-            fi
-
-            time aws s3 cp --only-show-errors s3://${BUCKET}/${S3_KEY} s3://${BUCKET}/${PREFIX}/${FILENAME}
+          for f in "${files_to_promote[@]}"; do
+            time aws s3 cp --only-show-errors ${f} s3://${BUCKET}/${new_prefix}/
           done
 
   pin-build-tools-image:

@@ -7,6 +7,7 @@ use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 use utils::crashsafe::durable_rename;
 
+use std::future::Future;
 use std::io::Read;
 use std::ops::Deref;
 use std::path::Path;
@@ -31,10 +32,9 @@ pub const CHECKSUM_SIZE: usize = size_of::<u32>();
 
 /// Storage should keep actual state inside of it. It should implement Deref
 /// trait to access state fields and have persist method for updating that state.
-#[async_trait::async_trait]
 pub trait Storage: Deref<Target = TimelinePersistentState> {
     /// Persist safekeeper state on disk and update internal state.
-    async fn persist(&mut self, s: &TimelinePersistentState) -> Result<()>;
+    fn persist(&mut self, s: &TimelinePersistentState) -> impl Future<Output = Result<()>> + Send;
 
     /// Timestamp of last persist.
     fn last_persist_at(&self) -> Instant;
@@ -188,7 +188,6 @@ impl TimelinePersistentState {
     }
 }
 
-#[async_trait::async_trait]
 impl Storage for FileStorage {
     /// Persists state durably to the underlying storage.
     ///

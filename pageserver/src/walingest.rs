@@ -21,19 +21,25 @@
 //! redo Postgres process, but some records it can handle directly with
 //! bespoken Rust code.
 
+use std::time::Duration;
+use std::time::SystemTime;
+
 use pageserver_api::shard::ShardIdentity;
 use postgres_ffi::v14::nonrelfile_utils::clogpage_precedes;
 use postgres_ffi::v14::nonrelfile_utils::slru_may_delete_clogsegment;
+use postgres_ffi::TimestampTz;
 use postgres_ffi::{fsm_logical_to_physical, page_is_new, page_set_lsn};
 
 use anyhow::{bail, Context, Result};
 use bytes::{Buf, Bytes, BytesMut};
 use tracing::*;
 use utils::failpoint_support;
+use utils::rate_limit::RateLimit;
 
 use crate::context::RequestContext;
 use crate::metrics::WAL_INGEST;
 use crate::pgdatadir_mapping::{DatadirModification, Version};
+use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::tenant::PageReconstructError;
 use crate::tenant::Timeline;
 use crate::walrecord::*;
@@ -51,8 +57,16 @@ use utils::lsn::Lsn;
 
 pub struct WalIngest {
     shard: ShardIdentity,
+    pg_version: u32,
     checkpoint: CheckPoint,
     checkpoint_modified: bool,
+    warn_ingest_lag: WarnIngestLag,
+}
+
+struct WarnIngestLag {
+    lag_msg_ratelimit: RateLimit,
+    future_lsn_msg_ratelimit: RateLimit,
+    timestamp_invalid_msg_ratelimit: RateLimit,
 }
 
 impl WalIngest {
@@ -69,8 +83,14 @@ impl WalIngest {
 
         Ok(WalIngest {
             shard: *timeline.get_shard_identity(),
+            pg_version: timeline.pg_version,
             checkpoint,
             checkpoint_modified: false,
+            warn_ingest_lag: WarnIngestLag {
+                lag_msg_ratelimit: RateLimit::new(std::time::Duration::from_secs(10)),
+                future_lsn_msg_ratelimit: RateLimit::new(std::time::Duration::from_secs(10)),
+                timestamp_invalid_msg_ratelimit: RateLimit::new(std::time::Duration::from_secs(10)),
+            },
         })
     }
 
@@ -86,10 +106,9 @@ impl WalIngest {
     ///
     pub async fn ingest_record(
         &mut self,
-        recdata: Bytes,
+        decoded: DecodedWALRecord,
         lsn: Lsn,
         modification: &mut DatadirModification<'_>,
-        decoded: &mut DecodedWALRecord,
         ctx: &RequestContext,
     ) -> anyhow::Result<bool> {
         WAL_INGEST.records_received.inc();
@@ -97,7 +116,12 @@ impl WalIngest {
         let prev_len = modification.len();
 
         modification.set_lsn(lsn)?;
-        decode_wal_record(recdata, decoded, pg_version)?;
+
+        if decoded.is_dbase_create_copy(self.pg_version) {
+            // Records of this type should always be preceded by a commit(), as they
+            // rely on reading data pages back from the Timeline.
+            assert!(!modification.has_dirty_data_pages());
+        }
 
         let mut buf = decoded.record.clone();
         buf.advance(decoded.main_data_offset);
@@ -115,11 +139,11 @@ impl WalIngest {
             pg_constants::RM_HEAP_ID | pg_constants::RM_HEAP2_ID => {
                 // Heap AM records need some special handling, because they modify VM pages
                 // without registering them with the standard mechanism.
-                self.ingest_heapam_record(&mut buf, modification, decoded, ctx)
+                self.ingest_heapam_record(&mut buf, modification, &decoded, ctx)
                     .await?;
             }
             pg_constants::RM_NEON_ID => {
-                self.ingest_neonrmgr_record(&mut buf, modification, decoded, ctx)
+                self.ingest_neonrmgr_record(&mut buf, modification, &decoded, ctx)
                     .await?;
             }
             // Handle other special record types
@@ -307,7 +331,7 @@ impl WalIngest {
             }
             pg_constants::RM_RELMAP_ID => {
                 let xlrec = XlRelmapUpdate::decode(&mut buf);
-                self.ingest_relmap_page(modification, &xlrec, decoded, ctx)
+                self.ingest_relmap_page(modification, &xlrec, &decoded, ctx)
                     .await?;
             }
             pg_constants::RM_XLOG_ID => {
@@ -452,7 +476,7 @@ impl WalIngest {
 
                 continue;
             }
-            self.ingest_decoded_block(modification, lsn, decoded, blk, ctx)
+            self.ingest_decoded_block(modification, lsn, &decoded, blk, ctx)
                 .await?;
         }
 
@@ -467,6 +491,8 @@ impl WalIngest {
         // Note that at this point this record is only cached in the modification
         // until commit() is called to flush the data into the repository and update
         // the latest LSN.
+
+        modification.on_record_end();
 
         Ok(modification.len() > prev_len)
     }
@@ -539,6 +565,7 @@ impl WalIngest {
                 page_set_lsn(&mut image, lsn)
             }
             assert_eq!(image.len(), BLCKSZ as usize);
+
             self.put_rel_page_image(modification, rel, blk.blkno, image.freeze(), ctx)
                 .await?;
         } else {
@@ -1177,7 +1204,7 @@ impl WalIngest {
             if rec.blkno % pg_constants::SLOTS_PER_FSM_PAGE != 0 {
                 // Tail of last remaining FSM page has to be zeroed.
                 // We are not precise here and instead of digging in FSM bitmap format just clear the whole page.
-                modification.put_rel_page_image(rel, fsm_physical_page_no, ZERO_PAGE.clone())?;
+                modification.put_rel_page_image_zero(rel, fsm_physical_page_no);
                 fsm_physical_page_no += 1;
             }
             let nblocks = get_relsize(modification, rel, ctx).await?;
@@ -1199,7 +1226,7 @@ impl WalIngest {
             if rec.blkno % pg_constants::VM_HEAPBLOCKS_PER_PAGE != 0 {
                 // Tail of last remaining vm page has to be zeroed.
                 // We are not precise here and instead of digging in VM bitmap format just clear the whole page.
-                modification.put_rel_page_image(rel, vm_page_no, ZERO_PAGE.clone())?;
+                modification.put_rel_page_image_zero(rel, vm_page_no);
                 vm_page_no += 1;
             }
             let nblocks = get_relsize(modification, rel, ctx).await?;
@@ -1210,6 +1237,48 @@ impl WalIngest {
             }
         }
         Ok(())
+    }
+
+    fn warn_on_ingest_lag(
+        &mut self,
+        conf: &crate::config::PageServerConf,
+        wal_timestmap: TimestampTz,
+    ) {
+        debug_assert_current_span_has_tenant_and_timeline_id();
+        let now = SystemTime::now();
+        let rate_limits = &mut self.warn_ingest_lag;
+        match try_from_pg_timestamp(wal_timestmap) {
+            Ok(ts) => {
+                match now.duration_since(ts) {
+                    Ok(lag) => {
+                        if lag > conf.wait_lsn_timeout {
+                            rate_limits.lag_msg_ratelimit.call2(|rate_limit_stats| {
+                                let lag = humantime::format_duration(lag);
+                                warn!(%rate_limit_stats, %lag, "ingesting record with timestamp lagging more than wait_lsn_timeout");
+                            })
+                        }
+                    },
+                    Err(e) => {
+                        let delta_t = e.duration();
+                        // determined by prod victoriametrics query: 1000 * (timestamp(node_time_seconds{neon_service="pageserver"}) - node_time_seconds)
+                        // => https://www.robustperception.io/time-metric-from-the-node-exporter/
+                        const IGNORED_DRIFT: Duration = Duration::from_millis(100);
+                        if delta_t > IGNORED_DRIFT {
+                            let delta_t = humantime::format_duration(delta_t);
+                            rate_limits.future_lsn_msg_ratelimit.call2(|rate_limit_stats| {
+                                warn!(%rate_limit_stats, %delta_t, "ingesting record with timestamp from future");
+                            })
+                        }
+                    }
+                };
+
+            }
+            Err(error) => {
+                rate_limits.timestamp_invalid_msg_ratelimit.call2(|rate_limit_stats| {
+                    warn!(%rate_limit_stats, %error, "ingesting record with invalid timestamp, cannot calculate lag and will fail find-lsn-for-timestamp type queries");
+                })
+            }
+        }
     }
 
     /// Subroutine of ingest_record(), to handle an XLOG_XACT_* records.
@@ -1227,6 +1296,8 @@ impl WalIngest {
         let mut segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
         let mut rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
         let mut page_xids: Vec<TransactionId> = vec![parsed.xid];
+
+        self.warn_on_ingest_lag(modification.tline.conf, parsed.xact_time);
 
         for subxact in &parsed.subxacts {
             let subxact_pageno = subxact / pg_constants::CLOG_XACTS_PER_PAGE;
@@ -1625,7 +1696,7 @@ impl WalIngest {
                     continue;
                 }
 
-                modification.put_rel_page_image(rel, gap_blknum, ZERO_PAGE.clone())?;
+                modification.put_rel_page_image_zero(rel, gap_blknum);
             }
         }
         Ok(())
@@ -1691,7 +1762,7 @@ impl WalIngest {
 
             // fill the gap with zeros
             for gap_blknum in old_nblocks..blknum {
-                modification.put_slru_page_image(kind, segno, gap_blknum, ZERO_PAGE.clone())?;
+                modification.put_slru_page_image_zero(kind, segno, gap_blknum);
             }
         }
         Ok(())
@@ -1765,21 +1836,25 @@ mod tests {
         walingest
             .put_rel_page_image(&mut m, TESTREL_A, 0, test_img("foo blk 0 at 2"), &ctx)
             .await?;
+        m.on_record_end();
         m.commit(&ctx).await?;
         let mut m = tline.begin_modification(Lsn(0x30));
         walingest
             .put_rel_page_image(&mut m, TESTREL_A, 0, test_img("foo blk 0 at 3"), &ctx)
             .await?;
+        m.on_record_end();
         m.commit(&ctx).await?;
         let mut m = tline.begin_modification(Lsn(0x40));
         walingest
             .put_rel_page_image(&mut m, TESTREL_A, 1, test_img("foo blk 1 at 4"), &ctx)
             .await?;
+        m.on_record_end();
         m.commit(&ctx).await?;
         let mut m = tline.begin_modification(Lsn(0x50));
         walingest
             .put_rel_page_image(&mut m, TESTREL_A, 2, test_img("foo blk 2 at 5"), &ctx)
             .await?;
+        m.on_record_end();
         m.commit(&ctx).await?;
 
         assert_current_logical_size(&tline, Lsn(0x50));
@@ -1921,6 +1996,7 @@ mod tests {
         walingest
             .put_rel_page_image(&mut m, TESTREL_A, 1, test_img("foo blk 1"), &ctx)
             .await?;
+        m.on_record_end();
         m.commit(&ctx).await?;
         assert_eq!(
             tline
@@ -1946,6 +2022,7 @@ mod tests {
         walingest
             .put_rel_page_image(&mut m, TESTREL_A, 1500, test_img("foo blk 1500"), &ctx)
             .await?;
+        m.on_record_end();
         m.commit(&ctx).await?;
         assert_eq!(
             tline
@@ -2303,6 +2380,9 @@ mod tests {
         let _endpoint = Lsn::from_hex("1FFFF98").unwrap();
 
         let harness = TenantHarness::create("test_ingest_real_wal").await.unwrap();
+        let span = harness
+            .span()
+            .in_scope(|| info_span!("timeline_span", timeline_id=%TIMELINE_ID));
         let (tenant, ctx) = harness.load().await;
 
         let remote_initdb_path =
@@ -2344,7 +2424,6 @@ mod tests {
             .await
             .unwrap();
         let mut modification = tline.begin_modification(startpoint);
-        let mut decoded = DecodedWALRecord::default();
         println!("decoding {} bytes", bytes.len() - xlogoff);
 
         // Decode and ingest wal. We process the wal in chunks because
@@ -2352,8 +2431,11 @@ mod tests {
         for chunk in bytes[xlogoff..].chunks(50) {
             decoder.feed_bytes(chunk);
             while let Some((lsn, recdata)) = decoder.poll_decode().unwrap() {
+                let mut decoded = DecodedWALRecord::default();
+                decode_wal_record(recdata, &mut decoded, modification.tline.pg_version).unwrap();
                 walingest
-                    .ingest_record(recdata, lsn, &mut modification, &mut decoded, &ctx)
+                    .ingest_record(decoded, lsn, &mut modification, &ctx)
+                    .instrument(span.clone())
                     .await
                     .unwrap();
             }

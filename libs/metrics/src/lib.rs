@@ -68,6 +68,7 @@ macro_rules! register_uint_gauge {
 static INTERNAL_REGISTRY: Lazy<Registry> = Lazy::new(Registry::new);
 
 /// Register a collector in the internal registry. MUST be called before the first call to `gather()`.
+///
 /// Otherwise, we can have a deadlock in the `gather()` call, trying to register a new collector
 /// while holding the lock.
 pub fn register_internal(c: Box<dyn Collector>) -> prometheus::Result<()> {

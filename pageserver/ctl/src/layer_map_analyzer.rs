@@ -4,7 +4,6 @@
 
 use anyhow::Result;
 use camino::{Utf8Path, Utf8PathBuf};
-use pageserver::config::defaults::DEFAULT_IO_BUFFER_ALIGNMENT;
 use pageserver::context::{DownloadBehavior, RequestContext};
 use pageserver::task_mgr::TaskKind;
 use pageserver::tenant::{TENANTS_SEGMENT_NAME, TIMELINES_SEGMENT_NAME};
@@ -148,7 +147,7 @@ pub(crate) async fn main(cmd: &AnalyzeLayerMapCmd) -> Result<()> {
     pageserver::virtual_file::init(
         10,
         virtual_file::api::IoEngineKind::StdFs,
-        DEFAULT_IO_BUFFER_ALIGNMENT,
+        pageserver_api::config::defaults::DEFAULT_IO_BUFFER_ALIGNMENT,
     );
     pageserver::page_cache::init(100);
 

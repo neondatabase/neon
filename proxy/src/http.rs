@@ -35,14 +35,17 @@ pub fn new_client() -> ClientWithMiddleware {
         .build()
 }
 
-pub(crate) fn new_client_with_timeout(default_timout: Duration) -> ClientWithMiddleware {
+pub(crate) fn new_client_with_timeout(
+    request_timeout: Duration,
+    total_retry_duration: Duration,
+) -> ClientWithMiddleware {
     let timeout_client = reqwest::ClientBuilder::new()
-        .timeout(default_timout)
+        .timeout(request_timeout)
         .build()
         .expect("Failed to create http client with timeout");
 
     let retry_policy =
-        ExponentialBackoff::builder().build_with_total_retry_duration(default_timout);
+        ExponentialBackoff::builder().build_with_total_retry_duration(total_retry_duration);
 
     reqwest_middleware::ClientBuilder::new(timeout_client)
         .with(reqwest_tracing::TracingMiddleware::default())

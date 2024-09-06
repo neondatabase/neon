@@ -1,6 +1,7 @@
-//!
 //! VirtualFile is like a normal File, but it's not bound directly to
-//! a file descriptor. Instead, the file is opened when it's read from,
+//! a file descriptor.
+//!
+//! Instead, the file is opened when it's read from,
 //! and if too many files are open globally in the system, least-recently
 //! used ones are closed.
 //!
@@ -10,7 +11,6 @@
 //! This is similar to PostgreSQL's virtual file descriptor facility in
 //! src/backend/storage/file/fd.c
 //!
-use crate::config::defaults::DEFAULT_IO_BUFFER_ALIGNMENT;
 use crate::context::RequestContext;
 use crate::metrics::{StorageIoOperation, STORAGE_IO_SIZE, STORAGE_IO_TIME_METRIC};
 
@@ -19,6 +19,7 @@ use crate::tenant::TENANTS_SEGMENT_NAME;
 use camino::{Utf8Path, Utf8PathBuf};
 use once_cell::sync::OnceCell;
 use owned_buffers_io::io_buf_ext::FullSlice;
+use pageserver_api::config::defaults::DEFAULT_IO_BUFFER_ALIGNMENT;
 use pageserver_api::shard::TenantShardId;
 use std::fs::File;
 use std::io::{Error, ErrorKind, Seek, SeekFrom};
@@ -1196,15 +1197,11 @@ pub(crate) fn get_io_buffer_alignment_raw() -> usize {
 
     if cfg!(test) {
         let env_var_name = "NEON_PAGESERVER_UNIT_TEST_IO_BUFFER_ALIGNMENT";
-        if align == DEFAULT_IO_BUFFER_ALIGNMENT {
-            if let Some(test_align) = utils::env::var(env_var_name) {
-                if is_zero_or_power_of_two(test_align) {
-                    test_align
-                } else {
-                    panic!("IO buffer alignment ({test_align}) is not a power of two");
-                }
+        if let Some(test_align) = utils::env::var(env_var_name) {
+            if is_zero_or_power_of_two(test_align) {
+                test_align
             } else {
-                crate::config::defaults::DEFAULT_IO_BUFFER_ALIGNMENT
+                panic!("IO buffer alignment ({test_align}) is not a power of two");
             }
         } else {
             align
@@ -1219,11 +1216,7 @@ pub(crate) fn get_io_buffer_alignment_raw() -> usize {
 /// This function should be used for getting the actual alignment value to use.
 pub(crate) fn get_io_buffer_alignment() -> usize {
     let align = get_io_buffer_alignment_raw();
-    if align == DEFAULT_IO_BUFFER_ALIGNMENT {
-        1
-    } else {
-        align
-    }
+    align.max(1)
 }
 
 #[cfg(test)]
