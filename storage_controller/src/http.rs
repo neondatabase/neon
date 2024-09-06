@@ -89,8 +89,15 @@ fn get_state(request: &Request<Body>) -> &HttpState {
 }
 
 /// Pageserver calls into this on startup, to learn which tenants it should attach
-async fn handle_re_attach(mut req: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn handle_re_attach(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::GenerationsApi)?;
+
+    let mut req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
 
     let reattach_req = json_request::<ReAttachRequest>(&mut req).await?;
     let state = get_state(&req);
@@ -99,8 +106,15 @@ async fn handle_re_attach(mut req: Request<Body>) -> Result<Response<Body>, ApiE
 
 /// Pageserver calls into this before doing deletions, to confirm that it still
 /// holds the latest generation for the tenants with deletions enqueued
-async fn handle_validate(mut req: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn handle_validate(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::GenerationsApi)?;
+
+    let mut req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
 
     let validate_req = json_request::<ValidateRequest>(&mut req).await?;
     let state = get_state(&req);
@@ -110,8 +124,15 @@ async fn handle_validate(mut req: Request<Body>) -> Result<Response<Body>, ApiEr
 /// Call into this before attaching a tenant to a pageserver, to acquire a generation number
 /// (in the real control plane this is unnecessary, because the same program is managing
 ///  generation numbers and doing attachments).
-async fn handle_attach_hook(mut req: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn handle_attach_hook(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::Admin)?;
+
+    let mut req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
 
     let attach_req = json_request::<AttachHookRequest>(&mut req).await?;
     let state = get_state(&req);
@@ -126,8 +147,15 @@ async fn handle_attach_hook(mut req: Request<Body>) -> Result<Response<Body>, Ap
     )
 }
 
-async fn handle_inspect(mut req: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn handle_inspect(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::Admin)?;
+
+    let mut req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
 
     let inspect_req = json_request::<InspectRequest>(&mut req).await?;
 
@@ -138,9 +166,16 @@ async fn handle_inspect(mut req: Request<Body>) -> Result<Response<Body>, ApiErr
 
 async fn handle_tenant_create(
     service: Arc<Service>,
-    mut req: Request<Body>,
+    req: Request<Body>,
 ) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::PageServerApi)?;
+
+    let mut req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
 
     let create_req = json_request::<TenantCreateRequest>(&mut req).await?;
 
@@ -152,10 +187,17 @@ async fn handle_tenant_create(
 
 async fn handle_tenant_location_config(
     service: Arc<Service>,
-    mut req: Request<Body>,
+    req: Request<Body>,
 ) -> Result<Response<Body>, ApiError> {
     let tenant_shard_id: TenantShardId = parse_request_param(&req, "tenant_shard_id")?;
     check_permissions(&req, Scope::PageServerApi)?;
+
+    let mut req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
 
     let config_req = json_request::<TenantLocationConfigRequest>(&mut req).await?;
     json_response(
@@ -168,9 +210,16 @@ async fn handle_tenant_location_config(
 
 async fn handle_tenant_config_set(
     service: Arc<Service>,
-    mut req: Request<Body>,
+    req: Request<Body>,
 ) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::PageServerApi)?;
+
+    let mut req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
 
     let config_req = json_request::<TenantConfigRequest>(&mut req).await?;
 
@@ -184,15 +233,29 @@ async fn handle_tenant_config_get(
     let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
     check_permissions(&req, Scope::PageServerApi)?;
 
+    match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(_req) => {}
+    };
+
     json_response(StatusCode::OK, service.tenant_config_get(tenant_id)?)
 }
 
 async fn handle_tenant_time_travel_remote_storage(
     service: Arc<Service>,
-    mut req: Request<Body>,
+    req: Request<Body>,
 ) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
     check_permissions(&req, Scope::PageServerApi)?;
+
+    let mut req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
 
     let time_travel_req = json_request::<TenantTimeTravelRequest>(&mut req).await?;
 
@@ -234,6 +297,13 @@ async fn handle_tenant_secondary_download(
     let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
     let wait = parse_query_param(&req, "wait_ms")?.map(Duration::from_millis);
 
+    match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(_req) => {}
+    };
+
     let (status, progress) = service.tenant_secondary_download(tenant_id, wait).await?;
     json_response(map_reqwest_hyper_status(status)?, progress)
 }
@@ -244,6 +314,13 @@ async fn handle_tenant_delete(
 ) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
     check_permissions(&req, Scope::PageServerApi)?;
+
+    match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(_req) => {}
+    };
 
     let status_code = service
         .tenant_delete(tenant_id)
@@ -260,10 +337,17 @@ async fn handle_tenant_delete(
 
 async fn handle_tenant_timeline_create(
     service: Arc<Service>,
-    mut req: Request<Body>,
+    req: Request<Body>,
 ) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
     check_permissions(&req, Scope::PageServerApi)?;
+
+    let mut req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
 
     let create_req = json_request::<TimelineCreateRequest>(&mut req).await?;
     json_response(
@@ -279,9 +363,16 @@ async fn handle_tenant_timeline_delete(
     req: Request<Body>,
 ) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    let timeline_id: TimelineId = parse_request_param(&req, "timeline_id")?;
+
     check_permissions(&req, Scope::PageServerApi)?;
 
-    let timeline_id: TimelineId = parse_request_param(&req, "timeline_id")?;
+    match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(_req) => {}
+    };
 
     // For timeline deletions, which both implement an "initially return 202, then 404 once
     // we're done" semantic, we wrap with a retry loop to expose a simpler API upstream.
@@ -339,12 +430,19 @@ async fn handle_tenant_timeline_delete(
 
 async fn handle_tenant_timeline_archival_config(
     service: Arc<Service>,
-    mut req: Request<Body>,
+    req: Request<Body>,
 ) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    let timeline_id: TimelineId = parse_request_param(&req, "timeline_id")?;
+
     check_permissions(&req, Scope::PageServerApi)?;
 
-    let timeline_id: TimelineId = parse_request_param(&req, "timeline_id")?;
+    let mut req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
 
     let create_req = json_request::<TimelineArchivalConfigRequest>(&mut req).await?;
 
@@ -360,9 +458,16 @@ async fn handle_tenant_timeline_detach_ancestor(
     req: Request<Body>,
 ) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    let timeline_id: TimelineId = parse_request_param(&req, "timeline_id")?;
+
     check_permissions(&req, Scope::PageServerApi)?;
 
-    let timeline_id: TimelineId = parse_request_param(&req, "timeline_id")?;
+    match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(_req) => {}
+    };
 
     let res = service
         .tenant_timeline_detach_ancestor(tenant_id, timeline_id)
@@ -394,6 +499,13 @@ async fn handle_tenant_timeline_passthrough(
 ) -> Result<Response<Body>, ApiError> {
     let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
     check_permissions(&req, Scope::PageServerApi)?;
+
+    let req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
 
     let Some(path) = req.uri().path_and_query() else {
         // This should never happen, our request router only calls us if there is a path
@@ -462,9 +574,17 @@ async fn handle_tenant_locate(
     service: Arc<Service>,
     req: Request<Body>,
 ) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+
     check_permissions(&req, Scope::Admin)?;
 
-    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(_req) => {}
+    };
+
     json_response(StatusCode::OK, service.tenant_locate(tenant_id)?)
 }
 
@@ -475,6 +595,14 @@ async fn handle_tenant_describe(
     check_permissions(&req, Scope::Scrubber)?;
 
     let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+
+    match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(_req) => {}
+    };
+
     json_response(StatusCode::OK, service.tenant_describe(tenant_id)?)
 }
 
@@ -484,11 +612,25 @@ async fn handle_tenant_list(
 ) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::Admin)?;
 
+    match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(_req) => {}
+    };
+
     json_response(StatusCode::OK, service.tenant_list())
 }
 
-async fn handle_node_register(mut req: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn handle_node_register(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::Admin)?;
+
+    let mut req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
 
     let register_req = json_request::<NodeRegisterRequest>(&mut req).await?;
     let state = get_state(&req);
@@ -498,6 +640,13 @@ async fn handle_node_register(mut req: Request<Body>) -> Result<Response<Body>, 
 
 async fn handle_node_list(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::Admin)?;
+
+    let req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
 
     let state = get_state(&req);
     let nodes = state.service.node_list().await?;
@@ -509,6 +658,13 @@ async fn handle_node_list(req: Request<Body>) -> Result<Response<Body>, ApiError
 async fn handle_node_drop(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::Admin)?;
 
+    let req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
+
     let state = get_state(&req);
     let node_id: NodeId = parse_request_param(&req, "node_id")?;
     json_response(StatusCode::OK, state.service.node_drop(node_id).await?)
@@ -517,13 +673,27 @@ async fn handle_node_drop(req: Request<Body>) -> Result<Response<Body>, ApiError
 async fn handle_node_delete(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::Admin)?;
 
+    let req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
+
     let state = get_state(&req);
     let node_id: NodeId = parse_request_param(&req, "node_id")?;
     json_response(StatusCode::OK, state.service.node_delete(node_id).await?)
 }
 
-async fn handle_node_configure(mut req: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn handle_node_configure(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::Admin)?;
+
+    let mut req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
 
     let node_id: NodeId = parse_request_param(&req, "node_id")?;
     let config_req = json_request::<NodeConfigureRequest>(&mut req).await?;
@@ -550,6 +720,13 @@ async fn handle_node_configure(mut req: Request<Body>) -> Result<Response<Body>,
 async fn handle_node_status(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::Admin)?;
 
+    let req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
+
     let state = get_state(&req);
     let node_id: NodeId = parse_request_param(&req, "node_id")?;
 
@@ -572,6 +749,13 @@ async fn handle_node_shards(req: Request<Body>) -> Result<Response<Body>, ApiErr
 async fn handle_get_leader(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::Admin)?;
 
+    let req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
+
     let state = get_state(&req);
     let leader = state.service.get_leader().await.map_err(|err| {
         ApiError::InternalServerError(anyhow::anyhow!(
@@ -585,6 +769,13 @@ async fn handle_get_leader(req: Request<Body>) -> Result<Response<Body>, ApiErro
 async fn handle_node_drain(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::Admin)?;
 
+    let req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
+
     let state = get_state(&req);
     let node_id: NodeId = parse_request_param(&req, "node_id")?;
 
@@ -595,6 +786,13 @@ async fn handle_node_drain(req: Request<Body>) -> Result<Response<Body>, ApiErro
 
 async fn handle_cancel_node_drain(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::Admin)?;
+
+    let req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
 
     let state = get_state(&req);
     let node_id: NodeId = parse_request_param(&req, "node_id")?;
@@ -607,6 +805,13 @@ async fn handle_cancel_node_drain(req: Request<Body>) -> Result<Response<Body>, 
 async fn handle_node_fill(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::Admin)?;
 
+    let req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
+
     let state = get_state(&req);
     let node_id: NodeId = parse_request_param(&req, "node_id")?;
 
@@ -618,6 +823,13 @@ async fn handle_node_fill(req: Request<Body>) -> Result<Response<Body>, ApiError
 async fn handle_cancel_node_fill(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::Admin)?;
 
+    let req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
+
     let state = get_state(&req);
     let node_id: NodeId = parse_request_param(&req, "node_id")?;
 
@@ -626,8 +838,15 @@ async fn handle_cancel_node_fill(req: Request<Body>) -> Result<Response<Body>, A
     json_response(StatusCode::ACCEPTED, ())
 }
 
-async fn handle_metadata_health_update(mut req: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn handle_metadata_health_update(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::Scrubber)?;
+
+    let mut req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
 
     let update_req = json_request::<MetadataHealthUpdateRequest>(&mut req).await?;
     let state = get_state(&req);
@@ -642,6 +861,13 @@ async fn handle_metadata_health_list_unhealthy(
 ) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::Admin)?;
 
+    let req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
+
     let state = get_state(&req);
     let unhealthy_tenant_shards = state.service.metadata_health_list_unhealthy().await?;
 
@@ -654,9 +880,16 @@ async fn handle_metadata_health_list_unhealthy(
 }
 
 async fn handle_metadata_health_list_outdated(
-    mut req: Request<Body>,
+    req: Request<Body>,
 ) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::Admin)?;
+
+    let mut req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
 
     let list_outdated_req = json_request::<MetadataHealthListOutdatedRequest>(&mut req).await?;
     let state = get_state(&req);
@@ -673,9 +906,16 @@ async fn handle_metadata_health_list_outdated(
 
 async fn handle_tenant_shard_split(
     service: Arc<Service>,
-    mut req: Request<Body>,
+    req: Request<Body>,
 ) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::Admin)?;
+
+    let mut req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
 
     let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
     let split_req = json_request::<TenantShardSplitRequest>(&mut req).await?;
@@ -688,9 +928,16 @@ async fn handle_tenant_shard_split(
 
 async fn handle_tenant_shard_migrate(
     service: Arc<Service>,
-    mut req: Request<Body>,
+    req: Request<Body>,
 ) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::Admin)?;
+
+    let mut req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
 
     let tenant_shard_id: TenantShardId = parse_request_param(&req, "tenant_shard_id")?;
     let migrate_req = json_request::<TenantShardMigrateRequest>(&mut req).await?;
@@ -702,8 +949,15 @@ async fn handle_tenant_shard_migrate(
     )
 }
 
-async fn handle_tenant_update_policy(mut req: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn handle_tenant_update_policy(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::Admin)?;
+
+    let mut req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
 
     let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
     let update_req = json_request::<TenantPolicyRequest>(&mut req).await?;
@@ -718,8 +972,15 @@ async fn handle_tenant_update_policy(mut req: Request<Body>) -> Result<Response<
     )
 }
 
-async fn handle_update_preferred_azs(mut req: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn handle_update_preferred_azs(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::Admin)?;
+
+    let mut req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
 
     let azs_req = json_request::<ShardsPreferredAzsRequest>(&mut req).await?;
     let state = get_state(&req);
@@ -733,13 +994,28 @@ async fn handle_update_preferred_azs(mut req: Request<Body>) -> Result<Response<
 async fn handle_step_down(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::Admin)?;
 
+    let req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
+
     let state = get_state(&req);
     json_response(StatusCode::OK, state.service.step_down().await)
 }
 
 async fn handle_tenant_drop(req: Request<Body>) -> Result<Response<Body>, ApiError> {
-    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
     check_permissions(&req, Scope::PageServerApi)?;
+
+    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+
+    let req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
 
     let state = get_state(&req);
 
@@ -747,8 +1023,16 @@ async fn handle_tenant_drop(req: Request<Body>) -> Result<Response<Body>, ApiErr
 }
 
 async fn handle_tenant_import(req: Request<Body>) -> Result<Response<Body>, ApiError> {
-    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
     check_permissions(&req, Scope::PageServerApi)?;
+
+    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+
+    let req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
 
     let state = get_state(&req);
 
@@ -761,6 +1045,13 @@ async fn handle_tenant_import(req: Request<Body>) -> Result<Response<Body>, ApiE
 async fn handle_tenants_dump(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::Admin)?;
 
+    let req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
+
     let state = get_state(&req);
     state.service.tenants_dump()
 }
@@ -768,12 +1059,26 @@ async fn handle_tenants_dump(req: Request<Body>) -> Result<Response<Body>, ApiEr
 async fn handle_scheduler_dump(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::Admin)?;
 
+    let req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
+
     let state = get_state(&req);
     state.service.scheduler_dump()
 }
 
 async fn handle_consistency_check(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::Admin)?;
+
+    let req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
 
     let state = get_state(&req);
 
@@ -783,19 +1088,40 @@ async fn handle_consistency_check(req: Request<Body>) -> Result<Response<Body>, 
 async fn handle_reconcile_all(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::Admin)?;
 
+    let req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
+
     let state = get_state(&req);
 
     json_response(StatusCode::OK, state.service.reconcile_all_now().await?)
 }
 
 /// Status endpoint is just used for checking that our HTTP listener is up
-async fn handle_status(_req: Request<Body>) -> Result<Response<Body>, ApiError> {
+async fn handle_status(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(_req) => {}
+    };
+
     json_response(StatusCode::OK, ())
 }
 
 /// Readiness endpoint indicates when we're done doing startup I/O (e.g. reconciling
 /// with remote pageserver nodes).  This is intended for use as a kubernetes readiness probe.
 async fn handle_ready(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
+
     let state = get_state(&req);
     if state.service.startup_complete.is_ready() {
         json_response(StatusCode::OK, ())
@@ -817,6 +1143,13 @@ async fn handle_get_safekeeper(req: Request<Body>) -> Result<Response<Body>, Api
     check_permissions(&req, Scope::Admin)?;
 
     let id = parse_request_param::<i64>(&req, "id")?;
+
+    let req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
 
     let state = get_state(&req);
 
@@ -848,6 +1181,13 @@ async fn handle_upsert_safekeeper(mut req: Request<Body>) -> Result<Response<Bod
             body.id
         )));
     }
+
+    let req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
 
     let state = get_state(&req);
 
@@ -927,10 +1267,7 @@ pub fn prologue_leadership_status_check_middleware<
 
         let allowed_routes = match leadership_status {
             LeadershipStatus::Leader => AllowedRoutes::All,
-            LeadershipStatus::SteppedDown => {
-                // TODO: does it make sense to allow /status here?
-                AllowedRoutes::Some(["/control/v1/step_down", "/status", "/metrics"].to_vec())
-            }
+            LeadershipStatus::SteppedDown => AllowedRoutes::All,
             LeadershipStatus::Candidate => {
                 AllowedRoutes::Some(["/ready", "/status", "/metrics"].to_vec())
             }
@@ -1006,6 +1343,13 @@ fn epilogue_metrics_middleware<B: hyper::body::HttpBody + Send + Sync + 'static>
 
 pub async fn measured_metrics_handler(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     pub const TEXT_FORMAT: &str = "text/plain; version=0.0.4";
+
+    let req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
 
     let state = get_state(&req);
     let payload = crate::metrics::METRICS_REGISTRY.encode(&state.neon_metrics);
