@@ -23,7 +23,7 @@ index ae54cb254f..1ba5a9e9d6 100644
 -CREATE USER regress_alter_generic_user3;
 -CREATE USER regress_alter_generic_user2;
 -CREATE USER regress_alter_generic_user1 IN ROLE regress_alter_generic_user3;
-+CREATE USER regress_alter_generic_user3 PASSWORD 'eib5tai9Oachootiex1';
++CREATE USER regress_alter_generic_user3 PASSWORD 'eib5tai9Oachootiex';
 +CREATE USER regress_alter_generic_user2 PASSWORD 'eib5tai9Oachootiex';
 +CREATE USER regress_alter_generic_user1 PASSWORD 'eib5tai9Oachootiex' IN ROLE regress_alter_generic_user3;
  CREATE SCHEMA alt_nsp1;
