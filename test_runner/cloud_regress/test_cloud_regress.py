@@ -3,8 +3,7 @@ Run the regression tests on the cloud instance of Neon
 """
 
 import os
-import re
-import subprocess
+from pathlib import Path
 
 import psycopg2
 import pytest
@@ -15,7 +14,7 @@ from fixtures.pg_version import PgVersion
 
 @pytest.mark.timeout(7200)
 @pytest.mark.remote_cluster
-def test_cloud_regress(remote_pg: RemotePostgres, pg_version: PgVersion):
+def test_cloud_regress(remote_pg: RemotePostgres, pg_version: PgVersion, pg_distrib_dir: Path):
     """
     Run the regression tests
     """
@@ -35,12 +34,9 @@ def test_cloud_regress(remote_pg: RemotePostgres, pg_version: PgVersion):
                 "RETURNS int AS 'regress.so' LANGUAGE C STRICT STABLE PARALLEL SAFE;"
             )
             conn.rollback()
-            runpath = (
-                f"{os.path.abspath(f'{os.path.relpath(__file__)}/../../../')}"
-                f"/vendor/postgres-v{pg_version}/src/test/regress"
-            )
-            prefix = f"/tmp/neon/pg_install/v{pg_version}"
-            regress_bin = f"{prefix}/lib/postgresql/pgxs/src/test/regress/pg_regress"
+            artifact_prefix = f"/tmp/neon/pg_install/v{pg_version}"
+            regress_bin = f"{artifact_prefix}/lib/postgresql/pgxs/src/test/regress/pg_regress"
+            runpath = pg_distrib_dir / f"build/{pg_version.v_prefixed}/src/test/regress"
 
             env_vars = {
                 "PGHOST": remote_pg.default_options["host"],
@@ -56,7 +52,7 @@ def test_cloud_regress(remote_pg: RemotePostgres, pg_version: PgVersion):
             regress_cmd = [
                 regress_bin,
                 "--inputdir=.",
-                f"--bindir={prefix}/bin",
+                f"--bindir={artifact_prefix}/bin",
                 "--dlpath=/usr/local/lib",
                 "--max-concurrent-tests=20",
                 "--schedule=./parallel_schedule",
