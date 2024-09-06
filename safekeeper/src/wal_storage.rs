@@ -179,8 +179,7 @@ impl PhysicalStorage {
             )
         };
 
-        // TODO: do we really know that write_lsn is fully flushed to disk?
-        //      If not, maybe it's better to call fsync() here to be sure?
+        // note: this assumes we fsync'ed whole datadir on start.
         let flush_lsn = write_lsn;
 
         debug!(
