@@ -1,7 +1,8 @@
-//! Describes the legacy now hopefully no longer modified per-timeline metadata stored in
-//! `index_part.json` managed by [`remote_timeline_client`]. For many tenants and their timelines,
-//! this struct and it's original serialization format is still needed because they were written a
-//! long time ago.
+//! Describes the legacy now hopefully no longer modified per-timeline metadata.
+//!
+//! It is stored in `index_part.json` managed by [`remote_timeline_client`]. For many tenants and
+//! their timelines, this struct and its original serialization format is still needed because
+//! they were written a long time ago.
 //!
 //! Instead of changing and adding versioning to this, just change [`IndexPart`] with soft json
 //! versioning.

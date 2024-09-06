@@ -282,9 +282,10 @@ impl BackgroundPurges {
 static TENANTS: Lazy<std::sync::RwLock<TenantsMap>> =
     Lazy::new(|| std::sync::RwLock::new(TenantsMap::Initializing));
 
-/// The TenantManager is responsible for storing and mutating the collection of all tenants
-/// that this pageserver process has state for.  Every Tenant and SecondaryTenant instance
-/// lives inside the TenantManager.
+/// Responsible for storing and mutating the collection of all tenants
+/// that this pageserver has state for.
+///
+/// Every Tenant and SecondaryTenant instance lives inside the TenantManager.
 ///
 /// The most important role of the TenantManager is to prevent conflicts: e.g. trying to attach
 /// the same tenant twice concurrently, or trying to configure the same tenant into secondary
@@ -2346,8 +2347,9 @@ pub enum TenantMapError {
     ShuttingDown,
 }
 
-/// Guards a particular tenant_id's content in the TenantsMap.  While this
-/// structure exists, the TenantsMap will contain a [`TenantSlot::InProgress`]
+/// Guards a particular tenant_id's content in the TenantsMap.
+///
+/// While this structure exists, the TenantsMap will contain a [`TenantSlot::InProgress`]
 /// for this tenant, which acts as a marker for any operations targeting
 /// this tenant to retry later, or wait for the InProgress state to end.
 ///

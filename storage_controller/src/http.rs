@@ -14,7 +14,7 @@ use metrics::{BuildInfo, NeonMetrics};
 use pageserver_api::controller_api::{
     MetadataHealthListOutdatedRequest, MetadataHealthListOutdatedResponse,
     MetadataHealthListUnhealthyResponse, MetadataHealthUpdateRequest, MetadataHealthUpdateResponse,
-    TenantCreateRequest,
+    ShardsPreferredAzsRequest, TenantCreateRequest,
 };
 use pageserver_api::models::{
     TenantConfigRequest, TenantLocationConfigRequest, TenantShardSplitRequest,
@@ -688,6 +688,18 @@ async fn handle_tenant_update_policy(mut req: Request<Body>) -> Result<Response<
     )
 }
 
+async fn handle_update_preferred_azs(mut req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    let azs_req = json_request::<ShardsPreferredAzsRequest>(&mut req).await?;
+    let state = get_state(&req);
+
+    json_response(
+        StatusCode::OK,
+        state.service.update_shards_preferred_azs(azs_req).await?,
+    )
+}
+
 async fn handle_step_down(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::Admin)?;
 
@@ -1172,6 +1184,13 @@ pub fn make_router(
                 r,
                 handle_tenant_update_policy,
                 RequestName("control_v1_tenant_policy"),
+            )
+        })
+        .put("/control/v1/preferred_azs", |r| {
+            named_request_span(
+                r,
+                handle_update_preferred_azs,
+                RequestName("control_v1_preferred_azs"),
             )
         })
         .put("/control/v1/step_down", |r| {

@@ -180,6 +180,8 @@ pub struct PageServerConf {
     pub io_buffer_alignment: usize,
 }
 
+/// Token for authentication to safekeepers
+///
 /// We do not want to store this in a PageServerConf because the latter may be logged
 /// and/or serialized at a whim, while the token is secret. Currently this token is the
 /// same for accessing all tenants/timelines, but may become per-tenant/per-timeline in

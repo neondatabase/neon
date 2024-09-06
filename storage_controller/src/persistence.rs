@@ -105,6 +105,7 @@ pub(crate) enum DatabaseOperation {
     ListMetadataHealthOutdated,
     GetLeader,
     UpdateLeader,
+    SetPreferredAzs,
 }
 
 #[must_use]
@@ -664,6 +665,33 @@ impl Persistence {
         Ok(())
     }
 
+    pub(crate) async fn set_tenant_shard_preferred_azs(
+        &self,
+        preferred_azs: Vec<(TenantShardId, String)>,
+    ) -> DatabaseResult<Vec<(TenantShardId, String)>> {
+        use crate::schema::tenant_shards::dsl::*;
+
+        self.with_measured_conn(DatabaseOperation::SetPreferredAzs, move |conn| {
+            let mut shards_updated = Vec::default();
+
+            for (tenant_shard_id, preferred_az) in preferred_azs.iter() {
+                let updated = diesel::update(tenant_shards)
+                    .filter(tenant_id.eq(tenant_shard_id.tenant_id.to_string()))
+                    .filter(shard_number.eq(tenant_shard_id.shard_number.0 as i32))
+                    .filter(shard_count.eq(tenant_shard_id.shard_count.literal() as i32))
+                    .set(preferred_az_id.eq(preferred_az))
+                    .execute(conn)?;
+
+                if updated == 1 {
+                    shards_updated.push((*tenant_shard_id, preferred_az.clone()));
+                }
+            }
+
+            Ok(shards_updated)
+        })
+        .await
+    }
+
     pub(crate) async fn detach(&self, tenant_shard_id: TenantShardId) -> anyhow::Result<()> {
         use crate::schema::tenant_shards::dsl::*;
         self.with_measured_conn(DatabaseOperation::Detach, move |conn| {
@@ -1050,6 +1078,11 @@ pub(crate) struct TenantShardPersistence {
     pub(crate) config: String,
     #[serde(default)]
     pub(crate) scheduling_policy: String,
+
+    // Hint that we should attempt to schedule this tenant shard the given
+    // availability zone in order to minimise the chances of cross-AZ communication
+    // with compute.
+    pub(crate) preferred_az_id: Option<String>,
 }
 
 impl TenantShardPersistence {
