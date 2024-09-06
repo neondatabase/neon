@@ -36,7 +36,7 @@ def test_cloud_regress(
                 "RETURNS int AS 'regress.so' LANGUAGE C STRICT STABLE PARALLEL SAFE;"
             )
             conn.rollback()
-            regress_bin = pg_distrib_dir / "lib/postgresql/pgxs/src/test/regress/pg_regress"
+            regress_bin = pg_distrib_dir / f"{pg_version.v_prefixed}/lib/postgresql/pgxs/src/test/regress/pg_regress"
             runpath = base_dir / f"vendor/postgres-{pg_version.v_prefixed}/src/test/regress"
 
             env_vars = {
