@@ -174,6 +174,10 @@ impl ComputeUserInfoMaybeEndpoint {
 }
 
 pub(crate) fn check_peer_addr_is_in_list(peer_addr: &IpAddr, ip_list: &[IpPattern]) -> bool {
+    if ip_list.len() == 1 && ip_list[0] == IpPattern::Single(IpAddr::from([127, 0, 0, 1])) {
+        // This is a special pattern which disables all access if the only one is 127.0.0.1.
+        return true;
+    }
     ip_list.is_empty() || ip_list.iter().any(|pattern| check_ip(peer_addr, pattern))
 }
 
