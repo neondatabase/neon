@@ -1034,6 +1034,119 @@ where
     request_span(request, handler).await
 }
 
+enum ForwardOutcome {
+    Forwarded(Result<Response<Body>, ApiError>),
+    NotForwarded(Request<Body>),
+}
+
+/// Potentially forward the request to the current storage controler leader.
+/// More specifically we forward when:
+/// 1. Request is not one of ["/control/v1/step_down", "/status", "/ready", "/metrics"]
+/// 2. Current instance is in [`LeadershipStatus::SteppedDown`] state
+/// 3. There is a leader in the database to forward to
+/// 4. Leader from step (3) is not the current instance
+///
+/// Why forward?
+/// It turns out that we can't rely on external orchestration to promptly route trafic to the
+/// new leader. This is downtime inducing. Forwarding provides a safe way out.
+///
+/// Why is it safe?
+/// If a storcon instance is persisted in the database, then we know that it is the current leader.
+/// There's one exception: time between handling step-down request and the new leader updating the
+/// database.
+///
+/// Let's treat the happy case first. The stepped down node does not produce any side effects,
+/// since all request handling happens on the leader.
+///
+/// As for the edge case, we are guaranteed to always have a maximum of two running instances.
+/// Hence, if we are in the edge case scenario the leader persisted in the database is the
+/// stepped down instance that received the request. Condition (4) above covers this scenario.
+async fn maybe_forward(req: Request<Body>) -> ForwardOutcome {
+    const NOT_FOR_FORWARD: [&str; 4] = ["/control/v1/step_down", "/status", "/ready", "/metrics"];
+
+    let uri = req.uri().to_string();
+    let uri_for_forward = !NOT_FOR_FORWARD.contains(&uri.as_str());
+
+    let state = get_state(&req);
+    let leadership_status = state.service.get_leadership_status();
+
+    if leadership_status != LeadershipStatus::SteppedDown || !uri_for_forward {
+        return ForwardOutcome::NotForwarded(req);
+    }
+
+    let leader = state.service.get_leader().await;
+    let leader = {
+        match leader {
+            Ok(Some(leader)) => leader,
+            Ok(None) => {
+                return ForwardOutcome::Forwarded(Err(ApiError::InternalServerError(
+                    anyhow::anyhow!("No leader to forward to while in stepped down state"),
+                )));
+            }
+            Err(err) => {
+                return ForwardOutcome::Forwarded(Err(ApiError::InternalServerError(
+                    anyhow::anyhow!(
+                        "Failed to get leader for forwarding while in stepped down state: {err}"
+                    ),
+                )));
+            }
+        }
+    };
+
+    let cfg = state.service.get_config();
+    if let Some(ref self_addr) = cfg.address_for_peers {
+        let leader_addr = match Uri::from_str(leader.address.as_str()) {
+            Ok(uri) => uri,
+            Err(err) => {
+                return ForwardOutcome::Forwarded(Err(ApiError::InternalServerError(
+                    anyhow::anyhow!(
+                    "Failed to parse leader uri for forwarding while in stepped down state: {err}"
+                ),
+                )));
+            }
+        };
+
+        if *self_addr == leader_addr {
+            return ForwardOutcome::Forwarded(Err(ApiError::InternalServerError(anyhow::anyhow!(
+                "Leader is stepped down instance"
+            ))));
+        }
+    }
+
+    tracing::debug!("Forwarding {} to leader at {}", uri, leader.address);
+
+    let client = reqwest::ClientBuilder::new()
+        .timeout(Duration::from_secs(4))
+        .build();
+    let client = match client {
+        Ok(client) => client,
+        Err(err) => {
+            return ForwardOutcome::Forwarded(Err(ApiError::InternalServerError(anyhow::anyhow!(
+                "Failed to build leader client for forwarding while in stepped down state: {err}"
+            ))));
+        }
+    };
+
+    let request: reqwest::Request = match convert_request(req, &client, leader.address).await {
+        Ok(r) => r,
+        Err(err) => {
+            return ForwardOutcome::Forwarded(Err(ApiError::InternalServerError(anyhow::anyhow!(
+                "Failed to convert request for forwarding while in stepped down state: {err}"
+            ))));
+        }
+    };
+
+    let response = match client.execute(request).await {
+        Ok(r) => r,
+        Err(err) => {
+            return ForwardOutcome::Forwarded(Err(ApiError::InternalServerError(anyhow::anyhow!(
+                "Failed to forward while in stepped down state: {err}"
+            ))));
+        }
+    };
+
+    ForwardOutcome::Forwarded(convert_response(response).await)
+}
 
 async fn convert_response(resp: reqwest::Response) -> Result<hyper::Response<Body>, ApiError> {
     use std::str::FromStr;
