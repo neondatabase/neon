@@ -41,11 +41,11 @@ use itertools::Itertools;
 use pageserver_api::{
     controller_api::{
         MetadataHealthRecord, MetadataHealthUpdateRequest, NodeAvailability, NodeRegisterRequest,
-        NodeSchedulingPolicy, PlacementPolicy, ShardSchedulingPolicy, ShardsPreferredAzsRequest,
-        ShardsPreferredAzsResponse, TenantCreateRequest, TenantCreateResponse,
-        TenantCreateResponseShard, TenantDescribeResponse, TenantDescribeResponseShard,
-        TenantLocateResponse, TenantPolicyRequest, TenantShardMigrateRequest,
-        TenantShardMigrateResponse,
+        NodeSchedulingPolicy, NodeShard, NodeShardResponse, PlacementPolicy, ShardSchedulingPolicy,
+        ShardsPreferredAzsRequest, ShardsPreferredAzsResponse, TenantCreateRequest,
+        TenantCreateResponse, TenantCreateResponseShard, TenantDescribeResponse,
+        TenantDescribeResponseShard, TenantLocateResponse, TenantPolicyRequest,
+        TenantShardMigrateRequest, TenantShardMigrateResponse,
     },
     models::{
         SecondaryProgress, TenantConfigRequest, TimelineArchivalConfigRequest,
