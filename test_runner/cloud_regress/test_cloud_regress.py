@@ -37,7 +37,7 @@ def test_cloud_regress(
             )
             conn.rollback()
             regress_bin = pg_distrib_dir / "lib/postgresql/pgxs/src/test/regress/pg_regress"
-            runpath = base_dir / f"build/{pg_version.v_prefixed}/src/test/regress"
+            runpath = base_dir / f"vendor/{pg_version.v_prefixed}/src/test/regress"
 
             env_vars = {
                 "PGHOST": remote_pg.default_options["host"],
