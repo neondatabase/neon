@@ -378,11 +378,11 @@ async fn handle_tenant_timeline_block_unblock_gc(
 
     let timeline_id: TimelineId = parse_request_param(&req, "timeline_id")?;
 
-    let res = service
+    service
         .tenant_timeline_block_unblock_gc(tenant_id, timeline_id, dir)
         .await?;
 
-    json_response(StatusCode::OK, res)
+    json_response(StatusCode::OK, ())
 }
 
 async fn handle_tenant_timeline_passthrough(
