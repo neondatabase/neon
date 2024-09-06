@@ -5,7 +5,6 @@ use std::{
     io::{self, Write},
 };
 
-use anyhow::Context;
 use camino::{Utf8Path, Utf8PathBuf};
 
 /// Similar to [`std::fs::create_dir`], except we fsync the
@@ -206,11 +205,13 @@ pub fn overwrite(
 }
 
 /// Syncs the filesystem for the given file descriptor.
+#[cfg_attr(target_os = "macos", allow(unused_variables))]
 pub fn syncfs(fd: impl AsRawFd) -> anyhow::Result<()> {
     // Linux guarantees durability for syncfs.
     // POSIX doesn't have syncfs, and further does not actually guarantee durability of sync().
     #[cfg(target_os = "linux")]
     {
+        use anyhow::Context;
         nix::unistd::syncfs(fd.as_raw_fd()).context("syncfs")?;
     }
     #[cfg(target_os = "macos")]
