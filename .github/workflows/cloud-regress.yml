@@ -61,7 +61,6 @@ jobs:
         with:
           build_type: ${{ env.BUILD_TYPE }}
           test_selection: cloud_regress
-          run_in_parallel: false
           pg_version: ${{ env.DEFAULT_PG_VERSION }}
           extra_params:
             -m remote_cluster
