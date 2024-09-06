@@ -62,7 +62,6 @@ jobs:
           build_type: ${{ env.BUILD_TYPE }}
           test_selection: cloud_regress
           pg_version: ${{ env.DEFAULT_PG_VERSION }}
-          extra_params:
-            -m remote_cluster
+          extra_params: -m remote_cluster
         env:
           BENCHMARK_CONNSTR: ${{ secrets.PG_REGRESS_CONNSTR }}
