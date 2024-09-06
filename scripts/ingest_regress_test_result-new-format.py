@@ -117,46 +117,73 @@ def ingest_test_result(
 ):
     rows = []
     for f in test_cases_dir.glob("*.json"):
+        # 1. Validate JSON
         try:
+            print(f"---> Ingesting ${f.name}...")
             test = json.loads(f.read_text())
+        except json.JSONDecodeError:
+            print(f"Error parsing JSON. Skipping '{f.name}'..")
+            continue
 
-            # Drop unneded fields from raw data
-            raw = test.copy()
-            raw.pop("parameterValues")
-            raw.pop("labels")
-            raw.pop("extra")
+        # 2. Validate required keys
+        required_keys = ["name", "status", "parameters", "labels", "time", "flaky", "retriesStatusChange"]
+        missing_keys = [key for key in required_keys if key not in test]
+        if missing_keys:
+            print(f"Missing keys: {', '.join(missing_keys)}. Skipping '{f.name}'..")
+            continue
 
-            # All allure parameters are prefixed with "__", see test_runner/fixtures/parametrize.py
-            parameters = {
-                p["name"].removeprefix("__"): p["value"]
-                for p in test["parameters"]
-                if p["name"].startswith("__")
-            }
-            arch = parameters.get("arch", "UNKNOWN").strip("'")
+        # 3. Validate parameters
+        parameters = test.get("parameters", [])
+        if not parameters:
+            print(f"Missing or empty parameters. Skipping '{f.name}'..")
+            continue
 
-            build_type, pg_version, unparametrized_name = parse_test_name(test["name"])
-            labels = {label["name"]: label["value"] for label in test["labels"]}
-            row = Row(
-                parent_suite=labels["parentSuite"],
-                suite=labels["suite"],
-                name=unparametrized_name,
-                status=test["status"],
-                started_at=datetime.fromtimestamp(test["time"]["start"] / 1000, tz=timezone.utc),
-                stopped_at=datetime.fromtimestamp(test["time"]["stop"] / 1000, tz=timezone.utc),
-                duration=test["time"]["duration"],
-                flaky=test["flaky"] or test["retriesStatusChange"],
-                arch=arch,
-                build_type=build_type,
-                pg_version=pg_version,
-                run_id=run_id,
-                run_attempt=run_attempt,
-                reference=reference,
-                revision=revision,
-                raw=json.dumps(raw),
-            )
-            rows.append(dataclasses.astuple(row))
-        except:
-            print(f"Error parsing JSON. Skipping file: {f.name}")
+        # 4. Validate time-related keys
+        if not all(k in test.get("time", {}) for k in ["start", "stop", "duration"]):
+            print(f"Missing time-related keys. Skipping '{f.name}'..")
+            continue
+
+        # 5. Validate labels
+        labels = {label["name"]: label["value"] for label in test.get("labels", [])}
+        if not all(k in labels for k in ["suite", "parentSuite"]):
+            print(f"Missing labels. Skipping '{f.name}'..")
+            continue
+
+        # Drop unneded fields from raw data
+        raw = test.copy()
+        raw.pop("parameterValues")
+        raw.pop("labels")
+        raw.pop("extra")
+
+        # All allure parameters are prefixed with "__", see test_runner/fixtures/parametrize.py
+        parameters = {
+            p["name"].removeprefix("__"): p["value"]
+            for p in test["parameters"]
+            if p["name"].startswith("__")
+        }
+        arch = parameters.get("arch", "UNKNOWN").strip("'")
+
+        build_type, pg_version, unparametrized_name = parse_test_name(test["name"])
+
+        row = Row(
+            parent_suite=labels["parentSuite"],
+            suite=labels["suite"],
+            name=unparametrized_name,
+            status=test["status"],
+            started_at=datetime.fromtimestamp(test["time"]["start"] / 1000, tz=timezone.utc),
+            stopped_at=datetime.fromtimestamp(test["time"]["stop"] / 1000, tz=timezone.utc),
+            duration=test["time"]["duration"],
+            flaky=test["flaky"] or test["retriesStatusChange"],
+            arch=arch,
+            build_type=build_type,
+            pg_version=pg_version,
+            run_id=run_id,
+            run_attempt=run_attempt,
+            reference=reference,
+            revision=revision,
+            raw=json.dumps(raw),
+        )
+        rows.append(dataclasses.astuple(row))
 
     columns = ",".join(f.name for f in dataclasses.fields(Row))
     query = f"INSERT INTO results ({columns}) VALUES %s ON CONFLICT DO NOTHING"
