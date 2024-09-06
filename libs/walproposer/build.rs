@@ -69,6 +69,7 @@ fn main() -> anyhow::Result<()> {
         "start_streaming",
         "finish_sync_safekeepers",
         "wait_event_set",
+        "WalProposerStart",
     ];
 
     // The bindgen::Builder is the main entry point
