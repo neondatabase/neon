@@ -9,11 +9,10 @@
 //! may lead to a data loss.
 //!
 use anyhow::bail;
+pub(crate) use pageserver_api::config::TenantConfigToml as TenantConf;
 use pageserver_api::models::AuxFilePolicy;
-use pageserver_api::models::CompactionAlgorithm;
 use pageserver_api::models::CompactionAlgorithmSettings;
 use pageserver_api::models::EvictionPolicy;
-use pageserver_api::models::LsnLease;
 use pageserver_api::models::{self, ThrottleConfig};
 use pageserver_api::shard::{ShardCount, ShardIdentity, ShardNumber, ShardStripeSize};
 use serde::de::IntoDeserializer;
@@ -22,50 +21,6 @@ use serde_json::Value;
 use std::num::NonZeroU64;
 use std::time::Duration;
 use utils::generation::Generation;
-
-pub mod defaults {
-
-    // FIXME: This current value is very low. I would imagine something like 1 GB or 10 GB
-    // would be more appropriate. But a low value forces the code to be exercised more,
-    // which is good for now to trigger bugs.
-    // This parameter actually determines L0 layer file size.
-    pub const DEFAULT_CHECKPOINT_DISTANCE: u64 = 256 * 1024 * 1024;
-    pub const DEFAULT_CHECKPOINT_TIMEOUT: &str = "10 m";
-
-    // FIXME the below configs are only used by legacy algorithm. The new algorithm
-    // has different parameters.
-
-    // Target file size, when creating image and delta layers.
-    // This parameter determines L1 layer file size.
-    pub const DEFAULT_COMPACTION_TARGET_SIZE: u64 = 128 * 1024 * 1024;
-
-    pub const DEFAULT_COMPACTION_PERIOD: &str = "20 s";
-    pub const DEFAULT_COMPACTION_THRESHOLD: usize = 10;
-    pub const DEFAULT_COMPACTION_ALGORITHM: super::CompactionAlgorithm =
-        super::CompactionAlgorithm::Legacy;
-
-    pub const DEFAULT_GC_HORIZON: u64 = 64 * 1024 * 1024;
-
-    // Large DEFAULT_GC_PERIOD is fine as long as PITR_INTERVAL is larger.
-    // If there's a need to decrease this value, first make sure that GC
-    // doesn't hold a layer map write lock for non-trivial operations.
-    // Relevant: https://github.com/neondatabase/neon/issues/3394
-    pub const DEFAULT_GC_PERIOD: &str = "1 hr";
-    pub const DEFAULT_IMAGE_CREATION_THRESHOLD: usize = 3;
-    pub const DEFAULT_PITR_INTERVAL: &str = "7 days";
-    pub const DEFAULT_WALRECEIVER_CONNECT_TIMEOUT: &str = "10 seconds";
-    pub const DEFAULT_WALRECEIVER_LAGGING_WAL_TIMEOUT: &str = "10 seconds";
-    // The default limit on WAL lag should be set to avoid causing disconnects under high throughput
-    // scenarios: since the broker stats are updated ~1/s, a value of 1GiB should be sufficient for
-    // throughputs up to 1GiB/s per timeline.
-    pub const DEFAULT_MAX_WALRECEIVER_LSN_WAL_LAG: u64 = 1024 * 1024 * 1024;
-    pub const DEFAULT_EVICTIONS_LOW_RESIDENCE_DURATION_METRIC_THRESHOLD: &str = "24 hour";
-    // By default ingest enough WAL for two new L0 layers before checking if new image
-    // image layers should be created.
-    pub const DEFAULT_IMAGE_LAYER_CREATION_CHECK_THRESHOLD: u8 = 2;
-
-    pub const DEFAULT_INGEST_BATCH_SIZE: u64 = 100;
-}
 
 #[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) enum AttachmentMode {
@@ -281,96 +236,20 @@ impl LocationConf {
     }
 }
 
-/// A tenant's calcuated configuration, which is the result of merging a
-/// tenant's TenantConfOpt with the global TenantConf from PageServerConf.
-///
-/// For storing and transmitting individual tenant's configuration, see
-/// TenantConfOpt.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TenantConf {
-    // Flush out an inmemory layer, if it's holding WAL older than this
-    // This puts a backstop on how much WAL needs to be re-digested if the
-    // page server crashes.
-    // This parameter actually determines L0 layer file size.
-    pub checkpoint_distance: u64,
-    // Inmemory layer is also flushed at least once in checkpoint_timeout to
-    // eventually upload WAL after activity is stopped.
-    #[serde(with = "humantime_serde")]
-    pub checkpoint_timeout: Duration,
-    // Target file size, when creating image and delta layers.
-    // This parameter determines L1 layer file size.
-    pub compaction_target_size: u64,
-    // How often to check if there's compaction work to be done.
-    // Duration::ZERO means automatic compaction is disabled.
-    #[serde(with = "humantime_serde")]
-    pub compaction_period: Duration,
-    // Level0 delta layer threshold for compaction.
-    pub compaction_threshold: usize,
-    pub compaction_algorithm: CompactionAlgorithmSettings,
-    // Determines how much history is retained, to allow
-    // branching and read replicas at an older point in time.
-    // The unit is #of bytes of WAL.
-    // Page versions older than this are garbage collected away.
-    pub gc_horizon: u64,
-    // Interval at which garbage collection is triggered.
-    // Duration::ZERO means automatic GC is disabled
-    #[serde(with = "humantime_serde")]
-    pub gc_period: Duration,
-    // Delta layer churn threshold to create L1 image layers.
-    pub image_creation_threshold: usize,
-    // Determines how much history is retained, to allow
-    // branching and read replicas at an older point in time.
-    // The unit is time.
-    // Page versions older than this are garbage collected away.
-    #[serde(with = "humantime_serde")]
-    pub pitr_interval: Duration,
-    /// Maximum amount of time to wait while opening a connection to receive wal, before erroring.
-    #[serde(with = "humantime_serde")]
-    pub walreceiver_connect_timeout: Duration,
-    /// Considers safekeepers stalled after no WAL updates were received longer than this threshold.
-    /// A stalled safekeeper will be changed to a newer one when it appears.
-    #[serde(with = "humantime_serde")]
-    pub lagging_wal_timeout: Duration,
-    /// Considers safekeepers lagging when their WAL is behind another safekeeper for more than this threshold.
-    /// A lagging safekeeper will be changed after `lagging_wal_timeout` time elapses since the last WAL update,
-    /// to avoid eager reconnects.
-    pub max_lsn_wal_lag: NonZeroU64,
-    pub eviction_policy: EvictionPolicy,
-    pub min_resident_size_override: Option<u64>,
-    // See the corresponding metric's help string.
-    #[serde(with = "humantime_serde")]
-    pub evictions_low_residence_duration_metric_threshold: Duration,
-
-    /// If non-zero, the period between uploads of a heatmap from attached tenants.  This
-    /// may be disabled if a Tenant will not have secondary locations: only secondary
-    /// locations will use the heatmap uploaded by attached locations.
-    #[serde(with = "humantime_serde")]
-    pub heatmap_period: Duration,
-
-    /// If true then SLRU segments are dowloaded on demand, if false SLRU segments are included in basebackup
-    pub lazy_slru_download: bool,
-
-    pub timeline_get_throttle: pageserver_api::models::ThrottleConfig,
-
-    // How much WAL must be ingested before checking again whether a new image layer is required.
-    // Expresed in multiples of checkpoint distance.
-    pub image_layer_creation_check_threshold: u8,
-
-    /// Switch to a new aux file policy. Switching this flag requires the user has not written any aux file into
-    /// the storage before, and this flag cannot be switched back. Otherwise there will be data corruptions.
-    /// There is a `last_aux_file_policy` flag which gets persisted in `index_part.json` once the first aux
-    /// file is written.
-    pub switch_aux_file_policy: AuxFilePolicy,
-
-    /// The length for an explicit LSN lease request.
-    /// Layers needed to reconstruct pages at LSN will not be GC-ed during this interval.
-    #[serde(with = "humantime_serde")]
-    pub lsn_lease_length: Duration,
-
-    /// The length for an implicit LSN lease granted as part of `get_lsn_by_timestamp` request.
-    /// Layers needed to reconstruct pages at LSN will not be GC-ed during this interval.
-    #[serde(with = "humantime_serde")]
-    pub lsn_lease_length_for_ts: Duration,
+impl Default for LocationConf {
+    // TODO: this should be removed once tenant loading can guarantee that we are never
+    // loading from a directory without a configuration.
+    // => tech debt since https://github.com/neondatabase/neon/issues/1555
+    fn default() -> Self {
+        Self {
+            mode: LocationMode::Attached(AttachedLocationConfig {
+                generation: Generation::none(),
+                attach_mode: AttachmentMode::Single,
+            }),
+            tenant_conf: TenantConfOpt::default(),
+            shard: ShardIdentity::unsharded(),
+        }
+    }
 }
 
 /// Same as TenantConf, but this struct preserves the information about
@@ -541,51 +420,6 @@ impl TenantConfOpt {
             lsn_lease_length_for_ts: self
                 .lsn_lease_length_for_ts
                 .unwrap_or(global_conf.lsn_lease_length_for_ts),
-        }
-    }
-}
-
-impl Default for TenantConf {
-    fn default() -> Self {
-        use defaults::*;
-        Self {
-            checkpoint_distance: DEFAULT_CHECKPOINT_DISTANCE,
-            checkpoint_timeout: humantime::parse_duration(DEFAULT_CHECKPOINT_TIMEOUT)
-                .expect("cannot parse default checkpoint timeout"),
-            compaction_target_size: DEFAULT_COMPACTION_TARGET_SIZE,
-            compaction_period: humantime::parse_duration(DEFAULT_COMPACTION_PERIOD)
-                .expect("cannot parse default compaction period"),
-            compaction_threshold: DEFAULT_COMPACTION_THRESHOLD,
-            compaction_algorithm: CompactionAlgorithmSettings {
-                kind: DEFAULT_COMPACTION_ALGORITHM,
-            },
-            gc_horizon: DEFAULT_GC_HORIZON,
-            gc_period: humantime::parse_duration(DEFAULT_GC_PERIOD)
-                .expect("cannot parse default gc period"),
-            image_creation_threshold: DEFAULT_IMAGE_CREATION_THRESHOLD,
-            pitr_interval: humantime::parse_duration(DEFAULT_PITR_INTERVAL)
-                .expect("cannot parse default PITR interval"),
-            walreceiver_connect_timeout: humantime::parse_duration(
-                DEFAULT_WALRECEIVER_CONNECT_TIMEOUT,
-            )
-            .expect("cannot parse default walreceiver connect timeout"),
-            lagging_wal_timeout: humantime::parse_duration(DEFAULT_WALRECEIVER_LAGGING_WAL_TIMEOUT)
-                .expect("cannot parse default walreceiver lagging wal timeout"),
-            max_lsn_wal_lag: NonZeroU64::new(DEFAULT_MAX_WALRECEIVER_LSN_WAL_LAG)
-                .expect("cannot parse default max walreceiver Lsn wal lag"),
-            eviction_policy: EvictionPolicy::NoEviction,
-            min_resident_size_override: None,
-            evictions_low_residence_duration_metric_threshold: humantime::parse_duration(
-                DEFAULT_EVICTIONS_LOW_RESIDENCE_DURATION_METRIC_THRESHOLD,
-            )
-            .expect("cannot parse default evictions_low_residence_duration_metric_threshold"),
-            heatmap_period: Duration::ZERO,
-            lazy_slru_download: false,
-            timeline_get_throttle: crate::tenant::throttle::Config::disabled(),
-            image_layer_creation_check_threshold: DEFAULT_IMAGE_LAYER_CREATION_CHECK_THRESHOLD,
-            switch_aux_file_policy: AuxFilePolicy::default_tenant_config(),
-            lsn_lease_length: LsnLease::DEFAULT_LENGTH,
-            lsn_lease_length_for_ts: LsnLease::DEFAULT_LENGTH_FOR_TS,
         }
     }
 }

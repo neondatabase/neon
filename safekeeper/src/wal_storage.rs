@@ -37,6 +37,8 @@ use pq_proto::SystemId;
 use utils::{id::TenantTimelineId, lsn::Lsn};
 
 pub trait Storage {
+    // Last written LSN.
+    fn write_lsn(&self) -> Lsn;
     /// LSN of last durably stored WAL record.
     fn flush_lsn(&self) -> Lsn;
 
@@ -96,7 +98,19 @@ pub struct PhysicalStorage {
     /// Also can be ahead of record_lsn, if happen to be in the middle of a WAL record.
     write_lsn: Lsn,
 
-    /// The LSN of the last WAL record written to disk. Still can be not fully flushed.
+    /// The LSN of the last WAL record written to disk. Still can be not fully
+    /// flushed.
+    ///
+    /// Note: Normally it (and flush_record_lsn) is <= write_lsn, but after xlog
+    /// switch ingest the reverse is true because we don't bump write_lsn up to
+    /// the next segment: WAL stream from the compute doesn't have the gap and
+    /// for simplicity / as a sanity check we disallow any non-sequential
+    /// writes, so write zeros as is.
+    ///
+    /// Similar effect is in theory possible due to LSN alignment: if record
+    /// ends at *2, decoder will report end lsn as *8 even though we haven't
+    /// written these zeros yet. In practice compute likely never sends
+    /// non-aligned chunks of data.
     write_record_lsn: Lsn,
 
     /// The LSN of the last WAL record flushed to disk.
@@ -329,6 +343,10 @@ impl PhysicalStorage {
 }
 
 impl Storage for PhysicalStorage {
+    // Last written LSN.
+    fn write_lsn(&self) -> Lsn {
+        self.write_lsn
+    }
     /// flush_lsn returns LSN of last durably stored WAL record.
     fn flush_lsn(&self) -> Lsn {
         self.flush_record_lsn
@@ -434,11 +452,12 @@ impl Storage for PhysicalStorage {
             .with_label_values(&["truncate_wal"])
             .start_timer();
 
-        // Streaming must not create a hole, so truncate cannot be called on non-written lsn
-        if self.write_lsn != Lsn(0) && end_pos > self.write_lsn {
+        // Streaming must not create a hole, so truncate cannot be called on
+        // non-written lsn.
+        if self.write_record_lsn != Lsn(0) && end_pos > self.write_record_lsn {
             bail!(
-                "truncate_wal called on non-written WAL, write_lsn={}, end_pos={}",
-                self.write_lsn,
+                "truncate_wal called on non-written WAL, write_record_lsn={}, end_pos={}",
+                self.write_record_lsn,
                 end_pos
             );
         }

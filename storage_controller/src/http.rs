@@ -2,6 +2,7 @@ use crate::metrics::{
     HttpRequestLatencyLabelGroup, HttpRequestStatusLabelGroup, PageserverRequestLabelGroup,
     METRICS_REGISTRY,
 };
+use crate::persistence::SafekeeperPersistence;
 use crate::reconciler::ReconcileError;
 use crate::service::{LeadershipStatus, Service, STARTUP_RECONCILE_TIMEOUT};
 use anyhow::Context;
@@ -13,7 +14,7 @@ use metrics::{BuildInfo, NeonMetrics};
 use pageserver_api::controller_api::{
     MetadataHealthListOutdatedRequest, MetadataHealthListOutdatedResponse,
     MetadataHealthListUnhealthyResponse, MetadataHealthUpdateRequest, MetadataHealthUpdateResponse,
-    TenantCreateRequest,
+    ShardsPreferredAzsRequest, TenantCreateRequest,
 };
 use pageserver_api::models::{
     TenantConfigRequest, TenantLocationConfigRequest, TenantShardSplitRequest,
@@ -101,7 +102,7 @@ async fn handle_validate(mut req: Request<Body>) -> Result<Response<Body>, ApiEr
 
     let validate_req = json_request::<ValidateRequest>(&mut req).await?;
     let state = get_state(&req);
-    json_response(StatusCode::OK, state.service.validate(validate_req))
+    json_response(StatusCode::OK, state.service.validate(validate_req).await?)
 }
 
 /// Call into this before attaching a tenant to a pageserver, to acquire a generation number
@@ -698,6 +699,18 @@ async fn handle_tenant_update_policy(mut req: Request<Body>) -> Result<Response<
     )
 }
 
+async fn handle_update_preferred_azs(mut req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    let azs_req = json_request::<ShardsPreferredAzsRequest>(&mut req).await?;
+    let state = get_state(&req);
+
+    json_response(
+        StatusCode::OK,
+        state.service.update_shards_preferred_azs(azs_req).await?,
+    )
+}
+
 async fn handle_step_down(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::Admin)?;
 
@@ -776,6 +789,55 @@ impl From<ReconcileError> for ApiError {
     fn from(value: ReconcileError) -> Self {
         ApiError::Conflict(format!("Reconciliation error: {}", value))
     }
+}
+
+/// Return the safekeeper record by instance id, or 404.
+///
+/// Not used by anything except manual testing.
+async fn handle_get_safekeeper(req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    let id = parse_request_param::<i64>(&req, "id")?;
+
+    let state = get_state(&req);
+
+    let res = state.service.get_safekeeper(id).await;
+
+    match res {
+        Ok(b) => json_response(StatusCode::OK, b),
+        Err(crate::persistence::DatabaseError::Query(diesel::result::Error::NotFound)) => {
+            Err(ApiError::NotFound("unknown instance_id".into()))
+        }
+        Err(other) => Err(other.into()),
+    }
+}
+
+/// Used as part of deployment scripts.
+///
+/// Assumes information is only relayed to storage controller after first selecting an unique id on
+/// control plane database, which means we have an id field in the request and payload.
+async fn handle_upsert_safekeeper(mut req: Request<Body>) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    let body = json_request::<SafekeeperPersistence>(&mut req).await?;
+    let id = parse_request_param::<i64>(&req, "id")?;
+
+    if id != body.id {
+        // it should be repeated
+        return Err(ApiError::BadRequest(anyhow::anyhow!(
+            "id mismatch: url={id:?}, body={:?}",
+            body.id
+        )));
+    }
+
+    let state = get_state(&req);
+
+    state.service.upsert_safekeeper(body).await?;
+
+    Ok(Response::builder()
+        .status(StatusCode::NO_CONTENT)
+        .body(Body::empty())
+        .unwrap())
 }
 
 /// Common wrapper for request handlers that call into Service and will operate on tenants: they must only
@@ -1142,8 +1204,22 @@ pub fn make_router(
                 RequestName("control_v1_tenant_policy"),
             )
         })
+        .put("/control/v1/preferred_azs", |r| {
+            named_request_span(
+                r,
+                handle_update_preferred_azs,
+                RequestName("control_v1_preferred_azs"),
+            )
+        })
         .put("/control/v1/step_down", |r| {
             named_request_span(r, handle_step_down, RequestName("control_v1_step_down"))
+        })
+        .get("/control/v1/safekeeper/:id", |r| {
+            named_request_span(r, handle_get_safekeeper, RequestName("v1_safekeeper"))
+        })
+        .post("/control/v1/safekeeper/:id", |r| {
+            // id is in the body
+            named_request_span(r, handle_upsert_safekeeper, RequestName("v1_safekeeper"))
         })
         // Tenant operations
         // The ^/v1/ endpoints act as a "Virtual Pageserver", enabling shard-naive clients to call into

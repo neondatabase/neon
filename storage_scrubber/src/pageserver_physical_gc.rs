@@ -440,9 +440,10 @@ async fn gc_ancestor(
     Ok(())
 }
 
-/// Physical garbage collection: removing unused S3 objects.  This is distinct from the garbage collection
-/// done inside the pageserver, which operates at a higher level (keys, layers).  This type of garbage collection
-/// is about removing:
+/// Physical garbage collection: removing unused S3 objects.
+///
+/// This is distinct from the garbage collection done inside the pageserver, which operates at a higher level
+/// (keys, layers).  This type of garbage collection is about removing:
 /// - Objects that were uploaded but never referenced in the remote index (e.g. because of a shutdown between
 ///   uploading a layer and uploading an index)
 /// - Index objects from historic generations

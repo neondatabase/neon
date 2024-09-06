@@ -1,8 +1,9 @@
+//! Timeline repository implementation that keeps old data in layer files, and
+//! the recent changes in ephemeral files.
 //!
-//! Timeline repository implementation that keeps old data in files on disk, and
-//! the recent changes in memory. See tenant/*_layer.rs files.
-//! The functions here are responsible for locating the correct layer for the
-//! get/put call, walking back the timeline branching history as needed.
+//! See tenant/*_layer.rs files. The functions here are responsible for locating
+//! the correct layer for the get/put call, walking back the timeline branching
+//! history as needed.
 //!
 //! The files are stored in the .neon/tenants/<tenant_id>/timelines/<timeline_id>
 //! directory. See docs/pageserver-storage.md for how the files are managed.

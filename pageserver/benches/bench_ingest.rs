@@ -4,7 +4,7 @@ use bytes::Bytes;
 use camino::Utf8PathBuf;
 use criterion::{criterion_group, criterion_main, Criterion};
 use pageserver::{
-    config::{defaults::DEFAULT_IO_BUFFER_ALIGNMENT, PageServerConf},
+    config::PageServerConf,
     context::{DownloadBehavior, RequestContext},
     l0_flush::{L0FlushConfig, L0FlushGlobalState},
     page_cache,
@@ -167,7 +167,7 @@ fn criterion_benchmark(c: &mut Criterion) {
     virtual_file::init(
         16384,
         virtual_file::io_engine_for_bench(),
-        DEFAULT_IO_BUFFER_ALIGNMENT,
+        pageserver_api::config::defaults::DEFAULT_IO_BUFFER_ALIGNMENT,
     );
     page_cache::init(conf.page_cache_size);
 

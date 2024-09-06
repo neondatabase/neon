@@ -72,6 +72,17 @@ def wait_lsn_force_checkpoint(
     wait_lsn_force_checkpoint_at(lsn, tenant_id, timeline_id, ps, pageserver_conn_options)
 
 
+def wait_lsn_force_checkpoint_at_sk(
+    safekeeper: Safekeeper,
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
+    ps: NeonPageserver,
+    pageserver_conn_options=None,
+):
+    sk_flush_lsn = safekeeper.get_flush_lsn(tenant_id, timeline_id)
+    wait_lsn_force_checkpoint_at(sk_flush_lsn, tenant_id, timeline_id, ps, pageserver_conn_options)
+
+
 def wait_lsn_force_checkpoint_at(
     lsn: Lsn,
     tenant_id: TenantId,
@@ -79,6 +90,10 @@ def wait_lsn_force_checkpoint_at(
     ps: NeonPageserver,
     pageserver_conn_options=None,
 ):
+    """
+    Wait until pageserver receives given lsn, force checkpoint and wait for
+    upload, i.e. remote_consistent_lsn advancement.
+    """
     pageserver_conn_options = pageserver_conn_options or {}
 
     auth_token = None
@@ -1040,6 +1055,24 @@ def test_restart_endpoint(neon_env_builder: NeonEnvBuilder):
         endpoint.stop()
         random_sk.start()
         endpoint.start()
+
+
+# Try restarting endpoint immediately after xlog switch.
+# https://github.com/neondatabase/neon/issues/8911
+def test_restart_endpoint_after_switch_wal(neon_env_builder: NeonEnvBuilder):
+    env = neon_env_builder.init_start()
+
+    endpoint = env.endpoints.create_start("main")
+
+    endpoint.safe_psql("create table t (i int)")
+
+    endpoint.safe_psql("SELECT pg_switch_wal()")
+
+    # we want immediate shutdown to have endpoint restart on xlog switch record,
+    # so prevent shutdown checkpoint.
+    endpoint.stop(mode="immediate")
+    endpoint = env.endpoints.create_start("main")
+    endpoint.safe_psql("SELECT 'works'")
 
 
 # Context manager which logs passed time on exit.
@@ -2330,6 +2363,77 @@ def test_s3_eviction(
     assert event_metrics_seen
 
 
+# Test resetting uploaded partial segment state.
+def test_backup_partial_reset(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.num_safekeepers = 1
+    neon_env_builder.enable_safekeeper_remote_storage(default_remote_storage())
+    # We want to upload/evict quickly, but not too quickly to check that s3 is
+    # empty before next round of upload happens.
+    # Note: this test fails with --delete-offloaded-wal, this is expected.
+    neon_env_builder.safekeeper_extra_opts = [
+        "--enable-offload",
+        "--partial-backup-timeout",
+        "1s",
+        "--control-file-save-interval",
+        "1s",
+        "--eviction-min-resident=1s",
+    ]
+    # XXX: pageserver currently connects to safekeeper as long as connection
+    # manager doesn't remove its entry (default lagging_wal_timeout is 10s),
+    # causing uneviction. It should be fixed to not reconnect if last
+    # remote_consistent_lsn is communicated and there is nothing to fetch. Make
+    # value lower to speed up the test.
+    initial_tenant_conf = {
+        "lagging_wal_timeout": "1s",
+    }
+    env = neon_env_builder.init_start(initial_tenant_conf)
+
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    endpoint = env.endpoints.create("main")
+    endpoint.start()
+    endpoint.safe_psql("create table t(key int, value text)")
+    endpoint.stop()
+    sk = env.safekeepers[0]
+    # eviction won't happen until remote_consistent_lsn catches up.
+    wait_lsn_force_checkpoint_at_sk(sk, tenant_id, timeline_id, env.pageserver)
+
+    http_cli = env.safekeepers[0].http_client()
+
+    # wait until eviction happens
+    def evicted():
+        eviction_state = http_cli.get_eviction_state(timeline_id)
+        log.info(f"eviction_state: {eviction_state}")
+        if isinstance(eviction_state, str) and eviction_state == "Present":
+            raise Exception("eviction didn't happen yet")
+
+    wait_until(30, 1, evicted)
+    # it must have uploaded something
+    uploaded_segs = sk.list_uploaded_segments(tenant_id, timeline_id)
+    log.info(f"uploaded segments before reset: {uploaded_segs}")
+    assert len(uploaded_segs) > 0
+
+    reset_res = http_cli.backup_partial_reset(tenant_id, timeline_id)
+    log.info(f"reset res: {reset_res}")
+
+    # Backup_partial_reset must have reset the state and dropped s3 segment.
+    #
+    # Note: if listing takes more than --partial-backup-timeout test becomes
+    # flaky because file might be reuploaded. With local fs it shouldn't be an
+    # issue, but can add retry if this appears.
+    uploaded_segs = sk.list_uploaded_segments(tenant_id, timeline_id)
+    log.info(f"uploaded segments after reset: {uploaded_segs}")
+    assert len(uploaded_segs) == 0
+
+    # calling second time should be ok
+    http_cli.backup_partial_reset(tenant_id, timeline_id)
+
+    # inserting data should be ok
+    endpoint.start()
+    endpoint.safe_psql("insert into t values(1, 'hehe')")
+
+
 def test_pull_timeline_partial_segment_integrity(neon_env_builder: NeonEnvBuilder):
     """
     Verify that pulling timeline from a SK with an uploaded partial segment
@@ -2357,7 +2461,16 @@ def test_pull_timeline_partial_segment_integrity(neon_env_builder: NeonEnvBuilde
         "--eviction-min-resident=500ms",
     ]
 
-    env = neon_env_builder.init_start(initial_tenant_conf={"checkpoint_timeout": "100ms"})
+    # XXX: pageserver currently connects to safekeeper as long as connection
+    # manager doesn't remove its entry (default lagging_wal_timeout is 10s),
+    # causing uneviction. It should be fixed to not reconnect if last
+    # remote_consistent_lsn is communicated and there is nothing to fetch. Until
+    # this is fixed make value lower to speed up the test.
+    initial_tenant_conf = {
+        "lagging_wal_timeout": "1s",
+        "checkpoint_timeout": "100ms",
+    }
+    env = neon_env_builder.init_start(initial_tenant_conf=initial_tenant_conf)
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
 
@@ -2421,7 +2534,7 @@ def test_pull_timeline_partial_segment_integrity(neon_env_builder: NeonEnvBuilde
     endpoint.start(safekeepers=[2, 3])
 
     def new_partial_segment_uploaded():
-        segs = src_sk.list_uploaded_segments(tenant_id, timeline_id)
+        segs = dst_sk.list_uploaded_segments(tenant_id, timeline_id)
         for seg in segs:
             if "partial" in seg and "sk3" in seg:
                 return seg

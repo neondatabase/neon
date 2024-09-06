@@ -39,7 +39,7 @@ use crate::tenant::disk_btree::{
 use crate::tenant::storage_layer::layer::S3_UPLOAD_LIMIT;
 use crate::tenant::timeline::GetVectoredError;
 use crate::tenant::vectored_blob_io::{
-    BlobFlag, MaxVectoredReadBytes, StreamingVectoredReadPlanner, VectoredBlobReader, VectoredRead,
+    BlobFlag, StreamingVectoredReadPlanner, VectoredBlobReader, VectoredRead,
     VectoredReadCoalesceMode, VectoredReadPlanner,
 };
 use crate::tenant::PageReconstructError;
@@ -52,6 +52,7 @@ use bytes::BytesMut;
 use camino::{Utf8Path, Utf8PathBuf};
 use futures::StreamExt;
 use itertools::Itertools;
+use pageserver_api::config::MaxVectoredReadBytes;
 use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::ImageCompressionAlgorithm;
 use pageserver_api::shard::TenantShardId;
@@ -135,10 +136,11 @@ impl Summary {
 // Flag indicating that this version initialize the page
 const WILL_INIT: u64 = 1;
 
-/// Struct representing reference to BLOB in layers. Reference contains BLOB
-/// offset, and for WAL records it also contains `will_init` flag. The flag
-/// helps to determine the range of records that needs to be applied, without
-/// reading/deserializing records themselves.
+/// Struct representing reference to BLOB in layers.
+///
+/// Reference contains BLOB offset, and for WAL records it also contains
+/// `will_init` flag. The flag helps to determine the range of records
+/// that needs to be applied, without reading/deserializing records themselves.
 #[derive(Debug, Serialize, Deserialize, Copy, Clone)]
 pub struct BlobRef(pub u64);
 

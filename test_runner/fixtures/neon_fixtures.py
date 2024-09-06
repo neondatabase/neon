@@ -24,7 +24,20 @@ from functools import cached_property, partial
 from itertools import chain, product
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple, Type, Union, cast
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    Iterator,
+    List,
+    Optional,
+    Tuple,
+    Type,
+    TypeVar,
+    Union,
+    cast,
+)
 from urllib.parse import quote, urlparse
 
 import asyncpg
@@ -89,6 +102,8 @@ from fixtures.utils import (
 from fixtures.utils import AuxFileStore as AuxFileStore  # reexport
 
 from .neon_api import NeonAPI, NeonApiEndpoint
+
+T = TypeVar("T")
 
 """
 This file contains pytest fixtures. A fixture is a test resource that can be
@@ -743,6 +758,9 @@ class NeonEnvBuilder:
         patch_script = ""
         for ps in self.env.pageservers:
             patch_script += f"UPDATE nodes SET listen_http_port={ps.service_port.http}, listen_pg_port={ps.service_port.pg}  WHERE node_id = '{ps.id}';"
+            # This is a temporary to get the backward compat test happy
+            # since the compat snapshot was generated with an older version of neon local
+            patch_script += f"UPDATE nodes SET availability_zone_id='{ps.az_id}'  WHERE node_id = '{ps.id}' AND availability_zone_id IS NULL;"
         patch_script_path.write_text(patch_script)
 
         # Update the config with info about tenants and timelines
@@ -1164,6 +1182,8 @@ class NeonEnv:
                 "listen_http_addr": f"localhost:{pageserver_port.http}",
                 "pg_auth_type": pg_auth_type,
                 "http_auth_type": http_auth_type,
+                # Default which can be overriden with `NeonEnvBuilder.pageserver_config_override`
+                "availability_zone": "us-east-2a",
             }
             if self.pageserver_virtual_file_io_engine is not None:
                 ps_cfg["virtual_file_io_engine"] = self.pageserver_virtual_file_io_engine
@@ -1192,11 +1212,7 @@ class NeonEnv:
 
             # Create a corresponding NeonPageserver object
             self.pageservers.append(
-                NeonPageserver(
-                    self,
-                    ps_id,
-                    port=pageserver_port,
-                )
+                NeonPageserver(self, ps_id, port=pageserver_port, az_id=ps_cfg["availability_zone"])
             )
             cfg["pageservers"].append(ps_cfg)
 
@@ -2400,6 +2416,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
             "listen_http_port": node.service_port.http,
             "listen_pg_addr": "localhost",
             "listen_pg_port": node.service_port.pg,
+            "availability_zone_id": node.az_id,
         }
         log.info(f"node_register({body})")
         self.request(
@@ -2543,7 +2560,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
 
     def tenant_describe(self, tenant_id: TenantId):
         """
-        :return: list of {"shard_id": "", "node_id": int, "listen_pg_addr": str, "listen_pg_port": int, "listen_http_addr: str, "listen_http_port: int}
+        :return: list of {"shard_id": "", "node_id": int, "listen_pg_addr": str, "listen_pg_port": int, "listen_http_addr: str, "listen_http_port: int, preferred_az_id: str}
         """
         response = self.request(
             "GET",
@@ -2870,6 +2887,40 @@ class NeonStorageController(MetricsGetter, LogUtils):
 
         raise AssertionError("unreachable")
 
+    def on_safekeeper_deploy(self, id: int, body: dict[str, Any]):
+        self.request(
+            "POST",
+            f"{self.api}/control/v1/safekeeper/{id}",
+            headers=self.headers(TokenScope.ADMIN),
+            json=body,
+        )
+
+    def get_safekeeper(self, id: int) -> Optional[dict[str, Any]]:
+        try:
+            response = self.request(
+                "GET",
+                f"{self.api}/control/v1/safekeeper/{id}",
+                headers=self.headers(TokenScope.ADMIN),
+            )
+            json = response.json()
+            assert isinstance(json, dict)
+            return json
+        except StorageControllerApiException as e:
+            if e.status_code == 404:
+                return None
+            raise e
+
+    def set_preferred_azs(self, preferred_azs: dict[TenantShardId, str]) -> list[TenantShardId]:
+        response = self.request(
+            "PUT",
+            f"{self.api}/control/v1/preferred_azs",
+            headers=self.headers(TokenScope.ADMIN),
+            json={str(tid): az for tid, az in preferred_azs.items()},
+        )
+
+        response.raise_for_status()
+        return [TenantShardId.parse(tid) for tid in response.json()["updated"]]
+
     def __enter__(self) -> "NeonStorageController":
         return self
 
@@ -2947,10 +2998,11 @@ class NeonPageserver(PgProtocol, LogUtils):
 
     TEMP_FILE_SUFFIX = "___temp"
 
-    def __init__(self, env: NeonEnv, id: int, port: PageserverPort):
+    def __init__(self, env: NeonEnv, id: int, port: PageserverPort, az_id: str):
         super().__init__(host="localhost", port=port.pg, user="cloud_admin")
         self.env = env
         self.id = id
+        self.az_id = az_id
         self.running = False
         self.service_port = port
         self.version = env.get_binary_version("pageserver")
@@ -2987,16 +3039,17 @@ class NeonPageserver(PgProtocol, LogUtils):
     def config_toml_path(self) -> Path:
         return self.workdir / "pageserver.toml"
 
-    def edit_config_toml(self, edit_fn: Callable[[Dict[str, Any]], None]):
+    def edit_config_toml(self, edit_fn: Callable[[Dict[str, Any]], T]) -> T:
         """
         Edit the pageserver's config toml file in place.
         """
         path = self.config_toml_path
         with open(path, "r") as f:
             config = toml.load(f)
-        edit_fn(config)
+        res = edit_fn(config)
         with open(path, "w") as f:
             toml.dump(config, f)
+        return res
 
     def patch_config_toml_nonrecursive(self, patch: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -4577,6 +4630,8 @@ class Safekeeper(LogUtils):
     def timeline_dir(self, tenant_id, timeline_id) -> Path:
         return self.data_dir / str(tenant_id) / str(timeline_id)
 
+    # List partial uploaded segments of this safekeeper. Works only for
+    # RemoteStorageKind.LOCAL_FS.
     def list_uploaded_segments(self, tenant_id: TenantId, timeline_id: TimelineId):
         tline_path = (
             self.env.repo_dir
@@ -4586,9 +4641,11 @@ class Safekeeper(LogUtils):
             / str(timeline_id)
         )
         assert isinstance(self.env.safekeepers_remote_storage, LocalFsStorage)
-        return self._list_segments_in_dir(
+        segs = self._list_segments_in_dir(
             tline_path, lambda name: ".metadata" not in name and ".___temp" not in name
         )
+        mysegs = [s for s in segs if f"sk{self.id}" in s]
+        return mysegs
 
     def list_segments(self, tenant_id, timeline_id) -> List[str]:
         """

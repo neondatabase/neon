@@ -4,11 +4,13 @@
 //! file, or on the command line.
 //! See also `settings.md` for better description on every parameter.
 
-use anyhow::{anyhow, bail, ensure, Context, Result};
-use pageserver_api::{models::ImageCompressionAlgorithm, shard::TenantShardId};
+use anyhow::{bail, ensure, Context};
+use pageserver_api::models::ImageCompressionAlgorithm;
+use pageserver_api::{
+    config::{DiskUsageEvictionTaskConfig, MaxVectoredReadBytes},
+    shard::TenantShardId,
+};
 use remote_storage::{RemotePath, RemoteStorageConfig};
-use serde::de::IntoDeserializer;
-use serde::{self, Deserialize};
 use std::env;
 use storage_broker::Uri;
 use utils::crashsafe::path_with_suffix_extension;
@@ -17,10 +19,8 @@ use utils::logging::SecretString;
 use once_cell::sync::OnceCell;
 use reqwest::Url;
 use std::num::NonZeroUsize;
-use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use toml_edit::{Document, Item};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use postgres_backend::AuthType;
@@ -29,139 +29,27 @@ use utils::{
     logging::LogFormat,
 };
 
-use crate::l0_flush::L0FlushConfig;
-use crate::tenant::config::TenantConfOpt;
 use crate::tenant::storage_layer::inmemory_layer::IndexEntry;
-use crate::tenant::timeline::compaction::CompactL0Phase1ValueAccess;
-use crate::tenant::vectored_blob_io::MaxVectoredReadBytes;
 use crate::tenant::{TENANTS_SEGMENT_NAME, TIMELINES_SEGMENT_NAME};
-use crate::{disk_usage_eviction_task::DiskUsageEvictionTaskConfig, virtual_file::io_engine};
-use crate::{tenant::config::TenantConf, virtual_file};
+use crate::virtual_file;
+use crate::virtual_file::io_engine;
 use crate::{TENANT_HEATMAP_BASENAME, TENANT_LOCATION_CONFIG_NAME, TIMELINE_DELETE_MARK_SUFFIX};
 
-use self::defaults::DEFAULT_CONCURRENT_TENANT_WARMUP;
-
-use self::defaults::DEFAULT_VIRTUAL_FILE_IO_ENGINE;
-
-pub mod defaults {
-    use crate::tenant::config::defaults::*;
-    use const_format::formatcp;
-
-    pub use pageserver_api::config::{
-        DEFAULT_HTTP_LISTEN_ADDR, DEFAULT_HTTP_LISTEN_PORT, DEFAULT_PG_LISTEN_ADDR,
-        DEFAULT_PG_LISTEN_PORT,
-    };
-    pub use storage_broker::DEFAULT_ENDPOINT as BROKER_DEFAULT_ENDPOINT;
-
-    pub const DEFAULT_WAIT_LSN_TIMEOUT: &str = "300 s";
-    pub const DEFAULT_WAL_REDO_TIMEOUT: &str = "60 s";
-
-    pub const DEFAULT_SUPERUSER: &str = "cloud_admin";
-
-    pub const DEFAULT_PAGE_CACHE_SIZE: usize = 8192;
-    pub const DEFAULT_MAX_FILE_DESCRIPTORS: usize = 100;
-
-    pub const DEFAULT_LOG_FORMAT: &str = "plain";
-
-    pub const DEFAULT_CONCURRENT_TENANT_WARMUP: usize = 8;
-
-    pub const DEFAULT_CONCURRENT_TENANT_SIZE_LOGICAL_SIZE_QUERIES: usize =
-        super::ConfigurableSemaphore::DEFAULT_INITIAL.get();
-
-    pub const DEFAULT_METRIC_COLLECTION_INTERVAL: &str = "10 min";
-    pub const DEFAULT_METRIC_COLLECTION_ENDPOINT: Option<reqwest::Url> = None;
-    pub const DEFAULT_SYNTHETIC_SIZE_CALCULATION_INTERVAL: &str = "10 min";
-    pub const DEFAULT_BACKGROUND_TASK_MAXIMUM_DELAY: &str = "10s";
-
-    pub const DEFAULT_HEATMAP_UPLOAD_CONCURRENCY: usize = 8;
-    pub const DEFAULT_SECONDARY_DOWNLOAD_CONCURRENCY: usize = 1;
-
-    pub const DEFAULT_INGEST_BATCH_SIZE: u64 = 100;
-
-    #[cfg(target_os = "linux")]
-    pub const DEFAULT_VIRTUAL_FILE_IO_ENGINE: &str = "tokio-epoll-uring";
-
-    #[cfg(not(target_os = "linux"))]
-    pub const DEFAULT_VIRTUAL_FILE_IO_ENGINE: &str = "std-fs";
-
-    pub const DEFAULT_GET_VECTORED_IMPL: &str = "vectored";
-
-    pub const DEFAULT_GET_IMPL: &str = "vectored";
-
-    pub const DEFAULT_MAX_VECTORED_READ_BYTES: usize = 128 * 1024; // 128 KiB
-
-    pub const DEFAULT_IMAGE_COMPRESSION: &str = "zstd(1)";
-
-    pub const DEFAULT_VALIDATE_VECTORED_GET: bool = false;
-
-    pub const DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB: usize = 0;
-
-    pub const DEFAULT_IO_BUFFER_ALIGNMENT: usize = 512;
-
-    ///
-    /// Default built-in configuration file.
-    ///
-    pub const DEFAULT_CONFIG_FILE: &str = formatcp!(
-        r#"
-# Initial configuration file created by 'pageserver --init'
-#listen_pg_addr = '{DEFAULT_PG_LISTEN_ADDR}'
-#listen_http_addr = '{DEFAULT_HTTP_LISTEN_ADDR}'
-
-#wait_lsn_timeout = '{DEFAULT_WAIT_LSN_TIMEOUT}'
-#wal_redo_timeout = '{DEFAULT_WAL_REDO_TIMEOUT}'
-
-#page_cache_size = {DEFAULT_PAGE_CACHE_SIZE}
-#max_file_descriptors = {DEFAULT_MAX_FILE_DESCRIPTORS}
-
-# initial superuser role name to use when creating a new tenant
-#initial_superuser_name = '{DEFAULT_SUPERUSER}'
-
-#broker_endpoint = '{BROKER_DEFAULT_ENDPOINT}'
-
-#log_format = '{DEFAULT_LOG_FORMAT}'
-
-#concurrent_tenant_size_logical_size_queries = '{DEFAULT_CONCURRENT_TENANT_SIZE_LOGICAL_SIZE_QUERIES}'
-#concurrent_tenant_warmup = '{DEFAULT_CONCURRENT_TENANT_WARMUP}'
-
-#metric_collection_interval = '{DEFAULT_METRIC_COLLECTION_INTERVAL}'
-#synthetic_size_calculation_interval = '{DEFAULT_SYNTHETIC_SIZE_CALCULATION_INTERVAL}'
-
-#disk_usage_based_eviction = {{ max_usage_pct = .., min_avail_bytes = .., period = "10s"}}
-
-#background_task_maximum_delay = '{DEFAULT_BACKGROUND_TASK_MAXIMUM_DELAY}'
-
-#ingest_batch_size = {DEFAULT_INGEST_BATCH_SIZE}
-
-#virtual_file_io_engine = '{DEFAULT_VIRTUAL_FILE_IO_ENGINE}'
-
-#max_vectored_read_bytes = '{DEFAULT_MAX_VECTORED_READ_BYTES}'
-
-[tenant_config]
-#checkpoint_distance = {DEFAULT_CHECKPOINT_DISTANCE} # in bytes
-#checkpoint_timeout = {DEFAULT_CHECKPOINT_TIMEOUT}
-#compaction_target_size = {DEFAULT_COMPACTION_TARGET_SIZE} # in bytes
-#compaction_period = '{DEFAULT_COMPACTION_PERIOD}'
-#compaction_threshold = {DEFAULT_COMPACTION_THRESHOLD}
-
-#gc_period = '{DEFAULT_GC_PERIOD}'
-#gc_horizon = {DEFAULT_GC_HORIZON}
-#image_creation_threshold = {DEFAULT_IMAGE_CREATION_THRESHOLD}
-#pitr_interval = '{DEFAULT_PITR_INTERVAL}'
-
-#min_resident_size_override = .. # in bytes
-#evictions_low_residence_duration_metric_threshold = '{DEFAULT_EVICTIONS_LOW_RESIDENCE_DURATION_METRIC_THRESHOLD}'
-
-#heatmap_upload_concurrency = {DEFAULT_HEATMAP_UPLOAD_CONCURRENCY}
-#secondary_download_concurrency = {DEFAULT_SECONDARY_DOWNLOAD_CONCURRENCY}
-
-#ephemeral_bytes_per_memory_kb = {DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB}
-
-#[remote_storage]
-
-"#
-    );
-}
-
+/// Global state of pageserver.
+///
+/// It's mostly immutable configuration, but some semaphores and the
+/// like crept in over time and the name stuck.
+///
+/// Instantiated by deserializing `pageserver.toml` into  [`pageserver_api::config::ConfigToml`]
+/// and passing that to [`PageServerConf::parse_and_validate`].
+///
+/// # Adding a New Field
+///
+/// 1. Add the field to `pageserver_api::config::ConfigToml`.
+/// 2. Fix compiler errors (exhaustive destructuring will guide you).
+///
+/// For fields that require additional validation or filling in of defaults at runtime,
+/// check for examples in the [`PageServerConf::parse_and_validate`] method.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PageServerConf {
     // Identifier of that particular pageserver so e g safekeepers
@@ -207,7 +95,7 @@ pub struct PageServerConf {
 
     pub remote_storage_config: Option<RemoteStorageConfig>,
 
-    pub default_tenant_conf: TenantConf,
+    pub default_tenant_conf: crate::tenant::config::TenantConf,
 
     /// Storage broker endpoints to connect to.
     pub broker_endpoint: Uri,
@@ -284,11 +172,7 @@ pub struct PageServerConf {
     /// Setting this to zero disables limits on total ephemeral layer size.
     pub ephemeral_bytes_per_memory_kb: usize,
 
-    pub l0_flush: L0FlushConfig,
-
-    /// This flag is temporary and will be removed after gradual rollout.
-    /// See <https://github.com/neondatabase/neon/issues/8184>.
-    pub compact_level0_phase1_value_access: CompactL0Phase1ValueAccess,
+    pub l0_flush: crate::l0_flush::L0FlushConfig,
 
     /// Direct IO settings
     pub virtual_file_direct_io: virtual_file::DirectIoMode,
@@ -296,6 +180,8 @@ pub struct PageServerConf {
     pub io_buffer_alignment: usize,
 }
 
+/// Token for authentication to safekeepers
+///
 /// We do not want to store this in a PageServerConf because the latter may be logged
 /// and/or serialized at a whim, while the token is secret. Currently this token is the
 /// same for accessing all tenants/timelines, but may become per-tenant/per-timeline in
@@ -303,472 +189,6 @@ pub struct PageServerConf {
 /// Hence, we resort to a global variable for now instead of passing the token from the
 /// startup code to the connection code through a dozen layers.
 pub static SAFEKEEPER_AUTH_TOKEN: OnceCell<Arc<String>> = OnceCell::new();
-
-// use dedicated enum for builder to better indicate the intention
-// and avoid possible confusion with nested options
-#[derive(Clone, Default)]
-pub enum BuilderValue<T> {
-    Set(T),
-    #[default]
-    NotSet,
-}
-
-impl<T: Clone> BuilderValue<T> {
-    pub fn ok_or(&self, field_name: &'static str, default: BuilderValue<T>) -> anyhow::Result<T> {
-        match self {
-            Self::Set(v) => Ok(v.clone()),
-            Self::NotSet => match default {
-                BuilderValue::Set(v) => Ok(v.clone()),
-                BuilderValue::NotSet => {
-                    anyhow::bail!("missing config value {field_name:?}")
-                }
-            },
-        }
-    }
-}
-
-// needed to simplify config construction
-#[derive(Default)]
-struct PageServerConfigBuilder {
-    listen_pg_addr: BuilderValue<String>,
-
-    listen_http_addr: BuilderValue<String>,
-
-    availability_zone: BuilderValue<Option<String>>,
-
-    wait_lsn_timeout: BuilderValue<Duration>,
-    wal_redo_timeout: BuilderValue<Duration>,
-
-    superuser: BuilderValue<String>,
-
-    page_cache_size: BuilderValue<usize>,
-    max_file_descriptors: BuilderValue<usize>,
-
-    workdir: BuilderValue<Utf8PathBuf>,
-
-    pg_distrib_dir: BuilderValue<Utf8PathBuf>,
-
-    http_auth_type: BuilderValue<AuthType>,
-    pg_auth_type: BuilderValue<AuthType>,
-
-    //
-    auth_validation_public_key_path: BuilderValue<Option<Utf8PathBuf>>,
-    remote_storage_config: BuilderValue<Option<RemoteStorageConfig>>,
-
-    broker_endpoint: BuilderValue<Uri>,
-    broker_keepalive_interval: BuilderValue<Duration>,
-
-    log_format: BuilderValue<LogFormat>,
-
-    concurrent_tenant_warmup: BuilderValue<NonZeroUsize>,
-    concurrent_tenant_size_logical_size_queries: BuilderValue<NonZeroUsize>,
-
-    metric_collection_interval: BuilderValue<Duration>,
-    metric_collection_endpoint: BuilderValue<Option<Url>>,
-    synthetic_size_calculation_interval: BuilderValue<Duration>,
-    metric_collection_bucket: BuilderValue<Option<RemoteStorageConfig>>,
-
-    disk_usage_based_eviction: BuilderValue<Option<DiskUsageEvictionTaskConfig>>,
-
-    test_remote_failures: BuilderValue<u64>,
-
-    ondemand_download_behavior_treat_error_as_warn: BuilderValue<bool>,
-
-    background_task_maximum_delay: BuilderValue<Duration>,
-
-    control_plane_api: BuilderValue<Option<Url>>,
-    control_plane_api_token: BuilderValue<Option<SecretString>>,
-    control_plane_emergency_mode: BuilderValue<bool>,
-
-    heatmap_upload_concurrency: BuilderValue<usize>,
-    secondary_download_concurrency: BuilderValue<usize>,
-
-    ingest_batch_size: BuilderValue<u64>,
-
-    virtual_file_io_engine: BuilderValue<virtual_file::IoEngineKind>,
-
-    max_vectored_read_bytes: BuilderValue<MaxVectoredReadBytes>,
-
-    image_compression: BuilderValue<ImageCompressionAlgorithm>,
-
-    ephemeral_bytes_per_memory_kb: BuilderValue<usize>,
-
-    l0_flush: BuilderValue<L0FlushConfig>,
-
-    compact_level0_phase1_value_access: BuilderValue<CompactL0Phase1ValueAccess>,
-
-    virtual_file_direct_io: BuilderValue<virtual_file::DirectIoMode>,
-
-    io_buffer_alignment: BuilderValue<usize>,
-}
-
-impl PageServerConfigBuilder {
-    fn new() -> Self {
-        Self::default()
-    }
-
-    #[inline(always)]
-    fn default_values() -> Self {
-        use self::BuilderValue::*;
-        use defaults::*;
-        Self {
-            listen_pg_addr: Set(DEFAULT_PG_LISTEN_ADDR.to_string()),
-            listen_http_addr: Set(DEFAULT_HTTP_LISTEN_ADDR.to_string()),
-            availability_zone: Set(None),
-            wait_lsn_timeout: Set(humantime::parse_duration(DEFAULT_WAIT_LSN_TIMEOUT)
-                .expect("cannot parse default wait lsn timeout")),
-            wal_redo_timeout: Set(humantime::parse_duration(DEFAULT_WAL_REDO_TIMEOUT)
-                .expect("cannot parse default wal redo timeout")),
-            superuser: Set(DEFAULT_SUPERUSER.to_string()),
-            page_cache_size: Set(DEFAULT_PAGE_CACHE_SIZE),
-            max_file_descriptors: Set(DEFAULT_MAX_FILE_DESCRIPTORS),
-            workdir: Set(Utf8PathBuf::new()),
-            pg_distrib_dir: Set(Utf8PathBuf::from_path_buf(
-                env::current_dir().expect("cannot access current directory"),
-            )
-            .expect("non-Unicode path")
-            .join("pg_install")),
-            http_auth_type: Set(AuthType::Trust),
-            pg_auth_type: Set(AuthType::Trust),
-            auth_validation_public_key_path: Set(None),
-            remote_storage_config: Set(None),
-            broker_endpoint: Set(storage_broker::DEFAULT_ENDPOINT
-                .parse()
-                .expect("failed to parse default broker endpoint")),
-            broker_keepalive_interval: Set(humantime::parse_duration(
-                storage_broker::DEFAULT_KEEPALIVE_INTERVAL,
-            )
-            .expect("cannot parse default keepalive interval")),
-            log_format: Set(LogFormat::from_str(DEFAULT_LOG_FORMAT).unwrap()),
-
-            concurrent_tenant_warmup: Set(NonZeroUsize::new(DEFAULT_CONCURRENT_TENANT_WARMUP)
-                .expect("Invalid default constant")),
-            concurrent_tenant_size_logical_size_queries: Set(
-                ConfigurableSemaphore::DEFAULT_INITIAL,
-            ),
-            metric_collection_interval: Set(humantime::parse_duration(
-                DEFAULT_METRIC_COLLECTION_INTERVAL,
-            )
-            .expect("cannot parse default metric collection interval")),
-            synthetic_size_calculation_interval: Set(humantime::parse_duration(
-                DEFAULT_SYNTHETIC_SIZE_CALCULATION_INTERVAL,
-            )
-            .expect("cannot parse default synthetic size calculation interval")),
-            metric_collection_endpoint: Set(DEFAULT_METRIC_COLLECTION_ENDPOINT),
-
-            metric_collection_bucket: Set(None),
-
-            disk_usage_based_eviction: Set(None),
-
-            test_remote_failures: Set(0),
-
-            ondemand_download_behavior_treat_error_as_warn: Set(false),
-
-            background_task_maximum_delay: Set(humantime::parse_duration(
-                DEFAULT_BACKGROUND_TASK_MAXIMUM_DELAY,
-            )
-            .unwrap()),
-
-            control_plane_api: Set(None),
-            control_plane_api_token: Set(None),
-            control_plane_emergency_mode: Set(false),
-
-            heatmap_upload_concurrency: Set(DEFAULT_HEATMAP_UPLOAD_CONCURRENCY),
-            secondary_download_concurrency: Set(DEFAULT_SECONDARY_DOWNLOAD_CONCURRENCY),
-
-            ingest_batch_size: Set(DEFAULT_INGEST_BATCH_SIZE),
-
-            virtual_file_io_engine: Set(DEFAULT_VIRTUAL_FILE_IO_ENGINE.parse().unwrap()),
-
-            max_vectored_read_bytes: Set(MaxVectoredReadBytes(
-                NonZeroUsize::new(DEFAULT_MAX_VECTORED_READ_BYTES).unwrap(),
-            )),
-            image_compression: Set(DEFAULT_IMAGE_COMPRESSION.parse().unwrap()),
-            ephemeral_bytes_per_memory_kb: Set(DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB),
-            l0_flush: Set(L0FlushConfig::default()),
-            compact_level0_phase1_value_access: Set(CompactL0Phase1ValueAccess::default()),
-            virtual_file_direct_io: Set(virtual_file::DirectIoMode::default()),
-            io_buffer_alignment: Set(DEFAULT_IO_BUFFER_ALIGNMENT),
-        }
-    }
-}
-
-impl PageServerConfigBuilder {
-    pub fn listen_pg_addr(&mut self, listen_pg_addr: String) {
-        self.listen_pg_addr = BuilderValue::Set(listen_pg_addr)
-    }
-
-    pub fn listen_http_addr(&mut self, listen_http_addr: String) {
-        self.listen_http_addr = BuilderValue::Set(listen_http_addr)
-    }
-
-    pub fn availability_zone(&mut self, availability_zone: Option<String>) {
-        self.availability_zone = BuilderValue::Set(availability_zone)
-    }
-
-    pub fn wait_lsn_timeout(&mut self, wait_lsn_timeout: Duration) {
-        self.wait_lsn_timeout = BuilderValue::Set(wait_lsn_timeout)
-    }
-
-    pub fn wal_redo_timeout(&mut self, wal_redo_timeout: Duration) {
-        self.wal_redo_timeout = BuilderValue::Set(wal_redo_timeout)
-    }
-
-    pub fn superuser(&mut self, superuser: String) {
-        self.superuser = BuilderValue::Set(superuser)
-    }
-
-    pub fn page_cache_size(&mut self, page_cache_size: usize) {
-        self.page_cache_size = BuilderValue::Set(page_cache_size)
-    }
-
-    pub fn max_file_descriptors(&mut self, max_file_descriptors: usize) {
-        self.max_file_descriptors = BuilderValue::Set(max_file_descriptors)
-    }
-
-    pub fn workdir(&mut self, workdir: Utf8PathBuf) {
-        self.workdir = BuilderValue::Set(workdir)
-    }
-
-    pub fn pg_distrib_dir(&mut self, pg_distrib_dir: Utf8PathBuf) {
-        self.pg_distrib_dir = BuilderValue::Set(pg_distrib_dir)
-    }
-
-    pub fn http_auth_type(&mut self, auth_type: AuthType) {
-        self.http_auth_type = BuilderValue::Set(auth_type)
-    }
-
-    pub fn pg_auth_type(&mut self, auth_type: AuthType) {
-        self.pg_auth_type = BuilderValue::Set(auth_type)
-    }
-
-    pub fn auth_validation_public_key_path(
-        &mut self,
-        auth_validation_public_key_path: Option<Utf8PathBuf>,
-    ) {
-        self.auth_validation_public_key_path = BuilderValue::Set(auth_validation_public_key_path)
-    }
-
-    pub fn remote_storage_config(&mut self, remote_storage_config: Option<RemoteStorageConfig>) {
-        self.remote_storage_config = BuilderValue::Set(remote_storage_config)
-    }
-
-    pub fn broker_endpoint(&mut self, broker_endpoint: Uri) {
-        self.broker_endpoint = BuilderValue::Set(broker_endpoint)
-    }
-
-    pub fn broker_keepalive_interval(&mut self, broker_keepalive_interval: Duration) {
-        self.broker_keepalive_interval = BuilderValue::Set(broker_keepalive_interval)
-    }
-
-    pub fn log_format(&mut self, log_format: LogFormat) {
-        self.log_format = BuilderValue::Set(log_format)
-    }
-
-    pub fn concurrent_tenant_warmup(&mut self, u: NonZeroUsize) {
-        self.concurrent_tenant_warmup = BuilderValue::Set(u);
-    }
-
-    pub fn concurrent_tenant_size_logical_size_queries(&mut self, u: NonZeroUsize) {
-        self.concurrent_tenant_size_logical_size_queries = BuilderValue::Set(u);
-    }
-
-    pub fn metric_collection_interval(&mut self, metric_collection_interval: Duration) {
-        self.metric_collection_interval = BuilderValue::Set(metric_collection_interval)
-    }
-
-    pub fn metric_collection_endpoint(&mut self, metric_collection_endpoint: Option<Url>) {
-        self.metric_collection_endpoint = BuilderValue::Set(metric_collection_endpoint)
-    }
-
-    pub fn metric_collection_bucket(
-        &mut self,
-        metric_collection_bucket: Option<RemoteStorageConfig>,
-    ) {
-        self.metric_collection_bucket = BuilderValue::Set(metric_collection_bucket)
-    }
-
-    pub fn synthetic_size_calculation_interval(
-        &mut self,
-        synthetic_size_calculation_interval: Duration,
-    ) {
-        self.synthetic_size_calculation_interval =
-            BuilderValue::Set(synthetic_size_calculation_interval)
-    }
-
-    pub fn test_remote_failures(&mut self, fail_first: u64) {
-        self.test_remote_failures = BuilderValue::Set(fail_first);
-    }
-
-    pub fn disk_usage_based_eviction(&mut self, value: Option<DiskUsageEvictionTaskConfig>) {
-        self.disk_usage_based_eviction = BuilderValue::Set(value);
-    }
-
-    pub fn ondemand_download_behavior_treat_error_as_warn(
-        &mut self,
-        ondemand_download_behavior_treat_error_as_warn: bool,
-    ) {
-        self.ondemand_download_behavior_treat_error_as_warn =
-            BuilderValue::Set(ondemand_download_behavior_treat_error_as_warn);
-    }
-
-    pub fn background_task_maximum_delay(&mut self, delay: Duration) {
-        self.background_task_maximum_delay = BuilderValue::Set(delay);
-    }
-
-    pub fn control_plane_api(&mut self, api: Option<Url>) {
-        self.control_plane_api = BuilderValue::Set(api)
-    }
-
-    pub fn control_plane_api_token(&mut self, token: Option<SecretString>) {
-        self.control_plane_api_token = BuilderValue::Set(token)
-    }
-
-    pub fn control_plane_emergency_mode(&mut self, enabled: bool) {
-        self.control_plane_emergency_mode = BuilderValue::Set(enabled)
-    }
-
-    pub fn heatmap_upload_concurrency(&mut self, value: usize) {
-        self.heatmap_upload_concurrency = BuilderValue::Set(value)
-    }
-
-    pub fn secondary_download_concurrency(&mut self, value: usize) {
-        self.secondary_download_concurrency = BuilderValue::Set(value)
-    }
-
-    pub fn ingest_batch_size(&mut self, ingest_batch_size: u64) {
-        self.ingest_batch_size = BuilderValue::Set(ingest_batch_size)
-    }
-
-    pub fn virtual_file_io_engine(&mut self, value: virtual_file::IoEngineKind) {
-        self.virtual_file_io_engine = BuilderValue::Set(value);
-    }
-
-    pub fn get_max_vectored_read_bytes(&mut self, value: MaxVectoredReadBytes) {
-        self.max_vectored_read_bytes = BuilderValue::Set(value);
-    }
-
-    pub fn get_image_compression(&mut self, value: ImageCompressionAlgorithm) {
-        self.image_compression = BuilderValue::Set(value);
-    }
-
-    pub fn get_ephemeral_bytes_per_memory_kb(&mut self, value: usize) {
-        self.ephemeral_bytes_per_memory_kb = BuilderValue::Set(value);
-    }
-
-    pub fn l0_flush(&mut self, value: L0FlushConfig) {
-        self.l0_flush = BuilderValue::Set(value);
-    }
-
-    pub fn compact_level0_phase1_value_access(&mut self, value: CompactL0Phase1ValueAccess) {
-        self.compact_level0_phase1_value_access = BuilderValue::Set(value);
-    }
-
-    pub fn virtual_file_direct_io(&mut self, value: virtual_file::DirectIoMode) {
-        self.virtual_file_direct_io = BuilderValue::Set(value);
-    }
-
-    pub fn io_buffer_alignment(&mut self, value: usize) {
-        self.io_buffer_alignment = BuilderValue::Set(value);
-    }
-
-    pub fn build(self, id: NodeId) -> anyhow::Result<PageServerConf> {
-        let default = Self::default_values();
-
-        macro_rules! conf {
-            (USING DEFAULT { $($field:ident,)* } CUSTOM LOGIC { $($custom_field:ident : $custom_value:expr,)* } ) => {
-                PageServerConf {
-                    $(
-                        $field: self.$field.ok_or(stringify!($field), default.$field)?,
-                    )*
-                    $(
-                        $custom_field: $custom_value,
-                    )*
-                }
-            };
-        }
-
-        Ok(conf!(
-            USING DEFAULT
-            {
-                listen_pg_addr,
-                listen_http_addr,
-                availability_zone,
-                wait_lsn_timeout,
-                wal_redo_timeout,
-                superuser,
-                page_cache_size,
-                max_file_descriptors,
-                workdir,
-                pg_distrib_dir,
-                http_auth_type,
-                pg_auth_type,
-                auth_validation_public_key_path,
-                remote_storage_config,
-                broker_endpoint,
-                broker_keepalive_interval,
-                log_format,
-                metric_collection_interval,
-                metric_collection_endpoint,
-                metric_collection_bucket,
-                synthetic_size_calculation_interval,
-                disk_usage_based_eviction,
-                test_remote_failures,
-                ondemand_download_behavior_treat_error_as_warn,
-                background_task_maximum_delay,
-                control_plane_api,
-                control_plane_api_token,
-                control_plane_emergency_mode,
-                heatmap_upload_concurrency,
-                secondary_download_concurrency,
-                ingest_batch_size,
-                max_vectored_read_bytes,
-                image_compression,
-                ephemeral_bytes_per_memory_kb,
-                l0_flush,
-                compact_level0_phase1_value_access,
-                virtual_file_direct_io,
-                io_buffer_alignment,
-            }
-            CUSTOM LOGIC
-            {
-                id: id,
-                // TenantConf is handled separately
-                default_tenant_conf: TenantConf::default(),
-                concurrent_tenant_warmup: ConfigurableSemaphore::new({
-                    self
-                        .concurrent_tenant_warmup
-                        .ok_or("concurrent_tenant_warmpup",
-                               default.concurrent_tenant_warmup)?
-                }),
-                concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore::new(
-                    self
-                        .concurrent_tenant_size_logical_size_queries
-                        .ok_or("concurrent_tenant_size_logical_size_queries",
-                               default.concurrent_tenant_size_logical_size_queries.clone())?
-                ),
-                eviction_task_immitated_concurrent_logical_size_queries: ConfigurableSemaphore::new(
-                    // re-use `concurrent_tenant_size_logical_size_queries`
-                    self
-                        .concurrent_tenant_size_logical_size_queries
-                        .ok_or("eviction_task_immitated_concurrent_logical_size_queries",
-                               default.concurrent_tenant_size_logical_size_queries.clone())?,
-                ),
-                virtual_file_io_engine: match self.virtual_file_io_engine {
-                    BuilderValue::Set(v) => v,
-                    BuilderValue::NotSet => match crate::virtual_file::io_engine_feature_test().context("auto-detect virtual_file_io_engine")? {
-                        io_engine::FeatureTestResult::PlatformPreferred(v) => v, // make no noise
-                        io_engine::FeatureTestResult::Worse { engine, remark } => {
-                            // TODO: bubble this up to the caller so we can tracing::warn! it.
-                            eprintln!("auto-detected IO engine is not platform-preferred: engine={engine:?} remark={remark:?}");
-                            engine
-                        }
-                    },
-                },
-            }
-        ))
-    }
-}
 
 impl PageServerConf {
     //
@@ -878,134 +298,134 @@ impl PageServerConf {
     ///
     /// This leaves any options not present in the file in the built-in defaults.
     pub fn parse_and_validate(
-        node_id: NodeId,
-        toml: &Document,
+        id: NodeId,
+        config_toml: pageserver_api::config::ConfigToml,
         workdir: &Utf8Path,
     ) -> anyhow::Result<Self> {
-        let mut builder = PageServerConfigBuilder::new();
-        builder.workdir(workdir.to_owned());
+        let pageserver_api::config::ConfigToml {
+            listen_pg_addr,
+            listen_http_addr,
+            availability_zone,
+            wait_lsn_timeout,
+            wal_redo_timeout,
+            superuser,
+            page_cache_size,
+            max_file_descriptors,
+            pg_distrib_dir,
+            http_auth_type,
+            pg_auth_type,
+            auth_validation_public_key_path,
+            remote_storage,
+            broker_endpoint,
+            broker_keepalive_interval,
+            log_format,
+            metric_collection_interval,
+            metric_collection_endpoint,
+            metric_collection_bucket,
+            synthetic_size_calculation_interval,
+            disk_usage_based_eviction,
+            test_remote_failures,
+            ondemand_download_behavior_treat_error_as_warn,
+            background_task_maximum_delay,
+            control_plane_api,
+            control_plane_api_token,
+            control_plane_emergency_mode,
+            heatmap_upload_concurrency,
+            secondary_download_concurrency,
+            ingest_batch_size,
+            max_vectored_read_bytes,
+            image_compression,
+            ephemeral_bytes_per_memory_kb,
+            compact_level0_phase1_value_access: _,
+            l0_flush,
+            virtual_file_direct_io,
+            concurrent_tenant_warmup,
+            concurrent_tenant_size_logical_size_queries,
+            virtual_file_io_engine,
+            io_buffer_alignment,
+            tenant_config,
+        } = config_toml;
 
-        let mut t_conf = TenantConfOpt::default();
+        let mut conf = PageServerConf {
+            // ------------------------------------------------------------
+            // fields that are already fully validated by the ConfigToml Deserialize impl
+            // ------------------------------------------------------------
+            listen_pg_addr,
+            listen_http_addr,
+            availability_zone,
+            wait_lsn_timeout,
+            wal_redo_timeout,
+            superuser,
+            page_cache_size,
+            max_file_descriptors,
+            http_auth_type,
+            pg_auth_type,
+            auth_validation_public_key_path,
+            remote_storage_config: remote_storage,
+            broker_endpoint,
+            broker_keepalive_interval,
+            log_format,
+            metric_collection_interval,
+            metric_collection_endpoint,
+            metric_collection_bucket,
+            synthetic_size_calculation_interval,
+            disk_usage_based_eviction,
+            test_remote_failures,
+            ondemand_download_behavior_treat_error_as_warn,
+            background_task_maximum_delay,
+            control_plane_api,
+            control_plane_emergency_mode,
+            heatmap_upload_concurrency,
+            secondary_download_concurrency,
+            ingest_batch_size,
+            max_vectored_read_bytes,
+            image_compression,
+            ephemeral_bytes_per_memory_kb,
+            virtual_file_direct_io,
+            io_buffer_alignment,
 
-        for (key, item) in toml.iter() {
-            match key {
-                "listen_pg_addr" => builder.listen_pg_addr(parse_toml_string(key, item)?),
-                "listen_http_addr" => builder.listen_http_addr(parse_toml_string(key, item)?),
-                "availability_zone" => builder.availability_zone(Some(parse_toml_string(key, item)?)),
-                "wait_lsn_timeout" => builder.wait_lsn_timeout(parse_toml_duration(key, item)?),
-                "wal_redo_timeout" => builder.wal_redo_timeout(parse_toml_duration(key, item)?),
-                "initial_superuser_name" => builder.superuser(parse_toml_string(key, item)?),
-                "page_cache_size" => builder.page_cache_size(parse_toml_u64(key, item)? as usize),
-                "max_file_descriptors" => {
-                    builder.max_file_descriptors(parse_toml_u64(key, item)? as usize)
-                }
-                "pg_distrib_dir" => {
-                    builder.pg_distrib_dir(Utf8PathBuf::from(parse_toml_string(key, item)?))
-                }
-                "auth_validation_public_key_path" => builder.auth_validation_public_key_path(Some(
-                    Utf8PathBuf::from(parse_toml_string(key, item)?),
-                )),
-                "http_auth_type" => builder.http_auth_type(parse_toml_from_str(key, item)?),
-                "pg_auth_type" => builder.pg_auth_type(parse_toml_from_str(key, item)?),
-                "remote_storage" => {
-                    builder.remote_storage_config(Some(RemoteStorageConfig::from_toml(item).context("remote_storage")?))
-                }
-                "tenant_config" => {
-                    t_conf = TenantConfOpt::try_from(item.to_owned()).context(format!("failed to parse: '{key}'"))?;
-                }
-                "broker_endpoint" => builder.broker_endpoint(parse_toml_string(key, item)?.parse().context("failed to parse broker endpoint")?),
-                "broker_keepalive_interval" => builder.broker_keepalive_interval(parse_toml_duration(key, item)?),
-                "log_format" => builder.log_format(
-                    LogFormat::from_config(&parse_toml_string(key, item)?)?
-                ),
-                "concurrent_tenant_warmup" => builder.concurrent_tenant_warmup({
-                    let input = parse_toml_string(key, item)?;
-                    let permits = input.parse::<usize>().context("expected a number of initial permits, not {s:?}")?;
-                    NonZeroUsize::new(permits).context("initial semaphore permits out of range: 0, use other configuration to disable a feature")?
-                }),
-                "concurrent_tenant_size_logical_size_queries" => builder.concurrent_tenant_size_logical_size_queries({
-                    let input = parse_toml_string(key, item)?;
-                    let permits = input.parse::<usize>().context("expected a number of initial permits, not {s:?}")?;
-                    NonZeroUsize::new(permits).context("initial semaphore permits out of range: 0, use other configuration to disable a feature")?
-                }),
-                "metric_collection_interval" => builder.metric_collection_interval(parse_toml_duration(key, item)?),
-                "metric_collection_endpoint" => {
-                    let endpoint = parse_toml_string(key, item)?.parse().context("failed to parse metric_collection_endpoint")?;
-                    builder.metric_collection_endpoint(Some(endpoint));
-                },
-                "metric_collection_bucket" => {
-                    builder.metric_collection_bucket(Some(RemoteStorageConfig::from_toml(item)?))
-                }
-                "synthetic_size_calculation_interval" =>
-                    builder.synthetic_size_calculation_interval(parse_toml_duration(key, item)?),
-                "test_remote_failures" => builder.test_remote_failures(parse_toml_u64(key, item)?),
-                "disk_usage_based_eviction" => {
-                    tracing::info!("disk_usage_based_eviction: {:#?}", &item);
-                    builder.disk_usage_based_eviction(
-                        deserialize_from_item("disk_usage_based_eviction", item)
-                            .context("parse disk_usage_based_eviction")?
-                    )
-                },
-                "ondemand_download_behavior_treat_error_as_warn" => builder.ondemand_download_behavior_treat_error_as_warn(parse_toml_bool(key, item)?),
-                "background_task_maximum_delay" => builder.background_task_maximum_delay(parse_toml_duration(key, item)?),
-                "control_plane_api" => {
-                    let parsed = parse_toml_string(key, item)?;
-                    if parsed.is_empty() {
-                        builder.control_plane_api(None)
-                    } else {
-                        builder.control_plane_api(Some(parsed.parse().context("failed to parse control plane URL")?))
+            // ------------------------------------------------------------
+            // fields that require additional validation or custom handling
+            // ------------------------------------------------------------
+            workdir: workdir.to_owned(),
+            pg_distrib_dir: pg_distrib_dir.unwrap_or_else(|| {
+                std::env::current_dir()
+                    .expect("current_dir() failed")
+                    .try_into()
+                    .expect("current_dir() is not a valid Utf8Path")
+            }),
+            control_plane_api_token: control_plane_api_token.map(SecretString::from),
+            id,
+            default_tenant_conf: tenant_config,
+            concurrent_tenant_warmup: ConfigurableSemaphore::new(concurrent_tenant_warmup),
+            concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore::new(
+                concurrent_tenant_size_logical_size_queries,
+            ),
+            eviction_task_immitated_concurrent_logical_size_queries: ConfigurableSemaphore::new(
+                // re-use `concurrent_tenant_size_logical_size_queries`
+                concurrent_tenant_size_logical_size_queries,
+            ),
+            virtual_file_io_engine: match virtual_file_io_engine {
+                Some(v) => v,
+                None => match crate::virtual_file::io_engine_feature_test()
+                    .context("auto-detect virtual_file_io_engine")?
+                {
+                    io_engine::FeatureTestResult::PlatformPreferred(v) => v, // make no noise
+                    io_engine::FeatureTestResult::Worse { engine, remark } => {
+                        // TODO: bubble this up to the caller so we can tracing::warn! it.
+                        eprintln!("auto-detected IO engine is not platform-preferred: engine={engine:?} remark={remark:?}");
+                        engine
                     }
                 },
-                "control_plane_api_token" => {
-                    let parsed = parse_toml_string(key, item)?;
-                    if parsed.is_empty() {
-                        builder.control_plane_api_token(None)
-                    } else {
-                        builder.control_plane_api_token(Some(parsed.into()))
-                    }
-                },
-                "control_plane_emergency_mode" => {
-                    builder.control_plane_emergency_mode(parse_toml_bool(key, item)?)
-                },
-                "heatmap_upload_concurrency" => {
-                    builder.heatmap_upload_concurrency(parse_toml_u64(key, item)? as usize)
-                },
-                "secondary_download_concurrency" => {
-                    builder.secondary_download_concurrency(parse_toml_u64(key, item)? as usize)
-                },
-                "ingest_batch_size" => builder.ingest_batch_size(parse_toml_u64(key, item)?),
-                "virtual_file_io_engine" => {
-                    builder.virtual_file_io_engine(parse_toml_from_str("virtual_file_io_engine", item)?)
-                }
-                "max_vectored_read_bytes" => {
-                    let bytes = parse_toml_u64("max_vectored_read_bytes", item)? as usize;
-                    builder.get_max_vectored_read_bytes(
-                        MaxVectoredReadBytes(
-                            NonZeroUsize::new(bytes).expect("Max byte size of vectored read must be greater than 0")))
-                }
-                "image_compression" => {
-                    builder.get_image_compression(parse_toml_from_str("image_compression", item)?)
-                }
-                "ephemeral_bytes_per_memory_kb" => {
-                    builder.get_ephemeral_bytes_per_memory_kb(parse_toml_u64("ephemeral_bytes_per_memory_kb", item)? as usize)
-                }
-                "l0_flush" => {
-                    builder.l0_flush(utils::toml_edit_ext::deserialize_item(item).context("l0_flush")?)
-                }
-                "compact_level0_phase1_value_access" => {
-                    builder.compact_level0_phase1_value_access(utils::toml_edit_ext::deserialize_item(item).context("compact_level0_phase1_value_access")?)
-                }
-                "virtual_file_direct_io" => {
-                    builder.virtual_file_direct_io(utils::toml_edit_ext::deserialize_item(item).context("virtual_file_direct_io")?)
-                }
-                "io_buffer_alignment" => {
-                    builder.io_buffer_alignment(parse_toml_u64("io_buffer_alignment", item)? as usize)
-                }
-                _ => bail!("unrecognized pageserver option '{key}'"),
-            }
-        }
+            },
+            l0_flush: l0_flush
+                .map(crate::l0_flush::L0FlushConfig::from)
+                .unwrap_or_default(),
+        };
 
-        let mut conf = builder.build(node_id).context("invalid config")?;
+        // ------------------------------------------------------------
+        // custom validation code that covers more than one field in isolation
+        // ------------------------------------------------------------
 
         if conf.http_auth_type == AuthType::NeonJWT || conf.pg_auth_type == AuthType::NeonJWT {
             let auth_validation_public_key_path = conf
@@ -1019,10 +439,8 @@ impl PageServerConf {
             );
         }
 
-        conf.default_tenant_conf = t_conf.merge(TenantConf::default());
-
         IndexEntry::validate_checkpoint_distance(conf.default_tenant_conf.checkpoint_distance)
-            .map_err(|msg| anyhow::anyhow!("{msg}"))
+            .map_err(anyhow::Error::msg)
             .with_context(|| {
                 format!(
                     "effective checkpoint distance is unsupported: {}",
@@ -1042,128 +460,23 @@ impl PageServerConf {
     pub fn dummy_conf(repo_dir: Utf8PathBuf) -> Self {
         let pg_distrib_dir = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../pg_install");
 
-        PageServerConf {
-            id: NodeId(0),
+        let config_toml = pageserver_api::config::ConfigToml {
             wait_lsn_timeout: Duration::from_secs(60),
             wal_redo_timeout: Duration::from_secs(60),
-            page_cache_size: defaults::DEFAULT_PAGE_CACHE_SIZE,
-            max_file_descriptors: defaults::DEFAULT_MAX_FILE_DESCRIPTORS,
-            listen_pg_addr: defaults::DEFAULT_PG_LISTEN_ADDR.to_string(),
-            listen_http_addr: defaults::DEFAULT_HTTP_LISTEN_ADDR.to_string(),
-            availability_zone: None,
-            superuser: "cloud_admin".to_string(),
-            workdir: repo_dir,
-            pg_distrib_dir,
-            http_auth_type: AuthType::Trust,
-            pg_auth_type: AuthType::Trust,
-            auth_validation_public_key_path: None,
-            remote_storage_config: None,
-            default_tenant_conf: TenantConf::default(),
-            broker_endpoint: storage_broker::DEFAULT_ENDPOINT.parse().unwrap(),
-            broker_keepalive_interval: Duration::from_secs(5000),
-            log_format: LogFormat::from_str(defaults::DEFAULT_LOG_FORMAT).unwrap(),
-            concurrent_tenant_warmup: ConfigurableSemaphore::new(
-                NonZeroUsize::new(DEFAULT_CONCURRENT_TENANT_WARMUP)
-                    .expect("Invalid default constant"),
-            ),
-            concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore::default(),
-            eviction_task_immitated_concurrent_logical_size_queries: ConfigurableSemaphore::default(
-            ),
+            pg_distrib_dir: Some(pg_distrib_dir),
             metric_collection_interval: Duration::from_secs(60),
-            metric_collection_endpoint: defaults::DEFAULT_METRIC_COLLECTION_ENDPOINT,
-            metric_collection_bucket: None,
             synthetic_size_calculation_interval: Duration::from_secs(60),
-            disk_usage_based_eviction: None,
-            test_remote_failures: 0,
-            ondemand_download_behavior_treat_error_as_warn: false,
             background_task_maximum_delay: Duration::ZERO,
-            control_plane_api: None,
-            control_plane_api_token: None,
-            control_plane_emergency_mode: false,
-            heatmap_upload_concurrency: defaults::DEFAULT_HEATMAP_UPLOAD_CONCURRENCY,
-            secondary_download_concurrency: defaults::DEFAULT_SECONDARY_DOWNLOAD_CONCURRENCY,
-            ingest_batch_size: defaults::DEFAULT_INGEST_BATCH_SIZE,
-            virtual_file_io_engine: DEFAULT_VIRTUAL_FILE_IO_ENGINE.parse().unwrap(),
-            max_vectored_read_bytes: MaxVectoredReadBytes(
-                NonZeroUsize::new(defaults::DEFAULT_MAX_VECTORED_READ_BYTES)
-                    .expect("Invalid default constant"),
-            ),
-            image_compression: defaults::DEFAULT_IMAGE_COMPRESSION.parse().unwrap(),
-            ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB,
-            l0_flush: L0FlushConfig::default(),
-            compact_level0_phase1_value_access: CompactL0Phase1ValueAccess::default(),
-            virtual_file_direct_io: virtual_file::DirectIoMode::default(),
-            io_buffer_alignment: defaults::DEFAULT_IO_BUFFER_ALIGNMENT,
-        }
+            ..Default::default()
+        };
+        PageServerConf::parse_and_validate(NodeId(0), config_toml, &repo_dir).unwrap()
     }
 }
 
-#[derive(Deserialize)]
+#[derive(serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PageserverIdentity {
     pub id: NodeId,
-}
-
-// Helper functions to parse a toml Item
-
-fn parse_toml_string(name: &str, item: &Item) -> Result<String> {
-    let s = item
-        .as_str()
-        .with_context(|| format!("configure option {name} is not a string"))?;
-    Ok(s.to_string())
-}
-
-fn parse_toml_u64(name: &str, item: &Item) -> Result<u64> {
-    // A toml integer is signed, so it cannot represent the full range of an u64. That's OK
-    // for our use, though.
-    let i: i64 = item
-        .as_integer()
-        .with_context(|| format!("configure option {name} is not an integer"))?;
-    if i < 0 {
-        bail!("configure option {name} cannot be negative");
-    }
-    Ok(i as u64)
-}
-
-fn parse_toml_bool(name: &str, item: &Item) -> Result<bool> {
-    item.as_bool()
-        .with_context(|| format!("configure option {name} is not a bool"))
-}
-
-fn parse_toml_duration(name: &str, item: &Item) -> Result<Duration> {
-    let s = item
-        .as_str()
-        .with_context(|| format!("configure option {name} is not a string"))?;
-
-    Ok(humantime::parse_duration(s)?)
-}
-
-fn parse_toml_from_str<T>(name: &str, item: &Item) -> anyhow::Result<T>
-where
-    T: FromStr,
-    <T as FromStr>::Err: std::fmt::Display,
-{
-    let v = item
-        .as_str()
-        .with_context(|| format!("configure option {name} is not a string"))?;
-    T::from_str(v).map_err(|e| {
-        anyhow!(
-            "Failed to parse string as {parse_type} for configure option {name}: {e}",
-            parse_type = stringify!(T)
-        )
-    })
-}
-
-fn deserialize_from_item<T>(name: &str, item: &Item) -> anyhow::Result<T>
-where
-    T: serde::de::DeserializeOwned,
-{
-    // ValueDeserializer::new is not public, so use the ValueDeserializer's documented way
-    let deserializer = match item.clone().into_value() {
-        Ok(value) => value.into_deserializer(),
-        Err(item) => anyhow::bail!("toml_edit::Item '{item}' is not a toml_edit::Value"),
-    };
-    T::deserialize(deserializer).with_context(|| format!("deserializing item for node {name}"))
 }
 
 /// Configurable semaphore permits setting.
@@ -1227,469 +540,109 @@ impl ConfigurableSemaphore {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, num::NonZeroU32};
 
-    use camino_tempfile::{tempdir, Utf8TempDir};
-    use pageserver_api::models::EvictionPolicy;
-    use remote_storage::{RemoteStorageKind, S3Config};
-    use utils::serde_percent::Percent;
+    use camino::Utf8PathBuf;
+    use utils::id::NodeId;
 
-    use super::*;
-    use crate::DEFAULT_PG_VERSION;
-
-    const ALL_BASE_VALUES_TOML: &str = r#"
-# Initial configuration file created by 'pageserver --init'
-
-listen_pg_addr = '127.0.0.1:64000'
-listen_http_addr = '127.0.0.1:9898'
-
-wait_lsn_timeout = '111 s'
-wal_redo_timeout = '111 s'
-
-page_cache_size = 444
-max_file_descriptors = 333
-
-# initial superuser role name to use when creating a new tenant
-initial_superuser_name = 'zzzz'
-
-metric_collection_interval = '222 s'
-metric_collection_endpoint = 'http://localhost:80/metrics'
-synthetic_size_calculation_interval = '333 s'
-
-log_format = 'json'
-background_task_maximum_delay = '334 s'
-
-"#;
+    use super::PageServerConf;
 
     #[test]
-    fn parse_defaults() -> anyhow::Result<()> {
-        let tempdir = tempdir()?;
-        let (workdir, pg_distrib_dir) = prepare_fs(&tempdir)?;
-        let broker_endpoint = storage_broker::DEFAULT_ENDPOINT;
-        // we have to create dummy values to overcome the validation errors
-        let config_string =
-            format!("pg_distrib_dir='{pg_distrib_dir}'\nbroker_endpoint = '{broker_endpoint}'",);
-        let toml = config_string.parse()?;
-
-        let parsed_config = PageServerConf::parse_and_validate(NodeId(10), &toml, &workdir)
-            .unwrap_or_else(|e| panic!("Failed to parse config '{config_string}', reason: {e:?}"));
-
-        assert_eq!(
-            parsed_config,
-            PageServerConf {
-                id: NodeId(10),
-                listen_pg_addr: defaults::DEFAULT_PG_LISTEN_ADDR.to_string(),
-                listen_http_addr: defaults::DEFAULT_HTTP_LISTEN_ADDR.to_string(),
-                availability_zone: None,
-                wait_lsn_timeout: humantime::parse_duration(defaults::DEFAULT_WAIT_LSN_TIMEOUT)?,
-                wal_redo_timeout: humantime::parse_duration(defaults::DEFAULT_WAL_REDO_TIMEOUT)?,
-                superuser: defaults::DEFAULT_SUPERUSER.to_string(),
-                page_cache_size: defaults::DEFAULT_PAGE_CACHE_SIZE,
-                max_file_descriptors: defaults::DEFAULT_MAX_FILE_DESCRIPTORS,
-                workdir,
-                pg_distrib_dir,
-                http_auth_type: AuthType::Trust,
-                pg_auth_type: AuthType::Trust,
-                auth_validation_public_key_path: None,
-                remote_storage_config: None,
-                default_tenant_conf: TenantConf::default(),
-                broker_endpoint: storage_broker::DEFAULT_ENDPOINT.parse().unwrap(),
-                broker_keepalive_interval: humantime::parse_duration(
-                    storage_broker::DEFAULT_KEEPALIVE_INTERVAL
-                )?,
-                log_format: LogFormat::from_str(defaults::DEFAULT_LOG_FORMAT).unwrap(),
-                concurrent_tenant_warmup: ConfigurableSemaphore::new(
-                    NonZeroUsize::new(DEFAULT_CONCURRENT_TENANT_WARMUP).unwrap()
-                ),
-                concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore::default(),
-                eviction_task_immitated_concurrent_logical_size_queries:
-                    ConfigurableSemaphore::default(),
-                metric_collection_interval: humantime::parse_duration(
-                    defaults::DEFAULT_METRIC_COLLECTION_INTERVAL
-                )?,
-                metric_collection_endpoint: defaults::DEFAULT_METRIC_COLLECTION_ENDPOINT,
-                metric_collection_bucket: None,
-                synthetic_size_calculation_interval: humantime::parse_duration(
-                    defaults::DEFAULT_SYNTHETIC_SIZE_CALCULATION_INTERVAL
-                )?,
-                disk_usage_based_eviction: None,
-                test_remote_failures: 0,
-                ondemand_download_behavior_treat_error_as_warn: false,
-                background_task_maximum_delay: humantime::parse_duration(
-                    defaults::DEFAULT_BACKGROUND_TASK_MAXIMUM_DELAY
-                )?,
-                control_plane_api: None,
-                control_plane_api_token: None,
-                control_plane_emergency_mode: false,
-                heatmap_upload_concurrency: defaults::DEFAULT_HEATMAP_UPLOAD_CONCURRENCY,
-                secondary_download_concurrency: defaults::DEFAULT_SECONDARY_DOWNLOAD_CONCURRENCY,
-                ingest_batch_size: defaults::DEFAULT_INGEST_BATCH_SIZE,
-                virtual_file_io_engine: DEFAULT_VIRTUAL_FILE_IO_ENGINE.parse().unwrap(),
-                max_vectored_read_bytes: MaxVectoredReadBytes(
-                    NonZeroUsize::new(defaults::DEFAULT_MAX_VECTORED_READ_BYTES)
-                        .expect("Invalid default constant")
-                ),
-                image_compression: defaults::DEFAULT_IMAGE_COMPRESSION.parse().unwrap(),
-                ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB,
-                l0_flush: L0FlushConfig::default(),
-                compact_level0_phase1_value_access: CompactL0Phase1ValueAccess::default(),
-                virtual_file_direct_io: virtual_file::DirectIoMode::default(),
-                io_buffer_alignment: defaults::DEFAULT_IO_BUFFER_ALIGNMENT,
-            },
-            "Correct defaults should be used when no config values are provided"
-        );
-
-        Ok(())
-    }
-
-    #[test]
-    fn parse_basic_config() -> anyhow::Result<()> {
-        let tempdir = tempdir()?;
-        let (workdir, pg_distrib_dir) = prepare_fs(&tempdir)?;
-        let broker_endpoint = storage_broker::DEFAULT_ENDPOINT;
-
-        let config_string = format!(
-            "{ALL_BASE_VALUES_TOML}pg_distrib_dir='{pg_distrib_dir}'\nbroker_endpoint = '{broker_endpoint}'",
-        );
-        let toml = config_string.parse()?;
-
-        let parsed_config = PageServerConf::parse_and_validate(NodeId(10), &toml, &workdir)
-            .unwrap_or_else(|e| panic!("Failed to parse config '{config_string}', reason: {e:?}"));
-
-        assert_eq!(
-            parsed_config,
-            PageServerConf {
-                id: NodeId(10),
-                listen_pg_addr: "127.0.0.1:64000".to_string(),
-                listen_http_addr: "127.0.0.1:9898".to_string(),
-                availability_zone: None,
-                wait_lsn_timeout: Duration::from_secs(111),
-                wal_redo_timeout: Duration::from_secs(111),
-                superuser: "zzzz".to_string(),
-                page_cache_size: 444,
-                max_file_descriptors: 333,
-                workdir,
-                pg_distrib_dir,
-                http_auth_type: AuthType::Trust,
-                pg_auth_type: AuthType::Trust,
-                auth_validation_public_key_path: None,
-                remote_storage_config: None,
-                default_tenant_conf: TenantConf::default(),
-                broker_endpoint: storage_broker::DEFAULT_ENDPOINT.parse().unwrap(),
-                broker_keepalive_interval: Duration::from_secs(5),
-                log_format: LogFormat::Json,
-                concurrent_tenant_warmup: ConfigurableSemaphore::new(
-                    NonZeroUsize::new(DEFAULT_CONCURRENT_TENANT_WARMUP).unwrap()
-                ),
-                concurrent_tenant_size_logical_size_queries: ConfigurableSemaphore::default(),
-                eviction_task_immitated_concurrent_logical_size_queries:
-                    ConfigurableSemaphore::default(),
-                metric_collection_interval: Duration::from_secs(222),
-                metric_collection_endpoint: Some(Url::parse("http://localhost:80/metrics")?),
-                metric_collection_bucket: None,
-                synthetic_size_calculation_interval: Duration::from_secs(333),
-                disk_usage_based_eviction: None,
-                test_remote_failures: 0,
-                ondemand_download_behavior_treat_error_as_warn: false,
-                background_task_maximum_delay: Duration::from_secs(334),
-                control_plane_api: None,
-                control_plane_api_token: None,
-                control_plane_emergency_mode: false,
-                heatmap_upload_concurrency: defaults::DEFAULT_HEATMAP_UPLOAD_CONCURRENCY,
-                secondary_download_concurrency: defaults::DEFAULT_SECONDARY_DOWNLOAD_CONCURRENCY,
-                ingest_batch_size: 100,
-                virtual_file_io_engine: DEFAULT_VIRTUAL_FILE_IO_ENGINE.parse().unwrap(),
-                max_vectored_read_bytes: MaxVectoredReadBytes(
-                    NonZeroUsize::new(defaults::DEFAULT_MAX_VECTORED_READ_BYTES)
-                        .expect("Invalid default constant")
-                ),
-                image_compression: defaults::DEFAULT_IMAGE_COMPRESSION.parse().unwrap(),
-                ephemeral_bytes_per_memory_kb: defaults::DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB,
-                l0_flush: L0FlushConfig::default(),
-                compact_level0_phase1_value_access: CompactL0Phase1ValueAccess::default(),
-                virtual_file_direct_io: virtual_file::DirectIoMode::default(),
-                io_buffer_alignment: defaults::DEFAULT_IO_BUFFER_ALIGNMENT,
-            },
-            "Should be able to parse all basic config values correctly"
-        );
-
-        Ok(())
-    }
-
-    #[test]
-    fn parse_remote_fs_storage_config() -> anyhow::Result<()> {
-        let tempdir = tempdir()?;
-        let (workdir, pg_distrib_dir) = prepare_fs(&tempdir)?;
-        let broker_endpoint = "http://127.0.0.1:7777";
-
-        let local_storage_path = tempdir.path().join("local_remote_storage");
-
-        let identical_toml_declarations = &[
-            format!(
-                r#"[remote_storage]
-local_path = '{local_storage_path}'"#,
-            ),
-            format!("remote_storage={{local_path='{local_storage_path}'}}"),
-        ];
-
-        for remote_storage_config_str in identical_toml_declarations {
-            let config_string = format!(
-                r#"{ALL_BASE_VALUES_TOML}
-pg_distrib_dir='{pg_distrib_dir}'
-broker_endpoint = '{broker_endpoint}'
-
-{remote_storage_config_str}"#,
-            );
-
-            let toml = config_string.parse()?;
-
-            let parsed_remote_storage_config =
-                PageServerConf::parse_and_validate(NodeId(10), &toml, &workdir)
-                    .unwrap_or_else(|e| {
-                        panic!("Failed to parse config '{config_string}', reason: {e:?}")
-                    })
-                    .remote_storage_config
-                    .expect("Should have remote storage config for the local FS");
-
-            assert_eq!(
-                parsed_remote_storage_config,
-                RemoteStorageConfig {
-                    storage: RemoteStorageKind::LocalFs { local_path: local_storage_path.clone() },
-                    timeout: RemoteStorageConfig::DEFAULT_TIMEOUT,
-                },
-                "Remote storage config should correctly parse the local FS config and fill other storage defaults"
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn parse_remote_s3_storage_config() -> anyhow::Result<()> {
-        let tempdir = tempdir()?;
-        let (workdir, pg_distrib_dir) = prepare_fs(&tempdir)?;
-
-        let bucket_name = "some-sample-bucket".to_string();
-        let bucket_region = "eu-north-1".to_string();
-        let prefix_in_bucket = "test_prefix".to_string();
-        let endpoint = "http://localhost:5000".to_string();
-        let max_concurrent_syncs = NonZeroUsize::new(111).unwrap();
-        let max_sync_errors = NonZeroU32::new(222).unwrap();
-        let s3_concurrency_limit = NonZeroUsize::new(333).unwrap();
-        let broker_endpoint = "http://127.0.0.1:7777";
-
-        let identical_toml_declarations = &[
-            format!(
-                r#"[remote_storage]
-max_concurrent_syncs = {max_concurrent_syncs}
-max_sync_errors = {max_sync_errors}
-bucket_name = '{bucket_name}'
-bucket_region = '{bucket_region}'
-prefix_in_bucket = '{prefix_in_bucket}'
-endpoint = '{endpoint}'
-concurrency_limit = {s3_concurrency_limit}"#
-            ),
-            format!(
-                "remote_storage={{max_concurrent_syncs={max_concurrent_syncs}, max_sync_errors={max_sync_errors}, bucket_name='{bucket_name}',\
-                bucket_region='{bucket_region}', prefix_in_bucket='{prefix_in_bucket}', endpoint='{endpoint}', concurrency_limit={s3_concurrency_limit}}}",
-            ),
-        ];
-
-        for remote_storage_config_str in identical_toml_declarations {
-            let config_string = format!(
-                r#"{ALL_BASE_VALUES_TOML}
-pg_distrib_dir='{pg_distrib_dir}'
-broker_endpoint = '{broker_endpoint}'
-
-{remote_storage_config_str}"#,
-            );
-
-            let toml = config_string.parse()?;
-
-            let parsed_remote_storage_config =
-                PageServerConf::parse_and_validate(NodeId(10), &toml, &workdir)
-                    .unwrap_or_else(|e| {
-                        panic!("Failed to parse config '{config_string}', reason: {e:?}")
-                    })
-                    .remote_storage_config
-                    .expect("Should have remote storage config for S3");
-
-            assert_eq!(
-                parsed_remote_storage_config,
-                RemoteStorageConfig {
-                    storage: RemoteStorageKind::AwsS3(S3Config {
-                        bucket_name: bucket_name.clone(),
-                        bucket_region: bucket_region.clone(),
-                        prefix_in_bucket: Some(prefix_in_bucket.clone()),
-                        endpoint: Some(endpoint.clone()),
-                        concurrency_limit: s3_concurrency_limit,
-                        max_keys_per_list_response: None,
-                        upload_storage_class: None,
-                    }),
-                    timeout: RemoteStorageConfig::DEFAULT_TIMEOUT,
-                },
-                "Remote storage config should correctly parse the S3 config"
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn parse_incorrect_tenant_config() -> anyhow::Result<()> {
-        let config_string = r#"
-            [tenant_config]
-            checkpoint_distance = -1 # supposed to be an u64
-        "#
-        .to_string();
-
-        let toml: Document = config_string.parse()?;
-        let item = toml.get("tenant_config").unwrap();
-        let error = TenantConfOpt::try_from(item.to_owned()).unwrap_err();
-
-        let expected_error_str = "checkpoint_distance: invalid value: integer `-1`, expected u64";
-        assert_eq!(error.to_string(), expected_error_str);
-
-        Ok(())
-    }
-
-    #[test]
-    fn parse_override_tenant_config() -> anyhow::Result<()> {
-        let config_string = r#"tenant_config={ min_resident_size_override =  400 }"#.to_string();
-
-        let toml: Document = config_string.parse()?;
-        let item = toml.get("tenant_config").unwrap();
-        let conf = TenantConfOpt::try_from(item.to_owned()).unwrap();
-
-        assert_eq!(conf.min_resident_size_override, Some(400));
-
-        Ok(())
-    }
-
-    #[test]
-    fn eviction_pageserver_config_parse() -> anyhow::Result<()> {
-        let tempdir = tempdir()?;
-        let (workdir, pg_distrib_dir) = prepare_fs(&tempdir)?;
-
-        let pageserver_conf_toml = format!(
-            r#"pg_distrib_dir = "{pg_distrib_dir}"
-metric_collection_endpoint = "http://sample.url"
-metric_collection_interval = "10min"
-
-[disk_usage_based_eviction]
-max_usage_pct = 80
-min_avail_bytes = 0
-period = "10s"
-
-[tenant_config]
-evictions_low_residence_duration_metric_threshold = "20m"
-
-[tenant_config.eviction_policy]
-kind = "LayerAccessThreshold"
-period = "20m"
-threshold = "20m"
-"#,
-        );
-        let toml: Document = pageserver_conf_toml.parse()?;
-        let conf = PageServerConf::parse_and_validate(NodeId(333), &toml, &workdir)?;
-
-        assert_eq!(conf.pg_distrib_dir, pg_distrib_dir);
-        assert_eq!(
-            conf.metric_collection_endpoint,
-            Some("http://sample.url".parse().unwrap())
-        );
-        assert_eq!(
-            conf.metric_collection_interval,
-            Duration::from_secs(10 * 60)
-        );
-        assert_eq!(
-            conf.default_tenant_conf
-                .evictions_low_residence_duration_metric_threshold,
-            Duration::from_secs(20 * 60)
-        );
-
-        // Assert that the node id provided by the indentity file (threaded
-        // through the call to [`PageServerConf::parse_and_validate`] is
-        // used.
-        assert_eq!(conf.id, NodeId(333));
-        assert_eq!(
-            conf.disk_usage_based_eviction,
-            Some(DiskUsageEvictionTaskConfig {
-                max_usage_pct: Percent::new(80).unwrap(),
-                min_avail_bytes: 0,
-                period: Duration::from_secs(10),
-                #[cfg(feature = "testing")]
-                mock_statvfs: None,
-                eviction_order: Default::default(),
-            })
-        );
-
-        match &conf.default_tenant_conf.eviction_policy {
-            EvictionPolicy::LayerAccessThreshold(eviction_threshold) => {
-                assert_eq!(eviction_threshold.period, Duration::from_secs(20 * 60));
-                assert_eq!(eviction_threshold.threshold, Duration::from_secs(20 * 60));
-            }
-            other => unreachable!("Unexpected eviction policy tenant settings: {other:?}"),
-        }
-
-        Ok(())
-    }
-
-    #[test]
-    fn parse_imitation_only_pageserver_config() {
-        let tempdir = tempdir().unwrap();
-        let (workdir, pg_distrib_dir) = prepare_fs(&tempdir).unwrap();
-
-        let pageserver_conf_toml = format!(
-            r#"pg_distrib_dir = "{pg_distrib_dir}"
-metric_collection_endpoint = "http://sample.url"
-metric_collection_interval = "10min"
-
-[tenant_config]
-evictions_low_residence_duration_metric_threshold = "20m"
-
-[tenant_config.eviction_policy]
-kind = "OnlyImitiate"
-period = "20m"
-threshold = "20m"
-"#,
-        );
-        let toml: Document = pageserver_conf_toml.parse().unwrap();
-        let conf = PageServerConf::parse_and_validate(NodeId(222), &toml, &workdir).unwrap();
-
-        match &conf.default_tenant_conf.eviction_policy {
-            EvictionPolicy::OnlyImitiate(t) => {
-                assert_eq!(t.period, Duration::from_secs(20 * 60));
-                assert_eq!(t.threshold, Duration::from_secs(20 * 60));
-            }
-            other => unreachable!("Unexpected eviction policy tenant settings: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn empty_remote_storage_is_error() {
-        let tempdir = tempdir().unwrap();
-        let (workdir, _) = prepare_fs(&tempdir).unwrap();
+    fn test_empty_config_toml_is_valid() {
+        // we use Default impl of everything in this situation
         let input = r#"
-remote_storage = {}
         "#;
-        let doc = toml_edit::Document::from_str(input).unwrap();
-        let err = PageServerConf::parse_and_validate(NodeId(222), &doc, &workdir)
-            .expect_err("empty remote_storage field should fail, don't specify it if you want no remote_storage");
-        assert!(format!("{err}").contains("remote_storage"), "{err}");
+        let config_toml = toml_edit::de::from_str::<pageserver_api::config::ConfigToml>(input)
+            .expect("empty config is valid");
+        let workdir = Utf8PathBuf::from("/nonexistent");
+        PageServerConf::parse_and_validate(NodeId(0), config_toml, &workdir)
+            .expect("parse_and_validate");
     }
 
-    fn prepare_fs(tempdir: &Utf8TempDir) -> anyhow::Result<(Utf8PathBuf, Utf8PathBuf)> {
-        let tempdir_path = tempdir.path();
+    #[test]
+    fn test_compactl0_phase1_access_mode_is_ignored_silently() {
+        let input = indoc::indoc! {r#"
+            [compact_level0_phase1_value_access]
+            mode = "streaming-kmerge"
+            validate = "key-lsn-value"
+        "#};
+        toml_edit::de::from_str::<pageserver_api::config::ConfigToml>(input).unwrap();
+    }
 
-        let workdir = tempdir_path.join("workdir");
-        fs::create_dir_all(&workdir)?;
+    /// If there's a typo in the pageserver config, we'd rather catch that typo
+    /// and fail pageserver startup than silently ignoring the typo, leaving whoever
+    /// made it in the believe that their config change is effective.
+    ///
+    /// The default in serde is to allow unknown fields, so, we rely
+    /// on developer+review discipline to add `deny_unknown_fields` when adding
+    /// new structs to the config, and these tests here as a regression test.
+    ///
+    /// The alternative to all of this would be to allow unknown fields in the config.
+    /// To catch them, we could have a config check tool or mgmt API endpoint that
+    /// compares the effective config with the TOML on disk and makes sure that
+    /// the on-disk TOML is a strict subset of the effective config.
+    mod unknown_fields_handling {
+        macro_rules! test {
+            ($short_name:ident, $input:expr) => {
+                #[test]
+                fn $short_name() {
+                    let input = $input;
+                    let err = toml_edit::de::from_str::<pageserver_api::config::ConfigToml>(&input)
+                        .expect_err("some_invalid_field is an invalid field");
+                    dbg!(&err);
+                    assert!(err.to_string().contains("some_invalid_field"));
+                }
+            };
+        }
+        use indoc::indoc;
 
-        let pg_distrib_dir = tempdir_path.join("pg_distrib");
-        let pg_distrib_dir_versioned = pg_distrib_dir.join(format!("v{DEFAULT_PG_VERSION}"));
-        fs::create_dir_all(&pg_distrib_dir_versioned)?;
-        let postgres_bin_dir = pg_distrib_dir_versioned.join("bin");
-        fs::create_dir_all(&postgres_bin_dir)?;
-        fs::write(postgres_bin_dir.join("postgres"), "I'm postgres, trust me")?;
+        test!(
+            toplevel,
+            indoc! {r#"
+                some_invalid_field = 23
+            "#}
+        );
 
-        Ok((workdir, pg_distrib_dir))
+        test!(
+            toplevel_nested,
+            indoc! {r#"
+                [some_invalid_field]
+                foo = 23
+            "#}
+        );
+
+        test!(
+            disk_usage_based_eviction,
+            indoc! {r#"
+                [disk_usage_based_eviction]
+                some_invalid_field = 23
+            "#}
+        );
+
+        test!(
+            tenant_config,
+            indoc! {r#"
+                [tenant_config]
+                some_invalid_field = 23
+            "#}
+        );
+
+        test!(
+            l0_flush,
+            indoc! {r#"
+                [l0_flush]
+                mode = "direct"
+                some_invalid_field = 23
+            "#}
+        );
+
+        // TODO: fix this => https://github.com/neondatabase/neon/issues/8915
+        // test!(
+        //     remote_storage_config,
+        //     indoc! {r#"
+        //         [remote_storage_config]
+        //         local_path = "/nonexistent"
+        //         some_invalid_field = 23
+        //     "#}
+        // );
     }
 }
