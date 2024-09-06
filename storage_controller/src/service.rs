@@ -451,7 +451,7 @@ struct ShardSplitParams {
 // When preparing for a shard split, we may either choose to proceed with the split,
 // or find that the work is already done and return NoOp.
 enum ShardSplitAction {
-    Split(ShardSplitParams),
+    Split(Box<ShardSplitParams>),
     NoOp(TenantShardSplitResponse),
 }
 
@@ -4186,7 +4186,7 @@ impl Service {
         let policy = policy.unwrap();
         let config = config.unwrap();
 
-        Ok(ShardSplitAction::Split(ShardSplitParams {
+        Ok(ShardSplitAction::Split(Box::new(ShardSplitParams {
             old_shard_count,
             new_shard_count: ShardCount::new(split_req.new_shard_count),
             new_stripe_size: split_req.new_stripe_size,
@@ -4194,13 +4194,13 @@ impl Service {
             policy,
             config,
             shard_ident,
-        }))
+        })))
     }
 
     async fn do_tenant_shard_split(
         &self,
         tenant_id: TenantId,
-        params: ShardSplitParams,
+        params: Box<ShardSplitParams>,
     ) -> Result<(TenantShardSplitResponse, Vec<ReconcilerWaiter>), ApiError> {
         // FIXME: we have dropped self.inner lock, and not yet written anything to the database: another
         // request could occur here, deleting or mutating the tenant.  begin_shard_split checks that the
@@ -4216,7 +4216,7 @@ impl Service {
             policy,
             config,
             shard_ident,
-        } = params;
+        } = *params;
 
         // Drop any secondary locations: pageservers do not support splitting these, and in any case the
         // end-state for a split tenant will usually be to have secondary locations on different nodes.
