@@ -36,7 +36,7 @@ jobs:
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_DEV }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY_DEV }}
 
-    runs-on: small
+    runs-on: us-east-2
     container:
       image: neondatabase/build-tools:pinned
       options: --init
