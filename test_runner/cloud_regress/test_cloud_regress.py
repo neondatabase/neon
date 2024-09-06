@@ -53,7 +53,7 @@ def test_cloud_regress(
             regress_cmd = [
                 str(regress_bin),
                 "--inputdir=.",
-                f"--bindir={pg_distrib_dir}/{pg_version.v_prefixed}/bin",
+                f"--bindir={pg_distrib_dir}/bin",
                 "--dlpath=/usr/local/lib",
                 "--max-concurrent-tests=20",
                 "--schedule=./parallel_schedule",
