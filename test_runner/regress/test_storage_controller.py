@@ -2048,8 +2048,11 @@ def test_storage_controller_step_down(neon_env_builder: NeonEnvBuilder):
     # Make a change to the tenant config to trigger a slow reconcile
     virtual_ps_http = PageserverHttpClient(env.storage_controller_port, lambda: True)
     virtual_ps_http.patch_tenant_config_client_side(tid, {"compaction_threshold": 5}, None)
-    env.storage_controller.allowed_errors.append(
-        ".*Accepted configuration update but reconciliation failed.*"
+    env.storage_controller.allowed_errors.extend(
+        [
+            ".*Accepted configuration update but reconciliation failed.*",
+            ".*Leader is stepped down instance",
+        ]
     )
 
     observed_state = env.storage_controller.step_down()
@@ -2072,9 +2075,9 @@ def test_storage_controller_step_down(neon_env_builder: NeonEnvBuilder):
     assert "compaction_threshold" in ps_tenant_conf.effective_config
     assert ps_tenant_conf.effective_config["compaction_threshold"] == 5
 
-    # Validate that the storcon is not replying to the usual requests
-    # once it has stepped down.
-    with pytest.raises(StorageControllerApiException, match="stepped_down"):
+    # Validate that the storcon attempts to forward the request, but stops.
+    # when it realises it is still the current leader.
+    with pytest.raises(StorageControllerApiException, match="Leader is stepped down instance"):
         env.storage_controller.tenant_list()
 
     # Validate that we can step down multiple times and the observed state
@@ -2220,6 +2223,15 @@ def test_storage_controller_leadership_transfer(
 
     env.storage_controller.wait_until_ready()
     env.storage_controller.consistency_check()
+
+    if not step_down_times_out:
+        # Check that the stepped down instance forwards requests
+        # to the new leader while it's still running.
+        storage_controller_proxy.route_to(f"http://127.0.0.1:{storage_controller_1_port}")
+        env.storage_controller.tenant_list()
+        env.storage_controller.node_configure(env.pageservers[0].id, {"scheduling": "Pause"})
+        status = env.storage_controller.node_status(env.pageservers[0].id)
+        assert status["scheduling"] == "Pause"
 
     if step_down_times_out:
         env.storage_controller.allowed_errors.extend(
