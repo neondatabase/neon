@@ -161,8 +161,7 @@ socket2 = "0.5"
 strum = "0.24"
 strum_macros = "0.24"
 "subtle"  = "2.5.0"
-# Our PR https://github.com/nical/rust_debug/pull/4 has been merged but no new version released yet
-svg_fmt = { git = "https://github.com/nical/rust_debug", rev = "28a7d96eecff2f28e75b1ea09f2d499a60d0e3b4" }
+svg_fmt = "0.4.3"
 sync_wrapper = "0.1.2"
 tar = "0.4"
 task-local-extensions = "0.1.4"
