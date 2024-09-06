@@ -305,8 +305,10 @@ pub struct TenantConfig {
     pub lsn_lease_length_for_ts: Option<String>,
 }
 
-/// The policy for the aux file storage. It can be switched through `switch_aux_file_policy`
-/// tenant config. When the first aux file written, the policy will be persisted in the
+/// The policy for the aux file storage.
+///
+/// It can be switched through `switch_aux_file_policy` tenant config.
+/// When the first aux file written, the policy will be persisted in the
 /// `index_part.json` file and has a limited migration path.
 ///
 /// Currently, we only allow the following migration path:
@@ -896,7 +898,9 @@ pub struct WalRedoManagerStatus {
     pub process: Option<WalRedoManagerProcessStatus>,
 }
 
-/// The progress of a secondary tenant is mostly useful when doing a long running download: e.g. initiating
+/// The progress of a secondary tenant.
+///
+/// It is mostly useful when doing a long running download: e.g. initiating
 /// a download job, timing out while waiting for it to run, and then inspecting this status to understand
 /// what's happening.
 #[derive(Default, Debug, Serialize, Deserialize, Clone)]

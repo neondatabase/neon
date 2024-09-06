@@ -60,7 +60,8 @@ impl TimelinesSet {
     }
 }
 
-/// Guard is used to add or remove timeline from the set.
+/// Guard is used to add or remove timelines from the set.
+///
 /// If the timeline present in set, it will be removed from it on drop.
 /// Note: do not use more than one guard for the same timeline, it caches the presence state.
 /// It is designed to be used in the manager task only.

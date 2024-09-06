@@ -448,8 +448,10 @@ async fn network_write<IO: AsyncRead + AsyncWrite + Unpin>(
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Encapsulates a task which takes messages from msg_rx, processes and pushes
-/// replies to reply_tx; reading from socket and writing to disk in parallel is
-/// beneficial for performance, this struct provides writing to disk part.
+/// replies to reply_tx.
+///
+/// Reading from socket and writing to disk in parallel is beneficial for
+/// performance, this struct provides the writing to disk part.
 pub struct WalAcceptor {
     tli: WalResidentTimeline,
     msg_rx: Receiver<ProposerAcceptorMessage>,

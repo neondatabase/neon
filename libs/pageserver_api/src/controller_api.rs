@@ -134,6 +134,8 @@ pub struct TenantDescribeResponseShard {
     pub scheduling_policy: ShardSchedulingPolicy,
 }
 
+/// Migration request for a given tenant shard to a given node.
+///
 /// Explicitly migrating a particular shard is a low level operation
 /// TODO: higher level "Reschedule tenant" operation where the request
 /// specifies some constraints, e.g. asking it to get off particular node(s)

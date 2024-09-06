@@ -1021,9 +1021,10 @@ impl Timeline {
 }
 
 /// DatadirModification represents an operation to ingest an atomic set of
-/// updates to the repository. It is created by the 'begin_record'
-/// function. It is called for each WAL record, so that all the modifications
-/// by a one WAL record appear atomic.
+/// updates to the repository.
+///
+/// It is created by the 'begin_record' function. It is called for each WAL
+/// record, so that all the modifications by a one WAL record appear atomic.
 pub struct DatadirModification<'a> {
     /// The timeline this modification applies to. You can access this to
     /// read the state, but note that any pending updates are *not* reflected
@@ -2048,6 +2049,7 @@ impl<'a> DatadirModification<'a> {
 
 /// This struct facilitates accessing either a committed key from the timeline at a
 /// specific LSN, or the latest uncommitted key from a pending modification.
+///
 /// During WAL ingestion, the records from multiple LSNs may be batched in the same
 /// modification before being flushed to the timeline. Hence, the routines in WalIngest
 /// need to look up the keys in the modification first before looking them up in the

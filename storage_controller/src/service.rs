@@ -116,7 +116,9 @@ pub(crate) const STARTUP_RECONCILE_TIMEOUT: Duration = Duration::from_secs(30);
 pub const MAX_OFFLINE_INTERVAL_DEFAULT: Duration = Duration::from_secs(30);
 
 /// How long a node may be unresponsive to heartbeats during start up before we declare it
-/// offline. This is much more lenient than [`MAX_OFFLINE_INTERVAL_DEFAULT`] since the pageserver's
+/// offline.
+///
+/// This is much more lenient than [`MAX_OFFLINE_INTERVAL_DEFAULT`] since the pageserver's
 /// handling of the re-attach response may take a long time and blocks heartbeats from
 /// being handled on the pageserver side.
 pub const MAX_WARMING_UP_INTERVAL_DEFAULT: Duration = Duration::from_secs(300);

@@ -6,9 +6,10 @@ pub enum YieldingLoopError {
     Cancelled,
 }
 
-/// Helper for long synchronous loops, e.g. over all tenants in the system.  Periodically
-/// yields to avoid blocking the executor, and after resuming checks the provided
-/// cancellation token to drop out promptly on shutdown.
+/// Helper for long synchronous loops, e.g. over all tenants in the system.
+///
+/// Periodically yields to avoid blocking the executor, and after resuming
+/// checks the provided cancellation token to drop out promptly on shutdown.
 #[inline(always)]
 pub async fn yielding_loop<I, T, F>(
     interval: usize,
