@@ -1,16 +1,16 @@
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import List, Optional
-from concurrent.futures import ThreadPoolExecutor
 
 import pytest
+from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     LogCursor,
     NeonEnvBuilder,
     NeonPageserver,
 )
 from fixtures.pageserver.utils import wait_timeline_detail_404
-from fixtures.log_helper import log
 
 
 @pytest.mark.parametrize("sharded", [True, False])
@@ -79,6 +79,7 @@ def test_gc_blocking_by_timeline(neon_env_builder: NeonEnvBuilder, sharded: bool
 
 def wait_for_another_gc_round():
     time.sleep(2)
+
 
 @dataclass
 class ScrollableLog:
