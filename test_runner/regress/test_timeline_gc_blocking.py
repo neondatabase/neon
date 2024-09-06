@@ -109,7 +109,6 @@ class ManyPageservers:
             one.assert_log_does_not_contain(what)
 
     def restart(self):
-
         def do_restart(x: ScrollableLog):
             x.pageserver.restart()
 
