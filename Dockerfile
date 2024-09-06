@@ -36,6 +36,7 @@ COPY --from=pg-build /home/nonroot/pg_install/v16/lib                       pg_i
 COPY --chown=nonroot . .
 
 ARG ADDITIONAL_RUSTFLAGS
+RUN rustc --print=cfg
 RUN set -e \
     && PQ_LIB_DIR=$(pwd)/pg_install/v16/lib RUSTFLAGS="-Clinker=clang -Clink-arg=-fuse-ld=mold -Clink-arg=-Wl,--no-rosegment ${ADDITIONAL_RUSTFLAGS}" cargo build \
       --bin pg_sni_router  \
