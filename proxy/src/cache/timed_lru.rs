@@ -16,7 +16,7 @@ use tracing::debug;
 // On the other hand, `hashlink` has good download stats and appears to be maintained.
 use hashlink::{linked_hash_map::RawEntryMut, LruCache};
 
-use super::{common::Cached, *};
+use super::{common::Cached, timed_lru, Cache};
 
 /// An implementation of timed LRU cache with fixed capacity.
 /// Key properties:

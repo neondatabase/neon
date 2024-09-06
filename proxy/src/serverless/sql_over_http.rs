@@ -745,22 +745,20 @@ impl BatchQueryData {
             builder = builder.deferrable(true);
         }
 
-        let transaction = builder.start().await.map_err(|e| {
+        let transaction = builder.start().await.inspect_err(|_| {
             // if we cannot start a transaction, we should return immediately
             // and not return to the pool. connection is clearly broken
             discard.discard();
-            e
         })?;
 
         let json_output =
             match query_batch(cancel.child_token(), &transaction, self, parsed_headers).await {
                 Ok(json_output) => {
                     info!("commit");
-                    let status = transaction.commit().await.map_err(|e| {
+                    let status = transaction.commit().await.inspect_err(|_| {
                         // if we cannot commit - for now don't return connection to pool
                         // TODO: get a query status from the error
                         discard.discard();
-                        e
                     })?;
                     discard.check_idle(status);
                     json_output
@@ -776,11 +774,10 @@ impl BatchQueryData {
                 }
                 Err(err) => {
                     info!("rollback");
-                    let status = transaction.rollback().await.map_err(|e| {
+                    let status = transaction.rollback().await.inspect_err(|_| {
                         // if we cannot rollback - for now don't return connection to pool
                         // TODO: get a query status from the error
                         discard.discard();
-                        e
                     })?;
                     discard.check_idle(status);
                     return Err(err);
