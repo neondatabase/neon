@@ -271,6 +271,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: sync(1)
+        shell: bash -euxo pipefail {0}
+        run: sync
+
       - name: Pytest benchmarks
         uses: ./.github/actions/run-python-test-set
         with:
