@@ -1057,6 +1057,24 @@ def test_restart_endpoint(neon_env_builder: NeonEnvBuilder):
         endpoint.start()
 
 
+# Try restarting endpoint immediately after xlog switch.
+# https://github.com/neondatabase/neon/issues/8911
+def test_restart_endpoint_after_switch_wal(neon_env_builder: NeonEnvBuilder):
+    env = neon_env_builder.init_start()
+
+    endpoint = env.endpoints.create_start("main")
+
+    endpoint.safe_psql("create table t (i int)")
+
+    endpoint.safe_psql("SELECT pg_switch_wal()")
+
+    # we want immediate shutdown to have endpoint restart on xlog switch record,
+    # so prevent shutdown checkpoint.
+    endpoint.stop(mode="immediate")
+    endpoint = env.endpoints.create_start("main")
+    endpoint.safe_psql("SELECT 'works'")
+
+
 # Context manager which logs passed time on exit.
 class DurationLogger:
     def __init__(self, desc):
