@@ -261,6 +261,15 @@ async fn main() -> anyhow::Result<()> {
     // Change into the data directory.
     std::env::set_current_dir(&workdir)?;
 
+    // Prevent running multiple safekeepers on the same directory
+    let lock_file_path = workdir.join(PID_FILE_NAME);
+    let lock_file =
+        pid_file::claim_for_current_process(&lock_file_path).context("claim pid file")?;
+    info!("claimed pid file at {lock_file_path:?}");
+    // ensure that the lock file is held even if the main thread of the process is panics
+    // we need to release the lock file only when the current process is gone
+    std::mem::forget(lock_file);
+
     // Set or read our ID.
     let id = set_id(&workdir, args.id.map(NodeId))?;
     if args.init {
@@ -364,16 +373,6 @@ async fn main() -> anyhow::Result<()> {
 type JoinTaskRes = Result<anyhow::Result<()>, JoinError>;
 
 async fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
-    // Prevent running multiple safekeepers on the same directory
-    let lock_file_path = conf.workdir.join(PID_FILE_NAME);
-    let lock_file =
-        pid_file::claim_for_current_process(&lock_file_path).context("claim pid file")?;
-    info!("claimed pid file at {lock_file_path:?}");
-
-    // ensure that the lock file is held even if the main thread of the process is panics
-    // we need to release the lock file only when the current process is gone
-    std::mem::forget(lock_file);
-
     info!("starting safekeeper WAL service on {}", conf.listen_pg_addr);
     let pg_listener = tcp_listener::bind(conf.listen_pg_addr.clone()).map_err(|e| {
         error!("failed to bind to address {}: {}", conf.listen_pg_addr, e);
