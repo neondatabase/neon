@@ -21,7 +21,7 @@ use pageserver_api::models::{
     TenantTimeTravelRequest, TimelineArchivalConfigRequest, TimelineCreateRequest,
 };
 use pageserver_api::shard::TenantShardId;
-use pageserver_client::mgmt_api;
+use pageserver_client::{mgmt_api, BlockUnblock};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
@@ -367,6 +367,23 @@ async fn handle_tenant_timeline_detach_ancestor(
         .await?;
 
     json_response(StatusCode::OK, res)
+}
+
+async fn handle_tenant_timeline_block_unblock_gc(
+    service: Arc<Service>,
+    req: Request<Body>,
+    dir: BlockUnblock,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
+    check_permissions(&req, Scope::PageServerApi)?;
+
+    let timeline_id: TimelineId = parse_request_param(&req, "timeline_id")?;
+
+    service
+        .tenant_timeline_block_unblock_gc(tenant_id, timeline_id, dir)
+        .await?;
+
+    json_response(StatusCode::OK, ())
 }
 
 async fn handle_tenant_timeline_passthrough(
@@ -1289,6 +1306,26 @@ pub fn make_router(
                     r,
                     handle_tenant_timeline_detach_ancestor,
                     RequestName("v1_tenant_timeline_detach_ancestor"),
+                )
+            },
+        )
+        .post(
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/block_gc",
+            |r| {
+                tenant_service_handler(
+                    r,
+                    |s, r| handle_tenant_timeline_block_unblock_gc(s, r, BlockUnblock::Block),
+                    RequestName("v1_tenant_timeline_block_unblock_gc"),
+                )
+            },
+        )
+        .post(
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/unblock_gc",
+            |r| {
+                tenant_service_handler(
+                    r,
+                    |s, r| handle_tenant_timeline_block_unblock_gc(s, r, BlockUnblock::Unblock),
+                    RequestName("v1_tenant_timeline_block_unblock_gc"),
                 )
             },
         )
