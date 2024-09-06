@@ -956,8 +956,8 @@ jobs:
           exit 1
 
   deploy:
-    needs: [ check-permissions, promote-images, tag, build-and-test-locally, trigger-custom-extensions-build-and-wait ]
-    if: github.ref_name == 'main' || github.ref_name == 'release'|| github.ref_name == 'release-proxy'
+    needs: [ check-permissions, promote-images, tag, build-and-test-locally, trigger-custom-extensions-build-and-wait, push-to-acr-dev, push-to-acr-prod ]
+    if: (github.ref_name == 'main' || github.ref_name == 'release' || github.ref_name == 'release-proxy') && !failure() && !cancelled()
 
     runs-on: [ self-hosted, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
