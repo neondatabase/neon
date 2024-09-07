@@ -34,9 +34,10 @@ impl SplitWriterResult {
     }
 }
 
-/// An image writer that takes images and produces multiple image layers. The interface does not
-/// guarantee atomicity (i.e., if the image layer generation fails, there might be leftover files
-/// to be cleaned up)
+/// An image writer that takes images and produces multiple image layers.
+///
+/// The interface does not guarantee atomicity (i.e., if the image layer generation
+/// fails, there might be leftover files to be cleaned up)
 #[must_use]
 pub struct SplitImageLayerWriter {
     inner: ImageLayerWriter,
@@ -193,9 +194,10 @@ impl SplitImageLayerWriter {
     }
 }
 
-/// A delta writer that takes key-lsn-values and produces multiple delta layers. The interface does not
-/// guarantee atomicity (i.e., if the delta layer generation fails, there might be leftover files
-/// to be cleaned up).
+/// A delta writer that takes key-lsn-values and produces multiple delta layers.
+///
+/// The interface does not guarantee atomicity (i.e., if the delta layer generation fails,
+/// there might be leftover files to be cleaned up).
 ///
 /// Note that if updates of a single key exceed the target size limit, all of the updates will be batched
 /// into a single file. This behavior might change in the future. For reference, the legacy compaction algorithm

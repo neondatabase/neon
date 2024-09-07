@@ -43,13 +43,12 @@ use utils::lsn::Lsn;
 use utils::sync::gate::GateError;
 use utils::sync::heavier_once_cell;
 
+/// The real implementation that uses a Postgres process to
+/// perform WAL replay.
 ///
-/// This is the real implementation that uses a Postgres process to
-/// perform WAL replay. Only one thread can use the process at a time,
-/// that is controlled by the Mutex. In the future, we might want to
-/// launch a pool of processes to allow concurrent replay of multiple
-/// records.
-///
+/// Only one thread can use the process at a time, that is controlled by the
+/// Mutex. In the future, we might want to launch a pool of processes to allow
+/// concurrent replay of multiple records.
 pub struct PostgresRedoManager {
     tenant_shard_id: TenantShardId,
     conf: &'static PageServerConf,

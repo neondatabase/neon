@@ -95,6 +95,7 @@ RUN mkdir -p /data/.neon/ && \
        "pg_distrib_dir='/usr/local/'\n" \
        "listen_pg_addr='0.0.0.0:6400'\n" \
        "listen_http_addr='0.0.0.0:9898'\n" \
+       "availability_zone='local'\n" \
   > /data/.neon/pageserver.toml && \
   chown -R neon:neon /data/.neon
 

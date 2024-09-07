@@ -104,7 +104,9 @@ pub struct ConfigToml {
     pub image_compression: ImageCompressionAlgorithm,
     pub ephemeral_bytes_per_memory_kb: usize,
     pub l0_flush: Option<crate::models::L0FlushConfig>,
-    pub compact_level0_phase1_value_access: CompactL0Phase1ValueAccess,
+    #[serde(skip_serializing)]
+    // TODO(https://github.com/neondatabase/neon/issues/8184): remove after this field is removed from all pageserver.toml's
+    pub compact_level0_phase1_value_access: serde::de::IgnoredAny,
     pub virtual_file_direct_io: crate::models::virtual_file::DirectIoMode,
     pub io_buffer_alignment: usize,
 }
@@ -208,43 +210,6 @@ pub enum GetImpl {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
 pub struct MaxVectoredReadBytes(pub NonZeroUsize);
-
-#[derive(Debug, PartialEq, Eq, Clone, serde::Deserialize, serde::Serialize)]
-#[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
-pub enum CompactL0Phase1ValueAccess {
-    /// The old way.
-    PageCachedBlobIo,
-    /// The new way.
-    StreamingKmerge {
-        /// If set, we run both the old way and the new way, validate that
-        /// they are identical (=> [`CompactL0BypassPageCacheValidation`]),
-        /// and if the validation fails,
-        /// - in tests: fail them with a panic or
-        /// - in prod, log a rate-limited warning and use the old way's results.
-        ///
-        /// If not set, we only run the new way and trust its results.
-        validate: Option<CompactL0BypassPageCacheValidation>,
-    },
-}
-
-/// See [`CompactL0Phase1ValueAccess::StreamingKmerge`].
-#[derive(Debug, PartialEq, Eq, Clone, serde::Deserialize, serde::Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum CompactL0BypassPageCacheValidation {
-    /// Validate that the series of (key, lsn) pairs are the same.
-    KeyLsn,
-    /// Validate that the entire output of old and new way is identical.
-    KeyLsnValue,
-}
-
-impl Default for CompactL0Phase1ValueAccess {
-    fn default() -> Self {
-        CompactL0Phase1ValueAccess::StreamingKmerge {
-            // TODO(https://github.com/neondatabase/neon/issues/8184): change to None once confident
-            validate: Some(CompactL0BypassPageCacheValidation::KeyLsnValue),
-        }
-    }
-}
 
 /// A tenant's calcuated configuration, which is the result of merging a
 /// tenant's TenantConfOpt with the global TenantConf from PageServerConf.
@@ -452,7 +417,7 @@ impl Default for ConfigToml {
             image_compression: (DEFAULT_IMAGE_COMPRESSION),
             ephemeral_bytes_per_memory_kb: (DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB),
             l0_flush: None,
-            compact_level0_phase1_value_access: CompactL0Phase1ValueAccess::default(),
+            compact_level0_phase1_value_access: Default::default(),
             virtual_file_direct_io: crate::models::virtual_file::DirectIoMode::default(),
 
             io_buffer_alignment: DEFAULT_IO_BUFFER_ALIGNMENT,

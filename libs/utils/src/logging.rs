@@ -190,7 +190,7 @@ impl Drop for TracingPanicHookGuard {
 }
 
 /// Named symbol for our panic hook, which logs the panic.
-fn tracing_panic_hook(info: &std::panic::PanicInfo) {
+fn tracing_panic_hook(info: &std::panic::PanicHookInfo) {
     // following rust 1.66.1 std implementation:
     // https://github.com/rust-lang/rust/blob/90743e7298aca107ddaa0c202a4d3604e29bfeb6/library/std/src/panicking.rs#L235-L288
     let location = info.location();

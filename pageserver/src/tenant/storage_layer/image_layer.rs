@@ -1,7 +1,9 @@
 //! An ImageLayer represents an image or a snapshot of a key-range at
-//! one particular LSN. It contains an image of all key-value pairs
-//! in its key-range. Any key that falls into the image layer's range
-//! but does not exist in the layer, does not exist.
+//! one particular LSN.
+//!
+//! It contains an image of all key-value pairs in its key-range. Any key
+//! that falls into the image layer's range but does not exist in the layer,
+//! does not exist.
 //!
 //! An image layer is stored in a file on disk. The file is stored in
 //! timelines/<timeline_id> directory.  Currently, there are no

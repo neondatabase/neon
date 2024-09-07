@@ -105,7 +105,7 @@ pub(crate) enum DatabaseOperation {
     ListMetadataHealthOutdated,
     GetLeader,
     UpdateLeader,
-    SetNodeAzId,
+    SetPreferredAzs,
 }
 
 #[must_use]
@@ -319,31 +319,6 @@ impl Persistence {
         if updated != 1 {
             Err(DatabaseError::Logical(format!(
                 "Node {node_id:?} not found for update",
-            )))
-        } else {
-            Ok(())
-        }
-    }
-
-    pub(crate) async fn set_node_availability_zone_id(
-        &self,
-        input_node_id: NodeId,
-        input_az_id: String,
-    ) -> DatabaseResult<()> {
-        use crate::schema::nodes::dsl::*;
-        let updated = self
-            .with_measured_conn(DatabaseOperation::SetNodeAzId, move |conn| {
-                let updated = diesel::update(nodes)
-                    .filter(node_id.eq(input_node_id.0 as i64))
-                    .set((availability_zone_id.eq(input_az_id.clone()),))
-                    .execute(conn)?;
-                Ok(updated)
-            })
-            .await?;
-
-        if updated != 1 {
-            Err(DatabaseError::Logical(format!(
-                "Node {node_id:?} not found for setting az id",
             )))
         } else {
             Ok(())
@@ -688,6 +663,33 @@ impl Persistence {
         .await?;
 
         Ok(())
+    }
+
+    pub(crate) async fn set_tenant_shard_preferred_azs(
+        &self,
+        preferred_azs: Vec<(TenantShardId, String)>,
+    ) -> DatabaseResult<Vec<(TenantShardId, String)>> {
+        use crate::schema::tenant_shards::dsl::*;
+
+        self.with_measured_conn(DatabaseOperation::SetPreferredAzs, move |conn| {
+            let mut shards_updated = Vec::default();
+
+            for (tenant_shard_id, preferred_az) in preferred_azs.iter() {
+                let updated = diesel::update(tenant_shards)
+                    .filter(tenant_id.eq(tenant_shard_id.tenant_id.to_string()))
+                    .filter(shard_number.eq(tenant_shard_id.shard_number.0 as i32))
+                    .filter(shard_count.eq(tenant_shard_id.shard_count.literal() as i32))
+                    .set(preferred_az_id.eq(preferred_az))
+                    .execute(conn)?;
+
+                if updated == 1 {
+                    shards_updated.push((*tenant_shard_id, preferred_az.clone()));
+                }
+            }
+
+            Ok(shards_updated)
+        })
+        .await
     }
 
     pub(crate) async fn detach(&self, tenant_shard_id: TenantShardId) -> anyhow::Result<()> {
@@ -1076,6 +1078,11 @@ pub(crate) struct TenantShardPersistence {
     pub(crate) config: String,
     #[serde(default)]
     pub(crate) scheduling_policy: String,
+
+    // Hint that we should attempt to schedule this tenant shard the given
+    // availability zone in order to minimise the chances of cross-AZ communication
+    // with compute.
+    pub(crate) preferred_az_id: Option<String>,
 }
 
 impl TenantShardPersistence {
@@ -1110,7 +1117,7 @@ pub(crate) struct NodePersistence {
     pub(crate) listen_http_port: i32,
     pub(crate) listen_pg_addr: String,
     pub(crate) listen_pg_port: i32,
-    pub(crate) availability_zone_id: Option<String>,
+    pub(crate) availability_zone_id: String,
 }
 
 /// Tenant metadata health status that are stored durably.

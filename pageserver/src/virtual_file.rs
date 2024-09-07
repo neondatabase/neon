@@ -1,6 +1,7 @@
-//!
 //! VirtualFile is like a normal File, but it's not bound directly to
-//! a file descriptor. Instead, the file is opened when it's read from,
+//! a file descriptor.
+//!
+//! Instead, the file is opened when it's read from,
 //! and if too many files are open globally in the system, least-recently
 //! used ones are closed.
 //!

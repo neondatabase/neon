@@ -62,7 +62,7 @@ from urllib3.util.retry import Retry
 
 from fixtures import overlayfs
 from fixtures.broker import NeonBroker
-from fixtures.common_types import Lsn, TenantId, TenantShardId, TimelineId
+from fixtures.common_types import Lsn, NodeId, TenantId, TenantShardId, TimelineId
 from fixtures.endpoint.http import EndpointHttpClient
 from fixtures.log_helper import log
 from fixtures.metrics import Metrics, MetricsGetter, parse_metrics
@@ -758,6 +758,9 @@ class NeonEnvBuilder:
         patch_script = ""
         for ps in self.env.pageservers:
             patch_script += f"UPDATE nodes SET listen_http_port={ps.service_port.http}, listen_pg_port={ps.service_port.pg}  WHERE node_id = '{ps.id}';"
+            # This is a temporary to get the backward compat test happy
+            # since the compat snapshot was generated with an older version of neon local
+            patch_script += f"UPDATE nodes SET availability_zone_id='{ps.az_id}'  WHERE node_id = '{ps.id}' AND availability_zone_id IS NULL;"
         patch_script_path.write_text(patch_script)
 
         # Update the config with info about tenants and timelines
@@ -2560,11 +2563,35 @@ class NeonStorageController(MetricsGetter, LogUtils):
 
     def tenant_describe(self, tenant_id: TenantId):
         """
-        :return: list of {"shard_id": "", "node_id": int, "listen_pg_addr": str, "listen_pg_port": int, "listen_http_addr: str, "listen_http_port: int}
+        :return: list of {"shard_id": "", "node_id": int, "listen_pg_addr": str, "listen_pg_port": int, "listen_http_addr: str, "listen_http_port: int, preferred_az_id: str}
         """
         response = self.request(
             "GET",
             f"{self.api}/control/v1/tenant/{tenant_id}",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def nodes(self):
+        """
+        :return: list of {"id": ""}
+        """
+        response = self.request(
+            "GET",
+            f"{self.api}/control/v1/node",
+            headers=self.headers(TokenScope.ADMIN),
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def node_shards(self, node_id: NodeId):
+        """
+        :return: list of {"shard_id": "", "is_secondary": bool}
+        """
+        response = self.request(
+            "GET",
+            f"{self.api}/control/v1/node/{node_id}/shards",
             headers=self.headers(TokenScope.ADMIN),
         )
         response.raise_for_status()
@@ -2885,6 +2912,17 @@ class NeonStorageController(MetricsGetter, LogUtils):
             if e.status_code == 404:
                 return None
             raise e
+
+    def set_preferred_azs(self, preferred_azs: dict[TenantShardId, str]) -> list[TenantShardId]:
+        response = self.request(
+            "PUT",
+            f"{self.api}/control/v1/preferred_azs",
+            headers=self.headers(TokenScope.ADMIN),
+            json={str(tid): az for tid, az in preferred_azs.items()},
+        )
+
+        response.raise_for_status()
+        return [TenantShardId.parse(tid) for tid in response.json()["updated"]]
 
     def __enter__(self) -> "NeonStorageController":
         return self

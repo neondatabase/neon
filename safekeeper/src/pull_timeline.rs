@@ -484,6 +484,7 @@ pub async fn validate_temp_timeline(
 }
 
 /// Move timeline from a temp directory to the main storage, and load it to the global map.
+///
 /// This operation is done under a lock to prevent bugs if several concurrent requests are
 /// trying to load the same timeline. Note that it doesn't guard against creating the
 /// timeline with the same ttid, but no one should be doing this anyway.

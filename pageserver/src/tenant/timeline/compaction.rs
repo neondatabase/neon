@@ -19,7 +19,6 @@ use bytes::Bytes;
 use enumset::EnumSet;
 use fail::fail_point;
 use itertools::Itertools;
-use pageserver_api::config::{CompactL0BypassPageCacheValidation, CompactL0Phase1ValueAccess};
 use pageserver_api::key::KEY_SIZE;
 use pageserver_api::keyspace::ShardedRange;
 use pageserver_api::shard::{ShardCount, ShardIdentity, TenantShardId};
@@ -912,137 +911,13 @@ impl Timeline {
         // we're compacting, in key, LSN order.
         // If there's both a Value::Image and Value::WalRecord for the same (key,lsn),
         // then the Value::Image is ordered before Value::WalRecord.
-        //
-        // TODO(https://github.com/neondatabase/neon/issues/8184): remove the page cached blob_io
-        // option and validation code once we've reached confidence.
-        enum AllValuesIter<'a> {
-            PageCachedBlobIo {
-                all_keys_iter: VecIter<'a>,
-            },
-            StreamingKmergeBypassingPageCache {
-                merge_iter: MergeIterator<'a>,
-            },
-            ValidatingStreamingKmergeBypassingPageCache {
-                mode: CompactL0BypassPageCacheValidation,
-                merge_iter: MergeIterator<'a>,
-                all_keys_iter: VecIter<'a>,
-            },
-        }
-        type VecIter<'a> = std::slice::Iter<'a, DeltaEntry<'a>>; // TODO: distinguished lifetimes
-        impl AllValuesIter<'_> {
-            async fn next_all_keys_iter(
-                iter: &mut VecIter<'_>,
-                ctx: &RequestContext,
-            ) -> anyhow::Result<Option<(Key, Lsn, Value)>> {
-                let Some(DeltaEntry {
-                    key,
-                    lsn,
-                    val: value_ref,
-                    ..
-                }) = iter.next()
-                else {
-                    return Ok(None);
-                };
-                let value = value_ref.load(ctx).await?;
-                Ok(Some((*key, *lsn, value)))
+        let mut all_values_iter = {
+            let mut deltas = Vec::with_capacity(deltas_to_compact.len());
+            for l in deltas_to_compact.iter() {
+                let l = l.get_as_delta(ctx).await.map_err(CompactionError::Other)?;
+                deltas.push(l);
             }
-            async fn next(
-                &mut self,
-                ctx: &RequestContext,
-            ) -> anyhow::Result<Option<(Key, Lsn, Value)>> {
-                match self {
-                    AllValuesIter::PageCachedBlobIo { all_keys_iter: iter } => {
-                      Self::next_all_keys_iter(iter, ctx).await
-                    }
-                    AllValuesIter::StreamingKmergeBypassingPageCache { merge_iter } => merge_iter.next().await,
-                    AllValuesIter::ValidatingStreamingKmergeBypassingPageCache { mode, merge_iter, all_keys_iter } => async {
-                        // advance both iterators
-                        let all_keys_iter_item = Self::next_all_keys_iter(all_keys_iter, ctx).await;
-                        let merge_iter_item = merge_iter.next().await;
-                        // compare results & log warnings as needed
-                        macro_rules! rate_limited_warn {
-                            ($($arg:tt)*) => {{
-                                if cfg!(debug_assertions) || cfg!(feature = "testing") {
-                                    warn!($($arg)*);
-                                    panic!("CompactL0BypassPageCacheValidation failure, check logs");
-                                }
-                                use once_cell::sync::Lazy;
-                                use utils::rate_limit::RateLimit;
-                                use std::sync::Mutex;
-                                use std::time::Duration;
-                                static LOGGED: Lazy<Mutex<RateLimit>> =
-                                    Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(10))));
-                                let mut rate_limit = LOGGED.lock().unwrap();
-                                rate_limit.call(|| {
-                                    warn!($($arg)*);
-                                });
-                            }}
-                        }
-                        match (&all_keys_iter_item, &merge_iter_item) {
-                            (Err(_), Err(_)) => {
-                                // don't bother asserting equivality of the errors
-                            }
-                            (Err(all_keys), Ok(merge)) => {
-                                rate_limited_warn!(?merge, "all_keys_iter returned an error where merge did not: {all_keys:?}");
-                            },
-                            (Ok(all_keys), Err(merge)) => {
-                                rate_limited_warn!(?all_keys, "merge returned an error where all_keys_iter did not: {merge:?}");
-                            },
-                            (Ok(None), Ok(None)) => { }
-                            (Ok(Some(all_keys)), Ok(None)) => {
-                                rate_limited_warn!(?all_keys, "merge returned None where all_keys_iter returned Some");
-                            }
-                            (Ok(None), Ok(Some(merge))) => {
-                                rate_limited_warn!(?merge, "all_keys_iter returned None where merge returned Some");
-                            }
-                            (Ok(Some((all_keys_key, all_keys_lsn, all_keys_value))), Ok(Some((merge_key, merge_lsn, merge_value)))) => {
-                                match mode {
-                                    // TODO: in this mode, we still load the value from disk for both iterators, even though we only need the all_keys_iter one
-                                    CompactL0BypassPageCacheValidation::KeyLsn => {
-                                        let all_keys = (all_keys_key, all_keys_lsn);
-                                        let merge = (merge_key, merge_lsn);
-                                        if all_keys != merge {
-                                            rate_limited_warn!(?all_keys, ?merge, "merge returned a different (Key,LSN) than all_keys_iter");
-                                        }
-                                    }
-                                    CompactL0BypassPageCacheValidation::KeyLsnValue => {
-                                        let all_keys = (all_keys_key, all_keys_lsn, all_keys_value);
-                                        let merge = (merge_key, merge_lsn, merge_value);
-                                        if all_keys != merge {
-                                            rate_limited_warn!(?all_keys, ?merge, "merge returned a different (Key,LSN,Value) than all_keys_iter");
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        // in case of mismatch, trust the legacy all_keys_iter_item
-                        all_keys_iter_item
-                    }.instrument(info_span!("next")).await
-                }
-            }
-        }
-        let mut all_values_iter = match &self.conf.compact_level0_phase1_value_access {
-            CompactL0Phase1ValueAccess::PageCachedBlobIo => AllValuesIter::PageCachedBlobIo {
-                all_keys_iter: all_keys.iter(),
-            },
-            CompactL0Phase1ValueAccess::StreamingKmerge { validate } => {
-                let merge_iter = {
-                    let mut deltas = Vec::with_capacity(deltas_to_compact.len());
-                    for l in deltas_to_compact.iter() {
-                        let l = l.get_as_delta(ctx).await.map_err(CompactionError::Other)?;
-                        deltas.push(l);
-                    }
-                    MergeIterator::create(&deltas, &[], ctx)
-                };
-                match validate {
-                    None => AllValuesIter::StreamingKmergeBypassingPageCache { merge_iter },
-                    Some(validate) => AllValuesIter::ValidatingStreamingKmergeBypassingPageCache {
-                        mode: validate.clone(),
-                        merge_iter,
-                        all_keys_iter: all_keys.iter(),
-                    },
-                }
-            }
+            MergeIterator::create(&deltas, &[], ctx)
         };
 
         // This iterator walks through all keys and is needed to calculate size used by each key
@@ -1119,7 +994,7 @@ impl Timeline {
         let mut keys = 0;
 
         while let Some((key, lsn, value)) = all_values_iter
-            .next(ctx)
+            .next()
             .await
             .map_err(CompactionError::Other)?
         {
