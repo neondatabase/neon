@@ -1057,17 +1057,13 @@ impl ComputeNode {
             // temporarily reset max_cluster_size in config
             // to avoid the possibility of hitting the limit, while we are applying config:
             // creating new extensions, roles, etc...
-            config::with_compute_ctl_tmp_override(
-                pgdata_path,
-                "neon.max_cluster_size=-1",
-                || {
-                    self.pg_reload_conf()?;
+            config::with_compute_ctl_tmp_override(pgdata_path, "neon.max_cluster_size=-1", || {
+                self.pg_reload_conf()?;
 
-                    self.apply_config(&compute_state)?;
+                self.apply_config(&compute_state)?;
 
-                    Ok(())
-                },
-            )?;
+                Ok(())
+            })?;
             self.pg_reload_conf()?;
         }
 
