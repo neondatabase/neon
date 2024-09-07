@@ -454,7 +454,7 @@ class NeonEnvBuilder:
         neon_binpath: Path,
         pg_distrib_dir: Path,
         pg_version: PgVersion,
-        test_name: str,
+        env_name: str,
         top_output_dir: Path,
         test_output_dir: Path,
         test_overlay_dir: Optional[Path] = None,
@@ -536,10 +536,8 @@ class NeonEnvBuilder:
 
         self.pageserver_io_buffer_alignment = pageserver_io_buffer_alignment
 
-        assert test_name.startswith(
-            "test_"
-        ), "Unexpectedly instantiated from outside a test function"
-        self.test_name = test_name
+        # Usually test name
+        self.env_name = env_name
 
     def init_configs(self, default_remote_storage_if_missing: bool = True) -> NeonEnv:
         # Cannot create more than one environment from one builder
@@ -888,7 +886,7 @@ class NeonEnvBuilder:
             self.repo_dir,
             self.mock_s3_server,
             str(self.run_id),
-            self.test_name,
+            self.env_name,
             user,
             bucket_name=bucket_name,
             bucket_region=bucket_region,
@@ -1444,7 +1442,7 @@ def neon_simple_env(
         pg_version=pg_version,
         run_id=run_id,
         preserve_database_files=cast(bool, pytestconfig.getoption("--preserve-database-files")),
-        test_name=request.node.name,
+        env_name=request.node.name,
         test_output_dir=test_output_dir,
         pageserver_virtual_file_io_engine=pageserver_virtual_file_io_engine,
         pageserver_aux_file_policy=pageserver_aux_file_policy,
@@ -1505,7 +1503,7 @@ def neon_env_builder(
         run_id=run_id,
         preserve_database_files=cast(bool, pytestconfig.getoption("--preserve-database-files")),
         pageserver_virtual_file_io_engine=pageserver_virtual_file_io_engine,
-        test_name=request.node.name,
+        env_name=request.node.name,
         test_output_dir=test_output_dir,
         test_overlay_dir=test_overlay_dir,
         pageserver_aux_file_policy=pageserver_aux_file_policy,
