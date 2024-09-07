@@ -201,10 +201,21 @@ env_logger = "0.10"
 log = "0.4"
 
 ## Libraries from neondatabase/ git forks, ideally with changes to be upstreamed
-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", branch="neon" }
-postgres-protocol = { git = "https://github.com/neondatabase/rust-postgres.git", branch="neon" }
-postgres-types = { git = "https://github.com/neondatabase/rust-postgres.git", branch="neon" }
-tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", branch="neon" }
+
+# We want to use the 'neon' branch for these, but there's currently one
+# incompatible change on the branch. See:
+#
+# - PR #8076 which contained changes that depended on the new changes in
+#   the rust-postgres crate, and
+# - PR #8654 which reverted those changes and made the code in proxy incompatible
+#   with the tip of the 'neon' branch again.
+#
+# When those proxy changes are re-applied (see PR #8747), we can switch using
+# the tip of the 'neon' branch again.
+postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev = "20031d7a9ee1addeae6e0968e3899ae6bf01cee2" }
+postgres-protocol = { git = "https://github.com/neondatabase/rust-postgres.git", rev = "20031d7a9ee1addeae6e0968e3899ae6bf01cee2" }
+postgres-types = { git = "https://github.com/neondatabase/rust-postgres.git", rev = "20031d7a9ee1addeae6e0968e3899ae6bf01cee2" }
+tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev = "20031d7a9ee1addeae6e0968e3899ae6bf01cee2" }
 
 ## Local libraries
 compute_api = { version = "0.1", path = "./libs/compute_api/" }
@@ -241,7 +252,7 @@ tonic-build = "0.9"
 [patch.crates-io]
 
 # Needed to get `tokio-postgres-rustls` to depend on our fork.
-tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", branch="neon" }
+tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev = "20031d7a9ee1addeae6e0968e3899ae6bf01cee2" }
 
 # bug fixes for UUID
 parquet = { git = "https://github.com/apache/arrow-rs", branch = "master" }
