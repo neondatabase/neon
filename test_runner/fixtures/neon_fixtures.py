@@ -269,21 +269,6 @@ def port_distributor(worker_base_port: int, worker_port_num: int) -> PortDistrib
     return PortDistributor(base_port=worker_base_port, port_number=worker_port_num)
 
 
-@pytest.fixture(scope="function")
-def default_broker(
-    port_distributor: PortDistributor,
-    test_output_dir: Path,
-    neon_binpath: Path,
-) -> Iterator[NeonBroker]:
-    # multiple pytest sessions could get launched in parallel, get them different ports/datadirs
-    client_port = port_distributor.get_port()
-    broker_logfile = test_output_dir / "repo" / "storage_broker.log"
-
-    broker = NeonBroker(logfile=broker_logfile, port=client_port, neon_binpath=neon_binpath)
-    yield broker
-    broker.stop()
-
-
 @pytest.fixture(scope="session")
 def run_id() -> Iterator[uuid.UUID]:
     yield uuid.uuid4()
@@ -464,7 +449,6 @@ class NeonEnvBuilder:
         self,
         repo_dir: Path,
         port_distributor: PortDistributor,
-        broker: NeonBroker,
         run_id: uuid.UUID,
         mock_s3_server: MockS3Server,
         neon_binpath: Path,
@@ -506,7 +490,6 @@ class NeonEnvBuilder:
         # Safekeepers remote storage
         self.safekeepers_remote_storage: Optional[RemoteStorage] = None
 
-        self.broker = broker
         self.run_id = run_id
         self.mock_s3_server: MockS3Server = mock_s3_server
         self.pageserver_config_override = pageserver_config_override
@@ -1045,6 +1028,8 @@ class NeonEnv:
 
     safekeepers - An array containing objects representing the safekeepers
 
+    broker - Object representing the storage broker
+
     pg_bin - pg_bin.run() can be used to execute Postgres client binaries,
         like psql or pg_dump
 
@@ -1070,7 +1055,7 @@ class NeonEnv:
         self.endpoints = EndpointFactory(self)
         self.safekeepers: List[Safekeeper] = []
         self.pageservers: List[NeonPageserver] = []
-        self.broker = config.broker
+        self.broker = None
         self.pageserver_remote_storage = config.pageserver_remote_storage
         self.safekeepers_remote_storage = config.safekeepers_remote_storage
         self.pg_version = config.pg_version
@@ -1088,6 +1073,11 @@ class NeonEnv:
         # so that we don't need to dig it out of the config file afterwards.
         self.initial_tenant = config.initial_tenant
         self.initial_timeline = config.initial_timeline
+
+        # Storage broker instance
+        broker_logfile = self.repo_dir / "storage_broker.log"
+        broker_port = self.port_distributor.get_port()
+        self.broker = NeonBroker(logfile=broker_logfile, port=broker_port, neon_binpath=self.neon_binpath)
 
         # The URL for the pageserver to use as its control_plane_api config
         if config.storage_controller_port_override is not None:
@@ -1423,7 +1413,6 @@ def neon_simple_env(
     pytestconfig: Config,
     port_distributor: PortDistributor,
     mock_s3_server: MockS3Server,
-    default_broker: NeonBroker,
     run_id: uuid.UUID,
     top_output_dir: Path,
     test_output_dir: Path,
@@ -1449,7 +1438,6 @@ def neon_simple_env(
         top_output_dir=top_output_dir,
         repo_dir=repo_dir,
         port_distributor=port_distributor,
-        broker=default_broker,
         mock_s3_server=mock_s3_server,
         neon_binpath=neon_binpath,
         pg_distrib_dir=pg_distrib_dir,
@@ -1478,7 +1466,6 @@ def neon_env_builder(
     neon_binpath: Path,
     pg_distrib_dir: Path,
     pg_version: PgVersion,
-    default_broker: NeonBroker,
     run_id: uuid.UUID,
     request: FixtureRequest,
     test_overlay_dir: Path,
@@ -1515,7 +1502,6 @@ def neon_env_builder(
         neon_binpath=neon_binpath,
         pg_distrib_dir=pg_distrib_dir,
         pg_version=pg_version,
-        broker=default_broker,
         run_id=run_id,
         preserve_database_files=cast(bool, pytestconfig.getoption("--preserve-database-files")),
         pageserver_virtual_file_io_engine=pageserver_virtual_file_io_engine,
