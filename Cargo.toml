@@ -177,8 +177,8 @@ tokio-rustls = "0.25"
 tokio-stream = "0.1"
 tokio-tar = "0.3"
 tokio-util = { version = "0.7.10", features = ["io", "rt"] }
-toml = "0.7"
-toml_edit = "0.19"
+toml = "0.8"
+toml_edit = "0.22"
 tonic = {version = "0.9", features = ["tls", "tls-roots"]}
 tower-service = "0.3.2"
 tracing = "0.1"
