@@ -5,7 +5,9 @@ use metrics::{IntCounter, IntCounterVec};
 use once_cell::sync::Lazy;
 use strum_macros::{EnumString, EnumVariantNames};
 
-#[derive(EnumString, EnumVariantNames, Eq, PartialEq, Debug, Clone, Copy)]
+#[derive(
+    EnumString, strum_macros::Display, EnumVariantNames, Eq, PartialEq, Debug, Clone, Copy,
+)]
 #[strum(serialize_all = "snake_case")]
 pub enum LogFormat {
     Plain,
@@ -188,7 +190,7 @@ impl Drop for TracingPanicHookGuard {
 }
 
 /// Named symbol for our panic hook, which logs the panic.
-fn tracing_panic_hook(info: &std::panic::PanicInfo) {
+fn tracing_panic_hook(info: &std::panic::PanicHookInfo) {
     // following rust 1.66.1 std implementation:
     // https://github.com/rust-lang/rust/blob/90743e7298aca107ddaa0c202a4d3604e29bfeb6/library/std/src/panicking.rs#L235-L288
     let location = info.location();
@@ -271,6 +273,14 @@ impl SecretString {
 impl From<String> for SecretString {
     fn from(s: String) -> Self {
         Self(s)
+    }
+}
+
+impl FromStr for SecretString {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self(s.to_string()))
     }
 }
 

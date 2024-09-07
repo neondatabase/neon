@@ -12,6 +12,8 @@ use utils::{
 
 pub use reqwest::Body as ReqwestBody;
 
+use crate::BlockUnblock;
+
 pub mod util;
 
 #[derive(Debug, Clone)]
@@ -419,6 +421,24 @@ impl Client {
         }
     }
 
+    pub async fn timeline_archival_config(
+        &self,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+        req: &TimelineArchivalConfigRequest,
+    ) -> Result<()> {
+        let uri = format!(
+            "{}/v1/tenant/{tenant_shard_id}/timeline/{timeline_id}/archival_config",
+            self.mgmt_api_endpoint
+        );
+
+        self.request(Method::POST, &uri, req)
+            .await?
+            .json()
+            .await
+            .map_err(Error::ReceiveBody)
+    }
+
     pub async fn timeline_detach_ancestor(
         &self,
         tenant_shard_id: TenantShardId,
@@ -434,6 +454,20 @@ impl Client {
             .json()
             .await
             .map_err(Error::ReceiveBody)
+    }
+
+    pub async fn timeline_block_unblock_gc(
+        &self,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+        dir: BlockUnblock,
+    ) -> Result<()> {
+        let uri = format!(
+            "{}/v1/tenant/{tenant_shard_id}/timeline/{timeline_id}/{dir}_gc",
+            self.mgmt_api_endpoint,
+        );
+
+        self.request(Method::POST, &uri, ()).await.map(|_| ())
     }
 
     pub async fn tenant_reset(&self, tenant_shard_id: TenantShardId) -> Result<()> {

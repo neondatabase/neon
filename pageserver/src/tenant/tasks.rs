@@ -10,7 +10,6 @@ use crate::context::{DownloadBehavior, RequestContext};
 use crate::metrics::TENANT_TASK_EVENTS;
 use crate::task_mgr;
 use crate::task_mgr::{TaskKind, BACKGROUND_RUNTIME};
-use crate::tenant::config::defaults::DEFAULT_COMPACTION_PERIOD;
 use crate::tenant::throttle::Stats;
 use crate::tenant::timeline::CompactionError;
 use crate::tenant::{Tenant, TenantState};
@@ -456,9 +455,11 @@ async fn ingest_housekeeping_loop(tenant: Arc<Tenant>, cancel: CancellationToken
 
             // If compaction period is set to zero (to disable it), then we will use a reasonable default
             let period = if period == Duration::ZERO {
-                humantime::Duration::from_str(DEFAULT_COMPACTION_PERIOD)
-                    .unwrap()
-                    .into()
+                humantime::Duration::from_str(
+                    pageserver_api::config::tenant_conf_defaults::DEFAULT_COMPACTION_PERIOD,
+                )
+                .unwrap()
+                .into()
             } else {
                 period
             };

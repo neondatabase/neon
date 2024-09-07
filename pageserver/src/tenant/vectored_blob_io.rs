@@ -16,7 +16,6 @@
 //! Note that the vectored blob api does *not* go through the page cache.
 
 use std::collections::BTreeMap;
-use std::num::NonZeroUsize;
 
 use bytes::BytesMut;
 use pageserver_api::key::Key;
@@ -28,9 +27,6 @@ use utils::vec_map::VecMap;
 use crate::context::RequestContext;
 use crate::tenant::blob_io::{BYTE_UNCOMPRESSED, BYTE_ZSTD, LEN_COMPRESSION_BIT_MASK};
 use crate::virtual_file::{self, VirtualFile};
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct MaxVectoredReadBytes(pub NonZeroUsize);
 
 /// Metadata bundled with the start and end offset of a blob.
 #[derive(Copy, Clone, Debug)]
@@ -597,8 +593,10 @@ impl<'a> VectoredBlobReader<'a> {
     }
 }
 
-/// Read planner used in [`crate::tenant::storage_layer::image_layer::ImageLayerIterator`]. It provides a streaming API for
-/// getting read blobs. It returns a batch when `handle` gets called and when the current key would just exceed the read_size and
+/// Read planner used in [`crate::tenant::storage_layer::image_layer::ImageLayerIterator`].
+///
+/// It provides a streaming API for getting read blobs. It returns a batch when
+/// `handle` gets called and when the current key would just exceed the read_size and
 /// max_cnt constraints.
 pub struct StreamingVectoredReadPlanner {
     read_builder: Option<VectoredReadBuilder>,

@@ -468,7 +468,7 @@ async fn build_timeline_info_common(
         pg_version: timeline.pg_version,
 
         state,
-        is_archived,
+        is_archived: Some(is_archived),
 
         walreceiver_status,
 
@@ -2076,7 +2076,7 @@ async fn disk_usage_eviction_run(
         evict_bytes: u64,
 
         #[serde(default)]
-        eviction_order: crate::disk_usage_eviction_task::EvictionOrder,
+        eviction_order: pageserver_api::config::EvictionOrder,
     }
 
     #[derive(Debug, Clone, Copy, serde::Serialize)]
@@ -2112,7 +2112,7 @@ async fn disk_usage_eviction_run(
         &state.remote_storage,
         usage,
         &state.tenant_manager,
-        config.eviction_order,
+        config.eviction_order.into(),
         &cancel,
     )
     .await;

@@ -14,6 +14,7 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio_rustls::server::TlsStream;
 
 /// Stream wrapper which implements libpq's protocol.
+///
 /// NOTE: This object deliberately doesn't implement [`AsyncRead`]
 /// or [`AsyncWrite`] to prevent subtle errors (e.g. trying
 /// to pass random malformed bytes through the connection).
