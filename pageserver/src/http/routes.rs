@@ -544,7 +544,6 @@ async fn timeline_create_handler(
             } else {
                 tracing::info!(%ancestor_id, "starting to branch");
             }
-            
         } else {
             tracing::info!("bootstrapping");
         }
