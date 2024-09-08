@@ -3498,34 +3498,66 @@ impl Service {
 
     /// When you need to send an HTTP request to the pageserver that holds shard0 of a tenant, this
     /// function looks up and returns node. If the tenant isn't found, returns Err(ApiError::NotFound)
-    pub(crate) fn tenant_shard0_node(
+    pub(crate) async fn tenant_shard0_node(
         &self,
         tenant_id: TenantId,
     ) -> Result<(Node, TenantShardId), ApiError> {
-        let locked = self.inner.read().unwrap();
-        let Some((tenant_shard_id, shard)) = locked
-            .tenants
-            .range(TenantShardId::tenant_range(tenant_id))
-            .next()
+        // Look up in-memory state and maybe use the node from there.
+        {
+            let locked = self.inner.read().unwrap();
+            let Some((tenant_shard_id, shard)) = locked
+                .tenants
+                .range(TenantShardId::tenant_range(tenant_id))
+                .next()
+            else {
+                return Err(ApiError::NotFound(
+                    anyhow::anyhow!("Tenant {tenant_id} not found").into(),
+                ));
+            };
+
+            let Some(intent_node_id) = shard.intent.get_attached() else {
+                tracing::warn!(
+                    tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(),
+                    "Shard not scheduled (policy {:?}), cannot generate pass-through URL",
+                    shard.policy
+                );
+                return Err(ApiError::Conflict(
+                    "Cannot call timeline API on non-attached tenant".to_string(),
+                ));
+            };
+
+            if shard.reconciler.is_none() {
+                // Optimization: while no reconcile is in flight, we may trust our in-memory state
+                // to tell us which pageserver to use. Otherwise we will fall through and hit the database
+                let Some(node) = locked.nodes.get(intent_node_id) else {
+                    // This should never happen
+                    return Err(ApiError::InternalServerError(anyhow::anyhow!(
+                        "Shard refers to nonexistent node"
+                    )));
+                };
+                return Ok((node.clone(), *tenant_shard_id));
+            }
+        };
+
+        // Look up the latest attached pageserver location from the database
+        // generation state: this will reflect the progress of any ongoing migration.
+        // Note that it is not guaranteed to _stay_ here, our caller must still handle
+        // the case where they call through to the pageserver and get a 404.
+        let db_result = self.persistence.tenant_generations(tenant_id).await?;
+        let Some(ShardGenerationState {
+            tenant_shard_id,
+            generation: _,
+            generation_pageserver: Some(node_id),
+        }) = db_result.first()
         else {
-            return Err(ApiError::NotFound(
-                anyhow::anyhow!("Tenant {tenant_id} not found").into(),
+            // This can happen if we raced with a tenant deletion or a shard split.  On a retry
+            // the caller will either succeed (shard split case), get a proper 404 (deletion case),
+            // or a conflict response (case where tenant was detached in background)
+            return Err(ApiError::ResourceUnavailable(
+                "Shard {} not found in database, or is not attached".into(),
             ));
         };
-
-        // TODO: should use the ID last published to compute_hook, rather than the intent: the intent might
-        // point to somewhere we haven't attached yet.
-        let Some(node_id) = shard.intent.get_attached() else {
-            tracing::warn!(
-                tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(),
-                "Shard not scheduled (policy {:?}), cannot generate pass-through URL",
-                shard.policy
-            );
-            return Err(ApiError::Conflict(
-                "Cannot call timeline API on non-attached tenant".to_string(),
-            ));
-        };
-
+        let locked = self.inner.read().unwrap();
         let Some(node) = locked.nodes.get(node_id) else {
             // This should never happen
             return Err(ApiError::InternalServerError(anyhow::anyhow!(

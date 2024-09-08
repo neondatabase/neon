@@ -515,7 +515,7 @@ async fn handle_tenant_timeline_passthrough(
     tracing::info!("Proxying request for tenant {} ({})", tenant_id, path);
 
     // Find the node that holds shard zero
-    let (node, tenant_shard_id) = service.tenant_shard0_node(tenant_id)?;
+    let (node, tenant_shard_id) = service.tenant_shard0_node(tenant_id).await?;
 
     // Callers will always pass an unsharded tenant ID.  Before proxying, we must
     // rewrite this to a shard-aware shard zero ID.
