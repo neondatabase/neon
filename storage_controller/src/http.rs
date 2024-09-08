@@ -545,16 +545,29 @@ async fn handle_tenant_timeline_passthrough(
     let _timer = latency.start_timer(labels.clone());
 
     let client = mgmt_api::Client::new(node.base_url(), service.get_config().jwt_token.as_deref());
-    let resp = client.get_raw(path).await.map_err(|_e|
-        // FIXME: give APiError a proper Unavailable variant.  We return 503 here because
-        // if we can't successfully send a request to the pageserver, we aren't available.
-        ApiError::ShuttingDown)?;
+    let resp = client.get_raw(path).await.map_err(|e|
+        // We return 503 here because if we can't successfully send a request to the pageserver,
+        // either we aren't available or the pageserver is unavailable.
+        ApiError::ResourceUnavailable(format!("Error sending pageserver API request to {}: {e}", node).into()))?;
 
     if !resp.status().is_success() {
         let error_counter = &METRICS_REGISTRY
             .metrics_group
             .storage_controller_passthrough_request_error;
         error_counter.inc(labels);
+    }
+
+    // Transform 404 into 503 if we raced with a migration
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        // Look up node again: if we migrated it will be different
+        let (new_node, _tenant_shard_id) = service.tenant_shard0_node(tenant_id).await?;
+        if new_node.get_id() != node.get_id() {
+            // Rather than retry here, send the client a 503 to prompt a retry: this matches
+            // the pageserver's use of 503, and all clients calling this API should retry on 503.
+            return Err(ApiError::ResourceUnavailable(
+                format!("Pageserver {node} returned 404, was migrated to {new_node}").into(),
+            ));
+        }
     }
 
     // We have a reqest::Response, would like a http::Response
