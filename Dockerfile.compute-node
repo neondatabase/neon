@@ -681,7 +681,7 @@ RUN apt-get update && apt-get install -y python3 python3-pip && \
 FROM pg-onnx-build AS pg-neon-ai-pg-build
 ARG PG_VERSION
 
-RUN wget https://github.com/neondatabase/pg_rag/archive/refs/heads/main.tar.gz -O pg_neon_ai.tar.gz && \
+RUN wget https://github.com/neondatabase/pg_rag/archive/refs/heads/main.tar.gz -O pg_neon_ai.tar.gz &&  \
     mkdir pg_neon_ai-src && cd pg_neon_ai-src && tar xzf ../pg_neon_ai.tar.gz --strip-components=1 -C . && \
     cd bge_small_en_v15 && tar xzf model.onnx.tar.gz && cd .. && \
     cd jina_reranker_v1_tiny_en && tar xzf model.onnx.tar.gz && cd .. && \
