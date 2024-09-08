@@ -1570,7 +1570,6 @@ fn cli() -> Command {
                         .value_parser(value_parser!(PathBuf))
                         .value_name("config")
                 )
-                .arg(pg_version_arg.clone())
                 .arg(force_arg)
         )
         .subcommand(
