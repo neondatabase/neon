@@ -608,7 +608,7 @@ pub fn twophase_file_key(xid: u64) -> Key {
         field3: 0,
         field4: ((xid & 0xFFFFFF0000000000) >> 40) as u32,
         field5: ((xid & 0x000000FF00000000) >> 32) as u8,
-        field6: ((xid & 0x00000000FFFFFFFF) >> 0) as u32,
+        field6: (xid & 0x00000000FFFFFFFF) as u32,
     }
 }
 
@@ -623,14 +623,14 @@ pub fn twophase_key_range(xid: u64) -> Range<Key> {
         field3: 0,
         field4: ((xid & 0xFFFFFF0000000000) >> 40) as u32,
         field5: ((xid & 0x000000FF00000000) >> 32) as u8,
-        field6: ((xid & 0x00000000FFFFFFFF) >> 0) as u32,
+        field6: (xid & 0x00000000FFFFFFFF) as u32,
     }..Key {
         field1: 0x02,
         field2: 0,
         field3: u32::from(overflowed),
         field4: ((next_xid & 0xFFFFFF0000000000) >> 40) as u32,
         field5: ((next_xid & 0x000000FF00000000) >> 32) as u8,
-        field6: ((next_xid & 0x00000000FFFFFFFF) >> 0) as u32,
+        field6: (next_xid & 0x00000000FFFFFFFF) as u32,
     }
 }
 

@@ -1330,7 +1330,7 @@ impl<'a> DatadirModification<'a> {
         };
         self.put(TWOPHASEDIR_KEY, Value::Image(newdirbuf));
 
-        self.put(twophase_file_key(xid as u64), Value::Image(img));
+        self.put(twophase_file_key(xid), Value::Image(img));
         Ok(())
     }
 
