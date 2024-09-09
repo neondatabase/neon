@@ -55,7 +55,7 @@ jobs:
         id: pwgen
         run: |
           DBPASS=$(dd if=/dev/random bs=48 count=1 2>/dev/null | base64)
-          echo DBPASS=${DBPASS//\//} >> ${GITHUB_OUTPUT}
+          echo DBPASS="${DBPASS//\//}" >> "${GITHUB_OUTPUT}"
 
       - name: Change tests according to the generated password
         run: |
