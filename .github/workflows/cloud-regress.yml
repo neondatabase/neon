@@ -61,7 +61,7 @@ jobs:
         run: |
           cd /__w/neon/neon/vendor/postgres-v${{ matrix.DEFAULT_PG_VERSION }}
           for fname in sql/*.sql expected/*.out; do
-          sed -i.bak "s/NEON_PASSWORD_PLACEHOLDER/'${{ steps.vars.outputs.DBPASS }}'/" $file
+          sed -i.bak "s/NEON_PASSWORD_PLACEHOLDER/'${{ steps.vars.outputs.DBPASS }}'/" $fname
           done
 
       - name: Download Neon artifact
