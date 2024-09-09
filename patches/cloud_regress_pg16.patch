@@ -1,5 +1,5 @@
 diff --git a/src/test/regress/expected/aggregates.out b/src/test/regress/expected/aggregates.out
-index 68fd716d3e..71ef6d6086 100644
+index 0c24f6afe4..dd808ac2b4 100644
 --- a/src/test/regress/expected/aggregates.out
 +++ b/src/test/regress/expected/aggregates.out
 @@ -11,7 +11,8 @@ CREATE TABLE aggtest (
@@ -61,7 +61,7 @@ index 71bd484282..066ea4ec0d 100644
  ALTER OPERATOR === (boolean, boolean) SET (RESTRICT = NONE);
  ERROR:  must be owner of operator ===
 diff --git a/src/test/regress/expected/alter_table.out b/src/test/regress/expected/alter_table.out
-index 05351cb1a4..f2ece75b81 100644
+index 0e439a6488..393f316c3e 100644
 --- a/src/test/regress/expected/alter_table.out
 +++ b/src/test/regress/expected/alter_table.out
 @@ -5,7 +5,7 @@
@@ -85,7 +85,7 @@ index 05351cb1a4..f2ece75b81 100644
  ALTER TABLE not_owned_by_me OWNER TO regress_test_not_me;
  SET SESSION AUTHORIZATION regress_test_me;
 diff --git a/src/test/regress/expected/arrays.out b/src/test/regress/expected/arrays.out
-index 957498432d..1c8d93ae03 100644
+index 57a283dc59..9672d526b4 100644
 --- a/src/test/regress/expected/arrays.out
 +++ b/src/test/regress/expected/arrays.out
 @@ -18,7 +18,8 @@ CREATE TABLE array_op_test (
@@ -160,7 +160,7 @@ index 97bbe53b64..eac3d42a79 100644
  -- We need to do this this way to cope with varying names for encodings:
  SET client_min_messages TO WARNING;
 diff --git a/src/test/regress/expected/constraints.out b/src/test/regress/expected/constraints.out
-index e6f6602d95..6709a8ab13 100644
+index cf0b80d616..e8e2a14a4a 100644
 --- a/src/test/regress/expected/constraints.out
 +++ b/src/test/regress/expected/constraints.out
 @@ -349,7 +349,8 @@ CREATE TABLE COPY_TBL (x INT, y TEXT, z INT,
@@ -183,7 +183,7 @@ index e6f6602d95..6709a8ab13 100644
  ERROR:  new row for relation "copy_tbl" violates check constraint "copy_con"
  DETAIL:  Failing row contains (7, check failed, 6).
  CONTEXT:  COPY copy_tbl, line 2: "7	check failed	6"
-@@ -756,7 +758,7 @@ DETAIL:  Key (f1)=(3) conflicts with key (f1)=(3).
+@@ -799,7 +801,7 @@ DETAIL:  Key (f1)=(3) conflicts with key (f1)=(3).
  DROP TABLE deferred_excl;
  -- Comments
  -- Setup a low-level role to enforce non-superuser checks.
@@ -192,7 +192,7 @@ index e6f6602d95..6709a8ab13 100644
  SET SESSION AUTHORIZATION regress_constraint_comments;
  CREATE TABLE constraint_comments_tbl (a int CONSTRAINT the_constraint CHECK (a > 0));
  CREATE DOMAIN constraint_comments_dom AS int CONSTRAINT the_constraint CHECK (value > 0);
-@@ -776,7 +778,7 @@ COMMENT ON CONSTRAINT the_constraint ON constraint_comments_tbl IS NULL;
+@@ -819,7 +821,7 @@ COMMENT ON CONSTRAINT the_constraint ON constraint_comments_tbl IS NULL;
  COMMENT ON CONSTRAINT the_constraint ON DOMAIN constraint_comments_dom IS NULL;
  -- unauthorized user
  RESET SESSION AUTHORIZATION;
@@ -370,10 +370,10 @@ index acfd9d1f4f..0eeb64e47a 100644
  REINDEX SCHEMA schema_to_reindex;
  ERROR:  must be owner of schema schema_to_reindex
 diff --git a/src/test/regress/expected/create_procedure.out b/src/test/regress/expected/create_procedure.out
-index 6ab09d7ec8..7f59ba9a23 100644
+index 2177ba3509..ae3ca94d00 100644
 --- a/src/test/regress/expected/create_procedure.out
 +++ b/src/test/regress/expected/create_procedure.out
-@@ -370,7 +370,7 @@ ERROR:  cp_testfunc1(integer) is not a procedure
+@@ -421,7 +421,7 @@ ERROR:  cp_testfunc1(integer) is not a procedure
  DROP PROCEDURE nonexistent();
  ERROR:  procedure nonexistent() does not exist
  -- privileges
@@ -573,7 +573,7 @@ index 93302a07ef..1a73f083ac 100644
  -- that does not match with what's expected.
  -- This checks all the object types that include schema qualifications.
 diff --git a/src/test/regress/expected/create_view.out b/src/test/regress/expected/create_view.out
-index 61825ef7d4..a2bff59d70 100644
+index f3f8c7b5a2..3e3e54ff4c 100644
 --- a/src/test/regress/expected/create_view.out
 +++ b/src/test/regress/expected/create_view.out
 @@ -18,7 +18,8 @@ CREATE TABLE real_city (
@@ -883,7 +883,7 @@ index 67a50bde3d..7eeafd2603 100644
    REVOKE INSERT ON TABLES FROM regress_matview_user;
  GRANT ALL ON SCHEMA matview_schema TO public;
 diff --git a/src/test/regress/expected/merge.out b/src/test/regress/expected/merge.out
-index bfdf59a275..300fa8e301 100644
+index bc9a59803f..5b9ddf0626 100644
 --- a/src/test/regress/expected/merge.out
 +++ b/src/test/regress/expected/merge.out
 @@ -1,9 +1,9 @@
@@ -2126,7 +2126,7 @@ index 5d9e6bf12b..c5fddfdca6 100644
  CREATE TABLE ihighway () INHERITS (road);
  INSERT INTO ihighway
 diff --git a/src/test/regress/expected/tsearch.out b/src/test/regress/expected/tsearch.out
-index cfa391ac51..7385373581 100644
+index 9fad6c8b04..a1b8e82389 100644
 --- a/src/test/regress/expected/tsearch.out
 +++ b/src/test/regress/expected/tsearch.out
 @@ -63,7 +63,8 @@ CREATE TABLE test_tsvector(
@@ -2140,7 +2140,7 @@ index cfa391ac51..7385373581 100644
  -- test basic text search behavior without indexes, then with
  SELECT count(*) FROM test_tsvector WHERE a @@ 'wr|qh';
 diff --git a/src/test/regress/expected/updatable_views.out b/src/test/regress/expected/updatable_views.out
-index 1950e6f281..60e5acdcd9 100644
+index ba46c32029..eac3017bac 100644
 --- a/src/test/regress/expected/updatable_views.out
 +++ b/src/test/regress/expected/updatable_views.out
 @@ -999,9 +999,9 @@ NOTICE:  drop cascades to 2 other objects
@@ -2156,7 +2156,7 @@ index 1950e6f281..60e5acdcd9 100644
  SET SESSION AUTHORIZATION regress_view_user1;
  CREATE TABLE base_tbl(a int, b text, c float);
  INSERT INTO base_tbl VALUES (1, 'Row 1', 1.0);
-@@ -3091,8 +3091,8 @@ DETAIL:  View columns that are not columns of their base relation are not updata
+@@ -3094,8 +3094,8 @@ DETAIL:  View columns that are not columns of their base relation are not updata
  drop view uv_iocu_view;
  drop table uv_iocu_tab;
  -- ON CONFLICT DO UPDATE permissions checks
@@ -2181,10 +2181,10 @@ index c809f88f54..d1d57852d4 100644
  CREATE POLICY seeall ON range_parted AS PERMISSIVE FOR SELECT USING (true);
  CREATE POLICY policy_range_parted ON range_parted for UPDATE USING (true) WITH CHECK (c % 2 = 0);
 diff --git a/src/test/regress/expected/vacuum.out b/src/test/regress/expected/vacuum.out
-index 4def90b805..8b70252225 100644
+index 4aaf4f025d..40a339758a 100644
 --- a/src/test/regress/expected/vacuum.out
 +++ b/src/test/regress/expected/vacuum.out
-@@ -386,7 +386,7 @@ CREATE TABLE vacowned (a int);
+@@ -433,7 +433,7 @@ CREATE TABLE vacowned (a int);
  CREATE TABLE vacowned_parted (a int) PARTITION BY LIST (a);
  CREATE TABLE vacowned_part1 PARTITION OF vacowned_parted FOR VALUES IN (1);
  CREATE TABLE vacowned_part2 PARTITION OF vacowned_parted FOR VALUES IN (2);
@@ -2194,7 +2194,7 @@ index 4def90b805..8b70252225 100644
  -- Simple table
  VACUUM vacowned;
 diff --git a/src/test/regress/parallel_schedule b/src/test/regress/parallel_schedule
-index cf46fa3359..709602df28 100644
+index 3d14bf4e4f..87f351b1d1 100644
 --- a/src/test/regress/parallel_schedule
 +++ b/src/test/regress/parallel_schedule
 @@ -130,4 +130,4 @@ test: fast_default
@@ -2204,7 +2204,7 @@ index cf46fa3359..709602df28 100644
 -test: tablespace
 +#test: tablespace
 diff --git a/src/test/regress/sql/aggregates.sql b/src/test/regress/sql/aggregates.sql
-index 758ad90651..1ea43f1e2d 100644
+index f51726e8ed..8854104eff 100644
 --- a/src/test/regress/sql/aggregates.sql
 +++ b/src/test/regress/sql/aggregates.sql
 @@ -15,7 +15,8 @@ CREATE TABLE aggtest (
@@ -2266,7 +2266,7 @@ index fd40370165..ca8055e06d 100644
  
  ALTER OPERATOR === (boolean, boolean) SET (RESTRICT = NONE);
 diff --git a/src/test/regress/sql/alter_table.sql b/src/test/regress/sql/alter_table.sql
-index 58ea20ac3d..e7a1c658c8 100644
+index d2845abc97..a0719b8d0e 100644
 --- a/src/test/regress/sql/alter_table.sql
 +++ b/src/test/regress/sql/alter_table.sql
 @@ -7,7 +7,7 @@ SET client_min_messages TO 'warning';
@@ -2290,7 +2290,7 @@ index 58ea20ac3d..e7a1c658c8 100644
  ALTER TABLE not_owned_by_me OWNER TO regress_test_not_me;
  SET SESSION AUTHORIZATION regress_test_me;
 diff --git a/src/test/regress/sql/arrays.sql b/src/test/regress/sql/arrays.sql
-index daf805c382..35abfb841c 100644
+index e414fa560d..79a75a0e57 100644
 --- a/src/test/regress/sql/arrays.sql
 +++ b/src/test/regress/sql/arrays.sql
 @@ -22,7 +22,8 @@ CREATE TABLE array_op_test (
@@ -2368,7 +2368,7 @@ index 3db9e25913..c66d5aa2c2 100644
  
  -- We need to do this this way to cope with varying names for encodings:
 diff --git a/src/test/regress/sql/constraints.sql b/src/test/regress/sql/constraints.sql
-index 5ffcd4ffc7..d01a4feaf1 100644
+index e3e3bea709..fa86ddc326 100644
 --- a/src/test/regress/sql/constraints.sql
 +++ b/src/test/regress/sql/constraints.sql
 @@ -243,12 +243,14 @@ CREATE TABLE COPY_TBL (x INT, y TEXT, z INT,
@@ -2388,7 +2388,7 @@ index 5ffcd4ffc7..d01a4feaf1 100644
  
  SELECT * FROM COPY_TBL;
  
-@@ -558,7 +560,7 @@ DROP TABLE deferred_excl;
+@@ -599,7 +601,7 @@ DROP TABLE deferred_excl;
  
  -- Comments
  -- Setup a low-level role to enforce non-superuser checks.
@@ -2397,7 +2397,7 @@ index 5ffcd4ffc7..d01a4feaf1 100644
  SET SESSION AUTHORIZATION regress_constraint_comments;
  
  CREATE TABLE constraint_comments_tbl (a int CONSTRAINT the_constraint CHECK (a > 0));
-@@ -580,7 +582,7 @@ COMMENT ON CONSTRAINT the_constraint ON DOMAIN constraint_comments_dom IS NULL;
+@@ -621,7 +623,7 @@ COMMENT ON CONSTRAINT the_constraint ON DOMAIN constraint_comments_dom IS NULL;
  
  -- unauthorized user
  RESET SESSION AUTHORIZATION;
@@ -2579,10 +2579,10 @@ index d49ce9f300..47fa813bc8 100644
  REINDEX SCHEMA schema_to_reindex;
  -- Permission failures with toast tables and indexes (pg_authid here)
 diff --git a/src/test/regress/sql/create_procedure.sql b/src/test/regress/sql/create_procedure.sql
-index 012cdf3628..ae147d020d 100644
+index 069a3727ce..faeeb3f744 100644
 --- a/src/test/regress/sql/create_procedure.sql
 +++ b/src/test/regress/sql/create_procedure.sql
-@@ -228,7 +228,7 @@ DROP PROCEDURE nonexistent();
+@@ -255,7 +255,7 @@ DROP PROCEDURE nonexistent();
  
  -- privileges
  
@@ -2760,7 +2760,7 @@ index 1b7064247a..be5b662ce1 100644
  -- Cases where schema creation fails as objects are qualified with a schema
  -- that does not match with what's expected.
 diff --git a/src/test/regress/sql/create_view.sql b/src/test/regress/sql/create_view.sql
-index 8838a40f7a..4b09319ebd 100644
+index 3a78be1b0c..617d2dc8d6 100644
 --- a/src/test/regress/sql/create_view.sql
 +++ b/src/test/regress/sql/create_view.sql
 @@ -23,7 +23,8 @@ CREATE TABLE real_city (
@@ -2773,6 +2773,19 @@ index 8838a40f7a..4b09319ebd 100644
  ANALYZE real_city;
  
  SELECT *
+diff --git a/src/test/regress/sql/database.sql b/src/test/regress/sql/database.sql
+index 0367c0e37a..a23b98c4bd 100644
+--- a/src/test/regress/sql/database.sql
++++ b/src/test/regress/sql/database.sql
+@@ -1,8 +1,6 @@
+ CREATE DATABASE regression_tbd
+ 	ENCODING utf8 LC_COLLATE "C" LC_CTYPE "C" TEMPLATE template0;
+ ALTER DATABASE regression_tbd RENAME TO regression_utf8;
+-ALTER DATABASE regression_utf8 SET TABLESPACE regress_tblspace;
+-ALTER DATABASE regression_utf8 RESET TABLESPACE;
+ ALTER DATABASE regression_utf8 CONNECTION_LIMIT 123;
+ 
+ -- Test PgDatabaseToastTable.  Doing this with GRANT would be slow.
 diff --git a/src/test/regress/sql/dependency.sql b/src/test/regress/sql/dependency.sql
 index 2559c62d0b..06c3aa1a36 100644
 --- a/src/test/regress/sql/dependency.sql
@@ -3067,7 +3080,7 @@ index 235123de1e..58e73cec5d 100644
    REVOKE INSERT ON TABLES FROM regress_matview_user;
  GRANT ALL ON SCHEMA matview_schema TO public;
 diff --git a/src/test/regress/sql/merge.sql b/src/test/regress/sql/merge.sql
-index ac6d2f0e0e..c1e6c1d4fb 100644
+index 2a220a248f..91a404d51e 100644
 --- a/src/test/regress/sql/merge.sql
 +++ b/src/test/regress/sql/merge.sql
 @@ -2,9 +2,9 @@
@@ -3853,7 +3866,7 @@ index 1b2d434683..b765c748b8 100644
  
  CREATE TABLE ihighway () INHERITS (road);
 diff --git a/src/test/regress/sql/tsearch.sql b/src/test/regress/sql/tsearch.sql
-index db2e09be94..f6c6c3e180 100644
+index fbd26cdba4..7ec2d78eee 100644
 --- a/src/test/regress/sql/tsearch.sql
 +++ b/src/test/regress/sql/tsearch.sql
 @@ -49,7 +49,8 @@ CREATE TABLE test_tsvector(
@@ -3867,7 +3880,7 @@ index db2e09be94..f6c6c3e180 100644
  ANALYZE test_tsvector;
  
 diff --git a/src/test/regress/sql/updatable_views.sql b/src/test/regress/sql/updatable_views.sql
-index eaee0b7e1d..bbdeaae602 100644
+index 0a3176e25d..7744ef68f5 100644
 --- a/src/test/regress/sql/updatable_views.sql
 +++ b/src/test/regress/sql/updatable_views.sql
 @@ -425,9 +425,9 @@ DROP TABLE base_tbl CASCADE;
@@ -3883,7 +3896,7 @@ index eaee0b7e1d..bbdeaae602 100644
  
  SET SESSION AUTHORIZATION regress_view_user1;
  CREATE TABLE base_tbl(a int, b text, c float);
-@@ -1585,8 +1585,8 @@ drop view uv_iocu_view;
+@@ -1586,8 +1586,8 @@ drop view uv_iocu_view;
  drop table uv_iocu_tab;
  
  -- ON CONFLICT DO UPDATE permissions checks
@@ -3908,10 +3921,10 @@ index 7a7bee77b9..07b480cd59 100644
  CREATE POLICY seeall ON range_parted AS PERMISSIVE FOR SELECT USING (true);
  CREATE POLICY policy_range_parted ON range_parted for UPDATE USING (true) WITH CHECK (c % 2 = 0);
 diff --git a/src/test/regress/sql/vacuum.sql b/src/test/regress/sql/vacuum.sql
-index 51d7b1fecc..b2a9490509 100644
+index ae36b54641..5612b8e162 100644
 --- a/src/test/regress/sql/vacuum.sql
 +++ b/src/test/regress/sql/vacuum.sql
-@@ -306,7 +306,7 @@ CREATE TABLE vacowned (a int);
+@@ -335,7 +335,7 @@ CREATE TABLE vacowned (a int);
  CREATE TABLE vacowned_parted (a int) PARTITION BY LIST (a);
  CREATE TABLE vacowned_part1 PARTITION OF vacowned_parted FOR VALUES IN (1);
  CREATE TABLE vacowned_part2 PARTITION OF vacowned_parted FOR VALUES IN (2);
