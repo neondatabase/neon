@@ -18,8 +18,7 @@ Prerequisites:
 
 Regression tests are in the 'regress' directory. They can be run in
 parallel to minimize total runtime. Most regression test sets up their
-environment with its own pageservers and safekeepers (but see
-`TEST_SHARED_FIXTURES`).
+environment with its own pageservers and safekeepers.
 
 'pg_clients' contains tests for connecting with various client
 libraries. Each client test uses a Dockerfile that pulls an image that
@@ -74,7 +73,6 @@ This is used to construct full path to the postgres binaries.
 Format is 2-digit major version nubmer, i.e. `DEFAULT_PG_VERSION=16`
 `TEST_OUTPUT`: Set the directory where test state and test output files
 should go.
-`TEST_SHARED_FIXTURES`: Try to re-use a single pageserver for all the tests.
 `RUST_LOG`: logging configuration to pass into Neon CLI
 
 Useful parameters and commands:
@@ -259,11 +257,9 @@ compute Postgres nodes. The connections between them can be configured to use JW
 authentication tokens, and some other configuration options can be tweaked too.
 
 The easiest way to get access to a Neon Environment is by using the `neon_simple_env`
-fixture. The 'simple' env may be shared across multiple tests, so don't shut down the nodes
-or make other destructive changes in that environment. Also don't assume that
-there are no tenants or branches or data in the cluster. For convenience, there is a
-branch called `empty`, though. The convention is to create a test-specific branch of
-that and load any test data there, instead of the 'main' branch.
+fixture. For convenience, there is a branch called `empty` in environments created with
+'neon_simple_env'. The convention is to create a test-specific branch of that and load any
+test data there, instead of the 'main' branch.
 
 For more complicated cases, you can build a custom Neon Environment, with the `neon_env`
 fixture:
