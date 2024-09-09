@@ -86,6 +86,7 @@ RUN curl -fsSL 'https://apt.llvm.org/llvm-snapshot.gpg.key' | apt-key add - \
 RUN curl -fsSL 'https://www.postgresql.org/media/keys/ACCC4CF8.asc' | apt-key add - \
     && echo 'deb http://apt.postgresql.org/pub/repos/apt bookworm-pgdg main' > /etc/apt/sources.list.d/pgdg.list \
     && apt update \
+    && apt install -y apt-transport-https \
     && apt install -y docker-ce docker-ce-cli \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
