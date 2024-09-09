@@ -121,6 +121,7 @@ fn main() -> anyhow::Result<()> {
             .allowlist_type("XLogPageHeaderData")
             .allowlist_type("XLogLongPageHeaderData")
             .allowlist_var("XLOG_PAGE_MAGIC")
+            .allowlist_var("PG_MAJORVERSION_NUM")
             .allowlist_var("PG_CONTROL_FILE_SIZE")
             .allowlist_var("PG_CONTROLFILEDATA_OFFSETOF_CRC")
             .allowlist_type("PageHeaderData")
