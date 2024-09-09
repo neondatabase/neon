@@ -25,6 +25,8 @@ from fixtures.pg_version import PgVersion
 from fixtures.remote_storage import RemoteStorageKind, S3Storage, s3_storage
 from fixtures.workload import Workload
 
+from test_runner.fixtures.pg_version import skip_on_postgres
+
 #
 # A test suite that help to prevent unintentionally breaking backward or forward compatibility between Neon releases.
 # - `test_create_snapshot` a script wrapped in a test that creates a data snapshot.
@@ -156,6 +158,7 @@ ingest_lag_log_line = ".*ingesting record with timestamp lagging more than wait_
 @check_ondisk_data_compatibility_if_enabled
 @pytest.mark.xdist_group("compatibility")
 @pytest.mark.order(after="test_create_snapshot")
+@skip_on_postgres(PgVersion.V17, "There are no snapshots yet") # TODO: revert this once we have snapshots
 def test_backward_compatibility(
     neon_env_builder: NeonEnvBuilder,
     test_output_dir: Path,
@@ -203,6 +206,7 @@ def test_backward_compatibility(
 @check_ondisk_data_compatibility_if_enabled
 @pytest.mark.xdist_group("compatibility")
 @pytest.mark.order(after="test_create_snapshot")
+@skip_on_postgres(PgVersion.V17, "There are no snapshots yet") # TODO: revert this once we have snapshots
 def test_forward_compatibility(
     neon_env_builder: NeonEnvBuilder,
     test_output_dir: Path,
