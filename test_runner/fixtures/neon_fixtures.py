@@ -221,33 +221,6 @@ def neon_api(neon_api_key: str, neon_api_base_url: str) -> NeonAPI:
     return NeonAPI(neon_api_key, neon_api_base_url)
 
 
-def shareable_scope(fixture_name: str, config: Config) -> Literal["session", "function"]:
-    """Return either session of function scope, depending on TEST_SHARED_FIXTURES envvar.
-
-    This function can be used as a scope like this:
-    @pytest.fixture(scope=shareable_scope)
-    def myfixture(...)
-       ...
-    """
-    scope: Literal["session", "function"]
-
-    if os.environ.get("TEST_SHARED_FIXTURES") is None:
-        # Create the environment in the per-test output directory
-        scope = "function"
-    elif (
-        os.environ.get("BUILD_TYPE") is not None
-        and os.environ.get("DEFAULT_PG_VERSION") is not None
-    ):
-        scope = "session"
-    else:
-        pytest.fail(
-            "Shared environment(TEST_SHARED_FIXTURES) requires BUILD_TYPE and DEFAULT_PG_VERSION to be set",
-            pytrace=False,
-        )
-
-    return scope
-
-
 @pytest.fixture(scope="session")
 def worker_port_num():
     return (32768 - BASE_PORT) // int(os.environ.get("PYTEST_XDIST_WORKER_COUNT", "1"))
@@ -1431,8 +1404,8 @@ class NeonEnv:
         return "ep-" + str(self.endpoint_counter)
 
 
-@pytest.fixture(scope=shareable_scope)
-def _shared_simple_env(
+@pytest.fixture(scope="function")
+def neon_simple_env(
     request: FixtureRequest,
     pytestconfig: Config,
     port_distributor: PortDistributor,
@@ -1450,19 +1423,13 @@ def _shared_simple_env(
     pageserver_io_buffer_alignment: Optional[int],
 ) -> Iterator[NeonEnv]:
     """
-    # Internal fixture backing the `neon_simple_env` fixture. If TEST_SHARED_FIXTURES
-     is set, this is shared by all tests using `neon_simple_env`.
+    Simple Neon environment, with no authentication and no safekeepers.
 
     This fixture will use RemoteStorageKind.LOCAL_FS with pageserver.
     """
 
-    if os.environ.get("TEST_SHARED_FIXTURES") is None:
-        # Create the environment in the per-test output directory
-        repo_dir = get_test_repo_dir(request, top_output_dir)
-    else:
-        # We're running shared fixtures. Share a single directory.
-        repo_dir = top_output_dir / "shared_repo"
-        shutil.rmtree(repo_dir, ignore_errors=True)
+    # Create the environment in the per-test output directory
+    repo_dir = get_test_repo_dir(request, top_output_dir)
 
     with NeonEnvBuilder(
         top_output_dir=top_output_dir,
@@ -1488,22 +1455,6 @@ def _shared_simple_env(
         env.neon_cli.create_branch("empty", ancestor_branch_name=DEFAULT_BRANCH_NAME)
 
         yield env
-
-
-@pytest.fixture(scope="function")
-def neon_simple_env(_shared_simple_env: NeonEnv) -> Iterator[NeonEnv]:
-    """
-    Simple Neon environment, with no authentication and no safekeepers.
-
-    If TEST_SHARED_FIXTURES environment variable is set, we reuse the same
-    environment for all tests that use 'neon_simple_env', keeping the
-    page server and safekeepers running. Any compute nodes are stopped after
-    each the test, however.
-    """
-    yield _shared_simple_env
-
-    _shared_simple_env.endpoints.stop_all()
-
 
 @pytest.fixture(scope="function")
 def neon_env_builder(
@@ -4898,14 +4849,7 @@ SMALL_DB_FILE_NAME_REGEX: re.Pattern = re.compile(  # type: ignore[type-arg]
 
 
 # This is autouse, so the test output directory always gets created, even
-# if a test doesn't put anything there. It also solves a problem with the
-# neon_simple_env fixture: if TEST_SHARED_FIXTURES is not set, it
-# creates the repo in the test output directory. But it cannot depend on
-# 'test_output_dir' fixture, because when TEST_SHARED_FIXTURES is not set,
-# it has 'session' scope and cannot access fixtures with 'function'
-# scope. So it uses the get_test_output_dir() function to get the path, and
-# this fixture ensures that the directory exists.  That works because
-# 'autouse' fixtures are run before other fixtures.
+# if a test doesn't put anything there.
 #
 # NB: we request the overlay dir fixture so the fixture does its cleanups
 @pytest.fixture(scope="function", autouse=True)
