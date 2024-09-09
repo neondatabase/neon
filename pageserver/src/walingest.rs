@@ -1204,7 +1204,7 @@ impl WalIngest {
             if rec.blkno % pg_constants::SLOTS_PER_FSM_PAGE != 0 {
                 // Tail of last remaining FSM page has to be zeroed.
                 // We are not precise here and instead of digging in FSM bitmap format just clear the whole page.
-                modification.put_rel_page_image_zero(rel, fsm_physical_page_no);
+                modification.put_rel_page_image_zero(rel, fsm_physical_page_no)?;
                 fsm_physical_page_no += 1;
             }
             let nblocks = get_relsize(modification, rel, ctx).await?;
@@ -1226,7 +1226,7 @@ impl WalIngest {
             if rec.blkno % pg_constants::VM_HEAPBLOCKS_PER_PAGE != 0 {
                 // Tail of last remaining vm page has to be zeroed.
                 // We are not precise here and instead of digging in VM bitmap format just clear the whole page.
-                modification.put_rel_page_image_zero(rel, vm_page_no);
+                modification.put_rel_page_image_zero(rel, vm_page_no)?;
                 vm_page_no += 1;
             }
             let nblocks = get_relsize(modification, rel, ctx).await?;
@@ -1696,7 +1696,7 @@ impl WalIngest {
                     continue;
                 }
 
-                modification.put_rel_page_image_zero(rel, gap_blknum);
+                modification.put_rel_page_image_zero(rel, gap_blknum)?;
             }
         }
         Ok(())
@@ -1762,7 +1762,7 @@ impl WalIngest {
 
             // fill the gap with zeros
             for gap_blknum in old_nblocks..blknum {
-                modification.put_slru_page_image_zero(kind, segno, gap_blknum);
+                modification.put_slru_page_image_zero(kind, segno, gap_blknum)?;
             }
         }
         Ok(())
