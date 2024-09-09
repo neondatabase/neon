@@ -712,6 +712,8 @@ async fn timeline_archival_config_handler(
             .tenant_manager
             .get_attached_tenant_shard(tenant_shard_id)?;
 
+        tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
+
         tenant
             .apply_timeline_archival_config(timeline_id, request_data.state)
             .await?;
