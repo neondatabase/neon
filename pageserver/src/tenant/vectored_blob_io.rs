@@ -16,6 +16,7 @@
 //! Note that the vectored blob api does *not* go through the page cache.
 
 use std::collections::BTreeMap;
+use std::ops::Deref;
 
 use bytes::{Bytes, BytesMut};
 use pageserver_api::key::Key;
@@ -35,12 +36,126 @@ pub struct BlobMeta {
     pub lsn: Lsn,
 }
 
+/// A view into the vectored blobs read buffer.
+#[derive(Clone, Debug)]
+pub(crate) enum VectoredBlobBufView<'a> {
+    Slice(&'a [u8]),
+    Bytes(bytes::Bytes),
+}
+
+impl<'a> VectoredBlobBufView<'a> {
+    /// Creates a new slice-based view on the blob.
+    pub fn new_slice(slice: &'a [u8]) -> Self {
+        Self::Slice(slice)
+    }
+
+    /// Creates a new [`bytes::Bytes`]-based view on the blob.
+    pub fn new_bytes(bytes: bytes::Bytes) -> Self {
+        Self::Bytes(bytes)
+    }
+
+    /// Creates a sub-view of the blob based on the range.
+    fn view(&self, range: std::ops::Range<usize>) -> Self {
+        match self {
+            VectoredBlobBufView::Slice(slice) => VectoredBlobBufView::Slice(&slice[range]),
+            VectoredBlobBufView::Bytes(bytes) => VectoredBlobBufView::Bytes(bytes.slice(range)),
+        }
+    }
+}
+
+impl<'a> Deref for VectoredBlobBufView<'a> {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            VectoredBlobBufView::Slice(slice) => slice,
+            VectoredBlobBufView::Bytes(bytes) => &bytes,
+        }
+    }
+}
+
+impl<'a> AsRef<[u8]> for VectoredBlobBufView<'a> {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            VectoredBlobBufView::Slice(slice) => slice,
+            VectoredBlobBufView::Bytes(bytes) => bytes.as_ref(),
+        }
+    }
+}
+
+impl<'a> From<&'a [u8]> for VectoredBlobBufView<'a> {
+    fn from(value: &'a [u8]) -> Self {
+        Self::new_slice(value)
+    }
+}
+
+impl From<Bytes> for VectoredBlobBufView<'_> {
+    fn from(value: Bytes) -> Self {
+        Self::new_bytes(value)
+    }
+}
+
+impl From<VectoredBlobBufView<'_>> for Bytes {
+    fn from(value: VectoredBlobBufView<'_>) -> Self {
+        match value {
+            VectoredBlobBufView::Slice(slice) => Bytes::copy_from_slice(slice),
+            VectoredBlobBufView::Bytes(bytes) => bytes,
+        }
+    }
+}
+
 /// Blob offsets into [`VectoredBlobsBuf::buf`]
 pub struct VectoredBlob {
-    pub start: usize,
-    pub end: usize,
+    /// Blob metadata.
     pub meta: BlobMeta,
-    pub compression_bits: u8,
+    /// Start offset.
+    start: usize,
+    /// End offset.
+    end: usize,
+    /// Compression used on the the blob.
+    compression_bits: u8,
+}
+
+impl VectoredBlob {
+    /// Reads a decompressed view of the blob.
+    pub(crate) async fn read<'a>(
+        &self,
+        buf: &VectoredBlobBufView<'a>,
+    ) -> Result<VectoredBlobBufView<'a>, std::io::Error> {
+        let mut decompressed_vec = Vec::new();
+        let view = buf.view(self.start..self.end);
+
+        match self.compression_bits {
+            BYTE_UNCOMPRESSED => Ok(view),
+            BYTE_ZSTD => {
+                let mut decoder =
+                    async_compression::tokio::write::ZstdDecoder::new(&mut decompressed_vec);
+                decoder.write_all(&view).await?;
+                decoder.flush().await?;
+                // Zero-copy conversion from `Vec` to `Bytes`
+                Ok(VectoredBlobBufView::new_bytes(Bytes::from(
+                    decompressed_vec,
+                )))
+            }
+            bits => {
+                let error = std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("Failed to decompress blob for {}@{}, {}..{}: invalid compression byte {bits:x}", self.meta.key, self.meta.lsn, self.start, self.end),
+                );
+                Err(error)
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for VectoredBlob {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}@{}, {}..{}",
+            self.meta.key, self.meta.lsn, self.start, self.end
+        )
+    }
 }
 
 /// Return type of [`VectoredBlobReader::read_blobs`]
@@ -49,31 +164,6 @@ pub struct VectoredBlobsBuf {
     pub buf: BytesMut,
     /// Offsets into the buffer and metadata for all blobs in this read
     pub blobs: Vec<VectoredBlob>,
-}
-
-/// Decompresses the buffer if needed.
-///
-/// Returns an owned buffer if decompression is performed, otherwise return `None`.
-pub(crate) async fn decompress(
-    buf: &[u8],
-    compression_bits: u8,
-) -> Result<Option<Bytes>, std::io::Error> {
-    let mut decompressed_vec = Vec::new();
-    if compression_bits == BYTE_UNCOMPRESSED {
-        Ok(None)
-    } else if compression_bits == BYTE_ZSTD {
-        let mut decoder = async_compression::tokio::write::ZstdDecoder::new(&mut decompressed_vec);
-        decoder.write_all(buf).await?;
-        decoder.flush().await?;
-        // Zero-copy conversion from `Vec` to `Bytes`
-        Ok(Some(Bytes::from(decompressed_vec)))
-    } else {
-        let error = std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("invalid compression byte {compression_bits:x}"),
-        );
-        Err(error)
-    }
 }
 
 /// Description of one disk read for multiple blobs.
@@ -1022,16 +1112,11 @@ mod tests {
             let result = vectored_blob_reader.read_blobs(&read, buf, &ctx).await?;
             assert_eq!(result.blobs.len(), 1);
             let read_blob = &result.blobs[0];
-            let slice = &result.buf[read_blob.start..read_blob.end];
-            let decompressed = decompress(slice, read_blob.compression_bits).await?;
-            let read_buf = if let Some(decompressed) = &decompressed {
-                decompressed
-            } else {
-                slice
-            };
+            let view = VectoredBlobBufView::new_slice(&result.buf);
+            let read_buf = read_blob.read(&view).await?;
             assert_eq!(
                 &blob[..],
-                read_buf,
+                &read_buf[..],
                 "mismatch for idx={idx} at offset={offset}"
             );
             buf = result.buf;
