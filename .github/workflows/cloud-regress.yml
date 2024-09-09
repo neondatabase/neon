@@ -54,6 +54,7 @@ jobs:
       - name: Generate a random password
         id: pwgen
         run: |
+          set +x
           DBPASS=$(dd if=/dev/random bs=48 count=1 2>/dev/null | base64)
           echo DBPASS="${DBPASS//\//}" >> "${GITHUB_OUTPUT}"
 
@@ -61,7 +62,9 @@ jobs:
         run: |
           cd /__w/neon/neon/vendor/postgres-v"${{ matrix.DEFAULT_PG_VERSION }}"/src/test/regress
           for fname in sql/*.sql expected/*.out; do
+          set +x
           sed -i.bak s/NEON_PASSWORD_PLACEHOLDER/"'${{ steps.pwgen.outputs.DBPASS }}'"/ "${fname}"
+          set -x
           done
 
       - name: Download Neon artifact
