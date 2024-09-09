@@ -61,10 +61,9 @@ jobs:
       - name: Change tests according to the generated password
         run: |
           cd /__w/neon/neon/vendor/postgres-v"${{ matrix.DEFAULT_PG_VERSION }}"/src/test/regress
-          for fname in sql/*.sql expected/*.out; do
           set +x
+          for fname in sql/*.sql expected/*.out; do
           sed -i.bak s/NEON_PASSWORD_PLACEHOLDER/"'${{ steps.pwgen.outputs.DBPASS }}'"/ "${fname}"
-          set -x
           done
 
       - name: Download Neon artifact
