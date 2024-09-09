@@ -48,9 +48,7 @@ def test_cloud_regress(
                             regress_cur.execute(
                                 f"ALTER SUBSCRIPTION {sub[0]} SET (slot_name = NONE)"
                             )
-                            regress_cur.execute(
-                                f"DROP SUBSCRIPTION {sub[0]} SET (slot_name = NONE)"
-                            )
+                            regress_cur.execute(f"DROP SUBSCRIPTION {sub[0]}")
                             regress_conn.commit()
 
             # This is also a workaround for the full path problem
