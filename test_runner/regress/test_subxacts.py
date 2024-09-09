@@ -9,8 +9,7 @@ from fixtures.neon_fixtures import NeonEnv, check_restored_datadir_content
 # CLOG.
 def test_subxacts(neon_simple_env: NeonEnv, test_output_dir):
     env = neon_simple_env
-    env.neon_cli.create_branch("test_subxacts", "empty")
-    endpoint = env.endpoints.create_start("test_subxacts")
+    endpoint = env.endpoints.create_start("main")
 
     pg_conn = endpoint.connect()
     cur = pg_conn.cursor()
