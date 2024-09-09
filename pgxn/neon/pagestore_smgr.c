@@ -2177,38 +2177,22 @@ neon_zeroextend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blocknum,
 	if (!XLogInsertAllowed())
 		return;
 
-	/* ensure we have enough xlog buffers to log max-sized records */
-	XLogEnsureRecordSpace(Min(remblocks, (XLR_MAX_BLOCK_ID - 1)), 0);
-
 	/*
-	 * Iterate over all the pages. They are collected into batches of
-	 * XLR_MAX_BLOCK_ID pages, and a single WAL-record is written for each
-	 * batch.
+	 * Pageserver auto-extends relations with 0s, so WAL-logging only the last
+	 * page is enough here (else we'd log each page 2 times with 0-bytes.
 	 */
-	while (remblocks > 0)
-	{
-		int			count = Min(remblocks, XLR_MAX_BLOCK_ID);
-
-		XLogBeginInsert();
-
-		for (int i = 0; i < count; i++)
-			XLogRegisterBlock(i, &InfoFromSMgrRel(reln), forkNum, blocknum + i,
-							  (char *) buffer.data, REGBUF_FORCE_IMAGE | REGBUF_STANDARD);
-
-		lsn = XLogInsert(RM_XLOG_ID, XLOG_FPI);
-
-		for (int i = 0; i < count; i++)
-		{
-			lfc_write(InfoFromSMgrRel(reln), forkNum, blocknum + i, buffer.data);
-			SetLastWrittenLSNForBlock(lsn, InfoFromSMgrRel(reln), forkNum,
-									  blocknum + i);
-		}
-
-		blocknum += count;
-		remblocks -= count;
-	}
+	XLogBeginInsert();
+	XLogRegisterBlock(0, &InfoFromSMgrRel(reln), forkNum, blocknum + nblocks, (char *) &buffer.data, REGBUF_FORCE_IMAGE);
+	lsn = XLogInsert(RM_XLOG_ID, XLOG_FPI);
 
 	Assert(lsn != 0);
+
+	for (uint32 i = blocknum; i < blocknum + nblocks; i++)
+	{
+		lfc_write(InfoFromSMgrRel(reln), forkNum, blocknum + i, buffer.data);
+		SetLastWrittenLSNForBlock(lsn, InfoFromSMgrRel(reln), forkNum,
+								  blocknum + i);
+	}
 
 	SetLastWrittenLSNForRelation(lsn, InfoFromSMgrRel(reln), forkNum);
 	set_cached_relsize(InfoFromSMgrRel(reln), forkNum, blocknum);
@@ -2367,6 +2351,14 @@ neon_read_at_lsn(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 	 */
 	if (RecoveryInProgress() && !(MyBackendType == B_STARTUP))
 		XLogWaitForReplayOf(request_lsns.request_lsn);
+
+	/*
+	 * It is possible that previous modifications in this backend haven't been
+ 	 * flushed yet (e.g. in neon_zeroextend), so we do so right now to make sure
+  	 * future reads don't have to wait forever.
+	 */
+	if (!RecoveryInProgress())
+		XLogFlush(request_lsn);
 
 	/*
 	 * Try to find prefetched page in the list of received pages.
