@@ -90,8 +90,11 @@ fn main() -> Result<()> {
         handle_init(sub_args).map(Some)
     } else {
         // all other commands need an existing config
-        let mut env =
-            LocalEnv::load_config(&local_env::base_path()).context("Error loading config")?;
+        let base_path = local_env::base_path();
+        let branch_mappings_path = local_env::branch_mappings_path();
+
+        let mut env = LocalEnv::load_config(&base_path, Some(&branch_mappings_path))
+            .context("Error loading config")?;
         let original_env = env.clone();
 
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -264,7 +267,7 @@ async fn get_timeline_infos(
 fn get_tenant_id(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> anyhow::Result<TenantId> {
     if let Some(tenant_id_from_arguments) = parse_tenant_id(sub_match).transpose() {
         tenant_id_from_arguments
-    } else if let Some(default_id) = env.default_tenant_id {
+    } else if let Some(default_id) = env.branch_mappings.default_tenant_id {
         Ok(default_id)
     } else {
         anyhow::bail!("No tenant id. Use --tenant-id, or set a default tenant");
@@ -278,7 +281,7 @@ fn get_tenant_shard_id(
 ) -> anyhow::Result<TenantShardId> {
     if let Some(tenant_id_from_arguments) = parse_tenant_shard_id(sub_match).transpose() {
         tenant_id_from_arguments
-    } else if let Some(default_id) = env.default_tenant_id {
+    } else if let Some(default_id) = env.branch_mappings.default_tenant_id {
         Ok(TenantShardId::unsharded(default_id))
     } else {
         anyhow::bail!("No tenant shard id. Use --tenant-id, or set a default tenant");
@@ -360,7 +363,6 @@ fn handle_init(init_match: &ArgMatches) -> anyhow::Result<LocalEnv> {
                 .collect(),
             pg_distrib_dir: None,
             neon_distrib_dir: None,
-            default_tenant_id: TenantId::from_array(std::array::from_fn(|_| 0)),
             storage_controller: None,
             control_plane_compute_hook_api: None,
         }
@@ -368,8 +370,12 @@ fn handle_init(init_match: &ArgMatches) -> anyhow::Result<LocalEnv> {
 
     LocalEnv::init(init_conf, force)
         .context("materialize initial neon_local environment on disk")?;
-    Ok(LocalEnv::load_config(&local_env::base_path())
-        .expect("freshly written config should be loadable"))
+    let base_path = local_env::base_path();
+    let branch_mappings_path = local_env::branch_mappings_path();
+    let env = LocalEnv::load_config(&base_path, Some(&branch_mappings_path))
+        .expect("freshly written config should be loadable");
+
+    Ok(env)
 }
 
 /// The default pageserver is the one where CLI tenant/timeline operations are sent by default.
@@ -525,14 +531,14 @@ async fn handle_tenant(
 
             if create_match.get_flag("set-default") {
                 println!("Setting tenant {tenant_id} as a default one");
-                env.default_tenant_id = Some(tenant_id);
+                env.branch_mappings.default_tenant_id = Some(tenant_id);
             }
         }
         Some(("set-default", set_default_match)) => {
             let tenant_id =
                 parse_tenant_id(set_default_match)?.context("No tenant id specified")?;
             println!("Setting tenant {tenant_id} as a default one");
-            env.default_tenant_id = Some(tenant_id);
+            env.branch_mappings.default_tenant_id = Some(tenant_id);
         }
         Some(("config", create_match)) => {
             let tenant_id = get_tenant_id(create_match, env)?;
@@ -693,6 +699,7 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
         Some(ep_subcommand_data) => ep_subcommand_data,
         None => bail!("no endpoint subcommand provided"),
     };
+
     let mut cplane = ComputeControlPlane::load(env.clone())?;
 
     match sub_name {
@@ -1360,6 +1367,7 @@ async fn handle_stop_all(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> R
 
 async fn try_stop_all(env: &local_env::LocalEnv, immediate: bool) {
     // Stop all endpoints
+    // NOTE: This only knows about endpoints in the default endpoints dir
     match ComputeControlPlane::load(env.clone()) {
         Ok(cplane) => {
             for (_k, node) in cplane.endpoints {
@@ -1418,6 +1426,18 @@ fn cli() -> Command {
         .help("timeout until we fail the command, e.g. 30s")
         .value_parser(value_parser!(humantime::Duration))
         .default_value("10s")
+        .required(false);
+
+    let branch_mappings_arg = Arg::new("branch-mappings")
+        .long("branch-mappings")
+        .help("File holding all branch names. Default is <repo dir>/branches.toml")
+        .value_parser(value_parser!(PathBuf))
+        .required(false);
+
+    let endpoints_dir_arg = Arg::new("endpoints-dir")
+        .long("endpoints-dir")
+        .help("Path to directory holding all endpoints. Default is <repo dir>/endpoints")
+        .value_parser(value_parser!(PathBuf))
         .required(false);
 
     let branch_name_arg = Arg::new("branch-name")
@@ -1560,6 +1580,8 @@ fn cli() -> Command {
     Command::new("Neon CLI")
         .arg_required_else_help(true)
         .version(GIT_VERSION)
+        .arg(branch_mappings_arg)
+        .arg(endpoints_dir_arg)
         .subcommand(
             Command::new("init")
                 .about("Initialize a new Neon repository, preparing configs for services to start with")
@@ -1571,7 +1593,6 @@ fn cli() -> Command {
                         .value_parser(value_parser!(PathBuf))
                         .value_name("config")
                 )
-                .arg(pg_version_arg.clone())
                 .arg(force_arg)
         )
         .subcommand(

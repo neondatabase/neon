@@ -292,7 +292,7 @@ impl ComputeHook {
             );
             return Ok(());
         };
-        let env = match LocalEnv::load_config(repo_dir) {
+        let env = match LocalEnv::load_config(repo_dir, None) {
             Ok(e) => e,
             Err(e) => {
                 tracing::warn!("Couldn't load neon_local config, skipping compute update ({e})");

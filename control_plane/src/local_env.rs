@@ -46,6 +46,11 @@ pub struct LocalEnv {
     // must be an absolute path. If the env var is not set, $PWD/.neon is used.
     pub base_data_dir: PathBuf,
 
+    // Similarly, path to branch mappings file. Not stored in the config file but
+    // read from the NEON_BRANCH_MAPPINGS env variable. "None" means no mappings
+    // are loaded, and they cannot be saved either.
+    pub branch_name_mappings_path: Option<PathBuf>,
+
     // Path to postgres distribution. It's expected that "bin", "include",
     // "lib", "share" from postgres distribution are there. If at some point
     // in time we will be able to run against vanilla postgres we may split that
@@ -54,10 +59,6 @@ pub struct LocalEnv {
 
     // Path to pageserver binary.
     pub neon_distrib_dir: PathBuf,
-
-    // Default tenant ID to use with the 'neon_local' command line utility, when
-    // --tenant_id is not explicitly specified.
-    pub default_tenant_id: Option<TenantId>,
 
     // used to issue tokens during e.g pg start
     pub private_key_path: PathBuf,
@@ -82,11 +83,7 @@ pub struct LocalEnv {
     // storage controller's configuration.
     pub control_plane_compute_hook_api: Option<Url>,
 
-    /// Keep human-readable aliases in memory (and persist them to config), to hide ZId hex strings from the user.
-    // A `HashMap<String, HashMap<TenantId, TimelineId>>` would be more appropriate here,
-    // but deserialization into a generic toml object as `toml::Value::try_from` fails with an error.
-    // https://toml.io/en/v1.0.0 does not contain a concept of "a table inside another table".
-    pub branch_name_mappings: HashMap<String, Vec<(TenantId, TimelineId)>>,
+    pub branch_mappings: BranchMappings,
 }
 
 /// On-disk state stored in `.neon/config`.
@@ -95,7 +92,6 @@ pub struct LocalEnv {
 pub struct OnDiskConfig {
     pub pg_distrib_dir: PathBuf,
     pub neon_distrib_dir: PathBuf,
-    pub default_tenant_id: Option<TenantId>,
     pub private_key_path: PathBuf,
     pub broker: NeonBroker,
     pub storage_controller: NeonStorageControllerConf,
@@ -107,7 +103,20 @@ pub struct OnDiskConfig {
     pub safekeepers: Vec<SafekeeperConf>,
     pub control_plane_api: Option<Url>,
     pub control_plane_compute_hook_api: Option<Url>,
-    branch_name_mappings: HashMap<String, Vec<(TenantId, TimelineId)>>,
+}
+
+#[derive(PartialEq, Eq, Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct BranchMappings {
+    // Default tenant ID to use with the 'neon_local' command line utility, when
+    // --tenant_id is not explicitly specified. This comes from the branches.
+    pub default_tenant_id: Option<TenantId>,
+
+    /// Keep human-readable aliases in memory (and persist them to config XXX), to hide ZId hex strings from the user.
+    // A `HashMap<String, HashMap<TenantId, TimelineId>>` would be more appropriate here,
+    // but deserialization into a generic toml object as `toml::Value::try_from` fails with an error.
+    // https://toml.io/en/v1.0.0 does not contain a concept of "a table inside another table".
+    pub mappings: HashMap<String, Vec<(TenantId, TimelineId)>>,
 }
 
 fn fail_if_pageservers_field_specified<'de, D>(_: D) -> Result<Vec<PageServerConf>, D::Error>
@@ -128,7 +137,6 @@ pub struct NeonLocalInitConf {
     pub pg_distrib_dir: Option<PathBuf>,
     // TODO: do we need this? Seems unused
     pub neon_distrib_dir: Option<PathBuf>,
-    pub default_tenant_id: TenantId,
     pub broker: NeonBroker,
     pub storage_controller: Option<NeonStorageControllerConf>,
     pub pageservers: Vec<NeonLocalInitPageserverConf>,
@@ -443,7 +451,8 @@ impl LocalEnv {
         timeline_id: TimelineId,
     ) -> anyhow::Result<()> {
         let existing_values = self
-            .branch_name_mappings
+            .branch_mappings
+            .mappings
             .entry(branch_name.clone())
             .or_default();
 
@@ -468,7 +477,8 @@ impl LocalEnv {
         branch_name: &str,
         tenant_id: TenantId,
     ) -> Option<TimelineId> {
-        self.branch_name_mappings
+        self.branch_mappings
+            .mappings
             .get(branch_name)?
             .iter()
             .find(|(mapped_tenant_id, _)| mapped_tenant_id == &tenant_id)
@@ -477,7 +487,8 @@ impl LocalEnv {
     }
 
     pub fn timeline_name_mappings(&self) -> HashMap<TenantTimelineId, String> {
-        self.branch_name_mappings
+        self.branch_mappings
+            .mappings
             .iter()
             .flat_map(|(name, tenant_timelines)| {
                 tenant_timelines.iter().map(|&(tenant_id, timeline_id)| {
@@ -488,7 +499,10 @@ impl LocalEnv {
     }
 
     ///  Construct `Self` from on-disk state.
-    pub fn load_config(repopath: &Path) -> anyhow::Result<Self> {
+    pub fn load_config(
+        repopath: &Path,
+        branch_name_mappings_path: Option<&Path>,
+    ) -> anyhow::Result<Self> {
         if !repopath.exists() {
             bail!(
                 "Neon config is not found in {}. You need to run 'neon_local init' first",
@@ -498,37 +512,43 @@ impl LocalEnv {
 
         // TODO: check that it looks like a neon repository
 
-        // load and parse file
+        // load and parse config file
         let config_file_contents = fs::read_to_string(repopath.join("config"))?;
         let on_disk_config: OnDiskConfig = toml::from_str(config_file_contents.as_str())?;
-        let mut env = {
-            let OnDiskConfig {
-                pg_distrib_dir,
-                neon_distrib_dir,
-                default_tenant_id,
-                private_key_path,
-                broker,
-                storage_controller,
-                pageservers,
-                safekeepers,
-                control_plane_api,
-                control_plane_compute_hook_api,
-                branch_name_mappings,
-            } = on_disk_config;
-            LocalEnv {
-                base_data_dir: repopath.to_owned(),
-                pg_distrib_dir,
-                neon_distrib_dir,
-                default_tenant_id,
-                private_key_path,
-                broker,
-                storage_controller,
-                pageservers,
-                safekeepers,
-                control_plane_api,
-                control_plane_compute_hook_api,
-                branch_name_mappings,
-            }
+        let OnDiskConfig {
+            pg_distrib_dir,
+            neon_distrib_dir,
+            private_key_path,
+            broker,
+            storage_controller,
+            pageservers,
+            safekeepers,
+            control_plane_api,
+            control_plane_compute_hook_api,
+        } = on_disk_config;
+
+        // load and parse "branches.toml" file
+        let branch_mappings = if let Some(path) = branch_name_mappings_path {
+            let contents = fs::read_to_string(path)
+                .context(format!("load branch mappings file {}", path.display()))?;
+            toml::from_str::<BranchMappings>(contents.as_str())?
+        } else {
+            BranchMappings::default()
+        };
+
+        let mut env = LocalEnv {
+            base_data_dir: repopath.to_owned(),
+            branch_name_mappings_path: branch_name_mappings_path.map(|p| p.to_owned()),
+            pg_distrib_dir,
+            neon_distrib_dir,
+            private_key_path,
+            broker,
+            storage_controller,
+            pageservers,
+            safekeepers,
+            control_plane_api,
+            control_plane_compute_hook_api,
+            branch_mappings,
         };
 
         // The source of truth for pageserver configuration is the pageserver.toml.
@@ -618,7 +638,6 @@ impl LocalEnv {
             &OnDiskConfig {
                 pg_distrib_dir: self.pg_distrib_dir.clone(),
                 neon_distrib_dir: self.neon_distrib_dir.clone(),
-                default_tenant_id: self.default_tenant_id,
                 private_key_path: self.private_key_path.clone(),
                 broker: self.broker.clone(),
                 storage_controller: self.storage_controller.clone(),
@@ -626,9 +645,20 @@ impl LocalEnv {
                 safekeepers: self.safekeepers.clone(),
                 control_plane_api: self.control_plane_api.clone(),
                 control_plane_compute_hook_api: self.control_plane_compute_hook_api.clone(),
-                branch_name_mappings: self.branch_name_mappings.clone(),
             },
-        )
+        )?;
+
+        if let Some(path) = &self.branch_name_mappings_path {
+            Self::persist_branches_impl(path, &self.branch_mappings)?;
+        } else {
+            if !self.branch_mappings.mappings.is_empty() {
+                tracing::warn!("command created a branch mapping, but it was not saved because no mappings file was configured")
+            } else if self.branch_mappings.default_tenant_id.is_some() {
+                tracing::warn!("command created a tenant default, but it was not saved because no mappings file was configured")
+            }
+        }
+
+        Ok(())
     }
 
     pub fn persist_config_impl(base_path: &Path, config: &OnDiskConfig) -> anyhow::Result<()> {
@@ -638,6 +668,19 @@ impl LocalEnv {
             format!(
                 "Failed to write config file into path '{}'",
                 target_config_path.display()
+            )
+        })
+    }
+
+    pub fn persist_branches_impl(
+        branch_name_mappings_path: &Path,
+        branch_mappings: &BranchMappings,
+    ) -> anyhow::Result<()> {
+        let content = &toml::to_string_pretty(branch_mappings)?;
+        fs::write(branch_name_mappings_path, content).with_context(|| {
+            format!(
+                "Failed to write branch information into path '{}'",
+                branch_name_mappings_path.display()
             )
         })
     }
@@ -702,7 +745,6 @@ impl LocalEnv {
         let NeonLocalInitConf {
             pg_distrib_dir,
             neon_distrib_dir,
-            default_tenant_id,
             broker,
             storage_controller,
             pageservers,
@@ -746,9 +788,9 @@ impl LocalEnv {
         // TODO: refactor to avoid this, LocalEnv should only be constructed from on-disk state
         let env = LocalEnv {
             base_data_dir: base_path.clone(),
+            branch_name_mappings_path: Some(base_path.join("branches.toml")),
             pg_distrib_dir,
             neon_distrib_dir,
-            default_tenant_id: Some(default_tenant_id),
             private_key_path,
             broker,
             storage_controller: storage_controller.unwrap_or_default(),
@@ -756,10 +798,10 @@ impl LocalEnv {
             safekeepers,
             control_plane_api: control_plane_api.unwrap_or_default(),
             control_plane_compute_hook_api: control_plane_compute_hook_api.unwrap_or_default(),
-            branch_name_mappings: Default::default(),
+            branch_mappings: Default::default(),
         };
 
-        // create endpoints dir
+        // create the default endpoints dir
         fs::create_dir_all(env.endpoints_path())?;
 
         // create safekeeper dirs
@@ -801,6 +843,24 @@ pub fn base_path() -> PathBuf {
             let pwd_abs = pwd.canonicalize().expect("canonicalize current directory");
             pwd_abs.join(".neon")
         }
+    };
+    assert!(path.is_absolute());
+    path
+}
+
+pub fn branch_mappings_path() -> PathBuf {
+    let path = match std::env::var_os("NEON_BRANCH_MAPPINGS") {
+        Some(val) => {
+            let path = PathBuf::from(val);
+
+            // a relative path is relative to repo dir
+            if !path.is_absolute() {
+                base_path().join(path)
+            } else {
+                path
+            }
+        }
+        None => base_path().join("branches.toml"),
     };
     assert!(path.is_absolute());
     path

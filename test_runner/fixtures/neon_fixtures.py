@@ -654,6 +654,10 @@ class NeonEnvBuilder:
         with snapshot_config_toml.open("r") as f:
             snapshot_config = toml.load(f)
 
+        snapshot_branches_toml = repo_dir / "branches.toml"
+        with snapshot_branches_toml.open("r") as f:
+            snapshot_branch_mappings = toml.load(f)
+
         self.initial_tenant = TenantId(snapshot_config["default_tenant_id"])
         self.initial_timeline = TimelineId(
             dict(snapshot_config["branch_name_mappings"][DEFAULT_BRANCH_NAME])[
@@ -729,15 +733,15 @@ class NeonEnvBuilder:
         with (self.repo_dir / "config").open("r") as f:
             config = toml.load(f)
 
-        config["default_tenant_id"] = snapshot_config["default_tenant_id"]
-        config["branch_name_mappings"] = snapshot_config["branch_name_mappings"]
-
         # Update the config with new neon + postgres path in case of compat test
         config["pg_distrib_dir"] = str(self.pg_distrib_dir)
         config["neon_distrib_dir"] = str(self.neon_binpath)
 
         with (self.repo_dir / "config").open("w") as f:
             toml.dump(config, f)
+
+        with (self.repo_dir / "branches.toml").open("w") as f:
+            toml.dump(snapshot_branch_mappings, f)
 
         return self.env
 
@@ -1118,7 +1122,6 @@ class NeonEnv:
 
         # Create the neon_local's `NeonLocalInitConf`
         cfg: Dict[str, Any] = {
-            "default_tenant_id": str(self.initial_tenant),
             "broker": {
                 "listen_addr": self.broker.listen_addr(),
             },
