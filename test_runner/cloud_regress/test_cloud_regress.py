@@ -30,6 +30,28 @@ def test_cloud_regress(
             log.info("Creating the extension")
             cur.execute("CREATE EXTENSION IF NOT EXISTS regress_so")
             conn.commit()
+            log.info("Looking for subscriptions in the regress database")
+            cur.execute(
+                "SELECT subname FROM pg_catalog.pg_subscription WHERE "
+                "subdbid = (SELECT oid FROM pg_catalog.pg_database WHERE datname='regression');"
+            )
+            if cur.rowcount > 0:
+                with psycopg2.connect(
+                    dbname="regression",
+                    host=remote_pg.default_options["host"],
+                    user=remote_pg.default_options["user"],
+                    password=remote_pg.default_options["password"],
+                ) as regress_conn:
+                    with regress_conn.cursor() as regress_cur:
+                        for sub in cur:
+                            regress_cur.execute(f"ALTER SUBSCRIPTION {sub[0]} DISABLE")
+                            regress_cur.execute(
+                                f"ALTER SUBSCRIPTION {sub[0]} SET (slot_name = NONE)"
+                            )
+                            regress_cur.execute(
+                                f"DROP SUBSCRIPTION {sub[0]} SET (slot_name = NONE)"
+                            )
+                            regress_conn.commit()
 
             # This is also a workaround for the full path problem
             # If we specify the full path in the command, the library won't be downloaded
