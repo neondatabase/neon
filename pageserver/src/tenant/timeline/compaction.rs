@@ -1856,7 +1856,6 @@ impl Timeline {
             self.tenant_shard_id,
             lowest_retain_lsn..end_lsn,
             self.get_compaction_target_size(),
-            ctx,
         )
         .await?;
 

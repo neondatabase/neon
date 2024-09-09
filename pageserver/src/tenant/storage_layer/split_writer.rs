@@ -188,7 +188,7 @@ impl SplitImageLayerWriter {
             .await
     }
 
-    /// When split writer fails, the caller should call this function and handle partially generated layers.
+    /// This function will be deprecated with #8841.
     pub(crate) fn take(self) -> anyhow::Result<(Vec<SplitWriterResult>, ImageLayerWriter)> {
         Ok((self.generated_layers, self.inner))
     }
@@ -221,7 +221,6 @@ impl SplitDeltaLayerWriter {
         tenant_shard_id: TenantShardId,
         lsn_range: Range<Lsn>,
         target_layer_size: u64,
-        #[allow(unused)] ctx: &RequestContext,
     ) -> anyhow::Result<Self> {
         Ok(Self {
             target_layer_size,
@@ -375,7 +374,7 @@ impl SplitDeltaLayerWriter {
             .await
     }
 
-    /// When split writer fails, the caller should call this function and handle partially generated layers.
+    /// This function will be deprecated with #8841.
     pub(crate) fn take(self) -> anyhow::Result<(Vec<SplitWriterResult>, Option<DeltaLayerWriter>)> {
         Ok((self.generated_layers, self.inner.map(|x| x.1)))
     }
@@ -443,7 +442,6 @@ mod tests {
             tenant.tenant_shard_id,
             Lsn(0x18)..Lsn(0x20),
             4 * 1024 * 1024,
-            &ctx,
         )
         .await
         .unwrap();
@@ -522,7 +520,6 @@ mod tests {
             tenant.tenant_shard_id,
             Lsn(0x18)..Lsn(0x20),
             4 * 1024 * 1024,
-            &ctx,
         )
         .await
         .unwrap();
@@ -627,7 +624,6 @@ mod tests {
             tenant.tenant_shard_id,
             Lsn(0x18)..Lsn(0x20),
             4 * 1024,
-            &ctx,
         )
         .await
         .unwrap();
@@ -716,7 +712,6 @@ mod tests {
             tenant.tenant_shard_id,
             Lsn(0x10)..Lsn(N as u64 * 16 + 0x10),
             4 * 1024 * 1024,
-            &ctx,
         )
         .await
         .unwrap();
