@@ -1523,13 +1523,6 @@ class PageserverPort:
     http: int
 
 
-CREATE_TIMELINE_ID_EXTRACTOR: re.Pattern = re.compile(  # type: ignore[type-arg]
-    r"^Created timeline '(?P<timeline_id>[^']+)'", re.MULTILINE
-)
-TIMELINE_DATA_EXTRACTOR: re.Pattern = re.compile(  # type: ignore[type-arg]
-    r"\s?(?P<branch_name>[^\s]+)\s\[(?P<timeline_id>[^\]]+)\]", re.MULTILINE
-)
-
 
 class AbstractNeonCli(abc.ABC):
     """
@@ -1759,6 +1752,9 @@ class NeonCli(AbstractNeonCli):
         tenant_id: Optional[TenantId] = None,
         timeline_id: Optional[TimelineId] = None,
     ) -> TimelineId:
+        if timeline_id is None:
+            timeline_id = TimelineId.generate()
+
         cmd = [
             "timeline",
             "create",
@@ -1766,23 +1762,16 @@ class NeonCli(AbstractNeonCli):
             new_branch_name,
             "--tenant-id",
             str(tenant_id or self.env.initial_tenant),
+            "--timeline-id",
+            str(timeline_id),
             "--pg-version",
             self.env.pg_version,
         ]
 
-        if timeline_id is not None:
-            cmd.extend(["--timeline-id", str(timeline_id)])
-
         res = self.raw_cli(cmd)
         res.check_returncode()
 
-        matches = CREATE_TIMELINE_ID_EXTRACTOR.search(res.stdout)
-
-        created_timeline_id = None
-        if matches is not None:
-            created_timeline_id = matches.group("timeline_id")
-
-        return TimelineId(str(created_timeline_id))
+        return timeline_id
 
     def create_branch(
         self,
@@ -1790,12 +1779,17 @@ class NeonCli(AbstractNeonCli):
         ancestor_branch_name: Optional[str] = None,
         tenant_id: Optional[TenantId] = None,
         ancestor_start_lsn: Optional[Lsn] = None,
+        new_timeline_id: Optional[TimelineId] = None,
     ) -> TimelineId:
+        if new_timeline_id is None:
+            new_timeline_id = TimelineId.generate()
         cmd = [
             "timeline",
             "branch",
             "--branch-name",
             new_branch_name,
+            "--timeline-id",
+            str(new_timeline_id),
             "--tenant-id",
             str(tenant_id or self.env.initial_tenant),
         ]
@@ -1807,16 +1801,7 @@ class NeonCli(AbstractNeonCli):
         res = self.raw_cli(cmd)
         res.check_returncode()
 
-        matches = CREATE_TIMELINE_ID_EXTRACTOR.search(res.stdout)
-
-        created_timeline_id = None
-        if matches is not None:
-            created_timeline_id = matches.group("timeline_id")
-
-        if created_timeline_id is None:
-            raise Exception("could not find timeline id after `neon timeline create` invocation")
-        else:
-            return TimelineId(str(created_timeline_id))
+        return TimelineId(str(new_timeline_id))
 
     def list_timelines(self, tenant_id: Optional[TenantId] = None) -> List[Tuple[str, TimelineId]]:
         """
@@ -1825,6 +1810,9 @@ class NeonCli(AbstractNeonCli):
 
         # main [b49f7954224a0ad25cc0013ea107b54b]
         # ┣━ @0/16B5A50: test_cli_branch_list_main [20f98c79111b9015d84452258b7d5540]
+        TIMELINE_DATA_EXTRACTOR: re.Pattern = re.compile(  # type: ignore[type-arg]
+            r"\s?(?P<branch_name>[^\s]+)\s\[(?P<timeline_id>[^\]]+)\]", re.MULTILINE
+        )
         res = self.raw_cli(
             ["timeline", "list", "--tenant-id", str(tenant_id or self.env.initial_tenant)]
         )
