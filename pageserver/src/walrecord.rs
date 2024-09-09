@@ -562,8 +562,8 @@ pub mod v16 {
 }
 
 pub mod v17 {
-    use bytes::{Buf, Bytes};
     pub use super::v14::XlHeapLockUpdated;
+    use bytes::{Buf, Bytes};
     pub use postgres_ffi::{TimeLineID, TimestampTz};
 
     pub use super::v16::rm_neon;

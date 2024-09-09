@@ -401,8 +401,7 @@ impl WalIngest {
                         cp.wal_level = rec.wal_level;
                         self.checkpoint_modified = true;
                     }
-                }
-                else if info == pg_constants::XLOG_END_OF_RECOVERY {
+                } else if info == pg_constants::XLOG_END_OF_RECOVERY {
                     if let CheckPoint::V17(cp) = &mut self.checkpoint {
                         let rec = v17::XlEndOfRecovery::decode(&mut buf);
                         cp.wal_level = rec.wal_level;
@@ -454,21 +453,21 @@ impl WalIngest {
                             && info == pg_constants::XLOG_CHECKPOINT_SHUTDOWN
                         {
                             let oldest_active_xid = if pg_version >= 17 {
-                            let mut oldest_active_full_xid = self.checkpoint.nextXid.value;
-                            for xid in modification.tline.list_twophase_files(lsn, ctx).await? {
-                                if xid < oldest_active_full_xid {
-                                    oldest_active_full_xid = xid;
+                                let mut oldest_active_full_xid = self.checkpoint.nextXid.value;
+                                for xid in modification.tline.list_twophase_files(lsn, ctx).await? {
+                                    if xid < oldest_active_full_xid {
+                                        oldest_active_full_xid = xid;
+                                    }
                                 }
-                            }
-                            oldest_active_full_xid as u32
-                        } else {
-                            let mut oldest_active_xid = cp.nextXid.value as u32;
-                            for xid in modification.tline.list_twophase_files(lsn, ctx).await? {
-                                let narrow_xid = xid as u32;
-                                if (narrow_xid.wrapping_sub(oldest_active_xid) as i32) < 0 {
-                                    oldest_active_xid = narrow_xid;
+                                oldest_active_full_xid as u32
+                            } else {
+                                let mut oldest_active_xid = cp.nextXid.value as u32;
+                                for xid in modification.tline.list_twophase_files(lsn, ctx).await? {
+                                    let narrow_xid = xid as u32;
+                                    if (narrow_xid.wrapping_sub(oldest_active_xid) as i32) < 0 {
+                                        oldest_active_xid = narrow_xid;
+                                    }
                                 }
-                            }
                                 oldest_active_xid
                             };
                             cp.oldestActiveXid = oldest_active_xid;
