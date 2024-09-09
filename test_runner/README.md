@@ -257,9 +257,8 @@ compute Postgres nodes. The connections between them can be configured to use JW
 authentication tokens, and some other configuration options can be tweaked too.
 
 The easiest way to get access to a Neon Environment is by using the `neon_simple_env`
-fixture. For convenience, there is a branch called `empty` in environments created with
-'neon_simple_env'. The convention is to create a test-specific branch of that and load any
-test data there, instead of the 'main' branch.
+fixture. For convenience, there is a branch called `main` in environments created with
+'neon_simple_env', ready to be used in the test.
 
 For more complicated cases, you can build a custom Neon Environment, with the `neon_env`
 fixture:

@@ -57,7 +57,6 @@ from _pytest.fixtures import FixtureRequest
 from psycopg2.extensions import connection as PgConnection
 from psycopg2.extensions import cursor as PgCursor
 from psycopg2.extensions import make_dsn, parse_dsn
-from typing_extensions import Literal
 from urllib3.util.retry import Retry
 
 from fixtures import overlayfs
@@ -1451,10 +1450,8 @@ def neon_simple_env(
     ) as builder:
         env = builder.init_start()
 
-        # For convenience in tests, create a branch from the freshly-initialized cluster.
-        env.neon_cli.create_branch("empty", ancestor_branch_name=DEFAULT_BRANCH_NAME)
-
         yield env
+
 
 @pytest.fixture(scope="function")
 def neon_env_builder(

@@ -9,8 +9,7 @@ from fixtures.pg_version import PgVersion
 #
 def test_unlogged(neon_simple_env: NeonEnv):
     env = neon_simple_env
-    env.neon_cli.create_branch("test_unlogged", "empty")
-    endpoint = env.endpoints.create_start("test_unlogged")
+    endpoint = env.endpoints.create_start("main")
 
     conn = endpoint.connect()
     cur = conn.cursor()
@@ -22,7 +21,7 @@ def test_unlogged(neon_simple_env: NeonEnv):
     cur.execute("INSERT INTO iut (id) values (42);")
 
     # create another compute to fetch inital empty contents from pageserver
-    fork_at_current_lsn(env, endpoint, "test_unlogged_basebackup", "test_unlogged")
+    fork_at_current_lsn(env, endpoint, "test_unlogged_basebackup", "main")
     endpoint2 = env.endpoints.create_start("test_unlogged_basebackup")
 
     conn2 = endpoint2.connect()

@@ -22,8 +22,7 @@ from fixtures.utils import query_scalar
 #
 def test_readonly_node(neon_simple_env: NeonEnv):
     env = neon_simple_env
-    env.neon_cli.create_branch("test_readonly_node", "empty")
-    endpoint_main = env.endpoints.create_start("test_readonly_node")
+    endpoint_main = env.endpoints.create_start("main")
 
     env.pageserver.allowed_errors.extend(
         [
@@ -74,12 +73,12 @@ def test_readonly_node(neon_simple_env: NeonEnv):
 
     # Create first read-only node at the point where only 100 rows were inserted
     endpoint_hundred = env.endpoints.create_start(
-        branch_name="test_readonly_node", endpoint_id="ep-readonly_node_hundred", lsn=lsn_a
+        branch_name="main", endpoint_id="ep-readonly_node_hundred", lsn=lsn_a
     )
 
     # And another at the point where 200100 rows were inserted
     endpoint_more = env.endpoints.create_start(
-        branch_name="test_readonly_node", endpoint_id="ep-readonly_node_more", lsn=lsn_b
+        branch_name="main", endpoint_id="ep-readonly_node_more", lsn=lsn_b
     )
 
     # On the 'hundred' node, we should see only 100 rows
@@ -100,7 +99,7 @@ def test_readonly_node(neon_simple_env: NeonEnv):
 
     # Check creating a node at segment boundary
     endpoint = env.endpoints.create_start(
-        branch_name="test_readonly_node",
+        branch_name="main",
         endpoint_id="ep-branch_segment_boundary",
         lsn=Lsn("0/3000000"),
     )
@@ -112,7 +111,7 @@ def test_readonly_node(neon_simple_env: NeonEnv):
     with pytest.raises(Exception, match="invalid basebackup lsn"):
         # compute node startup with invalid LSN should fail
         env.endpoints.create_start(
-            branch_name="test_readonly_node",
+            branch_name="main",
             endpoint_id="ep-readonly_node_preinitdb",
             lsn=Lsn("0/42"),
         )
@@ -218,14 +217,10 @@ def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
 # Similar test, but with more data, and we force checkpoints
 def test_timetravel(neon_simple_env: NeonEnv):
     env = neon_simple_env
-    pageserver_http_client = env.pageserver.http_client()
-    env.neon_cli.create_branch("test_timetravel", "empty")
-    endpoint = env.endpoints.create_start("test_timetravel")
-
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
     client = env.pageserver.http_client()
-
-    tenant_id = endpoint.safe_psql("show neon.tenant_id")[0][0]
-    timeline_id = endpoint.safe_psql("show neon.timeline_id")[0][0]
+    endpoint = env.endpoints.create_start("main")
 
     lsns = []
 
@@ -249,7 +244,7 @@ def test_timetravel(neon_simple_env: NeonEnv):
         wait_for_last_record_lsn(client, tenant_id, timeline_id, current_lsn)
 
         # run checkpoint manually to force a new layer file
-        pageserver_http_client.timeline_checkpoint(tenant_id, timeline_id)
+        client.timeline_checkpoint(tenant_id, timeline_id)
 
     ##### Restart pageserver
     env.endpoints.stop_all()
@@ -258,7 +253,7 @@ def test_timetravel(neon_simple_env: NeonEnv):
 
     for i, lsn in lsns:
         endpoint_old = env.endpoints.create_start(
-            branch_name="test_timetravel", endpoint_id=f"ep-old_lsn_{i}", lsn=lsn
+            branch_name="main", endpoint_id=f"ep-old_lsn_{i}", lsn=lsn
         )
         with endpoint_old.cursor() as cur:
             assert query_scalar(cur, f"select count(*) from testtab where iteration={i}") == 100000
