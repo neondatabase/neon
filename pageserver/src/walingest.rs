@@ -395,6 +395,21 @@ impl WalIngest {
             pg_constants::RM_XLOG_ID => {
                 let info = decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
 
+                if info == pg_constants::XLOG_PARAMETER_CHANGE {
+                    if let CheckPoint::V17(cp) = &mut self.checkpoint {
+                        let rec = v17::XlParameterChange::decode(&mut buf);
+                        cp.wal_level = rec.wal_level;
+                        self.checkpoint_modified = true;
+                    }
+                }
+                else if info == pg_constants::XLOG_END_OF_RECOVERY {
+                    if let CheckPoint::V17(cp) = &mut self.checkpoint {
+                        let rec = v17::XlEndOfRecovery::decode(&mut buf);
+                        cp.wal_level = rec.wal_level;
+                        self.checkpoint_modified = true;
+                    }
+                }
+
                 enum_pgversion_dispatch!(&mut self.checkpoint, CheckPoint, cp, {
                     if info == pg_constants::XLOG_NEXTOID {
                         let next_oid = buf.get_u32_le();

@@ -123,6 +123,7 @@ macro_rules! enum_pgversion_dispatch {
                 V14 : v14,
                 V15 : v15,
                 V16 : v16,
+                V17 : v17,
             ]
         )
     };
@@ -152,6 +153,7 @@ macro_rules! enum_pgversion {
                 V14 : v14,
                 V15 : v15,
                 V16 : v16,
+                V17 : v17,
             ]
         }
     };
@@ -164,6 +166,7 @@ macro_rules! enum_pgversion {
                 V14 : v14,
                 V15 : v15,
                 V16 : v16,
+                V17 : v17,
             ]
         }
     };

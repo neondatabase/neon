@@ -222,14 +222,19 @@ pub const INVALID_TRANSACTION_ID: u32 = 0;
 pub const FIRST_BOOTSTRAP_OBJECT_ID: u32 = 12000;
 pub const FIRST_NORMAL_OBJECT_ID: u32 = 16384;
 
+/* pg_control.h */
 pub const XLOG_CHECKPOINT_SHUTDOWN: u8 = 0x00;
 pub const XLOG_CHECKPOINT_ONLINE: u8 = 0x10;
-pub const XLP_FIRST_IS_CONTRECORD: u16 = 0x0001;
-pub const XLP_LONG_HEADER: u16 = 0x0002;
+pub const XLOG_PARAMETER_CHANGE: u8 = 0x60;
+pub const XLOG_END_OF_RECOVERY: u8 = 0x90;
 
 /* From xlog.h */
 pub const XLOG_REPLORIGIN_SET: u8 = 0x00;
 pub const XLOG_REPLORIGIN_DROP: u8 = 0x10;
+
+/* xlog_internal.h */
+pub const XLP_FIRST_IS_CONTRECORD: u16 = 0x0001;
+pub const XLP_LONG_HEADER: u16 = 0x0002;
 
 /* From replication/slot.h */
 pub const REPL_SLOT_ON_DISK_OFFSETOF_RESTART_LSN: usize = 4*4  /* offset of `slotdata` in ReplicationSlotOnDisk  */
