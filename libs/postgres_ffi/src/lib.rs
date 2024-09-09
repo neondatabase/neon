@@ -44,6 +44,9 @@ macro_rules! postgres_ffi {
             // Re-export some symbols from bindings
             pub use bindings::DBState_DB_SHUTDOWNED;
             pub use bindings::{CheckPoint, ControlFileData, XLogRecord};
+
+            pub const ZERO_CHECKPOINT: bytes::Bytes =
+                bytes::Bytes::from_static(&[0u8; xlog_utils::SIZEOF_CHECKPOINT]);
         }
     };
 }

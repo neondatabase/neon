@@ -438,16 +438,12 @@ impl WalIngest {
                 let info = decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
                 if info == pg_constants::XLOG_RUNNING_XACTS {
                     let xlrec = crate::walrecord::XlRunningXacts::decode(&mut buf);
-                    let modified =
-                        enum_pgversion_dispatch!(&mut self.checkpoint, CheckPoint, cp, {
-                            let modified = cp.oldestActiveXid != xlrec.oldest_running_xid;
-                            cp.oldestActiveXid = xlrec.oldest_running_xid;
-                            modified
-                        });
 
-                    if modified {
-                        self.checkpoint_modified = true;
-                    }
+                    enum_pgversion_dispatch!(&mut self.checkpoint, CheckPoint, cp, {
+                        cp.oldestActiveXid = xlrec.oldest_running_xid;
+                    });
+
+                    self.checkpoint_modified = true;
                 }
             }
             pg_constants::RM_REPLORIGIN_ID => {
@@ -1856,36 +1852,23 @@ mod tests {
         // TODO
     }
 
-    const fn max_of(elements: &[usize]) -> usize {
-        let mut res = elements[0];
-        let mut elem = 1;
-        loop {
-            if elem >= elements.len() {
-                break;
-            }
-            if res < elements[elem] {
-                res = elements[elem];
-            }
-            elem += 1;
+    #[tokio::test]
+    async fn test_zeroed_checkpoint_decodes_correctly() -> Result<()> {
+        for i in 14..=16 {
+            dispatch_pgversion!(i, {
+                pgv::CheckPoint::decode(&pgv::ZERO_CHECKPOINT)?;
+            });
         }
-        res
-    }
 
-    static ZERO_CHECKPOINT: Bytes = Bytes::from_static(
-        &[0u8; max_of(&[
-            postgres_ffi::v14::xlog_utils::SIZEOF_CHECKPOINT,
-            postgres_ffi::v15::xlog_utils::SIZEOF_CHECKPOINT,
-            postgres_ffi::v16::xlog_utils::SIZEOF_CHECKPOINT,
-        ])],
-    );
+        Ok(())
+    }
 
     async fn init_walingest_test(tline: &Timeline, ctx: &RequestContext) -> Result<WalIngest> {
         let mut m = tline.begin_modification(Lsn(0x10));
-        dispatch_pgversion!(tline.pg_version, {
-            m.put_checkpoint(Bytes::from_static(
-                &ZERO_CHECKPOINT[..pgv::xlog_utils::SIZEOF_CHECKPOINT],
-            ))?;
-        });
+        m.put_checkpoint(dispatch_pgversion!(
+            tline.pg_version,
+            pgv::ZERO_CHECKPOINT.clone()
+        ))?;
         m.put_relmap_file(0, 111, Bytes::from(""), ctx).await?; // dummy relmapper file
         m.commit(ctx).await?;
         let walingest = WalIngest::new(tline, Lsn(0x10), ctx).await?;
