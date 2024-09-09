@@ -22,10 +22,8 @@ if TYPE_CHECKING:
 def test_logical_replication(neon_simple_env: NeonEnv, pg_bin: PgBin, vanilla_pg):
     env = neon_simple_env
 
-    env.neon_cli.create_branch("test_logical_replication", "empty")
-    endpoint = env.endpoints.create_start("test_logical_replication")
+    endpoint = env.endpoints.create_start("main")
 
-    log.info("postgres is running on 'test_logical_replication' branch")
     pg_bin.run_capture(["pgbench", "-i", "-s10", endpoint.connstr()])
 
     endpoint.safe_psql("create publication pub1 for table pgbench_accounts, pgbench_history")

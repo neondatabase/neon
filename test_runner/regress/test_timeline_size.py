@@ -36,7 +36,7 @@ from fixtures.utils import get_timeline_dir_size, wait_until
 
 def test_timeline_size(neon_simple_env: NeonEnv):
     env = neon_simple_env
-    new_timeline_id = env.neon_cli.create_branch("test_timeline_size", "empty")
+    new_timeline_id = env.neon_cli.create_branch("test_timeline_size", "main")
 
     client = env.pageserver.http_client()
     client.timeline_wait_logical_size(env.initial_tenant, new_timeline_id)
@@ -68,7 +68,7 @@ def test_timeline_size(neon_simple_env: NeonEnv):
 
 def test_timeline_size_createdropdb(neon_simple_env: NeonEnv):
     env = neon_simple_env
-    new_timeline_id = env.neon_cli.create_branch("test_timeline_size_createdropdb", "empty")
+    new_timeline_id = env.neon_cli.create_branch("test_timeline_size_createdropdb", "main")
 
     client = env.pageserver.http_client()
     client.timeline_wait_logical_size(env.initial_tenant, new_timeline_id)

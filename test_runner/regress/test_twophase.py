@@ -11,6 +11,9 @@ from fixtures.neon_fixtures import (
 )
 
 
+#
+# Test branching, when a transaction is in prepared state
+#
 def twophase_test_on_timeline(env: NeonEnv):
     endpoint = env.endpoints.create_start(
         "test_twophase", config_lines=["max_prepared_transactions=5", "log_statement=all"]
@@ -63,7 +66,7 @@ def twophase_test_on_timeline(env: NeonEnv):
     assert len(twophase_files) == 2
 
     # Create a branch with the transaction in prepared state
-    fork_at_current_lsn(env, endpoint, "test_twophase_prepared", "test_twophase")
+    fork_at_current_lsn(env, endpoint, "test_twophase_prepared", "main")
 
     # Start compute on the new branch
     endpoint2 = env.endpoints.create_start(

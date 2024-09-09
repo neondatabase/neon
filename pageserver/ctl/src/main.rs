@@ -174,7 +174,7 @@ async fn main() -> anyhow::Result<()> {
                 println!("specified prefix '{}' failed validation", cmd.prefix);
                 return Ok(());
             };
-            let toml_document = toml_edit::Document::from_str(&cmd.config_toml_str)?;
+            let toml_document = toml_edit::DocumentMut::from_str(&cmd.config_toml_str)?;
             let toml_item = toml_document
                 .get("remote_storage")
                 .expect("need remote_storage");

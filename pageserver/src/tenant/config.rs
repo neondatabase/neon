@@ -452,7 +452,8 @@ impl TryFrom<toml_edit::Item> for TenantConfOpt {
                     .map_err(|e| anyhow::anyhow!("{}: {}", e.path(), e.inner().message()));
             }
             toml_edit::Item::Table(table) => {
-                let deserializer = toml_edit::de::Deserializer::new(table.into());
+                let deserializer =
+                    toml_edit::de::Deserializer::from(toml_edit::DocumentMut::from(table));
                 return serde_path_to_error::deserialize(deserializer)
                     .map_err(|e| anyhow::anyhow!("{}: {}", e.path(), e.inner().message()));
             }
