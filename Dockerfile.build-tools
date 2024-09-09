@@ -6,7 +6,7 @@ FROM debian:bookworm-slim
 # ```
 # . /etc/os-release && echo "${VERSION_CODENAME}"
 # ```
-ARG DEBIAN_VERSION_CODENAME=bullseye
+ARG DEBIAN_VERSION_CODENAME=bookworm
 
 # Add nonroot user
 RUN useradd -ms /bin/bash nonroot -b /home
