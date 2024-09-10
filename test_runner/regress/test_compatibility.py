@@ -21,11 +21,9 @@ from fixtures.pageserver.http import PageserverApiException
 from fixtures.pageserver.utils import (
     timeline_delete_wait_completed,
 )
-from fixtures.pg_version import PgVersion
+from fixtures.pg_version import PgVersion, skip_on_postgres
 from fixtures.remote_storage import RemoteStorageKind, S3Storage, s3_storage
 from fixtures.workload import Workload
-
-from fixtures.pg_version import skip_on_postgres
 
 #
 # A test suite that help to prevent unintentionally breaking backward or forward compatibility between Neon releases.
