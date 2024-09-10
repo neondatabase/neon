@@ -25,7 +25,7 @@ from fixtures.pg_version import PgVersion
 from fixtures.remote_storage import RemoteStorageKind, S3Storage, s3_storage
 from fixtures.workload import Workload
 
-from test_runner.fixtures.pg_version import skip_on_postgres
+from fixtures.pg_version import skip_on_postgres
 
 #
 # A test suite that help to prevent unintentionally breaking backward or forward compatibility between Neon releases.
