@@ -50,7 +50,7 @@ class NeonBroker:
                     raise RuntimeError(
                         f"timed out waiting {elapsed:.0f}s for storage_broker start: {e}"
                     ) from e
-                time.sleep(0.5)
+                time.sleep(0.1)
             else:
                 break  # success
 

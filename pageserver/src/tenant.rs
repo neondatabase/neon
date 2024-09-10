@@ -3534,6 +3534,7 @@ impl Tenant {
         // Flush loop needs to be spawned in order to be able to flush.
         unfinished_timeline.maybe_spawn_flush_loop();
 
+        info!("starting to import from datadir");
         import_datadir::import_timeline_from_postgres_datadir(
             unfinished_timeline,
             &pgdata_path,
@@ -3549,6 +3550,7 @@ impl Tenant {
             anyhow::bail!("failpoint before-checkpoint-new-timeline");
         });
 
+        info!("calling freeze_and_flush");
         unfinished_timeline
             .freeze_and_flush()
             .await
@@ -3559,7 +3561,9 @@ impl Tenant {
             })?;
 
         // All done!
+        info!("calling finish_creation");
         let timeline = raw_timeline.finish_creation()?;
+        info!("call to  finish_creation done");
 
         Ok(timeline)
     }
