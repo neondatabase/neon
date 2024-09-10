@@ -3,7 +3,7 @@
 #![deny(
     deprecated,
     future_incompatible,
-    // TODO: consider let_underscore
+    let_underscore,
     nonstandard_style,
     rust_2024_compatibility
 )]
