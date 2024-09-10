@@ -366,9 +366,9 @@ pub mod v14 {
                 max_prepared_xacts: buf.get_i32_le(),
                 max_locks_per_xact: buf.get_i32_le(),
                 wal_level: buf.get_i32_le(),
-                wal_log_hints: buf.get_u8_le() != 0,
-                track_commit_timestamp: buf.get_u8_le() != 0,
-                _padding: [buf.get_u8_le(), buf.get_u8_le()],
+                wal_log_hints: buf.get_u8() != 0,
+                track_commit_timestamp: buf.get_u8() != 0,
+                _padding: [buf.get_u8(), buf.get_u8()],
             }
         }
     }
