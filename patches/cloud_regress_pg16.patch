@@ -981,7 +981,7 @@ index fc42d418bf..e38f517574 100644
  CREATE SCHEMA addr_nsp;
  SET search_path TO 'addr_nsp';
 diff --git a/src/test/regress/expected/password.out b/src/test/regress/expected/password.out
-index 8475231735..e135d095f4 100644
+index 8475231735..1afae5395f 100644
 --- a/src/test/regress/expected/password.out
 +++ b/src/test/regress/expected/password.out
 @@ -12,11 +12,11 @@ SET password_encryption = 'md5'; -- ok
@@ -1006,8 +1006,8 @@ index 8475231735..e135d095f4 100644
  -----------------+---------------------------------------------------
 - regress_passwd1 | md5783277baca28003b33453252be4dbb34
 - regress_passwd2 | md54044304ba511dd062133eb5b4b84a2a3
-+ regress_passwd1 | md5cf164b1eb55cd11cd73be38189a421f6
-+ regress_passwd2 | md51b973138181bae7549ef288d52425a2e
++ regress_passwd1 | NEON_MD5_PLACEHOLDER_regress_passwd1
++ regress_passwd2 | NEON_MD5_PLACEHOLDER_regress_passwd2
   regress_passwd3 | SCRAM-SHA-256$4096:<salt>$<storedkey>:<serverkey>
 - regress_passwd4 | 
 + regress_passwd4 | SCRAM-SHA-256$4096:<salt>$<storedkey>:<serverkey>
@@ -1053,8 +1053,8 @@ index 8475231735..e135d095f4 100644
  -----------------+---------------------------------------------------
 - regress_passwd1 | md5cd3578025fe2c3d7ed1b9a9b26238b70
 - regress_passwd2 | md5dfa155cadd5f4ad57860162f3fab9cdb
-+ regress_passwd1 | md5cf164b1eb55cd11cd73be38189a421f6
-+ regress_passwd2 | md51c72b7907ee13c2116fd36cc255ed306
++ regress_passwd1 | NEON_MD5_PLACEHOLDER_regress_passwd1
++ regress_passwd2 | NEON_MD5_PLACEHOLDER_regress_passwd2
   regress_passwd3 | SCRAM-SHA-256$4096:<salt>$<storedkey>:<serverkey>
   regress_passwd4 | SCRAM-SHA-256$4096:<salt>$<storedkey>:<serverkey>
 - regress_passwd5 | md5e73a4b11df52a6068f8b39f90be36023
