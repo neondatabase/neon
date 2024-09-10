@@ -346,7 +346,7 @@ pub mod v14 {
     #[repr(C)]
     #[derive(Debug)]
     pub struct XlParameterChange {
-        pub MaxConnections: i32,
+        pub max_connections: i32,
         pub max_worker_processes: i32,
         pub max_wal_senders: i32,
         pub max_prepared_xacts: i32,
@@ -360,7 +360,7 @@ pub mod v14 {
     impl XlParameterChange {
         pub fn decode(buf: &mut Bytes) -> XlParameterChange {
             XlParameterChange {
-                MaxConnections: buf.get_i32_le(),
+                max_connections: buf.get_i32_le(),
                 max_worker_processes: buf.get_i32_le(),
                 max_wal_senders: buf.get_i32_le(),
                 max_prepared_xacts: buf.get_i32_le(),
@@ -575,8 +575,8 @@ pub mod v17 {
     #[derive(Debug)]
     pub struct XlEndOfRecovery {
         pub end_time: TimestampTz,
-        pub ThisTimeLineID: TimeLineID,
-        pub PrevTimeLineID: TimeLineID,
+        pub this_time_line_id: TimeLineID,
+        pub prev_time_line_id: TimeLineID,
         pub wal_level: i32,
     }
 
@@ -584,8 +584,8 @@ pub mod v17 {
         pub fn decode(buf: &mut Bytes) -> XlEndOfRecovery {
             XlEndOfRecovery {
                 end_time: buf.get_i64_le(),
-                ThisTimeLineID: buf.get_u32_le(),
-                PrevTimeLineID: buf.get_u32_le(),
+                this_time_line_id: buf.get_u32_le(),
+                prev_time_line_id: buf.get_u32_le(),
                 wal_level: buf.get_i32_le(),
             }
         }

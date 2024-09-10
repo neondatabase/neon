@@ -87,7 +87,7 @@ pub(crate) fn parse_filename(name: &str) -> Option<LayerFile> {
      * Generations add a -vX-XXXXXX postfix, which causes issues when we try to
      * parse 'vX' as an LSN.
      */
-    let is_delta = if lsns.len() == 1 || lsns[1].len() == 0 {
+    let is_delta = if lsns.len() == 1 || lsns[1].is_empty() {
         the_lsns = [lsns[0], lsns[0]];
         false
     } else {

@@ -584,7 +584,8 @@ impl WalIngest {
 
     /// This is the same as AdjustToFullTransactionId(xid) in PostgreSQL
     fn adjust_to_full_transaction_id(&self, xid: TransactionId) -> Result<u64> {
-        let next_full_xid = self.checkpoint.nextXid.value;
+        let next_full_xid =
+            enum_pgversion_dispatch!(&self.checkpoint, CheckPoint, cp, { cp.nextXid.value });
 
         let next_xid = (next_full_xid) as u32;
         let mut epoch = (next_full_xid >> 32) as u32;
