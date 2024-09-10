@@ -7,7 +7,10 @@ use pageserver_api::{
     },
     shard::TenantShardId,
 };
-use pageserver_client::mgmt_api::{Client, Result};
+use pageserver_client::{
+    mgmt_api::{Client, Result},
+    BlockUnblock,
+};
 use reqwest::StatusCode;
 use utils::id::{NodeId, TenantId, TimelineId};
 
@@ -254,6 +257,24 @@ impl PageserverClient {
             &self.node_id_label,
             self.inner
                 .timeline_detach_ancestor(tenant_shard_id, timeline_id)
+                .await
+        )
+    }
+
+    pub(crate) async fn timeline_block_unblock_gc(
+        &self,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+        dir: BlockUnblock,
+    ) -> Result<()> {
+        // measuring these makes no sense because we synchronize with the gc loop and remote
+        // storage on block_gc so there should be huge outliers
+        measured_request!(
+            "timeline_block_unblock_gc",
+            crate::metrics::Method::Post,
+            &self.node_id_label,
+            self.inner
+                .timeline_block_unblock_gc(tenant_shard_id, timeline_id, dir)
                 .await
         )
     }

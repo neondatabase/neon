@@ -1021,9 +1021,10 @@ impl Timeline {
 }
 
 /// DatadirModification represents an operation to ingest an atomic set of
-/// updates to the repository. It is created by the 'begin_record'
-/// function. It is called for each WAL record, so that all the modifications
-/// by a one WAL record appear atomic.
+/// updates to the repository.
+///
+/// It is created by the 'begin_record' function. It is called for each WAL
+/// record, so that all the modifications by a one WAL record appear atomic.
 pub struct DatadirModification<'a> {
     /// The timeline this modification applies to. You can access this to
     /// read the state, but note that any pending updates are *not* reflected
@@ -1204,6 +1205,13 @@ impl<'a> DatadirModification<'a> {
         img: Bytes,
     ) -> anyhow::Result<()> {
         anyhow::ensure!(rel.relnode != 0, RelationError::InvalidRelnode);
+        let key = rel_block_to_key(rel, blknum);
+        if !key.is_valid_key_on_write_path() {
+            anyhow::bail!(
+                "the request contains data not supported by pageserver at {}",
+                key
+            );
+        }
         self.put(rel_block_to_key(rel, blknum), Value::Image(img));
         Ok(())
     }
@@ -1215,14 +1223,34 @@ impl<'a> DatadirModification<'a> {
         blknum: BlockNumber,
         img: Bytes,
     ) -> anyhow::Result<()> {
-        self.put(slru_block_to_key(kind, segno, blknum), Value::Image(img));
+        let key = slru_block_to_key(kind, segno, blknum);
+        if !key.is_valid_key_on_write_path() {
+            anyhow::bail!(
+                "the request contains data not supported by pageserver at {}",
+                key
+            );
+        }
+        self.put(key, Value::Image(img));
         Ok(())
     }
 
-    pub(crate) fn put_rel_page_image_zero(&mut self, rel: RelTag, blknum: BlockNumber) {
-        self.pending_zero_data_pages
-            .insert(rel_block_to_key(rel, blknum).to_compact());
+    pub(crate) fn put_rel_page_image_zero(
+        &mut self,
+        rel: RelTag,
+        blknum: BlockNumber,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(rel.relnode != 0, RelationError::InvalidRelnode);
+        let key = rel_block_to_key(rel, blknum);
+        if !key.is_valid_key_on_write_path() {
+            anyhow::bail!(
+                "the request contains data not supported by pageserver: {} @ {}",
+                key,
+                self.lsn
+            );
+        }
+        self.pending_zero_data_pages.insert(key.to_compact());
         self.pending_bytes += ZERO_PAGE.len();
+        Ok(())
     }
 
     pub(crate) fn put_slru_page_image_zero(
@@ -1230,10 +1258,18 @@ impl<'a> DatadirModification<'a> {
         kind: SlruKind,
         segno: u32,
         blknum: BlockNumber,
-    ) {
-        self.pending_zero_data_pages
-            .insert(slru_block_to_key(kind, segno, blknum).to_compact());
+    ) -> anyhow::Result<()> {
+        let key = slru_block_to_key(kind, segno, blknum);
+        if !key.is_valid_key_on_write_path() {
+            anyhow::bail!(
+                "the request contains data not supported by pageserver: {} @ {}",
+                key,
+                self.lsn
+            );
+        }
+        self.pending_zero_data_pages.insert(key.to_compact());
         self.pending_bytes += ZERO_PAGE.len();
+        Ok(())
     }
 
     /// Call this at the end of each WAL record.
@@ -2048,6 +2084,7 @@ impl<'a> DatadirModification<'a> {
 
 /// This struct facilitates accessing either a committed key from the timeline at a
 /// specific LSN, or the latest uncommitted key from a pending modification.
+///
 /// During WAL ingestion, the records from multiple LSNs may be batched in the same
 /// modification before being flushed to the timeline. Hence, the routines in WalIngest
 /// need to look up the keys in the modification first before looking them up in the

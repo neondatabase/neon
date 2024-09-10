@@ -1552,6 +1552,12 @@ def test_tenant_import(neon_env_builder: NeonEnvBuilder, shard_count, remote_sto
     literal_shard_count = 1 if shard_count is None else shard_count
     assert len(describe["shards"]) == literal_shard_count
 
+    nodes = env.storage_controller.nodes()
+    assert len(nodes) == 2
+    describe1 = env.storage_controller.node_shards(nodes[0]["id"])
+    describe2 = env.storage_controller.node_shards(nodes[1]["id"])
+    assert len(describe1["shards"]) + len(describe2["shards"]) == literal_shard_count
+
     # Check the data is still there: this implicitly proves that we recovered generation numbers
     # properly, for the timeline which was written to after a generation bump.
     for timeline, branch, expect_rows in [
@@ -2512,3 +2518,55 @@ def eq_safekeeper_records(a: dict[str, Any], b: dict[str, Any]) -> bool:
                 del d[key]
 
     return compared[0] == compared[1]
+
+
+@run_only_on_default_postgres("this is like a 'unit test' against storcon db")
+def test_shard_preferred_azs(neon_env_builder: NeonEnvBuilder):
+    def assign_az(ps_cfg):
+        az = f"az-{ps_cfg['id']}"
+        ps_cfg["availability_zone"] = az
+
+    neon_env_builder.pageserver_config_override = assign_az
+    neon_env_builder.num_pageservers = 2
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    tids = [TenantId.generate() for _ in range(0, 3)]
+    for tid in tids:
+        env.storage_controller.tenant_create(tid)
+
+        shards = env.storage_controller.tenant_describe(tid)["shards"]
+        assert len(shards) == 1
+        attached_to = shards[0]["node_attached"]
+        expected_az = env.get_pageserver(attached_to).az_id
+
+        assert shards[0]["preferred_az_id"] == expected_az
+
+    updated = env.storage_controller.set_preferred_azs(
+        {TenantShardId(tid, 0, 0): "foo" for tid in tids}
+    )
+
+    assert set(updated) == set([TenantShardId(tid, 0, 0) for tid in tids])
+
+    for tid in tids:
+        shards = env.storage_controller.tenant_describe(tid)["shards"]
+        assert len(shards) == 1
+        assert shards[0]["preferred_az_id"] == "foo"
+
+    # Generate a layer to avoid shard split handling on ps from tripping
+    # up on debug assert.
+    timeline_id = TimelineId.generate()
+    env.neon_cli.create_timeline("bar", tids[0], timeline_id)
+
+    workload = Workload(env, tids[0], timeline_id, branch_name="bar")
+    workload.init()
+    workload.write_rows(256)
+    workload.validate()
+
+    env.storage_controller.tenant_shard_split(tids[0], shard_count=2)
+    shards = env.storage_controller.tenant_describe(tids[0])["shards"]
+    assert len(shards) == 2
+    for shard in shards:
+        attached_to = shard["node_attached"]
+        expected_az = env.get_pageserver(attached_to).az_id
+        assert shard["preferred_az_id"] == expected_az

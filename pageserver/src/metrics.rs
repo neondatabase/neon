@@ -9,7 +9,7 @@ use metrics::{
 use once_cell::sync::Lazy;
 use pageserver_api::shard::TenantShardId;
 use strum::{EnumCount, VariantNames};
-use strum_macros::{EnumVariantNames, IntoStaticStr};
+use strum_macros::{IntoStaticStr, VariantNames};
 use tracing::warn;
 use utils::id::TimelineId;
 
@@ -27,7 +27,7 @@ const CRITICAL_OP_BUCKETS: &[f64] = &[
 ];
 
 // Metrics collected on operations on the storage repository.
-#[derive(Debug, EnumVariantNames, IntoStaticStr)]
+#[derive(Debug, VariantNames, IntoStaticStr)]
 #[strum(serialize_all = "kebab_case")]
 pub(crate) enum StorageTimeOperation {
     #[strum(serialize = "layer flush")]

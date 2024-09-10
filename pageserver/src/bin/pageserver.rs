@@ -37,6 +37,7 @@ use pageserver::{
     virtual_file,
 };
 use postgres_backend::AuthType;
+use utils::crashsafe::syncfs;
 use utils::failpoint_support;
 use utils::logging::TracingErrorLayerEnablement;
 use utils::{
@@ -125,7 +126,6 @@ fn main() -> anyhow::Result<()> {
     // after setting up logging, log the effective IO engine choice and read path implementations
     info!(?conf.virtual_file_io_engine, "starting with virtual_file IO engine");
     info!(?conf.virtual_file_direct_io, "starting with virtual_file Direct IO settings");
-    info!(?conf.compact_level0_phase1_value_access, "starting with setting for compact_level0_phase1_value_access");
     info!(?conf.io_buffer_alignment, "starting with setting for IO buffer alignment");
 
     // The tenants directory contains all the pageserver local disk state.
@@ -156,23 +156,7 @@ fn main() -> anyhow::Result<()> {
         };
 
         let started = Instant::now();
-        // Linux guarantees durability for syncfs.
-        // POSIX doesn't have syncfs, and further does not actually guarantee durability of sync().
-        #[cfg(target_os = "linux")]
-        {
-            use std::os::fd::AsRawFd;
-            nix::unistd::syncfs(dirfd.as_raw_fd()).context("syncfs")?;
-        }
-        #[cfg(target_os = "macos")]
-        {
-            // macOS is not a production platform for Neon, don't even bother.
-            drop(dirfd);
-        }
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-        {
-            compile_error!("Unsupported OS");
-        }
-
+        syncfs(dirfd)?;
         let elapsed = started.elapsed();
         info!(
             elapsed_ms = elapsed.as_millis(),

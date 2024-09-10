@@ -1,8 +1,9 @@
+//! Timeline repository implementation that keeps old data in layer files, and
+//! the recent changes in ephemeral files.
 //!
-//! Timeline repository implementation that keeps old data in files on disk, and
-//! the recent changes in memory. See tenant/*_layer.rs files.
-//! The functions here are responsible for locating the correct layer for the
-//! get/put call, walking back the timeline branching history as needed.
+//! See tenant/*_layer.rs files. The functions here are responsible for locating
+//! the correct layer for the get/put call, walking back the timeline branching
+//! history as needed.
 //!
 //! The files are stored in the .neon/tenants/<tenant_id>/timelines/<timeline_id>
 //! directory. See docs/pageserver-storage.md for how the files are managed.
@@ -7090,13 +7091,13 @@ mod tests {
             vec![
                 // Image layer at GC horizon
                 PersistentLayerKey {
-                    key_range: Key::MIN..Key::NON_L0_MAX,
+                    key_range: Key::MIN..Key::MAX,
                     lsn_range: Lsn(0x30)..Lsn(0x31),
                     is_delta: false
                 },
-                // The delta layer covers the full range (with the layer key hack to avoid being recognized as L0)
+                // The delta layer below the horizon
                 PersistentLayerKey {
-                    key_range: Key::MIN..Key::NON_L0_MAX,
+                    key_range: get_key(3)..get_key(4),
                     lsn_range: Lsn(0x30)..Lsn(0x48),
                     is_delta: true
                 },

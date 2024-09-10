@@ -1,6 +1,7 @@
-//! Functionality for finding and purging garbage, as in "garbage collection".  Garbage means
-//! S3 objects which are either not referenced by any metadata, or are referenced by a
-//! control plane tenant/timeline in a deleted state.
+//! Functionality for finding and purging garbage, as in "garbage collection".
+//!
+//! Garbage means S3 objects which are either not referenced by any metadata,
+//! or are referenced by a control plane tenant/timeline in a deleted state.
 
 use std::{
     collections::{HashMap, HashSet},

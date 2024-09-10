@@ -75,14 +75,14 @@ impl PageServerNode {
         }
     }
 
-    fn pageserver_make_identity_toml(&self, node_id: NodeId) -> toml_edit::Document {
-        toml_edit::Document::from_str(&format!("id={node_id}")).unwrap()
+    fn pageserver_make_identity_toml(&self, node_id: NodeId) -> toml_edit::DocumentMut {
+        toml_edit::DocumentMut::from_str(&format!("id={node_id}")).unwrap()
     }
 
     fn pageserver_init_make_toml(
         &self,
         conf: NeonLocalInitPageserverConf,
-    ) -> anyhow::Result<toml_edit::Document> {
+    ) -> anyhow::Result<toml_edit::DocumentMut> {
         assert_eq!(&PageServerConf::from(&conf), &self.conf, "during neon_local init, we derive the runtime state of ps conf (self.conf) from the --config flag fully");
 
         // TODO(christian): instead of what we do here, create a pageserver_api::config::ConfigToml (PR #7656)
@@ -137,9 +137,9 @@ impl PageServerNode {
 
         // Turn `overrides` into a toml document.
         // TODO: above code is legacy code, it should be refactored to use toml_edit directly.
-        let mut config_toml = toml_edit::Document::new();
+        let mut config_toml = toml_edit::DocumentMut::new();
         for fragment_str in overrides {
-            let fragment = toml_edit::Document::from_str(&fragment_str)
+            let fragment = toml_edit::DocumentMut::from_str(&fragment_str)
                 .expect("all fragments in `overrides` are valid toml documents, this function controls that");
             for (key, item) in fragment.iter() {
                 config_toml.insert(key, item.clone());

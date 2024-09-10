@@ -10,7 +10,7 @@ pub fn deserialize_item<T>(item: &toml_edit::Item) -> Result<T, Error>
 where
     T: serde::de::DeserializeOwned,
 {
-    let document: toml_edit::Document = match item {
+    let document: toml_edit::DocumentMut = match item {
         toml_edit::Item::Table(toml) => toml.clone().into(),
         toml_edit::Item::Value(toml_edit::Value::InlineTable(toml)) => {
             toml.clone().into_table().into()

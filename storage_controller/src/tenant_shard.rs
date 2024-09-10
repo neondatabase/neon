@@ -140,6 +140,10 @@ pub(crate) struct TenantShard {
     // Support/debug tool: if something is going wrong or flapping with scheduling, this may
     // be set to a non-active state to avoid making changes while the issue is fixed.
     scheduling_policy: ShardSchedulingPolicy,
+
+    // We should attempt to schedule this shard in the provided AZ to
+    // decrease chances of cross-AZ compute.
+    preferred_az_id: Option<String>,
 }
 
 #[derive(Default, Clone, Debug, Serialize)]
@@ -463,6 +467,7 @@ impl TenantShard {
             last_error: Arc::default(),
             pending_compute_notification: false,
             scheduling_policy: ShardSchedulingPolicy::default(),
+            preferred_az_id: None,
         }
     }
 
@@ -1297,6 +1302,7 @@ impl TenantShard {
             pending_compute_notification: false,
             delayed_reconcile: false,
             scheduling_policy: serde_json::from_str(&tsp.scheduling_policy).unwrap(),
+            preferred_az_id: tsp.preferred_az_id,
         })
     }
 
@@ -1312,7 +1318,16 @@ impl TenantShard {
             config: serde_json::to_string(&self.config).unwrap(),
             splitting: SplitState::default(),
             scheduling_policy: serde_json::to_string(&self.scheduling_policy).unwrap(),
+            preferred_az_id: self.preferred_az_id.clone(),
         }
+    }
+
+    pub(crate) fn preferred_az(&self) -> Option<&str> {
+        self.preferred_az_id.as_deref()
+    }
+
+    pub(crate) fn set_preferred_az(&mut self, preferred_az_id: String) {
+        self.preferred_az_id = Some(preferred_az_id);
     }
 }
 
