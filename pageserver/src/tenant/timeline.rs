@@ -112,7 +112,7 @@ use pageserver_api::reltag::RelTag;
 use pageserver_api::shard::ShardIndex;
 
 use postgres_connection::PgConnectionConfig;
-use postgres_ffi::to_pg_timestamp;
+use postgres_ffi::{to_pg_timestamp, WAL_SEGMENT_SIZE};
 use utils::{
     completion,
     generation::Generation,
@@ -3370,6 +3370,20 @@ impl Timeline {
 
     pub(crate) fn finish_write(&self, new_lsn: Lsn) {
         assert!(new_lsn.is_aligned());
+        assert!({
+            let block_off = new_lsn.block_offset() as usize;
+            let seg_off = new_lsn.segment_offset(WAL_SEGMENT_SIZE);
+
+            if block_off == 0 {
+                true
+            } else if seg_off < postgres_ffi::XLOG_SIZE_OF_XLOG_LONG_PHD {
+                false
+            } else if block_off < postgres_ffi::XLOG_SIZE_OF_XLOG_SHORT_PHD {
+                false
+            } else {
+                true
+            }
+        });
 
         self.metrics.last_record_gauge.set(new_lsn.0 as i64);
         self.last_record_lsn.advance(new_lsn);
