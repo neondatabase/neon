@@ -65,7 +65,7 @@ def setup(remote_pg: RemotePostgres):
                 log.info("Role found: %s", role[0])
                 roles.append(role[0])
             for role in roles:
-                cur.execute(f"DROP ROLE {role[0]}")
+                cur.execute(f"DROP ROLE {role}")
             conn.commit()
 
 
