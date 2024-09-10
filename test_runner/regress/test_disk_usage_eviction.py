@@ -291,7 +291,7 @@ def pgbench_init_tenant(
     )
 
     with env.endpoints.create_start("main", tenant_id=tenant_id) as endpoint:
-        pg_bin.run(["pgbench", "-i", f"-s{scale}", endpoint.connstr()])
+        pg_bin.run(["pgbench", "-i", "-I", "dtGvp", f"-s{scale}", endpoint.connstr()])
         wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
 
     return (tenant_id, timeline_id)
