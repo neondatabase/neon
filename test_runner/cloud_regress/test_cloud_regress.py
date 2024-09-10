@@ -52,15 +52,17 @@ def setup(remote_pg: RemotePostgres):
                 "RETURNS int AS 'regress.so' LANGUAGE C STRICT STABLE PARALLEL SAFE;"
             )
             conn.rollback()
-            yield
-            log.info("Looking for extra roles...")
-            #cur.execute(
-            #    "SELECT rolname FROM pg_catalog.pg_roles WHERE oid > 16384 AND rolname <> 'neondb_owner'"
-            #)
-            #log.info("Rows count: %s", cur.rowcount)
-            #for role in cur:
-            #    cur.execute(f"DROP ROLE {role[0]}")
-            #conn.commit()
+    yield
+    log.info("Looking for extra roles...")
+    with psycopg2.connect(remote_pg.connstr()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT rolname FROM pg_catalog.pg_roles WHERE oid > 16384 AND rolname <> 'neondb_owner'"
+            )
+            log.info("Rows count: %s", cur.rowcount)
+            for role in cur:
+                cur.execute(f"DROP ROLE {role[0]}")
+            conn.commit()
 
 
 @pytest.mark.timeout(7200)
