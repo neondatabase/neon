@@ -7,7 +7,7 @@ from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder
 #
 # Test starting Postgres with custom options
 #
-def test_config(neon_simple_env: NeonEnv):
+def test_configx(neon_simple_env: NeonEnv):
     env = neon_simple_env
 
     # change config
