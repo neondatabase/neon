@@ -78,7 +78,7 @@ pub(crate) type ComputeReady = DatabaseInfo;
 
 // TODO: replace with an http-based protocol.
 struct MgmtHandler;
-#[async_trait::async_trait]
+
 impl postgres_backend::Handler<tokio::net::TcpStream> for MgmtHandler {
     async fn process_query(
         &mut self,

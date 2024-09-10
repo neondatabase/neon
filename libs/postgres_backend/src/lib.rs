@@ -81,17 +81,16 @@ pub fn is_expected_io_error(e: &io::Error) -> bool {
     )
 }
 
-#[async_trait::async_trait]
 pub trait Handler<IO> {
     /// Handle single query.
     /// postgres_backend will issue ReadyForQuery after calling this (this
     /// might be not what we want after CopyData streaming, but currently we don't
     /// care). It will also flush out the output buffer.
-    async fn process_query(
+    fn process_query(
         &mut self,
         pgb: &mut PostgresBackend<IO>,
         query_string: &str,
-    ) -> Result<(), QueryError>;
+    ) -> impl Future<Output = Result<(), QueryError>>;
 
     /// Called on startup packet receival, allows to process params.
     ///
