@@ -2,7 +2,6 @@
 Run the regression tests on the cloud instance of Neon
 """
 
-import os
 from pathlib import Path
 
 import psycopg2
