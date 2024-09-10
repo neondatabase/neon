@@ -60,8 +60,10 @@ def setup(remote_pg: RemotePostgres):
                 "SELECT rolname FROM pg_catalog.pg_roles WHERE oid > 16384 AND rolname <> 'neondb_owner'"
             )
             log.info("Rows count: %s", cur.rowcount)
-            for role in cur:
-                cur.execute(f"DROP ROLE {role[0]}")
+            if cur.rowcount > 0:
+                for role in cur:
+                    log.info("Role found: %s", role[0])
+                    #cur.execute(f"DROP ROLE {role[0]}")
             conn.commit()
 
 
