@@ -1093,6 +1093,7 @@ class NeonEnv:
     """
 
     def __init__(self, config: NeonEnvBuilder):
+        self.test_name = config.test_name
         self.repo_dir = config.repo_dir
         self.neon_binpath = config.neon_binpath
         self.pg_distrib_dir = config.pg_distrib_dir
@@ -4158,7 +4159,7 @@ class Endpoint(PgProtocol, LogUtils):
         self.check_stop_result = check_stop_result
         # passed to endpoint create and endpoint reconfigure
         self.active_safekeepers: List[int] = list(map(lambda sk: sk.id, env.safekeepers))
-        # path to conf is <repo_dir>/endpoints/<endpoint_id>/pgdata/postgresql.conf
+        # path to conf is <repo_dir>/endpoints/<endpoint_id>/pgdata/postgresql.conf XXX
 
         # Semaphore is set to 1 when we start, and acquire'd back to zero when we stop
         #
@@ -4193,6 +4194,9 @@ class Endpoint(PgProtocol, LogUtils):
             config_lines = []
 
         endpoint_id = endpoint_id or self.env.generate_endpoint_id()
+
+        endpoint_id = f"{self.env.test_name}-{endpoint_id}"
+
         self.endpoint_id = endpoint_id
         self.branch_name = branch_name
 
@@ -4207,7 +4211,7 @@ class Endpoint(PgProtocol, LogUtils):
             pageserver_id=pageserver_id,
             allow_multiple=allow_multiple,
         )
-        path = Path("endpoints") / self.endpoint_id / "pgdata"
+        path = self.endpoint_path() / "pgdata"
         self.pgdata_dir = os.path.join(self.env.repo_dir, path)
         self.logfile = self.endpoint_path() / "compute.log"
 
