@@ -66,7 +66,7 @@ def twophase_test_on_timeline(env: NeonEnv):
     assert len(twophase_files) == 2
 
     # Create a branch with the transaction in prepared state
-    fork_at_current_lsn(env, endpoint, "test_twophase_prepared", "main")
+    fork_at_current_lsn(env, endpoint, "test_twophase_prepared", "test_twophase")
 
     # Start compute on the new branch
     endpoint2 = env.endpoints.create_start(
@@ -100,7 +100,7 @@ def test_twophase(neon_simple_env: NeonEnv):
     Test branching, when a transaction is in prepared state
     """
     env = neon_simple_env
-    env.neon_cli.create_branch("test_twophase", "empty")
+    env.neon_cli.create_branch("test_twophase")
 
     twophase_test_on_timeline(env)
 
