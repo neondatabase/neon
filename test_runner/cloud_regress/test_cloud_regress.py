@@ -3,6 +3,7 @@ Run the regression tests on the cloud instance of Neon
 """
 
 from pathlib import Path
+from typing import List, Any
 
 import psycopg2
 import pytest
@@ -59,11 +60,12 @@ def setup(remote_pg: RemotePostgres):
             cur.execute(
                 "SELECT rolname FROM pg_catalog.pg_roles WHERE oid > 16384 AND rolname <> 'neondb_owner'"
             )
-            log.info("Rows count: %s", cur.rowcount)
-            if cur.rowcount > 0:
-                for role in cur:
-                    log.info("Role found: %s", role[0])
-                    #cur.execute(f"DROP ROLE {role[0]}")
+            roles: list[Any] = []
+            for role in cur:
+                log.info("Role found: %s", role[0])
+                roles.append(role[0])
+            for role in roles:
+                cur.execute(f"DROP ROLE {role[0]}")
             conn.commit()
 
 
