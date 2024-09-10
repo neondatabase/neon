@@ -453,7 +453,7 @@ impl WalIngest {
                             && info == pg_constants::XLOG_CHECKPOINT_SHUTDOWN
                         {
                             let oldest_active_xid = if pg_version >= 17 {
-                                let mut oldest_active_full_xid = self.checkpoint.nextXid.value;
+                                let mut oldest_active_full_xid = cp.nextXid.value;
                                 for xid in modification.tline.list_twophase_files(lsn, ctx).await? {
                                     if xid < oldest_active_full_xid {
                                         oldest_active_full_xid = xid;
