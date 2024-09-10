@@ -7,8 +7,8 @@ from fixtures.neon_fixtures import NeonEnv, fork_at_current_lsn
 #
 # Test branching, when a transaction is in prepared state
 #
-def test_twophase(neon_simple_env: NeonEnv):
-    env = neon_simple_env
+def test_twophase(neon_shared_env: NeonEnv):
+    env = neon_shared_env
     endpoint = env.endpoints.create_start("main", config_lines=["max_prepared_transactions=5"])
 
     conn = endpoint.connect()

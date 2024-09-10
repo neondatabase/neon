@@ -19,7 +19,7 @@ def pg_version() -> Optional[PgVersion]:
     return None
 
 
-@pytest.fixture(scope="function", autouse=True)
+@pytest.fixture(scope="session", autouse=True)
 def build_type() -> Optional[str]:
     return None
 
@@ -64,7 +64,7 @@ def pytest_generate_tests(metafunc: Metafunc):
     else:
         build_types = [bt.lower()]
 
-    metafunc.parametrize("build_type", build_types)
+    metafunc.parametrize("build_type", build_types, scope="session")
 
     if (v := os.getenv("DEFAULT_PG_VERSION")) is None:
         pg_versions = [version for version in PgVersion if version != PgVersion.NOT_SET]

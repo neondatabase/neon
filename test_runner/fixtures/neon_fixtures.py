@@ -138,7 +138,7 @@ def base_dir() -> Iterator[Path]:
     yield base_dir
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture(scope="session")
 def neon_binpath(base_dir: Path, build_type: str) -> Iterator[Path]:
     if os.getenv("REMOTE_ENV"):
         # we are in remote env and do not have neon binaries locally
@@ -158,7 +158,7 @@ def neon_binpath(base_dir: Path, build_type: str) -> Iterator[Path]:
     yield binpath
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture(scope="session")
 def pg_distrib_dir(base_dir: Path) -> Iterator[Path]:
     if env_postgres_bin := os.environ.get("POSTGRES_DISTRIB_DIR"):
         distrib_dir = Path(env_postgres_bin).resolve()
@@ -523,8 +523,9 @@ class NeonEnvBuilder:
         # Cannot create more than one environment from one builder
         assert self.env is None, "environment already initialized"
         env = self.init_configs(default_remote_storage_if_missing)
-        
-        env.storage_env.start()
+
+        if self.storage_env_builder is not None:
+            env.storage_env.start()
 
         # Prepare the default branch to start the postgres on later.
         # Pageserver itself does not create tenants and timelines, until started first and asked via HTTP API.
@@ -547,10 +548,6 @@ class NeonEnvBuilder:
     def start(self, timeout_in_seconds: Optional[int] = None):
         self.storage_env.start()
 
-    def stop(self, immediate: bool = False) -> "":
-        if self.env is not None:
-            self.env.stop(immediate)
-
     def __enter__(self) -> "NeonEnvBuilder":
         return self
 
@@ -563,8 +560,11 @@ class NeonEnvBuilder:
         traceback: Optional[TracebackType],
     ):
         # Stop all the nodes.
-        self.stop(immediate=True)
-    
+        if self.env is not None:
+            if self.storage_env_builder is None:
+                self.env.storage_env = None # XXX hide it
+            self.env.stop(immediate=True)
+
 class NeonStorageEnvBuilder:
     """
     Builder object to create a Neon runtime environment (storage parts)
@@ -1533,6 +1533,102 @@ class NeonStorageEnv:
         )
         del self.auth_keys
 
+
+@pytest.fixture(scope="session")
+def neon_shared_storage_env_cache() ->Iterator[Dict[str, NeonStorageEnv]]:
+    log.info("CREATING CACHE")
+    cache = {}
+    yield cache
+    for storage_env in cache.values():
+        storage_env.stop()
+
+@pytest.fixture(scope="session")
+def neon_shared_storage_env(
+    pytestconfig: Config,
+    port_distributor: PortDistributor,
+    mock_s3_server: MockS3Server,
+    run_id: uuid.UUID,
+    top_output_dir: Path,
+    build_type: str,
+    neon_binpath: Path,
+    pg_distrib_dir: Path,
+    request: FixtureRequest,
+    neon_shared_storage_env_cache: Dict[str, NeonStorageEnv],
+) -> Iterator[NeonEnv]:
+
+    repo_dir = top_output_dir / f"shared_repo-{build_type}"
+
+    if neon_shared_storage_env_cache.get(build_type) is None:
+        # Create the environment in the per-test output directory
+        shutil.rmtree(repo_dir, ignore_errors=True)
+
+        # FIXME: where do these come from?
+        pageserver_default_tenant_config_compaction_algorithm = None
+        pageserver_virtual_file_io_engine = None
+        pageserver_io_buffer_alignment = None
+
+        storage_env_builder = NeonStorageEnvBuilder(
+            top_output_dir=top_output_dir,
+            repo_dir=repo_dir,
+            port_distributor=port_distributor,
+            mock_s3_server=mock_s3_server,
+            neon_binpath=neon_binpath,
+            pg_distrib_dir=pg_distrib_dir,
+            run_id=run_id,
+            preserve_database_files=cast(bool, pytestconfig.getoption("--preserve-database-files")),
+            env_name=f"shared_repo-{build_type}",
+            pageserver_default_tenant_config_compaction_algorithm=pageserver_default_tenant_config_compaction_algorithm,
+            pageserver_virtual_file_io_engine=pageserver_virtual_file_io_engine,
+            pageserver_io_buffer_alignment=pageserver_io_buffer_alignment,
+        )
+        storage_env = storage_env_builder.init_configs()
+        storage_env.start()
+
+        neon_shared_storage_env_cache[build_type] = storage_env        
+
+    storage_env = neon_shared_storage_env_cache[build_type]
+    assert not storage_env is None
+    yield storage_env
+
+@pytest.fixture(scope="function")
+def neon_shared_env(
+    request: FixtureRequest,
+    pytestconfig: Config,
+    port_distributor: PortDistributor,
+    mock_s3_server: MockS3Server,
+    run_id: uuid.UUID,
+    top_output_dir: Path,
+    test_output_dir: Path,
+    neon_binpath: Path,
+    pg_distrib_dir: Path,
+    pg_version: PgVersion,
+    neon_shared_storage_env: StorageEnv,
+    pageserver_aux_file_policy: Optional[AuxFileStore],
+) -> Iterator[NeonEnv]:
+    """
+    Simple Neon environment, with no authentication and no safekeepers.
+
+    This fixture will use RemoteStorageKind.LOCAL_FS with pageserver.
+    """
+
+    with NeonEnvBuilder(
+        top_output_dir=top_output_dir,
+        repo_dir=neon_shared_storage_env.repo_dir,
+        port_distributor=port_distributor,
+        neon_binpath=neon_binpath,
+        pg_distrib_dir=pg_distrib_dir,
+        pg_version=pg_version,
+        run_id=run_id,
+        test_name=request.node.name,
+        test_output_dir=test_output_dir,
+        pageserver_aux_file_policy=pageserver_aux_file_policy,
+        storage_env=neon_shared_storage_env,
+    ) as env_builder:
+        env = env_builder.init_start()
+
+        yield env
+
+        env.storage_env = None # hide it so that it doesn't get stopped
 
 @pytest.fixture(scope="function")
 def neon_simple_env(

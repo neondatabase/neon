@@ -6,8 +6,8 @@ from fixtures.neon_fixtures import NeonEnv, wait_replica_caughtup
 #
 # Test that redo of XLOG_GIN_VACUUM_PAGE doesn't produce error
 #
-def test_gin_redo(neon_simple_env: NeonEnv):
-    env = neon_simple_env
+def test_gin_redo(neon_shared_env: NeonEnv):
+    env = neon_shared_env
 
     primary = env.endpoints.create_start(branch_name="main", endpoint_id="primary")
     time.sleep(1)

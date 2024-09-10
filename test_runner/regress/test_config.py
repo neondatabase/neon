@@ -7,7 +7,7 @@ from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder
 #
 # Test starting Postgres with custom options
 #
-def test_configx(neon_simple_env: NeonEnv):
+def test_config(neon_simple_env: NeonEnv):
     env = neon_simple_env
 
     # change config
@@ -29,6 +29,50 @@ def test_configx(neon_simple_env: NeonEnv):
             # check that config change was applied
             assert cur.fetchone() == ("debug1",)
 
+def test_shared_config1(neon_shared_env: NeonEnv):
+    env = neon_shared_env
+
+    # change config
+    endpoint = env.endpoints.create_start("main", config_lines=["log_min_messages=debug1"])
+
+    with closing(endpoint.connect()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT setting
+                FROM pg_settings
+                WHERE
+                    source != 'default'
+                    AND source != 'override'
+                    AND name = 'log_min_messages'
+            """
+            )
+
+            # check that config change was applied
+            assert cur.fetchone() == ("debug1",)
+
+def test_shared_config2(neon_shared_env: NeonEnv):
+    env = neon_shared_env
+
+    # change config
+    endpoint = env.endpoints.create_start("main", config_lines=["log_min_messages=debug1"])
+
+    with closing(endpoint.connect()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT setting
+                FROM pg_settings
+                WHERE
+                    source != 'default'
+                    AND source != 'override'
+                    AND name = 'log_min_messages'
+            """
+            )
+
+            # check that config change was applied
+            assert cur.fetchone() == ("debug1",)
+            
 
 #
 # Test that reordering of safekeepers does not restart walproposer
