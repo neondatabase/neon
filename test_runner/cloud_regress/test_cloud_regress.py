@@ -3,7 +3,7 @@ Run the regression tests on the cloud instance of Neon
 """
 
 from pathlib import Path
-from typing import List, Any
+from typing import Any
 
 import psycopg2
 import pytest
