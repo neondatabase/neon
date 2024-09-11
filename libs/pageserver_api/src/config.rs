@@ -64,6 +64,7 @@ pub struct ConfigToml {
     #[serde(with = "humantime_serde")]
     pub wal_redo_timeout: Duration,
     pub superuser: String,
+    pub initdb_cache_dir: Option<Utf8PathBuf>,
     pub page_cache_size: usize,
     pub max_file_descriptors: usize,
     pub pg_distrib_dir: Option<Utf8PathBuf>,
@@ -322,6 +323,7 @@ impl Default for ConfigToml {
             wal_redo_timeout: (humantime::parse_duration(DEFAULT_WAL_REDO_TIMEOUT)
                 .expect("cannot parse default wal redo timeout")),
             superuser: (DEFAULT_SUPERUSER.to_string()),
+            initdb_cache_dir: None,
             page_cache_size: (DEFAULT_PAGE_CACHE_SIZE),
             max_file_descriptors: (DEFAULT_MAX_FILE_DESCRIPTORS),
             pg_distrib_dir: None, // Utf8PathBuf::from("./pg_install"), // TODO: formely, this was std::env::current_dir()

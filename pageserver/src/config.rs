@@ -70,6 +70,8 @@ pub struct PageServerConf {
 
     pub superuser: String,
 
+    pub initdb_cache_dir: Option<Utf8PathBuf>,
+
     pub page_cache_size: usize,
     pub max_file_descriptors: usize,
 
@@ -297,6 +299,7 @@ impl PageServerConf {
             wait_lsn_timeout,
             wal_redo_timeout,
             superuser,
+            initdb_cache_dir,
             page_cache_size,
             max_file_descriptors,
             pg_distrib_dir,
@@ -344,6 +347,7 @@ impl PageServerConf {
             wait_lsn_timeout,
             wal_redo_timeout,
             superuser,
+            initdb_cache_dir,
             page_cache_size,
             max_file_descriptors,
             http_auth_type,
