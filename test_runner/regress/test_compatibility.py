@@ -178,7 +178,7 @@ def test_backward_compatibility(
         neon_env_builder.num_safekeepers = 3
         env = neon_env_builder.from_repo_dir(compatibility_snapshot_dir / "repo")
         env.pageserver.allowed_errors.append(ingest_lag_log_line)
-        neon_env_builder.start()
+        env.start()
 
         check_neon_works(
             env,
@@ -265,7 +265,7 @@ def test_forward_compatibility(
         # does not include logs from previous runs
         assert not env.pageserver.log_contains("git-env:" + prev_pageserver_version)
 
-        neon_env_builder.start()
+        env.start()
 
         # ensure the specified pageserver is running
         assert env.pageserver.log_contains("git-env:" + prev_pageserver_version)
