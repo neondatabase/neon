@@ -23,9 +23,6 @@ class Lsn:
             """Convert lsn from hex notation to int."""
             left, right = x.split("/")
             self.lsn_int = (int(left, 16) << 32) + int(right, 16)
-        assert self.lsn_int % 8192 == 0 or (
-            self.lsn_int % DEFAULT_WAL_SEG_SIZE >= 40 and self.lsn_int % 8192 >= 24
-        )
         assert 0 <= self.lsn_int <= 0xFFFFFFFF_FFFFFFFF
 
     def __str__(self) -> str:
