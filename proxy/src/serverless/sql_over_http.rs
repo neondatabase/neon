@@ -87,8 +87,8 @@ enum Payload {
     Batch(BatchQueryData),
 }
 
-const MAX_RESPONSE_SIZE: usize = 10 * 1024 * 1024; // 10 MiB
-const MAX_REQUEST_SIZE: u64 = 10 * 1024 * 1024; // 10 MiB
+const MAX_RESPONSE_SIZE: usize = 32 * 1024 * 1024; // 32 MiB
+const MAX_REQUEST_SIZE: u64 = 32 * 1024 * 1024; // 32 MiB
 
 static CONN_STRING: HeaderName = HeaderName::from_static("neon-connection-string");
 static RAW_TEXT_OUTPUT: HeaderName = HeaderName::from_static("neon-raw-text-output");
