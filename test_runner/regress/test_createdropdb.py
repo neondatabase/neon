@@ -12,8 +12,8 @@ from fixtures.utils import query_scalar
 # Test CREATE DATABASE when there have been relmapper changes
 #
 @pytest.mark.parametrize("strategy", ["file_copy", "wal_log"])
-def test_createdb(neon_simple_env: NeonEnv, strategy: str):
-    env = neon_simple_env
+def test_createdb(neon_shared_env: NeonEnv, strategy: str):
+    env = neon_shared_env
     if env.pg_version == PgVersion.V14 and strategy == "wal_log":
         pytest.skip("wal_log strategy not supported on PostgreSQL 14")
 
@@ -58,8 +58,8 @@ def test_createdb(neon_simple_env: NeonEnv, strategy: str):
 #
 # Test DROP DATABASE
 #
-def test_dropdb(neon_simple_env: NeonEnv, test_output_dir):
-    env = neon_simple_env
+def test_dropdb(neon_shared_env: NeonEnv, test_output_dir):
+    env = neon_shared_env
     endpoint = env.endpoints.create_start("main")
 
     with endpoint.cursor() as cur:

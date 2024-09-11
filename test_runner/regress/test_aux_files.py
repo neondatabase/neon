@@ -6,8 +6,8 @@ from fixtures.neon_fixtures import (
 )
 
 
-def test_aux_v2_config_switch(neon_env_builder: NeonEnvBuilder, vanilla_pg):
-    env = neon_env_builder.init_start()
+def test_aux_v2_config_switch(neon_shared_env: NeonEnv, vanilla_pg):
+    env = neon_shared_env
     endpoint = env.endpoints.create_start("main")
     client = env.pageserver.http_client()
 

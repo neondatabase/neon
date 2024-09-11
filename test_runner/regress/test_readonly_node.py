@@ -215,8 +215,8 @@ def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
 
 
 # Similar test, but with more data, and we force checkpoints
-def test_timetravel(neon_simple_env: NeonEnv):
-    env = neon_simple_env
+def test_timetravel(neon_shared_env: NeonEnv):
+    env = neon_shared_env
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
     client = env.pageserver.http_client()

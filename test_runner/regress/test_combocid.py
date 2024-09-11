@@ -1,8 +1,8 @@
 from fixtures.neon_fixtures import NeonEnvBuilder, flush_ep_to_pageserver
 
 
-def do_combocid_op(neon_env_builder: NeonEnvBuilder, op):
-    env = neon_env_builder.init_start()
+def do_combocid_op(neon_shared_env: NeonEnv, op):
+    env = neon_shared_env
     endpoint = env.endpoints.create_start(
         "main",
         config_lines=[
@@ -49,20 +49,20 @@ def do_combocid_op(neon_env_builder: NeonEnvBuilder, op):
     )
 
 
-def test_combocid_delete(neon_env_builder: NeonEnvBuilder):
-    do_combocid_op(neon_env_builder, "delete from t")
+def test_combocid_delete(neon_shared_env: NeonEnv):
+    do_combocid_op(neon_env, "delete from t")
 
 
-def test_combocid_update(neon_env_builder: NeonEnvBuilder):
-    do_combocid_op(neon_env_builder, "update t set val=val+1")
+def test_combocid_update(neon_shared_env: NeonEnv):
+    do_combocid_op(neon_env, "update t set val=val+1")
 
 
-def test_combocid_lock(neon_env_builder: NeonEnvBuilder):
-    do_combocid_op(neon_env_builder, "select * from t for update")
+def test_combocid_lock(neon_shared_env: NeonEnv):
+    do_combocid_op(neon_env, "select * from t for update")
 
 
-def test_combocid_multi_insert(neon_env_builder: NeonEnvBuilder):
-    env = neon_env_builder.init_start()
+def test_combocid_multi_insert(neon_shared_env: NeonEnv):
+    env = neon_shared_env
     endpoint = env.endpoints.create_start(
         "main",
         config_lines=[
@@ -112,8 +112,8 @@ def test_combocid_multi_insert(neon_env_builder: NeonEnvBuilder):
     )
 
 
-def test_combocid(neon_env_builder: NeonEnvBuilder):
-    env = neon_env_builder.init_start()
+def test_combocid(neon_shared_env: NeonEnv):
+    env = neon_shared_env
     endpoint = env.endpoints.create_start("main")
 
     conn = endpoint.connect()

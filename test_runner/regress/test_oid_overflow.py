@@ -2,8 +2,8 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder
 
 
-def test_oid_overflow(neon_env_builder: NeonEnvBuilder):
-    env = neon_env_builder.init_start()
+def test_oid_overflow(neon_shared_env: NeonEnv):
+    env = neon_shared_env
 
     endpoint = env.endpoints.create_start("main")
 

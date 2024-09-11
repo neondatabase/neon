@@ -9,8 +9,8 @@ from fixtures.utils import query_scalar
 #
 # Test compute node start after clog truncation
 #
-def test_clog_truncate(neon_simple_env: NeonEnv):
-    env = neon_simple_env
+def test_clog_truncate(neon_shared_env: NeonEnv):
+    env = neon_shared_env
 
     # set aggressive autovacuum to make sure that truncation will happen
     config = [

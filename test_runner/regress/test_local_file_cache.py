@@ -9,8 +9,8 @@ from fixtures.neon_fixtures import NeonEnvBuilder
 from fixtures.utils import query_scalar
 
 
-def test_local_file_cache_unlink(neon_env_builder: NeonEnvBuilder):
-    env = neon_env_builder.init_start()
+def test_local_file_cache_unlink(neon_shared_env: NeonEnv):
+    env = neon_shared_env
 
     cache_dir = os.path.join(env.repo_dir, "file_cache")
     os.mkdir(cache_dir)

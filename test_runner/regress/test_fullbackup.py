@@ -16,12 +16,12 @@ num_rows = 1000
 
 # Ensure that regular postgres can start from fullbackup
 def test_fullbackup(
-    neon_env_builder: NeonEnvBuilder,
+    neon_shared_env: NeonEnv,
     pg_bin: PgBin,
     port_distributor: PortDistributor,
     test_output_dir: Path,
 ):
-    env = neon_env_builder.init_start()
+    env = neon_shared_env
 
     # endpoint needs to be alive until the fullbackup so that we have
     # prev_record_lsn for the vanilla_pg to start in read-write mode

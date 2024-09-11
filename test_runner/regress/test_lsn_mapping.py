@@ -24,13 +24,13 @@ def assert_lsn_lease_granted(result, with_lease: bool):
 
 
 @pytest.mark.parametrize("with_lease", [True, False])
-def test_lsn_mapping(neon_env_builder: NeonEnvBuilder, with_lease: bool):
+def test_lsn_mapping(neon_shared_env: NeonEnv, with_lease: bool):
     """
     Test pageserver get_lsn_by_timestamp API.
 
     :param with_lease: Whether to get a lease associated with returned LSN.
     """
-    env = neon_env_builder.init_start()
+    env = neon_shared_env
 
     tenant_id, _ = env.neon_cli.create_tenant(
         conf={

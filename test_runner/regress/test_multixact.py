@@ -12,8 +12,8 @@ from fixtures.utils import query_scalar
 # is enough to verify that the WAL records are handled correctly
 # in the pageserver.
 #
-def test_multixact(neon_simple_env: NeonEnv, test_output_dir):
-    env = neon_simple_env
+def test_multixact(neon_shared_env: NeonEnv, test_output_dir):
+    env = neon_shared_env
     endpoint = env.endpoints.create_start("main")
 
     cur = endpoint.connect().cursor()

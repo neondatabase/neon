@@ -10,11 +10,11 @@ from fixtures.neon_fixtures import NeonEnvBuilder
         "💣",  # calls `trigger_segfault` internally
     ],
 )
-def test_endpoint_crash(neon_env_builder: NeonEnvBuilder, sql_func: str):
+def test_endpoint_crash(neon_shared_env: NeonEnv, sql_func: str):
     """
     Test that triggering crash from neon_test_utils crashes the endpoint
     """
-    env = neon_env_builder.init_start()
+    env = neon_shared_env
     env.neon_cli.create_branch("test_endpoint_crash")
     endpoint = env.endpoints.create_start("test_endpoint_crash")
 

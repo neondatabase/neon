@@ -2,9 +2,8 @@ from fixtures.metrics import parse_metrics
 from fixtures.neon_fixtures import NeonEnvBuilder, NeonProxy
 
 
-def test_build_info_metric(neon_env_builder: NeonEnvBuilder, link_proxy: NeonProxy):
-    neon_env_builder.num_safekeepers = 1
-    env = neon_env_builder.init_start()
+def test_build_info_metric(neon_shared_env: NeonEnv, link_proxy: NeonProxy):
+    env = neon_shared_env
 
     parsed_metrics = {}
 

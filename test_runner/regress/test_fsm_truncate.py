@@ -1,8 +1,8 @@
-from fixtures.neon_fixtures import NeonEnvBuilder
+from fixtures.neon_fixtures import NeonEnv
 
 
-def test_fsm_truncate(neon_env_builder: NeonEnvBuilder):
-    env = neon_env_builder.init_start()
+def test_fsm_truncate(neon_shared_env: NeonEnv):
+    env = neon_shared_env
     env.neon_cli.create_branch("test_fsm_truncate")
     endpoint = env.endpoints.create_start("test_fsm_truncate")
     endpoint.safe_psql(

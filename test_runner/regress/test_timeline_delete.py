@@ -36,8 +36,8 @@ from fixtures.utils import query_scalar, run_pg_bench_small, wait_until
 from urllib3.util.retry import Retry
 
 
-def test_timeline_delete(neon_simple_env: NeonEnv):
-    env = neon_simple_env
+def test_timeline_delete(neon_shared_env: NeonEnv):
+    env = neon_shared_env
 
     env.pageserver.allowed_errors.extend(
         [

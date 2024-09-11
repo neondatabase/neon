@@ -39,8 +39,8 @@ async def parallel_load_same_table(endpoint: Endpoint, n_parallel: int):
 
 
 # Load data into one table with COPY TO from 5 parallel connections
-def test_parallel_copy(neon_simple_env: NeonEnv, n_parallel=5):
-    env = neon_simple_env
+def test_parallel_copy(neon_shared_env: NeonEnv, n_parallel=5):
+    env = neon_shared_env
     endpoint = env.endpoints.create_start("main")
 
     # Create test table

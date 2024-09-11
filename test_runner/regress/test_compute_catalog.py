@@ -2,8 +2,8 @@ import requests
 from fixtures.neon_fixtures import NeonEnv
 
 
-def test_compute_catalog(neon_simple_env: NeonEnv):
-    env = neon_simple_env
+def test_compute_catalog(neon_shared_env: NeonEnv):
+    env = neon_shared_env
 
     endpoint = env.endpoints.create_start("main", config_lines=["log_min_messages=debug1"])
     client = endpoint.http_client()

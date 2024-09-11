@@ -7,8 +7,8 @@ if TYPE_CHECKING:
     from fixtures.neon_fixtures import NeonEnv
 
 
-def test_migrations(neon_simple_env: NeonEnv):
-    env = neon_simple_env
+def test_migrations(neon_shared_env: NeonEnv):
+    env = neon_shared_env
 
     endpoint = env.endpoints.create("main")
     endpoint.respec(skip_pg_catalog_updates=False)

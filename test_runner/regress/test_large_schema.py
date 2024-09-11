@@ -12,8 +12,8 @@ from fixtures.neon_fixtures import NeonEnvBuilder
 # to large (several gigabytes) layer files (both ephemeral and delta layers).
 # It may cause problems with uploading to S3 and also degrade performance because ephemeral file swapping.
 #
-def test_large_schema(neon_env_builder: NeonEnvBuilder):
-    env = neon_env_builder.init_start()
+def test_large_schema(neon_shared_env: NeonEnv):
+    env = neon_shared_env
 
     endpoint = env.endpoints.create_start("main")
 

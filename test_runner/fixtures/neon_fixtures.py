@@ -485,7 +485,7 @@ class NeonEnvBuilder:
 
         self.env = None
 
-        self.__setattr__ = self.my_setattr
+        self.armed = True
 
     def __getattr__(self, attribute: str) -> Any:
         if self.storage_env_builder is not None:
@@ -493,19 +493,24 @@ class NeonEnvBuilder:
         else:
             raise AttributeError(f"NeonEnvBuilder doesn't have attribute '{attribute}'")
 
-    def my_setattr(self, attribute: str, value: Any) -> Any:
+    def __setattr__(self, attribute: str, value: Any) -> Any:
+        if attribute == 'armed' or self.__dict__.get('armed') is not True:
+            self.__dict__[attribute] = value
+            return
+
         if self.storage_env_builder is not None:
-            return self.server_env_builder.__setattribute__(attribute, value)
+            return setattr(self.storage_env_builder, attribute, value)
         else:
             raise AttributeError(f"NeonEnvBuilder doesn't have attribute '{attribute}'")
 
     def init_configs(self, default_remote_storage_if_missing: bool = True) -> NeonEnv:
+        self.armed = False
         # Cannot create more than one environment from one builder
         assert self.env is None, "environment already initialized"
 
         env = NeonEnv(self)
         if self.storage_env_builder is not None:
-            self.storage_env = self.storage_env_builder.init_configs(neon_cli, default_remote_storage_if_missing=default_remote_storage_if_missing)
+            self.storage_env = self.storage_env_builder.init_configs(default_remote_storage_if_missing=default_remote_storage_if_missing)
         env.storage_env = self.storage_env
         self.env = env
         return self.env
@@ -1554,10 +1559,10 @@ def neon_shared_storage_env(
     pg_distrib_dir: Path,
     request: FixtureRequest,
     neon_shared_storage_env_cache: Dict[str, NeonStorageEnv],
+    shared_initdb_cache_dir: Path,
 ) -> Iterator[NeonEnv]:
 
     repo_dir = top_output_dir / f"shared_repo-{build_type}"
-
     if neon_shared_storage_env_cache.get(build_type) is None:
         # Create the environment in the per-test output directory
         shutil.rmtree(repo_dir, ignore_errors=True)
@@ -1673,6 +1678,7 @@ def neon_simple_env(
         shared_initdb_cache_dir=shared_initdb_cache_dir
     ) as storage_env_builder:
         storage_env = storage_env_builder.init_configs()
+        storage_env.start()
         with NeonEnvBuilder(
             top_output_dir=top_output_dir,
             repo_dir=repo_dir,
@@ -4254,7 +4260,7 @@ class Endpoint(PgProtocol, LogUtils):
         self.http_port = http_port
         self.check_stop_result = check_stop_result
         # passed to endpoint create and endpoint reconfigure
-        self.active_safekeepers: List[int] = list(map(lambda sk: sk.id, env.safekeepers))
+        self.active_safekeepers: List[int] = list(map(lambda sk: sk.id, env.storage_env.safekeepers))
         # path to conf is <repo_dir>/endpoints/<endpoint_id>/pgdata/postgresql.conf XXX
 
         # Semaphore is set to 1 when we start, and acquire'd back to zero when we stop

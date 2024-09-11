@@ -33,7 +33,7 @@ from requests import RequestException
 @pytest.mark.parametrize("scale", get_scales_matrix(1))
 @pytest.mark.parametrize("ty", ["cascade", "flat"])
 def test_branching_with_pgbench(
-    neon_simple_env: NeonEnv, pg_bin: PgBin, n_branches: int, scale: int, ty: str
+    neon_shared_env: NeonEnv, pg_bin: PgBin, n_branches: int, scale: int, ty: str
 ):
     env = neon_simple_env
 

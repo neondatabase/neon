@@ -56,8 +56,8 @@ def check_client(env: NeonEnv, client: PageserverHttpClient):
         assert TimelineId(timeline_details["timeline_id"]) == timeline_id
 
 
-def test_pageserver_http_get_wal_receiver_not_found(neon_simple_env: NeonEnv):
-    env = neon_simple_env
+def test_pageserver_http_get_wal_receiver_not_found(neon_shared_env: NeonEnv):
+    env = neon_shared_env
     with env.pageserver.http_client() as client:
         tenant_id, timeline_id = env.neon_cli.create_tenant()
 
@@ -105,8 +105,8 @@ def expect_updated_msg_lsn(
 #
 # These fields used to be returned by a separate API call, but they're part of
 # `timeline_details` now.
-def test_pageserver_http_get_wal_receiver_success(neon_simple_env: NeonEnv):
-    env = neon_simple_env
+def test_pageserver_http_get_wal_receiver_success(neon_shared_env: NeonEnv):
+    env = neon_shared_env
     with env.pageserver.http_client() as client:
         tenant_id, timeline_id = env.neon_cli.create_tenant()
         endpoint = env.endpoints.create_start(DEFAULT_BRANCH_NAME, tenant_id=tenant_id)

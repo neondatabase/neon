@@ -7,8 +7,8 @@ from fixtures.neon_fixtures import NeonEnv, check_restored_datadir_content
 # maintained in the pageserver, so subtransactions are not very exciting for
 # Neon. They are included in the commit record though and updated in the
 # CLOG.
-def test_subxacts(neon_simple_env: NeonEnv, test_output_dir):
-    env = neon_simple_env
+def test_subxacts(neon_shared_env: NeonEnv, test_output_dir):
+    env = neon_shared_env
     endpoint = env.endpoints.create_start("main")
 
     pg_conn = endpoint.connect()

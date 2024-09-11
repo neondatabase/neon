@@ -1,13 +1,13 @@
 import time
 
-from fixtures.neon_fixtures import NeonEnvBuilder
+from fixtures.neon_fixtures import NeonEnv
 
 
 #
 # Test truncation of FSM and VM forks of a relation
 #
-def test_truncate(neon_env_builder: NeonEnvBuilder, zenbenchmark):
-    env = neon_env_builder.init_start()
+def test_truncate(neon_shared_env: NeonEnv, zenbenchmark):
+    env = neon_shared_env
     n_records = 10000
     n_iter = 10
 

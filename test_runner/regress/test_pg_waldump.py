@@ -19,8 +19,8 @@ def check_wal_segment(pg_waldump_path: str, segment_path: str, test_output_dir):
 
 
 # Simple test to check that pg_waldump works with neon WAL files
-def test_pg_waldump(neon_simple_env: NeonEnv, test_output_dir, pg_bin: PgBin):
-    env = neon_simple_env
+def test_pg_waldump(neon_shared_env: NeonEnv, test_output_dir, pg_bin: PgBin):
+    env = neon_shared_env
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
     endpoint = env.endpoints.create_start("main")

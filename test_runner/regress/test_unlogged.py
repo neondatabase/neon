@@ -7,8 +7,8 @@ from fixtures.pg_version import PgVersion
 # fork to reset them during recovery. In Neon, pageserver directly sends init
 # fork contents as main fork during basebackup.
 #
-def test_unlogged(neon_simple_env: NeonEnv):
-    env = neon_simple_env
+def test_unlogged(neon_shared_env: NeonEnv):
+    env = neon_shared_env
     endpoint = env.endpoints.create_start("main")
 
     conn = endpoint.connect()

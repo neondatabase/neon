@@ -14,8 +14,8 @@ from fixtures.neon_fixtures import NeonEnv, PgBin
 # Test branching, when a transaction is in prepared state
 #
 @pytest.mark.timeout(600)
-def test_lfc_resize(neon_simple_env: NeonEnv, pg_bin: PgBin):
-    env = neon_simple_env
+def test_lfc_resize(neon_shared_env: NeonEnv, pg_bin: PgBin):
+    env = neon_shared_env
     endpoint = env.endpoints.create_start(
         "main",
         config_lines=[

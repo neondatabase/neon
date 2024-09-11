@@ -87,8 +87,8 @@ def test_hot_standby(neon_simple_env: NeonEnv):
         sk_http.configure_failpoints(("sk-send-wal-replica-sleep", "off"))
 
 
-def test_2_replicas_start(neon_simple_env: NeonEnv):
-    env = neon_simple_env
+def test_2_replicas_start(neon_shared_env: NeonEnv):
+    env = neon_shared_env
 
     with env.endpoints.create_start(
         branch_name="main",
@@ -286,8 +286,8 @@ def test_hot_standby_feedback(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
 
 # Test race condition between WAL replay and backends performing queries
 # https://github.com/neondatabase/neon/issues/7791
-def test_replica_query_race(neon_simple_env: NeonEnv):
-    env = neon_simple_env
+def test_replica_query_race(neon_shared_env: NeonEnv):
+    env = neon_shared_env
 
     primary_ep = env.endpoints.create_start(
         branch_name="main",

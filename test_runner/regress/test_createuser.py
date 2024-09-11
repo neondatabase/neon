@@ -5,8 +5,8 @@ from fixtures.utils import query_scalar
 #
 # Test CREATE USER to check shared catalog restore
 #
-def test_createuser(neon_simple_env: NeonEnv):
-    env = neon_simple_env
+def test_createuser(neon_shared_env: NeonEnv):
+    env = neon_shared_env
     endpoint = env.endpoints.create_start("main")
 
     with endpoint.cursor() as cur:

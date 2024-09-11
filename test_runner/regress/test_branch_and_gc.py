@@ -46,11 +46,11 @@ from fixtures.utils import query_scalar
 # Because the delta layer D covering lsn1 is corrupted, creating a branch
 # starting from lsn1 should return an error as follows:
 #     could not find data for key ... at LSN ..., for request at LSN ...
-def test_branch_and_gc(neon_simple_env: NeonEnv, build_type: str):
+def test_branch_and_gc(neon_shared_env: NeonEnv, build_type: str):
     if build_type == "debug":
         pytest.skip("times out in debug builds")
 
-    env = neon_simple_env
+    env = neon_shared_env
     pageserver_http_client = env.pageserver.http_client()
 
     tenant, _ = env.neon_cli.create_tenant(
@@ -116,8 +116,8 @@ def test_branch_and_gc(neon_simple_env: NeonEnv, build_type: str):
 # and prevent creating branches with invalid starting LSNs.
 #
 # For more details, see discussion in https://github.com/neondatabase/neon/pull/2101#issuecomment-1185273447.
-def test_branch_creation_before_gc(neon_simple_env: NeonEnv):
-    env = neon_simple_env
+def test_branch_creation_before_gc(neon_shared_env: NeonEnv):
+    env = neon_shared_env
     pageserver_http_client = env.pageserver.http_client()
 
     error_regexes = [

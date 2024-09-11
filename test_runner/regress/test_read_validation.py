@@ -13,8 +13,8 @@ extensions = ["pageinspect", "neon_test_utils", "pg_buffercache"]
 #
 # Validation of reading different page versions
 #
-def test_read_validation(neon_simple_env: NeonEnv):
-    env = neon_simple_env
+def test_read_validation(neon_shared_env: NeonEnv):
+    env = neon_shared_env
 
     endpoint = env.endpoints.create_start("main")
     with closing(endpoint.connect()) as con:
@@ -125,8 +125,8 @@ def test_read_validation(neon_simple_env: NeonEnv):
                 log.info(f"Caught an expected failure: {e}")
 
 
-def test_read_validation_neg(neon_simple_env: NeonEnv):
-    env = neon_simple_env
+def test_read_validation_neg(neon_shared_env: NeonEnv):
+    env = neon_shared_env
     env.pageserver.allowed_errors.append(".*invalid LSN\\(0\\) in request.*")
 
     endpoint = env.endpoints.create_start("main")
