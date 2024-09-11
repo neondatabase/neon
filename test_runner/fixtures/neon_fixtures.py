@@ -553,10 +553,6 @@ class NeonEnvBuilder:
         self.env = NeonEnv(self)
         return self.env
 
-    def start(self):
-        assert self.env is not None, "environment is not already initialized, call init() first"
-        self.env.start()
-
     def init_start(
         self,
         initial_tenant_conf: Optional[Dict[str, Any]] = None,
@@ -572,7 +568,7 @@ class NeonEnvBuilder:
         Configuring pageserver with remote storage is now the default. There will be a warning if pageserver is created without one.
         """
         env = self.init_configs(default_remote_storage_if_missing=default_remote_storage_if_missing)
-        self.start()
+        env.start()
 
         # Prepare the default branch to start the postgres on later.
         # Pageserver itself does not create tenants and timelines, until started first and asked via HTTP API.
