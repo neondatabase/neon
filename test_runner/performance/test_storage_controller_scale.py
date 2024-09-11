@@ -84,7 +84,7 @@ def test_storage_controller_many_tenants(
     compute_reconfigure_listener.register_on_notify(lambda body: time.sleep(0.01))
 
     env = neon_env_builder.init_configs()
-    neon_env_builder.start()
+    env.start()
 
     # We will intentionally stress reconciler concurrrency, which triggers a warning when lots
     # of shards are hitting the delayed path.
