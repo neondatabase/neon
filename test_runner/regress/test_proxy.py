@@ -558,7 +558,7 @@ def test_sql_over_http_pool_dos(static_proxy: NeonProxy):
         400,
         "select * from generate_series(1, 5000) a cross join generate_series(1, 5000) b cross join (select 'foo'::foo) c;",
     )
-    assert "response is too large (max is 10485760 bytes)" in response["message"]
+    assert "response is too large (max is 33554432 bytes)" in response["message"]
 
 
 def test_sql_over_http_pool_custom_types(static_proxy: NeonProxy):
