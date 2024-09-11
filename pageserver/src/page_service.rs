@@ -587,7 +587,7 @@ impl PageServerHandler {
                         return Err(QueryError::Shutdown)
                     }
                     msg = pgb.read_message() => { break msg; }
-                    () = futures::future::ready(()) => {
+                    () = futures::future::ready(()), if num_consecutive_getpage_requests > 0 => {
                         CONSECUTIVE_NONBLOCKING_GETPAGE_REQUESTS_HISTOGRAM.observe(num_consecutive_getpage_requests as f64);
                         num_consecutive_getpage_requests = 0;
                     }
