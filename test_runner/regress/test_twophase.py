@@ -16,7 +16,7 @@ from fixtures.neon_fixtures import (
 #
 def twophase_test_on_timeline(env: NeonEnv):
     endpoint = env.endpoints.create_start(
-        "test_twophase", config_lines=["max_prepared_transactions=5", "log_statement=all"]
+        "test_twophase", config_lines=["max_prepared_transactions=5"]
     )
 
     conn = endpoint.connect()
@@ -71,7 +71,7 @@ def twophase_test_on_timeline(env: NeonEnv):
     # Start compute on the new branch
     endpoint2 = env.endpoints.create_start(
         "test_twophase_prepared",
-        config_lines=["max_prepared_transactions=5", "log_statement=all"],
+        config_lines=["max_prepared_transactions=5"],
     )
 
     # Check that we restored only needed twophase files
