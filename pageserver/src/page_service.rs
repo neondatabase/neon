@@ -43,7 +43,7 @@ use crate::basebackup;
 use crate::basebackup::BasebackupError;
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
-use crate::metrics;
+use crate::metrics::{self, CONSECUTIVE_NONBLOCKING_GETPAGE_REQUESTS_HISTOGRAM};
 use crate::metrics::{ComputeCommandKind, COMPUTE_COMMANDS_COUNTERS, LIVE_CONNECTIONS};
 use crate::pgdatadir_mapping::Version;
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
@@ -577,14 +577,21 @@ impl PageServerHandler {
             }
         }
 
+        let mut num_consecutive_getpage_requests = 0;
         loop {
             // read request bytes (it's exactly 1 PagestreamFeMessage per CopyData)
-            let msg = tokio::select! {
-                biased;
-                _ = self.cancel.cancelled() => {
-                    return Err(QueryError::Shutdown)
+            let msg = loop {
+                tokio::select! {
+                    biased;
+                    _ = self.cancel.cancelled() => {
+                        return Err(QueryError::Shutdown)
+                    }
+                    msg = pgb.read_message() => { break msg; }
+                    () = futures::future::ready(()) => {
+                        CONSECUTIVE_NONBLOCKING_GETPAGE_REQUESTS_HISTOGRAM.observe(num_consecutive_getpage_requests as f64);
+                        num_consecutive_getpage_requests = 0;
+                    }
                 }
-                msg = pgb.read_message() => { msg }
             };
             let copy_data_bytes = match msg? {
                 Some(FeMessage::CopyData(bytes)) => bytes,
@@ -626,6 +633,7 @@ impl PageServerHandler {
                     )
                 }
                 PagestreamFeMessage::GetPage(req) => {
+                    num_consecutive_getpage_requests += 1;
                     fail::fail_point!("ps::handle-pagerequest-message::getpage");
                     // shard_id is filled in by the handler
                     let span = tracing::info_span!("handle_get_page_at_lsn_request", rel = %req.rel, blkno = %req.blkno, req_lsn = %req.request_lsn);

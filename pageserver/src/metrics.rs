@@ -3170,6 +3170,16 @@ static TOKIO_EXECUTOR_THREAD_COUNT: Lazy<UIntGaugeVec> = Lazy::new(|| {
     .unwrap()
 });
 
+pub(crate) static CONSECUTIVE_NONBLOCKING_GETPAGE_REQUESTS_HISTOGRAM: Lazy<Histogram> =
+    Lazy::new(|| {
+        register_histogram!(
+            "pageserver_consecutive_nonblocking_getpage_requests",
+            "Number of consecutive nonblocking getpage requests",
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, ],
+        )
+        .unwrap()
+    });
+
 pub(crate) fn set_tokio_runtime_setup(setup: &str, num_threads: NonZeroUsize) {
     static SERIALIZE: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _guard = SERIALIZE.lock().unwrap();
