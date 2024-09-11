@@ -3491,7 +3491,7 @@ impl Tenant {
                 .context("extract initdb tar")?;
         } else {
             // Init temporarily repo to get bootstrap data, this creates a directory in the `pgdata_path` path
-            run_initdb(self.conf, &pgdata_path, pg_version, &self.cancel).await?;
+            run_initdb_with_cache(self.conf, &pgdata_path, pg_version, &self.cancel).await?;
 
             // Upload the created data dir to S3
             if self.tenant_shard_id().is_shard_zero() {
@@ -3835,6 +3835,118 @@ impl Tenant {
             .max()
             .unwrap_or(0)
     }
+}
+
+fn cached_initdb_dirname(initial_superuser_name: &str, pg_version: u32) -> String
+{
+    use std::hash::Hash;
+    use std::hash::Hasher;
+    use std::collections::hash_map::DefaultHasher;
+    let mut hasher = DefaultHasher::new();
+    initial_superuser_name.hash(&mut hasher);
+    let hash = hasher.finish();
+
+    format!("cached_initial_pgdata_{pg_version}_{:016}", hash)
+}
+
+fn copy_dir_all(src: impl AsRef<std::path::Path>, dst: impl AsRef<std::path::Path>) -> std::io::Result<()> {
+    for entry in fs::read_dir(src.as_ref())? {
+        let entry = entry?;
+        let subsrc = entry.path();
+        let subdst = dst.as_ref().join(&entry.file_name());
+
+        if entry.file_type()?.is_dir() {
+            std::fs::create_dir(&subdst)?;
+            copy_dir_all(&subsrc, &subdst)?;
+        } else {
+            std::fs::copy(&subsrc, &subdst)?;
+        }
+    }
+    Ok(())
+}
+
+fn restore_cached_initdb_dir(
+    cached_path: &Utf8Path,
+    target_path: &Utf8Path,
+) -> anyhow::Result<bool> {
+    if !cached_path.exists() {
+        info!("cached initdb dir \"{cached_path}\" does not exist yet");
+        return Ok(false);
+    }
+
+    std::fs::create_dir(target_path)?;
+    copy_dir_all(cached_path, target_path)?;
+    info!("restored initdb result from cache dir \"{cached_path}\"");
+    Ok(true)
+}
+
+fn save_cached_initdb_dir(
+    src_path: &Utf8Path,
+    cache_path: &Utf8Path,
+) -> anyhow::Result<()> {
+    match std::fs::create_dir(cache_path) {
+        Ok(()) => {
+            info!("saving initdb result to cache dir \"{cache_path}\"");
+        },
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+            info!("cache initdb dir \"{cache_path}\" already exists, not saving");
+            return Ok(())
+        },
+        Err(err) => { return Err(anyhow::Error::from(err))},
+    };
+    let cache_dir_guard = scopeguard::guard(cache_path, |cp| {
+        if let Err(err) = std::fs::remove_dir_all(&cp) {
+            error!("could not remove cached initdb directory {cp}: {err}");
+        }
+    });
+
+    let cache_parent_path = cache_path.parent().ok_or(anyhow::Error::msg("no cache parent path"))?;
+
+    let tmp_dirpath = camino_tempfile::tempdir_in(cache_parent_path)?;
+    copy_dir_all(src_path, &tmp_dirpath)?;
+    std::fs::rename(tmp_dirpath, &*cache_dir_guard)?;
+
+    // disarm the guard
+    scopeguard::ScopeGuard::into_inner(cache_dir_guard);
+
+    Ok(())
+}
+
+async fn run_initdb_with_cache(
+    conf: &'static PageServerConf,
+    initdb_target_dir: &Utf8Path,
+    pg_version: u32,
+    cancel: &CancellationToken,
+) -> Result<(), InitdbError> {
+
+    let cache_dir = conf.initdb_cache_dir.as_ref().map(|initdb_cache_dir| {
+        initdb_cache_dir.join(cached_initdb_dirname(&conf.superuser, pg_version))
+    });
+
+    if let Some(cache_dir) = &cache_dir {
+        match restore_cached_initdb_dir(&cache_dir, initdb_target_dir) {
+            Ok(true) => return Ok(()),
+            Ok(false) => {},
+            Err(err) => {
+                warn!("Error restoring from cached initdb directory \"{cache_dir}\": {err}");
+                if initdb_target_dir.exists() {
+                    if let Err(err) = std::fs::remove_dir_all(&initdb_target_dir) {
+                        error!("could not remove temporary initdb target directory {initdb_target_dir}: {err}");
+                    }
+                }
+            },
+        }
+    }
+
+    run_initdb(conf, initdb_target_dir, pg_version, cancel).await?;
+
+    if let Some(cache_dir) = &cache_dir {
+        if let Err(err) = save_cached_initdb_dir(initdb_target_dir, &cache_dir) {
+            warn!("error saving initdb result to cache directory \"{cache_dir}\": {err}");
+        }
+    }
+
+    Ok(())
 }
 
 /// Create the cluster temporarily in 'initdbpath' directory inside the repository

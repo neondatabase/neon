@@ -181,6 +181,17 @@ def top_output_dir(base_dir: Path) -> Iterator[Path]:
     log.info(f"top_output_dir is {output_dir}")
     yield output_dir
 
+@pytest.fixture(scope="session", autouse=True)
+def shared_initdb_cache_dir(top_output_dir: Path) -> Iterator[Path]:
+    log.info("Creating shared initdb cache directory")
+
+    cache_dir = top_output_dir / "shared_initdb_cache"
+
+    shutil.rmtree(cache_dir, ignore_errors=True)
+    cache_dir.mkdir(exist_ok=True)
+
+    yield cache_dir
+
 
 @pytest.fixture(scope="function")
 def versioned_pg_distrib_dir(pg_distrib_dir: Path, pg_version: PgVersion) -> Iterator[Path]:
@@ -484,6 +495,7 @@ class NeonEnvBuilder:
         safekeeper_extra_opts: Optional[list[str]] = None,
         storage_controller_port_override: Optional[int] = None,
         pageserver_io_buffer_alignment: Optional[int] = None,
+        shared_initdb_cache_dir: Optional[Path] = None,
     ):
         self.repo_dir = repo_dir
         self.rust_log_override = rust_log_override
@@ -516,6 +528,7 @@ class NeonEnvBuilder:
         self.enable_scrub_on_exit = True
         self.test_output_dir = test_output_dir
         self.test_overlay_dir = test_overlay_dir
+        self.shared_initdb_cache_dir = shared_initdb_cache_dir
         self.overlay_mounts_created_by_us: List[Tuple[str, Path]] = []
         self.config_init_force: Optional[str] = None
         self.top_output_dir = top_output_dir
@@ -1052,6 +1065,7 @@ class NeonEnv:
 
     def __init__(self, config: NeonEnvBuilder):
         self.repo_dir = config.repo_dir
+        self.shared_initdb_cache_dir = config.shared_initdb_cache_dir
         self.rust_log_override = config.rust_log_override
         self.port_distributor = config.port_distributor
         self.s3_mock_server = config.mock_s3_server
@@ -1157,6 +1171,10 @@ class NeonEnv:
                 # Default which can be overriden with `NeonEnvBuilder.pageserver_config_override`
                 "availability_zone": "us-east-2a",
             }
+
+            if self.shared_initdb_cache_dir is not None:
+                ps_cfg["initdb_cache_dir"] = str(self.shared_initdb_cache_dir)
+
             if self.pageserver_virtual_file_io_engine is not None:
                 ps_cfg["virtual_file_io_engine"] = self.pageserver_virtual_file_io_engine
             if config.pageserver_default_tenant_config_compaction_algorithm is not None:
@@ -1420,6 +1438,7 @@ def neon_simple_env(
     pageserver_aux_file_policy: Optional[AuxFileStore],
     pageserver_default_tenant_config_compaction_algorithm: Optional[Dict[str, Any]],
     pageserver_io_buffer_alignment: Optional[int],
+    shared_initdb_cache_dir: Optional[Path],
 ) -> Iterator[NeonEnv]:
     """
     Simple Neon environment, with no authentication and no safekeepers.
@@ -1447,6 +1466,7 @@ def neon_simple_env(
         pageserver_aux_file_policy=pageserver_aux_file_policy,
         pageserver_default_tenant_config_compaction_algorithm=pageserver_default_tenant_config_compaction_algorithm,
         pageserver_io_buffer_alignment=pageserver_io_buffer_alignment,
+        shared_initdb_cache_dir=shared_initdb_cache_dir
     ) as builder:
         env = builder.init_start()
 
@@ -1472,6 +1492,7 @@ def neon_env_builder(
     pageserver_aux_file_policy: Optional[AuxFileStore],
     record_property: Callable[[str, object], None],
     pageserver_io_buffer_alignment: Optional[int],
+    shared_initdb_cache_dir: Optional[Path],
 ) -> Iterator[NeonEnvBuilder]:
     """
     Fixture to create a Neon environment for test.
@@ -1508,6 +1529,7 @@ def neon_env_builder(
         pageserver_aux_file_policy=pageserver_aux_file_policy,
         pageserver_default_tenant_config_compaction_algorithm=pageserver_default_tenant_config_compaction_algorithm,
         pageserver_io_buffer_alignment=pageserver_io_buffer_alignment,
+        shared_initdb_cache_dir=shared_initdb_cache_dir
     ) as builder:
         yield builder
         # Propogate `preserve_database_files` to make it possible to use in other fixtures,
