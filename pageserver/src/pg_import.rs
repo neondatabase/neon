@@ -57,6 +57,8 @@ impl PgImportEnv {
 
         let pgdata_lsn = import_datadir::get_lsn_from_controlfile(&pgdata_path)?.align();
 
+        println!("Importing {pgdata_path} to {_tenant_path} as lsn {pgdata_lsn}...");
+
         let range = Key::MIN..Key::NON_L0_MAX;
         let mut one_big_layer = ImageLayerWriter::new(
             &self.conf,
@@ -102,9 +104,12 @@ impl PgImportEnv {
         spcnode: u32,
     ) -> anyhow::Result<()> {
 
+        debug!("Importing database (path={path}, tablespace={spcnode}, dboid={dboid})");
+
         // traverse database directory in the same order as our RelKey ordering
         let reldirs = WalkDir::new(path)
-            .max_depth(1)
+            .min_depth(1)
+            .max_depth(2)
             .into_iter()
             .filter_map(|entry| {
                 entry.ok().and_then(|path| {
@@ -132,13 +137,16 @@ impl PgImportEnv {
     async fn import_rel_file(
         &mut self,
         layer_writer: &mut ImageLayerWriter,
-        path: &Utf8PathBuf,
+        db_path: &Utf8PathBuf,
         rel_tag: RelTag,
         segno: u32,
     ) -> anyhow::Result<()> {
+        let path = db_path.join(rel_tag.relnode.to_string());
 
-        let mut reader = tokio::fs::File::open(path).await?;
-        let len = metadata(path)?.len() as usize;
+        debug!("Importing relation file (path={path}, rel_tag={rel_tag}, segno={segno})");
+
+        let mut reader = tokio::fs::File::open(&path).await?;
+        let len = metadata(&path)?.len() as usize;
 
         let mut buf: [u8; 8192] = [0u8; 8192];
 
