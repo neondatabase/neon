@@ -589,12 +589,7 @@ impl ImageLayerInner {
                 let (tx, rx) = oneshot::channel();
                 senders.insert((blob_meta.key, blob_meta.lsn), tx);
 
-                reconstruct_state.update_key(
-                    &blob_meta.key,
-                    blob_meta.lsn,
-                    true,
-                    rx,
-                );
+                reconstruct_state.update_key(&blob_meta.key, blob_meta.lsn, true, rx);
             }
 
             let buf_size = read.size();
@@ -636,7 +631,8 @@ impl ImageLayerInner {
                     }
                     Err(err) => {
                         for (_, sender) in senders {
-                            let _ = sender.send(Err(std::io::Error::new(err.kind(), "vec read failed")));
+                            let _ = sender
+                                .send(Err(std::io::Error::new(err.kind(), "vec read failed")));
                         }
                     }
                 }

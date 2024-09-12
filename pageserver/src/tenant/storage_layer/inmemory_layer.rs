@@ -34,9 +34,7 @@ use std::sync::atomic::Ordering as AtomicOrdering;
 use std::sync::atomic::{AtomicU64, AtomicUsize};
 use tokio::sync::RwLock;
 
-use super::{
-    DeltaLayerWriter, PersistentLayerDesc, ValuesReconstructState,
-};
+use super::{DeltaLayerWriter, PersistentLayerDesc, ValuesReconstructState};
 
 pub(crate) mod vectored_dio_read;
 
@@ -502,7 +500,8 @@ impl InMemoryLayer {
                             let sender = senders
                                 .remove(&(key, entry_lsn))
                                 .expect("sender must exist");
-                            let _ = sender.send(Err(std::io::Error::new(e.kind(), "dio vec read failed")));
+                            let _ = sender
+                                .send(Err(std::io::Error::new(e.kind(), "dio vec read failed")));
                         }
                         Ok(value_buf) => {
                             let _ = sender.send(Ok(value_buf.into()));

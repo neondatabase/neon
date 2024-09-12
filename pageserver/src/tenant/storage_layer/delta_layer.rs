@@ -1028,7 +1028,8 @@ impl DeltaLayerInner {
                     }
                     Err(err) => {
                         for (_, sender) in senders {
-                            let _ = sender.send(Err(std::io::Error::new(err.kind(), "vec read failed")));
+                            let _ = sender
+                                .send(Err(std::io::Error::new(err.kind(), "vec read failed")));
                         }
                     }
                 }

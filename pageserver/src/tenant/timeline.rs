@@ -1140,7 +1140,10 @@ impl Timeline {
                 let walredo_self = self.myself.upgrade().expect("&self method holds the arc");
                 async move {
                     let state = res.expect("Read path is infallible");
-                    assert!(matches!(state.situation, ValueReconstructSituation::Complete));
+                    assert!(matches!(
+                        state.situation,
+                        ValueReconstructSituation::Complete
+                    ));
 
                     let converted = match convert(state).await {
                         Ok(ok) => ok,
@@ -1149,12 +1152,17 @@ impl Timeline {
                         }
                     };
 
-                    (key, walredo_self.reconstruct_value(key, lsn, converted).await)
+                    (
+                        key,
+                        walredo_self.reconstruct_value(key, lsn, converted).await,
+                    )
                 }
             });
         }
 
-        let results = futs.collect::<BTreeMap<Key, Result<Bytes, PageReconstructError>>>().await;
+        let results = futs
+            .collect::<BTreeMap<Key, Result<Bytes, PageReconstructError>>>()
+            .await;
 
         reconstruct_timer.stop_and_record();
 

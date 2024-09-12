@@ -13,7 +13,7 @@ use utils::bin_ser::BeSer;
 pub mod split_writer;
 
 use crate::context::{AccessStatsBehavior, RequestContext};
-use crate::repository::Value;
+use crate::repository::{Value, ValueBytes};
 use crate::walrecord::NeonWalRecord;
 use bytes::Bytes;
 use pageserver_api::key::Key;
@@ -110,15 +110,23 @@ pub(crate) async fn convert(
         match fut.await {
             Ok(res) => match res {
                 Ok(bytes) => {
-                    let value = Value::des(&bytes)
-                        .map_err(|err| PageReconstructError::Other(err.into()))?;
+                    let is_image = ValueBytes::is_image(&bytes).map_err(|err| {
+                        PageReconstructError::Other(anyhow::anyhow!(
+                            "Failed to check image discriminator: {err:?}"
+                        ))
+                    })?;
 
-                    match value {
-                        Value::Image(img) => {
-                            to.img = Some((lsn, img));
-                        }
-                        Value::WalRecord(rec) => {
+                    if is_image {
+                        to.img = Some((lsn, bytes));
+                    } else {
+                        let value = Value::des(&bytes)
+                            .map_err(|err| PageReconstructError::Other(err.into()))?;
+                        if let Value::WalRecord(rec) = value {
                             to.records.push((lsn, rec));
+                        } else {
+                            return Err(PageReconstructError::Other(anyhow::anyhow!(
+                                "Deserialized to image"
+                            )));
                         }
                     }
                 }
