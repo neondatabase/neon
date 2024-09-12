@@ -353,7 +353,7 @@ impl tokio_util::codec::Decoder for PglbCodec {
 
         match msg {
             // postgres
-            0 => Ok(Some(PglbMessage::Postgres(payload.freeze()))),
+            0 => Ok(Some(PglbMessage::Postgres(payload))),
             // control
             1 => {
                 if payload.is_empty() {
@@ -393,7 +393,7 @@ impl tokio_util::codec::Decoder for PglbCodec {
 
 pub enum PglbMessage {
     Control(PglbControlMessage),
-    Postgres(bytes::Bytes),
+    Postgres(bytes::BytesMut),
 }
 
 pub enum PglbControlMessage {

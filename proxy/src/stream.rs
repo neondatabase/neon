@@ -324,7 +324,7 @@ impl AuthProxyStreamExt for AuthProxyStream {
     fn write_message_noflush(&mut self, message: &BeMessage<'_>) -> io::Result<&mut Self> {
         let mut b = BytesMut::new();
         BeMessage::write(&mut b, message).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-        self.start_send_unpin(PglbMessage::Postgres(b.freeze()))
+        self.start_send_unpin(PglbMessage::Postgres(b))
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
         Ok(self)
     }
