@@ -980,11 +980,30 @@ impl ImageLayerWriter {
         self.inner.take().unwrap().finish(timeline, ctx, None).await
     }
 
-    pub(crate) async fn finish_layer(
+    /// Like finish(), but doesn't create the ResidentLayer struct. This can be used
+    /// by utilities that don't have a full-blown Timeline.
+    pub(crate) async fn finish_raw(
         mut self,
         ctx: &RequestContext,
     ) -> anyhow::Result<super::PersistentLayerDesc> {
-        self.inner.take().unwrap().finish_layer(ctx, None).await
+        let inner = self.inner.take().unwrap();
+
+        let name = ImageLayerName {
+            key_range: inner.key_range.clone(),
+            lsn: inner.lsn,
+        };
+
+        let temp_path = inner.path.clone();
+        let final_path = inner.conf.timeline_path(&inner.tenant_shard_id, &inner.timeline_id)
+            .join(name.to_string());
+
+        let desc = inner.finish_layer(ctx, None).await?;
+
+        // Rename the file to final name like Layer::finish_creating() does
+        utils::fs_ext::rename_noreplace(temp_path.as_std_path(), final_path.as_std_path())
+            .with_context(|| format!("rename temporary file as {final_path}"))?;
+
+        Ok(desc)
     }
 
     /// Finish writing the image layer with an end key, used in [`super::split_writer::SplitImageLayerWriter`]. The end key determines the end of the image layer's covered range and is exclusive.

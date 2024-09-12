@@ -97,7 +97,7 @@ impl PgImportEnv {
             self.import_db(&mut one_big_layer, &db).await?;
         }
 
-        let layerdesc = one_big_layer.finish_layer(&self.ctx).await?;
+        let layerdesc = one_big_layer.finish_raw(&self.ctx).await?;
 
         // should we anything about the wal?
 
