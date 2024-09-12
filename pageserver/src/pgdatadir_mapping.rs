@@ -1993,12 +1993,12 @@ struct TwoPhaseDirectory {
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
-struct RelDirectory {
+pub struct RelDirectory {
     // Set of relations that exist. (relfilenode, forknum)
     //
     // TODO: Store it as a btree or radix tree or something else that spans multiple
     // key-value pairs, if you have a lot of relations
-    rels: HashSet<(Oid, u8)>,
+    pub rels: HashSet<(Oid, u8)>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, PartialEq)]

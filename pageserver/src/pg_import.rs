@@ -5,14 +5,14 @@ use bytes::Bytes;
 use camino::{Utf8Path, Utf8PathBuf};
 
 use itertools::Itertools;
-use pageserver_api::{key::{rel_block_to_key, DBDIR_KEY}, reltag::RelTag};
+use pageserver_api::{key::{rel_block_to_key, rel_dir_to_key, relmap_file_key, DBDIR_KEY}, reltag::RelTag};
 use postgres_ffi::{pg_constants, relfile_utils::parse_relfilename, ControlFileData, DBState_DB_SHUTDOWNED, Oid, BLCKSZ};
 use tokio::io::AsyncRead;
 use tracing::{debug, trace, warn};
 use utils::{id::{NodeId, TenantId, TimelineId}, shard::{ShardCount, ShardNumber, TenantShardId}};
 use walkdir::WalkDir;
 
-use crate::{context::{DownloadBehavior, RequestContext}, import_datadir, pgdatadir_mapping::DbDirectory, task_mgr::TaskKind, tenant::storage_layer::ImageLayerWriter};
+use crate::{context::{DownloadBehavior, RequestContext}, import_datadir, pgdatadir_mapping::{DbDirectory, RelDirectory}, task_mgr::TaskKind, tenant::storage_layer::ImageLayerWriter};
 use crate::config::PageServerConf;
 use tokio::io::AsyncReadExt;
 
@@ -84,13 +84,8 @@ impl PgImportEnv {
             &self.ctx,
         ).await?;
 
-        // // 1. DbDir; relmap files; reldir
-        // self.import_dirs(&mut one_big_layer, &pgdata_path).await?;
-
-        // let buf = DbDirectory::ser(&DbDirectory {
-        //     dbdirs: HashMap::new(),
-        // })?;
-        // one_big_layer.put_image(DBDIR_KEY, buf.into(), &self.ctx).await?;
+        // 1. DbDir; relmap files; reldir
+        self.import_dirs(&mut one_big_layer, &datadir).await?;
 
         // 4. Import data
         for db in datadir.dbs {
@@ -107,19 +102,45 @@ impl PgImportEnv {
         Ok(())
     }
 
-    // // Write necessary metadata about databases/relations. We store them as serialized hashmaps.
-    // //
-    // // 1. DbDir: (spcnode, dbnode) -> bool (do relmapper and PG_VERSION files exist)
-    // // 2. Relmap file: (spcnode, dbnode) -> contents of `pg_filenode.map` file
-    // // 3. Collection of RelDirs: HashSet of (relfilenode, forknum) for each (spcnode, dbnode)
-    // async fn import_dirs(
-    //     &mut self,
-    //     layer_writer: &mut ImageLayerWriter,
-    //     path: &Utf8PathBuf,
-    // ) -> anyhow::Result<()> {
+    // Write necessary metadata about databases/relations. We store them as serialized hashmaps.
+    //
+    // 1. DbDir: (spcnode, dbnode) -> bool (do relmapper and PG_VERSION files exist)
+    // 2. Relmap file: (spcnode, dbnode) -> contents of `pg_filenode.map` file
+    // 3. Collection of RelDirs: HashSet of (relfilenode, forknum) for each (spcnode, dbnode)
+    async fn import_dirs(
+        &mut self,
+        layer_writer: &mut ImageLayerWriter,
+        datadir: &PgDataDir,
+    ) -> anyhow::Result<()> {
 
-    //     Ok(())
-    // }
+        // 1. dbdir
+        let dbdir_buf = DbDirectory::ser(&DbDirectory {
+            dbdirs: datadir.dbs.iter().map(|db| ((db.spcnode, db.dboid), true)).collect(),
+        })?;
+        layer_writer.put_image(DBDIR_KEY, dbdir_buf.into(), &self.ctx).await?;
+
+        // 2. relmap files for each db
+        for db in &datadir.dbs {
+            let mut relmap_file = tokio::fs::File::open(&db.path.join("pg_filenode.map")).await?;
+            let relmap_buf = read_all_bytes(&mut relmap_file).await?;
+            layer_writer.put_image(relmap_file_key(db.spcnode, db.dboid), relmap_buf, &self.ctx).await?;
+        }
+
+        // 3. reldirs for each db
+        for db in &datadir.dbs {
+            let reldir_buf = RelDirectory::ser(&RelDirectory {
+                rels: db.files.iter().map(|f| (f.rel_tag.relnode, f.rel_tag.forknum)).collect(),
+            })?;
+
+            layer_writer.put_image(
+                rel_dir_to_key(db.spcnode, db.dboid),
+                Bytes::from(reldir_buf),
+                &self.ctx,
+            ).await?;
+        }
+
+        Ok(())
+    }
 
     async fn import_db(
         &mut self,
