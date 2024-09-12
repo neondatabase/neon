@@ -1145,7 +1145,7 @@ impl Timeline {
                         ValueReconstructSituation::Complete
                     ));
 
-                    let converted = match convert(state).await {
+                    let converted = match convert(key, state).await {
                         Ok(ok) => ok,
                         Err(err) => {
                             return (key, Err(err));

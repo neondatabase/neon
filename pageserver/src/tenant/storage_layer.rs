@@ -16,7 +16,7 @@ use crate::context::{AccessStatsBehavior, RequestContext};
 use crate::repository::{Value, ValueBytes};
 use crate::walrecord::NeonWalRecord;
 use bytes::Bytes;
-use pageserver_api::key::Key;
+use pageserver_api::key::{Key, DBDIR_KEY};
 use pageserver_api::keyspace::{KeySpace, KeySpaceRandomAccum};
 use std::cmp::Ordering;
 use std::collections::hash_map::Entry;
@@ -102,6 +102,7 @@ impl VectoredValueReconstructState {
 }
 
 pub(crate) async fn convert(
+    _key: Key,
     from: VectoredValueReconstructState,
 ) -> Result<ValueReconstructState, PageReconstructError> {
     let mut to = ValueReconstructState::default();
@@ -110,23 +111,16 @@ pub(crate) async fn convert(
         match fut.await {
             Ok(res) => match res {
                 Ok(bytes) => {
-                    let is_image = ValueBytes::is_image(&bytes).map_err(|err| {
-                        PageReconstructError::Other(anyhow::anyhow!(
-                            "Failed to check image discriminator: {err:?}"
-                        ))
-                    })?;
+                    let value = Value::des(&bytes)
+                        .map_err(|err| PageReconstructError::Other(err.into()))?;
 
-                    if is_image {
-                        to.img = Some((lsn, bytes));
-                    } else {
-                        let value = Value::des(&bytes)
-                            .map_err(|err| PageReconstructError::Other(err.into()))?;
-                        if let Value::WalRecord(rec) = value {
+                    match value {
+                        Value::WalRecord(rec) => {
                             to.records.push((lsn, rec));
-                        } else {
-                            return Err(PageReconstructError::Other(anyhow::anyhow!(
-                                "Deserialized to image"
-                            )));
+                        },
+                        Value::Image(img) => {
+                            assert!(to.img.is_none());
+                            to.img = Some((lsn, img));
                         }
                     }
                 }
