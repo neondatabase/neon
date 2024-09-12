@@ -217,26 +217,24 @@ neon-pg-clean-ext-%:
 # they depend on openssl and other libraries that are not included in our
 # Rust build.
 .PHONY: walproposer-lib
-walproposer-lib: neon-pg-ext-v17
+walproposer-lib: neon-pg-ext-v16
 	+@echo "Compiling walproposer-lib"
 	mkdir -p $(POSTGRES_INSTALL_DIR)/build/walproposer-lib
-	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/v17/bin/pg_config CFLAGS='$(PG_CFLAGS) $(COPT)' \
+	$(MAKE) PG_CONFIG=$(POSTGRES_INSTALL_DIR)/v16/bin/pg_config CFLAGS='$(PG_CFLAGS) $(COPT)' \
 		-C $(POSTGRES_INSTALL_DIR)/build/walproposer-lib \
 		-f $(ROOT_PROJECT_DIR)/pgxn/neon/Makefile walproposer-lib
-	cp $(POSTGRES_INSTALL_DIR)/v17/lib/libpgport.a $(POSTGRES_INSTALL_DIR)/build/walproposer-lib
-	cp $(POSTGRES_INSTALL_DIR)/v17/lib/libpgcommon.a $(POSTGRES_INSTALL_DIR)/build/walproposer-lib
+	cp $(POSTGRES_INSTALL_DIR)/v16/lib/libpgport.a $(POSTGRES_INSTALL_DIR)/build/walproposer-lib
+	cp $(POSTGRES_INSTALL_DIR)/v16/lib/libpgcommon.a $(POSTGRES_INSTALL_DIR)/build/walproposer-lib
+ifeq ($(UNAME_S),Linux)
 	$(AR) d $(POSTGRES_INSTALL_DIR)/build/walproposer-lib/libpgport.a \
 		pg_strong_random.o
 	$(AR) d $(POSTGRES_INSTALL_DIR)/build/walproposer-lib/libpgcommon.a \
-		checksum_helper.o \
-		cryptohash_openssl.o \
+		pg_crc32c.o \
 		hmac_openssl.o \
+		cryptohash_openssl.o \
+		scram-common.o \
 		md5_common.o \
-		parse_manifest.o \
-		scram-common.o
-ifeq ($(UNAME_S),Linux)
-	$(AR) d $(POSTGRES_INSTALL_DIR)/build/walproposer-lib/libpgcommon.a \
-		pg_crc32c.o
+		checksum_helper.o
 endif
 
 .PHONY: walproposer-lib-clean
