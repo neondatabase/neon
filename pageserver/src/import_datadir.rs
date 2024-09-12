@@ -506,6 +506,13 @@ async fn import_file(
         return Ok(None);
     }
 
+    if file_name == "pg_internal.init" {
+        // tar archives on macOs, created without COPYFILE_DISABLE=1 env var
+        // will contain "fork files", skip them.
+        info!("skipping pg_internal.init");
+        return Ok(None);
+    }
+
     if file_path.starts_with("global") {
         let spcnode = postgres_ffi::pg_constants::GLOBALTABLESPACE_OID;
         let dbnode = 0;

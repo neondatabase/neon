@@ -652,11 +652,11 @@ async fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::Local
                 .ok_or_else(|| {
                     anyhow!("Found no timeline id for branch name '{ancestor_branch_name}'")
                 })?;
-            
+
             let pg_version = branch_match
-            .get_one::<u32>("pg-version")
-            .copied()
-            .context("Failed to parse postgres version from the argument string")?;
+                .get_one::<u32>("pg-version")
+                .copied()
+                .context("Failed to parse postgres version from the argument string")?;
 
             let start_lsn = branch_match
                 .get_one::<String>("ancestor-start-lsn")
