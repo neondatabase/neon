@@ -590,6 +590,22 @@ RUN wget https://github.com/theory/pg-semver/archive/refs/tags/v0.32.1.tar.gz -O
 
 #########################################################################################
 #
+# Layer "pg-sudo"
+# compile pg-neon-sudo extension
+#
+#########################################################################################
+FROM build-deps AS pg-sudo-pg-build
+COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
+
+ENV PATH="/usr/local/pgsql/bin/:$PATH"
+RUN wget https://github.com/skyzh/pg_sudo.tar.gz -O pg_sudo.tar.gz && \
+    mkdir pg_sudo-src && cd pg_sudo-src && tar xzf ../pg_sudo.tar.gz --strip-components=1 -C . && \
+    make -j $(getconf _NPROCESSORS_ONLN) && \
+    make -j $(getconf _NPROCESSORS_ONLN) install && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/pg_neon_sudo.control
+
+#########################################################################################
+#
 # Layer "pg-embedding-pg-build"
 # compile pg_embedding extension
 #
@@ -623,8 +639,7 @@ FROM build-deps AS pg-anon-pg-build
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
 ENV PATH="/usr/local/pgsql/bin/:$PATH"
-RUN wget  https://github.com/neondatabase/postgresql_anonymizer/archive/refs/tags/neon_1.1.1.tar.gz -O pg_anon.tar.gz && \
-    echo "321ea8d5c1648880aafde850a2c576e4a9e7b9933a34ce272efc839328999fa9  pg_anon.tar.gz" | sha256sum --check && \
+RUN wget  https://github.com/skyzh/postgresql_anonymizer/archive/refs/heads/master.tar.gz -O pg_anon.tar.gz && \
     mkdir pg_anon-src && cd pg_anon-src && tar xzf ../pg_anon.tar.gz --strip-components=1 -C . && \
     find /usr/local/pgsql -type f | sed 's|^/usr/local/pgsql/||' > /before.txt &&\
     make -j $(getconf _NPROCESSORS_ONLN) install PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
@@ -833,6 +848,7 @@ COPY --from=wal2json-pg-build /usr/local/pgsql /usr/local/pgsql
 COPY --from=pg-anon-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-ivm-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-partman-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pg-sudo-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY pgxn/ pgxn/
 
 RUN make -j $(getconf _NPROCESSORS_ONLN) \
@@ -953,7 +969,7 @@ COPY --from=pg-semver-pg-build /pg_semver.tar.gz /ext-src
 #COPY --from=pg-embedding-pg-build /home/nonroot/pg_embedding-src/ /ext-src
 #COPY --from=wal2json-pg-build /wal2json_2_5.tar.gz /ext-src
 COPY --from=pg-anon-pg-build /pg_anon.tar.gz /ext-src
-COPY patches/pg_anon.patch /ext-src
+COPY --from=pg-sudo-pg-build /pg_sudo.tar.gz /ext-src
 COPY --from=pg-ivm-build /pg_ivm.tar.gz /ext-src
 COPY --from=pg-partman-build /pg_partman.tar.gz /ext-src
 RUN cd /ext-src/ && for f in *.tar.gz; \
@@ -966,7 +982,6 @@ RUN cd /ext-src/rum-src && patch -p1 <../rum.patch
 RUN apt-get update && apt-get install -y cmake
 RUN cd /ext-src/pg_hint_plan-src && patch -p1 < /ext-src/pg_hint_plan.patch
 COPY --chmod=755 docker-compose/run-tests.sh /run-tests.sh
-RUN patch -p1 </ext-src/pg_anon.patch
 RUN patch -p1 </ext-src/pg_cron.patch
 ENV PATH=/usr/local/pgsql/bin:$PATH
 ENV PGHOST=compute
