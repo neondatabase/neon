@@ -18,16 +18,6 @@ use tokio::io::AsyncReadExt;
 
 use pageserver_api::key::Key;
 
-
-pub async fn do_import() -> anyhow::Result<()> {
-
-    let mut import = PgImportEnv::init().await?;
-
-    import.import_datadir(&Utf8PathBuf::from("pg_in"), &Utf8PathBuf::from("pg_out")).await?;
-
-    Ok(())
-}
-
 pub struct PgImportEnv {
     ctx: RequestContext,
     conf: &'static PageServerConf,
@@ -37,7 +27,7 @@ pub struct PgImportEnv {
 
 impl PgImportEnv {
 
-    async fn init() -> anyhow::Result<PgImportEnv> {
+    pub async fn init() -> anyhow::Result<PgImportEnv> {
         let ctx: RequestContext = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error);
         let config = toml_edit::Document::new();
         let conf = PageServerConf::parse_and_validate(
@@ -63,7 +53,7 @@ impl PgImportEnv {
         })
     }
 
-    async fn import_datadir(&mut self, pgdata_path: &Utf8Path, _tenant_path: &Utf8Path) -> anyhow::Result<()> {
+    pub async fn import_datadir(&mut self, pgdata_path: &Utf8Path, _tenant_path: &Utf8Path) -> anyhow::Result<()> {
 
         let pgdata_lsn = import_datadir::get_lsn_from_controlfile(&pgdata_path)?.align();
 
