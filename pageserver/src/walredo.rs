@@ -78,8 +78,10 @@ pub struct PostgresRedoManager {
     /// # Shutdown
     ///
     /// See [`Self::launched_processes`].
-    redo_process: heavier_once_cell::OnceCell<ProcessOnceCell>,
-
+    ///
+    /// # Different pg versions
+    ///
+    /// We run a own quiesced process for each version (pg14, pg15, pg16 and maybe pg17).
     processes: [heavier_once_cell::OnceCell<ProcessOnceCell>; 4],
 
     /// Gate that is entered when launching a walredo process and held open
@@ -246,7 +248,6 @@ impl PostgresRedoManager {
             tenant_shard_id,
             conf,
             last_redo_at: std::sync::Mutex::default(),
-            redo_process: heavier_once_cell::OnceCell::default(),
             processes: Default::default(),
             launched_processes: utils::sync::gate::Gate::default(),
         }
@@ -270,7 +271,7 @@ impl PostgresRedoManager {
         let mut it_was_us = false;
         for process in self.processes.iter() {
             // prevent new processes from being spawned
-            let maybe_permit = match self.redo_process.get_or_init_detached().await {
+            let maybe_permit = match process.get_or_init_detached().await {
                 Ok(guard) => {
                     if matches!(&*guard, ProcessOnceCell::ManagerShutDown) {
                         None
