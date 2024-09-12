@@ -148,19 +148,19 @@ jobs:
           key: v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.build-type }}-pg-${{ steps.pg_v17_rev.outputs.pg_rev }}-${{ hashFiles('Makefile', 'Dockerfile.build-tools') }}
 
       - name: Build postgres v14
-        #if: steps.cache_pg_14.outputs.cache-hit != 'true'
+        if: steps.cache_pg_14.outputs.cache-hit != 'true'
         run: mold -run make postgres-v14 -j$(nproc)
 
       - name: Build postgres v15
-        #if: steps.cache_pg_15.outputs.cache-hit != 'true'
+        if: steps.cache_pg_15.outputs.cache-hit != 'true'
         run: mold -run make postgres-v15 -j$(nproc)
 
       - name: Build postgres v16
-        #if: steps.cache_pg_16.outputs.cache-hit != 'true'
+        if: steps.cache_pg_16.outputs.cache-hit != 'true'
         run: mold -run make postgres-v16 -j$(nproc)
 
       - name: Build postgres v17
-        #if: steps.cache_pg_17.outputs.cache-hit != 'true'
+        if: steps.cache_pg_17.outputs.cache-hit != 'true'
         run: mold -run make postgres-v17 -j$(nproc)
 
       - name: Build neon extensions
