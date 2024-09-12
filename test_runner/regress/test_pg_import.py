@@ -22,8 +22,8 @@ class ImportCli(AbstractNeonCli):
 
     COMMAND = "import"
 
-    def run_import(self, pgdatadir: Path, dest_dir: Path):
-        res = self.raw_cli([str(pgdatadir), str(dest_dir)])
+    def run_import(self, pgdatadir: Path, dest_dir: Path, tenant_id: TenantId, timeline_id: TimelineId):
+        res = self.raw_cli(["--tenant-id", str(tenant_id), "--timeline-id", str(timeline_id), str(pgdatadir), str(dest_dir)])
         res.check_returncode()
 
 
@@ -50,10 +50,11 @@ def test_pg_import(test_output_dir, pg_bin, vanilla_pg, neon_env_builder):
     tenant_id = TenantId.generate()
     timeline_id = TimelineId.generate()
 
+    dst_path = env.pageserver_remote_storage.root
     tline_path = env.pageserver_remote_storage.timeline_path(tenant_id, timeline_id)
     tline_path.mkdir(parents=True)
 
     cli = ImportCli(env)
-    cli.run_import(vanilla_pg.pgdatadir, tline_path)
+    cli.run_import(vanilla_pg.pgdatadir, dst_path, tenant_id=tenant_id, timeline_id=timeline_id)
 
     # TODO: tell pageserver / storage controller that the tenant/timeline now exists
