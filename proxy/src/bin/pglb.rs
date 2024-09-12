@@ -39,10 +39,7 @@ async fn main() -> anyhow::Result<()> {
         conns: Mutex::new(IndexMap::new()),
     });
 
-    let quinn_handle = tokio::spawn(quinn_server(
-        auth_endpoint.clone(),
-        auth_connections.clone(),
-    ));
+    let quinn_handle = tokio::spawn(quinn_server(auth_endpoint, auth_connections.clone()));
 
     let _frontend_handle = tokio::spawn(start_frontend("127.0.0.1:0"));
 
@@ -52,7 +49,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn endpoint_config(addr: SocketAddr) -> anyhow::Result<Endpoint> {
-    use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+    use quinn::rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 
     let mut params = rcgen::CertificateParams::new(vec!["pglb".to_string()]);
     params
@@ -87,21 +84,31 @@ async fn quinn_server(ep: Endpoint, state: Arc<AuthConnState>) {
                 .unwrap()
                 .insert(conn_id, AuthConn { conn: conn.clone() });
 
+            // heartbeat loop
             loop {
-                match timeout(Duration::from_secs(1), conn.accept_uni()).await {
-                    Ok(Ok(_)) => {}
+                match timeout(Duration::from_secs(10), conn.accept_uni()).await {
+                    Ok(Ok(mut heartbeat_stream)) => {
+                        let data = heartbeat_stream.read_to_end(128).await.unwrap();
+                        if data.starts_with(b"shutdown") {
+                            println!("[{conn_id:?}] conn shutdown");
+                            break;
+                        }
+                        // else update latency info
+                    }
                     Ok(Err(conn_err)) => {
                         println!("[{conn_id:?}] conn err {conn_err:?}");
-                        state.conns.lock().unwrap().remove(&conn_id);
                         break;
                     }
                     Err(_) => {
                         println!("[{conn_id:?}] conn timeout err");
-                        state.conns.lock().unwrap().remove(&conn_id);
                         break;
                     }
                 }
             }
+
+            state.conns.lock().unwrap().remove(&conn_id);
+            let conn_closed = conn.closed().await;
+            println!("[{conn_id:?}] conn closed {conn_closed:?}");
         });
     }
 }
