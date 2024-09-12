@@ -1,14 +1,16 @@
 import os
 from pathlib import Path
 
-from fixtures.common_types import Lsn
+from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
+    AbstractNeonCli,
     NeonEnvBuilder,
     PgBin,
     VanillaPostgres,
 )
 from fixtures.port_distributor import PortDistributor
+from fixtures.remote_storage import RemoteStorageKind
 from fixtures.utils import query_scalar, subprocess_capture
 
 num_rows = 1000
@@ -20,7 +22,7 @@ class ImportCli(AbstractNeonCli):
 
     COMMAND = "import"
 
-    def import(self, pgdatadir: Path, dest_dir: Path):
+    def run_import(self, pgdatadir: Path, dest_dir: Path):
         res = self.raw_cli([str(pgdatadir), str(dest_dir)])
         res.check_returncode()
 
@@ -39,18 +41,18 @@ def test_pg_import(test_output_dir, pg_bin, vanilla_pg, neon_env_builder):
 
 
     # We have a Postgres data directory to import now
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
     env = neon_env_builder.init_start()
 
     # Set up pageserver for import
-    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     # Run pg_import utility, pointing directly to a directory in the remote storage dir
-    tenant = TenantId.generate()
-    timeline = TimelineId.generate()
+    tenant_id = TenantId.generate()
+    timeline_id = TimelineId.generate()
 
-    timelinedir = env.pagserver.workdir() / "tenants" / tenant_id / "timelines" / timeline
+    tline_path = env.pageserver_remote_storage.timeline_path(tenant_id, timeline_id)
 
     cli = ImportCli(env)
-    cli.import(vanilla_pg.pgdata(),
+    cli.run_import(vanilla_pg.pgdatadir, tline_path)
 
     # TODO: tell pageserver / storage controller that the tenant/timeline now exists
