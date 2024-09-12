@@ -219,29 +219,36 @@ impl ControlPlaneGenerationsApi for ControllerUpcallClient {
             .join("validate")
             .expect("Failed to build validate path");
 
-        let request = ValidateRequest {
-            tenants: tenants
-                .into_iter()
-                .map(|(id, gen)| ValidateRequestTenant {
-                    id,
-                    gen: gen
-                        .into()
-                        .expect("Generation should always be valid for a Tenant doing deletions"),
-                })
-                .collect(),
-        };
+        let mut result: HashMap<TenantShardId, bool> = HashMap::with_capacity(tenants.len());
 
-        failpoint_support::sleep_millis_async!("control-plane-client-validate-sleep", &self.cancel);
-        if self.cancel.is_cancelled() {
-            return Err(RetryForeverError::ShuttingDown);
+        for tenant_chunk in (tenants).chunks(128) {
+            let request = ValidateRequest {
+                tenants: tenant_chunk
+                    .iter()
+                    .map(|(id, generation)| ValidateRequestTenant {
+                        id: *id,
+                        gen: (*generation).into().expect(
+                            "Generation should always be valid for a Tenant doing deletions",
+                        ),
+                    })
+                    .collect(),
+            };
+
+            failpoint_support::sleep_millis_async!(
+                "control-plane-client-validate-sleep",
+                &self.cancel
+            );
+            if self.cancel.is_cancelled() {
+                return Err(RetryForeverError::ShuttingDown);
+            }
+
+            let response: ValidateResponse =
+                self.retry_http_forever(&re_attach_path, request).await?;
+            for rt in response.tenants {
+                result.insert(rt.id, rt.valid);
+            }
         }
 
-        let response: ValidateResponse = self.retry_http_forever(&re_attach_path, request).await?;
-
-        Ok(response
-            .tenants
-            .into_iter()
-            .map(|rt| (rt.id, rt.valid))
-            .collect())
+        Ok(result.into_iter().collect())
     }
 }
