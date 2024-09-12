@@ -17,9 +17,12 @@ use utils::{backoff, failpoint_support, generation::Generation, id::NodeId};
 use crate::{config::PageServerConf, virtual_file::on_fatal_io_error};
 use pageserver_api::config::NodeMetadata;
 
-/// The Pageserver's client for using the control plane API: this is a small subset
-/// of the overall control plane API, for dealing with generations (see docs/rfcs/025-generation-numbers.md)
-pub struct ControlPlaneClient {
+/// The Pageserver's client for using the storage controller upcall API: this is a small API
+/// for dealing with generations (see docs/rfcs/025-generation-numbers.md).
+///
+/// The server presenting this API may either be the storage controller or some other
+/// service (such as the Neon control plane) providing a store of generation numbers.
+pub struct ControllerUpcallClient {
     http_client: reqwest::Client,
     base_url: Url,
     node_id: NodeId,
@@ -45,7 +48,7 @@ pub trait ControlPlaneGenerationsApi {
     ) -> impl Future<Output = Result<HashMap<TenantShardId, bool>, RetryForeverError>> + Send;
 }
 
-impl ControlPlaneClient {
+impl ControllerUpcallClient {
     /// A None return value indicates that the input `conf` object does not have control
     /// plane API enabled.
     pub fn new(conf: &'static PageServerConf, cancel: &CancellationToken) -> Option<Self> {
@@ -114,7 +117,7 @@ impl ControlPlaneClient {
     }
 }
 
-impl ControlPlaneGenerationsApi for ControlPlaneClient {
+impl ControlPlaneGenerationsApi for ControllerUpcallClient {
     /// Block until we get a successful response, or error out if we are shut down
     async fn re_attach(
         &self,
