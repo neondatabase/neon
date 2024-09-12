@@ -18,7 +18,6 @@
 use std::collections::BTreeMap;
 
 use bytes::BytesMut;
-use futures::channel::oneshot;
 use pageserver_api::key::Key;
 use tokio::io::AsyncWriteExt;
 use tokio_epoll_uring::BoundedBuf;
@@ -34,6 +33,7 @@ use crate::virtual_file::{self, VirtualFile};
 pub struct BlobMeta {
     pub key: Key,
     pub lsn: Lsn,
+    pub will_init: bool,
 }
 
 /// Blob offsets into [`VectoredBlobsBuf::buf`]
@@ -356,7 +356,8 @@ pub enum BlobFlag {
 /// * Iterate over the collected blobs and coalesce them into reads at the end
 pub struct VectoredReadPlanner {
     // Track all the blob offsets. Start offsets must be ordered.
-    blobs: BTreeMap<Key, Vec<(Lsn, u64, u64)>>,
+    // Note: last bool is will_init
+    blobs: BTreeMap<Key, Vec<(Lsn, u64, u64, bool)>>,
     // Arguments for previous blob passed into [`VectoredReadPlanner::handle`]
     prev: Option<(Key, Lsn, u64, BlobFlag)>,
 
@@ -421,12 +422,12 @@ impl VectoredReadPlanner {
         match flag {
             BlobFlag::None => {
                 let blobs_for_key = self.blobs.entry(key).or_default();
-                blobs_for_key.push((lsn, start_offset, end_offset));
+                blobs_for_key.push((lsn, start_offset, end_offset, false));
             }
             BlobFlag::ReplaceAll => {
                 let blobs_for_key = self.blobs.entry(key).or_default();
                 blobs_for_key.clear();
-                blobs_for_key.push((lsn, start_offset, end_offset));
+                blobs_for_key.push((lsn, start_offset, end_offset, true));
             }
             BlobFlag::Ignore => {}
         }
@@ -437,11 +438,17 @@ impl VectoredReadPlanner {
         let mut reads = Vec::new();
 
         for (key, blobs_for_key) in self.blobs {
-            for (lsn, start_offset, end_offset) in blobs_for_key {
+            for (lsn, start_offset, end_offset, will_init) in blobs_for_key {
                 let extended = match &mut current_read_builder {
-                    Some(read_builder) => {
-                        read_builder.extend(start_offset, end_offset, BlobMeta { key, lsn })
-                    }
+                    Some(read_builder) => read_builder.extend(
+                        start_offset,
+                        end_offset,
+                        BlobMeta {
+                            key,
+                            lsn,
+                            will_init,
+                        },
+                    ),
                     None => VectoredReadExtended::No,
                 };
 
@@ -449,7 +456,11 @@ impl VectoredReadPlanner {
                     let next_read_builder = VectoredReadBuilder::new(
                         start_offset,
                         end_offset,
-                        BlobMeta { key, lsn },
+                        BlobMeta {
+                            key,
+                            lsn,
+                            will_init,
+                        },
                         self.max_read_size,
                         self.mode,
                     );
@@ -670,7 +681,15 @@ impl StreamingVectoredReadPlanner {
     ) -> Option<VectoredRead> {
         match &mut self.read_builder {
             Some(read_builder) => {
-                let extended = read_builder.extend(start_offset, end_offset, BlobMeta { key, lsn });
+                let extended = read_builder.extend(
+                    start_offset,
+                    end_offset,
+                    BlobMeta {
+                        key,
+                        lsn,
+                        will_init: false,
+                    },
+                );
                 assert_eq!(extended, VectoredReadExtended::Yes);
             }
             None => {
@@ -678,7 +697,11 @@ impl StreamingVectoredReadPlanner {
                     Some(VectoredReadBuilder::new_streaming(
                         start_offset,
                         end_offset,
-                        BlobMeta { key, lsn },
+                        BlobMeta {
+                            key,
+                            lsn,
+                            will_init: false,
+                        },
                         self.mode,
                     ))
                 };
@@ -1010,6 +1033,7 @@ mod tests {
         let meta = BlobMeta {
             key: Key::MIN,
             lsn: Lsn(0),
+            will_init: false,
         };
 
         for (idx, (blob, offset)) in blobs.iter().zip(offsets.iter()).enumerate() {

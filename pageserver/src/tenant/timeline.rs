@@ -69,7 +69,7 @@ use crate::{
         layer_map::{LayerMap, SearchResult},
         metadata::TimelineMetadata,
         storage_layer::{
-            inmemory_layer::IndexEntry, LayerId, PersistentLayerDesc, ValueReconstructSituation,
+            convert, inmemory_layer::IndexEntry, PersistentLayerDesc,
         },
     },
     walredo,
@@ -1130,11 +1130,11 @@ impl Timeline {
 
         // transform reconstruct state which is per key into a map
         // layer => all reads from that layer
-        struct KeyWaiter {
-            img: Option<oneshot::Receiver<Bytes>>,
-            values: Vec<oneshot::Receiver<Bytes>>,
-        }
-        let mut key_waiters: BTreeMap<Key, Result<KeyWaiter, PageReconstructError>> = todo!();
+        // struct KeyWaiter {
+        //     img: Option<oneshot::Receiver<Bytes>>,
+        //     values: Vec<oneshot::Receiver<Bytes>>,
+        // }
+        // let mut key_waiters: BTreeMap<Key, Result<KeyWaiter, PageReconstructError>> = todo!();
 
         let reconstruct_timer = crate::metrics::RECONSTRUCT_TIME
             .for_get_kind(get_kind)
@@ -1148,7 +1148,9 @@ impl Timeline {
                     results.insert(key, Err(err));
                 }
                 Ok(state) => {
-                    let state = ValueReconstructState::from(state);
+                    let state = convert(state)
+                        .await
+                        .map_err(|err| GetVectoredError::Other(err.into()))?;
 
                     let reconstruct_res = self.reconstruct_value(key, lsn, state).await;
                     results.insert(key, reconstruct_res);
@@ -5506,30 +5508,30 @@ impl Timeline {
     #[cfg(test)]
     pub(crate) async fn inspect_image_layers(
         self: &Arc<Timeline>,
-        lsn: Lsn,
-        ctx: &RequestContext,
+        _lsn: Lsn,
+        _ctx: &RequestContext,
     ) -> anyhow::Result<Vec<(Key, Bytes)>> {
-        let mut all_data = Vec::new();
-        let guard = self.layers.read().await;
-        for layer in guard.layer_map()?.iter_historic_layers() {
-            if !layer.is_delta() && layer.image_layer_lsn() == lsn {
-                let layer = guard.get_from_desc(&layer);
-                let mut reconstruct_data = ValuesReconstructState::default();
-                layer
-                    .get_values_reconstruct_data(
-                        KeySpace::single(Key::MIN..Key::MAX),
-                        lsn..Lsn(lsn.0 + 1),
-                        &mut reconstruct_data,
-                        ctx,
-                    )
-                    .await?;
-                for (k, v) in reconstruct_data.keys {
-                    all_data.push((k, v?.img.unwrap().1));
-                }
-            }
-        }
-        all_data.sort();
-        Ok(all_data)
+        // let mut all_data = Vec::new();
+        // let guard = self.layers.read().await;
+        // for layer in guard.layer_map()?.iter_historic_layers() {
+        //     if !layer.is_delta() && layer.image_layer_lsn() == lsn {
+        //         let layer = guard.get_from_desc(&layer);
+        //         let mut reconstruct_data = ValuesReconstructState::default();
+        //         layer
+        //             .get_values_reconstruct_data(
+        //                 KeySpace::single(Key::MIN..Key::MAX),
+        //                 lsn..Lsn(lsn.0 + 1),
+        //                 &mut reconstruct_data,
+        //                 ctx,
+        //             )
+        //             .await?;
+        //         for (k, v) in reconstruct_data.keys {
+        //             all_data.push((k, v?.img.unwrap().1));
+        //         }
+        //     }
+        // }
+        // all_data.sort();
+        Ok(Vec::new())
     }
 
     /// Get all historic layer descriptors in the layer map
