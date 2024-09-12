@@ -933,8 +933,11 @@ class NeonEnvBuilder:
 
         for directory_to_clean in reversed(directories_to_clean):
             if not os.listdir(directory_to_clean):
-                log.debug(f"Removing empty directory {directory_to_clean}")
-                directory_to_clean.rmdir()
+                log.info(f"Removing empty directory {directory_to_clean}")
+                try:
+                    directory_to_clean.rmdir()
+                except Exception as e:
+                    log.error(f"Error removing empty directory {directory_to_clean}: {e}")
 
     def cleanup_remote_storage(self):
         for x in [self.pageserver_remote_storage, self.safekeepers_remote_storage]:
@@ -3423,6 +3426,7 @@ class VanillaPostgres(PgProtocol):
         assert not self.running
         with open(os.path.join(self.pgdatadir, "postgresql.conf"), "a") as conf_file:
             conf_file.write("\n".join(options))
+            conf_file.write("\n")
 
     def edit_hba(self, hba: List[str]):
         """Prepend hba lines into pg_hba.conf file."""
@@ -3476,6 +3480,7 @@ def vanilla_pg(
     pg_bin = PgBin(test_output_dir, pg_distrib_dir, pg_version)
     port = port_distributor.get_port()
     with VanillaPostgres(pgdatadir, pg_bin, port) as vanilla_pg:
+        vanilla_pg.configure(["shared_preload_libraries='neon_rmgr'"])
         yield vanilla_pg
 
 

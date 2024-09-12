@@ -211,7 +211,7 @@ jobs:
       build-tag: ${{ needs.tag.outputs.build-tag }}
       build-type: ${{ matrix.build-type }}
       # Run tests on all Postgres versions in release builds and only on the latest version in debug builds
-      pg-versions: ${{ matrix.build-type == 'release' && '["v14", "v15", "v16"]' || '["v16"]' }}
+      pg-versions: ${{ matrix.build-type == 'release' && '["v14", "v15", "v16", "v17"]' || '["v17"]' }}
     secrets: inherit
 
   # Keep `benchmarks` job outside of `build-and-test-locally` workflow to make job failures non-blocking
@@ -548,7 +548,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        version: [ v14, v15, v16 ]
+        version: [ v14, v15, v16, v17 ]
         arch: [ x64, arm64 ]
 
     runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
@@ -627,7 +627,7 @@ jobs:
 
       - name: Build compute-tools image
         # compute-tools are Postgres independent, so build it only once
-        if: matrix.version == 'v16'
+        if: matrix.version == 'v17'
         uses: docker/build-push-action@v6
         with:
           target: compute-tools-image
@@ -649,7 +649,7 @@ jobs:
 
     strategy:
       matrix:
-        version: [ v14, v15, v16 ]
+        version: [ v14, v15, v16, v17 ]
 
     steps:
       - uses: docker/login-action@v3
@@ -671,7 +671,7 @@ jobs:
                                              neondatabase/neon-test-extensions-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}-arm64
 
       - name: Create multi-arch compute-tools image
-        if: matrix.version == 'v16'
+        if: matrix.version == 'v17'
         run: |
           docker buildx imagetools create -t neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }} \
                                              neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}-x64 \
@@ -689,7 +689,7 @@ jobs:
                                                                                 neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}
 
       - name: Push multi-arch compute-tools image to ECR
-        if: matrix.version == 'v16'
+        if: matrix.version == 'v17'
         run: |
           docker buildx imagetools create -t 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{ needs.tag.outputs.build-tag }} \
                                                                                 neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}
@@ -700,7 +700,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        version: [ v14, v15, v16 ]
+        version: [ v14, v15, v16, v17 ]
     env:
       VM_BUILDER_VERSION: v0.29.3
 
@@ -798,7 +798,7 @@ jobs:
     runs-on: ubuntu-22.04
 
     env:
-      VERSIONS: v14 v15 v16
+      VERSIONS: v14 v15 v16 v17
 
     steps:
       - uses: docker/login-action@v3
@@ -839,7 +839,7 @@ jobs:
             done
           done
           docker buildx imagetools create -t neondatabase/neon-test-extensions-v16:latest \
-                                             neondatabase/neon-test-extensions-v16:${{ needs.tag.outputs.build-tag }}
+                                              neondatabase/neon-test-extensions-v16:${{ needs.tag.outputs.build-tag }}
 
       - name: Login to prod ECR
         uses: docker/login-action@v3
@@ -852,7 +852,7 @@ jobs:
       - name: Copy all images to prod ECR
         if: github.ref_name == 'release'|| github.ref_name == 'release-proxy'
         run: |
-          for image in neon compute-tools {vm-,}compute-node-{v14,v15,v16}; do
+          for image in neon compute-tools {vm-,}compute-node-{v14,v15,v16,v17}; do
             docker buildx imagetools create -t 093970136003.dkr.ecr.eu-central-1.amazonaws.com/${image}:${{ needs.tag.outputs.build-tag }} \
                                                369495373322.dkr.ecr.eu-central-1.amazonaws.com/${image}:${{ needs.tag.outputs.build-tag }}
           done
@@ -864,7 +864,7 @@ jobs:
     with:
       client_id: ${{ vars.AZURE_DEV_CLIENT_ID }}
       image_tag: ${{ needs.tag.outputs.build-tag }}
-      images: neon compute-tools vm-compute-node-v14 vm-compute-node-v15 vm-compute-node-v16 compute-node-v14 compute-node-v15 compute-node-v16
+      images: neon compute-tools vm-compute-node-v14 vm-compute-node-v15 vm-compute-node-v16 vm-compute-node-v17 compute-node-v14 compute-node-v15 compute-node-v16 compute-node-v17
       registry_name: ${{ vars.AZURE_DEV_REGISTRY_NAME }}
       subscription_id: ${{ vars.AZURE_DEV_SUBSCRIPTION_ID }}
       tenant_id: ${{ vars.AZURE_TENANT_ID }}
@@ -876,7 +876,7 @@ jobs:
     with:
       client_id: ${{ vars.AZURE_PROD_CLIENT_ID }}
       image_tag: ${{ needs.tag.outputs.build-tag }}
-      images: neon compute-tools vm-compute-node-v14 vm-compute-node-v15 vm-compute-node-v16 compute-node-v14 compute-node-v15 compute-node-v16
+      images: neon compute-tools vm-compute-node-v14 vm-compute-node-v15 vm-compute-node-v16 vm-compute-node-v17 compute-node-v14 compute-node-v15 compute-node-v16 compute-node-v17
       registry_name: ${{ vars.AZURE_PROD_REGISTRY_NAME }}
       subscription_id: ${{ vars.AZURE_PROD_SUBSCRIPTION_ID }}
       tenant_id: ${{ vars.AZURE_TENANT_ID }}
@@ -971,7 +971,7 @@ jobs:
           #
           git config --global --add safe.directory ${{ github.workspace }}
           git config --global --add safe.directory ${GITHUB_WORKSPACE}
-          for r in 14 15 16; do
+          for r in 14 15 16 17; do
             git config --global --add safe.directory "${{ github.workspace }}/vendor/postgres-v$r"
             git config --global --add safe.directory "${GITHUB_WORKSPACE}/vendor/postgres-v$r"
           done
@@ -1117,6 +1117,7 @@ jobs:
 
               files_to_promote+=("s3://${BUCKET}/${s3_key}")
 
+              # TODO Add v17
               for pg_version in v14 v15 v16; do
                 # We run less tests for debug builds, so we don't need to promote them
                 if [ "${build_type}" == "debug" ] && { [ "${arch}" == "ARM64" ] || [ "${pg_version}" != "v16" ] ; }; then
