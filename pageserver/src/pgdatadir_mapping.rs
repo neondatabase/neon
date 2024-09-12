@@ -1988,8 +1988,8 @@ pub struct DbDirectory {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct TwoPhaseDirectory {
-    xids: HashSet<TransactionId>,
+pub(crate) struct TwoPhaseDirectory {
+    pub(crate) xids: HashSet<TransactionId>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -2022,9 +2022,9 @@ struct RelSizeEntry {
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
-struct SlruSegmentDirectory {
+pub(crate) struct SlruSegmentDirectory {
     // Set of SLRU segments that exist.
-    segments: HashSet<u32>,
+    pub(crate) segments: HashSet<u32>,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug, enum_map::Enum)]
