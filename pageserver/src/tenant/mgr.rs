@@ -30,7 +30,7 @@ use utils::{backoff, completion, crashsafe};
 
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
-use crate::control_plane_client::{
+use crate::controller_upcall_client::{
     ControlPlaneGenerationsApi, ControllerUpcallClient, RetryForeverError,
 };
 use crate::deletion_queue::DeletionQueueClient;
