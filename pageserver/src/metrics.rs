@@ -3175,7 +3175,7 @@ pub(crate) static CONSECUTIVE_NONBLOCKING_GETPAGE_REQUESTS_HISTOGRAM: Lazy<Histo
         register_histogram!(
             "pageserver_consecutive_nonblocking_getpage_requests",
             "Number of consecutive nonblocking getpage requests",
-            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, ],
+            (0..=256).map(|x| x as f64).collect::<Vec<f64>>(),
         )
         .unwrap()
     });
