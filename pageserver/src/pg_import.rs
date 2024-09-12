@@ -69,7 +69,7 @@ impl PgImportEnv {
 
         // Import ordinary databases, DEFAULTTABLESPACE_OID is smaller than GLOBALTABLESPACE_OID, so import them first
         // Traverse database in increasing oid order
-        WalkDir::new(pgdata_path.join("base"))
+        let dbdirs = WalkDir::new(pgdata_path.join("base"))
             .max_depth(1)
             .into_iter()
             .filter_map(|entry| {
@@ -77,14 +77,15 @@ impl PgImportEnv {
                     path.file_name().to_string_lossy().parse::<u32>().ok()
                 })
             })
-            .sorted()
-            .for_each(|dboid| {
-                let path = pgdata_path.join("base").join(dboid.to_string());
-                self.import_db(&mut one_big_layer, &path, dboid, pg_constants::DEFAULTTABLESPACE_OID);
-            });
+            .sorted();
+
+        for dboid in dbdirs {
+            let path = pgdata_path.join("base").join(dboid.to_string());
+            self.import_db(&mut one_big_layer, &path, dboid, pg_constants::DEFAULTTABLESPACE_OID).await?;
+        };
 
         // global catalogs now
-        self.import_db(&mut one_big_layer, &pgdata_path.join("global"), 0, postgres_ffi::pg_constants::GLOBALTABLESPACE_OID);
+        self.import_db(&mut one_big_layer, &pgdata_path.join("global"), 0, postgres_ffi::pg_constants::GLOBALTABLESPACE_OID).await?;
         
         one_big_layer.finish_layer(&self.ctx).await?;
 
@@ -102,7 +103,7 @@ impl PgImportEnv {
     ) -> anyhow::Result<()> {
 
         // traverse database directory in the same order as our RelKey ordering
-        WalkDir::new(path)
+        let reldirs = WalkDir::new(path)
             .max_depth(1)
             .into_iter()
             .filter_map(|entry| {
@@ -112,17 +113,18 @@ impl PgImportEnv {
                     parse_relfilename(&relfile).ok()
                 })
             })
-            .sorted()
-            .for_each(|(relnode, forknum, segno)|{
-                let rel_tag = RelTag {
-                    spcnode,
-                    dbnode: dboid,
-                    relnode,
-                    forknum,
-                };
+            .sorted();
 
-                self.import_rel_file(layer_writer, path, rel_tag, segno).await?;
-            });
+        for (relnode, forknum, segno) in reldirs {
+            let rel_tag = RelTag {
+                spcnode,
+                dbnode: dboid,
+                relnode,
+                forknum,
+            };
+
+            self.import_rel_file(layer_writer, path, rel_tag, segno).await?;
+        };
 
         Ok(())
     }
