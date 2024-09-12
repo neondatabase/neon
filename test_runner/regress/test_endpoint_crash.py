@@ -1,5 +1,5 @@
 import pytest
-from fixtures.neon_fixtures import NeonEnvBuilder
+from fixtures.neon_fixtures import Endpoint
 
 
 @pytest.mark.parametrize(
@@ -10,14 +10,11 @@ from fixtures.neon_fixtures import NeonEnvBuilder
         "💣",  # calls `trigger_segfault` internally
     ],
 )
-def test_endpoint_crash(neon_env_builder: NeonEnvBuilder, sql_func: str):
+def test_endpoint_crash(neon_endpoint: Endpoint, sql_func: str):
     """
     Test that triggering crash from neon_test_utils crashes the endpoint
     """
-    env = neon_env_builder.init_start()
-    env.neon_cli.create_branch("test_endpoint_crash")
-    endpoint = env.endpoints.create_start("test_endpoint_crash")
-
+    endpoint = neon_endpoint
     endpoint.safe_psql("CREATE EXTENSION neon_test_utils;")
     with pytest.raises(Exception, match="This probably means the server terminated abnormally"):
         endpoint.safe_psql(f"SELECT {sql_func}();")

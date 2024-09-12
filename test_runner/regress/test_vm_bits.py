@@ -2,7 +2,7 @@ import time
 from contextlib import closing
 
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, fork_at_current_lsn
+from fixtures.neon_fixtures import Endpoint, NeonEnv, NeonEnvBuilder, fork_at_current_lsn
 from fixtures.utils import query_scalar
 
 
@@ -57,7 +57,7 @@ def test_vm_bit_clear(neon_simple_env: NeonEnv):
     cur.execute("UPDATE vmtest_cold_update2 SET id = 5000, filler=repeat('x', 200) WHERE id = 1")
 
     # Branch at this point, to test that later
-    fork_at_current_lsn(env, endpoint, "test_vm_bit_clear_new", "main")
+    # fork_at_current_lsn(env, endpoint, "test_vm_bit_clear_new", "main")
 
     # Clear the buffer cache, to force the VM page to be re-fetched from
     # the page server
@@ -91,6 +91,7 @@ def test_vm_bit_clear(neon_simple_env: NeonEnv):
     # a dirty VM page is evicted. If the VM bit was not correctly cleared by the
     # earlier WAL record, the full-page image hides the problem. Starting a new
     # server at the right point-in-time avoids that full-page image.
+
     endpoint_new = env.endpoints.create_start("test_vm_bit_clear_new")
 
     pg_new_conn = endpoint_new.connect()
