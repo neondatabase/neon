@@ -10,9 +10,9 @@ use pageserver_api::models::{self, TenantState};
 use pageserver_api::models::{
     PagestreamBeMessage, PagestreamDbSizeRequest, PagestreamDbSizeResponse,
     PagestreamErrorResponse, PagestreamExistsRequest, PagestreamExistsResponse,
-    PagestreamFeMessage, PagestreamGetPageRequest, PagestreamGetPageResponse,
-    PagestreamGetSlruSegmentRequest, PagestreamGetSlruSegmentResponse, PagestreamNblocksRequest,
-    PagestreamNblocksResponse, PagestreamProtocolVersion,
+    PagestreamFeMessage, PagestreamGetPageRequest, PagestreamGetSlruSegmentRequest,
+    PagestreamGetSlruSegmentResponse, PagestreamNblocksRequest, PagestreamNblocksResponse,
+    PagestreamProtocolVersion,
 };
 use pageserver_api::shard::TenantShardId;
 use postgres_backend::{is_expected_io_error, AuthType, PostgresBackend, QueryError};
@@ -577,18 +577,16 @@ impl PageServerHandler {
             }
         }
 
-        let mut batch = Vec::new();
-        let mut num_consecutive_getpage_requests = 0;
+        let mut batched = None;
         'outer: loop {
             enum DebouncedFeMessage {
                 Exists(models::PagestreamExistsRequest),
                 Nblocks(models::PagestreamNblocksRequest),
                 GetPage {
                     span: Span,
-                    timeline: timeline::handle::Handle<TenantManagerTypes>,
-                    rel: RelTag,
-                    blkno: BlockNumber,
+                    shard: timeline::handle::Handle<TenantManagerTypes>,
                     effective_request_lsn: Lsn,
+                    pages: smallvec::SmallVec<[(RelTag, BlockNumber); 1]>,
                 },
                 DbSize(models::PagestreamDbSizeRequest),
                 GetSlruSegment(models::PagestreamGetSlruSegmentRequest),
@@ -597,7 +595,7 @@ impl PageServerHandler {
             let mut debounce: Option<std::time::Instant> = None;
             // return or `?` on protocol error
             // `break EXPR` to stop batching. The EXPR will be the first message in the next batch.
-            let after_batch: Option<DebouncedFeMessage> = loop {
+            let next_batched: Option<DebouncedFeMessage> = loop {
                 static BOUNCE_TIMEOUT: Lazy<Duration> = Lazy::new(|| {
                     utils::env::var::<humantime::Duration, _>("NEON_PAGESERVER_DEBOUNCE")
                         .unwrap()
@@ -619,7 +617,7 @@ impl PageServerHandler {
                         msg
                     }
                     _ = sleep_fut => {
-                        assert!(!batch.is_empty());
+                        assert!(batched.is_some());
                         break None;
                     }
                 };
@@ -652,11 +650,12 @@ impl PageServerHandler {
                         rel,
                         blkno,
                     }) => {
-                        let span = tracing::info_span!("handle_get_page_at_lsn_request", %tenant_id, %timeline_id, shard_id = tracing::field::Empty, %rel, %blkno, req_lsn = %request_lsn);
+                        let span = tracing::info_span!("handle_get_page_at_lsn_request_batched", %tenant_id, %timeline_id, shard_id = tracing::field::Empty, req_lsn = %request_lsn, batch_size = tracing::field::Empty);
                         let key = rel_block_to_key(rel, blkno);
-                        let timeline = match self
+                        let shard = match self
                             .timeline_handles
                             .get(tenant_id, timeline_id, ShardSelector::Page(key))
+                            .instrument(span.clone())
                             .await
                         {
                             Ok(tl) => tl,
@@ -680,15 +679,11 @@ impl PageServerHandler {
                             }
                             Err(e) => break Some(DebouncedFeMessage::RespondError(span, e.into())),
                         };
-                        span.record(
-                            "shard_id",
-                            tracing::field::display(timeline.tenant_shard_id.shard_slug()),
-                        );
                         let effective_request_lsn = match Self::wait_or_get_last_lsn(
-                            &timeline,
+                            &shard,
                             request_lsn,
                             not_modified_since,
-                            &timeline.get_latest_gc_cutoff_lsn(),
+                            &shard.get_latest_gc_cutoff_lsn(),
                             &ctx,
                         )
                         // TODO: if we actually need to wait for lsn here, it delays the entire batch which doesn't need to wait
@@ -701,36 +696,38 @@ impl PageServerHandler {
                         };
                         DebouncedFeMessage::GetPage {
                             span,
-                            timeline,
-                            rel,
-                            blkno,
+                            shard,
                             effective_request_lsn,
+                            pages: smallvec::smallvec![(rel, blkno)],
                         }
                     }
                 };
 
                 // check if we can debounce
-                match (batch.last(), this_msg) {
+                match (&mut batched, this_msg) {
                     (None, this_msg) => {
-                        batch.push(this_msg);
+                        batched = Some(this_msg);
                     }
                     (
                         Some(DebouncedFeMessage::GetPage {
                             span: _,
-                            timeline: prev_shard,
-                            rel: _,
-                            blkno: _,
-                            effective_request_lsn: prev_lsn,
+                            shard: accum_shard,
+                            pages: accum_pages,
+                            effective_request_lsn: accum_lsn,
                         }),
                         DebouncedFeMessage::GetPage {
-                            span,
-                            timeline: this_shard,
-                            rel,
-                            blkno,
+                            span: _,
+                            shard: this_shard,
+                            pages: this_pages,
                             effective_request_lsn: this_lsn,
                         },
                     ) if async {
-                        if (prev_shard.tenant_shard_id, prev_shard.timeline_id)
+                        assert_eq!(this_pages.len(), 1);
+                        if accum_pages.len() >= Timeline::MAX_GET_VECTORED_KEYS as usize {
+                            assert_eq!(accum_pages.len(), Timeline::MAX_GET_VECTORED_KEYS as usize);
+                            return false;
+                        }
+                        if (accum_shard.tenant_shard_id, accum_shard.timeline_id)
                             != (this_shard.tenant_shard_id, this_shard.timeline_id)
                         {
                             // TODO: we _could_ batch & execute each shard seperately (and in parallel).
@@ -739,18 +736,12 @@ impl PageServerHandler {
                         }
                         // the vectored get currently only supports a single LSN, so, bounce as soon
                         // as the effective request_lsn changes
-                        return *prev_lsn == this_lsn;
+                        return *accum_lsn == this_lsn;
                     }
                     .await =>
                     {
                         // ok to batch
-                        batch.push(DebouncedFeMessage::GetPage {
-                            span,
-                            timeline: this_shard,
-                            rel,
-                            blkno,
-                            effective_request_lsn: this_lsn,
-                        });
+                        accum_pages.extend(this_pages);
                     }
                     (Some(_), this_msg) => {
                         // by default, don't continue batching
@@ -764,107 +755,104 @@ impl PageServerHandler {
                     break None;
                 }
             };
-            assert!(!batch.is_empty());
 
-            CONSECUTIVE_NONBLOCKING_GETPAGE_REQUESTS_HISTOGRAM
-                .observe(num_consecutive_getpage_requests as f64);
-            num_consecutive_getpage_requests = 0;
-
-            for msg in batch.drain(..) {
-                // invoke handler function
-                let (handler_result, span) = match msg {
-                    DebouncedFeMessage::Exists(req) => {
-                        CONSECUTIVE_NONBLOCKING_GETPAGE_REQUESTS_HISTOGRAM
-                            .observe(num_consecutive_getpage_requests as f64);
-                        num_consecutive_getpage_requests = 0;
-
-                        fail::fail_point!("ps::handle-pagerequest-message::exists");
-                        let span = tracing::info_span!("handle_get_rel_exists_request", rel = %req.rel, req_lsn = %req.request_lsn);
-                        (
+            // invoke handler function
+            let (handler_results, span): (
+                smallvec::SmallVec<[Result<PagestreamBeMessage, PageStreamError>; 1]>,
+                _,
+            ) = match batched.take().expect("loop above ensures this") {
+                DebouncedFeMessage::Exists(req) => {
+                    fail::fail_point!("ps::handle-pagerequest-message::exists");
+                    let span = tracing::info_span!("handle_get_rel_exists_request", rel = %req.rel, req_lsn = %req.request_lsn);
+                    (
+                        smallvec::smallvec![
                             self.handle_get_rel_exists_request(tenant_id, timeline_id, &req, &ctx)
                                 .instrument(span.clone())
-                                .await,
-                            span,
-                        )
-                    }
-                    DebouncedFeMessage::Nblocks(req) => {
-                        CONSECUTIVE_NONBLOCKING_GETPAGE_REQUESTS_HISTOGRAM
-                            .observe(num_consecutive_getpage_requests as f64);
-                        num_consecutive_getpage_requests = 0;
-                        fail::fail_point!("ps::handle-pagerequest-message::nblocks");
-                        let span = tracing::info_span!("handle_get_nblocks_request", rel = %req.rel, req_lsn = %req.request_lsn);
-                        (
+                                .await
+                        ],
+                        span,
+                    )
+                }
+                DebouncedFeMessage::Nblocks(req) => {
+                    fail::fail_point!("ps::handle-pagerequest-message::nblocks");
+                    let span = tracing::info_span!("handle_get_nblocks_request", rel = %req.rel, req_lsn = %req.request_lsn);
+                    (
+                        smallvec::smallvec![
                             self.handle_get_nblocks_request(tenant_id, timeline_id, &req, &ctx)
                                 .instrument(span.clone())
                                 .await,
-                            span,
-                        )
-                    }
-                    DebouncedFeMessage::GetPage {
+                        ],
                         span,
-                        timeline,
-                        rel,
-                        blkno,
-                        effective_request_lsn,
-                    } => {
-                        num_consecutive_getpage_requests += 1;
-                        fail::fail_point!("ps::handle-pagerequest-message::getpage");
-                        // shard_id is filled in by the handler
-                        (
-                            // TODO: issue vectored get
-                            self.handle_get_page_at_lsn_request(
-                                &timeline,
-                                rel,
-                                blkno,
-                                effective_request_lsn,
-                                &ctx,
-                            )
-                            .instrument(span.clone())
-                            .await,
-                            span,
-                        )
-                    }
-                    DebouncedFeMessage::DbSize(req) => {
-                        CONSECUTIVE_NONBLOCKING_GETPAGE_REQUESTS_HISTOGRAM
-                            .observe(num_consecutive_getpage_requests as f64);
-                        num_consecutive_getpage_requests = 0;
-                        fail::fail_point!("ps::handle-pagerequest-message::dbsize");
-                        let span = tracing::info_span!("handle_db_size_request", dbnode = %req.dbnode, req_lsn = %req.request_lsn);
-                        (
+                    )
+                }
+                DebouncedFeMessage::GetPage {
+                    span,
+                    shard,
+                    effective_request_lsn,
+                    pages,
+                } => {
+                    CONSECUTIVE_NONBLOCKING_GETPAGE_REQUESTS_HISTOGRAM.observe(pages.len() as f64);
+                    span.record("batch_size", pages.len() as u64);
+                    fail::fail_point!("ps::handle-pagerequest-message::getpage");
+                    // shard_id is filled in by the handler
+                    (
+                        {
+                            let npages = pages.len();
+                            let res = self
+                                .handle_get_page_at_lsn_request_batched(
+                                    &shard,
+                                    effective_request_lsn,
+                                    pages,
+                                    &ctx,
+                                )
+                                .instrument(span.clone())
+                                .await;
+                            assert_eq!(res.len(), npages);
+                            res
+                        },
+                        span,
+                    )
+                }
+                DebouncedFeMessage::DbSize(req) => {
+                    fail::fail_point!("ps::handle-pagerequest-message::dbsize");
+                    let span = tracing::info_span!("handle_db_size_request", dbnode = %req.dbnode, req_lsn = %req.request_lsn);
+                    (
+                        smallvec::smallvec![
                             self.handle_db_size_request(tenant_id, timeline_id, &req, &ctx)
                                 .instrument(span.clone())
-                                .await,
-                            span,
-                        )
-                    }
-                    DebouncedFeMessage::GetSlruSegment(req) => {
-                        CONSECUTIVE_NONBLOCKING_GETPAGE_REQUESTS_HISTOGRAM
-                            .observe(num_consecutive_getpage_requests as f64);
-                        num_consecutive_getpage_requests = 0;
-                        fail::fail_point!("ps::handle-pagerequest-message::slrusegment");
-                        let span = tracing::info_span!("handle_get_slru_segment_request", kind = %req.kind, segno = %req.segno, req_lsn = %req.request_lsn);
-                        (
+                                .await
+                        ],
+                        span,
+                    )
+                }
+                DebouncedFeMessage::GetSlruSegment(req) => {
+                    fail::fail_point!("ps::handle-pagerequest-message::slrusegment");
+                    let span = tracing::info_span!("handle_get_slru_segment_request", kind = %req.kind, segno = %req.segno, req_lsn = %req.request_lsn);
+                    (
+                        smallvec::smallvec![
                             self.handle_get_slru_segment_request(
                                 tenant_id,
                                 timeline_id,
                                 &req,
-                                &ctx,
+                                &ctx
                             )
                             .instrument(span.clone())
-                            .await,
-                            span,
-                        )
-                    }
-                    DebouncedFeMessage::RespondError(span, e) => {
-                        // We've already decided to respond with an error, so we don't need to
-                        // call the handler.
-                        (Err(e), span)
-                    }
-                };
+                            .await
+                        ],
+                        span,
+                    )
+                }
+                DebouncedFeMessage::RespondError(span, e) => {
+                    // We've already decided to respond with an error, so we don't need to
+                    // call the handler.
+                    (smallvec::smallvec![Err(e)], span)
+                }
+            };
 
-                // Map handler result to protocol behavior.
-                // Some handler errors cause exit from pagestream protocol.
-                // Other handler errors are sent back as an error message and we stay in pagestream protocol.
+            // Map handler result to protocol behavior.
+            // Some handler errors cause exit from pagestream protocol.
+            // Other handler errors are sent back as an error message and we stay in pagestream protocol.
+            for handler_result in handler_results {
                 let response_msg = match handler_result {
                     Err(e) => match &e {
                         PageStreamError::Shutdown => {
@@ -899,21 +887,21 @@ impl PageServerHandler {
 
                 // marshal & transmit response message
                 pgb.write_message_noflush(&BeMessage::CopyData(&response_msg.serialize()))?;
-                tokio::select! {
-                    biased;
-                    _ = self.cancel.cancelled() => {
-                        // We were requested to shut down.
-                        info!("shutdown request received in page handler");
-                        return Err(QueryError::Shutdown)
-                    }
-                    res = pgb.flush() => {
-                        res?;
-                    }
+            }
+            tokio::select! {
+                biased;
+                _ = self.cancel.cancelled() => {
+                    // We were requested to shut down.
+                    info!("shutdown request received in page handler");
+                    return Err(QueryError::Shutdown)
+                }
+                res = pgb.flush() => {
+                    res?;
                 }
             }
 
-            assert!(batch.is_empty());
-            batch.extend(after_batch.into_iter());
+            assert!(batched.is_none(), "we take() earlier");
+            batched = next_batched;
         }
         Ok(())
     }
@@ -1158,25 +1146,29 @@ impl PageServerHandler {
     }
 
     #[instrument(skip_all)]
-    async fn handle_get_page_at_lsn_request(
+    async fn handle_get_page_at_lsn_request_batched(
         &mut self,
         timeline: &Timeline,
-        rel: RelTag,
-        blkno: BlockNumber,
         effective_lsn: Lsn,
+        pages: smallvec::SmallVec<[(RelTag, BlockNumber); 1]>,
         ctx: &RequestContext,
-    ) -> Result<PagestreamBeMessage, PageStreamError> {
+    ) -> smallvec::SmallVec<[Result<PagestreamBeMessage, PageStreamError>; 1]> {
         debug_assert_current_span_has_tenant_and_timeline_id();
-        let _timer = timeline
-            .query_metrics
-            .start_timer(metrics::SmgrQueryType::GetPageAtLsn, ctx);
+        let _timer = timeline.query_metrics.start_timer_many(
+            metrics::SmgrQueryType::GetPageAtLsn,
+            pages.len(),
+            ctx,
+        );
 
-        let page = timeline
-            .get_rel_page_at_lsn(rel, blkno, Version::Lsn(effective_lsn), ctx)
-            .await?;
+        let pages = timeline
+            .get_rel_page_at_lsn_batched(pages, Version::Lsn(effective_lsn), ctx)
+            .await;
 
-        Ok(PagestreamBeMessage::GetPage(PagestreamGetPageResponse {
-            page,
+        smallvec::SmallVec::from_iter(pages.into_iter().map(|page| {
+            page.map(|page| {
+                PagestreamBeMessage::GetPage(models::PagestreamGetPageResponse { page })
+            })
+            .map_err(PageStreamError::Read)
         }))
     }
 
