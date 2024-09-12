@@ -310,8 +310,12 @@ impl PgImportEnv {
         };
 
         let metadata = TimelineMetadata::new(
-            self.pgdata_lsn,
-            None, // prev_record_lsn
+            // FIXME: The 'disk_consistent_lsn' should be the LSN at the *end* of the
+            // checkpoint record, and prev_record_lsn should point to its beginning.
+            // We should read the real end of the record from the WAL, but here we
+            // just fake it.
+            Lsn(self.pgdata_lsn.0 + 8),
+            Some(self.pgdata_lsn),
             None, // no ancestor
             Lsn(0),
             self.pgdata_lsn,  // latest_gc_cutoff_lsn
