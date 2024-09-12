@@ -16,6 +16,14 @@ use crate::{context::{DownloadBehavior, RequestContext}, import_datadir, pgdatad
 use crate::config::PageServerConf;
 use tokio::io::AsyncReadExt;
 
+use crate::tenant::storage_layer::PersistentLayerDesc;
+use utils::generation::Generation;
+use utils::lsn::Lsn;
+use crate::tenant::IndexPart;
+use crate::tenant::metadata::TimelineMetadata;
+use crate::tenant::remote_timeline_client;
+use crate::tenant::remote_timeline_client::LayerFileMetadata;
+use pageserver_api::shard::ShardIndex;
 use pageserver_api::key::Key;
 use utils::bin_ser::BeSer;
 
@@ -24,24 +32,24 @@ pub struct PgImportEnv {
     conf: &'static PageServerConf,
     tli: TimelineId,
     tsi: TenantShardId,
+
+    pgdata_lsn: Lsn,
 }
 
 impl PgImportEnv {
 
-    pub async fn init() -> anyhow::Result<PgImportEnv> {
+    pub async fn init(dstdir: &Utf8Path, tenant_id: TenantId, timeline_id: TimelineId) -> anyhow::Result<PgImportEnv> {
         let ctx: RequestContext = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error);
         let config = toml_edit::Document::new();
         let conf = PageServerConf::parse_and_validate(
             NodeId(42), 
             &config,
-            &Utf8PathBuf::from("layers")
+            dstdir
         )?;
         let conf = Box::leak(Box::new(conf));
 
-        let tni = TenantId::from_str("42424242424242424242424242424242")?;
-        let tli = TimelineId::from_str("42424242424242424242424242424242")?;
         let tsi = TenantShardId {
-            tenant_id: tni,
+            tenant_id,
             shard_number: ShardNumber(0),
             shard_count: ShardCount(0),
         };
@@ -49,16 +57,20 @@ impl PgImportEnv {
         Ok(PgImportEnv {
             ctx,
             conf, 
-            tli,
+            tli: timeline_id,
             tsi,
+            pgdata_lsn: Lsn(0), // Will be filled in later, when the control file is imported
         })
     }
 
-    pub async fn import_datadir(&mut self, pgdata_path: &Utf8PathBuf, _tenant_path: &Utf8Path) -> anyhow::Result<()> {
+    pub async fn import_datadir(&mut self, pgdata_path: &Utf8PathBuf) -> anyhow::Result<()> {
 
         let pgdata_lsn = import_datadir::get_lsn_from_controlfile(&pgdata_path)?.align();
 
-        println!("Importing {pgdata_path} to {_tenant_path} as lsn {pgdata_lsn}...");
+        let timeline_path = self.conf.timeline_path(&self.tsi, &self.tli);
+
+        println!("Importing {pgdata_path} to {timeline_path} as lsn {pgdata_lsn}...");
+        self.pgdata_lsn = pgdata_lsn;
 
         let datadir = PgDataDir::new(pgdata_path);
 
@@ -85,9 +97,12 @@ impl PgImportEnv {
             self.import_db(&mut one_big_layer, &db).await?;
         }
 
-        one_big_layer.finish_layer(&self.ctx).await?;
+        let layerdesc = one_big_layer.finish_layer(&self.ctx).await?;
 
         // should we anything about the wal?
+
+        // Create index_part.json file
+        self.create_index_part(&[layerdesc]).await?;
 
         Ok(())
     }
@@ -168,6 +183,37 @@ impl PgImportEnv {
         Ok(())
     }
 
+    async fn create_index_part(&mut self, layers: &[PersistentLayerDesc]) -> anyhow::Result<()> {
+        let dstdir = &self.conf.workdir;
+
+        let metadata = TimelineMetadata::new(
+            self.pgdata_lsn,
+            None, // prev_record_lsn
+            None, // no ancestor
+            Lsn(0),
+            self.pgdata_lsn,  // latest_gc_cutoff_lsn
+            self.pgdata_lsn,  // initdb_lsn
+            16,  // FIXME: Postgres version. Read from control file
+        );
+        let generation = Generation::none();
+        let mut index_part = IndexPart::empty(metadata);
+
+        for l in layers {
+            let name = l.layer_name();
+            let metadata = LayerFileMetadata::new(l.file_size, generation, ShardIndex::unsharded());
+            if let Some(_) = index_part.layer_metadata.insert(name.clone(), metadata) {
+                bail!("duplicate layer filename {name}");
+            }
+        }
+
+        let data = index_part.to_s3_bytes()?;
+        let path = remote_timeline_client::remote_index_path(&self.tsi, &self.tli, generation);
+        let path = dstdir.join(path.get_path());
+        std::fs::write(&path, data)
+            .context("could not write {path}")?;
+
+        Ok(())
+    }
 }
 
 //
