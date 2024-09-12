@@ -1720,6 +1720,7 @@ impl Tenant {
                         ancestor_start_lsn,
                         create_guard,
                         ctx,
+                        pg_version,
                     )
                     .await?
                 } else {
@@ -1729,6 +1730,7 @@ impl Tenant {
                         ancestor_start_lsn,
                         create_guard,
                         ctx,
+                        ancestor_timeline.pg_version,
                     )
                     .await?
 
@@ -3246,8 +3248,9 @@ impl Tenant {
         start_lsn: Option<Lsn>,
         timeline_create_guard: TimelineCreateGuard<'_>,
         ctx: &RequestContext,
+        pg_version: u32,
     ) -> Result<Arc<Timeline>, CreateTimelineError> {
-        self.branch_timeline_impl(src_timeline, dst_id, start_lsn, timeline_create_guard, ctx)
+        self.branch_timeline_impl(src_timeline, dst_id, start_lsn, timeline_create_guard, ctx, pg_version)
             .await
     }
 
@@ -3257,7 +3260,8 @@ impl Tenant {
         dst_id: TimelineId,
         start_lsn: Option<Lsn>,
         timeline_create_guard: TimelineCreateGuard<'_>,
-        _ctx: &RequestContext,
+        ctx: &RequestContext,
+        pg_version: u32,
     ) -> Result<Arc<Timeline>, CreateTimelineError> {
         let src_id = src_timeline.timeline_id;
 
@@ -3333,7 +3337,7 @@ impl Tenant {
             start_lsn,
             *src_timeline.latest_gc_cutoff_lsn.read(), // FIXME: should we hold onto this guard longer?
             src_timeline.initdb_lsn,
-            src_timeline.pg_version,
+            pg_version,
         );
 
         let uninitialized_timeline = self
@@ -3346,6 +3350,93 @@ impl Tenant {
                 src_timeline.last_aux_file_policy.load(),
             )
             .await?;
+
+
+        if pg_version != src_timeline.pg_version {
+            info!(
+                "branching timeline {dst_id} from timeline {src_id} with different pg_version: {pg_version}",
+            );
+
+            let timeline_id = dst_id;
+
+            // prepare pgdata for the new timeline
+            let timelines_path = self.conf.timelines_path(&self.tenant_shard_id);
+            let pgdata_path = path_with_suffix_extension(
+                timelines_path.join(format!("basebackup-{timeline_id}")),
+                TEMP_FILE_SUFFIX,
+            );
+
+            if pgdata_path.exists() {
+                fs::remove_dir_all(&pgdata_path).with_context(|| {
+                    format!("Failed to remove already existing initdb directory: {pgdata_path}")
+                })?;
+            }
+            // this new directory is very temporary, set to remove it immediately after bootstrap, we don't need it
+            scopeguard::defer! {
+                if let Err(e) = fs::remove_dir_all(&pgdata_path) {
+                    // this is unlikely, but we will remove the directory on pageserver restart or another bootstrap call
+                    error!("Failed to remove temporary initdb directory '{pgdata_path}': {e}");
+                }
+            }
+
+            run_initdb(self.conf, &pgdata_path, pg_version, &self.cancel).await.with_context(|| {
+                format!(
+                    "Failed to initdb {timeline_id} with pg_version {pg_version} at {pgdata_path}"
+                )
+            })?;
+
+            // TODO
+            // do pg_upgrade bits here
+            // Rust is not the most convenient for writing this,
+            // So just call the bash script that relies on the pg_upgrade and neon_local to do all the work.
+            // In the future we can turn it into API call to some service that will do the work
+
+            // 1. start postgres on a parent timeline at the start_lsn, using neon_local (somehow)
+            // 2. run pg_upgrade using old neon_local and new neon_local (?) + new freshly created pgdata
+            // Or maybe use ad-hoc thing?
+            // We need old cluster read-only
+            // And new cluster read-write, but we will export it fully, so we can do whatever we want during upgrade
+
+            let pgdata_lsn = import_datadir::get_lsn_from_controlfile(&pgdata_path)?.align();
+
+            // TODO lsn gap is probably ok here
+            //assert!(pgdata_lsn >= start_lsn + 1);
+    
+            // TODO
+            // We must have start_lsn+1 == pgdata_lsn
+            // Set it somehow
+
+            // TODO why do we need these lines?
+            let tenant_shard_id = uninitialized_timeline.owning_tenant.tenant_shard_id;
+            let unfinished_timeline = uninitialized_timeline.raw_timeline()?;
+    
+            // Flush the new layer files to disk, before we make the timeline as available to
+            // the outside world.
+            //
+            // Flush loop needs to be spawned in order to be able to flush.
+            unfinished_timeline.maybe_spawn_flush_loop();
+    
+            import_datadir::import_timeline_from_postgres_datadir(
+                unfinished_timeline,
+                &pgdata_path,
+                pgdata_lsn,
+                ctx,
+            )
+            .await
+            .with_context(|| {
+                format!("Failed to import pgdatadir for timeline {tenant_shard_id}/{timeline_id}")
+            })?;
+    
+    
+            unfinished_timeline
+                .freeze_and_flush()
+                .await
+                .with_context(|| {
+                    format!(
+                        "Failed to flush after pgdatadir import for timeline {tenant_shard_id}/{timeline_id}"
+                    )
+                })?;
+        }
 
         let new_timeline = uninitialized_timeline.finish_creation()?;
 
@@ -3910,6 +4001,71 @@ async fn run_initdb(
 
     Ok(())
 }
+
+
+/// Run pg_upgrade from the old cluster to the new cluster.
+async fn run_pg_upgrade(
+    conf: &'static PageServerConf,
+    old_pgdata: &Utf8Path,
+    new_pgdata: &Utf8Path,
+    old_pg_version: u32,
+    new_pg_version: u32,
+    cancel: &CancellationToken,
+) -> Result<(), InitdbError> {
+    let pg_upgrade_bin_path = conf
+        .pg_bin_dir(new_pg_version)
+        .map_err(InitdbError::Other)?
+        .join("pg_upgrade");
+
+    let pg_upgrade_lib_dir = conf.pg_lib_dir(new_pg_version).map_err(InitdbError::Other)?;
+
+    info!(
+        "running {} from {} to {} version {} -> {}",
+        pg_upgrade_bin_path, old_pgdata, new_pgdata,
+        old_pg_version, new_pg_version,
+    );
+    let _permit = INIT_DB_SEMAPHORE.acquire().await;
+
+    let pg_upgrade_command = tokio::process::Command::new(&pg_upgrade_bin_path)
+        .args(["-b", "/home/ana/work/neon/pg_install/v15/bin/"])
+        .args(["-B", "/home/ana/work/neon/pg_install/v16/bin/"])
+        .args(["-d", old_pgdata.as_ref()])
+        .args(["-D", new_pgdata.as_ref()])
+        .args(["--username", &conf.superuser])
+        .args(["--neon_start", "cargo neon endpoint start main"])
+        .args(["--neon_stop", "cargo neon endpoint start main"])
+        .env_clear()
+        .env("LD_LIBRARY_PATH", &pg_upgrade_lib_dir)
+        .env("DYLD_LIBRARY_PATH", &pg_upgrade_lib_dir)
+        .stdin(std::process::Stdio::null())
+        // stdout invocation produces the same output every time, we don't need it
+        .stdout(std::process::Stdio::null())
+        // we would be interested in the stderr output, if there was any
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+
+    // Ideally we'd select here with the cancellation token, but the problem is that
+    // we can't safely terminate initdb: it launches processes of its own, and killing
+    // initdb doesn't kill them. After we return from this function, we want the target
+    // directory to be able to be cleaned up.
+    // See https://github.com/neondatabase/neon/issues/6385
+    let pg_upgrade_output = pg_upgrade_command.wait_with_output().await?;
+    if !pg_upgrade_output.status.success() {
+        return Err(InitdbError::Failed(
+            pg_upgrade_output.status,
+            pg_upgrade_output.stderr,
+        ));
+    }
+
+    // This isn't true cancellation support, see above. Still return an error to
+    // excercise the cancellation code path.
+    if cancel.is_cancelled() {
+        return Err(InitdbError::Cancelled);
+    }
+
+    Ok(())
+}
+
 
 /// Dump contents of a layer file to stdout.
 pub async fn dump_layerfile_from_path(

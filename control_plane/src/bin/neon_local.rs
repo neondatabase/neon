@@ -652,6 +652,11 @@ async fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::Local
                 .ok_or_else(|| {
                     anyhow!("Found no timeline id for branch name '{ancestor_branch_name}'")
                 })?;
+            
+            let pg_version = branch_match
+            .get_one::<u32>("pg-version")
+            .copied()
+            .context("Failed to parse postgres version from the argument string")?;
 
             let start_lsn = branch_match
                 .get_one::<String>("ancestor-start-lsn")
@@ -665,7 +670,7 @@ async fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::Local
                 ancestor_timeline_id: Some(ancestor_timeline_id),
                 existing_initdb_timeline_id: None,
                 ancestor_start_lsn: start_lsn,
-                pg_version: None,
+                pg_version: Some(pg_version),
             };
             let timeline_info = storage_controller
                 .tenant_timeline_create(tenant_id, create_req)
@@ -1583,6 +1588,7 @@ fn cli() -> Command {
             .subcommand(Command::new("branch")
                 .about("Create a new timeline, using another timeline as a base, copying its data")
                 .arg(tenant_id_arg.clone())
+                .arg(pg_version_arg.clone())
                 .arg(branch_name_arg.clone())
                 .arg(Arg::new("ancestor-branch-name").long("ancestor-branch-name")
                     .help("Use last Lsn of another timeline (and its data) as base when creating the new timeline. The timeline gets resolved by its branch name.").required(false))
