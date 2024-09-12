@@ -599,7 +599,7 @@ COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
 ENV PATH="/usr/local/pgsql/bin/:$PATH"
 RUN wget https://github.com/skyzh/pg_sudo/archive/refs/heads/main.tar.gz -O pg_sudo.tar.gz && \
-    mkdir pg_sudo-src && cd pg_sudo-src && tar xzf ../pg_sudo.tar.gz --strip-components=1 -C . && \
+    mkdir pg_sudo-src && cd skyzh/anon-patch-src && tar xzf ../pg_sudo.tar.gz --strip-components=1 -C . && \
     make -j $(getconf _NPROCESSORS_ONLN) && \
     make -j $(getconf _NPROCESSORS_ONLN) install && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/pg_neon_sudo.control
@@ -639,7 +639,7 @@ FROM build-deps AS pg-anon-pg-build
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
 ENV PATH="/usr/local/pgsql/bin/:$PATH"
-RUN wget  https://github.com/skyzh/postgresql_anonymizer/archive/refs/heads/master.tar.gz -O pg_anon.tar.gz && \
+RUN wget  https://github.com/yliang412/postgresql_anonymizer/archive/refs/heads/master.tar.gz -O pg_anon.tar.gz && \
     mkdir pg_anon-src && cd pg_anon-src && tar xzf ../pg_anon.tar.gz --strip-components=1 -C . && \
     find /usr/local/pgsql -type f | sed 's|^/usr/local/pgsql/||' > /before.txt &&\
     make -j $(getconf _NPROCESSORS_ONLN) install PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
