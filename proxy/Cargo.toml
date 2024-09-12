@@ -112,6 +112,8 @@ ecdsa = "0.16"
 p256 = "0.13"
 rsa = "0.9"
 
+quinn = { version = "0.11", features = [] }
+
 workspace_hack.workspace = true
 
 [dev-dependencies]
