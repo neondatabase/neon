@@ -13,7 +13,7 @@ use utils::{id::{NodeId, TenantId, TimelineId}, shard::{ShardCount, ShardNumber,
 use walkdir::WalkDir;
 
 use crate::{context::{DownloadBehavior, RequestContext}, pgdatadir_mapping::{DbDirectory, RelDirectory}, task_mgr::TaskKind, tenant::storage_layer::ImageLayerWriter};
-use crate::pgdatadir_mapping::SlruSegmentDirectory;
+use crate::pgdatadir_mapping::{SlruSegmentDirectory, TwoPhaseDirectory};
 use crate::config::PageServerConf;
 use tokio::io::AsyncReadExt;
 
@@ -27,7 +27,7 @@ use crate::tenant::remote_timeline_client::LayerFileMetadata;
 use pageserver_api::shard::ShardIndex;
 use pageserver_api::key::Key;
 use pageserver_api::reltag::SlruKind;
-use pageserver_api::key::{slru_block_to_key, slru_dir_to_key, slru_segment_size_to_key};
+use pageserver_api::key::{slru_block_to_key, slru_dir_to_key, slru_segment_size_to_key, TWOPHASEDIR_KEY};
 use utils::bin_ser::BeSer;
 
 use std::collections::HashSet;
@@ -105,6 +105,13 @@ impl PgImportEnv {
         self.import_slru(&mut one_big_layer, SlruKind::MultiXactMembers, &pgdata_path.join("pg_multixact/members")).await?;
         // pg_multixact/offsets (01:02 keyspace)
         self.import_slru(&mut one_big_layer, SlruKind::MultiXactOffsets, &pgdata_path.join("pg_multixact/offsets")).await?;
+
+        // Import pg_twophase.
+        // TODO: as empty
+        let twophasedir_buf = TwoPhaseDirectory::ser(
+            &TwoPhaseDirectory { xids: HashSet::new() }
+        )?;
+        one_big_layer.put_image(TWOPHASEDIR_KEY, Bytes::from(twophasedir_buf), &self.ctx).await?;
 
         let layerdesc = one_big_layer.finish_raw(&self.ctx).await?;
 
