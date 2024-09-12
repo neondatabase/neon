@@ -1,0 +1,23 @@
+// https://containers.dev/implementors/json_reference/
+{
+  "name": "Neon",
+  "build": {
+    "context": "..",
+    "dockerfile": "Dockerfile.devcontainer"
+  },
+
+  "postCreateCommand": {
+    "build neon": "BUILD_TYPE=debug CARGO_BUILD_FLAGS='--features=testing' mold -run make -s -j`nproc`",
+    "install python deps": "./scripts/pysync"
+  },
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "charliermarsh.ruff",
+        "github.vscode-github-actions",
+        "rust-lang.rust-analyzer"
+      ]
+    }
+  }
+}
