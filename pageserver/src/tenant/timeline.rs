@@ -526,6 +526,9 @@ pub(crate) enum PageReconstructError {
 
     #[error("{0}")]
     MissingKey(MissingKeyError),
+
+    #[error("vectored get error: {0}")]
+    VectoredGetGlobalError(VectoredGetGlobalError),
 }
 
 impl From<anyhow::Error> for PageReconstructError {
@@ -604,7 +607,11 @@ impl PageReconstructError {
         use PageReconstructError::*;
         match self {
             Cancelled => true,
-            Other(_) | AncestorLsnTimeout(_) | WalRedo(_) | MissingKey(_) => false,
+            Other(_)
+            | AncestorLsnTimeout(_)
+            | WalRedo(_)
+            | MissingKey(_)
+            | VectoredGetGlobalError(_) => false,
         }
     }
 }
@@ -814,6 +821,22 @@ impl From<GetVectoredError> for PageReconstructError {
             GetVectoredError::MissingKey(err) => PageReconstructError::MissingKey(err),
             GetVectoredError::GetReadyAncestorError(err) => PageReconstructError::from(err),
             GetVectoredError::Other(err) => PageReconstructError::Other(err),
+        }
+    }
+}
+
+#[derive(thiserror::Error, Debug)]
+#[error("{0}")]
+pub(crate) struct VectoredGetGlobalError(&'static str);
+impl<'a> From<&'a GetVectoredError> for VectoredGetGlobalError {
+    fn from(e: &'a GetVectoredError) -> Self {
+        match e {
+            GetVectoredError::Oversized(_) => VectoredGetGlobalError("oversized"),
+            GetVectoredError::InvalidLsn(_) => VectoredGetGlobalError("invalid LSN"),
+            GetVectoredError::MissingKey(_) => VectoredGetGlobalError("missing key"),
+            GetVectoredError::GetReadyAncestorError(_) => VectoredGetGlobalError("ancestor LSN"),
+            GetVectoredError::Cancelled => VectoredGetGlobalError("cancelled"),
+            GetVectoredError::Other(_) => VectoredGetGlobalError("other"),
         }
     }
 }

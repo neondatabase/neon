@@ -183,6 +183,9 @@ impl From<PageReconstructError> for ApiError {
             PageReconstructError::Cancelled => ApiError::Cancelled,
             PageReconstructError::AncestorLsnTimeout(e) => ApiError::Timeout(format!("{e}").into()),
             PageReconstructError::WalRedo(pre) => ApiError::InternalServerError(pre),
+            PageReconstructError::VectoredGetGlobalError(e) => {
+                ApiError::InternalServerError(anyhow::anyhow!(e))
+            }
         }
     }
 }

@@ -1814,6 +1814,7 @@ impl<'a> DatadirModification<'a> {
                         n_files = dir.files.len();
                         aux_files.dir = Some(dir);
                     }
+                    Err(PageReconstructError::VectoredGetGlobalError(_)) => todo!(),
                     Err(
                         e @ (PageReconstructError::Cancelled
                         | PageReconstructError::AncestorLsnTimeout(_)),
