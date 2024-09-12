@@ -68,7 +68,9 @@ use crate::{
     tenant::{
         layer_map::{LayerMap, SearchResult},
         metadata::TimelineMetadata,
-        storage_layer::{inmemory_layer::IndexEntry, PersistentLayerDesc},
+        storage_layer::{
+            inmemory_layer::IndexEntry, LayerId, PersistentLayerDesc, ValueReconstructSituation,
+        },
     },
     walredo,
 };
@@ -1125,6 +1127,14 @@ impl Timeline {
         self.get_vectored_reconstruct_data(keyspace.clone(), lsn, reconstruct_state, ctx)
             .await?;
         get_data_timer.stop_and_record();
+
+        // transform reconstruct state which is per key into a map
+        // layer => all reads from that layer
+        struct KeyWaiter {
+            img: Option<oneshot::Receiver<Bytes>>,
+            values: Vec<oneshot::Receiver<Bytes>>,
+        }
+        let mut key_waiters: BTreeMap<Key, Result<KeyWaiter, PageReconstructError>> = todo!();
 
         let reconstruct_timer = crate::metrics::RECONSTRUCT_TIME
             .for_get_kind(get_kind)

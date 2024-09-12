@@ -18,6 +18,7 @@
 use std::collections::BTreeMap;
 
 use bytes::BytesMut;
+use futures::channel::oneshot;
 use pageserver_api::key::Key;
 use tokio::io::AsyncWriteExt;
 use tokio_epoll_uring::BoundedBuf;
@@ -665,6 +666,7 @@ impl StreamingVectoredReadPlanner {
         start_offset: u64,
         end_offset: u64,
         is_last_blob_in_read: bool,
+        // destination: oneshot::Sender<Result<Bytes, std::io::Error>>,
     ) -> Option<VectoredRead> {
         match &mut self.read_builder {
             Some(read_builder) => {
