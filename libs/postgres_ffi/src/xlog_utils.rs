@@ -26,6 +26,7 @@ use bytes::{Buf, Bytes};
 use log::*;
 
 use serde::Serialize;
+use std::ffi::OsStr;
 use std::fs::File;
 use std::io::prelude::*;
 use std::io::ErrorKind;
@@ -78,19 +79,34 @@ pub fn XLogFileName(tli: TimeLineID, logSegNo: XLogSegNo, wal_segsz_bytes: usize
     )
 }
 
-pub fn XLogFromFileName(fname: &str, wal_seg_size: usize) -> (XLogSegNo, TimeLineID) {
-    let tli = u32::from_str_radix(&fname[0..8], 16).unwrap();
-    let log = u32::from_str_radix(&fname[8..16], 16).unwrap() as XLogSegNo;
-    let seg = u32::from_str_radix(&fname[16..24], 16).unwrap() as XLogSegNo;
-    (log * XLogSegmentsPerXLogId(wal_seg_size) + seg, tli)
+pub fn XLogFromFileName(
+    fname: &OsStr,
+    wal_seg_size: usize,
+) -> anyhow::Result<(XLogSegNo, TimeLineID)> {
+    if let Some(fname_str) = fname.to_str() {
+        let tli = u32::from_str_radix(&fname_str[0..8], 16)?;
+        let log = u32::from_str_radix(&fname_str[8..16], 16)? as XLogSegNo;
+        let seg = u32::from_str_radix(&fname_str[16..24], 16)? as XLogSegNo;
+        Ok((log * XLogSegmentsPerXLogId(wal_seg_size) + seg, tli))
+    } else {
+        anyhow::bail!("non-ut8 filename: {:?}", fname);
+    }
 }
 
-pub fn IsXLogFileName(fname: &str) -> bool {
-    return fname.len() == XLOG_FNAME_LEN && fname.chars().all(|c| c.is_ascii_hexdigit());
+pub fn IsXLogFileName(fname: &OsStr) -> bool {
+    if let Some(fname) = fname.to_str() {
+        fname.len() == XLOG_FNAME_LEN && fname.chars().all(|c| c.is_ascii_hexdigit())
+    } else {
+        false
+    }
 }
 
-pub fn IsPartialXLogFileName(fname: &str) -> bool {
-    fname.ends_with(".partial") && IsXLogFileName(&fname[0..fname.len() - 8])
+pub fn IsPartialXLogFileName(fname: &OsStr) -> bool {
+    if let Some(fname) = fname.to_str() {
+        fname.ends_with(".partial") && IsXLogFileName(OsStr::new(&fname[0..fname.len() - 8]))
+    } else {
+        false
+    }
 }
 
 /// If LSN points to the beginning of the page, then shift it to first record,

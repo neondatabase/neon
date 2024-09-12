@@ -7,6 +7,7 @@ use postgres_ffi::{WAL_SEGMENT_SIZE, XLOG_BLCKSZ};
 use postgres_ffi::{
     XLOG_SIZE_OF_XLOG_LONG_PHD, XLOG_SIZE_OF_XLOG_RECORD, XLOG_SIZE_OF_XLOG_SHORT_PHD,
 };
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -135,8 +136,8 @@ impl Conf {
 
     pub fn pg_waldump(
         &self,
-        first_segment_name: &str,
-        last_segment_name: &str,
+        first_segment_name: &OsStr,
+        last_segment_name: &OsStr,
     ) -> anyhow::Result<std::process::Output> {
         let first_segment_file = self.datadir.join(first_segment_name);
         let last_segment_file = self.datadir.join(last_segment_name);
