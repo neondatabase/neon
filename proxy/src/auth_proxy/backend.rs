@@ -86,7 +86,7 @@ impl std::fmt::Display for Backend<'_, ()> {
 impl<T> Backend<'_, T> {
     /// Very similar to [`std::option::Option::as_ref`].
     /// This helps us pass structured config to async tasks.
-    pub(crate) fn as_ref(&self) -> Backend<'_, &T> {
+    pub fn as_ref(&self) -> Backend<'_, &T> {
         match self {
             Self::Console(c, x) => Backend::Console(MaybeOwned::Borrowed(c), x),
         }
@@ -97,7 +97,7 @@ impl<'a, T> Backend<'a, T> {
     /// Very similar to [`std::option::Option::map`].
     /// Maps [`Backend<T>`] to [`Backend<R>`] by applying
     /// a function to a contained value.
-    pub(crate) fn map<R>(self, f: impl FnOnce(T) -> R) -> Backend<'a, R> {
+    pub fn map<R>(self, f: impl FnOnce(T) -> R) -> Backend<'a, R> {
         match self {
             Self::Console(c, x) => Backend::Console(c, f(x)),
         }
@@ -202,13 +202,13 @@ async fn authenticate_with_secret(
 
 impl<'a> Backend<'a, ComputeUserInfoMaybeEndpoint> {
     /// Get username from the credentials.
-    pub(crate) fn get_user(&self) -> &str {
+    pub fn get_user(&self) -> &str {
         match self {
             Self::Console(_, user_info) => &user_info.user,
         }
     }
 
-    pub(crate) async fn authenticate(
+    pub async fn authenticate(
         self,
         client: &mut AuthProxyStream,
         config: &'static AuthenticationConfig,

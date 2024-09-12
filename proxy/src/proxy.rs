@@ -377,10 +377,10 @@ async fn prepare_client_connection<P>(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub(crate) struct NeonOptions(Vec<(SmolStr, SmolStr)>);
+pub struct NeonOptions(Vec<(SmolStr, SmolStr)>);
 
 impl NeonOptions {
-    pub(crate) fn parse_params(params: &StartupMessageParams) -> Self {
+    pub fn parse_params(params: &StartupMessageParams) -> Self {
         params
             .options_raw()
             .map(Self::parse_from_iter)

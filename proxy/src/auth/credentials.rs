@@ -16,7 +16,7 @@ use thiserror::Error;
 use tracing::{info, warn};
 
 #[derive(Debug, Error, PartialEq, Eq, Clone)]
-pub(crate) enum ComputeUserInfoParseError {
+pub enum ComputeUserInfoParseError {
     #[error("Parameter '{0}' is missing in startup packet.")]
     MissingKey(&'static str),
 
@@ -51,10 +51,10 @@ impl ReportableError for ComputeUserInfoParseError {
 /// Various client credentials which we use for authentication.
 /// Note that we don't store any kind of client key or password here.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ComputeUserInfoMaybeEndpoint {
-    pub(crate) user: RoleName,
-    pub(crate) endpoint_id: Option<EndpointId>,
-    pub(crate) options: NeonOptions,
+pub struct ComputeUserInfoMaybeEndpoint {
+    pub user: RoleName,
+    pub endpoint_id: Option<EndpointId>,
+    pub options: NeonOptions,
 }
 
 impl ComputeUserInfoMaybeEndpoint {
@@ -83,7 +83,7 @@ pub(crate) fn endpoint_sni(
 }
 
 impl ComputeUserInfoMaybeEndpoint {
-    pub(crate) fn parse(
+    pub fn parse(
         ctx: &RequestMonitoring,
         params: &StartupMessageParams,
         sni: Option<&str>,

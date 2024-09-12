@@ -4,9 +4,9 @@ pub mod backend;
 pub use backend::Backend;
 
 mod credentials;
+pub use credentials::ComputeUserInfoMaybeEndpoint;
 pub(crate) use credentials::{
-    check_peer_addr_is_in_list, endpoint_sni, ComputeUserInfoMaybeEndpoint,
-    ComputeUserInfoParseError, IpPattern,
+    check_peer_addr_is_in_list, endpoint_sni, ComputeUserInfoParseError, IpPattern,
 };
 
 mod password_hack;
@@ -77,7 +77,7 @@ pub(crate) enum AuthErrorImpl {
 
 #[derive(Debug, Error)]
 #[error(transparent)]
-pub(crate) struct AuthError(Box<AuthErrorImpl>);
+pub struct AuthError(Box<AuthErrorImpl>);
 
 impl AuthError {
     pub(crate) fn bad_auth_method(name: impl Into<Box<str>>) -> Self {

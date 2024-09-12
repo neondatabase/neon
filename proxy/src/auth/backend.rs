@@ -138,7 +138,7 @@ impl<'a, T, D, E> Backend<'a, Result<T, E>, D> {
     }
 }
 
-pub(crate) struct ComputeCredentials {
+pub struct ComputeCredentials {
     pub(crate) info: ComputeUserInfo,
     pub(crate) keys: ComputeCredentialKeys,
 }
