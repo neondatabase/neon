@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fs::metadata, path::Path, str::FromStr};
+use std::fs::metadata;
 
 use anyhow::{bail, ensure, Context};
 use bytes::Bytes;
@@ -6,13 +6,13 @@ use camino::{Utf8Path, Utf8PathBuf};
 
 use itertools::Itertools;
 use pageserver_api::{key::{rel_block_to_key, rel_dir_to_key, relmap_file_key, DBDIR_KEY}, reltag::RelTag};
-use postgres_ffi::{pg_constants, relfile_utils::parse_relfilename, ControlFileData, DBState_DB_SHUTDOWNED, Oid, BLCKSZ};
+use postgres_ffi::{pg_constants, relfile_utils::parse_relfilename, ControlFileData, BLCKSZ};
 use tokio::io::AsyncRead;
-use tracing::{debug, trace, warn};
+use tracing::{debug};
 use utils::{id::{NodeId, TenantId, TimelineId}, shard::{ShardCount, ShardNumber, TenantShardId}};
 use walkdir::WalkDir;
 
-use crate::{context::{DownloadBehavior, RequestContext}, import_datadir, pgdatadir_mapping::{DbDirectory, RelDirectory}, task_mgr::TaskKind, tenant::storage_layer::ImageLayerWriter};
+use crate::{context::{DownloadBehavior, RequestContext}, pgdatadir_mapping::{DbDirectory, RelDirectory}, task_mgr::TaskKind, tenant::storage_layer::ImageLayerWriter};
 use crate::config::PageServerConf;
 use tokio::io::AsyncReadExt;
 
@@ -257,7 +257,6 @@ impl PgImportEnv {
 //
 
 struct PgDataDir {
-    pub path: Utf8PathBuf,
     pub dbs: Vec<PgDataDirDb> // spcnode, dboid, path
 }
 
@@ -308,7 +307,6 @@ impl PgDataDir {
         databases.sort_by_key(|db| (db.spcnode, db.dboid));
 
         Self {
-            path: datadir_path.clone(),
             dbs: databases
         }
     }
