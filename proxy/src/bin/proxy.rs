@@ -225,9 +225,9 @@ struct ProxyCliArgs {
     #[clap(long, default_value = config::RetryConfig::WAKE_COMPUTE_DEFAULT_VALUES)]
     wake_compute_retry: String,
 
-    /// Configure if this is a private access proxy for the POC: In that case the proxy will ignore the IP allowlist 
+    /// Configure if this is a private access proxy for the POC: In that case the proxy will ignore the IP allowlist
     #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
-    is_private_access_proxy: bool,    
+    is_private_access_proxy: bool,
 }
 
 #[derive(clap::Args, Clone, Copy, Debug)]
@@ -687,7 +687,6 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         rate_limiter: AuthRateLimiter::new(args.auth_rate_limit.clone()),
         rate_limit_ip_subnet: args.auth_rate_limit_ip_subnet,
         ip_allowlist_check_enabled: !args.is_private_access_proxy,
-
     };
 
     let config = Box::leak(Box::new(ProxyConfig {
