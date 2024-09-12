@@ -448,9 +448,7 @@ impl PostgresRedoManager {
         }
     }
 
-    ///
-    /// Process a batch of WAL records using bespoken Neon code.
-    ///
+    /// Process a batch of WAL records using bespoke Neon code.
     fn apply_batch_neon(
         &self,
         key: Key,
@@ -471,7 +469,7 @@ impl PostgresRedoManager {
 
         // Apply all the WAL records in the batch
         for (record_lsn, record) in records.iter() {
-            self.apply_record_neon(key, &mut page, *record_lsn, record)?;
+            apply_neon::apply_in_neon(record, *record_lsn, key, &mut page)?;
         }
         // Success!
         let duration = start_time.elapsed();
@@ -487,18 +485,6 @@ impl PostgresRedoManager {
         );
 
         Ok(page.freeze())
-    }
-
-    fn apply_record_neon(
-        &self,
-        key: Key,
-        page: &mut BytesMut,
-        record_lsn: Lsn,
-        record: &NeonWalRecord,
-    ) -> anyhow::Result<()> {
-        apply_neon::apply_in_neon(record, record_lsn, key, page)?;
-
-        Ok(())
     }
 }
 
