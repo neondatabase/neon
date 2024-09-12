@@ -64,9 +64,9 @@ impl PgImportEnv {
     }
 
     pub async fn import_datadir(&mut self, pgdata_path: &Utf8PathBuf) -> anyhow::Result<()> {
-
-        let pgdata_lsn = import_datadir::get_lsn_from_controlfile(&pgdata_path)?.align();
-
+        // Read control file
+        let control_file = self.import_controlfile(pgdata_path).await?;
+        let pgdata_lsn = Lsn(control_file.checkPoint).align();
         let timeline_path = self.conf.timeline_path(&self.tsi, &self.tli);
 
         println!("Importing {pgdata_path} to {timeline_path} as lsn {pgdata_lsn}...");
@@ -97,7 +97,7 @@ impl PgImportEnv {
         // should we anything about the wal?
 
         // Create index_part.json file
-        self.create_index_part(&[layerdesc]).await?;
+        self.create_index_part(&[layerdesc], &control_file).await?;
 
         Ok(())
     }
@@ -140,6 +140,13 @@ impl PgImportEnv {
         }
 
         Ok(())
+    }
+
+    async fn import_controlfile(&mut self, pgdata_path: &Utf8Path) -> anyhow::Result<ControlFileData> {
+        let controlfile_path = pgdata_path.join("global").join("pg_control");
+        let controlfile_buf = std::fs::read(&controlfile_path)
+            .with_context(|| format!("reading controlfile: {controlfile_path}"))?;
+        ControlFileData::decode(&controlfile_buf)
     }
 
     async fn import_db(
@@ -204,8 +211,16 @@ impl PgImportEnv {
         Ok(())
     }
 
-    async fn create_index_part(&mut self, layers: &[PersistentLayerDesc]) -> anyhow::Result<()> {
+    async fn create_index_part(&mut self, layers: &[PersistentLayerDesc], control_file: &ControlFileData) -> anyhow::Result<()> {
         let dstdir = &self.conf.workdir;
+
+        let pg_version = match control_file.catalog_version_no {
+            // thesea are from catversion.h
+            202107181 => 14,
+            202209061 => 15,
+            202307071 => 16,
+            catversion => { bail!("unrecognized catalog version {catversion}")},
+        };
 
         let metadata = TimelineMetadata::new(
             self.pgdata_lsn,
@@ -214,7 +229,7 @@ impl PgImportEnv {
             Lsn(0),
             self.pgdata_lsn,  // latest_gc_cutoff_lsn
             self.pgdata_lsn,  // initdb_lsn
-            16,  // FIXME: Postgres version. Read from control file
+            pg_version,
         );
         let generation = Generation::none();
         let mut index_part = IndexPart::empty(metadata);
