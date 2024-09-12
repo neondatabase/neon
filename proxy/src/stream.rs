@@ -306,18 +306,6 @@ pub(crate) trait AuthProxyStreamExt {
     /// Write the message into an internal buffer and flush it.
     async fn write_message(&mut self, message: &BeMessage<'_>) -> io::Result<&mut Self>;
 
-    // /// Flush the output buffer into the underlying stream.
-    // async fn flush(&mut self) -> io::Result<&mut Self>;
-
-    /// Write the error message using [`Self::write_message`], then re-throw it.
-    /// Allowing string literals is safe under the assumption they might not contain any runtime info.
-    /// This method exists due to `&str` not implementing `Into<anyhow::Error>`.
-    async fn throw_error_str<T>(
-        &mut self,
-        msg: &'static str,
-        error_kind: ErrorKind,
-    ) -> Result<T, ReportedError>;
-
     /// Write the error message using [`Self::write_message`], then re-throw it.
     /// Trait [`UserFacingError`] acts as an allowlist for error types.
     async fn throw_error<T, E>(&mut self, error: E) -> Result<T, ReportedError>
@@ -348,32 +336,6 @@ impl AuthProxyStreamExt for AuthProxyStream {
             .await
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
         Ok(self)
-    }
-
-    /// Write the error message using [`Self::write_message`], then re-throw it.
-    /// Allowing string literals is safe under the assumption they might not contain any runtime info.
-    /// This method exists due to `&str` not implementing `Into<anyhow::Error>`.
-    async fn throw_error_str<T>(
-        &mut self,
-        msg: &'static str,
-        error_kind: ErrorKind,
-    ) -> Result<T, ReportedError> {
-        tracing::info!(
-            kind = error_kind.to_metric_label(),
-            msg,
-            "forwarding error to user"
-        );
-
-        // already error case, ignore client IO error
-        self.write_message(&BeMessage::ErrorResponse(msg, None))
-            .await
-            .inspect_err(|e| debug!("write_message failed: {e}"))
-            .ok();
-
-        Err(ReportedError {
-            source: anyhow::anyhow!(msg),
-            error_kind,
-        })
     }
 
     /// Write the error message using [`Self::write_message`], then re-throw it.

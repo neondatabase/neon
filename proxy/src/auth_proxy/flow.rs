@@ -11,8 +11,8 @@ use crate::{
     stream::AuthProxyStreamExt,
 };
 use pq_proto::{BeAuthenticationSaslMessage, BeMessage, BeMessage as Be};
+use std::io;
 use tokio::task_local;
-use std::{io, sync::Arc};
 use tracing::info;
 
 /// Every authentication selector is supposed to implement this trait.
@@ -46,21 +46,6 @@ impl AuthMethod for Scram<'_> {
 pub(crate) struct PasswordHack;
 
 impl AuthMethod for PasswordHack {
-    #[inline(always)]
-    fn first_message(&self, _channel_binding: bool) -> BeMessage<'_> {
-        Be::AuthenticationCleartextPassword
-    }
-}
-
-/// Use clear-text password auth called `password` in docs
-/// <https://www.postgresql.org/docs/current/auth-password.html>
-pub(crate) struct CleartextPassword {
-    pub(crate) pool: Arc<ThreadPool>,
-    pub(crate) endpoint: EndpointIdInt,
-    pub(crate) secret: AuthSecret,
-}
-
-impl AuthMethod for CleartextPassword {
     #[inline(always)]
     fn first_message(&self, _channel_binding: bool) -> BeMessage<'_> {
         Be::AuthenticationCleartextPassword
@@ -124,30 +109,6 @@ impl AuthFlow<'_, PasswordHack> {
             .ok_or(AuthErrorImpl::MissingEndpointName)?;
 
         Ok(payload)
-    }
-}
-
-impl AuthFlow<'_, CleartextPassword> {
-    /// Perform user authentication. Raise an error in case authentication failed.
-    pub(crate) async fn authenticate(self) -> auth::Result<sasl::Outcome<ComputeCredentialKeys>> {
-        let msg = self.stream.read_password_message().await?;
-        let password = msg
-            .strip_suffix(&[0])
-            .ok_or(AuthErrorImpl::MalformedPassword("missing terminator"))?;
-
-        let outcome = validate_password_and_exchange(
-            &self.state.pool,
-            self.state.endpoint,
-            password,
-            self.state.secret,
-        )
-        .await?;
-
-        if let sasl::Outcome::Success(_) = &outcome {
-            self.stream.write_message_noflush(&Be::AuthenticationOk)?;
-        }
-
-        Ok(outcome)
     }
 }
 

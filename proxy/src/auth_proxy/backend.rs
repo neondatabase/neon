@@ -8,8 +8,7 @@ use crate::auth::backend::{
 };
 use crate::auth::{self, ComputeUserInfoMaybeEndpoint};
 use crate::auth_proxy::validate_password_and_exchange;
-use crate::console::errors::GetAuthInfoError;
-use crate::console::provider::{CachedRoleSecret, ConsoleBackend};
+use crate::console::provider::ConsoleBackend;
 use crate::console::AuthSecret;
 use crate::context::RequestMonitoring;
 use crate::intern::EndpointIdInt;
@@ -18,11 +17,7 @@ use crate::scram;
 use crate::stream::AuthProxyStreamExt;
 use crate::{
     config::AuthenticationConfig,
-    console::{
-        self,
-        provider::{CachedAllowedIps, CachedNodeInfo},
-        Api,
-    },
+    console::{self, provider::CachedNodeInfo, Api},
 };
 
 use super::AuthProxyStream;
@@ -55,14 +50,6 @@ impl<T> std::ops::Deref for MaybeOwned<'_, T> {
 pub enum Backend<'a, T> {
     /// Cloud API (V2).
     Console(MaybeOwned<'a, ConsoleBackend>, T),
-}
-
-#[cfg(test)]
-pub(crate) trait TestBackend: Send + Sync + 'static {
-    fn wake_compute(&self) -> Result<CachedNodeInfo, console::errors::WakeComputeError>;
-    fn get_allowed_ips_and_secret(
-        &self,
-    ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), console::errors::GetAuthInfoError>;
 }
 
 impl std::fmt::Display for Backend<'_, ()> {
@@ -100,15 +87,6 @@ impl<'a, T> Backend<'a, T> {
     pub fn map<R>(self, f: impl FnOnce(T) -> R) -> Backend<'a, R> {
         match self {
             Self::Console(c, x) => Backend::Console(c, f(x)),
-        }
-    }
-}
-impl<'a, T, E> Backend<'a, Result<T, E>> {
-    /// Very similar to [`std::option::Option::transpose`].
-    /// This is most useful for error handling.
-    pub(crate) fn transpose(self) -> Result<Backend<'a, T>, E> {
-        match self {
-            Self::Console(c, x) => x.map(|x| Backend::Console(c, x)),
         }
     }
 }
@@ -228,26 +206,6 @@ impl<'a> Backend<'a, ComputeUserInfoMaybeEndpoint> {
 
         info!("user successfully authenticated");
         Ok(res)
-    }
-}
-
-impl Backend<'_, ComputeUserInfo> {
-    pub(crate) async fn get_role_secret(
-        &self,
-        ctx: &RequestMonitoring,
-    ) -> Result<CachedRoleSecret, GetAuthInfoError> {
-        match self {
-            Self::Console(api, user_info) => api.get_role_secret(ctx, user_info).await,
-        }
-    }
-
-    pub(crate) async fn get_allowed_ips_and_secret(
-        &self,
-        ctx: &RequestMonitoring,
-    ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), GetAuthInfoError> {
-        match self {
-            Self::Console(api, user_info) => api.get_allowed_ips_and_secret(ctx, user_info).await,
-        }
     }
 }
 
