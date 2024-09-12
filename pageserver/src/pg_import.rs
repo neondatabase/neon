@@ -18,16 +18,6 @@ use tokio::io::AsyncReadExt;
 
 use pageserver_api::key::Key;
 
-
-pub async fn do_import() -> anyhow::Result<()> {
-
-    let mut import = PgImportEnv::init().await?;
-
-    import.import_datadir(&Utf8PathBuf::from("pg_in"), &Utf8PathBuf::from("pg_out")).await?;
-
-    Ok(())
-}
-
 pub struct PgImportEnv {
     ctx: RequestContext,
     conf: &'static PageServerConf,
@@ -37,7 +27,7 @@ pub struct PgImportEnv {
 
 impl PgImportEnv {
 
-    async fn init() -> anyhow::Result<PgImportEnv> {
+    pub async fn init() -> anyhow::Result<PgImportEnv> {
         let ctx: RequestContext = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error);
         let config = toml_edit::Document::new();
         let conf = PageServerConf::parse_and_validate(
@@ -63,7 +53,7 @@ impl PgImportEnv {
         })
     }
 
-    async fn import_datadir(&mut self, pgdata_path: &Utf8Path, _tenant_path: &Utf8Path) -> anyhow::Result<()> {
+    pub async fn import_datadir(&mut self, pgdata_path: &Utf8Path, _tenant_path: &Utf8Path) -> anyhow::Result<()> {
 
         let pgdata_lsn = import_datadir::get_lsn_from_controlfile(&pgdata_path)?.align();
 
@@ -90,11 +80,11 @@ impl PgImportEnv {
             .sorted()
             .for_each(|dboid| {
                 let path = pgdata_path.join("base").join(dboid.to_string());
-                self.import_db(&mut one_big_layer, &path, pg_constants::DEFAULTTABLESPACE_OID);
+                self.import_db(&mut one_big_layer, &path, pg_constants::DEFAULTTABLESPACE_OID).await;
             });
 
         // global catalogs now
-        self.import_db(&mut one_big_layer, &pgdata_path.join("global"), postgres_ffi::pg_constants::GLOBALTABLESPACE_OID);
+        self.import_db(&mut one_big_layer, &pgdata_path.join("global"), postgres_ffi::pg_constants::GLOBALTABLESPACE_OID).await?;
 
         
         one_big_layer.finish_layer(&self.ctx).await?;
@@ -136,7 +126,7 @@ impl PgImportEnv {
     ) -> anyhow::Result<()> {
 
         let mut reader = tokio::fs::File::open(path).await?;
-        let len = metadata(path)?.len();
+        let len = std::fs::metadata(path)?.len();
 
         let mut buf: [u8; 8192] = [0u8; 8192];
 
@@ -168,7 +158,7 @@ impl PgImportEnv {
                         break;
                     }
                     _ => {
-                        bail!("error reading file {}: {:#}", path.display(), err);
+                        bail!("error reading file {}: {:#}", path.as_display(), err);
                     }
                 },
             };
