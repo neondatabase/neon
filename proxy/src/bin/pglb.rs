@@ -1,34 +1,38 @@
 use std::{
-    collections::HashMap,
     net::SocketAddr,
     sync::{Arc, Mutex},
     time::Duration,
 };
 
 use anyhow::Context;
+use indexmap::IndexMap;
 use quinn::{Connection, Endpoint};
 use tokio::time::timeout;
 
-struct ConnState {
-    conns: Mutex<HashMap<usize, Conn>>,
+type AuthConnId = usize;
+struct AuthConnState {
+    conns: Mutex<IndexMap<AuthConnId, AuthConn>>,
 }
 
-struct Conn {
+struct AuthConn {
     conn: Connection,
     // latency info...
 }
 
 #[tokio::main]
 async fn main() {
-    let endpoint: Endpoint = endpoint_config("0.0.0.0:5634".parse().unwrap())
+    let auth_endpoint: Endpoint = endpoint_config("0.0.0.0:5634".parse().unwrap())
         .await
         .unwrap();
 
-    let connections = Arc::new(ConnState {
-        conns: Mutex::new(HashMap::new()),
+    let auth_connections = Arc::new(AuthConnState {
+        conns: Mutex::new(IndexMap::new()),
     });
 
-    let quinn_handle = tokio::spawn(quinn_server(endpoint.clone(), connections.clone()));
+    let quinn_handle = tokio::spawn(quinn_server(
+        auth_endpoint.clone(),
+        auth_connections.clone(),
+    ));
 
     // tcp listener goes here
 
@@ -55,7 +59,7 @@ async fn endpoint_config(addr: SocketAddr) -> anyhow::Result<Endpoint> {
     Endpoint::server(config, addr).context("endpoint")
 }
 
-async fn quinn_server(ep: Endpoint, state: Arc<ConnState>) {
+async fn quinn_server(ep: Endpoint, state: Arc<AuthConnState>) {
     loop {
         let incoming = ep.accept().await.expect("quinn server should not crash");
         let state = state.clone();
@@ -69,7 +73,7 @@ async fn quinn_server(ep: Endpoint, state: Arc<ConnState>) {
                 .conns
                 .lock()
                 .unwrap()
-                .insert(conn_id, Conn { conn: conn.clone() });
+                .insert(conn_id, AuthConn { conn: conn.clone() });
 
             loop {
                 match timeout(Duration::from_secs(1), conn.accept_uni()).await {
