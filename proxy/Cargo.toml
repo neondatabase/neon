@@ -113,6 +113,7 @@ p256 = "0.13"
 rsa = "0.9"
 
 quinn = { version = "0.11", features = [] }
+rcgen.workspace = true
 
 workspace_hack.workspace = true
 
@@ -121,7 +122,6 @@ camino-tempfile.workspace = true
 fallible-iterator.workspace = true
 tokio-tungstenite.workspace = true
 pbkdf2 = { workspace = true, features = ["simple", "std"] }
-rcgen.workspace = true
 rstest.workspace = true
 tokio-postgres-rustls.workspace = true
 walkdir.workspace = true
