@@ -614,7 +614,7 @@ impl ImageLayerInner {
             let read_ctx = ctx.attached_child();
             tokio::task::spawn(async move {
                 let buf = BytesMut::with_capacity(buf_size);
-                let vectored_blob_reader = VectoredBlobReader::new(&*read_from);
+                let vectored_blob_reader = VectoredBlobReader::new(&read_from);
                 let res = vectored_blob_reader.read_blobs(&read, buf, &read_ctx).await;
 
                 match res {
@@ -624,7 +624,10 @@ impl ImageLayerInner {
                             let sender = senders
                                 .remove(&(meta.meta.key, meta.meta.lsn))
                                 .expect("sender must exist");
-                            let _ = sender.send(Ok(Bytes::copy_from_slice(buf)));
+                            // TODO: this is silly - sort it out
+                            let bytes = Value::ser(&Value::Image(Bytes::copy_from_slice(buf)))
+                                .expect("stupid but correct");
+                            let _ = sender.send(Ok(bytes.into()));
                         }
 
                         assert!(senders.is_empty());
