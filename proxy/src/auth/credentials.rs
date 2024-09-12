@@ -464,16 +464,16 @@ mod tests {
     #[test]
     fn test_check_peer_addr_is_in_list() {
         fn check(v: serde_json::Value) -> bool {
-            let peer_addr = IpAddr::from([127, 0, 0, 1]);
+            let peer_addr = IpAddr::from([192, 1, 1, 1]);
             let ip_list: Vec<IpPattern> = serde_json::from_value(v).unwrap();
             check_peer_addr_is_in_list(&peer_addr, &ip_list)
         }
 
         assert!(check(json!([])));
-        assert!(check(json!(["127.0.0.1"])));
+        assert!(check(json!(["192.1.1.1"])));
         assert!(!check(json!(["8.8.8.8"])));
         // If there is an incorrect address, it will be skipped.
-        assert!(check(json!(["88.8.8", "127.0.0.1"])));
+        assert!(check(json!(["88.8.8", "192.1.1.1"])));
     }
     #[test]
     fn test_parse_ip_v4() -> anyhow::Result<()> {
@@ -542,5 +542,19 @@ mod tests {
             &IpPattern::Range(peer_addr, peer_addr_prev)
         ));
         Ok(())
+    }
+
+    #[test]
+    fn test_localhost_rejected() {
+        fn check(v: serde_json::Value) -> bool {
+            let peer_addr = IpAddr::from([127, 0, 0, 1]);
+            let ip_list: Vec<IpPattern> = serde_json::from_value(v).unwrap();
+            check_peer_addr_is_in_list(&peer_addr, &ip_list)
+        }
+
+        // Localhost is not allowed no matter what.
+        assert!(!check(json!([])));
+        assert!(!check(json!(["192.1.1.1"])));
+        assert!(!check(json!(["127.0.0.1"])));
     }
 }
