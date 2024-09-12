@@ -4057,23 +4057,24 @@ async fn run_pg_upgrade(
     // and neon_local
 
     // We test with neon_local, so let's hardcode it for now
-    let old_pgdata = "/home/ana/work/neon/.neon/endpoints/main/pgdata";
+    let base_dir = "/home/ana/work/neon";
+    let old_pgdata = format!("{}/.neon/endpoints/main/pgdata", base_dir);
 
     let pg_upgrade_command = tokio::process::Command::new(&pg_upgrade_bin_path)
-        .current_dir("/home/ana/work/neon/")
-        .args(["-b", "/home/ana/work/neon/pg_install/v15/bin/"])
-        .args(["-B", "/home/ana/work/neon/pg_install/v16/bin/"])
+        .current_dir(base_dir)
+        .args(["-b", format!("{}pg_install/v15/bin/", base_dir).as_str()])
+        .args(["-B", format!("{}pg_install/v16/bin/", base_dir).as_str()])
         .args(["-d", old_pgdata.as_ref()])
         .args(["-D", new_pgdata.as_ref()])
         .args(["--username", &conf.superuser])
         .args(["--socketdir", "/tmp"])
         .args([
             "--neon_start",
-            "/home/ana/.cargo/bin/cargo neon endpoint start main",
+            format!("{}target/debug/neon_local endpoint start main", base_dir).as_str(),
         ])
         .args([
             "--neon_stop",
-            "/home/ana/.cargo/bin/cargo neon endpoint stop main",
+            format!("{}target/debug/neon_local endpoint stop main", base_dir).as_str(),
         ])
         .env_clear()
         .env("LD_LIBRARY_PATH", &pg_upgrade_lib_dir)
