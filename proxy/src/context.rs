@@ -127,7 +127,7 @@ impl RequestMonitoring {
 
     #[cfg(test)]
     pub(crate) fn test() -> Self {
-        RequestMonitoring::new(Uuid::now_v7(), [192, 1, 1, 1].into(), Protocol::Tcp, "test")
+        RequestMonitoring::new(Uuid::now_v7(), [127, 0, 0, 1].into(), Protocol::Tcp, "test")
     }
 
     pub(crate) fn console_application_name(&self) -> String {
