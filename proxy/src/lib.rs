@@ -283,6 +283,7 @@ impl EndpointId {
     }
 }
 
+#[derive(Debug)]
 pub struct PglbCodec;
 
 impl tokio_util::codec::Encoder<PglbMessage> for PglbCodec {
@@ -404,7 +405,7 @@ pub enum PglbControlMessage {
     ComputeEstablish,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct ConnectionInitiatedPayload {
     pub tls_server_end_point: TlsServerEndPoint,
     pub server_name: Option<String>,
