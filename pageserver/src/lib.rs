@@ -32,6 +32,7 @@ pub mod virtual_file;
 pub mod walingest;
 pub mod walrecord;
 pub mod walredo;
+pub mod pg_import;
 
 use camino::Utf8Path;
 use deletion_queue::DeletionQueue;

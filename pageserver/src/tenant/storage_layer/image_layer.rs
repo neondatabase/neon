@@ -796,12 +796,11 @@ impl ImageLayerWriterInner {
     ///
     /// Finish writing the image layer.
     ///
-    async fn finish(
+    async fn finish_layer(
         self,
-        timeline: &Arc<Timeline>,
         ctx: &RequestContext,
         end_key: Option<Key>,
-    ) -> anyhow::Result<ResidentLayer> {
+    ) -> anyhow::Result<PersistentLayerDesc> {
         let index_start_blk =
             ((self.blob_writer.size() + PAGE_SZ as u64 - 1) / PAGE_SZ as u64) as u32;
 
@@ -877,8 +876,22 @@ impl ImageLayerWriterInner {
         // fsync the file
         file.sync_all().await?;
 
+        Ok(desc)
+    }
+
+    async fn finish(
+        self,
+        timeline: &Arc<Timeline>,
+        ctx: &RequestContext,
+        end_key: Option<Key>,
+    ) -> anyhow::Result<ResidentLayer> {
+        let path = self.path.clone();
+        let conf = self.conf;
+
+        let desc = self.finish_layer(ctx, end_key).await?;
+
         // FIXME: why not carry the virtualfile here, it supports renaming?
-        let layer = Layer::finish_creating(self.conf, timeline, desc, &self.path)?;
+        let layer = Layer::finish_creating(conf, timeline, desc, &path)?;
 
         info!("created image layer {}", layer.local_path());
 
@@ -965,6 +978,13 @@ impl ImageLayerWriter {
         ctx: &RequestContext,
     ) -> anyhow::Result<super::ResidentLayer> {
         self.inner.take().unwrap().finish(timeline, ctx, None).await
+    }
+
+    pub(crate) async fn finish_layer(
+        mut self,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<super::PersistentLayerDesc> {
+        self.inner.take().unwrap().finish_layer(ctx, None).await
     }
 
     /// Finish writing the image layer with an end key, used in [`super::split_writer::SplitImageLayerWriter`]. The end key determines the end of the image layer's covered range and is exclusive.
