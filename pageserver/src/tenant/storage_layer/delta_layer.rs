@@ -996,7 +996,7 @@ impl DeltaLayerInner {
                 (Key, Lsn),
                 sync::oneshot::Sender<Result<Bytes, std::io::Error>>,
             > = Default::default();
-            for (_, blob_meta) in read.blobs_at.as_slice() {
+            for (_, blob_meta) in read.blobs_at.as_slice().iter().rev() {
                 let (tx, rx) = sync::oneshot::channel();
                 senders.insert((blob_meta.key, blob_meta.lsn), tx);
                 reconstruct_state.update_key(
