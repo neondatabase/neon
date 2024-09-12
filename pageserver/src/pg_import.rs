@@ -27,7 +27,7 @@ use crate::tenant::remote_timeline_client::LayerFileMetadata;
 use pageserver_api::shard::ShardIndex;
 use pageserver_api::key::Key;
 use pageserver_api::reltag::SlruKind;
-use pageserver_api::key::{slru_block_to_key, slru_dir_to_key, slru_segment_size_to_key, TWOPHASEDIR_KEY};
+use pageserver_api::key::{slru_block_to_key, slru_dir_to_key, slru_segment_size_to_key, TWOPHASEDIR_KEY, CONTROLFILE_KEY, CHECKPOINT_KEY};
 use utils::bin_ser::BeSer;
 
 use std::collections::HashSet;
@@ -70,7 +70,11 @@ impl PgImportEnv {
 
     pub async fn import_datadir(&mut self, pgdata_path: &Utf8PathBuf) -> anyhow::Result<()> {
         // Read control file
-        let control_file = self.import_controlfile(pgdata_path).await?;
+        let controlfile_path = pgdata_path.join("global").join("pg_control");
+        let controlfile_buf = std::fs::read(&controlfile_path)
+            .with_context(|| format!("reading controlfile: {controlfile_path}"))?;
+        let control_file = ControlFileData::decode(&controlfile_buf)?;
+
         let pgdata_lsn = Lsn(control_file.checkPoint).align();
         let timeline_path = self.conf.timeline_path(&self.tsi, &self.tli);
 
@@ -113,6 +117,12 @@ impl PgImportEnv {
         )?;
         one_big_layer.put_image(TWOPHASEDIR_KEY, Bytes::from(twophasedir_buf), &self.ctx).await?;
 
+        // Controlfile, checkpoint
+        one_big_layer.put_image(CONTROLFILE_KEY, Bytes::from(controlfile_buf), &self.ctx).await?;
+
+        let checkpoint_buf = control_file.checkPointCopy.encode()?;
+        one_big_layer.put_image(CHECKPOINT_KEY, checkpoint_buf, &self.ctx).await?;
+
         let layerdesc = one_big_layer.finish_raw(&self.ctx).await?;
 
         // should we anything about the wal?
@@ -135,13 +145,6 @@ impl PgImportEnv {
         })?;
         layer_writer.put_image(DBDIR_KEY, dbdir_buf.into(), &self.ctx).await?;
         Ok(())
-    }
-
-    async fn import_controlfile(&mut self, pgdata_path: &Utf8Path) -> anyhow::Result<ControlFileData> {
-        let controlfile_path = pgdata_path.join("global").join("pg_control");
-        let controlfile_buf = std::fs::read(&controlfile_path)
-            .with_context(|| format!("reading controlfile: {controlfile_path}"))?;
-        ControlFileData::decode(&controlfile_buf)
     }
 
     async fn import_db(
