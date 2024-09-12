@@ -84,10 +84,10 @@ impl PgImportEnv {
             &self.ctx,
         ).await?;
 
-        // 1. DbDir; relmap files; reldir
-        self.import_dirs(&mut one_big_layer, &datadir).await?;
+        // Import dbdir (00:00:00 keyspace)
+        self.import_dbdir(&mut one_big_layer, &datadir).await?;
 
-        // 4. Import data
+        // Import databases (00:spcnode:dbnode keyspace for each db)
         for db in datadir.dbs {
             self.import_db(&mut one_big_layer, &db).await?;
         }
@@ -102,43 +102,17 @@ impl PgImportEnv {
         Ok(())
     }
 
-    // Write necessary metadata about databases/relations. We store them as serialized hashmaps.
-    //
-    // 1. DbDir: (spcnode, dbnode) -> bool (do relmapper and PG_VERSION files exist)
-    // 2. Relmap file: (spcnode, dbnode) -> contents of `pg_filenode.map` file
-    // 3. Collection of RelDirs: HashSet of (relfilenode, forknum) for each (spcnode, dbnode)
-    async fn import_dirs(
+    // DbDir: (spcnode, dbnode) -> bool (do relmapper and PG_VERSION files exist)
+    async fn import_dbdir(
         &mut self,
         layer_writer: &mut ImageLayerWriter,
         datadir: &PgDataDir,
     ) -> anyhow::Result<()> {
-
-        // 1. dbdir
+        debug!("Constructing dbdir entry, key {DBDIR_KEY}");
         let dbdir_buf = DbDirectory::ser(&DbDirectory {
             dbdirs: datadir.dbs.iter().map(|db| ((db.spcnode, db.dboid), true)).collect(),
         })?;
         layer_writer.put_image(DBDIR_KEY, dbdir_buf.into(), &self.ctx).await?;
-
-        // 2. relmap files for each db
-        for db in &datadir.dbs {
-            let mut relmap_file = tokio::fs::File::open(&db.path.join("pg_filenode.map")).await?;
-            let relmap_buf = read_all_bytes(&mut relmap_file).await?;
-            layer_writer.put_image(relmap_file_key(db.spcnode, db.dboid), relmap_buf, &self.ctx).await?;
-        }
-
-        // 3. reldirs for each db
-        for db in &datadir.dbs {
-            let reldir_buf = RelDirectory::ser(&RelDirectory {
-                rels: db.files.iter().map(|f| (f.rel_tag.relnode, f.rel_tag.forknum)).collect(),
-            })?;
-
-            layer_writer.put_image(
-                rel_dir_to_key(db.spcnode, db.dboid),
-                Bytes::from(reldir_buf),
-                &self.ctx,
-            ).await?;
-        }
-
         Ok(())
     }
 
@@ -159,9 +133,27 @@ impl PgImportEnv {
             db.path, db.spcnode, db.dboid
         );
 
+        // Import relmap (00:spcnode:dbnode:00:*:00)
+        let relmap_key = relmap_file_key(db.spcnode, db.dboid);
+        debug!("Constructing relmap entry, key {relmap_key}");
+        let mut relmap_file = tokio::fs::File::open(&db.path.join("pg_filenode.map")).await?;
+        let relmap_buf = read_all_bytes(&mut relmap_file).await?;
+        layer_writer.put_image(relmap_key, relmap_buf, &self.ctx).await?;
+
+        // Import reldir (00:spcnode:dbnode:00:*:01)
+        let reldir_key = rel_dir_to_key(db.spcnode, db.dboid);
+        debug!("Constructing reldirs entry, key {reldir_key}");
+        let reldir_buf = RelDirectory::ser(&RelDirectory {
+            rels: db.files.iter().map(|f| (f.rel_tag.relnode, f.rel_tag.forknum)).collect(),
+        })?;
+        layer_writer.put_image(reldir_key, reldir_buf.into(), &self.ctx).await?;
+
+        // Import data (00:spcnode:dbnode:reloid:fork:blk)
         for file in &db.files {
             self.import_rel_file(layer_writer, &file.path, &file.rel_tag, file.segno).await?;
         };
+
+        // Import relsize (00:spcnode:dbnode:reloid:fork:ff)
 
         Ok(())
     }
