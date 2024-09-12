@@ -1,4 +1,4 @@
-use std::fs::metadata;
+use std::{fs::metadata, time::Instant};
 
 use anyhow::{bail, ensure, Context};
 use bytes::Bytes;
@@ -163,7 +163,9 @@ impl PgImportEnv {
         segment: &PgDataDirDbFile,
     ) -> anyhow::Result<()> {
         let (path, rel_tag, segno) = (&segment.path, segment.rel_tag, segment.segno);
+
         debug!("Importing relation file (path={path}, rel_tag={rel_tag}, segno={segno})");
+        let start = Instant::now();
 
         let mut reader = tokio::fs::File::open(&path).await?;
         let len = metadata(&path)?.len() as usize;
@@ -197,6 +199,8 @@ impl PgImportEnv {
             };
             blknum += 1;
         }
+
+        debug!("Importing relation file (path={path}, rel_tag={rel_tag}, segno={segno}): done in {:.6} s", start.elapsed().as_secs_f64());
 
         // Set relsize for the last segment (00:spcnode:dbnode:reloid:fork:ff)
         if let Some(nblocks) = segment.nblocks {
