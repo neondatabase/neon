@@ -71,3 +71,11 @@ def test_pg_import(test_output_dir, pg_bin, vanilla_pg, neon_env_builder):
     cur = conn.cursor()
 
     assert endpoint.safe_psql("select count(*) from t") == [(300000,)]
+
+    # test writing after the import
+    endpoint.safe_psql("insert into t select g from generate_series(1, 1000) g")
+    assert endpoint.safe_psql("select count(*) from t") == [(301000,)]
+
+    endpoint.stop()
+    endpoint.start()
+    assert endpoint.safe_psql("select count(*) from t") == [(301000,)]
