@@ -13,6 +13,7 @@ use utils::{id::{NodeId, TenantId, TimelineId}, shard::{ShardCount, ShardNumber,
 use walkdir::WalkDir;
 
 use crate::{context::{DownloadBehavior, RequestContext}, pgdatadir_mapping::{DbDirectory, RelDirectory}, task_mgr::TaskKind, tenant::storage_layer::ImageLayerWriter};
+use crate::pgdatadir_mapping::SlruSegmentDirectory;
 use crate::config::PageServerConf;
 use tokio::io::AsyncReadExt;
 
@@ -25,7 +26,11 @@ use crate::tenant::remote_timeline_client;
 use crate::tenant::remote_timeline_client::LayerFileMetadata;
 use pageserver_api::shard::ShardIndex;
 use pageserver_api::key::Key;
+use pageserver_api::reltag::SlruKind;
+use pageserver_api::key::{slru_block_to_key, slru_dir_to_key, slru_segment_size_to_key};
 use utils::bin_ser::BeSer;
+
+use std::collections::HashSet;
 
 pub struct PgImportEnv {
     ctx: RequestContext,
@@ -91,6 +96,15 @@ impl PgImportEnv {
         for db in datadir.dbs {
             self.import_db(&mut one_big_layer, &db).await?;
         }
+
+        // Import SLRUs
+
+        // pg_xact (01:00 keyspace)
+        self.import_slru(&mut one_big_layer, SlruKind::Clog, &pgdata_path.join("pg_xact")).await?;
+        // pg_multixact/members (01:01 keyspace)
+        self.import_slru(&mut one_big_layer, SlruKind::MultiXactMembers, &pgdata_path.join("pg_multixact/members")).await?;
+        // pg_multixact/offsets (01:02 keyspace)
+        self.import_slru(&mut one_big_layer, SlruKind::MultiXactOffsets, &pgdata_path.join("pg_multixact/offsets")).await?;
 
         let layerdesc = one_big_layer.finish_raw(&self.ctx).await?;
 
@@ -206,6 +220,67 @@ impl PgImportEnv {
             layer_writer.put_image(size_key, Bytes::from(buf.to_vec()), &self.ctx).await?;
         }
 
+        Ok(())
+    }
+
+    async fn import_slru(
+        &mut self,
+        layer_writer: &mut ImageLayerWriter,
+        kind: SlruKind,
+        path: &Utf8PathBuf,
+    ) -> anyhow::Result<()> {
+        let segments: Vec<(String, u32)> = WalkDir::new(path)
+            .max_depth(1)
+            .into_iter()
+            .filter_map(|entry| {
+                let entry = entry.ok()?;
+                let filename = entry.file_name();
+                let filename = filename.to_string_lossy();
+                let segno = u32::from_str_radix(&filename, 16).ok()?;
+                Some((filename.to_string(), segno))
+            }).collect();
+
+        // Write SlruDir
+        let slrudir_key = slru_dir_to_key(kind);
+        let segnos: HashSet<u32> = segments.iter().map(|(_path, segno)| { *segno }).collect();
+        let slrudir = SlruSegmentDirectory {
+            segments: segnos,
+        };
+        let slrudir_buf = SlruSegmentDirectory::ser(&slrudir)?;
+        layer_writer.put_image(slrudir_key, slrudir_buf.into(), &self.ctx).await?;
+
+        for (segpath, segno) in segments {
+            // SlruSegBlocks for each segment
+            let p = path.join(Utf8PathBuf::from(segpath));
+            let mut reader = tokio::fs::File::open(&p).await
+                .context(format!("opening {}", &p))?;
+
+            let mut rpageno = 0;
+            loop {
+                let mut buf: Vec<u8> = Vec::new();
+                buf.resize(8192, 0);
+                let r = reader.read_exact(&mut buf).await;
+                match r {
+                    Ok(_) => {},
+                    Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => {
+                        // reached EOF. That's expected
+                        break;
+                    }
+                    Err(err) => {
+                        bail!("error reading file {}: {:#}", &p, err);
+                    }
+                };
+                let slruseg_key = slru_block_to_key(kind, segno, rpageno);
+                layer_writer.put_image(slruseg_key, Bytes::from(buf), &self.ctx).await?;
+                rpageno += 1;
+            }
+            let npages: u32 = rpageno;
+
+            // Followed by SlruSegSize
+            let segsize_key = slru_segment_size_to_key(kind, segno);
+            let segsize_buf = npages.to_le_bytes();
+            layer_writer.put_image(segsize_key, Bytes::copy_from_slice(&segsize_buf), &self.ctx).await?;
+        }
         Ok(())
     }
 
