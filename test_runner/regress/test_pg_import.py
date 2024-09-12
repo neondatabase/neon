@@ -58,3 +58,16 @@ def test_pg_import(test_output_dir, pg_bin, vanilla_pg, neon_env_builder):
     cli.run_import(vanilla_pg.pgdatadir, dst_path, tenant_id=tenant_id, timeline_id=timeline_id)
 
     # TODO: tell pageserver / storage controller that the tenant/timeline now exists
+    env.pageserver.tenant_attach(
+        tenant_id,
+        generation=100,
+        override_storage_controller_generation=True,
+    )
+
+    env.neon_cli.map_branch("imported", tenant_id, timeline_id)
+
+    endpoint = env.endpoints.create_start(branch_name="imported", tenant_id=tenant_id)
+    conn = endpoint.connect()
+    cur = conn.cursor()
+
+    assert endpoint.safe_psql("select count(*) from t") == [(300000,)]
