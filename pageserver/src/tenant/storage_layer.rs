@@ -20,7 +20,7 @@ use pageserver_api::key::Key;
 use pageserver_api::keyspace::{KeySpace, KeySpaceRandomAccum};
 use std::cmp::Ordering;
 use std::collections::hash_map::Entry;
-use std::collections::{BTreeMap, BinaryHeap, HashMap};
+use std::collections::{BinaryHeap, HashMap};
 use std::ops::Range;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
