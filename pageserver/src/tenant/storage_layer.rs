@@ -134,8 +134,8 @@ pub(crate) async fn convert(
         }
     }
 
-    if to.img.is_none() {
-        let (lsn, fut) = from.img.expect("Need an image");
+    if to.img.is_none() && from.img.is_some() {
+        let (lsn, fut) = from.img.expect("Has an image");
         match fut.await {
             Ok(res) => match res {
                 Ok(bytes) => {
