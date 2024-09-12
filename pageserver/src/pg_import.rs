@@ -181,7 +181,12 @@ impl PgImportEnv {
         let mut first = true;
         for chunk in chunks {
             let key_start = last_key_end;
-            let key_end = rel_key_range(chunk.last().unwrap().rel_tag).end;
+            let last_file = chunk.last().unwrap();
+            let key_end = if last_file.nblocks.is_some() {
+                rel_key_range(last_file.rel_tag).end
+            } else {
+                rel_block_to_key(last_file.rel_tag, (last_file.segno + 1) * 1024 * 1024 * 1024 / 8192)
+            };
             let mut layer_writer = ImageLayerWriter::new(
                 &self.conf,
                 self.tli,
