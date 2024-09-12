@@ -3378,12 +3378,12 @@ impl Tenant {
                 })?;
             }
             // this new directory is very temporary, set to remove it immediately after bootstrap, we don't need it
-            scopeguard::defer! {
-                if let Err(e) = fs::remove_dir_all(&pgdata_path) {
-                    // this is unlikely, but we will remove the directory on pageserver restart or another bootstrap call
-                    error!("Failed to remove temporary initdb directory '{pgdata_path}': {e}");
-                }
-            }
+            // scopeguard::defer! {
+            //     if let Err(e) = fs::remove_dir_all(&pgdata_path) {
+            //         // this is unlikely, but we will remove the directory on pageserver restart or another bootstrap call
+            //         error!("Failed to remove temporary initdb directory '{pgdata_path}': {e}");
+            //     }
+            // }
 
             run_initdb(self.conf, &pgdata_path, pg_version, &self.cancel)
                 .await
@@ -3419,8 +3419,6 @@ impl Tenant {
             // We need old cluster read-only
             // And new cluster read-write, but we will export it fully, so we can do whatever we want during upgrade
 
-            let pgdata_lsn = import_datadir::get_lsn_from_controlfile(&pgdata_path)?.align();
-
             // TODO Do we need to adjust something else?
             // Or should it be just start_lsn as it is?
             let pgdata_lsn = (start_lsn + 1).align();
@@ -3443,6 +3441,7 @@ impl Tenant {
                 unfinished_timeline,
                 &pgdata_path,
                 pgdata_lsn,
+                true,
                 ctx,
             )
             .await
@@ -3667,6 +3666,7 @@ impl Tenant {
             unfinished_timeline,
             &pgdata_path,
             pgdata_lsn,
+            false,
             ctx,
         )
         .await
@@ -4111,7 +4111,6 @@ async fn run_pg_upgrade(
 
     Ok(())
 }
-
 
 /// Dump contents of a layer file to stdout.
 pub async fn dump_layerfile_from_path(

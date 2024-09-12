@@ -54,6 +54,7 @@ pub async fn import_timeline_from_postgres_datadir(
     tline: &Timeline,
     pgdata_path: &Utf8Path,
     pgdata_lsn: Lsn,
+    change_control_file_lsn: bool,
     ctx: &RequestContext,
 ) -> Result<()> {
     let mut pg_control: Option<ControlFileData> = None;
@@ -76,8 +77,20 @@ pub async fn import_timeline_from_postgres_datadir(
 
             let mut file = tokio::fs::File::open(absolute_path).await?;
             let len = metadata.len() as usize;
-            if let Some(control_file) =
-                import_file(&mut modification, relative_path, &mut file, len, ctx).await?
+            let new_checkpoint_lsn = if change_control_file_lsn {
+                Some(pgdata_lsn)
+            } else {
+                None
+            };
+            if let Some(control_file) = import_file(
+                &mut modification,
+                relative_path,
+                &mut file,
+                len,
+                new_checkpoint_lsn,
+                ctx,
+            )
+            .await?
             {
                 pg_control = Some(control_file);
             }
@@ -94,6 +107,10 @@ pub async fn import_timeline_from_postgres_datadir(
         pg_control.state == DBState_DB_SHUTDOWNED,
         "Postgres cluster was not shut down cleanly"
     );
+    info!("pg_control: {:?}", pg_control);
+    info!("checkpoint: {:?}", pg_control.checkPoint);
+    info!("pgdata_lsn: {:?}", pgdata_lsn.0);
+    info!("checkpoint redo: {:?}", pg_control.checkPointCopy.redo);
     ensure!(
         pg_control.checkPointCopy.redo == pgdata_lsn.0,
         "unexpected checkpoint REDO pointer"
@@ -102,14 +119,16 @@ pub async fn import_timeline_from_postgres_datadir(
     // Import WAL. This is needed even when starting from a shutdown checkpoint, because
     // this reads the checkpoint record itself, advancing the tip of the timeline to
     // *after* the checkpoint record. And crucially, it initializes the 'prev_lsn'.
-    import_wal(
-        &pgdata_path.join("pg_wal"),
-        tline,
-        Lsn(pg_control.checkPointCopy.redo),
-        pgdata_lsn,
-        ctx,
-    )
-    .await?;
+    if !change_control_file_lsn {
+        import_wal(
+            &pgdata_path.join("pg_wal"),
+            tline,
+            Lsn(pg_control.checkPointCopy.redo),
+            pgdata_lsn,
+            ctx,
+        )
+        .await?;
+    }
 
     Ok(())
 }
@@ -367,8 +386,15 @@ pub async fn import_basebackup_from_tar(
 
         match header.entry_type() {
             tokio_tar::EntryType::Regular => {
-                if let Some(res) =
-                    import_file(&mut modification, file_path.as_ref(), &mut entry, len, ctx).await?
+                if let Some(res) = import_file(
+                    &mut modification,
+                    file_path.as_ref(),
+                    &mut entry,
+                    len,
+                    None,
+                    ctx,
+                )
+                .await?
                 {
                     // We found the pg_control file.
                     pg_control = Some(res);
@@ -493,6 +519,7 @@ async fn import_file(
     file_path: &Path,
     reader: &mut (impl AsyncRead + Send + Sync + Unpin),
     len: usize,
+    new_checkpoint_lsn: Option<Lsn>,
     ctx: &RequestContext,
 ) -> Result<Option<ControlFileData>> {
     let file_name = match file_path.file_name() {
@@ -522,7 +549,14 @@ async fn import_file(
                 let bytes = read_all_bytes(reader).await?;
 
                 // Extract the checkpoint record and import it separately.
-                let pg_control = ControlFileData::decode(&bytes[..])?;
+                let mut pg_control = ControlFileData::decode(&bytes[..])?;
+
+                if let Some(checkpoint_lsn) = new_checkpoint_lsn {
+                    // If we're not changing the checkpoint LSN, use the one from the control file.
+                    pg_control.checkPoint = checkpoint_lsn.0;
+                    pg_control.checkPointCopy.redo = checkpoint_lsn.0;
+                };
+
                 let checkpoint_bytes = pg_control.checkPointCopy.encode()?;
                 modification.put_checkpoint(checkpoint_bytes)?;
                 debug!("imported control file");
