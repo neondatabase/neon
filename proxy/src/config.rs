@@ -13,6 +13,7 @@ use rustls::{
     crypto::ring::sign,
     pki_types::{CertificateDer, PrivateKeyDer},
 };
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
@@ -149,7 +150,7 @@ pub fn configure_tls(
 ///   uses multiple hash functions, then this channel binding type's
 ///   channel bindings are undefined at this time (updates to is channel
 ///   binding type may occur to address this issue if it ever arises).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum TlsServerEndPoint {
     Sha256([u8; 32]),
     Undefined,

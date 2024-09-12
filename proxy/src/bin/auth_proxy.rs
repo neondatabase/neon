@@ -1,16 +1,20 @@
 use std::{sync::Arc, time::Duration};
 
+use proxy::PglbCodec;
 use quinn::{
     crypto::rustls::QuicClientConfig, rustls::client::danger, Endpoint, RecvStream, SendStream,
     VarInt,
 };
 use tokio::{
-    io::AsyncWriteExt,
+    io::{join, AsyncWriteExt},
     select,
     signal::unix::{signal, SignalKind},
     time::interval,
 };
-use tokio_util::task::TaskTracker;
+use tokio_util::{
+    codec::{Framed, FramedRead, FramedWrite},
+    task::TaskTracker,
+};
 
 #[tokio::main]
 async fn main() {
@@ -102,4 +106,6 @@ impl danger::ServerCertVerifier for NoVerify {
     }
 }
 
-async fn handle_stream(_send: SendStream, _recv: RecvStream) {}
+async fn handle_stream(send: SendStream, recv: RecvStream) {
+    let _stream = Framed::new(join(recv, send), PglbCodec);
+}
