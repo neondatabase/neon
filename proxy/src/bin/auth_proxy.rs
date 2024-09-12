@@ -1,11 +1,9 @@
 use std::{sync::Arc, time::Duration};
 
 use clap::Parser;
-use futures::TryStreamExt;
-use pq_proto::FeStartupPacket;
 use proxy::{
-    auth::{self, backend::AuthRateLimiter},
-    auth_proxy::{self, backend::MaybeOwned, AuthProxyStream, Backend},
+    auth::backend::AuthRateLimiter,
+    auth_proxy::{backend::MaybeOwned, Backend},
     config::{self, AuthenticationConfig, CacheOptions, ProjectInfoCacheOptions},
     console::{
         caches::ApiCaches,
@@ -14,23 +12,18 @@ use proxy::{
     },
     http,
     metrics::Metrics,
-    proxy::NeonOptions,
+    proxy::{handle_stream, AuthProxyConfig},
     rate_limiter::{RateBucketInfo, WakeComputeRateLimiter},
     scram::threadpool::ThreadPool,
-    stream::AuthProxyStreamExt,
-    PglbCodec, PglbControlMessage, PglbMessage,
 };
-use quinn::{
-    crypto::rustls::QuicClientConfig, rustls::client::danger, Endpoint, RecvStream, SendStream,
-    VarInt,
-};
+use quinn::{crypto::rustls::QuicClientConfig, rustls::client::danger, Endpoint, VarInt};
 use tokio::{
-    io::{join, AsyncWriteExt},
+    io::AsyncWriteExt,
     select,
     signal::unix::{signal, SignalKind},
     time::interval,
 };
-use tokio_util::{codec::Framed, task::TaskTracker};
+use tokio_util::task::TaskTracker;
 
 /// Neon proxy/router
 #[derive(Parser)]
@@ -177,7 +170,7 @@ async fn main() {
         rate_limit_ip_subnet: args.auth_rate_limit_ip_subnet,
     };
 
-    let config = Box::leak(Box::new(Config { backend, auth }));
+    let config = Box::leak(Box::new(AuthProxyConfig { backend, auth }));
 
     loop {
         select! {
@@ -206,11 +199,6 @@ async fn main() {
     tasks.close();
     tasks.wait().await;
     conn.close(VarInt::from_u32(1), b"graceful shutdown");
-}
-
-struct Config {
-    backend: Backend<'static, ()>,
-    auth: AuthenticationConfig,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -249,37 +237,4 @@ impl danger::ServerCertVerifier for NoVerify {
     fn supported_verify_schemes(&self) -> Vec<quinn::rustls::SignatureScheme> {
         vec![quinn::rustls::SignatureScheme::ECDSA_NISTP256_SHA256]
     }
-}
-
-async fn handle_stream(config: &'static Config, send: SendStream, recv: RecvStream) {
-    let mut stream: AuthProxyStream = Framed::new(join(recv, send), PglbCodec);
-
-    let first_msg = stream.try_next().await.unwrap();
-    let Some(PglbMessage::Control(PglbControlMessage::ConnectionInitiated(first_msg))) = first_msg
-    else {
-        panic!("invalid first msg")
-    };
-
-    let startup = stream.read_startup_packet().await.unwrap();
-    let FeStartupPacket::StartupMessage { version, params } = startup else {
-        panic!("invalid startup message")
-    };
-
-    // Extract credentials which we're going to use for auth.
-    let user_info = auth::ComputeUserInfoMaybeEndpoint {
-        user: params.get("user").unwrap().into(),
-        endpoint_id: first_msg
-            .server_name
-            .as_deref()
-            .map(|h| h.split_once('.').map_or(h, |(ep, _)| ep).into()),
-        options: NeonOptions::parse_params(&params),
-    };
-
-    let user_info = config.backend.as_ref().map(|()| user_info);
-    let user_info = match user_info.authenticate(&mut stream, &config.auth).await {
-        Ok(auth_result) => auth_result,
-        Err(e) => {
-            return stream.throw_error(e).await.unwrap();
-        }
-    };
 }

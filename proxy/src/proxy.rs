@@ -7,9 +7,20 @@ pub(crate) mod handshake;
 pub(crate) mod passthrough;
 pub(crate) mod retry;
 pub(crate) mod wake_compute;
+use connect_compute::ComputeConnectBackend;
 pub use copy_bidirectional::copy_bidirectional_client_compute;
 pub use copy_bidirectional::ErrorSource;
+use futures::TryStreamExt;
+use pq_proto::FeStartupPacket;
+use quinn::RecvStream;
+use quinn::SendStream;
+use tokio::io::join;
+use tokio_util::codec::Framed;
 
+use crate::auth_proxy::AuthProxyStream;
+use crate::stream::AuthProxyStreamExt;
+use crate::PglbControlMessage;
+use crate::PglbMessage;
 use crate::{
     auth,
     cancellation::{self, CancellationHandlerMain, CancellationHandlerMainInternal},
@@ -430,4 +441,47 @@ pub(crate) fn neon_option(bytes: &str) -> Option<(&str, &str)> {
     let cap = re.captures(bytes)?;
     let (_, [k, v]) = cap.extract();
     Some((k, v))
+}
+
+pub struct AuthProxyConfig {
+    pub backend: crate::auth_proxy::Backend<'static, ()>,
+    pub auth: crate::config::AuthenticationConfig,
+}
+
+pub async fn handle_stream(config: &'static AuthProxyConfig, send: SendStream, recv: RecvStream) {
+    let mut stream: AuthProxyStream = Framed::new(join(recv, send), crate::PglbCodec);
+
+    let first_msg = stream.try_next().await.unwrap();
+    let Some(PglbMessage::Control(PglbControlMessage::ConnectionInitiated(first_msg))) = first_msg
+    else {
+        panic!("invalid first msg")
+    };
+
+    let startup = stream.read_startup_packet().await.unwrap();
+    let FeStartupPacket::StartupMessage { version: _, params } = startup else {
+        panic!("invalid startup message")
+    };
+
+    // Extract credentials which we're going to use for auth.
+    let user_info = auth::ComputeUserInfoMaybeEndpoint {
+        user: params.get("user").unwrap().into(),
+        endpoint_id: first_msg
+            .server_name
+            .as_deref()
+            .map(|h| h.split_once('.').map_or(h, |(ep, _)| ep).into()),
+        options: NeonOptions::parse_params(&params),
+    };
+
+    let user_info = config.backend.as_ref().map(|()| user_info);
+    let user_info = match user_info.authenticate(&mut stream, &config.auth).await {
+        Ok(auth_result) => auth_result,
+        Err(e) => {
+            return stream.throw_error(e).await.unwrap();
+        }
+    };
+
+    user_info
+        .wake_compute(&RequestMonitoring::test())
+        .await
+        .unwrap();
 }

@@ -299,7 +299,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for Stream<S> {
 }
 
 #[allow(async_fn_in_trait)]
-pub trait AuthProxyStreamExt {
+pub(crate) trait AuthProxyStreamExt {
     /// Write the message into an internal buffer, but don't flush the underlying stream.
     fn write_message_noflush(&mut self, message: &BeMessage<'_>) -> io::Result<&mut Self>;
 
