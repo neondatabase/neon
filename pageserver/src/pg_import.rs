@@ -185,7 +185,8 @@ impl PgImportEnv {
             let key_end = if last_file.nblocks.is_some() {
                 rel_key_range(last_file.rel_tag).end
             } else {
-                rel_block_to_key(last_file.rel_tag, (last_file.segno + 1) * 1024 * 1024 * 1024 / 8192)
+                let end_blknum = (last_file.segno + 1) * (1024 * 1024 * 1024 / 8192);
+                rel_block_to_key(last_file.rel_tag, end_blknum)
             };
             let mut layer_writer = ImageLayerWriter::new(
                 &self.conf,
