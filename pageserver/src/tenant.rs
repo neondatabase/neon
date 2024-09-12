@@ -1709,15 +1709,32 @@ impl Tenant {
                             WaitLsnError::Shutdown => CreateTimelineError::ShuttingDown,
                         })?;
                 }
+                // hackathon hackaneon single click postgres upgrade
+                if pg_version > ancestor_timeline.pg_version {
+                    let old_pg_version = ancestor_timeline.pg_version;
+                    tracing::info!("Upgrading timeline {new_timeline_id} from version {old_pg_version} to {pg_version}");
+                    // add new stuff here
+                    self.branch_timeline(
+                        &ancestor_timeline,
+                        new_timeline_id,
+                        ancestor_start_lsn,
+                        create_guard,
+                        ctx,
+                    )
+                    .await?
+                } else {
+                    self.branch_timeline(
+                        &ancestor_timeline,
+                        new_timeline_id,
+                        ancestor_start_lsn,
+                        create_guard,
+                        ctx,
+                    )
+                    .await?
 
-                self.branch_timeline(
-                    &ancestor_timeline,
-                    new_timeline_id,
-                    ancestor_start_lsn,
-                    create_guard,
-                    ctx,
-                )
-                .await?
+                }
+
+                
             }
             None => {
                 self.bootstrap_timeline(
