@@ -5078,14 +5078,14 @@ impl Timeline {
 
         // If we have a page image, and no WAL, we're all set
         if data.records.is_empty() {
-            if let Some((img_lsn, img)) = &data.img {
+            if let Some((img_lsn, img)) = data.img {
                 trace!(
                     "found page image for key {} at {}, no WAL redo required, req LSN {}",
                     key,
                     img_lsn,
                     request_lsn,
                 );
-                Ok(img.clone())
+                Ok(img)
             } else {
                 Err(PageReconstructError::from(anyhow!(
                     "base image for {key} at {request_lsn} not found"
