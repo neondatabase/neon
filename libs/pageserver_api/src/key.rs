@@ -47,6 +47,9 @@ pub const AUX_KEY_PREFIX: u8 = 0x62;
 /// The key prefix of ReplOrigin keys.
 pub const REPL_ORIGIN_KEY_PREFIX: u8 = 0x63;
 
+/// The key prefix of Event keys
+pub const EVENT_KEY_PREFIX: u8 = 0x64;
+
 /// Check if the key falls in the range of metadata keys.
 pub const fn is_metadata_key_slice(key: &[u8]) -> bool {
     key[0] >= METADATA_KEY_BEGIN_PREFIX && key[0] < METADATA_KEY_END_PREFIX

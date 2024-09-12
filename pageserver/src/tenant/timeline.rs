@@ -22,7 +22,7 @@ use handle::ShardTimelineId;
 use once_cell::sync::Lazy;
 use pageserver_api::{
     key::{
-        CompactKey, KEY_SIZE, METADATA_KEY_BEGIN_PREFIX, METADATA_KEY_END_PREFIX,
+        CompactKey, EVENT_KEY_PREFIX, KEY_SIZE, METADATA_KEY_BEGIN_PREFIX, METADATA_KEY_END_PREFIX,
         NON_INHERITED_RANGE, NON_INHERITED_SPARSE_RANGE,
     },
     keyspace::{KeySpaceAccum, KeySpaceRandomAccum, SparseKeyPartitioning},
@@ -35,6 +35,7 @@ use pageserver_api::{
     shard::{ShardIdentity, ShardNumber, TenantShardId},
 };
 use rand::Rng;
+use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use storage_broker::BrokerClientChannel;
 use tokio::{
@@ -44,11 +45,11 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::{
+    bin_ser::BeSer,
     fs_ext, pausable_failpoint,
     sync::gate::{Gate, GateGuard},
 };
 
-use std::pin::pin;
 use std::sync::atomic::Ordering as AtomicOrdering;
 use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
@@ -62,6 +63,7 @@ use std::{
     collections::btree_map::Entry,
     ops::{Deref, Range},
 };
+use std::{pin::pin, sync::atomic::AtomicU8};
 
 use crate::{
     aux_file::AuxFileSizeEstimator,
@@ -160,6 +162,293 @@ pub(crate) enum FlushLoopState {
         initdb_optimization_count: usize,
     },
     Exited,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub(crate) struct Event {
+    offset: EventOffset,
+    payload: EventPayload,
+}
+
+/// Response to producers
+#[derive(Serialize, Deserialize, Debug)]
+pub(crate) struct EventAck {
+    pub(crate) offset: EventOffset,
+}
+
+struct Topic {
+    name: String,
+    id: TopicId,
+    next_offset: EventOffset,
+}
+
+/// Info about topic which is persisted
+#[derive(Serialize, Deserialize, Debug)]
+struct TopicHeader {
+    name: String,
+    next_offset: EventOffset,
+}
+
+type TopicId = u32;
+type TopicName = String;
+// Offsets should really be u64, using u32 for convenience to avoid packing
+// u64 into Key fields.
+pub(crate) type EventOffset = u32;
+type EventPayload = Bytes;
+
+struct TopicsInner {
+    next_id: TopicId,
+    topics: HashMap<TopicName, Topic>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct TopicSuperblock {
+    next_id: TopicId,
+    topics: Vec<TopicId>,
+}
+
+pub(crate) struct Topics {
+    loaded: AtomicU8,
+    inner: Mutex<TopicsInner>,
+}
+
+fn topic_header_key(topic_id: TopicId) -> Key {
+    Key {
+        field1: EVENT_KEY_PREFIX,
+        field2: 0,
+        field3: topic_id,
+        field4: 0,
+        field5: 0,
+        field6: 0,
+    }
+}
+
+impl Topics {
+    fn superblock_key(&self) -> Key {
+        Key {
+            field1: EVENT_KEY_PREFIX,
+            field2: 0,
+            field3: 0,
+            field4: 0,
+            field5: 0,
+            field6: 0,
+        }
+    }
+
+    async fn load(&self, timeline: &Timeline, ctx: &RequestContext) -> anyhow::Result<TopicsInner> {
+        let superblock_bytes = match timeline
+            .get(self.superblock_key(), timeline.get_last_record_lsn(), ctx)
+            .await
+        {
+            Ok(bytes) => bytes,
+            Err(PageReconstructError::MissingKey(_)) => {
+                return Ok(TopicsInner {
+                    next_id: 1,
+                    topics: Default::default(),
+                })
+            }
+            Err(e) => return Err(anyhow::anyhow!(e)),
+        };
+
+        let superblock: TopicSuperblock = serde_json::from_slice(&superblock_bytes).unwrap();
+
+        let mut inner = TopicsInner {
+            topics: Default::default(),
+            next_id: superblock.next_id,
+        };
+
+        for topic_id in superblock.topics {
+            let header_bytes = timeline
+                .get(
+                    topic_header_key(topic_id),
+                    timeline.get_last_record_lsn(),
+                    ctx,
+                )
+                .await?;
+            let header: TopicHeader = serde_json::from_slice(&header_bytes).unwrap();
+
+            inner.topics.insert(
+                header.name.clone(),
+                Topic {
+                    name: header.name,
+                    id: topic_id,
+                    next_offset: header.next_offset,
+                },
+            );
+        }
+
+        Ok(inner)
+    }
+
+    pub(crate) async fn produce(
+        &self,
+        topic_name: String,
+        timeline: &Timeline,
+        payload: EventPayload,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<EventOffset> {
+        if self.loaded.load(AtomicOrdering::Relaxed) == 0 {
+            let new_inner = self.load(timeline, ctx).await?;
+            *self.inner.lock().unwrap() = new_inner;
+            self.loaded.store(1, AtomicOrdering::Relaxed)
+        }
+        let (lsn, offset, write_keys) = {
+            let mut inner = self.inner.lock().unwrap();
+
+            // Taking LSN inside self.inner lock to serialize all updates
+            // Advance 8 bytes between imaginary LSNs, to preserve alignment
+            let lsn = Lsn(timeline.last_record_lsn.load().last.0 + 8);
+
+            let mut next_id = Some(inner.next_id);
+
+            use std::collections::hash_map;
+            let (offset, mut write_keys) = match inner.topics.entry(topic_name.clone()) {
+                hash_map::Entry::Vacant(e) => {
+                    let topic = Topic {
+                        next_offset: 1,
+                        name: topic_name.clone(),
+                        id: next_id.take().unwrap(),
+                    };
+
+                    e.insert(topic).produce(payload, lsn)?
+                }
+                hash_map::Entry::Occupied(mut e) => e.get_mut().produce(payload, lsn)?,
+            };
+
+            if next_id.is_none() {
+                inner.next_id += 1;
+
+                // This write transaction includes a superblock update.  This must land atomically wrt
+                // the writes to our newly created topic.
+                let superblock = TopicSuperblock {
+                    next_id: inner.next_id,
+                    topics: inner.topics.values().map(|t| t.id).collect(),
+                };
+                let superblock_bytes = serde_json::to_vec(&superblock).unwrap();
+                let value = Value::Image(superblock_bytes.into());
+                write_keys.push((
+                    self.superblock_key().to_compact(),
+                    lsn,
+                    value.serialized_size().unwrap() as usize,
+                    value,
+                ));
+            }
+
+            (lsn, offset, write_keys)
+        };
+
+        // FIXME: racing between picking lsn above and actually writing, all
+        // writes should go into a channel.
+
+        // Compose a write transaction: write the event to a page,
+        // and write the topic header to update knowledge of the
+        // next offset
+        let mut writer = timeline.writer().await;
+        writer.put_batch(write_keys, ctx).await?;
+        writer.finish_write(lsn);
+
+        Ok(offset)
+    }
+
+    pub(crate) async fn consume(
+        &self,
+        topic_name: String,
+        offset: EventOffset,
+        timeline: &Timeline,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<Option<Event>> {
+        let topic_id = {
+            let inner = self.inner.lock().unwrap();
+            let Some(topic) = inner.topics.get(&topic_name) else {
+                return Err(anyhow::anyhow!("Topic not found"));
+            };
+
+            if topic.next_offset <= offset {
+                return Ok(None);
+            }
+
+            topic.id
+        };
+
+        let event_key = Key {
+            field1: EVENT_KEY_PREFIX,
+            field2: 0,
+            field3: topic_id,
+            field4: 0,
+            field5: 0,
+            field6: offset,
+        };
+
+        let lsn = timeline.last_record_lsn.load().last;
+
+        match timeline.get(event_key, lsn, ctx).await {
+            Ok(event_bytes) => {
+                let event = serde_json::from_slice(&event_bytes).unwrap();
+                tracing::info!("Event found at {}/{}", topic_name, offset);
+                Ok(Some(event))
+            }
+            Err(PageReconstructError::MissingKey(_)) => {
+                // Unexpected: we checked against next_offset above
+                tracing::warn!("No event found at {}/{}", topic_name, offset);
+                Ok(None)
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+}
+
+type KeyBatch = Vec<(CompactKey, Lsn, usize, Value)>;
+
+impl Topic {
+    pub(crate) fn produce(
+        &mut self,
+        payload: EventPayload,
+        lsn: Lsn,
+    ) -> anyhow::Result<(EventOffset, KeyBatch)> {
+        let offset = self.next_offset;
+        self.next_offset += 1;
+
+        let event = Event { offset, payload };
+
+        let header_key = topic_header_key(self.id);
+
+        let event_key = Key {
+            field1: EVENT_KEY_PREFIX,
+            field2: 0,
+            field3: self.id,
+            field4: 0,
+            field5: 0,
+            field6: offset,
+        };
+
+        let header = TopicHeader {
+            name: self.name.clone(),
+            next_offset: self.next_offset,
+        };
+
+        let header_bytes = serde_json::to_vec(&header).unwrap().into();
+        let event_bytes = serde_json::to_vec(&event).unwrap().into();
+
+        let header_value = Value::Image(header_bytes);
+        let event_value = Value::Image(event_bytes);
+
+        let write_keys = vec![
+            (
+                header_key.to_compact(),
+                lsn,
+                header_value.serialized_size().unwrap() as usize,
+                header_value,
+            ),
+            (
+                event_key.to_compact(),
+                lsn,
+                event_value.serialized_size().unwrap() as usize,
+                event_value,
+            ),
+        ];
+
+        Ok((offset, write_keys))
+    }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -430,6 +719,8 @@ pub struct Timeline {
     pub(crate) l0_flush_global_state: L0FlushGlobalState,
 
     pub(crate) handles: handle::PerTimelineState<crate::page_service::TenantManagerTypes>,
+
+    pub(crate) topics: Topics,
 }
 
 pub struct WalReceiverInfo {
@@ -2240,6 +2531,15 @@ impl Timeline {
                 l0_flush_global_state: resources.l0_flush_global_state,
 
                 handles: Default::default(),
+
+                topics: Topics {
+                    inner: Mutex::new(TopicsInner {
+                        // TODO: recover from disk on startup
+                        next_id: 123,
+                        topics: Default::default(),
+                    }),
+                    loaded: Default::default(),
+                },
             };
 
             if aux_file_policy == Some(AuxFilePolicy::V1) {

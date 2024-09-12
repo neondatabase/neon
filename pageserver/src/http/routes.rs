@@ -4,11 +4,15 @@
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::collections::HashMap;
+use std::io::Read;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::Instant;
 
 use anyhow::{anyhow, Context, Result};
+use bytes::Buf;
+use bytes::Bytes;
 use enumset::EnumSet;
 use futures::StreamExt;
 use futures::TryFutureExt;
@@ -77,6 +81,8 @@ use crate::tenant::storage_layer::LayerAccessStatsReset;
 use crate::tenant::storage_layer::LayerName;
 use crate::tenant::timeline::CompactFlags;
 use crate::tenant::timeline::CompactionError;
+use crate::tenant::timeline::EventAck;
+use crate::tenant::timeline::EventOffset;
 use crate::tenant::timeline::Timeline;
 use crate::tenant::GetTimelineError;
 use crate::tenant::{LogicalSizeCalculationCause, PageReconstructError};
@@ -2008,6 +2014,80 @@ async fn getpage_at_lsn_handler(
     .await
 }
 
+async fn timeline_event_produce(
+    mut request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+    let topic_name: String = parse_request_param(&request, "topic_name")?;
+    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+    let state = get_state(&request);
+
+    let timeline =
+        active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
+            .await?;
+    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
+
+    let body = hyper::body::aggregate(request.body_mut())
+        .await
+        .context("Failed to read request body")
+        .map_err(ApiError::BadRequest)?;
+
+    if body.remaining() == 0 {
+        return Err(ApiError::BadRequest(anyhow::anyhow!(
+            "missing request body"
+        )));
+    }
+    let mut buffer = Vec::new();
+    body.reader()
+        .read_to_end(&mut buffer)
+        .map_err(|e| ApiError::BadRequest(anyhow::anyhow!(e)))?;
+    let payload = Bytes::from(buffer);
+
+    let offset = timeline
+        .topics
+        .produce(topic_name, &timeline, payload, &ctx)
+        .await
+        .map_err(ApiError::InternalServerError)?;
+    json_response(StatusCode::OK, EventAck { offset })
+}
+
+async fn timeline_event_consume(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+    let topic_name: String = parse_request_param(&request, "topic_name")?;
+    let offset: EventOffset = parse_request_param(&request, "offset")?;
+    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+    let state = get_state(&request);
+
+    let timeline =
+        active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
+            .await?;
+    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if Instant::now() > deadline {
+            return json_response(StatusCode::REQUEST_TIMEOUT, "no data yet");
+        }
+
+        let event = timeline
+            .topics
+            .consume(topic_name.clone(), offset, &timeline, &ctx)
+            .await
+            .map_err(ApiError::InternalServerError)?;
+        if let Some(event) = event {
+            return json_response(StatusCode::OK, event);
+        };
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 async fn timeline_collect_keyspace(
     request: Request<Body>,
     _cancel: CancellationToken,
@@ -3083,6 +3163,18 @@ pub fn make_router(
         .put(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/import_wal",
             |r| api_handler(r, put_tenant_timeline_import_wal),
+        )
+        .post(
+            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/perf_info",
+            |r| testing_api_handler("perf_info", r, perf_info),
+        )
+        .post(
+            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/event_produce/:topic_name",
+            |r| api_handler(r, timeline_event_produce),
+        )
+        .get(
+            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/event_consume/:topic_name/:offset",
+            |r| api_handler(r, timeline_event_consume),
         )
         .any(handler_404))
 }
