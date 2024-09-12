@@ -98,6 +98,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 pub mod auth;
+pub mod auth_proxy;
 pub mod cache;
 pub mod cancellation;
 pub mod compute;
@@ -405,7 +406,7 @@ pub enum PglbControlMessage {
 
 #[derive(Serialize, Deserialize)]
 pub struct ConnectionInitiatedPayload {
-    tls_server_end_point: TlsServerEndPoint,
-    server_name: Option<String>,
-    ip_addr: IpAddr,
+    pub tls_server_end_point: TlsServerEndPoint,
+    pub server_name: Option<String>,
+    pub ip_addr: IpAddr,
 }

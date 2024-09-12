@@ -1,6 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
-use proxy::PglbCodec;
+use futures::TryStreamExt;
+use proxy::{PglbCodec, PglbControlMessage, PglbMessage};
 use quinn::{
     crypto::rustls::QuicClientConfig, rustls::client::danger, Endpoint, RecvStream, SendStream,
     VarInt,
@@ -11,10 +12,7 @@ use tokio::{
     signal::unix::{signal, SignalKind},
     time::interval,
 };
-use tokio_util::{
-    codec::{Framed, FramedRead, FramedWrite},
-    task::TaskTracker,
-};
+use tokio_util::{codec::Framed, task::TaskTracker};
 
 #[tokio::main]
 async fn main() {
@@ -107,5 +105,11 @@ impl danger::ServerCertVerifier for NoVerify {
 }
 
 async fn handle_stream(send: SendStream, recv: RecvStream) {
-    let _stream = Framed::new(join(recv, send), PglbCodec);
+    let mut stream = Framed::new(join(recv, send), PglbCodec);
+
+    let first_msg = stream.try_next().await.unwrap();
+    let Some(PglbMessage::Control(PglbControlMessage::ConnectionInitiated(_first_msg))) = first_msg
+    else {
+        panic!("invalid first msg")
+    };
 }

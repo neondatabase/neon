@@ -9,6 +9,7 @@
 mod channel_binding;
 mod messages;
 mod stream;
+mod stream2;
 
 use crate::error::{ReportableError, UserFacingError};
 use std::io;
@@ -17,6 +18,7 @@ use thiserror::Error;
 pub(crate) use channel_binding::ChannelBinding;
 pub(crate) use messages::FirstMessage;
 pub(crate) use stream::{Outcome, SaslStream};
+pub(crate) use stream2::SaslStream2;
 
 /// Fine-grained auth errors help in writing tests.
 #[derive(Error, Debug)]

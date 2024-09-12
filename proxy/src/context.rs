@@ -125,7 +125,7 @@ impl RequestMonitoring {
         Self(TryLock::new(inner))
     }
 
-    #[cfg(test)]
+    // #[cfg(test)]
     pub(crate) fn test() -> Self {
         RequestMonitoring::new(Uuid::now_v7(), [127, 0, 0, 1].into(), Protocol::Tcp, "test")
     }
