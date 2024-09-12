@@ -1982,9 +1982,9 @@ impl<'a> Version<'a> {
 //--- Metadata structs stored in key-value pairs in the repository.
 
 #[derive(Debug, Serialize, Deserialize)]
-struct DbDirectory {
+pub struct DbDirectory {
     // (spcnode, dbnode) -> (do relmapper and PG_VERSION files exist)
-    dbdirs: HashMap<(Oid, Oid), bool>,
+    pub dbdirs: HashMap<(Oid, Oid), bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
