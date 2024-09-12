@@ -11,6 +11,7 @@ use crate::{
     stream::AuthProxyStreamExt,
 };
 use pq_proto::{BeAuthenticationSaslMessage, BeMessage, BeMessage as Be};
+use tokio::task_local;
 use std::{io, sync::Arc};
 use tracing::info;
 
@@ -76,13 +77,15 @@ pub(crate) struct AuthFlow<'a, State> {
     tls_server_end_point: TlsServerEndPoint,
 }
 
+task_local! {
+    pub(crate) static TLS_SERVER_END_POINT: TlsServerEndPoint;
+}
+
 /// Initial state of the stream wrapper.
 impl<'a> AuthFlow<'a, Begin> {
     /// Create a new wrapper for client authentication.
     pub(crate) fn new(stream: &'a mut AuthProxyStream) -> Self {
-        // TODO:
-        // let tls_server_end_point = stream.get_ref().tls_server_end_point();
-        let tls_server_end_point = TlsServerEndPoint::Undefined;
+        let tls_server_end_point = TLS_SERVER_END_POINT.get();
 
         Self {
             stream,
