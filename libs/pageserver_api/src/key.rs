@@ -92,6 +92,24 @@ impl Key {
         }
     }
 
+    pub const fn metadata_noninherited_key_range() -> Range<Self> {
+        Key {
+            field1: METADATA_KEY_BEGIN_PREFIX,
+            field2: 0,
+            field3: 0,
+            field4: 0,
+            field5: 0,
+            field6: 0,
+        }..Key {
+            field1: EVENT_KEY_PREFIX,
+            field2: 0,
+            field3: 0,
+            field4: 0,
+            field5: 0,
+            field6: 0,
+        }
+    }
+
     /// Get the range of aux keys.
     pub fn metadata_aux_key_range() -> Range<Self> {
         Key {
@@ -682,7 +700,7 @@ pub fn repl_origin_key_range() -> Range<Key> {
 /// Non inherited range for vectored get.
 pub const NON_INHERITED_RANGE: Range<Key> = AUX_FILES_KEY..AUX_FILES_KEY.next();
 /// Sparse keyspace range for vectored get. Missing key error will be ignored for this range.
-pub const NON_INHERITED_SPARSE_RANGE: Range<Key> = Key::metadata_key_range();
+pub const NON_INHERITED_SPARSE_RANGE: Range<Key> = Key::metadata_noninherited_key_range();
 
 impl Key {
     // AUX_FILES currently stores only data for logical replication (slots etc), and
