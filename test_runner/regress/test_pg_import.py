@@ -51,6 +51,7 @@ def test_pg_import(test_output_dir, pg_bin, vanilla_pg, neon_env_builder):
     timeline_id = TimelineId.generate()
 
     tline_path = env.pageserver_remote_storage.timeline_path(tenant_id, timeline_id)
+    tline_path.mkdir(parents=True)
 
     cli = ImportCli(env)
     cli.run_import(vanilla_pg.pgdatadir, tline_path)

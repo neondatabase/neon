@@ -1,4 +1,4 @@
-use std::{fs::metadata, path::Path, str::FromStr};
+use std::{fs::metadata, path::Path};
 
 use anyhow::{bail, ensure, Context};
 use bytes::Bytes;
@@ -27,20 +27,18 @@ pub struct PgImportEnv {
 
 impl PgImportEnv {
 
-    pub async fn init() -> anyhow::Result<PgImportEnv> {
+    pub async fn init(dstdir: &Utf8Path, tenant_id: TenantId, timeline_id: TimelineId) -> anyhow::Result<PgImportEnv> {
         let ctx: RequestContext = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error);
         let config = toml_edit::Document::new();
         let conf = PageServerConf::parse_and_validate(
             NodeId(42), 
             &config,
-            &Utf8PathBuf::from("layers")
+            dstdir
         )?;
         let conf = Box::leak(Box::new(conf));
 
-        let tni = TenantId::from_str("42424242424242424242424242424242")?;
-        let tli = TimelineId::from_str("42424242424242424242424242424242")?;
         let tsi = TenantShardId {
-            tenant_id: tni,
+            tenant_id,
             shard_number: ShardNumber(0),
             shard_count: ShardCount(0),
         };
@@ -48,16 +46,18 @@ impl PgImportEnv {
         Ok(PgImportEnv {
             ctx,
             conf, 
-            tli,
+            tli: timeline_id,
             tsi,
         })
     }
 
-    pub async fn import_datadir(&mut self, pgdata_path: &Utf8Path, _tenant_path: &Utf8Path) -> anyhow::Result<()> {
+    pub async fn import_datadir(&mut self, pgdata_path: &Utf8Path) -> anyhow::Result<()> {
 
         let pgdata_lsn = import_datadir::get_lsn_from_controlfile(&pgdata_path)?.align();
 
-        println!("Importing {pgdata_path} to {_tenant_path} as lsn {pgdata_lsn}...");
+        let timeline_path = self.conf.timeline_path(&self.tsi, &self.tli);
+
+        println!("Importing {pgdata_path} to {timeline_path} as lsn {pgdata_lsn}...");
 
         let range = Key::MIN..Key::NON_L0_MAX;
         let mut one_big_layer = ImageLayerWriter::new(
