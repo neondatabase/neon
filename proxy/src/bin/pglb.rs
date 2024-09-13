@@ -590,30 +590,30 @@ impl PgRawMessage {
                 src.reserve(4);
                 return Ok(None);
             }
-            let length = src.get_u32() as usize - 4;
+            let length = u32::from_be_bytes(src[0..4].try_into().unwrap()) as usize;
             if src.remaining() < length {
                 src.reserve(length - src.remaining());
                 return Ok(None);
             }
-            if length == 4 && src.starts_with(&80877103u32.to_be_bytes()) {
+            if length == 8 && src[4..8] == 80877103u32.to_be_bytes() {
                 Ok(Some(PgRawMessage::SslRequest))
             } else {
-                Ok(Some(PgRawMessage::Start(src.split_off(length).to_vec())))
+                Ok(Some(PgRawMessage::Start(src.split_to(length).to_vec())))
             }
         } else {
             if src.remaining() < 5 {
                 src.reserve(5);
                 return Ok(None);
             }
-            let tag = src.get_u8();
-            let length = src.get_u32() as usize - 4;
+            let tag = src[0];
+            let length = u32::from_be_bytes(src[1..5].try_into().unwrap()) as usize - 1;
             if src.remaining() < length {
                 src.reserve(length - src.remaining());
                 return Ok(None);
             }
             Ok(Some(PgRawMessage::Generic {
                 tag,
-                payload: src.split_off(length).to_vec(),
+                payload: src.split_to(length).to_vec(),
             }))
         }
     }
