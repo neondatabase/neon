@@ -477,17 +477,25 @@ pub async fn handle_stream(
         panic!("invalid first msg")
     };
 
+    println!("new conn: {conn_info:?}");
+
     // read startup packet
     let startup = stream.read_startup_packet().await?;
     let FeStartupPacket::StartupMessage { version: _, params } = startup else {
         panic!("invalid startup message")
     };
 
+    println!("params: {params:?}");
+
     let user_info = auth_with_user(&mut stream, config, &conn_info, &params).await?;
+
+    println!("authenticated");
 
     // wake the compute
     let node_info = user_info.wake_compute(&RequestMonitoring::test()).await?;
     let socket: SocketAddr = node_info.config.get_host()?.parse()?;
+
+    println!("woke compute");
 
     // tell pglb that the compute is up
     stream
