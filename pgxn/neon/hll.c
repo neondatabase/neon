@@ -137,7 +137,7 @@ addSHLL(HyperLogLogState *cState, uint32 hash)
 			uint32 cell = Min(interval_log2, HIST_SIZE-1);
 			new_histogram[cell] += cState->regs[index][count].histogram[i];
 		}
-		memcpy(cState->regs[index][count].histogram, new_histogram, sizeof new_hostogram);
+		memcpy(cState->regs[index][count].histogram, new_histogram, sizeof new_histogram);
 	}
 	cState->regs[index][count].ts = now;
 	cState->regs[index][count].histogram[0] += 1;
@@ -166,7 +166,7 @@ getMaximum(const HyperLogLogRegister* reg, TimestampTz since, time_t duration, d
 	{
 		for (i = 0; i < HLL_C_BITS + 1; i++)
 		{
-			if (reg[i].ts >= since && 1.0 - getAccessCount(reg, duration) / total_count >= min_hit_ration)
+			if (reg[i].ts >= since && 1.0 - getAccessCount(reg, duration) / total_count >= min_hit_ratio)
 			{
 				max = i;
 			}
