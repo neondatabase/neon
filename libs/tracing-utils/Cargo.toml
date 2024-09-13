@@ -12,3 +12,6 @@ opentelemetry-semantic-conventions.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
 tracing.workspace = true
 tracing-opentelemetry.workspace = true
+
+[dev-dependencies]
+tracing-subscriber.workspace = true    # For examples in docs
