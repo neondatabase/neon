@@ -10,7 +10,6 @@ bench = []
 [dependencies]
 anyhow.workspace = true
 async-stream.workspace = true
-bytes.workspace = true
 clap = { workspace = true, features = ["derive"] }
 const_format.workspace = true
 futures.workspace = true
@@ -24,7 +23,6 @@ parking_lot.workspace = true
 prost.workspace = true
 tonic.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }
-tokio-stream.workspace = true
 tracing.workspace = true
 metrics.workspace = true
 utils.workspace = true

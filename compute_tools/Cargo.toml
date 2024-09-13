@@ -11,7 +11,6 @@ testing = []
 
 [dependencies]
 anyhow.workspace = true
-async-compression.workspace = true
 chrono.workspace = true
 cfg-if.workspace = true
 clap.workspace = true
@@ -24,7 +23,6 @@ num_cpus.workspace = true
 opentelemetry.workspace = true
 postgres.workspace = true
 regex.workspace = true
-serde.workspace = true
 serde_json.workspace = true
 signal-hook.workspace = true
 tar.workspace = true
@@ -43,7 +41,6 @@ url.workspace = true
 compute_api.workspace = true
 utils.workspace = true
 workspace_hack.workspace = true
-toml_edit.workspace = true
 remote_storage = { version = "0.1", path = "../libs/remote_storage/" }
 vm_monitor = { version = "0.1", path = "../libs/vm_monitor/" }
 zstd = "0.13"
