@@ -582,7 +582,28 @@ struct ComputePassthrough {
 
 impl PglbConn<ComputePassthrough> {
     async fn handle_compute_passthrough(self) -> Result<PglbConn<End>> {
-        todo!()
+        let ComputePassthrough {
+            mut client_stream,
+            mut compute_stream,
+        } = self.state;
+
+        loop {
+            select! {
+                msg = client_stream.next() => {
+                    let Some(msg) = msg else {
+                        bail!("compute disconnected");
+                    };
+                    compute_stream.send(msg?).await?;
+                }
+
+                msg = compute_stream.next() => {
+                    let Some(msg) = msg else {
+                        bail!("compute disconnected");
+                    };
+                    client_stream.send(msg?).await?;
+                }
+            }
+        }
     }
 }
 
