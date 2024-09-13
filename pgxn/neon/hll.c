@@ -126,19 +126,50 @@ addSHLL(HyperLogLogState *cState, uint32 hash)
 	/* Compute the rank of the remaining 32 - "k" (registerWidth) bits */
 	count = rho(hash << HLL_BIT_WIDTH, HLL_C_BITS);
 
-	cState->regs[index][count] = now;
+	if (cState->regs[index][count].ts)
+	{
+		/* update histgoram */
+		int64_t delta = (now - cState->regs[index][count].ts)/USECS_PER_SEC;
+		uint32_t new_histogram[HIST_SIZE] = {0};
+		for (int i = 0; i < HIST_SIZE; i++) {
+			/* Use average point of interval */
+			uint32 interval_log2 = pg_ceil_log2_32((delta + (HIST_MIN_INTERVAL*((i+1) + ((1<<i)/2))/2)) / HIST_MIN_INTERVAL);
+			uint32 cell = Min(interval_log2, HIST_SIZE-1);
+			new_histogram[cell] += cState->regs[index][count].histogram[i];
+		}
+		memcpy(cState->regs[index][count].histogram, new_histogram, sizeof new_hostogram);
+	}
+	cState->regs[index][count].ts = now;
+	cState->regs[index][count].histogram[0] += 1;
+}
+
+static uint32_t
+getAccessCount(const HyperLogLogRegister* reg, time_t duration)
+{
+	uint32_t count = 0;
+	for (size_t i = 0; i < HIST_SIZE && (HIST_MIN_INTERVAL << i) <= duration; i++) {
+		count += reg->histogram[i];
+	}
+	return count;
 }
 
 static uint8
-getMaximum(const TimestampTz* reg, TimestampTz since)
+getMaximum(const HyperLogLogRegister* reg, TimestampTz since, time_t duration, double min_hit_ratio)
 {
 	uint8 max = 0;
-
-	for (size_t i = 0; i < HLL_C_BITS + 1; i++)
+	size_t i, j;
+	uint32_t total_count = 0;
+	for (i = 0; i < HIST_SIZE && (HIST_MIN_INTERVAL << i) <= duration; i++) {
+		total_count += getAccessCount(reg, duration);
+	}
+	if (total_count != 0)
 	{
-		if (reg[i] >= since)
+		for (i = 0; i < HLL_C_BITS + 1; i++)
 		{
-			max = i;
+			if (reg[i].ts >= since && 1.0 - getAccessCount(reg, duration) / total_count >= min_hit_ration)
+			{
+				max = i;
+			}
 		}
 	}
 
@@ -150,7 +181,7 @@ getMaximum(const TimestampTz* reg, TimestampTz since)
  * Estimates cardinality, based on elements added so far
  */
 double
-estimateSHLL(HyperLogLogState *cState, time_t duration)
+estimateSHLL(HyperLogLogState *cState, time_t duration, double min_hit_ratio)
 {
 	double		result;
 	double		sum = 0.0;
@@ -161,7 +192,7 @@ estimateSHLL(HyperLogLogState *cState, time_t duration)
 
 	for (i = 0; i < HLL_N_REGISTERS; i++)
 	{
-		R[i] = getMaximum(cState->regs[i], since);
+		R[i] = getMaximum(cState->regs[i], since, duration, min_hit_ratio);
 		sum += 1.0 / pow(2.0, R[i]);
 	}
 
