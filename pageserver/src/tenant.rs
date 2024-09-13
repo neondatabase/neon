@@ -1417,9 +1417,10 @@ impl Tenant {
     }
 
     pub(crate) async fn apply_timeline_archival_config(
-        &self,
+        self: &Arc<Self>,
         timeline_id: TimelineId,
         state: TimelineArchivalState,
+        ctx: RequestContext,
     ) -> Result<(), TimelineArchivalError> {
         info!("setting timeline archival config");
         let timeline_or_unarchive_offloaded = 'outer: {
@@ -1485,26 +1486,84 @@ impl Tenant {
             Some(Arc::clone(timeline))
         };
 
-        if let Some(timeline) = timeline_or_unarchive_offloaded {
-            let upload_needed = timeline
-                .remote_client
-                .schedule_index_upload_for_timeline_archival_state(state)?;
-
-            if upload_needed {
-                info!("Uploading new state");
-                const MAX_WAIT: Duration = Duration::from_secs(10);
-                let Ok(v) =
-                    tokio::time::timeout(MAX_WAIT, timeline.remote_client.wait_completion()).await
-                else {
-                    tracing::warn!("reached timeout for waiting on upload queue");
-                    return Err(TimelineArchivalError::Timeout);
-                };
-                v.map_err(|e| TimelineArchivalError::Other(anyhow::anyhow!(e)))?;
-            }
-            Ok(())
+        let timeline = if let Some(timeline) = timeline_or_unarchive_offloaded {
+            timeline
         } else {
-            Ok(())
+            let cancel = self.cancel.clone();
+            let timeline_preload = self.load_timeline_metadata(
+                timeline_id,
+                self.remote_storage.clone(),
+                cancel,
+            )
+            .await;
+
+            let index_part = match timeline_preload.index_part {
+                Ok(index_part) => {
+                    debug!("remote index part exists for timeline {timeline_id}");
+                    index_part
+                }
+                Err(DownloadError::NotFound) => {
+                    info!(%timeline_id, "index_part not found on remote");
+                    return Err(TimelineArchivalError::NotFound);
+                }
+                Err(e) => {
+                    // Some (possibly ephemeral) error happened during index_part download.
+                    warn!(%timeline_id, "Failed to load index_part from remote storage, failed creation? ({e})");
+                    return Err(TimelineArchivalError::Other(
+                        anyhow::Error::new(e).context("downloading index_part from remote storage"),
+                    ));
+                }
+            };
+            let index_part = match index_part {
+                MaybeDeletedIndexPart::IndexPart(index_part) => index_part,
+                MaybeDeletedIndexPart::Deleted(_index_part) => {
+                    info!("timeline is deleted according to index_part.json");
+                    return Err(TimelineArchivalError::NotFound);
+                }
+            };
+            let remote_metadata = index_part.metadata.clone();
+            let timeline_resources = self.build_timeline_resources(timeline_id);
+            self.load_remote_timeline(
+                timeline_id,
+                index_part,
+                remote_metadata,
+                timeline_resources,
+                &ctx,
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to load remote timeline {} for tenant {}",
+                    timeline_id, self.tenant_shard_id
+                )
+            })?;
+            let timelines = self.timelines.lock().unwrap();
+            if let Some(timeline) = timelines.get(&timeline_id) {
+                Arc::clone(timeline)
+            } else {
+                warn!("timeline not available directly after attach");
+                return Err(TimelineArchivalError::Other(anyhow::anyhow!(
+                    "timeline not available directly after attach"
+                )));
+            }
+        };
+
+        let upload_needed = timeline
+            .remote_client
+            .schedule_index_upload_for_timeline_archival_state(state)?;
+
+        if upload_needed {
+            info!("Uploading new state");
+            const MAX_WAIT: Duration = Duration::from_secs(10);
+            let Ok(v) =
+                tokio::time::timeout(MAX_WAIT, timeline.remote_client.wait_completion()).await
+            else {
+                tracing::warn!("reached timeout for waiting on upload queue");
+                return Err(TimelineArchivalError::Timeout);
+            };
+            v.map_err(|e| TimelineArchivalError::Other(anyhow::anyhow!(e)))?;
         }
+        Ok(())
     }
 
     pub(crate) fn tenant_shard_id(&self) -> TenantShardId {
