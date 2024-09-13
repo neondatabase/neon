@@ -54,6 +54,14 @@
 #define HLL_N_REGISTERS (1 << HLL_BIT_WIDTH)
 
 /*
+ * Number of histogram cells. We use exponential histogram with first interval
+ * equals to one minutes. Autoscaler request LFC  statistic with intervals 1,2,...,60 seconds,
+ * so 1^8=64 seems to be enough for our needs.
+ */
+#define HIST_SIZE         8
+#define HIST_MIN_INTERVAL 60 /* seconds */
+
+/*
  * HyperLogLog is an approximate technique for computing the number of distinct
  * entries in a set.  Importantly, it does this by using a fixed amount of
  * memory.  See the 2007 paper "HyperLogLog: the analysis of a near-optimal
@@ -74,13 +82,19 @@
  * precision; as 32 bits in second precision should be enough for statistics.
  * However, that is not yet implemented.
  */
+typedef struct
+{
+	TimestampTz ts; /* last access timestamp */
+	uint32_t    histogram[HIST_SIZE]; /* access counter histogram */
+} HyperLogLogRegister;
+
 typedef struct HyperLogLogState
 {
-	TimestampTz regs[HLL_N_REGISTERS][HLL_C_BITS + 1];
+	HyperLogLogRegister regs[HLL_N_REGISTERS][HLL_C_BITS + 1];
 } HyperLogLogState;
 
 extern void   initSHLL(HyperLogLogState *cState);
 extern void   addSHLL(HyperLogLogState *cState, uint32 hash);
-extern double estimateSHLL(HyperLogLogState *cState, time_t dutration);
+extern double estimateSHLL(HyperLogLogState *cState, time_t dutration, double min_hit_ratio);
 
 #endif
