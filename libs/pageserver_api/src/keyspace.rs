@@ -48,7 +48,7 @@ pub struct ShardedRange<'a> {
 
 // Calculate the size of a range within the blocks of the same relation, or spanning only the
 // top page in the previous relation's space.
-fn contiguous_range_len(range: &Range<Key>) -> u32 {
+pub fn contiguous_range_len(range: &Range<Key>) -> u32 {
     debug_assert!(is_contiguous_range(range));
     if range.start.field6 == 0xffffffff {
         range.end.field6 + 1
@@ -67,7 +67,7 @@ fn contiguous_range_len(range: &Range<Key>) -> u32 {
 /// This matters, because:
 /// - Within such ranges, keys are used contiguously.  Outside such ranges it is sparse.
 /// - Within such ranges, we may calculate distances using simple subtraction of field6.
-fn is_contiguous_range(range: &Range<Key>) -> bool {
+pub fn is_contiguous_range(range: &Range<Key>) -> bool {
     range.start.field1 == range.end.field1
         && range.start.field2 == range.end.field2
         && range.start.field3 == range.end.field3
