@@ -3393,6 +3393,14 @@ impl Tenant {
                 )
                 })?;
 
+            // TODO
+            // do pg_upgrade bits here
+            // Rust is not the most convenient for writing this,
+            // So just call the pg_upgrade in the subprocess.
+            // In the future we can turn it into API call to some service that will do the work
+            //
+            // 1. start postgres on a parent timeline at the start_lsn, using neon_local (now this is hardcoded)
+            // 2. run pg_upgrade using neon_local for old version and freshly created pgdata for new version
             run_pg_upgrade(
                 self.conf,
                 &pgdata_path,
@@ -3407,25 +3415,26 @@ impl Tenant {
                     "Failed to pg_upgrade {timeline_id} with pg_version {pg_version} at {pgdata_path}"
                 )
             })?;
-            // TODO
-            // do pg_upgrade bits here
-            // Rust is not the most convenient for writing this,
-            // So just call the bash script that relies on the pg_upgrade and neon_local to do all the work.
-            // In the future we can turn it into API call to some service that will do the work
 
-            // 1. start postgres on a parent timeline at the start_lsn, using neon_local (somehow)
-            // 2. run pg_upgrade using old neon_local and new neon_local (?) + new freshly created pgdata
-            // Or maybe use ad-hoc thing?
-            // We need old cluster read-only
-            // And new cluster read-write, but we will export it fully, so we can do whatever we want during upgrade
-
-            // TODO Do we need to adjust something else?
-            // Or should it be just start_lsn as it is?
-            let pgdata_lsn = (start_lsn + 1).align();
+            let contolfile_lsn = import_datadir::get_lsn_from_controlfile(&pgdata_path)?.align();
+            let start_lsn = start_lsn.align();
+            // choose the max of controlfile_lsn and start_lsn
+            //
+            // It is possible that the controlfile_lsn is ahead of the start_lsn,
+            // especially for small databases
+            // In that case, we need to start from the controlfile_lsn.
+            // Otherwise we will have LSN on the pages larger that the lsn of the branch.
+            // And this will lead to the error, when compute will try to flush the page
+            // with the lsn larger than the branch lsn.
+            //
+            // ERROR : xlog flush request %X/%X is not satisfied --- flushed only to %X/%X
+            //
+            // We got another problem here - a gap between the
+            // branching_lsn (where we diverged with the parent) and pgdata_lsn (import lsn of the new timeline)
+            // We should teach the wal-redo to skip all the records between these two points.
+            // Otherwise we will see some updates from the parent timeline in the new timeline
+            let pgdata_lsn = std::cmp::max(contolfile_lsn, start_lsn);
             assert!(pgdata_lsn.is_aligned());
-            // TODO
-            // We must have start_lsn+1 == pgdata_lsn
-            // Set it somehow
 
             // TODO why do we need these lines?
             let tenant_shard_id = uninitialized_timeline.owning_tenant.tenant_shard_id;
@@ -3442,6 +3451,7 @@ impl Tenant {
                 &pgdata_path,
                 pgdata_lsn,
                 true,
+                Some(src_timeline),
                 ctx,
             )
             .await
@@ -3667,6 +3677,7 @@ impl Tenant {
             &pgdata_path,
             pgdata_lsn,
             false,
+            None,
             ctx,
         )
         .await
