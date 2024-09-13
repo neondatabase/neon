@@ -82,6 +82,9 @@ pub async fn import_timeline_from_postgres_datadir(
             } else {
                 None
             };
+
+            // if this is import after pg_upgrade, skip all user data files
+            //  relfilenode > FirstNormalObjectId of the new cluster
             if let Some(control_file) = import_file(
                 &mut modification,
                 relative_path,
@@ -133,6 +136,30 @@ pub async fn import_timeline_from_postgres_datadir(
     Ok(())
 }
 
+
+fn is_user_relfile(path: &Path) -> bool {
+    let filename = &path
+        .file_name()
+        .expect("missing rel filename")
+        .to_string_lossy();
+    let (relnode, _, _) = parse_relfilename(filename).map_err(|e| {
+        warn!("unrecognized file in postgres datadir: {:?} ({})", path, e);
+        e
+    }).unwrap();
+
+    // if this is import after pg_upgrade, skip all user data files
+    //  relfilenode > FirstNormalObjectId of the new cluster
+
+    // THIS IS BAD
+    // if catalog relation was vacuumed with vacuum full, it will have a new relfilenode
+    // which will be greater than FirstNormalObjectId
+    if relnode > pg_constants::FIRST_NORMAL_OBJECT_ID {
+        // 
+        return true;
+    }
+
+    false
+}
 // subroutine of import_timeline_from_postgres_datadir(), to load one relation file.
 async fn import_rel(
     modification: &mut DatadirModification<'_>,
@@ -154,6 +181,7 @@ async fn import_rel(
         warn!("unrecognized file in postgres datadir: {:?} ({})", path, e);
         e
     })?;
+
 
     let mut buf: [u8; 8192] = [0u8; 8192];
 
@@ -576,8 +604,16 @@ async fn import_file(
                 debug!("ignored PG_VERSION file");
             }
             _ => {
-                import_rel(modification, file_path, spcnode, dbnode, reader, len, ctx).await?;
-                debug!("imported rel creation");
+                // if this is import after pg_upgrade, skip all user data files
+                //  relfilenode > FirstNormalObjectId of the new cluster
+                if is_user_relfile(file_path) && new_checkpoint_lsn.is_some()
+                {
+                    info!("after pg_restore skipping {:?}", file_path);
+                } else {
+                    import_rel(modification, file_path, spcnode, dbnode, reader, len, ctx).await?;
+                    debug!("imported rel creation");
+                }
+
             }
         }
     } else if file_path.starts_with("base") {
@@ -601,8 +637,15 @@ async fn import_file(
                 debug!("ignored PG_VERSION file");
             }
             _ => {
-                import_rel(modification, file_path, spcnode, dbnode, reader, len, ctx).await?;
-                debug!("imported rel creation");
+                  // if this is import after pg_upgrade, skip all user data files
+                //  relfilenode > FirstNormalObjectId of the new cluster
+                if is_user_relfile(file_path) && new_checkpoint_lsn.is_some()
+                {
+                    info!("after pg_restore skipping {:?}", file_path);
+                } else {
+                    import_rel(modification, file_path, spcnode, dbnode, reader, len, ctx).await?;
+                    debug!("imported rel creation");
+                }
             }
         }
     } else if file_path.starts_with("pg_xact") {

@@ -4057,7 +4057,7 @@ async fn run_pg_upgrade(
     // and neon_local
 
     // We test with neon_local, so let's hardcode it for now
-    let base_dir = "/home/ana/work/neon";
+    let base_dir = "/home/ana/work/neon/";
     let old_pgdata = format!("{}/.neon/endpoints/main/pgdata", base_dir);
 
     let pg_upgrade_command = tokio::process::Command::new(&pg_upgrade_bin_path)
