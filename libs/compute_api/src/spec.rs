@@ -146,11 +146,11 @@ impl RemoteExtSpec {
             // because library_index is based on the name without the file extension
             let strip_lib = Regex::new(r"([^\/]+)\.so.*").unwrap();
             let lib_captures = strip_lib.captures(real_ext_name).unwrap();
-            let lib_raw_name = lib_captures[1];
+            let lib_raw_name = lib_captures[1].to_string();
 
             real_ext_name = self
                 .library_index
-                .get(&lib_raw_name)
+                .get(&*lib_raw_name)
                 .ok_or(anyhow::anyhow!("library {} is not found", lib_raw_name))?;
         }
 
