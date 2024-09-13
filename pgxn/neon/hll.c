@@ -133,7 +133,7 @@ addSHLL(HyperLogLogState *cState, uint32 hash)
 		uint32_t new_histogram[HIST_SIZE] = {0};
 		for (int i = 0; i < HIST_SIZE; i++) {
 			/* Use average point of interval */
-			uint32 interval_log2 = pg_ceil_log2_32((delta + (HIST_MIN_INTERVAL*((i+1) + ((1<<i)/2))/2)) / HIST_MIN_INTERVAL);
+			uint32 interval_log2 = pg_ceil_log2_32((delta + (HIST_MIN_INTERVAL*((1<<i) + ((1<<i)/2))/2)) / HIST_MIN_INTERVAL);
 			uint32 cell = Min(interval_log2, HIST_SIZE-1);
 			new_histogram[cell] += cState->regs[index][count].histogram[i];
 		}
@@ -147,7 +147,7 @@ static uint32_t
 getAccessCount(const HyperLogLogRegister* reg, time_t duration)
 {
 	uint32_t count = 0;
-	for (size_t i = 0; i < HIST_SIZE && (HIST_MIN_INTERVAL << i) <= duration; i++) {
+	for (size_t i = 0; i < HIST_SIZE && HIST_MIN_INTERVAL*((1 << i)/2) <= duration; i++) {
 		count += reg->histogram[i];
 	}
 	return count;
@@ -166,7 +166,7 @@ getMaximum(const HyperLogLogRegister* reg, TimestampTz since, time_t duration, d
 	{
 		for (i = 0; i < HLL_C_BITS + 1; i++)
 		{
-			if (reg[i].ts >= since && 1.0 - getAccessCount(reg, duration) / total_count >= min_hit_ratio)
+			if (reg[i].ts >= since && 1.0 - getAccessCount(reg, duration) / total_count <= min_hit_ratio)
 			{
 				max = i;
 			}
