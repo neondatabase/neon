@@ -1280,7 +1280,7 @@ approximate_working_set_size(PG_FUNCTION_ARGS)
 		int32 dc;
 		bool reset = PG_GETARG_BOOL(0);
 		LWLockAcquire(lfc_lock, reset ? LW_EXCLUSIVE : LW_SHARED);
-		dc = (int32) estimateSHLL(&lfc_ctl->wss_estimation, (time_t)-1, 0);
+		dc = (int32) estimateSHLL(&lfc_ctl->wss_estimation, (time_t)-1, 1.0);
 		if (reset)
 			memset(lfc_ctl->wss_estimation.regs, 0, sizeof lfc_ctl->wss_estimation.regs);
 		LWLockRelease(lfc_lock);
@@ -1298,7 +1298,7 @@ approximate_optimal_cache_size(PG_FUNCTION_ARGS)
 	{
 		int32 dc;
 		time_t duration = PG_ARGISNULL(0) ? (time_t)-1 : PG_GETARG_INT32(0);
-		double min_hit_ratio = PG_ARGISNULL(1) ? 0 : PG_GETARG_FLOAT8(1);
+		double min_hit_ratio = PG_ARGISNULL(1) ? 1.0 : PG_GETARG_FLOAT8(1);
 		LWLockAcquire(lfc_lock, LW_SHARED);
 		dc = (int32) estimateSHLL(&lfc_ctl->wss_estimation, duration, min_hit_ratio);
 		LWLockRelease(lfc_lock);
