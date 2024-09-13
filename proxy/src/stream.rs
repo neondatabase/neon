@@ -3,9 +3,11 @@ use crate::config::TlsServerEndPoint;
 use crate::error::{ErrorKind, ReportableError, UserFacingError};
 use crate::metrics::Metrics;
 use crate::PglbMessage;
+use anyhow::{bail, Context};
 use bytes::BytesMut;
 
 use futures::{SinkExt, TryStreamExt};
+use postgres_protocol::message::backend;
 use pq_proto::framed::{ConnectionError, Framed};
 use pq_proto::{BeMessage, FeMessage, FeStartupPacket, ProtocolError};
 use rustls::ServerConfig;
@@ -317,6 +319,11 @@ pub(crate) trait AuthProxyStreamExt {
     async fn read_message(&mut self) -> io::Result<FeMessage>;
 
     async fn read_password_message(&mut self) -> io::Result<bytes::Bytes>;
+
+    async fn read_backend_message<T>(
+        &mut self,
+        f: impl FnOnce(backend::Message) -> anyhow::Result<T>,
+    ) -> anyhow::Result<T>;
 }
 
 impl AuthProxyStreamExt for AuthProxyStream {
@@ -416,5 +423,16 @@ impl AuthProxyStreamExt for AuthProxyStream {
                 format!("unexpected message type: {bad:?}"),
             )),
         }
+    }
+
+    async fn read_backend_message<T>(
+        &mut self,
+        f: impl FnOnce(backend::Message) -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        let PglbMessage::Postgres(mut buf) = self.try_next().await?.context("missing")? else {
+            bail!("invalid message");
+        };
+        let message = backend::Message::parse(&mut buf)?.context("missing")?;
+        f(message)
     }
 }
