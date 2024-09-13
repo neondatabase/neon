@@ -1035,7 +1035,7 @@ FROM neon-pg-ext-build AS postgres-cleanup-layer
 COPY --from=neon-pg-ext-build /usr/local/pgsql /usr/local/pgsql
 
 # Remove binaries from /bin/ that we won't use (or would manually copy & install otherwise)
-RUN cd /usr/local/pgsql/bin && rm ecpg raster2pgsql shp2pgsql pgtopo_export pgtopo_import pgsql2shp
+RUN cd /usr/local/pgsql/bin && rm -f ecpg raster2pgsql shp2pgsql pgtopo_export pgtopo_import pgsql2shp
 
 # Remove headers that we won't need anymore - we've completed installation of all extensions
 RUN rm -r /usr/local/pgsql/include
