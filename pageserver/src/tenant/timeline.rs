@@ -5206,8 +5206,16 @@ impl Timeline {
                     .cloned()
                     .collect::<Vec<_>>();
                 records = &records[scratch.len()..];
+
                 if later.is_none() {
                     assert!(records.is_empty());
+                }
+
+                // if we don't have any records for this timeline (which is possible)
+                // go to the previous one
+                if scratch.is_empty() {
+                    tracing::info!("no records for timeline {}", older.timeline_id);
+                    continue;
                 }
 
                 // this is only used for logging on the next round
