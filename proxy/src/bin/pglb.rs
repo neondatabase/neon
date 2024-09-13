@@ -520,10 +520,12 @@ impl PglbConn<ComputeConnect> {
         let mut compute_stream = Framed::new(
             compute_stream,
             PgRawCodec {
-                start_or_ssl_request: true,
+                start_or_ssl_request: false,
             },
         );
 
+        let mut resps = 4;
+        let mut first_auth_proxy_request = true;
         loop {
             select! {
                 msg = auth_stream.next() => {
@@ -532,9 +534,10 @@ impl PglbConn<ComputeConnect> {
                     };
                     match msg? {
                         PglbMessage::Postgres(mut payload) => {
-                            let Some(msg) = PgRawMessage::decode(&mut payload, false)? else {
+                            let Some(msg) = PgRawMessage::decode(&mut payload, first_auth_proxy_request)? else {
                                 bail!("auth proxy sent invalid message");
                             };
+                            first_auth_proxy_request = false;
                             compute_stream.send(msg).await?;
                         }
                         PglbMessage::Control(PglbControlMessage::ConnectionInitiated(_)) => {
@@ -556,13 +559,14 @@ impl PglbConn<ComputeConnect> {
                     }
                 }
 
-                msg = compute_stream.next() => {
+                msg = compute_stream.next(), if resps > 0 => {
                     let Some(msg) = msg else {
                         bail!("compute disconnected");
                     };
                     match msg? {
                         PgRawMessage::SslRequest => bail!("protocol violation"),
                         msg  => {
+                            resps -= 1;
                             let mut buf = BytesMut::new();
                             msg.encode(&mut buf)?;
                             auth_stream.send(proxy::PglbMessage::Postgres(
@@ -595,14 +599,18 @@ impl PglbConn<ComputePassthrough> {
                     let Some(msg) = msg else {
                         bail!("compute disconnected");
                     };
-                    compute_stream.send(msg?).await?;
+                    let msg = msg?;
+                    dbg!(&msg);
+                    compute_stream.send(msg).await?;
                 }
 
                 msg = compute_stream.next() => {
                     let Some(msg) = msg else {
                         bail!("compute disconnected");
                     };
-                    client_stream.send(msg?).await?;
+                    let msg = msg?;
+                    dbg!(&msg);
+                    client_stream.send(msg).await?;
                 }
             }
         }
