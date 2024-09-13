@@ -81,6 +81,7 @@ impl<'a> AuthFlow<'a, Begin> {
 
     /// Move to the next step by sending auth method's name & params to client.
     pub(crate) async fn begin<M: AuthMethod>(self, method: M) -> io::Result<AuthFlow<'a, M>> {
+        dbg!("sending auth begin message");
         self.stream
             .write_message(&method.first_message(self.tls_server_end_point.supported()))
             .await?;

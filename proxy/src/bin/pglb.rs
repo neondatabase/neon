@@ -6,7 +6,7 @@ use std::{
 };
 
 use anyhow::{anyhow, bail, Context, Result};
-use bytes::{Buf, BufMut, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use futures::{SinkExt, StreamExt};
 use indexmap::IndexMap;
 use itertools::Itertools;
@@ -446,9 +446,11 @@ impl PglbConn<AuthPassthrough> {
                     };
                     match msg? {
                         PglbMessage::Postgres(mut payload) => {
+                            println!("msg {payload:?}");
                             let Some(msg) = PgRawMessage::decode(&mut payload, false)? else {
                                 bail!("auth proxy sent invalid message");
                             };
+                            println!("parsed msg {msg:?}");
                             client_stream.send(msg).await?;
                         }
                         PglbMessage::Control(PglbControlMessage::ConnectionInitiated(_)) => {
@@ -649,10 +651,11 @@ impl tokio_util::codec::Decoder for PgRawCodec {
     }
 }
 
+#[derive(Debug)]
 pub enum PgRawMessage {
     SslRequest,
-    Start(Vec<u8>),
-    Generic { tag: u8, payload: Vec<u8> },
+    Start(Bytes),
+    Generic { tag: u8, payload: Bytes },
 }
 
 impl PgRawMessage {
@@ -663,13 +666,13 @@ impl PgRawMessage {
                 dst.put_u32(80877103);
             }
             Self::Start(payload) => {
-                dst.put_u32(payload.len() as u32 + 4);
-                dst.put_slice(&payload);
+                // dst.put_u32(payload.len() as u32 + 4);
+                dst.put_slice(payload);
             }
             Self::Generic { tag, payload } => {
-                dst.put_u8(*tag);
-                dst.put_u32(payload.len() as u32 + 4);
-                dst.put_slice(&payload);
+                // dst.put_u8(*tag);
+                // dst.put_u32(payload.len() as u32 + 4);
+                dst.put_slice(payload);
             }
         }
         Ok(())
@@ -689,7 +692,7 @@ impl PgRawMessage {
             if length == 8 && src[4..8] == 80877103u32.to_be_bytes() {
                 Ok(Some(PgRawMessage::SslRequest))
             } else {
-                Ok(Some(PgRawMessage::Start(src.split_to(length).to_vec())))
+                Ok(Some(PgRawMessage::Start(src.split_to(length).freeze())))
             }
         } else {
             if src.remaining() < 5 {
@@ -697,14 +700,14 @@ impl PgRawMessage {
                 return Ok(None);
             }
             let tag = src[0];
-            let length = u32::from_be_bytes(src[1..5].try_into().unwrap()) as usize - 1;
+            let length = u32::from_be_bytes(src[1..5].try_into().unwrap()) as usize + 1;
             if src.remaining() < length {
                 src.reserve(length - src.remaining());
                 return Ok(None);
             }
             Ok(Some(PgRawMessage::Generic {
                 tag,
-                payload: src.split_to(length).to_vec(),
+                payload: src.split_to(length).freeze(),
             }))
         }
     }

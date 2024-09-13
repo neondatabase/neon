@@ -27,6 +27,7 @@ use tokio::io::join;
 use tokio_postgres::config::AuthKeys;
 use tokio_util::codec::Framed;
 
+use crate::auth::backend::ComputeCredentialKeys;
 use crate::auth::backend::ComputeCredentials;
 use crate::auth_proxy::AuthProxyStream;
 use crate::auth_proxy::TLS_SERVER_END_POINT;
@@ -55,6 +56,7 @@ use once_cell::sync::OnceCell;
 use pq_proto::{BeMessage as Be, StartupMessageParams};
 use regex::Regex;
 use smol_str::{format_smolstr, SmolStr};
+use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use thiserror::Error;
@@ -493,14 +495,13 @@ pub async fn handle_stream(
 
     // wake the compute
     let node_info = user_info.wake_compute(&RequestMonitoring::test()).await?;
-    let socket: SocketAddr = node_info.config.get_host()?.parse()?;
 
     println!("woke compute");
 
+    let addr: IpAddr = node_info.config.get_host()?.parse()?;
+    let socket = SocketAddr::new(addr, node_info.config.get_ports()[0]);
+
     // tell pglb that the compute is up
-    stream
-        .write_message(&pq_proto::BeMessage::AuthenticationOk)
-        .await?;
     stream
         .send(PglbMessage::Control(PglbControlMessage::ConnectToCompute {
             socket,
@@ -512,7 +513,7 @@ pub async fn handle_stream(
     frontend::startup_message(params.iter(), &mut buf)?;
     stream.send(PglbMessage::Postgres(buf.split())).await?;
 
-    auth_with_compute(&mut stream, &node_info).await?;
+    auth_with_compute(&mut stream, user_info.get_keys()).await?;
 
     stream
         .send(PglbMessage::Control(PglbControlMessage::ComputeEstablish))
@@ -527,6 +528,8 @@ async fn auth_with_user(
     conn_info: &ConnectionInitiatedPayload,
     params: &StartupMessageParams,
 ) -> anyhow::Result<crate::auth_proxy::Backend<'static, ComputeCredentials>> {
+    dbg!("auth...");
+
     // Extract credentials which we're going to use for auth.
     let user_info = auth::ComputeUserInfoMaybeEndpoint {
         user: params.get("user").context("missing user")?.into(),
@@ -536,6 +539,8 @@ async fn auth_with_user(
             .map(|h| h.split_once('.').map_or(h, |(ep, _)| ep).into()),
         options: NeonOptions::parse_params(params),
     };
+
+    dbg!("parsed used info");
 
     // authenticate the user
     let user_info = config.backend.as_ref().map(|()| user_info);
@@ -558,12 +563,11 @@ async fn auth_with_user(
 
 async fn auth_with_compute(
     stream: &mut AuthProxyStream,
-    node_info: &NodeInfo,
+    keys: &ComputeCredentialKeys,
 ) -> anyhow::Result<()> {
-    let AuthKeys::ScramSha256(scram_keys) = node_info
-        .config
-        .get_auth_keys()
-        .context("missing auth keys")?;
+    let ComputeCredentialKeys::AuthKeys(AuthKeys::ScramSha256(scram_keys)) = keys else {
+        bail!("missing keys");
+    };
 
     // compute offers sasl
     stream
@@ -576,7 +580,7 @@ async fn auth_with_compute(
     let mut buf = BytesMut::new();
 
     // send auth message
-    let mut scram = ScramSha256::new_with_keys(scram_keys, ChannelBinding::unsupported());
+    let mut scram = ScramSha256::new_with_keys(*scram_keys, ChannelBinding::unsupported());
     frontend::sasl_initial_response(sasl::SCRAM_SHA_256, scram.message(), &mut buf)?;
     stream.send(PglbMessage::Postgres(buf.split())).await?;
 

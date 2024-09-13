@@ -104,22 +104,23 @@ async fn auth_quirks(
     // If there's no project so far, that entails that client doesn't
     // support SNI or other means of passing the endpoint (project) name.
     // We now expect to see a very specific payload in the place of password.
-    let (info, unauthenticated_password) = match user_info.try_into() {
+    let (info) = match user_info.try_into() {
         Err(info) => {
-            let res = hacks::password_hack_no_authentication(info, client).await?;
+            todo!()
+            // let res = hacks::password_hack_no_authentication(info, client).await?;
 
-            let password = match res.keys {
-                ComputeCredentialKeys::Password(p) => p,
-                ComputeCredentialKeys::AuthKeys(_) | ComputeCredentialKeys::None => {
-                    unreachable!("password hack should return a password")
-                }
-            };
-            (res.info, Some(password))
+            // let password = match res.keys {
+            //     ComputeCredentialKeys::Password(p) => p,
+            //     ComputeCredentialKeys::AuthKeys(_) | ComputeCredentialKeys::None => {
+            //         unreachable!("password hack should return a password")
+            //     }
+            // };
+            // (res.info, Some(password))
         }
-        Ok(info) => (info, None),
+        Ok(info) => info,
     };
 
-    info!("fetching user's authentication info");
+    dbg!("fetching user's authentication info");
     let cached_secret = api
         .get_role_secret(&RequestMonitoring::test(), &info)
         .await?;
@@ -132,11 +133,11 @@ async fn auth_quirks(
         // If we don't have an authentication secret, we mock one to
         // prevent malicious probing (possible due to missing protocol steps).
         // This mocked secret will never lead to successful authentication.
-        info!("authentication info not found, mocking it");
+        dbg!("authentication info not found, mocking it");
         AuthSecret::Scram(scram::ServerSecret::mock(rand::random()))
     };
 
-    match authenticate_with_secret(secret, info, client, unauthenticated_password, config).await {
+    match authenticate_with_secret(secret, info, client, config).await {
         Ok(keys) => Ok(keys),
         Err(e) => {
             if e.is_auth_failed() {
@@ -152,27 +153,27 @@ async fn authenticate_with_secret(
     secret: AuthSecret,
     info: ComputeUserInfo,
     client: &mut AuthProxyStream,
-    unauthenticated_password: Option<Vec<u8>>,
+    // unauthenticated_password: Option<Vec<u8>>,
     config: &'static AuthenticationConfig,
 ) -> auth::Result<ComputeCredentials> {
-    if let Some(password) = unauthenticated_password {
-        let ep = EndpointIdInt::from(&info.endpoint);
+    // if let Some(password) = unauthenticated_password {
+    //     let ep = EndpointIdInt::from(&info.endpoint);
 
-        let auth_outcome =
-            validate_password_and_exchange(&config.thread_pool, ep, &password, secret).await?;
-        let keys = match auth_outcome {
-            crate::sasl::Outcome::Success(key) => key,
-            crate::sasl::Outcome::Failure(reason) => {
-                info!("auth backend failed with an error: {reason}");
-                return Err(auth::AuthError::auth_failed(&*info.user));
-            }
-        };
+    //     let auth_outcome =
+    //         validate_password_and_exchange(&config.thread_pool, ep, &password, secret).await?;
+    //     let keys = match auth_outcome {
+    //         crate::sasl::Outcome::Success(key) => key,
+    //         crate::sasl::Outcome::Failure(reason) => {
+    //             info!("auth backend failed with an error: {reason}");
+    //             return Err(auth::AuthError::auth_failed(&*info.user));
+    //         }
+    //     };
 
-        // we have authenticated the password
-        client.write_message_noflush(&pq_proto::BeMessage::AuthenticationOk)?;
+    //     // we have authenticated the password
+    //     client.write_message_noflush(&pq_proto::BeMessage::AuthenticationOk)?;
 
-        return Ok(ComputeCredentials { info, keys });
-    }
+    //     return Ok(ComputeCredentials { info, keys });
+    // }
 
     // Finally, proceed with the main auth flow (SCRAM-based).
     classic::authenticate(info, client, config, secret).await
@@ -193,6 +194,7 @@ impl<'a> Backend<'a, ComputeUserInfoMaybeEndpoint> {
     ) -> auth::Result<Backend<'a, ComputeCredentials>> {
         let res = match self {
             Self::Console(api, user_info) => {
+                dbg!("authenticating...");
                 info!(
                     user = &*user_info.user,
                     project = user_info.endpoint(),
@@ -204,7 +206,7 @@ impl<'a> Backend<'a, ComputeUserInfoMaybeEndpoint> {
             }
         };
 
-        info!("user successfully authenticated");
+        dbg!("user successfully authenticated");
         Ok(res)
     }
 }

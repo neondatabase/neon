@@ -23,7 +23,7 @@ pub(super) async fn authenticate(
             return Err(auth::AuthError::bad_auth_method("MD5"));
         }
         AuthSecret::Scram(secret) => {
-            info!("auth endpoint chooses SCRAM");
+            dbg!("auth endpoint chooses SCRAM");
             let scram = auth_proxy::Scram(&secret);
 
             let auth_outcome = tokio::time::timeout(

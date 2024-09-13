@@ -33,7 +33,7 @@ struct ProxyCliArgs {
     #[clap(
         short,
         long,
-        default_value = "http://localhost:3000/authenticate_proxy_request/"
+        default_value = "http://localhost:3000/authenticate_proxy_request"
     )]
     auth_endpoint: String,
     /// timeout for the TLS handshake
@@ -170,7 +170,7 @@ async fn main() {
         rate_limit_ip_subnet: args.auth_rate_limit_ip_subnet,
     };
 
-    let config = Box::leak(Box::new(AuthProxyConfig { backend, auth }));
+    let config = &*Box::leak(Box::new(AuthProxyConfig { backend, auth }));
 
     loop {
         select! {
@@ -183,7 +183,9 @@ async fn main() {
             }
             stream = conn.accept_bi() => {
                 let (send, recv) = stream.unwrap();
-                tasks.spawn(handle_stream(config, send, recv));
+                tasks.spawn(async move {
+                    handle_stream(config, send, recv).await.inspect_err(|e| println!("err {e:?}"))
+                });
             }
         }
     }
