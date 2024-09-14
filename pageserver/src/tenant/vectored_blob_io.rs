@@ -422,7 +422,7 @@ impl VectoredReadPlanner {
         match flag {
             BlobFlag::None => {
                 let blobs_for_key = self.blobs.entry(key).or_default();
-                blobs_for_key.push((lsn, start_offset, end_offset, false));
+                blobs_for_key.push((lsn, start_offset, end_offset, false /* I think `false` is not always correct here, but it needs to be so the planner stops */));
             }
             BlobFlag::ReplaceAll => {
                 let blobs_for_key = self.blobs.entry(key).or_default();
