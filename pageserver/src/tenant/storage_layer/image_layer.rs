@@ -513,7 +513,7 @@ impl ImageLayerInner {
                     range_end_handled = true;
                     break;
                 } else {
-                    planner.handle(key, self.lsn, offset, flag);
+                    planner.handle(key, self.lsn, offset, flag, true);
                 }
             }
 

@@ -359,7 +359,7 @@ pub struct VectoredReadPlanner {
     // Note: last bool is will_init
     blobs: BTreeMap<Key, Vec<(Lsn, u64, u64, bool)>>,
     // Arguments for previous blob passed into [`VectoredReadPlanner::handle`]
-    prev: Option<(Key, Lsn, u64, BlobFlag)>,
+    prev: Option<(Key, Lsn, u64, BlobFlag, bool)>,
 
     max_read_size: usize,
 
@@ -394,40 +394,62 @@ impl VectoredReadPlanner {
     ///   This is used for WAL records that `will_init`.
     /// * [`BlobFlag::Ignore`]: This blob should not be included in the read. This happens
     ///   if the blob is cached.
-    pub fn handle(&mut self, key: Key, lsn: Lsn, offset: u64, flag: BlobFlag) {
+    pub fn handle(&mut self, key: Key, lsn: Lsn, offset: u64, flag: BlobFlag, will_init: bool) {
         // Implementation note: internally lag behind by one blob such that
         // we have a start and end offset when initialising [`VectoredRead`]
-        let (prev_key, prev_lsn, prev_offset, prev_flag) = match self.prev {
+        let (prev_key, prev_lsn, prev_offset, prev_flag, prev_will_init) = match self.prev {
             None => {
-                self.prev = Some((key, lsn, offset, flag));
+                self.prev = Some((key, lsn, offset, flag, will_init));
                 return;
             }
             Some(prev) => prev,
         };
 
-        self.add_blob(prev_key, prev_lsn, prev_offset, offset, prev_flag);
+        self.add_blob(
+            prev_key,
+            prev_lsn,
+            prev_offset,
+            offset,
+            prev_flag,
+            prev_will_init,
+        );
 
-        self.prev = Some((key, lsn, offset, flag));
+        self.prev = Some((key, lsn, offset, flag, will_init));
     }
 
     pub fn handle_range_end(&mut self, offset: u64) {
-        if let Some((prev_key, prev_lsn, prev_offset, prev_flag)) = self.prev {
-            self.add_blob(prev_key, prev_lsn, prev_offset, offset, prev_flag);
+        if let Some((prev_key, prev_lsn, prev_offset, prev_flag, prev_will_init)) = self.prev {
+            self.add_blob(
+                prev_key,
+                prev_lsn,
+                prev_offset,
+                offset,
+                prev_flag,
+                prev_will_init,
+            );
         }
 
         self.prev = None;
     }
 
-    fn add_blob(&mut self, key: Key, lsn: Lsn, start_offset: u64, end_offset: u64, flag: BlobFlag) {
+    fn add_blob(
+        &mut self,
+        key: Key,
+        lsn: Lsn,
+        start_offset: u64,
+        end_offset: u64,
+        flag: BlobFlag,
+        will_init: bool,
+    ) {
         match flag {
             BlobFlag::None => {
                 let blobs_for_key = self.blobs.entry(key).or_default();
-                blobs_for_key.push((lsn, start_offset, end_offset, false /* I think `false` is not always correct here, but it needs to be so the planner stops */));
+                blobs_for_key.push((lsn, start_offset, end_offset, will_init));
             }
             BlobFlag::ReplaceAll => {
                 let blobs_for_key = self.blobs.entry(key).or_default();
                 blobs_for_key.clear();
-                blobs_for_key.push((lsn, start_offset, end_offset, true));
+                blobs_for_key.push((lsn, start_offset, end_offset, will_init));
             }
             BlobFlag::Ignore => {}
         }

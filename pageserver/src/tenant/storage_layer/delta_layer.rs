@@ -934,7 +934,7 @@ impl DeltaLayerInner {
                     range_end_handled = true;
                     break;
                 } else {
-                    planner.handle(key, lsn, blob_ref.pos(), flag);
+                    planner.handle(key, lsn, blob_ref.pos(), flag, blob_ref.will_init());
                 }
             }
 
