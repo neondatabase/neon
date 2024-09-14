@@ -588,8 +588,11 @@ impl ImageLayerInner {
             for (_, blob_meta) in read.blobs_at.as_slice() {
                 let (tx, rx) = oneshot::channel();
                 senders.insert((blob_meta.key, blob_meta.lsn), tx);
-
-                reconstruct_state.update_key(&blob_meta.key, blob_meta.lsn, true, rx);
+                reconstruct_state.update_key(
+                    &blob_meta.key,
+                    blob_meta.lsn,
+                    super::FutureValue::Img { rx },
+                );
             }
 
             let buf_size = read.size();
@@ -624,9 +627,7 @@ impl ImageLayerInner {
                             let sender = senders
                                 .remove(&(meta.meta.key, meta.meta.lsn))
                                 .expect("sender must exist");
-                            // TODO: this is silly - sort it out
-                            let bytes = Value::ser(&Value::Image(Bytes::copy_from_slice(buf)))
-                                .expect("stupid but correct");
+                            let bytes = Bytes::copy_from_slice(buf);
                             let _ = sender.send(Ok(bytes.into()));
                         }
 
