@@ -108,6 +108,7 @@ fn parse_filename(name: &str) -> (Range<Key>, Range<Lsn>) {
 enum LineKind {
     GcCutoff,
     Branch,
+    KeyVertical,
 }
 
 impl From<LineKind> for Fill {
@@ -115,6 +116,7 @@ impl From<LineKind> for Fill {
         match value {
             LineKind::GcCutoff => Fill::Color(rgb(255, 0, 0)),
             LineKind::Branch => Fill::Color(rgb(0, 255, 0)),
+            LineKind::KeyVertical => Fill::Color(rgb(0, 0, 255)),
         }
     }
 }
@@ -126,6 +128,7 @@ impl FromStr for LineKind {
         Ok(match s {
             "gc_cutoff" => LineKind::GcCutoff,
             "branch" => LineKind::Branch,
+            "key" => LineKind::KeyVertical,
             _ => anyhow::bail!("unsupported linekind: {s}"),
         })
     }
@@ -142,25 +145,31 @@ pub fn main() -> Result<()> {
     let stdin = io::stdin();
 
     let mut lines: Vec<(Lsn, LineKind)> = vec![];
+    let mut vertical_lines: Vec<(Key, LineKind)> = vec![];
 
     for (lineno, line) in stdin.lock().lines().enumerate() {
         let lineno = lineno + 1;
 
         let line = line.unwrap();
-        if let Some((kind, lsn)) = line.split_once(':') {
-            let (kind, lsn) = LineKind::from_str(kind)
-                .context("parse kind")
-                .and_then(|kind| {
-                    if lsn.contains('/') {
-                        Lsn::from_str(lsn)
-                    } else {
-                        Lsn::from_hex(lsn)
+        if let Some((kind, what)) = line.split_once(':') {
+            (|| {
+                match LineKind::from_str(kind).context("parse kind")? {
+                    kind @ LineKind::Branch | kind @ LineKind::GcCutoff => {
+                        let lsn = if what.contains('/') {
+                            Lsn::from_str(what)?
+                        } else {
+                            Lsn::from_hex(what)?
+                        };
+                        lines.push((lsn, kind));
                     }
-                    .map(|lsn| (kind, lsn))
-                    .context("parse lsn")
-                })
-                .with_context(|| format!("parse {line:?} on {lineno}"))?;
-            lines.push((lsn, kind));
+                    kind @ LineKind::KeyVertical => {
+                        let key = Key::from_hex(what).context("parse key")?;
+                        vertical_lines.push((key, kind));
+                    }
+                }
+                anyhow::Ok(())
+            })()
+            .with_context(|| format!("parse {line:?} on {lineno}"))?;
             continue;
         }
         let line = PathBuf::from_str(&line).unwrap();
@@ -175,7 +184,7 @@ pub fn main() -> Result<()> {
     }
 
     // Collect all coordinates
-    let mut keys: Vec<Key> = Vec::with_capacity(files.len());
+    let mut keys: Vec<Key> = Vec::with_capacity(files.len() + vertical_lines.len());
     let mut lsns: Vec<Lsn> = Vec::with_capacity(files.len() + lines.len());
 
     for Layer {
@@ -191,6 +200,8 @@ pub fn main() -> Result<()> {
     }
 
     lsns.extend(lines.iter().map(|(lsn, _)| *lsn));
+
+    keys.extend(vertical_lines.iter().map(|(key, _)| *key));
 
     // Analyze
     let key_map = build_coordinate_compression_map(keys);
@@ -278,6 +289,25 @@ pub fn main() -> Result<()> {
                 stretch * (lsn_map.len() as f32 - (lsn_end as f32 - ymargin - lsn_offset)),
                 (key_map.len() + 10) as f32,
                 stretch * (lsn_diff - 2.0 * ymargin)
+            )
+            .fill(kind)
+        );
+    }
+
+    for (key, kind) in vertical_lines {
+        let key = *key_map.get(&key).unwrap();
+        let stretch = 2.0;
+        let xmargin = 0.05;
+        let ymargin = 0.05;
+        let lsn_diff = 0.3;
+        let lsn_offset = -lsn_diff / 2.0;
+        println!(
+            "{}",
+            rectangle(
+                5.0 + key as f32,
+                0.0,
+                (key_map.len() + 10) as f32,
+                lsn_map.len() as f32,
             )
             .fill(kind)
         );
