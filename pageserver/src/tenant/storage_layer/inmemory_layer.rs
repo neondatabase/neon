@@ -497,9 +497,6 @@ impl InMemoryLayer {
                         .expect("sender must exist");
                     match read.into_result().expect("we run execute() above") {
                         Err(e) => {
-                            let sender = senders
-                                .remove(&(key, entry_lsn))
-                                .expect("sender must exist");
                             let _ = sender
                                 .send(Err(std::io::Error::new(e.kind(), "dio vec read failed")));
                         }
