@@ -151,5 +151,5 @@ def test_optimal_cache_size_approximation(neon_simple_env: NeonEnv):
     cur.execute(f"select approximate_optimal_cache_size({int(after - before + 1)}, 0.99)")
     optimal_cache_size = cur.fetchall()[0][0]
     log.info(f"Optimal cache size for 99% hit rate {optimal_cache_size}")
-    assert ws_estimation >= 1000 and ws_estimation <= 2000
-    assert optimal_cache_size >= 100 and optimal_cache_size <= 200
+    assert ws_estimation >= 20000 and ws_estimation <= 30000
+    assert optimal_cache_size >= 2000 and optimal_cache_size <= 7000

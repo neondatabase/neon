@@ -1263,7 +1263,7 @@ approximate_working_set_size_seconds(PG_FUNCTION_ARGS)
 		int32 dc;
 		time_t duration = PG_ARGISNULL(0) ? (time_t)-1 : PG_GETARG_INT32(0);
 		LWLockAcquire(lfc_lock, LW_SHARED);
-		dc = (int32) estimateSHLL(&lfc_ctl->wss_estimation, duration, 0);
+		dc = (int32) estimateSHLL(&lfc_ctl->wss_estimation, duration, 1.0);
 		LWLockRelease(lfc_lock);
 		PG_RETURN_INT32(dc);
 	}

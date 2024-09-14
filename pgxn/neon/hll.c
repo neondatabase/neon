@@ -147,6 +147,7 @@ static uint32_t
 getAccessCount(const HyperLogLogRegister* reg, time_t duration)
 {
 	uint32_t count = 0;
+	//for (size_t i = 0; i < HIST_SIZE && HIST_MIN_INTERVAL*((1<<i) + ((1<<i)/2))/2 <= duration; i++) {
 	for (size_t i = 0; i < HIST_SIZE && HIST_MIN_INTERVAL*((1 << i)/2) <= duration; i++) {
 		count += reg->histogram[i];
 	}
@@ -159,14 +160,15 @@ getMaximum(const HyperLogLogRegister* reg, TimestampTz since, time_t duration, d
 	uint8 max = 0;
 	size_t i, j;
 	uint32_t total_count = 0;
-	for (i = 0; i < HIST_SIZE && (HIST_MIN_INTERVAL << i) <= duration; i++) {
-		total_count += getAccessCount(reg, duration);
+	for (i = 0; i < HLL_C_BITS + 1; i++)
+	{
+		total_count += getAccessCount(&reg[i], duration);
 	}
 	if (total_count != 0)
 	{
 		for (i = 0; i < HLL_C_BITS + 1; i++)
 		{
-			if (reg[i].ts >= since && 1.0 - getAccessCount(reg, duration) / total_count <= min_hit_ratio)
+			if (reg[i].ts >= since && 1.0 - (double)getAccessCount(&reg[i], duration) / total_count <= min_hit_ratio)
 			{
 				max = i;
 			}
