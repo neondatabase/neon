@@ -650,7 +650,7 @@ impl PageServerHandler {
                         rel,
                         blkno,
                     }) => {
-                        let span = tracing::info_span!("handle_get_page_at_lsn_request_batched", %tenant_id, %timeline_id, shard_id = tracing::field::Empty, req_lsn = %request_lsn, batch_size = tracing::field::Empty);
+                        let span = tracing::info_span!("handle_get_page_at_lsn_request_batched", %tenant_id, %timeline_id, shard_id = tracing::field::Empty, req_lsn = %request_lsn, batch_size = tracing::field::Empty, batch_id = tracing::field::Empty);
                         let key = rel_block_to_key(rel, blkno);
                         let shard = match self
                             .timeline_handles
@@ -793,6 +793,12 @@ impl PageServerHandler {
                 } => {
                     CONSECUTIVE_NONBLOCKING_GETPAGE_REQUESTS_HISTOGRAM.observe(pages.len() as f64);
                     span.record("batch_size", pages.len() as u64);
+                    static BATCH_ID: Lazy<std::sync::atomic::AtomicUsize> =
+                        Lazy::new(|| std::sync::atomic::AtomicUsize::new(0));
+                    span.record(
+                        "batch_id",
+                        BATCH_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as u64,
+                    );
                     fail::fail_point!("ps::handle-pagerequest-message::getpage");
                     // shard_id is filled in by the handler
                     (

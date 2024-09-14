@@ -9,6 +9,7 @@ mod layer_name;
 pub mod merge_iterator;
 
 use tokio::sync::{self};
+use tracing::{debug, Instrument};
 use utils::bin_ser::BeSer;
 pub mod split_writer;
 
@@ -160,7 +161,7 @@ pub(crate) struct ValuesReconstructState {
 
 enum IoConcurrency {
     Serial {
-        prev_io: Option<tokio::task::JoinHandle<()>>,
+        prev_io: Option<(usize, tokio::task::JoinHandle<()>)>,
     },
     Parallel,
 }
@@ -170,15 +171,22 @@ impl IoConcurrency {
     where
         F: std::future::Future<Output = ()> + Send + 'static,
     {
+        static IO_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let io_id = IO_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let span = tracing::debug_span!("spawned_io", io_id,);
         match self {
             IoConcurrency::Serial { prev_io } => {
                 let prev = prev_io.take();
-                *prev_io = Some(tokio::spawn(async move {
-                    if let Some(prev) = prev {
-                        prev.await.unwrap();
+                *prev_io = Some((io_id, tokio::spawn(
+                    async move {
+                        if let Some((prev_id, prev_task)) = prev {
+                            debug!(prev_io = prev_id, "Waiting for previous IO to complete");
+                            prev_task.await.unwrap();
+                        }
+                        fut.await;
                     }
-                    fut.await;
-                }));
+                    .instrument(span),
+                )));
             }
             IoConcurrency::Parallel => {
                 tokio::spawn(fut);
