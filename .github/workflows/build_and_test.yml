@@ -177,7 +177,11 @@ jobs:
       # but with disabled `debug-assertions` to excersice release code paths
       - name: Run cargo clippy (debug, with debug-assertions=false)
         run: |
-          parallel --jobs 8 "cargo hack --feature-powerset --partition {}/8 clippy --target-dir target/partition-{} $CLIPPY_COMMON_ARGS -C debug-assertions=off" ::: 1 2 3 4 5 6 7 8
+          for N in 4 8 10 12 14 16 18 20; do
+            echo "Running clippy with debug-assertions=false for partition ${N}"
+            time parallel --jobs ${N} "cargo hack --feature-powerset --partition {}/${N} clippy --target-dir target/partition-{} $CLIPPY_COMMON_ARGS -C debug-assertions=off" ::: $(seq -s " " 1 ${N})
+            rm -rf target/partition-*
+          done
 
       - name: Check documentation generation
         run: cargo doc --workspace --no-deps --document-private-items
