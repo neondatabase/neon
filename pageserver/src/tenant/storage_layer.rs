@@ -118,7 +118,7 @@ pub(crate) async fn convert(
                     match value {
                         Value::WalRecord(rec) => {
                             to.records.push((lsn, rec));
-                        },
+                        }
                         Value::Image(img) => {
                             assert!(to.img.is_none());
                             to.img = Some((lsn, img));
@@ -191,16 +191,19 @@ impl IoConcurrency {
         match self {
             IoConcurrency::Serial { prev_io } => {
                 let prev = prev_io.take();
-                *prev_io = Some((io_id, tokio::spawn(
-                    async move {
-                        if let Some((prev_id, prev_task)) = prev {
-                            debug!(prev_io = prev_id, "Waiting for previous IO to complete");
-                            prev_task.await.unwrap();
+                *prev_io = Some((
+                    io_id,
+                    tokio::spawn(
+                        async move {
+                            if let Some((prev_id, prev_task)) = prev {
+                                debug!(prev_io = prev_id, "Waiting for previous IO to complete");
+                                prev_task.await.unwrap();
+                            }
+                            fut.await;
                         }
-                        fut.await;
-                    }
-                    .instrument(span),
-                )));
+                        .instrument(span),
+                    ),
+                ));
             }
             IoConcurrency::Parallel => {
                 tokio::spawn(fut);
