@@ -13,7 +13,7 @@ use rand::prelude::*;
 use tokio::task::JoinSet;
 use tracing::info;
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::future::Future;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
@@ -295,64 +295,58 @@ async fn main_impl(
                 .await
                 .unwrap();
 
+            let (mut pagestream_tx, mut pagestream_rx) = client.split();
+
             start_work_barrier.wait().await;
             let client_start = Instant::now();
             let mut ticks_processed = 0;
-            while !cancel.is_cancelled() {
-                // Detect if a request took longer than the RPS rate
-                if let Some(period) = &rps_period {
-                    let periods_passed_until_now =
-                        usize::try_from(client_start.elapsed().as_micros() / period.as_micros())
+            let (rq_tx, mut rq_rx) = tokio::sync::mpsc::channel(4096);
+            let sender = tokio::spawn(async move {
+                while !cancel.is_cancelled() {
+                    let start = Instant::now();
+                    let req = {
+                        let mut rng = rand::thread_rng();
+                        let r = &ranges[weights.sample(&mut rng)];
+                        let key: i128 = rng.gen_range(r.start..r.end);
+                        let key = Key::from_i128(key);
+                        assert!(key.is_rel_block_key());
+                        let (rel_tag, block_no) = key
+                            .to_rel_block()
+                            .expect("we filter non-rel-block keys out above");
+                        PagestreamGetPageRequest {
+                            request_lsn: if rng.gen_bool(args.req_latest_probability) {
+                                Lsn::MAX
+                            } else {
+                                r.timeline_lsn
+                            },
+                            not_modified_since: r.timeline_lsn,
+                            rel: rel_tag,
+                            blkno: block_no,
+                        }
+                    };
+                    pagestream_tx.send_getpage(req).await.unwrap();
+                    rq_tx.send(start).await.unwrap();
+                }
+            });
+
+            let receiver = tokio::spawn(async move {
+                while let Some(start) = rq_rx.recv().await {
+                    let response = pagestream_rx.recv_getpage().await.unwrap();
+                    let end = Instant::now();
+                    live_stats.request_done();
+                    STATS.with(|stats| {
+                        stats
+                            .borrow()
+                            .lock()
+                            .unwrap()
+                            .observe(end.duration_since(start))
                             .unwrap();
-
-                    if periods_passed_until_now > ticks_processed {
-                        live_stats.missed((periods_passed_until_now - ticks_processed) as u64);
-                    }
-                    ticks_processed = periods_passed_until_now;
+                    });
                 }
+            });
 
-                let start = Instant::now();
-                let req = {
-                    let mut rng = rand::thread_rng();
-                    let r = &ranges[weights.sample(&mut rng)];
-                    let key: i128 = rng.gen_range(r.start..r.end);
-                    let key = Key::from_i128(key);
-                    assert!(key.is_rel_block_key());
-                    let (rel_tag, block_no) = key
-                        .to_rel_block()
-                        .expect("we filter non-rel-block keys out above");
-                    PagestreamGetPageRequest {
-                        request_lsn: if rng.gen_bool(args.req_latest_probability) {
-                            Lsn::MAX
-                        } else {
-                            r.timeline_lsn
-                        },
-                        not_modified_since: r.timeline_lsn,
-                        rel: rel_tag,
-                        blkno: block_no,
-                    }
-                };
-                client.getpage(req).await.unwrap();
-                let end = Instant::now();
-                live_stats.request_done();
-                ticks_processed += 1;
-                STATS.with(|stats| {
-                    stats
-                        .borrow()
-                        .lock()
-                        .unwrap()
-                        .observe(end.duration_since(start))
-                        .unwrap();
-                });
-
-                if let Some(period) = &rps_period {
-                    let next_at = client_start
-                        + Duration::from_micros(
-                            (ticks_processed) as u64 * u64::try_from(period.as_micros()).unwrap(),
-                        );
-                    tokio::time::sleep_until(next_at.into()).await;
-                }
-            }
+            sender.await.unwrap();
+            receiver.await.unwrap();
         })
     };
 
