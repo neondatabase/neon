@@ -88,13 +88,17 @@ pub(crate) struct VectoredValueReconstructState {
         Lsn,
         tokio::sync::oneshot::Receiver<Result<Bytes, std::io::Error>>,
     )>,
+    pub(crate) img: Option<(
+        Lsn,
+        tokio::sync::oneshot::Receiver<Result<Bytes, std::io::Error>>,
+    )>,
 
     pub(crate) situation: ValueReconstructSituation,
 }
 
 impl VectoredValueReconstructState {
     fn get_cached_lsn(&self) -> Option<Lsn> {
-        None
+        self.img.as_ref().map(|img| img.0)
     }
 }
 
@@ -104,7 +108,6 @@ pub(crate) async fn convert(
 ) -> Result<ValueReconstructState, PageReconstructError> {
     let mut to = ValueReconstructState::default();
 
-    let mut inited = false;
     for (lsn, fut) in from.records {
         match fut.await {
             Ok(res) => match res {
@@ -112,18 +115,13 @@ pub(crate) async fn convert(
                     let value = Value::des(&bytes)
                         .map_err(|err| PageReconstructError::Other(err.into()))?;
 
-                    match (inited, value) {
-                        (true, _) => {
-                            panic!("multiple will_init records, plan was wrong");
-                        }
-                        (false, Value::WalRecord(rec)) => {
-                            inited = rec.will_init();
+                    match value {
+                        Value::WalRecord(rec) => {
                             to.records.push((lsn, rec));
-                        }
-                        (false, Value::Image(img)) => {
+                        },
+                        Value::Image(img) => {
                             assert!(to.img.is_none());
                             to.img = Some((lsn, img));
-                            inited = true;
                         }
                     }
                 }
@@ -136,7 +134,23 @@ pub(crate) async fn convert(
             }
         }
     }
-    // do not assert inited=true here because it's kinda legitimate to ask for key that doesn't exist
+
+    if to.img.is_none() && from.img.is_some() {
+        let (lsn, fut) = from.img.expect("Has an image");
+        match fut.await {
+            Ok(res) => match res {
+                Ok(bytes) => {
+                    to.img = Some((lsn, bytes));
+                }
+                Err(err) => {
+                    return Err(PageReconstructError::Other(err.into()));
+                }
+            },
+            Err(err) => {
+                return Err(PageReconstructError::Other(err.into()));
+            }
+        }
+    }
 
     Ok(to)
 }
