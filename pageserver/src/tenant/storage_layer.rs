@@ -154,6 +154,37 @@ pub(crate) struct ValuesReconstructState {
     // Statistics that are still accessible as a caller of `get_vectored_impl`.
     layers_visited: u32,
     delta_layers_visited: u32,
+
+    io_concurrency: IoConcurrency,
+}
+
+enum IoConcurrency {
+    Serial {
+        prev_io: Option<tokio::task::JoinHandle<()>>,
+    },
+    Parallel,
+}
+
+impl IoConcurrency {
+    pub(crate) fn spawn_io<F>(&mut self, fut: F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        match self {
+            IoConcurrency::Serial { prev_io } => {
+                let prev = prev_io.take();
+                *prev_io = Some(tokio::spawn(async move {
+                    if let Some(prev) = prev {
+                        prev.await.unwrap();
+                    }
+                    fut.await;
+                }));
+            }
+            IoConcurrency::Parallel => {
+                tokio::spawn(fut);
+            }
+        }
+    }
 }
 
 impl ValuesReconstructState {
@@ -164,7 +195,28 @@ impl ValuesReconstructState {
             keys_with_image_coverage: None,
             layers_visited: 0,
             delta_layers_visited: 0,
+            io_concurrency: {
+                static IO_CONCURRENCY: once_cell::sync::Lazy<String> =
+                    once_cell::sync::Lazy::new(|| {
+                        std::env::var("NEON_PAGESERVER_VALUE_RECONSTRUCT_IO_CONCURRENCY").unwrap()
+                    });
+                match IO_CONCURRENCY.as_str() {
+                    "parallel" => IoConcurrency::Parallel,
+                    "serial" => IoConcurrency::Serial { prev_io: None },
+                    x => panic!(
+                        "Invalid value for NEON_PAGESERVER_VALUE_RECONSTRUCT_IO_CONCURRENCY: {}",
+                        x
+                    ),
+                }
+            },
         }
+    }
+
+    pub(crate) fn spawn_io<F>(&mut self, fut: F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        self.io_concurrency.spawn_io(fut);
     }
 
     /// Associate a key with the error which it encountered and mark it as done

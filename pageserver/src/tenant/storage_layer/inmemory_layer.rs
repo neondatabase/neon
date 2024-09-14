@@ -478,7 +478,7 @@ impl InMemoryLayer {
 
         let read_from = inner.file.clone();
         let read_ctx = ctx.attached_child();
-        tokio::task::spawn(async move {
+        reconstruct_state.spawn_io(async move {
             let locked = read_from.read().await;
             let f = vectored_dio_read::execute(
                 &*locked,

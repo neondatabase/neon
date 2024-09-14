@@ -612,7 +612,7 @@ impl ImageLayerInner {
 
             let read_from = self.file.clone();
             let read_ctx = ctx.attached_child();
-            tokio::task::spawn(async move {
+            reconstruct_state.spawn_io(async move {
                 let buf = BytesMut::with_capacity(buf_size);
                 let vectored_blob_reader = VectoredBlobReader::new(&read_from);
                 let res = vectored_blob_reader.read_blobs(&read, buf, &read_ctx).await;
