@@ -260,43 +260,46 @@ impl Timeline {
             vectored_gets.push(key);
             key_state_slot.insert(KeyState::NeedsVectoredGet);
         }
-        // turn vectored_gets into a keyspace
-        let keyspace = {
-            // add_key reuqires monotonicity
-            vectored_gets.sort_unstable();
-            let mut acc = KeySpaceAccum::new();
-            for key in vectored_gets
-                .into_iter()
-                // in fact it requires strong monotonicity
-                .dedup()
-            {
-                acc.add_key(key);
-            }
-            acc.to_keyspace()
-        };
 
-        match self.get_vectored(keyspace, request_lsn, ctx).await {
-            Ok(results) => {
-                for (key, res) in results {
-                    if let Err(err) = &res {
-                        warn!(%key, ?err, "a key inside get_vectored failed with a per-key error");
-                    }
-                    let mut interests = key_states.range_mut((key, 0)..(key.next(), 0)).peekable();
-                    let first_interest = interests.next().unwrap();
-                    let next_interest = interests.peek().is_some();
-                    if !next_interest {
-                        match first_interest.1 {
-                            KeyState::NeedsVectoredGet => {
-                                *first_interest.1 = KeyState::Done(res);
-                            }
-                            KeyState::Done(_) => unreachable!(),
+        if !vectored_gets.is_empty() {
+            // turn vectored_gets into a keyspace
+            let keyspace = {
+                // add_key reuqires monotonicity
+                vectored_gets.sort_unstable();
+                let mut acc = KeySpaceAccum::new();
+                for key in vectored_gets
+                    .into_iter()
+                    // in fact it requires strong monotonicity
+                    .dedup()
+                {
+                    acc.add_key(key);
+                }
+                acc.to_keyspace()
+            };
+
+            match self.get_vectored(keyspace, request_lsn, ctx).await {
+                Ok(results) => {
+                    for (key, res) in results {
+                        if let Err(err) = &res {
+                            warn!(%key, ?err, "a key inside get_vectored failed with a per-key error");
                         }
-                        continue;
-                    } else {
-                        for ((_, _), state) in [first_interest].into_iter().chain(interests) {
-                            match state {
+                        let mut interests =
+                            key_states.range_mut((key, 0)..(key.next(), 0)).peekable();
+                        let first_interest = interests.next().unwrap();
+                        let next_interest = interests.peek().is_some();
+                        if !next_interest {
+                            match first_interest.1 {
                                 KeyState::NeedsVectoredGet => {
-                                    *state = KeyState::Done(match &res {
+                                    *first_interest.1 = KeyState::Done(res);
+                                }
+                                KeyState::Done(_) => unreachable!(),
+                            }
+                            continue;
+                        } else {
+                            for ((_, _), state) in [first_interest].into_iter().chain(interests) {
+                                match state {
+                                    KeyState::NeedsVectoredGet => {
+                                        *state = KeyState::Done(match &res {
                                         Ok(buf) => Ok(buf.clone()),
                                         // this `match` is working around the fact that we cannot Clone the PageReconstructError
                                         Err(err) => Err(match err {
@@ -312,54 +315,56 @@ impl Timeline {
                                             },
                                         }),
                                     });
+                                    }
+                                    KeyState::Done(_) => unreachable!(),
                                 }
-                                KeyState::Done(_) => unreachable!(),
                             }
                         }
                     }
                 }
-            }
-            Err(err) => {
-                warn!(?err, "get_vectored failed with a global error, mapping that error to per-key failure");
-                // this cannot really happen because get_vectored only errors globally on invalid LSN or too large batch size
-                for ((_, _), state) in key_states.iter_mut() {
-                    // this whole `match` is a lot like `From<GetVectoredError> for PageReconstructError`
-                    // but without taking ownership of the GetVectoredError
-                    match &err {
-                        GetVectoredError::Cancelled => {
-                            *state = KeyState::Done(Err(PageReconstructError::Cancelled));
-                        }
-                        // TODO: restructure get_vectored API to make this error per-key
-                        GetVectoredError::MissingKey(err) => {
-                            *state = KeyState::Done(Err(PageReconstructError::Other(anyhow::anyhow!("whole vectored get request failed because one or more of the requested keys were missing: {err:?}"))));
-                        }
-                        // TODO: restructure get_vectored API to make this error per-key
-                        GetVectoredError::GetReadyAncestorError(err) => {
-                            *state = KeyState::Done(Err(PageReconstructError::Other(anyhow::anyhow!("whole vectored get request failed because one or more key required ancestor that wasn't ready: {err:?}"))));
-                        }
-                        // TODO: restructure get_vectored API to make this error per-key
-                        GetVectoredError::Other(err) => {
-                            *state = KeyState::Done(Err(PageReconstructError::Other(
-                                anyhow::anyhow!("whole vectored get request failed: {err:?}"),
-                            )));
-                        }
-                        // TODO: we can prevent this error class by moving this check into the type system
-                        GetVectoredError::InvalidLsn(e) => {
-                            *state =
-                                KeyState::Done(Err(anyhow::anyhow!("invalid LSN: {e:?}").into()));
-                        }
-                        // NB: this should never happen in practice because we limit MAX_GET_VECTORED_KEYS
-                        // TODO: we can prevent this error class by moving this check into the type system
-                        GetVectoredError::Oversized(err) => {
-                            *state = KeyState::Done(Err(anyhow::anyhow!(
-                                "batching oversized: {err:?}"
-                            )
-                            .into()));
+                Err(err) => {
+                    warn!(?err, "get_vectored failed with a global error, mapping that error to per-key failure");
+                    // this cannot really happen because get_vectored only errors globally on invalid LSN or too large batch size
+                    for ((_, _), state) in key_states.iter_mut() {
+                        // this whole `match` is a lot like `From<GetVectoredError> for PageReconstructError`
+                        // but without taking ownership of the GetVectoredError
+                        match &err {
+                            GetVectoredError::Cancelled => {
+                                *state = KeyState::Done(Err(PageReconstructError::Cancelled));
+                            }
+                            // TODO: restructure get_vectored API to make this error per-key
+                            GetVectoredError::MissingKey(err) => {
+                                *state = KeyState::Done(Err(PageReconstructError::Other(anyhow::anyhow!("whole vectored get request failed because one or more of the requested keys were missing: {err:?}"))));
+                            }
+                            // TODO: restructure get_vectored API to make this error per-key
+                            GetVectoredError::GetReadyAncestorError(err) => {
+                                *state = KeyState::Done(Err(PageReconstructError::Other(anyhow::anyhow!("whole vectored get request failed because one or more key required ancestor that wasn't ready: {err:?}"))));
+                            }
+                            // TODO: restructure get_vectored API to make this error per-key
+                            GetVectoredError::Other(err) => {
+                                *state = KeyState::Done(Err(PageReconstructError::Other(
+                                    anyhow::anyhow!("whole vectored get request failed: {err:?}"),
+                                )));
+                            }
+                            // TODO: we can prevent this error class by moving this check into the type system
+                            GetVectoredError::InvalidLsn(e) => {
+                                *state = KeyState::Done(Err(
+                                    anyhow::anyhow!("invalid LSN: {e:?}").into()
+                                ));
+                            }
+                            // NB: this should never happen in practice because we limit MAX_GET_VECTORED_KEYS
+                            // TODO: we can prevent this error class by moving this check into the type system
+                            GetVectoredError::Oversized(err) => {
+                                *state = KeyState::Done(Err(anyhow::anyhow!(
+                                    "batching oversized: {err:?}"
+                                )
+                                .into()));
+                            }
                         }
                     }
                 }
-            }
-        };
+            };
+        }
 
         // get the results into the order in which they were requested
         let mut return_order: smallvec::SmallVec<[_; Timeline::MAX_GET_VECTORED_KEYS as usize]> =
