@@ -137,8 +137,12 @@ def test_optimal_cache_size_approximation(neon_simple_env: NeonEnv):
     cur.execute(
         "create table t_small(pk integer primary key, count integer default 0, payload text default repeat('?', 128))"
     )
-    cur.execute("insert into t_huge(pk) values (generate_series(1,1000000))") # table size is 21277 pages
-    cur.execute("insert into t_small(pk) values (generate_series(1,100000))") # table size is 2128 pages
+    cur.execute(
+        "insert into t_huge(pk) values (generate_series(1,1000000))"
+    )  # table size is 21277 pages
+    cur.execute(
+        "insert into t_small(pk) values (generate_series(1,100000))"
+    )  # table size is 2128 pages
     time.sleep(2)
     before = time.monotonic()
     for _ in range(100):
