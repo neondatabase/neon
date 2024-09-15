@@ -433,6 +433,8 @@ impl LayerFringe {
         let entry = self.layers.entry(layer_id.clone());
         match entry {
             Entry::Occupied(mut entry) => {
+                // On this branch, we don't add to planned_reads_by_lsn
+                // even though we might be interested in a different lsn_range.
                 entry.get_mut().target_keyspace.add_keyspace(keyspace);
             }
             Entry::Vacant(entry) => {
