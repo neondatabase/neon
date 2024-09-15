@@ -513,7 +513,7 @@ impl ImageLayerInner {
                     range_end_handled = true;
                     break;
                 } else {
-                    planner.handle(key, self.lsn, offset, flag, crate::tenant::vectored_blob_io::BlobType::RawImage);
+                    planner.handle(key, self.lsn, offset, flag, true);
                 }
             }
 
@@ -591,7 +591,7 @@ impl ImageLayerInner {
                 reconstruct_state.update_key(
                     &blob_meta.key,
                     blob_meta.lsn,
-                    super::FutureValue::RawImage { rx },
+                    super::FutureValue::Img { rx },
                 );
             }
 
