@@ -699,7 +699,6 @@ impl StreamingVectoredReadPlanner {
         start_offset: u64,
         end_offset: u64,
         is_last_blob_in_read: bool,
-        // destination: oneshot::Sender<Result<Bytes, std::io::Error>>,
     ) -> Option<VectoredRead> {
         match &mut self.read_builder {
             Some(read_builder) => {
@@ -709,7 +708,7 @@ impl StreamingVectoredReadPlanner {
                     BlobMeta {
                         key,
                         lsn,
-                        will_init: false,
+                        will_init: todo!(),
                     },
                 );
                 assert_eq!(extended, VectoredReadExtended::Yes);
@@ -722,7 +721,7 @@ impl StreamingVectoredReadPlanner {
                         BlobMeta {
                             key,
                             lsn,
-                            will_init: false,
+                            will_init: todo!(),
                         },
                         self.mode,
                     ))
