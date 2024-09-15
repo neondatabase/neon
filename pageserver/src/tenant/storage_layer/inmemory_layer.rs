@@ -467,11 +467,7 @@ impl InMemoryLayer {
 
                     let (tx, rx) = tokio::sync::oneshot::channel();
                     senders.insert((key, *entry_lsn), tx);
-                    reconstruct_state.update_key(
-                        &key,
-                        *entry_lsn,
-                        crate::tenant::storage_layer::FutureValue::WalRecord { will_init, rx },
-                    );
+                    reconstruct_state.update_key(&key, *entry_lsn, todo!());
 
                     if will_init {
                         break;

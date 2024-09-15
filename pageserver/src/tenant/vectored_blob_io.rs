@@ -33,7 +33,7 @@ use crate::virtual_file::{self, VirtualFile};
 pub struct BlobMeta {
     pub key: Key,
     pub lsn: Lsn,
-    pub will_init: bool,
+    pub blob_type: BlobType,
 }
 
 /// Blob offsets into [`VectoredBlobsBuf::buf`]
@@ -346,6 +346,13 @@ pub enum BlobFlag {
     ReplaceAll,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum BlobType {
+    RawImage,
+    ValueImage,
+    ValueWalRecord{ will_init: bool },
+}
+
 /// Planner for vectored blob reads.
 ///
 /// Blob offsets are received via [`VectoredReadPlanner::handle`]
@@ -357,9 +364,9 @@ pub enum BlobFlag {
 pub struct VectoredReadPlanner {
     // Track all the blob offsets. Start offsets must be ordered.
     // Note: last bool is will_init
-    blobs: BTreeMap<Key, Vec<(Lsn, u64, u64, bool)>>,
+    blobs: BTreeMap<Key, Vec<(Lsn, u64, u64, BlobType)>>,
     // Arguments for previous blob passed into [`VectoredReadPlanner::handle`]
-    prev: Option<(Key, Lsn, u64, BlobFlag, bool)>,
+    prev: Option<(Key, Lsn, u64, BlobFlag, BlobType)>,
 
     max_read_size: usize,
 
@@ -394,12 +401,12 @@ impl VectoredReadPlanner {
     ///   This is used for WAL records that `will_init`.
     /// * [`BlobFlag::Ignore`]: This blob should not be included in the read. This happens
     ///   if the blob is cached.
-    pub fn handle(&mut self, key: Key, lsn: Lsn, offset: u64, flag: BlobFlag, will_init: bool) {
+    pub fn handle(&mut self, key: Key, lsn: Lsn, offset: u64, flag: BlobFlag, blob_type: BlobType) {
         // Implementation note: internally lag behind by one blob such that
         // we have a start and end offset when initialising [`VectoredRead`]
-        let (prev_key, prev_lsn, prev_offset, prev_flag, prev_will_init) = match self.prev {
+        let (prev_key, prev_lsn, prev_offset, prev_flag, prev_blob_type) = match self.prev {
             None => {
-                self.prev = Some((key, lsn, offset, flag, will_init));
+                self.prev = Some((key, lsn, offset, flag, blob_type));
                 return;
             }
             Some(prev) => prev,
@@ -411,21 +418,21 @@ impl VectoredReadPlanner {
             prev_offset,
             offset,
             prev_flag,
-            prev_will_init,
+            prev_blob_type,
         );
 
-        self.prev = Some((key, lsn, offset, flag, will_init));
+        self.prev = Some((key, lsn, offset, flag, blob_type));
     }
 
     pub fn handle_range_end(&mut self, offset: u64) {
-        if let Some((prev_key, prev_lsn, prev_offset, prev_flag, prev_will_init)) = self.prev {
+        if let Some((prev_key, prev_lsn, prev_offset, prev_flag, prev_blob_type)) = self.prev {
             self.add_blob(
                 prev_key,
                 prev_lsn,
                 prev_offset,
                 offset,
                 prev_flag,
-                prev_will_init,
+                prev_blob_type,
             );
         }
 
@@ -439,17 +446,17 @@ impl VectoredReadPlanner {
         start_offset: u64,
         end_offset: u64,
         flag: BlobFlag,
-        will_init: bool,
+        blob_type: BlobType,
     ) {
         match flag {
             BlobFlag::None => {
                 let blobs_for_key = self.blobs.entry(key).or_default();
-                blobs_for_key.push((lsn, start_offset, end_offset, will_init));
+                blobs_for_key.push((lsn, start_offset, end_offset, blob_type));
             }
             BlobFlag::ReplaceAll => {
                 let blobs_for_key = self.blobs.entry(key).or_default();
                 blobs_for_key.clear();
-                blobs_for_key.push((lsn, start_offset, end_offset, will_init));
+                blobs_for_key.push((lsn, start_offset, end_offset, blob_type));
             }
             BlobFlag::Ignore => {}
         }
@@ -460,7 +467,7 @@ impl VectoredReadPlanner {
         let mut reads = Vec::new();
 
         for (key, blobs_for_key) in self.blobs {
-            for (lsn, start_offset, end_offset, will_init) in blobs_for_key {
+            for (lsn, start_offset, end_offset, blob_type) in blobs_for_key {
                 let extended = match &mut current_read_builder {
                     Some(read_builder) => read_builder.extend(
                         start_offset,
@@ -468,7 +475,7 @@ impl VectoredReadPlanner {
                         BlobMeta {
                             key,
                             lsn,
-                            will_init,
+                            blob_type,
                         },
                     ),
                     None => VectoredReadExtended::No,
@@ -481,7 +488,7 @@ impl VectoredReadPlanner {
                         BlobMeta {
                             key,
                             lsn,
-                            will_init,
+                            blob_type,
                         },
                         self.max_read_size,
                         self.mode,
@@ -699,7 +706,6 @@ impl StreamingVectoredReadPlanner {
         start_offset: u64,
         end_offset: u64,
         is_last_blob_in_read: bool,
-        // destination: oneshot::Sender<Result<Bytes, std::io::Error>>,
     ) -> Option<VectoredRead> {
         match &mut self.read_builder {
             Some(read_builder) => {
@@ -709,7 +715,7 @@ impl StreamingVectoredReadPlanner {
                     BlobMeta {
                         key,
                         lsn,
-                        will_init: false,
+                        blob_type: todo!(),
                     },
                 );
                 assert_eq!(extended, VectoredReadExtended::Yes);
@@ -722,7 +728,7 @@ impl StreamingVectoredReadPlanner {
                         BlobMeta {
                             key,
                             lsn,
-                            will_init: false,
+                            blob_type: todo!(),
                         },
                         self.mode,
                     ))

@@ -323,15 +323,16 @@ impl ValuesReconstructState {
             let key_done = match state.situation {
                 ValueReconstructSituation::Complete => unreachable!(),
                 ValueReconstructSituation::Continue => match future_value {
-                    FutureValue::Img { rx } => {
+                    FutureValue::ValueImage { rx } => {
                         assert!(state.img.is_none());
                         state.img = Some((lsn, rx));
                         true
                     }
-                    FutureValue::WalRecord { will_init, rx } => {
+                    FutureValue::ValueWalRecord { will_init, rx } => {
                         state.records.push((lsn, rx));
                         will_init
                     }
+                    FutureValue::RawImage { rx } => todo!(),
                 },
             };
 
@@ -367,11 +368,14 @@ impl ValuesReconstructState {
 }
 
 enum FutureValue {
-    WalRecord {
+    RawImage {
+        rx: sync::oneshot::Receiver<Result<Bytes, std::io::Error>>,
+    },
+    ValueWalRecord {
         will_init: bool,
         rx: sync::oneshot::Receiver<Result<Bytes, std::io::Error>>,
     },
-    Img {
+    ValueImage {
         rx: sync::oneshot::Receiver<Result<Bytes, std::io::Error>>,
     },
 }

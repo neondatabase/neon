@@ -39,7 +39,7 @@ use crate::tenant::disk_btree::{
 use crate::tenant::storage_layer::layer::S3_UPLOAD_LIMIT;
 use crate::tenant::timeline::GetVectoredError;
 use crate::tenant::vectored_blob_io::{
-    BlobFlag, StreamingVectoredReadPlanner, VectoredBlobReader, VectoredRead,
+    BlobFlag, BlobType, StreamingVectoredReadPlanner, VectoredBlobReader, VectoredRead,
     VectoredReadCoalesceMode, VectoredReadPlanner,
 };
 use crate::virtual_file::owned_buffers_io::io_buf_ext::{FullSlice, IoBufExt};
@@ -934,7 +934,17 @@ impl DeltaLayerInner {
                     range_end_handled = true;
                     break;
                 } else {
-                    planner.handle(key, lsn, blob_ref.pos(), flag, blob_ref.will_init());
+                    planner.handle(
+                        key,
+                        lsn,
+                        blob_ref.pos(),
+                        flag,
+                        if blob_ref.will_init() {
+                            BlobType::ValueImage
+                        } else {
+                            BlobType::ValueImage
+                        },
+                    );
                 }
             }
 
@@ -1002,9 +1012,12 @@ impl DeltaLayerInner {
                 reconstruct_state.update_key(
                     &blob_meta.key,
                     blob_meta.lsn,
-                    super::FutureValue::WalRecord {
-                        will_init: blob_meta.will_init,
-                        rx,
+                    match blob_meta.blob_type {
+                        BlobType::RawImage => unreachable!(),
+                        BlobType::ValueImage => super::FutureValue::ValueImage { rx },
+                        BlobType::ValueWalRecord { will_init } => {
+                            super::FutureValue::ValueWalRecord { will_init, rx }
+                        }
                     },
                 );
             }
@@ -1179,7 +1192,7 @@ impl DeltaLayerInner {
                     BlobMeta {
                         key,
                         lsn,
-                        will_init: false,
+                        blob_type: todo!(),
                     },
                     start_offset..end_offset,
                 ))
