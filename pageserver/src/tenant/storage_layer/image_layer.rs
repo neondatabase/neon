@@ -619,7 +619,7 @@ impl ImageLayerInner {
 
                 match res {
                     Ok(blobs_buf) => {
-                        for meta in blobs_buf.blobs.iter().rev() {
+                        for meta in blobs_buf.blobs.iter() {
                             let buf = &blobs_buf.buf[meta.start..meta.end];
                             let sender = senders
                                 .remove(&(meta.meta.key, meta.meta.lsn))
