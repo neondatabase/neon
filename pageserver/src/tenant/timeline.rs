@@ -568,7 +568,7 @@ impl From<layer_manager::Shutdown> for GetVectoredError {
 
 #[derive(thiserror::Error)]
 pub struct MissingKeyError {
-    key: Key,
+    keys: KeySpace,
     shard: ShardNumber,
     cont_lsn: Lsn,
     request_lsn: Lsn,
@@ -586,8 +586,8 @@ impl std::fmt::Display for MissingKeyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "could not find data for key {} (shard {:?}) at LSN {}, request LSN {}",
-            self.key, self.shard, self.cont_lsn, self.request_lsn
+            "could not find data for keys (shard {:?}) at LSN {}, request LSN {} keys {}",
+            self.shard, self.cont_lsn, self.request_lsn, self.keys
         )?;
         if let Some(ref ancestor_lsn) = self.ancestor_lsn {
             write!(f, ", ancestor {}", ancestor_lsn)?;
@@ -955,7 +955,11 @@ impl Timeline {
                 }
             }
             None => Err(PageReconstructError::MissingKey(MissingKeyError {
-                key,
+                keys: {
+                    let mut accum = KeySpaceAccum::new();
+                    accum.add_key(key);
+                    accum.to_keyspace()
+                },
                 shard: self.shard_identity.get_shard_number(&key),
                 cont_lsn: Lsn(0),
                 request_lsn: lsn,
@@ -3139,7 +3143,7 @@ impl Timeline {
 
         if let Some(missing_keyspace) = missing_keyspace {
             return Err(GetVectoredError::MissingKey(MissingKeyError {
-                key: missing_keyspace.start().unwrap(), /* better if we can store the full keyspace */
+                keys: missing_keyspace.clone(),
                 shard: self
                     .shard_identity
                     .get_shard_number(&missing_keyspace.start().unwrap()),
