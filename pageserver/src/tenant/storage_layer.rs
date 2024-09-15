@@ -279,7 +279,7 @@ pub(crate) enum LayerId {
 /// Layer wrapper for the read path. Note that it is valid
 /// to use these layers even after external operations have
 /// been performed on them (compaction, freeze, etc.).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) enum ReadableLayer {
     PersistentLayer(Layer),
     InMemoryLayer(Arc<InMemoryLayer>),
@@ -292,6 +292,8 @@ struct ReadDesc {
     layer_id: LayerId,
     /// Lsn range for the read, used for selecting the next read
     lsn_range: Range<Lsn>,
+    /// This read's index in [`LayerKeyspace::target_keyspace`];
+    read_id: LayerKeyspaceReadId,
 }
 
 /// Data structure which maintains a fringe of layers for the
@@ -310,8 +312,12 @@ pub(crate) struct LayerFringe {
 #[derive(Debug)]
 struct LayerKeyspace {
     layer: ReadableLayer,
-    target_keyspace: KeySpaceRandomAccum,
+    next_read_id: LayerKeyspaceReadId,
+    reads: HashMap<LayerKeyspaceReadId, (Range<Lsn>, KeySpace)>,
 }
+
+#[derive(PartialEq, Eq, Hash, Debug, Clone, Copy)]
+struct LayerKeyspaceReadId(usize);
 
 impl LayerFringe {
     pub(crate) fn new() -> Self {
@@ -327,22 +333,24 @@ impl LayerFringe {
             None => return None,
         };
 
-        let removed = self.layers.remove_entry(&read_desc.layer_id);
+        let mut entry = match self.layers.entry(read_desc.layer_id) {
+            Entry::Occupied(o) => o,
+            Entry::Vacant(_) => unreachable!("fringe internals are always consistent"),
+        };
 
-        match removed {
-            Some((
-                _,
-                LayerKeyspace {
-                    layer,
-                    mut target_keyspace,
-                },
-            )) => Some((
-                layer,
-                target_keyspace.consume_keyspace(),
-                read_desc.lsn_range,
-            )),
-            None => unreachable!("fringe internals are always consistent"),
+        let (lsn_range, keyspace) = entry
+            .get_mut()
+            .reads
+            .remove(&read_desc.read_id)
+            .expect("fringe internals are always consistent");
+
+        let layer = entry.get().layer.clone();
+
+        if entry.get().reads.is_empty() {
+            entry.remove();
         }
+
+        Some((layer, keyspace, lsn_range))
     }
 
     pub(crate) fn update(
@@ -355,18 +363,31 @@ impl LayerFringe {
         let entry = self.layers.entry(layer_id.clone());
         match entry {
             Entry::Occupied(mut entry) => {
-                entry.get_mut().target_keyspace.add_keyspace(keyspace);
+                let read_id = {
+                    let r = &mut entry.get_mut().next_read_id;
+                    let read_id = *r;
+                    *r = LayerKeyspaceReadId(r.0 + 1);
+                    read_id
+                };
+                self.planned_reads_by_lsn.push(ReadDesc {
+                    lsn_range: lsn_range.clone(),
+                    layer_id: layer_id.clone(),
+                    read_id,
+                });
+                let replaced = entry.get_mut().reads.insert(read_id, (lsn_range, keyspace));
+                assert!(replaced.is_none());
             }
             Entry::Vacant(entry) => {
+                let read_id = LayerKeyspaceReadId(0);
                 self.planned_reads_by_lsn.push(ReadDesc {
-                    lsn_range,
+                    lsn_range: lsn_range.clone(),
                     layer_id: layer_id.clone(),
+                    read_id,
                 });
-                let mut accum = KeySpaceRandomAccum::new();
-                accum.add_keyspace(keyspace);
                 entry.insert(LayerKeyspace {
                     layer,
-                    target_keyspace: accum,
+                    next_read_id: LayerKeyspaceReadId(1),
+                    reads: [(read_id, (lsn_range, keyspace))].into(),
                 });
             }
         }
