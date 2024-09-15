@@ -55,8 +55,8 @@
 
 /*
  * Number of histogram cells. We use exponential histogram with first interval
- * equals to one minutes. Autoscaler request LFC  statistic with intervals 1,2,...,60 seconds,
- * so 1^8=64 seems to be enough for our needs.
+ * equals to one minutes. Autoscaler request LFC  statistic with intervals 1,2,...,60 minutes
+ * so 2^8=64 seems to be enough for our needs.
  */
 #define HIST_SIZE         8
 #define HIST_MIN_INTERVAL 60 /* seconds */
@@ -77,15 +77,12 @@
  * modified timestamp >= the query timestamp. This value is the number of bits
  * for this register in the normal HLL calculation.
  *
- * The memory usage is 2^B * (C + 1) * sizeof(TimetampTz), or 184kiB.
- * Usage could be halved if we decide to reduce the required time dimension
- * precision; as 32 bits in second precision should be enough for statistics.
- * However, that is not yet implemented.
+ * The memory usage is 2^B * (C + 1) * sizeof(HyperLogLogRegister), or 920kiB.
  */
 typedef struct
 {
 	TimestampTz ts; /* last access timestamp */
-	uint32_t    histogram[HIST_SIZE]; /* access counter histogram */
+	uint32_t    histogram[HIST_SIZE]; /* access counter exponential histogram */
 } HyperLogLogRegister;
 
 typedef struct HyperLogLogState
