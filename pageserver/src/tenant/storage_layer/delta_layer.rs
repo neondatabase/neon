@@ -1002,10 +1002,8 @@ impl DeltaLayerInner {
                 reconstruct_state.update_key(
                     &blob_meta.key,
                     blob_meta.lsn,
-                    super::FutureValue::WalRecord {
-                        will_init: blob_meta.will_init,
-                        rx,
-                    },
+                    blob_meta.will_init,
+                    rx,
                 );
             }
 

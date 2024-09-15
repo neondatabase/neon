@@ -312,7 +312,8 @@ impl ValuesReconstructState {
         &mut self,
         key: &Key,
         lsn: Lsn,
-        future_value: FutureValue,
+        completes: bool,
+        value: sync::oneshot::Receiver<Result<Bytes, std::io::Error>>,
     ) -> ValueReconstructSituation {
         let state = self
             .keys
@@ -320,22 +321,14 @@ impl ValuesReconstructState {
             .or_insert(Ok(VectoredValueReconstructState::default()));
 
         if let Ok(state) = state {
-            let key_done = match state.situation {
+            match state.situation {
                 ValueReconstructSituation::Complete => unreachable!(),
-                ValueReconstructSituation::Continue => match future_value {
-                    FutureValue::Img { rx } => {
-                        assert!(state.img.is_none());
-                        state.img = Some((lsn, rx));
-                        true
-                    }
-                    FutureValue::WalRecord { will_init, rx } => {
-                        state.records.push((lsn, rx));
-                        will_init
-                    }
-                },
-            };
+                ValueReconstructSituation::Continue => {
+                    state.records.push((lsn, value));
+                }
+            }
 
-            if key_done && state.situation == ValueReconstructSituation::Continue {
+            if completes && state.situation == ValueReconstructSituation::Continue {
                 state.situation = ValueReconstructSituation::Complete;
                 self.keys_done.add_key(*key);
             }
@@ -364,16 +357,6 @@ impl ValuesReconstructState {
             self.keys_with_image_coverage.take(),
         )
     }
-}
-
-enum FutureValue {
-    WalRecord {
-        will_init: bool,
-        rx: sync::oneshot::Receiver<Result<Bytes, std::io::Error>>,
-    },
-    Img {
-        rx: sync::oneshot::Receiver<Result<Bytes, std::io::Error>>,
-    },
 }
 
 impl Default for ValuesReconstructState {
