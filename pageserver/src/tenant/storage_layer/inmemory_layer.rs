@@ -469,9 +469,7 @@ impl InMemoryLayer {
                     senders.insert((key, *entry_lsn), tx);
                     reconstruct_state.update_key(&key, *entry_lsn, will_init, rx);
 
-                    if key == Key::from_hex("000000067F000000050000400600000543D3").unwrap() {
-                        info!(%key, %entry_lsn, will_init, "inmemory layer found key")
-                    }
+                    debug!(%key, %entry_lsn, will_init, "inmemory layer found key");
 
                     if will_init {
                         break;

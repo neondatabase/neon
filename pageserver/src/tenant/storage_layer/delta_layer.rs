@@ -915,9 +915,7 @@ impl DeltaLayerInner {
                 let lsn = DeltaKey::extract_lsn_from_buf(&raw_key);
                 let blob_ref = BlobRef(value);
 
-                if key == Key::from_hex("000000067F000000050000400600000543D3").unwrap() {
-                    info!(file = %self_desc.layer_name(), %key, %lsn, will_init = blob_ref.will_init(), "delta layer found key")
-                }
+                debug!(file = %self_desc.layer_name(), %key, %lsn, will_init = blob_ref.will_init(), "delta layer found key");
 
                 // Lsns are not monotonically increasing across keys, so we don't assert on them.
                 assert!(key >= range.start);

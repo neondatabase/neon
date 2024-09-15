@@ -510,9 +510,7 @@ impl ImageLayerInner {
                     BlobFlag::None
                 };
 
-                if key == Key::from_hex("000000067F000000050000400600000543D3").unwrap() {
-                    info!(file = %self_desc.layer_name(), %key, %self.lsn, will_init=true, "image layer found key")
-                }
+                debug!(file = %self_desc.layer_name(), %key, %self.lsn, will_init=true, "image layer found key");
 
                 if key >= range.end {
                     planner.handle_range_end(offset);
