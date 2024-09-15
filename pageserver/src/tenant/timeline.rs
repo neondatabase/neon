@@ -49,7 +49,6 @@ use utils::{
     sync::gate::{Gate, GateGuard},
 };
 
-use std::pin::pin;
 use std::sync::atomic::Ordering as AtomicOrdering;
 use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
@@ -63,6 +62,7 @@ use std::{
     collections::btree_map::Entry,
     ops::{Deref, Range},
 };
+use std::{pin::pin, sync::atomic::AtomicUsize};
 
 use crate::{
     aux_file::AuxFileSizeEstimator,
@@ -1129,8 +1129,12 @@ impl Timeline {
         let get_data_timer = crate::metrics::GET_RECONSTRUCT_DATA_TIME
             .for_get_kind(get_kind)
             .start_timer();
+        static INVOCATION: Lazy<AtomicUsize> = Lazy::new(|| AtomicUsize::new(0));
+        let invocation = INVOCATION.fetch_add(1, AtomicOrdering::Relaxed);
         self.get_vectored_reconstruct_data(keyspace.clone(), lsn, reconstruct_state, ctx)
-            .await?;
+            .instrument(debug_span!("get_vectored_reconstruct_data", invocation))
+            .await
+            .with_context(|| format!("get_vectored_reconstruct_data invocation {invocation}"))?;
         get_data_timer.stop_and_record();
 
         let reconstruct_timer = crate::metrics::RECONSTRUCT_TIME
