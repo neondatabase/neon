@@ -1136,7 +1136,7 @@ impl Timeline {
             .await
             .map_err(|err| {
                 anyhow::anyhow!(
-                    "get_vectored_reconstruct_data invocation {invocation}: keyspace={keyspace} {err:?}",
+                    "get_vectored_reconstruct_data invocation {invocation} lsn={lsn} keyspace={keyspace} {err:?}",
                 )
             })?;
         get_data_timer.stop_and_record();
