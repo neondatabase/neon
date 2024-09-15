@@ -1134,7 +1134,11 @@ impl Timeline {
         self.get_vectored_reconstruct_data(keyspace.clone(), lsn, reconstruct_state, ctx)
             .instrument(debug_span!("get_vectored_reconstruct_data", invocation))
             .await
-            .with_context(|| format!("get_vectored_reconstruct_data invocation {invocation}"))?;
+            .map_err(|err| {
+                anyhow::anyhow!(
+                    "get_vectored_reconstruct_data invocation {invocation}: keyspace={keyspace} {err:?}",
+                )
+            })?;
         get_data_timer.stop_and_record();
 
         let reconstruct_timer = crate::metrics::RECONSTRUCT_TIME
