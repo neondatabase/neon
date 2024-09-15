@@ -137,8 +137,8 @@ def test_optimal_cache_size_approximation(neon_simple_env: NeonEnv):
     cur.execute(
         "create table t_small(pk integer primary key, count integer default 0, payload text default repeat('?', 128))"
     )
-    cur.execute("insert into t_huge(pk) values (generate_series(1,1000000))")
-    cur.execute("insert into t_small(pk) values (generate_series(1,100000))")
+    cur.execute("insert into t_huge(pk) values (generate_series(1,1000000))") # table size is 21277 pages
+    cur.execute("insert into t_small(pk) values (generate_series(1,100000))") # table size is 2128 pages
     time.sleep(2)
     before = time.monotonic()
     for _ in range(100):
@@ -152,4 +152,4 @@ def test_optimal_cache_size_approximation(neon_simple_env: NeonEnv):
     optimal_cache_size = cur.fetchall()[0][0]
     log.info(f"Optimal cache size for 99% hit rate {optimal_cache_size}")
     assert ws_estimation >= 20000 and ws_estimation <= 30000
-    assert optimal_cache_size >= 2000 and optimal_cache_size <= 7000
+    assert optimal_cache_size >= 2000 and optimal_cache_size <= 3000
