@@ -88,17 +88,14 @@ pub(crate) struct VectoredValueReconstructState {
         Lsn,
         tokio::sync::oneshot::Receiver<Result<Bytes, std::io::Error>>,
     )>,
-    pub(crate) img: Option<(
-        Lsn,
-        tokio::sync::oneshot::Receiver<Result<Bytes, std::io::Error>>,
-    )>,
+    pub(crate) will_init_lsn: Option<Lsn>,
 
     pub(crate) situation: ValueReconstructSituation,
 }
 
 impl VectoredValueReconstructState {
     fn get_cached_lsn(&self) -> Option<Lsn> {
-        self.img.as_ref().map(|img| img.0)
+        self.will_init_lsn
     }
 }
 
@@ -124,23 +121,6 @@ pub(crate) async fn convert(
                             to.img = Some((lsn, img));
                         }
                     }
-                }
-                Err(err) => {
-                    return Err(PageReconstructError::Other(err.into()));
-                }
-            },
-            Err(err) => {
-                return Err(PageReconstructError::Other(err.into()));
-            }
-        }
-    }
-
-    if to.img.is_none() && from.img.is_some() {
-        let (lsn, fut) = from.img.expect("Has an image");
-        match fut.await {
-            Ok(res) => match res {
-                Ok(bytes) => {
-                    to.img = Some((lsn, bytes));
                 }
                 Err(err) => {
                     return Err(PageReconstructError::Other(err.into()));
@@ -329,6 +309,8 @@ impl ValuesReconstructState {
             }
 
             if completes && state.situation == ValueReconstructSituation::Continue {
+                assert_eq!(state.will_init_lsn, None);
+                state.will_init_lsn = Some(lsn);
                 state.situation = ValueReconstructSituation::Complete;
                 self.keys_done.add_key(*key);
             }
