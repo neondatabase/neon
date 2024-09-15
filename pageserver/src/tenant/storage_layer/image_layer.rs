@@ -441,12 +441,13 @@ impl ImageLayerInner {
     // the reconstruct state with whatever is found.
     pub(super) async fn get_values_reconstruct_data(
         &self,
+        self_desc: PersistentLayerDesc,
         keyspace: KeySpace,
         reconstruct_state: &mut ValuesReconstructState,
         ctx: &RequestContext,
     ) -> Result<(), GetVectoredError> {
         let reads = self
-            .plan_reads(keyspace, None, ctx)
+            .plan_reads(self_desc, keyspace, None, ctx)
             .await
             .map_err(GetVectoredError::Other)?;
 
@@ -465,6 +466,7 @@ impl ImageLayerInner {
     /// this shard.
     async fn plan_reads(
         &self,
+        self_desc: PersistentLayerDesc,
         keyspace: KeySpace,
         shard_identity: Option<&ShardIdentity>,
         ctx: &RequestContext,
@@ -508,6 +510,10 @@ impl ImageLayerInner {
                     BlobFlag::None
                 };
 
+                if key == Key::from_hex("000000067F000000050000400600000543D3").unwrap() {
+                    info!(file = %self_desc.layer_name(), %key, %self.lsn, will_init=true, "image layer found key")
+                }
+
                 if key >= range.end {
                     planner.handle_range_end(offset);
                     range_end_handled = true;
@@ -537,6 +543,7 @@ impl ImageLayerInner {
         // Fragment the range into the regions owned by this ShardIdentity
         let plan = self
             .plan_reads(
+                todo!(),
                 KeySpace {
                     // If asked for the total key space, plan_reads will give us all the keys in the layer
                     ranges: vec![Key::MIN..Key::MAX],

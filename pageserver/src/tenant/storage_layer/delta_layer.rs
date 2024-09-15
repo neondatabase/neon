@@ -842,6 +842,7 @@ impl DeltaLayerInner {
     // can be further optimised to visit the index only once.
     pub(super) async fn get_values_reconstruct_data(
         &self,
+        self_desc: PersistentLayerDesc,
         keyspace: KeySpace,
         lsn_range: Range<Lsn>,
         reconstruct_state: &mut ValuesReconstructState,
@@ -864,6 +865,7 @@ impl DeltaLayerInner {
         let data_end_offset = self.index_start_offset();
 
         let reads = Self::plan_reads(
+            self_desc,
             &keyspace,
             lsn_range.clone(),
             data_end_offset,
@@ -884,6 +886,7 @@ impl DeltaLayerInner {
     }
 
     async fn plan_reads<Reader>(
+        self_desc: PersistentLayerDesc,
         keyspace: &KeySpace,
         lsn_range: Range<Lsn>,
         data_end_offset: u64,
@@ -911,6 +914,10 @@ impl DeltaLayerInner {
                 let key = Key::from_slice(&raw_key[..KEY_SIZE]);
                 let lsn = DeltaKey::extract_lsn_from_buf(&raw_key);
                 let blob_ref = BlobRef(value);
+
+                if key == Key::from_hex("000000067F000000050000400600000543D3").unwrap() {
+                    info!(file = %self_desc.layer_name(), %key, %lsn, will_init = blob_ref.will_init(), "delta layer found key")
+                }
 
                 // Lsns are not monotonically increasing across keys, so we don't assert on them.
                 assert!(key >= range.start);

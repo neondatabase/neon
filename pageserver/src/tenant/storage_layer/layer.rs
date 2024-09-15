@@ -1755,11 +1755,17 @@ impl DownloadedLayer {
             .map_err(GetVectoredError::Other)?
         {
             Delta(d) => {
-                d.get_values_reconstruct_data(keyspace, lsn_range, reconstruct_data, ctx)
-                    .await
+                d.get_values_reconstruct_data(
+                    owner.desc.clone(),
+                    keyspace,
+                    lsn_range,
+                    reconstruct_data,
+                    ctx,
+                )
+                .await
             }
             Image(i) => {
-                i.get_values_reconstruct_data(keyspace, reconstruct_data, ctx)
+                i.get_values_reconstruct_data(owner.desc.clone(), keyspace, reconstruct_data, ctx)
                     .await
             }
         }

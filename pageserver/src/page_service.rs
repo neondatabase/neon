@@ -736,7 +736,10 @@ impl PageServerHandler {
                         }
                         // the vectored get currently only supports a single LSN, so, bounce as soon
                         // as the effective request_lsn changes
-                        return *accum_lsn == this_lsn;
+                        if (*accum_lsn != this_lsn) {
+                            return false;
+                        }
+                        return true;
                     }
                     .await =>
                     {
