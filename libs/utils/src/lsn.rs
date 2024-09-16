@@ -1,6 +1,5 @@
 #![warn(missing_docs)]
 
-use camino::Utf8Path;
 use serde::{de::Visitor, Deserialize, Serialize};
 use std::fmt;
 use std::ops::{Add, AddAssign};
@@ -143,14 +142,6 @@ impl Lsn {
     pub fn widening_sub<T: Into<u64>>(self, other: T) -> i128 {
         let other: u64 = other.into();
         i128::from(self.0) - i128::from(other)
-    }
-
-    /// Parse an LSN from a filename in the form `0000000000000000`
-    pub fn from_filename<F>(filename: F) -> Result<Self, LsnParseError>
-    where
-        F: AsRef<Utf8Path>,
-    {
-        Lsn::from_hex(filename.as_ref().as_str())
     }
 
     /// Parse an LSN from a string in the form `0000000000000000`
