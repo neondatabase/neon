@@ -30,6 +30,7 @@
 #include "utils/guc.h"
 
 #include "neon.h"
+#include "neon_perf_counters.h"
 #include "neon_utils.h"
 #include "pagestore_client.h"
 #include "walproposer.h"
@@ -331,6 +332,7 @@ CLEANUP_AND_DISCONNECT(PageServer *shard)
 	}
 	if (shard->conn)
 	{
+		MyNeonCounters->pageserver_disconnects_total++;
 		PQfinish(shard->conn);
 		shard->conn = NULL;
 	}
@@ -737,6 +739,8 @@ pageserver_send(shardno_t shard_no, NeonRequest *request)
 	PageServer *shard = &page_servers[shard_no];
 	PGconn	   *pageserver_conn;
 
+	MyNeonCounters->pageserver_requests_sent_total++;
+
 	/* If the connection was lost for some reason, reconnect */
 	if (shard->state == PS_Connected && PQstatus(shard->conn) == CONNECTION_BAD)
 	{
@@ -889,6 +893,7 @@ pageserver_flush(shardno_t shard_no)
 	}
 	else
 	{
+		MyNeonCounters->pageserver_send_flushes_total++;
 		if (PQflush(pageserver_conn))
 		{
 			char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
@@ -922,7 +927,10 @@ check_neon_id(char **newval, void **extra, GucSource source)
 static Size
 PagestoreShmemSize(void)
 {
-	return sizeof(PagestoreShmemState);
+	return add_size(
+		sizeof(PagestoreShmemState),
+		NeonPerfCountersShmemSize()
+		);
 }
 
 static bool
@@ -941,6 +949,9 @@ PagestoreShmemInit(void)
 		memset(&pagestore_shared->shard_map, 0, sizeof(ShardMap));
 		AssignPageserverConnstring(page_server_connstring, NULL);
 	}
+
+	NeonPerfCountersShmemInit();
+
 	LWLockRelease(AddinShmemInitLock);
 	return found;
 }

@@ -66,6 +66,7 @@
 #include "storage/md.h"
 #include "storage/smgr.h"
 
+#include "neon_perf_counters.h"
 #include "pagestore_client.h"
 #include "bitmap.h"
 
@@ -289,7 +290,6 @@ static PrefetchState *MyPState;
 
 static bool compact_prefetch_buffers(void);
 static void consume_prefetch_responses(void);
-static uint64 prefetch_register_buffer(BufferTag tag, neon_request_lsns *force_request_lsns);
 static bool prefetch_read(PrefetchRequest *slot);
 static void prefetch_do_request(PrefetchRequest *slot, neon_request_lsns *force_request_lsns);
 static bool prefetch_wait_for(uint64 ring_index);
@@ -780,21 +780,27 @@ prefetch_do_request(PrefetchRequest *slot, neon_request_lsns *force_request_lsns
 }
 
 /*
- * prefetch_register_buffer() - register and prefetch buffer
+ * prefetch_register_bufferv() - register and prefetch buffers
  *
  * Register that we may want the contents of BufferTag in the near future.
+ * This is used when issuing a speculative prefetch request, but also when
+ * performing a synchronous request and need the buffer right now.
  *
  * If force_request_lsns is not NULL, those values are sent to the
  * pageserver. If NULL, we utilize the lastWrittenLsn -infrastructure
  * to calculate the LSNs to send.
  *
+ * When performing a prefetch rather than a synchronous request,
+ * is_prefetch==true. Currently, it only affects how the request is accounted
+ * in the perf counters.
+ *
  * NOTE: this function may indirectly update MyPState->pfs_hash; which
  * invalidates any active pointers into the hash table.
  */
-
 static uint64
 prefetch_register_bufferv(BufferTag tag, neon_request_lsns *frlsns,
-						  BlockNumber nblocks, const bits8 *mask)
+						  BlockNumber nblocks, const bits8 *mask,
+						  bool is_prefetch)
 {
 	uint64		min_ring_index;
 	PrefetchRequest req;
@@ -815,6 +821,7 @@ Retry:
 		PrfHashEntry *entry = NULL;
 		uint64		ring_index;
 		neon_request_lsns *lsns;
+
 		if (PointerIsValid(mask) && !BITMAP_ISSET(mask, i))
 			continue;
 
@@ -858,6 +865,7 @@ Retry:
 					prefetch_set_unused(ring_index);
 					entry = NULL;
 					slot = NULL;
+					MyNeonCounters->prefetch_discards_total++;
 				}
 			}
 
@@ -972,6 +980,11 @@ Retry:
 
 		min_ring_index = Min(min_ring_index, ring_index);
 
+		if (is_prefetch)
+			MyNeonCounters->prefetch_requests_total++;
+		else
+			MyNeonCounters->sync_requests_total++;
+
 		prefetch_do_request(slot, lsns);
 	}
 
@@ -997,13 +1010,6 @@ Retry:
 	}
 
 	return min_ring_index;
-}
-
-
-static uint64
-prefetch_register_buffer(BufferTag tag, neon_request_lsns *force_request_lsns)
-{
-	return prefetch_register_bufferv(tag, force_request_lsns, 1, NULL);
 }
 
 
@@ -2612,7 +2618,7 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 			lfc_present[i] = ~(lfc_present[i]);
 
 		ring_index = prefetch_register_bufferv(tag, NULL, iterblocks,
-											   lfc_present);
+											   lfc_present, true);
 		nblocks -= iterblocks;
 		blocknum += iterblocks;
 
@@ -2656,7 +2662,7 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum)
 
 	CopyNRelFileInfoToBufTag(tag, InfoFromSMgrRel(reln));
 
-	ring_index = prefetch_register_buffer(tag, NULL);
+	ring_index = prefetch_register_bufferv(tag, NULL, 1, NULL, true);
 
 	Assert(ring_index < MyPState->ring_unused &&
 		   MyPState->ring_last <= ring_index);
@@ -2747,16 +2753,19 @@ neon_read_at_lsnv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber base_block
 	 * weren't for the behaviour of the LwLsn cache that uses the highest
 	 * value of the LwLsn cache when the entry is not found.
 	 */
-	prefetch_register_bufferv(buftag, request_lsns, nblocks, mask);
+	prefetch_register_bufferv(buftag, request_lsns, nblocks, mask, false);
 
 	for (int i = 0; i < nblocks; i++)
 	{
 		void	   *buffer = buffers[i];
 		BlockNumber blockno = base_blockno + i;
 		neon_request_lsns *reqlsns = &request_lsns[i];
+		TimestampTz		start_ts, end_ts;
 
 		if (PointerIsValid(mask) && !BITMAP_ISSET(mask, i))
 			continue;
+
+		start_ts = GetCurrentTimestamp();
 
 		if (RecoveryInProgress() && MyBackendType != B_STARTUP)
 			XLogWaitForReplayOf(reqlsns[0].request_lsn);
@@ -2794,6 +2803,7 @@ Retry:
 				/* drop caches */
 				prefetch_set_unused(slot->my_ring_index);
 				pgBufferUsage.prefetch.expired += 1;
+				MyNeonCounters->prefetch_discards_total++;
 				/* make it look like a prefetch cache miss */
 				entry = NULL;
 			}
@@ -2804,8 +2814,9 @@ Retry:
 			if (entry == NULL)
 			{
 				pgBufferUsage.prefetch.misses += 1;
+				MyNeonCounters->prefetch_misses_total++;
 
-				ring_index = prefetch_register_bufferv(buftag, reqlsns, 1, NULL);
+				ring_index = prefetch_register_bufferv(buftag, reqlsns, 1, NULL, false);
 				Assert(ring_index != UINT64_MAX);
 				slot = GetPrfSlot(ring_index);
 			}
@@ -2860,6 +2871,9 @@ Retry:
 		/* buffer was used, clean up for later reuse */
 		prefetch_set_unused(ring_index);
 		prefetch_cleanup_trailing_unused();
+
+		end_ts = GetCurrentTimestamp();
+		inc_getpage_wait(end_ts >= start_ts ? (end_ts - start_ts) : 0);
 	}
 }
 
@@ -2913,6 +2927,7 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, void *buffer
 	/* Try to read from local file cache */
 	if (lfc_read(InfoFromSMgrRel(reln), forkNum, blkno, buffer))
 	{
+		MyNeonCounters->file_cache_hits_total++;
 		return;
 	}
 
@@ -3097,7 +3112,7 @@ neon_readv(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 				/* assume heap */
 				RmgrTable[RM_HEAP_ID].rm_mask(mdbuf_masked, blkno);
 				RmgrTable[RM_HEAP_ID].rm_mask(pageserver_masked, blkno);
-	
+
 				if (memcmp(mdbuf_masked, pageserver_masked, BLCKSZ) != 0)
 				{
 					neon_log(PANIC, "heap buffers differ at blk %u in rel %u/%u/%u fork %u (request LSN %X/%08X):\n------ MD ------\n%s\n------ Page Server ------\n%s\n",
