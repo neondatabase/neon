@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 from contextlib import _GeneratorContextManager, contextmanager
 
 # Type-related stuff
+from pathlib import Path
 from typing import Dict, Iterator, List
 
 import pytest
@@ -229,11 +230,11 @@ class VanillaCompare(PgCompare):
         pass  # TODO find something
 
     def report_size(self):
-        data_size = self.pg.get_subdir_size("base")
+        data_size = self.pg.get_subdir_size(Path("base"))
         self.zenbenchmark.record(
             "data_size", data_size / (1024 * 1024), "MB", report=MetricReport.LOWER_IS_BETTER
         )
-        wal_size = self.pg.get_subdir_size("pg_wal")
+        wal_size = self.pg.get_subdir_size(Path("pg_wal"))
         self.zenbenchmark.record(
             "wal_size", wal_size / (1024 * 1024), "MB", report=MetricReport.LOWER_IS_BETTER
         )
