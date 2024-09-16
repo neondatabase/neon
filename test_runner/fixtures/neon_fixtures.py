@@ -93,6 +93,7 @@ from fixtures.utils import (
     allure_add_grafana_links,
     allure_attach_from_dir,
     assert_no_errors,
+    get_dir_size,
     get_self_dir,
     print_gc_result,
     subprocess_capture,
@@ -222,16 +223,6 @@ def worker_base_port(worker_seq_no: int, worker_port_num: int) -> int:
     # so we divide ports in ranges of ports
     # so workers have disjoint set of ports for services
     return BASE_PORT + worker_seq_no * worker_port_num
-
-
-def get_dir_size(path: Path) -> int:
-    """Return size in bytes."""
-    totalbytes = 0
-    for root, _dirs, files in os.walk(path):
-        for name in files:
-            totalbytes += os.path.getsize(os.path.join(root, name))
-
-    return totalbytes
 
 
 @pytest.fixture(scope="session")
