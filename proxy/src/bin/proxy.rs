@@ -268,6 +268,12 @@ struct SqlOverHttpArgs {
 
     #[clap(long, default_value_t = 64)]
     sql_over_http_cancel_set_shards: usize,
+
+    #[clap(long, default_value_t = 10 * 1024 * 1024)] // 10 MiB
+    sql_over_http_max_request_size_bytes: u64,
+
+    #[clap(long, default_value_t = 10 * 1024 * 1024)] // 10 MiB
+    sql_over_http_max_response_size_bytes: usize,
 }
 
 #[tokio::main]
@@ -679,6 +685,8 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         },
         cancel_set: CancelSet::new(args.sql_over_http.sql_over_http_cancel_set_shards),
         client_conn_threshold: args.sql_over_http.sql_over_http_client_conn_threshold,
+        max_request_size_bytes: args.sql_over_http.sql_over_http_max_request_size_bytes,
+        max_response_size_bytes: args.sql_over_http.sql_over_http_max_response_size_bytes,
     };
     let authentication_config = AuthenticationConfig {
         thread_pool,
