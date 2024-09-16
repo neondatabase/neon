@@ -639,9 +639,7 @@ _PG_init(void)
 
 	pg_init_libpagestore();
 	pg_init_walproposer();
-	WalSender_Custom_XLogReaderRoutines = NeonOnDemandXLogReaderRoutines;
-	LogicalFuncs_Custom_XLogReaderRoutines = NeonOnDemandXLogReaderRoutines;
-	SlotFuncs_Custom_XLogReaderRoutines = NeonOnDemandXLogReaderRoutines;
+	Custom_XLogReaderRoutines = NeonOnDemandXLogReaderRoutines;
 
 	InitLogicalReplicationMonitor();
 
