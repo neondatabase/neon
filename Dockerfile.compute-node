@@ -55,22 +55,27 @@ RUN cd postgres && \
     # We could add the additional grant statements to the postgres repository but it would be hard to maintain,
     # whenever we need to pick up a new postgres version and we want to limit the changes in our postgres fork,
     # so we do it here.
-    old_list="pg_stat_statements--1.0--1.1.sql pg_stat_statements--1.1--1.2.sql pg_stat_statements--1.2--1.3.sql pg_stat_statements--1.3--1.4.sql pg_stat_statements--1.4--1.5.sql pg_stat_statements--1.4.sql pg_stat_statements--1.5--1.6.sql"; \
-    # the first loop is for pg_stat_statement extension version <= 1.6
     for file in /usr/local/pgsql/share/extension/pg_stat_statements--*.sql; do \
         filename=$(basename "$file"); \
-        if echo "$old_list" | grep -q -F "$filename"; then \
+        # Note that there are no downgrade scripts for pg_stat_statements, so we \
+        # don't have to modify any downgrade paths or (much) older versions: we only \
+        # have to make sure every creation of the pg_stat_statements_reset function \
+        # also adds execute permissions to the neon_superuser.
+        case $filename in \
+          pg_stat_statements--1.4.sql) \
+            # pg_stat_statements_reset is first created with 1.4
             echo 'GRANT EXECUTE ON FUNCTION pg_stat_statements_reset() TO neon_superuser;' >> $file; \
-        fi; \
-    done; \
-    # the second loop is for pg_stat_statement extension versions >= 1.7,
-    # where pg_stat_statement_reset() got 3 additional arguments
-    for file in /usr/local/pgsql/share/extension/pg_stat_statements--*.sql; do \
-        filename=$(basename "$file"); \
-        if ! echo "$old_list" | grep -q -F "$filename"; then \
+            ;; \
+          pg_stat_statements--1.6--1.7.sql) \
+            # Then with the 1.6-1.7 migration it is re-created with a new signature, thus add the permissions back
             echo 'GRANT EXECUTE ON FUNCTION pg_stat_statements_reset(Oid, Oid, bigint) TO neon_superuser;' >> $file; \
-        fi; \
-    done
+            ;; \
+          pg_stat_statements--1.10--1.11.sql) \
+            # Then with the 1.10-1.11 migration it is re-created with a new signature again, thus add the permissions back
+            echo 'GRANT EXECUTE ON FUNCTION pg_stat_statements_reset(Oid, Oid, bigint, boolean) TO neon_superuser;' >> $file; \
+            ;; \
+        esac; \
+    done;
 
 #########################################################################################
 #
