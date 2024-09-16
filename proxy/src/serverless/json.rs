@@ -14,64 +14,70 @@ use super::sql_over_http::BatchQueryData;
 use super::sql_over_http::Payload;
 use super::sql_over_http::QueryData;
 
+enum States {
+    Empty,
+    HasQueries(Vec<QueryData>),
+    HasPartialQueryData {
+        query: Option<String>,
+        params: Option<Vec<Option<String>>>,
+        #[allow(clippy::option_option)]
+        array_mode: Option<Option<bool>>,
+    },
+}
+
+enum Field {
+    Queries,
+    Query,
+    Params,
+    ArrayMode,
+    Ignore,
+}
+
+struct FieldVisitor;
+
+impl<'de> de::Visitor<'de> for FieldVisitor {
+    type Value = Field;
+
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str(
+            r#"a JSON object string of either "query", "params", "arrayMode", or "queries"."#,
+        )
+    }
+    fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        self.visit_bytes(v.as_bytes())
+    }
+    fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        match v {
+            b"queries" => Ok(Field::Queries),
+            b"query" => Ok(Field::Query),
+            b"params" => Ok(Field::Params),
+            b"arrayMode" => Ok(Field::ArrayMode),
+            _ => Ok(Field::Ignore),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Field {
+    #[inline]
+    fn deserialize<D>(d: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        d.deserialize_identifier(FieldVisitor)
+    }
+}
+
 impl<'de> Deserialize<'de> for QueryData {
     fn deserialize<D>(d: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        enum Field {
-            Query,
-            Params,
-            ArrayMode,
-            Ignore,
-        }
-
-        enum States {
-            Empty,
-            HasPartialQueryData {
-                query: Option<String>,
-                params: Option<Vec<Option<String>>>,
-                #[allow(clippy::option_option)]
-                array_mode: Option<Option<bool>>,
-            },
-        }
-
-        struct FieldVisitor;
-
-        impl<'de> de::Visitor<'de> for FieldVisitor {
-            type Value = Field;
-
-            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                f.write_str(r#"a JSON object string of either "query", "params", or "arrayMode"."#)
-            }
-            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
-            where
-                E: de::Error,
-            {
-                self.visit_bytes(v.as_bytes())
-            }
-            fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
-            where
-                E: de::Error,
-            {
-                match v {
-                    b"query" => Ok(Field::Query),
-                    b"params" => Ok(Field::Params),
-                    b"arrayMode" => Ok(Field::ArrayMode),
-                    _ => Ok(Field::Ignore),
-                }
-            }
-        }
-        impl<'de> Deserialize<'de> for Field {
-            #[inline]
-            fn deserialize<D>(d: D) -> Result<Self, D::Error>
-            where
-                D: Deserializer<'de>,
-            {
-                d.deserialize_identifier(FieldVisitor)
-            }
-        }
-
         struct Visitor;
         impl<'de> de::Visitor<'de> for Visitor {
             type Value = QueryData;
@@ -91,6 +97,7 @@ impl<'de> Deserialize<'de> for QueryData {
                     match key {
                         Field::Query => {
                             let (params, array_mode) = match state {
+                                States::HasQueries(_) => unreachable!(),
                                 States::HasPartialQueryData { query: Some(_), .. } => {
                                     return Err(<A::Error as de::Error>::duplicate_field("query"))
                                 }
@@ -109,6 +116,7 @@ impl<'de> Deserialize<'de> for QueryData {
                         }
                         Field::Params => {
                             let (query, array_mode) = match state {
+                                States::HasQueries(_) => unreachable!(),
                                 States::HasPartialQueryData {
                                     params: Some(_), ..
                                 } => {
@@ -129,6 +137,7 @@ impl<'de> Deserialize<'de> for QueryData {
                         }
                         Field::ArrayMode => {
                             let (query, params) = match state {
+                                States::HasQueries(_) => unreachable!(),
                                 States::HasPartialQueryData {
                                     array_mode: Some(_),
                                     ..
@@ -150,12 +159,13 @@ impl<'de> Deserialize<'de> for QueryData {
                                 array_mode: Some(m.next_value()?),
                             };
                         }
-                        Field::Ignore => {
+                        Field::Queries | Field::Ignore => {
                             let _ = m.next_value::<de::IgnoredAny>()?;
                         }
                     }
                 }
                 match state {
+                    States::HasQueries(_) => unreachable!(),
                     States::HasPartialQueryData {
                         query: Some(query),
                         params: Some(params),
@@ -184,62 +194,6 @@ impl<'de> Deserialize<'de> for Payload {
     where
         D: Deserializer<'de>,
     {
-        enum Field {
-            Queries,
-            Query,
-            Params,
-            ArrayMode,
-            Ignore,
-        }
-
-        enum States {
-            Empty,
-            HasQueries(Vec<QueryData>),
-            HasPartialQueryData {
-                query: Option<String>,
-                params: Option<Vec<Option<String>>>,
-                #[allow(clippy::option_option)]
-                array_mode: Option<Option<bool>>,
-            },
-        }
-
-        struct FieldVisitor;
-
-        impl<'de> de::Visitor<'de> for FieldVisitor {
-            type Value = Field;
-
-            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                f.write_str(r#"a JSON object string of either "query", "params", "arrayMode", or "queries"."#)
-            }
-            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
-            where
-                E: de::Error,
-            {
-                self.visit_bytes(v.as_bytes())
-            }
-            fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
-            where
-                E: de::Error,
-            {
-                match v {
-                    b"queries" => Ok(Field::Queries),
-                    b"query" => Ok(Field::Query),
-                    b"params" => Ok(Field::Params),
-                    b"arrayMode" => Ok(Field::ArrayMode),
-                    _ => Ok(Field::Ignore),
-                }
-            }
-        }
-        impl<'de> Deserialize<'de> for Field {
-            #[inline]
-            fn deserialize<D>(d: D) -> Result<Self, D::Error>
-            where
-                D: Deserializer<'de>,
-            {
-                d.deserialize_identifier(FieldVisitor)
-            }
-        }
-
         struct Visitor;
         impl<'de> de::Visitor<'de> for Visitor {
             type Value = Payload;
