@@ -406,9 +406,9 @@ impl<'de> Deserialize<'de> for PgText {
             {
                 let mut values = Vec::new();
 
-                // TODO: consider avoiding the allocation here.
+                // TODO: consider avoiding the allocations for json::Value here.
                 while let Some(value) = seq.next_element()? {
-                    values.push(json_value_to_pg_text(&value));
+                    values.push(json_value_to_pg_text(value));
                 }
 
                 Ok(values)
@@ -421,7 +421,7 @@ impl<'de> Deserialize<'de> for PgText {
     }
 }
 
-fn json_value_to_pg_text(value: &Value) -> Option<String> {
+fn json_value_to_pg_text(value: Value) -> Option<String> {
     match value {
         // special care for nulls
         Value::Null => None,
@@ -430,10 +430,10 @@ fn json_value_to_pg_text(value: &Value) -> Option<String> {
         v @ (Value::Bool(_) | Value::Number(_) | Value::Object(_)) => Some(v.to_string()),
 
         // avoid escaping here, as we pass this as a parameter
-        Value::String(s) => Some(s.to_string()),
+        Value::String(s) => Some(s),
 
         // special care for arrays
-        Value::Array(_) => json_array_to_pg_array(value),
+        Value::Array(_) => json_array_to_pg_array(&value),
     }
 }
 
@@ -670,21 +670,21 @@ mod tests {
 
     #[test]
     fn test_atomic_types_to_pg_params() {
-        let pg_params = json_value_to_pg_text(&Value::Bool(true));
+        let pg_params = json_value_to_pg_text(Value::Bool(true));
         assert_eq!(pg_params, Some("true".to_owned()));
-        let pg_params = json_value_to_pg_text(&Value::Bool(false));
+        let pg_params = json_value_to_pg_text(Value::Bool(false));
         assert_eq!(pg_params, Some("false".to_owned()));
 
         let json = Value::Number(serde_json::Number::from(42));
-        let pg_params = json_value_to_pg_text(&json);
+        let pg_params = json_value_to_pg_text(json);
         assert_eq!(pg_params, Some("42".to_owned()));
 
         let json = Value::String("foo\"".to_string());
-        let pg_params = json_value_to_pg_text(&json);
+        let pg_params = json_value_to_pg_text(json);
         assert_eq!(pg_params, Some("foo\"".to_owned()));
 
         let json = Value::Null;
-        let pg_params = json_value_to_pg_text(&json);
+        let pg_params = json_value_to_pg_text(json);
         assert_eq!(pg_params, None);
     }
 
@@ -693,7 +693,7 @@ mod tests {
         // atoms and escaping
         let json = "[true, false, null, \"NULL\", 42, \"foo\", \"bar\\\"-\\\\\"]";
         let json: Value = serde_json::from_str(json).unwrap();
-        let pg_params = json_value_to_pg_text(&json);
+        let pg_params = json_value_to_pg_text(json);
         assert_eq!(
             pg_params,
             Some("{true,false,NULL,\"NULL\",42,\"foo\",\"bar\\\"-\\\\\"}".to_owned())
@@ -702,7 +702,7 @@ mod tests {
         // nested arrays
         let json = "[[true, false], [null, 42], [\"foo\", \"bar\\\"-\\\\\"]]";
         let json: Value = serde_json::from_str(json).unwrap();
-        let pg_params = json_value_to_pg_text(&json);
+        let pg_params = json_value_to_pg_text(json);
         assert_eq!(
             pg_params,
             Some("{{true,false},{NULL,42},{\"foo\",\"bar\\\"-\\\\\"}}".to_owned())
@@ -710,7 +710,7 @@ mod tests {
         // array of objects
         let json = r#"[{"foo": 1},{"bar": 2}]"#;
         let json: Value = serde_json::from_str(json).unwrap();
-        let pg_params = json_value_to_pg_text(&json);
+        let pg_params = json_value_to_pg_text(json);
         assert_eq!(
             pg_params,
             Some(r#"{"{\"foo\":1}","{\"bar\":2}"}"#.to_owned())
