@@ -292,7 +292,7 @@ struct ReadDesc {
     layer_id: LayerId,
     /// Lsn range for the read, used for selecting the next read
     lsn_range: Range<Lsn>,
-    /// This read's index in [`LayerKeyspace::target_keyspace`];
+    /// This read's index in [`LayerKeyspace::reads`];
     read_id: LayerKeyspaceReadId,
 }
 
