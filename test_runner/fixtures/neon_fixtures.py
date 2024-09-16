@@ -182,25 +182,6 @@ def top_output_dir(base_dir: Path) -> Iterator[Path]:
     yield output_dir
 
 
-@pytest.fixture(scope="function")
-def versioned_pg_distrib_dir(pg_distrib_dir: Path, pg_version: PgVersion) -> Iterator[Path]:
-    versioned_dir = pg_distrib_dir / pg_version.v_prefixed
-
-    psql_bin_path = versioned_dir / "bin/psql"
-    postgres_bin_path = versioned_dir / "bin/postgres"
-
-    if os.getenv("REMOTE_ENV"):
-        # When testing against a remote server, we only need the client binary.
-        if not psql_bin_path.exists():
-            raise Exception(f"psql not found at '{psql_bin_path}'")
-    else:
-        if not postgres_bin_path.exists():
-            raise Exception(f"postgres not found at '{postgres_bin_path}'")
-
-    log.info(f"versioned_pg_distrib_dir is {versioned_dir}")
-    yield versioned_dir
-
-
 @pytest.fixture(scope="session")
 def neon_api_key() -> str:
     api_key = os.getenv("NEON_API_KEY")
