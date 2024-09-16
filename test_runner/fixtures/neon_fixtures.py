@@ -159,7 +159,7 @@ def neon_binpath(base_dir: Path, build_type: str) -> Iterator[Path]:
     yield binpath
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture(scope="session")
 def pg_distrib_dir(base_dir: Path) -> Iterator[Path]:
     if env_postgres_bin := os.environ.get("POSTGRES_DISTRIB_DIR"):
         distrib_dir = Path(env_postgres_bin).resolve()
