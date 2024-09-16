@@ -43,7 +43,6 @@ from urllib.parse import quote, urlparse
 import asyncpg
 import backoff
 import httpx
-import jwt
 import psycopg2
 import psycopg2.sql
 import pytest
@@ -60,6 +59,7 @@ from psycopg2.extensions import make_dsn, parse_dsn
 from urllib3.util.retry import Retry
 
 from fixtures import overlayfs
+from fixtures.auth_tokens import AuthKeys, TokenScope
 from fixtures.broker import NeonBroker
 from fixtures.common_types import Lsn, NodeId, TenantId, TenantShardId, TimelineId
 from fixtures.endpoint.http import EndpointHttpClient
@@ -371,44 +371,6 @@ class PgProtocol:
         Execute query returning single row with single column.
         """
         return self.safe_psql(query, log_query=log_query)[0][0]
-
-
-@dataclass
-class AuthKeys:
-    priv: str
-
-    def generate_token(self, *, scope: TokenScope, **token_data: Any) -> str:
-        token_data = {key: str(val) for key, val in token_data.items()}
-        token = jwt.encode({"scope": scope, **token_data}, self.priv, algorithm="EdDSA")
-        # cast(Any, self.priv)
-
-        # jwt.encode can return 'bytes' or 'str', depending on Python version or type
-        # hinting or something (not sure what). If it returned 'bytes', convert it to 'str'
-        # explicitly.
-        if isinstance(token, bytes):
-            token = token.decode()
-
-        return token
-
-    def generate_pageserver_token(self) -> str:
-        return self.generate_token(scope=TokenScope.PAGE_SERVER_API)
-
-    def generate_safekeeper_token(self) -> str:
-        return self.generate_token(scope=TokenScope.SAFEKEEPER_DATA)
-
-    # generate token giving access to only one tenant
-    def generate_tenant_token(self, tenant_id: TenantId) -> str:
-        return self.generate_token(scope=TokenScope.TENANT, tenant_id=str(tenant_id))
-
-
-# TODO: Replace with `StrEnum` when we upgrade to python 3.11
-class TokenScope(str, Enum):
-    ADMIN = "admin"
-    PAGE_SERVER_API = "pageserverapi"
-    GENERATIONS_API = "generations_api"
-    SAFEKEEPER_DATA = "safekeeperdata"
-    TENANT = "tenant"
-    SCRUBBER = "scrubber"
 
 
 class NeonEnvBuilder:

@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import pytest
+from fixtures.auth_tokens import TokenScope
 from fixtures.common_types import TenantId, TenantShardId, TimelineId
 from fixtures.compute_reconfigure import ComputeReconfigure
 from fixtures.log_helper import log
@@ -18,7 +19,6 @@ from fixtures.neon_fixtures import (
     PgBin,
     StorageControllerApiException,
     StorageControllerLeadershipStatus,
-    TokenScope,
     last_flush_lsn_upload,
 )
 from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
