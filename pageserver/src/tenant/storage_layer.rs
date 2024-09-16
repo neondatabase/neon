@@ -389,6 +389,7 @@ pub(crate) struct LayerFringe {
 struct LayerKeyspace {
     layer: ReadableLayer,
     target_keyspace: KeySpaceRandomAccum,
+    lsn_range: Range<Lsn>
 }
 
 impl LayerFringe {
@@ -413,6 +414,7 @@ impl LayerFringe {
                 LayerKeyspace {
                     layer,
                     mut target_keyspace,
+                    ..
                 },
             )) => Some((
                 layer,
@@ -436,10 +438,11 @@ impl LayerFringe {
                 // On this branch, we don't add to planned_reads_by_lsn
                 // even though we might be interested in a different lsn_range.
                 entry.get_mut().target_keyspace.add_keyspace(keyspace);
+                assert_eq!(lsn_range, entry.get().lsn_range);
             }
             Entry::Vacant(entry) => {
                 self.planned_reads_by_lsn.push(ReadDesc {
-                    lsn_range,
+                    lsn_range: lsn_range.clone(),
                     layer_id: layer_id.clone(),
                 });
                 let mut accum = KeySpaceRandomAccum::new();
@@ -447,6 +450,7 @@ impl LayerFringe {
                 entry.insert(LayerKeyspace {
                     layer,
                     target_keyspace: accum,
+                    lsn_range,
                 });
             }
         }
