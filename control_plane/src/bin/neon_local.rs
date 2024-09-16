@@ -640,6 +640,8 @@ async fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::Local
         }
         Some(("branch", branch_match)) => {
             let tenant_id = get_tenant_id(branch_match, env)?;
+            let new_timeline_id =
+                parse_timeline_id(branch_match)?.unwrap_or(TimelineId::generate());
             let new_branch_name = branch_match
                 .get_one::<String>("branch-name")
                 .ok_or_else(|| anyhow!("No branch name provided"))?;
@@ -658,7 +660,6 @@ async fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::Local
                 .map(|lsn_str| Lsn::from_str(lsn_str))
                 .transpose()
                 .context("Failed to parse ancestor start Lsn from the request")?;
-            let new_timeline_id = TimelineId::generate();
             let storage_controller = StorageController::from_env(env);
             let create_req = TimelineCreateRequest {
                 new_timeline_id,
@@ -1570,7 +1571,6 @@ fn cli() -> Command {
                         .value_parser(value_parser!(PathBuf))
                         .value_name("config")
                 )
-                .arg(pg_version_arg.clone())
                 .arg(force_arg)
         )
         .subcommand(
@@ -1583,6 +1583,7 @@ fn cli() -> Command {
             .subcommand(Command::new("branch")
                 .about("Create a new timeline, using another timeline as a base, copying its data")
                 .arg(tenant_id_arg.clone())
+                .arg(timeline_id_arg.clone())
                 .arg(branch_name_arg.clone())
                 .arg(Arg::new("ancestor-branch-name").long("ancestor-branch-name")
                     .help("Use last Lsn of another timeline (and its data) as base when creating the new timeline. The timeline gets resolved by its branch name.").required(false))

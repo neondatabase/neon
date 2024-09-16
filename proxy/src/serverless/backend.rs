@@ -50,7 +50,9 @@ impl PoolingBackend {
             .as_ref()
             .map(|()| user_info.clone());
         let (allowed_ips, maybe_secret) = backend.get_allowed_ips_and_secret(ctx).await?;
-        if !check_peer_addr_is_in_list(&ctx.peer_addr(), &allowed_ips) {
+        if config.ip_allowlist_check_enabled
+            && !check_peer_addr_is_in_list(&ctx.peer_addr(), &allowed_ips)
+        {
             return Err(AuthError::ip_address_not_allowed(ctx.peer_addr()));
         }
         if !self

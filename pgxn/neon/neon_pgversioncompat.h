@@ -6,7 +6,11 @@
 #ifndef NEON_PGVERSIONCOMPAT_H
 #define NEON_PGVERSIONCOMPAT_H
 
+#if PG_MAJORVERSION_NUM < 17
 #define NRelFileInfoBackendIsTemp(rinfo) (rinfo.backend != InvalidBackendId)
+#else
+#define NRelFileInfoBackendIsTemp(rinfo) (rinfo.backend != INVALID_PROC_NUMBER)
+#endif
 
 #define RelFileInfoEquals(a, b) ( \
 	NInfoGetSpcOid(a) == NInfoGetSpcOid(b) && \
@@ -50,7 +54,7 @@
 #define CopyNRelFileInfoToBufTag(tag, rinfo) \
 	do { \
 		(tag).rnode = (rinfo); \
-	} while (false);
+	} while (false)
 
 #define BufTagGetNRelFileInfo(tag) tag.rnode
 
@@ -98,7 +102,7 @@
 		(tag).spcOid = (rinfo).spcOid; \
 		(tag).dbOid = (rinfo).dbOid; \
 		(tag).relNumber = (rinfo).relNumber; \
-	} while (false);
+	} while (false)
 
 #define BufTagGetNRelFileInfo(tag) \
 	((RelFileLocator) { \
@@ -111,6 +115,12 @@
 	((reln)->smgr_rlocator)
 
 #define DropRelationAllLocalBuffers DropRelationAllLocalBuffers
+#endif
+
+#if PG_MAJORVERSION_NUM < 17
+#define ProcNumber BackendId
+#define INVALID_PROC_NUMBER InvalidBackendId
+#define AmAutoVacuumWorkerProcess() (IsAutoVacuumWorkerProcess())
 #endif
 
 #endif							/* NEON_PGVERSIONCOMPAT_H */

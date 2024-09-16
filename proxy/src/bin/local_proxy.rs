@@ -224,6 +224,7 @@ fn build_config(args: &LocalProxyCliArgs) -> anyhow::Result<&'static ProxyConfig
             rate_limiter_enabled: false,
             rate_limiter: BucketRateLimiter::new(vec![]),
             rate_limit_ip_subnet: 64,
+            ip_allowlist_check_enabled: true,
         },
         require_client_ip: false,
         handshake_timeout: Duration::from_secs(10),

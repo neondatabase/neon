@@ -57,7 +57,6 @@ from _pytest.fixtures import FixtureRequest
 from psycopg2.extensions import connection as PgConnection
 from psycopg2.extensions import cursor as PgCursor
 from psycopg2.extensions import make_dsn, parse_dsn
-from typing_extensions import Literal
 from urllib3.util.retry import Retry
 
 from fixtures import overlayfs
@@ -219,33 +218,6 @@ def neon_api_base_url() -> str:
 @pytest.fixture(scope="session")
 def neon_api(neon_api_key: str, neon_api_base_url: str) -> NeonAPI:
     return NeonAPI(neon_api_key, neon_api_base_url)
-
-
-def shareable_scope(fixture_name: str, config: Config) -> Literal["session", "function"]:
-    """Return either session of function scope, depending on TEST_SHARED_FIXTURES envvar.
-
-    This function can be used as a scope like this:
-    @pytest.fixture(scope=shareable_scope)
-    def myfixture(...)
-       ...
-    """
-    scope: Literal["session", "function"]
-
-    if os.environ.get("TEST_SHARED_FIXTURES") is None:
-        # Create the environment in the per-test output directory
-        scope = "function"
-    elif (
-        os.environ.get("BUILD_TYPE") is not None
-        and os.environ.get("DEFAULT_PG_VERSION") is not None
-    ):
-        scope = "session"
-    else:
-        pytest.fail(
-            "Shared environment(TEST_SHARED_FIXTURES) requires BUILD_TYPE and DEFAULT_PG_VERSION to be set",
-            pytrace=False,
-        )
-
-    return scope
 
 
 @pytest.fixture(scope="session")
@@ -581,10 +553,6 @@ class NeonEnvBuilder:
         self.env = NeonEnv(self)
         return self.env
 
-    def start(self):
-        assert self.env is not None, "environment is not already initialized, call init() first"
-        self.env.start()
-
     def init_start(
         self,
         initial_tenant_conf: Optional[Dict[str, Any]] = None,
@@ -600,7 +568,7 @@ class NeonEnvBuilder:
         Configuring pageserver with remote storage is now the default. There will be a warning if pageserver is created without one.
         """
         env = self.init_configs(default_remote_storage_if_missing=default_remote_storage_if_missing)
-        self.start()
+        env.start()
 
         # Prepare the default branch to start the postgres on later.
         # Pageserver itself does not create tenants and timelines, until started first and asked via HTTP API.
@@ -965,8 +933,11 @@ class NeonEnvBuilder:
 
         for directory_to_clean in reversed(directories_to_clean):
             if not os.listdir(directory_to_clean):
-                log.debug(f"Removing empty directory {directory_to_clean}")
-                directory_to_clean.rmdir()
+                log.info(f"Removing empty directory {directory_to_clean}")
+                try:
+                    directory_to_clean.rmdir()
+                except Exception as e:
+                    log.error(f"Error removing empty directory {directory_to_clean}: {e}")
 
     def cleanup_remote_storage(self):
         for x in [self.pageserver_remote_storage, self.safekeepers_remote_storage]:
@@ -1101,9 +1072,6 @@ class NeonEnv:
         self.pg_distrib_dir = config.pg_distrib_dir
         self.endpoint_counter = 0
         self.storage_controller_config = config.storage_controller_config
-
-        # generate initial tenant ID here instead of letting 'neon init' generate it,
-        # so that we don't need to dig it out of the config file afterwards.
         self.initial_tenant = config.initial_tenant
         self.initial_timeline = config.initial_timeline
 
@@ -1431,8 +1399,8 @@ class NeonEnv:
         return "ep-" + str(self.endpoint_counter)
 
 
-@pytest.fixture(scope=shareable_scope)
-def _shared_simple_env(
+@pytest.fixture(scope="function")
+def neon_simple_env(
     request: FixtureRequest,
     pytestconfig: Config,
     port_distributor: PortDistributor,
@@ -1450,19 +1418,13 @@ def _shared_simple_env(
     pageserver_io_buffer_alignment: Optional[int],
 ) -> Iterator[NeonEnv]:
     """
-    # Internal fixture backing the `neon_simple_env` fixture. If TEST_SHARED_FIXTURES
-     is set, this is shared by all tests using `neon_simple_env`.
+    Simple Neon environment, with no authentication and no safekeepers.
 
     This fixture will use RemoteStorageKind.LOCAL_FS with pageserver.
     """
 
-    if os.environ.get("TEST_SHARED_FIXTURES") is None:
-        # Create the environment in the per-test output directory
-        repo_dir = get_test_repo_dir(request, top_output_dir)
-    else:
-        # We're running shared fixtures. Share a single directory.
-        repo_dir = top_output_dir / "shared_repo"
-        shutil.rmtree(repo_dir, ignore_errors=True)
+    # Create the environment in the per-test output directory
+    repo_dir = get_test_repo_dir(request, top_output_dir)
 
     with NeonEnvBuilder(
         top_output_dir=top_output_dir,
@@ -1484,25 +1446,7 @@ def _shared_simple_env(
     ) as builder:
         env = builder.init_start()
 
-        # For convenience in tests, create a branch from the freshly-initialized cluster.
-        env.neon_cli.create_branch("empty", ancestor_branch_name=DEFAULT_BRANCH_NAME)
-
         yield env
-
-
-@pytest.fixture(scope="function")
-def neon_simple_env(_shared_simple_env: NeonEnv) -> Iterator[NeonEnv]:
-    """
-    Simple Neon environment, with no authentication and no safekeepers.
-
-    If TEST_SHARED_FIXTURES environment variable is set, we reuse the same
-    environment for all tests that use 'neon_simple_env', keeping the
-    page server and safekeepers running. Any compute nodes are stopped after
-    each the test, however.
-    """
-    yield _shared_simple_env
-
-    _shared_simple_env.endpoints.stop_all()
 
 
 @pytest.fixture(scope="function")
@@ -1571,14 +1515,6 @@ def neon_env_builder(
 class PageserverPort:
     pg: int
     http: int
-
-
-CREATE_TIMELINE_ID_EXTRACTOR: re.Pattern = re.compile(  # type: ignore[type-arg]
-    r"^Created timeline '(?P<timeline_id>[^']+)'", re.MULTILINE
-)
-TIMELINE_DATA_EXTRACTOR: re.Pattern = re.compile(  # type: ignore[type-arg]
-    r"\s?(?P<branch_name>[^\s]+)\s\[(?P<timeline_id>[^\]]+)\]", re.MULTILINE
-)
 
 
 class AbstractNeonCli(abc.ABC):
@@ -1809,6 +1745,9 @@ class NeonCli(AbstractNeonCli):
         tenant_id: Optional[TenantId] = None,
         timeline_id: Optional[TimelineId] = None,
     ) -> TimelineId:
+        if timeline_id is None:
+            timeline_id = TimelineId.generate()
+
         cmd = [
             "timeline",
             "create",
@@ -1816,23 +1755,16 @@ class NeonCli(AbstractNeonCli):
             new_branch_name,
             "--tenant-id",
             str(tenant_id or self.env.initial_tenant),
+            "--timeline-id",
+            str(timeline_id),
             "--pg-version",
             self.env.pg_version,
         ]
 
-        if timeline_id is not None:
-            cmd.extend(["--timeline-id", str(timeline_id)])
-
         res = self.raw_cli(cmd)
         res.check_returncode()
 
-        matches = CREATE_TIMELINE_ID_EXTRACTOR.search(res.stdout)
-
-        created_timeline_id = None
-        if matches is not None:
-            created_timeline_id = matches.group("timeline_id")
-
-        return TimelineId(str(created_timeline_id))
+        return timeline_id
 
     def create_branch(
         self,
@@ -1840,12 +1772,17 @@ class NeonCli(AbstractNeonCli):
         ancestor_branch_name: Optional[str] = None,
         tenant_id: Optional[TenantId] = None,
         ancestor_start_lsn: Optional[Lsn] = None,
+        new_timeline_id: Optional[TimelineId] = None,
     ) -> TimelineId:
+        if new_timeline_id is None:
+            new_timeline_id = TimelineId.generate()
         cmd = [
             "timeline",
             "branch",
             "--branch-name",
             new_branch_name,
+            "--timeline-id",
+            str(new_timeline_id),
             "--tenant-id",
             str(tenant_id or self.env.initial_tenant),
         ]
@@ -1857,16 +1794,7 @@ class NeonCli(AbstractNeonCli):
         res = self.raw_cli(cmd)
         res.check_returncode()
 
-        matches = CREATE_TIMELINE_ID_EXTRACTOR.search(res.stdout)
-
-        created_timeline_id = None
-        if matches is not None:
-            created_timeline_id = matches.group("timeline_id")
-
-        if created_timeline_id is None:
-            raise Exception("could not find timeline id after `neon timeline create` invocation")
-        else:
-            return TimelineId(str(created_timeline_id))
+        return TimelineId(str(new_timeline_id))
 
     def list_timelines(self, tenant_id: Optional[TenantId] = None) -> List[Tuple[str, TimelineId]]:
         """
@@ -1875,6 +1803,9 @@ class NeonCli(AbstractNeonCli):
 
         # main [b49f7954224a0ad25cc0013ea107b54b]
         # ┣━ @0/16B5A50: test_cli_branch_list_main [20f98c79111b9015d84452258b7d5540]
+        TIMELINE_DATA_EXTRACTOR: re.Pattern = re.compile(  # type: ignore[type-arg]
+            r"\s?(?P<branch_name>[^\s]+)\s\[(?P<timeline_id>[^\]]+)\]", re.MULTILINE
+        )
         res = self.raw_cli(
             ["timeline", "list", "--tenant-id", str(tenant_id or self.env.initial_tenant)]
         )
@@ -3495,6 +3426,7 @@ class VanillaPostgres(PgProtocol):
         assert not self.running
         with open(os.path.join(self.pgdatadir, "postgresql.conf"), "a") as conf_file:
             conf_file.write("\n".join(options))
+            conf_file.write("\n")
 
     def edit_hba(self, hba: List[str]):
         """Prepend hba lines into pg_hba.conf file."""
@@ -3548,6 +3480,7 @@ def vanilla_pg(
     pg_bin = PgBin(test_output_dir, pg_distrib_dir, pg_version)
     port = port_distributor.get_port()
     with VanillaPostgres(pgdatadir, pg_bin, port) as vanilla_pg:
+        vanilla_pg.configure(["shared_preload_libraries='neon_rmgr'"])
         yield vanilla_pg
 
 
@@ -4898,14 +4831,7 @@ SMALL_DB_FILE_NAME_REGEX: re.Pattern = re.compile(  # type: ignore[type-arg]
 
 
 # This is autouse, so the test output directory always gets created, even
-# if a test doesn't put anything there. It also solves a problem with the
-# neon_simple_env fixture: if TEST_SHARED_FIXTURES is not set, it
-# creates the repo in the test output directory. But it cannot depend on
-# 'test_output_dir' fixture, because when TEST_SHARED_FIXTURES is not set,
-# it has 'session' scope and cannot access fixtures with 'function'
-# scope. So it uses the get_test_output_dir() function to get the path, and
-# this fixture ensures that the directory exists.  That works because
-# 'autouse' fixtures are run before other fixtures.
+# if a test doesn't put anything there.
 #
 # NB: we request the overlay dir fixture so the fixture does its cleanups
 @pytest.fixture(scope="function", autouse=True)

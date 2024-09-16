@@ -57,7 +57,7 @@ mod tests {
     fn bad_url() {
         let url = "test:foobar";
         url.parse::<url::Url>().expect("unexpected parsing failure");
-        let _ = url.parse::<ApiUrl>().expect_err("should not parse");
+        url.parse::<ApiUrl>().expect_err("should not parse");
     }
 
     #[test]
