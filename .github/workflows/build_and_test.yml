@@ -120,6 +120,55 @@ jobs:
       - name: Run mypy to check types
         run: poetry run mypy .
 
+  # Check that the vendor/postgres-* submodules point to the
+  # corresponding REL_*_STABLE_neon branches.
+  check-submodules:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      # We need more history, to find the common ancestor between each REL_14_* branch.
+      # 3 months should be plenty.
+      - name: Checkout more history
+        id: checkout-deeper
+        run: git submodule foreach git fetch --shallow-since='3 months'
+
+      - name: Check vendor/postgres-v14 submodule reference
+        id: postgres-v14-submodule
+        run: |
+            cd vendor/postgres-v14
+            git fetch origin "refs/heads/REL_14_STABLE_neon:refs/heads/origin/REL_14_STABLE_neon"
+            RC=$(git merge-base --is-ancestor origin/REL_14_STABLE_neon HEAD; echo $?)
+            if [ "$RC" != "0" ]; then
+              echo "vendor/postgres-v14 submodule is not an ancestor of the REL_14_STABLE_neon branch. Please rebase it"
+              exit 1
+            fi
+
+      - name: Check vendor/postgres-v15 submodule reference
+        id: postgres-v15-submodule
+        run: |
+            cd vendor/postgres-v15
+            git fetch origin "refs/heads/REL_14_STABLE_neon:refs/heads/origin/REL_14_STABLE_neon"
+            RC=$(git merge-base --is-ancestor origin/REL_14_STABLE_neon HEAD; echo $?)
+            if [ "$RC" != "0" ]; then
+              echo "vendor/postgres-v15 submodule is not an ancestor of the REL_14_STABLE_neon branch. Please rebase it"
+              exit 1
+            fi
+
+      - name: Check vendor/postgres-v16 submodule reference
+        id: postgres-v16-submodule
+        run: |
+            cd vendor/postgres-v16
+            git fetch origin "refs/heads/REL_14_STABLE_neon:refs/heads/origin/REL_14_STABLE_neon"
+            RC=$(git merge-base --is-ancestor origin/REL_14_STABLE_neon HEAD; echo $?)
+            if [ "$RC" != "0" ]; then
+              echo "vendor/postgres-v16 submodule is not an ancestor of the REL_14_STABLE_neon branch. Please rebase it"
+              exit 1
+            fi
+
   check-codestyle-rust:
     needs: [ check-permissions, build-build-tools-image ]
     strategy:
@@ -1152,6 +1201,7 @@ jobs:
     # Usually we do `needs: [...]`
     needs:
       - build-and-test-locally
+      - check-submodules
       - check-codestyle-python
       - check-codestyle-rust
       - promote-images
