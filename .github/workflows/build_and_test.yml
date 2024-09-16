@@ -357,6 +357,7 @@ jobs:
             })
 
   coverage-report:
+    if: ${{ !startsWith(github.ref_name, 'release') }}
     needs: [ check-permissions, build-build-tools-image, build-and-test-locally ]
     runs-on: [ self-hosted, small ]
     container:
