@@ -389,7 +389,7 @@ pub(crate) struct LayerFringe {
 struct LayerKeyspace {
     layer: ReadableLayer,
     target_keyspace: KeySpaceRandomAccum,
-    lsn_range: Range<Lsn>
+    lsn_range: Range<Lsn>,
 }
 
 impl LayerFringe {
@@ -438,6 +438,24 @@ impl LayerFringe {
                 // On this branch, we don't add to planned_reads_by_lsn
                 // even though we might be interested in a different lsn_range.
                 entry.get_mut().target_keyspace.add_keyspace(keyspace);
+
+                if lsn_range != entry.get().lsn_range {
+                    tracing::error!(
+                        "LSN range assumption violated for layer: {:?}, lsn_range: {:?}",
+                        layer_id,
+                        lsn_range
+                    );
+
+                    let fringe = self.planned_reads_by_lsn.clone().into_sorted_vec();
+                    for read in fringe {
+                        tracing::error!(
+                            "layer: {:?}, lsn_range: {:?}",
+                            read.layer_id,
+                            read.lsn_range
+                        );
+                    }
+                    panic!("LSN range assumption violated");
+                }
                 assert_eq!(lsn_range, entry.get().lsn_range);
             }
             Entry::Vacant(entry) => {
