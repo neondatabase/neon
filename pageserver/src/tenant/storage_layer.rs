@@ -276,6 +276,16 @@ pub(crate) enum LayerId {
     InMemoryLayerId(InMemoryLayerFileId),
 }
 
+/// Uniquely identify a layer visit by the layer
+/// and LSN floor (or start LSN) of the reads.
+/// The layer itself is not enough since we may
+/// have different LSN lower bounds for delta layer reads.
+#[derive(Debug, PartialEq, Eq, Clone, Hash)]
+struct LayerToVisitId {
+    layer_id: LayerId,
+    lsn_floor: Lsn,
+}
+
 /// Layer wrapper for the read path. Note that it is valid
 /// to use these layers even after external operations have
 /// been performed on them (compaction, freeze, etc.).
@@ -289,7 +299,7 @@ pub(crate) enum ReadableLayer {
 #[derive(Debug, Clone)]
 struct ReadDesc {
     /// An id used to resolve the readable layer within the fringe
-    layer_id: LayerId,
+    layer_to_visit_id: LayerToVisitId,
     /// Lsn range for the read, used for selecting the next read
     lsn_range: Range<Lsn>,
 }
@@ -304,7 +314,7 @@ struct ReadDesc {
 #[derive(Debug)]
 pub(crate) struct LayerFringe {
     planned_reads_by_lsn: BinaryHeap<ReadDesc>,
-    layers: HashMap<LayerId, LayerKeyspace>,
+    layers: HashMap<LayerToVisitId, LayerKeyspace>,
 }
 
 #[derive(Debug)]
@@ -327,7 +337,7 @@ impl LayerFringe {
             None => return None,
         };
 
-        let removed = self.layers.remove_entry(&read_desc.layer_id);
+        let removed = self.layers.remove_entry(&read_desc.layer_to_visit_id);
 
         match removed {
             Some((
@@ -351,8 +361,12 @@ impl LayerFringe {
         keyspace: KeySpace,
         lsn_range: Range<Lsn>,
     ) {
-        let layer_id = layer.id();
-        let entry = self.layers.entry(layer_id.clone());
+        let layer_to_visit_id = LayerToVisitId {
+            layer_id: layer.id(),
+            lsn_floor: lsn_range.start,
+        };
+
+        let entry = self.layers.entry(layer_to_visit_id.clone());
         match entry {
             Entry::Occupied(mut entry) => {
                 entry.get_mut().target_keyspace.add_keyspace(keyspace);
@@ -360,7 +374,7 @@ impl LayerFringe {
             Entry::Vacant(entry) => {
                 self.planned_reads_by_lsn.push(ReadDesc {
                     lsn_range,
-                    layer_id: layer_id.clone(),
+                    layer_to_visit_id: layer_to_visit_id.clone(),
                 });
                 let mut accum = KeySpaceRandomAccum::new();
                 accum.add_keyspace(keyspace);
