@@ -840,6 +840,36 @@ impl Timeline {
         Ok(total_size * BLCKSZ as u64)
     }
 
+    /// Get a KeySpace that covers all the Keys that are in use at AND below the given LSN. This is only used
+    /// for gc-compaction.
+    ///
+    /// gc-compaction cannot use the same `collect_keyspace` function as the legacy compaction because it
+    /// processes data at multiple LSNs and needs to be aware of the fact that some key ranges might need to
+    /// be kept only for a specific range of LSN.
+    ///
+    /// Consider the case that the user created branches at LSN 10 and 20, where the user created a table A at
+    /// LSN 10 and dropped that table at LSN 20. `collect_keyspace` at LSN 10 will return the key range
+    /// corresponding to that table, while LSN 20 won't. The keyspace info at a single LSN is not enough to
+    /// determine which keys to retain/drop for gc-compaction.
+    ///
+    /// For now, it only drops AUX-v1 keys. But in the future, the function will be extended to return the keyspace
+    /// to be retained for each of the branch LSN.
+    ///
+    /// The return value is (dense keyspace, sparse keyspace).
+    pub(crate) async fn collect_gc_compaction_keyspace(
+        &self,
+    ) -> Result<(KeySpace, SparseKeySpace), CollectKeySpaceError> {
+        let metadata_key_begin = Key::metadata_key_range().start;
+        let aux_v1_key = AUX_FILES_KEY;
+        let dense_keyspace = KeySpace {
+            ranges: vec![Key::MIN..aux_v1_key, aux_v1_key.next()..metadata_key_begin],
+        };
+        Ok((
+            dense_keyspace,
+            SparseKeySpace(KeySpace::single(Key::metadata_key_range())),
+        ))
+    }
+
     ///
     /// Get a KeySpace that covers all the Keys that are in use at the given LSN.
     /// Anything that's not listed maybe removed from the underlying storage (from
