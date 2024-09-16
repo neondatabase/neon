@@ -130,35 +130,45 @@ jobs:
         with:
           submodules: true
 
-      # We need more history, to find the common ancestor between each REL_14_* branch.
-      # 3 months should be plenty.
-      - name: Checkout more history
-        id: checkout-deeper
-        run: git submodule foreach git fetch --shallow-since='3 months'
-
       - name: Check vendor/postgres-v14 submodule reference
-        uses: ./.github/actions/check-submodule-reference
+        uses: jtmullen/submodule-branch-check-action@v1
         with:
-          submodule_path: vendor/postgres-v14
-          branch: REL_14_STABLE_neon
+          path: "vendor/postgres-v14"
+          branch: "REL_14_STABLE_neon"
+          fetch_depth: "50"
+          sub_fetch_depth: "50"
+          first_parent: true
+          pass_if_unchanged: true
 
       - name: Check vendor/postgres-v15 submodule reference
-        uses: ./.github/actions/check-submodule-reference
+        uses: jtmullen/submodule-branch-check-action@v1
         with:
-          submodule_path: vendor/postgres-v15
-          branch: REL_15_STABLE_neon
+          path: "vendor/postgres-v15"
+          branch: "REL_15_STABLE_neon"
+          fetch_depth: "50"
+          sub_fetch_depth: "50"
+          first_parent: true
+          pass_if_unchanged: true
 
       - name: Check vendor/postgres-v16 submodule reference
-        uses: ./.github/actions/check-submodule-reference
+        uses: jtmullen/submodule-branch-check-action@v1
         with:
-          submodule_path: vendor/postgres-v16
-          branch: REL_16_STABLE_neon
+          path: "vendor/postgres-v16"
+          branch: "REL_16_STABLE_neon"
+          fetch_depth: "50"
+          sub_fetch_depth: "50"
+          first_parent: true
+          pass_if_unchanged: true
 
       - name: Check vendor/postgres-v17 submodule reference
-        uses: ./.github/actions/check-submodule-reference
+        uses: jtmullen/submodule-branch-check-action@v1
         with:
-          submodule_path: vendor/postgres-v17
-          branch: REL_17_STABLE_neon
+          path: "vendor/postgres-v17"
+          branch: "REL_17_STABLE_neon"
+          fetch_depth: "50"
+          sub_fetch_depth: "50"
+          first_parent: true
+          pass_if_unchanged: true
 
   check-codestyle-rust:
     needs: [ check-permissions, build-build-tools-image ]
