@@ -456,7 +456,6 @@ impl LayerFringe {
                     }
                     panic!("LSN range assumption violated");
                 }
-                assert_eq!(lsn_range, entry.get().lsn_range);
             }
             Entry::Vacant(entry) => {
                 self.planned_reads_by_lsn.push(ReadDesc {

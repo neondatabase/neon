@@ -1177,6 +1177,32 @@ mod tests {
     }
 
     #[test]
+    fn vlad_test() {
+        let layers = vec![
+            LayerDesc {
+                key_range: Key::from_i128(0)..Key::from_i128(100),
+                lsn_range: Lsn(0)..Lsn(100),
+                is_delta: true,
+            },
+            LayerDesc {
+                key_range: Key::from_i128(20)..Key::from_i128(30),
+                lsn_range: Lsn(10)..Lsn(50),
+                is_delta: false,
+            },
+        ];
+
+        let layer_map = create_layer_map(layers.clone());
+
+        let range = Key::from_i128(0)..Key::from_i128(100);
+        let result = layer_map.range_search(range.clone(), Lsn(100));
+        let expected = brute_force_range_search(&layer_map, range, Lsn(100));
+
+        eprintln!("result: {result:?}");
+
+        assert_range_search_result_eq(result, expected);
+    }
+
+    #[test]
     fn layer_visibility_basic() {
         // A simple synthetic input, as a smoke test.
         let tenant_shard_id = TenantShardId::unsharded(TenantId::generate());
