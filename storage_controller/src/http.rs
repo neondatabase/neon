@@ -5,7 +5,7 @@ use crate::metrics::{
 };
 use crate::persistence::SafekeeperPersistence;
 use crate::reconciler::ReconcileError;
-use crate::service::{LeadershipStatus, Service, STARTUP_RECONCILE_TIMEOUT};
+use crate::service::{LeadershipStatus, Service, RECONCILE_TIMEOUT, STARTUP_RECONCILE_TIMEOUT};
 use anyhow::Context;
 use futures::Future;
 use hyper::header::CONTENT_TYPE;
@@ -1423,8 +1423,8 @@ async fn maybe_forward(req: Request<Body>) -> ForwardOutcome {
         match leader {
             Ok(Some(leader)) => leader,
             Ok(None) => {
-                return ForwardOutcome::Forwarded(Err(ApiError::InternalServerError(
-                    anyhow::anyhow!("No leader to forward to while in stepped down state"),
+                return ForwardOutcome::Forwarded(Err(ApiError::ResourceUnavailable(
+                    "No leader to forward to while in stepped down state".into(),
                 )));
             }
             Err(err) => {
@@ -1457,10 +1457,13 @@ async fn maybe_forward(req: Request<Body>) -> ForwardOutcome {
         }
     }
 
-    tracing::debug!("Forwarding {} to leader at {}", uri, leader.address);
+    tracing::info!("Forwarding {} to leader at {}", uri, leader.address);
 
+    // Use [`RECONCILE_TIMEOUT`] as the max amount of time a request should block for and
+    // include some leeway to get the timeout for proxied requests.
+    const PROXIED_REQUEST_TIMEOUT: Duration = Duration::from_secs(RECONCILE_TIMEOUT.as_secs() + 10);
     let client = reqwest::ClientBuilder::new()
-        .timeout(Duration::from_secs(4))
+        .timeout(PROXIED_REQUEST_TIMEOUT)
         .build();
     let client = match client {
         Ok(client) => client,
@@ -1492,6 +1495,12 @@ async fn maybe_forward(req: Request<Body>) -> ForwardOutcome {
     ForwardOutcome::Forwarded(convert_response(response).await)
 }
 
+/// Convert a [`reqwest::Response`] to a [hyper::Response`] by passing through
+/// a stable representation (string, bytes or integer)
+///
+/// Ideally, we would not have to do this since both types use the http crate
+/// under the hood. However, they use different versions of the crate and keeping
+/// second order dependencies in sync is difficult.
 async fn convert_response(resp: reqwest::Response) -> Result<hyper::Response<Body>, ApiError> {
     use std::str::FromStr;
 
@@ -1509,13 +1518,16 @@ async fn convert_response(resp: reqwest::Response) -> Result<hyper::Response<Bod
     }
 
     let body = http::Body::wrap_stream(resp.bytes_stream());
-    //let body = hyper::body::Body::wrap_stream(resp.bytes_stream());
 
     builder.body(body).map_err(|err| {
         ApiError::InternalServerError(anyhow::anyhow!("Response conversion failed: {err}"))
     })
 }
 
+/// Convert a [`reqwest::Request`] to a [hyper::Request`] by passing through
+/// a stable representation (string, bytes or integer)
+///
+/// See [`convert_response`] for why we are doing it this way.
 async fn convert_request(
     req: hyper::Request<Body>,
     client: &reqwest::Client,
