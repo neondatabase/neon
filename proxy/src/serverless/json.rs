@@ -385,25 +385,40 @@ impl<'de> Deserialize<'de> for Payload {
 struct PgText {
     value: Vec<Option<String>>,
 }
+
 impl<'de> Deserialize<'de> for PgText {
-    fn deserialize<D>(__deserializer: D) -> Result<Self, D::Error>
+    fn deserialize<D>(d: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        // TODO: consider avoiding the allocation here.
-        let value = Deserialize::deserialize(__deserializer)?;
-        Ok(PgText {
-            value: json_to_pg_text(value),
-        })
-    }
-}
+        struct VecVisitor;
 
-//
-// Convert json non-string types to strings, so that they can be passed to Postgres
-// as parameters.
-//
-fn json_to_pg_text(json: Vec<Value>) -> Vec<Option<String>> {
-    json.iter().map(json_value_to_pg_text).collect()
+        impl<'de> de::Visitor<'de> for VecVisitor {
+            type Value = Vec<Option<String>>;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a sequence of postgres parameters")
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Vec<Option<String>>, A::Error>
+            where
+                A: de::SeqAccess<'de>,
+            {
+                let mut values = Vec::new();
+
+                // TODO: consider avoiding the allocation here.
+                while let Some(value) = seq.next_element()? {
+                    values.push(json_value_to_pg_text(&value));
+                }
+
+                Ok(values)
+            }
+        }
+
+        let value = d.deserialize_seq(VecVisitor)?;
+
+        Ok(PgText { value })
+    }
 }
 
 fn json_value_to_pg_text(value: &Value) -> Option<String> {
@@ -655,24 +670,22 @@ mod tests {
 
     #[test]
     fn test_atomic_types_to_pg_params() {
-        let json = vec![Value::Bool(true), Value::Bool(false)];
-        let pg_params = json_to_pg_text(json);
-        assert_eq!(
-            pg_params,
-            vec![Some("true".to_owned()), Some("false".to_owned())]
-        );
+        let pg_params = json_value_to_pg_text(&Value::Bool(true));
+        assert_eq!(pg_params, Some("true".to_owned()));
+        let pg_params = json_value_to_pg_text(&Value::Bool(false));
+        assert_eq!(pg_params, Some("false".to_owned()));
 
-        let json = vec![Value::Number(serde_json::Number::from(42))];
-        let pg_params = json_to_pg_text(json);
-        assert_eq!(pg_params, vec![Some("42".to_owned())]);
+        let json = Value::Number(serde_json::Number::from(42));
+        let pg_params = json_value_to_pg_text(&json);
+        assert_eq!(pg_params, Some("42".to_owned()));
 
-        let json = vec![Value::String("foo\"".to_string())];
-        let pg_params = json_to_pg_text(json);
-        assert_eq!(pg_params, vec![Some("foo\"".to_owned())]);
+        let json = Value::String("foo\"".to_string());
+        let pg_params = json_value_to_pg_text(&json);
+        assert_eq!(pg_params, Some("foo\"".to_owned()));
 
-        let json = vec![Value::Null];
-        let pg_params = json_to_pg_text(json);
-        assert_eq!(pg_params, vec![None]);
+        let json = Value::Null;
+        let pg_params = json_value_to_pg_text(&json);
+        assert_eq!(pg_params, None);
     }
 
     #[test]
@@ -680,31 +693,27 @@ mod tests {
         // atoms and escaping
         let json = "[true, false, null, \"NULL\", 42, \"foo\", \"bar\\\"-\\\\\"]";
         let json: Value = serde_json::from_str(json).unwrap();
-        let pg_params = json_to_pg_text(vec![json]);
+        let pg_params = json_value_to_pg_text(&json);
         assert_eq!(
             pg_params,
-            vec![Some(
-                "{true,false,NULL,\"NULL\",42,\"foo\",\"bar\\\"-\\\\\"}".to_owned()
-            )]
+            Some("{true,false,NULL,\"NULL\",42,\"foo\",\"bar\\\"-\\\\\"}".to_owned())
         );
 
         // nested arrays
         let json = "[[true, false], [null, 42], [\"foo\", \"bar\\\"-\\\\\"]]";
         let json: Value = serde_json::from_str(json).unwrap();
-        let pg_params = json_to_pg_text(vec![json]);
+        let pg_params = json_value_to_pg_text(&json);
         assert_eq!(
             pg_params,
-            vec![Some(
-                "{{true,false},{NULL,42},{\"foo\",\"bar\\\"-\\\\\"}}".to_owned()
-            )]
+            Some("{{true,false},{NULL,42},{\"foo\",\"bar\\\"-\\\\\"}}".to_owned())
         );
         // array of objects
         let json = r#"[{"foo": 1},{"bar": 2}]"#;
         let json: Value = serde_json::from_str(json).unwrap();
-        let pg_params = json_to_pg_text(vec![json]);
+        let pg_params = json_value_to_pg_text(&json);
         assert_eq!(
             pg_params,
-            vec![Some(r#"{"{\"foo\":1}","{\"bar\":2}"}"#.to_owned())]
+            Some(r#"{"{\"foo\":1}","{\"bar\":2}"}"#.to_owned())
         );
     }
 
