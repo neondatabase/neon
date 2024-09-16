@@ -18,7 +18,6 @@ camino = { workspace = true, features = ["serde1"] }
 humantime-serde.workspace = true
 hyper = { workspace = true, features = ["stream"] }
 futures.workspace = true
-rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["sync", "fs", "io-util"] }
