@@ -858,7 +858,6 @@ jobs:
           done
 
   push-to-acr-dev:
-    if: github.ref_name == 'main'
     needs: [ tag, promote-images ]
     uses: ./.github/workflows/_push-to-acr.yml
     with:
@@ -868,9 +867,9 @@ jobs:
       registry_name: ${{ vars.AZURE_DEV_REGISTRY_NAME }}
       subscription_id: ${{ vars.AZURE_DEV_SUBSCRIPTION_ID }}
       tenant_id: ${{ vars.AZURE_TENANT_ID }}
+      skip_if: ${{ github.ref_name != 'main' }}
 
   push-to-acr-prod:
-    if: github.ref_name == 'release'|| github.ref_name == 'release-proxy'
     needs: [ tag, promote-images ]
     uses: ./.github/workflows/_push-to-acr.yml
     with:
@@ -880,6 +879,7 @@ jobs:
       registry_name: ${{ vars.AZURE_PROD_REGISTRY_NAME }}
       subscription_id: ${{ vars.AZURE_PROD_SUBSCRIPTION_ID }}
       tenant_id: ${{ vars.AZURE_TENANT_ID }}
+      skip_if: ${{ !startsWith(github.ref_name, 'release') }}
 
   trigger-custom-extensions-build-and-wait:
     needs: [ check-permissions, tag ]
@@ -957,7 +957,7 @@ jobs:
 
   deploy:
     needs: [ check-permissions, promote-images, tag, build-and-test-locally, trigger-custom-extensions-build-and-wait, push-to-acr-dev, push-to-acr-prod ]
-    if: (github.ref_name == 'main' || github.ref_name == 'release' || github.ref_name == 'release-proxy') && !failure() && !cancelled()
+    if: github.ref_name == 'main' || github.ref_name == 'release' || github.ref_name == 'release-proxy'
 
     runs-on: [ self-hosted, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
