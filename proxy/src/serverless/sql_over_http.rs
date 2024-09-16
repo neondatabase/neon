@@ -26,7 +26,6 @@ use serde::de;
 use serde::Deserialize;
 use serde::Deserializer;
 use serde::Serialize;
-use serde_json::Value;
 use tokio::time;
 use tokio_postgres::error::DbError;
 use tokio_postgres::error::ErrorPosition;
@@ -60,6 +59,7 @@ use crate::metrics::Metrics;
 use crate::proxy::run_until_cancelled;
 use crate::proxy::NeonOptions;
 use crate::serverless::backend::HttpConnError;
+use crate::serverless::json::PgText;
 use crate::usage_metrics::MetricCounterRecorder;
 use crate::DbName;
 use crate::RoleName;
@@ -71,7 +71,6 @@ use super::conn_pool::Client;
 use super::conn_pool::ConnInfo;
 use super::conn_pool::ConnInfoWithAuth;
 use super::http_util::json_response;
-use super::json::json_to_pg_text;
 use super::json::pg_text_row_to_json;
 use super::json::JsonConversionError;
 
@@ -175,21 +174,6 @@ impl<'de> Deserialize<'de> for QueryData {
                             };
                         }
                         Field::Params => {
-                            #[doc(hidden)]
-                            struct PgText {
-                                value: Vec<Option<String>>,
-                            }
-                            impl<'de> Deserialize<'de> for PgText {
-                                fn deserialize<D>(__deserializer: D) -> Result<Self, D::Error>
-                                where
-                                    D: Deserializer<'de>,
-                                {
-                                    Ok(PgText {
-                                        value: bytes_to_pg_text(__deserializer)?,
-                                    })
-                                }
-                            }
-
                             let (query, array_mode) = match state {
                                 States::HasPartialQueryData {
                                     params: Some(_), ..
@@ -380,21 +364,6 @@ impl<'de> Deserialize<'de> for Payload {
                             };
                         }
                         Field::Params => {
-                            #[doc(hidden)]
-                            struct PgText {
-                                value: Vec<Option<String>>,
-                            }
-                            impl<'de> Deserialize<'de> for PgText {
-                                fn deserialize<D>(__deserializer: D) -> Result<Self, D::Error>
-                                where
-                                    D: Deserializer<'de>,
-                                {
-                                    Ok(PgText {
-                                        value: bytes_to_pg_text(__deserializer)?,
-                                    })
-                                }
-                            }
-
                             let (query, array_mode) = match state {
                                 States::HasQueries(_) => {
                                     return Err(<A::Error as de::Error>::unknown_field(
@@ -498,15 +467,6 @@ static TXN_READ_ONLY: HeaderName = HeaderName::from_static("neon-batch-read-only
 static TXN_DEFERRABLE: HeaderName = HeaderName::from_static("neon-batch-deferrable");
 
 static HEADER_VALUE_TRUE: HeaderValue = HeaderValue::from_static("true");
-
-fn bytes_to_pg_text<'de, D>(deserializer: D) -> Result<Vec<Option<String>>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    // TODO: consider avoiding the allocation here.
-    let json: Vec<Value> = Deserialize::deserialize(deserializer)?;
-    Ok(json_to_pg_text(json))
-}
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ConnInfoError {

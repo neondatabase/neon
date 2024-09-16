@@ -1,8 +1,26 @@
+use serde::Deserialize;
+use serde::Deserializer;
 use serde_json::Map;
 use serde_json::Value;
 use tokio_postgres::types::Kind;
 use tokio_postgres::types::Type;
 use tokio_postgres::Row;
+
+pub(crate) struct PgText {
+    pub(crate) value: Vec<Option<String>>,
+}
+impl<'de> Deserialize<'de> for PgText {
+    fn deserialize<D>(__deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        // TODO: consider avoiding the allocation here.
+        let value = Deserialize::deserialize(__deserializer)?;
+        Ok(PgText {
+            value: json_to_pg_text(value),
+        })
+    }
+}
 
 //
 // Convert json non-string types to strings, so that they can be passed to Postgres
