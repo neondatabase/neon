@@ -137,37 +137,28 @@ jobs:
         run: git submodule foreach git fetch --shallow-since='3 months'
 
       - name: Check vendor/postgres-v14 submodule reference
-        id: postgres-v14-submodule
-        run: |
-            cd vendor/postgres-v14
-            git fetch origin "refs/heads/REL_14_STABLE_neon:refs/heads/origin/REL_14_STABLE_neon"
-            RC=$(git merge-base --is-ancestor origin/REL_14_STABLE_neon HEAD; echo $?)
-            if [ "$RC" != "0" ]; then
-              echo "vendor/postgres-v14 submodule is not an ancestor of the REL_14_STABLE_neon branch. Please rebase it"
-              exit 1
-            fi
+        uses: ./.github/actions/check-submodule-reference
+        with:
+          submodule_path: vendor/postgres-v14
+          branch: REL_14_STABLE_neon
 
       - name: Check vendor/postgres-v15 submodule reference
-        id: postgres-v15-submodule
-        run: |
-            cd vendor/postgres-v15
-            git fetch origin "refs/heads/REL_14_STABLE_neon:refs/heads/origin/REL_14_STABLE_neon"
-            RC=$(git merge-base --is-ancestor origin/REL_14_STABLE_neon HEAD; echo $?)
-            if [ "$RC" != "0" ]; then
-              echo "vendor/postgres-v15 submodule is not an ancestor of the REL_14_STABLE_neon branch. Please rebase it"
-              exit 1
-            fi
+        uses: ./.github/actions/check-submodule-reference
+        with:
+          submodule_path: vendor/postgres-v15
+          branch: REL_15_STABLE_neon
 
       - name: Check vendor/postgres-v16 submodule reference
-        id: postgres-v16-submodule
-        run: |
-            cd vendor/postgres-v16
-            git fetch origin "refs/heads/REL_14_STABLE_neon:refs/heads/origin/REL_14_STABLE_neon"
-            RC=$(git merge-base --is-ancestor origin/REL_14_STABLE_neon HEAD; echo $?)
-            if [ "$RC" != "0" ]; then
-              echo "vendor/postgres-v16 submodule is not an ancestor of the REL_14_STABLE_neon branch. Please rebase it"
-              exit 1
-            fi
+        uses: ./.github/actions/check-submodule-reference
+        with:
+          submodule_path: vendor/postgres-v16
+          branch: REL_16_STABLE_neon
+
+      - name: Check vendor/postgres-v17 submodule reference
+        uses: ./.github/actions/check-submodule-reference
+        with:
+          submodule_path: vendor/postgres-v17
+          branch: REL_17_STABLE_neon
 
   check-codestyle-rust:
     needs: [ check-permissions, build-build-tools-image ]
