@@ -192,7 +192,7 @@ pub(super) struct Guard<'a> {
 
 #[derive(Debug)]
 pub(crate) struct BlockingReasons {
-    tenant_blocked: bool,
+    tenant_post_attached_single_wait: bool,
     timelines: usize,
     reasons: enumset::EnumSet<GcBlockingReason>,
 }
@@ -201,8 +201,8 @@ impl std::fmt::Display for BlockingReasons {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "tenant blocked: {}; {} timelines block for {:?}",
-            self.tenant_blocked, self.timelines, self.reasons
+            "tenant_post_attached_single_wait: {}; {} timelines block for {:?}",
+            self.tenant_post_attached_single_wait, self.timelines, self.reasons
         )
     }
 }
@@ -216,7 +216,7 @@ impl BlockingReasons {
         });
         if !g.timelines_blocked.is_empty() || g.tenant_post_attached_single_wait {
             Some(BlockingReasons {
-                tenant_blocked: g.tenant_post_attached_single_wait,
+                tenant_post_attached_single_wait: g.tenant_post_attached_single_wait,
                 timelines: g.timelines_blocked.len(),
                 reasons,
             })
@@ -226,7 +226,7 @@ impl BlockingReasons {
     }
 
     fn summarize(g: &std::sync::MutexGuard<'_, Storage>) -> Option<Self> {
-        if g.timelines_blocked.is_empty() || !g.tenant_post_attached_single_wait {
+        if g.timelines_blocked.is_empty() && !g.tenant_post_attached_single_wait {
             None
         } else {
             let reasons = g
@@ -234,7 +234,7 @@ impl BlockingReasons {
                 .values()
                 .fold(enumset::EnumSet::empty(), |acc, next| acc.union(*next));
             Some(BlockingReasons {
-                tenant_blocked: g.tenant_post_attached_single_wait,
+                tenant_post_attached_single_wait: g.tenant_post_attached_single_wait,
                 timelines: g.timelines_blocked.len(),
                 reasons,
             })
