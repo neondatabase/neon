@@ -82,16 +82,13 @@ fn bench(c: &mut Criterion) {
     //
     // benchmark the protocol implementation
     //
-    for pg_version in [14, 15, 16]
-    /* FIXME: centralized place for this array? */
-    {
-        bench_group!(
-            &format!("ping-{pg_version}"),
-            Arc::new(move |mgr: Arc<PostgresRedoManager>| async move {
-                let _: () = mgr.ping(pg_version).await.unwrap();
-            })
-        );
-    }
+    let pg_version = 14;
+    bench_group!(
+        &format!("ping"),
+        Arc::new(move |mgr: Arc<PostgresRedoManager>| async move {
+            let _: () = mgr.ping(pg_version).await.unwrap();
+        })
+    );
     //
     // benchmarks with actual record redo
     //
