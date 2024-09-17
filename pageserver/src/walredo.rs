@@ -468,8 +468,6 @@ impl PostgresRedoManager {
                 })
                 .await;
 
-            // If something went wrong, don't try to reuse the process. Kill it, and
-            // next request will launch a new one.
             if result.is_ok() && n_attempts != 0 {
                 info!(n_attempts, "retried walredo succeeded");
             }
