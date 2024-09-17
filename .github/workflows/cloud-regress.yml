@@ -43,8 +43,8 @@ jobs:
 
       - name: Patch the test
         run: |
-          cd vendor/postgres-v${{ DEFAULT_PG_VERSION }}
-          patch -p1 < ../../patches/cloud_regress_pg${{ DEFAULT_PG_VERSION }}.patch
+          cd "vendor/postgres-v${DEFAULT_PG_VERSION}"
+          patch -p1 < "../../patches/cloud_regress_pg${DEFAULT_PG_VERSION}.patch"
 
       - name: Generate a random password
         id: pwgen
@@ -54,12 +54,12 @@ jobs:
 
       - name: Change tests according to the generated password
         run: |
-          cd vendor/postgres-v"${{ DEFAULT_PG_VERSION }}"/src/test/regress
+          cd vendor/postgres-v"${DEFAULT_PG_VERSION}"/src/test/regress
           for fname in sql/*.sql expected/*.out; do
           sed -i.bak s/NEON_PASSWORD_PLACEHOLDER/"'::add-mask:${{ steps.pwgen.outputs.DBPASS }}'"/ "${fname}"
           done
           for ph in $(grep NEON_MD5_PLACEHOLDER expected/password.out | awk '{print $3;}' | sort | uniq); do
-          USER=$(echo ${ph} | cut -c 22-)
+          USER=$(echo "${ph}" | cut -c 22-)
           MD5=md5$(echo -n "::add-mask:${{ steps.pwgen.outputs.DBPASS }}${USER}" | md5sum | awk '{print $1;}')
           sed -i.bak "s/${ph}/::add-mask:${MD5}/" expected/password.out
           done
