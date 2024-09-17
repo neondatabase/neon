@@ -1061,8 +1061,13 @@ Ping(StringInfo input_message)
 	tot_written = 0;
 	do {
 		ssize_t		rc;
-		static const char response[BLCKSZ] = {0};
-		rc = write(STDOUT_FILENO, &response[tot_written], BLCKSZ - tot_written);
+		/* We don't need alignment, but it's bad practice to use char[BLCKSZ] */
+#if PG_VERSION_NUM >= 160000
+		static const PGIOAlignedBlock response;
+#else
+		static const PGAlignedBlock response;
+#endif
+		rc = write(STDOUT_FILENO, &response.data[tot_written], BLCKSZ - tot_written);
 		if (rc < 0) {
 			/* If interrupted by signal, just retry */
 			if (errno == EINTR)
