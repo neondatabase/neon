@@ -6,7 +6,6 @@ pub mod health_server;
 
 use std::time::Duration;
 
-use anyhow::bail;
 use bytes::Bytes;
 use http_body_util::BodyExt;
 use hyper1::body::Body;
@@ -113,10 +112,20 @@ impl Endpoint {
     }
 }
 
-pub(crate) async fn parse_json_body_with_limit<D: DeserializeOwned>(
-    mut b: impl Body<Data = Bytes, Error = reqwest::Error> + Unpin,
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ReadPayloadError<E> {
+    #[error("could not read the HTTP body: {0}")]
+    Read(E),
+    #[error("could not parse the HTTP body: {0}")]
+    Parse(#[from] serde_json::Error),
+    #[error("could not parse the HTTP body: content length exceeds limit of {0} bytes")]
+    LengthExceeded(usize),
+}
+
+pub(crate) async fn parse_json_body_with_limit<D: DeserializeOwned, E>(
+    mut b: impl Body<Data = Bytes, Error = E> + Unpin,
     limit: usize,
-) -> anyhow::Result<D> {
+) -> Result<D, ReadPayloadError<E>> {
     // We could use `b.limited().collect().await.to_bytes()` here
     // but this ends up being slightly more efficient as far as I can tell.
 
@@ -124,14 +133,19 @@ pub(crate) async fn parse_json_body_with_limit<D: DeserializeOwned>(
     // in reqwest, this value is influenced by the Content-Length header.
     let lower_bound = match usize::try_from(b.size_hint().lower()) {
         Ok(bound) if bound <= limit => bound,
-        _ => bail!("Content length exceeds limit of {limit} bytes"),
+        _ => return Err(ReadPayloadError::LengthExceeded(limit)),
     };
     let mut bytes = Vec::with_capacity(lower_bound);
 
-    while let Some(frame) = b.frame().await.transpose()? {
+    while let Some(frame) = b
+        .frame()
+        .await
+        .transpose()
+        .map_err(ReadPayloadError::Read)?
+    {
         if let Ok(data) = frame.into_data() {
             if bytes.len() + data.len() > limit {
-                bail!("Content length exceeds limit of {limit} bytes")
+                return Err(ReadPayloadError::LengthExceeded(limit));
             }
             bytes.extend_from_slice(&data);
         }
