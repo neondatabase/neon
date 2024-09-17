@@ -57,7 +57,7 @@ RUN set -e \
 
 # Build final image
 #
-FROM debian:bullseye-slim
+FROM debian:bookworm-slim
 ARG DEFAULT_PG_VERSION
 WORKDIR /data
 

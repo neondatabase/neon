@@ -1,4 +1,4 @@
-FROM debian:bullseye-slim
+FROM debian:bookworm-slim
 
 # Use ARG as a build-time environment variable here to allow.
 # It's not supposed to be set outside.
@@ -6,7 +6,7 @@ FROM debian:bullseye-slim
 # ```
 # . /etc/os-release && echo "${VERSION_CODENAME}"
 # ```
-ARG DEBIAN_VERSION_CODENAME=bullseye
+ARG DEBIAN_VERSION_CODENAME=bookworm
 
 # Add nonroot user
 RUN useradd -ms /bin/bash nonroot -b /home
@@ -38,14 +38,14 @@ RUN set -e \
         libseccomp-dev \
         libsqlite3-dev \
         libssl-dev \
-        libstdc++-10-dev \
+        libstdc++-11-dev \
         libtool \
         libxml2-dev \
         libxmlsec1-dev \
         libxxhash-dev \
         lsof \
         make \
-        netcat \
+        netcat-traditional \
         net-tools \
         openssh-client \
         parallel \
@@ -81,8 +81,11 @@ RUN curl -fsSL 'https://apt.llvm.org/llvm-snapshot.gpg.key' | apt-key add - \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 # Install docker
-RUN curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg \
-    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/debian ${DEBIAN_VERSION_CODENAME} stable" > /etc/apt/sources.list.d/docker.list \
+RUN curl -fsSL 'https://www.postgresql.org/media/keys/ACCC4CF8.asc' | apt-key add - \
+    && echo 'deb http://apt.postgresql.org/pub/repos/apt bookworm-pgdg main' > /etc/apt/sources.list.d/pgdg.list \
+    && apt install -y apt-transport-https ca-certificates gnupg-agent \
+    && curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor > /usr/share/keyrings/docker-ce-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-ce-archive-keyring.gpg] https://download.docker.com/linux/debian ${DEBIAN_VERSION_CODENAME} stable" > /etc/apt/sources.list.d/docker-ce.list \
     && apt update \
     && apt install -y docker-ce docker-ce-cli \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
