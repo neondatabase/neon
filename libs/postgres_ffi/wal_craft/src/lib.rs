@@ -26,7 +26,6 @@ macro_rules! xlog_utils_test {
 
 postgres_ffi::for_all_postgres_versions! { xlog_utils_test }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Conf {
     pub pg_version: u32,
     pub pg_distrib_dir: PathBuf,
