@@ -414,34 +414,31 @@ impl PostgresRedoManager {
         let mut n_attempts = 0u32;
         loop {
             let base_img = &base_img;
-            let result = self
-                .do_with_walredo_process(pg_version, |proc| async move {
-                    let started_at = std::time::Instant::now();
+            let closure = |proc| async move {
+                let started_at = std::time::Instant::now();
 
-                    // Relational WAL records are applied using wal-redo-postgres
-                    let result = proc
-                        .apply_wal_records(rel, blknum, base_img, records, wal_redo_timeout)
-                        .await
-                        .context("apply_wal_records");
+                // Relational WAL records are applied using wal-redo-postgres
+                let result = proc
+                    .apply_wal_records(rel, blknum, base_img, records, wal_redo_timeout)
+                    .await
+                    .context("apply_wal_records");
 
-                    let duration = started_at.elapsed();
+                let duration = started_at.elapsed();
 
-                    let len = records.len();
-                    let nbytes = records.iter().fold(0, |acumulator, record| {
-                        acumulator
-                            + match &record.1 {
-                                NeonWalRecord::Postgres { rec, .. } => rec.len(),
-                                _ => unreachable!(
-                                    "Only PostgreSQL records are accepted in this batch"
-                                ),
-                            }
-                    });
+                let len = records.len();
+                let nbytes = records.iter().fold(0, |acumulator, record| {
+                    acumulator
+                        + match &record.1 {
+                            NeonWalRecord::Postgres { rec, .. } => rec.len(),
+                            _ => unreachable!("Only PostgreSQL records are accepted in this batch"),
+                        }
+                });
 
-                    WAL_REDO_TIME.observe(duration.as_secs_f64());
-                    WAL_REDO_RECORDS_HISTOGRAM.observe(len as f64);
-                    WAL_REDO_BYTES_HISTOGRAM.observe(nbytes as f64);
+                WAL_REDO_TIME.observe(duration.as_secs_f64());
+                WAL_REDO_RECORDS_HISTOGRAM.observe(len as f64);
+                WAL_REDO_BYTES_HISTOGRAM.observe(nbytes as f64);
 
-                    debug!(
+                debug!(
                         "postgres applied {} WAL records ({} bytes) in {} us to reconstruct page image at LSN {}",
                         len,
                         nbytes,
@@ -449,8 +446,8 @@ impl PostgresRedoManager {
                         lsn
                     );
 
-                    if let Err(e) = result.as_ref() {
-                        error!(
+                if let Err(e) = result.as_ref() {
+                    error!(
                             "error applying {} WAL records {}..{} ({} bytes) to key {key}, from base image with LSN {} to reconstruct page image at LSN {} n_attempts={}: {:?}",
                             records.len(),
                             records.first().map(|p| p.0).unwrap_or(Lsn(0)),
@@ -461,12 +458,11 @@ impl PostgresRedoManager {
                             n_attempts,
                             e,
                         );
-                    }
+                }
 
-                    result.map_err(Error::Other)
-
-                })
-                .await;
+                result.map_err(Error::Other)
+            };
+            let result = self.do_with_walredo_process(pg_version, closure).await;
 
             if result.is_ok() && n_attempts != 0 {
                 info!(n_attempts, "retried walredo succeeded");
