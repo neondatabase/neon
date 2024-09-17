@@ -238,6 +238,9 @@ impl WalRedoProcess {
         res
     }
 
+    /// Do a ping request-response roundtrip.
+    ///
+    /// Not used in production, but by Rust benchmarks.
     pub(crate) async fn ping(&self, timeout: Duration) -> anyhow::Result<()> {
         let mut writebuf: Vec<u8> = Vec::with_capacity(4);
         protocol::build_ping_msg(&mut writebuf);

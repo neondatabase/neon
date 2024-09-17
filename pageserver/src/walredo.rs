@@ -205,6 +205,10 @@ impl PostgresRedoManager {
         }
     }
 
+    /// Do a ping request-response roundtrip.
+    ///
+    /// Not used in production, but by Rust benchmarks.
+    ///
     /// # Cancel-Safety
     ///
     /// This method is cancellation-safe.
