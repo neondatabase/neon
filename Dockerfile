@@ -43,30 +43,31 @@ COPY --chown=nonroot . .
 
 ARG ADDITIONAL_RUSTFLAGS
 RUN set -e \
-    && PQ_LIB_DIR=$(pwd)/pg_install/v${STABLE_PG_VERSION}/lib RUSTFLAGS="-Clinker=clang -Clink-arg=-fuse-ld=mold -Clink-arg=-Wl,--no-rosegment ${ADDITIONAL_RUSTFLAGS}" cargo build \
-      --bin pg_sni_router  \
-      --bin pageserver  \
-      --bin pagectl  \
-      --bin safekeeper  \
-      --bin storage_broker  \
-      --bin storage_controller  \
-      --bin proxy  \
-      --bin neon_local \
-      --bin storage_scrubber \
-      --locked --release
+    && RUSTFLAGS="-Clinker=clang -Clink-arg=-fuse-ld=mold -Clink-arg=-Wl,--no-rosegment" cargo build  \
+    --bin pg_sni_router  \
+    --bin pageserver  \
+    --bin pagectl  \
+    --bin safekeeper  \
+    --bin storage_broker  \
+    --bin storage_controller  \
+    --bin proxy  \
+    --bin neon_local \
+    --locked --release \
+    && cachepot -s
 
 # Build final image
 #
-FROM debian:bullseye-slim
-ARG DEFAULT_PG_VERSION
+FROM debian:bookworm-slim
 WORKDIR /data
 
 RUN set -e \
     && apt update \
     && apt install -y \
-        libreadline-dev \
-        libseccomp-dev \
-        ca-certificates \
+    libreadline-dev \
+    libseccomp-dev \
+    libicu67 \
+    openssl \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* \
     && useradd -d /data neon \
     && chown -R neon:neon /data
@@ -89,15 +90,13 @@ COPY --from=pg-build /home/nonroot/postgres_install.tar.gz /data/
 
 # By default, pageserver uses `.neon/` working directory in WORKDIR, so create one and fill it with the dummy config.
 # Now, when `docker run ... pageserver` is run, it can start without errors, yet will have some default dummy values.
-RUN mkdir -p /data/.neon/ && \
-  echo "id=1234" > "/data/.neon/identity.toml" && \
-  echo "broker_endpoint='http://storage_broker:50051'\n" \
-       "pg_distrib_dir='/usr/local/'\n" \
-       "listen_pg_addr='0.0.0.0:6400'\n" \
-       "listen_http_addr='0.0.0.0:9898'\n" \
-       "availability_zone='local'\n" \
-  > /data/.neon/pageserver.toml && \
-  chown -R neon:neon /data/.neon
+RUN mkdir -p /data/.neon/ && chown -R neon:neon /data/.neon/ \
+    && /usr/local/bin/pageserver -D /data/.neon/ --init \
+    -c "id=1234" \
+    -c "broker_endpoint='http://storage_broker:50051'" \
+    -c "pg_distrib_dir='/usr/local/'" \
+    -c "listen_pg_addr='0.0.0.0:6400'" \
+    -c "listen_http_addr='0.0.0.0:9898'"
 
 # When running a binary that links with libpq, default to using our most recent postgres version.  Binaries
 # that want a particular postgres version will select it explicitly: this is just a default.

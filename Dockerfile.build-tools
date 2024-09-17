@@ -1,4 +1,4 @@
-FROM debian:bullseye-slim
+FROM debian:bookworm-slim
 
 # Use ARG as a build-time environment variable here to allow.
 # It's not supposed to be set outside.
@@ -16,45 +16,46 @@ SHELL ["/bin/bash", "-c"]
 RUN set -e \
     && apt update \
     && apt install -y \
-        autoconf \
-        automake \
-        bison \
-        build-essential \
-        ca-certificates \
-        cmake \
-        curl \
-        flex \
-        git \
-        gnupg \
-        gzip \
-        jq \
-        libcurl4-openssl-dev \
-        libbz2-dev \
-        libffi-dev \
-        liblzma-dev \
-        libncurses5-dev \
-        libncursesw5-dev \
-        libreadline-dev \
-        libseccomp-dev \
-        libsqlite3-dev \
-        libssl-dev \
-        libstdc++-10-dev \
-        libtool \
-        libxml2-dev \
-        libxmlsec1-dev \
-        libxxhash-dev \
-        lsof \
-        make \
-        netcat \
-        net-tools \
-        openssh-client \
-        parallel \
-        pkg-config \
-        unzip \
-        wget \
-        xz-utils \
-        zlib1g-dev \
-        zstd \
+    autoconf \
+    automake \
+    bison \
+    build-essential \
+    ca-certificates \
+    cmake \
+    curl \
+    flex \
+    git \
+    gnupg \
+    gzip \
+    jq \
+    libcurl4-openssl-dev \
+    libbz2-dev \
+    libffi-dev \
+    liblzma-dev \
+    libncurses5-dev \
+    libncursesw5-dev \
+    libpq-dev \
+    libreadline-dev \
+    libseccomp-dev \
+    libsqlite3-dev \
+    libssl-dev \
+    libstdc++-10-dev \
+    libtool \
+    libxml2-dev \
+    libxmlsec1-dev \
+    libxxhash-dev \
+    lsof \
+    make \
+    netcat \
+    net-tools \
+    openssh-client \
+    parallel \
+    pkg-config \
+    unzip \
+    wget \
+    xz-utils \
+    zlib1g-dev \
+    zstd \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 # protobuf-compiler (protoc)
@@ -201,9 +202,9 @@ ARG CARGO_DENY_VERSION=0.16.1
 ARG CARGO_HACK_VERSION=0.6.31
 ARG CARGO_NEXTEST_VERSION=0.9.72
 RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux-gnu/rustup-init && whoami && \
-	chmod +x rustup-init && \
-	./rustup-init -y --default-toolchain ${RUSTC_VERSION} && \
-	rm rustup-init && \
+    chmod +x rustup-init && \
+    ./rustup-init -y --default-toolchain ${RUSTC_VERSION} && \
+    rm rustup-init && \
     export PATH="$HOME/.cargo/bin:$PATH" && \
     . "$HOME/.cargo/env" && \
     cargo --version && rustup --version && \

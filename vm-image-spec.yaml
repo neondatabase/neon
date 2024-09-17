@@ -4,17 +4,17 @@ commands:
   - name: cgconfigparser
     user: root
     sysvInitAction: sysinit
-    shell: 'cgconfigparser -l /etc/cgconfig.conf -s 1664'
+    shell: "cgconfigparser -l /etc/cgconfig.conf -s 1664"
   # restrict permissions on /neonvm/bin/resize-swap, because we grant access to compute_ctl for
   # running it as root.
   - name: chmod-resize-swap
     user: root
     sysvInitAction: sysinit
-    shell: 'chmod 711 /neonvm/bin/resize-swap'
+    shell: "chmod 711 /neonvm/bin/resize-swap"
   - name: pgbouncer
     user: postgres
     sysvInitAction: respawn
-    shell: '/usr/local/bin/pgbouncer /etc/pgbouncer.ini'
+    shell: "/usr/local/bin/pgbouncer /etc/pgbouncer.ini"
   - name: postgres-exporter
     user: nobody
     sysvInitAction: respawn
@@ -22,11 +22,11 @@ commands:
   - name: sql-exporter
     user: nobody
     sysvInitAction: respawn
-    shell: '/bin/sql_exporter -config.file=/etc/sql_exporter.yml -web.listen-address=:9399'
+    shell: "/bin/sql_exporter -config.file=/etc/sql_exporter.yml -web.listen-address=:9399"
   - name: sql-exporter-autoscaling
     user: nobody
     sysvInitAction: respawn
-    shell: '/bin/sql_exporter -config.file=/etc/sql_exporter_autoscaling.yml -web.listen-address=:9499'
+    shell: "/bin/sql_exporter -config.file=/etc/sql_exporter_autoscaling.yml -web.listen-address=:9499"
 shutdownHook: |
   su -p postgres --session-command '/usr/local/bin/pg_ctl stop -D /var/db/postgres/compute/pgdata -m fast --wait -t 10'
 files:
@@ -453,8 +453,8 @@ build: |
   # At time of writing (2023-03-14), debian bullseye has a version of cgroup-tools (technically
   # libcgroup) that doesn't support cgroup v2 (version 0.41-11). Unfortunately, the vm-monitor
   # requires cgroup v2, so we'll build cgroup-tools ourselves.
-  FROM debian:bullseye-slim as libcgroup-builder
-  ENV LIBCGROUP_VERSION=v2.0.3
+  FROM debian:bookworm-slim as libcgroup-builder
+  ENV LIBCGROUP_VERSION v2.0.3
 
   RUN set -exu \
       && apt update \
@@ -487,7 +487,7 @@ build: |
 
   # Build pgbouncer
   #
-  FROM debian:bullseye-slim AS pgbouncer
+  FROM debian:bookworm-slim AS pgbouncer
   RUN set -e \
       && apt-get update \
       && apt-get install -y \
