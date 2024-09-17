@@ -49,8 +49,8 @@ jobs:
       - name: Generate a random password
         id: pwgen
         run: |
-          DBPASS=::add-mask:$(dd if=/dev/random bs=48 count=1 2>/dev/null | base64)
-          echo DBPASS=::add-mask:"${DBPASS//\//}" >> "${GITHUB_OUTPUT}"
+          DBPASS=::add-mask::$(dd if=/dev/random bs=48 count=1 2>/dev/null | base64)
+          echo DBPASS=::add-mask::"${DBPASS//\//}" >> "${GITHUB_OUTPUT}"
 
       - name: Change tests according to the generated password
         run: |
@@ -60,8 +60,8 @@ jobs:
           done
           for ph in $(grep NEON_MD5_PLACEHOLDER expected/password.out | awk '{print $3;}' | sort | uniq); do
           USER=$(echo "${ph}" | cut -c 22-)
-          MD5=md5$(echo -n "::add-mask:${{ steps.pwgen.outputs.DBPASS }}${USER}" | md5sum | awk '{print $1;}')
-          sed -i.bak "s/${ph}/::add-mask:${MD5}/" expected/password.out
+          MD5=md5$(echo -n ::add-mask::"${{ steps.pwgen.outputs.DBPASS }}${USER}" | md5sum | awk '{print $1;}')
+          sed -i.bak "s/${ph}/::add-mask::${MD5}/" expected/password.out
           done
 
       - name: Download Neon artifact
