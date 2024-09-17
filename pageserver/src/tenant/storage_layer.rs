@@ -297,7 +297,7 @@ pub(crate) enum ReadableLayer {
 
 /// A partial description of a read to be done.
 #[derive(Debug, Clone)]
-struct ReadDesc {
+struct LayerVisit {
     /// An id used to resolve the readable layer within the fringe
     layer_to_visit_id: LayerToVisitId,
     /// Lsn range for the read, used for selecting the next read
@@ -313,12 +313,12 @@ struct ReadDesc {
 /// a two layer indexing scheme.
 #[derive(Debug)]
 pub(crate) struct LayerFringe {
-    planned_reads_by_lsn: BinaryHeap<ReadDesc>,
-    layers: HashMap<LayerToVisitId, LayerKeyspace>,
+    planned_visits_by_lsn: BinaryHeap<LayerVisit>,
+    visit_reads: HashMap<LayerToVisitId, LayerVisitReads>,
 }
 
 #[derive(Debug)]
-struct LayerKeyspace {
+struct LayerVisitReads {
     layer: ReadableLayer,
     target_keyspace: KeySpaceRandomAccum,
 }
@@ -326,23 +326,23 @@ struct LayerKeyspace {
 impl LayerFringe {
     pub(crate) fn new() -> Self {
         LayerFringe {
-            planned_reads_by_lsn: BinaryHeap::new(),
-            layers: HashMap::new(),
+            planned_visits_by_lsn: BinaryHeap::new(),
+            visit_reads: HashMap::new(),
         }
     }
 
     pub(crate) fn next_layer(&mut self) -> Option<(ReadableLayer, KeySpace, Range<Lsn>)> {
-        let read_desc = match self.planned_reads_by_lsn.pop() {
+        let read_desc = match self.planned_visits_by_lsn.pop() {
             Some(desc) => desc,
             None => return None,
         };
 
-        let removed = self.layers.remove_entry(&read_desc.layer_to_visit_id);
+        let removed = self.visit_reads.remove_entry(&read_desc.layer_to_visit_id);
 
         match removed {
             Some((
                 _,
-                LayerKeyspace {
+                LayerVisitReads {
                     layer,
                     mut target_keyspace,
                 },
@@ -366,19 +366,19 @@ impl LayerFringe {
             lsn_floor: lsn_range.start,
         };
 
-        let entry = self.layers.entry(layer_to_visit_id.clone());
+        let entry = self.visit_reads.entry(layer_to_visit_id.clone());
         match entry {
             Entry::Occupied(mut entry) => {
                 entry.get_mut().target_keyspace.add_keyspace(keyspace);
             }
             Entry::Vacant(entry) => {
-                self.planned_reads_by_lsn.push(ReadDesc {
+                self.planned_visits_by_lsn.push(LayerVisit {
                     lsn_range,
                     layer_to_visit_id: layer_to_visit_id.clone(),
                 });
                 let mut accum = KeySpaceRandomAccum::new();
                 accum.add_keyspace(keyspace);
-                entry.insert(LayerKeyspace {
+                entry.insert(LayerVisitReads {
                     layer,
                     target_keyspace: accum,
                 });
@@ -393,7 +393,7 @@ impl Default for LayerFringe {
     }
 }
 
-impl Ord for ReadDesc {
+impl Ord for LayerVisit {
     fn cmp(&self, other: &Self) -> Ordering {
         let ord = self.lsn_range.end.cmp(&other.lsn_range.end);
         if ord == std::cmp::Ordering::Equal {
@@ -404,19 +404,19 @@ impl Ord for ReadDesc {
     }
 }
 
-impl PartialOrd for ReadDesc {
+impl PartialOrd for LayerVisit {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl PartialEq for ReadDesc {
+impl PartialEq for LayerVisit {
     fn eq(&self, other: &Self) -> bool {
         self.lsn_range == other.lsn_range
     }
 }
 
-impl Eq for ReadDesc {}
+impl Eq for LayerVisit {}
 
 impl ReadableLayer {
     pub(crate) fn id(&self) -> LayerId {
