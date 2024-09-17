@@ -14,6 +14,8 @@ def test_compute_metrics(neon_simple_env: NeonEnv):
 
     # We don't check that the values make sense, this is just a very
     # basic check that the server doesn't crash or something like that.
-    cur.execute("CREATE EXTENSION neon")
+    #
+    # 1.5 is the minimum version to contain these views.
+    cur.execute("CREATE EXTENSION neon VERSION '1.5'")
     cur.execute("SELECT * FROM neon_perf_counters")
     cur.execute("SELECT * FROM neon_backend_perf_counters")

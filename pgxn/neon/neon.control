@@ -1,6 +1,8 @@
 # neon extension
 comment = 'cloud storage for PostgreSQL'
-default_version = '1.5'
+# TODO: bump default version to 1.5, after we are certain that we don't
+# need to rollback the compute image
+default_version = '1.4'
 module_pathname = '$libdir/neon'
 relocatable = true
 trusted = true
