@@ -1,8 +1,9 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Duration};
 
+use tokio_util::sync::CancellationToken;
 use utils::id::TimelineId;
 
-use super::remote_timeline_client::index::GcBlockingReason;
+use super::{remote_timeline_client::index::GcBlockingReason, tasks::Cancelled};
 
 type Storage = HashMap<TimelineId, enumset::EnumSet<GcBlockingReason>>;
 
@@ -39,6 +40,24 @@ impl GcBlock {
             Ok(Guard {
                 _inner: self.blocking.lock().await,
             })
+        }
+    }
+
+    /// Blocks GC until `duration` has elapsed.
+    ///
+    /// We do this as the leases mapping are not persisted to disk. By delaying GC by default
+    /// length, we gurantees that all the leases we granted before will expire when we run GC for
+    /// the first time after restart / transition from AttachedMulti to AttachedSingle.
+    pub(super) async fn block_for(
+        &self,
+        duration: Duration,
+        cancel: &CancellationToken,
+    ) -> Result<(), Cancelled> {
+        // hold this lock so gc_iteration cannot proceed.
+        let _g = self.blocking.lock().await;
+        match tokio::time::timeout(duration, cancel.cancelled()).await {
+            Ok(_) => Err(Cancelled),
+            Err(_) => Ok(()),
         }
     }
 

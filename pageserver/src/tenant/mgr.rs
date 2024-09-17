@@ -949,6 +949,19 @@ impl TenantManager {
                 (LocationMode::Attached(attach_conf), Some(TenantSlot::Attached(tenant))) => {
                     match attach_conf.generation.cmp(&tenant.generation) {
                         Ordering::Equal => {
+                            if attach_conf.attach_mode == AttachmentMode::Single {
+                                // We need to wait for LSN lease duration after transitioning into `AttachedSingle`
+                                // before doing any gc so that the client has time to renew the lease.
+                                let tenant = tenant.clone();
+                                tokio::spawn(async move {
+                                    let lsn_lease_length = tenant.get_lsn_lease_length();
+                                    let _ = tenant
+                                        .gc_block
+                                        .block_for(lsn_lease_length, &tenant.cancel)
+                                        .await;
+                                });
+                            }
+
                             // A transition from Attached to Attached in the same generation, we may
                             // take our fast path and just provide the updated configuration
                             // to the tenant.
