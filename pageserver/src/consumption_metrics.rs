@@ -178,7 +178,7 @@ async fn collect_metrics(
                 )
                 .await;
                 if let Err(e) = res {
-                    tracing::error!("failed to upload to S3: {e:#}");
+                    tracing::error!("failed to upload to remote storage: {e:#}");
                 }
             }
         };
