@@ -1,13 +1,8 @@
 use std::{collections::HashMap, time::Duration};
 
-use anyhow::bail;
+use super::{remote_timeline_client::index::GcBlockingReason, tasks};
 use tokio_util::sync::CancellationToken;
 use utils::id::TimelineId;
-
-use super::{
-    remote_timeline_client::index::GcBlockingReason,
-    tasks::{self, Cancelled},
-};
 
 type TimelinesBlocked = HashMap<TimelineId, enumset::EnumSet<GcBlockingReason>>;
 
@@ -60,14 +55,14 @@ impl GcBlock {
     /// when we run GC for the first time after restart / transition from AttachedMulti to AttachedSingle.
     pub(super) async fn block_for(&self, duration: Duration, cancel: &CancellationToken) {
         {
-            let g = self.reasons.lock().unwrap();
+            let mut g = self.reasons.lock().unwrap();
             g.tenant_blocked = true;
         }
 
         let _ = tasks::delay_by_duration(duration, cancel).await;
 
         {
-            let g = self.reasons.lock().unwrap();
+            let mut g = self.reasons.lock().unwrap();
             g.tenant_blocked = false;
         }
     }
