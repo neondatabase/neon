@@ -49,7 +49,7 @@ jobs:
       - name: Generate a random password
         id: pwgen
         run: |
-          DBPASS=::add-mask::$(dd if=/dev/random bs=48 count=1 2>/dev/null | base64)
+          DBPASS="::add-mask::$(dd if=/dev/random bs=48 count=1 2>/dev/null | base64)"
           echo DBPASS=::add-mask::"${DBPASS//\//}" >> "${GITHUB_OUTPUT}"
 
       - name: Change tests according to the generated password
