@@ -183,10 +183,10 @@ impl WalResidentTimeline {
                 "Replacing uploaded partial segment in in-mem control file: {replace:?}"
             );
 
-            let remote_timeline_path = wal_backup::remote_timeline_path(&self.tli.ttid)?;
+            let remote_timeline_path = &self.tli.remote_path;
             wal_backup::copy_partial_segment(
-                &replace.previous.remote_path(&remote_timeline_path),
-                &replace.current.remote_path(&remote_timeline_path),
+                &replace.previous.remote_path(remote_timeline_path),
+                &replace.current.remote_path(remote_timeline_path),
             )
             .await?;
         }
@@ -484,6 +484,7 @@ pub async fn validate_temp_timeline(
 }
 
 /// Move timeline from a temp directory to the main storage, and load it to the global map.
+///
 /// This operation is done under a lock to prevent bugs if several concurrent requests are
 /// trying to load the same timeline. Note that it doesn't guard against creating the
 /// timeline with the same ttid, but no one should be doing this anyway.

@@ -24,7 +24,7 @@ def build_type() -> Optional[str]:
     return None
 
 
-@pytest.fixture(scope="function", autouse=True)
+@pytest.fixture(scope="session", autouse=True)
 def platform() -> Optional[str]:
     return None
 

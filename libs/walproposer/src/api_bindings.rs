@@ -33,7 +33,7 @@ extern "C" fn get_shmem_state(wp: *mut WalProposer) -> *mut WalproposerShmemStat
     }
 }
 
-extern "C" fn start_streaming(wp: *mut WalProposer, startpos: XLogRecPtr) {
+extern "C-unwind" fn start_streaming(wp: *mut WalProposer, startpos: XLogRecPtr) {
     unsafe {
         let callback_data = (*(*wp).config).callback_data;
         let api = callback_data as *mut Box<dyn ApiImpl>;
@@ -187,7 +187,7 @@ extern "C" fn conn_blocking_write(
     }
 }
 
-extern "C" fn recovery_download(wp: *mut WalProposer, sk: *mut Safekeeper) -> bool {
+extern "C-unwind" fn recovery_download(wp: *mut WalProposer, sk: *mut Safekeeper) -> bool {
     unsafe {
         let callback_data = (*(*(*sk).wp).config).callback_data;
         let api = callback_data as *mut Box<dyn ApiImpl>;
@@ -272,7 +272,7 @@ extern "C" fn rm_safekeeper_event_set(sk: *mut Safekeeper) {
     }
 }
 
-extern "C" fn wait_event_set(
+extern "C-unwind" fn wait_event_set(
     wp: *mut WalProposer,
     timeout: ::std::os::raw::c_long,
     event_sk: *mut *mut Safekeeper,
@@ -324,7 +324,7 @@ extern "C" fn get_redo_start_lsn(wp: *mut WalProposer) -> XLogRecPtr {
     }
 }
 
-extern "C" fn finish_sync_safekeepers(wp: *mut WalProposer, lsn: XLogRecPtr) {
+extern "C-unwind" fn finish_sync_safekeepers(wp: *mut WalProposer, lsn: XLogRecPtr) {
     unsafe {
         let callback_data = (*(*wp).config).callback_data;
         let api = callback_data as *mut Box<dyn ApiImpl>;
@@ -340,7 +340,7 @@ extern "C" fn process_safekeeper_feedback(wp: *mut WalProposer, sk: *mut Safekee
     }
 }
 
-extern "C" fn log_internal(
+extern "C-unwind" fn log_internal(
     wp: *mut WalProposer,
     level: ::std::os::raw::c_int,
     line: *const ::std::os::raw::c_char,

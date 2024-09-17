@@ -30,7 +30,7 @@ use std::fs::File;
 use std::io::prelude::*;
 use std::io::ErrorKind;
 use std::io::SeekFrom;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::SystemTime;
 use utils::bin_ser::DeserializeError;
 use utils::bin_ser::SerializeError;
@@ -258,13 +258,6 @@ fn open_wal_segment(seg_file_path: &Path) -> anyhow::Result<Option<File>> {
             _ => Err(e.into()),
         },
     }
-}
-
-pub fn main() {
-    let mut data_dir = PathBuf::new();
-    data_dir.push(".");
-    let wal_end = find_end_of_wal(&data_dir, WAL_SEGMENT_SIZE, Lsn(0)).unwrap();
-    println!("wal_end={:?}", wal_end);
 }
 
 impl XLogRecord {

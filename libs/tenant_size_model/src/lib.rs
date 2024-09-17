@@ -5,9 +5,10 @@
 mod calculation;
 pub mod svg;
 
-/// StorageModel is the input to the synthetic size calculation. It represents
-/// a tree of timelines, with just the information that's needed for the
-/// calculation. This doesn't track timeline names or where each timeline
+/// StorageModel is the input to the synthetic size calculation.
+///
+/// It represents a tree of timelines, with just the information that's needed
+/// for the calculation. This doesn't track timeline names or where each timeline
 /// begins and ends, for example. Instead, it consists of "points of interest"
 /// on the timelines. A point of interest could be the timeline start or end point,
 /// the oldest point on a timeline that needs to be retained because of PITR

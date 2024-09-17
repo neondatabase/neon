@@ -422,7 +422,7 @@ fn stream_objects_with_retries<'a>(
                     let yield_err = if err.is_permanent() {
                         true
                     } else {
-                        let backoff_time = 1 << trial.max(5);
+                        let backoff_time = 1 << trial.min(5);
                         tokio::time::sleep(Duration::from_secs(backoff_time)).await;
                         trial += 1;
                         trial == MAX_RETRIES - 1
@@ -473,7 +473,7 @@ async fn list_objects_with_retries(
                     s3_target.delimiter,
                     DisplayErrorContext(e),
                 );
-                let backoff_time = 1 << trial.max(5);
+                let backoff_time = 1 << trial.min(5);
                 tokio::time::sleep(Duration::from_secs(backoff_time)).await;
             }
         }
@@ -492,7 +492,7 @@ async fn download_object_with_retries(
             Ok(response) => response,
             Err(e) => {
                 error!("Failed to download object for key {key}: {e}");
-                let backoff_time = 1 << trial.max(5);
+                let backoff_time = 1 << trial.min(5);
                 tokio::time::sleep(Duration::from_secs(backoff_time)).await;
                 continue;
             }
@@ -508,7 +508,7 @@ async fn download_object_with_retries(
             }
             Err(e) => {
                 error!("Failed to stream object body for key {key}: {e}");
-                let backoff_time = 1 << trial.max(5);
+                let backoff_time = 1 << trial.min(5);
                 tokio::time::sleep(Duration::from_secs(backoff_time)).await;
             }
         }

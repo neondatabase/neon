@@ -66,7 +66,6 @@ use std::{
 use crate::{
     aux_file::AuxFileSizeEstimator,
     tenant::{
-        config::defaults::DEFAULT_PITR_INTERVAL,
         layer_map::{LayerMap, SearchResult},
         metadata::TimelineMetadata,
         storage_layer::{inmemory_layer::IndexEntry, PersistentLayerDesc},
@@ -102,6 +101,7 @@ use crate::{
     pgdatadir_mapping::{AuxFilesDirectory, DirectoryKind},
     virtual_file::{MaybeFatalIo, VirtualFile},
 };
+use pageserver_api::config::tenant_conf_defaults::DEFAULT_PITR_INTERVAL;
 
 use crate::config::PageServerConf;
 use crate::keyspace::{KeyPartitioning, KeySpace};
@@ -2243,7 +2243,7 @@ impl Timeline {
             };
 
             if aux_file_policy == Some(AuxFilePolicy::V1) {
-                warn!("this timeline is using deprecated aux file policy V1");
+                warn!("this timeline is using deprecated aux file policy V1 (when loading the timeline)");
             }
 
             result.repartition_threshold =

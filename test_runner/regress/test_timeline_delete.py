@@ -68,10 +68,13 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
 
     # construct pair of branches to validate that pageserver prohibits
     # deletion of ancestor timelines when they have child branches
-    parent_timeline_id = env.neon_cli.create_branch("test_ancestor_branch_delete_parent", "empty")
+    parent_timeline_id = env.neon_cli.create_branch(
+        new_branch_name="test_ancestor_branch_delete_parent", ancestor_branch_name="main"
+    )
 
     leaf_timeline_id = env.neon_cli.create_branch(
-        "test_ancestor_branch_delete_branch1", "test_ancestor_branch_delete_parent"
+        new_branch_name="test_ancestor_branch_delete_branch1",
+        ancestor_branch_name="test_ancestor_branch_delete_parent",
     )
 
     timeline_path = env.pageserver.timeline_dir(env.initial_tenant, parent_timeline_id)

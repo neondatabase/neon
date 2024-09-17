@@ -6,6 +6,7 @@ pub use utilization::PageserverUtilization;
 
 use std::{
     collections::HashMap,
+    fmt::Display,
     io::{BufRead, Read},
     num::{NonZeroU32, NonZeroU64, NonZeroUsize},
     str::FromStr,
@@ -61,7 +62,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
     serde::Serialize,
     serde::Deserialize,
     strum_macros::Display,
-    strum_macros::EnumVariantNames,
+    strum_macros::VariantNames,
     strum_macros::AsRefStr,
     strum_macros::IntoStaticStr,
 )]
@@ -304,8 +305,10 @@ pub struct TenantConfig {
     pub lsn_lease_length_for_ts: Option<String>,
 }
 
-/// The policy for the aux file storage. It can be switched through `switch_aux_file_policy`
-/// tenant config. When the first aux file written, the policy will be persisted in the
+/// The policy for the aux file storage.
+///
+/// It can be switched through `switch_aux_file_policy` tenant config.
+/// When the first aux file written, the policy will be persisted in the
 /// `index_part.json` file and has a limited migration path.
 ///
 /// Currently, we only allow the following migration path:
@@ -435,7 +438,9 @@ pub enum CompactionAlgorithm {
     Tiered,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde_with::DeserializeFromStr, serde_with::SerializeDisplay,
+)]
 pub enum ImageCompressionAlgorithm {
     // Disabled for writes, support decompressing during read path
     Disabled,
@@ -470,9 +475,31 @@ impl FromStr for ImageCompressionAlgorithm {
     }
 }
 
+impl Display for ImageCompressionAlgorithm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ImageCompressionAlgorithm::Disabled => write!(f, "disabled"),
+            ImageCompressionAlgorithm::Zstd { level } => {
+                if let Some(level) = level {
+                    write!(f, "zstd({})", level)
+                } else {
+                    write!(f, "zstd")
+                }
+            }
+        }
+    }
+}
+
 #[derive(Eq, PartialEq, Debug, Clone, Serialize, Deserialize)]
 pub struct CompactionAlgorithmSettings {
     pub kind: CompactionAlgorithm,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum L0FlushConfig {
+    #[serde(rename_all = "snake_case")]
+    Direct { max_concurrency: NonZeroUsize },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -716,12 +743,17 @@ pub struct TimelineInfo {
     pub pg_version: u32,
 
     pub state: TimelineState,
-    pub is_archived: bool,
 
     pub walreceiver_status: String,
 
+    // ALWAYS add new fields at the end of the struct with `Option` to ensure forward/backward compatibility.
+    // Backward compatibility: you will get a JSON not containing the newly-added field.
+    // Forward compatibility: a previous version of the pageserver will receive a JSON. serde::Deserialize does
+    // not deny unknown fields by default so it's safe to set the field to some value, though it won't be
+    // read.
     /// The last aux file policy being used on this timeline
     pub last_aux_file_policy: Option<AuxFilePolicy>,
+    pub is_archived: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -866,7 +898,9 @@ pub struct WalRedoManagerStatus {
     pub process: Option<WalRedoManagerProcessStatus>,
 }
 
-/// The progress of a secondary tenant is mostly useful when doing a long running download: e.g. initiating
+/// The progress of a secondary tenant.
+///
+/// It is mostly useful when doing a long running download: e.g. initiating
 /// a download job, timing out while waiting for it to run, and then inspecting this status to understand
 /// what's happening.
 #[derive(Default, Debug, Serialize, Deserialize, Clone)]
@@ -1651,21 +1685,33 @@ mod tests {
     #[test]
     fn test_image_compression_algorithm_parsing() {
         use ImageCompressionAlgorithm::*;
-        assert_eq!(
-            ImageCompressionAlgorithm::from_str("disabled").unwrap(),
-            Disabled
-        );
-        assert_eq!(
-            ImageCompressionAlgorithm::from_str("zstd").unwrap(),
-            Zstd { level: None }
-        );
-        assert_eq!(
-            ImageCompressionAlgorithm::from_str("zstd(18)").unwrap(),
-            Zstd { level: Some(18) }
-        );
-        assert_eq!(
-            ImageCompressionAlgorithm::from_str("zstd(-3)").unwrap(),
-            Zstd { level: Some(-3) }
-        );
+        let cases = [
+            ("disabled", Disabled),
+            ("zstd", Zstd { level: None }),
+            ("zstd(18)", Zstd { level: Some(18) }),
+            ("zstd(-3)", Zstd { level: Some(-3) }),
+        ];
+
+        for (display, expected) in cases {
+            assert_eq!(
+                ImageCompressionAlgorithm::from_str(display).unwrap(),
+                expected,
+                "parsing works"
+            );
+            assert_eq!(format!("{expected}"), display, "Display FromStr roundtrip");
+
+            let ser = serde_json::to_string(&expected).expect("serialization");
+            assert_eq!(
+                serde_json::from_str::<ImageCompressionAlgorithm>(&ser).unwrap(),
+                expected,
+                "serde roundtrip"
+            );
+
+            assert_eq!(
+                serde_json::Value::String(display.to_string()),
+                serde_json::to_value(expected).unwrap(),
+                "Display is the serde serialization"
+            );
+        }
     }
 }

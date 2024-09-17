@@ -6,7 +6,7 @@ use redis::{
     ConnectionInfo, IntoConnectionInfo, RedisConnectionInfo, RedisResult,
 };
 use tokio::task::JoinHandle;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 use super::elasticache::CredentialsProvider;
 
@@ -109,7 +109,10 @@ impl ConnectionWithCredentialsProvider {
             let credentials_provider = credentials_provider.clone();
             let con2 = con.clone();
             let f = tokio::spawn(async move {
-                let _ = Self::keep_connection(con2, credentials_provider).await;
+                Self::keep_connection(con2, credentials_provider)
+                    .await
+                    .inspect_err(|e| debug!("keep_connection failed: {e}"))
+                    .ok();
             });
             self.refresh_token_task = Some(f);
         }

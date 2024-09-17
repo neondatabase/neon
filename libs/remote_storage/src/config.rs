@@ -185,7 +185,7 @@ mod tests {
     use super::*;
 
     fn parse(input: &str) -> anyhow::Result<RemoteStorageConfig> {
-        let toml = input.parse::<toml_edit::Document>().unwrap();
+        let toml = input.parse::<toml_edit::DocumentMut>().unwrap();
         RemoteStorageConfig::from_toml(toml.as_item())
     }
 
@@ -233,6 +233,31 @@ timeout = '5s'";
                 timeout: Duration::from_secs(7)
             }
         );
+    }
+
+    #[test]
+    fn test_storage_class_serde_roundtrip() {
+        let classes = [
+            None,
+            Some(StorageClass::Standard),
+            Some(StorageClass::IntelligentTiering),
+        ];
+        for class in classes {
+            #[derive(Serialize, Deserialize)]
+            struct Wrapper {
+                #[serde(
+                    deserialize_with = "deserialize_storage_class",
+                    serialize_with = "serialize_storage_class"
+                )]
+                class: Option<StorageClass>,
+            }
+            let wrapped = Wrapper {
+                class: class.clone(),
+            };
+            let serialized = serde_json::to_string(&wrapped).unwrap();
+            let deserialized: Wrapper = serde_json::from_str(&serialized).unwrap();
+            assert_eq!(class, deserialized.class);
+        }
     }
 
     #[test]

@@ -6,9 +6,10 @@ pub enum YieldingLoopError {
     Cancelled,
 }
 
-/// Helper for long synchronous loops, e.g. over all tenants in the system.  Periodically
-/// yields to avoid blocking the executor, and after resuming checks the provided
-/// cancellation token to drop out promptly on shutdown.
+/// Helper for long synchronous loops, e.g. over all tenants in the system.
+///
+/// Periodically yields to avoid blocking the executor, and after resuming
+/// checks the provided cancellation token to drop out promptly on shutdown.
 #[inline(always)]
 pub async fn yielding_loop<I, T, F>(
     interval: usize,
@@ -23,7 +24,7 @@ where
     for (i, item) in iter.enumerate() {
         visitor(item);
 
-        if i + 1 % interval == 0 {
+        if (i + 1) % interval == 0 {
             tokio::task::yield_now().await;
             if cancel.is_cancelled() {
                 return Err(YieldingLoopError::Cancelled);

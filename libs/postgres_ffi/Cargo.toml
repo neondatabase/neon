@@ -5,13 +5,10 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-rand.workspace = true
 regex.workspace = true
 bytes.workspace = true
-byteorder.workspace = true
 anyhow.workspace = true
 crc32c.workspace = true
-hex.workspace = true
 once_cell.workspace = true
 log.workspace = true
 memoffset.workspace = true

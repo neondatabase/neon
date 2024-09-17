@@ -23,7 +23,6 @@ async fn make_tcp_pair() -> (TcpStream, TcpStream) {
 
 struct TestHandler {}
 
-#[async_trait::async_trait]
 impl<IO: AsyncRead + AsyncWrite + Unpin + Send> Handler<IO> for TestHandler {
     // return single col 'hey' for any query
     async fn process_query(

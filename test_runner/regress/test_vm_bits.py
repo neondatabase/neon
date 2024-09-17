@@ -13,8 +13,7 @@ from fixtures.utils import query_scalar
 def test_vm_bit_clear(neon_simple_env: NeonEnv):
     env = neon_simple_env
 
-    env.neon_cli.create_branch("test_vm_bit_clear", "empty")
-    endpoint = env.endpoints.create_start("test_vm_bit_clear")
+    endpoint = env.endpoints.create_start("main")
 
     pg_conn = endpoint.connect()
     cur = pg_conn.cursor()
@@ -58,7 +57,7 @@ def test_vm_bit_clear(neon_simple_env: NeonEnv):
     cur.execute("UPDATE vmtest_cold_update2 SET id = 5000, filler=repeat('x', 200) WHERE id = 1")
 
     # Branch at this point, to test that later
-    fork_at_current_lsn(env, endpoint, "test_vm_bit_clear_new", "test_vm_bit_clear")
+    fork_at_current_lsn(env, endpoint, "test_vm_bit_clear_new", "main")
 
     # Clear the buffer cache, to force the VM page to be re-fetched from
     # the page server

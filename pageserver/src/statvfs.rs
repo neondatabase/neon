@@ -60,32 +60,7 @@ pub mod mock {
     use regex::Regex;
     use tracing::log::info;
 
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    #[serde(tag = "type")]
-    pub enum Behavior {
-        Success {
-            blocksize: u64,
-            total_blocks: u64,
-            name_filter: Option<utils::serde_regex::Regex>,
-        },
-        Failure {
-            mocked_error: MockedError,
-        },
-    }
-
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    #[allow(clippy::upper_case_acronyms)]
-    pub enum MockedError {
-        EIO,
-    }
-
-    impl From<MockedError> for nix::Error {
-        fn from(e: MockedError) -> Self {
-            match e {
-                MockedError::EIO => nix::Error::EIO,
-            }
-        }
-    }
+    pub use pageserver_api::config::statvfs::mock::Behavior;
 
     pub fn get(tenants_dir: &Utf8Path, behavior: &Behavior) -> nix::Result<Statvfs> {
         info!("running mocked statvfs");
@@ -116,6 +91,7 @@ pub mod mock {
                     block_size: *blocksize,
                 })
             }
+            #[cfg(feature = "testing")]
             Behavior::Failure { mocked_error } => Err((*mocked_error).into()),
         }
     }

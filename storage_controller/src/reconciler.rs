@@ -17,6 +17,7 @@ use utils::failpoint_support;
 use utils::generation::Generation;
 use utils::id::{NodeId, TimelineId};
 use utils::lsn::Lsn;
+use utils::pausable_failpoint;
 use utils::sync::gate::GateGuard;
 
 use crate::compute_hook::{ComputeHook, NotifyError};
@@ -592,6 +593,8 @@ impl Reconciler {
             .await;
             notify_attempts += 1;
         }
+
+        pausable_failpoint!("reconciler-live-migrate-post-notify");
 
         // Downgrade the origin to secondary.  If the tenant's policy is PlacementPolicy::Attached(0), then
         // this location will be deleted in the general case reconciliation that runs after this.

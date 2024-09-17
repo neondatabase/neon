@@ -538,4 +538,17 @@ mod tests {
         ));
         Ok(())
     }
+
+    #[test]
+    fn test_connection_blocker() {
+        fn check(v: serde_json::Value) -> bool {
+            let peer_addr = IpAddr::from([127, 0, 0, 1]);
+            let ip_list: Vec<IpPattern> = serde_json::from_value(v).unwrap();
+            check_peer_addr_is_in_list(&peer_addr, &ip_list)
+        }
+
+        assert!(check(json!([])));
+        assert!(check(json!(["127.0.0.1"])));
+        assert!(!check(json!(["255.255.255.255"])));
+    }
 }

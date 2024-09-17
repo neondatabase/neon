@@ -311,7 +311,9 @@ async fn auth_quirks(
     let (allowed_ips, maybe_secret) = api.get_allowed_ips_and_secret(ctx, &info).await?;
 
     // check allowed list
-    if !check_peer_addr_is_in_list(&ctx.peer_addr(), &allowed_ips) {
+    if config.ip_allowlist_check_enabled
+        && !check_peer_addr_is_in_list(&ctx.peer_addr(), &allowed_ips)
+    {
         return Err(auth::AuthError::ip_address_not_allowed(ctx.peer_addr()));
     }
 
@@ -603,6 +605,7 @@ mod tests {
         rate_limiter_enabled: true,
         rate_limiter: AuthRateLimiter::new(&RateBucketInfo::DEFAULT_AUTH_SET),
         rate_limit_ip_subnet: 64,
+        ip_allowlist_check_enabled: true,
     });
 
     async fn read_message(r: &mut (impl AsyncRead + Unpin), b: &mut BytesMut) -> PgMessage {
