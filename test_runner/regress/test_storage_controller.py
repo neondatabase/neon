@@ -69,7 +69,7 @@ def test_storage_controller_smoke(
     env = neon_env_builder.init_configs()
 
     # Start services by hand so that we can skip a pageserver (this will start + register later)
-    env.broker.try_start()
+    env.broker.start()
     env.storage_controller.start()
     env.pageservers[0].start()
     env.pageservers[1].start()
@@ -292,7 +292,7 @@ def test_storage_controller_onboarding(neon_env_builder: NeonEnvBuilder, warm_up
 
     # Start services by hand so that we can skip registration on one of the pageservers
     env = neon_env_builder.init_configs()
-    env.broker.try_start()
+    env.broker.start()
     env.storage_controller.start()
 
     # This is the pageserver where we'll initially create the tenant.  Run it in emergency
@@ -2117,7 +2117,7 @@ def start_env(env: NeonEnv, storage_controller_port: int):
         max_workers=2 + len(env.pageservers) + len(env.safekeepers)
     ) as executor:
         futs.append(
-            executor.submit(lambda: env.broker.try_start() or None)
+            executor.submit(lambda: env.broker.start() or None)
         )  # The `or None` is for the linter
 
         for pageserver in env.pageservers:
