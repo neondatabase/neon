@@ -345,10 +345,8 @@ impl PostgresRedoManager {
             }
         };
 
-        let result = closure(
-            proc.clone(), /* lack of true aysnc closures prevents passing a &Process here */
-        )
-        .await;
+        // async closures are unstable, would support &Process
+        let result = closure(proc.clone()).await;
 
         if result.is_err() {
             // Avoid concurrent callers hitting the same issue by taking `proc` out of the rotation.
