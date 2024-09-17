@@ -157,20 +157,14 @@ FROM build-deps AS plv8-build
 ARG PG_VERSION
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
-RUN case "${PG_VERSION}" in "v17") \
-    echo "v17 extensions are not supported yet. Quit" && exit 0;; \
-    esac && \
-    apt update && \
-    apt install -y ninja-build python3-dev libncurses5 binutils clang
+RUN apt update && \
+    apt install -y ninja-build python3-dev libncurses5 binutils clang libstdc++-12-dev libtinfo5 pkg-config
 
-RUN case "${PG_VERSION}" in "v17") \
-    echo "v17 extensions are not supported yet. Quit" && exit 0;; \
-    esac && \
-    wget https://github.com/plv8/plv8/archive/refs/tags/v3.1.10.tar.gz -O plv8.tar.gz && \
-    echo "7096c3290928561f0d4901b7a52794295dc47f6303102fae3f8e42dd575ad97d plv8.tar.gz" | sha256sum --check && \
-    mkdir plv8-src && cd plv8-src && tar xzf ../plv8.tar.gz --strip-components=1 -C . && \
+RUN wget https://github.com/plv8/plv8/archive/refs/tags/v3.2.2.tar.gz -O plv8.tar.gz && \
+    echo "2d1491280505afcdff629191451d0891d3258dbdc483992aa7449a8517335d98 plv8.tar.gz" | sha256sum --check && \
+    mkdir plv8-src && cd plv8-src && tar xvzf ../plv8.tar.gz --strip-components=1 -C . && \
     # generate and copy upgrade scripts
-    mkdir -p upgrade && ./generate_upgrade.sh 3.1.10 && \
+    mkdir -p upgrade && ./generate_upgrade.sh 3.2.2 && \
     cp upgrade/* /usr/local/pgsql/share/extension/ && \
     export PATH="/usr/local/pgsql/bin:$PATH" && \
     make DOCKER=1 -j $(getconf _NPROCESSORS_ONLN) install && \
@@ -178,8 +172,8 @@ RUN case "${PG_VERSION}" in "v17") \
     find /usr/local/pgsql/ -name "plv8-*.so" | xargs strip && \
     # don't break computes with installed old version of plv8
     cd /usr/local/pgsql/lib/ && \
-    ln -s plv8-3.1.10.so plv8-3.1.5.so && \
-    ln -s plv8-3.1.10.so plv8-3.1.8.so && \
+    ln -s plv8-3.2.2.so plv8-3.1.5.so && \
+    ln -s plv8-3.2.2.so plv8-3.1.8.so && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/plv8.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/plcoffee.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/plls.control
@@ -278,7 +272,7 @@ COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
 COPY patches/pgvector.patch /pgvector.patch
 
-# By default, pgvector Makefile uses `-march=native`. We don't want that, 
+# By default, pgvector Makefile uses `-march=native`. We don't want that,
 # because we build the images on different machines than where we run them.
 # Pass OPTFLAGS="" to remove it.
 RUN case "${PG_VERSION}" in "v17") \
