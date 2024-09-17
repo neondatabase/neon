@@ -1,9 +1,13 @@
 use std::{collections::HashMap, time::Duration};
 
+use anyhow::bail;
 use tokio_util::sync::CancellationToken;
 use utils::id::TimelineId;
 
-use super::{remote_timeline_client::index::GcBlockingReason, tasks::Cancelled};
+use super::{
+    remote_timeline_client::index::GcBlockingReason,
+    tasks::{self, Cancelled},
+};
 
 type TimelinesBlocked = HashMap<TimelineId, enumset::EnumSet<GcBlockingReason>>;
 
@@ -54,16 +58,17 @@ impl GcBlock {
     /// We do this as the leases mapping are not persisted to disk. By delaying GC by default
     /// length, we guarantee that all the leases we granted before will expire when we run GC for
     /// the first time after restart / transition from AttachedMulti to AttachedSingle.
-    pub(super) async fn block_for(
-        &self,
-        duration: Duration,
-        cancel: &CancellationToken,
-    ) -> Result<(), Cancelled> {
-        // hold this lock so gc_iteration cannot proceed.
-        let _g = self.blocking.lock().await;
-        match tokio::time::timeout(duration, cancel.cancelled()).await {
-            Ok(_) => Err(Cancelled),
-            Err(_) => Ok(()),
+    pub(super) async fn block_for(&self, duration: Duration, cancel: &CancellationToken) {
+        {
+            let g = self.reasons.lock().unwrap();
+            g.tenant_blocked = true;
+        }
+
+        let _ = tasks::delay_by_duration(duration, cancel).await;
+
+        {
+            let g = self.reasons.lock().unwrap();
+            g.tenant_blocked = false;
         }
     }
 
@@ -192,6 +197,7 @@ pub(super) struct Guard<'a> {
 
 #[derive(Debug)]
 pub(crate) struct BlockingReasons {
+    tenant_blocked: bool,
     timelines: usize,
     reasons: enumset::EnumSet<GcBlockingReason>,
 }
@@ -200,8 +206,8 @@ impl std::fmt::Display for BlockingReasons {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{} timelines block for {:?}",
-            self.timelines, self.reasons
+            "tenant blocked: {}; {} timelines block for {:?}",
+            self.tenant_blocked, self.timelines, self.reasons
         )
     }
 }
@@ -213,8 +219,9 @@ impl BlockingReasons {
             reasons = reasons.union(*value);
             !value.is_empty()
         });
-        if !g.timelines_blocked.is_empty() {
+        if !g.timelines_blocked.is_empty() || g.tenant_blocked {
             Some(BlockingReasons {
+                tenant_blocked: g.tenant_blocked,
                 timelines: g.timelines_blocked.len(),
                 reasons,
             })
@@ -224,7 +231,7 @@ impl BlockingReasons {
     }
 
     fn summarize(g: &std::sync::MutexGuard<'_, Storage>) -> Option<Self> {
-        if g.timelines_blocked.is_empty() {
+        if g.timelines_blocked.is_empty() || !g.tenant_blocked {
             None
         } else {
             let reasons = g
@@ -232,6 +239,7 @@ impl BlockingReasons {
                 .values()
                 .fold(enumset::EnumSet::empty(), |acc, next| acc.union(*next));
             Some(BlockingReasons {
+                tenant_blocked: g.tenant_blocked,
                 timelines: g.timelines_blocked.len(),
                 reasons,
             })

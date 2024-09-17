@@ -363,7 +363,8 @@ async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
                 first = false;
 
                 let delays = async {
-                    tenant.gc_block.block_for(tenant.get_lsn_lease_length(), &cancel).await?;
+                    let lsn_lease_length = tenant.get_lsn_lease_length();
+                    delay_by_duration(lsn_lease_length, &tenant.cancel).await?;
                     random_init_delay(period, &cancel).await?;
                     Ok::<_, Cancelled>(())
                 };
@@ -522,6 +523,17 @@ async fn wait_for_active_tenant(tenant: &Arc<Tenant>) -> ControlFlow<()> {
 #[error("cancelled")]
 pub(crate) struct Cancelled;
 
+/// Waits for `duration` time unless cancelled.
+pub(crate) async fn delay_by_duration(
+    duration: Duration,
+    cancel: &CancellationToken,
+) -> Result<(), Cancelled> {
+    match tokio::time::timeout(duration, cancel.cancelled()).await {
+        Ok(_) => Err(Cancelled),
+        Err(_) => Ok(()),
+    }
+}
+
 /// Provide a random delay for background task initialization.
 ///
 /// This delay prevents a thundering herd of background tasks and will likely keep them running on
@@ -539,10 +551,7 @@ pub(crate) async fn random_init_delay(
         rng.gen_range(Duration::ZERO..=period)
     };
 
-    match tokio::time::timeout(d, cancel.cancelled()).await {
-        Ok(_) => Err(Cancelled),
-        Err(_) => Ok(()),
-    }
+    delay_by_duration(d, cancel).await
 }
 
 struct Iteration {
