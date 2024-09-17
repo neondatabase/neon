@@ -152,6 +152,9 @@ pub const XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED: u8 = (1 << 0) as u8;
 pub const XLH_UPDATE_NEW_ALL_VISIBLE_CLEARED: u8 = (1 << 1) as u8;
 pub const XLH_DELETE_ALL_VISIBLE_CLEARED: u8 = (1 << 0) as u8;
 
+// From heapam_xlog.h
+pub const XLOG_HEAP2_REWRITE: u8 = 0x00;
+
 // From replication/message.h
 pub const XLOG_LOGICAL_MESSAGE: u8 = 0x00;
 
@@ -219,14 +222,19 @@ pub const INVALID_TRANSACTION_ID: u32 = 0;
 pub const FIRST_BOOTSTRAP_OBJECT_ID: u32 = 12000;
 pub const FIRST_NORMAL_OBJECT_ID: u32 = 16384;
 
+/* pg_control.h */
 pub const XLOG_CHECKPOINT_SHUTDOWN: u8 = 0x00;
 pub const XLOG_CHECKPOINT_ONLINE: u8 = 0x10;
-pub const XLP_FIRST_IS_CONTRECORD: u16 = 0x0001;
-pub const XLP_LONG_HEADER: u16 = 0x0002;
+pub const XLOG_PARAMETER_CHANGE: u8 = 0x60;
+pub const XLOG_END_OF_RECOVERY: u8 = 0x90;
 
 /* From xlog.h */
 pub const XLOG_REPLORIGIN_SET: u8 = 0x00;
 pub const XLOG_REPLORIGIN_DROP: u8 = 0x10;
+
+/* xlog_internal.h */
+pub const XLP_FIRST_IS_CONTRECORD: u16 = 0x0001;
+pub const XLP_LONG_HEADER: u16 = 0x0002;
 
 /* From replication/slot.h */
 pub const REPL_SLOT_ON_DISK_OFFSETOF_RESTART_LSN: usize = 4*4  /* offset of `slotdata` in ReplicationSlotOnDisk  */
@@ -244,33 +252,6 @@ pub const VM_HEAPBLOCKS_PER_PAGE: u32 =
 
 /* From origin.c */
 pub const REPLICATION_STATE_MAGIC: u32 = 0x1257DADE;
-
-// List of subdirectories inside pgdata.
-// Copied from src/bin/initdb/initdb.c
-pub const PGDATA_SUBDIRS: [&str; 22] = [
-    "global",
-    "pg_wal/archive_status",
-    "pg_commit_ts",
-    "pg_dynshmem",
-    "pg_notify",
-    "pg_serial",
-    "pg_snapshots",
-    "pg_subtrans",
-    "pg_twophase",
-    "pg_multixact",
-    "pg_multixact/members",
-    "pg_multixact/offsets",
-    "base",
-    "base/1",
-    "pg_replslot",
-    "pg_tblspc",
-    "pg_stat",
-    "pg_stat_tmp",
-    "pg_xact",
-    "pg_logical",
-    "pg_logical/snapshots",
-    "pg_logical/mappings",
-];
 
 // Don't include postgresql.conf as it is inconvenient on node start:
 // we need postgresql.conf before basebackup to synchronize safekeepers

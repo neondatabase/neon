@@ -100,6 +100,9 @@
 #include "storage/buf_internals.h"
 #include "storage/bufmgr.h"
 #include "storage/dsm.h"
+#if PG_MAJORVERSION_NUM >= 17
+#include "storage/dsm_registry.h"
+#endif
 #include "storage/ipc.h"
 #include "storage/pg_shmem.h"
 #include "storage/pmsignal.h"
@@ -137,7 +140,7 @@ static BufferTag target_redo_tag;
 
 static XLogReaderState *reader_state;
 
-#define TRACE DEBUG5
+#define TRACE LOG
 
 #ifdef HAVE_LIBSECCOMP
 
@@ -517,6 +520,10 @@ CreateFakeSharedMemoryAndSemaphores()
 	/*
 	 * Set up xlog, clog, and buffers
 	 */
+#if PG_MAJORVERSION_NUM >= 17
+	DSMRegistryShmemInit();
+	VarsupShmemInit();
+#endif
 	XLOGShmemInit();
 	CLOGShmemInit();
 	CommitTsShmemInit();
@@ -566,7 +573,10 @@ CreateFakeSharedMemoryAndSemaphores()
 	/*
 	 * Set up other modules that need some shared memory space
 	 */
+#if PG_MAJORVERSION_NUM < 17
+	/* "snapshot too old" was removed in PG17, and with it the SnapMgr */
 	SnapMgrInit();
+#endif
 	BTreeShmemInit();
 	SyncScanShmemInit();
 	/* Skip due to the 'pg_notify' directory check */
@@ -742,7 +752,7 @@ BeginRedoForBlock(StringInfo input_message)
 		 target_redo_tag.forkNum,
 		 target_redo_tag.blockNum);
 
-	reln = smgropen(rinfo, InvalidBackendId, RELPERSISTENCE_PERMANENT);
+	reln = smgropen(rinfo, INVALID_PROC_NUMBER, RELPERSISTENCE_PERMANENT);
 	if (reln->smgr_cached_nblocks[forknum] == InvalidBlockNumber ||
 		reln->smgr_cached_nblocks[forknum] < blknum + 1)
 	{

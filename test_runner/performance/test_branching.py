@@ -43,7 +43,7 @@ def test_compare_child_and_root_pgbench_perf(neon_compare: NeonCompare):
 
     env.neon_cli.create_branch("root")
     endpoint_root = env.endpoints.create_start("root")
-    pg_bin.run_capture(["pgbench", "-i", endpoint_root.connstr(), "-s10"])
+    pg_bin.run_capture(["pgbench", "-i", "-I", "dtGvp", endpoint_root.connstr(), "-s10"])
 
     fork_at_current_lsn(env, endpoint_root, "child", "root")
 

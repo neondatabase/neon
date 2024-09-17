@@ -580,9 +580,11 @@ async fn import_file(
         import_slru(modification, slru, file_path, reader, len, ctx).await?;
         debug!("imported multixact members slru");
     } else if file_path.starts_with("pg_twophase") {
-        let xid = u32::from_str_radix(file_name.as_ref(), 16)?;
-
         let bytes = read_all_bytes(reader).await?;
+
+        // In PostgreSQL v17, this is a 64-bit FullTransactionid. In previous versions,
+        // it's a 32-bit TransactionId, which fits in u64 anyway.
+        let xid = u64::from_str_radix(file_name.as_ref(), 16)?;
         modification
             .put_twophase_file(xid, Bytes::copy_from_slice(&bytes[..]), ctx)
             .await?;

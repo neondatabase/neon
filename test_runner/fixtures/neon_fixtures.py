@@ -43,7 +43,6 @@ from urllib.parse import quote, urlparse
 import asyncpg
 import backoff
 import httpx
-import jwt
 import psycopg2
 import psycopg2.sql
 import pytest
@@ -60,6 +59,7 @@ from psycopg2.extensions import make_dsn, parse_dsn
 from urllib3.util.retry import Retry
 
 from fixtures import overlayfs
+from fixtures.auth_tokens import AuthKeys, TokenScope
 from fixtures.broker import NeonBroker
 from fixtures.common_types import Lsn, NodeId, TenantId, TenantShardId, TimelineId
 from fixtures.endpoint.http import EndpointHttpClient
@@ -93,6 +93,7 @@ from fixtures.utils import (
     allure_add_grafana_links,
     allure_attach_from_dir,
     assert_no_errors,
+    get_dir_size,
     get_self_dir,
     print_gc_result,
     subprocess_capture,
@@ -158,7 +159,7 @@ def neon_binpath(base_dir: Path, build_type: str) -> Iterator[Path]:
     yield binpath
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture(scope="session")
 def pg_distrib_dir(base_dir: Path) -> Iterator[Path]:
     if env_postgres_bin := os.environ.get("POSTGRES_DISTRIB_DIR"):
         distrib_dir = Path(env_postgres_bin).resolve()
@@ -180,25 +181,6 @@ def top_output_dir(base_dir: Path) -> Iterator[Path]:
 
     log.info(f"top_output_dir is {output_dir}")
     yield output_dir
-
-
-@pytest.fixture(scope="function")
-def versioned_pg_distrib_dir(pg_distrib_dir: Path, pg_version: PgVersion) -> Iterator[Path]:
-    versioned_dir = pg_distrib_dir / pg_version.v_prefixed
-
-    psql_bin_path = versioned_dir / "bin/psql"
-    postgres_bin_path = versioned_dir / "bin/postgres"
-
-    if os.getenv("REMOTE_ENV"):
-        # When testing against a remote server, we only need the client binary.
-        if not psql_bin_path.exists():
-            raise Exception(f"psql not found at '{psql_bin_path}'")
-    else:
-        if not postgres_bin_path.exists():
-            raise Exception(f"postgres not found at '{postgres_bin_path}'")
-
-    log.info(f"versioned_pg_distrib_dir is {versioned_dir}")
-    yield versioned_dir
 
 
 @pytest.fixture(scope="session")
@@ -241,16 +223,6 @@ def worker_base_port(worker_seq_no: int, worker_port_num: int) -> int:
     # so we divide ports in ranges of ports
     # so workers have disjoint set of ports for services
     return BASE_PORT + worker_seq_no * worker_port_num
-
-
-def get_dir_size(path: str) -> int:
-    """Return size in bytes."""
-    totalbytes = 0
-    for root, _dirs, files in os.walk(path):
-        for name in files:
-            totalbytes += os.path.getsize(os.path.join(root, name))
-
-    return totalbytes
 
 
 @pytest.fixture(scope="session")
@@ -401,44 +373,6 @@ class PgProtocol:
         return self.safe_psql(query, log_query=log_query)[0][0]
 
 
-@dataclass
-class AuthKeys:
-    priv: str
-
-    def generate_token(self, *, scope: TokenScope, **token_data: Any) -> str:
-        token_data = {key: str(val) for key, val in token_data.items()}
-        token = jwt.encode({"scope": scope, **token_data}, self.priv, algorithm="EdDSA")
-        # cast(Any, self.priv)
-
-        # jwt.encode can return 'bytes' or 'str', depending on Python version or type
-        # hinting or something (not sure what). If it returned 'bytes', convert it to 'str'
-        # explicitly.
-        if isinstance(token, bytes):
-            token = token.decode()
-
-        return token
-
-    def generate_pageserver_token(self) -> str:
-        return self.generate_token(scope=TokenScope.PAGE_SERVER_API)
-
-    def generate_safekeeper_token(self) -> str:
-        return self.generate_token(scope=TokenScope.SAFEKEEPER_DATA)
-
-    # generate token giving access to only one tenant
-    def generate_tenant_token(self, tenant_id: TenantId) -> str:
-        return self.generate_token(scope=TokenScope.TENANT, tenant_id=str(tenant_id))
-
-
-# TODO: Replace with `StrEnum` when we upgrade to python 3.11
-class TokenScope(str, Enum):
-    ADMIN = "admin"
-    PAGE_SERVER_API = "pageserverapi"
-    GENERATIONS_API = "generations_api"
-    SAFEKEEPER_DATA = "safekeeperdata"
-    TENANT = "tenant"
-    SCRUBBER = "scrubber"
-
-
 class NeonEnvBuilder:
     """
     Builder object to create a Neon runtime environment
@@ -553,10 +487,6 @@ class NeonEnvBuilder:
         self.env = NeonEnv(self)
         return self.env
 
-    def start(self):
-        assert self.env is not None, "environment is not already initialized, call init() first"
-        self.env.start()
-
     def init_start(
         self,
         initial_tenant_conf: Optional[Dict[str, Any]] = None,
@@ -572,7 +502,7 @@ class NeonEnvBuilder:
         Configuring pageserver with remote storage is now the default. There will be a warning if pageserver is created without one.
         """
         env = self.init_configs(default_remote_storage_if_missing=default_remote_storage_if_missing)
-        self.start()
+        env.start()
 
         # Prepare the default branch to start the postgres on later.
         # Pageserver itself does not create tenants and timelines, until started first and asked via HTTP API.
@@ -937,8 +867,11 @@ class NeonEnvBuilder:
 
         for directory_to_clean in reversed(directories_to_clean):
             if not os.listdir(directory_to_clean):
-                log.debug(f"Removing empty directory {directory_to_clean}")
-                directory_to_clean.rmdir()
+                log.info(f"Removing empty directory {directory_to_clean}")
+                try:
+                    directory_to_clean.rmdir()
+                except Exception as e:
+                    log.error(f"Error removing empty directory {directory_to_clean}: {e}")
 
     def cleanup_remote_storage(self):
         for x in [self.pageserver_remote_storage, self.safekeepers_remote_storage]:
@@ -1073,9 +1006,6 @@ class NeonEnv:
         self.pg_distrib_dir = config.pg_distrib_dir
         self.endpoint_counter = 0
         self.storage_controller_config = config.storage_controller_config
-
-        # generate initial tenant ID here instead of letting 'neon init' generate it,
-        # so that we don't need to dig it out of the config file afterwards.
         self.initial_tenant = config.initial_tenant
         self.initial_timeline = config.initial_timeline
 
@@ -1521,14 +1451,6 @@ class PageserverPort:
     http: int
 
 
-CREATE_TIMELINE_ID_EXTRACTOR: re.Pattern = re.compile(  # type: ignore[type-arg]
-    r"^Created timeline '(?P<timeline_id>[^']+)'", re.MULTILINE
-)
-TIMELINE_DATA_EXTRACTOR: re.Pattern = re.compile(  # type: ignore[type-arg]
-    r"\s?(?P<branch_name>[^\s]+)\s\[(?P<timeline_id>[^\]]+)\]", re.MULTILINE
-)
-
-
 class AbstractNeonCli(abc.ABC):
     """
     A typed wrapper around an arbitrary Neon CLI tool.
@@ -1757,6 +1679,9 @@ class NeonCli(AbstractNeonCli):
         tenant_id: Optional[TenantId] = None,
         timeline_id: Optional[TimelineId] = None,
     ) -> TimelineId:
+        if timeline_id is None:
+            timeline_id = TimelineId.generate()
+
         cmd = [
             "timeline",
             "create",
@@ -1764,23 +1689,16 @@ class NeonCli(AbstractNeonCli):
             new_branch_name,
             "--tenant-id",
             str(tenant_id or self.env.initial_tenant),
+            "--timeline-id",
+            str(timeline_id),
             "--pg-version",
             self.env.pg_version,
         ]
 
-        if timeline_id is not None:
-            cmd.extend(["--timeline-id", str(timeline_id)])
-
         res = self.raw_cli(cmd)
         res.check_returncode()
 
-        matches = CREATE_TIMELINE_ID_EXTRACTOR.search(res.stdout)
-
-        created_timeline_id = None
-        if matches is not None:
-            created_timeline_id = matches.group("timeline_id")
-
-        return TimelineId(str(created_timeline_id))
+        return timeline_id
 
     def create_branch(
         self,
@@ -1788,12 +1706,17 @@ class NeonCli(AbstractNeonCli):
         ancestor_branch_name: Optional[str] = None,
         tenant_id: Optional[TenantId] = None,
         ancestor_start_lsn: Optional[Lsn] = None,
+        new_timeline_id: Optional[TimelineId] = None,
     ) -> TimelineId:
+        if new_timeline_id is None:
+            new_timeline_id = TimelineId.generate()
         cmd = [
             "timeline",
             "branch",
             "--branch-name",
             new_branch_name,
+            "--timeline-id",
+            str(new_timeline_id),
             "--tenant-id",
             str(tenant_id or self.env.initial_tenant),
         ]
@@ -1805,16 +1728,7 @@ class NeonCli(AbstractNeonCli):
         res = self.raw_cli(cmd)
         res.check_returncode()
 
-        matches = CREATE_TIMELINE_ID_EXTRACTOR.search(res.stdout)
-
-        created_timeline_id = None
-        if matches is not None:
-            created_timeline_id = matches.group("timeline_id")
-
-        if created_timeline_id is None:
-            raise Exception("could not find timeline id after `neon timeline create` invocation")
-        else:
-            return TimelineId(str(created_timeline_id))
+        return TimelineId(str(new_timeline_id))
 
     def list_timelines(self, tenant_id: Optional[TenantId] = None) -> List[Tuple[str, TimelineId]]:
         """
@@ -1823,6 +1737,9 @@ class NeonCli(AbstractNeonCli):
 
         # main [b49f7954224a0ad25cc0013ea107b54b]
         # ┣━ @0/16B5A50: test_cli_branch_list_main [20f98c79111b9015d84452258b7d5540]
+        TIMELINE_DATA_EXTRACTOR: re.Pattern = re.compile(  # type: ignore[type-arg]
+            r"\s?(?P<branch_name>[^\s]+)\s\[(?P<timeline_id>[^\]]+)\]", re.MULTILINE
+        )
         res = self.raw_cli(
             ["timeline", "list", "--tenant-id", str(tenant_id or self.env.initial_tenant)]
         )
@@ -3355,12 +3272,12 @@ class PgBin:
         )
         return base_path
 
-    def get_pg_controldata_checkpoint_lsn(self, pgdata: str) -> Lsn:
+    def get_pg_controldata_checkpoint_lsn(self, pgdata: Path) -> Lsn:
         """
         Run pg_controldata on given datadir and extract checkpoint lsn.
         """
 
-        pg_controldata_path = os.path.join(self.pg_bin_path, "pg_controldata")
+        pg_controldata_path = self.pg_bin_path / "pg_controldata"
         cmd = f"{pg_controldata_path} -D {pgdata}"
         result = subprocess.run(cmd, capture_output=True, text=True, shell=True)
         checkpoint_lsn = re.findall(
@@ -3443,6 +3360,7 @@ class VanillaPostgres(PgProtocol):
         assert not self.running
         with open(os.path.join(self.pgdatadir, "postgresql.conf"), "a") as conf_file:
             conf_file.write("\n".join(options))
+            conf_file.write("\n")
 
     def edit_hba(self, hba: List[str]):
         """Prepend hba lines into pg_hba.conf file."""
@@ -3468,9 +3386,9 @@ class VanillaPostgres(PgProtocol):
         self.running = False
         self.pg_bin.run_capture(["pg_ctl", "-w", "-D", str(self.pgdatadir), "stop"])
 
-    def get_subdir_size(self, subdir) -> int:
+    def get_subdir_size(self, subdir: Path) -> int:
         """Return size of pgdatadir subdirectory in bytes."""
-        return get_dir_size(os.path.join(self.pgdatadir, subdir))
+        return get_dir_size(self.pgdatadir / subdir)
 
     def __enter__(self) -> "VanillaPostgres":
         return self
@@ -3496,6 +3414,7 @@ def vanilla_pg(
     pg_bin = PgBin(test_output_dir, pg_distrib_dir, pg_version)
     port = port_distributor.get_port()
     with VanillaPostgres(pgdatadir, pg_bin, port) as vanilla_pg:
+        vanilla_pg.configure(["shared_preload_libraries='neon_rmgr'"])
         yield vanilla_pg
 
 
@@ -3996,7 +3915,7 @@ class Endpoint(PgProtocol, LogUtils):
         self.env = env
         self.branch_name: Optional[str] = None  # dubious
         self.endpoint_id: Optional[str] = None  # dubious, see asserts below
-        self.pgdata_dir: Optional[str] = None  # Path to computenode PGDATA
+        self.pgdata_dir: Optional[Path] = None  # Path to computenode PGDATA
         self.tenant_id = tenant_id
         self.pg_port = pg_port
         self.http_port = http_port
@@ -4053,7 +3972,7 @@ class Endpoint(PgProtocol, LogUtils):
             allow_multiple=allow_multiple,
         )
         path = Path("endpoints") / self.endpoint_id / "pgdata"
-        self.pgdata_dir = os.path.join(self.env.repo_dir, path)
+        self.pgdata_dir = self.env.repo_dir / path
         self.logfile = self.endpoint_path() / "compute.log"
 
         config_lines = config_lines or []
@@ -4106,21 +4025,21 @@ class Endpoint(PgProtocol, LogUtils):
         path = Path("endpoints") / self.endpoint_id
         return self.env.repo_dir / path
 
-    def pg_data_dir_path(self) -> str:
+    def pg_data_dir_path(self) -> Path:
         """Path to Postgres data directory"""
-        return os.path.join(self.endpoint_path(), "pgdata")
+        return self.endpoint_path() / "pgdata"
 
-    def pg_xact_dir_path(self) -> str:
+    def pg_xact_dir_path(self) -> Path:
         """Path to pg_xact dir"""
-        return os.path.join(self.pg_data_dir_path(), "pg_xact")
+        return self.pg_data_dir_path() / "pg_xact"
 
-    def pg_twophase_dir_path(self) -> str:
+    def pg_twophase_dir_path(self) -> Path:
         """Path to pg_twophase dir"""
-        return os.path.join(self.pg_data_dir_path(), "pg_twophase")
+        return self.pg_data_dir_path() / "pg_twophase"
 
-    def config_file_path(self) -> str:
+    def config_file_path(self) -> Path:
         """Path to the postgresql.conf in the endpoint directory (not the one in pgdata)"""
-        return os.path.join(self.endpoint_path(), "postgresql.conf")
+        return self.endpoint_path() / "postgresql.conf"
 
     def config(self, lines: List[str]) -> "Endpoint":
         """
@@ -4285,7 +4204,7 @@ class Endpoint(PgProtocol, LogUtils):
         log.info(f'checkpointing at LSN {self.safe_psql("select pg_current_wal_lsn()")[0][0]}')
         self.safe_psql("checkpoint")
         assert self.pgdata_dir is not None  # please mypy
-        return get_dir_size(os.path.join(self.pgdata_dir, "pg_wal")) / 1024 / 1024
+        return get_dir_size(self.pgdata_dir / "pg_wal") / 1024 / 1024
 
     def clear_shared_buffers(self, cursor: Optional[Any] = None):
         """

@@ -6,7 +6,7 @@ use pq_proto::StartupMessageParams;
 use smol_str::SmolStr;
 use std::net::IpAddr;
 use tokio::sync::mpsc;
-use tracing::{field::display, info, info_span, Span};
+use tracing::{debug, field::display, info, info_span, Span};
 use try_lock::TryLock;
 use uuid::Uuid;
 
@@ -362,7 +362,9 @@ impl RequestMonitoringInner {
                 });
         }
         if let Some(tx) = self.sender.take() {
-            let _: Result<(), _> = tx.send(RequestData::from(&*self));
+            tx.send(RequestData::from(&*self))
+                .inspect_err(|e| debug!("tx send failed: {e}"))
+                .ok();
         }
     }
 
@@ -371,7 +373,9 @@ impl RequestMonitoringInner {
         // Here we log the length of the session.
         self.disconnect_timestamp = Some(Utc::now());
         if let Some(tx) = self.disconnect_sender.take() {
-            let _: Result<(), _> = tx.send(RequestData::from(&*self));
+            tx.send(RequestData::from(&*self))
+                .inspect_err(|e| debug!("tx send failed: {e}"))
+                .ok();
         }
     }
 }
