@@ -495,7 +495,7 @@ pub struct CompactionAlgorithmSettings {
     pub kind: CompactionAlgorithm,
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, PartialEq, Eq, Clone, Deserialize, Serialize)]
 #[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum L0FlushConfig {
     #[serde(rename_all = "snake_case")]
