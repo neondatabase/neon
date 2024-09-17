@@ -56,6 +56,8 @@ use crate::metrics::HttpDirection;
 use crate::metrics::Metrics;
 use crate::proxy::run_until_cancelled;
 use crate::proxy::NeonOptions;
+use crate::serverless::json::Arena;
+use crate::serverless::json::SerdeArena;
 use crate::usage_metrics::MetricCounterRecorder;
 use crate::DbName;
 use crate::RoleName;
@@ -70,10 +72,11 @@ use super::conn_pool::ConnInfoWithAuth;
 use super::http_util::json_response;
 use super::json::pg_text_row_to_json;
 use super::json::JsonConversionError;
+use super::json::Slice;
 
 pub(crate) struct QueryData {
-    pub(crate) query: String,
-    pub(crate) params: Vec<Option<String>>,
+    pub(crate) query: Slice,
+    pub(crate) params: Slice,
     pub(crate) array_mode: Option<bool>,
 }
 
@@ -604,9 +607,15 @@ async fn handle_db_inner(
         ));
     }
 
+    let mut arena = Arena::default();
+
     let fetch_and_process_request = Box::pin(async {
+        let seed = SerdeArena {
+            arena: &mut arena,
+            _t: PhantomData::<Payload>,
+        };
         let payload = parse_json_body_with_limit(
-            PhantomData,
+            seed,
             request.into_body(),
             config.http_config.max_request_size_bytes as usize,
         )
@@ -676,7 +685,7 @@ async fn handle_db_inner(
     // Now execute the query and return the result.
     let json_output = match payload {
         Payload::Single(stmt) => {
-            stmt.process(config, cancel, &mut client, parsed_headers)
+            stmt.process(config, &arena, cancel, &mut client, parsed_headers)
                 .await?
         }
         Payload::Batch(statements) => {
@@ -694,7 +703,7 @@ async fn handle_db_inner(
             }
 
             statements
-                .process(config, cancel, &mut client, parsed_headers)
+                .process(config, &arena, cancel, &mut client, parsed_headers)
                 .await?
         }
     };
@@ -786,6 +795,7 @@ impl QueryData {
     async fn process(
         self,
         config: &'static ProxyConfig,
+        arena: &Arena,
         cancel: CancellationToken,
         client: &mut Client<tokio_postgres::Client>,
         parsed_headers: HttpHeaders,
@@ -794,7 +804,14 @@ impl QueryData {
         let cancel_token = inner.cancel_token();
 
         let res = match select(
-            pin!(query_to_json(config, &*inner, self, &mut 0, parsed_headers)),
+            pin!(query_to_json(
+                config,
+                arena,
+                &*inner,
+                self,
+                &mut 0,
+                parsed_headers
+            )),
             pin!(cancel.cancelled()),
         )
         .await
@@ -860,6 +877,7 @@ impl BatchQueryData {
     async fn process(
         self,
         config: &'static ProxyConfig,
+        arena: &Arena,
         cancel: CancellationToken,
         client: &mut Client<tokio_postgres::Client>,
         parsed_headers: HttpHeaders,
@@ -886,6 +904,7 @@ impl BatchQueryData {
 
         let json_output = match query_batch(
             config,
+            arena,
             cancel.child_token(),
             &transaction,
             self,
@@ -930,6 +949,7 @@ impl BatchQueryData {
 
 async fn query_batch(
     config: &'static ProxyConfig,
+    arena: &Arena,
     cancel: CancellationToken,
     transaction: &Transaction<'_>,
     queries: BatchQueryData,
@@ -940,6 +960,7 @@ async fn query_batch(
     for stmt in queries.queries {
         let query = pin!(query_to_json(
             config,
+            arena,
             transaction,
             stmt,
             &mut current_size,
@@ -969,14 +990,21 @@ async fn query_batch(
 
 async fn query_to_json<T: GenericClient>(
     config: &'static ProxyConfig,
+    arena: &Arena,
     client: &T,
     data: QueryData,
     current_size: &mut usize,
     parsed_headers: HttpHeaders,
 ) -> Result<(ReadyForQueryStatus, impl Serialize), SqlOverHttpError> {
     info!("executing query");
-    let query_params = data.params;
-    let mut row_stream = std::pin::pin!(client.query_raw_txt(&data.query, query_params).await?);
+
+    let query_params = arena.params_arena[data.params.into_range()]
+        .iter()
+        .map(|p| p.map(|p| &arena.str_arena[p.into_range()]));
+
+    let query = &arena.str_arena[data.query.into_range()];
+
+    let mut row_stream = std::pin::pin!(client.query_raw_txt(query, query_params).await?);
     info!("finished executing query");
 
     // Manually drain the stream into a vector to leave row_stream hanging
