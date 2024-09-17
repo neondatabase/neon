@@ -23,14 +23,9 @@ concurrency:
 
 jobs:
   regress:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - DEFAULT_PG_VERSION: 16
     env:
       POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
-      DEFAULT_PG_VERSION: ${{ matrix.DEFAULT_PG_VERSION }}
+      DEFAULT_PG_VERSION: 16
       TEST_OUTPUT: /tmp/test_output
       BUILD_TYPE: remote
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_DEV }}
@@ -48,30 +43,26 @@ jobs:
 
       - name: Patch the test
         run: |
-          cd vendor/postgres-v${{ matrix.DEFAULT_PG_VERSION }}
-          patch -p1 < ../../patches/cloud_regress_pg${{ matrix.DEFAULT_PG_VERSION }}.patch
+          cd vendor/postgres-v${{ DEFAULT_PG_VERSION }}
+          patch -p1 < ../../patches/cloud_regress_pg${{ DEFAULT_PG_VERSION }}.patch
 
       - name: Generate a random password
         id: pwgen
         run: |
-          set +x
-          DBPASS=$(dd if=/dev/random bs=48 count=1 2>/dev/null | base64)
-          echo DBPASS="${DBPASS//\//}" >> "${GITHUB_OUTPUT}"
+          DBPASS=::add-mask:$(dd if=/dev/random bs=48 count=1 2>/dev/null | base64)
+          echo DBPASS=::add-mask:"${DBPASS//\//}" >> "${GITHUB_OUTPUT}"
 
       - name: Change tests according to the generated password
         run: |
-          cd /__w/neon/neon/vendor/postgres-v"${{ matrix.DEFAULT_PG_VERSION }}"/src/test/regress
-          set +x
+          cd vendor/postgres-v"${{ DEFAULT_PG_VERSION }}"/src/test/regress
           for fname in sql/*.sql expected/*.out; do
-          sed -i.bak s/NEON_PASSWORD_PLACEHOLDER/"'${{ steps.pwgen.outputs.DBPASS }}'"/ "${fname}"
+          sed -i.bak s/NEON_PASSWORD_PLACEHOLDER/"'::add-mask:${{ steps.pwgen.outputs.DBPASS }}'"/ "${fname}"
           done
           for ph in $(grep NEON_MD5_PLACEHOLDER expected/password.out | awk '{print $3;}' | sort | uniq); do
           USER=$(echo ${ph} | cut -c 22-)
-          MD5=md5$(echo -n "${{ steps.pwgen.outputs.DBPASS }}${USER}" | md5sum | awk '{print $1;}')
-          sed -i.bak "s/${ph}/$MD5/" expected/password.out
+          MD5=md5$(echo -n "::add-mask:${{ steps.pwgen.outputs.DBPASS }}${USER}" | md5sum | awk '{print $1;}')
+          sed -i.bak "s/${ph}/::add-mask:${MD5}/" expected/password.out
           done
-          
-          
 
       - name: Download Neon artifact
         uses: ./.github/actions/download
