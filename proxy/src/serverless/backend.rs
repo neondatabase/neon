@@ -1,7 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use tracing::{field::display, info};
+use tracing::{debug, field::display, info};
 
 use crate::{
     auth::{
@@ -105,7 +105,7 @@ impl PoolingBackend {
         ctx: &RequestMonitoring,
         config: &AuthenticationConfig,
         user_info: &ComputeUserInfo,
-        jwt: &str,
+        jwt: String,
     ) -> Result<ComputeCredentials, AuthError> {
         match &self.config.auth_backend {
             crate::auth::Backend::Console(console, ()) => {
@@ -116,13 +116,13 @@ impl PoolingBackend {
                         user_info.endpoint.clone(),
                         &user_info.user,
                         &**console,
-                        jwt,
+                        &jwt,
                     )
                     .await
                     .map_err(|e| AuthError::auth_failed(e.to_string()))?;
                 Ok(ComputeCredentials {
                     info: user_info.clone(),
-                    keys: crate::auth::backend::ComputeCredentialKeys::None,
+                    keys: crate::auth::backend::ComputeCredentialKeys::Jwt(jwt),
                 })
             }
             crate::auth::Backend::Web(_, ()) => Err(AuthError::auth_failed(
@@ -136,12 +136,13 @@ impl PoolingBackend {
                         user_info.endpoint.clone(),
                         &user_info.user,
                         &StaticAuthRules,
-                        jwt,
+                        &jwt,
                     )
                     .await
                     .map_err(|e| AuthError::auth_failed(e.to_string()))?;
                 Ok(ComputeCredentials {
                     info: user_info.clone(),
+                    // todo: rewrite JWT signature with key shared somehow between local proxy and postgres
                     keys: crate::auth::backend::ComputeCredentialKeys::None,
                 })
             }
