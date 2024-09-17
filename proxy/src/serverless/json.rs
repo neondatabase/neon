@@ -116,7 +116,7 @@ impl<'a, 'de> DeserializeSeed<'de> for SerdeArena<'a, Slice> {
             }
         }
 
-        d.deserialize_seq(Visitor(self))
+        d.deserialize_str(Visitor(self))
     }
 }
 
