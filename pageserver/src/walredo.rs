@@ -318,11 +318,11 @@ impl PostgresRedoManager {
                 // acquire guard before spawning process, so that we don't spawn new processes
                 // if the gate is already closed.
                 let _launched_processes_guard = match self.launched_processes.enter() {
-                            Ok(guard) => guard,
-                            Err(GateError::GateClosed) => unreachable!(
-                                "shutdown sets the once cell to `ManagerShutDown` state before closing the gate"
-                            ),
-                        };
+                    Ok(guard) => guard,
+                    Err(GateError::GateClosed) => unreachable!(
+                        "shutdown sets the once cell to `ManagerShutDown` state before closing the gate"
+                    ),
+                };
                 let proc = Arc::new(Process {
                     process: process::WalRedoProcess::launch(
                         self.conf,
