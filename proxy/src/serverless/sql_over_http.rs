@@ -563,14 +563,14 @@ async fn handle_inner(
 
     let authenticate_and_connect = Box::pin(
         async {
-            let keys = match &conn_info.auth {
+            let keys = match conn_info.auth {
                 AuthData::Password(pw) => {
                     backend
                         .authenticate_with_password(
                             ctx,
                             &config.authentication_config,
                             &conn_info.conn_info.user_info,
-                            pw,
+                            &pw,
                         )
                         .await?
                 }
