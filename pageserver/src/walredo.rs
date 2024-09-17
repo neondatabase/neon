@@ -33,7 +33,6 @@ use crate::repository::Key;
 use crate::walrecord::NeonWalRecord;
 use anyhow::Context;
 use bytes::{Bytes, BytesMut};
-use once_cell::sync::Lazy;
 use pageserver_api::models::{WalRedoManagerProcessStatus, WalRedoManagerStatus};
 use pageserver_api::shard::TenantShardId;
 use std::future::Future;

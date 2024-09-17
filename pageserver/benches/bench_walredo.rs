@@ -51,9 +51,11 @@
 use anyhow::Context;
 use bytes::{Buf, Bytes};
 use criterion::{BenchmarkId, Criterion};
+use once_cell::sync::Lazy;
 use pageserver::{config::PageServerConf, walrecord::NeonWalRecord, walredo::PostgresRedoManager};
 use pageserver_api::{key::Key, shard::TenantShardId};
 use std::{
+    future::Future,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -61,40 +63,62 @@ use tokio::{sync::Barrier, task::JoinSet};
 use utils::{id::TenantId, lsn::Lsn};
 
 fn bench(c: &mut Criterion) {
-    {
-        let nclients = [1, 2, 4, 8, 16, 32, 64, 128];
-        for nclients in nclients {
-            let mut group = c.benchmark_group("short");
-            group.bench_with_input(
-                BenchmarkId::from_parameter(nclients),
-                &nclients,
-                |b, nclients| {
-                    let redo_work = Arc::new(Request::short_input());
-                    b.iter_custom(|iters| bench_impl(Arc::clone(&redo_work), iters, *nclients));
-                },
-            );
-        }
+    macro_rules! bench_group {
+        ($name:expr, $redo_work:expr) => {{
+            let name: &str = $name;
+            let nclients = [1, 2, 4, 8, 16, 32, 64, 128];
+            for nclients in nclients {
+                let mut group = c.benchmark_group(name);
+                group.bench_with_input(
+                    BenchmarkId::from_parameter(nclients),
+                    &nclients,
+                    |b, nclients| {
+                        b.iter_custom(|iters| bench_impl($redo_work, iters, *nclients));
+                    },
+                );
+            }
+        }};
     }
+    //
+    // benchmark the protocol implementation
+    //
+    for pg_version in [14, 15, 16]
+    /* FIXME: centralized place for this array? */
     {
-        let nclients = [1, 2, 4, 8, 16, 32, 64, 128];
-        for nclients in nclients {
-            let mut group = c.benchmark_group("medium");
-            group.bench_with_input(
-                BenchmarkId::from_parameter(nclients),
-                &nclients,
-                |b, nclients| {
-                    let redo_work = Arc::new(Request::medium_input());
-                    b.iter_custom(|iters| bench_impl(Arc::clone(&redo_work), iters, *nclients));
-                },
-            );
-        }
+        bench_group!(
+            &format!("ping-{pg_version}"),
+            Arc::new(move |mgr: Arc<PostgresRedoManager>| async move {
+                let _: () = mgr.ping(pg_version).await.unwrap();
+            })
+        );
     }
+    //
+    // benchmarks with actual record redo
+    //
+    let make_redo_work = |req: &'static Request| {
+        Arc::new(move |mgr: Arc<PostgresRedoManager>| async move {
+            let page = req.execute(&mgr).await.unwrap();
+            assert_eq!(page.remaining(), 8192);
+        })
+    };
+    bench_group!("short", {
+        static REQUEST: Lazy<Request> = Lazy::new(|| Request::short_input());
+        make_redo_work(&REQUEST)
+    });
+    bench_group!("medium", {
+        static REQUEST: Lazy<Request> = Lazy::new(|| Request::medium_input());
+        make_redo_work(&REQUEST)
+    });
 }
 criterion::criterion_group!(benches, bench);
 criterion::criterion_main!(benches);
 
 // Returns the sum of each client's wall-clock time spent executing their share of the n_redos.
-fn bench_impl(redo_work: Arc<Request>, n_redos: u64, nclients: u64) -> Duration {
+fn bench_impl<F, Fut>(redo_work: Arc<F>, n_redos: u64, nclients: u64) -> Duration
+where
+    F: Fn(Arc<PostgresRedoManager>) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
     let repo_dir = camino_tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
 
     let conf = PageServerConf::dummy_conf(repo_dir.path().to_path_buf());
@@ -135,17 +159,20 @@ fn bench_impl(redo_work: Arc<Request>, n_redos: u64, nclients: u64) -> Duration 
     })
 }
 
-async fn client(
+async fn client<F, Fut>(
     mgr: Arc<PostgresRedoManager>,
     start: Arc<Barrier>,
-    redo_work: Arc<Request>,
+    redo_work: Arc<F>,
     n_redos: u64,
-) -> Duration {
+) -> Duration
+where
+    F: Fn(Arc<PostgresRedoManager>) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
     start.wait().await;
     let start = Instant::now();
     for _ in 0..n_redos {
-        let page = redo_work.execute(&mgr).await.unwrap();
-        assert_eq!(page.remaining(), 8192);
+        redo_work(Arc::clone(&mgr)).await;
         // The real pageserver will rarely if ever do 2 walredos in a row without
         // yielding to the executor.
         tokio::task::yield_now().await;

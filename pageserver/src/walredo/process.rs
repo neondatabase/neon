@@ -4,7 +4,11 @@ mod protocol;
 
 use self::no_leak_child::NoLeakChild;
 use crate::{
-    config::PageServerConf, metrics::{WalRedoKillCause, WAL_REDO_PROCESS_COUNTERS, WAL_REDO_RECORD_COUNTER}, page_cache::PAGE_SZ, span::debug_assert_current_span_has_tenant_id, walrecord::NeonWalRecord
+    config::PageServerConf,
+    metrics::{WalRedoKillCause, WAL_REDO_PROCESS_COUNTERS, WAL_REDO_RECORD_COUNTER},
+    page_cache::PAGE_SZ,
+    span::debug_assert_current_span_has_tenant_id,
+    walrecord::NeonWalRecord,
 };
 use anyhow::Context;
 use bytes::Bytes;
