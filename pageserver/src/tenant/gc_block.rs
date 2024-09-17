@@ -8,8 +8,8 @@ type TimelinesBlocked = HashMap<TimelineId, enumset::EnumSet<GcBlockingReason>>;
 
 #[derive(Default)]
 struct Storage {
-    pub timelines_blocked: TimelinesBlocked,
-    pub tenant_blocked: bool,
+    timelines_blocked: TimelinesBlocked,
+    tenant_post_attached_single_wait: bool,
 }
 
 #[derive(Default)]
@@ -56,14 +56,14 @@ impl GcBlock {
     pub(super) async fn block_for(&self, duration: Duration, cancel: &CancellationToken) {
         {
             let mut g = self.reasons.lock().unwrap();
-            g.tenant_blocked = true;
+            g.tenant_post_attached_single_wait = true;
         }
 
         let _ = tasks::delay_by_duration(duration, cancel).await;
 
         {
             let mut g = self.reasons.lock().unwrap();
-            g.tenant_blocked = false;
+            g.tenant_post_attached_single_wait = false;
         }
     }
 
@@ -214,9 +214,9 @@ impl BlockingReasons {
             reasons = reasons.union(*value);
             !value.is_empty()
         });
-        if !g.timelines_blocked.is_empty() || g.tenant_blocked {
+        if !g.timelines_blocked.is_empty() || g.tenant_post_attached_single_wait {
             Some(BlockingReasons {
-                tenant_blocked: g.tenant_blocked,
+                tenant_blocked: g.tenant_post_attached_single_wait,
                 timelines: g.timelines_blocked.len(),
                 reasons,
             })
@@ -226,7 +226,7 @@ impl BlockingReasons {
     }
 
     fn summarize(g: &std::sync::MutexGuard<'_, Storage>) -> Option<Self> {
-        if g.timelines_blocked.is_empty() || !g.tenant_blocked {
+        if g.timelines_blocked.is_empty() || !g.tenant_post_attached_single_wait {
             None
         } else {
             let reasons = g
@@ -234,7 +234,7 @@ impl BlockingReasons {
                 .values()
                 .fold(enumset::EnumSet::empty(), |acc, next| acc.union(*next));
             Some(BlockingReasons {
-                tenant_blocked: g.tenant_blocked,
+                tenant_blocked: g.tenant_post_attached_single_wait,
                 timelines: g.timelines_blocked.len(),
                 reasons,
             })
