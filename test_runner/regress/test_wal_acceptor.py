@@ -1405,7 +1405,7 @@ class SafekeeperEnv:
     ):
         self.repo_dir = repo_dir
         self.port_distributor = port_distributor
-        self.fake_broker_endpoint = f"http://127.0.0.1{port_distributor.get_port()}"
+        self.fake_broker_endpoint = f"http://127.0.0.1:{port_distributor.get_port()}"
         self.pg_bin = pg_bin
         self.num_safekeepers = num_safekeepers
         self.bin_safekeeper = str(neon_binpath / "safekeeper")
