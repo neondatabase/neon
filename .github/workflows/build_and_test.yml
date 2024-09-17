@@ -316,9 +316,9 @@ jobs:
         if: steps.cache_pg_16.outputs.cache-hit != 'true'
         run: mold -run make postgres-v16 -j$(nproc)
 
-      - name: Build neon extensions
-        run: mold -run make neon-pg-ext -j$(nproc)
-        shell: bash
+      # - name: Build neon extensions
+      #   run: mold -run make neon-pg-ext -j$(nproc)
+      #   shell: bash
 
       - name: Build walproposer-lib
         run: mold -run make walproposer-lib -j$(nproc)
