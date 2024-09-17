@@ -951,7 +951,7 @@ impl TenantManager {
                         Ordering::Equal => {
                             if attach_conf.attach_mode == AttachmentMode::Single {
                                 // We need to wait for LSN lease duration after transitioning into `AttachedSingle`
-                                // before doing any gc so that the client has time to renew the lease.
+                                // before doing any gc so that all previously granted lease will expire.
                                 let tenant = tenant.clone();
                                 tokio::spawn(async move {
                                     let lsn_lease_length = tenant.get_lsn_lease_length();
