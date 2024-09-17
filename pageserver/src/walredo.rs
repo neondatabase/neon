@@ -335,7 +335,7 @@ impl PostgresRedoManager {
                 let duration = start.elapsed();
                 WAL_REDO_PROCESS_LAUNCH_DURATION_HISTOGRAM.observe(duration.as_secs_f64());
                 info!(
-                    duration_ms = duration.as_millis(),
+                    elapsed_ms = duration.as_millis(),
                     pid = proc.id(),
                     "launched walredo process"
                 );
