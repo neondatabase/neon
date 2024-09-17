@@ -5405,7 +5405,8 @@ impl Timeline {
         for (key, img) in images {
             image_layer_writer.put_image(key, img, ctx).await?;
         }
-        let image_layer = image_layer_writer.finish(self, ctx).await?;
+        let (desc, path) = image_layer_writer.finish(ctx).await?;
+        let image_layer = Layer::finish_creating(self.conf, self, desc, &path)?;
 
         {
             let mut guard = self.layers.write().await;

@@ -1071,7 +1071,7 @@ mod test {
         tenant::{
             config::TenantConf,
             harness::{TenantHarness, TIMELINE_ID},
-            storage_layer::ResidentLayer,
+            storage_layer::{Layer, ResidentLayer},
             vectored_blob_io::StreamingVectoredReadPlanner,
             Tenant, Timeline,
         },
@@ -1142,7 +1142,8 @@ mod test {
 
                 key = key.next();
             }
-            writer.finish(&timeline, &ctx).await.unwrap()
+            let (desc, path) = writer.finish(&ctx).await.unwrap();
+            Layer::finish_creating(tenant.conf, &timeline, desc, &path).unwrap()
         };
         let original_size = resident.metadata().file_size;
 
@@ -1204,7 +1205,9 @@ mod test {
                 .await
                 .unwrap();
             let replacement = if wrote_keys > 0 {
-                Some(filtered_writer.finish(&timeline, &ctx).await.unwrap())
+                let (desc, path) = filtered_writer.finish(&ctx).await.unwrap();
+                let resident = Layer::finish_creating(tenant.conf, &timeline, desc, &path).unwrap();
+                Some(resident)
             } else {
                 None
             };
@@ -1277,7 +1280,8 @@ mod test {
         for (key, img) in images {
             writer.put_image(key, img, ctx).await?;
         }
-        let img_layer = writer.finish(tline, ctx).await?;
+        let (desc, path) = writer.finish(ctx).await?;
+        let img_layer = Layer::finish_creating(tenant.conf, tline, desc, &path)?;
 
         Ok::<_, anyhow::Error>(img_layer)
     }
