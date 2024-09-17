@@ -811,6 +811,11 @@ impl Reconciler {
                     tenant_conf: self.config.clone(),
                 },
             ));
+
+            // TODO: Consider notifying control plane about detaches. This would avoid situations
+            // where the compute tries to start-up with a stale set of pageservers.
+            self.compute_hook
+                .handle_detach(self.tenant_shard_id, self.shard.stripe_size);
         }
 
         for (node, conf) in changes {

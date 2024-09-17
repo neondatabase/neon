@@ -71,6 +71,37 @@ impl ComputeHookTenant {
         }
     }
 
+    fn is_sharded(&self) -> bool {
+        matches!(self, ComputeHookTenant::Sharded(_))
+    }
+
+    /// Clear compute hook state for the specified shard.
+    /// Only valid for [`ComputeHookTenant::Sharded`] instances.
+    fn handle_detach(&mut self, tenant_shard_id: TenantShardId, stripe_size: ShardStripeSize) {
+        match self {
+            ComputeHookTenant::Sharded(sharded) => {
+                if sharded.stripe_size != stripe_size
+                    || sharded.shard_count != tenant_shard_id.shard_count
+                {
+                    tracing::warn!("Shard split detected while handling detach")
+                }
+
+                let shard_idx = sharded.shards.iter().position(|(shard_number, _node_id)| {
+                    *shard_number == tenant_shard_id.shard_number
+                });
+
+                if let Some(shard_idx) = shard_idx {
+                    sharded.shards.remove(shard_idx);
+                } else {
+                    tracing::warn!("Shard not found while handling detach")
+                }
+            }
+            ComputeHookTenant::Unsharded(_) => {
+                unreachable!("Detach of unsharded tenants is handled externally");
+            }
+        }
+    }
+
     /// Set one shard's location.  If stripe size or shard count have changed, Self is reset
     /// and drops existing content.
     fn update(
@@ -613,6 +644,36 @@ impl ComputeHook {
         let maybe_send_result = self.notify_prepare(tenant_shard_id, node_id, stripe_size);
         self.notify_execute(maybe_send_result, tenant_shard_id, cancel)
             .await
+    }
+
+    /// Reflect a detach for a particular shard in the compute hook state.
+    ///
+    /// The goal is to avoid sending compute notifications with stale information (i.e.
+    /// including detach pageservers).
+    #[tracing::instrument(skip_all, fields(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug()))]
+    pub(super) fn handle_detach(
+        &self,
+        tenant_shard_id: TenantShardId,
+        stripe_size: ShardStripeSize,
+    ) {
+        use std::collections::hash_map::Entry;
+
+        let mut state_locked = self.state.lock().unwrap();
+        match state_locked.entry(tenant_shard_id.tenant_id) {
+            Entry::Vacant(_) => {
+                tracing::warn!("Compute hook tenant not found for detach");
+            }
+            Entry::Occupied(mut e) => {
+                let sharded = e.get().is_sharded();
+                if !sharded {
+                    e.remove();
+                } else {
+                    e.get_mut().handle_detach(tenant_shard_id, stripe_size);
+                }
+
+                tracing::debug!("Compute hook handled shard detach");
+            }
+        }
     }
 }
 
