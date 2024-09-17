@@ -198,21 +198,267 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch: [ x64, arm64 ]
-        # Do not build or run tests in debug for release branches
-        build-type: ${{ fromJson((startsWith(github.ref_name, 'release') && github.event_name == 'push') && '["release"]' || '["debug", "release"]') }}
-        include:
-          - build-type: release
-            arch: arm64
-    uses: ./.github/workflows/_build-and-test-locally.yml
-    with:
-      arch: ${{ matrix.arch }}
-      build-tools-image: ${{ needs.build-build-tools-image.outputs.image }}
-      build-tag: ${{ needs.tag.outputs.build-tag }}
-      build-type: ${{ matrix.build-type }}
-      # Run tests on all Postgres versions in release builds and only on the latest version in debug builds
-      pg-versions: ${{ matrix.build-type == 'release' && '["v14", "v15", "v16", "v17"]' || '["v17"]' }}
-    secrets: inherit
+        build_type: [ debug, release ]
+    env:
+      BUILD_TYPE: ${{ matrix.build_type }}
+      GIT_VERSION: ${{ github.event.pull_request.head.sha || github.sha }}
+      BUILD_TAG: ${{ needs.tag.outputs.build-tag }}
+
+    steps:
+      - name: Fix git ownership
+        run: |
+          # Workaround for `fatal: detected dubious ownership in repository at ...`
+          #
+          # Use both ${{ github.workspace }} and ${GITHUB_WORKSPACE} because they're different on host and in containers
+          #   Ref https://github.com/actions/checkout/issues/785
+          #
+          git config --global --add safe.directory ${{ github.workspace }}
+          git config --global --add safe.directory ${GITHUB_WORKSPACE}
+          for r in 14 15 16; do
+            git config --global --add safe.directory "${{ github.workspace }}/vendor/postgres-v$r"
+            git config --global --add safe.directory "${GITHUB_WORKSPACE}/vendor/postgres-v$r"
+          done
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+          fetch-depth: 1
+
+      - name: Set pg 14 revision for caching
+        id: pg_v14_rev
+        run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-v14) >> $GITHUB_OUTPUT
+
+      - name: Set pg 15 revision for caching
+        id: pg_v15_rev
+        run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-v15) >> $GITHUB_OUTPUT
+
+      - name: Set pg 16 revision for caching
+        id: pg_v16_rev
+        run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-v16) >> $GITHUB_OUTPUT
+
+      # Set some environment variables used by all the steps.
+      #
+      # CARGO_FLAGS is extra options to pass to "cargo build", "cargo test" etc.
+      #   It also includes --features, if any
+      #
+      # CARGO_FEATURES is passed to "cargo metadata". It is separate from CARGO_FLAGS,
+      #   because "cargo metadata" doesn't accept --release or --debug options
+      #
+      # We run tests with addtional features, that are turned off by default (e.g. in release builds), see
+      # corresponding Cargo.toml files for their descriptions.
+      - name: Set env variables
+        run: |
+          CARGO_FEATURES="--features testing"
+          if [[ $BUILD_TYPE == "debug" ]]; then
+            cov_prefix="scripts/coverage --profraw-prefix=$GITHUB_JOB --dir=/tmp/coverage run"
+            CARGO_FLAGS="--locked"
+          elif [[ $BUILD_TYPE == "release" ]]; then
+            cov_prefix=""
+            CARGO_FLAGS="--locked --release"
+          fi
+          {
+            echo "cov_prefix=${cov_prefix}"
+            echo "CARGO_FEATURES=${CARGO_FEATURES}"
+            echo "CARGO_FLAGS=${CARGO_FLAGS}"
+            echo "CARGO_HOME=${GITHUB_WORKSPACE}/.cargo"
+          } >> $GITHUB_ENV
+
+      # Disabled for now
+      # Don't include the ~/.cargo/registry/src directory. It contains just
+      # uncompressed versions of the crates in ~/.cargo/registry/cache
+      # directory, and it's faster to let 'cargo' to rebuild it from the
+      # compressed crates.
+#      - name: Cache cargo deps
+#        id: cache_cargo
+#        uses: actions/cache@v4
+#        with:
+#          path: |
+#            ~/.cargo/registry/
+#            !~/.cargo/registry/src
+#            ~/.cargo/git/
+#            target/
+#          # Fall back to older versions of the key, if no cache for current Cargo.lock was found
+#          key: |
+#            v1-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+#            v1-${{ runner.os }}-${{ matrix.build_type }}-cargo-${{ hashFiles('rust-toolchain.toml') }}-
+
+      - name: Cache postgres v14 build
+        id: cache_pg_14
+        uses: actions/cache@v4
+        with:
+          path: pg_install/v14
+          key: v1-${{ runner.os }}-${{ matrix.build_type }}-pg-${{ steps.pg_v14_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
+
+      - name: Cache postgres v15 build
+        id: cache_pg_15
+        uses: actions/cache@v4
+        with:
+          path: pg_install/v15
+          key: v1-${{ runner.os }}-${{ matrix.build_type }}-pg-${{ steps.pg_v15_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
+
+      - name: Cache postgres v16 build
+        id: cache_pg_16
+        uses: actions/cache@v4
+        with:
+          path: pg_install/v16
+          key: v1-${{ runner.os }}-${{ matrix.build_type }}-pg-${{ steps.pg_v16_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
+
+      - name: Build postgres v14
+        if: steps.cache_pg_14.outputs.cache-hit != 'true'
+        run: mold -run make postgres-v14 -j$(nproc)
+
+      - name: Build postgres v15
+        if: steps.cache_pg_15.outputs.cache-hit != 'true'
+        run: mold -run make postgres-v15 -j$(nproc)
+
+      - name: Build postgres v16
+        if: steps.cache_pg_16.outputs.cache-hit != 'true'
+        run: mold -run make postgres-v16 -j$(nproc)
+
+      - name: Build neon extensions
+        run: mold -run make neon-pg-ext -j$(nproc)
+        shell: bash
+
+      - name: Build walproposer-lib
+        run: mold -run make walproposer-lib -j$(nproc)
+
+      - name: Run cargo build
+        run: |
+          ${cov_prefix} mold -run cargo build $CARGO_FLAGS $CARGO_FEATURES --bins --tests
+
+      - name: Run rust tests
+        env:
+          NEXTEST_RETRIES: 3
+        run: |
+          #nextest does not yet support running doctests
+          cargo test --doc $CARGO_FLAGS $CARGO_FEATURES
+
+          for io_engine in std-fs tokio-epoll-uring ; do
+            NEON_PAGESERVER_UNIT_TEST_VIRTUAL_FILE_IOENGINE=$io_engine ${cov_prefix} cargo nextest run $CARGO_FLAGS $CARGO_FEATURES
+          done
+
+          # Run separate tests for real S3
+          export ENABLE_REAL_S3_REMOTE_STORAGE=nonempty
+          export REMOTE_STORAGE_S3_BUCKET=neon-github-ci-tests
+          export REMOTE_STORAGE_S3_REGION=eu-central-1
+          # Avoid `$CARGO_FEATURES` since there's no `testing` feature in the e2e tests now
+          ${cov_prefix} cargo nextest run $CARGO_FLAGS -E 'package(remote_storage)' -E 'test(test_real_s3)'
+
+          # Run separate tests for real Azure Blob Storage
+          # XXX: replace region with `eu-central-1`-like region
+          export ENABLE_REAL_AZURE_REMOTE_STORAGE=y
+          export AZURE_STORAGE_ACCOUNT="${{ secrets.AZURE_STORAGE_ACCOUNT_DEV }}"
+          export AZURE_STORAGE_ACCESS_KEY="${{ secrets.AZURE_STORAGE_ACCESS_KEY_DEV }}"
+          export REMOTE_STORAGE_AZURE_CONTAINER="${{ vars.REMOTE_STORAGE_AZURE_CONTAINER }}"
+          export REMOTE_STORAGE_AZURE_REGION="${{ vars.REMOTE_STORAGE_AZURE_REGION }}"
+          # Avoid `$CARGO_FEATURES` since there's no `testing` feature in the e2e tests now
+          ${cov_prefix} cargo nextest run $CARGO_FLAGS -E 'package(remote_storage)' -E 'test(test_real_azure)'
+
+      - name: Install rust binaries
+        run: |
+          # Install target binaries
+          mkdir -p /tmp/neon/bin/
+          binaries=$(
+            ${cov_prefix} cargo metadata $CARGO_FEATURES --format-version=1 --no-deps |
+            jq -r '.packages[].targets[] | select(.kind | index("bin")) | .name'
+          )
+          for bin in $binaries; do
+            SRC=target/$BUILD_TYPE/$bin
+            DST=/tmp/neon/bin/$bin
+            cp "$SRC" "$DST"
+          done
+
+          # Install test executables and write list of all binaries (for code coverage)
+          if [[ $BUILD_TYPE == "debug" ]]; then
+            # Keep bloated coverage data files away from the rest of the artifact
+            mkdir -p /tmp/coverage/
+
+            mkdir -p /tmp/neon/test_bin/
+
+            test_exe_paths=$(
+              ${cov_prefix} cargo test $CARGO_FLAGS $CARGO_FEATURES --message-format=json --no-run |
+              jq -r '.executable | select(. != null)'
+            )
+            for bin in $test_exe_paths; do
+              SRC=$bin
+              DST=/tmp/neon/test_bin/$(basename $bin)
+
+              # We don't need debug symbols for code coverage, so strip them out to make
+              # the artifact smaller.
+              strip "$SRC" -o "$DST"
+              echo "$DST" >> /tmp/coverage/binaries.list
+            done
+
+            for bin in $binaries; do
+              echo "/tmp/neon/bin/$bin" >> /tmp/coverage/binaries.list
+            done
+          fi
+
+      - name: Install postgres binaries
+        run: cp -a pg_install /tmp/neon/pg_install
+
+      - name: Upload Neon artifact
+        uses: ./.github/actions/upload
+        with:
+          name: neon-${{ runner.os }}-${{ matrix.build_type }}-artifact
+          path: /tmp/neon
+
+      # XXX: keep this after the binaries.list is formed, so the coverage can properly work later
+      - name: Merge and upload coverage data
+        if: matrix.build_type == 'debug'
+        uses: ./.github/actions/save-coverage-data
+
+  regress-tests:
+    needs: [ check-permissions, build-neon, build-build-tools-image, tag ]
+    runs-on: [ self-hosted, gen3, large ]
+    container:
+      image: ${{ needs.build-build-tools-image.outputs.image }}
+      credentials:
+        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+      # for changed limits, see comments on `options:` earlier in this file
+      options: --init --shm-size=512mb --ulimit memlock=67108864:67108864
+    strategy:
+      fail-fast: false
+      matrix:
+        build_type: [ debug, release ]
+        pg_version: [ v14, v15, v16 ]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+          fetch-depth: 1
+
+      - name: Pytest regression tests
+        uses: ./.github/actions/run-python-test-set
+        timeout-minutes: 60
+        with:
+          build_type: ${{ matrix.build_type }}
+          test_selection: regress
+          needs_postgres_source: true
+          run_with_real_s3: true
+          real_s3_bucket: neon-github-ci-tests
+          real_s3_region: eu-central-1
+          rerun_flaky: true
+          pg_version: ${{ matrix.pg_version }}
+        env:
+          TEST_RESULT_CONNSTR: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}
+          CHECK_ONDISK_DATA_COMPATIBILITY: nonempty
+          BUILD_TAG: ${{ needs.tag.outputs.build-tag }}
+          PAGESERVER_VIRTUAL_FILE_IO_ENGINE: tokio-epoll-uring
+          PAGESERVER_GET_VECTORED_IMPL: vectored
+          PAGESERVER_GET_IMPL: vectored
+          PAGESERVER_VALIDATE_VEC_GET: true
+
+      # Temporary disable this step until we figure out why it's so flaky
+      # Ref https://github.com/neondatabase/neon/issues/4540
+      - name: Merge and upload coverage data
+        if: |
+          false &&
+          matrix.build_type == 'debug' && matrix.pg_version == 'v14'
+        uses: ./.github/actions/save-coverage-data
 
   # Keep `benchmarks` job outside of `build-and-test-locally` workflow to make job failures non-blocking
   get-benchmarks-durations:
