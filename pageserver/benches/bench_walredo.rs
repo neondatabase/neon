@@ -102,11 +102,11 @@ fn bench(c: &mut Criterion) {
         })
     };
     bench_group!("short", {
-        static REQUEST: Lazy<Request> = Lazy::new(|| Request::short_input());
+        static REQUEST: Lazy<Request> = Lazy::new(Request::short_input);
         make_redo_work(&REQUEST)
     });
     bench_group!("medium", {
-        static REQUEST: Lazy<Request> = Lazy::new(|| Request::medium_input());
+        static REQUEST: Lazy<Request> = Lazy::new(Request::medium_input);
         make_redo_work(&REQUEST)
     });
 }
