@@ -117,13 +117,21 @@ neon_perf_counters_to_metrics(neon_per_backend_counters *counters)
 		metrics[i].value = (double) bucket_accum;
 		i++;
 	}
-	metrics[i].name = "prefetch_requests_total";
+	metrics[i].name = "getpage_prefetch_requests_total";
 	metrics[i].is_bucket = false;
-	metrics[i].value = (double) counters->prefetch_requests_total;
+	metrics[i].value = (double) counters->getpage_prefetch_requests_total;
 	i++;
-	metrics[i].name = "sync_requests_total";
+	metrics[i].name = "getpage_sync_requests_total";
 	metrics[i].is_bucket = false;
-	metrics[i].value = (double) counters->sync_requests_total;
+	metrics[i].value = (double) counters->getpage_sync_requests_total;
+	i++;
+	metrics[i].name = "getpage_prefetch_misses_total";
+	metrics[i].is_bucket = false;
+	metrics[i].value = (double) counters->getpage_prefetch_misses_total;
+	i++;
+	metrics[i].name = "getpage_prefetch_discards_total";
+	metrics[i].is_bucket = false;
+	metrics[i].value = (double) counters->getpage_prefetch_discards_total;
 	i++;
 	metrics[i].name = "pageserver_requests_sent_total";
 	metrics[i].is_bucket = false;
@@ -136,14 +144,6 @@ neon_perf_counters_to_metrics(neon_per_backend_counters *counters)
 	metrics[i].name = "pageserver_send_flushes_total";
 	metrics[i].is_bucket = false;
 	metrics[i].value = (double) counters->pageserver_send_flushes_total;
-	i++;
-	metrics[i].name = "prefetch_misses_total";
-	metrics[i].is_bucket = false;
-	metrics[i].value = (double) counters->prefetch_misses_total;
-	i++;
-	metrics[i].name = "prefetch_discards_total";
-	metrics[i].is_bucket = false;
-	metrics[i].value = (double) counters->prefetch_discards_total;
 	i++;
 	metrics[i].name = "file_cache_hits_total";
 	metrics[i].is_bucket = false;
@@ -239,13 +239,13 @@ neon_get_perf_counters(PG_FUNCTION_ARGS)
 		totals.getpage_wait_us_sum += counters->getpage_wait_us_sum;
 		for (int bucketno = 0; bucketno < NUM_GETPAGE_WAIT_BUCKETS; bucketno++)
 			totals.getpage_wait_us_bucket[bucketno] += counters->getpage_wait_us_bucket[bucketno];
-		totals.prefetch_requests_total += counters->prefetch_requests_total;
-		totals.sync_requests_total += counters->sync_requests_total;
+		totals.getpage_prefetch_requests_total += counters->getpage_prefetch_requests_total;
+		totals.getpage_sync_requests_total += counters->getpage_sync_requests_total;
+		totals.getpage_prefetch_misses_total += counters->getpage_prefetch_misses_total;
+		totals.getpage_prefetch_discards_total += counters->getpage_prefetch_discards_total;
 		totals.pageserver_requests_sent_total += counters->pageserver_requests_sent_total;
 		totals.pageserver_disconnects_total += counters->pageserver_disconnects_total;
 		totals.pageserver_send_flushes_total += counters->pageserver_send_flushes_total;
-		totals.prefetch_misses_total += counters->prefetch_misses_total;
-		totals.prefetch_discards_total += counters->prefetch_discards_total;
 		totals.file_cache_hits_total += counters->file_cache_hits_total;
 	}
 

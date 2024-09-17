@@ -47,8 +47,18 @@ typedef struct
 	 * Total number of speculative prefetch Getpage requests and synchronous
 	 * GetPage requests sent.
 	 */
-	uint64		prefetch_requests_total;
-	uint64		sync_requests_total;
+	uint64		getpage_prefetch_requests_total;
+	uint64		getpage_sync_requests_total;
+
+	/* XXX: It's not clear to me when these misses happen. */
+	uint64		getpage_prefetch_misses_total;
+
+	/*
+	 * Number of prefetched responses that were discarded becuase the
+	 * prefetched page was not needed or because it was concurrently fetched /
+	 * modified by another backend.
+	 */
+	uint64		getpage_prefetch_discards_total;
 
 	/*
 	 * Total number of requests send to pageserver. (prefetch_requests_total
@@ -70,16 +80,6 @@ typedef struct
 	 * this can be smaller than pageserver_requests_sent_total.
 	 */
 	uint64		pageserver_send_flushes_total;
-
-	/* XXX: It's not clear to me when these misses happen. */
-	uint64		prefetch_misses_total;
-
-	/*
-	 * Number of prefetched responses that were discarded becuase the
-	 * prefetched page was not needed or because it was concurrently fetched /
-	 * modified by another backend.
-	 */
-	uint64		prefetch_discards_total;
 
 	/*
 	 * Number of requests satisfied from the LFC.

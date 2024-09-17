@@ -865,7 +865,7 @@ Retry:
 					prefetch_set_unused(ring_index);
 					entry = NULL;
 					slot = NULL;
-					MyNeonCounters->prefetch_discards_total++;
+					MyNeonCounters->getpage_prefetch_discards_total++;
 				}
 			}
 
@@ -981,9 +981,9 @@ Retry:
 		min_ring_index = Min(min_ring_index, ring_index);
 
 		if (is_prefetch)
-			MyNeonCounters->prefetch_requests_total++;
+			MyNeonCounters->getpage_prefetch_requests_total++;
 		else
-			MyNeonCounters->sync_requests_total++;
+			MyNeonCounters->getpage_sync_requests_total++;
 
 		prefetch_do_request(slot, lsns);
 	}
@@ -2803,7 +2803,7 @@ Retry:
 				/* drop caches */
 				prefetch_set_unused(slot->my_ring_index);
 				pgBufferUsage.prefetch.expired += 1;
-				MyNeonCounters->prefetch_discards_total++;
+				MyNeonCounters->getpage_prefetch_discards_total++;
 				/* make it look like a prefetch cache miss */
 				entry = NULL;
 			}
@@ -2814,7 +2814,7 @@ Retry:
 			if (entry == NULL)
 			{
 				pgBufferUsage.prefetch.misses += 1;
-				MyNeonCounters->prefetch_misses_total++;
+				MyNeonCounters->getpage_prefetch_misses_total++;
 
 				ring_index = prefetch_register_bufferv(buftag, reqlsns, 1, NULL, false);
 				Assert(ring_index != UINT64_MAX);
