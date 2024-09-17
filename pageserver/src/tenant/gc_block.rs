@@ -5,7 +5,13 @@ use utils::id::TimelineId;
 
 use super::{remote_timeline_client::index::GcBlockingReason, tasks::Cancelled};
 
-type Storage = HashMap<TimelineId, enumset::EnumSet<GcBlockingReason>>;
+type TimelinesBlocked = HashMap<TimelineId, enumset::EnumSet<GcBlockingReason>>;
+
+#[derive(Default)]
+struct Storage {
+    pub timelines_blocked: TimelinesBlocked,
+    pub tenant_blocked: bool,
+}
 
 #[derive(Default)]
 pub(crate) struct GcBlock {
@@ -83,7 +89,7 @@ impl GcBlock {
     ) -> anyhow::Result<bool> {
         let (added, uploaded) = {
             let mut g = self.reasons.lock().unwrap();
-            let set = g.entry(timeline.timeline_id).or_default();
+            let set = g.timelines_blocked.entry(timeline.timeline_id).or_default();
             let added = set.insert(reason);
 
             // LOCK ORDER: intentionally hold the lock, see self.reasons.
@@ -114,7 +120,7 @@ impl GcBlock {
 
         let (remaining_blocks, uploaded) = {
             let mut g = self.reasons.lock().unwrap();
-            match g.entry(timeline.timeline_id) {
+            match g.timelines_blocked.entry(timeline.timeline_id) {
                 Entry::Occupied(mut oe) => {
                     let set = oe.get_mut();
                     set.remove(reason);
@@ -128,7 +134,7 @@ impl GcBlock {
                 }
             }
 
-            let remaining_blocks = g.len();
+            let remaining_blocks = g.timelines_blocked.len();
 
             // LOCK ORDER: intentionally hold the lock while scheduling; see self.reasons
             let uploaded = timeline
@@ -153,11 +159,11 @@ impl GcBlock {
     pub(crate) fn before_delete(&self, timeline: &super::Timeline) {
         let unblocked = {
             let mut g = self.reasons.lock().unwrap();
-            if g.is_empty() {
+            if g.timelines_blocked.is_empty() {
                 return;
             }
 
-            g.remove(&timeline.timeline_id);
+            g.timelines_blocked.remove(&timeline.timeline_id);
 
             BlockingReasons::clean_and_summarize(g).is_none()
         };
@@ -168,10 +174,11 @@ impl GcBlock {
     }
 
     /// Initialize with the non-deleted timelines of this tenant.
-    pub(crate) fn set_scanned(&self, scanned: Storage) {
+    pub(crate) fn set_scanned(&self, scanned: TimelinesBlocked) {
         let mut g = self.reasons.lock().unwrap();
-        assert!(g.is_empty());
-        g.extend(scanned.into_iter().filter(|(_, v)| !v.is_empty()));
+        assert!(g.timelines_blocked.is_empty());
+        g.timelines_blocked
+            .extend(scanned.into_iter().filter(|(_, v)| !v.is_empty()));
 
         if let Some(reasons) = BlockingReasons::clean_and_summarize(g) {
             tracing::info!(summary=?reasons, "initialized with gc blocked");
@@ -202,13 +209,13 @@ impl std::fmt::Display for BlockingReasons {
 impl BlockingReasons {
     fn clean_and_summarize(mut g: std::sync::MutexGuard<'_, Storage>) -> Option<Self> {
         let mut reasons = enumset::EnumSet::empty();
-        g.retain(|_key, value| {
+        g.timelines_blocked.retain(|_key, value| {
             reasons = reasons.union(*value);
             !value.is_empty()
         });
-        if !g.is_empty() {
+        if !g.timelines_blocked.is_empty() {
             Some(BlockingReasons {
-                timelines: g.len(),
+                timelines: g.timelines_blocked.len(),
                 reasons,
             })
         } else {
@@ -217,14 +224,15 @@ impl BlockingReasons {
     }
 
     fn summarize(g: &std::sync::MutexGuard<'_, Storage>) -> Option<Self> {
-        if g.is_empty() {
+        if g.timelines_blocked.is_empty() {
             None
         } else {
             let reasons = g
+                .timelines_blocked
                 .values()
                 .fold(enumset::EnumSet::empty(), |acc, next| acc.union(*next));
             Some(BlockingReasons {
-                timelines: g.len(),
+                timelines: g.timelines_blocked.len(),
                 reasons,
             })
         }
