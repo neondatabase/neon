@@ -136,7 +136,8 @@ use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 
 use super::{
-    config::TenantConf, storage_layer::inmemory_layer, storage_layer::LayerVisibilityHint,
+    config::TenantConf,
+    storage_layer::{inmemory_layer, LayerVisibilityHint, LayerVisitDetails},
     upload_queue::NotInitialized,
 };
 use super::{debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenantConf};
@@ -3153,12 +3154,12 @@ impl Timeline {
     async fn get_vectored_reconstruct_data_timeline(
         timeline: &Timeline,
         keyspace: KeySpace,
-        mut cont_lsn: Lsn,
+        cont_lsn: Lsn,
         reconstruct_state: &mut ValuesReconstructState,
         cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> Result<TimelineVisitOutcome, GetVectoredError> {
-        let mut unmapped_keyspace = keyspace.clone();
+        let mut unmapped_keyspaces = vec![(cont_lsn, keyspace.clone())];
         let mut fringe = LayerFringe::new();
 
         let mut completed_keyspace = KeySpace::default();
@@ -3169,85 +3170,82 @@ impl Timeline {
                 return Err(GetVectoredError::Cancelled);
             }
 
-            let (keys_done_last_step, keys_with_image_coverage) =
-                reconstruct_state.consume_done_keys();
-            unmapped_keyspace.remove_overlapping_with(&keys_done_last_step);
-            completed_keyspace.merge(&keys_done_last_step);
-            if let Some(keys_with_image_coverage) = keys_with_image_coverage {
-                unmapped_keyspace
-                    .remove_overlapping_with(&KeySpace::single(keys_with_image_coverage.clone()));
-                image_covered_keyspace.add_range(keys_with_image_coverage);
-            }
-
-            // Do not descent any further if the last layer we visited
-            // completed all keys in the keyspace it inspected. This is not
-            // required for correctness, but avoids visiting extra layers
-            // which turns out to be a perf bottleneck in some cases.
-            if !unmapped_keyspace.is_empty() {
-                let guard = timeline.layers.read().await;
-                let layers = guard.layer_map()?;
-
-                let in_memory_layer = layers.find_in_memory_layer(|l| {
-                    let start_lsn = l.get_lsn_range().start;
-                    cont_lsn > start_lsn
-                });
-
-                match in_memory_layer {
-                    Some(l) => {
-                        let lsn_range = l.get_lsn_range().start..cont_lsn;
-                        fringe.update(
-                            ReadableLayer::InMemoryLayer(l),
-                            unmapped_keyspace.clone(),
-                            lsn_range,
-                        );
-                    }
-                    None => {
-                        for range in unmapped_keyspace.ranges.iter() {
-                            let results = layers.range_search(range.clone(), cont_lsn);
-
-                            results
-                                .found
-                                .into_iter()
-                                .map(|(SearchResult { layer, lsn_floor }, keyspace_accum)| {
-                                    (
-                                        ReadableLayer::PersistentLayer(guard.get_from_desc(&layer)),
-                                        keyspace_accum.to_keyspace(),
-                                        lsn_floor..cont_lsn,
-                                    )
-                                })
-                                .for_each(|(layer, keyspace, lsn_range)| {
-                                    fringe.update(layer, keyspace, lsn_range)
-                                });
-                        }
-                    }
+            for (cont_lsn, unmapped_keyspace) in unmapped_keyspaces.iter_mut() {
+                let (keys_done_last_step, keys_with_image_coverage) =
+                    reconstruct_state.consume_done_keys();
+                unmapped_keyspace.remove_overlapping_with(&keys_done_last_step);
+                completed_keyspace.merge(&keys_done_last_step);
+                if let Some(keys_with_image_coverage) = keys_with_image_coverage {
+                    unmapped_keyspace.remove_overlapping_with(&KeySpace::single(
+                        keys_with_image_coverage.clone(),
+                    ));
+                    image_covered_keyspace.add_range(keys_with_image_coverage);
                 }
 
-                // It's safe to drop the layer map lock after planning the next round of reads.
-                // The fringe keeps readable handles for the layers which are safe to read even
-                // if layers were compacted or flushed.
-                //
-                // The more interesting consideration is: "Why is the read algorithm still correct
-                // if the layer map changes while it is operating?". Doing a vectored read on a
-                // timeline boils down to pushing an imaginary lsn boundary downwards for each range
-                // covered by the read. The layer map tells us how to move the lsn downwards for a
-                // range at *a particular point in time*. It is fine for the answer to be different
-                // at two different time points.
-                drop(guard);
+                // Do not descent any further if the last layer we visited
+                // completed all keys in the keyspace it inspected. This is not
+                // required for correctness, but avoids visiting extra layers
+                // which turns out to be a perf bottleneck in some cases.
+                if !unmapped_keyspace.is_empty() {
+                    let guard = timeline.layers.read().await;
+                    let layers = guard.layer_map()?;
+
+                    let in_memory_layer = layers.find_in_memory_layer(|l| {
+                        let start_lsn = l.get_lsn_range().start;
+                        *cont_lsn > start_lsn
+                    });
+
+                    match in_memory_layer {
+                        Some(l) => {
+                            let lsn_range = l.get_lsn_range().start..*cont_lsn;
+                            fringe.update(
+                                ReadableLayer::InMemoryLayer(l),
+                                unmapped_keyspace.clone(),
+                                lsn_range,
+                            );
+                        }
+                        None => {
+                            for range in unmapped_keyspace.ranges.iter() {
+                                let results = layers.range_search(range.clone(), *cont_lsn);
+
+                                results
+                                    .found
+                                    .into_iter()
+                                    .map(|(SearchResult { layer, lsn_floor }, keyspace_accum)| {
+                                        (
+                                            ReadableLayer::PersistentLayer(
+                                                guard.get_from_desc(&layer),
+                                            ),
+                                            keyspace_accum.to_keyspace(),
+                                            lsn_floor..*cont_lsn,
+                                        )
+                                    })
+                                    .for_each(|(layer, keyspace, lsn_range)| {
+                                        fringe.update(layer, keyspace, lsn_range)
+                                    });
+                            }
+                        }
+                    }
+
+                    // It's safe to drop the layer map lock after planning the next round of reads.
+                    // The fringe keeps readable handles for the layers which are safe to read even
+                    // if layers were compacted or flushed.
+                    //
+                    // The more interesting consideration is: "Why is the read algorithm still correct
+                    // if the layer map changes while it is operating?". Doing a vectored read on a
+                    // timeline boils down to pushing an imaginary lsn boundary downwards for each range
+                    // covered by the read. The layer map tells us how to move the lsn downwards for a
+                    // range at *a particular point in time*. It is fine for the answer to be different
+                    // at two different time points.
+                    drop(guard);
+                }
             }
 
-            if let Some((layer_to_read, keyspace_to_read, lsn_range)) = fringe.next_layer() {
-                let next_cont_lsn = lsn_range.start;
+            if let Some((layer_to_read, layer_visit)) = fringe.next_layer() {
+                unmapped_keyspaces = layer_visit.keyspaces();
                 layer_to_read
-                    .get_values_reconstruct_data(
-                        keyspace_to_read.clone(),
-                        lsn_range,
-                        reconstruct_state,
-                        ctx,
-                    )
+                    .get_values_reconstruct_data(layer_visit, reconstruct_state, ctx)
                     .await?;
-
-                unmapped_keyspace = keyspace_to_read;
-                cont_lsn = next_cont_lsn;
 
                 reconstruct_state.on_layer_visited(&layer_to_read);
             } else {
@@ -5502,19 +5500,24 @@ impl Timeline {
         lsn: Lsn,
         ctx: &RequestContext,
     ) -> anyhow::Result<Vec<(Key, Bytes)>> {
+        use super::storage_layer::{LayerVisitBuilder, LayerVisitBuilderUpdate};
+
         let mut all_data = Vec::new();
         let guard = self.layers.read().await;
         for layer in guard.layer_map()?.iter_historic_layers() {
             if !layer.is_delta() && layer.image_layer_lsn() == lsn {
                 let layer = guard.get_from_desc(&layer);
                 let mut reconstruct_data = ValuesReconstructState::default();
+
+                let (layer, visit) = LayerVisitBuilder::new(
+                    ReadableLayer::PersistentLayer(layer),
+                    KeySpace::single(Key::MIN..Key::MAX),
+                    lsn..Lsn(lsn.0 + 1),
+                )
+                .build();
+
                 layer
-                    .get_values_reconstruct_data(
-                        KeySpace::single(Key::MIN..Key::MAX),
-                        lsn..Lsn(lsn.0 + 1),
-                        &mut reconstruct_data,
-                        ctx,
-                    )
+                    .get_values_reconstruct_data(visit, &mut reconstruct_data, ctx)
                     .await?;
                 for (k, v) in reconstruct_data.keys {
                     all_data.push((k, v?.img.unwrap().1));

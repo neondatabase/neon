@@ -69,7 +69,7 @@ use utils::{
 };
 
 use super::layer_name::ImageLayerName;
-use super::{AsLayerDesc, LayerName, PersistentLayerDesc, ValuesReconstructState};
+use super::{AsLayerDesc, ImageLayerVisit, LayerName, PersistentLayerDesc, ValuesReconstructState};
 
 ///
 /// Header stored in the beginning of the file
@@ -435,12 +435,12 @@ impl ImageLayerInner {
     // the reconstruct state with whatever is found.
     pub(super) async fn get_values_reconstruct_data(
         &self,
-        keyspace: KeySpace,
+        visit: ImageLayerVisit,
         reconstruct_state: &mut ValuesReconstructState,
         ctx: &RequestContext,
     ) -> Result<(), GetVectoredError> {
         let reads = self
-            .plan_reads(keyspace, None, ctx)
+            .plan_reads(visit.keyspace, None, ctx)
             .await
             .map_err(GetVectoredError::Other)?;
 

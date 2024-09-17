@@ -17,7 +17,6 @@ use anyhow::{anyhow, Context, Result};
 use bytes::Bytes;
 use camino::Utf8PathBuf;
 use pageserver_api::key::CompactKey;
-use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::InMemoryLayerInfo;
 use pageserver_api::shard::TenantShardId;
 use std::collections::{BTreeMap, HashMap};
@@ -36,7 +35,8 @@ use std::sync::atomic::{AtomicU64, AtomicUsize};
 use tokio::sync::RwLock;
 
 use super::{
-    DeltaLayerWriter, PersistentLayerDesc, ValueReconstructSituation, ValuesReconstructState,
+    DeltaLayerWriter, InMemoryLayerVisit, PersistentLayerDesc, ValueReconstructSituation,
+    ValuesReconstructState,
 };
 
 pub(crate) mod vectored_dio_read;
@@ -416,11 +416,14 @@ impl InMemoryLayer {
     // If the key is cached, go no further than the cached Lsn.
     pub(crate) async fn get_values_reconstruct_data(
         &self,
-        keyspace: KeySpace,
-        end_lsn: Lsn,
+        visit: InMemoryLayerVisit,
         reconstruct_state: &mut ValuesReconstructState,
         ctx: &RequestContext,
     ) -> Result<(), GetVectoredError> {
+        let InMemoryLayerVisit {
+            keyspace, lsn_ceil, ..
+        } = visit;
+
         let ctx = RequestContextBuilder::extend(ctx)
             .page_content_kind(PageContentKind::InMemoryLayer)
             .build();
@@ -440,8 +443,8 @@ impl InMemoryLayer {
             {
                 let key = Key::from_compact(*key);
                 let lsn_range = match reconstruct_state.get_cached_lsn(&key) {
-                    Some(cached_lsn) => (cached_lsn + 1)..end_lsn,
-                    None => self.start_lsn..end_lsn,
+                    Some(cached_lsn) => (cached_lsn + 1)..lsn_ceil,
+                    None => self.start_lsn..lsn_ceil,
                 };
 
                 let slice = vec_map.slice_range(lsn_range);
