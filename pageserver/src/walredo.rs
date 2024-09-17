@@ -414,7 +414,7 @@ impl PostgresRedoManager {
         let mut n_attempts = 0u32;
         loop {
             let base_img = &base_img;
-            let closure = |proc| async move {
+            let closure = |proc: Arc<Process>| async move {
                 let started_at = std::time::Instant::now();
 
                 // Relational WAL records are applied using wal-redo-postgres
