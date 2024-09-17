@@ -1,3 +1,4 @@
+use std::marker::PhantomData;
 use std::pin::pin;
 use std::sync::Arc;
 
@@ -605,6 +606,7 @@ async fn handle_db_inner(
 
     let fetch_and_process_request = Box::pin(async {
         let payload = parse_json_body_with_limit(
+            PhantomData,
             request.into_body(),
             config.http_config.max_request_size_bytes as usize,
         )

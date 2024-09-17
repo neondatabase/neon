@@ -9,7 +9,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use http_body_util::BodyExt;
 use hyper1::body::Body;
-use serde::de::DeserializeOwned;
+use serde::de::DeserializeSeed;
 
 pub(crate) use reqwest::{Request, Response};
 pub(crate) use reqwest_middleware::{ClientWithMiddleware, Error};
@@ -122,7 +122,8 @@ pub(crate) enum ReadPayloadError<E> {
     LengthExceeded(usize),
 }
 
-pub(crate) async fn parse_json_body_with_limit<D: DeserializeOwned, E>(
+pub(crate) async fn parse_json_body_with_limit<D, E>(
+    seed: impl for<'de> DeserializeSeed<'de, Value = D>,
     mut b: impl Body<Data = Bytes, Error = E> + Unpin,
     limit: usize,
 ) -> Result<D, ReadPayloadError<E>> {
@@ -151,7 +152,7 @@ pub(crate) async fn parse_json_body_with_limit<D: DeserializeOwned, E>(
         }
     }
 
-    Ok(serde_json::from_slice::<D>(&bytes)?)
+    Ok(seed.deserialize(&mut serde_json::Deserializer::from_slice(&bytes))?)
 }
 
 #[cfg(test)]

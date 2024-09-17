@@ -1,5 +1,6 @@
 use std::{
     future::Future,
+    marker::PhantomData,
     sync::Arc,
     time::{Duration, SystemTime},
 };
@@ -148,6 +149,7 @@ impl JwkCacheEntryLock {
                 Ok(r) => {
                     let resp: http::Response<reqwest::Body> = r.into();
                     match parse_json_body_with_limit::<jose_jwk::JwkSet, _>(
+                        PhantomData,
                         resp.into_body(),
                         MAX_JWK_BODY_SIZE,
                     )
