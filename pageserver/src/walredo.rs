@@ -206,6 +206,9 @@ impl PostgresRedoManager {
         }
     }
 
+    /// # Cancel-Safety
+    ///
+    /// This method is cancellation-safe.
     pub async fn ping(&self, pg_version: u32) -> Result<(), Error> {
         self.do_with_walredo_process(pg_version, |proc| async move {
             proc.ping(Duration::from_secs(1))
@@ -307,6 +310,9 @@ impl PostgresRedoManager {
         }
     }
 
+    /// # Cancel-Safety
+    ///
+    /// This method is cancel-safe iff `closure` is cancel-safe.
     async fn do_with_walredo_process<
         F: FnOnce(Arc<Process>) -> Fut,
         Fut: Future<Output = Result<O, Error>>,
