@@ -56,8 +56,8 @@ impl GcBlock {
     /// Blocks GC until `duration` has elapsed.
     ///
     /// We do this as the leases mapping are not persisted to disk. By delaying GC by default
-    /// length, we guarantee that all the leases we granted before will expire when we run GC for
-    /// the first time after restart / transition from AttachedMulti to AttachedSingle.
+    /// length, we guarantee that all the leases we granted before will have a chance to renew
+    /// when we run GC for the first time after restart / transition from AttachedMulti to AttachedSingle.
     pub(super) async fn block_for(&self, duration: Duration, cancel: &CancellationToken) {
         {
             let g = self.reasons.lock().unwrap();
