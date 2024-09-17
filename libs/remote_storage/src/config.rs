@@ -185,7 +185,7 @@ mod tests {
     use super::*;
 
     fn parse(input: &str) -> anyhow::Result<RemoteStorageConfig> {
-        let toml = input.parse::<toml_edit::Document>().unwrap();
+        let toml = input.parse::<toml_edit::DocumentMut>().unwrap();
         RemoteStorageConfig::from_toml(toml.as_item())
     }
 

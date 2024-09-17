@@ -36,10 +36,8 @@ def test_logical_replication(neon_simple_env: NeonEnv, vanilla_pg):
     env = neon_simple_env
 
     tenant_id = env.initial_tenant
-    timeline_id = env.neon_cli.create_branch("test_logical_replication", "empty")
-    endpoint = env.endpoints.create_start(
-        "test_logical_replication", config_lines=["log_statement=all"]
-    )
+    timeline_id = env.initial_timeline
+    endpoint = env.endpoints.create_start("main", config_lines=["log_statement=all"])
 
     pg_conn = endpoint.connect()
     cur = pg_conn.cursor()
@@ -185,10 +183,9 @@ def test_obsolete_slot_drop(neon_simple_env: NeonEnv, vanilla_pg):
 
     env = neon_simple_env
 
-    env.neon_cli.create_branch("test_logical_replication", "empty")
     # set low neon.logical_replication_max_snap_files
     endpoint = env.endpoints.create_start(
-        "test_logical_replication",
+        "main",
         config_lines=["log_statement=all", "neon.logical_replication_max_snap_files=1"],
     )
 
@@ -472,7 +469,7 @@ def test_slots_and_branching(neon_simple_env: NeonEnv):
 def test_replication_shutdown(neon_simple_env: NeonEnv):
     # Ensure Postgres can exit without stuck when a replication job is active + neon extension installed
     env = neon_simple_env
-    env.neon_cli.create_branch("test_replication_shutdown_publisher", "empty")
+    env.neon_cli.create_branch("test_replication_shutdown_publisher", "main")
     pub = env.endpoints.create("test_replication_shutdown_publisher")
 
     env.neon_cli.create_branch("test_replication_shutdown_subscriber")

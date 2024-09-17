@@ -62,7 +62,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
     serde::Serialize,
     serde::Deserialize,
     strum_macros::Display,
-    strum_macros::EnumVariantNames,
+    strum_macros::VariantNames,
     strum_macros::AsRefStr,
     strum_macros::IntoStaticStr,
 )]

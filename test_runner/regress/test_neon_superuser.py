@@ -6,7 +6,7 @@ from fixtures.utils import wait_until
 
 def test_neon_superuser(neon_simple_env: NeonEnv, pg_version: PgVersion):
     env = neon_simple_env
-    env.neon_cli.create_branch("test_neon_superuser_publisher", "empty")
+    env.neon_cli.create_branch("test_neon_superuser_publisher", "main")
     pub = env.endpoints.create("test_neon_superuser_publisher")
 
     env.neon_cli.create_branch("test_neon_superuser_subscriber")

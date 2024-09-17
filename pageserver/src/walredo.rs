@@ -364,10 +364,8 @@ impl PostgresRedoManager {
             }
         };
 
-        let result = closure(
-            proc.clone(), /* lack of true aysnc closures prevents passing a &Process here */
-        )
-        .await;
+        // async closures are unstable, would support &Process
+        let result = closure(proc.clone()).await;
 
         if result.is_err() {
             // Avoid concurrent callers hitting the same issue by taking `proc` out of the rotation.
@@ -458,25 +456,25 @@ impl PostgresRedoManager {
                 WAL_REDO_BYTES_HISTOGRAM.observe(nbytes as f64);
 
                 debug!(
-                        "postgres applied {} WAL records ({} bytes) in {} us to reconstruct page image at LSN {}",
-                        len,
-                        nbytes,
-                        duration.as_micros(),
-                        lsn
-                    );
+                    "postgres applied {} WAL records ({} bytes) in {} us to reconstruct page image at LSN {}",
+                    len,
+                    nbytes,
+                    duration.as_micros(),
+                    lsn
+                );
 
                 if let Err(e) = result.as_ref() {
                     error!(
-                            "error applying {} WAL records {}..{} ({} bytes) to key {key}, from base image with LSN {} to reconstruct page image at LSN {} n_attempts={}: {:?}",
-                            records.len(),
-                            records.first().map(|p| p.0).unwrap_or(Lsn(0)),
-                            records.last().map(|p| p.0).unwrap_or(Lsn(0)),
-                            nbytes,
-                            base_img_lsn,
-                            lsn,
-                            n_attempts,
-                            e,
-                        );
+                        "error applying {} WAL records {}..{} ({} bytes) to key {key}, from base image with LSN {} to reconstruct page image at LSN {} n_attempts={}: {:?}",
+                        records.len(),
+                        records.first().map(|p| p.0).unwrap_or(Lsn(0)),
+                        records.last().map(|p| p.0).unwrap_or(Lsn(0)),
+                        nbytes,
+                        base_img_lsn,
+                        lsn,
+                        n_attempts,
+                        e,
+                    );
                 }
 
                 result.map_err(Error::Other)

@@ -1038,9 +1038,12 @@ DetermineEpochStartLsn(WalProposer *wp)
 		if (SkipXLogPageHeader(wp, wp->propEpochStartLsn) != wp->api.get_redo_start_lsn(wp))
 		{
 			/*
-			 * However, allow to proceed if previously elected leader was me;
-			 * plain restart of walproposer not intervened by concurrent
-			 * compute (who could generate WAL) is ok.
+			 * However, allow to proceed if last_log_term on the node which gave
+			 * the highest vote (i.e. point where we are going to start writing)
+			 * actually had been won by me; plain restart of walproposer not
+			 * intervened by concurrent compute which wrote WAL is ok.
+			 *
+			 * This avoids compute crash after manual term_bump.
 			 */
 			if (!((dth->n_entries >= 1) && (dth->entries[dth->n_entries - 1].term ==
 											pg_atomic_read_u64(&walprop_shared->mineLastElectedTerm))))
@@ -1442,12 +1445,17 @@ RecvAppendResponses(Safekeeper *sk)
 		if (sk->appendResponse.term > wp->propTerm)
 		{
 			/*
-			 * Another compute with higher term is running. Panic to restart
-			 * PG as we likely need to retake basebackup. However, don't dump
-			 * core as this is kinda expected scenario.
+			 *
+			 * Term has changed to higher one, probably another compute is
+			 * running. If this is the case we could PANIC as well because
+			 * likely it inserted some data and our basebackup is unsuitable
+			 * anymore. However, we also bump term manually (term_bump endpoint)
+			 * on safekeepers for migration purposes, in this case we do want
+			 * compute to stay alive. So restart walproposer with FATAL instead
+			 * of panicking; if basebackup is spoiled next election will notice
+			 * this.
 			 */
-			disable_core_dump();
-			wp_log(PANIC, "WAL acceptor %s:%s with term " INT64_FORMAT " rejected our request, our term " INT64_FORMAT ", meaning another compute is running at the same time, and it conflicts with us",
+			wp_log(FATAL, "WAL acceptor %s:%s with term " INT64_FORMAT " rejected our request, our term " INT64_FORMAT ", meaning another compute is running at the same time, and it conflicts with us",
 				   sk->host, sk->port,
 				   sk->appendResponse.term, wp->propTerm);
 		}

@@ -60,3 +60,16 @@ pub struct TimelineCopyRequest {
     pub target_timeline_id: TimelineId,
     pub until_lsn: Lsn,
 }
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TimelineTermBumpRequest {
+    /// bump to
+    pub term: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TimelineTermBumpResponse {
+    // before the request
+    pub previous_term: u64,
+    pub current_term: u64,
+}

@@ -6,8 +6,6 @@
  * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
- * contrib/neon/pagestore_client.h
- *
  *-------------------------------------------------------------------------
  */
 #ifndef pageserver_h
@@ -187,7 +185,7 @@ extern char *nm_to_string(NeonMessage *msg);
  * API
  */
 
-typedef unsigned shardno_t;
+typedef uint16 shardno_t;
 
 typedef struct
 {
@@ -211,7 +209,7 @@ extern int  neon_protocol_version;
 
 extern shardno_t get_shard_number(BufferTag* tag);
 
-extern const f_smgr *smgr_neon(BackendId backend, NRelFileInfo rinfo);
+extern const f_smgr *smgr_neon(ProcNumber backend, NRelFileInfo rinfo);
 extern void smgr_init_neon(void);
 extern void readahead_buffer_resize(int newsize, void *extra);
 
@@ -233,8 +231,13 @@ extern void neon_zeroextend(SMgrRelation reln, ForkNumber forknum,
 							BlockNumber blocknum, int nbuffers, bool skipFsync);
 #endif
 
+#if PG_MAJORVERSION_NUM >=17
+extern bool neon_prefetch(SMgrRelation reln, ForkNumber forknum,
+						  BlockNumber blocknum, int nblocks);
+#else
 extern bool neon_prefetch(SMgrRelation reln, ForkNumber forknum,
 						  BlockNumber blocknum);
+#endif
 
 /*
  * LSN values associated with each request to the pageserver
@@ -269,19 +272,11 @@ typedef struct
 } neon_request_lsns;
 
 #if PG_MAJORVERSION_NUM < 16
-extern void neon_read(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
-					  char *buffer);
 extern PGDLLEXPORT void neon_read_at_lsn(NRelFileInfo rnode, ForkNumber forkNum, BlockNumber blkno,
 										 neon_request_lsns request_lsns, char *buffer);
-extern void neon_write(SMgrRelation reln, ForkNumber forknum,
-					   BlockNumber blocknum, char *buffer, bool skipFsync);
 #else
-extern void neon_read(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
-					  void *buffer);
 extern PGDLLEXPORT void neon_read_at_lsn(NRelFileInfo rnode, ForkNumber forkNum, BlockNumber blkno,
 										 neon_request_lsns request_lsns, void *buffer);
-extern void neon_write(SMgrRelation reln, ForkNumber forknum,
-					   BlockNumber blocknum, const void *buffer, bool skipFsync);
 #endif
 extern void neon_writeback(SMgrRelation reln, ForkNumber forknum,
 						   BlockNumber blocknum, BlockNumber nblocks);
@@ -299,17 +294,34 @@ extern void update_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum, BlockN
 extern void forget_cached_relsize(NRelFileInfo rinfo, ForkNumber forknum);
 
 /* functions for local file cache */
-#if PG_MAJORVERSION_NUM < 16
-extern void lfc_write(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
-					  char *buffer);
-#else
-extern void lfc_write(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
-					  const void *buffer);
-#endif
-extern bool lfc_read(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno, char *buffer);
-extern bool lfc_cache_contains(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno);
+extern void lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum,
+					   BlockNumber blkno, const void *const *buffers,
+					   BlockNumber nblocks);
+/* returns number of blocks read, with one bit set in *read for each  */
+extern int lfc_readv_select(NRelFileInfo rinfo, ForkNumber forkNum,
+							BlockNumber blkno, void **buffers,
+							BlockNumber nblocks, bits8 *mask);
+
+extern bool lfc_cache_contains(NRelFileInfo rinfo, ForkNumber forkNum,
+							   BlockNumber blkno);
+extern int lfc_cache_containsv(NRelFileInfo rinfo, ForkNumber forkNum,
+							   BlockNumber blkno, int nblocks, bits8 *bitmap);
 extern void lfc_evict(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno);
 extern void lfc_init(void);
 
+static inline bool
+lfc_read(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
+		 void *buffer)
+{
+	bits8		rv = 0;
+	return lfc_readv_select(rinfo, forkNum, blkno, &buffer, 1, &rv) == 1;
+}
+
+static inline void
+lfc_write(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
+		  const void *buffer)
+{
+	return lfc_writev(rinfo, forkNum, blkno, &buffer, 1);
+}
 
 #endif

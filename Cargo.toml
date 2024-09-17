@@ -73,7 +73,7 @@ camino = "1.1.6"
 cfg-if = "1.0.0"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4.0", features = ["derive"] }
-comfy-table = "6.1"
+comfy-table = "7.1"
 const_format = "0.2"
 crc32c = "0.6"
 crossbeam-deque = "0.8.5"
@@ -123,8 +123,8 @@ opentelemetry = "0.20.0"
 opentelemetry-otlp = { version = "0.13.0", default-features=false, features = ["http-proto", "trace", "http", "reqwest-client"] }
 opentelemetry-semantic-conventions = "0.12.0"
 parking_lot = "0.12"
-parquet = { version = "51.0.0", default-features = false, features = ["zstd"] }
-parquet_derive = "51.0.0"
+parquet = { version = "53", default-features = false, features = ["zstd"] }
+parquet_derive = "53"
 pbkdf2 = { version = "0.12.1", features = ["simple", "std"] }
 pin-project-lite = "0.2"
 procfs = "0.16"
@@ -158,8 +158,8 @@ signal-hook = "0.3"
 smallvec = "1.11"
 smol_str = { version = "0.2.0", features = ["serde"] }
 socket2 = "0.5"
-strum = "0.24"
-strum_macros = "0.24"
+strum = "0.26"
+strum_macros = "0.26"
 "subtle"  = "2.5.0"
 svg_fmt = "0.4.3"
 sync_wrapper = "0.1.2"
@@ -177,8 +177,8 @@ tokio-rustls = "0.25"
 tokio-stream = "0.1"
 tokio-tar = "0.3"
 tokio-util = { version = "0.7.10", features = ["io", "rt"] }
-toml = "0.7"
-toml_edit = "0.19"
+toml = "0.8"
+toml_edit = "0.22"
 tonic = {version = "0.9", features = ["tls", "tls-roots"]}
 tower-service = "0.3.2"
 tracing = "0.1"
@@ -201,10 +201,21 @@ env_logger = "0.10"
 log = "0.4"
 
 ## Libraries from neondatabase/ git forks, ideally with changes to be upstreamed
-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", branch="neon" }
-postgres-protocol = { git = "https://github.com/neondatabase/rust-postgres.git", branch="neon" }
-postgres-types = { git = "https://github.com/neondatabase/rust-postgres.git", branch="neon" }
-tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", branch="neon" }
+
+# We want to use the 'neon' branch for these, but there's currently one
+# incompatible change on the branch. See:
+#
+# - PR #8076 which contained changes that depended on the new changes in
+#   the rust-postgres crate, and
+# - PR #8654 which reverted those changes and made the code in proxy incompatible
+#   with the tip of the 'neon' branch again.
+#
+# When those proxy changes are re-applied (see PR #8747), we can switch using
+# the tip of the 'neon' branch again.
+postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev = "20031d7a9ee1addeae6e0968e3899ae6bf01cee2" }
+postgres-protocol = { git = "https://github.com/neondatabase/rust-postgres.git", rev = "20031d7a9ee1addeae6e0968e3899ae6bf01cee2" }
+postgres-types = { git = "https://github.com/neondatabase/rust-postgres.git", rev = "20031d7a9ee1addeae6e0968e3899ae6bf01cee2" }
+tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev = "20031d7a9ee1addeae6e0968e3899ae6bf01cee2" }
 
 ## Local libraries
 compute_api = { version = "0.1", path = "./libs/compute_api/" }
@@ -241,11 +252,7 @@ tonic-build = "0.9"
 [patch.crates-io]
 
 # Needed to get `tokio-postgres-rustls` to depend on our fork.
-tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", branch="neon" }
-
-# bug fixes for UUID
-parquet = { git = "https://github.com/apache/arrow-rs", branch = "master" }
-parquet_derive = { git = "https://github.com/apache/arrow-rs", branch = "master" }
+tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev = "20031d7a9ee1addeae6e0968e3899ae6bf01cee2" }
 
 ################# Binary contents sections
 

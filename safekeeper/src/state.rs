@@ -1,9 +1,10 @@
 //! Defines per timeline data stored persistently (SafeKeeperPersistentState)
 //! and its wrapper with in memory layer (SafekeeperState).
 
-use std::ops::Deref;
+use std::{cmp::max, ops::Deref};
 
 use anyhow::Result;
+use safekeeper_api::models::TimelineTermBumpResponse;
 use serde::{Deserialize, Serialize};
 use utils::{
     id::{NodeId, TenantId, TenantTimelineId, TimelineId},
@@ -12,7 +13,7 @@ use utils::{
 
 use crate::{
     control_file,
-    safekeeper::{AcceptorState, PersistedPeerInfo, PgUuid, ServerInfo, TermHistory},
+    safekeeper::{AcceptorState, PersistedPeerInfo, PgUuid, ServerInfo, Term, TermHistory},
     wal_backup_partial::{self},
 };
 
@@ -210,6 +211,27 @@ where
     pub async fn flush(&mut self) -> Result<()> {
         let s = self.start_change();
         self.finish_change(&s).await
+    }
+
+    /// Make term at least as `to`. If `to` is None, increment current one. This
+    /// is not in safekeeper.rs because we want to be able to do it even if
+    /// timeline is offloaded.
+    pub async fn term_bump(&mut self, to: Option<Term>) -> Result<TimelineTermBumpResponse> {
+        let before = self.acceptor_state.term;
+        let mut state = self.start_change();
+        let new = match to {
+            Some(to) => max(state.acceptor_state.term, to),
+            None => state.acceptor_state.term + 1,
+        };
+        if new > state.acceptor_state.term {
+            state.acceptor_state.term = new;
+            self.finish_change(&state).await?;
+        }
+        let after = self.acceptor_state.term;
+        Ok(TimelineTermBumpResponse {
+            previous_term: before,
+            current_term: after,
+        })
     }
 }
 
