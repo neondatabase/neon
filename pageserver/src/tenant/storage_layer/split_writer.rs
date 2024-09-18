@@ -1,7 +1,6 @@
 use std::{future::Future, ops::Range, sync::Arc};
 
 use bytes::Bytes;
-use camino::Utf8PathBuf;
 use pageserver_api::key::{Key, KEY_SIZE};
 use utils::{id::TimelineId, lsn::Lsn, shard::TenantShardId};
 
@@ -14,7 +13,7 @@ use super::{
 };
 
 pub(crate) enum SplitWriterResult {
-    Produced((PersistentLayerDesc, Utf8PathBuf)),
+    Produced(ResidentLayer),
     Discarded(PersistentLayerKey),
 }
 
@@ -43,7 +42,7 @@ impl SplitWriterResult {
 pub struct SplitImageLayerWriter {
     inner: ImageLayerWriter,
     target_layer_size: u64,
-    generated_layer_writers: Vec<(ImageLayerWriter, Key)>,
+    generated_layer_writers: Vec<(ImageLayerWriter, PersistentLayerKey)>,
     conf: &'static PageServerConf,
     timeline_id: TimelineId,
     tenant_shard_id: TenantShardId,
@@ -85,7 +84,6 @@ impl SplitImageLayerWriter {
         &mut self,
         key: Key,
         img: Bytes,
-        #[allow(unused)] tline: &Arc<Timeline>,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         // The current estimation is an upper bound of the space that the key/image could take
@@ -104,10 +102,16 @@ impl SplitImageLayerWriter {
                 ctx,
             )
             .await?;
+            let layer_key = PersistentLayerKey {
+                key_range: self.start_key..key,
+                lsn_range: PersistentLayerDesc::image_layer_lsn_range(self.lsn),
+                is_delta: false,
+            };
             let prev_image_writer = std::mem::replace(&mut self.inner, next_image_writer);
             self.start_key = key;
 
-            self.generated_layer_writers.push((prev_image_writer, key));
+            self.generated_layer_writers
+                .push((prev_image_writer, layer_key));
         }
         self.inner.put_image(key, img, ctx).await
     }
@@ -126,25 +130,24 @@ impl SplitImageLayerWriter {
         let Self {
             mut generated_layer_writers,
             inner,
-            lsn,
             ..
         } = self;
         if inner.num_keys() != 0 {
-            generated_layer_writers.push((inner, end_key));
+            let layer_key = PersistentLayerKey {
+                key_range: self.start_key..end_key,
+                lsn_range: PersistentLayerDesc::image_layer_lsn_range(self.lsn),
+                is_delta: false,
+            };
+            generated_layer_writers.push((inner, layer_key));
         }
         // BEGIN: catch every error and do the recovery in the below section
         let mut generated_layers = Vec::new();
-        for (inner, end_key) in generated_layer_writers {
-            let layer_key = PersistentLayerKey {
-                key_range: self.start_key..end_key,
-                lsn_range: PersistentLayerDesc::image_layer_lsn_range(lsn),
-                is_delta: false,
-            };
+        for (inner, layer_key) in generated_layer_writers {
             if discard_fn(&layer_key).await {
                 generated_layers.push(SplitWriterResult::Discarded(layer_key));
             } else {
-                let layer = match inner.finish_with_end_key(tline, end_key, ctx).await {
-                    Ok(layer) => layer,
+                let layer = match inner.finish_with_end_key(end_key, ctx).await {
+                    Ok((desc, path)) => Layer::finish_creating(self.conf, tline, desc, &path)?,
                     Err(e) => {
                         for produced_layer in generated_layers {
                             if let SplitWriterResult::Produced(image_layer) = produced_layer {
@@ -431,7 +434,7 @@ mod tests {
         .unwrap();
 
         image_writer
-            .put_image(get_key(0), get_img(0), &tline, &ctx)
+            .put_image(get_key(0), get_img(0), &ctx)
             .await
             .unwrap();
         let layers = image_writer
@@ -511,7 +514,7 @@ mod tests {
         for i in 0..N {
             let i = i as u32;
             image_writer
-                .put_image(get_key(i), get_large_img(), &tline, &ctx)
+                .put_image(get_key(i), get_large_img(), &ctx)
                 .await
                 .unwrap();
             delta_writer
@@ -611,11 +614,11 @@ mod tests {
         .unwrap();
 
         image_writer
-            .put_image(get_key(0), get_img(0), &tline, &ctx)
+            .put_image(get_key(0), get_img(0), &ctx)
             .await
             .unwrap();
         image_writer
-            .put_image(get_key(1), get_large_img(), &tline, &ctx)
+            .put_image(get_key(1), get_large_img(), &ctx)
             .await
             .unwrap();
         let layers = image_writer
