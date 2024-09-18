@@ -3,7 +3,6 @@ use std::{
     borrow::Cow,
     cmp::Ordering,
     collections::{BTreeMap, HashMap, HashSet},
-    error::Error,
     ops::Deref,
     path::PathBuf,
     str::FromStr,
