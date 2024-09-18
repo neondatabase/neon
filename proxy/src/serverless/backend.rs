@@ -1,9 +1,6 @@
 use std::{io, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use bytes::Bytes;
-use http_body_util::Full;
-use hyper1::client::conn::http2;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use tokio::net::{lookup_host, TcpStream};
 use tracing::{field::display, info};
@@ -396,7 +393,7 @@ impl ConnectMechanism for HyperMechanism {
         Ok(poll_http2_client(
             self.pool.clone(),
             ctx,
-            self.conn_info.clone(),
+            &self.conn_info,
             client,
             connection,
             self.conn_id,
@@ -411,13 +408,7 @@ async fn connect_http2(
     host: &str,
     port: u16,
     timeout: Duration,
-) -> Result<
-    (
-        http2::SendRequest<Full<Bytes>>,
-        http2::Connection<TokioIo<TcpStream>, Full<Bytes>, TokioExecutor>,
-    ),
-    HttpConnError,
-> {
+) -> Result<(http_conn_pool::Send, http_conn_pool::Connect), HttpConnError> {
     let mut addrs = lookup_host((host, port)).await?;
 
     let mut last_err = None;
