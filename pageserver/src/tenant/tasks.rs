@@ -346,6 +346,7 @@ async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
             RequestContext::todo_child(TaskKind::GarbageCollector, DownloadBehavior::Download);
 
         let mut first = true;
+        tenant.gc_block.set_lsn_lease_deadline(tenant.get_lsn_lease_length());
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => {
@@ -363,8 +364,8 @@ async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
                 first = false;
 
                 let delays = async {
-                    let lsn_lease_length = tenant.get_lsn_lease_length();
-                    delay_by_duration(lsn_lease_length, &tenant.cancel).await?;
+                    let deadline = tenant.gc_block.get_lsn_lease_deadline();
+                    delay_until(deadline, &tenant.cancel).await?;
                     random_init_delay(period, &cancel).await?;
                     Ok::<_, Cancelled>(())
                 };
@@ -423,7 +424,8 @@ async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
                 }
             };
 
-            if tokio::time::timeout(sleep_duration, cancel.cancelled())
+            let deadline = tenant.gc_block.get_lsn_lease_deadline().max(tokio::time::Instant::now() + sleep_duration);
+            if tokio::time::timeout_at(deadline, cancel.cancelled())
                 .await
                 .is_ok()
             {
@@ -524,11 +526,11 @@ async fn wait_for_active_tenant(tenant: &Arc<Tenant>) -> ControlFlow<()> {
 pub(crate) struct Cancelled;
 
 /// Waits for `duration` time unless cancelled.
-pub(crate) async fn delay_by_duration(
-    duration: Duration,
+async fn delay_until(
+    deadline: tokio::time::Instant,
     cancel: &CancellationToken,
 ) -> Result<(), Cancelled> {
-    match tokio::time::timeout(duration, cancel.cancelled()).await {
+    match tokio::time::timeout_at(deadline, cancel.cancelled()).await {
         Ok(_) => Err(Cancelled),
         Err(_) => Ok(()),
     }
@@ -550,8 +552,7 @@ pub(crate) async fn random_init_delay(
         let mut rng = rand::thread_rng();
         rng.gen_range(Duration::ZERO..=period)
     };
-
-    delay_by_duration(d, cancel).await
+    delay_until(tokio::time::Instant::now() + d, cancel).await
 }
 
 struct Iteration {

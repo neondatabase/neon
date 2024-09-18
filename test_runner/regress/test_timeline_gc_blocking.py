@@ -47,7 +47,7 @@ def test_gc_blocking_by_timeline(neon_env_builder: NeonEnvBuilder, sharded: bool
     gc_blocking = tenant_after["gc_blocking"]
     assert (
         gc_blocking
-        == "BlockingReasons { tenant_post_attached_single_wait: false, timelines: 1, reasons: EnumSet(Manual) }"
+        == "BlockingReasons { tenant_blocked_by_lsn_lease_deadline: false, timelines: 1, reasons: EnumSet(Manual) }"
     )
 
     wait_for_another_gc_round()
