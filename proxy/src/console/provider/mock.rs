@@ -41,11 +41,15 @@ impl From<tokio_postgres::Error> for ApiError {
 #[derive(Clone)]
 pub struct Api {
     endpoint: ApiUrl,
+    ip_allowlist_check_enabled: bool,
 }
 
 impl Api {
-    pub fn new(endpoint: ApiUrl) -> Self {
-        Self { endpoint }
+    pub fn new(endpoint: ApiUrl, ip_allowlist_check_enabled: bool) -> Self {
+        Self {
+            endpoint,
+            ip_allowlist_check_enabled,
+        }
     }
 
     pub(crate) fn url(&self) -> &str {
@@ -64,6 +68,7 @@ impl Api {
                 tokio_postgres::connect(self.endpoint.as_str(), tokio_postgres::NoTls).await?;
 
             tokio::spawn(connection);
+
             let secret = if let Some(entry) = get_execute_postgres_query(
                 &client,
                 "select rolpassword from pg_catalog.pg_authid where rolname = $1",
@@ -79,21 +84,26 @@ impl Api {
                 warn!("user '{}' does not exist", user_info.user);
                 None
             };
-            let allowed_ips = match get_execute_postgres_query(
-                &client,
-                "select allowed_ips from neon_control_plane.endpoints where endpoint_id = $1",
-                &[&user_info.endpoint.as_str()],
-                "allowed_ips",
-            )
-            .await?
-            {
-                Some(s) => {
-                    info!("got allowed_ips: {s}");
-                    s.split(',')
-                        .map(|s| IpPattern::from_str(s).unwrap())
-                        .collect()
+
+            let allowed_ips = if self.ip_allowlist_check_enabled {
+                match get_execute_postgres_query(
+                    &client,
+                    "select allowed_ips from neon_control_plane.endpoints where endpoint_id = $1",
+                    &[&user_info.endpoint.as_str()],
+                    "allowed_ips",
+                )
+                .await?
+                {
+                    Some(s) => {
+                        info!("got allowed_ips: {s}");
+                        s.split(',')
+                            .map(|s| IpPattern::from_str(s).unwrap())
+                            .collect()
+                    }
+                    None => vec![],
                 }
-                None => vec![],
+            } else {
+                vec![]
             };
 
             Ok((secret, allowed_ips))
