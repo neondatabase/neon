@@ -3,6 +3,7 @@ use std::{
     borrow::Cow,
     cmp::Ordering,
     collections::{BTreeMap, HashMap, HashSet},
+    error::Error,
     ops::Deref,
     path::PathBuf,
     str::FromStr,
@@ -218,9 +219,9 @@ fn passthrough_api_error(node: &Node, e: mgmt_api::Error) -> ApiError {
                 format!("{node} error receiving error body: {str}").into(),
             )
         }
-        mgmt_api::Error::ReceiveBody(str) => {
+        mgmt_api::Error::ReceiveBody(err) => {
             // Presume errors receiving body are connectivity/availability issues
-            ApiError::ResourceUnavailable(format!("{node} error receiving body: {str}").into())
+            ApiError::InternalServerError(anyhow::Error::from(err).context("error receiving body"))
         }
         mgmt_api::Error::ApiError(StatusCode::NOT_FOUND, msg) => {
             ApiError::NotFound(anyhow::anyhow!(format!("{node}: {msg}")).into())
