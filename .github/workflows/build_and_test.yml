@@ -849,6 +849,7 @@ jobs:
           done
 
   push-to-acr-dev:
+    if: github.ref_name == 'main'
     needs: [ tag, promote-images ]
     uses: ./.github/workflows/_push-to-acr.yml
     with:
@@ -858,9 +859,9 @@ jobs:
       registry_name: ${{ vars.AZURE_DEV_REGISTRY_NAME }}
       subscription_id: ${{ vars.AZURE_DEV_SUBSCRIPTION_ID }}
       tenant_id: ${{ vars.AZURE_TENANT_ID }}
-      skip_if: ${{ github.ref_name != 'main' }}
 
   push-to-acr-prod:
+    if: github.ref_name == 'release'|| github.ref_name == 'release-proxy'
     needs: [ tag, promote-images ]
     uses: ./.github/workflows/_push-to-acr.yml
     with:
@@ -870,7 +871,6 @@ jobs:
       registry_name: ${{ vars.AZURE_PROD_REGISTRY_NAME }}
       subscription_id: ${{ vars.AZURE_PROD_SUBSCRIPTION_ID }}
       tenant_id: ${{ vars.AZURE_TENANT_ID }}
-      skip_if: ${{ !startsWith(github.ref_name, 'release') }}
 
   trigger-custom-extensions-build-and-wait:
     needs: [ check-permissions, tag ]
@@ -948,7 +948,8 @@ jobs:
 
   deploy:
     needs: [ check-permissions, promote-images, tag, build-and-test-locally, trigger-custom-extensions-build-and-wait, push-to-acr-dev, push-to-acr-prod ]
-    if: github.ref_name == 'main' || github.ref_name == 'release' || github.ref_name == 'release-proxy'
+    # `!failure() && !cancelled()` is required because the workflow depends on the job that can be skipped: `push-to-acr-dev` and `push-to-acr-prod`
+    if: (github.ref_name == 'main' || github.ref_name == 'release' || github.ref_name == 'release-proxy') && !failure() && !cancelled()
 
     runs-on: [ self-hosted, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
@@ -1046,7 +1047,8 @@ jobs:
   # The job runs on `release` branch and copies compatibility data and Neon artifact from the last *release PR* to the latest directory
   promote-compatibility-data:
     needs: [ deploy ]
-    if: github.ref_name == 'release'
+    # `!failure() && !cancelled()` is required because the workflow transitively depends on the job that can be skipped: `push-to-acr-dev` and `push-to-acr-prod`
+    if: github.ref_name == 'release' && !failure() && !cancelled()
 
     runs-on: ubuntu-22.04
     steps:
