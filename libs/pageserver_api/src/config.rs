@@ -434,8 +434,6 @@ pub mod tenant_conf_defaults {
     // By default ingest enough WAL for two new L0 layers before checking if new image
     // image layers should be created.
     pub const DEFAULT_IMAGE_LAYER_CREATION_CHECK_THRESHOLD: u8 = 2;
-
-    pub const DEFAULT_INGEST_BATCH_SIZE: u64 = 100;
 }
 
 impl Default for TenantConfigToml {
