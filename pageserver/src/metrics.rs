@@ -1777,7 +1777,7 @@ pub(crate) static SECONDARY_MODE: Lazy<SecondaryModeMetrics> = Lazy::new(|| {
     .expect("failed to define a metric"),
     upload_heatmap_duration: register_histogram!(
         "pageserver_secondary_upload_heatmap_duration",
-        "Time to build and upload a heatmap, including any waiting inside the S3 client"
+        "Time to build and upload a heatmap, including any waiting inside the remote storage client"
     )
     .expect("failed to define a metric"),
     download_heatmap: register_int_counter!(

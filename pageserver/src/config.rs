@@ -281,7 +281,7 @@ impl PageServerConf {
 
         #[allow(clippy::manual_range_patterns)]
         match pg_version {
-            14 | 15 | 16 => Ok(path.join(format!("v{pg_version}"))),
+            14 | 15 | 16 | 17 => Ok(path.join(format!("v{pg_version}"))),
             _ => bail!("Unsupported postgres version: {}", pg_version),
         }
     }

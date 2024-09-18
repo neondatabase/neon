@@ -237,6 +237,26 @@ impl WalIngest {
                                 .await?;
                         }
                     }
+                } else if pg_version == 17 {
+                    if info == postgres_ffi::v17::bindings::XLOG_DBASE_CREATE_WAL_LOG {
+                        debug!("XLOG_DBASE_CREATE_WAL_LOG: noop");
+                    } else if info == postgres_ffi::v17::bindings::XLOG_DBASE_CREATE_FILE_COPY {
+                        // The XLOG record was renamed between v14 and v15,
+                        // but the record format is the same.
+                        // So we can reuse XlCreateDatabase here.
+                        debug!("XLOG_DBASE_CREATE_FILE_COPY");
+                        let createdb = XlCreateDatabase::decode(&mut buf);
+                        self.ingest_xlog_dbase_create(modification, &createdb, ctx)
+                            .await?;
+                    } else if info == postgres_ffi::v17::bindings::XLOG_DBASE_DROP {
+                        let dropdb = XlDropDatabase::decode(&mut buf);
+                        for tablespace_id in dropdb.tablespace_ids {
+                            trace!("Drop db {}, {}", tablespace_id, dropdb.db_id);
+                            modification
+                                .drop_dbdir(tablespace_id, dropdb.db_id, ctx)
+                                .await?;
+                        }
+                    }
                 }
             }
             pg_constants::RM_TBLSPC_ID => {
@@ -246,7 +266,11 @@ impl WalIngest {
                 let info = decoded.xl_info & !pg_constants::XLR_INFO_MASK;
 
                 if info == pg_constants::CLOG_ZEROPAGE {
-                    let pageno = buf.get_u32_le();
+                    let pageno = if pg_version < 17 {
+                        buf.get_u32_le()
+                    } else {
+                        buf.get_u64_le() as u32
+                    };
                     let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
                     let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
                     self.put_slru_page_image(
@@ -260,7 +284,7 @@ impl WalIngest {
                     .await?;
                 } else {
                     assert!(info == pg_constants::CLOG_TRUNCATE);
-                    let xlrec = XlClogTruncate::decode(&mut buf);
+                    let xlrec = XlClogTruncate::decode(&mut buf, pg_version);
                     self.ingest_clog_truncate_record(modification, &xlrec, ctx)
                         .await?;
                 }
@@ -299,12 +323,21 @@ impl WalIngest {
                         parsed_xact.xid,
                         lsn,
                     );
-                    modification
-                        .drop_twophase_file(parsed_xact.xid, ctx)
-                        .await?;
+
+                    let xid: u64 = if pg_version >= 17 {
+                        self.adjust_to_full_transaction_id(parsed_xact.xid)?
+                    } else {
+                        parsed_xact.xid as u64
+                    };
+                    modification.drop_twophase_file(xid, ctx).await?;
                 } else if info == pg_constants::XLOG_XACT_PREPARE {
+                    let xid: u64 = if pg_version >= 17 {
+                        self.adjust_to_full_transaction_id(decoded.xl_xid)?
+                    } else {
+                        decoded.xl_xid as u64
+                    };
                     modification
-                        .put_twophase_file(decoded.xl_xid, Bytes::copy_from_slice(&buf[..]), ctx)
+                        .put_twophase_file(xid, Bytes::copy_from_slice(&buf[..]), ctx)
                         .await?;
                 }
             }
@@ -312,7 +345,11 @@ impl WalIngest {
                 let info = decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
 
                 if info == pg_constants::XLOG_MULTIXACT_ZERO_OFF_PAGE {
-                    let pageno = buf.get_u32_le();
+                    let pageno = if pg_version < 17 {
+                        buf.get_u32_le()
+                    } else {
+                        buf.get_u64_le() as u32
+                    };
                     let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
                     let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
                     self.put_slru_page_image(
@@ -325,7 +362,11 @@ impl WalIngest {
                     )
                     .await?;
                 } else if info == pg_constants::XLOG_MULTIXACT_ZERO_MEM_PAGE {
-                    let pageno = buf.get_u32_le();
+                    let pageno = if pg_version < 17 {
+                        buf.get_u32_le()
+                    } else {
+                        buf.get_u64_le() as u32
+                    };
                     let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
                     let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
                     self.put_slru_page_image(
@@ -353,6 +394,20 @@ impl WalIngest {
             }
             pg_constants::RM_XLOG_ID => {
                 let info = decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
+
+                if info == pg_constants::XLOG_PARAMETER_CHANGE {
+                    if let CheckPoint::V17(cp) = &mut self.checkpoint {
+                        let rec = v17::XlParameterChange::decode(&mut buf);
+                        cp.wal_level = rec.wal_level;
+                        self.checkpoint_modified = true;
+                    }
+                } else if info == pg_constants::XLOG_END_OF_RECOVERY {
+                    if let CheckPoint::V17(cp) = &mut self.checkpoint {
+                        let rec = v17::XlEndOfRecovery::decode(&mut buf);
+                        cp.wal_level = rec.wal_level;
+                        self.checkpoint_modified = true;
+                    }
+                }
 
                 enum_pgversion_dispatch!(&mut self.checkpoint, CheckPoint, cp, {
                     if info == pg_constants::XLOG_NEXTOID {
@@ -397,12 +452,24 @@ impl WalIngest {
                         if xlog_checkpoint.oldestActiveXid == pg_constants::INVALID_TRANSACTION_ID
                             && info == pg_constants::XLOG_CHECKPOINT_SHUTDOWN
                         {
-                            let mut oldest_active_xid = cp.nextXid.value as u32;
-                            for xid in modification.tline.list_twophase_files(lsn, ctx).await? {
-                                if (xid.wrapping_sub(oldest_active_xid) as i32) < 0 {
-                                    oldest_active_xid = xid;
+                            let oldest_active_xid = if pg_version >= 17 {
+                                let mut oldest_active_full_xid = cp.nextXid.value;
+                                for xid in modification.tline.list_twophase_files(lsn, ctx).await? {
+                                    if xid < oldest_active_full_xid {
+                                        oldest_active_full_xid = xid;
+                                    }
                                 }
-                            }
+                                oldest_active_full_xid as u32
+                            } else {
+                                let mut oldest_active_xid = cp.nextXid.value as u32;
+                                for xid in modification.tline.list_twophase_files(lsn, ctx).await? {
+                                    let narrow_xid = xid as u32;
+                                    if (narrow_xid.wrapping_sub(oldest_active_xid) as i32) < 0 {
+                                        oldest_active_xid = narrow_xid;
+                                    }
+                                }
+                                oldest_active_xid
+                            };
                             cp.oldestActiveXid = oldest_active_xid;
                         } else {
                             cp.oldestActiveXid = xlog_checkpoint.oldestActiveXid;
@@ -513,6 +580,25 @@ impl WalIngest {
         modification.on_record_end();
 
         Ok(modification.len() > prev_len)
+    }
+
+    /// This is the same as AdjustToFullTransactionId(xid) in PostgreSQL
+    fn adjust_to_full_transaction_id(&self, xid: TransactionId) -> Result<u64> {
+        let next_full_xid =
+            enum_pgversion_dispatch!(&self.checkpoint, CheckPoint, cp, { cp.nextXid.value });
+
+        let next_xid = (next_full_xid) as u32;
+        let mut epoch = (next_full_xid >> 32) as u32;
+
+        if xid > next_xid {
+            // Wraparound occurred, must be from a prev epoch.
+            if epoch == 0 {
+                bail!("apparent XID wraparound with prepared transaction XID {xid}, nextXid is {next_full_xid}");
+            }
+            epoch -= 1;
+        }
+
+        Ok((epoch as u64) << 32 | xid as u64)
     }
 
     /// Do not store this block, but observe it for the purposes of updating our relation size state.
@@ -815,6 +901,73 @@ impl WalIngest {
                     bail!("Unknown RMGR {} for Heap decoding", decoded.xl_rmid);
                 }
             }
+            17 => {
+                if decoded.xl_rmid == pg_constants::RM_HEAP_ID {
+                    let info = decoded.xl_info & pg_constants::XLOG_HEAP_OPMASK;
+
+                    if info == pg_constants::XLOG_HEAP_INSERT {
+                        let xlrec = v17::XlHeapInsert::decode(buf);
+                        assert_eq!(0, buf.remaining());
+                        if (xlrec.flags & pg_constants::XLH_INSERT_ALL_VISIBLE_CLEARED) != 0 {
+                            new_heap_blkno = Some(decoded.blocks[0].blkno);
+                        }
+                    } else if info == pg_constants::XLOG_HEAP_DELETE {
+                        let xlrec = v17::XlHeapDelete::decode(buf);
+                        if (xlrec.flags & pg_constants::XLH_DELETE_ALL_VISIBLE_CLEARED) != 0 {
+                            new_heap_blkno = Some(decoded.blocks[0].blkno);
+                        }
+                    } else if info == pg_constants::XLOG_HEAP_UPDATE
+                        || info == pg_constants::XLOG_HEAP_HOT_UPDATE
+                    {
+                        let xlrec = v17::XlHeapUpdate::decode(buf);
+                        // the size of tuple data is inferred from the size of the record.
+                        // we can't validate the remaining number of bytes without parsing
+                        // the tuple data.
+                        if (xlrec.flags & pg_constants::XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED) != 0 {
+                            old_heap_blkno = Some(decoded.blocks.last().unwrap().blkno);
+                        }
+                        if (xlrec.flags & pg_constants::XLH_UPDATE_NEW_ALL_VISIBLE_CLEARED) != 0 {
+                            // PostgreSQL only uses XLH_UPDATE_NEW_ALL_VISIBLE_CLEARED on a
+                            // non-HOT update where the new tuple goes to different page than
+                            // the old one. Otherwise, only XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED is
+                            // set.
+                            new_heap_blkno = Some(decoded.blocks[0].blkno);
+                        }
+                    } else if info == pg_constants::XLOG_HEAP_LOCK {
+                        let xlrec = v17::XlHeapLock::decode(buf);
+                        if (xlrec.flags & pg_constants::XLH_LOCK_ALL_FROZEN_CLEARED) != 0 {
+                            old_heap_blkno = Some(decoded.blocks[0].blkno);
+                            flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
+                        }
+                    }
+                } else if decoded.xl_rmid == pg_constants::RM_HEAP2_ID {
+                    let info = decoded.xl_info & pg_constants::XLOG_HEAP_OPMASK;
+                    if info == pg_constants::XLOG_HEAP2_MULTI_INSERT {
+                        let xlrec = v17::XlHeapMultiInsert::decode(buf);
+
+                        let offset_array_len =
+                            if decoded.xl_info & pg_constants::XLOG_HEAP_INIT_PAGE > 0 {
+                                // the offsets array is omitted if XLOG_HEAP_INIT_PAGE is set
+                                0
+                            } else {
+                                size_of::<u16>() * xlrec.ntuples as usize
+                            };
+                        assert_eq!(offset_array_len, buf.remaining());
+
+                        if (xlrec.flags & pg_constants::XLH_INSERT_ALL_VISIBLE_CLEARED) != 0 {
+                            new_heap_blkno = Some(decoded.blocks[0].blkno);
+                        }
+                    } else if info == pg_constants::XLOG_HEAP2_LOCK_UPDATED {
+                        let xlrec = v17::XlHeapLockUpdated::decode(buf);
+                        if (xlrec.flags & pg_constants::XLH_LOCK_ALL_FROZEN_CLEARED) != 0 {
+                            old_heap_blkno = Some(decoded.blocks[0].blkno);
+                            flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
+                        }
+                    }
+                } else {
+                    bail!("Unknown RMGR {} for Heap decoding", decoded.xl_rmid);
+                }
+            }
             _ => {}
         }
 
@@ -923,26 +1076,26 @@ impl WalIngest {
         assert_eq!(decoded.xl_rmid, pg_constants::RM_NEON_ID);
 
         match pg_version {
-            16 => {
+            16 | 17 => {
                 let info = decoded.xl_info & pg_constants::XLOG_HEAP_OPMASK;
 
                 match info {
                     pg_constants::XLOG_NEON_HEAP_INSERT => {
-                        let xlrec = v16::rm_neon::XlNeonHeapInsert::decode(buf);
+                        let xlrec = v17::rm_neon::XlNeonHeapInsert::decode(buf);
                         assert_eq!(0, buf.remaining());
                         if (xlrec.flags & pg_constants::XLH_INSERT_ALL_VISIBLE_CLEARED) != 0 {
                             new_heap_blkno = Some(decoded.blocks[0].blkno);
                         }
                     }
                     pg_constants::XLOG_NEON_HEAP_DELETE => {
-                        let xlrec = v16::rm_neon::XlNeonHeapDelete::decode(buf);
+                        let xlrec = v17::rm_neon::XlNeonHeapDelete::decode(buf);
                         if (xlrec.flags & pg_constants::XLH_DELETE_ALL_VISIBLE_CLEARED) != 0 {
                             new_heap_blkno = Some(decoded.blocks[0].blkno);
                         }
                     }
                     pg_constants::XLOG_NEON_HEAP_UPDATE
                     | pg_constants::XLOG_NEON_HEAP_HOT_UPDATE => {
-                        let xlrec = v16::rm_neon::XlNeonHeapUpdate::decode(buf);
+                        let xlrec = v17::rm_neon::XlNeonHeapUpdate::decode(buf);
                         // the size of tuple data is inferred from the size of the record.
                         // we can't validate the remaining number of bytes without parsing
                         // the tuple data.
@@ -958,7 +1111,7 @@ impl WalIngest {
                         }
                     }
                     pg_constants::XLOG_NEON_HEAP_MULTI_INSERT => {
-                        let xlrec = v16::rm_neon::XlNeonHeapMultiInsert::decode(buf);
+                        let xlrec = v17::rm_neon::XlNeonHeapMultiInsert::decode(buf);
 
                         let offset_array_len =
                             if decoded.xl_info & pg_constants::XLOG_HEAP_INIT_PAGE > 0 {
@@ -974,7 +1127,7 @@ impl WalIngest {
                         }
                     }
                     pg_constants::XLOG_NEON_HEAP_LOCK => {
-                        let xlrec = v16::rm_neon::XlNeonHeapLock::decode(buf);
+                        let xlrec = v17::rm_neon::XlNeonHeapLock::decode(buf);
                         if (xlrec.flags & pg_constants::XLH_LOCK_ALL_FROZEN_CLEARED) != 0 {
                             old_heap_blkno = Some(decoded.blocks[0].blkno);
                             flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;

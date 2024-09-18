@@ -106,6 +106,7 @@ fn main() -> Result<()> {
             "stop" => rt.block_on(handle_stop_all(sub_args, &env)),
             "pageserver" => rt.block_on(handle_pageserver(sub_args, &env)),
             "storage_controller" => rt.block_on(handle_storage_controller(sub_args, &env)),
+            "storage_broker" => rt.block_on(handle_storage_broker(sub_args, &env)),
             "safekeeper" => rt.block_on(handle_safekeeper(sub_args, &env)),
             "endpoint" => rt.block_on(handle_endpoint(sub_args, &env)),
             "mappings" => handle_mappings(sub_args, &mut env),
@@ -640,6 +641,8 @@ async fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::Local
         }
         Some(("branch", branch_match)) => {
             let tenant_id = get_tenant_id(branch_match, env)?;
+            let new_timeline_id =
+                parse_timeline_id(branch_match)?.unwrap_or(TimelineId::generate());
             let new_branch_name = branch_match
                 .get_one::<String>("branch-name")
                 .ok_or_else(|| anyhow!("No branch name provided"))?;
@@ -658,7 +661,6 @@ async fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::Local
                 .map(|lsn_str| Lsn::from_str(lsn_str))
                 .transpose()
                 .context("Failed to parse ancestor start Lsn from the request")?;
-            let new_timeline_id = TimelineId::generate();
             let storage_controller = StorageController::from_env(env);
             let create_req = TimelineCreateRequest {
                 new_timeline_id,
@@ -1244,6 +1246,32 @@ async fn handle_safekeeper(sub_match: &ArgMatches, env: &local_env::LocalEnv) ->
     Ok(())
 }
 
+async fn handle_storage_broker(sub_match: &ArgMatches, env: &local_env::LocalEnv) -> Result<()> {
+    let (sub_name, sub_args) = match sub_match.subcommand() {
+        Some(broker_command_data) => broker_command_data,
+        None => bail!("no broker subcommand provided"),
+    };
+
+    match sub_name {
+        "start" => {
+            if let Err(e) = broker::start_broker_process(env, get_start_timeout(sub_args)).await {
+                eprintln!("broker start failed: {e}");
+                exit(1);
+            }
+        }
+
+        "stop" => {
+            if let Err(e) = broker::stop_broker_process(env) {
+                eprintln!("broker stop failed: {e}");
+                exit(1);
+            }
+        }
+
+        _ => bail!("Unexpected broker subcommand '{}'", sub_name),
+    }
+    Ok(())
+}
+
 async fn handle_start_all(
     env: &local_env::LocalEnv,
     retry_timeout: &Duration,
@@ -1570,7 +1598,6 @@ fn cli() -> Command {
                         .value_parser(value_parser!(PathBuf))
                         .value_name("config")
                 )
-                .arg(pg_version_arg.clone())
                 .arg(force_arg)
         )
         .subcommand(
@@ -1583,6 +1610,7 @@ fn cli() -> Command {
             .subcommand(Command::new("branch")
                 .about("Create a new timeline, using another timeline as a base, copying its data")
                 .arg(tenant_id_arg.clone())
+                .arg(timeline_id_arg.clone())
                 .arg(branch_name_arg.clone())
                 .arg(Arg::new("ancestor-branch-name").long("ancestor-branch-name")
                     .help("Use last Lsn of another timeline (and its data) as base when creating the new timeline. The timeline gets resolved by its branch name.").required(false))
@@ -1670,6 +1698,19 @@ fn cli() -> Command {
                 .subcommand(Command::new("stop").about("Stop storage controller")
                             .arg(stop_mode_arg.clone())
                             .arg(instance_id))
+        )
+        .subcommand(
+            Command::new("storage_broker")
+                .arg_required_else_help(true)
+                .about("Manage broker")
+                .subcommand(Command::new("start")
+                            .about("Start broker")
+                            .arg(timeout_arg.clone())
+                )
+                .subcommand(Command::new("stop")
+                            .about("Stop broker")
+                            .arg(stop_mode_arg.clone())
+                )
         )
         .subcommand(
             Command::new("safekeeper")

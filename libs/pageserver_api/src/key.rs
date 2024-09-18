@@ -1,8 +1,8 @@
 use anyhow::{bail, Result};
 use byteorder::{ByteOrder, BE};
 use postgres_ffi::relfile_utils::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
+use postgres_ffi::Oid;
 use postgres_ffi::RepOriginId;
-use postgres_ffi::{Oid, TransactionId};
 use serde::{Deserialize, Serialize};
 use std::{fmt, ops::Range};
 
@@ -350,7 +350,17 @@ impl Key {
 // 02 00000000 00000000 00000000 00   00000000
 //
 // TwoPhaseFile:
-// 02 00000000 00000000 00000000 00   XID
+//
+// 02 00000000 00000000 00XXXXXX XX   XXXXXXXX
+//
+//                        \______XID_________/
+//
+// The 64-bit XID is stored a little awkwardly in field6, field5 and
+// field4. PostgreSQL v16 and below only stored a 32-bit XID, which
+// fit completely in field6, but starting with PostgreSQL v17, a full
+// 64-bit XID is used. Most pageserver code that accesses
+// TwoPhaseFiles now deals with 64-bit XIDs even on v16, the high bits
+// are just unused.
 //
 // ControlFile:
 // 03 00000000 00000000 00000000 00   00000000
@@ -582,35 +592,36 @@ pub const TWOPHASEDIR_KEY: Key = Key {
 };
 
 #[inline(always)]
-pub fn twophase_file_key(xid: TransactionId) -> Key {
+pub fn twophase_file_key(xid: u64) -> Key {
     Key {
         field1: 0x02,
         field2: 0,
         field3: 0,
-        field4: 0,
-        field5: 0,
-        field6: xid,
+        field4: ((xid & 0xFFFFFF0000000000) >> 40) as u32,
+        field5: ((xid & 0x000000FF00000000) >> 32) as u8,
+        field6: (xid & 0x00000000FFFFFFFF) as u32,
     }
 }
 
 #[inline(always)]
-pub fn twophase_key_range(xid: TransactionId) -> Range<Key> {
+pub fn twophase_key_range(xid: u64) -> Range<Key> {
+    // 64-bit XIDs really should not overflow
     let (next_xid, overflowed) = xid.overflowing_add(1);
 
     Key {
         field1: 0x02,
         field2: 0,
         field3: 0,
-        field4: 0,
-        field5: 0,
-        field6: xid,
+        field4: ((xid & 0xFFFFFF0000000000) >> 40) as u32,
+        field5: ((xid & 0x000000FF00000000) >> 32) as u8,
+        field6: (xid & 0x00000000FFFFFFFF) as u32,
     }..Key {
         field1: 0x02,
         field2: 0,
-        field3: 0,
-        field4: 0,
-        field5: u8::from(overflowed),
-        field6: next_xid,
+        field3: u32::from(overflowed),
+        field4: ((next_xid & 0xFFFFFF0000000000) >> 40) as u32,
+        field5: ((next_xid & 0x000000FF00000000) >> 32) as u8,
+        field6: (next_xid & 0x00000000FFFFFFFF) as u32,
     }
 }
 

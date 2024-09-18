@@ -290,7 +290,7 @@ async fn worker_inner(
     }
 
     if !w.flushed_row_groups().is_empty() {
-        let _: Writer<BytesMut> = upload_parquet(w, len, &storage).await?;
+        let _rtchk: Writer<BytesMut> = upload_parquet(w, len, &storage).await?;
     }
 
     Ok(())
