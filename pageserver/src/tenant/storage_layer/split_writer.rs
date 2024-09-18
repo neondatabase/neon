@@ -481,7 +481,7 @@ mod tests {
 
     #[tokio::test]
     async fn write_split_discard() {
-        write_split_helper("split_writer_write_split_discard", false).await;
+        write_split_helper("split_writer_write_split_discard", true).await;
     }
 
     async fn write_split_helper(harness_name: &'static str, discard: bool) {
@@ -533,59 +533,54 @@ mod tests {
                 .unwrap();
         }
         let image_layers = image_writer
-            .finish(&tline, &ctx, get_key(N as u32))
+            .finish_with_discard_fn(&tline, &ctx, get_key(N as u32), |_| async { discard })
             .await
             .unwrap();
-        let delta_layers = delta_writer.finish(&tline, &ctx).await.unwrap();
-        if discard {
-            for (i, layer) in image_layers.into_iter().enumerate() {
-                let discarded = layer.into_discarded_layer();
-                assert_eq!(
-                    discarded,
-                    PersistentLayerKey {
-                        key_range: get_key(i as u32)..get_key(i as u32 + 1),
-                        lsn_range: Lsn(0x18)..Lsn(0x20),
-                        is_delta: false
-                    }
-                );
-            }
-            for layer in delta_layers {
-                layer.into_discarded_layer();
-            }
-        } else {
-            let image_layers = image_layers
-                .into_iter()
-                .map(|x| x.into_resident_layer())
-                .collect_vec();
-            let delta_layers = delta_layers
-                .into_iter()
-                .map(|x| x.into_resident_layer())
-                .collect_vec();
-            assert_eq!(image_layers.len(), N / 512 + 1);
-            assert_eq!(delta_layers.len(), N / 512 + 1);
-            assert_eq!(
-                delta_layers.first().unwrap().layer_desc().key_range.start,
-                get_key(0)
-            );
-            assert_eq!(
-                delta_layers.last().unwrap().layer_desc().key_range.end,
-                get_key(N as u32)
-            );
-            for idx in 0..image_layers.len() {
-                assert_ne!(image_layers[idx].layer_desc().key_range.start, Key::MIN);
-                assert_ne!(image_layers[idx].layer_desc().key_range.end, Key::MAX);
-                assert_ne!(delta_layers[idx].layer_desc().key_range.start, Key::MIN);
-                assert_ne!(delta_layers[idx].layer_desc().key_range.end, Key::MAX);
-                if idx > 0 {
-                    assert_eq!(
-                        image_layers[idx - 1].layer_desc().key_range.end,
-                        image_layers[idx].layer_desc().key_range.start
-                    );
-                    assert_eq!(
-                        delta_layers[idx - 1].layer_desc().key_range.end,
-                        delta_layers[idx].layer_desc().key_range.start
-                    );
+        let delta_layers = delta_writer
+            .finish_with_discard_fn(&tline, &ctx, |_| async { discard })
+            .await
+            .unwrap();
+        let image_layers = image_layers
+            .into_iter()
+            .map(|x| {
+                if discard {
+                    x.into_discarded_layer()
+                } else {
+                    x.into_resident_layer().layer_desc().key()
                 }
+            })
+            .collect_vec();
+        let delta_layers = delta_layers
+            .into_iter()
+            .map(|x| {
+                if discard {
+                    x.into_discarded_layer()
+                } else {
+                    x.into_resident_layer().layer_desc().key()
+                }
+            })
+            .collect_vec();
+        assert_eq!(image_layers.len(), N / 512 + 1);
+        assert_eq!(delta_layers.len(), N / 512 + 1);
+        assert_eq!(delta_layers.first().unwrap().key_range.start, get_key(0));
+        assert_eq!(
+            delta_layers.last().unwrap().key_range.end,
+            get_key(N as u32)
+        );
+        for idx in 0..image_layers.len() {
+            assert_ne!(image_layers[idx].key_range.start, Key::MIN);
+            assert_ne!(image_layers[idx].key_range.end, Key::MAX);
+            assert_ne!(delta_layers[idx].key_range.start, Key::MIN);
+            assert_ne!(delta_layers[idx].key_range.end, Key::MAX);
+            if idx > 0 {
+                assert_eq!(
+                    image_layers[idx - 1].key_range.end,
+                    image_layers[idx].key_range.start
+                );
+                assert_eq!(
+                    delta_layers[idx - 1].key_range.end,
+                    delta_layers[idx].key_range.start
+                );
             }
         }
     }
