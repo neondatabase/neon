@@ -65,6 +65,7 @@ jobs:
           MD5=md5$(echo -n "${{ steps.pwgen.outputs.DBPASS }}${USER}" | md5sum | awk '{print $1;}')
           sed -i.bak "s/${ph}/${MD5}/" expected/password.out
           done
+          
 
       - name: Download Neon artifact
         uses: ./.github/actions/download
