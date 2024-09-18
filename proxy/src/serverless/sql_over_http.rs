@@ -8,6 +8,7 @@ use futures::future::Either;
 use futures::StreamExt;
 use futures::TryFutureExt;
 use http::header::AUTHORIZATION;
+use http_body_util::combinators::BoxBody;
 use http_body_util::BodyExt;
 use http_body_util::Full;
 use hyper1::body::Body;
@@ -247,7 +248,7 @@ pub(crate) async fn handle(
     request: Request<Incoming>,
     backend: Arc<PoolingBackend>,
     cancel: CancellationToken,
-) -> Result<Response<Full<Bytes>>, ApiError> {
+) -> Result<Response<BoxBody<Bytes, hyper1::Error>>, ApiError> {
     let result = handle_inner(cancel, config, &ctx, request, backend).await;
 
     let mut response = match result {
@@ -504,7 +505,7 @@ async fn handle_inner(
     ctx: &RequestMonitoring,
     request: Request<Incoming>,
     backend: Arc<PoolingBackend>,
-) -> Result<Response<Full<Bytes>>, SqlOverHttpError> {
+) -> Result<Response<BoxBody<Bytes, hyper1::Error>>, SqlOverHttpError> {
     let _requeset_gauge = Metrics::get()
         .proxy
         .connection_requests
@@ -521,35 +522,20 @@ async fn handle_inner(
     );
 
     match conn_info.auth {
-        AuthData::Password(pw) => {
-            let res = handle_db_inner(
+        AuthData::Jwt(jwt) if config.authentication_config.is_auth_broker => {
+            handle_auth_broker_inner(config, ctx, request, conn_info.conn_info, jwt, backend).await
+        }
+        auth => {
+            handle_db_inner(
                 cancel,
                 config,
                 ctx,
                 request,
                 conn_info.conn_info,
-                &pw,
+                auth,
                 backend,
             )
-            .await?;
-            Ok(res)
-        }
-        AuthData::Jwt(jwt) => {
-            let keys = backend
-                .authenticate_with_jwt(
-                    ctx,
-                    &config.authentication_config,
-                    &conn_info.conn_info.user_info,
-                    jwt,
-                )
-                .await
-                .map_err(HttpConnError::from)?;
-
-            let _client = backend
-                .connect_to_local_proxy(ctx, conn_info.conn_info, keys)
-                .await?;
-
-            todo!()
+            .await
         }
     }
 }
@@ -560,9 +546,9 @@ async fn handle_db_inner(
     ctx: &RequestMonitoring,
     request: Request<Incoming>,
     conn_info: ConnInfo,
-    password: &[u8],
+    auth: AuthData,
     backend: Arc<PoolingBackend>,
-) -> Result<Response<Full<Bytes>>, SqlOverHttpError> {
+) -> Result<Response<BoxBody<Bytes, hyper1::Error>>, SqlOverHttpError> {
     //
     // Determine the destination and connection params
     //
@@ -605,14 +591,28 @@ async fn handle_db_inner(
 
     let authenticate_and_connect = Box::pin(
         async {
-            let keys = backend
-                .authenticate_with_password(
-                    ctx,
-                    &config.authentication_config,
-                    &conn_info.user_info,
-                    password,
-                )
-                .await?;
+            let keys = match auth {
+                AuthData::Password(pw) => {
+                    backend
+                        .authenticate_with_password(
+                            ctx,
+                            &config.authentication_config,
+                            &conn_info.user_info,
+                            &pw,
+                        )
+                        .await?
+                }
+                AuthData::Jwt(jwt) => {
+                    backend
+                        .authenticate_with_jwt(
+                            ctx,
+                            &config.authentication_config,
+                            &conn_info.user_info,
+                            jwt,
+                        )
+                        .await?
+                }
+            };
 
             let client = backend
                 .connect_to_compute(ctx, conn_info, keys, !allow_pool)
@@ -673,7 +673,11 @@ async fn handle_db_inner(
 
     let len = json_output.len();
     let response = response
-        .body(Full::new(Bytes::from(json_output)))
+        .body(
+            Full::new(Bytes::from(json_output))
+                .map_err(|x| match x {})
+                .boxed(),
+        )
         // only fails if invalid status code or invalid header/values are given.
         // these are not user configurable so it cannot fail dynamically
         .expect("building response payload should not fail");
@@ -687,6 +691,49 @@ async fn handle_db_inner(
         .observe(HttpDirection::Response, len as f64);
 
     Ok(response)
+}
+
+async fn handle_auth_broker_inner(
+    config: &'static ProxyConfig,
+    ctx: &RequestMonitoring,
+    request: Request<Incoming>,
+    conn_info: ConnInfo,
+    jwt: String,
+    backend: Arc<PoolingBackend>,
+) -> Result<Response<BoxBody<Bytes, hyper1::Error>>, SqlOverHttpError> {
+    let keys = backend
+        .authenticate_with_jwt(
+            ctx,
+            &config.authentication_config,
+            &conn_info.user_info,
+            jwt,
+        )
+        .await
+        .map_err(HttpConnError::from)?;
+
+    let mut client = backend.connect_to_local_proxy(ctx, conn_info, keys).await?;
+
+    // always completes instantly in http2 mode
+    // but good just in case
+    client.ready().await.map_err(HttpConnError::from)?;
+
+    let (parts, body) = request.into_parts();
+    let mut req = Request::builder()
+        .method("POST")
+        .uri("http://proxy.local/sql");
+
+    *req.headers_mut().unwrap() = parts.headers;
+
+    let req = req.body(body).unwrap();
+
+    // todo: map body to count egress
+    let _metrics = client.metrics();
+
+    Ok(client
+        .send_request(req)
+        .await
+        .map_err(HttpConnError::from)?
+        .map(|b| b.boxed()))
 }
 
 impl QueryData {

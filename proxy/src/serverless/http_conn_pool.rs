@@ -1,11 +1,10 @@
-use bytes::Bytes;
 use dashmap::DashMap;
-use http_body_util::Full;
 use hyper1::client::conn::http2;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use parking_lot::RwLock;
 use rand::Rng;
 use std::collections::VecDeque;
+use std::ops::DerefMut;
 use std::{
     ops::Deref,
     sync::atomic::{self, AtomicUsize},
@@ -18,14 +17,18 @@ use crate::metrics::{HttpEndpointPoolsGuard, Metrics};
 use crate::usage_metrics::{Ids, MetricCounter, USAGE_METRICS};
 use crate::{context::RequestMonitoring, EndpointCacheKey};
 
-use tracing::{debug, error, Span};
+use tracing::{debug, error};
 use tracing::{info, info_span, Instrument};
 
 use super::conn_pool::ConnInfo;
 
+pub(crate) type Send = http2::SendRequest<hyper1::body::Incoming>;
+pub(crate) type Connect =
+    http2::Connection<TokioIo<TcpStream>, hyper1::body::Incoming, TokioExecutor>;
+
 #[derive(Clone)]
 struct ConnPoolEntry {
-    conn: http2::SendRequest<Full<Bytes>>,
+    conn: Send,
     conn_id: uuid::Uuid,
     aux: MetricsAuxInfo,
 }
@@ -215,7 +218,7 @@ impl GlobalConnPool {
         );
         ctx.set_cold_start_info(ColdStartInfo::HttpPoolHit);
         ctx.success();
-        Some(Client::new(client.conn, conn_info.clone(), client.aux))
+        Some(Client::new(client.conn, client.aux))
     }
 
     fn get_or_create_endpoint_pool(
@@ -263,9 +266,9 @@ impl GlobalConnPool {
 pub(crate) fn poll_http2_client(
     global_pool: Arc<GlobalConnPool>,
     ctx: &RequestMonitoring,
-    conn_info: ConnInfo,
-    client: http2::SendRequest<Full<Bytes>>,
-    connection: http2::Connection<TokioIo<TcpStream>, Full<Bytes>, TokioExecutor>,
+    conn_info: &ConnInfo,
+    client: Send,
+    connection: Connect,
     conn_id: uuid::Uuid,
     aux: MetricsAuxInfo,
 ) -> Client {
@@ -314,7 +317,7 @@ pub(crate) fn poll_http2_client(
         .instrument(span),
     );
 
-    Client::new(client, conn_info, aux)
+    Client::new(client, aux)
 }
 
 impl Client {
@@ -327,32 +330,23 @@ impl Client {
 }
 
 pub(crate) struct Client {
-    span: Span,
-    inner: http2::SendRequest<Full<Bytes>>,
+    inner: Send,
     aux: MetricsAuxInfo,
-    conn_info: ConnInfo,
 }
 
 impl Client {
-    pub(self) fn new(
-        inner: http2::SendRequest<Full<Bytes>>,
-        conn_info: ConnInfo,
-        aux: MetricsAuxInfo,
-    ) -> Self {
-        Self {
-            inner,
-            span: Span::current(),
-            conn_info,
-            aux,
-        }
-    }
-    pub(crate) fn inner(&mut self) -> &mut http2::SendRequest<Full<Bytes>> {
-        &mut self.inner
+    pub(self) fn new(inner: Send, aux: MetricsAuxInfo) -> Self {
+        Self { inner, aux }
     }
 }
 
+impl DerefMut for Client {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
+}
 impl Deref for Client {
-    type Target = http2::SendRequest<Full<Bytes>>;
+    type Target = Send;
 
     fn deref(&self) -> &Self::Target {
         &self.inner
