@@ -37,7 +37,7 @@ jobs:
     strategy:
       matrix:
         arch: [ x64, arm64 ]
-        os: [ bullseye, bookworm ]
+        debian_version: [ bullseye, bookworm ]
 
     runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
 
@@ -79,17 +79,19 @@ jobs:
           provenance: false
           push: true
           pull: true
-          file: docker/debian/${{ matrix.os }}/Dockerfile.build-tools
-          cache-from: type=registry,ref=cache.neon.build/build-tools:cache-${{ matrix.arch }}-${{ matrix.os }}
-          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/build-tools:cache-{0}-{1},mode=max', matrix.arch, matrix.os) || '' }}
-          tags: neondatabase/build-tools:${{ inputs.image-tag }}-${{ matrix.arch }}-${{ matrix.os }}
+          file: Dockerfile.build-tools
+          build-args: DEBIAN_VERSION_CODENAME=${{ matrix.debian_version }}
+          cache-from: type=registry,ref=cache.neon.build/build-tools:cache-${{ matrix.arch }}-${{ matrix.debian_version }}
+          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/build-tools:cache-{0}-{1},mode=max', matrix.arch, matrix.debian_version) || '' }}
+          tags: neondatabase/build-tools:${{ inputs.image-tag }}-${{ matrix.arch }}-${{ matrix.debian_version }}
 
   merge-images:
     needs: [ build-image ]
     runs-on: ubuntu-22.04
     strategy:
       matrix:
-        os: [ bullseye, bookworm ]
+        debian_version: [ bullseye, bookworm ]
+        arch: [ x64, arm64 ]
 
     env:
       IMAGE_TAG: ${{ inputs.image-tag }}
@@ -103,5 +105,5 @@ jobs:
       - name: Create multi-arch image
         run: |
           docker buildx imagetools create -t neondatabase/build-tools:${IMAGE_TAG} \
-                                             neondatabase/build-tools:${IMAGE_TAG}-${{ matrix.os }}-x64 \
-                                             neondatabase/build-tools:${IMAGE_TAG}-${{ matrix.os }}-arm64
+                                             neondatabase/build-tools:${IMAGE_TAG}-${{ matrix.debian_version }}-${{ matrix.arch }} \
+                                             neondatabase/build-tools:${IMAGE_TAG}-${{ matrix.debian_version }}-arm64
