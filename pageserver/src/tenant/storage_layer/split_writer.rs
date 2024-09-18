@@ -146,7 +146,10 @@ impl SplitImageLayerWriter {
             if discard_fn(&layer_key).await {
                 generated_layers.push(SplitWriterResult::Discarded(layer_key));
             } else {
-                let layer = match inner.finish_with_end_key(end_key, ctx).await {
+                let layer = match inner
+                    .finish_with_end_key(layer_key.key_range.end, ctx)
+                    .await
+                {
                     Ok((desc, path)) => Layer::finish_creating(self.conf, tline, desc, &path)?,
                     Err(e) => {
                         for produced_layer in generated_layers {
@@ -535,8 +538,16 @@ mod tests {
             .unwrap();
         let delta_layers = delta_writer.finish(&tline, &ctx).await.unwrap();
         if discard {
-            for layer in image_layers {
-                layer.into_discarded_layer();
+            for (i, layer) in image_layers.into_iter().enumerate() {
+                let discarded = layer.into_discarded_layer();
+                assert_eq!(
+                    discarded,
+                    PersistentLayerKey {
+                        key_range: get_key(i as u32)..get_key(i as u32 + 1),
+                        lsn_range: Lsn(0x18)..Lsn(0x20),
+                        is_delta: false
+                    }
+                );
             }
             for layer in delta_layers {
                 layer.into_discarded_layer();
