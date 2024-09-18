@@ -563,9 +563,11 @@ impl Timeline {
                 .await?;
 
             if keys_written > 0 {
-                let new_layer = image_layer_writer
-                    .finish(self, ctx)
+                let (desc, path) = image_layer_writer
+                    .finish(ctx)
                     .await
+                    .map_err(CompactionError::Other)?;
+                let new_layer = Layer::finish_creating(self.conf, self, desc, &path)
                     .map_err(CompactionError::Other)?;
                 tracing::info!(layer=%new_layer, "Rewrote layer, {} -> {} bytes",
                     layer.metadata().file_size,
