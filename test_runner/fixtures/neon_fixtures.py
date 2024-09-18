@@ -3863,9 +3863,6 @@ def static_proxy(
     dbname = vanilla_pg.default_options["dbname"]
     auth_endpoint = f"postgres://proxy:password@{host}:{port}/{dbname}"
 
-    # require password for 'http_auth' user
-    vanilla_pg.edit_hba([f"host {dbname} http_auth {host} password"])
-
     # For simplicity, we use the same user for both `--auth-endpoint` and `safe_psql`
     vanilla_pg.start()
     vanilla_pg.safe_psql("create user proxy with login superuser password 'password'")
