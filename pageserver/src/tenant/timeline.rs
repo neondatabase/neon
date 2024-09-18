@@ -5373,7 +5373,8 @@ impl Timeline {
     /// Force create an image layer and place it into the layer map.
     ///
     /// DO NOT use this function directly. Use [`Tenant::branch_timeline_test_with_layers`]
-    /// or [`Tenant::create_test_timeline_with_layers`] to ensure all these layers are placed into the layer map in one run.
+    /// or [`Tenant::create_test_timeline_with_layers`] to ensure all these layers are
+    /// placed into the layer map in one run AND be validated.
     #[cfg(test)]
     pub(super) async fn force_create_image_layer(
         self: &Arc<Timeline>,
@@ -5419,7 +5420,8 @@ impl Timeline {
     /// Force create a delta layer and place it into the layer map.
     ///
     /// DO NOT use this function directly. Use [`Tenant::branch_timeline_test_with_layers`]
-    /// or [`Tenant::create_test_timeline_with_layers`] to ensure all these layers are placed into the layer map in one run.
+    /// or [`Tenant::create_test_timeline_with_layers`] to ensure all these layers are
+    /// placed into the layer map in one run AND be validated.
     #[cfg(test)]
     pub(super) async fn force_create_delta_layer(
         self: &Arc<Timeline>,
@@ -5444,33 +5446,6 @@ impl Timeline {
         );
         if let Some(check_start_lsn) = check_start_lsn {
             assert!(deltas.lsn_range.start >= check_start_lsn);
-        }
-        // check if the delta layer does not violate the LSN invariant, the legacy compaction should always produce a batch of
-        // layers of the same start/end LSN, and so should the force inserted layer
-        {
-            /// Checks if a overlaps with b, assume a/b = [start, end).
-            pub fn overlaps_with<T: Ord>(a: &Range<T>, b: &Range<T>) -> bool {
-                !(a.end <= b.start || b.end <= a.start)
-            }
-
-            if deltas.key_range.start.next() != deltas.key_range.end {
-                let guard = self.layers.read().await;
-                let mut invalid_layers =
-                    guard.layer_map()?.iter_historic_layers().filter(|layer| {
-                        layer.is_delta()
-                        && overlaps_with(&layer.lsn_range, &deltas.lsn_range)
-                        && layer.lsn_range != deltas.lsn_range
-                        // skip single-key layer files
-                        && layer.key_range.start.next() != layer.key_range.end
-                    });
-                if let Some(layer) = invalid_layers.next() {
-                    // If a delta layer overlaps with another delta layer AND their LSN range is not the same, panic
-                    panic!(
-                        "inserted layer violates delta layer LSN invariant: current_lsn_range={}..{}, conflict_lsn_range={}..{}",
-                        deltas.lsn_range.start, deltas.lsn_range.end, layer.lsn_range.start, layer.lsn_range.end
-                    );
-                }
-            }
         }
         let mut delta_layer_writer = DeltaLayerWriter::new(
             self.conf,
