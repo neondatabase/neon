@@ -141,7 +141,7 @@ impl KeyHistoryRetention {
                     };
                     stat.produce_image_key(img);
                     if let Some(image_writer) = image_writer.as_mut() {
-                        image_writer.put_image(key, img.clone(), tline, ctx).await?;
+                        image_writer.put_image(key, img.clone(), ctx).await?;
                     } else {
                         delta_writer
                             .put_value_with_discard_fn(
