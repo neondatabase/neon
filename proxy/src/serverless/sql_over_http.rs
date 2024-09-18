@@ -514,17 +514,59 @@ async fn handle_inner(
         "handling interactive connection from client"
     );
 
-    //
-    // Determine the destination and connection params
-    //
-    let headers = request.headers();
-
-    // TLS config should be there.
-    let conn_info = get_conn_info(ctx, headers, config.tls_config.as_ref())?;
+    let conn_info = get_conn_info(ctx, request.headers(), config.tls_config.as_ref())?;
     info!(
         user = conn_info.conn_info.user_info.user.as_str(),
         "credentials"
     );
+
+    match conn_info.auth {
+        AuthData::Password(pw) => {
+            let res = handle_db_inner(
+                cancel,
+                config,
+                ctx,
+                request,
+                conn_info.conn_info,
+                &pw,
+                backend,
+            )
+            .await?;
+            Ok(res)
+        }
+        AuthData::Jwt(jwt) => {
+            let keys = backend
+                .authenticate_with_jwt(
+                    ctx,
+                    &config.authentication_config,
+                    &conn_info.conn_info.user_info,
+                    jwt,
+                )
+                .await
+                .map_err(HttpConnError::from)?;
+
+            let _client = backend
+                .connect_to_local_proxy(ctx, conn_info.conn_info, keys)
+                .await?;
+
+            todo!()
+        }
+    }
+}
+
+async fn handle_db_inner(
+    cancel: CancellationToken,
+    config: &'static ProxyConfig,
+    ctx: &RequestMonitoring,
+    request: Request<Incoming>,
+    conn_info: ConnInfo,
+    password: &[u8],
+    backend: Arc<PoolingBackend>,
+) -> Result<Response<Full<Bytes>>, SqlOverHttpError> {
+    //
+    // Determine the destination and connection params
+    //
+    let headers = request.headers();
 
     // Allow connection pooling only if explicitly requested
     // or if we have decided that http pool is no longer opt-in
@@ -563,31 +605,17 @@ async fn handle_inner(
 
     let authenticate_and_connect = Box::pin(
         async {
-            let keys = match conn_info.auth {
-                AuthData::Password(pw) => {
-                    backend
-                        .authenticate_with_password(
-                            ctx,
-                            &config.authentication_config,
-                            &conn_info.conn_info.user_info,
-                            &pw,
-                        )
-                        .await?
-                }
-                AuthData::Jwt(jwt) => {
-                    backend
-                        .authenticate_with_jwt(
-                            ctx,
-                            &config.authentication_config,
-                            &conn_info.conn_info.user_info,
-                            jwt,
-                        )
-                        .await?
-                }
-            };
+            let keys = backend
+                .authenticate_with_password(
+                    ctx,
+                    &config.authentication_config,
+                    &conn_info.user_info,
+                    password,
+                )
+                .await?;
 
             let client = backend
-                .connect_to_compute(ctx, conn_info.conn_info, keys, !allow_pool)
+                .connect_to_compute(ctx, conn_info, keys, !allow_pool)
                 .await?;
             // not strictly necessary to mark success here,
             // but it's just insurance for if we forget it somewhere else

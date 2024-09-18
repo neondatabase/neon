@@ -5,6 +5,7 @@
 mod backend;
 pub mod cancel_set;
 mod conn_pool;
+mod http_conn_pool;
 mod http_util;
 mod json;
 mod sql_over_http;
@@ -81,7 +82,28 @@ pub async fn task_main(
         }
     });
 
+    let http_conn_pool = http_conn_pool::GlobalConnPool::new(&config.http_config);
+    {
+        let http_conn_pool = Arc::clone(&http_conn_pool);
+        tokio::spawn(async move {
+            http_conn_pool.gc_worker(StdRng::from_entropy()).await;
+        });
+    }
+
+    // shutdown the connection pool
+    tokio::spawn({
+        let cancellation_token = cancellation_token.clone();
+        let http_conn_pool = http_conn_pool.clone();
+        async move {
+            cancellation_token.cancelled().await;
+            tokio::task::spawn_blocking(move || http_conn_pool.shutdown())
+                .await
+                .unwrap();
+        }
+    });
+
     let backend = Arc::new(PoolingBackend {
+        http_conn_pool: Arc::clone(&http_conn_pool),
         pool: Arc::clone(&conn_pool),
         config,
         endpoint_rate_limiter: Arc::clone(&endpoint_rate_limiter),

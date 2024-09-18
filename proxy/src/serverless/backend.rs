@@ -1,7 +1,12 @@
-use std::{sync::Arc, time::Duration};
+use std::{io, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use tracing::{debug, field::display, info};
+use bytes::Bytes;
+use http_body_util::Full;
+use hyper1::client::conn::http2;
+use hyper_util::rt::{TokioExecutor, TokioIo};
+use tokio::net::{lookup_host, TcpStream};
+use tracing::{field::display, info};
 
 use crate::{
     auth::{
@@ -27,9 +32,13 @@ use crate::{
     Host,
 };
 
-use super::conn_pool::{poll_client, Client, ConnInfo, GlobalConnPool};
+use super::{
+    conn_pool::{poll_client, Client, ConnInfo, GlobalConnPool},
+    http_conn_pool::{self, poll_http2_client},
+};
 
 pub(crate) struct PoolingBackend {
+    pub(crate) http_conn_pool: Arc<super::http_conn_pool::GlobalConnPool>,
     pub(crate) pool: Arc<GlobalConnPool<tokio_postgres::Client>>,
     pub(crate) config: &'static ProxyConfig,
     pub(crate) endpoint_rate_limiter: Arc<EndpointRateLimiter>,
@@ -190,6 +199,39 @@ impl PoolingBackend {
         )
         .await
     }
+
+    // Wake up the destination if needed
+    #[tracing::instrument(fields(pid = tracing::field::Empty), skip_all)]
+    pub(crate) async fn connect_to_local_proxy(
+        &self,
+        ctx: &RequestMonitoring,
+        conn_info: ConnInfo,
+        keys: ComputeCredentials,
+    ) -> Result<http_conn_pool::Client, HttpConnError> {
+        info!("pool: looking for an existing connection");
+        if let Some(client) = self.http_conn_pool.get(ctx, &conn_info) {
+            return Ok(client);
+        }
+
+        let conn_id = uuid::Uuid::new_v4();
+        tracing::Span::current().record("conn_id", display(conn_id));
+        info!(%conn_id, "pool: opening a new connection '{conn_info}'");
+        let backend = self.config.auth_backend.as_ref().map(|()| keys);
+        crate::proxy::connect_compute::connect_to_compute(
+            ctx,
+            &HyperMechanism {
+                conn_id,
+                conn_info,
+                pool: self.http_conn_pool.clone(),
+                locks: &self.config.connect_compute_locks,
+            },
+            &backend,
+            false, // do not allow self signed compute for http flow
+            self.config.wake_compute_retry_config,
+            self.config.connect_to_compute_retry_config,
+        )
+        .await
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -198,6 +240,10 @@ pub(crate) enum HttpConnError {
     ConnectionClosedAbruptly(#[from] tokio::sync::watch::error::SendError<uuid::Uuid>),
     #[error("could not connection to compute")]
     ConnectionError(#[from] tokio_postgres::Error),
+    #[error("could not connection to compute")]
+    IoConnectionError(#[from] std::io::Error),
+    #[error("could not establish h2 connection to compute")]
+    H2ConnectionError(#[from] hyper1::Error),
 
     #[error("could not get auth info")]
     GetAuthInfo(#[from] GetAuthInfoError),
@@ -214,6 +260,8 @@ impl ReportableError for HttpConnError {
         match self {
             HttpConnError::ConnectionClosedAbruptly(_) => ErrorKind::Compute,
             HttpConnError::ConnectionError(p) => p.get_error_kind(),
+            HttpConnError::IoConnectionError(_) => ErrorKind::Compute,
+            HttpConnError::H2ConnectionError(_) => ErrorKind::Compute,
             HttpConnError::GetAuthInfo(a) => a.get_error_kind(),
             HttpConnError::AuthError(a) => a.get_error_kind(),
             HttpConnError::WakeCompute(w) => w.get_error_kind(),
@@ -227,6 +275,8 @@ impl UserFacingError for HttpConnError {
         match self {
             HttpConnError::ConnectionClosedAbruptly(_) => self.to_string(),
             HttpConnError::ConnectionError(p) => p.to_string(),
+            HttpConnError::IoConnectionError(p) => p.to_string(),
+            HttpConnError::H2ConnectionError(_) => "Could not establish HTTP connection to the database".to_string(),
             HttpConnError::GetAuthInfo(c) => c.to_string_client(),
             HttpConnError::AuthError(c) => c.to_string_client(),
             HttpConnError::WakeCompute(c) => c.to_string_client(),
@@ -241,6 +291,8 @@ impl CouldRetry for HttpConnError {
     fn could_retry(&self) -> bool {
         match self {
             HttpConnError::ConnectionError(e) => e.could_retry(),
+            HttpConnError::IoConnectionError(e) => e.could_retry(),
+            HttpConnError::H2ConnectionError(_) => false,
             HttpConnError::ConnectionClosedAbruptly(_) => false,
             HttpConnError::GetAuthInfo(_) => false,
             HttpConnError::AuthError(_) => false,
@@ -308,4 +360,101 @@ impl ConnectMechanism for TokioMechanism {
     }
 
     fn update_connect_config(&self, _config: &mut compute::ConnCfg) {}
+}
+
+struct HyperMechanism {
+    pool: Arc<http_conn_pool::GlobalConnPool>,
+    conn_info: ConnInfo,
+    conn_id: uuid::Uuid,
+
+    /// connect_to_compute concurrency lock
+    locks: &'static ApiLocks<Host>,
+}
+
+#[async_trait]
+impl ConnectMechanism for HyperMechanism {
+    type Connection = http_conn_pool::Client;
+    type ConnectError = HttpConnError;
+    type Error = HttpConnError;
+
+    async fn connect_once(
+        &self,
+        ctx: &RequestMonitoring,
+        node_info: &CachedNodeInfo,
+        timeout: Duration,
+    ) -> Result<Self::Connection, Self::ConnectError> {
+        let host = node_info.config.get_host()?;
+        let permit = self.locks.get_permit(&host).await?;
+
+        let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
+
+        // let port = node_info.config.get_ports().first().unwrap_or_else(10432);
+        let res = connect_http2(&host, 10432, timeout).await;
+        drop(pause);
+        let (client, connection) = permit.release_result(res)?;
+
+        Ok(poll_http2_client(
+            self.pool.clone(),
+            ctx,
+            self.conn_info.clone(),
+            client,
+            connection,
+            self.conn_id,
+            node_info.aux.clone(),
+        ))
+    }
+
+    fn update_connect_config(&self, _config: &mut compute::ConnCfg) {}
+}
+
+async fn connect_http2(
+    host: &str,
+    port: u16,
+    timeout: Duration,
+) -> Result<
+    (
+        http2::SendRequest<Full<Bytes>>,
+        http2::Connection<TokioIo<TcpStream>, Full<Bytes>, TokioExecutor>,
+    ),
+    HttpConnError,
+> {
+    let mut addrs = lookup_host((host, port)).await?;
+
+    let mut last_err = None;
+
+    let stream = loop {
+        let Some(addr) = addrs.next() else {
+            return Err(last_err.unwrap_or_else(|| {
+                HttpConnError::IoConnectionError(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "could not resolve any addresses",
+                ))
+            }));
+        };
+
+        let stream = match tokio::time::timeout(timeout, TcpStream::connect(addr)).await {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(e)) => {
+                last_err = Some(HttpConnError::IoConnectionError(e));
+                continue;
+            }
+            Err(e) => {
+                last_err = Some(HttpConnError::IoConnectionError(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    e,
+                )));
+                continue;
+            }
+        };
+
+        stream.set_nodelay(true)?;
+
+        break stream;
+    };
+
+    let (client, connection) = hyper1::client::conn::http2::Builder::new(TokioExecutor::new())
+        .handshake(TokioIo::new(stream))
+        .await?;
+
+    Ok((client, connection))
 }
