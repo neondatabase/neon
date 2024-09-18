@@ -171,8 +171,6 @@ impl ComputeUserInfo {
 }
 
 pub(crate) enum ComputeCredentialKeys {
-    #[expect(dead_code, reason = "WIP")]
-    Jwt(String),
     #[cfg(any(test, feature = "testing"))]
     Password(Vec<u8>),
     AuthKeys(AuthKeys),
