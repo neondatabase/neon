@@ -55,15 +55,17 @@ jobs:
           echo DBPASS="${DBPASS//\//}" >> "${GITHUB_OUTPUT}"
 
       - name: Change tests according to the generated password
+        env:
+          DBPASS: ${{ steps.pwgen.outputs.DBPASS }}
         run: |
           cd vendor/postgres-v"${DEFAULT_PG_VERSION}"/src/test/regress
           for fname in sql/*.sql expected/*.out; do
-          sed -i.bak s/NEON_PASSWORD_PLACEHOLDER/"'${{ steps.pwgen.outputs.DBPASS }}'"/ "${fname}"
+            sed -i.bak s/NEON_PASSWORD_PLACEHOLDER/"'${DBPASS}'"/ "${fname}"
           done
           for ph in $(grep NEON_MD5_PLACEHOLDER expected/password.out | awk '{print $3;}' | sort | uniq); do
-          USER=$(echo "${ph}" | cut -c 22-)
-          MD5=md5$(echo -n "${{ steps.pwgen.outputs.DBPASS }}${USER}" | md5sum | awk '{print $1;}')
-          sed -i.bak "s/${ph}/${MD5}/" expected/password.out
+            USER=$(echo "${ph}" | cut -c 22-)
+            MD5=md5$(echo -n "${DBPASS}${USER}" | md5sum | awk '{print $1;}')
+            sed -i.bak "s/${ph}/${MD5}/" expected/password.out
           done
 
       - name: Download Neon artifact
