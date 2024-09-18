@@ -309,7 +309,6 @@ impl NodeInfo {
             #[cfg(any(test, feature = "testing"))]
             ComputeCredentialKeys::Password(password) => self.config.password(password),
             ComputeCredentialKeys::AuthKeys(auth_keys) => self.config.auth_keys(*auth_keys),
-            ComputeCredentialKeys::Jwt(_) => panic!("unsupported keys"),
             ComputeCredentialKeys::None => &mut self.config,
         };
     }

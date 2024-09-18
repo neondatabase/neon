@@ -39,6 +39,7 @@ use url::Url;
 use urlencoding;
 use utils::http::error::ApiError;
 
+use crate::auth::backend::ComputeCredentials;
 use crate::auth::backend::ComputeUserInfo;
 use crate::auth::endpoint_sni;
 use crate::auth::ComputeUserInfoParseError;
@@ -610,7 +611,12 @@ async fn handle_db_inner(
                             &conn_info.user_info,
                             jwt,
                         )
-                        .await?
+                        .await?;
+
+                    ComputeCredentials {
+                        info: conn_info.user_info.clone(),
+                        keys: crate::auth::backend::ComputeCredentialKeys::None,
+                    }
                 }
             };
 
@@ -701,7 +707,7 @@ async fn handle_auth_broker_inner(
     jwt: String,
     backend: Arc<PoolingBackend>,
 ) -> Result<Response<BoxBody<Bytes, hyper1::Error>>, SqlOverHttpError> {
-    let keys = backend
+    backend
         .authenticate_with_jwt(
             ctx,
             &config.authentication_config,
@@ -711,7 +717,7 @@ async fn handle_auth_broker_inner(
         .await
         .map_err(HttpConnError::from)?;
 
-    let mut client = backend.connect_to_local_proxy(ctx, conn_info, keys).await?;
+    let mut client = backend.connect_to_local_proxy(ctx, conn_info).await?;
 
     // always completes instantly in http2 mode
     // but good just in case

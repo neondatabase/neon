@@ -112,7 +112,7 @@ impl PoolingBackend {
         config: &AuthenticationConfig,
         user_info: &ComputeUserInfo,
         jwt: String,
-    ) -> Result<ComputeCredentials, AuthError> {
+    ) -> Result<(), AuthError> {
         match &self.config.auth_backend {
             crate::auth::Backend::Console(console, ()) => {
                 config
@@ -126,10 +126,8 @@ impl PoolingBackend {
                     )
                     .await
                     .map_err(|e| AuthError::auth_failed(e.to_string()))?;
-                Ok(ComputeCredentials {
-                    info: user_info.clone(),
-                    keys: crate::auth::backend::ComputeCredentialKeys::Jwt(jwt),
-                })
+
+                Ok(())
             }
             crate::auth::Backend::Web(_, ()) => Err(AuthError::auth_failed(
                 "JWT login over web auth proxy is not supported",
@@ -146,11 +144,9 @@ impl PoolingBackend {
                     )
                     .await
                     .map_err(|e| AuthError::auth_failed(e.to_string()))?;
-                Ok(ComputeCredentials {
-                    info: user_info.clone(),
-                    // todo: rewrite JWT signature with key shared somehow between local proxy and postgres
-                    keys: crate::auth::backend::ComputeCredentialKeys::None,
-                })
+
+                // todo: rewrite JWT signature with key shared somehow between local proxy and postgres
+                Ok(())
             }
         }
     }
@@ -203,7 +199,6 @@ impl PoolingBackend {
         &self,
         ctx: &RequestMonitoring,
         conn_info: ConnInfo,
-        keys: ComputeCredentials,
     ) -> Result<http_conn_pool::Client, HttpConnError> {
         info!("pool: looking for an existing connection");
         if let Some(client) = self.http_conn_pool.get(ctx, &conn_info) {
@@ -213,7 +208,14 @@ impl PoolingBackend {
         let conn_id = uuid::Uuid::new_v4();
         tracing::Span::current().record("conn_id", display(conn_id));
         info!(%conn_id, "pool: opening a new connection '{conn_info}'");
-        let backend = self.config.auth_backend.as_ref().map(|()| keys);
+        let backend = self
+            .config
+            .auth_backend
+            .as_ref()
+            .map(|()| ComputeCredentials {
+                info: conn_info.user_info.clone(),
+                keys: crate::auth::backend::ComputeCredentialKeys::None,
+            });
         crate::proxy::connect_compute::connect_to_compute(
             ctx,
             &HyperMechanism {
