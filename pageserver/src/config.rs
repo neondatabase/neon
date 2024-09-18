@@ -491,11 +491,6 @@ pub struct ConfigurableSemaphore {
 }
 
 impl ConfigurableSemaphore {
-    pub const DEFAULT_INITIAL: NonZeroUsize = match NonZeroUsize::new(1) {
-        Some(x) => x,
-        None => panic!("const unwrap is not yet stable"),
-    };
-
     /// Initializse using a non-zero amount of permits.
     ///
     /// Require a non-zero initial permits, because using permits == 0 is a crude way to disable a
@@ -513,12 +508,6 @@ impl ConfigurableSemaphore {
     /// Returns the configured amount of permits.
     pub fn initial_permits(&self) -> NonZeroUsize {
         self.initial_permits
-    }
-}
-
-impl Default for ConfigurableSemaphore {
-    fn default() -> Self {
-        Self::new(Self::DEFAULT_INITIAL)
     }
 }
 

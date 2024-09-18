@@ -340,7 +340,10 @@ impl Default for ConfigToml {
 
             concurrent_tenant_warmup: (NonZeroUsize::new(DEFAULT_CONCURRENT_TENANT_WARMUP)
                 .expect("Invalid default constant")),
-            concurrent_tenant_size_logical_size_queries: NonZeroUsize::new(1).unwrap(),
+            concurrent_tenant_size_logical_size_queries: NonZeroUsize::new(
+                DEFAULT_CONCURRENT_TENANT_SIZE_LOGICAL_SIZE_QUERIES,
+            )
+            .unwrap(),
             metric_collection_interval: (humantime::parse_duration(
                 DEFAULT_METRIC_COLLECTION_INTERVAL,
             )
