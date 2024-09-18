@@ -87,6 +87,9 @@ jobs:
   merge-images:
     needs: [ build-image ]
     runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        os: [ bullseye, bookworm ]
 
     env:
       IMAGE_TAG: ${{ inputs.image-tag }}
