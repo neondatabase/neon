@@ -1,7 +1,7 @@
 //! Quantify a single walredo manager's throughput under N concurrent callers.
 //!
 //! The benchmark implementation ([`bench_impl`]) is parametrized by
-//! - `redo_work` => [`Request::short_request`] or [`Request::medium_request`]
+//! - `redo_work` => an async closure that takes a `PostgresRedoManager` and performs one redo
 //! - `n_redos` => number of times the benchmark shell execute the `redo_work`
 //! - `nclients` => number of clients (more on this shortly).
 //!
@@ -10,7 +10,7 @@
 //! Each task executes the `redo_work` `n_redos/nclients` times.
 //!
 //! We exercise the following combinations:
-//! - `redo_work = short / medium``
+//! - `redo_work = ping / short / medium``
 //! - `nclients = [1, 2, 4, 8, 16, 32, 64, 128]`
 //!
 //! We let `criterion` determine the `n_redos` using `iter_custom`.
