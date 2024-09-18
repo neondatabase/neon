@@ -1285,7 +1285,7 @@ async fn handle_start_all(
         return Ok(());
     };
 
-    println!("startup failed because one or more services could not be started");
+    eprintln!("startup failed because one or more services could not be started");
 
     for e in errors {
         eprintln!("{e}");
