@@ -9,7 +9,7 @@
 [submodule "vendor/postgres-v16"]
 	path = vendor/postgres-v16
 	url = https://github.com/neondatabase/postgres.git
-	branch = REL_16_STABLE_neon
+	branch = fix_path_for_extension_request
 [submodule "vendor/postgres-v17"]
 	path = vendor/postgres-v17
 	url = https://github.com/neondatabase/postgres.git
