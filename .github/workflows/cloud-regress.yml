@@ -17,7 +17,7 @@ defaults:
     shell: bash -euxo pipefail {0}
 
 concurrency:
-  # Allow only one workflow per any non-`main` branch.
+  # Allow only one workflow
   group: ${{ github.workflow }}
   cancel-in-progress: true
 
@@ -96,7 +96,7 @@ jobs:
         with:
           channel-id: "C033QLM5P7D" # on-call-staging-stream
           slack-message: |
-            Periodic regression testing: ${{ job.status }}
+            Periodic pg_regress on staging: ${{ job.status }}
             <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|GitHub Run>
             <${{ steps.create-allure-report.outputs.report-url }}|Allure report>
         env:
