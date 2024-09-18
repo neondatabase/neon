@@ -163,7 +163,7 @@ impl SplitImageLayerWriter {
     }
 
     pub fn discard(self) {
-        // do nothing
+        // The drop handler of each `generated_layer_writers` will clean up the `.tmp` files.
     }
 
     #[cfg(test)]
