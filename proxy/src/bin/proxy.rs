@@ -62,12 +62,13 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 #[derive(Clone, Debug, ValueEnum)]
 enum AuthBackendType {
     Console,
-    #[cfg(feature = "testing")]
-    Postgres,
     // clap only shows the name, not the alias, in usage text.
     // TODO: swap name/alias and deprecate "link"
     #[value(name("link"), alias("web"))]
     Web,
+
+    #[cfg(feature = "testing")]
+    Postgres,
 }
 
 /// Neon proxy/router
@@ -639,16 +640,18 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
             let api = console::provider::ConsoleBackend::Console(api);
             auth::Backend::Console(MaybeOwned::Owned(api), ())
         }
-        #[cfg(feature = "testing")]
-        AuthBackendType::Postgres => {
-            let url = args.auth_endpoint.parse()?;
-            let api = console::provider::mock::Api::new(url);
-            let api = console::provider::ConsoleBackend::Postgres(api);
-            auth::Backend::Console(MaybeOwned::Owned(api), ())
-        }
+
         AuthBackendType::Web => {
             let url = args.uri.parse()?;
             auth::Backend::Web(MaybeOwned::Owned(url), ())
+        }
+
+        #[cfg(feature = "testing")]
+        AuthBackendType::Postgres => {
+            let url = args.auth_endpoint.parse()?;
+            let api = console::provider::mock::Api::new(url, !args.is_private_access_proxy);
+            let api = console::provider::ConsoleBackend::Postgres(api);
+            auth::Backend::Console(MaybeOwned::Owned(api), ())
         }
     };
 
