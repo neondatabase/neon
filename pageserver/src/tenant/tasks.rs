@@ -364,8 +364,6 @@ async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
                 first = false;
 
                 let delays = async {
-                    let deadline = tenant.gc_block.get_lsn_lease_deadline();
-                    delay_until(deadline, &tenant.cancel).await?;
                     random_init_delay(period, &cancel).await?;
                     Ok::<_, Cancelled>(())
                 };
@@ -424,8 +422,7 @@ async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
                 }
             };
 
-            let deadline = tenant.gc_block.get_lsn_lease_deadline().max(tokio::time::Instant::now() + sleep_duration);
-            if tokio::time::timeout_at(deadline, cancel.cancelled())
+            if tokio::time::timeout(sleep_duration, cancel.cancelled())
                 .await
                 .is_ok()
             {

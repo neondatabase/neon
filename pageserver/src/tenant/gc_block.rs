@@ -69,12 +69,6 @@ impl GcBlock {
         g.lsn_lease_deadline = Some(deadline);
     }
 
-    /// Gets the deadline before which we cannot proceed to GC due to lsn lease.
-    pub(super) fn get_lsn_lease_deadline(&self) -> Instant {
-        let g = self.reasons.lock().unwrap();
-        g.lsn_lease_deadline.unwrap_or(Instant::now())
-    }
-
     pub(crate) fn summary(&self) -> Option<BlockingReasons> {
         let g = self.reasons.lock().unwrap();
 
