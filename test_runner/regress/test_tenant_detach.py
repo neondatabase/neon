@@ -272,7 +272,7 @@ def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
     env.pageserver.allowed_errors.extend(PERMIT_PAGE_SERVICE_ERRORS)
 
     # create new nenant
-    tenant_id, timeline_id = env.neon_cli.create_tenant()
+    tenant_id, timeline_id = env.neon_cli.create_tenant(conf={"lsn_lease_length": "0s"})
 
     # assert tenant exists on disk
     assert env.pageserver.tenant_dir(tenant_id).exists()
