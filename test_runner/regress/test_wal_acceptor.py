@@ -19,7 +19,6 @@ import psycopg2.errors
 import psycopg2.extras
 import pytest
 import requests
-from fixtures.broker import NeonBroker
 from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.metrics import parse_metrics
@@ -1439,11 +1438,7 @@ class SafekeeperEnv:
     ):
         self.repo_dir = repo_dir
         self.port_distributor = port_distributor
-        self.broker = NeonBroker(
-            logfile=Path(self.repo_dir) / "storage_broker.log",
-            port=self.port_distributor.get_port(),
-            neon_binpath=neon_binpath,
-        )
+        self.fake_broker_endpoint = f"http://127.0.0.1:{port_distributor.get_port()}"
         self.pg_bin = pg_bin
         self.num_safekeepers = num_safekeepers
         self.bin_safekeeper = str(neon_binpath / "safekeeper")
@@ -1492,7 +1487,7 @@ class SafekeeperEnv:
             "--id",
             str(i),
             "--broker-endpoint",
-            self.broker.client_url(),
+            self.fake_broker_endpoint,
         ]
         log.info(f'Running command "{" ".join(cmd)}"')
 

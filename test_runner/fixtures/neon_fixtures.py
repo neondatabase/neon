@@ -60,7 +60,6 @@ from urllib3.util.retry import Retry
 
 from fixtures import overlayfs
 from fixtures.auth_tokens import AuthKeys, TokenScope
-from fixtures.broker import NeonBroker
 from fixtures.common_types import Lsn, NodeId, TenantId, TenantShardId, TimelineId
 from fixtures.endpoint.http import EndpointHttpClient
 from fixtures.log_helper import log
@@ -230,21 +229,6 @@ def port_distributor(worker_base_port: int, worker_port_num: int) -> PortDistrib
     return PortDistributor(base_port=worker_base_port, port_number=worker_port_num)
 
 
-@pytest.fixture(scope="function")
-def default_broker(
-    port_distributor: PortDistributor,
-    test_output_dir: Path,
-    neon_binpath: Path,
-) -> Iterator[NeonBroker]:
-    # multiple pytest sessions could get launched in parallel, get them different ports/datadirs
-    client_port = port_distributor.get_port()
-    broker_logfile = test_output_dir / "repo" / "storage_broker.log"
-
-    broker = NeonBroker(logfile=broker_logfile, port=client_port, neon_binpath=neon_binpath)
-    yield broker
-    broker.stop()
-
-
 @pytest.fixture(scope="session")
 def run_id() -> Iterator[uuid.UUID]:
     yield uuid.uuid4()
@@ -387,7 +371,6 @@ class NeonEnvBuilder:
         self,
         repo_dir: Path,
         port_distributor: PortDistributor,
-        broker: NeonBroker,
         run_id: uuid.UUID,
         mock_s3_server: MockS3Server,
         neon_binpath: Path,
@@ -428,7 +411,6 @@ class NeonEnvBuilder:
         # Safekeepers remote storage
         self.safekeepers_remote_storage: Optional[RemoteStorage] = None
 
-        self.broker = broker
         self.run_id = run_id
         self.mock_s3_server: MockS3Server = mock_s3_server
         self.pageserver_config_override = pageserver_config_override
@@ -940,6 +922,8 @@ class NeonEnvBuilder:
 
             self.env.storage_controller.assert_no_errors()
 
+            self.env.broker.assert_no_errors()
+
         try:
             self.overlay_cleanup_teardown()
         except Exception as e:
@@ -993,7 +977,7 @@ class NeonEnv:
         self.endpoints = EndpointFactory(self)
         self.safekeepers: List[Safekeeper] = []
         self.pageservers: List[NeonPageserver] = []
-        self.broker = config.broker
+        self.broker = NeonBroker(self)
         self.pageserver_remote_storage = config.pageserver_remote_storage
         self.safekeepers_remote_storage = config.safekeepers_remote_storage
         self.pg_version = config.pg_version
@@ -1168,7 +1152,7 @@ class NeonEnv:
             max_workers=2 + len(self.pageservers) + len(self.safekeepers)
         ) as executor:
             futs.append(
-                executor.submit(lambda: self.broker.try_start() or None)
+                executor.submit(lambda: self.broker.start() or None)
             )  # The `or None` is for the linter
 
             for pageserver in self.pageservers:
@@ -1225,7 +1209,7 @@ class NeonEnv:
                 pageserver.stop(immediate=immediate)
             except RuntimeError:
                 stop_later.append(pageserver)
-        self.broker.stop(immediate=immediate)
+        self.broker.stop()
 
         # TODO: for nice logging we need python 3.11 ExceptionGroup
         for ps in stop_later:
@@ -1339,7 +1323,6 @@ def neon_simple_env(
     pytestconfig: Config,
     port_distributor: PortDistributor,
     mock_s3_server: MockS3Server,
-    default_broker: NeonBroker,
     run_id: uuid.UUID,
     top_output_dir: Path,
     test_output_dir: Path,
@@ -1364,7 +1347,6 @@ def neon_simple_env(
         top_output_dir=top_output_dir,
         repo_dir=repo_dir,
         port_distributor=port_distributor,
-        broker=default_broker,
         mock_s3_server=mock_s3_server,
         neon_binpath=neon_binpath,
         pg_distrib_dir=pg_distrib_dir,
@@ -1392,7 +1374,6 @@ def neon_env_builder(
     neon_binpath: Path,
     pg_distrib_dir: Path,
     pg_version: PgVersion,
-    default_broker: NeonBroker,
     run_id: uuid.UUID,
     request: FixtureRequest,
     test_overlay_dir: Path,
@@ -1428,7 +1409,6 @@ def neon_env_builder(
         neon_binpath=neon_binpath,
         pg_distrib_dir=pg_distrib_dir,
         pg_version=pg_version,
-        broker=default_broker,
         run_id=run_id,
         preserve_database_files=cast(bool, pytestconfig.getoption("--preserve-database-files")),
         pageserver_virtual_file_io_engine=pageserver_virtual_file_io_engine,
@@ -1849,6 +1829,18 @@ class NeonCli(AbstractNeonCli):
         if immediate:
             args.extend(["-m", "immediate"])
         return self.raw_cli(args)
+
+    def broker_start(
+        self, timeout_in_seconds: Optional[int] = None
+    ) -> "subprocess.CompletedProcess[str]":
+        cmd = ["storage_broker", "start"]
+        if timeout_in_seconds is not None:
+            cmd.append(f"--start-timeout={timeout_in_seconds}s")
+        return self.raw_cli(cmd)
+
+    def broker_stop(self) -> "subprocess.CompletedProcess[str]":
+        cmd = ["storage_broker", "stop"]
+        return self.raw_cli(cmd)
 
     def endpoint_create(
         self,
@@ -4571,6 +4563,40 @@ class Safekeeper(LogUtils):
             self.assert_log_contains(msg)
 
         wait_until(20, 0.5, paused)
+
+
+class NeonBroker(LogUtils):
+    """An object managing storage_broker instance"""
+
+    def __init__(self, env: NeonEnv):
+        super().__init__(logfile=env.repo_dir / "storage_broker.log")
+        self.env = env
+        self.port: int = self.env.port_distributor.get_port()
+        self.running = False
+
+    def start(
+        self,
+        timeout_in_seconds: Optional[int] = None,
+    ):
+        assert not self.running
+        self.env.neon_cli.broker_start(timeout_in_seconds)
+        self.running = True
+        return self
+
+    def stop(self):
+        if self.running:
+            self.env.neon_cli.broker_stop()
+            self.running = False
+        return self
+
+    def listen_addr(self):
+        return f"127.0.0.1:{self.port}"
+
+    def client_url(self):
+        return f"http://{self.listen_addr()}"
+
+    def assert_no_errors(self):
+        assert_no_errors(self.logfile, "storage_controller", [])
 
 
 # TODO: Replace with `StrEnum` when we upgrade to python 3.11
