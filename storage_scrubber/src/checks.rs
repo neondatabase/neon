@@ -376,7 +376,7 @@ pub(crate) fn parse_layer_object_name(name: &str) -> Result<(LayerName, Generati
     }
 }
 
-/// Note (https://github.com/neondatabase/neon/issues/8872):
+/// Note (<https://github.com/neondatabase/neon/issues/8872>):
 /// Since we do not gurantee the order of the listing, we could list layer keys right before
 /// pageserver `RemoteTimelineClient` deletes the layer files and then the index.
 /// In the rare case, this would give back a transient error where the index key is missing.
