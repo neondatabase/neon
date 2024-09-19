@@ -1,12 +1,12 @@
+FROM debian:bookworm-slim
+
 # Use ARG as a build-time environment variable here to allow.
 # It's not supposed to be set outside.
 # Alternatively it can be obtained using the following command
 # ```
 # . /etc/os-release && echo "${VERSION_CODENAME}"
 # ```
-ARG DEBIAN_VERSION_CODENAME=bullseye
-
-FROM debian:${DEBIAN_VERSION_CODENAME}-slim
+ARG DEBIAN_VERSION_CODENAME=bookworm
 
 # Add nonroot user
 RUN useradd -ms /bin/bash nonroot -b /home
@@ -38,14 +38,14 @@ RUN set -e \
         libseccomp-dev \
         libsqlite3-dev \
         libssl-dev \
-        libstdc++-*-dev \
+        libstdc++-11-dev \
         libtool \
         libxml2-dev \
         libxmlsec1-dev \
         libxxhash-dev \
         lsof \
         make \
-        netcat* \
+        netcat-traditional \
         net-tools \
         openssh-client \
         parallel \
@@ -55,7 +55,6 @@ RUN set -e \
         xz-utils \
         zlib1g-dev \
         zstd \
-        lsb-release \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 # protobuf-compiler (protoc)
@@ -75,8 +74,7 @@ RUN curl -sL "https://github.com/peak/s5cmd/releases/download/v${S5CMD_VERSION}/
 # LLVM
 ENV LLVM_VERSION=18
 RUN curl -fsSL 'https://apt.llvm.org/llvm-snapshot.gpg.key' | apt-key add - \
-    && export CODENAME=$(lsb_release -cs) \
-    && echo "deb http://apt.llvm.org/${CODENAME}/ llvm-toolchain-${CODENAME}-${LLVM_VERSION} main" > /etc/apt/sources.list.d/llvm.stable.list \
+    && echo "deb http://apt.llvm.org/${DEBIAN_VERSION_CODENAME}/ llvm-toolchain-${DEBIAN_VERSION_CODENAME}-${LLVM_VERSION} main" > /etc/apt/sources.list.d/llvm.stable.list \
     && apt update \
     && apt install -y clang-${LLVM_VERSION} llvm-${LLVM_VERSION} \
     && bash -c 'for f in /usr/bin/clang*-${LLVM_VERSION} /usr/bin/llvm*-${LLVM_VERSION}; do ln -s "${f}" "${f%-${LLVM_VERSION}}"; done' \
@@ -84,11 +82,10 @@ RUN curl -fsSL 'https://apt.llvm.org/llvm-snapshot.gpg.key' | apt-key add - \
 
 # Install docker
 RUN curl -fsSL 'https://www.postgresql.org/media/keys/ACCC4CF8.asc' | apt-key add - \
-    && export CODENAME=$(lsb_release -cs) \
-    && echo "deb http://apt.postgresql.org/pub/repos/apt ${CODENAME}-pgdg main" > /etc/apt/sources.list.d/pgdg.list \
+    && echo 'deb http://apt.postgresql.org/pub/repos/apt bookworm-pgdg main' > /etc/apt/sources.list.d/pgdg.list \
     && apt install -y apt-transport-https ca-certificates gnupg-agent \
     && curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor > /usr/share/keyrings/docker-ce-archive-keyring.gpg \
-    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-ce-archive-keyring.gpg] https://download.docker.com/linux/debian ${CODENAME} stable" > /etc/apt/sources.list.d/docker-ce.list \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-ce-archive-keyring.gpg] https://download.docker.com/linux/debian ${DEBIAN_VERSION_CODENAME} stable" > /etc/apt/sources.list.d/docker-ce.list \
     && apt update \
     && apt install -y docker-ce docker-ce-cli \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*

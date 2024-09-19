@@ -453,6 +453,7 @@ build: |
   # At time of writing (2023-03-14), debian bullseye has a version of cgroup-tools (technically
   # libcgroup) that doesn't support cgroup v2 (version 0.41-11). Unfortunately, the vm-monitor
   # requires cgroup v2, so we'll build cgroup-tools ourselves.
+  # Update:
   FROM debian:bullseye-slim as libcgroup-builder
   ENV LIBCGROUP_VERSION=v2.0.3
 
