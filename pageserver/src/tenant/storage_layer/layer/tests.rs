@@ -1,6 +1,6 @@
 use std::time::UNIX_EPOCH;
 
-use pageserver_api::key::CONTROLFILE_KEY;
+use pageserver_api::{key::CONTROLFILE_KEY, keyspace::KeySpace};
 use tokio::task::JoinSet;
 use utils::{
     completion::{self, Completion},
@@ -9,7 +9,10 @@ use utils::{
 
 use super::failpoints::{Failpoint, FailpointKind};
 use super::*;
-use crate::{context::DownloadBehavior, tenant::storage_layer::LayerVisibilityHint};
+use crate::{
+    context::DownloadBehavior,
+    tenant::storage_layer::{ImageLayerVisit, LayerVisibilityHint},
+};
 use crate::{task_mgr::TaskKind, tenant::harness::TenantHarness};
 
 /// Used in tests to advance a future to wanted await point, and not futher.
@@ -56,13 +59,14 @@ async fn smoke_test() {
 
     let img_before = {
         let mut data = ValuesReconstructState::default();
+        let visit = ImageLayerVisit {
+            keyspace: controlfile_keyspace.clone(),
+            lsn_floor: Lsn(0x10),
+        };
+        let visit = PersistentLayerVisit::ImageLayer(visit);
+
         layer
-            .get_values_reconstruct_data(
-                controlfile_keyspace.clone(),
-                Lsn(0x10)..Lsn(0x11),
-                &mut data,
-                &ctx,
-            )
+            .get_values_reconstruct_data(visit, &mut data, &ctx)
             .await
             .unwrap();
         data.keys
@@ -88,13 +92,14 @@ async fn smoke_test() {
     // on accesses when the layer is evicted, it will automatically be downloaded.
     let img_after = {
         let mut data = ValuesReconstructState::default();
+        let visit = ImageLayerVisit {
+            keyspace: controlfile_keyspace.clone(),
+            lsn_floor: Lsn(0x10),
+        };
+        let visit = PersistentLayerVisit::ImageLayer(visit);
+
         layer
-            .get_values_reconstruct_data(
-                controlfile_keyspace.clone(),
-                Lsn(0x10)..Lsn(0x11),
-                &mut data,
-                &ctx,
-            )
+            .get_values_reconstruct_data(visit, &mut data, &ctx)
             .instrument(download_span.clone())
             .await
             .unwrap();

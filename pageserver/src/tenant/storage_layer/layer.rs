@@ -1,9 +1,7 @@
 use anyhow::Context;
 use camino::{Utf8Path, Utf8PathBuf};
-use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::HistoricLayerInfo;
 use pageserver_api::shard::{ShardIdentity, ShardIndex, TenantShardId};
-use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, SystemTime};
@@ -23,7 +21,7 @@ use super::delta_layer::{self, DeltaEntry};
 use super::image_layer::{self};
 use super::{
     AsLayerDesc, ImageLayerWriter, LayerAccessStats, LayerAccessStatsReset, LayerName,
-    LayerVisibilityHint, PersistentLayerDesc, ValuesReconstructState,
+    LayerVisibilityHint, PersistentLayerDesc, PersistentLayerVisit, ValuesReconstructState,
 };
 
 use utils::generation::Generation;
@@ -303,8 +301,7 @@ impl Layer {
 
     pub(crate) async fn get_values_reconstruct_data(
         &self,
-        keyspace: KeySpace,
-        lsn_range: Range<Lsn>,
+        visit: PersistentLayerVisit,
         reconstruct_data: &mut ValuesReconstructState,
         ctx: &RequestContext,
     ) -> Result<(), GetVectoredError> {
@@ -322,7 +319,7 @@ impl Layer {
         self.record_access(ctx);
 
         layer
-            .get_values_reconstruct_data(keyspace, lsn_range, reconstruct_data, &self.0, ctx)
+            .get_values_reconstruct_data(visit, reconstruct_data, &self.0, ctx)
             .instrument(tracing::debug_span!("get_values_reconstruct_data", layer=%self))
             .await
             .map_err(|err| match err {
@@ -1741,8 +1738,7 @@ impl DownloadedLayer {
 
     async fn get_values_reconstruct_data(
         &self,
-        keyspace: KeySpace,
-        lsn_range: Range<Lsn>,
+        visit: PersistentLayerVisit,
         reconstruct_data: &mut ValuesReconstructState,
         owner: &Arc<LayerInner>,
         ctx: &RequestContext,
@@ -1755,11 +1751,11 @@ impl DownloadedLayer {
             .map_err(GetVectoredError::Other)?
         {
             Delta(d) => {
-                d.get_values_reconstruct_data(keyspace, lsn_range, reconstruct_data, ctx)
+                d.get_values_reconstruct_data(visit.into_delta_layer_visit(), reconstruct_data, ctx)
                     .await
             }
             Image(i) => {
-                i.get_values_reconstruct_data(keyspace, reconstruct_data, ctx)
+                i.get_values_reconstruct_data(visit.into_image_layer_visit(), reconstruct_data, ctx)
                     .await
             }
         }

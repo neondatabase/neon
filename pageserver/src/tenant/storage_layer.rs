@@ -287,7 +287,7 @@ pub(crate) enum ReadableLayer {
 
 /// A partial description of a read to be done.
 #[derive(Debug, Clone)]
-struct ReadDesc {
+struct VisitLocation {
     /// An id used to resolve the readable layer within the fringe
     layer_id: LayerId,
     /// Lsn range for the read, used for selecting the next read
@@ -303,46 +303,442 @@ struct ReadDesc {
 /// a two layer indexing scheme.
 #[derive(Debug)]
 pub(crate) struct LayerFringe {
-    planned_reads_by_lsn: BinaryHeap<ReadDesc>,
-    layers: HashMap<LayerId, LayerKeyspace>,
+    visits_by_lsn_index: BinaryHeap<VisitLocation>,
+    layer_visits: HashMap<LayerId, LayerVisitBuilder>,
 }
 
 #[derive(Debug)]
-struct LayerKeyspace {
-    layer: ReadableLayer,
-    target_keyspace: KeySpaceRandomAccum,
+pub(crate) enum LayerVisitBuilder {
+    InMemoryLayer(InMemoryLayerVisitBuilder),
+    PersistentLayer(PersistentLayerVisitBuilder),
+}
+
+#[derive(Debug)]
+pub(crate) enum LayerVisit {
+    InMemoryLayer(InMemoryLayerVisit),
+    PersistentLayer(PersistentLayerVisit),
+}
+
+#[derive(Debug)]
+pub(crate) enum PersistentLayerVisitBuilder {
+    DeltaLayer(DeltaLayerVisitBuilder),
+    ImageLayer(ImageLayerVisitBuilder),
+}
+
+#[derive(Debug)]
+pub(crate) enum PersistentLayerVisit {
+    DeltaLayer(DeltaLayerVisit),
+    ImageLayer(ImageLayerVisit),
+}
+
+#[derive(Debug)]
+pub(crate) struct InMemoryLayerVisitBuilder {
+    /// Key space accumulator which will define which keys we are
+    /// interested in for this layer visit.
+    keyspace_accum: KeySpaceRandomAccum,
+    /// Ignore any keys with an LSN greater or equal
+    /// than the specified one.
+    lsn_ceil: Lsn,
+    /// Only consider keys at LSN greater or equal than the specified one
+    lsn_floor: Lsn,
+    // The in-memory layer to visit
+    layer: Arc<InMemoryLayer>,
+}
+
+#[derive(Debug)]
+pub(crate) struct InMemoryLayerVisit {
+    /// Key space of keys considered by the visit
+    keyspace: KeySpace,
+    /// Ignore any keys with an LSN greater or equal
+    /// than the specified one.
+    lsn_ceil: Lsn,
+    /// Only consider keys at LSN greater or equal than the specified one
+    lsn_floor: Lsn,
+}
+
+#[derive(Debug)]
+pub(crate) struct DeltaLayerVisitBuilder {
+    /// List of key spaces accumulators which will define what deltas are read.
+    /// Each accumulator has an associated LSN which specifies
+    /// the LSN floor for it (i.e. do not read below this LSN).
+    keyspace_accums: HashMap<Lsn, KeySpaceRandomAccum>,
+    /// Ignore any keys with an LSN greater or equal
+    /// than the specified one.
+    lsn_ceil: Lsn,
+    /// Handle for the layer to visit (guaranteed to be a delta layer)
+    layer: Layer,
+}
+
+#[derive(Debug)]
+pub(crate) struct DeltaLayerVisit {
+    /// List of key spaces considered during the visit.
+    /// Each keyspace has an associated LSN which specifies
+    /// the LSN floor for it (i.e. do not read below this LSN).
+    keyspaces: Vec<(Lsn, KeySpace)>,
+    /// Ignore any keys with an LSN greater or equal
+    /// than the specified one.
+    lsn_ceil: Lsn,
+}
+
+#[derive(Debug)]
+pub(crate) struct ImageLayerVisitBuilder {
+    /// Key space which defines which keys we are
+    /// interested in for this layer visit.
+    keyspace_accum: KeySpaceRandomAccum,
+    /// Handle for the layer to visit (guaranteed to be an image layer)
+    layer: Layer,
+    /// Only consider keys at LSN greater or equal than the specified one
+    lsn_floor: Lsn,
+}
+
+#[derive(Debug)]
+pub(crate) struct ImageLayerVisit {
+    /// Key space which defines which keys we are
+    /// interested in for this layer visit.
+    keyspace: KeySpace,
+    /// Only consider keys at LSN greater or equal than the specified one
+    lsn_floor: Lsn,
+}
+
+impl LayerVisitBuilder {
+    pub(crate) fn new(layer: ReadableLayer, keyspace: KeySpace, lsn_range: Range<Lsn>) -> Self {
+        match layer {
+            ReadableLayer::InMemoryLayer(in_mem) => {
+                Self::InMemoryLayer(InMemoryLayerVisitBuilder::new(in_mem, keyspace, lsn_range))
+            }
+            ReadableLayer::PersistentLayer(persistent) => Self::PersistentLayer(
+                PersistentLayerVisitBuilder::new(persistent, keyspace, lsn_range),
+            ),
+        }
+    }
+}
+
+impl InMemoryLayerVisitBuilder {
+    fn new(layer: Arc<InMemoryLayer>, keyspace: KeySpace, lsn_range: Range<Lsn>) -> Self {
+        assert_eq!(lsn_range.start, layer.get_lsn_range().start);
+
+        let mut keyspace_accum = KeySpaceRandomAccum::new();
+        keyspace_accum.add_keyspace(keyspace);
+
+        Self {
+            keyspace_accum,
+            lsn_floor: lsn_range.start,
+            lsn_ceil: lsn_range.end,
+            layer,
+        }
+    }
+}
+
+impl PersistentLayerVisitBuilder {
+    fn new(layer: Layer, keyspace: KeySpace, lsn_range: Range<Lsn>) -> Self {
+        let is_delta = layer.layer_desc().is_delta;
+        if is_delta {
+            Self::DeltaLayer(DeltaLayerVisitBuilder::new(layer, keyspace, lsn_range))
+        } else {
+            Self::ImageLayer(ImageLayerVisitBuilder::new(layer, keyspace, lsn_range))
+        }
+    }
+}
+
+impl DeltaLayerVisitBuilder {
+    fn new(layer: Layer, keyspace: KeySpace, lsn_range: Range<Lsn>) -> Self {
+        assert!(layer.layer_desc().is_delta);
+
+        let mut keyspace_accum = KeySpaceRandomAccum::new();
+        keyspace_accum.add_keyspace(keyspace);
+
+        Self {
+            keyspace_accums: HashMap::from([(lsn_range.start, keyspace_accum)]),
+            lsn_ceil: lsn_range.end,
+            layer,
+        }
+    }
+}
+
+impl ImageLayerVisitBuilder {
+    fn new(layer: Layer, keyspace: KeySpace, lsn_range: Range<Lsn>) -> Self {
+        assert!(!layer.layer_desc().is_delta);
+        assert_eq!(lsn_range.start, layer.layer_desc().lsn_range.start);
+
+        let mut keyspace_accum = KeySpaceRandomAccum::new();
+        keyspace_accum.add_keyspace(keyspace);
+
+        Self {
+            keyspace_accum,
+            lsn_floor: lsn_range.start,
+            layer,
+        }
+    }
+}
+
+pub(crate) trait LayerVisitBuilderUpdate {
+    type L;
+    type LV;
+
+    /// Extend an already planned layer visit to also include the keys
+    /// in the provided keyspace and LSN range.
+    fn update(&mut self, keyspace: KeySpace, lsn_range: Range<Lsn>);
+
+    /// Build the visit!
+    fn build(self) -> (Self::L, Self::LV);
+}
+
+impl LayerVisitBuilderUpdate for LayerVisitBuilder {
+    type L = ReadableLayer;
+    type LV = LayerVisit;
+
+    fn update(&mut self, keyspace: KeySpace, lsn_range: Range<Lsn>) {
+        match self {
+            LayerVisitBuilder::InMemoryLayer(v) => v.update(keyspace, lsn_range),
+            LayerVisitBuilder::PersistentLayer(v) => v.update(keyspace, lsn_range),
+        }
+    }
+
+    fn build(self) -> (Self::L, Self::LV) {
+        match self {
+            LayerVisitBuilder::InMemoryLayer(in_mem) => (
+                ReadableLayer::InMemoryLayer(in_mem.layer),
+                LayerVisit::InMemoryLayer(InMemoryLayerVisit {
+                    keyspace: in_mem.keyspace_accum.to_keyspace(),
+                    lsn_ceil: in_mem.lsn_ceil,
+                    lsn_floor: in_mem.lsn_floor,
+                }),
+            ),
+            LayerVisitBuilder::PersistentLayer(pers) => {
+                let (layer, visit) = pers.build();
+                (
+                    ReadableLayer::PersistentLayer(layer),
+                    LayerVisit::PersistentLayer(visit),
+                )
+            }
+        }
+    }
+}
+
+impl LayerVisitBuilderUpdate for PersistentLayerVisitBuilder {
+    type L = Layer;
+    type LV = PersistentLayerVisit;
+
+    fn update(&mut self, keyspace: KeySpace, lsn_range: Range<Lsn>) {
+        match self {
+            PersistentLayerVisitBuilder::DeltaLayer(v) => v.update(keyspace, lsn_range),
+            PersistentLayerVisitBuilder::ImageLayer(v) => v.update(keyspace, lsn_range),
+        }
+    }
+
+    fn build(self) -> (Self::L, Self::LV) {
+        match self {
+            PersistentLayerVisitBuilder::DeltaLayer(delta) => {
+                let (layer, visit) = delta.build();
+                (layer, PersistentLayerVisit::DeltaLayer(visit))
+            }
+            PersistentLayerVisitBuilder::ImageLayer(img) => {
+                let (layer, visit) = img.build();
+                (layer, PersistentLayerVisit::ImageLayer(visit))
+            }
+        }
+    }
+}
+
+impl LayerVisitBuilderUpdate for InMemoryLayerVisitBuilder {
+    type L = Arc<InMemoryLayer>;
+    type LV = InMemoryLayerVisit;
+
+    fn update(&mut self, keyspace: KeySpace, lsn_range: Range<Lsn>) {
+        // Note: I cannot think of any cases when this update should happen,
+        // since in memory layers span the entire key range.
+        assert_eq!(lsn_range.end, self.lsn_ceil);
+        assert_eq!(lsn_range.start, self.lsn_floor);
+        self.keyspace_accum.add_keyspace(keyspace);
+    }
+
+    fn build(self) -> (Self::L, Self::LV) {
+        (
+            self.layer,
+            InMemoryLayerVisit {
+                keyspace: self.keyspace_accum.to_keyspace(),
+                lsn_floor: self.lsn_floor,
+                lsn_ceil: self.lsn_ceil,
+            },
+        )
+    }
+}
+
+impl LayerVisitBuilderUpdate for DeltaLayerVisitBuilder {
+    type L = Layer;
+    type LV = DeltaLayerVisit;
+
+    fn update(&mut self, keyspace: KeySpace, lsn_range: Range<Lsn>) {
+        assert_eq!(lsn_range.end, self.lsn_ceil);
+        self.keyspace_accums
+            .entry(lsn_range.start)
+            .or_default()
+            .add_keyspace(keyspace);
+    }
+
+    fn build(self) -> (Self::L, Self::LV) {
+        use itertools::Itertools;
+
+        let keyspaces = self
+            .keyspace_accums
+            .into_iter()
+            .filter_map(|(lsn_floor, accum)| {
+                let keyspace = accum.to_keyspace();
+                if keyspace.is_empty() {
+                    None
+                } else {
+                    Some((lsn_floor, keyspace))
+                }
+            })
+            .sorted_by_key(|(_lsn_floor, keyspace)| keyspace.start().unwrap())
+            .collect::<Vec<(Lsn, KeySpace)>>();
+
+        if cfg!(debug_assertions) {
+            // Check that the keyspaces we are going to read from
+            // a layer are non-overlapping.
+            //
+            // The keyspaces provided to vectored read initially are non-overlapping.
+            // We may split keyspaces at each step and keyspaces resulting from a split
+            // are non-overlapping as well. One can prove that the property holds by
+            // induction.
+            let mut prev_end: Option<Key> = None;
+            for (_lsn_floor, crnt) in keyspaces.iter() {
+                if let Some(prev_end) = prev_end {
+                    debug_assert!(prev_end <= crnt.start().unwrap())
+                }
+
+                prev_end = Some(crnt.end().unwrap());
+            }
+        }
+
+        (
+            self.layer,
+            DeltaLayerVisit {
+                keyspaces,
+                lsn_ceil: self.lsn_ceil,
+            },
+        )
+    }
+}
+
+impl LayerVisitBuilderUpdate for ImageLayerVisitBuilder {
+    type L = Layer;
+    type LV = ImageLayerVisit;
+
+    fn update(&mut self, keyspace: KeySpace, lsn_range: Range<Lsn>) {
+        assert_eq!(lsn_range.start, self.lsn_floor);
+        self.keyspace_accum.add_keyspace(keyspace);
+    }
+
+    fn build(self) -> (Self::L, Self::LV) {
+        (
+            self.layer,
+            ImageLayerVisit {
+                keyspace: self.keyspace_accum.to_keyspace(),
+                lsn_floor: self.lsn_floor,
+            },
+        )
+    }
+}
+
+pub(crate) trait LayerVisitDetails {
+    /// Returns the key spaces planned for the visit
+    /// and their associated floor LSNs.
+    fn keyspaces(&self) -> Vec<(Lsn, KeySpace)>;
+}
+
+impl LayerVisitDetails for LayerVisit {
+    fn keyspaces(&self) -> Vec<(Lsn, KeySpace)> {
+        match self {
+            LayerVisit::PersistentLayer(pers) => pers.keyspaces(),
+            LayerVisit::InMemoryLayer(in_mem) => in_mem.keyspaces(),
+        }
+    }
+}
+
+impl LayerVisitDetails for PersistentLayerVisit {
+    fn keyspaces(&self) -> Vec<(Lsn, KeySpace)> {
+        match self {
+            PersistentLayerVisit::DeltaLayer(delta) => delta.keyspaces(),
+            PersistentLayerVisit::ImageLayer(image) => image.keyspaces(),
+        }
+    }
+}
+
+impl LayerVisitDetails for DeltaLayerVisit {
+    fn keyspaces(&self) -> Vec<(Lsn, KeySpace)> {
+        self.keyspaces.clone()
+    }
+}
+
+impl LayerVisitDetails for ImageLayerVisit {
+    fn keyspaces(&self) -> Vec<(Lsn, KeySpace)> {
+        vec![(self.lsn_floor, self.keyspace.clone())]
+    }
+}
+
+impl LayerVisitDetails for InMemoryLayerVisit {
+    fn keyspaces(&self) -> Vec<(Lsn, KeySpace)> {
+        vec![(self.lsn_floor, self.keyspace.clone())]
+    }
+}
+
+impl LayerVisit {
+    fn into_persistent_layer_visit(self) -> PersistentLayerVisit {
+        match self {
+            LayerVisit::PersistentLayer(visit) => visit,
+            LayerVisit::InMemoryLayer(visit) => {
+                panic!("Invalid attempt to cast to PersistentLayerVisit: {visit:?}");
+            }
+        }
+    }
+
+    fn into_in_memory_layer_visit(self) -> InMemoryLayerVisit {
+        match self {
+            LayerVisit::InMemoryLayer(visit) => visit,
+            LayerVisit::PersistentLayer(visit) => {
+                panic!("Invalid attempt to cast to InMemoryLayerVisit: {visit:?}");
+            }
+        }
+    }
+}
+
+impl PersistentLayerVisit {
+    fn into_delta_layer_visit(self) -> DeltaLayerVisit {
+        match self {
+            PersistentLayerVisit::DeltaLayer(visit) => visit,
+            PersistentLayerVisit::ImageLayer(visit) => {
+                panic!("Invalid attempt to cast to DeltaLayerVisit: {visit:?}");
+            }
+        }
+    }
+
+    fn into_image_layer_visit(self) -> ImageLayerVisit {
+        match self {
+            PersistentLayerVisit::ImageLayer(visit) => visit,
+            PersistentLayerVisit::DeltaLayer(visit) => {
+                panic!("Invalid attempt to cast to ImageLayerVisit: {visit:?}");
+            }
+        }
+    }
 }
 
 impl LayerFringe {
     pub(crate) fn new() -> Self {
         LayerFringe {
-            planned_reads_by_lsn: BinaryHeap::new(),
-            layers: HashMap::new(),
+            visits_by_lsn_index: BinaryHeap::new(),
+            layer_visits: HashMap::new(),
         }
     }
 
-    pub(crate) fn next_layer(&mut self) -> Option<(ReadableLayer, KeySpace, Range<Lsn>)> {
-        let read_desc = match self.planned_reads_by_lsn.pop() {
+    pub(crate) fn next_layer(&mut self) -> Option<(ReadableLayer, LayerVisit)> {
+        let read_desc = match self.visits_by_lsn_index.pop() {
             Some(desc) => desc,
             None => return None,
         };
 
-        let removed = self.layers.remove_entry(&read_desc.layer_id);
-
-        match removed {
-            Some((
-                _,
-                LayerKeyspace {
-                    layer,
-                    mut target_keyspace,
-                },
-            )) => Some((
-                layer,
-                target_keyspace.consume_keyspace(),
-                read_desc.lsn_range,
-            )),
-            None => unreachable!("fringe internals are always consistent"),
-        }
+        let removed = self.layer_visits.remove(&read_desc.layer_id)?;
+        Some(removed.build())
     }
 
     pub(crate) fn update(
@@ -352,22 +748,18 @@ impl LayerFringe {
         lsn_range: Range<Lsn>,
     ) {
         let layer_id = layer.id();
-        let entry = self.layers.entry(layer_id.clone());
+        let entry = self.layer_visits.entry(layer_id.clone());
         match entry {
             Entry::Occupied(mut entry) => {
-                entry.get_mut().target_keyspace.add_keyspace(keyspace);
+                entry.get_mut().update(keyspace, lsn_range);
             }
             Entry::Vacant(entry) => {
-                self.planned_reads_by_lsn.push(ReadDesc {
-                    lsn_range,
+                self.visits_by_lsn_index.push(VisitLocation {
+                    lsn_range: lsn_range.clone(),
                     layer_id: layer_id.clone(),
                 });
-                let mut accum = KeySpaceRandomAccum::new();
-                accum.add_keyspace(keyspace);
-                entry.insert(LayerKeyspace {
-                    layer,
-                    target_keyspace: accum,
-                });
+
+                entry.insert(LayerVisitBuilder::new(layer, keyspace, lsn_range));
             }
         }
     }
@@ -379,7 +771,7 @@ impl Default for LayerFringe {
     }
 }
 
-impl Ord for ReadDesc {
+impl Ord for VisitLocation {
     fn cmp(&self, other: &Self) -> Ordering {
         let ord = self.lsn_range.end.cmp(&other.lsn_range.end);
         if ord == std::cmp::Ordering::Equal {
@@ -390,19 +782,19 @@ impl Ord for ReadDesc {
     }
 }
 
-impl PartialOrd for ReadDesc {
+impl PartialOrd for VisitLocation {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl PartialEq for ReadDesc {
+impl PartialEq for VisitLocation {
     fn eq(&self, other: &Self) -> bool {
         self.lsn_range == other.lsn_range
     }
 }
 
-impl Eq for ReadDesc {}
+impl Eq for VisitLocation {}
 
 impl ReadableLayer {
     pub(crate) fn id(&self) -> LayerId {
@@ -414,20 +806,27 @@ impl ReadableLayer {
 
     pub(crate) async fn get_values_reconstruct_data(
         &self,
-        keyspace: KeySpace,
-        lsn_range: Range<Lsn>,
+        visit: LayerVisit,
         reconstruct_state: &mut ValuesReconstructState,
         ctx: &RequestContext,
     ) -> Result<(), GetVectoredError> {
         match self {
             ReadableLayer::PersistentLayer(layer) => {
                 layer
-                    .get_values_reconstruct_data(keyspace, lsn_range, reconstruct_state, ctx)
+                    .get_values_reconstruct_data(
+                        visit.into_persistent_layer_visit(),
+                        reconstruct_state,
+                        ctx,
+                    )
                     .await
             }
             ReadableLayer::InMemoryLayer(layer) => {
                 layer
-                    .get_values_reconstruct_data(keyspace, lsn_range.end, reconstruct_state, ctx)
+                    .get_values_reconstruct_data(
+                        visit.into_in_memory_layer_visit(),
+                        reconstruct_state,
+                        ctx,
+                    )
                     .await
             }
         }

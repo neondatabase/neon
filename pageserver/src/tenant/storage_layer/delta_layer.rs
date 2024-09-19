@@ -75,7 +75,7 @@ use utils::{
     lsn::Lsn,
 };
 
-use super::{AsLayerDesc, LayerName, PersistentLayerDesc, ValuesReconstructState};
+use super::{AsLayerDesc, DeltaLayerVisit, LayerName, PersistentLayerDesc, ValuesReconstructState};
 
 ///
 /// Header stored in the beginning of the file
@@ -841,8 +841,7 @@ impl DeltaLayerInner {
     // can be further optimised to visit the index only once.
     pub(super) async fn get_values_reconstruct_data(
         &self,
-        keyspace: KeySpace,
-        lsn_range: Range<Lsn>,
+        visit: DeltaLayerVisit,
         reconstruct_state: &mut ValuesReconstructState,
         ctx: &RequestContext,
     ) -> Result<(), GetVectoredError> {
@@ -863,8 +862,8 @@ impl DeltaLayerInner {
         let data_end_offset = self.index_start_offset();
 
         let reads = Self::plan_reads(
-            &keyspace,
-            lsn_range.clone(),
+            &visit.keyspaces,
+            visit.lsn_ceil,
             data_end_offset,
             index_reader,
             planner,
@@ -877,14 +876,16 @@ impl DeltaLayerInner {
         self.do_reads_and_update_state(reads, reconstruct_state, ctx)
             .await;
 
-        reconstruct_state.on_lsn_advanced(&keyspace, lsn_range.start);
+        for (lsn_floor, keyspace) in visit.keyspaces {
+            reconstruct_state.on_lsn_advanced(&keyspace, lsn_floor);
+        }
 
         Ok(())
     }
 
     async fn plan_reads<Reader>(
-        keyspace: &KeySpace,
-        lsn_range: Range<Lsn>,
+        keyspaces: &Vec<(Lsn, KeySpace)>,
+        lsn_ceil: Lsn,
         data_end_offset: u64,
         index_reader: DiskBtreeReader<Reader, DELTA_KEY_SIZE>,
         mut planner: VectoredReadPlanner,
@@ -898,48 +899,52 @@ impl DeltaLayerInner {
             .page_content_kind(PageContentKind::DeltaLayerBtreeNode)
             .build();
 
-        for range in keyspace.ranges.iter() {
-            let mut range_end_handled = false;
+        for (lsn_floor, keyspace) in keyspaces {
+            let lsn_range = *lsn_floor..lsn_ceil;
 
-            let start_key = DeltaKey::from_key_lsn(&range.start, lsn_range.start);
-            let index_stream = index_reader.clone().into_stream(&start_key.0, &ctx);
-            let mut index_stream = std::pin::pin!(index_stream);
+            for range in keyspace.ranges.iter() {
+                let mut range_end_handled = false;
 
-            while let Some(index_entry) = index_stream.next().await {
-                let (raw_key, value) = index_entry?;
-                let key = Key::from_slice(&raw_key[..KEY_SIZE]);
-                let lsn = DeltaKey::extract_lsn_from_buf(&raw_key);
-                let blob_ref = BlobRef(value);
+                let start_key = DeltaKey::from_key_lsn(&range.start, lsn_range.start);
+                let index_stream = index_reader.clone().into_stream(&start_key.0, &ctx);
+                let mut index_stream = std::pin::pin!(index_stream);
 
-                // Lsns are not monotonically increasing across keys, so we don't assert on them.
-                assert!(key >= range.start);
+                while let Some(index_entry) = index_stream.next().await {
+                    let (raw_key, value) = index_entry?;
+                    let key = Key::from_slice(&raw_key[..KEY_SIZE]);
+                    let lsn = DeltaKey::extract_lsn_from_buf(&raw_key);
+                    let blob_ref = BlobRef(value);
 
-                let outside_lsn_range = !lsn_range.contains(&lsn);
-                let below_cached_lsn = reconstruct_state.get_cached_lsn(&key) >= Some(lsn);
+                    // Lsns are not monotonically increasing across keys, so we don't assert on them.
+                    assert!(key >= range.start);
 
-                let flag = {
-                    if outside_lsn_range || below_cached_lsn {
-                        BlobFlag::Ignore
-                    } else if blob_ref.will_init() {
-                        BlobFlag::ReplaceAll
+                    let outside_lsn_range = !lsn_range.contains(&lsn);
+                    let below_cached_lsn = reconstruct_state.get_cached_lsn(&key) >= Some(lsn);
+
+                    let flag = {
+                        if outside_lsn_range || below_cached_lsn {
+                            BlobFlag::Ignore
+                        } else if blob_ref.will_init() {
+                            BlobFlag::ReplaceAll
+                        } else {
+                            // Usual path: add blob to the read
+                            BlobFlag::None
+                        }
+                    };
+
+                    if key >= range.end || (key.next() == range.end && lsn >= lsn_range.end) {
+                        planner.handle_range_end(blob_ref.pos());
+                        range_end_handled = true;
+                        break;
                     } else {
-                        // Usual path: add blob to the read
-                        BlobFlag::None
+                        planner.handle(key, lsn, blob_ref.pos(), flag);
                     }
-                };
-
-                if key >= range.end || (key.next() == range.end && lsn >= lsn_range.end) {
-                    planner.handle_range_end(blob_ref.pos());
-                    range_end_handled = true;
-                    break;
-                } else {
-                    planner.handle(key, lsn, blob_ref.pos(), flag);
                 }
-            }
 
-            if !range_end_handled {
-                tracing::debug!("Handling range end fallback at {}", data_end_offset);
-                planner.handle_range_end(data_end_offset);
+                if !range_end_handled {
+                    tracing::debug!("Handling range end fallback at {}", data_end_offset);
+                    planner.handle_range_end(data_end_offset);
+                }
             }
         }
 
@@ -1641,8 +1646,8 @@ pub(crate) mod test {
 
         // Plan and validate
         let vectored_reads = DeltaLayerInner::plan_reads(
-            &keyspace,
-            lsn_range.clone(),
+            &vec![(lsn_range.start, keyspace.clone())],
+            lsn_range.end,
             disk_offset,
             reader,
             planner,
@@ -1895,8 +1900,8 @@ pub(crate) mod test {
             let data_end_offset = inner.index_start_blk as u64 * PAGE_SZ as u64;
 
             let vectored_reads = DeltaLayerInner::plan_reads(
-                &keyspace,
-                entries_meta.lsn_range.clone(),
+                &vec![(entries_meta.lsn_range.start, keyspace)],
+                entries_meta.lsn_range.end,
                 data_end_offset,
                 index_reader,
                 planner,
