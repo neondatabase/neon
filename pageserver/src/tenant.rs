@@ -140,6 +140,7 @@ pub mod metadata;
 pub mod remote_timeline_client;
 pub mod storage_layer;
 
+pub mod checks;
 pub mod config;
 pub mod mgr;
 pub mod secondary;
@@ -1573,6 +1574,9 @@ impl Tenant {
         image_layer_desc: Vec<(Lsn, Vec<(pageserver_api::key::Key, bytes::Bytes)>)>,
         end_lsn: Lsn,
     ) -> anyhow::Result<Arc<Timeline>> {
+        use checks::check_valid_layermap;
+        use itertools::Itertools;
+
         let tline = self
             .create_test_timeline(new_timeline_id, initdb_lsn, pg_version, ctx)
             .await?;
@@ -1586,6 +1590,18 @@ impl Tenant {
             tline
                 .force_create_image_layer(lsn, images, Some(initdb_lsn), ctx)
                 .await?;
+        }
+        let layer_names = tline
+            .layers
+            .read()
+            .await
+            .layer_map()
+            .unwrap()
+            .iter_historic_layers()
+            .map(|layer| layer.layer_name())
+            .collect_vec();
+        if let Some(err) = check_valid_layermap(&layer_names) {
+            bail!("invalid layermap: {err}");
         }
         Ok(tline)
     }
@@ -3197,6 +3213,9 @@ impl Tenant {
         image_layer_desc: Vec<(Lsn, Vec<(pageserver_api::key::Key, bytes::Bytes)>)>,
         end_lsn: Lsn,
     ) -> anyhow::Result<Arc<Timeline>> {
+        use checks::check_valid_layermap;
+        use itertools::Itertools;
+
         let tline = self
             .branch_timeline_test(src_timeline, dst_id, ancestor_lsn, ctx)
             .await?;
@@ -3216,6 +3235,18 @@ impl Tenant {
             tline
                 .force_create_image_layer(lsn, images, Some(ancestor_lsn), ctx)
                 .await?;
+        }
+        let layer_names = tline
+            .layers
+            .read()
+            .await
+            .layer_map()
+            .unwrap()
+            .iter_historic_layers()
+            .map(|layer| layer.layer_name())
+            .collect_vec();
+        if let Some(err) = check_valid_layermap(&layer_names) {
+            bail!("invalid layermap: {err}");
         }
         Ok(tline)
     }
