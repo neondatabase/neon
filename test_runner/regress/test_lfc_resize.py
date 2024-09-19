@@ -8,22 +8,19 @@ import time
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv, PgBin
+from fixtures.shared_fixtures import TTimeline
 
 
 #
 # Test branching, when a transaction is in prepared state
 #
 @pytest.mark.timeout(600)
-def test_lfc_resize(neon_simple_env: NeonEnv, pg_bin: PgBin):
-    env = neon_simple_env
-    endpoint = env.endpoints.create_start(
-        "main",
-        config_lines=[
-            "neon.file_cache_path='file.cache'",
-            "neon.max_file_cache_size=512MB",
-            "neon.file_cache_size_limit=512MB",
-        ],
-    )
+def test_lfc_resize(timeline: TTimeline, pg_bin: PgBin):
+    endpoint = timeline.primary_with_config(config_lines=[
+        "neon.file_cache_path='file.cache'",
+        "neon.max_file_cache_size=512MB",
+        "neon.file_cache_size_limit=512MB",
+    ])
     n_resize = 10
     scale = 100
 
@@ -49,7 +46,7 @@ def test_lfc_resize(neon_simple_env: NeonEnv, pg_bin: PgBin):
 
     thread.join()
 
-    lfc_file_path = f"{endpoint.pg_data_dir_path()}/file.cache"
+    lfc_file_path = timeline.tenant.pgdatadir(endpoint) / "file.cache"
     lfc_file_size = os.path.getsize(lfc_file_path)
     res = subprocess.run(["ls", "-sk", lfc_file_path], check=True, text=True, capture_output=True)
     lfc_file_blocks = re.findall("([0-9A-F]+)", res.stdout)[0]

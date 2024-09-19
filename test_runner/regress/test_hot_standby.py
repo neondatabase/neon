@@ -14,6 +14,7 @@ from fixtures.neon_fixtures import (
     tenant_get_shards,
     wait_replica_caughtup,
 )
+from fixtures.shared_fixtures import TTimeline
 from fixtures.utils import wait_until
 
 
@@ -221,29 +222,20 @@ def pgbench_accounts_initialized(ep):
 #
 # Without hs feedback enabled we'd see 'User query might have needed to see row
 # versions that must be removed.' errors.
-def test_hot_standby_feedback(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
-    env = neon_env_builder.init_start()
-    agressive_vacuum_conf = [
+def test_hot_standby_feedback(timeline: TTimeline, pg_bin: PgBin):
+    with timeline.primary_with_config(config_lines=[
         "log_autovacuum_min_duration = 0",
         "autovacuum_naptime = 10s",
         "autovacuum_vacuum_threshold = 25",
         "autovacuum_vacuum_scale_factor = 0.1",
         "autovacuum_vacuum_cost_delay = -1",
-    ]
-    with env.endpoints.create_start(
-        branch_name="main", endpoint_id="primary", config_lines=agressive_vacuum_conf
-    ) as primary:
+    ]) as primary:
         # It would be great to have more strict max_standby_streaming_delay=0s here, but then sometimes it fails with
         # 'User was holding shared buffer pin for too long.'.
-        with env.endpoints.new_replica_start(
-            origin=primary,
-            endpoint_id="secondary",
-            config_lines=[
-                "max_standby_streaming_delay=2s",
-                "neon.protocol_version=2",
-                "hot_standby_feedback=true",
-            ],
-        ) as secondary:
+        with timeline.secondary_with_config(config_lines=[
+            "max_standby_streaming_delay=2s",
+            "hot_standby_feedback=true",
+        ]) as secondary:
             log.info(
                 f"primary connstr is {primary.connstr()}, secondary connstr {secondary.connstr()}"
             )
@@ -286,20 +278,15 @@ def test_hot_standby_feedback(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
 
 # Test race condition between WAL replay and backends performing queries
 # https://github.com/neondatabase/neon/issues/7791
-def test_replica_query_race(neon_simple_env: NeonEnv):
-    env = neon_simple_env
-
-    primary_ep = env.endpoints.create_start(
-        branch_name="main",
-        endpoint_id="primary",
-    )
+def test_replica_query_race(timeline: TTimeline):
+    primary_ep = timeline.primary
 
     with primary_ep.connect() as p_con:
         with p_con.cursor() as p_cur:
             p_cur.execute("CREATE EXTENSION neon_test_utils")
             p_cur.execute("CREATE TABLE test AS SELECT 0 AS counter")
 
-    standby_ep = env.endpoints.new_replica_start(origin=primary_ep, endpoint_id="standby")
+    standby_ep = timeline.secondary
     wait_replica_caughtup(primary_ep, standby_ep)
 
     # In primary, run a lot of UPDATEs on a single page

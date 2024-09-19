@@ -3,6 +3,7 @@ from pathlib import Path
 
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv
+from fixtures.shared_fixtures import TTimeline
 from fixtures.utils import query_scalar
 
 
@@ -73,18 +74,14 @@ WITH (fillfactor='100');
     assert blocks < 10
 
 
-def test_sliding_working_set_approximation(neon_simple_env: NeonEnv):
-    env = neon_simple_env
+def test_sliding_working_set_approximation(timeline: TTimeline):
+    endpoint = timeline.primary_with_config(config_lines=[
+        "autovacuum = off",
+        "shared_buffers=1MB",
+        "neon.max_file_cache_size=256MB",
+        "neon.file_cache_size_limit=245MB",
+    ])
 
-    endpoint = env.endpoints.create_start(
-        branch_name="main",
-        config_lines=[
-            "autovacuum = off",
-            "shared_buffers=1MB",
-            "neon.max_file_cache_size=256MB",
-            "neon.file_cache_size_limit=245MB",
-        ],
-    )
     conn = endpoint.connect()
     cur = conn.cursor()
     cur.execute("create extension neon")

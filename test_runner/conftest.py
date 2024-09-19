@@ -10,4 +10,8 @@ pytest_plugins = (
     "fixtures.compare_fixtures",
     "fixtures.slow",
     "fixtures.flaky",
+    "fixtures.shared_fixtures",
+    "fixtures.function.neon_storage",
+    "fixtures.session.neon_storage",
+    "fixtures.session.s3",
 )

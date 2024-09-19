@@ -1,14 +1,13 @@
-from fixtures.neon_fixtures import NeonEnvBuilder, flush_ep_to_pageserver
+from pathlib import Path
+
+from fixtures.neon_fixtures import NeonEnvBuilder, flush_ep_to_pageserver, test_output_dir
+from fixtures.shared_fixtures import TTimeline
 
 
-def do_combocid_op(neon_env_builder: NeonEnvBuilder, op):
-    env = neon_env_builder.init_start()
-    endpoint = env.endpoints.create_start(
-        "main",
-        config_lines=[
-            "shared_buffers='1MB'",
-        ],
-    )
+def do_combocid_op(timeline: TTimeline, op):
+    endpoint = timeline.primary_with_config(config_lines=[
+        "shared_buffers='1MB'",
+    ])
 
     conn = endpoint.connect()
     cur = conn.cursor()
@@ -43,32 +42,26 @@ def do_combocid_op(neon_env_builder: NeonEnvBuilder, op):
     assert len(rows) == 500
 
     cur.execute("rollback")
-    flush_ep_to_pageserver(env, endpoint, env.initial_tenant, env.initial_timeline)
-    env.pageserver.http_client().timeline_checkpoint(
-        env.initial_tenant, env.initial_timeline, compact=False, wait_until_uploaded=True
-    )
+    timeline.stop_and_flush(endpoint)
+    timeline.checkpoint(compact=False, wait_until_uploaded=True)
 
 
-def test_combocid_delete(neon_env_builder: NeonEnvBuilder):
-    do_combocid_op(neon_env_builder, "delete from t")
+def test_combocid_delete(timeline: TTimeline):
+    do_combocid_op(timeline, "delete from t")
 
 
-def test_combocid_update(neon_env_builder: NeonEnvBuilder):
-    do_combocid_op(neon_env_builder, "update t set val=val+1")
+def test_combocid_update(timeline: TTimeline):
+    do_combocid_op(timeline, "update t set val=val+1")
 
 
-def test_combocid_lock(neon_env_builder: NeonEnvBuilder):
-    do_combocid_op(neon_env_builder, "select * from t for update")
+def test_combocid_lock(timeline: TTimeline):
+    do_combocid_op(timeline, "select * from t for update")
 
 
-def test_combocid_multi_insert(neon_env_builder: NeonEnvBuilder):
-    env = neon_env_builder.init_start()
-    endpoint = env.endpoints.create_start(
-        "main",
-        config_lines=[
-            "shared_buffers='1MB'",
-        ],
-    )
+def test_combocid_multi_insert(timeline: TTimeline, test_output_dir: Path):
+    endpoint = timeline.primary_with_config(config_lines=[
+        "shared_buffers='1MB'",
+    ])
 
     conn = endpoint.connect()
     cur = conn.cursor()
@@ -77,7 +70,7 @@ def test_combocid_multi_insert(neon_env_builder: NeonEnvBuilder):
     cur.execute("CREATE EXTENSION neon_test_utils")
 
     cur.execute("create table t(id integer, val integer)")
-    file_path = f"{endpoint.pg_data_dir_path()}/t.csv"
+    file_path = str(test_output_dir / "t.csv")
     cur.execute(f"insert into t select g, 0 from generate_series(1,{n_records}) g")
     cur.execute(f"copy t to '{file_path}'")
     cur.execute("truncate table t")
@@ -106,15 +99,12 @@ def test_combocid_multi_insert(neon_env_builder: NeonEnvBuilder):
 
     cur.execute("rollback")
 
-    flush_ep_to_pageserver(env, endpoint, env.initial_tenant, env.initial_timeline)
-    env.pageserver.http_client().timeline_checkpoint(
-        env.initial_tenant, env.initial_timeline, compact=False, wait_until_uploaded=True
-    )
+    timeline.stop_and_flush(endpoint)
+    timeline.checkpoint(compact=False, wait_until_uploaded=True)
 
 
-def test_combocid(neon_env_builder: NeonEnvBuilder):
-    env = neon_env_builder.init_start()
-    endpoint = env.endpoints.create_start("main")
+def test_combocid(timeline: TTimeline):
+    endpoint = timeline.primary
 
     conn = endpoint.connect()
     cur = conn.cursor()
@@ -147,7 +137,5 @@ def test_combocid(neon_env_builder: NeonEnvBuilder):
 
     cur.execute("rollback")
 
-    flush_ep_to_pageserver(env, endpoint, env.initial_tenant, env.initial_timeline)
-    env.pageserver.http_client().timeline_checkpoint(
-        env.initial_tenant, env.initial_timeline, compact=False, wait_until_uploaded=True
-    )
+    timeline.stop_and_flush(endpoint)
+    timeline.checkpoint(compact=False, wait_until_uploaded=True)

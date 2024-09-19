@@ -13,6 +13,7 @@ from fixtures.utils import AuxFileStore
 Dynamically parametrize tests by different parameters
 """
 
+
 def get_pgversions():
     if (v := os.getenv("DEFAULT_PG_VERSION")) is None:
         pg_versions = [version for version in PgVersion if version != PgVersion.NOT_SET]

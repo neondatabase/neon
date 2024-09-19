@@ -2,7 +2,7 @@ import time
 from contextlib import closing
 
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import Endpoint, NeonEnv, NeonEnvBuilder, fork_at_current_lsn
+from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder
 from fixtures.utils import query_scalar
 
 

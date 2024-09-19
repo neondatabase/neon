@@ -1,17 +1,15 @@
 import time
 
 from fixtures.neon_fixtures import NeonEnv, wait_replica_caughtup
+from fixtures.shared_fixtures import TTimeline
 
 
 #
 # Test that redo of XLOG_GIN_VACUUM_PAGE doesn't produce error
 #
-def test_gin_redo(neon_simple_env: NeonEnv):
-    env = neon_simple_env
-
-    primary = env.endpoints.create_start(branch_name="main", endpoint_id="primary")
-    time.sleep(1)
-    secondary = env.endpoints.new_replica_start(origin=primary, endpoint_id="secondary")
+def test_gin_redo(timeline: TTimeline):
+    primary = timeline.primary
+    secondary = timeline.secondary
     con = primary.connect()
     cur = con.cursor()
     cur.execute("create table gin_test_tbl(id integer, i int4[])")

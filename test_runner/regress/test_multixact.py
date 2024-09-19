@@ -1,4 +1,5 @@
 from fixtures.neon_fixtures import NeonEnv, check_restored_datadir_content
+from fixtures.shared_fixtures import TTimeline
 from fixtures.utils import query_scalar
 
 
@@ -12,9 +13,8 @@ from fixtures.utils import query_scalar
 # is enough to verify that the WAL records are handled correctly
 # in the pageserver.
 #
-def test_multixact(neon_simple_env: NeonEnv, test_output_dir):
-    env = neon_simple_env
-    endpoint = env.endpoints.create_start("main")
+def test_multixact(timeline: TTimeline, test_output_dir):
+    endpoint = timeline.primary
 
     cur = endpoint.connect().cursor()
     cur.execute(
@@ -72,10 +72,8 @@ def test_multixact(neon_simple_env: NeonEnv, test_output_dir):
     assert int(next_multixact_id) > int(next_multixact_id_old)
 
     # Branch at this point
-    env.neon_cli.create_branch(
-        "test_multixact_new", ancestor_branch_name="main", ancestor_start_lsn=lsn
-    )
-    endpoint_new = env.endpoints.create_start("test_multixact_new")
+    branch = timeline.create_branch("test_multixact_new", lsn=lsn)
+    endpoint_new = branch.primary
 
     next_multixact_id_new = endpoint_new.safe_psql(
         "SELECT next_multixact_id FROM pg_control_checkpoint()"
@@ -85,4 +83,4 @@ def test_multixact(neon_simple_env: NeonEnv, test_output_dir):
     assert next_multixact_id_new == next_multixact_id
 
     # Check that we can restore the content of the datadir correctly
-    check_restored_datadir_content(test_output_dir, env, endpoint)
+    timeline.tenant.check_restored_datadir_content(test_output_dir, endpoint)

@@ -15,6 +15,7 @@ from fixtures.neon_fixtures import (
 )
 from fixtures.pageserver.http import PageserverApiException
 from fixtures.pageserver.utils import wait_until_tenant_active
+from fixtures.shared_fixtures import TTimeline
 from fixtures.utils import query_scalar
 from performance.test_perf_pgbench import get_scales_matrix
 from requests import RequestException
@@ -115,13 +116,10 @@ def test_branching_with_pgbench(
 # This test checks if the pageserver is able to handle a "unnormalized" starting LSN.
 #
 # Related: see discussion in https://github.com/neondatabase/neon/pull/2143#issuecomment-1209092186
-def test_branching_unnormalized_start_lsn(neon_simple_env: NeonEnv, pg_bin: PgBin):
+def test_branching_unnormalized_start_lsn(timeline: TTimeline, pg_bin: PgBin):
     XLOG_BLCKSZ = 8192
 
-    env = neon_simple_env
-
-    env.neon_cli.create_branch("b0")
-    endpoint0 = env.endpoints.create_start("b0")
+    endpoint0 = timeline.primary
 
     pg_bin.run_capture(["pgbench", "-i", endpoint0.connstr()])
 
@@ -133,8 +131,8 @@ def test_branching_unnormalized_start_lsn(neon_simple_env: NeonEnv, pg_bin: PgBi
     start_lsn = Lsn((int(curr_lsn) - XLOG_BLCKSZ) // XLOG_BLCKSZ * XLOG_BLCKSZ)
 
     log.info(f"Branching b1 from b0 starting at lsn {start_lsn}...")
-    env.neon_cli.create_branch("b1", "b0", ancestor_start_lsn=start_lsn)
-    endpoint1 = env.endpoints.create_start("b1")
+    tl2 = timeline.create_branch("branch", start_lsn)
+    endpoint1 = tl2.primary
 
     pg_bin.run_capture(["pgbench", "-i", endpoint1.connstr()])
 

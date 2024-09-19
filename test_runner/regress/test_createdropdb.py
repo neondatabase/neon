@@ -5,6 +5,7 @@ import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv, check_restored_datadir_content
 from fixtures.pg_version import PgVersion
+from fixtures.shared_fixtures import TTimeline
 from fixtures.utils import query_scalar
 
 
@@ -12,18 +13,17 @@ from fixtures.utils import query_scalar
 # Test CREATE DATABASE when there have been relmapper changes
 #
 @pytest.mark.parametrize("strategy", ["file_copy", "wal_log"])
-def test_createdb(neon_simple_env: NeonEnv, strategy: str):
-    env = neon_simple_env
-    if env.pg_version == PgVersion.V14 and strategy == "wal_log":
+def test_createdb(timeline: TTimeline, pg_version: PgVersion, strategy: str):
+    if pg_version == PgVersion.V14 and strategy == "wal_log":
         pytest.skip("wal_log strategy not supported on PostgreSQL 14")
 
-    endpoint = env.endpoints.create_start("main")
+    endpoint = timeline.primary
 
     with endpoint.cursor() as cur:
         # Cause a 'relmapper' change in the original branch
         cur.execute("VACUUM FULL pg_class")
 
-        if env.pg_version == PgVersion.V14:
+        if pg_version == PgVersion.V14:
             cur.execute("CREATE DATABASE foodb")
         else:
             cur.execute(f"CREATE DATABASE foodb STRATEGY={strategy}")
@@ -31,8 +31,8 @@ def test_createdb(neon_simple_env: NeonEnv, strategy: str):
         lsn = query_scalar(cur, "SELECT pg_current_wal_insert_lsn()")
 
     # Create a branch
-    env.neon_cli.create_branch("test_createdb2", "main", ancestor_start_lsn=lsn)
-    endpoint2 = env.endpoints.create_start("test_createdb2")
+    tl2 = timeline.create_branch("createdb2", lsn=lsn)
+    endpoint2 = tl2.primary
 
     # Test that you can connect to the new database on both branches
     for db in (endpoint, endpoint2):
@@ -58,9 +58,8 @@ def test_createdb(neon_simple_env: NeonEnv, strategy: str):
 #
 # Test DROP DATABASE
 #
-def test_dropdb(neon_simple_env: NeonEnv, test_output_dir):
-    env = neon_simple_env
-    endpoint = env.endpoints.create_start("main")
+def test_dropdb(timeline: TTimeline, test_output_dir):
+    endpoint = timeline.primary
 
     with endpoint.cursor() as cur:
         cur.execute("CREATE DATABASE foodb")
@@ -77,28 +76,28 @@ def test_dropdb(neon_simple_env: NeonEnv, test_output_dir):
         lsn_after_drop = query_scalar(cur, "SELECT pg_current_wal_insert_lsn()")
 
     # Create two branches before and after database drop.
-    env.neon_cli.create_branch("test_before_dropdb", "main", ancestor_start_lsn=lsn_before_drop)
-    endpoint_before = env.endpoints.create_start("test_before_dropdb")
+    tl_before = timeline.create_branch("test_before_dropdb", lsn=lsn_before_drop)
+    endpoint_before = tl_before.primary
 
-    env.neon_cli.create_branch("test_after_dropdb", "main", ancestor_start_lsn=lsn_after_drop)
-    endpoint_after = env.endpoints.create_start("test_after_dropdb")
+    tl_after = timeline.create_branch("test_after_dropdb", lsn=lsn_after_drop)
+    endpoint_after = tl_after.primary
 
     # Test that database exists on the branch before drop
     endpoint_before.connect(dbname="foodb").close()
 
     # Test that database subdir exists on the branch before drop
-    assert endpoint_before.pgdata_dir
-    dbpath = pathlib.Path(endpoint_before.pgdata_dir) / "base" / str(dboid)
+    assert timeline.tenant.pgdatadir(endpoint_before)
+    dbpath = pathlib.Path(timeline.tenant.pgdatadir(endpoint_before)) / "base" / str(dboid)
     log.info(dbpath)
 
     assert os.path.isdir(dbpath) is True
 
     # Test that database subdir doesn't exist on the branch after drop
-    assert endpoint_after.pgdata_dir
-    dbpath = pathlib.Path(endpoint_after.pgdata_dir) / "base" / str(dboid)
+    assert timeline.tenant.pgdatadir(endpoint_after)
+    dbpath = pathlib.Path(timeline.tenant.pgdatadir(endpoint_after)) / "base" / str(dboid)
     log.info(dbpath)
 
     assert os.path.isdir(dbpath) is False
 
     # Check that we restore the content of the datadir correctly
-    check_restored_datadir_content(test_output_dir, env, endpoint)
+    timeline.tenant.check_restored_datadir_content(test_output_dir, endpoint)
