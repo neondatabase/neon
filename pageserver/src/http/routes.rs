@@ -820,7 +820,7 @@ async fn get_lsn_by_timestamp_handler(
 
     let lease = if with_lease {
         timeline
-            .make_lsn_lease(lsn, timeline.get_lsn_lease_length_for_ts(), &ctx)
+            .init_lsn_lease(lsn, timeline.get_lsn_lease_length_for_ts(), &ctx)
             .inspect_err(|_| {
                 warn!("fail to grant a lease to {}", lsn);
             })
@@ -1689,7 +1689,7 @@ async fn lsn_lease_handler(
         active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
             .await?;
     let result = timeline
-        .make_lsn_lease(lsn, timeline.get_lsn_lease_length(), &ctx)
+        .init_lsn_lease(lsn, timeline.get_lsn_lease_length(), &ctx)
         .map_err(|e| ApiError::InternalServerError(e.context("lsn lease http handler")))?;
 
     json_response(StatusCode::OK, result)

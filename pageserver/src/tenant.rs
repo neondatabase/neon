@@ -7237,21 +7237,21 @@ mod tests {
         let leased_lsns = [0x30, 0x50, 0x70];
         let mut leases = Vec::new();
         let _: anyhow::Result<_> = leased_lsns.iter().try_for_each(|n| {
-            leases.push(timeline.make_lsn_lease(Lsn(*n), timeline.get_lsn_lease_length(), &ctx)?);
+            leases.push(timeline.init_lsn_lease(Lsn(*n), timeline.get_lsn_lease_length(), &ctx)?);
             Ok(())
         });
 
         // Renewing with shorter lease should not change the lease.
         let updated_lease_0 =
-            timeline.make_lsn_lease(Lsn(leased_lsns[0]), Duration::from_secs(0), &ctx)?;
+            timeline.renew_lsn_lease(Lsn(leased_lsns[0]), Duration::from_secs(0), &ctx);
         assert_eq!(updated_lease_0.valid_until, leases[0].valid_until);
 
         // Renewing with a long lease should renew lease with later expiration time.
-        let updated_lease_1 = timeline.make_lsn_lease(
+        let updated_lease_1 = timeline.renew_lsn_lease(
             Lsn(leased_lsns[1]),
             timeline.get_lsn_lease_length() * 2,
             &ctx,
-        )?;
+        );
 
         assert!(updated_lease_1.valid_until > leases[1].valid_until);
 
@@ -7284,13 +7284,14 @@ mod tests {
         // Make lease on a already GC-ed LSN.
         // 0/80 does not have a valid lease + is below latest_gc_cutoff
         assert!(Lsn(0x80) < *timeline.get_latest_gc_cutoff_lsn());
-        let res = timeline.make_lsn_lease(Lsn(0x80), timeline.get_lsn_lease_length(), &ctx);
+        let res = timeline.init_lsn_lease(Lsn(0x80), timeline.get_lsn_lease_length(), &ctx);
         assert!(res.is_err());
 
         // Should still be able to renew a currently valid lease
         // Assumption: original lease to is still valid for 0/50.
+        // (use `Timeline::init_lsn_lease` so it does validation)
         let _ =
-            timeline.make_lsn_lease(Lsn(leased_lsns[1]), timeline.get_lsn_lease_length(), &ctx)?;
+            timeline.init_lsn_lease(Lsn(leased_lsns[1]), timeline.get_lsn_lease_length(), &ctx)?;
 
         Ok(())
     }

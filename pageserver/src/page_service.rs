@@ -795,7 +795,6 @@ impl PageServerHandler {
     }
 
     /// Handles the lsn lease request.
-    /// If a lease cannot be obtained, the client will receive NULL.
     #[instrument(skip_all, fields(shard_id, %lsn))]
     async fn handle_make_lsn_lease<IO>(
         &mut self,
@@ -818,25 +817,19 @@ impl PageServerHandler {
             .await?;
         set_tracing_field_shard_id(&timeline);
 
-        let lease = timeline
-            .make_lsn_lease(lsn, timeline.get_lsn_lease_length(), ctx)
-            .inspect_err(|e| {
-                warn!("{e}");
-            })
-            .ok();
-        let valid_until_str = lease.map(|l| {
-            l.valid_until
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .expect("valid_until is earlier than UNIX_EPOCH")
-                .as_millis()
-                .to_string()
-        });
-        let bytes = valid_until_str.as_ref().map(|x| x.as_bytes());
+        let lease = timeline.renew_lsn_lease(lsn, timeline.get_lsn_lease_length(), ctx);
+        let valid_until_str = lease
+            .valid_until
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("valid_until is earlier than UNIX_EPOCH")
+            .as_millis()
+            .to_string();
+        let bytes = valid_until_str.as_bytes();
 
         pgb.write_message_noflush(&BeMessage::RowDescription(&[RowDescriptor::text_col(
             b"valid_until",
         )]))?
-        .write_message_noflush(&BeMessage::DataRow(&[bytes]))?;
+        .write_message_noflush(&BeMessage::DataRow(&[Some(bytes)]))?;
 
         Ok(())
     }
