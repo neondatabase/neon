@@ -29,6 +29,12 @@ pub(crate) struct GcBlock {
     /// LOCK ORDER: this is held locked while scheduling the next index_part update. This is done
     /// to keep the this field up to date with RemoteTimelineClient `upload_queue.dirty`.
     reasons: std::sync::Mutex<Storage>,
+
+    /// GC background task or manually run `Tenant::gc_iteration` holds a lock on this.
+    ///
+    /// Do not add any more features taking and forbidding taking this lock. It should be
+    /// `tokio::sync::Notify`, but that is rarely used. On the other side, [`GcBlock::insert`]
+    /// synchronizes with gc tasks by locking and unlocking this mutex.
     blocking: tokio::sync::Mutex<()>,
 }
 
