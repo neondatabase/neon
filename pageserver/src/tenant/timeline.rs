@@ -4038,6 +4038,7 @@ impl Timeline {
             // partition, so flush it to disk.
             let (desc, path) = image_layer_writer.finish(ctx).await?;
             let image_layer = Layer::finish_creating(self.conf, self, desc, &path)?;
+            info!("created image layer for rel {}", image_layer.local_path());
             Ok(ImageLayerCreationOutcome {
                 image: Some(image_layer),
                 next_start_key: img_range.end,
@@ -4127,6 +4128,10 @@ impl Timeline {
             // partition, so flush it to disk.
             let (desc, path) = image_layer_writer.finish(ctx).await?;
             let image_layer = Layer::finish_creating(self.conf, self, desc, &path)?;
+            info!(
+                "created image layer for metadata {}",
+                image_layer.local_path()
+            );
             Ok(ImageLayerCreationOutcome {
                 image: Some(image_layer),
                 next_start_key: img_range.end,
@@ -5430,7 +5435,7 @@ impl Timeline {
         }
         let (desc, path) = image_layer_writer.finish(ctx).await?;
         let image_layer = Layer::finish_creating(self.conf, self, desc, &path)?;
-
+        info!("force created image layer {}", image_layer.local_path());
         {
             let mut guard = self.layers.write().await;
             guard.open_mut().unwrap().force_insert_layer(image_layer);
@@ -5509,7 +5514,7 @@ impl Timeline {
         }
         let (desc, path) = delta_layer_writer.finish(deltas.key_range.end, ctx).await?;
         let delta_layer = Layer::finish_creating(self.conf, self, desc, &path)?;
-
+        info!("force created delta layer {}", delta_layer.local_path());
         {
             let mut guard = self.layers.write().await;
             guard.open_mut().unwrap().force_insert_layer(delta_layer);
