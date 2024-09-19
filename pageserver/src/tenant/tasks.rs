@@ -248,7 +248,7 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
             info_span!(parent: None, "timeline_get_throttle", tenant_id=%tenant.tenant_shard_id, shard_id=%tenant.tenant_shard_id.shard_slug()).in_scope(|| {
                 let now = Instant::now();
                 let prev = std::mem::replace(&mut last_throttle_flag_reset_at, now);
-                let Stats { count_accounted, count_throttled, sum_throttled_usecs } = tenant.timeline_get_throttle.reset_stats();
+                let Stats { count_accounted_start, count_accounted_finish, count_throttled, sum_throttled_usecs} = tenant.timeline_get_throttle.reset_stats();
                 if count_throttled == 0 {
                     return;
                 }
@@ -257,9 +257,10 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
                 info!(
                     n_seconds=%format_args!("{:.3}",
                     delta.as_secs_f64()),
-                    count_accounted,
+                    count_accounted = count_accounted_finish,  // don't break existing log scraping
                     count_throttled,
                     sum_throttled_usecs,
+                    count_accounted_start, // log after pre-existing fields to not break existing log scraping
                     allowed_rps=%format_args!("{allowed_rps:.0}"),
                     "shard was throttled in the last n_seconds"
                 );

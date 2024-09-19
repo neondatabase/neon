@@ -2592,6 +2592,8 @@ pub(crate) fn remove_tenant_metrics(tenant_shard_id: &TenantShardId) {
         let _ = TENANT_SYNTHETIC_SIZE_METRIC.remove_label_values(&[&tid]);
     }
 
+    tenant_throttling::remove_tenant_metrics(tenant_shard_id);
+
     // we leave the BROKEN_TENANTS_SET entry if any
 }
 
@@ -3055,41 +3057,180 @@ pub mod tokio_epoll_uring {
 pub(crate) mod tenant_throttling {
     use metrics::{register_int_counter_vec, IntCounter};
     use once_cell::sync::Lazy;
+    use utils::shard::TenantShardId;
 
     use crate::tenant::{self, throttle::Metric};
 
-    pub(crate) struct TimelineGet {
-        wait_time: IntCounter,
-        count: IntCounter,
+    struct GlobalAndPerTenantIntCounter {
+        global: IntCounter,
+        per_tenant: IntCounter,
     }
 
-    pub(crate) static TIMELINE_GET: Lazy<TimelineGet> = Lazy::new(|| {
-        static WAIT_USECS: Lazy<metrics::IntCounterVec> = Lazy::new(|| {
-            register_int_counter_vec!(
-            "pageserver_tenant_throttling_wait_usecs_sum_global",
-            "Sum of microseconds that tenants spent waiting for a tenant throttle of a given kind.",
+    impl GlobalAndPerTenantIntCounter {
+        #[inline(always)]
+        pub(crate) fn inc(&self) {
+            self.inc_by(1)
+        }
+        #[inline(always)]
+        pub(crate) fn inc_by(&self, n: u64) {
+            self.global.inc_by(n);
+            self.per_tenant.inc_by(n);
+        }
+    }
+
+    pub(crate) struct TimelineGet {
+        count_accounted_start: GlobalAndPerTenantIntCounter,
+        count_accounted_finish: GlobalAndPerTenantIntCounter,
+        wait_time: GlobalAndPerTenantIntCounter,
+        count_throttled: GlobalAndPerTenantIntCounter,
+    }
+
+    static COUNT_ACCOUNTED_START: Lazy<metrics::IntCounterVec> = Lazy::new(|| {
+        register_int_counter_vec!(
+            "pageserver_tenant_throttling_count_accounted_start_global",
+            "Count of tenant throttling starts, by kind of throttle.",
             &["kind"]
         )
-            .unwrap()
-        });
-
-        static WAIT_COUNT: Lazy<metrics::IntCounterVec> = Lazy::new(|| {
-            register_int_counter_vec!(
-                "pageserver_tenant_throttling_count_global",
-                "Count of tenant throttlings, by kind of throttle.",
-                &["kind"]
-            )
-            .unwrap()
-        });
-
-        let kind = "timeline_get";
-        TimelineGet {
-            wait_time: WAIT_USECS.with_label_values(&[kind]),
-            count: WAIT_COUNT.with_label_values(&[kind]),
-        }
+        .unwrap()
+    });
+    static COUNT_ACCOUNTED_START_PER_TENANT: Lazy<metrics::IntCounterVec> = Lazy::new(|| {
+        register_int_counter_vec!(
+            "pageserver_tenant_throttling_count_accounted_start",
+            "Count of tenant throttling starts, by kind of throttle.",
+            &["kind", "tenant_id", "shard_id"]
+        )
+        .unwrap()
+    });
+    static COUNT_ACCOUNTED_FINISH: Lazy<metrics::IntCounterVec> = Lazy::new(|| {
+        register_int_counter_vec!(
+            "pageserver_tenant_throttling_count_accounted_finish_global",
+            "Count of tenant throttling finishes, by kind of throttle.",
+            &["kind"]
+        )
+        .unwrap()
+    });
+    static COUNT_ACCOUNTED_FINISH_PER_TENANT: Lazy<metrics::IntCounterVec> = Lazy::new(|| {
+        register_int_counter_vec!(
+            "pageserver_tenant_throttling_count_accounted_finish",
+            "Count of tenant throttling finishes, by kind of throttle.",
+            &["kind", "tenant_id", "shard_id"]
+        )
+        .unwrap()
+    });
+    static WAIT_USECS: Lazy<metrics::IntCounterVec> = Lazy::new(|| {
+        register_int_counter_vec!(
+            "pageserver_tenant_throttling_wait_usecs_sum_global",
+            "Sum of microseconds that spent waiting throttle by kind of throttle.",
+            &["kind"]
+        )
+        .unwrap()
+    });
+    static WAIT_USECS_PER_TENANT: Lazy<metrics::IntCounterVec> = Lazy::new(|| {
+        register_int_counter_vec!(
+            "pageserver_tenant_throttling_wait_usecs_sum",
+            "Sum of microseconds that spent waiting throttle by kind of throttle.",
+            &["kind", "tenant_id", "shard_id"]
+        )
+        .unwrap()
     });
 
-    impl Metric for &'static TimelineGet {
+    static WAIT_COUNT: Lazy<metrics::IntCounterVec> = Lazy::new(|| {
+        register_int_counter_vec!(
+            "pageserver_tenant_throttling_count_global",
+            "Count of tenant throttlings, by kind of throttle.",
+            &["kind"]
+        )
+        .unwrap()
+    });
+    static WAIT_COUNT_PER_TENANT: Lazy<metrics::IntCounterVec> = Lazy::new(|| {
+        register_int_counter_vec!(
+            "pageserver_tenant_throttling_count",
+            "Count of tenant throttlings, by kind of throttle.",
+            &["kind", "tenant_id", "shard_id"]
+        )
+        .unwrap()
+    });
+
+    const KIND: &str = "timeline_get";
+
+    impl TimelineGet {
+        pub(crate) fn new(tenant_shard_id: &TenantShardId) -> Self {
+            TimelineGet {
+                count_accounted_start: {
+                    GlobalAndPerTenantIntCounter {
+                        global: COUNT_ACCOUNTED_START.with_label_values(&[KIND]),
+                        per_tenant: COUNT_ACCOUNTED_START_PER_TENANT.with_label_values(&[
+                            KIND,
+                            &tenant_shard_id.tenant_id.to_string(),
+                            &tenant_shard_id.shard_slug().to_string(),
+                        ]),
+                    }
+                },
+                count_accounted_finish: {
+                    GlobalAndPerTenantIntCounter {
+                        global: COUNT_ACCOUNTED_FINISH.with_label_values(&[KIND]),
+                        per_tenant: COUNT_ACCOUNTED_FINISH_PER_TENANT.with_label_values(&[
+                            KIND,
+                            &tenant_shard_id.tenant_id.to_string(),
+                            &tenant_shard_id.shard_slug().to_string(),
+                        ]),
+                    }
+                },
+                wait_time: {
+                    GlobalAndPerTenantIntCounter {
+                        global: WAIT_USECS.with_label_values(&[KIND]),
+                        per_tenant: WAIT_USECS_PER_TENANT.with_label_values(&[
+                            KIND,
+                            &tenant_shard_id.tenant_id.to_string(),
+                            &tenant_shard_id.shard_slug().to_string(),
+                        ]),
+                    }
+                },
+                count_throttled: {
+                    GlobalAndPerTenantIntCounter {
+                        global: WAIT_COUNT.with_label_values(&[KIND]),
+                        per_tenant: WAIT_COUNT_PER_TENANT.with_label_values(&[
+                            KIND,
+                            &tenant_shard_id.tenant_id.to_string(),
+                            &tenant_shard_id.shard_slug().to_string(),
+                        ]),
+                    }
+                },
+            }
+        }
+    }
+
+    pub(crate) fn preinitialize_global_metrics() {
+        Lazy::force(&COUNT_ACCOUNTED_START);
+        Lazy::force(&COUNT_ACCOUNTED_FINISH);
+        Lazy::force(&WAIT_USECS);
+        Lazy::force(&WAIT_COUNT);
+    }
+
+    pub(crate) fn remove_tenant_metrics(tenant_shard_id: &TenantShardId) {
+        for m in &[
+            &COUNT_ACCOUNTED_START_PER_TENANT,
+            &COUNT_ACCOUNTED_FINISH_PER_TENANT,
+            &WAIT_USECS_PER_TENANT,
+            &WAIT_COUNT_PER_TENANT,
+        ] {
+            let _ = m.remove_label_values(&[
+                KIND,
+                &tenant_shard_id.tenant_id.to_string(),
+                &tenant_shard_id.shard_slug().to_string(),
+            ]);
+        }
+    }
+
+    impl Metric for TimelineGet {
+        #[inline(always)]
+        fn accounting_start(&self) {
+            self.count_accounted_start.inc();
+        }
+        #[inline(always)]
+        fn accounting_finish(&self) {
+            self.count_accounted_finish.inc();
+        }
         #[inline(always)]
         fn observe_throttling(
             &self,
@@ -3097,7 +3238,7 @@ pub(crate) mod tenant_throttling {
         ) {
             let val = u64::try_from(wait_time.as_micros()).unwrap();
             self.wait_time.inc_by(val);
-            self.count.inc();
+            self.count_throttled.inc();
         }
     }
 }
@@ -3253,7 +3394,8 @@ pub fn preinitialize_metrics() {
 
     // Custom
     Lazy::force(&RECONSTRUCT_TIME);
-    Lazy::force(&tenant_throttling::TIMELINE_GET);
     Lazy::force(&BASEBACKUP_QUERY_TIME);
     Lazy::force(&COMPUTE_COMMANDS_COUNTERS);
+
+    tenant_throttling::preinitialize_global_metrics();
 }

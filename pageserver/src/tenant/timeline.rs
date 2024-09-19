@@ -196,9 +196,8 @@ fn drop_wlock<T>(rlock: tokio::sync::RwLockWriteGuard<'_, T>) {
 /// The outward-facing resources required to build a Timeline
 pub struct TimelineResources {
     pub remote_client: RemoteTimelineClient,
-    pub timeline_get_throttle: Arc<
-        crate::tenant::throttle::Throttle<&'static crate::metrics::tenant_throttling::TimelineGet>,
-    >,
+    pub timeline_get_throttle:
+        Arc<crate::tenant::throttle::Throttle<crate::metrics::tenant_throttling::TimelineGet>>,
     pub l0_flush_global_state: l0_flush::L0FlushGlobalState,
 }
 
@@ -406,9 +405,8 @@ pub struct Timeline {
     gc_lock: tokio::sync::Mutex<()>,
 
     /// Cloned from [`super::Tenant::timeline_get_throttle`] on construction.
-    timeline_get_throttle: Arc<
-        crate::tenant::throttle::Throttle<&'static crate::metrics::tenant_throttling::TimelineGet>,
-    >,
+    timeline_get_throttle:
+        Arc<crate::tenant::throttle::Throttle<crate::metrics::tenant_throttling::TimelineGet>>,
 
     /// Keep aux directory cache to avoid it's reconstruction on each update
     pub(crate) aux_files: tokio::sync::Mutex<AuxFilesState>,
