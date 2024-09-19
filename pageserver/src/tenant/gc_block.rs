@@ -34,7 +34,7 @@ pub(crate) struct GcBlock {
     ///
     /// Do not add any more features taking and forbidding taking this lock. It should be
     /// `tokio::sync::Notify`, but that is rarely used. On the other side, [`GcBlock::insert`]
-    /// synchronizes with gc tasks by locking and unlocking this mutex.
+    /// synchronizes with gc attempts by locking and unlocking this mutex.
     blocking: tokio::sync::Mutex<()>,
 }
 
