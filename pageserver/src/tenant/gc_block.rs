@@ -22,6 +22,8 @@ impl Storage {
     }
 }
 
+/// GcBlock provides persistent (per-timeline) gc blocking and facilitates transient time based gc
+/// blocking.
 #[derive(Default)]
 pub(crate) struct GcBlock {
     /// The timelines which have current reasons to block gc.
@@ -75,6 +77,9 @@ impl GcBlock {
         g.lsn_lease_deadline = Some(deadline);
     }
 
+    /// Describe the current gc blocking reasons.
+    ///
+    /// TODO: make this json serializable.
     pub(crate) fn summary(&self) -> Option<BlockingReasons> {
         let g = self.reasons.lock().unwrap();
 
