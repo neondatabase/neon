@@ -1,5 +1,4 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::fmt::format;
 
 use anyhow::Context;
 use itertools::Itertools;

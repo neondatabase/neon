@@ -380,6 +380,7 @@ pub async fn scan_pageserver_metadata_cmd(
 
             if summary.is_fatal() {
                 tracing::error!("Fatal scrub errors detected");
+                std::process::exit(1);
             } else if summary.is_empty() {
                 // Strictly speaking an empty bucket is a valid bucket, but if someone ran the
                 // scrubber they were likely expecting to scan something, and if we see no timelines
@@ -391,6 +392,7 @@ pub async fn scan_pageserver_metadata_cmd(
                         .prefix_in_bucket
                         .unwrap_or("<none>".to_string())
                 );
+                std::process::exit(1);
             }
 
             Ok(())
