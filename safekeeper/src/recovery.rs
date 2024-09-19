@@ -35,7 +35,7 @@ use crate::{
 
 /// Entrypoint for per timeline task which always runs, checking whether
 /// recovery for this safekeeper is needed and starting it if so.
-#[instrument(name = "recovery task", skip_all, fields(ttid = %tli.ttid))]
+#[instrument(name = "recovery", skip_all, fields(ttid = %tli.ttid))]
 pub async fn recovery_main(tli: WalResidentTimeline, conf: SafeKeeperConf) {
     info!("started");
 

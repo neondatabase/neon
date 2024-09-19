@@ -162,7 +162,6 @@ def test_fully_custom_config(positive_env: NeonEnv):
         "min_resident_size_override": 23,
         "timeline_get_throttle": {
             "task_kinds": ["PageRequestHandler"],
-            "fair": True,
             "initial": 0,
             "refill_interval": "1s",
             "refill_amount": 1000,

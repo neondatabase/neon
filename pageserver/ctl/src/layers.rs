@@ -59,7 +59,7 @@ pub(crate) enum LayerCmd {
 
 async fn read_delta_file(path: impl AsRef<Path>, ctx: &RequestContext) -> Result<()> {
     let path = Utf8Path::from_path(path.as_ref()).expect("non-Unicode path");
-    virtual_file::init(10, virtual_file::api::IoEngineKind::StdFs);
+    virtual_file::init(10, virtual_file::api::IoEngineKind::StdFs, 1);
     page_cache::init(100);
     let file = VirtualFile::open(path, ctx).await?;
     let file_id = page_cache::next_file_id();
@@ -89,6 +89,7 @@ async fn read_delta_file(path: impl AsRef<Path>, ctx: &RequestContext) -> Result
     for (k, v) in all {
         let value = cursor.read_blob(v.pos(), ctx).await?;
         println!("key:{} value_len:{}", k, value.len());
+        assert!(k.is_i128_representable(), "invalid key: ");
     }
     // TODO(chi): special handling for last key?
     Ok(())
@@ -189,7 +190,11 @@ pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
             new_tenant_id,
             new_timeline_id,
         } => {
-            pageserver::virtual_file::init(10, virtual_file::api::IoEngineKind::StdFs);
+            pageserver::virtual_file::init(
+                10,
+                virtual_file::api::IoEngineKind::StdFs,
+                pageserver_api::config::defaults::DEFAULT_IO_BUFFER_ALIGNMENT,
+            );
             pageserver::page_cache::init(100);
 
             let ctx = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error);

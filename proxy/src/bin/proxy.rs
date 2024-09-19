@@ -60,11 +60,15 @@ use clap::{Parser, ValueEnum};
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 #[derive(Clone, Debug, ValueEnum)]
-enum AuthBackend {
+enum AuthBackendType {
     Console,
+    // clap only shows the name, not the alias, in usage text.
+    // TODO: swap name/alias and deprecate "link"
+    #[value(name("link"), alias("web"))]
+    Web,
+
     #[cfg(feature = "testing")]
     Postgres,
-    Link,
 }
 
 /// Neon proxy/router
@@ -77,8 +81,8 @@ struct ProxyCliArgs {
     /// listen for incoming client connections on ip:port
     #[clap(short, long, default_value = "127.0.0.1:4432")]
     proxy: String,
-    #[clap(value_enum, long, default_value_t = AuthBackend::Link)]
-    auth_backend: AuthBackend,
+    #[clap(value_enum, long, default_value_t = AuthBackendType::Web)]
+    auth_backend: AuthBackendType,
     /// listen for management callback connection on ip:port
     #[clap(short, long, default_value = "127.0.0.1:7000")]
     mgmt: String,
@@ -88,7 +92,7 @@ struct ProxyCliArgs {
     /// listen for incoming wss connections on ip:port
     #[clap(long)]
     wss: Option<String>,
-    /// redirect unauthenticated users to the given uri in case of link auth
+    /// redirect unauthenticated users to the given uri in case of web auth
     #[clap(short, long, default_value = "http://localhost:3000/psql_session/")]
     uri: String,
     /// cloud API endpoint for authenticating users
@@ -148,7 +152,7 @@ struct ProxyCliArgs {
     disable_dynamic_rate_limiter: bool,
     /// Endpoint rate limiter max number of requests per second.
     ///
-    /// Provided in the form '<Requests Per Second>@<Bucket Duration Size>'.
+    /// Provided in the form `<Requests Per Second>@<Bucket Duration Size>`.
     /// Can be given multiple times for different bucket sizes.
     #[clap(long, default_values_t = RateBucketInfo::DEFAULT_ENDPOINT_SET)]
     endpoint_rps_limit: Vec<RateBucketInfo>,
@@ -221,6 +225,10 @@ struct ProxyCliArgs {
     /// Whether to retry the wake_compute request
     #[clap(long, default_value = config::RetryConfig::WAKE_COMPUTE_DEFAULT_VALUES)]
     wake_compute_retry: String,
+
+    /// Configure if this is a private access proxy for the POC: In that case the proxy will ignore the IP allowlist
+    #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
+    is_private_access_proxy: bool,
 }
 
 #[derive(clap::Args, Clone, Copy, Debug)]
@@ -261,6 +269,12 @@ struct SqlOverHttpArgs {
 
     #[clap(long, default_value_t = 64)]
     sql_over_http_cancel_set_shards: usize,
+
+    #[clap(long, default_value_t = 10 * 1024 * 1024)] // 10 MiB
+    sql_over_http_max_request_size_bytes: u64,
+
+    #[clap(long, default_value_t = 10 * 1024 * 1024)] // 10 MiB
+    sql_over_http_max_response_size_bytes: usize,
 }
 
 #[tokio::main]
@@ -447,7 +461,10 @@ async fn main() -> anyhow::Result<()> {
 
     // maintenance tasks. these never return unless there's an error
     let mut maintenance_tasks = JoinSet::new();
-    maintenance_tasks.spawn(proxy::handle_signals(cancellation_token.clone()));
+    maintenance_tasks.spawn(proxy::handle_signals(
+        cancellation_token.clone(),
+        || async { Ok(()) },
+    ));
     maintenance_tasks.spawn(http::health_server::task_main(
         http_listener,
         AppMetrics {
@@ -467,7 +484,7 @@ async fn main() -> anyhow::Result<()> {
         ));
     }
 
-    if let auth::BackendType::Console(api, _) = &config.auth_backend {
+    if let auth::Backend::Console(api, _) = &config.auth_backend {
         if let proxy::console::provider::ConsoleBackend::Console(api) = &**api {
             match (redis_notifications_client, regional_redis_client.clone()) {
                 (None, None) => {}
@@ -572,7 +589,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
     }
 
     let auth_backend = match &args.auth_backend {
-        AuthBackend::Console => {
+        AuthBackendType::Console => {
             let wake_compute_cache_config: CacheOptions = args.wake_compute_cache.parse()?;
             let project_info_cache_config: ProjectInfoCacheOptions =
                 args.project_info_cache.parse()?;
@@ -621,18 +638,20 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
                 wake_compute_endpoint_rate_limiter,
             );
             let api = console::provider::ConsoleBackend::Console(api);
-            auth::BackendType::Console(MaybeOwned::Owned(api), ())
+            auth::Backend::Console(MaybeOwned::Owned(api), ())
         }
-        #[cfg(feature = "testing")]
-        AuthBackend::Postgres => {
-            let url = args.auth_endpoint.parse()?;
-            let api = console::provider::mock::Api::new(url);
-            let api = console::provider::ConsoleBackend::Postgres(api);
-            auth::BackendType::Console(MaybeOwned::Owned(api), ())
-        }
-        AuthBackend::Link => {
+
+        AuthBackendType::Web => {
             let url = args.uri.parse()?;
-            auth::BackendType::Link(MaybeOwned::Owned(url), ())
+            auth::Backend::Web(MaybeOwned::Owned(url), ())
+        }
+
+        #[cfg(feature = "testing")]
+        AuthBackendType::Postgres => {
+            let url = args.auth_endpoint.parse()?;
+            let api = console::provider::mock::Api::new(url, !args.is_private_access_proxy);
+            let api = console::provider::ConsoleBackend::Postgres(api);
+            auth::Backend::Console(MaybeOwned::Owned(api), ())
         }
     };
 
@@ -669,6 +688,8 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         },
         cancel_set: CancelSet::new(args.sql_over_http.sql_over_http_cancel_set_shards),
         client_conn_threshold: args.sql_over_http.sql_over_http_client_conn_threshold,
+        max_request_size_bytes: args.sql_over_http.sql_over_http_max_request_size_bytes,
+        max_response_size_bytes: args.sql_over_http.sql_over_http_max_response_size_bytes,
     };
     let authentication_config = AuthenticationConfig {
         thread_pool,
@@ -676,6 +697,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         rate_limiter_enabled: args.auth_rate_limit_enabled,
         rate_limiter: AuthRateLimiter::new(args.auth_rate_limit.clone()),
         rate_limit_ip_subnet: args.auth_rate_limit_ip_subnet,
+        ip_allowlist_check_enabled: !args.is_private_access_proxy,
     };
 
     let config = Box::leak(Box::new(ProxyConfig {

@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 
@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use utils::id::{NodeId, TenantId};
 
+use crate::models::PageserverUtilization;
 use crate::{
     models::{ShardParameters, TenantConfig},
     shard::{ShardStripeSize, TenantShardId},
@@ -55,6 +56,8 @@ pub struct NodeRegisterRequest {
 
     pub listen_http_addr: String,
     pub listen_http_port: u16,
+
+    pub availability_zone_id: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -69,6 +72,17 @@ pub struct NodeConfigureRequest {
 pub struct TenantPolicyRequest {
     pub placement: Option<PlacementPolicy>,
     pub scheduling: Option<ShardSchedulingPolicy>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct ShardsPreferredAzsRequest {
+    #[serde(flatten)]
+    pub preferred_az_ids: HashMap<TenantShardId, String>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct ShardsPreferredAzsResponse {
+    pub updated: Vec<TenantShardId>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -96,6 +110,21 @@ pub struct TenantDescribeResponse {
     pub stripe_size: ShardStripeSize,
     pub policy: PlacementPolicy,
     pub config: TenantConfig,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct NodeShardResponse {
+    pub node_id: NodeId,
+    pub shards: Vec<NodeShard>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct NodeShard {
+    pub tenant_shard_id: TenantShardId,
+    /// Whether the shard is observed secondary on a specific node. True = yes, False = no, None = not on this node.
+    pub is_observed_secondary: Option<bool>,
+    /// Whether the shard is intended to be a secondary on a specific node. True = yes, False = no, None = not on this node.
+    pub is_intended_secondary: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -129,8 +158,12 @@ pub struct TenantDescribeResponseShard {
     pub is_splitting: bool,
 
     pub scheduling_policy: ShardSchedulingPolicy,
+
+    pub preferred_az_id: Option<String>,
 }
 
+/// Migration request for a given tenant shard to a given node.
+///
 /// Explicitly migrating a particular shard is a low level operation
 /// TODO: higher level "Reschedule tenant" operation where the request
 /// specifies some constraints, e.g. asking it to get off particular node(s)
@@ -140,23 +173,11 @@ pub struct TenantShardMigrateRequest {
     pub node_id: NodeId,
 }
 
-/// Utilisation score indicating how good a candidate a pageserver
-/// is for scheduling the next tenant. See [`crate::models::PageserverUtilization`].
-/// Lower values are better.
-#[derive(Serialize, Deserialize, Clone, Copy, Eq, PartialEq, PartialOrd, Ord, Debug)]
-pub struct UtilizationScore(pub u64);
-
-impl UtilizationScore {
-    pub fn worst() -> Self {
-        UtilizationScore(u64::MAX)
-    }
-}
-
-#[derive(Serialize, Clone, Copy, Debug)]
+#[derive(Serialize, Clone, Debug)]
 #[serde(into = "NodeAvailabilityWrapper")]
 pub enum NodeAvailability {
     // Normal, happy state
-    Active(UtilizationScore),
+    Active(PageserverUtilization),
     // Node is warming up, but we expect it to become available soon. Covers
     // the time span between the re-attach response being composed on the storage controller
     // and the first successful heartbeat after the processing of the re-attach response
@@ -195,7 +216,9 @@ impl From<NodeAvailabilityWrapper> for NodeAvailability {
         match val {
             // Assume the worst utilisation score to begin with. It will later be updated by
             // the heartbeats.
-            NodeAvailabilityWrapper::Active => NodeAvailability::Active(UtilizationScore::worst()),
+            NodeAvailabilityWrapper::Active => {
+                NodeAvailability::Active(PageserverUtilization::full())
+            }
             NodeAvailabilityWrapper::WarmingUp => NodeAvailability::WarmingUp(Instant::now()),
             NodeAvailabilityWrapper::Offline => NodeAvailability::Offline,
         }

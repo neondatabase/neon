@@ -141,12 +141,32 @@ impl ControlPlaneGenerationsApi for ControlPlaneClient {
                         m.other
                     );
 
+                    let az_id = {
+                        let az_id_from_metadata = m
+                            .other
+                            .get("availability_zone_id")
+                            .and_then(|jv| jv.as_str().map(|str| str.to_owned()));
+
+                        match az_id_from_metadata {
+                            Some(az_id) => Some(az_id),
+                            None => {
+                                tracing::warn!("metadata.json does not contain an 'availability_zone_id' field");
+                                conf.availability_zone.clone()
+                            }
+                        }
+                    };
+
+                    if az_id.is_none() {
+                        panic!("Availablity zone id could not be inferred from metadata.json or pageserver config");
+                    }
+
                     Some(NodeRegisterRequest {
                         node_id: conf.id,
                         listen_pg_addr: m.postgres_host,
                         listen_pg_port: m.postgres_port,
                         listen_http_addr: m.http_host,
                         listen_http_port: m.http_port,
+                        availability_zone_id: az_id.expect("Checked above"),
                     })
                 }
                 Err(e) => {

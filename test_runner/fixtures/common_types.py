@@ -1,5 +1,6 @@
 import random
 from dataclasses import dataclass
+from enum import Enum
 from functools import total_ordering
 from typing import Any, Dict, Type, TypeVar, Union
 
@@ -12,7 +13,7 @@ DEFAULT_WAL_SEG_SIZE = 16 * 1024 * 1024
 class Lsn:
     """
     Datatype for an LSN. Internally it is a 64-bit integer, but the string
-    representation is like "1/123abcd". See also pg_lsn datatype in Postgres
+    representation is like "1/0123abcd". See also pg_lsn datatype in Postgres
     """
 
     def __init__(self, x: Union[int, str]):
@@ -139,6 +140,14 @@ class TenantId(Id):
         return self.id.hex()
 
 
+class NodeId(Id):
+    def __repr__(self) -> str:
+        return f'`NodeId("{self.id.hex()}")'
+
+    def __str__(self) -> str:
+        return self.id.hex()
+
+
 class TimelineId(Id):
     def __repr__(self) -> str:
         return f'TimelineId("{self.id.hex()}")'
@@ -213,3 +222,9 @@ class TenantShardId:
 
     def __hash__(self) -> int:
         return hash(self._tuple())
+
+
+# TODO: Replace with `StrEnum` when we upgrade to python 3.11
+class TimelineArchivalState(str, Enum):
+    ARCHIVED = "Archived"
+    UNARCHIVED = "Unarchived"

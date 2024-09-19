@@ -2184,6 +2184,8 @@ pub fn remote_timeline_path(
     remote_timelines_path(tenant_shard_id).join(Utf8Path::new(&timeline_id.to_string()))
 }
 
+/// Obtains the path of the given Layer in the remote
+///
 /// Note that the shard component of a remote layer path is _not_ always the same
 /// as in the TenantShardId of the caller: tenants may reference layers from a different
 /// ShardIndex.  Use the ShardIndex from the layer's metadata.

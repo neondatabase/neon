@@ -53,7 +53,7 @@ impl Conf {
 
         #[allow(clippy::manual_range_patterns)]
         match self.pg_version {
-            14 | 15 | 16 => Ok(path.join(format!("v{}", self.pg_version))),
+            14 | 15 | 16 | 17 => Ok(path.join(format!("v{}", self.pg_version))),
             _ => bail!("Unsupported postgres version: {}", self.pg_version),
         }
     }

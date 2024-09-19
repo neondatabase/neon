@@ -12,9 +12,9 @@ use http_body_util::BodyExt;
 use hyper1::body::Body;
 use serde::de::DeserializeOwned;
 
-pub use reqwest::{Request, Response, StatusCode};
-pub use reqwest_middleware::{ClientWithMiddleware, Error};
-pub use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
+pub(crate) use reqwest::{Request, Response};
+pub(crate) use reqwest_middleware::{ClientWithMiddleware, Error};
+pub(crate) use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
 
 use crate::{
     metrics::{ConsoleRequest, Metrics},
@@ -35,14 +35,17 @@ pub fn new_client() -> ClientWithMiddleware {
         .build()
 }
 
-pub fn new_client_with_timeout(default_timout: Duration) -> ClientWithMiddleware {
+pub(crate) fn new_client_with_timeout(
+    request_timeout: Duration,
+    total_retry_duration: Duration,
+) -> ClientWithMiddleware {
     let timeout_client = reqwest::ClientBuilder::new()
-        .timeout(default_timout)
+        .timeout(request_timeout)
         .build()
         .expect("Failed to create http client with timeout");
 
     let retry_policy =
-        ExponentialBackoff::builder().build_with_total_retry_duration(default_timout);
+        ExponentialBackoff::builder().build_with_total_retry_duration(total_retry_duration);
 
     reqwest_middleware::ClientBuilder::new(timeout_client)
         .with(reqwest_tracing::TracingMiddleware::default())
@@ -77,20 +80,20 @@ impl Endpoint {
     }
 
     #[inline(always)]
-    pub fn url(&self) -> &ApiUrl {
+    pub(crate) fn url(&self) -> &ApiUrl {
         &self.endpoint
     }
 
     /// Return a [builder](RequestBuilder) for a `GET` request,
     /// appending a single `path` segment to the base endpoint URL.
-    pub fn get(&self, path: &str) -> RequestBuilder {
+    pub(crate) fn get(&self, path: &str) -> RequestBuilder {
         let mut url = self.endpoint.clone();
         url.path_segments_mut().push(path);
         self.client.get(url.into_inner())
     }
 
     /// Execute a [request](reqwest::Request).
-    pub async fn execute(&self, request: Request) -> Result<Response, Error> {
+    pub(crate) async fn execute(&self, request: Request) -> Result<Response, Error> {
         let _timer = Metrics::get()
             .proxy
             .console_request_latency
@@ -102,7 +105,7 @@ impl Endpoint {
     }
 }
 
-pub async fn parse_json_body_with_limit<D: DeserializeOwned>(
+pub(crate) async fn parse_json_body_with_limit<D: DeserializeOwned>(
     mut b: impl Body<Data = Bytes, Error = reqwest::Error> + Unpin,
     limit: usize,
 ) -> anyhow::Result<D> {

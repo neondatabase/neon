@@ -9,7 +9,7 @@ use metrics::{
 use once_cell::sync::Lazy;
 use pageserver_api::shard::TenantShardId;
 use strum::{EnumCount, VariantNames};
-use strum_macros::{EnumVariantNames, IntoStaticStr};
+use strum_macros::{IntoStaticStr, VariantNames};
 use tracing::warn;
 use utils::id::TimelineId;
 
@@ -27,7 +27,7 @@ const CRITICAL_OP_BUCKETS: &[f64] = &[
 ];
 
 // Metrics collected on operations on the storage repository.
-#[derive(Debug, EnumVariantNames, IntoStaticStr)]
+#[derive(Debug, VariantNames, IntoStaticStr)]
 #[strum(serialize_all = "kebab_case")]
 pub(crate) enum StorageTimeOperation {
     #[strum(serialize = "layer flush")]
@@ -1552,7 +1552,6 @@ pub(crate) static LIVE_CONNECTIONS: Lazy<IntCounterPairVec> = Lazy::new(|| {
 #[derive(Clone, Copy, enum_map::Enum, IntoStaticStr)]
 pub(crate) enum ComputeCommandKind {
     PageStreamV2,
-    PageStream,
     Basebackup,
     Fullbackup,
     LeaseLsn,
@@ -1778,7 +1777,7 @@ pub(crate) static SECONDARY_MODE: Lazy<SecondaryModeMetrics> = Lazy::new(|| {
     .expect("failed to define a metric"),
     upload_heatmap_duration: register_histogram!(
         "pageserver_secondary_upload_heatmap_duration",
-        "Time to build and upload a heatmap, including any waiting inside the S3 client"
+        "Time to build and upload a heatmap, including any waiting inside the remote storage client"
     )
     .expect("failed to define a metric"),
     download_heatmap: register_int_counter!(
@@ -1799,6 +1798,14 @@ pub(crate) static SECONDARY_RESIDENT_PHYSICAL_SIZE: Lazy<UIntGaugeVec> = Lazy::n
         "pageserver_secondary_resident_physical_size",
         "The size of the layer files present in the pageserver's filesystem, for secondary locations.",
         &["tenant_id", "shard_id"]
+    )
+    .expect("failed to define a metric")
+});
+
+pub(crate) static NODE_UTILIZATION_SCORE: Lazy<UIntGauge> = Lazy::new(|| {
+    register_uint_gauge!(
+        "pageserver_utilization_score",
+        "The utilization score we report to the storage controller for scheduling, where 0 is empty, 1000000 is full, and anything above is considered overloaded",
     )
     .expect("failed to define a metric")
 });

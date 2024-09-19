@@ -54,8 +54,8 @@ jobs:
       build-tag: ${{steps.build-tag.outputs.tag}}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      # Need `fetch-depth: 0` to count the number of commits in the branch
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -211,7 +211,7 @@ jobs:
       build-tag: ${{ needs.tag.outputs.build-tag }}
       build-type: ${{ matrix.build-type }}
       # Run tests on all Postgres versions in release builds and only on the latest version in debug builds
-      pg-versions: ${{ matrix.build-type == 'release' && '["v14", "v15", "v16"]' || '["v16"]' }}
+      pg-versions: ${{ matrix.build-type == 'release' && '["v14", "v15", "v16", "v17"]' || '["v17"]' }}
     secrets: inherit
 
   # Keep `benchmarks` job outside of `build-and-test-locally` workflow to make job failures non-blocking
@@ -286,6 +286,7 @@ jobs:
           PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
           TEST_RESULT_CONNSTR: "${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}"
           PAGESERVER_VIRTUAL_FILE_IO_ENGINE: tokio-epoll-uring
+          SYNC_AFTER_EACH_TEST: true
       # XXX: no coverage data handling here, since benchmarks are run on release builds,
       # while coverage is currently collected for the debug ones
 
@@ -356,6 +357,7 @@ jobs:
             })
 
   coverage-report:
+    if: ${{ !startsWith(github.ref_name, 'release') }}
     needs: [ check-permissions, build-build-tools-image, build-and-test-locally ]
     runs-on: [ self-hosted, small ]
     container:
@@ -372,8 +374,8 @@ jobs:
         coverage-html: ${{ steps.upload-coverage-report-new.outputs.report-url }}
         coverage-json: ${{ steps.upload-coverage-report-new.outputs.summary-json }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      # Need `fetch-depth: 0` for differential coverage (to get diff between two commits)
+      - uses: actions/checkout@v4
         with:
           submodules: true
           fetch-depth: 0
@@ -474,11 +476,9 @@ jobs:
     runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           submodules: true
-          fetch-depth: 0
 
       - uses: ./.github/actions/set-docker-config-dir
       - uses: docker/setup-buildx-action@v3
@@ -547,17 +547,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        version: [ v14, v15, v16 ]
+        version: [ v14, v15, v16, v17 ]
         arch: [ x64, arm64 ]
 
     runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           submodules: true
-          fetch-depth: 0
 
       - uses: ./.github/actions/set-docker-config-dir
       - uses: docker/setup-buildx-action@v3
@@ -626,7 +624,7 @@ jobs:
 
       - name: Build compute-tools image
         # compute-tools are Postgres independent, so build it only once
-        if: matrix.version == 'v16'
+        if: matrix.version == 'v17'
         uses: docker/build-push-action@v6
         with:
           target: compute-tools-image
@@ -648,7 +646,7 @@ jobs:
 
     strategy:
       matrix:
-        version: [ v14, v15, v16 ]
+        version: [ v14, v15, v16, v17 ]
 
     steps:
       - uses: docker/login-action@v3
@@ -670,7 +668,7 @@ jobs:
                                              neondatabase/neon-test-extensions-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}-arm64
 
       - name: Create multi-arch compute-tools image
-        if: matrix.version == 'v16'
+        if: matrix.version == 'v17'
         run: |
           docker buildx imagetools create -t neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }} \
                                              neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}-x64 \
@@ -688,7 +686,7 @@ jobs:
                                                                                 neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}
 
       - name: Push multi-arch compute-tools image to ECR
-        if: matrix.version == 'v16'
+        if: matrix.version == 'v17'
         run: |
           docker buildx imagetools create -t 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{ needs.tag.outputs.build-tag }} \
                                                                                 neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}
@@ -699,15 +697,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        version: [ v14, v15, v16 ]
+        version: [ v14, v15, v16, v17 ]
     env:
       VM_BUILDER_VERSION: v0.29.3
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      - uses: actions/checkout@v4
 
       - name: Downloading vm-builder
         run: |
@@ -747,10 +742,7 @@ jobs:
     runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'small-arm64' || 'small')) }}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      - uses: actions/checkout@v4
 
       - uses: ./.github/actions/set-docker-config-dir
       - uses: docker/login-action@v3
@@ -793,14 +785,11 @@ jobs:
           docker compose -f ./docker-compose/docker-compose.yml down
 
   promote-images:
-    permissions:
-      contents: read  # This is required for actions/checkout
-      id-token: write # This is required for Azure Login to work.
     needs: [ check-permissions, tag, test-images, vm-compute-node-image ]
     runs-on: ubuntu-22.04
 
     env:
-      VERSIONS: v14 v15 v16
+      VERSIONS: v14 v15 v16 v17
 
     steps:
       - uses: docker/login-action@v3
@@ -822,28 +811,6 @@ jobs:
                                                neondatabase/vm-compute-node-${version}:${{ needs.tag.outputs.build-tag }}
           done
 
-      - name: Azure login
-        if: github.ref_name == 'main'
-        uses: azure/login@6c251865b4e6290e7b78be643ea2d005bc51f69a  # @v2.1.1
-        with:
-          client-id: ${{ secrets.AZURE_DEV_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_DEV_SUBSCRIPTION_ID }}
-
-      - name: Login to ACR
-        if: github.ref_name == 'main'
-        run: |
-          az acr login --name=neoneastus2
-
-      - name: Copy docker images to ACR-dev
-        if: github.ref_name == 'main'
-        run: |
-          for image in neon compute-tools {vm-,}compute-node-{v14,v15,v16}; do
-            docker buildx imagetools create \
-              -t neoneastus2.azurecr.io/neondatabase/${image}:${{ needs.tag.outputs.build-tag }} \
-                                        neondatabase/${image}:${{ needs.tag.outputs.build-tag }}
-          done
-
       - name: Add latest tag to images
         if: github.ref_name == 'main'
         run: |
@@ -863,7 +830,7 @@ jobs:
             done
           done
           docker buildx imagetools create -t neondatabase/neon-test-extensions-v16:latest \
-                                             neondatabase/neon-test-extensions-v16:${{ needs.tag.outputs.build-tag }}
+                                              neondatabase/neon-test-extensions-v16:${{ needs.tag.outputs.build-tag }}
 
       - name: Login to prod ECR
         uses: docker/login-action@v3
@@ -876,10 +843,34 @@ jobs:
       - name: Copy all images to prod ECR
         if: github.ref_name == 'release'|| github.ref_name == 'release-proxy'
         run: |
-          for image in neon compute-tools {vm-,}compute-node-{v14,v15,v16}; do
+          for image in neon compute-tools {vm-,}compute-node-{v14,v15,v16,v17}; do
             docker buildx imagetools create -t 093970136003.dkr.ecr.eu-central-1.amazonaws.com/${image}:${{ needs.tag.outputs.build-tag }} \
                                                369495373322.dkr.ecr.eu-central-1.amazonaws.com/${image}:${{ needs.tag.outputs.build-tag }}
           done
+
+  push-to-acr-dev:
+    if: github.ref_name == 'main'
+    needs: [ tag, promote-images ]
+    uses: ./.github/workflows/_push-to-acr.yml
+    with:
+      client_id: ${{ vars.AZURE_DEV_CLIENT_ID }}
+      image_tag: ${{ needs.tag.outputs.build-tag }}
+      images: neon compute-tools vm-compute-node-v14 vm-compute-node-v15 vm-compute-node-v16 vm-compute-node-v17 compute-node-v14 compute-node-v15 compute-node-v16 compute-node-v17
+      registry_name: ${{ vars.AZURE_DEV_REGISTRY_NAME }}
+      subscription_id: ${{ vars.AZURE_DEV_SUBSCRIPTION_ID }}
+      tenant_id: ${{ vars.AZURE_TENANT_ID }}
+
+  push-to-acr-prod:
+    if: github.ref_name == 'release'|| github.ref_name == 'release-proxy'
+    needs: [ tag, promote-images ]
+    uses: ./.github/workflows/_push-to-acr.yml
+    with:
+      client_id: ${{ vars.AZURE_PROD_CLIENT_ID }}
+      image_tag: ${{ needs.tag.outputs.build-tag }}
+      images: neon compute-tools vm-compute-node-v14 vm-compute-node-v15 vm-compute-node-v16 vm-compute-node-v17 compute-node-v14 compute-node-v15 compute-node-v16 compute-node-v17
+      registry_name: ${{ vars.AZURE_PROD_REGISTRY_NAME }}
+      subscription_id: ${{ vars.AZURE_PROD_SUBSCRIPTION_ID }}
+      tenant_id: ${{ vars.AZURE_TENANT_ID }}
 
   trigger-custom-extensions-build-and-wait:
     needs: [ check-permissions, tag ]
@@ -956,8 +947,9 @@ jobs:
           exit 1
 
   deploy:
-    needs: [ check-permissions, promote-images, tag, build-and-test-locally, trigger-custom-extensions-build-and-wait ]
-    if: github.ref_name == 'main' || github.ref_name == 'release'|| github.ref_name == 'release-proxy'
+    needs: [ check-permissions, promote-images, tag, build-and-test-locally, trigger-custom-extensions-build-and-wait, push-to-acr-dev, push-to-acr-prod ]
+    # `!failure() && !cancelled()` is required because the workflow depends on the job that can be skipped: `push-to-acr-dev` and `push-to-acr-prod`
+    if: (github.ref_name == 'main' || github.ref_name == 'release' || github.ref_name == 'release-proxy') && !failure() && !cancelled()
 
     runs-on: [ self-hosted, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
@@ -971,15 +963,12 @@ jobs:
           #
           git config --global --add safe.directory ${{ github.workspace }}
           git config --global --add safe.directory ${GITHUB_WORKSPACE}
-          for r in 14 15 16; do
+          for r in 14 15 16 17; do
             git config --global --add safe.directory "${{ github.workspace }}/vendor/postgres-v$r"
             git config --global --add safe.directory "${GITHUB_WORKSPACE}/vendor/postgres-v$r"
           done
 
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      - uses: actions/checkout@v4
 
       - name: Trigger deploy workflow
         env:
@@ -1055,43 +1044,90 @@ jobs:
               generate_release_notes: true,
             })
 
+  # The job runs on `release` branch and copies compatibility data and Neon artifact from the last *release PR* to the latest directory
   promote-compatibility-data:
-    needs: [ check-permissions, promote-images, tag, build-and-test-locally ]
-    if: github.ref_name == 'release'
+    needs: [ deploy ]
+    # `!failure() && !cancelled()` is required because the workflow transitively depends on the job that can be skipped: `push-to-acr-dev` and `push-to-acr-prod`
+    if: github.ref_name == 'release' && !failure() && !cancelled()
 
-    runs-on: [ self-hosted, small ]
-    container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/base:pinned
-      options: --init
+    runs-on: ubuntu-22.04
     steps:
-      - name: Promote compatibility snapshot for the release
+      - name: Fetch GITHUB_RUN_ID and COMMIT_SHA for the last merged release PR
+        id: fetch-last-release-pr-info
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          branch_name_and_pr_number=$(gh pr list \
+            --repo "${GITHUB_REPOSITORY}" \
+            --base release \
+            --state merged \
+            --limit 10 \
+            --json mergeCommit,headRefName,number \
+            --jq ".[] | select(.mergeCommit.oid==\"${GITHUB_SHA}\") | { branch_name: .headRefName, pr_number: .number }")
+          branch_name=$(echo "${branch_name_and_pr_number}" | jq -r '.branch_name')
+          pr_number=$(echo "${branch_name_and_pr_number}" | jq -r '.pr_number')
+
+          run_id=$(gh run list \
+            --repo "${GITHUB_REPOSITORY}" \
+            --workflow build_and_test.yml \
+            --branch "${branch_name}" \
+            --json databaseId \
+            --limit 1 \
+            --jq '.[].databaseId')
+
+          last_commit_sha=$(gh pr view "${pr_number}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --json commits \
+            --jq '.commits[-1].oid')
+
+          echo "run-id=${run_id}" | tee -a ${GITHUB_OUTPUT}
+          echo "commit-sha=${last_commit_sha}" | tee -a ${GITHUB_OUTPUT}
+
+      - name: Promote compatibility snapshot and Neon artifact
         env:
           BUCKET: neon-github-public-dev
-          PREFIX: artifacts/latest
-          COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          AWS_REGION: eu-central-1
+          COMMIT_SHA: ${{ steps.fetch-last-release-pr-info.outputs.commit-sha }}
+          RUN_ID: ${{ steps.fetch-last-release-pr-info.outputs.run-id }}
         run: |
-          # Update compatibility snapshot for the release
-          for pg_version in v14 v15 v16; do
-            for build_type in debug release; do
-              OLD_FILENAME=compatibility-snapshot-${build_type}-pg${pg_version}-${GITHUB_RUN_ID}.tar.zst
-              NEW_FILENAME=compatibility-snapshot-${build_type}-pg${pg_version}.tar.zst
+          old_prefix="artifacts/${COMMIT_SHA}/${RUN_ID}"
+          new_prefix="artifacts/latest"
 
-              time aws s3 mv --only-show-errors s3://${BUCKET}/${PREFIX}/${OLD_FILENAME} s3://${BUCKET}/${PREFIX}/${NEW_FILENAME}
+          files_to_promote=()
+          files_on_s3=$(aws s3api list-objects-v2 --bucket ${BUCKET} --prefix ${old_prefix} | jq -r '.Contents[]?.Key' || true)
+
+          for arch in X64 ARM64; do
+            for build_type in debug release; do
+              neon_artifact_filename="neon-Linux-${arch}-${build_type}-artifact.tar.zst"
+              s3_key=$(echo "${files_on_s3}" | grep ${neon_artifact_filename} | sort --version-sort | tail -1 || true)
+              if [ -z "${s3_key}" ]; then
+                echo >&2 "Neither s3://${BUCKET}/${old_prefix}/${neon_artifact_filename} nor its version from previous attempts exist"
+                exit 1
+              fi
+
+              files_to_promote+=("s3://${BUCKET}/${s3_key}")
+
+              # TODO Add v17
+              for pg_version in v14 v15 v16; do
+                # We run less tests for debug builds, so we don't need to promote them
+                if [ "${build_type}" == "debug" ] && { [ "${arch}" == "ARM64" ] || [ "${pg_version}" != "v16" ] ; }; then
+                  continue
+                fi
+
+                compatibility_data_filename="compatibility-snapshot-${arch}-${build_type}-pg${pg_version}.tar.zst"
+                s3_key=$(echo "${files_on_s3}" | grep ${compatibility_data_filename} | sort --version-sort | tail -1 || true)
+                if [ -z "${s3_key}" ]; then
+                  echo >&2 "Neither s3://${BUCKET}/${old_prefix}/${compatibility_data_filename} nor its version from previous attempts exist"
+                  exit 1
+                fi
+
+                files_to_promote+=("s3://${BUCKET}/${s3_key}")
+              done
             done
           done
 
-          # Update Neon artifact for the release (reuse already uploaded artifact)
-          for build_type in debug release; do
-            OLD_PREFIX=artifacts/${COMMIT_SHA}/${GITHUB_RUN_ID}
-            FILENAME=neon-${{ runner.os }}-${{ runner.arch }}-${build_type}-artifact.tar.zst
-
-            S3_KEY=$(aws s3api list-objects-v2 --bucket ${BUCKET} --prefix ${OLD_PREFIX} | jq -r '.Contents[]?.Key' | grep ${FILENAME} | sort --version-sort | tail -1 || true)
-            if [ -z "${S3_KEY}" ]; then
-              echo >&2 "Neither s3://${BUCKET}/${OLD_PREFIX}/${FILENAME} nor its version from previous attempts exist"
-              exit 1
-            fi
-
-            time aws s3 cp --only-show-errors s3://${BUCKET}/${S3_KEY} s3://${BUCKET}/${PREFIX}/${FILENAME}
+          for f in "${files_to_promote[@]}"; do
+            time aws s3 cp --only-show-errors ${f} s3://${BUCKET}/${new_prefix}/
           done
 
   pin-build-tools-image:

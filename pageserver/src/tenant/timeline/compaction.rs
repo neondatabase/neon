@@ -14,7 +14,7 @@ use super::{
     RecordedDuration, Timeline,
 };
 
-use anyhow::{anyhow, Context};
+use anyhow::{anyhow, bail, Context};
 use bytes::Bytes;
 use enumset::EnumSet;
 use fail::fail_point;
@@ -29,9 +29,11 @@ use utils::id::TimelineId;
 
 use crate::context::{AccessStatsBehavior, RequestContext, RequestContextBuilder};
 use crate::page_cache;
-use crate::tenant::config::defaults::{DEFAULT_CHECKPOINT_DISTANCE, DEFAULT_COMPACTION_THRESHOLD};
 use crate::tenant::remote_timeline_client::WaitCompletionError;
 use crate::tenant::storage_layer::merge_iterator::MergeIterator;
+use crate::tenant::storage_layer::split_writer::{
+    SplitDeltaLayerWriter, SplitImageLayerWriter, SplitWriterResult,
+};
 use crate::tenant::storage_layer::{
     AsLayerDesc, PersistentLayerDesc, PersistentLayerKey, ValueReconstructState,
 };
@@ -40,6 +42,9 @@ use crate::tenant::timeline::{drop_rlock, DeltaLayerWriter, ImageLayerWriter};
 use crate::tenant::timeline::{Layer, ResidentLayer};
 use crate::tenant::DeltaLayer;
 use crate::virtual_file::{MaybeFatalIo, VirtualFile};
+use pageserver_api::config::tenant_conf_defaults::{
+    DEFAULT_CHECKPOINT_DISTANCE, DEFAULT_COMPACTION_THRESHOLD,
+};
 
 use crate::keyspace::KeySpace;
 use crate::repository::{Key, Value};
@@ -71,15 +76,60 @@ pub(crate) struct KeyHistoryRetention {
 }
 
 impl KeyHistoryRetention {
+    /// Hack: skip delta layer if we need to produce a layer of a same key-lsn.
+    ///
+    /// This can happen if we have removed some deltas in "the middle" of some existing layer's key-lsn-range.
+    /// For example, consider the case where a single delta with range [0x10,0x50) exists.
+    /// And we have branches at LSN 0x10, 0x20, 0x30.
+    /// Then we delete branch @ 0x20.
+    /// Bottom-most compaction may now delete the delta [0x20,0x30).
+    /// And that wouldnt' change the shape of the layer.
+    ///
+    /// Note that bottom-most-gc-compaction never _adds_ new data in that case, only removes.
+    ///
+    /// `discard_key` will only be called when the writer reaches its target (instead of for every key), so it's fine to grab a lock inside.
+    async fn discard_key(key: &PersistentLayerKey, tline: &Arc<Timeline>, dry_run: bool) -> bool {
+        if dry_run {
+            return true;
+        }
+        let guard = tline.layers.read().await;
+        if !guard.contains_key(key) {
+            return false;
+        }
+        let layer_generation = guard.get_from_key(key).metadata().generation;
+        drop(guard);
+        if layer_generation == tline.generation {
+            info!(
+                key=%key,
+                ?layer_generation,
+                "discard layer due to duplicated layer key in the same generation",
+            );
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Pipe a history of a single key to the writers.
+    ///
+    /// If `image_writer` is none, the images will be placed into the delta layers.
+    /// The delta writer will contain all images and deltas (below and above the horizon) except the bottom-most images.
+    #[allow(clippy::too_many_arguments)]
     async fn pipe_to(
         self,
         key: Key,
-        delta_writer: &mut Vec<(Key, Lsn, Value)>,
-        mut image_writer: Option<&mut ImageLayerWriter>,
+        tline: &Arc<Timeline>,
+        delta_writer: &mut SplitDeltaLayerWriter,
+        mut image_writer: Option<&mut SplitImageLayerWriter>,
         stat: &mut CompactionStatistics,
+        dry_run: bool,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         let mut first_batch = true;
+        let discard = |key: &PersistentLayerKey| {
+            let key = key.clone();
+            async move { Self::discard_key(&key, tline, dry_run).await }
+        };
         for (cutoff_lsn, KeyLogAtLsn(logs)) in self.below_horizon {
             if first_batch {
                 if logs.len() == 1 && logs[0].1.is_image() {
@@ -88,28 +138,45 @@ impl KeyHistoryRetention {
                     };
                     stat.produce_image_key(img);
                     if let Some(image_writer) = image_writer.as_mut() {
-                        image_writer.put_image(key, img.clone(), ctx).await?;
+                        image_writer
+                            .put_image_with_discard_fn(key, img.clone(), tline, ctx, discard)
+                            .await?;
                     } else {
-                        delta_writer.push((key, cutoff_lsn, Value::Image(img.clone())));
+                        delta_writer
+                            .put_value_with_discard_fn(
+                                key,
+                                cutoff_lsn,
+                                Value::Image(img.clone()),
+                                tline,
+                                ctx,
+                                discard,
+                            )
+                            .await?;
                     }
                 } else {
                     for (lsn, val) in logs {
                         stat.produce_key(&val);
-                        delta_writer.push((key, lsn, val));
+                        delta_writer
+                            .put_value_with_discard_fn(key, lsn, val, tline, ctx, discard)
+                            .await?;
                     }
                 }
                 first_batch = false;
             } else {
                 for (lsn, val) in logs {
                     stat.produce_key(&val);
-                    delta_writer.push((key, lsn, val));
+                    delta_writer
+                        .put_value_with_discard_fn(key, lsn, val, tline, ctx, discard)
+                        .await?;
                 }
             }
         }
         let KeyLogAtLsn(above_horizon_logs) = self.above_horizon;
         for (lsn, val) in above_horizon_logs {
             stat.produce_key(&val);
-            delta_writer.push((key, lsn, val));
+            delta_writer
+                .put_value_with_discard_fn(key, lsn, val, tline, ctx, discard)
+                .await?;
         }
         Ok(())
     }
@@ -496,9 +563,11 @@ impl Timeline {
                 .await?;
 
             if keys_written > 0 {
-                let new_layer = image_layer_writer
-                    .finish(self, ctx)
+                let (desc, path) = image_layer_writer
+                    .finish(ctx)
                     .await
+                    .map_err(CompactionError::Other)?;
+                let new_layer = Layer::finish_creating(self.conf, self, desc, &path)
                     .map_err(CompactionError::Other)?;
                 tracing::info!(layer=%new_layer, "Rewrote layer, {} -> {} bytes",
                     layer.metadata().file_size,
@@ -844,137 +913,13 @@ impl Timeline {
         // we're compacting, in key, LSN order.
         // If there's both a Value::Image and Value::WalRecord for the same (key,lsn),
         // then the Value::Image is ordered before Value::WalRecord.
-        //
-        // TODO(https://github.com/neondatabase/neon/issues/8184): remove the page cached blob_io
-        // option and validation code once we've reached confidence.
-        enum AllValuesIter<'a> {
-            PageCachedBlobIo {
-                all_keys_iter: VecIter<'a>,
-            },
-            StreamingKmergeBypassingPageCache {
-                merge_iter: MergeIterator<'a>,
-            },
-            ValidatingStreamingKmergeBypassingPageCache {
-                mode: CompactL0BypassPageCacheValidation,
-                merge_iter: MergeIterator<'a>,
-                all_keys_iter: VecIter<'a>,
-            },
-        }
-        type VecIter<'a> = std::slice::Iter<'a, DeltaEntry<'a>>; // TODO: distinguished lifetimes
-        impl AllValuesIter<'_> {
-            async fn next_all_keys_iter(
-                iter: &mut VecIter<'_>,
-                ctx: &RequestContext,
-            ) -> anyhow::Result<Option<(Key, Lsn, Value)>> {
-                let Some(DeltaEntry {
-                    key,
-                    lsn,
-                    val: value_ref,
-                    ..
-                }) = iter.next()
-                else {
-                    return Ok(None);
-                };
-                let value = value_ref.load(ctx).await?;
-                Ok(Some((*key, *lsn, value)))
+        let mut all_values_iter = {
+            let mut deltas = Vec::with_capacity(deltas_to_compact.len());
+            for l in deltas_to_compact.iter() {
+                let l = l.get_as_delta(ctx).await.map_err(CompactionError::Other)?;
+                deltas.push(l);
             }
-            async fn next(
-                &mut self,
-                ctx: &RequestContext,
-            ) -> anyhow::Result<Option<(Key, Lsn, Value)>> {
-                match self {
-                    AllValuesIter::PageCachedBlobIo { all_keys_iter: iter } => {
-                      Self::next_all_keys_iter(iter, ctx).await
-                    }
-                    AllValuesIter::StreamingKmergeBypassingPageCache { merge_iter } => merge_iter.next().await,
-                    AllValuesIter::ValidatingStreamingKmergeBypassingPageCache { mode, merge_iter, all_keys_iter } => async {
-                        // advance both iterators
-                        let all_keys_iter_item = Self::next_all_keys_iter(all_keys_iter, ctx).await;
-                        let merge_iter_item = merge_iter.next().await;
-                        // compare results & log warnings as needed
-                        macro_rules! rate_limited_warn {
-                            ($($arg:tt)*) => {{
-                                if cfg!(debug_assertions) || cfg!(feature = "testing") {
-                                    warn!($($arg)*);
-                                    panic!("CompactL0BypassPageCacheValidation failure, check logs");
-                                }
-                                use once_cell::sync::Lazy;
-                                use utils::rate_limit::RateLimit;
-                                use std::sync::Mutex;
-                                use std::time::Duration;
-                                static LOGGED: Lazy<Mutex<RateLimit>> =
-                                    Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(10))));
-                                let mut rate_limit = LOGGED.lock().unwrap();
-                                rate_limit.call(|| {
-                                    warn!($($arg)*);
-                                });
-                            }}
-                        }
-                        match (&all_keys_iter_item, &merge_iter_item) {
-                            (Err(_), Err(_)) => {
-                                // don't bother asserting equivality of the errors
-                            }
-                            (Err(all_keys), Ok(merge)) => {
-                                rate_limited_warn!(?merge, "all_keys_iter returned an error where merge did not: {all_keys:?}");
-                            },
-                            (Ok(all_keys), Err(merge)) => {
-                                rate_limited_warn!(?all_keys, "merge returned an error where all_keys_iter did not: {merge:?}");
-                            },
-                            (Ok(None), Ok(None)) => { }
-                            (Ok(Some(all_keys)), Ok(None)) => {
-                                rate_limited_warn!(?all_keys, "merge returned None where all_keys_iter returned Some");
-                            }
-                            (Ok(None), Ok(Some(merge))) => {
-                                rate_limited_warn!(?merge, "all_keys_iter returned None where merge returned Some");
-                            }
-                            (Ok(Some((all_keys_key, all_keys_lsn, all_keys_value))), Ok(Some((merge_key, merge_lsn, merge_value)))) => {
-                                match mode {
-                                    // TODO: in this mode, we still load the value from disk for both iterators, even though we only need the all_keys_iter one
-                                    CompactL0BypassPageCacheValidation::KeyLsn => {
-                                        let all_keys = (all_keys_key, all_keys_lsn);
-                                        let merge = (merge_key, merge_lsn);
-                                        if all_keys != merge {
-                                            rate_limited_warn!(?all_keys, ?merge, "merge returned a different (Key,LSN) than all_keys_iter");
-                                        }
-                                    }
-                                    CompactL0BypassPageCacheValidation::KeyLsnValue => {
-                                        let all_keys = (all_keys_key, all_keys_lsn, all_keys_value);
-                                        let merge = (merge_key, merge_lsn, merge_value);
-                                        if all_keys != merge {
-                                            rate_limited_warn!(?all_keys, ?merge, "merge returned a different (Key,LSN,Value) than all_keys_iter");
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        // in case of mismatch, trust the legacy all_keys_iter_item
-                        all_keys_iter_item
-                    }.instrument(info_span!("next")).await
-                }
-            }
-        }
-        let mut all_values_iter = match &self.conf.compact_level0_phase1_value_access {
-            CompactL0Phase1ValueAccess::PageCachedBlobIo => AllValuesIter::PageCachedBlobIo {
-                all_keys_iter: all_keys.iter(),
-            },
-            CompactL0Phase1ValueAccess::StreamingKmerge { validate } => {
-                let merge_iter = {
-                    let mut deltas = Vec::with_capacity(deltas_to_compact.len());
-                    for l in deltas_to_compact.iter() {
-                        let l = l.get_as_delta(ctx).await.map_err(CompactionError::Other)?;
-                        deltas.push(l);
-                    }
-                    MergeIterator::create(&deltas, &[], ctx)
-                };
-                match validate {
-                    None => AllValuesIter::StreamingKmergeBypassingPageCache { merge_iter },
-                    Some(validate) => AllValuesIter::ValidatingStreamingKmergeBypassingPageCache {
-                        mode: validate.clone(),
-                        merge_iter,
-                        all_keys_iter: all_keys.iter(),
-                    },
-                }
-            }
+            MergeIterator::create(&deltas, &[], ctx)
         };
 
         // This iterator walks through all keys and is needed to calculate size used by each key
@@ -1051,7 +996,7 @@ impl Timeline {
         let mut keys = 0;
 
         while let Some((key, lsn, value)) = all_values_iter
-            .next(ctx)
+            .next()
             .await
             .map_err(CompactionError::Other)?
         {
@@ -1365,43 +1310,6 @@ impl TryFrom<CompactLevel0Phase1StatsBuilder> for CompactLevel0Phase1Stats {
                 .new_deltas_size
                 .ok_or_else(|| anyhow!("new_deltas_size not set"))?,
         })
-    }
-}
-
-#[derive(Debug, PartialEq, Eq, Clone, serde::Deserialize, serde::Serialize)]
-#[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
-pub enum CompactL0Phase1ValueAccess {
-    /// The old way.
-    PageCachedBlobIo,
-    /// The new way.
-    StreamingKmerge {
-        /// If set, we run both the old way and the new way, validate that
-        /// they are identical (=> [`CompactL0BypassPageCacheValidation`]),
-        /// and if the validation fails,
-        /// - in tests: fail them with a panic or
-        /// - in prod, log a rate-limited warning and use the old way's results.
-        ///
-        /// If not set, we only run the new way and trust its results.
-        validate: Option<CompactL0BypassPageCacheValidation>,
-    },
-}
-
-/// See [`CompactL0Phase1ValueAccess::StreamingKmerge`].
-#[derive(Debug, PartialEq, Eq, Clone, serde::Deserialize, serde::Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum CompactL0BypassPageCacheValidation {
-    /// Validate that the series of (key, lsn) pairs are the same.
-    KeyLsn,
-    /// Validate that the entire output of old and new way is identical.
-    KeyLsnValue,
-}
-
-impl Default for CompactL0Phase1ValueAccess {
-    fn default() -> Self {
-        CompactL0Phase1ValueAccess::StreamingKmerge {
-            // TODO(https://github.com/neondatabase/neon/issues/8184): change to None once confident
-            validate: Some(CompactL0BypassPageCacheValidation::KeyLsnValue),
-        }
     }
 }
 
@@ -1814,10 +1722,26 @@ impl Timeline {
             }
             let mut selected_layers = Vec::new();
             drop(gc_info);
+            // Pick all the layers intersect or below the gc_cutoff, get the largest LSN in the selected layers.
+            let Some(max_layer_lsn) = layers
+                .iter_historic_layers()
+                .filter(|desc| desc.get_lsn_range().start <= gc_cutoff)
+                .map(|desc| desc.get_lsn_range().end)
+                .max()
+            else {
+                info!("no layers to compact with gc");
+                return Ok(());
+            };
+            // Then, pick all the layers that are below the max_layer_lsn. This is to ensure we can pick all single-key
+            // layers to compact.
             for desc in layers.iter_historic_layers() {
-                if desc.get_lsn_range().start <= gc_cutoff {
+                if desc.get_lsn_range().end <= max_layer_lsn {
                     selected_layers.push(guard.get_from_desc(&desc));
                 }
+            }
+            if selected_layers.is_empty() {
+                info!("no layers to compact with gc");
+                return Ok(());
             }
             retain_lsns_below_horizon.sort();
             (selected_layers, gc_cutoff, retain_lsns_below_horizon)
@@ -1848,27 +1772,52 @@ impl Timeline {
             lowest_retain_lsn
         );
         // Step 1: (In the future) construct a k-merge iterator over all layers. For now, simply collect all keys + LSNs.
-        // Also, collect the layer information to decide when to split the new delta layers.
-        let mut downloaded_layers = Vec::new();
-        let mut delta_split_points = BTreeSet::new();
+        // Also, verify if the layer map can be split by drawing a horizontal line at every LSN start/end split point.
+        let mut lsn_split_point = BTreeSet::new(); // TODO: use a better data structure (range tree / range set?)
         for layer in &layer_selection {
-            let resident_layer = layer.download_and_keep_resident().await?;
-            downloaded_layers.push(resident_layer);
-
             let desc = layer.layer_desc();
             if desc.is_delta() {
-                // TODO: is it correct to only record split points for deltas intersecting with the GC horizon? (exclude those below/above the horizon)
-                // so that we can avoid having too many small delta layers.
-                let key_range = desc.get_key_range();
-                delta_split_points.insert(key_range.start);
-                delta_split_points.insert(key_range.end);
+                // ignore single-key layer files
+                if desc.key_range.start.next() != desc.key_range.end {
+                    let lsn_range = &desc.lsn_range;
+                    lsn_split_point.insert(lsn_range.start);
+                    lsn_split_point.insert(lsn_range.end);
+                }
                 stat.visit_delta_layer(desc.file_size());
             } else {
                 stat.visit_image_layer(desc.file_size());
             }
         }
+        for layer in &layer_selection {
+            let desc = layer.layer_desc();
+            let key_range = &desc.key_range;
+            if desc.is_delta() && key_range.start.next() != key_range.end {
+                let lsn_range = desc.lsn_range.clone();
+                let intersects = lsn_split_point.range(lsn_range).collect_vec();
+                if intersects.len() > 1 {
+                    bail!(
+                        "cannot run gc-compaction because it violates the layer map LSN split assumption: layer {} intersects with LSN [{}]",
+                        desc.key(),
+                        intersects.into_iter().map(|lsn| lsn.to_string()).join(", ")
+                    );
+                }
+            }
+        }
+        // The maximum LSN we are processing in this compaction loop
+        let end_lsn = layer_selection
+            .iter()
+            .map(|l| l.layer_desc().lsn_range.end)
+            .max()
+            .unwrap();
+        // We don't want any of the produced layers to cover the full key range (i.e., MIN..MAX) b/c it will then be recognized
+        // as an L0 layer.
         let mut delta_layers = Vec::new();
         let mut image_layers = Vec::new();
+        let mut downloaded_layers = Vec::new();
+        for layer in &layer_selection {
+            let resident_layer = layer.download_and_keep_resident().await?;
+            downloaded_layers.push(resident_layer);
+        }
         for resident_layer in &downloaded_layers {
             if resident_layer.layer_desc().is_delta() {
                 let layer = resident_layer.get_as_delta(ctx).await?;
@@ -1884,138 +1833,17 @@ impl Timeline {
         let mut accumulated_values = Vec::new();
         let mut last_key: Option<Key> = None;
 
-        enum FlushDeltaResult {
-            /// Create a new resident layer
-            CreateResidentLayer(ResidentLayer),
-            /// Keep an original delta layer
-            KeepLayer(PersistentLayerKey),
-        }
-
-        #[allow(clippy::too_many_arguments)]
-        async fn flush_deltas(
-            deltas: &mut Vec<(Key, Lsn, crate::repository::Value)>,
-            last_key: Key,
-            delta_split_points: &[Key],
-            current_delta_split_point: &mut usize,
-            tline: &Arc<Timeline>,
-            lowest_retain_lsn: Lsn,
-            ctx: &RequestContext,
-            stats: &mut CompactionStatistics,
-            dry_run: bool,
-            last_batch: bool,
-        ) -> anyhow::Result<Option<FlushDeltaResult>> {
-            // Check if we need to split the delta layer. We split at the original delta layer boundary to avoid
-            // overlapping layers.
-            //
-            // If we have a structure like this:
-            //
-            // | Delta 1 |         | Delta 4 |
-            // |---------| Delta 2 |---------|
-            // | Delta 3 |         | Delta 5 |
-            //
-            // And we choose to compact delta 2+3+5. We will get an overlapping delta layer with delta 1+4.
-            // A simple solution here is to split the delta layers using the original boundary, while this
-            // might produce a lot of small layers. This should be improved and fixed in the future.
-            let mut need_split = false;
-            while *current_delta_split_point < delta_split_points.len()
-                && last_key >= delta_split_points[*current_delta_split_point]
-            {
-                *current_delta_split_point += 1;
-                need_split = true;
-            }
-            if !need_split && !last_batch {
-                return Ok(None);
-            }
-            let deltas: Vec<(Key, Lsn, Value)> = std::mem::take(deltas);
-            if deltas.is_empty() {
-                return Ok(None);
-            }
-            let end_lsn = deltas.iter().map(|(_, lsn, _)| lsn).max().copied().unwrap() + 1;
-            let delta_key = PersistentLayerKey {
-                key_range: {
-                    let key_start = deltas.first().unwrap().0;
-                    let key_end = deltas.last().unwrap().0.next();
-                    key_start..key_end
-                },
-                lsn_range: lowest_retain_lsn..end_lsn,
-                is_delta: true,
-            };
-            {
-                // Hack: skip delta layer if we need to produce a layer of a same key-lsn.
-                //
-                // This can happen if we have removed some deltas in "the middle" of some existing layer's key-lsn-range.
-                // For example, consider the case where a single delta with range [0x10,0x50) exists.
-                // And we have branches at LSN 0x10, 0x20, 0x30.
-                // Then we delete branch @ 0x20.
-                // Bottom-most compaction may now delete the delta [0x20,0x30).
-                // And that wouldnt' change the shape of the layer.
-                //
-                // Note that bottom-most-gc-compaction never _adds_ new data in that case, only removes.
-                // That's why it's safe to skip.
-                let guard = tline.layers.read().await;
-
-                if guard.contains_key(&delta_key) {
-                    let layer_generation = guard.get_from_key(&delta_key).metadata().generation;
-                    drop(guard);
-                    if layer_generation == tline.generation {
-                        stats.discard_delta_layer();
-                        // TODO: depending on whether we design this compaction process to run along with
-                        // other compactions, there could be layer map modifications after we drop the
-                        // layer guard, and in case it creates duplicated layer key, we will still error
-                        // in the end.
-                        info!(
-                            key=%delta_key,
-                            ?layer_generation,
-                            "discard delta layer due to duplicated layer in the same generation"
-                        );
-                        return Ok(Some(FlushDeltaResult::KeepLayer(delta_key)));
-                    }
-                }
-            }
-
-            let mut delta_layer_writer = DeltaLayerWriter::new(
-                tline.conf,
-                tline.timeline_id,
-                tline.tenant_shard_id,
-                delta_key.key_range.start,
-                lowest_retain_lsn..end_lsn,
-                ctx,
-            )
-            .await?;
-            for (key, lsn, val) in deltas {
-                delta_layer_writer.put_value(key, lsn, val, ctx).await?;
-            }
-
-            stats.produce_delta_layer(delta_layer_writer.size());
-            if dry_run {
-                return Ok(None);
-            }
-
-            let (desc, path) = delta_layer_writer
-                .finish(delta_key.key_range.end, ctx)
-                .await?;
-            let delta_layer = Layer::finish_creating(tline.conf, tline, desc, &path)?;
-            Ok(Some(FlushDeltaResult::CreateResidentLayer(delta_layer)))
-        }
-
-        // Hack the key range to be min..(max-1). Otherwise, the image layer will be
-        // interpreted as an L0 delta layer.
-        let hack_image_layer_range = {
-            let mut end_key = Key::MAX;
-            end_key.field6 -= 1;
-            Key::MIN..end_key
-        };
-
         // Only create image layers when there is no ancestor branches. TODO: create covering image layer
         // when some condition meet.
         let mut image_layer_writer = if self.ancestor_timeline.is_none() {
             Some(
-                ImageLayerWriter::new(
+                SplitImageLayerWriter::new(
                     self.conf,
                     self.timeline_id,
                     self.tenant_shard_id,
-                    &hack_image_layer_range, // covers the full key range
+                    Key::MIN,
                     lowest_retain_lsn,
+                    self.get_compaction_target_size(),
                     ctx,
                 )
                 .await?,
@@ -2023,6 +1851,15 @@ impl Timeline {
         } else {
             None
         };
+
+        let mut delta_layer_writer = SplitDeltaLayerWriter::new(
+            self.conf,
+            self.timeline_id,
+            self.tenant_shard_id,
+            lowest_retain_lsn..end_lsn,
+            self.get_compaction_target_size(),
+        )
+        .await?;
 
         /// Returns None if there is no ancestor branch. Throw an error when the key is not found.
         ///
@@ -2044,47 +1881,11 @@ impl Timeline {
             let img = tline.get(key, tline.ancestor_lsn, ctx).await?;
             Ok(Some((key, tline.ancestor_lsn, img)))
         }
-        let image_layer_key = PersistentLayerKey {
-            key_range: hack_image_layer_range,
-            lsn_range: PersistentLayerDesc::image_layer_lsn_range(lowest_retain_lsn),
-            is_delta: false,
-        };
-
-        // Like with delta layers, it can happen that we re-produce an already existing image layer.
-        // This could happen when a user triggers force compaction and image generation. In this case,
-        // it's always safe to rewrite the layer.
-        let discard_image_layer = {
-            let guard = self.layers.read().await;
-            if guard.contains_key(&image_layer_key) {
-                let layer_generation = guard.get_from_key(&image_layer_key).metadata().generation;
-                drop(guard);
-                if layer_generation == self.generation {
-                    // TODO: depending on whether we design this compaction process to run along with
-                    // other compactions, there could be layer map modifications after we drop the
-                    // layer guard, and in case it creates duplicated layer key, we will still error
-                    // in the end.
-                    info!(
-                        key=%image_layer_key,
-                        ?layer_generation,
-                        "discard image layer due to duplicated layer key in the same generation",
-                    );
-                    true
-                } else {
-                    false
-                }
-            } else {
-                false
-            }
-        };
 
         // Actually, we can decide not to write to the image layer at all at this point because
         // the key and LSN range are determined. However, to keep things simple here, we still
         // create this writer, and discard the writer in the end.
 
-        let mut delta_values = Vec::new();
-        let delta_split_points = delta_split_points.into_iter().collect_vec();
-        let mut current_delta_split_point = 0;
-        let mut delta_layers = Vec::new();
         while let Some((key, lsn, val)) = merge_iter.next().await? {
             if cancel.is_cancelled() {
                 return Err(anyhow!("cancelled")); // TODO: refactor to CompactionError and pass cancel error
@@ -2115,27 +1916,14 @@ impl Timeline {
                 retention
                     .pipe_to(
                         *last_key,
-                        &mut delta_values,
+                        self,
+                        &mut delta_layer_writer,
                         image_layer_writer.as_mut(),
                         &mut stat,
+                        dry_run,
                         ctx,
                     )
                     .await?;
-                delta_layers.extend(
-                    flush_deltas(
-                        &mut delta_values,
-                        *last_key,
-                        &delta_split_points,
-                        &mut current_delta_split_point,
-                        self,
-                        lowest_retain_lsn,
-                        ctx,
-                        &mut stat,
-                        dry_run,
-                        false,
-                    )
-                    .await?,
-                );
                 accumulated_values.clear();
                 *last_key = key;
                 accumulated_values.push((key, lsn, val));
@@ -2159,42 +1947,74 @@ impl Timeline {
         retention
             .pipe_to(
                 last_key,
-                &mut delta_values,
+                self,
+                &mut delta_layer_writer,
                 image_layer_writer.as_mut(),
                 &mut stat,
+                dry_run,
                 ctx,
             )
             .await?;
-        delta_layers.extend(
-            flush_deltas(
-                &mut delta_values,
-                last_key,
-                &delta_split_points,
-                &mut current_delta_split_point,
-                self,
-                lowest_retain_lsn,
-                ctx,
-                &mut stat,
-                dry_run,
-                true,
-            )
-            .await?,
-        );
-        assert!(delta_values.is_empty(), "unprocessed keys");
 
-        let image_layer = if discard_image_layer {
-            stat.discard_image_layer();
-            None
-        } else if let Some(writer) = image_layer_writer {
-            stat.produce_image_layer(writer.size());
+        let discard = |key: &PersistentLayerKey| {
+            let key = key.clone();
+            async move { KeyHistoryRetention::discard_key(&key, self, dry_run).await }
+        };
+
+        let produced_image_layers = if let Some(writer) = image_layer_writer {
             if !dry_run {
-                Some(writer.finish(self, ctx).await?)
+                writer
+                    .finish_with_discard_fn(self, ctx, Key::MAX, discard)
+                    .await?
             } else {
-                None
+                let (layers, _) = writer.take()?;
+                assert!(layers.is_empty(), "image layers produced in dry run mode?");
+                Vec::new()
             }
         } else {
-            None
+            Vec::new()
         };
+
+        let produced_delta_layers = if !dry_run {
+            delta_layer_writer
+                .finish_with_discard_fn(self, ctx, discard)
+                .await?
+        } else {
+            let (layers, _) = delta_layer_writer.take()?;
+            assert!(layers.is_empty(), "delta layers produced in dry run mode?");
+            Vec::new()
+        };
+
+        let mut compact_to = Vec::new();
+        let mut keep_layers = HashSet::new();
+        let produced_delta_layers_len = produced_delta_layers.len();
+        let produced_image_layers_len = produced_image_layers.len();
+        for action in produced_delta_layers {
+            match action {
+                SplitWriterResult::Produced(layer) => {
+                    stat.produce_delta_layer(layer.layer_desc().file_size());
+                    compact_to.push(layer);
+                }
+                SplitWriterResult::Discarded(l) => {
+                    keep_layers.insert(l);
+                    stat.discard_delta_layer();
+                }
+            }
+        }
+        for action in produced_image_layers {
+            match action {
+                SplitWriterResult::Produced(layer) => {
+                    stat.produce_image_layer(layer.layer_desc().file_size());
+                    compact_to.push(layer);
+                }
+                SplitWriterResult::Discarded(l) => {
+                    keep_layers.insert(l);
+                    stat.discard_image_layer();
+                }
+            }
+        }
+        let mut layer_selection = layer_selection;
+        layer_selection.retain(|x| !keep_layers.contains(&x.layer_desc().key()));
 
         info!(
             "gc-compaction statistics: {}",
@@ -2206,28 +2026,11 @@ impl Timeline {
         }
 
         info!(
-            "produced {} delta layers and {} image layers",
-            delta_layers.len(),
-            if image_layer.is_some() { 1 } else { 0 }
+            "produced {} delta layers and {} image layers, {} layers are kept",
+            produced_delta_layers_len,
+            produced_image_layers_len,
+            layer_selection.len()
         );
-        let mut compact_to = Vec::new();
-        let mut keep_layers = HashSet::new();
-        for action in delta_layers {
-            match action {
-                FlushDeltaResult::CreateResidentLayer(layer) => {
-                    compact_to.push(layer);
-                }
-                FlushDeltaResult::KeepLayer(l) => {
-                    keep_layers.insert(l);
-                }
-            }
-        }
-        if discard_image_layer {
-            keep_layers.insert(image_layer_key);
-        }
-        let mut layer_selection = layer_selection;
-        layer_selection.retain(|x| !keep_layers.contains(&x.layer_desc().key()));
-        compact_to.extend(image_layer);
 
         // Step 3: Place back to the layer map.
         {

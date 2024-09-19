@@ -81,6 +81,7 @@ static void nwp_register_gucs(void);
 static void assign_neon_safekeepers(const char *newval, void *extra);
 static void nwp_prepare_shmem(void);
 static uint64 backpressure_lag_impl(void);
+static uint64 startup_backpressure_wrap(void);
 static bool backpressure_throttling_impl(void);
 static void walprop_register_bgworker(void);
 
@@ -90,7 +91,7 @@ static void walprop_pg_init_bgworker(void);
 static TimestampTz walprop_pg_get_current_timestamp(WalProposer *wp);
 static void walprop_pg_load_libpqwalreceiver(void);
 
-static process_interrupts_callback_t PrevProcessInterruptsCallback;
+static process_interrupts_callback_t PrevProcessInterruptsCallback = NULL;
 static shmem_startup_hook_type prev_shmem_startup_hook_type;
 #if PG_VERSION_NUM >= 150000
 static shmem_request_hook_type prev_shmem_request_hook = NULL;
@@ -178,7 +179,7 @@ pg_init_walproposer(void)
 
 	nwp_prepare_shmem();
 
-	delay_backend_us = &backpressure_lag_impl;
+	delay_backend_us = &startup_backpressure_wrap;
 	PrevProcessInterruptsCallback = ProcessInterruptsCallback;
 	ProcessInterruptsCallback = backpressure_throttling_impl;
 
@@ -220,6 +221,64 @@ nwp_register_gucs(void)
 							NULL, NULL, NULL);
 }
 
+
+static int
+split_safekeepers_list(char *safekeepers_list, char *safekeepers[])
+{
+	int n_safekeepers = 0;
+	char *curr_sk = safekeepers_list;
+
+	for (char *coma = safekeepers_list; coma != NULL && *coma != '\0'; curr_sk = coma)
+	{
+		if (++n_safekeepers >= MAX_SAFEKEEPERS) {
+			wpg_log(FATAL, "too many safekeepers");
+		}
+
+		coma = strchr(coma, ',');
+		safekeepers[n_safekeepers-1] = curr_sk;
+
+		if (coma != NULL) {
+			*coma++ = '\0';
+		}
+	}
+
+	return n_safekeepers;
+}
+
+/*
+ * Accept two coma-separated strings with list of safekeeper host:port addresses.
+ * Split them into arrays and return false if two sets do not match, ignoring the order.
+ */
+static bool
+safekeepers_cmp(char *old, char *new)
+{
+	char *safekeepers_old[MAX_SAFEKEEPERS];
+	char *safekeepers_new[MAX_SAFEKEEPERS];
+	int len_old = 0;
+	int len_new = 0;
+
+	len_old = split_safekeepers_list(old, safekeepers_old);
+	len_new = split_safekeepers_list(new, safekeepers_new);
+
+	if (len_old != len_new)
+	{
+		return false;
+	}
+
+	qsort(&safekeepers_old, len_old, sizeof(char *), pg_qsort_strcmp);
+	qsort(&safekeepers_new, len_new, sizeof(char *), pg_qsort_strcmp);
+
+	for (int i = 0; i < len_new; i++)
+	{
+		if (strcmp(safekeepers_old[i], safekeepers_new[i]) != 0)
+		{
+			return false;
+		}
+	}
+
+	return true;
+}
+
 /*
  * GUC assign_hook for neon.safekeepers. Restarts walproposer through FATAL if
  * the list changed.
@@ -235,19 +294,26 @@ assign_neon_safekeepers(const char *newval, void *extra)
 		wpg_log(FATAL, "neon.safekeepers is empty");
 	}
 
+	/* Copy values because we will modify them in split_safekeepers_list() */
+	char *newval_copy = pstrdup(newval);
+	char *oldval = pstrdup(wal_acceptors_list);
+
 	/* 
 	 * TODO: restarting through FATAL is stupid and introduces 1s delay before
 	 * next bgw start. We should refactor walproposer to allow graceful exit and
 	 * thus remove this delay.
+	 * XXX: If you change anything here, sync with test_safekeepers_reconfigure_reorder.
 	 */
-	if (strcmp(wal_acceptors_list, newval) != 0)
+	if (!safekeepers_cmp(oldval, newval_copy))
 	{
 		wpg_log(FATAL, "restarting walproposer to change safekeeper list from %s to %s",
 				wal_acceptors_list, newval);
 	}
+	pfree(newval_copy);
+	pfree(oldval);
 }
 
-/*  Check if we need to suspend inserts because of lagging replication. */
+/* Check if we need to suspend inserts because of lagging replication. */
 static uint64
 backpressure_lag_impl(void)
 {
@@ -285,6 +351,22 @@ backpressure_lag_impl(void)
 		}
 	}
 	return 0;
+}
+
+/*
+ * We don't apply backpressure when we're the postmaster, or the startup
+ * process, because in postmaster we can't apply backpressure, and in
+ * the startup process we can't afford to slow down.
+ */
+static uint64
+startup_backpressure_wrap(void)
+{
+	if (AmStartupProcess() || !IsUnderPostmaster)
+		return 0;
+
+	delay_backend_us = &backpressure_lag_impl;
+
+	return backpressure_lag_impl();
 }
 
 /*
@@ -336,12 +418,13 @@ WalproposerShmemInit_SyncSafekeeper(void)
 static bool
 backpressure_throttling_impl(void)
 {
-	int64		lag;
+	uint64		lag;
 	TimestampTz start,
 				stop;
-	bool		retry = PrevProcessInterruptsCallback
-		? PrevProcessInterruptsCallback()
-		: false;
+	bool		retry = false;
+
+	if (PointerIsValid(PrevProcessInterruptsCallback))
+		retry = PrevProcessInterruptsCallback();
 
 	/*
 	 * Don't throttle read only transactions or wal sender. Do throttle CREATE
@@ -537,7 +620,12 @@ walprop_pg_init_walsender(void)
 	/* Create replication slot for WAL proposer if not exists */
 	if (SearchNamedReplicationSlot(WAL_PROPOSER_SLOT_NAME, false) == NULL)
 	{
+#if PG_MAJORVERSION_NUM >= 17
+		ReplicationSlotCreate(WAL_PROPOSER_SLOT_NAME, false, RS_PERSISTENT,
+							  false, false, false);
+#else
 		ReplicationSlotCreate(WAL_PROPOSER_SLOT_NAME, false, RS_PERSISTENT, false);
+#endif
 		ReplicationSlotReserveWal();
 		/* Write this slot to disk */
 		ReplicationSlotMarkDirty();
@@ -1444,7 +1532,11 @@ walprop_pg_init_event_set(WalProposer *wp)
 		wpg_log(FATAL, "double-initialization of event set");
 
 	/* for each sk, we have socket plus potentially socket for neon walreader */
+#if PG_MAJORVERSION_NUM >= 17
+	waitEvents = CreateWaitEventSet(NULL, 2 + 2 * wp->n_safekeepers);
+#else
 	waitEvents = CreateWaitEventSet(TopMemoryContext, 2 + 2 * wp->n_safekeepers);
+#endif
 	AddWaitEventToSet(waitEvents, WL_LATCH_SET, PGINVALID_SOCKET,
 					  MyLatch, NULL);
 	AddWaitEventToSet(waitEvents, WL_EXIT_ON_PM_DEATH, PGINVALID_SOCKET,

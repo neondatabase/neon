@@ -22,9 +22,10 @@ use compute_api::spec::{Database, GenericOption, GenericOptions, PgIdent, Role};
 
 const POSTGRES_WAIT_TIMEOUT: Duration = Duration::from_millis(60 * 1000); // milliseconds
 
-/// Escape a string for including it in a SQL literal. Wrapping the result
-/// with `E'{}'` or `'{}'` is not required, as it returns a ready-to-use
-/// SQL string literal, e.g. `'db'''` or `E'db\\'`.
+/// Escape a string for including it in a SQL literal.
+///
+/// Wrapping the result with `E'{}'` or `'{}'` is not required,
+/// as it returns a ready-to-use SQL string literal, e.g. `'db'''` or `E'db\\'`.
 /// See <https://github.com/postgres/postgres/blob/da98d005cdbcd45af563d0c4ac86d0e9772cd15f/src/backend/utils/adt/quote.c#L47>
 /// for the original implementation.
 pub fn escape_literal(s: &str) -> String {

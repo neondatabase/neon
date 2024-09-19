@@ -44,6 +44,8 @@ def test_remote_extensions(
 ):
     if pg_version == PgVersion.V16:
         pytest.skip("TODO: PG16 extension building")
+    if pg_version == PgVersion.V17:
+        pytest.skip("TODO: PG17 extension building")
 
     # setup mock http server
     # that expects request for anon.tar.zst

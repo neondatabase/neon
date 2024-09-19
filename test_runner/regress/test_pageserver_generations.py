@@ -134,7 +134,7 @@ def test_generations_upgrade(neon_env_builder: NeonEnvBuilder):
     )
 
     env = neon_env_builder.init_configs()
-    env.broker.try_start()
+    env.broker.start()
     for sk in env.safekeepers:
         sk.start()
     env.storage_controller.start()
@@ -142,11 +142,10 @@ def test_generations_upgrade(neon_env_builder: NeonEnvBuilder):
     # We will start a pageserver with no control_plane_api set, so it won't be able to self-register
     env.storage_controller.node_register(env.pageserver)
 
-    replaced_config = env.pageserver.patch_config_toml_nonrecursive(
-        {
-            "control_plane_api": "",
-        }
-    )
+    def remove_control_plane_api_field(config):
+        return config.pop("control_plane_api")
+
+    control_plane_api = env.pageserver.edit_config_toml(remove_control_plane_api_field)
     env.pageserver.start()
     env.storage_controller.node_configure(env.pageserver.id, {"availability": "Active"})
 
@@ -179,7 +178,11 @@ def test_generations_upgrade(neon_env_builder: NeonEnvBuilder):
 
     env.pageserver.stop()
     # Starting without the override that disabled control_plane_api
-    env.pageserver.patch_config_toml_nonrecursive(replaced_config)
+    env.pageserver.patch_config_toml_nonrecursive(
+        {
+            "control_plane_api": control_plane_api,
+        }
+    )
     env.pageserver.start()
 
     generate_uploads_and_deletions(env, pageserver=env.pageserver, init=False)

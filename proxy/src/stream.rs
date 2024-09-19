@@ -12,8 +12,10 @@ use std::{io, task};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio_rustls::server::TlsStream;
+use tracing::debug;
 
 /// Stream wrapper which implements libpq's protocol.
+///
 /// NOTE: This object deliberately doesn't implement [`AsyncRead`]
 /// or [`AsyncWrite`] to prevent subtle errors (e.g. trying
 /// to pass random malformed bytes through the connection).
@@ -35,7 +37,7 @@ impl<S> PqStream<S> {
     }
 
     /// Get a shared reference to the underlying stream.
-    pub fn get_ref(&self) -> &S {
+    pub(crate) fn get_ref(&self) -> &S {
         self.framed.get_ref()
     }
 }
@@ -62,12 +64,12 @@ impl<S: AsyncRead + Unpin> PqStream<S> {
             .ok_or_else(err_connection)
     }
 
-    pub async fn read_password_message(&mut self) -> io::Result<bytes::Bytes> {
+    pub(crate) async fn read_password_message(&mut self) -> io::Result<bytes::Bytes> {
         match self.read_message().await? {
             FeMessage::PasswordMessage(msg) => Ok(msg),
             bad => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("unexpected message type: {:?}", bad),
+                format!("unexpected message type: {bad:?}"),
             )),
         }
     }
@@ -99,7 +101,10 @@ impl ReportableError for ReportedError {
 
 impl<S: AsyncWrite + Unpin> PqStream<S> {
     /// Write the message into an internal buffer, but don't flush the underlying stream.
-    pub fn write_message_noflush(&mut self, message: &BeMessage<'_>) -> io::Result<&mut Self> {
+    pub(crate) fn write_message_noflush(
+        &mut self,
+        message: &BeMessage<'_>,
+    ) -> io::Result<&mut Self> {
         self.framed
             .write_message(message)
             .map_err(ProtocolError::into_io_error)?;
@@ -114,7 +119,7 @@ impl<S: AsyncWrite + Unpin> PqStream<S> {
     }
 
     /// Flush the output buffer into the underlying stream.
-    pub async fn flush(&mut self) -> io::Result<&mut Self> {
+    pub(crate) async fn flush(&mut self) -> io::Result<&mut Self> {
         self.framed.flush().await?;
         Ok(self)
     }
@@ -134,9 +139,10 @@ impl<S: AsyncWrite + Unpin> PqStream<S> {
         );
 
         // already error case, ignore client IO error
-        let _: Result<_, std::io::Error> = self
-            .write_message(&BeMessage::ErrorResponse(msg, None))
-            .await;
+        self.write_message(&BeMessage::ErrorResponse(msg, None))
+            .await
+            .inspect_err(|e| debug!("write_message failed: {e}"))
+            .ok();
 
         Err(ReportedError {
             source: anyhow::anyhow!(msg),
@@ -146,7 +152,7 @@ impl<S: AsyncWrite + Unpin> PqStream<S> {
 
     /// Write the error message using [`Self::write_message`], then re-throw it.
     /// Trait [`UserFacingError`] acts as an allowlist for error types.
-    pub async fn throw_error<T, E>(&mut self, error: E) -> Result<T, ReportedError>
+    pub(crate) async fn throw_error<T, E>(&mut self, error: E) -> Result<T, ReportedError>
     where
         E: UserFacingError + Into<anyhow::Error>,
     {
@@ -160,9 +166,10 @@ impl<S: AsyncWrite + Unpin> PqStream<S> {
         );
 
         // already error case, ignore client IO error
-        let _: Result<_, std::io::Error> = self
-            .write_message(&BeMessage::ErrorResponse(&msg, None))
-            .await;
+        self.write_message(&BeMessage::ErrorResponse(&msg, None))
+            .await
+            .inspect_err(|e| debug!("write_message failed: {e}"))
+            .ok();
 
         Err(ReportedError {
             source: anyhow::anyhow!(error),
@@ -200,7 +207,7 @@ impl<S> Stream<S> {
         }
     }
 
-    pub fn tls_server_end_point(&self) -> TlsServerEndPoint {
+    pub(crate) fn tls_server_end_point(&self) -> TlsServerEndPoint {
         match self {
             Stream::Raw { .. } => TlsServerEndPoint::Undefined,
             Stream::Tls {

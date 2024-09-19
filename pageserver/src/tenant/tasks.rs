@@ -10,7 +10,6 @@ use crate::context::{DownloadBehavior, RequestContext};
 use crate::metrics::TENANT_TASK_EVENTS;
 use crate::task_mgr;
 use crate::task_mgr::{TaskKind, BACKGROUND_RUNTIME};
-use crate::tenant::config::defaults::DEFAULT_COMPACTION_PERIOD;
 use crate::tenant::throttle::Stats;
 use crate::tenant::timeline::CompactionError;
 use crate::tenant::{Tenant, TenantState};
@@ -192,20 +191,28 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
                 }
             }
 
-            let started_at = Instant::now();
 
-            let sleep_duration = if period == Duration::ZERO {
+
+            let sleep_duration;
+            if period == Duration::ZERO {
                 #[cfg(not(feature = "testing"))]
                 info!("automatic compaction is disabled");
                 // check again in 10 seconds, in case it's been enabled again.
-                Duration::from_secs(10)
+                sleep_duration = Duration::from_secs(10)
             } else {
+                let iteration = Iteration {
+                    started_at: Instant::now(),
+                    period,
+                    kind: BackgroundLoopKind::Compaction,
+                };
+
                 // Run compaction
-                match tenant.compaction_iteration(&cancel, &ctx).await {
+                let IterationResult { output, elapsed } = iteration.run(tenant.compaction_iteration(&cancel, &ctx)).await;
+                match output {
                     Ok(has_pending_task) => {
                         error_run_count = 0;
                         // schedule the next compaction immediately in case there is a pending compaction task
-                        if has_pending_task { Duration::ZERO } else { period }
+                        sleep_duration = if has_pending_task { Duration::ZERO } else { period };
                     }
                     Err(e) => {
                         let wait_duration = backoff::exponential_backoff_duration_seconds(
@@ -221,16 +228,14 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
                             &wait_duration,
                             cancel.is_cancelled(),
                         );
-                        wait_duration
+                        sleep_duration = wait_duration;
                     }
                 }
+
+                // the duration is recorded by performance tests by enabling debug in this function
+                tracing::debug!(elapsed_ms=elapsed.as_millis(), "compaction iteration complete");
             };
 
-            let elapsed = started_at.elapsed();
-            warn_when_period_overrun(elapsed, period, BackgroundLoopKind::Compaction);
-
-            // the duration is recorded by performance tests by enabling debug in this function
-            tracing::debug!(elapsed_ms=elapsed.as_millis(), "compaction iteration complete");
 
             // Perhaps we did no work and the walredo process has been idle for some time:
             // give it a chance to shut down to avoid leaving walredo process running indefinitely.
@@ -368,23 +373,27 @@ async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
                 }
             }
 
-            let started_at = Instant::now();
-
             let gc_horizon = tenant.get_gc_horizon();
-            let sleep_duration = if period == Duration::ZERO || gc_horizon == 0 {
+            let sleep_duration;
+            if period == Duration::ZERO || gc_horizon == 0 {
                 #[cfg(not(feature = "testing"))]
                 info!("automatic GC is disabled");
                 // check again in 10 seconds, in case it's been enabled again.
-                Duration::from_secs(10)
+                sleep_duration = Duration::from_secs(10);
             } else {
+                let iteration = Iteration {
+                    started_at: Instant::now(),
+                    period,
+                    kind: BackgroundLoopKind::Gc,
+                };
                 // Run gc
-                let res = tenant
-                    .gc_iteration(None, gc_horizon, tenant.get_pitr_interval(), &cancel, &ctx)
+                let IterationResult { output, elapsed: _ } =
+                    iteration.run(tenant.gc_iteration(None, gc_horizon, tenant.get_pitr_interval(), &cancel, &ctx))
                     .await;
-                match res {
+                match output {
                     Ok(_) => {
                         error_run_count = 0;
-                        period
+                        sleep_duration = period;
                     }
                     Err(crate::tenant::GcError::TenantCancelled) => {
                         return;
@@ -408,12 +417,10 @@ async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
                             error!("Gc failed {error_run_count} times, retrying in {wait_duration:?}: {e:?}");
                         }
 
-                        wait_duration
+                        sleep_duration = wait_duration;
                     }
                 }
             };
-
-            warn_when_period_overrun(started_at.elapsed(), period, BackgroundLoopKind::Gc);
 
             if tokio::time::timeout(sleep_duration, cancel.cancelled())
                 .await
@@ -448,9 +455,11 @@ async fn ingest_housekeeping_loop(tenant: Arc<Tenant>, cancel: CancellationToken
 
             // If compaction period is set to zero (to disable it), then we will use a reasonable default
             let period = if period == Duration::ZERO {
-                humantime::Duration::from_str(DEFAULT_COMPACTION_PERIOD)
-                    .unwrap()
-                    .into()
+                humantime::Duration::from_str(
+                    pageserver_api::config::tenant_conf_defaults::DEFAULT_COMPACTION_PERIOD,
+                )
+                .unwrap()
+                .into()
             } else {
                 period
             };
@@ -468,14 +477,12 @@ async fn ingest_housekeeping_loop(tenant: Arc<Tenant>, cancel: CancellationToken
                 break;
             }
 
-            let started_at = Instant::now();
-            tenant.ingest_housekeeping().await;
-
-            warn_when_period_overrun(
-                started_at.elapsed(),
+            let iteration = Iteration {
+                started_at: Instant::now(),
                 period,
-                BackgroundLoopKind::IngestHouseKeeping,
-            );
+                kind: BackgroundLoopKind::IngestHouseKeeping,
+            };
+            iteration.run(tenant.ingest_housekeeping()).await;
         }
     }
     .await;
@@ -553,6 +560,54 @@ pub(crate) async fn delay_by_lease_length(
     }
 }
 
+struct Iteration {
+    started_at: Instant,
+    period: Duration,
+    kind: BackgroundLoopKind,
+}
+
+struct IterationResult<O> {
+    output: O,
+    elapsed: Duration,
+}
+
+impl Iteration {
+    #[instrument(skip_all)]
+    pub(crate) async fn run<Fut, O>(self, fut: Fut) -> IterationResult<O>
+    where
+        Fut: std::future::Future<Output = O>,
+    {
+        let Self {
+            started_at,
+            period,
+            kind,
+        } = self;
+
+        let mut fut = std::pin::pin!(fut);
+
+        // Wrap `fut` into a future that logs a message every `period` so that we get a
+        // very obvious breadcrumb in the logs _while_ a slow iteration is happening.
+        let liveness_logger = async move {
+            loop {
+                match tokio::time::timeout(period, &mut fut).await {
+                    Ok(x) => return x,
+                    Err(_) => {
+                        // info level as per the same rationale why warn_when_period_overrun is info
+                        // =>  https://github.com/neondatabase/neon/pull/5724
+                        info!("still running");
+                    }
+                }
+            }
+        };
+
+        let output = liveness_logger.await;
+
+        let elapsed = started_at.elapsed();
+        warn_when_period_overrun(elapsed, period, kind);
+
+        IterationResult { output, elapsed }
+    }
+}
 /// Attention: the `task` and `period` beocme labels of a pageserver-wide prometheus metric.
 pub(crate) fn warn_when_period_overrun(
     elapsed: Duration,

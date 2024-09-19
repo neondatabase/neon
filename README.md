@@ -64,6 +64,12 @@ brew install protobuf openssl flex bison icu4c pkg-config
 echo 'export PATH="$(brew --prefix openssl)/bin:$PATH"' >> ~/.zshrc
 ```
 
+If you get errors about missing `m4` you may have to install it manually:
+```
+brew install m4
+brew link --force m4
+```
+
 2. [Install Rust](https://www.rust-lang.org/tools/install)
 ```
 # recommended approach from https://www.rust-lang.org/tools/install
@@ -126,7 +132,7 @@ make -j`sysctl -n hw.logicalcpu` -s
 To run the `psql` client, install the `postgresql-client` package or modify `PATH` and `LD_LIBRARY_PATH` to include `pg_install/bin` and `pg_install/lib`, respectively.
 
 To run the integration tests or Python scripts (not required to use the code), install
-Python (3.9 or higher), and install the python3 packages using `./scripts/pysync` (requires [poetry>=1.3](https://python-poetry.org/)) in the project directory.
+Python (3.9 or higher), and install the python3 packages using `./scripts/pysync` (requires [poetry>=1.8](https://python-poetry.org/)) in the project directory.
 
 
 #### Running neon database

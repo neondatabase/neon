@@ -42,11 +42,9 @@ def test_cancellations(neon_simple_env: NeonEnv):
     ps_http = ps.http_client()
     ps_http.is_testing_enabled_or_skip()
 
-    env.neon_cli.create_branch("test_config", "empty")
-
     # We don't want to have any racy behaviour with autovacuum IOs
     ep = env.endpoints.create_start(
-        "test_config",
+        "main",
         config_lines=[
             "autovacuum = off",
             "shared_buffers = 128MB",

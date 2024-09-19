@@ -25,8 +25,8 @@ use tracing::{debug, error, info, info_span, warn, Instrument};
 pub struct Api {
     endpoint: http::Endpoint,
     pub caches: &'static ApiCaches,
-    pub locks: &'static ApiLocks<EndpointCacheKey>,
-    pub wake_compute_endpoint_rate_limiter: Arc<WakeComputeRateLimiter>,
+    pub(crate) locks: &'static ApiLocks<EndpointCacheKey>,
+    pub(crate) wake_compute_endpoint_rate_limiter: Arc<WakeComputeRateLimiter>,
     jwt: String,
 }
 
@@ -38,10 +38,7 @@ impl Api {
         locks: &'static ApiLocks<EndpointCacheKey>,
         wake_compute_endpoint_rate_limiter: Arc<WakeComputeRateLimiter>,
     ) -> Self {
-        let jwt: String = match std::env::var("NEON_PROXY_TO_CONTROLPLANE_TOKEN") {
-            Ok(v) => v,
-            Err(_) => "".to_string(),
-        };
+        let jwt = std::env::var("NEON_PROXY_TO_CONTROLPLANE_TOKEN").unwrap_or_default();
         Self {
             endpoint,
             caches,
@@ -51,7 +48,7 @@ impl Api {
         }
     }
 
-    pub fn url(&self) -> &str {
+    pub(crate) fn url(&self) -> &str {
         self.endpoint.url().as_str()
     }
 
@@ -96,10 +93,10 @@ impl Api {
                 // Error 404 is special: it's ok not to have a secret.
                 // TODO(anna): retry
                 Err(e) => {
-                    if e.get_reason().is_not_found() {
-                        return Ok(AuthInfo::default());
+                    return if e.get_reason().is_not_found() {
+                        Ok(AuthInfo::default())
                     } else {
-                        return Err(e.into());
+                        Err(e.into())
                     }
                 }
             };

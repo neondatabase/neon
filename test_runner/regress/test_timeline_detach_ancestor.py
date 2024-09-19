@@ -118,6 +118,9 @@ def test_ancestor_detach_branched_from(
         truncated_layers = 0
     elif branchpoint == Branchpoint.AFTER_L0:
         branch_at = Lsn(last_lsn + 8)
+        # make sure the branch point is not on a page header
+        if 0 < (branch_at.lsn_int % 8192) < 40:
+            branch_at += 40
         rows = 8192
         # as there is no 8 byte walrecord, nothing should get copied from the straddling layer
         truncated_layers = 0

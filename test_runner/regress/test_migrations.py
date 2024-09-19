@@ -9,13 +9,12 @@ if TYPE_CHECKING:
 
 def test_migrations(neon_simple_env: NeonEnv):
     env = neon_simple_env
-    env.neon_cli.create_branch("test_migrations", "empty")
 
-    endpoint = env.endpoints.create("test_migrations")
+    endpoint = env.endpoints.create("main")
     endpoint.respec(skip_pg_catalog_updates=False)
     endpoint.start()
 
-    num_migrations = 10
+    num_migrations = 11
     endpoint.wait_for_migrations(num_migrations=num_migrations)
 
     with endpoint.cursor() as cur:

@@ -2,13 +2,12 @@
 
 pub mod delta_layer;
 pub mod image_layer;
-pub(crate) mod inmemory_layer;
+pub mod inmemory_layer;
 pub(crate) mod layer;
 mod layer_desc;
 mod layer_name;
 pub mod merge_iterator;
 
-#[cfg(test)]
 pub mod split_writer;
 
 use crate::context::{AccessStatsBehavior, RequestContext};
@@ -435,10 +434,11 @@ impl ReadableLayer {
     }
 }
 
-/// Layers contain a hint indicating whether they are likely to be used for reads.  This is a hint rather
-/// than an authoritative value, so that we do not have to update it synchronously when changing the visibility
-/// of layers (for example when creating a branch that makes some previously covered layers visible).  It should
-/// be used for cache management but not for correctness-critical checks.
+/// Layers contain a hint indicating whether they are likely to be used for reads.
+///
+/// This is a hint rather than an authoritative value, so that we do not have to update it synchronously
+/// when changing the visibility of layers (for example when creating a branch that makes some previously
+/// covered layers visible).  It should be used for cache management but not for correctness-critical checks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LayerVisibilityHint {
     /// A Visible layer might be read while serving a read, because there is not an image layer between it

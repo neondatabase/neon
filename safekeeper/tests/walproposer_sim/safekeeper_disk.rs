@@ -83,7 +83,6 @@ impl DiskStateStorage {
     }
 }
 
-#[async_trait::async_trait]
 impl control_file::Storage for DiskStateStorage {
     /// Persist safekeeper state on disk and update internal state.
     async fn persist(&mut self, s: &TimelinePersistentState) -> Result<()> {
@@ -175,8 +174,11 @@ impl DiskWALStorage {
     }
 }
 
-#[async_trait::async_trait]
 impl wal_storage::Storage for DiskWALStorage {
+    // Last written LSN.
+    fn write_lsn(&self) -> Lsn {
+        self.write_lsn
+    }
     /// LSN of last durably stored WAL record.
     fn flush_lsn(&self) -> Lsn {
         self.flush_record_lsn

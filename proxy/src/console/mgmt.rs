@@ -14,18 +14,18 @@ use tracing::{error, info, info_span, Instrument};
 static CPLANE_WAITERS: Lazy<Waiters<ComputeReady>> = Lazy::new(Default::default);
 
 /// Give caller an opportunity to wait for the cloud's reply.
-pub fn get_waiter(
+pub(crate) fn get_waiter(
     psql_session_id: impl Into<String>,
 ) -> Result<Waiter<'static, ComputeReady>, waiters::RegisterError> {
     CPLANE_WAITERS.register(psql_session_id.into())
 }
 
-pub fn notify(psql_session_id: &str, msg: ComputeReady) -> Result<(), waiters::NotifyError> {
+pub(crate) fn notify(psql_session_id: &str, msg: ComputeReady) -> Result<(), waiters::NotifyError> {
     CPLANE_WAITERS.notify(psql_session_id, msg)
 }
 
 /// Console management API listener task.
-/// It spawns console response handlers needed for the link auth.
+/// It spawns console response handlers needed for the web auth.
 pub async fn task_main(listener: TcpListener) -> anyhow::Result<Infallible> {
     scopeguard::defer! {
         info!("mgmt has shut down");
@@ -74,11 +74,11 @@ async fn handle_connection(socket: TcpStream) -> Result<(), QueryError> {
 }
 
 /// A message received by `mgmt` when a compute node is ready.
-pub type ComputeReady = DatabaseInfo;
+pub(crate) type ComputeReady = DatabaseInfo;
 
 // TODO: replace with an http-based protocol.
 struct MgmtHandler;
-#[async_trait::async_trait]
+
 impl postgres_backend::Handler<tokio::net::TcpStream> for MgmtHandler {
     async fn process_query(
         &mut self,

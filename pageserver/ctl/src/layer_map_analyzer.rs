@@ -79,16 +79,24 @@ pub(crate) fn parse_filename(name: &str) -> Option<LayerFile> {
         return None;
     }
     let keys: Vec<&str> = split[0].split('-').collect();
-    let mut lsns: Vec<&str> = split[1].split('-').collect();
-    let is_delta = if lsns.len() == 1 {
-        lsns.push(lsns[0]);
+    let lsn_and_opt_generation: Vec<&str> = split[1].split('v').collect();
+    let lsns: Vec<&str> = lsn_and_opt_generation[0].split('-').collect();
+    let the_lsns: [&str; 2];
+
+    /*
+     * Generations add a -vX-XXXXXX postfix, which causes issues when we try to
+     * parse 'vX' as an LSN.
+     */
+    let is_delta = if lsns.len() == 1 || lsns[1].is_empty() {
+        the_lsns = [lsns[0], lsns[0]];
         false
     } else {
+        the_lsns = [lsns[0], lsns[1]];
         true
     };
 
     let key_range = Key::from_hex(keys[0]).unwrap()..Key::from_hex(keys[1]).unwrap();
-    let lsn_range = Lsn::from_hex(lsns[0]).unwrap()..Lsn::from_hex(lsns[1]).unwrap();
+    let lsn_range = Lsn::from_hex(the_lsns[0]).unwrap()..Lsn::from_hex(the_lsns[1]).unwrap();
     let holes = Vec::new();
     Some(LayerFile {
         key_range,
@@ -144,7 +152,11 @@ pub(crate) async fn main(cmd: &AnalyzeLayerMapCmd) -> Result<()> {
     let ctx = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error);
 
     // Initialize virtual_file (file desriptor cache) and page cache which are needed to access layer persistent B-Tree.
-    pageserver::virtual_file::init(10, virtual_file::api::IoEngineKind::StdFs);
+    pageserver::virtual_file::init(
+        10,
+        virtual_file::api::IoEngineKind::StdFs,
+        pageserver_api::config::defaults::DEFAULT_IO_BUFFER_ALIGNMENT,
+    );
     pageserver::page_cache::init(100);
 
     let mut total_delta_layers = 0usize;

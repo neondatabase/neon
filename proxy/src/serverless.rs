@@ -25,8 +25,6 @@ use hyper_util::rt::TokioExecutor;
 use hyper_util::server::conn::auto::Builder;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
-pub use reqwest_middleware::{ClientWithMiddleware, Error};
-pub use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::time::timeout;
 use tokio_rustls::TlsAcceptor;
@@ -50,7 +48,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn, Instrument};
 use utils::http::error::ApiError;
 
-pub const SERVERLESS_DRIVER_SNI: &str = "api";
+pub(crate) const SERVERLESS_DRIVER_SNI: &str = "api";
 
 pub async fn task_main(
     config: &'static ProxyConfig,
@@ -93,11 +91,11 @@ pub async fn task_main(
             let mut tls_server_config = rustls::ServerConfig::clone(&config.to_server_config());
             // prefer http2, but support http/1.1
             tls_server_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-            Arc::new(tls_server_config) as Arc<_>
+            Arc::new(tls_server_config)
         }
         None => {
             warn!("TLS config is missing");
-            Arc::new(NoTls) as Arc<_>
+            Arc::new(NoTls)
         }
     };
 
@@ -178,9 +176,9 @@ pub async fn task_main(
     Ok(())
 }
 
-pub trait AsyncReadWrite: AsyncRead + AsyncWrite + Send + 'static {}
+pub(crate) trait AsyncReadWrite: AsyncRead + AsyncWrite + Send + 'static {}
 impl<T: AsyncRead + AsyncWrite + Send + 'static> AsyncReadWrite for T {}
-pub type AsyncRW = Pin<Box<dyn AsyncReadWrite>>;
+pub(crate) type AsyncRW = Pin<Box<dyn AsyncReadWrite>>;
 
 #[async_trait]
 trait MaybeTlsAcceptor: Send + Sync + 'static {
@@ -407,7 +405,7 @@ async fn request_handler(
             .header("Access-Control-Allow-Origin", "*")
             .header(
                 "Access-Control-Allow-Headers",
-                "Neon-Connection-String, Neon-Raw-Text-Output, Neon-Array-Mode, Neon-Pool-Opt-In, Neon-Batch-Read-Only, Neon-Batch-Isolation-Level",
+                "Authorization, Neon-Connection-String, Neon-Raw-Text-Output, Neon-Array-Mode, Neon-Pool-Opt-In, Neon-Batch-Read-Only, Neon-Batch-Isolation-Level",
             )
             .header("Access-Control-Max-Age", "86400" /* 24 hours */)
             .status(StatusCode::OK) // 204 is also valid, but see: https://developer.mozilla.org/en-US/docs/Web/HTTP/Methods/OPTIONS#status_code

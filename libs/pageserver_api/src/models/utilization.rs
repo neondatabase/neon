@@ -38,7 +38,7 @@ pub struct PageserverUtilization {
     pub max_shard_count: u32,
 
     /// Cached result of [`Self::score`]
-    pub utilization_score: u64,
+    pub utilization_score: Option<u64>,
 
     /// When was this snapshot captured, pageserver local time.
     ///
@@ -49,6 +49,8 @@ pub struct PageserverUtilization {
 fn unity_percent() -> Percent {
     Percent::new(0).unwrap()
 }
+
+pub type RawScore = u64;
 
 impl PageserverUtilization {
     const UTILIZATION_FULL: u64 = 1000000;
@@ -62,7 +64,7 @@ impl PageserverUtilization {
     /// - Negative values are forbidden
     /// - Values over UTILIZATION_FULL indicate an overloaded node, which may show degraded performance due to
     ///   layer eviction.
-    pub fn score(&self) -> u64 {
+    pub fn score(&self) -> RawScore {
         let disk_usable_capacity = ((self.disk_usage_bytes + self.free_space_bytes)
             * self.disk_usable_pct.get() as u64)
             / 100;
@@ -74,8 +76,41 @@ impl PageserverUtilization {
         std::cmp::max(disk_utilization_score, shard_utilization_score)
     }
 
-    pub fn refresh_score(&mut self) {
-        self.utilization_score = self.score();
+    pub fn cached_score(&mut self) -> RawScore {
+        match self.utilization_score {
+            None => {
+                let s = self.score();
+                self.utilization_score = Some(s);
+                s
+            }
+            Some(s) => s,
+        }
+    }
+
+    /// If a node is currently hosting more work than it can comfortably handle.  This does not indicate that
+    /// it will fail, but it is a strong signal that more work should not be added unless there is no alternative.
+    ///
+    /// When a node is overloaded, we may override soft affinity preferences and do things like scheduling
+    /// into a node in a less desirable AZ, if all the nodes in the preferred AZ are overloaded.
+    pub fn is_overloaded(score: RawScore) -> bool {
+        // Why the factor of two?  This is unscientific but reflects behavior of real systems:
+        // - In terms of shard counts, a node's preferred max count is a soft limit intended to keep
+        //   startup and housekeeping jobs nice and responsive.  We can go to double this limit if needed
+        //   until some more nodes are deployed.
+        // - In terms of disk space, the node's utilization heuristic assumes every tenant needs to
+        //   hold its biggest timeline fully on disk, which is tends to be an over estimate when
+        //   some tenants are very idle and have dropped layers from disk.  In practice going up to
+        //   double is generally better than giving up and scheduling in a sub-optimal AZ.
+        score >= 2 * Self::UTILIZATION_FULL
+    }
+
+    pub fn adjust_shard_count_max(&mut self, shard_count: u32) {
+        if self.shard_count < shard_count {
+            self.shard_count = shard_count;
+
+            // Dirty cache: this will be calculated next time someone retrives the score
+            self.utilization_score = None;
+        }
     }
 
     /// A utilization structure that has a full utilization score: use this as a placeholder when
@@ -88,7 +123,38 @@ impl PageserverUtilization {
             disk_usable_pct: Percent::new(100).unwrap(),
             shard_count: 1,
             max_shard_count: 1,
-            utilization_score: Self::UTILIZATION_FULL,
+            utilization_score: Some(Self::UTILIZATION_FULL),
+            captured_at: serde_system_time::SystemTime(SystemTime::now()),
+        }
+    }
+}
+
+/// Test helper
+pub mod test_utilization {
+    use super::PageserverUtilization;
+    use std::time::SystemTime;
+    use utils::{
+        serde_percent::Percent,
+        serde_system_time::{self},
+    };
+
+    // Parameters of the imaginary node used for test utilization instances
+    const TEST_DISK_SIZE: u64 = 1024 * 1024 * 1024 * 1024;
+    const TEST_SHARDS_MAX: u32 = 1000;
+
+    /// Unit test helper.  Unconditionally compiled because cfg(test) doesn't carry across crates.  Do
+    /// not abuse this function from non-test code.
+    ///
+    /// Emulates a node with a 1000 shard limit and a 1TB disk.
+    pub fn simple(shard_count: u32, disk_wanted_bytes: u64) -> PageserverUtilization {
+        PageserverUtilization {
+            disk_usage_bytes: disk_wanted_bytes,
+            free_space_bytes: TEST_DISK_SIZE - std::cmp::min(disk_wanted_bytes, TEST_DISK_SIZE),
+            disk_wanted_bytes,
+            disk_usable_pct: Percent::new(100).unwrap(),
+            shard_count,
+            max_shard_count: TEST_SHARDS_MAX,
+            utilization_score: None,
             captured_at: serde_system_time::SystemTime(SystemTime::now()),
         }
     }
@@ -120,7 +186,7 @@ mod tests {
             disk_usage_bytes: u64::MAX,
             free_space_bytes: 0,
             disk_wanted_bytes: u64::MAX,
-            utilization_score: 13,
+            utilization_score: Some(13),
             disk_usable_pct: Percent::new(90).unwrap(),
             shard_count: 100,
             max_shard_count: 200,

@@ -43,15 +43,8 @@ pub mod logging;
 pub mod lock_file;
 pub mod pid_file;
 
-// Misc
-pub mod accum;
-pub mod shutdown;
-
 // Utility for binding TcpListeners with proper socket options.
 pub mod tcp_listener;
-
-// Utility for putting a raw file descriptor into non-blocking mode
-pub mod nonblock;
 
 // Default signal handling
 pub mod sentry_init;
@@ -71,6 +64,7 @@ pub mod postgres_client;
 
 pub mod tracing_span_assert;
 
+pub mod leaky_bucket;
 pub mod rate_limit;
 
 /// Simple once-barrier and a guard which keeps barrier awaiting.

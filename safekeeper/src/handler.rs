@@ -2,6 +2,7 @@
 //! protocol commands.
 
 use anyhow::Context;
+use std::future::Future;
 use std::str::{self, FromStr};
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -95,7 +96,6 @@ fn cmd_to_string(cmd: &SafekeeperPostgresCommand) -> &str {
     }
 }
 
-#[async_trait::async_trait]
 impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
     for SafekeeperPostgresHandler
 {
@@ -197,49 +197,51 @@ impl<IO: AsyncRead + AsyncWrite + Unpin + Send> postgres_backend::Handler<IO>
         Ok(())
     }
 
-    async fn process_query(
+    fn process_query(
         &mut self,
         pgb: &mut PostgresBackend<IO>,
         query_string: &str,
-    ) -> Result<(), QueryError> {
-        if query_string
-            .to_ascii_lowercase()
-            .starts_with("set datestyle to ")
-        {
-            // important for debug because psycopg2 executes "SET datestyle TO 'ISO'" on connect
-            pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
-            return Ok(());
-        }
-
-        let cmd = parse_cmd(query_string)?;
-        let cmd_str = cmd_to_string(&cmd);
-
-        let _guard = PG_QUERIES_GAUGE.with_label_values(&[cmd_str]).guard();
-
-        info!("got query {:?}", query_string);
-
-        let tenant_id = self.tenant_id.context("tenantid is required")?;
-        let timeline_id = self.timeline_id.context("timelineid is required")?;
-        self.check_permission(Some(tenant_id))?;
-        self.ttid = TenantTimelineId::new(tenant_id, timeline_id);
-
-        match cmd {
-            SafekeeperPostgresCommand::StartWalPush => {
-                self.handle_start_wal_push(pgb)
-                    .instrument(info_span!("WAL receiver"))
-                    .await
+    ) -> impl Future<Output = Result<(), QueryError>> {
+        Box::pin(async move {
+            if query_string
+                .to_ascii_lowercase()
+                .starts_with("set datestyle to ")
+            {
+                // important for debug because psycopg2 executes "SET datestyle TO 'ISO'" on connect
+                pgb.write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
+                return Ok(());
             }
-            SafekeeperPostgresCommand::StartReplication { start_lsn, term } => {
-                self.handle_start_replication(pgb, start_lsn, term)
-                    .instrument(info_span!("WAL sender"))
-                    .await
+
+            let cmd = parse_cmd(query_string)?;
+            let cmd_str = cmd_to_string(&cmd);
+
+            let _guard = PG_QUERIES_GAUGE.with_label_values(&[cmd_str]).guard();
+
+            info!("got query {:?}", query_string);
+
+            let tenant_id = self.tenant_id.context("tenantid is required")?;
+            let timeline_id = self.timeline_id.context("timelineid is required")?;
+            self.check_permission(Some(tenant_id))?;
+            self.ttid = TenantTimelineId::new(tenant_id, timeline_id);
+
+            match cmd {
+                SafekeeperPostgresCommand::StartWalPush => {
+                    self.handle_start_wal_push(pgb)
+                        .instrument(info_span!("WAL receiver"))
+                        .await
+                }
+                SafekeeperPostgresCommand::StartReplication { start_lsn, term } => {
+                    self.handle_start_replication(pgb, start_lsn, term)
+                        .instrument(info_span!("WAL sender"))
+                        .await
+                }
+                SafekeeperPostgresCommand::IdentifySystem => self.handle_identify_system(pgb).await,
+                SafekeeperPostgresCommand::TimelineStatus => self.handle_timeline_status(pgb).await,
+                SafekeeperPostgresCommand::JSONCtrl { ref cmd } => {
+                    handle_json_ctrl(self, pgb, cmd).await
+                }
             }
-            SafekeeperPostgresCommand::IdentifySystem => self.handle_identify_system(pgb).await,
-            SafekeeperPostgresCommand::TimelineStatus => self.handle_timeline_status(pgb).await,
-            SafekeeperPostgresCommand::JSONCtrl { ref cmd } => {
-                handle_json_ctrl(self, pgb, cmd).await
-            }
-        }
+        })
     }
 }
 

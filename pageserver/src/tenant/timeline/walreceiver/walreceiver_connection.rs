@@ -27,11 +27,11 @@ use super::TaskStateUpdate;
 use crate::{
     context::RequestContext,
     metrics::{LIVE_CONNECTIONS, WALRECEIVER_STARTED_CONNECTIONS, WAL_INGEST},
-    task_mgr::TaskKind,
-    task_mgr::WALRECEIVER_RUNTIME,
+    pgdatadir_mapping::DatadirModification,
+    task_mgr::{TaskKind, WALRECEIVER_RUNTIME},
     tenant::{debug_assert_current_span_has_tenant_and_timeline_id, Timeline, WalReceiverInfo},
     walingest::WalIngest,
-    walrecord::DecodedWALRecord,
+    walrecord::{decode_wal_record, DecodedWALRecord},
 };
 use postgres_backend::is_expected_io_error;
 use postgres_connection::PgConnectionConfig;
@@ -312,10 +312,25 @@ pub(super) async fn handle_walreceiver_connection(
                 waldecoder.feed_bytes(data);
 
                 {
-                    let mut decoded = DecodedWALRecord::default();
                     let mut modification = timeline.begin_modification(startlsn);
                     let mut uncommitted_records = 0;
                     let mut filtered_records = 0;
+
+                    async fn commit(
+                        modification: &mut DatadirModification<'_>,
+                        uncommitted: &mut u64,
+                        filtered: &mut u64,
+                        ctx: &RequestContext,
+                    ) -> anyhow::Result<()> {
+                        WAL_INGEST
+                            .records_committed
+                            .inc_by(*uncommitted - *filtered);
+                        modification.commit(ctx).await?;
+                        *uncommitted = 0;
+                        *filtered = 0;
+                        Ok(())
+                    }
+
                     while let Some((lsn, recdata)) = waldecoder.poll_decode()? {
                         // It is important to deal with the aligned records as lsn in getPage@LSN is
                         // aligned and can be several bytes bigger. Without this alignment we are
@@ -324,9 +339,28 @@ pub(super) async fn handle_walreceiver_connection(
                             return Err(WalReceiverError::Other(anyhow!("LSN not aligned")));
                         }
 
+                        // Deserialize WAL record
+                        let mut decoded = DecodedWALRecord::default();
+                        decode_wal_record(recdata, &mut decoded, modification.tline.pg_version)?;
+
+                        if decoded.is_dbase_create_copy(timeline.pg_version)
+                            && uncommitted_records > 0
+                        {
+                            // Special case: legacy PG database creations operate by reading pages from a 'template' database:
+                            // these are the only kinds of WAL record that require reading data blocks while ingesting.  Ensure
+                            // all earlier writes of data blocks are visible by committing any modification in flight.
+                            commit(
+                                &mut modification,
+                                &mut uncommitted_records,
+                                &mut filtered_records,
+                                &ctx,
+                            )
+                            .await?;
+                        }
+
                         // Ingest the records without immediately committing them.
                         let ingested = walingest
-                            .ingest_record(recdata, lsn, &mut modification, &mut decoded, &ctx)
+                            .ingest_record(decoded, lsn, &mut modification, &ctx)
                             .await
                             .with_context(|| format!("could not ingest record at {lsn}"))?;
                         if !ingested {
@@ -345,22 +379,29 @@ pub(super) async fn handle_walreceiver_connection(
                         // Commit every ingest_batch_size records. Even if we filtered out
                         // all records, we still need to call commit to advance the LSN.
                         uncommitted_records += 1;
-                        if uncommitted_records >= ingest_batch_size {
-                            WAL_INGEST
-                                .records_committed
-                                .inc_by(uncommitted_records - filtered_records);
-                            modification.commit(&ctx).await?;
-                            uncommitted_records = 0;
-                            filtered_records = 0;
+                        if uncommitted_records >= ingest_batch_size
+                            || modification.approx_pending_bytes()
+                                > DatadirModification::MAX_PENDING_BYTES
+                        {
+                            commit(
+                                &mut modification,
+                                &mut uncommitted_records,
+                                &mut filtered_records,
+                                &ctx,
+                            )
+                            .await?;
                         }
                     }
 
                     // Commit the remaining records.
                     if uncommitted_records > 0 {
-                        WAL_INGEST
-                            .records_committed
-                            .inc_by(uncommitted_records - filtered_records);
-                        modification.commit(&ctx).await?;
+                        commit(
+                            &mut modification,
+                            &mut uncommitted_records,
+                            &mut filtered_records,
+                            &ctx,
+                        )
+                        .await?;
                     }
                 }
 

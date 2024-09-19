@@ -36,6 +36,8 @@ pub(crate) struct Node {
     listen_pg_addr: String,
     listen_pg_port: u16,
 
+    availability_zone_id: String,
+
     // This cancellation token means "stop any RPCs in flight to this node, and don't start
     // any more". It is not related to process shutdown.
     #[serde(skip)]
@@ -61,6 +63,11 @@ impl Node {
         self.id
     }
 
+    #[allow(unused)]
+    pub(crate) fn get_availability_zone_id(&self) -> &str {
+        self.availability_zone_id.as_str()
+    }
+
     pub(crate) fn get_scheduling(&self) -> NodeSchedulingPolicy {
         self.scheduling
     }
@@ -77,6 +84,7 @@ impl Node {
             && self.listen_http_port == register_req.listen_http_port
             && self.listen_pg_addr == register_req.listen_pg_addr
             && self.listen_pg_port == register_req.listen_pg_port
+            && self.availability_zone_id == register_req.availability_zone_id
     }
 
     /// For a shard located on this node, populate a response object
@@ -92,15 +100,15 @@ impl Node {
         }
     }
 
-    pub(crate) fn get_availability(&self) -> NodeAvailability {
-        self.availability
+    pub(crate) fn get_availability(&self) -> &NodeAvailability {
+        &self.availability
     }
 
     pub(crate) fn set_availability(&mut self, availability: NodeAvailability) {
         use AvailabilityTransition::*;
         use NodeAvailability::WarmingUp;
 
-        match self.get_availability_transition(availability) {
+        match self.get_availability_transition(&availability) {
             ToActive => {
                 // Give the node a new cancellation token, effectively resetting it to un-cancelled.  Any
                 // users of previously-cloned copies of the node will still see the old cancellation
@@ -115,8 +123,8 @@ impl Node {
             Unchanged | ToWarmingUpFromOffline => {}
         }
 
-        if let (WarmingUp(crnt), WarmingUp(proposed)) = (self.availability, availability) {
-            self.availability = WarmingUp(std::cmp::max(crnt, proposed));
+        if let (WarmingUp(crnt), WarmingUp(proposed)) = (&self.availability, &availability) {
+            self.availability = WarmingUp(std::cmp::max(*crnt, *proposed));
         } else {
             self.availability = availability;
         }
@@ -126,12 +134,12 @@ impl Node {
     /// into a description of the transition.
     pub(crate) fn get_availability_transition(
         &self,
-        availability: NodeAvailability,
+        availability: &NodeAvailability,
     ) -> AvailabilityTransition {
         use AvailabilityTransition::*;
         use NodeAvailability::*;
 
-        match (self.availability, availability) {
+        match (&self.availability, availability) {
             (Offline, Active(_)) => ToActive,
             (Active(_), Offline) => ToOffline,
             (Active(_), WarmingUp(_)) => ToWarmingUpFromActive,
@@ -153,15 +161,15 @@ impl Node {
 
     /// Is this node elegible to have work scheduled onto it?
     pub(crate) fn may_schedule(&self) -> MaySchedule {
-        let score = match self.availability {
-            NodeAvailability::Active(score) => score,
+        let utilization = match &self.availability {
+            NodeAvailability::Active(u) => u.clone(),
             NodeAvailability::Offline | NodeAvailability::WarmingUp(_) => return MaySchedule::No,
         };
 
         match self.scheduling {
-            NodeSchedulingPolicy::Active => MaySchedule::Yes(score),
+            NodeSchedulingPolicy::Active => MaySchedule::Yes(utilization),
             NodeSchedulingPolicy::Draining => MaySchedule::No,
-            NodeSchedulingPolicy::Filling => MaySchedule::Yes(score),
+            NodeSchedulingPolicy::Filling => MaySchedule::Yes(utilization),
             NodeSchedulingPolicy::Pause => MaySchedule::No,
             NodeSchedulingPolicy::PauseForRestart => MaySchedule::No,
         }
@@ -173,6 +181,7 @@ impl Node {
         listen_http_port: u16,
         listen_pg_addr: String,
         listen_pg_port: u16,
+        availability_zone_id: String,
     ) -> Self {
         Self {
             id,
@@ -182,6 +191,7 @@ impl Node {
             listen_pg_port,
             scheduling: NodeSchedulingPolicy::Active,
             availability: NodeAvailability::Offline,
+            availability_zone_id,
             cancel: CancellationToken::new(),
         }
     }
@@ -194,6 +204,7 @@ impl Node {
             listen_http_port: self.listen_http_port as i32,
             listen_pg_addr: self.listen_pg_addr.clone(),
             listen_pg_port: self.listen_pg_port as i32,
+            availability_zone_id: self.availability_zone_id.clone(),
         }
     }
 
@@ -208,6 +219,7 @@ impl Node {
             listen_http_port: np.listen_http_port as u16,
             listen_pg_addr: np.listen_pg_addr,
             listen_pg_port: np.listen_pg_port as u16,
+            availability_zone_id: np.availability_zone_id,
             cancel: CancellationToken::new(),
         }
     }
@@ -285,7 +297,7 @@ impl Node {
     pub(crate) fn describe(&self) -> NodeDescribeResponse {
         NodeDescribeResponse {
             id: self.id,
-            availability: self.availability.into(),
+            availability: self.availability.clone().into(),
             scheduling: self.scheduling,
             listen_http_addr: self.listen_http_addr.clone(),
             listen_http_port: self.listen_http_port,

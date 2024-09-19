@@ -25,7 +25,7 @@ use x509_parser::oid_registry;
 
 pub struct ProxyConfig {
     pub tls_config: Option<TlsConfig>,
-    pub auth_backend: auth::BackendType<'static, (), ()>,
+    pub auth_backend: auth::Backend<'static, (), ()>,
     pub metric_collection: Option<MetricCollectionConfig>,
     pub allow_self_signed_compute: bool,
     pub http_config: HttpConfig,
@@ -56,6 +56,8 @@ pub struct HttpConfig {
     pub pool_options: GlobalConnPoolOptions,
     pub cancel_set: CancelSet,
     pub client_conn_threshold: u64,
+    pub max_request_size_bytes: u64,
+    pub max_response_size_bytes: usize,
 }
 
 pub struct AuthenticationConfig {
@@ -64,6 +66,7 @@ pub struct AuthenticationConfig {
     pub rate_limiter_enabled: bool,
     pub rate_limiter: AuthRateLimiter,
     pub rate_limit_ip_subnet: u8,
+    pub ip_allowlist_check_enabled: bool,
 }
 
 impl TlsConfig {
@@ -247,7 +250,7 @@ impl CertResolver {
 
         let common_name = pem.subject().to_string();
 
-        // We only use non-wildcard certificates in link proxy so it seems okay to treat them the same as
+        // We only use non-wildcard certificates in web auth proxy so it seems okay to treat them the same as
         // wildcard ones as we don't use SNI there. That treatment only affects certificate selection, so
         // verify-full will still check wildcard match. Old coding here just ignored non-wildcard common names
         // and passed None instead, which blows up number of cases downstream code should handle. Proper coding
@@ -318,7 +321,7 @@ impl CertResolver {
             // a) Instead of multi-cert approach use single cert with extra
             //    domains listed in Subject Alternative Name (SAN).
             // b) Deploy separate proxy instances for extra domains.
-            self.default.as_ref().cloned()
+            self.default.clone()
         }
     }
 }

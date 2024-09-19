@@ -192,7 +192,7 @@ WORKDIR /home/nonroot
 
 # Rust
 # Please keep the version of llvm (installed above) in sync with rust llvm (`rustc --version --verbose | grep LLVM`)
-ENV RUSTC_VERSION=1.80.1
+ENV RUSTC_VERSION=1.81.0
 ENV RUSTUP_HOME="/home/nonroot/.rustup"
 ENV PATH="/home/nonroot/.cargo/bin:${PATH}"
 ARG RUSTFILT_VERSION=0.2.1
@@ -207,7 +207,7 @@ RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux
     export PATH="$HOME/.cargo/bin:$PATH" && \
     . "$HOME/.cargo/env" && \
     cargo --version && rustup --version && \
-    rustup component add llvm-tools-preview rustfmt clippy && \
+    rustup component add llvm-tools rustfmt clippy && \
     cargo install rustfilt            --version ${RUSTFILT_VERSION} && \
     cargo install cargo-hakari        --version ${CARGO_HAKARI_VERSION} && \
     cargo install cargo-deny --locked --version ${CARGO_DENY_VERSION} && \

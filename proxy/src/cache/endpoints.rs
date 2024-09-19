@@ -28,7 +28,7 @@ use crate::{
 };
 
 #[derive(Deserialize, Debug, Clone)]
-pub struct ControlPlaneEventKey {
+pub(crate) struct ControlPlaneEventKey {
     endpoint_created: Option<EndpointCreated>,
     branch_created: Option<BranchCreated>,
     project_created: Option<ProjectCreated>,
@@ -56,7 +56,7 @@ pub struct EndpointsCache {
 }
 
 impl EndpointsCache {
-    pub fn new(config: EndpointCacheConfig) -> Self {
+    pub(crate) fn new(config: EndpointCacheConfig) -> Self {
         Self {
             limiter: Arc::new(Mutex::new(GlobalRateLimiter::new(
                 config.limiter_info.clone(),
@@ -68,7 +68,7 @@ impl EndpointsCache {
             ready: AtomicBool::new(false),
         }
     }
-    pub async fn is_valid(&self, ctx: &RequestMonitoring, endpoint: &EndpointId) -> bool {
+    pub(crate) async fn is_valid(&self, ctx: &RequestMonitoring, endpoint: &EndpointId) -> bool {
         if !self.ready.load(Ordering::Acquire) {
             return true;
         }
@@ -242,6 +242,6 @@ mod tests {
     #[test]
     fn test() {
         let s = "{\"branch_created\":null,\"endpoint_created\":{\"endpoint_id\":\"ep-rapid-thunder-w0qqw2q9\"},\"project_created\":null,\"type\":\"endpoint_created\"}";
-        let _: ControlPlaneEventKey = serde_json::from_str(s).unwrap();
+        serde_json::from_str::<ControlPlaneEventKey>(s).unwrap();
     }
 }

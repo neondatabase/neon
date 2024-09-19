@@ -11,12 +11,17 @@ import pytest
 import toml
 from fixtures.common_types import TenantId, TimelineId
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, PgBin, flush_ep_to_pageserver
+from fixtures.neon_fixtures import (
+    NeonEnv,
+    NeonEnvBuilder,
+    PgBin,
+    flush_ep_to_pageserver,
+)
 from fixtures.pageserver.http import PageserverApiException
 from fixtures.pageserver.utils import (
     timeline_delete_wait_completed,
 )
-from fixtures.pg_version import PgVersion
+from fixtures.pg_version import PgVersion, skip_on_postgres
 from fixtures.remote_storage import RemoteStorageKind, S3Storage, s3_storage
 from fixtures.workload import Workload
 
@@ -144,9 +149,16 @@ def test_create_snapshot(
     )
 
 
+# check_neon_works does recovery from WAL => the compatibility snapshot's WAL is old => will log this warning
+ingest_lag_log_line = ".*ingesting record with timestamp lagging more than wait_lsn_timeout.*"
+
+
 @check_ondisk_data_compatibility_if_enabled
 @pytest.mark.xdist_group("compatibility")
 @pytest.mark.order(after="test_create_snapshot")
+@skip_on_postgres(
+    PgVersion.V17, "There are no snapshots yet"
+)  # TODO: revert this once we have snapshots
 def test_backward_compatibility(
     neon_env_builder: NeonEnvBuilder,
     test_output_dir: Path,
@@ -168,7 +180,8 @@ def test_backward_compatibility(
     try:
         neon_env_builder.num_safekeepers = 3
         env = neon_env_builder.from_repo_dir(compatibility_snapshot_dir / "repo")
-        neon_env_builder.start()
+        env.pageserver.allowed_errors.append(ingest_lag_log_line)
+        env.start()
 
         check_neon_works(
             env,
@@ -176,6 +189,9 @@ def test_backward_compatibility(
             sql_dump_path=compatibility_snapshot_dir / "dump.sql",
             repo_dir=env.repo_dir,
         )
+
+        env.pageserver.assert_log_contains(ingest_lag_log_line)
+
     except Exception:
         if breaking_changes_allowed:
             pytest.xfail(
@@ -190,6 +206,9 @@ def test_backward_compatibility(
 @check_ondisk_data_compatibility_if_enabled
 @pytest.mark.xdist_group("compatibility")
 @pytest.mark.order(after="test_create_snapshot")
+@skip_on_postgres(
+    PgVersion.V17, "There are no snapshots yet"
+)  # TODO: revert this once we have snapshots
 def test_forward_compatibility(
     neon_env_builder: NeonEnvBuilder,
     test_output_dir: Path,
@@ -233,6 +252,8 @@ def test_forward_compatibility(
         env = neon_env_builder.from_repo_dir(
             compatibility_snapshot_dir / "repo",
         )
+        # there may be an arbitrary number of unrelated tests run between create_snapshot and here
+        env.pageserver.allowed_errors.append(ingest_lag_log_line)
 
         # not using env.pageserver.version because it was initialized before
         prev_pageserver_version_str = env.get_binary_version("pageserver")
@@ -250,7 +271,7 @@ def test_forward_compatibility(
         # does not include logs from previous runs
         assert not env.pageserver.log_contains("git-env:" + prev_pageserver_version)
 
-        neon_env_builder.start()
+        env.start()
 
         # ensure the specified pageserver is running
         assert env.pageserver.log_contains("git-env:" + prev_pageserver_version)
@@ -296,7 +317,7 @@ def check_neon_works(env: NeonEnv, test_output_dir: Path, sql_dump_path: Path, r
     pg_version = env.pg_version
 
     # Stop endpoint while we recreate timeline
-    ep.stop()
+    flush_ep_to_pageserver(env, ep, tenant_id, timeline_id)
 
     try:
         pageserver_http.timeline_preserve_initdb_archive(tenant_id, timeline_id)
@@ -343,6 +364,11 @@ def check_neon_works(env: NeonEnv, test_output_dir: Path, sql_dump_path: Path, r
 
     assert not dump_from_wal_differs, "dump from WAL differs"
     assert not initial_dump_differs, "initial dump differs"
+
+    flush_ep_to_pageserver(env, ep, tenant_id, timeline_id)
+    pageserver_http.timeline_checkpoint(
+        tenant_id, timeline_id, compact=False, wait_until_uploaded=True
+    )
 
 
 def dump_differs(

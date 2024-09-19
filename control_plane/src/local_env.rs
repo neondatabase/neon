@@ -165,6 +165,9 @@ pub struct NeonStorageControllerConf {
     pub split_threshold: Option<u64>,
 
     pub max_secondary_lag_bytes: Option<u64>,
+
+    #[serde(with = "humantime_serde")]
+    pub heartbeat_interval: Duration,
 }
 
 impl NeonStorageControllerConf {
@@ -172,6 +175,9 @@ impl NeonStorageControllerConf {
     const DEFAULT_MAX_OFFLINE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
 
     const DEFAULT_MAX_WARMING_UP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+    // Very tight heartbeat interval to speed up tests
+    const DEFAULT_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 }
 
 impl Default for NeonStorageControllerConf {
@@ -183,6 +189,7 @@ impl Default for NeonStorageControllerConf {
             database_url: None,
             split_threshold: None,
             max_secondary_lag_bytes: None,
+            heartbeat_interval: Self::DEFAULT_HEARTBEAT_INTERVAL,
         }
     }
 }
@@ -335,7 +342,7 @@ impl LocalEnv {
 
         #[allow(clippy::manual_range_patterns)]
         match pg_version {
-            14 | 15 | 16 => Ok(path.join(format!("v{pg_version}"))),
+            14 | 15 | 16 | 17 => Ok(path.join(format!("v{pg_version}"))),
             _ => bail!("Unsupported postgres version: {}", pg_version),
         }
     }

@@ -33,7 +33,8 @@ use uuid::{NoContext, Timestamp};
 
 const PROXY_IO_BYTES_PER_CLIENT: &str = "proxy_io_bytes_per_client";
 
-const DEFAULT_HTTP_REPORTING_TIMEOUT: Duration = Duration::from_secs(60);
+const HTTP_REPORTING_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const HTTP_REPORTING_RETRY_DURATION: Duration = Duration::from_secs(60);
 
 /// Key that uniquely identifies the object, this metric describes.
 /// Currently, endpoint_id is enough, but this may change later,
@@ -43,12 +44,12 @@ const DEFAULT_HTTP_REPORTING_TIMEOUT: Duration = Duration::from_secs(60);
 /// so while the project-id is unique across regions the whole pipeline will work correctly
 /// because we enrich the event with project_id in the control-plane endpoint.
 #[derive(Eq, Hash, PartialEq, Serialize, Deserialize, Debug, Clone)]
-pub struct Ids {
-    pub endpoint_id: EndpointIdInt,
-    pub branch_id: BranchIdInt,
+pub(crate) struct Ids {
+    pub(crate) endpoint_id: EndpointIdInt,
+    pub(crate) branch_id: BranchIdInt,
 }
 
-pub trait MetricCounterRecorder {
+pub(crate) trait MetricCounterRecorder {
     /// Record that some bytes were sent from the proxy to the client
     fn record_egress(&self, bytes: u64);
     /// Record that some connections were opened
@@ -92,7 +93,7 @@ impl MetricCounterReporter for MetricBackupCounter {
 }
 
 #[derive(Debug)]
-pub struct MetricCounter {
+pub(crate) struct MetricCounter {
     transmitted: AtomicU64,
     opened_connections: AtomicUsize,
     backup: Arc<MetricBackupCounter>,
@@ -173,14 +174,14 @@ impl<C: MetricCounterReporter> Clearable for C {
 type FastHasher = std::hash::BuildHasherDefault<rustc_hash::FxHasher>;
 
 #[derive(Default)]
-pub struct Metrics {
+pub(crate) struct Metrics {
     endpoints: DashMap<Ids, Arc<MetricCounter>, FastHasher>,
     backup_endpoints: DashMap<Ids, Arc<MetricBackupCounter>, FastHasher>,
 }
 
 impl Metrics {
     /// Register a new byte metrics counter for this endpoint
-    pub fn register(&self, ids: Ids) -> Arc<MetricCounter> {
+    pub(crate) fn register(&self, ids: Ids) -> Arc<MetricCounter> {
         let backup = if let Some(entry) = self.backup_endpoints.get(&ids) {
             entry.clone()
         } else {
@@ -215,7 +216,7 @@ impl Metrics {
     }
 }
 
-pub static USAGE_METRICS: Lazy<Metrics> = Lazy::new(Metrics::default);
+pub(crate) static USAGE_METRICS: Lazy<Metrics> = Lazy::new(Metrics::default);
 
 pub async fn task_main(config: &MetricCollectionConfig) -> anyhow::Result<Infallible> {
     info!("metrics collector config: {config:?}");
@@ -223,7 +224,10 @@ pub async fn task_main(config: &MetricCollectionConfig) -> anyhow::Result<Infall
         info!("metrics collector has shut down");
     }
 
-    let http_client = http::new_client_with_timeout(DEFAULT_HTTP_REPORTING_TIMEOUT);
+    let http_client = http::new_client_with_timeout(
+        HTTP_REPORTING_REQUEST_TIMEOUT,
+        HTTP_REPORTING_RETRY_DURATION,
+    );
     let hostname = hostname::get()?.as_os_str().to_string_lossy().into_owned();
 
     let mut prev = Utc::now();
@@ -450,12 +454,9 @@ async fn upload_events_chunk(
     remote_path: &RemotePath,
     cancel: &CancellationToken,
 ) -> anyhow::Result<()> {
-    let storage = match storage {
-        Some(storage) => storage,
-        None => {
-            error!("no remote storage configured");
-            return Ok(());
-        }
+    let Some(storage) = storage else {
+        error!("no remote storage configured");
+        return Ok(());
     };
     let data = serde_json::to_vec(&chunk).context("serialize metrics")?;
     let mut encoder = GzipEncoder::new(Vec::new());
