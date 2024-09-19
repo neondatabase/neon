@@ -811,11 +811,6 @@ impl Reconciler {
                     tenant_conf: self.config.clone(),
                 },
             ));
-
-            // TODO: Consider notifying control plane about detaches. This would avoid situations
-            // where the compute tries to start-up with a stale set of pageservers.
-            self.compute_hook
-                .handle_detach(self.tenant_shard_id, self.shard.stripe_size);
         }
 
         for (node, conf) in changes {
@@ -823,6 +818,19 @@ impl Reconciler {
                 return Err(ReconcileError::Cancel);
             }
             self.location_config(&node, conf, None, false).await?;
+        }
+
+
+        // A None attached intent indicates that we are detaching from the primary location.
+        // Pass this information to the [`ComputeHook`] such that it can update its tenant-wide
+        // state.
+        if self.intent.attached.is_none() {
+            assert!(!self.detach.is_empty());
+
+            // TODO: Consider notifying control plane about detaches. This would avoid situations
+            // where the compute tries to start-up with a stale set of pageservers.
+            self.compute_hook
+                .handle_detach(self.tenant_shard_id, self.shard.stripe_size);
         }
 
         failpoint_support::sleep_millis_async!("sleep-on-reconcile-epilogue");
