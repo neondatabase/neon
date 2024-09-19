@@ -10,6 +10,7 @@ use std::sync::atomic::AtomicU32;
 use std::sync::atomic::Ordering;
 use std::sync::{Condvar, Mutex, RwLock};
 use std::thread;
+use std::time::Duration;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -1385,6 +1386,22 @@ LIMIT 100",
             remote_ext_metrics.total_ext_download_size += download_size;
         }
         Ok(remote_ext_metrics)
+    }
+
+    /// Waits until current thread receives a state changed notification and
+    /// the pageserver connection strings has changed.
+    ///
+    /// The operation will time out after a specified duration.
+    pub fn wait_timeout_while_pageserver_connstr_unchanged(&self, duration: Duration) {
+        let state = self.state.lock().unwrap();
+        let old_pageserver_connstr = state.pspec.as_ref().unwrap().pageserver_connstr.clone();
+        let _ = self
+            .state_changed
+            .wait_timeout_while(state, duration, |s| {
+                let pageserver_connstr = &s.pspec.as_ref().unwrap().pageserver_connstr;
+                pageserver_connstr == &old_pageserver_connstr
+            })
+            .unwrap();
     }
 }
 

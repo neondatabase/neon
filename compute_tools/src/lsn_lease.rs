@@ -60,7 +60,7 @@ fn lsn_lease_bg_task(
             "Succeeded, sleeping for {} seconds",
             sleep_duration.as_secs()
         );
-        thread::sleep(sleep_duration);
+        compute.wait_timeout_while_pageserver_connstr_unchanged(sleep_duration);
     }
 }
 
@@ -110,7 +110,9 @@ fn acquire_lsn_lease_with_retry(
             Err(e) => {
                 warn!("Failed to acquire lsn lease: {e} (attempt {attempts}");
 
-                thread::sleep(Duration::from_millis(retry_period_ms as u64));
+                compute.wait_timeout_while_pageserver_connstr_unchanged(Duration::from_millis(
+                    retry_period_ms as u64,
+                ));
                 retry_period_ms *= 1.5;
                 retry_period_ms = retry_period_ms.min(MAX_RETRY_PERIOD_MS);
             }
