@@ -398,7 +398,7 @@ pub struct LatencyTimer {
     cold_start_info: ColdStartInfo,
     outcome: ConnectOutcome,
 
-    done: bool,
+    skip_reporting: bool,
 }
 
 impl LatencyTimer {
@@ -411,7 +411,7 @@ impl LatencyTimer {
             cold_start_info: ColdStartInfo::Unknown,
             // assume failed unless otherwise specified
             outcome: ConnectOutcome::Failed,
-            done: false,
+            skip_reporting: false,
         }
     }
 
@@ -424,7 +424,7 @@ impl LatencyTimer {
             cold_start_info: ColdStartInfo::Unknown,
             // assume failed unless otherwise specified
             outcome: ConnectOutcome::Failed,
-            done: true,
+            skip_reporting: true,
         }
     }
 
@@ -459,7 +459,7 @@ pub enum ConnectOutcome {
 
 impl Drop for LatencyTimer {
     fn drop(&mut self) {
-        if self.done {
+        if self.skip_reporting {
             return;
         }
 
