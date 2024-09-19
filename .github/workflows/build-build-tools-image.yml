@@ -105,4 +105,4 @@ jobs:
       - name: Create multi-arch image
         run: |
           docker buildx imagetools create -t neondatabase/build-tools:${IMAGE_TAG} \
-                                             neondatabase/build-tools:${IMAGE_TAG}-${{ matrix.debian_version }}-${{ matrix.arch }}
+                                             neondatabase/build-tools:${IMAGE_TAG}-${{ matrix.arch }}-${{ matrix.debian_version }}
