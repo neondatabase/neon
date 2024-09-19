@@ -27,7 +27,7 @@ def test_readonly_node(neon_simple_env: NeonEnv):
     env.pageserver.allowed_errors.extend(
         [
             ".*basebackup .* failed: invalid basebackup lsn.*",
-            ".*page_service.*handle_make_lsn_lease.*.*tried to request a page version that was garbage collected",
+            ".*/lsn_lease.*invalid lsn lease request.*",
         ]
     )
 
@@ -108,7 +108,7 @@ def test_readonly_node(neon_simple_env: NeonEnv):
     assert cur.fetchone() == (1,)
 
     # Create node at pre-initdb lsn
-    with pytest.raises(Exception, match="invalid basebackup lsn"):
+    with pytest.raises(Exception, match="invalid lsn lease request"):
         # compute node startup with invalid LSN should fail
         env.endpoints.create_start(
             branch_name="main",

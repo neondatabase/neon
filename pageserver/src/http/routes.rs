@@ -1690,7 +1690,9 @@ async fn lsn_lease_handler(
             .await?;
     let result = timeline
         .init_lsn_lease(lsn, timeline.get_lsn_lease_length(), &ctx)
-        .map_err(|e| ApiError::InternalServerError(e.context("lsn lease http handler")))?;
+        .map_err(|e| {
+            ApiError::InternalServerError(e.context(format!("invalid lsn lease request at {lsn}")))
+        })?;
 
     json_response(StatusCode::OK, result)
 }

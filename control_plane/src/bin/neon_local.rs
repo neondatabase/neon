@@ -904,8 +904,7 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
                             pageserver
                                 .http_client
                                 .timeline_init_lsn_lease(shard.shard_id, endpoint.timeline_id, lsn)
-                                .await
-                                .with_context(|| format!("initialize lsn lease @ {lsn}"))?;
+                                .await?;
                         }
 
                         anyhow::Ok((
