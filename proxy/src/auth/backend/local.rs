@@ -9,8 +9,9 @@ use crate::{
         messages::{ColdStartInfo, EndpointJwksResponse, MetricsAuxInfo},
         NodeInfo,
     },
+    context::RequestMonitoring,
     intern::{BranchIdInt, BranchIdTag, EndpointIdTag, InternId, ProjectIdInt, ProjectIdTag},
-    RoleName,
+    EndpointId, RoleName,
 };
 
 use super::jwt::{AuthRule, FetchAuthRules, JwkCache};
@@ -57,7 +58,12 @@ pub struct JwksRoleSettings {
 }
 
 impl FetchAuthRules for StaticAuthRules {
-    async fn fetch_auth_rules(&self, role_name: RoleName) -> anyhow::Result<Vec<AuthRule>> {
+    async fn fetch_auth_rules(
+        &self,
+        _ctx: &RequestMonitoring,
+        _endpoint: EndpointId,
+        role_name: RoleName,
+    ) -> anyhow::Result<Vec<AuthRule>> {
         let mappings = JWKS_ROLE_MAP.load();
         let role_mappings = mappings
             .as_deref()
