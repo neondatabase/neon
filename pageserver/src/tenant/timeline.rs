@@ -3170,16 +3170,21 @@ impl Timeline {
                 return Err(GetVectoredError::Cancelled);
             }
 
+            let (keys_done_last_step, keys_with_image_coverage) =
+                reconstruct_state.consume_done_keys();
+
+            // Update state that is external to the loop.
+            completed_keyspace.merge(&keys_done_last_step);
+            if let Some(keys_with_image_coverage) = keys_with_image_coverage.clone() {
+                image_covered_keyspace.add_range(keys_with_image_coverage);
+            }
+
             for (cont_lsn, unmapped_keyspace) in unmapped_keyspaces.iter_mut() {
-                let (keys_done_last_step, keys_with_image_coverage) =
-                    reconstruct_state.consume_done_keys();
+                // Remove any completed keys from the currently inspected keyspace.
                 unmapped_keyspace.remove_overlapping_with(&keys_done_last_step);
-                completed_keyspace.merge(&keys_done_last_step);
-                if let Some(keys_with_image_coverage) = keys_with_image_coverage {
-                    unmapped_keyspace.remove_overlapping_with(&KeySpace::single(
-                        keys_with_image_coverage.clone(),
-                    ));
-                    image_covered_keyspace.add_range(keys_with_image_coverage);
+                if let Some(keys_with_image_coverage) = keys_with_image_coverage.clone() {
+                    unmapped_keyspace
+                        .remove_overlapping_with(&KeySpace::single(keys_with_image_coverage));
                 }
 
                 // Do not descent any further if the last layer we visited
