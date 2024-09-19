@@ -8,7 +8,7 @@ use crate::{
     metrics::{self, ReconcileCompleteLabelGroup, ReconcileOutcome},
     persistence::TenantShardPersistence,
     reconciler::{ReconcileUnits, ReconcilerConfig},
-    scheduler::{AffinityScore, MaySchedule, RefCountUpdate, ScheduleContext},
+    scheduler::{AffinityScore, MaySchedule, RefCountUpdate, ScheduleContext, ShardType},
     service::ReconcileResultRequest,
 };
 use pageserver_api::controller_api::{
@@ -537,7 +537,8 @@ impl TenantShard {
             Ok((true, promote_secondary))
         } else {
             // Pick a fresh node: either we had no secondaries or none were schedulable
-            let node_id = scheduler.schedule_shard(&self.intent.secondary, context)?;
+            let node_id =
+                scheduler.schedule_shard(ShardType::Attached, &self.intent.secondary, context)?;
             tracing::debug!("Selected {} as attached", node_id);
             self.intent.set_attached(scheduler, Some(node_id));
             Ok((true, node_id))
@@ -613,7 +614,11 @@ impl TenantShard {
 
                 let mut used_pageservers = vec![attached_node_id];
                 while self.intent.secondary.len() < secondary_count {
-                    let node_id = scheduler.schedule_shard(&used_pageservers, context)?;
+                    let node_id = scheduler.schedule_shard(
+                        ShardType::Secondary,
+                        &used_pageservers,
+                        context,
+                    )?;
                     self.intent.push_secondary(scheduler, node_id);
                     used_pageservers.push(node_id);
                     modified = true;
@@ -626,7 +631,7 @@ impl TenantShard {
                     modified = true;
                 } else if self.intent.secondary.is_empty() {
                     // Populate secondary by scheduling a fresh node
-                    let node_id = scheduler.schedule_shard(&[], context)?;
+                    let node_id = scheduler.schedule_shard(ShardType::Secondary, &[], context)?;
                     self.intent.push_secondary(scheduler, node_id);
                     modified = true;
                 }
@@ -803,9 +808,11 @@ impl TenantShard {
             // Let the scheduler suggest a node, where it would put us if we were scheduling afresh
             // This implicitly limits the choice to nodes that are available, and prefers nodes
             // with lower utilization.
-            let Ok(candidate_node) =
-                scheduler.schedule_shard(&self.intent.all_pageservers(), schedule_context)
-            else {
+            let Ok(candidate_node) = scheduler.schedule_shard(
+                ShardType::Secondary,
+                &self.intent.all_pageservers(),
+                schedule_context,
+            ) else {
                 // A scheduling error means we have no possible candidate replacements
                 continue;
             };

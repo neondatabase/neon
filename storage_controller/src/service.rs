@@ -25,7 +25,7 @@ use crate::{
         ShardGenerationState, TenantFilter,
     },
     reconciler::{ReconcileError, ReconcileUnits, ReconcilerConfig, ReconcilerConfigBuilder},
-    scheduler::{MaySchedule, ScheduleContext, ScheduleError, ScheduleMode},
+    scheduler::{MaySchedule, ScheduleContext, ScheduleError, ScheduleMode, ShardType},
     tenant_shard::{
         MigrateAttachment, ReconcileNeeded, ReconcilerStatus, ScheduleOptimization,
         ScheduleOptimizationAction,
@@ -2621,7 +2621,8 @@ impl Service {
             let scheduler = &mut locked.scheduler;
             // Right now we only perform the operation on a single node without parallelization
             // TODO fan out the operation to multiple nodes for better performance
-            let node_id = scheduler.schedule_shard(&[], &ScheduleContext::default())?;
+            let node_id =
+                scheduler.schedule_shard(ShardType::Attached, &[], &ScheduleContext::default())?;
             let node = locked
                 .nodes
                 .get(&node_id)
@@ -2807,7 +2808,8 @@ impl Service {
 
             // Pick an arbitrary node to use for remote deletions (does not have to be where the tenant
             // was attached, just has to be able to see the S3 content)
-            let node_id = scheduler.schedule_shard(&[], &ScheduleContext::default())?;
+            let node_id =
+                scheduler.schedule_shard(ShardType::Attached, &[], &ScheduleContext::default())?;
             let node = nodes
                 .get(&node_id)
                 .expect("Pageservers may not be deleted while lock is active");

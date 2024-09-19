@@ -141,6 +141,13 @@ impl Default for ScheduleMode {
     }
 }
 
+/// Different scheduling heuristics shall be applied depending
+/// on whether the shard is attached or secondary.
+pub(crate) enum ShardType {
+    Attached,
+    Secondary,
+}
+
 // For carrying state between multiple calls to [`TenantShard::schedule`], e.g. when calling
 // it for many shards in the same tenant.
 #[derive(Debug, Default)]
@@ -483,6 +490,7 @@ impl Scheduler {
     /// cause us to fail to schedule a shard.
     pub(crate) fn schedule_shard(
         &mut self,
+        _shard_type: ShardType,
         hard_exclude: &[NodeId],
         context: &ScheduleContext,
     ) -> Result<NodeId, ScheduleError> {
@@ -603,9 +611,9 @@ mod tests {
 
         let context = ScheduleContext::default();
 
-        let scheduled = scheduler.schedule_shard(&[], &context)?;
+        let scheduled = scheduler.schedule_shard(ShardType::Attached, &[], &context)?;
         t1_intent.set_attached(&mut scheduler, Some(scheduled));
-        let scheduled = scheduler.schedule_shard(&[], &context)?;
+        let scheduled = scheduler.schedule_shard(ShardType::Attached, &[], &context)?;
         t2_intent.set_attached(&mut scheduler, Some(scheduled));
 
         assert_eq!(scheduler.get_node_shard_count(NodeId(1)), 1);
@@ -614,7 +622,11 @@ mod tests {
         assert_eq!(scheduler.get_node_shard_count(NodeId(2)), 1);
         assert_eq!(scheduler.get_node_attached_shard_count(NodeId(2)), 1);
 
-        let scheduled = scheduler.schedule_shard(&t1_intent.all_pageservers(), &context)?;
+        let scheduled = scheduler.schedule_shard(
+            ShardType::Attached,
+            &t1_intent.all_pageservers(),
+            &context,
+        )?;
         t1_intent.push_secondary(&mut scheduler, scheduled);
 
         assert_eq!(scheduler.get_node_shard_count(NodeId(1)), 1);
@@ -668,7 +680,9 @@ mod tests {
             scheduler: &mut Scheduler,
             context: &ScheduleContext,
         ) {
-            let scheduled = scheduler.schedule_shard(&[], context).unwrap();
+            let scheduled = scheduler
+                .schedule_shard(ShardType::Attached, &[], context)
+                .unwrap();
             let mut intent = IntentState::new();
             intent.set_attached(scheduler, Some(scheduled));
             scheduled_intents.push(intent);
