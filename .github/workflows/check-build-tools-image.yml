@@ -40,7 +40,8 @@ jobs:
       - name: Check if such tag found in the registry
         id: check-image
         env:
-          IMAGE_TAG: ${{ steps.get-build-tools-tag.outputs.image-tag }}
+          # TODO: temp set -new suffix to create new build tool image
+          IMAGE_TAG: ${{ steps.get-build-tools-tag.outputs.image-tag }}-new
         run: |
           if docker manifest inspect neondatabase/build-tools:${IMAGE_TAG}; then
             found=true

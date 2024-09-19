@@ -9,7 +9,7 @@ ARG BUILD_TAG
 # Layer "build-deps"
 #
 #########################################################################################
-FROM debian:bullseye-slim AS build-deps
+FROM debian:bookworm-slim AS build-deps
 RUN apt update &&  \
     apt install -y git autoconf automake libtool build-essential bison flex libreadline-dev \
     zlib1g-dev libxml2-dev libcurl4-openssl-dev libossp-uuid-dev wget pkg-config libssl-dev \
@@ -93,13 +93,9 @@ RUN apt update && \
     protobuf-c-compiler xsltproc
 
 # SFCGAL > 1.3 requires CGAL > 5.2, Bullseye's libcgal-dev is 5.2
-RUN case "${PG_VERSION}" in "v17") \
-    mkdir -p /sfcgal && \
-    echo "Postgis doensn't yet support PG17 (needs 3.4.3, if not higher)" && exit 0;; \
-    esac && \
-    wget https://gitlab.com/Oslandia/SFCGAL/-/archive/v1.3.10/SFCGAL-v1.3.10.tar.gz -O SFCGAL.tar.gz && \
-    echo "4e39b3b2adada6254a7bdba6d297bb28e1a9835a9f879b74f37e2dab70203232 SFCGAL.tar.gz" | sha256sum --check && \
-    mkdir sfcgal-src && cd sfcgal-src && tar xzf ../SFCGAL.tar.gz --strip-components=1 -C . && \
+RUN wget https://gitlab.com/Oslandia/SFCGAL/-/archive/v1.4.1/SFCGAL-v1.4.1.tar.gz -O SFCGAL.tar.gz && \
+    echo "1800c8a26241588f11cddcf433049e9b9aea902e923414d2ecef33a3295626c3 SFCGAL.tar.gz" | sha256sum --check && \
+    mkdir sfcgal-src && cd sfcgal-src && tar xvzf ../SFCGAL.tar.gz --strip-components=1 -C . && \
     cmake -DCMAKE_BUILD_TYPE=Release . && make -j $(getconf _NPROCESSORS_ONLN) && \
     DESTDIR=/sfcgal make install -j $(getconf _NPROCESSORS_ONLN) && \
     make clean && cp -R /sfcgal/* /
@@ -161,30 +157,24 @@ FROM build-deps AS plv8-build
 ARG PG_VERSION
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
-RUN case "${PG_VERSION}" in "v17") \
-    echo "v17 extensions are not supported yet. Quit" && exit 0;; \
-    esac && \
-    apt update && \
-    apt install -y ninja-build python3-dev libncurses5 binutils clang
+ENV PLV8_BRANCH=r3.2
+ENV PLV8_VERSION=3.2.2
 
-RUN case "${PG_VERSION}" in "v17") \
-    echo "v17 extensions are not supported yet. Quit" && exit 0;; \
-    esac && \
-    wget https://github.com/plv8/plv8/archive/refs/tags/v3.1.10.tar.gz -O plv8.tar.gz && \
-    echo "7096c3290928561f0d4901b7a52794295dc47f6303102fae3f8e42dd575ad97d plv8.tar.gz" | sha256sum --check && \
-    mkdir plv8-src && cd plv8-src && tar xzf ../plv8.tar.gz --strip-components=1 -C . && \
-    # generate and copy upgrade scripts
-    mkdir -p upgrade && ./generate_upgrade.sh 3.1.10 && \
-    cp upgrade/* /usr/local/pgsql/share/extension/ && \
-    export PATH="/usr/local/pgsql/bin:$PATH" && \
-    make DOCKER=1 -j $(getconf _NPROCESSORS_ONLN) install && \
-    rm -rf /plv8-* && \
-    find /usr/local/pgsql/ -name "plv8-*.so" | xargs strip && \
+RUN apt update && \
+    apt install -y ninja-build python3-dev git libncurses5 binutils clang libstdc++-12-dev libtinfo5 pkg-config cmake
+
+
+RUN set -ex \
+    && export PATH="/usr/local/pgsql/bin:$PATH" \
+    && git clone --branch ${PLV8_BRANCH} --single-branch --depth 1 https://github.com/plv8/plv8 \
+    && cd plv8 \
+    && make DOCKER=1 -j $(getconf _NPROCESSORS_ONLN) install \
+    && find /usr/local/pgsql/ -name "plv8-*.so" | xargs strip \
+    && cd .. && rm -rf ./plv8 \
     # don't break computes with installed old version of plv8
-    cd /usr/local/pgsql/lib/ && \
-    ln -s plv8-3.1.10.so plv8-3.1.5.so && \
-    ln -s plv8-3.1.10.so plv8-3.1.8.so && \
-    echo 'trusted = true' >> /usr/local/pgsql/share/extension/plv8.control && \
+    && ln -s /usr/local/pgsql/lib/plv8-${PLV8_VERSION}.so /usr/local/pgsql/lib/plv8-3.1.5.so \
+    && ln -s /usr/local/pgsql/lib/plv8-${PLV8_VERSION}.so /usr/local/pgsql/lib/plv8-3.1.8.so \
+    && echo 'trusted = true' >> /usr/local/pgsql/share/extension/plv8.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/plcoffee.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/plls.control
 
@@ -1027,7 +1017,7 @@ RUN cd compute_tools && mold -run cargo build --locked --profile release-line-de
 #
 #########################################################################################
 
-FROM debian:bullseye-slim AS compute-tools-image
+FROM debian:bookworm-slim AS compute-tools-image
 
 COPY --from=compute-tools /home/nonroot/target/release-line-debug-size-lto/compute_ctl /usr/local/bin/compute_ctl
 
@@ -1144,7 +1134,7 @@ ENV PGDATABASE=postgres
 # Put it all together into the final image
 #
 #########################################################################################
-FROM debian:bullseye-slim
+FROM debian:bookworm-slim
 # Add user postgres
 RUN mkdir /var/db && useradd -m -d /var/db/postgres postgres && \
     echo "postgres:test_console_pass" | chpasswd && \
@@ -1165,7 +1155,7 @@ RUN mkdir /usr/local/download_extensions && chown -R postgres:postgres /usr/loca
 
 # Install:
 # libreadline8 for psql
-# libicu67, locales for collations (including ICU and plpgsql_check)
+# libicu72, locales for collations (including ICU and plpgsql_check)
 # liblz4-1 for lz4
 # libossp-uuid16 for extension ossp-uuid
 # libgeos, libgdal, libsfcgal1, libproj and libprotobuf-c1 for PostGIS
@@ -1176,7 +1166,7 @@ RUN mkdir /usr/local/download_extensions && chown -R postgres:postgres /usr/loca
 RUN apt update &&  \
     apt install --no-install-recommends -y \
         gdb \
-        libicu67 \
+        libicu72 \
         liblz4-1 \
         libreadline8 \
         libboost-iostreams1.74.0 \
@@ -1185,8 +1175,8 @@ RUN apt update &&  \
         libboost-system1.74.0 \
         libossp-uuid16 \
         libgeos-c1v5 \
-        libgdal28 \
-        libproj19 \
+        libgdal32 \
+        libproj25 \
         libprotobuf-c1 \
         libsfcgal1 \
         libxml2 \

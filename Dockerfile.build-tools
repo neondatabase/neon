@@ -1,4 +1,4 @@
-FROM debian:bullseye-slim
+FROM debian:bookworm-slim
 
 # Use ARG as a build-time environment variable here to allow.
 # It's not supposed to be set outside.
@@ -6,7 +6,7 @@ FROM debian:bullseye-slim
 # ```
 # . /etc/os-release && echo "${VERSION_CODENAME}"
 # ```
-ARG DEBIAN_VERSION_CODENAME=bullseye
+ARG DEBIAN_VERSION_CODENAME=bookworm
 
 # Add nonroot user
 RUN useradd -ms /bin/bash nonroot -b /home
@@ -16,45 +16,47 @@ SHELL ["/bin/bash", "-c"]
 RUN set -e \
     && apt update \
     && apt install -y \
-        autoconf \
-        automake \
-        bison \
-        build-essential \
-        ca-certificates \
-        cmake \
-        curl \
-        flex \
-        git \
-        gnupg \
-        gzip \
-        jq \
-        libcurl4-openssl-dev \
-        libbz2-dev \
-        libffi-dev \
-        liblzma-dev \
-        libncurses5-dev \
-        libncursesw5-dev \
-        libreadline-dev \
-        libseccomp-dev \
-        libsqlite3-dev \
-        libssl-dev \
-        libstdc++-10-dev \
-        libtool \
-        libxml2-dev \
-        libxmlsec1-dev \
-        libxxhash-dev \
-        lsof \
-        make \
-        netcat \
-        net-tools \
-        openssh-client \
-        parallel \
-        pkg-config \
-        unzip \
-        wget \
-        xz-utils \
-        zlib1g-dev \
-        zstd \
+    autoconf \
+    automake \
+    bison \
+    build-essential \
+    ca-certificates \
+    cmake \
+    curl \
+    flex \
+    git \
+    gnupg \
+    gzip \
+    jq \
+    libcurl4-openssl-dev \
+    libbz2-dev \
+    libffi-dev \
+    liblzma-dev \
+    libncurses5-dev \
+    libncursesw5-dev \
+    libpq-dev \
+    libreadline-dev \
+    libseccomp-dev \
+    libsqlite3-dev \
+    libssl-dev \
+    libstdc++-11-dev \
+    libtool \
+    libxml2-dev \
+    libxmlsec1-dev \
+    libxxhash-dev \
+    lsof \
+    make \
+    netcat-traditional \
+    net-tools \
+    openssh-client \
+    parallel \
+    pkg-config \
+    unzip \
+    wget \
+    xz-utils \
+    zlib1g-dev \
+    zstd \
+    software-properties-common \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 # protobuf-compiler (protoc)
@@ -74,15 +76,18 @@ RUN curl -sL "https://github.com/peak/s5cmd/releases/download/v${S5CMD_VERSION}/
 # LLVM
 ENV LLVM_VERSION=18
 RUN curl -fsSL 'https://apt.llvm.org/llvm-snapshot.gpg.key' | apt-key add - \
-    && echo "deb http://apt.llvm.org/${DEBIAN_VERSION_CODENAME}/ llvm-toolchain-${DEBIAN_VERSION_CODENAME}-${LLVM_VERSION} main" > /etc/apt/sources.list.d/llvm.stable.list \
+    && echo "deb http://apt.llvm.org/bookworm/ llvm-toolchain-bookworm-${LLVM_VERSION} main" > /etc/apt/sources.list.d/llvm.stable.list \
     && apt update \
     && apt install -y clang-${LLVM_VERSION} llvm-${LLVM_VERSION} \
     && bash -c 'for f in /usr/bin/clang*-${LLVM_VERSION} /usr/bin/llvm*-${LLVM_VERSION}; do ln -s "${f}" "${f%-${LLVM_VERSION}}"; done' \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
-# Install docker
-RUN curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg \
-    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/debian ${DEBIAN_VERSION_CODENAME} stable" > /etc/apt/sources.list.d/docker.list \
+# PostgreSQL 14
+RUN curl -fsSL 'https://www.postgresql.org/media/keys/ACCC4CF8.asc' | apt-key add - \
+    && echo 'deb http://apt.postgresql.org/pub/repos/apt bookworm-pgdg main' > /etc/apt/sources.list.d/pgdg.list \
+    && apt install -y apt-transport-https ca-certificates curl gnupg-agent lsb-release \
+    && curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor > /usr/share/keyrings/docker-ce-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-ce-archive-keyring.gpg] https://download.docker.com/linux/debian $(lsb_release -cs) stable" > /etc/apt/sources.list.d/docker-ce.list \
     && apt update \
     && apt install -y docker-ce docker-ce-cli \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*

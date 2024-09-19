@@ -183,7 +183,7 @@ runs:
       uses: actions/cache@v4
       with:
         path: ~/.cache/pypoetry/virtualenvs
-        key: v2-${{ runner.os }}-${{ runner.arch }}-python-deps-${{ hashFiles('poetry.lock') }}
+        key: v2-${{ runner.os }}-temp-python-deps-${{ hashFiles('poetry.lock') }}
 
     - name: Store Allure test stat in the DB (new)
       if: ${{ !cancelled() && inputs.store-test-results-into-db == 'true' }}
