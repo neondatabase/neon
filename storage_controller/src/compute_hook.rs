@@ -77,7 +77,7 @@ impl ComputeHookTenant {
 
     /// Clear compute hook state for the specified shard.
     /// Only valid for [`ComputeHookTenant::Sharded`] instances.
-    fn handle_detach(&mut self, tenant_shard_id: TenantShardId, stripe_size: ShardStripeSize) {
+    fn remove_shard(&mut self, tenant_shard_id: TenantShardId, stripe_size: ShardStripeSize) {
         match self {
             ComputeHookTenant::Sharded(sharded) => {
                 if sharded.stripe_size != stripe_size
@@ -668,7 +668,7 @@ impl ComputeHook {
                 if !sharded {
                     e.remove();
                 } else {
-                    e.get_mut().handle_detach(tenant_shard_id, stripe_size);
+                    e.get_mut().remove_shard(tenant_shard_id, stripe_size);
                 }
 
                 tracing::debug!("Compute hook handled shard detach");
