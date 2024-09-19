@@ -92,7 +92,7 @@ fn bench(c: &mut Criterion) {
     //
     let pg_version = 14;
     bench_group!(
-        &format!("ping"),
+        "ping",
         Arc::new(move |mgr: Arc<PostgresRedoManager>| async move {
             let _: () = mgr.ping(pg_version).await.unwrap();
         })
