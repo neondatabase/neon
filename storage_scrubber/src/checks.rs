@@ -478,9 +478,21 @@ pub(crate) async fn list_timeline_blobs(
 
     if let Some(index_part_object_key) = index_part_object.as_ref() {
         let index_part_bytes =
-            download_object_with_retries(remote_client, &index_part_object_key.key)
+            match download_object_with_retries(remote_client, &index_part_object_key.key)
                 .await
-                .context("index_part.json download")?;
+                .context("index_part.json download")
+            {
+                Ok(index_part_bytes) => index_part_bytes,
+                Err(e) => {
+                    // It is possible that the branch gets deleted in-between we list the objects and we download the index part file.
+                    errors.push(format!("failed to download : {e}"));
+                    return Ok(RemoteTimelineBlobData {
+                        blob_data: BlobDataParseResult::Incorrect { errors, s3_layers },
+                        unused_index_keys: index_part_keys,
+                        unknown_keys,
+                    });
+                }
+            };
 
         match serde_json::from_slice(&index_part_bytes) {
             Ok(index_part) => {
