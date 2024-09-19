@@ -44,10 +44,10 @@ pub fn check_valid_layermap(metadata: &[LayerName]) -> Option<String> {
         let intersects = lsn_split_point.range(lsn_range).collect_vec();
         if intersects.len() > 1 {
             let err = format!(
-                        "layer violates the layer map LSN split assumption: layer {} intersects with LSN [{}]",
-                        layer,
-                        intersects.into_iter().map(|lsn| lsn.to_string()).join(", ")
-                    );
+                "layer violates the layer map LSN split assumption: layer {} intersects with LSN [{}]",
+                layer,
+                intersects.into_iter().map(|lsn| lsn.to_string()).join(", ")
+            );
             return Some(err);
         }
     }
