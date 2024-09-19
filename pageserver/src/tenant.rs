@@ -4164,9 +4164,18 @@ pub(crate) mod harness {
             let records_neon = records.iter().all(|r| apply_neon::can_apply_in_neon(&r.1));
             if records_neon {
                 // For Neon wal records, we can decode without spawning postgres, so do so.
-                let base_img = base_img.expect("Neon WAL redo requires base image").1;
-                let mut page = BytesMut::new();
-                page.extend_from_slice(&base_img);
+                let mut page = match (base_img, records.first()) {
+                    (Some((_lsn, img)), _) => {
+                        let mut page = BytesMut::new();
+                        page.extend_from_slice(&img);
+                        page
+                    }
+                    (_, Some((_lsn, rec))) if rec.will_init() => BytesMut::new(),
+                    _ => {
+                        panic!("Neon WAL redo requires base image or will init record");
+                    }
+                };
+
                 for (record_lsn, record) in records {
                     apply_neon::apply_in_neon(&record, record_lsn, key, &mut page)?;
                 }
@@ -8492,6 +8501,7 @@ mod tests {
         let harness = TenantHarness::create("test_vectored_read_with_nested_image_layer").await?;
         let (tenant, ctx) = harness.load().await;
 
+        let will_init_keys = [2, 6];
         fn get_key(id: u32) -> Key {
             let mut key = Key::from_hex("110000000033333333444444445500000000").unwrap();
             key.field6 = id;
@@ -8541,18 +8551,25 @@ mod tests {
                 }
             };
 
-            let delta = format!("@{lsn}");
-            delta_layer_spec.push((
-                key,
-                lsn,
-                Value::WalRecord(NeonWalRecord::wal_append(&delta)),
-            ));
-            delta_layer_end_lsn = std::cmp::max(delta_layer_start_lsn, lsn);
+            let will_init = will_init_keys.contains(&i);
+            if will_init {
+                delta_layer_spec.push((key, lsn, Value::WalRecord(NeonWalRecord::wal_init())));
 
-            expected_key_values
-                .get_mut(&key)
-                .expect("An image exists for each key")
-                .push_str(delta.as_str());
+                expected_key_values.insert(key, "".to_string());
+            } else {
+                let delta = format!("@{lsn}");
+                delta_layer_spec.push((
+                    key,
+                    lsn,
+                    Value::WalRecord(NeonWalRecord::wal_append(&delta)),
+                ));
+
+                expected_key_values
+                    .get_mut(&key)
+                    .expect("An image exists for each key")
+                    .push_str(delta.as_str());
+            }
+            delta_layer_end_lsn = std::cmp::max(delta_layer_start_lsn, lsn);
         }
 
         delta_layer_end_lsn = Lsn(delta_layer_end_lsn.0 + 1);
