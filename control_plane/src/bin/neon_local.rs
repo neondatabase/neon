@@ -894,17 +894,28 @@ async fn handle_endpoint(ep_match: &ArgMatches, env: &local_env::LocalEnv) -> Re
                 // to pass these on to postgres.
                 let storage_controller = StorageController::from_env(env);
                 let locate_result = storage_controller.tenant_locate(endpoint.tenant_id).await?;
-                let pageservers = locate_result
-                    .shards
-                    .into_iter()
-                    .map(|shard| {
-                        (
+                let pageservers = futures::future::try_join_all(
+                    locate_result.shards.into_iter().map(|shard| async move {
+                        if let ComputeMode::Static(lsn) = endpoint.mode {
+                            // Initialize LSN leases for static computes.
+                            let conf = env.get_pageserver_conf(shard.node_id).unwrap();
+                            let pageserver = PageServerNode::from_env(env, conf);
+
+                            pageserver
+                                .http_client
+                                .timeline_init_lsn_lease(shard.shard_id, endpoint.timeline_id, lsn)
+                                .await
+                                .with_context(|| format!("initialize lsn lease @ {lsn}"))?;
+                        }
+
+                        anyhow::Ok((
                             Host::parse(&shard.listen_pg_addr)
                                 .expect("Storage controller reported bad hostname"),
                             shard.listen_pg_port,
-                        )
-                    })
-                    .collect::<Vec<_>>();
+                        ))
+                    }),
+                )
+                .await?;
                 let stripe_size = locate_result.shard_params.stripe_size;
 
                 (pageservers, stripe_size)

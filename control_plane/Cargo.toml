@@ -9,6 +9,7 @@ anyhow.workspace = true
 camino.workspace = true
 clap.workspace = true
 comfy-table.workspace = true
+futures = { workspace = true }
 git-version.workspace = true
 humantime.workspace = true
 nix.workspace = true

@@ -1327,6 +1327,7 @@ dependencies = [
  "clap",
  "comfy-table",
  "compute_api",
+ "futures",
  "git-version",
  "humantime",
  "humantime-serde",
