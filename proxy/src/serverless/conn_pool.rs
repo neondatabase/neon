@@ -776,6 +776,8 @@ mod tests {
             },
             cancel_set: CancelSet::new(0),
             client_conn_threshold: u64::MAX,
+            max_request_size_bytes: u64::MAX,
+            max_response_size_bytes: usize::MAX,
         }));
         let pool = GlobalConnPool::new(config);
         let conn_info = ConnInfo {

@@ -13,7 +13,6 @@ use pageserver_api::{
 use remote_storage::{RemotePath, RemoteStorageConfig};
 use std::env;
 use storage_broker::Uri;
-use utils::crashsafe::path_with_suffix_extension;
 use utils::logging::SecretString;
 
 use once_cell::sync::OnceCell;
@@ -33,7 +32,7 @@ use crate::tenant::storage_layer::inmemory_layer::IndexEntry;
 use crate::tenant::{TENANTS_SEGMENT_NAME, TIMELINES_SEGMENT_NAME};
 use crate::virtual_file;
 use crate::virtual_file::io_engine;
-use crate::{TENANT_HEATMAP_BASENAME, TENANT_LOCATION_CONFIG_NAME, TIMELINE_DELETE_MARK_SUFFIX};
+use crate::{TENANT_HEATMAP_BASENAME, TENANT_LOCATION_CONFIG_NAME};
 
 /// Global state of pageserver.
 ///
@@ -255,17 +254,6 @@ impl PageServerConf {
     ) -> Utf8PathBuf {
         self.timelines_path(tenant_shard_id)
             .join(timeline_id.to_string())
-    }
-
-    pub(crate) fn timeline_delete_mark_file_path(
-        &self,
-        tenant_shard_id: TenantShardId,
-        timeline_id: TimelineId,
-    ) -> Utf8PathBuf {
-        path_with_suffix_extension(
-            self.timeline_path(&tenant_shard_id, &timeline_id),
-            TIMELINE_DELETE_MARK_SUFFIX,
-        )
     }
 
     /// Turns storage remote path of a file into its local path.
@@ -491,11 +479,6 @@ pub struct ConfigurableSemaphore {
 }
 
 impl ConfigurableSemaphore {
-    pub const DEFAULT_INITIAL: NonZeroUsize = match NonZeroUsize::new(1) {
-        Some(x) => x,
-        None => panic!("const unwrap is not yet stable"),
-    };
-
     /// Initializse using a non-zero amount of permits.
     ///
     /// Require a non-zero initial permits, because using permits == 0 is a crude way to disable a
@@ -513,12 +496,6 @@ impl ConfigurableSemaphore {
     /// Returns the configured amount of permits.
     pub fn initial_permits(&self) -> NonZeroUsize {
         self.initial_permits
-    }
-}
-
-impl Default for ConfigurableSemaphore {
-    fn default() -> Self {
-        Self::new(Self::DEFAULT_INITIAL)
     }
 }
 

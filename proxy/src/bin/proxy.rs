@@ -62,12 +62,13 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 #[derive(Clone, Debug, ValueEnum)]
 enum AuthBackendType {
     Console,
-    #[cfg(feature = "testing")]
-    Postgres,
     // clap only shows the name, not the alias, in usage text.
     // TODO: swap name/alias and deprecate "link"
     #[value(name("link"), alias("web"))]
     Web,
+
+    #[cfg(feature = "testing")]
+    Postgres,
 }
 
 /// Neon proxy/router
@@ -268,6 +269,12 @@ struct SqlOverHttpArgs {
 
     #[clap(long, default_value_t = 64)]
     sql_over_http_cancel_set_shards: usize,
+
+    #[clap(long, default_value_t = 10 * 1024 * 1024)] // 10 MiB
+    sql_over_http_max_request_size_bytes: u64,
+
+    #[clap(long, default_value_t = 10 * 1024 * 1024)] // 10 MiB
+    sql_over_http_max_response_size_bytes: usize,
 }
 
 #[tokio::main]
@@ -633,16 +640,18 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
             let api = console::provider::ConsoleBackend::Console(api);
             auth::Backend::Console(MaybeOwned::Owned(api), ())
         }
-        #[cfg(feature = "testing")]
-        AuthBackendType::Postgres => {
-            let url = args.auth_endpoint.parse()?;
-            let api = console::provider::mock::Api::new(url);
-            let api = console::provider::ConsoleBackend::Postgres(api);
-            auth::Backend::Console(MaybeOwned::Owned(api), ())
-        }
+
         AuthBackendType::Web => {
             let url = args.uri.parse()?;
             auth::Backend::Web(MaybeOwned::Owned(url), ())
+        }
+
+        #[cfg(feature = "testing")]
+        AuthBackendType::Postgres => {
+            let url = args.auth_endpoint.parse()?;
+            let api = console::provider::mock::Api::new(url, !args.is_private_access_proxy);
+            let api = console::provider::ConsoleBackend::Postgres(api);
+            auth::Backend::Console(MaybeOwned::Owned(api), ())
         }
     };
 
@@ -679,6 +688,8 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         },
         cancel_set: CancelSet::new(args.sql_over_http.sql_over_http_cancel_set_shards),
         client_conn_threshold: args.sql_over_http.sql_over_http_client_conn_threshold,
+        max_request_size_bytes: args.sql_over_http.sql_over_http_max_request_size_bytes,
+        max_response_size_bytes: args.sql_over_http.sql_over_http_max_response_size_bytes,
     };
     let authentication_config = AuthenticationConfig {
         thread_pool,

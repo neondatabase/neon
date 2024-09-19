@@ -39,7 +39,7 @@ def single_timeline(
     log.info("detach template tenant form pageserver")
     env.pageserver.tenant_detach(template_tenant)
 
-    log.info(f"duplicating template tenant {ncopies} times in S3")
+    log.info(f"duplicating template tenant {ncopies} times in remote storage")
     tenants = fixtures.pageserver.remote_storage.duplicate_tenant(env, template_tenant, ncopies)
 
     # In theory we could just attach all the tenants, force on-demand downloads via mgmt API, and be done.

@@ -107,7 +107,7 @@ def test_branch_creation_many(neon_compare: NeonCompare, n_branches: int, shape:
     env.neon_cli.create_branch("b0")
 
     endpoint = env.endpoints.create_start("b0")
-    neon_compare.pg_bin.run_capture(["pgbench", "-i", "-s10", endpoint.connstr()])
+    neon_compare.pg_bin.run_capture(["pgbench", "-i", "-I", "dtGvp", "-s10", endpoint.connstr()])
 
     branch_creation_durations = []
 

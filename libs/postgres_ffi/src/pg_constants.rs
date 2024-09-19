@@ -9,8 +9,8 @@
 //! comments on them.
 //!
 
+use crate::PageHeaderData;
 use crate::BLCKSZ;
-use crate::{PageHeaderData, XLogRecord};
 
 //
 // From pg_tablespace_d.h
@@ -194,8 +194,6 @@ pub const XLR_RMGR_INFO_MASK: u8 = 0xF0;
 pub const XLOG_TBLSPC_CREATE: u8 = 0x00;
 pub const XLOG_TBLSPC_DROP: u8 = 0x10;
 
-pub const SIZEOF_XLOGRECORD: u32 = size_of::<XLogRecord>() as u32;
-
 //
 // from xlogrecord.h
 //
@@ -219,8 +217,6 @@ pub const BKPIMAGE_HAS_HOLE: u8 = 0x01; /* page image has "hole" */
 /* From transam.h */
 pub const FIRST_NORMAL_TRANSACTION_ID: u32 = 3;
 pub const INVALID_TRANSACTION_ID: u32 = 0;
-pub const FIRST_BOOTSTRAP_OBJECT_ID: u32 = 12000;
-pub const FIRST_NORMAL_OBJECT_ID: u32 = 16384;
 
 /* pg_control.h */
 pub const XLOG_CHECKPOINT_SHUTDOWN: u8 = 0x00;

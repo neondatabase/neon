@@ -54,8 +54,8 @@ jobs:
       build-tag: ${{steps.build-tag.outputs.tag}}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      # Need `fetch-depth: 0` to count the number of commits in the branch
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -357,6 +357,7 @@ jobs:
             })
 
   coverage-report:
+    if: ${{ !startsWith(github.ref_name, 'release') }}
     needs: [ check-permissions, build-build-tools-image, build-and-test-locally ]
     runs-on: [ self-hosted, small ]
     container:
@@ -373,8 +374,8 @@ jobs:
         coverage-html: ${{ steps.upload-coverage-report-new.outputs.report-url }}
         coverage-json: ${{ steps.upload-coverage-report-new.outputs.summary-json }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      # Need `fetch-depth: 0` for differential coverage (to get diff between two commits)
+      - uses: actions/checkout@v4
         with:
           submodules: true
           fetch-depth: 0
@@ -475,11 +476,9 @@ jobs:
     runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           submodules: true
-          fetch-depth: 0
 
       - uses: ./.github/actions/set-docker-config-dir
       - uses: docker/setup-buildx-action@v3
@@ -554,11 +553,9 @@ jobs:
     runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           submodules: true
-          fetch-depth: 0
 
       - uses: ./.github/actions/set-docker-config-dir
       - uses: docker/setup-buildx-action@v3
@@ -705,10 +702,7 @@ jobs:
       VM_BUILDER_VERSION: v0.29.3
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      - uses: actions/checkout@v4
 
       - name: Downloading vm-builder
         run: |
@@ -748,10 +742,7 @@ jobs:
     runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'small-arm64' || 'small')) }}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      - uses: actions/checkout@v4
 
       - uses: ./.github/actions/set-docker-config-dir
       - uses: docker/login-action@v3
@@ -957,6 +948,7 @@ jobs:
 
   deploy:
     needs: [ check-permissions, promote-images, tag, build-and-test-locally, trigger-custom-extensions-build-and-wait, push-to-acr-dev, push-to-acr-prod ]
+    # `!failure() && !cancelled()` is required because the workflow depends on the job that can be skipped: `push-to-acr-dev` and `push-to-acr-prod`
     if: (github.ref_name == 'main' || github.ref_name == 'release' || github.ref_name == 'release-proxy') && !failure() && !cancelled()
 
     runs-on: [ self-hosted, small ]
@@ -976,10 +968,7 @@ jobs:
             git config --global --add safe.directory "${GITHUB_WORKSPACE}/vendor/postgres-v$r"
           done
 
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      - uses: actions/checkout@v4
 
       - name: Trigger deploy workflow
         env:
@@ -1058,7 +1047,8 @@ jobs:
   # The job runs on `release` branch and copies compatibility data and Neon artifact from the last *release PR* to the latest directory
   promote-compatibility-data:
     needs: [ deploy ]
-    if: github.ref_name == 'release'
+    # `!failure() && !cancelled()` is required because the workflow transitively depends on the job that can be skipped: `push-to-acr-dev` and `push-to-acr-prod`
+    if: github.ref_name == 'release' && !failure() && !cancelled()
 
     runs-on: ubuntu-22.04
     steps:

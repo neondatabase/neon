@@ -199,7 +199,7 @@ def test_hot_standby_gc(neon_env_builder: NeonEnvBuilder, pause_apply: bool):
 def run_pgbench(connstr: str, pg_bin: PgBin):
     log.info(f"Start a pgbench workload on pg {connstr}")
     # s10 is about 150MB of data. In debug mode init takes about 15s on SSD.
-    pg_bin.run_capture(["pgbench", "-i", "-s10", connstr])
+    pg_bin.run_capture(["pgbench", "-i", "-I", "dtGvp", "-s10", connstr])
     log.info("pgbench init done")
     pg_bin.run_capture(["pgbench", "-T60", connstr])
 

@@ -135,7 +135,7 @@ def test_generations_upgrade(neon_env_builder: NeonEnvBuilder):
     )
 
     env = neon_env_builder.init_configs()
-    env.broker.try_start()
+    env.broker.start()
     for sk in env.safekeepers:
         sk.start()
     env.storage_controller.start()

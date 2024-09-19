@@ -14,7 +14,7 @@ def test_migrations(neon_simple_env: NeonEnv):
     endpoint.respec(skip_pg_catalog_updates=False)
     endpoint.start()
 
-    num_migrations = 10
+    num_migrations = 11
     endpoint.wait_for_migrations(num_migrations=num_migrations)
 
     with endpoint.cursor() as cur:
