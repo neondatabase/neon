@@ -8,6 +8,7 @@ import requests
 from fixtures.common_types import Lsn, TenantId, TenantTimelineId, TimelineId
 from fixtures.log_helper import log
 from fixtures.metrics import Metrics, MetricsGetter, parse_metrics
+from fixtures.utils import wait_until
 
 
 # Walreceiver as returned by sk's timeline status endpoint.
@@ -160,6 +161,16 @@ class SafekeeperHttpClient(requests.Session, MetricsGetter):
             remote_consistent_lsn=Lsn(resj["remote_consistent_lsn"]),
             walreceivers=walreceivers,
         )
+
+    # Get timeline_start_lsn, waiting until it's nonzero. It is a way to ensure
+    # that the timeline is fully initialized at the safekeeper.
+    def get_non_zero_timeline_start_lsn(self, tenant_id: TenantId, timeline_id: TimelineId) -> Lsn:
+        def timeline_start_lsn_non_zero() -> Lsn:
+            s = self.timeline_status(tenant_id, timeline_id).timeline_start_lsn
+            assert s > Lsn(0)
+            return s
+
+        return wait_until(30, 1, timeline_start_lsn_non_zero)
 
     def get_commit_lsn(self, tenant_id: TenantId, timeline_id: TimelineId) -> Lsn:
         return self.timeline_status(tenant_id, timeline_id).commit_lsn
