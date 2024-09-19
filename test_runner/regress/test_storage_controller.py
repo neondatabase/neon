@@ -485,7 +485,7 @@ def test_storage_controller_compute_hook(
     httpserver.expect_request("/notify", method="PUT").respond_with_handler(handler)
 
     # Start running
-    env = neon_env_builder.init_start()
+    env = neon_env_builder.init_start(initial_tenant_conf={"lsn_lease_length": "0s"})
 
     # Initial notification from tenant creation
     assert len(notifications) == 1

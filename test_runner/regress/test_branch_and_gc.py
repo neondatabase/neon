@@ -142,6 +142,7 @@ def test_branch_creation_before_gc(neon_simple_env: NeonEnv):
             "image_creation_threshold": "1",
             # set PITR interval to be small, so we can do GC
             "pitr_interval": "0 s",
+            "lsn_lease_length": "0s",
         }
     )
 

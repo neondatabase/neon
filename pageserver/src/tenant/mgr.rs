@@ -949,6 +949,12 @@ impl TenantManager {
                 (LocationMode::Attached(attach_conf), Some(TenantSlot::Attached(tenant))) => {
                     match attach_conf.generation.cmp(&tenant.generation) {
                         Ordering::Equal => {
+                            if attach_conf.attach_mode == AttachmentMode::Single {
+                                tenant
+                                    .gc_block
+                                    .set_lsn_lease_deadline(tenant.get_lsn_lease_length());
+                            }
+
                             // A transition from Attached to Attached in the same generation, we may
                             // take our fast path and just provide the updated configuration
                             // to the tenant.

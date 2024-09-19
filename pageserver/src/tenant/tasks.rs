@@ -346,6 +346,7 @@ async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
             RequestContext::todo_child(TaskKind::GarbageCollector, DownloadBehavior::Download);
 
         let mut first = true;
+        tenant.gc_block.set_lsn_lease_deadline(tenant.get_lsn_lease_length());
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => {
@@ -363,7 +364,6 @@ async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
                 first = false;
 
                 let delays = async {
-                    delay_by_lease_length(tenant.get_lsn_lease_length(), &cancel).await?;
                     random_init_delay(period, &cancel).await?;
                     Ok::<_, Cancelled>(())
                 };
@@ -538,23 +538,7 @@ pub(crate) async fn random_init_delay(
         let mut rng = rand::thread_rng();
         rng.gen_range(Duration::ZERO..=period)
     };
-
     match tokio::time::timeout(d, cancel.cancelled()).await {
-        Ok(_) => Err(Cancelled),
-        Err(_) => Ok(()),
-    }
-}
-
-/// Delays GC by defaul lease length at restart.
-///
-/// We do this as the leases mapping are not persisted to disk. By delaying GC by default
-/// length, we gurantees that all the leases we granted before the restart will expire
-/// when we run GC for the first time after the restart.
-pub(crate) async fn delay_by_lease_length(
-    length: Duration,
-    cancel: &CancellationToken,
-) -> Result<(), Cancelled> {
-    match tokio::time::timeout(length, cancel.cancelled()).await {
         Ok(_) => Err(Cancelled),
         Err(_) => Ok(()),
     }

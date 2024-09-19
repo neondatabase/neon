@@ -222,7 +222,7 @@ def pgbench_accounts_initialized(ep):
 # Without hs feedback enabled we'd see 'User query might have needed to see row
 # versions that must be removed.' errors.
 def test_hot_standby_feedback(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
-    env = neon_env_builder.init_start()
+    env = neon_env_builder.init_start(initial_tenant_conf={"lsn_lease_length": "0s"})
     agressive_vacuum_conf = [
         "log_autovacuum_min_duration = 0",
         "autovacuum_naptime = 10s",
