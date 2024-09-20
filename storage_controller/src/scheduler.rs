@@ -32,6 +32,8 @@ pub(crate) struct SchedulerNode {
     shard_count: usize,
     /// How many shards are currently attached on this node, via their [`crate::tenant_shard::IntentState`].
     attached_shard_count: usize,
+    /// Availability zone id in which the node resides
+    az: String,
 
     /// Whether this node is currently elegible to have new shards scheduled (this is derived
     /// from a node's availability state and scheduling policy).
@@ -179,6 +181,7 @@ impl PartialEq for SchedulerNode {
         may_schedule_matches
             && self.shard_count == other.shard_count
             && self.attached_shard_count == other.attached_shard_count
+            && self.az == other.az
     }
 }
 
@@ -293,6 +296,7 @@ impl Scheduler {
                     shard_count: 0,
                     attached_shard_count: 0,
                     may_schedule: node.may_schedule(),
+                    az: node.get_availability_zone_id().to_string(),
                 },
             );
         }
@@ -319,6 +323,7 @@ impl Scheduler {
                     shard_count: 0,
                     attached_shard_count: 0,
                     may_schedule: node.may_schedule(),
+                    az: node.get_availability_zone_id().to_string(),
                 },
             );
         }
@@ -497,6 +502,7 @@ impl Scheduler {
                     shard_count: 0,
                     attached_shard_count: 0,
                     may_schedule: node.may_schedule(),
+                    az: node.get_availability_zone_id().to_string(),
                 });
             }
         }
