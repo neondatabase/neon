@@ -33,6 +33,7 @@ use remote_storage::GenericRemoteStorage;
 use remote_storage::TimeoutOrCancel;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::future::Future;
 use std::sync::Weak;
 use std::time::SystemTime;
 use storage_broker::BrokerClientChannel;
@@ -1308,8 +1309,7 @@ impl Tenant {
         for timeline_id in timeline_ids {
             let cancel_clone = cancel.clone();
             part_downloads.spawn(
-                self.clone()
-                    .load_timeline_metadata(timeline_id, remote_storage.clone(), cancel_clone)
+                self.load_timeline_metadata(timeline_id, remote_storage.clone(), cancel_clone)
                     .instrument(info_span!("download_index_part", %timeline_id)),
             );
         }
@@ -1338,12 +1338,12 @@ impl Tenant {
         Ok(timeline_preloads)
     }
 
-    async fn load_timeline_metadata(
-        self: Arc<Tenant>,
+    fn load_timeline_metadata(
+        self: &Arc<Tenant>,
         timeline_id: TimelineId,
         remote_storage: GenericRemoteStorage,
         cancel: CancellationToken,
-    ) -> TimelinePreload {
+    ) -> impl Future<Output = TimelinePreload> {
         let client = RemoteTimelineClient::new(
             remote_storage.clone(),
             self.deletion_queue_client.clone(),
@@ -1365,7 +1365,6 @@ impl Tenant {
                 index_part,
             }
         }
-        .await
     }
 
     pub(crate) async fn apply_timeline_archival_config(
