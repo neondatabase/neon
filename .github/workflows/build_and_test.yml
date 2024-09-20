@@ -159,6 +159,10 @@ jobs:
       # This will catch compiler & clippy warnings in all feature combinations.
       # TODO: use cargo hack for build and test as well, but, that's quite expensive.
       # NB: keep clippy args in sync with ./run_clippy.sh
+      #
+      # The only difference between "clippy --debug" and "clippy --release" is that in --release mode,
+      # #[cfg(debug_assertions)] blocks are not built. It's not worth building everything for second
+      # time just for that, so skip "clippy --release".
       - run: |
           CLIPPY_COMMON_ARGS="$( source .neon_clippy_args; echo "$CLIPPY_COMMON_ARGS")"
           if [ "$CLIPPY_COMMON_ARGS" = "" ]; then
@@ -168,8 +172,6 @@ jobs:
           echo "CLIPPY_COMMON_ARGS=${CLIPPY_COMMON_ARGS}" >> $GITHUB_ENV
       - name: Run cargo clippy (debug)
         run: cargo hack --feature-powerset clippy $CLIPPY_COMMON_ARGS
-      - name: Run cargo clippy (release)
-        run: cargo hack --feature-powerset clippy --release $CLIPPY_COMMON_ARGS
 
       - name: Check documentation generation
         run: cargo doc --workspace --no-deps --document-private-items
