@@ -132,7 +132,7 @@ PAGESERVER_GLOBAL_METRICS: Tuple[str, ...] = (
     *histogram("pageserver_wait_lsn_seconds"),
     *histogram("pageserver_remote_operation_seconds"),
     *histogram("pageserver_io_operations_seconds"),
-    "pageserver_smgr_query_seconds_global_count_total",
+    "pageserver_smgr_query_started_global_count_total",
     "pageserver_tenant_states_count",
     "pageserver_circuit_breaker_broken_total",
     "pageserver_circuit_breaker_unbroken_total",
