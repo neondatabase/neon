@@ -13,7 +13,6 @@ use pageserver_api::{
 use remote_storage::{RemotePath, RemoteStorageConfig};
 use std::env;
 use storage_broker::Uri;
-use utils::crashsafe::path_with_suffix_extension;
 use utils::logging::SecretString;
 
 use once_cell::sync::OnceCell;
@@ -33,7 +32,7 @@ use crate::tenant::storage_layer::inmemory_layer::IndexEntry;
 use crate::tenant::{TENANTS_SEGMENT_NAME, TIMELINES_SEGMENT_NAME};
 use crate::virtual_file;
 use crate::virtual_file::io_engine;
-use crate::{TENANT_HEATMAP_BASENAME, TENANT_LOCATION_CONFIG_NAME, TIMELINE_DELETE_MARK_SUFFIX};
+use crate::{TENANT_HEATMAP_BASENAME, TENANT_LOCATION_CONFIG_NAME};
 
 /// Global state of pageserver.
 ///
@@ -180,6 +179,8 @@ pub struct PageServerConf {
     pub io_buffer_alignment: usize,
 }
 
+/// Token for authentication to safekeepers
+///
 /// We do not want to store this in a PageServerConf because the latter may be logged
 /// and/or serialized at a whim, while the token is secret. Currently this token is the
 /// same for accessing all tenants/timelines, but may become per-tenant/per-timeline in
@@ -255,17 +256,6 @@ impl PageServerConf {
             .join(timeline_id.to_string())
     }
 
-    pub(crate) fn timeline_delete_mark_file_path(
-        &self,
-        tenant_shard_id: TenantShardId,
-        timeline_id: TimelineId,
-    ) -> Utf8PathBuf {
-        path_with_suffix_extension(
-            self.timeline_path(&tenant_shard_id, &timeline_id),
-            TIMELINE_DELETE_MARK_SUFFIX,
-        )
-    }
-
     /// Turns storage remote path of a file into its local path.
     pub fn local_path(&self, remote_path: &RemotePath) -> Utf8PathBuf {
         remote_path.with_base(&self.workdir)
@@ -279,7 +269,7 @@ impl PageServerConf {
 
         #[allow(clippy::manual_range_patterns)]
         match pg_version {
-            14 | 15 | 16 => Ok(path.join(format!("v{pg_version}"))),
+            14 | 15 | 16 | 17 => Ok(path.join(format!("v{pg_version}"))),
             _ => bail!("Unsupported postgres version: {}", pg_version),
         }
     }
@@ -553,6 +543,16 @@ mod tests {
         let workdir = Utf8PathBuf::from("/nonexistent");
         PageServerConf::parse_and_validate(NodeId(0), config_toml, &workdir)
             .expect("parse_and_validate");
+    }
+
+    #[test]
+    fn test_compactl0_phase1_access_mode_is_ignored_silently() {
+        let input = indoc::indoc! {r#"
+            [compact_level0_phase1_value_access]
+            mode = "streaming-kmerge"
+            validate = "key-lsn-value"
+        "#};
+        toml_edit::de::from_str::<pageserver_api::config::ConfigToml>(input).unwrap();
     }
 
     /// If there's a typo in the pageserver config, we'd rather catch that typo

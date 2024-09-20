@@ -278,7 +278,7 @@ impl WalResidentTimeline {
 }
 
 /// pull_timeline request body.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct Request {
     pub tenant_id: TenantId,
     pub timeline_id: TimelineId,
@@ -293,7 +293,7 @@ pub struct Response {
 }
 
 /// Response for debug dump request.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct DebugDumpResponse {
     pub start_time: DateTime<Utc>,
     pub finish_time: DateTime<Utc>,
@@ -484,6 +484,7 @@ pub async fn validate_temp_timeline(
 }
 
 /// Move timeline from a temp directory to the main storage, and load it to the global map.
+///
 /// This operation is done under a lock to prevent bugs if several concurrent requests are
 /// trying to load the same timeline. Note that it doesn't guard against creating the
 /// timeline with the same ttid, but no one should be doing this anyway.

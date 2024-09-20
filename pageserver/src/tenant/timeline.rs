@@ -4013,7 +4013,8 @@ impl Timeline {
         if wrote_keys {
             // Normal path: we have written some data into the new image layer for this
             // partition, so flush it to disk.
-            let image_layer = image_layer_writer.finish(self, ctx).await?;
+            let (desc, path) = image_layer_writer.finish(ctx).await?;
+            let image_layer = Layer::finish_creating(self.conf, self, desc, &path)?;
             Ok(ImageLayerCreationOutcome {
                 image: Some(image_layer),
                 next_start_key: img_range.end,
@@ -4101,7 +4102,8 @@ impl Timeline {
         if wrote_any_image {
             // Normal path: we have written some data into the new image layer for this
             // partition, so flush it to disk.
-            let image_layer = image_layer_writer.finish(self, ctx).await?;
+            let (desc, path) = image_layer_writer.finish(ctx).await?;
+            let image_layer = Layer::finish_creating(self.conf, self, desc, &path)?;
             Ok(ImageLayerCreationOutcome {
                 image: Some(image_layer),
                 next_start_key: img_range.end,
@@ -5403,7 +5405,8 @@ impl Timeline {
         for (key, img) in images {
             image_layer_writer.put_image(key, img, ctx).await?;
         }
-        let image_layer = image_layer_writer.finish(self, ctx).await?;
+        let (desc, path) = image_layer_writer.finish(ctx).await?;
+        let image_layer = Layer::finish_creating(self.conf, self, desc, &path)?;
 
         {
             let mut guard = self.layers.write().await;

@@ -1,4 +1,5 @@
 //! The timeline manager task is responsible for managing the timeline's background tasks.
+//!
 //! It is spawned alongside each timeline and exits when the timeline is deleted.
 //! It watches for changes in the timeline state and decides when to spawn or kill background tasks.
 //! It also can manage some reactive state, like should the timeline be active for broker pushes or not.

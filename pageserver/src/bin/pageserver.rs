@@ -37,6 +37,7 @@ use pageserver::{
     virtual_file,
 };
 use postgres_backend::AuthType;
+use utils::crashsafe::syncfs;
 use utils::failpoint_support;
 use utils::logging::TracingErrorLayerEnablement;
 use utils::{
@@ -155,23 +156,7 @@ fn main() -> anyhow::Result<()> {
         };
 
         let started = Instant::now();
-        // Linux guarantees durability for syncfs.
-        // POSIX doesn't have syncfs, and further does not actually guarantee durability of sync().
-        #[cfg(target_os = "linux")]
-        {
-            use std::os::fd::AsRawFd;
-            nix::unistd::syncfs(dirfd.as_raw_fd()).context("syncfs")?;
-        }
-        #[cfg(target_os = "macos")]
-        {
-            // macOS is not a production platform for Neon, don't even bother.
-            drop(dirfd);
-        }
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-        {
-            compile_error!("Unsupported OS");
-        }
-
+        syncfs(dirfd)?;
         let elapsed = started.elapsed();
         info!(
             elapsed_ms = elapsed.as_millis(),

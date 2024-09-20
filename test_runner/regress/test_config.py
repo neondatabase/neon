@@ -9,10 +9,9 @@ from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder
 #
 def test_config(neon_simple_env: NeonEnv):
     env = neon_simple_env
-    env.neon_cli.create_branch("test_config", "empty")
 
     # change config
-    endpoint = env.endpoints.create_start("test_config", config_lines=["log_min_messages=debug1"])
+    endpoint = env.endpoints.create_start("main", config_lines=["log_min_messages=debug1"])
 
     with closing(endpoint.connect()) as conn:
         with conn.cursor() as cur:

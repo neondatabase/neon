@@ -28,6 +28,7 @@ use utils::{
     auth::{encode_from_key_file, Claims, Scope},
     id::{NodeId, TenantId},
 };
+use whoami::username;
 
 pub struct StorageController {
     env: LocalEnv,
@@ -183,7 +184,7 @@ impl StorageController {
     /// to other versions if that one isn't found.  Some automated tests create circumstances
     /// where only one version is available in pg_distrib_dir, such as `test_remote_extensions`.
     async fn get_pg_dir(&self, dir_name: &str) -> anyhow::Result<Utf8PathBuf> {
-        let prefer_versions = [STORAGE_CONTROLLER_POSTGRES_VERSION, 15, 14];
+        let prefer_versions = [STORAGE_CONTROLLER_POSTGRES_VERSION, 16, 15, 14];
 
         for v in prefer_versions {
             let path = Utf8PathBuf::from_path_buf(self.env.pg_dir(v, dir_name)?).unwrap();
@@ -211,7 +212,16 @@ impl StorageController {
     /// Readiness check for our postgres process
     async fn pg_isready(&self, pg_bin_dir: &Utf8Path, postgres_port: u16) -> anyhow::Result<bool> {
         let bin_path = pg_bin_dir.join("pg_isready");
-        let args = ["-h", "localhost", "-p", &format!("{}", postgres_port)];
+        let args = [
+            "-h",
+            "localhost",
+            "-U",
+            &username(),
+            "-d",
+            DB_NAME,
+            "-p",
+            &format!("{}", postgres_port),
+        ];
         let exitcode = Command::new(bin_path).args(args).spawn()?.wait().await?;
 
         Ok(exitcode.success())
@@ -225,7 +235,11 @@ impl StorageController {
     ///
     /// Returns the database url
     pub async fn setup_database(&self, postgres_port: u16) -> anyhow::Result<String> {
-        let database_url = format!("postgresql://localhost:{}/{DB_NAME}", postgres_port);
+        let database_url = format!(
+            "postgresql://{}@localhost:{}/{DB_NAME}",
+            &username(),
+            postgres_port
+        );
 
         let pg_bin_dir = self.get_pg_bin_dir().await?;
         let createdb_path = pg_bin_dir.join("createdb");
@@ -235,6 +249,10 @@ impl StorageController {
                 "localhost",
                 "-p",
                 &format!("{}", postgres_port),
+                "-U",
+                &username(),
+                "-O",
+                &username(),
                 DB_NAME,
             ])
             .output()
@@ -271,7 +289,7 @@ impl StorageController {
             // But tokio-postgres fork doesn't have this upstream commit:
             // https://github.com/sfackler/rust-postgres/commit/cb609be758f3fb5af537f04b584a2ee0cebd5e79
             // => we should rebase our fork => TODO https://github.com/neondatabase/neon/issues/8399
-            .user(&whoami::username())
+            .user(&username())
             .dbname(DB_NAME)
             .connect(tokio_postgres::NoTls)
             .await
@@ -328,6 +346,12 @@ impl StorageController {
             let pg_log_path = pg_data_path.join("postgres.log");
 
             if !tokio::fs::try_exists(&pg_data_path).await? {
+                let initdb_args = ["-D", pg_data_path.as_ref(), "--username", &username()];
+                tracing::info!(
+                    "Initializing storage controller database with args: {:?}",
+                    initdb_args
+                );
+
                 // Initialize empty database
                 let initdb_path = pg_bin_dir.join("initdb");
                 let mut child = Command::new(&initdb_path)
@@ -335,7 +359,7 @@ impl StorageController {
                         ("LD_LIBRARY_PATH".to_owned(), pg_lib_dir.to_string()),
                         ("DYLD_LIBRARY_PATH".to_owned(), pg_lib_dir.to_string()),
                     ])
-                    .args(["-D", pg_data_path.as_ref()])
+                    .args(initdb_args)
                     .spawn()
                     .expect("Failed to spawn initdb");
                 let status = child.wait().await?;
@@ -364,8 +388,14 @@ impl StorageController {
                 pg_data_path.as_ref(),
                 "-l",
                 pg_log_path.as_ref(),
+                "-U",
+                &username(),
                 "start",
             ];
+            tracing::info!(
+                "Starting storage controller database with args: {:?}",
+                db_start_args
+            );
 
             background_process::start_process(
                 "storage_controller_db",

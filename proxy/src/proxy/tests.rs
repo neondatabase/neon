@@ -268,7 +268,7 @@ async fn keepalive_is_inherited() -> anyhow::Result<()> {
         anyhow::Ok(keepalive)
     });
 
-    let _ = TcpStream::connect(("127.0.0.1", port)).await?;
+    TcpStream::connect(("127.0.0.1", port)).await?;
     assert!(t.await??, "keepalive should be inherited");
 
     Ok(())

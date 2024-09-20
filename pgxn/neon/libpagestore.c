@@ -537,7 +537,11 @@ pageserver_connect(shardno_t shard_no, int elevel)
 		/* No more polling needed; connection succeeded */
 		shard->last_connect_time = GetCurrentTimestamp();
 
+#if PG_MAJORVERSION_NUM >= 17
+		shard->wes_read = CreateWaitEventSet(NULL, 3);
+#else
 		shard->wes_read = CreateWaitEventSet(TopMemoryContext, 3);
+#endif
 		AddWaitEventToSet(shard->wes_read, WL_LATCH_SET, PGINVALID_SOCKET,
 						  MyLatch, NULL);
 		AddWaitEventToSet(shard->wes_read, WL_EXIT_ON_PM_DEATH, PGINVALID_SOCKET,

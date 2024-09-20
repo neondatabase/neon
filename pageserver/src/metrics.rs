@@ -9,7 +9,7 @@ use metrics::{
 use once_cell::sync::Lazy;
 use pageserver_api::shard::TenantShardId;
 use strum::{EnumCount, VariantNames};
-use strum_macros::{EnumVariantNames, IntoStaticStr};
+use strum_macros::{IntoStaticStr, VariantNames};
 use tracing::warn;
 use utils::id::TimelineId;
 
@@ -27,7 +27,7 @@ const CRITICAL_OP_BUCKETS: &[f64] = &[
 ];
 
 // Metrics collected on operations on the storage repository.
-#[derive(Debug, EnumVariantNames, IntoStaticStr)]
+#[derive(Debug, VariantNames, IntoStaticStr)]
 #[strum(serialize_all = "kebab_case")]
 pub(crate) enum StorageTimeOperation {
     #[strum(serialize = "layer flush")]
@@ -1777,7 +1777,7 @@ pub(crate) static SECONDARY_MODE: Lazy<SecondaryModeMetrics> = Lazy::new(|| {
     .expect("failed to define a metric"),
     upload_heatmap_duration: register_histogram!(
         "pageserver_secondary_upload_heatmap_duration",
-        "Time to build and upload a heatmap, including any waiting inside the S3 client"
+        "Time to build and upload a heatmap, including any waiting inside the remote storage client"
     )
     .expect("failed to define a metric"),
     download_heatmap: register_int_counter!(

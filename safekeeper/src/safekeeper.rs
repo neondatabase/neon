@@ -938,8 +938,9 @@ where
         }
 
         trace!(
-            "processed AppendRequest of len {}, end_lsn={:?}, commit_lsn={:?}, truncate_lsn={:?}, flushed={:?}",
+            "processed AppendRequest of len {}, begin_lsn={}, end_lsn={:?}, commit_lsn={:?}, truncate_lsn={:?}, flushed={:?}",
             msg.wal_data.len(),
+            msg.h.begin_lsn,
             msg.h.end_lsn,
             msg.h.commit_lsn,
             msg.h.truncate_lsn,

@@ -89,8 +89,19 @@ impl PageserverUtilization {
 
     /// If a node is currently hosting more work than it can comfortably handle.  This does not indicate that
     /// it will fail, but it is a strong signal that more work should not be added unless there is no alternative.
+    ///
+    /// When a node is overloaded, we may override soft affinity preferences and do things like scheduling
+    /// into a node in a less desirable AZ, if all the nodes in the preferred AZ are overloaded.
     pub fn is_overloaded(score: RawScore) -> bool {
-        score >= Self::UTILIZATION_FULL
+        // Why the factor of two?  This is unscientific but reflects behavior of real systems:
+        // - In terms of shard counts, a node's preferred max count is a soft limit intended to keep
+        //   startup and housekeeping jobs nice and responsive.  We can go to double this limit if needed
+        //   until some more nodes are deployed.
+        // - In terms of disk space, the node's utilization heuristic assumes every tenant needs to
+        //   hold its biggest timeline fully on disk, which is tends to be an over estimate when
+        //   some tenants are very idle and have dropped layers from disk.  In practice going up to
+        //   double is generally better than giving up and scheduling in a sub-optimal AZ.
+        score >= 2 * Self::UTILIZATION_FULL
     }
 
     pub fn adjust_shard_count_max(&mut self, shard_count: u32) {

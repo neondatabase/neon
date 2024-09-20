@@ -62,7 +62,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
     serde::Serialize,
     serde::Deserialize,
     strum_macros::Display,
-    strum_macros::EnumVariantNames,
+    strum_macros::VariantNames,
     strum_macros::AsRefStr,
     strum_macros::IntoStaticStr,
 )]
@@ -305,8 +305,10 @@ pub struct TenantConfig {
     pub lsn_lease_length_for_ts: Option<String>,
 }
 
-/// The policy for the aux file storage. It can be switched through `switch_aux_file_policy`
-/// tenant config. When the first aux file written, the policy will be persisted in the
+/// The policy for the aux file storage.
+///
+/// It can be switched through `switch_aux_file_policy` tenant config.
+/// When the first aux file written, the policy will be persisted in the
 /// `index_part.json` file and has a limited migration path.
 ///
 /// Currently, we only allow the following migration path:
@@ -493,7 +495,7 @@ pub struct CompactionAlgorithmSettings {
     pub kind: CompactionAlgorithm,
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, PartialEq, Eq, Clone, Deserialize, Serialize)]
 #[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum L0FlushConfig {
     #[serde(rename_all = "snake_case")]
@@ -896,7 +898,9 @@ pub struct WalRedoManagerStatus {
     pub process: Option<WalRedoManagerProcessStatus>,
 }
 
-/// The progress of a secondary tenant is mostly useful when doing a long running download: e.g. initiating
+/// The progress of a secondary tenant.
+///
+/// It is mostly useful when doing a long running download: e.g. initiating
 /// a download job, timing out while waiting for it to run, and then inspecting this status to understand
 /// what's happening.
 #[derive(Default, Debug, Serialize, Deserialize, Clone)]

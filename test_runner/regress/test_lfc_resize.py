@@ -16,9 +16,8 @@ from fixtures.neon_fixtures import NeonEnv, PgBin
 @pytest.mark.timeout(600)
 def test_lfc_resize(neon_simple_env: NeonEnv, pg_bin: PgBin):
     env = neon_simple_env
-    env.neon_cli.create_branch("test_lfc_resize", "empty")
     endpoint = env.endpoints.create_start(
-        "test_lfc_resize",
+        "main",
         config_lines=[
             "neon.file_cache_path='file.cache'",
             "neon.max_file_cache_size=512MB",

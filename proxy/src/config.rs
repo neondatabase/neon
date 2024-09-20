@@ -56,6 +56,8 @@ pub struct HttpConfig {
     pub pool_options: GlobalConnPoolOptions,
     pub cancel_set: CancelSet,
     pub client_conn_threshold: u64,
+    pub max_request_size_bytes: u64,
+    pub max_response_size_bytes: usize,
 }
 
 pub struct AuthenticationConfig {
@@ -64,6 +66,7 @@ pub struct AuthenticationConfig {
     pub rate_limiter_enabled: bool,
     pub rate_limiter: AuthRateLimiter,
     pub rate_limit_ip_subnet: u8,
+    pub ip_allowlist_check_enabled: bool,
 }
 
 impl TlsConfig {

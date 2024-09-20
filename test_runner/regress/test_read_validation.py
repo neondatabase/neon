@@ -15,12 +15,8 @@ extensions = ["pageinspect", "neon_test_utils", "pg_buffercache"]
 #
 def test_read_validation(neon_simple_env: NeonEnv):
     env = neon_simple_env
-    env.neon_cli.create_branch("test_read_validation", "empty")
 
-    endpoint = env.endpoints.create_start(
-        "test_read_validation",
-    )
-
+    endpoint = env.endpoints.create_start("main")
     with closing(endpoint.connect()) as con:
         with con.cursor() as c:
             for e in extensions:
@@ -131,13 +127,9 @@ def test_read_validation(neon_simple_env: NeonEnv):
 
 def test_read_validation_neg(neon_simple_env: NeonEnv):
     env = neon_simple_env
-    env.neon_cli.create_branch("test_read_validation_neg", "empty")
-
     env.pageserver.allowed_errors.append(".*invalid LSN\\(0\\) in request.*")
 
-    endpoint = env.endpoints.create_start(
-        "test_read_validation_neg",
-    )
+    endpoint = env.endpoints.create_start("main")
 
     with closing(endpoint.connect()) as con:
         with con.cursor() as c:

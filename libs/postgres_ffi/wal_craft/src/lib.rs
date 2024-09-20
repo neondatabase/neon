@@ -26,7 +26,6 @@ macro_rules! xlog_utils_test {
 
 postgres_ffi::for_all_postgres_versions! { xlog_utils_test }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Conf {
     pub pg_version: u32,
     pub pg_distrib_dir: PathBuf,
@@ -53,7 +52,7 @@ impl Conf {
 
         #[allow(clippy::manual_range_patterns)]
         match self.pg_version {
-            14 | 15 | 16 => Ok(path.join(format!("v{}", self.pg_version))),
+            14 | 15 | 16 | 17 => Ok(path.join(format!("v{}", self.pg_version))),
             _ => bail!("Unsupported postgres version: {}", self.pg_version),
         }
     }
