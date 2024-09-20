@@ -75,6 +75,7 @@ pub(crate) struct NodeAttachmentSchedulingScore {
     /// Size of [`ScheduleContext::attached_nodes`] for the current node.
     /// This normally tracks the number of attached shards belonging to the
     /// tenant being scheduled that are already on this node.
+    // HERE?
     attached_shards_in_context: usize,
     /// Utilisation score that combines shard count and disk utilisation
     utilization_score: u64,
@@ -239,6 +240,7 @@ impl Default for ScheduleMode {
 
 // For carrying state between multiple calls to [`TenantShard::schedule`], e.g. when calling
 // it for many shards in the same tenant.
+// TODO: it would be nice if we could make this shard specific at the type level somehow
 #[derive(Debug, Default)]
 pub(crate) struct ScheduleContext {
     /// Sparse map of nodes: omitting a node implicitly makes its affinity [`AffinityScore::FREE`]
@@ -577,6 +579,7 @@ impl Scheduler {
     pub(crate) fn schedule_shard<Tag: ShardTag>(
         &mut self,
         hard_exclude: &[NodeId],
+        _preferred_az: &Option<String>,
         context: &ScheduleContext,
     ) -> Result<NodeId, ScheduleError> {
         if self.nodes.is_empty() {
@@ -700,9 +703,9 @@ mod tests {
 
         let context = ScheduleContext::default();
 
-        let scheduled = scheduler.schedule_shard::<AttachedShardTag>(&[], &context)?;
+        let scheduled = scheduler.schedule_shard::<AttachedShardTag>(&[], &None, &context)?;
         t1_intent.set_attached(&mut scheduler, Some(scheduled));
-        let scheduled = scheduler.schedule_shard::<AttachedShardTag>(&[], &context)?;
+        let scheduled = scheduler.schedule_shard::<AttachedShardTag>(&[], &None, &context)?;
         t2_intent.set_attached(&mut scheduler, Some(scheduled));
 
         assert_eq!(scheduler.get_node_shard_count(NodeId(1)), 1);
@@ -711,8 +714,11 @@ mod tests {
         assert_eq!(scheduler.get_node_shard_count(NodeId(2)), 1);
         assert_eq!(scheduler.get_node_attached_shard_count(NodeId(2)), 1);
 
-        let scheduled =
-            scheduler.schedule_shard::<AttachedShardTag>(&t1_intent.all_pageservers(), &context)?;
+        let scheduled = scheduler.schedule_shard::<AttachedShardTag>(
+            &t1_intent.all_pageservers(),
+            &None,
+            &context,
+        )?;
         t1_intent.push_secondary(&mut scheduler, scheduled);
 
         assert_eq!(scheduler.get_node_shard_count(NodeId(1)), 1);
@@ -767,7 +773,7 @@ mod tests {
             context: &ScheduleContext,
         ) {
             let scheduled = scheduler
-                .schedule_shard::<AttachedShardTag>(&[], context)
+                .schedule_shard::<AttachedShardTag>(&[], &None, context)
                 .unwrap();
             let mut intent = IntentState::new();
             intent.set_attached(scheduler, Some(scheduled));
