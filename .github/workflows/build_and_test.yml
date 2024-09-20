@@ -130,7 +130,15 @@ jobs:
         with:
           submodules: true
 
+      - uses: dorny/paths-filter@v3
+        id: check-if-submodules-changed
+        with:
+          filters: |
+            vendor:
+              - 'vendor/**'
+
       - name: Check vendor/postgres-v14 submodule reference
+        if: steps.check-if-submodules-changed.outputs.vendor == 'true'
         uses: jtmullen/submodule-branch-check-action@v1
         with:
           path: "vendor/postgres-v14"
@@ -141,6 +149,7 @@ jobs:
           pass_if_unchanged: true
 
       - name: Check vendor/postgres-v15 submodule reference
+        if: steps.check-if-submodules-changed.outputs.vendor == 'true'
         uses: jtmullen/submodule-branch-check-action@v1
         with:
           path: "vendor/postgres-v15"
@@ -151,6 +160,7 @@ jobs:
           pass_if_unchanged: true
 
       - name: Check vendor/postgres-v16 submodule reference
+        if: steps.check-if-submodules-changed.outputs.vendor == 'true'
         uses: jtmullen/submodule-branch-check-action@v1
         with:
           path: "vendor/postgres-v16"
@@ -161,6 +171,7 @@ jobs:
           pass_if_unchanged: true
 
       - name: Check vendor/postgres-v17 submodule reference
+        if: steps.check-if-submodules-changed.outputs.vendor == 'true'
         uses: jtmullen/submodule-branch-check-action@v1
         with:
           path: "vendor/postgres-v17"
