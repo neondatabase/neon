@@ -1209,7 +1209,6 @@ dependencies = [
  "remote_storage",
  "serde",
  "serde_json",
- "serde_with",
  "utils",
 ]
 
@@ -1218,7 +1217,6 @@ name = "compute_tools"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-compression",
  "bytes",
  "cfg-if",
  "chrono",
@@ -1237,7 +1235,6 @@ dependencies = [
  "reqwest 0.12.4",
  "rlimit",
  "rust-ini",
- "serde",
  "serde_json",
  "signal-hook",
  "tar",
@@ -1246,7 +1243,6 @@ dependencies = [
  "tokio-postgres",
  "tokio-stream",
  "tokio-util",
- "toml_edit",
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
@@ -1317,12 +1313,9 @@ dependencies = [
 name = "consumption_metrics"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "chrono",
  "rand 0.8.5",
  "serde",
- "serde_with",
- "utils",
 ]
 
 [[package]]
@@ -1334,9 +1327,7 @@ dependencies = [
  "clap",
  "comfy-table",
  "compute_api",
- "futures",
  "git-version",
- "hex",
  "humantime",
  "humantime-serde",
  "hyper 0.14.26",
@@ -1344,7 +1335,6 @@ dependencies = [
  "once_cell",
  "pageserver_api",
  "pageserver_client",
- "postgres",
  "postgres_backend",
  "postgres_connection",
  "regex",
@@ -1353,9 +1343,7 @@ dependencies = [
  "scopeguard",
  "serde",
  "serde_json",
- "serde_with",
  "storage_broker",
- "tar",
  "thiserror",
  "tokio",
  "tokio-postgres",
@@ -1663,7 +1651,6 @@ dependencies = [
  "hex",
  "parking_lot 0.12.1",
  "rand 0.8.5",
- "scopeguard",
  "smallvec",
  "tracing",
  "utils",
@@ -2233,24 +2220,22 @@ checksum = "4271d37baee1b8c7e4b708028c57d816cf9d2434acb33a549475f78c181f6253"
 
 [[package]]
 name = "git-version"
-version = "0.3.5"
+version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f6b0decc02f4636b9ccad390dcbe77b722a77efedfa393caf8379a51d5c61899"
+checksum = "1ad568aa3db0fcbc81f2f116137f263d7304f512a1209b35b85150d3ef88ad19"
 dependencies = [
  "git-version-macro",
- "proc-macro-hack",
 ]
 
 [[package]]
 name = "git-version-macro"
-version = "0.3.5"
+version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fe69f1cbdb6e28af2bac214e943b99ce8a0a06b447d15d3e61161b0423139f3f"
+checksum = "53010ccb100b96a67bc32c0175f0ed1426b31b655d562898e57325f81c023ac0"
 dependencies = [
- "proc-macro-hack",
  "proc-macro2",
  "quote",
- "syn 1.0.109",
+ "syn 2.0.52",
 ]
 
 [[package]]
@@ -2742,19 +2727,6 @@ dependencies = [
  "bitflags 1.3.2",
  "inotify-sys",
  "libc",
-]
-
-[[package]]
-name = "inotify"
-version = "0.10.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fdd168d97690d0b8c412d6b6c10360277f4d7ee495c5d0d5d5fe0854923255cc"
-dependencies = [
- "bitflags 1.3.2",
- "futures-core",
- "inotify-sys",
- "libc",
- "tokio",
 ]
 
 [[package]]
@@ -3251,7 +3223,7 @@ dependencies = [
  "crossbeam-channel",
  "filetime",
  "fsevent-sys",
- "inotify 0.9.6",
+ "inotify",
  "kqueue",
  "libc",
  "log",
@@ -3642,7 +3614,6 @@ name = "pagectl"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "bytes",
  "camino",
  "clap",
  "git-version",
@@ -3651,7 +3622,6 @@ dependencies = [
  "pageserver_api",
  "postgres_ffi",
  "remote_storage",
- "serde",
  "serde_json",
  "svg_fmt",
  "thiserror",
@@ -3670,7 +3640,6 @@ dependencies = [
  "arc-swap",
  "async-compression",
  "async-stream",
- "async-trait",
  "bit_field",
  "byteorder",
  "bytes",
@@ -3678,16 +3647,13 @@ dependencies = [
  "camino-tempfile",
  "chrono",
  "clap",
- "const_format",
  "consumption_metrics",
  "crc32c",
  "criterion",
- "crossbeam-utils",
  "either",
  "enum-map",
  "enumset",
  "fail",
- "flate2",
  "futures",
  "git-version",
  "hex",
@@ -3726,13 +3692,9 @@ dependencies = [
  "serde_json",
  "serde_path_to_error",
  "serde_with",
- "signal-hook",
- "smallvec",
  "storage_broker",
  "strum",
  "strum_macros",
- "svg_fmt",
- "sync_wrapper",
  "sysinfo",
  "tenant_size_model",
  "thiserror",
@@ -3746,7 +3708,6 @@ dependencies = [
  "tokio-util",
  "toml_edit",
  "tracing",
- "twox-hash",
  "url",
  "utils",
  "walkdir",
@@ -3810,44 +3771,22 @@ name = "pageserver_compaction"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-compression",
  "async-stream",
- "byteorder",
- "bytes",
- "chrono",
  "clap",
- "const_format",
- "consumption_metrics",
  "criterion",
- "crossbeam-utils",
- "either",
- "fail",
- "flate2",
  "futures",
  "git-version",
- "hex",
  "hex-literal",
- "humantime",
- "humantime-serde",
  "itertools 0.10.5",
- "metrics",
  "once_cell",
  "pageserver_api",
  "pin-project-lite",
  "rand 0.8.5",
- "smallvec",
  "svg_fmt",
- "sync_wrapper",
- "thiserror",
  "tokio",
- "tokio-io-timeout",
- "tokio-util",
  "tracing",
- "tracing-error",
  "tracing-subscriber",
- "url",
  "utils",
- "walkdir",
  "workspace_hack",
 ]
 
@@ -4164,9 +4103,7 @@ name = "postgres_backend"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-trait",
  "bytes",
- "futures",
  "once_cell",
  "pq_proto",
  "rustls 0.22.4",
@@ -4199,16 +4136,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bindgen",
- "byteorder",
  "bytes",
  "crc32c",
  "env_logger",
- "hex",
  "log",
  "memoffset 0.8.0",
  "once_cell",
  "postgres",
- "rand 0.8.5",
  "regex",
  "serde",
  "thiserror",
@@ -4243,13 +4177,11 @@ dependencies = [
  "byteorder",
  "bytes",
  "itertools 0.10.5",
- "pin-project-lite",
  "postgres-protocol",
  "rand 0.8.5",
  "serde",
  "thiserror",
  "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -4280,12 +4212,6 @@ checksum = "353e1ca18966c16d9deb1c69278edbc5f194139612772bd9537af60ac231e1e6"
 dependencies = [
  "elliptic-curve 0.13.8",
 ]
-
-[[package]]
-name = "proc-macro-hack"
-version = "0.5.20+deprecated"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc375e1527247fe1a97d8b7156678dfe7c1af2fc075c9a4db3690ecd2a148068"
 
 [[package]]
 name = "proc-macro2"
@@ -4405,7 +4331,6 @@ dependencies = [
  "aws-config",
  "aws-sdk-iam",
  "aws-sigv4",
- "aws-types",
  "base64 0.13.1",
  "bstr",
  "bytes",
@@ -4414,7 +4339,6 @@ dependencies = [
  "chrono",
  "clap",
  "consumption_metrics",
- "crossbeam-deque",
  "dashmap",
  "ecdsa 0.16.9",
  "env_logger",
@@ -4440,11 +4364,9 @@ dependencies = [
  "jose-jwa",
  "jose-jwk",
  "lasso",
- "md5",
  "measured",
  "metrics",
  "once_cell",
- "opentelemetry",
  "p256 0.13.2",
  "parking_lot 0.12.1",
  "parquet",
@@ -4465,7 +4387,6 @@ dependencies = [
  "reqwest-middleware",
  "reqwest-retry",
  "reqwest-tracing",
- "routerify",
  "rsa",
  "rstest",
  "rustc-hash",
@@ -4481,7 +4402,6 @@ dependencies = [
  "smol_str",
  "socket2 0.5.5",
  "subtle",
- "task-local-extensions",
  "thiserror",
  "tikv-jemalloc-ctl",
  "tikv-jemallocator",
@@ -4491,7 +4411,6 @@ dependencies = [
  "tokio-rustls 0.25.0",
  "tokio-tungstenite",
  "tokio-util",
- "tower-service",
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
@@ -4781,7 +4700,6 @@ dependencies = [
  "async-stream",
  "async-trait",
  "aws-config",
- "aws-credential-types",
  "aws-sdk-s3",
  "aws-smithy-async",
  "aws-smithy-types",
@@ -4795,7 +4713,6 @@ dependencies = [
  "futures",
  "futures-util",
  "http-types",
- "humantime",
  "humantime-serde",
  "hyper 0.14.26",
  "itertools 0.10.5",
@@ -5275,14 +5192,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-stream",
- "async-trait",
  "byteorder",
  "bytes",
  "camino",
  "camino-tempfile",
  "chrono",
  "clap",
- "const_format",
  "crc32c",
  "desim",
  "fail",
@@ -5308,9 +5223,7 @@ dependencies = [
  "sd-notify",
  "serde",
  "serde_json",
- "serde_with",
  "sha2",
- "signal-hook",
  "storage_broker",
  "strum",
  "strum_macros",
@@ -5321,7 +5234,6 @@ dependencies = [
  "tokio-stream",
  "tokio-tar",
  "tokio-util",
- "toml_edit",
  "tracing",
  "tracing-subscriber",
  "url",
@@ -5336,7 +5248,6 @@ version = "0.1.0"
 dependencies = [
  "const_format",
  "serde",
- "serde_with",
  "utils",
 ]
 
@@ -5865,7 +5776,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-stream",
- "bytes",
  "clap",
  "const_format",
  "futures",
@@ -5879,7 +5789,6 @@ dependencies = [
  "parking_lot 0.12.1",
  "prost",
  "tokio",
- "tokio-stream",
  "tonic",
  "tonic-build",
  "tracing",
@@ -5892,9 +5801,7 @@ name = "storage_controller"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "aws-config",
  "bytes",
- "camino",
  "chrono",
  "clap",
  "control_plane",
@@ -5935,20 +5842,9 @@ dependencies = [
 name = "storage_controller_client"
 version = "0.1.0"
 dependencies = [
- "anyhow",
- "bytes",
- "futures",
- "pageserver_api",
  "pageserver_client",
- "postgres",
  "reqwest 0.12.4",
  "serde",
- "thiserror",
- "tokio",
- "tokio-postgres",
- "tokio-stream",
- "tokio-util",
- "utils",
  "workspace_hack",
 ]
 
@@ -5960,13 +5856,9 @@ dependencies = [
  "async-stream",
  "aws-config",
  "aws-sdk-s3",
- "aws-smithy-async",
- "bincode",
- "bytes",
  "camino",
  "chrono",
  "clap",
- "crc32c",
  "either",
  "futures",
  "futures-util",
@@ -5978,20 +5870,16 @@ dependencies = [
  "pageserver",
  "pageserver_api",
  "postgres_ffi",
- "rand 0.8.5",
  "remote_storage",
  "reqwest 0.12.4",
  "rustls 0.22.4",
  "rustls-native-certs 0.7.0",
  "serde",
  "serde_json",
- "serde_with",
  "storage_controller_client",
- "thiserror",
  "tokio",
  "tokio-postgres",
  "tokio-postgres-rustls",
- "tokio-rustls 0.25.0",
  "tokio-stream",
  "tokio-util",
  "tracing",
@@ -6010,14 +5898,11 @@ dependencies = [
  "comfy-table",
  "futures",
  "humantime",
- "hyper 0.14.26",
  "pageserver_api",
  "pageserver_client",
  "reqwest 0.12.4",
- "serde",
  "serde_json",
  "storage_controller_client",
- "thiserror",
  "tokio",
  "tracing",
  "utils",
@@ -6138,15 +6023,6 @@ dependencies = [
  "filetime",
  "libc",
  "xattr",
-]
-
-[[package]]
-name = "task-local-extensions"
-version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba323866e5d033818e3240feeb9f7db2c4296674e4d9e16b97b7bf8f490434e8"
-dependencies = [
- "pin-utils",
 ]
 
 [[package]]
@@ -6739,7 +6615,6 @@ dependencies = [
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry-semantic-conventions",
- "reqwest 0.12.4",
  "tokio",
  "tracing",
  "tracing-opentelemetry",
@@ -6943,7 +6818,6 @@ dependencies = [
  "serde_assert",
  "serde_json",
  "serde_path_to_error",
- "serde_with",
  "signal-hook",
  "strum",
  "strum_macros",
@@ -6999,13 +6873,11 @@ dependencies = [
  "cgroups-rs",
  "clap",
  "futures",
- "inotify 0.10.2",
  "serde",
  "serde_json",
  "sysinfo",
  "tokio",
  "tokio-postgres",
- "tokio-stream",
  "tokio-util",
  "tracing",
  "tracing-subscriber",
@@ -7032,7 +6904,6 @@ dependencies = [
  "clap",
  "env_logger",
  "log",
- "once_cell",
  "postgres",
  "postgres_ffi",
  "regex",
@@ -7555,6 +7426,7 @@ dependencies = [
  "digest",
  "either",
  "fail",
+ "futures",
  "futures-channel",
  "futures-executor",
  "futures-io",
@@ -7610,6 +7482,8 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-core",
+ "tracing-log",
+ "tracing-subscriber",
  "url",
  "uuid",
  "zeroize",

@@ -82,7 +82,7 @@ impl ApiError {
                 StatusCode::INTERNAL_SERVER_ERROR,
             ),
             ApiError::InternalServerError(err) => HttpErrorBody::response_from_msg_and_status(
-                err.to_string(),
+                format!("{err:#}"), // use alternative formatting so that we give the cause without backtrace
                 StatusCode::INTERNAL_SERVER_ERROR,
             ),
         }

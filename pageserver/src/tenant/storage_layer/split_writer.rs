@@ -121,11 +121,11 @@ impl SplitImageLayerWriter {
                 self.generated_layers
                     .push(SplitWriterResult::Discarded(layer_key));
             } else {
-                self.generated_layers.push(SplitWriterResult::Produced(
-                    prev_image_writer
-                        .finish_with_end_key(tline, key, ctx)
-                        .await?,
-                ));
+                let (desc, path) = prev_image_writer.finish_with_end_key(key, ctx).await?;
+
+                let layer = Layer::finish_creating(self.conf, tline, desc, &path)?;
+                self.generated_layers
+                    .push(SplitWriterResult::Produced(layer));
             }
         }
         self.inner.put_image(key, img, ctx).await
@@ -170,9 +170,9 @@ impl SplitImageLayerWriter {
         if discard(&layer_key).await {
             generated_layers.push(SplitWriterResult::Discarded(layer_key));
         } else {
-            generated_layers.push(SplitWriterResult::Produced(
-                inner.finish_with_end_key(tline, end_key, ctx).await?,
-            ));
+            let (desc, path) = inner.finish_with_end_key(end_key, ctx).await?;
+            let layer = Layer::finish_creating(self.conf, tline, desc, &path)?;
+            generated_layers.push(SplitWriterResult::Produced(layer));
         }
         Ok(generated_layers)
     }

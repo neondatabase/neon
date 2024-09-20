@@ -9,7 +9,6 @@ anyhow.workspace = true
 clap.workspace = true
 env_logger.workspace = true
 log.workspace = true
-once_cell.workspace = true
 postgres.workspace = true
 postgres_ffi.workspace = true
 camino-tempfile.workspace = true
