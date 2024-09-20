@@ -95,7 +95,7 @@ hdrhistogram = "7.5.2"
 hex = "0.4"
 hex-literal = "0.4"
 hmac = "0.12.1"
-hostname = "0.3.1"
+hostname = "0.4"
 http = {version = "1.1.0", features = ["std"]}
 http-types = { version = "2", default-features = false }
 humantime = "2.1"
