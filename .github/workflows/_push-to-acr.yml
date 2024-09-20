@@ -52,5 +52,5 @@ jobs:
           for image in ${images}; do
             docker buildx imagetools create \
               -t ${{ inputs.registry_name }}.azurecr.io/neondatabase/${image}:${{ inputs.image_tag }} \
-                                        neondatabase/${image}:${{ inputs.image_tag }}
+                                                        neondatabase/${image}:${{ inputs.image_tag }}
           done

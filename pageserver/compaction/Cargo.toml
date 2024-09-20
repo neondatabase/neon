@@ -9,41 +9,19 @@ default = []
 
 [dependencies]
 anyhow.workspace = true
-async-compression.workspace = true
 async-stream.workspace = true
-byteorder.workspace = true
-bytes.workspace = true
-chrono = { workspace = true, features = ["serde"] }
 clap = { workspace = true, features = ["string"] }
-const_format.workspace = true
-consumption_metrics.workspace = true
-crossbeam-utils.workspace = true
-either.workspace = true
-flate2.workspace = true
-fail.workspace = true
 futures.workspace = true
 git-version.workspace = true
-hex.workspace = true
-humantime.workspace = true
-humantime-serde.workspace = true
 itertools.workspace = true
 once_cell.workspace = true
 pageserver_api.workspace = true
 pin-project-lite.workspace = true
 rand.workspace = true
-smallvec = { workspace = true, features = ["write"] }
 svg_fmt.workspace = true
-sync_wrapper.workspace = true
-thiserror.workspace = true
 tokio = { workspace = true, features = ["process", "sync", "fs", "rt", "io-util", "time"] }
-tokio-io-timeout.workspace = true
-tokio-util.workspace = true
 tracing.workspace = true
-tracing-error.workspace = true
 tracing-subscriber.workspace = true
-url.workspace = true
-walkdir.workspace = true
-metrics.workspace = true
 utils.workspace = true
 workspace_hack.workspace = true
 

@@ -121,8 +121,6 @@ enum Command {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    tracing::info!("version: {}, build_tag {}", GIT_VERSION, BUILD_TAG);
-
     let bucket_config = BucketConfig::from_env()?;
 
     let command_log_name = match &cli.command {
@@ -141,6 +139,8 @@ async fn main() -> anyhow::Result<()> {
         bucket_config.bucket,
         chrono::Utc::now().format("%Y_%m_%d__%H_%M_%S")
     ));
+
+    tracing::info!("version: {}, build_tag {}", GIT_VERSION, BUILD_TAG);
 
     let controller_client = cli.controller_api.map(|controller_api| {
         ControllerClientConfig {

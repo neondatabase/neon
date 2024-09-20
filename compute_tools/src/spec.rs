@@ -793,6 +793,9 @@ pub fn handle_migrations(client: &mut Client) -> Result<()> {
         include_str!(
             "./migrations/0010-grant_snapshot_synchronization_funcs_to_neon_superuser.sql"
         ),
+        include_str!(
+            "./migrations/0011-grant_pg_show_replication_origin_status_to_neon_superuser.sql"
+        ),
     ];
 
     MigrationRunner::new(client, &migrations).run_migrations()?;

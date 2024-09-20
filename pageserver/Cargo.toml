@@ -15,7 +15,6 @@ anyhow.workspace = true
 arc-swap.workspace = true
 async-compression.workspace = true
 async-stream.workspace = true
-async-trait.workspace = true
 bit_field.workspace = true
 byteorder.workspace = true
 bytes.workspace = true
@@ -23,12 +22,9 @@ camino.workspace = true
 camino-tempfile.workspace = true
 chrono = { workspace = true, features = ["serde"] }
 clap = { workspace = true, features = ["string"] }
-const_format.workspace = true
 consumption_metrics.workspace = true
 crc32c.workspace = true
-crossbeam-utils.workspace = true
 either.workspace = true
-flate2.workspace = true
 fail.workspace = true
 futures.workspace = true
 git-version.workspace = true
@@ -57,10 +53,6 @@ serde.workspace = true
 serde_json = { workspace = true, features = ["raw_value"] }
 serde_path_to_error.workspace = true
 serde_with.workspace = true
-signal-hook.workspace = true
-smallvec = { workspace = true, features = ["write"] }
-svg_fmt.workspace = true
-sync_wrapper.workspace = true
 sysinfo.workspace = true
 tokio-tar.workspace = true
 thiserror.workspace = true
@@ -73,7 +65,6 @@ tokio-stream.workspace = true
 tokio-util.workspace = true
 toml_edit = { workspace = true, features = [ "serde" ] }
 tracing.workspace = true
-twox-hash.workspace = true
 url.workspace = true
 walkdir.workspace = true
 metrics.workspace = true
