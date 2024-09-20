@@ -22,7 +22,6 @@
 //! Another explaination can be found here: <https://brandur.org/rate-limiting>
 
 use std::{
-    cell::UnsafeCell,
     sync::Mutex,
     task::{Poll, Waker},
     time::Duration,
@@ -134,19 +133,13 @@ impl LeakyBucketState {
 
 pub struct RateLimiter {
     config: LeakyBucketConfig,
-    state: UnsafeCell<LeakyBucketState>,
     queue: Mutex<Queue>,
 }
-
-// SAFETY: To access the state in the UnsafeCell, you must be holding the RateToken.
-unsafe impl Sync for RateLimiter {}
-
-struct RateToken;
 
 struct Queue {
     sleep_counter: u64,
     queue: PinList<RateLimitQueue>,
-    token: Option<RateToken>,
+    state: Option<LeakyBucketState>,
 }
 
 impl Queue {
@@ -156,17 +149,17 @@ impl Queue {
         Enqueued {
             entry: pin_list::Node::new(),
             queue: this,
-            token: None,
+            state: None,
         }
     }
 }
 
 type RateLimitQueue = dyn pin_list::Types<
-    Id = pin_list::id::DebugChecked,
+    Id = pin_list::id::Checked,
     // the waker that lets us wake the next in the queue
     Protected = Waker,
     // the token that gives us access to the rate limit state
-    Removed = RateToken,
+    Removed = LeakyBucketState,
     // the sleep count at the start of the enqueue
     Unprotected = u64,
 >;
@@ -175,7 +168,7 @@ pin_project_lite::pin_project! {
     struct Enqueued<'a> {
         #[pin]
         entry: Node<RateLimitQueue>,
-        token: Option<(RateToken, u64)>,
+        state: Option<(LeakyBucketState, u64)>,
         queue: &'a Mutex<Queue>,
     }
 
@@ -186,29 +179,29 @@ pin_project_lite::pin_project! {
             #[allow(clippy::mut_mutex_lock, reason = "false positive")]
             let mut q = this.queue.lock().unwrap();
 
-            let token = if let Some(init) = this.entry.initialized_mut() {
+            let state = if let Some(init) = this.entry.initialized_mut() {
                 let (data, _start_count) =  init.reset(&mut q.queue) ;
                 match data {
                     // we were in the queue and are not holding any resources.
                     NodeData::Linked(_) => return,
                     // we were the head of the queue and were about to be the current leader
-                    NodeData::Removed(token) => token
+                    NodeData::Removed(state) => state
                 }
-            } else if let Some((token, sleep_counter)) = this.token.take() {
+            } else if let Some((state, sleep_counter)) = this.state.take() {
                 // we were holding the lock, and are now releasing it.
                 q.sleep_counter = sleep_counter;
-                token
+                state
             } else {
                 // we apparently didn't even get into the queue to begin with
                 return;
             };
 
-            // wake the next in the queue and give them the lock token
-            match q.queue.cursor_front_mut().remove_current(token) {
+            // wake the next in the queue and give them the rate limit state
+            match q.queue.cursor_front_mut().remove_current(state) {
                 // wake up the next leader
                 Ok(waker) => waker.wake(),
                 // no tasks left in the queue. unlocked
-                Err(token) => q.token = Some(token),
+                Err(state) => q.state = Some(state),
             }
         }
     }
@@ -229,8 +222,8 @@ impl std::future::Future for Enqueued<'_> {
 
             match init.take_removed(&q.queue) {
                 // if we are removed from the queue, that means we are the new leader
-                Ok((token, start_count)) => {
-                    *this.token = Some((token, q.sleep_counter));
+                Ok((state, start_count)) => {
+                    *this.state = Some((state, q.sleep_counter));
                     Poll::Ready(start_count)
                 }
                 // if we are not removed from the queue, that means we are still waiting
@@ -246,9 +239,9 @@ impl std::future::Future for Enqueued<'_> {
             // we are not yet registered in the queue
             let start_count = q.sleep_counter;
 
-            if let Some(token) = q.token.take() {
+            if let Some(state) = q.state.take() {
                 // we are the first in the queue and it is not yet acquired
-                *this.token = Some((token, q.sleep_counter));
+                *this.state = Some((state, q.sleep_counter));
                 Poll::Ready(start_count)
             } else {
                 // we push ourselves to the back of the queue
@@ -262,17 +255,15 @@ impl std::future::Future for Enqueued<'_> {
 impl RateLimiter {
     pub fn with_initial_tokens(config: LeakyBucketConfig, initial_tokens: f64) -> Self {
         RateLimiter {
-            state: UnsafeCell::new(LeakyBucketState::with_initial_tokens(
-                &config,
-                initial_tokens,
-            )),
-            config,
             queue: Mutex::new(Queue {
                 sleep_counter: 0,
-                // SAFETY: we make sure to only interact with the same queue
-                queue: PinList::new(unsafe { pin_list::id::DebugChecked::new() }),
-                token: Some(RateToken),
+                queue: PinList::new(pin_list::id::Checked::new()),
+                state: Some(LeakyBucketState::with_initial_tokens(
+                    &config,
+                    initial_tokens,
+                )),
             }),
+            config,
         }
     }
 
@@ -286,19 +277,14 @@ impl RateLimiter {
 
         let mut entry = std::pin::pin!(Queue::wait(&self.queue));
         let start_count = entry.as_mut().await;
-        let (_token, sleep_counter) = entry
+        let (state, sleep_counter) = entry
             .project()
-            .token
+            .state
             .as_mut()
             .expect("token should be init if we returned from enqueued");
 
         loop {
-            // SAFETY: we are holding the token.
-            let res = unsafe {
-                let state = &mut *self.state.get();
-                state.add_tokens(&self.config, start, count as f64)
-            };
-            match res {
+            match state.add_tokens(&self.config, start, count as f64) {
                 Ok(()) => return start_count < *sleep_counter,
                 Err(ready_at) => {
                     *sleep_counter += 1;
