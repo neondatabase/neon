@@ -2,7 +2,7 @@ use crate::{node::Node, tenant_shard::TenantShard};
 use itertools::Itertools;
 use pageserver_api::models::PageserverUtilization;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::{collections::HashMap, fmt::Debug};
 use utils::{http::error::ApiError, id::NodeId};
 
 /// Scenarios in which we cannot find a suitable location for a tenant shard
@@ -27,7 +27,7 @@ pub enum MaySchedule {
 }
 
 #[derive(Serialize)]
-struct SchedulerNode {
+pub(crate) struct SchedulerNode {
     /// How many shards are currently scheduled on this node, via their [`crate::tenant_shard::IntentState`].
     shard_count: usize,
     /// How many shards are currently attached on this node, via their [`crate::tenant_shard::IntentState`].
@@ -38,32 +38,91 @@ struct SchedulerNode {
     may_schedule: MaySchedule,
 }
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
-enum NodeSchedulingScore {
-    Attached(NodeAttachmentSchedulingScore),
+pub(crate) trait NodeSchedulingScore: Debug + Ord + Copy + Sized {
+    fn generate(
+        node_id: &NodeId,
+        node: &mut SchedulerNode,
+        context: &ScheduleContext,
+    ) -> Option<Self>;
+    fn is_overloaded(&self) -> bool;
+    fn node_id(&self) -> NodeId;
 }
 
-impl NodeSchedulingScore {
-    fn is_overloaded(&self) -> bool {
-        match self {
-            NodeSchedulingScore::Attached(score) => {
-                PageserverUtilization::is_overloaded(score.utilization_score)
-            }
-        }
-    }
+pub(crate) trait ShardTag {
+    type Score: NodeSchedulingScore;
+}
 
-    fn node_id(&self) -> NodeId {
-        match self {
-            NodeSchedulingScore::Attached(score) => score.node_id,
-        }
-    }
+pub(crate) struct AttachedShardTag {}
+impl ShardTag for AttachedShardTag {
+    type Score = NodeAttachmentSchedulingScore;
+}
+
+pub(crate) struct SecondaryShardTag {}
+impl ShardTag for SecondaryShardTag {
+    type Score = NodeSecondarySchedulingScore;
 }
 
 /// Scheduling score of a given node for shard attachments.
 /// Lower scores indicate more suitable nodes.
 /// Ordering is given by member declaration order (top to bottom).
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
-struct NodeAttachmentSchedulingScore {
+pub(crate) struct NodeAttachmentSchedulingScore {
+    /// The number of shards belonging to the tenant currently being
+    /// scheduled that are attached to this node.
+    affinity_score: AffinityScore,
+    /// Size of [`ScheduleContext::attached_nodes`] for the current node.
+    /// This normally tracks the number of attached shards belonging to the
+    /// tenant being scheduled that are already on this node.
+    attached_shards_in_context: usize,
+    /// Utilisation score that combines shard count and disk utilisation
+    utilization_score: u64,
+    /// Total number of shards attached to this node. When nodes have identical utilisation, this
+    /// acts as an anti-affinity between attached shards.
+    total_attached_shard_count: usize,
+    /// Convenience to make selection deterministic in tests and empty systems
+    node_id: NodeId,
+}
+
+impl NodeSchedulingScore for NodeAttachmentSchedulingScore {
+    fn generate(
+        node_id: &NodeId,
+        node: &mut SchedulerNode,
+        context: &ScheduleContext,
+    ) -> Option<Self> {
+        let utilization = match &mut node.may_schedule {
+            MaySchedule::Yes(u) => u,
+            MaySchedule::No => {
+                return None;
+            }
+        };
+
+        Some(Self {
+            affinity_score: context
+                .nodes
+                .get(node_id)
+                .copied()
+                .unwrap_or(AffinityScore::FREE),
+            attached_shards_in_context: context.attached_nodes.get(node_id).copied().unwrap_or(0),
+            utilization_score: utilization.cached_score(),
+            total_attached_shard_count: node.attached_shard_count,
+            node_id: *node_id,
+        })
+    }
+
+    fn is_overloaded(&self) -> bool {
+        PageserverUtilization::is_overloaded(self.utilization_score)
+    }
+
+    fn node_id(&self) -> NodeId {
+        self.node_id
+    }
+}
+
+/// Scheduling score of a given node for shard secondaries.
+/// Lower scores indicate more suitable nodes.
+/// Ordering is given by member declaration order (top to bottom).
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
+pub(crate) struct NodeSecondarySchedulingScore {
     /// The number of shards belonging to the tenant currently being
     /// scheduled that are attached to this node.
     affinity_score: AffinityScore,
@@ -74,6 +133,40 @@ struct NodeAttachmentSchedulingScore {
     total_attached_shard_count: usize,
     /// Convenience to make selection deterministic in tests and empty systems
     node_id: NodeId,
+}
+
+impl NodeSchedulingScore for NodeSecondarySchedulingScore {
+    fn generate(
+        node_id: &NodeId,
+        node: &mut SchedulerNode,
+        context: &ScheduleContext,
+    ) -> Option<Self> {
+        let utilization = match &mut node.may_schedule {
+            MaySchedule::Yes(u) => u,
+            MaySchedule::No => {
+                return None;
+            }
+        };
+
+        Some(Self {
+            affinity_score: context
+                .nodes
+                .get(node_id)
+                .copied()
+                .unwrap_or(AffinityScore::FREE),
+            utilization_score: utilization.cached_score(),
+            total_attached_shard_count: node.attached_shard_count,
+            node_id: *node_id,
+        })
+    }
+
+    fn is_overloaded(&self) -> bool {
+        PageserverUtilization::is_overloaded(self.utilization_score)
+    }
+
+    fn node_id(&self) -> NodeId {
+        self.node_id
+    }
 }
 
 impl PartialEq for SchedulerNode {
@@ -139,13 +232,6 @@ impl Default for ScheduleMode {
     fn default() -> Self {
         Self::Normal
     }
-}
-
-/// Different scheduling heuristics shall be applied depending
-/// on whether the shard is attached or secondary.
-pub(crate) enum ShardType {
-    Attached,
-    Secondary,
 }
 
 // For carrying state between multiple calls to [`TenantShard::schedule`], e.g. when calling
@@ -453,28 +539,22 @@ impl Scheduler {
 
     /// Compute a schedulling score for each node that the scheduler knows of
     /// minus a set of hard excluded nodes.
-    fn compute_node_scores(
+    fn compute_node_scores<Score>(
         &mut self,
         hard_exclude: &[NodeId],
         context: &ScheduleContext,
-    ) -> Vec<NodeSchedulingScore> {
+    ) -> Vec<Score>
+    where
+        Score: NodeSchedulingScore,
+    {
         self.nodes
             .iter_mut()
-            .filter_map(|(k, v)| match &mut v.may_schedule {
-                MaySchedule::No => None,
-                MaySchedule::Yes(_) if hard_exclude.contains(k) => None,
-                MaySchedule::Yes(utilization) => Some(NodeSchedulingScore::Attached(
-                    NodeAttachmentSchedulingScore {
-                        affinity_score: context
-                            .nodes
-                            .get(k)
-                            .copied()
-                            .unwrap_or(AffinityScore::FREE),
-                        utilization_score: utilization.cached_score(),
-                        total_attached_shard_count: v.attached_shard_count,
-                        node_id: *k,
-                    },
-                )),
+            .filter_map(|(k, v)| {
+                if hard_exclude.contains(k) {
+                    None
+                } else {
+                    Score::generate(k, v, context)
+                }
             })
             .collect()
     }
@@ -488,9 +568,8 @@ impl Scheduler {
     /// to their anti-affinity score.  We use this to prefeer to avoid placing shards in
     /// the same tenant on the same node.  This is a soft constraint: the context will never
     /// cause us to fail to schedule a shard.
-    pub(crate) fn schedule_shard(
+    pub(crate) fn schedule_shard<Tag: ShardTag>(
         &mut self,
-        _shard_type: ShardType,
         hard_exclude: &[NodeId],
         context: &ScheduleContext,
     ) -> Result<NodeId, ScheduleError> {
@@ -498,7 +577,7 @@ impl Scheduler {
             return Err(ScheduleError::NoPageservers);
         }
 
-        let mut scores = self.compute_node_scores(hard_exclude, context);
+        let mut scores = self.compute_node_scores::<Tag::Score>(hard_exclude, context);
 
         // Exclude nodes whose utilization is critically high, if there are alternatives available.  This will
         // cause us to violate affinity rules if it is necessary to avoid critically overloading nodes: for example
@@ -611,9 +690,9 @@ mod tests {
 
         let context = ScheduleContext::default();
 
-        let scheduled = scheduler.schedule_shard(ShardType::Attached, &[], &context)?;
+        let scheduled = scheduler.schedule_shard::<AttachedShardTag>(&[], &context)?;
         t1_intent.set_attached(&mut scheduler, Some(scheduled));
-        let scheduled = scheduler.schedule_shard(ShardType::Attached, &[], &context)?;
+        let scheduled = scheduler.schedule_shard::<AttachedShardTag>(&[], &context)?;
         t2_intent.set_attached(&mut scheduler, Some(scheduled));
 
         assert_eq!(scheduler.get_node_shard_count(NodeId(1)), 1);
@@ -622,11 +701,8 @@ mod tests {
         assert_eq!(scheduler.get_node_shard_count(NodeId(2)), 1);
         assert_eq!(scheduler.get_node_attached_shard_count(NodeId(2)), 1);
 
-        let scheduled = scheduler.schedule_shard(
-            ShardType::Attached,
-            &t1_intent.all_pageservers(),
-            &context,
-        )?;
+        let scheduled =
+            scheduler.schedule_shard::<AttachedShardTag>(&t1_intent.all_pageservers(), &context)?;
         t1_intent.push_secondary(&mut scheduler, scheduled);
 
         assert_eq!(scheduler.get_node_shard_count(NodeId(1)), 1);
@@ -681,7 +757,7 @@ mod tests {
             context: &ScheduleContext,
         ) {
             let scheduled = scheduler
-                .schedule_shard(ShardType::Attached, &[], context)
+                .schedule_shard::<AttachedShardTag>(&[], context)
                 .unwrap();
             let mut intent = IntentState::new();
             intent.set_attached(scheduler, Some(scheduled));
