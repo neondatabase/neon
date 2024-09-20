@@ -57,7 +57,7 @@ fn lsn_lease_bg_task(
             .max(valid_duration / 2);
 
         info!(
-            "Succeeded, sleeping for {} seconds",
+            "Request succeeded, sleeping for {} seconds",
             sleep_duration.as_secs()
         );
         compute.wait_timeout_while_pageserver_connstr_unchanged(sleep_duration);
@@ -89,10 +89,7 @@ fn acquire_lsn_lease_with_retry(
                 .map(|connstr| {
                     let mut config = postgres::Config::from_str(connstr).expect("Invalid connstr");
                     if let Some(storage_auth_token) = &spec.storage_auth_token {
-                        info!("Got storage auth token from spec file");
                         config.password(storage_auth_token.clone());
-                    } else {
-                        info!("Storage auth token not set");
                     }
                     config
                 })
@@ -108,7 +105,7 @@ fn acquire_lsn_lease_with_retry(
                 bail!("Permanent error: lease could not be obtained, LSN is behind the GC cutoff");
             }
             Err(e) => {
-                warn!("Failed to acquire lsn lease: {e} (attempt {attempts}");
+                warn!("Failed to acquire lsn lease: {e} (attempt {attempts})");
 
                 compute.wait_timeout_while_pageserver_connstr_unchanged(Duration::from_millis(
                     retry_period_ms as u64,

@@ -1395,13 +1395,18 @@ LIMIT 100",
     pub fn wait_timeout_while_pageserver_connstr_unchanged(&self, duration: Duration) {
         let state = self.state.lock().unwrap();
         let old_pageserver_connstr = state.pspec.as_ref().unwrap().pageserver_connstr.clone();
+        let mut unchanged = true;
         let _ = self
             .state_changed
             .wait_timeout_while(state, duration, |s| {
                 let pageserver_connstr = &s.pspec.as_ref().unwrap().pageserver_connstr;
-                pageserver_connstr == &old_pageserver_connstr
+                unchanged = pageserver_connstr == &old_pageserver_connstr;
+                unchanged
             })
             .unwrap();
+        if !unchanged {
+            info!("Pageserver config changed");
+        }
     }
 }
 
