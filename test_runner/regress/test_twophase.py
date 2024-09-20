@@ -149,7 +149,7 @@ def test_twophase_at_wal_segment_start(neon_simple_env: NeonEnv):
     env.neon_cli.create_branch("test_twophase", "main")
 
     endpoint = env.endpoints.create_start(
-        "test_twophase", config_lines=["max_prepared_transactions=5", "log_statement=all"]
+        "test_twophase", config_lines=["max_prepared_transactions=5"]
     )
     endpoint.safe_psql("SELECT pg_switch_wal()")
 
