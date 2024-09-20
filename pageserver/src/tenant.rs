@@ -7289,7 +7289,7 @@ mod tests {
     #[tokio::test]
     async fn test_lsn_lease() -> anyhow::Result<()> {
         let (tenant, ctx) = TenantHarness::create("test_lsn_lease").await?.load().await;
-        advance_time_by(tenant.get_lsn_lease_length()).await;
+        harness::advance_time_by(tenant.get_lsn_lease_length()).await;
         let key = Key::from_hex("010000000033333333444444445500000000").unwrap();
 
         let end_lsn = Lsn(0x100);
