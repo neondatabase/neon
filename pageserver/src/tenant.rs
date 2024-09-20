@@ -1031,7 +1031,7 @@ impl Tenant {
         }
 
         Ok(TenantPreload {
-            timelines: Self::load_timeline_metadata(
+            timelines: Self::load_timelines_metadata(
                 self,
                 remote_timeline_ids,
                 remote_storage,
@@ -1304,6 +1304,42 @@ impl Tenant {
     }
 
     async fn load_timeline_metadata(
+        self: Arc<Tenant>,
+        timeline_id: TimelineId,
+        remote_storage: GenericRemoteStorage,
+        cancel: CancellationToken,
+    ) -> anyhow::Result<TimelinePreload> {
+        let client = RemoteTimelineClient::new(
+            remote_storage.clone(),
+            self.deletion_queue_client.clone(),
+            self.conf,
+            self.tenant_shard_id,
+            timeline_id,
+            self.generation,
+        );
+        let timeline_preload = async move {
+            debug!("starting index part download");
+
+            let index_part = client.download_index_file(&cancel).await;
+
+            debug!("finished index part download");
+
+            Result::<_, anyhow::Error>::Ok(TimelinePreload {
+                client,
+                timeline_id,
+                index_part,
+            })
+        }
+        .map(move |res| {
+            res.with_context(|| format!("download index part for timeline {timeline_id}"))
+        })
+        .instrument(info_span!("download_index_part", %timeline_id))
+        .await?;
+
+        Ok(timeline_preload)
+    }
+
+    async fn load_timelines_metadata(
         self: &Arc<Tenant>,
         timeline_ids: HashSet<TimelineId>,
         remote_storage: &GenericRemoteStorage,
@@ -1311,34 +1347,12 @@ impl Tenant {
     ) -> anyhow::Result<HashMap<TimelineId, TimelinePreload>> {
         let mut part_downloads = JoinSet::new();
         for timeline_id in timeline_ids {
-            let client = RemoteTimelineClient::new(
-                remote_storage.clone(),
-                self.deletion_queue_client.clone(),
-                self.conf,
-                self.tenant_shard_id,
-                timeline_id,
-                self.generation,
-            );
             let cancel_clone = cancel.clone();
-            part_downloads.spawn(
-                async move {
-                    debug!("starting index part download");
-
-                    let index_part = client.download_index_file(&cancel_clone).await;
-
-                    debug!("finished index part download");
-
-                    Result::<_, anyhow::Error>::Ok(TimelinePreload {
-                        client,
-                        timeline_id,
-                        index_part,
-                    })
-                }
-                .map(move |res| {
-                    res.with_context(|| format!("download index part for timeline {timeline_id}"))
-                })
-                .instrument(info_span!("download_index_part", %timeline_id)),
-            );
+            part_downloads.spawn(self.clone().load_timeline_metadata(
+                timeline_id,
+                remote_storage.clone(),
+                cancel_clone,
+            ));
         }
 
         let mut timeline_preloads: HashMap<TimelineId, TimelinePreload> = HashMap::new();
