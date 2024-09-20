@@ -346,7 +346,6 @@ async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
             RequestContext::todo_child(TaskKind::GarbageCollector, DownloadBehavior::Download);
 
         let mut first = true;
-        tenant.gc_block.set_lsn_lease_deadline(tenant.get_lsn_lease_length());
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => {

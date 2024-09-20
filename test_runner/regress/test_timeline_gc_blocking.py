@@ -45,10 +45,7 @@ def test_gc_blocking_by_timeline(neon_env_builder: NeonEnvBuilder, sharded: bool
     tenant_after = http.tenant_status(env.initial_tenant)
     assert tenant_before != tenant_after
     gc_blocking = tenant_after["gc_blocking"]
-    assert (
-        gc_blocking
-        == "BlockingReasons { tenant_blocked_by_lsn_lease_deadline: false, timelines: 1, reasons: EnumSet(Manual) }"
-    )
+    assert gc_blocking == "BlockingReasons { timelines: 1, reasons: EnumSet(Manual) }"
 
     wait_for_another_gc_round()
     pss.assert_log_contains(gc_skipped_line)
