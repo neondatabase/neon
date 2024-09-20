@@ -137,7 +137,7 @@ async fn delete_remote_layers_and_index(timeline: &Timeline) -> anyhow::Result<(
 
 /// It is important that this gets called when DeletionGuard is being held.
 /// For more context see comments in [`DeleteTimelineFlow::prepare`]
-pub(super) async fn remove_timeline_from_tenant(
+async fn remove_timeline_from_tenant(
     tenant: &Tenant,
     timeline: &Timeline,
     _: &DeletionGuard, // using it as a witness

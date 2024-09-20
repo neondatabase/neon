@@ -290,6 +290,9 @@ pub struct Tenant {
     /// **Lock order**: if acquring both, acquire`timelines` before `timelines_creating`
     timelines_creating: std::sync::Mutex<HashSet<TimelineId>>,
 
+    /// Possibly offloaded and archived timelines
+    timelines_offloaded: Mutex<HashMap<TimelineId, OffloadedTimeline>>,
+
     // This mutex prevents creation of new timelines during GC.
     // Adding yet another mutex (in addition to `timelines`) is needed because holding
     // `timelines` mutex during all GC iteration
@@ -477,6 +480,20 @@ impl WalRedoManager {
             WalRedoManager::Prod(_, m) => Some(m.status()),
             #[cfg(test)]
             WalRedoManager::Test(_) => None,
+        }
+    }
+}
+
+pub struct OffloadedTimeline {
+    pub timeline_id: TimelineId,
+    pub ancestor_timeline_id: Option<TimelineId>,
+}
+
+impl OffloadedTimeline {
+    fn from_timeline(timeline: &Timeline) -> Self {
+        Self {
+            timeline_id: timeline.timeline_id,
+            ancestor_timeline_id: timeline.get_ancestor_timeline_id(),
         }
     }
 }
@@ -1405,11 +1422,35 @@ impl Tenant {
         state: TimelineArchivalState,
     ) -> Result<(), TimelineArchivalError> {
         info!("setting timeline archival config");
-        let timeline = {
+        let timeline_or_unarchive_offloaded = 'outer: {
             let timelines = self.timelines.lock().unwrap();
 
             let Some(timeline) = timelines.get(&timeline_id) else {
-                return Err(TimelineArchivalError::NotFound);
+                let offloaded_timelines = self.timelines_offloaded.lock().unwrap();
+                let Some(offloaded) = offloaded_timelines.get(&timeline_id) else {
+                    return Err(TimelineArchivalError::NotFound);
+                };
+                if state == TimelineArchivalState::Archived {
+                    // It's offloaded, so nothing to do for archival
+                    return Ok(());
+                }
+                if let Some(ancestor_timeline_id) = offloaded.ancestor_timeline_id {
+                    let has_archived_parent =
+                        if let Some(ancestor_timeline) = timelines.get(&timeline_id) {
+                            ancestor_timeline.is_archived() == Some(true)
+                        } else if offloaded_timelines.contains_key(&ancestor_timeline_id) {
+                            true
+                        } else {
+                            error!("ancestor timeline {ancestor_timeline_id} not found");
+                            return Err(TimelineArchivalError::NotFound);
+                        };
+                    if has_archived_parent {
+                        return Err(TimelineArchivalError::HasArchivedParent(
+                            ancestor_timeline_id,
+                        ));
+                    }
+                }
+                break 'outer None;
             };
 
             if state == TimelineArchivalState::Unarchived {
@@ -1422,42 +1463,48 @@ impl Tenant {
                 }
             }
 
-            // Ensure that there are no non-archived child timelines
-            let children: Vec<TimelineId> = timelines
-                .iter()
-                .filter_map(|(id, entry)| {
-                    if entry.get_ancestor_timeline_id() != Some(timeline_id) {
-                        return None;
-                    }
-                    if entry.is_archived() == Some(true) {
-                        return None;
-                    }
-                    Some(*id)
-                })
-                .collect();
+            if state == TimelineArchivalState::Archived {
+                // Ensure that there are no non-archived child timelines
+                let children: Vec<TimelineId> = timelines
+                    .iter()
+                    .filter_map(|(id, entry)| {
+                        if entry.get_ancestor_timeline_id() != Some(timeline_id) {
+                            return None;
+                        }
+                        if entry.is_archived() == Some(true) {
+                            return None;
+                        }
+                        Some(*id)
+                    })
+                    .collect();
 
-            if !children.is_empty() && state == TimelineArchivalState::Archived {
-                return Err(TimelineArchivalError::HasUnarchivedChildren(children));
+                if !children.is_empty() {
+                    return Err(TimelineArchivalError::HasUnarchivedChildren(children));
+                }
             }
-            Arc::clone(timeline)
+            Some(Arc::clone(timeline))
         };
 
-        let upload_needed = timeline
-            .remote_client
-            .schedule_index_upload_for_timeline_archival_state(state)?;
+        if let Some(timeline) = timeline_or_unarchive_offloaded {
+            let upload_needed = timeline
+                .remote_client
+                .schedule_index_upload_for_timeline_archival_state(state)?;
 
-        if upload_needed {
-            info!("Uploading new state");
-            const MAX_WAIT: Duration = Duration::from_secs(10);
-            let Ok(v) =
-                tokio::time::timeout(MAX_WAIT, timeline.remote_client.wait_completion()).await
-            else {
-                tracing::warn!("reached timeout for waiting on upload queue");
-                return Err(TimelineArchivalError::Timeout);
-            };
-            v.map_err(|e| TimelineArchivalError::Other(anyhow::anyhow!(e)))?;
+            if upload_needed {
+                info!("Uploading new state");
+                const MAX_WAIT: Duration = Duration::from_secs(10);
+                let Ok(v) =
+                    tokio::time::timeout(MAX_WAIT, timeline.remote_client.wait_completion()).await
+                else {
+                    tracing::warn!("reached timeout for waiting on upload queue");
+                    return Err(TimelineArchivalError::Timeout);
+                };
+                v.map_err(|e| TimelineArchivalError::Other(anyhow::anyhow!(e)))?;
+            }
+            Ok(())
+        } else {
+            Ok(())
         }
-        Ok(())
     }
 
     pub(crate) fn tenant_shard_id(&self) -> TenantShardId {
@@ -1950,6 +1997,7 @@ impl Tenant {
             has_pending_task |= pending_task_left;
             if !pending_task_left && *can_offload {
                 offload_timeline(self, timeline)
+                    .instrument(info_span!("offload_timeline", %timeline_id))
                     .await
                     .map_err(|e| timeline::CompactionError::Other(e))?;
             }
@@ -2861,6 +2909,7 @@ impl Tenant {
             constructed_at: Instant::now(),
             timelines: Mutex::new(HashMap::new()),
             timelines_creating: Mutex::new(HashSet::new()),
+            timelines_offloaded: Mutex::new(HashMap::new()),
             gc_cs: tokio::sync::Mutex::new(()),
             walredo_mgr,
             remote_storage,
