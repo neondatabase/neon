@@ -1344,7 +1344,6 @@ impl Tenant {
         remote_storage: GenericRemoteStorage,
         cancel: CancellationToken,
     ) -> impl Future<Output = TimelinePreload> {
-        debug_assert_current_span_has_tenant_and_timeline_id();
         let client = RemoteTimelineClient::new(
             remote_storage.clone(),
             self.deletion_queue_client.clone(),
@@ -1354,6 +1353,7 @@ impl Tenant {
             self.generation,
         );
         async move {
+            debug_assert_current_span_has_tenant_and_timeline_id();
             debug!("starting index part download");
 
             let index_part = client.download_index_file(&cancel).await;
