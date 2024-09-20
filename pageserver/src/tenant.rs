@@ -18,7 +18,6 @@ use camino::Utf8Path;
 use camino::Utf8PathBuf;
 use enumset::EnumSet;
 use futures::stream::FuturesUnordered;
-use futures::FutureExt;
 use futures::StreamExt;
 use pageserver_api::models;
 use pageserver_api::models::AuxFilePolicy;
@@ -1308,7 +1307,7 @@ impl Tenant {
         timeline_id: TimelineId,
         remote_storage: GenericRemoteStorage,
         cancel: CancellationToken,
-    ) -> anyhow::Result<TimelinePreload> {
+    ) -> TimelinePreload {
         let client = RemoteTimelineClient::new(
             remote_storage.clone(),
             self.deletion_queue_client.clone(),
@@ -1317,26 +1316,21 @@ impl Tenant {
             timeline_id,
             self.generation,
         );
-        let timeline_preload = async move {
+        async move {
             debug!("starting index part download");
 
             let index_part = client.download_index_file(&cancel).await;
 
             debug!("finished index part download");
 
-            Result::<_, anyhow::Error>::Ok(TimelinePreload {
+            TimelinePreload {
                 client,
                 timeline_id,
                 index_part,
-            })
+            }
         }
-        .map(move |res| {
-            res.with_context(|| format!("download index part for timeline {timeline_id}"))
-        })
         .instrument(info_span!("download_index_part", %timeline_id))
-        .await?;
-
-        Ok(timeline_preload)
+        .await
     }
 
     async fn load_timelines_metadata(
@@ -1362,8 +1356,7 @@ impl Tenant {
                 next = part_downloads.join_next() => {
                     match next {
                         Some(result) => {
-                            let preload_result = result.context("join preload task")?;
-                            let preload = preload_result?;
+                            let preload = result.context("join preload task")?;
                             timeline_preloads.insert(preload.timeline_id, preload);
                         },
                         None => {
