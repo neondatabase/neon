@@ -204,7 +204,7 @@ impl RateLimiter {
                     }
 
                     // increment the counter after we finish sleeping (or cancel this task).
-                    // this ensures that tasks that have already started the acquire will observer
+                    // this ensures that tasks that have already started the acquire will observe
                     // the new sleep count when they are allowed to resume on the notify.
                     let _inc = Increment(&self.sleep_counter);
                     end_count += 1;
