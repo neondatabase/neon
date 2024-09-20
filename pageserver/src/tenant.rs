@@ -302,7 +302,7 @@ pub struct Tenant {
     /// Throttle applied at the top of [`Timeline::get`].
     /// All [`Tenant::timelines`] of a given [`Tenant`] instance share the same [`throttle::Throttle`] instance.
     pub(crate) timeline_get_throttle:
-        Arc<throttle::Throttle<&'static crate::metrics::tenant_throttling::TimelineGet>>,
+        Arc<throttle::Throttle<crate::metrics::tenant_throttling::TimelineGet>>,
 
     /// An ongoing timeline detach concurrency limiter.
     ///
@@ -2831,7 +2831,7 @@ impl Tenant {
             gate: Gate::default(),
             timeline_get_throttle: Arc::new(throttle::Throttle::new(
                 Tenant::get_timeline_get_throttle_config(conf, &attached_conf.tenant_conf),
-                &crate::metrics::tenant_throttling::TIMELINE_GET,
+                crate::metrics::tenant_throttling::TimelineGet::new(&tenant_shard_id),
             )),
             tenant_conf: Arc::new(ArcSwap::from_pointee(attached_conf)),
             ongoing_timeline_detach: std::sync::Mutex::default(),
