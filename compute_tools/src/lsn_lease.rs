@@ -31,7 +31,10 @@ pub fn launch_lsn_lease_bg_task_for_static(compute: &Arc<ComputeNode>) {
     let span = tracing::info_span!("lsn_lease_bg_task", %tenant_id, %timeline_id, %lsn);
     thread::spawn(move || {
         let _entered = span.entered();
-        lsn_lease_bg_task(compute, tenant_id, timeline_id, lsn);
+        if let Err(e) = lsn_lease_bg_task(compute, tenant_id, timeline_id, lsn) {
+            // TODO: might need stronger error feedback than logging an warning.
+            warn!("Exited with error: {e}");
+        }
     });
 }
 
@@ -41,9 +44,9 @@ fn lsn_lease_bg_task(
     tenant_id: TenantId,
     timeline_id: TimelineId,
     lsn: Lsn,
-) {
+) -> Result<()> {
     loop {
-        let valid_until = acquire_lsn_lease_with_retry(&compute, tenant_id, timeline_id, lsn);
+        let valid_until = acquire_lsn_lease_with_retry(&compute, tenant_id, timeline_id, lsn)?;
         let valid_duration = valid_until
             .duration_since(SystemTime::now())
             .unwrap_or(Duration::ZERO);
@@ -68,7 +71,7 @@ fn acquire_lsn_lease_with_retry(
     tenant_id: TenantId,
     timeline_id: TimelineId,
     lsn: Lsn,
-) -> SystemTime {
+) -> Result<SystemTime> {
     let mut attempts = 0usize;
     let mut retry_period_ms: f64 = 500.0;
     const MAX_RETRY_PERIOD_MS: f64 = 60.0 * 1000.0;
@@ -98,8 +101,11 @@ fn acquire_lsn_lease_with_retry(
 
         let result = try_acquire_lsn_lease(tenant_id, timeline_id, lsn, &configs);
         match result {
-            Ok(res) => {
-                return res;
+            Ok(Some(res)) => {
+                return Ok(res);
+            }
+            Ok(None) => {
+                bail!("Permanent error: lease could not be obtained, LSN is behind the GC cutoff");
             }
             Err(e) => {
                 warn!("Failed to acquire lsn lease: {e} (attempt {attempts}");
@@ -121,13 +127,13 @@ fn try_acquire_lsn_lease(
     timeline_id: TimelineId,
     lsn: Lsn,
     configs: &[postgres::Config],
-) -> Result<SystemTime> {
+) -> Result<Option<SystemTime>> {
     fn get_valid_until(
         config: &postgres::Config,
         tenant_shard_id: TenantShardId,
         timeline_id: TimelineId,
         lsn: Lsn,
-    ) -> Result<SystemTime> {
+    ) -> Result<Option<SystemTime>> {
         let mut client = config.connect(NoTls)?;
         let cmd = format!("lease lsn {} {} {} ", tenant_shard_id, timeline_id, lsn);
         let res = client.simple_query(&cmd)?;
@@ -141,15 +147,13 @@ fn try_acquire_lsn_lease(
         };
 
         // Note: this will be None if a lease is explicitly not granted.
-        let valid_until_str = row
-            .get("valid_until")
-            .expect("valid_until always has a value");
+        let valid_until_str = row.get("valid_until");
 
-        let valid_until = SystemTime::UNIX_EPOCH
-            .checked_add(Duration::from_millis(
-                u128::from_str(valid_until_str).unwrap() as u64,
-            ))
-            .expect("Time larger than max SystemTime could handle");
+        let valid_until = valid_until_str.map(|s| {
+            SystemTime::UNIX_EPOCH
+                .checked_add(Duration::from_millis(u128::from_str(s).unwrap() as u64))
+                .expect("Time larger than max SystemTime could handle")
+        });
         Ok(valid_until)
     }
 
@@ -167,7 +171,7 @@ fn try_acquire_lsn_lease(
                 };
                 get_valid_until(config, tenant_shard_id, timeline_id, lsn)
             })
-            .collect::<Result<Vec<SystemTime>>>()?
+            .collect::<Result<Vec<Option<SystemTime>>>>()?
             .into_iter()
             .min()
             .unwrap()
