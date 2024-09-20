@@ -27,6 +27,7 @@ futures = { workspace = true}
 jsonwebtoken.workspace = true
 nix.workspace = true
 once_cell.workspace = true
+pin-list = "0.1"
 pin-project-lite.workspace = true
 regex.workspace = true
 routerify.workspace = true

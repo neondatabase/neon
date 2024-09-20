@@ -3960,6 +3960,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pin-list"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fe91484d5a948b56f858ff2b92fd5b20b97d21b11d2d41041db8e5ec12d56c5e"
+dependencies = [
+ "pin-project-lite",
+ "pinned-aliasable",
+]
+
+[[package]]
 name = "pin-project"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3990,6 +4000,12 @@ name = "pin-utils"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8b870d8c151b6f2fb93e84a13146138f05d02ed11c7e7c54f8826aaaf7c9f184"
+
+[[package]]
+name = "pinned-aliasable"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5d0f9ae89bf0ed03b69ac1f3f7ea2e6e09b4fa5448011df2e67d581c2b850b7b"
 
 [[package]]
 name = "pkcs1"
@@ -6807,6 +6823,7 @@ dependencies = [
  "metrics",
  "nix 0.27.1",
  "once_cell",
+ "pin-list",
  "pin-project-lite",
  "postgres_connection",
  "pq_proto",

@@ -22,14 +22,14 @@
 //! Another explaination can be found here: <https://brandur.org/rate-limiting>
 
 use std::{
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Mutex,
-    },
+    cell::UnsafeCell,
+    sync::Mutex,
+    task::{Poll, Waker},
     time::Duration,
 };
 
-use tokio::{sync::Notify, time::Instant};
+use pin_list::{Node, NodeData, PinList};
+use tokio::time::Instant;
 
 pub struct LeakyBucketConfig {
     /// This is the "time cost" of a single request unit.
@@ -133,35 +133,146 @@ impl LeakyBucketState {
 }
 
 pub struct RateLimiter {
-    pub config: LeakyBucketConfig,
-    pub sleep_counter: AtomicU64,
-    pub state: Mutex<LeakyBucketState>,
-    /// a queue to provide this fair ordering.
-    pub queue: Notify,
+    config: LeakyBucketConfig,
+    state: UnsafeCell<LeakyBucketState>,
+    queue: Mutex<Queue>,
 }
 
-struct Requeue<'a>(&'a Notify);
+// SAFETY: To access the state in the UnsafeCell, you must be holding the RateToken.
+unsafe impl Sync for RateLimiter {}
 
-impl Drop for Requeue<'_> {
-    fn drop(&mut self) {
-        self.0.notify_one();
+struct RateToken;
+
+struct Queue {
+    sleep_counter: u64,
+    queue: PinList<RateLimitQueue>,
+    token: Option<RateToken>,
+}
+
+impl Queue {
+    /// returns the sleep_counter start value on await.
+    /// sleep_counter end value can be found within the enqueued.
+    fn wait(this: &Mutex<Self>) -> Enqueued<'_> {
+        Enqueued {
+            entry: pin_list::Node::new(),
+            queue: this,
+            token: None,
+        }
+    }
+}
+
+type RateLimitQueue = dyn pin_list::Types<
+    Id = pin_list::id::DebugChecked,
+    // the waker that lets us wake the next in the queue
+    Protected = Waker,
+    // the token that gives us access to the rate limit state
+    Removed = RateToken,
+    // the sleep count at the start of the enqueue
+    Unprotected = u64,
+>;
+
+pin_project_lite::pin_project! {
+    struct Enqueued<'a> {
+        #[pin]
+        entry: Node<RateLimitQueue>,
+        token: Option<(RateToken, u64)>,
+        queue: &'a Mutex<Queue>,
+    }
+
+    impl<'a> PinnedDrop for Enqueued<'a> {
+        fn drop(this: Pin<&mut Self>) {
+            let this = this.project();
+
+            #[allow(clippy::mut_mutex_lock, reason = "false positive")]
+            let mut q = this.queue.lock().unwrap();
+
+            let token = if let Some(init) = this.entry.initialized_mut() {
+                let (data, _start_count) =  init.reset(&mut q.queue) ;
+                match data {
+                    // we were in the queue and are not holding any resources.
+                    NodeData::Linked(_) => return,
+                    // we were the head of the queue and were about to be the current leader
+                    NodeData::Removed(token) => token
+                }
+            } else if let Some((token, sleep_counter)) = this.token.take() {
+                // we were holding the lock, and are now releasing it.
+                q.sleep_counter = sleep_counter;
+                token
+            } else {
+                // we apparently didn't even get into the queue to begin with
+                return;
+            };
+
+            // wake the next in the queue and give them the lock token
+            match q.queue.cursor_front_mut().remove_current(token) {
+                // wake up the next leader
+                Ok(waker) => waker.wake(),
+                // no tasks left in the queue. unlocked
+                Err(token) => q.token = Some(token),
+            }
+        }
+    }
+}
+
+impl std::future::Future for Enqueued<'_> {
+    type Output = u64;
+
+    fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
+        let this = self.project();
+        let mut node = this.entry;
+
+        #[allow(clippy::mut_mutex_lock, reason = "false positive")]
+        let mut q = this.queue.lock().unwrap();
+
+        if let Some(init) = node.as_mut().initialized_mut() {
+            // we are registered in the queue
+
+            match init.take_removed(&q.queue) {
+                // if we are removed from the queue, that means we are the new leader
+                Ok((token, start_count)) => {
+                    *this.token = Some((token, q.sleep_counter));
+                    Poll::Ready(start_count)
+                }
+                // if we are not removed from the queue, that means we are still waiting
+                // and had a spurious wake up
+                Err(init) => {
+                    init.protected_mut(&mut q.queue)
+                        .unwrap()
+                        .clone_from(cx.waker());
+                    Poll::Pending
+                }
+            }
+        } else {
+            // we are not yet registered in the queue
+            let start_count = q.sleep_counter;
+
+            if let Some(token) = q.token.take() {
+                // we are the first in the queue and it is not yet acquired
+                *this.token = Some((token, q.sleep_counter));
+                Poll::Ready(start_count)
+            } else {
+                // we push ourselves to the back of the queue
+                q.queue.push_back(node, cx.waker().clone(), start_count);
+                Poll::Pending
+            }
+        }
     }
 }
 
 impl RateLimiter {
     pub fn with_initial_tokens(config: LeakyBucketConfig, initial_tokens: f64) -> Self {
         RateLimiter {
-            sleep_counter: AtomicU64::new(0),
-            state: Mutex::new(LeakyBucketState::with_initial_tokens(
+            state: UnsafeCell::new(LeakyBucketState::with_initial_tokens(
                 &config,
                 initial_tokens,
             )),
             config,
-            queue: {
-                let queue = Notify::new();
-                queue.notify_one();
-                queue
-            },
+            queue: Mutex::new(Queue {
+                sleep_counter: 0,
+                // SAFETY: we make sure to only interact with the same queue
+                queue: PinList::new(unsafe { pin_list::id::DebugChecked::new() }),
+                token: Some(RateToken),
+            }),
         }
     }
 
@@ -173,42 +284,24 @@ impl RateLimiter {
     pub async fn acquire(&self, count: usize) -> bool {
         let start = tokio::time::Instant::now();
 
-        let start_count = self.sleep_counter.load(Ordering::Acquire);
-        let mut end_count = start_count;
-
-        // wait until we are the first in the queue
-        let mut notified = std::pin::pin!(self.queue.notified());
-        if !notified.as_mut().enable() {
-            notified.await;
-            end_count = self.sleep_counter.load(Ordering::Acquire);
-        }
-
-        // notify the next waiter in the queue when we are done.
-        let _guard = Requeue(&self.queue);
+        let mut entry = std::pin::pin!(Queue::wait(&self.queue));
+        let start_count = entry.as_mut().await;
+        let (_token, sleep_counter) = entry
+            .project()
+            .token
+            .as_mut()
+            .expect("token should be init if we returned from enqueued");
 
         loop {
-            let res = self
-                .state
-                .lock()
-                .unwrap()
-                .add_tokens(&self.config, start, count as f64);
+            // SAFETY: we are holding the token.
+            let res = unsafe {
+                let state = &mut *self.state.get();
+                state.add_tokens(&self.config, start, count as f64)
+            };
             match res {
-                Ok(()) => return end_count > start_count,
+                Ok(()) => return start_count < *sleep_counter,
                 Err(ready_at) => {
-                    struct Increment<'a>(&'a AtomicU64);
-
-                    impl Drop for Increment<'_> {
-                        fn drop(&mut self) {
-                            self.0.fetch_add(1, Ordering::AcqRel);
-                        }
-                    }
-
-                    // increment the counter after we finish sleeping (or cancel this task).
-                    // this ensures that tasks that have already started the acquire will observe
-                    // the new sleep count when they are allowed to resume on the notify.
-                    let _inc = Increment(&self.sleep_counter);
-                    end_count += 1;
-
+                    *sleep_counter += 1;
                     tokio::time::sleep_until(ready_at).await;
                 }
             }
