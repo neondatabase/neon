@@ -140,6 +140,7 @@ pub mod metadata;
 pub mod remote_timeline_client;
 pub mod storage_layer;
 
+pub mod checks;
 pub mod config;
 pub mod mgr;
 pub mod secondary;
@@ -1573,6 +1574,9 @@ impl Tenant {
         image_layer_desc: Vec<(Lsn, Vec<(pageserver_api::key::Key, bytes::Bytes)>)>,
         end_lsn: Lsn,
     ) -> anyhow::Result<Arc<Timeline>> {
+        use checks::check_valid_layermap;
+        use itertools::Itertools;
+
         let tline = self
             .create_test_timeline(new_timeline_id, initdb_lsn, pg_version, ctx)
             .await?;
@@ -1586,6 +1590,18 @@ impl Tenant {
             tline
                 .force_create_image_layer(lsn, images, Some(initdb_lsn), ctx)
                 .await?;
+        }
+        let layer_names = tline
+            .layers
+            .read()
+            .await
+            .layer_map()
+            .unwrap()
+            .iter_historic_layers()
+            .map(|layer| layer.layer_name())
+            .collect_vec();
+        if let Some(err) = check_valid_layermap(&layer_names) {
+            bail!("invalid layermap: {err}");
         }
         Ok(tline)
     }
@@ -3197,6 +3213,9 @@ impl Tenant {
         image_layer_desc: Vec<(Lsn, Vec<(pageserver_api::key::Key, bytes::Bytes)>)>,
         end_lsn: Lsn,
     ) -> anyhow::Result<Arc<Timeline>> {
+        use checks::check_valid_layermap;
+        use itertools::Itertools;
+
         let tline = self
             .branch_timeline_test(src_timeline, dst_id, ancestor_lsn, ctx)
             .await?;
@@ -3216,6 +3235,18 @@ impl Tenant {
             tline
                 .force_create_image_layer(lsn, images, Some(ancestor_lsn), ctx)
                 .await?;
+        }
+        let layer_names = tline
+            .layers
+            .read()
+            .await
+            .layer_map()
+            .unwrap()
+            .iter_historic_layers()
+            .map(|layer| layer.layer_name())
+            .collect_vec();
+        if let Some(err) = check_valid_layermap(&layer_names) {
+            bail!("invalid layermap: {err}");
         }
         Ok(tline)
     }
@@ -4164,9 +4195,18 @@ pub(crate) mod harness {
             let records_neon = records.iter().all(|r| apply_neon::can_apply_in_neon(&r.1));
             if records_neon {
                 // For Neon wal records, we can decode without spawning postgres, so do so.
-                let base_img = base_img.expect("Neon WAL redo requires base image").1;
-                let mut page = BytesMut::new();
-                page.extend_from_slice(&base_img);
+                let mut page = match (base_img, records.first()) {
+                    (Some((_lsn, img)), _) => {
+                        let mut page = BytesMut::new();
+                        page.extend_from_slice(&img);
+                        page
+                    }
+                    (_, Some((_lsn, rec))) if rec.will_init() => BytesMut::new(),
+                    _ => {
+                        panic!("Neon WAL redo requires base image or will init record");
+                    }
+                };
+
                 for (record_lsn, record) in records {
                     apply_neon::apply_in_neon(&record, record_lsn, key, &mut page)?;
                 }
@@ -8467,6 +8507,137 @@ mod tests {
             .unwrap();
 
         verify_result().await;
+
+        Ok(())
+    }
+
+    // Regression test for https://github.com/neondatabase/neon/issues/9012
+    // Create an image arrangement where we have to read at different LSN ranges
+    // from a delta layer. This is achieved by overlapping an image layer on top of
+    // a delta layer. Like so:
+    //
+    //     A      B
+    // +----------------+ -> delta_layer
+    // |                |                           ^ lsn
+    // |       =========|-> nested_image_layer      |
+    // |       C        |                           |
+    // +----------------+                           |
+    // ======== -> baseline_image_layer             +-------> key
+    //
+    //
+    // When querying the key range [A, B) we need to read at different LSN ranges
+    // for [A, C) and [C, B). This test checks that the described edge case is handled correctly.
+    #[tokio::test]
+    async fn test_vectored_read_with_nested_image_layer() -> anyhow::Result<()> {
+        let harness = TenantHarness::create("test_vectored_read_with_nested_image_layer").await?;
+        let (tenant, ctx) = harness.load().await;
+
+        let will_init_keys = [2, 6];
+        fn get_key(id: u32) -> Key {
+            let mut key = Key::from_hex("110000000033333333444444445500000000").unwrap();
+            key.field6 = id;
+            key
+        }
+
+        let mut expected_key_values = HashMap::new();
+
+        let baseline_image_layer_lsn = Lsn(0x10);
+        let mut baseline_img_layer = Vec::new();
+        for i in 0..5 {
+            let key = get_key(i);
+            let value = format!("value {i}@{baseline_image_layer_lsn}");
+
+            let removed = expected_key_values.insert(key, value.clone());
+            assert!(removed.is_none());
+
+            baseline_img_layer.push((key, Bytes::from(value)));
+        }
+
+        let nested_image_layer_lsn = Lsn(0x50);
+        let mut nested_img_layer = Vec::new();
+        for i in 5..10 {
+            let key = get_key(i);
+            let value = format!("value {i}@{nested_image_layer_lsn}");
+
+            let removed = expected_key_values.insert(key, value.clone());
+            assert!(removed.is_none());
+
+            nested_img_layer.push((key, Bytes::from(value)));
+        }
+
+        let mut delta_layer_spec = Vec::default();
+        let delta_layer_start_lsn = Lsn(0x20);
+        let mut delta_layer_end_lsn = delta_layer_start_lsn;
+
+        for i in 0..10 {
+            let key = get_key(i);
+            let key_in_nested = nested_img_layer
+                .iter()
+                .any(|(key_with_img, _)| *key_with_img == key);
+            let lsn = {
+                if key_in_nested {
+                    Lsn(nested_image_layer_lsn.0 + 0x10)
+                } else {
+                    delta_layer_start_lsn
+                }
+            };
+
+            let will_init = will_init_keys.contains(&i);
+            if will_init {
+                delta_layer_spec.push((key, lsn, Value::WalRecord(NeonWalRecord::wal_init())));
+
+                expected_key_values.insert(key, "".to_string());
+            } else {
+                let delta = format!("@{lsn}");
+                delta_layer_spec.push((
+                    key,
+                    lsn,
+                    Value::WalRecord(NeonWalRecord::wal_append(&delta)),
+                ));
+
+                expected_key_values
+                    .get_mut(&key)
+                    .expect("An image exists for each key")
+                    .push_str(delta.as_str());
+            }
+            delta_layer_end_lsn = std::cmp::max(delta_layer_start_lsn, lsn);
+        }
+
+        delta_layer_end_lsn = Lsn(delta_layer_end_lsn.0 + 1);
+
+        assert!(
+            nested_image_layer_lsn > delta_layer_start_lsn
+                && nested_image_layer_lsn < delta_layer_end_lsn
+        );
+
+        let tline = tenant
+            .create_test_timeline_with_layers(
+                TIMELINE_ID,
+                baseline_image_layer_lsn,
+                DEFAULT_PG_VERSION,
+                &ctx,
+                vec![DeltaLayerTestDesc::new_with_inferred_key_range(
+                    delta_layer_start_lsn..delta_layer_end_lsn,
+                    delta_layer_spec,
+                )], // delta layers
+                vec![
+                    (baseline_image_layer_lsn, baseline_img_layer),
+                    (nested_image_layer_lsn, nested_img_layer),
+                ], // image layers
+                delta_layer_end_lsn,
+            )
+            .await?;
+
+        let keyspace = KeySpace::single(get_key(0)..get_key(10));
+        let results = tline
+            .get_vectored(keyspace, delta_layer_end_lsn, &ctx)
+            .await
+            .expect("No vectored errors");
+        for (key, res) in results {
+            let value = res.expect("No key errors");
+            let expected_value = expected_key_values.remove(&key).expect("No unknown keys");
+            assert_eq!(value, Bytes::from(expected_value));
+        }
 
         Ok(())
     }

@@ -60,6 +60,7 @@ use super::backend::PoolingBackend;
 use super::conn_pool::AuthData;
 use super::conn_pool::Client;
 use super::conn_pool::ConnInfo;
+use super::conn_pool::ConnInfoWithAuth;
 use super::http_util::json_response;
 use super::json::json_to_pg_text;
 use super::json::pg_text_row_to_json;
@@ -86,9 +87,6 @@ enum Payload {
     Single(QueryData),
     Batch(BatchQueryData),
 }
-
-const MAX_RESPONSE_SIZE: usize = 10 * 1024 * 1024; // 10 MiB
-const MAX_REQUEST_SIZE: u64 = 10 * 1024 * 1024; // 10 MiB
 
 static CONN_STRING: HeaderName = HeaderName::from_static("neon-connection-string");
 static RAW_TEXT_OUTPUT: HeaderName = HeaderName::from_static("neon-raw-text-output");
@@ -151,7 +149,7 @@ fn get_conn_info(
     ctx: &RequestMonitoring,
     headers: &HeaderMap,
     tls: Option<&TlsConfig>,
-) -> Result<ConnInfo, ConnInfoError> {
+) -> Result<ConnInfoWithAuth, ConnInfoError> {
     // HTTP only uses cleartext (for now and likely always)
     ctx.set_auth_method(crate::context::AuthMethod::Cleartext);
 
@@ -238,11 +236,8 @@ fn get_conn_info(
         options: options.unwrap_or_default(),
     };
 
-    Ok(ConnInfo {
-        user_info,
-        dbname,
-        auth,
-    })
+    let conn_info = ConnInfo { user_info, dbname };
+    Ok(ConnInfoWithAuth { conn_info, auth })
 }
 
 // TODO: return different http error codes
@@ -366,10 +361,10 @@ pub(crate) enum SqlOverHttpError {
     ConnectCompute(#[from] HttpConnError),
     #[error("{0}")]
     ConnInfo(#[from] ConnInfoError),
-    #[error("request is too large (max is {MAX_REQUEST_SIZE} bytes)")]
-    RequestTooLarge,
-    #[error("response is too large (max is {MAX_RESPONSE_SIZE} bytes)")]
-    ResponseTooLarge,
+    #[error("request is too large (max is {0} bytes)")]
+    RequestTooLarge(u64),
+    #[error("response is too large (max is {0} bytes)")]
+    ResponseTooLarge(usize),
     #[error("invalid isolation level")]
     InvalidIsolationLevel,
     #[error("{0}")]
@@ -386,8 +381,8 @@ impl ReportableError for SqlOverHttpError {
             SqlOverHttpError::ReadPayload(e) => e.get_error_kind(),
             SqlOverHttpError::ConnectCompute(e) => e.get_error_kind(),
             SqlOverHttpError::ConnInfo(e) => e.get_error_kind(),
-            SqlOverHttpError::RequestTooLarge => ErrorKind::User,
-            SqlOverHttpError::ResponseTooLarge => ErrorKind::User,
+            SqlOverHttpError::RequestTooLarge(_) => ErrorKind::User,
+            SqlOverHttpError::ResponseTooLarge(_) => ErrorKind::User,
             SqlOverHttpError::InvalidIsolationLevel => ErrorKind::User,
             SqlOverHttpError::Postgres(p) => p.get_error_kind(),
             SqlOverHttpError::JsonConversion(_) => ErrorKind::Postgres,
@@ -402,8 +397,8 @@ impl UserFacingError for SqlOverHttpError {
             SqlOverHttpError::ReadPayload(p) => p.to_string(),
             SqlOverHttpError::ConnectCompute(c) => c.to_string_client(),
             SqlOverHttpError::ConnInfo(c) => c.to_string_client(),
-            SqlOverHttpError::RequestTooLarge => self.to_string(),
-            SqlOverHttpError::ResponseTooLarge => self.to_string(),
+            SqlOverHttpError::RequestTooLarge(_) => self.to_string(),
+            SqlOverHttpError::ResponseTooLarge(_) => self.to_string(),
             SqlOverHttpError::InvalidIsolationLevel => self.to_string(),
             SqlOverHttpError::Postgres(p) => p.to_string(),
             SqlOverHttpError::JsonConversion(_) => "could not parse postgres response".to_string(),
@@ -526,7 +521,10 @@ async fn handle_inner(
 
     // TLS config should be there.
     let conn_info = get_conn_info(ctx, headers, config.tls_config.as_ref())?;
-    info!(user = conn_info.user_info.user.as_str(), "credentials");
+    info!(
+        user = conn_info.conn_info.user_info.user.as_str(),
+        "credentials"
+    );
 
     // Allow connection pooling only if explicitly requested
     // or if we have decided that http pool is no longer opt-in
@@ -537,7 +535,7 @@ async fn handle_inner(
 
     let request_content_length = match request.body().size_hint().upper() {
         Some(v) => v,
-        None => MAX_REQUEST_SIZE + 1,
+        None => config.http_config.max_request_size_bytes + 1,
     };
     info!(request_content_length, "request size in bytes");
     Metrics::get()
@@ -547,8 +545,10 @@ async fn handle_inner(
 
     // we don't have a streaming request support yet so this is to prevent OOM
     // from a malicious user sending an extremely large request body
-    if request_content_length > MAX_REQUEST_SIZE {
-        return Err(SqlOverHttpError::RequestTooLarge);
+    if request_content_length > config.http_config.max_request_size_bytes {
+        return Err(SqlOverHttpError::RequestTooLarge(
+            config.http_config.max_request_size_bytes,
+        ));
     }
 
     let fetch_and_process_request = Box::pin(
@@ -569,20 +569,20 @@ async fn handle_inner(
                         .authenticate_with_password(
                             ctx,
                             &config.authentication_config,
-                            &conn_info.user_info,
+                            &conn_info.conn_info.user_info,
                             pw,
                         )
                         .await?
                 }
                 AuthData::Jwt(jwt) => {
                     backend
-                        .authenticate_with_jwt(ctx, &conn_info.user_info, jwt)
+                        .authenticate_with_jwt(ctx, &conn_info.conn_info.user_info, jwt)
                         .await?
                 }
             };
 
             let client = backend
-                .connect_to_compute(ctx, conn_info, keys, !allow_pool)
+                .connect_to_compute(ctx, conn_info.conn_info, keys, !allow_pool)
                 .await?;
             // not strictly necessary to mark success here,
             // but it's just insurance for if we forget it somewhere else
@@ -612,7 +612,10 @@ async fn handle_inner(
 
     // Now execute the query and return the result.
     let json_output = match payload {
-        Payload::Single(stmt) => stmt.process(cancel, &mut client, parsed_headers).await?,
+        Payload::Single(stmt) => {
+            stmt.process(config, cancel, &mut client, parsed_headers)
+                .await?
+        }
         Payload::Batch(statements) => {
             if parsed_headers.txn_read_only {
                 response = response.header(TXN_READ_ONLY.clone(), &HEADER_VALUE_TRUE);
@@ -628,7 +631,7 @@ async fn handle_inner(
             }
 
             statements
-                .process(cancel, &mut client, parsed_headers)
+                .process(config, cancel, &mut client, parsed_headers)
                 .await?
         }
     };
@@ -656,6 +659,7 @@ async fn handle_inner(
 impl QueryData {
     async fn process(
         self,
+        config: &'static ProxyConfig,
         cancel: CancellationToken,
         client: &mut Client<tokio_postgres::Client>,
         parsed_headers: HttpHeaders,
@@ -664,7 +668,7 @@ impl QueryData {
         let cancel_token = inner.cancel_token();
 
         let res = match select(
-            pin!(query_to_json(&*inner, self, &mut 0, parsed_headers)),
+            pin!(query_to_json(config, &*inner, self, &mut 0, parsed_headers)),
             pin!(cancel.cancelled()),
         )
         .await
@@ -727,6 +731,7 @@ impl QueryData {
 impl BatchQueryData {
     async fn process(
         self,
+        config: &'static ProxyConfig,
         cancel: CancellationToken,
         client: &mut Client<tokio_postgres::Client>,
         parsed_headers: HttpHeaders,
@@ -751,44 +756,52 @@ impl BatchQueryData {
             discard.discard();
         })?;
 
-        let json_output =
-            match query_batch(cancel.child_token(), &transaction, self, parsed_headers).await {
-                Ok(json_output) => {
-                    info!("commit");
-                    let status = transaction.commit().await.inspect_err(|_| {
-                        // if we cannot commit - for now don't return connection to pool
-                        // TODO: get a query status from the error
-                        discard.discard();
-                    })?;
-                    discard.check_idle(status);
-                    json_output
-                }
-                Err(SqlOverHttpError::Cancelled(_)) => {
-                    if let Err(err) = cancel_token.cancel_query(NoTls).await {
-                        tracing::error!(?err, "could not cancel query");
-                    }
-                    // TODO: after cancelling, wait to see if we can get a status. maybe the connection is still safe.
+        let json_output = match query_batch(
+            config,
+            cancel.child_token(),
+            &transaction,
+            self,
+            parsed_headers,
+        )
+        .await
+        {
+            Ok(json_output) => {
+                info!("commit");
+                let status = transaction.commit().await.inspect_err(|_| {
+                    // if we cannot commit - for now don't return connection to pool
+                    // TODO: get a query status from the error
                     discard.discard();
+                })?;
+                discard.check_idle(status);
+                json_output
+            }
+            Err(SqlOverHttpError::Cancelled(_)) => {
+                if let Err(err) = cancel_token.cancel_query(NoTls).await {
+                    tracing::error!(?err, "could not cancel query");
+                }
+                // TODO: after cancelling, wait to see if we can get a status. maybe the connection is still safe.
+                discard.discard();
 
-                    return Err(SqlOverHttpError::Cancelled(SqlOverHttpCancel::Postgres));
-                }
-                Err(err) => {
-                    info!("rollback");
-                    let status = transaction.rollback().await.inspect_err(|_| {
-                        // if we cannot rollback - for now don't return connection to pool
-                        // TODO: get a query status from the error
-                        discard.discard();
-                    })?;
-                    discard.check_idle(status);
-                    return Err(err);
-                }
-            };
+                return Err(SqlOverHttpError::Cancelled(SqlOverHttpCancel::Postgres));
+            }
+            Err(err) => {
+                info!("rollback");
+                let status = transaction.rollback().await.inspect_err(|_| {
+                    // if we cannot rollback - for now don't return connection to pool
+                    // TODO: get a query status from the error
+                    discard.discard();
+                })?;
+                discard.check_idle(status);
+                return Err(err);
+            }
+        };
 
         Ok(json_output)
     }
 }
 
 async fn query_batch(
+    config: &'static ProxyConfig,
     cancel: CancellationToken,
     transaction: &Transaction<'_>,
     queries: BatchQueryData,
@@ -798,6 +811,7 @@ async fn query_batch(
     let mut current_size = 0;
     for stmt in queries.queries {
         let query = pin!(query_to_json(
+            config,
             transaction,
             stmt,
             &mut current_size,
@@ -826,6 +840,7 @@ async fn query_batch(
 }
 
 async fn query_to_json<T: GenericClient>(
+    config: &'static ProxyConfig,
     client: &T,
     data: QueryData,
     current_size: &mut usize,
@@ -846,8 +861,10 @@ async fn query_to_json<T: GenericClient>(
         rows.push(row);
         // we don't have a streaming response support yet so this is to prevent OOM
         // from a malicious query (eg a cross join)
-        if *current_size > MAX_RESPONSE_SIZE {
-            return Err(SqlOverHttpError::ResponseTooLarge);
+        if *current_size > config.http_config.max_response_size_bytes {
+            return Err(SqlOverHttpError::ResponseTooLarge(
+                config.http_config.max_response_size_bytes,
+            ));
         }
     }
 

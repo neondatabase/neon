@@ -26,15 +26,9 @@ on:
         description: Azure tenant ID
         required: true
         type: string
-      skip_if:
-        description: Skip the job if this expression is true
-        required: true
-        type: boolean
 
 jobs:
   push-to-acr:
-    if: ${{ !inputs.skip_if }}
-
     runs-on: ubuntu-22.04
     permissions:
       contents: read  # This is required for actions/checkout

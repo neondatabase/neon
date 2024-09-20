@@ -702,7 +702,7 @@ impl Endpoint {
                     }
                 }
             }
-            std::thread::sleep(ATTEMPT_INTERVAL);
+            tokio::time::sleep(ATTEMPT_INTERVAL).await;
         }
 
         // disarm the scopeguard, let the child outlive this function (and neon_local invoction)

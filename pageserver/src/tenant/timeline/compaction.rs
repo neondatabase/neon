@@ -29,6 +29,7 @@ use utils::id::TimelineId;
 
 use crate::context::{AccessStatsBehavior, RequestContext, RequestContextBuilder};
 use crate::page_cache;
+use crate::tenant::checks::check_valid_layermap;
 use crate::tenant::remote_timeline_client::WaitCompletionError;
 use crate::tenant::storage_layer::merge_iterator::MergeIterator;
 use crate::tenant::storage_layer::split_writer::{
@@ -563,9 +564,11 @@ impl Timeline {
                 .await?;
 
             if keys_written > 0 {
-                let new_layer = image_layer_writer
-                    .finish(self, ctx)
+                let (desc, path) = image_layer_writer
+                    .finish(ctx)
                     .await
+                    .map_err(CompactionError::Other)?;
+                let new_layer = Layer::finish_creating(self.conf, self, desc, &path)
                     .map_err(CompactionError::Other)?;
                 tracing::info!(layer=%new_layer, "Rewrote layer, {} -> {} bytes",
                     layer.metadata().file_size,
@@ -1786,20 +1789,12 @@ impl Timeline {
                 stat.visit_image_layer(desc.file_size());
             }
         }
-        for layer in &layer_selection {
-            let desc = layer.layer_desc();
-            let key_range = &desc.key_range;
-            if desc.is_delta() && key_range.start.next() != key_range.end {
-                let lsn_range = desc.lsn_range.clone();
-                let intersects = lsn_split_point.range(lsn_range).collect_vec();
-                if intersects.len() > 1 {
-                    bail!(
-                        "cannot run gc-compaction because it violates the layer map LSN split assumption: layer {} intersects with LSN [{}]",
-                        desc.key(),
-                        intersects.into_iter().map(|lsn| lsn.to_string()).join(", ")
-                    );
-                }
-            }
+        let layer_names: Vec<crate::tenant::storage_layer::LayerName> = layer_selection
+            .iter()
+            .map(|layer| layer.layer_desc().layer_name())
+            .collect_vec();
+        if let Some(err) = check_valid_layermap(&layer_names) {
+            bail!("cannot run gc-compaction because {}", err);
         }
         // The maximum LSN we are processing in this compaction loop
         let end_lsn = layer_selection
