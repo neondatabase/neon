@@ -66,6 +66,7 @@ use std::{
 use crate::{
     aux_file::AuxFileSizeEstimator,
     tenant::{
+        config::AttachmentMode,
         layer_map::{LayerMap, SearchResult},
         metadata::TimelineMetadata,
         storage_layer::{inmemory_layer::IndexEntry, PersistentLayerDesc},
@@ -1336,20 +1337,21 @@ impl Timeline {
         self.make_lsn_lease(lsn, length, true, ctx)
     }
 
-    /// Renews a lease at a particular LSN. The requested LSN is not validated against the `latest_gc_cutoff_lsn`.
+    /// Renews a lease at a particular LSN. The requested LSN is not validated against the `latest_gc_cutoff_lsn` when we are in the grace period.
     pub(crate) fn renew_lsn_lease(
         &self,
         lsn: Lsn,
         length: Duration,
         ctx: &RequestContext,
-    ) -> LsnLease {
+    ) -> anyhow::Result<LsnLease> {
         self.make_lsn_lease(lsn, length, false, ctx)
-            .expect("lsn lease renewal always succeed")
     }
 
     /// Obtains a temporary lease blocking garbage collection for the given LSN.
     ///
-    /// This function will error if the requesting LSN is less than the `latest_gc_cutoff_lsn` for the initial request.
+    /// If we are in `AttachedSingle` mode and is not blocked by the lsn lease deadline, this function will error
+    /// if the requesting LSN is less than the `latest_gc_cutoff_lsn` and there is no existing request present.
+    ///
     /// If there is an existing lease in the map, the lease will be renewed only if the request extends the lease.
     /// The returned lease is therefore the maximum between the existing lease and the requesting lease.
     fn make_lsn_lease(
@@ -1381,9 +1383,15 @@ impl Timeline {
                     existing_lease.clone()
                 }
                 Entry::Vacant(vacant) => {
-                    // Reject already GC-ed LSN (lsn < latest_gc_cutoff) on initial request.
-                    // We will trust renewal request made by compute immediately after pageserver migration/restart.
-                    if init {
+                    // Reject already GC-ed LSN (lsn < latest_gc_cutoff) if we are in AttachedSingle and
+                    // not blocked by the lsn lease deadline.
+                    let validate = {
+                        let conf = self.tenant_conf.load();
+                        conf.location.attach_mode == AttachmentMode::Single
+                            && !conf.is_gc_blocked_by_lsn_lease_deadline()
+                    };
+
+                    if init || validate {
                         let latest_gc_cutoff_lsn = self.get_latest_gc_cutoff_lsn();
                         if lsn < *latest_gc_cutoff_lsn {
                             bail!("tried to request a page version that was garbage collected. requested at {} gc cutoff {}", lsn, *latest_gc_cutoff_lsn);
@@ -1971,8 +1979,6 @@ impl Timeline {
             .unwrap_or(self.conf.default_tenant_conf.lsn_lease_length)
     }
 
-    // TODO(yuchen): remove unused flag after implementing https://github.com/neondatabase/neon/issues/8072
-    #[allow(unused)]
     pub(crate) fn get_lsn_lease_length_for_ts(&self) -> Duration {
         let tenant_conf = self.tenant_conf.load();
         tenant_conf
