@@ -3155,45 +3155,38 @@ pub(crate) mod tenant_throttling {
 
     impl TimelineGet {
         pub(crate) fn new(tenant_shard_id: &TenantShardId) -> Self {
+            let per_tenant_label_values = &[
+                KIND,
+                &tenant_shard_id.tenant_id.to_string(),
+                &tenant_shard_id.shard_slug().to_string(),
+            ];
             TimelineGet {
                 count_accounted_start: {
                     GlobalAndPerTenantIntCounter {
                         global: COUNT_ACCOUNTED_START.with_label_values(&[KIND]),
-                        per_tenant: COUNT_ACCOUNTED_START_PER_TENANT.with_label_values(&[
-                            KIND,
-                            &tenant_shard_id.tenant_id.to_string(),
-                            &tenant_shard_id.shard_slug().to_string(),
-                        ]),
+                        per_tenant: COUNT_ACCOUNTED_START_PER_TENANT
+                            .with_label_values(per_tenant_label_values),
                     }
                 },
                 count_accounted_finish: {
                     GlobalAndPerTenantIntCounter {
                         global: COUNT_ACCOUNTED_FINISH.with_label_values(&[KIND]),
-                        per_tenant: COUNT_ACCOUNTED_FINISH_PER_TENANT.with_label_values(&[
-                            KIND,
-                            &tenant_shard_id.tenant_id.to_string(),
-                            &tenant_shard_id.shard_slug().to_string(),
-                        ]),
+                        per_tenant: COUNT_ACCOUNTED_FINISH_PER_TENANT
+                            .with_label_values(per_tenant_label_values),
                     }
                 },
                 wait_time: {
                     GlobalAndPerTenantIntCounter {
                         global: WAIT_USECS.with_label_values(&[KIND]),
-                        per_tenant: WAIT_USECS_PER_TENANT.with_label_values(&[
-                            KIND,
-                            &tenant_shard_id.tenant_id.to_string(),
-                            &tenant_shard_id.shard_slug().to_string(),
-                        ]),
+                        per_tenant: WAIT_USECS_PER_TENANT
+                            .with_label_values(per_tenant_label_values),
                     }
                 },
                 count_throttled: {
                     GlobalAndPerTenantIntCounter {
                         global: WAIT_COUNT.with_label_values(&[KIND]),
-                        per_tenant: WAIT_COUNT_PER_TENANT.with_label_values(&[
-                            KIND,
-                            &tenant_shard_id.tenant_id.to_string(),
-                            &tenant_shard_id.shard_slug().to_string(),
-                        ]),
+                        per_tenant: WAIT_COUNT_PER_TENANT
+                            .with_label_values(per_tenant_label_values),
                     }
                 },
             }
