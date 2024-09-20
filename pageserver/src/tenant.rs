@@ -1030,12 +1030,9 @@ impl Tenant {
         }
 
         Ok(TenantPreload {
-            timelines: self.load_timelines_metadata(
-                remote_timeline_ids,
-                remote_storage,
-                cancel,
-            )
-            .await?,
+            timelines: self
+                .load_timelines_metadata(remote_timeline_ids, remote_storage, cancel)
+                .await?,
         })
     }
 
