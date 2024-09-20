@@ -163,8 +163,6 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
     // How many errors we have seen consequtively
     let mut error_run_count = 0;
 
-    let mut last_throttle_flag_reset_at = Instant::now();
-
     TENANT_TASK_EVENTS.with_label_values(&["start"]).inc();
     async {
         let ctx = RequestContext::todo_child(TaskKind::Compaction, DownloadBehavior::Download);
@@ -191,8 +189,6 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
                 }
             }
 
-
-
             let sleep_duration;
             if period == Duration::ZERO {
                 #[cfg(not(feature = "testing"))]
@@ -207,12 +203,18 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
                 };
 
                 // Run compaction
-                let IterationResult { output, elapsed } = iteration.run(tenant.compaction_iteration(&cancel, &ctx)).await;
+                let IterationResult { output, elapsed } = iteration
+                    .run(tenant.compaction_iteration(&cancel, &ctx))
+                    .await;
                 match output {
                     Ok(has_pending_task) => {
                         error_run_count = 0;
                         // schedule the next compaction immediately in case there is a pending compaction task
-                        sleep_duration = if has_pending_task { Duration::ZERO } else { period };
+                        sleep_duration = if has_pending_task {
+                            Duration::ZERO
+                        } else {
+                            period
+                        };
                     }
                     Err(e) => {
                         let wait_duration = backoff::exponential_backoff_duration_seconds(
@@ -233,37 +235,19 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
                 }
 
                 // the duration is recorded by performance tests by enabling debug in this function
-                tracing::debug!(elapsed_ms=elapsed.as_millis(), "compaction iteration complete");
+                tracing::debug!(
+                    elapsed_ms = elapsed.as_millis(),
+                    "compaction iteration complete"
+                );
             };
-
 
             // Perhaps we did no work and the walredo process has been idle for some time:
             // give it a chance to shut down to avoid leaving walredo process running indefinitely.
+            // TODO: move this to a separate task (housekeeping loop) that isn't affected by the back-off,
+            // so we get some upper bound guarantee on when walredo quiesce / this throttling reporting here happens.
             if let Some(walredo_mgr) = &tenant.walredo_mgr {
                 walredo_mgr.maybe_quiesce(period * 10);
             }
-
-            // TODO: move this (and walredo quiesce) to a separate task that isn't affected by the back-off,
-            // so we get some upper bound guarantee on when walredo quiesce / this throttling reporting here happens.
-            info_span!(parent: None, "timeline_get_throttle", tenant_id=%tenant.tenant_shard_id, shard_id=%tenant.tenant_shard_id.shard_slug()).in_scope(|| {
-                let now = Instant::now();
-                let prev = std::mem::replace(&mut last_throttle_flag_reset_at, now);
-                let Stats { count_accounted, count_throttled, sum_throttled_usecs } = tenant.timeline_get_throttle.reset_stats();
-                if count_throttled == 0 {
-                    return;
-                }
-                let allowed_rps = tenant.timeline_get_throttle.steady_rps();
-                let delta = now - prev;
-                info!(
-                    n_seconds=%format_args!("{:.3}",
-                    delta.as_secs_f64()),
-                    count_accounted,
-                    count_throttled,
-                    sum_throttled_usecs,
-                    allowed_rps=%format_args!("{allowed_rps:.0}"),
-                    "shard was throttled in the last n_seconds"
-                );
-            });
 
             // Sleep
             if tokio::time::timeout(sleep_duration, cancel.cancelled())
@@ -436,6 +420,7 @@ async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
 async fn ingest_housekeeping_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
     TENANT_TASK_EVENTS.with_label_values(&["start"]).inc();
     async {
+    let mut last_throttle_flag_reset_at = Instant::now();
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => {
@@ -482,6 +467,29 @@ async fn ingest_housekeeping_loop(tenant: Arc<Tenant>, cancel: CancellationToken
                 kind: BackgroundLoopKind::IngestHouseKeeping,
             };
             iteration.run(tenant.ingest_housekeeping()).await;
+
+            // TODO: rename the background loop kind to something more generic, like, tenant housekeeping.
+            // Or just spawn another background loop for this throttle, it's not like it's super costly.
+            info_span!(parent: None, "timeline_get_throttle", tenant_id=%tenant.tenant_shard_id, shard_id=%tenant.tenant_shard_id.shard_slug()).in_scope(|| {
+                let now = Instant::now();
+                let prev = std::mem::replace(&mut last_throttle_flag_reset_at, now);
+                let Stats { count_accounted_start, count_accounted_finish, count_throttled, sum_throttled_usecs} = tenant.timeline_get_throttle.reset_stats();
+                if count_throttled == 0 {
+                    return;
+                }
+                let allowed_rps = tenant.timeline_get_throttle.steady_rps();
+                let delta = now - prev;
+                info!(
+                    n_seconds=%format_args!("{:.3}",
+                    delta.as_secs_f64()),
+                    count_accounted = count_accounted_finish,  // don't break existing log scraping
+                    count_throttled,
+                    sum_throttled_usecs,
+                    count_accounted_start, // log after pre-existing fields to not break existing log scraping
+                    allowed_rps=%format_args!("{allowed_rps:.0}"),
+                    "shard was throttled in the last n_seconds"
+                );
+            });
         }
     }
     .await;
