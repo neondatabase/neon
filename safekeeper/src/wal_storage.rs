@@ -539,20 +539,17 @@ async fn remove_segments_from_disk(
     while let Some(entry) = entries.next_entry().await? {
         let entry_path = entry.path();
         let fname = entry_path.file_name().unwrap();
-
-        if let Some(fname_str) = fname.to_str() {
-            /* Ignore files that are not XLOG segments */
-            if !IsXLogFileName(fname_str) && !IsPartialXLogFileName(fname_str) {
-                continue;
-            }
-            let (segno, _) = XLogFromFileName(fname_str, wal_seg_size);
-            if remove_predicate(segno) {
-                remove_file(entry_path).await?;
-                n_removed += 1;
-                min_removed = min(min_removed, segno);
-                max_removed = max(max_removed, segno);
-                REMOVED_WAL_SEGMENTS.inc();
-            }
+        /* Ignore files that are not XLOG segments */
+        if !IsXLogFileName(fname) && !IsPartialXLogFileName(fname) {
+            continue;
+        }
+        let (segno, _) = XLogFromFileName(fname, wal_seg_size)?;
+        if remove_predicate(segno) {
+            remove_file(entry_path).await?;
+            n_removed += 1;
+            min_removed = min(min_removed, segno);
+            max_removed = max(max_removed, segno);
+            REMOVED_WAL_SEGMENTS.inc();
         }
     }
 

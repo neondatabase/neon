@@ -27,7 +27,7 @@ use crate::{
     Host,
 };
 
-use super::conn_pool::{poll_client, AuthData, Client, ConnInfo, GlobalConnPool};
+use super::conn_pool::{poll_client, Client, ConnInfo, GlobalConnPool};
 
 pub(crate) struct PoolingBackend {
     pub(crate) pool: Arc<GlobalConnPool<tokio_postgres::Client>>,
@@ -273,13 +273,6 @@ impl ConnectMechanism for TokioMechanism {
             .user(&self.conn_info.user_info.user)
             .dbname(&self.conn_info.dbname)
             .connect_timeout(timeout);
-
-        match &self.conn_info.auth {
-            AuthData::Jwt(_) => {}
-            AuthData::Password(pw) => {
-                config.password(pw);
-            }
-        }
 
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
         let res = config.connect(tokio_postgres::NoTls).await;
