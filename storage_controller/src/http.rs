@@ -548,7 +548,7 @@ async fn handle_tenant_timeline_passthrough(
     let resp = client.get_raw(path).await.map_err(|e|
         // We return 503 here because if we can't successfully send a request to the pageserver,
         // either we aren't available or the pageserver is unavailable.
-        ApiError::ResourceUnavailable(format!("Error sending pageserver API request to {}: {e}", node).into()))?;
+        ApiError::ResourceUnavailable(format!("Error sending pageserver API request to {node}: {e}").into()))?;
 
     if !resp.status().is_success() {
         let error_counter = &METRICS_REGISTRY
