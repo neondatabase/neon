@@ -892,8 +892,8 @@ impl ComputeNode {
         if let Some(ref local_proxy) = spec.local_proxy_config {
             info!("configuring local-proxy");
 
-            write_local_proxy_conf("/etc/localproxy.json".as_ref(), local_proxy)?;
-            notify_local_proxy("/etc/localproxy.pid".as_ref())?;
+            write_local_proxy_conf("/etc/localproxy/config.json".as_ref(), local_proxy)?;
+            notify_local_proxy("/etc/localproxy/pid".as_ref())?;
         }
 
         // Run migrations separately to not hold up cold starts
