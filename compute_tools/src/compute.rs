@@ -1055,6 +1055,20 @@ impl ComputeNode {
             });
         }
 
+        if let Some(local_proxy) = &pspec.spec.local_proxy_config {
+            info!("configuring local-proxy");
+
+            // Spawn a thread to do the configuration,
+            // so that we don't block the main thread that starts Postgres.
+            let local_proxy = local_proxy.clone();
+            let _handle = thread::spawn(move || -> Result<()> {
+                write_local_proxy_conf("/etc/localproxy.json".as_ref(), &local_proxy)?;
+                notify_local_proxy("/etc/localproxy.pid".as_ref())?;
+
+                Ok(())
+            });
+        }
+
         info!(
             "start_compute spec.remote_extensions {:?}",
             pspec.spec.remote_extensions
