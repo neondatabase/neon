@@ -38,6 +38,44 @@ struct SchedulerNode {
     may_schedule: MaySchedule,
 }
 
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
+enum NodeSchedulingScore {
+    Attached(NodeAttachmentSchedulingScore),
+}
+
+impl NodeSchedulingScore {
+    fn is_overloaded(&self) -> bool {
+        match self {
+            NodeSchedulingScore::Attached(score) => {
+                PageserverUtilization::is_overloaded(score.utilization_score)
+            }
+        }
+    }
+
+    fn node_id(&self) -> NodeId {
+        match self {
+            NodeSchedulingScore::Attached(score) => score.node_id,
+        }
+    }
+}
+
+/// Scheduling score of a given node for shard attachments.
+/// Lower scores indicate more suitable nodes.
+/// Ordering is given by member declaration order (top to bottom).
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
+struct NodeAttachmentSchedulingScore {
+    /// The number of shards belonging to the tenant currently being
+    /// scheduled that are attached to this node.
+    affinity_score: AffinityScore,
+    /// Utilisation score that combines shard count and disk utilisation
+    utilization_score: u64,
+    /// Total number of shards attached to this node. When nodes have identical utilisation, this
+    /// acts as an anti-affinity between attached shards.
+    total_attached_shard_count: usize,
+    /// Convenience to make selection deterministic in tests and empty systems
+    node_id: NodeId,
+}
+
 impl PartialEq for SchedulerNode {
     fn eq(&self, other: &Self) -> bool {
         let may_schedule_matches = matches!(
@@ -406,6 +444,34 @@ impl Scheduler {
         node.and_then(|(node_id, may_schedule)| if may_schedule { Some(node_id) } else { None })
     }
 
+    /// Compute a schedulling score for each node that the scheduler knows of
+    /// minus a set of hard excluded nodes.
+    fn compute_node_scores(
+        &mut self,
+        hard_exclude: &[NodeId],
+        context: &ScheduleContext,
+    ) -> Vec<NodeSchedulingScore> {
+        self.nodes
+            .iter_mut()
+            .filter_map(|(k, v)| match &mut v.may_schedule {
+                MaySchedule::No => None,
+                MaySchedule::Yes(_) if hard_exclude.contains(k) => None,
+                MaySchedule::Yes(utilization) => Some(NodeSchedulingScore::Attached(
+                    NodeAttachmentSchedulingScore {
+                        affinity_score: context
+                            .nodes
+                            .get(k)
+                            .copied()
+                            .unwrap_or(AffinityScore::FREE),
+                        utilization_score: utilization.cached_score(),
+                        total_attached_shard_count: v.attached_shard_count,
+                        node_id: *k,
+                    },
+                )),
+            })
+            .collect()
+    }
+
     /// hard_exclude: it is forbidden to use nodes in this list, typically becacuse they
     /// are already in use by this shard -- we use this to avoid picking the same node
     /// as both attached and secondary location.  This is a hard constraint: if we cannot
@@ -424,20 +490,7 @@ impl Scheduler {
             return Err(ScheduleError::NoPageservers);
         }
 
-        let mut scores: Vec<(NodeId, AffinityScore, u64, usize)> = self
-            .nodes
-            .iter_mut()
-            .filter_map(|(k, v)| match &mut v.may_schedule {
-                MaySchedule::No => None,
-                MaySchedule::Yes(_) if hard_exclude.contains(k) => None,
-                MaySchedule::Yes(utilization) => Some((
-                    *k,
-                    context.nodes.get(k).copied().unwrap_or(AffinityScore::FREE),
-                    utilization.cached_score(),
-                    v.attached_shard_count,
-                )),
-            })
-            .collect();
+        let mut scores = self.compute_node_scores(hard_exclude, context);
 
         // Exclude nodes whose utilization is critically high, if there are alternatives available.  This will
         // cause us to violate affinity rules if it is necessary to avoid critically overloading nodes: for example
@@ -445,20 +498,14 @@ impl Scheduler {
         // overloaded.
         let non_overloaded_scores = scores
             .iter()
-            .filter(|i| !PageserverUtilization::is_overloaded(i.2))
+            .filter(|i| !i.is_overloaded())
             .copied()
             .collect::<Vec<_>>();
         if !non_overloaded_scores.is_empty() {
             scores = non_overloaded_scores;
         }
 
-        // Sort by, in order of precedence:
-        //  1st: Affinity score.  We should never pick a higher-score node if a lower-score node is available
-        //  2nd: Utilization score (this combines shard count and disk utilization)
-        //  3rd: Attached shard count.  When nodes have identical utilization (e.g. when populating some
-        //       empty nodes), this acts as an anti-affinity between attached shards.
-        //  4th: Node ID.  This is a convenience to make selection deterministic in tests and empty systems.
-        scores.sort_by_key(|i| (i.1, i.2, i.3, i.0));
+        scores.sort();
 
         if scores.is_empty() {
             // After applying constraints, no pageservers were left.
@@ -481,12 +528,12 @@ impl Scheduler {
         }
 
         // Lowest score wins
-        let node_id = scores.first().unwrap().0;
+        let node_id = scores.first().unwrap().node_id();
 
         if !matches!(context.mode, ScheduleMode::Speculative) {
             tracing::info!(
             "scheduler selected node {node_id} (elegible nodes {:?}, hard exclude: {hard_exclude:?}, soft exclude: {context:?})",
-            scores.iter().map(|i| i.0 .0).collect::<Vec<_>>()
+            scores.iter().map(|i| i.node_id().0).collect::<Vec<_>>()
         );
         }
 
