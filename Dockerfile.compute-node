@@ -1065,7 +1065,7 @@ RUN case "${PG_VERSION}" in "v17") \
     mkdir /ext-src
 
 #COPY --from=postgis-build /postgis.tar.gz /ext-src/
-COPY --from=postgis-build /postgis-src /ext-src/
+COPY --from=postgis-build /postgis-src/ /ext-src/
 COPY --from=postgis-build /sfcgal/* /usr
 COPY --from=plv8-build /plv8.tar.gz /ext-src/
 COPY --from=h3-pg-build /h3-pg.tar.gz /ext-src/
