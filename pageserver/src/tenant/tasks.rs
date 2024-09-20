@@ -203,12 +203,18 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
                 };
 
                 // Run compaction
-                let IterationResult { output, elapsed } = iteration.run(tenant.compaction_iteration(&cancel, &ctx)).await;
+                let IterationResult { output, elapsed } = iteration
+                    .run(tenant.compaction_iteration(&cancel, &ctx))
+                    .await;
                 match output {
                     Ok(has_pending_task) => {
                         error_run_count = 0;
                         // schedule the next compaction immediately in case there is a pending compaction task
-                        sleep_duration = if has_pending_task { Duration::ZERO } else { period };
+                        sleep_duration = if has_pending_task {
+                            Duration::ZERO
+                        } else {
+                            period
+                        };
                     }
                     Err(e) => {
                         let wait_duration = backoff::exponential_backoff_duration_seconds(
