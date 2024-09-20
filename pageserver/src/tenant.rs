@@ -1301,37 +1301,6 @@ impl Tenant {
         .await
     }
 
-    async fn load_timeline_metadata(
-        self: Arc<Tenant>,
-        timeline_id: TimelineId,
-        remote_storage: GenericRemoteStorage,
-        cancel: CancellationToken,
-    ) -> TimelinePreload {
-        let client = RemoteTimelineClient::new(
-            remote_storage.clone(),
-            self.deletion_queue_client.clone(),
-            self.conf,
-            self.tenant_shard_id,
-            timeline_id,
-            self.generation,
-        );
-        async move {
-            debug!("starting index part download");
-
-            let index_part = client.download_index_file(&cancel).await;
-
-            debug!("finished index part download");
-
-            TimelinePreload {
-                client,
-                timeline_id,
-                index_part,
-            }
-        }
-        .instrument(info_span!("download_index_part", %timeline_id))
-        .await
-    }
-
     async fn load_timelines_metadata(
         self: &Arc<Tenant>,
         timeline_ids: HashSet<TimelineId>,
@@ -1370,6 +1339,37 @@ impl Tenant {
         }
 
         Ok(timeline_preloads)
+    }
+
+    async fn load_timeline_metadata(
+        self: Arc<Tenant>,
+        timeline_id: TimelineId,
+        remote_storage: GenericRemoteStorage,
+        cancel: CancellationToken,
+    ) -> TimelinePreload {
+        let client = RemoteTimelineClient::new(
+            remote_storage.clone(),
+            self.deletion_queue_client.clone(),
+            self.conf,
+            self.tenant_shard_id,
+            timeline_id,
+            self.generation,
+        );
+        async move {
+            debug!("starting index part download");
+
+            let index_part = client.download_index_file(&cancel).await;
+
+            debug!("finished index part download");
+
+            TimelinePreload {
+                client,
+                timeline_id,
+                index_part,
+            }
+        }
+        .instrument(info_span!("download_index_part", %timeline_id))
+        .await
     }
 
     pub(crate) async fn apply_timeline_archival_config(
