@@ -1307,11 +1307,11 @@ impl Tenant {
         let mut part_downloads = JoinSet::new();
         for timeline_id in timeline_ids {
             let cancel_clone = cancel.clone();
-            part_downloads.spawn(self.clone().load_timeline_metadata(
-                timeline_id,
-                remote_storage.clone(),
-                cancel_clone,
-            ));
+            part_downloads.spawn(
+                self.clone()
+                    .load_timeline_metadata(timeline_id, remote_storage.clone(), cancel_clone)
+                    .instrument(info_span!("download_index_part", %timeline_id)),
+            );
         }
 
         let mut timeline_preloads: HashMap<TimelineId, TimelinePreload> = HashMap::new();
@@ -1365,7 +1365,6 @@ impl Tenant {
                 index_part,
             }
         }
-        .instrument(info_span!("download_index_part", %timeline_id))
         .await
     }
 
