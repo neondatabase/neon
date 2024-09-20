@@ -8,6 +8,7 @@ from fixtures.neon_fixtures import (
     PgBin,
     fork_at_current_lsn,
     import_timeline_from_vanilla_postgres,
+    wait_for_wal_insert_lsn,
 )
 
 
@@ -146,12 +147,16 @@ def test_twophase_at_wal_segment_start(neon_simple_env: NeonEnv):
     very first page of a WAL segment and the server was started up at that first page.
     """
     env = neon_simple_env
-    env.neon_cli.create_branch("test_twophase", "main")
+    timeline_id = env.neon_cli.create_branch("test_twophase", "main")
 
     endpoint = env.endpoints.create_start(
         "test_twophase", config_lines=["max_prepared_transactions=5"]
     )
     endpoint.safe_psql("SELECT pg_switch_wal()")
+
+    # to avoid hitting https://github.com/neondatabase/neon/issues/9079, wait for the
+    # WAL to reach the pageserver.
+    wait_for_wal_insert_lsn(env, endpoint, env.initial_tenant, timeline_id)
 
     endpoint.stop_and_destroy()
 
