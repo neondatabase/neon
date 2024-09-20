@@ -145,7 +145,6 @@ jobs:
           branch: "REL_14_STABLE_neon"
           fetch_depth: "50"
           sub_fetch_depth: "50"
-          first_parent: true
           pass_if_unchanged: true
 
       - name: Check vendor/postgres-v15 submodule reference
@@ -156,7 +155,6 @@ jobs:
           branch: "REL_15_STABLE_neon"
           fetch_depth: "50"
           sub_fetch_depth: "50"
-          first_parent: true
           pass_if_unchanged: true
 
       - name: Check vendor/postgres-v16 submodule reference
@@ -167,7 +165,6 @@ jobs:
           branch: "REL_16_STABLE_neon"
           fetch_depth: "50"
           sub_fetch_depth: "50"
-          first_parent: true
           pass_if_unchanged: true
 
       - name: Check vendor/postgres-v17 submodule reference
@@ -178,7 +175,6 @@ jobs:
           branch: "REL_17_STABLE_neon"
           fetch_depth: "50"
           sub_fetch_depth: "50"
-          first_parent: true
           pass_if_unchanged: true
 
   check-codestyle-rust:
