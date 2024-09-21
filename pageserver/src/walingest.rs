@@ -1069,7 +1069,7 @@ impl WalIngest {
         // NB: In PostgreSQL, the next-multi-xid stored in the control file is allowed to
         // go to 0, and it's fixed up by skipping to FirstMultiXactId in functions that
         // read it, like GetNewMultiXactId(). This is different from how nextXid is
-        // incremented! nextXid skips over < FirstNormalTransactionId when the the value
+        // incremented! nextXid skips over < FirstNormalTransactionId when the value
         // is stored, so it's never 0 in a checkpoint.
         //
         // I don't know why it's done that way, it seems less error-prone to skip over 0
