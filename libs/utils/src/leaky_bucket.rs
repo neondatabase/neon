@@ -142,14 +142,17 @@ struct Queue {
     state: Option<LeakyBucketState>,
 }
 
-impl Queue {
+impl RateLimiter {
     /// returns the sleep_counter start value on await.
     /// sleep_counter end value can be found within the enqueued.
-    fn wait(this: &Mutex<Self>) -> Enqueued<'_> {
+    fn wait(&self, count: usize) -> Enqueued<'_> {
         Enqueued {
             entry: pin_list::Node::new(),
-            queue: this,
+            limiter: self,
+            sleep_counter: 0,
             state: None,
+            count,
+            start: tokio::time::Instant::now(),
         }
     }
 }
@@ -157,9 +160,10 @@ impl Queue {
 type RateLimitQueue = dyn pin_list::Types<
     Id = pin_list::id::Checked,
     // the waker that lets us wake the next in the queue
-    Protected = Waker,
-    // the token that gives us access to the rate limit state
-    Removed = LeakyBucketState,
+    Protected = (Waker, Instant, usize),
+    // the token that gives us access to the rate limit state.
+    // if None, then we were granted access by the leader
+    Removed = Option<LeakyBucketState>,
     // the sleep count at the start of the enqueue
     Unprotected = u64,
 >;
@@ -168,8 +172,11 @@ pin_project_lite::pin_project! {
     struct Enqueued<'a> {
         #[pin]
         entry: Node<RateLimitQueue>,
-        state: Option<(LeakyBucketState, u64)>,
-        queue: &'a Mutex<Queue>,
+        state: Option<LeakyBucketState>,
+        sleep_counter: u64,
+        limiter: &'a RateLimiter,
+        start: Instant,
+        count: usize,
     }
 
     impl<'a> PinnedDrop for Enqueued<'a> {
@@ -177,31 +184,48 @@ pin_project_lite::pin_project! {
             let this = this.project();
 
             #[allow(clippy::mut_mutex_lock, reason = "false positive")]
-            let mut q = this.queue.lock().unwrap();
+            let mut q = this.limiter.queue.lock().unwrap();
 
-            let state = if let Some(init) = this.entry.initialized_mut() {
+            let mut state = if let Some(init) = this.entry.initialized_mut() {
                 let (data, _start_count) =  init.reset(&mut q.queue) ;
                 match data {
                     // we were in the queue and are not holding any resources.
-                    NodeData::Linked(_) => return,
+                    NodeData::Linked(_) | NodeData::Removed(None) => return,
                     // we were the head of the queue and were about to be the current leader
-                    NodeData::Removed(state) => state
+                    NodeData::Removed(Some(state)) => state
                 }
-            } else if let Some((state, sleep_counter)) = this.state.take() {
+            } else if let Some(state) = this.state.take() {
                 // we were holding the lock, and are now releasing it.
-                q.sleep_counter = sleep_counter;
+                q.sleep_counter = *this.sleep_counter;
                 state
             } else {
                 // we apparently didn't even get into the queue to begin with
                 return;
             };
 
-            // wake the next in the queue and give them the rate limit state
-            match q.queue.cursor_front_mut().remove_current(state) {
-                // wake up the next leader
-                Ok(waker) => waker.wake(),
-                // no tasks left in the queue. unlocked
-                Err(state) => q.state = Some(state),
+            let mut cursor = q.queue.cursor_front_mut();
+            loop {
+                match cursor.protected() {
+                    Some((_waker, start, count)) => {
+                        match state.add_tokens(&this.limiter.config, *start, *count as f64) {
+                            Ok(()) => {
+                                cursor.remove_current(None)
+                                    .map_err(|_| {}).expect("we have just checked that the current node is in the list");
+                            },
+                            // next in the queue has to sleep
+                            Err(_ready_at) => {
+                                cursor.remove_current(Some(state))
+                                    .map_err(|_| {}).expect("we have just checked that the current node is in the list");
+                                break;
+                            }
+                        }
+                    },
+                    // no tasks left in the queue. unlocked
+                    None => {
+                        q.state = Some(state);
+                        break;
+                    }
+                }
             }
         }
     }
@@ -215,7 +239,7 @@ impl std::future::Future for Enqueued<'_> {
         let mut node = this.entry;
 
         #[allow(clippy::mut_mutex_lock, reason = "false positive")]
-        let mut q = this.queue.lock().unwrap();
+        let mut q = this.limiter.queue.lock().unwrap();
 
         if let Some(init) = node.as_mut().initialized_mut() {
             // we are registered in the queue
@@ -223,7 +247,8 @@ impl std::future::Future for Enqueued<'_> {
             match init.take_removed(&q.queue) {
                 // if we are removed from the queue, that means we are the new leader
                 Ok((state, start_count)) => {
-                    *this.state = Some((state, q.sleep_counter));
+                    *this.state = state;
+                    *this.sleep_counter = q.sleep_counter;
                     Poll::Ready(start_count)
                 }
                 // if we are not removed from the queue, that means we are still waiting
@@ -231,6 +256,7 @@ impl std::future::Future for Enqueued<'_> {
                 Err(init) => {
                     init.protected_mut(&mut q.queue)
                         .unwrap()
+                        .0
                         .clone_from(cx.waker());
                     Poll::Pending
                 }
@@ -241,11 +267,16 @@ impl std::future::Future for Enqueued<'_> {
 
             if let Some(state) = q.state.take() {
                 // we are the first in the queue and it is not yet acquired
-                *this.state = Some((state, q.sleep_counter));
+                *this.state = Some(state);
+                *this.sleep_counter = q.sleep_counter;
                 Poll::Ready(start_count)
             } else {
                 // we push ourselves to the back of the queue
-                q.queue.push_back(node, cx.waker().clone(), start_count);
+                q.queue.push_back(
+                    node,
+                    (cx.waker().clone(), *this.start, *this.count),
+                    start_count,
+                );
                 Poll::Pending
             }
         }
@@ -273,21 +304,21 @@ impl RateLimiter {
 
     /// returns true if we did throttle
     pub async fn acquire(&self, count: usize) -> bool {
-        let start = tokio::time::Instant::now();
-
-        let mut entry = std::pin::pin!(Queue::wait(&self.queue));
+        let mut entry = std::pin::pin!(self.wait(count));
         let start_count = entry.as_mut().await;
-        let (state, sleep_counter) = entry
-            .project()
-            .state
-            .as_mut()
-            .expect("token should be init if we returned from enqueued");
+        let entry = entry.project();
+
+        let Some(state) = entry.state.as_mut() else {
+            // we were woken up without the state,
+            // thus the state leader must have allowed us to continue
+            return start_count < *entry.sleep_counter;
+        };
 
         loop {
-            match state.add_tokens(&self.config, start, count as f64) {
-                Ok(()) => return start_count < *sleep_counter,
+            match state.add_tokens(&self.config, *entry.start, count as f64) {
+                Ok(()) => return start_count < *entry.sleep_counter,
                 Err(ready_at) => {
-                    *sleep_counter += 1;
+                    *entry.sleep_counter += 1;
                     tokio::time::sleep_until(ready_at).await;
                 }
             }
