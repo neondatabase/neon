@@ -224,7 +224,7 @@ neon_get_perf_counters(PG_FUNCTION_ARGS)
 	Datum		values[3];
 	bool		nulls[3];
 	Datum		getpage_wait_str;
-	neon_per_backend_counters totals = { 0 };
+	neon_per_backend_counters totals = {0};
 	metric_t   *metrics;
 
 	/* We put all the tuples into a tuplestore in one go. */

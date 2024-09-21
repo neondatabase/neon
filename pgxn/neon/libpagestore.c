@@ -927,10 +927,7 @@ check_neon_id(char **newval, void **extra, GucSource source)
 static Size
 PagestoreShmemSize(void)
 {
-	return add_size(
-		sizeof(PagestoreShmemState),
-		NeonPerfCountersShmemSize()
-		);
+	return add_size(sizeof(PagestoreShmemState), NeonPerfCountersShmemSize());
 }
 
 static bool
