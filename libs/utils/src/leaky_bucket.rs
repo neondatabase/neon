@@ -161,9 +161,9 @@ type RateLimitQueue = dyn pin_list::Types<
     Id = pin_list::id::Checked,
     // the waker that lets us wake the next in the queue
     Protected = (Waker, Instant, usize),
-    // the token that gives us access to the rate limit state.
-    // if None, then we were granted access by the leader
-    Removed = Option<LeakyBucketState>,
+    // the token that gives us access to the rate limit state, along with when it should be ready.
+    // if None, then we were granted access already by the leader
+    Removed = Option<(LeakyBucketState, Instant)>,
     // the sleep count at the start of the enqueue
     Unprotected = u64,
 >;
@@ -172,7 +172,7 @@ pin_project_lite::pin_project! {
     struct Enqueued<'a> {
         #[pin]
         entry: Node<RateLimitQueue>,
-        state: Option<LeakyBucketState>,
+        state: Option<(LeakyBucketState, Instant)>,
         sleep_counter: u64,
         limiter: &'a RateLimiter,
         start: Instant,
@@ -192,9 +192,9 @@ pin_project_lite::pin_project! {
                     // we were in the queue and are not holding any resources.
                     NodeData::Linked(_) | NodeData::Removed(None) => return,
                     // we were the head of the queue and were about to be the current leader
-                    NodeData::Removed(Some(state)) => state
+                    NodeData::Removed(Some((state, _ready_at))) => state
                 }
-            } else if let Some(state) = this.state.take() {
+            } else if let Some((state, _ready_at)) = this.state.take() {
                 // we were holding the lock, and are now releasing it.
                 q.sleep_counter = *this.sleep_counter;
                 state
@@ -213,8 +213,8 @@ pin_project_lite::pin_project! {
                                     .map_err(|_| {}).expect("we have just checked that the current node is in the list");
                             },
                             // next in the queue has to sleep
-                            Err(_ready_at) => {
-                                cursor.remove_current(Some(state))
+                            Err(ready_at) => {
+                                cursor.remove_current(Some((state, ready_at)))
                                     .map_err(|_| {}).expect("we have just checked that the current node is in the list");
                                 break;
                             }
@@ -267,7 +267,7 @@ impl std::future::Future for Enqueued<'_> {
 
             if let Some(state) = q.state.take() {
                 // we are the first in the queue and it is not yet acquired
-                *this.state = Some(state);
+                *this.state = Some((state, *this.start));
                 *this.sleep_counter = q.sleep_counter;
                 Poll::Ready(start_count)
             } else {
@@ -308,19 +308,23 @@ impl RateLimiter {
         let start_count = entry.as_mut().await;
         let entry = entry.project();
 
-        let Some(state) = entry.state.as_mut() else {
+        let Some((state, ready_at)) = entry.state.as_mut() else {
             // we were woken up without the state,
             // thus the state leader must have allowed us to continue
             return start_count < *entry.sleep_counter;
         };
 
         loop {
+            if *ready_at > Instant::now() {
+                *entry.sleep_counter += 1;
+                tokio::time::sleep_until(*ready_at).await;
+            }
+
             match state.add_tokens(&self.config, *entry.start, count as f64) {
                 Ok(()) => return start_count < *entry.sleep_counter,
-                Err(ready_at) => {
-                    *entry.sleep_counter += 1;
-                    tokio::time::sleep_until(ready_at).await;
-                }
+                // we might hit this branch if we were the first in the queue
+                // and the limit happened to be exhausted already
+                Err(next_ready_at) => *ready_at = next_ready_at,
             }
         }
     }
