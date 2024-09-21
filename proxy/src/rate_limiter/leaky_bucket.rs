@@ -6,9 +6,8 @@ use std::{
 use ahash::RandomState;
 use dashmap::DashMap;
 use rand::{thread_rng, Rng};
-use tokio::time::Instant;
 use tracing::info;
-use utils::leaky_bucket::LeakyBucketState;
+use utils::leaky_bucket::{InstantNs, LeakyBucketState};
 
 use crate::intern::EndpointIdInt;
 
@@ -37,7 +36,7 @@ impl<K: Hash + Eq> LeakyBucketRateLimiter<K> {
 
     /// Check that number of connections to the endpoint is below `max_rps` rps.
     pub(crate) fn check(&self, key: K, n: u32) -> bool {
-        let now = Instant::now();
+        let now = self.config.now();
 
         if self.access_count.fetch_add(1, Ordering::AcqRel) % 2048 == 0 {
             self.do_gc(now);
@@ -48,10 +47,17 @@ impl<K: Hash + Eq> LeakyBucketRateLimiter<K> {
             .entry(key)
             .or_insert_with(|| LeakyBucketState { empty_at: now });
 
-        entry.add_tokens(&self.config, now, n as f64).is_ok()
+        entry
+            .add_tokens_fast(
+                self.config.bucket_width,
+                now,
+                now,
+                self.config.cost * (n as u64),
+            )
+            .is_ok()
     }
 
-    fn do_gc(&self, now: Instant) {
+    fn do_gc(&self, now: InstantNs) {
         info!(
             "cleaning up bucket rate limiter, current size = {}",
             self.map.len()
@@ -90,7 +96,7 @@ mod tests {
     use std::time::Duration;
 
     use tokio::time::Instant;
-    use utils::leaky_bucket::LeakyBucketState;
+    use utils::leaky_bucket::{LeakyBucketState, Ns};
 
     use super::LeakyBucketConfig;
 
@@ -98,11 +104,11 @@ mod tests {
     async fn check() {
         let config: utils::leaky_bucket::LeakyBucketConfig =
             LeakyBucketConfig::new(500.0, 2000.0).into();
-        assert_eq!(config.cost, Duration::from_millis(2));
-        assert_eq!(config.bucket_width, Duration::from_secs(4));
+        assert_eq!(config.cost, Ns::from(Duration::from_millis(2)));
+        assert_eq!(config.bucket_width, Ns::from(Duration::from_secs(4)));
 
         let mut bucket = LeakyBucketState {
-            empty_at: Instant::now(),
+            empty_at: config.now(),
         };
 
         // should work for 2000 requests this second
@@ -110,7 +116,7 @@ mod tests {
             bucket.add_tokens(&config, Instant::now(), 1.0).unwrap();
         }
         bucket.add_tokens(&config, Instant::now(), 1.0).unwrap_err();
-        assert_eq!(bucket.empty_at - Instant::now(), config.bucket_width);
+        assert_eq!(bucket.empty_at - config.now(), config.bucket_width);
 
         // in 1ms we should drain 0.5 tokens.
         // make sure we don't lose any tokens
