@@ -1,0 +1,55 @@
+collector_name: neon_collector_autoscaling
+metrics:
+- metric_name: lfc_misses
+  type: gauge
+  help: 'lfc_misses'
+  key_labels:
+  values: [lfc_misses]
+  query: |
+    select lfc_value as lfc_misses from neon.neon_lfc_stats where lfc_key='file_cache_misses';
+
+- metric_name: lfc_used
+  type: gauge
+  help: 'LFC chunks used (chunk = 1MB)'
+  key_labels:
+  values: [lfc_used]
+  query: |
+    select lfc_value as lfc_used from neon.neon_lfc_stats where lfc_key='file_cache_used';
+
+- metric_name: lfc_hits
+  type: gauge
+  help: 'lfc_hits'
+  key_labels:
+  values: [lfc_hits]
+  query: |
+    select lfc_value as lfc_hits from neon.neon_lfc_stats where lfc_key='file_cache_hits';
+
+- metric_name: lfc_writes
+  type: gauge
+  help: 'lfc_writes'
+  key_labels:
+  values: [lfc_writes]
+  query: |
+    select lfc_value as lfc_writes from neon.neon_lfc_stats where lfc_key='file_cache_writes';
+
+- metric_name: lfc_cache_size_limit
+  type: gauge
+  help: 'LFC cache size limit in bytes'
+  key_labels:
+  values: [lfc_cache_size_limit]
+  query: |
+    select pg_size_bytes(current_setting('neon.file_cache_size_limit')) as lfc_cache_size_limit;
+
+- metric_name: lfc_approximate_working_set_size_windows
+  type: gauge
+  help: 'Approximate working set size in pages of 8192 bytes'
+  key_labels: [duration_seconds]
+  values: [size]
+  # NOTE: This is the "internal" / "machine-readable" version. This outputs the working set
+  # size looking back 1..60 minutes, labeled with the number of minutes.
+  query: |
+    select
+      x::text as duration_seconds,
+      neon.approximate_working_set_size_seconds(x) as size
+    from
+      (select generate_series * 60 as x from generate_series(1, 60)) as t (x);

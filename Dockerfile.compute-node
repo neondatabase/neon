@@ -1033,6 +1033,15 @@ COPY --from=compute-tools /home/nonroot/target/release-line-debug-size-lto/compu
 
 #########################################################################################
 #
+# Layers postgres_exporter and sql_exporter
+#
+#########################################################################################
+
+FROM quay.io/prometheuscommunity/postgres-exporter:v0.12.1 AS postgres-exporter
+FROM burningalchemist/sql_exporter:0.13 AS sql-exporter
+
+#########################################################################################
+#
 # Clean up postgres folder before inclusion
 #
 #########################################################################################
@@ -1160,8 +1169,18 @@ RUN mkdir /var/db && useradd -m -d /var/db/postgres postgres && \
 COPY --from=postgres-cleanup-layer --chown=postgres /usr/local/pgsql /usr/local
 COPY --from=compute-tools --chown=postgres /home/nonroot/target/release-line-debug-size-lto/compute_ctl /usr/local/bin/compute_ctl
 
+# Metrics exporter binaries and  configuration files
+COPY --from=postgres-exporter /bin/postgres_exporter /bin/postgres_exporter
+COPY --from=sql-exporter      /bin/sql_exporter      /bin/sql_exporter
+
+COPY --chmod=0644 compute/etc/sql_exporter.yml               /etc/sql_exporter.yml
+COPY --chmod=0644 compute/etc/neon_collector.yml             /etc/neon_collector.yml
+COPY --chmod=0644 compute/etc/sql_exporter_autoscaling.yml   /etc/sql_exporter_autoscaling.yml
+COPY --chmod=0644 compute/etc/neon_collector_autoscaling.yml /etc/neon_collector_autoscaling.yml
+
 # Create remote extension download directory
 RUN mkdir /usr/local/download_extensions && chown -R postgres:postgres /usr/local/download_extensions
+
 
 # Install:
 # libreadline8 for psql
