@@ -849,7 +849,7 @@ class NeonEnvBuilder:
 
         for directory_to_clean in reversed(directories_to_clean):
             if not os.listdir(directory_to_clean):
-                log.info(f"Removing empty directory {directory_to_clean}")
+                log.debug(f"Removing empty directory {directory_to_clean}")
                 try:
                     directory_to_clean.rmdir()
                 except Exception as e:
