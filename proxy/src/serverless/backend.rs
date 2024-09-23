@@ -115,7 +115,7 @@ impl PoolingBackend {
         config: &AuthenticationConfig,
         user_info: &ComputeUserInfo,
         jwt: String,
-    ) -> Result<(), AuthError> {
+    ) -> Result<ComputeCredentials, AuthError> {
         match &self.config.auth_backend {
             crate::auth::Backend::ControlPlane(console, ()) => {
                 config
@@ -130,13 +130,16 @@ impl PoolingBackend {
                     .await
                     .map_err(|e| AuthError::auth_failed(e.to_string()))?;
 
-                Ok(())
+                Ok(ComputeCredentials {
+                    info: user_info.clone(),
+                    keys: crate::auth::backend::ComputeCredentialKeys::None,
+                })
             }
             crate::auth::Backend::ConsoleRedirect(_, ()) => Err(AuthError::auth_failed(
                 "JWT login over web auth proxy is not supported",
             )),
             crate::auth::Backend::Local(_) => {
-                config
+                let keys = config
                     .jwks_cache
                     .check_jwt(
                         ctx,
@@ -148,8 +151,10 @@ impl PoolingBackend {
                     .await
                     .map_err(|e| AuthError::auth_failed(e.to_string()))?;
 
-                // todo: rewrite JWT signature with key shared somehow between local proxy and postgres
-                Ok(())
+                Ok(ComputeCredentials {
+                    info: user_info.clone(),
+                    keys,
+                })
             }
         }
     }

@@ -645,12 +645,7 @@ async fn handle_db_inner(
                             &conn_info.user_info,
                             jwt,
                         )
-                        .await?;
-
-                    ComputeCredentials {
-                        info: conn_info.user_info.clone(),
-                        keys: crate::auth::backend::ComputeCredentialKeys::None,
-                    }
+                        .await?
                 }
             };
 
