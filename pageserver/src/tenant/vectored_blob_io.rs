@@ -121,12 +121,12 @@ pub struct VectoredBlob {
 impl VectoredBlob {
     /// Reads a decompressed view of the blob.
     pub(crate) async fn read<'a>(&self, buf: &BufView<'a>) -> Result<BufView<'a>, std::io::Error> {
-        let mut decompressed_vec = Vec::new();
         let view = buf.view(self.start..self.end);
 
         match self.compression_bits {
             BYTE_UNCOMPRESSED => Ok(view),
             BYTE_ZSTD => {
+                let mut decompressed_vec = Vec::new();
                 let mut decoder =
                     async_compression::tokio::write::ZstdDecoder::new(&mut decompressed_vec);
                 decoder.write_all(&view).await?;
