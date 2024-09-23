@@ -79,9 +79,10 @@ jobs:
           push: true
           pull: true
           file: Dockerfile.build-tools
-          cache-from: type=registry,ref=cache.neon.build/build-tools:cache-${{ matrix.arch }}
-          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/build-tools:cache-{0},mode=max', matrix.arch) || '' }}
-          tags: neondatabase/build-tools:${{ inputs.image-tag }}-${{ matrix.arch }}
+          cache-from: type=registry,ref=cache.neon.build/build-tools:cache-bullseye-${{ matrix.arch }}
+          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/build-tools:cache-{0}-{1},mode=max', 'bullseye', matrix.arch) || '' }}
+          tags: |
+            neondatabase/build-tools:${{ inputs.image-tag }}-${{ matrix.arch }}
 
   merge-images:
     needs: [ build-image ]
