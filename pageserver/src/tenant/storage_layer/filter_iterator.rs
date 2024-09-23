@@ -62,11 +62,11 @@ impl<'a> FilterIterator<'a> {
                 //                                        ^ current filter
             }
             if self.current_filter_idx >= self.retain_key_filters.len() {
-                // We already exhausted all filters, so nothing needs to be filtered.
+                // We already exhausted all filters, so we should return now
                 // [filter region] [filter region] [filter region]
                 //                                                    ^ item
                 //                                                 ^ current filter (nothing)
-                return Ok(Some(item));
+                return Ok(None);
             }
             if self.retain_key_filters[self.current_filter_idx].contains(&item.0) {
                 // [filter region]    [filter region]     [filter region]
@@ -176,6 +176,30 @@ mod tests {
         result.extend(test_deltas1[5..10].iter().cloned());
         result.extend(test_deltas1[20..30].iter().cloned());
         result.extend(test_deltas1[90..100].iter().cloned());
+        assert_filter_iter_equal(&mut filter_iter, &result).await;
+
+        let merge_iter = MergeIterator::create(
+            &[resident_layer_1.get_as_delta(&ctx).await.unwrap()],
+            &[],
+            &ctx,
+        );
+
+        let mut filter_iter = FilterIterator::create(
+            merge_iter,
+            KeySpace {
+                ranges: vec![
+                    get_key(0)..get_key(10),
+                    get_key(20)..get_key(30),
+                    get_key(90)..get_key(95),
+                ],
+            },
+            SparseKeySpace(KeySpace::default()),
+        )
+        .unwrap();
+        let mut result = Vec::new();
+        result.extend(test_deltas1[0..10].iter().cloned());
+        result.extend(test_deltas1[20..30].iter().cloned());
+        result.extend(test_deltas1[90..95].iter().cloned());
         assert_filter_iter_equal(&mut filter_iter, &result).await;
     }
 }
