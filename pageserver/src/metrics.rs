@@ -1177,10 +1177,10 @@ pub(crate) mod virtual_file_io_engine {
 }
 
 struct GlobalAndPerTimelineHistogramTimer<'a, 'c> {
-    global_metric: &'a Histogram,
+    global_latency_histo: &'a Histogram,
 
     // Optional because not all op types are tracked per-timeline
-    timeline_metric: Option<&'a Histogram>,
+    per_timeline_latency_histo: Option<&'a Histogram>,
 
     ctx: &'c RequestContext,
     start: std::time::Instant,
@@ -1212,9 +1212,10 @@ impl<'a, 'c> Drop for GlobalAndPerTimelineHistogramTimer<'a, 'c> {
                 elapsed
             }
         };
-        self.global_metric.observe(ex_throttled.as_secs_f64());
-        if let Some(timeline_metric) = self.timeline_metric {
-            timeline_metric.observe(ex_throttled.as_secs_f64());
+        self.global_latency_histo
+            .observe(ex_throttled.as_secs_f64());
+        if let Some(per_timeline_getpage_histo) = self.per_timeline_latency_histo {
+            per_timeline_getpage_histo.observe(ex_throttled.as_secs_f64());
         }
     }
 }
@@ -1240,9 +1241,31 @@ pub enum SmgrQueryType {
 
 #[derive(Debug)]
 pub(crate) struct SmgrQueryTimePerTimeline {
-    global_metrics: [Histogram; SmgrQueryType::COUNT],
-    per_timeline_getpage: Histogram,
+    global_started: [IntCounter; SmgrQueryType::COUNT],
+    global_latency: [Histogram; SmgrQueryType::COUNT],
+    per_timeline_getpage_started: IntCounter,
+    per_timeline_getpage_latency: Histogram,
 }
+
+static SMGR_QUERY_STARTED_GLOBAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        // it's a counter, but, name is prepared to extend it to a histogram of queue depth
+        "pageserver_smgr_query_started_global_count",
+        "Number of smgr queries started, aggregated by query type.",
+        &["smgr_query_type"],
+    )
+    .expect("failed to define a metric")
+});
+
+static SMGR_QUERY_STARTED_PER_TENANT_TIMELINE: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        // it's a counter, but, name is prepared to extend it to a histogram of queue depth
+        "pageserver_smgr_query_started_count",
+        "Number of smgr queries started, aggregated by query type and tenant/timeline.",
+        &["smgr_query_type", "tenant_id", "shard_id", "timeline_id"],
+    )
+    .expect("failed to define a metric")
+});
 
 static SMGR_QUERY_TIME_PER_TENANT_TIMELINE: Lazy<HistogramVec> = Lazy::new(|| {
     register_histogram_vec!(
@@ -1319,14 +1342,20 @@ impl SmgrQueryTimePerTimeline {
         let tenant_id = tenant_shard_id.tenant_id.to_string();
         let shard_slug = format!("{}", tenant_shard_id.shard_slug());
         let timeline_id = timeline_id.to_string();
-        let global_metrics = std::array::from_fn(|i| {
+        let global_started = std::array::from_fn(|i| {
+            let op = SmgrQueryType::from_repr(i).unwrap();
+            SMGR_QUERY_STARTED_GLOBAL
+                .get_metric_with_label_values(&[op.into()])
+                .unwrap()
+        });
+        let global_latency = std::array::from_fn(|i| {
             let op = SmgrQueryType::from_repr(i).unwrap();
             SMGR_QUERY_TIME_GLOBAL
                 .get_metric_with_label_values(&[op.into()])
                 .unwrap()
         });
 
-        let per_timeline_getpage = SMGR_QUERY_TIME_PER_TENANT_TIMELINE
+        let per_timeline_getpage_started = SMGR_QUERY_STARTED_PER_TENANT_TIMELINE
             .get_metric_with_label_values(&[
                 SmgrQueryType::GetPageAtLsn.into(),
                 &tenant_id,
@@ -1334,9 +1363,20 @@ impl SmgrQueryTimePerTimeline {
                 &timeline_id,
             ])
             .unwrap();
+        let per_timeline_getpage_latency = SMGR_QUERY_TIME_PER_TENANT_TIMELINE
+            .get_metric_with_label_values(&[
+                SmgrQueryType::GetPageAtLsn.into(),
+                &tenant_id,
+                &shard_slug,
+                &timeline_id,
+            ])
+            .unwrap();
+
         Self {
-            global_metrics,
-            per_timeline_getpage,
+            global_started,
+            global_latency,
+            per_timeline_getpage_latency,
+            per_timeline_getpage_started,
         }
     }
     pub(crate) fn start_timer<'c: 'a, 'a>(
@@ -1344,8 +1384,11 @@ impl SmgrQueryTimePerTimeline {
         op: SmgrQueryType,
         ctx: &'c RequestContext,
     ) -> Option<impl Drop + '_> {
-        let global_metric = &self.global_metrics[op as usize];
         let start = Instant::now();
+
+        self.global_started[op as usize].inc();
+
+        // We subtract time spent throttled from the observed latency.
         match ctx.micros_spent_throttled.open() {
             Ok(()) => (),
             Err(error) => {
@@ -1364,15 +1407,16 @@ impl SmgrQueryTimePerTimeline {
             }
         }
 
-        let timeline_metric = if matches!(op, SmgrQueryType::GetPageAtLsn) {
-            Some(&self.per_timeline_getpage)
+        let per_timeline_latency_histo = if matches!(op, SmgrQueryType::GetPageAtLsn) {
+            self.per_timeline_getpage_started.inc();
+            Some(&self.per_timeline_getpage_latency)
         } else {
             None
         };
 
         Some(GlobalAndPerTimelineHistogramTimer {
-            global_metric,
-            timeline_metric,
+            global_latency_histo: &self.global_latency[op as usize],
+            per_timeline_latency_histo,
             ctx,
             start,
             op,
@@ -1423,9 +1467,12 @@ mod smgr_query_time_tests {
             let get_counts = || {
                 let global: u64 = ops
                     .iter()
-                    .map(|op| metrics.global_metrics[*op as usize].get_sample_count())
+                    .map(|op| metrics.global_latency[*op as usize].get_sample_count())
                     .sum();
-                (global, metrics.per_timeline_getpage.get_sample_count())
+                (
+                    global,
+                    metrics.per_timeline_getpage_latency.get_sample_count(),
+                )
             };
 
             let (pre_global, pre_per_tenant_timeline) = get_counts();
@@ -2576,6 +2623,12 @@ impl TimelineMetrics {
             let _ = STORAGE_IO_SIZE.remove_label_values(&[op, tenant_id, shard_id, timeline_id]);
         }
 
+        let _ = SMGR_QUERY_STARTED_PER_TENANT_TIMELINE.remove_label_values(&[
+            SmgrQueryType::GetPageAtLsn.into(),
+            tenant_id,
+            shard_id,
+            timeline_id,
+        ]);
         let _ = SMGR_QUERY_TIME_PER_TENANT_TIMELINE.remove_label_values(&[
             SmgrQueryType::GetPageAtLsn.into(),
             tenant_id,
@@ -3361,11 +3414,14 @@ pub fn preinitialize_metrics() {
     }
 
     // countervecs
-    [&BACKGROUND_LOOP_PERIOD_OVERRUN_COUNT]
-        .into_iter()
-        .for_each(|c| {
-            Lazy::force(c);
-        });
+    [
+        &BACKGROUND_LOOP_PERIOD_OVERRUN_COUNT,
+        &SMGR_QUERY_STARTED_GLOBAL,
+    ]
+    .into_iter()
+    .for_each(|c| {
+        Lazy::force(c);
+    });
 
     // gauges
     WALRECEIVER_ACTIVE_MANAGERS.get();

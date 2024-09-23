@@ -4314,7 +4314,9 @@ impl Timeline {
         timer.stop_and_record();
 
         // Creating image layers may have caused some previously visible layers to be covered
-        self.update_layer_visibility().await?;
+        if !image_layers.is_empty() {
+            self.update_layer_visibility().await?;
+        }
 
         Ok(image_layers)
     }
