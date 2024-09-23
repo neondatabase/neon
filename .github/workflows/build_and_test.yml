@@ -1207,7 +1207,6 @@ jobs:
     # Usually we do `needs: [...]`
     needs:
       - build-and-test-locally
-      - check-submodules
       - check-codestyle-python
       - check-codestyle-rust
       - promote-images
