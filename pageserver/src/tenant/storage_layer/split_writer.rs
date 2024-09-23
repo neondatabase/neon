@@ -196,7 +196,7 @@ impl SplitImageLayerWriter {
 pub struct SplitDeltaLayerWriter {
     inner: Option<(Key, DeltaLayerWriter)>,
     target_layer_size: u64,
-    generated_layers: Vec<SplitWriterResult>,
+    generated_layer_writers: Vec<(DeltaLayerWriter, PersistentLayerKey)>,
     conf: &'static PageServerConf,
     timeline_id: TimelineId,
     tenant_shard_id: TenantShardId,
@@ -215,7 +215,7 @@ impl SplitDeltaLayerWriter {
         Ok(Self {
             target_layer_size,
             inner: None,
-            generated_layers: Vec::new(),
+            generated_layer_writers: Vec::new(),
             conf,
             timeline_id,
             tenant_shard_id,
@@ -224,20 +224,13 @@ impl SplitDeltaLayerWriter {
         })
     }
 
-    /// Put value into the layer writer. In the case the writer decides to produce a layer, and the discard fn returns true, no layer will be written in the end.
-    pub async fn put_value_with_discard_fn<D, F>(
+    pub async fn put_value(
         &mut self,
         key: Key,
         lsn: Lsn,
         val: Value,
-        tline: &Arc<Timeline>,
         ctx: &RequestContext,
-        discard: D,
-    ) -> anyhow::Result<()>
-    where
-        D: FnOnce(&PersistentLayerKey) -> F,
-        F: Future<Output = bool>,
-    {
+    ) -> anyhow::Result<()> {
         // The current estimation is key size plus LSN size plus value size estimation. This is not an accurate
         // number, and therefore the final layer size could be a little bit larger or smaller than the target.
         //
@@ -281,16 +274,8 @@ impl SplitDeltaLayerWriter {
                     lsn_range: self.lsn_range.clone(),
                     is_delta: true,
                 };
-                if discard(&layer_key).await {
-                    drop(prev_delta_writer);
-                    self.generated_layers
-                        .push(SplitWriterResult::Discarded(layer_key));
-                } else {
-                    let (desc, path) = prev_delta_writer.finish(key, ctx).await?;
-                    let delta_layer = Layer::finish_creating(self.conf, tline, desc, &path)?;
-                    self.generated_layers
-                        .push(SplitWriterResult::Produced(delta_layer));
-                }
+                self.generated_layer_writers
+                    .push((prev_delta_writer, layer_key));
             } else if inner.estimated_size() >= S3_UPLOAD_LIMIT {
                 // We have to produce a very large file b/c a key is updated too often.
                 anyhow::bail!(
@@ -305,53 +290,59 @@ impl SplitDeltaLayerWriter {
         inner.put_value(key, lsn, val, ctx).await
     }
 
-    pub async fn put_value(
-        &mut self,
-        key: Key,
-        lsn: Lsn,
-        val: Value,
-        tline: &Arc<Timeline>,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
-        self.put_value_with_discard_fn(key, lsn, val, tline, ctx, |_| async { false })
-            .await
-    }
-
     pub(crate) async fn finish_with_discard_fn<D, F>(
         self,
         tline: &Arc<Timeline>,
         ctx: &RequestContext,
-        discard: D,
+        discard_fn: D,
     ) -> anyhow::Result<Vec<SplitWriterResult>>
     where
-        D: FnOnce(&PersistentLayerKey) -> F,
+        D: Fn(&PersistentLayerKey) -> F,
         F: Future<Output = bool>,
     {
         let Self {
-            mut generated_layers,
+            mut generated_layer_writers,
             inner,
             ..
         } = self;
-        let Some((start_key, inner)) = inner else {
-            return Ok(generated_layers);
-        };
-        if inner.num_keys() == 0 {
-            return Ok(generated_layers);
+        if let Some((start_key, writer)) = inner {
+            if writer.num_keys() != 0 {
+                let end_key = self.last_key_written.next();
+                let layer_key = PersistentLayerKey {
+                    key_range: start_key..end_key,
+                    lsn_range: self.lsn_range.clone(),
+                    is_delta: true,
+                };
+                generated_layer_writers.push((writer, layer_key));
+            }
         }
-        let end_key = self.last_key_written.next();
-        let layer_key = PersistentLayerKey {
-            key_range: start_key..end_key,
-            lsn_range: self.lsn_range.clone(),
-            is_delta: true,
-        };
-        if discard(&layer_key).await {
-            generated_layers.push(SplitWriterResult::Discarded(layer_key));
-        } else {
-            let (desc, path) = inner.finish(end_key, ctx).await?;
-            let delta_layer = Layer::finish_creating(self.conf, tline, desc, &path)?;
-            generated_layers.push(SplitWriterResult::Produced(delta_layer));
+        // BEGIN: catch every error and do the recovery in the below section
+        let mut generated_layers = Vec::new();
+        for (inner, layer_key) in generated_layer_writers {
+            if discard_fn(&layer_key).await {
+                generated_layers.push(SplitWriterResult::Discarded(layer_key));
+            } else {
+                let layer = match inner.finish(layer_key.key_range.end, ctx).await {
+                    Ok((desc, path)) => Layer::finish_creating(self.conf, tline, desc, &path)?,
+                    Err(e) => {
+                        for produced_layer in generated_layers {
+                            if let SplitWriterResult::Produced(delta_layer) = produced_layer {
+                                let layer: Layer = delta_layer.into();
+                                layer.delete_on_drop();
+                            }
+                        }
+                        return Err(e);
+                    }
+                };
+                generated_layers.push(SplitWriterResult::Produced(layer));
+            }
         }
+        // END: catch every error and do the recovery in the above section
         Ok(generated_layers)
+    }
+
+    pub fn discard(self) {
+        // The drop handler of each `generated_layer_writers` will clean up the `.tmp` files.
     }
 
     #[cfg(test)]
@@ -362,11 +353,6 @@ impl SplitDeltaLayerWriter {
     ) -> anyhow::Result<Vec<SplitWriterResult>> {
         self.finish_with_discard_fn(tline, ctx, |_| async { false })
             .await
-    }
-
-    /// This function will be deprecated with #8841.
-    pub(crate) fn take(self) -> anyhow::Result<(Vec<SplitWriterResult>, Option<DeltaLayerWriter>)> {
-        Ok((self.generated_layers, self.inner.map(|x| x.1)))
     }
 }
 
@@ -447,13 +433,7 @@ mod tests {
         assert_eq!(layers.len(), 1);
 
         delta_writer
-            .put_value(
-                get_key(0),
-                Lsn(0x18),
-                Value::Image(get_img(0)),
-                &tline,
-                &ctx,
-            )
+            .put_value(get_key(0), Lsn(0x18), Value::Image(get_img(0)), &ctx)
             .await
             .unwrap();
         let layers = delta_writer.finish(&tline, &ctx).await.unwrap();
@@ -525,14 +505,7 @@ mod tests {
                 .await
                 .unwrap();
             delta_writer
-                .put_value_with_discard_fn(
-                    get_key(i),
-                    Lsn(0x20),
-                    Value::Image(get_large_img()),
-                    &tline,
-                    &ctx,
-                    |_| async { discard },
-                )
+                .put_value(get_key(i), Lsn(0x20), Value::Image(get_large_img()), &ctx)
                 .await
                 .unwrap();
         }
@@ -638,23 +611,11 @@ mod tests {
         assert_eq!(layers.len(), 2);
 
         delta_writer
-            .put_value(
-                get_key(0),
-                Lsn(0x18),
-                Value::Image(get_img(0)),
-                &tline,
-                &ctx,
-            )
+            .put_value(get_key(0), Lsn(0x18), Value::Image(get_img(0)), &ctx)
             .await
             .unwrap();
         delta_writer
-            .put_value(
-                get_key(1),
-                Lsn(0x1A),
-                Value::Image(get_large_img()),
-                &tline,
-                &ctx,
-            )
+            .put_value(get_key(1), Lsn(0x1A), Value::Image(get_large_img()), &ctx)
             .await
             .unwrap();
         let layers = delta_writer.finish(&tline, &ctx).await.unwrap();
@@ -718,7 +679,6 @@ mod tests {
                     get_key(0),
                     Lsn(i as u64 * 16 + 0x10),
                     Value::Image(get_large_img()),
-                    &tline,
                     &ctx,
                 )
                 .await
