@@ -1,8 +1,4 @@
-use std::{
-    io,
-    sync::{atomic::Ordering, Arc},
-    time::Duration,
-};
+use std::{io, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
@@ -282,6 +278,8 @@ pub(crate) enum HttpConnError {
     PostgresConnectionError(#[from] tokio_postgres::Error),
     #[error("could not connection to local-proxy in compute")]
     LocalProxyConnectionError(#[from] LocalProxyConnError),
+    #[error("could not parse JWT payload")]
+    JwtPayloadError(serde_json::Error),
 
     #[error("could not get auth info")]
     GetAuthInfo(#[from] GetAuthInfoError),
@@ -307,6 +305,7 @@ impl ReportableError for HttpConnError {
             HttpConnError::ConnectionClosedAbruptly(_) => ErrorKind::Compute,
             HttpConnError::PostgresConnectionError(p) => p.get_error_kind(),
             HttpConnError::LocalProxyConnectionError(_) => ErrorKind::Compute,
+            HttpConnError::JwtPayloadError(_) => ErrorKind::User,
             HttpConnError::GetAuthInfo(a) => a.get_error_kind(),
             HttpConnError::AuthError(a) => a.get_error_kind(),
             HttpConnError::WakeCompute(w) => w.get_error_kind(),
@@ -321,6 +320,7 @@ impl UserFacingError for HttpConnError {
             HttpConnError::ConnectionClosedAbruptly(_) => self.to_string(),
             HttpConnError::PostgresConnectionError(p) => p.to_string(),
             HttpConnError::LocalProxyConnectionError(p) => p.to_string(),
+            HttpConnError::JwtPayloadError(p) => p.to_string(),
             HttpConnError::GetAuthInfo(c) => c.to_string_client(),
             HttpConnError::AuthError(c) => c.to_string_client(),
             HttpConnError::WakeCompute(c) => c.to_string_client(),
@@ -337,6 +337,7 @@ impl CouldRetry for HttpConnError {
             HttpConnError::PostgresConnectionError(e) => e.could_retry(),
             HttpConnError::LocalProxyConnectionError(e) => e.could_retry(),
             HttpConnError::ConnectionClosedAbruptly(_) => false,
+            HttpConnError::JwtPayloadError(_) => false,
             HttpConnError::GetAuthInfo(_) => false,
             HttpConnError::AuthError(_) => false,
             HttpConnError::WakeCompute(_) => false,

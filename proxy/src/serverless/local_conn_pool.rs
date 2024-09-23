@@ -1,19 +1,13 @@
-use dashmap::DashMap;
 use futures::{future::poll_fn, Future};
 use jose_jwk::jose_b64::base64ct::{Base64UrlUnpadded, Encoding};
 use p256::ecdsa::{Signature, SigningKey};
-use p256::SecretKey;
 use parking_lot::RwLock;
 use rand::rngs::OsRng;
-use rand::Rng;
 use serde_json::Value;
 use signature::Signer;
+use std::ops::Deref;
 use std::task::{ready, Poll};
 use std::{collections::HashMap, pin::pin, sync::Arc, sync::Weak, time::Duration};
-use std::{
-    ops::Deref,
-    sync::atomic::{self, AtomicU64},
-};
 use tokio::time::Instant;
 use tokio_postgres::tls::NoTlsStream;
 use tokio_postgres::types::ToSql;
@@ -22,15 +16,15 @@ use tokio_util::sync::CancellationToken;
 use typed_json::json;
 
 use crate::console::messages::{ColdStartInfo, MetricsAuxInfo};
-use crate::metrics::{HttpEndpointPoolsGuard, Metrics};
+use crate::metrics::Metrics;
 use crate::usage_metrics::{Ids, MetricCounter, USAGE_METRICS};
-use crate::{context::RequestMonitoring, DbName, EndpointCacheKey, RoleName};
+use crate::{context::RequestMonitoring, DbName, RoleName};
 
-use tracing::{debug, error, warn, Span};
+use tracing::{error, warn, Span};
 use tracing::{info, info_span, Instrument};
 
 use super::backend::HttpConnError;
-use super::conn_pool::{Client, ClientInnerExt, ConnInfo};
+use super::conn_pool::{ClientInnerExt, ConnInfo};
 
 struct ConnPoolEntry<C: ClientInnerExt> {
     conn: ClientInner<C>,
@@ -200,20 +194,15 @@ impl<C: ClientInnerExt> LocalConnPool<C> {
         })
     }
 
-    #[cfg(test)]
-    pub(crate) fn get_global_connections_count(&self) -> usize {
-        self.global_pool.read().total_conns
-    }
-
     pub(crate) fn get_idle_timeout(&self) -> Duration {
         self.config.pool_options.idle_timeout
     }
 
-    pub(crate) fn shutdown(&self) {
-        let mut pool = self.global_pool.write();
-        pool.pools.clear();
-        pool.total_conns = 0;
-    }
+    // pub(crate) fn shutdown(&self) {
+    //     let mut pool = self.global_pool.write();
+    //     pool.pools.clear();
+    //     pool.total_conns = 0;
+    // }
 
     pub(crate) fn get(
         self: &Arc<Self>,
@@ -451,7 +440,7 @@ impl<C: ClientInnerExt> LocalClient<C> {
     }
 }
 impl LocalClient<tokio_postgres::Client> {
-    pub(crate) async fn set_jwt_session(&mut self, payload: &str) -> anyhow::Result<()> {
+    pub(crate) async fn set_jwt_session(&mut self, payload: &[u8]) -> Result<(), HttpConnError> {
         let inner = self
             .inner
             .as_mut()
@@ -461,17 +450,19 @@ impl LocalClient<tokio_postgres::Client> {
         let kid = inner.inner.get_process_id();
         let header = json!({"kid":kid.to_string()}).to_string();
 
-        let mut payload = serde_json::from_str::<serde_json::Map<String, Value>>(payload)?;
+        let mut payload = serde_json::from_slice::<serde_json::Map<String, Value>>(payload)
+            .map_err(HttpConnError::JwtPayloadError)?;
         payload.insert("jti".to_string(), Value::String(inner.jti.to_string()));
         let payload = Value::Object(payload).to_string();
 
         let token = sign_jwt(&inner.key, header, payload);
 
         // initiates the auth session
+        inner.inner.simple_query("discard all").await?;
         inner
             .inner
             .query(
-                "select auth.jwt_session_init($1);",
+                "select auth.jwt_session_init($1)",
                 &[&token as &(dyn ToSql + Sync)],
             )
             .await?;
@@ -492,7 +483,7 @@ impl LocalClient<tokio_postgres::Client> {
 
 fn sign_jwt(sk: &SigningKey, header: String, payload: String) -> String {
     let header = Base64UrlUnpadded::encode_string(header.as_bytes());
-    let payload = Base64UrlUnpadded::encode_string(payload.to_string().as_bytes());
+    let payload = Base64UrlUnpadded::encode_string(payload.as_bytes());
 
     let message = format!("{header}.{payload}");
     let sig: Signature = sk.sign(message.as_bytes());

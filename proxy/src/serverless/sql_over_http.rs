@@ -40,6 +40,7 @@ use url::Url;
 use urlencoding;
 use utils::http::error::ApiError;
 
+use crate::auth::backend::ComputeCredentialKeys;
 use crate::auth::backend::ComputeCredentials;
 use crate::auth::backend::ComputeUserInfo;
 use crate::auth::endpoint_sni;
@@ -650,13 +651,33 @@ async fn handle_db_inner(
                 }
             };
 
-            let client = backend
-                .connect_to_compute(ctx, conn_info, keys, !allow_pool)
-                .await?;
+            let client = match keys.keys {
+                ComputeCredentialKeys::JwtPayload(payload) => {
+                    let mut client = backend
+                        .connect_to_local_compute(
+                            ctx,
+                            conn_info,
+                            ComputeCredentials {
+                                info: keys.info,
+                                keys: ComputeCredentialKeys::None,
+                            },
+                        )
+                        .await?;
+                    client.set_jwt_session(&payload).await?;
+                    Client::Local(client)
+                }
+                _ => {
+                    let client = backend
+                        .connect_to_compute(ctx, conn_info, keys, !allow_pool)
+                        .await?;
+                    Client::Remote(client)
+                }
+            };
+
             // not strictly necessary to mark success here,
             // but it's just insurance for if we forget it somewhere else
             ctx.success();
-            Ok::<_, HttpConnError>(Client::Remote(client))
+            Ok::<_, HttpConnError>(client)
         }
         .map_err(SqlOverHttpError::from),
     );
