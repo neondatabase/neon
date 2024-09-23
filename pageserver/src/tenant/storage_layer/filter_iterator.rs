@@ -32,12 +32,12 @@ impl<'a> FilterIterator<'a> {
         retain_key_filters.extend(sparse_keyspace.0.ranges);
         retain_key_filters.sort_by(|a, b| a.start.cmp(&b.start));
         // Verify key filters are non-overlapping and sorted
-        for i in 1..retain_key_filters.len() {
-            if retain_key_filters[i - 1].end > retain_key_filters[i].start {
+        for window in retain_key_filters.windows(2) {
+            if window[0].end > window[1].start {
                 bail!(
                     "Key filters are overlapping: {:?} and {:?}",
-                    retain_key_filters[i - 1],
-                    retain_key_filters[i]
+                    window[0],
+                    window[1]
                 );
             }
         }
