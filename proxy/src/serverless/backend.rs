@@ -448,6 +448,7 @@ async fn connect_http2(
     let (client, connection) = hyper1::client::conn::http2::Builder::new(TokioExecutor::new())
         .timer(TokioTimer::new())
         .keep_alive_interval(Duration::from_secs(20))
+        .keep_alive_while_idle(true)
         .keep_alive_timeout(Duration::from_secs(5))
         .handshake(TokioIo::new(stream))
         .await?;
