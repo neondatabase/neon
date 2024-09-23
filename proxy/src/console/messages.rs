@@ -284,6 +284,7 @@ pub(crate) struct DatabaseInfo {
     /// be inconvenient for debug with local PG instance.
     pub(crate) password: Option<Box<str>>,
     pub(crate) aux: MetricsAuxInfo,
+    pub(crate) allowed_ips: Option<Vec<IpPattern>>,
 }
 
 // Manually implement debug to omit sensitive info.
