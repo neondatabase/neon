@@ -56,20 +56,22 @@ use crate::metrics::Metrics;
 use crate::proxy::run_until_cancelled;
 use crate::proxy::NeonOptions;
 use crate::serverless::backend::HttpConnError;
+use crate::usage_metrics::MetricCounter;
 use crate::usage_metrics::MetricCounterRecorder;
 use crate::DbName;
 use crate::RoleName;
 
 use super::backend::LocalProxyConnError;
 use super::backend::PoolingBackend;
+use super::conn_pool;
 use super::conn_pool::AuthData;
-use super::conn_pool::Client;
 use super::conn_pool::ConnInfo;
 use super::conn_pool::ConnInfoWithAuth;
 use super::http_util::json_response;
 use super::json::json_to_pg_text;
 use super::json::pg_text_row_to_json;
 use super::json::JsonConversionError;
+use super::local_conn_pool;
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -654,7 +656,7 @@ async fn handle_db_inner(
             // not strictly necessary to mark success here,
             // but it's just insurance for if we forget it somewhere else
             ctx.success();
-            Ok::<_, HttpConnError>(client)
+            Ok::<_, HttpConnError>(Client::Remote(client))
         }
         .map_err(SqlOverHttpError::from),
     );
@@ -791,7 +793,7 @@ impl QueryData {
         self,
         config: &'static ProxyConfig,
         cancel: CancellationToken,
-        client: &mut Client<tokio_postgres::Client>,
+        client: &mut Client,
         parsed_headers: HttpHeaders,
     ) -> Result<String, SqlOverHttpError> {
         let (inner, mut discard) = client.inner();
@@ -865,7 +867,7 @@ impl BatchQueryData {
         self,
         config: &'static ProxyConfig,
         cancel: CancellationToken,
-        client: &mut Client<tokio_postgres::Client>,
+        client: &mut Client,
         parsed_headers: HttpHeaders,
     ) -> Result<String, SqlOverHttpError> {
         info!("starting transaction");
@@ -1057,4 +1059,51 @@ async fn query_to_json<T: GenericClient>(
     });
 
     Ok((ready, results))
+}
+
+enum Client {
+    Remote(conn_pool::Client<tokio_postgres::Client>),
+    Local(local_conn_pool::LocalClient<tokio_postgres::Client>),
+}
+
+enum Discard<'a> {
+    Remote(conn_pool::Discard<'a, tokio_postgres::Client>),
+    Local(local_conn_pool::Discard<'a, tokio_postgres::Client>),
+}
+
+impl Client {
+    fn metrics(&self) -> Arc<MetricCounter> {
+        match self {
+            Client::Remote(client) => client.metrics(),
+            Client::Local(local_client) => local_client.metrics(),
+        }
+    }
+
+    fn inner(&mut self) -> (&mut tokio_postgres::Client, Discard<'_>) {
+        match self {
+            Client::Remote(client) => {
+                let (c, d) = client.inner();
+                (c, Discard::Remote(d))
+            }
+            Client::Local(local_client) => {
+                let (c, d) = local_client.inner();
+                (c, Discard::Local(d))
+            }
+        }
+    }
+}
+
+impl Discard<'_> {
+    fn check_idle(&mut self, status: ReadyForQueryStatus) {
+        match self {
+            Discard::Remote(discard) => discard.check_idle(status),
+            Discard::Local(discard) => discard.check_idle(status),
+        }
+    }
+    fn discard(&mut self) {
+        match self {
+            Discard::Remote(discard) => discard.discard(),
+            Discard::Local(discard) => discard.discard(),
+        }
+    }
 }
