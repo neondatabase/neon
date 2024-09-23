@@ -714,6 +714,16 @@ async fn handle_db_inner(
     Ok(response)
 }
 
+static HEADERS_TO_FORWARD: &[&HeaderName] = &[
+    &AUTHORIZATION,
+    &CONN_STRING,
+    &RAW_TEXT_OUTPUT,
+    &ARRAY_MODE,
+    &TXN_ISOLATION_LEVEL,
+    &TXN_READ_ONLY,
+    &TXN_DEFERRABLE,
+];
+
 async fn handle_auth_broker_inner(
     config: &'static ProxyConfig,
     ctx: &RequestMonitoring,
@@ -738,12 +748,18 @@ async fn handle_auth_broker_inner(
     // but good just in case
     client.ready().await.map_err(HttpConnError::from)?;
 
-    let (parts, body) = request.into_parts();
+    let (mut parts, body) = request.into_parts();
     let mut req = Request::builder()
         .method("POST")
         .uri("http://proxy.local/sql");
 
-    *req.headers_mut().unwrap() = parts.headers;
+    // todo(conradludgate): maybe auth-broker should parse these and re-serialize
+    // these instead just to ensure they remain normalised.
+    for &h in HEADERS_TO_FORWARD {
+        if let Some(hv) = parts.headers.remove(h) {
+            req = req.header(h, hv);
+        }
+    }
 
     let req = req.body(body).unwrap();
 
