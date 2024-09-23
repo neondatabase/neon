@@ -1,7 +1,7 @@
 use std::{io, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use tokio::net::{lookup_host, TcpStream};
 use tracing::{field::display, info};
 
@@ -446,6 +446,9 @@ async fn connect_http2(
     };
 
     let (client, connection) = hyper1::client::conn::http2::Builder::new(TokioExecutor::new())
+        .timer(TokioTimer::new())
+        .keep_alive_interval(Duration::from_secs(20))
+        .keep_alive_timeout(Duration::from_secs(5))
         .handshake(TokioIo::new(stream))
         .await?;
 

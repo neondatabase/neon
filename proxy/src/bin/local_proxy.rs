@@ -278,6 +278,7 @@ fn build_config(args: &LocalProxyCliArgs) -> anyhow::Result<&'static ProxyConfig
             rate_limit_ip_subnet: 64,
             ip_allowlist_check_enabled: true,
             is_auth_broker: false,
+            accept_jwts: true,
         },
         require_client_ip: false,
         handshake_timeout: Duration::from_secs(10),

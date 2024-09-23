@@ -72,6 +72,7 @@ pub struct AuthenticationConfig {
     pub ip_allowlist_check_enabled: bool,
     pub jwks_cache: JwkCache,
     pub is_auth_broker: bool,
+    pub accept_jwts: bool,
 }
 
 impl TlsConfig {

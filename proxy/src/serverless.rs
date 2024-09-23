@@ -51,6 +51,7 @@ use tracing::{error, info, warn, Instrument};
 use utils::http::error::ApiError;
 
 pub(crate) const SERVERLESS_DRIVER_SNI: &str = "api";
+pub(crate) const SERVERLESS_DRIVER_AUTH_BROKER_SNI: &str = "apiauth";
 
 pub async fn task_main(
     config: &'static ProxyConfig,
