@@ -2955,7 +2955,7 @@ pub fn make_router(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/preserve_initdb_archive",
             |r| api_handler(r, timeline_preserve_initdb_handler),
         )
-        .post(
+        .put(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/archival_config",
             |r| api_handler(r, timeline_archival_config_handler),
         )
