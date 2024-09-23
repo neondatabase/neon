@@ -1383,7 +1383,7 @@ impl SmgrQueryTimePerTimeline {
         &'a self,
         op: SmgrQueryType,
         ctx: &'c RequestContext,
-    ) -> Option<impl Drop + '_> {
+    ) -> Option<impl Drop + 'a> {
         let start = Instant::now();
 
         self.global_started[op as usize].inc();
@@ -1534,7 +1534,7 @@ impl BasebackupQueryTime {
     pub(crate) fn start_recording<'c: 'a, 'a>(
         &'a self,
         ctx: &'c RequestContext,
-    ) -> BasebackupQueryTimeOngoingRecording<'_, '_> {
+    ) -> BasebackupQueryTimeOngoingRecording<'a, 'a> {
         let start = Instant::now();
         match ctx.micros_spent_throttled.open() {
             Ok(()) => (),
