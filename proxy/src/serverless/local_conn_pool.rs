@@ -1,17 +1,25 @@
 use dashmap::DashMap;
 use futures::{future::poll_fn, Future};
+use jose_jwk::jose_b64::base64ct::{Base64UrlUnpadded, Encoding};
+use p256::ecdsa::{Signature, SigningKey};
+use p256::SecretKey;
 use parking_lot::RwLock;
+use rand::rngs::OsRng;
 use rand::Rng;
+use serde_json::Value;
+use signature::Signer;
 use std::task::{ready, Poll};
 use std::{collections::HashMap, pin::pin, sync::Arc, sync::Weak, time::Duration};
 use std::{
     ops::Deref,
-    sync::atomic::{self, AtomicUsize},
+    sync::atomic::{self, AtomicU64},
 };
 use tokio::time::Instant;
 use tokio_postgres::tls::NoTlsStream;
+use tokio_postgres::types::ToSql;
 use tokio_postgres::{AsyncMessage, ReadyForQueryStatus, Socket};
 use tokio_util::sync::CancellationToken;
+use typed_json::json;
 
 use crate::console::messages::{ColdStartInfo, MetricsAuxInfo};
 use crate::metrics::{HttpEndpointPoolsGuard, Metrics};
@@ -22,12 +30,15 @@ use tracing::{debug, error, warn, Span};
 use tracing::{info, info_span, Instrument};
 
 use super::backend::HttpConnError;
-use super::conn_pool::ConnInfo;
+use super::conn_pool::{Client, ClientInnerExt, ConnInfo};
 
 struct ConnPoolEntry<C: ClientInnerExt> {
     conn: ClientInner<C>,
     _last_access: std::time::Instant,
 }
+
+// /// key id for the pg_session_jwt state
+// static PG_SESSION_JWT_KID: AtomicU64 = AtomicU64::new(1);
 
 // Per-endpoint connection pool, (dbname, username) -> DbUserConnPool
 // Number of open connections is limited by the `max_conns_per_endpoint`.
@@ -170,15 +181,14 @@ impl<C: ClientInnerExt> DbUserConnPool<C> {
     }
 }
 
-pub(crate) struct GlobalConnPool<C: ClientInnerExt> {
+pub(crate) struct LocalConnPool<C: ClientInnerExt> {
     global_pool: RwLock<EndpointConnPool<C>>,
 
     config: &'static crate::config::HttpConfig,
 }
 
-impl<C: ClientInnerExt> GlobalConnPool<C> {
+impl<C: ClientInnerExt> LocalConnPool<C> {
     pub(crate) fn new(config: &'static crate::config::HttpConfig) -> Arc<Self> {
-        let shards = config.pool_options.pool_shards;
         Arc::new(Self {
             global_pool: RwLock::new(EndpointConnPool {
                 pools: HashMap::new(),
@@ -209,12 +219,8 @@ impl<C: ClientInnerExt> GlobalConnPool<C> {
         self: &Arc<Self>,
         ctx: &RequestMonitoring,
         conn_info: &ConnInfo,
-    ) -> Result<Option<Client<C>>, HttpConnError> {
+    ) -> Result<Option<LocalClient<C>>, HttpConnError> {
         let mut client: Option<ClientInner<C>> = None;
-        let Some(endpoint) = conn_info.endpoint_cache_key() else {
-            return Ok(None);
-        };
-
         if let Some(entry) = self
             .global_pool
             .write()
@@ -241,7 +247,7 @@ impl<C: ClientInnerExt> GlobalConnPool<C> {
             client.session.send(ctx.session_id())?;
             ctx.set_cold_start_info(ColdStartInfo::HttpPoolHit);
             ctx.success();
-            return Ok(Some(Client::new(
+            return Ok(Some(LocalClient::new(
                 client,
                 conn_info.clone(),
                 Arc::downgrade(self),
@@ -251,15 +257,15 @@ impl<C: ClientInnerExt> GlobalConnPool<C> {
     }
 }
 
-pub(crate) fn poll_client<C: ClientInnerExt>(
-    global_pool: Arc<GlobalConnPool<C>>,
+pub(crate) fn poll_client(
+    global_pool: Arc<LocalConnPool<tokio_postgres::Client>>,
     ctx: &RequestMonitoring,
     conn_info: ConnInfo,
-    client: C,
+    client: tokio_postgres::Client,
     mut connection: tokio_postgres::Connection<Socket, NoTlsStream>,
     conn_id: uuid::Uuid,
     aux: MetricsAuxInfo,
-) -> Client<C> {
+) -> LocalClient<tokio_postgres::Client> {
     let conn_gauge = Metrics::get().proxy.db_connections.guard(ctx.protocol());
     let mut session_id = ctx.session_id();
     let (tx, mut rx) = tokio::sync::watch::channel(session_id);
@@ -269,10 +275,7 @@ pub(crate) fn poll_client<C: ClientInnerExt>(
     span.in_scope(|| {
         info!(cold_start_info = cold_start_info.as_str(), %conn_info, %session_id, "new connection");
     });
-    let pool = match conn_info.endpoint_cache_key() {
-        Some(endpoint) => Arc::downgrade(&global_pool),
-        None => Weak::new(),
-    };
+    let pool = Arc::downgrade(&global_pool);
     let pool_clone = pool.clone();
 
     let db_user = conn_info.db_and_user();
@@ -354,14 +357,19 @@ pub(crate) fn poll_client<C: ClientInnerExt>(
 
     }
     .instrument(span));
+
+    let key = SigningKey::random(&mut OsRng);
+
     let inner = ClientInner {
         inner: client,
         session: tx,
         cancel,
         aux,
         conn_id,
+        key,
+        jti: 0,
     };
-    Client::new(inner, conn_info, pool_clone)
+    LocalClient::new(inner, conn_info, pool_clone)
 }
 
 struct ClientInner<C: ClientInnerExt> {
@@ -370,6 +378,10 @@ struct ClientInner<C: ClientInnerExt> {
     cancel: CancellationToken,
     aux: MetricsAuxInfo,
     conn_id: uuid::Uuid,
+
+    // needed for pg_session_jwt state
+    key: SigningKey,
+    jti: u64,
 }
 
 impl<C: ClientInnerExt> Drop for ClientInner<C> {
@@ -379,27 +391,13 @@ impl<C: ClientInnerExt> Drop for ClientInner<C> {
     }
 }
 
-pub(crate) trait ClientInnerExt: Sync + Send + 'static {
-    fn is_closed(&self) -> bool;
-    fn get_process_id(&self) -> i32;
-}
-
-impl ClientInnerExt for tokio_postgres::Client {
-    fn is_closed(&self) -> bool {
-        self.is_closed()
-    }
-    fn get_process_id(&self) -> i32 {
-        self.get_process_id()
-    }
-}
-
 impl<C: ClientInnerExt> ClientInner<C> {
     pub(crate) fn is_closed(&self) -> bool {
         self.inner.is_closed()
     }
 }
 
-impl<C: ClientInnerExt> Client<C> {
+impl<C: ClientInnerExt> LocalClient<C> {
     pub(crate) fn metrics(&self) -> Arc<MetricCounter> {
         let aux = &self.inner.as_ref().unwrap().aux;
         USAGE_METRICS.register(Ids {
@@ -409,23 +407,23 @@ impl<C: ClientInnerExt> Client<C> {
     }
 }
 
-pub(crate) struct Client<C: ClientInnerExt> {
+pub(crate) struct LocalClient<C: ClientInnerExt> {
     span: Span,
     inner: Option<ClientInner<C>>,
     conn_info: ConnInfo,
-    pool: Weak<GlobalConnPool<C>>,
+    pool: Weak<LocalConnPool<C>>,
 }
 
 pub(crate) struct Discard<'a, C: ClientInnerExt> {
     conn_info: &'a ConnInfo,
-    pool: &'a mut Weak<GlobalConnPool<C>>,
+    pool: &'a mut Weak<LocalConnPool<C>>,
 }
 
-impl<C: ClientInnerExt> Client<C> {
+impl<C: ClientInnerExt> LocalClient<C> {
     pub(self) fn new(
         inner: ClientInner<C>,
         conn_info: ConnInfo,
-        pool: Weak<GlobalConnPool<C>>,
+        pool: Weak<LocalConnPool<C>>,
     ) -> Self {
         Self {
             inner: Some(inner),
@@ -444,6 +442,62 @@ impl<C: ClientInnerExt> Client<C> {
         let inner = inner.as_mut().expect("client inner should not be removed");
         (&mut inner.inner, Discard { conn_info, pool })
     }
+    pub(crate) fn key(&self) -> &SigningKey {
+        let inner = &self
+            .inner
+            .as_ref()
+            .expect("client inner should not be removed");
+        &inner.key
+    }
+}
+impl LocalClient<tokio_postgres::Client> {
+    pub(crate) async fn set_jwt_session(&mut self, payload: &str) -> anyhow::Result<()> {
+        let inner = self
+            .inner
+            .as_mut()
+            .expect("client inner should not be removed");
+        inner.jti += 1;
+
+        let kid = inner.inner.get_process_id();
+        let header = json!({"kid":kid.to_string()}).to_string();
+
+        let mut payload = serde_json::from_str::<serde_json::Map<String, Value>>(payload)?;
+        payload.insert("jti".to_string(), Value::String(inner.jti.to_string()));
+        let payload = Value::Object(payload).to_string();
+
+        let token = sign_jwt(&inner.key, header, payload);
+
+        // initiates the auth session
+        inner
+            .inner
+            .query(
+                "select auth.jwt_session_init($1);",
+                &[&token as &(dyn ToSql + Sync)],
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    // pub(crate) fn jti(&mut self) -> u64 {
+    //     let jti = &mut self
+    //         .inner
+    //         .as_mut()
+    //         .expect("client inner should not be removed")
+    //         .jti;
+    //     *jti += 1;
+    //     *jti
+    // }
+}
+
+fn sign_jwt(sk: &SigningKey, header: String, payload: String) -> String {
+    let header = Base64UrlUnpadded::encode_string(header.as_bytes());
+    let payload = Base64UrlUnpadded::encode_string(payload.to_string().as_bytes());
+
+    let message = format!("{header}.{payload}");
+    let sig: Signature = sk.sign(message.as_bytes());
+    let base64_sig = Base64UrlUnpadded::encode_string(&sig.to_bytes());
+    format!("{message}.{base64_sig}")
 }
 
 impl<C: ClientInnerExt> Discard<'_, C> {
@@ -461,7 +515,7 @@ impl<C: ClientInnerExt> Discard<'_, C> {
     }
 }
 
-impl<C: ClientInnerExt> Deref for Client<C> {
+impl<C: ClientInnerExt> Deref for LocalClient<C> {
     type Target = C;
 
     fn deref(&self) -> &Self::Target {
@@ -473,7 +527,7 @@ impl<C: ClientInnerExt> Deref for Client<C> {
     }
 }
 
-impl<C: ClientInnerExt> Client<C> {
+impl<C: ClientInnerExt> LocalClient<C> {
     fn do_drop(&mut self) -> Option<impl FnOnce()> {
         let conn_info = self.conn_info.clone();
         let client = self
@@ -492,7 +546,7 @@ impl<C: ClientInnerExt> Client<C> {
     }
 }
 
-impl<C: ClientInnerExt> Drop for Client<C> {
+impl<C: ClientInnerExt> Drop for LocalClient<C> {
     fn drop(&mut self) {
         if let Some(drop) = self.do_drop() {
             tokio::task::spawn_blocking(drop);

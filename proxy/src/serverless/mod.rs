@@ -64,6 +64,7 @@ pub async fn task_main(
         info!("websocket server has shut down");
     }
 
+    let local_pool = local_conn_pool::LocalConnPool::new(&config.http_config);
     let conn_pool = conn_pool::GlobalConnPool::new(&config.http_config);
     {
         let conn_pool = Arc::clone(&conn_pool);
@@ -106,6 +107,7 @@ pub async fn task_main(
 
     let backend = Arc::new(PoolingBackend {
         http_conn_pool: Arc::clone(&http_conn_pool),
+        local_pool,
         pool: Arc::clone(&conn_pool),
         config,
         endpoint_rate_limiter: Arc::clone(&endpoint_rate_limiter),
