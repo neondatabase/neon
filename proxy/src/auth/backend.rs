@@ -163,6 +163,7 @@ impl ComputeUserInfo {
 }
 
 pub(crate) enum ComputeCredentialKeys {
+    #[cfg(any(test, feature = "testing"))]
     Password(Vec<u8>),
     AuthKeys(AuthKeys),
     None,
@@ -293,16 +294,10 @@ async fn auth_quirks(
     // We now expect to see a very specific payload in the place of password.
     let (info, unauthenticated_password) = match user_info.try_into() {
         Err(info) => {
-            let res = hacks::password_hack_no_authentication(ctx, info, client).await?;
-
-            ctx.set_endpoint_id(res.info.endpoint.clone());
-            let password = match res.keys {
-                ComputeCredentialKeys::Password(p) => p,
-                ComputeCredentialKeys::AuthKeys(_) | ComputeCredentialKeys::None => {
-                    unreachable!("password hack should return a password")
-                }
-            };
-            (res.info, Some(password))
+            let (info, password) =
+                hacks::password_hack_no_authentication(ctx, info, client).await?;
+            ctx.set_endpoint_id(info.endpoint.clone());
+            (info, Some(password))
         }
         Ok(info) => (info, None),
     };

@@ -892,6 +892,7 @@ def test_timeline_status(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
     log.info(f"debug_dump before reboot {debug_dump_0}")
     assert debug_dump_0["timelines_count"] == 1
     assert debug_dump_0["timelines"][0]["timeline_id"] == str(timeline_id)
+    assert debug_dump_0["timelines"][0]["wal_last_modified"] != ""
 
     endpoint.safe_psql("create table t(i int)")
 

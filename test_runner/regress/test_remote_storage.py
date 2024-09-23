@@ -244,6 +244,7 @@ def test_remote_storage_upload_queue_retries(
             # create image layers eagerly, so that GC can remove some layers
             "image_creation_threshold": "1",
             "image_layer_creation_check_threshold": "0",
+            "lsn_lease_length": "0s",
         }
     )
 
@@ -391,6 +392,7 @@ def test_remote_timeline_client_calls_started_metric(
             # disable background compaction and GC. We invoke it manually when we want it to happen.
             "gc_period": "0s",
             "compaction_period": "0s",
+            "lsn_lease_length": "0s",
         }
     )
 
