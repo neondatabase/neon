@@ -8,6 +8,7 @@ from fixtures.neon_fixtures import (
     PgBin,
     fork_at_current_lsn,
     import_timeline_from_vanilla_postgres,
+    wait_for_wal_insert_lsn,
 )
 
 
@@ -21,11 +22,6 @@ def twophase_test_on_timeline(env: NeonEnv):
 
     conn = endpoint.connect()
     cur = conn.cursor()
-
-    # FIXME: Switch to the next WAL segment, to work around the bug fixed in
-    # https://github.com/neondatabase/neon/pull/8914.  When that is merged, this can be
-    # removed.
-    cur.execute("select pg_switch_wal()")
 
     cur.execute("CREATE TABLE foo (t text)")
 
@@ -138,5 +134,30 @@ def test_twophase_nonzero_epoch(
         vanilla_pg.connstr(),
     )
     vanilla_pg.stop()  # don't need the original server anymore
+
+    twophase_test_on_timeline(env)
+
+
+def test_twophase_at_wal_segment_start(neon_simple_env: NeonEnv):
+    """
+    Same as 'test_twophase' test, but the server is started at an LSN at the beginning
+    of a WAL segment. We had a bug where we didn't initialize the "long XLOG page header"
+    at the beginning of the segment correctly, which was detected when the checkpointer
+    tried to read the XLOG_XACT_PREPARE record from the WAL, if that record was on the
+    very first page of a WAL segment and the server was started up at that first page.
+    """
+    env = neon_simple_env
+    timeline_id = env.neon_cli.create_branch("test_twophase", "main")
+
+    endpoint = env.endpoints.create_start(
+        "test_twophase", config_lines=["max_prepared_transactions=5"]
+    )
+    endpoint.safe_psql("SELECT pg_switch_wal()")
+
+    # to avoid hitting https://github.com/neondatabase/neon/issues/9079, wait for the
+    # WAL to reach the pageserver.
+    wait_for_wal_insert_lsn(env, endpoint, env.initial_tenant, timeline_id)
+
+    endpoint.stop_and_destroy()
 
     twophase_test_on_timeline(env)

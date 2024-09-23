@@ -439,11 +439,30 @@ impl Layer {
 
     fn record_access(&self, ctx: &RequestContext) {
         if self.0.access_stats.record_access(ctx) {
-            // Visibility was modified to Visible
-            tracing::info!(
-                "Layer {} became visible as a result of access",
-                self.0.desc.key()
-            );
+            // Visibility was modified to Visible: maybe log about this
+            match ctx.task_kind() {
+                TaskKind::CalculateSyntheticSize
+                | TaskKind::GarbageCollector
+                | TaskKind::MgmtRequest => {
+                    // This situation is expected in code paths do binary searches of the LSN space to resolve
+                    // an LSN to a timestamp, which happens during GC, during GC cutoff calculations in synthetic size,
+                    // and on-demand for certain HTTP API requests.
+                }
+                _ => {
+                    // In all other contexts, it is unusual to do I/O involving layers which are not visible at
+                    // some branch tip, so we log the fact that we are accessing something that the visibility
+                    // calculation thought should not be visible.
+                    //
+                    // This case is legal in brief time windows: for example an in-flight getpage request can hold on to a layer object
+                    // which was covered by a concurrent compaction.
+                    tracing::info!(
+                        "Layer {} became visible as a result of access",
+                        self.0.desc.key()
+                    );
+                }
+            }
+
+            // Update the timeline's visible bytes count
             if let Some(tl) = self.0.timeline.upgrade() {
                 tl.metrics
                     .visible_physical_size_gauge

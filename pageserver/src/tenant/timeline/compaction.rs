@@ -29,7 +29,9 @@ use utils::id::TimelineId;
 
 use crate::context::{AccessStatsBehavior, RequestContext, RequestContextBuilder};
 use crate::page_cache;
+use crate::tenant::checks::check_valid_layermap;
 use crate::tenant::remote_timeline_client::WaitCompletionError;
+use crate::tenant::storage_layer::filter_iterator::FilterIterator;
 use crate::tenant::storage_layer::merge_iterator::MergeIterator;
 use crate::tenant::storage_layer::split_writer::{
     SplitDeltaLayerWriter, SplitImageLayerWriter, SplitWriterResult,
@@ -1771,6 +1773,7 @@ impl Timeline {
             gc_cutoff,
             lowest_retain_lsn
         );
+
         // Step 1: (In the future) construct a k-merge iterator over all layers. For now, simply collect all keys + LSNs.
         // Also, verify if the layer map can be split by drawing a horizontal line at every LSN start/end split point.
         let mut lsn_split_point = BTreeSet::new(); // TODO: use a better data structure (range tree / range set?)
@@ -1788,20 +1791,12 @@ impl Timeline {
                 stat.visit_image_layer(desc.file_size());
             }
         }
-        for layer in &layer_selection {
-            let desc = layer.layer_desc();
-            let key_range = &desc.key_range;
-            if desc.is_delta() && key_range.start.next() != key_range.end {
-                let lsn_range = desc.lsn_range.clone();
-                let intersects = lsn_split_point.range(lsn_range).collect_vec();
-                if intersects.len() > 1 {
-                    bail!(
-                        "cannot run gc-compaction because it violates the layer map LSN split assumption: layer {} intersects with LSN [{}]",
-                        desc.key(),
-                        intersects.into_iter().map(|lsn| lsn.to_string()).join(", ")
-                    );
-                }
-            }
+        let layer_names: Vec<crate::tenant::storage_layer::LayerName> = layer_selection
+            .iter()
+            .map(|layer| layer.layer_desc().layer_name())
+            .collect_vec();
+        if let Some(err) = check_valid_layermap(&layer_names) {
+            bail!("cannot run gc-compaction because {}", err);
         }
         // The maximum LSN we are processing in this compaction loop
         let end_lsn = layer_selection
@@ -1827,7 +1822,12 @@ impl Timeline {
                 image_layers.push(layer);
             }
         }
-        let mut merge_iter = MergeIterator::create(&delta_layers, &image_layers, ctx);
+        let (dense_ks, sparse_ks) = self.collect_gc_compaction_keyspace().await?;
+        let mut merge_iter = FilterIterator::create(
+            MergeIterator::create(&delta_layers, &image_layers, ctx),
+            dense_ks,
+            sparse_ks,
+        )?;
         // Step 2: Produce images+deltas. TODO: ensure newly-produced delta does not overlap with other deltas.
         // Data of the same key.
         let mut accumulated_values = Vec::new();

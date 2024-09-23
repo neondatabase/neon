@@ -18,7 +18,6 @@ use camino::Utf8Path;
 use camino::Utf8PathBuf;
 use enumset::EnumSet;
 use futures::stream::FuturesUnordered;
-use futures::FutureExt;
 use futures::StreamExt;
 use pageserver_api::models;
 use pageserver_api::models::AuxFilePolicy;
@@ -34,6 +33,7 @@ use remote_storage::GenericRemoteStorage;
 use remote_storage::TimeoutOrCancel;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::future::Future;
 use std::sync::Weak;
 use std::time::SystemTime;
 use storage_broker::BrokerClientChannel;
@@ -140,6 +140,7 @@ pub mod metadata;
 pub mod remote_timeline_client;
 pub mod storage_layer;
 
+pub mod checks;
 pub mod config;
 pub mod mgr;
 pub mod secondary;
@@ -301,7 +302,7 @@ pub struct Tenant {
     /// Throttle applied at the top of [`Timeline::get`].
     /// All [`Tenant::timelines`] of a given [`Tenant`] instance share the same [`throttle::Throttle`] instance.
     pub(crate) timeline_get_throttle:
-        Arc<throttle::Throttle<&'static crate::metrics::tenant_throttling::TimelineGet>>,
+        Arc<throttle::Throttle<crate::metrics::tenant_throttling::TimelineGet>>,
 
     /// An ongoing timeline detach concurrency limiter.
     ///
@@ -1030,13 +1031,9 @@ impl Tenant {
         }
 
         Ok(TenantPreload {
-            timelines: Self::load_timeline_metadata(
-                self,
-                remote_timeline_ids,
-                remote_storage,
-                cancel,
-            )
-            .await?,
+            timelines: self
+                .load_timelines_metadata(remote_timeline_ids, remote_storage, cancel)
+                .await?,
         })
     }
 
@@ -1302,7 +1299,7 @@ impl Tenant {
         .await
     }
 
-    async fn load_timeline_metadata(
+    async fn load_timelines_metadata(
         self: &Arc<Tenant>,
         timeline_ids: HashSet<TimelineId>,
         remote_storage: &GenericRemoteStorage,
@@ -1310,33 +1307,10 @@ impl Tenant {
     ) -> anyhow::Result<HashMap<TimelineId, TimelinePreload>> {
         let mut part_downloads = JoinSet::new();
         for timeline_id in timeline_ids {
-            let client = RemoteTimelineClient::new(
-                remote_storage.clone(),
-                self.deletion_queue_client.clone(),
-                self.conf,
-                self.tenant_shard_id,
-                timeline_id,
-                self.generation,
-            );
             let cancel_clone = cancel.clone();
             part_downloads.spawn(
-                async move {
-                    debug!("starting index part download");
-
-                    let index_part = client.download_index_file(&cancel_clone).await;
-
-                    debug!("finished index part download");
-
-                    Result::<_, anyhow::Error>::Ok(TimelinePreload {
-                        client,
-                        timeline_id,
-                        index_part,
-                    })
-                }
-                .map(move |res| {
-                    res.with_context(|| format!("download index part for timeline {timeline_id}"))
-                })
-                .instrument(info_span!("download_index_part", %timeline_id)),
+                self.load_timeline_metadata(timeline_id, remote_storage.clone(), cancel_clone)
+                    .instrument(info_span!("download_index_part", %timeline_id)),
             );
         }
 
@@ -1347,8 +1321,7 @@ impl Tenant {
                 next = part_downloads.join_next() => {
                     match next {
                         Some(result) => {
-                            let preload_result = result.context("join preload task")?;
-                            let preload = preload_result?;
+                            let preload = result.context("join preload task")?;
                             timeline_preloads.insert(preload.timeline_id, preload);
                         },
                         None => {
@@ -1363,6 +1336,36 @@ impl Tenant {
         }
 
         Ok(timeline_preloads)
+    }
+
+    fn load_timeline_metadata(
+        self: &Arc<Tenant>,
+        timeline_id: TimelineId,
+        remote_storage: GenericRemoteStorage,
+        cancel: CancellationToken,
+    ) -> impl Future<Output = TimelinePreload> {
+        let client = RemoteTimelineClient::new(
+            remote_storage.clone(),
+            self.deletion_queue_client.clone(),
+            self.conf,
+            self.tenant_shard_id,
+            timeline_id,
+            self.generation,
+        );
+        async move {
+            debug_assert_current_span_has_tenant_and_timeline_id();
+            debug!("starting index part download");
+
+            let index_part = client.download_index_file(&cancel).await;
+
+            debug!("finished index part download");
+
+            TimelinePreload {
+                client,
+                timeline_id,
+                index_part,
+            }
+        }
     }
 
     pub(crate) async fn apply_timeline_archival_config(
@@ -1573,6 +1576,9 @@ impl Tenant {
         image_layer_desc: Vec<(Lsn, Vec<(pageserver_api::key::Key, bytes::Bytes)>)>,
         end_lsn: Lsn,
     ) -> anyhow::Result<Arc<Timeline>> {
+        use checks::check_valid_layermap;
+        use itertools::Itertools;
+
         let tline = self
             .create_test_timeline(new_timeline_id, initdb_lsn, pg_version, ctx)
             .await?;
@@ -1586,6 +1592,18 @@ impl Tenant {
             tline
                 .force_create_image_layer(lsn, images, Some(initdb_lsn), ctx)
                 .await?;
+        }
+        let layer_names = tline
+            .layers
+            .read()
+            .await
+            .layer_map()
+            .unwrap()
+            .iter_historic_layers()
+            .map(|layer| layer.layer_name())
+            .collect_vec();
+        if let Some(err) = check_valid_layermap(&layer_names) {
+            bail!("invalid layermap: {err}");
         }
         Ok(tline)
     }
@@ -2815,7 +2833,7 @@ impl Tenant {
             gate: Gate::default(),
             timeline_get_throttle: Arc::new(throttle::Throttle::new(
                 Tenant::get_timeline_get_throttle_config(conf, &attached_conf.tenant_conf),
-                &crate::metrics::tenant_throttling::TIMELINE_GET,
+                crate::metrics::tenant_throttling::TimelineGet::new(&tenant_shard_id),
             )),
             tenant_conf: Arc::new(ArcSwap::from_pointee(attached_conf)),
             ongoing_timeline_detach: std::sync::Mutex::default(),
@@ -3197,6 +3215,9 @@ impl Tenant {
         image_layer_desc: Vec<(Lsn, Vec<(pageserver_api::key::Key, bytes::Bytes)>)>,
         end_lsn: Lsn,
     ) -> anyhow::Result<Arc<Timeline>> {
+        use checks::check_valid_layermap;
+        use itertools::Itertools;
+
         let tline = self
             .branch_timeline_test(src_timeline, dst_id, ancestor_lsn, ctx)
             .await?;
@@ -3216,6 +3237,18 @@ impl Tenant {
             tline
                 .force_create_image_layer(lsn, images, Some(ancestor_lsn), ctx)
                 .await?;
+        }
+        let layer_names = tline
+            .layers
+            .read()
+            .await
+            .layer_map()
+            .unwrap()
+            .iter_historic_layers()
+            .map(|layer| layer.layer_name())
+            .collect_vec();
+        if let Some(err) = check_valid_layermap(&layer_names) {
+            bail!("invalid layermap: {err}");
         }
         Ok(tline)
     }

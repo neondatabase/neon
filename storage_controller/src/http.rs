@@ -1849,7 +1849,7 @@ pub fn make_router(
                 RequestName("v1_tenant_timeline"),
             )
         })
-        .post(
+        .put(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/archival_config",
             |r| {
                 tenant_service_handler(
