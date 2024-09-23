@@ -43,7 +43,7 @@ for implementing them in future iterations.
 
 ## Impacted components
 
-Compute, control plane, CI.
+Compute, control plane, CI, observability (some Grafana dashboards may require changes).
 
 ## Prior art
 
@@ -73,6 +73,10 @@ In order to avoid confusion with storage releases, we will use a different prefi
 tags](https://github.com/neondatabase/neon/releases) -- `release-compute-XXXX`. We will use the same tag for
 Docker images as well. The `neondatabase/compute-node-v16:release-compute-XXXX` looks longer and a bit redundant,
 but it's better to have image and git tags in sync.
+
+Currently, control plane relies on the numeric compute and storage release versions to decide on compute->storage
+compatibility. Once we implement this proposal, we should drop this code as release numbers will be completely
+independent. The only constraint we want is that it must monotonically increase within the same release branch.
 
 ### Compute config/settings manifest
 
@@ -117,6 +121,21 @@ The priority of settings will be (a higher number is a higher priority):
 4. Per-version `replica`
 5. Any per-user/project/endpoint overrides in the control plane
 6. Any dynamic setting calculated based on the compute size
+
+**N.B.** For simplicity, we do not do any custom logic for `shared_preload_libraries`, so it's completely
+overridden if specified on some level. Make sure that you include all necessary extensions in it when you
+do any overrides.
+
+**N.B.** There is a tricky question about what to do with custom compute image pinning we sometimes
+do for particular projects and customers. That's usually some ad-hoc work and images are based on
+the latest compute image, so it's relatively safe to assume that we could use settings from the latest compute
+release. If for some reason that's not true, and further overrides are needed, it's also possible to do
+on the project level together with pinning the image, so it's on-call/engineer/support responsibility to
+ensure that compute starts with the specified custom image. The only real risk is that compute image will get
+stale and settings from new releases will drift away, so eventually it will get something incompatible,
+but i) this is some operational issue, as we do not want stale images anyway, and ii) base settings
+receive something really new so rarely that the chance of this happening is very low. If we want to solve it completely,
+then together with pinning the image we could also pin the matching release revision in the control plane.
 
 The compute team will own the content of `compute/manifest.yaml`.
 
@@ -196,7 +215,11 @@ The control plane will implement new API methods to manage releases:
    Here, we can actually mix-in custom (remote) extensions metadata into the `manifest`, so that the control plane
    will get information about all available extensions not bundled into compute image. The corresponding
    workflow in `neondatabase/build-custom-extensions` should produce it as an artifact and make
-   it accessible to the workflow in the `neondatabase/infra`. See the complete release flow below.
+   it accessible to the workflow in the `neondatabase/infra`. See the complete release flow below. Doing that,
+   we put a constraint that new custom extension requires new compute release, which is good for the safety,
+   but is not exactly what we want operational-wise (we want to be able to deploy new extensions without new
+   images). Yet, it can be solved incrementally: v0 -- do not do anything with extensions at all;
+   v1 -- put them into the same manifest; v2 -- make them separate entities with their own lifecycle.
 
    **N.B.** This method is intended to be used in CI workflows, and CI/network can be flaky. It's reasonable
    to assume that we could retry the request several times, even though it's already succeeded. Although it's
