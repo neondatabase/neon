@@ -592,6 +592,10 @@ impl Scheduler {
             scores = non_overloaded_scores;
         }
 
+        // Sort the nodes by score. The one with the lowest scores will be the preferred node.
+        // Refer to [`NodeAttachmentSchedulingScore`] for attached locations and
+        // [`NodeSecondarySchedulingScore`] for secondary locations to understand how the nodes
+        // are ranked.
         scores.sort();
 
         if scores.is_empty() {
