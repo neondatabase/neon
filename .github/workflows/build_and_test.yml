@@ -564,8 +564,8 @@ jobs:
           push: true
           pull: true
           file: Dockerfile
-          cache-from: type=registry,ref=cache.neon.build/neon:cache-${{ matrix.arch }}
-          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/neon:cache-{0},mode=max', matrix.arch) || '' }}
+          cache-from: type=registry,ref=cache.neon.build/neon:cache-bullseye-${{ matrix.arch }}
+          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/neon:cache-{0}-{1},mode=max', 'bullseye', matrix.arch) || '' }}
           tags: |
             neondatabase/neon:${{ needs.tag.outputs.build-tag }}-${{ matrix.arch }}
 
@@ -665,8 +665,8 @@ jobs:
           push: true
           pull: true
           file: compute/Dockerfile.compute-node
-          cache-from: type=registry,ref=cache.neon.build/compute-node-${{ matrix.version.pg }}:cache-${{ matrix.arch }}
-          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/compute-node-{0}:cache-{1},mode=max', matrix.version.pg, matrix.arch) || '' }}
+          cache-from: type=registry,ref=cache.neon.build/compute-node-${{ matrix.version.pg }}:cache-bullseye-${{ matrix.arch }}
+          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/compute-node-{0}:cache-{1}-{2},mode=max', matrix.version.pg, 'bullseye', matrix.arch) || '' }}
           tags: |
             neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}-${{ matrix.arch }}
 
@@ -686,8 +686,8 @@ jobs:
           pull: true
           file: compute/Dockerfile.compute-node
           target: neon-pg-ext-test
-          cache-from: type=registry,ref=cache.neon.build/neon-test-extensions-${{ matrix.version.pg }}:cache-${{ matrix.arch }}
-          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/neon-test-extensions-{0}:cache-{1},mode=max', matrix.version.pg, matrix.arch) || '' }}
+          cache-from: type=registry,ref=cache.neon.build/neon-test-extensions-${{ matrix.version.pg }}:cache-bullseye-${{ matrix.arch }}
+          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/neon-test-extensions-{0}:cache-{1}-{2},mode=max', matrix.version.pg, 'bullseye', matrix.arch) || '' }}
           tags: |
             neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{needs.tag.outputs.build-tag}}-${{ matrix.arch }}
 
@@ -710,6 +710,8 @@ jobs:
           push: true
           pull: true
           file: compute/Dockerfile.compute-node
+          cache-from: type=registry,ref=cache.neon.build/neon-test-extensions-${{ matrix.version.pg }}:cache-bullseye-${{ matrix.arch }}
+          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/compute-tools-{0}:cache-{1}-{2},mode=max', matrix.version.pg, 'bullseye', matrix.arch) || '' }}
           tags: |
             neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}-${{ matrix.arch }}
 
