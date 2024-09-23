@@ -104,7 +104,8 @@ impl From<VectoredBlobBufView<'_>> for Bytes {
     }
 }
 
-/// Blob offsets into [`VectoredBlobsBuf::buf`]
+/// Blob offsets into [`VectoredBlobsBuf::buf`]. The byte ranges is potentially compressed,
+/// subject to [`VectoredBlob::compression_bits`].
 pub struct VectoredBlob {
     /// Blob metadata.
     pub meta: BlobMeta,
