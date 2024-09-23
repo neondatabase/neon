@@ -582,7 +582,7 @@ impl ConnectMechanism for TokioExtMechanism {
             node_info.aux.clone(),
         );
 
-        let kid = client.get_process_id().to_string();
+        let kid = client.get_process_id();
         let jwk = p256::PublicKey::from(client.key().verifying_key()).to_jwk();
 
         // initiates the auth session

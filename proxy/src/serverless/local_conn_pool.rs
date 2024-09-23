@@ -452,7 +452,7 @@ impl LocalClient<tokio_postgres::Client> {
 
         let mut payload = serde_json::from_slice::<serde_json::Map<String, Value>>(payload)
             .map_err(HttpConnError::JwtPayloadError)?;
-        payload.insert("jti".to_string(), Value::String(inner.jti.to_string()));
+        payload.insert("jti".to_string(), Value::Number(inner.jti.into()));
         let payload = Value::Object(payload).to_string();
 
         let token = sign_jwt(&inner.key, header, payload);
