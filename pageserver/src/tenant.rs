@@ -203,6 +203,8 @@ impl AttachedTenantConf {
                         .unwrap_or(LsnLease::DEFAULT_LENGTH),
             )
         } else {
+            // We don't use `lsn_lease_deadline` to delay GC in AttachedMulti and AttachedStale
+            // because we don't do GC in these modes.
             None
         };
 
