@@ -486,6 +486,11 @@ readahead_buffer_resize(int newsize, void *extra)
 		newPState->n_unused -= 1;
 	}
 
+	MyNeonCounters->getpage_prefetches_buffered =
+		MyPState->n_responses_buffered;
+	MyNeonCounters->pageserver_open_requests =
+		MyPState->n_requests_inflight;
+
 	for (; end >= MyPState->ring_last && end != UINT64_MAX; end -= 1)
 	{
 		prefetch_set_unused(end);
@@ -619,6 +624,8 @@ prefetch_read(PrefetchRequest *slot)
 		MyPState->n_responses_buffered += 1;
 		MyPState->n_requests_inflight -= 1;
 		MyPState->ring_receive += 1;
+		MyNeonCounters->getpage_prefetches_buffered =
+			MyPState->n_responses_buffered;
 
 		/* update slot state */
 		slot->status = PRFS_RECEIVED;
@@ -672,6 +679,15 @@ prefetch_on_ps_disconnect(void)
 
 		prefetch_set_unused(ring_index);
 	}
+
+	/*
+	 * We can have gone into retry due to network error, so update stats with
+	 * the latest available 
+	 */
+	MyNeonCounters->pageserver_open_requests =
+		MyPState->n_requests_inflight;
+	MyNeonCounters->getpage_prefetches_buffered =
+		MyPState->n_responses_buffered;
 }
 
 /*
@@ -704,6 +720,9 @@ prefetch_set_unused(uint64 ring_index)
 
 		MyPState->n_responses_buffered -= 1;
 		MyPState->n_unused += 1;
+
+		MyNeonCounters->getpage_prefetches_buffered =
+			MyPState->n_responses_buffered;
 	}
 	else
 	{
@@ -814,6 +833,15 @@ prefetch_register_bufferv(BufferTag tag, neon_request_lsns *frlsns,
 	req.buftag = tag;
 
 Retry:
+	/*
+	 * We can have gone into retry due to network error, so update stats with
+	 * the latest available 
+	 */
+	MyNeonCounters->pageserver_open_requests =
+		MyPState->ring_unused - MyPState->ring_receive;
+	MyNeonCounters->getpage_prefetches_buffered =
+		MyPState->n_responses_buffered;
+
 	min_ring_index = UINT64_MAX;
 	for (int i = 0; i < nblocks; i++)
 	{
@@ -988,6 +1016,9 @@ Retry:
 		prefetch_do_request(slot, lsns);
 	}
 
+	MyNeonCounters->pageserver_open_requests =
+		MyPState->ring_unused - MyPState->ring_receive;
+
 	Assert(any_hits);
 
 	Assert(GetPrfSlot(min_ring_index)->status == PRFS_REQUESTED ||
@@ -1063,8 +1094,10 @@ page_server_request(void const *req)
 			{
 				/* do nothing */
 			}
+			MyNeonCounters->pageserver_open_requests++;
 			consume_prefetch_responses();
 			resp = page_server->receive(shard_no);
+			MyNeonCounters->pageserver_open_requests--;
 		}
 		PG_CATCH();
 		{
@@ -1073,6 +1106,8 @@ page_server_request(void const *req)
 			 * point, but this currently seems fine for now.
 			 */
 			page_server->disconnect(shard_no);
+			MyNeonCounters->pageserver_open_requests = 0;
+
 			PG_RE_THROW();
 		}
 		PG_END_TRY();
