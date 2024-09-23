@@ -30,10 +30,15 @@ use tracing::{info, info_span, Instrument};
 use super::backend::HttpConnError;
 
 #[derive(Debug, Clone)]
+pub(crate) struct ConnInfoWithAuth {
+    pub(crate) conn_info: ConnInfo,
+    pub(crate) auth: AuthData,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct ConnInfo {
     pub(crate) user_info: ComputeUserInfo,
     pub(crate) dbname: DbName,
-    pub(crate) auth: AuthData,
 }
 
 #[derive(Debug, Clone)]
@@ -776,6 +781,8 @@ mod tests {
             },
             cancel_set: CancelSet::new(0),
             client_conn_threshold: u64::MAX,
+            max_request_size_bytes: u64::MAX,
+            max_response_size_bytes: usize::MAX,
         }));
         let pool = GlobalConnPool::new(config);
         let conn_info = ConnInfo {
@@ -785,7 +792,6 @@ mod tests {
                 options: NeonOptions::default(),
             },
             dbname: "dbname".into(),
-            auth: AuthData::Password("password".as_bytes().into()),
         };
         let ep_pool = Arc::downgrade(
             &pool.get_or_create_endpoint_pool(&conn_info.endpoint_cache_key().unwrap()),
@@ -843,7 +849,6 @@ mod tests {
                 options: NeonOptions::default(),
             },
             dbname: "dbname".into(),
-            auth: AuthData::Password("password".as_bytes().into()),
         };
         let ep_pool = Arc::downgrade(
             &pool.get_or_create_endpoint_pool(&conn_info.endpoint_cache_key().unwrap()),

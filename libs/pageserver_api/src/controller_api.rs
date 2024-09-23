@@ -112,6 +112,21 @@ pub struct TenantDescribeResponse {
     pub config: TenantConfig,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+pub struct NodeShardResponse {
+    pub node_id: NodeId,
+    pub shards: Vec<NodeShard>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct NodeShard {
+    pub tenant_shard_id: TenantShardId,
+    /// Whether the shard is observed secondary on a specific node. True = yes, False = no, None = not on this node.
+    pub is_observed_secondary: Option<bool>,
+    /// Whether the shard is intended to be a secondary on a specific node. True = yes, False = no, None = not on this node.
+    pub is_intended_secondary: Option<bool>,
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct NodeDescribeResponse {
     pub id: NodeId,

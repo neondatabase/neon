@@ -1025,6 +1025,15 @@ fn access_stats() {
     assert_eq!(access_stats.latest_activity(), lowres_time(atime));
     access_stats.set_visibility(LayerVisibilityHint::Visible);
     assert_eq!(access_stats.latest_activity(), lowres_time(atime));
+
+    // Recording access implicitly makes layer visible, if it wasn't already
+    let atime = UNIX_EPOCH + Duration::from_secs(2200000000);
+    access_stats.set_visibility(LayerVisibilityHint::Covered);
+    assert_eq!(access_stats.visibility(), LayerVisibilityHint::Covered);
+    assert!(access_stats.record_access_at(atime));
+    access_stats.set_visibility(LayerVisibilityHint::Visible);
+    assert!(!access_stats.record_access_at(atime));
+    access_stats.set_visibility(LayerVisibilityHint::Visible);
 }
 
 #[test]

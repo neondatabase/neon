@@ -1052,26 +1052,19 @@ impl ComputeNode {
         let pg_process = self.start_postgres(pspec.storage_auth_token.clone())?;
 
         let config_time = Utc::now();
-        if pspec.spec.mode == ComputeMode::Primary {
-            if !pspec.spec.skip_pg_catalog_updates {
-                let pgdata_path = Path::new(&self.pgdata);
-                // temporarily reset max_cluster_size in config
-                // to avoid the possibility of hitting the limit, while we are applying config:
-                // creating new extensions, roles, etc...
-                config::with_compute_ctl_tmp_override(
-                    pgdata_path,
-                    "neon.max_cluster_size=-1",
-                    || {
-                        self.pg_reload_conf()?;
-
-                        self.apply_config(&compute_state)?;
-
-                        Ok(())
-                    },
-                )?;
+        if pspec.spec.mode == ComputeMode::Primary && !pspec.spec.skip_pg_catalog_updates {
+            let pgdata_path = Path::new(&self.pgdata);
+            // temporarily reset max_cluster_size in config
+            // to avoid the possibility of hitting the limit, while we are applying config:
+            // creating new extensions, roles, etc...
+            config::with_compute_ctl_tmp_override(pgdata_path, "neon.max_cluster_size=-1", || {
                 self.pg_reload_conf()?;
-            }
-            self.post_apply_config()?;
+
+                self.apply_config(&compute_state)?;
+
+                Ok(())
+            })?;
+            self.pg_reload_conf()?;
         }
 
         let startup_end_time = Utc::now();

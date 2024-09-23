@@ -200,6 +200,7 @@ def test_sharding_split_compaction(neon_env_builder: NeonEnvBuilder, failpoint: 
         # Disable automatic creation of image layers, as we will create them explicitly when we want them
         "image_creation_threshold": 9999,
         "image_layer_creation_check_threshold": 0,
+        "lsn_lease_length": "0s",
     }
 
     neon_env_builder.storage_controller_config = {
@@ -374,7 +375,7 @@ def test_sharding_split_smoke(
     non_default_tenant_config = {"gc_horizon": 77 * 1024 * 1024}
 
     env = neon_env_builder.init_configs(True)
-    neon_env_builder.start()
+    env.start()
     tenant_id = TenantId.generate()
     timeline_id = TimelineId.generate()
     env.neon_cli.create_tenant(
@@ -1436,7 +1437,7 @@ def test_sharding_unlogged_relation(neon_env_builder: NeonEnvBuilder):
 
     neon_env_builder.num_pageservers = 2
     env = neon_env_builder.init_configs()
-    neon_env_builder.start()
+    env.start()
 
     tenant_id = TenantId.generate()
     timeline_id = TimelineId.generate()
@@ -1475,7 +1476,7 @@ def test_top_tenants(neon_env_builder: NeonEnvBuilder):
     """
 
     env = neon_env_builder.init_configs()
-    neon_env_builder.start()
+    env.start()
 
     tenants = []
     n_tenants = 8

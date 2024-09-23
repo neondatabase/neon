@@ -3,6 +3,7 @@ use std::{
     borrow::Cow,
     cmp::Ordering,
     collections::{BTreeMap, HashMap, HashSet},
+    error::Error,
     ops::Deref,
     path::PathBuf,
     str::FromStr,
@@ -41,11 +42,11 @@ use itertools::Itertools;
 use pageserver_api::{
     controller_api::{
         MetadataHealthRecord, MetadataHealthUpdateRequest, NodeAvailability, NodeRegisterRequest,
-        NodeSchedulingPolicy, PlacementPolicy, ShardSchedulingPolicy, ShardsPreferredAzsRequest,
-        ShardsPreferredAzsResponse, TenantCreateRequest, TenantCreateResponse,
-        TenantCreateResponseShard, TenantDescribeResponse, TenantDescribeResponseShard,
-        TenantLocateResponse, TenantPolicyRequest, TenantShardMigrateRequest,
-        TenantShardMigrateResponse,
+        NodeSchedulingPolicy, NodeShard, NodeShardResponse, PlacementPolicy, ShardSchedulingPolicy,
+        ShardsPreferredAzsRequest, ShardsPreferredAzsResponse, TenantCreateRequest,
+        TenantCreateResponse, TenantCreateResponseShard, TenantDescribeResponse,
+        TenantDescribeResponseShard, TenantLocateResponse, TenantPolicyRequest,
+        TenantShardMigrateRequest, TenantShardMigrateResponse,
     },
     models::{
         SecondaryProgress, TenantConfigRequest, TimelineArchivalConfigRequest,
@@ -69,7 +70,7 @@ use pageserver_api::{
         ValidateResponse, ValidateResponseTenant,
     },
 };
-use pageserver_client::mgmt_api;
+use pageserver_client::{mgmt_api, BlockUnblock};
 use tokio::sync::mpsc::error::TrySendError;
 use tokio_util::sync::CancellationToken;
 use utils::{
@@ -142,6 +143,7 @@ enum TenantOperations {
     AttachHook,
     TimelineArchivalConfig,
     TimelineDetachAncestor,
+    TimelineGcBlockUnblock,
 }
 
 #[derive(Clone, strum_macros::Display)]
@@ -217,9 +219,16 @@ fn passthrough_api_error(node: &Node, e: mgmt_api::Error) -> ApiError {
                 format!("{node} error receiving error body: {str}").into(),
             )
         }
-        mgmt_api::Error::ReceiveBody(str) => {
-            // Presume errors receiving body are connectivity/availability issues
-            ApiError::ResourceUnavailable(format!("{node} error receiving body: {str}").into())
+        mgmt_api::Error::ReceiveBody(err) if err.is_decode() => {
+            // Return 500 for decoding errors.
+            ApiError::InternalServerError(anyhow::Error::from(err).context("error decoding body"))
+        }
+        mgmt_api::Error::ReceiveBody(err) => {
+            // Presume errors receiving body are connectivity/availability issues except for decoding errors
+            let src_str = err.source().map(|e| e.to_string()).unwrap_or_default();
+            ApiError::ResourceUnavailable(
+                format!("{node} error receiving error body: {err} {}", src_str).into(),
+            )
         }
         mgmt_api::Error::ApiError(StatusCode::NOT_FOUND, msg) => {
             ApiError::NotFound(anyhow::anyhow!(format!("{node}: {msg}")).into())
@@ -451,7 +460,7 @@ struct ShardSplitParams {
 // When preparing for a shard split, we may either choose to proceed with the split,
 // or find that the work is already done and return NoOp.
 enum ShardSplitAction {
-    Split(ShardSplitParams),
+    Split(Box<ShardSplitParams>),
     NoOp(TenantShardSplitResponse),
 }
 
@@ -3197,6 +3206,57 @@ impl Service {
         }).await?
     }
 
+    pub(crate) async fn tenant_timeline_block_unblock_gc(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        dir: BlockUnblock,
+    ) -> Result<(), ApiError> {
+        let _tenant_lock = trace_shared_lock(
+            &self.tenant_op_locks,
+            tenant_id,
+            TenantOperations::TimelineGcBlockUnblock,
+        )
+        .await;
+
+        self.tenant_remote_mutation(tenant_id, move |targets| async move {
+            if targets.is_empty() {
+                return Err(ApiError::NotFound(
+                    anyhow::anyhow!("Tenant not found").into(),
+                ));
+            }
+
+            async fn do_one(
+                tenant_shard_id: TenantShardId,
+                timeline_id: TimelineId,
+                node: Node,
+                jwt: Option<String>,
+                dir: BlockUnblock,
+            ) -> Result<(), ApiError> {
+                let client = PageserverClient::new(node.get_id(), node.base_url(), jwt.as_deref());
+
+                client
+                    .timeline_block_unblock_gc(tenant_shard_id, timeline_id, dir)
+                    .await
+                    .map_err(|e| passthrough_api_error(&node, e))
+            }
+
+            // no shard needs to go first/last; the operation should be idempotent
+            self.tenant_for_shards(targets, |tenant_shard_id, node| {
+                futures::FutureExt::boxed(do_one(
+                    tenant_shard_id,
+                    timeline_id,
+                    node,
+                    self.config.jwt_token.clone(),
+                    dir,
+                ))
+            })
+            .await
+        })
+        .await??;
+        Ok(())
+    }
+
     /// Helper for concurrently calling a pageserver API on a number of shards, such as timeline creation.
     ///
     /// On success, the returned vector contains exactly the same number of elements as the input `locations`.
@@ -4186,7 +4246,7 @@ impl Service {
         let policy = policy.unwrap();
         let config = config.unwrap();
 
-        Ok(ShardSplitAction::Split(ShardSplitParams {
+        Ok(ShardSplitAction::Split(Box::new(ShardSplitParams {
             old_shard_count,
             new_shard_count: ShardCount::new(split_req.new_shard_count),
             new_stripe_size: split_req.new_stripe_size,
@@ -4194,13 +4254,13 @@ impl Service {
             policy,
             config,
             shard_ident,
-        }))
+        })))
     }
 
     async fn do_tenant_shard_split(
         &self,
         tenant_id: TenantId,
-        params: ShardSplitParams,
+        params: Box<ShardSplitParams>,
     ) -> Result<(TenantShardSplitResponse, Vec<ReconcilerWaiter>), ApiError> {
         // FIXME: we have dropped self.inner lock, and not yet written anything to the database: another
         // request could occur here, deleting or mutating the tenant.  begin_shard_split checks that the
@@ -4216,7 +4276,7 @@ impl Service {
             policy,
             config,
             shard_ident,
-        } = params;
+        } = *params;
 
         // Drop any secondary locations: pageservers do not support splitting these, and in any case the
         // end-state for a split tenant will usually be to have secondary locations on different nodes.
@@ -4922,6 +4982,45 @@ impl Service {
             .ok_or(ApiError::NotFound(
                 format!("Node {node_id} not registered").into(),
             ))
+    }
+
+    pub(crate) async fn get_node_shards(
+        &self,
+        node_id: NodeId,
+    ) -> Result<NodeShardResponse, ApiError> {
+        let locked = self.inner.read().unwrap();
+        let mut shards = Vec::new();
+        for (tid, tenant) in locked.tenants.iter() {
+            let is_intended_secondary = match (
+                tenant.intent.get_attached() == &Some(node_id),
+                tenant.intent.get_secondary().contains(&node_id),
+            ) {
+                (true, true) => {
+                    return Err(ApiError::InternalServerError(anyhow::anyhow!(
+                        "{} attached as primary+secondary on the same node",
+                        tid
+                    )))
+                }
+                (true, false) => Some(false),
+                (false, true) => Some(true),
+                (false, false) => None,
+            };
+            let is_observed_secondary = if let Some(ObservedStateLocation { conf: Some(conf) }) =
+                tenant.observed.locations.get(&node_id)
+            {
+                Some(conf.secondary_conf.is_some())
+            } else {
+                None
+            };
+            if is_intended_secondary.is_some() || is_observed_secondary.is_some() {
+                shards.push(NodeShard {
+                    tenant_shard_id: *tid,
+                    is_intended_secondary,
+                    is_observed_secondary,
+                });
+            }
+        }
+        Ok(NodeShardResponse { node_id, shards })
     }
 
     pub(crate) async fn get_leader(&self) -> DatabaseResult<Option<ControllerPersistence>> {

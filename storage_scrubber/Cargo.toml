@@ -6,21 +6,13 @@ license.workspace = true
 
 [dependencies]
 aws-sdk-s3.workspace = true
-aws-smithy-async.workspace = true
 either.workspace = true
-tokio-rustls.workspace = true
 anyhow.workspace = true
 git-version.workspace = true
 hex.workspace = true
 humantime.workspace = true
-thiserror.workspace = true
-rand.workspace = true
-bytes.workspace = true
-bincode.workspace = true
-crc32c.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-serde_with.workspace = true
 workspace_hack.workspace = true
 utils.workspace = true
 async-stream.workspace = true

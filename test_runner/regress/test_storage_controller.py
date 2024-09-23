@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import pytest
+from fixtures.auth_tokens import TokenScope
 from fixtures.common_types import TenantId, TenantShardId, TimelineId
 from fixtures.compute_reconfigure import ComputeReconfigure
 from fixtures.log_helper import log
@@ -18,7 +19,6 @@ from fixtures.neon_fixtures import (
     PgBin,
     StorageControllerApiException,
     StorageControllerLeadershipStatus,
-    TokenScope,
     last_flush_lsn_upload,
 )
 from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
@@ -69,7 +69,7 @@ def test_storage_controller_smoke(
     env = neon_env_builder.init_configs()
 
     # Start services by hand so that we can skip a pageserver (this will start + register later)
-    env.broker.try_start()
+    env.broker.start()
     env.storage_controller.start()
     env.pageservers[0].start()
     env.pageservers[1].start()
@@ -292,7 +292,7 @@ def test_storage_controller_onboarding(neon_env_builder: NeonEnvBuilder, warm_up
 
     # Start services by hand so that we can skip registration on one of the pageservers
     env = neon_env_builder.init_configs()
-    env.broker.try_start()
+    env.broker.start()
     env.storage_controller.start()
 
     # This is the pageserver where we'll initially create the tenant.  Run it in emergency
@@ -485,7 +485,7 @@ def test_storage_controller_compute_hook(
     httpserver.expect_request("/notify", method="PUT").respond_with_handler(handler)
 
     # Start running
-    env = neon_env_builder.init_start()
+    env = neon_env_builder.init_start(initial_tenant_conf={"lsn_lease_length": "0s"})
 
     # Initial notification from tenant creation
     assert len(notifications) == 1
@@ -1552,6 +1552,12 @@ def test_tenant_import(neon_env_builder: NeonEnvBuilder, shard_count, remote_sto
     literal_shard_count = 1 if shard_count is None else shard_count
     assert len(describe["shards"]) == literal_shard_count
 
+    nodes = env.storage_controller.nodes()
+    assert len(nodes) == 2
+    describe1 = env.storage_controller.node_shards(nodes[0]["id"])
+    describe2 = env.storage_controller.node_shards(nodes[1]["id"])
+    assert len(describe1["shards"]) + len(describe2["shards"]) == literal_shard_count
+
     # Check the data is still there: this implicitly proves that we recovered generation numbers
     # properly, for the timeline which was written to after a generation bump.
     for timeline, branch, expect_rows in [
@@ -2042,8 +2048,11 @@ def test_storage_controller_step_down(neon_env_builder: NeonEnvBuilder):
     # Make a change to the tenant config to trigger a slow reconcile
     virtual_ps_http = PageserverHttpClient(env.storage_controller_port, lambda: True)
     virtual_ps_http.patch_tenant_config_client_side(tid, {"compaction_threshold": 5}, None)
-    env.storage_controller.allowed_errors.append(
-        ".*Accepted configuration update but reconciliation failed.*"
+    env.storage_controller.allowed_errors.extend(
+        [
+            ".*Accepted configuration update but reconciliation failed.*",
+            ".*Leader is stepped down instance",
+        ]
     )
 
     observed_state = env.storage_controller.step_down()
@@ -2066,9 +2075,9 @@ def test_storage_controller_step_down(neon_env_builder: NeonEnvBuilder):
     assert "compaction_threshold" in ps_tenant_conf.effective_config
     assert ps_tenant_conf.effective_config["compaction_threshold"] == 5
 
-    # Validate that the storcon is not replying to the usual requests
-    # once it has stepped down.
-    with pytest.raises(StorageControllerApiException, match="stepped_down"):
+    # Validate that the storcon attempts to forward the request, but stops.
+    # when it realises it is still the current leader.
+    with pytest.raises(StorageControllerApiException, match="Leader is stepped down instance"):
         env.storage_controller.tenant_list()
 
     # Validate that we can step down multiple times and the observed state
@@ -2117,7 +2126,7 @@ def start_env(env: NeonEnv, storage_controller_port: int):
         max_workers=2 + len(env.pageservers) + len(env.safekeepers)
     ) as executor:
         futs.append(
-            executor.submit(lambda: env.broker.try_start() or None)
+            executor.submit(lambda: env.broker.start() or None)
         )  # The `or None` is for the linter
 
         for pageserver in env.pageservers:
@@ -2214,6 +2223,15 @@ def test_storage_controller_leadership_transfer(
 
     env.storage_controller.wait_until_ready()
     env.storage_controller.consistency_check()
+
+    if not step_down_times_out:
+        # Check that the stepped down instance forwards requests
+        # to the new leader while it's still running.
+        storage_controller_proxy.route_to(f"http://127.0.0.1:{storage_controller_1_port}")
+        env.storage_controller.tenant_list()
+        env.storage_controller.node_configure(env.pageservers[0].id, {"scheduling": "Pause"})
+        status = env.storage_controller.node_status(env.pageservers[0].id)
+        assert status["scheduling"] == "Pause"
 
     if step_down_times_out:
         env.storage_controller.allowed_errors.extend(

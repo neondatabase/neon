@@ -81,6 +81,7 @@ static void nwp_register_gucs(void);
 static void assign_neon_safekeepers(const char *newval, void *extra);
 static void nwp_prepare_shmem(void);
 static uint64 backpressure_lag_impl(void);
+static uint64 startup_backpressure_wrap(void);
 static bool backpressure_throttling_impl(void);
 static void walprop_register_bgworker(void);
 
@@ -90,7 +91,7 @@ static void walprop_pg_init_bgworker(void);
 static TimestampTz walprop_pg_get_current_timestamp(WalProposer *wp);
 static void walprop_pg_load_libpqwalreceiver(void);
 
-static process_interrupts_callback_t PrevProcessInterruptsCallback;
+static process_interrupts_callback_t PrevProcessInterruptsCallback = NULL;
 static shmem_startup_hook_type prev_shmem_startup_hook_type;
 #if PG_VERSION_NUM >= 150000
 static shmem_request_hook_type prev_shmem_request_hook = NULL;
@@ -178,7 +179,7 @@ pg_init_walproposer(void)
 
 	nwp_prepare_shmem();
 
-	delay_backend_us = &backpressure_lag_impl;
+	delay_backend_us = &startup_backpressure_wrap;
 	PrevProcessInterruptsCallback = ProcessInterruptsCallback;
 	ProcessInterruptsCallback = backpressure_throttling_impl;
 
@@ -353,6 +354,22 @@ backpressure_lag_impl(void)
 }
 
 /*
+ * We don't apply backpressure when we're the postmaster, or the startup
+ * process, because in postmaster we can't apply backpressure, and in
+ * the startup process we can't afford to slow down.
+ */
+static uint64
+startup_backpressure_wrap(void)
+{
+	if (AmStartupProcess() || !IsUnderPostmaster)
+		return 0;
+
+	delay_backend_us = &backpressure_lag_impl;
+
+	return backpressure_lag_impl();
+}
+
+/*
  * WalproposerShmemSize --- report amount of shared memory space needed
  */
 static Size
@@ -401,12 +418,13 @@ WalproposerShmemInit_SyncSafekeeper(void)
 static bool
 backpressure_throttling_impl(void)
 {
-	int64		lag;
+	uint64		lag;
 	TimestampTz start,
 				stop;
-	bool		retry = PrevProcessInterruptsCallback
-		? PrevProcessInterruptsCallback()
-		: false;
+	bool		retry = false;
+
+	if (PointerIsValid(PrevProcessInterruptsCallback))
+		retry = PrevProcessInterruptsCallback();
 
 	/*
 	 * Don't throttle read only transactions or wal sender. Do throttle CREATE
@@ -602,7 +620,12 @@ walprop_pg_init_walsender(void)
 	/* Create replication slot for WAL proposer if not exists */
 	if (SearchNamedReplicationSlot(WAL_PROPOSER_SLOT_NAME, false) == NULL)
 	{
+#if PG_MAJORVERSION_NUM >= 17
+		ReplicationSlotCreate(WAL_PROPOSER_SLOT_NAME, false, RS_PERSISTENT,
+							  false, false, false);
+#else
 		ReplicationSlotCreate(WAL_PROPOSER_SLOT_NAME, false, RS_PERSISTENT, false);
+#endif
 		ReplicationSlotReserveWal();
 		/* Write this slot to disk */
 		ReplicationSlotMarkDirty();
@@ -1509,7 +1532,11 @@ walprop_pg_init_event_set(WalProposer *wp)
 		wpg_log(FATAL, "double-initialization of event set");
 
 	/* for each sk, we have socket plus potentially socket for neon walreader */
+#if PG_MAJORVERSION_NUM >= 17
+	waitEvents = CreateWaitEventSet(NULL, 2 + 2 * wp->n_safekeepers);
+#else
 	waitEvents = CreateWaitEventSet(TopMemoryContext, 2 + 2 * wp->n_safekeepers);
+#endif
 	AddWaitEventToSet(waitEvents, WL_LATCH_SET, PGINVALID_SOCKET,
 					  MyLatch, NULL);
 	AddWaitEventToSet(waitEvents, WL_EXIT_ON_PM_DEATH, PGINVALID_SOCKET,

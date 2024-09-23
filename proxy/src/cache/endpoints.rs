@@ -242,6 +242,6 @@ mod tests {
     #[test]
     fn test() {
         let s = "{\"branch_created\":null,\"endpoint_created\":{\"endpoint_id\":\"ep-rapid-thunder-w0qqw2q9\"},\"project_created\":null,\"type\":\"endpoint_created\"}";
-        let _: ControlPlaneEventKey = serde_json::from_str(s).unwrap();
+        serde_json::from_str::<ControlPlaneEventKey>(s).unwrap();
     }
 }

@@ -39,7 +39,7 @@ use crate::tenant::vectored_blob_io::{
     BlobFlag, StreamingVectoredReadPlanner, VectoredBlobBufView, VectoredBlobReader, VectoredRead,
     VectoredReadPlanner,
 };
-use crate::tenant::{PageReconstructError, Timeline};
+use crate::tenant::PageReconstructError;
 use crate::virtual_file::owned_buffers_io::io_buf_ext::IoBufExt;
 use crate::virtual_file::{self, VirtualFile};
 use crate::{IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX};
@@ -59,7 +59,6 @@ use std::io::SeekFrom;
 use std::ops::Range;
 use std::os::unix::prelude::FileExt;
 use std::str::FromStr;
-use std::sync::Arc;
 use tokio::sync::OnceCell;
 use tokio_stream::StreamExt;
 use tracing::*;
@@ -71,9 +70,7 @@ use utils::{
 };
 
 use super::layer_name::ImageLayerName;
-use super::{
-    AsLayerDesc, Layer, LayerName, PersistentLayerDesc, ResidentLayer, ValuesReconstructState,
-};
+use super::{AsLayerDesc, LayerName, PersistentLayerDesc, ValuesReconstructState};
 
 ///
 /// Header stored in the beginning of the file
@@ -816,10 +813,9 @@ impl ImageLayerWriterInner {
     ///
     async fn finish(
         self,
-        timeline: &Arc<Timeline>,
         ctx: &RequestContext,
         end_key: Option<Key>,
-    ) -> anyhow::Result<ResidentLayer> {
+    ) -> anyhow::Result<(PersistentLayerDesc, Utf8PathBuf)> {
         let index_start_blk =
             ((self.blob_writer.size() + PAGE_SZ as u64 - 1) / PAGE_SZ as u64) as u32;
 
@@ -895,12 +891,9 @@ impl ImageLayerWriterInner {
         // fsync the file
         file.sync_all().await?;
 
-        // FIXME: why not carry the virtualfile here, it supports renaming?
-        let layer = Layer::finish_creating(self.conf, timeline, desc, &self.path)?;
+        trace!("created image layer {}", self.path);
 
-        info!("created image layer {}", layer.local_path());
-
-        Ok(layer)
+        Ok((desc, self.path))
     }
 }
 
@@ -979,24 +972,18 @@ impl ImageLayerWriter {
     ///
     pub(crate) async fn finish(
         mut self,
-        timeline: &Arc<Timeline>,
         ctx: &RequestContext,
-    ) -> anyhow::Result<super::ResidentLayer> {
-        self.inner.take().unwrap().finish(timeline, ctx, None).await
+    ) -> anyhow::Result<(PersistentLayerDesc, Utf8PathBuf)> {
+        self.inner.take().unwrap().finish(ctx, None).await
     }
 
     /// Finish writing the image layer with an end key, used in [`super::split_writer::SplitImageLayerWriter`]. The end key determines the end of the image layer's covered range and is exclusive.
     pub(super) async fn finish_with_end_key(
         mut self,
-        timeline: &Arc<Timeline>,
         end_key: Key,
         ctx: &RequestContext,
-    ) -> anyhow::Result<super::ResidentLayer> {
-        self.inner
-            .take()
-            .unwrap()
-            .finish(timeline, ctx, Some(end_key))
-            .await
+    ) -> anyhow::Result<(PersistentLayerDesc, Utf8PathBuf)> {
+        self.inner.take().unwrap().finish(ctx, Some(end_key)).await
     }
 }
 
@@ -1105,7 +1092,7 @@ mod test {
         tenant::{
             config::TenantConf,
             harness::{TenantHarness, TIMELINE_ID},
-            storage_layer::ResidentLayer,
+            storage_layer::{Layer, ResidentLayer},
             vectored_blob_io::StreamingVectoredReadPlanner,
             Tenant, Timeline,
         },
@@ -1176,7 +1163,8 @@ mod test {
 
                 key = key.next();
             }
-            writer.finish(&timeline, &ctx).await.unwrap()
+            let (desc, path) = writer.finish(&ctx).await.unwrap();
+            Layer::finish_creating(tenant.conf, &timeline, desc, &path).unwrap()
         };
         let original_size = resident.metadata().file_size;
 
@@ -1238,7 +1226,9 @@ mod test {
                 .await
                 .unwrap();
             let replacement = if wrote_keys > 0 {
-                Some(filtered_writer.finish(&timeline, &ctx).await.unwrap())
+                let (desc, path) = filtered_writer.finish(&ctx).await.unwrap();
+                let resident = Layer::finish_creating(tenant.conf, &timeline, desc, &path).unwrap();
+                Some(resident)
             } else {
                 None
             };
@@ -1311,7 +1301,8 @@ mod test {
         for (key, img) in images {
             writer.put_image(key, img, ctx).await?;
         }
-        let img_layer = writer.finish(tline, ctx).await?;
+        let (desc, path) = writer.finish(ctx).await?;
+        let img_layer = Layer::finish_creating(tenant.conf, tline, desc, &path)?;
 
         Ok::<_, anyhow::Error>(img_layer)
     }

@@ -13,7 +13,7 @@ DEFAULT_WAL_SEG_SIZE = 16 * 1024 * 1024
 class Lsn:
     """
     Datatype for an LSN. Internally it is a 64-bit integer, but the string
-    representation is like "1/123abcd". See also pg_lsn datatype in Postgres
+    representation is like "1/0123abcd". See also pg_lsn datatype in Postgres
     """
 
     def __init__(self, x: Union[int, str]):
@@ -135,6 +135,14 @@ class Id:
 class TenantId(Id):
     def __repr__(self) -> str:
         return f'`TenantId("{self.id.hex()}")'
+
+    def __str__(self) -> str:
+        return self.id.hex()
+
+
+class NodeId(Id):
+    def __repr__(self) -> str:
+        return f'`NodeId("{self.id.hex()}")'
 
     def __str__(self) -> str:
         return self.id.hex()

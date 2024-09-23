@@ -24,6 +24,7 @@
  * PushPage ('P'): Copy a page image (in the payload) to buffer cache
  * ApplyRecord ('A'): Apply a WAL record (in the payload)
  * GetPage ('G'): Return a page image from buffer cache.
+ * Ping ('H'): Return the input message.
  *
  * Currently, you only get a response to GetPage requests; the response is
  * simply a 8k page, without any headers. Errors are logged to stderr.
@@ -100,6 +101,9 @@
 #include "storage/buf_internals.h"
 #include "storage/bufmgr.h"
 #include "storage/dsm.h"
+#if PG_MAJORVERSION_NUM >= 17
+#include "storage/dsm_registry.h"
+#endif
 #include "storage/ipc.h"
 #include "storage/pg_shmem.h"
 #include "storage/pmsignal.h"
@@ -130,6 +134,7 @@ static void ApplyRecord(StringInfo input_message);
 static void apply_error_callback(void *arg);
 static bool redo_block_filter(XLogReaderState *record, uint8 block_id);
 static void GetPage(StringInfo input_message);
+static void Ping(StringInfo input_message);
 static ssize_t buffered_read(void *buf, size_t count);
 static void CreateFakeSharedMemoryAndSemaphores();
 
@@ -137,7 +142,7 @@ static BufferTag target_redo_tag;
 
 static XLogReaderState *reader_state;
 
-#define TRACE DEBUG5
+#define TRACE LOG
 
 #ifdef HAVE_LIBSECCOMP
 
@@ -391,6 +396,10 @@ WalRedoMain(int argc, char *argv[])
 				GetPage(&input_message);
 				break;
 
+			case 'H': 			/* Ping */
+				Ping(&input_message);
+				break;
+
 				/*
 				 * EOF means we're done. Perform normal shutdown.
 				 */
@@ -517,6 +526,10 @@ CreateFakeSharedMemoryAndSemaphores()
 	/*
 	 * Set up xlog, clog, and buffers
 	 */
+#if PG_MAJORVERSION_NUM >= 17
+	DSMRegistryShmemInit();
+	VarsupShmemInit();
+#endif
 	XLOGShmemInit();
 	CLOGShmemInit();
 	CommitTsShmemInit();
@@ -566,7 +579,10 @@ CreateFakeSharedMemoryAndSemaphores()
 	/*
 	 * Set up other modules that need some shared memory space
 	 */
+#if PG_MAJORVERSION_NUM < 17
+	/* "snapshot too old" was removed in PG17, and with it the SnapMgr */
 	SnapMgrInit();
+#endif
 	BTreeShmemInit();
 	SyncScanShmemInit();
 	/* Skip due to the 'pg_notify' directory check */
@@ -742,7 +758,7 @@ BeginRedoForBlock(StringInfo input_message)
 		 target_redo_tag.forkNum,
 		 target_redo_tag.blockNum);
 
-	reln = smgropen(rinfo, InvalidBackendId, RELPERSISTENCE_PERMANENT);
+	reln = smgropen(rinfo, INVALID_PROC_NUMBER, RELPERSISTENCE_PERMANENT);
 	if (reln->smgr_cached_nblocks[forknum] == InvalidBlockNumber ||
 		reln->smgr_cached_nblocks[forknum] < blknum + 1)
 	{
@@ -1044,6 +1060,36 @@ GetPage(StringInfo input_message)
 	wal_redo_buffer = InvalidBuffer;
 
 	elog(TRACE, "Page sent back for block %u", blknum);
+}
+
+
+static void
+Ping(StringInfo input_message)
+{
+	int			tot_written;
+	/* Response: the input message */
+	tot_written = 0;
+	do {
+		ssize_t		rc;
+		/* We don't need alignment, but it's bad practice to use char[BLCKSZ] */
+#if PG_VERSION_NUM >= 160000
+		static const PGIOAlignedBlock response;
+#else
+		static const PGAlignedBlock response;
+#endif
+		rc = write(STDOUT_FILENO, &response.data[tot_written], BLCKSZ - tot_written);
+		if (rc < 0) {
+			/* If interrupted by signal, just retry */
+			if (errno == EINTR)
+				continue;
+			ereport(ERROR,
+					(errcode_for_file_access(),
+					 errmsg("could not write to stdout: %m")));
+		}
+		tot_written += rc;
+	} while (tot_written < BLCKSZ);
+
+	elog(TRACE, "Page sent back for ping");
 }
 
 

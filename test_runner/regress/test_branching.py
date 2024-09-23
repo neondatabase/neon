@@ -52,7 +52,7 @@ def test_branching_with_pgbench(
     def run_pgbench(connstr: str):
         log.info(f"Start a pgbench workload on pg {connstr}")
 
-        pg_bin.run_capture(["pgbench", "-i", f"-s{scale}", connstr])
+        pg_bin.run_capture(["pgbench", "-i", "-I", "dtGvp", f"-s{scale}", connstr])
         pg_bin.run_capture(["pgbench", "-T15", connstr])
 
     env.neon_cli.create_branch("b0", tenant_id=tenant)
@@ -419,7 +419,7 @@ def test_duplicate_creation(neon_env_builder: NeonEnvBuilder):
 
 
 def test_branching_while_stuck_find_gc_cutoffs(neon_env_builder: NeonEnvBuilder):
-    env = neon_env_builder.init_start()
+    env = neon_env_builder.init_start(initial_tenant_conf={"lsn_lease_length": "0s"})
 
     client = env.pageserver.http_client()
 

@@ -19,7 +19,6 @@ import psycopg2.errors
 import psycopg2.extras
 import pytest
 import requests
-from fixtures.broker import NeonBroker
 from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.metrics import parse_metrics
@@ -893,6 +892,7 @@ def test_timeline_status(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
     log.info(f"debug_dump before reboot {debug_dump_0}")
     assert debug_dump_0["timelines_count"] == 1
     assert debug_dump_0["timelines"][0]["timeline_id"] == str(timeline_id)
+    assert debug_dump_0["timelines"][0]["wal_last_modified"] != ""
 
     endpoint.safe_psql("create table t(i int)")
 
@@ -1055,6 +1055,24 @@ def test_restart_endpoint(neon_env_builder: NeonEnvBuilder):
         endpoint.stop()
         random_sk.start()
         endpoint.start()
+
+
+# Try restarting endpoint immediately after xlog switch.
+# https://github.com/neondatabase/neon/issues/8911
+def test_restart_endpoint_after_switch_wal(neon_env_builder: NeonEnvBuilder):
+    env = neon_env_builder.init_start()
+
+    endpoint = env.endpoints.create_start("main")
+
+    endpoint.safe_psql("create table t (i int)")
+
+    endpoint.safe_psql("SELECT pg_switch_wal()")
+
+    # we want immediate shutdown to have endpoint restart on xlog switch record,
+    # so prevent shutdown checkpoint.
+    endpoint.stop(mode="immediate")
+    endpoint = env.endpoints.create_start("main")
+    endpoint.safe_psql("SELECT 'works'")
 
 
 # Context manager which logs passed time on exit.
@@ -1421,11 +1439,7 @@ class SafekeeperEnv:
     ):
         self.repo_dir = repo_dir
         self.port_distributor = port_distributor
-        self.broker = NeonBroker(
-            logfile=Path(self.repo_dir) / "storage_broker.log",
-            port=self.port_distributor.get_port(),
-            neon_binpath=neon_binpath,
-        )
+        self.fake_broker_endpoint = f"http://127.0.0.1:{port_distributor.get_port()}"
         self.pg_bin = pg_bin
         self.num_safekeepers = num_safekeepers
         self.bin_safekeeper = str(neon_binpath / "safekeeper")
@@ -1474,7 +1488,7 @@ class SafekeeperEnv:
             "--id",
             str(i),
             "--broker-endpoint",
-            self.broker.client_url(),
+            self.fake_broker_endpoint,
         ]
         log.info(f'Running command "{" ".join(cmd)}"')
 
@@ -2174,6 +2188,43 @@ def test_patch_control_file(neon_env_builder: NeonEnvBuilder):
     )
     log.info(f"dump_control_file response: {res}")
     assert res["timelines"][0]["control_file"]["timeline_start_lsn"] == "0/1"
+
+
+def test_term_bump(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.num_safekeepers = 1
+    env = neon_env_builder.init_start()
+
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    endpoint = env.endpoints.create_start("main")
+    # initialize safekeeper
+    endpoint.safe_psql("create table t(key int, value text)")
+
+    http_cli = env.safekeepers[0].http_client()
+
+    # check that bump up to specific term works
+    curr_term = http_cli.timeline_status(tenant_id, timeline_id).term
+    bump_to = curr_term + 3
+    res = http_cli.term_bump(tenant_id, timeline_id, bump_to)
+    log.info(f"bump to {bump_to} res: {res}")
+    assert res.current_term >= bump_to
+
+    # check that bump to none increments current term
+    res = http_cli.term_bump(tenant_id, timeline_id, None)
+    log.info(f"bump to None res: {res}")
+    assert res.current_term > bump_to
+    assert res.current_term > res.previous_term
+
+    # check that bumping doesn't work downward
+    res = http_cli.term_bump(tenant_id, timeline_id, 2)
+    log.info(f"bump to 2 res: {res}")
+    assert res.current_term > bump_to
+    assert res.current_term == res.previous_term
+
+    # check that this doesn't kill endpoint because last WAL flush was his and
+    # thus its basebackup is still good
+    endpoint.safe_psql("insert into t values (1, 'payload')")
 
 
 # Test disables periodic pushes from safekeeper to the broker and checks that
