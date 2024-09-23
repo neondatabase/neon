@@ -262,12 +262,15 @@ impl CertResolver {
         // and passed None instead, which blows up number of cases downstream code should handle. Proper coding
         // here should better avoid Option for common_names, and do wildcard-based certificate selection instead
         // of cutting off '*.' parts.
-        let common_name = if common_name.starts_with("CN=*.") {
-            common_name.strip_prefix("CN=*.").map(|s| s.to_string())
+        let common_name = if let Some(s) = common_name.strip_prefix("CN=*.") {
+            s.to_string()
+        } else if let Some(s) = common_name.strip_prefix("CN=apiauth.") {
+            s.to_string()
+        } else if let Some(s) = common_name.strip_prefix("CN=") {
+            s.to_string()
         } else {
-            common_name.strip_prefix("CN=").map(|s| s.to_string())
-        }
-        .context("Failed to parse common name from certificate")?;
+            bail!("Failed to parse common name from certificate")
+        };
 
         let cert = Arc::new(rustls::sign::CertifiedKey::new(cert_chain, key));
 
