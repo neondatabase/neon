@@ -4021,6 +4021,7 @@ pub(crate) mod harness {
         buf.freeze()
     }
 
+    #[cfg(test)]
     pub async fn advance_time_by(duration: Duration) {
         tokio::time::pause();
         tokio::time::advance(duration).await;
