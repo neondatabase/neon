@@ -512,6 +512,8 @@ async fn list_timeline_blobs_impl(
     match index_part_object.as_ref() {
         Some(selected) => index_part_keys.retain(|k| k != selected),
         None => {
+            // It is possible that the branch gets deleted after we got some layer files listed
+            // and we no longer have the index file in the listing.
             errors.push(
                 "S3 list response got no index_part.json file but still has layer files"
                     .to_string(),
@@ -528,9 +530,21 @@ async fn list_timeline_blobs_impl(
 
     if let Some(index_part_object_key) = index_part_object.as_ref() {
         let index_part_bytes =
-            download_object_with_retries(remote_client, &index_part_object_key.key)
-                .await
-                .context("index_part.json download")?;
+            match download_object_with_retries(remote_client, &index_part_object_key.key).await {
+                Ok(index_part_bytes) => index_part_bytes,
+                Err(e) => {
+                    // It is possible that the branch gets deleted in-between we list the objects
+                    // and we download the index part file.
+                    errors.push(format!("failed to download index_part.json: {e}"));
+                    return Ok(ListTimelineBlobsResult::MissingIndexPart(
+                        RemoteTimelineBlobData {
+                            blob_data: BlobDataParseResult::Incorrect { errors, s3_layers },
+                            unused_index_keys: index_part_keys,
+                            unknown_keys,
+                        },
+                    ));
+                }
+            };
 
         match serde_json::from_slice(&index_part_bytes) {
             Ok(index_part) => {
