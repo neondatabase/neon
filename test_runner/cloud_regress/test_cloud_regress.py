@@ -19,7 +19,6 @@ def setup(remote_pg: RemotePostgres):
     """
     with psycopg2.connect(remote_pg.connstr()) as conn:
         with conn.cursor() as cur:
-            cur = conn.cursor()
             log.info("Creating the extension")
             cur.execute("CREATE EXTENSION IF NOT EXISTS regress_so")
             conn.commit()
@@ -43,7 +42,7 @@ def setup(remote_pg: RemotePostgres):
                                 f"ALTER SUBSCRIPTION {sub[0]} SET (slot_name = NONE)"
                             )
                             regress_cur.execute(f"DROP SUBSCRIPTION {sub[0]}")
-                            regress_conn.commit()
+                        regress_conn.commit()
 
     yield
     # TODO: Migrate to branches and remove this code
