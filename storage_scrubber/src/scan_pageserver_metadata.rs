@@ -215,7 +215,7 @@ pub async fn scan_pageserver_metadata(
                 }
             }
             .instrument(
-                info_span!(parent: None, "", tenant_shard = %ttid.tenant_shard_id, timeline = %ttid.timeline_id),
+                info_span!("analyze-timeline", shard = %ttid.tenant_shard_id.shard_slug(), timeline = %ttid.timeline_id),
             )
             .await
         }
@@ -288,7 +288,7 @@ pub async fn scan_pageserver_metadata(
                         timelines,
                         highest_shard_count,
                     )
-                    .instrument(info_span!("", tenant = %prev_tenant_id))
+                    .instrument(info_span!("analyze-tenant", tenant = %prev_tenant_id))
                     .await;
                     tenant_id = Some(ttid.tenant_shard_id.tenant_id);
                     highest_shard_count = ttid.tenant_shard_id.shard_count;
@@ -328,7 +328,7 @@ pub async fn scan_pageserver_metadata(
             tenant_timeline_results,
             highest_shard_count,
         )
-        .instrument(info_span!("", tenant = %tenant_id))
+        .instrument(info_span!("analyze-tenant", tenant = %tenant_id))
         .await;
     }
 
