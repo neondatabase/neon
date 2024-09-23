@@ -5272,7 +5272,7 @@ impl Service {
             }
             AvailabilityTransition::ToActive => {
                 tracing::info!("Node {} transition to active", node_id);
-                // When a node comes back online, we must reconcile any tenant that has a None observed
+                // When a node comes back online, we must reconcile any non-detached tenant that has a None observed
                 // location on the node.
                 for tenant_shard in locked.tenants.values_mut() {
                     // If a reconciliation is already in progress, rely on the previous scheduling
@@ -5282,7 +5282,9 @@ impl Service {
                     }
 
                     if let Some(observed_loc) = tenant_shard.observed.locations.get_mut(&node_id) {
-                        if observed_loc.conf.is_none() {
+                        if observed_loc.conf.is_none()
+                            && !matches!(tenant_shard.policy, PlacementPolicy::Detached)
+                        {
                             self.maybe_reconcile_shard(tenant_shard, &new_nodes);
                         }
                     }
