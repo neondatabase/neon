@@ -201,7 +201,8 @@ def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
                 cur.execute("SELECT count(*) FROM t0")
                 assert cur.fetchone() == (ROW_COUNT,)
 
-            time.sleep(3)
+            # Wait for static compute to renew lease at least once.
+            time.sleep(LSN_LEASE_LENGTH / 2)
 
             generate_updates_on_main(env, ep_main, i, end=100)
 
@@ -210,7 +211,8 @@ def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
             # Trigger Pageserver restarts
             for ps in env.pageservers:
                 ps.stop()
-                time.sleep(3)
+                # Static compute should have at least one lease request failure due to connection.
+                time.sleep(LSN_LEASE_LENGTH / 2)
                 ps.start()
 
             trigger_gc_and_select(env, ep_static)
@@ -227,8 +229,9 @@ def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
         # Do some update so we can increment latest_gc_cutoff
         generate_updates_on_main(env, ep_main, i, end=100)
 
-    # Now trigger GC again, layers should be removed.
+    # Wait for the existing lease to expire.
     time.sleep(LSN_LEASE_LENGTH + 1)
+    # Now trigger GC again, layers should be removed.
     for shard, ps in tenant_get_shards(env, env.initial_tenant):
         client = ps.http_client()
         gc_result = client.timeline_gc(shard, env.initial_timeline, 0)
