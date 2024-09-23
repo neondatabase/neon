@@ -15,7 +15,7 @@ use tokio_postgres::{AsyncMessage, ReadyForQueryStatus, Socket};
 use tokio_util::sync::CancellationToken;
 use typed_json::json;
 
-use crate::console::messages::{ColdStartInfo, MetricsAuxInfo};
+use crate::control_plane::messages::{ColdStartInfo, MetricsAuxInfo};
 use crate::metrics::Metrics;
 use crate::usage_metrics::{Ids, MetricCounter, USAGE_METRICS};
 use crate::{context::RequestMonitoring, DbName, RoleName};
