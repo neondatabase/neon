@@ -324,7 +324,6 @@ impl PageServerConf {
             max_vectored_read_bytes,
             image_compression,
             ephemeral_bytes_per_memory_kb,
-            compact_level0_phase1_value_access: _,
             l0_flush,
             virtual_file_direct_io,
             concurrent_tenant_warmup,
@@ -533,16 +532,6 @@ mod tests {
         let workdir = Utf8PathBuf::from("/nonexistent");
         PageServerConf::parse_and_validate(NodeId(0), config_toml, &workdir)
             .expect("parse_and_validate");
-    }
-
-    #[test]
-    fn test_compactl0_phase1_access_mode_is_ignored_silently() {
-        let input = indoc::indoc! {r#"
-            [compact_level0_phase1_value_access]
-            mode = "streaming-kmerge"
-            validate = "key-lsn-value"
-        "#};
-        toml_edit::de::from_str::<pageserver_api::config::ConfigToml>(input).unwrap();
     }
 
     /// If there's a typo in the pageserver config, we'd rather catch that typo
