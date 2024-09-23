@@ -623,6 +623,9 @@ async fn handle_db_inner(
 
     let authenticate_and_connect = Box::pin(
         async {
+            let is_local_proxy =
+                matches!(backend.config.auth_backend, crate::auth::Backend::Local(_));
+
             let keys = match auth {
                 AuthData::Password(pw) => {
                     backend
@@ -652,7 +655,7 @@ async fn handle_db_inner(
             };
 
             let client = match keys.keys {
-                ComputeCredentialKeys::JwtPayload(payload) => {
+                ComputeCredentialKeys::JwtPayload(payload) if is_local_proxy => {
                     let mut client = backend
                         .connect_to_local_compute(
                             ctx,
