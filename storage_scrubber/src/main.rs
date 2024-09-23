@@ -41,6 +41,10 @@ struct Cli {
     #[arg(long)]
     /// JWT token for authenticating with storage controller.  Requires scope 'scrubber' or 'admin'.
     controller_jwt: Option<String>,
+
+    /// If set to true, the scrubber will exit with error code on fatal error.
+    #[arg(long, default_value_t = false)]
+    exit_code: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -203,6 +207,7 @@ async fn main() -> anyhow::Result<()> {
                     tenant_ids,
                     json,
                     post_to_storcon,
+                    cli.exit_code,
                 )
                 .await
             }
@@ -269,6 +274,7 @@ async fn main() -> anyhow::Result<()> {
                 gc_min_age,
                 gc_mode,
                 post_to_storcon,
+                cli.exit_code,
             )
             .await
         }
@@ -284,6 +290,7 @@ pub async fn run_cron_job(
     gc_min_age: humantime::Duration,
     gc_mode: GcMode,
     post_to_storcon: bool,
+    exit_code: bool,
 ) -> anyhow::Result<()> {
     tracing::info!(%gc_min_age, %gc_mode, "Running pageserver-physical-gc");
     pageserver_physical_gc_cmd(
@@ -301,6 +308,7 @@ pub async fn run_cron_job(
         Vec::new(),
         true,
         post_to_storcon,
+        exit_code,
     )
     .await?;
 
@@ -349,6 +357,7 @@ pub async fn scan_pageserver_metadata_cmd(
     tenant_shard_ids: Vec<TenantShardId>,
     json: bool,
     post_to_storcon: bool,
+    exit_code: bool,
 ) -> anyhow::Result<()> {
     if controller_client.is_none() && post_to_storcon {
         return Err(anyhow!("Posting pageserver scan health status to storage controller requires `--controller-api` and `--controller-jwt` to run"));
@@ -380,7 +389,9 @@ pub async fn scan_pageserver_metadata_cmd(
 
             if summary.is_fatal() {
                 tracing::error!("Fatal scrub errors detected");
-                std::process::exit(1);
+                if exit_code {
+                    std::process::exit(1);
+                }
             } else if summary.is_empty() {
                 // Strictly speaking an empty bucket is a valid bucket, but if someone ran the
                 // scrubber they were likely expecting to scan something, and if we see no timelines
@@ -392,7 +403,9 @@ pub async fn scan_pageserver_metadata_cmd(
                         .prefix_in_bucket
                         .unwrap_or("<none>".to_string())
                 );
-                std::process::exit(1);
+                if exit_code {
+                    std::process::exit(1);
+                }
             }
 
             Ok(())

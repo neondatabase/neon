@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
 
-use anyhow::Context;
 use itertools::Itertools;
 use pageserver::tenant::checks::check_valid_layermap;
 use pageserver::tenant::layer_map::LayerMap;
