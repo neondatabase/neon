@@ -6,7 +6,7 @@ use crate::{
     error::{ReportableError, UserFacingError},
     metrics::{Metrics, SniKind},
     proxy::NeonOptions,
-    serverless::{SERVERLESS_DRIVER_AUTH_BROKER_SNI, SERVERLESS_DRIVER_SNI},
+    serverless::SERVERLESS_DRIVER_SNI,
     EndpointId, RoleName,
 };
 use itertools::Itertools;
@@ -71,13 +71,13 @@ pub(crate) fn endpoint_sni(
     let Some((subdomain, common_name)) = sni.split_once('.') else {
         return Err(ComputeUserInfoParseError::UnknownCommonName { cn: sni.into() });
     };
-    if subdomain == SERVERLESS_DRIVER_SNI || subdomain == SERVERLESS_DRIVER_AUTH_BROKER_SNI {
-        return Ok(None);
-    }
     if !common_names.contains(common_name) {
         return Err(ComputeUserInfoParseError::UnknownCommonName {
             cn: common_name.into(),
         });
+    }
+    if subdomain == SERVERLESS_DRIVER_SNI {
+        return Ok(None);
     }
     Ok(Some(EndpointId::from(subdomain)))
 }
