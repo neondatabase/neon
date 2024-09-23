@@ -28,7 +28,7 @@ commands:
     sysvInitAction: respawn
     shell: '/bin/sql_exporter -config.file=/etc/sql_exporter_autoscaling.yml -web.listen-address=:9499'
 shutdownHook: |
-  su -p postgres --session-command '/usr/local/bin/pg_ctl stop -D /var/db/postgres/compute/pgdata -m fast --wait -t 10'
+  su -p postgres --session-command '/usr/local/bin/pg_ctl stop -D /var/db/postgres/compute/pgdata -m immediate --wait -t 10'
 files:
   - filename: compute_ctl-resize-swap
     content: |
