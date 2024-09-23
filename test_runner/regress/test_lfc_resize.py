@@ -10,11 +10,11 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv, PgBin
 
 
-#
-# Test branching, when a transaction is in prepared state
-#
 @pytest.mark.timeout(600)
 def test_lfc_resize(neon_simple_env: NeonEnv, pg_bin: PgBin):
+    """
+    Test resizing the Local File Cache
+    """
     env = neon_simple_env
     endpoint = env.endpoints.create_start(
         "main",
@@ -32,13 +32,20 @@ def test_lfc_resize(neon_simple_env: NeonEnv, pg_bin: PgBin):
         pg_bin.run_capture(["pgbench", "-i", f"-s{scale}", connstr])
         pg_bin.run_capture(["pgbench", "-c10", f"-T{n_resize}", "-Mprepared", "-S", connstr])
 
-    thread = threading.Thread(target=run_pgbench, args=(endpoint.connstr(),), daemon=True)
+    # Initializing the pgbench database can be very slow, especially on debug builds.
+    connstr = endpoint.connstr(options="-cstatement_timeout=300s")
+
+    thread = threading.Thread(target=run_pgbench, args=(connstr,), daemon=True)
     thread.start()
 
     conn = endpoint.connect()
     cur = conn.cursor()
 
-    for _ in range(n_resize):
+    # For as long as pgbench is running, twiddle the LFC size once a second.
+    # Note that we launch this immediately, already while the "pgbench -i"
+    # initialization step is still running. That's quite a different workload
+    # than the actual pgbench benchamark run, so this gives us coverage of both.
+    while thread.is_alive():
         size = random.randint(1, 512)
         cur.execute(f"alter system set neon.file_cache_size_limit='{size}MB'")
         cur.execute("select pg_reload_conf()")
