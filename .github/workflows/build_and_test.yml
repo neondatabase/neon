@@ -567,7 +567,7 @@ jobs:
           cache-from: type=registry,ref=cache.neon.build/neon:cache-bullseye-${{ matrix.arch }}
           cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/neon:cache-{0}-{1},mode=max', 'bullseye', matrix.arch) || '' }}
           tags: |
-            neondatabase/neon:${{ needs.tag.outputs.build-tag }}-${{ matrix.arch }}
+            neondatabase/neon:${{ needs.tag.outputs.build-tag }}-bullseye-${{ matrix.arch }}
 
   neon-image:
     needs: [ neon-image-arch, tag ]
@@ -582,8 +582,9 @@ jobs:
       - name: Create multi-arch image
         run: |
           docker buildx imagetools create -t neondatabase/neon:${{ needs.tag.outputs.build-tag }} \
-                                             neondatabase/neon:${{ needs.tag.outputs.build-tag }}-x64 \
-                                             neondatabase/neon:${{ needs.tag.outputs.build-tag }}-arm64
+                                          -t neondatabase/neon:${{ needs.tag.outputs.build-tag }}-bullseye \
+                                             neondatabase/neon:${{ needs.tag.outputs.build-tag }}-bullseye-x64 \
+                                             neondatabase/neon:${{ needs.tag.outputs.build-tag }}-bullseye-arm64
 
       - uses: docker/login-action@v3
         with:
@@ -668,7 +669,7 @@ jobs:
           cache-from: type=registry,ref=cache.neon.build/compute-node-${{ matrix.version.pg }}:cache-bullseye-${{ matrix.arch }}
           cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/compute-node-{0}:cache-{1}-{2},mode=max', matrix.version.pg, 'bullseye', matrix.arch) || '' }}
           tags: |
-            neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}-${{ matrix.arch }}
+            neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}-bullseye-${{ matrix.arch }}
 
       - name: Build neon extensions test image
         if: matrix.version.pg == 'v16'
@@ -689,7 +690,7 @@ jobs:
           cache-from: type=registry,ref=cache.neon.build/neon-test-extensions-${{ matrix.version.pg }}:cache-bullseye-${{ matrix.arch }}
           cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/neon-test-extensions-{0}:cache-{1}-{2},mode=max', matrix.version.pg, 'bullseye', matrix.arch) || '' }}
           tags: |
-            neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{needs.tag.outputs.build-tag}}-${{ matrix.arch }}
+            neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{needs.tag.outputs.build-tag}}-bullseye-${{ matrix.arch }}
 
       - name: Build compute-tools image
         # compute-tools are Postgres independent, so build it only once
@@ -713,7 +714,7 @@ jobs:
           cache-from: type=registry,ref=cache.neon.build/neon-test-extensions-${{ matrix.version.pg }}:cache-bullseye-${{ matrix.arch }}
           cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/compute-tools-{0}:cache-{1}-{2},mode=max', matrix.version.pg, 'bullseye', matrix.arch) || '' }}
           tags: |
-            neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}-${{ matrix.arch }}
+            neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}-bullseye-${{ matrix.arch }}
 
   compute-node-image:
     needs: [ compute-node-image-arch, tag ]
@@ -732,22 +733,25 @@ jobs:
       - name: Create multi-arch compute-node image
         run: |
           docker buildx imagetools create -t neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }} \
-                                             neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}-x64 \
-                                             neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}-arm64
+                                          -t neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}-bullseye \
+                                             neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}-bullseye-x64 \
+                                             neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}-bullseye-arm64
 
       - name: Create multi-arch neon-test-extensions image
         if: matrix.version == 'v16'
         run: |
           docker buildx imagetools create -t neondatabase/neon-test-extensions-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }} \
-                                             neondatabase/neon-test-extensions-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}-x64 \
-                                             neondatabase/neon-test-extensions-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}-arm64
+                                          -t neondatabase/neon-test-extensions-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}-bullseye \
+                                             neondatabase/neon-test-extensions-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}-bullseye-x64 \
+                                             neondatabase/neon-test-extensions-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}-bullseye-arm64
 
       - name: Create multi-arch compute-tools image
         if: matrix.version == 'v17'
         run: |
           docker buildx imagetools create -t neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }} \
-                                             neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}-x64 \
-                                             neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}-arm64
+                                          -t neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}-bullseye \
+                                             neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}-bullseye-x64 \
+                                             neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}-bullseye-arm64
 
       - uses: docker/login-action@v3
         with:
