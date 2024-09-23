@@ -284,6 +284,7 @@ pub(crate) struct DatabaseInfo {
     /// be inconvenient for debug with local PG instance.
     pub(crate) password: Option<Box<str>>,
     pub(crate) aux: MetricsAuxInfo,
+    #[serde(default)]
     pub(crate) allowed_ips: Option<Vec<IpPattern>>,
 }
 
@@ -295,6 +296,7 @@ impl fmt::Debug for DatabaseInfo {
             .field("port", &self.port)
             .field("dbname", &self.dbname)
             .field("user", &self.user)
+            .field("allowed_ips", &self.allowed_ips)
             .finish_non_exhaustive()
     }
 }
