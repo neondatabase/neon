@@ -1064,6 +1064,9 @@ RUN case "${PG_VERSION}" in "v17") \
     esac && \
     mkdir /ext-src
 
+# This is required for the PostGIS test
+RUN apt-get install -y libproj19 libgdal28
+
 #COPY --from=postgis-build /postgis.tar.gz /ext-src/
 COPY --from=postgis-build /postgis-src/ /ext-src/postgis-src
 COPY --from=postgis-build /sfcgal/* /usr
