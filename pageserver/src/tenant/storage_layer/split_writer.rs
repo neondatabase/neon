@@ -476,14 +476,18 @@ mod tests {
 
     #[tokio::test]
     async fn write_split() {
+        // Test the split writer with retaining all the layers we have produced (discard=false)
         write_split_helper("split_writer_write_split", false).await;
     }
 
     #[tokio::test]
     async fn write_split_discard() {
+        // Test the split writer with discarding all the layers we have produced (discard=true)
         write_split_helper("split_writer_write_split_discard", true).await;
     }
 
+    /// Test the image+delta writer by writing a large number of images and deltas. If discard is
+    /// set to true, all layers will be discarded.
     async fn write_split_helper(harness_name: &'static str, discard: bool) {
         let harness = TenantHarness::create(harness_name).await.unwrap();
         let (tenant, ctx) = harness.load().await;
