@@ -435,6 +435,22 @@ mod tests {
             "aux": dummy_aux(),
         }))?;
 
+        // with allowed_ips
+        let dbinfo = serde_json::from_value::<DatabaseInfo>(json!({
+            "host": "localhost",
+            "port": 5432,
+            "dbname": "postgres",
+            "user": "john_doe",
+            "password": "password",
+            "aux": dummy_aux(),
+            "allowed_ips": ["127.0.0.1"],
+        }))?;
+
+        assert_eq!(
+            dbinfo.allowed_ips,
+            Some(vec![IpPattern::Single("127.0.0.1".parse()?)])
+        );
+
         Ok(())
     }
 
