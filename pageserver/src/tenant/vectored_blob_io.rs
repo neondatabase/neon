@@ -38,12 +38,12 @@ pub struct BlobMeta {
 
 /// A view into the vectored blobs read buffer.
 #[derive(Clone, Debug)]
-pub(crate) enum VectoredBlobBufView<'a> {
+pub(crate) enum BufView<'a> {
     Slice(&'a [u8]),
     Bytes(bytes::Bytes),
 }
 
-impl<'a> VectoredBlobBufView<'a> {
+impl<'a> BufView<'a> {
     /// Creates a new slice-based view on the blob.
     pub fn new_slice(slice: &'a [u8]) -> Self {
         Self::Slice(slice)
@@ -59,47 +59,47 @@ impl<'a> VectoredBlobBufView<'a> {
     /// If using slice as the underlying storage, the copy will be an O(n) operation.
     pub fn into_bytes(self) -> Bytes {
         match self {
-            VectoredBlobBufView::Slice(slice) => Bytes::copy_from_slice(slice),
-            VectoredBlobBufView::Bytes(bytes) => bytes,
+            BufView::Slice(slice) => Bytes::copy_from_slice(slice),
+            BufView::Bytes(bytes) => bytes,
         }
     }
 
     /// Creates a sub-view of the blob based on the range.
     fn view(&self, range: std::ops::Range<usize>) -> Self {
         match self {
-            VectoredBlobBufView::Slice(slice) => VectoredBlobBufView::Slice(&slice[range]),
-            VectoredBlobBufView::Bytes(bytes) => VectoredBlobBufView::Bytes(bytes.slice(range)),
+            BufView::Slice(slice) => BufView::Slice(&slice[range]),
+            BufView::Bytes(bytes) => BufView::Bytes(bytes.slice(range)),
         }
     }
 }
 
-impl<'a> Deref for VectoredBlobBufView<'a> {
+impl<'a> Deref for BufView<'a> {
     type Target = [u8];
 
     fn deref(&self) -> &Self::Target {
         match self {
-            VectoredBlobBufView::Slice(slice) => slice,
-            VectoredBlobBufView::Bytes(bytes) => &bytes,
+            BufView::Slice(slice) => slice,
+            BufView::Bytes(bytes) => &bytes,
         }
     }
 }
 
-impl<'a> AsRef<[u8]> for VectoredBlobBufView<'a> {
+impl<'a> AsRef<[u8]> for BufView<'a> {
     fn as_ref(&self) -> &[u8] {
         match self {
-            VectoredBlobBufView::Slice(slice) => slice,
-            VectoredBlobBufView::Bytes(bytes) => bytes.as_ref(),
+            BufView::Slice(slice) => slice,
+            BufView::Bytes(bytes) => bytes.as_ref(),
         }
     }
 }
 
-impl<'a> From<&'a [u8]> for VectoredBlobBufView<'a> {
+impl<'a> From<&'a [u8]> for BufView<'a> {
     fn from(value: &'a [u8]) -> Self {
         Self::new_slice(value)
     }
 }
 
-impl From<Bytes> for VectoredBlobBufView<'_> {
+impl From<Bytes> for BufView<'_> {
     fn from(value: Bytes) -> Self {
         Self::new_bytes(value)
     }
@@ -120,10 +120,7 @@ pub struct VectoredBlob {
 
 impl VectoredBlob {
     /// Reads a decompressed view of the blob.
-    pub(crate) async fn read<'a>(
-        &self,
-        buf: &VectoredBlobBufView<'a>,
-    ) -> Result<VectoredBlobBufView<'a>, std::io::Error> {
+    pub(crate) async fn read<'a>(&self, buf: &BufView<'a>) -> Result<BufView<'a>, std::io::Error> {
         let mut decompressed_vec = Vec::new();
         let view = buf.view(self.start..self.end);
 
@@ -135,9 +132,7 @@ impl VectoredBlob {
                 decoder.write_all(&view).await?;
                 decoder.flush().await?;
                 // Zero-copy conversion from `Vec` to `Bytes`
-                Ok(VectoredBlobBufView::new_bytes(Bytes::from(
-                    decompressed_vec,
-                )))
+                Ok(BufView::new_bytes(Bytes::from(decompressed_vec)))
             }
             bits => {
                 let error = std::io::Error::new(
@@ -1114,7 +1109,7 @@ mod tests {
             let result = vectored_blob_reader.read_blobs(&read, buf, &ctx).await?;
             assert_eq!(result.blobs.len(), 1);
             let read_blob = &result.blobs[0];
-            let view = VectoredBlobBufView::new_slice(&result.buf);
+            let view = BufView::new_slice(&result.buf);
             let read_buf = read_blob.read(&view).await?;
             assert_eq!(
                 &blob[..],

@@ -36,7 +36,7 @@ use crate::tenant::disk_btree::{
 };
 use crate::tenant::timeline::GetVectoredError;
 use crate::tenant::vectored_blob_io::{
-    BlobFlag, StreamingVectoredReadPlanner, VectoredBlobBufView, VectoredBlobReader, VectoredRead,
+    BlobFlag, BufView, StreamingVectoredReadPlanner, VectoredBlobReader, VectoredRead,
     VectoredReadPlanner,
 };
 use crate::tenant::PageReconstructError;
@@ -549,7 +549,7 @@ impl ImageLayerInner {
             let buf = BytesMut::with_capacity(buf_size);
             let blobs_buf = vectored_blob_reader.read_blobs(&read, buf, ctx).await?;
             let frozen_buf = blobs_buf.buf.freeze();
-            let view = VectoredBlobBufView::new_bytes(frozen_buf);
+            let view = BufView::new_bytes(frozen_buf);
 
             for meta in blobs_buf.blobs.iter() {
                 let img_buf = meta.read(&view).await?;
@@ -603,7 +603,7 @@ impl ImageLayerInner {
             match res {
                 Ok(blobs_buf) => {
                     let frozen_buf = blobs_buf.buf.freeze();
-                    let view = VectoredBlobBufView::new_bytes(frozen_buf);
+                    let view = BufView::new_bytes(frozen_buf);
                     for meta in blobs_buf.blobs.iter() {
                         let img_buf = meta.read(&view).await;
 
@@ -1042,7 +1042,7 @@ impl<'a> ImageLayerIterator<'a> {
             .read_blobs(&plan, buf, self.ctx)
             .await?;
         let frozen_buf = blobs_buf.buf.freeze();
-        let view = VectoredBlobBufView::new_bytes(frozen_buf);
+        let view = BufView::new_bytes(frozen_buf);
         for meta in blobs_buf.blobs.iter() {
             let img_buf = meta.read(&view).await?;
             next_batch.push_back((

@@ -39,7 +39,7 @@ use crate::tenant::disk_btree::{
 use crate::tenant::storage_layer::layer::S3_UPLOAD_LIMIT;
 use crate::tenant::timeline::GetVectoredError;
 use crate::tenant::vectored_blob_io::{
-    BlobFlag, StreamingVectoredReadPlanner, VectoredBlobBufView, VectoredBlobReader, VectoredRead,
+    BlobFlag, BufView, StreamingVectoredReadPlanner, VectoredBlobReader, VectoredRead,
     VectoredReadCoalesceMode, VectoredReadPlanner,
 };
 use crate::tenant::PageReconstructError;
@@ -1021,7 +1021,7 @@ impl DeltaLayerInner {
                     continue;
                 }
             };
-            let view = VectoredBlobBufView::new_slice(&blobs_buf.buf);
+            let view = BufView::new_slice(&blobs_buf.buf);
             for meta in blobs_buf.blobs.iter().rev() {
                 if Some(meta.meta.key) == ignore_key_with_err {
                     continue;
@@ -1260,7 +1260,7 @@ impl DeltaLayerInner {
                 buf.reserve(read.size());
                 let res = reader.read_blobs(&read, buf, ctx).await?;
 
-                let view = VectoredBlobBufView::new_slice(&res.buf);
+                let view = BufView::new_slice(&res.buf);
 
                 for blob in res.blobs {
                     let key = blob.meta.key;
@@ -1555,7 +1555,7 @@ impl<'a> DeltaLayerIterator<'a> {
             .read_blobs(&plan, buf, self.ctx)
             .await?;
         let frozen_buf = blobs_buf.buf.freeze();
-        let view = VectoredBlobBufView::new_bytes(frozen_buf);
+        let view = BufView::new_bytes(frozen_buf);
         for meta in blobs_buf.blobs.iter() {
             let blob_read = meta.read(&view).await?;
             let value = Value::des(&blob_read)?;
@@ -1936,7 +1936,7 @@ pub(crate) mod test {
                 let blobs_buf = vectored_blob_reader
                     .read_blobs(&read, buf.take().expect("Should have a buffer"), &ctx)
                     .await?;
-                let view = VectoredBlobBufView::new_slice(&blobs_buf.buf);
+                let view = BufView::new_slice(&blobs_buf.buf);
                 for meta in blobs_buf.blobs.iter() {
                     let value = meta.read(&view).await?;
                     assert_eq!(
