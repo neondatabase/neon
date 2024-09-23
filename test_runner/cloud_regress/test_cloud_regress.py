@@ -23,6 +23,7 @@ def setup(remote_pg: RemotePostgres):
             log.info("Creating the extension")
             cur.execute("CREATE EXTENSION IF NOT EXISTS regress_so")
             conn.commit()
+            # TODO: Migrate to branches and remove this code
             log.info("Looking for subscriptions in the regress database")
             cur.execute(
                 "SELECT subname FROM pg_catalog.pg_subscription WHERE "
@@ -44,16 +45,8 @@ def setup(remote_pg: RemotePostgres):
                             regress_cur.execute(f"DROP SUBSCRIPTION {sub[0]}")
                             regress_conn.commit()
 
-            # This is also a workaround for the full path problem
-            # If we specify the full path in the command, the library won't be downloaded
-            # So we specify the name only for the first time
-            log.info("Creating a C function to check availability of regress.so")
-            cur.execute(
-                "CREATE FUNCTION get_columns_length(oid[]) "
-                "RETURNS int AS 'regress.so' LANGUAGE C STRICT STABLE PARALLEL SAFE;"
-            )
-            conn.rollback()
     yield
+    # TODO: Migrate to branches and remove this code
     log.info("Looking for extra roles...")
     with psycopg2.connect(remote_pg.connstr()) as conn:
         with conn.cursor() as cur:
