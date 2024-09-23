@@ -6,7 +6,7 @@
  * Portions Copyright (c) 2014-2023, PostgreSQL Global Development Group
  *
  * Implements https://hal.science/hal-00465313/document
- * 
+ *
  * Based on Hideaki Ohno's C++ implementation.  This is probably not ideally
  * suited to estimating the cardinality of very large sets;  in particular, we
  * have not attempted to further optimize the implementation as described in
@@ -126,22 +126,78 @@ addSHLL(HyperLogLogState *cState, uint32 hash)
 	/* Compute the rank of the remaining 32 - "k" (registerWidth) bits */
 	count = rho(hash << HLL_BIT_WIDTH, HLL_C_BITS);
 
-	cState->regs[index][count] = now;
+	if (cState->regs[index][count].ts)
+	{
+		/* update histgoram */
+		int64_t delta = (now - cState->regs[index][count].ts)/USECS_PER_SEC;
+		uint32_t new_histogram[HIST_SIZE] = {0};
+		for (int i = 0; i < HIST_SIZE; i++) {
+			/* Use middle point of interval */
+			uint32 interval_log2 = pg_ceil_log2_32((delta + (HIST_MIN_INTERVAL*((1<<i) + ((1<<i)/2))/2)) / HIST_MIN_INTERVAL);
+			uint32 cell = Min(interval_log2, HIST_SIZE-1);
+			new_histogram[cell] += cState->regs[index][count].histogram[i];
+		}
+		memcpy(cState->regs[index][count].histogram, new_histogram, sizeof new_histogram);
+	}
+	cState->regs[index][count].ts = now;
+	cState->regs[index][count].histogram[0] += 1; // most recent access always goes to first histogram backet
+}
+
+static uint32_t
+getAccessCount(const HyperLogLogRegister* reg, time_t duration)
+{
+	uint32_t count = 0;
+//  Simplest solution is to take in account all points fro overlapped interval
+//	for (size_t i = 0; i < HIST_SIZE && HIST_MIN_INTERVAL*((1 << i)/2) <= duration; i++) {
+	for (size_t i = 0; i < HIST_SIZE; i++) {
+		uint32_t high_boundary = HIST_MIN_INTERVAL*(1 << i);
+		uint32_t low_boundary = HIST_MIN_INTERVAL*((1 << i)/2);
+		if (high_boundary >= duration) {
+			// Assume uniform distribution of points within interval and use proportional number of points
+			Assert(duration >= low_boundary);
+			count += reg->histogram[i] * (duration - low_boundary) / (high_boundary - low_boundary);
+			break; // it's last interval within specified time range
+		} else {
+			count += reg->histogram[i];
+		}
+	}
+	return count;
 }
 
 static uint8
-getMaximum(const TimestampTz* reg, TimestampTz since)
+getMaximum(const HyperLogLogRegister* reg, TimestampTz since, time_t duration, double min_hit_ratio)
 {
 	uint8 max = 0;
-
-	for (size_t i = 0; i < HLL_C_BITS + 1; i++)
+	size_t i, j;
+	if (min_hit_ratio == 1.0)
 	{
-		if (reg[i] >= since)
+		for (i = 0; i < HLL_C_BITS + 1; i++)
 		{
-			max = i;
+			if (reg[i].ts >= since)
+			{
+				max = i;
+			}
 		}
 	}
-
+	else
+	{
+		uint32_t total_count = 0;
+		for (i = 0; i < HLL_C_BITS + 1; i++)
+		{
+			total_count += getAccessCount(&reg[i], duration);
+		}
+		if (total_count != 0)
+		{
+			for (i = 0; i < HLL_C_BITS + 1; i++)
+			{
+				// Take in account only bits with access frequncy exceeding maximal miss rate (1 - hit rate)
+				if (reg[i].ts >= since && 1.0 - (double)getAccessCount(&reg[i], duration) / total_count <= min_hit_ratio)
+				{
+					max = i;
+				}
+			}
+		}
+	}
 	return max;
 }
 
@@ -150,7 +206,7 @@ getMaximum(const TimestampTz* reg, TimestampTz since)
  * Estimates cardinality, based on elements added so far
  */
 double
-estimateSHLL(HyperLogLogState *cState, time_t duration)
+estimateSHLL(HyperLogLogState *cState, time_t duration, double min_hit_ratio)
 {
 	double		result;
 	double		sum = 0.0;
@@ -161,7 +217,7 @@ estimateSHLL(HyperLogLogState *cState, time_t duration)
 
 	for (i = 0; i < HLL_N_REGISTERS; i++)
 	{
-		R[i] = getMaximum(cState->regs[i], since);
+		R[i] = getMaximum(cState->regs[i], since, duration, min_hit_ratio);
 		sum += 1.0 / pow(2.0, R[i]);
 	}
 

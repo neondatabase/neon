@@ -114,3 +114,46 @@ def test_sliding_working_set_approximation(neon_simple_env: NeonEnv):
 
     assert estimation_1k >= 20 and estimation_1k <= 40
     assert estimation_10k >= 200 and estimation_10k <= 400
+
+
+def test_optimal_cache_size_approximation(neon_simple_env: NeonEnv):
+    env = neon_simple_env
+
+    endpoint = env.endpoints.create_start(
+        branch_name="main",
+        config_lines=[
+            "autovacuum = off",
+            "shared_buffers=1MB",
+            "neon.max_file_cache_size=256MB",
+            "neon.file_cache_size_limit=245MB",
+        ],
+    )
+    conn = endpoint.connect()
+    cur = conn.cursor()
+    cur.execute("create extension neon version '1.5'")
+    cur.execute(
+        "create table t_huge(pk integer primary key, count integer default 0, payload text default repeat('?', 128))"
+    )
+    cur.execute(
+        "create table t_small(pk integer primary key, count integer default 0, payload text default repeat('?', 128))"
+    )
+    cur.execute(
+        "insert into t_huge(pk) values (generate_series(1,1000000))"
+    )  # table size is 21277 pages
+    cur.execute(
+        "insert into t_small(pk) values (generate_series(1,100000))"
+    )  # table size is 2128 pages
+    time.sleep(2)
+    before = time.monotonic()
+    for _ in range(100):
+        cur.execute("select sum(count) from t_small")
+    cur.execute("select sum(count) from t_huge")
+    after = time.monotonic()
+    cur.execute(f"select approximate_working_set_size_seconds({int(after - before + 1)})")
+    ws_estimation = cur.fetchall()[0][0]
+    log.info(f"Working set size estimaton {ws_estimation}")
+    cur.execute(f"select approximate_optimal_cache_size({int(after - before + 1)}, 0.99)")
+    optimal_cache_size = cur.fetchall()[0][0]
+    log.info(f"Optimal cache size for 99% hit rate {optimal_cache_size}")
+    assert ws_estimation >= 20000 and ws_estimation <= 30000
+    assert optimal_cache_size >= 2000 and optimal_cache_size <= 3000
