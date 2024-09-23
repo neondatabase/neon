@@ -42,3 +42,39 @@ def test_physical_replication(neon_simple_env: NeonEnv):
                                 s_cur.execute(
                                     "select * from t where pk=%s", (random.randrange(1, 2 * pk),)
                                 )
+
+
+def test_physical_replication_config_mismatch(neon_simple_env: NeonEnv):
+    env = neon_simple_env
+    with env.endpoints.create_start(
+        branch_name="main",
+        endpoint_id="primary",
+    ) as primary:
+        with primary.connect() as p_con:
+            with p_con.cursor() as p_cur:
+                p_cur.execute(
+                    "CREATE TABLE t(pk bigint primary key, payload text default repeat('?',200))"
+                )
+        time.sleep(1)
+
+        with env.endpoints.new_replica_start(
+            origin=primary,
+            endpoint_id="secondary",
+            config_lines=["max_connections=5"],
+        ) as secondary:
+            with secondary.connect() as s_con:
+                with s_con.cursor() as s_cur:
+                    cursors = []
+                    for i in range(10):
+                        p_con = primary.connect()
+                        p_cur = p_con.cursor()
+                        p_cur.execute("begin")
+                        p_cur.execute("insert into t (pk) values (%s)", (i,))
+                        cursors.append(p_cur)
+
+                    for p_cur in cursors:
+                        p_cur.execute("commit")
+
+                    time.sleep(5)
+                    s_cur.execute("select count(*) from t")
+                    assert s_cur.fetchall()[0][0] == 10
