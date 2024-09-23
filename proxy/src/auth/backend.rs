@@ -619,6 +619,7 @@ mod tests {
         rate_limit_ip_subnet: 64,
         ip_allowlist_check_enabled: true,
         is_auth_broker: false,
+        accept_jwts: false,
     });
 
     async fn read_message(r: &mut (impl AsyncRead + Unpin), b: &mut BytesMut) -> PgMessage {

@@ -43,6 +43,7 @@ use crate::auth::backend::ComputeCredentials;
 use crate::auth::backend::ComputeUserInfo;
 use crate::auth::endpoint_sni;
 use crate::auth::ComputeUserInfoParseError;
+use crate::config::AuthenticationConfig;
 use crate::config::ProxyConfig;
 use crate::config::TlsConfig;
 use crate::context::RequestMonitoring;
@@ -148,6 +149,7 @@ impl UserFacingError for ConnInfoError {
 }
 
 fn get_conn_info(
+    config: &'static AuthenticationConfig,
     ctx: &RequestMonitoring,
     headers: &HeaderMap,
     tls: Option<&TlsConfig>,
@@ -183,6 +185,10 @@ fn get_conn_info(
     ctx.set_user(username.clone());
 
     let auth = if let Some(auth) = headers.get(&AUTHORIZATION) {
+        if !config.accept_jwts {
+            return Err(ConnInfoError::MissingPassword);
+        }
+
         let auth = auth
             .to_str()
             .map_err(|_| ConnInfoError::InvalidHeader(&AUTHORIZATION))?;
@@ -192,6 +198,10 @@ fn get_conn_info(
                 .into(),
         )
     } else if let Some(pass) = connection_url.password() {
+        if config.accept_jwts {
+            return Err(ConnInfoError::MissingPassword);
+        }
+
         AuthData::Password(match urlencoding::decode_binary(pass.as_bytes()) {
             std::borrow::Cow::Borrowed(b) => b.into(),
             std::borrow::Cow::Owned(b) => b.into(),
@@ -516,7 +526,12 @@ async fn handle_inner(
         "handling interactive connection from client"
     );
 
-    let conn_info = get_conn_info(ctx, request.headers(), config.tls_config.as_ref())?;
+    let conn_info = get_conn_info(
+        &config.authentication_config,
+        ctx,
+        request.headers(),
+        config.tls_config.as_ref(),
+    )?;
     info!(
         user = conn_info.conn_info.user_info.user.as_str(),
         "credentials"

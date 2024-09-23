@@ -6,7 +6,7 @@ use crate::{
     error::{ReportableError, UserFacingError},
     metrics::{Metrics, SniKind},
     proxy::NeonOptions,
-    serverless::SERVERLESS_DRIVER_SNI,
+    serverless::{SERVERLESS_DRIVER_AUTH_BROKER_SNI, SERVERLESS_DRIVER_SNI},
     EndpointId, RoleName,
 };
 use itertools::Itertools;
@@ -76,7 +76,7 @@ pub(crate) fn endpoint_sni(
             cn: common_name.into(),
         });
     }
-    if subdomain == SERVERLESS_DRIVER_SNI {
+    if subdomain == SERVERLESS_DRIVER_SNI || subdomain == SERVERLESS_DRIVER_AUTH_BROKER_SNI {
         return Ok(None);
     }
     Ok(Some(EndpointId::from(subdomain)))
