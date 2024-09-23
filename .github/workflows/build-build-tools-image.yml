@@ -72,15 +72,20 @@ jobs:
           username: ${{ secrets.NEON_CI_DOCKERCACHE_USERNAME }}
           password: ${{ secrets.NEON_CI_DOCKERCACHE_PASSWORD }}
 
-      - uses: docker/build-push-action@v6
+      - name: Build build-tools image
+        uses: docker/build-push-action@v6
         with:
           context: .
           provenance: false
           push: true
           pull: true
           file: Dockerfile.build-tools
-          cache-from: type=registry,ref=cache.neon.build/build-tools:cache-${{ matrix.arch }}
-          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/build-tools:cache-{0},mode=max', matrix.arch) || '' }}
+          cache-from: |
+            type=registry,ref=cache.neon.build/build-tools:cache-${{ matrix.arch }}
+            ${{ github.event_name == 'pull_request' && format('type=registry,ref=cache.neon.build/build-tools:cache-pr{0}-{1}', github.event.pull_request.number, matrix.arch) || '' }}
+          cache-to: |
+            ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/build-tools:cache-{0},mode=max', matrix.arch) || '' }}
+            ${{ github.event_name == 'pull_request' && format('type=registry,ref=cache.neon.build/build-tools:cache-pr{0}-{1},mode=max', github.event.pull_request.number, matrix.arch) || '' }}
           tags: neondatabase/build-tools:${{ inputs.image-tag }}-${{ matrix.arch }}
 
   merge-images:

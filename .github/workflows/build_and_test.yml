@@ -551,7 +551,8 @@ jobs:
           username: ${{ secrets.NEON_CI_DOCKERCACHE_USERNAME }}
           password: ${{ secrets.NEON_CI_DOCKERCACHE_PASSWORD }}
 
-      - uses: docker/build-push-action@v6
+      - name: Build storage image
+        uses: docker/build-push-action@v6
         with:
           context: .
           # ARM-specific flags are recommended for Graviton ≥ 2, these flags are also supported by Ampere Altra (Azure)
@@ -565,8 +566,12 @@ jobs:
           push: true
           pull: true
           file: Dockerfile
-          cache-from: type=registry,ref=cache.neon.build/neon:cache-${{ matrix.arch }}
-          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/neon:cache-{0},mode=max', matrix.arch) || '' }}
+          cache-from: |
+            type=registry,ref=cache.neon.build/neon:cache-${{ matrix.arch }}
+            ${{ github.event_name == 'pull_request' && format('type=registry,ref=cache.neon.build/neon:cache-pr{0}-{1}', github.event.pull_request.number, matrix.arch) || '' }}
+          cache-to: |
+            ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/neon:cache-{0},mode=max', matrix.arch) || '' }}
+            ${{ github.event_name == 'pull_request' && format('type=registry,ref=cache.neon.build/neon:cache-pr{0}-{1},mode=max', github.event.pull_request.number, matrix.arch) || '' }}
           tags: |
             neondatabase/neon:${{ needs.tag.outputs.build-tag }}-${{ matrix.arch }}
 
@@ -652,8 +657,12 @@ jobs:
           push: true
           pull: true
           file: compute/Dockerfile.compute-node
-          cache-from: type=registry,ref=cache.neon.build/compute-node-${{ matrix.version }}:cache-${{ matrix.arch }}
-          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/compute-node-{0}:cache-{1},mode=max', matrix.version, matrix.arch) || '' }}
+          cache-from: |
+            type=registry,ref=cache.neon.build/compute-node-${{ matrix.version }}:cache-${{ matrix.arch }}
+            ${{ github.event_name == 'pull_request' && format('type=registry,ref=cache.neon.build/compute-node-{0}:cache-pr{1}-{2}', matrix.version, github.event.pull_request.number, matrix.arch) || '' }}
+          cache-to: |
+            ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/compute-node-{0}:cache-{1},mode=max', matrix.version, matrix.arch) || '' }}
+            ${{ github.event_name == 'pull_request' && format('type=registry,ref=cache.neon.build/compute-node-{0}:cache-pr{1}-{2},mode=max', matrix.version, github.event.pull_request.number, matrix.arch) || '' }}
           tags: |
             neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}-${{ matrix.arch }}
 
@@ -672,8 +681,12 @@ jobs:
           pull: true
           file: compute/Dockerfile.compute-node
           target: neon-pg-ext-test
-          cache-from: type=registry,ref=cache.neon.build/neon-test-extensions-${{ matrix.version }}:cache-${{ matrix.arch }}
-          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/neon-test-extensions-{0}:cache-{1},mode=max', matrix.version, matrix.arch) || '' }}
+          cache-from: |
+            type=registry,ref=cache.neon.build/neon-test-extensions-${{ matrix.version }}:cache-${{ matrix.arch }}
+            ${{ github.event_name == 'pull_request' && format('type=registry,ref=cache.neon.build/neon-test-extensions-{0}:cache-pr{1}-{2}', matrix.version, github.event.pull_request.number, matrix.arch) || '' }}
+          cache-to: |
+            ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/neon-test-extensions-{0}:cache-{1},mode=max', matrix.version, matrix.arch) || '' }}
+            ${{ github.event_name == 'pull_request' && format('type=registry,ref=cache.neon.build/neon-test-extensions-{0}:cache-pr{1}-{2},mode=max', matrix.version, github.event.pull_request.number, matrix.arch) || '' }}
           tags: |
             neondatabase/neon-test-extensions-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}-${{ matrix.arch }}
 
@@ -692,6 +705,12 @@ jobs:
           push: true
           pull: true
           file: compute/Dockerfile.compute-node
+          cache-from: |
+            type=registry,ref=cache.neon.build/neon-test-extensions-${{ matrix.version }}:cache-${{ matrix.arch }}
+            ${{ github.event_name == 'pull_request' && format('type=registry,ref=cache.neon.build/compute-tools-{0}:cache-pr{1}-{2}', matrix.version, github.event.pull_request.number, matrix.arch) || '' }}
+          cache-to: |
+            ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/compute-tools-{0}:cache-{1},mode=max', matrix.version, matrix.arch) || '' }}
+            ${{ github.event_name == 'pull_request' && format('type=registry,ref=cache.neon.build/compute-tools-{0}:cache-pr{1}-{2},mode=max', matrix.version, github.event.pull_request.number, matrix.arch) || '' }}
           tags: |
             neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}-${{ matrix.arch }}
 
