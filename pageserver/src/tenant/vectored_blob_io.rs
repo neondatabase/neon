@@ -54,6 +54,16 @@ impl<'a> VectoredBlobBufView<'a> {
         Self::Bytes(bytes)
     }
 
+    /// Convert the view into `Bytes`.
+    ///
+    /// If using slice as the underlying storage, the copy will be an O(n) operation.
+    pub fn into_bytes(self) -> Bytes {
+        match self {
+            VectoredBlobBufView::Slice(slice) => Bytes::copy_from_slice(slice),
+            VectoredBlobBufView::Bytes(bytes) => bytes,
+        }
+    }
+
     /// Creates a sub-view of the blob based on the range.
     fn view(&self, range: std::ops::Range<usize>) -> Self {
         match self {
@@ -92,15 +102,6 @@ impl<'a> From<&'a [u8]> for VectoredBlobBufView<'a> {
 impl From<Bytes> for VectoredBlobBufView<'_> {
     fn from(value: Bytes) -> Self {
         Self::new_bytes(value)
-    }
-}
-
-impl From<VectoredBlobBufView<'_>> for Bytes {
-    fn from(value: VectoredBlobBufView<'_>) -> Self {
-        match value {
-            VectoredBlobBufView::Slice(slice) => Bytes::copy_from_slice(slice),
-            VectoredBlobBufView::Bytes(bytes) => bytes,
-        }
     }
 }
 

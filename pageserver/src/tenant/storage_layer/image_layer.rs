@@ -556,7 +556,7 @@ impl ImageLayerInner {
 
                 key_count += 1;
                 writer
-                    .put_image(meta.meta.key, img_buf.into(), ctx)
+                    .put_image(meta.meta.key, img_buf.into_bytes(), ctx)
                     .await
                     .context(format!("Storing key {}", meta.meta.key))?;
             }
@@ -624,7 +624,7 @@ impl ImageLayerInner {
                         reconstruct_state.update_key(
                             &meta.meta.key,
                             self.lsn,
-                            Value::Image(img_buf.into()),
+                            Value::Image(img_buf.into_bytes()),
                         );
                     }
                 }
@@ -1048,7 +1048,7 @@ impl<'a> ImageLayerIterator<'a> {
             next_batch.push_back((
                 meta.meta.key,
                 self.image_layer.lsn,
-                Value::Image(img_buf.into()),
+                Value::Image(img_buf.into_bytes()),
             ));
         }
         self.key_values_batch = next_batch;
