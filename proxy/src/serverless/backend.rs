@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use tokio::net::{lookup_host, TcpStream};
 use tokio_postgres::types::ToSql;
-use tracing::{field::display, info};
+use tracing::{debug, field::display, info};
 
 use crate::{
     auth::{
@@ -23,7 +23,7 @@ use crate::{
     error::{ErrorKind, ReportableError, UserFacingError},
     intern::EndpointIdInt,
     proxy::{
-        connect_compute::ConnectMechanism,
+        connect_compute::{ComputeConnectBackend, ConnectMechanism},
         retry::{CouldRetry, ShouldRetryWakeCompute},
     },
     rate_limiter::EndpointRateLimiter,
@@ -251,22 +251,51 @@ impl PoolingBackend {
 
         let conn_id = uuid::Uuid::new_v4();
         tracing::Span::current().record("conn_id", display(conn_id));
-        info!(%conn_id, "pool: opening a new connection '{conn_info}'");
+        info!(%conn_id, "local_pool: opening a new connection '{conn_info}'");
         let backend = self.config.auth_backend.as_ref().map(|()| keys);
-        crate::proxy::connect_compute::connect_to_compute(
+
+        let mut node_info = backend.wake_compute(ctx).await?;
+
+        let config = node_info
+            .config
+            .user(&conn_info.user_info.user)
+            .dbname(&conn_info.dbname);
+
+        let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
+        let (client, connection) = config.connect(tokio_postgres::NoTls).await?;
+        drop(pause);
+
+        tracing::Span::current().record("pid", tracing::field::display(client.get_process_id()));
+
+        let client = local_conn_pool::poll_client(
+            self.local_pool.clone(),
             ctx,
-            &TokioExtMechanism {
-                conn_id,
-                conn_info,
-                pool: self.local_pool.clone(),
-                locks: &self.config.connect_compute_locks,
-            },
-            &backend,
-            false, // do not allow self signed compute for http flow
-            self.config.wake_compute_retry_config,
-            self.config.connect_to_compute_retry_config,
-        )
-        .await
+            conn_info,
+            client,
+            connection,
+            conn_id,
+            node_info.aux.clone(),
+        );
+
+        let kid = client.get_process_id();
+        let jwk = p256::PublicKey::from(client.key().verifying_key()).to_jwk();
+
+        debug!(kid, ?jwk, "setting up backend session state");
+
+        // initiates the auth session
+        client
+            .query(
+                "select auth.init($1, $2);",
+                &[
+                    &kid as &(dyn ToSql + Sync),
+                    &tokio_postgres::types::Json(jwk),
+                ],
+            )
+            .await?;
+
+        info!(?kid, "backend session state init");
+
+        Ok(client)
     }
 }
 
@@ -532,72 +561,4 @@ async fn connect_http2(
         .await?;
 
     Ok((client, connection))
-}
-
-// uses tokio-postgres but explicitly uses the pg_session_jwt extension
-struct TokioExtMechanism {
-    pool: Arc<LocalConnPool<tokio_postgres::Client>>,
-    conn_info: ConnInfo,
-    conn_id: uuid::Uuid,
-
-    /// connect_to_compute concurrency lock
-    locks: &'static ApiLocks<Host>,
-}
-
-#[async_trait]
-impl ConnectMechanism for TokioExtMechanism {
-    type Connection = LocalClient<tokio_postgres::Client>;
-    type ConnectError = HttpConnError;
-    type Error = HttpConnError;
-
-    async fn connect_once(
-        &self,
-        ctx: &RequestMonitoring,
-        node_info: &CachedNodeInfo,
-        timeout: Duration,
-    ) -> Result<Self::Connection, Self::ConnectError> {
-        let host = node_info.config.get_host()?;
-        let permit = self.locks.get_permit(&host).await?;
-
-        let mut config = (*node_info.config).clone();
-        let config = config
-            .user(&self.conn_info.user_info.user)
-            .dbname(&self.conn_info.dbname)
-            .connect_timeout(timeout);
-
-        let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
-        let res = config.connect(tokio_postgres::NoTls).await;
-        drop(pause);
-        let (client, connection) = permit.release_result(res)?;
-
-        tracing::Span::current().record("pid", tracing::field::display(client.get_process_id()));
-
-        let client = local_conn_pool::poll_client(
-            self.pool.clone(),
-            ctx,
-            self.conn_info.clone(),
-            client,
-            connection,
-            self.conn_id,
-            node_info.aux.clone(),
-        );
-
-        let kid = client.get_process_id();
-        let jwk = p256::PublicKey::from(client.key().verifying_key()).to_jwk();
-
-        // initiates the auth session
-        client
-            .query(
-                "select auth.init($1, $2);",
-                &[
-                    &kid as &(dyn ToSql + Sync),
-                    &tokio_postgres::types::Json(jwk),
-                ],
-            )
-            .await?;
-
-        Ok(client)
-    }
-
-    fn update_connect_config(&self, _config: &mut compute::ConnCfg) {}
 }

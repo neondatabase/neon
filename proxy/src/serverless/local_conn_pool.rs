@@ -20,7 +20,7 @@ use crate::metrics::Metrics;
 use crate::usage_metrics::{Ids, MetricCounter, USAGE_METRICS};
 use crate::{context::RequestMonitoring, DbName, RoleName};
 
-use tracing::{error, warn, Span};
+use tracing::{debug, error, warn, Span};
 use tracing::{info, info_span, Instrument};
 
 use super::backend::HttpConnError;
@@ -80,12 +80,12 @@ impl<C: ClientInnerExt> EndpointConnPool<C> {
         let conn_id = client.conn_id;
 
         if client.is_closed() {
-            info!(%conn_id, "pool: throwing away connection '{conn_info}' because connection is closed");
+            info!(%conn_id, "local_pool: throwing away connection '{conn_info}' because connection is closed");
             return;
         }
         let global_max_conn = pool.read().global_pool_size_max_conns;
         if pool.read().total_conns >= global_max_conn {
-            info!(%conn_id, "pool: throwing away connection '{conn_info}' because pool is full");
+            info!(%conn_id, "local_pool: throwing away connection '{conn_info}' because pool is full");
             return;
         }
 
@@ -118,9 +118,9 @@ impl<C: ClientInnerExt> EndpointConnPool<C> {
 
         // do logging outside of the mutex
         if returned {
-            info!(%conn_id, "pool: returning connection '{conn_info}' back to the pool, total_conns={total_conns}, for this (db, user)={per_db_size}");
+            info!(%conn_id, "local_pool: returning connection '{conn_info}' back to the pool, total_conns={total_conns}, for this (db, user)={per_db_size}");
         } else {
-            info!(%conn_id, "pool: throwing away connection '{conn_info}' because pool is full, total_conns={total_conns}");
+            info!(%conn_id, "local_pool: throwing away connection '{conn_info}' because pool is full, total_conns={total_conns}");
         }
     }
 }
@@ -221,7 +221,7 @@ impl<C: ClientInnerExt> LocalConnPool<C> {
         // ok return cached connection if found and establish a new one otherwise
         if let Some(client) = client {
             if client.is_closed() {
-                info!("pool: cached connection '{conn_info}' is closed, opening a new one");
+                info!("local_pool: cached connection '{conn_info}' is closed, opening a new one");
                 return Ok(None);
             }
             tracing::Span::current().record("conn_id", tracing::field::display(client.conn_id));
@@ -231,7 +231,7 @@ impl<C: ClientInnerExt> LocalConnPool<C> {
             );
             info!(
                 cold_start_info = ColdStartInfo::HttpPoolHit.as_str(),
-                "pool: reusing connection '{conn_info}'"
+                "local_pool: reusing connection '{conn_info}'"
             );
             client.session.send(ctx.session_id())?;
             ctx.set_cold_start_info(ColdStartInfo::HttpPoolHit);
@@ -448,12 +448,20 @@ impl LocalClient<tokio_postgres::Client> {
         inner.jti += 1;
 
         let kid = inner.inner.get_process_id();
-        let header = json!({"kid":kid.to_string()}).to_string();
+        let header = json!({"kid":kid}).to_string();
 
         let mut payload = serde_json::from_slice::<serde_json::Map<String, Value>>(payload)
             .map_err(HttpConnError::JwtPayloadError)?;
         payload.insert("jti".to_string(), Value::Number(inner.jti.into()));
         let payload = Value::Object(payload).to_string();
+
+        debug!(
+            kid,
+            jti = inner.jti,
+            ?header,
+            ?payload,
+            "signing new ephemeral JWT"
+        );
 
         let token = sign_jwt(&inner.key, header, payload);
 
@@ -466,6 +474,8 @@ impl LocalClient<tokio_postgres::Client> {
                 &[&token as &(dyn ToSql + Sync)],
             )
             .await?;
+
+        info!(kid, jti = inner.jti, "user session state init");
 
         Ok(())
     }
@@ -495,13 +505,15 @@ impl<C: ClientInnerExt> Discard<'_, C> {
     pub(crate) fn check_idle(&mut self, status: ReadyForQueryStatus) {
         let conn_info = &self.conn_info;
         if status != ReadyForQueryStatus::Idle && std::mem::take(self.pool).strong_count() > 0 {
-            info!("pool: throwing away connection '{conn_info}' because connection is not idle");
+            info!(
+                "local_pool: throwing away connection '{conn_info}' because connection is not idle"
+            );
         }
     }
     pub(crate) fn discard(&mut self) {
         let conn_info = &self.conn_info;
         if std::mem::take(self.pool).strong_count() > 0 {
-            info!("pool: throwing away connection '{conn_info}' because connection is potentially in a broken state");
+            info!("local_pool: throwing away connection '{conn_info}' because connection is potentially in a broken state");
         }
     }
 }
