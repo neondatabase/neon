@@ -651,7 +651,7 @@ jobs:
           provenance: false
           push: true
           pull: true
-          file: Dockerfile.compute-node
+          file: compute/Dockerfile.compute-node
           cache-from: type=registry,ref=cache.neon.build/compute-node-${{ matrix.version }}:cache-${{ matrix.arch }}
           cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/compute-node-{0}:cache-{1},mode=max', matrix.version, matrix.arch) || '' }}
           tags: |
@@ -670,7 +670,7 @@ jobs:
           provenance: false
           push: true
           pull: true
-          file: Dockerfile.compute-node
+          file: compute/Dockerfile.compute-node
           target: neon-pg-ext-test
           cache-from: type=registry,ref=cache.neon.build/neon-test-extensions-${{ matrix.version }}:cache-${{ matrix.arch }}
           cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/neon-test-extensions-{0}:cache-{1},mode=max', matrix.version, matrix.arch) || '' }}
@@ -691,7 +691,7 @@ jobs:
           provenance: false
           push: true
           pull: true
-          file: Dockerfile.compute-node
+          file: compute/Dockerfile.compute-node
           tags: |
             neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}-${{ matrix.arch }}
 
@@ -779,7 +779,7 @@ jobs:
       - name: Build vm image
         run: |
           ./vm-builder \
-            -spec=vm-image-spec.yaml \
+            -spec=compute/vm-image-spec.yaml \
             -src=neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }} \
             -dst=neondatabase/vm-compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}
 
