@@ -2553,7 +2553,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         desired_availability: Optional[PageserverAvailability],
         desired_scheduling_policy: Optional[PageserverSchedulingPolicy],
         max_attempts: int,
-        backoff: int,
+        backoff: float,
     ):
         """
         Poll the node status until it reaches 'desired_scheduling_policy' and 'desired_availability'
@@ -2948,7 +2948,7 @@ class NeonPageserver(PgProtocol, LogUtils):
             self.id
         ):
             self.env.storage_controller.poll_node_status(
-                self.id, PageserverAvailability.ACTIVE, None, max_attempts=20, backoff=1
+                self.id, PageserverAvailability.ACTIVE, None, max_attempts=200, backoff=0.1
             )
 
         return self
