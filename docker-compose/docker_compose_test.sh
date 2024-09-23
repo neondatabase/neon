@@ -82,8 +82,7 @@ for pg_version in 14 15 16; do
         TMPDIR=$(mktemp -d)
         docker cp $TEST_CONTAINER_NAME:/ext-src/postgis-src/raster/test $TMPDIR
         docker cp $TEST_CONTAINER_NAME:/ext-src/postgis-src/regress/00-regress-install/lib $TMPDIR
-        docker exec $COMPUTE_CONTAINER_NAME mkdir -p /ext-src/postgis-src/raster /ext-src/postgis-src/regress \
-        /ext-src/postgis-src/regress/00-regress-install/lib
+        docker exec $COMPUTE_CONTAINER_NAME mkdir -p /ext-src/postgis-src/raster /ext-src/postgis-src/regress /ext-src/postgis-src/regress/00-regress-install/lib
         docker cp $TMPDIR/test $COMPUTE_CONTAINER_NAME:/ext-src/postgis-src/raster/test
         docker cp $TMPDIR/lib $COMPUTE_CONTAINER_NAME:/ext-src/postgis-src/regress/00-regress-install/lib
         rm -rf $TMPDIR
