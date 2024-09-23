@@ -47,7 +47,7 @@ from fixtures.remote_storage import (
     s3_storage,
 )
 from fixtures.safekeeper.http import SafekeeperHttpClient
-from fixtures.safekeeper.utils import are_walreceivers_absent
+from fixtures.safekeeper.utils import wait_walreceivers_absent
 from fixtures.utils import (
     PropagatingThread,
     get_dir_size,
@@ -1061,6 +1061,7 @@ def test_restart_endpoint(neon_env_builder: NeonEnvBuilder):
 # https://github.com/neondatabase/neon/issues/8911
 def test_restart_endpoint_after_switch_wal(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
+    timeline_id = env.initial_timeline
 
     endpoint = env.endpoints.create_start("main")
 
@@ -1070,7 +1071,7 @@ def test_restart_endpoint_after_switch_wal(neon_env_builder: NeonEnvBuilder):
 
     # we want immediate shutdown to have endpoint restart on xlog switch record,
     # so prevent shutdown checkpoint.
-    endpoint.stop(mode="immediate")
+    endpoint.stop(mode="immediate", sks_wait_walreceiver_gone=(env.safekeepers, timeline_id))
     endpoint = env.endpoints.create_start("main")
     endpoint.safe_psql("SELECT 'works'")
 
@@ -1222,10 +1223,7 @@ def wait_flush_lsn_align_by_ep(env, branch, tenant_id, timeline_id, ep, sks):
     # Even if there is no compute, there might be some in flight data; ensure
     # all walreceivers die before rechecking.
     for sk_http_cli in sk_http_clis:
-        wait(
-            partial(are_walreceivers_absent, sk_http_cli, tenant_id, timeline_id),
-            "walreceivers to be gone",
-        )
+        wait_walreceivers_absent(sk_http_cli, tenant_id, timeline_id)
     # Now recheck again flush_lsn and exit if it is good
     if is_flush_lsn_aligned(sk_http_clis, tenant_id, timeline_id):
         return
