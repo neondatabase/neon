@@ -563,6 +563,8 @@ pub enum CreateTimelineError {
     AncestorLsn(anyhow::Error),
     #[error("ancestor timeline is not active")]
     AncestorNotActive,
+    #[error("ancestor timeline is archived")]
+    AncestorArchived,
     #[error("tenant shutting down")]
     ShuttingDown,
     #[error(transparent)]
@@ -1696,6 +1698,11 @@ impl Tenant {
                 // ready for other purposes either.
                 if !ancestor_timeline.is_active() {
                     return Err(CreateTimelineError::AncestorNotActive);
+                }
+
+                if !ancestor_timeline.is_archived() {
+                    info!("tried to branch archived timeline");
+                    return Err(CreateTimelineError::AncestorArchived);
                 }
 
                 if let Some(lsn) = ancestor_start_lsn.as_mut() {

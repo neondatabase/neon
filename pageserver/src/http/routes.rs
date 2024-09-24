@@ -589,6 +589,10 @@ async fn timeline_create_handler(
                 StatusCode::SERVICE_UNAVAILABLE,
                 HttpErrorBody::from_msg(e.to_string()),
             ),
+            Err(e @ tenant::CreateTimelineError::AncestorArchived) => json_response(
+                StatusCode::NOT_ACCEPTABLE,
+                HttpErrorBody::from_msg(e.to_string()),
+            ),
             Err(tenant::CreateTimelineError::ShuttingDown) => json_response(
                 StatusCode::SERVICE_UNAVAILABLE,
                 HttpErrorBody::from_msg("tenant shutting down".to_string()),
