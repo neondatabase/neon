@@ -308,7 +308,10 @@ impl DeleteTimelineFlow {
 
         let timeline = match timelines.get(&timeline_id) {
             Some(t) => t,
-            None => return Err(DeleteTimelineError::NotFound),
+            None => {
+                let offloaded_timelines = tenant.timelines_offloaded.lock().unwrap();
+                return Err(DeleteTimelineError::NotFound);
+            }
         };
 
         // Ensure that there are no child timelines **attached to that pageserver**,
