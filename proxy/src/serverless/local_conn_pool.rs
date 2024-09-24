@@ -439,6 +439,7 @@ impl<C: ClientInnerExt> LocalClient<C> {
         &inner.key
     }
 }
+
 impl LocalClient<tokio_postgres::Client> {
     pub(crate) async fn set_jwt_session(&mut self, payload: &[u8]) -> Result<(), HttpConnError> {
         let inner = self
@@ -479,16 +480,6 @@ impl LocalClient<tokio_postgres::Client> {
 
         Ok(())
     }
-
-    // pub(crate) fn jti(&mut self) -> u64 {
-    //     let jti = &mut self
-    //         .inner
-    //         .as_mut()
-    //         .expect("client inner should not be removed")
-    //         .jti;
-    //     *jti += 1;
-    //     *jti
-    // }
 }
 
 fn sign_jwt(sk: &SigningKey, header: String, payload: String) -> String {

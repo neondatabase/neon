@@ -282,7 +282,7 @@ impl PoolingBackend {
             node_info.aux.clone(),
         );
 
-        let kid = client.get_process_id();
+        let kid = client.get_process_id() as i64;
         let jwk = p256::PublicKey::from(client.key().verifying_key()).to_jwk();
 
         debug!(kid, ?jwk, "setting up backend session state");
