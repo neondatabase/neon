@@ -4638,11 +4638,8 @@ class StorageScrubber:
         (output_path, stdout, status_code) = subprocess_capture(
             self.log_dir,
             args,
-            echo_stderr=False,
-            echo_stdout=False,
             env=env,
-            check=False,
-            capture_stdout=False,
+            check=True,
             timeout=timeout,
         )
         if status_code:
