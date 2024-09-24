@@ -91,7 +91,7 @@ pub(super) async fn authenticate(
     info!(parent: &span, "waiting for console's reply...");
     let db_info = waiter.await.map_err(WebAuthError::from)?;
 
-    if auth_config.ip_allowlist_check_enabled {
+    if !auth_config.skip_allowed_ips_check {
         if let Some(allowed_ips) = &db_info.allowed_ips {
             if !auth::check_peer_addr_is_in_list(&ctx.peer_addr(), allowed_ips) {
                 return Err(auth::AuthError::ip_address_not_allowed(ctx.peer_addr()));

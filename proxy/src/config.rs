@@ -66,7 +66,7 @@ pub struct AuthenticationConfig {
     pub rate_limiter_enabled: bool,
     pub rate_limiter: AuthRateLimiter,
     pub rate_limit_ip_subnet: u8,
-    pub ip_allowlist_check_enabled: bool,
+    pub skip_allowed_ips_check: bool,
 }
 
 impl TlsConfig {
