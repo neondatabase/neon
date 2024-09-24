@@ -112,7 +112,6 @@ fn main() -> Result<()> {
             "safekeeper" => rt.block_on(handle_safekeeper(sub_args, env)),
             "endpoint" => rt.block_on(handle_endpoint(sub_args, env)),
             "mappings" => handle_mappings(sub_args, env),
-            "pg" => bail!("'pg' subcommand has been renamed to 'endpoint'"),
             _ => bail!("unexpected subcommand {sub_name}"),
         };
 
@@ -1858,13 +1857,6 @@ fn cli() -> Command {
                         .arg(tenant_id_arg.clone())
                         .arg(timeline_id_arg.clone())
                 )
-        )
-        // Obsolete old name for 'endpoint'. We now just print an error if it's used.
-        .subcommand(
-            Command::new("pg")
-                .hide(true)
-                .arg(Arg::new("ignore-rest").allow_hyphen_values(true).num_args(0..).required(false))
-                .trailing_var_arg(true)
         )
         .subcommand(
             Command::new("start")
