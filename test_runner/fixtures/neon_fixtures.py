@@ -4617,7 +4617,8 @@ class StorageScrubber:
             "REGION": s3_storage.bucket_region,
             "BUCKET": s3_storage.bucket_name,
             "BUCKET_PREFIX": s3_storage.prefix_in_bucket,
-            "RUST_LOG": "DEBUG",
+            "RUST_LOG": "INFO",
+            "PAGESERVER_DISABLE_FILE_LOGGING": "1",
         }
         env.update(s3_storage.access_env_vars())
 
@@ -4637,10 +4638,8 @@ class StorageScrubber:
         (output_path, stdout, status_code) = subprocess_capture(
             self.log_dir,
             args,
-            echo_stderr=True,
-            echo_stdout=True,
             env=env,
-            check=False,
+            check=True,
             capture_stdout=True,
             timeout=timeout,
         )
