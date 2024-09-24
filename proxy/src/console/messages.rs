@@ -284,6 +284,8 @@ pub(crate) struct DatabaseInfo {
     /// be inconvenient for debug with local PG instance.
     pub(crate) password: Option<Box<str>>,
     pub(crate) aux: MetricsAuxInfo,
+    #[serde(default)]
+    pub(crate) allowed_ips: Option<Vec<IpPattern>>,
 }
 
 // Manually implement debug to omit sensitive info.
@@ -294,6 +296,7 @@ impl fmt::Debug for DatabaseInfo {
             .field("port", &self.port)
             .field("dbname", &self.dbname)
             .field("user", &self.user)
+            .field("allowed_ips", &self.allowed_ips)
             .finish_non_exhaustive()
     }
 }
@@ -431,6 +434,22 @@ mod tests {
             "N.E.W": "forward compatibility check",
             "aux": dummy_aux(),
         }))?;
+
+        // with allowed_ips
+        let dbinfo = serde_json::from_value::<DatabaseInfo>(json!({
+            "host": "localhost",
+            "port": 5432,
+            "dbname": "postgres",
+            "user": "john_doe",
+            "password": "password",
+            "aux": dummy_aux(),
+            "allowed_ips": ["127.0.0.1"],
+        }))?;
+
+        assert_eq!(
+            dbinfo.allowed_ips,
+            Some(vec![IpPattern::Single("127.0.0.1".parse()?)])
+        );
 
         Ok(())
     }
