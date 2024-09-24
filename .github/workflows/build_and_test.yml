@@ -843,6 +843,9 @@ jobs:
     needs: [ check-permissions, tag, test-images, vm-compute-node-image ]
     runs-on: ubuntu-22.04
 
+    permissions:
+      id-token: write # for `aws-actions/configure-aws-credentials`
+
     env:
       VERSIONS: v14 v15 v16 v17
 
@@ -887,13 +890,19 @@ jobs:
           docker buildx imagetools create -t neondatabase/neon-test-extensions-v16:latest \
                                               neondatabase/neon-test-extensions-v16:${{ needs.tag.outputs.build-tag }}
 
+      - name: Configure AWS-prod credentials
+        if: github.ref_name == 'release'|| github.ref_name == 'release-proxy'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: eu-central-1
+          mask-aws-account-id: true
+          role-to-assume: ${{ secrets.PROD_GHA_OIDC_ROLE }}
+
       - name: Login to prod ECR
         uses: docker/login-action@v3
         if: github.ref_name == 'release'|| github.ref_name == 'release-proxy'
         with:
           registry: 093970136003.dkr.ecr.eu-central-1.amazonaws.com
-          username: ${{ secrets.PROD_GHA_RUNNER_LIMITED_AWS_ACCESS_KEY_ID }}
-          password: ${{ secrets.PROD_GHA_RUNNER_LIMITED_AWS_SECRET_ACCESS_KEY }}
 
       - name: Copy all images to prod ECR
         if: github.ref_name == 'release'|| github.ref_name == 'release-proxy'
