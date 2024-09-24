@@ -63,7 +63,9 @@ def test_lfc_resize(neon_simple_env: NeonEnv, pg_bin: PgBin):
     while True:
         lfc_file_path = f"{endpoint.pg_data_dir_path()}/file.cache"
         lfc_file_size = os.path.getsize(lfc_file_path)
-        res = subprocess.run(["ls", "-sk", lfc_file_path], check=True, text=True, capture_output=True)
+        res = subprocess.run(
+            ["ls", "-sk", lfc_file_path], check=True, text=True, capture_output=True
+        )
         lfc_file_blocks = re.findall("([0-9A-F]+)", res.stdout)[0]
         log.info(f"Size of LFC file {lfc_file_size}, blocks {lfc_file_blocks}")
         assert lfc_file_size <= 512 * 1024 * 1024
