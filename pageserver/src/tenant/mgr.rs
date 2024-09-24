@@ -219,7 +219,11 @@ async fn safe_rename_tenant_dir(path: impl AsRef<Utf8Path>) -> std::io::Result<U
         + TEMP_FILE_SUFFIX;
     let tmp_path = path_with_suffix_extension(&path, &rand_suffix);
     fs::rename(path.as_ref(), &tmp_path).await?;
-    fs::File::open(parent).await?.sync_all().await?;
+    fs::File::open(parent)
+        .await?
+        .sync_all()
+        .await
+        .maybe_fatal_err("safe_rename_tenant_dir")?;
     Ok(tmp_path)
 }
 

@@ -466,6 +466,7 @@ impl VirtualFile {
                 &[]
             };
             utils::crashsafe::overwrite(&final_path, &tmp_path, content)
+                .maybe_fatal_err("crashsafe_overwrite")
         })
         .await
         .expect("blocking task is never aborted")
