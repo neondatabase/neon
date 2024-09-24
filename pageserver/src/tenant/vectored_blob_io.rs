@@ -79,7 +79,7 @@ impl<'a> Deref for BufView<'a> {
     fn deref(&self) -> &Self::Target {
         match self {
             BufView::Slice(slice) => slice,
-            BufView::Bytes(bytes) => &bytes,
+            BufView::Bytes(bytes) => bytes,
         }
     }
 }
