@@ -291,7 +291,7 @@ pub struct Tenant {
     timelines_creating: std::sync::Mutex<HashSet<TimelineId>>,
 
     /// Possibly offloaded and archived timelines
-    timelines_offloaded: Mutex<HashMap<TimelineId, OffloadedTimeline>>,
+    timelines_offloaded: Mutex<HashMap<TimelineId, Arc<OffloadedTimeline>>>,
 
     // This mutex prevents creation of new timelines during GC.
     // Adding yet another mutex (in addition to `timelines`) is needed because holding

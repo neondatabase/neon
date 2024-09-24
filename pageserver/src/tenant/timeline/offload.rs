@@ -28,7 +28,7 @@ pub(crate) async fn offload_timeline(
         let mut offloaded_timelines = tenant.timelines_offloaded.lock().unwrap();
         offloaded_timelines.insert(
             timeline.timeline_id,
-            OffloadedTimeline::from_timeline(&timeline),
+            Arc::new(OffloadedTimeline::from_timeline(&timeline)),
         );
     }
 
