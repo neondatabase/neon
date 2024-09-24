@@ -273,10 +273,10 @@ async fn page_service_conn_main(
                 info!("Postgres client disconnected ({io_error})");
                 Ok(())
             } else {
-                Err(io_error).context("Postgres connection error")
+                Err(io_error).context(format!("Postgres connection error for {}", peer_addr))
             }
         }
-        other => other.context("Postgres query error"),
+        other => other.context(format!("Postgres query error for {}", peer_addr)),
     }
 }
 
