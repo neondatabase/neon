@@ -219,8 +219,10 @@ impl ControlPlaneGenerationsApi for ControllerUpcallClient {
             .join("validate")
             .expect("Failed to build validate path");
 
+        // When sending validate requests, break them up into chunks so that we
+        // avoid possible edge cases of generating any HTTP requests that
+        // require database I/O across many thousands of tenants.
         let mut result: HashMap<TenantShardId, bool> = HashMap::with_capacity(tenants.len());
-
         for tenant_chunk in (tenants).chunks(128) {
             let request = ValidateRequest {
                 tenants: tenant_chunk
