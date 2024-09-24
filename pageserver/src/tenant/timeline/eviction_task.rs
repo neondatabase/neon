@@ -30,7 +30,8 @@ use crate::{
     pgdatadir_mapping::CollectKeySpaceError,
     task_mgr::{self, TaskKind, BACKGROUND_RUNTIME},
     tenant::{
-        size::CalculateSyntheticSizeError, storage_layer::LayerVisibilityHint, tasks::BackgroundLoopKind, timeline::EvictionError, LogicalSizeCalculationCause, Tenant
+        size::CalculateSyntheticSizeError, storage_layer::LayerVisibilityHint,
+        tasks::BackgroundLoopKind, timeline::EvictionError, LogicalSizeCalculationCause, Tenant,
     },
 };
 
