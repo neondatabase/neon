@@ -4337,7 +4337,6 @@ dependencies = [
  "lasso",
  "measured",
  "metrics",
- "nix 0.27.1",
  "once_cell",
  "p256 0.13.2",
  "parking_lot 0.12.1",

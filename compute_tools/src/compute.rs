@@ -945,14 +945,13 @@ impl ComputeNode {
             });
         }
 
-        let mut local_proxy_handle = None;
         if let Some(ref local_proxy) = spec.local_proxy_config {
             info!("configuring local-proxy");
 
             // Spawn a thread to do the configuration,
             // so that we don't block the main thread that starts Postgres.
             let local_proxy = local_proxy.clone();
-            local_proxy_handle = Some(thread::spawn(move || -> Result<()> {
+            let _handle = Some(thread::spawn(move || -> Result<()> {
                 write_local_proxy_conf("/etc/localproxy/config.json".as_ref(), &local_proxy)?;
                 notify_local_proxy("/etc/localproxy/pid".as_ref())?;
 
@@ -1001,13 +1000,6 @@ impl ComputeNode {
         })?;
 
         self.pg_reload_conf()?;
-
-        if let Some(handle) = local_proxy_handle {
-            match handle.join() {
-                Ok(res) => res?,
-                Err(panic) => std::panic::resume_unwind(panic),
-            }
-        }
 
         let unknown_op = "unknown".to_string();
         let op_id = spec.operation_uuid.as_ref().unwrap_or(&unknown_op);

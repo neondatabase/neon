@@ -146,8 +146,8 @@ where
 /// Create or completely rewrite configuration file specified by `path`
 pub fn write_local_proxy_conf(path: &Path, local_proxy: &LocalProxySpec) -> Result<()> {
     let config =
-        serde_json::to_string_pretty(local_proxy).context("serializing local-proxy json")?;
-    std::fs::write(path, config).context("writing localproxy.json")?;
+        serde_json::to_string_pretty(local_proxy).context("serializing LocalProxySpec to json")?;
+    std::fs::write(path, config).with_context(|| format!("writing {}", path.display()))?;
 
     Ok(())
 }
