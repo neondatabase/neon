@@ -1,5 +1,8 @@
 name: Cloud Regression Test
 on:
+  push:
+    branches: [amasterov/move-patch-to-compute]
+
   schedule:
     # * is a special character in YAML so you have to quote this string
     #          ┌───────────── minute (0 - 59)
@@ -42,7 +45,7 @@ jobs:
       - name: Patch the test
         run: |
           cd "vendor/postgres-v${DEFAULT_PG_VERSION}"
-          patch -p1 < "../../patches/cloud_regress_pg${DEFAULT_PG_VERSION}.patch"
+          patch -p1 < "../../compute/patches/cloud_regress_pg${DEFAULT_PG_VERSION}.patch"
 
       - name: Generate a random password
         id: pwgen
