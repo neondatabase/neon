@@ -280,7 +280,7 @@ FROM build-deps AS vector-pg-build
 ARG PG_VERSION
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
-COPY patches/pgvector.patch /pgvector.patch
+COPY compute/patches/pgvector.patch /pgvector.patch
 
 # By default, pgvector Makefile uses `-march=native`. We don't want that,
 # because we build the images on different machines than where we run them.
@@ -366,7 +366,7 @@ FROM build-deps AS rum-pg-build
 ARG PG_VERSION
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
-COPY patches/rum.patch /rum.patch
+COPY compute/patches/rum.patch /rum.patch
 
 RUN case "${PG_VERSION}" in "v17") \
     echo "v17 extensions are not supported yet. Quit" && exit 0;; \
@@ -1033,6 +1033,41 @@ COPY --from=compute-tools /home/nonroot/target/release-line-debug-size-lto/compu
 
 #########################################################################################
 #
+# Layer "pgbouncer"
+#
+#########################################################################################
+
+FROM debian:bullseye-slim AS pgbouncer
+RUN set -e \
+    && apt-get update \
+    && apt-get install -y \
+        build-essential \
+        git \
+        libevent-dev \
+        libtool \
+        pkg-config
+
+# Use `dist_man_MANS=` to skip manpage generation (which requires python3/pandoc)
+ENV PGBOUNCER_TAG=pgbouncer_1_22_1
+RUN set -e \
+    && git clone --recurse-submodules --depth 1 --branch ${PGBOUNCER_TAG} https://github.com/pgbouncer/pgbouncer.git pgbouncer \
+    && cd pgbouncer \
+    && ./autogen.sh \
+    && LDFLAGS=-static ./configure --prefix=/usr/local/pgbouncer --without-openssl \
+    && make -j $(nproc) dist_man_MANS= \
+    && make install dist_man_MANS=
+
+#########################################################################################
+#
+# Layers "postgres-exporter" and "sql-exporter"
+#
+#########################################################################################
+
+FROM quay.io/prometheuscommunity/postgres-exporter:v0.12.1 AS postgres-exporter
+FROM burningalchemist/sql_exporter:0.13 AS sql-exporter
+
+#########################################################################################
+#
 # Clean up postgres folder before inclusion
 #
 #########################################################################################
@@ -1085,7 +1120,7 @@ COPY --from=pgjwt-pg-build /pgjwt.tar.gz /ext-src
 COPY --from=hypopg-pg-build /hypopg.tar.gz /ext-src
 COPY --from=pg-hashids-pg-build /pg_hashids.tar.gz /ext-src
 COPY --from=rum-pg-build /rum.tar.gz /ext-src
-COPY patches/rum.patch /ext-src
+COPY compute/patches/rum.patch /ext-src
 #COPY --from=pgtap-pg-build /pgtap.tar.gz /ext-src
 COPY --from=ip4r-pg-build /ip4r.tar.gz /ext-src
 COPY --from=prefix-pg-build /prefix.tar.gz /ext-src
@@ -1093,9 +1128,9 @@ COPY --from=hll-pg-build /hll.tar.gz /ext-src
 COPY --from=plpgsql-check-pg-build /plpgsql_check.tar.gz /ext-src
 #COPY --from=timescaledb-pg-build /timescaledb.tar.gz /ext-src
 COPY --from=pg-hint-plan-pg-build /pg_hint_plan.tar.gz /ext-src
-COPY patches/pg_hint_plan.patch /ext-src
+COPY compute/patches/pg_hint_plan.patch /ext-src
 COPY --from=pg-cron-pg-build /pg_cron.tar.gz /ext-src
-COPY patches/pg_cron.patch /ext-src
+COPY compute/patches/pg_cron.patch /ext-src
 #COPY --from=pg-pgx-ulid-build /home/nonroot/pgx_ulid.tar.gz /ext-src
 #COPY --from=rdkit-pg-build /rdkit.tar.gz /ext-src
 COPY --from=pg-uuidv7-pg-build /pg_uuidv7.tar.gz /ext-src
@@ -1104,7 +1139,7 @@ COPY --from=pg-semver-pg-build /pg_semver.tar.gz /ext-src
 #COPY --from=pg-embedding-pg-build /home/nonroot/pg_embedding-src/ /ext-src
 #COPY --from=wal2json-pg-build /wal2json_2_5.tar.gz /ext-src
 COPY --from=pg-anon-pg-build /pg_anon.tar.gz /ext-src
-COPY patches/pg_anon.patch /ext-src
+COPY compute/patches/pg_anon.patch /ext-src
 COPY --from=pg-ivm-build /pg_ivm.tar.gz /ext-src
 COPY --from=pg-partman-build /pg_partman.tar.gz /ext-src
 RUN case "${PG_VERSION}" in "v17") \
@@ -1167,8 +1202,22 @@ RUN mkdir /var/db && useradd -m -d /var/db/postgres postgres && \
 COPY --from=postgres-cleanup-layer --chown=postgres /usr/local/pgsql /usr/local
 COPY --from=compute-tools --chown=postgres /home/nonroot/target/release-line-debug-size-lto/compute_ctl /usr/local/bin/compute_ctl
 
+# pgbouncer and its config
+COPY --from=pgbouncer         /usr/local/pgbouncer/bin/pgbouncer /usr/local/bin/pgbouncer
+COPY --chmod=0666 --chown=postgres compute/etc/pgbouncer.ini /etc/pgbouncer.ini
+
+# Metrics exporter binaries and  configuration files
+COPY --from=postgres-exporter /bin/postgres_exporter /bin/postgres_exporter
+COPY --from=sql-exporter      /bin/sql_exporter      /bin/sql_exporter
+
+COPY --chmod=0644 compute/etc/sql_exporter.yml               /etc/sql_exporter.yml
+COPY --chmod=0644 compute/etc/neon_collector.yml             /etc/neon_collector.yml
+COPY --chmod=0644 compute/etc/sql_exporter_autoscaling.yml   /etc/sql_exporter_autoscaling.yml
+COPY --chmod=0644 compute/etc/neon_collector_autoscaling.yml /etc/neon_collector_autoscaling.yml
+
 # Create remote extension download directory
 RUN mkdir /usr/local/download_extensions && chown -R postgres:postgres /usr/local/download_extensions
+
 
 # Install:
 # libreadline8 for psql

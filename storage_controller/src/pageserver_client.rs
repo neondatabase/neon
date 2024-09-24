@@ -238,7 +238,7 @@ impl PageserverClient {
     ) -> Result<()> {
         measured_request!(
             "timeline_archival_config",
-            crate::metrics::Method::Post,
+            crate::metrics::Method::Put,
             &self.node_id_label,
             self.inner
                 .timeline_archival_config(tenant_shard_id, timeline_id, req)

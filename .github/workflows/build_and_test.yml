@@ -120,6 +120,59 @@ jobs:
       - name: Run mypy to check types
         run: poetry run mypy .
 
+  # Check that the vendor/postgres-* submodules point to the
+  # corresponding REL_*_STABLE_neon branches.
+  check-submodules:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: dorny/paths-filter@v3
+        id: check-if-submodules-changed
+        with:
+          filters: |
+            vendor:
+              - 'vendor/**'
+
+      - name: Check vendor/postgres-v14 submodule reference
+        if: steps.check-if-submodules-changed.outputs.vendor == 'true'
+        uses: jtmullen/submodule-branch-check-action@v1
+        with:
+          path: "vendor/postgres-v14"
+          fetch_depth: "50"
+          sub_fetch_depth: "50"
+          pass_if_unchanged: true
+
+      - name: Check vendor/postgres-v15 submodule reference
+        if: steps.check-if-submodules-changed.outputs.vendor == 'true'
+        uses: jtmullen/submodule-branch-check-action@v1
+        with:
+          path: "vendor/postgres-v15"
+          fetch_depth: "50"
+          sub_fetch_depth: "50"
+          pass_if_unchanged: true
+
+      - name: Check vendor/postgres-v16 submodule reference
+        if: steps.check-if-submodules-changed.outputs.vendor == 'true'
+        uses: jtmullen/submodule-branch-check-action@v1
+        with:
+          path: "vendor/postgres-v16"
+          fetch_depth: "50"
+          sub_fetch_depth: "50"
+          pass_if_unchanged: true
+
+      - name: Check vendor/postgres-v17 submodule reference
+        if: steps.check-if-submodules-changed.outputs.vendor == 'true'
+        uses: jtmullen/submodule-branch-check-action@v1
+        with:
+          path: "vendor/postgres-v17"
+          fetch_depth: "50"
+          sub_fetch_depth: "50"
+          pass_if_unchanged: true
+
   check-codestyle-rust:
     needs: [ check-permissions, build-build-tools-image ]
     strategy:
@@ -159,6 +212,10 @@ jobs:
       # This will catch compiler & clippy warnings in all feature combinations.
       # TODO: use cargo hack for build and test as well, but, that's quite expensive.
       # NB: keep clippy args in sync with ./run_clippy.sh
+      #
+      # The only difference between "clippy --debug" and "clippy --release" is that in --release mode,
+      # #[cfg(debug_assertions)] blocks are not built. It's not worth building everything for second
+      # time just for that, so skip "clippy --release".
       - run: |
           CLIPPY_COMMON_ARGS="$( source .neon_clippy_args; echo "$CLIPPY_COMMON_ARGS")"
           if [ "$CLIPPY_COMMON_ARGS" = "" ]; then
@@ -168,8 +225,6 @@ jobs:
           echo "CLIPPY_COMMON_ARGS=${CLIPPY_COMMON_ARGS}" >> $GITHUB_ENV
       - name: Run cargo clippy (debug)
         run: cargo hack --feature-powerset clippy $CLIPPY_COMMON_ARGS
-      - name: Run cargo clippy (release)
-        run: cargo hack --feature-powerset clippy --release $CLIPPY_COMMON_ARGS
 
       - name: Check documentation generation
         run: cargo doc --workspace --no-deps --document-private-items
@@ -596,7 +651,7 @@ jobs:
           provenance: false
           push: true
           pull: true
-          file: Dockerfile.compute-node
+          file: compute/Dockerfile.compute-node
           cache-from: type=registry,ref=cache.neon.build/compute-node-${{ matrix.version }}:cache-${{ matrix.arch }}
           cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/compute-node-{0}:cache-{1},mode=max', matrix.version, matrix.arch) || '' }}
           tags: |
@@ -615,7 +670,7 @@ jobs:
           provenance: false
           push: true
           pull: true
-          file: Dockerfile.compute-node
+          file: compute/Dockerfile.compute-node
           target: neon-pg-ext-test
           cache-from: type=registry,ref=cache.neon.build/neon-test-extensions-${{ matrix.version }}:cache-${{ matrix.arch }}
           cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/neon-test-extensions-{0}:cache-{1},mode=max', matrix.version, matrix.arch) || '' }}
@@ -636,7 +691,7 @@ jobs:
           provenance: false
           push: true
           pull: true
-          file: Dockerfile.compute-node
+          file: compute/Dockerfile.compute-node
           tags: |
             neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}-${{ matrix.arch }}
 
@@ -724,7 +779,7 @@ jobs:
       - name: Build vm image
         run: |
           ./vm-builder \
-            -spec=vm-image-spec.yaml \
+            -spec=compute/vm-image-spec.yaml \
             -src=neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }} \
             -dst=neondatabase/vm-compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}
 

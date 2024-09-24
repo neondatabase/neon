@@ -107,7 +107,7 @@ jobs:
           if [ "$GITHUB_EVENT_NAME" == "pull_request" ]; then
             for f in $(gh api "/repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" --paginate --jq '.[].filename'); do
               case "$f" in
-                vendor/*|pgxn/*|libs/vm_monitor/*|Dockerfile.compute-node)
+                vendor/*|pgxn/*|libs/vm_monitor/*|compute/Dockerfile.compute-node)
                   platforms=$(echo "${platforms}" | jq --compact-output '. += ["k8s-neonvm"] | unique')
                   ;;
                 *)

@@ -3,6 +3,7 @@ use std::{
     borrow::Cow,
     cmp::Ordering,
     collections::{BTreeMap, HashMap, HashSet},
+    error::Error,
     ops::Deref,
     path::PathBuf,
     str::FromStr,
@@ -25,7 +26,7 @@ use crate::{
         ShardGenerationState, TenantFilter,
     },
     reconciler::{ReconcileError, ReconcileUnits, ReconcilerConfig, ReconcilerConfigBuilder},
-    scheduler::{MaySchedule, ScheduleContext, ScheduleError, ScheduleMode},
+    scheduler::{AttachedShardTag, MaySchedule, ScheduleContext, ScheduleError, ScheduleMode},
     tenant_shard::{
         MigrateAttachment, ReconcileNeeded, ReconcilerStatus, ScheduleOptimization,
         ScheduleOptimizationAction,
@@ -218,9 +219,16 @@ fn passthrough_api_error(node: &Node, e: mgmt_api::Error) -> ApiError {
                 format!("{node} error receiving error body: {str}").into(),
             )
         }
-        mgmt_api::Error::ReceiveBody(str) => {
-            // Presume errors receiving body are connectivity/availability issues
-            ApiError::ResourceUnavailable(format!("{node} error receiving body: {str}").into())
+        mgmt_api::Error::ReceiveBody(err) if err.is_decode() => {
+            // Return 500 for decoding errors.
+            ApiError::InternalServerError(anyhow::Error::from(err).context("error decoding body"))
+        }
+        mgmt_api::Error::ReceiveBody(err) => {
+            // Presume errors receiving body are connectivity/availability issues except for decoding errors
+            let src_str = err.source().map(|e| e.to_string()).unwrap_or_default();
+            ApiError::ResourceUnavailable(
+                format!("{node} error receiving error body: {err} {}", src_str).into(),
+            )
         }
         mgmt_api::Error::ApiError(StatusCode::NOT_FOUND, msg) => {
             ApiError::NotFound(anyhow::anyhow!(format!("{node}: {msg}")).into())
@@ -2621,7 +2629,8 @@ impl Service {
             let scheduler = &mut locked.scheduler;
             // Right now we only perform the operation on a single node without parallelization
             // TODO fan out the operation to multiple nodes for better performance
-            let node_id = scheduler.schedule_shard(&[], &ScheduleContext::default())?;
+            let node_id =
+                scheduler.schedule_shard::<AttachedShardTag>(&[], &ScheduleContext::default())?;
             let node = locked
                 .nodes
                 .get(&node_id)
@@ -2807,7 +2816,8 @@ impl Service {
 
             // Pick an arbitrary node to use for remote deletions (does not have to be where the tenant
             // was attached, just has to be able to see the S3 content)
-            let node_id = scheduler.schedule_shard(&[], &ScheduleContext::default())?;
+            let node_id =
+                scheduler.schedule_shard::<AttachedShardTag>(&[], &ScheduleContext::default())?;
             let node = nodes
                 .get(&node_id)
                 .expect("Pageservers may not be deleted while lock is active");

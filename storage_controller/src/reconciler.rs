@@ -820,6 +820,16 @@ impl Reconciler {
             self.location_config(&node, conf, None, false).await?;
         }
 
+        // The condition below identifies a detach. We must have no attached intent and
+        // must have been attached to something previously. Pass this information to
+        // the [`ComputeHook`] such that it can update its tenant-wide state.
+        if self.intent.attached.is_none() && !self.detach.is_empty() {
+            // TODO: Consider notifying control plane about detaches. This would avoid situations
+            // where the compute tries to start-up with a stale set of pageservers.
+            self.compute_hook
+                .handle_detach(self.tenant_shard_id, self.shard.stripe_size);
+        }
+
         failpoint_support::sleep_millis_async!("sleep-on-reconcile-epilogue");
 
         Ok(())

@@ -236,7 +236,7 @@ def get_scale_for_db(size_mb: int) -> int:
 
 
 ATTACHMENT_NAME_REGEX: re.Pattern = re.compile(  # type: ignore[type-arg]
-    r"regression\.diffs|.+\.(?:log|stderr|stdout|filediff|metrics|html|walredo)"
+    r"regression\.(diffs|out)|.+\.(?:log|stderr|stdout|filediff|metrics|html|walredo)"
 )
 
 

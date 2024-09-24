@@ -8,7 +8,10 @@ use crate::{
     metrics::{self, ReconcileCompleteLabelGroup, ReconcileOutcome},
     persistence::TenantShardPersistence,
     reconciler::{ReconcileUnits, ReconcilerConfig},
-    scheduler::{AffinityScore, MaySchedule, RefCountUpdate, ScheduleContext},
+    scheduler::{
+        AffinityScore, AttachedShardTag, MaySchedule, RefCountUpdate, ScheduleContext,
+        SecondaryShardTag,
+    },
     service::ReconcileResultRequest,
 };
 use pageserver_api::controller_api::{
@@ -335,19 +338,19 @@ pub(crate) enum ReconcileWaitError {
     Failed(TenantShardId, Arc<ReconcileError>),
 }
 
-#[derive(Eq, PartialEq, Debug)]
+#[derive(Eq, PartialEq, Debug, Clone)]
 pub(crate) struct ReplaceSecondary {
     old_node_id: NodeId,
     new_node_id: NodeId,
 }
 
-#[derive(Eq, PartialEq, Debug)]
+#[derive(Eq, PartialEq, Debug, Clone)]
 pub(crate) struct MigrateAttachment {
     pub(crate) old_attached_node_id: NodeId,
     pub(crate) new_attached_node_id: NodeId,
 }
 
-#[derive(Eq, PartialEq, Debug)]
+#[derive(Eq, PartialEq, Debug, Clone)]
 pub(crate) enum ScheduleOptimizationAction {
     // Replace one of our secondary locations with a different node
     ReplaceSecondary(ReplaceSecondary),
@@ -355,7 +358,7 @@ pub(crate) enum ScheduleOptimizationAction {
     MigrateAttachment(MigrateAttachment),
 }
 
-#[derive(Eq, PartialEq, Debug)]
+#[derive(Eq, PartialEq, Debug, Clone)]
 pub(crate) struct ScheduleOptimization {
     // What was the reconcile sequence when we generated this optimization?  The optimization
     // should only be applied if the shard's sequence is still at this value, in case other changes
@@ -537,7 +540,8 @@ impl TenantShard {
             Ok((true, promote_secondary))
         } else {
             // Pick a fresh node: either we had no secondaries or none were schedulable
-            let node_id = scheduler.schedule_shard(&self.intent.secondary, context)?;
+            let node_id =
+                scheduler.schedule_shard::<AttachedShardTag>(&self.intent.secondary, context)?;
             tracing::debug!("Selected {} as attached", node_id);
             self.intent.set_attached(scheduler, Some(node_id));
             Ok((true, node_id))
@@ -613,7 +617,8 @@ impl TenantShard {
 
                 let mut used_pageservers = vec![attached_node_id];
                 while self.intent.secondary.len() < secondary_count {
-                    let node_id = scheduler.schedule_shard(&used_pageservers, context)?;
+                    let node_id = scheduler
+                        .schedule_shard::<SecondaryShardTag>(&used_pageservers, context)?;
                     self.intent.push_secondary(scheduler, node_id);
                     used_pageservers.push(node_id);
                     modified = true;
@@ -626,7 +631,7 @@ impl TenantShard {
                     modified = true;
                 } else if self.intent.secondary.is_empty() {
                     // Populate secondary by scheduling a fresh node
-                    let node_id = scheduler.schedule_shard(&[], context)?;
+                    let node_id = scheduler.schedule_shard::<SecondaryShardTag>(&[], context)?;
                     self.intent.push_secondary(scheduler, node_id);
                     modified = true;
                 }
@@ -803,9 +808,10 @@ impl TenantShard {
             // Let the scheduler suggest a node, where it would put us if we were scheduling afresh
             // This implicitly limits the choice to nodes that are available, and prefers nodes
             // with lower utilization.
-            let Ok(candidate_node) =
-                scheduler.schedule_shard(&self.intent.all_pageservers(), schedule_context)
-            else {
+            let Ok(candidate_node) = scheduler.schedule_shard::<SecondaryShardTag>(
+                &self.intent.all_pageservers(),
+                schedule_context,
+            ) else {
                 // A scheduling error means we have no possible candidate replacements
                 continue;
             };
@@ -1333,6 +1339,8 @@ impl TenantShard {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use std::{cell::RefCell, rc::Rc};
+
     use pageserver_api::{
         controller_api::NodeAvailability,
         shard::{ShardCount, ShardNumber},
@@ -1637,12 +1645,14 @@ pub(crate) mod tests {
 
     // Optimize til quiescent: this emulates what Service::optimize_all does, when
     // called repeatedly in the background.
+    // Returns the applied optimizations
     fn optimize_til_idle(
         nodes: &HashMap<NodeId, Node>,
         scheduler: &mut Scheduler,
         shards: &mut [TenantShard],
-    ) {
+    ) -> Vec<ScheduleOptimization> {
         let mut loop_n = 0;
+        let mut optimizations = Vec::default();
         loop {
             let mut schedule_context = ScheduleContext::default();
             let mut any_changed = false;
@@ -1657,6 +1667,7 @@ pub(crate) mod tests {
             for shard in shards.iter_mut() {
                 let optimization = shard.optimize_attachment(nodes, &schedule_context);
                 if let Some(optimization) = optimization {
+                    optimizations.push(optimization.clone());
                     shard.apply_optimization(scheduler, optimization);
                     any_changed = true;
                     break;
@@ -1664,6 +1675,7 @@ pub(crate) mod tests {
 
                 let optimization = shard.optimize_secondary(scheduler, &schedule_context);
                 if let Some(optimization) = optimization {
+                    optimizations.push(optimization.clone());
                     shard.apply_optimization(scheduler, optimization);
                     any_changed = true;
                     break;
@@ -1678,6 +1690,8 @@ pub(crate) mod tests {
             loop_n += 1;
             assert!(loop_n < 1000);
         }
+
+        optimizations
     }
 
     /// Test the balancing behavior of shard scheduling: that it achieves a balance, and
@@ -1725,6 +1739,50 @@ pub(crate) mod tests {
         assert_eq!(scheduler.get_node_attached_shard_count(NodeId(4)), 1);
 
         for shard in shards.iter_mut() {
+            shard.intent.clear(&mut scheduler);
+        }
+
+        Ok(())
+    }
+
+    /// Test that initial shard scheduling is optimal. By optimal we mean
+    /// that the optimizer cannot find a way to improve it.
+    ///
+    /// This test is an example of the scheduling issue described in
+    /// https://github.com/neondatabase/neon/issues/8969
+    #[test]
+    fn initial_scheduling_is_optimal() -> anyhow::Result<()> {
+        use itertools::Itertools;
+
+        let nodes = make_test_nodes(2);
+
+        let mut scheduler = Scheduler::new([].iter());
+        scheduler.node_upsert(nodes.get(&NodeId(1)).unwrap());
+        scheduler.node_upsert(nodes.get(&NodeId(2)).unwrap());
+
+        let mut a = make_test_tenant(PlacementPolicy::Attached(1), ShardCount::new(4));
+        let a_context = Rc::new(RefCell::new(ScheduleContext::default()));
+
+        let mut b = make_test_tenant(PlacementPolicy::Attached(1), ShardCount::new(4));
+        let b_context = Rc::new(RefCell::new(ScheduleContext::default()));
+
+        let a_shards_with_context = a.iter_mut().map(|shard| (shard, a_context.clone()));
+        let b_shards_with_context = b.iter_mut().map(|shard| (shard, b_context.clone()));
+
+        let schedule_order = a_shards_with_context.interleave(b_shards_with_context);
+
+        for (shard, context) in schedule_order {
+            let context = &mut *context.borrow_mut();
+            shard.schedule(&mut scheduler, context).unwrap();
+        }
+
+        let applied_to_a = optimize_til_idle(&nodes, &mut scheduler, &mut a);
+        assert_eq!(applied_to_a, vec![]);
+
+        let applied_to_b = optimize_til_idle(&nodes, &mut scheduler, &mut b);
+        assert_eq!(applied_to_b, vec![]);
+
+        for shard in a.iter_mut().chain(b.iter_mut()) {
             shard.intent.clear(&mut scheduler);
         }
 
