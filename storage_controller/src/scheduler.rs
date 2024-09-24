@@ -1,6 +1,6 @@
 use crate::{node::Node, tenant_shard::TenantShard};
 use itertools::Itertools;
-use pageserver_api::models::PageserverUtilization;
+use pageserver_api::{controller_api::AvailabilityZone, models::PageserverUtilization};
 use serde::Serialize;
 use std::{collections::HashMap, fmt::Debug};
 use utils::{http::error::ApiError, id::NodeId};
@@ -33,7 +33,7 @@ pub(crate) struct SchedulerNode {
     /// How many shards are currently attached on this node, via their [`crate::tenant_shard::IntentState`].
     attached_shard_count: usize,
     /// Availability zone id in which the node resides
-    az: String,
+    az: AvailabilityZone,
 
     /// Whether this node is currently elegible to have new shards scheduled (this is derived
     /// from a node's availability state and scheduling policy).
@@ -44,7 +44,7 @@ pub(crate) trait NodeSchedulingScore: Debug + Ord + Copy + Sized {
     fn generate(
         node_id: &NodeId,
         node: &mut SchedulerNode,
-        preferred_az: &Option<String>,
+        preferred_az: &Option<AvailabilityZone>,
         context: &ScheduleContext,
     ) -> Option<Self>;
     fn is_overloaded(&self) -> bool;
@@ -139,7 +139,7 @@ impl NodeSchedulingScore for NodeAttachmentSchedulingScore {
     fn generate(
         node_id: &NodeId,
         node: &mut SchedulerNode,
-        preferred_az: &Option<String>,
+        preferred_az: &Option<AvailabilityZone>,
         context: &ScheduleContext,
     ) -> Option<Self> {
         let utilization = match &mut node.may_schedule {
@@ -242,7 +242,7 @@ impl NodeSchedulingScore for NodeSecondarySchedulingScore {
     fn generate(
         node_id: &NodeId,
         node: &mut SchedulerNode,
-        preferred_az: &Option<String>,
+        preferred_az: &Option<AvailabilityZone>,
         context: &ScheduleContext,
     ) -> Option<Self> {
         let utilization = match &mut node.may_schedule {
@@ -402,7 +402,7 @@ impl Scheduler {
                     shard_count: 0,
                     attached_shard_count: 0,
                     may_schedule: node.may_schedule(),
-                    az: node.get_availability_zone_id().to_string(),
+                    az: node.get_availability_zone_id().clone(),
                 },
             );
         }
@@ -429,7 +429,7 @@ impl Scheduler {
                     shard_count: 0,
                     attached_shard_count: 0,
                     may_schedule: node.may_schedule(),
-                    az: node.get_availability_zone_id().to_string(),
+                    az: node.get_availability_zone_id().clone(),
                 },
             );
         }
@@ -608,7 +608,7 @@ impl Scheduler {
                     shard_count: 0,
                     attached_shard_count: 0,
                     may_schedule: node.may_schedule(),
-                    az: node.get_availability_zone_id().to_string(),
+                    az: node.get_availability_zone_id().clone(),
                 });
             }
         }
@@ -654,7 +654,7 @@ impl Scheduler {
     fn compute_node_scores<Score>(
         &mut self,
         hard_exclude: &[NodeId],
-        preferred_az: &Option<String>,
+        preferred_az: &Option<AvailabilityZone>,
         context: &ScheduleContext,
     ) -> Vec<Score>
     where
@@ -684,7 +684,7 @@ impl Scheduler {
     pub(crate) fn schedule_shard<Tag: ShardTag>(
         &mut self,
         hard_exclude: &[NodeId],
-        preferred_az: &Option<String>,
+        preferred_az: &Option<AvailabilityZone>,
         context: &ScheduleContext,
     ) -> Result<NodeId, ScheduleError> {
         if self.nodes.is_empty() {
@@ -765,7 +765,10 @@ impl Scheduler {
 pub(crate) mod test_utils {
 
     use crate::node::Node;
-    use pageserver_api::{controller_api::NodeAvailability, models::utilization::test_utilization};
+    use pageserver_api::{
+        controller_api::{AvailabilityZone, NodeAvailability},
+        models::utilization::test_utilization,
+    };
     use std::collections::HashMap;
     use utils::id::NodeId;
 
@@ -775,7 +778,7 @@ pub(crate) mod test_utils {
     ///
     /// The `azs` argument specifies the list of availability zones which will be assigned
     /// to nodes in round-robin fashion. If empy, a default AZ is assigned.
-    pub(crate) fn make_test_nodes(n: u64, azs: &[String]) -> HashMap<NodeId, Node> {
+    pub(crate) fn make_test_nodes(n: u64, azs: &[AvailabilityZone]) -> HashMap<NodeId, Node> {
         let mut az_iter = azs.iter().cycle();
 
         (1..n + 1)
@@ -787,7 +790,10 @@ pub(crate) mod test_utils {
                         80 + i as u16,
                         format!("pghost-{i}"),
                         5432 + i as u16,
-                        az_iter.next().cloned().unwrap_or("test-az".to_string()),
+                        az_iter
+                            .next()
+                            .cloned()
+                            .unwrap_or(AvailabilityZone("test-az".to_string())),
                     );
                     node.set_availability(NodeAvailability::Active(test_utilization::simple(0, 0)));
                     assert!(node.is_available());
@@ -999,8 +1005,8 @@ mod tests {
     /// A simple test that showcases AZ-aware scheduling and its interaction with
     /// affinity scores.
     fn az_scheduling() {
-        let az_a_tag = "az-a".to_string();
-        let az_b_tag = "az-b".to_string();
+        let az_a_tag = AvailabilityZone("az-a".to_string());
+        let az_b_tag = AvailabilityZone("az-b".to_string());
 
         let nodes = test_utils::make_test_nodes(3, &[az_a_tag.clone(), az_b_tag.clone()]);
         let mut scheduler = Scheduler::new(nodes.values());
@@ -1012,7 +1018,7 @@ mod tests {
 
         fn assert_scheduler_chooses<Tag: ShardTag>(
             expect_node: NodeId,
-            preferred_az: Option<String>,
+            preferred_az: Option<AvailabilityZone>,
             scheduled_intents: &mut Vec<IntentState>,
             scheduler: &mut Scheduler,
             context: &mut ScheduleContext,

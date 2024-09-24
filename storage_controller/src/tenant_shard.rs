@@ -15,7 +15,7 @@ use crate::{
     service::ReconcileResultRequest,
 };
 use pageserver_api::controller_api::{
-    NodeSchedulingPolicy, PlacementPolicy, ShardSchedulingPolicy,
+    AvailabilityZone, NodeSchedulingPolicy, PlacementPolicy, ShardSchedulingPolicy,
 };
 use pageserver_api::{
     models::{LocationConfig, LocationConfigMode, TenantConfig},
@@ -146,7 +146,7 @@ pub(crate) struct TenantShard {
 
     // We should attempt to schedule this shard in the provided AZ to
     // decrease chances of cross-AZ compute.
-    preferred_az_id: Option<String>,
+    preferred_az_id: Option<AvailabilityZone>,
 }
 
 #[derive(Default, Clone, Debug, Serialize)]
@@ -1319,7 +1319,7 @@ impl TenantShard {
             pending_compute_notification: false,
             delayed_reconcile: false,
             scheduling_policy: serde_json::from_str(&tsp.scheduling_policy).unwrap(),
-            preferred_az_id: tsp.preferred_az_id,
+            preferred_az_id: tsp.preferred_az_id.map(AvailabilityZone),
         })
     }
 
@@ -1335,15 +1335,15 @@ impl TenantShard {
             config: serde_json::to_string(&self.config).unwrap(),
             splitting: SplitState::default(),
             scheduling_policy: serde_json::to_string(&self.scheduling_policy).unwrap(),
-            preferred_az_id: self.preferred_az_id.clone(),
+            preferred_az_id: self.preferred_az_id.as_ref().map(|az| az.0.clone()),
         }
     }
 
-    pub(crate) fn preferred_az(&self) -> Option<&str> {
-        self.preferred_az_id.as_deref()
+    pub(crate) fn preferred_az(&self) -> Option<&AvailabilityZone> {
+        self.preferred_az_id.as_ref()
     }
 
-    pub(crate) fn set_preferred_az(&mut self, preferred_az_id: String) {
+    pub(crate) fn set_preferred_az(&mut self, preferred_az_id: AvailabilityZone) {
         self.preferred_az_id = Some(preferred_az_id);
     }
 }
@@ -1388,7 +1388,7 @@ pub(crate) mod tests {
     fn make_test_tenant(
         policy: PlacementPolicy,
         shard_count: ShardCount,
-        preferred_az: Option<String>,
+        preferred_az: Option<AvailabilityZone>,
     ) -> Vec<TenantShard> {
         let tenant_id = TenantId::generate();
 
@@ -1819,11 +1819,11 @@ pub(crate) mod tests {
             eprintln!("Running test with seed {seed}");
             let mut rng = StdRng::seed_from_u64(seed);
 
-            let az_a_tag = "az-a".to_string();
-            let az_b_tag = "az-b".to_string();
+            let az_a_tag = AvailabilityZone("az-a".to_string());
+            let az_b_tag = AvailabilityZone("az-b".to_string());
             let azs = [az_a_tag, az_b_tag];
             let nodes = make_test_nodes(4, &azs);
-            let mut shards_per_az: HashMap<String, u32> = HashMap::new();
+            let mut shards_per_az: HashMap<AvailabilityZone, u32> = HashMap::new();
 
             let mut scheduler = Scheduler::new([].iter());
             for node in nodes.values() {

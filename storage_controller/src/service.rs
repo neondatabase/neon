@@ -41,12 +41,12 @@ use futures::{stream::FuturesUnordered, StreamExt};
 use itertools::Itertools;
 use pageserver_api::{
     controller_api::{
-        MetadataHealthRecord, MetadataHealthUpdateRequest, NodeAvailability, NodeRegisterRequest,
-        NodeSchedulingPolicy, NodeShard, NodeShardResponse, PlacementPolicy, ShardSchedulingPolicy,
-        ShardsPreferredAzsRequest, ShardsPreferredAzsResponse, TenantCreateRequest,
-        TenantCreateResponse, TenantCreateResponseShard, TenantDescribeResponse,
-        TenantDescribeResponseShard, TenantLocateResponse, TenantPolicyRequest,
-        TenantShardMigrateRequest, TenantShardMigrateResponse,
+        AvailabilityZone, MetadataHealthRecord, MetadataHealthUpdateRequest, NodeAvailability,
+        NodeRegisterRequest, NodeSchedulingPolicy, NodeShard, NodeShardResponse, PlacementPolicy,
+        ShardSchedulingPolicy, ShardsPreferredAzsRequest, ShardsPreferredAzsResponse,
+        TenantCreateRequest, TenantCreateResponse, TenantCreateResponseShard,
+        TenantDescribeResponse, TenantDescribeResponseShard, TenantLocateResponse,
+        TenantPolicyRequest, TenantShardMigrateRequest, TenantShardMigrateResponse,
     },
     models::{
         SecondaryProgress, TenantConfigRequest, TimelineArchivalConfigRequest,
@@ -1282,7 +1282,7 @@ impl Service {
                     123,
                     "".to_string(),
                     123,
-                    "test_az".to_string(),
+                    AvailabilityZone("test_az".to_string()),
                 );
 
                 scheduler.node_upsert(&node);
@@ -2099,7 +2099,7 @@ impl Service {
                     let az_id = locked
                         .nodes
                         .get(&resp.node_id)
-                        .map(|n| n.get_availability_zone_id().to_string())?;
+                        .map(|n| n.get_availability_zone_id().clone())?;
 
                     Some((resp.shard_id, az_id))
                 })
@@ -4487,7 +4487,7 @@ impl Service {
                     let az_id = locked
                         .nodes
                         .get(node_id)
-                        .map(|n| n.get_availability_zone_id().to_string())?;
+                        .map(|n| n.get_availability_zone_id().clone())?;
 
                     Some((*tid, az_id))
                 })
