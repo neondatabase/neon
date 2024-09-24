@@ -50,16 +50,28 @@ def test_lfc_resize(neon_simple_env: NeonEnv, pg_bin: PgBin):
         cur.execute(f"alter system set neon.file_cache_size_limit='{size}MB'")
         cur.execute("select pg_reload_conf()")
         time.sleep(1)
-
-    cur.execute("alter system set neon.file_cache_size_limit='100MB'")
-    cur.execute("select pg_reload_conf()")
-
     thread.join()
 
-    lfc_file_path = f"{endpoint.pg_data_dir_path()}/file.cache"
-    lfc_file_size = os.path.getsize(lfc_file_path)
-    res = subprocess.run(["ls", "-sk", lfc_file_path], check=True, text=True, capture_output=True)
-    lfc_file_blocks = re.findall("([0-9A-F]+)", res.stdout)[0]
-    log.info(f"Size of LFC file {lfc_file_size}, blocks {lfc_file_blocks}")
-    assert lfc_file_size <= 512 * 1024 * 1024
+    # At the end, set it at 100 MB, and perform a final check that the disk usage
+    # of the file is in that ballbark.
+    #
+    # We retry the check a few times, because it might take a while for the
+    # system to react to changing the setting and shrinking the file.
+    cur.execute("alter system set neon.file_cache_size_limit='100MB'")
+    cur.execute("select pg_reload_conf()")
+    nretries = 10
+    while True:
+        lfc_file_path = f"{endpoint.pg_data_dir_path()}/file.cache"
+        lfc_file_size = os.path.getsize(lfc_file_path)
+        res = subprocess.run(["ls", "-sk", lfc_file_path], check=True, text=True, capture_output=True)
+        lfc_file_blocks = re.findall("([0-9A-F]+)", res.stdout)[0]
+        log.info(f"Size of LFC file {lfc_file_size}, blocks {lfc_file_blocks}")
+        assert lfc_file_size <= 512 * 1024 * 1024
+
+        if int(lfc_file_blocks) <= 128 * 1024 or nretries == 0:
+            break
+
+        nretries = nretries - 1
+        time.sleep(1)
+
     assert int(lfc_file_blocks) <= 128 * 1024
