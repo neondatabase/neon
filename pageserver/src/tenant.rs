@@ -3627,7 +3627,7 @@ impl Tenant {
         start_lsn: Lsn,
         ancestor: Option<Arc<Timeline>>,
         last_aux_file_policy: Option<AuxFilePolicy>,
-    ) -> anyhow::Result<UninitializedTimeline> {
+    ) -> anyhow::Result<UninitializedTimeline<'a>> {
         let tenant_shard_id = self.tenant_shard_id;
 
         let resources = self.build_timeline_resources(new_timeline_id);

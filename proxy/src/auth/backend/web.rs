@@ -1,5 +1,6 @@
 use crate::{
     auth, compute,
+    config::AuthenticationConfig,
     console::{self, provider::NodeInfo},
     context::RequestMonitoring,
     error::{ReportableError, UserFacingError},
@@ -58,6 +59,7 @@ pub(crate) fn new_psql_session_id() -> String {
 
 pub(super) async fn authenticate(
     ctx: &RequestMonitoring,
+    auth_config: &'static AuthenticationConfig,
     link_uri: &reqwest::Url,
     client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
 ) -> auth::Result<NodeInfo> {
@@ -88,6 +90,14 @@ pub(super) async fn authenticate(
     // Wait for web console response (see `mgmt`).
     info!(parent: &span, "waiting for console's reply...");
     let db_info = waiter.await.map_err(WebAuthError::from)?;
+
+    if auth_config.ip_allowlist_check_enabled {
+        if let Some(allowed_ips) = &db_info.allowed_ips {
+            if !auth::check_peer_addr_is_in_list(&ctx.peer_addr(), allowed_ips) {
+                return Err(auth::AuthError::ip_address_not_allowed(ctx.peer_addr()));
+            }
+        }
+    }
 
     client.write_message_noflush(&Be::NoticeResponse("Connecting to database."))?;
 
