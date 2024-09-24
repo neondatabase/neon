@@ -1,18 +1,18 @@
 {
   "v17": [
-    "17rc1",
-    "5bbb9bd93dd805e90bd8af15d00080363d18ec68"
+    "17.0",
+    "68b5038f27e493bde6ae552fe066f10cbdfe6a14"
   ],
   "v16": [
     "16.4",
-    "3ec6e2496f64c6fec35c67cb82efd6490a6a4738"
+    "e131a9c027b202ce92bd7b9cf2569d48a6f9948e"
   ],
   "v15": [
     "15.8",
-    "72b904c0b3ac43bd74d1e8e6d772e2c476ae25b1"
+    "22e580fe9ffcea7e02592110b1c9bf426d83cada"
   ],
   "v14": [
     "14.13",
-    "87cb68f899db434cd6f1908cf0ac8fdeafdd88c1"
+    "2199b83fb72680001ce0f43bf6187a21dfb8f45d"
   ]
 }
