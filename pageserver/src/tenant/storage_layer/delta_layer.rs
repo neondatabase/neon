@@ -37,7 +37,7 @@ use crate::tenant::disk_btree::{
     DiskBtreeBuilder, DiskBtreeIterator, DiskBtreeReader, VisitDirection,
 };
 use crate::tenant::storage_layer::layer::S3_UPLOAD_LIMIT;
-use crate::tenant::timeline::GetVectoredError;
+use crate::tenant::timeline::{GetVectoredError, OkOrReportErr};
 use crate::tenant::vectored_blob_io::{
     BlobFlag, BufView, StreamingVectoredReadPlanner, VectoredBlobReader, VectoredRead,
     VectoredReadCoalesceMode, VectoredReadPlanner,
@@ -1023,42 +1023,30 @@ impl DeltaLayerInner {
             };
             let view = BufView::new_slice(&blobs_buf.buf);
             for meta in blobs_buf.blobs.iter().rev() {
-                if Some(meta.meta.key) == ignore_key_with_err {
+                let Some(blob_read) = meta
+                    .read(&view)
+                    .await
+                    .map_err(|e| {
+                        PageReconstructError::Other(anyhow!(e).context(format!(
+                            "Failed to decompress blob from virtual file {}",
+                            self.file.path,
+                        )))
+                    })
+                    .ok_or_report_err(meta.meta.key, reconstruct_state, &mut ignore_key_with_err)
+                else {
                     continue;
-                }
-                let blob_read = meta.read(&view).await;
-                let blob_read = match blob_read {
-                    Ok(buf) => buf,
-                    Err(e) => {
-                        reconstruct_state.on_key_error(
-                            meta.meta.key,
-                            PageReconstructError::Other(anyhow!(e).context(format!(
-                                "Failed to decompress blob from virtual file {}",
-                                self.file.path,
-                            ))),
-                        );
-
-                        ignore_key_with_err = Some(meta.meta.key);
-                        continue;
-                    }
                 };
 
-                let value = Value::des(&blob_read);
-
-                let value = match value {
-                    Ok(v) => v,
-                    Err(e) => {
-                        reconstruct_state.on_key_error(
-                            meta.meta.key,
-                            PageReconstructError::Other(anyhow!(e).context(format!(
-                                "Failed to deserialize blob from virtual file {}",
-                                self.file.path,
-                            ))),
-                        );
-
-                        ignore_key_with_err = Some(meta.meta.key);
-                        continue;
-                    }
+                let Some(value) = Value::des(&blob_read)
+                    .map_err(|e| {
+                        PageReconstructError::Other(anyhow!(e).context(format!(
+                            "Failed to deserialize blob from virtual file {}",
+                            self.file.path,
+                        )))
+                    })
+                    .ok_or_report_err(meta.meta.key, reconstruct_state, &mut ignore_key_with_err)
+                else {
+                    continue;
                 };
 
                 // Invariant: once a key reaches [`ValueReconstructSituation::Complete`]

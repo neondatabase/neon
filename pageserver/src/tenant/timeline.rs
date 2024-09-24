@@ -525,6 +525,38 @@ pub(crate) enum PageReconstructError {
     #[error("{0}")]
     MissingKey(MissingKeyError),
 }
+pub(super) trait OkOrReportErrSealed {}
+impl<T> OkOrReportErrSealed for Result<T, PageReconstructError> {}
+
+pub(super) trait OkOrReportErr<T>: OkOrReportErrSealed {
+    fn ok_or_report_err(
+        self,
+        key: Key,
+        state: &mut ValuesReconstructState,
+        ignore_key_with_err: &mut Option<Key>,
+    ) -> Option<T>;
+}
+
+impl<T> OkOrReportErr<T> for Result<T, PageReconstructError> {
+    fn ok_or_report_err(
+        self,
+        key: Key,
+        state: &mut ValuesReconstructState,
+        ignore_key_with_err: &mut Option<Key>,
+    ) -> Option<T> {
+        if Some(&key) == ignore_key_with_err.as_ref() {
+            return None;
+        }
+        match self {
+            Ok(v) => Some(v),
+            Err(e) => {
+                state.on_key_error(key, e);
+                ignore_key_with_err.replace(key);
+                None
+            }
+        }
+    }
+}
 
 impl From<anyhow::Error> for PageReconstructError {
     fn from(value: anyhow::Error) -> Self {
