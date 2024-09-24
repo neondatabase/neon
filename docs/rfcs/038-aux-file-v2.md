@@ -2,7 +2,7 @@
 
 ## Summary
 
-This RFC describes a new storage strategy for AUX files.
+This is a retrospective RFC describing a new storage strategy for AUX files.
 
 ## Motivation
 
@@ -14,6 +14,13 @@ a key in the hash map) to the aux file key. In this way, the pageserver only sto
 the deltas at each of the LSNs. However, this improved v1 storage strategy still
 requires us to store everything in an aux file cache in memory, because we cannot
 fetch a single key (or file) from the compound `AUX_FILES_KEY`.
+
+We also decided not to make the new aux storage strategy (v1) compatible with the
+original one (v1). One feasible way of doing a seamless migration is to store new
+data in aux v2 while old data in aux v1, but this complicates file deletions. We
+want all users to start with a clean state with no aux files in the storage, and
+therefore, we need to do manual migrations for users using aux v1 by using the
+[migration script](https://github.com/neondatabase/aux_v2_migration).
 
 ### Prior art
 
@@ -103,6 +110,6 @@ With the add of sparse keyspaces, we also modified the compaction code to accomm
 During the period of migration, we store the aux policy in the `index_part.json` file. When a tenant is attached
 with no policy set, the pageserver will scan the aux file keyspaces to identify the current aux policy being used (v1 or v2).
 
-If a timeline has aux v1 files stored, it will use aux file policy v1 unless we do a manual migration for them. Otherwise, the default aux file policy for new timelines is aux v2.
+If a timeline has aux v1 files stored, it will use aux file policy v1 unless we do a manual migration for them. Otherwise, the default aux file policy for new timelines is aux v2. Users enrolled in logical replication before we set aux v2 as default use aux v1 policy. Users who tried setting up inbound replication (which was not supported at that time) may also create some file entries in aux v1 store, even if they did not enroll in the logical replication testing program.
 
 The code for aux v2 migration is in https://github.com/neondatabase/aux_v2_migration. The toolkit scans all projects with logical replication enabled. For all these projects, it put the computes into maintenance mode (suspend all of then), call the migration API to switch the aux file policy on the pageserver (which drops all replication states), and restart all the computes.
