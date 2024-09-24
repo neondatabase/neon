@@ -7,7 +7,7 @@ use utils::{id::TimelineId, lsn::Lsn, shard::TenantShardId};
 use crate::tenant::storage_layer::Layer;
 use crate::{config::PageServerConf, context::RequestContext, repository::Value, tenant::Timeline};
 
-use super::layer::{self, S3_UPLOAD_LIMIT};
+use super::layer::S3_UPLOAD_LIMIT;
 use super::{
     DeltaLayerWriter, ImageLayerWriter, PersistentLayerDesc, PersistentLayerKey, ResidentLayer,
 };
