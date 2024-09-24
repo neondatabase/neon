@@ -1700,7 +1700,7 @@ impl Tenant {
                     return Err(CreateTimelineError::AncestorNotActive);
                 }
 
-                if !ancestor_timeline.is_archived() {
+                if ancestor_timeline.is_archived() == Some(true) {
                     info!("tried to branch archived timeline");
                     return Err(CreateTimelineError::AncestorArchived);
                 }
