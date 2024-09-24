@@ -7,7 +7,7 @@ use utils::{id::TimelineId, lsn::Lsn, shard::TenantShardId};
 use crate::tenant::storage_layer::Layer;
 use crate::{config::PageServerConf, context::RequestContext, repository::Value, tenant::Timeline};
 
-use super::layer::S3_UPLOAD_LIMIT;
+use super::layer::{self, S3_UPLOAD_LIMIT};
 use super::{
     DeltaLayerWriter, ImageLayerWriter, PersistentLayerDesc, PersistentLayerKey, ResidentLayer,
 };
@@ -286,8 +286,16 @@ impl SplitDeltaLayerWriter {
                     self.generated_layers
                         .push(SplitWriterResult::Discarded(layer_key));
                 } else {
+                    // `finish` will remove the file if anything goes wrong, while we need to handle deleting temporary
+                    // files for `finish_creating`.
                     let (desc, path) = prev_delta_writer.finish(key, ctx).await?;
-                    let delta_layer = Layer::finish_creating(self.conf, tline, desc, &path)?;
+                    let delta_layer = match Layer::finish_creating(self.conf, tline, desc, &path) {
+                        Ok(layer) => layer,
+                        Err(e) => {
+                            tokio::fs::remove_file(&path).await.ok();
+                            return Err(e);
+                        }
+                    };
                     self.generated_layers
                         .push(SplitWriterResult::Produced(delta_layer));
                 }
@@ -347,8 +355,16 @@ impl SplitDeltaLayerWriter {
         if discard(&layer_key).await {
             generated_layers.push(SplitWriterResult::Discarded(layer_key));
         } else {
+            // `finish` will remove the file if anything goes wrong, while we need to handle deleting temporary
+            // files for `finish_creating`.
             let (desc, path) = inner.finish(end_key, ctx).await?;
-            let delta_layer = Layer::finish_creating(self.conf, tline, desc, &path)?;
+            let delta_layer = match Layer::finish_creating(self.conf, tline, desc, &path) {
+                Ok(layer) => layer,
+                Err(e) => {
+                    tokio::fs::remove_file(&path).await.ok();
+                    return Err(e);
+                }
+            };
             generated_layers.push(SplitWriterResult::Produced(delta_layer));
         }
         Ok(generated_layers)
