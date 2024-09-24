@@ -1,8 +1,5 @@
 name: Cloud Regression Test
 on:
-  push:
-    branches: [amasterov/move-patch-to-compute]
-
   schedule:
     # * is a special character in YAML so you have to quote this string
     #          ┌───────────── minute (0 - 59)
