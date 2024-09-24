@@ -4640,6 +4640,7 @@ class StorageScrubber:
             args,
             env=env,
             check=True,
+            capture_stdout=True,
             timeout=timeout,
         )
         if status_code:
