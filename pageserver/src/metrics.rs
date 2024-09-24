@@ -1580,6 +1580,7 @@ impl<'a, 'c> BasebackupQueryTimeOngoingRecording<'a, 'c> {
                 elapsed
             }
         };
+        // If you want to change categorize of a specific error, also change it in `log_query_error`.
         let metric = match res {
             Ok(_) => &self.parent.ok,
             Err(QueryError::Disconnected(ConnectionError::Io(io_error)))
