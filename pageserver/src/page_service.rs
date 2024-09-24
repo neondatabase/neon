@@ -273,10 +273,28 @@ async fn page_service_conn_main(
                 info!("Postgres client disconnected ({io_error})");
                 Ok(())
             } else {
-                Err(io_error).context(format!("Postgres connection error for {}", peer_addr))
+                let tenant_id = conn_handler
+                    .timeline_handles
+                    .tenant_id()
+                    .map(|tid| format!("{tid}"))
+                    .unwrap_or("???".to_string());
+                Err(io_error).context(format!(
+                    "Postgres connection error for tenant {} client at {}",
+                    tenant_id, peer_addr
+                ))
             }
         }
-        other => other.context(format!("Postgres query error for {}", peer_addr)),
+        other => {
+            let tenant_id = conn_handler
+                .timeline_handles
+                .tenant_id()
+                .map(|tid| format!("{tid}"))
+                .unwrap_or("???".to_string());
+            other.context(format!(
+                "Postgres query error for tenant {} client at {}",
+                tenant_id, peer_addr
+            ))
+        }
     }
 }
 
@@ -339,6 +357,10 @@ impl TimelineHandles {
                     GetActiveTimelineError::Timeline(GetTimelineError::ShuttingDown)
                 }
             })
+    }
+
+    fn tenant_id(&self) -> Option<TenantId> {
+        self.wrapper.tenant_id.get().cloned()
     }
 }
 
