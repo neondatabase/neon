@@ -848,14 +848,19 @@ impl Reconciler {
     }
 
     /// Keep trying to notify the compute indefinitely, only dropping out if:
-    /// - the node `origin` becomes unavailable
-    /// - the node `origin` no longer has our tenant shard attached
-    /// - our cancellation token fires
+    /// - the node `origin` becomes unavailable -> Ok(())
+    /// - the node `origin` no longer has our tenant shard attached -> Ok(())
+    /// - our cancellation token fires -> Err(ReconcileError::Cancelled)
     ///
     /// This is used during live migration, where we do not wish to detach
     /// an origin location until the compute definitely knows about the new
     /// location.
-    async fn compute_notify_blocking(&mut self, _origin: &Node) -> Result<(), ReconcileError> {
+    ///
+    /// In cases where the origin node becomes unavailable, we return success, indicating
+    /// to the caller that they should continue irrespective of whether the compute was notified,
+    /// because the origin node is unusable anyway.  Notification will be retried later via the
+    /// [`Self::compute_notify_failure`] flag.
+    async fn compute_notify_blocking(&mut self, origin: &Node) -> Result<(), ReconcileError> {
         let mut notify_attempts = 0;
         while let Err(e) = self.compute_notify().await {
             match e {
@@ -867,6 +872,76 @@ impl Reconciler {
                     );
                 }
             }
+
+            // Did the origin pageserver become unavailable?
+            if !origin.is_available() {
+                tracing::info!("Giving up on compute notification because {origin} is unavailable");
+                break;
+            }
+
+            // Does the origin pageserver still host the shard we are interested in?  We should only
+            // continue waiting for compute notification to be acked if the old location is still usable.
+            let tenant_shard_id = self.tenant_shard_id;
+            match origin
+                .with_client_retries(
+                    |client| async move { client.get_location_config(tenant_shard_id).await },
+                    &self.service_config.jwt_token,
+                    1,
+                    3,
+                    Duration::from_secs(5),
+                    &self.cancel,
+                )
+                .await
+            {
+                Some(Ok(Some(location_conf))) => {
+                    if matches!(
+                        location_conf.mode,
+                        LocationConfigMode::AttachedMulti
+                            | LocationConfigMode::AttachedSingle
+                            | LocationConfigMode::AttachedStale
+                    ) {
+                        tracing::info!(
+                            "Still attached to {origin}, will wait & retry compute notification"
+                        );
+                    } else {
+                        tracing::info!(
+                            "Giving up on compute notification because {origin} is in state {:?}",
+                            location_conf.mode
+                        );
+                        return Ok(());
+                    }
+                    // Fall through
+                }
+                Some(Ok(None)) => {
+                    tracing::info!(
+                        "No longer attached to {origin}, giving up on compute notification"
+                    );
+                    return Ok(());
+                }
+                Some(Err(e)) => {
+                    match e {
+                        mgmt_api::Error::Cancelled => {
+                            tracing::info!(
+                                "Giving up on compute notification because {origin} is unavailable"
+                            );
+                            return Ok(());
+                        }
+                        mgmt_api::Error::ApiError(StatusCode::NOT_FOUND, _) => {
+                            tracing::info!(
+                                "No longer attached to {origin}, giving up on compute notification"
+                            );
+                            return Ok(());
+                        }
+                        e => {
+                            // Other API errors are unexpected here.
+                            tracing::warn!("Unexpected error checking location on {origin}: {e}");
+
+                            // Fall through, we will retry compute notification.
+                        }
+                    }
+                }
+                None => return Err(ReconcileError::Cancel),
+            };
 
             exponential_backoff(
                 notify_attempts,
