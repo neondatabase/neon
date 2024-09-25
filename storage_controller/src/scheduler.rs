@@ -723,6 +723,12 @@ impl Scheduler {
         Ok(node_id)
     }
 
+    /// Selects any available node. This is suitable for performing background work (e.g. S3
+    /// deletions).
+    pub(crate) fn any_available_node(&mut self) -> Result<NodeId, ScheduleError> {
+        self.schedule_shard::<AttachedShardTag>(&[], &None, &ScheduleContext::default())
+    }
+
     /// Unit test access to internal state
     #[cfg(test)]
     pub(crate) fn get_node_shard_count(&self, node_id: NodeId) -> usize {
