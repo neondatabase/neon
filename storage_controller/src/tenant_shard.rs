@@ -548,6 +548,11 @@ impl TenantShard {
         }
     }
 
+    #[instrument(skip_all, fields(
+        tenant_id=%self.tenant_shard_id.tenant_id,
+        shard_id=%self.tenant_shard_id.shard_slug(),
+        sequence=%self.sequence
+    ))]
     pub(crate) fn schedule(
         &mut self,
         scheduler: &mut Scheduler,
