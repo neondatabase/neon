@@ -102,7 +102,7 @@ jobs:
           # Default set of platforms to run e2e tests on
           platforms='["docker", "k8s"]'
 
-          # If the PR changes vendor/, pgxn/ or libs/vm_monitor/ directories, or Dockerfile.compute-node, add k8s-neonvm to the list of platforms.
+          # If the PR changes vendor/, pgxn/ or libs/vm_monitor/ directories, or compute/Dockerfile.compute-node, add k8s-neonvm to the list of platforms.
           # If the workflow run is not a pull request, add k8s-neonvm to the list.
           if [ "$GITHUB_EVENT_NAME" == "pull_request" ]; then
             for f in $(gh api "/repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" --paginate --jq '.[].filename'); do
