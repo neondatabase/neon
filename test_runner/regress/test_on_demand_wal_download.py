@@ -15,7 +15,8 @@ def test_on_demand_wal_download(neon_simple_env: NeonEnv):
 
     con = ep.connect()
     cur = con.cursor()
-    cur.execute("CREATE TABLE t(pk bigint primary key, payload text storage external)")
+    cur.execute("CREATE TABLE t(pk bigint primary key, payload text)")
+    cur.execute("ALTER TABLE t ALTER payload SET STORAGE external")
     cur.execute("select pg_create_logical_replication_slot('myslot', 'test_decoding', false, true)")
     cur.execute("insert into t values (generate_series(1,100000),repeat('?',10000))")
 
