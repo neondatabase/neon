@@ -112,7 +112,7 @@ use pageserver_api::reltag::RelTag;
 use pageserver_api::shard::ShardIndex;
 
 use postgres_connection::PgConnectionConfig;
-use postgres_ffi::to_pg_timestamp;
+use postgres_ffi::{to_pg_timestamp, v14::xlog_utils, WAL_SEGMENT_SIZE};
 use utils::{
     completion,
     generation::Generation,
@@ -1337,6 +1337,10 @@ impl Timeline {
         _ctx: &RequestContext,
     ) -> anyhow::Result<LsnLease> {
         let lease = {
+            // Normalize the requested LSN to be aligned, and move to the first record
+            // if it points to the beginning of the page (header).
+            let lsn = xlog_utils::normalize_lsn(lsn, WAL_SEGMENT_SIZE);
+
             let mut gc_info = self.gc_info.write().unwrap();
 
             let valid_until = SystemTime::now() + length;
