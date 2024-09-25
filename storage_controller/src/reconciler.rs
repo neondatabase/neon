@@ -572,30 +572,7 @@ impl Reconciler {
 
         // During a live migration it is unhelpful to proceed if we couldn't notify compute: if we detach
         // the origin without notifying compute, we will render the tenant unavailable.
-        let mut notify_attempts = 0;
-        while let Err(e) = self.compute_notify().await {
-            match e {
-                NotifyError::Fatal(_) => return Err(ReconcileError::Notify(e)),
-                NotifyError::ShuttingDown => return Err(ReconcileError::Cancel),
-                _ => {
-                    tracing::warn!(
-                        "Live migration blocked by compute notification error, retrying: {e}"
-                    );
-                }
-            }
-
-            exponential_backoff(
-                notify_attempts,
-                // Generous waits: control plane operations which might be blocking us usually complete on the order
-                // of hundreds to thousands of milliseconds, so no point busy polling.
-                1.0,
-                10.0,
-                &self.cancel,
-            )
-            .await;
-            notify_attempts += 1;
-        }
-
+        self.compute_notify_blocking(&origin_ps).await?;
         pausable_failpoint!("reconciler-live-migrate-post-notify");
 
         // Downgrade the origin to secondary.  If the tenant's policy is PlacementPolicy::Attached(0), then
@@ -868,6 +845,42 @@ impl Reconciler {
         } else {
             Ok(())
         }
+    }
+
+    /// Keep trying to notify the compute indefinitely, only dropping out if:
+    /// - the node `origin` becomes unavailable
+    /// - the node `origin` no longer has our tenant shard attached
+    /// - our cancellation token fires
+    ///
+    /// This is used during live migration, where we do not wish to detach
+    /// an origin location until the compute definitely knows about the new
+    /// location.
+    async fn compute_notify_blocking(&mut self, _origin: &Node) -> Result<(), ReconcileError> {
+        let mut notify_attempts = 0;
+        while let Err(e) = self.compute_notify().await {
+            match e {
+                NotifyError::Fatal(_) => return Err(ReconcileError::Notify(e)),
+                NotifyError::ShuttingDown => return Err(ReconcileError::Cancel),
+                _ => {
+                    tracing::warn!(
+                        "Live migration blocked by compute notification error, retrying: {e}"
+                    );
+                }
+            }
+
+            exponential_backoff(
+                notify_attempts,
+                // Generous waits: control plane operations which might be blocking us usually complete on the order
+                // of hundreds to thousands of milliseconds, so no point busy polling.
+                1.0,
+                10.0,
+                &self.cancel,
+            )
+            .await;
+            notify_attempts += 1;
+        }
+
+        Ok(())
     }
 }
 
