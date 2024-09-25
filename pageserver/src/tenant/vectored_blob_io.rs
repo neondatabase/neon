@@ -16,9 +16,9 @@
 //! Note that the vectored blob api does *not* go through the page cache.
 
 use std::collections::BTreeMap;
-use std::num::NonZeroUsize;
+use std::ops::Deref;
 
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use pageserver_api::key::Key;
 use tokio::io::AsyncWriteExt;
 use tokio_epoll_uring::BoundedBuf;
@@ -29,9 +29,6 @@ use crate::context::RequestContext;
 use crate::tenant::blob_io::{BYTE_UNCOMPRESSED, BYTE_ZSTD, LEN_COMPRESSION_BIT_MASK};
 use crate::virtual_file::{self, VirtualFile};
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct MaxVectoredReadBytes(pub NonZeroUsize);
-
 /// Metadata bundled with the start and end offset of a blob.
 #[derive(Copy, Clone, Debug)]
 pub struct BlobMeta {
@@ -39,11 +36,123 @@ pub struct BlobMeta {
     pub lsn: Lsn,
 }
 
-/// Blob offsets into [`VectoredBlobsBuf::buf`]
+/// A view into the vectored blobs read buffer.
+#[derive(Clone, Debug)]
+pub(crate) enum BufView<'a> {
+    Slice(&'a [u8]),
+    Bytes(bytes::Bytes),
+}
+
+impl<'a> BufView<'a> {
+    /// Creates a new slice-based view on the blob.
+    pub fn new_slice(slice: &'a [u8]) -> Self {
+        Self::Slice(slice)
+    }
+
+    /// Creates a new [`bytes::Bytes`]-based view on the blob.
+    pub fn new_bytes(bytes: bytes::Bytes) -> Self {
+        Self::Bytes(bytes)
+    }
+
+    /// Convert the view into `Bytes`.
+    ///
+    /// If using slice as the underlying storage, the copy will be an O(n) operation.
+    pub fn into_bytes(self) -> Bytes {
+        match self {
+            BufView::Slice(slice) => Bytes::copy_from_slice(slice),
+            BufView::Bytes(bytes) => bytes,
+        }
+    }
+
+    /// Creates a sub-view of the blob based on the range.
+    fn view(&self, range: std::ops::Range<usize>) -> Self {
+        match self {
+            BufView::Slice(slice) => BufView::Slice(&slice[range]),
+            BufView::Bytes(bytes) => BufView::Bytes(bytes.slice(range)),
+        }
+    }
+}
+
+impl<'a> Deref for BufView<'a> {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            BufView::Slice(slice) => slice,
+            BufView::Bytes(bytes) => bytes,
+        }
+    }
+}
+
+impl<'a> AsRef<[u8]> for BufView<'a> {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            BufView::Slice(slice) => slice,
+            BufView::Bytes(bytes) => bytes.as_ref(),
+        }
+    }
+}
+
+impl<'a> From<&'a [u8]> for BufView<'a> {
+    fn from(value: &'a [u8]) -> Self {
+        Self::new_slice(value)
+    }
+}
+
+impl From<Bytes> for BufView<'_> {
+    fn from(value: Bytes) -> Self {
+        Self::new_bytes(value)
+    }
+}
+
+/// Blob offsets into [`VectoredBlobsBuf::buf`]. The byte ranges is potentially compressed,
+/// subject to [`VectoredBlob::compression_bits`].
 pub struct VectoredBlob {
-    pub start: usize,
-    pub end: usize,
+    /// Blob metadata.
     pub meta: BlobMeta,
+    /// Start offset.
+    start: usize,
+    /// End offset.
+    end: usize,
+    /// Compression used on the the blob.
+    compression_bits: u8,
+}
+
+impl VectoredBlob {
+    /// Reads a decompressed view of the blob.
+    pub(crate) async fn read<'a>(&self, buf: &BufView<'a>) -> Result<BufView<'a>, std::io::Error> {
+        let view = buf.view(self.start..self.end);
+
+        match self.compression_bits {
+            BYTE_UNCOMPRESSED => Ok(view),
+            BYTE_ZSTD => {
+                let mut decompressed_vec = Vec::new();
+                let mut decoder =
+                    async_compression::tokio::write::ZstdDecoder::new(&mut decompressed_vec);
+                decoder.write_all(&view).await?;
+                decoder.flush().await?;
+                // Zero-copy conversion from `Vec` to `Bytes`
+                Ok(BufView::new_bytes(Bytes::from(decompressed_vec)))
+            }
+            bits => {
+                let error = std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("Failed to decompress blob for {}@{}, {}..{}: invalid compression byte {bits:x}", self.meta.key, self.meta.lsn, self.start, self.end),
+                );
+                Err(error)
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for VectoredBlob {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}@{}, {}..{}",
+            self.meta.key, self.meta.lsn, self.start, self.end
+        )
+    }
 }
 
 /// Return type of [`VectoredBlobReader::read_blobs`]
@@ -518,7 +627,7 @@ impl<'a> VectoredBlobReader<'a> {
             );
         }
 
-        let mut buf = self
+        let buf = self
             .file
             .read_exact_at(buf.slice(0..read.size()), read.start, ctx)
             .await?
@@ -532,9 +641,6 @@ impl<'a> VectoredBlobReader<'a> {
         // Blobs in `read` only provide their starting offset. The end offset
         // of a blob is implicit: the start of the next blob if one exists
         // or the end of the read.
-
-        // Some scratch space, put here for reusing the allocation
-        let mut decompressed_vec = Vec::new();
 
         for (blob_start, meta) in blobs_at {
             let blob_start_in_buf = blob_start - start_offset;
@@ -561,35 +667,14 @@ impl<'a> VectoredBlobReader<'a> {
                 )
             };
 
-            let start_raw = blob_start_in_buf + size_length;
-            let end_raw = start_raw + blob_size;
-            let (start, end);
-            if compression_bits == BYTE_UNCOMPRESSED {
-                start = start_raw as usize;
-                end = end_raw as usize;
-            } else if compression_bits == BYTE_ZSTD {
-                let mut decoder =
-                    async_compression::tokio::write::ZstdDecoder::new(&mut decompressed_vec);
-                decoder
-                    .write_all(&buf[start_raw as usize..end_raw as usize])
-                    .await?;
-                decoder.flush().await?;
-                start = buf.len();
-                buf.extend_from_slice(&decompressed_vec);
-                end = buf.len();
-                decompressed_vec.clear();
-            } else {
-                let error = std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("invalid compression byte {compression_bits:x}"),
-                );
-                return Err(error);
-            }
+            let start = (blob_start_in_buf + size_length) as usize;
+            let end = start + blob_size as usize;
 
             metas.push(VectoredBlob {
                 start,
                 end,
                 meta: *meta,
+                compression_bits,
             });
         }
 
@@ -597,8 +682,10 @@ impl<'a> VectoredBlobReader<'a> {
     }
 }
 
-/// Read planner used in [`crate::tenant::storage_layer::image_layer::ImageLayerIterator`]. It provides a streaming API for
-/// getting read blobs. It returns a batch when `handle` gets called and when the current key would just exceed the read_size and
+/// Read planner used in [`crate::tenant::storage_layer::image_layer::ImageLayerIterator`].
+///
+/// It provides a streaming API for getting read blobs. It returns a batch when
+/// `handle` gets called and when the current key would just exceed the read_size and
 /// max_cnt constraints.
 pub struct StreamingVectoredReadPlanner {
     read_builder: Option<VectoredReadBuilder>,
@@ -1022,8 +1109,13 @@ mod tests {
             let result = vectored_blob_reader.read_blobs(&read, buf, &ctx).await?;
             assert_eq!(result.blobs.len(), 1);
             let read_blob = &result.blobs[0];
-            let read_buf = &result.buf[read_blob.start..read_blob.end];
-            assert_eq!(blob, read_buf, "mismatch for idx={idx} at offset={offset}");
+            let view = BufView::new_slice(&result.buf);
+            let read_buf = read_blob.read(&view).await?;
+            assert_eq!(
+                &blob[..],
+                &read_buf[..],
+                "mismatch for idx={idx} at offset={offset}"
+            );
             buf = result.buf;
         }
         Ok(())

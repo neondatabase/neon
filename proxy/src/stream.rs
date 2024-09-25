@@ -12,8 +12,10 @@ use std::{io, task};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio_rustls::server::TlsStream;
+use tracing::debug;
 
 /// Stream wrapper which implements libpq's protocol.
+///
 /// NOTE: This object deliberately doesn't implement [`AsyncRead`]
 /// or [`AsyncWrite`] to prevent subtle errors (e.g. trying
 /// to pass random malformed bytes through the connection).
@@ -137,9 +139,10 @@ impl<S: AsyncWrite + Unpin> PqStream<S> {
         );
 
         // already error case, ignore client IO error
-        let _: Result<_, std::io::Error> = self
-            .write_message(&BeMessage::ErrorResponse(msg, None))
-            .await;
+        self.write_message(&BeMessage::ErrorResponse(msg, None))
+            .await
+            .inspect_err(|e| debug!("write_message failed: {e}"))
+            .ok();
 
         Err(ReportedError {
             source: anyhow::anyhow!(msg),
@@ -163,9 +166,10 @@ impl<S: AsyncWrite + Unpin> PqStream<S> {
         );
 
         // already error case, ignore client IO error
-        let _: Result<_, std::io::Error> = self
-            .write_message(&BeMessage::ErrorResponse(&msg, None))
-            .await;
+        self.write_message(&BeMessage::ErrorResponse(&msg, None))
+            .await
+            .inspect_err(|e| debug!("write_message failed: {e}"))
+            .ok();
 
         Err(ReportedError {
             source: anyhow::anyhow!(error),

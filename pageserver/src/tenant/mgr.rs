@@ -282,9 +282,10 @@ impl BackgroundPurges {
 static TENANTS: Lazy<std::sync::RwLock<TenantsMap>> =
     Lazy::new(|| std::sync::RwLock::new(TenantsMap::Initializing));
 
-/// The TenantManager is responsible for storing and mutating the collection of all tenants
-/// that this pageserver process has state for.  Every Tenant and SecondaryTenant instance
-/// lives inside the TenantManager.
+/// Responsible for storing and mutating the collection of all tenants
+/// that this pageserver has state for.
+///
+/// Every Tenant and SecondaryTenant instance lives inside the TenantManager.
 ///
 /// The most important role of the TenantManager is to prevent conflicts: e.g. trying to attach
 /// the same tenant twice concurrently, or trying to configure the same tenant into secondary
@@ -948,6 +949,12 @@ impl TenantManager {
                 (LocationMode::Attached(attach_conf), Some(TenantSlot::Attached(tenant))) => {
                     match attach_conf.generation.cmp(&tenant.generation) {
                         Ordering::Equal => {
+                            if attach_conf.attach_mode == AttachmentMode::Single {
+                                tenant
+                                    .gc_block
+                                    .set_lsn_lease_deadline(tenant.get_lsn_lease_length());
+                            }
+
                             // A transition from Attached to Attached in the same generation, we may
                             // take our fast path and just provide the updated configuration
                             // to the tenant.
@@ -2346,8 +2353,9 @@ pub enum TenantMapError {
     ShuttingDown,
 }
 
-/// Guards a particular tenant_id's content in the TenantsMap.  While this
-/// structure exists, the TenantsMap will contain a [`TenantSlot::InProgress`]
+/// Guards a particular tenant_id's content in the TenantsMap.
+///
+/// While this structure exists, the TenantsMap will contain a [`TenantSlot::InProgress`]
 /// for this tenant, which acts as a marker for any operations targeting
 /// this tenant to retry later, or wait for the InProgress state to end.
 ///

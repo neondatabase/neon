@@ -106,7 +106,7 @@ def test_threshold_based_eviction(
 
     # create a bunch of layers
     with env.endpoints.create_start("main", tenant_id=tenant_id) as pg:
-        pg_bin.run(["pgbench", "-i", "-s", "3", pg.connstr()])
+        pg_bin.run(["pgbench", "-i", "-I", "dtGvp", "-s", "3", pg.connstr()])
         last_flush_lsn_upload(env, pg, tenant_id, timeline_id)
     # wrap up and shutdown safekeepers so that no more layers will be created after the final checkpoint
     for sk in env.safekeepers:

@@ -284,6 +284,8 @@ pub(crate) struct DatabaseInfo {
     /// be inconvenient for debug with local PG instance.
     pub(crate) password: Option<Box<str>>,
     pub(crate) aux: MetricsAuxInfo,
+    #[serde(default)]
+    pub(crate) allowed_ips: Option<Vec<IpPattern>>,
 }
 
 // Manually implement debug to omit sensitive info.
@@ -294,6 +296,7 @@ impl fmt::Debug for DatabaseInfo {
             .field("port", &self.port)
             .field("dbname", &self.dbname)
             .field("user", &self.user)
+            .field("allowed_ips", &self.allowed_ips)
             .finish_non_exhaustive()
     }
 }
@@ -395,7 +398,7 @@ mod tests {
                 }
             }
         });
-        let _: KickSession<'_> = serde_json::from_str(&json.to_string())?;
+        serde_json::from_str::<KickSession<'_>>(&json.to_string())?;
 
         Ok(())
     }
@@ -403,7 +406,7 @@ mod tests {
     #[test]
     fn parse_db_info() -> anyhow::Result<()> {
         // with password
-        let _: DatabaseInfo = serde_json::from_value(json!({
+        serde_json::from_value::<DatabaseInfo>(json!({
             "host": "localhost",
             "port": 5432,
             "dbname": "postgres",
@@ -413,7 +416,7 @@ mod tests {
         }))?;
 
         // without password
-        let _: DatabaseInfo = serde_json::from_value(json!({
+        serde_json::from_value::<DatabaseInfo>(json!({
             "host": "localhost",
             "port": 5432,
             "dbname": "postgres",
@@ -422,7 +425,7 @@ mod tests {
         }))?;
 
         // new field (forward compatibility)
-        let _: DatabaseInfo = serde_json::from_value(json!({
+        serde_json::from_value::<DatabaseInfo>(json!({
             "host": "localhost",
             "port": 5432,
             "dbname": "postgres",
@@ -431,6 +434,22 @@ mod tests {
             "N.E.W": "forward compatibility check",
             "aux": dummy_aux(),
         }))?;
+
+        // with allowed_ips
+        let dbinfo = serde_json::from_value::<DatabaseInfo>(json!({
+            "host": "localhost",
+            "port": 5432,
+            "dbname": "postgres",
+            "user": "john_doe",
+            "password": "password",
+            "aux": dummy_aux(),
+            "allowed_ips": ["127.0.0.1"],
+        }))?;
+
+        assert_eq!(
+            dbinfo.allowed_ips,
+            Some(vec![IpPattern::Single("127.0.0.1".parse()?)])
+        );
 
         Ok(())
     }
@@ -441,7 +460,7 @@ mod tests {
             "address": "0.0.0.0",
             "aux": dummy_aux(),
         });
-        let _: WakeCompute = serde_json::from_str(&json.to_string())?;
+        serde_json::from_str::<WakeCompute>(&json.to_string())?;
         Ok(())
     }
 
@@ -451,18 +470,18 @@ mod tests {
         let json = json!({
             "role_secret": "secret",
         });
-        let _: GetRoleSecret = serde_json::from_str(&json.to_string())?;
+        serde_json::from_str::<GetRoleSecret>(&json.to_string())?;
         let json = json!({
             "role_secret": "secret",
             "allowed_ips": ["8.8.8.8"],
         });
-        let _: GetRoleSecret = serde_json::from_str(&json.to_string())?;
+        serde_json::from_str::<GetRoleSecret>(&json.to_string())?;
         let json = json!({
             "role_secret": "secret",
             "allowed_ips": ["8.8.8.8"],
             "project_id": "project",
         });
-        let _: GetRoleSecret = serde_json::from_str(&json.to_string())?;
+        serde_json::from_str::<GetRoleSecret>(&json.to_string())?;
 
         Ok(())
     }

@@ -25,9 +25,7 @@ use std::time::Duration;
 use std::time::SystemTime;
 
 use pageserver_api::shard::ShardIdentity;
-use postgres_ffi::v14::nonrelfile_utils::clogpage_precedes;
-use postgres_ffi::v14::nonrelfile_utils::slru_may_delete_clogsegment;
-use postgres_ffi::TimestampTz;
+use postgres_ffi::{dispatch_pgversion, enum_pgversion, enum_pgversion_dispatch, TimestampTz};
 use postgres_ffi::{fsm_logical_to_physical, page_is_new, page_set_lsn};
 
 use anyhow::{bail, Context, Result};
@@ -48,12 +46,28 @@ use pageserver_api::key::rel_block_to_key;
 use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
 use postgres_ffi::pg_constants;
 use postgres_ffi::relfile_utils::{FSM_FORKNUM, INIT_FORKNUM, MAIN_FORKNUM, VISIBILITYMAP_FORKNUM};
-use postgres_ffi::v14::nonrelfile_utils::mx_offset_to_member_segment;
-use postgres_ffi::v14::xlog_utils::*;
-use postgres_ffi::v14::CheckPoint;
 use postgres_ffi::TransactionId;
 use postgres_ffi::BLCKSZ;
+use utils::bin_ser::SerializeError;
 use utils::lsn::Lsn;
+
+enum_pgversion! {CheckPoint, pgv::CheckPoint}
+
+impl CheckPoint {
+    fn encode(&self) -> Result<Bytes, SerializeError> {
+        enum_pgversion_dispatch!(self, CheckPoint, cp, { cp.encode() })
+    }
+
+    fn update_next_xid(&mut self, xid: u32) -> bool {
+        enum_pgversion_dispatch!(self, CheckPoint, cp, { cp.update_next_xid(xid) })
+    }
+
+    pub fn update_next_multixid(&mut self, multi_xid: u32, multi_offset: u32) -> bool {
+        enum_pgversion_dispatch!(self, CheckPoint, cp, {
+            cp.update_next_multixid(multi_xid, multi_offset)
+        })
+    }
+}
 
 pub struct WalIngest {
     shard: ShardIdentity,
@@ -77,8 +91,13 @@ impl WalIngest {
         // Fetch the latest checkpoint into memory, so that we can compare with it
         // quickly in `ingest_record` and update it when it changes.
         let checkpoint_bytes = timeline.get_checkpoint(startpoint, ctx).await?;
-        let checkpoint = CheckPoint::decode(&checkpoint_bytes)?;
-        trace!("CheckPoint.nextXid = {}", checkpoint.nextXid.value);
+        let pgversion = timeline.pg_version;
+
+        let checkpoint = dispatch_pgversion!(pgversion, {
+            let checkpoint = pgv::CheckPoint::decode(&checkpoint_bytes)?;
+            trace!("CheckPoint.nextXid = {}", checkpoint.nextXid.value);
+            <pgv::CheckPoint as Into<CheckPoint>>::into(checkpoint)
+        });
 
         Ok(WalIngest {
             shard: *timeline.get_shard_identity(),
@@ -104,10 +123,9 @@ impl WalIngest {
     ///
     pub async fn ingest_record(
         &mut self,
-        recdata: Bytes,
+        decoded: DecodedWALRecord,
         lsn: Lsn,
         modification: &mut DatadirModification<'_>,
-        decoded: &mut DecodedWALRecord,
         ctx: &RequestContext,
     ) -> anyhow::Result<bool> {
         WAL_INGEST.records_received.inc();
@@ -115,7 +133,12 @@ impl WalIngest {
         let prev_len = modification.len();
 
         modification.set_lsn(lsn)?;
-        decode_wal_record(recdata, decoded, pg_version)?;
+
+        if decoded.is_dbase_create_copy(pg_version) {
+            // Records of this type should always be preceded by a commit(), as they
+            // rely on reading data pages back from the Timeline.
+            assert!(!modification.has_dirty_data_pages());
+        }
 
         let mut buf = decoded.record.clone();
         buf.advance(decoded.main_data_offset);
@@ -133,11 +156,11 @@ impl WalIngest {
             pg_constants::RM_HEAP_ID | pg_constants::RM_HEAP2_ID => {
                 // Heap AM records need some special handling, because they modify VM pages
                 // without registering them with the standard mechanism.
-                self.ingest_heapam_record(&mut buf, modification, decoded, ctx)
+                self.ingest_heapam_record(&mut buf, modification, &decoded, ctx)
                     .await?;
             }
             pg_constants::RM_NEON_ID => {
-                self.ingest_neonrmgr_record(&mut buf, modification, decoded, ctx)
+                self.ingest_neonrmgr_record(&mut buf, modification, &decoded, ctx)
                     .await?;
             }
             // Handle other special record types
@@ -214,6 +237,26 @@ impl WalIngest {
                                 .await?;
                         }
                     }
+                } else if pg_version == 17 {
+                    if info == postgres_ffi::v17::bindings::XLOG_DBASE_CREATE_WAL_LOG {
+                        debug!("XLOG_DBASE_CREATE_WAL_LOG: noop");
+                    } else if info == postgres_ffi::v17::bindings::XLOG_DBASE_CREATE_FILE_COPY {
+                        // The XLOG record was renamed between v14 and v15,
+                        // but the record format is the same.
+                        // So we can reuse XlCreateDatabase here.
+                        debug!("XLOG_DBASE_CREATE_FILE_COPY");
+                        let createdb = XlCreateDatabase::decode(&mut buf);
+                        self.ingest_xlog_dbase_create(modification, &createdb, ctx)
+                            .await?;
+                    } else if info == postgres_ffi::v17::bindings::XLOG_DBASE_DROP {
+                        let dropdb = XlDropDatabase::decode(&mut buf);
+                        for tablespace_id in dropdb.tablespace_ids {
+                            trace!("Drop db {}, {}", tablespace_id, dropdb.db_id);
+                            modification
+                                .drop_dbdir(tablespace_id, dropdb.db_id, ctx)
+                                .await?;
+                        }
+                    }
                 }
             }
             pg_constants::RM_TBLSPC_ID => {
@@ -223,7 +266,11 @@ impl WalIngest {
                 let info = decoded.xl_info & !pg_constants::XLR_INFO_MASK;
 
                 if info == pg_constants::CLOG_ZEROPAGE {
-                    let pageno = buf.get_u32_le();
+                    let pageno = if pg_version < 17 {
+                        buf.get_u32_le()
+                    } else {
+                        buf.get_u64_le() as u32
+                    };
                     let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
                     let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
                     self.put_slru_page_image(
@@ -237,7 +284,7 @@ impl WalIngest {
                     .await?;
                 } else {
                     assert!(info == pg_constants::CLOG_TRUNCATE);
-                    let xlrec = XlClogTruncate::decode(&mut buf);
+                    let xlrec = XlClogTruncate::decode(&mut buf, pg_version);
                     self.ingest_clog_truncate_record(modification, &xlrec, ctx)
                         .await?;
                 }
@@ -276,12 +323,21 @@ impl WalIngest {
                         parsed_xact.xid,
                         lsn,
                     );
-                    modification
-                        .drop_twophase_file(parsed_xact.xid, ctx)
-                        .await?;
+
+                    let xid: u64 = if pg_version >= 17 {
+                        self.adjust_to_full_transaction_id(parsed_xact.xid)?
+                    } else {
+                        parsed_xact.xid as u64
+                    };
+                    modification.drop_twophase_file(xid, ctx).await?;
                 } else if info == pg_constants::XLOG_XACT_PREPARE {
+                    let xid: u64 = if pg_version >= 17 {
+                        self.adjust_to_full_transaction_id(decoded.xl_xid)?
+                    } else {
+                        decoded.xl_xid as u64
+                    };
                     modification
-                        .put_twophase_file(decoded.xl_xid, Bytes::copy_from_slice(&buf[..]), ctx)
+                        .put_twophase_file(xid, Bytes::copy_from_slice(&buf[..]), ctx)
                         .await?;
                 }
             }
@@ -289,7 +345,11 @@ impl WalIngest {
                 let info = decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
 
                 if info == pg_constants::XLOG_MULTIXACT_ZERO_OFF_PAGE {
-                    let pageno = buf.get_u32_le();
+                    let pageno = if pg_version < 17 {
+                        buf.get_u32_le()
+                    } else {
+                        buf.get_u64_le() as u32
+                    };
                     let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
                     let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
                     self.put_slru_page_image(
@@ -302,7 +362,11 @@ impl WalIngest {
                     )
                     .await?;
                 } else if info == pg_constants::XLOG_MULTIXACT_ZERO_MEM_PAGE {
-                    let pageno = buf.get_u32_le();
+                    let pageno = if pg_version < 17 {
+                        buf.get_u32_le()
+                    } else {
+                        buf.get_u64_le() as u32
+                    };
                     let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
                     let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
                     self.put_slru_page_image(
@@ -325,76 +389,99 @@ impl WalIngest {
             }
             pg_constants::RM_RELMAP_ID => {
                 let xlrec = XlRelmapUpdate::decode(&mut buf);
-                self.ingest_relmap_page(modification, &xlrec, decoded, ctx)
+                self.ingest_relmap_page(modification, &xlrec, &decoded, ctx)
                     .await?;
             }
             pg_constants::RM_XLOG_ID => {
                 let info = decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
 
-                if info == pg_constants::XLOG_NEXTOID {
-                    let next_oid = buf.get_u32_le();
-                    if self.checkpoint.nextOid != next_oid {
-                        self.checkpoint.nextOid = next_oid;
+                if info == pg_constants::XLOG_PARAMETER_CHANGE {
+                    if let CheckPoint::V17(cp) = &mut self.checkpoint {
+                        let rec = v17::XlParameterChange::decode(&mut buf);
+                        cp.wal_level = rec.wal_level;
                         self.checkpoint_modified = true;
                     }
-                } else if info == pg_constants::XLOG_CHECKPOINT_ONLINE
-                    || info == pg_constants::XLOG_CHECKPOINT_SHUTDOWN
-                {
-                    let mut checkpoint_bytes = [0u8; SIZEOF_CHECKPOINT];
-                    buf.copy_to_slice(&mut checkpoint_bytes);
-                    let xlog_checkpoint = CheckPoint::decode(&checkpoint_bytes)?;
-                    trace!(
-                        "xlog_checkpoint.oldestXid={}, checkpoint.oldestXid={}",
-                        xlog_checkpoint.oldestXid,
-                        self.checkpoint.oldestXid
-                    );
-                    if (self
-                        .checkpoint
-                        .oldestXid
-                        .wrapping_sub(xlog_checkpoint.oldestXid) as i32)
-                        < 0
-                    {
-                        self.checkpoint.oldestXid = xlog_checkpoint.oldestXid;
+                } else if info == pg_constants::XLOG_END_OF_RECOVERY {
+                    if let CheckPoint::V17(cp) = &mut self.checkpoint {
+                        let rec = v17::XlEndOfRecovery::decode(&mut buf);
+                        cp.wal_level = rec.wal_level;
+                        self.checkpoint_modified = true;
                     }
-                    trace!(
-                        "xlog_checkpoint.oldestActiveXid={}, checkpoint.oldestActiveXid={}",
-                        xlog_checkpoint.oldestActiveXid,
-                        self.checkpoint.oldestActiveXid
-                    );
-
-                    // A shutdown checkpoint has `oldestActiveXid == InvalidTransactionid`,
-                    // because at shutdown, all in-progress transactions will implicitly
-                    // end. Postgres startup code knows that, and allows hot standby to start
-                    // immediately from a shutdown checkpoint.
-                    //
-                    // In Neon, Postgres hot standby startup always behaves as if starting from
-                    // an online checkpoint. It needs a valid `oldestActiveXid` value, so
-                    // instead of overwriting self.checkpoint.oldestActiveXid with
-                    // InvalidTransactionid from the checkpoint WAL record, update it to a
-                    // proper value, knowing that there are no in-progress transactions at this
-                    // point, except for prepared transactions.
-                    //
-                    // See also the neon code changes in the InitWalRecovery() function.
-                    if xlog_checkpoint.oldestActiveXid == pg_constants::INVALID_TRANSACTION_ID
-                        && info == pg_constants::XLOG_CHECKPOINT_SHUTDOWN
-                    {
-                        let mut oldest_active_xid = self.checkpoint.nextXid.value as u32;
-                        for xid in modification.tline.list_twophase_files(lsn, ctx).await? {
-                            if (xid.wrapping_sub(oldest_active_xid) as i32) < 0 {
-                                oldest_active_xid = xid;
-                            }
-                        }
-                        self.checkpoint.oldestActiveXid = oldest_active_xid;
-                    } else {
-                        self.checkpoint.oldestActiveXid = xlog_checkpoint.oldestActiveXid;
-                    }
-
-                    // Write a new checkpoint key-value pair on every checkpoint record, even
-                    // if nothing really changed. Not strictly required, but it seems nice to
-                    // have some trace of the checkpoint records in the layer files at the same
-                    // LSNs.
-                    self.checkpoint_modified = true;
                 }
+
+                enum_pgversion_dispatch!(&mut self.checkpoint, CheckPoint, cp, {
+                    if info == pg_constants::XLOG_NEXTOID {
+                        let next_oid = buf.get_u32_le();
+                        if cp.nextOid != next_oid {
+                            cp.nextOid = next_oid;
+                            self.checkpoint_modified = true;
+                        }
+                    } else if info == pg_constants::XLOG_CHECKPOINT_ONLINE
+                        || info == pg_constants::XLOG_CHECKPOINT_SHUTDOWN
+                    {
+                        let mut checkpoint_bytes = [0u8; pgv::xlog_utils::SIZEOF_CHECKPOINT];
+                        buf.copy_to_slice(&mut checkpoint_bytes);
+                        let xlog_checkpoint = pgv::CheckPoint::decode(&checkpoint_bytes)?;
+                        trace!(
+                            "xlog_checkpoint.oldestXid={}, checkpoint.oldestXid={}",
+                            xlog_checkpoint.oldestXid,
+                            cp.oldestXid
+                        );
+                        if (cp.oldestXid.wrapping_sub(xlog_checkpoint.oldestXid) as i32) < 0 {
+                            cp.oldestXid = xlog_checkpoint.oldestXid;
+                        }
+                        trace!(
+                            "xlog_checkpoint.oldestActiveXid={}, checkpoint.oldestActiveXid={}",
+                            xlog_checkpoint.oldestActiveXid,
+                            cp.oldestActiveXid
+                        );
+
+                        // A shutdown checkpoint has `oldestActiveXid == InvalidTransactionid`,
+                        // because at shutdown, all in-progress transactions will implicitly
+                        // end. Postgres startup code knows that, and allows hot standby to start
+                        // immediately from a shutdown checkpoint.
+                        //
+                        // In Neon, Postgres hot standby startup always behaves as if starting from
+                        // an online checkpoint. It needs a valid `oldestActiveXid` value, so
+                        // instead of overwriting self.checkpoint.oldestActiveXid with
+                        // InvalidTransactionid from the checkpoint WAL record, update it to a
+                        // proper value, knowing that there are no in-progress transactions at this
+                        // point, except for prepared transactions.
+                        //
+                        // See also the neon code changes in the InitWalRecovery() function.
+                        if xlog_checkpoint.oldestActiveXid == pg_constants::INVALID_TRANSACTION_ID
+                            && info == pg_constants::XLOG_CHECKPOINT_SHUTDOWN
+                        {
+                            let oldest_active_xid = if pg_version >= 17 {
+                                let mut oldest_active_full_xid = cp.nextXid.value;
+                                for xid in modification.tline.list_twophase_files(lsn, ctx).await? {
+                                    if xid < oldest_active_full_xid {
+                                        oldest_active_full_xid = xid;
+                                    }
+                                }
+                                oldest_active_full_xid as u32
+                            } else {
+                                let mut oldest_active_xid = cp.nextXid.value as u32;
+                                for xid in modification.tline.list_twophase_files(lsn, ctx).await? {
+                                    let narrow_xid = xid as u32;
+                                    if (narrow_xid.wrapping_sub(oldest_active_xid) as i32) < 0 {
+                                        oldest_active_xid = narrow_xid;
+                                    }
+                                }
+                                oldest_active_xid
+                            };
+                            cp.oldestActiveXid = oldest_active_xid;
+                        } else {
+                            cp.oldestActiveXid = xlog_checkpoint.oldestActiveXid;
+                        }
+
+                        // Write a new checkpoint key-value pair on every checkpoint record, even
+                        // if nothing really changed. Not strictly required, but it seems nice to
+                        // have some trace of the checkpoint records in the layer files at the same
+                        // LSNs.
+                        self.checkpoint_modified = true;
+                    }
+                });
             }
             pg_constants::RM_LOGICALMSG_ID => {
                 let info = decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
@@ -418,7 +505,11 @@ impl WalIngest {
                 let info = decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
                 if info == pg_constants::XLOG_RUNNING_XACTS {
                     let xlrec = crate::walrecord::XlRunningXacts::decode(&mut buf);
-                    self.checkpoint.oldestActiveXid = xlrec.oldest_running_xid;
+
+                    enum_pgversion_dispatch!(&mut self.checkpoint, CheckPoint, cp, {
+                        cp.oldestActiveXid = xlrec.oldest_running_xid;
+                    });
+
                     self.checkpoint_modified = true;
                 }
             }
@@ -470,7 +561,7 @@ impl WalIngest {
 
                 continue;
             }
-            self.ingest_decoded_block(modification, lsn, decoded, blk, ctx)
+            self.ingest_decoded_block(modification, lsn, &decoded, blk, ctx)
                 .await?;
         }
 
@@ -486,7 +577,28 @@ impl WalIngest {
         // until commit() is called to flush the data into the repository and update
         // the latest LSN.
 
+        modification.on_record_end();
+
         Ok(modification.len() > prev_len)
+    }
+
+    /// This is the same as AdjustToFullTransactionId(xid) in PostgreSQL
+    fn adjust_to_full_transaction_id(&self, xid: TransactionId) -> Result<u64> {
+        let next_full_xid =
+            enum_pgversion_dispatch!(&self.checkpoint, CheckPoint, cp, { cp.nextXid.value });
+
+        let next_xid = (next_full_xid) as u32;
+        let mut epoch = (next_full_xid >> 32) as u32;
+
+        if xid > next_xid {
+            // Wraparound occurred, must be from a prev epoch.
+            if epoch == 0 {
+                bail!("apparent XID wraparound with prepared transaction XID {xid}, nextXid is {next_full_xid}");
+            }
+            epoch -= 1;
+        }
+
+        Ok((epoch as u64) << 32 | xid as u64)
     }
 
     /// Do not store this block, but observe it for the purposes of updating our relation size state.
@@ -531,7 +643,7 @@ impl WalIngest {
             && blk.has_image
             && decoded.xl_rmid == pg_constants::RM_XLOG_ID
             && (decoded.xl_info == pg_constants::XLOG_FPI
-                || decoded.xl_info == pg_constants::XLOG_FPI_FOR_HINT)
+            || decoded.xl_info == pg_constants::XLOG_FPI_FOR_HINT)
             // compression of WAL is not yet supported: fall back to storing the original WAL record
             && !postgres_ffi::bkpimage_is_compressed(blk.bimg_info, modification.tline.pg_version)
             // do not materialize null pages because them most likely be soon replaced with real data
@@ -557,6 +669,7 @@ impl WalIngest {
                 page_set_lsn(&mut image, lsn)
             }
             assert_eq!(image.len(), BLCKSZ as usize);
+
             self.put_rel_page_image(modification, rel, blk.blkno, image.freeze(), ctx)
                 .await?;
         } else {
@@ -788,6 +901,73 @@ impl WalIngest {
                     bail!("Unknown RMGR {} for Heap decoding", decoded.xl_rmid);
                 }
             }
+            17 => {
+                if decoded.xl_rmid == pg_constants::RM_HEAP_ID {
+                    let info = decoded.xl_info & pg_constants::XLOG_HEAP_OPMASK;
+
+                    if info == pg_constants::XLOG_HEAP_INSERT {
+                        let xlrec = v17::XlHeapInsert::decode(buf);
+                        assert_eq!(0, buf.remaining());
+                        if (xlrec.flags & pg_constants::XLH_INSERT_ALL_VISIBLE_CLEARED) != 0 {
+                            new_heap_blkno = Some(decoded.blocks[0].blkno);
+                        }
+                    } else if info == pg_constants::XLOG_HEAP_DELETE {
+                        let xlrec = v17::XlHeapDelete::decode(buf);
+                        if (xlrec.flags & pg_constants::XLH_DELETE_ALL_VISIBLE_CLEARED) != 0 {
+                            new_heap_blkno = Some(decoded.blocks[0].blkno);
+                        }
+                    } else if info == pg_constants::XLOG_HEAP_UPDATE
+                        || info == pg_constants::XLOG_HEAP_HOT_UPDATE
+                    {
+                        let xlrec = v17::XlHeapUpdate::decode(buf);
+                        // the size of tuple data is inferred from the size of the record.
+                        // we can't validate the remaining number of bytes without parsing
+                        // the tuple data.
+                        if (xlrec.flags & pg_constants::XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED) != 0 {
+                            old_heap_blkno = Some(decoded.blocks.last().unwrap().blkno);
+                        }
+                        if (xlrec.flags & pg_constants::XLH_UPDATE_NEW_ALL_VISIBLE_CLEARED) != 0 {
+                            // PostgreSQL only uses XLH_UPDATE_NEW_ALL_VISIBLE_CLEARED on a
+                            // non-HOT update where the new tuple goes to different page than
+                            // the old one. Otherwise, only XLH_UPDATE_OLD_ALL_VISIBLE_CLEARED is
+                            // set.
+                            new_heap_blkno = Some(decoded.blocks[0].blkno);
+                        }
+                    } else if info == pg_constants::XLOG_HEAP_LOCK {
+                        let xlrec = v17::XlHeapLock::decode(buf);
+                        if (xlrec.flags & pg_constants::XLH_LOCK_ALL_FROZEN_CLEARED) != 0 {
+                            old_heap_blkno = Some(decoded.blocks[0].blkno);
+                            flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
+                        }
+                    }
+                } else if decoded.xl_rmid == pg_constants::RM_HEAP2_ID {
+                    let info = decoded.xl_info & pg_constants::XLOG_HEAP_OPMASK;
+                    if info == pg_constants::XLOG_HEAP2_MULTI_INSERT {
+                        let xlrec = v17::XlHeapMultiInsert::decode(buf);
+
+                        let offset_array_len =
+                            if decoded.xl_info & pg_constants::XLOG_HEAP_INIT_PAGE > 0 {
+                                // the offsets array is omitted if XLOG_HEAP_INIT_PAGE is set
+                                0
+                            } else {
+                                size_of::<u16>() * xlrec.ntuples as usize
+                            };
+                        assert_eq!(offset_array_len, buf.remaining());
+
+                        if (xlrec.flags & pg_constants::XLH_INSERT_ALL_VISIBLE_CLEARED) != 0 {
+                            new_heap_blkno = Some(decoded.blocks[0].blkno);
+                        }
+                    } else if info == pg_constants::XLOG_HEAP2_LOCK_UPDATED {
+                        let xlrec = v17::XlHeapLockUpdated::decode(buf);
+                        if (xlrec.flags & pg_constants::XLH_LOCK_ALL_FROZEN_CLEARED) != 0 {
+                            old_heap_blkno = Some(decoded.blocks[0].blkno);
+                            flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
+                        }
+                    }
+                } else {
+                    bail!("Unknown RMGR {} for Heap decoding", decoded.xl_rmid);
+                }
+            }
             _ => {}
         }
 
@@ -896,26 +1076,26 @@ impl WalIngest {
         assert_eq!(decoded.xl_rmid, pg_constants::RM_NEON_ID);
 
         match pg_version {
-            16 => {
+            16 | 17 => {
                 let info = decoded.xl_info & pg_constants::XLOG_HEAP_OPMASK;
 
                 match info {
                     pg_constants::XLOG_NEON_HEAP_INSERT => {
-                        let xlrec = v16::rm_neon::XlNeonHeapInsert::decode(buf);
+                        let xlrec = v17::rm_neon::XlNeonHeapInsert::decode(buf);
                         assert_eq!(0, buf.remaining());
                         if (xlrec.flags & pg_constants::XLH_INSERT_ALL_VISIBLE_CLEARED) != 0 {
                             new_heap_blkno = Some(decoded.blocks[0].blkno);
                         }
                     }
                     pg_constants::XLOG_NEON_HEAP_DELETE => {
-                        let xlrec = v16::rm_neon::XlNeonHeapDelete::decode(buf);
+                        let xlrec = v17::rm_neon::XlNeonHeapDelete::decode(buf);
                         if (xlrec.flags & pg_constants::XLH_DELETE_ALL_VISIBLE_CLEARED) != 0 {
                             new_heap_blkno = Some(decoded.blocks[0].blkno);
                         }
                     }
                     pg_constants::XLOG_NEON_HEAP_UPDATE
                     | pg_constants::XLOG_NEON_HEAP_HOT_UPDATE => {
-                        let xlrec = v16::rm_neon::XlNeonHeapUpdate::decode(buf);
+                        let xlrec = v17::rm_neon::XlNeonHeapUpdate::decode(buf);
                         // the size of tuple data is inferred from the size of the record.
                         // we can't validate the remaining number of bytes without parsing
                         // the tuple data.
@@ -931,7 +1111,7 @@ impl WalIngest {
                         }
                     }
                     pg_constants::XLOG_NEON_HEAP_MULTI_INSERT => {
-                        let xlrec = v16::rm_neon::XlNeonHeapMultiInsert::decode(buf);
+                        let xlrec = v17::rm_neon::XlNeonHeapMultiInsert::decode(buf);
 
                         let offset_array_len =
                             if decoded.xl_info & pg_constants::XLOG_HEAP_INIT_PAGE > 0 {
@@ -947,7 +1127,7 @@ impl WalIngest {
                         }
                     }
                     pg_constants::XLOG_NEON_HEAP_LOCK => {
-                        let xlrec = v16::rm_neon::XlNeonHeapLock::decode(buf);
+                        let xlrec = v17::rm_neon::XlNeonHeapLock::decode(buf);
                         if (xlrec.flags & pg_constants::XLH_LOCK_ALL_FROZEN_CLEARED) != 0 {
                             old_heap_blkno = Some(decoded.blocks[0].blkno);
                             flags = pg_constants::VISIBILITYMAP_ALL_FROZEN;
@@ -1195,7 +1375,7 @@ impl WalIngest {
             if rec.blkno % pg_constants::SLOTS_PER_FSM_PAGE != 0 {
                 // Tail of last remaining FSM page has to be zeroed.
                 // We are not precise here and instead of digging in FSM bitmap format just clear the whole page.
-                modification.put_rel_page_image(rel, fsm_physical_page_no, ZERO_PAGE.clone())?;
+                modification.put_rel_page_image_zero(rel, fsm_physical_page_no)?;
                 fsm_physical_page_no += 1;
             }
             let nblocks = get_relsize(modification, rel, ctx).await?;
@@ -1217,7 +1397,7 @@ impl WalIngest {
             if rec.blkno % pg_constants::VM_HEAPBLOCKS_PER_PAGE != 0 {
                 // Tail of last remaining vm page has to be zeroed.
                 // We are not precise here and instead of digging in VM bitmap format just clear the whole page.
-                modification.put_rel_page_image(rel, vm_page_no, ZERO_PAGE.clone())?;
+                modification.put_rel_page_image_zero(rel, vm_page_no)?;
                 vm_page_no += 1;
             }
             let nblocks = get_relsize(modification, rel, ctx).await?;
@@ -1233,12 +1413,17 @@ impl WalIngest {
     fn warn_on_ingest_lag(
         &mut self,
         conf: &crate::config::PageServerConf,
-        wal_timestmap: TimestampTz,
+        wal_timestamp: TimestampTz,
     ) {
         debug_assert_current_span_has_tenant_and_timeline_id();
         let now = SystemTime::now();
         let rate_limits = &mut self.warn_ingest_lag;
-        match try_from_pg_timestamp(wal_timestmap) {
+
+        let ts = enum_pgversion_dispatch!(&self.checkpoint, CheckPoint, _cp, {
+            pgv::xlog_utils::try_from_pg_timestamp(wal_timestamp)
+        });
+
+        match ts {
             Ok(ts) => {
                 match now.duration_since(ts) {
                     Ok(lag) => {
@@ -1248,7 +1433,7 @@ impl WalIngest {
                                 warn!(%rate_limit_stats, %lag, "ingesting record with timestamp lagging more than wait_lsn_timeout");
                             })
                         }
-                    },
+                    }
                     Err(e) => {
                         let delta_t = e.duration();
                         // determined by prod victoriametrics query: 1000 * (timestamp(node_time_seconds{neon_service="pageserver"}) - node_time_seconds)
@@ -1262,7 +1447,6 @@ impl WalIngest {
                         }
                     }
                 };
-
             }
             Err(error) => {
                 rate_limits.timestamp_invalid_msg_ratelimit.call2(|rate_limit_stats| {
@@ -1370,14 +1554,17 @@ impl WalIngest {
         // truncated, but a checkpoint record with the updated values isn't written until
         // later. In Neon, a server can start at any LSN, not just on a checkpoint record,
         // so we keep the oldestXid and oldestXidDB up-to-date.
-        self.checkpoint.oldestXid = xlrec.oldest_xid;
-        self.checkpoint.oldestXidDB = xlrec.oldest_xid_db;
+        enum_pgversion_dispatch!(&mut self.checkpoint, CheckPoint, cp, {
+            cp.oldestXid = xlrec.oldest_xid;
+            cp.oldestXidDB = xlrec.oldest_xid_db;
+        });
         self.checkpoint_modified = true;
 
         // TODO Treat AdvanceOldestClogXid() or write a comment why we don't need it
 
         let latest_page_number =
-            self.checkpoint.nextXid.value as u32 / pg_constants::CLOG_XACTS_PER_PAGE;
+            enum_pgversion_dispatch!(self.checkpoint, CheckPoint, cp, { cp.nextXid.value }) as u32
+                / pg_constants::CLOG_XACTS_PER_PAGE;
 
         // Now delete all segments containing pages between xlrec.pageno
         // and latest_page_number.
@@ -1385,7 +1572,9 @@ impl WalIngest {
         // First, make an important safety check:
         // the current endpoint page must not be eligible for removal.
         // See SimpleLruTruncate() in slru.c
-        if clogpage_precedes(latest_page_number, xlrec.pageno) {
+        if dispatch_pgversion!(modification.tline.pg_version, {
+            pgv::nonrelfile_utils::clogpage_precedes(latest_page_number, xlrec.pageno)
+        }) {
             info!("could not truncate directory pg_xact apparent wraparound");
             return Ok(());
         }
@@ -1402,7 +1591,12 @@ impl WalIngest {
             .await?
         {
             let segpage = segno * pg_constants::SLRU_PAGES_PER_SEGMENT;
-            if slru_may_delete_clogsegment(segpage, xlrec.pageno) {
+
+            let may_delete = dispatch_pgversion!(modification.tline.pg_version, {
+                pgv::nonrelfile_utils::slru_may_delete_clogsegment(segpage, xlrec.pageno)
+            });
+
+            if may_delete {
                 modification
                     .drop_slru_segment(SlruKind::Clog, segno, ctx)
                     .await?;
@@ -1521,14 +1715,23 @@ impl WalIngest {
         xlrec: &XlMultiXactTruncate,
         ctx: &RequestContext,
     ) -> Result<()> {
-        self.checkpoint.oldestMulti = xlrec.end_trunc_off;
-        self.checkpoint.oldestMultiDB = xlrec.oldest_multi_db;
+        let (maxsegment, startsegment, endsegment) =
+            enum_pgversion_dispatch!(&mut self.checkpoint, CheckPoint, cp, {
+                cp.oldestMulti = xlrec.end_trunc_off;
+                cp.oldestMultiDB = xlrec.oldest_multi_db;
+                let maxsegment: i32 = pgv::nonrelfile_utils::mx_offset_to_member_segment(
+                    pg_constants::MAX_MULTIXACT_OFFSET,
+                );
+                let startsegment: i32 =
+                    pgv::nonrelfile_utils::mx_offset_to_member_segment(xlrec.start_trunc_memb);
+                let endsegment: i32 =
+                    pgv::nonrelfile_utils::mx_offset_to_member_segment(xlrec.end_trunc_memb);
+                (maxsegment, startsegment, endsegment)
+            });
+
         self.checkpoint_modified = true;
 
         // PerformMembersTruncation
-        let maxsegment: i32 = mx_offset_to_member_segment(pg_constants::MAX_MULTIXACT_OFFSET);
-        let startsegment: i32 = mx_offset_to_member_segment(xlrec.start_trunc_memb);
-        let endsegment: i32 = mx_offset_to_member_segment(xlrec.end_trunc_memb);
         let mut segment: i32 = startsegment;
 
         // Delete all the segments except the last one. The last segment can still
@@ -1687,7 +1890,7 @@ impl WalIngest {
                     continue;
                 }
 
-                modification.put_rel_page_image(rel, gap_blknum, ZERO_PAGE.clone())?;
+                modification.put_rel_page_image_zero(rel, gap_blknum)?;
             }
         }
         Ok(())
@@ -1753,7 +1956,7 @@ impl WalIngest {
 
             // fill the gap with zeros
             for gap_blknum in old_nblocks..blknum {
-                modification.put_slru_page_image(kind, segno, gap_blknum, ZERO_PAGE.clone())?;
+                modification.put_slru_page_image_zero(kind, segno, gap_blknum)?;
             }
         }
         Ok(())
@@ -1802,11 +2005,23 @@ mod tests {
         // TODO
     }
 
-    static ZERO_CHECKPOINT: Bytes = Bytes::from_static(&[0u8; SIZEOF_CHECKPOINT]);
+    #[tokio::test]
+    async fn test_zeroed_checkpoint_decodes_correctly() -> Result<()> {
+        for i in 14..=16 {
+            dispatch_pgversion!(i, {
+                pgv::CheckPoint::decode(&pgv::ZERO_CHECKPOINT)?;
+            });
+        }
+
+        Ok(())
+    }
 
     async fn init_walingest_test(tline: &Timeline, ctx: &RequestContext) -> Result<WalIngest> {
         let mut m = tline.begin_modification(Lsn(0x10));
-        m.put_checkpoint(ZERO_CHECKPOINT.clone())?;
+        m.put_checkpoint(dispatch_pgversion!(
+            tline.pg_version,
+            pgv::ZERO_CHECKPOINT.clone()
+        ))?;
         m.put_relmap_file(0, 111, Bytes::from(""), ctx).await?; // dummy relmapper file
         m.commit(ctx).await?;
         let walingest = WalIngest::new(tline, Lsn(0x10), ctx).await?;
@@ -1827,21 +2042,25 @@ mod tests {
         walingest
             .put_rel_page_image(&mut m, TESTREL_A, 0, test_img("foo blk 0 at 2"), &ctx)
             .await?;
+        m.on_record_end();
         m.commit(&ctx).await?;
         let mut m = tline.begin_modification(Lsn(0x30));
         walingest
             .put_rel_page_image(&mut m, TESTREL_A, 0, test_img("foo blk 0 at 3"), &ctx)
             .await?;
+        m.on_record_end();
         m.commit(&ctx).await?;
         let mut m = tline.begin_modification(Lsn(0x40));
         walingest
             .put_rel_page_image(&mut m, TESTREL_A, 1, test_img("foo blk 1 at 4"), &ctx)
             .await?;
+        m.on_record_end();
         m.commit(&ctx).await?;
         let mut m = tline.begin_modification(Lsn(0x50));
         walingest
             .put_rel_page_image(&mut m, TESTREL_A, 2, test_img("foo blk 2 at 5"), &ctx)
             .await?;
+        m.on_record_end();
         m.commit(&ctx).await?;
 
         assert_current_logical_size(&tline, Lsn(0x50));
@@ -1983,6 +2202,7 @@ mod tests {
         walingest
             .put_rel_page_image(&mut m, TESTREL_A, 1, test_img("foo blk 1"), &ctx)
             .await?;
+        m.on_record_end();
         m.commit(&ctx).await?;
         assert_eq!(
             tline
@@ -2008,6 +2228,7 @@ mod tests {
         walingest
             .put_rel_page_image(&mut m, TESTREL_A, 1500, test_img("foo blk 1500"), &ctx)
             .await?;
+        m.on_record_end();
         m.commit(&ctx).await?;
         assert_eq!(
             tline
@@ -2409,7 +2630,6 @@ mod tests {
             .await
             .unwrap();
         let mut modification = tline.begin_modification(startpoint);
-        let mut decoded = DecodedWALRecord::default();
         println!("decoding {} bytes", bytes.len() - xlogoff);
 
         // Decode and ingest wal. We process the wal in chunks because
@@ -2417,8 +2637,10 @@ mod tests {
         for chunk in bytes[xlogoff..].chunks(50) {
             decoder.feed_bytes(chunk);
             while let Some((lsn, recdata)) = decoder.poll_decode().unwrap() {
+                let mut decoded = DecodedWALRecord::default();
+                decode_wal_record(recdata, &mut decoded, modification.tline.pg_version).unwrap();
                 walingest
-                    .ingest_record(recdata, lsn, &mut modification, &mut decoded, &ctx)
+                    .ingest_record(decoded, lsn, &mut modification, &ctx)
                     .instrument(span.clone())
                     .await
                     .unwrap();

@@ -12,7 +12,7 @@ use crate::keyspace::{KeySpace, KeySpaceAccum};
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id;
 use crate::walrecord::NeonWalRecord;
 use crate::{aux_file, repository::*};
-use anyhow::{bail, ensure, Context};
+use anyhow::{ensure, Context};
 use bytes::{Buf, Bytes, BytesMut};
 use enum_map::Enum;
 use pageserver_api::key::{
@@ -168,7 +168,9 @@ impl Timeline {
         DatadirModification {
             tline: self,
             pending_lsns: Vec::new(),
-            pending_updates: HashMap::new(),
+            pending_metadata_pages: HashMap::new(),
+            pending_data_pages: Vec::new(),
+            pending_zero_data_pages: Default::default(),
             pending_deletions: Vec::new(),
             pending_nblocks: 0,
             pending_directory_entries: Vec::new(),
@@ -631,7 +633,7 @@ impl Timeline {
 
     pub(crate) async fn get_twophase_file(
         &self,
-        xid: TransactionId,
+        xid: u64,
         lsn: Lsn,
         ctx: &RequestContext,
     ) -> Result<Bytes, PageReconstructError> {
@@ -644,11 +646,19 @@ impl Timeline {
         &self,
         lsn: Lsn,
         ctx: &RequestContext,
-    ) -> Result<HashSet<TransactionId>, PageReconstructError> {
+    ) -> Result<HashSet<u64>, PageReconstructError> {
         // fetch directory entry
         let buf = self.get(TWOPHASEDIR_KEY, lsn, ctx).await?;
 
-        Ok(TwoPhaseDirectory::des(&buf)?.xids)
+        if self.pg_version >= 17 {
+            Ok(TwoPhaseDirectoryV17::des(&buf)?.xids)
+        } else {
+            Ok(TwoPhaseDirectory::des(&buf)?
+                .xids
+                .iter()
+                .map(|x| u64::from(*x))
+                .collect())
+        }
     }
 
     pub(crate) async fn get_control_file(
@@ -727,8 +737,12 @@ impl Timeline {
         let current_policy = self.last_aux_file_policy.load();
         match current_policy {
             Some(AuxFilePolicy::V1) => {
-                warn!("this timeline is using deprecated aux file policy V1 (policy=V1)");
-                self.list_aux_files_v1(lsn, ctx).await
+                let res = self.list_aux_files_v1(lsn, ctx).await?;
+                let empty_str = if res.is_empty() { ", empty" } else { "" };
+                warn!(
+                    "this timeline is using deprecated aux file policy V1 (policy=v1{empty_str})"
+                );
+                Ok(res)
             }
             None => {
                 let res = self.list_aux_files_v1(lsn, ctx).await?;
@@ -826,6 +840,36 @@ impl Timeline {
         Ok(total_size * BLCKSZ as u64)
     }
 
+    /// Get a KeySpace that covers all the Keys that are in use at AND below the given LSN. This is only used
+    /// for gc-compaction.
+    ///
+    /// gc-compaction cannot use the same `collect_keyspace` function as the legacy compaction because it
+    /// processes data at multiple LSNs and needs to be aware of the fact that some key ranges might need to
+    /// be kept only for a specific range of LSN.
+    ///
+    /// Consider the case that the user created branches at LSN 10 and 20, where the user created a table A at
+    /// LSN 10 and dropped that table at LSN 20. `collect_keyspace` at LSN 10 will return the key range
+    /// corresponding to that table, while LSN 20 won't. The keyspace info at a single LSN is not enough to
+    /// determine which keys to retain/drop for gc-compaction.
+    ///
+    /// For now, it only drops AUX-v1 keys. But in the future, the function will be extended to return the keyspace
+    /// to be retained for each of the branch LSN.
+    ///
+    /// The return value is (dense keyspace, sparse keyspace).
+    pub(crate) async fn collect_gc_compaction_keyspace(
+        &self,
+    ) -> Result<(KeySpace, SparseKeySpace), CollectKeySpaceError> {
+        let metadata_key_begin = Key::metadata_key_range().start;
+        let aux_v1_key = AUX_FILES_KEY;
+        let dense_keyspace = KeySpace {
+            ranges: vec![Key::MIN..aux_v1_key, aux_v1_key.next()..metadata_key_begin],
+        };
+        Ok((
+            dense_keyspace,
+            SparseKeySpace(KeySpace::single(Key::metadata_key_range())),
+        ))
+    }
+
     ///
     /// Get a KeySpace that covers all the Keys that are in use at the given LSN.
     /// Anything that's not listed maybe removed from the underlying storage (from
@@ -896,9 +940,13 @@ impl Timeline {
 
         // Then pg_twophase
         result.add_key(TWOPHASEDIR_KEY);
-        let buf = self.get(TWOPHASEDIR_KEY, lsn, ctx).await?;
-        let twophase_dir = TwoPhaseDirectory::des(&buf)?;
-        let mut xids: Vec<TransactionId> = twophase_dir.xids.iter().cloned().collect();
+
+        let mut xids: Vec<u64> = self
+            .list_twophase_files(lsn, ctx)
+            .await?
+            .iter()
+            .cloned()
+            .collect();
         xids.sort_unstable();
         for xid in xids {
             result.add_key(twophase_file_key(xid));
@@ -1015,9 +1063,10 @@ impl Timeline {
 }
 
 /// DatadirModification represents an operation to ingest an atomic set of
-/// updates to the repository. It is created by the 'begin_record'
-/// function. It is called for each WAL record, so that all the modifications
-/// by a one WAL record appear atomic.
+/// updates to the repository.
+///
+/// It is created by the 'begin_record' function. It is called for each WAL
+/// record, so that all the modifications by a one WAL record appear atomic.
 pub struct DatadirModification<'a> {
     /// The timeline this modification applies to. You can access this to
     /// read the state, but note that any pending updates are *not* reflected
@@ -1031,9 +1080,23 @@ pub struct DatadirModification<'a> {
     // The put-functions add the modifications here, and they are flushed to the
     // underlying key-value store by the 'finish' function.
     pending_lsns: Vec<Lsn>,
-    pending_updates: HashMap<Key, Vec<(Lsn, usize, Value)>>,
     pending_deletions: Vec<(Range<Key>, Lsn)>,
     pending_nblocks: i64,
+
+    /// Metadata writes, indexed by key so that they can be read from not-yet-committed modifications
+    /// while ingesting subsequent records. See [`Self::is_data_key`] for the definition of 'metadata'.
+    pending_metadata_pages: HashMap<CompactKey, Vec<(Lsn, usize, Value)>>,
+
+    /// Data writes, ready to be flushed into an ephemeral layer. See [`Self::is_data_key`] for
+    /// which keys are stored here.
+    pending_data_pages: Vec<(CompactKey, Lsn, usize, Value)>,
+
+    // Sometimes during ingest, for example when extending a relation, we would like to write a zero page.  However,
+    // if we encounter a write from postgres in the same wal record, we will drop this entry.
+    //
+    // Unlike other 'pending' fields, this does not last until the next call to commit(): it is flushed
+    // at the end of each wal record, and all these writes implicitly are at lsn Self::lsn
+    pending_zero_data_pages: HashSet<CompactKey>,
 
     /// For special "directory" keys that store key-value maps, track the size of the map
     /// if it was updated in this modification.
@@ -1058,6 +1121,10 @@ impl<'a> DatadirModification<'a> {
         self.pending_bytes
     }
 
+    pub(crate) fn has_dirty_data_pages(&self) -> bool {
+        (!self.pending_data_pages.is_empty()) || (!self.pending_zero_data_pages.is_empty())
+    }
+
     /// Set the current lsn
     pub(crate) fn set_lsn(&mut self, lsn: Lsn) -> anyhow::Result<()> {
         ensure!(
@@ -1066,11 +1133,26 @@ impl<'a> DatadirModification<'a> {
             lsn,
             self.lsn
         );
+
+        // If we are advancing LSN, then state from previous wal record should have been flushed.
+        assert!(self.pending_zero_data_pages.is_empty());
+
         if lsn > self.lsn {
             self.pending_lsns.push(self.lsn);
             self.lsn = lsn;
         }
         Ok(())
+    }
+
+    /// In this context, 'metadata' means keys that are only read by the pageserver internally, and 'data' means
+    /// keys that represent literal blocks that postgres can read.  So data includes relation blocks and
+    /// SLRU blocks, which are read directly by postgres, and everything else is considered metadata.
+    ///
+    /// The distinction is important because data keys are handled on a fast path where dirty writes are
+    /// not readable until this modification is committed, whereas metadata keys are visible for read
+    /// via [`Self::get`] as soon as their record has been ingested.
+    fn is_data_key(key: &Key) -> bool {
+        key.is_rel_block_key() || key.is_slru_block_key()
     }
 
     /// Initialize a completely new repository.
@@ -1087,9 +1169,15 @@ impl<'a> DatadirModification<'a> {
         // Create AuxFilesDirectory
         self.init_aux_dir()?;
 
-        let buf = TwoPhaseDirectory::ser(&TwoPhaseDirectory {
-            xids: HashSet::new(),
-        })?;
+        let buf = if self.tline.pg_version >= 17 {
+            TwoPhaseDirectoryV17::ser(&TwoPhaseDirectoryV17 {
+                xids: HashSet::new(),
+            })
+        } else {
+            TwoPhaseDirectory::ser(&TwoPhaseDirectory {
+                xids: HashSet::new(),
+            })
+        }?;
         self.pending_directory_entries
             .push((DirectoryKind::TwoPhase, 0));
         self.put(TWOPHASEDIR_KEY, Value::Image(buf.into()));
@@ -1165,6 +1253,13 @@ impl<'a> DatadirModification<'a> {
         img: Bytes,
     ) -> anyhow::Result<()> {
         anyhow::ensure!(rel.relnode != 0, RelationError::InvalidRelnode);
+        let key = rel_block_to_key(rel, blknum);
+        if !key.is_valid_key_on_write_path() {
+            anyhow::bail!(
+                "the request contains data not supported by pageserver at {}",
+                key
+            );
+        }
         self.put(rel_block_to_key(rel, blknum), Value::Image(img));
         Ok(())
     }
@@ -1176,8 +1271,61 @@ impl<'a> DatadirModification<'a> {
         blknum: BlockNumber,
         img: Bytes,
     ) -> anyhow::Result<()> {
-        self.put(slru_block_to_key(kind, segno, blknum), Value::Image(img));
+        let key = slru_block_to_key(kind, segno, blknum);
+        if !key.is_valid_key_on_write_path() {
+            anyhow::bail!(
+                "the request contains data not supported by pageserver at {}",
+                key
+            );
+        }
+        self.put(key, Value::Image(img));
         Ok(())
+    }
+
+    pub(crate) fn put_rel_page_image_zero(
+        &mut self,
+        rel: RelTag,
+        blknum: BlockNumber,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(rel.relnode != 0, RelationError::InvalidRelnode);
+        let key = rel_block_to_key(rel, blknum);
+        if !key.is_valid_key_on_write_path() {
+            anyhow::bail!(
+                "the request contains data not supported by pageserver: {} @ {}",
+                key,
+                self.lsn
+            );
+        }
+        self.pending_zero_data_pages.insert(key.to_compact());
+        self.pending_bytes += ZERO_PAGE.len();
+        Ok(())
+    }
+
+    pub(crate) fn put_slru_page_image_zero(
+        &mut self,
+        kind: SlruKind,
+        segno: u32,
+        blknum: BlockNumber,
+    ) -> anyhow::Result<()> {
+        let key = slru_block_to_key(kind, segno, blknum);
+        if !key.is_valid_key_on_write_path() {
+            anyhow::bail!(
+                "the request contains data not supported by pageserver: {} @ {}",
+                key,
+                self.lsn
+            );
+        }
+        self.pending_zero_data_pages.insert(key.to_compact());
+        self.pending_bytes += ZERO_PAGE.len();
+        Ok(())
+    }
+
+    /// Call this at the end of each WAL record.
+    pub(crate) fn on_record_end(&mut self) {
+        let pending_zero_data_pages = std::mem::take(&mut self.pending_zero_data_pages);
+        for key in pending_zero_data_pages {
+            self.put_data(key, Value::Image(ZERO_PAGE.clone()));
+        }
     }
 
     /// Store a relmapper file (pg_filenode.map) in the repository
@@ -1221,22 +1369,31 @@ impl<'a> DatadirModification<'a> {
 
     pub async fn put_twophase_file(
         &mut self,
-        xid: TransactionId,
+        xid: u64,
         img: Bytes,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         // Add it to the directory entry
-        let buf = self.get(TWOPHASEDIR_KEY, ctx).await?;
-        let mut dir = TwoPhaseDirectory::des(&buf)?;
-        if !dir.xids.insert(xid) {
-            anyhow::bail!("twophase file for xid {} already exists", xid);
-        }
-        self.pending_directory_entries
-            .push((DirectoryKind::TwoPhase, dir.xids.len()));
-        self.put(
-            TWOPHASEDIR_KEY,
-            Value::Image(Bytes::from(TwoPhaseDirectory::ser(&dir)?)),
-        );
+        let dirbuf = self.get(TWOPHASEDIR_KEY, ctx).await?;
+        let newdirbuf = if self.tline.pg_version >= 17 {
+            let mut dir = TwoPhaseDirectoryV17::des(&dirbuf)?;
+            if !dir.xids.insert(xid) {
+                anyhow::bail!("twophase file for xid {} already exists", xid);
+            }
+            self.pending_directory_entries
+                .push((DirectoryKind::TwoPhase, dir.xids.len()));
+            Bytes::from(TwoPhaseDirectoryV17::ser(&dir)?)
+        } else {
+            let xid = xid as u32;
+            let mut dir = TwoPhaseDirectory::des(&dirbuf)?;
+            if !dir.xids.insert(xid) {
+                anyhow::bail!("twophase file for xid {} already exists", xid);
+            }
+            self.pending_directory_entries
+                .push((DirectoryKind::TwoPhase, dir.xids.len()));
+            Bytes::from(TwoPhaseDirectory::ser(&dir)?)
+        };
+        self.put(TWOPHASEDIR_KEY, Value::Image(newdirbuf));
 
         self.put(twophase_file_key(xid), Value::Image(img));
         Ok(())
@@ -1539,22 +1696,32 @@ impl<'a> DatadirModification<'a> {
     /// This method is used for marking truncated SLRU files
     pub async fn drop_twophase_file(
         &mut self,
-        xid: TransactionId,
+        xid: u64,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         // Remove it from the directory entry
         let buf = self.get(TWOPHASEDIR_KEY, ctx).await?;
-        let mut dir = TwoPhaseDirectory::des(&buf)?;
+        let newdirbuf = if self.tline.pg_version >= 17 {
+            let mut dir = TwoPhaseDirectoryV17::des(&buf)?;
 
-        if !dir.xids.remove(&xid) {
-            warn!("twophase file for xid {} does not exist", xid);
-        }
-        self.pending_directory_entries
-            .push((DirectoryKind::TwoPhase, dir.xids.len()));
-        self.put(
-            TWOPHASEDIR_KEY,
-            Value::Image(Bytes::from(TwoPhaseDirectory::ser(&dir)?)),
-        );
+            if !dir.xids.remove(&xid) {
+                warn!("twophase file for xid {} does not exist", xid);
+            }
+            self.pending_directory_entries
+                .push((DirectoryKind::TwoPhase, dir.xids.len()));
+            Bytes::from(TwoPhaseDirectoryV17::ser(&dir)?)
+        } else {
+            let xid: u32 = u32::try_from(xid)?;
+            let mut dir = TwoPhaseDirectory::des(&buf)?;
+
+            if !dir.xids.remove(&xid) {
+                warn!("twophase file for xid {} does not exist", xid);
+            }
+            self.pending_directory_entries
+                .push((DirectoryKind::TwoPhase, dir.xids.len()));
+            Bytes::from(TwoPhaseDirectory::ser(&dir)?)
+        };
+        self.put(TWOPHASEDIR_KEY, Value::Image(newdirbuf));
 
         // Delete it
         self.delete(twophase_key_range(xid));
@@ -1597,7 +1764,7 @@ impl<'a> DatadirModification<'a> {
                 if aux_files_key_v1.is_empty() {
                     None
                 } else {
-                    warn!("this timeline is using deprecated aux file policy V1");
+                    warn!("this timeline is using deprecated aux file policy V1 (detected existing v1 files)");
                     self.tline.do_switch_aux_policy(AuxFilePolicy::V1)?;
                     Some(AuxFilePolicy::V1)
                 }
@@ -1778,7 +1945,7 @@ impl<'a> DatadirModification<'a> {
     /// retains all the metadata, but data pages are flushed. That's again OK
     /// for bulk import, where you are just loading data pages and won't try to
     /// modify the same pages twice.
-    pub async fn flush(&mut self, ctx: &RequestContext) -> anyhow::Result<()> {
+    pub(crate) async fn flush(&mut self, ctx: &RequestContext) -> anyhow::Result<()> {
         // Unless we have accumulated a decent amount of changes, it's not worth it
         // to scan through the pending_updates list.
         let pending_nblocks = self.pending_nblocks;
@@ -1789,31 +1956,11 @@ impl<'a> DatadirModification<'a> {
         let mut writer = self.tline.writer().await;
 
         // Flush relation and  SLRU data blocks, keep metadata.
-        let mut retained_pending_updates = HashMap::<_, Vec<_>>::new();
-        for (key, values) in self.pending_updates.drain() {
-            if !key.is_valid_key_on_write_path() {
-                bail!(
-                    "the request contains data not supported by pageserver at TimelineWriter::put: {}", key
-                );
-            }
-            let mut write_batch = Vec::new();
-            for (lsn, value_ser_size, value) in values {
-                if key.is_rel_block_key() || key.is_slru_block_key() {
-                    // This bails out on first error without modifying pending_updates.
-                    // That's Ok, cf this function's doc comment.
-                    write_batch.push((key.to_compact(), lsn, value_ser_size, value));
-                } else {
-                    retained_pending_updates.entry(key).or_default().push((
-                        lsn,
-                        value_ser_size,
-                        value,
-                    ));
-                }
-            }
-            writer.put_batch(write_batch, ctx).await?;
-        }
+        let pending_data_pages = std::mem::take(&mut self.pending_data_pages);
 
-        self.pending_updates = retained_pending_updates;
+        // This bails out on first error without modifying pending_updates.
+        // That's Ok, cf this function's doc comment.
+        writer.put_batch(pending_data_pages, ctx).await?;
         self.pending_bytes = 0;
 
         if pending_nblocks != 0 {
@@ -1834,29 +1981,31 @@ impl<'a> DatadirModification<'a> {
     /// All the modifications in this atomic update are stamped by the specified LSN.
     ///
     pub async fn commit(&mut self, ctx: &RequestContext) -> anyhow::Result<()> {
+        // Commit should never be called mid-wal-record
+        assert!(self.pending_zero_data_pages.is_empty());
+
         let mut writer = self.tline.writer().await;
 
         let pending_nblocks = self.pending_nblocks;
         self.pending_nblocks = 0;
 
-        if !self.pending_updates.is_empty() {
-            // Ordering: the items in this batch do not need to be in any global order, but values for
-            // a particular Key must be in Lsn order relative to one another.  InMemoryLayer relies on
-            // this to do efficient updates to its index.
-            let batch: Vec<(CompactKey, Lsn, usize, Value)> = self
-                .pending_updates
+        // Ordering: the items in this batch do not need to be in any global order, but values for
+        // a particular Key must be in Lsn order relative to one another.  InMemoryLayer relies on
+        // this to do efficient updates to its index.
+        let mut write_batch = std::mem::take(&mut self.pending_data_pages);
+
+        write_batch.extend(
+            self.pending_metadata_pages
                 .drain()
                 .flat_map(|(key, values)| {
-                    values.into_iter().map(move |(lsn, val_ser_size, value)| {
-                        if !key.is_valid_key_on_write_path() {
-                            bail!("the request contains data not supported by pageserver at TimelineWriter::put: {}", key);
-                        }
-                        Ok((key.to_compact(), lsn, val_ser_size, value))
-                    })
-                })
-                .collect::<anyhow::Result<Vec<_>>>()?;
+                    values
+                        .into_iter()
+                        .map(move |(lsn, value_size, value)| (key, lsn, value_size, value))
+                }),
+        );
 
-            writer.put_batch(batch, ctx).await?;
+        if !write_batch.is_empty() {
+            writer.put_batch(write_batch, ctx).await?;
         }
 
         if !self.pending_deletions.is_empty() {
@@ -1887,33 +2036,58 @@ impl<'a> DatadirModification<'a> {
     }
 
     pub(crate) fn len(&self) -> usize {
-        self.pending_updates.len() + self.pending_deletions.len()
+        self.pending_metadata_pages.len()
+            + self.pending_data_pages.len()
+            + self.pending_deletions.len()
     }
 
-    // Internal helper functions to batch the modifications
-
+    /// Read a page from the Timeline we are writing to.  For metadata pages, this passes through
+    /// a cache in Self, which makes writes earlier in this modification visible to WAL records later
+    /// in the modification.
+    ///
+    /// For data pages, reads pass directly to the owning Timeline: any ingest code which reads a data
+    /// page must ensure that the pages they read are already committed in Timeline, for example
+    /// DB create operations are always preceded by a call to commit().  This is special cased because
+    /// it's rare: all the 'normal' WAL operations will only read metadata pages such as relation sizes,
+    /// and not data pages.
     async fn get(&self, key: Key, ctx: &RequestContext) -> Result<Bytes, PageReconstructError> {
-        // Have we already updated the same key? Read the latest pending updated
-        // version in that case.
-        //
-        // Note: we don't check pending_deletions. It is an error to request a
-        // value that has been removed, deletion only avoids leaking storage.
-        if let Some(values) = self.pending_updates.get(&key) {
-            if let Some((_, _, value)) = values.last() {
-                return if let Value::Image(img) = value {
-                    Ok(img.clone())
-                } else {
-                    // Currently, we never need to read back a WAL record that we
-                    // inserted in the same "transaction". All the metadata updates
-                    // work directly with Images, and we never need to read actual
-                    // data pages. We could handle this if we had to, by calling
-                    // the walredo manager, but let's keep it simple for now.
-                    Err(PageReconstructError::Other(anyhow::anyhow!(
-                        "unexpected pending WAL record"
-                    )))
-                };
+        if !Self::is_data_key(&key) {
+            // Have we already updated the same key? Read the latest pending updated
+            // version in that case.
+            //
+            // Note: we don't check pending_deletions. It is an error to request a
+            // value that has been removed, deletion only avoids leaking storage.
+            if let Some(values) = self.pending_metadata_pages.get(&key.to_compact()) {
+                if let Some((_, _, value)) = values.last() {
+                    return if let Value::Image(img) = value {
+                        Ok(img.clone())
+                    } else {
+                        // Currently, we never need to read back a WAL record that we
+                        // inserted in the same "transaction". All the metadata updates
+                        // work directly with Images, and we never need to read actual
+                        // data pages. We could handle this if we had to, by calling
+                        // the walredo manager, but let's keep it simple for now.
+                        Err(PageReconstructError::Other(anyhow::anyhow!(
+                            "unexpected pending WAL record"
+                        )))
+                    };
+                }
+            }
+        } else {
+            // This is an expensive check, so we only do it in debug mode. If reading a data key,
+            // this key should never be present in pending_data_pages. We ensure this by committing
+            // modifications before ingesting DB create operations, which are the only kind that reads
+            // data pages during ingest.
+            if cfg!(debug_assertions) {
+                for (dirty_key, _, _, _) in &self.pending_data_pages {
+                    debug_assert!(&key.to_compact() != dirty_key);
+                }
+
+                debug_assert!(!self.pending_zero_data_pages.contains(&key.to_compact()))
             }
         }
+
+        // Metadata page cache miss, or we're reading a data page.
         let lsn = Lsn::max(self.tline.get_last_record_lsn(), self.lsn);
         self.tline.get(key, lsn, ctx).await
     }
@@ -1925,11 +2099,40 @@ impl<'a> DatadirModification<'a> {
     }
 
     fn put(&mut self, key: Key, val: Value) {
-        let values = self.pending_updates.entry(key).or_default();
+        if Self::is_data_key(&key) {
+            self.put_data(key.to_compact(), val)
+        } else {
+            self.put_metadata(key.to_compact(), val)
+        }
+    }
+
+    fn put_data(&mut self, key: CompactKey, val: Value) {
+        let val_serialized_size = val.serialized_size().unwrap() as usize;
+
+        // If this page was previously zero'd in the same WalRecord, then drop the previous zero page write.  This
+        // is an optimization that avoids persisting both the zero page generated by us (e.g. during a relation extend),
+        // and the subsequent postgres-originating write
+        if self.pending_zero_data_pages.remove(&key) {
+            self.pending_bytes -= ZERO_PAGE.len();
+        }
+
+        self.pending_bytes += val_serialized_size;
+        self.pending_data_pages
+            .push((key, self.lsn, val_serialized_size, val))
+    }
+
+    fn put_metadata(&mut self, key: CompactKey, val: Value) {
+        let values = self.pending_metadata_pages.entry(key).or_default();
         // Replace the previous value if it exists at the same lsn
         if let Some((last_lsn, last_value_ser_size, last_value)) = values.last_mut() {
             if *last_lsn == self.lsn {
+                // Update the pending_bytes contribution from this entry, and update the serialized size in place
+                self.pending_bytes -= *last_value_ser_size;
                 *last_value_ser_size = val.serialized_size().unwrap() as usize;
+                self.pending_bytes += *last_value_ser_size;
+
+                // Use the latest value, this replaces any earlier write to the same (key,lsn), such as much
+                // have been generated by synthesized zero page writes prior to the first real write to a page.
                 *last_value = val;
                 return;
             }
@@ -1948,6 +2151,7 @@ impl<'a> DatadirModification<'a> {
 
 /// This struct facilitates accessing either a committed key from the timeline at a
 /// specific LSN, or the latest uncommitted key from a pending modification.
+///
 /// During WAL ingestion, the records from multiple LSNs may be batched in the same
 /// modification before being flushed to the timeline. Hence, the routines in WalIngest
 /// need to look up the keys in the modification first before looking them up in the
@@ -1987,9 +2191,19 @@ struct DbDirectory {
     dbdirs: HashMap<(Oid, Oid), bool>,
 }
 
+// The format of TwoPhaseDirectory changed in PostgreSQL v17, because the filenames of
+// pg_twophase files was expanded from 32-bit XIDs to 64-bit XIDs.  Previously, the files
+// were named like "pg_twophase/000002E5", now they're like
+// "pg_twophsae/0000000A000002E4".
+
 #[derive(Debug, Serialize, Deserialize)]
 struct TwoPhaseDirectory {
     xids: HashSet<TransactionId>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct TwoPhaseDirectoryV17 {
+    xids: HashSet<u64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]

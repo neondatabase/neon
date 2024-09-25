@@ -204,6 +204,7 @@ def test_scrubber_physical_gc_ancestors(
             # No PITR, so that as soon as child shards generate an image layer, it covers ancestor deltas
             # and makes them GC'able
             "pitr_interval": "0s",
+            "lsn_lease_length": "0s",
         },
     )
 
@@ -216,6 +217,13 @@ def test_scrubber_physical_gc_ancestors(
     workload = Workload(env, tenant_id, timeline_id)
     workload.init()
     workload.write_rows(100)
+
+    # Issue a deletion queue flush so that the parent shard can't leave behind layers
+    # that will look like unexpected garbage to the scrubber
+    for pre_split_shard in env.storage_controller.locate(tenant_id):
+        env.get_pageserver(pre_split_shard["node_id"]).http_client().deletion_queue_flush(
+            execute=True
+        )
 
     new_shard_count = 4
     assert shard_count is None or new_shard_count > shard_count
@@ -320,6 +328,10 @@ def test_scrubber_physical_gc_timeline_deletion(neon_env_builder: NeonEnvBuilder
     workload.init()
     workload.write_rows(100, upload=False)
     workload.stop()
+
+    # Issue a deletion queue flush so that the parent shard can't leave behind layers
+    # that will look like unexpected garbage to the scrubber
+    env.get_tenant_pageserver(tenant_id).http_client().deletion_queue_flush(execute=True)
 
     new_shard_count = 4
     shards = env.storage_controller.tenant_shard_split(tenant_id, shard_count=new_shard_count)

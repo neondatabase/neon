@@ -65,6 +65,8 @@ impl<T> Poison<T> {
     }
 }
 
+/// Armed pointer to a [`Poison`].
+///
 /// Use [`Self::data`] and [`Self::data_mut`] to access the wrapped state.
 /// Once modifications are done, use [`Self::disarm`].
 /// If [`Guard`] gets dropped instead of calling [`Self::disarm`], the state is poisoned

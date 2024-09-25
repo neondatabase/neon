@@ -1,13 +1,17 @@
+import os
+import time
 from abc import ABC, abstractmethod
 from contextlib import _GeneratorContextManager, contextmanager
 
 # Type-related stuff
+from pathlib import Path
 from typing import Dict, Iterator, List
 
 import pytest
 from _pytest.fixtures import FixtureRequest
 
 from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
+from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
     PgBin,
@@ -226,11 +230,11 @@ class VanillaCompare(PgCompare):
         pass  # TODO find something
 
     def report_size(self):
-        data_size = self.pg.get_subdir_size("base")
+        data_size = self.pg.get_subdir_size(Path("base"))
         self.zenbenchmark.record(
             "data_size", data_size / (1024 * 1024), "MB", report=MetricReport.LOWER_IS_BETTER
         )
-        wal_size = self.pg.get_subdir_size("pg_wal")
+        wal_size = self.pg.get_subdir_size(Path("pg_wal"))
         self.zenbenchmark.record(
             "wal_size", wal_size / (1024 * 1024), "MB", report=MetricReport.LOWER_IS_BETTER
         )
@@ -333,3 +337,26 @@ def neon_with_baseline(request: FixtureRequest) -> PgCompare:
     fixture = request.getfixturevalue(request.param)
     assert isinstance(fixture, PgCompare), f"test error: fixture {fixture} is not PgCompare"
     return fixture
+
+
+@pytest.fixture(scope="function", autouse=True)
+def sync_after_each_test():
+    # The fixture calls `sync(2)` after each test if `SYNC_AFTER_EACH_TEST` env var is `true`
+    #
+    # In CI, `SYNC_AFTER_EACH_TEST` is set to `true` only for benchmarks (`test_runner/performance`)
+    # that are run on self-hosted runners because some of these tests are pretty write-heavy
+    # and create issues to start the processes within 10s
+    key = "SYNC_AFTER_EACH_TEST"
+    enabled = os.environ.get(key) == "true"
+
+    yield
+
+    if not enabled:
+        # regress test, or running locally
+        return
+
+    start = time.time()
+    # we only run benches on unices, the method might not exist on windows
+    os.sync()
+    elapsed = time.time() - start
+    log.info(f"called sync after test {elapsed=}")

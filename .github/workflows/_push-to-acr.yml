@@ -1,0 +1,56 @@
+name: Push images to ACR
+on:
+  workflow_call:
+    inputs:
+      client_id:
+        description: Client ID of Azure managed identity or Entra app
+        required: true
+        type: string
+      image_tag:
+        description: Tag for the container image
+        required: true
+        type: string
+      images:
+        description: Images to push
+        required: true
+        type: string
+      registry_name:
+        description: Name of the container registry
+        required: true
+        type: string
+      subscription_id:
+        description: Azure subscription ID
+        required: true
+        type: string
+      tenant_id:
+        description: Azure tenant ID
+        required: true
+        type: string
+
+jobs:
+  push-to-acr:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read  # This is required for actions/checkout
+      id-token: write # This is required for Azure Login to work.
+
+    steps:
+      - name: Azure login
+        uses: azure/login@6c251865b4e6290e7b78be643ea2d005bc51f69a  # @v2.1.1
+        with:
+          client-id: ${{ inputs.client_id }}
+          subscription-id: ${{ inputs.subscription_id }}
+          tenant-id: ${{ inputs.tenant_id }}
+
+      - name: Login to ACR
+        run: |
+          az acr login --name=${{ inputs.registry_name }}
+
+      - name: Copy docker images to ACR ${{ inputs.registry_name }}
+        run: |
+          images='${{ inputs.images }}'
+          for image in ${images}; do
+            docker buildx imagetools create \
+              -t ${{ inputs.registry_name }}.azurecr.io/neondatabase/${image}:${{ inputs.image_tag }} \
+                                                        neondatabase/${image}:${{ inputs.image_tag }}
+          done

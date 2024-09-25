@@ -27,7 +27,7 @@ use crate::{
     Host,
 };
 
-use super::conn_pool::{poll_client, AuthData, Client, ConnInfo, GlobalConnPool};
+use super::conn_pool::{poll_client, Client, ConnInfo, GlobalConnPool};
 
 pub(crate) struct PoolingBackend {
     pub(crate) pool: Arc<GlobalConnPool<tokio_postgres::Client>>,
@@ -50,7 +50,9 @@ impl PoolingBackend {
             .as_ref()
             .map(|()| user_info.clone());
         let (allowed_ips, maybe_secret) = backend.get_allowed_ips_and_secret(ctx).await?;
-        if !check_peer_addr_is_in_list(&ctx.peer_addr(), &allowed_ips) {
+        if config.ip_allowlist_check_enabled
+            && !check_peer_addr_is_in_list(&ctx.peer_addr(), &allowed_ips)
+        {
             return Err(AuthError::ip_address_not_allowed(ctx.peer_addr()));
         }
         if !self
@@ -271,13 +273,6 @@ impl ConnectMechanism for TokioMechanism {
             .user(&self.conn_info.user_info.user)
             .dbname(&self.conn_info.dbname)
             .connect_timeout(timeout);
-
-        match &self.conn_info.auth {
-            AuthData::Jwt(_) => {}
-            AuthData::Password(pw) => {
-                config.password(pw);
-            }
-        }
 
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
         let res = config.connect(tokio_postgres::NoTls).await;

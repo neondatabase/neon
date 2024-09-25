@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 
@@ -57,7 +57,7 @@ pub struct NodeRegisterRequest {
     pub listen_http_addr: String,
     pub listen_http_port: u16,
 
-    pub availability_zone_id: Option<String>,
+    pub availability_zone_id: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -72,6 +72,17 @@ pub struct NodeConfigureRequest {
 pub struct TenantPolicyRequest {
     pub placement: Option<PlacementPolicy>,
     pub scheduling: Option<ShardSchedulingPolicy>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct ShardsPreferredAzsRequest {
+    #[serde(flatten)]
+    pub preferred_az_ids: HashMap<TenantShardId, String>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct ShardsPreferredAzsResponse {
+    pub updated: Vec<TenantShardId>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -99,6 +110,21 @@ pub struct TenantDescribeResponse {
     pub stripe_size: ShardStripeSize,
     pub policy: PlacementPolicy,
     pub config: TenantConfig,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct NodeShardResponse {
+    pub node_id: NodeId,
+    pub shards: Vec<NodeShard>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct NodeShard {
+    pub tenant_shard_id: TenantShardId,
+    /// Whether the shard is observed secondary on a specific node. True = yes, False = no, None = not on this node.
+    pub is_observed_secondary: Option<bool>,
+    /// Whether the shard is intended to be a secondary on a specific node. True = yes, False = no, None = not on this node.
+    pub is_intended_secondary: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -132,8 +158,12 @@ pub struct TenantDescribeResponseShard {
     pub is_splitting: bool,
 
     pub scheduling_policy: ShardSchedulingPolicy,
+
+    pub preferred_az_id: Option<String>,
 }
 
+/// Migration request for a given tenant shard to a given node.
+///
 /// Explicitly migrating a particular shard is a low level operation
 /// TODO: higher level "Reschedule tenant" operation where the request
 /// specifies some constraints, e.g. asking it to get off particular node(s)

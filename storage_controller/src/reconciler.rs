@@ -17,6 +17,7 @@ use utils::failpoint_support;
 use utils::generation::Generation;
 use utils::id::{NodeId, TimelineId};
 use utils::lsn::Lsn;
+use utils::pausable_failpoint;
 use utils::sync::gate::GateGuard;
 
 use crate::compute_hook::{ComputeHook, NotifyError};
@@ -593,6 +594,8 @@ impl Reconciler {
             notify_attempts += 1;
         }
 
+        pausable_failpoint!("reconciler-live-migrate-post-notify");
+
         // Downgrade the origin to secondary.  If the tenant's policy is PlacementPolicy::Attached(0), then
         // this location will be deleted in the general case reconciliation that runs after this.
         let origin_secondary_conf = build_location_config(
@@ -815,6 +818,16 @@ impl Reconciler {
                 return Err(ReconcileError::Cancel);
             }
             self.location_config(&node, conf, None, false).await?;
+        }
+
+        // The condition below identifies a detach. We must have no attached intent and
+        // must have been attached to something previously. Pass this information to
+        // the [`ComputeHook`] such that it can update its tenant-wide state.
+        if self.intent.attached.is_none() && !self.detach.is_empty() {
+            // TODO: Consider notifying control plane about detaches. This would avoid situations
+            // where the compute tries to start-up with a stale set of pageservers.
+            self.compute_hook
+                .handle_detach(self.tenant_shard_id, self.shard.stripe_size);
         }
 
         failpoint_support::sleep_millis_async!("sleep-on-reconcile-epilogue");

@@ -8,6 +8,8 @@ version = "0.1.0"
 description = "workspace-hack package, managed by hakari"
 # You can choose to publish this crate: see https://docs.rs/cargo-hakari/latest/cargo_hakari/publishing.
 publish = false
+edition.workspace = true
+license.workspace = true
 # The parts of the file between the BEGIN HAKARI SECTION and END HAKARI SECTION comments
 # are managed by hakari.
 
@@ -36,18 +38,21 @@ deranged = { version = "0.3", default-features = false, features = ["powerfmt", 
 digest = { version = "0.10", features = ["mac", "oid", "std"] }
 either = { version = "1" }
 fail = { version = "0.5", default-features = false, features = ["failpoints"] }
+futures = { version = "0.3" }
 futures-channel = { version = "0.3", features = ["sink"] }
 futures-executor = { version = "0.3" }
 futures-io = { version = "0.3" }
 futures-util = { version = "0.3", features = ["channel", "io", "sink"] }
 generic-array = { version = "0.14", default-features = false, features = ["more_lengths", "zeroize"] }
 getrandom = { version = "0.2", default-features = false, features = ["std"] }
+half = { version = "2", default-features = false, features = ["num-traits"] }
 hashbrown = { version = "0.14", features = ["raw"] }
 hex = { version = "0.4", features = ["serde"] }
 hmac = { version = "0.12", default-features = false, features = ["reset"] }
 hyper = { version = "0.14", features = ["full"] }
 indexmap = { version = "1", default-features = false, features = ["std"] }
-itertools = { version = "0.10" }
+itertools-5ef9efb8ec2df382 = { package = "itertools", version = "0.12", default-features = false, features = ["use_std"] }
+itertools-93f6ce9d446188ac = { package = "itertools", version = "0.10" }
 lazy_static = { version = "1", default-features = false, features = ["spin_no_std"] }
 libc = { version = "0.2", features = ["extra_traits", "use_std"] }
 log = { version = "0.4", default-features = false, features = ["std"] }
@@ -57,7 +62,7 @@ num-bigint = { version = "0.4" }
 num-integer = { version = "0.1", features = ["i128"] }
 num-traits = { version = "0.2", features = ["i128", "libm"] }
 once_cell = { version = "1" }
-parquet = { git = "https://github.com/apache/arrow-rs", branch = "master", default-features = false, features = ["zstd"] }
+parquet = { version = "53", default-features = false, features = ["zstd"] }
 prost = { version = "0.11" }
 rand = { version = "0.8", features = ["small_rng"] }
 regex = { version = "1" }
@@ -80,10 +85,13 @@ time = { version = "0.3", features = ["macros", "serde-well-known"] }
 tokio = { version = "1", features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "test-util"] }
 tokio-rustls = { version = "0.24" }
 tokio-util = { version = "0.7", features = ["codec", "compat", "io", "rt"] }
+toml_edit = { version = "0.22", features = ["serde"] }
 tonic = { version = "0.9", features = ["tls-roots"] }
 tower = { version = "0.4", default-features = false, features = ["balance", "buffer", "limit", "log", "timeout", "util"] }
 tracing = { version = "0.1", features = ["log"] }
 tracing-core = { version = "0.1" }
+tracing-log = { version = "0.1", default-features = false, features = ["log-tracer", "std"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt", "json", "smallvec", "tracing-log"] }
 url = { version = "2", features = ["serde"] }
 uuid = { version = "1", features = ["serde", "v4", "v7"] }
 zeroize = { version = "1", features = ["derive", "serde"] }
@@ -99,9 +107,11 @@ cc = { version = "1", default-features = false, features = ["parallel"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "wasmbind"] }
 either = { version = "1" }
 getrandom = { version = "0.2", default-features = false, features = ["std"] }
+half = { version = "2", default-features = false, features = ["num-traits"] }
 hashbrown = { version = "0.14", features = ["raw"] }
 indexmap = { version = "1", default-features = false, features = ["std"] }
-itertools = { version = "0.10" }
+itertools-5ef9efb8ec2df382 = { package = "itertools", version = "0.12", default-features = false, features = ["use_std"] }
+itertools-93f6ce9d446188ac = { package = "itertools", version = "0.10" }
 lazy_static = { version = "1", default-features = false, features = ["spin_no_std"] }
 libc = { version = "0.2", features = ["extra_traits", "use_std"] }
 log = { version = "0.4", default-features = false, features = ["std"] }
@@ -111,7 +121,7 @@ num-bigint = { version = "0.4" }
 num-integer = { version = "0.1", features = ["i128"] }
 num-traits = { version = "0.2", features = ["i128", "libm"] }
 once_cell = { version = "1" }
-parquet = { git = "https://github.com/apache/arrow-rs", branch = "master", default-features = false, features = ["zstd"] }
+parquet = { version = "53", default-features = false, features = ["zstd"] }
 proc-macro2 = { version = "1" }
 prost = { version = "0.11" }
 quote = { version = "1" }
@@ -122,6 +132,7 @@ serde = { version = "1", features = ["alloc", "derive"] }
 syn-dff4ba8e3ae991db = { package = "syn", version = "1", features = ["extra-traits", "full", "visit"] }
 syn-f595c2ba2a3f28df = { package = "syn", version = "2", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
 time-macros = { version = "0.2", default-features = false, features = ["formatting", "parsing", "serde"] }
+toml_edit = { version = "0.22", features = ["serde"] }
 zstd = { version = "0.13" }
 zstd-safe = { version = "7", default-features = false, features = ["arrays", "legacy", "std", "zdict_builder"] }
 zstd-sys = { version = "2", default-features = false, features = ["legacy", "std", "zdict_builder"] }

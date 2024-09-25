@@ -5,6 +5,7 @@
 use std::env;
 use std::env::{var, VarError};
 use std::io::Read;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -36,6 +37,7 @@ use pageserver::{
     virtual_file,
 };
 use postgres_backend::AuthType;
+use utils::crashsafe::syncfs;
 use utils::failpoint_support;
 use utils::logging::TracingErrorLayerEnablement;
 use utils::{
@@ -124,7 +126,6 @@ fn main() -> anyhow::Result<()> {
     // after setting up logging, log the effective IO engine choice and read path implementations
     info!(?conf.virtual_file_io_engine, "starting with virtual_file IO engine");
     info!(?conf.virtual_file_direct_io, "starting with virtual_file Direct IO settings");
-    info!(?conf.compact_level0_phase1_value_access, "starting with setting for compact_level0_phase1_value_access");
     info!(?conf.io_buffer_alignment, "starting with setting for IO buffer alignment");
 
     // The tenants directory contains all the pageserver local disk state.
@@ -155,23 +156,7 @@ fn main() -> anyhow::Result<()> {
         };
 
         let started = Instant::now();
-        // Linux guarantees durability for syncfs.
-        // POSIX doesn't have syncfs, and further does not actually guarantee durability of sync().
-        #[cfg(target_os = "linux")]
-        {
-            use std::os::fd::AsRawFd;
-            nix::unistd::syncfs(dirfd.as_raw_fd()).context("syncfs")?;
-        }
-        #[cfg(target_os = "macos")]
-        {
-            // macOS is not a production platform for Neon, don't even bother.
-            drop(dirfd);
-        }
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-        {
-            compile_error!("Unsupported OS");
-        }
-
+        syncfs(dirfd)?;
         let elapsed = started.elapsed();
         info!(
             elapsed_ms = elapsed.as_millis(),
@@ -223,27 +208,15 @@ fn initialize_config(
         }
     };
 
-    let config: toml_edit::Document = match std::fs::File::open(cfg_file_path) {
-        Ok(mut f) => {
-            let md = f.metadata().context("stat config file")?;
-            if md.is_file() {
-                let mut s = String::new();
-                f.read_to_string(&mut s).context("read config file")?;
-                s.parse().context("parse config file toml")?
-            } else {
-                anyhow::bail!("directory entry exists but is not a file: {cfg_file_path}");
-            }
-        }
-        Err(e) => {
-            anyhow::bail!("open pageserver config: {e}: {cfg_file_path}");
-        }
-    };
-
-    debug!("Using pageserver toml: {config}");
-
-    // Construct the runtime representation
-    let conf = PageServerConf::parse_and_validate(identity.id, &config, workdir)
-        .context("Failed to parse pageserver configuration")?;
+    let config_file_contents =
+        std::fs::read_to_string(cfg_file_path).context("read config file from filesystem")?;
+    let config_toml = serde_path_to_error::deserialize(
+        toml_edit::de::Deserializer::from_str(&config_file_contents)
+            .context("build toml deserializer")?,
+    )
+    .context("deserialize config toml")?;
+    let conf = PageServerConf::parse_and_validate(identity.id, config_toml, workdir)
+        .context("runtime-validation of config toml")?;
 
     Ok(Box::leak(Box::new(conf)))
 }

@@ -74,7 +74,7 @@ def test_metric_collection(
     env.pageserver.allowed_errors.extend(
         [
             ".*metrics endpoint refused the sent metrics*",
-            ".*metrics_collection: failed to upload to S3: Failed to upload data of length .* to storage path.*",
+            ".*metrics_collection: failed to upload to remote storage: Failed to upload data of length .* to storage path.*",
         ]
     )
 
