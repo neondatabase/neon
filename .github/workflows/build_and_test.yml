@@ -610,13 +610,13 @@ jobs:
           # images, as that reduces the support burden of old and ancient
           # distros.
           - pg: v14
-            debian: bullseye-slim
+            debian: bullseye
           - pg: v15
-            debian: bullseye-slim
+            debian: bullseye
           - pg: v16
-            debian: bullseye-slim
+            debian: bullseye
           - pg: v17
-            debian: bookworm-slim
+            debian: bookworm
         arch: [ x64, arm64 ]
 
     runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
@@ -662,15 +662,15 @@ jobs:
             PG_VERSION=${{ matrix.version.pg }}
             BUILD_TAG=${{ needs.tag.outputs.build-tag }}
             TAG=${{ needs.build-build-tools-image.outputs.image-tag }}
-            DEBIAN_FLAVOR=${{ matrix.version.debian }}
+            DEBIAN_VERSION=${{ matrix.version.debian }}
           provenance: false
           push: true
           pull: true
           file: compute/Dockerfile.compute-node
-          cache-from: type=registry,ref=cache.neon.build/compute-node-${{ matrix.version.pg }}:cache-bullseye-${{ matrix.arch }}
-          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/compute-node-{0}:cache-{1}-{2},mode=max', matrix.version.pg, 'bullseye', matrix.arch) || '' }}
+          cache-from: type=registry,ref=cache.neon.build/compute-node-${{ matrix.version.pg }}:cache-${{ matrix.version.debian }}-${{ matrix.arch }}
+          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/compute-node-{0}:cache-{1}-{2},mode=max', matrix.version.pg, matrix.version.debian, matrix.arch) || '' }}
           tags: |
-            neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}-bullseye-${{ matrix.arch }}
+            neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}-${{ matrix.version.debian }}-${{ matrix.arch }}
 
       - name: Build neon extensions test image
         if: matrix.version.pg == 'v16'
@@ -682,16 +682,16 @@ jobs:
             PG_VERSION=${{ matrix.version.pg }}
             BUILD_TAG=${{ needs.tag.outputs.build-tag }}
             TAG=${{ needs.build-build-tools-image.outputs.image-tag }}
-            DEBIAN_FLAVOR=${{ matrix.version.debian }}
+            DEBIAN_VERSION=${{ matrix.version.debian }}
           provenance: false
           push: true
           pull: true
           file: compute/Dockerfile.compute-node
           target: neon-pg-ext-test
-          cache-from: type=registry,ref=cache.neon.build/neon-test-extensions-${{ matrix.version.pg }}:cache-bullseye-${{ matrix.arch }}
-          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/neon-test-extensions-{0}:cache-{1}-{2},mode=max', matrix.version.pg, 'bullseye', matrix.arch) || '' }}
+          cache-from: type=registry,ref=cache.neon.build/neon-test-extensions-${{ matrix.version.pg }}:cache-${{ matrix.version.debian }}-${{ matrix.arch }}
+          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/neon-test-extensions-{0}:cache-{1}-{2},mode=max', matrix.version.pg, matrix.version.debian, matrix.arch) || '' }}
           tags: |
-            neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{needs.tag.outputs.build-tag}}-bullseye-${{ matrix.arch }}
+            neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{needs.tag.outputs.build-tag}}-${{ matrix.version.debian }}-${{ matrix.arch }}
 
       - name: Build compute-tools image
         # compute-tools are Postgres independent, so build it only once
@@ -707,15 +707,15 @@ jobs:
             GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
             BUILD_TAG=${{ needs.tag.outputs.build-tag }}
             TAG=${{ needs.build-build-tools-image.outputs.image-tag }}
-            DEBIAN_FLAVOR=${{ matrix.version.debian }}
+            DEBIAN_VERSION=${{ matrix.version.debian }}
           provenance: false
           push: true
           pull: true
           file: compute/Dockerfile.compute-node
-          cache-from: type=registry,ref=cache.neon.build/neon-test-extensions-${{ matrix.version.pg }}:cache-bullseye-${{ matrix.arch }}
-          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/compute-tools-{0}:cache-{1}-{2},mode=max', matrix.version.pg, 'bullseye', matrix.arch) || '' }}
+          cache-from: type=registry,ref=cache.neon.build/neon-test-extensions-${{ matrix.version.pg }}:cache-${{ matrix.version.debian }}-${{ matrix.arch }}
+          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/compute-tools-{0}:cache-{1}-{2},mode=max', matrix.version.pg, matrix.version.debian, matrix.arch) || '' }}
           tags: |
-            neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}-bullseye-${{ matrix.arch }}
+            neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}-${{ matrix.version.debian }}-${{ matrix.arch }}
 
   compute-node-image:
     needs: [ compute-node-image-arch, tag ]
@@ -723,7 +723,20 @@ jobs:
 
     strategy:
       matrix:
-        version: [ v14, v15, v16, v17 ]
+        version:
+          # Much data was already generated on old PG versions with bullseye's
+          # libraries, the locales of which can cause data incompatibilities.
+          # However, new PG versions should check if they can be built on newer
+          # images, as that reduces the support burden of old and ancient
+          # distros.
+          - pg: v14
+            debian: bullseye
+          - pg: v15
+            debian: bullseye
+          - pg: v16
+            debian: bullseye
+          - pg: v17
+            debian: bookworm
 
     steps:
       - uses: docker/login-action@v3
@@ -733,26 +746,26 @@ jobs:
 
       - name: Create multi-arch compute-node image
         run: |
-          docker buildx imagetools create -t neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }} \
-                                          -t neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}-bullseye \
-                                             neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}-bullseye-x64 \
-                                             neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}-bullseye-arm64
+          docker buildx imagetools create -t neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }} \
+                                          -t neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}-${{ matrix.version.debian }} \
+                                             neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}-${{ matrix.version.debian }}-x64 \
+                                             neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}-${{ matrix.version.debian }}-arm64
 
       - name: Create multi-arch neon-test-extensions image
-        if: matrix.version == 'v16'
+        if: matrix.version.pg == 'v16'
         run: |
-          docker buildx imagetools create -t neondatabase/neon-test-extensions-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }} \
-                                          -t neondatabase/neon-test-extensions-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}-bullseye \
-                                             neondatabase/neon-test-extensions-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}-bullseye-x64 \
-                                             neondatabase/neon-test-extensions-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}-bullseye-arm64
+          docker buildx imagetools create -t neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }} \
+                                          -t neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}-${{ matrix.version.debian }} \
+                                             neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}-${{ matrix.version.debian }}-x64 \
+                                             neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}-${{ matrix.version.debian }}-arm64
 
       - name: Create multi-arch compute-tools image
-        if: matrix.version == 'v17'
+        if: matrix.version.pg == 'v16'
         run: |
           docker buildx imagetools create -t neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }} \
-                                          -t neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}-bullseye \
-                                             neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}-bullseye-x64 \
-                                             neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}-bullseye-arm64
+                                          -t neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}-${{ matrix.version.debian }} \
+                                             neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}-${{ matrix.version.debian }}-x64 \
+                                             neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}-${{ matrix.version.debian }}-arm64
 
       - uses: docker/login-action@v3
         with:
@@ -760,13 +773,13 @@ jobs:
           username: ${{ secrets.AWS_ACCESS_KEY_DEV }}
           password: ${{ secrets.AWS_SECRET_KEY_DEV }}
 
-      - name: Push multi-arch compute-node-${{ matrix.version }} image to ECR
+      - name: Push multi-arch compute-node-${{ matrix.version.pg }} image to ECR
         run: |
-          docker buildx imagetools create -t 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }} \
-                                                                                neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}
+          docker buildx imagetools create -t 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }} \
+                                                                                neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}
 
       - name: Push multi-arch compute-tools image to ECR
-        if: matrix.version == 'v17'
+        if: matrix.version.pg == 'v16'
         run: |
           docker buildx imagetools create -t 369495373322.dkr.ecr.eu-central-1.amazonaws.com/compute-tools:${{ needs.tag.outputs.build-tag }} \
                                                                                 neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}
