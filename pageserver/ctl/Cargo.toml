@@ -10,7 +10,6 @@ license.workspace = true
 anyhow.workspace = true
 camino.workspace = true
 clap = { workspace = true, features = ["string"] }
-git-version.workspace = true
 humantime.workspace = true
 pageserver = { path = ".." }
 pageserver_api.workspace = true
