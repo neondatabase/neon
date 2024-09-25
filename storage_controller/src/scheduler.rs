@@ -319,7 +319,6 @@ impl Default for ScheduleMode {
 
 // For carrying state between multiple calls to [`TenantShard::schedule`], e.g. when calling
 // it for many shards in the same tenant.
-// TODO: it would be nice if we could make this shard specific at the type level somehow
 #[derive(Debug, Default)]
 pub(crate) struct ScheduleContext {
     /// Sparse map of nodes: omitting a node implicitly makes its affinity [`AffinityScore::FREE`]
