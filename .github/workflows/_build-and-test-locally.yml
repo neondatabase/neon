@@ -259,7 +259,13 @@ jobs:
       - name: Install postgres binaries
         run: |
           # Use tar to copy files matching the pattern, preserving the paths in the destionation
-          tar cv pg_install/v* pg_install/build/*/src/test/regress/*.so | tar  xv -C /tmp/neon
+          tar c \
+            pg_install/v* \
+            pg_install/build/*/src/test/regress/*.so \
+            pg_install/build/*/src/test/regress/pg_regress \
+            pg_install/build/v17/src/test/isolation/isolationtester \
+            pg_install/build/v17/src/test/isolation/pg_isolation_regress \
+            | tar  x -C /tmp/neon
 
       - name: Upload Neon artifact
         uses: ./.github/actions/upload
