@@ -3,13 +3,15 @@ ARG REPOSITORY=neondatabase
 ARG IMAGE=build-tools
 ARG TAG=pinned
 ARG BUILD_TAG
+ARG DEBIAN_FLAVOR=bullseye-slim
 
 #########################################################################################
 #
 # Layer "build-deps"
 #
 #########################################################################################
-FROM debian:bullseye-slim AS build-deps
+FROM debian:$DEBIAN_FLAVOR AS build-deps
+ARG DEBIAN_FLAVOR
 RUN apt update &&  \
     apt install -y git autoconf automake libtool build-essential bison flex libreadline-dev \
     zlib1g-dev libxml2-dev libcurl4-openssl-dev libossp-uuid-dev wget pkg-config libssl-dev \
@@ -1027,7 +1029,8 @@ RUN cd compute_tools && mold -run cargo build --locked --profile release-line-de
 #
 #########################################################################################
 
-FROM debian:bullseye-slim AS compute-tools-image
+FROM debian:$DEBIAN_FLAVOR AS compute-tools-image
+ARG DEBIAN_FLAVOR
 
 COPY --from=compute-tools /home/nonroot/target/release-line-debug-size-lto/compute_ctl /usr/local/bin/compute_ctl
 
@@ -1037,7 +1040,8 @@ COPY --from=compute-tools /home/nonroot/target/release-line-debug-size-lto/compu
 #
 #########################################################################################
 
-FROM debian:bullseye-slim AS pgbouncer
+FROM debian:$DEBIAN_FLAVOR AS pgbouncer
+ARG DEBIAN_FLAVOR
 RUN set -e \
     && apt-get update \
     && apt-get install -y \
@@ -1179,7 +1183,9 @@ ENV PGDATABASE=postgres
 # Put it all together into the final image
 #
 #########################################################################################
-FROM debian:bullseye-slim
+FROM debian:$DEBIAN_FLAVOR
+ARG DEBIAN_FLAVOR
+ENV DEBIAN_FLAVOR=$DEBIAN_FLAVOR
 # Add user postgres
 RUN mkdir /var/db && useradd -m -d /var/db/postgres postgres && \
     echo "postgres:test_console_pass" | chpasswd && \
@@ -1211,21 +1217,34 @@ COPY --chmod=0644 compute/etc/neon_collector_autoscaling.yml /etc/neon_collector
 # Create remote extension download directory
 RUN mkdir /usr/local/download_extensions && chown -R postgres:postgres /usr/local/download_extensions
 
-
 # Install:
 # libreadline8 for psql
-# libicu67, locales for collations (including ICU and plpgsql_check)
 # liblz4-1 for lz4
 # libossp-uuid16 for extension ossp-uuid
-# libgeos, libgdal, libsfcgal1, libproj and libprotobuf-c1 for PostGIS
+# libgeos, libsfcgal1, and libprotobuf-c1 for PostGIS
 # libxml2, libxslt1.1 for xml2
 # libzstd1 for zstd
 # libboost* for rdkit
 # ca-certificates for communicating with s3 by compute_ctl
-RUN apt update &&  \
+
+
+RUN apt update && \
+    case $DEBIAN_FLAVOR in \
+      # Version-specific installs for Bullseye (PG14-PG16):
+      # libicu67, locales for collations (including ICU and plpgsql_check)
+      # libgdal28, libproj19 for PostGIS
+      bullseye*) \
+        VERSION_INSTALLS="libicu67 libgdal28 libproj19"; \
+      ;; \
+      # Version-specific installs for Bookworm (PG17):
+      # libicu72, locales for collations (including ICU and plpgsql_check)
+      # libgdal32, libproj25 for PostGIS
+      bookworm*) \
+        VERSION_INSTALLS="libicu72 libgdal32 libproj25"; \
+      ;; \
+    esac && \
     apt install --no-install-recommends -y \
         gdb \
-        libicu67 \
         liblz4-1 \
         libreadline8 \
         libboost-iostreams1.74.0 \
@@ -1234,8 +1253,6 @@ RUN apt update &&  \
         libboost-system1.74.0 \
         libossp-uuid16 \
         libgeos-c1v5 \
-        libgdal28 \
-        libproj19 \
         libprotobuf-c1 \
         libsfcgal1 \
         libxml2 \
@@ -1244,7 +1261,8 @@ RUN apt update &&  \
         libcurl4-openssl-dev \
         locales \
         procps \
-        ca-certificates && \
+        ca-certificates \
+        $VERSION_INSTALLS && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* && \
     localedef -i en_US -c -f UTF-8 -A /usr/share/locale/locale.alias en_US.UTF-8
 
