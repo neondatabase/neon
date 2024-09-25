@@ -6,6 +6,7 @@ on:
       - main
       - release
       - release-proxy
+      - bayandin/test
   pull_request:
 
 defaults:
@@ -27,7 +28,7 @@ env:
 
 jobs:
   check-permissions:
-    if: ${{ !contains(github.event.pull_request.labels.*.name, 'run-no-ci') }}
+    if: false
     uses: ./.github/workflows/check-permissions.yml
     with:
       github-event-name: ${{ github.event_name }}
@@ -78,7 +79,6 @@ jobs:
         id: build-tag
 
   check-build-tools-image:
-    needs: [ check-permissions ]
     uses: ./.github/workflows/check-build-tools-image.yml
 
   build-build-tools-image:

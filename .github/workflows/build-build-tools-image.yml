@@ -36,7 +36,7 @@ jobs:
 
     strategy:
       matrix:
-        arch: [ x64, arm64 ]
+        arch: [ x64 ]
 
     runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
 
@@ -79,7 +79,9 @@ jobs:
           push: true
           pull: true
           file: Dockerfile.build-tools
-          cache-from: type=registry,ref=cache.neon.build/build-tools:cache-${{ matrix.arch }}
+          cache-from: |
+            type=registry,ref=cache.neon.build/build-tools:cache-${{ matrix.arch }}
+            type=registry,ref=cache.neon.build/build-tools:cache-${{ matrix.arch }}-does-not-exist
           cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/build-tools:cache-{0},mode=max', matrix.arch) || '' }}
           tags: neondatabase/build-tools:${{ inputs.image-tag }}-${{ matrix.arch }}
 

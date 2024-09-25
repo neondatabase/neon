@@ -33,7 +33,7 @@ jobs:
           IMAGE_TAG: |
             ${{ hashFiles('Dockerfile.build-tools',
                           '.github/workflows/check-build-tools-image.yml',
-                          '.github/workflows/build-build-tools-image.yml') }}
+                          '.github/workflows/build-build-tools-image.yml') }}-test
         run: |
           echo "image-tag=${IMAGE_TAG}" | tee -a $GITHUB_OUTPUT
 
