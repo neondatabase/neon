@@ -463,7 +463,7 @@ impl Reconciler {
             for (timeline_id, baseline_lsn) in &baseline {
                 match latest.get(timeline_id) {
                     Some(latest_lsn) => {
-                        tracing::info!("🕑 LSN origin {baseline_lsn} vs destination {latest_lsn}");
+                        tracing::info!(timeline_id = %timeline_id, "🕑 LSN origin {baseline_lsn} vs destination {latest_lsn}");
                         if latest_lsn < baseline_lsn {
                             any_behind = true;
                         }
