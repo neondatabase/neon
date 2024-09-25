@@ -3,6 +3,7 @@
 use core::slice;
 use std::{
     alloc::{self, Layout},
+    cmp,
     mem::{ManuallyDrop, MaybeUninit},
     ops::{Deref, DerefMut},
     ptr::NonNull,
@@ -12,6 +13,7 @@ use bytes::buf::UninitSlice;
 
 struct IoBufferPtr(*mut u8);
 
+// SAFETY: We gurantees no one besides `IoBufferPtr` itself has the raw pointer.
 unsafe impl Send for IoBufferPtr {}
 
 /// An aligned buffer type used for I/O.
@@ -108,6 +110,7 @@ impl IoBufferMut {
     /// Equivalent to `&s[..]`.
     #[inline]
     fn as_slice(&self) -> &[u8] {
+        // SAFETY: The pointer is valid and `len` bytes are initialized.
         unsafe { slice::from_raw_parts(self.as_ptr(), self.len) }
     }
 
@@ -115,6 +118,7 @@ impl IoBufferMut {
     ///
     /// Equivalent to `&mut s[..]`.
     fn as_mut_slice(&mut self) -> &mut [u8] {
+        // SAFETY: The pointer is valid and `len` bytes are initialized.
         unsafe { slice::from_raw_parts_mut(self.as_mut_ptr(), self.len) }
     }
 
@@ -123,6 +127,71 @@ impl IoBufferMut {
     pub fn clear(&mut self) {
         self.len = 0;
     }
+
+    /// Reserves capacity for at least `additional` more bytes to be inserted
+    /// in the given `IoBufferMut`. The collection may reserve more space to
+    /// speculatively avoid frequent reallocations. After calling `reserve`,
+    /// capacity will be greater than or equal to `self.len() + additional`.
+    /// Does nothing if capacity is already sufficient.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the new capacity exceeds `isize::MAX` _bytes_.
+    pub fn reserve(&mut self, additional: usize) {
+        if additional > self.capacity() - self.len() {
+            self.reserve_inner(additional);
+        }
+    }
+
+    fn reserve_inner(&mut self, additional: usize) {
+        let Some(required_cap) = self.len().checked_add(additional) else {
+            capacity_overflow()
+        };
+
+        let old_capacity = self.capacity();
+        let align = self.align();
+        // This guarantees exponential growth. The doubling cannot overflow
+        // because `cap <= isize::MAX` and the type of `cap` is `usize`.
+        let cap = cmp::max(old_capacity * 2, required_cap);
+
+        if !is_valid_alloc(cap) {
+            capacity_overflow()
+        }
+        let new_layout = Layout::from_size_align(cap, self.align()).expect("Invalid layout");
+
+        let old_ptr = self.as_mut_ptr();
+
+        // SAFETY: old allocation was allocated with std::alloc::alloc with the same layout,
+        // and we panics on null pointer.
+        let (ptr, cap) = unsafe {
+            let old_layout = Layout::from_size_align_unchecked(old_capacity, align);
+            let ptr = alloc::realloc(old_ptr, old_layout, new_layout.size());
+            if ptr.is_null() {
+                alloc::handle_alloc_error(new_layout);
+            }
+            (IoBufferPtr(ptr), cap)
+        };
+
+        self.ptr = ptr;
+        self.capacity = cap;
+    }
+}
+
+fn capacity_overflow() -> ! {
+    panic!("capacity overflow")
+}
+
+// We need to guarantee the following:
+// * We don't ever allocate `> isize::MAX` byte-size objects.
+// * We don't overflow `usize::MAX` and actually allocate too little.
+//
+// On 64-bit we just need to check for overflow since trying to allocate
+// `> isize::MAX` bytes will surely fail. On 32-bit and 16-bit we need to add
+// an extra guard for this in case we're running on a platform which can use
+// all 4GB in user-space, e.g., PAE or x32.
+#[inline]
+fn is_valid_alloc(alloc_size: usize) -> bool {
+    !(usize::BITS < 64 && alloc_size > isize::MAX as usize)
 }
 
 impl Drop for IoBufferMut {
@@ -243,6 +312,25 @@ mod tests {
         assert_eq!(v.capacity(), ALIGN / 2);
         assert_eq!(v.align(), ALIGN);
         assert_eq!(v.as_ptr().align_offset(ALIGN), 0);
+    }
+
+    #[test]
+    fn test_reserve() {
+        use bytes::BufMut;
+        const ALIGN: usize = 4 * 1024;
+        let mut v = IoBufferMut::with_capacity_aligned(ALIGN, ALIGN);
+        let capacity = v.capacity();
+        v.reserve(capacity);
+        assert_eq!(v.capacity(), capacity);
+        let data = [b'a'; ALIGN];
+        v.put(&data[..]);
+        v.reserve(capacity);
+        assert!(v.capacity() >= capacity * 2);
+        assert_eq!(&v[..], &data[..]);
+        let capacity = v.capacity();
+        v.clear();
+        v.reserve(capacity);
+        assert_eq!(capacity, v.capacity());
     }
 
     #[test]
