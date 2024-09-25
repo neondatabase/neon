@@ -2553,7 +2553,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         desired_availability: Optional[PageserverAvailability],
         desired_scheduling_policy: Optional[PageserverSchedulingPolicy],
         max_attempts: int,
-        backoff: int,
+        backoff: float,
     ):
         """
         Poll the node status until it reaches 'desired_scheduling_policy' and 'desired_availability'
@@ -2948,7 +2948,7 @@ class NeonPageserver(PgProtocol, LogUtils):
             self.id
         ):
             self.env.storage_controller.poll_node_status(
-                self.id, PageserverAvailability.ACTIVE, None, max_attempts=20, backoff=1
+                self.id, PageserverAvailability.ACTIVE, None, max_attempts=200, backoff=0.1
             )
 
         return self
@@ -4617,7 +4617,8 @@ class StorageScrubber:
             "REGION": s3_storage.bucket_region,
             "BUCKET": s3_storage.bucket_name,
             "BUCKET_PREFIX": s3_storage.prefix_in_bucket,
-            "RUST_LOG": "DEBUG",
+            "RUST_LOG": "INFO",
+            "PAGESERVER_DISABLE_FILE_LOGGING": "1",
         }
         env.update(s3_storage.access_env_vars())
 
@@ -4637,10 +4638,8 @@ class StorageScrubber:
         (output_path, stdout, status_code) = subprocess_capture(
             self.log_dir,
             args,
-            echo_stderr=True,
-            echo_stdout=True,
             env=env,
-            check=False,
+            check=True,
             capture_stdout=True,
             timeout=timeout,
         )

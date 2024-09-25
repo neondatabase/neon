@@ -105,7 +105,7 @@ extern neon_per_backend_counters *neon_per_backend_counters_shared;
 extern void inc_getpage_wait(uint64 latency);
 
 extern Size NeonPerfCountersShmemSize(void);
-extern bool NeonPerfCountersShmemInit(void);
+extern void NeonPerfCountersShmemInit(void);
 
 
 #endif							/* NEON_PERF_COUNTERS_H */

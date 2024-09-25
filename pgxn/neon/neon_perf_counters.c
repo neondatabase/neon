@@ -32,7 +32,7 @@ NeonPerfCountersShmemSize(void)
 	return size;
 }
 
-bool
+void
 NeonPerfCountersShmemInit(void)
 {
 	bool		found;

@@ -92,6 +92,10 @@ pub mod toml_edit_ext;
 
 pub mod circuit_breaker;
 
+// Re-export used in macro. Avoids adding git-version as dep in target crates.
+#[doc(hidden)]
+pub use git_version;
+
 /// This is a shortcut to embed git sha into binaries and avoid copying the same build script to all packages
 ///
 /// we have several cases:
@@ -131,7 +135,7 @@ macro_rules! project_git_version {
     ($const_identifier:ident) => {
         // this should try GIT_VERSION first only then git_version::git_version!
         const $const_identifier: &::core::primitive::str = {
-            const __COMMIT_FROM_GIT: &::core::primitive::str = git_version::git_version! {
+            const __COMMIT_FROM_GIT: &::core::primitive::str = $crate::git_version::git_version! {
                 prefix = "",
                 fallback = "unknown",
                 args = ["--abbrev=40", "--always", "--dirty=-modified"] // always use full sha

@@ -346,7 +346,14 @@ impl StorageController {
             let pg_log_path = pg_data_path.join("postgres.log");
 
             if !tokio::fs::try_exists(&pg_data_path).await? {
-                let initdb_args = ["-D", pg_data_path.as_ref(), "--username", &username()];
+                let initdb_args = [
+                    "-D",
+                    pg_data_path.as_ref(),
+                    "--username",
+                    &username(),
+                    "--no-sync",
+                    "--no-instructions",
+                ];
                 tracing::info!(
                     "Initializing storage controller database with args: {:?}",
                     initdb_args
