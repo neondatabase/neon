@@ -1,13 +1,15 @@
 //! This module implements Timeline lifecycle management and has all necessary code
 //! to glue together SafeKeeper and all other background services.
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use camino::Utf8PathBuf;
 use remote_storage::RemotePath;
 use safekeeper_api::models::TimelineTermBumpResponse;
 use serde::{Deserialize, Serialize};
-use tokio::fs::{self};
+use tokio::fs::{self, File};
+use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
+use utils::crashsafe::{durable_rename, fsync_async_opt};
 use utils::id::TenantId;
 
 use std::cmp::max;
@@ -27,6 +29,8 @@ use utils::{
 use storage_broker::proto::SafekeeperTimelineInfo;
 use storage_broker::proto::TenantTimelineId as ProtoTenantTimelineId;
 
+use crate::control_file::{ CONTROL_FILE_NAME};
+use crate::pull_timeline::create_temp_timeline_dir;
 use crate::rate_limit::RateLimiter;
 use crate::receive_wal::WalReceivers;
 use crate::safekeeper::{
@@ -614,23 +618,49 @@ impl Timeline {
             }
         }
 
-        // Create timeline directory.
-        fs::create_dir_all(&self.timeline_dir).await?;
+        // Create a temporary timeline directory
+        let (_tmp_dir, tli_dir_path) = create_temp_timeline_dir(conf, self.ttid).await?;
+
+        // Init the control file
+        let init_control_file = async {
+            let guard = shared_state.sk.state_mut();
+            let path = tli_dir_path.join(CONTROL_FILE_NAME);
+            let buf = guard.write_to_buf()?;
+            let mut control_file = File::create(&path)
+                .await
+                .with_context(|| format!("failed to create init control file at: {}", path))?;
+            control_file.write_all(&buf).await.with_context(|| {
+                format!(
+                    "failed to write safekeeper state into control file at: {}",
+                    path
+                )
+            })?;
+            control_file.flush().await.with_context(|| {
+                format!(
+                    "failed to flush safekeeper state into control file at: {}",
+                    path
+                )
+            })?;
+            drop(control_file);
+            Ok(())
+        };
 
         // Write timeline to disk and start background tasks.
-        if let Err(e) = shared_state.sk.state_mut().flush().await {
+        if let Err(e) = init_control_file.await {
             // Bootstrap failed, cancel timeline and remove timeline directory.
             self.cancel(shared_state);
-
-            if let Err(fs_err) = fs::remove_dir_all(&self.timeline_dir).await {
-                warn!(
-                    "failed to remove timeline {} directory after bootstrap failure: {}",
-                    self.ttid, fs_err
-                );
-            }
-
             return Err(e);
         }
+
+        info!(
+            "moving timeline {} from {} to {}",
+            self.ttid, tli_dir_path, self.timeline_dir
+        );
+        tokio::fs::create_dir_all(&self.timeline_dir).await?;
+        // fsync tenant dir creation
+        fsync_async_opt(&conf.workdir, !conf.no_sync).await?;
+        durable_rename(&tli_dir_path, &self.timeline_dir, !conf.no_sync).await?;
+
         self.bootstrap(conf, broker_active_set, partial_backup_rate_limiter);
         Ok(())
     }
