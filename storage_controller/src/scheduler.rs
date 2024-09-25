@@ -65,18 +65,84 @@ impl ShardTag for SecondaryShardTag {
     type Score = NodeSecondarySchedulingScore;
 }
 
+#[derive(PartialEq, Eq, Debug, Clone, Copy)]
+enum AzMatch {
+    Yes,
+    No,
+    Unknown,
+}
+
+impl AzMatch {
+    fn new(node_az: &AvailabilityZone, shard_preferred_az: Option<&AvailabilityZone>) -> Self {
+        match shard_preferred_az {
+            Some(preferred_az) if preferred_az == node_az => Self::Yes,
+            Some(_preferred_az) => Self::No,
+            None => Self::Unknown,
+        }
+    }
+}
+
+#[derive(PartialEq, Eq, Debug, Clone, Copy)]
+struct AttachmentAzMatch(AzMatch);
+
+impl Ord for AttachmentAzMatch {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Lower scores indicate a more suitable node.
+        // Note that we prefer a node for which we don't have
+        // info to a node which we are certain doesn't match the
+        // preferred AZ of the shard.
+        let az_match_score = |az_match: &AzMatch| match az_match {
+            AzMatch::Yes => 0,
+            AzMatch::Unknown => 1,
+            AzMatch::No => 2,
+        };
+
+        az_match_score(&self.0).cmp(&az_match_score(&other.0))
+    }
+}
+
+impl PartialOrd for AttachmentAzMatch {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+#[derive(PartialEq, Eq, Debug, Clone, Copy)]
+struct SecondaryAzMatch(AzMatch);
+
+impl Ord for SecondaryAzMatch {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Lower scores indicate a more suitable node.
+        // For secondary locations we wish to avoid the preferred AZ
+        // of the shard.
+        let az_match_score = |az_match: &AzMatch| match az_match {
+            AzMatch::No => 0,
+            AzMatch::Unknown => 1,
+            AzMatch::Yes => 2,
+        };
+
+        az_match_score(&self.0).cmp(&az_match_score(&other.0))
+    }
+}
+
+impl PartialOrd for SecondaryAzMatch {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 /// Scheduling score of a given node for shard attachments.
 /// Lower scores indicate more suitable nodes.
 /// Ordering is given by member declaration order (top to bottom).
-#[derive(Debug, Eq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 pub(crate) struct NodeAttachmentSchedulingScore {
     /// The number of shards belonging to the tenant currently being
     /// scheduled that are attached to this node.
     affinity_score: AffinityScore,
-    /// Optional flag indicating whether this node matches the preferred AZ
+    /// Flag indicating whether this node matches the preferred AZ
     /// of the shard. For equal affinity scores, nodes in the matching AZ
     /// are considered first.
-    az_match: Option<bool>,
+    az_match: AttachmentAzMatch,
     /// Size of [`ScheduleContext::attached_nodes`] for the current node.
     /// This normally tracks the number of attached shards belonging to the
     /// tenant being scheduled that are already on this node.
@@ -88,51 +154,6 @@ pub(crate) struct NodeAttachmentSchedulingScore {
     total_attached_shard_count: usize,
     /// Convenience to make selection deterministic in tests and empty systems
     node_id: NodeId,
-}
-
-impl Ord for NodeAttachmentSchedulingScore {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // Lower scores indicate a more suitable node.
-        // Note that we prefer a node for which we don't have
-        // info to a node which we are certain doesn't match the
-        // preferred AZ of the shard.
-        let az_match_score = |az_match: &Option<bool>| match az_match {
-            Some(true) => 0,
-            None => 1,
-            Some(false) => 2,
-        };
-
-        let self_unpacked = (
-            self.affinity_score,
-            az_match_score(&self.az_match),
-            self.attached_shards_in_context,
-            self.utilization_score,
-            self.total_attached_shard_count,
-            self.node_id,
-        );
-        let other_unpacked = (
-            other.affinity_score,
-            az_match_score(&other.az_match),
-            other.attached_shards_in_context,
-            other.utilization_score,
-            other.total_attached_shard_count,
-            other.node_id,
-        );
-
-        self_unpacked.cmp(&other_unpacked)
-    }
-}
-
-impl PartialOrd for NodeAttachmentSchedulingScore {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl PartialEq for NodeAttachmentSchedulingScore {
-    fn eq(&self, other: &Self) -> bool {
-        self.cmp(other) == std::cmp::Ordering::Equal
-    }
 }
 
 impl NodeSchedulingScore for NodeAttachmentSchedulingScore {
@@ -155,9 +176,7 @@ impl NodeSchedulingScore for NodeAttachmentSchedulingScore {
                 .get(node_id)
                 .copied()
                 .unwrap_or(AffinityScore::FREE),
-            az_match: preferred_az
-                .as_ref()
-                .map(|preferred_az| *preferred_az == node.az),
+            az_match: AttachmentAzMatch(AzMatch::new(&node.az, preferred_az.as_ref())),
             attached_shards_in_context: context.attached_nodes.get(node_id).copied().unwrap_or(0),
             utilization_score: utilization.cached_score(),
             total_attached_shard_count: node.attached_shard_count,
@@ -177,13 +196,13 @@ impl NodeSchedulingScore for NodeAttachmentSchedulingScore {
 /// Scheduling score of a given node for shard secondaries.
 /// Lower scores indicate more suitable nodes.
 /// Ordering is given by member declaration order (top to bottom).
-#[derive(Debug, Eq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 pub(crate) struct NodeSecondarySchedulingScore {
-    /// Optional flag indicating whether this node matches the preferred AZ
+    /// Flag indicating whether this node matches the preferred AZ
     /// of the shard. For secondary locations we wish to avoid nodes in.
     /// the preferred AZ of the shard, since that's where the attached location
     /// should be scheduled and having the secondary in the same AZ is bad for HA.
-    az_match: Option<bool>,
+    az_match: SecondaryAzMatch,
     /// The number of shards belonging to the tenant currently being
     /// scheduled that are attached to this node.
     affinity_score: AffinityScore,
@@ -194,48 +213,6 @@ pub(crate) struct NodeSecondarySchedulingScore {
     total_attached_shard_count: usize,
     /// Convenience to make selection deterministic in tests and empty systems
     node_id: NodeId,
-}
-
-impl Ord for NodeSecondarySchedulingScore {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // Lower scores indicate a more suitable node.
-        // For secondary locations we wish to avoid the preferred AZ
-        // of the shard.
-        let az_match_score = |az_match: &Option<bool>| match az_match {
-            Some(false) => 0,
-            None => 1,
-            Some(true) => 2,
-        };
-
-        let self_unpacked = (
-            az_match_score(&self.az_match),
-            self.affinity_score,
-            self.utilization_score,
-            self.total_attached_shard_count,
-            self.node_id,
-        );
-        let other_unpacked = (
-            az_match_score(&other.az_match),
-            other.affinity_score,
-            other.utilization_score,
-            other.total_attached_shard_count,
-            other.node_id,
-        );
-
-        self_unpacked.cmp(&other_unpacked)
-    }
-}
-
-impl PartialOrd for NodeSecondarySchedulingScore {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl PartialEq for NodeSecondarySchedulingScore {
-    fn eq(&self, other: &Self) -> bool {
-        self.cmp(other) == std::cmp::Ordering::Equal
-    }
 }
 
 impl NodeSchedulingScore for NodeSecondarySchedulingScore {
@@ -253,9 +230,7 @@ impl NodeSchedulingScore for NodeSecondarySchedulingScore {
         };
 
         Some(Self {
-            az_match: preferred_az
-                .as_ref()
-                .map(|preferred_az| *preferred_az == node.az),
+            az_match: SecondaryAzMatch(AzMatch::new(&node.az, preferred_az.as_ref())),
             affinity_score: context
                 .nodes
                 .get(node_id)
