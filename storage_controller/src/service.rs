@@ -26,7 +26,7 @@ use crate::{
         ShardGenerationState, TenantFilter,
     },
     reconciler::{ReconcileError, ReconcileUnits, ReconcilerConfig, ReconcilerConfigBuilder},
-    scheduler::{AttachedShardTag, MaySchedule, ScheduleContext, ScheduleError, ScheduleMode},
+    scheduler::{MaySchedule, ScheduleContext, ScheduleError, ScheduleMode},
     tenant_shard::{
         MigrateAttachment, ReconcileNeeded, ReconcilerStatus, ScheduleOptimization,
         ScheduleOptimizationAction,
@@ -1265,6 +1265,8 @@ impl Service {
 
         #[cfg(feature = "testing")]
         {
+            use pageserver_api::controller_api::AvailabilityZone;
+
             // Hack: insert scheduler state for all nodes referenced by shards, as compatibility
             // tests only store the shards, not the nodes.  The nodes will be loaded shortly
             // after when pageservers start up and register.
@@ -1282,7 +1284,7 @@ impl Service {
                     123,
                     "".to_string(),
                     123,
-                    "test_az".to_string(),
+                    AvailabilityZone("test_az".to_string()),
                 );
 
                 scheduler.node_upsert(&node);
@@ -2099,7 +2101,7 @@ impl Service {
                     let az_id = locked
                         .nodes
                         .get(&resp.node_id)
-                        .map(|n| n.get_availability_zone_id().to_string())?;
+                        .map(|n| n.get_availability_zone_id().clone())?;
 
                     Some((resp.shard_id, az_id))
                 })
@@ -2629,8 +2631,7 @@ impl Service {
             let scheduler = &mut locked.scheduler;
             // Right now we only perform the operation on a single node without parallelization
             // TODO fan out the operation to multiple nodes for better performance
-            let node_id =
-                scheduler.schedule_shard::<AttachedShardTag>(&[], &ScheduleContext::default())?;
+            let node_id = scheduler.any_available_node()?;
             let node = locked
                 .nodes
                 .get(&node_id)
@@ -2816,8 +2817,7 @@ impl Service {
 
             // Pick an arbitrary node to use for remote deletions (does not have to be where the tenant
             // was attached, just has to be able to see the S3 content)
-            let node_id =
-                scheduler.schedule_shard::<AttachedShardTag>(&[], &ScheduleContext::default())?;
+            let node_id = scheduler.any_available_node()?;
             let node = nodes
                 .get(&node_id)
                 .expect("Pageservers may not be deleted while lock is active");
@@ -4481,7 +4481,7 @@ impl Service {
                     let az_id = locked
                         .nodes
                         .get(node_id)
-                        .map(|n| n.get_availability_zone_id().to_string())?;
+                        .map(|n| n.get_availability_zone_id().clone())?;
 
                     Some((*tid, az_id))
                 })
