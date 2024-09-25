@@ -18,7 +18,7 @@
 use std::collections::BTreeMap;
 use std::ops::Deref;
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use pageserver_api::key::Key;
 use tokio::io::AsyncWriteExt;
 use tokio_epoll_uring::BoundedBuf;
@@ -27,6 +27,7 @@ use utils::vec_map::VecMap;
 
 use crate::context::RequestContext;
 use crate::tenant::blob_io::{BYTE_UNCOMPRESSED, BYTE_ZSTD, LEN_COMPRESSION_BIT_MASK};
+use crate::virtual_file::dio::IoBufferMut;
 use crate::virtual_file::{self, VirtualFile};
 
 /// Metadata bundled with the start and end offset of a blob.
@@ -158,7 +159,7 @@ impl std::fmt::Display for VectoredBlob {
 /// Return type of [`VectoredBlobReader::read_blobs`]
 pub struct VectoredBlobsBuf {
     /// Buffer for all blobs in this read
-    pub buf: BytesMut,
+    pub buf: IoBufferMut,
     /// Offsets into the buffer and metadata for all blobs in this read
     pub blobs: Vec<VectoredBlob>,
 }
@@ -605,7 +606,7 @@ impl<'a> VectoredBlobReader<'a> {
     pub async fn read_blobs(
         &self,
         read: &VectoredRead,
-        buf: BytesMut,
+        buf: IoBufferMut,
         ctx: &RequestContext,
     ) -> Result<VectoredBlobsBuf, std::io::Error> {
         assert!(read.size() > 0);
@@ -1090,7 +1091,8 @@ mod tests {
 
         // Multiply by two (compressed data might need more space), and add a few bytes for the header
         let reserved_bytes = blobs.iter().map(|bl| bl.len()).max().unwrap() * 2 + 16;
-        let mut buf = BytesMut::with_capacity(reserved_bytes);
+        let align = virtual_file::get_io_buffer_alignment();
+        let mut buf = IoBufferMut::with_capacity_aligned(reserved_bytes, align);
 
         let mode = VectoredReadCoalesceMode::get();
         let vectored_blob_reader = VectoredBlobReader::new(&file);
