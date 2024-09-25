@@ -800,7 +800,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
             | FeMessage::CopyFail
             | FeMessage::PasswordMessage(_) => {
                 return Err(QueryError::Other(anyhow::anyhow!(
-                    "unexpected message type from {}: {msg:?}",
+                    "unexpected message type: {msg:?}",
                 )));
             }
         }
