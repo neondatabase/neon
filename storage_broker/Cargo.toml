@@ -15,7 +15,6 @@ const_format.workspace = true
 futures.workspace = true
 futures-core.workspace = true
 futures-util.workspace = true
-git-version.workspace = true
 humantime.workspace = true
 hyper = { workspace = true, features = ["full"] }
 once_cell.workspace = true
