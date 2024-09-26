@@ -7,6 +7,8 @@ ARG IMAGE=build-tools
 ARG TAG=pinned
 ARG DEFAULT_PG_VERSION=17
 ARG STABLE_PG_VERSION=16
+ARG DEBIAN_VERSION=bullseye
+ARG DEBIAN_FLAVOR=${DEBIAN_VERSION}-slim
 
 # Build Postgres
 FROM $REPOSITORY/$IMAGE:$TAG AS pg-build
@@ -57,7 +59,7 @@ RUN set -e \
 
 # Build final image
 #
-FROM debian:bullseye-slim
+FROM debian:${DEBIAN_FLAVOR}
 ARG DEFAULT_PG_VERSION
 WORKDIR /data
 

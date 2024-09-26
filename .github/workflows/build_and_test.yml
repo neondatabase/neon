@@ -560,15 +560,16 @@ jobs:
             ADDITIONAL_RUSTFLAGS=${{ matrix.arch == 'arm64' && '-Ctarget-feature=+lse -Ctarget-cpu=neoverse-n1' || '' }}
             GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
             BUILD_TAG=${{ needs.tag.outputs.build-tag }}
-            TAG=${{ needs.build-build-tools-image.outputs.image-tag }}
+            TAG=${{ needs.build-build-tools-image.outputs.image-tag }}-bookworm
+            DEBIAN_VERSION=bookworm
           provenance: false
           push: true
           pull: true
           file: Dockerfile
-          cache-from: type=registry,ref=cache.neon.build/neon:cache-bullseye-${{ matrix.arch }}
-          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/neon:cache-{0}-{1},mode=max', 'bullseye', matrix.arch) || '' }}
+          cache-from: type=registry,ref=cache.neon.build/neon:cache-bookworm-${{ matrix.arch }}
+          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/neon:cache-{0}-{1},mode=max', 'bookworm', matrix.arch) || '' }}
           tags: |
-            neondatabase/neon:${{ needs.tag.outputs.build-tag }}-bullseye-${{ matrix.arch }}
+            neondatabase/neon:${{ needs.tag.outputs.build-tag }}-bookworm-${{ matrix.arch }}
 
   neon-image:
     needs: [ neon-image-arch, tag ]
@@ -583,9 +584,9 @@ jobs:
       - name: Create multi-arch image
         run: |
           docker buildx imagetools create -t neondatabase/neon:${{ needs.tag.outputs.build-tag }} \
-                                          -t neondatabase/neon:${{ needs.tag.outputs.build-tag }}-bullseye \
-                                             neondatabase/neon:${{ needs.tag.outputs.build-tag }}-bullseye-x64 \
-                                             neondatabase/neon:${{ needs.tag.outputs.build-tag }}-bullseye-arm64
+                                          -t neondatabase/neon:${{ needs.tag.outputs.build-tag }}-bookworm \
+                                             neondatabase/neon:${{ needs.tag.outputs.build-tag }}-bookworm-x64 \
+                                             neondatabase/neon:${{ needs.tag.outputs.build-tag }}-bookworm-arm64
 
       - uses: docker/login-action@v3
         with:
