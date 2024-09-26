@@ -533,16 +533,16 @@ jobs:
     - name: Install postgresql-16 where pytest expects it
       run: |
         cd /home/nonroot
-        wget -q https://apt.postgresql.org/pub/repos/apt/pool/main/p/postgresql-16/libpq5_16.4-1.pgdg110%2B1_amd64.deb
-        wget -q https://apt.postgresql.org/pub/repos/apt/pool/main/p/postgresql-16/postgresql-client-16_16.4-1.pgdg110%2B1_amd64.deb
-        wget -q https://apt.postgresql.org/pub/repos/apt/pool/main/p/postgresql-16/postgresql-16_16.4-1.pgdg110%2B1_amd64.deb 
-        dpkg -x libpq5_16.4-1.pgdg110+1_amd64.deb pg
-        dpkg -x postgresql-client-16_16.4-1.pgdg110+1_amd64.deb pg
-        dpkg -x postgresql-16_16.4-1.pgdg110+1_amd64.deb pg
+        wget -q "https://apt.postgresql.org/pub/repos/apt/pool/16/p/postgresql-16/libpq5_16.4-1.pgdg+2_amd64.deb"
+        wget -q "https://apt.postgresql.org/pub/repos/apt/pool/main/p/postgresql-16/postgresql-client-16_16.4-1.pgdg110+2_amd64.deb"
+        wget -q "https://apt.postgresql.org/pub/repos/apt/pool/main/p/postgresql-16/postgresql-16_16.4-1.pgdg110+2_amd64.deb"
+        dpkg -x libpq5_16.4-1.pgdg+2_amd64.deb pg
+        dpkg -x postgresql-client-16_16.4-1.pgdg110+2_amd64.deb pg
+        dpkg -x postgresql-16_16.4-1.pgdg110+2_amd64.deb pg
         mkdir -p /tmp/neon/pg_install/v16/bin
-        ln -s /home/nonroot/pg/usr/lib/postgresql/16/bin/pgbench /tmp/neon/pg_install/v16/bin/pgbench  
-        ln -s /home/nonroot/pg/usr/lib/postgresql/16/bin/psql /tmp/neon/pg_install/v16/bin/psql  
-        ln -s /home/nonroot/pg/usr/lib/x86_64-linux-gnu /tmp/neon/pg_install/v16/lib 
+        ln -s /home/nonroot/pg/usr/lib/postgresql/16/bin/pgbench /tmp/neon/pg_install/v16/bin/pgbench
+        ln -s /home/nonroot/pg/usr/lib/postgresql/16/bin/psql /tmp/neon/pg_install/v16/bin/psql
+        ln -s /home/nonroot/pg/usr/lib/x86_64-linux-gnu /tmp/neon/pg_install/v16/lib
         /tmp/neon/pg_install/v16/bin/pgbench --version
         /tmp/neon/pg_install/v16/bin/psql --version
 
