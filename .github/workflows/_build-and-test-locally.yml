@@ -257,7 +257,15 @@ jobs:
           ${cov_prefix} cargo nextest run $CARGO_FLAGS $CARGO_FEATURES -E 'package(remote_storage)' -E 'test(test_real_azure)'
 
       - name: Install postgres binaries
-        run: cp -a pg_install /tmp/neon/pg_install
+        run: |
+          # Use tar to copy files matching the pattern, preserving the paths in the destionation
+          tar c \
+            pg_install/v* \
+            pg_install/build/*/src/test/regress/*.so \
+            pg_install/build/*/src/test/regress/pg_regress \
+            pg_install/build/*/src/test/isolation/isolationtester \
+            pg_install/build/*/src/test/isolation/pg_isolation_regress \
+            | tar  x -C /tmp/neon
 
       - name: Upload Neon artifact
         uses: ./.github/actions/upload

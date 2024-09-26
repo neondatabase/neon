@@ -589,6 +589,10 @@ async fn timeline_create_handler(
                 StatusCode::SERVICE_UNAVAILABLE,
                 HttpErrorBody::from_msg(e.to_string()),
             ),
+            Err(e @ tenant::CreateTimelineError::AncestorArchived) => json_response(
+                StatusCode::NOT_ACCEPTABLE,
+                HttpErrorBody::from_msg(e.to_string()),
+            ),
             Err(tenant::CreateTimelineError::ShuttingDown) => json_response(
                 StatusCode::SERVICE_UNAVAILABLE,
                 HttpErrorBody::from_msg("tenant shutting down".to_string()),
@@ -2957,7 +2961,7 @@ pub fn make_router(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/preserve_initdb_archive",
             |r| api_handler(r, timeline_preserve_initdb_handler),
         )
-        .post(
+        .put(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/archival_config",
             |r| api_handler(r, timeline_archival_config_handler),
         )

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use futures::Future;
 use pageserver_api::{
-    controller_api::NodeRegisterRequest,
+    controller_api::{AvailabilityZone, NodeRegisterRequest},
     shard::TenantShardId,
     upcall_api::{
         ReAttachRequest, ReAttachResponse, ReAttachResponseTenant, ValidateRequest,
@@ -17,9 +17,12 @@ use utils::{backoff, failpoint_support, generation::Generation, id::NodeId};
 use crate::{config::PageServerConf, virtual_file::on_fatal_io_error};
 use pageserver_api::config::NodeMetadata;
 
-/// The Pageserver's client for using the control plane API: this is a small subset
-/// of the overall control plane API, for dealing with generations (see docs/rfcs/025-generation-numbers.md)
-pub struct ControlPlaneClient {
+/// The Pageserver's client for using the storage controller upcall API: this is a small API
+/// for dealing with generations (see docs/rfcs/025-generation-numbers.md).
+///
+/// The server presenting this API may either be the storage controller or some other
+/// service (such as the Neon control plane) providing a store of generation numbers.
+pub struct ControllerUpcallClient {
     http_client: reqwest::Client,
     base_url: Url,
     node_id: NodeId,
@@ -45,7 +48,7 @@ pub trait ControlPlaneGenerationsApi {
     ) -> impl Future<Output = Result<HashMap<TenantShardId, bool>, RetryForeverError>> + Send;
 }
 
-impl ControlPlaneClient {
+impl ControllerUpcallClient {
     /// A None return value indicates that the input `conf` object does not have control
     /// plane API enabled.
     pub fn new(conf: &'static PageServerConf, cancel: &CancellationToken) -> Option<Self> {
@@ -114,7 +117,7 @@ impl ControlPlaneClient {
     }
 }
 
-impl ControlPlaneGenerationsApi for ControlPlaneClient {
+impl ControlPlaneGenerationsApi for ControllerUpcallClient {
     /// Block until we get a successful response, or error out if we are shut down
     async fn re_attach(
         &self,
@@ -148,10 +151,10 @@ impl ControlPlaneGenerationsApi for ControlPlaneClient {
                             .and_then(|jv| jv.as_str().map(|str| str.to_owned()));
 
                         match az_id_from_metadata {
-                            Some(az_id) => Some(az_id),
+                            Some(az_id) => Some(AvailabilityZone(az_id)),
                             None => {
                                 tracing::warn!("metadata.json does not contain an 'availability_zone_id' field");
-                                conf.availability_zone.clone()
+                                conf.availability_zone.clone().map(AvailabilityZone)
                             }
                         }
                     };
@@ -216,29 +219,38 @@ impl ControlPlaneGenerationsApi for ControlPlaneClient {
             .join("validate")
             .expect("Failed to build validate path");
 
-        let request = ValidateRequest {
-            tenants: tenants
-                .into_iter()
-                .map(|(id, gen)| ValidateRequestTenant {
-                    id,
-                    gen: gen
-                        .into()
-                        .expect("Generation should always be valid for a Tenant doing deletions"),
-                })
-                .collect(),
-        };
+        // When sending validate requests, break them up into chunks so that we
+        // avoid possible edge cases of generating any HTTP requests that
+        // require database I/O across many thousands of tenants.
+        let mut result: HashMap<TenantShardId, bool> = HashMap::with_capacity(tenants.len());
+        for tenant_chunk in (tenants).chunks(128) {
+            let request = ValidateRequest {
+                tenants: tenant_chunk
+                    .iter()
+                    .map(|(id, generation)| ValidateRequestTenant {
+                        id: *id,
+                        gen: (*generation).into().expect(
+                            "Generation should always be valid for a Tenant doing deletions",
+                        ),
+                    })
+                    .collect(),
+            };
 
-        failpoint_support::sleep_millis_async!("control-plane-client-validate-sleep", &self.cancel);
-        if self.cancel.is_cancelled() {
-            return Err(RetryForeverError::ShuttingDown);
+            failpoint_support::sleep_millis_async!(
+                "control-plane-client-validate-sleep",
+                &self.cancel
+            );
+            if self.cancel.is_cancelled() {
+                return Err(RetryForeverError::ShuttingDown);
+            }
+
+            let response: ValidateResponse =
+                self.retry_http_forever(&re_attach_path, request).await?;
+            for rt in response.tenants {
+                result.insert(rt.id, rt.valid);
+            }
         }
 
-        let response: ValidateResponse = self.retry_http_forever(&re_attach_path, request).await?;
-
-        Ok(response
-            .tenants
-            .into_iter()
-            .map(|rt| (rt.id, rt.valid))
-            .collect())
+        Ok(result.into_iter().collect())
     }
 }

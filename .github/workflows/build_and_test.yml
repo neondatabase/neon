@@ -120,6 +120,59 @@ jobs:
       - name: Run mypy to check types
         run: poetry run mypy .
 
+  # Check that the vendor/postgres-* submodules point to the
+  # corresponding REL_*_STABLE_neon branches.
+  check-submodules:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: dorny/paths-filter@v3
+        id: check-if-submodules-changed
+        with:
+          filters: |
+            vendor:
+              - 'vendor/**'
+
+      - name: Check vendor/postgres-v14 submodule reference
+        if: steps.check-if-submodules-changed.outputs.vendor == 'true'
+        uses: jtmullen/submodule-branch-check-action@v1
+        with:
+          path: "vendor/postgres-v14"
+          fetch_depth: "50"
+          sub_fetch_depth: "50"
+          pass_if_unchanged: true
+
+      - name: Check vendor/postgres-v15 submodule reference
+        if: steps.check-if-submodules-changed.outputs.vendor == 'true'
+        uses: jtmullen/submodule-branch-check-action@v1
+        with:
+          path: "vendor/postgres-v15"
+          fetch_depth: "50"
+          sub_fetch_depth: "50"
+          pass_if_unchanged: true
+
+      - name: Check vendor/postgres-v16 submodule reference
+        if: steps.check-if-submodules-changed.outputs.vendor == 'true'
+        uses: jtmullen/submodule-branch-check-action@v1
+        with:
+          path: "vendor/postgres-v16"
+          fetch_depth: "50"
+          sub_fetch_depth: "50"
+          pass_if_unchanged: true
+
+      - name: Check vendor/postgres-v17 submodule reference
+        if: steps.check-if-submodules-changed.outputs.vendor == 'true'
+        uses: jtmullen/submodule-branch-check-action@v1
+        with:
+          path: "vendor/postgres-v17"
+          fetch_depth: "50"
+          sub_fetch_depth: "50"
+          pass_if_unchanged: true
+
   check-codestyle-rust:
     needs: [ check-permissions, build-build-tools-image ]
     strategy:
@@ -549,7 +602,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        version: [ v14, v15, v16, v17 ]
+        version:
+          # Much data was already generated on old PG versions with bullseye's
+          # libraries, the locales of which can cause data incompatibilities.
+          # However, new PG versions should check if they can be built on newer
+          # images, as that reduces the support burden of old and ancient
+          # distros.
+          - pg: v14
+            debian: bullseye-slim
+          - pg: v15
+            debian: bullseye-slim
+          - pg: v16
+            debian: bullseye-slim
+          - pg: v17
+            debian: bookworm-slim
         arch: [ x64, arm64 ]
 
     runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
@@ -592,41 +658,46 @@ jobs:
           context: .
           build-args: |
             GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
-            PG_VERSION=${{ matrix.version }}
+            PG_VERSION=${{ matrix.version.pg }}
             BUILD_TAG=${{ needs.tag.outputs.build-tag }}
             TAG=${{ needs.build-build-tools-image.outputs.image-tag }}
+            DEBIAN_FLAVOR=${{ matrix.version.debian }}
           provenance: false
           push: true
           pull: true
-          file: Dockerfile.compute-node
-          cache-from: type=registry,ref=cache.neon.build/compute-node-${{ matrix.version }}:cache-${{ matrix.arch }}
-          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/compute-node-{0}:cache-{1},mode=max', matrix.version, matrix.arch) || '' }}
+          file: compute/Dockerfile.compute-node
+          cache-from: type=registry,ref=cache.neon.build/compute-node-${{ matrix.version.pg }}:cache-${{ matrix.arch }}
+          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/compute-node-{0}:cache-{1},mode=max', matrix.version.pg, matrix.arch) || '' }}
           tags: |
-            neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}-${{ matrix.arch }}
+            neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}-${{ matrix.arch }}
 
       - name: Build neon extensions test image
-        if: matrix.version == 'v16'
+        if: matrix.version.pg == 'v16'
         uses: docker/build-push-action@v6
         with:
           context: .
           build-args: |
             GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
-            PG_VERSION=${{ matrix.version }}
+            PG_VERSION=${{ matrix.version.pg }}
             BUILD_TAG=${{ needs.tag.outputs.build-tag }}
             TAG=${{ needs.build-build-tools-image.outputs.image-tag }}
+            DEBIAN_FLAVOR=${{ matrix.version.debian }}
           provenance: false
           push: true
           pull: true
-          file: Dockerfile.compute-node
+          file: compute/Dockerfile.compute-node
           target: neon-pg-ext-test
-          cache-from: type=registry,ref=cache.neon.build/neon-test-extensions-${{ matrix.version }}:cache-${{ matrix.arch }}
-          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/neon-test-extensions-{0}:cache-{1},mode=max', matrix.version, matrix.arch) || '' }}
+          cache-from: type=registry,ref=cache.neon.build/neon-test-extensions-${{ matrix.version.pg }}:cache-${{ matrix.arch }}
+          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/neon-test-extensions-{0}:cache-{1},mode=max', matrix.version.pg, matrix.arch) || '' }}
           tags: |
-            neondatabase/neon-test-extensions-${{ matrix.version }}:${{needs.tag.outputs.build-tag}}-${{ matrix.arch }}
+            neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{needs.tag.outputs.build-tag}}-${{ matrix.arch }}
 
       - name: Build compute-tools image
         # compute-tools are Postgres independent, so build it only once
-        if: matrix.version == 'v17'
+        # We pick 16, because that builds on debian 11 with older glibc (and is
+        # thus compatible with newer glibc), rather than 17 on Debian 12, as
+        # that isn't guaranteed to be compatible with Debian 11
+        if: matrix.version.pg == 'v16'
         uses: docker/build-push-action@v6
         with:
           target: compute-tools-image
@@ -635,10 +706,11 @@ jobs:
             GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
             BUILD_TAG=${{ needs.tag.outputs.build-tag }}
             TAG=${{ needs.build-build-tools-image.outputs.image-tag }}
+            DEBIAN_FLAVOR=${{ matrix.version.debian }}
           provenance: false
           push: true
           pull: true
-          file: Dockerfile.compute-node
+          file: compute/Dockerfile.compute-node
           tags: |
             neondatabase/compute-tools:${{ needs.tag.outputs.build-tag }}-${{ matrix.arch }}
 
@@ -726,7 +798,7 @@ jobs:
       - name: Build vm image
         run: |
           ./vm-builder \
-            -spec=vm-image-spec.yaml \
+            -spec=compute/vm-image-spec.yaml \
             -src=neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }} \
             -dst=neondatabase/vm-compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}
 
@@ -790,6 +862,9 @@ jobs:
     needs: [ check-permissions, tag, test-images, vm-compute-node-image ]
     runs-on: ubuntu-22.04
 
+    permissions:
+      id-token: write # for `aws-actions/configure-aws-credentials`
+
     env:
       VERSIONS: v14 v15 v16 v17
 
@@ -834,13 +909,19 @@ jobs:
           docker buildx imagetools create -t neondatabase/neon-test-extensions-v16:latest \
                                               neondatabase/neon-test-extensions-v16:${{ needs.tag.outputs.build-tag }}
 
+      - name: Configure AWS-prod credentials
+        if: github.ref_name == 'release'|| github.ref_name == 'release-proxy'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: eu-central-1
+          mask-aws-account-id: true
+          role-to-assume: ${{ secrets.PROD_GHA_OIDC_ROLE }}
+
       - name: Login to prod ECR
         uses: docker/login-action@v3
         if: github.ref_name == 'release'|| github.ref_name == 'release-proxy'
         with:
           registry: 093970136003.dkr.ecr.eu-central-1.amazonaws.com
-          username: ${{ secrets.PROD_GHA_RUNNER_LIMITED_AWS_ACCESS_KEY_ID }}
-          password: ${{ secrets.PROD_GHA_RUNNER_LIMITED_AWS_SECRET_ACCESS_KEY }}
 
       - name: Copy all images to prod ECR
         if: github.ref_name == 'release'|| github.ref_name == 'release-proxy'
@@ -1109,10 +1190,9 @@ jobs:
 
               files_to_promote+=("s3://${BUCKET}/${s3_key}")
 
-              # TODO Add v17
-              for pg_version in v14 v15 v16; do
+              for pg_version in v14 v15 v16 v17; do
                 # We run less tests for debug builds, so we don't need to promote them
-                if [ "${build_type}" == "debug" ] && { [ "${arch}" == "ARM64" ] || [ "${pg_version}" != "v16" ] ; }; then
+                if [ "${build_type}" == "debug" ] && { [ "${arch}" == "ARM64" ] || [ "${pg_version}" != "v17" ] ; }; then
                   continue
                 fi
 

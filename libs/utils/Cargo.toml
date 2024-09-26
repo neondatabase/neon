@@ -19,6 +19,7 @@ bincode.workspace = true
 bytes.workspace = true
 camino.workspace = true
 chrono.workspace = true
+git-version.workspace = true
 hex = { workspace = true, features = ["serde"] }
 humantime.workspace = true
 hyper = { workspace = true, features = ["full"] }

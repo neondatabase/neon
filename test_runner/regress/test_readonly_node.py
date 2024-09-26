@@ -188,9 +188,13 @@ def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
     with env.endpoints.create_start("main") as ep_main:
         with ep_main.cursor() as cur:
             cur.execute("CREATE TABLE t0(v0 int primary key, v1 text)")
-        lsn = None
+        lsn = Lsn(0)
         for i in range(2):
             lsn = generate_updates_on_main(env, ep_main, i)
+
+        # Round down to the closest LSN on page boundary (unnormalized).
+        XLOG_BLCKSZ = 8192
+        lsn = Lsn((int(lsn) // XLOG_BLCKSZ) * XLOG_BLCKSZ)
 
         with env.endpoints.create_start(
             branch_name="main",

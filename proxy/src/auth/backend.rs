@@ -444,7 +444,7 @@ impl<'a> Backend<'a, ComputeUserInfoMaybeEndpoint, &()> {
             Self::Web(url, ()) => {
                 info!("performing web authentication");
 
-                let info = web::authenticate(ctx, &url, client).await?;
+                let info = web::authenticate(ctx, config, &url, client).await?;
 
                 Backend::Web(url, info)
             }

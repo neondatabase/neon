@@ -432,7 +432,7 @@ impl Client {
             self.mgmt_api_endpoint
         );
 
-        self.request(Method::POST, &uri, req)
+        self.request(Method::PUT, &uri, req)
             .await?
             .json()
             .await

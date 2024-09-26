@@ -18,7 +18,6 @@ use camino::Utf8Path;
 use camino::Utf8PathBuf;
 use enumset::EnumSet;
 use futures::stream::FuturesUnordered;
-use futures::FutureExt;
 use futures::StreamExt;
 use pageserver_api::models;
 use pageserver_api::models::AuxFilePolicy;
@@ -35,6 +34,7 @@ use remote_storage::GenericRemoteStorage;
 use remote_storage::TimeoutOrCancel;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::future::Future;
 use std::sync::Weak;
 use std::time::SystemTime;
 use storage_broker::BrokerClientChannel;
@@ -591,6 +591,8 @@ pub enum CreateTimelineError {
     AncestorLsn(anyhow::Error),
     #[error("ancestor timeline is not active")]
     AncestorNotActive,
+    #[error("ancestor timeline is archived")]
+    AncestorArchived,
     #[error("tenant shutting down")]
     ShuttingDown,
     #[error(transparent)]
@@ -1059,13 +1061,9 @@ impl Tenant {
         }
 
         Ok(TenantPreload {
-            timelines: Self::load_timeline_metadata(
-                self,
-                remote_timeline_ids,
-                remote_storage,
-                cancel,
-            )
-            .await?,
+            timelines: self
+                .load_timelines_metadata(remote_timeline_ids, remote_storage, cancel)
+                .await?,
         })
     }
 
@@ -1331,7 +1329,7 @@ impl Tenant {
         .await
     }
 
-    async fn load_timeline_metadata(
+    async fn load_timelines_metadata(
         self: &Arc<Tenant>,
         timeline_ids: HashSet<TimelineId>,
         remote_storage: &GenericRemoteStorage,
@@ -1339,33 +1337,10 @@ impl Tenant {
     ) -> anyhow::Result<HashMap<TimelineId, TimelinePreload>> {
         let mut part_downloads = JoinSet::new();
         for timeline_id in timeline_ids {
-            let client = RemoteTimelineClient::new(
-                remote_storage.clone(),
-                self.deletion_queue_client.clone(),
-                self.conf,
-                self.tenant_shard_id,
-                timeline_id,
-                self.generation,
-            );
             let cancel_clone = cancel.clone();
             part_downloads.spawn(
-                async move {
-                    debug!("starting index part download");
-
-                    let index_part = client.download_index_file(&cancel_clone).await;
-
-                    debug!("finished index part download");
-
-                    Result::<_, anyhow::Error>::Ok(TimelinePreload {
-                        client,
-                        timeline_id,
-                        index_part,
-                    })
-                }
-                .map(move |res| {
-                    res.with_context(|| format!("download index part for timeline {timeline_id}"))
-                })
-                .instrument(info_span!("download_index_part", %timeline_id)),
+                self.load_timeline_metadata(timeline_id, remote_storage.clone(), cancel_clone)
+                    .instrument(info_span!("download_index_part", %timeline_id)),
             );
         }
 
@@ -1376,8 +1351,7 @@ impl Tenant {
                 next = part_downloads.join_next() => {
                     match next {
                         Some(result) => {
-                            let preload_result = result.context("join preload task")?;
-                            let preload = preload_result?;
+                            let preload = result.context("join preload task")?;
                             timeline_preloads.insert(preload.timeline_id, preload);
                         },
                         None => {
@@ -1392,6 +1366,36 @@ impl Tenant {
         }
 
         Ok(timeline_preloads)
+    }
+
+    fn load_timeline_metadata(
+        self: &Arc<Tenant>,
+        timeline_id: TimelineId,
+        remote_storage: GenericRemoteStorage,
+        cancel: CancellationToken,
+    ) -> impl Future<Output = TimelinePreload> {
+        let client = RemoteTimelineClient::new(
+            remote_storage.clone(),
+            self.deletion_queue_client.clone(),
+            self.conf,
+            self.tenant_shard_id,
+            timeline_id,
+            self.generation,
+        );
+        async move {
+            debug_assert_current_span_has_tenant_and_timeline_id();
+            debug!("starting index part download");
+
+            let index_part = client.download_index_file(&cancel).await;
+
+            debug!("finished index part download");
+
+            TimelinePreload {
+                client,
+                timeline_id,
+                index_part,
+            }
+        }
     }
 
     pub(crate) async fn apply_timeline_archival_config(
@@ -1724,6 +1728,11 @@ impl Tenant {
                     return Err(CreateTimelineError::AncestorNotActive);
                 }
 
+                if ancestor_timeline.is_archived() == Some(true) {
+                    info!("tried to branch archived timeline");
+                    return Err(CreateTimelineError::AncestorArchived);
+                }
+
                 if let Some(lsn) = ancestor_start_lsn.as_mut() {
                     *lsn = lsn.align();
 
@@ -1999,9 +2008,6 @@ impl Tenant {
                 TenantState::Activating(_) | TenantState::Active | TenantState::Broken { .. } | TenantState::Stopping { .. } => {
                     panic!("caller is responsible for calling activate() only on Loading / Attaching tenants, got {state:?}", state = current_state);
                 }
-                TenantState::Loading => {
-                    *current_state = TenantState::Activating(ActivatingFrom::Loading);
-                }
                 TenantState::Attaching => {
                     *current_state = TenantState::Activating(ActivatingFrom::Attaching);
                 }
@@ -2182,7 +2188,7 @@ impl Tenant {
     async fn set_stopping(
         &self,
         progress: completion::Barrier,
-        allow_transition_from_loading: bool,
+        _allow_transition_from_loading: bool,
         allow_transition_from_attaching: bool,
     ) -> Result<(), SetStoppingError> {
         let mut rx = self.state.subscribe();
@@ -2197,7 +2203,6 @@ impl Tenant {
                 );
                 false
             }
-            TenantState::Loading => allow_transition_from_loading,
             TenantState::Active | TenantState::Broken { .. } | TenantState::Stopping { .. } => true,
         })
         .await
@@ -2212,13 +2217,6 @@ impl Tenant {
             TenantState::Attaching => {
                 if !allow_transition_from_attaching {
                     unreachable!("2we ensured above that we're done with activation, and, there is no re-activation")
-                };
-                *current_state = TenantState::Stopping { progress };
-                true
-            }
-            TenantState::Loading => {
-                if !allow_transition_from_loading {
-                    unreachable!("3we ensured above that we're done with activation, and, there is no re-activation")
                 };
                 *current_state = TenantState::Stopping { progress };
                 true
@@ -2278,7 +2276,7 @@ impl Tenant {
         // The load & attach routines own the tenant state until it has reached `Active`.
         // So, wait until it's done.
         rx.wait_for(|state| match state {
-            TenantState::Activating(_) | TenantState::Loading | TenantState::Attaching => {
+            TenantState::Activating(_) | TenantState::Attaching => {
                 info!(
                     "waiting for {} to turn Active|Broken|Stopping",
                     <&'static str>::from(state)
@@ -2298,7 +2296,7 @@ impl Tenant {
         let reason = reason.to_string();
         self.state.send_modify(|current_state| {
             match *current_state {
-                TenantState::Activating(_) | TenantState::Loading | TenantState::Attaching => {
+                TenantState::Activating(_) | TenantState::Attaching => {
                     unreachable!("we ensured above that we're done with activation, and, there is no re-activation")
                 }
                 TenantState::Active => {
@@ -2342,7 +2340,7 @@ impl Tenant {
         loop {
             let current_state = receiver.borrow_and_update().clone();
             match current_state {
-                TenantState::Loading | TenantState::Attaching | TenantState::Activating(_) => {
+                TenantState::Attaching | TenantState::Activating(_) => {
                     // in these states, there's a chance that we can reach ::Active
                     self.activate_now();
                     match timeout_cancellable(timeout, &self.cancel, receiver.changed()).await {
@@ -3660,7 +3658,7 @@ impl Tenant {
         start_lsn: Lsn,
         ancestor: Option<Arc<Timeline>>,
         last_aux_file_policy: Option<AuxFilePolicy>,
-    ) -> anyhow::Result<UninitializedTimeline> {
+    ) -> anyhow::Result<UninitializedTimeline<'a>> {
         let tenant_shard_id = self.tenant_shard_id;
 
         let resources = self.build_timeline_resources(new_timeline_id);
@@ -4177,7 +4175,7 @@ pub(crate) mod harness {
             let walredo_mgr = Arc::new(WalRedoManager::from(TestRedoManager));
 
             let tenant = Arc::new(Tenant::new(
-                TenantState::Loading,
+                TenantState::Attaching,
                 self.conf,
                 AttachedTenantConf::try_from(LocationConf::attached_single(
                     TenantConfOpt::from(self.tenant_conf.clone()),

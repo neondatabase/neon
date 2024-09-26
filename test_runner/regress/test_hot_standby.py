@@ -198,9 +198,6 @@ def test_hot_standby_gc(neon_env_builder: NeonEnvBuilder, pause_apply: bool):
 
 def run_pgbench(connstr: str, pg_bin: PgBin):
     log.info(f"Start a pgbench workload on pg {connstr}")
-    # s10 is about 150MB of data. In debug mode init takes about 15s on SSD.
-    pg_bin.run_capture(["pgbench", "-i", "-I", "dtGvp", "-s10", connstr])
-    log.info("pgbench init done")
     pg_bin.run_capture(["pgbench", "-T60", connstr])
 
 
@@ -247,9 +244,15 @@ def test_hot_standby_feedback(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
             log.info(
                 f"primary connstr is {primary.connstr()}, secondary connstr {secondary.connstr()}"
             )
+
+            # s10 is about 150MB of data. In debug mode init takes about 15s on SSD.
+            pg_bin.run_capture(["pgbench", "-i", "-I", "dtGvp", "-s10", primary.connstr()])
+            log.info("pgbench init done in primary")
+
             t = threading.Thread(target=run_pgbench, args=(primary.connstr(), pg_bin))
             t.start()
-            # Wait until pgbench_accounts is created + filled on replica *and*
+
+            # Wait until we see that the pgbench_accounts is created + filled on replica *and*
             # index is created. Otherwise index creation would conflict with
             # read queries and hs feedback won't save us.
             wait_until(60, 1.0, partial(pgbench_accounts_initialized, secondary))
