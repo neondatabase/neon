@@ -422,6 +422,9 @@ backpressure_throttling_impl(void)
 	TimestampTz start,
 				stop;
 	bool		retry = false;
+	char	   *new_status = NULL;
+	const char *old_status;
+	int			len;
 
 	if (PointerIsValid(PrevProcessInterruptsCallback))
 		retry = PrevProcessInterruptsCallback();
@@ -442,14 +445,24 @@ backpressure_throttling_impl(void)
 	if (lag == 0)
 		return retry;
 
-	/* Suspend writers until replicas catch up */
-	set_ps_display("backpressure throttling");
+
+	old_status = get_ps_display(&len);
+	new_status = (char *) palloc(len + 64 + 1);
+	memcpy(new_status, old_status, len);
+	snprintf(new_status + len, 64, "backpressure throttling: lag %lu", lag);
+	set_ps_display(new_status);
+	new_status[len] = '\0'; /* truncate off " backpressure ..." to later reset the ps */
 
 	elog(DEBUG2, "backpressure throttling: lag %lu", lag);
 	start = GetCurrentTimestamp();
 	pg_usleep(BACK_PRESSURE_DELAY);
 	stop = GetCurrentTimestamp();
 	pg_atomic_add_fetch_u64(&walprop_shared->backpressureThrottlingTime, stop - start);
+
+	/* Reset ps display */
+	set_ps_display(new_status);
+	pfree(new_status);
+
 	return true;
 }
 
