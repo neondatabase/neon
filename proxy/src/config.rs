@@ -256,12 +256,17 @@ impl CertResolver {
 
         let common_name = pem.subject().to_string();
 
-        // We only use non-wildcard certificates in web auth proxy so it seems okay to treat them the same as
-        // wildcard ones as we don't use SNI there. That treatment only affects certificate selection, so
-        // verify-full will still check wildcard match. Old coding here just ignored non-wildcard common names
-        // and passed None instead, which blows up number of cases downstream code should handle. Proper coding
-        // here should better avoid Option for common_names, and do wildcard-based certificate selection instead
-        // of cutting off '*.' parts.
+        // We need to get the canonical name for this certificate so we can match them against any domain names
+        // seen within the proxy codebase.
+        //
+        // In scram-proxy we use wildcard certificates only, with the database endpoint as the wildcard subdomain, taken from SNI.
+        // We need to remove the wildcard prefix for the purposes of certificate selection.
+        //
+        // auth-broker does not use SNI and instead uses the Neon-Connection-String header.
+        // Auth broker has the subdomain `apiauth` we need to remove for the purposes of validating the Neon-Connection-String.
+        //
+        // Console Web proxy does not use any wildcard domains and does not need any certificate selection or conn string
+        // validation, so let's we can continue with any common-name
         let common_name = if let Some(s) = common_name.strip_prefix("CN=*.") {
             s.to_string()
         } else if let Some(s) = common_name.strip_prefix("CN=apiauth.") {
