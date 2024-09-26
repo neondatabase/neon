@@ -11,8 +11,10 @@ use crate::compute::ComputeNode;
 fn configurator_main_loop(compute: &Arc<ComputeNode>) {
     info!("waiting for reconfiguration requests");
     loop {
-        let state = compute.state.lock().unwrap();
-        let mut state = compute.state_changed.wait(state).unwrap();
+        let mut state = compute.state.lock().unwrap();
+        if state.status != ComputeStatus::ConfigurationPending {
+            state = compute.state_changed.wait(state).unwrap();
+        }
 
         if state.status == ComputeStatus::ConfigurationPending {
             info!("got configuration request");
