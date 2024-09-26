@@ -757,14 +757,6 @@ async fn handle_auth_broker_inner(
 
     let mut client = backend.connect_to_local_proxy(ctx, conn_info).await?;
 
-    // always completes instantly in http2 mode
-    // but good just in case
-    client
-        .ready()
-        .await
-        .map_err(LocalProxyConnError::from)
-        .map_err(HttpConnError::from)?;
-
     let local_proxy_uri = ::http::Uri::from_static("http://proxy.local/sql");
 
     let (mut parts, body) = request.into_parts();
@@ -786,6 +778,7 @@ async fn handle_auth_broker_inner(
     let _metrics = client.metrics();
 
     Ok(client
+        .inner
         .send_request(req)
         .await
         .map_err(LocalProxyConnError::from)
