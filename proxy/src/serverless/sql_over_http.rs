@@ -126,14 +126,22 @@ pub(crate) enum ConnInfoError {
     MissingUsername,
     #[error("invalid username: {0}")]
     InvalidUsername(#[from] std::string::FromUtf8Error),
-    #[error("missing password")]
-    MissingPassword,
+    #[error("missing authentication credentials: {0}")]
+    MissingCredentials(Credentials),
     #[error("missing hostname")]
     MissingHostname,
     #[error("invalid hostname: {0}")]
     InvalidEndpoint(#[from] ComputeUserInfoParseError),
     #[error("malformed endpoint")]
     MalformedEndpoint,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum Credentials {
+    #[error("required password")]
+    Password,
+    #[error("required authorization bearer token in JWT format")]
+    BearerJwt,
 }
 
 impl ReportableError for ConnInfoError {
@@ -186,7 +194,7 @@ fn get_conn_info(
 
     let auth = if let Some(auth) = headers.get(&AUTHORIZATION) {
         if !config.accept_jwts {
-            return Err(ConnInfoError::MissingPassword);
+            return Err(ConnInfoError::MissingCredentials(Credentials::Password));
         }
 
         let auth = auth
@@ -194,20 +202,23 @@ fn get_conn_info(
             .map_err(|_| ConnInfoError::InvalidHeader(&AUTHORIZATION))?;
         AuthData::Jwt(
             auth.strip_prefix("Bearer ")
-                .ok_or(ConnInfoError::MissingPassword)?
+                .ok_or(ConnInfoError::MissingCredentials(Credentials::BearerJwt))?
                 .into(),
         )
     } else if let Some(pass) = connection_url.password() {
+        // wrong credentials provided
         if config.accept_jwts {
-            return Err(ConnInfoError::MissingPassword);
+            return Err(ConnInfoError::MissingCredentials(Credentials::BearerJwt));
         }
 
         AuthData::Password(match urlencoding::decode_binary(pass.as_bytes()) {
             std::borrow::Cow::Borrowed(b) => b.into(),
             std::borrow::Cow::Owned(b) => b.into(),
         })
+    } else if config.accept_jwts {
+        return Err(ConnInfoError::MissingCredentials(Credentials::BearerJwt));
     } else {
-        return Err(ConnInfoError::MissingPassword);
+        return Err(ConnInfoError::MissingCredentials(Credentials::Password));
     };
 
     let endpoint = match connection_url.host() {
