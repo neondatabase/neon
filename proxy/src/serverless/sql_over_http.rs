@@ -8,6 +8,7 @@ use futures::future::Either;
 use futures::StreamExt;
 use futures::TryFutureExt;
 use http::header::AUTHORIZATION;
+use http::Method;
 use http_body_util::combinators::BoxBody;
 use http_body_util::BodyExt;
 use http_body_util::Full;
@@ -759,10 +760,10 @@ async fn handle_auth_broker_inner(
     // but good just in case
     client.ready().await.map_err(HttpConnError::from)?;
 
+    let local_proxy_uri = ::http::Uri::from_static("http://proxy.local/sql");
+
     let (mut parts, body) = request.into_parts();
-    let mut req = Request::builder()
-        .method("POST")
-        .uri("http://proxy.local/sql");
+    let mut req = Request::builder().method(Method::POST).uri(local_proxy_uri);
 
     // todo(conradludgate): maybe auth-broker should parse these and re-serialize
     // these instead just to ensure they remain normalised.
@@ -772,7 +773,9 @@ async fn handle_auth_broker_inner(
         }
     }
 
-    let req = req.body(body).unwrap();
+    let req = req
+        .body(body)
+        .expect("all headers and params received via hyper should be valid for request");
 
     // todo: map body to count egress
     let _metrics = client.metrics();
