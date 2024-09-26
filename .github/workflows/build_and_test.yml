@@ -874,12 +874,17 @@ jobs:
           username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
           password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
 
+      - name: Configure AWS-dev credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: eu-central-1
+          mask-aws-account-id: true
+          role-to-assume: ${{ vars.DEV_GHA_OIDC_ROLE }}
+
       - name: Login to dev ECR
         uses: docker/login-action@v3
         with:
           registry: 369495373322.dkr.ecr.eu-central-1.amazonaws.com
-          username: ${{ secrets.AWS_ACCESS_KEY_DEV }}
-          password: ${{ secrets.AWS_SECRET_KEY_DEV }}
 
       - name: Copy vm-compute-node images to ECR
         run: |
