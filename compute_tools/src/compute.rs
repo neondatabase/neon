@@ -710,7 +710,7 @@ impl ComputeNode {
         info!("running initdb");
         let initdb_bin = Path::new(&self.pgbin).parent().unwrap().join("initdb");
         Command::new(initdb_bin)
-            .args(["-D", pgdata])
+            .args(["--pgdata", pgdata])
             .output()
             .expect("cannot start initdb process");
 

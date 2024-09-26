@@ -347,7 +347,7 @@ impl StorageController {
 
             if !tokio::fs::try_exists(&pg_data_path).await? {
                 let initdb_args = [
-                    "-D",
+                    "--pgdata",
                     pg_data_path.as_ref(),
                     "--username",
                     &username(),
