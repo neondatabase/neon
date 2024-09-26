@@ -4023,13 +4023,6 @@ pub(crate) mod harness {
         buf.freeze()
     }
 
-    #[cfg(test)]
-    pub async fn advance_time_by(duration: Duration) {
-        tokio::time::pause();
-        tokio::time::advance(duration).await;
-        tokio::time::resume();
-    }
-
     impl From<TenantConf> for TenantConfOpt {
         fn from(tenant_conf: TenantConf) -> Self {
             Self {
@@ -4505,14 +4498,17 @@ mod tests {
         tline.freeze_and_flush().await.map_err(|e| e.into())
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_prohibit_branch_creation_on_garbage_collected_data() -> anyhow::Result<()> {
         let (tenant, ctx) =
             TenantHarness::create("test_prohibit_branch_creation_on_garbage_collected_data")
                 .await?
                 .load()
                 .await;
-        harness::advance_time_by(tenant.get_lsn_lease_length()).await;
+        // Advance to the lsn lease deadline so that GC is not blocked by
+        // initial transition into AttachedSingle.
+        tokio::time::advance(tenant.get_lsn_lease_length()).await;
+        tokio::time::resume();
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
             .await?;
@@ -7289,10 +7285,13 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_lsn_lease() -> anyhow::Result<()> {
         let (tenant, ctx) = TenantHarness::create("test_lsn_lease").await?.load().await;
-        harness::advance_time_by(tenant.get_lsn_lease_length()).await;
+        // Advance to the lsn lease deadline so that GC is not blocked by
+        // initial transition into AttachedSingle.
+        tokio::time::advance(tenant.get_lsn_lease_length()).await;
+        tokio::time::resume();
         let key = Key::from_hex("010000000033333333444444445500000000").unwrap();
 
         let end_lsn = Lsn(0x100);
