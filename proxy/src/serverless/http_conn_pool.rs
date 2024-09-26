@@ -4,11 +4,7 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use parking_lot::RwLock;
 use rand::Rng;
 use std::collections::VecDeque;
-use std::ops::DerefMut;
-use std::{
-    ops::Deref,
-    sync::atomic::{self, AtomicUsize},
-};
+use std::sync::atomic::{self, AtomicUsize};
 use std::{sync::Arc, sync::Weak};
 use tokio::net::TcpStream;
 
@@ -320,17 +316,8 @@ pub(crate) fn poll_http2_client(
     Client::new(client, aux)
 }
 
-impl Client {
-    pub(crate) fn metrics(&self) -> Arc<MetricCounter> {
-        USAGE_METRICS.register(Ids {
-            endpoint_id: self.aux.endpoint_id,
-            branch_id: self.aux.branch_id,
-        })
-    }
-}
-
 pub(crate) struct Client {
-    inner: Send,
+    pub(crate) inner: Send,
     aux: MetricsAuxInfo,
 }
 
@@ -338,17 +325,11 @@ impl Client {
     pub(self) fn new(inner: Send, aux: MetricsAuxInfo) -> Self {
         Self { inner, aux }
     }
-}
 
-impl DerefMut for Client {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.inner
-    }
-}
-impl Deref for Client {
-    type Target = Send;
-
-    fn deref(&self) -> &Self::Target {
-        &self.inner
+    pub(crate) fn metrics(&self) -> Arc<MetricCounter> {
+        USAGE_METRICS.register(Ids {
+            endpoint_id: self.aux.endpoint_id,
+            branch_id: self.aux.branch_id,
+        })
     }
 }
