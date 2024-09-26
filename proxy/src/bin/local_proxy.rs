@@ -2,30 +2,37 @@ use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
     pin::pin,
+    str::FromStr,
     sync::Arc,
     time::Duration,
 };
 
-use anyhow::{bail, ensure};
+use anyhow::{bail, ensure, Context};
+use compute_api::spec::LocalProxySpec;
 use dashmap::DashMap;
-use futures::{future::Either, FutureExt};
+use futures::future::Either;
 use proxy::{
-    auth::backend::local::{JwksRoleSettings, LocalBackend, JWKS_ROLE_MAP},
+    auth::backend::local::{LocalBackend, JWKS_ROLE_MAP},
     cancellation::CancellationHandlerMain,
     config::{self, AuthenticationConfig, HttpConfig, ProxyConfig, RetryConfig},
-    console::{locks::ApiLocks, messages::JwksRoleMapping},
+    console::{
+        locks::ApiLocks,
+        messages::{EndpointJwksResponse, JwksSettings},
+    },
     http::health_server::AppMetrics,
+    intern::RoleNameInt,
     metrics::{Metrics, ThreadPoolMetrics},
     rate_limiter::{BucketRateLimiter, EndpointRateLimiter, LeakyBucketConfig, RateBucketInfo},
     scram::threadpool::ThreadPool,
     serverless::{self, cancel_set::CancelSet, GlobalConnPoolOptions},
+    RoleName,
 };
 
 project_git_version!(GIT_VERSION);
 project_build_tag!(BUILD_TAG);
 
 use clap::Parser;
-use tokio::{net::TcpListener, task::JoinSet};
+use tokio::{net::TcpListener, sync::Notify, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use utils::{project_build_tag, project_git_version, sentry_init::init_sentry};
@@ -75,6 +82,9 @@ struct LocalProxyCliArgs {
     /// File address of the local proxy config file
     #[clap(long, default_value = "./localproxy.json")]
     config_path: PathBuf,
+    /// File address of the local proxy config file
+    #[clap(long, default_value = "./localproxy.pid")]
+    pid_path: PathBuf,
 }
 
 #[derive(clap::Args, Clone, Copy, Debug)]
@@ -139,12 +149,28 @@ async fn main() -> anyhow::Result<()> {
         16,
     ));
 
-    refresh_config(args.config_path.clone()).await;
+    // write the process ID to a file so that compute-ctl can find our process later
+    // in order to trigger the appropriate SIGHUP on config change.
+    let pid = std::process::id();
+    info!("process running in PID {pid}");
+    std::fs::write(args.pid_path, format!("{pid}\n")).context("writing PID to file")?;
 
     let mut maintenance_tasks = JoinSet::new();
+
+    let refresh_config_notify = Arc::new(Notify::new());
+    let refresh_config_notify2 = Arc::clone(&refresh_config_notify);
     maintenance_tasks.spawn(proxy::handle_signals(shutdown.clone(), move || {
-        refresh_config(args.config_path.clone()).map(Ok)
+        refresh_config_notify2.notify_one();
     }));
+
+    // trigger the first config load **after** setting up the signal hook
+    // to avoid the race condition where:
+    // 1. No config file registered when local-proxy starts up
+    // 2. The config file is written but the signal hook is not yet received
+    // 3. local-proxy completes startup but has no config loaded, despite there being a registerd config.
+    refresh_config_notify.notify_one();
+    tokio::spawn(refresh_config_loop(args.config_path, refresh_config_notify));
+
     maintenance_tasks.spawn(proxy::http::health_server::task_main(
         metrics_listener,
         AppMetrics {
@@ -245,81 +271,84 @@ fn build_config(args: &LocalProxyCliArgs) -> anyhow::Result<&'static ProxyConfig
     })))
 }
 
-async fn refresh_config(path: PathBuf) {
-    match refresh_config_inner(&path).await {
-        Ok(()) => {}
-        Err(e) => {
-            error!(error=?e, ?path, "could not read config file");
+async fn refresh_config_loop(path: PathBuf, rx: Arc<Notify>) {
+    loop {
+        rx.notified().await;
+
+        match refresh_config_inner(&path).await {
+            Ok(()) => {}
+            Err(e) => {
+                error!(error=?e, ?path, "could not read config file");
+            }
         }
     }
 }
 
 async fn refresh_config_inner(path: &Path) -> anyhow::Result<()> {
     let bytes = tokio::fs::read(&path).await?;
-    let mut data: JwksRoleMapping = serde_json::from_slice(&bytes)?;
+    let data: LocalProxySpec = serde_json::from_slice(&bytes)?;
 
-    let mut settings = None;
+    let mut jwks_set = vec![];
 
-    for mapping in data.roles.values_mut() {
-        for jwks in &mut mapping.jwks {
-            ensure!(
-                jwks.jwks_url.has_authority()
-                    && (jwks.jwks_url.scheme() == "http" || jwks.jwks_url.scheme() == "https"),
-                "Invalid JWKS url. Must be HTTP",
-            );
+    for jwks in data.jwks {
+        let mut jwks_url = url::Url::from_str(&jwks.jwks_url).context("parsing JWKS url")?;
 
-            ensure!(
-                jwks.jwks_url
-                    .host()
-                    .is_some_and(|h| h != url::Host::Domain("")),
-                "Invalid JWKS url. No domain listed",
-            );
+        ensure!(
+            jwks_url.has_authority()
+                && (jwks_url.scheme() == "http" || jwks_url.scheme() == "https"),
+            "Invalid JWKS url. Must be HTTP",
+        );
 
-            // clear username, password and ports
-            jwks.jwks_url.set_username("").expect(
+        ensure!(
+            jwks_url.host().is_some_and(|h| h != url::Host::Domain("")),
+            "Invalid JWKS url. No domain listed",
+        );
+
+        // clear username, password and ports
+        jwks_url
+            .set_username("")
+            .expect("url can be a base and has a valid host and is not a file. should not error");
+        jwks_url
+            .set_password(None)
+            .expect("url can be a base and has a valid host and is not a file. should not error");
+        // local testing is hard if we need to have a specific restricted port
+        if cfg!(not(feature = "testing")) {
+            jwks_url.set_port(None).expect(
                 "url can be a base and has a valid host and is not a file. should not error",
             );
-            jwks.jwks_url.set_password(None).expect(
-                "url can be a base and has a valid host and is not a file. should not error",
-            );
-            // local testing is hard if we need to have a specific restricted port
-            if cfg!(not(feature = "testing")) {
-                jwks.jwks_url.set_port(None).expect(
-                    "url can be a base and has a valid host and is not a file. should not error",
-                );
-            }
-
-            // clear query params
-            jwks.jwks_url.set_fragment(None);
-            jwks.jwks_url.query_pairs_mut().clear().finish();
-
-            if jwks.jwks_url.scheme() != "https" {
-                // local testing is hard if we need to set up https support.
-                if cfg!(not(feature = "testing")) {
-                    jwks.jwks_url
-                        .set_scheme("https")
-                        .expect("should not error to set the scheme to https if it was http");
-                } else {
-                    warn!(scheme = jwks.jwks_url.scheme(), "JWKS url is not HTTPS");
-                }
-            }
-
-            let (pr, br) = settings.get_or_insert((jwks.project_id, jwks.branch_id));
-            ensure!(
-                *pr == jwks.project_id,
-                "inconsistent project IDs configured"
-            );
-            ensure!(*br == jwks.branch_id, "inconsistent branch IDs configured");
         }
+
+        // clear query params
+        jwks_url.set_fragment(None);
+        jwks_url.query_pairs_mut().clear().finish();
+
+        if jwks_url.scheme() != "https" {
+            // local testing is hard if we need to set up https support.
+            if cfg!(not(feature = "testing")) {
+                jwks_url
+                    .set_scheme("https")
+                    .expect("should not error to set the scheme to https if it was http");
+            } else {
+                warn!(scheme = jwks_url.scheme(), "JWKS url is not HTTPS");
+            }
+        }
+
+        jwks_set.push(JwksSettings {
+            id: jwks.id,
+            jwks_url,
+            provider_name: jwks.provider_name,
+            jwt_audience: jwks.jwt_audience,
+            role_names: jwks
+                .role_names
+                .into_iter()
+                .map(RoleName::from)
+                .map(|s| RoleNameInt::from(&s))
+                .collect(),
+        })
     }
 
-    if let Some((project_id, branch_id)) = settings {
-        JWKS_ROLE_MAP.store(Some(Arc::new(JwksRoleSettings {
-            roles: data.roles,
-            project_id,
-            branch_id,
-        })));
-    }
+    info!("successfully loaded new config");
+    JWKS_ROLE_MAP.store(Some(Arc::new(EndpointJwksResponse { jwks: jwks_set })));
 
     Ok(())
 }
