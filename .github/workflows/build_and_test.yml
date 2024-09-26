@@ -790,7 +790,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        version: [ v14, v15, v16, v17 ]
+        version:
+          # Much data was already generated on old PG versions with bullseye's
+          # libraries, the locales of which can cause data incompatibilities.
+          # However, new PG versions should check if they can be built on newer
+          # images, as that reduces the support burden of old and ancient
+          # distros.
+          - pg: v14
+            debian: bullseye
+          - pg: v15
+            debian: bullseye
+          - pg: v16
+            debian: bullseye
+          - pg: v17
+            debian: bookworm
     env:
       VM_BUILDER_VERSION: v0.29.3
 
@@ -812,18 +825,18 @@ jobs:
       # it won't have the proper authentication (written at v0.6.0)
       - name: Pulling compute-node image
         run: |
-          docker pull neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}
+          docker pull neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}
 
       - name: Build vm image
         run: |
           ./vm-builder \
-            -spec=compute/vm-image-spec.yaml \
-            -src=neondatabase/compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }} \
-            -dst=neondatabase/vm-compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}
+            -spec=compute/vm-image-spec-${{ matrix.version.debian }}.yaml \
+            -src=neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }} \
+            -dst=neondatabase/vm-compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}
 
       - name: Pushing vm-compute-node image
         run: |
-          docker push neondatabase/vm-compute-node-${{ matrix.version }}:${{ needs.tag.outputs.build-tag }}
+          docker push neondatabase/vm-compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}
 
   test-images:
     needs: [ check-permissions, tag, neon-image, compute-node-image ]
