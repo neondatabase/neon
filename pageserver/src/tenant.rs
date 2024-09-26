@@ -3887,9 +3887,9 @@ async fn run_initdb(
     let _permit = INIT_DB_SEMAPHORE.acquire().await;
 
     let initdb_command = tokio::process::Command::new(&initdb_bin_path)
-        .args(["-D", initdb_target_dir.as_ref()])
-        .args(["-U", &conf.superuser])
-        .args(["-E", "utf8"])
+        .args(["--pgdata", initdb_target_dir.as_ref()])
+        .args(["--username", &conf.superuser])
+        .args(["--encoding", "utf8"])
         .arg("--no-instructions")
         .arg("--no-sync")
         .env_clear()
