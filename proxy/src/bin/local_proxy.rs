@@ -1,13 +1,7 @@
-use std::{
-    net::SocketAddr,
-    path::{Path, PathBuf},
-    pin::pin,
-    str::FromStr,
-    sync::Arc,
-    time::Duration,
-};
+use std::{net::SocketAddr, pin::pin, str::FromStr, sync::Arc, time::Duration};
 
 use anyhow::{bail, ensure, Context};
+use camino::{Utf8Path, Utf8PathBuf};
 use compute_api::spec::LocalProxySpec;
 use dashmap::DashMap;
 use futures::future::Either;
@@ -35,7 +29,7 @@ use clap::Parser;
 use tokio::{net::TcpListener, sync::Notify, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
-use utils::{project_build_tag, project_git_version, sentry_init::init_sentry};
+use utils::{pid_file, project_build_tag, project_git_version, sentry_init::init_sentry};
 
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
@@ -79,12 +73,12 @@ struct LocalProxyCliArgs {
     /// Address of the postgres server
     #[clap(long, default_value = "127.0.0.1:5432")]
     compute: SocketAddr,
-    /// File address of the local proxy config file
+    /// Path of the local proxy config file
     #[clap(long, default_value = "./localproxy.json")]
-    config_path: PathBuf,
-    /// File address of the local proxy config file
+    config_path: Utf8PathBuf,
+    /// Path of the local proxy PID file
     #[clap(long, default_value = "./localproxy.pid")]
-    pid_path: PathBuf,
+    pid_path: Utf8PathBuf,
 }
 
 #[derive(clap::Args, Clone, Copy, Debug)]
@@ -136,6 +130,24 @@ async fn main() -> anyhow::Result<()> {
     let args = LocalProxyCliArgs::parse();
     let config = build_config(&args)?;
 
+    // before we bind to any ports, write the process ID to a file
+    // so that compute-ctl can find our process later
+    // in order to trigger the appropriate SIGHUP on config change.
+    //
+    // This also claims a "lock" that makes sure only one instance
+    // of local-proxy runs at a time.
+    let _process_guard = loop {
+        match pid_file::claim_for_current_process(&args.pid_path) {
+            Ok(guard) => break guard,
+            Err(e) => {
+                // compute-ctl might have tried to read the pid-file to let us
+                // know about some config change. We should try again.
+                error!(path=?args.pid_path, "could not claim PID file guard: {e:?}");
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        }
+    };
+
     let metrics_listener = TcpListener::bind(args.metrics).await?.into_std()?;
     let http_listener = TcpListener::bind(args.http).await?;
     let shutdown = CancellationToken::new();
@@ -158,9 +170,11 @@ async fn main() -> anyhow::Result<()> {
     let mut maintenance_tasks = JoinSet::new();
 
     let refresh_config_notify = Arc::new(Notify::new());
-    let refresh_config_notify2 = Arc::clone(&refresh_config_notify);
-    maintenance_tasks.spawn(proxy::handle_signals(shutdown.clone(), move || {
-        refresh_config_notify2.notify_one();
+    maintenance_tasks.spawn(proxy::handle_signals(shutdown.clone(), {
+        let refresh_config_notify = Arc::clone(&refresh_config_notify);
+        move || {
+            refresh_config_notify.notify_one();
+        }
     }));
 
     // trigger the first config load **after** setting up the signal hook
@@ -271,7 +285,7 @@ fn build_config(args: &LocalProxyCliArgs) -> anyhow::Result<&'static ProxyConfig
     })))
 }
 
-async fn refresh_config_loop(path: PathBuf, rx: Arc<Notify>) {
+async fn refresh_config_loop(path: Utf8PathBuf, rx: Arc<Notify>) {
     loop {
         rx.notified().await;
 
@@ -284,7 +298,7 @@ async fn refresh_config_loop(path: PathBuf, rx: Arc<Notify>) {
     }
 }
 
-async fn refresh_config_inner(path: &Path) -> anyhow::Result<()> {
+async fn refresh_config_inner(path: &Utf8Path) -> anyhow::Result<()> {
     let bytes = tokio::fs::read(&path).await?;
     let data: LocalProxySpec = serde_json::from_slice(&bytes)?;
 
