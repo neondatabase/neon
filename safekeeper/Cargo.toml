@@ -21,7 +21,6 @@ chrono.workspace = true
 clap = { workspace = true, features = ["derive"] }
 crc32c.workspace = true
 fail.workspace = true
-git-version.workspace = true
 hex.workspace = true
 humantime.workspace = true
 hyper.workspace = true

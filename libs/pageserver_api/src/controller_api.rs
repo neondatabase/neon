@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::fmt::Display;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 
@@ -57,7 +58,7 @@ pub struct NodeRegisterRequest {
     pub listen_http_addr: String,
     pub listen_http_port: u16,
 
-    pub availability_zone_id: String,
+    pub availability_zone_id: AvailabilityZone,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -74,10 +75,19 @@ pub struct TenantPolicyRequest {
     pub scheduling: Option<ShardSchedulingPolicy>,
 }
 
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct AvailabilityZone(pub String);
+
+impl Display for AvailabilityZone {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct ShardsPreferredAzsRequest {
     #[serde(flatten)]
-    pub preferred_az_ids: HashMap<TenantShardId, String>,
+    pub preferred_az_ids: HashMap<TenantShardId, AvailabilityZone>,
 }
 
 #[derive(Serialize, Deserialize)]

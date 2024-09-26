@@ -5,6 +5,7 @@ use itertools::Itertools;
 use super::storage_layer::LayerName;
 
 /// Checks whether a layer map is valid (i.e., is a valid result of the current compaction algorithm if nothing goes wrong).
+///
 /// The function checks if we can split the LSN range of a delta layer only at the LSNs of the delta layers. For example,
 ///
 /// ```plain

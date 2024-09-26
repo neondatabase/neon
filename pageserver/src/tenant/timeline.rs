@@ -112,7 +112,7 @@ use pageserver_api::reltag::RelTag;
 use pageserver_api::shard::ShardIndex;
 
 use postgres_connection::PgConnectionConfig;
-use postgres_ffi::to_pg_timestamp;
+use postgres_ffi::{to_pg_timestamp, v14::xlog_utils, WAL_SEGMENT_SIZE};
 use utils::{
     completion,
     generation::Generation,
@@ -1337,6 +1337,10 @@ impl Timeline {
         _ctx: &RequestContext,
     ) -> anyhow::Result<LsnLease> {
         let lease = {
+            // Normalize the requested LSN to be aligned, and move to the first record
+            // if it points to the beginning of the page (header).
+            let lsn = xlog_utils::normalize_lsn(lsn, WAL_SEGMENT_SIZE);
+
             let mut gc_info = self.gc_info.write().unwrap();
 
             let valid_until = SystemTime::now() + length;
@@ -3597,7 +3601,7 @@ impl Timeline {
                     ctx,
                 )
                 .await
-                .map_err(|e| FlushLayerError::from_anyhow(self, e))?;
+                .map_err(|e| FlushLayerError::from_anyhow(self, e.into()))?;
 
             if self.cancel.is_cancelled() {
                 return Err(FlushLayerError::Cancelled);
@@ -3836,16 +3840,20 @@ impl Timeline {
         partition_size: u64,
         flags: EnumSet<CompactFlags>,
         ctx: &RequestContext,
-    ) -> anyhow::Result<((KeyPartitioning, SparseKeyPartitioning), Lsn)> {
+    ) -> Result<((KeyPartitioning, SparseKeyPartitioning), Lsn), CompactionError> {
         let Ok(mut partitioning_guard) = self.partitioning.try_lock() else {
             // NB: there are two callers, one is the compaction task, of which there is only one per struct Tenant and hence Timeline.
             // The other is the initdb optimization in flush_frozen_layer, used by `boostrap_timeline`, which runs before `.activate()`
             // and hence before the compaction task starts.
-            anyhow::bail!("repartition() called concurrently, this should not happen");
+            return Err(CompactionError::Other(anyhow!(
+                "repartition() called concurrently, this should not happen"
+            )));
         };
         let ((dense_partition, sparse_partition), partition_lsn) = &*partitioning_guard;
         if lsn < *partition_lsn {
-            anyhow::bail!("repartition() called with LSN going backwards, this should not happen");
+            return Err(CompactionError::Other(anyhow!(
+                "repartition() called with LSN going backwards, this should not happen"
+            )));
         }
 
         let distance = lsn.0 - partition_lsn.0;
@@ -4445,6 +4453,12 @@ pub(crate) enum CompactionError {
     /// Compaction cannot be done right now; page reconstruction and so on.
     #[error(transparent)]
     Other(anyhow::Error),
+}
+
+impl CompactionError {
+    pub fn is_cancelled(&self) -> bool {
+        matches!(self, CompactionError::ShuttingDown)
+    }
 }
 
 impl From<CollectKeySpaceError> for CompactionError {

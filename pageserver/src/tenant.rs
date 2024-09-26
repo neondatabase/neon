@@ -563,6 +563,8 @@ pub enum CreateTimelineError {
     AncestorLsn(anyhow::Error),
     #[error("ancestor timeline is not active")]
     AncestorNotActive,
+    #[error("ancestor timeline is archived")]
+    AncestorArchived,
     #[error("tenant shutting down")]
     ShuttingDown,
     #[error(transparent)]
@@ -1698,6 +1700,11 @@ impl Tenant {
                     return Err(CreateTimelineError::AncestorNotActive);
                 }
 
+                if ancestor_timeline.is_archived() == Some(true) {
+                    info!("tried to branch archived timeline");
+                    return Err(CreateTimelineError::AncestorArchived);
+                }
+
                 if let Some(lsn) = ancestor_start_lsn.as_mut() {
                     *lsn = lsn.align();
 
@@ -1968,9 +1975,6 @@ impl Tenant {
                 TenantState::Activating(_) | TenantState::Active | TenantState::Broken { .. } | TenantState::Stopping { .. } => {
                     panic!("caller is responsible for calling activate() only on Loading / Attaching tenants, got {state:?}", state = current_state);
                 }
-                TenantState::Loading => {
-                    *current_state = TenantState::Activating(ActivatingFrom::Loading);
-                }
                 TenantState::Attaching => {
                     *current_state = TenantState::Activating(ActivatingFrom::Attaching);
                 }
@@ -2151,7 +2155,7 @@ impl Tenant {
     async fn set_stopping(
         &self,
         progress: completion::Barrier,
-        allow_transition_from_loading: bool,
+        _allow_transition_from_loading: bool,
         allow_transition_from_attaching: bool,
     ) -> Result<(), SetStoppingError> {
         let mut rx = self.state.subscribe();
@@ -2166,7 +2170,6 @@ impl Tenant {
                 );
                 false
             }
-            TenantState::Loading => allow_transition_from_loading,
             TenantState::Active | TenantState::Broken { .. } | TenantState::Stopping { .. } => true,
         })
         .await
@@ -2181,13 +2184,6 @@ impl Tenant {
             TenantState::Attaching => {
                 if !allow_transition_from_attaching {
                     unreachable!("2we ensured above that we're done with activation, and, there is no re-activation")
-                };
-                *current_state = TenantState::Stopping { progress };
-                true
-            }
-            TenantState::Loading => {
-                if !allow_transition_from_loading {
-                    unreachable!("3we ensured above that we're done with activation, and, there is no re-activation")
                 };
                 *current_state = TenantState::Stopping { progress };
                 true
@@ -2247,7 +2243,7 @@ impl Tenant {
         // The load & attach routines own the tenant state until it has reached `Active`.
         // So, wait until it's done.
         rx.wait_for(|state| match state {
-            TenantState::Activating(_) | TenantState::Loading | TenantState::Attaching => {
+            TenantState::Activating(_) | TenantState::Attaching => {
                 info!(
                     "waiting for {} to turn Active|Broken|Stopping",
                     <&'static str>::from(state)
@@ -2267,7 +2263,7 @@ impl Tenant {
         let reason = reason.to_string();
         self.state.send_modify(|current_state| {
             match *current_state {
-                TenantState::Activating(_) | TenantState::Loading | TenantState::Attaching => {
+                TenantState::Activating(_) | TenantState::Attaching => {
                     unreachable!("we ensured above that we're done with activation, and, there is no re-activation")
                 }
                 TenantState::Active => {
@@ -2311,7 +2307,7 @@ impl Tenant {
         loop {
             let current_state = receiver.borrow_and_update().clone();
             match current_state {
-                TenantState::Loading | TenantState::Attaching | TenantState::Activating(_) => {
+                TenantState::Attaching | TenantState::Activating(_) => {
                     // in these states, there's a chance that we can reach ::Active
                     self.activate_now();
                     match timeout_cancellable(timeout, &self.cancel, receiver.changed()).await {
@@ -4144,7 +4140,7 @@ pub(crate) mod harness {
             let walredo_mgr = Arc::new(WalRedoManager::from(TestRedoManager));
 
             let tenant = Arc::new(Tenant::new(
-                TenantState::Loading,
+                TenantState::Attaching,
                 self.conf,
                 AttachedTenantConf::try_from(LocationConf::attached_single(
                     TenantConfOpt::from(self.tenant_conf.clone()),

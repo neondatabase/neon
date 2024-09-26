@@ -27,7 +27,6 @@ crc32c.workspace = true
 either.workspace = true
 fail.workspace = true
 futures.workspace = true
-git-version.workspace = true
 hex.workspace = true
 humantime.workspace = true
 humantime-serde.workspace = true
