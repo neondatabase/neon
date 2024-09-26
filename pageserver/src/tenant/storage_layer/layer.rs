@@ -442,11 +442,13 @@ impl Layer {
             // Visibility was modified to Visible: maybe log about this
             match ctx.task_kind() {
                 TaskKind::CalculateSyntheticSize
+                | TaskKind::OndemandLogicalSizeCalculation
                 | TaskKind::GarbageCollector
                 | TaskKind::MgmtRequest => {
                     // This situation is expected in code paths do binary searches of the LSN space to resolve
                     // an LSN to a timestamp, which happens during GC, during GC cutoff calculations in synthetic size,
-                    // and on-demand for certain HTTP API requests.
+                    // and on-demand for certain HTTP API requests. On-demand logical size calculation is also included
+                    // because it is run as a sub-task of synthetic size.
                 }
                 _ => {
                     // In all other contexts, it is unusual to do I/O involving layers which are not visible at
