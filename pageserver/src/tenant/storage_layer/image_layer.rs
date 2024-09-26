@@ -40,11 +40,12 @@ use crate::tenant::vectored_blob_io::{
     VectoredReadPlanner,
 };
 use crate::tenant::PageReconstructError;
+use crate::virtual_file::dio::IoBufferMut;
 use crate::virtual_file::owned_buffers_io::io_buf_ext::IoBufExt;
 use crate::virtual_file::{self, MaybeFatalIo, VirtualFile};
 use crate::{IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX};
 use anyhow::{anyhow, bail, ensure, Context, Result};
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use camino::{Utf8Path, Utf8PathBuf};
 use hex;
 use itertools::Itertools;
@@ -542,14 +543,15 @@ impl ImageLayerInner {
             .await?;
 
         let vectored_blob_reader = VectoredBlobReader::new(&self.file);
+        let align = virtual_file::get_io_buffer_alignment();
         let mut key_count = 0;
         for read in plan.into_iter() {
             let buf_size = read.size();
 
-            let buf = BytesMut::with_capacity(buf_size);
+            let buf = IoBufferMut::with_capacity_aligned(buf_size, align);
             let blobs_buf = vectored_blob_reader.read_blobs(&read, buf, ctx).await?;
-            let frozen_buf = blobs_buf.buf.freeze();
-            let view = BufView::new_bytes(frozen_buf);
+
+            let view = BufView::new_slice(&blobs_buf.buf);
 
             for meta in blobs_buf.blobs.iter() {
                 let img_buf = meta.read(&view).await?;
@@ -597,13 +599,13 @@ impl ImageLayerInner {
                 );
             }
 
-            let buf = BytesMut::with_capacity(buf_size);
+            let align = virtual_file::get_io_buffer_alignment();
+            let buf = IoBufferMut::with_capacity_aligned(buf_size, align);
             let res = vectored_blob_reader.read_blobs(&read, buf, ctx).await;
 
             match res {
                 Ok(blobs_buf) => {
-                    let frozen_buf = blobs_buf.buf.freeze();
-                    let view = BufView::new_bytes(frozen_buf);
+                    let view = BufView::new_slice(&blobs_buf.buf);
                     for meta in blobs_buf.blobs.iter() {
                         let img_buf = meta.read(&view).await;
 
@@ -1039,12 +1041,12 @@ impl<'a> ImageLayerIterator<'a> {
         let vectored_blob_reader = VectoredBlobReader::new(&self.image_layer.file);
         let mut next_batch = std::collections::VecDeque::new();
         let buf_size = plan.size();
-        let buf = BytesMut::with_capacity(buf_size);
+        let align = virtual_file::get_io_buffer_alignment();
+        let buf = IoBufferMut::with_capacity_aligned(buf_size, align);
         let blobs_buf = vectored_blob_reader
             .read_blobs(&plan, buf, self.ctx)
             .await?;
-        let frozen_buf = blobs_buf.buf.freeze();
-        let view = BufView::new_bytes(frozen_buf);
+        let view = BufView::new_slice(&blobs_buf.buf);
         for meta in blobs_buf.blobs.iter() {
             let img_buf = meta.read(&view).await?;
             next_batch.push_back((
