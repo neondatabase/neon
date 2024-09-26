@@ -994,7 +994,9 @@ impl ImageLayerWriter {
         };
 
         let temp_path = inner.path.clone();
-        let final_path = inner.conf.timeline_path(&inner.tenant_shard_id, &inner.timeline_id)
+        let final_path = inner
+            .conf
+            .timeline_path(&inner.tenant_shard_id, &inner.timeline_id)
             .join(name.to_string());
 
         let desc = inner.finish_layer(ctx, None).await?;

@@ -21,6 +21,7 @@ pub mod aux_file;
 pub mod metrics;
 pub mod page_cache;
 pub mod page_service;
+pub mod pg_import;
 pub mod pgdatadir_mapping;
 pub mod repository;
 pub mod span;
@@ -32,7 +33,6 @@ pub mod virtual_file;
 pub mod walingest;
 pub mod walrecord;
 pub mod walredo;
-pub mod pg_import;
 
 use camino::Utf8Path;
 use deletion_queue::DeletionQueue;

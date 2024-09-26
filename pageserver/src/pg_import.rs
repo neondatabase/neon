@@ -5,32 +5,49 @@ use bytes::Bytes;
 use camino::{Utf8Path, Utf8PathBuf};
 
 use itertools::Itertools;
-use pageserver_api::{key::{rel_block_to_key, rel_dir_to_key, rel_size_to_key, relmap_file_key, DBDIR_KEY}, reltag::RelTag};
+use pageserver_api::{
+    key::{rel_block_to_key, rel_dir_to_key, rel_size_to_key, relmap_file_key, DBDIR_KEY},
+    reltag::RelTag,
+};
 use postgres_ffi::{pg_constants, relfile_utils::parse_relfilename, ControlFileData, BLCKSZ};
-use tokio::{io::AsyncRead, task::{self, JoinHandle}};
+use tokio::{
+    io::AsyncRead,
+    task::{self, JoinHandle},
+};
 use tracing::debug;
-use utils::{id::{NodeId, TenantId, TimelineId}, shard::{ShardCount, ShardNumber, TenantShardId}};
+use utils::{
+    id::{NodeId, TenantId, TimelineId},
+    shard::{ShardCount, ShardNumber, TenantShardId},
+};
 use walkdir::WalkDir;
 
-use crate::{context::{DownloadBehavior, RequestContext}, pgdatadir_mapping::{DbDirectory, RelDirectory}, task_mgr::TaskKind, tenant::storage_layer::ImageLayerWriter};
-use crate::pgdatadir_mapping::{SlruSegmentDirectory, TwoPhaseDirectory};
 use crate::config::PageServerConf;
+use crate::pgdatadir_mapping::{SlruSegmentDirectory, TwoPhaseDirectory};
+use crate::{
+    context::{DownloadBehavior, RequestContext},
+    pgdatadir_mapping::{DbDirectory, RelDirectory},
+    task_mgr::TaskKind,
+    tenant::storage_layer::ImageLayerWriter,
+};
 use tokio::io::AsyncReadExt;
 
-use crate::tenant::storage_layer::PersistentLayerDesc;
-use utils::generation::Generation;
-use utils::lsn::Lsn;
-use crate::tenant::IndexPart;
 use crate::tenant::metadata::TimelineMetadata;
 use crate::tenant::remote_timeline_client;
 use crate::tenant::remote_timeline_client::LayerFileMetadata;
-use pageserver_api::shard::ShardIndex;
+use crate::tenant::storage_layer::PersistentLayerDesc;
+use crate::tenant::IndexPart;
 use pageserver_api::key::Key;
-use pageserver_api::keyspace::{is_contiguous_range, contiguous_range_len};
+use pageserver_api::key::{
+    slru_block_to_key, slru_dir_to_key, slru_segment_size_to_key, CHECKPOINT_KEY, CONTROLFILE_KEY,
+    TWOPHASEDIR_KEY,
+};
 use pageserver_api::keyspace::singleton_range;
+use pageserver_api::keyspace::{contiguous_range_len, is_contiguous_range};
 use pageserver_api::reltag::SlruKind;
-use pageserver_api::key::{slru_block_to_key, slru_dir_to_key, slru_segment_size_to_key, TWOPHASEDIR_KEY, CONTROLFILE_KEY, CHECKPOINT_KEY};
+use pageserver_api::shard::ShardIndex;
 use utils::bin_ser::BeSer;
+use utils::generation::Generation;
+use utils::lsn::Lsn;
 
 use std::collections::HashSet;
 use std::ops::Range;
@@ -48,14 +65,13 @@ pub struct PgImportEnv {
 }
 
 impl PgImportEnv {
-
-    pub async fn init(dstdir: &Utf8Path, tenant_id: TenantId, timeline_id: TimelineId) -> anyhow::Result<PgImportEnv> {
+    pub async fn init(
+        dstdir: &Utf8Path,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+    ) -> anyhow::Result<PgImportEnv> {
         let config = toml_edit::Document::new();
-        let conf = PageServerConf::parse_and_validate(
-            NodeId(42), 
-            &config,
-            dstdir
-        )?;
+        let conf = PageServerConf::parse_and_validate(NodeId(42), &config, dstdir)?;
         let conf = Box::leak(Box::new(conf));
 
         let tsi = TenantShardId {
@@ -65,7 +81,7 @@ impl PgImportEnv {
         };
 
         Ok(PgImportEnv {
-            conf, 
+            conf,
             tli: timeline_id,
             tsi,
             pgdata_lsn: Lsn(0), // Will be filled in later, when the control file is imported
@@ -86,6 +102,7 @@ impl PgImportEnv {
         let timeline_path = self.conf.timeline_path(&self.tsi, &self.tli);
 
         println!("Importing {pgdata_path} to {timeline_path} as lsn {pgdata_lsn}...");
+
         self.pgdata_lsn = pgdata_lsn;
 
         let datadir = PgDataDir::new(pgdata_path);
@@ -93,9 +110,14 @@ impl PgImportEnv {
         // Import dbdir (00:00:00 keyspace)
         // This is just constructed here, but will be written to the image layer in the first call to import_db()
         let dbdir_buf = Bytes::from(DbDirectory::ser(&DbDirectory {
-            dbdirs: datadir.dbs.iter().map(|db| ((db.spcnode, db.dboid), true)).collect(),
+            dbdirs: datadir
+                .dbs
+                .iter()
+                .map(|db| ((db.spcnode, db.dboid), true))
+                .collect(),
         })?);
-        self.tasks.push(ImportSingleKeyTask::new(DBDIR_KEY, dbdir_buf).into());
+        self.tasks
+            .push(ImportSingleKeyTask::new(DBDIR_KEY, dbdir_buf).into());
 
         // Import databases (00:spcnode:dbnode keyspace for each db)
         for db in datadir.dbs {
@@ -105,24 +127,45 @@ impl PgImportEnv {
         // Import SLRUs
 
         // pg_xact (01:00 keyspace)
-        self.import_slru(SlruKind::Clog, &pgdata_path.join("pg_xact")).await?;
+        self.import_slru(SlruKind::Clog, &pgdata_path.join("pg_xact"))
+            .await?;
         // pg_multixact/members (01:01 keyspace)
-        self.import_slru(SlruKind::MultiXactMembers, &pgdata_path.join("pg_multixact/members")).await?;
+        self.import_slru(
+            SlruKind::MultiXactMembers,
+            &pgdata_path.join("pg_multixact/members"),
+        )
+        .await?;
         // pg_multixact/offsets (01:02 keyspace)
-        self.import_slru(SlruKind::MultiXactOffsets, &pgdata_path.join("pg_multixact/offsets")).await?;
+        self.import_slru(
+            SlruKind::MultiXactOffsets,
+            &pgdata_path.join("pg_multixact/offsets"),
+        )
+        .await?;
 
         // Import pg_twophase.
         // TODO: as empty
-        let twophasedir_buf = TwoPhaseDirectory::ser(
-            &TwoPhaseDirectory { xids: HashSet::new() }
-        )?;
-        self.tasks.push(AnyImportTask::SingleKey(ImportSingleKeyTask::new(TWOPHASEDIR_KEY, Bytes::from(twophasedir_buf))));
+        let twophasedir_buf = TwoPhaseDirectory::ser(&TwoPhaseDirectory {
+            xids: HashSet::new(),
+        })?;
+        self.tasks
+            .push(AnyImportTask::SingleKey(ImportSingleKeyTask::new(
+                TWOPHASEDIR_KEY,
+                Bytes::from(twophasedir_buf),
+            )));
 
         // Controlfile, checkpoint
-        self.tasks.push(AnyImportTask::SingleKey(ImportSingleKeyTask::new(CONTROLFILE_KEY, Bytes::from(controlfile_buf))));
+        self.tasks
+            .push(AnyImportTask::SingleKey(ImportSingleKeyTask::new(
+                CONTROLFILE_KEY,
+                Bytes::from(controlfile_buf),
+            )));
 
         let checkpoint_buf = control_file.checkPointCopy.encode()?;
-        self.tasks.push(AnyImportTask::SingleKey(ImportSingleKeyTask::new(CHECKPOINT_KEY, checkpoint_buf)));
+        self.tasks
+            .push(AnyImportTask::SingleKey(ImportSingleKeyTask::new(
+                CHECKPOINT_KEY,
+                checkpoint_buf,
+            )));
 
         // Assigns parts of key space to later parallel jobs
         let mut last_end_key = Key::MIN;
@@ -130,12 +173,12 @@ impl PgImportEnv {
         let mut current_chunk_size: usize = 0;
         let mut parallel_jobs = Vec::new();
         for task in std::mem::take(&mut self.tasks).into_iter() {
-            if current_chunk_size + task.total_size() > 1024*1024*1024 {
+            if current_chunk_size + task.total_size() > 1024 * 1024 * 1024 {
                 let key_range = last_end_key..task.key_range().start;
                 parallel_jobs.push(ChunkProcessingJob::new(
                     key_range.clone(),
                     std::mem::take(&mut current_chunk),
-                    self
+                    self,
                 ));
                 last_end_key = key_range.end;
                 current_chunk_size = 0;
@@ -146,7 +189,7 @@ impl PgImportEnv {
         parallel_jobs.push(ChunkProcessingJob::new(
             last_end_key..Key::NON_L0_MAX,
             current_chunk,
-            self
+            self,
         ));
 
         // Start all jobs simultaneosly
@@ -172,10 +215,7 @@ impl PgImportEnv {
         Ok(())
     }
 
-    async fn import_db(
-        &mut self,
-        db: &PgDataDirDb,
-    ) -> anyhow::Result<()> {
+    async fn import_db(&mut self, db: &PgDataDirDb) -> anyhow::Result<()> {
         debug!(
             "Importing database (path={}, tablespace={}, dboid={})",
             db.path, db.spcnode, db.dboid
@@ -186,15 +226,26 @@ impl PgImportEnv {
         debug!("Constructing relmap entry, key {relmap_key}");
         let mut relmap_file = tokio::fs::File::open(&db.path.join("pg_filenode.map")).await?;
         let relmap_buf = read_all_bytes(&mut relmap_file).await?;
-        self.tasks.push(AnyImportTask::SingleKey(ImportSingleKeyTask::new(relmap_key, relmap_buf)));
+        self.tasks
+            .push(AnyImportTask::SingleKey(ImportSingleKeyTask::new(
+                relmap_key, relmap_buf,
+            )));
 
         // Import reldir (00:spcnode:dbnode:00:*:01)
         let reldir_key = rel_dir_to_key(db.spcnode, db.dboid);
         debug!("Constructing reldirs entry, key {reldir_key}");
         let reldir_buf = RelDirectory::ser(&RelDirectory {
-            rels: db.files.iter().map(|f| (f.rel_tag.relnode, f.rel_tag.forknum)).collect(),
+            rels: db
+                .files
+                .iter()
+                .map(|f| (f.rel_tag.relnode, f.rel_tag.forknum))
+                .collect(),
         })?;
-        self.tasks.push(AnyImportTask::SingleKey(ImportSingleKeyTask::new(reldir_key, Bytes::from(reldir_buf))));
+        self.tasks
+            .push(AnyImportTask::SingleKey(ImportSingleKeyTask::new(
+                reldir_key,
+                Bytes::from(reldir_buf),
+            )));
 
         // Import data (00:spcnode:dbnode:reloid:fork:blk) and set sizes for each last
         // segment in a given relation (00:spcnode:dbnode:reloid:fork:ff)
@@ -204,25 +255,29 @@ impl PgImportEnv {
             let start_blk: u32 = file.segno * (1024 * 1024 * 1024 / 8192);
             let start_key = rel_block_to_key(file.rel_tag, start_blk);
             let end_key = rel_block_to_key(file.rel_tag, start_blk + (len / 8192) as u32);
-            self.tasks.push(AnyImportTask::RelBlocks(ImportRelBlocksTask::new(start_key..end_key, &file.path)));
+            self.tasks
+                .push(AnyImportTask::RelBlocks(ImportRelBlocksTask::new(
+                    start_key..end_key,
+                    &file.path,
+                )));
 
             // Set relsize for the last segment (00:spcnode:dbnode:reloid:fork:ff)
             if let Some(nblocks) = file.nblocks {
                 let size_key = rel_size_to_key(file.rel_tag);
                 //debug!("Setting relation size (path={path}, rel_tag={rel_tag}, segno={segno}) to {nblocks}, key {size_key}");
                 let buf = nblocks.to_le_bytes();
-                self.tasks.push(AnyImportTask::SingleKey(ImportSingleKeyTask::new(size_key, Bytes::from(buf.to_vec()))));
+                self.tasks
+                    .push(AnyImportTask::SingleKey(ImportSingleKeyTask::new(
+                        size_key,
+                        Bytes::from(buf.to_vec()),
+                    )));
             }
         }
 
         Ok(())
     }
 
-    async fn import_slru(
-        &mut self,
-        kind: SlruKind,
-        path: &Utf8PathBuf,
-    ) -> anyhow::Result<()> {
+    async fn import_slru(&mut self, kind: SlruKind, path: &Utf8PathBuf) -> anyhow::Result<()> {
         let segments: Vec<(String, u32)> = WalkDir::new(path)
             .max_depth(1)
             .into_iter()
@@ -232,16 +287,19 @@ impl PgImportEnv {
                 let filename = filename.to_string_lossy();
                 let segno = u32::from_str_radix(&filename, 16).ok()?;
                 Some((filename.to_string(), segno))
-            }).collect();
+            })
+            .collect();
 
         // Write SlruDir
         let slrudir_key = slru_dir_to_key(kind);
-        let segnos: HashSet<u32> = segments.iter().map(|(_path, segno)| { *segno }).collect();
-        let slrudir = SlruSegmentDirectory {
-            segments: segnos,
-        };
+        let segnos: HashSet<u32> = segments.iter().map(|(_path, segno)| *segno).collect();
+        let slrudir = SlruSegmentDirectory { segments: segnos };
         let slrudir_buf = SlruSegmentDirectory::ser(&slrudir)?;
-        self.tasks.push(AnyImportTask::SingleKey(ImportSingleKeyTask::new(slrudir_key, Bytes::from(slrudir_buf))));
+        self.tasks
+            .push(AnyImportTask::SingleKey(ImportSingleKeyTask::new(
+                slrudir_key,
+                Bytes::from(slrudir_buf),
+            )));
 
         for (segpath, segno) in segments {
             // SlruSegBlocks for each segment
@@ -251,12 +309,20 @@ impl PgImportEnv {
             let nblocks = u32::try_from(file_size / 8192)?;
             let start_key = slru_block_to_key(kind, segno, 0);
             let end_key = slru_block_to_key(kind, segno, nblocks);
-            self.tasks.push(AnyImportTask::SlruBlocks(ImportSlruBlocksTask::new(start_key..end_key, &p)));
+            self.tasks
+                .push(AnyImportTask::SlruBlocks(ImportSlruBlocksTask::new(
+                    start_key..end_key,
+                    &p,
+                )));
 
             // Followed by SlruSegSize
             let segsize_key = slru_segment_size_to_key(kind, segno);
             let segsize_buf = nblocks.to_le_bytes();
-            self.tasks.push(AnyImportTask::SingleKey(ImportSingleKeyTask::new(segsize_key, Bytes::copy_from_slice(&segsize_buf))));
+            self.tasks
+                .push(AnyImportTask::SingleKey(ImportSingleKeyTask::new(
+                    segsize_key,
+                    Bytes::copy_from_slice(&segsize_buf),
+                )));
         }
         Ok(())
     }
@@ -269,7 +335,9 @@ impl PgImportEnv {
             202107181 => 14,
             202209061 => 15,
             202307071 => 16,
-            catversion => { bail!("unrecognized catalog version {catversion}")},
+            catversion => {
+                bail!("unrecognized catalog version {catversion}")
+            }
         };
 
         let metadata = TimelineMetadata::new(
@@ -281,8 +349,8 @@ impl PgImportEnv {
             Some(self.pgdata_lsn),
             None, // no ancestor
             Lsn(0),
-            self.pgdata_lsn,  // latest_gc_cutoff_lsn
-            self.pgdata_lsn,  // initdb_lsn
+            self.pgdata_lsn, // latest_gc_cutoff_lsn
+            self.pgdata_lsn, // initdb_lsn
             pg_version,
         );
         let generation = Generation::none();
@@ -299,8 +367,7 @@ impl PgImportEnv {
         let data = index_part.to_s3_bytes()?;
         let path = remote_timeline_client::remote_index_path(&self.tsi, &self.tli, generation);
         let path = dstdir.join(path.get_path());
-        std::fs::write(&path, data)
-            .context("could not write {path}")?;
+        std::fs::write(&path, data).context("could not write {path}")?;
 
         Ok(())
     }
@@ -311,14 +378,14 @@ impl PgImportEnv {
 //
 
 struct PgDataDir {
-    pub dbs: Vec<PgDataDirDb> // spcnode, dboid, path
+    pub dbs: Vec<PgDataDirDb>, // spcnode, dboid, path
 }
 
 struct PgDataDirDb {
     pub spcnode: u32,
     pub dboid: u32,
     pub path: Utf8PathBuf,
-    pub files: Vec<PgDataDirDbFile>
+    pub files: Vec<PgDataDirDbFile>,
 }
 
 struct PgDataDirDbFile {
@@ -338,9 +405,9 @@ impl PgDataDir {
             .max_depth(1)
             .into_iter()
             .filter_map(|entry| {
-                entry.ok().and_then(|path| {
-                    path.file_name().to_string_lossy().parse::<u32>().ok()
-                })
+                entry
+                    .ok()
+                    .and_then(|path| path.file_name().to_string_lossy().parse::<u32>().ok())
             })
             .sorted()
             .map(|dboid| {
@@ -348,7 +415,7 @@ impl PgDataDir {
                     datadir_path.join("base").join(dboid.to_string()),
                     pg_constants::DEFAULTTABLESPACE_OID,
                     dboid,
-                    datadir_path
+                    datadir_path,
                 )
             })
             .collect::<Vec<_>>();
@@ -363,9 +430,7 @@ impl PgDataDir {
 
         databases.sort_by_key(|db| (db.spcnode, db.dboid));
 
-        Self {
-            dbs: databases
-        }
+        Self { dbs: databases }
     }
 }
 
@@ -408,7 +473,7 @@ impl PgDataDirDb {
         // Set cummulative sizes. Do all of that math here, so that later we could easier
         // parallelize over segments and know with which segments we need to write relsize
         // entry.
-        let mut cumulative_nblocks: usize= 0;
+        let mut cumulative_nblocks: usize = 0;
         let mut prev_rel_tag: Option<RelTag> = None;
         for i in 0..files.len() {
             if prev_rel_tag == Some(files[i].rel_tag) {
@@ -417,7 +482,7 @@ impl PgDataDirDb {
                 cumulative_nblocks = files[i].nblocks.unwrap();
             }
 
-            files[i].nblocks = if i == files.len() - 1 || files[i+1].rel_tag != files[i].rel_tag {
+            files[i].nblocks = if i == files.len() - 1 || files[i + 1].rel_tag != files[i].rel_tag {
                 Some(cumulative_nblocks)
             } else {
                 None
@@ -425,7 +490,6 @@ impl PgDataDirDb {
 
             prev_rel_tag = Some(files[i].rel_tag);
         }
-
 
         PgDataDirDb {
             files,
@@ -453,7 +517,11 @@ trait ImportTask {
         }
     }
 
-    async fn doit(self, layer_writer: &mut ImageLayerWriter, ctx: &RequestContext) -> anyhow::Result<()>;
+    async fn doit(
+        self,
+        layer_writer: &mut ImageLayerWriter,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()>;
 }
 
 struct ImportSingleKeyTask {
@@ -472,7 +540,11 @@ impl ImportTask for ImportSingleKeyTask {
         singleton_range(self.key)
     }
 
-    async fn doit(self, layer_writer: &mut ImageLayerWriter, ctx: &RequestContext) -> anyhow::Result<()> {
+    async fn doit(
+        self,
+        layer_writer: &mut ImageLayerWriter,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
         layer_writer.put_image(self.key, self.buf, ctx).await?;
         Ok(())
     }
@@ -487,7 +559,7 @@ impl ImportRelBlocksTask {
     fn new(key_range: Range<Key>, path: &Utf8Path) -> Self {
         ImportRelBlocksTask {
             key_range,
-            path: path.into()
+            path: path.into(),
         }
     }
 }
@@ -497,7 +569,11 @@ impl ImportTask for ImportRelBlocksTask {
         self.key_range.clone()
     }
 
-    async fn doit(self, layer_writer: &mut ImageLayerWriter, ctx: &RequestContext) -> anyhow::Result<()> {
+    async fn doit(
+        self,
+        layer_writer: &mut ImageLayerWriter,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
         debug!("Importing relation file {}", self.path);
         let mut reader = tokio::fs::File::open(&self.path).await?;
         let mut buf: [u8; 8192] = [0u8; 8192];
@@ -508,7 +584,9 @@ impl ImportTask for ImportRelBlocksTask {
         while blknum < end_blk {
             reader.read_exact(&mut buf).await?;
             let key = rel_block_to_key(rel_tag.clone(), blknum);
-            layer_writer.put_image(key, Bytes::copy_from_slice(&buf), ctx).await?;
+            layer_writer
+                .put_image(key, Bytes::copy_from_slice(&buf), ctx)
+                .await?;
             blknum += 1;
         }
         Ok(())
@@ -524,7 +602,7 @@ impl ImportSlruBlocksTask {
     fn new(key_range: Range<Key>, path: &Utf8Path) -> Self {
         ImportSlruBlocksTask {
             key_range,
-            path: path.into()
+            path: path.into(),
         }
     }
 }
@@ -534,9 +612,14 @@ impl ImportTask for ImportSlruBlocksTask {
         self.key_range.clone()
     }
 
-    async fn doit(self, layer_writer: &mut ImageLayerWriter, ctx: &RequestContext) -> anyhow::Result<()> {
+    async fn doit(
+        self,
+        layer_writer: &mut ImageLayerWriter,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
         debug!("Importing SLRU segment file {}", self.path);
-        let mut reader = tokio::fs::File::open(&self.path).await
+        let mut reader = tokio::fs::File::open(&self.path)
+            .await
             .context(format!("opening {}", &self.path))?;
         let mut buf: [u8; 8192] = [0u8; 8192];
 
@@ -546,7 +629,9 @@ impl ImportTask for ImportSlruBlocksTask {
         while blknum < end_blk {
             reader.read_exact(&mut buf).await?;
             let key = slru_block_to_key(kind, segno, blknum);
-            layer_writer.put_image(key, Bytes::copy_from_slice(&buf), ctx).await?;
+            layer_writer
+                .put_image(key, Bytes::copy_from_slice(&buf), ctx)
+                .await?;
             blknum += 1;
         }
         Ok(())
@@ -564,10 +649,14 @@ impl ImportTask for AnyImportTask {
         match self {
             Self::SingleKey(t) => t.key_range(),
             Self::RelBlocks(t) => t.key_range(),
-            Self::SlruBlocks(t) => t.key_range()
+            Self::SlruBlocks(t) => t.key_range(),
         }
     }
-    async fn doit(self, layer_writer: &mut ImageLayerWriter, ctx: &RequestContext) -> anyhow::Result<()> {
+    async fn doit(
+        self,
+        layer_writer: &mut ImageLayerWriter,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
         match self {
             Self::SingleKey(t) => t.doit(layer_writer, ctx).await,
             Self::RelBlocks(t) => t.doit(layer_writer, ctx).await,
@@ -620,11 +709,9 @@ impl ChunkProcessingJob {
     async fn run(self) -> anyhow::Result<PersistentLayerDesc> {
         let ctx: RequestContext = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error);
         let config = toml_edit::Document::new();
-        let conf: &'static PageServerConf = Box::leak(Box::new(PageServerConf::parse_and_validate(
-            NodeId(42),
-            &config,
-            &self.dstdir
-        )?));
+        let conf: &'static PageServerConf = Box::leak(Box::new(
+            PageServerConf::parse_and_validate(NodeId(42), &config, &self.dstdir)?,
+        ));
         let tsi = TenantShardId {
             tenant_id: self.tenant_id,
             shard_number: ShardNumber(0),
@@ -638,7 +725,8 @@ impl ChunkProcessingJob {
             &self.range,
             self.pgdata_lsn,
             &ctx,
-        ).await?;
+        )
+        .await?;
 
         for task in self.tasks {
             task.doit(&mut layer, &ctx).await?;

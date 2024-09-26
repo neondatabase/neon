@@ -1,7 +1,10 @@
 use anyhow;
 use camino::Utf8PathBuf;
 use clap::Parser;
-use pageserver::{pg_import, virtual_file::{self, api::IoEngineKind}};
+use pageserver::{
+    pg_import,
+    virtual_file::{self, api::IoEngineKind},
+};
 use utils::id::{TenantId, TimelineId};
 use utils::logging::{self, LogFormat, TracingErrorLayerEnablement};
 
@@ -35,11 +38,7 @@ fn main() -> anyhow::Result<()> {
         logging::Output::Stdout,
     )?;
 
-    virtual_file::init(
-        100,
-        IoEngineKind::StdFs,
-        512,
-    );
+    virtual_file::init(100, IoEngineKind::StdFs, 512);
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -53,7 +52,8 @@ fn main() -> anyhow::Result<()> {
 }
 
 async fn async_main(cli: CliOpts) -> anyhow::Result<()> {
-    let mut import = pg_import::PgImportEnv::init(&cli.dest_path, cli.tenant_id, cli.timeline_id).await?;
+    let mut import =
+        pg_import::PgImportEnv::init(&cli.dest_path, cli.tenant_id, cli.timeline_id).await?;
 
     import.import_datadir(&cli.pgdata).await?;
 
