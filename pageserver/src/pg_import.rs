@@ -102,6 +102,7 @@ impl PgImportEnv {
         let timeline_path = self.conf.timeline_path(&self.tsi, &self.tli);
 
         println!("Importing {pgdata_path} to {timeline_path} as lsn {pgdata_lsn}...");
+        tokio::fs::create_dir_all(&timeline_path).await?;
 
         self.pgdata_lsn = pgdata_lsn;
 
