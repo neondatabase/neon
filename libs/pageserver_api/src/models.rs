@@ -37,14 +37,11 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 /// ```mermaid
 /// stateDiagram-v2
 ///
-///     [*] --> Loading: spawn_load()
 ///     [*] --> Attaching: spawn_attach()
 ///
-///     Loading --> Activating: activate()
 ///     Attaching --> Activating: activate()
 ///     Activating --> Active: infallible
 ///
-///     Loading --> Broken: load() failure
 ///     Attaching --> Broken: attach() failure
 ///
 ///     Active --> Stopping: set_stopping(), part of shutdown & detach
@@ -68,10 +65,6 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 )]
 #[serde(tag = "slug", content = "data")]
 pub enum TenantState {
-    /// This tenant is being loaded from local disk.
-    ///
-    /// `set_stopping()` and `set_broken()` do not work in this state and wait for it to pass.
-    Loading,
     /// This tenant is being attached to the pageserver.
     ///
     /// `set_stopping()` and `set_broken()` do not work in this state and wait for it to pass.
@@ -121,8 +114,6 @@ impl TenantState {
             // But, our attach task might still be fetching the remote timelines, etc.
             // So, return `Maybe` while Attaching, making Console wait for the attach task to finish.
             Self::Attaching | Self::Activating(ActivatingFrom::Attaching) => Maybe,
-            // tenant mgr startup distinguishes attaching from loading via marker file.
-            Self::Loading | Self::Activating(ActivatingFrom::Loading) => Attached,
             // We only reach Active after successful load / attach.
             // So, call atttachment status Attached.
             Self::Active => Attached,
@@ -191,10 +182,11 @@ impl LsnLease {
 }
 
 /// The only [`TenantState`] variants we could be `TenantState::Activating` from.
+///
+/// XXX: We used to have more variants here, but now it's just one, which makes this rather
+/// useless. Remove, once we've checked that there's no client code left that looks at this.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ActivatingFrom {
-    /// Arrived to [`TenantState::Activating`] from [`TenantState::Loading`]
-    Loading,
     /// Arrived to [`TenantState::Activating`] from [`TenantState::Attaching`]
     Attaching,
 }
@@ -495,7 +487,7 @@ pub struct CompactionAlgorithmSettings {
     pub kind: CompactionAlgorithm,
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, PartialEq, Eq, Clone, Deserialize, Serialize)]
 #[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum L0FlushConfig {
     #[serde(rename_all = "snake_case")]
@@ -1562,11 +1554,8 @@ mod tests {
 
     #[test]
     fn tenantstatus_activating_serde() {
-        let states = [
-            TenantState::Activating(ActivatingFrom::Loading),
-            TenantState::Activating(ActivatingFrom::Attaching),
-        ];
-        let expected = "[{\"slug\":\"Activating\",\"data\":\"Loading\"},{\"slug\":\"Activating\",\"data\":\"Attaching\"}]";
+        let states = [TenantState::Activating(ActivatingFrom::Attaching)];
+        let expected = "[{\"slug\":\"Activating\",\"data\":\"Attaching\"}]";
 
         let actual = serde_json::to_string(&states).unwrap();
 
@@ -1581,13 +1570,7 @@ mod tests {
     fn tenantstatus_activating_strum() {
         // tests added, because we use these for metrics
         let examples = [
-            (line!(), TenantState::Loading, "Loading"),
             (line!(), TenantState::Attaching, "Attaching"),
-            (
-                line!(),
-                TenantState::Activating(ActivatingFrom::Loading),
-                "Activating",
-            ),
             (
                 line!(),
                 TenantState::Activating(ActivatingFrom::Attaching),

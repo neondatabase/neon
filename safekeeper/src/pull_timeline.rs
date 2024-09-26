@@ -278,7 +278,7 @@ impl WalResidentTimeline {
 }
 
 /// pull_timeline request body.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct Request {
     pub tenant_id: TenantId,
     pub timeline_id: TimelineId,
@@ -293,7 +293,7 @@ pub struct Response {
 }
 
 /// Response for debug dump request.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct DebugDumpResponse {
     pub start_time: DateTime<Utc>,
     pub finish_time: DateTime<Utc>,

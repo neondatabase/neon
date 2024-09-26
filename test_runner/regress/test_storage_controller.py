@@ -4,6 +4,7 @@ import threading
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import pytest
@@ -485,7 +486,7 @@ def test_storage_controller_compute_hook(
     httpserver.expect_request("/notify", method="PUT").respond_with_handler(handler)
 
     # Start running
-    env = neon_env_builder.init_start()
+    env = neon_env_builder.init_start(initial_tenant_conf={"lsn_lease_length": "0s"})
 
     # Initial notification from tenant creation
     assert len(notifications) == 1
@@ -2463,6 +2464,87 @@ def test_storage_controller_validate_during_migration(neon_env_builder: NeonEnvB
     except:
         # On failures, we want to report them FAIL during the test, not as ERROR during teardown
         neon_env_builder.enable_scrub_on_exit = False
+        raise
+
+
+class MigrationFailpoints(Enum):
+    # While only the origin is attached
+    PRE_GENERATION_INC = "reconciler-live-migrate-pre-generation-inc"
+    # While both locations are attached
+    POST_NOTIFY = "reconciler-live-migrate-post-notify"
+    # While only the destination is attached
+    POST_DETACH = "reconciler-live-migrate-post-detach"
+
+
+@pytest.mark.parametrize(
+    "migration_failpoint",
+    [
+        MigrationFailpoints.PRE_GENERATION_INC,
+        MigrationFailpoints.POST_NOTIFY,
+        MigrationFailpoints.POST_DETACH,
+    ],
+)
+def test_storage_controller_proxy_during_migration(
+    neon_env_builder: NeonEnvBuilder, migration_failpoint: MigrationFailpoints
+):
+    """
+    If we send a proxied GET request to the controller during a migration, it should route
+    the request to whichever pageserver was most recently issued a generation.
+
+    Reproducer for https://github.com/neondatabase/neon/issues/9062
+    """
+    neon_env_builder.num_pageservers = 2
+    neon_env_builder.enable_pageserver_remote_storage(s3_storage())
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+    env.neon_cli.create_tenant(tenant_id, timeline_id)
+
+    # Activate a failpoint that will cause live migration to get stuck _after_ the generation has been issued
+    # to the new pageserver: this should result in requests routed to the new pageserver.
+    env.storage_controller.configure_failpoints((migration_failpoint.value, "pause"))
+
+    origin_pageserver = env.get_tenant_pageserver(tenant_id)
+    dest_ps_id = [p.id for p in env.pageservers if p.id != origin_pageserver.id][0]
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            migrate_fut = executor.submit(
+                env.storage_controller.tenant_shard_migrate,
+                TenantShardId(tenant_id, 0, 0),
+                dest_ps_id,
+            )
+
+            def has_hit_migration_failpoint():
+                expr = f"at failpoint {str(migration_failpoint.value)}"
+                log.info(expr)
+                assert env.storage_controller.log_contains(expr)
+
+            wait_until(10, 1, has_hit_migration_failpoint)
+
+            # This request should be routed to whichever pageserver holds the highest generation
+            tenant_info = env.storage_controller.pageserver_api().tenant_status(
+                tenant_id,
+            )
+
+            if migration_failpoint in (
+                MigrationFailpoints.POST_NOTIFY,
+                MigrationFailpoints.POST_DETACH,
+            ):
+                # We expect request to land on the destination
+                assert tenant_info["generation"] == 2
+            elif migration_failpoint == MigrationFailpoints.PRE_GENERATION_INC:
+                # We expect request to land on the origin
+                assert tenant_info["generation"] == 1
+
+            # Eventually migration completes
+            env.storage_controller.configure_failpoints((migration_failpoint.value, "off"))
+            migrate_fut.result()
+    except:
+        # Always disable 'pause' failpoints, even on failure, to avoid hanging in shutdown
+        env.storage_controller.configure_failpoints((migration_failpoint.value, "off"))
         raise
 
 

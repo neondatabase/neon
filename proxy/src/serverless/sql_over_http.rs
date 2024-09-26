@@ -60,6 +60,7 @@ use super::backend::PoolingBackend;
 use super::conn_pool::AuthData;
 use super::conn_pool::Client;
 use super::conn_pool::ConnInfo;
+use super::conn_pool::ConnInfoWithAuth;
 use super::http_util::json_response;
 use super::json::json_to_pg_text;
 use super::json::pg_text_row_to_json;
@@ -148,7 +149,7 @@ fn get_conn_info(
     ctx: &RequestMonitoring,
     headers: &HeaderMap,
     tls: Option<&TlsConfig>,
-) -> Result<ConnInfo, ConnInfoError> {
+) -> Result<ConnInfoWithAuth, ConnInfoError> {
     // HTTP only uses cleartext (for now and likely always)
     ctx.set_auth_method(crate::context::AuthMethod::Cleartext);
 
@@ -235,11 +236,8 @@ fn get_conn_info(
         options: options.unwrap_or_default(),
     };
 
-    Ok(ConnInfo {
-        user_info,
-        dbname,
-        auth,
-    })
+    let conn_info = ConnInfo { user_info, dbname };
+    Ok(ConnInfoWithAuth { conn_info, auth })
 }
 
 // TODO: return different http error codes
@@ -523,7 +521,10 @@ async fn handle_inner(
 
     // TLS config should be there.
     let conn_info = get_conn_info(ctx, headers, config.tls_config.as_ref())?;
-    info!(user = conn_info.user_info.user.as_str(), "credentials");
+    info!(
+        user = conn_info.conn_info.user_info.user.as_str(),
+        "credentials"
+    );
 
     // Allow connection pooling only if explicitly requested
     // or if we have decided that http pool is no longer opt-in
@@ -568,20 +569,20 @@ async fn handle_inner(
                         .authenticate_with_password(
                             ctx,
                             &config.authentication_config,
-                            &conn_info.user_info,
+                            &conn_info.conn_info.user_info,
                             pw,
                         )
                         .await?
                 }
                 AuthData::Jwt(jwt) => {
                     backend
-                        .authenticate_with_jwt(ctx, &conn_info.user_info, jwt)
+                        .authenticate_with_jwt(ctx, &conn_info.conn_info.user_info, jwt)
                         .await?
                 }
             };
 
             let client = backend
-                .connect_to_compute(ctx, conn_info, keys, !allow_pool)
+                .connect_to_compute(ctx, conn_info.conn_info, keys, !allow_pool)
                 .await?;
             // not strictly necessary to mark success here,
             // but it's just insurance for if we forget it somewhere else

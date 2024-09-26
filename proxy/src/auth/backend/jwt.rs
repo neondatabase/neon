@@ -25,6 +25,8 @@ const MAX_JWK_BODY_SIZE: usize = 64 * 1024;
 pub(crate) trait FetchAuthRules: Clone + Send + Sync + 'static {
     fn fetch_auth_rules(
         &self,
+        ctx: &RequestMonitoring,
+        endpoint: EndpointId,
         role_name: RoleName,
     ) -> impl Future<Output = anyhow::Result<Vec<AuthRule>>> + Send;
 }
@@ -101,7 +103,9 @@ impl JwkCacheEntryLock {
     async fn renew_jwks<F: FetchAuthRules>(
         &self,
         _permit: JwkRenewalPermit<'_>,
+        ctx: &RequestMonitoring,
         client: &reqwest::Client,
+        endpoint: EndpointId,
         role_name: RoleName,
         auth_rules: &F,
     ) -> anyhow::Result<Arc<JwkCacheEntry>> {
@@ -115,7 +119,9 @@ impl JwkCacheEntryLock {
             }
         }
 
-        let rules = auth_rules.fetch_auth_rules(role_name).await?;
+        let rules = auth_rules
+            .fetch_auth_rules(ctx, endpoint, role_name)
+            .await?;
         let mut key_sets =
             ahash::HashMap::with_capacity_and_hasher(rules.len(), ahash::RandomState::new());
         // TODO(conrad): run concurrently
@@ -166,6 +172,7 @@ impl JwkCacheEntryLock {
         self: &Arc<Self>,
         ctx: &RequestMonitoring,
         client: &reqwest::Client,
+        endpoint: EndpointId,
         role_name: RoleName,
         fetch: &F,
     ) -> Result<Arc<JwkCacheEntry>, anyhow::Error> {
@@ -176,7 +183,9 @@ impl JwkCacheEntryLock {
         let Some(cached) = guard else {
             let _paused = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
             let permit = self.acquire_permit().await;
-            return self.renew_jwks(permit, client, role_name, fetch).await;
+            return self
+                .renew_jwks(permit, ctx, client, endpoint, role_name, fetch)
+                .await;
         };
 
         let last_update = now.duration_since(cached.last_retrieved);
@@ -187,7 +196,9 @@ impl JwkCacheEntryLock {
             let permit = self.acquire_permit().await;
 
             // it's been too long since we checked the keys. wait for them to update.
-            return self.renew_jwks(permit, client, role_name, fetch).await;
+            return self
+                .renew_jwks(permit, ctx, client, endpoint, role_name, fetch)
+                .await;
         }
 
         // every 5 minutes we should spawn a job to eagerly update the token.
@@ -198,8 +209,12 @@ impl JwkCacheEntryLock {
                 let entry = self.clone();
                 let client = client.clone();
                 let fetch = fetch.clone();
+                let ctx = ctx.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = entry.renew_jwks(permit, &client, role_name, &fetch).await {
+                    if let Err(e) = entry
+                        .renew_jwks(permit, &ctx, &client, endpoint, role_name, &fetch)
+                        .await
+                    {
                         tracing::warn!(error=?e, "could not fetch JWKs in background job");
                     }
                 });
@@ -216,6 +231,7 @@ impl JwkCacheEntryLock {
         ctx: &RequestMonitoring,
         jwt: &str,
         client: &reqwest::Client,
+        endpoint: EndpointId,
         role_name: RoleName,
         fetch: &F,
     ) -> Result<(), anyhow::Error> {
@@ -242,7 +258,7 @@ impl JwkCacheEntryLock {
         let kid = header.key_id.context("missing key id")?;
 
         let mut guard = self
-            .get_or_update_jwk_cache(ctx, client, role_name.clone(), fetch)
+            .get_or_update_jwk_cache(ctx, client, endpoint.clone(), role_name.clone(), fetch)
             .await?;
 
         // get the key from the JWKs if possible. If not, wait for the keys to update.
@@ -254,7 +270,14 @@ impl JwkCacheEntryLock {
 
                     let permit = self.acquire_permit().await;
                     guard = self
-                        .renew_jwks(permit, client, role_name.clone(), fetch)
+                        .renew_jwks(
+                            permit,
+                            ctx,
+                            client,
+                            endpoint.clone(),
+                            role_name.clone(),
+                            fetch,
+                        )
                         .await?;
                 }
                 _ => {
@@ -318,7 +341,7 @@ impl JwkCache {
         jwt: &str,
     ) -> Result<(), anyhow::Error> {
         // try with just a read lock first
-        let key = (endpoint, role_name.clone());
+        let key = (endpoint.clone(), role_name.clone());
         let entry = self.map.get(&key).as_deref().map(Arc::clone);
         let entry = entry.unwrap_or_else(|| {
             // acquire a write lock after to insert.
@@ -327,7 +350,7 @@ impl JwkCache {
         });
 
         entry
-            .check_jwt(ctx, jwt, &self.client, role_name, fetch)
+            .check_jwt(ctx, jwt, &self.client, endpoint, role_name, fetch)
             .await
     }
 }
@@ -688,6 +711,8 @@ X0n5X2/pBLJzxZc62ccvZYVnctBiFs6HbSnxpuMQCfkt/BcR/ttIepBQQIW86wHL
         impl FetchAuthRules for Fetch {
             async fn fetch_auth_rules(
                 &self,
+                _ctx: &RequestMonitoring,
+                _endpoint: EndpointId,
                 _role_name: RoleName,
             ) -> anyhow::Result<Vec<AuthRule>> {
                 Ok(vec![
@@ -706,6 +731,7 @@ X0n5X2/pBLJzxZc62ccvZYVnctBiFs6HbSnxpuMQCfkt/BcR/ttIepBQQIW86wHL
         }
 
         let role_name = RoleName::from("user");
+        let endpoint = EndpointId::from("ep");
 
         let jwk_cache = Arc::new(JwkCacheEntryLock::default());
 
@@ -715,6 +741,7 @@ X0n5X2/pBLJzxZc62ccvZYVnctBiFs6HbSnxpuMQCfkt/BcR/ttIepBQQIW86wHL
                     &RequestMonitoring::test(),
                     &token,
                     &client,
+                    endpoint.clone(),
                     role_name.clone(),
                     &Fetch(addr),
                 )

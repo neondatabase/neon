@@ -1,0 +1,246 @@
+collector_name: neon_collector
+metrics:
+- metric_name: lfc_misses
+  type: gauge
+  help: 'lfc_misses'
+  key_labels:
+  values: [lfc_misses]
+  query: |
+    select lfc_value as lfc_misses from neon.neon_lfc_stats where lfc_key='file_cache_misses';
+
+- metric_name: lfc_used
+  type: gauge
+  help: 'LFC chunks used (chunk = 1MB)'
+  key_labels:
+  values: [lfc_used]
+  query: |
+    select lfc_value as lfc_used from neon.neon_lfc_stats where lfc_key='file_cache_used';
+
+- metric_name: lfc_hits
+  type: gauge
+  help: 'lfc_hits'
+  key_labels:
+  values: [lfc_hits]
+  query: |
+    select lfc_value as lfc_hits from neon.neon_lfc_stats where lfc_key='file_cache_hits';
+
+- metric_name: lfc_writes
+  type: gauge
+  help: 'lfc_writes'
+  key_labels:
+  values: [lfc_writes]
+  query: |
+    select lfc_value as lfc_writes from neon.neon_lfc_stats where lfc_key='file_cache_writes';
+
+- metric_name: lfc_cache_size_limit
+  type: gauge
+  help: 'LFC cache size limit in bytes'
+  key_labels:
+  values: [lfc_cache_size_limit]
+  query: |
+    select pg_size_bytes(current_setting('neon.file_cache_size_limit')) as lfc_cache_size_limit;
+
+- metric_name: connection_counts
+  type: gauge
+  help: 'Connection counts'
+  key_labels:
+    - datname
+    - state
+  values: [count]
+  query: |
+    select datname, state, count(*) as count from pg_stat_activity where state <> '' group by datname, state;
+
+- metric_name: pg_stats_userdb
+  type: gauge
+  help: 'Stats for several oldest non-system dbs'
+  key_labels:
+    - datname
+  value_label: kind
+  values:
+    - db_size
+    - deadlocks
+    # Rows
+    - inserted
+    - updated
+    - deleted
+  # We export stats for 10 non-system database. Without this limit
+  # it is too easy to abuse the system by creating lots of databases.
+  query: |
+    select pg_database_size(datname) as db_size, deadlocks,
+       tup_inserted as inserted, tup_updated as updated, tup_deleted as deleted,
+       datname
+     from pg_stat_database
+     where datname IN (
+       select datname
+       from pg_database
+       where datname <> 'postgres' and not datistemplate
+       order by oid
+       limit 10
+     );
+
+- metric_name: max_cluster_size
+  type: gauge
+  help: 'neon.max_cluster_size setting'
+  key_labels:
+  values: [max_cluster_size]
+  query: |
+    select setting::int as max_cluster_size from pg_settings where name = 'neon.max_cluster_size';
+
+- metric_name: db_total_size
+  type: gauge
+  help: 'Size of all databases'
+  key_labels:
+  values: [total]
+  query: |
+    select sum(pg_database_size(datname)) as total from pg_database;
+
+# DEPRECATED
+- metric_name: lfc_approximate_working_set_size
+  type: gauge
+  help: 'Approximate working set size in pages of 8192 bytes'
+  key_labels:
+  values: [approximate_working_set_size]
+  query: |
+    select neon.approximate_working_set_size(false) as approximate_working_set_size;
+
+- metric_name: lfc_approximate_working_set_size_windows
+  type: gauge
+  help: 'Approximate working set size in pages of 8192 bytes'
+  key_labels: [duration]
+  values: [size]
+  # NOTE: This is the "public" / "human-readable" version. Here, we supply a small selection
+  # of durations in a pretty-printed form.
+  query: |
+    select
+      x as duration,
+      neon.approximate_working_set_size_seconds(extract('epoch' from x::interval)::int) as size
+    from
+      (values ('5m'),('15m'),('1h')) as t (x);
+
+- metric_name: compute_current_lsn
+  type: gauge
+  help: 'Current LSN of the database'
+  key_labels:
+  values: [lsn]
+  query: |
+    select
+      case
+        when pg_catalog.pg_is_in_recovery()
+        then (pg_last_wal_replay_lsn() - '0/0')::FLOAT8
+        else (pg_current_wal_lsn() - '0/0')::FLOAT8
+      end as lsn;
+
+- metric_name: compute_receive_lsn
+  type: gauge
+  help: 'Returns the last write-ahead log location that has been received and synced to disk by streaming replication'
+  key_labels:
+  values: [lsn]
+  query: |
+    SELECT
+      CASE
+        WHEN pg_catalog.pg_is_in_recovery()
+        THEN (pg_last_wal_receive_lsn() - '0/0')::FLOAT8
+        ELSE 0
+      END AS lsn;
+
+- metric_name: replication_delay_bytes
+  type: gauge
+  help: 'Bytes between received and replayed LSN'
+  key_labels:
+  values: [replication_delay_bytes]
+  # We use a GREATEST call here because this calculation can be negative.
+  # The calculation is not atomic, meaning after we've gotten the receive
+  # LSN, the replay LSN may have advanced past the receive LSN we
+  # are using for the calculation.
+  query: |
+    SELECT GREATEST(0, pg_wal_lsn_diff(pg_last_wal_receive_lsn(), pg_last_wal_replay_lsn())) AS replication_delay_bytes;
+
+- metric_name: replication_delay_seconds
+  type: gauge
+  help: 'Time since last LSN was replayed'
+  key_labels:
+  values: [replication_delay_seconds]
+  query: |
+    SELECT
+      CASE
+        WHEN pg_last_wal_receive_lsn() = pg_last_wal_replay_lsn() THEN 0
+        ELSE GREATEST (0, EXTRACT (EPOCH FROM now() - pg_last_xact_replay_timestamp()))
+     END AS replication_delay_seconds;
+
+- metric_name: checkpoints_req
+  type: gauge
+  help: 'Number of requested checkpoints'
+  key_labels:
+  values: [checkpoints_req]
+  query: |
+    SELECT checkpoints_req FROM pg_stat_bgwriter;
+
+- metric_name: checkpoints_timed
+  type: gauge
+  help: 'Number of scheduled checkpoints'
+  key_labels:
+  values: [checkpoints_timed]
+  query: |
+    SELECT checkpoints_timed FROM pg_stat_bgwriter;
+
+- metric_name: compute_logical_snapshot_files
+  type: gauge
+  help: 'Number of snapshot files in pg_logical/snapshot'
+  key_labels:
+    - timeline_id
+  values: [num_logical_snapshot_files]
+  query: |
+    SELECT
+      (SELECT setting FROM pg_settings WHERE name = 'neon.timeline_id') AS timeline_id,
+      -- Postgres creates temporary snapshot files of the form %X-%X.snap.%d.tmp. These
+      -- temporary snapshot files are renamed to the actual snapshot files after they are
+      -- completely built. We only WAL-log the completely built snapshot files.
+      (SELECT COUNT(*) FROM pg_ls_dir('pg_logical/snapshots') AS name WHERE name LIKE '%.snap') AS num_logical_snapshot_files;
+
+# In all the below metrics, we cast LSNs to floats because Prometheus only supports floats.
+# It's probably fine because float64 can store integers from -2^53 to +2^53 exactly.
+
+# Number of slots is limited by max_replication_slots, so collecting position for all of them shouldn't be bad.
+- metric_name: logical_slot_restart_lsn
+  type: gauge
+  help: 'restart_lsn of logical slots'
+  key_labels:
+    - slot_name
+  values: [restart_lsn]
+  query: |
+    select slot_name, (restart_lsn - '0/0')::FLOAT8 as restart_lsn
+    from pg_replication_slots
+    where slot_type = 'logical';
+
+- metric_name: compute_subscriptions_count
+  type: gauge
+  help: 'Number of logical replication subscriptions grouped by enabled/disabled'
+  key_labels:
+    - enabled
+  values: [subscriptions_count]
+  query: |
+    select subenabled::text as enabled, count(*) as subscriptions_count
+    from pg_subscription
+    group by subenabled;
+
+- metric_name: retained_wal
+  type: gauge
+  help: 'Retained WAL in inactive replication slots'
+  key_labels:
+    - slot_name
+  values: [retained_wal]
+  query: |
+    SELECT slot_name, pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)::FLOAT8 AS retained_wal
+    FROM pg_replication_slots
+    WHERE active = false;
+
+- metric_name: wal_is_lost
+  type: gauge
+  help: 'Whether or not the replication slot wal_status is lost'
+  key_labels:
+    - slot_name
+  values: [wal_is_lost]
+  query: |
+    SELECT slot_name,
+           CASE WHEN wal_status = 'lost' THEN 1 ELSE 0 END AS wal_is_lost
+    FROM pg_replication_slots;
