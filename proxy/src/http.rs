@@ -93,7 +93,7 @@ impl Endpoint {
     }
 
     /// Return a [builder](RequestBuilder) for a `GET` request,
-    /// appending a single `path` segment to the base endpoint URL.
+    /// accepting a closure to modify the url path segments for more complex paths queries.
     pub(crate) fn get_with_url(&self, f: impl for<'a> FnOnce(&'a mut ApiUrl)) -> RequestBuilder {
         let mut url = self.endpoint.clone();
         f(&mut url);
