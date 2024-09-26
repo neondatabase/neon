@@ -1692,11 +1692,18 @@ async fn lsn_lease_handler(
     let timeline =
         active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
             .await?;
-    let result = timeline
-        .init_lsn_lease(lsn, timeline.get_lsn_lease_length(), &ctx)
-        .map_err(|e| {
-            ApiError::InternalServerError(e.context(format!("invalid lsn lease request at {lsn}")))
-        })?;
+
+    let result = async {
+        timeline
+            .init_lsn_lease(lsn, timeline.get_lsn_lease_length(), &ctx)
+            .map_err(|e| {
+                ApiError::InternalServerError(
+                    e.context(format!("invalid lsn lease request at {lsn}")),
+                )
+            })
+    }
+    .instrument(info_span!("init_lsn_lease", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug(), %timeline_id))
+    .await?;
 
     json_response(StatusCode::OK, result)
 }
