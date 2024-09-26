@@ -660,7 +660,7 @@ jobs:
             GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
             PG_VERSION=${{ matrix.version.pg }}
             BUILD_TAG=${{ needs.tag.outputs.build-tag }}
-            TAG=${{ needs.build-build-tools-image.outputs.image-tag }}
+            TAG=${{ needs.build-build-tools-image.outputs.image-tag }}-${{ matrix.version.debian }}
             DEBIAN_VERSION=${{ matrix.version.debian }}
           provenance: false
           push: true
@@ -680,7 +680,7 @@ jobs:
             GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
             PG_VERSION=${{ matrix.version.pg }}
             BUILD_TAG=${{ needs.tag.outputs.build-tag }}
-            TAG=${{ needs.build-build-tools-image.outputs.image-tag }}
+            TAG=${{ needs.build-build-tools-image.outputs.image-tag }}-${{ matrix.version.debian }}
             DEBIAN_VERSION=${{ matrix.version.debian }}
           provenance: false
           push: true
@@ -705,7 +705,7 @@ jobs:
           build-args: |
             GIT_VERSION=${{ github.event.pull_request.head.sha || github.sha }}
             BUILD_TAG=${{ needs.tag.outputs.build-tag }}
-            TAG=${{ needs.build-build-tools-image.outputs.image-tag }}
+            TAG=${{ needs.build-build-tools-image.outputs.image-tag }}-${{ matrix.version.debian }}
             DEBIAN_VERSION=${{ matrix.version.debian }}
           provenance: false
           push: true
