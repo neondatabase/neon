@@ -1190,10 +1190,9 @@ jobs:
 
               files_to_promote+=("s3://${BUCKET}/${s3_key}")
 
-              # TODO Add v17
-              for pg_version in v14 v15 v16; do
+              for pg_version in v14 v15 v16 v17; do
                 # We run less tests for debug builds, so we don't need to promote them
-                if [ "${build_type}" == "debug" ] && { [ "${arch}" == "ARM64" ] || [ "${pg_version}" != "v16" ] ; }; then
+                if [ "${build_type}" == "debug" ] && { [ "${arch}" == "ARM64" ] || [ "${pg_version}" != "v17" ] ; }; then
                   continue
                 fi
 
