@@ -2,8 +2,8 @@ use std::{str::FromStr, time::Duration};
 
 use pageserver_api::{
     controller_api::{
-        NodeAvailability, NodeDescribeResponse, NodeRegisterRequest, NodeSchedulingPolicy,
-        TenantLocateResponseShard,
+        AvailabilityZone, NodeAvailability, NodeDescribeResponse, NodeRegisterRequest,
+        NodeSchedulingPolicy, TenantLocateResponseShard,
     },
     shard::TenantShardId,
 };
@@ -36,7 +36,7 @@ pub(crate) struct Node {
     listen_pg_addr: String,
     listen_pg_port: u16,
 
-    availability_zone_id: String,
+    availability_zone_id: AvailabilityZone,
 
     // This cancellation token means "stop any RPCs in flight to this node, and don't start
     // any more". It is not related to process shutdown.
@@ -64,8 +64,8 @@ impl Node {
     }
 
     #[allow(unused)]
-    pub(crate) fn get_availability_zone_id(&self) -> &str {
-        self.availability_zone_id.as_str()
+    pub(crate) fn get_availability_zone_id(&self) -> &AvailabilityZone {
+        &self.availability_zone_id
     }
 
     pub(crate) fn get_scheduling(&self) -> NodeSchedulingPolicy {
@@ -181,7 +181,7 @@ impl Node {
         listen_http_port: u16,
         listen_pg_addr: String,
         listen_pg_port: u16,
-        availability_zone_id: String,
+        availability_zone_id: AvailabilityZone,
     ) -> Self {
         Self {
             id,
@@ -204,7 +204,7 @@ impl Node {
             listen_http_port: self.listen_http_port as i32,
             listen_pg_addr: self.listen_pg_addr.clone(),
             listen_pg_port: self.listen_pg_port as i32,
-            availability_zone_id: self.availability_zone_id.clone(),
+            availability_zone_id: self.availability_zone_id.0.clone(),
         }
     }
 
@@ -219,7 +219,7 @@ impl Node {
             listen_http_port: np.listen_http_port as u16,
             listen_pg_addr: np.listen_pg_addr,
             listen_pg_port: np.listen_pg_port as u16,
-            availability_zone_id: np.availability_zone_id,
+            availability_zone_id: AvailabilityZone(np.availability_zone_id),
             cancel: CancellationToken::new(),
         }
     }

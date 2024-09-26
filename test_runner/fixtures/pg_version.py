@@ -16,6 +16,7 @@ class PgVersion(str, enum.Enum):
     V14 = "14"
     V15 = "15"
     V16 = "16"
+    V17 = "17"
     # Instead of making version an optional parameter in methods, we can use this fake entry
     # to explicitly rely on the default server version (could be different from pg_version fixture value)
     NOT_SET = "<-POSTRGRES VERSION IS NOT SET->"

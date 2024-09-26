@@ -53,6 +53,7 @@ TENANT_CONF = {
     # create image layers eagerly, so that GC can remove some layers
     "image_creation_threshold": "1",
     "image_layer_creation_check_threshold": "0",
+    "lsn_lease_length": "0s",
 }
 
 
@@ -134,7 +135,7 @@ def test_generations_upgrade(neon_env_builder: NeonEnvBuilder):
     )
 
     env = neon_env_builder.init_configs()
-    env.broker.try_start()
+    env.broker.start()
     for sk in env.safekeepers:
         sk.start()
     env.storage_controller.start()

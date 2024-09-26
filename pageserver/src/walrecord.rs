@@ -174,6 +174,7 @@ impl DecodedWALRecord {
                 }
                 15 => info == postgres_ffi::v15::bindings::XLOG_DBASE_CREATE_FILE_COPY,
                 16 => info == postgres_ffi::v16::bindings::XLOG_DBASE_CREATE_FILE_COPY,
+                17 => info == postgres_ffi::v17::bindings::XLOG_DBASE_CREATE_FILE_COPY,
                 _ => {
                     panic!("Unsupported postgres version {pg_version}")
                 }
@@ -341,16 +342,47 @@ pub mod v14 {
             }
         }
     }
+
+    #[repr(C)]
+    #[derive(Debug)]
+    pub struct XlParameterChange {
+        pub max_connections: i32,
+        pub max_worker_processes: i32,
+        pub max_wal_senders: i32,
+        pub max_prepared_xacts: i32,
+        pub max_locks_per_xact: i32,
+        pub wal_level: i32,
+        pub wal_log_hints: bool,
+        pub track_commit_timestamp: bool,
+        pub _padding: [u8; 2],
+    }
+
+    impl XlParameterChange {
+        pub fn decode(buf: &mut Bytes) -> XlParameterChange {
+            XlParameterChange {
+                max_connections: buf.get_i32_le(),
+                max_worker_processes: buf.get_i32_le(),
+                max_wal_senders: buf.get_i32_le(),
+                max_prepared_xacts: buf.get_i32_le(),
+                max_locks_per_xact: buf.get_i32_le(),
+                wal_level: buf.get_i32_le(),
+                wal_log_hints: buf.get_u8() != 0,
+                track_commit_timestamp: buf.get_u8() != 0,
+                _padding: [buf.get_u8(), buf.get_u8()],
+            }
+        }
+    }
 }
 
 pub mod v15 {
     pub use super::v14::{
         XlHeapDelete, XlHeapInsert, XlHeapLock, XlHeapLockUpdated, XlHeapMultiInsert, XlHeapUpdate,
+        XlParameterChange,
     };
 }
 
 pub mod v16 {
-    pub use super::v14::{XlHeapInsert, XlHeapLockUpdated, XlHeapMultiInsert};
+    pub use super::v14::{XlHeapInsert, XlHeapLockUpdated, XlHeapMultiInsert, XlParameterChange};
     use bytes::{Buf, Bytes};
     use postgres_ffi::{OffsetNumber, TransactionId};
 
@@ -524,6 +556,37 @@ pub mod v16 {
                     infobits_set: buf.get_u8(),
                     flags: buf.get_u8(),
                 }
+            }
+        }
+    }
+}
+
+pub mod v17 {
+    pub use super::v14::XlHeapLockUpdated;
+    use bytes::{Buf, Bytes};
+    pub use postgres_ffi::{TimeLineID, TimestampTz};
+
+    pub use super::v16::rm_neon;
+    pub use super::v16::{
+        XlHeapDelete, XlHeapInsert, XlHeapLock, XlHeapMultiInsert, XlHeapUpdate, XlParameterChange,
+    };
+
+    #[repr(C)]
+    #[derive(Debug)]
+    pub struct XlEndOfRecovery {
+        pub end_time: TimestampTz,
+        pub this_time_line_id: TimeLineID,
+        pub prev_time_line_id: TimeLineID,
+        pub wal_level: i32,
+    }
+
+    impl XlEndOfRecovery {
+        pub fn decode(buf: &mut Bytes) -> XlEndOfRecovery {
+            XlEndOfRecovery {
+                end_time: buf.get_i64_le(),
+                this_time_line_id: buf.get_u32_le(),
+                prev_time_line_id: buf.get_u32_le(),
+                wal_level: buf.get_i32_le(),
             }
         }
     }
@@ -746,9 +809,13 @@ pub struct XlClogTruncate {
 }
 
 impl XlClogTruncate {
-    pub fn decode(buf: &mut Bytes) -> XlClogTruncate {
+    pub fn decode(buf: &mut Bytes, pg_version: u32) -> XlClogTruncate {
         XlClogTruncate {
-            pageno: buf.get_u32_le(),
+            pageno: if pg_version < 17 {
+                buf.get_u32_le()
+            } else {
+                buf.get_u64_le() as u32
+            },
             oldest_xid: buf.get_u32_le(),
             oldest_xid_db: buf.get_u32_le(),
         }

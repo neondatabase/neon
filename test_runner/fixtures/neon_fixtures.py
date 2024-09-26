@@ -43,7 +43,6 @@ from urllib.parse import quote, urlparse
 import asyncpg
 import backoff
 import httpx
-import jwt
 import psycopg2
 import psycopg2.sql
 import pytest
@@ -60,7 +59,7 @@ from psycopg2.extensions import make_dsn, parse_dsn
 from urllib3.util.retry import Retry
 
 from fixtures import overlayfs
-from fixtures.broker import NeonBroker
+from fixtures.auth_tokens import AuthKeys, TokenScope
 from fixtures.common_types import Lsn, NodeId, TenantId, TenantShardId, TimelineId
 from fixtures.endpoint.http import EndpointHttpClient
 from fixtures.log_helper import log
@@ -93,6 +92,7 @@ from fixtures.utils import (
     allure_add_grafana_links,
     allure_attach_from_dir,
     assert_no_errors,
+    get_dir_size,
     get_self_dir,
     print_gc_result,
     subprocess_capture,
@@ -158,7 +158,7 @@ def neon_binpath(base_dir: Path, build_type: str) -> Iterator[Path]:
     yield binpath
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture(scope="session")
 def pg_distrib_dir(base_dir: Path) -> Iterator[Path]:
     if env_postgres_bin := os.environ.get("POSTGRES_DISTRIB_DIR"):
         distrib_dir = Path(env_postgres_bin).resolve()
@@ -180,25 +180,6 @@ def top_output_dir(base_dir: Path) -> Iterator[Path]:
 
     log.info(f"top_output_dir is {output_dir}")
     yield output_dir
-
-
-@pytest.fixture(scope="function")
-def versioned_pg_distrib_dir(pg_distrib_dir: Path, pg_version: PgVersion) -> Iterator[Path]:
-    versioned_dir = pg_distrib_dir / pg_version.v_prefixed
-
-    psql_bin_path = versioned_dir / "bin/psql"
-    postgres_bin_path = versioned_dir / "bin/postgres"
-
-    if os.getenv("REMOTE_ENV"):
-        # When testing against a remote server, we only need the client binary.
-        if not psql_bin_path.exists():
-            raise Exception(f"psql not found at '{psql_bin_path}'")
-    else:
-        if not postgres_bin_path.exists():
-            raise Exception(f"postgres not found at '{postgres_bin_path}'")
-
-    log.info(f"versioned_pg_distrib_dir is {versioned_dir}")
-    yield versioned_dir
 
 
 @pytest.fixture(scope="session")
@@ -243,34 +224,9 @@ def worker_base_port(worker_seq_no: int, worker_port_num: int) -> int:
     return BASE_PORT + worker_seq_no * worker_port_num
 
 
-def get_dir_size(path: str) -> int:
-    """Return size in bytes."""
-    totalbytes = 0
-    for root, _dirs, files in os.walk(path):
-        for name in files:
-            totalbytes += os.path.getsize(os.path.join(root, name))
-
-    return totalbytes
-
-
 @pytest.fixture(scope="session")
 def port_distributor(worker_base_port: int, worker_port_num: int) -> PortDistributor:
     return PortDistributor(base_port=worker_base_port, port_number=worker_port_num)
-
-
-@pytest.fixture(scope="function")
-def default_broker(
-    port_distributor: PortDistributor,
-    test_output_dir: Path,
-    neon_binpath: Path,
-) -> Iterator[NeonBroker]:
-    # multiple pytest sessions could get launched in parallel, get them different ports/datadirs
-    client_port = port_distributor.get_port()
-    broker_logfile = test_output_dir / "repo" / "storage_broker.log"
-
-    broker = NeonBroker(logfile=broker_logfile, port=client_port, neon_binpath=neon_binpath)
-    yield broker
-    broker.stop()
 
 
 @pytest.fixture(scope="session")
@@ -401,44 +357,6 @@ class PgProtocol:
         return self.safe_psql(query, log_query=log_query)[0][0]
 
 
-@dataclass
-class AuthKeys:
-    priv: str
-
-    def generate_token(self, *, scope: TokenScope, **token_data: Any) -> str:
-        token_data = {key: str(val) for key, val in token_data.items()}
-        token = jwt.encode({"scope": scope, **token_data}, self.priv, algorithm="EdDSA")
-        # cast(Any, self.priv)
-
-        # jwt.encode can return 'bytes' or 'str', depending on Python version or type
-        # hinting or something (not sure what). If it returned 'bytes', convert it to 'str'
-        # explicitly.
-        if isinstance(token, bytes):
-            token = token.decode()
-
-        return token
-
-    def generate_pageserver_token(self) -> str:
-        return self.generate_token(scope=TokenScope.PAGE_SERVER_API)
-
-    def generate_safekeeper_token(self) -> str:
-        return self.generate_token(scope=TokenScope.SAFEKEEPER_DATA)
-
-    # generate token giving access to only one tenant
-    def generate_tenant_token(self, tenant_id: TenantId) -> str:
-        return self.generate_token(scope=TokenScope.TENANT, tenant_id=str(tenant_id))
-
-
-# TODO: Replace with `StrEnum` when we upgrade to python 3.11
-class TokenScope(str, Enum):
-    ADMIN = "admin"
-    PAGE_SERVER_API = "pageserverapi"
-    GENERATIONS_API = "generations_api"
-    SAFEKEEPER_DATA = "safekeeperdata"
-    TENANT = "tenant"
-    SCRUBBER = "scrubber"
-
-
 class NeonEnvBuilder:
     """
     Builder object to create a Neon runtime environment
@@ -453,7 +371,6 @@ class NeonEnvBuilder:
         self,
         repo_dir: Path,
         port_distributor: PortDistributor,
-        broker: NeonBroker,
         run_id: uuid.UUID,
         mock_s3_server: MockS3Server,
         neon_binpath: Path,
@@ -494,7 +411,6 @@ class NeonEnvBuilder:
         # Safekeepers remote storage
         self.safekeepers_remote_storage: Optional[RemoteStorage] = None
 
-        self.broker = broker
         self.run_id = run_id
         self.mock_s3_server: MockS3Server = mock_s3_server
         self.pageserver_config_override = pageserver_config_override
@@ -726,9 +642,6 @@ class NeonEnvBuilder:
         patch_script = ""
         for ps in self.env.pageservers:
             patch_script += f"UPDATE nodes SET listen_http_port={ps.service_port.http}, listen_pg_port={ps.service_port.pg}  WHERE node_id = '{ps.id}';"
-            # This is a temporary to get the backward compat test happy
-            # since the compat snapshot was generated with an older version of neon local
-            patch_script += f"UPDATE nodes SET availability_zone_id='{ps.az_id}'  WHERE node_id = '{ps.id}' AND availability_zone_id IS NULL;"
         patch_script_path.write_text(patch_script)
 
         # Update the config with info about tenants and timelines
@@ -934,7 +847,10 @@ class NeonEnvBuilder:
         for directory_to_clean in reversed(directories_to_clean):
             if not os.listdir(directory_to_clean):
                 log.debug(f"Removing empty directory {directory_to_clean}")
-                directory_to_clean.rmdir()
+                try:
+                    directory_to_clean.rmdir()
+                except Exception as e:
+                    log.error(f"Error removing empty directory {directory_to_clean}: {e}")
 
     def cleanup_remote_storage(self):
         for x in [self.pageserver_remote_storage, self.safekeepers_remote_storage]:
@@ -1003,6 +919,8 @@ class NeonEnvBuilder:
 
             self.env.storage_controller.assert_no_errors()
 
+            self.env.broker.assert_no_errors()
+
         try:
             self.overlay_cleanup_teardown()
         except Exception as e:
@@ -1056,7 +974,7 @@ class NeonEnv:
         self.endpoints = EndpointFactory(self)
         self.safekeepers: List[Safekeeper] = []
         self.pageservers: List[NeonPageserver] = []
-        self.broker = config.broker
+        self.broker = NeonBroker(self)
         self.pageserver_remote_storage = config.pageserver_remote_storage
         self.safekeepers_remote_storage = config.safekeepers_remote_storage
         self.pg_version = config.pg_version
@@ -1231,7 +1149,7 @@ class NeonEnv:
             max_workers=2 + len(self.pageservers) + len(self.safekeepers)
         ) as executor:
             futs.append(
-                executor.submit(lambda: self.broker.try_start() or None)
+                executor.submit(lambda: self.broker.start() or None)
             )  # The `or None` is for the linter
 
             for pageserver in self.pageservers:
@@ -1288,7 +1206,7 @@ class NeonEnv:
                 pageserver.stop(immediate=immediate)
             except RuntimeError:
                 stop_later.append(pageserver)
-        self.broker.stop(immediate=immediate)
+        self.broker.stop()
 
         # TODO: for nice logging we need python 3.11 ExceptionGroup
         for ps in stop_later:
@@ -1402,7 +1320,6 @@ def neon_simple_env(
     pytestconfig: Config,
     port_distributor: PortDistributor,
     mock_s3_server: MockS3Server,
-    default_broker: NeonBroker,
     run_id: uuid.UUID,
     top_output_dir: Path,
     test_output_dir: Path,
@@ -1427,7 +1344,6 @@ def neon_simple_env(
         top_output_dir=top_output_dir,
         repo_dir=repo_dir,
         port_distributor=port_distributor,
-        broker=default_broker,
         mock_s3_server=mock_s3_server,
         neon_binpath=neon_binpath,
         pg_distrib_dir=pg_distrib_dir,
@@ -1455,7 +1371,6 @@ def neon_env_builder(
     neon_binpath: Path,
     pg_distrib_dir: Path,
     pg_version: PgVersion,
-    default_broker: NeonBroker,
     run_id: uuid.UUID,
     request: FixtureRequest,
     test_overlay_dir: Path,
@@ -1491,7 +1406,6 @@ def neon_env_builder(
         neon_binpath=neon_binpath,
         pg_distrib_dir=pg_distrib_dir,
         pg_version=pg_version,
-        broker=default_broker,
         run_id=run_id,
         preserve_database_files=cast(bool, pytestconfig.getoption("--preserve-database-files")),
         pageserver_virtual_file_io_engine=pageserver_virtual_file_io_engine,
@@ -1912,6 +1826,18 @@ class NeonCli(AbstractNeonCli):
         if immediate:
             args.extend(["-m", "immediate"])
         return self.raw_cli(args)
+
+    def broker_start(
+        self, timeout_in_seconds: Optional[int] = None
+    ) -> "subprocess.CompletedProcess[str]":
+        cmd = ["storage_broker", "start"]
+        if timeout_in_seconds is not None:
+            cmd.append(f"--start-timeout={timeout_in_seconds}s")
+        return self.raw_cli(cmd)
+
+    def broker_stop(self) -> "subprocess.CompletedProcess[str]":
+        cmd = ["storage_broker", "stop"]
+        return self.raw_cli(cmd)
 
     def endpoint_create(
         self,
@@ -2624,7 +2550,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         desired_availability: Optional[PageserverAvailability],
         desired_scheduling_policy: Optional[PageserverSchedulingPolicy],
         max_attempts: int,
-        backoff: int,
+        backoff: float,
     ):
         """
         Poll the node status until it reaches 'desired_scheduling_policy' and 'desired_availability'
@@ -3019,7 +2945,7 @@ class NeonPageserver(PgProtocol, LogUtils):
             self.id
         ):
             self.env.storage_controller.poll_node_status(
-                self.id, PageserverAvailability.ACTIVE, None, max_attempts=20, backoff=1
+                self.id, PageserverAvailability.ACTIVE, None, max_attempts=200, backoff=0.1
             )
 
         return self
@@ -3335,12 +3261,12 @@ class PgBin:
         )
         return base_path
 
-    def get_pg_controldata_checkpoint_lsn(self, pgdata: str) -> Lsn:
+    def get_pg_controldata_checkpoint_lsn(self, pgdata: Path) -> Lsn:
         """
         Run pg_controldata on given datadir and extract checkpoint lsn.
         """
 
-        pg_controldata_path = os.path.join(self.pg_bin_path, "pg_controldata")
+        pg_controldata_path = self.pg_bin_path / "pg_controldata"
         cmd = f"{pg_controldata_path} -D {pgdata}"
         result = subprocess.run(cmd, capture_output=True, text=True, shell=True)
         checkpoint_lsn = re.findall(
@@ -3423,6 +3349,7 @@ class VanillaPostgres(PgProtocol):
         assert not self.running
         with open(os.path.join(self.pgdatadir, "postgresql.conf"), "a") as conf_file:
             conf_file.write("\n".join(options))
+            conf_file.write("\n")
 
     def edit_hba(self, hba: List[str]):
         """Prepend hba lines into pg_hba.conf file."""
@@ -3448,9 +3375,9 @@ class VanillaPostgres(PgProtocol):
         self.running = False
         self.pg_bin.run_capture(["pg_ctl", "-w", "-D", str(self.pgdatadir), "stop"])
 
-    def get_subdir_size(self, subdir) -> int:
+    def get_subdir_size(self, subdir: Path) -> int:
         """Return size of pgdatadir subdirectory in bytes."""
-        return get_dir_size(os.path.join(self.pgdatadir, subdir))
+        return get_dir_size(self.pgdatadir / subdir)
 
     def __enter__(self) -> "VanillaPostgres":
         return self
@@ -3476,6 +3403,7 @@ def vanilla_pg(
     pg_bin = PgBin(test_output_dir, pg_distrib_dir, pg_version)
     port = port_distributor.get_port()
     with VanillaPostgres(pgdatadir, pg_bin, port) as vanilla_pg:
+        vanilla_pg.configure(["shared_preload_libraries='neon_rmgr'"])
         yield vanilla_pg
 
 
@@ -3932,9 +3860,6 @@ def static_proxy(
     dbname = vanilla_pg.default_options["dbname"]
     auth_endpoint = f"postgres://proxy:password@{host}:{port}/{dbname}"
 
-    # require password for 'http_auth' user
-    vanilla_pg.edit_hba([f"host {dbname} http_auth {host} password"])
-
     # For simplicity, we use the same user for both `--auth-endpoint` and `safe_psql`
     vanilla_pg.start()
     vanilla_pg.safe_psql("create user proxy with login superuser password 'password'")
@@ -3976,7 +3901,7 @@ class Endpoint(PgProtocol, LogUtils):
         self.env = env
         self.branch_name: Optional[str] = None  # dubious
         self.endpoint_id: Optional[str] = None  # dubious, see asserts below
-        self.pgdata_dir: Optional[str] = None  # Path to computenode PGDATA
+        self.pgdata_dir: Optional[Path] = None  # Path to computenode PGDATA
         self.tenant_id = tenant_id
         self.pg_port = pg_port
         self.http_port = http_port
@@ -4033,7 +3958,7 @@ class Endpoint(PgProtocol, LogUtils):
             allow_multiple=allow_multiple,
         )
         path = Path("endpoints") / self.endpoint_id / "pgdata"
-        self.pgdata_dir = os.path.join(self.env.repo_dir, path)
+        self.pgdata_dir = self.env.repo_dir / path
         self.logfile = self.endpoint_path() / "compute.log"
 
         config_lines = config_lines or []
@@ -4086,21 +4011,21 @@ class Endpoint(PgProtocol, LogUtils):
         path = Path("endpoints") / self.endpoint_id
         return self.env.repo_dir / path
 
-    def pg_data_dir_path(self) -> str:
+    def pg_data_dir_path(self) -> Path:
         """Path to Postgres data directory"""
-        return os.path.join(self.endpoint_path(), "pgdata")
+        return self.endpoint_path() / "pgdata"
 
-    def pg_xact_dir_path(self) -> str:
+    def pg_xact_dir_path(self) -> Path:
         """Path to pg_xact dir"""
-        return os.path.join(self.pg_data_dir_path(), "pg_xact")
+        return self.pg_data_dir_path() / "pg_xact"
 
-    def pg_twophase_dir_path(self) -> str:
+    def pg_twophase_dir_path(self) -> Path:
         """Path to pg_twophase dir"""
-        return os.path.join(self.pg_data_dir_path(), "pg_twophase")
+        return self.pg_data_dir_path() / "pg_twophase"
 
-    def config_file_path(self) -> str:
+    def config_file_path(self) -> Path:
         """Path to the postgresql.conf in the endpoint directory (not the one in pgdata)"""
-        return os.path.join(self.endpoint_path(), "postgresql.conf")
+        return self.endpoint_path() / "postgresql.conf"
 
     def config(self, lines: List[str]) -> "Endpoint":
         """
@@ -4155,7 +4080,7 @@ class Endpoint(PgProtocol, LogUtils):
             json.dump(dict(data_dict, **kwargs), file, indent=4)
 
     # Please note: Migrations only run if pg_skip_catalog_updates is false
-    def wait_for_migrations(self, num_migrations: int = 10):
+    def wait_for_migrations(self, num_migrations: int = 11):
         with self.cursor() as cur:
 
             def check_migrations_done():
@@ -4265,7 +4190,7 @@ class Endpoint(PgProtocol, LogUtils):
         log.info(f'checkpointing at LSN {self.safe_psql("select pg_current_wal_lsn()")[0][0]}')
         self.safe_psql("checkpoint")
         assert self.pgdata_dir is not None  # please mypy
-        return get_dir_size(os.path.join(self.pgdata_dir, "pg_wal")) / 1024 / 1024
+        return get_dir_size(self.pgdata_dir / "pg_wal") / 1024 / 1024
 
     def clear_shared_buffers(self, cursor: Optional[Any] = None):
         """
@@ -4634,6 +4559,40 @@ class Safekeeper(LogUtils):
         wait_until(20, 0.5, paused)
 
 
+class NeonBroker(LogUtils):
+    """An object managing storage_broker instance"""
+
+    def __init__(self, env: NeonEnv):
+        super().__init__(logfile=env.repo_dir / "storage_broker.log")
+        self.env = env
+        self.port: int = self.env.port_distributor.get_port()
+        self.running = False
+
+    def start(
+        self,
+        timeout_in_seconds: Optional[int] = None,
+    ):
+        assert not self.running
+        self.env.neon_cli.broker_start(timeout_in_seconds)
+        self.running = True
+        return self
+
+    def stop(self):
+        if self.running:
+            self.env.neon_cli.broker_stop()
+            self.running = False
+        return self
+
+    def listen_addr(self):
+        return f"127.0.0.1:{self.port}"
+
+    def client_url(self):
+        return f"http://{self.listen_addr()}"
+
+    def assert_no_errors(self):
+        assert_no_errors(self.logfile, "storage_controller", [])
+
+
 # TODO: Replace with `StrEnum` when we upgrade to python 3.11
 class NodeKind(str, Enum):
     PAGESERVER = "pageserver"
@@ -4655,7 +4614,8 @@ class StorageScrubber:
             "REGION": s3_storage.bucket_region,
             "BUCKET": s3_storage.bucket_name,
             "BUCKET_PREFIX": s3_storage.prefix_in_bucket,
-            "RUST_LOG": "DEBUG",
+            "RUST_LOG": "INFO",
+            "PAGESERVER_DISABLE_FILE_LOGGING": "1",
         }
         env.update(s3_storage.access_env_vars())
 
@@ -4675,10 +4635,8 @@ class StorageScrubber:
         (output_path, stdout, status_code) = subprocess_capture(
             self.log_dir,
             args,
-            echo_stderr=True,
-            echo_stdout=True,
             env=env,
-            check=False,
+            check=True,
             capture_stdout=True,
             timeout=timeout,
         )

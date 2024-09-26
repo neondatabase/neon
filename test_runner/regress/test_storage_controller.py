@@ -4,9 +4,11 @@ import threading
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import pytest
+from fixtures.auth_tokens import TokenScope
 from fixtures.common_types import TenantId, TenantShardId, TimelineId
 from fixtures.compute_reconfigure import ComputeReconfigure
 from fixtures.log_helper import log
@@ -18,7 +20,6 @@ from fixtures.neon_fixtures import (
     PgBin,
     StorageControllerApiException,
     StorageControllerLeadershipStatus,
-    TokenScope,
     last_flush_lsn_upload,
 )
 from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
@@ -69,7 +70,7 @@ def test_storage_controller_smoke(
     env = neon_env_builder.init_configs()
 
     # Start services by hand so that we can skip a pageserver (this will start + register later)
-    env.broker.try_start()
+    env.broker.start()
     env.storage_controller.start()
     env.pageservers[0].start()
     env.pageservers[1].start()
@@ -292,7 +293,7 @@ def test_storage_controller_onboarding(neon_env_builder: NeonEnvBuilder, warm_up
 
     # Start services by hand so that we can skip registration on one of the pageservers
     env = neon_env_builder.init_configs()
-    env.broker.try_start()
+    env.broker.start()
     env.storage_controller.start()
 
     # This is the pageserver where we'll initially create the tenant.  Run it in emergency
@@ -485,7 +486,7 @@ def test_storage_controller_compute_hook(
     httpserver.expect_request("/notify", method="PUT").respond_with_handler(handler)
 
     # Start running
-    env = neon_env_builder.init_start()
+    env = neon_env_builder.init_start(initial_tenant_conf={"lsn_lease_length": "0s"})
 
     # Initial notification from tenant creation
     assert len(notifications) == 1
@@ -2048,8 +2049,11 @@ def test_storage_controller_step_down(neon_env_builder: NeonEnvBuilder):
     # Make a change to the tenant config to trigger a slow reconcile
     virtual_ps_http = PageserverHttpClient(env.storage_controller_port, lambda: True)
     virtual_ps_http.patch_tenant_config_client_side(tid, {"compaction_threshold": 5}, None)
-    env.storage_controller.allowed_errors.append(
-        ".*Accepted configuration update but reconciliation failed.*"
+    env.storage_controller.allowed_errors.extend(
+        [
+            ".*Accepted configuration update but reconciliation failed.*",
+            ".*Leader is stepped down instance",
+        ]
     )
 
     observed_state = env.storage_controller.step_down()
@@ -2072,9 +2076,9 @@ def test_storage_controller_step_down(neon_env_builder: NeonEnvBuilder):
     assert "compaction_threshold" in ps_tenant_conf.effective_config
     assert ps_tenant_conf.effective_config["compaction_threshold"] == 5
 
-    # Validate that the storcon is not replying to the usual requests
-    # once it has stepped down.
-    with pytest.raises(StorageControllerApiException, match="stepped_down"):
+    # Validate that the storcon attempts to forward the request, but stops.
+    # when it realises it is still the current leader.
+    with pytest.raises(StorageControllerApiException, match="Leader is stepped down instance"):
         env.storage_controller.tenant_list()
 
     # Validate that we can step down multiple times and the observed state
@@ -2123,7 +2127,7 @@ def start_env(env: NeonEnv, storage_controller_port: int):
         max_workers=2 + len(env.pageservers) + len(env.safekeepers)
     ) as executor:
         futs.append(
-            executor.submit(lambda: env.broker.try_start() or None)
+            executor.submit(lambda: env.broker.start() or None)
         )  # The `or None` is for the linter
 
         for pageserver in env.pageservers:
@@ -2220,6 +2224,15 @@ def test_storage_controller_leadership_transfer(
 
     env.storage_controller.wait_until_ready()
     env.storage_controller.consistency_check()
+
+    if not step_down_times_out:
+        # Check that the stepped down instance forwards requests
+        # to the new leader while it's still running.
+        storage_controller_proxy.route_to(f"http://127.0.0.1:{storage_controller_1_port}")
+        env.storage_controller.tenant_list()
+        env.storage_controller.node_configure(env.pageservers[0].id, {"scheduling": "Pause"})
+        status = env.storage_controller.node_status(env.pageservers[0].id)
+        assert status["scheduling"] == "Pause"
 
     if step_down_times_out:
         env.storage_controller.allowed_errors.extend(
@@ -2451,6 +2464,87 @@ def test_storage_controller_validate_during_migration(neon_env_builder: NeonEnvB
     except:
         # On failures, we want to report them FAIL during the test, not as ERROR during teardown
         neon_env_builder.enable_scrub_on_exit = False
+        raise
+
+
+class MigrationFailpoints(Enum):
+    # While only the origin is attached
+    PRE_GENERATION_INC = "reconciler-live-migrate-pre-generation-inc"
+    # While both locations are attached
+    POST_NOTIFY = "reconciler-live-migrate-post-notify"
+    # While only the destination is attached
+    POST_DETACH = "reconciler-live-migrate-post-detach"
+
+
+@pytest.mark.parametrize(
+    "migration_failpoint",
+    [
+        MigrationFailpoints.PRE_GENERATION_INC,
+        MigrationFailpoints.POST_NOTIFY,
+        MigrationFailpoints.POST_DETACH,
+    ],
+)
+def test_storage_controller_proxy_during_migration(
+    neon_env_builder: NeonEnvBuilder, migration_failpoint: MigrationFailpoints
+):
+    """
+    If we send a proxied GET request to the controller during a migration, it should route
+    the request to whichever pageserver was most recently issued a generation.
+
+    Reproducer for https://github.com/neondatabase/neon/issues/9062
+    """
+    neon_env_builder.num_pageservers = 2
+    neon_env_builder.enable_pageserver_remote_storage(s3_storage())
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+    env.neon_cli.create_tenant(tenant_id, timeline_id)
+
+    # Activate a failpoint that will cause live migration to get stuck _after_ the generation has been issued
+    # to the new pageserver: this should result in requests routed to the new pageserver.
+    env.storage_controller.configure_failpoints((migration_failpoint.value, "pause"))
+
+    origin_pageserver = env.get_tenant_pageserver(tenant_id)
+    dest_ps_id = [p.id for p in env.pageservers if p.id != origin_pageserver.id][0]
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            migrate_fut = executor.submit(
+                env.storage_controller.tenant_shard_migrate,
+                TenantShardId(tenant_id, 0, 0),
+                dest_ps_id,
+            )
+
+            def has_hit_migration_failpoint():
+                expr = f"at failpoint {str(migration_failpoint.value)}"
+                log.info(expr)
+                assert env.storage_controller.log_contains(expr)
+
+            wait_until(10, 1, has_hit_migration_failpoint)
+
+            # This request should be routed to whichever pageserver holds the highest generation
+            tenant_info = env.storage_controller.pageserver_api().tenant_status(
+                tenant_id,
+            )
+
+            if migration_failpoint in (
+                MigrationFailpoints.POST_NOTIFY,
+                MigrationFailpoints.POST_DETACH,
+            ):
+                # We expect request to land on the destination
+                assert tenant_info["generation"] == 2
+            elif migration_failpoint == MigrationFailpoints.PRE_GENERATION_INC:
+                # We expect request to land on the origin
+                assert tenant_info["generation"] == 1
+
+            # Eventually migration completes
+            env.storage_controller.configure_failpoints((migration_failpoint.value, "off"))
+            migrate_fut.result()
+    except:
+        # Always disable 'pause' failpoints, even on failure, to avoid hanging in shutdown
+        env.storage_controller.configure_failpoints((migration_failpoint.value, "off"))
         raise
 
 

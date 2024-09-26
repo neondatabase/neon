@@ -19,6 +19,7 @@ bincode.workspace = true
 bytes.workspace = true
 camino.workspace = true
 chrono.workspace = true
+git-version.workspace = true
 hex = { workspace = true, features = ["serde"] }
 humantime.workspace = true
 hyper = { workspace = true, features = ["full"] }
@@ -42,7 +43,6 @@ tracing.workspace = true
 tracing-error.workspace = true
 tracing-subscriber = { workspace = true, features = ["json", "registry"] }
 rand.workspace = true
-serde_with.workspace = true
 strum.workspace = true
 strum_macros.workspace = true
 url.workspace = true

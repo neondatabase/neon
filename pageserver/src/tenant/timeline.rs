@@ -112,7 +112,7 @@ use pageserver_api::reltag::RelTag;
 use pageserver_api::shard::ShardIndex;
 
 use postgres_connection::PgConnectionConfig;
-use postgres_ffi::to_pg_timestamp;
+use postgres_ffi::{to_pg_timestamp, v14::xlog_utils, WAL_SEGMENT_SIZE};
 use utils::{
     completion,
     generation::Generation,
@@ -196,9 +196,8 @@ fn drop_wlock<T>(rlock: tokio::sync::RwLockWriteGuard<'_, T>) {
 /// The outward-facing resources required to build a Timeline
 pub struct TimelineResources {
     pub remote_client: RemoteTimelineClient,
-    pub timeline_get_throttle: Arc<
-        crate::tenant::throttle::Throttle<&'static crate::metrics::tenant_throttling::TimelineGet>,
-    >,
+    pub timeline_get_throttle:
+        Arc<crate::tenant::throttle::Throttle<crate::metrics::tenant_throttling::TimelineGet>>,
     pub l0_flush_global_state: l0_flush::L0FlushGlobalState,
 }
 
@@ -406,9 +405,8 @@ pub struct Timeline {
     gc_lock: tokio::sync::Mutex<()>,
 
     /// Cloned from [`super::Tenant::timeline_get_throttle`] on construction.
-    timeline_get_throttle: Arc<
-        crate::tenant::throttle::Throttle<&'static crate::metrics::tenant_throttling::TimelineGet>,
-    >,
+    timeline_get_throttle:
+        Arc<crate::tenant::throttle::Throttle<crate::metrics::tenant_throttling::TimelineGet>>,
 
     /// Keep aux directory cache to avoid it's reconstruction on each update
     pub(crate) aux_files: tokio::sync::Mutex<AuxFilesState>,
@@ -1339,6 +1337,10 @@ impl Timeline {
         _ctx: &RequestContext,
     ) -> anyhow::Result<LsnLease> {
         let lease = {
+            // Normalize the requested LSN to be aligned, and move to the first record
+            // if it points to the beginning of the page (header).
+            let lsn = xlog_utils::normalize_lsn(lsn, WAL_SEGMENT_SIZE);
+
             let mut gc_info = self.gc_info.write().unwrap();
 
             let valid_until = SystemTime::now() + length;
@@ -3599,7 +3601,7 @@ impl Timeline {
                     ctx,
                 )
                 .await
-                .map_err(|e| FlushLayerError::from_anyhow(self, e))?;
+                .map_err(|e| FlushLayerError::from_anyhow(self, e.into()))?;
 
             if self.cancel.is_cancelled() {
                 return Err(FlushLayerError::Cancelled);
@@ -3838,16 +3840,20 @@ impl Timeline {
         partition_size: u64,
         flags: EnumSet<CompactFlags>,
         ctx: &RequestContext,
-    ) -> anyhow::Result<((KeyPartitioning, SparseKeyPartitioning), Lsn)> {
+    ) -> Result<((KeyPartitioning, SparseKeyPartitioning), Lsn), CompactionError> {
         let Ok(mut partitioning_guard) = self.partitioning.try_lock() else {
             // NB: there are two callers, one is the compaction task, of which there is only one per struct Tenant and hence Timeline.
             // The other is the initdb optimization in flush_frozen_layer, used by `boostrap_timeline`, which runs before `.activate()`
             // and hence before the compaction task starts.
-            anyhow::bail!("repartition() called concurrently, this should not happen");
+            return Err(CompactionError::Other(anyhow!(
+                "repartition() called concurrently, this should not happen"
+            )));
         };
         let ((dense_partition, sparse_partition), partition_lsn) = &*partitioning_guard;
         if lsn < *partition_lsn {
-            anyhow::bail!("repartition() called with LSN going backwards, this should not happen");
+            return Err(CompactionError::Other(anyhow!(
+                "repartition() called with LSN going backwards, this should not happen"
+            )));
         }
 
         let distance = lsn.0 - partition_lsn.0;
@@ -4013,7 +4019,9 @@ impl Timeline {
         if wrote_keys {
             // Normal path: we have written some data into the new image layer for this
             // partition, so flush it to disk.
-            let image_layer = image_layer_writer.finish(self, ctx).await?;
+            let (desc, path) = image_layer_writer.finish(ctx).await?;
+            let image_layer = Layer::finish_creating(self.conf, self, desc, &path)?;
+            info!("created image layer for rel {}", image_layer.local_path());
             Ok(ImageLayerCreationOutcome {
                 image: Some(image_layer),
                 next_start_key: img_range.end,
@@ -4101,7 +4109,12 @@ impl Timeline {
         if wrote_any_image {
             // Normal path: we have written some data into the new image layer for this
             // partition, so flush it to disk.
-            let image_layer = image_layer_writer.finish(self, ctx).await?;
+            let (desc, path) = image_layer_writer.finish(ctx).await?;
+            let image_layer = Layer::finish_creating(self.conf, self, desc, &path)?;
+            info!(
+                "created image layer for metadata {}",
+                image_layer.local_path()
+            );
             Ok(ImageLayerCreationOutcome {
                 image: Some(image_layer),
                 next_start_key: img_range.end,
@@ -4309,7 +4322,9 @@ impl Timeline {
         timer.stop_and_record();
 
         // Creating image layers may have caused some previously visible layers to be covered
-        self.update_layer_visibility().await?;
+        if !image_layers.is_empty() {
+            self.update_layer_visibility().await?;
+        }
 
         Ok(image_layers)
     }
@@ -4438,6 +4453,12 @@ pub(crate) enum CompactionError {
     /// Compaction cannot be done right now; page reconstruction and so on.
     #[error(transparent)]
     Other(anyhow::Error),
+}
+
+impl CompactionError {
+    pub fn is_cancelled(&self) -> bool {
+        matches!(self, CompactionError::ShuttingDown)
+    }
 }
 
 impl From<CollectKeySpaceError> for CompactionError {
@@ -5371,7 +5392,8 @@ impl Timeline {
     /// Force create an image layer and place it into the layer map.
     ///
     /// DO NOT use this function directly. Use [`Tenant::branch_timeline_test_with_layers`]
-    /// or [`Tenant::create_test_timeline_with_layers`] to ensure all these layers are placed into the layer map in one run.
+    /// or [`Tenant::create_test_timeline_with_layers`] to ensure all these layers are
+    /// placed into the layer map in one run AND be validated.
     #[cfg(test)]
     pub(super) async fn force_create_image_layer(
         self: &Arc<Timeline>,
@@ -5403,8 +5425,9 @@ impl Timeline {
         for (key, img) in images {
             image_layer_writer.put_image(key, img, ctx).await?;
         }
-        let image_layer = image_layer_writer.finish(self, ctx).await?;
-
+        let (desc, path) = image_layer_writer.finish(ctx).await?;
+        let image_layer = Layer::finish_creating(self.conf, self, desc, &path)?;
+        info!("force created image layer {}", image_layer.local_path());
         {
             let mut guard = self.layers.write().await;
             guard.open_mut().unwrap().force_insert_layer(image_layer);
@@ -5416,7 +5439,8 @@ impl Timeline {
     /// Force create a delta layer and place it into the layer map.
     ///
     /// DO NOT use this function directly. Use [`Tenant::branch_timeline_test_with_layers`]
-    /// or [`Tenant::create_test_timeline_with_layers`] to ensure all these layers are placed into the layer map in one run.
+    /// or [`Tenant::create_test_timeline_with_layers`] to ensure all these layers are
+    /// placed into the layer map in one run AND be validated.
     #[cfg(test)]
     pub(super) async fn force_create_delta_layer(
         self: &Arc<Timeline>,
@@ -5442,33 +5466,6 @@ impl Timeline {
         if let Some(check_start_lsn) = check_start_lsn {
             assert!(deltas.lsn_range.start >= check_start_lsn);
         }
-        // check if the delta layer does not violate the LSN invariant, the legacy compaction should always produce a batch of
-        // layers of the same start/end LSN, and so should the force inserted layer
-        {
-            /// Checks if a overlaps with b, assume a/b = [start, end).
-            pub fn overlaps_with<T: Ord>(a: &Range<T>, b: &Range<T>) -> bool {
-                !(a.end <= b.start || b.end <= a.start)
-            }
-
-            if deltas.key_range.start.next() != deltas.key_range.end {
-                let guard = self.layers.read().await;
-                let mut invalid_layers =
-                    guard.layer_map()?.iter_historic_layers().filter(|layer| {
-                        layer.is_delta()
-                        && overlaps_with(&layer.lsn_range, &deltas.lsn_range)
-                        && layer.lsn_range != deltas.lsn_range
-                        // skip single-key layer files
-                        && layer.key_range.start.next() != layer.key_range.end
-                    });
-                if let Some(layer) = invalid_layers.next() {
-                    // If a delta layer overlaps with another delta layer AND their LSN range is not the same, panic
-                    panic!(
-                        "inserted layer violates delta layer LSN invariant: current_lsn_range={}..{}, conflict_lsn_range={}..{}",
-                        deltas.lsn_range.start, deltas.lsn_range.end, layer.lsn_range.start, layer.lsn_range.end
-                    );
-                }
-            }
-        }
         let mut delta_layer_writer = DeltaLayerWriter::new(
             self.conf,
             self.timeline_id,
@@ -5483,7 +5480,7 @@ impl Timeline {
         }
         let (desc, path) = delta_layer_writer.finish(deltas.key_range.end, ctx).await?;
         let delta_layer = Layer::finish_creating(self.conf, self, desc, &path)?;
-
+        info!("force created delta layer {}", delta_layer.local_path());
         {
             let mut guard = self.layers.write().await;
             guard.open_mut().unwrap().force_insert_layer(delta_layer);

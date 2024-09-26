@@ -24,13 +24,13 @@ def test_logical_replication(neon_simple_env: NeonEnv, pg_bin: PgBin, vanilla_pg
 
     endpoint = env.endpoints.create_start("main")
 
-    pg_bin.run_capture(["pgbench", "-i", "-s10", endpoint.connstr()])
+    pg_bin.run_capture(["pgbench", "-i", "-I", "dtGvp", "-s10", endpoint.connstr()])
 
     endpoint.safe_psql("create publication pub1 for table pgbench_accounts, pgbench_history")
 
     # now start subscriber
     vanilla_pg.start()
-    pg_bin.run_capture(["pgbench", "-i", "-s10", vanilla_pg.connstr()])
+    pg_bin.run_capture(["pgbench", "-i", "-I", "dtGvp", "-s10", vanilla_pg.connstr()])
 
     vanilla_pg.safe_psql("truncate table pgbench_accounts")
     vanilla_pg.safe_psql("truncate table pgbench_history")
@@ -99,9 +99,9 @@ def test_subscriber_lag(
     sub_connstr = benchmark_project_sub.connstr
 
     if benchmark_project_pub.is_new:
-        pg_bin.run_capture(["pgbench", "-i", "-s100"], env=pub_env)
+        pg_bin.run_capture(["pgbench", "-i", "-I", "dtGvp", "-s100"], env=pub_env)
     if benchmark_project_sub.is_new:
-        pg_bin.run_capture(["pgbench", "-i", "-s100"], env=sub_env)
+        pg_bin.run_capture(["pgbench", "-i", "-I", "dtGvp", "-s100"], env=sub_env)
 
     pub_conn = psycopg2.connect(pub_connstr)
     sub_conn = psycopg2.connect(sub_connstr)
@@ -193,8 +193,8 @@ def test_publisher_restart(
     pub_connstr = benchmark_project_pub.connstr
     sub_connstr = benchmark_project_sub.connstr
 
-    pg_bin.run_capture(["pgbench", "-i", "-s100"], env=pub_env)
-    pg_bin.run_capture(["pgbench", "-i", "-s100"], env=sub_env)
+    pg_bin.run_capture(["pgbench", "-i", "-I", "dtGvp", "-s100"], env=pub_env)
+    pg_bin.run_capture(["pgbench", "-i", "-I", "dtGvp", "-s100"], env=sub_env)
 
     pub_conn = psycopg2.connect(pub_connstr)
     sub_conn = psycopg2.connect(sub_connstr)
@@ -288,7 +288,7 @@ def test_snap_files(
             is_super = cur.fetchall()[0][0]
             assert is_super, "This benchmark won't work if we don't have superuser"
 
-    pg_bin.run_capture(["pgbench", "-i", "-s100"], env=env)
+    pg_bin.run_capture(["pgbench", "-i", "-I", "dtGvp", "-s100"], env=env)
 
     conn = psycopg2.connect(connstr)
     conn.autocommit = True

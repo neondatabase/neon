@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use futures::Future;
 use pageserver_api::{
-    controller_api::NodeRegisterRequest,
+    controller_api::{AvailabilityZone, NodeRegisterRequest},
     shard::TenantShardId,
     upcall_api::{
         ReAttachRequest, ReAttachResponse, ReAttachResponseTenant, ValidateRequest,
@@ -151,10 +151,10 @@ impl ControlPlaneGenerationsApi for ControllerUpcallClient {
                             .and_then(|jv| jv.as_str().map(|str| str.to_owned()));
 
                         match az_id_from_metadata {
-                            Some(az_id) => Some(az_id),
+                            Some(az_id) => Some(AvailabilityZone(az_id)),
                             None => {
                                 tracing::warn!("metadata.json does not contain an 'availability_zone_id' field");
-                                conf.availability_zone.clone()
+                                conf.availability_zone.clone().map(AvailabilityZone)
                             }
                         }
                     };
