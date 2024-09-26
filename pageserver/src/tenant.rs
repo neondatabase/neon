@@ -7287,7 +7287,11 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn test_lsn_lease() -> anyhow::Result<()> {
-        let (tenant, ctx) = TenantHarness::create("test_lsn_lease").await?.load().await;
+        let (tenant, ctx) = TenantHarness::create("test_lsn_lease")
+            .await
+            .unwrap()
+            .load()
+            .await;
         // Advance to the lsn lease deadline so that GC is not blocked by
         // initial transition into AttachedSingle.
         tokio::time::advance(tenant.get_lsn_lease_length()).await;
@@ -7319,24 +7323,33 @@ mod tests {
 
         let leased_lsns = [0x30, 0x50, 0x70];
         let mut leases = Vec::new();
-        let _: anyhow::Result<_> = leased_lsns.iter().try_for_each(|n| {
-            leases.push(timeline.init_lsn_lease(Lsn(*n), timeline.get_lsn_lease_length(), &ctx)?);
-            Ok(())
+        leased_lsns.iter().for_each(|n| {
+            leases.push(
+                timeline
+                    .init_lsn_lease(Lsn(*n), timeline.get_lsn_lease_length(), &ctx)
+                    .expect("lease request should succeed"),
+            );
         });
 
-        // Renewing with shorter lease should not change the lease.
-        let updated_lease_0 =
-            timeline.renew_lsn_lease(Lsn(leased_lsns[0]), Duration::from_secs(0), &ctx)?;
-        assert_eq!(updated_lease_0.valid_until, leases[0].valid_until);
+        let updated_lease_0 = timeline
+            .renew_lsn_lease(Lsn(leased_lsns[0]), Duration::from_secs(0), &ctx)
+            .expect("lease renewal should succeed");
+        assert_eq!(
+            updated_lease_0.valid_until, leases[0].valid_until,
+            " Renewing with shorter lease should not change the lease."
+        );
 
-        // Renewing with a long lease should renew lease with later expiration time.
-        let updated_lease_1 = timeline.renew_lsn_lease(
-            Lsn(leased_lsns[1]),
-            timeline.get_lsn_lease_length() * 2,
-            &ctx,
-        )?;
-
-        assert!(updated_lease_1.valid_until > leases[1].valid_until);
+        let updated_lease_1 = timeline
+            .renew_lsn_lease(
+                Lsn(leased_lsns[1]),
+                timeline.get_lsn_lease_length() * 2,
+                &ctx,
+            )
+            .expect("lease renewal should succeed");
+        assert!(
+            updated_lease_1.valid_until > leases[1].valid_until,
+            "Renewing with a long lease should renew lease with later expiration time."
+        );
 
         // Force set disk consistent lsn so we can get the cutoff at `end_lsn`.
         info!(
@@ -7353,7 +7366,8 @@ mod tests {
                 &CancellationToken::new(),
                 &ctx,
             )
-            .await?;
+            .await
+            .unwrap();
 
         // Keeping everything <= Lsn(0x80) b/c leases:
         // 0/10: initdb layer
@@ -7367,14 +7381,16 @@ mod tests {
         // Make lease on a already GC-ed LSN.
         // 0/80 does not have a valid lease + is below latest_gc_cutoff
         assert!(Lsn(0x80) < *timeline.get_latest_gc_cutoff_lsn());
-        let res = timeline.init_lsn_lease(Lsn(0x80), timeline.get_lsn_lease_length(), &ctx);
-        assert!(res.is_err());
+        timeline
+            .init_lsn_lease(Lsn(0x80), timeline.get_lsn_lease_length(), &ctx)
+            .expect_err("lease request on GC-ed LSN should fail");
 
         // Should still be able to renew a currently valid lease
         // Assumption: original lease to is still valid for 0/50.
         // (use `Timeline::init_lsn_lease` for testing so it always does validation)
-        let _ =
-            timeline.init_lsn_lease(Lsn(leased_lsns[1]), timeline.get_lsn_lease_length(), &ctx)?;
+        timeline
+            .init_lsn_lease(Lsn(leased_lsns[1]), timeline.get_lsn_lease_length(), &ctx)
+            .expect("lease renewal with validation should succeed");
 
         Ok(())
     }
