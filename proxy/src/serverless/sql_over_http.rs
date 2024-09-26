@@ -60,6 +60,7 @@ use crate::usage_metrics::MetricCounterRecorder;
 use crate::DbName;
 use crate::RoleName;
 
+use super::backend::LocalProxyConnError;
 use super::backend::PoolingBackend;
 use super::conn_pool::AuthData;
 use super::conn_pool::Client;
@@ -303,7 +304,7 @@ pub(crate) async fn handle(
 
             let mut message = e.to_string_client();
             let db_error = match &e {
-                SqlOverHttpError::ConnectCompute(HttpConnError::ConnectionError(e))
+                SqlOverHttpError::ConnectCompute(HttpConnError::PostgresConnectionError(e))
                 | SqlOverHttpError::Postgres(e) => e.as_db_error(),
                 _ => None,
             };
@@ -758,7 +759,11 @@ async fn handle_auth_broker_inner(
 
     // always completes instantly in http2 mode
     // but good just in case
-    client.ready().await.map_err(HttpConnError::from)?;
+    client
+        .ready()
+        .await
+        .map_err(LocalProxyConnError::from)
+        .map_err(HttpConnError::from)?;
 
     let local_proxy_uri = ::http::Uri::from_static("http://proxy.local/sql");
 
@@ -783,6 +788,7 @@ async fn handle_auth_broker_inner(
     Ok(client
         .send_request(req)
         .await
+        .map_err(LocalProxyConnError::from)
         .map_err(HttpConnError::from)?
         .map(|b| b.boxed()))
 }
@@ -836,7 +842,9 @@ impl QueryData {
                     // query failed or was cancelled.
                     Ok(Err(error)) => {
                         let db_error = match &error {
-                            SqlOverHttpError::ConnectCompute(HttpConnError::ConnectionError(e))
+                            SqlOverHttpError::ConnectCompute(
+                                HttpConnError::PostgresConnectionError(e),
+                            )
                             | SqlOverHttpError::Postgres(e) => e.as_db_error(),
                             _ => None,
                         };
