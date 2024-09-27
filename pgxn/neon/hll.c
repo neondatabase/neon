@@ -147,20 +147,8 @@ static uint32_t
 getAccessCount(const HyperLogLogRegister* reg, time_t duration)
 {
 	uint32_t count = 0;
-//  Simplest solution is to take in account all points fro overlapped interval
-//	for (size_t i = 0; i < HIST_SIZE && HIST_MIN_INTERVAL*((1 << i)/2) <= duration; i++) {
-	for (size_t i = 0; i < HIST_SIZE; i++) {
-		uint32_t high_boundary = HIST_MIN_INTERVAL*(1 << i);
-		uint32_t low_boundary = HIST_MIN_INTERVAL*((1 << i)/2);
-		if (high_boundary >= duration) {
-			// Assume uniform distribution of points within interval and use proportional number of points
-			Assert(duration >= low_boundary);
-			count += reg->histogram[i] * (duration - low_boundary) / (high_boundary - low_boundary);
-			break; // it's last interval within specified time range
-		} else {
-			count += reg->histogram[i];
-		}
-	}
+    /* Simplest solution is to take in account all points fro overlapped interval */
+	for (size_t i = 0; i < HIST_SIZE && HIST_MIN_INTERVAL*((1 << i)/2) <= duration; i++) {
 	return count;
 }
 
