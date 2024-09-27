@@ -737,6 +737,7 @@ pub enum GetLogicalSizePriority {
 pub(crate) enum CompactFlags {
     ForceRepartition,
     ForceImageLayerCreation,
+    ForceL0Compaction,
     EnhancedGcBottomMostCompaction,
     DryRun,
 }

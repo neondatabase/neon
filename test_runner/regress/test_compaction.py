@@ -63,7 +63,9 @@ page_cache_size=10
             log.info(f"Running churn round {i}/{churn_rounds} ...")
 
         workload.churn_rows(row_count, env.pageserver.id)
-        ps_http.timeline_compact(tenant_id, timeline_id)
+        # Force L0 compaction to ensure the number of layers is within bounds; we don't want to count L0 layers
+        # in this benchmark. In other words, this smoke test ensures number of L1 layers are bound.
+        ps_http.timeline_compact(tenant_id, timeline_id, force_l0_compaction=True)
 
     log.info("Validating at workload end ...")
     workload.validate(env.pageserver.id)
