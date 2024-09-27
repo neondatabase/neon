@@ -61,20 +61,32 @@ class Workload:
             with ENDPOINT_LOCK:
                 self._endpoint.reconfigure()
 
-    def endpoint(self, pageserver_id: Optional[int] = None) -> Endpoint:
+    def go_readonly(self):
+        self.stop()
+        self._endpoint = self.make_endpoint(readonly=True, pageserver_id=None)
+        self._endpoint.start(pageserver_id=None)
+
+    def make_endpoint(self, readonly: bool, pageserver_id: Optional[int] = None) -> Endpoint:
         # We may be running alongside other Workloads for different tenants.  Full TTID is
         # obnoxiously long for use here, but a cut-down version is still unique enough for tests.
         endpoint_id = f"ep-workload-{str(self.tenant_id)[0:4]}-{str(self.timeline_id)[0:4]}"
 
+        if readonly:
+            self._endpoint_opts["hot_standby"] = True
+
+        return self.env.endpoints.create(
+            self.branch_name,
+            tenant_id=self.tenant_id,
+            pageserver_id=pageserver_id,
+            endpoint_id=endpoint_id,
+            **self._endpoint_opts,
+        )
+
+    def endpoint(self, pageserver_id: Optional[int] = None) -> Endpoint:
         with ENDPOINT_LOCK:
             if self._endpoint is None:
-                self._endpoint = self.env.endpoints.create(
-                    self.branch_name,
-                    tenant_id=self.tenant_id,
-                    pageserver_id=pageserver_id,
-                    endpoint_id=endpoint_id,
-                    **self._endpoint_opts,
-                )
+                self._endpoint = self.make_endpoint(pageserver_id=pageserver_id, readonly=False)
+
                 self._endpoint.start(pageserver_id=pageserver_id)
             else:
                 self._endpoint.reconfigure(pageserver_id=pageserver_id)
