@@ -23,11 +23,11 @@ use super::{
     middleware::authorize::Authorize,
     routes::{
         check_writability, configure, database_schema, dbs_and_roles, extension_server, extensions,
-        grants, insights, lfc, metrics, metrics_json, promote, status, terminate,
+        grants, hadron_liveness_probe, insights, lfc, metrics, metrics_json, promote,
+        refresh_configuration, status, terminate,
     },
 };
 use crate::compute::ComputeNode;
-use crate::http::routes::{hadron_liveness_probe, refresh_configuration};
 
 /// `compute_ctl` has two servers: internal and external. The internal server
 /// binds to the loopback interface and handles communication from clients on

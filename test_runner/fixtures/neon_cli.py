@@ -633,6 +633,15 @@ class NeonLocalCli(AbstractNeonCli):
             args.extend(["--safekeepers", (",".join(map(str, safekeepers)))])
         return self.raw_cli(args, check_return_code=check_return_code)
 
+    def endpoint_refresh_configuration(
+        self,
+        endpoint_id: str,
+    ) -> subprocess.CompletedProcess[str]:
+        args = ["endpoint", "refresh-configuration", endpoint_id]
+        res = self.raw_cli(args)
+        res.check_returncode()
+        return res
+
     def endpoint_stop(
         self,
         endpoint_id: str,
@@ -656,6 +665,22 @@ class NeonLocalCli(AbstractNeonCli):
         lsn_str = proc.stdout.split()[-1]
         lsn: Lsn | None = None if lsn_str == "null" else Lsn(lsn_str)
         return lsn, proc
+
+    def endpoint_update_pageservers(
+        self,
+        endpoint_id: str,
+        pageserver_id: int | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        args = [
+            "endpoint",
+            "update-pageservers",
+            endpoint_id,
+        ]
+        if pageserver_id is not None:
+            args.extend(["--pageserver-id", str(pageserver_id)])
+        res = self.raw_cli(args)
+        res.check_returncode()
+        return res
 
     def mappings_map_branch(
         self, name: str, tenant_id: TenantId, timeline_id: TimelineId
