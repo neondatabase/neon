@@ -833,7 +833,7 @@ impl PageServerHandler {
         set_tracing_field_shard_id(&timeline);
 
         let lease = timeline
-            .make_lsn_lease(lsn, timeline.get_lsn_lease_length(), ctx)
+            .renew_lsn_lease(lsn, timeline.get_lsn_lease_length(), ctx)
             .inspect_err(|e| {
                 warn!("{e}");
             })

@@ -21,6 +21,7 @@ use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use pageserver_api::models;
 use pageserver_api::models::AuxFilePolicy;
+use pageserver_api::models::LsnLease;
 use pageserver_api::models::TimelineArchivalState;
 use pageserver_api::models::TimelineState;
 use pageserver_api::models::TopTenantShardItem;
@@ -182,26 +183,53 @@ pub struct TenantSharedResources {
 pub(super) struct AttachedTenantConf {
     tenant_conf: TenantConfOpt,
     location: AttachedLocationConfig,
+    /// The deadline before which we are blocked from GC so that
+    /// leases have a chance to be renewed.
+    lsn_lease_deadline: Option<tokio::time::Instant>,
 }
 
 impl AttachedTenantConf {
     fn new(tenant_conf: TenantConfOpt, location: AttachedLocationConfig) -> Self {
+        // Sets a deadline before which we cannot proceed to GC due to lsn lease.
+        //
+        // We do this as the leases mapping are not persisted to disk. By delaying GC by lease
+        // length, we guarantee that all the leases we granted before will have a chance to renew
+        // when we run GC for the first time after restart / transition from AttachedMulti to AttachedSingle.
+        let lsn_lease_deadline = if location.attach_mode == AttachmentMode::Single {
+            Some(
+                tokio::time::Instant::now()
+                    + tenant_conf
+                        .lsn_lease_length
+                        .unwrap_or(LsnLease::DEFAULT_LENGTH),
+            )
+        } else {
+            // We don't use `lsn_lease_deadline` to delay GC in AttachedMulti and AttachedStale
+            // because we don't do GC in these modes.
+            None
+        };
+
         Self {
             tenant_conf,
             location,
+            lsn_lease_deadline,
         }
     }
 
     fn try_from(location_conf: LocationConf) -> anyhow::Result<Self> {
         match &location_conf.mode {
-            LocationMode::Attached(attach_conf) => Ok(Self {
-                tenant_conf: location_conf.tenant_conf,
-                location: *attach_conf,
-            }),
+            LocationMode::Attached(attach_conf) => {
+                Ok(Self::new(location_conf.tenant_conf, *attach_conf))
+            }
             LocationMode::Secondary(_) => {
                 anyhow::bail!("Attempted to construct AttachedTenantConf from a LocationConf in secondary mode")
             }
         }
+    }
+
+    fn is_gc_blocked_by_lsn_lease_deadline(&self) -> bool {
+        self.lsn_lease_deadline
+            .map(|d| tokio::time::Instant::now() < d)
+            .unwrap_or(false)
     }
 }
 struct TimelinePreload {
@@ -1822,6 +1850,11 @@ impl Tenant {
                 info!("Skipping GC in location state {:?}", conf.location);
                 return Ok(GcResult::default());
             }
+
+            if conf.is_gc_blocked_by_lsn_lease_deadline() {
+                info!("Skipping GC because lsn lease deadline is not reached");
+                return Ok(GcResult::default());
+            }
         }
 
         let _guard = match self.gc_block.start().await {
@@ -2630,6 +2663,8 @@ impl Tenant {
             Arc::new(AttachedTenantConf {
                 tenant_conf: new_tenant_conf.clone(),
                 location: inner.location,
+                // Attached location is not changed, no need to update lsn lease deadline.
+                lsn_lease_deadline: inner.lsn_lease_deadline,
             })
         });
 
@@ -4461,13 +4496,17 @@ mod tests {
         tline.freeze_and_flush().await.map_err(|e| e.into())
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_prohibit_branch_creation_on_garbage_collected_data() -> anyhow::Result<()> {
         let (tenant, ctx) =
             TenantHarness::create("test_prohibit_branch_creation_on_garbage_collected_data")
                 .await?
                 .load()
                 .await;
+        // Advance to the lsn lease deadline so that GC is not blocked by
+        // initial transition into AttachedSingle.
+        tokio::time::advance(tenant.get_lsn_lease_length()).await;
+        tokio::time::resume();
         let tline = tenant
             .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
             .await?;
@@ -7244,9 +7283,17 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_lsn_lease() -> anyhow::Result<()> {
-        let (tenant, ctx) = TenantHarness::create("test_lsn_lease").await?.load().await;
+        let (tenant, ctx) = TenantHarness::create("test_lsn_lease")
+            .await
+            .unwrap()
+            .load()
+            .await;
+        // Advance to the lsn lease deadline so that GC is not blocked by
+        // initial transition into AttachedSingle.
+        tokio::time::advance(tenant.get_lsn_lease_length()).await;
+        tokio::time::resume();
         let key = Key::from_hex("010000000033333333444444445500000000").unwrap();
 
         let end_lsn = Lsn(0x100);
@@ -7274,24 +7321,33 @@ mod tests {
 
         let leased_lsns = [0x30, 0x50, 0x70];
         let mut leases = Vec::new();
-        let _: anyhow::Result<_> = leased_lsns.iter().try_for_each(|n| {
-            leases.push(timeline.make_lsn_lease(Lsn(*n), timeline.get_lsn_lease_length(), &ctx)?);
-            Ok(())
+        leased_lsns.iter().for_each(|n| {
+            leases.push(
+                timeline
+                    .init_lsn_lease(Lsn(*n), timeline.get_lsn_lease_length(), &ctx)
+                    .expect("lease request should succeed"),
+            );
         });
 
-        // Renewing with shorter lease should not change the lease.
-        let updated_lease_0 =
-            timeline.make_lsn_lease(Lsn(leased_lsns[0]), Duration::from_secs(0), &ctx)?;
-        assert_eq!(updated_lease_0.valid_until, leases[0].valid_until);
+        let updated_lease_0 = timeline
+            .renew_lsn_lease(Lsn(leased_lsns[0]), Duration::from_secs(0), &ctx)
+            .expect("lease renewal should succeed");
+        assert_eq!(
+            updated_lease_0.valid_until, leases[0].valid_until,
+            " Renewing with shorter lease should not change the lease."
+        );
 
-        // Renewing with a long lease should renew lease with later expiration time.
-        let updated_lease_1 = timeline.make_lsn_lease(
-            Lsn(leased_lsns[1]),
-            timeline.get_lsn_lease_length() * 2,
-            &ctx,
-        )?;
-
-        assert!(updated_lease_1.valid_until > leases[1].valid_until);
+        let updated_lease_1 = timeline
+            .renew_lsn_lease(
+                Lsn(leased_lsns[1]),
+                timeline.get_lsn_lease_length() * 2,
+                &ctx,
+            )
+            .expect("lease renewal should succeed");
+        assert!(
+            updated_lease_1.valid_until > leases[1].valid_until,
+            "Renewing with a long lease should renew lease with later expiration time."
+        );
 
         // Force set disk consistent lsn so we can get the cutoff at `end_lsn`.
         info!(
@@ -7308,7 +7364,8 @@ mod tests {
                 &CancellationToken::new(),
                 &ctx,
             )
-            .await?;
+            .await
+            .unwrap();
 
         // Keeping everything <= Lsn(0x80) b/c leases:
         // 0/10: initdb layer
@@ -7322,13 +7379,16 @@ mod tests {
         // Make lease on a already GC-ed LSN.
         // 0/80 does not have a valid lease + is below latest_gc_cutoff
         assert!(Lsn(0x80) < *timeline.get_latest_gc_cutoff_lsn());
-        let res = timeline.make_lsn_lease(Lsn(0x80), timeline.get_lsn_lease_length(), &ctx);
-        assert!(res.is_err());
+        timeline
+            .init_lsn_lease(Lsn(0x80), timeline.get_lsn_lease_length(), &ctx)
+            .expect_err("lease request on GC-ed LSN should fail");
 
         // Should still be able to renew a currently valid lease
         // Assumption: original lease to is still valid for 0/50.
-        let _ =
-            timeline.make_lsn_lease(Lsn(leased_lsns[1]), timeline.get_lsn_lease_length(), &ctx)?;
+        // (use `Timeline::init_lsn_lease` for testing so it always does validation)
+        timeline
+            .init_lsn_lease(Lsn(leased_lsns[1]), timeline.get_lsn_lease_length(), &ctx)
+            .expect("lease renewal with validation should succeed");
 
         Ok(())
     }
