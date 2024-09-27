@@ -997,6 +997,7 @@ impl PageServerHandler {
         )
         .await?;
 
+        tracing::info!("get_rel_page_at_lsn: {lsn}");
         let page = timeline
             .get_rel_page_at_lsn(req.rel, req.blkno, Version::Lsn(lsn), ctx)
             .await?;

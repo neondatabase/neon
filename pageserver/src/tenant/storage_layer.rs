@@ -433,6 +433,7 @@ impl ReadableLayer {
         reconstruct_state: &mut ValuesReconstructState,
         ctx: &RequestContext,
     ) -> Result<(), GetVectoredError> {
+        tracing::info!("get_values_reconstruct_data: {:?}", self.id());
         match self {
             ReadableLayer::PersistentLayer(layer) => {
                 layer

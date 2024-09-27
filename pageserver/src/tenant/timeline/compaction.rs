@@ -364,6 +364,10 @@ impl Timeline {
                 // 3. Create new image layers for partitions that have been modified
                 // "enough". Skip image layer creation if L0 compaction cannot keep up.
                 if fully_compacted {
+                    tracing::info!(
+                        "create_image_layers @ {lsn} (latest {})",
+                        self.get_last_record_lsn()
+                    );
                     let image_layers = self
                         .create_image_layers(
                             &partitioning,
