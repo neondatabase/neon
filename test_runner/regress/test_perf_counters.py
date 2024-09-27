@@ -1,7 +1,7 @@
 from fixtures.neon_fixtures import NeonEnv
 
 
-def test_compute_metrics(neon_simple_env: NeonEnv):
+def test_perf_counters(neon_simple_env: NeonEnv):
     """
     Test compute metrics, exposed in the neon_backend_perf_counters and
     neon_perf_counters views
