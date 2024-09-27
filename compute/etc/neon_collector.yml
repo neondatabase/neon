@@ -120,6 +120,7 @@ metrics:
 
 - metric_name: getpage_prefetch_misses_total
   type: counter
+  help: 'Number of prefetch misses (XXX what does this mean?)'
   values: [getpage_prefetch_misses_total]
   query_ref: neon_perf_counters
 
