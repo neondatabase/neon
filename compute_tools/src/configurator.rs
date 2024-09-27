@@ -11,9 +11,17 @@ use crate::compute::ComputeNode;
 fn configurator_main_loop(compute: &Arc<ComputeNode>) {
     info!("waiting for reconfiguration requests");
     loop {
-        let state = compute.state.lock().unwrap();
-        let mut state = compute.state_changed.wait(state).unwrap();
+        let mut state = compute.state.lock().unwrap();
 
+        // We have to re-check the status after re-acquiring the lock because it could be that
+        // the status has changed while we were waiting for the lock, and we might not need to
+        // wait on the condition variable. Otherwise, we might end up in some soft-/deadlock, i.e.
+        // we are waiting for a condition variable that will never be signaled.
+        if state.status != ComputeStatus::ConfigurationPending {
+            state = compute.state_changed.wait(state).unwrap();
+        }
+
+        // Re-check the status after waking up
         if state.status == ComputeStatus::ConfigurationPending {
             info!("got configuration request");
             state.status = ComputeStatus::Configuration;

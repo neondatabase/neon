@@ -130,14 +130,14 @@ impl<Id: InternId> Default for StringInterner<Id> {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct RoleNameTag;
+pub struct RoleNameTag;
 impl InternId for RoleNameTag {
     fn get_interner() -> &'static StringInterner<Self> {
         static ROLE_NAMES: OnceLock<StringInterner<RoleNameTag>> = OnceLock::new();
         ROLE_NAMES.get_or_init(Default::default)
     }
 }
-pub(crate) type RoleNameInt = InternedString<RoleNameTag>;
+pub type RoleNameInt = InternedString<RoleNameTag>;
 impl From<&RoleName> for RoleNameInt {
     fn from(value: &RoleName) -> Self {
         RoleNameTag::get_interner().get_or_intern(value)
