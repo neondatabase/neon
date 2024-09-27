@@ -279,7 +279,7 @@ async fn page_service_conn_main(
                     .map(|tid| format!("{tid}"))
                     .unwrap_or("???".to_string());
                 Err(io_error).context(format!(
-                    "Postgres connection error for tenant {} client at {}",
+                    "Postgres connection error for tenant_id={} client at peer_addr={}",
                     tenant_id, peer_addr
                 ))
             }
@@ -291,7 +291,7 @@ async fn page_service_conn_main(
                 .map(|tid| format!("{tid}"))
                 .unwrap_or("???".to_string());
             other.context(format!(
-                "Postgres query error for tenant {} client at {}",
+                "Postgres query error for tenant_id={} client peer_addr={}",
                 tenant_id, peer_addr
             ))
         }
