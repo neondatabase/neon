@@ -1470,4 +1470,52 @@ mod tests {
             LayerVisibilityHint::Visible
         ));
     }
+
+    /// Exercise edge case of querying at exactly the LSN of an image layer
+    #[test]
+    fn layer_search_at_image_lsn() {
+        let tenant_id = TenantId::generate();
+        let tenant_shard_id = TenantShardId::unsharded(tenant_id);
+        let timeline_id = TimelineId::generate();
+
+        let last_record_lsn = Lsn::from_hex("00000000DEADBEEF").unwrap();
+
+        let mut layer_map = LayerMap::default();
+        let mut updates = layer_map.batch_update();
+
+        let image_layer = PersistentLayerDesc {
+            key_range: Key::from_i128(0)..Key::from_i128(i128::MAX),
+            lsn_range: PersistentLayerDesc::image_layer_lsn_range(last_record_lsn),
+            tenant_shard_id,
+            timeline_id,
+            is_delta: false,
+            file_size: 123,
+        };
+
+        let delta_layer = PersistentLayerDesc {
+            key_range: Key::from_i128(0)..Key::from_i128(i128::MAX),
+            lsn_range: Lsn(0)..Lsn(0xdead0000),
+            tenant_shard_id,
+            timeline_id,
+            is_delta: true,
+            file_size: 123,
+        };
+
+        updates.insert_historic(image_layer.clone());
+        updates.insert_historic(delta_layer);
+
+        updates.flush();
+
+        // FIXME: according to the search() docstring, it searches for layers with start LSNs _less then_
+        // `end_lsn` -- i.e. it's correct that if you ask for exactly the LSN of an image layer, it shouldn't hit
+        // it.  However, the way that page_service calls it is to take the last_record_lsn of a Timeline
+        // and pass that directly into LayerMap::search().
+
+        let searched = layer_map
+            .search(Key::from_i128(12345), last_record_lsn)
+            .unwrap();
+
+        // We searched at the LSN of the image layer: we should hit it
+        assert_eq!(searched.layer.as_ref(), &image_layer);
+    }
 }
