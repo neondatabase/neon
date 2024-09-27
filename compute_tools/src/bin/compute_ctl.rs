@@ -152,7 +152,7 @@ fn process_cli(matches: &clap::ArgMatches) -> Result<ProcessCliResult> {
     let spec_json = matches.get_one::<String>("spec");
     let spec_path = matches.get_one::<String>("spec-path");
     let resize_swap_on_bind = matches.get_flag("resize-swap-on-bind");
-    let set_disk_quota_on_bind = matches.get_flag("set-disk-quota-on-bind");
+    let set_disk_quota_for_fs = matches.get_one::<String>("set-disk-quota-for-fs");
 
     Ok(ProcessCliResult {
         connstr,
@@ -163,7 +163,7 @@ fn process_cli(matches: &clap::ArgMatches) -> Result<ProcessCliResult> {
         spec_json,
         spec_path,
         resize_swap_on_bind,
-        set_disk_quota_on_bind,
+        set_disk_quota_for_fs,
     })
 }
 
@@ -176,7 +176,7 @@ struct ProcessCliResult<'clap> {
     spec_json: Option<&'clap String>,
     spec_path: Option<&'clap String>,
     resize_swap_on_bind: bool,
-    set_disk_quota_on_bind: bool,
+    set_disk_quota_for_fs: Option<&'clap String>,
 }
 
 fn startup_context_from_env() -> Option<opentelemetry::ContextGuard> {
@@ -297,7 +297,7 @@ fn wait_spec(
         pgbin,
         ext_remote_storage,
         resize_swap_on_bind,
-        set_disk_quota_on_bind,
+        set_disk_quota_for_fs,
         http_port,
         ..
     }: ProcessCliResult,
@@ -378,7 +378,7 @@ fn wait_spec(
         compute,
         http_port,
         resize_swap_on_bind,
-        set_disk_quota_on_bind,
+        set_disk_quota_for_fs: set_disk_quota_for_fs.cloned(),
     })
 }
 
@@ -387,7 +387,7 @@ struct WaitSpecResult {
     // passed through from ProcessCliResult
     http_port: u16,
     resize_swap_on_bind: bool,
-    set_disk_quota_on_bind: bool,
+    set_disk_quota_for_fs: Option<String>,
 }
 
 fn start_postgres(
@@ -397,7 +397,7 @@ fn start_postgres(
         compute,
         http_port,
         resize_swap_on_bind,
-        set_disk_quota_on_bind,
+        set_disk_quota_for_fs,
     }: WaitSpecResult,
 ) -> Result<(Option<PostgresHandle>, StartPostgresResult)> {
     // We got all we need, update the state.
@@ -411,7 +411,7 @@ fn start_postgres(
     );
     // before we release the mutex, fetch the swap size (if any) for later.
     let swap_size_bytes = state.pspec.as_ref().unwrap().spec.swap_size_bytes;
-    let disk_quota_bytes = state.pspec.as_ref().unwrap().spec.pgdata_disk_quota_bytes;
+    let disk_quota_bytes = state.pspec.as_ref().unwrap().spec.disk_quota_bytes;
     drop(state);
 
     // Launch remaining service threads
@@ -451,8 +451,10 @@ fn start_postgres(
     }
 
     // Set disk quota if the compute spec says so
-    if let (Some(disk_quota_bytes), true) = (disk_quota_bytes, set_disk_quota_on_bind) {
-        match set_disk_quota(disk_quota_bytes, &compute.pgdata) {
+    if let (Some(disk_quota_bytes), Some(disk_quota_fs_mountpoint)) =
+        (disk_quota_bytes, set_disk_quota_for_fs)
+    {
+        match set_disk_quota(disk_quota_bytes, &disk_quota_fs_mountpoint) {
             Ok(()) => {
                 let size_mib = disk_quota_bytes as f32 / (1 << 20) as f32; // just for more coherent display.
                 info!(%disk_quota_bytes, %size_mib, "set disk quota");
@@ -783,9 +785,9 @@ fn cli() -> clap::Command {
                 .action(clap::ArgAction::SetTrue),
         )
         .arg(
-            Arg::new("set-disk-quota-on-bind")
-                .long("set-disk-quota-on-bind")
-                .action(clap::ArgAction::SetTrue),
+            Arg::new("set-disk-quota-for-fs")
+                .long("set-disk-quota-for-fs")
+                .value_name("SET_DISK_QUOTA_FOR_FS")
         )
 }
 

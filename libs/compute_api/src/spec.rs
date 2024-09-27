@@ -50,15 +50,15 @@ pub struct ComputeSpec {
     #[serde(default)]
     pub swap_size_bytes: Option<u64>,
 
-    /// If compute_ctl was passed `--set-disk-quota-on-bind`, a value of `Some(_)` instructs
-    /// compute_ctl to run `/neonvm/bin/set-disk-quota` with the given size, when the spec is first
-    /// received.
+    /// If compute_ctl was passed `--set-disk-quota-for-fs`, a value of `Some(_)` instructs
+    /// compute_ctl to run `/neonvm/bin/set-disk-quota` with the given size and fs, when the
+    /// spec is first received.
     ///
-    /// Both this field and `--set-disk-quota-on-bind` are required, so that the control plane's
+    /// Both this field and `--set-disk-quota-for-fs` are required, so that the control plane's
     /// spec generation doesn't need to be aware of the actual compute it's running on, while
     /// guaranteeing gradual rollout of disk quota.
     #[serde(default)]
-    pub pgdata_disk_quota_bytes: Option<u64>,
+    pub disk_quota_bytes: Option<u64>,
 
     /// Expected cluster state at the end of transition process.
     pub cluster: Cluster,
