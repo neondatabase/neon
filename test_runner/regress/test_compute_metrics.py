@@ -4,7 +4,7 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypedDict, cast
+from typing import TYPE_CHECKING, Any, Optional, TypedDict, cast
 
 import pytest
 import requests
@@ -21,11 +21,16 @@ if TYPE_CHECKING:
         help: str
         key_labels: tuple[str] | None
         values: tuple[str]
-        query: str
+        query: Optional[str]
+        query_ref: Optional[str]
 
     class Collector(TypedDict):
         collector_name: str
         metrics: list[Metric]
+
+    class Query(TypedDict):
+        query_name: str
+        query: str
 
 
 CONFIG_DIR = Path(__file__).parents[2] / "compute" / "etc"
@@ -52,8 +57,16 @@ def test_sql_exporter_metrics_smoke(neon_simple_env: NeonEnv, collector_config: 
         collector = cast("Collector", yaml.safe_load(f))
 
         for metric in collector["metrics"]:
-            log.info("Checking %s in %s", metric["metric_name"], collector_config)
-            endpoint.safe_psql(metric["query"])
+            query = metric.get("query")
+            if query is not None:
+                log.info("Checking query for metric %s in %s", metric["metric_name"], collector_config)
+                endpoint.safe_psql(metric["query"])
+
+        queries = collector.get("queries")
+        if queries is not None:
+            for query in queries:
+                log.info("Checking query %s in %s", query["query_name"], collector_config)
+                endpoint.safe_psql(query["query"])
 
     endpoint.stop_and_destroy()
 
