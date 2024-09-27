@@ -629,6 +629,7 @@ def test_versions_mismatch(
     env = neon_env_builder.from_repo_dir(
         compatibility_snapshot_dir / "repo",
     )
+    env.pageserver.allowed_errors.extend([".*ingesting record with timestamp lagging more than wait_lsn_timeout.+"])
     env.start()
     check_neon_works(
         env, test_output_dir, compatibility_snapshot_dir / "dump.sql", test_output_dir / "repo"
