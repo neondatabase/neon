@@ -360,7 +360,7 @@ impl TimelineHandles {
     }
 
     fn tenant_id(&self) -> Option<TenantId> {
-        self.wrapper.tenant_id.get().cloned()
+        self.wrapper.tenant_id.get().copied()
     }
 }
 
