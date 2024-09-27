@@ -441,10 +441,7 @@ fn start_postgres(
                 // Mark compute startup as failed; don't try to start postgres, and report this
                 // error to the control plane when it next asks.
                 prestartup_failed = true;
-                let mut state = compute.state.lock().unwrap();
-                state.error = Some(format!("{err:?}"));
-                state.status = ComputeStatus::Failed;
-                compute.state_changed.notify_all();
+                compute.set_failed_status(err);
                 delay_exit = true;
             }
         }
@@ -466,10 +463,7 @@ fn start_postgres(
                 // Mark compute startup as failed; don't try to start postgres, and report this
                 // error to the control plane when it next asks.
                 prestartup_failed = true;
-                let mut state = compute.state.lock().unwrap();
-                state.error = Some(format!("{err:?}"));
-                state.status = ComputeStatus::Failed;
-                compute.state_changed.notify_all();
+                compute.set_failed_status(err);
                 delay_exit = true;
             }
         }
@@ -484,16 +478,7 @@ fn start_postgres(
             Ok(pg) => Some(pg),
             Err(err) => {
                 error!("could not start the compute node: {:#}", err);
-                let mut state = compute.state.lock().unwrap();
-                state.error = Some(format!("{:?}", err));
-                state.status = ComputeStatus::Failed;
-                // Notify others that Postgres failed to start. In case of configuring the
-                // empty compute, it's likely that API handler is still waiting for compute
-                // state change. With this we will notify it that compute is in Failed state,
-                // so control plane will know about it earlier and record proper error instead
-                // of timeout.
-                compute.state_changed.notify_all();
-                drop(state); // unlock
+                compute.set_failed_status(err);
                 delay_exit = true;
                 None
             }
