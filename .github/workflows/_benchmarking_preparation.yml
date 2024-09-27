@@ -3,19 +3,23 @@ name: Prepare benchmarking databases by restoring dumps
 on:
   workflow_call:
     # no inputs needed
-    
+
 defaults:
   run:
     shell: bash -euxo pipefail {0}
 
 jobs:
   setup-databases:
+    permissions:
+      contents: write
+      statuses: write
+      id-token: write # aws-actions/configure-aws-credentials
     strategy:
       fail-fast: false
       matrix:
-        platform: [ aws-rds-postgres, aws-aurora-serverless-v2-postgres, neon ] 
+        platform: [ aws-rds-postgres, aws-aurora-serverless-v2-postgres, neon ]
         database: [ clickbench, tpch, userexample ]
-  
+
     env:
       LD_LIBRARY_PATH: /tmp/neon/pg_install/v16/lib
       PLATFORM: ${{ matrix.platform }}
@@ -35,13 +39,13 @@ jobs:
       run: |
         case "${PLATFORM}" in
           neon)
-            CONNSTR=${{ secrets.BENCHMARK_CAPTEST_CONNSTR }} 
+            CONNSTR=${{ secrets.BENCHMARK_CAPTEST_CONNSTR }}
             ;;
           aws-rds-postgres)
-            CONNSTR=${{ secrets.BENCHMARK_RDS_POSTGRES_CONNSTR }} 
+            CONNSTR=${{ secrets.BENCHMARK_RDS_POSTGRES_CONNSTR }}
             ;;
           aws-aurora-serverless-v2-postgres)
-            CONNSTR=${{ secrets.BENCHMARK_RDS_AURORA_CONNSTR }} 
+            CONNSTR=${{ secrets.BENCHMARK_RDS_AURORA_CONNSTR }}
             ;;
           *)
             echo >&2 "Unknown PLATFORM=${PLATFORM}"
@@ -49,7 +53,7 @@ jobs:
             ;;
         esac
 
-        echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT  
+        echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
 
     - uses: actions/checkout@v4
 
@@ -67,23 +71,23 @@ jobs:
         path: /tmp/neon/
         prefix: latest
 
-    # we create a table that has one row for each database that we want to restore with the status whether the restore is done    
+    # we create a table that has one row for each database that we want to restore with the status whether the restore is done
     - name: Create benchmark_restore_status table if it does not exist
       env:
         BENCHMARK_CONNSTR: ${{ steps.set-up-prep-connstr.outputs.connstr }}
         DATABASE_NAME: ${{ matrix.database }}
-      # to avoid a race condition of multiple jobs trying to create the table at the same time, 
+      # to avoid a race condition of multiple jobs trying to create the table at the same time,
       # we use an advisory lock
       run: |
         ${PG_BINARIES}/psql "${{ env.BENCHMARK_CONNSTR }}" -c "
-        SELECT pg_advisory_lock(4711);  
+        SELECT pg_advisory_lock(4711);
         CREATE TABLE IF NOT EXISTS benchmark_restore_status (
         databasename text primary key,
         restore_done boolean
         );
         SELECT pg_advisory_unlock(4711);
         "
-    
+
     - name: Check if restore is already done
       id: check-restore-done
       env:
@@ -117,7 +121,7 @@ jobs:
         DATABASE_NAME: ${{ matrix.database }}
       run: |
         mkdir -p /tmp/dumps
-        aws s3 cp s3://neon-github-dev/performance/pgdumps/$DATABASE_NAME/$DATABASE_NAME.pg_dump /tmp/dumps/ 
+        aws s3 cp s3://neon-github-dev/performance/pgdumps/$DATABASE_NAME/$DATABASE_NAME.pg_dump /tmp/dumps/
 
     - name: Replace database name in connection string
       if: steps.check-restore-done.outputs.skip != 'true'
@@ -136,17 +140,17 @@ jobs:
         else
           new_connstr="${base_connstr}/${DATABASE_NAME}"
         fi
-        echo "database_connstr=${new_connstr}" >> $GITHUB_OUTPUT  
+        echo "database_connstr=${new_connstr}" >> $GITHUB_OUTPUT
 
     - name: Restore dump
       if: steps.check-restore-done.outputs.skip != 'true'
       env:
         DATABASE_NAME: ${{ matrix.database }}
         DATABASE_CONNSTR: ${{ steps.replace-dbname.outputs.database_connstr }}
-        # the following works only with larger computes: 
+        # the following works only with larger computes:
         # PGOPTIONS: "-c maintenance_work_mem=8388608 -c max_parallel_maintenance_workers=7"
         # we add the || true because:
-        # the dumps were created with Neon and contain neon extensions that are not 
+        # the dumps were created with Neon and contain neon extensions that are not
         # available in RDS, so we will always report an error, but we can ignore it
       run: |
         ${PG_BINARIES}/pg_restore --clean --if-exists --no-owner --jobs=4 \
