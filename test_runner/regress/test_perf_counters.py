@@ -1,4 +1,9 @@
-from fixtures.neon_fixtures import NeonEnv
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import NeonEnv
 
 
 def test_perf_counters(neon_simple_env: NeonEnv):
