@@ -522,7 +522,7 @@ jobs:
       DEFAULT_PG_VERSION: 16
       TEST_OUTPUT: /tmp/test_output
       BUILD_TYPE: remote
-      LD_LIBRARY_PATH: /home/nonroot/pg/usr/lib/x86_64-linux-gnu
+
       SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
       PLATFORM: ${{ matrix.PLATFORM }}
 
@@ -541,17 +541,26 @@ jobs:
     # instead of using Neon artifacts containing pgbench
     - name: Install postgresql-16 where pytest expects it
       run: |
+        # Just to make it easier to test things locally on macOS (with arm64)
+        arch=$(uname -m | sed 's/x86_64/amd64/g' | sed 's/aarch64/arm64/g')
+
         cd /home/nonroot
-        wget -q "https://apt.postgresql.org/pub/repos/apt/pool/16/p/postgresql-16/libpq5_16.4-1.pgdg+2_amd64.deb"
-        wget -q "https://apt.postgresql.org/pub/repos/apt/pool/main/p/postgresql-16/postgresql-client-16_16.4-1.pgdg110+2_amd64.deb"
-        wget -q "https://apt.postgresql.org/pub/repos/apt/pool/main/p/postgresql-16/postgresql-16_16.4-1.pgdg110+2_amd64.deb"
-        dpkg -x libpq5_16.4-1.pgdg+2_amd64.deb pg
-        dpkg -x postgresql-client-16_16.4-1.pgdg110+2_amd64.deb pg
-        dpkg -x postgresql-16_16.4-1.pgdg110+2_amd64.deb pg
+        wget -q "https://apt.postgresql.org/pub/repos/apt/pool/main/p/postgresql-17/libpq5_17.0-1.pgdg110+1_${arch}.deb"
+        wget -q "https://apt.postgresql.org/pub/repos/apt/pool/main/p/postgresql-16/postgresql-client-16_16.4-1.pgdg110+2_${arch}.deb"
+        wget -q "https://apt.postgresql.org/pub/repos/apt/pool/main/p/postgresql-16/postgresql-16_16.4-1.pgdg110+2_${arch}.deb"
+        dpkg -x libpq5_17.0-1.pgdg110+1_${arch}.deb pg
+        dpkg -x postgresql-16_16.4-1.pgdg110+2_${arch}.deb pg
+        dpkg -x postgresql-client-16_16.4-1.pgdg110+2_${arch}.deb pg
+
         mkdir -p /tmp/neon/pg_install/v16/bin
         ln -s /home/nonroot/pg/usr/lib/postgresql/16/bin/pgbench /tmp/neon/pg_install/v16/bin/pgbench
-        ln -s /home/nonroot/pg/usr/lib/postgresql/16/bin/psql /tmp/neon/pg_install/v16/bin/psql
-        ln -s /home/nonroot/pg/usr/lib/x86_64-linux-gnu /tmp/neon/pg_install/v16/lib
+        ln -s /home/nonroot/pg/usr/lib/postgresql/16/bin/psql    /tmp/neon/pg_install/v16/bin/psql
+        ln -s /home/nonroot/pg/usr/lib/$(uname -m)-linux-gnu     /tmp/neon/pg_install/v16/lib
+
+        LD_LIBRARY_PATH="/home/nonroot/pg/usr/lib/$(uname -m)-linux-gnu:${LD_LIBRARY_PATH}"
+        export LD_LIBRARY_PATH
+        echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}" >> ${GITHUB_ENV}
+
         /tmp/neon/pg_install/v16/bin/pgbench --version
         /tmp/neon/pg_install/v16/bin/psql --version
 
