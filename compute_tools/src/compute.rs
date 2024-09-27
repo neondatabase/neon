@@ -1123,6 +1123,9 @@ impl ComputeNode {
     //
     // Use that as a default location and pattern, except macos where core dumps are written
     // to /cores/ directory by default.
+    //
+    // With default Linux settings, the core dump file is called just "core", so check for
+    // that too.
     pub fn check_for_core_dumps(&self) -> Result<()> {
         let core_dump_dir = match std::env::consts::OS {
             "macos" => Path::new("/cores/"),
@@ -1134,8 +1137,17 @@ impl ComputeNode {
         let files = fs::read_dir(core_dump_dir)?;
         let cores = files.filter_map(|entry| {
             let entry = entry.ok()?;
-            let _ = entry.file_name().to_str()?.strip_prefix("core.")?;
-            Some(entry.path())
+
+            let is_core_dump = match entry.file_name().to_str()? {
+                n if n.starts_with("core.") => true,
+                "core" => true,
+                _ => false,
+            };
+            if is_core_dump {
+                Some(entry.path())
+            } else {
+                None
+            }
         });
 
         // Print backtrace for each core dump
