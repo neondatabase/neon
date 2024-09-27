@@ -44,7 +44,7 @@ use crate::tenant::vectored_blob_io::{
 };
 use crate::tenant::PageReconstructError;
 use crate::virtual_file::owned_buffers_io::io_buf_ext::{FullSlice, IoBufExt};
-use crate::virtual_file::{self, VirtualFile};
+use crate::virtual_file::{self, MaybeFatalIo, VirtualFile};
 use crate::{walrecord, TEMP_FILE_SUFFIX};
 use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION};
 use anyhow::{anyhow, bail, ensure, Context, Result};
@@ -589,7 +589,9 @@ impl DeltaLayerWriterInner {
         );
 
         // fsync the file
-        file.sync_all().await?;
+        file.sync_all()
+            .await
+            .maybe_fatal_err("delta_layer sync_all")?;
 
         trace!("created delta layer {}", self.path);
 

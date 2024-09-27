@@ -466,6 +466,7 @@ impl VirtualFile {
                 &[]
             };
             utils::crashsafe::overwrite(&final_path, &tmp_path, content)
+                .maybe_fatal_err("crashsafe_overwrite")
         })
         .await
         .expect("blocking task is never aborted")
@@ -475,7 +476,7 @@ impl VirtualFile {
     pub async fn sync_all(&self) -> Result<(), Error> {
         with_file!(self, StorageIoOperation::Fsync, |file_guard| {
             let (_file_guard, res) = io_engine::get().sync_all(file_guard).await;
-            res
+            res.maybe_fatal_err("sync_all")
         })
     }
 
@@ -483,7 +484,7 @@ impl VirtualFile {
     pub async fn sync_data(&self) -> Result<(), Error> {
         with_file!(self, StorageIoOperation::Fsync, |file_guard| {
             let (_file_guard, res) = io_engine::get().sync_data(file_guard).await;
-            res
+            res.maybe_fatal_err("sync_data")
         })
     }
 
