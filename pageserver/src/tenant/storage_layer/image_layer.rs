@@ -32,7 +32,7 @@ use crate::repository::{Key, Value, KEY_SIZE};
 use crate::tenant::blob_io::BlobWriter;
 use crate::tenant::block_io::{BlockBuf, FileBlockReader};
 use crate::tenant::disk_btree::{
-    DiskBtreeBuilder, DiskBtreeIterator, DiskBtreeReader, VisitDirection,
+    DiskBtreeBuilder, DiskBtreeIter, DiskBtreeIterator, DiskBtreeReader, VisitDirection,
 };
 use crate::tenant::timeline::GetVectoredError;
 use crate::tenant::vectored_blob_io::{
@@ -652,7 +652,7 @@ impl ImageLayerInner {
         ImageLayerIterator {
             image_layer: self,
             ctx,
-            index_iter: tree_reader.iter(&[0; KEY_SIZE], ctx),
+            index_iter: tree_reader.iter(&[0; KEY_SIZE], ctx).map_image(self.lsn),
             key_values_batch: VecDeque::new(),
             is_end: false,
             planner: StreamingVectoredReadPlanner::new(
@@ -999,9 +999,35 @@ pub struct ImageLayerIterator<'a> {
     image_layer: &'a ImageLayerInner,
     ctx: &'a RequestContext,
     planner: StreamingVectoredReadPlanner,
-    index_iter: DiskBtreeIterator<'a>,
+    index_iter: ImageLayerDiskBtreeIter<'a>,
     key_values_batch: VecDeque<(Key, Lsn, Value)>,
     is_end: bool,
+}
+
+pub struct ImageLayerDiskBtreeIter<'a> {
+    iter: DiskBtreeIter<'a>,
+    lsn: Lsn,
+}
+
+impl<'a> DiskBtreeIter<'a> {
+    pub(crate) fn map_image(self, lsn: Lsn) -> ImageLayerDiskBtreeIter<'a> {
+        ImageLayerDiskBtreeIter { iter: self, lsn }
+    }
+}
+
+impl<'a> DiskBtreeIterator for ImageLayerDiskBtreeIter<'a> {
+    type Item = (Key, Lsn, u64);
+
+    async fn next(
+        &mut self,
+    ) -> Option<std::result::Result<Self::Item, crate::tenant::disk_btree::DiskBtreeError>> {
+        self.iter.next().await.map(|res| {
+            res.map(|(raw_key, offset)| {
+                let key = Key::from_slice(&raw_key[..KEY_SIZE]);
+                (key, self.lsn, offset)
+            })
+        })
+    }
 }
 
 impl<'a> ImageLayerIterator<'a> {
@@ -1016,12 +1042,8 @@ impl<'a> ImageLayerIterator<'a> {
 
         let plan = loop {
             if let Some(res) = self.index_iter.next().await {
-                let (raw_key, offset) = res?;
-                if let Some(batch_plan) = self.planner.handle(
-                    Key::from_slice(&raw_key[..KEY_SIZE]),
-                    self.image_layer.lsn,
-                    offset,
-                ) {
+                let (key, lsn, offset) = res?;
+                if let Some(batch_plan) = self.planner.handle(key, lsn, offset) {
                     break batch_plan;
                 }
             } else {

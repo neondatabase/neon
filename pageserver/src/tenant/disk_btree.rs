@@ -260,11 +260,11 @@ where
         Ok(result)
     }
 
-    pub fn iter<'a>(self, start_key: &'a [u8; L], ctx: &'a RequestContext) -> DiskBtreeIterator<'a>
+    pub fn iter<'a>(self, start_key: &'a [u8; L], ctx: &'a RequestContext) -> DiskBtreeIter<'a>
     where
         R: 'a + Send,
     {
-        DiskBtreeIterator {
+        DiskBtreeIter {
             stream: Box::pin(self.into_stream(start_key, ctx)),
         }
     }
@@ -525,18 +525,127 @@ where
     }
 }
 
-pub struct DiskBtreeIterator<'a> {
+pub trait DiskBtreeIterator {
+    type Item;
+    async fn next(&mut self) -> Option<std::result::Result<Self::Item, DiskBtreeError>>;
+    fn map<B, F>(self, f: F) -> MapDiskBtreeIter<Self, F>
+    where
+        Self: Sized,
+        F: FnMut(Self::Item) -> B,
+    {
+        MapDiskBtreeIter::new(self, f)
+    }
+
+    fn filter<P>(self, predicate: P) -> FilterDiskBtreeIter<Self, P>
+    where
+        Self: Sized,
+        P: FnMut(&Self::Item) -> bool,
+    {
+        FilterDiskBtreeIter::new(self, predicate)
+    }
+}
+
+pub struct DiskBtreeIter<'a> {
     #[allow(clippy::type_complexity)]
     stream: std::pin::Pin<
         Box<dyn Stream<Item = std::result::Result<(Vec<u8>, u64), DiskBtreeError>> + 'a + Send>,
     >,
 }
 
-impl<'a> DiskBtreeIterator<'a> {
-    pub async fn next(&mut self) -> Option<std::result::Result<(Vec<u8>, u64), DiskBtreeError>> {
+impl<'a> DiskBtreeIterator for DiskBtreeIter<'a> {
+    type Item = (Vec<u8>, u64);
+
+    async fn next(&mut self) -> Option<std::result::Result<Self::Item, DiskBtreeError>> {
         self.stream.next().await
     }
 }
+
+pub struct MapDiskBtreeIter<I, F> {
+    iter: I,
+    f: F,
+}
+
+impl<I, F> MapDiskBtreeIter<I, F> {
+    pub fn new(iter: I, f: F) -> Self {
+        MapDiskBtreeIter { iter, f }
+    }
+}
+
+impl<B, I: DiskBtreeIterator, F> DiskBtreeIterator for MapDiskBtreeIter<I, F>
+where
+    F: FnMut(I::Item) -> B,
+{
+    type Item = B;
+
+    async fn next(&mut self) -> Option<std::result::Result<Self::Item, DiskBtreeError>> {
+        self.iter.next().await.map(|res| res.map(|x| (self.f)(x)))
+    }
+}
+
+pub struct FilterDiskBtreeIter<I, P> {
+    iter: I,
+    predicate: P,
+}
+
+impl<I, P> FilterDiskBtreeIter<I, P> {
+    pub fn new(iter: I, predicate: P) -> Self {
+        FilterDiskBtreeIter { iter, predicate }
+    }
+}
+
+impl<I: DiskBtreeIterator, P> DiskBtreeIterator for FilterDiskBtreeIter<I, P>
+where
+    P: FnMut(&I::Item) -> bool,
+{
+    type Item = I::Item;
+
+    async fn next(&mut self) -> Option<std::result::Result<Self::Item, DiskBtreeError>> {
+        self.iter.next().await.and_then(|res| match res {
+            Ok(x) => {
+                if (self.predicate)(&x) {
+                    Some(Ok(x))
+                } else {
+                    None
+                }
+            }
+            Err(e) => Some(Err(e)),
+        })
+    }
+}
+
+// pub struct DeltaLayerDiskBtreeIterator<'a, F> {
+//     inner: DiskBtreeIterator<'a, F, >,
+//     extract: F,
+// }
+
+// impl<'a, F> DeltaLayerDiskBtreeIterator<'a, F>
+// where
+//     F: FnMut(Vec<u8>, u64) -> (Key, Lsn, u64),
+// {
+//     pub async fn next(&mut self) -> Option<std::result::Result<(Key, Lsn, u64), DiskBtreeError>> {
+//         self.inner
+//             .next()
+//             .await
+//             .map(|res| res.map(|(raw_key, value)| (self.extract)(raw_key, value)))
+//     }
+// }
+
+// pub struct ImageLayerDiskBtreeIterator<'a, F> {
+//     inner: DiskBtreeIterator<'a>,
+//     extract: F,
+// }
+
+// impl<'a, F> ImageLayerDiskBtreeIterator<'a, F>
+// where
+//     F: FnMut(Vec<u8>, u64) -> (Key, Lsn, u64),
+// {
+//     pub async fn next(&mut self) -> Option<std::result::Result<(Key, Lsn, u64), DiskBtreeError>> {
+//         self.inner
+//             .next()
+//             .await
+//             .map(|res| res.map(|(raw_key, value)| (self.extract)(raw_key, value)))
+//     }
+// }
 
 ///
 /// Public builder object, for creating a new tree.

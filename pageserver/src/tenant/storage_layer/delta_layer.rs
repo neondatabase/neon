@@ -34,7 +34,7 @@ use crate::repository::{Key, Value, KEY_SIZE};
 use crate::tenant::blob_io::BlobWriter;
 use crate::tenant::block_io::{BlockBuf, BlockCursor, BlockLease, BlockReader, FileBlockReader};
 use crate::tenant::disk_btree::{
-    DiskBtreeBuilder, DiskBtreeIterator, DiskBtreeReader, VisitDirection,
+    DiskBtreeBuilder, DiskBtreeIter, DiskBtreeIterator, DiskBtreeReader, VisitDirection,
 };
 use crate::tenant::storage_layer::layer::S3_UPLOAD_LIMIT;
 use crate::tenant::timeline::GetVectoredError;
@@ -1426,14 +1426,17 @@ impl DeltaLayerInner {
         offset
     }
 
-    pub(crate) fn iter<'a>(&'a self, ctx: &'a RequestContext) -> DeltaLayerIterator<'a> {
+    pub(crate) fn iter<'a>(
+        &'a self,
+        ctx: &'a RequestContext,
+    ) -> DeltaLayerIterator<'a, DeltaLayerDiskBtreeIter<'a>> {
         let block_reader = FileBlockReader::new(&self.file, self.file_id);
         let tree_reader =
             DiskBtreeReader::new(self.index_start_blk, self.index_root_blk, block_reader);
         DeltaLayerIterator {
             delta_layer: self,
             ctx,
-            index_iter: tree_reader.iter(&[0; DELTA_KEY_SIZE], ctx),
+            index_iter: tree_reader.iter(&[0; DELTA_KEY_SIZE], ctx).map_delta(),
             key_values_batch: std::collections::VecDeque::new(),
             is_end: false,
             planner: StreamingVectoredReadPlanner::new(
@@ -1508,16 +1511,19 @@ impl<'a> pageserver_compaction::interface::CompactionDeltaEntry<'a, Key> for Del
     }
 }
 
-pub struct DeltaLayerIterator<'a> {
+pub struct DeltaLayerIterator<'a, I = DeltaLayerDiskBtreeIter<'a>> {
     delta_layer: &'a DeltaLayerInner,
     ctx: &'a RequestContext,
     planner: StreamingVectoredReadPlanner,
-    index_iter: DiskBtreeIterator<'a>,
+    index_iter: I,
     key_values_batch: VecDeque<(Key, Lsn, Value)>,
     is_end: bool,
 }
 
-impl<'a> DeltaLayerIterator<'a> {
+impl<'a, I> DeltaLayerIterator<'a, I>
+where
+    I: DiskBtreeIterator<Item = (Key, Lsn, u64)>,
+{
     pub(crate) fn layer_dbg_info(&self) -> String {
         self.delta_layer.layer_dbg_info()
     }
@@ -1529,11 +1535,7 @@ impl<'a> DeltaLayerIterator<'a> {
 
         let plan = loop {
             if let Some(res) = self.index_iter.next().await {
-                let (raw_key, value) = res?;
-                let key = Key::from_slice(&raw_key[..KEY_SIZE]);
-                let lsn = DeltaKey::extract_lsn_from_buf(&raw_key);
-                let blob_ref = BlobRef(value);
-                let offset = blob_ref.pos();
+                let (key, lsn, offset) = res?;
                 if let Some(batch_plan) = self.planner.handle(key, lsn, offset) {
                     break batch_plan;
                 }
@@ -1578,6 +1580,51 @@ impl<'a> DeltaLayerIterator<'a> {
                 .pop_front()
                 .expect("should not be empty"),
         ))
+    }
+
+    pub async fn filter_key<P>(
+        self,
+        predicate: P,
+    ) -> DeltaLayerIterator<'a, impl DiskBtreeIterator<Item = (Key, Lsn, u64)>>
+    where
+        P: FnMut(&(Key, Lsn, u64)) -> bool,
+    {
+        DeltaLayerIterator {
+            delta_layer: self.delta_layer,
+            ctx: self.ctx,
+            planner: self.planner,
+            index_iter: self.index_iter.filter(predicate),
+            key_values_batch: self.key_values_batch,
+            is_end: self.is_end,
+        }
+    }
+}
+
+pub struct DeltaLayerDiskBtreeIter<'a> {
+    iter: DiskBtreeIter<'a>,
+}
+
+impl<'a> DiskBtreeIter<'a> {
+    pub(crate) fn map_delta(self) -> DeltaLayerDiskBtreeIter<'a> {
+        DeltaLayerDiskBtreeIter { iter: self }
+    }
+}
+
+impl<'a> DiskBtreeIterator for DeltaLayerDiskBtreeIter<'a> {
+    type Item = (Key, Lsn, u64);
+
+    async fn next(
+        &mut self,
+    ) -> Option<std::result::Result<Self::Item, crate::tenant::disk_btree::DiskBtreeError>> {
+        self.iter.next().await.map(|res| {
+            res.map(|(raw_key, value)| {
+                let key = Key::from_slice(&raw_key[..KEY_SIZE]);
+                let lsn = DeltaKey::extract_lsn_from_buf(&raw_key);
+                let blob_ref = BlobRef(value);
+                let offset = blob_ref.pos();
+                (key, lsn, offset)
+            })
+        })
     }
 }
 
