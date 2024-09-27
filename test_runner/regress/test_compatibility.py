@@ -263,12 +263,14 @@ def test_forward_compatibility(
             )
 
         # does not include logs from previous runs
-        assert not env.pageserver.log_contains("git:" + prev_pageserver_version)
+        assert ((not env.pageserver.log_contains("git-env:" + prev_pageserver_version)) and
+                (not env.pageserver.log_contains("git:" + prev_pageserver_version)))
 
         env.start()
 
         # ensure the specified pageserver is running
-        assert env.pageserver.log_contains("git:" + prev_pageserver_version)
+        assert (env.pageserver.log_contains("git:-env" + prev_pageserver_version) or
+                env.pageserver.log_contains("git:" + prev_pageserver_version))
 
         check_neon_works(
             env,
