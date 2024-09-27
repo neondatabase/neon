@@ -252,11 +252,11 @@ def test_forward_compatibility(
         # not using env.pageserver.version because it was initialized before
         prev_pageserver_version_str = env.get_binary_version("pageserver")
         prev_pageserver_version_match = re.search(
-            "Neon page server git:(.*) failpoints: (.*), features: (.*)",
+            "Neon page server git(-env)?:(.*) failpoints: (.*), features: (.*)",
             prev_pageserver_version_str,
         )
         if prev_pageserver_version_match is not None:
-            prev_pageserver_version = prev_pageserver_version_match.group(1)
+            prev_pageserver_version = prev_pageserver_version_match.group(2)
         else:
             raise AssertionError(
                 "cannot find git hash in the version string: " + prev_pageserver_version_str
