@@ -3856,21 +3856,21 @@ impl Timeline {
             )));
         }
 
-        let distance = lsn.0 - partition_lsn.0;
-        if *partition_lsn != Lsn(0)
-            && distance <= self.repartition_threshold
-            && !flags.contains(CompactFlags::ForceRepartition)
-        {
-            debug!(
-                distance,
-                threshold = self.repartition_threshold,
-                "no repartitioning needed"
-            );
-            return Ok((
-                (dense_partition.clone(), sparse_partition.clone()),
-                *partition_lsn,
-            ));
-        }
+        // let distance = lsn.0 - partition_lsn.0;
+        // if *partition_lsn != Lsn(0)
+        //     && distance <= self.repartition_threshold
+        //     && !flags.contains(CompactFlags::ForceRepartition)
+        // {
+        //     debug!(
+        //         distance,
+        //         threshold = self.repartition_threshold,
+        //         "no repartitioning needed"
+        //     );
+        //     return Ok((
+        //         (dense_partition.clone(), sparse_partition.clone()),
+        //         *partition_lsn,
+        //     ));
+        // }
 
         let (dense_ks, sparse_ks) = self.collect_keyspace(lsn, ctx).await?;
         let dense_partitioning = dense_ks.partition(&self.shard_identity, partition_size);
@@ -5779,6 +5779,7 @@ impl<'a> TimelineWriter<'a> {
     /// the 'lsn' or anything older. The previous last record LSN is stored alongside
     /// the latest and can be read.
     pub(crate) fn finish_write(&self, new_lsn: Lsn) {
+        tracing::info!("finish_write @ {new_lsn}");
         self.tl.finish_write(new_lsn);
     }
 
