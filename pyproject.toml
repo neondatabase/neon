@@ -42,6 +42,8 @@ pytest-repeat = "^0.9.3"
 websockets = "^12.0"
 clickhouse-connect = "^0.7.16"
 kafka-python = "^2.0.2"
+pyyaml = "^6.0.2"
+types-pyyaml = "^6.0.12.20240917"
 
 [tool.poetry.group.dev.dependencies]
 mypy = "==1.3.0"
