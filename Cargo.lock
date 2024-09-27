@@ -1321,6 +1321,7 @@ dependencies = [
  "clap",
  "comfy-table",
  "compute_api",
+ "futures",
  "humantime",
  "humantime-serde",
  "hyper 0.14.30",
