@@ -62,7 +62,7 @@ use std::collections::VecDeque;
 use std::fs::File;
 use std::io::SeekFrom;
 use std::ops::Range;
-use std::os::unix::fs::FileExt;
+use std::os::unix::fs::{FileExt, OpenOptionsExt};
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
@@ -790,9 +790,15 @@ impl DeltaLayerInner {
         max_vectored_read_bytes: Option<MaxVectoredReadBytes>,
         ctx: &RequestContext,
     ) -> anyhow::Result<Self> {
-        let file = VirtualFile::open(path, ctx)
-            .await
-            .context("open layer file")?;
+        let file = VirtualFile::open_with_options(
+            path,
+            virtual_file::OpenOptions::new()
+                .read(true)
+                .custom_flags(nix::libc::O_DIRECT),
+            ctx,
+        )
+        .await
+        .context("open layer file")?;
 
         let file_id = page_cache::next_file_id();
 

@@ -58,6 +58,7 @@ use std::collections::VecDeque;
 use std::fs::File;
 use std::io::SeekFrom;
 use std::ops::Range;
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::prelude::FileExt;
 use std::str::FromStr;
 use tokio::sync::OnceCell;
@@ -389,9 +390,15 @@ impl ImageLayerInner {
         max_vectored_read_bytes: Option<MaxVectoredReadBytes>,
         ctx: &RequestContext,
     ) -> anyhow::Result<Self> {
-        let file = VirtualFile::open(path, ctx)
-            .await
-            .context("open layer file")?;
+        let file = VirtualFile::open_with_options(
+            path,
+            virtual_file::OpenOptions::new()
+                .read(true)
+                .custom_flags(nix::libc::O_DIRECT),
+            ctx,
+        )
+        .await
+        .context("open layer file")?;
         let file_id = page_cache::next_file_id();
         let block_reader = FileBlockReader::new(&file, file_id);
         let summary_blk = block_reader
