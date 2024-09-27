@@ -40,7 +40,7 @@ use crate::tenant::storage_layer::layer::S3_UPLOAD_LIMIT;
 use crate::tenant::timeline::GetVectoredError;
 use crate::tenant::vectored_blob_io::{
     BlobFlag, BufView, StreamingVectoredReadPlanner, VectoredBlobReader, VectoredRead,
-    VectoredReadCoalesceMode, VectoredReadPlanner,
+    VectoredReadPlanner,
 };
 use crate::tenant::PageReconstructError;
 use crate::virtual_file::owned_buffers_io::io_buf_ext::{FullSlice, IoBufExt};
@@ -1133,7 +1133,7 @@ impl DeltaLayerInner {
         ctx: &RequestContext,
     ) -> anyhow::Result<usize> {
         use crate::tenant::vectored_blob_io::{
-            BlobMeta, VectoredReadBuilder, VectoredReadExtended,
+            BlobMeta, ChunkedVectoredReadBuilder, VectoredReadExtended,
         };
         use futures::stream::TryStreamExt;
 
@@ -1183,8 +1183,8 @@ impl DeltaLayerInner {
 
         let mut prev: Option<(Key, Lsn, BlobRef)> = None;
 
-        let mut read_builder: Option<VectoredReadBuilder> = None;
-        let read_mode = VectoredReadCoalesceMode::get();
+        let mut read_builder: Option<ChunkedVectoredReadBuilder> = None;
+        let align = virtual_file::get_io_buffer_alignment();
 
         let max_read_size = self
             .max_vectored_read_bytes
@@ -1228,12 +1228,12 @@ impl DeltaLayerInner {
                 {
                     None
                 } else {
-                    read_builder.replace(VectoredReadBuilder::new(
+                    read_builder.replace(ChunkedVectoredReadBuilder::new(
                         offsets.start.pos(),
                         offsets.end.pos(),
                         meta,
                         max_read_size,
-                        read_mode,
+                        align,
                     ))
                 }
             } else {
