@@ -143,8 +143,15 @@ where
     res
 }
 
+pub fn configure_local_proxy(local_proxy: &LocalProxySpec) -> Result<()> {
+    write_local_proxy_conf("/etc/localproxy/config.json".as_ref(), local_proxy)?;
+    notify_local_proxy("/etc/localproxy/pid".as_ref())?;
+
+    Ok(())
+}
+
 /// Create or completely rewrite configuration file specified by `path`
-pub fn write_local_proxy_conf(path: &Path, local_proxy: &LocalProxySpec) -> Result<()> {
+fn write_local_proxy_conf(path: &Path, local_proxy: &LocalProxySpec) -> Result<()> {
     let config =
         serde_json::to_string_pretty(local_proxy).context("serializing LocalProxySpec to json")?;
     std::fs::write(path, config).with_context(|| format!("writing {}", path.display()))?;
@@ -153,7 +160,7 @@ pub fn write_local_proxy_conf(path: &Path, local_proxy: &LocalProxySpec) -> Resu
 }
 
 /// Notify local proxy about a new config file.
-pub fn notify_local_proxy(path: &Utf8Path) -> Result<()> {
+fn notify_local_proxy(path: &Utf8Path) -> Result<()> {
     match pid_file::read(path)? {
         // if the file doesn't exist, or isn't locked, localproxy isn't running
         // and will naturally pick up our config later
