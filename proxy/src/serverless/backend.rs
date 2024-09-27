@@ -119,7 +119,7 @@ impl PoolingBackend {
                     .check_jwt(
                         ctx,
                         user_info.endpoint.clone(),
-                        user_info.user.clone(),
+                        &user_info.user,
                         &StaticAuthRules,
                         jwt,
                     )

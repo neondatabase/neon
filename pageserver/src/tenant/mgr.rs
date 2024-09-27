@@ -30,8 +30,8 @@ use utils::{backoff, completion, crashsafe};
 
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
-use crate::control_plane_client::{
-    ControlPlaneClient, ControlPlaneGenerationsApi, RetryForeverError,
+use crate::controller_upcall_client::{
+    ControlPlaneGenerationsApi, ControllerUpcallClient, RetryForeverError,
 };
 use crate::deletion_queue::DeletionQueueClient;
 use crate::http::routes::ACTIVE_TENANT_TIMEOUT;
@@ -122,7 +122,7 @@ pub(crate) enum ShardSelector {
     Known(ShardIndex),
 }
 
-/// A convenience for use with the re_attach ControlPlaneClient function: rather
+/// A convenience for use with the re_attach ControllerUpcallClient function: rather
 /// than the serializable struct, we build this enum that encapsulates
 /// the invariant that attached tenants always have generations.
 ///
@@ -341,7 +341,7 @@ async fn init_load_generations(
             "Emergency mode!  Tenants will be attached unsafely using their last known generation"
         );
         emergency_generations(tenant_confs)
-    } else if let Some(client) = ControlPlaneClient::new(conf, cancel) {
+    } else if let Some(client) = ControllerUpcallClient::new(conf, cancel) {
         info!("Calling control plane API to re-attach tenants");
         // If we are configured to use the control plane API, then it is the source of truth for what tenants to load.
         match client.re_attach(conf).await {
@@ -949,12 +949,6 @@ impl TenantManager {
                 (LocationMode::Attached(attach_conf), Some(TenantSlot::Attached(tenant))) => {
                     match attach_conf.generation.cmp(&tenant.generation) {
                         Ordering::Equal => {
-                            if attach_conf.attach_mode == AttachmentMode::Single {
-                                tenant
-                                    .gc_block
-                                    .set_lsn_lease_deadline(tenant.get_lsn_lease_length());
-                            }
-
                             // A transition from Attached to Attached in the same generation, we may
                             // take our fast path and just provide the updated configuration
                             // to the tenant.
