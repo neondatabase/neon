@@ -273,25 +273,17 @@ async fn page_service_conn_main(
                 info!("Postgres client disconnected ({io_error})");
                 Ok(())
             } else {
-                let tenant_id = conn_handler
-                    .timeline_handles
-                    .tenant_id()
-                    .map(|tid| format!("{tid}"))
-                    .unwrap_or("???".to_string());
+                let tenant_id = conn_handler.timeline_handles.tenant_id();
                 Err(io_error).context(format!(
-                    "Postgres connection error for tenant_id={} client at peer_addr={}",
+                    "Postgres connection error for tenant_id={:?} client at peer_addr={}",
                     tenant_id, peer_addr
                 ))
             }
         }
         other => {
-            let tenant_id = conn_handler
-                .timeline_handles
-                .tenant_id()
-                .map(|tid| format!("{tid}"))
-                .unwrap_or("???".to_string());
+            let tenant_id = conn_handler.timeline_handles.tenant_id();
             other.context(format!(
-                "Postgres query error for tenant_id={} client peer_addr={}",
+                "Postgres query error for tenant_id={:?} client peer_addr={}",
                 tenant_id, peer_addr
             ))
         }
