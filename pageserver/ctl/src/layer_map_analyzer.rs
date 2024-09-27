@@ -151,13 +151,10 @@ pub(crate) async fn main(cmd: &AnalyzeLayerMapCmd) -> Result<()> {
     let max_holes = cmd.max_holes.unwrap_or(DEFAULT_MAX_HOLES);
     let ctx = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error);
 
+    let align = pageserver_api::config::defaults::DEFAULT_IO_BUFFER_ALIGNMENT;
     // Initialize virtual_file (file desriptor cache) and page cache which are needed to access layer persistent B-Tree.
-    pageserver::virtual_file::init(
-        10,
-        virtual_file::api::IoEngineKind::StdFs,
-        pageserver_api::config::defaults::DEFAULT_IO_BUFFER_ALIGNMENT,
-    );
-    pageserver::page_cache::init(100);
+    pageserver::virtual_file::init(10, virtual_file::api::IoEngineKind::StdFs, align);
+    pageserver::page_cache::init(100, align);
 
     let mut total_delta_layers = 0usize;
     let mut total_image_layers = 0usize;

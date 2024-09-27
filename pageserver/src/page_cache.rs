@@ -82,6 +82,7 @@ use once_cell::sync::OnceCell;
 use crate::{
     context::RequestContext,
     metrics::{page_cache_eviction_metrics, PageCacheSizeMetrics},
+    virtual_file::{self, dio::IoBufferMut},
 };
 
 static PAGE_CACHE: OnceCell<PageCache> = OnceCell::new();
@@ -90,8 +91,8 @@ const TEST_PAGE_CACHE_SIZE: usize = 50;
 ///
 /// Initialize the page cache. This must be called once at page server startup.
 ///
-pub fn init(size: usize) {
-    if PAGE_CACHE.set(PageCache::new(size)).is_err() {
+pub fn init(size: usize, align: usize) {
+    if PAGE_CACHE.set(PageCache::new(size, align)).is_err() {
         panic!("page cache already initialized");
     }
 }
@@ -106,7 +107,12 @@ pub fn get() -> &'static PageCache {
     // page cache is usable in unit tests.
     //
     if cfg!(test) {
-        PAGE_CACHE.get_or_init(|| PageCache::new(TEST_PAGE_CACHE_SIZE))
+        PAGE_CACHE.get_or_init(|| {
+            PageCache::new(
+                TEST_PAGE_CACHE_SIZE,
+                virtual_file::get_io_buffer_alignment(),
+            )
+        })
     } else {
         PAGE_CACHE.get().expect("page cache not initialized")
     }
@@ -637,13 +643,10 @@ impl PageCache {
     /// Initialize a new page cache
     ///
     /// This should be called only once at page server startup.
-    fn new(num_pages: usize) -> Self {
+    fn new(num_pages: usize, align: usize) -> Self {
         assert!(num_pages > 0, "page cache size must be > 0");
 
-        // We could use Vec::leak here, but that potentially also leaks
-        // uninitialized reserved capacity. With into_boxed_slice and Box::leak
-        // this is avoided.
-        let page_buffer = Box::leak(vec![0u8; num_pages * PAGE_SZ].into_boxed_slice());
+        let page_buffer = IoBufferMut::with_capacity_aligned(num_pages * PAGE_SZ, align).leak();
 
         let size_metrics = &crate::metrics::PAGE_CACHE_SIZE;
         size_metrics.max_bytes.set_page_sz(num_pages);

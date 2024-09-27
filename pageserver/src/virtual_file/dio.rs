@@ -6,7 +6,7 @@ use std::{
     cmp,
     mem::{ManuallyDrop, MaybeUninit},
     ops::{Deref, DerefMut},
-    ptr::NonNull,
+    ptr::{addr_of_mut, NonNull},
 };
 
 use bytes::buf::UninitSlice;
@@ -174,6 +174,11 @@ impl IoBufferMut {
 
         self.ptr = ptr;
         self.capacity = cap;
+    }
+
+    pub fn leak<'a>(self) -> &'a mut [u8] {
+        let mut buf = ManuallyDrop::new(self);
+        unsafe { slice::from_raw_parts_mut(buf.as_mut_ptr(), buf.len) }
     }
 }
 

@@ -415,7 +415,7 @@ impl VirtualFile {
             open_options.open(path_ref.as_std_path()).await?
         });
 
-        // Strip all options other than read and write.
+        // Strip all options other than read and write (O_DIRECT).
         //
         // It would perhaps be nicer to check just for the read and write flags
         // explicitly, but OpenOptions doesn't contain any functions to read flags,

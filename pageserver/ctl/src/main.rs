@@ -205,12 +205,9 @@ fn read_pg_control_file(control_file_path: &Utf8Path) -> anyhow::Result<()> {
 
 async fn print_layerfile(path: &Utf8Path) -> anyhow::Result<()> {
     // Basic initialization of things that don't change after startup
-    virtual_file::init(
-        10,
-        virtual_file::api::IoEngineKind::StdFs,
-        DEFAULT_IO_BUFFER_ALIGNMENT,
-    );
-    page_cache::init(100);
+    let align = DEFAULT_IO_BUFFER_ALIGNMENT;
+    virtual_file::init(10, virtual_file::api::IoEngineKind::StdFs, align);
+    page_cache::init(100, align);
     let ctx = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error);
     dump_layerfile_from_path(path, true, &ctx).await
 }
