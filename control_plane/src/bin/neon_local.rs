@@ -124,11 +124,6 @@ struct StopCmdArgs {
     mode: StopMode,
 }
 
-//        .short('m')
-//        .value_parser(["fast", "immediate"])
-//        .default_value("fast")
-//        .help("If 'immediate', don't flush repository data at shutdown")
-//        .required(false)
 #[derive(Clone, Copy, clap::ValueEnum)]
 enum StopMode {
     Fast,
