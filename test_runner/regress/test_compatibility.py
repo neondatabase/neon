@@ -271,7 +271,7 @@ def test_forward_compatibility(
 
         # ensure the specified pageserver is running
         assert env.pageserver.log_contains(
-            "git:-env" + prev_pageserver_version
+            "git-env:" + prev_pageserver_version
         ) or env.pageserver.log_contains("git:" + prev_pageserver_version)
 
         check_neon_works(
@@ -617,9 +617,7 @@ def test_versions_mismatch(
     os.makedirs(target_dir)
     for component, paths in binaries.items():
         directory = neon_bin if bool(combination & bitmap[component]) else compatibility_neon_bin
-        log.info("Directory: %s", directory)
         for filename in paths:
-            log.info("Target: %s", os.path.join(target_dir, filename))
             os.link(directory / filename, target_dir / filename)
     neon_env_builder.neon_binpath = target_dir
     neon_env_builder.pg_distrib_dir = (
