@@ -1,5 +1,6 @@
 use std::{
-    hash::BuildHasherDefault, marker::PhantomData, num::NonZeroUsize, ops::Index, sync::OnceLock,
+    any::type_name, hash::BuildHasherDefault, marker::PhantomData, num::NonZeroUsize, ops::Index,
+    sync::OnceLock,
 };
 
 use lasso::{Capacity, MemoryLimits, Spur, ThreadedRodeo};
@@ -16,10 +17,19 @@ pub struct StringInterner<Id> {
     _id: PhantomData<Id>,
 }
 
-#[derive(PartialEq, Debug, Clone, Copy, Eq, Hash)]
+#[derive(PartialEq, Clone, Copy, Eq, Hash)]
 pub struct InternedString<Id> {
     inner: Spur,
     _id: PhantomData<Id>,
+}
+
+impl<Id: InternId> std::fmt::Debug for InternedString<Id> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("InternedString")
+            .field(&type_name::<Id>())
+            .field(&self.as_str())
+            .finish()
+    }
 }
 
 impl<Id: InternId> std::fmt::Display for InternedString<Id> {
