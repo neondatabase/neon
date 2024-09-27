@@ -11,6 +11,7 @@ from fixtures.neon_fixtures import (
     generate_uploads_and_deletions,
 )
 from fixtures.pageserver.http import PageserverApiException
+from fixtures.pageserver.utils import wait_for_last_record_lsn
 from fixtures.utils import wait_until
 from fixtures.workload import Workload
 
@@ -412,3 +413,42 @@ def test_image_layer_compression(neon_env_builder: NeonEnvBuilder, enabled: bool
                 f"SELECT count(*) FROM foo WHERE id={v} and val=repeat('abcde{v:0>3}', 500)"
             )
             assert res[0][0] == 1
+
+
+def test_image_layer_reads(neon_env_builder: NeonEnvBuilder):
+    env = neon_env_builder.init_start()
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    env.pageserver.http_client().set_tenant_config(
+        tenant_id,
+        {
+            "compaction_period": "0s",
+        },
+    )
+
+    workload = Workload(env, tenant_id, timeline_id)
+    workload.init()
+    workload.write_rows(256)
+    workload.validate()
+
+    workload.go_readonly()
+
+    commit_lsn = env.safekeepers[0].http_client().get_commit_lsn(tenant_id, timeline_id)
+    wait_for_last_record_lsn(env.pageserver.http_client(), tenant_id, timeline_id, commit_lsn)
+    log.info(f"Ingested up to commit_lsn {commit_lsn}")
+
+    env.pageserver.http_client().timeline_compact(
+        tenant_id, timeline_id, force_image_layer_creation=True
+    )
+
+    # Uncomment this checkpoint, and the logs will show getpage requests hitting the image layers we
+    # just created.  However, without the checkpoint, getpage requests will hit one InMemoryLayer and
+    # one persistent delta layer.
+    # env.pageserver.http_client().timeline_checkpoint(tenant_id, timeline_id, wait_until_uploaded=True)
+
+    # This should send getpage requests at the same LSN where we just created image layers
+    workload.validate()
+
+    # Nothing should have written in the meantime
+    assert commit_lsn == env.safekeepers[0].http_client().get_commit_lsn(tenant_id, timeline_id)
