@@ -40,16 +40,6 @@ impl IoBufferMut {
     /// * `capacity`, when rounded up to the nearest multiple of `align`,
     ///    must not overflow isize (i.e., the rounded value must be
     ///    less than or equal to `isize::MAX`).
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// let mut buf = IoBufferMut::with_capacity_aligned(4096, 4096);
-    ///
-    /// assert_eq!(buf.len(), 0);
-    /// assert_eq!(buf.capacity(), 4096);
-    /// assert_eq!(buf.align(), 4096);
-    /// ```
     pub fn with_capacity_aligned(capacity: usize, align: usize) -> Self {
         let layout = Layout::from_size_align(capacity, align).expect("Invalid layout");
 
@@ -68,6 +58,13 @@ impl IoBufferMut {
             len: 0,
             align,
         }
+    }
+
+    pub fn with_capacity_aligned_zeroed(capacity: usize, align: usize) -> Self {
+        use bytes::BufMut;
+        let mut buf = Self::with_capacity_aligned(capacity, align);
+        buf.put_bytes(0, capacity);
+        buf
     }
 
     /// Returns the total number of bytes the buffer can hold.
