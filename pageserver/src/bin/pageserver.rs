@@ -173,7 +173,7 @@ fn main() -> anyhow::Result<()> {
         conf.virtual_file_io_engine,
         conf.io_buffer_alignment,
     );
-    page_cache::init(conf.page_cache_size);
+    page_cache::init(conf.page_cache_size, conf.io_buffer_alignment);
 
     start_pageserver(launch_ts, conf).context("Failed to start pageserver")?;
 
