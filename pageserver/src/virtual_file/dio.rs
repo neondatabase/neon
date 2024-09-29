@@ -175,6 +175,7 @@ impl IoBufferMut {
 
     pub fn leak<'a>(self) -> &'a mut [u8] {
         let mut buf = ManuallyDrop::new(self);
+        // SAFETY: leaking the buffer as intended.
         unsafe { slice::from_raw_parts_mut(buf.as_mut_ptr(), buf.len) }
     }
 }
