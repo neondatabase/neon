@@ -20,7 +20,6 @@ chrono.workspace = true
 clap.workspace = true
 fail.workspace = true
 futures.workspace = true
-git-version.workspace = true
 hex.workspace = true
 hyper.workspace = true
 humantime.workspace = true

@@ -13,6 +13,9 @@ RUN useradd -ms /bin/bash nonroot -b /home
 SHELL ["/bin/bash", "-c"]
 
 # System deps
+#
+# 'gdb' is included so that we get backtraces of core dumps produced in
+# regression tests
 RUN set -e \
     && apt update \
     && apt install -y \
@@ -24,6 +27,7 @@ RUN set -e \
         cmake \
         curl \
         flex \
+        gdb \
         git \
         gnupg \
         gzip \

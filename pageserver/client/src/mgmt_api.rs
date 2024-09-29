@@ -736,4 +736,22 @@ impl Client {
             .await
             .map_err(Error::ReceiveBody)
     }
+
+    pub async fn timeline_init_lsn_lease(
+        &self,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+        lsn: Lsn,
+    ) -> Result<LsnLease> {
+        let uri = format!(
+            "{}/v1/tenant/{tenant_shard_id}/timeline/{timeline_id}/lsn_lease",
+            self.mgmt_api_endpoint,
+        );
+
+        self.request(Method::POST, &uri, LsnLeaseRequest { lsn })
+            .await?
+            .json()
+            .await
+            .map_err(Error::ReceiveBody)
+    }
 }

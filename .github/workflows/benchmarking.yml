@@ -12,7 +12,6 @@ on:
     #          │ │ │ ┌───────────── month (1 - 12 or JAN-DEC)
     #          │ │ │ │ ┌───────────── day of the week (0 - 6 or SUN-SAT)
     - cron:   '0 3 * * *' # run once a day, timezone is utc
-
   workflow_dispatch: # adds ability to run this manually
     inputs:
       region_id:
@@ -59,7 +58,7 @@ jobs:
     permissions:
       contents: write
       statuses: write
-      id-token: write # Required for OIDC authentication in azure runners
+      id-token: write # aws-actions/configure-aws-credentials
     strategy:
       fail-fast: false
       matrix:
@@ -68,12 +67,10 @@ jobs:
             PLATFORM: "neon-staging"
             region_id: ${{ github.event.inputs.region_id || 'aws-us-east-2' }}
             RUNNER: [ self-hosted, us-east-2, x64 ]
-            IMAGE: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned
           - DEFAULT_PG_VERSION: 16
             PLATFORM: "azure-staging"
             region_id: 'azure-eastus2'
             RUNNER: [ self-hosted, eastus2, x64 ]
-            IMAGE: neondatabase/build-tools:pinned
     env:
       TEST_PG_BENCH_DURATIONS_MATRIX: "300"
       TEST_PG_BENCH_SCALES_MATRIX: "10,100"
@@ -86,7 +83,10 @@ jobs:
 
     runs-on: ${{ matrix.RUNNER }}
     container:
-      image: ${{ matrix.IMAGE }}
+      image: neondatabase/build-tools:pinned
+      credentials:
+        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
       options: --init
 
     steps:
@@ -164,6 +164,10 @@ jobs:
 
   replication-tests:
     if: ${{ github.event.inputs.run_only_pgvector_tests == 'false' || github.event.inputs.run_only_pgvector_tests == null }}
+    permissions:
+      contents: write
+      statuses: write
+      id-token: write # aws-actions/configure-aws-credentials
     env:
       POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
       DEFAULT_PG_VERSION: 16
@@ -174,12 +178,21 @@ jobs:
 
     runs-on: [ self-hosted, us-east-2, x64 ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned
+      image: neondatabase/build-tools:pinned
+      credentials:
+        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
       options: --init
 
     steps:
     - uses: actions/checkout@v4
 
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-region: eu-central-1
+        role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+        role-duration-seconds: 18000 # 5 hours
 
     - name: Download Neon artifact
       uses: ./.github/actions/download
@@ -267,7 +280,7 @@ jobs:
         region_id_default=${{ env.DEFAULT_REGION_ID }}
         runner_default='["self-hosted", "us-east-2", "x64"]'
         runner_azure='["self-hosted", "eastus2", "x64"]'
-        image_default="369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned"
+        image_default="neondatabase/build-tools:pinned"
         matrix='{
           "pg_version" : [
             16
@@ -344,7 +357,7 @@ jobs:
     permissions:
       contents: write
       statuses: write
-      id-token: write # Required for OIDC authentication in azure runners
+      id-token: write # aws-actions/configure-aws-credentials
 
     strategy:
       fail-fast: false
@@ -371,7 +384,7 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    - name: Configure AWS credentials # necessary on Azure runners
+    - name: Configure AWS credentials
       uses: aws-actions/configure-aws-credentials@v4
       with:
         aws-region: eu-central-1
@@ -492,17 +505,15 @@ jobs:
     permissions:
       contents: write
       statuses: write
-      id-token: write # Required for OIDC authentication in azure runners
+      id-token: write # aws-actions/configure-aws-credentials
     strategy:
       fail-fast: false
       matrix:
         include:
           - PLATFORM: "neonvm-captest-pgvector"
             RUNNER: [ self-hosted, us-east-2, x64 ]
-            IMAGE: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned
           - PLATFORM: "azure-captest-pgvector"
             RUNNER: [ self-hosted, eastus2, x64 ]
-            IMAGE: neondatabase/build-tools:pinned
 
     env:
       TEST_PG_BENCH_DURATIONS_MATRIX: "15m"
@@ -511,13 +522,16 @@ jobs:
       DEFAULT_PG_VERSION: 16
       TEST_OUTPUT: /tmp/test_output
       BUILD_TYPE: remote
-      LD_LIBRARY_PATH: /home/nonroot/pg/usr/lib/x86_64-linux-gnu
+
       SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref_name == 'main' ) }}
       PLATFORM: ${{ matrix.PLATFORM }}
 
     runs-on: ${{ matrix.RUNNER }}
     container:
-      image: ${{ matrix.IMAGE }}
+      image: neondatabase/build-tools:pinned
+      credentials:
+        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
       options: --init
 
     steps:
@@ -527,17 +541,26 @@ jobs:
     # instead of using Neon artifacts containing pgbench
     - name: Install postgresql-16 where pytest expects it
       run: |
+        # Just to make it easier to test things locally on macOS (with arm64)
+        arch=$(uname -m | sed 's/x86_64/amd64/g' | sed 's/aarch64/arm64/g')
+
         cd /home/nonroot
-        wget -q https://apt.postgresql.org/pub/repos/apt/pool/main/p/postgresql-16/libpq5_16.4-1.pgdg110%2B1_amd64.deb
-        wget -q https://apt.postgresql.org/pub/repos/apt/pool/main/p/postgresql-16/postgresql-client-16_16.4-1.pgdg110%2B1_amd64.deb
-        wget -q https://apt.postgresql.org/pub/repos/apt/pool/main/p/postgresql-16/postgresql-16_16.4-1.pgdg110%2B1_amd64.deb 
-        dpkg -x libpq5_16.4-1.pgdg110+1_amd64.deb pg
-        dpkg -x postgresql-client-16_16.4-1.pgdg110+1_amd64.deb pg
-        dpkg -x postgresql-16_16.4-1.pgdg110+1_amd64.deb pg
+        wget -q "https://apt.postgresql.org/pub/repos/apt/pool/main/p/postgresql-17/libpq5_17.0-1.pgdg110+1_${arch}.deb"
+        wget -q "https://apt.postgresql.org/pub/repos/apt/pool/main/p/postgresql-16/postgresql-client-16_16.4-1.pgdg110+2_${arch}.deb"
+        wget -q "https://apt.postgresql.org/pub/repos/apt/pool/main/p/postgresql-16/postgresql-16_16.4-1.pgdg110+2_${arch}.deb"
+        dpkg -x libpq5_17.0-1.pgdg110+1_${arch}.deb pg
+        dpkg -x postgresql-16_16.4-1.pgdg110+2_${arch}.deb pg
+        dpkg -x postgresql-client-16_16.4-1.pgdg110+2_${arch}.deb pg
+
         mkdir -p /tmp/neon/pg_install/v16/bin
-        ln -s /home/nonroot/pg/usr/lib/postgresql/16/bin/pgbench /tmp/neon/pg_install/v16/bin/pgbench  
-        ln -s /home/nonroot/pg/usr/lib/postgresql/16/bin/psql /tmp/neon/pg_install/v16/bin/psql  
-        ln -s /home/nonroot/pg/usr/lib/x86_64-linux-gnu /tmp/neon/pg_install/v16/lib 
+        ln -s /home/nonroot/pg/usr/lib/postgresql/16/bin/pgbench /tmp/neon/pg_install/v16/bin/pgbench
+        ln -s /home/nonroot/pg/usr/lib/postgresql/16/bin/psql    /tmp/neon/pg_install/v16/bin/psql
+        ln -s /home/nonroot/pg/usr/lib/$(uname -m)-linux-gnu     /tmp/neon/pg_install/v16/lib
+
+        LD_LIBRARY_PATH="/home/nonroot/pg/usr/lib/$(uname -m)-linux-gnu:${LD_LIBRARY_PATH}"
+        export LD_LIBRARY_PATH
+        echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}" >> ${GITHUB_ENV}
+
         /tmp/neon/pg_install/v16/bin/pgbench --version
         /tmp/neon/pg_install/v16/bin/psql --version
 
@@ -559,7 +582,7 @@ jobs:
 
         echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
 
-    - name: Configure AWS credentials # necessary on Azure runners to read/write from/to S3
+    - name: Configure AWS credentials
       uses: aws-actions/configure-aws-credentials@v4
       with:
         aws-region: eu-central-1
@@ -620,6 +643,10 @@ jobs:
     # *_CLICKBENCH_CONNSTR: Genuine ClickBench DB with ~100M rows
     # *_CLICKBENCH_10M_CONNSTR: DB with the first 10M rows of ClickBench DB
     if: ${{ !cancelled() && (github.event.inputs.run_only_pgvector_tests == 'false' || github.event.inputs.run_only_pgvector_tests == null) }}
+    permissions:
+      contents: write
+      statuses: write
+      id-token: write # aws-actions/configure-aws-credentials
     needs: [ generate-matrices, pgbench-compare, prepare_AWS_RDS_databases ]
 
     strategy:
@@ -638,11 +665,21 @@ jobs:
 
     runs-on: [ self-hosted, us-east-2, x64 ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned
+      image: neondatabase/build-tools:pinned
+      credentials:
+        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
       options: --init
 
     steps:
     - uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-region: eu-central-1
+        role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+        role-duration-seconds: 18000 # 5 hours
 
     - name: Download Neon artifact
       uses: ./.github/actions/download
@@ -714,6 +751,10 @@ jobs:
     #
     # *_TPCH_S10_CONNSTR: DB generated with scale factor 10 (~10 GB)
     if: ${{ !cancelled() && (github.event.inputs.run_only_pgvector_tests == 'false' || github.event.inputs.run_only_pgvector_tests == null) }}
+    permissions:
+      contents: write
+      statuses: write
+      id-token: write # aws-actions/configure-aws-credentials
     needs: [ generate-matrices, clickbench-compare, prepare_AWS_RDS_databases ]
 
     strategy:
@@ -731,11 +772,21 @@ jobs:
 
     runs-on: [ self-hosted, us-east-2, x64 ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned
+      image: neondatabase/build-tools:pinned
+      credentials:
+        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
       options: --init
 
     steps:
     - uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-region: eu-central-1
+        role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+        role-duration-seconds: 18000 # 5 hours
 
     - name: Download Neon artifact
       uses: ./.github/actions/download
@@ -806,6 +857,10 @@ jobs:
 
   user-examples-compare:
     if: ${{ !cancelled() && (github.event.inputs.run_only_pgvector_tests == 'false' || github.event.inputs.run_only_pgvector_tests == null) }}
+    permissions:
+      contents: write
+      statuses: write
+      id-token: write # aws-actions/configure-aws-credentials
     needs: [ generate-matrices, tpch-compare, prepare_AWS_RDS_databases ]
 
     strategy:
@@ -822,11 +877,21 @@ jobs:
 
     runs-on: [ self-hosted, us-east-2, x64 ]
     container:
-      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:pinned
+      image: neondatabase/build-tools:pinned
+      credentials:
+        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
       options: --init
 
     steps:
     - uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-region: eu-central-1
+        role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
+        role-duration-seconds: 18000 # 5 hours
 
     - name: Download Neon artifact
       uses: ./.github/actions/download

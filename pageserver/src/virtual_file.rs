@@ -468,6 +468,7 @@ impl VirtualFile {
                 &[]
             };
             utils::crashsafe::overwrite(&final_path, &tmp_path, content)
+                .maybe_fatal_err("crashsafe_overwrite")
         })
         .await
         .expect("blocking task is never aborted")
@@ -477,7 +478,7 @@ impl VirtualFile {
     pub async fn sync_all(&self) -> Result<(), Error> {
         with_file!(self, StorageIoOperation::Fsync, |file_guard| {
             let (_file_guard, res) = io_engine::get().sync_all(file_guard).await;
-            res
+            res.maybe_fatal_err("sync_all")
         })
     }
 
@@ -485,7 +486,7 @@ impl VirtualFile {
     pub async fn sync_data(&self) -> Result<(), Error> {
         with_file!(self, StorageIoOperation::Fsync, |file_guard| {
             let (_file_guard, res) = io_engine::get().sync_data(file_guard).await;
-            res
+            res.maybe_fatal_err("sync_data")
         })
     }
 
@@ -1149,7 +1150,9 @@ pub fn init(num_slots: usize, engine: IoEngineKind, io_buffer_alignment: usize) 
         panic!("virtual_file::init called twice");
     }
     if set_io_buffer_alignment(io_buffer_alignment).is_err() {
-        panic!("IO buffer alignment ({io_buffer_alignment}) is not a power of two");
+        panic!(
+            "IO buffer alignment needs to be a power of two and greater than 512, got {io_buffer_alignment}"
+        );
     }
     io_engine::init(engine);
     crate::metrics::virtual_file_descriptor_cache::SIZE_MAX.set(num_slots as u64);
@@ -1176,14 +1179,16 @@ fn get_open_files() -> &'static OpenFiles {
 
 static IO_BUFFER_ALIGNMENT: AtomicUsize = AtomicUsize::new(DEFAULT_IO_BUFFER_ALIGNMENT);
 
-/// Returns true if `x` is zero or a power of two.
-fn is_zero_or_power_of_two(x: usize) -> bool {
-    (x == 0) || ((x & (x - 1)) == 0)
+/// Returns true if the alignment is a power of two and is greater or equal to 512.
+fn is_valid_io_buffer_alignment(align: usize) -> bool {
+    align.is_power_of_two() && align >= 512
 }
 
+/// Sets IO buffer alignment requirement. Returns error if the alignment requirement is
+/// not a power of two or less than 512 bytes.
 #[allow(unused)]
 pub(crate) fn set_io_buffer_alignment(align: usize) -> Result<(), usize> {
-    if is_zero_or_power_of_two(align) {
+    if is_valid_io_buffer_alignment(align) {
         IO_BUFFER_ALIGNMENT.store(align, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     } else {
@@ -1191,19 +1196,19 @@ pub(crate) fn set_io_buffer_alignment(align: usize) -> Result<(), usize> {
     }
 }
 
-/// Gets the io buffer alignment requirement. Returns 0 if there is no requirement specified.
+/// Gets the io buffer alignment.
 ///
-/// This function should be used to check the raw config value.
-pub(crate) fn get_io_buffer_alignment_raw() -> usize {
+/// This function should be used for getting the actual alignment value to use.
+pub(crate) fn get_io_buffer_alignment() -> usize {
     let align = IO_BUFFER_ALIGNMENT.load(std::sync::atomic::Ordering::Relaxed);
 
     if cfg!(test) {
         let env_var_name = "NEON_PAGESERVER_UNIT_TEST_IO_BUFFER_ALIGNMENT";
         if let Some(test_align) = utils::env::var(env_var_name) {
-            if is_zero_or_power_of_two(test_align) {
+            if is_valid_io_buffer_alignment(test_align) {
                 test_align
             } else {
-                panic!("IO buffer alignment ({test_align}) is not a power of two");
+                panic!("IO buffer alignment needs to be a power of two and greater than 512, got {test_align}");
             }
         } else {
             align
@@ -1211,14 +1216,6 @@ pub(crate) fn get_io_buffer_alignment_raw() -> usize {
     } else {
         align
     }
-}
-
-/// Gets the io buffer alignment requirement. Returns 1 if the alignment config is set to zero.
-///
-/// This function should be used for getting the actual alignment value to use.
-pub(crate) fn get_io_buffer_alignment() -> usize {
-    let align = get_io_buffer_alignment_raw();
-    align.max(1)
 }
 
 #[cfg(test)]

@@ -80,6 +80,14 @@ pub(crate) trait TestBackend: Send + Sync + 'static {
     fn get_allowed_ips_and_secret(
         &self,
     ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), console::errors::GetAuthInfoError>;
+    fn dyn_clone(&self) -> Box<dyn TestBackend>;
+}
+
+#[cfg(test)]
+impl Clone for Box<dyn TestBackend> {
+    fn clone(&self) -> Self {
+        TestBackend::dyn_clone(&**self)
+    }
 }
 
 impl std::fmt::Display for Backend<'_, (), ()> {
@@ -583,6 +591,14 @@ mod tests {
                 CachedAllowedIps::new_uncached(Arc::new(self.ips.clone())),
                 Some(CachedRoleSecret::new_uncached(Some(self.secret.clone()))),
             ))
+        }
+
+        async fn get_endpoint_jwks(
+            &self,
+            _ctx: &RequestMonitoring,
+            _endpoint: crate::EndpointId,
+        ) -> anyhow::Result<Vec<super::jwt::AuthRule>> {
+            unimplemented!()
         }
 
         async fn wake_compute(

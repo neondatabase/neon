@@ -463,7 +463,7 @@ impl Reconciler {
             for (timeline_id, baseline_lsn) in &baseline {
                 match latest.get(timeline_id) {
                     Some(latest_lsn) => {
-                        tracing::info!("🕑 LSN origin {baseline_lsn} vs destination {latest_lsn}");
+                        tracing::info!(timeline_id = %timeline_id, "🕑 LSN origin {baseline_lsn} vs destination {latest_lsn}");
                         if latest_lsn < baseline_lsn {
                             any_behind = true;
                         }
@@ -541,6 +541,8 @@ impl Reconciler {
             }
         }
 
+        pausable_failpoint!("reconciler-live-migrate-pre-generation-inc");
+
         // Increment generation before attaching to new pageserver
         self.generation = Some(
             self.persistence
@@ -616,6 +618,8 @@ impl Reconciler {
                 conf: Some(origin_secondary_conf),
             },
         );
+
+        pausable_failpoint!("reconciler-live-migrate-post-detach");
 
         tracing::info!("🔁 Switching to AttachedSingle mode on node {dest_ps}",);
         let dest_final_conf = build_location_config(
