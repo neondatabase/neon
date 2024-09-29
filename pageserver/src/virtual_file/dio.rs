@@ -64,6 +64,7 @@ impl IoBufferMut {
         use bytes::BufMut;
         let mut buf = Self::with_capacity_aligned(capacity, align);
         buf.put_bytes(0, capacity);
+        buf.len = capacity;
         buf
     }
 
@@ -223,7 +224,7 @@ impl DerefMut for IoBufferMut {
     }
 }
 
-/// SAFETY: See [`IoBufferMut::advance_mut`]
+/// SAFETY: When advancing the internal cursor, the caller needs to make sure the bytes advcanced past have been initialized.
 unsafe impl bytes::BufMut for IoBufferMut {
     #[inline]
     fn remaining_mut(&self) -> usize {
@@ -235,7 +236,7 @@ unsafe impl bytes::BufMut for IoBufferMut {
     // SAFETY: Caller needs to make sure the bytes being advanced past have been initialized.
     #[inline]
     unsafe fn advance_mut(&mut self, cnt: usize) {
-        let len = self.len();
+        let len: usize = self.len();
         let remaining = self.remaining_mut();
 
         if remaining < cnt {
@@ -315,6 +316,17 @@ mod tests {
         assert_eq!(v.capacity(), ALIGN / 2);
         assert_eq!(v.align(), ALIGN);
         assert_eq!(v.as_ptr().align_offset(ALIGN), 0);
+    }
+
+    #[test]
+    fn test_with_capacity_aligned_zeroed() {
+        const ALIGN: usize = 4 * 1024;
+        let v = IoBufferMut::with_capacity_aligned_zeroed(ALIGN, ALIGN);
+        assert_eq!(v.len(), ALIGN);
+        assert_eq!(v.capacity(), ALIGN);
+        assert_eq!(v.align(), ALIGN);
+        assert_eq!(v.as_ptr().align_offset(ALIGN), 0);
+        assert_eq!(&v[..], &[0; ALIGN])
     }
 
     #[test]

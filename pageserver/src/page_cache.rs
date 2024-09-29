@@ -646,7 +646,8 @@ impl PageCache {
     fn new(num_pages: usize, align: usize) -> Self {
         assert!(num_pages > 0, "page cache size must be > 0");
 
-        let page_buffer = IoBufferMut::with_capacity_aligned(num_pages * PAGE_SZ, align).leak();
+        let page_buffer =
+            IoBufferMut::with_capacity_aligned_zeroed(num_pages * PAGE_SZ, align).leak();
 
         let size_metrics = &crate::metrics::PAGE_CACHE_SIZE;
         size_metrics.max_bytes.set_page_sz(num_pages);
