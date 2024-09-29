@@ -92,7 +92,7 @@ jobs:
     needs: [ check-permissions, build-build-tools-image ]
     runs-on: [ self-hosted, small ]
     container:
-      image: ${{ needs.build-build-tools-image.outputs.image }}
+      image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
       credentials:
         username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
         password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
@@ -106,7 +106,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/pypoetry/virtualenvs
-          key: v2-${{ runner.os }}-${{ runner.arch }}-python-deps-${{ hashFiles('poetry.lock') }}
+          key: v2-${{ runner.os }}-${{ runner.arch }}-python-deps-bookworm-${{ hashFiles('poetry.lock') }}
 
       - name: Install Python deps
         run: ./scripts/pysync
@@ -181,7 +181,7 @@ jobs:
     runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'small-arm64' || 'small')) }}
 
     container:
-      image: ${{ needs.build-build-tools-image.outputs.image }}
+      image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
       credentials:
         username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
         password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
@@ -262,7 +262,7 @@ jobs:
     uses: ./.github/workflows/_build-and-test-locally.yml
     with:
       arch: ${{ matrix.arch }}
-      build-tools-image: ${{ needs.build-build-tools-image.outputs.image }}
+      build-tools-image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
       build-tag: ${{ needs.tag.outputs.build-tag }}
       build-type: ${{ matrix.build-type }}
       # Run tests on all Postgres versions in release builds and only on the latest version in debug builds
@@ -277,7 +277,7 @@ jobs:
     needs: [ check-permissions, build-build-tools-image ]
     runs-on: [ self-hosted, small ]
     container:
-      image: ${{ needs.build-build-tools-image.outputs.image }}
+      image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
       credentials:
         username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
         password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
@@ -290,7 +290,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/pypoetry/virtualenvs
-          key: v1-${{ runner.os }}-${{ runner.arch }}-python-deps-${{ hashFiles('poetry.lock') }}
+          key: v2-${{ runner.os }}-${{ runner.arch }}-python-deps-bookworm-${{ hashFiles('poetry.lock') }}
 
       - name: Install Python deps
         run: ./scripts/pysync
@@ -310,7 +310,7 @@ jobs:
     needs: [ check-permissions, build-and-test-locally, build-build-tools-image, get-benchmarks-durations ]
     runs-on: [ self-hosted, small ]
     container:
-      image: ${{ needs.build-build-tools-image.outputs.image }}
+      image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
       credentials:
         username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
         password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
@@ -368,7 +368,7 @@ jobs:
 
     runs-on: [ self-hosted, small ]
     container:
-      image: ${{ needs.build-build-tools-image.outputs.image }}
+      image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
       credentials:
         username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
         password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
@@ -416,7 +416,7 @@ jobs:
     needs: [ check-permissions, build-build-tools-image, build-and-test-locally ]
     runs-on: [ self-hosted, small ]
     container:
-      image: ${{ needs.build-build-tools-image.outputs.image }}
+      image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
       credentials:
         username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
         password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
