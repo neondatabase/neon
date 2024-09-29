@@ -17,7 +17,6 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
-use sysinfo::SystemExt;
 use tokio::fs;
 
 use anyhow::Context;
@@ -496,9 +495,10 @@ pub async fn init_tenant_mgr(
     let ctx = RequestContext::todo_child(TaskKind::Startup, DownloadBehavior::Warn);
 
     // Initialize dynamic limits that depend on system resources
-    let system_memory =
-        sysinfo::System::new_with_specifics(sysinfo::RefreshKind::new().with_memory())
-            .total_memory();
+    let system_memory = sysinfo::System::new_with_specifics(
+        sysinfo::RefreshKind::new().with_memory(sysinfo::MemoryRefreshKind::new().with_ram()),
+    )
+    .total_memory();
     let max_ephemeral_layer_bytes =
         conf.ephemeral_bytes_per_memory_kb as u64 * (system_memory / 1024);
     tracing::info!("Initialized ephemeral layer size limit to {max_ephemeral_layer_bytes}, for {system_memory} bytes of memory");

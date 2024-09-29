@@ -5,7 +5,6 @@
 // The monitor was previously started by vm-builder, and for testing purposes,
 // we can mimic that setup with this binary.
 
-#[cfg(target_os = "linux")]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     use clap::Parser;
@@ -25,9 +24,4 @@ async fn main() -> anyhow::Result<()> {
     let args: &'static Args = Box::leak(Box::new(Args::parse()));
     let token = CancellationToken::new();
     vm_monitor::start(args, token).await
-}
-
-#[cfg(not(target_os = "linux"))]
-fn main() {
-    panic!("the monitor requires cgroups, which are only available on linux")
 }

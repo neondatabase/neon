@@ -23,6 +23,3 @@ tokio-postgres.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-
-[target.'cfg(target_os = "linux")'.dependencies]
-cgroups-rs = "0.3.3"

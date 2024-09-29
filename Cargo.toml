@@ -140,7 +140,7 @@ rustc-hash = "1.1.0"
 rustls = "0.22"
 rustls-pemfile = "2"
 scopeguard = "1.1"
-sysinfo = "0.29.2"
+sysinfo = "0.30.12"
 sd-notify = "0.4.1"
 send-future = "0.1.0"
 sentry = { version = "0.32", default-features = false, features = ["backtrace", "contexts", "panic", "rustls", "reqwest" ] }
