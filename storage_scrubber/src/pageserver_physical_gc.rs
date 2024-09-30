@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use crate::checks::{list_timeline_blobs, BlobDataParseResult};
 use crate::metadata_stream::{stream_tenant_timelines, stream_tenants};
-use crate::{init_remote, BucketConfig, NodeKind, RootTarget, TenantShardTimelineId};
+use crate::{init_remote, BucketConfig, NodeKind, RootTarget, TenantShardTimelineId, MAX_RETRIES};
 use futures_util::{StreamExt, TryStreamExt};
 use pageserver::tenant::remote_timeline_client::index::LayerFileMetadata;
 use pageserver::tenant::remote_timeline_client::{parse_remote_index_path, remote_layer_path};
@@ -18,6 +18,7 @@ use serde::Serialize;
 use storage_controller_client::control_api;
 use tokio_util::sync::CancellationToken;
 use tracing::{info_span, Instrument};
+use utils::backoff;
 use utils::generation::Generation;
 use utils::id::{TenantId, TenantTimelineId};
 
@@ -326,15 +327,25 @@ async fn maybe_delete_index(
     }
 
     // All validations passed: erase the object
-    match remote_client
-        .delete(&obj.key, &CancellationToken::new())
-        .await
+    let cancel = CancellationToken::new();
+    match backoff::retry(
+        || remote_client.delete(&obj.key, &cancel),
+        |_| false,
+        3,
+        MAX_RETRIES as u32,
+        "head_object",
+        &cancel,
+    )
+    .await
     {
-        Ok(_) => {
+        None => {
+            unreachable!("Using a dummy cancellation token");
+        }
+        Some(Ok(_)) => {
             tracing::info!("Successfully deleted index");
             summary.indices_deleted += 1;
         }
-        Err(e) => {
+        Some(Err(e)) => {
             tracing::warn!("Failed to delete index: {e}");
             summary.remote_storage_errors += 1;
         }
