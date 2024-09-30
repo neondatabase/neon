@@ -32,13 +32,13 @@ def test_lfc_prewarm(neon_simple_env: NeonEnv):
 
     for _ in range(20):
         time.sleep(1)  # give prewarm BGW some time to proceed
-        cur.execute("select file_cache_used from neon_stat_file_cache")
-        lfc_used = cur.fetchall()[0][0]
-        if lfc_used > 100:
+        cur.execute("select lfc_value from neon_lfc_stats where lfc_key='file_cache_used_pages'")
+        lfc_used_pages = cur.fetchall()[0][0]
+        log.info(f"Used LFC size: {lfc_used_pages}")
+        if lfc_used_pages > 10000:
             break
 
-    log.info(f"Used LFC size: {lfc_used}")
-    assert lfc_used > 100
+    assert lfc_used_pages > 10000
 
     cur.execute("select sum(pk) from t")
     assert cur.fetchall()[0][0] == n_records * (n_records + 1) / 2
