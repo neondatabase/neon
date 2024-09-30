@@ -4974,7 +4974,12 @@ impl Service {
 
             {
                 let mut nodes_mut = (**nodes).clone();
-                nodes_mut.remove(&node_id);
+                if let Some(mut removed_node) = nodes_mut.remove(&node_id) {
+                    // Ensure that any reconciler holding an Arc<> to this node will
+                    // drop out when trying to RPC to it (setting Offline state sets the
+                    // cancellation token on the Node object).
+                    removed_node.set_availability(NodeAvailability::Offline);
+                }
                 *nodes = Arc::new(nodes_mut);
             }
         }
