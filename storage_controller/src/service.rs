@@ -3117,7 +3117,7 @@ impl Service {
                 jwt: Option<String>,
             ) -> Result<(), ApiError> {
                 tracing::info!(
-                    "Importing timeline on shard {tenant_shard_id}/{timeline_id}, attached to node {node}",
+                    "Importing pgdata on shard {tenant_shard_id}/{timeline_id}, attached to node {node}",
                 );
 
                 let client = PageserverClient::new(node.get_id(), node.base_url(), jwt.as_deref());
@@ -3126,7 +3126,6 @@ impl Service {
                     .timeline_import_pgdata(tenant_shard_id, timeline_id, pgdata_path)
                     .await
                     .map_err(|e| {
-
                         passthrough_api_error(&node, e)
                     })
             }

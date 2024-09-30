@@ -161,7 +161,7 @@ impl<'t> UninitializedTimeline<'t> {
         raw_timeline
             .freeze_and_flush()
             .await
-            .context("Failed to flush after basebackup import")?;
+            .context("flush after pgdata import")?;
 
         // TODO: is this necessary?
         // Doing it for now because other code that produces image layers does this at some point.

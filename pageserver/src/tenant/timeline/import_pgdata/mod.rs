@@ -230,8 +230,22 @@ impl PgImportEnv {
                 ctx.detached_child(TaskKind::ImportPgdata, DownloadBehavior::Error);
             work.spawn(async move { job.run(&ctx).await });
         }
+        let mut results = Vec::new();
+        while let Some(result) = work.join_next().await {
+            results.push(result);
+        }
 
-        Ok(())
+        if results.iter().all(|r| r.is_ok()) {
+            Ok(())
+        } else {
+            let mut msg = String::new();
+            for result in results {
+                if let Err(err) = result {
+                    msg.push_str(&format!("{err:?}\n\n"));
+                }
+            }
+            bail!("Some parallel jobs failed:\n\n{msg}");
+        }
     }
 
     async fn import_db(&mut self, db: &PgDataDirDb) -> anyhow::Result<()> {
