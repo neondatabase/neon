@@ -32,6 +32,15 @@ struct ConnPoolEntry {
 // Per-endpoint connection pool
 // Number of open connections is limited by the `max_conns_per_endpoint`.
 pub(crate) struct EndpointConnPool {
+    // TODO(conrad):
+    // either we should open more connections depending on stream count
+    // (not exposed by hyper, need our own counter)
+    // or we can change this to an Option rather than a VecDeque.
+    //
+    // Opening more connections to the same db because we run out of streams
+    // seems somewhat redundant though.
+    //
+    // Probably we should run a semaphore and just the single conn. TBD.
     conns: VecDeque<ConnPoolEntry>,
     _guard: HttpEndpointPoolsGuard<'static>,
     global_connections_count: Arc<AtomicUsize>,
@@ -41,9 +50,13 @@ impl EndpointConnPool {
     fn get_conn_entry(&mut self) -> Option<ConnPoolEntry> {
         let Self { conns, .. } = self;
 
-        let conn = conns.pop_front()?;
-        conns.push_back(conn.clone());
-        Some(conn)
+        loop {
+            let conn = conns.pop_front()?;
+            if !conn.conn.is_closed() {
+                conns.push_back(conn.clone());
+                return Some(conn);
+            }
+        }
     }
 
     fn remove_conn(&mut self, conn_id: uuid::Uuid) -> bool {
@@ -203,10 +216,6 @@ impl GlobalConnPool {
         let endpoint_pool = self.get_or_create_endpoint_pool(&endpoint);
         let client = endpoint_pool.write().get_conn_entry()?;
 
-        if client.conn.is_closed() {
-            info!("pool: cached connection '{conn_info}' is closed, opening a new one");
-            return None;
-        }
         tracing::Span::current().record("conn_id", tracing::field::display(client.conn_id));
         info!(
             cold_start_info = ColdStartInfo::HttpPoolHit.as_str(),
@@ -291,8 +300,6 @@ pub(crate) fn poll_http2_client(
         }
         None => Weak::new(),
     };
-
-    // let idle = global_pool.get_idle_timeout();
 
     tokio::spawn(
         async move {
