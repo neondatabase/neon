@@ -950,9 +950,6 @@ class NeonEnv:
 
     safekeepers - An array containing objects representing the safekeepers
 
-    pg_bin - pg_bin.run() can be used to execute Postgres client binaries,
-        like psql or pg_dump
-
     initial_tenant - tenant ID of the initial tenant created in the repository
 
     neon_cli - can be used to run the 'neon' CLI tool
@@ -3300,6 +3297,8 @@ class PgBin:
 
 @pytest.fixture(scope="function")
 def pg_bin(test_output_dir: Path, pg_distrib_dir: Path, pg_version: PgVersion) -> PgBin:
+    """pg_bin.run() can be used to execute Postgres client binaries, like psql or pg_dump"""
+
     return PgBin(test_output_dir, pg_distrib_dir, pg_version)
 
 
