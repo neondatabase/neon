@@ -140,6 +140,14 @@ impl SplitImageLayerWriter {
             };
             generated_layer_writers.push((inner, layer_key));
         }
+        let clean_up_layers = |generated_layers: Vec<SplitWriterResult>| {
+            for produced_layer in generated_layers {
+                if let SplitWriterResult::Produced(image_layer) = produced_layer {
+                    let layer: Layer = image_layer.into();
+                    layer.delete_on_drop();
+                }
+            }
+        };
         // BEGIN: catch every error and do the recovery in the below section
         let mut generated_layers = Vec::new();
         for (inner, layer_key) in generated_layer_writers {
@@ -150,14 +158,20 @@ impl SplitImageLayerWriter {
                     .finish_with_end_key(layer_key.key_range.end, ctx)
                     .await
                 {
-                    Ok((desc, path)) => Layer::finish_creating(self.conf, tline, desc, &path)?,
-                    Err(e) => {
-                        for produced_layer in generated_layers {
-                            if let SplitWriterResult::Produced(image_layer) = produced_layer {
-                                let layer: Layer = image_layer.into();
-                                layer.delete_on_drop();
+                    Ok((desc, path)) => {
+                        match Layer::finish_creating(self.conf, tline, desc, &path) {
+                            Ok(layer) => layer,
+                            Err(e) => {
+                                tokio::fs::remove_file(&path).await.ok();
+                                clean_up_layers(generated_layers);
+                                return Err(e);
                             }
                         }
+                    }
+                    Err(e) => {
+                        // ImageLayerWriter::finish will clean up the temporary layer if anything goes wrong,
+                        // so we don't need to remove it by ourselves.
+                        clean_up_layers(generated_layers);
                         return Err(e);
                     }
                 };
