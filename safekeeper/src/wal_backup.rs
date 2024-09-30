@@ -203,7 +203,7 @@ struct WalBackupTask {
 }
 
 /// Offload single timeline.
-#[instrument(name = "WAL backup", skip_all, fields(ttid = %tli.ttid))]
+#[instrument(name = "wal_backup", skip_all, fields(ttid = %tli.ttid))]
 async fn backup_task_main(
     tli: WalResidentTimeline,
     parallel_jobs: usize,
@@ -315,7 +315,7 @@ async fn backup_lsn_range(
         anyhow::bail!("parallel_jobs must be >= 1");
     }
 
-    let remote_timeline_path = remote_timeline_path(&timeline.ttid)?;
+    let remote_timeline_path = &timeline.remote_path;
     let start_lsn = *backup_lsn;
     let segments = get_segments(start_lsn, end_lsn, wal_seg_size);
 
@@ -328,11 +328,7 @@ async fn backup_lsn_range(
     loop {
         let added_task = match iter.next() {
             Some(s) => {
-                uploads.push_back(backup_single_segment(
-                    s,
-                    timeline_dir,
-                    &remote_timeline_path,
-                ));
+                uploads.push_back(backup_single_segment(s, timeline_dir, remote_timeline_path));
                 true
             }
             None => false,

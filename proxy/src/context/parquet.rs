@@ -62,8 +62,8 @@ pub struct ParquetUploadArgs {
 // But after FAILED_UPLOAD_WARN_THRESHOLD retries, we start to log it at WARN
 // level instead, as repeated failures can mean a more serious problem. If it
 // fails more than FAILED_UPLOAD_RETRIES times, we give up
-pub const FAILED_UPLOAD_WARN_THRESHOLD: u32 = 3;
-pub const FAILED_UPLOAD_MAX_RETRIES: u32 = 10;
+pub(crate) const FAILED_UPLOAD_WARN_THRESHOLD: u32 = 3;
+pub(crate) const FAILED_UPLOAD_MAX_RETRIES: u32 = 10;
 
 // the parquet crate leaves a lot to be desired...
 // what follows is an attempt to write parquet files with minimal allocs.
@@ -73,7 +73,7 @@ pub const FAILED_UPLOAD_MAX_RETRIES: u32 = 10;
 // * after each rowgroup write, we check the length of the file and upload to s3 if large enough
 
 #[derive(parquet_derive::ParquetRecordWriter)]
-pub struct RequestData {
+pub(crate) struct RequestData {
     region: &'static str,
     protocol: &'static str,
     /// Must be UTC. The derive macro doesn't like the timezones
@@ -290,7 +290,7 @@ async fn worker_inner(
     }
 
     if !w.flushed_row_groups().is_empty() {
-        let _: Writer<BytesMut> = upload_parquet(w, len, &storage).await?;
+        let _rtchk: Writer<BytesMut> = upload_parquet(w, len, &storage).await?;
     }
 
     Ok(())
@@ -598,49 +598,15 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1315874, 3, 6000),
-                (1315867, 3, 6000),
-                (1315927, 3, 6000),
-                (1315884, 3, 6000),
-                (1316014, 3, 6000),
-                (1315856, 3, 6000),
-                (1315648, 3, 6000),
-                (1315884, 3, 6000),
-                (438913, 1, 2000)
-            ]
-        );
-
-        tmpdir.close().unwrap();
-    }
-
-    #[tokio::test]
-    async fn verify_parquet_min_compression() {
-        let tmpdir = camino_tempfile::tempdir().unwrap();
-
-        let config = ParquetConfig {
-            propeties: Arc::new(
-                WriterProperties::builder()
-                    .set_compression(parquet::basic::Compression::ZSTD(ZstdLevel::default()))
-                    .build(),
-            ),
-            rows_per_group: 2_000,
-            file_size: 1_000_000,
-            max_duration: time::Duration::from_secs(20 * 60),
-            test_remote_failures: 0,
-        };
-
-        let rx = random_stream(50_000);
-        let file_stats = run_test(tmpdir.path(), config, rx).await;
-
-        // with compression, there are fewer files with more rows per file
-        assert_eq!(
-            file_stats,
-            [
-                (1223214, 5, 10000),
-                (1229364, 5, 10000),
-                (1231158, 5, 10000),
-                (1230520, 5, 10000),
-                (1221798, 5, 10000)
+                (1312632, 3, 6000),
+                (1312621, 3, 6000),
+                (1312680, 3, 6000),
+                (1312637, 3, 6000),
+                (1312773, 3, 6000),
+                (1312610, 3, 6000),
+                (1312404, 3, 6000),
+                (1312639, 3, 6000),
+                (437848, 1, 2000)
             ]
         );
 
@@ -672,11 +638,11 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1208861, 5, 10000),
-                (1208592, 5, 10000),
-                (1208885, 5, 10000),
-                (1208873, 5, 10000),
-                (1209128, 5, 10000)
+                (1203465, 5, 10000),
+                (1203189, 5, 10000),
+                (1203490, 5, 10000),
+                (1203475, 5, 10000),
+                (1203729, 5, 10000)
             ]
         );
 
@@ -701,15 +667,15 @@ mod tests {
         assert_eq!(
             file_stats,
             [
-                (1315874, 3, 6000),
-                (1315867, 3, 6000),
-                (1315927, 3, 6000),
-                (1315884, 3, 6000),
-                (1316014, 3, 6000),
-                (1315856, 3, 6000),
-                (1315648, 3, 6000),
-                (1315884, 3, 6000),
-                (438913, 1, 2000)
+                (1312632, 3, 6000),
+                (1312621, 3, 6000),
+                (1312680, 3, 6000),
+                (1312637, 3, 6000),
+                (1312773, 3, 6000),
+                (1312610, 3, 6000),
+                (1312404, 3, 6000),
+                (1312639, 3, 6000),
+                (437848, 1, 2000)
             ]
         );
 
@@ -736,7 +702,7 @@ mod tests {
                 while let Some(r) = s.next().await {
                     tx.send(r).unwrap();
                 }
-                time::sleep(time::Duration::from_secs(70)).await
+                time::sleep(time::Duration::from_secs(70)).await;
             }
         });
 
@@ -746,7 +712,7 @@ mod tests {
         // files are smaller than the size threshold, but they took too long to fill so were flushed early
         assert_eq!(
             file_stats,
-            [(659836, 2, 3001), (659550, 2, 3000), (659346, 2, 2999)]
+            [(657696, 2, 3001), (657410, 2, 3000), (657206, 2, 2999)]
         );
 
         tmpdir.close().unwrap();

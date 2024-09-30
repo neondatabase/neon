@@ -17,9 +17,7 @@ use std::time::Duration;
 
 use anyhow::{bail, Context};
 use camino::Utf8PathBuf;
-use pageserver_api::models::{
-    self, AuxFilePolicy, LocationConfig, TenantHistorySize, TenantInfo, TimelineInfo,
-};
+use pageserver_api::models::{self, AuxFilePolicy, TenantInfo, TimelineInfo};
 use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api;
 use postgres_backend::AuthType;
@@ -75,14 +73,14 @@ impl PageServerNode {
         }
     }
 
-    fn pageserver_make_identity_toml(&self, node_id: NodeId) -> toml_edit::Document {
-        toml_edit::Document::from_str(&format!("id={node_id}")).unwrap()
+    fn pageserver_make_identity_toml(&self, node_id: NodeId) -> toml_edit::DocumentMut {
+        toml_edit::DocumentMut::from_str(&format!("id={node_id}")).unwrap()
     }
 
     fn pageserver_init_make_toml(
         &self,
         conf: NeonLocalInitPageserverConf,
-    ) -> anyhow::Result<toml_edit::Document> {
+    ) -> anyhow::Result<toml_edit::DocumentMut> {
         assert_eq!(&PageServerConf::from(&conf), &self.conf, "during neon_local init, we derive the runtime state of ps conf (self.conf) from the --config flag fully");
 
         // TODO(christian): instead of what we do here, create a pageserver_api::config::ConfigToml (PR #7656)
@@ -137,9 +135,9 @@ impl PageServerNode {
 
         // Turn `overrides` into a toml document.
         // TODO: above code is legacy code, it should be refactored to use toml_edit directly.
-        let mut config_toml = toml_edit::Document::new();
+        let mut config_toml = toml_edit::DocumentMut::new();
         for fragment_str in overrides {
-            let fragment = toml_edit::Document::from_str(&fragment_str)
+            let fragment = toml_edit::DocumentMut::from_str(&fragment_str)
                 .expect("all fragments in `overrides` are valid toml documents, this function controls that");
             for (key, item) in fragment.iter() {
                 config_toml.insert(key, item.clone());
@@ -181,6 +179,23 @@ impl PageServerNode {
         );
         io::stdout().flush()?;
 
+        // If the config file we got as a CLI argument includes the `availability_zone`
+        // config, then use that to populate the `metadata.json` file for the pageserver.
+        // In production the deployment orchestrator does this for us.
+        let az_id = conf
+            .other
+            .get("availability_zone")
+            .map(|toml| {
+                let az_str = toml.to_string();
+                // Trim the (") chars from the toml representation
+                if az_str.starts_with('"') && az_str.ends_with('"') {
+                    az_str[1..az_str.len() - 1].to_string()
+                } else {
+                    az_str
+                }
+            })
+            .unwrap_or("local".to_string());
+
         let config = self
             .pageserver_init_make_toml(conf)
             .context("make pageserver toml")?;
@@ -216,6 +231,7 @@ impl PageServerNode {
         let (_http_host, http_port) =
             parse_host_port(&self.conf.listen_http_addr).expect("Unable to parse listen_http_addr");
         let http_port = http_port.unwrap_or(9898);
+
         // Intentionally hand-craft JSON: this acts as an implicit format compat test
         // in case the pageserver-side structure is edited, and reflects the real life
         // situation: the metadata is written by some other script.
@@ -226,7 +242,10 @@ impl PageServerNode {
                 postgres_port: self.pg_connection_config.port(),
                 http_host: "localhost".to_string(),
                 http_port,
-                other: HashMap::new(),
+                other: HashMap::from([(
+                    "availability_zone_id".to_string(),
+                    serde_json::json!(az_id),
+                )]),
             })
             .unwrap(),
         )
@@ -301,22 +320,6 @@ impl PageServerNode {
     ///
     pub fn stop(&self, immediate: bool) -> anyhow::Result<()> {
         background_process::stop_process(immediate, "pageserver", &self.pid_file())
-    }
-
-    pub async fn page_server_psql_client(
-        &self,
-    ) -> anyhow::Result<(
-        tokio_postgres::Client,
-        tokio_postgres::Connection<tokio_postgres::Socket, tokio_postgres::tls::NoTlsStream>,
-    )> {
-        let mut config = self.pg_connection_config.clone();
-        if self.conf.pg_auth_type == AuthType::NeonJWT {
-            let token = self
-                .env
-                .generate_auth_token(&Claims::new(None, Scope::PageServerApi))?;
-            config = config.set_password(Some(token));
-        }
-        Ok(config.connect_no_tls().await?)
     }
 
     pub async fn check_status(&self) -> mgmt_api::Result<()> {
@@ -519,19 +522,6 @@ impl PageServerNode {
         Ok(())
     }
 
-    pub async fn location_config(
-        &self,
-        tenant_shard_id: TenantShardId,
-        config: LocationConfig,
-        flush_ms: Option<Duration>,
-        lazy: bool,
-    ) -> anyhow::Result<()> {
-        Ok(self
-            .http_client
-            .location_config(tenant_shard_id, config, flush_ms, lazy)
-            .await?)
-    }
-
     pub async fn timeline_list(
         &self,
         tenant_shard_id: &TenantShardId,
@@ -614,15 +604,5 @@ impl PageServerNode {
         }
 
         Ok(())
-    }
-
-    pub async fn tenant_synthetic_size(
-        &self,
-        tenant_shard_id: TenantShardId,
-    ) -> anyhow::Result<TenantHistorySize> {
-        Ok(self
-            .http_client
-            .tenant_synthetic_size(tenant_shard_id)
-            .await?)
     }
 }

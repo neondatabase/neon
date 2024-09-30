@@ -135,25 +135,6 @@ async fn delete_remote_layers_and_index(timeline: &Timeline) -> anyhow::Result<(
         .context("delete_all")
 }
 
-// This function removs remaining traces of a timeline on disk.
-// Namely: metadata file, timeline directory, delete mark.
-// Note: io::ErrorKind::NotFound are ignored for metadata and timeline dir.
-// delete mark should be present because it is the last step during deletion.
-// (nothing can fail after its deletion)
-async fn cleanup_remaining_timeline_fs_traces(
-    conf: &PageServerConf,
-    tenant_shard_id: TenantShardId,
-    timeline_id: TimelineId,
-) -> anyhow::Result<()> {
-    // Remove delete mark
-    // TODO: once we are confident that no more exist in the field, remove this
-    // line.  It cleans up a legacy marker file that might in rare cases be present.
-    tokio::fs::remove_file(conf.timeline_delete_mark_file_path(tenant_shard_id, timeline_id))
-        .await
-        .or_else(fs_ext::ignore_not_found)
-        .context("remove delete mark")
-}
-
 /// It is important that this gets called when DeletionGuard is being held.
 /// For more context see comments in [`DeleteTimelineFlow::prepare`]
 async fn remove_timeline_from_tenant(
@@ -194,12 +175,10 @@ async fn remove_timeline_from_tenant(
 /// 7. Delete mark file
 ///
 /// It is resumable from any step in case a crash/restart occurs.
-/// There are three entrypoints to the process:
+/// There are two entrypoints to the process:
 /// 1. [`DeleteTimelineFlow::run`] this is the main one called by a management api handler.
 /// 2. [`DeleteTimelineFlow::resume_deletion`] is called during restarts when local metadata is still present
 ///    and we possibly neeed to continue deletion of remote files.
-/// 3. [`DeleteTimelineFlow::cleanup_remaining_timeline_fs_traces`] is used when we deleted remote
-///    index but still have local metadata, timeline directory and delete mark.
 ///
 /// Note the only other place that messes around timeline delete mark is the logic that scans directory with timelines during tenant load.
 #[derive(Default)]
@@ -311,18 +290,6 @@ impl DeleteTimelineFlow {
         Ok(())
     }
 
-    #[instrument(skip_all, fields(%timeline_id))]
-    pub async fn cleanup_remaining_timeline_fs_traces(
-        tenant: &Tenant,
-        timeline_id: TimelineId,
-    ) -> anyhow::Result<()> {
-        let r =
-            cleanup_remaining_timeline_fs_traces(tenant.conf, tenant.tenant_shard_id, timeline_id)
-                .await;
-        info!("Done");
-        r
-    }
-
     fn prepare(
         tenant: &Tenant,
         timeline_id: TimelineId,
@@ -395,7 +362,7 @@ impl DeleteTimelineFlow {
         task_mgr::spawn(
             task_mgr::BACKGROUND_RUNTIME.handle(),
             TaskKind::TimelineDeletionWorker,
-            Some(tenant_shard_id),
+            tenant_shard_id,
             Some(timeline_id),
             "timeline_delete",
             async move {

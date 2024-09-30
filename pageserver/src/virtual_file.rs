@@ -1,6 +1,7 @@
-//!
 //! VirtualFile is like a normal File, but it's not bound directly to
-//! a file descriptor. Instead, the file is opened when it's read from,
+//! a file descriptor.
+//!
+//! Instead, the file is opened when it's read from,
 //! and if too many files are open globally in the system, least-recently
 //! used ones are closed.
 //!
@@ -18,6 +19,7 @@ use crate::tenant::TENANTS_SEGMENT_NAME;
 use camino::{Utf8Path, Utf8PathBuf};
 use once_cell::sync::OnceCell;
 use owned_buffers_io::io_buf_ext::FullSlice;
+use pageserver_api::config::defaults::DEFAULT_IO_BUFFER_ALIGNMENT;
 use pageserver_api::shard::TenantShardId;
 use std::fs::File;
 use std::io::{Error, ErrorKind, Seek, SeekFrom};
@@ -464,6 +466,7 @@ impl VirtualFile {
                 &[]
             };
             utils::crashsafe::overwrite(&final_path, &tmp_path, content)
+                .maybe_fatal_err("crashsafe_overwrite")
         })
         .await
         .expect("blocking task is never aborted")
@@ -473,7 +476,7 @@ impl VirtualFile {
     pub async fn sync_all(&self) -> Result<(), Error> {
         with_file!(self, StorageIoOperation::Fsync, |file_guard| {
             let (_file_guard, res) = io_engine::get().sync_all(file_guard).await;
-            res
+            res.maybe_fatal_err("sync_all")
         })
     }
 
@@ -481,7 +484,7 @@ impl VirtualFile {
     pub async fn sync_data(&self) -> Result<(), Error> {
         with_file!(self, StorageIoOperation::Fsync, |file_guard| {
             let (_file_guard, res) = io_engine::get().sync_data(file_guard).await;
-            res
+            res.maybe_fatal_err("sync_data")
         })
     }
 
@@ -756,7 +759,19 @@ impl VirtualFile {
         })
     }
 
+    /// The function aborts the process if the error is fatal.
     async fn write_at<B: IoBuf + Send>(
+        &self,
+        buf: FullSlice<B>,
+        offset: u64,
+        _ctx: &RequestContext, /* TODO: use for metrics: https://github.com/neondatabase/neon/issues/6107 */
+    ) -> (FullSlice<B>, Result<usize, Error>) {
+        let (slice, result) = self.write_at_inner(buf, offset, _ctx).await;
+        let result = result.maybe_fatal_err("write_at");
+        (slice, result)
+    }
+
+    async fn write_at_inner<B: IoBuf + Send>(
         &self,
         buf: FullSlice<B>,
         offset: u64,
@@ -1128,9 +1143,14 @@ impl OpenFiles {
 /// server startup.
 ///
 #[cfg(not(test))]
-pub fn init(num_slots: usize, engine: IoEngineKind) {
+pub fn init(num_slots: usize, engine: IoEngineKind, io_buffer_alignment: usize) {
     if OPEN_FILES.set(OpenFiles::new(num_slots)).is_err() {
         panic!("virtual_file::init called twice");
+    }
+    if set_io_buffer_alignment(io_buffer_alignment).is_err() {
+        panic!(
+            "IO buffer alignment needs to be a power of two and greater than 512, got {io_buffer_alignment}"
+        );
     }
     io_engine::init(engine);
     crate::metrics::virtual_file_descriptor_cache::SIZE_MAX.set(num_slots as u64);
@@ -1152,6 +1172,47 @@ fn get_open_files() -> &'static OpenFiles {
         OPEN_FILES.get_or_init(|| OpenFiles::new(TEST_MAX_FILE_DESCRIPTORS))
     } else {
         OPEN_FILES.get().expect("virtual_file::init not called yet")
+    }
+}
+
+static IO_BUFFER_ALIGNMENT: AtomicUsize = AtomicUsize::new(DEFAULT_IO_BUFFER_ALIGNMENT);
+
+/// Returns true if the alignment is a power of two and is greater or equal to 512.
+fn is_valid_io_buffer_alignment(align: usize) -> bool {
+    align.is_power_of_two() && align >= 512
+}
+
+/// Sets IO buffer alignment requirement. Returns error if the alignment requirement is
+/// not a power of two or less than 512 bytes.
+#[allow(unused)]
+pub(crate) fn set_io_buffer_alignment(align: usize) -> Result<(), usize> {
+    if is_valid_io_buffer_alignment(align) {
+        IO_BUFFER_ALIGNMENT.store(align, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    } else {
+        Err(align)
+    }
+}
+
+/// Gets the io buffer alignment.
+///
+/// This function should be used for getting the actual alignment value to use.
+pub(crate) fn get_io_buffer_alignment() -> usize {
+    let align = IO_BUFFER_ALIGNMENT.load(std::sync::atomic::Ordering::Relaxed);
+
+    if cfg!(test) {
+        let env_var_name = "NEON_PAGESERVER_UNIT_TEST_IO_BUFFER_ALIGNMENT";
+        if let Some(test_align) = utils::env::var(env_var_name) {
+            if is_valid_io_buffer_alignment(test_align) {
+                test_align
+            } else {
+                panic!("IO buffer alignment needs to be a power of two and greater than 512, got {test_align}");
+            }
+        } else {
+            align
+        }
+    } else {
+        align
     }
 }
 

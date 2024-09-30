@@ -1,6 +1,8 @@
 //! Safekeeper timeline has a background task which is subscribed to `commit_lsn`
-//! and `flush_lsn` updates. After the partial segment was updated (`flush_lsn`
-//! was changed), the segment will be uploaded to S3 in about 15 minutes.
+//! and `flush_lsn` updates.
+//!
+//! After the partial segment was updated (`flush_lsn` was changed), the segment
+//! will be uploaded to S3 within the configured `partial_backup_timeout`.
 //!
 //! The filename format for partial segments is
 //! `Segment_Term_Flush_Commit_skNN.partial`, where:
@@ -22,6 +24,7 @@ use postgres_ffi::{XLogFileName, XLogSegNo, PG_TLI};
 use remote_storage::RemotePath;
 use serde::{Deserialize, Serialize};
 
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn};
 use utils::{id::NodeId, lsn::Lsn};
 
@@ -31,7 +34,7 @@ use crate::{
     safekeeper::Term,
     timeline::WalResidentTimeline,
     timeline_manager::StateSnapshot,
-    wal_backup::{self, remote_timeline_path},
+    wal_backup::{self},
     SafeKeeperConf,
 };
 
@@ -145,7 +148,7 @@ impl State {
     }
 }
 
-struct PartialBackup {
+pub struct PartialBackup {
     wal_seg_size: usize,
     tli: WalResidentTimeline,
     conf: SafeKeeperConf,
@@ -155,8 +158,25 @@ struct PartialBackup {
     state: State,
 }
 
-// Read-only methods for getting segment names
 impl PartialBackup {
+    pub async fn new(tli: WalResidentTimeline, conf: SafeKeeperConf) -> PartialBackup {
+        let (_, persistent_state) = tli.get_state().await;
+        let wal_seg_size = tli.get_wal_seg_size().await;
+
+        let local_prefix = tli.get_timeline_dir();
+        let remote_timeline_path = tli.remote_path.clone();
+
+        PartialBackup {
+            wal_seg_size,
+            tli,
+            state: persistent_state.partial_backup,
+            conf,
+            local_prefix,
+            remote_timeline_path,
+        }
+    }
+
+    // Read-only methods for getting segment names
     fn segno(&self, lsn: Lsn) -> XLogSegNo {
         lsn.segment_number(self.wal_seg_size)
     }
@@ -297,6 +317,18 @@ impl PartialBackup {
         Ok(())
     }
 
+    // Prepend to the given segments remote prefix and delete them from the
+    // remote storage.
+    async fn delete_segments(&self, segments_to_delete: &Vec<String>) -> anyhow::Result<()> {
+        info!("deleting objects: {:?}", segments_to_delete);
+        let mut objects_to_delete = vec![];
+        for seg in segments_to_delete.iter() {
+            let remote_path = self.remote_timeline_path.join(seg);
+            objects_to_delete.push(remote_path);
+        }
+        wal_backup::delete_objects(&objects_to_delete).await
+    }
+
     /// Delete all non-Uploaded segments from the remote storage. There should be only one
     /// Uploaded segment at a time.
     #[instrument(name = "gc", skip_all)]
@@ -329,15 +361,8 @@ impl PartialBackup {
             );
         }
 
-        info!("deleting objects: {:?}", segments_to_delete);
-        let mut objects_to_delete = vec![];
-        for seg in segments_to_delete.iter() {
-            let remote_path = self.remote_timeline_path.join(seg);
-            objects_to_delete.push(remote_path);
-        }
-
-        // removing segments from remote storage
-        wal_backup::delete_objects(&objects_to_delete).await?;
+        // execute the deletion
+        self.delete_segments(&segments_to_delete).await?;
 
         // now we can update the state on disk
         let new_state = {
@@ -348,6 +373,27 @@ impl PartialBackup {
         self.commit_state(new_state).await?;
 
         Ok(())
+    }
+
+    /// Remove uploaded segment(s) from the state and remote storage. Aimed for
+    /// manual intervention, not normally needed.
+    /// Returns list of segments which potentially existed in the remote storage.
+    pub async fn reset(&mut self) -> anyhow::Result<Vec<String>> {
+        let segments_to_delete = self
+            .state
+            .segments
+            .iter()
+            .map(|seg| seg.name.clone())
+            .collect();
+
+        // First reset cfile state, and only then objects themselves. If the
+        // later fails we might leave some garbage behind; that's ok for this
+        // single time usage.
+        let new_state = State { segments: vec![] };
+        self.commit_state(new_state).await?;
+
+        self.delete_segments(&segments_to_delete).await?;
+        Ok(segments_to_delete)
     }
 }
 
@@ -372,38 +418,21 @@ pub(crate) fn needs_uploading(
 ///
 /// When there is nothing more to do and the last segment was successfully uploaded, the task
 /// returns PartialRemoteSegment, to signal readiness for offloading the timeline.
-#[instrument(name = "Partial backup", skip_all, fields(ttid = %tli.ttid))]
+#[instrument(name = "partial_backup", skip_all, fields(ttid = %tli.ttid))]
 pub async fn main_task(
     tli: WalResidentTimeline,
     conf: SafeKeeperConf,
     limiter: RateLimiter,
+    cancel: CancellationToken,
 ) -> Option<PartialRemoteSegment> {
     debug!("started");
     let await_duration = conf.partial_backup_timeout;
     let mut first_iteration = true;
 
-    let (_, persistent_state) = tli.get_state().await;
     let mut commit_lsn_rx = tli.get_commit_lsn_watch_rx();
     let mut flush_lsn_rx = tli.get_term_flush_lsn_watch_rx();
-    let wal_seg_size = tli.get_wal_seg_size().await;
 
-    let local_prefix = tli.get_timeline_dir();
-    let remote_timeline_path = match remote_timeline_path(&tli.ttid) {
-        Ok(path) => path,
-        Err(e) => {
-            error!("failed to create remote path: {:?}", e);
-            return None;
-        }
-    };
-
-    let mut backup = PartialBackup {
-        wal_seg_size,
-        tli,
-        state: persistent_state.partial_backup,
-        conf,
-        local_prefix,
-        remote_timeline_path,
-    };
+    let mut backup = PartialBackup::new(tli, conf).await;
 
     debug!("state: {:?}", backup.state);
 
@@ -433,6 +462,10 @@ pub async fn main_task(
                 && flush_lsn_rx.borrow().term == seg.term
             {
                 // we have nothing to do, the last segment is already uploaded
+                debug!(
+                    "exiting, uploaded up to term={} flush_lsn={} commit_lsn={}",
+                    seg.term, seg.flush_lsn, seg.commit_lsn
+                );
                 return Some(seg.clone());
             }
         }
@@ -442,6 +475,10 @@ pub async fn main_task(
             tokio::select! {
                 _ = backup.tli.cancel.cancelled() => {
                     info!("timeline canceled");
+                    return None;
+                }
+                _ = cancel.cancelled() => {
+                    info!("task canceled");
                     return None;
                 }
                 _ = flush_lsn_rx.changed() => {}
@@ -470,6 +507,10 @@ pub async fn main_task(
                     info!("timeline canceled");
                     return None;
                 }
+                _ = cancel.cancelled() => {
+                    info!("task canceled");
+                    return None;
+                }
                 _ = commit_lsn_rx.changed() => {}
                 _ = flush_lsn_rx.changed() => {
                     let segno = backup.segno(flush_lsn_rx.borrow().lsn);
@@ -492,7 +533,13 @@ pub async fn main_task(
         }
 
         // limit concurrent uploads
-        let _upload_permit = limiter.acquire_partial_backup().await;
+        let _upload_permit = tokio::select! {
+            acq = limiter.acquire_partial_backup() => acq,
+            _ = cancel.cancelled() => {
+                info!("task canceled");
+                return None;
+            }
+        };
 
         let prepared = backup.prepare_upload().await;
         if let Some(seg) = &uploaded_segment {

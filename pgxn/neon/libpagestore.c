@@ -30,6 +30,7 @@
 #include "utils/guc.h"
 
 #include "neon.h"
+#include "neon_perf_counters.h"
 #include "neon_utils.h"
 #include "pagestore_client.h"
 #include "walproposer.h"
@@ -331,6 +332,7 @@ CLEANUP_AND_DISCONNECT(PageServer *shard)
 	}
 	if (shard->conn)
 	{
+		MyNeonCounters->pageserver_disconnects_total++;
 		PQfinish(shard->conn);
 		shard->conn = NULL;
 	}
@@ -537,7 +539,11 @@ pageserver_connect(shardno_t shard_no, int elevel)
 		/* No more polling needed; connection succeeded */
 		shard->last_connect_time = GetCurrentTimestamp();
 
+#if PG_MAJORVERSION_NUM >= 17
+		shard->wes_read = CreateWaitEventSet(NULL, 3);
+#else
 		shard->wes_read = CreateWaitEventSet(TopMemoryContext, 3);
+#endif
 		AddWaitEventToSet(shard->wes_read, WL_LATCH_SET, PGINVALID_SOCKET,
 						  MyLatch, NULL);
 		AddWaitEventToSet(shard->wes_read, WL_EXIT_ON_PM_DEATH, PGINVALID_SOCKET,
@@ -549,9 +555,6 @@ pageserver_connect(shardno_t shard_no, int elevel)
 		{
 		case 2:
 			pagestream_query = psprintf("pagestream_v2 %s %s", neon_tenant, neon_timeline);
-			break;
-		case 1:
-			pagestream_query = psprintf("pagestream %s %s", neon_tenant, neon_timeline);
 			break;
 		default:
 			elog(ERROR, "unexpected neon_protocol_version %d", neon_protocol_version);
@@ -736,6 +739,8 @@ pageserver_send(shardno_t shard_no, NeonRequest *request)
 	PageServer *shard = &page_servers[shard_no];
 	PGconn	   *pageserver_conn;
 
+	MyNeonCounters->pageserver_requests_sent_total++;
+
 	/* If the connection was lost for some reason, reconnect */
 	if (shard->state == PS_Connected && PQstatus(shard->conn) == CONNECTION_BAD)
 	{
@@ -888,6 +893,7 @@ pageserver_flush(shardno_t shard_no)
 	}
 	else
 	{
+		MyNeonCounters->pageserver_send_flushes_total++;
 		if (PQflush(pageserver_conn))
 		{
 			char	   *msg = pchomp(PQerrorMessage(pageserver_conn));
@@ -921,7 +927,7 @@ check_neon_id(char **newval, void **extra, GucSource source)
 static Size
 PagestoreShmemSize(void)
 {
-	return sizeof(PagestoreShmemState);
+	return add_size(sizeof(PagestoreShmemState), NeonPerfCountersShmemSize());
 }
 
 static bool
@@ -940,6 +946,9 @@ PagestoreShmemInit(void)
 		memset(&pagestore_shared->shard_map, 0, sizeof(ShardMap));
 		AssignPageserverConnstring(page_server_connstring, NULL);
 	}
+
+	NeonPerfCountersShmemInit();
+
 	LWLockRelease(AddinShmemInitLock);
 	return found;
 }
@@ -1063,7 +1072,7 @@ pg_init_libpagestore(void)
 							NULL,
 							&neon_protocol_version,
 							2, /* use protocol version 2 */
-							1, /* min */
+							2, /* min */
 							2, /* max */
 							PGC_SU_BACKEND,
 							0,	/* no flags required */

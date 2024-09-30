@@ -36,14 +36,15 @@ use crate::tenant::block_io::{BlockBuf, BlockCursor, BlockLease, BlockReader, Fi
 use crate::tenant::disk_btree::{
     DiskBtreeBuilder, DiskBtreeIterator, DiskBtreeReader, VisitDirection,
 };
+use crate::tenant::storage_layer::layer::S3_UPLOAD_LIMIT;
 use crate::tenant::timeline::GetVectoredError;
 use crate::tenant::vectored_blob_io::{
-    BlobFlag, MaxVectoredReadBytes, StreamingVectoredReadPlanner, VectoredBlobReader, VectoredRead,
+    BlobFlag, BufView, StreamingVectoredReadPlanner, VectoredBlobReader, VectoredRead,
     VectoredReadPlanner,
 };
 use crate::tenant::PageReconstructError;
 use crate::virtual_file::owned_buffers_io::io_buf_ext::{FullSlice, IoBufExt};
-use crate::virtual_file::{self, VirtualFile};
+use crate::virtual_file::{self, MaybeFatalIo, VirtualFile};
 use crate::{walrecord, TEMP_FILE_SUFFIX};
 use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION};
 use anyhow::{anyhow, bail, ensure, Context, Result};
@@ -51,6 +52,7 @@ use bytes::BytesMut;
 use camino::{Utf8Path, Utf8PathBuf};
 use futures::StreamExt;
 use itertools::Itertools;
+use pageserver_api::config::MaxVectoredReadBytes;
 use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::ImageCompressionAlgorithm;
 use pageserver_api::shard::TenantShardId;
@@ -64,7 +66,7 @@ use std::os::unix::fs::FileExt;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
-use tokio_epoll_uring::IoBufMut;
+use tokio_epoll_uring::IoBuf;
 use tracing::*;
 
 use utils::{
@@ -134,10 +136,11 @@ impl Summary {
 // Flag indicating that this version initialize the page
 const WILL_INIT: u64 = 1;
 
-/// Struct representing reference to BLOB in layers. Reference contains BLOB
-/// offset, and for WAL records it also contains `will_init` flag. The flag
-/// helps to determine the range of records that needs to be applied, without
-/// reading/deserializing records themselves.
+/// Struct representing reference to BLOB in layers.
+///
+/// Reference contains BLOB offset, and for WAL records it also contains
+/// `will_init` flag. The flag helps to determine the range of records
+/// that needs to be applied, without reading/deserializing records themselves.
 #[derive(Debug, Serialize, Deserialize, Copy, Clone)]
 pub struct BlobRef(pub u64);
 
@@ -224,12 +227,22 @@ pub struct DeltaLayerInner {
     file: VirtualFile,
     file_id: FileId,
 
-    #[allow(dead_code)]
     layer_key_range: Range<Key>,
-    #[allow(dead_code)]
     layer_lsn_range: Range<Lsn>,
 
     max_vectored_read_bytes: Option<MaxVectoredReadBytes>,
+}
+
+impl DeltaLayerInner {
+    pub(crate) fn layer_dbg_info(&self) -> String {
+        format!(
+            "delta {}..{} {}..{}",
+            self.key_range().start,
+            self.key_range().end,
+            self.lsn_range().start,
+            self.lsn_range().end
+        )
+    }
 }
 
 impl std::fmt::Debug for DeltaLayerInner {
@@ -458,7 +471,7 @@ impl DeltaLayerWriterInner {
         ctx: &RequestContext,
     ) -> (FullSlice<Buf>, anyhow::Result<()>)
     where
-        Buf: IoBufMut + Send,
+        Buf: IoBuf + Send,
     {
         assert!(
             self.lsn_range.start <= lsn,
@@ -556,7 +569,6 @@ impl DeltaLayerWriterInner {
         // 5GB limit for objects without multipart upload (which we don't want to use)
         // Make it a little bit below to account for differing GB units
         // https://docs.aws.amazon.com/AmazonS3/latest/userguide/upload-objects.html
-        const S3_UPLOAD_LIMIT: u64 = 4_500_000_000;
         ensure!(
             metadata.len() <= S3_UPLOAD_LIMIT,
             "Created delta layer file at {} of size {} above limit {S3_UPLOAD_LIMIT}!",
@@ -577,7 +589,9 @@ impl DeltaLayerWriterInner {
         );
 
         // fsync the file
-        file.sync_all().await?;
+        file.sync_all()
+            .await
+            .maybe_fatal_err("delta_layer sync_all")?;
 
         trace!("created delta layer {}", self.path);
 
@@ -666,7 +680,7 @@ impl DeltaLayerWriter {
         ctx: &RequestContext,
     ) -> (FullSlice<Buf>, anyhow::Result<()>)
     where
-        Buf: IoBufMut + Send,
+        Buf: IoBuf + Send,
     {
         self.inner
             .as_mut()
@@ -690,12 +704,10 @@ impl DeltaLayerWriter {
         self.inner.take().unwrap().finish(key_end, ctx).await
     }
 
-    #[cfg(test)]
     pub(crate) fn num_keys(&self) -> usize {
         self.inner.as_ref().unwrap().num_keys
     }
 
-    #[cfg(test)]
     pub(crate) fn estimated_size(&self) -> u64 {
         let inner = self.inner.as_ref().unwrap();
         inner.blob_writer.size() + inner.tree.borrow_writer().size() + PAGE_SZ as u64
@@ -872,44 +884,6 @@ impl DeltaLayerInner {
         Ok(())
     }
 
-    /// Load all key-values in the delta layer, should be replaced by an iterator-based interface in the future.
-    pub(super) async fn load_key_values(
-        &self,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<Vec<(Key, Lsn, Value)>> {
-        let block_reader = FileBlockReader::new(&self.file, self.file_id);
-        let index_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
-            self.index_start_blk,
-            self.index_root_blk,
-            block_reader,
-        );
-        let mut result = Vec::new();
-        let mut stream =
-            Box::pin(self.stream_index_forwards(index_reader, &[0; DELTA_KEY_SIZE], ctx));
-        let block_reader = FileBlockReader::new(&self.file, self.file_id);
-        let cursor = block_reader.block_cursor();
-        let mut buf = Vec::new();
-        while let Some(item) = stream.next().await {
-            let (key, lsn, pos) = item?;
-            // TODO: dedup code with get_reconstruct_value
-            // TODO: ctx handling and sharding
-            cursor
-                .read_blob_into_buf(pos.pos(), &mut buf, ctx)
-                .await
-                .with_context(|| {
-                    format!("Failed to read blob from virtual file {}", self.file.path)
-                })?;
-            let val = Value::des(&buf).with_context(|| {
-                format!(
-                    "Failed to deserialize file blob from virtual file {}",
-                    self.file.path
-                )
-            })?;
-            result.push((key, lsn, val));
-        }
-        Ok(result)
-    }
-
     async fn plan_reads<Reader>(
         keyspace: &KeySpace,
         lsn_range: Range<Lsn>,
@@ -1049,13 +1023,30 @@ impl DeltaLayerInner {
                     continue;
                 }
             };
-
+            let view = BufView::new_slice(&blobs_buf.buf);
             for meta in blobs_buf.blobs.iter().rev() {
                 if Some(meta.meta.key) == ignore_key_with_err {
                     continue;
                 }
+                let blob_read = meta.read(&view).await;
+                let blob_read = match blob_read {
+                    Ok(buf) => buf,
+                    Err(e) => {
+                        reconstruct_state.on_key_error(
+                            meta.meta.key,
+                            PageReconstructError::Other(anyhow!(e).context(format!(
+                                "Failed to decompress blob from virtual file {}",
+                                self.file.path,
+                            ))),
+                        );
 
-                let value = Value::des(&blobs_buf.buf[meta.start..meta.end]);
+                        ignore_key_with_err = Some(meta.meta.key);
+                        continue;
+                    }
+                };
+
+                let value = Value::des(&blob_read);
+
                 let value = match value {
                     Ok(v) => v,
                     Err(e) => {
@@ -1144,7 +1135,7 @@ impl DeltaLayerInner {
         ctx: &RequestContext,
     ) -> anyhow::Result<usize> {
         use crate::tenant::vectored_blob_io::{
-            BlobMeta, VectoredReadBuilder, VectoredReadExtended,
+            BlobMeta, ChunkedVectoredReadBuilder, VectoredReadExtended,
         };
         use futures::stream::TryStreamExt;
 
@@ -1194,7 +1185,8 @@ impl DeltaLayerInner {
 
         let mut prev: Option<(Key, Lsn, BlobRef)> = None;
 
-        let mut read_builder: Option<VectoredReadBuilder> = None;
+        let mut read_builder: Option<ChunkedVectoredReadBuilder> = None;
+        let align = virtual_file::get_io_buffer_alignment();
 
         let max_read_size = self
             .max_vectored_read_bytes
@@ -1238,11 +1230,12 @@ impl DeltaLayerInner {
                 {
                     None
                 } else {
-                    read_builder.replace(VectoredReadBuilder::new(
+                    read_builder.replace(ChunkedVectoredReadBuilder::new(
                         offsets.start.pos(),
                         offsets.end.pos(),
                         meta,
                         max_read_size,
+                        align,
                     ))
                 }
             } else {
@@ -1269,21 +1262,21 @@ impl DeltaLayerInner {
                 buf.reserve(read.size());
                 let res = reader.read_blobs(&read, buf, ctx).await?;
 
+                let view = BufView::new_slice(&res.buf);
+
                 for blob in res.blobs {
                     let key = blob.meta.key;
                     let lsn = blob.meta.lsn;
-                    let data = &res.buf[blob.start..blob.end];
+
+                    let data = blob.read(&view).await?;
 
                     #[cfg(debug_assertions)]
-                    Value::des(data)
+                    Value::des(&data)
                         .with_context(|| {
                             format!(
-                                "blob failed to deserialize for {}@{}, {}..{}: {:?}",
-                                blob.meta.key,
-                                blob.meta.lsn,
-                                blob.start,
-                                blob.end,
-                                utils::Hex(data)
+                                "blob failed to deserialize for {}: {:?}",
+                                blob,
+                                utils::Hex(&data)
                             )
                         })
                         .unwrap();
@@ -1291,15 +1284,15 @@ impl DeltaLayerInner {
                     // is it an image or will_init walrecord?
                     // FIXME: this could be handled by threading the BlobRef to the
                     // VectoredReadBuilder
-                    let will_init = crate::repository::ValueBytes::will_init(data)
+                    let will_init = crate::repository::ValueBytes::will_init(&data)
                         .inspect_err(|_e| {
                             #[cfg(feature = "testing")]
-                            tracing::error!(data=?utils::Hex(data), err=?_e, %key, %lsn, "failed to parse will_init out of serialized value");
+                            tracing::error!(data=?utils::Hex(&data), err=?_e, %key, %lsn, "failed to parse will_init out of serialized value");
                         })
                         .unwrap_or(false);
 
                     per_blob_copy.clear();
-                    per_blob_copy.extend_from_slice(data);
+                    per_blob_copy.extend_from_slice(&data);
 
                     let (tmp, res) = writer
                         .put_value_bytes(
@@ -1527,6 +1520,10 @@ pub struct DeltaLayerIterator<'a> {
 }
 
 impl<'a> DeltaLayerIterator<'a> {
+    pub(crate) fn layer_dbg_info(&self) -> String {
+        self.delta_layer.layer_dbg_info()
+    }
+
     /// Retrieve a batch of key-value pairs into the iterator buffer.
     async fn next_batch(&mut self) -> anyhow::Result<()> {
         assert!(self.key_values_batch.is_empty());
@@ -1560,8 +1557,11 @@ impl<'a> DeltaLayerIterator<'a> {
             .read_blobs(&plan, buf, self.ctx)
             .await?;
         let frozen_buf = blobs_buf.buf.freeze();
+        let view = BufView::new_bytes(frozen_buf);
         for meta in blobs_buf.blobs.iter() {
-            let value = Value::des(&frozen_buf[meta.start..meta.end])?;
+            let blob_read = meta.read(&view).await?;
+            let value = Value::des(&blob_read)?;
+
             next_batch.push_back((meta.meta.key, meta.meta.lsn, value));
         }
         self.key_values_batch = next_batch;
@@ -1938,9 +1938,13 @@ pub(crate) mod test {
                 let blobs_buf = vectored_blob_reader
                     .read_blobs(&read, buf.take().expect("Should have a buffer"), &ctx)
                     .await?;
+                let view = BufView::new_slice(&blobs_buf.buf);
                 for meta in blobs_buf.blobs.iter() {
-                    let value = &blobs_buf.buf[meta.start..meta.end];
-                    assert_eq!(value, entries_meta.index[&(meta.meta.key, meta.meta.lsn)]);
+                    let value = meta.read(&view).await?;
+                    assert_eq!(
+                        &value[..],
+                        &entries_meta.index[&(meta.meta.key, meta.meta.lsn)]
+                    );
                 }
 
                 buf = Some(blobs_buf.buf);
@@ -2281,7 +2285,7 @@ pub(crate) mod test {
                         // every key should be a batch b/c the value is larger than max_read_size
                         assert_eq!(iter.key_values_batch.len(), 1);
                     } else {
-                        assert_eq!(iter.key_values_batch.len(), batch_size);
+                        assert!(iter.key_values_batch.len() <= batch_size);
                     }
                     if num_items >= N {
                         break;

@@ -56,6 +56,7 @@ use utils::http::endpoint::request_span;
 use utils::http::request::must_parse_query_param;
 use utils::http::request::{get_request_param, must_get_query_param, parse_query_param};
 
+use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::deletion_queue::DeletionQueueClient;
 use crate::pgdatadir_mapping::LsnForTimestamp;
@@ -80,7 +81,6 @@ use crate::tenant::timeline::CompactionError;
 use crate::tenant::timeline::Timeline;
 use crate::tenant::GetTimelineError;
 use crate::tenant::{LogicalSizeCalculationCause, PageReconstructError};
-use crate::{config::PageServerConf, tenant::mgr};
 use crate::{disk_usage_eviction_task, tenant};
 use pageserver_api::models::{
     StatusResponse, TenantConfigRequest, TenantInfo, TimelineCreateRequest, TimelineGcRequest,
@@ -318,6 +318,27 @@ impl From<crate::tenant::DeleteTimelineError> for ApiError {
     }
 }
 
+impl From<crate::tenant::TimelineArchivalError> for ApiError {
+    fn from(value: crate::tenant::TimelineArchivalError) -> Self {
+        use crate::tenant::TimelineArchivalError::*;
+        match value {
+            NotFound => ApiError::NotFound(anyhow::anyhow!("timeline not found").into()),
+            Timeout => ApiError::Timeout("hit pageserver internal timeout".into()),
+            e @ HasArchivedParent(_) => {
+                ApiError::PreconditionFailed(e.to_string().into_boxed_str())
+            }
+            HasUnarchivedChildren(children) => ApiError::PreconditionFailed(
+                format!(
+                    "Cannot archive timeline which has non-archived child timelines: {children:?}"
+                )
+                .into_boxed_str(),
+            ),
+            a @ AlreadyInProgress => ApiError::Conflict(a.to_string()),
+            Other(e) => ApiError::InternalServerError(e),
+        }
+    }
+}
+
 impl From<crate::tenant::mgr::DeleteTimelineError> for ApiError {
     fn from(value: crate::tenant::mgr::DeleteTimelineError) -> Self {
         use crate::tenant::mgr::DeleteTimelineError::*;
@@ -405,6 +426,8 @@ async fn build_timeline_info_common(
     let current_logical_size = timeline.get_current_logical_size(logical_size_task_priority, ctx);
     let current_physical_size = Some(timeline.layer_size_sum().await);
     let state = timeline.current_state();
+    // Report is_archived = false if the timeline is still loading
+    let is_archived = timeline.is_archived().unwrap_or(false);
     let remote_consistent_lsn_projected = timeline
         .get_remote_consistent_lsn_projected()
         .unwrap_or(Lsn(0));
@@ -445,6 +468,7 @@ async fn build_timeline_info_common(
         pg_version: timeline.pg_version,
 
         state,
+        is_archived: Some(is_archived),
 
         walreceiver_status,
 
@@ -563,6 +587,10 @@ async fn timeline_create_handler(
             ),
             Err(e @ tenant::CreateTimelineError::AncestorNotActive) => json_response(
                 StatusCode::SERVICE_UNAVAILABLE,
+                HttpErrorBody::from_msg(e.to_string()),
+            ),
+            Err(e @ tenant::CreateTimelineError::AncestorArchived) => json_response(
+                StatusCode::NOT_ACCEPTABLE,
                 HttpErrorBody::from_msg(e.to_string()),
             ),
             Err(tenant::CreateTimelineError::ShuttingDown) => json_response(
@@ -686,9 +714,7 @@ async fn timeline_archival_config_handler(
 
         tenant
             .apply_timeline_archival_config(timeline_id, request_data.state)
-            .await
-            .context("applying archival config")
-            .map_err(ApiError::InternalServerError)?;
+            .await?;
         Ok::<_, ApiError>(())
     }
     .instrument(info_span!("timeline_archival_config",
@@ -798,7 +824,7 @@ async fn get_lsn_by_timestamp_handler(
 
     let lease = if with_lease {
         timeline
-            .make_lsn_lease(lsn, timeline.get_lsn_lease_length_for_ts(), &ctx)
+            .init_lsn_lease(lsn, timeline.get_lsn_lease_length_for_ts(), &ctx)
             .inspect_err(|_| {
                 warn!("fail to grant a lease to {}", lsn);
             })
@@ -852,7 +878,10 @@ async fn get_timestamp_of_lsn_handler(
 
     match result {
         Some(time) => {
-            let time = format_rfc3339(postgres_ffi::from_pg_timestamp(time)).to_string();
+            let time = format_rfc3339(
+                postgres_ffi::try_from_pg_timestamp(time).map_err(ApiError::InternalServerError)?,
+            )
+            .to_string();
             json_response(StatusCode::OK, time)
         }
         None => Err(ApiError::NotFound(
@@ -1663,9 +1692,18 @@ async fn lsn_lease_handler(
     let timeline =
         active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
             .await?;
-    let result = timeline
-        .make_lsn_lease(lsn, timeline.get_lsn_lease_length(), &ctx)
-        .map_err(|e| ApiError::InternalServerError(e.context("lsn lease http handler")))?;
+
+    let result = async {
+        timeline
+            .init_lsn_lease(lsn, timeline.get_lsn_lease_length(), &ctx)
+            .map_err(|e| {
+                ApiError::InternalServerError(
+                    e.context(format!("invalid lsn lease request at {lsn}")),
+                )
+            })
+    }
+    .instrument(info_span!("init_lsn_lease", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug(), %timeline_id))
+    .await?;
 
     json_response(StatusCode::OK, result)
 }
@@ -1681,8 +1719,13 @@ async fn timeline_gc_handler(
 
     let gc_req: TimelineGcRequest = json_request(&mut request).await?;
 
+    let state = get_state(&request);
+
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
-    let gc_result = mgr::immediate_gc(tenant_shard_id, timeline_id, gc_req, cancel, &ctx).await?;
+    let gc_result = state
+        .tenant_manager
+        .immediate_gc(tenant_shard_id, timeline_id, gc_req, cancel, &ctx)
+        .await?;
 
     json_response(StatusCode::OK, gc_result)
 }
@@ -1706,13 +1749,12 @@ async fn timeline_compact_handler(
         flags |= CompactFlags::ForceImageLayerCreation;
     }
     if Some(true) == parse_query_param::<_, bool>(&request, "enhanced_gc_bottom_most_compaction")? {
-        if !cfg!(feature = "testing") {
-            return Err(ApiError::InternalServerError(anyhow!(
-                "enhanced_gc_bottom_most_compaction is only available in testing mode"
-            )));
-        }
         flags |= CompactFlags::EnhancedGcBottomMostCompaction;
     }
+    if Some(true) == parse_query_param::<_, bool>(&request, "dry_run")? {
+        flags |= CompactFlags::DryRun;
+    }
+
     let wait_until_uploaded =
         parse_query_param::<_, bool>(&request, "wait_until_uploaded")?.unwrap_or(false);
 
@@ -2052,7 +2094,7 @@ async fn disk_usage_eviction_run(
         evict_bytes: u64,
 
         #[serde(default)]
-        eviction_order: crate::disk_usage_eviction_task::EvictionOrder,
+        eviction_order: pageserver_api::config::EvictionOrder,
     }
 
     #[derive(Debug, Clone, Copy, serde::Serialize)]
@@ -2088,7 +2130,7 @@ async fn disk_usage_eviction_run(
         &state.remote_storage,
         usage,
         &state.tenant_manager,
-        config.eviction_order,
+        config.eviction_order.into(),
         &cancel,
     )
     .await;
@@ -2327,6 +2369,20 @@ async fn put_io_engine_handler(
     check_permission(&r, None)?;
     let kind: crate::virtual_file::IoEngineKind = json_request(&mut r).await?;
     crate::virtual_file::io_engine::set(kind);
+    json_response(StatusCode::OK, ())
+}
+
+async fn put_io_alignment_handler(
+    mut r: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    check_permission(&r, None)?;
+    let align: usize = json_request(&mut r).await?;
+    crate::virtual_file::set_io_buffer_alignment(align).map_err(|align| {
+        ApiError::PreconditionFailed(
+            format!("Requested io alignment ({align}) is not a power of two").into(),
+        )
+    })?;
     json_response(StatusCode::OK, ())
 }
 
@@ -2917,7 +2973,7 @@ pub fn make_router(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/preserve_initdb_archive",
             |r| api_handler(r, timeline_preserve_initdb_handler),
         )
-        .post(
+        .put(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/archival_config",
             |r| api_handler(r, timeline_archival_config_handler),
         )
@@ -2942,7 +2998,7 @@ pub fn make_router(
         )
         .put(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/compact",
-            |r| testing_api_handler("run timeline compaction", r, timeline_compact_handler),
+            |r| api_handler(r, timeline_compact_handler),
         )
         .put(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/checkpoint",
@@ -3017,6 +3073,9 @@ pub fn make_router(
             |r| api_handler(r, timeline_collect_keyspace),
         )
         .put("/v1/io_engine", |r| api_handler(r, put_io_engine_handler))
+        .put("/v1/io_alignment", |r| {
+            api_handler(r, put_io_alignment_handler)
+        })
         .put(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/force_aux_policy_switch",
             |r| api_handler(r, force_aux_policy_switch_handler),

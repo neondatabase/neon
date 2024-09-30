@@ -45,6 +45,8 @@ pub use azure_core::Etag;
 
 pub use error::{DownloadError, TimeTravelError, TimeoutOrCancel};
 
+/// Default concurrency limit for S3 operations
+///
 /// Currently, sync happens with AWS S3, that has two limits on requests per second:
 /// ~200 RPS for IAM services
 /// <https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/UsingWithRDS.IAMDBAuth.html>
@@ -125,10 +127,6 @@ impl RemotePath {
         &self.0
     }
 
-    pub fn extension(&self) -> Option<&str> {
-        self.0.extension()
-    }
-
     pub fn strip_prefix(&self, p: &RemotePath) -> Result<&Utf8Path, std::path::StripPrefixError> {
         self.0.strip_prefix(&p.0)
     }
@@ -150,7 +148,7 @@ pub enum ListingMode {
     NoDelimiter,
 }
 
-#[derive(PartialEq, Eq, Debug)]
+#[derive(PartialEq, Eq, Debug, Clone)]
 pub struct ListingObject {
     pub key: RemotePath,
     pub last_modified: SystemTime,
@@ -214,6 +212,13 @@ pub trait RemoteStorage: Send + Sync + 'static {
         }
         Ok(combined)
     }
+
+    /// Obtain metadata information about an object.
+    async fn head_object(
+        &self,
+        key: &RemotePath,
+        cancel: &CancellationToken,
+    ) -> Result<ListingObject, DownloadError>;
 
     /// Streams the local file contents into remote into the remote storage entry.
     ///
@@ -293,7 +298,9 @@ pub trait RemoteStorage: Send + Sync + 'static {
     ) -> Result<(), TimeTravelError>;
 }
 
-/// DownloadStream is sensitive to the timeout and cancellation used with the original
+/// Data part of an ongoing [`Download`].
+///
+/// `DownloadStream` is sensitive to the timeout and cancellation used with the original
 /// [`RemoteStorage::download`] request. The type yields `std::io::Result<Bytes>` to be compatible
 /// with `tokio::io::copy_buf`.
 // This has 'static because safekeepers do not use cancellation tokens (yet)
@@ -360,6 +367,20 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
             Self::AwsS3(s) => Box::pin(s.list_streaming(prefix, mode, max_keys, cancel)),
             Self::AzureBlob(s) => Box::pin(s.list_streaming(prefix, mode, max_keys, cancel)),
             Self::Unreliable(s) => Box::pin(s.list_streaming(prefix, mode, max_keys, cancel)),
+        }
+    }
+
+    // See [`RemoteStorage::head_object`].
+    pub async fn head_object(
+        &self,
+        key: &RemotePath,
+        cancel: &CancellationToken,
+    ) -> Result<ListingObject, DownloadError> {
+        match self {
+            Self::LocalFs(s) => s.head_object(key, cancel).await,
+            Self::AwsS3(s) => s.head_object(key, cancel).await,
+            Self::AzureBlob(s) => s.head_object(key, cancel).await,
+            Self::Unreliable(s) => s.head_object(key, cancel).await,
         }
     }
 
@@ -598,6 +619,7 @@ impl ConcurrencyLimiter {
             RequestKind::Delete => &self.write,
             RequestKind::Copy => &self.write,
             RequestKind::TimeTravel => &self.write,
+            RequestKind::Head => &self.read,
         }
     }
 

@@ -6,7 +6,7 @@ use pq_proto::StartupMessageParams;
 use smol_str::SmolStr;
 use std::net::IpAddr;
 use tokio::sync::mpsc;
-use tracing::{field::display, info, info_span, Span};
+use tracing::{debug, field::display, info, info_span, Span};
 use try_lock::TryLock;
 use uuid::Uuid;
 
@@ -22,8 +22,9 @@ use self::parquet::RequestData;
 
 pub mod parquet;
 
-pub static LOG_CHAN: OnceCell<mpsc::WeakUnboundedSender<RequestData>> = OnceCell::new();
-pub static LOG_CHAN_DISCONNECT: OnceCell<mpsc::WeakUnboundedSender<RequestData>> = OnceCell::new();
+pub(crate) static LOG_CHAN: OnceCell<mpsc::WeakUnboundedSender<RequestData>> = OnceCell::new();
+pub(crate) static LOG_CHAN_DISCONNECT: OnceCell<mpsc::WeakUnboundedSender<RequestData>> =
+    OnceCell::new();
 
 /// Context data for a single request to connect to a database.
 ///
@@ -38,12 +39,12 @@ pub struct RequestMonitoring(
 );
 
 struct RequestMonitoringInner {
-    pub peer_addr: IpAddr,
-    pub session_id: Uuid,
-    pub protocol: Protocol,
+    pub(crate) peer_addr: IpAddr,
+    pub(crate) session_id: Uuid,
+    pub(crate) protocol: Protocol,
     first_packet: chrono::DateTime<Utc>,
     region: &'static str,
-    pub span: Span,
+    pub(crate) span: Span,
 
     // filled in as they are discovered
     project: Option<ProjectIdInt>,
@@ -63,19 +64,53 @@ struct RequestMonitoringInner {
     sender: Option<mpsc::UnboundedSender<RequestData>>,
     // This sender is only used to log the length of session in case of success.
     disconnect_sender: Option<mpsc::UnboundedSender<RequestData>>,
-    pub latency_timer: LatencyTimer,
+    pub(crate) latency_timer: LatencyTimer,
     // Whether proxy decided that it's not a valid endpoint end rejected it before going to cplane.
     rejected: Option<bool>,
     disconnect_timestamp: Option<chrono::DateTime<Utc>>,
 }
 
 #[derive(Clone, Debug)]
-pub enum AuthMethod {
-    // aka link aka passwordless
+pub(crate) enum AuthMethod {
+    // aka passwordless, fka link
     Web,
     ScramSha256,
     ScramSha256Plus,
     Cleartext,
+}
+
+impl Clone for RequestMonitoring {
+    fn clone(&self) -> Self {
+        let inner = self.0.try_lock().expect("should not deadlock");
+        let new = RequestMonitoringInner {
+            peer_addr: inner.peer_addr,
+            session_id: inner.session_id,
+            protocol: inner.protocol,
+            first_packet: inner.first_packet,
+            region: inner.region,
+            span: info_span!("background_task"),
+
+            project: inner.project,
+            branch: inner.branch,
+            endpoint_id: inner.endpoint_id.clone(),
+            dbname: inner.dbname.clone(),
+            user: inner.user.clone(),
+            application: inner.application.clone(),
+            error_kind: inner.error_kind,
+            auth_method: inner.auth_method.clone(),
+            success: inner.success,
+            rejected: inner.rejected,
+            cold_start_info: inner.cold_start_info,
+            pg_options: inner.pg_options.clone(),
+
+            sender: None,
+            disconnect_sender: None,
+            latency_timer: LatencyTimer::noop(inner.protocol),
+            disconnect_timestamp: inner.disconnect_timestamp,
+        };
+
+        Self(TryLock::new(new))
+    }
 }
 
 impl RequestMonitoring {
@@ -125,11 +160,11 @@ impl RequestMonitoring {
     }
 
     #[cfg(test)]
-    pub fn test() -> Self {
+    pub(crate) fn test() -> Self {
         RequestMonitoring::new(Uuid::now_v7(), [127, 0, 0, 1].into(), Protocol::Tcp, "test")
     }
 
-    pub fn console_application_name(&self) -> String {
+    pub(crate) fn console_application_name(&self) -> String {
         let this = self.0.try_lock().expect("should not deadlock");
         format!(
             "{}/{}",
@@ -138,19 +173,19 @@ impl RequestMonitoring {
         )
     }
 
-    pub fn set_rejected(&self, rejected: bool) {
+    pub(crate) fn set_rejected(&self, rejected: bool) {
         let mut this = self.0.try_lock().expect("should not deadlock");
         this.rejected = Some(rejected);
     }
 
-    pub fn set_cold_start_info(&self, info: ColdStartInfo) {
+    pub(crate) fn set_cold_start_info(&self, info: ColdStartInfo) {
         self.0
             .try_lock()
             .expect("should not deadlock")
             .set_cold_start_info(info);
     }
 
-    pub fn set_db_options(&self, options: StartupMessageParams) {
+    pub(crate) fn set_db_options(&self, options: StartupMessageParams) {
         let mut this = self.0.try_lock().expect("should not deadlock");
         this.set_application(options.get("application_name").map(SmolStr::from));
         if let Some(user) = options.get("user") {
@@ -163,43 +198,43 @@ impl RequestMonitoring {
         this.pg_options = Some(options);
     }
 
-    pub fn set_project(&self, x: MetricsAuxInfo) {
+    pub(crate) fn set_project(&self, x: MetricsAuxInfo) {
         let mut this = self.0.try_lock().expect("should not deadlock");
         if this.endpoint_id.is_none() {
-            this.set_endpoint_id(x.endpoint_id.as_str().into())
+            this.set_endpoint_id(x.endpoint_id.as_str().into());
         }
         this.branch = Some(x.branch_id);
         this.project = Some(x.project_id);
         this.set_cold_start_info(x.cold_start_info);
     }
 
-    pub fn set_project_id(&self, project_id: ProjectIdInt) {
+    pub(crate) fn set_project_id(&self, project_id: ProjectIdInt) {
         let mut this = self.0.try_lock().expect("should not deadlock");
         this.project = Some(project_id);
     }
 
-    pub fn set_endpoint_id(&self, endpoint_id: EndpointId) {
+    pub(crate) fn set_endpoint_id(&self, endpoint_id: EndpointId) {
         self.0
             .try_lock()
             .expect("should not deadlock")
             .set_endpoint_id(endpoint_id);
     }
 
-    pub fn set_dbname(&self, dbname: DbName) {
+    pub(crate) fn set_dbname(&self, dbname: DbName) {
         self.0
             .try_lock()
             .expect("should not deadlock")
             .set_dbname(dbname);
     }
 
-    pub fn set_user(&self, user: RoleName) {
+    pub(crate) fn set_user(&self, user: RoleName) {
         self.0
             .try_lock()
             .expect("should not deadlock")
             .set_user(user);
     }
 
-    pub fn set_auth_method(&self, auth_method: AuthMethod) {
+    pub(crate) fn set_auth_method(&self, auth_method: AuthMethod) {
         let mut this = self.0.try_lock().expect("should not deadlock");
         this.auth_method = Some(auth_method);
     }
@@ -211,7 +246,7 @@ impl RequestMonitoring {
             .has_private_peer_addr()
     }
 
-    pub fn set_error_kind(&self, kind: ErrorKind) {
+    pub(crate) fn set_error_kind(&self, kind: ErrorKind) {
         let mut this = self.0.try_lock().expect("should not deadlock");
         // Do not record errors from the private address to metrics.
         if !this.has_private_peer_addr() {
@@ -237,30 +272,30 @@ impl RequestMonitoring {
             .log_connect();
     }
 
-    pub fn protocol(&self) -> Protocol {
+    pub(crate) fn protocol(&self) -> Protocol {
         self.0.try_lock().expect("should not deadlock").protocol
     }
 
-    pub fn span(&self) -> Span {
+    pub(crate) fn span(&self) -> Span {
         self.0.try_lock().expect("should not deadlock").span.clone()
     }
 
-    pub fn session_id(&self) -> Uuid {
+    pub(crate) fn session_id(&self) -> Uuid {
         self.0.try_lock().expect("should not deadlock").session_id
     }
 
-    pub fn peer_addr(&self) -> IpAddr {
+    pub(crate) fn peer_addr(&self) -> IpAddr {
         self.0.try_lock().expect("should not deadlock").peer_addr
     }
 
-    pub fn cold_start_info(&self) -> ColdStartInfo {
+    pub(crate) fn cold_start_info(&self) -> ColdStartInfo {
         self.0
             .try_lock()
             .expect("should not deadlock")
             .cold_start_info
     }
 
-    pub fn latency_timer_pause(&self, waiting_for: Waiting) -> LatencyTimerPause {
+    pub(crate) fn latency_timer_pause(&self, waiting_for: Waiting) -> LatencyTimerPause<'_> {
         LatencyTimerPause {
             ctx: self,
             start: tokio::time::Instant::now(),
@@ -268,16 +303,16 @@ impl RequestMonitoring {
         }
     }
 
-    pub fn success(&self) {
+    pub(crate) fn success(&self) {
         self.0
             .try_lock()
             .expect("should not deadlock")
             .latency_timer
-            .success()
+            .success();
     }
 }
 
-pub struct LatencyTimerPause<'a> {
+pub(crate) struct LatencyTimerPause<'a> {
     ctx: &'a RequestMonitoring,
     start: tokio::time::Instant,
     waiting_for: Waiting,
@@ -328,7 +363,7 @@ impl RequestMonitoringInner {
     fn has_private_peer_addr(&self) -> bool {
         match self.peer_addr {
             IpAddr::V4(ip) => ip.is_private(),
-            _ => false,
+            IpAddr::V6(_) => false,
         }
     }
 
@@ -361,7 +396,9 @@ impl RequestMonitoringInner {
                 });
         }
         if let Some(tx) = self.sender.take() {
-            let _: Result<(), _> = tx.send(RequestData::from(&*self));
+            tx.send(RequestData::from(&*self))
+                .inspect_err(|e| debug!("tx send failed: {e}"))
+                .ok();
         }
     }
 
@@ -370,7 +407,9 @@ impl RequestMonitoringInner {
         // Here we log the length of the session.
         self.disconnect_timestamp = Some(Utc::now());
         if let Some(tx) = self.disconnect_sender.take() {
-            let _: Result<(), _> = tx.send(RequestData::from(&*self));
+            tx.send(RequestData::from(&*self))
+                .inspect_err(|e| debug!("tx send failed: {e}"))
+                .ok();
         }
     }
 }

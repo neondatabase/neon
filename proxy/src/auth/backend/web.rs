@@ -1,5 +1,6 @@
 use crate::{
     auth, compute,
+    config::AuthenticationConfig,
     console::{self, provider::NodeInfo},
     context::RequestMonitoring,
     error::{ReportableError, UserFacingError},
@@ -13,7 +14,7 @@ use tokio_postgres::config::SslMode;
 use tracing::{info, info_span};
 
 #[derive(Debug, Error)]
-pub enum LinkAuthError {
+pub(crate) enum WebAuthError {
     #[error(transparent)]
     WaiterRegister(#[from] waiters::RegisterError),
 
@@ -24,18 +25,18 @@ pub enum LinkAuthError {
     Io(#[from] std::io::Error),
 }
 
-impl UserFacingError for LinkAuthError {
+impl UserFacingError for WebAuthError {
     fn to_string_client(&self) -> String {
         "Internal error".to_string()
     }
 }
 
-impl ReportableError for LinkAuthError {
+impl ReportableError for WebAuthError {
     fn get_error_kind(&self) -> crate::error::ErrorKind {
         match self {
-            LinkAuthError::WaiterRegister(_) => crate::error::ErrorKind::Service,
-            LinkAuthError::WaiterWait(_) => crate::error::ErrorKind::Service,
-            LinkAuthError::Io(_) => crate::error::ErrorKind::ClientDisconnect,
+            Self::WaiterRegister(_) => crate::error::ErrorKind::Service,
+            Self::WaiterWait(_) => crate::error::ErrorKind::Service,
+            Self::Io(_) => crate::error::ErrorKind::ClientDisconnect,
         }
     }
 }
@@ -52,12 +53,13 @@ fn hello_message(redirect_uri: &reqwest::Url, session_id: &str) -> String {
     )
 }
 
-pub fn new_psql_session_id() -> String {
+pub(crate) fn new_psql_session_id() -> String {
     hex::encode(rand::random::<[u8; 8]>())
 }
 
 pub(super) async fn authenticate(
     ctx: &RequestMonitoring,
+    auth_config: &'static AuthenticationConfig,
     link_uri: &reqwest::Url,
     client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
 ) -> auth::Result<NodeInfo> {
@@ -74,7 +76,7 @@ pub(super) async fn authenticate(
         }
     };
 
-    let span = info_span!("link", psql_session_id = &psql_session_id);
+    let span = info_span!("web", psql_session_id = &psql_session_id);
     let greeting = hello_message(link_uri, &psql_session_id);
 
     // Give user a URL to spawn a new database.
@@ -87,7 +89,15 @@ pub(super) async fn authenticate(
 
     // Wait for web console response (see `mgmt`).
     info!(parent: &span, "waiting for console's reply...");
-    let db_info = waiter.await.map_err(LinkAuthError::from)?;
+    let db_info = waiter.await.map_err(WebAuthError::from)?;
+
+    if auth_config.ip_allowlist_check_enabled {
+        if let Some(allowed_ips) = &db_info.allowed_ips {
+            if !auth::check_peer_addr_is_in_list(&ctx.peer_addr(), allowed_ips) {
+                return Err(auth::AuthError::ip_address_not_allowed(ctx.peer_addr()));
+            }
+        }
+    }
 
     client.write_message_noflush(&Be::NoticeResponse("Connecting to database."))?;
 

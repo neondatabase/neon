@@ -43,15 +43,8 @@ pub mod logging;
 pub mod lock_file;
 pub mod pid_file;
 
-// Misc
-pub mod accum;
-pub mod shutdown;
-
 // Utility for binding TcpListeners with proper socket options.
 pub mod tcp_listener;
-
-// Utility for putting a raw file descriptor into non-blocking mode
-pub mod nonblock;
 
 // Default signal handling
 pub mod sentry_init;
@@ -71,6 +64,7 @@ pub mod postgres_client;
 
 pub mod tracing_span_assert;
 
+pub mod leaky_bucket;
 pub mod rate_limit;
 
 /// Simple once-barrier and a guard which keeps barrier awaiting.
@@ -97,6 +91,10 @@ pub mod poison;
 pub mod toml_edit_ext;
 
 pub mod circuit_breaker;
+
+// Re-export used in macro. Avoids adding git-version as dep in target crates.
+#[doc(hidden)]
+pub use git_version;
 
 /// This is a shortcut to embed git sha into binaries and avoid copying the same build script to all packages
 ///
@@ -137,7 +135,7 @@ macro_rules! project_git_version {
     ($const_identifier:ident) => {
         // this should try GIT_VERSION first only then git_version::git_version!
         const $const_identifier: &::core::primitive::str = {
-            const __COMMIT_FROM_GIT: &::core::primitive::str = git_version::git_version! {
+            const __COMMIT_FROM_GIT: &::core::primitive::str = $crate::git_version::git_version! {
                 prefix = "",
                 fallback = "unknown",
                 args = ["--abbrev=40", "--always", "--dirty=-modified"] // always use full sha

@@ -200,6 +200,7 @@ def test_sharding_split_compaction(neon_env_builder: NeonEnvBuilder, failpoint: 
         # Disable automatic creation of image layers, as we will create them explicitly when we want them
         "image_creation_threshold": 9999,
         "image_layer_creation_check_threshold": 0,
+        "lsn_lease_length": "0s",
     }
 
     neon_env_builder.storage_controller_config = {
@@ -374,7 +375,7 @@ def test_sharding_split_smoke(
     non_default_tenant_config = {"gc_horizon": 77 * 1024 * 1024}
 
     env = neon_env_builder.init_configs(True)
-    neon_env_builder.start()
+    env.start()
     tenant_id = TenantId.generate()
     timeline_id = TimelineId.generate()
     env.neon_cli.create_tenant(
@@ -394,6 +395,7 @@ def test_sharding_split_smoke(
 
     # Note which pageservers initially hold a shard after tenant creation
     pre_split_pageserver_ids = [loc["node_id"] for loc in env.storage_controller.locate(tenant_id)]
+    log.info("Pre-split pageservers: {pre_split_pageserver_ids}")
 
     # For pageservers holding a shard, validate their ingest statistics
     # reflect a proper splitting of the WAL.
@@ -555,9 +557,9 @@ def test_sharding_split_smoke(
     assert sum(total.values()) == split_shard_count * 2
     check_effective_tenant_config()
 
-    # More specific check: that we are fully balanced.  This is deterministic because
-    # the order in which we consider shards for optimization is deterministic, and the
-    # order of preference of nodes is also deterministic (lower node IDs win).
+    # More specific check: that we are fully balanced.  It is deterministic that we will get exactly
+    # one shard on each pageserver, because for these small shards the utilization metric is
+    # dominated by shard count.
     log.info(f"total: {total}")
     assert total == {
         1: 1,
@@ -577,8 +579,14 @@ def test_sharding_split_smoke(
         15: 1,
         16: 1,
     }
+
+    # The controller is not required to lay out the attached locations in any particular way, but
+    # all the pageservers that originally held an attached shard should still hold one, otherwise
+    # it would indicate that we had done some unnecessary migration.
     log.info(f"attached: {attached}")
-    assert attached == {1: 1, 2: 1, 3: 1, 5: 1, 6: 1, 7: 1, 9: 1, 11: 1}
+    for ps_id in pre_split_pageserver_ids:
+        log.info("Pre-split pageserver {ps_id} should still hold an attached location")
+        assert ps_id in attached
 
     # Ensure post-split pageserver locations survive a restart (i.e. the child shards
     # correctly wrote config to disk, and the storage controller responds correctly
@@ -1429,7 +1437,7 @@ def test_sharding_unlogged_relation(neon_env_builder: NeonEnvBuilder):
 
     neon_env_builder.num_pageservers = 2
     env = neon_env_builder.init_configs()
-    neon_env_builder.start()
+    env.start()
 
     tenant_id = TenantId.generate()
     timeline_id = TimelineId.generate()
@@ -1468,7 +1476,7 @@ def test_top_tenants(neon_env_builder: NeonEnvBuilder):
     """
 
     env = neon_env_builder.init_configs()
-    neon_env_builder.start()
+    env.start()
 
     tenants = []
     n_tenants = 8

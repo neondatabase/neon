@@ -118,6 +118,9 @@ def test_ancestor_detach_branched_from(
         truncated_layers = 0
     elif branchpoint == Branchpoint.AFTER_L0:
         branch_at = Lsn(last_lsn + 8)
+        # make sure the branch point is not on a page header
+        if 0 < (branch_at.lsn_int % 8192) < 40:
+            branch_at += 40
         rows = 8192
         # as there is no 8 byte walrecord, nothing should get copied from the straddling layer
         truncated_layers = 0
@@ -639,8 +642,12 @@ def test_timeline_ancestor_detach_errors(neon_env_builder: NeonEnvBuilder, shard
 
     for ps in pageservers.values():
         ps.allowed_errors.extend(SHUTDOWN_ALLOWED_ERRORS)
-        ps.allowed_errors.append(
-            ".* WARN .* path=/v1/tenant/.*/timeline/.*/detach_ancestor request_id=.*: request was dropped before completing"
+        ps.allowed_errors.extend(
+            [
+                ".* WARN .* path=/v1/tenant/.*/timeline/.*/detach_ancestor request_id=.*: request was dropped before completing",
+                # rare error logging, which is hard to reproduce without instrumenting responding with random sleep
+                '.* ERROR .* path=/v1/tenant/.*/timeline/.*/detach_ancestor request_id=.*: Cancelled request finished with an error: Conflict\\("no ancestors"\\)',
+            ]
         )
 
     client = (

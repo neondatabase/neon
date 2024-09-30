@@ -1,6 +1,4 @@
-use super::{
-    ComputeCredentialKeys, ComputeCredentials, ComputeUserInfo, ComputeUserInfoNoEndpoint,
-};
+use super::{ComputeCredentials, ComputeUserInfo, ComputeUserInfoNoEndpoint};
 use crate::{
     auth::{self, AuthFlow},
     config::AuthenticationConfig,
@@ -17,7 +15,7 @@ use tracing::{info, warn};
 /// one round trip and *expensive* computations (>= 4096 HMAC iterations).
 /// These properties are benefical for serverless JS workers, so we
 /// use this mechanism for websocket connections.
-pub async fn authenticate_cleartext(
+pub(crate) async fn authenticate_cleartext(
     ctx: &RequestMonitoring,
     info: ComputeUserInfo,
     client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
@@ -59,11 +57,11 @@ pub async fn authenticate_cleartext(
 /// Workaround for clients which don't provide an endpoint (project) name.
 /// Similar to [`authenticate_cleartext`], but there's a specific password format,
 /// and passwords are not yet validated (we don't know how to validate them!)
-pub async fn password_hack_no_authentication(
+pub(crate) async fn password_hack_no_authentication(
     ctx: &RequestMonitoring,
     info: ComputeUserInfoNoEndpoint,
     client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
-) -> auth::Result<ComputeCredentials> {
+) -> auth::Result<(ComputeUserInfo, Vec<u8>)> {
     warn!("project not specified, resorting to the password hack auth flow");
     ctx.set_auth_method(crate::context::AuthMethod::Cleartext);
 
@@ -79,12 +77,12 @@ pub async fn password_hack_no_authentication(
     info!(project = &*payload.endpoint, "received missing parameter");
 
     // Report tentative success; compute node will check the password anyway.
-    Ok(ComputeCredentials {
-        info: ComputeUserInfo {
+    Ok((
+        ComputeUserInfo {
             user: info.user,
             options: info.options,
             endpoint: payload.endpoint,
         },
-        keys: ComputeCredentialKeys::Password(payload.password),
-    })
+        payload.password,
+    ))
 }

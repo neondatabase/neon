@@ -1,4 +1,4 @@
-use anyhow::{anyhow, bail};
+use anyhow::{anyhow, bail, Context};
 use camino::Utf8PathBuf;
 use pageserver_api::controller_api::{MetadataHealthUpdateRequest, MetadataHealthUpdateResponse};
 use pageserver_api::shard::TenantShardId;
@@ -7,6 +7,7 @@ use storage_controller_client::control_api;
 use storage_scrubber::garbage::{find_garbage, purge_garbage, PurgeMode};
 use storage_scrubber::pageserver_physical_gc::GcMode;
 use storage_scrubber::scan_pageserver_metadata::scan_pageserver_metadata;
+use storage_scrubber::scan_safekeeper_metadata::DatabaseOrList;
 use storage_scrubber::tenant_snapshot::SnapshotDownloader;
 use storage_scrubber::{find_large_objects, ControllerClientConfig};
 use storage_scrubber::{
@@ -40,6 +41,10 @@ struct Cli {
     #[arg(long)]
     /// JWT token for authenticating with storage controller.  Requires scope 'scrubber' or 'admin'.
     controller_jwt: Option<String>,
+
+    /// If set to true, the scrubber will exit with error code on fatal error.
+    #[arg(long, default_value_t = false)]
+    exit_code: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -76,6 +81,9 @@ enum Command {
         /// For safekeeper node_kind only, table in the db with debug dump
         #[arg(long, default_value = None)]
         dump_db_table: Option<String>,
+        /// For safekeeper node_kind only, json list of timelines and their lsn info
+        #[arg(long, default_value = None)]
+        timeline_lsns: Option<String>,
     },
     TenantSnapshot {
         #[arg(long = "tenant-id")]
@@ -117,8 +125,6 @@ enum Command {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    tracing::info!("version: {}, build_tag {}", GIT_VERSION, BUILD_TAG);
-
     let bucket_config = BucketConfig::from_env()?;
 
     let command_log_name = match &cli.command {
@@ -138,6 +144,8 @@ async fn main() -> anyhow::Result<()> {
         chrono::Utc::now().format("%Y_%m_%d__%H_%M_%S")
     ));
 
+    tracing::info!("version: {}, build_tag {}", GIT_VERSION, BUILD_TAG);
+
     let controller_client = cli.controller_api.map(|controller_api| {
         ControllerClientConfig {
             controller_api,
@@ -155,20 +163,22 @@ async fn main() -> anyhow::Result<()> {
             post_to_storcon,
             dump_db_connstr,
             dump_db_table,
+            timeline_lsns,
         } => {
             if let NodeKind::Safekeeper = node_kind {
-                let dump_db_connstr =
-                    dump_db_connstr.ok_or(anyhow::anyhow!("dump_db_connstr not specified"))?;
-                let dump_db_table =
-                    dump_db_table.ok_or(anyhow::anyhow!("dump_db_table not specified"))?;
-
-                let summary = scan_safekeeper_metadata(
-                    bucket_config.clone(),
-                    tenant_ids.iter().map(|tshid| tshid.tenant_id).collect(),
-                    dump_db_connstr,
-                    dump_db_table,
-                )
-                .await?;
+                let db_or_list = match (timeline_lsns, dump_db_connstr) {
+                    (Some(timeline_lsns), _) => {
+                        let timeline_lsns = serde_json::from_str(&timeline_lsns).context("parsing timeline_lsns")?;
+                        DatabaseOrList::List(timeline_lsns)
+                    }
+                    (None, Some(dump_db_connstr)) => {
+                        let dump_db_table = dump_db_table.ok_or_else(|| anyhow::anyhow!("dump_db_table not specified"))?;
+                        let tenant_ids = tenant_ids.iter().map(|tshid| tshid.tenant_id).collect();
+                        DatabaseOrList::Database { tenant_ids, connstr: dump_db_connstr, table: dump_db_table }
+                    }
+                    (None, None) => anyhow::bail!("neither `timeline_lsns` specified, nor `dump_db_connstr` and `dump_db_table`"),
+                };
+                let summary = scan_safekeeper_metadata(bucket_config.clone(), db_or_list).await?;
                 if json {
                     println!("{}", serde_json::to_string(&summary).unwrap())
                 } else {
@@ -197,6 +207,7 @@ async fn main() -> anyhow::Result<()> {
                     tenant_ids,
                     json,
                     post_to_storcon,
+                    cli.exit_code,
                 )
                 .await
             }
@@ -263,6 +274,7 @@ async fn main() -> anyhow::Result<()> {
                 gc_min_age,
                 gc_mode,
                 post_to_storcon,
+                cli.exit_code,
             )
             .await
         }
@@ -278,6 +290,7 @@ pub async fn run_cron_job(
     gc_min_age: humantime::Duration,
     gc_mode: GcMode,
     post_to_storcon: bool,
+    exit_code: bool,
 ) -> anyhow::Result<()> {
     tracing::info!(%gc_min_age, %gc_mode, "Running pageserver-physical-gc");
     pageserver_physical_gc_cmd(
@@ -295,6 +308,7 @@ pub async fn run_cron_job(
         Vec::new(),
         true,
         post_to_storcon,
+        exit_code,
     )
     .await?;
 
@@ -343,6 +357,7 @@ pub async fn scan_pageserver_metadata_cmd(
     tenant_shard_ids: Vec<TenantShardId>,
     json: bool,
     post_to_storcon: bool,
+    exit_code: bool,
 ) -> anyhow::Result<()> {
     if controller_client.is_none() && post_to_storcon {
         return Err(anyhow!("Posting pageserver scan health status to storage controller requires `--controller-api` and `--controller-jwt` to run"));
@@ -374,6 +389,9 @@ pub async fn scan_pageserver_metadata_cmd(
 
             if summary.is_fatal() {
                 tracing::error!("Fatal scrub errors detected");
+                if exit_code {
+                    std::process::exit(1);
+                }
             } else if summary.is_empty() {
                 // Strictly speaking an empty bucket is a valid bucket, but if someone ran the
                 // scrubber they were likely expecting to scan something, and if we see no timelines
@@ -385,6 +403,9 @@ pub async fn scan_pageserver_metadata_cmd(
                         .prefix_in_bucket
                         .unwrap_or("<none>".to_string())
                 );
+                if exit_code {
+                    std::process::exit(1);
+                }
             }
 
             Ok(())

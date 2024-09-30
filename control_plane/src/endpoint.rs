@@ -561,6 +561,7 @@ impl Endpoint {
             operation_uuid: None,
             features: self.features.clone(),
             swap_size_bytes: None,
+            disk_quota_bytes: None,
             cluster: Cluster {
                 cluster_id: None, // project ID: not used
                 name: None,       // project name: not used
@@ -702,7 +703,7 @@ impl Endpoint {
                     }
                 }
             }
-            std::thread::sleep(ATTEMPT_INTERVAL);
+            tokio::time::sleep(ATTEMPT_INTERVAL).await;
         }
 
         // disarm the scopeguard, let the child outlive this function (and neon_local invoction)

@@ -5,7 +5,7 @@ import threading
 import time
 from typing import List
 
-from fixtures.neon_fixtures import DEFAULT_BRANCH_NAME, NeonEnvBuilder
+from fixtures.neon_fixtures import NeonEnvBuilder
 from fixtures.utils import query_scalar
 
 
@@ -15,11 +15,8 @@ def test_local_file_cache_unlink(neon_env_builder: NeonEnvBuilder):
     cache_dir = os.path.join(env.repo_dir, "file_cache")
     os.mkdir(cache_dir)
 
-    env.neon_cli.create_branch("empty", ancestor_branch_name=DEFAULT_BRANCH_NAME)
-    env.neon_cli.create_branch("test_local_file_cache_unlink", "empty")
-
     endpoint = env.endpoints.create_start(
-        "test_local_file_cache_unlink",
+        "main",
         config_lines=[
             "shared_buffers='1MB'",
             f"neon.file_cache_path='{cache_dir}/file.cache'",

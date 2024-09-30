@@ -19,7 +19,6 @@ import psycopg2.errors
 import psycopg2.extras
 import pytest
 import requests
-from fixtures.broker import NeonBroker
 from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.metrics import parse_metrics
@@ -72,6 +71,17 @@ def wait_lsn_force_checkpoint(
     wait_lsn_force_checkpoint_at(lsn, tenant_id, timeline_id, ps, pageserver_conn_options)
 
 
+def wait_lsn_force_checkpoint_at_sk(
+    safekeeper: Safekeeper,
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
+    ps: NeonPageserver,
+    pageserver_conn_options=None,
+):
+    sk_flush_lsn = safekeeper.get_flush_lsn(tenant_id, timeline_id)
+    wait_lsn_force_checkpoint_at(sk_flush_lsn, tenant_id, timeline_id, ps, pageserver_conn_options)
+
+
 def wait_lsn_force_checkpoint_at(
     lsn: Lsn,
     tenant_id: TenantId,
@@ -79,6 +89,10 @@ def wait_lsn_force_checkpoint_at(
     ps: NeonPageserver,
     pageserver_conn_options=None,
 ):
+    """
+    Wait until pageserver receives given lsn, force checkpoint and wait for
+    upload, i.e. remote_consistent_lsn advancement.
+    """
     pageserver_conn_options = pageserver_conn_options or {}
 
     auth_token = None
@@ -253,6 +267,10 @@ def test_many_timelines(neon_env_builder: NeonEnvBuilder):
     assert max(init_m[1].commit_lsns) < middle_lsn < min(final_m[1].commit_lsns)
     assert max(init_m[2].flush_lsns) <= min(final_m[2].flush_lsns) < middle_lsn
     assert max(init_m[2].commit_lsns) <= min(final_m[2].commit_lsns) < middle_lsn
+
+    # Test timeline_list endpoint.
+    http_cli = env.safekeepers[0].http_client()
+    assert len(http_cli.timeline_list()) == 3
 
 
 # Check that dead minority doesn't prevent the commits: execute insert n_inserts
@@ -754,7 +772,7 @@ class ProposerPostgres(PgProtocol):
     def initdb(self):
         """Run initdb"""
 
-        args = ["initdb", "-U", "cloud_admin", "-D", self.pg_data_dir_path()]
+        args = ["initdb", "--username", "cloud_admin", "--pgdata", self.pg_data_dir_path()]
         self.pg_bin.run(args)
 
     def start(self):
@@ -874,6 +892,7 @@ def test_timeline_status(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
     log.info(f"debug_dump before reboot {debug_dump_0}")
     assert debug_dump_0["timelines_count"] == 1
     assert debug_dump_0["timelines"][0]["timeline_id"] == str(timeline_id)
+    assert debug_dump_0["timelines"][0]["wal_last_modified"] != ""
 
     endpoint.safe_psql("create table t(i int)")
 
@@ -1036,6 +1055,24 @@ def test_restart_endpoint(neon_env_builder: NeonEnvBuilder):
         endpoint.stop()
         random_sk.start()
         endpoint.start()
+
+
+# Try restarting endpoint immediately after xlog switch.
+# https://github.com/neondatabase/neon/issues/8911
+def test_restart_endpoint_after_switch_wal(neon_env_builder: NeonEnvBuilder):
+    env = neon_env_builder.init_start()
+
+    endpoint = env.endpoints.create_start("main")
+
+    endpoint.safe_psql("create table t (i int)")
+
+    endpoint.safe_psql("SELECT pg_switch_wal()")
+
+    # we want immediate shutdown to have endpoint restart on xlog switch record,
+    # so prevent shutdown checkpoint.
+    endpoint.stop(mode="immediate")
+    endpoint = env.endpoints.create_start("main")
+    endpoint.safe_psql("SELECT 'works'")
 
 
 # Context manager which logs passed time on exit.
@@ -1296,6 +1333,8 @@ def test_lagging_sk(neon_env_builder: NeonEnvBuilder):
     # Check that WALs are the same.
     cmp_sk_wal([sk1, sk2, sk3], tenant_id, timeline_id)
 
+    env.stop(immediate=True)
+
 
 # Smaller version of test_one_sk_down testing peer recovery in isolation: that
 # it works without compute at all.
@@ -1400,11 +1439,7 @@ class SafekeeperEnv:
     ):
         self.repo_dir = repo_dir
         self.port_distributor = port_distributor
-        self.broker = NeonBroker(
-            logfile=Path(self.repo_dir) / "storage_broker.log",
-            port=self.port_distributor.get_port(),
-            neon_binpath=neon_binpath,
-        )
+        self.fake_broker_endpoint = f"http://127.0.0.1:{port_distributor.get_port()}"
         self.pg_bin = pg_bin
         self.num_safekeepers = num_safekeepers
         self.bin_safekeeper = str(neon_binpath / "safekeeper")
@@ -1453,7 +1488,7 @@ class SafekeeperEnv:
             "--id",
             str(i),
             "--broker-endpoint",
-            self.broker.client_url(),
+            self.fake_broker_endpoint,
         ]
         log.info(f'Running command "{" ".join(cmd)}"')
 
@@ -2049,8 +2084,13 @@ def test_timeline_copy(neon_env_builder: NeonEnvBuilder, insert_rows: int):
 
     endpoint.safe_psql("create table t(key int, value text)")
 
-    timeline_status = env.safekeepers[0].http_client().timeline_status(tenant_id, timeline_id)
-    timeline_start_lsn = timeline_status.timeline_start_lsn
+    # Note: currently timelines on sks are created by compute and commit of
+    # transaction above is finished when 2/3 sks received it, so there is a
+    # small chance that timeline on this sk is not created/initialized yet,
+    # hence the usage of waiting function to prevent flakiness.
+    timeline_start_lsn = (
+        env.safekeepers[0].http_client().get_non_zero_timeline_start_lsn(tenant_id, timeline_id)
+    )
     log.info(f"Timeline start LSN: {timeline_start_lsn}")
 
     current_percent = 0.0
@@ -2153,6 +2193,43 @@ def test_patch_control_file(neon_env_builder: NeonEnvBuilder):
     )
     log.info(f"dump_control_file response: {res}")
     assert res["timelines"][0]["control_file"]["timeline_start_lsn"] == "0/1"
+
+
+def test_term_bump(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.num_safekeepers = 1
+    env = neon_env_builder.init_start()
+
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    endpoint = env.endpoints.create_start("main")
+    # initialize safekeeper
+    endpoint.safe_psql("create table t(key int, value text)")
+
+    http_cli = env.safekeepers[0].http_client()
+
+    # check that bump up to specific term works
+    curr_term = http_cli.timeline_status(tenant_id, timeline_id).term
+    bump_to = curr_term + 3
+    res = http_cli.term_bump(tenant_id, timeline_id, bump_to)
+    log.info(f"bump to {bump_to} res: {res}")
+    assert res.current_term >= bump_to
+
+    # check that bump to none increments current term
+    res = http_cli.term_bump(tenant_id, timeline_id, None)
+    log.info(f"bump to None res: {res}")
+    assert res.current_term > bump_to
+    assert res.current_term > res.previous_term
+
+    # check that bumping doesn't work downward
+    res = http_cli.term_bump(tenant_id, timeline_id, 2)
+    log.info(f"bump to 2 res: {res}")
+    assert res.current_term > bump_to
+    assert res.current_term == res.previous_term
+
+    # check that this doesn't kill endpoint because last WAL flush was his and
+    # thus its basebackup is still good
+    endpoint.safe_psql("insert into t values (1, 'payload')")
 
 
 # Test disables periodic pushes from safekeeper to the broker and checks that
@@ -2324,6 +2401,77 @@ def test_s3_eviction(
     assert event_metrics_seen
 
 
+# Test resetting uploaded partial segment state.
+def test_backup_partial_reset(neon_env_builder: NeonEnvBuilder):
+    neon_env_builder.num_safekeepers = 1
+    neon_env_builder.enable_safekeeper_remote_storage(default_remote_storage())
+    # We want to upload/evict quickly, but not too quickly to check that s3 is
+    # empty before next round of upload happens.
+    # Note: this test fails with --delete-offloaded-wal, this is expected.
+    neon_env_builder.safekeeper_extra_opts = [
+        "--enable-offload",
+        "--partial-backup-timeout",
+        "1s",
+        "--control-file-save-interval",
+        "1s",
+        "--eviction-min-resident=1s",
+    ]
+    # XXX: pageserver currently connects to safekeeper as long as connection
+    # manager doesn't remove its entry (default lagging_wal_timeout is 10s),
+    # causing uneviction. It should be fixed to not reconnect if last
+    # remote_consistent_lsn is communicated and there is nothing to fetch. Make
+    # value lower to speed up the test.
+    initial_tenant_conf = {
+        "lagging_wal_timeout": "1s",
+    }
+    env = neon_env_builder.init_start(initial_tenant_conf)
+
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    endpoint = env.endpoints.create("main")
+    endpoint.start()
+    endpoint.safe_psql("create table t(key int, value text)")
+    endpoint.stop()
+    sk = env.safekeepers[0]
+    # eviction won't happen until remote_consistent_lsn catches up.
+    wait_lsn_force_checkpoint_at_sk(sk, tenant_id, timeline_id, env.pageserver)
+
+    http_cli = env.safekeepers[0].http_client()
+
+    # wait until eviction happens
+    def evicted():
+        eviction_state = http_cli.get_eviction_state(timeline_id)
+        log.info(f"eviction_state: {eviction_state}")
+        if isinstance(eviction_state, str) and eviction_state == "Present":
+            raise Exception("eviction didn't happen yet")
+
+    wait_until(30, 1, evicted)
+    # it must have uploaded something
+    uploaded_segs = sk.list_uploaded_segments(tenant_id, timeline_id)
+    log.info(f"uploaded segments before reset: {uploaded_segs}")
+    assert len(uploaded_segs) > 0
+
+    reset_res = http_cli.backup_partial_reset(tenant_id, timeline_id)
+    log.info(f"reset res: {reset_res}")
+
+    # Backup_partial_reset must have reset the state and dropped s3 segment.
+    #
+    # Note: if listing takes more than --partial-backup-timeout test becomes
+    # flaky because file might be reuploaded. With local fs it shouldn't be an
+    # issue, but can add retry if this appears.
+    uploaded_segs = sk.list_uploaded_segments(tenant_id, timeline_id)
+    log.info(f"uploaded segments after reset: {uploaded_segs}")
+    assert len(uploaded_segs) == 0
+
+    # calling second time should be ok
+    http_cli.backup_partial_reset(tenant_id, timeline_id)
+
+    # inserting data should be ok
+    endpoint.start()
+    endpoint.safe_psql("insert into t values(1, 'hehe')")
+
+
 def test_pull_timeline_partial_segment_integrity(neon_env_builder: NeonEnvBuilder):
     """
     Verify that pulling timeline from a SK with an uploaded partial segment
@@ -2351,7 +2499,16 @@ def test_pull_timeline_partial_segment_integrity(neon_env_builder: NeonEnvBuilde
         "--eviction-min-resident=500ms",
     ]
 
-    env = neon_env_builder.init_start(initial_tenant_conf={"checkpoint_timeout": "100ms"})
+    # XXX: pageserver currently connects to safekeeper as long as connection
+    # manager doesn't remove its entry (default lagging_wal_timeout is 10s),
+    # causing uneviction. It should be fixed to not reconnect if last
+    # remote_consistent_lsn is communicated and there is nothing to fetch. Until
+    # this is fixed make value lower to speed up the test.
+    initial_tenant_conf = {
+        "lagging_wal_timeout": "1s",
+        "checkpoint_timeout": "100ms",
+    }
+    env = neon_env_builder.init_start(initial_tenant_conf=initial_tenant_conf)
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
 
@@ -2415,7 +2572,7 @@ def test_pull_timeline_partial_segment_integrity(neon_env_builder: NeonEnvBuilde
     endpoint.start(safekeepers=[2, 3])
 
     def new_partial_segment_uploaded():
-        segs = src_sk.list_uploaded_segments(tenant_id, timeline_id)
+        segs = dst_sk.list_uploaded_segments(tenant_id, timeline_id)
         for seg in segs:
             if "partial" in seg and "sk3" in seg:
                 return seg

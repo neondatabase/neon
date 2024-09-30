@@ -8,35 +8,30 @@ license.workspace = true
 default = []
 # Enables test-only APIs, incuding failpoints. In particular, enables the `fail_point!` macro,
 # which adds some runtime cost to run tests on outage conditions
-testing = ["fail/failpoints"]
+testing = ["fail/failpoints", "pageserver_api/testing" ]
 
 [dependencies]
 anyhow.workspace = true
 arc-swap.workspace = true
 async-compression.workspace = true
 async-stream.workspace = true
-async-trait.workspace = true
+bit_field.workspace = true
 byteorder.workspace = true
 bytes.workspace = true
 camino.workspace = true
 camino-tempfile.workspace = true
 chrono = { workspace = true, features = ["serde"] }
 clap = { workspace = true, features = ["string"] }
-const_format.workspace = true
 consumption_metrics.workspace = true
 crc32c.workspace = true
-crossbeam-utils.workspace = true
 either.workspace = true
-flate2.workspace = true
 fail.workspace = true
 futures.workspace = true
-git-version.workspace = true
 hex.workspace = true
 humantime.workspace = true
 humantime-serde.workspace = true
 hyper.workspace = true
 itertools.workspace = true
-leaky-bucket.workspace = true
 md5.workspace = true
 nix.workspace = true
 # hack to get the number of worker threads tokio uses
@@ -52,14 +47,11 @@ rand.workspace = true
 range-set-blaze = { version = "0.1.16", features = ["alloc"] }
 regex.workspace = true
 scopeguard.workspace = true
+send-future.workspace = true
 serde.workspace = true
 serde_json = { workspace = true, features = ["raw_value"] }
 serde_path_to_error.workspace = true
 serde_with.workspace = true
-signal-hook.workspace = true
-smallvec = { workspace = true, features = ["write"] }
-svg_fmt.workspace = true
-sync_wrapper.workspace = true
 sysinfo.workspace = true
 tokio-tar.workspace = true
 thiserror.workspace = true
@@ -72,7 +64,6 @@ tokio-stream.workspace = true
 tokio-util.workspace = true
 toml_edit = { workspace = true, features = [ "serde" ] }
 tracing.workspace = true
-twox-hash.workspace = true
 url.workspace = true
 walkdir.workspace = true
 metrics.workspace = true
@@ -100,6 +91,7 @@ procfs.workspace = true
 criterion.workspace = true
 hex-literal.workspace = true
 tokio = { workspace = true, features = ["process", "sync", "fs", "rt", "io-util", "time", "test-util"] }
+indoc.workspace = true
 
 [[bench]]
 name = "bench_layer_map"

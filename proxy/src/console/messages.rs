@@ -4,34 +4,33 @@ use std::fmt::{self, Display};
 
 use crate::auth::IpPattern;
 
-use crate::intern::{BranchIdInt, EndpointIdInt, ProjectIdInt};
+use crate::intern::{BranchIdInt, EndpointIdInt, ProjectIdInt, RoleNameInt};
 use crate::proxy::retry::CouldRetry;
 
 /// Generic error response with human-readable description.
 /// Note that we can't always present it to user as is.
 #[derive(Debug, Deserialize, Clone)]
-pub struct ConsoleError {
-    pub error: Box<str>,
+pub(crate) struct ConsoleError {
+    pub(crate) error: Box<str>,
     #[serde(skip)]
-    pub http_status_code: http::StatusCode,
-    pub status: Option<Status>,
+    pub(crate) http_status_code: http::StatusCode,
+    pub(crate) status: Option<Status>,
 }
 
 impl ConsoleError {
-    pub fn get_reason(&self) -> Reason {
+    pub(crate) fn get_reason(&self) -> Reason {
         self.status
             .as_ref()
             .and_then(|s| s.details.error_info.as_ref())
-            .map(|e| e.reason)
-            .unwrap_or(Reason::Unknown)
+            .map_or(Reason::Unknown, |e| e.reason)
     }
-    pub fn get_user_facing_message(&self) -> String {
+
+    pub(crate) fn get_user_facing_message(&self) -> String {
         use super::provider::errors::REQUEST_FAILED;
         self.status
             .as_ref()
             .and_then(|s| s.details.user_facing_message.as_ref())
-            .map(|m| m.message.clone().into())
-            .unwrap_or_else(|| {
+            .map_or_else(|| {
                 // Ask @neondatabase/control-plane for review before adding more.
                 match self.http_status_code {
                     http::StatusCode::NOT_FOUND => {
@@ -48,19 +47,18 @@ impl ConsoleError {
                     }
                     _ => REQUEST_FAILED.to_owned(),
                 }
-            })
+            }, |m| m.message.clone().into())
     }
 }
 
 impl Display for ConsoleError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let msg = self
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let msg: &str = self
             .status
             .as_ref()
             .and_then(|s| s.details.user_facing_message.as_ref())
-            .map(|m| m.message.as_ref())
-            .unwrap_or_else(|| &self.error);
-        write!(f, "{}", msg)
+            .map_or_else(|| self.error.as_ref(), |m| m.message.as_ref());
+        write!(f, "{msg}")
     }
 }
 
@@ -88,27 +86,28 @@ impl CouldRetry for ConsoleError {
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct Status {
-    pub code: Box<str>,
-    pub message: Box<str>,
-    pub details: Details,
+#[allow(dead_code)]
+pub(crate) struct Status {
+    pub(crate) code: Box<str>,
+    pub(crate) message: Box<str>,
+    pub(crate) details: Details,
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct Details {
-    pub error_info: Option<ErrorInfo>,
-    pub retry_info: Option<RetryInfo>,
-    pub user_facing_message: Option<UserFacingMessage>,
+pub(crate) struct Details {
+    pub(crate) error_info: Option<ErrorInfo>,
+    pub(crate) retry_info: Option<RetryInfo>,
+    pub(crate) user_facing_message: Option<UserFacingMessage>,
 }
 
 #[derive(Copy, Clone, Debug, Deserialize)]
-pub struct ErrorInfo {
-    pub reason: Reason,
+pub(crate) struct ErrorInfo {
+    pub(crate) reason: Reason,
     // Schema could also have `metadata` field, but it's not structured. Skip it for now.
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Default)]
-pub enum Reason {
+pub(crate) enum Reason {
     /// RoleProtected indicates that the role is protected and the attempted operation is not permitted on protected roles.
     #[serde(rename = "ROLE_PROTECTED")]
     RoleProtected,
@@ -168,7 +167,7 @@ pub enum Reason {
 }
 
 impl Reason {
-    pub fn is_not_found(&self) -> bool {
+    pub(crate) fn is_not_found(self) -> bool {
         matches!(
             self,
             Reason::ResourceNotFound
@@ -178,7 +177,7 @@ impl Reason {
         )
     }
 
-    pub fn can_retry(&self) -> bool {
+    pub(crate) fn can_retry(self) -> bool {
         match self {
             // do not retry role protected errors
             // not a transitive error
@@ -208,22 +207,23 @@ impl Reason {
 }
 
 #[derive(Copy, Clone, Debug, Deserialize)]
-pub struct RetryInfo {
-    pub retry_delay_ms: u64,
+#[allow(dead_code)]
+pub(crate) struct RetryInfo {
+    pub(crate) retry_delay_ms: u64,
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct UserFacingMessage {
-    pub message: Box<str>,
+pub(crate) struct UserFacingMessage {
+    pub(crate) message: Box<str>,
 }
 
 /// Response which holds client's auth secret, e.g. [`crate::scram::ServerSecret`].
 /// Returned by the `/proxy_get_role_secret` API method.
 #[derive(Deserialize)]
-pub struct GetRoleSecret {
-    pub role_secret: Box<str>,
-    pub allowed_ips: Option<Vec<IpPattern>>,
-    pub project_id: Option<ProjectIdInt>,
+pub(crate) struct GetRoleSecret {
+    pub(crate) role_secret: Box<str>,
+    pub(crate) allowed_ips: Option<Vec<IpPattern>>,
+    pub(crate) project_id: Option<ProjectIdInt>,
 }
 
 // Manually implement debug to omit sensitive info.
@@ -236,21 +236,21 @@ impl fmt::Debug for GetRoleSecret {
 /// Response which holds compute node's `host:port` pair.
 /// Returned by the `/proxy_wake_compute` API method.
 #[derive(Debug, Deserialize)]
-pub struct WakeCompute {
-    pub address: Box<str>,
-    pub aux: MetricsAuxInfo,
+pub(crate) struct WakeCompute {
+    pub(crate) address: Box<str>,
+    pub(crate) aux: MetricsAuxInfo,
 }
 
-/// Async response which concludes the link auth flow.
+/// Async response which concludes the web auth flow.
 /// Also known as `kickResponse` in the console.
 #[derive(Debug, Deserialize)]
-pub struct KickSession<'a> {
+pub(crate) struct KickSession<'a> {
     /// Session ID is assigned by the proxy.
-    pub session_id: &'a str,
+    pub(crate) session_id: &'a str,
 
     /// Compute node connection params.
     #[serde(deserialize_with = "KickSession::parse_db_info")]
-    pub result: DatabaseInfo,
+    pub(crate) result: DatabaseInfo,
 }
 
 impl KickSession<'_> {
@@ -273,25 +273,28 @@ impl KickSession<'_> {
 
 /// Compute node connection params.
 #[derive(Deserialize)]
-pub struct DatabaseInfo {
-    pub host: Box<str>,
-    pub port: u16,
-    pub dbname: Box<str>,
-    pub user: Box<str>,
+pub(crate) struct DatabaseInfo {
+    pub(crate) host: Box<str>,
+    pub(crate) port: u16,
+    pub(crate) dbname: Box<str>,
+    pub(crate) user: Box<str>,
     /// Console always provides a password, but it might
     /// be inconvenient for debug with local PG instance.
-    pub password: Option<Box<str>>,
-    pub aux: MetricsAuxInfo,
+    pub(crate) password: Option<Box<str>>,
+    pub(crate) aux: MetricsAuxInfo,
+    #[serde(default)]
+    pub(crate) allowed_ips: Option<Vec<IpPattern>>,
 }
 
 // Manually implement debug to omit sensitive info.
 impl fmt::Debug for DatabaseInfo {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DatabaseInfo")
             .field("host", &self.host)
             .field("port", &self.port)
             .field("dbname", &self.dbname)
             .field("user", &self.user)
+            .field("allowed_ips", &self.allowed_ips)
             .finish_non_exhaustive()
     }
 }
@@ -299,12 +302,12 @@ impl fmt::Debug for DatabaseInfo {
 /// Various labels for prometheus metrics.
 /// Also known as `ProxyMetricsAuxInfo` in the console.
 #[derive(Debug, Deserialize, Clone)]
-pub struct MetricsAuxInfo {
-    pub endpoint_id: EndpointIdInt,
-    pub project_id: ProjectIdInt,
-    pub branch_id: BranchIdInt,
+pub(crate) struct MetricsAuxInfo {
+    pub(crate) endpoint_id: EndpointIdInt,
+    pub(crate) project_id: ProjectIdInt,
+    pub(crate) branch_id: BranchIdInt,
     #[serde(default)]
-    pub cold_start_info: ColdStartInfo,
+    pub(crate) cold_start_info: ColdStartInfo,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, Clone, Copy, FixedCardinalityLabel)]
@@ -331,7 +334,7 @@ pub enum ColdStartInfo {
 }
 
 impl ColdStartInfo {
-    pub fn as_str(&self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             ColdStartInfo::Unknown => "unknown",
             ColdStartInfo::Warm => "warm",
@@ -341,6 +344,20 @@ impl ColdStartInfo {
             ColdStartInfo::WarmCached => "warm_cached",
         }
     }
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct EndpointJwksResponse {
+    pub jwks: Vec<JwksSettings>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct JwksSettings {
+    pub id: String,
+    pub jwks_url: url::Url,
+    pub provider_name: String,
+    pub jwt_audience: Option<String>,
+    pub role_names: Vec<RoleNameInt>,
 }
 
 #[cfg(test)]
@@ -373,7 +390,7 @@ mod tests {
                 }
             }
         });
-        let _: KickSession = serde_json::from_str(&json.to_string())?;
+        serde_json::from_str::<KickSession<'_>>(&json.to_string())?;
 
         Ok(())
     }
@@ -381,7 +398,7 @@ mod tests {
     #[test]
     fn parse_db_info() -> anyhow::Result<()> {
         // with password
-        let _: DatabaseInfo = serde_json::from_value(json!({
+        serde_json::from_value::<DatabaseInfo>(json!({
             "host": "localhost",
             "port": 5432,
             "dbname": "postgres",
@@ -391,7 +408,7 @@ mod tests {
         }))?;
 
         // without password
-        let _: DatabaseInfo = serde_json::from_value(json!({
+        serde_json::from_value::<DatabaseInfo>(json!({
             "host": "localhost",
             "port": 5432,
             "dbname": "postgres",
@@ -400,7 +417,7 @@ mod tests {
         }))?;
 
         // new field (forward compatibility)
-        let _: DatabaseInfo = serde_json::from_value(json!({
+        serde_json::from_value::<DatabaseInfo>(json!({
             "host": "localhost",
             "port": 5432,
             "dbname": "postgres",
@@ -409,6 +426,22 @@ mod tests {
             "N.E.W": "forward compatibility check",
             "aux": dummy_aux(),
         }))?;
+
+        // with allowed_ips
+        let dbinfo = serde_json::from_value::<DatabaseInfo>(json!({
+            "host": "localhost",
+            "port": 5432,
+            "dbname": "postgres",
+            "user": "john_doe",
+            "password": "password",
+            "aux": dummy_aux(),
+            "allowed_ips": ["127.0.0.1"],
+        }))?;
+
+        assert_eq!(
+            dbinfo.allowed_ips,
+            Some(vec![IpPattern::Single("127.0.0.1".parse()?)])
+        );
 
         Ok(())
     }
@@ -419,7 +452,7 @@ mod tests {
             "address": "0.0.0.0",
             "aux": dummy_aux(),
         });
-        let _: WakeCompute = serde_json::from_str(&json.to_string())?;
+        serde_json::from_str::<WakeCompute>(&json.to_string())?;
         Ok(())
     }
 
@@ -429,18 +462,18 @@ mod tests {
         let json = json!({
             "role_secret": "secret",
         });
-        let _: GetRoleSecret = serde_json::from_str(&json.to_string())?;
+        serde_json::from_str::<GetRoleSecret>(&json.to_string())?;
         let json = json!({
             "role_secret": "secret",
             "allowed_ips": ["8.8.8.8"],
         });
-        let _: GetRoleSecret = serde_json::from_str(&json.to_string())?;
+        serde_json::from_str::<GetRoleSecret>(&json.to_string())?;
         let json = json!({
             "role_secret": "secret",
             "allowed_ips": ["8.8.8.8"],
             "project_id": "project",
         });
-        let _: GetRoleSecret = serde_json::from_str(&json.to_string())?;
+        serde_json::from_str::<GetRoleSecret>(&json.to_string())?;
 
         Ok(())
     }

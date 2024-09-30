@@ -16,7 +16,7 @@ use thiserror::Error;
 use tracing::{info, warn};
 
 #[derive(Debug, Error, PartialEq, Eq, Clone)]
-pub enum ComputeUserInfoParseError {
+pub(crate) enum ComputeUserInfoParseError {
     #[error("Parameter '{0}' is missing in startup packet.")]
     MissingKey(&'static str),
 
@@ -51,20 +51,20 @@ impl ReportableError for ComputeUserInfoParseError {
 /// Various client credentials which we use for authentication.
 /// Note that we don't store any kind of client key or password here.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ComputeUserInfoMaybeEndpoint {
-    pub user: RoleName,
-    pub endpoint_id: Option<EndpointId>,
-    pub options: NeonOptions,
+pub(crate) struct ComputeUserInfoMaybeEndpoint {
+    pub(crate) user: RoleName,
+    pub(crate) endpoint_id: Option<EndpointId>,
+    pub(crate) options: NeonOptions,
 }
 
 impl ComputeUserInfoMaybeEndpoint {
     #[inline]
-    pub fn endpoint(&self) -> Option<&str> {
+    pub(crate) fn endpoint(&self) -> Option<&str> {
         self.endpoint_id.as_deref()
     }
 }
 
-pub fn endpoint_sni(
+pub(crate) fn endpoint_sni(
     sni: &str,
     common_names: &HashSet<String>,
 ) -> Result<Option<EndpointId>, ComputeUserInfoParseError> {
@@ -83,16 +83,18 @@ pub fn endpoint_sni(
 }
 
 impl ComputeUserInfoMaybeEndpoint {
-    pub fn parse(
+    pub(crate) fn parse(
         ctx: &RequestMonitoring,
         params: &StartupMessageParams,
         sni: Option<&str>,
         common_names: Option<&HashSet<String>>,
     ) -> Result<Self, ComputeUserInfoParseError> {
-        use ComputeUserInfoParseError::*;
-
         // Some parameters are stored in the startup message.
-        let get_param = |key| params.get(key).ok_or(MissingKey(key));
+        let get_param = |key| {
+            params
+                .get(key)
+                .ok_or(ComputeUserInfoParseError::MissingKey(key))
+        };
         let user: RoleName = get_param("user")?.into();
 
         // Project name might be passed via PG's command-line options.
@@ -122,12 +124,18 @@ impl ComputeUserInfoMaybeEndpoint {
         let endpoint = match (endpoint_option, endpoint_from_domain) {
             // Invariant: if we have both project name variants, they should match.
             (Some(option), Some(domain)) if option != domain => {
-                Some(Err(InconsistentProjectNames { domain, option }))
+                Some(Err(ComputeUserInfoParseError::InconsistentProjectNames {
+                    domain,
+                    option,
+                }))
             }
             // Invariant: project name may not contain certain characters.
-            (a, b) => a.or(b).map(|name| match project_name_valid(name.as_ref()) {
-                false => Err(MalformedProjectName(name)),
-                true => Ok(name),
+            (a, b) => a.or(b).map(|name| {
+                if project_name_valid(name.as_ref()) {
+                    Ok(name)
+                } else {
+                    Err(ComputeUserInfoParseError::MalformedProjectName(name))
+                }
             }),
         }
         .transpose()?;
@@ -165,12 +173,12 @@ impl ComputeUserInfoMaybeEndpoint {
     }
 }
 
-pub fn check_peer_addr_is_in_list(peer_addr: &IpAddr, ip_list: &[IpPattern]) -> bool {
+pub(crate) fn check_peer_addr_is_in_list(peer_addr: &IpAddr, ip_list: &[IpPattern]) -> bool {
     ip_list.is_empty() || ip_list.iter().any(|pattern| check_ip(peer_addr, pattern))
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub enum IpPattern {
+pub(crate) enum IpPattern {
     Subnet(ipnet::IpNet),
     Range(IpAddr, IpAddr),
     Single(IpAddr),
@@ -186,7 +194,7 @@ impl<'de> serde::de::Deserialize<'de> for IpPattern {
         impl<'de> serde::de::Visitor<'de> for StrVisitor {
             type Value = IpPattern;
 
-            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 write!(formatter, "comma separated list with ip address, ip address range, or ip address subnet mask")
             }
 
@@ -529,5 +537,18 @@ mod tests {
             &IpPattern::Range(peer_addr, peer_addr_prev)
         ));
         Ok(())
+    }
+
+    #[test]
+    fn test_connection_blocker() {
+        fn check(v: serde_json::Value) -> bool {
+            let peer_addr = IpAddr::from([127, 0, 0, 1]);
+            let ip_list: Vec<IpPattern> = serde_json::from_value(v).unwrap();
+            check_peer_addr_is_in_list(&peer_addr, &ip_list)
+        }
+
+        assert!(check(json!([])));
+        assert!(check(json!(["127.0.0.1"])));
+        assert!(!check(json!(["255.255.255.255"])));
     }
 }

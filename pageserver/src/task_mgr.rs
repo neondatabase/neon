@@ -146,6 +146,12 @@ impl FromStr for TokioRuntimeMode {
     }
 }
 
+static TOKIO_THREAD_STACK_SIZE: Lazy<NonZeroUsize> = Lazy::new(|| {
+    env::var("NEON_PAGESERVER_TOKIO_THREAD_STACK_SIZE")
+        // the default 2MiB are insufficent, especially in debug mode
+        .unwrap_or_else(|| NonZeroUsize::new(4 * 1024 * 1024).unwrap())
+});
+
 static ONE_RUNTIME: Lazy<Option<tokio::runtime::Runtime>> = Lazy::new(|| {
     let thread_name = "pageserver-tokio";
     let Some(mode) = env::var("NEON_PAGESERVER_USE_ONE_RUNTIME") else {
@@ -164,6 +170,7 @@ static ONE_RUNTIME: Lazy<Option<tokio::runtime::Runtime>> = Lazy::new(|| {
             tokio::runtime::Builder::new_current_thread()
                 .thread_name(thread_name)
                 .enable_all()
+                .thread_stack_size(TOKIO_THREAD_STACK_SIZE.get())
                 .build()
                 .expect("failed to create one single runtime")
         }
@@ -173,6 +180,7 @@ static ONE_RUNTIME: Lazy<Option<tokio::runtime::Runtime>> = Lazy::new(|| {
                 .thread_name(thread_name)
                 .enable_all()
                 .worker_threads(num_workers.get())
+                .thread_stack_size(TOKIO_THREAD_STACK_SIZE.get())
                 .build()
                 .expect("failed to create one multi-threaded runtime")
         }
@@ -199,6 +207,7 @@ macro_rules! pageserver_runtime {
                     .thread_name($name)
                     .worker_threads(TOKIO_WORKER_THREADS.get())
                     .enable_all()
+                    .thread_stack_size(TOKIO_THREAD_STACK_SIZE.get())
                     .build()
                     .expect(std::concat!("Failed to create runtime ", $name))
             });
@@ -393,7 +402,7 @@ struct PageServerTask {
 
     /// Tasks may optionally be launched for a particular tenant/timeline, enabling
     /// later cancelling tasks for that tenant/timeline in [`shutdown_tasks`]
-    tenant_shard_id: Option<TenantShardId>,
+    tenant_shard_id: TenantShardId,
     timeline_id: Option<TimelineId>,
 
     mutable: Mutex<MutableTaskState>,
@@ -405,7 +414,7 @@ struct PageServerTask {
 pub fn spawn<F>(
     runtime: &tokio::runtime::Handle,
     kind: TaskKind,
-    tenant_shard_id: Option<TenantShardId>,
+    tenant_shard_id: TenantShardId,
     timeline_id: Option<TimelineId>,
     name: &str,
     future: F,
@@ -550,7 +559,7 @@ pub async fn shutdown_tasks(
         let tasks = TASKS.lock().unwrap();
         for task in tasks.values() {
             if (kind.is_none() || Some(task.kind) == kind)
-                && (tenant_shard_id.is_none() || task.tenant_shard_id == tenant_shard_id)
+                && (tenant_shard_id.is_none() || Some(task.tenant_shard_id) == tenant_shard_id)
                 && (timeline_id.is_none() || task.timeline_id == timeline_id)
             {
                 task.cancel.cancel();
@@ -573,13 +582,8 @@ pub async fn shutdown_tasks(
         };
         if let Some(mut join_handle) = join_handle {
             if log_all {
-                if tenant_shard_id.is_none() {
-                    // there are quite few of these
-                    info!(name = task.name, kind = ?task_kind, "stopping global task");
-                } else {
-                    // warn to catch these in tests; there shouldn't be any
-                    warn!(name = task.name, tenant_shard_id = ?tenant_shard_id, timeline_id = ?timeline_id, kind = ?task_kind, "stopping left-over");
-                }
+                // warn to catch these in tests; there shouldn't be any
+                warn!(name = task.name, tenant_shard_id = ?tenant_shard_id, timeline_id = ?timeline_id, kind = ?task_kind, "stopping left-over");
             }
             if tokio::time::timeout(std::time::Duration::from_secs(1), &mut join_handle)
                 .await

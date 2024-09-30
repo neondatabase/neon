@@ -273,10 +273,20 @@ async fn page_service_conn_main(
                 info!("Postgres client disconnected ({io_error})");
                 Ok(())
             } else {
-                Err(io_error).context("Postgres connection error")
+                let tenant_id = conn_handler.timeline_handles.tenant_id();
+                Err(io_error).context(format!(
+                    "Postgres connection error for tenant_id={:?} client at peer_addr={}",
+                    tenant_id, peer_addr
+                ))
             }
         }
-        other => other.context("Postgres query error"),
+        other => {
+            let tenant_id = conn_handler.timeline_handles.tenant_id();
+            other.context(format!(
+                "Postgres query error for tenant_id={:?} client peer_addr={}",
+                tenant_id, peer_addr
+            ))
+        }
     }
 }
 
@@ -339,6 +349,10 @@ impl TimelineHandles {
                     GetActiveTimelineError::Timeline(GetTimelineError::ShuttingDown)
                 }
             })
+    }
+
+    fn tenant_id(&self) -> Option<TenantId> {
+        self.wrapper.tenant_id.get().copied()
     }
 }
 
@@ -557,7 +571,7 @@ impl PageServerHandler {
         pgb: &mut PostgresBackend<IO>,
         tenant_id: TenantId,
         timeline_id: TimelineId,
-        protocol_version: PagestreamProtocolVersion,
+        _protocol_version: PagestreamProtocolVersion,
         ctx: RequestContext,
     ) -> Result<(), QueryError>
     where
@@ -601,8 +615,7 @@ impl PageServerHandler {
             fail::fail_point!("ps::handle-pagerequest-message");
 
             // parse request
-            let neon_fe_msg =
-                PagestreamFeMessage::parse(&mut copy_data_bytes.reader(), protocol_version)?;
+            let neon_fe_msg = PagestreamFeMessage::parse(&mut copy_data_bytes.reader())?;
 
             // invoke handler function
             let (handler_result, span) = match neon_fe_msg {
@@ -754,16 +767,21 @@ impl PageServerHandler {
         }
 
         if request_lsn < **latest_gc_cutoff_lsn {
-            // Check explicitly for INVALID just to get a less scary error message if the
-            // request is obviously bogus
-            return Err(if request_lsn == Lsn::INVALID {
-                PageStreamError::BadRequest("invalid LSN(0) in request".into())
-            } else {
-                PageStreamError::BadRequest(format!(
+            let gc_info = &timeline.gc_info.read().unwrap();
+            if !gc_info.leases.contains_key(&request_lsn) {
+                // The requested LSN is below gc cutoff and is not guarded by a lease.
+
+                // Check explicitly for INVALID just to get a less scary error message if the
+                // request is obviously bogus
+                return Err(if request_lsn == Lsn::INVALID {
+                    PageStreamError::BadRequest("invalid LSN(0) in request".into())
+                } else {
+                    PageStreamError::BadRequest(format!(
                         "tried to request a page version that was garbage collected. requested at {} gc cutoff {}",
                         request_lsn, **latest_gc_cutoff_lsn
                     ).into())
-            });
+                });
+            }
         }
 
         // Wait for WAL up to 'not_modified_since' to arrive, if necessary
@@ -790,6 +808,8 @@ impl PageServerHandler {
         }
     }
 
+    /// Handles the lsn lease request.
+    /// If a lease cannot be obtained, the client will receive NULL.
     #[instrument(skip_all, fields(shard_id, %lsn))]
     async fn handle_make_lsn_lease<IO>(
         &mut self,
@@ -812,19 +832,25 @@ impl PageServerHandler {
             .await?;
         set_tracing_field_shard_id(&timeline);
 
-        let lease = timeline.make_lsn_lease(lsn, timeline.get_lsn_lease_length(), ctx)?;
-        let valid_until = lease
-            .valid_until
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map_err(|e| QueryError::Other(e.into()))?;
+        let lease = timeline
+            .renew_lsn_lease(lsn, timeline.get_lsn_lease_length(), ctx)
+            .inspect_err(|e| {
+                warn!("{e}");
+            })
+            .ok();
+        let valid_until_str = lease.map(|l| {
+            l.valid_until
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .expect("valid_until is earlier than UNIX_EPOCH")
+                .as_millis()
+                .to_string()
+        });
+        let bytes = valid_until_str.as_ref().map(|x| x.as_bytes());
 
         pgb.write_message_noflush(&BeMessage::RowDescription(&[RowDescriptor::text_col(
             b"valid_until",
         )]))?
-        .write_message_noflush(&BeMessage::DataRow(&[Some(
-            &valid_until.as_millis().to_be_bytes(),
-        )]))?
-        .write_message_noflush(&BeMessage::CommandComplete(b"SELECT 1"))?;
+        .write_message_noflush(&BeMessage::DataRow(&[bytes]))?;
 
         Ok(())
     }
@@ -1187,7 +1213,6 @@ impl PageServerHandler {
     }
 }
 
-#[async_trait::async_trait]
 impl<IO> postgres_backend::Handler<IO> for PageServerHandler
 where
     IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,
@@ -1272,35 +1297,6 @@ where
                 tenant_id,
                 timeline_id,
                 PagestreamProtocolVersion::V2,
-                ctx,
-            )
-            .await?;
-        } else if let Some(params) = parts.strip_prefix(&["pagestream"]) {
-            if params.len() != 2 {
-                return Err(QueryError::Other(anyhow::anyhow!(
-                    "invalid param number for pagestream command"
-                )));
-            }
-            let tenant_id = TenantId::from_str(params[0])
-                .with_context(|| format!("Failed to parse tenant id from {}", params[0]))?;
-            let timeline_id = TimelineId::from_str(params[1])
-                .with_context(|| format!("Failed to parse timeline id from {}", params[1]))?;
-
-            tracing::Span::current()
-                .record("tenant_id", field::display(tenant_id))
-                .record("timeline_id", field::display(timeline_id));
-
-            self.check_permission(Some(tenant_id))?;
-
-            COMPUTE_COMMANDS_COUNTERS
-                .for_command(ComputeCommandKind::PageStream)
-                .inc();
-
-            self.handle_pagerequests(
-                pgb,
-                tenant_id,
-                timeline_id,
-                PagestreamProtocolVersion::V1,
                 ctx,
             )
             .await?;

@@ -12,10 +12,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
+use utils::backoff::exponential_backoff;
 use utils::failpoint_support;
 use utils::generation::Generation;
 use utils::id::{NodeId, TimelineId};
 use utils::lsn::Lsn;
+use utils::pausable_failpoint;
 use utils::sync::gate::GateGuard;
 
 use crate::compute_hook::{ComputeHook, NotifyError};
@@ -461,7 +463,7 @@ impl Reconciler {
             for (timeline_id, baseline_lsn) in &baseline {
                 match latest.get(timeline_id) {
                     Some(latest_lsn) => {
-                        tracing::info!("🕑 LSN origin {baseline_lsn} vs destination {latest_lsn}");
+                        tracing::info!(timeline_id = %timeline_id, "🕑 LSN origin {baseline_lsn} vs destination {latest_lsn}");
                         if latest_lsn < baseline_lsn {
                             any_behind = true;
                         }
@@ -539,6 +541,8 @@ impl Reconciler {
             }
         }
 
+        pausable_failpoint!("reconciler-live-migrate-pre-generation-inc");
+
         // Increment generation before attaching to new pageserver
         self.generation = Some(
             self.persistence
@@ -568,6 +572,7 @@ impl Reconciler {
 
         // During a live migration it is unhelpful to proceed if we couldn't notify compute: if we detach
         // the origin without notifying compute, we will render the tenant unavailable.
+        let mut notify_attempts = 0;
         while let Err(e) = self.compute_notify().await {
             match e {
                 NotifyError::Fatal(_) => return Err(ReconcileError::Notify(e)),
@@ -578,7 +583,20 @@ impl Reconciler {
                     );
                 }
             }
+
+            exponential_backoff(
+                notify_attempts,
+                // Generous waits: control plane operations which might be blocking us usually complete on the order
+                // of hundreds to thousands of milliseconds, so no point busy polling.
+                1.0,
+                10.0,
+                &self.cancel,
+            )
+            .await;
+            notify_attempts += 1;
         }
+
+        pausable_failpoint!("reconciler-live-migrate-post-notify");
 
         // Downgrade the origin to secondary.  If the tenant's policy is PlacementPolicy::Attached(0), then
         // this location will be deleted in the general case reconciliation that runs after this.
@@ -600,6 +618,8 @@ impl Reconciler {
                 conf: Some(origin_secondary_conf),
             },
         );
+
+        pausable_failpoint!("reconciler-live-migrate-post-detach");
 
         tracing::info!("🔁 Switching to AttachedSingle mode on node {dest_ps}",);
         let dest_final_conf = build_location_config(
@@ -802,6 +822,16 @@ impl Reconciler {
                 return Err(ReconcileError::Cancel);
             }
             self.location_config(&node, conf, None, false).await?;
+        }
+
+        // The condition below identifies a detach. We must have no attached intent and
+        // must have been attached to something previously. Pass this information to
+        // the [`ComputeHook`] such that it can update its tenant-wide state.
+        if self.intent.attached.is_none() && !self.detach.is_empty() {
+            // TODO: Consider notifying control plane about detaches. This would avoid situations
+            // where the compute tries to start-up with a stale set of pageservers.
+            self.compute_hook
+                .handle_detach(self.tenant_shard_id, self.shard.stripe_size);
         }
 
         failpoint_support::sleep_millis_async!("sleep-on-reconcile-epilogue");

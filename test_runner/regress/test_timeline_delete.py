@@ -16,9 +16,9 @@ from fixtures.neon_fixtures import (
 )
 from fixtures.pageserver.http import PageserverApiException
 from fixtures.pageserver.utils import (
-    MANY_SMALL_LAYERS_TENANT_CONFIG,
     assert_prefix_empty,
     assert_prefix_not_empty,
+    many_small_layers_tenant_config,
     poll_for_remote_storage_iterations,
     timeline_delete_wait_completed,
     wait_for_last_record_lsn,
@@ -68,10 +68,13 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
 
     # construct pair of branches to validate that pageserver prohibits
     # deletion of ancestor timelines when they have child branches
-    parent_timeline_id = env.neon_cli.create_branch("test_ancestor_branch_delete_parent", "empty")
+    parent_timeline_id = env.neon_cli.create_branch(
+        new_branch_name="test_ancestor_branch_delete_parent", ancestor_branch_name="main"
+    )
 
     leaf_timeline_id = env.neon_cli.create_branch(
-        "test_ancestor_branch_delete_branch1", "test_ancestor_branch_delete_parent"
+        new_branch_name="test_ancestor_branch_delete_branch1",
+        ancestor_branch_name="test_ancestor_branch_delete_parent",
     )
 
     timeline_path = env.pageserver.timeline_dir(env.initial_tenant, parent_timeline_id)
@@ -635,7 +638,7 @@ def test_delete_timeline_client_hangup(neon_env_builder: NeonEnvBuilder):
     wait_until(50, 0.1, first_request_finished)
 
     # check that the timeline is gone
-    wait_timeline_detail_404(ps_http, env.initial_tenant, child_timeline_id, iterations=2)
+    wait_timeline_detail_404(ps_http, env.initial_tenant, child_timeline_id, iterations=10)
 
 
 def test_timeline_delete_works_for_remote_smoke(
@@ -782,7 +785,7 @@ def test_timeline_delete_resumed_on_attach(
     remote_storage_kind = s3_storage()
     neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
 
-    env = neon_env_builder.init_start(initial_tenant_conf=MANY_SMALL_LAYERS_TENANT_CONFIG)
+    env = neon_env_builder.init_start(initial_tenant_conf=many_small_layers_tenant_config())
 
     tenant_id = env.initial_tenant
 

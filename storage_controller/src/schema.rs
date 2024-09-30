@@ -25,6 +25,7 @@ diesel::table! {
         listen_http_port -> Int4,
         listen_pg_addr -> Varchar,
         listen_pg_port -> Int4,
+        availability_zone_id -> Varchar,
     }
 }
 
@@ -40,7 +41,22 @@ diesel::table! {
         splitting -> Int2,
         config -> Text,
         scheduling_policy -> Varchar,
+        preferred_az_id -> Nullable<Varchar>,
     }
 }
 
 diesel::allow_tables_to_appear_in_same_query!(controllers, metadata_health, nodes, tenant_shards,);
+
+diesel::table! {
+    safekeepers {
+        id -> Int8,
+        region_id -> Text,
+        version -> Int8,
+        instance_id -> Text,
+        host -> Text,
+        port -> Int4,
+        active -> Bool,
+        http_port -> Int4,
+        availability_zone_id -> Text,
+    }
+}

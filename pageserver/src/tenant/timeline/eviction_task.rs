@@ -30,8 +30,8 @@ use crate::{
     pgdatadir_mapping::CollectKeySpaceError,
     task_mgr::{self, TaskKind, BACKGROUND_RUNTIME},
     tenant::{
-        storage_layer::LayerVisibilityHint, tasks::BackgroundLoopKind, timeline::EvictionError,
-        LogicalSizeCalculationCause, Tenant,
+        size::CalculateSyntheticSizeError, storage_layer::LayerVisibilityHint,
+        tasks::BackgroundLoopKind, timeline::EvictionError, LogicalSizeCalculationCause, Tenant,
     },
 };
 
@@ -60,7 +60,7 @@ impl Timeline {
         task_mgr::spawn(
             BACKGROUND_RUNTIME.handle(),
             TaskKind::Eviction,
-            Some(self.tenant_shard_id),
+            self.tenant_shard_id,
             Some(self.timeline_id),
             &format!(
                 "layer eviction for {}/{}",
@@ -557,6 +557,8 @@ impl Timeline {
             gather_result = gather => {
                 match gather_result {
                     Ok(_) => {},
+                    // It can happen sometimes that we hit this instead of the cancellation token firing above
+                    Err(CalculateSyntheticSizeError::Cancelled) => {}
                     Err(e) => {
                         // We don't care about the result, but, if it failed, we should log it,
                         // since consumption metric might be hitting the cached value and

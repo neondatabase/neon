@@ -1,5 +1,5 @@
 //! Payload for ad hoc authentication method for clients that don't support SNI.
-//! See the `impl` for [`super::backend::BackendType<ClientCredentials>`].
+//! See the `impl` for [`super::backend::Backend<ClientCredentials>`].
 //! Read more: <https://github.com/neondatabase/cloud/issues/1620#issuecomment-1165332290>.
 //! UPDATE (Mon Aug  8 13:20:34 UTC 2022): the payload format has been simplified.
 
@@ -7,13 +7,13 @@ use bstr::ByteSlice;
 
 use crate::EndpointId;
 
-pub struct PasswordHackPayload {
-    pub endpoint: EndpointId,
-    pub password: Vec<u8>,
+pub(crate) struct PasswordHackPayload {
+    pub(crate) endpoint: EndpointId,
+    pub(crate) password: Vec<u8>,
 }
 
 impl PasswordHackPayload {
-    pub fn parse(bytes: &[u8]) -> Option<Self> {
+    pub(crate) fn parse(bytes: &[u8]) -> Option<Self> {
         // The format is `project=<utf-8>;<password-bytes>` or `project=<utf-8>$<password-bytes>`.
         let separators = [";", "$"];
         for sep in separators {
@@ -30,7 +30,7 @@ impl PasswordHackPayload {
     }
 }
 
-pub fn parse_endpoint_param(bytes: &str) -> Option<&str> {
+pub(crate) fn parse_endpoint_param(bytes: &str) -> Option<&str> {
     bytes
         .strip_prefix("project=")
         .or_else(|| bytes.strip_prefix("endpoint="))
