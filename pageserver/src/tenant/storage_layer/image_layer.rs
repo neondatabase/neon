@@ -41,7 +41,7 @@ use crate::tenant::vectored_blob_io::{
 };
 use crate::tenant::PageReconstructError;
 use crate::virtual_file::owned_buffers_io::io_buf_ext::IoBufExt;
-use crate::virtual_file::{self, VirtualFile};
+use crate::virtual_file::{self, MaybeFatalIo, VirtualFile};
 use crate::{IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX};
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::{Bytes, BytesMut};
@@ -889,7 +889,9 @@ impl ImageLayerWriterInner {
         // set inner.file here. The first read will have to re-open it.
 
         // fsync the file
-        file.sync_all().await?;
+        file.sync_all()
+            .await
+            .maybe_fatal_err("image_layer sync_all")?;
 
         trace!("created image layer {}", self.path);
 

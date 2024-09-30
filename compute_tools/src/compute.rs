@@ -306,6 +306,13 @@ impl ComputeNode {
         self.state_changed.notify_all();
     }
 
+    pub fn set_failed_status(&self, err: anyhow::Error) {
+        let mut state = self.state.lock().unwrap();
+        state.error = Some(format!("{err:?}"));
+        state.status = ComputeStatus::Failed;
+        self.state_changed.notify_all();
+    }
+
     pub fn get_status(&self) -> ComputeStatus {
         self.state.lock().unwrap().status
     }
