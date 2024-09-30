@@ -1,3 +1,4 @@
+use camino::{Utf8Path, Utf8PathBuf};
 use hyper::Uri;
 use std::{
     borrow::Cow,
@@ -136,6 +137,7 @@ enum TenantOperations {
     AttachHook,
     TimelineArchivalConfig,
     TimelineDetachAncestor,
+    TimelineImportFromPgdata,
 }
 
 #[derive(Clone, strum_macros::Display)]
@@ -3083,6 +3085,67 @@ impl Service {
             }
 
             Ok(any.1)
+        }).await?
+    }
+
+    pub(crate) async fn tenant_timeline_import_from_pgdata(
+        &self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        pgdata_path: String,
+    ) -> Result<(), ApiError> {
+        tracing::info!("Importing pgdata into {tenant_id}/{timeline_id} from {pgdata_path}");
+
+        let _tenant_lock = trace_shared_lock(
+            &self.tenant_op_locks,
+            tenant_id,
+            TenantOperations::TimelineImportFromPgdata,
+        )
+        .await;
+
+        self.tenant_remote_mutation(tenant_id, move |targets| async move {
+            if targets.is_empty() {
+                return Err(ApiError::NotFound(
+                    anyhow::anyhow!("Tenant not found").into(),
+                ));
+            }
+
+            async fn do_one(
+                tenant_shard_id: TenantShardId,
+                timeline_id: TimelineId,
+                pgdata_path: String,
+                node: Node,
+                jwt: Option<String>,
+            ) -> Result<(), ApiError> {
+                tracing::info!(
+                    "Importing timeline on shard {tenant_shard_id}/{timeline_id}, attached to node {node}",
+                );
+
+                let client = PageserverClient::new(node.get_id(), node.base_url(), jwt.as_deref());
+
+                client
+                    .timeline_import_pgdata(tenant_shard_id, timeline_id, pgdata_path)
+                    .await
+                    .map_err(|e| {
+                        use mgmt_api::Error;
+                        passthrough_api_error(&node, e)
+                    })
+            }
+
+            // no shard needs to go first/last; the operation should be idempotent
+            let mut results = self
+                .tenant_for_shards(targets, |tenant_shard_id, node| {
+                    futures::FutureExt::boxed(do_one(
+                        tenant_shard_id,
+                        timeline_id,
+                        pgdata_path.clone(),
+                        node,
+                        self.config.jwt_token.clone(),
+                    ))
+                })
+                .await?;
+
+            Ok(())
         }).await?
     }
 

@@ -368,6 +368,26 @@ async fn handle_tenant_timeline_detach_ancestor(
     json_response(StatusCode::OK, res)
 }
 
+
+async fn handle_tenant_timeline_import_pgdata(
+    service: Arc<Service>,
+    mut req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_id: TenantId = parse_request_param(&req, "tenant_shard_id")?;
+    check_permissions(&req, Scope::PageServerApi)?;
+
+    let timeline_id: TimelineId = parse_request_param(&req, "timeline_id")?;
+
+    // TODO: avoid duplicating body parsing between here and pageserver
+    let pgdata_path = json_request::<String>(&mut req).await?;
+
+    let res = service
+        .tenant_timeline_import_from_pgdata(tenant_id, timeline_id, pgdata_path)
+        .await?;
+
+    json_response(StatusCode::OK, res)
+}
+
 async fn handle_tenant_timeline_passthrough(
     service: Arc<Service>,
     req: Request<Body>,
@@ -1195,6 +1215,16 @@ pub fn make_router(
                     r,
                     handle_tenant_timeline_detach_ancestor,
                     RequestName("v1_tenant_timeline_detach_ancestor"),
+                )
+            },
+        )
+        .put(
+            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/import_pgdata",
+            |r| {
+                tenant_service_handler(
+                    r,
+                    handle_tenant_timeline_import_pgdata,
+                    RequestName("v1_tenant_timeline_import_pgdata"),
                 )
             },
         )

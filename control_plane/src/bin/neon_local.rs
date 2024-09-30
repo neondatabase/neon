@@ -599,6 +599,7 @@ async fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::Local
                 timeline_info.timeline_id
             );
         }
+        // TODO: rename to import-basebackup-plus-wal
         Some(("import", import_match)) => {
             let tenant_id = get_tenant_id(import_match, env)?;
             let timeline_id = parse_timeline_id(import_match)?.expect("No timeline id provided");
@@ -637,6 +638,9 @@ async fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::Local
                 .await?;
             env.register_branch_mapping(branch_name.to_string(), tenant_id, timeline_id)?;
             println!("Done");
+        }
+        Some(("import-pgdata", matches)) => {
+            todo!()
         }
         Some(("branch", branch_match)) => {
             let tenant_id = get_tenant_id(branch_match, env)?;

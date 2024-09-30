@@ -1,3 +1,4 @@
+use camino::Utf8PathBuf;
 use pageserver_api::{
     models::{
         detach_ancestor::AncestorDetached, LocationConfig, LocationConfigListResponse,
@@ -276,6 +277,23 @@ impl PageserverClient {
             crate::metrics::Method::Post,
             &self.node_id_label,
             self.inner.top_tenant_shards(request).await
+        )
+    }
+
+    pub(crate) async fn timeline_import_pgdata(
+        &self,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+        pgdata_dir: String,
+    ) -> Result<()> {
+        // XXX this one is super slow
+        measured_request!(
+            "timeline_import_pgdata",
+            crate::metrics::Method::Put,
+            &self.node_id_label,
+            self.inner
+                .import_pgdata(tenant_shard_id, timeline_id, pgdata_dir)
+                .await
         )
     }
 }

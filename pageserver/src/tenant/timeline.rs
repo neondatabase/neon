@@ -4,6 +4,7 @@ pub mod delete;
 pub(crate) mod detach_ancestor;
 mod eviction_task;
 pub(crate) mod handle;
+pub(crate) mod import_pgdata;
 mod init;
 pub mod layer_manager;
 pub(crate) mod logical_size;

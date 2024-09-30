@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
+use camino::Utf8PathBuf;
 use enumset::EnumSet;
 use futures::StreamExt;
 use futures::TryFutureExt;
@@ -2717,6 +2718,62 @@ async fn put_tenant_timeline_import_wal(
     }.instrument(span).await
 }
 
+async fn put_tenant_timeline_import_pgdata(
+    mut request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+    let base_lsn: Lsn = must_parse_query_param(&request, "base_lsn")?;
+    let end_lsn: Lsn = base_lsn;
+    let pg_version: u32 = must_parse_query_param(&request, "pg_version")?;
+
+    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+
+    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
+
+    let span = info_span!("import_pgdata", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), timeline_id=%timeline_id, base_lsn=%base_lsn, end_lsn=%end_lsn, pg_version=%pg_version);
+    async move {
+        let state = get_state(&request);
+        let tenant = state
+            .tenant_manager
+            .get_attached_tenant_shard(tenant_shard_id)?;
+
+        let broker_client = state.broker_client.clone();
+
+        let pgdata_path: Utf8PathBuf = json_request(&mut request).await?;
+
+        info!(%pgdata_path, "importing pgdata dir");
+        let prepared = crate::tenant::timeline::import_pgdata::prepare(pgdata_path, &ctx)
+            .await
+            // TODO: differentiate between not-parseable PGDATA (user error)
+            // and truly internal errors (e.g., disk full or IO errors)
+            .map_err(ApiError::InternalServerError)?;
+
+        tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
+
+        let timeline = tenant
+            .create_empty_timeline(
+                timeline_id,
+                prepared.base_lsn(),
+                prepared.pg_version(),
+                &ctx,
+            )
+            .map_err(ApiError::InternalServerError)
+            .await?;
+
+        timeline
+            .import_pgdata(tenant.clone(), prepared, broker_client, &ctx)
+            .await
+            .map_err(ApiError::InternalServerError)?;
+
+        info!("done");
+        json_response(StatusCode::OK, ())
+    }
+    .instrument(span)
+    .await
+}
+
 /// Read the end of a tar archive.
 ///
 /// A tar archive normally ends with two consecutive blocks of zeros, 512 bytes each.
@@ -3083,6 +3140,10 @@ pub fn make_router(
         .put(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/import_wal",
             |r| api_handler(r, put_tenant_timeline_import_wal),
+        )
+        .put(
+            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/import_pgdata",
+            |r| api_handler(r, put_tenant_timeline_import_pgdata),
         )
         .any(handler_404))
 }

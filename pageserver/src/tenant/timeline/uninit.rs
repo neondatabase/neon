@@ -1,11 +1,16 @@
 use std::{collections::hash_map::Entry, fs, sync::Arc};
 
 use anyhow::Context;
-use camino::Utf8PathBuf;
+use camino::{Utf8Path, Utf8PathBuf};
+use pageserver_api::key::{CHECKPOINT_KEY, DBDIR_KEY};
 use tracing::{error, info, info_span};
 use utils::{fs_ext, id::TimelineId, lsn::Lsn};
 
-use crate::{context::RequestContext, import_datadir, tenant::Tenant};
+use crate::{
+    context::RequestContext,
+    import_datadir,
+    tenant::{timeline::import_pgdata, Tenant},
+};
 
 use super::Timeline;
 
@@ -108,6 +113,51 @@ impl<'t> UninitializedTimeline<'t> {
             anyhow::bail!("failpoint before-checkpoint-new-timeline");
         });
 
+        raw_timeline
+            .freeze_and_flush()
+            .await
+            .context("Failed to flush after basebackup import")?;
+
+        // All the data has been imported. Insert the Timeline into the tenant's timelines map
+        let tl = self.finish_creation()?;
+        tl.activate(tenant, broker_client, None, ctx);
+        Ok(tl)
+    }
+
+    /// Prepares timeline data by loading it from the basebackup archive.
+    pub(crate) async fn import_pgdata(
+        self,
+        tenant: Arc<Tenant>,
+        prepared: import_pgdata::Prepared,
+        broker_client: storage_broker::BrokerClientChannel,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<Arc<Timeline>> {
+        // Do the import while everything is at lsn 0.
+        // The index parts that get uploaded during the import will look invalid.
+
+        let base_lsn = prepared.base_lsn();
+
+        // This fills the layer map with layers.
+        import_pgdata::doit(&self, prepared, ctx)
+            .await
+            .context("import");
+
+        let raw_timeline = self.raw_timeline()?;
+
+        // Do a fake write through the regular key-valuate-store APIs so that
+        // * last_record_lsn and disk_consistent_lsn get set to base_lsn, and
+        // * index_part.json gets written (TODO: assert this is the first time that happens)
+        // choice of CHECKPOINT_KEY is arbitrary here.
+        // What's important is that we go through the DatadirModification.
+        // If we went to Timeline::put directly, we wouldn't advance last_record_lsn.
+        let checkpoint_value = raw_timeline.get(CHECKPOINT_KEY, base_lsn, ctx).await?;
+        let mut modification = raw_timeline.begin_modification(base_lsn);
+        modification.put_checkpoint(checkpoint_value)?;
+        modification.commit(ctx).await?;
+
+        // Flush the write to disk (this is what creates the IndexPart)
+        // Flush loop needs to be spawned in order to be able to flush.
+        raw_timeline.maybe_spawn_flush_loop();
         raw_timeline
             .freeze_and_flush()
             .await
