@@ -1,4 +1,3 @@
-use anyhow;
 use camino::Utf8PathBuf;
 use clap::Parser;
 use pageserver::{

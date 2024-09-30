@@ -127,7 +127,7 @@ struct PgImportEnv {
 impl PgImportEnv {
     async fn doit(mut self, ctx: &RequestContext) -> anyhow::Result<()> {
         // Read control file
-        let controlfile_path = (&self.pgdata_dir).join("global").join("pg_control");
+        let controlfile_path = self.pgdata_dir.join("global").join("pg_control");
         let controlfile_buf = std::fs::read(&controlfile_path)
             .with_context(|| format!("reading controlfile: {controlfile_path}"))?;
 
@@ -157,18 +157,18 @@ impl PgImportEnv {
         // Import SLRUs
 
         // pg_xact (01:00 keyspace)
-        self.import_slru(SlruKind::Clog, &(&self.pgdata_dir).join("pg_xact"))
+        self.import_slru(SlruKind::Clog, &self.pgdata_dir.join("pg_xact"))
             .await?;
         // pg_multixact/members (01:01 keyspace)
         self.import_slru(
             SlruKind::MultiXactMembers,
-            &(&self.pgdata_dir).join("pg_multixact/members"),
+            &self.pgdata_dir.join("pg_multixact/members"),
         )
         .await?;
         // pg_multixact/offsets (01:02 keyspace)
         self.import_slru(
             SlruKind::MultiXactOffsets,
-            &(&self.pgdata_dir).join("pg_multixact/offsets"),
+            &self.pgdata_dir.join("pg_multixact/offsets"),
         )
         .await?;
 
@@ -557,7 +557,7 @@ impl ImportTask for ImportRelBlocksTask {
         let mut blknum = start_blk;
         while blknum < end_blk {
             reader.read_exact(&mut buf).await?;
-            let key = rel_block_to_key(rel_tag.clone(), blknum);
+            let key = rel_block_to_key(rel_tag, blknum);
             layer_writer
                 .put_image(key, Bytes::copy_from_slice(&buf), ctx)
                 .await?;
@@ -683,12 +683,12 @@ impl ChunkProcessingJob {
             self.timeline.tenant_shard_id,
             &self.range,
             self.pgdata_lsn,
-            &ctx,
+            ctx,
         )
         .await?;
 
         for task in self.tasks {
-            task.doit(&mut writer, &ctx).await?;
+            task.doit(&mut writer, ctx).await?;
         }
 
         let resident_layer = writer.finish(&self.timeline, ctx).await?;

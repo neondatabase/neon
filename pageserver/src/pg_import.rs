@@ -1,3 +1,11 @@
+//! Hackathon project code.
+//!
+//! TODO: Remove this code after the new import impl is done.
+//! In the meantime it's nice to continue being able to compare `./import`
+#![allow(clippy::redundant_pattern_matching, clippy::clone_on_copy)]
+
+
+
 use std::fs::metadata;
 
 use anyhow::{bail, ensure, Context};
@@ -720,7 +728,7 @@ impl ChunkProcessingJob {
         };
 
         let mut layer = ImageLayerWriter::new(
-            &conf,
+            conf,
             self.timeline_id,
             tsi,
             &self.range,
