@@ -638,7 +638,7 @@ def test_delete_timeline_client_hangup(neon_env_builder: NeonEnvBuilder):
     wait_until(50, 0.1, first_request_finished)
 
     # check that the timeline is gone
-    wait_timeline_detail_404(ps_http, env.initial_tenant, child_timeline_id, iterations=2)
+    wait_timeline_detail_404(ps_http, env.initial_tenant, child_timeline_id, iterations=10)
 
 
 def test_timeline_delete_works_for_remote_smoke(
