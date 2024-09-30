@@ -2724,15 +2724,12 @@ async fn put_tenant_timeline_import_pgdata(
 ) -> Result<Response<Body>, ApiError> {
     let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
-    let base_lsn: Lsn = must_parse_query_param(&request, "base_lsn")?;
-    let end_lsn: Lsn = base_lsn;
-    let pg_version: u32 = must_parse_query_param(&request, "pg_version")?;
 
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
 
-    let span = info_span!("import_pgdata", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), timeline_id=%timeline_id, base_lsn=%base_lsn, end_lsn=%end_lsn, pg_version=%pg_version);
+    let span = info_span!("import_pgdata", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), timeline_id=%timeline_id);
     async move {
         let state = get_state(&request);
         let tenant = state
@@ -2744,11 +2741,14 @@ async fn put_tenant_timeline_import_pgdata(
         let pgdata_path: Utf8PathBuf = json_request(&mut request).await?;
 
         info!(%pgdata_path, "importing pgdata dir");
+
         let prepared = crate::tenant::timeline::import_pgdata::prepare(pgdata_path, &ctx)
             .await
             // TODO: differentiate between not-parseable PGDATA (user error)
             // and truly internal errors (e.g., disk full or IO errors)
             .map_err(ApiError::InternalServerError)?;
+
+        info!("prepared pgdata");
 
         tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
 

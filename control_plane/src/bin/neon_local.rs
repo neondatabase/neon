@@ -642,7 +642,8 @@ async fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::Local
         }
         Some(("import-pgdata", import_match)) => {
             let tenant_id = get_tenant_id(import_match, env)?;
-            let timeline_id = parse_timeline_id(import_match)?.expect("No timeline id provided");
+            let timeline_id =
+                parse_timeline_id(import_match)?.unwrap_or_else(|| TimelineId::generate());
             let branch_name = import_match
                 .get_one::<String>("branch-name")
                 .ok_or_else(|| anyhow!("No branch name provided"))?;
@@ -1641,7 +1642,7 @@ fn cli() -> Command {
             .arg(timeline_id_arg.clone())
             .arg(branch_name_arg.clone())
             .arg(Arg::new("pgdata-dir")
-                    .long("pgdata_dir")
+                    .long("pgdata-dir")
                     .value_parser(value_parser!(Utf8PathBuf))
                     .help("Path to PGDATA directory")
                 )

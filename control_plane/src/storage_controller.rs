@@ -826,7 +826,7 @@ impl StorageController {
         pgdata_path: &Utf8Path,
     ) -> anyhow::Result<TimelineInfo> {
         self.dispatch(
-            Method::POST,
+            Method::PUT,
             format!("v1/tenant/{tenant_id}/timeline/{timeline_id}/import_pgdata"),
             Some(pgdata_path),
         )
