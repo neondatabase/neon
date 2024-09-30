@@ -5,7 +5,10 @@ pub mod neon;
 use super::messages::{ConsoleError, MetricsAuxInfo};
 use crate::{
     auth::{
-        backend::{ComputeCredentialKeys, ComputeUserInfo},
+        backend::{
+            jwt::{AuthRule, FetchAuthRules},
+            ComputeCredentialKeys, ComputeUserInfo,
+        },
         IpPattern,
     },
     cache::{endpoints::EndpointsCache, project_info::ProjectInfoCacheImpl, Cached, TimedLru},
@@ -16,7 +19,7 @@ use crate::{
     intern::ProjectIdInt,
     metrics::ApiLockMetrics,
     rate_limiter::{DynamicLimiter, Outcome, RateLimiterConfig, Token},
-    scram, EndpointCacheKey,
+    scram, EndpointCacheKey, EndpointId,
 };
 use dashmap::DashMap;
 use std::{hash::Hash, sync::Arc, time::Duration};
@@ -334,6 +337,12 @@ pub(crate) trait Api {
         user_info: &ComputeUserInfo,
     ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), errors::GetAuthInfoError>;
 
+    async fn get_endpoint_jwks(
+        &self,
+        ctx: &RequestMonitoring,
+        endpoint: EndpointId,
+    ) -> anyhow::Result<Vec<AuthRule>>;
+
     /// Wake up the compute node and return the corresponding connection info.
     async fn wake_compute(
         &self,
@@ -343,6 +352,7 @@ pub(crate) trait Api {
 }
 
 #[non_exhaustive]
+#[derive(Clone)]
 pub enum ConsoleBackend {
     /// Current Cloud API (V2).
     Console(neon::Api),
@@ -383,6 +393,20 @@ impl Api for ConsoleBackend {
             Self::Postgres(api) => api.get_allowed_ips_and_secret(ctx, user_info).await,
             #[cfg(test)]
             Self::Test(api) => api.get_allowed_ips_and_secret(),
+        }
+    }
+
+    async fn get_endpoint_jwks(
+        &self,
+        ctx: &RequestMonitoring,
+        endpoint: EndpointId,
+    ) -> anyhow::Result<Vec<AuthRule>> {
+        match self {
+            Self::Console(api) => api.get_endpoint_jwks(ctx, endpoint).await,
+            #[cfg(any(test, feature = "testing"))]
+            Self::Postgres(api) => api.get_endpoint_jwks(ctx, endpoint).await,
+            #[cfg(test)]
+            Self::Test(_api) => Ok(vec![]),
         }
     }
 
@@ -550,5 +574,15 @@ impl WakeComputePermit {
             Err(_) => self.release(Outcome::Overload),
         }
         res
+    }
+}
+
+impl FetchAuthRules for ConsoleBackend {
+    async fn fetch_auth_rules(
+        &self,
+        ctx: &RequestMonitoring,
+        endpoint: EndpointId,
+    ) -> anyhow::Result<Vec<AuthRule>> {
+        self.get_endpoint_jwks(ctx, endpoint).await
     }
 }

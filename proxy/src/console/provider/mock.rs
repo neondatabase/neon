@@ -4,7 +4,9 @@ use super::{
     errors::{ApiError, GetAuthInfoError, WakeComputeError},
     AuthInfo, AuthSecret, CachedNodeInfo, NodeInfo,
 };
-use crate::context::RequestMonitoring;
+use crate::{
+    auth::backend::jwt::AuthRule, context::RequestMonitoring, intern::RoleNameInt, RoleName,
+};
 use crate::{auth::backend::ComputeUserInfo, compute, error::io_error, scram, url::ApiUrl};
 use crate::{auth::IpPattern, cache::Cached};
 use crate::{
@@ -118,6 +120,39 @@ impl Api {
         })
     }
 
+    async fn do_get_endpoint_jwks(&self, endpoint: EndpointId) -> anyhow::Result<Vec<AuthRule>> {
+        let (client, connection) =
+            tokio_postgres::connect(self.endpoint.as_str(), tokio_postgres::NoTls).await?;
+
+        let connection = tokio::spawn(connection);
+
+        let res = client.query(
+                "select id, jwks_url, audience, role_names from neon_control_plane.endpoint_jwks where endpoint_id = $1",
+                &[&endpoint.as_str()],
+            )
+            .await?;
+
+        let mut rows = vec![];
+        for row in res {
+            rows.push(AuthRule {
+                id: row.get("id"),
+                jwks_url: url::Url::parse(row.get("jwks_url"))?,
+                audience: row.get("audience"),
+                role_names: row
+                    .get::<_, Vec<String>>("role_names")
+                    .into_iter()
+                    .map(RoleName::from)
+                    .map(|s| RoleNameInt::from(&s))
+                    .collect(),
+            });
+        }
+
+        drop(client);
+        connection.await??;
+
+        Ok(rows)
+    }
+
     async fn do_wake_compute(&self) -> Result<NodeInfo, WakeComputeError> {
         let mut config = compute::ConnCfg::new();
         config
@@ -183,6 +218,14 @@ impl super::Api for Api {
             )),
             None,
         ))
+    }
+
+    async fn get_endpoint_jwks(
+        &self,
+        _ctx: &RequestMonitoring,
+        endpoint: EndpointId,
+    ) -> anyhow::Result<Vec<AuthRule>> {
+        self.do_get_endpoint_jwks(endpoint).await
     }
 
     #[tracing::instrument(skip_all)]
