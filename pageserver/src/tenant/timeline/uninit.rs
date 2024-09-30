@@ -8,7 +8,12 @@ use utils::{fs_ext, id::TimelineId, lsn::Lsn};
 use crate::{
     context::RequestContext,
     import_datadir,
-    tenant::{metadata::MetadataUpdate, timeline::import_pgdata, Tenant},
+    tenant::{
+        metadata::TimelineMetadata,
+        remote_timeline_client::MaybeDeletedIndexPart,
+        timeline::{import_pgdata, ShutdownMode},
+        Tenant,
+    },
 };
 
 use super::Timeline;
@@ -87,6 +92,53 @@ impl<'t> UninitializedTimeline<'t> {
         }
     }
 
+    /// Finish creation by dropping the in-memory struct and reloading the timeline from object storage.
+    ///
+    /// XXX factor this out into a method on tenant and
+    /// share code with Tenant::attach
+    /// Like, Tenant::reload_timeline() or whatever.
+    ///
+    /// Returns a not-activated timeline that's already in the tenant's timelines map.
+    ///
+    // Not recoverable.
+    pub(crate) async fn finish_by_reloading_timeline_from_remote(
+        mut self,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<Arc<Timeline>> {
+        let tenant = self.owning_tenant;
+        let timeline_id = self.timeline_id;
+        let tenant_shard_id = tenant.tenant_shard_id;
+
+        let Some((raw_timeline, _create_guard)) = self.raw_timeline.take() else {
+            return Err(anyhow::anyhow!(
+                "No timeline for initialization found for {tenant_shard_id}/{timeline_id}"
+            ));
+        };
+
+        raw_timeline.shutdown(ShutdownMode::Hard).await; // in theory this shouldn't even .await anything except for coop yield
+        let Some(raw_timeline) = Arc::into_inner(raw_timeline) else {
+            anyhow::bail!("implementation error: timeline that we shut down was still referenced from somewhere");
+        };
+        drop(raw_timeline);
+
+        // load from object storage like Tenant::attach does
+        let resources = tenant.make_timeline_resources(timeline_id);
+        let index_part = resources.remote_client.download_index_file(&tenant.cancel).await?;
+        let index_part = match index_part {
+            MaybeDeletedIndexPart::Deleted(_) => {
+                // likely concurrent delete call, cplane should prevent this
+                anyhow::bail!("index part says deleted but we are not done creating yet, this should not happen but")
+            }
+            MaybeDeletedIndexPart::IndexPart(p) => p,
+        };
+        let metadata = index_part.metadata.clone();
+        let timeline = self
+            .owning_tenant
+            .load_remote_timeline(timeline_id, index_part, metadata, resources, ctx)
+            .await?;
+        Ok(timeline)
+    }
+
     /// Prepares timeline data by loading it from the basebackup archive.
     pub(crate) async fn import_basebackup_from_tar(
         self,
@@ -143,42 +195,27 @@ impl<'t> UninitializedTimeline<'t> {
 
         let raw_timeline = self.raw_timeline()?;
 
-        //
-        // Get the timeline in-memory and S3 state into the same state
-        // as if we had used DatadirModification.
-        //
-        // TODO: how to make this maintainable?
-        //
-
-        // to advance last_record_lsn, from now on reads@base_lsn should work
-        raw_timeline.finish_write(base_lsn);
-
-        // set disk consistent lsn so that next index part upload uploads a valid TimelineMetadata
-        assert!(
-            raw_timeline.set_disk_consistent_lsn(base_lsn),
-            "this should not fail, we are the sole user of raw_timeline at this point"
+        let metadata = TimelineMetadata::new(
+            // FIXME: The 'disk_consistent_lsn' should be the LSN at the *end* of the
+            // checkpoint record, and prev_record_lsn should point to its beginning.
+            // We should read the real end of the record from the WAL, but here we
+            // just fake it.
+            Lsn(base_lsn.0 + 8),
+            Some(base_lsn),
+            None, // no ancestor
+            Lsn(0),
+            base_lsn, // latest_gc_cutoff_lsn
+            base_lsn, // initdb_lsn
+            raw_timeline.pg_version,
         );
-
         raw_timeline
             .remote_client
-            .schedule_index_upload_for_metadata_update(&MetadataUpdate::new(
-                // FIXME: The 'disk_consistent_lsn' should be the LSN at the *end* of the
-                // checkpoint record, and prev_record_lsn should point to its beginning.
-                // We should read the real end of the record from the WAL, but here we
-                // just fake it.
-                Lsn(base_lsn.0 + 8), // disk_consistent_lsn
-                Some(base_lsn),      // prev_record_lsn ,
-                base_lsn,            // latest_gc_cutoff_lsn
-            ))?;
+            .schedule_index_upload_for_full_metadata_update(&metadata)?;
         raw_timeline.remote_client.wait_completion().await?;
+        // TODO: what guarantees _today_ and _in the future_ that no more uploads
+        // will happen after? Maybe just shutdown the timeline
 
-        // TODO: is this necessary?
-        // Doing it for now because other code that produces image layers does this at some point.
-        // So, shouldn't hurt to do it.
-        raw_timeline.update_layer_visibility().await?;
-
-        // All the data has been imported. Insert the Timeline into the tenant's timelines map
-        let tl = self.finish_creation()?;
+        let tl = self.finish_by_reloading_timeline_from_remote(ctx).await?;
         tl.activate(tenant, broker_client, None, ctx);
         Ok(tl)
     }

@@ -686,7 +686,7 @@ impl Tenant {
         ancestor: Option<Arc<Timeline>>,
         last_aux_file_policy: Option<AuxFilePolicy>,
         _ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Arc<Timeline>> {
         let tenant_id = self.tenant_shard_id;
 
         let timeline = self.create_timeline_struct(
@@ -773,7 +773,7 @@ impl Tenant {
             "Timeline has no ancestor and no layer files"
         );
 
-        Ok(())
+        Ok(timeline)
     }
 
     /// Attach a tenant that's available in cloud storage.
@@ -1266,7 +1266,7 @@ impl Tenant {
         remote_metadata: TimelineMetadata,
         resources: TimelineResources,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Arc<Timeline>> {
         span::debug_assert_current_span_has_tenant_id();
 
         info!("downloading index file for timeline {}", timeline_id);
@@ -3564,7 +3564,7 @@ impl Tenant {
     }
 
     /// Call this before constructing a timeline, to build its required structures
-    fn build_timeline_resources(&self, timeline_id: TimelineId) -> TimelineResources {
+    fn make_timeline_resources(&self, timeline_id: TimelineId) -> TimelineResources {
         let remote_client = RemoteTimelineClient::new(
             self.remote_storage.clone(),
             self.deletion_queue_client.clone(),
@@ -3596,7 +3596,7 @@ impl Tenant {
     ) -> anyhow::Result<UninitializedTimeline> {
         let tenant_shard_id = self.tenant_shard_id;
 
-        let resources = self.build_timeline_resources(new_timeline_id);
+        let resources = self.make_timeline_resources(new_timeline_id);
         resources
             .remote_client
             .init_upload_queue_for_empty_remote(new_metadata)?;
