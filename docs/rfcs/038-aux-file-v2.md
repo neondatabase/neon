@@ -98,7 +98,7 @@ There are two places we need to read the aux files from the pageserver:
 With the add of sparse keyspaces, we also modified the compaction code to accommodate the fact that sparse keyspaces do not have every single key stored in the storage.
 
 * L0 compaction: we modified the hole computation code so that it can handle sparse keyspaces when computing holes.
-* Image layer creation: instead of calling `key.next()` and getting/reconstructing images for every single key, we use the vectored get API to scan all keys in the keyspace at a given LSN. Image layers are only created if there are too many delta layers between the latest LSN and the last image layer we generated for sparse keyspaces.
+* Image layer creation: instead of calling `key.next()` and getting/reconstructing images for every single key, we use the vectored get API to scan all keys in the keyspace at a given LSN. Image layers are only created if there are too many delta layers between the latest LSN and the last image layer we generated for sparse keyspaces. The created image layer always cover the full aux key range for now, and could be optimized later.
 
 ## Migration
 
