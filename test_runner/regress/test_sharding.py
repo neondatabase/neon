@@ -23,6 +23,7 @@ from fixtures.remote_storage import s3_storage
 from fixtures.utils import wait_until
 from fixtures.workload import Workload
 from pytest_httpserver import HTTPServer
+from typing_extensions import override
 from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
 
@@ -954,6 +955,7 @@ class PageserverFailpoint(Failure):
         self.pageserver_id = pageserver_id
         self._mitigate = mitigate
 
+    @override
     def apply(self, env: NeonEnv):
         pageserver = env.get_pageserver(self.pageserver_id)
         pageserver.allowed_errors.extend(
@@ -961,19 +963,23 @@ class PageserverFailpoint(Failure):
         )
         pageserver.http_client().configure_failpoints((self.failpoint, "return(1)"))
 
+    @override
     def clear(self, env: NeonEnv):
         pageserver = env.get_pageserver(self.pageserver_id)
         pageserver.http_client().configure_failpoints((self.failpoint, "off"))
         if self._mitigate:
             env.storage_controller.node_configure(self.pageserver_id, {"availability": "Active"})
 
+    @override
     def expect_available(self):
         return True
 
+    @override
     def can_mitigate(self):
         return self._mitigate
 
-    def mitigate(self, env):
+    @override
+    def mitigate(self, env: NeonEnv):
         env.storage_controller.node_configure(self.pageserver_id, {"availability": "Offline"})
 
 
@@ -983,9 +989,11 @@ class StorageControllerFailpoint(Failure):
         self.pageserver_id = None
         self.action = action
 
+    @override
     def apply(self, env: NeonEnv):
         env.storage_controller.configure_failpoints((self.failpoint, self.action))
 
+    @override
     def clear(self, env: NeonEnv):
         if "panic" in self.action:
             log.info("Restarting storage controller after panic")
@@ -994,16 +1002,19 @@ class StorageControllerFailpoint(Failure):
         else:
             env.storage_controller.configure_failpoints((self.failpoint, "off"))
 
+    @override
     def expect_available(self):
         # Controller panics _do_ leave pageservers available, but our test code relies
         # on using the locate API to update configurations in Workload, so we must skip
         # these actions when the controller has been panicked.
         return "panic" not in self.action
 
+    @override
     def can_mitigate(self):
         return False
 
-    def fails_forward(self, env):
+    @override
+    def fails_forward(self, env: NeonEnv):
         # Edge case: the very last failpoint that simulates a DB connection error, where
         # the abort path will fail-forward and result in a complete split.
         fail_forward = self.failpoint == "shard-split-post-complete"
@@ -1017,6 +1028,7 @@ class StorageControllerFailpoint(Failure):
 
         return fail_forward
 
+    @override
     def expect_exception(self):
         if "panic" in self.action:
             return requests.exceptions.ConnectionError
@@ -1029,18 +1041,22 @@ class NodeKill(Failure):
         self.pageserver_id = pageserver_id
         self._mitigate = mitigate
 
+    @override
     def apply(self, env: NeonEnv):
         pageserver = env.get_pageserver(self.pageserver_id)
         pageserver.stop(immediate=True)
 
+    @override
     def clear(self, env: NeonEnv):
         pageserver = env.get_pageserver(self.pageserver_id)
         pageserver.start()
 
+    @override
     def expect_available(self):
         return False
 
-    def mitigate(self, env):
+    @override
+    def mitigate(self, env: NeonEnv):
         env.storage_controller.node_configure(self.pageserver_id, {"availability": "Offline"})
 
 
@@ -1059,21 +1075,26 @@ class CompositeFailure(Failure):
                 self.pageserver_id = f.pageserver_id
                 break
 
+    @override
     def apply(self, env: NeonEnv):
         for f in self.failures:
             f.apply(env)
 
-    def clear(self, env):
+    @override
+    def clear(self, env: NeonEnv):
         for f in self.failures:
             f.clear(env)
 
+    @override
     def expect_available(self):
         return all(f.expect_available() for f in self.failures)
 
-    def mitigate(self, env):
+    @override
+    def mitigate(self, env: NeonEnv):
         for f in self.failures:
             f.mitigate(env)
 
+    @override
     def expect_exception(self):
         expect = set(f.expect_exception() for f in self.failures)
 
@@ -1211,7 +1232,7 @@ def test_sharding_split_failures(
 
         assert attached_count == initial_shard_count
 
-    def assert_split_done(exclude_ps_id=None) -> None:
+    def assert_split_done(exclude_ps_id: Optional[int] = None) -> None:
         secondary_count = 0
         attached_count = 0
         for ps in env.pageservers:

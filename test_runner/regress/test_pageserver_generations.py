@@ -15,7 +15,7 @@ import enum
 import os
 import re
 import time
-from typing import Optional
+from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.common_types import TenantId, TimelineId
@@ -39,6 +39,10 @@ from fixtures.remote_storage import (
 )
 from fixtures.utils import wait_until
 from fixtures.workload import Workload
+
+if TYPE_CHECKING:
+    from typing import Optional
+
 
 # A tenant configuration that is convenient for generating uploads and deletions
 # without a large amount of postgres traffic.
