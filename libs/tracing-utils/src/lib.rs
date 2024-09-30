@@ -38,10 +38,7 @@ pub mod http;
 
 use opentelemetry::trace::TracerProvider;
 use opentelemetry::KeyValue;
-use opentelemetry_otlp::WithExportConfig;
-use opentelemetry_otlp::{OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_EXPORTER_OTLP_TRACES_ENDPOINT};
 use opentelemetry_sdk::Resource;
-
 use tracing::Subscriber;
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::Layer;
@@ -124,35 +121,11 @@ where
     S: Subscriber + for<'span> LookupSpan<'span>,
 {
     // Sets up exporter from the OTEL_EXPORTER_* environment variables.
-    let mut exporter = opentelemetry_otlp::new_exporter().http();
+    let exporter = opentelemetry_otlp::new_exporter().http();
 
-    // XXX opentelemetry-otlp v0.18.0 has a bug in how it uses the
-    // OTEL_EXPORTER_OTLP_ENDPOINT env variable. According to the
-    // OpenTelemetry spec at
-    // <https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/protocol/exporter.md#endpoint-urls-for-otlphttp>,
-    // the full exporter URL is formed by appending "/v1/traces" to the value
-    // of OTEL_EXPORTER_OTLP_ENDPOINT. However, opentelemetry-otlp only does
-    // that with the grpc-tonic exporter. Other exporters, like the HTTP
-    // exporter, use the URL from OTEL_EXPORTER_OTLP_ENDPOINT as is, without
-    // appending "/v1/traces".
-    //
-    // See https://github.com/open-telemetry/opentelemetry-rust/pull/950
-    //
-    // Work around that by checking OTEL_EXPORTER_OTLP_ENDPOINT, and setting
-    // the endpoint url with the "/v1/traces" path ourselves. If the bug is
-    // fixed in a later version, we can remove this code. But if we don't
-    // remember to remove this, it won't do any harm either, as the crate will
-    // just ignore the OTEL_EXPORTER_OTLP_ENDPOINT setting when the endpoint
-    // is set directly with `with_endpoint`.
-    if std::env::var(OTEL_EXPORTER_OTLP_TRACES_ENDPOINT).is_err() {
-        if let Ok(mut endpoint) = std::env::var(OTEL_EXPORTER_OTLP_ENDPOINT) {
-            if !endpoint.ends_with('/') {
-                endpoint.push('/');
-            }
-            endpoint.push_str("v1/traces");
-            exporter = exporter.with_endpoint(endpoint);
-        }
-    }
+    // TODO: opentelemetry::global::set_error_handler() with custom handler that
+    //       bypasses default tracing layers, but logs regular looking log
+    //       messages.
 
     // Propagate trace information in the standard W3C TraceContext format.
     opentelemetry::global::set_text_map_propagator(
