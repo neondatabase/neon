@@ -94,6 +94,7 @@ impl Api {
             let start = Instant::now();
             let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Cplane);
             let response = self.endpoint.execute(request).await?;
+            info!("received http response {response:?}");
             drop(pause);
             info!(duration = ?start.elapsed(), "received http response");
             let body = match parse_body::<GetRoleSecret>(response).await {
@@ -218,6 +219,7 @@ impl Api {
             let start = Instant::now();
             let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Cplane);
             let response = self.endpoint.execute(request).await?;
+            info!("received http response {response:?}");
             drop(pause);
             info!(duration = ?start.elapsed(), "received http response");
             let body = parse_body::<WakeCompute>(response).await?;
