@@ -1473,11 +1473,33 @@ walprop_pg_wal_read(Safekeeper *sk, char *buf, XLogRecPtr startptr, Size count, 
 {
 	NeonWALReadResult res;
 
-	res = NeonWALRead(sk->xlogreader,
-					  buf,
-					  startptr,
-					  count,
-					  walprop_pg_get_timeline_id());
+#if PG_MAJORVERSION_NUM >= 17
+	if (!sk->wp->config->syncSafekeepers)
+	{
+		Size	rbytes;
+		rbytes = WALReadFromBuffers(buf, startptr, count,
+									walprop_pg_get_timeline_id());
+
+		startptr += rbytes;
+		count -= rbytes;
+	}
+#endif
+
+	if (count == 0)
+	{
+		res = NEON_WALREAD_SUCCESS;
+	}
+	else
+	{
+		Assert(count > 0);
+
+		/* Now read the remaining WAL from the WAL file */
+		res = NeonWALRead(sk->xlogreader,
+						  buf,
+						  startptr,
+						  count,
+						  walprop_pg_get_timeline_id());
+	}
 
 	if (res == NEON_WALREAD_SUCCESS)
 	{

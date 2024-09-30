@@ -1,29 +1,12 @@
-use std::{collections::HashMap, time::Duration};
+use std::collections::HashMap;
 
-use super::remote_timeline_client::index::GcBlockingReason;
-use tokio::time::Instant;
 use utils::id::TimelineId;
 
-type TimelinesBlocked = HashMap<TimelineId, enumset::EnumSet<GcBlockingReason>>;
+use super::remote_timeline_client::index::GcBlockingReason;
 
-#[derive(Default)]
-struct Storage {
-    timelines_blocked: TimelinesBlocked,
-    /// The deadline before which we are blocked from GC so that
-    /// leases have a chance to be renewed.
-    lsn_lease_deadline: Option<Instant>,
-}
+type Storage = HashMap<TimelineId, enumset::EnumSet<GcBlockingReason>>;
 
-impl Storage {
-    fn is_blocked_by_lsn_lease_deadline(&self) -> bool {
-        self.lsn_lease_deadline
-            .map(|d| Instant::now() < d)
-            .unwrap_or(false)
-    }
-}
-
-/// GcBlock provides persistent (per-timeline) gc blocking and facilitates transient time based gc
-/// blocking.
+/// GcBlock provides persistent (per-timeline) gc blocking.
 #[derive(Default)]
 pub(crate) struct GcBlock {
     /// The timelines which have current reasons to block gc.
@@ -66,17 +49,6 @@ impl GcBlock {
         }
     }
 
-    /// Sets a deadline before which we cannot proceed to GC due to lsn lease.
-    ///
-    /// We do this as the leases mapping are not persisted to disk. By delaying GC by lease
-    /// length, we guarantee that all the leases we granted before will have a chance to renew
-    /// when we run GC for the first time after restart / transition from AttachedMulti to AttachedSingle.
-    pub(super) fn set_lsn_lease_deadline(&self, lsn_lease_length: Duration) {
-        let deadline = Instant::now() + lsn_lease_length;
-        let mut g = self.reasons.lock().unwrap();
-        g.lsn_lease_deadline = Some(deadline);
-    }
-
     /// Describe the current gc blocking reasons.
     ///
     /// TODO: make this json serializable.
@@ -102,7 +74,7 @@ impl GcBlock {
     ) -> anyhow::Result<bool> {
         let (added, uploaded) = {
             let mut g = self.reasons.lock().unwrap();
-            let set = g.timelines_blocked.entry(timeline.timeline_id).or_default();
+            let set = g.entry(timeline.timeline_id).or_default();
             let added = set.insert(reason);
 
             // LOCK ORDER: intentionally hold the lock, see self.reasons.
@@ -133,7 +105,7 @@ impl GcBlock {
 
         let (remaining_blocks, uploaded) = {
             let mut g = self.reasons.lock().unwrap();
-            match g.timelines_blocked.entry(timeline.timeline_id) {
+            match g.entry(timeline.timeline_id) {
                 Entry::Occupied(mut oe) => {
                     let set = oe.get_mut();
                     set.remove(reason);
@@ -147,7 +119,7 @@ impl GcBlock {
                 }
             }
 
-            let remaining_blocks = g.timelines_blocked.len();
+            let remaining_blocks = g.len();
 
             // LOCK ORDER: intentionally hold the lock while scheduling; see self.reasons
             let uploaded = timeline
@@ -172,11 +144,11 @@ impl GcBlock {
     pub(crate) fn before_delete(&self, timeline: &super::Timeline) {
         let unblocked = {
             let mut g = self.reasons.lock().unwrap();
-            if g.timelines_blocked.is_empty() {
+            if g.is_empty() {
                 return;
             }
 
-            g.timelines_blocked.remove(&timeline.timeline_id);
+            g.remove(&timeline.timeline_id);
 
             BlockingReasons::clean_and_summarize(g).is_none()
         };
@@ -187,11 +159,10 @@ impl GcBlock {
     }
 
     /// Initialize with the non-deleted timelines of this tenant.
-    pub(crate) fn set_scanned(&self, scanned: TimelinesBlocked) {
+    pub(crate) fn set_scanned(&self, scanned: Storage) {
         let mut g = self.reasons.lock().unwrap();
-        assert!(g.timelines_blocked.is_empty());
-        g.timelines_blocked
-            .extend(scanned.into_iter().filter(|(_, v)| !v.is_empty()));
+        assert!(g.is_empty());
+        g.extend(scanned.into_iter().filter(|(_, v)| !v.is_empty()));
 
         if let Some(reasons) = BlockingReasons::clean_and_summarize(g) {
             tracing::info!(summary=?reasons, "initialized with gc blocked");
@@ -205,7 +176,6 @@ pub(super) struct Guard<'a> {
 
 #[derive(Debug)]
 pub(crate) struct BlockingReasons {
-    tenant_blocked_by_lsn_lease_deadline: bool,
     timelines: usize,
     reasons: enumset::EnumSet<GcBlockingReason>,
 }
@@ -214,8 +184,8 @@ impl std::fmt::Display for BlockingReasons {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "tenant_blocked_by_lsn_lease_deadline: {}, {} timelines block for {:?}",
-            self.tenant_blocked_by_lsn_lease_deadline, self.timelines, self.reasons
+            "{} timelines block for {:?}",
+            self.timelines, self.reasons
         )
     }
 }
@@ -223,15 +193,13 @@ impl std::fmt::Display for BlockingReasons {
 impl BlockingReasons {
     fn clean_and_summarize(mut g: std::sync::MutexGuard<'_, Storage>) -> Option<Self> {
         let mut reasons = enumset::EnumSet::empty();
-        g.timelines_blocked.retain(|_key, value| {
+        g.retain(|_key, value| {
             reasons = reasons.union(*value);
             !value.is_empty()
         });
-        let blocked_by_lsn_lease_deadline = g.is_blocked_by_lsn_lease_deadline();
-        if !g.timelines_blocked.is_empty() || blocked_by_lsn_lease_deadline {
+        if !g.is_empty() {
             Some(BlockingReasons {
-                tenant_blocked_by_lsn_lease_deadline: blocked_by_lsn_lease_deadline,
-                timelines: g.timelines_blocked.len(),
+                timelines: g.len(),
                 reasons,
             })
         } else {
@@ -240,17 +208,14 @@ impl BlockingReasons {
     }
 
     fn summarize(g: &std::sync::MutexGuard<'_, Storage>) -> Option<Self> {
-        let blocked_by_lsn_lease_deadline = g.is_blocked_by_lsn_lease_deadline();
-        if g.timelines_blocked.is_empty() && !blocked_by_lsn_lease_deadline {
+        if g.is_empty() {
             None
         } else {
             let reasons = g
-                .timelines_blocked
                 .values()
                 .fold(enumset::EnumSet::empty(), |acc, next| acc.union(*next));
             Some(BlockingReasons {
-                tenant_blocked_by_lsn_lease_deadline: blocked_by_lsn_lease_deadline,
-                timelines: g.timelines_blocked.len(),
+                timelines: g.len(),
                 reasons,
             })
         }
