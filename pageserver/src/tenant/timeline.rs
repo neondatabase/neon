@@ -190,7 +190,7 @@ fn drop_rlock<T>(rlock: tokio::sync::RwLockReadGuard<T>) {
 
 /// Temporary function for immutable storage state refactor, ensures we are dropping mutex guard instead of other things.
 /// Can be removed after all refactors are done.
-pub(self) fn drop_wlock<T>(rlock: tokio::sync::RwLockWriteGuard<'_, T>) {
+fn drop_wlock<T>(rlock: tokio::sync::RwLockWriteGuard<'_, T>) {
     drop(rlock)
 }
 

@@ -381,11 +381,11 @@ async fn handle_tenant_timeline_import_pgdata(
     // TODO: avoid duplicating body parsing between here and pageserver
     let pgdata_path = json_request::<String>(&mut req).await?;
 
-    let res = service
+    service
         .tenant_timeline_import_from_pgdata(tenant_id, timeline_id, pgdata_path)
         .await?;
 
-    json_response(StatusCode::OK, res)
+    json_response(StatusCode::OK, ())
 }
 
 async fn handle_tenant_timeline_passthrough(

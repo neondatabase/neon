@@ -652,7 +652,7 @@ async fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::Local
 
             let storage_controller = StorageController::from_env(env);
             storage_controller
-                .tenant_timeline_import_from_pgdata(tenant_id, timeline_id, &pgdata_dir)
+                .tenant_timeline_import_from_pgdata(tenant_id, timeline_id, pgdata_dir)
                 .await?;
 
             env.register_branch_mapping(branch_name.to_owned(), tenant_id, timeline_id)?;
