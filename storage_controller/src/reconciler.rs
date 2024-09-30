@@ -900,7 +900,7 @@ impl Reconciler {
                             | LocationConfigMode::AttachedSingle
                             | LocationConfigMode::AttachedStale
                     ) {
-                        tracing::info!(
+                        tracing::debug!(
                             "Still attached to {origin}, will wait & retry compute notification"
                         );
                     } else {
