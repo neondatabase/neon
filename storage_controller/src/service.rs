@@ -1,4 +1,3 @@
-use camino::{Utf8Path, Utf8PathBuf};
 use hyper::Uri;
 use std::{
     borrow::Cow,
@@ -3127,13 +3126,13 @@ impl Service {
                     .timeline_import_pgdata(tenant_shard_id, timeline_id, pgdata_path)
                     .await
                     .map_err(|e| {
-                        use mgmt_api::Error;
+
                         passthrough_api_error(&node, e)
                     })
             }
 
             // no shard needs to go first/last; the operation should be idempotent
-            let mut results = self
+            let results: Vec<()> = self
                 .tenant_for_shards(targets, |tenant_shard_id, node| {
                     futures::FutureExt::boxed(do_one(
                         tenant_shard_id,
@@ -3144,6 +3143,7 @@ impl Service {
                     ))
                 })
                 .await?;
+            drop(results);
 
             Ok(())
         }).await?

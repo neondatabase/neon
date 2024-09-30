@@ -4,7 +4,7 @@
 
 use std::{
     fs::metadata,
-    sync::{Arc, Weak},
+    sync::Arc,
 };
 
 use anyhow::{bail, ensure, Context};
@@ -19,17 +19,12 @@ use pageserver_api::{
 use postgres_ffi::{pg_constants, relfile_utils::parse_relfilename, ControlFileData, BLCKSZ};
 use tokio::{
     io::AsyncRead,
-    task::{self, JoinHandle, JoinSet},
+    task::{JoinSet},
 };
 use tracing::debug;
-use utils::{
-    id::{NodeId, TenantId, TimelineId},
-    shard::{ShardCount, ShardNumber, TenantShardId},
-};
 use walkdir::WalkDir;
 
 use crate::pgdatadir_mapping::{SlruSegmentDirectory, TwoPhaseDirectory};
-use crate::{config::PageServerConf, tenant::storage_layer::split_writer::SplitImageLayerWriter};
 use crate::{
     context::{DownloadBehavior, RequestContext},
     pgdatadir_mapping::{DbDirectory, RelDirectory},
@@ -38,11 +33,6 @@ use crate::{
 };
 use tokio::io::AsyncReadExt;
 
-use crate::tenant::metadata::TimelineMetadata;
-use crate::tenant::remote_timeline_client;
-use crate::tenant::remote_timeline_client::LayerFileMetadata;
-use crate::tenant::storage_layer::PersistentLayerDesc;
-use crate::tenant::IndexPart;
 use pageserver_api::key::Key;
 use pageserver_api::key::{
     slru_block_to_key, slru_dir_to_key, slru_segment_size_to_key, CHECKPOINT_KEY, CONTROLFILE_KEY,
@@ -51,9 +41,7 @@ use pageserver_api::key::{
 use pageserver_api::keyspace::singleton_range;
 use pageserver_api::keyspace::{contiguous_range_len, is_contiguous_range};
 use pageserver_api::reltag::SlruKind;
-use pageserver_api::shard::ShardIndex;
 use utils::bin_ser::BeSer;
-use utils::generation::Generation;
 use utils::lsn::Lsn;
 
 use std::collections::HashSet;

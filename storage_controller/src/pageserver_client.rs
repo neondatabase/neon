@@ -1,4 +1,3 @@
-use camino::Utf8PathBuf;
 use pageserver_api::{
     models::{
         detach_ancestor::AncestorDetached, LocationConfig, LocationConfigListResponse,

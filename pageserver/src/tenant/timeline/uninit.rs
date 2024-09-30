@@ -1,8 +1,8 @@
 use std::{collections::hash_map::Entry, fs, sync::Arc};
 
 use anyhow::Context;
-use camino::{Utf8Path, Utf8PathBuf};
-use pageserver_api::key::{CHECKPOINT_KEY, DBDIR_KEY};
+use camino::Utf8PathBuf;
+use pageserver_api::key::CHECKPOINT_KEY;
 use tracing::{error, info, info_span};
 use utils::{fs_ext, id::TimelineId, lsn::Lsn};
 
