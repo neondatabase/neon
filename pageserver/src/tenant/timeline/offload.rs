@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::tenant::{OffloadedTimeline, Tenant};
+use crate::tenant::{OffloadedTimeline, Tenant, TimelineOrOffloaded};
 
 use super::{
     delete::{delete_local_timeline_directory, DeleteTimelineFlow, DeletionGuard},
@@ -13,6 +13,11 @@ pub(crate) async fn offload_timeline(
 ) -> anyhow::Result<()> {
     tracing::info!("offloading archived timeline");
     let (timeline, guard) = DeleteTimelineFlow::prepare(tenant, timeline.timeline_id)?;
+
+    let TimelineOrOffloaded::Timeline(timeline) = timeline else {
+        tracing::error!("timeline already offloaded, but given timeline object");
+        return Ok(());
+    };
 
     // TODO extend guard mechanism above with method
     // to make deletions possible while offloading is in progress

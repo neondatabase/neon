@@ -485,15 +485,60 @@ impl WalRedoManager {
 }
 
 pub struct OffloadedTimeline {
+    pub tenant_shard_id: TenantShardId,
     pub timeline_id: TimelineId,
     pub ancestor_timeline_id: Option<TimelineId>,
+
+    // TODO: once we persist offloaded state, make this lazily constructed
+    pub remote_client: Arc<RemoteTimelineClient>,
+
+    /// Prevent two tasks from deleting the timeline at the same time. If held, the
+    /// timeline is being deleted. If 'true', the timeline has already been deleted.
+    pub delete_progress: Arc<tokio::sync::Mutex<DeleteTimelineFlow>>,
 }
 
 impl OffloadedTimeline {
     fn from_timeline(timeline: &Timeline) -> Self {
         Self {
+            tenant_shard_id: timeline.tenant_shard_id,
             timeline_id: timeline.timeline_id,
             ancestor_timeline_id: timeline.get_ancestor_timeline_id(),
+
+            remote_client: timeline.remote_client.clone(),
+            delete_progress: timeline.delete_progress.clone(),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub enum TimelineOrOffloaded {
+    Timeline(Arc<Timeline>),
+    Offloaded(Arc<OffloadedTimeline>),
+}
+
+impl TimelineOrOffloaded {
+    pub fn tenant_shard_id(&self) -> TenantShardId {
+        match self {
+            TimelineOrOffloaded::Timeline(timeline) => timeline.tenant_shard_id,
+            TimelineOrOffloaded::Offloaded(offloaded) => offloaded.tenant_shard_id,
+        }
+    }
+    pub fn timeline_id(&self) -> TimelineId {
+        match self {
+            TimelineOrOffloaded::Timeline(timeline) => timeline.timeline_id,
+            TimelineOrOffloaded::Offloaded(offloaded) => offloaded.timeline_id,
+        }
+    }
+    pub fn delete_progress(&self) -> &Arc<tokio::sync::Mutex<DeleteTimelineFlow>> {
+        match self {
+            TimelineOrOffloaded::Timeline(timeline) => &timeline.delete_progress,
+            TimelineOrOffloaded::Offloaded(offloaded) => &offloaded.delete_progress,
+        }
+    }
+    pub fn remote_client(&self) -> &Arc<RemoteTimelineClient> {
+        match self {
+            TimelineOrOffloaded::Timeline(timeline) => &timeline.remote_client,
+            TimelineOrOffloaded::Offloaded(offloaded) => &offloaded.remote_client,
         }
     }
 }
@@ -1490,12 +1535,9 @@ impl Tenant {
             timeline
         } else {
             let cancel = self.cancel.clone();
-            let timeline_preload = self.load_timeline_metadata(
-                timeline_id,
-                self.remote_storage.clone(),
-                cancel,
-            )
-            .await;
+            let timeline_preload = self
+                .load_timeline_metadata(timeline_id, self.remote_storage.clone(), cancel)
+                .await;
 
             let index_part = match timeline_preload.index_part {
                 Ok(index_part) => {
