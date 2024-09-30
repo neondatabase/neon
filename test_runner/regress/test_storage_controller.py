@@ -642,6 +642,15 @@ def test_storage_controller_stuck_compute_hook(
         handle_params["status"] = 200
         migrate_fut.result(timeout=10)
 
+        # Advance log cursor past the last 'stuck' message (we already waited for one, but
+        # there could be more than one)
+        while True:
+            contains_r = env.storage_controller.log_contains(NOTIFY_BLOCKED_LOG, offset=log_cursor)
+            if contains_r is None:
+                break
+            else:
+                (_, log_cursor) = contains_r
+
         # Now, do a migration in the opposite direction
         handle_params["status"] = 423
         migrate_fut = executor.submit(
@@ -658,7 +667,7 @@ def test_storage_controller_stuck_compute_hook(
         # also allow the migration to complete -- we only wait for the compute hook as long as we think
         # the old location is still usable for computes.
         # This is a regression test for issue https://github.com/neondatabase/neon/issues/8901
-        env.get_pageserver(dest_ps_id).stop()
+        dest_pageserver.stop()
         env.storage_controller.node_configure(dest_ps_id, {"availability": "Offline"})
 
         try:
@@ -683,7 +692,7 @@ def test_storage_controller_stuck_compute_hook(
         assert loc["mode"] == "AttachedSingle"
 
         # When the origin node comes back, it should get cleaned up
-        env.get_pageserver(dest_ps_id).start()
+        dest_pageserver.start()
         try:
             env.storage_controller.reconcile_all()
         except StorageControllerApiException as e:
