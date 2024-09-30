@@ -731,12 +731,7 @@ impl Client {
             "{}/v1/tenant/{tenant_shard_id}/timeline/{timeline_id}/import_pgdata",
             self.mgmt_api_endpoint,
         );
-        self.start_request(Method::PUT, uri)
-            .body(pgdata_path)
-            .send()
-            .await
-            .map_err(Error::SendRequest)?
-            .error_from_body()
+        self.request(Method::PUT, uri, pgdata_path)
             .await?
             .json()
             .await
