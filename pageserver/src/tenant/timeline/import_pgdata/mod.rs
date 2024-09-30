@@ -122,14 +122,15 @@ pub async fn doit(
         pgdata_dir,
         control_file,
     } = prepared;
-    let tasks = PgImportEnv {
+    PgImportEnv {
         timeline: raw_timeline.clone(),
         pgdata_dir,
         control_file,
         pgdata_lsn,
         tasks: Vec::new(),
     }
-    .plan();
+    .doit(ctx)
+    .await
 }
 
 // TODO: rename to `State`
@@ -142,7 +143,7 @@ struct PgImportEnv {
 }
 
 impl PgImportEnv {
-    async fn plan(&mut self) -> anyhow::Result<()> {
+    async fn doit(mut self, ctx: &RequestContext) -> anyhow::Result<()> {
         // Read control file
         let controlfile_path = (&self.pgdata_dir).join("global").join("pg_control");
         let controlfile_buf = std::fs::read(&controlfile_path)
@@ -225,7 +226,7 @@ impl PgImportEnv {
                 parallel_jobs.push(ChunkProcessingJob::new(
                     key_range.clone(),
                     std::mem::take(&mut current_chunk),
-                    self,
+                    &self,
                 ));
                 last_end_key = key_range.end;
                 current_chunk_size = 0;
@@ -236,7 +237,7 @@ impl PgImportEnv {
         parallel_jobs.push(ChunkProcessingJob::new(
             last_end_key..Key::NON_L0_MAX,
             current_chunk,
-            self,
+            &self,
         ));
 
         // Start all jobs simultaneosly
@@ -680,8 +681,6 @@ struct ChunkProcessingJob {
     range: Range<Key>,
     tasks: Vec<AnyImportTask>,
 
-    tenant_id: TenantId,
-    timeline_id: TimelineId,
     pgdata_lsn: Lsn,
 }
 
@@ -692,14 +691,12 @@ impl ChunkProcessingJob {
             timeline: env.timeline.clone(),
             range,
             tasks,
-            tenant_id: env.tsi.tenant_id,
-            timeline_id: env.tli,
             pgdata_lsn: env.pgdata_lsn,
         }
     }
 
     async fn run(self, ctx: &RequestContext) -> anyhow::Result<()> {
-        let writer = ImageLayerWriter::new(
+        let mut writer = ImageLayerWriter::new(
             self.timeline.conf,
             self.timeline.timeline_id,
             self.timeline.tenant_shard_id,
@@ -720,7 +717,6 @@ impl ChunkProcessingJob {
         guard
             .open_mut()?
             .track_new_image_layers(&[resident_layer], &self.timeline.metrics);
-        drop(guard);
         super::drop_wlock(guard);
 
         Ok(())
