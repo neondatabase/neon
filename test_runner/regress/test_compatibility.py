@@ -662,6 +662,23 @@ def test_versions_mismatch(
         [".*ingesting record with timestamp lagging more than wait_lsn_timeout.+"]
     )
     env.start()
+    # Creating a tenant
+    tenant_id = TenantId.generate()
+    env.neon_cli.create_tenant(tenant_id)
+    # Repeating a creation should be idempotent (we are just testing it doesn't return an error)
+    env.storage_controller.tenant_create(tenant_id=tenant_id)
+    # Creating and deleting a timeline
+    timeline_id = TimelineId.generate()
+    env.storage_controller.pageserver_api().timeline_create(
+        pg_version=PgVersion.NOT_SET, tenant_id=tenant_id, new_timeline_id=timeline_id
+    )
+    timelines = env.storage_controller.pageserver_api().timeline_list(tenant_id)
+    assert len(timelines) == 2
+    timeline_delete_wait_completed(
+        env.storage_controller.pageserver_api(), tenant_id, timeline_id
+    )
+    timelines = env.storage_controller.pageserver_api().timeline_list(tenant_id)
+    assert len(timelines) == 1
     check_neon_works(
         env, test_output_dir, compatibility_snapshot_dir / "dump.sql", test_output_dir / "repo"
     )
