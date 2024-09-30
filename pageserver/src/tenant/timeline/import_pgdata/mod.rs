@@ -2,10 +2,7 @@
 //!
 //!
 
-use std::{
-    fs::metadata,
-    sync::Arc,
-};
+use std::{fs::metadata, sync::Arc};
 
 use anyhow::{bail, ensure, Context};
 use bytes::Bytes;
@@ -17,10 +14,7 @@ use pageserver_api::{
     reltag::RelTag,
 };
 use postgres_ffi::{pg_constants, relfile_utils::parse_relfilename, ControlFileData, BLCKSZ};
-use tokio::{
-    io::AsyncRead,
-    task::{JoinSet},
-};
+use tokio::{io::AsyncRead, task::JoinSet};
 use tracing::debug;
 use walkdir::WalkDir;
 
@@ -232,9 +226,8 @@ impl PgImportEnv {
         let mut work = JoinSet::new();
         // TODO: semaphore?
         for job in parallel_jobs {
-            // TODO: inherit ctx from parent
             let ctx: RequestContext =
-                RequestContext::new(TaskKind::ImportPgdata, DownloadBehavior::Error);
+                ctx.detached_child(TaskKind::ImportPgdata, DownloadBehavior::Error);
             work.spawn(async move { job.run(&ctx).await });
         }
 

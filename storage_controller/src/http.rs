@@ -373,7 +373,7 @@ async fn handle_tenant_timeline_import_pgdata(
     service: Arc<Service>,
     mut req: Request<Body>,
 ) -> Result<Response<Body>, ApiError> {
-    let tenant_id: TenantId = parse_request_param(&req, "tenant_shard_id")?;
+    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
     check_permissions(&req, Scope::PageServerApi)?;
 
     let timeline_id: TimelineId = parse_request_param(&req, "timeline_id")?;
@@ -1219,7 +1219,7 @@ pub fn make_router(
             },
         )
         .put(
-            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/import_pgdata",
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/import_pgdata",
             |r| {
                 tenant_service_handler(
                     r,

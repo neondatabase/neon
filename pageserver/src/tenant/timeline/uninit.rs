@@ -140,7 +140,7 @@ impl<'t> UninitializedTimeline<'t> {
         // This fills the layer map with layers.
         import_pgdata::doit(&self, prepared, ctx)
             .await
-            .context("import");
+            .context("import")?;
 
         let raw_timeline = self.raw_timeline()?;
 

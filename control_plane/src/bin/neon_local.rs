@@ -6,6 +6,7 @@
 //! rely on `neon_local` to set up the environment for each test.
 //!
 use anyhow::{anyhow, bail, Context, Result};
+use camino::Utf8PathBuf;
 use clap::{value_parser, Arg, ArgAction, ArgMatches, Command, ValueEnum};
 use compute_api::spec::ComputeMode;
 use control_plane::endpoint::ComputeControlPlane;
@@ -639,8 +640,22 @@ async fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::Local
             env.register_branch_mapping(branch_name.to_string(), tenant_id, timeline_id)?;
             println!("Done");
         }
-        Some(("import-pgdata", matches)) => {
-            todo!()
+        Some(("import-pgdata", import_match)) => {
+            let tenant_id = get_tenant_id(import_match, env)?;
+            let timeline_id = parse_timeline_id(import_match)?.expect("No timeline id provided");
+            let branch_name = import_match
+                .get_one::<String>("branch-name")
+                .ok_or_else(|| anyhow!("No branch name provided"))?;
+            let pgdata_dir = import_match
+                .get_one::<Utf8PathBuf>("pgdata-dir")
+                .ok_or_else(|| anyhow!("No pgdata-dir provided"))?;
+
+            let storage_controller = StorageController::from_env(env);
+            storage_controller
+                .tenant_timeline_import_from_pgdata(tenant_id, timeline_id, &pgdata_dir)
+                .await?;
+
+            env.register_branch_mapping(branch_name.to_owned(), tenant_id, timeline_id)?;
         }
         Some(("branch", branch_match)) => {
             let tenant_id = get_tenant_id(branch_match, env)?;
@@ -1619,6 +1634,17 @@ fn cli() -> Command {
                 .arg(Arg::new("end-lsn").long("end-lsn")
                     .help("Lsn the basebackup ends at"))
                 .arg(pg_version_arg.clone())
+            )
+            .subcommand(Command::new("import-pgdata")
+            .about("Import timeline from a pgdata directory")
+            .arg(tenant_id_arg.clone())
+            .arg(timeline_id_arg.clone())
+            .arg(branch_name_arg.clone())
+            .arg(Arg::new("pgdata-dir")
+                    .long("pgdata_dir")
+                    .value_parser(value_parser!(Utf8PathBuf))
+                    .help("Path to PGDATA directory")
+                )
             )
         ).subcommand(
             Command::new("tenant")
