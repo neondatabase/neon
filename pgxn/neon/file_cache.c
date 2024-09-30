@@ -532,6 +532,18 @@ lfc_init(void)
 		BackgroundWorker bgw;
 		memset(&bgw, 0, sizeof(bgw));
 		bgw.bgw_flags = BGWORKER_SHMEM_ACCESS;
+		/*
+		 * Prewarming LFC at replica is problematic and doubtful.
+		 * 1. It has not so much sense because replica is skipping all WAL records which target pages is not present
+		 *    in shared buffers and invalidate LFC in this case. And as far as size of shared buffers is very small,
+		 *    there is really no sense to try to prewarm LFC which will be invalidated in any case.
+		 * 2. Unlike primary,it is not possible to retrieve most recent version of the page. We should follow current apply LSN.
+		 *    It significantly complicates prewarming.
+		 *
+		 *  BgWorkerStart_RecoveryFinished means we won't ever get started on a hot_standby see
+		 * https://www.postgresql.org/docs/10/static/bgworker.html as it's not
+		 * documented in bgworker.c.
+		 */
 		bgw.bgw_start_time = BgWorkerStart_RecoveryFinished;
 		snprintf(bgw.bgw_library_name, BGW_MAXLEN, "neon");
 		snprintf(bgw.bgw_function_name, BGW_MAXLEN, "LfcPrewarmMain");
@@ -600,8 +612,9 @@ lfc_init_prewarm(void)
 	size_t i, max_entries = lfc_prewarm_limit;
 	uint32_t hash;
 	FileCacheEntry *entry;
-	int fd = OpenTransientFile("lfc.state", O_RDONLY | PG_BINARY);
+	int fd;
 
+	fd = OpenTransientFile("lfc.state", O_RDONLY | PG_BINARY);
 	if (fd < 0)
 	{
 		elog(LOG, "LFC: state file is missing");
