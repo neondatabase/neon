@@ -102,7 +102,7 @@ pub async fn task_main(
                     error!("missing required proxy protocol header");
                     return;
                 }
-                Ok((_socket, Some(_))) if config.proxy_protocol_v2 == ProxyProtocolV2::Never => {
+                Ok((_socket, Some(_))) if config.proxy_protocol_v2 == ProxyProtocolV2::Rejected => {
                     error!("proxy protocol header not supported");
                     return;
                 }

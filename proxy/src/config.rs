@@ -41,9 +41,12 @@ pub struct ProxyConfig {
 
 #[derive(Copy, Clone, Debug, ValueEnum, PartialEq)]
 pub enum ProxyProtocolV2 {
+    /// Connection will error if PROXY protocol v2 header is missing
     Required,
+    /// Connection will parse PROXY protocol v2 header, but accept the connection if it's missing.
     Supported,
-    Never,
+    /// Connection will error if PROXY protocol v2 header is provided
+    Rejected,
 }
 
 #[derive(Debug)]
