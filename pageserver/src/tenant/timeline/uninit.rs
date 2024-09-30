@@ -2,18 +2,13 @@ use std::{collections::hash_map::Entry, fs, sync::Arc};
 
 use anyhow::Context;
 use camino::Utf8PathBuf;
-use pageserver_api::key::{CHECKPOINT_KEY, DBDIR_KEY};
 use tracing::{error, info, info_span};
 use utils::{fs_ext, id::TimelineId, lsn::Lsn};
 
 use crate::{
     context::RequestContext,
     import_datadir,
-    tenant::{
-        metadata::{MetadataUpdate, TimelineMetadata},
-        timeline::import_pgdata,
-        Tenant,
-    },
+    tenant::{metadata::MetadataUpdate, timeline::import_pgdata, Tenant},
 };
 
 use super::Timeline;
