@@ -19,7 +19,7 @@ use pageserver_api::{
 use postgres_ffi::{pg_constants, relfile_utils::parse_relfilename, ControlFileData, BLCKSZ};
 use tokio::{
     io::AsyncRead,
-    task::{self, JoinHandle},
+    task::{self, JoinHandle, JoinSet},
 };
 use tracing::debug;
 use utils::{
@@ -142,7 +142,7 @@ struct PgImportEnv {
 }
 
 impl PgImportEnv {
-    async fn plan(&mut self) -> anyhow::Result<Executing> {
+    async fn plan(&mut self) -> anyhow::Result<()> {
         // Read control file
         let controlfile_path = (&self.pgdata_dir).join("global").join("pg_control");
         let controlfile_buf = std::fs::read(&controlfile_path)
@@ -240,17 +240,13 @@ impl PgImportEnv {
         ));
 
         // Start all jobs simultaneosly
+        let mut work = JoinSet::new();
         // TODO: semaphore?
-        let mut handles = vec![];
         for job in parallel_jobs {
             // TODO: inherit ctx from parent
             let ctx: RequestContext =
                 RequestContext::new(TaskKind::ImportPgdata, DownloadBehavior::Error);
-            let handle: JoinHandle<anyhow::Result<PersistentLayerDesc>> = task::spawn(async move {
-                let layerdesc = job.run(&ctx).await?;
-                Ok(layerdesc)
-            });
-            handles.push(handle);
+            work.spawn(async move { job.run(&ctx).await });
         }
 
         Ok(())
@@ -364,15 +360,6 @@ impl PgImportEnv {
                     segsize_key,
                     Bytes::copy_from_slice(&segsize_buf),
                 )));
-        }
-        Ok(())
-    }
-}
-
-impl Executing {
-    async fn execute(&self) -> anyhow::Result<()> {
-        for task in &self.tasks {
-            task.doit().await?;
         }
         Ok(())
     }
@@ -711,12 +698,12 @@ impl ChunkProcessingJob {
         }
     }
 
-    async fn run(self, ctx: &RequestContext) -> anyhow::Result<PersistentLayerDesc> {
+    async fn run(self, ctx: &RequestContext) -> anyhow::Result<()> {
         let writer = ImageLayerWriter::new(
             self.timeline.conf,
             self.timeline.timeline_id,
             self.timeline.tenant_shard_id,
-            range,
+            &self.range,
             self.pgdata_lsn,
             &ctx,
         )
@@ -732,10 +719,10 @@ impl ChunkProcessingJob {
         let mut guard = self.timeline.layers.write().await;
         guard
             .open_mut()?
-            .track_new_image_layers(&image_layers, &self.timeline.metrics);
+            .track_new_image_layers(&[resident_layer], &self.timeline.metrics);
         drop(guard);
-        drop_wlock(guard);
+        super::drop_wlock(guard);
 
-        Ok(layerdesc)
+        Ok(())
     }
 }

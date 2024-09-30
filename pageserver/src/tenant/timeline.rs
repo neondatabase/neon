@@ -4298,12 +4298,19 @@ impl Timeline {
             }
         }
 
-        // This is like create_image_layers does it
         let mut guard = self.layers.write().await;
+
+        // FIXME: we could add the images to be uploaded *before* returning from here, but right
+        // now they are being scheduled outside of write lock; current way is inconsistent with
+        // compaction lock order.
         guard
             .open_mut()?
             .track_new_image_layers(&image_layers, &self.metrics);
-        crate::tenant::timeline::drop_wlock(guard);
+        drop_wlock(guard);
+        timer.stop_and_record();
+
+        // Creating image layers may have caused some previously visible layers to be covered
+        self.update_layer_visibility().await?;
 
         Ok(image_layers)
     }
