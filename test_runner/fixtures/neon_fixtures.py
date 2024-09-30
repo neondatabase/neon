@@ -642,9 +642,6 @@ class NeonEnvBuilder:
         patch_script = ""
         for ps in self.env.pageservers:
             patch_script += f"UPDATE nodes SET listen_http_port={ps.service_port.http}, listen_pg_port={ps.service_port.pg}  WHERE node_id = '{ps.id}';"
-            # This is a temporary to get the backward compat test happy
-            # since the compat snapshot was generated with an older version of neon local
-            patch_script += f"UPDATE nodes SET availability_zone_id='{ps.az_id}'  WHERE node_id = '{ps.id}' AND availability_zone_id IS NULL;"
         patch_script_path.write_text(patch_script)
 
         # Update the config with info about tenants and timelines
@@ -3314,7 +3311,7 @@ class VanillaPostgres(PgProtocol):
         self.pg_bin = pg_bin
         self.running = False
         if init:
-            self.pg_bin.run_capture(["initdb", "-D", str(pgdatadir)])
+            self.pg_bin.run_capture(["initdb", "--pgdata", str(pgdatadir)])
         self.configure([f"port = {port}\n"])
 
     def enable_tls(self):

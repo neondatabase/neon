@@ -772,7 +772,7 @@ class ProposerPostgres(PgProtocol):
     def initdb(self):
         """Run initdb"""
 
-        args = ["initdb", "-U", "cloud_admin", "-D", self.pg_data_dir_path()]
+        args = ["initdb", "--username", "cloud_admin", "--pgdata", self.pg_data_dir_path()]
         self.pg_bin.run(args)
 
     def start(self):
@@ -2084,8 +2084,13 @@ def test_timeline_copy(neon_env_builder: NeonEnvBuilder, insert_rows: int):
 
     endpoint.safe_psql("create table t(key int, value text)")
 
-    timeline_status = env.safekeepers[0].http_client().timeline_status(tenant_id, timeline_id)
-    timeline_start_lsn = timeline_status.timeline_start_lsn
+    # Note: currently timelines on sks are created by compute and commit of
+    # transaction above is finished when 2/3 sks received it, so there is a
+    # small chance that timeline on this sk is not created/initialized yet,
+    # hence the usage of waiting function to prevent flakiness.
+    timeline_start_lsn = (
+        env.safekeepers[0].http_client().get_non_zero_timeline_start_lsn(tenant_id, timeline_id)
+    )
     log.info(f"Timeline start LSN: {timeline_start_lsn}")
 
     current_percent = 0.0
