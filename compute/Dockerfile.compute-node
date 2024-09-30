@@ -1258,7 +1258,7 @@ RUN apt update && \
         libxml2 \
         libxslt1.1 \
         libzstd1 \
-        libcurl4-openssl-dev \
+        libcurl4 \
         locales \
         procps \
         ca-certificates \
