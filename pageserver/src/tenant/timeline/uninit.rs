@@ -2,14 +2,18 @@ use std::{collections::hash_map::Entry, fs, sync::Arc};
 
 use anyhow::Context;
 use camino::Utf8PathBuf;
-use pageserver_api::key::CHECKPOINT_KEY;
+use pageserver_api::key::{CHECKPOINT_KEY, DBDIR_KEY};
 use tracing::{error, info, info_span};
 use utils::{fs_ext, id::TimelineId, lsn::Lsn};
 
 use crate::{
     context::RequestContext,
     import_datadir,
-    tenant::{timeline::import_pgdata, Tenant},
+    tenant::{
+        metadata::{MetadataUpdate, TimelineMetadata},
+        timeline::import_pgdata,
+        Tenant,
+    },
 };
 
 use super::Timeline;
@@ -144,24 +148,34 @@ impl<'t> UninitializedTimeline<'t> {
 
         let raw_timeline = self.raw_timeline()?;
 
-        // Do a fake write through the regular key-valuate-store APIs so that
-        // * last_record_lsn and disk_consistent_lsn get set to base_lsn, and
-        // * index_part.json gets written (TODO: assert this is the first time that happens)
-        // choice of CHECKPOINT_KEY is arbitrary here.
-        // What's important is that we go through the DatadirModification.
-        // If we went to Timeline::put directly, we wouldn't advance last_record_lsn.
-        let checkpoint_value = raw_timeline.get(CHECKPOINT_KEY, base_lsn, ctx).await?;
-        let mut modification = raw_timeline.begin_modification(base_lsn);
-        modification.put_checkpoint(checkpoint_value)?;
-        modification.commit(ctx).await?;
+        //
+        // Get the timeline in-memory and S3 state into the same state
+        // as if we had used DatadirModification.
+        //
+        // TODO: how to make this maintainable?
+        //
 
-        // Flush the write to disk (this is what creates the IndexPart)
-        // Flush loop needs to be spawned in order to be able to flush.
-        raw_timeline.maybe_spawn_flush_loop();
+        // to advance last_record_lsn, from now on reads@base_lsn should work
+        raw_timeline.finish_write(base_lsn);
+
+        // set disk consistent lsn so that next index part upload uploads a valid TimelineMetadata
+        assert!(
+            raw_timeline.set_disk_consistent_lsn(base_lsn),
+            "this should not fail, we are the sole user of raw_timeline at this point"
+        );
+
         raw_timeline
-            .freeze_and_flush()
-            .await
-            .context("flush after pgdata import")?;
+            .remote_client
+            .schedule_index_upload_for_metadata_update(&MetadataUpdate::new(
+                // FIXME: The 'disk_consistent_lsn' should be the LSN at the *end* of the
+                // checkpoint record, and prev_record_lsn should point to its beginning.
+                // We should read the real end of the record from the WAL, but here we
+                // just fake it.
+                Lsn(base_lsn.0 + 8), // disk_consistent_lsn
+                Some(base_lsn),      // prev_record_lsn ,
+                base_lsn,            // latest_gc_cutoff_lsn
+            ))?;
+        raw_timeline.remote_client.wait_completion().await?;
 
         // TODO: is this necessary?
         // Doing it for now because other code that produces image layers does this at some point.
