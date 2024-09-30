@@ -984,6 +984,7 @@ pub fn short_error(e: &QueryError) -> String {
 }
 
 fn log_query_error(query: &str, e: &QueryError) {
+    // If you want to change the log level of a specific error, also re-categorize it in `BasebackupQueryTimeOngoingRecording`.
     match e {
         QueryError::Disconnected(ConnectionError::Io(io_error)) => {
             if is_expected_io_error(io_error) {

@@ -589,6 +589,10 @@ async fn timeline_create_handler(
                 StatusCode::SERVICE_UNAVAILABLE,
                 HttpErrorBody::from_msg(e.to_string()),
             ),
+            Err(e @ tenant::CreateTimelineError::AncestorArchived) => json_response(
+                StatusCode::NOT_ACCEPTABLE,
+                HttpErrorBody::from_msg(e.to_string()),
+            ),
             Err(tenant::CreateTimelineError::ShuttingDown) => json_response(
                 StatusCode::SERVICE_UNAVAILABLE,
                 HttpErrorBody::from_msg("tenant shutting down".to_string()),
@@ -820,7 +824,7 @@ async fn get_lsn_by_timestamp_handler(
 
     let lease = if with_lease {
         timeline
-            .make_lsn_lease(lsn, timeline.get_lsn_lease_length_for_ts(), &ctx)
+            .init_lsn_lease(lsn, timeline.get_lsn_lease_length_for_ts(), &ctx)
             .inspect_err(|_| {
                 warn!("fail to grant a lease to {}", lsn);
             })
@@ -1688,9 +1692,18 @@ async fn lsn_lease_handler(
     let timeline =
         active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
             .await?;
-    let result = timeline
-        .make_lsn_lease(lsn, timeline.get_lsn_lease_length(), &ctx)
-        .map_err(|e| ApiError::InternalServerError(e.context("lsn lease http handler")))?;
+
+    let result = async {
+        timeline
+            .init_lsn_lease(lsn, timeline.get_lsn_lease_length(), &ctx)
+            .map_err(|e| {
+                ApiError::InternalServerError(
+                    e.context(format!("invalid lsn lease request at {lsn}")),
+                )
+            })
+    }
+    .instrument(info_span!("init_lsn_lease", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug(), %timeline_id))
+    .await?;
 
     json_response(StatusCode::OK, result)
 }
