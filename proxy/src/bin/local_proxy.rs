@@ -274,7 +274,7 @@ fn build_config(args: &LocalProxyCliArgs) -> anyhow::Result<&'static ProxyConfig
             rate_limit_ip_subnet: 64,
             ip_allowlist_check_enabled: true,
         },
-        require_client_ip: false,
+        proxy_protocol_v2: config::ProxyProtocolV2::Rejected,
         handshake_timeout: Duration::from_secs(10),
         region: "local".into(),
         wake_compute_retry_config: RetryConfig::parse(RetryConfig::WAKE_COMPUTE_DEFAULT_VALUES)?,
