@@ -517,6 +517,10 @@ impl StorageController {
             args.push(format!("--max-secondary-lag-bytes={lag}"))
         }
 
+        if let Some(threshold) = self.config.long_reconcile_threshold {
+            args.push(format!("--long-reconcile-threshold={}", humantime::Duration::from(threshold)))
+        }
+
         args.push(format!(
             "--neon-local-repo-dir={}",
             self.env.base_data_dir.display()
