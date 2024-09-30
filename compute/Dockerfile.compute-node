@@ -1083,7 +1083,7 @@ RUN set -e \
 # Compile the Neon-specific `local_proxy` binary
 #
 #########################################################################################
-FROM $REPOSITORY/$IMAGE:$TAG AS local-proxy
+FROM $REPOSITORY/$IMAGE:$TAG AS local_proxy
 ARG BUILD_TAG
 ENV BUILD_TAG=$BUILD_TAG
 
@@ -1230,9 +1230,9 @@ COPY --from=compute-tools --chown=postgres /home/nonroot/target/release-line-deb
 COPY --from=pgbouncer         /usr/local/pgbouncer/bin/pgbouncer /usr/local/bin/pgbouncer
 COPY --chmod=0666 --chown=postgres compute/etc/pgbouncer.ini /etc/pgbouncer.ini
 
-# local-proxy and its config
-COPY --from=local-proxy --chown=postgres /home/nonroot/target/release-line-debug-size-lto/local_proxy /usr/local/bin/local-proxy
-RUN mkdir -p /etc/localproxy && chown postgres:postgres /etc/localproxy
+# local_proxy and its config
+COPY --from=local_proxy --chown=postgres /home/nonroot/target/release-line-debug-size-lto/local_proxy /usr/local/bin/local_proxy
+RUN mkdir -p /etc/local_proxy && chown postgres:postgres /etc/local_proxy
 
 # Metrics exporter binaries and  configuration files
 COPY --from=postgres-exporter /bin/postgres_exporter /bin/postgres_exporter

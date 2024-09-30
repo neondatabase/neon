@@ -19,10 +19,10 @@ commands:
     user: postgres
     sysvInitAction: respawn
     shell: '/usr/local/bin/pgbouncer /etc/pgbouncer.ini'
-  - name: local-proxy
+  - name: local_proxy
     user: postgres
     sysvInitAction: respawn
-    shell: '/usr/local/bin/local-proxy --config-path /etc/localproxy/config.json --pid-path /etc/localproxy/pid --http 0.0.0.0:10432'
+    shell: '/usr/local/bin/local_proxy --config-path /etc/local_proxy/config.json --pid-path /etc/local_proxy/pid --http 0.0.0.0:10432'
   - name: postgres-exporter
     user: nobody
     sysvInitAction: respawn

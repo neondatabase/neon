@@ -280,7 +280,7 @@ pub struct GenericOption {
 /// declare a `trait` on it.
 pub type GenericOptions = Option<Vec<GenericOption>>;
 
-/// Configured the local-proxy application with the relevant JWKS and roles it should
+/// Configured the local_proxy application with the relevant JWKS and roles it should
 /// use for authorizing connect requests using JWT.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct LocalProxySpec {
