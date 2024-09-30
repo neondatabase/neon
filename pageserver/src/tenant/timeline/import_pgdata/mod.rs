@@ -2,7 +2,10 @@
 //!
 //!
 
-use std::{fs::metadata, sync::Arc};
+use std::{
+    fs::metadata,
+    sync::{Arc, Weak},
+};
 
 use anyhow::{bail, ensure, Context};
 use bytes::Bytes;
@@ -25,8 +28,8 @@ use utils::{
 };
 use walkdir::WalkDir;
 
-use crate::config::PageServerConf;
 use crate::pgdatadir_mapping::{SlruSegmentDirectory, TwoPhaseDirectory};
+use crate::{config::PageServerConf, tenant::storage_layer::split_writer::SplitImageLayerWriter};
 use crate::{
     context::{DownloadBehavior, RequestContext},
     pgdatadir_mapping::{DbDirectory, RelDirectory},
@@ -90,7 +93,7 @@ impl Prepared {
             .expect("prepare() checks that try_pg_version doesn't error")
     }
     fn try_pg_version(&self) -> anyhow::Result<u32> {
-        match self.control_file.catalog_version_no {
+        Ok(match self.control_file.catalog_version_no {
             // thesea are from catversion.h
             202107181 => 14,
             202209061 => 15,
@@ -99,7 +102,7 @@ impl Prepared {
             catversion => {
                 bail!("unrecognized catalog version {catversion}")
             }
-        }
+        })
     }
 }
 
@@ -119,29 +122,27 @@ pub async fn doit(
         pgdata_dir,
         control_file,
     } = prepared;
-    PgImportEnv {
+    let tasks = PgImportEnv {
         timeline: raw_timeline.clone(),
         pgdata_dir,
         control_file,
         pgdata_lsn,
         tasks: Vec::new(),
-        layers: Vec::new(),
     }
-    .doit()
-    .await
+    .plan();
 }
 
+// TODO: rename to `State`
 struct PgImportEnv {
     timeline: Arc<Timeline>,
     pgdata_dir: Utf8PathBuf,
     pgdata_lsn: Lsn,
     control_file: ControlFileData,
     tasks: Vec<AnyImportTask>,
-    layers: Vec<PersistentLayerDesc>,
 }
 
 impl PgImportEnv {
-    async fn doit(&mut self) -> anyhow::Result<()> {
+    async fn plan(&mut self) -> anyhow::Result<Executing> {
         // Read control file
         let controlfile_path = (&self.pgdata_dir).join("global").join("pg_control");
         let controlfile_buf = std::fs::read(&controlfile_path)
@@ -242,17 +243,14 @@ impl PgImportEnv {
         // TODO: semaphore?
         let mut handles = vec![];
         for job in parallel_jobs {
+            // TODO: inherit ctx from parent
+            let ctx: RequestContext =
+                RequestContext::new(TaskKind::ImportPgdata, DownloadBehavior::Error);
             let handle: JoinHandle<anyhow::Result<PersistentLayerDesc>> = task::spawn(async move {
-                let layerdesc = job.run().await?;
+                let layerdesc = job.run(&ctx).await?;
                 Ok(layerdesc)
             });
             handles.push(handle);
-        }
-
-        // Wait for all jobs to complete
-        for handle in handles {
-            let layerdesc = handle.await??;
-            self.layers.push(layerdesc);
         }
 
         Ok(())
@@ -366,6 +364,15 @@ impl PgImportEnv {
                     segsize_key,
                     Bytes::copy_from_slice(&segsize_buf),
                 )));
+        }
+        Ok(())
+    }
+}
+
+impl Executing {
+    async fn execute(&self) -> anyhow::Result<()> {
+        for task in &self.tasks {
+            task.doit().await?;
         }
         Ok(())
     }
@@ -682,10 +689,10 @@ impl From<ImportSlruBlocksTask> for AnyImportTask {
 }
 
 struct ChunkProcessingJob {
+    timeline: Arc<Timeline>,
     range: Range<Key>,
     tasks: Vec<AnyImportTask>,
 
-    dstdir: Utf8PathBuf,
     tenant_id: TenantId,
     timeline_id: TimelineId,
     pgdata_lsn: Lsn,
@@ -695,6 +702,7 @@ impl ChunkProcessingJob {
     fn new(range: Range<Key>, tasks: Vec<AnyImportTask>, env: &PgImportEnv) -> Self {
         assert!(env.pgdata_lsn.is_valid());
         Self {
+            timeline: env.timeline.clone(),
             range,
             tasks,
             tenant_id: env.tsi.tenant_id,
@@ -703,33 +711,31 @@ impl ChunkProcessingJob {
         }
     }
 
-    async fn run(self) -> anyhow::Result<PersistentLayerDesc> {
-        let ctx: RequestContext = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error);
-        let config = toml_edit::Document::new();
-        let conf: &'static PageServerConf = Box::leak(Box::new(
-            PageServerConf::parse_and_validate(NodeId(42), &config, &self.dstdir)?,
-        ));
-        let tsi = TenantShardId {
-            tenant_id: self.tenant_id,
-            shard_number: ShardNumber(0),
-            shard_count: ShardCount(0),
-        };
-
-        let mut layer = ImageLayerWriter::new(
-            &conf,
-            self.timeline_id,
-            tsi,
-            &self.range,
+    async fn run(self, ctx: &RequestContext) -> anyhow::Result<PersistentLayerDesc> {
+        let writer = ImageLayerWriter::new(
+            self.timeline.conf,
+            self.timeline.timeline_id,
+            self.timeline.tenant_shard_id,
+            range,
             self.pgdata_lsn,
             &ctx,
         )
         .await?;
 
         for task in self.tasks {
-            task.doit(&mut layer, &ctx).await?;
+            task.doit(&mut writer, &ctx).await?;
         }
 
-        let layerdesc = layer.finish_raw(&ctx).await?;
+        let resident_layer = writer.finish(&self.timeline, ctx).await?;
+
+        // this is sharing the same code as create_image_layers
+        let mut guard = self.timeline.layers.write().await;
+        guard
+            .open_mut()?
+            .track_new_image_layers(&image_layers, &self.timeline.metrics);
+        drop(guard);
+        drop_wlock(guard);
+
         Ok(layerdesc)
     }
 }

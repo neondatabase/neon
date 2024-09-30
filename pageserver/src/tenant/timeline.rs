@@ -190,7 +190,7 @@ fn drop_rlock<T>(rlock: tokio::sync::RwLockReadGuard<T>) {
 
 /// Temporary function for immutable storage state refactor, ensures we are dropping mutex guard instead of other things.
 /// Can be removed after all refactors are done.
-fn drop_wlock<T>(rlock: tokio::sync::RwLockWriteGuard<'_, T>) {
+pub(self) fn drop_wlock<T>(rlock: tokio::sync::RwLockWriteGuard<'_, T>) {
     drop(rlock)
 }
 
@@ -4298,19 +4298,12 @@ impl Timeline {
             }
         }
 
+        // This is like create_image_layers does it
         let mut guard = self.layers.write().await;
-
-        // FIXME: we could add the images to be uploaded *before* returning from here, but right
-        // now they are being scheduled outside of write lock; current way is inconsistent with
-        // compaction lock order.
         guard
             .open_mut()?
             .track_new_image_layers(&image_layers, &self.metrics);
-        drop_wlock(guard);
-        timer.stop_and_record();
-
-        // Creating image layers may have caused some previously visible layers to be covered
-        self.update_layer_visibility().await?;
+        crate::tenant::timeline::drop_wlock(guard);
 
         Ok(image_layers)
     }
@@ -4652,7 +4645,7 @@ impl Timeline {
     }
 
     /// Schedules the uploads of the given image layers
-    fn upload_new_image_layers(
+    pub(self) fn upload_new_image_layers(
         self: &Arc<Self>,
         new_images: impl IntoIterator<Item = ResidentLayer>,
     ) -> Result<(), super::upload_queue::NotInitialized> {

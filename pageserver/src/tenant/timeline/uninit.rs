@@ -163,6 +163,11 @@ impl<'t> UninitializedTimeline<'t> {
             .await
             .context("Failed to flush after basebackup import")?;
 
+        // TODO: is this necessary?
+        // Doing it for now because other code that produces image layers does this at some point.
+        // So, shouldn't hurt to do it.
+        raw_timeline.update_layer_visibility().await?;
+
         // All the data has been imported. Insert the Timeline into the tenant's timelines map
         let tl = self.finish_creation()?;
         tl.activate(tenant, broker_client, None, ctx);

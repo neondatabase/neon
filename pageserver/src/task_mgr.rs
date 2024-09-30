@@ -381,6 +381,8 @@ pub enum TaskKind {
     UnitTest,
 
     DetachAncestor,
+
+    ImportPgdata,
 }
 
 #[derive(Default)]
