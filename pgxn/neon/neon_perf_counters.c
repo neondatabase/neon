@@ -141,6 +141,8 @@ histogram_to_metrics(IOHistogram histogram,
 		metrics[i].value = (double) bucket_accum;
 		i++;
 	}
+
+	return i;
 }
 
 static metric_t *
