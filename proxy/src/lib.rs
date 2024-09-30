@@ -82,7 +82,7 @@
     impl_trait_overcaptures,
 )]
 
-use std::{convert::Infallible, future::Future};
+use std::convert::Infallible;
 
 use anyhow::{bail, Context};
 use intern::{EndpointIdInt, EndpointIdTag, InternId};
@@ -117,13 +117,12 @@ pub mod usage_metrics;
 pub mod waiters;
 
 /// Handle unix signals appropriately.
-pub async fn handle_signals<F, Fut>(
+pub async fn handle_signals<F>(
     token: CancellationToken,
     mut refresh_config: F,
 ) -> anyhow::Result<Infallible>
 where
-    F: FnMut() -> Fut,
-    Fut: Future<Output = anyhow::Result<()>>,
+    F: FnMut(),
 {
     use tokio::signal::unix::{signal, SignalKind};
 
@@ -136,7 +135,7 @@ where
             // Hangup is commonly used for config reload.
             _ = hangup.recv() => {
                 warn!("received SIGHUP");
-                refresh_config().await?;
+                refresh_config();
             }
             // Shut down the whole application.
             _ = interrupt.recv() => {

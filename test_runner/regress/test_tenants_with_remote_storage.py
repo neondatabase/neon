@@ -71,10 +71,9 @@ def test_tenants_many(neon_env_builder: NeonEnvBuilder):
                 "checkpoint_distance": "5000000",
             }
         )
-        env.neon_cli.create_timeline("test_tenants_many", tenant_id=tenant)
 
         endpoint = env.endpoints.create_start(
-            "test_tenants_many",
+            "main",
             tenant_id=tenant,
         )
         tenants_endpoints.append((tenant, endpoint))

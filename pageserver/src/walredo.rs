@@ -205,6 +205,22 @@ impl PostgresRedoManager {
         }
     }
 
+    /// Do a ping request-response roundtrip.
+    ///
+    /// Not used in production, but by Rust benchmarks.
+    ///
+    /// # Cancel-Safety
+    ///
+    /// This method is cancellation-safe.
+    pub async fn ping(&self, pg_version: u32) -> Result<(), Error> {
+        self.do_with_walredo_process(pg_version, |proc| async move {
+            proc.ping(Duration::from_secs(1))
+                .await
+                .map_err(Error::Other)
+        })
+        .await
+    }
+
     pub fn status(&self) -> WalRedoManagerStatus {
         WalRedoManagerStatus {
             last_redo_at: {
@@ -297,6 +313,9 @@ impl PostgresRedoManager {
         }
     }
 
+    /// # Cancel-Safety
+    ///
+    /// This method is cancel-safe iff `closure` is cancel-safe.
     async fn do_with_walredo_process<
         F: FnOnce(Arc<Process>) -> Fut,
         Fut: Future<Output = Result<O, Error>>,
@@ -536,6 +555,17 @@ mod tests {
     use std::str::FromStr;
     use tracing::Instrument;
     use utils::{id::TenantId, lsn::Lsn};
+
+    #[tokio::test]
+    async fn test_ping() {
+        let h = RedoHarness::new().unwrap();
+
+        h.manager
+            .ping(14)
+            .instrument(h.span())
+            .await
+            .expect("ping should work");
+    }
 
     #[tokio::test]
     async fn short_v14_redo() {

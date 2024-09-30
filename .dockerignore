@@ -13,6 +13,7 @@
 # Directories
 !.cargo/
 !.config/
+!compute/
 !compute_tools/
 !control_plane/
 !libs/

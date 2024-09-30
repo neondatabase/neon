@@ -1,13 +1,11 @@
 use measured::FixedCardinalityLabel;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::fmt::{self, Display};
 
 use crate::auth::IpPattern;
 
-use crate::intern::{BranchIdInt, EndpointIdInt, ProjectIdInt};
+use crate::intern::{BranchIdInt, EndpointIdInt, ProjectIdInt, RoleNameInt};
 use crate::proxy::retry::CouldRetry;
-use crate::RoleName;
 
 /// Generic error response with human-readable description.
 /// Note that we can't always present it to user as is.
@@ -284,6 +282,8 @@ pub(crate) struct DatabaseInfo {
     /// be inconvenient for debug with local PG instance.
     pub(crate) password: Option<Box<str>>,
     pub(crate) aux: MetricsAuxInfo,
+    #[serde(default)]
+    pub(crate) allowed_ips: Option<Vec<IpPattern>>,
 }
 
 // Manually implement debug to omit sensitive info.
@@ -294,6 +294,7 @@ impl fmt::Debug for DatabaseInfo {
             .field("port", &self.port)
             .field("dbname", &self.dbname)
             .field("user", &self.user)
+            .field("allowed_ips", &self.allowed_ips)
             .finish_non_exhaustive()
     }
 }
@@ -346,11 +347,6 @@ impl ColdStartInfo {
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct JwksRoleMapping {
-    pub roles: HashMap<RoleName, EndpointJwksResponse>,
-}
-
-#[derive(Debug, Deserialize, Clone)]
 pub struct EndpointJwksResponse {
     pub jwks: Vec<JwksSettings>,
 }
@@ -358,11 +354,10 @@ pub struct EndpointJwksResponse {
 #[derive(Debug, Deserialize, Clone)]
 pub struct JwksSettings {
     pub id: String,
-    pub project_id: ProjectIdInt,
-    pub branch_id: BranchIdInt,
     pub jwks_url: url::Url,
     pub provider_name: String,
     pub jwt_audience: Option<String>,
+    pub role_names: Vec<RoleNameInt>,
 }
 
 #[cfg(test)]
@@ -431,6 +426,22 @@ mod tests {
             "N.E.W": "forward compatibility check",
             "aux": dummy_aux(),
         }))?;
+
+        // with allowed_ips
+        let dbinfo = serde_json::from_value::<DatabaseInfo>(json!({
+            "host": "localhost",
+            "port": 5432,
+            "dbname": "postgres",
+            "user": "john_doe",
+            "password": "password",
+            "aux": dummy_aux(),
+            "allowed_ips": ["127.0.0.1"],
+        }))?;
+
+        assert_eq!(
+            dbinfo.allowed_ips,
+            Some(vec![IpPattern::Single("127.0.0.1".parse()?)])
+        );
 
         Ok(())
     }

@@ -55,3 +55,8 @@ pub(crate) fn build_get_page_msg(tag: BufferTag, buf: &mut Vec<u8>) {
     tag.ser_into(buf)
         .expect("serialize BufferTag should always succeed");
 }
+
+pub(crate) fn build_ping_msg(buf: &mut Vec<u8>) {
+    buf.put_u8(b'H');
+    buf.put_u32(4);
+}

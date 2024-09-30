@@ -3,6 +3,7 @@ use std::{
     borrow::Cow,
     cmp::Ordering,
     collections::{BTreeMap, HashMap, HashSet},
+    error::Error,
     ops::Deref,
     path::PathBuf,
     str::FromStr,
@@ -218,9 +219,16 @@ fn passthrough_api_error(node: &Node, e: mgmt_api::Error) -> ApiError {
                 format!("{node} error receiving error body: {str}").into(),
             )
         }
-        mgmt_api::Error::ReceiveBody(str) => {
-            // Presume errors receiving body are connectivity/availability issues
-            ApiError::ResourceUnavailable(format!("{node} error receiving body: {str}").into())
+        mgmt_api::Error::ReceiveBody(err) if err.is_decode() => {
+            // Return 500 for decoding errors.
+            ApiError::InternalServerError(anyhow::Error::from(err).context("error decoding body"))
+        }
+        mgmt_api::Error::ReceiveBody(err) => {
+            // Presume errors receiving body are connectivity/availability issues except for decoding errors
+            let src_str = err.source().map(|e| e.to_string()).unwrap_or_default();
+            ApiError::ResourceUnavailable(
+                format!("{node} error receiving error body: {err} {}", src_str).into(),
+            )
         }
         mgmt_api::Error::ApiError(StatusCode::NOT_FOUND, msg) => {
             ApiError::NotFound(anyhow::anyhow!(format!("{node}: {msg}")).into())
@@ -1257,6 +1265,8 @@ impl Service {
 
         #[cfg(feature = "testing")]
         {
+            use pageserver_api::controller_api::AvailabilityZone;
+
             // Hack: insert scheduler state for all nodes referenced by shards, as compatibility
             // tests only store the shards, not the nodes.  The nodes will be loaded shortly
             // after when pageservers start up and register.
@@ -1274,7 +1284,7 @@ impl Service {
                     123,
                     "".to_string(),
                     123,
-                    "test_az".to_string(),
+                    AvailabilityZone("test_az".to_string()),
                 );
 
                 scheduler.node_upsert(&node);
@@ -2091,7 +2101,7 @@ impl Service {
                     let az_id = locked
                         .nodes
                         .get(&resp.node_id)
-                        .map(|n| n.get_availability_zone_id().to_string())?;
+                        .map(|n| n.get_availability_zone_id().clone())?;
 
                     Some((resp.shard_id, az_id))
                 })
@@ -2621,7 +2631,7 @@ impl Service {
             let scheduler = &mut locked.scheduler;
             // Right now we only perform the operation on a single node without parallelization
             // TODO fan out the operation to multiple nodes for better performance
-            let node_id = scheduler.schedule_shard(&[], &ScheduleContext::default())?;
+            let node_id = scheduler.any_available_node()?;
             let node = locked
                 .nodes
                 .get(&node_id)
@@ -2807,7 +2817,7 @@ impl Service {
 
             // Pick an arbitrary node to use for remote deletions (does not have to be where the tenant
             // was attached, just has to be able to see the S3 content)
-            let node_id = scheduler.schedule_shard(&[], &ScheduleContext::default())?;
+            let node_id = scheduler.any_available_node()?;
             let node = nodes
                 .get(&node_id)
                 .expect("Pageservers may not be deleted while lock is active");
@@ -3498,34 +3508,66 @@ impl Service {
 
     /// When you need to send an HTTP request to the pageserver that holds shard0 of a tenant, this
     /// function looks up and returns node. If the tenant isn't found, returns Err(ApiError::NotFound)
-    pub(crate) fn tenant_shard0_node(
+    pub(crate) async fn tenant_shard0_node(
         &self,
         tenant_id: TenantId,
     ) -> Result<(Node, TenantShardId), ApiError> {
-        let locked = self.inner.read().unwrap();
-        let Some((tenant_shard_id, shard)) = locked
-            .tenants
-            .range(TenantShardId::tenant_range(tenant_id))
-            .next()
+        // Look up in-memory state and maybe use the node from there.
+        {
+            let locked = self.inner.read().unwrap();
+            let Some((tenant_shard_id, shard)) = locked
+                .tenants
+                .range(TenantShardId::tenant_range(tenant_id))
+                .next()
+            else {
+                return Err(ApiError::NotFound(
+                    anyhow::anyhow!("Tenant {tenant_id} not found").into(),
+                ));
+            };
+
+            let Some(intent_node_id) = shard.intent.get_attached() else {
+                tracing::warn!(
+                    tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(),
+                    "Shard not scheduled (policy {:?}), cannot generate pass-through URL",
+                    shard.policy
+                );
+                return Err(ApiError::Conflict(
+                    "Cannot call timeline API on non-attached tenant".to_string(),
+                ));
+            };
+
+            if shard.reconciler.is_none() {
+                // Optimization: while no reconcile is in flight, we may trust our in-memory state
+                // to tell us which pageserver to use. Otherwise we will fall through and hit the database
+                let Some(node) = locked.nodes.get(intent_node_id) else {
+                    // This should never happen
+                    return Err(ApiError::InternalServerError(anyhow::anyhow!(
+                        "Shard refers to nonexistent node"
+                    )));
+                };
+                return Ok((node.clone(), *tenant_shard_id));
+            }
+        };
+
+        // Look up the latest attached pageserver location from the database
+        // generation state: this will reflect the progress of any ongoing migration.
+        // Note that it is not guaranteed to _stay_ here, our caller must still handle
+        // the case where they call through to the pageserver and get a 404.
+        let db_result = self.persistence.tenant_generations(tenant_id).await?;
+        let Some(ShardGenerationState {
+            tenant_shard_id,
+            generation: _,
+            generation_pageserver: Some(node_id),
+        }) = db_result.first()
         else {
-            return Err(ApiError::NotFound(
-                anyhow::anyhow!("Tenant {tenant_id} not found").into(),
+            // This can happen if we raced with a tenant deletion or a shard split.  On a retry
+            // the caller will either succeed (shard split case), get a proper 404 (deletion case),
+            // or a conflict response (case where tenant was detached in background)
+            return Err(ApiError::ResourceUnavailable(
+                "Shard {} not found in database, or is not attached".into(),
             ));
         };
-
-        // TODO: should use the ID last published to compute_hook, rather than the intent: the intent might
-        // point to somewhere we haven't attached yet.
-        let Some(node_id) = shard.intent.get_attached() else {
-            tracing::warn!(
-                tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(),
-                "Shard not scheduled (policy {:?}), cannot generate pass-through URL",
-                shard.policy
-            );
-            return Err(ApiError::Conflict(
-                "Cannot call timeline API on non-attached tenant".to_string(),
-            ));
-        };
-
+        let locked = self.inner.read().unwrap();
         let Some(node) = locked.nodes.get(node_id) else {
             // This should never happen
             return Err(ApiError::InternalServerError(anyhow::anyhow!(
@@ -4471,7 +4513,7 @@ impl Service {
                     let az_id = locked
                         .nodes
                         .get(node_id)
-                        .map(|n| n.get_availability_zone_id().to_string())?;
+                        .map(|n| n.get_availability_zone_id().clone())?;
 
                     Some((*tid, az_id))
                 })

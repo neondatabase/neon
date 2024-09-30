@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::control_plane_client::ControlPlaneGenerationsApi;
+use crate::controller_upcall_client::ControlPlaneGenerationsApi;
 use crate::metrics;
 use crate::tenant::remote_timeline_client::remote_layer_path;
 use crate::tenant::remote_timeline_client::remote_timeline_path;
@@ -622,7 +622,7 @@ impl DeletionQueue {
     /// If remote_storage is None, then the returned workers will also be None.
     pub fn new<C>(
         remote_storage: GenericRemoteStorage,
-        control_plane_client: Option<C>,
+        controller_upcall_client: Option<C>,
         conf: &'static PageServerConf,
     ) -> (Self, Option<DeletionQueueWorkers<C>>)
     where
@@ -662,7 +662,7 @@ impl DeletionQueue {
                     conf,
                     backend_rx,
                     executor_tx,
-                    control_plane_client,
+                    controller_upcall_client,
                     lsn_table.clone(),
                     cancel.clone(),
                 ),
@@ -704,7 +704,7 @@ mod test {
     use tokio::task::JoinHandle;
 
     use crate::{
-        control_plane_client::RetryForeverError,
+        controller_upcall_client::RetryForeverError,
         repository::Key,
         tenant::{harness::TenantHarness, storage_layer::DeltaLayerName},
     };

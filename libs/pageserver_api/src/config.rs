@@ -104,9 +104,6 @@ pub struct ConfigToml {
     pub image_compression: ImageCompressionAlgorithm,
     pub ephemeral_bytes_per_memory_kb: usize,
     pub l0_flush: Option<crate::models::L0FlushConfig>,
-    #[serde(skip_serializing)]
-    // TODO(https://github.com/neondatabase/neon/issues/8184): remove after this field is removed from all pageserver.toml's
-    pub compact_level0_phase1_value_access: serde::de::IgnoredAny,
     pub virtual_file_direct_io: crate::models::virtual_file::DirectIoMode,
     pub io_buffer_alignment: usize,
 }
@@ -171,40 +168,6 @@ impl Default for EvictionOrder {
             highest_layer_count_loses_first: true,
         }
     }
-}
-
-#[derive(
-    Eq,
-    PartialEq,
-    Debug,
-    Copy,
-    Clone,
-    strum_macros::EnumString,
-    strum_macros::Display,
-    serde_with::DeserializeFromStr,
-    serde_with::SerializeDisplay,
-)]
-#[strum(serialize_all = "kebab-case")]
-pub enum GetVectoredImpl {
-    Sequential,
-    Vectored,
-}
-
-#[derive(
-    Eq,
-    PartialEq,
-    Debug,
-    Copy,
-    Clone,
-    strum_macros::EnumString,
-    strum_macros::Display,
-    serde_with::DeserializeFromStr,
-    serde_with::SerializeDisplay,
-)]
-#[strum(serialize_all = "kebab-case")]
-pub enum GetImpl {
-    Legacy,
-    Vectored,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -338,8 +301,6 @@ pub mod defaults {
     pub const DEFAULT_IMAGE_COMPRESSION: ImageCompressionAlgorithm =
         ImageCompressionAlgorithm::Zstd { level: Some(1) };
 
-    pub const DEFAULT_VALIDATE_VECTORED_GET: bool = false;
-
     pub const DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB: usize = 0;
 
     pub const DEFAULT_IO_BUFFER_ALIGNMENT: usize = 512;
@@ -376,7 +337,10 @@ impl Default for ConfigToml {
 
             concurrent_tenant_warmup: (NonZeroUsize::new(DEFAULT_CONCURRENT_TENANT_WARMUP)
                 .expect("Invalid default constant")),
-            concurrent_tenant_size_logical_size_queries: NonZeroUsize::new(1).unwrap(),
+            concurrent_tenant_size_logical_size_queries: NonZeroUsize::new(
+                DEFAULT_CONCURRENT_TENANT_SIZE_LOGICAL_SIZE_QUERIES,
+            )
+            .unwrap(),
             metric_collection_interval: (humantime::parse_duration(
                 DEFAULT_METRIC_COLLECTION_INTERVAL,
             )
@@ -417,7 +381,6 @@ impl Default for ConfigToml {
             image_compression: (DEFAULT_IMAGE_COMPRESSION),
             ephemeral_bytes_per_memory_kb: (DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB),
             l0_flush: None,
-            compact_level0_phase1_value_access: Default::default(),
             virtual_file_direct_io: crate::models::virtual_file::DirectIoMode::default(),
 
             io_buffer_alignment: DEFAULT_IO_BUFFER_ALIGNMENT,
@@ -467,8 +430,6 @@ pub mod tenant_conf_defaults {
     // By default ingest enough WAL for two new L0 layers before checking if new image
     // image layers should be created.
     pub const DEFAULT_IMAGE_LAYER_CREATION_CHECK_THRESHOLD: u8 = 2;
-
-    pub const DEFAULT_INGEST_BATCH_SIZE: u64 = 100;
 }
 
 impl Default for TenantConfigToml {

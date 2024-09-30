@@ -397,6 +397,8 @@ pub struct LatencyTimer {
     protocol: Protocol,
     cold_start_info: ColdStartInfo,
     outcome: ConnectOutcome,
+
+    skip_reporting: bool,
 }
 
 impl LatencyTimer {
@@ -409,6 +411,20 @@ impl LatencyTimer {
             cold_start_info: ColdStartInfo::Unknown,
             // assume failed unless otherwise specified
             outcome: ConnectOutcome::Failed,
+            skip_reporting: false,
+        }
+    }
+
+    pub(crate) fn noop(protocol: Protocol) -> Self {
+        Self {
+            start: time::Instant::now(),
+            stop: None,
+            accumulated: Accumulated::default(),
+            protocol,
+            cold_start_info: ColdStartInfo::Unknown,
+            // assume failed unless otherwise specified
+            outcome: ConnectOutcome::Failed,
+            skip_reporting: true,
         }
     }
 
@@ -443,6 +459,10 @@ pub enum ConnectOutcome {
 
 impl Drop for LatencyTimer {
     fn drop(&mut self) {
+        if self.skip_reporting {
+            return;
+        }
+
         let duration = self
             .stop
             .unwrap_or_else(time::Instant::now)

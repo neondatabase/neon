@@ -525,6 +525,10 @@ impl TestBackend for TestConnectMechanism {
     {
         unimplemented!("not used in tests")
     }
+
+    fn dyn_clone(&self) -> Box<dyn TestBackend> {
+        Box::new(self.clone())
+    }
 }
 
 fn helper_create_cached_node_info(cache: &'static NodeInfoCache) -> CachedNodeInfo {

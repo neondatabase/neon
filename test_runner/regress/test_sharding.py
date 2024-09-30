@@ -200,6 +200,7 @@ def test_sharding_split_compaction(neon_env_builder: NeonEnvBuilder, failpoint: 
         # Disable automatic creation of image layers, as we will create them explicitly when we want them
         "image_creation_threshold": 9999,
         "image_layer_creation_check_threshold": 0,
+        "lsn_lease_length": "0s",
     }
 
     neon_env_builder.storage_controller_config = {

@@ -481,6 +481,7 @@ async fn dump_debug_handler(mut request: Request<Body>) -> Result<Response<Body>
     let mut dump_memory: Option<bool> = None;
     let mut dump_disk_content: Option<bool> = None;
     let mut dump_term_history: Option<bool> = None;
+    let mut dump_wal_last_modified: Option<bool> = None;
     let mut tenant_id: Option<TenantId> = None;
     let mut timeline_id: Option<TimelineId> = None;
 
@@ -494,6 +495,7 @@ async fn dump_debug_handler(mut request: Request<Body>) -> Result<Response<Body>
             "dump_memory" => dump_memory = Some(parse_kv_str(&k, &v)?),
             "dump_disk_content" => dump_disk_content = Some(parse_kv_str(&k, &v)?),
             "dump_term_history" => dump_term_history = Some(parse_kv_str(&k, &v)?),
+            "dump_wal_last_modified" => dump_wal_last_modified = Some(parse_kv_str(&k, &v)?),
             "tenant_id" => tenant_id = Some(parse_kv_str(&k, &v)?),
             "timeline_id" => timeline_id = Some(parse_kv_str(&k, &v)?),
             _ => Err(ApiError::BadRequest(anyhow::anyhow!(
@@ -508,6 +510,7 @@ async fn dump_debug_handler(mut request: Request<Body>) -> Result<Response<Body>
     let dump_memory = dump_memory.unwrap_or(dump_all);
     let dump_disk_content = dump_disk_content.unwrap_or(dump_all);
     let dump_term_history = dump_term_history.unwrap_or(true);
+    let dump_wal_last_modified = dump_wal_last_modified.unwrap_or(dump_all);
 
     let args = debug_dump::Args {
         dump_all,
@@ -515,6 +518,7 @@ async fn dump_debug_handler(mut request: Request<Body>) -> Result<Response<Body>
         dump_memory,
         dump_disk_content,
         dump_term_history,
+        dump_wal_last_modified,
         tenant_id,
         timeline_id,
     };

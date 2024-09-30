@@ -1,7 +1,11 @@
 openapi: "3.0.2"
 info:
   title: Safekeeper control API
+  description: Neon Safekeeper API
   version: "1.0"
+  license:
+    name: "Apache"
+    url: https://github.com/neondatabase/neon/blob/main/LICENSE
 
 
 servers:
@@ -381,6 +385,12 @@ components:
     #
 
     GenericErrorContent:
+      type: object
+      properties:
+        msg:
+          type: string
+
+    NotFoundError:
       type: object
       properties:
         msg:

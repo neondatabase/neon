@@ -204,6 +204,7 @@ def test_scrubber_physical_gc_ancestors(
             # No PITR, so that as soon as child shards generate an image layer, it covers ancestor deltas
             # and makes them GC'able
             "pitr_interval": "0s",
+            "lsn_lease_length": "0s",
         },
     )
 

@@ -12,6 +12,7 @@ use pageserver_api::controller_api::MetadataHealthUpdateRequest;
 use pageserver_api::shard::TenantShardId;
 use remote_storage::GenericRemoteStorage;
 use serde::Serialize;
+use tracing::{info_span, Instrument};
 use utils::id::TenantId;
 use utils::shard::ShardCount;
 
@@ -169,45 +170,54 @@ pub async fn scan_pageserver_metadata(
         let mut timeline_ids = HashSet::new();
         let mut timeline_generations = HashMap::new();
         for (ttid, data) in timelines {
-            if ttid.tenant_shard_id.shard_count == highest_shard_count {
-                // Only analyze `TenantShardId`s with highest shard count.
+            async {
+                if ttid.tenant_shard_id.shard_count == highest_shard_count {
+                    // Only analyze `TenantShardId`s with highest shard count.
 
-                // Stash the generation of each timeline, for later use identifying orphan layers
-                if let BlobDataParseResult::Parsed {
-                    index_part,
-                    index_part_generation,
-                    s3_layers: _s3_layers,
-                } = &data.blob_data
-                {
-                    if index_part.deleted_at.is_some() {
-                        // skip deleted timeline.
-                        tracing::info!("Skip analysis of {} b/c timeline is already deleted", ttid);
-                        continue;
+                    // Stash the generation of each timeline, for later use identifying orphan layers
+                    if let BlobDataParseResult::Parsed {
+                        index_part,
+                        index_part_generation,
+                        s3_layers: _s3_layers,
+                    } = &data.blob_data
+                    {
+                        if index_part.deleted_at.is_some() {
+                            // skip deleted timeline.
+                            tracing::info!(
+                                "Skip analysis of {} b/c timeline is already deleted",
+                                ttid
+                            );
+                            return;
+                        }
+                        timeline_generations.insert(ttid, *index_part_generation);
                     }
-                    timeline_generations.insert(ttid, *index_part_generation);
+
+                    // Apply checks to this timeline shard's metadata, and in the process update `tenant_objects`
+                    // reference counts for layers across the tenant.
+                    let analysis = branch_cleanup_and_check_errors(
+                        remote_client,
+                        &ttid,
+                        &mut tenant_objects,
+                        None,
+                        None,
+                        Some(data),
+                    )
+                    .await;
+                    summary.update_analysis(&ttid, &analysis);
+
+                    timeline_ids.insert(ttid.timeline_id);
+                } else {
+                    tracing::info!(
+                        "Skip analysis of {} b/c a lower shard count than {}",
+                        ttid,
+                        highest_shard_count.0,
+                    );
                 }
-
-                // Apply checks to this timeline shard's metadata, and in the process update `tenant_objects`
-                // reference counts for layers across the tenant.
-                let analysis = branch_cleanup_and_check_errors(
-                    remote_client,
-                    &ttid,
-                    &mut tenant_objects,
-                    None,
-                    None,
-                    Some(data),
-                )
-                .await;
-                summary.update_analysis(&ttid, &analysis);
-
-                timeline_ids.insert(ttid.timeline_id);
-            } else {
-                tracing::info!(
-                    "Skip analysis of {} b/c a lower shard count than {}",
-                    ttid,
-                    highest_shard_count.0,
-                );
             }
+            .instrument(
+                info_span!("analyze-timeline", shard = %ttid.tenant_shard_id.shard_slug(), timeline = %ttid.timeline_id),
+            )
+            .await
         }
 
         summary.timeline_count += timeline_ids.len();
@@ -278,6 +288,7 @@ pub async fn scan_pageserver_metadata(
                         timelines,
                         highest_shard_count,
                     )
+                    .instrument(info_span!("analyze-tenant", tenant = %prev_tenant_id))
                     .await;
                     tenant_id = Some(ttid.tenant_shard_id.tenant_id);
                     highest_shard_count = ttid.tenant_shard_id.shard_count;
@@ -306,15 +317,18 @@ pub async fn scan_pageserver_metadata(
         tenant_timeline_results.push((ttid, data));
     }
 
+    let tenant_id = tenant_id.expect("Must be set if results are present");
+
     if !tenant_timeline_results.is_empty() {
         analyze_tenant(
             &remote_client,
-            tenant_id.expect("Must be set if results are present"),
+            tenant_id,
             &mut summary,
             tenant_objects,
             tenant_timeline_results,
             highest_shard_count,
         )
+        .instrument(info_span!("analyze-tenant", tenant = %tenant_id))
         .await;
     }
 

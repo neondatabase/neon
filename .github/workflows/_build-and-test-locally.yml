@@ -236,9 +236,7 @@ jobs:
 
           # run pageserver tests with different settings
           for io_engine in std-fs tokio-epoll-uring ; do
-            for io_buffer_alignment in 0 1 512 ; do
-              NEON_PAGESERVER_UNIT_TEST_VIRTUAL_FILE_IOENGINE=$io_engine NEON_PAGESERVER_UNIT_TEST_IO_BUFFER_ALIGNMENT=$io_buffer_alignment ${cov_prefix} cargo nextest run $CARGO_FLAGS $CARGO_FEATURES  -E 'package(pageserver)'
-            done
+            NEON_PAGESERVER_UNIT_TEST_VIRTUAL_FILE_IOENGINE=$io_engine ${cov_prefix} cargo nextest run $CARGO_FLAGS $CARGO_FEATURES  -E 'package(pageserver)'
           done
 
           # Run separate tests for real S3
@@ -257,7 +255,15 @@ jobs:
           ${cov_prefix} cargo nextest run $CARGO_FLAGS $CARGO_FEATURES -E 'package(remote_storage)' -E 'test(test_real_azure)'
 
       - name: Install postgres binaries
-        run: cp -a pg_install /tmp/neon/pg_install
+        run: |
+          # Use tar to copy files matching the pattern, preserving the paths in the destionation
+          tar c \
+            pg_install/v* \
+            pg_install/build/*/src/test/regress/*.so \
+            pg_install/build/*/src/test/regress/pg_regress \
+            pg_install/build/*/src/test/isolation/isolationtester \
+            pg_install/build/*/src/test/isolation/pg_isolation_regress \
+            | tar  x -C /tmp/neon
 
       - name: Upload Neon artifact
         uses: ./.github/actions/upload

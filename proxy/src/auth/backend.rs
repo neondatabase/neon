@@ -80,6 +80,14 @@ pub(crate) trait TestBackend: Send + Sync + 'static {
     fn get_allowed_ips_and_secret(
         &self,
     ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), console::errors::GetAuthInfoError>;
+    fn dyn_clone(&self) -> Box<dyn TestBackend>;
+}
+
+#[cfg(test)]
+impl Clone for Box<dyn TestBackend> {
+    fn clone(&self) -> Self {
+        TestBackend::dyn_clone(&**self)
+    }
 }
 
 impl std::fmt::Display for Backend<'_, (), ()> {
@@ -163,6 +171,7 @@ impl ComputeUserInfo {
 }
 
 pub(crate) enum ComputeCredentialKeys {
+    #[cfg(any(test, feature = "testing"))]
     Password(Vec<u8>),
     AuthKeys(AuthKeys),
     None,
@@ -293,16 +302,10 @@ async fn auth_quirks(
     // We now expect to see a very specific payload in the place of password.
     let (info, unauthenticated_password) = match user_info.try_into() {
         Err(info) => {
-            let res = hacks::password_hack_no_authentication(ctx, info, client).await?;
-
-            ctx.set_endpoint_id(res.info.endpoint.clone());
-            let password = match res.keys {
-                ComputeCredentialKeys::Password(p) => p,
-                ComputeCredentialKeys::AuthKeys(_) | ComputeCredentialKeys::None => {
-                    unreachable!("password hack should return a password")
-                }
-            };
-            (res.info, Some(password))
+            let (info, password) =
+                hacks::password_hack_no_authentication(ctx, info, client).await?;
+            ctx.set_endpoint_id(info.endpoint.clone());
+            (info, Some(password))
         }
         Ok(info) => (info, None),
     };
@@ -449,7 +452,7 @@ impl<'a> Backend<'a, ComputeUserInfoMaybeEndpoint, &()> {
             Self::Web(url, ()) => {
                 info!("performing web authentication");
 
-                let info = web::authenticate(ctx, &url, client).await?;
+                let info = web::authenticate(ctx, config, &url, client).await?;
 
                 Backend::Web(url, info)
             }
@@ -588,6 +591,14 @@ mod tests {
                 CachedAllowedIps::new_uncached(Arc::new(self.ips.clone())),
                 Some(CachedRoleSecret::new_uncached(Some(self.secret.clone()))),
             ))
+        }
+
+        async fn get_endpoint_jwks(
+            &self,
+            _ctx: &RequestMonitoring,
+            _endpoint: crate::EndpointId,
+        ) -> anyhow::Result<Vec<super::jwt::AuthRule>> {
+            unimplemented!()
         }
 
         async fn wake_compute(

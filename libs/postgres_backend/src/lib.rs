@@ -280,16 +280,6 @@ pub struct PostgresBackend<IO> {
 
 pub type PostgresBackendTCP = PostgresBackend<tokio::net::TcpStream>;
 
-pub fn query_from_cstring(query_string: Bytes) -> Vec<u8> {
-    let mut query_string = query_string.to_vec();
-    if let Some(ch) = query_string.last() {
-        if *ch == 0 {
-            query_string.pop();
-        }
-    }
-    query_string
-}
-
 /// Cast a byte slice to a string slice, dropping null terminator if there's one.
 fn cstr_to_str(bytes: &[u8]) -> anyhow::Result<&str> {
     let without_null = bytes.strip_suffix(&[0]).unwrap_or(bytes);
@@ -994,6 +984,7 @@ pub fn short_error(e: &QueryError) -> String {
 }
 
 fn log_query_error(query: &str, e: &QueryError) {
+    // If you want to change the log level of a specific error, also re-categorize it in `BasebackupQueryTimeOngoingRecording`.
     match e {
         QueryError::Disconnected(ConnectionError::Io(io_error)) => {
             if is_expected_io_error(io_error) {

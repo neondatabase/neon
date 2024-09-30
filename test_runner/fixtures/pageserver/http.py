@@ -631,7 +631,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         log.info(
             f"requesting timeline archival config {config} for tenant {tenant_id} and timeline {timeline_id}"
         )
-        res = self.post(
+        res = self.put(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/archival_config",
             json=config,
         )

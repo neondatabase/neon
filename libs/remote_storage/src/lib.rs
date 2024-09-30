@@ -127,10 +127,6 @@ impl RemotePath {
         &self.0
     }
 
-    pub fn extension(&self) -> Option<&str> {
-        self.0.extension()
-    }
-
     pub fn strip_prefix(&self, p: &RemotePath) -> Result<&Utf8Path, std::path::StripPrefixError> {
         self.0.strip_prefix(&p.0)
     }

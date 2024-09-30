@@ -8,7 +8,6 @@ license.workspace = true
 aws-sdk-s3.workspace = true
 either.workspace = true
 anyhow.workspace = true
-git-version.workspace = true
 hex.workspace = true
 humantime.workspace = true
 serde.workspace = true

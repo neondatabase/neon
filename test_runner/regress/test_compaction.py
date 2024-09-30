@@ -240,6 +240,7 @@ def test_uploads_and_deletions(
         "image_creation_threshold": "1",
         "image_layer_creation_check_threshold": "0",
         "compaction_algorithm": json.dumps({"kind": compaction_algorithm.value}),
+        "lsn_lease_length": "0s",
     }
     env = neon_env_builder.init_start(initial_tenant_conf=tenant_conf)
 

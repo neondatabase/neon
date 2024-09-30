@@ -43,6 +43,13 @@ impl ThreadPool {
     pub fn new(n_workers: u8) -> Arc<Self> {
         // rayon would be nice here, but yielding in rayon does not work well afaict.
 
+        if n_workers == 0 {
+            return Arc::new(Self {
+                runtime: None,
+                metrics: Arc::new(ThreadPoolMetrics::new(n_workers as usize)),
+            });
+        }
+
         Arc::new_cyclic(|pool| {
             let pool = pool.clone();
             let worker_id = AtomicUsize::new(0);

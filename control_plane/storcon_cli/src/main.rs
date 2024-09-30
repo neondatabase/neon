@@ -4,8 +4,8 @@ use std::{str::FromStr, time::Duration};
 use clap::{Parser, Subcommand};
 use pageserver_api::{
     controller_api::{
-        NodeAvailabilityWrapper, NodeDescribeResponse, NodeShardResponse, ShardSchedulingPolicy,
-        TenantCreateRequest, TenantDescribeResponse, TenantPolicyRequest,
+        AvailabilityZone, NodeAvailabilityWrapper, NodeDescribeResponse, NodeShardResponse,
+        ShardSchedulingPolicy, TenantCreateRequest, TenantDescribeResponse, TenantPolicyRequest,
     },
     models::{
         EvictionPolicy, EvictionPolicyLayerAccessThreshold, LocationConfigSecondary,
@@ -339,7 +339,7 @@ async fn main() -> anyhow::Result<()> {
                         listen_pg_port,
                         listen_http_addr,
                         listen_http_port,
-                        availability_zone_id,
+                        availability_zone_id: AvailabilityZone(availability_zone_id),
                     }),
                 )
                 .await?;

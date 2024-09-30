@@ -174,8 +174,7 @@ def test_pageserver_chaos(
             "checkpoint_distance": "5000000",
         }
     )
-    env.neon_cli.create_timeline("test_pageserver_chaos", tenant_id=tenant)
-    endpoint = env.endpoints.create_start("test_pageserver_chaos", tenant_id=tenant)
+    endpoint = env.endpoints.create_start("main", tenant_id=tenant)
 
     # Create table, and insert some rows. Make it big enough that it doesn't fit in
     # shared_buffers, otherwise the SELECT after restart will just return answer

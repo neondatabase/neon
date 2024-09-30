@@ -113,7 +113,7 @@ impl SafekeeperNode {
 
     pub async fn start(
         &self,
-        extra_opts: Vec<String>,
+        extra_opts: &[String],
         retry_timeout: &Duration,
     ) -> anyhow::Result<()> {
         print!(
@@ -196,7 +196,7 @@ impl SafekeeperNode {
             ]);
         }
 
-        args.extend(extra_opts);
+        args.extend_from_slice(extra_opts);
 
         background_process::start_process(
             &format!("safekeeper-{id}"),

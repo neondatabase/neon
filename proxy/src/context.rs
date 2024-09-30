@@ -79,6 +79,40 @@ pub(crate) enum AuthMethod {
     Cleartext,
 }
 
+impl Clone for RequestMonitoring {
+    fn clone(&self) -> Self {
+        let inner = self.0.try_lock().expect("should not deadlock");
+        let new = RequestMonitoringInner {
+            peer_addr: inner.peer_addr,
+            session_id: inner.session_id,
+            protocol: inner.protocol,
+            first_packet: inner.first_packet,
+            region: inner.region,
+            span: info_span!("background_task"),
+
+            project: inner.project,
+            branch: inner.branch,
+            endpoint_id: inner.endpoint_id.clone(),
+            dbname: inner.dbname.clone(),
+            user: inner.user.clone(),
+            application: inner.application.clone(),
+            error_kind: inner.error_kind,
+            auth_method: inner.auth_method.clone(),
+            success: inner.success,
+            rejected: inner.rejected,
+            cold_start_info: inner.cold_start_info,
+            pg_options: inner.pg_options.clone(),
+
+            sender: None,
+            disconnect_sender: None,
+            latency_timer: LatencyTimer::noop(inner.protocol),
+            disconnect_timestamp: inner.disconnect_timestamp,
+        };
+
+        Self(TryLock::new(new))
+    }
+}
+
 impl RequestMonitoring {
     pub fn new(
         session_id: Uuid,

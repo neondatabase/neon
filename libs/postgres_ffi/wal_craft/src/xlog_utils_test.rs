@@ -4,6 +4,7 @@ use super::*;
 use crate::{error, info};
 use regex::Regex;
 use std::cmp::min;
+use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::Write;
 use std::{env, str::FromStr};
@@ -54,7 +55,7 @@ fn test_end_of_wal<C: crate::Crafter>(test_name: &str) {
         .wal_dir()
         .read_dir()
         .unwrap()
-        .map(|f| f.unwrap().file_name().into_string().unwrap())
+        .map(|f| f.unwrap().file_name())
         .filter(|fname| IsXLogFileName(fname))
         .max()
         .unwrap();
@@ -70,11 +71,11 @@ fn test_end_of_wal<C: crate::Crafter>(test_name: &str) {
             start_lsn
         );
         for file in fs::read_dir(cfg.wal_dir()).unwrap().flatten() {
-            let fname = file.file_name().into_string().unwrap();
+            let fname = file.file_name();
             if !IsXLogFileName(&fname) {
                 continue;
             }
-            let (segno, _) = XLogFromFileName(&fname, WAL_SEGMENT_SIZE);
+            let (segno, _) = XLogFromFileName(&fname, WAL_SEGMENT_SIZE).unwrap();
             let seg_start_lsn = XLogSegNoOffsetToRecPtr(segno, 0, WAL_SEGMENT_SIZE);
             if seg_start_lsn > u64::from(*start_lsn) {
                 continue;
@@ -93,10 +94,10 @@ fn test_end_of_wal<C: crate::Crafter>(test_name: &str) {
     }
 }
 
-fn find_pg_waldump_end_of_wal(cfg: &crate::Conf, last_segment: &str) -> Lsn {
+fn find_pg_waldump_end_of_wal(cfg: &crate::Conf, last_segment: &OsStr) -> Lsn {
     // Get the actual end of WAL by pg_waldump
     let waldump_output = cfg
-        .pg_waldump("000000010000000000000001", last_segment)
+        .pg_waldump(OsStr::new("000000010000000000000001"), last_segment)
         .unwrap()
         .stderr;
     let waldump_output = std::str::from_utf8(&waldump_output).unwrap();
@@ -117,7 +118,7 @@ fn find_pg_waldump_end_of_wal(cfg: &crate::Conf, last_segment: &str) -> Lsn {
 
 fn check_end_of_wal(
     cfg: &crate::Conf,
-    last_segment: &str,
+    last_segment: &OsStr,
     start_lsn: Lsn,
     expected_end_of_wal: Lsn,
 ) {
@@ -132,7 +133,8 @@ fn check_end_of_wal(
     // Rename file to partial to actually find last valid lsn, then rename it back.
     fs::rename(
         cfg.wal_dir().join(last_segment),
-        cfg.wal_dir().join(format!("{}.partial", last_segment)),
+        cfg.wal_dir()
+            .join(format!("{}.partial", last_segment.to_str().unwrap())),
     )
     .unwrap();
     let wal_end = find_end_of_wal(&cfg.wal_dir(), WAL_SEGMENT_SIZE, start_lsn).unwrap();
@@ -142,7 +144,8 @@ fn check_end_of_wal(
     );
     assert_eq!(wal_end, expected_end_of_wal);
     fs::rename(
-        cfg.wal_dir().join(format!("{}.partial", last_segment)),
+        cfg.wal_dir()
+            .join(format!("{}.partial", last_segment.to_str().unwrap())),
         cfg.wal_dir().join(last_segment),
     )
     .unwrap();

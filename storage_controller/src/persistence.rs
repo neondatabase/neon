@@ -9,6 +9,7 @@ use diesel::pg::PgConnection;
 use diesel::prelude::*;
 use diesel::Connection;
 use itertools::Itertools;
+use pageserver_api::controller_api::AvailabilityZone;
 use pageserver_api::controller_api::MetadataHealthRecord;
 use pageserver_api::controller_api::ShardSchedulingPolicy;
 use pageserver_api::controller_api::{NodeSchedulingPolicy, PlacementPolicy};
@@ -667,8 +668,8 @@ impl Persistence {
 
     pub(crate) async fn set_tenant_shard_preferred_azs(
         &self,
-        preferred_azs: Vec<(TenantShardId, String)>,
-    ) -> DatabaseResult<Vec<(TenantShardId, String)>> {
+        preferred_azs: Vec<(TenantShardId, AvailabilityZone)>,
+    ) -> DatabaseResult<Vec<(TenantShardId, AvailabilityZone)>> {
         use crate::schema::tenant_shards::dsl::*;
 
         self.with_measured_conn(DatabaseOperation::SetPreferredAzs, move |conn| {
@@ -679,7 +680,7 @@ impl Persistence {
                     .filter(tenant_id.eq(tenant_shard_id.tenant_id.to_string()))
                     .filter(shard_number.eq(tenant_shard_id.shard_number.0 as i32))
                     .filter(shard_count.eq(tenant_shard_id.shard_count.literal() as i32))
-                    .set(preferred_az_id.eq(preferred_az))
+                    .set(preferred_az_id.eq(preferred_az.0.clone()))
                     .execute(conn)?;
 
                 if updated == 1 {

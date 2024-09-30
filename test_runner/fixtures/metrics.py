@@ -102,6 +102,11 @@ def histogram(prefix_without_trailing_underscore: str) -> List[str]:
     return [f"{prefix_without_trailing_underscore}_{x}" for x in ["bucket", "count", "sum"]]
 
 
+def counter(name: str) -> str:
+    # the prometheus_client package appends _total to all counters client-side
+    return f"{name}_total"
+
+
 PAGESERVER_PER_TENANT_REMOTE_TIMELINE_CLIENT_METRICS: Tuple[str, ...] = (
     "pageserver_remote_timeline_client_calls_started_total",
     "pageserver_remote_timeline_client_calls_finished_total",
@@ -132,9 +137,14 @@ PAGESERVER_GLOBAL_METRICS: Tuple[str, ...] = (
     *histogram("pageserver_wait_lsn_seconds"),
     *histogram("pageserver_remote_operation_seconds"),
     *histogram("pageserver_io_operations_seconds"),
+    "pageserver_smgr_query_started_global_count_total",
     "pageserver_tenant_states_count",
     "pageserver_circuit_breaker_broken_total",
     "pageserver_circuit_breaker_unbroken_total",
+    counter("pageserver_tenant_throttling_count_accounted_start_global"),
+    counter("pageserver_tenant_throttling_count_accounted_finish_global"),
+    counter("pageserver_tenant_throttling_wait_usecs_sum_global"),
+    counter("pageserver_tenant_throttling_count_global"),
 )
 
 PAGESERVER_PER_TENANT_METRICS: Tuple[str, ...] = (
@@ -146,6 +156,7 @@ PAGESERVER_PER_TENANT_METRICS: Tuple[str, ...] = (
     "pageserver_smgr_query_seconds_bucket",
     "pageserver_smgr_query_seconds_count",
     "pageserver_smgr_query_seconds_sum",
+    "pageserver_smgr_query_started_count_total",
     "pageserver_archive_size",
     "pageserver_pitr_history_size",
     "pageserver_layer_bytes",
@@ -157,6 +168,10 @@ PAGESERVER_PER_TENANT_METRICS: Tuple[str, ...] = (
     "pageserver_evictions_with_low_residence_duration_total",
     "pageserver_aux_file_estimated_size",
     "pageserver_valid_lsn_lease_count",
+    counter("pageserver_tenant_throttling_count_accounted_start"),
+    counter("pageserver_tenant_throttling_count_accounted_finish"),
+    counter("pageserver_tenant_throttling_wait_usecs_sum"),
+    counter("pageserver_tenant_throttling_count"),
     *PAGESERVER_PER_TENANT_REMOTE_TIMELINE_CLIENT_METRICS,
     # "pageserver_directory_entries_count", -- only used if above a certain threshold
     # "pageserver_broken_tenants_count" -- used only for broken

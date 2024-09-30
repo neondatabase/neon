@@ -1,4 +1,4 @@
-use std::{collections::HashMap, net::SocketAddr};
+use std::net::SocketAddr;
 
 use anyhow::Context;
 use arc_swap::ArcSwapOption;
@@ -9,8 +9,9 @@ use crate::{
         messages::{ColdStartInfo, EndpointJwksResponse, MetricsAuxInfo},
         NodeInfo,
     },
-    intern::{BranchIdInt, BranchIdTag, EndpointIdTag, InternId, ProjectIdInt, ProjectIdTag},
-    RoleName,
+    context::RequestMonitoring,
+    intern::{BranchIdTag, EndpointIdTag, InternId, ProjectIdTag},
+    EndpointId,
 };
 
 use super::jwt::{AuthRule, FetchAuthRules, JwkCache};
@@ -47,21 +48,17 @@ impl LocalBackend {
 #[derive(Clone, Copy)]
 pub(crate) struct StaticAuthRules;
 
-pub static JWKS_ROLE_MAP: ArcSwapOption<JwksRoleSettings> = ArcSwapOption::const_empty();
-
-#[derive(Debug, Clone)]
-pub struct JwksRoleSettings {
-    pub roles: HashMap<RoleName, EndpointJwksResponse>,
-    pub project_id: ProjectIdInt,
-    pub branch_id: BranchIdInt,
-}
+pub static JWKS_ROLE_MAP: ArcSwapOption<EndpointJwksResponse> = ArcSwapOption::const_empty();
 
 impl FetchAuthRules for StaticAuthRules {
-    async fn fetch_auth_rules(&self, role_name: RoleName) -> anyhow::Result<Vec<AuthRule>> {
+    async fn fetch_auth_rules(
+        &self,
+        _ctx: &RequestMonitoring,
+        _endpoint: EndpointId,
+    ) -> anyhow::Result<Vec<AuthRule>> {
         let mappings = JWKS_ROLE_MAP.load();
         let role_mappings = mappings
             .as_deref()
-            .and_then(|m| m.roles.get(&role_name))
             .context("JWKs settings for this role were not configured")?;
         let mut rules = vec![];
         for setting in &role_mappings.jwks {
@@ -69,6 +66,7 @@ impl FetchAuthRules for StaticAuthRules {
                 id: setting.id.clone(),
                 jwks_url: setting.jwks_url.clone(),
                 audience: setting.jwt_audience.clone(),
+                role_names: setting.role_names.clone(),
             });
         }
 

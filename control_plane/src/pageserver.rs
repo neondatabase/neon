@@ -17,9 +17,7 @@ use std::time::Duration;
 
 use anyhow::{bail, Context};
 use camino::Utf8PathBuf;
-use pageserver_api::models::{
-    self, AuxFilePolicy, LocationConfig, TenantHistorySize, TenantInfo, TimelineInfo,
-};
+use pageserver_api::models::{self, AuxFilePolicy, TenantInfo, TimelineInfo};
 use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api;
 use postgres_backend::AuthType;
@@ -324,22 +322,6 @@ impl PageServerNode {
         background_process::stop_process(immediate, "pageserver", &self.pid_file())
     }
 
-    pub async fn page_server_psql_client(
-        &self,
-    ) -> anyhow::Result<(
-        tokio_postgres::Client,
-        tokio_postgres::Connection<tokio_postgres::Socket, tokio_postgres::tls::NoTlsStream>,
-    )> {
-        let mut config = self.pg_connection_config.clone();
-        if self.conf.pg_auth_type == AuthType::NeonJWT {
-            let token = self
-                .env
-                .generate_auth_token(&Claims::new(None, Scope::PageServerApi))?;
-            config = config.set_password(Some(token));
-        }
-        Ok(config.connect_no_tls().await?)
-    }
-
     pub async fn check_status(&self) -> mgmt_api::Result<()> {
         self.http_client.status().await
     }
@@ -540,19 +522,6 @@ impl PageServerNode {
         Ok(())
     }
 
-    pub async fn location_config(
-        &self,
-        tenant_shard_id: TenantShardId,
-        config: LocationConfig,
-        flush_ms: Option<Duration>,
-        lazy: bool,
-    ) -> anyhow::Result<()> {
-        Ok(self
-            .http_client
-            .location_config(tenant_shard_id, config, flush_ms, lazy)
-            .await?)
-    }
-
     pub async fn timeline_list(
         &self,
         tenant_shard_id: &TenantShardId,
@@ -635,15 +604,5 @@ impl PageServerNode {
         }
 
         Ok(())
-    }
-
-    pub async fn tenant_synthetic_size(
-        &self,
-        tenant_shard_id: TenantShardId,
-    ) -> anyhow::Result<TenantHistorySize> {
-        Ok(self
-            .http_client
-            .tenant_synthetic_size(tenant_shard_id)
-            .await?)
     }
 }

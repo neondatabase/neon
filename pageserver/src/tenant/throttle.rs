@@ -24,8 +24,10 @@ use crate::{context::RequestContext, task_mgr::TaskKind};
 pub struct Throttle<M: Metric> {
     inner: ArcSwap<Inner>,
     metric: M,
-    /// will be turned into [`Stats::count_accounted`]
-    count_accounted: AtomicU64,
+    /// will be turned into [`Stats::count_accounted_start`]
+    count_accounted_start: AtomicU64,
+    /// will be turned into [`Stats::count_accounted_finish`]
+    count_accounted_finish: AtomicU64,
     /// will be turned into [`Stats::count_throttled`]
     count_throttled: AtomicU64,
     /// will be turned into [`Stats::sum_throttled_usecs`]
@@ -43,17 +45,21 @@ pub struct Observation {
     pub wait_time: Duration,
 }
 pub trait Metric {
+    fn accounting_start(&self);
+    fn accounting_finish(&self);
     fn observe_throttling(&self, observation: &Observation);
 }
 
 /// See [`Throttle::reset_stats`].
 pub struct Stats {
-    // Number of requests that were subject to throttling, i.e., requests of the configured [`Config::task_kinds`].
-    pub count_accounted: u64,
-    // Subset of the `accounted` requests that were actually throttled.
-    // Note that the numbers are stored as two independent atomics, so, there might be a slight drift.
+    /// Number of requests that started [`Throttle::throttle`] calls.
+    pub count_accounted_start: u64,
+    /// Number of requests that finished [`Throttle::throttle`] calls.
+    pub count_accounted_finish: u64,
+    /// Subset of the `accounted` requests that were actually throttled.
+    /// Note that the numbers are stored as two independent atomics, so, there might be a slight drift.
     pub count_throttled: u64,
-    // Sum of microseconds that throttled requests spent waiting for throttling.
+    /// Sum of microseconds that throttled requests spent waiting for throttling.
     pub sum_throttled_usecs: u64,
 }
 
@@ -65,7 +71,8 @@ where
         Self {
             inner: ArcSwap::new(Arc::new(Self::new_inner(config))),
             metric,
-            count_accounted: AtomicU64::new(0),
+            count_accounted_start: AtomicU64::new(0),
+            count_accounted_finish: AtomicU64::new(0),
             count_throttled: AtomicU64::new(0),
             sum_throttled_usecs: AtomicU64::new(0),
         }
@@ -117,11 +124,13 @@ where
     /// This method allows retrieving & resetting that flag.
     /// Useful for periodic reporting.
     pub fn reset_stats(&self) -> Stats {
-        let count_accounted = self.count_accounted.swap(0, Ordering::Relaxed);
+        let count_accounted_start = self.count_accounted_start.swap(0, Ordering::Relaxed);
+        let count_accounted_finish = self.count_accounted_finish.swap(0, Ordering::Relaxed);
         let count_throttled = self.count_throttled.swap(0, Ordering::Relaxed);
         let sum_throttled_usecs = self.sum_throttled_usecs.swap(0, Ordering::Relaxed);
         Stats {
-            count_accounted,
+            count_accounted_start,
+            count_accounted_finish,
             count_throttled,
             sum_throttled_usecs,
         }
@@ -139,9 +148,12 @@ where
         };
         let start = std::time::Instant::now();
 
+        self.metric.accounting_start();
+        self.count_accounted_start.fetch_add(1, Ordering::Relaxed);
         let did_throttle = inner.rate_limiter.acquire(key_count).await;
+        self.count_accounted_finish.fetch_add(1, Ordering::Relaxed);
+        self.metric.accounting_finish();
 
-        self.count_accounted.fetch_add(1, Ordering::Relaxed);
         if did_throttle {
             self.count_throttled.fetch_add(1, Ordering::Relaxed);
             let now = Instant::now();

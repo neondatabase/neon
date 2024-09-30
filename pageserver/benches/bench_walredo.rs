@@ -1,7 +1,7 @@
 //! Quantify a single walredo manager's throughput under N concurrent callers.
 //!
 //! The benchmark implementation ([`bench_impl`]) is parametrized by
-//! - `redo_work` => [`Request::short_request`] or [`Request::medium_request`]
+//! - `redo_work` => an async closure that takes a `PostgresRedoManager` and performs one redo
 //! - `n_redos` => number of times the benchmark shell execute the `redo_work`
 //! - `nclients` => number of clients (more on this shortly).
 //!
@@ -10,7 +10,7 @@
 //! Each task executes the `redo_work` `n_redos/nclients` times.
 //!
 //! We exercise the following combinations:
-//! - `redo_work = short / medium``
+//! - `redo_work = ping / short / medium``
 //! - `nclients = [1, 2, 4, 8, 16, 32, 64, 128]`
 //!
 //! We let `criterion` determine the `n_redos` using `iter_custom`.
@@ -27,33 +27,43 @@
 //!
 //! # Reference Numbers
 //!
-//! 2024-04-15 on i3en.3xlarge
+//! 2024-09-18 on im4gn.2xlarge
 //!
 //! ```text
-//! short/1           time:   [24.584 µs 24.737 µs 24.922 µs]
-//! short/2           time:   [33.479 µs 33.660 µs 33.888 µs]
-//! short/4           time:   [42.713 µs 43.046 µs 43.440 µs]
-//! short/8           time:   [71.814 µs 72.478 µs 73.240 µs]
-//! short/16          time:   [132.73 µs 134.45 µs 136.22 µs]
-//! short/32          time:   [258.31 µs 260.73 µs 263.27 µs]
-//! short/64          time:   [511.61 µs 514.44 µs 517.51 µs]
-//! short/128         time:   [992.64 µs 998.23 µs 1.0042 ms]
-//! medium/1          time:   [110.11 µs 110.50 µs 110.96 µs]
-//! medium/2          time:   [153.06 µs 153.85 µs 154.99 µs]
-//! medium/4          time:   [317.51 µs 319.92 µs 322.85 µs]
-//! medium/8          time:   [638.30 µs 644.68 µs 652.12 µs]
-//! medium/16         time:   [1.2651 ms 1.2773 ms 1.2914 ms]
-//! medium/32         time:   [2.5117 ms 2.5410 ms 2.5720 ms]
-//! medium/64         time:   [4.8088 ms 4.8555 ms 4.9047 ms]
-//! medium/128        time:   [8.8311 ms 8.9849 ms 9.1263 ms]
+//! ping/1                  time:   [21.789 µs 21.918 µs 22.078 µs]
+//! ping/2                  time:   [27.686 µs 27.812 µs 27.970 µs]
+//! ping/4                  time:   [35.468 µs 35.671 µs 35.926 µs]
+//! ping/8                  time:   [59.682 µs 59.987 µs 60.363 µs]
+//! ping/16                 time:   [101.79 µs 102.37 µs 103.08 µs]
+//! ping/32                 time:   [184.18 µs 185.15 µs 186.36 µs]
+//! ping/64                 time:   [349.86 µs 351.45 µs 353.47 µs]
+//! ping/128                time:   [684.53 µs 687.98 µs 692.17 µs]
+//! short/1                 time:   [31.833 µs 32.126 µs 32.428 µs]
+//! short/2                 time:   [35.558 µs 35.756 µs 35.992 µs]
+//! short/4                 time:   [44.850 µs 45.138 µs 45.484 µs]
+//! short/8                 time:   [65.985 µs 66.379 µs 66.853 µs]
+//! short/16                time:   [127.06 µs 127.90 µs 128.87 µs]
+//! short/32                time:   [252.98 µs 254.70 µs 256.73 µs]
+//! short/64                time:   [497.13 µs 499.86 µs 503.26 µs]
+//! short/128               time:   [987.46 µs 993.45 µs 1.0004 ms]
+//! medium/1                time:   [137.91 µs 138.55 µs 139.35 µs]
+//! medium/2                time:   [192.00 µs 192.91 µs 194.07 µs]
+//! medium/4                time:   [389.62 µs 391.55 µs 394.01 µs]
+//! medium/8                time:   [776.80 µs 780.33 µs 784.77 µs]
+//! medium/16               time:   [1.5323 ms 1.5383 ms 1.5459 ms]
+//! medium/32               time:   [3.0120 ms 3.0226 ms 3.0350 ms]
+//! medium/64               time:   [5.7405 ms 5.7787 ms 5.8166 ms]
+//! medium/128              time:   [10.412 ms 10.574 ms 10.718 ms]
 //! ```
 
 use anyhow::Context;
 use bytes::{Buf, Bytes};
 use criterion::{BenchmarkId, Criterion};
+use once_cell::sync::Lazy;
 use pageserver::{config::PageServerConf, walrecord::NeonWalRecord, walredo::PostgresRedoManager};
 use pageserver_api::{key::Key, shard::TenantShardId};
 use std::{
+    future::Future,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -61,40 +71,59 @@ use tokio::{sync::Barrier, task::JoinSet};
 use utils::{id::TenantId, lsn::Lsn};
 
 fn bench(c: &mut Criterion) {
-    {
-        let nclients = [1, 2, 4, 8, 16, 32, 64, 128];
-        for nclients in nclients {
-            let mut group = c.benchmark_group("short");
-            group.bench_with_input(
-                BenchmarkId::from_parameter(nclients),
-                &nclients,
-                |b, nclients| {
-                    let redo_work = Arc::new(Request::short_input());
-                    b.iter_custom(|iters| bench_impl(Arc::clone(&redo_work), iters, *nclients));
-                },
-            );
-        }
+    macro_rules! bench_group {
+        ($name:expr, $redo_work:expr) => {{
+            let name: &str = $name;
+            let nclients = [1, 2, 4, 8, 16, 32, 64, 128];
+            for nclients in nclients {
+                let mut group = c.benchmark_group(name);
+                group.bench_with_input(
+                    BenchmarkId::from_parameter(nclients),
+                    &nclients,
+                    |b, nclients| {
+                        b.iter_custom(|iters| bench_impl($redo_work, iters, *nclients));
+                    },
+                );
+            }
+        }};
     }
-    {
-        let nclients = [1, 2, 4, 8, 16, 32, 64, 128];
-        for nclients in nclients {
-            let mut group = c.benchmark_group("medium");
-            group.bench_with_input(
-                BenchmarkId::from_parameter(nclients),
-                &nclients,
-                |b, nclients| {
-                    let redo_work = Arc::new(Request::medium_input());
-                    b.iter_custom(|iters| bench_impl(Arc::clone(&redo_work), iters, *nclients));
-                },
-            );
-        }
-    }
+    //
+    // benchmark the protocol implementation
+    //
+    let pg_version = 14;
+    bench_group!(
+        "ping",
+        Arc::new(move |mgr: Arc<PostgresRedoManager>| async move {
+            let _: () = mgr.ping(pg_version).await.unwrap();
+        })
+    );
+    //
+    // benchmarks with actual record redo
+    //
+    let make_redo_work = |req: &'static Request| {
+        Arc::new(move |mgr: Arc<PostgresRedoManager>| async move {
+            let page = req.execute(&mgr).await.unwrap();
+            assert_eq!(page.remaining(), 8192);
+        })
+    };
+    bench_group!("short", {
+        static REQUEST: Lazy<Request> = Lazy::new(Request::short_input);
+        make_redo_work(&REQUEST)
+    });
+    bench_group!("medium", {
+        static REQUEST: Lazy<Request> = Lazy::new(Request::medium_input);
+        make_redo_work(&REQUEST)
+    });
 }
 criterion::criterion_group!(benches, bench);
 criterion::criterion_main!(benches);
 
 // Returns the sum of each client's wall-clock time spent executing their share of the n_redos.
-fn bench_impl(redo_work: Arc<Request>, n_redos: u64, nclients: u64) -> Duration {
+fn bench_impl<F, Fut>(redo_work: Arc<F>, n_redos: u64, nclients: u64) -> Duration
+where
+    F: Fn(Arc<PostgresRedoManager>) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
     let repo_dir = camino_tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
 
     let conf = PageServerConf::dummy_conf(repo_dir.path().to_path_buf());
@@ -135,17 +164,20 @@ fn bench_impl(redo_work: Arc<Request>, n_redos: u64, nclients: u64) -> Duration 
     })
 }
 
-async fn client(
+async fn client<F, Fut>(
     mgr: Arc<PostgresRedoManager>,
     start: Arc<Barrier>,
-    redo_work: Arc<Request>,
+    redo_work: Arc<F>,
     n_redos: u64,
-) -> Duration {
+) -> Duration
+where
+    F: Fn(Arc<PostgresRedoManager>) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
     start.wait().await;
     let start = Instant::now();
     for _ in 0..n_redos {
-        let page = redo_work.execute(&mgr).await.unwrap();
-        assert_eq!(page.remaining(), 8192);
+        redo_work(Arc::clone(&mgr)).await;
         // The real pageserver will rarely if ever do 2 walredos in a row without
         // yielding to the executor.
         tokio::task::yield_now().await;

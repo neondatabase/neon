@@ -6,6 +6,8 @@
 #ifndef NEON_PGVERSIONCOMPAT_H
 #define NEON_PGVERSIONCOMPAT_H
 
+#include "fmgr.h"
+
 #if PG_MAJORVERSION_NUM < 17
 #define NRelFileInfoBackendIsTemp(rinfo) (rinfo.backend != InvalidBackendId)
 #else
@@ -121,6 +123,10 @@
 #define ProcNumber BackendId
 #define INVALID_PROC_NUMBER InvalidBackendId
 #define AmAutoVacuumWorkerProcess() (IsAutoVacuumWorkerProcess())
+#endif
+
+#if PG_MAJORVERSION_NUM < 15
+extern void InitMaterializedSRF(FunctionCallInfo fcinfo, bits32 flags);
 #endif
 
 #endif							/* NEON_PGVERSIONCOMPAT_H */

@@ -151,7 +151,7 @@ where
                     print!(".");
                     io::stdout().flush().unwrap();
                 }
-                thread::sleep(RETRY_INTERVAL);
+                tokio::time::sleep(RETRY_INTERVAL).await;
             }
             Err(e) => {
                 println!("error starting process {process_name:?}: {e:#}");

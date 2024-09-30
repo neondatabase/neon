@@ -109,6 +109,7 @@ typedef struct FileCacheControl
 								 * reenabling */
 	uint32		size;			/* size of cache file in chunks */
 	uint32		used;			/* number of used chunks */
+	uint32		used_pages;		/* number of used pages */
 	uint32		limit;			/* shared copy of lfc_size_limit */
 	uint64		hits;
 	uint64		misses;
@@ -905,6 +906,10 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 				/* Cache overflow: evict least recently used chunk */
 				FileCacheEntry *victim = dlist_container(FileCacheEntry, list_node, dlist_pop_head_node(&lfc_ctl->lru));
 	
+				for (int i = 0; i < BLOCKS_PER_CHUNK; i++)
+				{
+					lfc_ctl->used_pages -= (victim->bitmap[i >> 5] >> (i & 31)) & 1;
+				}
 				CriticalAssert(victim->access_count == 0);
 				entry->offset = victim->offset; /* grab victim's chunk */
 				hash_search_with_hash_value(lfc_hash, &victim->key, victim->hash, HASH_REMOVE, NULL);
@@ -959,6 +964,7 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 
 				for (int i = 0; i < blocks_in_chunk; i++)
 				{
+					lfc_ctl->used_pages += 1 - ((entry->bitmap[(chunk_offs + i) >> 5] >> ((chunk_offs + i) & 31)) & 1);
 					entry->bitmap[(chunk_offs + i) >> 5] |=
 						(1 << ((chunk_offs + i) & 31));
 				}
@@ -1050,6 +1056,11 @@ neon_get_lfc_stats(PG_FUNCTION_ARGS)
 			key = "file_cache_size";
 			if (lfc_ctl)
 				value = lfc_ctl->size;
+			break;
+		case 5:
+			key = "file_cache_used_pages";
+			if (lfc_ctl)
+				value = lfc_ctl->used_pages;
 			break;
 		default:
 			SRF_RETURN_DONE(funcctx);

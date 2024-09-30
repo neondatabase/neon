@@ -11,7 +11,9 @@ from fixtures.utils import print_gc_result, query_scalar
 #
 def test_branch_behind(neon_env_builder: NeonEnvBuilder):
     # Disable pitr, because here we want to test branch creation after GC
-    env = neon_env_builder.init_start(initial_tenant_conf={"pitr_interval": "0 sec"})
+    env = neon_env_builder.init_start(
+        initial_tenant_conf={"pitr_interval": "0 sec", "lsn_lease_length": "0s"}
+    )
 
     error_regexes = [
         ".*invalid branch start lsn.*",

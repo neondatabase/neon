@@ -17,6 +17,7 @@ use postgres_ffi::MAX_SEND_SIZE;
 use serde::Deserialize;
 use serde::Serialize;
 
+use postgres_ffi::v14::xlog_utils::{IsPartialXLogFileName, IsXLogFileName};
 use sha2::{Digest, Sha256};
 use utils::id::NodeId;
 use utils::id::TenantTimelineId;
@@ -50,6 +51,9 @@ pub struct Args {
 
     /// Dump full term history. True by default.
     pub dump_term_history: bool,
+
+    /// Dump last modified time of WAL segments. Uses value of `dump_all` by default.
+    pub dump_wal_last_modified: bool,
 
     /// Filter timelines by tenant_id.
     pub tenant_id: Option<TenantId>,
@@ -128,12 +132,19 @@ async fn build_from_tli_dump(
         None
     };
 
+    let wal_last_modified = if args.dump_wal_last_modified {
+        get_wal_last_modified(timeline_dir).ok().flatten()
+    } else {
+        None
+    };
+
     Timeline {
         tenant_id: timeline.ttid.tenant_id,
         timeline_id: timeline.ttid.timeline_id,
         control_file,
         memory,
         disk_content,
+        wal_last_modified,
     }
 }
 
@@ -156,6 +167,7 @@ pub struct Timeline {
     pub control_file: Option<TimelinePersistentState>,
     pub memory: Option<Memory>,
     pub disk_content: Option<DiskContent>,
+    pub wal_last_modified: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -300,6 +312,27 @@ fn build_file_info(entry: DirEntry) -> Result<FileInfo> {
         start_zeroes,
         end_zeroes,
     })
+}
+
+/// Get highest modified time of WAL segments in the directory.
+fn get_wal_last_modified(path: &Utf8Path) -> Result<Option<DateTime<Utc>>> {
+    let mut res = None;
+    for entry in fs::read_dir(path)? {
+        if entry.is_err() {
+            continue;
+        }
+        let entry = entry?;
+        /* Ignore files that are not XLOG segments */
+        let fname = entry.file_name();
+        if !IsXLogFileName(&fname) && !IsPartialXLogFileName(&fname) {
+            continue;
+        }
+
+        let metadata = entry.metadata()?;
+        let modified: DateTime<Utc> = DateTime::from(metadata.modified()?);
+        res = std::cmp::max(res, Some(modified));
+    }
+    Ok(res)
 }
 
 /// Converts SafeKeeperConf to Config, filtering out the fields that are not

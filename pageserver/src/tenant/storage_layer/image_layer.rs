@@ -36,11 +36,12 @@ use crate::tenant::disk_btree::{
 };
 use crate::tenant::timeline::GetVectoredError;
 use crate::tenant::vectored_blob_io::{
-    BlobFlag, StreamingVectoredReadPlanner, VectoredBlobReader, VectoredRead, VectoredReadPlanner,
+    BlobFlag, BufView, StreamingVectoredReadPlanner, VectoredBlobReader, VectoredRead,
+    VectoredReadPlanner,
 };
 use crate::tenant::PageReconstructError;
 use crate::virtual_file::owned_buffers_io::io_buf_ext::IoBufExt;
-use crate::virtual_file::{self, VirtualFile};
+use crate::virtual_file::{self, MaybeFatalIo, VirtualFile};
 use crate::{IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX};
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::{Bytes, BytesMut};
@@ -547,15 +548,15 @@ impl ImageLayerInner {
 
             let buf = BytesMut::with_capacity(buf_size);
             let blobs_buf = vectored_blob_reader.read_blobs(&read, buf, ctx).await?;
-
             let frozen_buf = blobs_buf.buf.freeze();
+            let view = BufView::new_bytes(frozen_buf);
 
             for meta in blobs_buf.blobs.iter() {
-                let img_buf = frozen_buf.slice(meta.start..meta.end);
+                let img_buf = meta.read(&view).await?;
 
                 key_count += 1;
                 writer
-                    .put_image(meta.meta.key, img_buf, ctx)
+                    .put_image(meta.meta.key, img_buf.into_bytes(), ctx)
                     .await
                     .context(format!("Storing key {}", meta.meta.key))?;
             }
@@ -602,13 +603,28 @@ impl ImageLayerInner {
             match res {
                 Ok(blobs_buf) => {
                     let frozen_buf = blobs_buf.buf.freeze();
-
+                    let view = BufView::new_bytes(frozen_buf);
                     for meta in blobs_buf.blobs.iter() {
-                        let img_buf = frozen_buf.slice(meta.start..meta.end);
+                        let img_buf = meta.read(&view).await;
+
+                        let img_buf = match img_buf {
+                            Ok(img_buf) => img_buf,
+                            Err(e) => {
+                                reconstruct_state.on_key_error(
+                                    meta.meta.key,
+                                    PageReconstructError::Other(anyhow!(e).context(format!(
+                                        "Failed to decompress blob from virtual file {}",
+                                        self.file.path,
+                                    ))),
+                                );
+
+                                continue;
+                            }
+                        };
                         reconstruct_state.update_key(
                             &meta.meta.key,
                             self.lsn,
-                            Value::Image(img_buf),
+                            Value::Image(img_buf.into_bytes()),
                         );
                     }
                 }
@@ -873,7 +889,9 @@ impl ImageLayerWriterInner {
         // set inner.file here. The first read will have to re-open it.
 
         // fsync the file
-        file.sync_all().await?;
+        file.sync_all()
+            .await
+            .maybe_fatal_err("image_layer sync_all")?;
 
         trace!("created image layer {}", self.path);
 
@@ -1025,10 +1043,15 @@ impl<'a> ImageLayerIterator<'a> {
         let blobs_buf = vectored_blob_reader
             .read_blobs(&plan, buf, self.ctx)
             .await?;
-        let frozen_buf: Bytes = blobs_buf.buf.freeze();
+        let frozen_buf = blobs_buf.buf.freeze();
+        let view = BufView::new_bytes(frozen_buf);
         for meta in blobs_buf.blobs.iter() {
-            let img_buf = frozen_buf.slice(meta.start..meta.end);
-            next_batch.push_back((meta.meta.key, self.image_layer.lsn, Value::Image(img_buf)));
+            let img_buf = meta.read(&view).await?;
+            next_batch.push_back((
+                meta.meta.key,
+                self.image_layer.lsn,
+                Value::Image(img_buf.into_bytes()),
+            ));
         }
         self.key_values_batch = next_batch;
         Ok(())

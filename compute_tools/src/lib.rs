@@ -10,6 +10,7 @@ pub mod http;
 pub mod logger;
 pub mod catalog;
 pub mod compute;
+pub mod disk_quota;
 pub mod extension_server;
 pub mod lsn_lease;
 mod migration;

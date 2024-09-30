@@ -31,9 +31,7 @@ def helper_compare_timeline_list(
         )
     )
 
-    timelines_cli = env.neon_cli.list_timelines()
-    assert timelines_cli == env.neon_cli.list_timelines(initial_tenant)
-
+    timelines_cli = env.neon_cli.list_timelines(initial_tenant)
     cli_timeline_ids = sorted([timeline_id for (_, timeline_id) in timelines_cli])
     assert timelines_api == cli_timeline_ids
 
