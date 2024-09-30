@@ -27,12 +27,16 @@ def test_lfc_prewarm(neon_simple_env: NeonEnv):
     endpoint.stop()
     endpoint.start()
 
-    time.sleep(5)  # give prewarm BGW some time to proceed
-
     conn = endpoint.connect()
     cur = conn.cursor()
-    cur.execute("select file_cache_used from neon_stat_file_cache")
-    lfc_used = cur.fetchall()[0][0]
+
+    for _ in range(20):
+        time.sleep(1)  # give prewarm BGW some time to proceed
+        cur.execute("select file_cache_used from neon_stat_file_cache")
+        lfc_used = cur.fetchall()[0][0]
+        if lfc_used > 100:
+            break
+
     log.info(f"Used LFC size: {lfc_used}")
     assert lfc_used > 100
 
