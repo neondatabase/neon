@@ -27,20 +27,15 @@ def test_empty_tenant_size(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_configs()
     env.start()
 
-    (tenant_id, _) = env.neon_cli.create_tenant()
+    (tenant_id, timeline_id) = env.neon_cli.create_tenant()
     http_client = env.pageserver.http_client()
     initial_size = http_client.tenant_size(tenant_id)
 
     # we should never have zero, because there should be the initdb "changes"
     assert initial_size > 0, "initial implementation returns ~initdb tenant_size"
 
-    main_branch_name = "main"
-
-    branch_name, main_timeline_id = env.neon_cli.list_timelines(tenant_id)[0]
-    assert branch_name == main_branch_name
-
     endpoint = env.endpoints.create_start(
-        main_branch_name,
+        "main",
         tenant_id=tenant_id,
         config_lines=["autovacuum=off", "checkpoint_timeout=10min"],
     )
@@ -54,7 +49,7 @@ def test_empty_tenant_size(neon_env_builder: NeonEnvBuilder):
     # The transaction above will make the compute generate a checkpoint.
     # In turn, the pageserver persists the checkpoint. This should only be
     # one key with a size of a couple hundred bytes.
-    wait_for_last_flush_lsn(env, endpoint, tenant_id, main_timeline_id)
+    wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
     size = http_client.tenant_size(tenant_id)
 
     assert size >= initial_size and size - initial_size < 1024
@@ -306,7 +301,8 @@ def test_single_branch_get_tenant_size_grows(
     env = neon_env_builder.init_start(initial_tenant_conf=tenant_config)
 
     tenant_id = env.initial_tenant
-    branch_name, timeline_id = env.neon_cli.list_timelines(tenant_id)[0]
+    timeline_id = env.initial_timeline
+    branch_name = "main"
 
     http_client = env.pageserver.http_client()
 
@@ -516,7 +512,8 @@ def test_get_tenant_size_with_multiple_branches(
     env.pageserver.allowed_errors.append(".*InternalServerError\\(No such file or directory.*")
 
     tenant_id = env.initial_tenant
-    main_branch_name, main_timeline_id = env.neon_cli.list_timelines(tenant_id)[0]
+    main_timeline_id = env.initial_timeline
+    main_branch_name = "main"
 
     http_client = env.pageserver.http_client()
 
