@@ -5,7 +5,9 @@ use std::{
 };
 
 use crate::{
-    metrics::{self, ReconcileCompleteLabelGroup, ReconcileOutcome},
+    metrics::{
+        self, ReconcileCompleteLabelGroup, ReconcileLongRunningLabelGroup, ReconcileOutcome,
+    },
     persistence::TenantShardPersistence,
     reconciler::{ReconcileUnits, ReconcilerConfig},
     scheduler::{
@@ -14,6 +16,7 @@ use crate::{
     },
     service::ReconcileResultRequest,
 };
+use futures::future::{self, Either};
 use pageserver_api::controller_api::{
     AvailabilityZone, NodeSchedulingPolicy, PlacementPolicy, ShardSchedulingPolicy,
 };
@@ -1183,6 +1186,7 @@ impl TenantShard {
         };
 
         let reconcile_seq = self.sequence;
+        let long_reconcile_threshold = service_config.long_reconcile_threshold;
 
         tracing::info!(seq=%reconcile_seq, "Spawning Reconciler for sequence {}", self.sequence);
         let must_notify = self.pending_compute_notification;
@@ -1219,7 +1223,54 @@ impl TenantShard {
                     return;
                 }
 
-                let result = Self::reconcile(reconcile_seq, reconciler, must_notify).await;
+                let (tenant_id_label, shard_number_label, sequence_label) = {
+                    (
+                        reconciler.tenant_shard_id.tenant_id.to_string(),
+                        reconciler.tenant_shard_id.shard_number.0.to_string(),
+                        reconcile_seq.to_string(),
+                    )
+                };
+
+                let label_group = ReconcileLongRunningLabelGroup {
+                    tenant_id: &tenant_id_label,
+                    shard_number: &shard_number_label,
+                    sequence: &sequence_label,
+                };
+
+                let reconcile_fut = Self::reconcile(reconcile_seq, reconciler, must_notify);
+                let long_reconcile_fut = {
+                    let label_group = label_group.clone();
+                    async move {
+                        tokio::time::sleep(long_reconcile_threshold).await;
+
+                        tracing::warn!("Reconcile passed the long running threshold of {long_reconcile_threshold:?}");
+
+                        metrics::METRICS_REGISTRY
+                            .metrics_group
+                            .storage_controller_reconcile_long_running
+                            .inc(label_group);
+                    }
+                };
+
+                let reconcile_fut = std::pin::pin!(reconcile_fut);
+                let long_reconcile_fut = std::pin::pin!(long_reconcile_fut);
+
+                let (was_long, result) =
+                    match future::select(reconcile_fut, long_reconcile_fut).await {
+                        Either::Left((reconcile_result, _)) => (false, reconcile_result),
+                        Either::Right((_, reconcile_fut)) => (true, reconcile_fut.await),
+                    };
+
+                if was_long {
+                    let id = metrics::METRICS_REGISTRY
+                        .metrics_group
+                        .storage_controller_reconcile_long_running
+                        .with_labels(label_group);
+                    metrics::METRICS_REGISTRY
+                        .metrics_group
+                        .storage_controller_reconcile_long_running
+                        .remove_metric(id);
+                }
 
                 result_tx
                     .send(ReconcileResultRequest::ReconcileResult(result))
