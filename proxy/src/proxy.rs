@@ -10,6 +10,7 @@ pub(crate) mod wake_compute;
 pub use copy_bidirectional::copy_bidirectional_client_compute;
 pub use copy_bidirectional::ErrorSource;
 
+use crate::config::ProxyProtocolV2;
 use crate::{
     auth,
     cancellation::{self, CancellationHandlerMain, CancellationHandlerMainInternal},
@@ -93,15 +94,19 @@ pub async fn task_main(
 
         connections.spawn(async move {
             let (socket, peer_addr) = match read_proxy_protocol(socket).await {
-                Ok((socket, Some(addr))) => (socket, addr.ip()),
                 Err(e) => {
                     error!("per-client task finished with an error: {e:#}");
                     return;
                 }
-                Ok((_socket, None)) if config.require_client_ip => {
-                    error!("missing required client IP");
+                Ok((_socket, None)) if config.proxy_protocol_v2 == ProxyProtocolV2::Required => {
+                    error!("missing required proxy protocol header");
                     return;
                 }
+                Ok((_socket, Some(_))) if config.proxy_protocol_v2 == ProxyProtocolV2::Never => {
+                    error!("proxy protocol header not supported");
+                    return;
+                }
+                Ok((socket, Some(addr))) => (socket, addr.ip()),
                 Ok((socket, None)) => (socket, peer_addr.ip()),
             };
 

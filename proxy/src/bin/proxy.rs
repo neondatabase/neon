@@ -17,6 +17,7 @@ use proxy::config::AuthenticationConfig;
 use proxy::config::CacheOptions;
 use proxy::config::HttpConfig;
 use proxy::config::ProjectInfoCacheOptions;
+use proxy::config::ProxyProtocolV2;
 use proxy::console;
 use proxy::context::parquet::ParquetUploadArgs;
 use proxy::http;
@@ -144,9 +145,6 @@ struct ProxyCliArgs {
     /// size of the threadpool for password hashing
     #[clap(long, default_value_t = 4)]
     scram_thread_pool_size: u8,
-    /// Require that all incoming requests have a Proxy Protocol V2 packet **and** have an IP address associated.
-    #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
-    require_client_ip: bool,
     /// Disable dynamic rate limiter and store the metrics to ensure its production behaviour.
     #[clap(long, default_value_t = true, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
     disable_dynamic_rate_limiter: bool,
@@ -229,6 +227,10 @@ struct ProxyCliArgs {
     /// Configure if this is a private access proxy for the POC: In that case the proxy will ignore the IP allowlist
     #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
     is_private_access_proxy: bool,
+
+    /// Configure whether all incoming requests have a Proxy Protocol V2 packet.
+    #[clap(value_enum, long, default_value_t = ProxyProtocolV2::Supported)]
+    proxy_protocol_v2: ProxyProtocolV2,
 }
 
 #[derive(clap::Args, Clone, Copy, Debug)]
@@ -704,7 +706,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         allow_self_signed_compute: args.allow_self_signed_compute,
         http_config,
         authentication_config,
-        require_client_ip: args.require_client_ip,
+        proxy_protocol_v2: args.proxy_protocol_v2,
         handshake_timeout: args.handshake_timeout,
         region: args.region.clone(),
         wake_compute_retry_config: config::RetryConfig::parse(&args.wake_compute_retry)?,

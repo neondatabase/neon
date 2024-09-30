@@ -7,6 +7,7 @@ use crate::{
     Host,
 };
 use anyhow::{bail, ensure, Context, Ok};
+use clap::ValueEnum;
 use itertools::Itertools;
 use remote_storage::RemoteStorageConfig;
 use rustls::{
@@ -30,12 +31,19 @@ pub struct ProxyConfig {
     pub allow_self_signed_compute: bool,
     pub http_config: HttpConfig,
     pub authentication_config: AuthenticationConfig,
-    pub require_client_ip: bool,
+    pub proxy_protocol_v2: ProxyProtocolV2,
     pub region: String,
     pub handshake_timeout: Duration,
     pub wake_compute_retry_config: RetryConfig,
     pub connect_compute_locks: ApiLocks<Host>,
     pub connect_to_compute_retry_config: RetryConfig,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum, PartialEq)]
+pub enum ProxyProtocolV2 {
+    Required,
+    Supported,
+    Never,
 }
 
 #[derive(Debug)]
