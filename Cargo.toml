@@ -116,9 +116,10 @@ notify = "6.0.0"
 num_cpus = "1.15"
 num-traits = "0.2.15"
 once_cell = "1.13"
-opentelemetry = "0.20.0"
-opentelemetry-otlp = { version = "0.13.0", default-features=false, features = ["http-proto", "trace", "http", "reqwest-client"] }
-opentelemetry-semantic-conventions = "0.12.0"
+opentelemetry = "0.25"
+opentelemetry_sdk = "0.25"
+opentelemetry-otlp = { version = "0.25", default-features=false, features = ["http-proto", "trace", "http", "reqwest-client"] }
+opentelemetry-semantic-conventions = "0.25"
 parking_lot = "0.12"
 parquet = { version = "53", default-features = false, features = ["zstd"] }
 parquet_derive = "53"
@@ -131,7 +132,7 @@ rand = "0.8"
 redis = { version = "0.25.2", features = ["tokio-rustls-comp", "keep-alive"] }
 regex = "1.10.2"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
-reqwest-tracing = { version = "0.5", features = ["opentelemetry_0_20"] }
+reqwest-tracing = { version = "0.5", features = ["opentelemetry_0_24"] }
 reqwest-middleware = "0.3.0"
 reqwest-retry = "0.5"
 routerify = "3"
@@ -177,8 +178,8 @@ toml_edit = "0.22"
 tonic = {version = "0.9", features = ["tls", "tls-roots"]}
 tower-service = "0.3.2"
 tracing = "0.1"
-tracing-error = "0.2.0"
-tracing-opentelemetry = "0.21.0"
+tracing-error = "0.2"
+tracing-opentelemetry = "0.26"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["smallvec", "fmt", "tracing-log", "std", "env-filter", "json"] }
 try-lock = "0.2.5"
 twox-hash = { version = "1.6.3", default-features = false }
