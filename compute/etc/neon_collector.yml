@@ -321,7 +321,7 @@ queries:
         (SELECT value FROM c WHERE metric = 'getpage_prefetch_misses_total')  AS getpage_prefetch_misses_total,
         (SELECT value FROM c WHERE metric = 'getpage_prefetch_discards_total')  AS getpage_prefetch_discards_total,
         (SELECT value FROM c WHERE metric = 'pageserver_requests_sent_total')  AS pageserver_requests_sent_total,
-        (SELECT value FROM c WHERE metric = 'pageserver_requests_disconnects_total')  AS pageserver_requests_disconnects_total,
+        (SELECT value FROM c WHERE metric = 'pageserver_disconnects_total')  AS pageserver_disconnects_total,
         (SELECT value FROM c WHERE metric = 'pageserver_send_flushes_total')  AS pageserver_send_flushes_total;
 
   - query_name: getpage_wait_seconds_buckets
