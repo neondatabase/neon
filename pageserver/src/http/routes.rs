@@ -2737,8 +2737,9 @@ async fn put_tenant_timeline_import_pgdata(
             .get_attached_tenant_shard(tenant_shard_id)?;
 
         let broker_client = state.broker_client.clone();
-
-        let pgdata_path: Utf8PathBuf = json_request(&mut request).await?;
+        let pgdata_path: String = json_request(&mut request).await?;
+        // TODO: think about security implications - in the end we prob want the PGDATA to be in S3 anyways
+        let pgdata_path = Utf8PathBuf::from(pgdata_path);
 
         info!(%pgdata_path, "importing pgdata dir");
 
@@ -2752,6 +2753,7 @@ async fn put_tenant_timeline_import_pgdata(
 
         tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
 
+        // TODO: should dedup this code with bootstrap_timeline
         let timeline = tenant
             .create_empty_timeline(
                 timeline_id,
