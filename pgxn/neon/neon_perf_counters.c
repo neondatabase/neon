@@ -159,7 +159,7 @@ neon_perf_counters_to_metrics(neon_per_backend_counters *counters)
 		i++; \
 	} while (false)
 
-	i += histogram_to_metrics(&counters->getpage_hist, metrics,
+	i += histogram_to_metrics(&counters->getpage_hist, &metrics[i],
 							  "getpage_wait_seconds_count",
 							  "getpage_wait_seconds_sum",
 							  "getpage_wait_seconds_bucket");
@@ -176,11 +176,11 @@ neon_perf_counters_to_metrics(neon_per_backend_counters *counters)
 
 	APPEND_METRIC(file_cache_hits_total);
 
-	i += histogram_to_metrics(&counters->file_cache_read_hist, metrics,
+	i += histogram_to_metrics(&counters->file_cache_read_hist, &metrics[i],
 							  "file_cache_read_wait_seconds_count",
 							  "file_cache_read_wait_seconds_sum",
 							  "file_cache_read_wait_seconds_bucket");
-	i += histogram_to_metrics(&counters->file_cache_write_hist, metrics,
+	i += histogram_to_metrics(&counters->file_cache_write_hist, &metrics[i],
 							  "file_cache_write_wait_seconds_count",
 							  "file_cache_write_wait_seconds_sum",
 							  "file_cache_write_wait_seconds_bucket");
@@ -256,7 +256,7 @@ histogram_merge_into(IOHistogram into, IOHistogram from)
 {
 	into->wait_us_count += from->wait_us_count;
 	into->wait_us_sum += from->wait_us_sum;
-	for (int bucketno; bucketno < NUM_IO_WAIT_BUCKETS; bucketno++)
+	for (int bucketno = 0; bucketno < NUM_IO_WAIT_BUCKETS; bucketno++)
 		into->wait_us_bucket[bucketno] += from->wait_us_bucket[bucketno];
 }
 
