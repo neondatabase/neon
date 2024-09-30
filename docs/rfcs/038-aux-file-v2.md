@@ -15,13 +15,6 @@ the deltas at each of the LSNs. However, this improved v1 storage strategy still
 requires us to store everything in an aux file cache in memory, because we cannot
 fetch a single key (or file) from the compound `AUX_FILES_KEY`.
 
-We also decided not to make the new aux storage strategy (v1) compatible with the
-original one (v1). One feasible way of doing a seamless migration is to store new
-data in aux v2 while old data in aux v1, but this complicates file deletions. We
-want all users to start with a clean state with no aux files in the storage, and
-therefore, we need to do manual migrations for users using aux v1 by using the
-[migration script](https://github.com/neondatabase/aux_v2_migration).
-
 ### Prior art
 
 For storing large amount of small files, we can use a key-value store where the key
@@ -73,6 +66,8 @@ For example, `pg_logical/mappings/test1` will be encoded as:
    ^ not used due to key representation
 ```
 
+The prefixes of the directories should be assigned every time we add a new type of aux file into the storage within `aux_file.rs`. For all directories without an assigned prefix, it will be put into the `0xFFFF` keyspace.
+
 Note that inside pageserver, there are two representations of the keys: the 18B full key representation
 and the 16B compact key representation. For the 18B representation, some fields have restricted ranges
 of values. Therefore, the aux keys only use the 16B compact portion of the full key.
@@ -106,6 +101,8 @@ With the add of sparse keyspaces, we also modified the compaction code to accomm
 * Image layer creation: instead of calling `key.next()` and getting/reconstructing images for every single key, we use the vectored get API to scan all keys in the keyspace at a given LSN. Image layers are only created if there are too many delta layers between the latest LSN and the last image layer we generated for sparse keyspaces.
 
 ## Migration
+
+We decided not to make the new aux storage strategy (v1) compatible with the original one (v1). One feasible way of doing a seamless migration is to store new data in aux v2 while old data in aux v1, but this complicates file deletions. We want all users to start with a clean state with no aux files in the storage, and therefore, we need to do manual migrations for users using aux v1 by using the [migration script](https://github.com/neondatabase/aux_v2_migration).
 
 During the period of migration, we store the aux policy in the `index_part.json` file. When a tenant is attached
 with no policy set, the pageserver will scan the aux file keyspaces to identify the current aux policy being used (v1 or v2).
