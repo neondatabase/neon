@@ -280,7 +280,7 @@ def test_forward_compatibility(
         # not using env.pageserver.version because it was initialized before
         prev_pageserver_version_str = env.get_binary_version("pageserver")
         prev_pageserver_version_match = re.search(
-            "Neon page server git-env:(.*) failpoints: (.*), features: (.*)",
+            "Neon page server git(?:-env)?:(.*) failpoints: (.*), features: (.*)",
             prev_pageserver_version_str,
         )
         if prev_pageserver_version_match is not None:
@@ -291,12 +291,12 @@ def test_forward_compatibility(
             )
 
         # does not include logs from previous runs
-        assert not env.pageserver.log_contains("git-env:" + prev_pageserver_version)
+        assert not env.pageserver.log_contains(f"git(-env)?:{prev_pageserver_version}")
 
         env.start()
 
         # ensure the specified pageserver is running
-        assert env.pageserver.log_contains("git-env:" + prev_pageserver_version)
+        assert env.pageserver.log_contains(f"git(-env)?:{prev_pageserver_version}")
 
         check_neon_works(
             env,
