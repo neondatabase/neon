@@ -1083,6 +1083,47 @@ impl TenantShard {
         }
     }
 
+    async fn reconcile(
+        sequence: Sequence,
+        mut reconciler: Reconciler,
+        must_notify: bool,
+    ) -> ReconcileResult {
+        // Attempt to make observed state match intent state
+        let result = reconciler.reconcile().await;
+
+        // If we know we had a pending compute notification from some previous action, send a notification irrespective
+        // of whether the above reconcile() did any work
+        if result.is_ok() && must_notify {
+            // If this fails we will send the need to retry in [`ReconcileResult::pending_compute_notification`]
+            reconciler.compute_notify().await.ok();
+        }
+
+        // Update result counter
+        let outcome_label = match &result {
+            Ok(_) => ReconcileOutcome::Success,
+            Err(ReconcileError::Cancel) => ReconcileOutcome::Cancel,
+            Err(_) => ReconcileOutcome::Error,
+        };
+
+        metrics::METRICS_REGISTRY
+            .metrics_group
+            .storage_controller_reconcile_complete
+            .inc(ReconcileCompleteLabelGroup {
+                status: outcome_label,
+            });
+
+        // Constructing result implicitly drops Reconciler, freeing any ReconcileUnits before the Service might
+        // try and schedule more work in response to our result.
+        ReconcileResult {
+            sequence,
+            result,
+            tenant_shard_id: reconciler.tenant_shard_id,
+            generation: reconciler.generation,
+            observed: reconciler.observed,
+            pending_compute_notification: reconciler.compute_notify_failure,
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     #[instrument(skip_all, fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug()))]
     pub(crate) fn spawn_reconciler(
@@ -1122,7 +1163,7 @@ impl TenantShard {
 
         let reconciler_cancel = cancel.child_token();
         let reconciler_intent = TargetState::from_intent(pageservers, &self.intent);
-        let mut reconciler = Reconciler {
+        let reconciler = Reconciler {
             tenant_shard_id: self.tenant_shard_id,
             shard: self.shard,
             placement_policy: self.policy.clone(),
@@ -1178,40 +1219,7 @@ impl TenantShard {
                     return;
                 }
 
-                // Attempt to make observed state match intent state
-                let result = reconciler.reconcile().await;
-
-                // If we know we had a pending compute notification from some previous action, send a notification irrespective
-                // of whether the above reconcile() did any work
-                if result.is_ok() && must_notify {
-                    // If this fails we will send the need to retry in [`ReconcileResult::pending_compute_notification`]
-                    reconciler.compute_notify().await.ok();
-                }
-
-                // Update result counter
-                let outcome_label = match &result {
-                    Ok(_) => ReconcileOutcome::Success,
-                    Err(ReconcileError::Cancel) => ReconcileOutcome::Cancel,
-                    Err(_) => ReconcileOutcome::Error,
-                };
-
-                metrics::METRICS_REGISTRY
-                    .metrics_group
-                    .storage_controller_reconcile_complete
-                    .inc(ReconcileCompleteLabelGroup {
-                        status: outcome_label,
-                    });
-
-                // Constructing result implicitly drops Reconciler, freeing any ReconcileUnits before the Service might
-                // try and schedule more work in response to our result.
-                let result = ReconcileResult {
-                    sequence: reconcile_seq,
-                    result,
-                    tenant_shard_id: reconciler.tenant_shard_id,
-                    generation: reconciler.generation,
-                    observed: reconciler.observed,
-                    pending_compute_notification: reconciler.compute_notify_failure,
-                };
+                let result = Self::reconcile(reconcile_seq, reconciler, must_notify).await;
 
                 result_tx
                     .send(ReconcileResultRequest::ReconcileResult(result))
