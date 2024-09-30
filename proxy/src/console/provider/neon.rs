@@ -220,7 +220,9 @@ impl Api {
             let response = self.endpoint.execute(request).await?;
             drop(pause);
             info!(duration = ?start.elapsed(), "received http response");
+            info!(response = ?response, "this is response");
             let body = parse_body::<WakeCompute>(response).await?;
+            info!(body = ?body, "parsed response body");
 
             // Unfortunately, ownership won't let us use `Option::ok_or` here.
             let (host, port) = match parse_host_port(&body.address) {
