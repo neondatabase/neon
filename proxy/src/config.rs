@@ -1,5 +1,8 @@
 use crate::{
-    auth::{self, backend::AuthRateLimiter},
+    auth::{
+        self,
+        backend::{jwt::JwkCache, AuthRateLimiter},
+    },
     console::locks::ApiLocks,
     rate_limiter::{RateBucketInfo, RateLimitAlgorithm, RateLimiterConfig},
     scram::threadpool::ThreadPool,
@@ -78,6 +81,9 @@ pub struct AuthenticationConfig {
     pub rate_limiter: AuthRateLimiter,
     pub rate_limit_ip_subnet: u8,
     pub ip_allowlist_check_enabled: bool,
+    pub jwks_cache: JwkCache,
+    pub is_auth_broker: bool,
+    pub accept_jwts: bool,
 }
 
 impl TlsConfig {
@@ -261,18 +267,26 @@ impl CertResolver {
 
         let common_name = pem.subject().to_string();
 
-        // We only use non-wildcard certificates in web auth proxy so it seems okay to treat them the same as
-        // wildcard ones as we don't use SNI there. That treatment only affects certificate selection, so
-        // verify-full will still check wildcard match. Old coding here just ignored non-wildcard common names
-        // and passed None instead, which blows up number of cases downstream code should handle. Proper coding
-        // here should better avoid Option for common_names, and do wildcard-based certificate selection instead
-        // of cutting off '*.' parts.
-        let common_name = if common_name.starts_with("CN=*.") {
-            common_name.strip_prefix("CN=*.").map(|s| s.to_string())
+        // We need to get the canonical name for this certificate so we can match them against any domain names
+        // seen within the proxy codebase.
+        //
+        // In scram-proxy we use wildcard certificates only, with the database endpoint as the wildcard subdomain, taken from SNI.
+        // We need to remove the wildcard prefix for the purposes of certificate selection.
+        //
+        // auth-broker does not use SNI and instead uses the Neon-Connection-String header.
+        // Auth broker has the subdomain `apiauth` we need to remove for the purposes of validating the Neon-Connection-String.
+        //
+        // Console Web proxy does not use any wildcard domains and does not need any certificate selection or conn string
+        // validation, so let's we can continue with any common-name
+        let common_name = if let Some(s) = common_name.strip_prefix("CN=*.") {
+            s.to_string()
+        } else if let Some(s) = common_name.strip_prefix("CN=apiauth.") {
+            s.to_string()
+        } else if let Some(s) = common_name.strip_prefix("CN=") {
+            s.to_string()
         } else {
-            common_name.strip_prefix("CN=").map(|s| s.to_string())
-        }
-        .context("Failed to parse common name from certificate")?;
+            bail!("Failed to parse common name from certificate")
+        };
 
         let cert = Arc::new(rustls::sign::CertifiedKey::new(cert_chain, key));
 
