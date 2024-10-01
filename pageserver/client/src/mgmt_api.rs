@@ -555,7 +555,7 @@ impl Client {
         &self,
         mode: &pageserver_api::models::virtual_file::IoMode,
     ) -> Result<()> {
-        let uri = format!("{}/v1/io_alignment", self.mgmt_api_endpoint);
+        let uri = format!("{}/v1/io_mode", self.mgmt_api_endpoint);
         self.request(Method::PUT, uri, mode)
             .await?
             .json()
