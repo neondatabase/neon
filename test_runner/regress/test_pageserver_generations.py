@@ -549,6 +549,14 @@ def test_multi_attach(
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
 
+    # Instruct the storage controller to not interfere with our low level configuration
+    # of the pageserver's attachment states.  Otherwise when it sees nodes go offline+return,
+    # it would send its own requests that would conflict with the test's.
+    env.storage_controller.tenant_policy_update(tenant_id, {"scheduling": "Stop"})
+    env.storage_controller.allowed_errors.extend(
+        [".*Scheduling is disabled by policy Stop.*", ".*Skipping reconcile for policy Stop.*"]
+    )
+
     # Initially, the tenant will be attached to the first pageserver (first is default in our test harness)
     wait_until(10, 0.2, lambda: assert_tenant_state(http_clients[0], tenant_id, "Active"))
     _detail = http_clients[0].timeline_detail(tenant_id, timeline_id)
