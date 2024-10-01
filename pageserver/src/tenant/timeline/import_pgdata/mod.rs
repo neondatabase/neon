@@ -350,6 +350,7 @@ impl PgImportEnv {
             let end_key = slru_block_to_key(kind, segno, nblocks);
             self.tasks
                 .push(AnyImportTask::SlruBlocks(ImportSlruBlocksTask::new(
+                    *self.timeline.get_shard_identity(),
                     start_key..end_key,
                     &p,
                 )));
@@ -504,6 +505,7 @@ trait ImportTask {
     fn key_range(&self) -> Range<Key>;
 
     fn total_size(&self) -> usize {
+        // TODO: revisit this
         if is_contiguous_range(&self.key_range()) {
             contiguous_range_len(&self.key_range()) as usize * 8192
         } else {
@@ -515,7 +517,7 @@ trait ImportTask {
         self,
         layer_writer: &mut ImageLayerWriter,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()>;
+    ) -> anyhow::Result<usize>;
 }
 
 struct ImportSingleKeyTask {
@@ -538,9 +540,9 @@ impl ImportTask for ImportSingleKeyTask {
         self,
         layer_writer: &mut ImageLayerWriter,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<usize> {
         layer_writer.put_image(self.key, self.buf, ctx).await?;
-        Ok(())
+        Ok(1)
     }
 }
 
@@ -569,42 +571,47 @@ impl ImportTask for ImportRelBlocksTask {
         self,
         layer_writer: &mut ImageLayerWriter,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<usize> {
         debug!("Importing relation file {}", self.path);
         let reader = VirtualFile::open(&self.path, ctx).await?;
 
         let (rel_tag, start_blk) = self.key_range.start.to_rel_block()?;
         let (_rel_tag, end_blk) = self.key_range.end.to_rel_block()?;
-        let mut blknum = start_blk;
+        let mut blknum = start_blk; /* XXX below code assumes start_blk is 0, that's probably wrong/ */
+        let mut nimages = 0;
+        let mut file_offset: u64 = 0;
         while blknum < end_blk {
             let key = rel_block_to_key(rel_tag, blknum);
             if self.shard_identity.is_key_disposable(&key) {
                 // Skip blocks that are not in the shard
-                blknum += 1;
-                continue;
+            } else {
+                let buf = Vec::with_capacity(8192);
+                let buf = reader
+                    // FIXME: prefetch
+                    .read_exact_at(buf.slice_full(), file_offset, ctx)
+                    .await?;
+                layer_writer
+                    .put_image(key, Bytes::from(buf.into_inner()), ctx)
+                    .await?;
+                nimages += 1;
             }
-            let buf = Vec::with_capacity(8192);
-            let buf = reader
-                // FIXME: prefetch
-                .read_exact_at(buf.slice_full(), u64::from(blknum) * 8192, ctx)
-                .await?;
-            layer_writer
-                .put_image(key, Bytes::from(buf.into_inner()), ctx)
-                .await?;
             blknum += 1;
+            file_offset += 8192;
         }
-        Ok(())
+        Ok(nimages)
     }
 }
 
 struct ImportSlruBlocksTask {
+    shard_identity: ShardIdentity,
     key_range: Range<Key>,
     path: Utf8PathBuf,
 }
 
 impl ImportSlruBlocksTask {
-    fn new(key_range: Range<Key>, path: &Utf8Path) -> Self {
+    fn new(shard_identity: ShardIdentity, key_range: Range<Key>, path: &Utf8Path) -> Self {
         ImportSlruBlocksTask {
+            shard_identity,
             key_range,
             path: path.into(),
         }
@@ -620,7 +627,7 @@ impl ImportTask for ImportSlruBlocksTask {
         self,
         layer_writer: &mut ImageLayerWriter,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<usize> {
         debug!("Importing SLRU segment file {}", self.path);
         let mut reader = tokio::fs::File::open(&self.path)
             .await
@@ -630,15 +637,22 @@ impl ImportTask for ImportSlruBlocksTask {
         let (kind, segno, start_blk) = self.key_range.start.to_slru_block()?;
         let (_kind, _segno, end_blk) = self.key_range.end.to_slru_block()?;
         let mut blknum = start_blk;
+        let mut nimages = 0;
         while blknum < end_blk {
-            reader.read_exact(&mut buf).await?;
             let key = slru_block_to_key(kind, segno, blknum);
+            assert!(
+                !self.shard_identity.is_key_disposable(&key),
+                "SLRU keys need to go into every shard"
+            );
+            reader.read_exact(&mut buf).await?;
+
             layer_writer
                 .put_image(key, Bytes::copy_from_slice(&buf), ctx)
                 .await?;
             blknum += 1;
+            nimages += 1;
         }
-        Ok(())
+        Ok(nimages)
     }
 }
 
@@ -656,11 +670,12 @@ impl ImportTask for AnyImportTask {
             Self::SlruBlocks(t) => t.key_range(),
         }
     }
+    /// returns the number of images put into the `layer_writer`
     async fn doit(
         self,
         layer_writer: &mut ImageLayerWriter,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<usize> {
         match self {
             Self::SingleKey(t) => t.doit(layer_writer, ctx).await,
             Self::RelBlocks(t) => t.doit(layer_writer, ctx).await,
@@ -717,11 +732,17 @@ impl ChunkProcessingJob {
         )
         .await?;
 
+        let mut nimages = 0;
         for task in self.tasks {
-            task.doit(&mut writer, ctx).await?;
+            nimages += task.doit(&mut writer, ctx).await?;
         }
 
-        let resident_layer = writer.finish(&self.timeline, ctx).await?;
+        let resident_layer = if nimages > 0 {
+            writer.finish(&self.timeline, ctx).await?
+        } else {
+            // dropping the writer cleans up
+            return Ok(());
+        };
 
         // this is sharing the same code as create_image_layers
         let mut guard = self.timeline.layers.write().await;
