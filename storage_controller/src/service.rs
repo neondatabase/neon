@@ -526,17 +526,19 @@ pub(crate) enum ReconcileResultRequest {
     Stop,
 }
 
+#[derive(Clone)]
 struct MutationLocation {
     node: Node,
     generation: Generation,
 }
 
+#[derive(Clone)]
 struct ShardMutationLocations {
     latest: MutationLocation,
     other: Vec<MutationLocation>,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct TenantMutationLocations(BTreeMap<TenantShardId, ShardMutationLocations>);
 
 impl Service {
@@ -3374,8 +3376,8 @@ impl Service {
         O: FnOnce(TenantMutationLocations) -> F,
         F: std::future::Future<Output = R>,
     {
-        let target_gens = {
-            let mut targets = Vec::new();
+        let mutation_locations = {
+            let mut locations = TenantMutationLocations::default();
 
             // Load the currently attached pageservers for the latest generation of each shard.  This can
             // run concurrently with reconciliations, and it is not guaranteed that the node we find here
@@ -3426,34 +3428,21 @@ impl Service {
                     .ok_or(ApiError::Conflict(format!(
                         "Raced with removal of node {node_id}"
                     )))?;
-                targets.push((
-                    tenant_shard_id,
-                    node.clone(),
-                    generation.expect("Checked above"),
-                ));
-            }
 
-            targets
-        };
-
-        let mutation_locations = {
-            let mut locations = TenantMutationLocations::default();
-            for (tid, node, generation) in target_gens.iter() {
                 let location = ShardMutationLocations {
                     latest: MutationLocation {
                         node: node.clone(),
-                        generation: *generation,
+                        generation: generation.expect("Checked above"),
                     },
                     other: Vec::default(),
                 };
-
-                locations.0.insert(*tid, location);
+                locations.0.insert(tenant_shard_id, location);
             }
 
             locations
         };
 
-        let result = op(mutation_locations).await;
+        let result = op(mutation_locations.clone()).await;
 
         // Post-check: are all the generations of all the shards the same as they were initially?  This proves that
         // our remote operation executed on the latest generation and is therefore persistent.
@@ -3469,9 +3458,10 @@ impl Service {
                      }| (tenant_shard_id, generation),
                 )
                 .collect::<Vec<_>>()
-                != target_gens
+                != mutation_locations
+                    .0
                     .into_iter()
-                    .map(|i| (i.0, Some(i.2)))
+                    .map(|i| (i.0, Some(i.1.latest.generation)))
                     .collect::<Vec<_>>()
             {
                 // We raced with something that incremented the generation, and therefore cannot be
