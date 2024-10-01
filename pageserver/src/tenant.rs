@@ -319,6 +319,9 @@ pub struct Tenant {
     /// background warmup.
     pub(crate) activate_now_sem: tokio::sync::Semaphore,
 
+    /// Time it took for the tenant to activate. Zero if not active yet.
+    attach_wal_lag_cooldown: Arc<std::sync::OnceLock<std::time::Instant>>,
+
     // Cancellation token fires when we have entered shutdown().  This is a parent of
     // Timelines' cancellation token.
     pub(crate) cancel: CancellationToken,
@@ -1000,11 +1003,16 @@ impl Tenant {
                 // Remote preload is complete.
                 drop(remote_load_completion);
 
+
                 // We will time the duration of the attach phase unless this is a creation (attach will do no work)
+                let attach_start = std::time::Instant::now();
                 let attached = {
                     let _attach_timer = Some(TENANT.attach.start_timer());
                     tenant_clone.attach(preload, &ctx).await
                 };
+                let attach_duration = attach_start.elapsed();
+                let wal_lag_cooldown = attach_start + 2 * attach_duration + Duration::from_secs(60);
+                _ = tenant_clone.attach_wal_lag_cooldown.set(wal_lag_cooldown);
 
                 match attached {
                     Ok(()) => {
@@ -2754,6 +2762,7 @@ impl Tenant {
             pg_version,
             state,
             last_aux_file_policy,
+            self.attach_wal_lag_cooldown.clone(),
             self.cancel.child_token(),
         );
 
@@ -2860,6 +2869,7 @@ impl Tenant {
                 Some(Duration::from_secs(3600 * 24)),
             )),
             activate_now_sem: tokio::sync::Semaphore::new(0),
+            attach_wal_lag_cooldown: Arc::new(std::sync::OnceLock::new()),
             cancel: CancellationToken::default(),
             gate: Gate::default(),
             timeline_get_throttle: Arc::new(throttle::Throttle::new(

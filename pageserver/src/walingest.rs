@@ -21,6 +21,8 @@
 //! redo Postgres process, but some records it can handle directly with
 //! bespoken Rust code.
 
+use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::Duration;
 use std::time::SystemTime;
 
@@ -70,6 +72,7 @@ impl CheckPoint {
 }
 
 pub struct WalIngest {
+    attach_wal_lag_cooldown: Arc<OnceLock<std::time::Instant>>,
     shard: ShardIdentity,
     checkpoint: CheckPoint,
     checkpoint_modified: bool,
@@ -103,6 +106,7 @@ impl WalIngest {
             shard: *timeline.get_shard_identity(),
             checkpoint,
             checkpoint_modified: false,
+            attach_wal_lag_cooldown: timeline.attach_wal_lag_cooldown.clone(),
             warn_ingest_lag: WarnIngestLag {
                 lag_msg_ratelimit: RateLimit::new(std::time::Duration::from_secs(10)),
                 future_lsn_msg_ratelimit: RateLimit::new(std::time::Duration::from_secs(10)),
@@ -1429,6 +1433,13 @@ impl WalIngest {
                     Ok(lag) => {
                         if lag > conf.wait_lsn_timeout {
                             rate_limits.lag_msg_ratelimit.call2(|rate_limit_stats| {
+                                if let Some(attach_cooldown) = self.attach_wal_lag_cooldown.get() {
+                                    if &std::time::Instant::now() < attach_cooldown {
+                                        return;
+                                    }
+                                } else {
+                                    // Still loading? We shouldn't be here
+                                }
                                 let lag = humantime::format_duration(lag);
                                 warn!(%rate_limit_stats, %lag, "ingesting record with timestamp lagging more than wait_lsn_timeout");
                             })
