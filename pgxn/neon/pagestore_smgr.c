@@ -1777,10 +1777,15 @@ neon_init(void)
 	 * Sanity check that theperf counters array is sized correctly. We got
 	 * this wrong once, and the formula for max number of backends and aux
 	 * processes might well change in the future, so better safe than sorry.
-	 * This is a very cheap check so we do it even without assertions.
+	 * This is a very cheap check so we do it even without assertions.  On
+	 * v14, this gets called before initializing MyProc, so we cannot perform
+	 * the check here. That's OK, we don't expect the logic to change in old
+	 * releases.
 	 */
+#if PG_VERSION_NUM>=150000
 	if (MyNeonCounters >= &neon_per_backend_counters_shared[NUM_NEON_PERF_COUNTER_SLOTS])
 		elog(ERROR, "MyNeonCounters points past end of array");
+#endif
 
 	prfs_size = offsetof(PrefetchState, prf_buffer) +
 		sizeof(PrefetchRequest) * readahead_buffer_size;
