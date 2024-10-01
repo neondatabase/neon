@@ -1062,6 +1062,8 @@ RUN set -e \
         build-essential \
         git \
         ca-certificates \
+        autoconf \
+        automake \
         libevent-dev \
         libtool \
         pkg-config
