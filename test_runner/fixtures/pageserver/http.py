@@ -854,6 +854,18 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         self.verbose_error(res)
         return LayerMapInfo.from_json(res.json())
 
+    def timeline_layer_scan_disposable_keys(
+        self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId, layer_name: str
+    ) -> dict[str, Any]:
+        res = self.post(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/layer/{layer_name}/scan_disposable_keys",
+        )
+        self.verbose_error(res)
+        assert res.status_code == 200
+        ret = res.json()
+        assert isinstance(ret, dict)
+        return ret
+
     def download_layer(
         self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId, layer_name: str
     ):

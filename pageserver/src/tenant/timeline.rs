@@ -1820,7 +1820,7 @@ impl Timeline {
         }
     }
 
-    pub(crate) async fn layer_map_info(
+    pub(crate) async fn scan_for_shard_notlocal_keys(
         &self,
         reset: LayerAccessStatsReset,
     ) -> Result<LayerMapInfo, layer_manager::Shutdown> {

@@ -1052,7 +1052,7 @@ impl DeltaLayerInner {
         }
     }
 
-    pub(super) async fn load_keys<'a>(
+    pub(crate) async fn index_entries<'a>(
         &'a self,
         ctx: &RequestContext,
     ) -> Result<Vec<DeltaEntry<'a>>> {
@@ -1316,7 +1316,7 @@ impl DeltaLayerInner {
 
         tree_reader.dump().await?;
 
-        let keys = self.load_keys(ctx).await?;
+        let keys = self.index_entries(ctx).await?;
 
         async fn dump_blob(val: &ValueRef<'_>, ctx: &RequestContext) -> anyhow::Result<String> {
             let buf = val.load_raw(ctx).await?;
@@ -1422,6 +1422,16 @@ impl DeltaLayerInner {
                 1024,        // The default value. Unit tests might use a different value
             ),
         }
+    }
+
+    /// NB: not super efficient, but not terrible either. Should prob be an iterator.
+    //
+    // We're reusing the index traversal logical in plan_reads; would be nice to
+    // factor that out.
+    pub(crate) async fn load_keys(&self, ctx: &RequestContext) -> anyhow::Result<Vec<Key>> {
+        self.index_entries(ctx)
+            .await
+            .map(|entries| entries.into_iter().map(|entry| entry.key).collect())
     }
 }
 
