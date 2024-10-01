@@ -13,7 +13,7 @@ def test_subscriber_restart(neon_simple_env: NeonEnv):
     pub = env.endpoints.create("publisher")
     pub.start()
 
-    env.neon_cli.create_branch("subscriber")
+    sub_timeline_id = env.neon_cli.create_branch("subscriber")
     sub = env.endpoints.create("subscriber")
     sub.start()
 
@@ -47,7 +47,7 @@ def test_subscriber_restart(neon_simple_env: NeonEnv):
         for _ in range(n_restarts):
             # restart subscriber
             # time.sleep(2)
-            sub.stop("immediate")
+            sub.stop("immediate", sks_wait_walreceiver_gone=(env.safekeepers, sub_timeline_id))
             sub.start()
 
         thread.join()

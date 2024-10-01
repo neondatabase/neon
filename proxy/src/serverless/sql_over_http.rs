@@ -8,6 +8,8 @@ use futures::future::Either;
 use futures::StreamExt;
 use futures::TryFutureExt;
 use http::header::AUTHORIZATION;
+use http::Method;
+use http_body_util::combinators::BoxBody;
 use http_body_util::BodyExt;
 use http_body_util::Full;
 use hyper1::body::Body;
@@ -38,9 +40,11 @@ use url::Url;
 use urlencoding;
 use utils::http::error::ApiError;
 
+use crate::auth::backend::ComputeCredentials;
 use crate::auth::backend::ComputeUserInfo;
 use crate::auth::endpoint_sni;
 use crate::auth::ComputeUserInfoParseError;
+use crate::config::AuthenticationConfig;
 use crate::config::ProxyConfig;
 use crate::config::TlsConfig;
 use crate::context::RequestMonitoring;
@@ -56,6 +60,7 @@ use crate::usage_metrics::MetricCounterRecorder;
 use crate::DbName;
 use crate::RoleName;
 
+use super::backend::LocalProxyConnError;
 use super::backend::PoolingBackend;
 use super::conn_pool::AuthData;
 use super::conn_pool::Client;
@@ -123,14 +128,22 @@ pub(crate) enum ConnInfoError {
     MissingUsername,
     #[error("invalid username: {0}")]
     InvalidUsername(#[from] std::string::FromUtf8Error),
-    #[error("missing password")]
-    MissingPassword,
+    #[error("missing authentication credentials: {0}")]
+    MissingCredentials(Credentials),
     #[error("missing hostname")]
     MissingHostname,
     #[error("invalid hostname: {0}")]
     InvalidEndpoint(#[from] ComputeUserInfoParseError),
     #[error("malformed endpoint")]
     MalformedEndpoint,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum Credentials {
+    #[error("required password")]
+    Password,
+    #[error("required authorization bearer token in JWT format")]
+    BearerJwt,
 }
 
 impl ReportableError for ConnInfoError {
@@ -146,6 +159,7 @@ impl UserFacingError for ConnInfoError {
 }
 
 fn get_conn_info(
+    config: &'static AuthenticationConfig,
     ctx: &RequestMonitoring,
     headers: &HeaderMap,
     tls: Option<&TlsConfig>,
@@ -181,21 +195,32 @@ fn get_conn_info(
     ctx.set_user(username.clone());
 
     let auth = if let Some(auth) = headers.get(&AUTHORIZATION) {
+        if !config.accept_jwts {
+            return Err(ConnInfoError::MissingCredentials(Credentials::Password));
+        }
+
         let auth = auth
             .to_str()
             .map_err(|_| ConnInfoError::InvalidHeader(&AUTHORIZATION))?;
         AuthData::Jwt(
             auth.strip_prefix("Bearer ")
-                .ok_or(ConnInfoError::MissingPassword)?
+                .ok_or(ConnInfoError::MissingCredentials(Credentials::BearerJwt))?
                 .into(),
         )
     } else if let Some(pass) = connection_url.password() {
+        // wrong credentials provided
+        if config.accept_jwts {
+            return Err(ConnInfoError::MissingCredentials(Credentials::BearerJwt));
+        }
+
         AuthData::Password(match urlencoding::decode_binary(pass.as_bytes()) {
             std::borrow::Cow::Borrowed(b) => b.into(),
             std::borrow::Cow::Owned(b) => b.into(),
         })
+    } else if config.accept_jwts {
+        return Err(ConnInfoError::MissingCredentials(Credentials::BearerJwt));
     } else {
-        return Err(ConnInfoError::MissingPassword);
+        return Err(ConnInfoError::MissingCredentials(Credentials::Password));
     };
 
     let endpoint = match connection_url.host() {
@@ -247,7 +272,7 @@ pub(crate) async fn handle(
     request: Request<Incoming>,
     backend: Arc<PoolingBackend>,
     cancel: CancellationToken,
-) -> Result<Response<Full<Bytes>>, ApiError> {
+) -> Result<Response<BoxBody<Bytes, hyper1::Error>>, ApiError> {
     let result = handle_inner(cancel, config, &ctx, request, backend).await;
 
     let mut response = match result {
@@ -279,7 +304,7 @@ pub(crate) async fn handle(
 
             let mut message = e.to_string_client();
             let db_error = match &e {
-                SqlOverHttpError::ConnectCompute(HttpConnError::ConnectionError(e))
+                SqlOverHttpError::ConnectCompute(HttpConnError::PostgresConnectionError(e))
                 | SqlOverHttpError::Postgres(e) => e.as_db_error(),
                 _ => None,
             };
@@ -504,7 +529,7 @@ async fn handle_inner(
     ctx: &RequestMonitoring,
     request: Request<Incoming>,
     backend: Arc<PoolingBackend>,
-) -> Result<Response<Full<Bytes>>, SqlOverHttpError> {
+) -> Result<Response<BoxBody<Bytes, hyper1::Error>>, SqlOverHttpError> {
     let _requeset_gauge = Metrics::get()
         .proxy
         .connection_requests
@@ -514,17 +539,49 @@ async fn handle_inner(
         "handling interactive connection from client"
     );
 
-    //
-    // Determine the destination and connection params
-    //
-    let headers = request.headers();
-
-    // TLS config should be there.
-    let conn_info = get_conn_info(ctx, headers, config.tls_config.as_ref())?;
+    let conn_info = get_conn_info(
+        &config.authentication_config,
+        ctx,
+        request.headers(),
+        config.tls_config.as_ref(),
+    )?;
     info!(
         user = conn_info.conn_info.user_info.user.as_str(),
         "credentials"
     );
+
+    match conn_info.auth {
+        AuthData::Jwt(jwt) if config.authentication_config.is_auth_broker => {
+            handle_auth_broker_inner(config, ctx, request, conn_info.conn_info, jwt, backend).await
+        }
+        auth => {
+            handle_db_inner(
+                cancel,
+                config,
+                ctx,
+                request,
+                conn_info.conn_info,
+                auth,
+                backend,
+            )
+            .await
+        }
+    }
+}
+
+async fn handle_db_inner(
+    cancel: CancellationToken,
+    config: &'static ProxyConfig,
+    ctx: &RequestMonitoring,
+    request: Request<Incoming>,
+    conn_info: ConnInfo,
+    auth: AuthData,
+    backend: Arc<PoolingBackend>,
+) -> Result<Response<BoxBody<Bytes, hyper1::Error>>, SqlOverHttpError> {
+    //
+    // Determine the destination and connection params
+    //
+    let headers = request.headers();
 
     // Allow connection pooling only if explicitly requested
     // or if we have decided that http pool is no longer opt-in
@@ -563,26 +620,36 @@ async fn handle_inner(
 
     let authenticate_and_connect = Box::pin(
         async {
-            let keys = match &conn_info.auth {
+            let keys = match auth {
                 AuthData::Password(pw) => {
                     backend
                         .authenticate_with_password(
                             ctx,
                             &config.authentication_config,
-                            &conn_info.conn_info.user_info,
-                            pw,
+                            &conn_info.user_info,
+                            &pw,
                         )
                         .await?
                 }
                 AuthData::Jwt(jwt) => {
                     backend
-                        .authenticate_with_jwt(ctx, &conn_info.conn_info.user_info, jwt)
-                        .await?
+                        .authenticate_with_jwt(
+                            ctx,
+                            &config.authentication_config,
+                            &conn_info.user_info,
+                            jwt,
+                        )
+                        .await?;
+
+                    ComputeCredentials {
+                        info: conn_info.user_info.clone(),
+                        keys: crate::auth::backend::ComputeCredentialKeys::None,
+                    }
                 }
             };
 
             let client = backend
-                .connect_to_compute(ctx, conn_info.conn_info, keys, !allow_pool)
+                .connect_to_compute(ctx, conn_info, keys, !allow_pool)
                 .await?;
             // not strictly necessary to mark success here,
             // but it's just insurance for if we forget it somewhere else
@@ -640,7 +707,11 @@ async fn handle_inner(
 
     let len = json_output.len();
     let response = response
-        .body(Full::new(Bytes::from(json_output)))
+        .body(
+            Full::new(Bytes::from(json_output))
+                .map_err(|x| match x {})
+                .boxed(),
+        )
         // only fails if invalid status code or invalid header/values are given.
         // these are not user configurable so it cannot fail dynamically
         .expect("building response payload should not fail");
@@ -654,6 +725,65 @@ async fn handle_inner(
         .observe(HttpDirection::Response, len as f64);
 
     Ok(response)
+}
+
+static HEADERS_TO_FORWARD: &[&HeaderName] = &[
+    &AUTHORIZATION,
+    &CONN_STRING,
+    &RAW_TEXT_OUTPUT,
+    &ARRAY_MODE,
+    &TXN_ISOLATION_LEVEL,
+    &TXN_READ_ONLY,
+    &TXN_DEFERRABLE,
+];
+
+async fn handle_auth_broker_inner(
+    config: &'static ProxyConfig,
+    ctx: &RequestMonitoring,
+    request: Request<Incoming>,
+    conn_info: ConnInfo,
+    jwt: String,
+    backend: Arc<PoolingBackend>,
+) -> Result<Response<BoxBody<Bytes, hyper1::Error>>, SqlOverHttpError> {
+    backend
+        .authenticate_with_jwt(
+            ctx,
+            &config.authentication_config,
+            &conn_info.user_info,
+            jwt,
+        )
+        .await
+        .map_err(HttpConnError::from)?;
+
+    let mut client = backend.connect_to_local_proxy(ctx, conn_info).await?;
+
+    let local_proxy_uri = ::http::Uri::from_static("http://proxy.local/sql");
+
+    let (mut parts, body) = request.into_parts();
+    let mut req = Request::builder().method(Method::POST).uri(local_proxy_uri);
+
+    // todo(conradludgate): maybe auth-broker should parse these and re-serialize
+    // these instead just to ensure they remain normalised.
+    for &h in HEADERS_TO_FORWARD {
+        if let Some(hv) = parts.headers.remove(h) {
+            req = req.header(h, hv);
+        }
+    }
+
+    let req = req
+        .body(body)
+        .expect("all headers and params received via hyper should be valid for request");
+
+    // todo: map body to count egress
+    let _metrics = client.metrics();
+
+    Ok(client
+        .inner
+        .send_request(req)
+        .await
+        .map_err(LocalProxyConnError::from)
+        .map_err(HttpConnError::from)?
+        .map(|b| b.boxed()))
 }
 
 impl QueryData {
@@ -705,7 +835,9 @@ impl QueryData {
                     // query failed or was cancelled.
                     Ok(Err(error)) => {
                         let db_error = match &error {
-                            SqlOverHttpError::ConnectCompute(HttpConnError::ConnectionError(e))
+                            SqlOverHttpError::ConnectCompute(
+                                HttpConnError::PostgresConnectionError(e),
+                            )
                             | SqlOverHttpError::Postgres(e) => e.as_db_error(),
                             _ => None,
                         };

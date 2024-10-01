@@ -56,6 +56,7 @@ use utils::http::endpoint::request_span;
 use utils::http::request::must_parse_query_param;
 use utils::http::request::{get_request_param, must_get_query_param, parse_query_param};
 
+use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::deletion_queue::DeletionQueueClient;
 use crate::pgdatadir_mapping::LsnForTimestamp;
@@ -80,7 +81,6 @@ use crate::tenant::timeline::CompactionError;
 use crate::tenant::timeline::Timeline;
 use crate::tenant::GetTimelineError;
 use crate::tenant::{LogicalSizeCalculationCause, PageReconstructError};
-use crate::{config::PageServerConf, tenant::mgr};
 use crate::{disk_usage_eviction_task, tenant};
 use pageserver_api::models::{
     StatusResponse, TenantConfigRequest, TenantInfo, TimelineCreateRequest, TimelineGcRequest,
@@ -1719,8 +1719,13 @@ async fn timeline_gc_handler(
 
     let gc_req: TimelineGcRequest = json_request(&mut request).await?;
 
+    let state = get_state(&request);
+
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
-    let gc_result = mgr::immediate_gc(tenant_shard_id, timeline_id, gc_req, cancel, &ctx).await?;
+    let gc_result = state
+        .tenant_manager
+        .immediate_gc(tenant_shard_id, timeline_id, gc_req, cancel, &ctx)
+        .await?;
 
     json_response(StatusCode::OK, gc_result)
 }

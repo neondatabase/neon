@@ -53,7 +53,7 @@ def test_branch_and_gc(neon_simple_env: NeonEnv, build_type: str):
     env = neon_simple_env
     pageserver_http_client = env.pageserver.http_client()
 
-    tenant, _ = env.neon_cli.create_tenant(
+    tenant, timeline_main = env.neon_cli.create_tenant(
         conf={
             # disable background GC
             "gc_period": "0s",
@@ -70,8 +70,7 @@ def test_branch_and_gc(neon_simple_env: NeonEnv, build_type: str):
         }
     )
 
-    timeline_main = env.neon_cli.create_timeline("test_main", tenant_id=tenant)
-    endpoint_main = env.endpoints.create_start("test_main", tenant_id=tenant)
+    endpoint_main = env.endpoints.create_start("main", tenant_id=tenant)
 
     main_cur = endpoint_main.connect().cursor()
 
@@ -92,7 +91,7 @@ def test_branch_and_gc(neon_simple_env: NeonEnv, build_type: str):
     pageserver_http_client.timeline_gc(tenant, timeline_main, lsn2 - lsn1 + 1024)
 
     env.neon_cli.create_branch(
-        "test_branch", "test_main", tenant_id=tenant, ancestor_start_lsn=lsn1
+        "test_branch", ancestor_branch_name="main", ancestor_start_lsn=lsn1, tenant_id=tenant
     )
     endpoint_branch = env.endpoints.create_start("test_branch", tenant_id=tenant)
 
