@@ -1005,7 +1005,11 @@ pub mod virtual_file {
 
     impl IoMode {
         pub const fn preferred() -> Self {
-            Self::Buffered
+            if cfg!(target_os = "linux") {
+                Self::Direct
+            } else {
+                Self::Buffered
+            }
         }
     }
 
