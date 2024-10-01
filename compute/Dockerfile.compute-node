@@ -12,7 +12,6 @@ ARG DEBIAN_FLAVOR=bullseye-slim
 #########################################################################################
 FROM debian:$DEBIAN_FLAVOR AS build-deps
 ARG DEBIAN_FLAVOR
-ENV DEBIAN_FLAVOR=$DEBIAN_FLAVOR
 
 RUN case $DEBIAN_FLAVOR in \
       # Version-specific installs for Bullseye (PG14-PG16):
@@ -1172,7 +1171,6 @@ ENV PGDATABASE=postgres
 #########################################################################################
 FROM debian:$DEBIAN_FLAVOR
 ARG DEBIAN_FLAVOR
-ENV DEBIAN_FLAVOR=$DEBIAN_FLAVOR
 # Add user postgres
 RUN mkdir /var/db && useradd -m -d /var/db/postgres postgres && \
     echo "postgres:test_console_pass" | chpasswd && \
