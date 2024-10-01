@@ -565,7 +565,7 @@ mod tests {
         stream::{PqStream, Stream},
     };
 
-    use super::{auth_quirks, AuthRateLimiter};
+    use super::{auth_quirks, jwt::JwkCache, AuthRateLimiter};
 
     struct Auth {
         ips: Vec<IpPattern>,
@@ -611,12 +611,15 @@ mod tests {
     }
 
     static CONFIG: Lazy<AuthenticationConfig> = Lazy::new(|| AuthenticationConfig {
+        jwks_cache: JwkCache::default(),
         thread_pool: ThreadPool::new(1),
         scram_protocol_timeout: std::time::Duration::from_secs(5),
         rate_limiter_enabled: true,
         rate_limiter: AuthRateLimiter::new(&RateBucketInfo::DEFAULT_AUTH_SET),
         rate_limit_ip_subnet: 64,
         ip_allowlist_check_enabled: true,
+        is_auth_broker: false,
+        accept_jwts: false,
     });
 
     async fn read_message(r: &mut (impl AsyncRead + Unpin), b: &mut BytesMut) -> PgMessage {

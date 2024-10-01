@@ -937,7 +937,7 @@ PagestoreShmemInit(void)
 
 	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
 	pagestore_shared = ShmemInitStruct("libpagestore shared state",
-									   PagestoreShmemSize(),
+									   sizeof(PagestoreShmemState),
 									   &found);
 	if (!found)
 	{
