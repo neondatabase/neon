@@ -2100,7 +2100,7 @@ impl Tenant {
                 offload_timeline(self, timeline)
                     .instrument(info_span!("offload_timeline", %timeline_id))
                     .await
-                    .map_err(|e| timeline::CompactionError::Other(e))?;
+                    .map_err(timeline::CompactionError::Other)?;
             }
         }
 

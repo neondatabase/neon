@@ -150,7 +150,7 @@ async fn remove_maybe_offloaded_timeline_from_tenant(
     let mut timelines_offloaded = tenant.timelines_offloaded.lock().unwrap();
     let offloaded_children_exist = timelines_offloaded
         .iter()
-        .any(|(_, entry)| &entry.ancestor_timeline_id == &Some(timeline.timeline_id()));
+        .any(|(_, entry)| entry.ancestor_timeline_id == Some(timeline.timeline_id()));
     let children_exist = timelines
         .iter()
         .any(|(_, entry)| entry.get_ancestor_timeline_id() == Some(timeline.timeline_id()));
