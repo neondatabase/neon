@@ -1461,8 +1461,7 @@ pub(crate) fn set_io_mode(mode: IoMode) {
 }
 
 pub(crate) fn get_io_mode() -> IoMode {
-    let mode = IoMode::try_from(IO_MODE.load(Ordering::Relaxed)).unwrap();
-    mode
+    IoMode::try_from(IO_MODE.load(Ordering::Relaxed)).unwrap()
 }
 #[cfg(test)]
 mod tests {
@@ -1587,10 +1586,10 @@ mod tests {
         impl Adapter for A {
             async fn open(
                 path: Utf8PathBuf,
-                mut opts: OpenOptions,
+                opts: OpenOptions,
                 ctx: &RequestContext,
             ) -> Result<MaybeVirtualFile, anyhow::Error> {
-                let vf = VirtualFile::open_with_options(&path, &mut opts, ctx).await?;
+                let vf = VirtualFile::open_with_options(&path, &opts, ctx).await?;
                 Ok(MaybeVirtualFile::VirtualFile(vf))
             }
         }
