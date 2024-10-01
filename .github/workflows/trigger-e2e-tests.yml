@@ -137,7 +137,7 @@ jobs:
 
           gh workflow --repo ${REMOTE_REPO} \
             run testing.yml \
-              --ref "main" \
+              --ref "sharnoff/fix-autoscaling-memory-test" \
               --raw-field "ci_job_name=neon-cloud-e2e" \
               --raw-field "commit_hash=$COMMIT_SHA" \
               --raw-field "remote_repo=${GITHUB_REPOSITORY}" \
