@@ -58,7 +58,6 @@ use std::collections::VecDeque;
 use std::fs::File;
 use std::io::SeekFrom;
 use std::ops::Range;
-use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::prelude::FileExt;
 use std::str::FromStr;
 use tokio::sync::OnceCell;
