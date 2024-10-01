@@ -27,7 +27,7 @@ RUN case $DEBIAN_FLAVOR in \
       ;; \
     esac && \
     apt update &&  \
-    apt install -y git autoconf automake libtool build-essential bison flex libreadline-dev \
+    apt install --no-install-recommends -y git autoconf automake libtool build-essential bison flex libreadline-dev \
     zlib1g-dev libxml2-dev libcurl4-openssl-dev libossp-uuid-dev wget pkg-config libssl-dev \
     libicu-dev libxslt1-dev liblz4-dev libzstd-dev zstd \
     $VERSION_INSTALLS
@@ -104,7 +104,7 @@ FROM build-deps AS postgis-build
 ARG PG_VERSION
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 RUN apt update && \
-    apt install -y gdal-bin libboost-dev libboost-thread-dev libboost-filesystem-dev \
+    apt install --no-install-recommends -y gdal-bin libboost-dev libboost-thread-dev libboost-filesystem-dev \
     libboost-system-dev libboost-iostreams-dev libboost-program-options-dev libboost-timer-dev \
     libcgal-dev libgdal-dev libgmp-dev libmpfr-dev libopenscenegraph-dev libprotobuf-c-dev \
     protobuf-c-compiler xsltproc
@@ -182,7 +182,7 @@ RUN case "${PG_VERSION}" in "v17") \
     echo "v17 extensions are not supported yet. Quit" && exit 0;; \
     esac && \
     apt update && \
-    apt install -y ninja-build python3-dev libncurses5 binutils clang
+    apt install --no-install-recommends -y ninja-build python3-dev libncurses5 binutils clang
 
 RUN case "${PG_VERSION}" in "v17") \
     echo "v17 extensions are not supported yet. Quit" && exit 0;; \
@@ -587,7 +587,7 @@ RUN case "${PG_VERSION}" in "v17") \
     echo "v17 extensions are not supported yet. Quit" && exit 0;; \
     esac && \
     apt-get update && \
-    apt-get install -y \
+    apt-get install --no-install-recommends -y \
         libboost-iostreams1.74-dev \
         libboost-regex1.74-dev \
         libboost-serialization1.74-dev \
@@ -752,7 +752,7 @@ ARG PG_VERSION
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
 RUN apt-get update && \
-    apt-get install -y curl libclang-dev && \
+    apt-get install --no-install-recommends -y curl libclang-dev && \
     useradd -ms /bin/bash nonroot -b /home
 
 ENV HOME=/home/nonroot
@@ -1058,7 +1058,7 @@ FROM debian:$DEBIAN_FLAVOR AS pgbouncer
 ARG DEBIAN_FLAVOR
 RUN set -e \
     && apt-get update \
-    && apt-get install -y \
+    && apt-get install --no-install-recommends -y \
         build-essential \
         git \
         libevent-dev \
