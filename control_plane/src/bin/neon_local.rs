@@ -642,8 +642,7 @@ async fn handle_timeline(timeline_match: &ArgMatches, env: &mut local_env::Local
         }
         Some(("import-pgdata", import_match)) => {
             let tenant_id = get_tenant_id(import_match, env)?;
-            let timeline_id =
-                parse_timeline_id(import_match)?.unwrap_or_else(|| TimelineId::generate());
+            let timeline_id = parse_timeline_id(import_match)?.unwrap_or_else(TimelineId::generate);
             let branch_name = import_match
                 .get_one::<String>("branch-name")
                 .ok_or_else(|| anyhow!("No branch name provided"))?;

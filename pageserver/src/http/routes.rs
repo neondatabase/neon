@@ -1269,6 +1269,7 @@ async fn timeline_layer_file_scan_disposable_keys(
         } else {
             not_disposable_count += 1;
         }
+        #[allow(clippy::collapsible_if)]
         if i % 10000 == 0 {
             if cancel.is_cancelled() || timeline.cancel.is_cancelled() || timeline.is_stopping() {
                 return Err(ApiError::ShuttingDown);

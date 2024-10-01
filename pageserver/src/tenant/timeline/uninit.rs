@@ -203,10 +203,10 @@ impl<'t> UninitializedTimeline<'t> {
         // We should read the real end of the record from the WAL, but here we
         // just fake it.
         let disk_consistent_lsn = Lsn(base_lsn.0 + 8);
-        let prev_record_lsn = Some(base_lsn);
+        let prev_record_lsn = base_lsn;
         let metadata = TimelineMetadata::new(
             disk_consistent_lsn,
-            prev_record_lsn,
+            Some(prev_record_lsn),
             None,     // no ancestor
             Lsn(0),   // no ancestor lsn
             base_lsn, // latest_gc_cutoff_lsn
@@ -224,7 +224,7 @@ impl<'t> UninitializedTimeline<'t> {
         let tl = self.finish_by_reloading_timeline_from_remote(ctx).await?;
 
         assert_eq!(tl.disk_consistent_lsn.load(), disk_consistent_lsn);
-        assert_eq!(tl.get_prev_record_lsn(), prev_record_lsn.unwrap());
+        assert_eq!(tl.get_prev_record_lsn(), prev_record_lsn);
         assert_eq!(tl.initdb_lsn, base_lsn);
         assert_eq!(*tl.latest_gc_cutoff_lsn.read(), base_lsn);
         // TODO: assert remote timeline client's metadata eq exactly our `metadata` variable

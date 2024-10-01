@@ -295,7 +295,7 @@ impl PgImportEnv {
             let end_key = rel_block_to_key(file.rel_tag, start_blk + (len / 8192) as u32);
             self.tasks
                 .push(AnyImportTask::RelBlocks(ImportRelBlocksTask::new(
-                    self.timeline.get_shard_identity().clone(),
+                    *self.timeline.get_shard_identity(),
                     start_key..end_key,
                     &file.path,
                 )));

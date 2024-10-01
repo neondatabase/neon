@@ -4,10 +4,8 @@ from typing import Optional
 import pytest
 from fixtures.common_types import TenantId, TenantShardId, TimelineId
 from fixtures.neon_fixtures import NeonEnvBuilder, VanillaPostgres
-from fixtures.remote_storage import RemoteStorageKind
-
-from fixtures.log_helper import log
 from fixtures.pageserver.http import HistoricLayerInfo, PageserverHttpClient
+from fixtures.remote_storage import RemoteStorageKind
 
 num_rows = 1000
 
@@ -83,9 +81,10 @@ def test_pgdata_import_smoke(
                         ),
                     )
 
-                futs.append(executor.submit(do_layer, shard_ps_http, tenant_shard_id, timeline_id, layer))
+                futs.append(
+                    executor.submit(do_layer, shard_ps_http, tenant_shard_id, timeline_id, layer)
+                )
         for fut in futs:
             layer, result = fut.result()
             assert result["disposable_count"] == 0
             assert result["not_disposable_count"] > 0  # sanity check
-
