@@ -333,7 +333,7 @@ async fn maybe_delete_index(
         |_| false,
         3,
         MAX_RETRIES as u32,
-        "head_object",
+        "maybe_delete_index",
         &cancel,
     )
     .await
