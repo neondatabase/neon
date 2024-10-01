@@ -94,13 +94,17 @@ RUN apt update && \
     libcgal-dev libgdal-dev libgmp-dev libmpfr-dev libopenscenegraph-dev libprotobuf-c-dev \
     protobuf-c-compiler xsltproc
 
-# SFCGAL > 1.3 requires CGAL > 5.2, Bullseye's libcgal-dev is 5.2
-RUN case "${PG_VERSION}" in "v17") \
-    mkdir -p /sfcgal && \
-    echo "Postgis doensn't yet support PG17 (needs 3.4.3, if not higher)" && exit 0;; \
-    esac && \
-    wget https://gitlab.com/Oslandia/SFCGAL/-/archive/v1.3.10/SFCGAL-v1.3.10.tar.gz -O SFCGAL.tar.gz && \
-    echo "4e39b3b2adada6254a7bdba6d297bb28e1a9835a9f879b74f37e2dab70203232 SFCGAL.tar.gz" | sha256sum --check && \
+
+RUN export CGAL_VERSION=6.0 && \
+    wget https://github.com/CGAL/cgal/releases/download/v${CGAL_VERSION}/CGAL-${CGAL_VERSION}.tar.xz && \
+    tar xJf CGAL-${CGAL_VERSION}.tar.xz && \
+    cd CGAL-${CGAL_VERSION} && mkdir build && cd build && cmake .. && make && make install && cd ../..
+
+
+# Postgis 3.5.0 requires SFCGAL 1.4+
+RUN mkdir -p /sfcgal && \
+    wget https://gitlab.com/sfcgal/SFCGAL/-/archive/v1.5.2/SFCGAL-v1.5.2.tar.gz -O SFCGAL.tar.gz && \
+    echo "b946b3c20d53f6e2703046085f0fcfea6c1a4081163f7bedd30b1195801efdd2 SFCGAL.tar.gz" | sha256sum --check && \
     mkdir sfcgal-src && cd sfcgal-src && tar xzf ../SFCGAL.tar.gz --strip-components=1 -C . && \
     cmake -DCMAKE_BUILD_TYPE=Release . && make -j $(getconf _NPROCESSORS_ONLN) && \
     DESTDIR=/sfcgal make install -j $(getconf _NPROCESSORS_ONLN) && \
@@ -108,11 +112,9 @@ RUN case "${PG_VERSION}" in "v17") \
 
 ENV PATH="/usr/local/pgsql/bin:$PATH"
 
-RUN case "${PG_VERSION}" in "v17") \
-    echo "Postgis doensn't yet support PG17 (needs 3.4.3, if not higher)" && exit 0;; \
-    esac && \
-    wget https://download.osgeo.org/postgis/source/postgis-3.3.3.tar.gz -O postgis.tar.gz && \
-    echo "74eb356e3f85f14233791013360881b6748f78081cc688ff9d6f0f673a762d13 postgis.tar.gz" | sha256sum --check && \
+# Postgis 3.5.0 supports v17
+RUN wget https://download.osgeo.org/postgis/source/postgis-3.5.0.tar.gz -O postgis.tar.gz && \
+    echo "ca698a22cc2b2b3467ac4e063b43a28413f3004ddd505bdccdd74c56a647f510  postgis-3.5.0.tar.gz" | sha256sum --check && \
     mkdir postgis-src && cd postgis-src && tar xzf ../postgis.tar.gz --strip-components=1 -C . && \
     find /usr/local/pgsql -type f | sed 's|^/usr/local/pgsql/||' > /before.txt &&\
     ./autogen.sh && \
@@ -137,10 +139,9 @@ RUN case "${PG_VERSION}" in "v17") \
     cp /usr/local/pgsql/share/extension/address_standardizer.control /extensions/postgis && \
     cp /usr/local/pgsql/share/extension/address_standardizer_data_us.control /extensions/postgis
 
-RUN case "${PG_VERSION}" in "v17") \
-    echo "v17 extensions are not supported yet. Quit" && exit 0;; \
-    esac && \
-    wget https://github.com/pgRouting/pgrouting/archive/v3.4.2.tar.gz -O pgrouting.tar.gz && \
+# not version-specific
+# last release v3.6.2 - Mar 30, 2023
+RUN wget https://github.com/pgRouting/pgrouting/archive/v3.6.2.tar.gz -O pgrouting.tar.gz && \
     echo "cac297c07d34460887c4f3b522b35c470138760fe358e351ad1db4edb6ee306e pgrouting.tar.gz" | sha256sum --check && \
     mkdir pgrouting-src && cd pgrouting-src && tar xzf ../pgrouting.tar.gz --strip-components=1 -C . && \
     mkdir build && cd build && \
@@ -163,12 +164,13 @@ FROM build-deps AS plv8-build
 ARG PG_VERSION
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
-RUN case "${PG_VERSION}" in "v17") \
-    echo "v17 extensions are not supported yet. Quit" && exit 0;; \
-    esac && \
-    apt update && \
+RUN apt update && \
     apt install -y ninja-build python3-dev libncurses5 binutils clang
 
+# plv8 3.2.3 supports v17
+# last release v3.2.3 - Sep 7, 2024
+# TODO last version uses cmake and has a different dependencies, update this
+# TODO also don't forget to update ln -s hack below
 RUN case "${PG_VERSION}" in "v17") \
     echo "v17 extensions are not supported yet. Quit" && exit 0;; \
     esac && \
@@ -200,10 +202,7 @@ FROM build-deps AS h3-pg-build
 ARG PG_VERSION
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
-RUN case "${PG_VERSION}" in "v17") \
-    echo "v17 extensions are not supported yet. Quit" && exit 0;; \
-    esac && \
-    case "$(uname -m)" in \
+RUN case "$(uname -m)" in \
       "x86_64") \
         export CMAKE_CHECKSUM=739d372726cb23129d57a539ce1432453448816e345e1545f6127296926b6754 \
         ;; \
@@ -221,10 +220,9 @@ RUN case "${PG_VERSION}" in "v17") \
       && /tmp/cmake-install.sh --skip-license --prefix=/usr/local/ \
       && rm /tmp/cmake-install.sh
 
-RUN case "${PG_VERSION}" in "v17") \
-        mkdir -p /h3/usr/ && \
-    echo "v17 extensions are not supported yet. Quit" && exit 0;; \
-    esac && \
+# not version-specific
+# last release v4.1.0 - Jan 18, 2023
+RUN mkdir -p /h3/usr/ && \
     wget https://github.com/uber/h3/archive/refs/tags/v4.1.0.tar.gz -O h3.tar.gz && \
     echo "ec99f1f5974846bde64f4513cf8d2ea1b8d172d2218ab41803bf6a63532272bc h3.tar.gz" | sha256sum --check && \
     mkdir h3-src && cd h3-src && tar xzf ../h3.tar.gz --strip-components=1 -C . && \
@@ -235,10 +233,9 @@ RUN case "${PG_VERSION}" in "v17") \
     cp -R /h3/usr / && \
     rm -rf build
 
-RUN case "${PG_VERSION}" in "v17") \
-    echo "v17 extensions are not supported yet. Quit" && exit 0;; \
-    esac && \
-    wget https://github.com/zachasme/h3-pg/archive/refs/tags/v4.1.3.tar.gz -O h3-pg.tar.gz && \
+# not version-specific
+# last release v4.1.3 - Jul 26, 2023
+RUN wget https://github.com/zachasme/h3-pg/archive/refs/tags/v4.1.3.tar.gz -O h3-pg.tar.gz && \
     echo "5c17f09a820859ffe949f847bebf1be98511fb8f1bd86f94932512c00479e324 h3-pg.tar.gz" | sha256sum --check && \
     mkdir h3-pg-src && cd h3-pg-src && tar xzf ../h3-pg.tar.gz --strip-components=1 -C . && \
     export PATH="/usr/local/pgsql/bin:$PATH" && \
@@ -257,11 +254,13 @@ FROM build-deps AS unit-pg-build
 ARG PG_VERSION
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
+# not version-specific
+# last release 7.9 - Sep 15, 2024
 RUN case "${PG_VERSION}" in "v17") \
     echo "v17 extensions are not supported yet. Quit" && exit 0;; \
     esac && \
-    wget https://github.com/df7cb/postgresql-unit/archive/refs/tags/7.7.tar.gz -O postgresql-unit.tar.gz && \
-    echo "411d05beeb97e5a4abf17572bfcfbb5a68d98d1018918feff995f6ee3bb03e79 postgresql-unit.tar.gz" | sha256sum --check && \
+    wget https://github.com/df7cb/postgresql-unit/archive/refs/tags/7.9.tar.gz -O postgresql-unit.tar.gz && \
+    echo "e46de6245dcc8b2c2ecf29873dbd43b2b346773f31dd5ce4b8315895a052b456 postgresql-unit.tar.gz" | sha256sum --check && \
     mkdir postgresql-unit-src && cd postgresql-unit-src && tar xzf ../postgresql-unit.tar.gz --strip-components=1 -C . && \
     make -j $(getconf _NPROCESSORS_ONLN) PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
     make -j $(getconf _NPROCESSORS_ONLN) install PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
@@ -287,6 +286,8 @@ COPY compute/patches/pgvector.patch /pgvector.patch
 # By default, pgvector Makefile uses `-march=native`. We don't want that,
 # because we build the images on different machines than where we run them.
 # Pass OPTFLAGS="" to remove it.
+#
+# v17 is not supported yet because of upstream issue https://github.com/pgvector/pgvector/issues/669
 RUN case "${PG_VERSION}" in "v17") \
     echo "v17 extensions are not supported yet. Quit" && exit 0;; \
     esac && \
@@ -308,12 +309,10 @@ FROM build-deps AS pgjwt-pg-build
 ARG PG_VERSION
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
-# 9742dab1b2f297ad3811120db7b21451bca2d3c9 made on 13/11/2021
-RUN case "${PG_VERSION}" in "v17") \
-    echo "v17 extensions are not supported yet. Quit" && exit 0;; \
-    esac && \
-    wget https://github.com/michelp/pgjwt/archive/9742dab1b2f297ad3811120db7b21451bca2d3c9.tar.gz -O pgjwt.tar.gz && \
-    echo "cfdefb15007286f67d3d45510f04a6a7a495004be5b3aecb12cda667e774203f pgjwt.tar.gz" | sha256sum --check && \
+# not version-specific
+# doesn't use releases, last commit f3d82fd - Mar 2, 2023 
+RUN wget https://github.com/michelp/pgjwt/archive/f3d82fd30151e754e19ce5d6a06c71c20689ce3d.tar.gz -O pgjwt.tar.gz && \
+    echo "dae8ed99eebb7593b43013f6532d772b12dfecd55548d2673f2dfd0163f6d2b9 pgjwt.tar.gz" | sha256sum --check && \
     mkdir pgjwt-src && cd pgjwt-src && tar xzf ../pgjwt.tar.gz --strip-components=1 -C . && \
     make -j $(getconf _NPROCESSORS_ONLN) install PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/pgjwt.control
@@ -328,11 +327,10 @@ FROM build-deps AS hypopg-pg-build
 ARG PG_VERSION
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
-RUN case "${PG_VERSION}" in "v17") \
-    echo "v17 extensions are not supported yet. Quit" && exit 0;; \
-    esac && \
-    wget https://github.com/HypoPG/hypopg/archive/refs/tags/1.4.0.tar.gz -O hypopg.tar.gz && \
-    echo "0821011743083226fc9b813c1f2ef5897a91901b57b6bea85a78e466187c6819 hypopg.tar.gz" | sha256sum --check && \
+# HypoPG 1.4.1 supports v17
+# last release 1.4.1 - Apr 28, 2024
+RUN wget https://github.com/HypoPG/hypopg/archive/refs/tags/1.4.1.tar.gz -O hypopg.tar.gz && \
+    echo "9afe6357fd389d8d33fad81703038ce520b09275ec00153c6c89282bcdedd6bc hypopg.tar.gz" | sha256sum --check && \
     mkdir hypopg-src && cd hypopg-src && tar xzf ../hypopg.tar.gz --strip-components=1 -C . && \
     make -j $(getconf _NPROCESSORS_ONLN) PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
     make -j $(getconf _NPROCESSORS_ONLN) install PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
@@ -348,10 +346,9 @@ FROM build-deps AS pg-hashids-pg-build
 ARG PG_VERSION
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
-RUN case "${PG_VERSION}" in "v17") \
-    echo "v17 extensions are not supported yet. Quit" && exit 0;; \
-    esac && \
-    wget https://github.com/iCyberon/pg_hashids/archive/refs/tags/v1.2.1.tar.gz -O pg_hashids.tar.gz && \
+# not version-specific
+# last release v1.2.1 -Jan 12, 2018
+RUN wget https://github.com/iCyberon/pg_hashids/archive/refs/tags/v1.2.1.tar.gz -O pg_hashids.tar.gz && \
     echo "74576b992d9277c92196dd8d816baa2cc2d8046fe102f3dcd7f3c3febed6822a pg_hashids.tar.gz" | sha256sum --check && \
     mkdir pg_hashids-src && cd pg_hashids-src && tar xzf ../pg_hashids.tar.gz --strip-components=1 -C . && \
     make -j $(getconf _NPROCESSORS_ONLN) PG_CONFIG=/usr/local/pgsql/bin/pg_config USE_PGXS=1 && \
@@ -369,7 +366,8 @@ ARG PG_VERSION
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
 COPY compute/patches/rum.patch /rum.patch
-
+# maybe version-specific
+# last release 1.3.13 - Sep 19, 2022
 RUN case "${PG_VERSION}" in "v17") \
     echo "v17 extensions are not supported yet. Quit" && exit 0;; \
     esac && \
@@ -391,11 +389,10 @@ FROM build-deps AS pgtap-pg-build
 ARG PG_VERSION
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
-RUN case "${PG_VERSION}" in "v17") \
-    echo "v17 extensions are not supported yet. Quit" && exit 0;; \
-    esac && \
-    wget https://github.com/theory/pgtap/archive/refs/tags/v1.2.0.tar.gz -O pgtap.tar.gz && \
-    echo "9c7c3de67ea41638e14f06da5da57bac6f5bd03fea05c165a0ec862205a5c052 pgtap.tar.gz" | sha256sum --check && \
+# pgtap 1.3.3 supports v17
+# last release v1.3.3 - Apr 8, 2024
+RUN wget https://github.com/theory/pgtap/archive/refs/tags/v1.3.3.tar.gz -O pgtap.tar.gz && \
+    echo "325ea79d0d2515bce96bce43f6823dcd3effbd6c54cb2a4d6c2384fffa3a14c7 pgtap.tar.gz" | sha256sum --check && \
     mkdir pgtap-src && cd pgtap-src && tar xzf ../pgtap.tar.gz --strip-components=1 -C . && \
     make -j $(getconf _NPROCESSORS_ONLN) PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
     make -j $(getconf _NPROCESSORS_ONLN) install PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
@@ -411,6 +408,8 @@ FROM build-deps AS ip4r-pg-build
 ARG PG_VERSION
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
+# not version-specific
+# last release v2.4.2 - Jul 29, 2023
 RUN case "${PG_VERSION}" in "v17") \
     echo "v17 extensions are not supported yet. Quit" && exit 0;; \
     esac && \
@@ -431,10 +430,9 @@ FROM build-deps AS prefix-pg-build
 ARG PG_VERSION
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
-RUN case "${PG_VERSION}" in "v17") \
-    echo "v17 extensions are not supported yet. Quit" && exit 0;; \
-    esac && \
-    wget https://github.com/dimitri/prefix/archive/refs/tags/v1.2.10.tar.gz -O prefix.tar.gz && \
+# not version-specific
+# last release v1.2.10  - Jul 5, 2023
+RUN wget https://github.com/dimitri/prefix/archive/refs/tags/v1.2.10.tar.gz -O prefix.tar.gz && \
     echo "4342f251432a5f6fb05b8597139d3ccde8dcf87e8ca1498e7ee931ca057a8575 prefix.tar.gz" | sha256sum --check && \
     mkdir prefix-src && cd prefix-src && tar xzf ../prefix.tar.gz --strip-components=1 -C . && \
     make -j $(getconf _NPROCESSORS_ONLN) PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
@@ -451,10 +449,9 @@ FROM build-deps AS hll-pg-build
 ARG PG_VERSION
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
-RUN case "${PG_VERSION}" in "v17") \
-    echo "v17 extensions are not supported yet. Quit" && exit 0;; \
-    esac && \
-    wget https://github.com/citusdata/postgresql-hll/archive/refs/tags/v2.18.tar.gz -O hll.tar.gz && \
+# not version-specific
+# last release v2.18 - Sep 15, 2023
+RUN wget https://github.com/citusdata/postgresql-hll/archive/refs/tags/v2.18.tar.gz -O hll.tar.gz && \
     echo "e2f55a6f4c4ab95ee4f1b4a2b73280258c5136b161fe9d059559556079694f0e hll.tar.gz" | sha256sum --check && \
     mkdir hll-src && cd hll-src && tar xzf ../hll.tar.gz --strip-components=1 -C . && \
     make -j $(getconf _NPROCESSORS_ONLN) PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
@@ -471,11 +468,13 @@ FROM build-deps AS plpgsql-check-pg-build
 ARG PG_VERSION
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
+# plpgsql_check v2.7.11 supports v17
+# last release v2.7.11 - Sep 16, 2024
 RUN case "${PG_VERSION}" in "v17") \
     echo "v17 extensions are not supported yet. Quit" && exit 0;; \
     esac && \
-    wget https://github.com/okbob/plpgsql_check/archive/refs/tags/v2.5.3.tar.gz -O plpgsql_check.tar.gz && \
-    echo "6631ec3e7fb3769eaaf56e3dfedb829aa761abf163d13dba354b4c218508e1c0 plpgsql_check.tar.gz" | sha256sum --check && \
+    wget https://github.com/okbob/plpgsql_check/archive/refs/tags/v2.7.11.tar.gz -O plpgsql_check.tar.gz && \
+    echo "208933f8dbe8e0d2628eb3851e9f52e6892b8e280c63700c0f1ce7883625d172 plpgsql_check.tar.gz" | sha256sum --check && \
     mkdir plpgsql_check-src && cd plpgsql_check-src && tar xzf ../plpgsql_check.tar.gz --strip-components=1 -C . && \
     make -j $(getconf _NPROCESSORS_ONLN) PG_CONFIG=/usr/local/pgsql/bin/pg_config USE_PGXS=1 && \
     make -j $(getconf _NPROCESSORS_ONLN) install PG_CONFIG=/usr/local/pgsql/bin/pg_config USE_PGXS=1 && \
@@ -493,6 +492,8 @@ COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 ARG PG_VERSION
 ENV PATH="/usr/local/pgsql/bin:$PATH"
 
+# v17 is not supported yet. TimescaleDB 2.17.0 will support it
+# https://github.com/timescale/timescaledb/issues/6949
 RUN case "${PG_VERSION}" in "v17") \
     echo "v17 extensions are not supported yet. Quit" && exit 0;; \
     esac && \
@@ -529,10 +530,9 @@ COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 ARG PG_VERSION
 ENV PATH="/usr/local/pgsql/bin:$PATH"
 
-RUN case "${PG_VERSION}" in "v17") \
-    echo "v17 extensions are not supported yet. Quit" && exit 0;; \
-    esac && \
-    case "${PG_VERSION}" in \
+# version-specific, has separate releases for each version
+# TODO check minor upgrades for v14-16
+RUN case "${PG_VERSION}" in \
       "v14") \
         export PG_HINT_PLAN_VERSION=14_1_4_1 \
         export PG_HINT_PLAN_CHECKSUM=c3501becf70ead27f70626bce80ea401ceac6a77e2083ee5f3ff1f1444ec1ad1 \
@@ -546,7 +546,8 @@ RUN case "${PG_VERSION}" in "v17") \
         export PG_HINT_PLAN_CHECKSUM=fc85a9212e7d2819d4ae4ac75817481101833c3cfa9f0fe1f980984e12347d00 \
         ;; \
       "v17") \
-        echo "TODO: PG17 pg_hint_plan support" && exit 0 \
+        export PG_HINT_PLAN_VERSION=17_1_7_0 \
+        export PG_HINT_PLAN_CHECKSUM=06dd306328c67a4248f48403c50444f30959fb61ebe963248dbc2afb396fe600 \
         ;; \
       *) \
         echo "Export the valid PG_HINT_PLAN_VERSION variable" && exit 1 \
@@ -570,6 +571,9 @@ FROM build-deps AS pg-cron-pg-build
 ARG PG_VERSION
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
+# 1.6.4 available, supports v17
+# FIXME: Why is it here? We don't support pg_cron...
+# !Do not remove! We set it in shared_preload_libraries and computes will fail to start if library is not found.
 ENV PATH="/usr/local/pgsql/bin/:$PATH"
 RUN case "${PG_VERSION}" in "v17") \
     echo "v17 extensions are not supported yet. Quit" && exit 0;; \
@@ -591,10 +595,7 @@ FROM build-deps AS rdkit-pg-build
 ARG PG_VERSION
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
-RUN case "${PG_VERSION}" in "v17") \
-    echo "v17 extensions are not supported yet. Quit" && exit 0;; \
-    esac && \
-    apt-get update && \
+RUN apt-get update && \
     apt-get install -y \
         cmake \
         libboost-iostreams1.74-dev \
@@ -603,12 +604,11 @@ RUN case "${PG_VERSION}" in "v17") \
         libboost-system1.74-dev \
         libeigen3-dev
 
+# rdkit Release_2024_09_1 supports v17
+# last release Release_2024_09_1 - Sep 27, 2024
 ENV PATH="/usr/local/pgsql/bin/:/usr/local/pgsql/:$PATH"
-RUN case "${PG_VERSION}" in "v17") \
-    echo "v17 extensions are not supported yet. Quit" && exit 0;; \
-    esac && \
-    wget https://github.com/rdkit/rdkit/archive/refs/tags/Release_2023_03_3.tar.gz -O rdkit.tar.gz && \
-    echo "bdbf9a2e6988526bfeb8c56ce3cdfe2998d60ac289078e2215374288185e8c8d rdkit.tar.gz" | sha256sum --check && \
+RUN wget https://github.com/rdkit/rdkit/archive/refs/tags/Release_2024_09_1.tar.gz -O rdkit.tar.gz && \
+    echo "034c00d6e9de323506834da03400761ed8c3721095114369d06805409747a60f rdkit.tar.gz" | sha256sum --check && \
     mkdir rdkit-src && cd rdkit-src && tar xzf ../rdkit.tar.gz --strip-components=1 -C . && \
     cmake \
         -D RDK_BUILD_CAIRO_SUPPORT=OFF \
@@ -647,12 +647,11 @@ FROM build-deps AS pg-uuidv7-pg-build
 ARG PG_VERSION
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
+# not version-specific
+# last release v1.5.0 - Mar 21, 2024
 ENV PATH="/usr/local/pgsql/bin/:$PATH"
-RUN case "${PG_VERSION}" in "v17") \
-    echo "v17 extensions are not supported yet. Quit" && exit 0;; \
-    esac && \
-    wget https://github.com/fboulnois/pg_uuidv7/archive/refs/tags/v1.0.1.tar.gz -O pg_uuidv7.tar.gz && \
-    echo "0d0759ab01b7fb23851ecffb0bce27822e1868a4a5819bfd276101c716637a7a pg_uuidv7.tar.gz" | sha256sum --check && \
+RUN wget https://github.com/fboulnois/pg_uuidv7/archive/refs/tags/v1.5.0.tar.gz -O pg_uuidv7.tar.gz && \
+    echo "5f53e5ce0fa4e01c1d489f736478224571d4b2b88eaf63186265e38f0b8d3d78 pg_uuidv7.tar.gz" | sha256sum --check && \
     mkdir pg_uuidv7-src && cd pg_uuidv7-src && tar xzf ../pg_uuidv7.tar.gz --strip-components=1 -C . && \
     make -j $(getconf _NPROCESSORS_ONLN) && \
     make -j $(getconf _NPROCESSORS_ONLN) install && \
@@ -668,11 +667,10 @@ FROM build-deps AS pg-roaringbitmap-pg-build
 ARG PG_VERSION
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
+# not version-specific
+# last release v0.5.4 - Jun 28, 2022
 ENV PATH="/usr/local/pgsql/bin/:$PATH"
-RUN case "${PG_VERSION}" in "v17") \
-    echo "v17 extensions is not supported yet by pg_roaringbitmap. Quit" && exit 0;; \
-    esac && \
-    wget https://github.com/ChenHuajun/pg_roaringbitmap/archive/refs/tags/v0.5.4.tar.gz -O pg_roaringbitmap.tar.gz && \
+RUN wget https://github.com/ChenHuajun/pg_roaringbitmap/archive/refs/tags/v0.5.4.tar.gz -O pg_roaringbitmap.tar.gz && \
     echo "b75201efcb1c2d1b014ec4ae6a22769cc7a224e6e406a587f5784a37b6b5a2aa pg_roaringbitmap.tar.gz" | sha256sum --check && \
     mkdir pg_roaringbitmap-src && cd pg_roaringbitmap-src && tar xzf ../pg_roaringbitmap.tar.gz --strip-components=1 -C . && \
     make -j $(getconf _NPROCESSORS_ONLN) && \
@@ -689,12 +687,11 @@ FROM build-deps AS pg-semver-pg-build
 ARG PG_VERSION
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
+# not version-specific
+# last release v0.40.0 - Jul 22, 2024
 ENV PATH="/usr/local/pgsql/bin/:$PATH"
-RUN case "${PG_VERSION}" in "v17") \
-    echo "v17 is not supported yet by pg_semver. Quit" && exit 0;; \
-    esac && \
-    wget https://github.com/theory/pg-semver/archive/refs/tags/v0.32.1.tar.gz -O pg_semver.tar.gz && \
-    echo "fbdaf7512026d62eec03fad8687c15ed509b6ba395bff140acd63d2e4fbe25d7 pg_semver.tar.gz" | sha256sum --check && \
+RUN wget https://github.com/theory/pg-semver/archive/refs/tags/v0.40.0.tar.gz -O pg_semver.tar.gz && \
+    echo "3e50bcc29a0e2e481e7b6d2bc937cadc5f5869f55d983b5a1aafeb49f5425cfc pg_semver.tar.gz" | sha256sum --check && \
     mkdir pg_semver-src && cd pg_semver-src && tar xzf ../pg_semver.tar.gz --strip-components=1 -C . && \
     make -j $(getconf _NPROCESSORS_ONLN) && \
     make -j $(getconf _NPROCESSORS_ONLN) install && \
@@ -709,6 +706,8 @@ RUN case "${PG_VERSION}" in "v17") \
 FROM build-deps AS pg-embedding-pg-build
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
+# This is our extension, support stopped in favor of pgvector
+# TODO: deprecate it
 ARG PG_VERSION
 ENV PATH="/usr/local/pgsql/bin/:$PATH"
 RUN case "${PG_VERSION}" in \
@@ -735,6 +734,9 @@ FROM build-deps AS pg-anon-pg-build
 ARG PG_VERSION
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
+# This was experimental extension, that never got to real production.
+# TODO deprecate it
+# !Do not remove! It can be present in shared_preload_libraries and compute will fail to start if library is not found.
 ENV PATH="/usr/local/pgsql/bin/:$PATH"
 RUN case "${PG_VERSION}" in "v17") \
     echo "postgresql_anonymizer does not yet support PG17" && exit 0;; \
@@ -882,13 +884,12 @@ FROM build-deps AS wal2json-pg-build
 ARG PG_VERSION
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
+# wal2json wal2json_2_6 supports v17
+# last release wal2json_2_6 - Apr 25, 2024
 ENV PATH="/usr/local/pgsql/bin/:$PATH"
-RUN case "${PG_VERSION}" in "v17") \
-    echo "We'll need to update wal2json to 2.6+ for pg17 support" && exit 0;; \
-    esac && \
-    wget https://github.com/eulerto/wal2json/archive/refs/tags/wal2json_2_5.tar.gz && \
-    echo "b516653575541cf221b99cf3f8be9b6821f6dbcfc125675c85f35090f824f00e wal2json_2_5.tar.gz" | sha256sum --check && \
-    mkdir wal2json-src && cd wal2json-src && tar xzf ../wal2json_2_5.tar.gz --strip-components=1 -C . && \
+RUN wget https://github.com/eulerto/wal2json/archive/refs/tags/wal2json_2_6.tar.gz -O wal2json.tar.gz && \
+    echo "18b4bdec28c74a8fc98a11c72de38378a760327ef8e5e42e975b0029eb96ba0d wal2json.tar.gz" | sha256sum --check && \
+    mkdir wal2json-src && cd wal2json-src && tar xzf ../wal2json.tar.gz --strip-components=1 -C . && \
     make -j $(getconf _NPROCESSORS_ONLN) && \
     make -j $(getconf _NPROCESSORS_ONLN) install
 
@@ -902,12 +903,14 @@ FROM build-deps AS pg-ivm-build
 ARG PG_VERSION
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
+# pg_ivm v1.9 supports v17
+# last release v1.9 - Jul 31
 ENV PATH="/usr/local/pgsql/bin/:$PATH"
 RUN case "${PG_VERSION}" in "v17") \
     echo "We'll need to update pg_ivm to 1.9+ for pg17 support" && exit 0;; \
     esac && \
-    wget https://github.com/sraoss/pg_ivm/archive/refs/tags/v1.7.tar.gz -O pg_ivm.tar.gz && \
-    echo "ebfde04f99203c7be4b0e873f91104090e2e83e5429c32ac242d00f334224d5e pg_ivm.tar.gz" | sha256sum --check && \
+    wget https://github.com/sraoss/pg_ivm/archive/refs/tags/v1.9.tar.gz -O pg_ivm.tar.gz && \
+    echo "59e15722939f274650abf637f315dd723c87073496ca77236b044cb205270d8b pg_ivm.tar.gz" | sha256sum --check && \
     mkdir pg_ivm-src && cd pg_ivm-src && tar xzf ../pg_ivm.tar.gz --strip-components=1 -C . && \
     make -j $(getconf _NPROCESSORS_ONLN) && \
     make -j $(getconf _NPROCESSORS_ONLN) install && \
@@ -923,12 +926,11 @@ FROM build-deps AS pg-partman-build
 ARG PG_VERSION
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
+# should support v17 https://github.com/pgpartman/pg_partman/discussions/693
+# last release 5.1.0  Apr 2, 2024
 ENV PATH="/usr/local/pgsql/bin/:$PATH"
-RUN case "${PG_VERSION}" in "v17") \
-    echo "pg_partman doesn't support PG17 yet" && exit 0;; \
-    esac && \
-    wget https://github.com/pgpartman/pg_partman/archive/refs/tags/v5.0.1.tar.gz -O pg_partman.tar.gz && \
-    echo "75b541733a9659a6c90dbd40fccb904a630a32880a6e3044d0c4c5f4c8a65525 pg_partman.tar.gz" | sha256sum --check && \
+RUN wget https://github.com/pgpartman/pg_partman/archive/refs/tags/v5.1.0.tar.gz -O pg_partman.tar.gz && \
+    echo "3e3a27d7ff827295d5c55ef72f07a49062d6204b3cb0b9a048645d6db9f3cb9f pg_partman.tar.gz" | sha256sum --check && \
     mkdir pg_partman-src && cd pg_partman-src && tar xzf ../pg_partman.tar.gz --strip-components=1 -C . && \
     make -j $(getconf _NPROCESSORS_ONLN) && \
     make -j $(getconf _NPROCESSORS_ONLN) install && \
