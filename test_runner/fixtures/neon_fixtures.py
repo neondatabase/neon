@@ -2593,6 +2593,16 @@ class NeonStorageController(MetricsGetter, LogUtils):
             headers=self.headers(TokenScope.ADMIN),
         )
 
+    def timeline_import_from_pgdata(
+        self, tenant_id: TenantId, pgdata_dir: Path, timeline_id: TimelineId
+    ):
+        self.request(
+            "PUT",
+            f"{self.api}/v1/tenant/{tenant_id}/timeline/{timeline_id}/import_pgdata",
+            json=str(pgdata_dir),
+            headers=self.headers(TokenScope.TENANT),
+        )
+
     def reconcile_all(self):
         r = self.request(
             "POST",
