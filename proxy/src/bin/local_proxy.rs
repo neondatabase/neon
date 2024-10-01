@@ -279,6 +279,7 @@ fn build_config(args: &LocalProxyCliArgs) -> anyhow::Result<&'static ProxyConfig
             ip_allowlist_check_enabled: true,
             is_auth_broker: false,
             accept_jwts: true,
+            webauth_confirmation_timeout: Duration::ZERO,
         },
         proxy_protocol_v2: config::ProxyProtocolV2::Rejected,
         handshake_timeout: Duration::from_secs(10),

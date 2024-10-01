@@ -620,6 +620,7 @@ mod tests {
         ip_allowlist_check_enabled: true,
         is_auth_broker: false,
         accept_jwts: false,
+        webauth_confirmation_timeout: std::time::Duration::from_secs(5),
     });
 
     async fn read_message(r: &mut (impl AsyncRead + Unpin), b: &mut BytesMut) -> PgMessage {
