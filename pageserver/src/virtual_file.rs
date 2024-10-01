@@ -95,7 +95,8 @@ impl VirtualFile {
         path: P,
         ctx: &RequestContext,
     ) -> Result<Self, std::io::Error> {
-        Self::open_buffered(path, ctx).await
+        let file = VirtualFileInner::open(path, ctx).await?;
+        Ok(Self::Buffered(file))
     }
 
     /// Open a file in read-only mode. Like File::open.
@@ -105,39 +106,7 @@ impl VirtualFile {
         path: P,
         ctx: &RequestContext,
     ) -> Result<Self, std::io::Error> {
-        match get_io_mode() {
-            IoMode::Buffered => Self::open_buffered(path, ctx).await,
-            #[cfg(target_os = "linux")]
-            IoMode::Direct => Self::open_direct(path, ctx).await,
-        }
-    }
-
-    /// Open a file in read-only mode using direct IO. Like File::open.
-    async fn open_buffered<P: AsRef<Utf8Path>>(
-        path: P,
-        ctx: &RequestContext,
-    ) -> Result<Self, std::io::Error> {
-        let file =
-            VirtualFileInner::open_with_options(path.as_ref(), OpenOptions::new().read(true), ctx)
-                .await?;
-        Ok(Self::Buffered(file))
-    }
-
-    /// Open a file in read-only mode using direct IO. Like File::open with `O_DIRECT` flag.
-    #[cfg(target_os = "linux")]
-    async fn open_direct<P: AsRef<Utf8Path>>(
-        path: P,
-        ctx: &RequestContext,
-    ) -> Result<Self, std::io::Error> {
-        let file = VirtualFileInner::open_with_options(
-            path.as_ref(),
-            OpenOptions::new()
-                .read(true)
-                .custom_flags(nix::libc::O_DIRECT),
-            ctx,
-        )
-        .await?;
-        Ok(Self::Direct(file))
+        Self::open_with_options_v2(path.as_ref(), OpenOptions::new().read(true), ctx).await
     }
 
     pub async fn create<P: AsRef<Utf8Path>>(
@@ -152,32 +121,12 @@ impl VirtualFile {
         path: P,
         ctx: &RequestContext,
     ) -> Result<Self, std::io::Error> {
-        let file = match get_io_mode() {
-            IoMode::Buffered => {
-                let file = VirtualFileInner::open_with_options(
-                    path.as_ref(),
-                    OpenOptions::new().write(true).create(true).truncate(true),
-                    ctx,
-                )
-                .await?;
-                Self::Buffered(file)
-            }
-            #[cfg(target_os = "linux")]
-            IoMode::Direct => {
-                let file = VirtualFileInner::open_with_options(
-                    path.as_ref(),
-                    OpenOptions::new()
-                        .write(true)
-                        .create(true)
-                        .truncate(true)
-                        .custom_flags(nix::libc::O_DIRECT),
-                    ctx,
-                )
-                .await?;
-                Self::Direct(file)
-            }
-        };
-        Ok(file)
+        VirtualFile::open_with_options_v2(
+            path.as_ref(),
+            OpenOptions::new().write(true).create(true).truncate(true),
+            ctx,
+        )
+        .await
     }
 
     pub async fn open_with_options<P: AsRef<Utf8Path>>(
@@ -191,7 +140,7 @@ impl VirtualFile {
 
     pub async fn open_with_options_v2<P: AsRef<Utf8Path>>(
         path: P,
-        open_options: &mut OpenOptions,
+        open_options: &mut OpenOptions, // Uses `&mut` here to add `O_DIRECT`.
         ctx: &RequestContext, /* TODO: carry a pointer to the metrics in the RequestContext instead of the parsing https://github.com/neondatabase/neon/issues/6107 */
     ) -> Result<Self, std::io::Error> {
         let file = match get_io_mode() {
