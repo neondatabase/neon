@@ -873,6 +873,28 @@ RUN case "${PG_VERSION}" in "v17") \
 
 #########################################################################################
 #
+# Layer "pg-session-jwt-build"
+# Compile "pg_session_jwt" extension
+#
+#########################################################################################
+
+FROM rust-extensions-build AS pg-session-jwt-build
+ARG PG_VERSION
+
+RUN case "${PG_VERSION}" in "v17") \
+    echo "pg_session_jwt does not yet have a release that supports pg17" && exit 0;; \
+    esac && \
+    wget https://github.com/neondatabase/pg_session_jwt/archive/ff0a72440e8ff584dab24b3f9b7c00c56c660b8e.tar.gz -O pg_session_jwt.tar.gz && \
+    echo "1fbb2b5a339263bcf6daa847fad8bccbc0b451cea6a62e6d3bf232b0087f05cb pg_session_jwt.tar.gz" | sha256sum --check && \
+    mkdir pg_session_jwt-src && cd pg_session_jwt-src && tar xzf ../pg_session_jwt.tar.gz --strip-components=1 -C . && \
+    sed -i 's/pgrx = "=0.11.3"/pgrx = { version = "=0.11.3", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
+    cargo pgrx install --release
+    # it's needed to enable extension because it uses untrusted C language
+    # sed -i 's/superuser = false/superuser = true/g' /usr/local/pgsql/share/extension/pg_session_jwt.control && \
+    # echo "trusted = true" >> /usr/local/pgsql/share/extension/pg_session_jwt.control
+
+#########################################################################################
+#
 # Layer "wal2json-build"
 # Compile "wal2json" extension
 #
@@ -967,6 +989,7 @@ COPY --from=timescaledb-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-hint-plan-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-cron-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-pgx-ulid-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pg-session-jwt-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=rdkit-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-uuidv7-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-roaringbitmap-pg-build /usr/local/pgsql/ /usr/local/pgsql/
