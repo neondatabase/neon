@@ -460,12 +460,44 @@ class NeonEnvBuilder:
             "test_"
         ), "Unexpectedly instantiated from outside a test function"
         self.test_name = test_name
+        self.compatibility_neon_bindir: Optional[Path] = None
+        self.compatibility_pg_distrib_dir: Optional[Path] = None
+        self.version_combination: Optional[int] = None
+        self.mixdir = self.test_output_dir / 'neon'
 
     def init_configs(self, default_remote_storage_if_missing: bool = True) -> NeonEnv:
         # Cannot create more than one environment from one builder
         assert self.env is None, "environment already initialized"
         if default_remote_storage_if_missing and self.pageserver_remote_storage is None:
             self.enable_pageserver_remote_storage(default_remote_storage())
+        if self.version_combination is not None:
+            self.mixdir.mkdir(mode=0o755, exist_ok=True)
+
+            # Combination: 0: old, 1: new
+            bitmap = {
+                "storage_controller": 0x01,
+                "storage_broker": 0x02,
+                "compute": 0x04,
+                "safekeeper": 0x08,
+                "pageserver": 0x10,
+            }
+
+            binaries = {
+                "storage_controller": ["storage_controller"],
+                "storage_broker": ["storage_broker"],
+                "compute": ["compute_ctl"],
+                "safekeeper": ["safekeeper"],
+                "pageserver": ["pageserver", "pagectl"],
+            }
+            for component, paths in binaries.items():
+                directory = self.neon_binpath if bool(self.version_combination & bitmap[component]) else self.compatibility_neon_bindir
+                for filename in paths:
+                    os.link(directory / filename, self.mixdir / filename)
+            if self.version_combination & bitmap['compute']:
+                self.pg_distrib_dir = self.compatibility_pg_distrib_dir
+            self.neon_binpath = self.mixdir
+
+
         self.env = NeonEnv(self)
         return self.env
 

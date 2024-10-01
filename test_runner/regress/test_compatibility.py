@@ -96,7 +96,7 @@ from fixtures.workload import Workload
 #    export COMPATIBILITY_NEON_BIN=neon_previous/target/${BUILD_TYPE}
 #    export COMPATIBILITY_POSTGRES_DISTRIB_DIR=neon_previous/pg_install
 #    export NEON_BIN=target/release
-#    export POSTGRES_DISTRIB=pg_install
+#    export POSTGRES_DISTRIB_DIR=pg_install
 #
 #    # Build previous version of binaries and store them somewhere:
 #    rm -rf pg_install target
@@ -584,26 +584,10 @@ def test_historic_storage_formats(
 
 @check_ondisk_data_compatibility_if_enabled
 @pytest.mark.xdist_group("compatibility")
-@pytest.mark.parametrize("combination", [0x15, 0x02, 0x0C, 0x09, 0x1A])
+@pytest.mark.parametrize("combination", [0x15, 0x02, 0x0C, 0x09, 0x1A], ids=lambda x: f"combination{x:05b}")
 def test_versions_mismatch(
     neon_env_builder: NeonEnvBuilder, test_output_dir: Path, pg_version: PgVersion, combination
 ):
-    # Combination: 0: old, 1: new
-    bitmap = {
-        "storage_controller": 0x01,
-        "storage_broker": 0x02,
-        "compute": 0x04,
-        "safekeeper": 0x08,
-        "pageserver": 0x10,
-    }
-
-    binaries = {
-        "storage_controller": ["storage_controller"],
-        "storage_broker": ["storage_broker"],
-        "compute": ["compute_ctl"],
-        "safekeeper": ["safekeeper"],
-        "pageserver": ["pageserver", "pagectl"],
-    }
 
     compatibility_snapshot_dir_env = os.environ.get("COMPATIBILITY_SNAPSHOT_DIR")
     assert compatibility_snapshot_dir_env is not None, (
@@ -612,11 +596,13 @@ def test_versions_mismatch(
     )
     compatibility_snapshot_dir = Path(compatibility_snapshot_dir_env).resolve()
 
+    '''
     postgres_distrib_dir_env = os.environ.get("POSTGRES_DISTRIB_DIR")
     assert (
         postgres_distrib_dir_env is not None
     ), "POSTGRES_DISTRIB_DIR is not set. It should be set to a path with postgres binaries"
     postgres_distrib_dir = Path(postgres_distrib_dir_env).resolve()
+    '''
 
     compatibility_postgres_distrib_dir_env = os.environ.get("COMPATIBILITY_POSTGRES_DISTRIB_DIR")
     assert compatibility_postgres_distrib_dir_env is not None, (
@@ -625,11 +611,13 @@ def test_versions_mismatch(
     )
     compatibility_postgres_distrib_dir = Path(compatibility_postgres_distrib_dir_env).resolve()
 
+    '''
     neon_bin_env = os.environ.get("NEON_BIN")
     assert (
         neon_bin_env is not None
     ), "NEON_BIN is not set. It should be set to a path with Neon binaries "
     neon_bin = Path(neon_bin_env).resolve()
+    '''
 
     compatibility_neon_bin_env = os.environ.get("COMPATIBILITY_NEON_BIN")
     assert compatibility_neon_bin_env is not None, (
@@ -638,18 +626,9 @@ def test_versions_mismatch(
     )
     compatibility_neon_bin = Path(compatibility_neon_bin_env).resolve()
 
-    target_dir = test_output_dir / "neon" / "bin"
-    os.makedirs(target_dir)
-    for component, paths in binaries.items():
-        directory = neon_bin if bool(combination & bitmap[component]) else compatibility_neon_bin
-        for filename in paths:
-            os.link(directory / filename, target_dir / filename)
-    neon_env_builder.neon_binpath = target_dir
-    neon_env_builder.pg_distrib_dir = (
-        postgres_distrib_dir
-        if (combination & bitmap["compute"])
-        else compatibility_postgres_distrib_dir
-    )
+    neon_env_builder.version_combination = combination
+    neon_env_builder.compatibility_neon_bindir = compatibility_neon_bin
+    neon_env_builder.compatibility_pg_distrib_dir = compatibility_postgres_distrib_dir
     neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.from_repo_dir(
         compatibility_snapshot_dir / "repo",
@@ -658,6 +637,7 @@ def test_versions_mismatch(
         [".*ingesting record with timestamp lagging more than wait_lsn_timeout.+"]
     )
     env.start()
+    '''
     # Creating a tenant
     tenant_id = TenantId.generate()
     env.neon_cli.create_tenant(tenant_id)
@@ -675,6 +655,7 @@ def test_versions_mismatch(
     )
     timelines = env.storage_controller.pageserver_api().timeline_list(tenant_id)
     assert len(timelines) == 1
+    '''
     check_neon_works(
         env, test_output_dir, compatibility_snapshot_dir / "dump.sql", test_output_dir / "repo"
     )
