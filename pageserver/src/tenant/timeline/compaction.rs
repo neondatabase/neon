@@ -264,6 +264,12 @@ impl CompactionStatistics {
     }
 }
 
+#[derive(Debug)]
+enum CompactShardAncestorsMode {
+    Rewrite { rewrite_max: usize },
+    Verify,
+}
+
 impl Timeline {
     /// TODO: cancellation
     ///
@@ -278,6 +284,11 @@ impl Timeline {
             self.compact_with_gc(cancel, flags, ctx)
                 .await
                 .map_err(CompactionError::Other)?;
+            return Ok(false);
+        }
+
+        if flags.contains(CompactFlags::ShardAncestorsCompaction) {
+            self.compact_shard_ancestors(usize::MAX, ctx).await?;
             return Ok(false);
         }
 
@@ -413,9 +424,10 @@ impl Timeline {
     ///
     /// Note: this phase may read and write many gigabytes of data: use rewrite_max to bound
     /// how much work it will try to do in each compaction pass.
+    #[instrument(skip_all, fields(?mode))]
     async fn compact_shard_ancestors(
         self: &Arc<Self>,
-        rewrite_max: usize,
+        mode: CompactShardAncestorsMode,
         ctx: &RequestContext,
     ) -> Result<(), CompactionError> {
         let mut drop_layers = Vec::new();
@@ -439,8 +451,15 @@ impl Timeline {
         for layer_desc in layers.layer_map()?.iter_historic_layers() {
             let layer = layers.get_from_desc(&layer_desc);
             if layer.metadata().shard.shard_count == self.shard_identity.count {
-                // This layer does not belong to a historic ancestor, no need to re-image it.
-                continue;
+                match mode {
+                    CompactShardAncestorsMode::Verify => {
+                        // fallthrough for checking
+                    }
+                    CompactShardAncestorsMode::Rewrite { rewrite_max } => {
+                        // We are only verifying the layers, not rewriting them.
+                        continue;
+                    }
+                }
             }
 
             // This layer was created on an ancestor shard: check if it contains any data for this shard.
