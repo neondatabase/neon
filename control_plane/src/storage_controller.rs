@@ -518,7 +518,10 @@ impl StorageController {
         }
 
         if let Some(threshold) = self.config.long_reconcile_threshold {
-            args.push(format!("--long-reconcile-threshold={}", humantime::Duration::from(threshold)))
+            args.push(format!(
+                "--long-reconcile-threshold={}",
+                humantime::Duration::from(threshold)
+            ))
         }
 
         args.push(format!(
