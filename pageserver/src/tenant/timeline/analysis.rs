@@ -85,7 +85,7 @@ impl Timeline {
                 has_image: image_layer.is_some(),
                 num_of_deltas_above_image: maybe_delta_layers.len(),
                 total_num_of_deltas: pitr_delta_layers.len(),
-                num_of_l0
+                num_of_l0,
             });
         }
 
