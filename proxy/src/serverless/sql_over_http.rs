@@ -678,6 +678,9 @@ async fn handle_db_inner(
         None => return Err(SqlOverHttpError::Cancelled(SqlOverHttpCancel::Connect)),
     };
 
+    arena.params_arena.shrink_to_fit();
+    arena.str_arena.shrink_to_fit();
+
     let mut response = Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/json");
@@ -955,7 +958,8 @@ async fn query_batch(
     queries: BatchQueryData,
     parsed_headers: HttpHeaders,
 ) -> Result<String, SqlOverHttpError> {
-    let mut results = Vec::with_capacity(queries.queries.len());
+    let mut result_bytes = br#"{"results":["#.to_vec();
+
     let mut current_size = 0;
     for stmt in queries.queries {
         let query = pin!(query_to_json(
@@ -971,7 +975,12 @@ async fn query_batch(
         match res {
             // TODO: maybe we should check that the transaction bit is set here
             Either::Left((Ok((_, values)), _cancelled)) => {
-                results.push(values);
+                if !result_bytes.is_empty() {
+                    result_bytes.push(b',');
+                }
+                values
+                    .serialize(&mut serde_json::Serializer::new(&mut result_bytes))
+                    .expect("serializing results to memory should always succeed");
             }
             Either::Left((Err(e), _cancelled)) => {
                 return Err(e);
@@ -982,8 +991,10 @@ async fn query_batch(
         }
     }
 
-    let results = json!({ "results": results });
-    let json_output = serde_json::to_string(&results).expect("json serialization should not fail");
+    result_bytes.extend_from_slice(b"]}");
+
+    let json_output =
+        String::from_utf8(result_bytes).expect("JSON serialization should always be utf8");
 
     Ok(json_output)
 }
