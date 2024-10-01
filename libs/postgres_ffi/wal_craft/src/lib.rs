@@ -93,9 +93,9 @@ impl Conf {
         );
         let output = self
             .new_pg_command("initdb")?
-            .arg("-D")
+            .arg("--pgdata")
             .arg(&self.datadir)
-            .args(["-U", "postgres", "--no-instructions", "--no-sync"])
+            .args(["--username", "postgres", "--no-instructions", "--no-sync"])
             .output()?;
         debug!("initdb output: {:?}", output);
         ensure!(

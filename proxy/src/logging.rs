@@ -1,4 +1,3 @@
-use tracing_opentelemetry::OpenTelemetryLayer;
 use tracing_subscriber::{
     filter::{EnvFilter, LevelFilter},
     prelude::*,
@@ -23,9 +22,7 @@ pub async fn init() -> anyhow::Result<LoggingGuard> {
         .with_writer(std::io::stderr)
         .with_target(false);
 
-    let otlp_layer = tracing_utils::init_tracing("proxy")
-        .await
-        .map(OpenTelemetryLayer::new);
+    let otlp_layer = tracing_utils::init_tracing("proxy").await;
 
     tracing_subscriber::registry()
         .with(env_filter)

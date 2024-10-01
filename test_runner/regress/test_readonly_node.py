@@ -27,7 +27,7 @@ def test_readonly_node(neon_simple_env: NeonEnv):
     env.pageserver.allowed_errors.extend(
         [
             ".*basebackup .* failed: invalid basebackup lsn.*",
-            ".*page_service.*handle_make_lsn_lease.*.*tried to request a page version that was garbage collected",
+            ".*/lsn_lease.*invalid lsn lease request.*",
         ]
     )
 
@@ -108,7 +108,7 @@ def test_readonly_node(neon_simple_env: NeonEnv):
     assert cur.fetchone() == (1,)
 
     # Create node at pre-initdb lsn
-    with pytest.raises(Exception, match="invalid basebackup lsn"):
+    with pytest.raises(Exception, match="invalid lsn lease request"):
         # compute node startup with invalid LSN should fail
         env.endpoints.create_start(
             branch_name="main",
@@ -167,6 +167,23 @@ def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
             )
         return last_flush_lsn
 
+    def trigger_gc_and_select(env: NeonEnv, ep_static: Endpoint):
+        """
+        Trigger GC manually on all pageservers. Then run an `SELECT` query.
+        """
+        for shard, ps in tenant_get_shards(env, env.initial_tenant):
+            client = ps.http_client()
+            gc_result = client.timeline_gc(shard, env.initial_timeline, 0)
+            log.info(f"{gc_result=}")
+
+            assert (
+                gc_result["layers_removed"] == 0
+            ), "No layers should be removed, old layers are guarded by leases."
+
+        with ep_static.cursor() as cur:
+            cur.execute("SELECT count(*) FROM t0")
+            assert cur.fetchone() == (ROW_COUNT,)
+
     # Insert some records on main branch
     with env.endpoints.create_start("main") as ep_main:
         with ep_main.cursor() as cur:
@@ -193,25 +210,31 @@ def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
 
             generate_updates_on_main(env, ep_main, i, end=100)
 
-            # Trigger GC
-            for shard, ps in tenant_get_shards(env, env.initial_tenant):
-                client = ps.http_client()
-                gc_result = client.timeline_gc(shard, env.initial_timeline, 0)
-                log.info(f"{gc_result=}")
+            trigger_gc_and_select(env, ep_static)
 
-                assert (
-                    gc_result["layers_removed"] == 0
-                ), "No layers should be removed, old layers are guarded by leases."
+            # Trigger Pageserver restarts
+            for ps in env.pageservers:
+                ps.stop()
+                # Static compute should have at least one lease request failure due to connection.
+                time.sleep(LSN_LEASE_LENGTH / 2)
+                ps.start()
 
-            with ep_static.cursor() as cur:
-                cur.execute("SELECT count(*) FROM t0")
-                assert cur.fetchone() == (ROW_COUNT,)
+            trigger_gc_and_select(env, ep_static)
+
+            # Reconfigure pageservers
+            env.pageservers[0].stop()
+            env.storage_controller.node_configure(
+                env.pageservers[0].id, {"availability": "Offline"}
+            )
+            env.storage_controller.reconcile_until_idle()
+
+            trigger_gc_and_select(env, ep_static)
 
         # Do some update so we can increment latest_gc_cutoff
         generate_updates_on_main(env, ep_main, i, end=100)
 
     # Wait for the existing lease to expire.
-    time.sleep(LSN_LEASE_LENGTH)
+    time.sleep(LSN_LEASE_LENGTH + 1)
     # Now trigger GC again, layers should be removed.
     for shard, ps in tenant_get_shards(env, env.initial_tenant):
         client = ps.http_client()

@@ -772,7 +772,7 @@ class ProposerPostgres(PgProtocol):
     def initdb(self):
         """Run initdb"""
 
-        args = ["initdb", "-U", "cloud_admin", "-D", self.pg_data_dir_path()]
+        args = ["initdb", "--username", "cloud_admin", "--pgdata", self.pg_data_dir_path()]
         self.pg_bin.run(args)
 
     def start(self):

@@ -26,8 +26,7 @@ def test_truncate(neon_env_builder: NeonEnvBuilder, zenbenchmark):
         }
     )
 
-    env.neon_cli.create_timeline("test_truncate", tenant_id=tenant)
-    endpoint = env.endpoints.create_start("test_truncate", tenant_id=tenant)
+    endpoint = env.endpoints.create_start("main", tenant_id=tenant)
     cur = endpoint.connect().cursor()
     cur.execute("create table t1(x integer)")
     cur.execute(f"insert into t1 values (generate_series(1,{n_records}))")
