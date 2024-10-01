@@ -711,8 +711,17 @@ impl ChunkProcessingJob {
         let mut guard = self.timeline.layers.write().await;
         guard
             .open_mut()?
-            .track_new_image_layers(&[resident_layer], &self.timeline.metrics);
+            .track_new_image_layers(&[resident_layer.clone()], &self.timeline.metrics);
         super::drop_wlock(guard);
+
+        // Schedule the layer for upload but don't add barriers such as
+        // wait for completion or index upload, so we don't inhibit upload parallelism.
+        // TODO: limit upload parallelism somehow (e.g. by limiting concurrency of jobs?)
+        // TODO: or regulate parallelism by upload queue depth? Prob should happen at a higher level.
+        self.timeline
+            .remote_client
+            .schedule_layer_file_upload(resident_layer)?;
+
 
         Ok(())
     }

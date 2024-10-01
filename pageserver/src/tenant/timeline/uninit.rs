@@ -123,7 +123,10 @@ impl<'t> UninitializedTimeline<'t> {
 
         // load from object storage like Tenant::attach does
         let resources = tenant.make_timeline_resources(timeline_id);
-        let index_part = resources.remote_client.download_index_file(&tenant.cancel).await?;
+        let index_part = resources
+            .remote_client
+            .download_index_file(&tenant.cancel)
+            .await?;
         let index_part = match index_part {
             MaybeDeletedIndexPart::Deleted(_) => {
                 // likely concurrent delete call, cplane should prevent this
@@ -195,15 +198,17 @@ impl<'t> UninitializedTimeline<'t> {
 
         let raw_timeline = self.raw_timeline()?;
 
+        // FIXME: The 'disk_consistent_lsn' should be the LSN at the *end* of the
+        // checkpoint record, and prev_record_lsn should point to its beginning.
+        // We should read the real end of the record from the WAL, but here we
+        // just fake it.
+        let disk_consistent_lsn = Lsn(base_lsn.0 + 8);
+        let prev_record_lsn = Some(base_lsn);
         let metadata = TimelineMetadata::new(
-            // FIXME: The 'disk_consistent_lsn' should be the LSN at the *end* of the
-            // checkpoint record, and prev_record_lsn should point to its beginning.
-            // We should read the real end of the record from the WAL, but here we
-            // just fake it.
-            Lsn(base_lsn.0 + 8),
-            Some(base_lsn),
-            None, // no ancestor
-            Lsn(0),
+            disk_consistent_lsn,
+            prev_record_lsn,
+            None,     // no ancestor
+            Lsn(0),   // no ancestor lsn
             base_lsn, // latest_gc_cutoff_lsn
             base_lsn, // initdb_lsn
             raw_timeline.pg_version,
@@ -214,8 +219,16 @@ impl<'t> UninitializedTimeline<'t> {
         raw_timeline.remote_client.wait_completion().await?;
         // TODO: what guarantees _today_ and _in the future_ that no more uploads
         // will happen after? Maybe just shutdown the timeline
+        // => for now, we'll put in a bunch of assertions after reloading
 
         let tl = self.finish_by_reloading_timeline_from_remote(ctx).await?;
+
+        assert_eq!(tl.disk_consistent_lsn.load(), disk_consistent_lsn);
+        assert_eq!(tl.get_prev_record_lsn(), prev_record_lsn.unwrap());
+        assert_eq!(tl.initdb_lsn, base_lsn);
+        assert_eq!(*tl.latest_gc_cutoff_lsn.read(), base_lsn);
+        // TODO: assert remote timeline client's metadata eq exactly our `metadata` variable
+
         tl.activate(tenant, broker_client, None, ctx);
         Ok(tl)
     }

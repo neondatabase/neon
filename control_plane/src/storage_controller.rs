@@ -824,7 +824,7 @@ impl StorageController {
         tenant_id: TenantId,
         timeline_id: TimelineId,
         pgdata_path: &Utf8Path,
-    ) -> anyhow::Result<TimelineInfo> {
+    ) -> anyhow::Result<()> {
         self.dispatch(
             Method::PUT,
             format!("v1/tenant/{tenant_id}/timeline/{timeline_id}/import_pgdata"),
