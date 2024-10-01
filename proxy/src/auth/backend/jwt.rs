@@ -261,10 +261,6 @@ impl JwkCacheEntryLock {
         let sig = base64::decode_config(signature, base64::URL_SAFE_NO_PAD)
             .context("Provided authentication token is not a valid JWT encoding")?;
 
-        ensure!(
-            header.typ == "JWT",
-            "Provided authentication token is not a valid JWT encoding"
-        );
         let kid = header.key_id.context("missing key id")?;
 
         let mut guard = self
@@ -299,7 +295,7 @@ impl JwkCacheEntryLock {
                 verify_ec_signature(header_payload.as_bytes(), &sig, key)?;
             }
             jose_jwk::Key::Rsa(key) => {
-                verify_rsa_signature(header_payload.as_bytes(), &sig, key, &jwk.prm.alg)?;
+                verify_rsa_signature(header_payload.as_bytes(), &sig, key, &header.algorithm)?;
             }
             key => bail!("unsupported key type {key:?}"),
         };
@@ -381,7 +377,7 @@ fn verify_rsa_signature(
     data: &[u8],
     sig: &[u8],
     key: &jose_jwk::Rsa,
-    alg: &Option<jose_jwa::Algorithm>,
+    alg: &jose_jwa::Algorithm,
 ) -> anyhow::Result<()> {
     use jose_jwa::{Algorithm, Signing};
     use rsa::{
@@ -392,7 +388,7 @@ fn verify_rsa_signature(
     let key = RsaPublicKey::try_from(key).map_err(|_| anyhow::anyhow!("invalid RSA key"))?;
 
     match alg {
-        Some(Algorithm::Signing(Signing::Rs256)) => {
+        Algorithm::Signing(Signing::Rs256) => {
             let key = VerifyingKey::<sha2::Sha256>::new(key);
             let sig = Signature::try_from(sig)?;
             key.verify(data, &sig)?;
@@ -406,9 +402,6 @@ fn verify_rsa_signature(
 /// <https://datatracker.ietf.org/doc/html/rfc7515#section-4.1>
 #[derive(serde::Deserialize, serde::Serialize)]
 struct JwtHeader<'a> {
-    /// must be "JWT"
-    #[serde(rename = "typ")]
-    typ: &'a str,
     /// must be a supported alg
     #[serde(rename = "alg")]
     algorithm: jose_jwa::Algorithm,
@@ -592,7 +585,6 @@ mod tests {
             key: jose_jwk::Key::Ec(pk),
             prm: jose_jwk::Parameters {
                 kid: Some(kid),
-                alg: Some(jose_jwa::Algorithm::Signing(jose_jwa::Signing::Es256)),
                 ..Default::default()
             },
         };
@@ -606,7 +598,6 @@ mod tests {
             key: jose_jwk::Key::Rsa(pk),
             prm: jose_jwk::Parameters {
                 kid: Some(kid),
-                alg: Some(jose_jwa::Algorithm::Signing(jose_jwa::Signing::Rs256)),
                 ..Default::default()
             },
         };
@@ -615,7 +606,6 @@ mod tests {
 
     fn build_jwt_payload(kid: String, sig: jose_jwa::Signing) -> String {
         let header = JwtHeader {
-            typ: "JWT",
             algorithm: jose_jwa::Algorithm::Signing(sig),
             key_id: Some(&kid),
         };
