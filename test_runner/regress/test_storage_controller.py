@@ -567,6 +567,149 @@ def test_storage_controller_compute_hook(
     env.storage_controller.consistency_check()
 
 
+def test_storage_controller_stuck_compute_hook(
+    httpserver: HTTPServer,
+    neon_env_builder: NeonEnvBuilder,
+    httpserver_listen_address,
+):
+    """
+    Test the migration process's behavior when the compute hook does not enable it to proceed
+    """
+
+    neon_env_builder.num_pageservers = 2
+    (host, port) = httpserver_listen_address
+    neon_env_builder.control_plane_compute_hook_api = f"http://{host}:{port}/notify"
+
+    handle_params = {"status": 200}
+
+    notifications = []
+
+    def handler(request: Request):
+        status = handle_params["status"]
+        log.info(f"Notify request[{status}]: {request}")
+        notifications.append(request.json)
+        return Response(status=status)
+
+    httpserver.expect_request("/notify", method="PUT").respond_with_handler(handler)
+
+    # Start running
+    env = neon_env_builder.init_start(initial_tenant_conf={"lsn_lease_length": "0s"})
+
+    # Initial notification from tenant creation
+    assert len(notifications) == 1
+    expect: Dict[str, Union[List[Dict[str, int]], str, None, int]] = {
+        "tenant_id": str(env.initial_tenant),
+        "stripe_size": None,
+        "shards": [{"node_id": int(env.pageservers[0].id), "shard_number": 0}],
+    }
+    assert notifications[0] == expect
+
+    # Do a migration while the compute hook is returning 423 status
+    tenant_id = env.initial_tenant
+    origin_pageserver = env.get_tenant_pageserver(tenant_id)
+    dest_ps_id = [p.id for p in env.pageservers if p.id != origin_pageserver.id][0]
+    dest_pageserver = env.get_pageserver(dest_ps_id)
+    shard_0_id = TenantShardId(tenant_id, 0, 0)
+
+    NOTIFY_BLOCKED_LOG = ".*Live migration blocked.*"
+    env.storage_controller.allowed_errors.extend(
+        [
+            NOTIFY_BLOCKED_LOG,
+            ".*Failed to notify compute.*",
+            ".*Reconcile error.*Cancelled",
+            ".*Reconcile error.*Control plane tenant busy",
+        ]
+    )
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        # We expect the controller to hit the 423 (locked) and retry.  Migration shouldn't complete until that
+        # status is cleared.
+        handle_params["status"] = 423
+        migrate_fut = executor.submit(
+            env.storage_controller.tenant_shard_migrate, shard_0_id, dest_ps_id
+        )
+
+        def logged_stuck():
+            env.storage_controller.assert_log_contains(NOTIFY_BLOCKED_LOG)
+
+        wait_until(10, 0.25, logged_stuck)
+        contains_r = env.storage_controller.log_contains(NOTIFY_BLOCKED_LOG)
+        assert contains_r is not None  # Appease mypy
+        (_, log_cursor) = contains_r
+        assert migrate_fut.running()
+
+        # Permit the compute hook to proceed
+        handle_params["status"] = 200
+        migrate_fut.result(timeout=10)
+
+        # Advance log cursor past the last 'stuck' message (we already waited for one, but
+        # there could be more than one)
+        while True:
+            contains_r = env.storage_controller.log_contains(NOTIFY_BLOCKED_LOG, offset=log_cursor)
+            if contains_r is None:
+                break
+            else:
+                (_, log_cursor) = contains_r
+
+        # Now, do a migration in the opposite direction
+        handle_params["status"] = 423
+        migrate_fut = executor.submit(
+            env.storage_controller.tenant_shard_migrate, shard_0_id, origin_pageserver.id
+        )
+
+        def logged_stuck_again():
+            env.storage_controller.assert_log_contains(NOTIFY_BLOCKED_LOG, offset=log_cursor)
+
+        wait_until(10, 0.25, logged_stuck_again)
+        assert migrate_fut.running()
+
+        # This time, the compute hook remains stuck, but we mark the origin node offline: this should
+        # also allow the migration to complete -- we only wait for the compute hook as long as we think
+        # the old location is still usable for computes.
+        # This is a regression test for issue https://github.com/neondatabase/neon/issues/8901
+        dest_pageserver.stop()
+        env.storage_controller.node_configure(dest_ps_id, {"availability": "Offline"})
+
+        try:
+            migrate_fut.result(timeout=10)
+        except StorageControllerApiException as e:
+            # The reconciler will fail because it can't detach from the origin: the important
+            # thing is that it finishes, rather than getting stuck in the compute notify loop.
+            assert "Reconcile error" in str(e)
+
+        # A later background reconciliation will clean up and leave things in a neat state, even
+        # while the compute hook is still blocked
+        try:
+            env.storage_controller.reconcile_all()
+        except StorageControllerApiException as e:
+            # We expect that the reconciler will do its work, but be unable to fully succeed
+            # because it can't send a compute notification.  It will complete, but leave
+            # the internal flag set for "retry compute notification later"
+            assert "Control plane tenant busy" in str(e)
+
+        # Confirm that we are AttachedSingle on the node we last called the migrate API for
+        loc = origin_pageserver.http_client().tenant_get_location(shard_0_id)
+        assert loc["mode"] == "AttachedSingle"
+
+        # When the origin node comes back, it should get cleaned up
+        dest_pageserver.start()
+        try:
+            env.storage_controller.reconcile_all()
+        except StorageControllerApiException as e:
+            # Compute hook is still blocked: reconciler will configure PS but not fully succeed
+            assert "Control plane tenant busy" in str(e)
+
+        with pytest.raises(PageserverApiException, match="Tenant shard not found"):
+            dest_pageserver.http_client().tenant_get_location(shard_0_id)
+
+        # Once the compute hook is unblocked, we should be able to get into a totally
+        # quiescent state again
+        handle_params["status"] = 200
+        env.storage_controller.reconcile_until_idle()
+
+    env.storage_controller.consistency_check()
+
+
 def test_storage_controller_debug_apis(neon_env_builder: NeonEnvBuilder):
     """
     Verify that occasional-use debug APIs work as expected.  This is a lightweight test
