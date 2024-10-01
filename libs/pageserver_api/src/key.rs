@@ -748,6 +748,16 @@ impl Key {
         self.field1 == 0x00 && self.field4 != 0 && self.field6 != 0xffffffff
     }
 
+    #[inline(always)]
+    pub fn is_rel_dir_key(&self) -> bool {
+        self.field1 == 0x00
+            && self.field2 != 0
+            && self.field3 != 0
+            && self.field4 == 0
+            && self.field5 == 0
+            && self.field6 == 1
+    }
+
     /// Guaranteed to return `Ok()` if [`Self::is_rel_block_key`] returns `true` for `key`.
     #[inline(always)]
     pub fn to_rel_block(self) -> anyhow::Result<(RelTag, BlockNumber)> {
