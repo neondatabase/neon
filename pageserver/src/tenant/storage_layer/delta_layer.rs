@@ -572,7 +572,7 @@ impl DeltaLayerWriterInner {
         ensure!(
             metadata.len() <= S3_UPLOAD_LIMIT,
             "Created delta layer file at {} of size {} above limit {S3_UPLOAD_LIMIT}!",
-            file.path,
+            file.path(),
             metadata.len()
         );
 
@@ -790,15 +790,9 @@ impl DeltaLayerInner {
         max_vectored_read_bytes: Option<MaxVectoredReadBytes>,
         ctx: &RequestContext,
     ) -> anyhow::Result<Self> {
-        let file = VirtualFile::open_with_options(
-            path,
-            virtual_file::OpenOptions::new()
-                .read(true)
-                .custom_flags(nix::libc::O_DIRECT),
-            ctx,
-        )
-        .await
-        .context("open layer file")?;
+        let file = VirtualFile::open_v2(path, ctx)
+            .await
+            .context("open layer file")?;
 
         let file_id = page_cache::next_file_id();
 
@@ -1017,7 +1011,7 @@ impl DeltaLayerInner {
                             blob_meta.key,
                             PageReconstructError::Other(anyhow!(
                                 "Failed to read blobs from virtual file {}: {}",
-                                self.file.path,
+                                self.file.path(),
                                 kind
                             )),
                         );
@@ -1043,7 +1037,7 @@ impl DeltaLayerInner {
                             meta.meta.key,
                             PageReconstructError::Other(anyhow!(e).context(format!(
                                 "Failed to decompress blob from virtual file {}",
-                                self.file.path,
+                                self.file.path(),
                             ))),
                         );
 
@@ -1061,7 +1055,7 @@ impl DeltaLayerInner {
                             meta.meta.key,
                             PageReconstructError::Other(anyhow!(e).context(format!(
                                 "Failed to deserialize blob from virtual file {}",
-                                self.file.path,
+                                self.file.path(),
                             ))),
                         );
 

@@ -550,6 +550,16 @@ impl Client {
             .map_err(Error::ReceiveBody)
     }
 
+    /// Configs io mode at runtime.
+    pub async fn put_io_mode(&self, mode: virtual_file::IoMode) -> Result<()> {
+        let uri = format!("{}/v1/io_alignment", self.mgmt_api_endpoint);
+        self.request(Method::PUT, uri, mode)
+            .await?
+            .json()
+            .await
+            .map_err(Error::ReceiveBody)
+    }
+
     pub async fn get_utilization(&self) -> Result<PageserverUtilization> {
         let uri = format!("{}/v1/utilization", self.mgmt_api_endpoint);
         self.get(uri)
