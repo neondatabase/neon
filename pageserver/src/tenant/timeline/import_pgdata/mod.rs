@@ -12,18 +12,23 @@ use itertools::Itertools;
 use pageserver_api::{
     key::{rel_block_to_key, rel_dir_to_key, rel_size_to_key, relmap_file_key, DBDIR_KEY},
     reltag::RelTag,
+    shard::ShardIdentity,
 };
 use postgres_ffi::{pg_constants, relfile_utils::parse_relfilename, ControlFileData, BLCKSZ};
 use tokio::{io::AsyncRead, task::JoinSet};
+use tokio_epoll_uring::BoundedBuf;
 use tracing::debug;
 use walkdir::WalkDir;
 
-use crate::pgdatadir_mapping::{SlruSegmentDirectory, TwoPhaseDirectory};
 use crate::{
     context::{DownloadBehavior, RequestContext},
     pgdatadir_mapping::{DbDirectory, RelDirectory},
     task_mgr::TaskKind,
     tenant::storage_layer::ImageLayerWriter,
+};
+use crate::{
+    pgdatadir_mapping::{SlruSegmentDirectory, TwoPhaseDirectory},
+    virtual_file::VirtualFile,
 };
 use tokio::io::AsyncReadExt;
 
@@ -290,6 +295,7 @@ impl PgImportEnv {
             let end_key = rel_block_to_key(file.rel_tag, start_blk + (len / 8192) as u32);
             self.tasks
                 .push(AnyImportTask::RelBlocks(ImportRelBlocksTask::new(
+                    self.timeline.get_shard_identity().clone(),
                     start_key..end_key,
                     &file.path,
                 )));
@@ -539,13 +545,15 @@ impl ImportTask for ImportSingleKeyTask {
 }
 
 struct ImportRelBlocksTask {
+    shard_identity: ShardIdentity,
     key_range: Range<Key>,
     path: Utf8PathBuf,
 }
 
 impl ImportRelBlocksTask {
-    fn new(key_range: Range<Key>, path: &Utf8Path) -> Self {
+    fn new(shard_identity: ShardIdentity, key_range: Range<Key>, path: &Utf8Path) -> Self {
         ImportRelBlocksTask {
+            shard_identity,
             key_range,
             path: path.into(),
         }
@@ -563,17 +571,25 @@ impl ImportTask for ImportRelBlocksTask {
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         debug!("Importing relation file {}", self.path);
-        let mut reader = tokio::fs::File::open(&self.path).await?;
-        let mut buf: [u8; 8192] = [0u8; 8192];
+        let reader = VirtualFile::open(&self.path, ctx).await?;
 
         let (rel_tag, start_blk) = self.key_range.start.to_rel_block()?;
         let (_rel_tag, end_blk) = self.key_range.end.to_rel_block()?;
         let mut blknum = start_blk;
         while blknum < end_blk {
-            reader.read_exact(&mut buf).await?;
             let key = rel_block_to_key(rel_tag, blknum);
+            if self.shard_identity.is_key_disposable(&key) {
+                // Skip blocks that are not in the shard
+                blknum += 1;
+                continue;
+            }
+            let buf = Vec::with_capacity(8192);
+            let buf = reader
+                // FIXME: prefetch
+                .read_exact_at(buf.slice_full(), u64::from(blknum) * 8192, ctx)
+                .await?;
             layer_writer
-                .put_image(key, Bytes::copy_from_slice(&buf), ctx)
+                .put_image(key, Bytes::from(buf.into_inner()), ctx)
                 .await?;
             blknum += 1;
         }
@@ -721,7 +737,6 @@ impl ChunkProcessingJob {
         self.timeline
             .remote_client
             .schedule_layer_file_upload(resident_layer)?;
-
 
         Ok(())
     }

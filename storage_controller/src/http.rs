@@ -368,7 +368,6 @@ async fn handle_tenant_timeline_detach_ancestor(
     json_response(StatusCode::OK, res)
 }
 
-
 async fn handle_tenant_timeline_import_pgdata(
     service: Arc<Service>,
     mut req: Request<Body>,

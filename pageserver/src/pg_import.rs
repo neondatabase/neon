@@ -4,8 +4,6 @@
 //! In the meantime it's nice to continue being able to compare `./import`
 #![allow(clippy::redundant_pattern_matching, clippy::clone_on_copy)]
 
-
-
 use std::fs::metadata;
 
 use anyhow::{bail, ensure, Context};
