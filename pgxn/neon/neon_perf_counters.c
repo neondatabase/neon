@@ -137,7 +137,7 @@ neon_perf_counters_to_metrics(neon_per_backend_counters *counters)
 	metrics[i].is_bucket = false;
 	metrics[i].value = (double) counters->pageserver_requests_sent_total;
 	i++;
-	metrics[i].name = "pageserver_requests_disconnects_total";
+	metrics[i].name = "pageserver_disconnects_total";
 	metrics[i].is_bucket = false;
 	metrics[i].value = (double) counters->pageserver_disconnects_total;
 	i++;
