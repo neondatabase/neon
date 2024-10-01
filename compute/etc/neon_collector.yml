@@ -314,7 +314,7 @@ queries:
         SELECT jsonb_object_agg(metric, value) jb FROM neon.neon_perf_counters
       )
       SELECT d.*
-      FROM jsonb_to_record(select jb from c) as d(
+      FROM jsonb_to_record((select jb from c)) as d(
           getpage_wait_seconds_count numeric,
           getpage_wait_seconds_sum numeric,
           getpage_prefetch_requests_total numeric,
