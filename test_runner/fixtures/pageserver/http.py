@@ -588,7 +588,6 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         force_image_layer_creation=False,
         wait_until_uploaded=False,
         enhanced_gc_bottom_most_compaction=False,
-        
     ):
         self.is_testing_enabled_or_skip()
         query = {}
@@ -685,7 +684,6 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         res_json = res.json()
         return res_json
 
-    # TODO: why do we have this function? just use layer_map_info
     def timeline_layer_map_info(
         self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId
     ):

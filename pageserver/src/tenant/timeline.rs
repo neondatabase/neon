@@ -740,7 +740,6 @@ pub(crate) enum CompactFlags {
     ForceRepartition,
     ForceImageLayerCreation,
     EnhancedGcBottomMostCompaction,
-    ShardAncestorsCompaction,
     DryRun,
 }
 

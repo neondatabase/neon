@@ -1734,9 +1734,6 @@ async fn timeline_compact_handler(
     if Some(true) == parse_query_param::<_, bool>(&request, "enhanced_gc_bottom_most_compaction")? {
         flags |= CompactFlags::EnhancedGcBottomMostCompaction;
     }
-    if Some(true) == parse_query_param::<_, bool>(&request, "shard_ancestors_compaction")? {
-        flags |= CompactFlags::ShardAncestorsCompaction;
-    }
     if Some(true) == parse_query_param::<_, bool>(&request, "dry_run")? {
         flags |= CompactFlags::DryRun;
     }
