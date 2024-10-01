@@ -526,6 +526,19 @@ pub(crate) enum ReconcileResultRequest {
     Stop,
 }
 
+struct MutationLocation {
+    node: Node,
+    generation: Generation,
+}
+
+struct ShardMutationLocations {
+    latest: MutationLocation,
+    other: Vec<MutationLocation>,
+}
+
+#[derive(Default)]
+struct TenantMutationLocations(BTreeMap<TenantShardId, ShardMutationLocations>);
+
 impl Service {
     pub fn get_config(&self) -> &Config {
         &self.config
@@ -2987,12 +3000,15 @@ impl Service {
         failpoint_support::sleep_millis_async!("tenant-create-timeline-shared-lock");
 
         self.tenant_remote_mutation(tenant_id, move |mut targets| async move {
-            if targets.is_empty() {
+            if targets.0.is_empty() {
                 return Err(ApiError::NotFound(
                     anyhow::anyhow!("Tenant not found").into(),
                 ));
             };
-            let shard_zero = targets.remove(0);
+
+            let (shard_zero_tid, shard_zero_locations) =
+                targets.0.pop_first().expect("Must have at least one shard");
+            assert!(shard_zero_tid.is_shard_zero());
 
             async fn create_one(
                 tenant_shard_id: TenantShardId,
@@ -3017,8 +3033,8 @@ impl Service {
             // use whatever LSN that shard picked when creating on subsequent shards.  We arbitrarily use shard zero as the shard
             // that will get the first creation request, and propagate the LSN to all the >0 shards.
             let timeline_info = create_one(
-                shard_zero.0,
-                shard_zero.1,
+                shard_zero_tid,
+                shard_zero_locations.latest.node,
                 self.config.jwt_token.clone(),
                 create_req.clone(),
             )
@@ -3031,11 +3047,15 @@ impl Service {
             }
 
             // Create timeline on remaining shards with number >0
-            if !targets.is_empty() {
+            if !targets.0.is_empty() {
                 // If we had multiple shards, issue requests for the remainder now.
                 let jwt = &self.config.jwt_token;
                 self.tenant_for_shards(
-                    targets.iter().map(|t| (t.0, t.1.clone())).collect(),
+                    targets
+                        .0
+                        .iter()
+                        .map(|t| (*t.0, t.1.latest.node.clone()))
+                        .collect(),
                     |tenant_shard_id: TenantShardId, node: Node| {
                         let create_req = create_req.clone();
                         Box::pin(create_one(tenant_shard_id, node, jwt.clone(), create_req))
@@ -3068,7 +3088,7 @@ impl Service {
         .await;
 
         self.tenant_remote_mutation(tenant_id, move |targets| async move {
-            if targets.is_empty() {
+            if targets.0.is_empty() {
                 return Err(ApiError::NotFound(
                     anyhow::anyhow!("Tenant not found").into(),
                 ));
@@ -3099,8 +3119,9 @@ impl Service {
 
             // no shard needs to go first/last; the operation should be idempotent
             // TODO: it would be great to ensure that all shards return the same error
+            let locations = targets.0.iter().map(|t| (*t.0, t.1.latest.node.clone())).collect();
             let results = self
-                .tenant_for_shards(targets, |tenant_shard_id, node| {
+                .tenant_for_shards(locations, |tenant_shard_id, node| {
                     futures::FutureExt::boxed(config_one(
                         tenant_shard_id,
                         timeline_id,
@@ -3131,7 +3152,7 @@ impl Service {
         .await;
 
         self.tenant_remote_mutation(tenant_id, move |targets| async move {
-            if targets.is_empty() {
+            if targets.0.is_empty() {
                 return Err(ApiError::NotFound(
                     anyhow::anyhow!("Tenant not found").into(),
                 ));
@@ -3179,8 +3200,9 @@ impl Service {
             }
 
             // no shard needs to go first/last; the operation should be idempotent
+            let locations = targets.0.iter().map(|t| (*t.0, t.1.latest.node.clone())).collect();
             let mut results = self
-                .tenant_for_shards(targets, |tenant_shard_id, node| {
+                .tenant_for_shards(locations, |tenant_shard_id, node| {
                     futures::FutureExt::boxed(detach_one(
                         tenant_shard_id,
                         timeline_id,
@@ -3227,7 +3249,7 @@ impl Service {
         .await;
 
         self.tenant_remote_mutation(tenant_id, move |targets| async move {
-            if targets.is_empty() {
+            if targets.0.is_empty() {
                 return Err(ApiError::NotFound(
                     anyhow::anyhow!("Tenant not found").into(),
                 ));
@@ -3249,7 +3271,12 @@ impl Service {
             }
 
             // no shard needs to go first/last; the operation should be idempotent
-            self.tenant_for_shards(targets, |tenant_shard_id, node| {
+            let locations = targets
+                .0
+                .iter()
+                .map(|t| (*t.0, t.1.latest.node.clone()))
+                .collect();
+            self.tenant_for_shards(locations, |tenant_shard_id, node| {
                 futures::FutureExt::boxed(do_one(
                     tenant_shard_id,
                     timeline_id,
@@ -3344,7 +3371,7 @@ impl Service {
         op: O,
     ) -> Result<R, ApiError>
     where
-        O: FnOnce(Vec<(TenantShardId, Node)>) -> F,
+        O: FnOnce(TenantMutationLocations) -> F,
         F: std::future::Future<Output = R>,
     {
         let target_gens = {
@@ -3399,14 +3426,34 @@ impl Service {
                     .ok_or(ApiError::Conflict(format!(
                         "Raced with removal of node {node_id}"
                     )))?;
-                targets.push((tenant_shard_id, node.clone(), generation));
+                targets.push((
+                    tenant_shard_id,
+                    node.clone(),
+                    generation.expect("Checked above"),
+                ));
             }
 
             targets
         };
 
-        let targets = target_gens.iter().map(|t| (t.0, t.1.clone())).collect();
-        let result = op(targets).await;
+        let mutation_locations = {
+            let mut locations = TenantMutationLocations::default();
+            for (tid, node, generation) in target_gens.iter() {
+                let location = ShardMutationLocations {
+                    latest: MutationLocation {
+                        node: node.clone(),
+                        generation: *generation,
+                    },
+                    other: Vec::default(),
+                };
+
+                locations.0.insert(*tid, location);
+            }
+
+            locations
+        };
+
+        let result = op(mutation_locations).await;
 
         // Post-check: are all the generations of all the shards the same as they were initially?  This proves that
         // our remote operation executed on the latest generation and is therefore persistent.
@@ -3424,7 +3471,7 @@ impl Service {
                 .collect::<Vec<_>>()
                 != target_gens
                     .into_iter()
-                    .map(|i| (i.0, i.2))
+                    .map(|i| (i.0, Some(i.2)))
                     .collect::<Vec<_>>()
             {
                 // We raced with something that incremented the generation, and therefore cannot be
@@ -3454,12 +3501,14 @@ impl Service {
         .await;
 
         self.tenant_remote_mutation(tenant_id, move |mut targets| async move {
-            if targets.is_empty() {
+            if targets.0.is_empty() {
                 return Err(ApiError::NotFound(
                     anyhow::anyhow!("Tenant not found").into(),
                 ));
             }
-            let shard_zero = targets.remove(0);
+
+            let (shard_zero_tid, shard_zero_locations) = targets.0.pop_first().expect("Must have at least one shard");
+            assert!(shard_zero_tid.is_shard_zero());
 
             async fn delete_one(
                 tenant_shard_id: TenantShardId,
@@ -3482,8 +3531,9 @@ impl Service {
                     })
             }
 
+            let locations = targets.0.iter().map(|t| (*t.0, t.1.latest.node.clone())).collect();
             let statuses = self
-                .tenant_for_shards(targets, |tenant_shard_id: TenantShardId, node: Node| {
+                .tenant_for_shards(locations, |tenant_shard_id: TenantShardId, node: Node| {
                     Box::pin(delete_one(
                         tenant_shard_id,
                         timeline_id,
@@ -3501,9 +3551,9 @@ impl Service {
             // Delete shard zero last: this is not strictly necessary, but since a caller's GET on a timeline will be routed
             // to shard zero, it gives a more obvious behavior that a GET returns 404 once the deletion is done.
             let shard_zero_status = delete_one(
-                shard_zero.0,
+                shard_zero_tid,
                 timeline_id,
-                shard_zero.1,
+                shard_zero_locations.latest.node,
                 self.config.jwt_token.clone(),
             )
             .await?;
