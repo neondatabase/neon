@@ -992,8 +992,19 @@ pub mod virtual_file {
     }
 
     /// Direct IO modes for a pageserver.
-    #[derive(Debug, PartialEq, Eq, Clone, serde::Deserialize, serde::Serialize)]
-    #[serde(rename_all = "kebab-case", deny_unknown_fields)]
+    #[derive(
+        Copy,
+        Clone,
+        PartialEq,
+        Eq,
+        Hash,
+        strum_macros::EnumString,
+        strum_macros::Display,
+        serde_with::DeserializeFromStr,
+        serde_with::SerializeDisplay,
+        Debug,
+    )]
+    #[strum(serialize_all = "kebab-case")]
     #[repr(u8)]
     pub enum IoMode {
         /// Uses buffered IO.
