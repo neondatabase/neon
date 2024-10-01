@@ -11,6 +11,7 @@ pub(crate) struct RangeAnalysis {
     has_image: bool,
     num_of_deltas_above_image: usize,
     total_num_of_deltas: usize,
+    num_of_l0: usize,
 }
 
 impl Timeline {
@@ -20,8 +21,10 @@ impl Timeline {
         let mut delta_ranges = Vec::new();
         let mut image_ranges = Vec::new();
 
+        let num_of_l0;
         let all_layer_files = {
             let guard = self.layers.read().await;
+            num_of_l0 = guard.layer_map().unwrap().level0_deltas().len();
             guard.all_persistent_layers()
         };
         let lsn = self.get_last_record_lsn();
@@ -82,6 +85,7 @@ impl Timeline {
                 has_image: image_layer.is_some(),
                 num_of_deltas_above_image: maybe_delta_layers.len(),
                 total_num_of_deltas: pitr_delta_layers.len(),
+                num_of_l0
             });
         }
 

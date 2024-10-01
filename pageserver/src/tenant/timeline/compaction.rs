@@ -726,7 +726,7 @@ impl Timeline {
         let threshold = self.get_compaction_threshold();
         if level0_deltas.is_empty() || level0_deltas.len() < threshold {
             if force_compaction_ignore_threshold {
-                debug!(
+                info!(
                     level0_deltas = level0_deltas.len(),
                     threshold, "too few deltas to compact, but forcing compaction"
                 );

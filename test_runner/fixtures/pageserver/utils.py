@@ -191,18 +191,6 @@ def last_record_lsn(
     return Lsn(lsn_str)
 
 
-def disk_consistent_lsn(
-    pageserver_http_client: PageserverHttpClient,
-    tenant: Union[TenantId, TenantShardId],
-    timeline: TimelineId,
-) -> Lsn:
-    detail = pageserver_http_client.timeline_detail(tenant, timeline)
-
-    lsn_str = detail["disk_consistent_lsn"]
-    assert isinstance(lsn_str, str)
-    return Lsn(lsn_str)
-
-
 def wait_for_last_record_lsn(
     pageserver_http: PageserverHttpClient,
     tenant: Union[TenantId, TenantShardId],
