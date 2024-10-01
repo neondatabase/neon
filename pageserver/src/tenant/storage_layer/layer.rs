@@ -459,7 +459,7 @@ impl Layer {
                     // which was covered by a concurrent compaction.
                     tracing::info!(
                         "Layer {} became visible as a result of access",
-                        self.0.desc.key()
+                        self.0.desc.layer_name()
                     );
                 }
             }
