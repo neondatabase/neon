@@ -125,7 +125,7 @@ fn main() -> anyhow::Result<()> {
 
     // after setting up logging, log the effective IO engine choice and read path implementations
     info!(?conf.virtual_file_io_engine, "starting with virtual_file IO engine");
-    info!(?conf.virtual_file_direct_io, "starting with virtual_file Direct IO settings");
+    info!(?conf.virtual_file_io_mode, "starting with virtual_file Direct IO settings");
     info!(?conf.io_buffer_alignment, "starting with setting for IO buffer alignment");
 
     // The tenants directory contains all the pageserver local disk state.

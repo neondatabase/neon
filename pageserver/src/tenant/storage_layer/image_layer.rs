@@ -388,7 +388,7 @@ impl ImageLayerInner {
         max_vectored_read_bytes: Option<MaxVectoredReadBytes>,
         ctx: &RequestContext,
     ) -> anyhow::Result<Self> {
-        let file = VirtualFile::open(path, ctx)
+        let file = VirtualFile::open_v2(path, ctx)
             .await
             .context("open layer file")?;
         let file_id = page_cache::next_file_id();
@@ -614,7 +614,7 @@ impl ImageLayerInner {
                                     meta.meta.key,
                                     PageReconstructError::Other(anyhow!(e).context(format!(
                                         "Failed to decompress blob from virtual file {}",
-                                        self.file.path,
+                                        self.file.path(),
                                     ))),
                                 );
 
@@ -635,7 +635,7 @@ impl ImageLayerInner {
                             blob_meta.key,
                             PageReconstructError::from(anyhow!(
                                 "Failed to read blobs from virtual file {}: {}",
-                                self.file.path,
+                                self.file.path(),
                                 kind
                             )),
                         );
