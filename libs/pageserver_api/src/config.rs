@@ -296,7 +296,7 @@ pub mod defaults {
 
     pub const DEFAULT_INGEST_BATCH_SIZE: u64 = 100;
 
-    pub const DEFAULT_MAX_VECTORED_READ_BYTES: usize = 128 * 1024; // 128 KiB
+    pub const DEFAULT_MAX_VECTORED_READ_BYTES: usize = 130 * 1024; // 130 KiB
 
     pub const DEFAULT_IMAGE_COMPRESSION: ImageCompressionAlgorithm =
         ImageCompressionAlgorithm::Zstd { level: Some(1) };
