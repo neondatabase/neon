@@ -144,6 +144,10 @@ def test_storage_controller_many_tenants(
     # permits, to ensure that we are exercising stressing that.
     api_concurrency = 135
 
+    # A different concurrency limit for bulk tenant+timeline creations: these do I/O and will
+    # start timing on test nodes if we aren't a bit careful.
+    create_concurrency = 16
+
     class Operation(str, Enum):
         TIMELINE_OPS = "timeline_ops"
         SHARD_MIGRATE = "shard_migrate"
@@ -169,9 +173,9 @@ def test_storage_controller_many_tenants(
             )
         )
 
-    # We will create tenants directly via API, not via neon_local, to avoid any false
-    # serialization of operations in neon_local (it e.g. loads/saves a config file on each call)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=api_concurrency) as executor:
+    # Creation phase: make a lot of tenants, and create timelines in a subset of them
+    # This executor has concurrency set modestly, to avoid overloading pageservers with timeline creations.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=create_concurrency) as executor:
         tenant_create_futs = []
         t1 = time.time()
 
@@ -183,6 +187,8 @@ def test_storage_controller_many_tenants(
             else:
                 shard_count = 1
 
+            # We will create tenants directly via API, not via neon_local, to avoid any false
+            # serialization of operations in neon_local (it e.g. loads/saves a config file on each call)
             f = executor.submit(
                 env.storage_controller.tenant_create,
                 tenant_id,
@@ -220,7 +226,10 @@ def test_storage_controller_many_tenants(
             f"Created {len(tenant_timelines)} timelines in {time.time() - t1}, {len(tenant_timelines) / (time.time() - t1)}/s"
         )
 
-        # Function to exercise timeline operations
+    # Exercise phase: pick pseudo-random operations to do on the tenants + timelines
+    # This executor has concurrency high enough to stress the storage controller API.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=api_concurrency) as executor:
+
         def exercise_timeline_ops(tenant_id, timeline_id):
             # A read operation: this requires looking up shard zero and routing there
             detail = virtual_ps_http.timeline_detail(tenant_id, timeline_id)
