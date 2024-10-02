@@ -247,7 +247,7 @@ def test_vm_bit_clear_on_heap_lock_blackbox(neon_env_builder: NeonEnvBuilder):
     # in a "clean" way. Our neon extension will write a full-page image of the VM
     # page, and we want to avoid that. A clean shutdown will also not do, for the
     # same reason.
-    endpoint.stop(mode="immediate")
+    endpoint.stop(mode="immediate", sks_wait_walreceiver_gone=(env.safekeepers, timeline_id))
 
     endpoint.start()
     pg_conn = endpoint.connect()

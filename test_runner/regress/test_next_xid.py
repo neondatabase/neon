@@ -435,7 +435,9 @@ $$;
 
     # Wait until pageserver has received all the data, and restart the endpoint
     wait_for_wal_insert_lsn(env, endpoint, tenant_id, timeline_id)
-    endpoint.stop(mode="immediate")  # 'immediate' to avoid writing shutdown checkpoint
+    endpoint.stop(
+        mode="immediate", sks_wait_walreceiver_gone=(env.safekeepers, timeline_id)
+    )  # 'immediate' to avoid writing shutdown checkpoint
     endpoint.start()
 
     # Check that the next-multixid value wrapped around correctly
