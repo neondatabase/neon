@@ -726,10 +726,18 @@ impl Timeline {
         let threshold = self.get_compaction_threshold();
         if level0_deltas.is_empty() || level0_deltas.len() < threshold {
             if force_compaction_ignore_threshold {
-                info!(
-                    level0_deltas = level0_deltas.len(),
-                    threshold, "too few deltas to compact, but forcing compaction"
-                );
+                if !level0_deltas.is_empty() {
+                    info!(
+                        level0_deltas = level0_deltas.len(),
+                        threshold, "too few deltas to compact, but forcing compaction"
+                    );
+                } else {
+                    info!(
+                        level0_deltas = level0_deltas.len(),
+                        threshold, "too few deltas to compact, cannot force compaction"
+                    );
+                    return Ok(CompactLevel0Phase1Result::default());
+                }
             } else {
                 debug!(
                     level0_deltas = level0_deltas.len(),
