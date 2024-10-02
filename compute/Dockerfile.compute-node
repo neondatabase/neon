@@ -95,7 +95,7 @@ RUN apt update && \
     protobuf-c-compiler xsltproc
 
 
-RUN export CGAL_VERSION=6.0 && \
+RUN export CGAL_VERSION=5.6 && \
     wget https://github.com/CGAL/cgal/releases/download/v${CGAL_VERSION}/CGAL-${CGAL_VERSION}.tar.xz && \
     tar xJf CGAL-${CGAL_VERSION}.tar.xz && \
     cd CGAL-${CGAL_VERSION} && mkdir build && cd build && cmake .. && make && make install && cd ../..
