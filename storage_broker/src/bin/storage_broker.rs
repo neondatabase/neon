@@ -50,9 +50,7 @@ use storage_broker::proto::{
     FilterTenantTimelineId, MessageType, SafekeeperDiscoveryRequest, SafekeeperDiscoveryResponse,
     SafekeeperTimelineInfo, SubscribeByFilterRequest, SubscribeSafekeeperInfoRequest, TypedMessage,
 };
-use storage_broker::{
-    parse_proto_ttid, DEFAULT_KEEPALIVE_INTERVAL, DEFAULT_LISTEN_ADDR,
-};
+use storage_broker::{parse_proto_ttid, DEFAULT_KEEPALIVE_INTERVAL, DEFAULT_LISTEN_ADDR};
 use utils::id::TenantTimelineId;
 use utils::logging::{self, LogFormat};
 use utils::sentry_init::init_sentry;
@@ -723,13 +721,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         .await;
 
-        let res = builder
-            .serve_connection(TokioIo::new(stream), service_fn_)
-            .await;
+        tokio::task::spawn(async move {
+            let res = builder
+                .serve_connection(TokioIo::new(stream), service_fn_)
+                .await;
 
-        if let Err(e) = res {
-            info!("error serving connection from {addr}: {e}");
-        }
+            if let Err(e) = res {
+                info!("error serving connection from {addr}: {e}");
+            }
+        });
     }
 }
 
