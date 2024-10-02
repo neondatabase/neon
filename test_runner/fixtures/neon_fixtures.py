@@ -463,7 +463,7 @@ class NeonEnvBuilder:
         self.compatibility_neon_bindir: Optional[Path] = None
         self.compatibility_pg_distrib_dir: Optional[Path] = None
         self.version_combination: Optional[int] = None
-        self.mixdir = self.test_output_dir / "neon"
+        self.mixdir = self.test_output_dir / "mixdir_neon"
 
     def init_configs(self, default_remote_storage_if_missing: bool = True) -> NeonEnv:
         # Cannot create more than one environment from one builder
