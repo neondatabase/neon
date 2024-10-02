@@ -1,4 +1,5 @@
-use hyper::body::HttpBody;
+use hyper_1 as hyper;
+use hyper_1::body::Body as HttpBody;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -123,23 +124,13 @@ where
         }
     }
 
-    fn poll_data(
+    fn poll_frame(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Self::Data, Self::Error>>> {
+    ) -> Poll<Option<Result<hyper_1::body::Frame<Self::Data>, Self::Error>>> {
         match self.get_mut() {
-            EitherBody::Left(b) => Pin::new(b).poll_data(cx).map(map_option_err),
-            EitherBody::Right(b) => Pin::new(b).poll_data(cx).map(map_option_err),
-        }
-    }
-
-    fn poll_trailers(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Result<Option<hyper::HeaderMap>, Self::Error>> {
-        match self.get_mut() {
-            EitherBody::Left(b) => Pin::new(b).poll_trailers(cx).map_err(Into::into),
-            EitherBody::Right(b) => Pin::new(b).poll_trailers(cx).map_err(Into::into),
+            EitherBody::Left(b) => Pin::new(b).poll_frame(cx).map(map_option_err),
+            EitherBody::Right(b) => Pin::new(b).poll_frame(cx).map(map_option_err),
         }
     }
 }
