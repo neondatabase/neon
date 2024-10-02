@@ -559,6 +559,8 @@ impl Reconciler {
         self.location_config(&dest_ps, dest_conf, None, false)
             .await?;
 
+        pausable_failpoint!("reconciler-live-migrate-pre-await-lsn");
+
         if let Some(baseline) = baseline_lsns {
             tracing::info!("🕑 Waiting for LSN to catch up...");
             self.await_lsn(self.tenant_shard_id, &dest_ps, baseline)
