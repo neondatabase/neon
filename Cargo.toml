@@ -246,7 +246,7 @@ criterion = "0.5.1"
 rcgen = "0.12"
 rstest = "0.18"
 camino-tempfile = "1.0.2"
-tonic-build = "0.9"
+tonic-build = "0.12"
 
 [patch.crates-io]
 
