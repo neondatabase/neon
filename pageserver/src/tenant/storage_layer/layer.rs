@@ -458,8 +458,8 @@ impl Layer {
                     // This case is legal in brief time windows: for example an in-flight getpage request can hold on to a layer object
                     // which was covered by a concurrent compaction.
                     tracing::info!(
-                        "Layer {} became visible as a result of access",
-                        self.0.desc.layer_name()
+                        layer=%self,
+                        "became visible as a result of access",
                     );
                 }
             }
