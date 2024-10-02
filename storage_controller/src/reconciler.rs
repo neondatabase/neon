@@ -469,10 +469,7 @@ impl Reconciler {
                         }
                     }
                     None => {
-                        // Expected timeline isn't yet visible on migration destination.
-                        // (IRL we would have to account for timeline deletion, but this
-                        //  is just test helper)
-                        any_behind = true;
+                        // Timeline was deleted in the meantime - ignore it
                     }
                 }
             }
