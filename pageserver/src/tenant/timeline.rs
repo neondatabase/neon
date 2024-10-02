@@ -430,7 +430,7 @@ pub struct Timeline {
 
     pub(crate) handles: handle::PerTimelineState<crate::page_service::TenantManagerTypes>,
 
-    pub(crate) attach_wal_lag_cooldown: Arc<OnceLock<std::time::Instant>>,
+    pub(crate) attach_wal_lag_cooldown: Arc<OnceLock<WalLagCooldown>>,
 }
 
 pub struct WalReceiverInfo {
@@ -2132,7 +2132,7 @@ impl Timeline {
         pg_version: u32,
         state: TimelineState,
         aux_file_policy: Option<AuxFilePolicy>,
-        attach_wal_lag_cooldown: Arc<OnceLock<std::time::Instant>>,
+        attach_wal_lag_cooldown: Arc<OnceLock<WalLagCooldown>>,
         cancel: CancellationToken,
     ) -> Arc<Self> {
         let disk_consistent_lsn = metadata.disk_consistent_lsn();

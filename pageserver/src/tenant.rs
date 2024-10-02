@@ -97,6 +97,7 @@ use crate::tenant::remote_timeline_client::MaybeDeletedIndexPart;
 use crate::tenant::remote_timeline_client::INITDB_PATH;
 use crate::tenant::storage_layer::DeltaLayer;
 use crate::tenant::storage_layer::ImageLayer;
+use crate::walingest::WalLagCooldown;
 use crate::walredo;
 use crate::InitializationOrder;
 use std::collections::hash_map::Entry;
@@ -320,7 +321,7 @@ pub struct Tenant {
     pub(crate) activate_now_sem: tokio::sync::Semaphore,
 
     /// Time it took for the tenant to activate. Zero if not active yet.
-    attach_wal_lag_cooldown: Arc<std::sync::OnceLock<std::time::Instant>>,
+    attach_wal_lag_cooldown: Arc<std::sync::OnceLock<WalLagCooldown>>,
 
     // Cancellation token fires when we have entered shutdown().  This is a parent of
     // Timelines' cancellation token.
@@ -1011,8 +1012,7 @@ impl Tenant {
                     tenant_clone.attach(preload, &ctx).await
                 };
                 let attach_duration = attach_start.elapsed();
-                let wal_lag_cooldown = attach_start + 2 * attach_duration + Duration::from_secs(60);
-                _ = tenant_clone.attach_wal_lag_cooldown.set(wal_lag_cooldown);
+                _ = tenant_clone.attach_wal_lag_cooldown.set(WalLagCooldown::new(attach_start, attach_duration));
 
                 match attached {
                     Ok(()) => {
