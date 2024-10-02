@@ -14,6 +14,7 @@ use std::time::SystemTime;
 
 use super::REMOTE_STORAGE_PREFIX_SEPARATOR;
 use anyhow::Result;
+use azure_core::prelude::IfMatchCondition;
 use azure_core::request_options::{MaxResults, Metadata, Range};
 use azure_core::{Continuable, RetryOptions};
 use azure_identity::DefaultAzureCredential;
@@ -35,8 +36,9 @@ use utils::backoff;
 use crate::metrics::{start_measuring_requests, AttemptOutcome, RequestKind};
 use crate::ListingObject;
 use crate::{
-    config::AzureConfig, error::Cancelled, ConcurrencyLimiter, Download, DownloadError, Listing,
-    ListingMode, RemotePath, RemoteStorage, StorageMetadata, TimeTravelError, TimeoutOrCancel,
+    config::AzureConfig, error::Cancelled, ConcurrencyLimiter, Download, DownloadError, Etag,
+    Listing, ListingMode, RemotePath, RemoteStorage, StorageMetadata, TimeTravelError,
+    TimeoutOrCancel,
 };
 
 pub struct AzureBlobStorage {
@@ -259,6 +261,7 @@ fn to_download_error(error: azure_core::Error) -> DownloadError {
     if let Some(http_err) = error.as_http_error() {
         match http_err.status() {
             StatusCode::NotFound => DownloadError::NotFound,
+            StatusCode::NotModified => DownloadError::Unmodified,
             StatusCode::BadRequest => DownloadError::BadInput(anyhow::Error::new(error)),
             _ => DownloadError::Other(anyhow::Error::new(error)),
         }
@@ -484,11 +487,16 @@ impl RemoteStorage for AzureBlobStorage {
     async fn download(
         &self,
         from: &RemotePath,
+        prev_etag: Option<&Etag>,
         cancel: &CancellationToken,
     ) -> Result<Download, DownloadError> {
         let blob_client = self.client.blob_client(self.relative_path_to_name(from));
 
-        let builder = blob_client.get();
+        let mut builder = blob_client.get();
+
+        if let Some(etag) = prev_etag {
+            builder = builder.if_match(IfMatchCondition::NotMatch(etag.to_string()))
+        }
 
         self.download_for_builder(builder, cancel).await
     }

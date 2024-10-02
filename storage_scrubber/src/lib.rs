@@ -488,7 +488,7 @@ async fn download_object_with_retries(
     let cancel = CancellationToken::new();
     for trial in 0..MAX_RETRIES {
         let mut buf = Vec::new();
-        let download = match remote_client.download(key, &cancel).await {
+        let download = match remote_client.download(key, None, &cancel).await {
             Ok(response) => response,
             Err(e) => {
                 error!("Failed to download object for key {key}: {e}");

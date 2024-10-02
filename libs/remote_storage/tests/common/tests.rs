@@ -284,7 +284,7 @@ async fn upload_download_works(ctx: &mut MaybeEnabledStorage) -> anyhow::Result<
     ctx.client.upload(data, len, &path, None, &cancel).await?;
 
     // Normal download request
-    let dl = ctx.client.download(&path, &cancel).await?;
+    let dl = ctx.client.download(&path, None, &cancel).await?;
     let buf = download_to_vec(dl).await?;
     assert_eq!(&buf, &orig);
 
@@ -364,7 +364,7 @@ async fn copy_works(ctx: &mut MaybeEnabledStorage) -> anyhow::Result<()> {
     // Normal download request
     ctx.client.copy_object(&path, &path_dest, &cancel).await?;
 
-    let dl = ctx.client.download(&path_dest, &cancel).await?;
+    let dl = ctx.client.download(&path_dest, None, &cancel).await?;
     let buf = download_to_vec(dl).await?;
     assert_eq!(&buf, &orig);
 

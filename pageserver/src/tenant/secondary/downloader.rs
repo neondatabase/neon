@@ -944,9 +944,6 @@ impl<'a> TenantDownloader<'a> {
     ) -> Result<HeatMapDownload, UpdateError> {
         debug_assert_current_span_has_tenant_id();
         let tenant_shard_id = self.secondary_state.get_tenant_shard_id();
-        // TODO: pull up etag check into the request, to do a conditional GET rather than
-        // issuing a GET and then maybe ignoring the response body
-        // (https://github.com/neondatabase/neon/issues/6199)
         tracing::debug!("Downloading heatmap for secondary tenant",);
 
         let heatmap_path = remote_heatmap_path(tenant_shard_id);
@@ -954,26 +951,26 @@ impl<'a> TenantDownloader<'a> {
 
         backoff::retry(
             || async {
-                let download = self
+                let download = match self
                     .remote_storage
-                    .download(&heatmap_path, cancel)
+                    .download(&heatmap_path, prev_etag, cancel)
                     .await
-                    .map_err(UpdateError::from)?;
+                {
+                    Ok(download) => download,
+                    Err(DownloadError::Unmodified) => return Ok(HeatMapDownload::Unmodified),
+                    Err(err) => return Err(err.into()),
+                };
 
-                SECONDARY_MODE.download_heatmap.inc();
+                SECONDARY_MODE.download_heatmap.inc(); // TODO: increment on Unmodified
 
-                if Some(&download.etag) == prev_etag {
-                    Ok(HeatMapDownload::Unmodified)
-                } else {
-                    let mut heatmap_bytes = Vec::new();
-                    let mut body = tokio_util::io::StreamReader::new(download.download_stream);
-                    let _size = tokio::io::copy_buf(&mut body, &mut heatmap_bytes).await?;
-                    Ok(HeatMapDownload::Modified(HeatMapModified {
-                        etag: download.etag,
-                        last_modified: download.last_modified,
-                        bytes: heatmap_bytes,
-                    }))
-                }
+                let mut heatmap_bytes = Vec::new();
+                let mut body = tokio_util::io::StreamReader::new(download.download_stream);
+                let _size = tokio::io::copy_buf(&mut body, &mut heatmap_bytes).await?;
+                Ok(HeatMapDownload::Modified(HeatMapModified {
+                    etag: download.etag,
+                    last_modified: download.last_modified,
+                    bytes: heatmap_bytes,
+                }))
             },
             |e| matches!(e, UpdateError::NoData | UpdateError::Cancelled),
             FAILED_DOWNLOAD_WARN_THRESHOLD,

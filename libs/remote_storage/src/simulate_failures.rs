@@ -12,8 +12,8 @@ use std::{collections::hash_map::Entry, sync::Arc};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    Download, DownloadError, GenericRemoteStorage, Listing, ListingMode, RemotePath, RemoteStorage,
-    StorageMetadata, TimeTravelError,
+    Download, DownloadError, Etag, GenericRemoteStorage, Listing, ListingMode, RemotePath,
+    RemoteStorage, StorageMetadata, TimeTravelError,
 };
 
 pub struct UnreliableWrapper {
@@ -167,11 +167,12 @@ impl RemoteStorage for UnreliableWrapper {
     async fn download(
         &self,
         from: &RemotePath,
+        prev_etag: Option<&Etag>,
         cancel: &CancellationToken,
     ) -> Result<Download, DownloadError> {
         self.attempt(RemoteOp::Download(from.clone()))
             .map_err(DownloadError::Other)?;
-        self.inner.download(from, cancel).await
+        self.inner.download(from, prev_etag, cancel).await
     }
 
     async fn download_byte_range(

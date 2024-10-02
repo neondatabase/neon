@@ -153,7 +153,7 @@ async fn download_object<'a>(
                     .with_context(|| format!("create a destination file for layer '{dst_path}'"))
                     .map_err(DownloadError::Other)?;
 
-                let download = storage.download(src_path, cancel).await?;
+                let download = storage.download(src_path, None, cancel).await?;
 
                 pausable_failpoint!("before-downloading-layer-stream-pausable");
 
@@ -344,7 +344,7 @@ async fn do_download_index_part(
 
     let index_part_bytes = download_retry_forever(
         || async {
-            let download = storage.download(&remote_path, cancel).await?;
+            let download = storage.download(&remote_path, None, cancel).await?;
 
             let mut bytes = Vec::new();
 
@@ -526,10 +526,12 @@ pub(crate) async fn download_initdb_tar_zst(
                 .with_context(|| format!("tempfile creation {temp_path}"))
                 .map_err(DownloadError::Other)?;
 
-            let download = match storage.download(&remote_path, cancel).await {
+            let download = match storage.download(&remote_path, None, cancel).await {
                 Ok(dl) => dl,
                 Err(DownloadError::NotFound) => {
-                    storage.download(&remote_preserved_path, cancel).await?
+                    storage
+                        .download(&remote_preserved_path, None, cancel)
+                        .await?
                 }
                 Err(other) => Err(other)?,
             };
