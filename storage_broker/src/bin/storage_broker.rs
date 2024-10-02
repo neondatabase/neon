@@ -51,7 +51,7 @@ use storage_broker::proto::{
     SafekeeperTimelineInfo, SubscribeByFilterRequest, SubscribeSafekeeperInfoRequest, TypedMessage,
 };
 use storage_broker::{
-    parse_proto_ttid, EitherBody, DEFAULT_KEEPALIVE_INTERVAL, DEFAULT_LISTEN_ADDR,
+    parse_proto_ttid, DEFAULT_KEEPALIVE_INTERVAL, DEFAULT_LISTEN_ADDR,
 };
 use utils::id::TenantTimelineId;
 use utils::logging::{self, LogFormat};
@@ -712,11 +712,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // Response types: it is UnsyncBoxBody for the
                         // former one (not sure why) and plain hyper::Body
                         // for the latter. Both implement HttpBody though,
-                        // and EitherBody is used to merge them.
-                        res_resp.map(|resp| resp.map(EitherBody::Left))
+                        // and `Either` is used to merge them.
+                        res_resp.map(|resp| resp.map(http_body_util::Either::Left))
                     } else {
                         let res_resp = http1_handler(req).await;
-                        res_resp.map(|resp| resp.map(EitherBody::Right))
+                        res_resp.map(|resp| resp.map(http_body_util::Either::Right))
                     }
                 }
             })
