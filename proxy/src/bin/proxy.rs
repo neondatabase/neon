@@ -236,6 +236,10 @@ struct ProxyCliArgs {
     // TODO(conradludgate): switch default to rejected or required once we've updated all deployments
     #[clap(value_enum, long, default_value_t = ProxyProtocolV2::Supported)]
     proxy_protocol_v2: ProxyProtocolV2,
+
+    /// Time the proxy waits for the webauth session to be confirmed by the control plane.
+    #[clap(long, default_value = "2m", value_parser = humantime::parse_duration)]
+    webauth_confirmation_timeout: std::time::Duration,
 }
 
 #[derive(clap::Args, Clone, Copy, Debug)]
@@ -719,6 +723,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         ip_allowlist_check_enabled: !args.is_private_access_proxy,
         is_auth_broker: args.is_auth_broker,
         accept_jwts: args.is_auth_broker,
+        webauth_confirmation_timeout: args.webauth_confirmation_timeout,
     };
 
     let config = Box::leak(Box::new(ProxyConfig {
