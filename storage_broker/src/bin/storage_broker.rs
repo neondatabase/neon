@@ -19,7 +19,7 @@ use hyper::service::service_fn;
 use hyper::{Method, StatusCode};
 use hyper_1 as hyper;
 use hyper_1::body::Incoming;
-use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -679,8 +679,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
 
         let mut builder = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
+        builder.http1().timer(TokioTimer::new());
         builder
             .http2()
+            .timer(TokioTimer::new())
             .keep_alive_interval(Some(args.http2_keepalive_interval));
 
         let storage_broker_server_cloned = storage_broker_server.clone();
