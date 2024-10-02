@@ -5,6 +5,7 @@
 mod backend;
 pub mod cancel_set;
 mod conn_pool;
+mod http_conn_pool;
 mod http_util;
 mod json;
 mod sql_over_http;
@@ -19,7 +20,8 @@ use anyhow::Context;
 use futures::future::{select, Either};
 use futures::TryFutureExt;
 use http::{Method, Response, StatusCode};
-use http_body_util::Full;
+use http_body_util::combinators::BoxBody;
+use http_body_util::{BodyExt, Empty};
 use hyper1::body::Incoming;
 use hyper_util::rt::TokioExecutor;
 use hyper_util::server::conn::auto::Builder;
@@ -81,7 +83,28 @@ pub async fn task_main(
         }
     });
 
+    let http_conn_pool = http_conn_pool::GlobalConnPool::new(&config.http_config);
+    {
+        let http_conn_pool = Arc::clone(&http_conn_pool);
+        tokio::spawn(async move {
+            http_conn_pool.gc_worker(StdRng::from_entropy()).await;
+        });
+    }
+
+    // shutdown the connection pool
+    tokio::spawn({
+        let cancellation_token = cancellation_token.clone();
+        let http_conn_pool = http_conn_pool.clone();
+        async move {
+            cancellation_token.cancelled().await;
+            tokio::task::spawn_blocking(move || http_conn_pool.shutdown())
+                .await
+                .unwrap();
+        }
+    });
+
     let backend = Arc::new(PoolingBackend {
+        http_conn_pool: Arc::clone(&http_conn_pool),
         pool: Arc::clone(&conn_pool),
         config,
         endpoint_rate_limiter: Arc::clone(&endpoint_rate_limiter),
@@ -342,7 +365,7 @@ async fn request_handler(
     // used to cancel in-flight HTTP requests. not used to cancel websockets
     http_cancellation_token: CancellationToken,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
-) -> Result<Response<Full<Bytes>>, ApiError> {
+) -> Result<Response<BoxBody<Bytes, hyper1::Error>>, ApiError> {
     let host = request
         .headers()
         .get("host")
@@ -386,7 +409,7 @@ async fn request_handler(
         );
 
         // Return the response so the spawned future can continue.
-        Ok(response.map(|_: http_body_util::Empty<Bytes>| Full::new(Bytes::new())))
+        Ok(response.map(|b| b.map_err(|x| match x {}).boxed()))
     } else if request.uri().path() == "/sql" && *request.method() == Method::POST {
         let ctx = RequestMonitoring::new(
             session_id,
@@ -409,7 +432,7 @@ async fn request_handler(
             )
             .header("Access-Control-Max-Age", "86400" /* 24 hours */)
             .status(StatusCode::OK) // 204 is also valid, but see: https://developer.mozilla.org/en-US/docs/Web/HTTP/Methods/OPTIONS#status_code
-            .body(Full::new(Bytes::new()))
+            .body(Empty::new().map_err(|x| match x {}).boxed())
             .map_err(|e| ApiError::InternalServerError(e.into()))
     } else {
         json_response(StatusCode::BAD_REQUEST, "query is not supported")

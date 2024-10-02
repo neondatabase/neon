@@ -8,7 +8,7 @@ use anyhow::{bail, ensure, Context};
 use arc_swap::ArcSwapOption;
 use dashmap::DashMap;
 use jose_jwk::crypto::KeyInfo;
-use serde::{Deserialize, Deserializer};
+use serde::{de::Visitor, Deserialize, Deserializer};
 use signature::Verifier;
 use tokio::time::Instant;
 
@@ -261,10 +261,6 @@ impl JwkCacheEntryLock {
         let sig = base64::decode_config(signature, base64::URL_SAFE_NO_PAD)
             .context("Provided authentication token is not a valid JWT encoding")?;
 
-        ensure!(
-            header.typ == "JWT",
-            "Provided authentication token is not a valid JWT encoding"
-        );
         let kid = header.key_id.context("missing key id")?;
 
         let mut guard = self
@@ -299,7 +295,7 @@ impl JwkCacheEntryLock {
                 verify_ec_signature(header_payload.as_bytes(), &sig, key)?;
             }
             jose_jwk::Key::Rsa(key) => {
-                verify_rsa_signature(header_payload.as_bytes(), &sig, key, &jwk.prm.alg)?;
+                verify_rsa_signature(header_payload.as_bytes(), &sig, key, &header.algorithm)?;
             }
             key => bail!("unsupported key type {key:?}"),
         };
@@ -311,13 +307,11 @@ impl JwkCacheEntryLock {
 
         tracing::debug!(?payload, "JWT signature valid with claims");
 
-        match (expected_audience, payload.audience) {
-            // check the audience matches
-            (Some(aud1), Some(aud2)) => ensure!(aud1 == aud2, "invalid JWT token audience"),
-            // the audience is expected but is missing
-            (Some(_), None) => bail!("invalid JWT token audience"),
-            // we don't care for the audience field
-            (None, _) => {}
+        if let Some(aud) = expected_audience {
+            ensure!(
+                payload.audience.0.iter().any(|s| s == aud),
+                "invalid JWT token audience"
+            );
         }
 
         let now = SystemTime::now();
@@ -383,7 +377,7 @@ fn verify_rsa_signature(
     data: &[u8],
     sig: &[u8],
     key: &jose_jwk::Rsa,
-    alg: &Option<jose_jwa::Algorithm>,
+    alg: &jose_jwa::Algorithm,
 ) -> anyhow::Result<()> {
     use jose_jwa::{Algorithm, Signing};
     use rsa::{
@@ -394,7 +388,7 @@ fn verify_rsa_signature(
     let key = RsaPublicKey::try_from(key).map_err(|_| anyhow::anyhow!("invalid RSA key"))?;
 
     match alg {
-        Some(Algorithm::Signing(Signing::Rs256)) => {
+        Algorithm::Signing(Signing::Rs256) => {
             let key = VerifyingKey::<sha2::Sha256>::new(key);
             let sig = Signature::try_from(sig)?;
             key.verify(data, &sig)?;
@@ -408,9 +402,6 @@ fn verify_rsa_signature(
 /// <https://datatracker.ietf.org/doc/html/rfc7515#section-4.1>
 #[derive(serde::Deserialize, serde::Serialize)]
 struct JwtHeader<'a> {
-    /// must be "JWT"
-    #[serde(rename = "typ")]
-    typ: &'a str,
     /// must be a supported alg
     #[serde(rename = "alg")]
     algorithm: jose_jwa::Algorithm,
@@ -420,11 +411,12 @@ struct JwtHeader<'a> {
 }
 
 /// <https://datatracker.ietf.org/doc/html/rfc7519#section-4.1>
-#[derive(serde::Deserialize, serde::Serialize, Debug)]
+#[derive(serde::Deserialize, Debug)]
+#[allow(dead_code)]
 struct JwtPayload<'a> {
     /// Audience - Recipient for which the JWT is intended
-    #[serde(rename = "aud")]
-    audience: Option<&'a str>,
+    #[serde(rename = "aud", default)]
+    audience: OneOrMany,
     /// Expiration - Time after which the JWT expires
     #[serde(deserialize_with = "numeric_date_opt", rename = "exp", default)]
     expiration: Option<SystemTime>,
@@ -445,6 +437,59 @@ struct JwtPayload<'a> {
     /// Unique session identifier
     #[serde(rename = "sid")]
     session_id: Option<&'a str>,
+}
+
+/// `OneOrMany` supports parsing either a single item or an array of items.
+///
+/// Needed for <https://datatracker.ietf.org/doc/html/rfc7519#section-4.1.3>
+///
+/// > The "aud" (audience) claim identifies the recipients that the JWT is
+/// > intended for.  Each principal intended to process the JWT MUST
+/// > identify itself with a value in the audience claim.  If the principal
+/// > processing the claim does not identify itself with a value in the
+/// > "aud" claim when this claim is present, then the JWT MUST be
+/// > rejected.  In the general case, the "aud" value is **an array of case-
+/// > sensitive strings**, each containing a StringOrURI value.  In the
+/// > special case when the JWT has one audience, the "aud" value MAY be a
+/// > **single case-sensitive string** containing a StringOrURI value.  The
+/// > interpretation of audience values is generally application specific.
+/// > Use of this claim is OPTIONAL.
+#[derive(Default, Debug)]
+struct OneOrMany(Vec<String>);
+
+impl<'de> Deserialize<'de> for OneOrMany {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct OneOrManyVisitor;
+        impl<'de> Visitor<'de> for OneOrManyVisitor {
+            type Value = OneOrMany;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a single string or an array of strings")
+            }
+
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(OneOrMany(vec![v.to_owned()]))
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                let mut v = vec![];
+                while let Some(s) = seq.next_element()? {
+                    v.push(s);
+                }
+                Ok(OneOrMany(v))
+            }
+        }
+        deserializer.deserialize_any(OneOrManyVisitor)
+    }
 }
 
 fn numeric_date_opt<'de, D: Deserializer<'de>>(d: D) -> Result<Option<SystemTime>, D::Error> {
@@ -540,7 +585,6 @@ mod tests {
             key: jose_jwk::Key::Ec(pk),
             prm: jose_jwk::Parameters {
                 kid: Some(kid),
-                alg: Some(jose_jwa::Algorithm::Signing(jose_jwa::Signing::Es256)),
                 ..Default::default()
             },
         };
@@ -554,7 +598,6 @@ mod tests {
             key: jose_jwk::Key::Rsa(pk),
             prm: jose_jwk::Parameters {
                 kid: Some(kid),
-                alg: Some(jose_jwa::Algorithm::Signing(jose_jwa::Signing::Rs256)),
                 ..Default::default()
             },
         };
@@ -563,7 +606,6 @@ mod tests {
 
     fn build_jwt_payload(kid: String, sig: jose_jwa::Signing) -> String {
         let header = JwtHeader {
-            typ: "JWT",
             algorithm: jose_jwa::Algorithm::Signing(sig),
             key_id: Some(&kid),
         };

@@ -10,7 +10,6 @@
 //!
 //! ```rust,no_run
 //! use tracing_subscriber::prelude::*;
-//! use tracing_opentelemetry::OpenTelemetryLayer;
 //!
 //! #[tokio::main]
 //! async fn main() {
@@ -22,7 +21,7 @@
 //!         .with_writer(std::io::stderr);
 //!
 //!     // Initialize OpenTelemetry. Exports tracing spans as OpenTelemetry traces
-//!     let otlp_layer = tracing_utils::init_tracing("my_application").await.map(OpenTelemetryLayer::new);
+//!     let otlp_layer = tracing_utils::init_tracing("my_application").await;
 //!
 //!     // Put it all together
 //!     tracing_subscriber::registry()
@@ -35,14 +34,14 @@
 #![deny(unsafe_code)]
 #![deny(clippy::undocumented_unsafe_blocks)]
 
-use opentelemetry::sdk::Resource;
-use opentelemetry::KeyValue;
-use opentelemetry_otlp::WithExportConfig;
-use opentelemetry_otlp::{OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_EXPORTER_OTLP_TRACES_ENDPOINT};
-
-pub use tracing_opentelemetry::OpenTelemetryLayer;
-
 pub mod http;
+
+use opentelemetry::trace::TracerProvider;
+use opentelemetry::KeyValue;
+use opentelemetry_sdk::Resource;
+use tracing::Subscriber;
+use tracing_subscriber::registry::LookupSpan;
+use tracing_subscriber::Layer;
 
 /// Set up OpenTelemetry exporter, using configuration from environment variables.
 ///
@@ -71,7 +70,10 @@ pub mod http;
 ///
 /// This doesn't block, but is marked as 'async' to hint that this must be called in
 /// asynchronous execution context.
-pub async fn init_tracing(service_name: &str) -> Option<opentelemetry::sdk::trace::Tracer> {
+pub async fn init_tracing<S>(service_name: &str) -> Option<impl Layer<S>>
+where
+    S: Subscriber + for<'span> LookupSpan<'span>,
+{
     if std::env::var("OTEL_SDK_DISABLED") == Ok("true".to_string()) {
         return None;
     };
@@ -80,9 +82,10 @@ pub async fn init_tracing(service_name: &str) -> Option<opentelemetry::sdk::trac
 
 /// Like `init_tracing`, but creates a separate tokio Runtime for the tracing
 /// tasks.
-pub fn init_tracing_without_runtime(
-    service_name: &str,
-) -> Option<opentelemetry::sdk::trace::Tracer> {
+pub fn init_tracing_without_runtime<S>(service_name: &str) -> Option<impl Layer<S>>
+where
+    S: Subscriber + for<'span> LookupSpan<'span>,
+{
     if std::env::var("OTEL_SDK_DISABLED") == Ok("true".to_string()) {
         return None;
     };
@@ -113,54 +116,36 @@ pub fn init_tracing_without_runtime(
     Some(init_tracing_internal(service_name.to_string()))
 }
 
-fn init_tracing_internal(service_name: String) -> opentelemetry::sdk::trace::Tracer {
-    // Set up exporter from the OTEL_EXPORTER_* environment variables
-    let mut exporter = opentelemetry_otlp::new_exporter().http().with_env();
+fn init_tracing_internal<S>(service_name: String) -> impl Layer<S>
+where
+    S: Subscriber + for<'span> LookupSpan<'span>,
+{
+    // Sets up exporter from the OTEL_EXPORTER_* environment variables.
+    let exporter = opentelemetry_otlp::new_exporter().http();
 
-    // XXX opentelemetry-otlp v0.18.0 has a bug in how it uses the
-    // OTEL_EXPORTER_OTLP_ENDPOINT env variable. According to the
-    // OpenTelemetry spec at
-    // <https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/protocol/exporter.md#endpoint-urls-for-otlphttp>,
-    // the full exporter URL is formed by appending "/v1/traces" to the value
-    // of OTEL_EXPORTER_OTLP_ENDPOINT. However, opentelemetry-otlp only does
-    // that with the grpc-tonic exporter. Other exporters, like the HTTP
-    // exporter, use the URL from OTEL_EXPORTER_OTLP_ENDPOINT as is, without
-    // appending "/v1/traces".
-    //
-    // See https://github.com/open-telemetry/opentelemetry-rust/pull/950
-    //
-    // Work around that by checking OTEL_EXPORTER_OTLP_ENDPOINT, and setting
-    // the endpoint url with the "/v1/traces" path ourselves. If the bug is
-    // fixed in a later version, we can remove this code. But if we don't
-    // remember to remove this, it won't do any harm either, as the crate will
-    // just ignore the OTEL_EXPORTER_OTLP_ENDPOINT setting when the endpoint
-    // is set directly with `with_endpoint`.
-    if std::env::var(OTEL_EXPORTER_OTLP_TRACES_ENDPOINT).is_err() {
-        if let Ok(mut endpoint) = std::env::var(OTEL_EXPORTER_OTLP_ENDPOINT) {
-            if !endpoint.ends_with('/') {
-                endpoint.push('/');
-            }
-            endpoint.push_str("v1/traces");
-            exporter = exporter.with_endpoint(endpoint);
-        }
-    }
+    // TODO: opentelemetry::global::set_error_handler() with custom handler that
+    //       bypasses default tracing layers, but logs regular looking log
+    //       messages.
 
     // Propagate trace information in the standard W3C TraceContext format.
     opentelemetry::global::set_text_map_propagator(
-        opentelemetry::sdk::propagation::TraceContextPropagator::new(),
+        opentelemetry_sdk::propagation::TraceContextPropagator::new(),
     );
 
-    opentelemetry_otlp::new_pipeline()
+    let tracer = opentelemetry_otlp::new_pipeline()
         .tracing()
         .with_exporter(exporter)
-        .with_trace_config(
-            opentelemetry::sdk::trace::config().with_resource(Resource::new(vec![KeyValue::new(
+        .with_trace_config(opentelemetry_sdk::trace::Config::default().with_resource(
+            Resource::new(vec![KeyValue::new(
                 opentelemetry_semantic_conventions::resource::SERVICE_NAME,
                 service_name,
-            )])),
-        )
-        .install_batch(opentelemetry::runtime::Tokio)
+            )]),
+        ))
+        .install_batch(opentelemetry_sdk::runtime::Tokio)
         .expect("could not initialize opentelemetry exporter")
+        .tracer("global");
+
+    tracing_opentelemetry::layer().with_tracer(tracer)
 }
 
 // Shutdown trace pipeline gracefully, so that it has a chance to send any
