@@ -64,14 +64,12 @@ use std::{
 use std::{pin::pin, sync::OnceLock};
 
 use crate::{
-    aux_file::AuxFileSizeEstimator,
-    tenant::{
+    aux_file::AuxFileSizeEstimator, tenant::{
         config::AttachmentMode,
         layer_map::{LayerMap, SearchResult},
         metadata::TimelineMetadata,
         storage_layer::{inmemory_layer::IndexEntry, PersistentLayerDesc},
-    },
-    walredo,
+    }, walingest::WalLagCooldown, walredo
 };
 use crate::{
     context::{DownloadBehavior, RequestContext},

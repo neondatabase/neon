@@ -72,8 +72,15 @@ impl CheckPoint {
     }
 }
 
+/// Temporary limitation of WAL lag warnings after attach
+///
+/// After tenant attach, we want to limit WAL lag warnings because
+/// we don't look at the WAL until the attach is complete, which
+/// might take a while.
 pub struct WalLagCooldown {
+    /// Until when should this limitation apply at all
     active_until: std::time::Instant,
+    /// The maximum lag to suppress. Lags above this limit get reported anyways.
     max_lag: Duration,
 }
 
