@@ -1,13 +1,13 @@
-import os
 import concurrent.futures
 import json
+import os
 import threading
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
 from pathlib import Path
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import pytest
 from fixtures.auth_tokens import TokenScope
@@ -57,10 +57,10 @@ def get_node_shard_counts(env: NeonEnv, tenant_ids):
     return counts
 
 
-@pytest.mark.parametrize("combination", [0x1F, 0x15, 0x02, 0x0C, 0x09, 0x1A], ids=lambda x: f"combination{x:05b}")
-def test_storage_controller_smoke(
-    neon_env_builder: NeonEnvBuilder, combination
-):
+@pytest.mark.parametrize(
+    "combination", [0x1F, 0x15, 0x02, 0x0C, 0x09, 0x1A], ids=lambda x: f"combination{x:05b}"
+)
+def test_storage_controller_smoke(neon_env_builder: NeonEnvBuilder, combination):
     """
     Test the basic lifecycle of a storage controller:
     - Restarting

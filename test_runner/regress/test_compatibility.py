@@ -584,11 +584,12 @@ def test_historic_storage_formats(
 
 @check_ondisk_data_compatibility_if_enabled
 @pytest.mark.xdist_group("compatibility")
-@pytest.mark.parametrize("combination", [0x1F, 0x15, 0x02, 0x0C, 0x09, 0x1A], ids=lambda x: f"combination{x:05b}")
+@pytest.mark.parametrize(
+    "combination", [0x1F, 0x15, 0x02, 0x0C, 0x09, 0x1A], ids=lambda x: f"combination{x:05b}"
+)
 def test_versions_mismatch(
     neon_env_builder: NeonEnvBuilder, test_output_dir: Path, pg_version: PgVersion, combination
 ):
-
     compatibility_snapshot_dir_env = os.environ.get("COMPATIBILITY_SNAPSHOT_DIR")
     assert compatibility_snapshot_dir_env is not None, (
         f"COMPATIBILITY_SNAPSHOT_DIR is not set. It should be set to `compatibility_snapshot_pg{pg_version.v_prefixed}`"

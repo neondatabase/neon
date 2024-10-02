@@ -440,9 +440,9 @@ class NeonEnvBuilder:
 
         self.pageserver_virtual_file_io_engine: Optional[str] = pageserver_virtual_file_io_engine
 
-        self.pageserver_default_tenant_config_compaction_algorithm: Optional[
-            Dict[str, Any]
-        ] = pageserver_default_tenant_config_compaction_algorithm
+        self.pageserver_default_tenant_config_compaction_algorithm: Optional[Dict[str, Any]] = (
+            pageserver_default_tenant_config_compaction_algorithm
+        )
         if self.pageserver_default_tenant_config_compaction_algorithm is not None:
             log.debug(
                 f"Overriding pageserver default compaction algorithm to {self.pageserver_default_tenant_config_compaction_algorithm}"
@@ -463,7 +463,7 @@ class NeonEnvBuilder:
         self.compatibility_neon_bindir: Optional[Path] = None
         self.compatibility_pg_distrib_dir: Optional[Path] = None
         self.version_combination: Optional[int] = None
-        self.mixdir = self.test_output_dir / 'neon'
+        self.mixdir = self.test_output_dir / "neon"
 
     def init_configs(self, default_remote_storage_if_missing: bool = True) -> NeonEnv:
         # Cannot create more than one environment from one builder
@@ -471,8 +471,12 @@ class NeonEnvBuilder:
         if default_remote_storage_if_missing and self.pageserver_remote_storage is None:
             self.enable_pageserver_remote_storage(default_remote_storage())
         if self.version_combination is not None:
-            assert self.compatibility_neon_bindir is not None, "compatibility_neon_bindir is required when using mixed versions"
-            assert self.compatibility_pg_distrib_dir is not None, "compatibility_pg_distrib_dir is required when using mixed versions"
+            assert (
+                self.compatibility_neon_bindir is not None
+            ), "compatibility_neon_bindir is required when using mixed versions"
+            assert (
+                self.compatibility_pg_distrib_dir is not None
+            ), "compatibility_pg_distrib_dir is required when using mixed versions"
             self.mixdir.mkdir(mode=0o755, exist_ok=True)
 
             # Combination: 0: old, 1: new
@@ -492,13 +496,16 @@ class NeonEnvBuilder:
                 "pageserver": ["pageserver", "pagectl"],
             }
             for component, paths in binaries.items():
-                directory = self.neon_binpath if bool(self.version_combination & bitmap[component]) else self.compatibility_neon_bindir
+                directory = (
+                    self.neon_binpath
+                    if bool(self.version_combination & bitmap[component])
+                    else self.compatibility_neon_bindir
+                )
                 for filename in paths:
                     os.link(directory / filename, self.mixdir / filename)
-            if self.version_combination & bitmap['compute']:
+            if self.version_combination & bitmap["compute"]:
                 self.pg_distrib_dir = self.compatibility_pg_distrib_dir
             self.neon_binpath = self.mixdir
-
 
         self.env = NeonEnv(self)
         return self.env
@@ -1106,9 +1113,9 @@ class NeonEnv:
                 ps_cfg["virtual_file_io_engine"] = self.pageserver_virtual_file_io_engine
             if config.pageserver_default_tenant_config_compaction_algorithm is not None:
                 tenant_config = ps_cfg.setdefault("tenant_config", {})
-                tenant_config[
-                    "compaction_algorithm"
-                ] = config.pageserver_default_tenant_config_compaction_algorithm
+                tenant_config["compaction_algorithm"] = (
+                    config.pageserver_default_tenant_config_compaction_algorithm
+                )
 
             if self.pageserver_remote_storage is not None:
                 ps_cfg["remote_storage"] = remote_storage_to_toml_dict(
@@ -1151,9 +1158,9 @@ class NeonEnv:
             if config.auth_enabled:
                 sk_cfg["auth_enabled"] = True
             if self.safekeepers_remote_storage is not None:
-                sk_cfg[
-                    "remote_storage"
-                ] = self.safekeepers_remote_storage.to_toml_inline_table().strip()
+                sk_cfg["remote_storage"] = (
+                    self.safekeepers_remote_storage.to_toml_inline_table().strip()
+                )
             self.safekeepers.append(
                 Safekeeper(env=self, id=id, port=port, extra_opts=config.safekeeper_extra_opts)
             )
