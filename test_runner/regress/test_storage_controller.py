@@ -2811,6 +2811,7 @@ def test_shard_preferred_azs(neon_env_builder: NeonEnvBuilder):
         expected_az = env.get_pageserver(attached_to).az_id
         assert shard["preferred_az_id"] == expected_az
 
+
 @run_only_on_default_postgres("Postgres version makes no difference here")
 @pytest.mark.parametrize(
     "migration_failpoint",
