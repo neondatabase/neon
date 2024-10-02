@@ -149,6 +149,8 @@ getAccessCount(const HyperLogLogRegister* reg, time_t duration)
 	uint32_t count = 0;
     /* Simplest solution is to take in account all points fro overlapped interval */
 	for (size_t i = 0; i < HIST_SIZE && HIST_MIN_INTERVAL*((1 << i)/2) <= duration; i++) {
+		count += reg->histogram[i];
+	}
 	return count;
 }
 
@@ -176,10 +178,11 @@ getMaximum(const HyperLogLogRegister* reg, TimestampTz since, time_t duration, d
 		}
 		if (total_count != 0)
 		{
+			const double threshold = total_count * (1 - min_hit_ratio);
 			for (i = 0; i < HLL_C_BITS + 1; i++)
 			{
 				// Take in account only bits with access frequncy exceeding maximal miss rate (1 - hit rate)
-				if (reg[i].ts >= since && 1.0 - (double)getAccessCount(&reg[i], duration) / total_count <= min_hit_ratio)
+				if (reg[i].ts >= since && getAccessCount(&reg[i], duration) >= threshold)
 				{
 					max = i;
 				}
