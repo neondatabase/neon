@@ -155,7 +155,7 @@ jobs:
       github.ref_name == 'main'
     runs-on: [ self-hosted, large ]
     container:
-      image: ${{ needs.build-build-tools-image.outputs.image }}
+      image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
       credentials:
         username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
         password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
