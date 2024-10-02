@@ -596,6 +596,8 @@ RUN apt-get update && \
         libboost-regex1.74-dev \
         libboost-serialization1.74-dev \
         libboost-system1.74-dev \
+#TODO check what exactly is needed
+        libboost-all-dev \
         libeigen3-dev
 
 # rdkit Release_2024_09_1 supports v17
