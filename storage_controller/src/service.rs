@@ -3428,13 +3428,42 @@ impl Service {
                     .ok_or(ApiError::Conflict(format!(
                         "Raced with removal of node {node_id}"
                     )))?;
+                let generation = generation.expect("Checked above");
+
+                let tenant = locked.tenants.get(&tenant_shard_id);
+
+                // TODO(vlad): Abstract the logic that finds stale attached locations
+                // from observed state into a [`Service`] method.
+                let other_locations = match tenant {
+                    Some(tenant) => {
+                        let mut other = tenant.attached_locations();
+                        let latest_location_index =
+                            other.iter().position(|&l| l == (node.get_id(), generation));
+                        if let Some(idx) = latest_location_index {
+                            other.remove(idx);
+                        }
+
+                        other
+                    }
+                    None => Vec::default(),
+                };
 
                 let location = ShardMutationLocations {
                     latest: MutationLocation {
                         node: node.clone(),
-                        generation: generation.expect("Checked above"),
+                        generation,
                     },
-                    other: Vec::default(),
+                    other: other_locations
+                        .into_iter()
+                        .filter_map(|(node_id, generation)| {
+                            let node = locked.nodes.get(&node_id)?;
+
+                            Some(MutationLocation {
+                                node: node.clone(),
+                                generation,
+                            })
+                        })
+                        .collect(),
                 };
                 locations.0.insert(tenant_shard_id, location);
             }
