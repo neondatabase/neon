@@ -454,7 +454,7 @@ impl Reconciler {
                 Ok(l) => l,
                 Err(e) => {
                     tracing::info!("🕑 Can't get LSNs on node {node} yet, waiting ({e})",);
-                    std::thread::sleep(Duration::from_millis(500));
+                    tokio::time::sleep(Duration::from_millis(500)).await;
                     continue;
                 }
             };
@@ -478,7 +478,7 @@ impl Reconciler {
                 tracing::info!("✅ LSN caught up.  Proceeding...");
                 break;
             } else {
-                std::thread::sleep(Duration::from_millis(500));
+                tokio::time::sleep(Duration::from_millis(500)).await;
             }
         }
 
