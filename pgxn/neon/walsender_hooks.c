@@ -160,7 +160,7 @@ NeonWALPageRead(
 							  WL_LATCH_SET | WL_EXIT_ON_PM_DEATH | reader_events,
 							  sock,
 							  timeout_ms,
-							  WAIT_EVENT_WAL_SENDER_MAIN);
+							  WAIT_EVENT_NEON_WAL_DL);
 		}
 	}
 }

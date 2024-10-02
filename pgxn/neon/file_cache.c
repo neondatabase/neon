@@ -42,6 +42,7 @@
 
 #include "hll.h"
 #include "bitmap.h"
+#include "neon.h"
 
 #define CriticalAssert(cond) do if (!(cond)) elog(PANIC, "Assertion %s failed at %s:%d: ", #cond, __FILE__, __LINE__); while (0)
 
@@ -173,7 +174,9 @@ lfc_disable(char const *op)
 			 * If the reason of error is ENOSPC, then truncation of file may
 			 * help to reclaim some space
 			 */
+			pgstat_report_wait_start(WAIT_EVENT_NEON_LFC_TRUNCATE);
 			int			rc = ftruncate(lfc_desc, 0);
+			pgstat_report_wait_end();
 
 			if (rc < 0)
 				elog(WARNING, "Failed to truncate local file cache %s: %m", lfc_path);
@@ -769,8 +772,10 @@ lfc_readv_select(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 
 		if (iteration_hits != 0)
 		{
+			pgstat_report_wait_start(WAIT_EVENT_NEON_LFC_READ);
 			rc = preadv(lfc_desc, iov, blocks_in_chunk,
 						((off_t) entry_offset * BLOCKS_PER_CHUNK + chunk_offs) * BLCKSZ);
+			pgstat_report_wait_end();
 
 			if (rc != (BLCKSZ * blocks_in_chunk))
 			{
@@ -944,8 +949,11 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 		lfc_ctl->writes += blocks_in_chunk;
 		LWLockRelease(lfc_lock);
 
+		pgstat_report_wait_start(WAIT_EVENT_NEON_LFC_WRITE);
 		rc = pwritev(lfc_desc, iov, blocks_in_chunk,
 					 ((off_t) entry_offset * BLOCKS_PER_CHUNK + chunk_offs) * BLCKSZ);
+		pgstat_report_wait_end();
+
 		if (rc != BLCKSZ * blocks_in_chunk)
 		{
 			lfc_disable("write");
