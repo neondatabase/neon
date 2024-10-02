@@ -454,7 +454,7 @@ impl Reconciler {
                 Ok(l) => l,
                 Err(e) => {
                     tracing::info!("🕑 Can't get LSNs on node {node} yet, waiting ({e})",);
-                    std::thread::sleep(Duration::from_millis(500));
+                    tokio::time::sleep(Duration::from_millis(500)).await;
                     continue;
                 }
             };
@@ -469,10 +469,7 @@ impl Reconciler {
                         }
                     }
                     None => {
-                        // Expected timeline isn't yet visible on migration destination.
-                        // (IRL we would have to account for timeline deletion, but this
-                        //  is just test helper)
-                        any_behind = true;
+                        // Timeline was deleted in the meantime - ignore it
                     }
                 }
             }
@@ -481,7 +478,7 @@ impl Reconciler {
                 tracing::info!("✅ LSN caught up.  Proceeding...");
                 break;
             } else {
-                std::thread::sleep(Duration::from_millis(500));
+                tokio::time::sleep(Duration::from_millis(500)).await;
             }
         }
 
@@ -561,6 +558,8 @@ impl Reconciler {
         tracing::info!("🔁 Attaching to pageserver {dest_ps}");
         self.location_config(&dest_ps, dest_conf, None, false)
             .await?;
+
+        pausable_failpoint!("reconciler-live-migrate-pre-await-lsn");
 
         if let Some(baseline) = baseline_lsns {
             tracing::info!("🕑 Waiting for LSN to catch up...");
