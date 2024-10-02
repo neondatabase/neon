@@ -3014,21 +3014,60 @@ impl Service {
 
             async fn create_one(
                 tenant_shard_id: TenantShardId,
-                node: Node,
+                locations: ShardMutationLocations,
                 jwt: Option<String>,
                 create_req: TimelineCreateRequest,
             ) -> Result<TimelineInfo, ApiError> {
+                let latest = locations.latest.node;
+
                 tracing::info!(
-                    "Creating timeline on shard {}/{}, attached to node {node}",
+                    "Creating timeline on shard {}/{}, attached to node {latest} in generation {:?}",
                     tenant_shard_id,
                     create_req.new_timeline_id,
+                    locations.latest.generation
                 );
-                let client = PageserverClient::new(node.get_id(), node.base_url(), jwt.as_deref());
 
-                client
+                let client =
+                    PageserverClient::new(latest.get_id(), latest.base_url(), jwt.as_deref());
+
+                let timeline_info = client
                     .timeline_create(tenant_shard_id, &create_req)
                     .await
-                    .map_err(|e| passthrough_api_error(&node, e))
+                    .map_err(|e| passthrough_api_error(&latest, e))?;
+
+                for location in locations.other {
+                    tracing::info!(
+                        "Creating timeline on shard {}/{}, stale attached to node {} in generation {:?}",
+                        tenant_shard_id,
+                        create_req.new_timeline_id,
+                        location.node,
+                        location.generation
+                    );
+
+                    let client = PageserverClient::new(
+                        location.node.get_id(),
+                        location.node.base_url(),
+                        jwt.as_deref(),
+                    );
+
+                    let res = client
+                        .timeline_create(tenant_shard_id, &create_req)
+                        .await;
+
+                    if let Err(e) = res {
+                        match e {
+                            mgmt_api::Error::ApiError(StatusCode::NOT_FOUND, _) => {
+                                // Tenant might have been detached from the stale location,
+                                // so ignore 404s.
+                            },
+                            _ => {
+                                return Err(passthrough_api_error(&location.node, e));
+                            }
+                        }
+                    }
+                }
+
+                Ok(timeline_info)
             }
 
             // Because the caller might not provide an explicit LSN, we must do the creation first on a single shard, and then
@@ -3036,7 +3075,7 @@ impl Service {
             // that will get the first creation request, and propagate the LSN to all the >0 shards.
             let timeline_info = create_one(
                 shard_zero_tid,
-                shard_zero_locations.latest.node,
+                shard_zero_locations,
                 self.config.jwt_token.clone(),
                 create_req.clone(),
             )
@@ -3058,9 +3097,15 @@ impl Service {
                         .iter()
                         .map(|t| (*t.0, t.1.latest.node.clone()))
                         .collect(),
-                    |tenant_shard_id: TenantShardId, node: Node| {
+                    |tenant_shard_id: TenantShardId, _node: Node| {
                         let create_req = create_req.clone();
-                        Box::pin(create_one(tenant_shard_id, node, jwt.clone(), create_req))
+                        let mutation_locations = targets.0.remove(&tenant_shard_id).unwrap();
+                        Box::pin(create_one(
+                            tenant_shard_id,
+                            mutation_locations,
+                            jwt.clone(),
+                            create_req,
+                        ))
                     },
                 )
                 .await?;
