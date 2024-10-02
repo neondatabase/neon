@@ -2919,3 +2919,97 @@ def test_timeline_delete_mid_live_migration(neon_env_builder: NeonEnvBuilder, mi
         # Always disable 'pause' failpoints, even on failure, to avoid hanging in shutdown
         env.storage_controller.configure_failpoints((migration_failpoint.value, "off"))
         raise
+
+
+@run_only_on_default_postgres("Postgres version makes no difference here")
+@pytest.mark.parametrize(
+    "migration_failpoint",
+    [
+        MigrationFailpoints.PRE_GENERATION_INC,
+        MigrationFailpoints.POST_NOTIFY,
+        MigrationFailpoints.POST_DETACH,
+    ],
+)
+def test_multi_attached_timeline_creation(neon_env_builder: NeonEnvBuilder, migration_failpoint):
+    neon_env_builder.num_pageservers = 2
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    tenant_id = TenantId.generate()
+    env.storage_controller.tenant_create(tenant_id, placement_policy={"Attached": 1})
+
+    shard_zero = TenantShardId(tenant_id, 0, 0)
+    locations = env.storage_controller.get_tenants_placement()[str(shard_zero)]
+
+    assert locations["observed"] == locations["intent"]
+    assert locations["observed"]["attached"] is not None
+    assert len(locations["observed"]["secondary"]) > 0
+
+    attached_location = locations["observed"]["attached"]
+    secondary_location = locations["observed"]["secondary"][0]
+
+    env.storage_controller.configure_failpoints((migration_failpoint.value, "pause"))
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            migrate_fut = executor.submit(
+                env.storage_controller.tenant_shard_migrate,
+                shard_zero,
+                secondary_location,
+            )
+
+            def has_hit_migration_failpoint():
+                expr = f"at failpoint {migration_failpoint.value}"
+                log.info(expr)
+                assert env.storage_controller.log_contains(expr)
+
+            wait_until(10, 1, has_hit_migration_failpoint)
+
+            timeline_id = TimelineId.generate()
+            env.storage_controller.pageserver_api().timeline_create(
+                pg_version=PgVersion.NOT_SET, tenant_id=tenant_id, new_timeline_id=timeline_id
+            )
+
+            # Timeline creation only goes to the origin.
+            if migration_failpoint == MigrationFailpoints.PRE_GENERATION_INC:
+                client = env.get_pageserver(attached_location).http_client()
+                assert timeline_id in {
+                    TimelineId(b["timeline_id"]) for b in client.timeline_list(tenant_id)
+                }, f"new timeline not found on {attached_location}"
+
+                with pytest.raises(PageserverApiException) as exc:
+                    env.get_pageserver(secondary_location).http_client().timeline_list(tenant_id)
+                assert exc.value.status_code == 404
+
+            # Timeline creations goes to both attached locations
+            if migration_failpoint == MigrationFailpoints.POST_NOTIFY:
+                for node_id in [attached_location, secondary_location]:
+                    client = env.get_pageserver(node_id).http_client()
+                    assert timeline_id in {
+                        TimelineId(b["timeline_id"]) for b in client.timeline_list(tenant_id)
+                    }, f"new timeline not found on {node_id}"
+
+            # Timeline creation goes both locations, but storcon gets a 404 from the origin
+            # which it ignores.
+            if migration_failpoint == MigrationFailpoints.POST_DETACH:
+                client = env.get_pageserver(secondary_location).http_client()
+                assert timeline_id in {
+                    TimelineId(b["timeline_id"]) for b in client.timeline_list(tenant_id)
+                }, f"new timeline not found on {attached_location}"
+
+                with pytest.raises(PageserverApiException) as exc:
+                    env.get_pageserver(attached_location).http_client().timeline_list(tenant_id)
+                assert exc.value.status_code == 404
+
+            # Eventually migration completes
+            env.storage_controller.configure_failpoints((migration_failpoint.value, "off"))
+            migrate_fut.result()
+
+            # Ensure that we detached from the old attached location
+            with pytest.raises(PageserverApiException) as exc:
+                env.get_pageserver(attached_location).http_client().timeline_list(tenant_id)
+            assert exc.value.status_code == 404
+    except:
+        # Always disable 'pause' failpoints, even on failure, to avoid hanging in shutdown
+        env.storage_controller.configure_failpoints((migration_failpoint.value, "off"))
+        raise
