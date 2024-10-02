@@ -338,6 +338,12 @@ def test_storage_controller_many_tenants(
     # Restart pageservers gracefully: this exercises the /re-attach pageserver API
     # and the storage controller drain and fill API
     log.info("Restarting pageservers...")
+
+    # Parameters for how long we expect it to take to migrate all of the tenants from/to
+    # a node during a drain/fill operation
+    DRAIN_FILL_TIMEOUT = 240
+    DRAIN_FILL_BACKOFF = 5
+
     for ps in env.pageservers:
         log.info(f"Draining pageserver {ps.id}")
         t1 = time.time()
@@ -349,8 +355,8 @@ def test_storage_controller_many_tenants(
             ps.id,
             PageserverAvailability.ACTIVE,
             PageserverSchedulingPolicy.PAUSE_FOR_RESTART,
-            max_attempts=24,
-            backoff=5,
+            max_attempts=DRAIN_FILL_TIMEOUT // DRAIN_FILL_BACKOFF,
+            backoff=DRAIN_FILL_BACKOFF,
         )
         log.info(f"Drained pageserver {ps.id} in {time.time() - t1}s")
 
@@ -378,8 +384,8 @@ def test_storage_controller_many_tenants(
             ps.id,
             PageserverAvailability.ACTIVE,
             PageserverSchedulingPolicy.ACTIVE,
-            max_attempts=24,
-            backoff=5,
+            max_attempts=DRAIN_FILL_TIMEOUT // DRAIN_FILL_BACKOFF,
+            backoff=DRAIN_FILL_BACKOFF,
         )
 
         log.info(f"Filled pageserver {ps.id} in {time.time() - t1}s")
