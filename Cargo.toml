@@ -99,8 +99,8 @@ http-types = { version = "2", default-features = false }
 http-body-util = "0.1.2"
 humantime = "2.1"
 humantime-serde = "1.1.1"
-hyper = "0.14"
-hyper_1 = { package = "hyper", version = "1.4" }
+hyper0 = { package = "hyper", version = "0.14" }
+hyper = "1.4"
 hyper-util = "0.1"
 tokio-tungstenite = "0.20.0"
 indexmap = "2"

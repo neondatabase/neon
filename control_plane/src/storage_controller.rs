@@ -3,7 +3,7 @@ use crate::{
     local_env::{LocalEnv, NeonStorageControllerConf},
 };
 use camino::{Utf8Path, Utf8PathBuf};
-use hyper::Uri;
+use hyper0::Uri;
 use nix::unistd::Pid;
 use pageserver_api::{
     controller_api::{
