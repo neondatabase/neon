@@ -9,10 +9,7 @@ use crate::{
 };
 use pq_proto::BeMessage as Be;
 use thiserror::Error;
-use tokio::{
-    io::{AsyncRead, AsyncWrite},
-    time::Duration,
-};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_postgres::config::SslMode;
 use tracing::{info, info_span};
 
@@ -44,16 +41,15 @@ impl ReportableError for WebAuthError {
     }
 }
 
-fn hello_message(redirect_uri: &reqwest::Url, session_id: &str, timeout: Duration) -> String {
+fn hello_message(redirect_uri: &reqwest::Url, session_id: &str) -> String {
     format!(
         concat![
             "Welcome to Neon!\n",
-            "Authenticate by visiting within {timeout}:\n",
+            "Authenticate by visiting:\n",
             "    {redirect_uri}{session_id}\n\n",
         ],
         redirect_uri = redirect_uri,
         session_id = session_id,
-        timeout = humantime::format_duration(timeout),
     )
 }
 
@@ -81,11 +77,7 @@ pub(super) async fn authenticate(
     };
 
     let span = info_span!("web", psql_session_id = &psql_session_id);
-    let greeting = hello_message(
-        link_uri,
-        &psql_session_id,
-        auth_config.webauth_confirmation_timeout,
-    );
+    let greeting = hello_message(link_uri, &psql_session_id);
 
     // Give user a URL to spawn a new database.
     info!(parent: &span, "sending the auth URL to the user");
@@ -99,7 +91,9 @@ pub(super) async fn authenticate(
     info!(parent: &span, "waiting for console's reply...");
     let db_info = tokio::time::timeout(auth_config.webauth_confirmation_timeout, waiter)
         .await
-        .map_err(auth::AuthError::user_timeout)?
+        .map_err(|_elapsed| {
+            auth::AuthError::confirmation_timeout(auth_config.webauth_confirmation_timeout.into())
+        })?
         .map_err(WebAuthError::from)?;
 
     if auth_config.ip_allowlist_check_enabled {
