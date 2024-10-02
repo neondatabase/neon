@@ -2641,6 +2641,12 @@ def test_storage_controller_proxy_during_migration(
     """
     neon_env_builder.num_pageservers = 2
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
+
+    neon_env_builder.storage_controller_config = {
+        # Publish long reconcile metric early
+        "long_reconcile_threshold": "5s",
+    }
+
     env = neon_env_builder.init_configs()
     env.start()
 
@@ -2648,12 +2654,36 @@ def test_storage_controller_proxy_during_migration(
     timeline_id = env.initial_timeline
     env.neon_cli.create_tenant(tenant_id, timeline_id)
 
+    # The test stalls a reconcile on purpose to check if the long running
+    # reconcile alert fires.
+    env.storage_controller.allowed_errors.extend(
+        [".*Reconcile passed the long running threshold.*"]
+    )
+
     # Activate a failpoint that will cause live migration to get stuck _after_ the generation has been issued
     # to the new pageserver: this should result in requests routed to the new pageserver.
     env.storage_controller.configure_failpoints((migration_failpoint.value, "pause"))
 
     origin_pageserver = env.get_tenant_pageserver(tenant_id)
     dest_ps_id = [p.id for p in env.pageservers if p.id != origin_pageserver.id][0]
+
+    def long_migration_metric_published():
+        assert (
+            env.storage_controller.get_metric_value(
+                "storage_controller_reconcile_long_running_total",
+                filter={"tenant_id": str(tenant_id), "shard_number": "0"},
+            )
+            == 1
+        )
+
+    def assert_long_migration_metric_not_published():
+        assert (
+            env.storage_controller.get_metric_value(
+                "storage_controller_reconcile_long_running_total",
+                filter={"tenant_id": str(tenant_id), "shard_number": "0"},
+            )
+            is None
+        )
 
     try:
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
@@ -2685,9 +2715,14 @@ def test_storage_controller_proxy_during_migration(
                 # We expect request to land on the origin
                 assert tenant_info["generation"] == 1
 
+            wait_until(10, 1, long_migration_metric_published)
+
             # Eventually migration completes
             env.storage_controller.configure_failpoints((migration_failpoint.value, "off"))
             migrate_fut.result()
+
+            assert_long_migration_metric_not_published()
+
     except:
         # Always disable 'pause' failpoints, even on failure, to avoid hanging in shutdown
         env.storage_controller.configure_failpoints((migration_failpoint.value, "off"))
