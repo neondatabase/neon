@@ -471,6 +471,8 @@ class NeonEnvBuilder:
         if default_remote_storage_if_missing and self.pageserver_remote_storage is None:
             self.enable_pageserver_remote_storage(default_remote_storage())
         if self.version_combination is not None:
+            assert self.compatibility_neon_bindir is not None, "compatibility_neon_bindir is required when using mixed versions"
+            assert self.compatibility_pg_distrib_dir is not None, "compatibility_pg_distrib_dir is required when using mixed versions"
             self.mixdir.mkdir(mode=0o755, exist_ok=True)
 
             # Combination: 0: old, 1: new
