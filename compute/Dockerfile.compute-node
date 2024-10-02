@@ -129,7 +129,7 @@ ENV PATH="/usr/local/pgsql/bin:$PATH"
 
 # Postgis 3.5.0 supports v17
 RUN wget https://download.osgeo.org/postgis/source/postgis-3.5.0.tar.gz -O postgis.tar.gz && \
-    echo "ca698a22cc2b2b3467ac4e063b43a28413f3004ddd505bdccdd74c56a647f510  postgis-3.5.0.tar.gz" | sha256sum --check && \
+    echo "ca698a22cc2b2b3467ac4e063b43a28413f3004ddd505bdccdd74c56a647f510  postgis.tar.gz" | sha256sum --check && \
     mkdir postgis-src && cd postgis-src && tar xzf ../postgis.tar.gz --strip-components=1 -C . && \
     find /usr/local/pgsql -type f | sed 's|^/usr/local/pgsql/||' > /before.txt &&\
     ./autogen.sh && \
