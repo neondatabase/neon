@@ -1033,7 +1033,7 @@ impl Service {
         tenant_id=%result.tenant_shard_id.tenant_id, shard_id=%result.tenant_shard_id.shard_slug(),
         sequence=%result.sequence
     ))]
-    fn process_result(&self, mut result: ReconcileResult) {
+    fn process_result(&self, result: ReconcileResult) {
         let mut locked = self.inner.write().unwrap();
         let (nodes, tenants, _scheduler) = locked.parts_mut();
         let Some(tenant) = tenants.get_mut(&result.tenant_shard_id) else {
@@ -1055,13 +1055,27 @@ impl Service {
 
         // In case a node was deleted while this reconcile is in flight, filter it out of the update we will
         // make to the tenant
-        result
-            .observed_deltas
-            .retain(|delta| nodes.contains_key(delta.node_id()));
+        let deltas = result.observed_deltas.into_iter().flat_map(|delta| {
+            // In case a node was deleted while this reconcile is in flight, filter it out of the update we will
+            // make to the tenant
+            let node = nodes.get(delta.node_id())?;
+
+            if node.is_available() {
+                return Some(delta);
+            }
+
+            // In case a node became unavailable concurrently with the reconcile, observed
+            // locations on it are now uncertain. By convention, set them to None in order
+            // for them to get refreshed when the node comes back online.
+            Some(ObservedStateDelta::Upsert(Box::new((
+                node.get_id(),
+                ObservedStateLocation { conf: None },
+            ))))
+        });
 
         match result.result {
             Ok(()) => {
-                for delta in result.observed_deltas {
+                for delta in deltas {
                     match delta {
                         ObservedStateDelta::Upsert(ups) => {
                             let (node_id, loc) = *ups;
@@ -1105,7 +1119,7 @@ impl Service {
                 // so that waiters will see the correct error after waiting.
                 tenant.set_last_error(result.sequence, e);
 
-                for delta in result.observed_deltas {
+                for delta in deltas {
                     match delta {
                         ObservedStateDelta::Upsert(ups) => {
                             let (node_id, loc) = *ups;
