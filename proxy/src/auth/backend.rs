@@ -94,17 +94,22 @@ impl std::fmt::Display for Backend<'_, (), ()> {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::ControlPlane(api, ()) => match &**api {
-                ControlPlaneBackend::Management(endpoint) => {
-                    fmt.debug_tuple("Console").field(&endpoint.url()).finish()
-                }
+                ControlPlaneBackend::Management(endpoint) => fmt
+                    .debug_tuple("ControlPlane::Management")
+                    .field(&endpoint.url())
+                    .finish(),
                 #[cfg(any(test, feature = "testing"))]
-                ControlPlaneBackend::PostgresMock(endpoint) => {
-                    fmt.debug_tuple("Postgres").field(&endpoint.url()).finish()
-                }
+                ControlPlaneBackend::PostgresMock(endpoint) => fmt
+                    .debug_tuple("ControlPlane::PostgresMock")
+                    .field(&endpoint.url())
+                    .finish(),
                 #[cfg(test)]
-                ControlPlaneBackend::Test(_) => fmt.debug_tuple("Test").finish(),
+                ControlPlaneBackend::Test(_) => fmt.debug_tuple("ControlPlane::Test").finish(),
             },
-            Self::ConsoleRedirect(url, ()) => fmt.debug_tuple("Web").field(&url.as_str()).finish(),
+            Self::ConsoleRedirect(url, ()) => fmt
+                .debug_tuple("ConsoleRedirect")
+                .field(&url.as_str())
+                .finish(),
             Self::Local(_) => fmt.debug_tuple("Local").finish(),
         }
     }
