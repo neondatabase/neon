@@ -107,6 +107,8 @@ pub struct ComputeSpec {
     #[serde(default)]
     pub shard_stripe_size: Option<usize>,
 
+    /// Local Proxy configuration used for JWT authentication
+    #[serde(default)]
     pub local_proxy_config: Option<LocalProxySpec>,
 }
 

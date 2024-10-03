@@ -109,7 +109,7 @@ struct SqlOverHttpArgs {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let _logging_guard = proxy::logging::init().await?;
+    let _logging_guard = proxy::logging::init_local_proxy()?;
     let _panic_hook_guard = utils::logging::replace_panic_hook_with_tracing_panic_hook();
     let _sentry_guard = init_sentry(Some(GIT_VERSION.into()), &[]);
 
