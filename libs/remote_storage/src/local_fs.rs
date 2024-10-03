@@ -23,8 +23,8 @@ use tokio_util::{io::ReaderStream, sync::CancellationToken};
 use utils::crashsafe::path_with_suffix_extension;
 
 use crate::{
-    Download, DownloadError, Listing, ListingMode, ListingObject, RemotePath, TimeTravelError,
-    TimeoutOrCancel, REMOTE_STORAGE_PREFIX_SEPARATOR,
+    Download, DownloadError, DownloadOpts, Listing, ListingMode, ListingObject, RemotePath,
+    TimeTravelError, TimeoutOrCancel, REMOTE_STORAGE_PREFIX_SEPARATOR,
 };
 
 use super::{RemoteStorage, StorageMetadata};
@@ -494,7 +494,7 @@ impl RemoteStorage for LocalFs {
     async fn download(
         &self,
         from: &RemotePath,
-        prev_etag: Option<&Etag>,
+        opts: &DownloadOpts,
         cancel: &CancellationToken,
     ) -> Result<Download, DownloadError> {
         let target_path = from.with_base(&self.storage_root);
@@ -502,7 +502,7 @@ impl RemoteStorage for LocalFs {
         let file_metadata = file_metadata(&target_path).await?;
         let etag = mock_etag(&file_metadata);
 
-        if prev_etag == Some(&etag) {
+        if opts.etag.as_ref() == Some(&etag) {
             return Err(DownloadError::Unmodified);
         }
 
@@ -697,7 +697,7 @@ mod fs_tests {
     ) -> anyhow::Result<String> {
         let cancel = CancellationToken::new();
         let download = storage
-            .download(remote_storage_path, None, &cancel)
+            .download(remote_storage_path, &DownloadOpts::default(), &cancel)
             .await
             .map_err(|e| anyhow::anyhow!("Download failed: {e}"))?;
         ensure!(
@@ -778,8 +778,8 @@ mod fs_tests {
             "We should upload and download the same contents"
         );
 
-        let non_existing_path = "somewhere/else";
-        match storage.download(&RemotePath::new(Utf8Path::new(non_existing_path))?, None, &cancel).await {
+        let non_existing_path = RemotePath::new(Utf8Path::new("somewhere/else"))?;
+        match storage.download(&non_existing_path, &DownloadOpts::default(), &cancel).await {
             Err(DownloadError::NotFound) => {} // Should get NotFound for non existing keys
             other => panic!("Should get a NotFound error when downloading non-existing storage files, but got: {other:?}"),
         }
@@ -1108,7 +1108,7 @@ mod fs_tests {
 
         let read = aggregate(
             storage
-                .download(&path, None, &cancel)
+                .download(&path, &DownloadOpts::default(), &cancel)
                 .await?
                 .download_stream,
         )
@@ -1125,7 +1125,7 @@ mod fs_tests {
 
         let read = aggregate(
             storage
-                .download(&path, None, &cancel)
+                .download(&path, &DownloadOpts::default(), &cancel)
                 .await?
                 .download_stream,
         )
@@ -1164,7 +1164,7 @@ mod fs_tests {
 
         let read = aggregate(
             storage
-                .download(&path, None, &cancel)
+                .download(&path, &DownloadOpts::default(), &cancel)
                 .await?
                 .download_stream,
         )

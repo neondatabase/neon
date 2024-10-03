@@ -49,7 +49,7 @@ use futures::Future;
 use metrics::UIntGauge;
 use pageserver_api::models::SecondaryProgress;
 use pageserver_api::shard::TenantShardId;
-use remote_storage::{DownloadError, Etag, GenericRemoteStorage};
+use remote_storage::{DownloadError, DownloadOpts, Etag, GenericRemoteStorage};
 
 use tokio_util::sync::CancellationToken;
 use tracing::{info_span, instrument, warn, Instrument};
@@ -948,12 +948,15 @@ impl<'a> TenantDownloader<'a> {
 
         let heatmap_path = remote_heatmap_path(tenant_shard_id);
         let cancel = &self.secondary_state.cancel;
+        let opts = DownloadOpts {
+            etag: prev_etag.cloned(),
+        };
 
         backoff::retry(
             || async {
                 let download = match self
                     .remote_storage
-                    .download(&heatmap_path, prev_etag, cancel)
+                    .download(&heatmap_path, &opts, cancel)
                     .await
                 {
                     Ok(download) => download,

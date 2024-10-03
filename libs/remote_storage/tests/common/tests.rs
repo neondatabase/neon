@@ -1,8 +1,7 @@
 use anyhow::Context;
 use camino::Utf8Path;
 use futures::StreamExt;
-use remote_storage::ListingMode;
-use remote_storage::RemotePath;
+use remote_storage::{DownloadOpts, ListingMode, RemotePath};
 use std::sync::Arc;
 use std::{collections::HashSet, num::NonZeroU32};
 use test_context::test_context;
@@ -284,7 +283,10 @@ async fn upload_download_works(ctx: &mut MaybeEnabledStorage) -> anyhow::Result<
     ctx.client.upload(data, len, &path, None, &cancel).await?;
 
     // Normal download request
-    let dl = ctx.client.download(&path, None, &cancel).await?;
+    let dl = ctx
+        .client
+        .download(&path, &DownloadOpts::default(), &cancel)
+        .await?;
     let buf = download_to_vec(dl).await?;
     assert_eq!(&buf, &orig);
 
@@ -364,7 +366,10 @@ async fn copy_works(ctx: &mut MaybeEnabledStorage) -> anyhow::Result<()> {
     // Normal download request
     ctx.client.copy_object(&path, &path_dest, &cancel).await?;
 
-    let dl = ctx.client.download(&path_dest, None, &cancel).await?;
+    let dl = ctx
+        .client
+        .download(&path_dest, &DownloadOpts::default(), &cancel)
+        .await?;
     let buf = download_to_vec(dl).await?;
     assert_eq!(&buf, &orig);
 

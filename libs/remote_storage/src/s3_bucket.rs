@@ -45,7 +45,7 @@ use crate::{
     error::Cancelled,
     metrics::{start_counting_cancelled_wait, start_measuring_requests},
     support::PermitCarrying,
-    ConcurrencyLimiter, Download, DownloadError, Etag, Listing, ListingMode, ListingObject,
+    ConcurrencyLimiter, Download, DownloadError, DownloadOpts, Listing, ListingMode, ListingObject,
     RemotePath, RemoteStorage, TimeTravelError, TimeoutOrCancel, MAX_KEYS_PER_DELETE,
     REMOTE_STORAGE_PREFIX_SEPARATOR,
 };
@@ -65,10 +65,10 @@ pub struct S3Bucket {
     pub timeout: Duration,
 }
 
-struct GetObjectRequest<'a> {
+struct GetObjectRequest {
     bucket: String,
     key: String,
-    etag: Option<&'a Etag>,
+    etag: Option<String>,
     range: Option<String>,
 }
 impl S3Bucket {
@@ -241,7 +241,7 @@ impl S3Bucket {
 
     async fn download_object(
         &self,
-        request: GetObjectRequest<'_>,
+        request: GetObjectRequest,
         cancel: &CancellationToken,
     ) -> Result<Download, DownloadError> {
         let kind = RequestKind::Get;
@@ -790,7 +790,7 @@ impl RemoteStorage for S3Bucket {
     async fn download(
         &self,
         from: &RemotePath,
-        prev_etag: Option<&Etag>,
+        opts: &DownloadOpts,
         cancel: &CancellationToken,
     ) -> Result<Download, DownloadError> {
         // if prefix is not none then download file `prefix/from`
@@ -799,7 +799,7 @@ impl RemoteStorage for S3Bucket {
             GetObjectRequest {
                 bucket: self.bucket_name.clone(),
                 key: self.relative_path_to_s3_object(from),
-                etag: prev_etag,
+                etag: opts.etag.as_ref().map(|e| e.to_string()),
                 range: None,
             },
             cancel,

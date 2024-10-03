@@ -14,8 +14,7 @@ use std::time::SystemTime;
 
 use super::REMOTE_STORAGE_PREFIX_SEPARATOR;
 use anyhow::Result;
-use azure_core::prelude::IfMatchCondition;
-use azure_core::request_options::{MaxResults, Metadata, Range};
+use azure_core::request_options::{IfMatchCondition, MaxResults, Metadata, Range};
 use azure_core::{Continuable, RetryOptions};
 use azure_identity::DefaultAzureCredential;
 use azure_storage::StorageCredentials;
@@ -34,11 +33,10 @@ use tracing::debug;
 use utils::backoff;
 
 use crate::metrics::{start_measuring_requests, AttemptOutcome, RequestKind};
-use crate::ListingObject;
 use crate::{
-    config::AzureConfig, error::Cancelled, ConcurrencyLimiter, Download, DownloadError, Etag,
-    Listing, ListingMode, RemotePath, RemoteStorage, StorageMetadata, TimeTravelError,
-    TimeoutOrCancel,
+    config::AzureConfig, error::Cancelled, ConcurrencyLimiter, Download, DownloadError,
+    DownloadOpts, Listing, ListingMode, ListingObject, RemotePath, RemoteStorage, StorageMetadata,
+    TimeTravelError, TimeoutOrCancel,
 };
 
 pub struct AzureBlobStorage {
@@ -487,14 +485,14 @@ impl RemoteStorage for AzureBlobStorage {
     async fn download(
         &self,
         from: &RemotePath,
-        prev_etag: Option<&Etag>,
+        opts: &DownloadOpts,
         cancel: &CancellationToken,
     ) -> Result<Download, DownloadError> {
         let blob_client = self.client.blob_client(self.relative_path_to_name(from));
 
         let mut builder = blob_client.get();
 
-        if let Some(etag) = prev_etag {
+        if let Some(ref etag) = opts.etag {
             builder = builder.if_match(IfMatchCondition::NotMatch(etag.to_string()))
         }
 
