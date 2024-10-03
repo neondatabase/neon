@@ -11,7 +11,7 @@ use crate::auth::backend::{
     ComputeCredentialKeys, ComputeCredentials, ComputeUserInfo, MaybeOwned, TestBackend,
 };
 use crate::config::{CertResolver, RetryConfig};
-use crate::control_plane::messages::{ConsoleError, Details, MetricsAuxInfo, Status};
+use crate::control_plane::messages::{ControlPlaneError, Details, MetricsAuxInfo, Status};
 use crate::control_plane::provider::{
     CachedAllowedIps, CachedRoleSecret, ControlPlaneBackend, NodeInfoCache,
 };
@@ -492,7 +492,7 @@ impl TestBackend for TestConnectMechanism {
         match action {
             ConnectAction::Wake => Ok(helper_create_cached_node_info(self.cache)),
             ConnectAction::WakeFail => {
-                let err = control_plane::errors::ApiError::Console(ConsoleError {
+                let err = control_plane::errors::ApiError::ControlPlane(ControlPlaneError {
                     http_status_code: StatusCode::BAD_REQUEST,
                     error: "TEST".into(),
                     status: None,
@@ -501,7 +501,7 @@ impl TestBackend for TestConnectMechanism {
                 Err(control_plane::errors::WakeComputeError::ApiError(err))
             }
             ConnectAction::WakeRetry => {
-                let err = control_plane::errors::ApiError::Console(ConsoleError {
+                let err = control_plane::errors::ApiError::ControlPlane(ControlPlaneError {
                     http_status_code: StatusCode::BAD_REQUEST,
                     error: "TEST".into(),
                     status: Some(Status {

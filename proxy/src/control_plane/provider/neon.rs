@@ -1,7 +1,7 @@
 //! Production console backend.
 
 use super::{
-    super::messages::{ConsoleError, GetRoleSecret, WakeCompute},
+    super::messages::{ControlPlaneError, GetRoleSecret, WakeCompute},
     errors::{ApiError, GetAuthInfoError, WakeComputeError},
     ApiCaches, ApiLocks, AuthInfo, AuthSecret, CachedAllowedIps, CachedNodeInfo, CachedRoleSecret,
     NodeInfo,
@@ -348,7 +348,7 @@ impl super::Api for Api {
                     let (cached, info) = cached.take_value();
                     let info = info.map_err(|c| {
                         info!(key = &*key, "found cached wake_compute error");
-                        WakeComputeError::ApiError(ApiError::Console(*c))
+                        WakeComputeError::ApiError(ApiError::ControlPlane(*c))
                     })?;
 
                     debug!(key = &*key, "found cached compute node info");
@@ -395,9 +395,9 @@ impl super::Api for Api {
                 Ok(cached.map(|()| node))
             }
             Err(err) => match err {
-                WakeComputeError::ApiError(ApiError::Console(err)) => {
+                WakeComputeError::ApiError(ApiError::ControlPlane(err)) => {
                     let Some(status) = &err.status else {
-                        return Err(WakeComputeError::ApiError(ApiError::Console(err)));
+                        return Err(WakeComputeError::ApiError(ApiError::ControlPlane(err)));
                     };
 
                     let reason = status
@@ -407,7 +407,7 @@ impl super::Api for Api {
 
                     // if we can retry this error, do not cache it.
                     if reason.can_retry() {
-                        return Err(WakeComputeError::ApiError(ApiError::Console(err)));
+                        return Err(WakeComputeError::ApiError(ApiError::ControlPlane(err)));
                     }
 
                     // at this point, we should only have quota errors.
@@ -422,7 +422,7 @@ impl super::Api for Api {
                         Duration::from_secs(30),
                     );
 
-                    Err(WakeComputeError::ApiError(ApiError::Console(err)))
+                    Err(WakeComputeError::ApiError(ApiError::ControlPlane(err)))
                 }
                 err => return Err(err),
             },
@@ -448,7 +448,7 @@ async fn parse_body<T: for<'a> serde::Deserialize<'a>>(
     // as the fact that the request itself has failed.
     let mut body = serde_json::from_slice(&s).unwrap_or_else(|e| {
         warn!("failed to parse error body: {e}");
-        ConsoleError {
+        ControlPlaneError {
             error: "reason unclear (malformed error message)".into(),
             http_status_code: status,
             status: None,
@@ -457,7 +457,7 @@ async fn parse_body<T: for<'a> serde::Deserialize<'a>>(
     body.http_status_code = status;
 
     error!("console responded with an error ({status}): {body:?}");
-    Err(ApiError::Console(body))
+    Err(ApiError::ControlPlane(body))
 }
 
 fn parse_host_port(input: &str) -> Option<(&str, u16)> {
