@@ -9,7 +9,7 @@ use measured::{
     text::TextEncoder,
     LabelGroup, MetricGroup,
 };
-use tikv_jemalloc_ctl::{config, epoch, epoch_mib, stats, version};
+use tikv_jemalloc_ctl::{config, epoch, epoch_mib, stats, version, Access, AsName, Name};
 
 pub struct MetricRecorder {
     epoch: epoch_mib,
@@ -114,3 +114,8 @@ jemalloc_gauge!(mapped, mapped_mib);
 jemalloc_gauge!(metadata, metadata_mib);
 jemalloc_gauge!(resident, resident_mib);
 jemalloc_gauge!(retained, retained_mib);
+
+pub fn disable_thp() -> Result<(), tikv_jemalloc_ctl::Error> {
+    let opt_thp: &Name = "opt.thp".name();
+    opt_thp.write("never")
+}
