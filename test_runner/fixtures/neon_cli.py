@@ -144,9 +144,31 @@ class AbstractNeonCli(abc.ABC):
 
 
 class NeonLocalCli(AbstractNeonCli):
-    """
-    A typed wrapper around the `neon_local` CLI tool.
+    """A typed wrapper around the `neon_local` CLI tool.
     Supports main commands via typed methods and a way to run arbitrary command directly via CLI.
+
+    Note: The methods in this class are supposed to be faithful wrappers of the underlying
+    'neon_local' commands. If you're tempted to add any logic here, please consider putting it
+    in the caller instead!
+
+    There are a few exceptions where these wrapper methods intentionally differ from the
+    underlying commands, however:
+    - Many 'neon_local' commands take an optional 'tenant_id' argument and use the default from
+      the config file if it's omitted. The corresponding wrappers require an explicit 'tenant_id'
+      argument. The idea is that we don't want to rely on the config file's default in tests,
+      because NeonEnv has its own 'initial_tenant'. They are currently always the same, but we
+      want to rely on the Neonenv's default instead of the config file default in tests.
+
+    - Similarly, --pg_version argument is always required in the wrappers, even when it's
+      optional in the 'neon_local' command. The default in 'neon_local' is a specific
+      hardcoded version, but in tests, we never want to accidentally rely on that;, we
+      always want to use the version from the test fixtures.
+
+    - Wrappers for commands that create a new tenant or timeline ID require the new tenant
+      or timeline ID to be passed by the caller, while the 'neon_local' commands will
+      generate a random ID if it's not specified. This is because we don't want to have to
+      parse the ID from the 'neon_local' output. Making it required ensures that the
+      caller has to generate it.
     """
 
     COMMAND = "neon_local"
