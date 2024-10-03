@@ -566,10 +566,7 @@ impl TenantShard {
     ) -> Result<(), ScheduleError> {
         let r = self.do_schedule(scheduler, context);
 
-        context.avoid(&self.intent.all_pageservers());
-        if let Some(attached) = self.intent.get_attached() {
-            context.push_attached(*attached);
-        }
+        self.populate_context(context);
 
         r
     }
@@ -674,6 +671,19 @@ impl TenantShard {
         }
 
         Ok(())
+    }
+
+    /// When building the ScheduleContext of a tenant, call this on each shard to
+    /// add its contribution to the context.
+    pub(crate) fn populate_context(&self, context: &mut ScheduleContext) {
+        context.avoid(&self.intent.all_pageservers());
+
+        if let Some(attached) = self.intent.get_attached() {
+            context.push_attached(*attached);
+        }
+        for secondary in self.intent.get_secondary() {
+            context.push_secondary(*secondary);
+        }
     }
 
     /// Reschedule this tenant shard to one of its secondary locations. Returns a scheduling error
@@ -1632,10 +1642,8 @@ pub(crate) mod tests {
         shard_b.intent.push_secondary(&mut scheduler, NodeId(3));
 
         let mut schedule_context = ScheduleContext::default();
-        schedule_context.avoid(&shard_a.intent.all_pageservers());
-        schedule_context.push_attached(shard_a.intent.get_attached().unwrap());
-        schedule_context.avoid(&shard_b.intent.all_pageservers());
-        schedule_context.push_attached(shard_b.intent.get_attached().unwrap());
+        shard_a.populate_context(&mut schedule_context);
+        shard_b.populate_context(&mut schedule_context);
 
         let optimization_a = shard_a.optimize_attachment(&nodes, &schedule_context);
 
@@ -1699,10 +1707,8 @@ pub(crate) mod tests {
         shard_b.intent.push_secondary(&mut scheduler, NodeId(3));
 
         let mut schedule_context = ScheduleContext::default();
-        schedule_context.avoid(&shard_a.intent.all_pageservers());
-        schedule_context.push_attached(shard_a.intent.get_attached().unwrap());
-        schedule_context.avoid(&shard_b.intent.all_pageservers());
-        schedule_context.push_attached(shard_b.intent.get_attached().unwrap());
+        shard_a.populate_context(&mut schedule_context);
+        shard_b.populate_context(&mut schedule_context);
 
         let optimization_a = shard_a.optimize_secondary(&mut scheduler, &schedule_context);
 
@@ -1744,10 +1750,7 @@ pub(crate) mod tests {
             let mut any_changed = false;
 
             for shard in shards.iter() {
-                schedule_context.avoid(&shard.intent.all_pageservers());
-                if let Some(attached) = shard.intent.get_attached() {
-                    schedule_context.push_attached(*attached);
-                }
+                shard.populate_context(&mut schedule_context);
             }
 
             for shard in shards.iter_mut() {

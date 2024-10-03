@@ -5858,10 +5858,7 @@ impl Service {
 
             // Accumulate the schedule context for all the shards in a tenant: we must have
             // the total view of all shards before we can try to optimize any of them.
-            schedule_context.avoid(&shard.intent.all_pageservers());
-            if let Some(attached) = shard.intent.get_attached() {
-                schedule_context.push_attached(*attached);
-            }
+            shard.populate_context(&mut schedule_context);
             tenant_shards.push(shard);
 
             // Once we have seen the last shard in the tenant, proceed to search across all shards

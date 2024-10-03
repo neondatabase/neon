@@ -206,6 +206,10 @@ pub(crate) struct NodeSecondarySchedulingScore {
     /// The number of shards belonging to the tenant currently being
     /// scheduled that are attached to this node.
     affinity_score: AffinityScore,
+    /// Size of [`ScheduleContext::attached_nodes`] for the current node.
+    /// This normally tracks the number of attached shards belonging to the
+    /// tenant being scheduled that are already on this node.
+    secondary_shards_in_context: usize,
     /// Utilisation score that combines shard count and disk utilisation
     utilization_score: u64,
     /// Total number of shards attached to this node. When nodes have identical utilisation, this
@@ -231,6 +235,7 @@ impl NodeSchedulingScore for NodeSecondarySchedulingScore {
 
         Some(Self {
             az_match: SecondaryAzMatch(AzMatch::new(&node.az, preferred_az.as_ref())),
+            secondary_shards_in_context: context.secondary_nodes.get(node_id).copied().unwrap_or(0),
             affinity_score: context
                 .nodes
                 .get(node_id)
@@ -327,6 +332,9 @@ pub(crate) struct ScheduleContext {
     /// Specifically how many _attached_ locations are on each node
     pub(crate) attached_nodes: HashMap<NodeId, usize>,
 
+    /// Specifically how many _secondary_ locations are on each node
+    pub(crate) secondary_nodes: HashMap<NodeId, usize>,
+
     pub(crate) mode: ScheduleMode,
 }
 
@@ -342,6 +350,11 @@ impl ScheduleContext {
 
     pub(crate) fn push_attached(&mut self, node_id: NodeId) {
         let entry = self.attached_nodes.entry(node_id).or_default();
+        *entry += 1;
+    }
+
+    pub(crate) fn push_secondary(&mut self, node_id: NodeId) {
+        let entry = self.secondary_nodes.entry(node_id).or_default();
         *entry += 1;
     }
 
@@ -786,7 +799,14 @@ pub(crate) mod test_utils {
 
 #[cfg(test)]
 mod tests {
-    use pageserver_api::{controller_api::NodeAvailability, models::utilization::test_utilization};
+    use pageserver_api::{
+        controller_api::NodeAvailability, models::utilization::test_utilization,
+        shard::ShardIdentity, shard::TenantShardId,
+    };
+    use utils::{
+        id::TenantId,
+        shard::{ShardCount, ShardNumber},
+    };
 
     use super::*;
 
@@ -1072,6 +1092,173 @@ mod tests {
 
         for mut intent in scheduled_intents {
             intent.clear(&mut scheduler);
+        }
+    }
+
+    #[test]
+    fn repro_foo() {
+        let az_tag = AvailabilityZone("az-a".to_string());
+
+        let nodes = test_utils::make_test_nodes(
+            5,
+            &[
+                az_tag.clone(),
+                az_tag.clone(),
+                az_tag.clone(),
+                az_tag.clone(),
+                az_tag.clone(),
+            ],
+        );
+        let mut scheduler = Scheduler::new(nodes.values());
+
+        // Need to keep these alive because they contribute to shard counts via RAII
+        let mut scheduled_shards = Vec::new();
+
+        let mut context = ScheduleContext::default();
+
+        fn schedule_shard(
+            tenant_shard_id: TenantShardId,
+            expect_attached: NodeId,
+            expect_secondary: NodeId,
+            scheduled_shards: &mut Vec<TenantShard>,
+            scheduler: &mut Scheduler,
+            context: &mut ScheduleContext,
+        ) {
+            let shard_identity = ShardIdentity::new(
+                tenant_shard_id.shard_number,
+                tenant_shard_id.shard_count,
+                pageserver_api::shard::ShardStripeSize(1),
+            )
+            .unwrap();
+            let mut shard = TenantShard::new(
+                tenant_shard_id,
+                shard_identity,
+                pageserver_api::controller_api::PlacementPolicy::Attached(1),
+            );
+
+            shard.schedule(scheduler, context).unwrap();
+
+            assert_eq!(shard.intent.get_attached().unwrap(), expect_attached);
+            assert_eq!(
+                shard.intent.get_secondary().first().unwrap(),
+                &expect_secondary
+            );
+
+            scheduled_shards.push(shard);
+        }
+
+        let tenant_id = TenantId::generate();
+
+        schedule_shard(
+            TenantShardId {
+                tenant_id,
+                shard_number: ShardNumber(0),
+                shard_count: ShardCount(8),
+            },
+            NodeId(1),
+            NodeId(2),
+            &mut scheduled_shards,
+            &mut scheduler,
+            &mut context,
+        );
+
+        schedule_shard(
+            TenantShardId {
+                tenant_id,
+                shard_number: ShardNumber(1),
+                shard_count: ShardCount(8),
+            },
+            NodeId(3),
+            NodeId(4),
+            &mut scheduled_shards,
+            &mut scheduler,
+            &mut context,
+        );
+
+        schedule_shard(
+            TenantShardId {
+                tenant_id,
+                shard_number: ShardNumber(2),
+                shard_count: ShardCount(8),
+            },
+            NodeId(5),
+            NodeId(1),
+            &mut scheduled_shards,
+            &mut scheduler,
+            &mut context,
+        );
+
+        schedule_shard(
+            TenantShardId {
+                tenant_id,
+                shard_number: ShardNumber(3),
+                shard_count: ShardCount(8),
+            },
+            NodeId(2),
+            NodeId(3),
+            &mut scheduled_shards,
+            &mut scheduler,
+            &mut context,
+        );
+
+        schedule_shard(
+            TenantShardId {
+                tenant_id,
+                shard_number: ShardNumber(4),
+                shard_count: ShardCount(8),
+            },
+            NodeId(4),
+            NodeId(5),
+            &mut scheduled_shards,
+            &mut scheduler,
+            &mut context,
+        );
+
+        schedule_shard(
+            TenantShardId {
+                tenant_id,
+                shard_number: ShardNumber(5),
+                shard_count: ShardCount(8),
+            },
+            NodeId(1),
+            NodeId(2),
+            &mut scheduled_shards,
+            &mut scheduler,
+            &mut context,
+        );
+
+        schedule_shard(
+            TenantShardId {
+                tenant_id,
+                shard_number: ShardNumber(6),
+                shard_count: ShardCount(8),
+            },
+            NodeId(3),
+            NodeId(4),
+            &mut scheduled_shards,
+            &mut scheduler,
+            &mut context,
+        );
+
+        schedule_shard(
+            TenantShardId {
+                tenant_id,
+                shard_number: ShardNumber(7),
+                shard_count: ShardCount(8),
+            },
+            NodeId(5),
+            NodeId(1),
+            &mut scheduled_shards,
+            &mut scheduler,
+            &mut context,
+        );
+
+        for shard in &scheduled_shards {
+            assert_eq!(shard.optimize_attachment(&nodes, &context), None);
+        }
+
+        for mut shard in scheduled_shards {
+            shard.intent.clear(&mut scheduler);
         }
     }
 }
