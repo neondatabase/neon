@@ -17,7 +17,7 @@ def reconfigure_endpoint(endpoint: Endpoint, pageserver_id: int, use_explicit_re
     # to make sure that PG-initiated config refresh doesn't mess things up by reverting to the old config.
     endpoint.update_pageservers_in_config(pageserver_id=pageserver_id)
 
-    # PG will eventually automatically refresh its configuration if it detects connectivity issues with pageservers.
+    # PG will automatically refresh its configuration if it detects connectivity issues with pageservers.
     # We also allow the test to explicitly request a reconfigure so that the test can be sure that the
     # endpoint is running with the latest configuration.
     #

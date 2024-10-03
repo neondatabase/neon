@@ -4936,9 +4936,19 @@ class Endpoint(PgProtocol, LogUtils):
         # in the following commands.
         if safekeepers is not None:
             self.active_safekeepers = safekeepers
-        self.env.neon_cli.endpoint_reconfigure(
-            self.endpoint_id, self.tenant_id, pageserver_id, self.active_safekeepers
-        )
+
+        start_time = time.time()
+        while True:
+            try:
+                self.env.neon_cli.endpoint_reconfigure(
+                    self.endpoint_id, self.tenant_id, pageserver_id, self.active_safekeepers
+                )
+                return
+            except RuntimeError as e:
+                if time.time() - start_time > 120:
+                    raise e
+                log.warning(f"Reconfigure failed with error: {e}. Retrying...")
+                time.sleep(5)
 
     def refresh_configuration(self):
         assert self.endpoint_id is not None
