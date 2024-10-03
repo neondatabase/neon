@@ -27,7 +27,7 @@ def test_neon_cli_basics(neon_env_builder: NeonEnvBuilder, port_distributor: Por
         env.neon_cli.endpoint_start("ep-basic-main")
 
         branch_name = "migration-check"
-        env.neon_cli.create_branch(
+        env.neon_cli.timeline_branch(
             tenant_id=env.initial_tenant,
             timeline_id=TimelineId.generate(),
             new_branch_name=branch_name,

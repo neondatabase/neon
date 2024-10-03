@@ -1681,7 +1681,7 @@ def test_tenant_import(neon_env_builder: NeonEnvBuilder, shard_count, remote_sto
     )
 
     # Now import it again
-    env.neon_cli.import_tenant(tenant_id)
+    env.neon_cli.tenant_import(tenant_id)
 
     # Check we found the shards
     describe = env.storage_controller.tenant_describe(tenant_id)

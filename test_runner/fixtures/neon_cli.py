@@ -170,7 +170,7 @@ class NeonLocalCli(AbstractNeonCli):
     def raw_cli(self, *args, **kwargs) -> subprocess.CompletedProcess[str]:
         return super().raw_cli(*args, **kwargs)
 
-    def create_tenant(
+    def tenant_create(
         self,
         tenant_id: TenantId,
         timeline_id: TimelineId,
@@ -224,19 +224,19 @@ class NeonLocalCli(AbstractNeonCli):
         res = self.raw_cli(args)
         res.check_returncode()
 
-    def import_tenant(self, tenant_id: TenantId):
+    def tenant_import(self, tenant_id: TenantId):
         args = ["tenant", "import", "--tenant-id", str(tenant_id)]
         res = self.raw_cli(args)
         res.check_returncode()
 
-    def set_default(self, tenant_id: TenantId):
+    def tenant_set_default(self, tenant_id: TenantId):
         """
         Update default tenant for future operations that require tenant_id.
         """
         res = self.raw_cli(["tenant", "set-default", "--tenant-id", str(tenant_id)])
         res.check_returncode()
 
-    def config_tenant(self, tenant_id: TenantId, conf: Dict[str, str]):
+    def tenant_config(self, tenant_id: TenantId, conf: Dict[str, str]):
         """
         Update tenant config.
         """
@@ -252,12 +252,12 @@ class NeonLocalCli(AbstractNeonCli):
         res = self.raw_cli(args)
         res.check_returncode()
 
-    def list_tenants(self) -> "subprocess.CompletedProcess[str]":
+    def tenant_list(self) -> "subprocess.CompletedProcess[str]":
         res = self.raw_cli(["tenant", "list"])
         res.check_returncode()
         return res
 
-    def create_timeline(
+    def timeline_create(
         self,
         new_branch_name: str,
         tenant_id: TenantId,
@@ -285,7 +285,7 @@ class NeonLocalCli(AbstractNeonCli):
 
         return timeline_id
 
-    def create_branch(
+    def timeline_branch(
         self,
         tenant_id: TenantId,
         timeline_id: TimelineId,
@@ -346,7 +346,7 @@ class NeonLocalCli(AbstractNeonCli):
         res = self.raw_cli(cmd)
         res.check_returncode()
 
-    def list_timelines(self, tenant_id: TenantId) -> List[Tuple[str, TimelineId]]:
+    def timeline_list(self, tenant_id: TenantId) -> List[Tuple[str, TimelineId]]:
         """
         Returns a list of (branch_name, timeline_id) tuples out of parsed `neon timeline list` CLI output.
         """
@@ -455,7 +455,7 @@ class NeonLocalCli(AbstractNeonCli):
             args.extend(["-m", "immediate"])
         return self.raw_cli(args)
 
-    def broker_start(
+    def storage_broker_start(
         self, timeout_in_seconds: Optional[int] = None
     ) -> "subprocess.CompletedProcess[str]":
         cmd = ["storage_broker", "start"]
@@ -463,7 +463,7 @@ class NeonLocalCli(AbstractNeonCli):
             cmd.append(f"--start-timeout={timeout_in_seconds}s")
         return self.raw_cli(cmd)
 
-    def broker_stop(self) -> "subprocess.CompletedProcess[str]":
+    def storage_broker_stop(self) -> "subprocess.CompletedProcess[str]":
         cmd = ["storage_broker", "stop"]
         return self.raw_cli(cmd)
 
@@ -578,7 +578,7 @@ class NeonLocalCli(AbstractNeonCli):
 
         return self.raw_cli(args, check_return_code=check_return_code)
 
-    def map_branch(
+    def mappings_map_branch(
         self, name: str, tenant_id: TenantId, timeline_id: TimelineId
     ) -> "subprocess.CompletedProcess[str]":
         """

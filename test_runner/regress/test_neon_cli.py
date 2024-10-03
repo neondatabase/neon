@@ -31,7 +31,7 @@ def helper_compare_timeline_list(
         )
     )
 
-    timelines_cli = env.neon_cli.list_timelines(initial_tenant)
+    timelines_cli = env.neon_cli.timeline_list(initial_tenant)
     cli_timeline_ids = sorted([timeline_id for (_, timeline_id) in timelines_cli])
     assert timelines_api == cli_timeline_ids
 
@@ -55,8 +55,7 @@ def test_cli_timeline_list(neon_simple_env: NeonEnv):
 
     # Check that all new branches are visible via CLI
     timelines_cli = [
-        timeline_id
-        for (_, timeline_id) in env.neon_cli.list_timelines(tenant_id=env.initial_tenant)
+        timeline_id for (_, timeline_id) in env.neon_cli.timeline_list(env.initial_tenant)
     ]
 
     assert main_timeline_id in timelines_cli
@@ -67,7 +66,7 @@ def helper_compare_tenant_list(pageserver_http_client: PageserverHttpClient, env
     tenants = pageserver_http_client.tenant_list()
     tenants_api = sorted(map(lambda t: cast(str, t["id"]), tenants))
 
-    res = env.neon_cli.list_tenants()
+    res = env.neon_cli.tenant_list()
     tenants_cli = sorted(map(lambda t: t.split()[0], res.stdout.splitlines()))
 
     assert tenants_api == tenants_cli
@@ -91,7 +90,7 @@ def test_cli_tenant_list(neon_simple_env: NeonEnv):
     # check tenant2 appeared
     helper_compare_tenant_list(pageserver_http_client, env)
 
-    res = env.neon_cli.list_tenants()
+    res = env.neon_cli.tenant_list()
     tenants = sorted(map(lambda t: TenantId(t.split()[0]), res.stdout.splitlines()))
 
     assert env.initial_tenant in tenants
@@ -102,7 +101,7 @@ def test_cli_tenant_list(neon_simple_env: NeonEnv):
 def test_cli_tenant_create(neon_simple_env: NeonEnv):
     env = neon_simple_env
     tenant_id, _ = env.create_tenant()
-    timelines = env.neon_cli.list_timelines(tenant_id)
+    timelines = env.neon_cli.timeline_list(tenant_id)
 
     # an initial timeline should be created upon tenant creation
     assert len(timelines) == 1
@@ -135,7 +134,7 @@ def test_cli_start_stop(neon_env_builder: NeonEnvBuilder):
     env.neon_cli.pageserver_stop(env.pageserver.id)
     env.neon_cli.safekeeper_stop()
     env.neon_cli.storage_controller_stop(False)
-    env.neon_cli.broker_stop()
+    env.neon_cli.storage_broker_stop()
 
     # Keep NeonEnv state up to date, it usually owns starting/stopping services
     env.pageserver.running = False
@@ -178,7 +177,7 @@ def test_cli_start_stop_multi(neon_env_builder: NeonEnvBuilder):
 
     # Stop this to get out of the way of the following `start`
     env.neon_cli.storage_controller_stop(False)
-    env.neon_cli.broker_stop()
+    env.neon_cli.storage_broker_stop()
 
     # Default start
     res = env.neon_cli.raw_cli(["start"])

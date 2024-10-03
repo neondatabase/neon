@@ -32,7 +32,7 @@ from prometheus_client.samples import Sample
 def test_tenant_creation_fails(neon_simple_env: NeonEnv):
     tenants_dir = neon_simple_env.pageserver.tenant_dir()
     initial_tenants = sorted(
-        map(lambda t: t.split()[0], neon_simple_env.neon_cli.list_tenants().stdout.splitlines())
+        map(lambda t: t.split()[0], neon_simple_env.neon_cli.tenant_list().stdout.splitlines())
     )
     [d for d in tenants_dir.iterdir()]
 
@@ -59,7 +59,7 @@ def test_tenant_creation_fails(neon_simple_env: NeonEnv):
     # an empty tenant dir with no config in it.
     neon_simple_env.pageserver.allowed_errors.append(".*Failed to load tenant config.*")
     new_tenants = sorted(
-        map(lambda t: t.split()[0], neon_simple_env.neon_cli.list_tenants().stdout.splitlines())
+        map(lambda t: t.split()[0], neon_simple_env.neon_cli.tenant_list().stdout.splitlines())
     )
     assert initial_tenants == new_tenants, "should not create new tenants"
 

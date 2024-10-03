@@ -1344,7 +1344,7 @@ class NeonEnv:
         tenant_id = tenant_id or TenantId.generate()
         timeline_id = timeline_id or TimelineId.generate()
 
-        self.neon_cli.create_tenant(
+        self.neon_cli.tenant_create(
             tenant_id=tenant_id,
             timeline_id=timeline_id,
             pg_version=self.pg_version,
@@ -1363,7 +1363,7 @@ class NeonEnv:
         Update tenant config.
         """
         tenant_id = tenant_id or self.initial_tenant
-        self.neon_cli.config_tenant(tenant_id, conf)
+        self.neon_cli.tenant_config(tenant_id, conf)
 
     def create_branch(
         self,
@@ -1376,7 +1376,7 @@ class NeonEnv:
         new_timeline_id = new_timeline_id or TimelineId.generate()
         tenant_id = tenant_id or self.initial_tenant
 
-        self.neon_cli.create_branch(
+        self.neon_cli.timeline_branch(
             tenant_id, new_timeline_id, new_branch_name, ancestor_branch_name, ancestor_start_lsn
         )
 
@@ -1391,7 +1391,7 @@ class NeonEnv:
         timeline_id = timeline_id or TimelineId.generate()
         tenant_id = tenant_id or self.initial_tenant
 
-        self.neon_cli.create_timeline(new_branch_name, tenant_id, timeline_id, self.pg_version)
+        self.neon_cli.timeline_create(new_branch_name, tenant_id, timeline_id, self.pg_version)
 
         return timeline_id
 
@@ -4049,7 +4049,7 @@ class Safekeeper(LogUtils):
         1) wait for remote_consistent_lsn and wal_backup_lsn on safekeeper to reach it.
         2) checkpoint timeline on safekeeper, which should remove WAL before this LSN; optionally wait for that.
         """
-        cli = self.http_client()
+        client = self.http_client()
 
         target_segment_file = lsn.segment_name()
 
@@ -4061,7 +4061,7 @@ class Safekeeper(LogUtils):
             assert all(target_segment_file <= s for s in segments)
 
         def are_lsns_advanced():
-            stat = cli.timeline_status(tenant_id, timeline_id)
+            stat = client.timeline_status(tenant_id, timeline_id)
             log.info(
                 f"waiting for remote_consistent_lsn and backup_lsn on sk {self.id} to reach {lsn}, currently remote_consistent_lsn={stat.remote_consistent_lsn}, backup_lsn={stat.backup_lsn}"
             )
@@ -4070,7 +4070,7 @@ class Safekeeper(LogUtils):
         # xxx: max wait is long because we might be waiting for reconnection from
         # pageserver to this safekeeper
         wait_until(30, 1, are_lsns_advanced)
-        cli.checkpoint(tenant_id, timeline_id)
+        client.checkpoint(tenant_id, timeline_id)
         if wait_wal_removal:
             wait_until(30, 1, are_segments_removed)
 
@@ -4098,13 +4098,13 @@ class NeonBroker(LogUtils):
         timeout_in_seconds: Optional[int] = None,
     ):
         assert not self.running
-        self.env.neon_cli.broker_start(timeout_in_seconds)
+        self.env.neon_cli.storage_broker_start(timeout_in_seconds)
         self.running = True
         return self
 
     def stop(self):
         if self.running:
-            self.env.neon_cli.broker_stop()
+            self.env.neon_cli.storage_broker_stop()
             self.running = False
         return self
 
@@ -4733,10 +4733,10 @@ def flush_ep_to_pageserver(
     commit_lsn: Lsn = Lsn(0)
     # In principle in the absense of failures polling single sk would be enough.
     for sk in env.safekeepers:
-        cli = sk.http_client()
+        client = sk.http_client()
         # wait until compute connections are gone
-        wait_walreceivers_absent(cli, tenant, timeline)
-        commit_lsn = max(cli.get_commit_lsn(tenant, timeline), commit_lsn)
+        wait_walreceivers_absent(client, tenant, timeline)
+        commit_lsn = max(client.get_commit_lsn(tenant, timeline), commit_lsn)
 
     # Note: depending on WAL filtering implementation, probably most shards
     # won't be able to reach commit_lsn (unless gaps are also ack'ed), so this

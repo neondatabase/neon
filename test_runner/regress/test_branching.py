@@ -173,7 +173,7 @@ def test_cannot_create_endpoint_on_non_uploaded_timeline(neon_env_builder: NeonE
 
         wait_until_paused(env, "before-upload-index-pausable")
 
-        env.neon_cli.map_branch(initial_branch, env.initial_tenant, env.initial_timeline)
+        env.neon_cli.mappings_map_branch(initial_branch, env.initial_tenant, env.initial_timeline)
 
         with pytest.raises(RuntimeError, match="ERROR: Not found: Timeline"):
             env.endpoints.create_start(
