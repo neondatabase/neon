@@ -258,7 +258,7 @@ impl S3Bucket {
             .set_range(request.range);
 
         if let Some(etag) = request.etag {
-            builder = builder.if_none_match(etag.to_string());
+            builder = builder.if_none_match(etag);
         }
 
         let get_object = builder.send();
@@ -285,8 +285,12 @@ impl S3Bucket {
                 return Err(DownloadError::NotFound);
             }
             Err(SdkError::ServiceError(e))
+                // aws_smithy_runtime_api::http::response::StatusCode isn't
+                // re-exported by any aws crates, so just check the numeric
+                // status against http_types::StatusCode instead of pulling it.
                 if e.raw().status().as_u16() == StatusCode::NotModified =>
             {
+                // Count an unmodified heatmap as a success.
                 crate::metrics::BUCKET_METRICS.req_seconds.observe_elapsed(
                     kind,
                     AttemptOutcome::Ok,
