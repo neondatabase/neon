@@ -239,7 +239,6 @@ impl AuthenticationConfig {
     pub(crate) fn check_rate_limit(
         &self,
         ctx: &RequestMonitoring,
-        config: &AuthenticationConfig,
         secret: AuthSecret,
         endpoint: &EndpointId,
         is_cleartext: bool,
@@ -263,7 +262,7 @@ impl AuthenticationConfig {
         let limit_not_exceeded = self.rate_limiter.check(
             (
                 endpoint_int,
-                MaskedIp::new(ctx.peer_addr(), config.rate_limit_ip_subnet),
+                MaskedIp::new(ctx.peer_addr(), self.rate_limit_ip_subnet),
             ),
             password_weight,
         );
@@ -337,7 +336,6 @@ async fn auth_quirks(
     let secret = if let Some(secret) = secret {
         config.check_rate_limit(
             ctx,
-            config,
             secret,
             &info.endpoint,
             unauthenticated_password.is_some() || allow_cleartext,
