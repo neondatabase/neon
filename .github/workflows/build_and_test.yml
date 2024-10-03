@@ -341,7 +341,7 @@ jobs:
           PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
           TEST_RESULT_CONNSTR: "${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}"
           PAGESERVER_VIRTUAL_FILE_IO_ENGINE: tokio-epoll-uring
-          SYNC_AFTER_EACH_TEST: true
+          SYNC_BETWEEN_TESTS: true
       # XXX: no coverage data handling here, since benchmarks are run on release builds,
       # while coverage is currently collected for the debug ones
 
@@ -773,7 +773,7 @@ jobs:
       matrix:
         version: [ v14, v15, v16, v17 ]
     env:
-      VM_BUILDER_VERSION: v0.29.3
+      VM_BUILDER_VERSION: v0.35.0
 
     steps:
       - uses: actions/checkout@v4
@@ -1190,10 +1190,9 @@ jobs:
 
               files_to_promote+=("s3://${BUCKET}/${s3_key}")
 
-              # TODO Add v17
-              for pg_version in v14 v15 v16; do
+              for pg_version in v14 v15 v16 v17; do
                 # We run less tests for debug builds, so we don't need to promote them
-                if [ "${build_type}" == "debug" ] && { [ "${arch}" == "ARM64" ] || [ "${pg_version}" != "v16" ] ; }; then
+                if [ "${build_type}" == "debug" ] && { [ "${arch}" == "ARM64" ] || [ "${pg_version}" != "v17" ] ; }; then
                   continue
                 fi
 

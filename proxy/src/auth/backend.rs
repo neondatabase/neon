@@ -80,6 +80,14 @@ pub(crate) trait TestBackend: Send + Sync + 'static {
     fn get_allowed_ips_and_secret(
         &self,
     ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), console::errors::GetAuthInfoError>;
+    fn dyn_clone(&self) -> Box<dyn TestBackend>;
+}
+
+#[cfg(test)]
+impl Clone for Box<dyn TestBackend> {
+    fn clone(&self) -> Self {
+        TestBackend::dyn_clone(&**self)
+    }
 }
 
 impl std::fmt::Display for Backend<'_, (), ()> {
@@ -557,7 +565,7 @@ mod tests {
         stream::{PqStream, Stream},
     };
 
-    use super::{auth_quirks, AuthRateLimiter};
+    use super::{auth_quirks, jwt::JwkCache, AuthRateLimiter};
 
     struct Auth {
         ips: Vec<IpPattern>,
@@ -585,6 +593,14 @@ mod tests {
             ))
         }
 
+        async fn get_endpoint_jwks(
+            &self,
+            _ctx: &RequestMonitoring,
+            _endpoint: crate::EndpointId,
+        ) -> anyhow::Result<Vec<super::jwt::AuthRule>> {
+            unimplemented!()
+        }
+
         async fn wake_compute(
             &self,
             _ctx: &RequestMonitoring,
@@ -595,12 +611,16 @@ mod tests {
     }
 
     static CONFIG: Lazy<AuthenticationConfig> = Lazy::new(|| AuthenticationConfig {
+        jwks_cache: JwkCache::default(),
         thread_pool: ThreadPool::new(1),
         scram_protocol_timeout: std::time::Duration::from_secs(5),
         rate_limiter_enabled: true,
         rate_limiter: AuthRateLimiter::new(&RateBucketInfo::DEFAULT_AUTH_SET),
         rate_limit_ip_subnet: 64,
         ip_allowlist_check_enabled: true,
+        is_auth_broker: false,
+        accept_jwts: false,
+        webauth_confirmation_timeout: std::time::Duration::from_secs(5),
     });
 
     async fn read_message(r: &mut (impl AsyncRead + Unpin), b: &mut BytesMut) -> PgMessage {

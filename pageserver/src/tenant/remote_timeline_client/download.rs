@@ -178,6 +178,7 @@ async fn download_object<'a>(
                 destination_file
                     .flush()
                     .await
+                    .maybe_fatal_err("download_object sync_all")
                     .with_context(|| format!("flush source file at {dst_path}"))
                     .map_err(DownloadError::Other)?;
 
@@ -185,6 +186,7 @@ async fn download_object<'a>(
                 destination_file
                     .sync_all()
                     .await
+                    .maybe_fatal_err("download_object sync_all")
                     .with_context(|| format!("failed to fsync source file at {dst_path}"))
                     .map_err(DownloadError::Other)?;
 
@@ -232,6 +234,7 @@ async fn download_object<'a>(
                 destination_file
                     .sync_all()
                     .await
+                    .maybe_fatal_err("download_object sync_all")
                     .with_context(|| format!("failed to fsync source file at {dst_path}"))
                     .map_err(DownloadError::Other)?;
 

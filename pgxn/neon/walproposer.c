@@ -213,7 +213,7 @@ WalProposerPoll(WalProposer *wp)
 		rc = wp->api.wait_event_set(wp, timeout, &sk, &events);
 
 		/* Exit loop if latch is set (we got new WAL) */
-		if ((rc == 1 && events & WL_LATCH_SET))
+		if (rc == 1 && (events & WL_LATCH_SET))
 			break;
 
 		/*

@@ -8,6 +8,7 @@ use aws_config::web_identity_token::WebIdentityTokenCredentialsProvider;
 use aws_config::Region;
 use futures::future::Either;
 use proxy::auth;
+use proxy::auth::backend::jwt::JwkCache;
 use proxy::auth::backend::AuthRateLimiter;
 use proxy::auth::backend::MaybeOwned;
 use proxy::cancellation::CancelMap;
@@ -17,6 +18,7 @@ use proxy::config::AuthenticationConfig;
 use proxy::config::CacheOptions;
 use proxy::config::HttpConfig;
 use proxy::config::ProjectInfoCacheOptions;
+use proxy::config::ProxyProtocolV2;
 use proxy::console;
 use proxy::context::parquet::ParquetUploadArgs;
 use proxy::http;
@@ -102,6 +104,9 @@ struct ProxyCliArgs {
         default_value = "http://localhost:3000/authenticate_proxy_request/"
     )]
     auth_endpoint: String,
+    /// if this is not local proxy, this toggles whether we accept jwt or passwords for http
+    #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
+    is_auth_broker: bool,
     /// path to TLS key for client postgres connections
     ///
     /// tls-key and tls-cert are for backwards compatibility, we can put all certs in one dir
@@ -144,9 +149,6 @@ struct ProxyCliArgs {
     /// size of the threadpool for password hashing
     #[clap(long, default_value_t = 4)]
     scram_thread_pool_size: u8,
-    /// Require that all incoming requests have a Proxy Protocol V2 packet **and** have an IP address associated.
-    #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
-    require_client_ip: bool,
     /// Disable dynamic rate limiter and store the metrics to ensure its production behaviour.
     #[clap(long, default_value_t = true, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
     disable_dynamic_rate_limiter: bool,
@@ -229,6 +231,15 @@ struct ProxyCliArgs {
     /// Configure if this is a private access proxy for the POC: In that case the proxy will ignore the IP allowlist
     #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
     is_private_access_proxy: bool,
+
+    /// Configure whether all incoming requests have a Proxy Protocol V2 packet.
+    // TODO(conradludgate): switch default to rejected or required once we've updated all deployments
+    #[clap(value_enum, long, default_value_t = ProxyProtocolV2::Supported)]
+    proxy_protocol_v2: ProxyProtocolV2,
+
+    /// Time the proxy waits for the webauth session to be confirmed by the control plane.
+    #[clap(long, default_value = "2m", value_parser = humantime::parse_duration)]
+    webauth_confirmation_timeout: std::time::Duration,
 }
 
 #[derive(clap::Args, Clone, Copy, Debug)]
@@ -382,9 +393,27 @@ async fn main() -> anyhow::Result<()> {
     info!("Starting mgmt on {mgmt_address}");
     let mgmt_listener = TcpListener::bind(mgmt_address).await?;
 
-    let proxy_address: SocketAddr = args.proxy.parse()?;
-    info!("Starting proxy on {proxy_address}");
-    let proxy_listener = TcpListener::bind(proxy_address).await?;
+    let proxy_listener = if !args.is_auth_broker {
+        let proxy_address: SocketAddr = args.proxy.parse()?;
+        info!("Starting proxy on {proxy_address}");
+
+        Some(TcpListener::bind(proxy_address).await?)
+    } else {
+        None
+    };
+
+    // TODO: rename the argument to something like serverless.
+    // It now covers more than just websockets, it also covers SQL over HTTP.
+    let serverless_listener = if let Some(serverless_address) = args.wss {
+        let serverless_address: SocketAddr = serverless_address.parse()?;
+        info!("Starting wss on {serverless_address}");
+        Some(TcpListener::bind(serverless_address).await?)
+    } else if args.is_auth_broker {
+        bail!("wss arg must be present for auth-broker")
+    } else {
+        None
+    };
+
     let cancellation_token = CancellationToken::new();
 
     let cancel_map = CancelMap::default();
@@ -430,21 +459,17 @@ async fn main() -> anyhow::Result<()> {
     // client facing tasks. these will exit on error or on cancellation
     // cancellation returns Ok(())
     let mut client_tasks = JoinSet::new();
-    client_tasks.spawn(proxy::proxy::task_main(
-        config,
-        proxy_listener,
-        cancellation_token.clone(),
-        cancellation_handler.clone(),
-        endpoint_rate_limiter.clone(),
-    ));
+    if let Some(proxy_listener) = proxy_listener {
+        client_tasks.spawn(proxy::proxy::task_main(
+            config,
+            proxy_listener,
+            cancellation_token.clone(),
+            cancellation_handler.clone(),
+            endpoint_rate_limiter.clone(),
+        ));
+    }
 
-    // TODO: rename the argument to something like serverless.
-    // It now covers more than just websockets, it also covers SQL over HTTP.
-    if let Some(serverless_address) = args.wss {
-        let serverless_address: SocketAddr = serverless_address.parse()?;
-        info!("Starting wss on {serverless_address}");
-        let serverless_listener = TcpListener::bind(serverless_address).await?;
-
+    if let Some(serverless_listener) = serverless_listener {
         client_tasks.spawn(serverless::task_main(
             config,
             serverless_listener,
@@ -461,10 +486,7 @@ async fn main() -> anyhow::Result<()> {
 
     // maintenance tasks. these never return unless there's an error
     let mut maintenance_tasks = JoinSet::new();
-    maintenance_tasks.spawn(proxy::handle_signals(
-        cancellation_token.clone(),
-        || async { Ok(()) },
-    ));
+    maintenance_tasks.spawn(proxy::handle_signals(cancellation_token.clone(), || {}));
     maintenance_tasks.spawn(http::health_server::task_main(
         http_listener,
         AppMetrics {
@@ -677,7 +699,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
     )?;
 
     let http_config = HttpConfig {
-        accept_websockets: true,
+        accept_websockets: !args.is_auth_broker,
         pool_options: GlobalConnPoolOptions {
             max_conns_per_endpoint: args.sql_over_http.sql_over_http_pool_max_conns_per_endpoint,
             gc_epoch: args.sql_over_http.sql_over_http_pool_gc_epoch,
@@ -692,12 +714,16 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         max_response_size_bytes: args.sql_over_http.sql_over_http_max_response_size_bytes,
     };
     let authentication_config = AuthenticationConfig {
+        jwks_cache: JwkCache::default(),
         thread_pool,
         scram_protocol_timeout: args.scram_protocol_timeout,
         rate_limiter_enabled: args.auth_rate_limit_enabled,
         rate_limiter: AuthRateLimiter::new(args.auth_rate_limit.clone()),
         rate_limit_ip_subnet: args.auth_rate_limit_ip_subnet,
         ip_allowlist_check_enabled: !args.is_private_access_proxy,
+        is_auth_broker: args.is_auth_broker,
+        accept_jwts: args.is_auth_broker,
+        webauth_confirmation_timeout: args.webauth_confirmation_timeout,
     };
 
     let config = Box::leak(Box::new(ProxyConfig {
@@ -707,7 +733,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         allow_self_signed_compute: args.allow_self_signed_compute,
         http_config,
         authentication_config,
-        require_client_ip: args.require_client_ip,
+        proxy_protocol_v2: args.proxy_protocol_v2,
         handshake_timeout: args.handshake_timeout,
         region: args.region.clone(),
         wake_compute_retry_config: config::RetryConfig::parse(&args.wake_compute_retry)?,

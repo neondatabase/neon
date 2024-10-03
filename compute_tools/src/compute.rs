@@ -10,6 +10,7 @@ use std::sync::atomic::AtomicU32;
 use std::sync::atomic::Ordering;
 use std::sync::{Condvar, Mutex, RwLock};
 use std::thread;
+use std::time::Duration;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -302,6 +303,13 @@ impl ComputeNode {
     pub fn set_status(&self, status: ComputeStatus) {
         let mut state = self.state.lock().unwrap();
         state.status = status;
+        self.state_changed.notify_all();
+    }
+
+    pub fn set_failed_status(&self, err: anyhow::Error) {
+        let mut state = self.state.lock().unwrap();
+        state.error = Some(format!("{err:?}"));
+        state.status = ComputeStatus::Failed;
         self.state_changed.notify_all();
     }
 
@@ -710,7 +718,7 @@ impl ComputeNode {
         info!("running initdb");
         let initdb_bin = Path::new(&self.pgbin).parent().unwrap().join("initdb");
         Command::new(initdb_bin)
-            .args(["-D", pgdata])
+            .args(["--pgdata", pgdata])
             .output()
             .expect("cannot start initdb process");
 
@@ -1052,19 +1060,26 @@ impl ComputeNode {
         let pg_process = self.start_postgres(pspec.storage_auth_token.clone())?;
 
         let config_time = Utc::now();
-        if pspec.spec.mode == ComputeMode::Primary && !pspec.spec.skip_pg_catalog_updates {
-            let pgdata_path = Path::new(&self.pgdata);
-            // temporarily reset max_cluster_size in config
-            // to avoid the possibility of hitting the limit, while we are applying config:
-            // creating new extensions, roles, etc...
-            config::with_compute_ctl_tmp_override(pgdata_path, "neon.max_cluster_size=-1", || {
+        if pspec.spec.mode == ComputeMode::Primary {
+            if !pspec.spec.skip_pg_catalog_updates {
+                let pgdata_path = Path::new(&self.pgdata);
+                // temporarily reset max_cluster_size in config
+                // to avoid the possibility of hitting the limit, while we are applying config:
+                // creating new extensions, roles, etc...
+                config::with_compute_ctl_tmp_override(
+                    pgdata_path,
+                    "neon.max_cluster_size=-1",
+                    || {
+                        self.pg_reload_conf()?;
+
+                        self.apply_config(&compute_state)?;
+
+                        Ok(())
+                    },
+                )?;
                 self.pg_reload_conf()?;
-
-                self.apply_config(&compute_state)?;
-
-                Ok(())
-            })?;
-            self.pg_reload_conf()?;
+            }
+            self.post_apply_config()?;
         }
 
         let startup_end_time = Utc::now();
@@ -1123,6 +1138,9 @@ impl ComputeNode {
     //
     // Use that as a default location and pattern, except macos where core dumps are written
     // to /cores/ directory by default.
+    //
+    // With default Linux settings, the core dump file is called just "core", so check for
+    // that too.
     pub fn check_for_core_dumps(&self) -> Result<()> {
         let core_dump_dir = match std::env::consts::OS {
             "macos" => Path::new("/cores/"),
@@ -1134,8 +1152,17 @@ impl ComputeNode {
         let files = fs::read_dir(core_dump_dir)?;
         let cores = files.filter_map(|entry| {
             let entry = entry.ok()?;
-            let _ = entry.file_name().to_str()?.strip_prefix("core.")?;
-            Some(entry.path())
+
+            let is_core_dump = match entry.file_name().to_str()? {
+                n if n.starts_with("core.") => true,
+                "core" => true,
+                _ => false,
+            };
+            if is_core_dump {
+                Some(entry.path())
+            } else {
+                None
+            }
         });
 
         // Print backtrace for each core dump
@@ -1385,6 +1412,36 @@ LIMIT 100",
             remote_ext_metrics.total_ext_download_size += download_size;
         }
         Ok(remote_ext_metrics)
+    }
+
+    /// Waits until current thread receives a state changed notification and
+    /// the pageserver connection strings has changed.
+    ///
+    /// The operation will time out after a specified duration.
+    pub fn wait_timeout_while_pageserver_connstr_unchanged(&self, duration: Duration) {
+        let state = self.state.lock().unwrap();
+        let old_pageserver_connstr = state
+            .pspec
+            .as_ref()
+            .expect("spec must be set")
+            .pageserver_connstr
+            .clone();
+        let mut unchanged = true;
+        let _ = self
+            .state_changed
+            .wait_timeout_while(state, duration, |s| {
+                let pageserver_connstr = &s
+                    .pspec
+                    .as_ref()
+                    .expect("spec must be set")
+                    .pageserver_connstr;
+                unchanged = pageserver_connstr == &old_pageserver_connstr;
+                unchanged
+            })
+            .unwrap();
+        if !unchanged {
+            info!("Pageserver config changed");
+        }
     }
 }
 

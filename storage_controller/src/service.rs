@@ -128,6 +128,9 @@ pub const MAX_WARMING_UP_INTERVAL_DEFAULT: Duration = Duration::from_secs(300);
 /// How often to send heartbeats to registered nodes?
 pub const HEARTBEAT_INTERVAL_DEFAULT: Duration = Duration::from_secs(5);
 
+/// How long is too long for a reconciliation?
+pub const LONG_RECONCILE_THRESHOLD_DEFAULT: Duration = Duration::from_secs(120);
+
 #[derive(Clone, strum_macros::Display)]
 enum TenantOperations {
     Create,
@@ -348,6 +351,8 @@ pub struct Config {
     pub start_as_candidate: bool,
 
     pub http_service_port: i32,
+
+    pub long_reconcile_threshold: Duration,
 }
 
 impl From<DatabaseError> for ApiError {
@@ -4974,7 +4979,12 @@ impl Service {
 
             {
                 let mut nodes_mut = (**nodes).clone();
-                nodes_mut.remove(&node_id);
+                if let Some(mut removed_node) = nodes_mut.remove(&node_id) {
+                    // Ensure that any reconciler holding an Arc<> to this node will
+                    // drop out when trying to RPC to it (setting Offline state sets the
+                    // cancellation token on the Node object).
+                    removed_node.set_availability(NodeAvailability::Offline);
+                }
                 *nodes = Arc::new(nodes_mut);
             }
         }

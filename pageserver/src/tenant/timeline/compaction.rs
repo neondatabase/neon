@@ -353,7 +353,13 @@ impl Timeline {
 
                 // 2. Compact
                 let timer = self.metrics.compact_time_histo.start_timer();
-                let fully_compacted = self.compact_level0(target_file_size, ctx).await?;
+                let fully_compacted = self
+                    .compact_level0(
+                        target_file_size,
+                        flags.contains(CompactFlags::ForceL0Compaction),
+                        ctx,
+                    )
+                    .await?;
                 timer.stop_and_record();
 
                 let mut partitioning = dense_partitioning;
@@ -658,6 +664,7 @@ impl Timeline {
     async fn compact_level0(
         self: &Arc<Self>,
         target_file_size: u64,
+        force_compaction_ignore_threshold: bool,
         ctx: &RequestContext,
     ) -> Result<bool, CompactionError> {
         let CompactLevel0Phase1Result {
@@ -679,9 +686,15 @@ impl Timeline {
             let now = tokio::time::Instant::now();
             stats.read_lock_acquisition_micros =
                 DurationRecorder::Recorded(RecordedDuration(now - begin), now);
-            self.compact_level0_phase1(phase1_layers_locked, stats, target_file_size, &ctx)
-                .instrument(phase1_span)
-                .await?
+            self.compact_level0_phase1(
+                phase1_layers_locked,
+                stats,
+                target_file_size,
+                force_compaction_ignore_threshold,
+                &ctx,
+            )
+            .instrument(phase1_span)
+            .await?
         };
 
         if new_layers.is_empty() && deltas_to_compact.is_empty() {
@@ -700,6 +713,7 @@ impl Timeline {
         guard: tokio::sync::RwLockReadGuard<'a, LayerManager>,
         mut stats: CompactLevel0Phase1StatsBuilder,
         target_file_size: u64,
+        force_compaction_ignore_threshold: bool,
         ctx: &RequestContext,
     ) -> Result<CompactLevel0Phase1Result, CompactionError> {
         stats.read_lock_held_spawn_blocking_startup_micros =
@@ -711,11 +725,26 @@ impl Timeline {
         // Only compact if enough layers have accumulated.
         let threshold = self.get_compaction_threshold();
         if level0_deltas.is_empty() || level0_deltas.len() < threshold {
-            debug!(
-                level0_deltas = level0_deltas.len(),
-                threshold, "too few deltas to compact"
-            );
-            return Ok(CompactLevel0Phase1Result::default());
+            if force_compaction_ignore_threshold {
+                if !level0_deltas.is_empty() {
+                    info!(
+                        level0_deltas = level0_deltas.len(),
+                        threshold, "too few deltas to compact, but forcing compaction"
+                    );
+                } else {
+                    info!(
+                        level0_deltas = level0_deltas.len(),
+                        threshold, "too few deltas to compact, cannot force compaction"
+                    );
+                    return Ok(CompactLevel0Phase1Result::default());
+                }
+            } else {
+                debug!(
+                    level0_deltas = level0_deltas.len(),
+                    threshold, "too few deltas to compact"
+                );
+                return Ok(CompactLevel0Phase1Result::default());
+            }
         }
 
         let mut level0_deltas = level0_deltas

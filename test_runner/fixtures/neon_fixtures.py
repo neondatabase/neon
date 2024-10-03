@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from fcntl import LOCK_EX, LOCK_UN, flock
-from functools import cached_property, partial
+from functools import cached_property
 from itertools import chain, product
 from pathlib import Path
 from types import TracebackType
@@ -86,7 +86,7 @@ from fixtures.remote_storage import (
     remote_storage_to_toml_dict,
 )
 from fixtures.safekeeper.http import SafekeeperHttpClient
-from fixtures.safekeeper.utils import are_walreceivers_absent
+from fixtures.safekeeper.utils import wait_walreceivers_absent
 from fixtures.utils import (
     ATTACHMENT_NAME_REGEX,
     allure_add_grafana_links,
@@ -949,9 +949,6 @@ class NeonEnv:
     pageservers - An array containing objects representing the pageservers
 
     safekeepers - An array containing objects representing the safekeepers
-
-    pg_bin - pg_bin.run() can be used to execute Postgres client binaries,
-        like psql or pg_dump
 
     initial_tenant - tenant ID of the initial tenant created in the repository
 
@@ -3300,6 +3297,8 @@ class PgBin:
 
 @pytest.fixture(scope="function")
 def pg_bin(test_output_dir: Path, pg_distrib_dir: Path, pg_version: PgVersion) -> PgBin:
+    """pg_bin.run() can be used to execute Postgres client binaries, like psql or pg_dump"""
+
     return PgBin(test_output_dir, pg_distrib_dir, pg_version)
 
 
@@ -3311,7 +3310,7 @@ class VanillaPostgres(PgProtocol):
         self.pg_bin = pg_bin
         self.running = False
         if init:
-            self.pg_bin.run_capture(["initdb", "-D", str(pgdatadir)])
+            self.pg_bin.run_capture(["initdb", "--pgdata", str(pgdatadir)])
         self.configure([f"port = {port}\n"])
 
     def enable_tls(self):
@@ -4101,12 +4100,26 @@ class Endpoint(PgProtocol, LogUtils):
         with open(remote_extensions_spec_path, "w") as file:
             json.dump(spec, file, indent=4)
 
-    def stop(self, mode: str = "fast") -> "Endpoint":
+    def stop(
+        self,
+        mode: str = "fast",
+        sks_wait_walreceiver_gone: Optional[tuple[List[Safekeeper], TimelineId]] = None,
+    ) -> "Endpoint":
         """
         Stop the Postgres instance if it's running.
 
-        Because test teardown might try and stop an endpoint concurrently with test code
-        stopping the endpoint, this method is thread safe
+        Because test teardown might try and stop an endpoint concurrently with
+        test code stopping the endpoint, this method is thread safe
+
+        If sks_wait_walreceiever_gone is not None, wait for the safekeepers in
+        this list to have no walreceivers, i.e. compute endpoint connection be
+        gone. When endpoint is stopped in immediate mode and started again this
+        avoids race of old connection delivering some data after
+        sync-safekeepers check, which makes basebackup unusable. TimelineId is
+        needed because endpoint doesn't know it.
+
+        A better solution would be bump term when sync-safekeepers is skipped on
+        start, see #9079.
 
         Returns self.
         """
@@ -4117,6 +4130,11 @@ class Endpoint(PgProtocol, LogUtils):
             self.env.neon_cli.endpoint_stop(
                 self.endpoint_id, check_return_code=self.check_stop_result, mode=mode
             )
+
+        if sks_wait_walreceiver_gone is not None:
+            for sk in sks_wait_walreceiver_gone[0]:
+                cli = sk.http_client()
+                wait_walreceivers_absent(cli, self.tenant_id, sks_wait_walreceiver_gone[1])
 
         return self
 
@@ -5210,7 +5228,7 @@ def flush_ep_to_pageserver(
     for sk in env.safekeepers:
         cli = sk.http_client()
         # wait until compute connections are gone
-        wait_until(30, 0.5, partial(are_walreceivers_absent, cli, tenant, timeline))
+        wait_walreceivers_absent(cli, tenant, timeline)
         commit_lsn = max(cli.get_commit_lsn(tenant, timeline), commit_lsn)
 
     # Note: depending on WAL filtering implementation, probably most shards

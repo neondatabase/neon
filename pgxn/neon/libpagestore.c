@@ -490,7 +490,7 @@ pageserver_connect(shardno_t shard_no, int elevel)
 											   WL_EXIT_ON_PM_DEATH | WL_LATCH_SET | WL_SOCKET_READABLE,
 											   PQsocket(shard->conn),
 											   0,
-											   PG_WAIT_EXTENSION);
+											   WAIT_EVENT_NEON_PS_STARTING);
 					elog(DEBUG5, "PGRES_POLLING_READING=>%d", rc);
 					if (rc & WL_LATCH_SET)
 					{
@@ -512,7 +512,7 @@ pageserver_connect(shardno_t shard_no, int elevel)
 											   WL_EXIT_ON_PM_DEATH | WL_LATCH_SET | WL_SOCKET_WRITEABLE,
 											   PQsocket(shard->conn),
 											   0,
-											   PG_WAIT_EXTENSION);
+											   WAIT_EVENT_NEON_PS_STARTING);
 					elog(DEBUG5, "PGRES_POLLING_WRITING=>%d", rc);
 					if (rc & WL_LATCH_SET)
 					{
@@ -608,7 +608,8 @@ pageserver_connect(shardno_t shard_no, int elevel)
 			WaitEvent	event;
 
 			/* Sleep until there's something to do */
-			(void) WaitEventSetWait(shard->wes_read, -1L, &event, 1, PG_WAIT_EXTENSION);
+			(void) WaitEventSetWait(shard->wes_read, -1L, &event, 1,
+									WAIT_EVENT_NEON_PS_CONFIGURING);
 			ResetLatch(MyLatch);
 
 			CHECK_FOR_INTERRUPTS();
@@ -656,7 +657,8 @@ static int
 call_PQgetCopyData(shardno_t shard_no, char **buffer)
 {
 	int			ret;
-	PGconn	   *pageserver_conn = page_servers[shard_no].conn;
+	PageServer *shard = &page_servers[shard_no];
+	PGconn	   *pageserver_conn = shard->conn;
 
 retry:
 	ret = PQgetCopyData(pageserver_conn, buffer, 1 /* async */ );
@@ -666,7 +668,8 @@ retry:
 		WaitEvent	event;
 
 		/* Sleep until there's something to do */
-		(void) WaitEventSetWait(page_servers[shard_no].wes_read, -1L, &event, 1, PG_WAIT_EXTENSION);
+		(void) WaitEventSetWait(shard->wes_read, -1L, &event, 1,
+								WAIT_EVENT_NEON_PS_READ);
 		ResetLatch(MyLatch);
 
 		CHECK_FOR_INTERRUPTS();
@@ -937,7 +940,7 @@ PagestoreShmemInit(void)
 
 	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
 	pagestore_shared = ShmemInitStruct("libpagestore shared state",
-									   PagestoreShmemSize(),
+									   sizeof(PagestoreShmemState),
 									   &found);
 	if (!found)
 	{
