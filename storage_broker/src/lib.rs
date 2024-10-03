@@ -1,4 +1,3 @@
-use hyper_1 as hyper;
 use std::time::Duration;
 use tonic::codegen::StdError;
 use tonic::transport::{ClientTlsConfig, Endpoint};
