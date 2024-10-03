@@ -158,6 +158,21 @@ def neon_binpath(base_dir: Path, build_type: str) -> Iterator[Path]:
     yield binpath
 
 
+@pytest.fixture(scope="function")
+def compatibility_neon_binpath(base_dir: Path, build_type: str) -> Optional[Iterator[Path]]:
+    if os.getenv("REMOTE_ENV"):
+        return
+    if env_compatibility_neon_binpath := os.environ.get("COMPATIBILITY_NEON_BIN"):
+        comp_binpath = Path(env_compatibility_neon_binpath).resolve()
+        if not (comp_binpath / "pageserver").exists():
+            raise Exception(f"compatibility neon binaries not found ad {comp_binpath}")
+    else:
+        comp_binpath = base_dir / "neon_previous" / "target" / build_type
+        if not (comp_binpath / "pageserver").exists():
+            comp_binpath = None
+    yield comp_binpath
+
+
 @pytest.fixture(scope="session")
 def pg_distrib_dir(base_dir: Path) -> Iterator[Path]:
     if env_postgres_bin := os.environ.get("POSTGRES_DISTRIB_DIR"):
@@ -167,6 +182,22 @@ def pg_distrib_dir(base_dir: Path) -> Iterator[Path]:
 
     log.info(f"pg_distrib_dir is {distrib_dir}")
     yield distrib_dir
+
+
+@pytest.fixture(scope="session")
+def compatibility_pg_distrib_dir(base_dir: Path) -> Iterator[Path]:
+    if env_compat_postgres_bin := os.environ.get("COMPAT_POSTGRES_DISTRIB_DIR"):
+        compat_distrib_dir = Path(env_compat_postgres_bin).resolve()
+        if not compat_distrib_dir.exists():
+            raise Exception(f"compatibility postgres directory not fount at {compat_distrib_dir}")
+    else:
+        compat_distrib_dir = base_dir / "neon_previous" / "pg_install"
+        if not compat_distrib_dir.exists():
+            compat_distrib_dir = None
+
+    if compat_distrib_dir:
+        log.info(f"pg_distrib_dir is {compat_distrib_dir}")
+    yield compat_distrib_dir
 
 
 @pytest.fixture(scope="session")
@@ -374,7 +405,9 @@ class NeonEnvBuilder:
         run_id: uuid.UUID,
         mock_s3_server: MockS3Server,
         neon_binpath: Path,
+        compatibility_neon_binpath: Path,
         pg_distrib_dir: Path,
+        compatibility_pg_distrib_dir: Path,
         pg_version: PgVersion,
         test_name: str,
         top_output_dir: Path,
@@ -460,8 +493,8 @@ class NeonEnvBuilder:
             "test_"
         ), "Unexpectedly instantiated from outside a test function"
         self.test_name = test_name
-        self.compatibility_neon_bindir: Optional[Path] = None
-        self.compatibility_pg_distrib_dir: Optional[Path] = None
+        self.compatibility_neon_binpath = compatibility_neon_binpath
+        self.compatibility_pg_distrib_dir = compatibility_pg_distrib_dir
         self.version_combination: Optional[int] = None
         self.mixdir = self.test_output_dir / "mixdir_neon"
 
@@ -472,7 +505,7 @@ class NeonEnvBuilder:
             self.enable_pageserver_remote_storage(default_remote_storage())
         if self.version_combination is not None:
             assert (
-                self.compatibility_neon_bindir is not None
+                self.compatibility_neon_binpath is not None
             ), "compatibility_neon_bindir is required when using mixed versions"
             assert (
                 self.compatibility_pg_distrib_dir is not None
@@ -499,7 +532,7 @@ class NeonEnvBuilder:
                 directory = (
                     self.neon_binpath
                     if bool(self.version_combination & bitmap[component])
-                    else self.compatibility_neon_bindir
+                    else self.compatibility_neon_binpath
                 )
                 for filename in paths:
                     os.link(directory / filename, self.mixdir / filename)
@@ -1410,7 +1443,9 @@ def neon_env_builder(
     port_distributor: PortDistributor,
     mock_s3_server: MockS3Server,
     neon_binpath: Path,
+    compatibility_neon_binpath: Path,
     pg_distrib_dir: Path,
+    compatibility_pg_distrib_dir: Path,
     pg_version: PgVersion,
     run_id: uuid.UUID,
     request: FixtureRequest,
@@ -1445,7 +1480,9 @@ def neon_env_builder(
         port_distributor=port_distributor,
         mock_s3_server=mock_s3_server,
         neon_binpath=neon_binpath,
+        compatibility_neon_binpath=compatibility_neon_binpath,
         pg_distrib_dir=pg_distrib_dir,
+        compatibility_pg_distrib_dir=compatibility_pg_distrib_dir,
         pg_version=pg_version,
         run_id=run_id,
         preserve_database_files=cast(bool, pytestconfig.getoption("--preserve-database-files")),

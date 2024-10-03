@@ -83,7 +83,7 @@ def test_storage_controller_smoke(neon_env_builder: NeonEnvBuilder, combination)
     compatibility_neon_bin = Path(compatibility_neon_bin_env).resolve()
     neon_env_builder.num_pageservers = 3
     neon_env_builder.version_combination = combination
-    neon_env_builder.compatibility_neon_bindir = compatibility_neon_bin
+    neon_env_builder.compatibility_neon_binpath = compatibility_neon_bin
     neon_env_builder.compatibility_pg_distrib_dir = compatibility_postgres_distrib_dir
     env = neon_env_builder.init_configs()
 
