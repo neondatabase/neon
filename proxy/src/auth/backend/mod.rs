@@ -8,6 +8,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+pub use console_redirect::ConsoleRedirectBackend;
 pub(crate) use console_redirect::WebAuthError;
 use ipnet::{Ipv4Net, Ipv6Net};
 use local::LocalBackend;
@@ -36,7 +37,7 @@ use crate::{
         provider::{CachedAllowedIps, CachedNodeInfo},
         Api,
     },
-    stream, url,
+    stream,
 };
 use crate::{scram, EndpointCacheKey, EndpointId, RoleName};
 
@@ -69,7 +70,7 @@ pub enum Backend<'a, T, D> {
     /// Cloud API (V2).
     ControlPlane(MaybeOwned<'a, ControlPlaneBackend>, T),
     /// Authentication via a web browser.
-    ConsoleRedirect(MaybeOwned<'a, url::ApiUrl>, D),
+    ConsoleRedirect(MaybeOwned<'a, ConsoleRedirectBackend>, D),
     /// Local proxy uses configured auth credentials and does not wake compute
     Local(MaybeOwned<'a, LocalBackend>),
 }
@@ -106,9 +107,9 @@ impl std::fmt::Display for Backend<'_, (), ()> {
                 #[cfg(test)]
                 ControlPlaneBackend::Test(_) => fmt.debug_tuple("ControlPlane::Test").finish(),
             },
-            Self::ConsoleRedirect(url, ()) => fmt
+            Self::ConsoleRedirect(backend, ()) => fmt
                 .debug_tuple("ConsoleRedirect")
-                .field(&url.as_str())
+                .field(&backend.url().as_str())
                 .finish(),
             Self::Local(_) => fmt.debug_tuple("Local").finish(),
         }
@@ -454,12 +455,12 @@ impl<'a> Backend<'a, ComputeUserInfoMaybeEndpoint, &()> {
                 Backend::ControlPlane(api, credentials)
             }
             // NOTE: this auth backend doesn't use client credentials.
-            Self::ConsoleRedirect(url, ()) => {
+            Self::ConsoleRedirect(backend, ()) => {
                 info!("performing web authentication");
 
-                let info = console_redirect::authenticate(ctx, config, &url, client).await?;
+                let info = backend.authenticate(ctx, config, client).await?;
 
-                Backend::ConsoleRedirect(url, info)
+                Backend::ConsoleRedirect(backend, info)
             }
             Self::Local(_) => {
                 return Err(auth::AuthError::bad_auth_method("invalid for local proxy"))
