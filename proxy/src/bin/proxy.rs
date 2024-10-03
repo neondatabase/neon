@@ -10,6 +10,7 @@ use futures::future::Either;
 use proxy::auth;
 use proxy::auth::backend::jwt::JwkCache;
 use proxy::auth::backend::AuthRateLimiter;
+use proxy::auth::backend::ConsoleRedirectBackend;
 use proxy::auth::backend::MaybeOwned;
 use proxy::cancellation::CancelMap;
 use proxy::cancellation::CancellationHandler;
@@ -742,7 +743,7 @@ fn build_auth_backend(
 
         AuthBackendType::Web => {
             let url = args.uri.parse()?;
-            auth::Backend::ConsoleRedirect(MaybeOwned::Owned(url), ())
+            auth::Backend::ConsoleRedirect(MaybeOwned::Owned(ConsoleRedirectBackend::new(url)), ())
         }
 
         #[cfg(feature = "testing")]
