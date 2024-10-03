@@ -40,6 +40,7 @@ itertools.workspace = true
 sync_wrapper = { workspace = true, features = ["futures"] }
 
 [dev-dependencies]
+aws-config = { workspace = true, features = ["rustls", "sso"] }
 camino-tempfile.workspace = true
 test-context.workspace = true
 rand.workspace = true
