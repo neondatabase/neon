@@ -1465,7 +1465,7 @@ impl Tenant {
     pub(crate) async fn apply_timeline_archival_config(
         self: &Arc<Self>,
         timeline_id: TimelineId,
-        state: TimelineArchivalState,
+        new_state: TimelineArchivalState,
         ctx: RequestContext,
     ) -> Result<(), TimelineArchivalError> {
         info!("setting timeline archival config");
@@ -1477,7 +1477,7 @@ impl Tenant {
                 let Some(offloaded) = offloaded_timelines.get(&timeline_id) else {
                     return Err(TimelineArchivalError::NotFound);
                 };
-                if state == TimelineArchivalState::Archived {
+                if new_state == TimelineArchivalState::Archived {
                     // It's offloaded, so nothing to do for archival
                     return Ok(());
                 }
@@ -1501,7 +1501,7 @@ impl Tenant {
                 break 'outer None;
             };
 
-            if state == TimelineArchivalState::Unarchived {
+            if new_state == TimelineArchivalState::Unarchived {
                 if let Some(ancestor_timeline) = timeline.ancestor_timeline() {
                     if ancestor_timeline.is_archived() == Some(true) {
                         return Err(TimelineArchivalError::HasArchivedParent(
@@ -1511,7 +1511,7 @@ impl Tenant {
                 }
             }
 
-            if state == TimelineArchivalState::Archived {
+            if new_state == TimelineArchivalState::Archived {
                 // Ensure that there are no non-archived child timelines
                 let children: Vec<TimelineId> = timelines
                     .iter()
@@ -1594,7 +1594,7 @@ impl Tenant {
 
         let upload_needed = timeline
             .remote_client
-            .schedule_index_upload_for_timeline_archival_state(state)?;
+            .schedule_index_upload_for_timeline_archival_state(new_state)?;
 
         if upload_needed {
             info!("Uploading new state");
