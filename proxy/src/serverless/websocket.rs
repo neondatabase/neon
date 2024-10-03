@@ -1,3 +1,4 @@
+use crate::control_plane::provider::ControlPlaneBackend;
 use crate::proxy::ErrorSource;
 use crate::{
     cancellation::CancellationHandlerMain,
@@ -129,7 +130,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncBufRead for WebSocketRw<S> {
 
 pub(crate) async fn serve_websocket(
     config: &'static ProxyConfig,
-    auth_backend: &'static crate::auth::Backend<'static, ()>,
+    auth_backend: &'static ControlPlaneBackend,
     ctx: RequestMonitoring,
     websocket: OnUpgrade,
     cancellation_handler: Arc<CancellationHandlerMain>,

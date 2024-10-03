@@ -32,6 +32,7 @@ use tokio::time::timeout;
 use tokio_rustls::TlsAcceptor;
 use tokio_util::task::TaskTracker;
 
+use crate::auth::Backend;
 use crate::cancellation::CancellationHandlerMain;
 use crate::config::ProxyConfig;
 use crate::context::RequestMonitoring;
@@ -54,7 +55,7 @@ pub(crate) const SERVERLESS_DRIVER_SNI: &str = "api";
 
 pub async fn task_main(
     config: &'static ProxyConfig,
-    auth_backend: &'static crate::auth::Backend<'static, ()>,
+    auth_backend: crate::auth::Backend<'static>,
     ws_listener: TcpListener,
     cancellation_token: CancellationToken,
     cancellation_handler: Arc<CancellationHandlerMain>,
@@ -379,6 +380,10 @@ async fn request_handler(
     if config.http_config.accept_websockets
         && framed_websockets::upgrade::is_upgrade_request(&request)
     {
+        let Backend::ControlPlane(auth_backend) = backend.auth_backend else {
+            return json_response(StatusCode::BAD_REQUEST, "query is not supported");
+        };
+
         let ctx = RequestMonitoring::new(
             session_id,
             peer_addr,
@@ -396,7 +401,7 @@ async fn request_handler(
             async move {
                 if let Err(e) = websocket::serve_websocket(
                     config,
-                    backend.auth_backend,
+                    auth_backend,
                     ctx,
                     websocket,
                     cancellation_handler,

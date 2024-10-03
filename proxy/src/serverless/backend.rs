@@ -17,7 +17,7 @@ use crate::{
         errors::{GetAuthInfoError, WakeComputeError},
         locks::ApiLocks,
         provider::ApiLockError,
-        CachedNodeInfo,
+        Api, CachedNodeInfo,
     },
     error::{ErrorKind, ReportableError, UserFacingError},
     intern::EndpointIdInt,
@@ -38,7 +38,7 @@ pub(crate) struct PoolingBackend {
     pub(crate) http_conn_pool: Arc<super::http_conn_pool::GlobalConnPool>,
     pub(crate) pool: Arc<GlobalConnPool<tokio_postgres::Client>>,
     pub(crate) config: &'static ProxyConfig,
-    pub(crate) auth_backend: &'static crate::auth::Backend<'static, ()>,
+    pub(crate) auth_backend: crate::auth::Backend<'static>,
     pub(crate) endpoint_rate_limiter: Arc<EndpointRateLimiter>,
 }
 
@@ -49,9 +49,16 @@ impl PoolingBackend {
         user_info: &ComputeUserInfo,
         password: &[u8],
     ) -> Result<ComputeCredentials, AuthError> {
-        let user_info = user_info.clone();
-        let backend = self.auth_backend.as_ref().map(|()| user_info.clone());
-        let (allowed_ips, maybe_secret) = backend.get_allowed_ips_and_secret(ctx).await?;
+        let cplane = match &self.auth_backend {
+            crate::auth::Backend::ControlPlane(cplane) => cplane,
+            crate::auth::Backend::Local(_local) => {
+                return Err(AuthError::bad_auth_method(
+                    "password authentication not supported by local_proxy",
+                ))
+            }
+        };
+
+        let (allowed_ips, maybe_secret) = cplane.get_allowed_ips_and_secret(ctx, user_info).await?;
         if self.config.authentication_config.ip_allowlist_check_enabled
             && !check_peer_addr_is_in_list(&ctx.peer_addr(), &allowed_ips)
         {
@@ -65,7 +72,7 @@ impl PoolingBackend {
         }
         let cached_secret = match maybe_secret {
             Some(secret) => secret,
-            None => backend.get_role_secret(ctx).await?,
+            None => cplane.get_role_secret(ctx, user_info).await?,
         };
 
         let secret = match cached_secret.value.clone() {
@@ -100,7 +107,7 @@ impl PoolingBackend {
             }
         };
         res.map(|key| ComputeCredentials {
-            info: user_info,
+            info: user_info.clone(),
             keys: key,
         })
     }
@@ -112,7 +119,7 @@ impl PoolingBackend {
         jwt: String,
     ) -> Result<(), AuthError> {
         match &self.auth_backend {
-            crate::auth::Backend::ControlPlane(console, ()) => {
+            crate::auth::Backend::ControlPlane(console) => {
                 self.config
                     .authentication_config
                     .jwks_cache
@@ -173,21 +180,41 @@ impl PoolingBackend {
         let conn_id = uuid::Uuid::new_v4();
         tracing::Span::current().record("conn_id", display(conn_id));
         info!(%conn_id, "pool: opening a new connection '{conn_info}'");
-        let backend = self.auth_backend.as_ref().map(|()| keys);
-        crate::proxy::connect_compute::connect_to_compute(
-            ctx,
-            &TokioMechanism {
-                conn_id,
-                conn_info,
-                pool: self.pool.clone(),
-                locks: &self.config.connect_compute_locks,
-            },
-            &backend,
-            false, // do not allow self signed compute for http flow
-            self.config.wake_compute_retry_config,
-            self.config.connect_to_compute_retry_config,
-        )
-        .await
+
+        match &self.auth_backend {
+            crate::auth::Backend::ControlPlane(cplane) => {
+                crate::proxy::connect_compute::connect_to_compute(
+                    ctx,
+                    &TokioMechanism {
+                        conn_id,
+                        conn_info,
+                        pool: self.pool.clone(),
+                        locks: &self.config.connect_compute_locks,
+                    },
+                    &cplane.attach_to_credentials(keys),
+                    false, // do not allow self signed compute for http flow
+                    self.config.wake_compute_retry_config,
+                    self.config.connect_to_compute_retry_config,
+                )
+                .await
+            }
+            crate::auth::Backend::Local(local_proxy) => {
+                crate::proxy::connect_compute::connect_to_compute(
+                    ctx,
+                    &TokioMechanism {
+                        conn_id,
+                        conn_info,
+                        pool: self.pool.clone(),
+                        locks: &self.config.connect_compute_locks,
+                    },
+                    &**local_proxy,
+                    false, // do not allow self signed compute for http flow
+                    self.config.wake_compute_retry_config,
+                    self.config.connect_to_compute_retry_config,
+                )
+                .await
+            }
+        }
     }
 
     // Wake up the destination if needed
@@ -197,6 +224,13 @@ impl PoolingBackend {
         ctx: &RequestMonitoring,
         conn_info: ConnInfo,
     ) -> Result<http_conn_pool::Client, HttpConnError> {
+        let cplane = match &self.auth_backend {
+            crate::auth::Backend::Local(_) => {
+                panic!("connect to local_proxy should not be called if we are already local_proxy")
+            }
+            crate::auth::Backend::ControlPlane(cplane) => cplane,
+        };
+
         info!("pool: looking for an existing connection");
         if let Some(client) = self.http_conn_pool.get(ctx, &conn_info) {
             return Ok(client);
@@ -205,7 +239,8 @@ impl PoolingBackend {
         let conn_id = uuid::Uuid::new_v4();
         tracing::Span::current().record("conn_id", display(conn_id));
         info!(%conn_id, "pool: opening a new connection '{conn_info}'");
-        let backend = self.auth_backend.as_ref().map(|()| ComputeCredentials {
+
+        let backend = cplane.attach_to_credentials(ComputeCredentials {
             info: conn_info.user_info.clone(),
             keys: crate::auth::backend::ComputeCredentialKeys::None,
         });

@@ -11,7 +11,6 @@ use proxy::auth;
 use proxy::auth::backend::jwt::JwkCache;
 use proxy::auth::backend::AuthRateLimiter;
 use proxy::auth::backend::ConsoleRedirectBackend;
-use proxy::auth::backend::MaybeOwned;
 use proxy::cancellation::CancelMap;
 use proxy::cancellation::CancellationHandler;
 use proxy::config::remote_storage_from_toml;
@@ -22,6 +21,7 @@ use proxy::config::ProjectInfoCacheOptions;
 use proxy::config::ProxyProtocolV2;
 use proxy::context::parquet::ParquetUploadArgs;
 use proxy::control_plane;
+use proxy::control_plane::provider::ControlPlaneBackend;
 use proxy::http;
 use proxy::http::health_server::AppMetrics;
 use proxy::metrics::Metrics;
@@ -480,7 +480,7 @@ async fn main() -> anyhow::Result<()> {
             if let Some(serverless_listener) = serverless_listener {
                 client_tasks.spawn(serverless::task_main(
                     config,
-                    auth_backend,
+                    auth::Backend::ControlPlane(auth_backend),
                     serverless_listener,
                     cancellation_token.clone(),
                     cancellation_handler.clone(),
@@ -528,40 +528,38 @@ async fn main() -> anyhow::Result<()> {
         ));
     }
 
-    if let Either::Left(auth::Backend::ControlPlane(api, _)) = &auth_backend {
-        if let proxy::control_plane::provider::ControlPlaneBackend::Management(api) = &**api {
-            match (redis_notifications_client, regional_redis_client.clone()) {
-                (None, None) => {}
-                (client1, client2) => {
-                    let cache = api.caches.project_info.clone();
-                    if let Some(client) = client1 {
-                        maintenance_tasks.spawn(notifications::task_main(
-                            client,
-                            cache.clone(),
-                            cancel_map.clone(),
-                            args.region.clone(),
-                        ));
-                    }
-                    if let Some(client) = client2 {
-                        maintenance_tasks.spawn(notifications::task_main(
-                            client,
-                            cache.clone(),
-                            cancel_map.clone(),
-                            args.region.clone(),
-                        ));
-                    }
-                    maintenance_tasks.spawn(async move { cache.clone().gc_worker().await });
+    if let Either::Left(ControlPlaneBackend::Management(api)) = &auth_backend {
+        match (redis_notifications_client, regional_redis_client.clone()) {
+            (None, None) => {}
+            (client1, client2) => {
+                let cache = api.caches.project_info.clone();
+                if let Some(client) = client1 {
+                    maintenance_tasks.spawn(notifications::task_main(
+                        client,
+                        cache.clone(),
+                        cancel_map.clone(),
+                        args.region.clone(),
+                    ));
                 }
+                if let Some(client) = client2 {
+                    maintenance_tasks.spawn(notifications::task_main(
+                        client,
+                        cache.clone(),
+                        cancel_map.clone(),
+                        args.region.clone(),
+                    ));
+                }
+                maintenance_tasks.spawn(async move { cache.clone().gc_worker().await });
             }
-            if let Some(regional_redis_client) = regional_redis_client {
-                let cache = api.caches.endpoints_cache.clone();
-                let con = regional_redis_client;
-                let span = tracing::info_span!("endpoints_cache");
-                maintenance_tasks.spawn(
-                    async move { cache.do_read(con, cancellation_token.clone()).await }
-                        .instrument(span),
-                );
-            }
+        }
+        if let Some(regional_redis_client) = regional_redis_client {
+            let cache = api.caches.endpoints_cache.clone();
+            let con = regional_redis_client;
+            let span = tracing::info_span!("endpoints_cache");
+            maintenance_tasks.spawn(
+                async move { cache.do_read(con, cancellation_token.clone()).await }
+                    .instrument(span),
+            );
         }
     }
 
@@ -707,7 +705,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
 /// auth::Backend is created at proxy startup, and lives forever.
 fn build_auth_backend(
     args: &ProxyCliArgs,
-) -> anyhow::Result<Either<&'static auth::Backend<'static, ()>, &'static ConsoleRedirectBackend>> {
+) -> anyhow::Result<Either<&'static ControlPlaneBackend, &'static ConsoleRedirectBackend>> {
     match &args.auth_backend {
         AuthBackendType::Console => {
             let wake_compute_cache_config: CacheOptions = args.wake_compute_cache.parse()?;
@@ -757,8 +755,7 @@ fn build_auth_backend(
                 locks,
                 wake_compute_endpoint_rate_limiter,
             );
-            let api = control_plane::provider::ControlPlaneBackend::Management(api);
-            let auth_backend = auth::Backend::ControlPlane(MaybeOwned::Owned(api), ());
+            let auth_backend = control_plane::provider::ControlPlaneBackend::Management(api);
 
             let config = Box::leak(Box::new(auth_backend));
 
@@ -769,9 +766,7 @@ fn build_auth_backend(
         AuthBackendType::Postgres => {
             let url = args.auth_endpoint.parse()?;
             let api = control_plane::provider::mock::Api::new(url, !args.is_private_access_proxy);
-            let api = control_plane::provider::ControlPlaneBackend::PostgresMock(api);
-
-            let auth_backend = auth::Backend::ControlPlane(MaybeOwned::Owned(api), ());
+            let auth_backend = control_plane::provider::ControlPlaneBackend::PostgresMock(api);
 
             let config = Box::leak(Box::new(auth_backend));
 
