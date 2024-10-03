@@ -206,7 +206,9 @@ async fn download_object<'a>(
                     .with_context(|| format!("create a destination file for layer '{dst_path}'"))
                     .map_err(DownloadError::Other)?;
 
-                let mut download = storage.download(src_path, cancel).await?;
+                let mut download = storage
+                    .download(src_path, &DownloadOpts::default(), cancel)
+                    .await?;
 
                 pausable_failpoint!("before-downloading-layer-stream-pausable");
 
