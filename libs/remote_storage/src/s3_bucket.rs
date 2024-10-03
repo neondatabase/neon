@@ -292,7 +292,7 @@ impl S3Bucket {
                     AttemptOutcome::Ok,
                     started_at,
                 );
-                return Err(DownloadError::NotFound);
+                return Err(DownloadError::Unmodified);
             }
             Err(e) => {
                 crate::metrics::BUCKET_METRICS.req_seconds.observe_elapsed(
