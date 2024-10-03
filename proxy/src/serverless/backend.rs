@@ -38,6 +38,7 @@ pub(crate) struct PoolingBackend {
     pub(crate) http_conn_pool: Arc<super::http_conn_pool::GlobalConnPool>,
     pub(crate) pool: Arc<GlobalConnPool<tokio_postgres::Client>>,
     pub(crate) config: &'static ProxyConfig,
+    pub(crate) auth_backend: &'static crate::auth::Backend<'static, (), ()>,
     pub(crate) endpoint_rate_limiter: Arc<EndpointRateLimiter>,
 }
 
@@ -50,11 +51,7 @@ impl PoolingBackend {
         password: &[u8],
     ) -> Result<ComputeCredentials, AuthError> {
         let user_info = user_info.clone();
-        let backend = self
-            .config
-            .auth_backend
-            .as_ref()
-            .map(|()| user_info.clone());
+        let backend = self.auth_backend.as_ref().map(|()| user_info.clone());
         let (allowed_ips, maybe_secret) = backend.get_allowed_ips_and_secret(ctx).await?;
         if config.ip_allowlist_check_enabled
             && !check_peer_addr_is_in_list(&ctx.peer_addr(), &allowed_ips)
@@ -113,7 +110,7 @@ impl PoolingBackend {
         user_info: &ComputeUserInfo,
         jwt: String,
     ) -> Result<(), AuthError> {
-        match &self.config.auth_backend {
+        match &self.auth_backend {
             crate::auth::Backend::ControlPlane(console, ()) => {
                 config
                     .jwks_cache
@@ -176,7 +173,7 @@ impl PoolingBackend {
         let conn_id = uuid::Uuid::new_v4();
         tracing::Span::current().record("conn_id", display(conn_id));
         info!(%conn_id, "pool: opening a new connection '{conn_info}'");
-        let backend = self.config.auth_backend.as_ref().map(|()| keys);
+        let backend = self.auth_backend.as_ref().map(|()| keys);
         crate::proxy::connect_compute::connect_to_compute(
             ctx,
             &TokioMechanism {
@@ -208,14 +205,10 @@ impl PoolingBackend {
         let conn_id = uuid::Uuid::new_v4();
         tracing::Span::current().record("conn_id", display(conn_id));
         info!(%conn_id, "pool: opening a new connection '{conn_info}'");
-        let backend = self
-            .config
-            .auth_backend
-            .as_ref()
-            .map(|()| ComputeCredentials {
-                info: conn_info.user_info.clone(),
-                keys: crate::auth::backend::ComputeCredentialKeys::None,
-            });
+        let backend = self.auth_backend.as_ref().map(|()| ComputeCredentials {
+            info: conn_info.user_info.clone(),
+            keys: crate::auth::backend::ComputeCredentialKeys::None,
+        });
         crate::proxy::connect_compute::connect_to_compute(
             ctx,
             &HyperMechanism {

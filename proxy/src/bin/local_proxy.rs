@@ -6,9 +6,12 @@ use compute_api::spec::LocalProxySpec;
 use dashmap::DashMap;
 use futures::future::Either;
 use proxy::{
-    auth::backend::{
-        jwt::JwkCache,
-        local::{LocalBackend, JWKS_ROLE_MAP},
+    auth::{
+        self,
+        backend::{
+            jwt::JwkCache,
+            local::{LocalBackend, JWKS_ROLE_MAP},
+        },
     },
     cancellation::CancellationHandlerMain,
     config::{self, AuthenticationConfig, HttpConfig, ProxyConfig, RetryConfig},
@@ -132,6 +135,7 @@ async fn main() -> anyhow::Result<()> {
 
     let args = LocalProxyCliArgs::parse();
     let config = build_config(&args)?;
+    let auth_backend = build_auth_backend(&args)?;
 
     // before we bind to any ports, write the process ID to a file
     // so that compute-ctl can find our process later
@@ -193,6 +197,7 @@ async fn main() -> anyhow::Result<()> {
 
     let task = serverless::task_main(
         config,
+        auth_backend,
         http_listener,
         shutdown.clone(),
         Arc::new(CancellationHandlerMain::new(
@@ -257,9 +262,6 @@ fn build_config(args: &LocalProxyCliArgs) -> anyhow::Result<&'static ProxyConfig
 
     Ok(Box::leak(Box::new(ProxyConfig {
         tls_config: None,
-        auth_backend: proxy::auth::Backend::Local(proxy::auth::backend::MaybeOwned::Owned(
-            LocalBackend::new(args.compute),
-        )),
         metric_collection: None,
         allow_self_signed_compute: false,
         http_config,
@@ -284,6 +286,17 @@ fn build_config(args: &LocalProxyCliArgs) -> anyhow::Result<&'static ProxyConfig
             RetryConfig::CONNECT_TO_COMPUTE_DEFAULT_VALUES,
         )?,
     })))
+}
+
+/// auth::Backend is created at proxy startup, and lives forever.
+fn build_auth_backend(
+    args: &LocalProxyCliArgs,
+) -> anyhow::Result<&'static auth::Backend<'static, (), ()>> {
+    let auth_backend = proxy::auth::Backend::Local(proxy::auth::backend::MaybeOwned::Owned(
+        LocalBackend::new(args.compute),
+    ));
+
+    Ok(Box::leak(Box::new(auth_backend)))
 }
 
 async fn refresh_config_loop(path: Utf8PathBuf, rx: Arc<Notify>) {
