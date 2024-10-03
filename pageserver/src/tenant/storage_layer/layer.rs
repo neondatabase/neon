@@ -458,8 +458,8 @@ impl Layer {
                     // This case is legal in brief time windows: for example an in-flight getpage request can hold on to a layer object
                     // which was covered by a concurrent compaction.
                     tracing::info!(
-                        "Layer {} became visible as a result of access",
-                        self.0.desc.layer_name()
+                        layer=%self,
+                        "became visible as a result of access",
                     );
                 }
             }
@@ -688,7 +688,9 @@ impl Drop for LayerInner {
             // and we could be delaying shutdown for nothing.
         }
 
-        if let Some(timeline) = self.timeline.upgrade() {
+        let timeline = self.timeline.upgrade();
+
+        if let Some(timeline) = timeline.as_ref() {
             // Only need to decrement metrics if the timeline still exists: otherwise
             // it will have already de-registered these metrics via TimelineMetrics::shutdown
             if self.desc.is_delta() {
@@ -719,7 +721,6 @@ impl Drop for LayerInner {
         let path = std::mem::take(&mut self.path);
         let file_name = self.layer_desc().layer_name();
         let file_size = self.layer_desc().file_size;
-        let timeline = self.timeline.clone();
         let meta = self.metadata();
         let status = self.status.take();
 
@@ -729,7 +730,7 @@ impl Drop for LayerInner {
             // carry this until we are finished for [`Layer::wait_drop`] support
             let _status = status;
 
-            let Some(timeline) = timeline.upgrade() else {
+            let Some(timeline) = timeline else {
                 // no need to nag that timeline is gone: under normal situation on
                 // task_mgr::remove_tenant_from_memory the timeline is gone before we get dropped.
                 LAYER_IMPL_METRICS.inc_deletes_failed(DeleteFailed::TimelineGone);
