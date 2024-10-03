@@ -41,6 +41,10 @@ pub(crate) fn api_error_into_response(this: ApiError) -> Response<BoxBody<Bytes,
             err.to_string(),
             StatusCode::SERVICE_UNAVAILABLE,
         ),
+        ApiError::TooManyRequests(err) => HttpErrorBody::response_from_msg_and_status(
+            err.to_string(),
+            StatusCode::TOO_MANY_REQUESTS,
+        ),
         ApiError::Timeout(err) => HttpErrorBody::response_from_msg_and_status(
             err.to_string(),
             StatusCode::REQUEST_TIMEOUT,
