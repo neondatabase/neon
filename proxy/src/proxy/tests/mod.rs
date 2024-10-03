@@ -552,7 +552,7 @@ fn helper_create_cached_node_info(cache: &'static NodeInfoCache) -> CachedNodeIn
 
 fn helper_create_connect_info(
     mechanism: &TestConnectMechanism,
-) -> auth::Backend<'static, ComputeCredentials, &()> {
+) -> auth::Backend<'static, ComputeCredentials> {
     let user_info = auth::Backend::ControlPlane(
         MaybeOwned::Owned(ControlPlaneBackend::Test(Box::new(mechanism.clone()))),
         ComputeCredentials {
