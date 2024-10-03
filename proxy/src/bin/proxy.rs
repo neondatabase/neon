@@ -297,7 +297,7 @@ async fn main() -> anyhow::Result<()> {
         build_tag: BUILD_TAG,
     });
 
-    proxy::jemalloc::disable_thp()?;
+    proxy::jemalloc::inspect_thp()?;
     let jemalloc = match proxy::jemalloc::MetricRecorder::new() {
         Ok(t) => Some(t),
         Err(e) => {
