@@ -23,6 +23,7 @@ aws-sigv4 = { version = "1", features = ["http0-compat", "sign-eventstream", "si
 aws-smithy-async = { version = "1", default-features = false, features = ["rt-tokio"] }
 aws-smithy-http = { version = "0.60", default-features = false, features = ["event-stream"] }
 aws-smithy-types = { version = "1", default-features = false, features = ["byte-stream-poll-next", "http-body-0-4-x", "http-body-1-x", "rt-tokio", "test-util"] }
+axum = { version = "0.6", features = ["ws"] }
 base64 = { version = "0.21", features = ["alloc"] }
 base64ct = { version = "1", default-features = false, features = ["std"] }
 bytes = { version = "1", features = ["serde"] }
@@ -47,11 +48,10 @@ half = { version = "2", default-features = false, features = ["num-traits"] }
 hashbrown = { version = "0.14", features = ["raw"] }
 hex = { version = "0.4", features = ["serde"] }
 hmac = { version = "0.12", default-features = false, features = ["reset"] }
-hyper-582f2526e08bb6a0 = { package = "hyper", version = "0.14", features = ["full"] }
-hyper-dff4ba8e3ae991db = { package = "hyper", version = "1", features = ["full"] }
-hyper-util = { version = "0.1", features = ["client-legacy", "server-auto", "service"] }
+hyper = { version = "0.14", features = ["full"] }
 indexmap = { version = "1", default-features = false, features = ["std"] }
-itertools = { version = "0.12" }
+itertools-5ef9efb8ec2df382 = { package = "itertools", version = "0.12" }
+itertools-93f6ce9d446188ac = { package = "itertools", version = "0.10" }
 lazy_static = { version = "1", default-features = false, features = ["spin_no_std"] }
 libc = { version = "0.2", features = ["extra_traits", "use_std"] }
 log = { version = "0.4", default-features = false, features = ["std"] }
@@ -62,7 +62,7 @@ num-integer = { version = "0.1", features = ["i128"] }
 num-traits = { version = "0.2", features = ["i128", "libm"] }
 once_cell = { version = "1" }
 parquet = { version = "53", default-features = false, features = ["zstd"] }
-prost = { version = "0.13", features = ["prost-derive"] }
+prost = { version = "0.11" }
 rand = { version = "0.8", features = ["small_rng"] }
 regex = { version = "1" }
 regex-automata = { version = "0.4", default-features = false, features = ["dfa-onepass", "hybrid", "meta", "nfa-backtrack", "perf-inline", "perf-literal", "unicode"] }
@@ -81,11 +81,10 @@ sync_wrapper = { version = "0.1", default-features = false, features = ["futures
 tikv-jemalloc-sys = { version = "0.5" }
 time = { version = "0.3", features = ["macros", "serde-well-known"] }
 tokio = { version = "1", features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "test-util"] }
-tokio-stream = { version = "0.1", features = ["net"] }
+tokio-rustls = { version = "0.24" }
 tokio-util = { version = "0.7", features = ["codec", "compat", "io", "rt"] }
 toml_edit = { version = "0.22", features = ["serde"] }
-tonic = { version = "0.12", features = ["tls-roots"] }
-tower = { version = "0.4", default-features = false, features = ["balance", "buffer", "limit", "log", "util"] }
+tower = { version = "0.4", default-features = false, features = ["balance", "buffer", "limit", "log", "timeout", "util"] }
 tracing = { version = "0.1", features = ["log"] }
 tracing-core = { version = "0.1" }
 url = { version = "2", features = ["serde"] }
@@ -106,7 +105,9 @@ getrandom = { version = "0.2", default-features = false, features = ["std"] }
 half = { version = "2", default-features = false, features = ["num-traits"] }
 hashbrown = { version = "0.14", features = ["raw"] }
 indexmap = { version = "1", default-features = false, features = ["std"] }
-itertools = { version = "0.12" }
+itertools-5ef9efb8ec2df382 = { package = "itertools", version = "0.12" }
+itertools-93f6ce9d446188ac = { package = "itertools", version = "0.10" }
+lazy_static = { version = "1", default-features = false, features = ["spin_no_std"] }
 libc = { version = "0.2", features = ["extra_traits", "use_std"] }
 log = { version = "0.4", default-features = false, features = ["std"] }
 memchr = { version = "2" }
@@ -116,9 +117,8 @@ num-integer = { version = "0.1", features = ["i128"] }
 num-traits = { version = "0.2", features = ["i128", "libm"] }
 once_cell = { version = "1" }
 parquet = { version = "53", default-features = false, features = ["zstd"] }
-prettyplease = { version = "0.2", default-features = false, features = ["verbatim"] }
 proc-macro2 = { version = "1" }
-prost = { version = "0.13", features = ["prost-derive"] }
+prost = { version = "0.11" }
 quote = { version = "1" }
 regex = { version = "1" }
 regex-automata = { version = "0.4", default-features = false, features = ["dfa-onepass", "hybrid", "meta", "nfa-backtrack", "perf-inline", "perf-literal", "unicode"] }

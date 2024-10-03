@@ -96,12 +96,9 @@ hmac = "0.12.1"
 hostname = "0.4"
 http = {version = "1.1.0", features = ["std"]}
 http-types = { version = "2", default-features = false }
-http-body-util = "0.1.2"
 humantime = "2.1"
 humantime-serde = "1.1.1"
 hyper = "0.14"
-hyper_1 = { package = "hyper", version = "1.4" }
-hyper-util = "0.1"
 tokio-tungstenite = "0.20.0"
 indexmap = "2"
 indoc = "2"
@@ -130,7 +127,7 @@ pbkdf2 = { version = "0.12.1", features = ["simple", "std"] }
 pin-project-lite = "0.2"
 procfs = "0.16"
 prometheus = {version = "0.13", default-features=false, features = ["process"]} # removes protobuf dependency
-prost = "0.13"
+prost = "0.11"
 rand = "0.8"
 redis = { version = "0.25.2", features = ["tokio-rustls-comp", "keep-alive"] }
 regex = "1.10.2"
@@ -178,7 +175,7 @@ tokio-tar = "0.3"
 tokio-util = { version = "0.7.10", features = ["io", "rt"] }
 toml = "0.8"
 toml_edit = "0.22"
-tonic = {version = "0.12.3", features = ["tls", "tls-roots"]}
+tonic = {version = "0.9", features = ["tls", "tls-roots"]}
 tower-service = "0.3.2"
 tracing = "0.1"
 tracing-error = "0.2"
@@ -246,7 +243,7 @@ criterion = "0.5.1"
 rcgen = "0.12"
 rstest = "0.18"
 camino-tempfile = "1.0.2"
-tonic-build = "0.12"
+tonic-build = "0.9"
 
 [patch.crates-io]
 
