@@ -17,13 +17,14 @@ RUN case $DEBIAN_FLAVOR in \
       # Version-specific installs for Bullseye (PG14-PG16):
       # The h3_pg extension needs a cmake 3.20+, but Debian bullseye has 3.18.
       # Install newer version (3.25) from backports.
+      # libstdc++-10-dev is required for plv8
       bullseye*) \
         echo "deb http://deb.debian.org/debian bullseye-backports main" > /etc/apt/sources.list.d/bullseye-backports.list; \
-        VERSION_INSTALLS="cmake/bullseye-backports cmake-data/bullseye-backports"; \
+        VERSION_INSTALLS="cmake/bullseye-backports cmake-data/bullseye-backports libstdc++-10-dev"; \
       ;; \
       # Version-specific installs for Bookworm (PG17):
       bookworm*) \
-        VERSION_INSTALLS="cmake"; \
+        VERSION_INSTALLS="cmake libstdc++-12-dev"; \
       ;; \
     esac && \
     apt update &&  \
@@ -182,7 +183,7 @@ ARG PG_VERSION
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
 RUN apt update && \
-    apt install --no-install-recommends -y ninja-build python3-dev libncurses5 binutils clang libstdc++-10-dev
+    apt install --no-install-recommends -y ninja-build python3-dev libncurses5 binutils clang
 
 # plv8 3.2.3 supports v17
 # last release v3.2.3 - Sep 7, 2024
