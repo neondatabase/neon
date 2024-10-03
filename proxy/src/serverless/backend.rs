@@ -13,7 +13,7 @@ use crate::{
         check_peer_addr_is_in_list, AuthError,
     },
     compute,
-    config::{AuthenticationConfig, ProxyConfig},
+    config::ProxyConfig,
     context::RequestMonitoring,
     control_plane::{
         errors::{GetAuthInfoError, WakeComputeError},
@@ -50,14 +50,13 @@ impl PoolingBackend {
     pub(crate) async fn authenticate_with_password(
         &self,
         ctx: &RequestMonitoring,
-        config: &AuthenticationConfig,
         user_info: &ComputeUserInfo,
         password: &[u8],
     ) -> Result<ComputeCredentials, AuthError> {
         let user_info = user_info.clone();
         let backend = self.auth_backend.as_ref().map(|()| user_info.clone());
         let (allowed_ips, maybe_secret) = backend.get_allowed_ips_and_secret(ctx).await?;
-        if config.ip_allowlist_check_enabled
+        if self.config.authentication_config.ip_allowlist_check_enabled
             && !check_peer_addr_is_in_list(&ctx.peer_addr(), &allowed_ips)
         {
             return Err(AuthError::ip_address_not_allowed(ctx.peer_addr()));
@@ -76,7 +75,6 @@ impl PoolingBackend {
         let secret = match cached_secret.value.clone() {
             Some(secret) => self.config.authentication_config.check_rate_limit(
                 ctx,
-                config,
                 secret,
                 &user_info.endpoint,
                 true,
@@ -88,9 +86,13 @@ impl PoolingBackend {
             }
         };
         let ep = EndpointIdInt::from(&user_info.endpoint);
-        let auth_outcome =
-            crate::auth::validate_password_and_exchange(&config.thread_pool, ep, password, secret)
-                .await?;
+        let auth_outcome = crate::auth::validate_password_and_exchange(
+            &self.config.authentication_config.thread_pool,
+            ep,
+            password,
+            secret,
+        )
+        .await?;
         let res = match auth_outcome {
             crate::sasl::Outcome::Success(key) => {
                 info!("user successfully authenticated");
@@ -110,13 +112,13 @@ impl PoolingBackend {
     pub(crate) async fn authenticate_with_jwt(
         &self,
         ctx: &RequestMonitoring,
-        config: &AuthenticationConfig,
         user_info: &ComputeUserInfo,
         jwt: String,
     ) -> Result<ComputeCredentials, AuthError> {
         match &self.auth_backend {
             crate::auth::Backend::ControlPlane(console, ()) => {
-                config
+                self.config
+                    .authentication_config
                     .jwks_cache
                     .check_jwt(
                         ctx,
@@ -137,7 +139,9 @@ impl PoolingBackend {
                 "JWT login over web auth proxy is not supported",
             )),
             crate::auth::Backend::Local(_) => {
-                let keys = config
+                let keys = self
+                    .config
+                    .authentication_config
                     .jwks_cache
                     .check_jwt(
                         ctx,

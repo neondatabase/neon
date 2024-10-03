@@ -45,6 +45,7 @@ use crate::auth::backend::ComputeUserInfo;
 use crate::auth::endpoint_sni;
 use crate::auth::ComputeUserInfoParseError;
 use crate::config::AuthenticationConfig;
+use crate::config::HttpConfig;
 use crate::config::ProxyConfig;
 use crate::config::TlsConfig;
 use crate::context::RequestMonitoring;
@@ -554,7 +555,7 @@ async fn handle_inner(
 
     match conn_info.auth {
         AuthData::Jwt(jwt) if config.authentication_config.is_auth_broker => {
-            handle_auth_broker_inner(config, ctx, request, conn_info.conn_info, jwt, backend).await
+            handle_auth_broker_inner(ctx, request, conn_info.conn_info, jwt, backend).await
         }
         auth => {
             handle_db_inner(
@@ -627,22 +628,12 @@ async fn handle_db_inner(
             let keys = match auth {
                 AuthData::Password(pw) => {
                     backend
-                        .authenticate_with_password(
-                            ctx,
-                            &config.authentication_config,
-                            &conn_info.user_info,
-                            &pw,
-                        )
+                        .authenticate_with_password(ctx, &conn_info.user_info, &pw)
                         .await?
                 }
                 AuthData::Jwt(jwt) => {
                     backend
-                        .authenticate_with_jwt(
-                            ctx,
-                            &config.authentication_config,
-                            &conn_info.user_info,
-                            jwt,
-                        )
+                        .authenticate_with_jwt(ctx, &conn_info.user_info, jwt)
                         .await?
                 }
             };
@@ -690,7 +681,7 @@ async fn handle_db_inner(
     // Now execute the query and return the result.
     let json_output = match payload {
         Payload::Single(stmt) => {
-            stmt.process(config, cancel, &mut client, parsed_headers)
+            stmt.process(&config.http_config, cancel, &mut client, parsed_headers)
                 .await?
         }
         Payload::Batch(statements) => {
@@ -708,7 +699,7 @@ async fn handle_db_inner(
             }
 
             statements
-                .process(config, cancel, &mut client, parsed_headers)
+                .process(&config.http_config, cancel, &mut client, parsed_headers)
                 .await?
         }
     };
@@ -748,7 +739,6 @@ static HEADERS_TO_FORWARD: &[&HeaderName] = &[
 ];
 
 async fn handle_auth_broker_inner(
-    config: &'static ProxyConfig,
     ctx: &RequestMonitoring,
     request: Request<Incoming>,
     conn_info: ConnInfo,
@@ -756,12 +746,7 @@ async fn handle_auth_broker_inner(
     backend: Arc<PoolingBackend>,
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, SqlOverHttpError> {
     backend
-        .authenticate_with_jwt(
-            ctx,
-            &config.authentication_config,
-            &conn_info.user_info,
-            jwt,
-        )
+        .authenticate_with_jwt(ctx, &conn_info.user_info, jwt)
         .await
         .map_err(HttpConnError::from)?;
 
@@ -799,7 +784,7 @@ async fn handle_auth_broker_inner(
 impl QueryData {
     async fn process(
         self,
-        config: &'static ProxyConfig,
+        config: &'static HttpConfig,
         cancel: CancellationToken,
         client: &mut Client,
         parsed_headers: HttpHeaders,
@@ -873,7 +858,7 @@ impl QueryData {
 impl BatchQueryData {
     async fn process(
         self,
-        config: &'static ProxyConfig,
+        config: &'static HttpConfig,
         cancel: CancellationToken,
         client: &mut Client,
         parsed_headers: HttpHeaders,
@@ -943,7 +928,7 @@ impl BatchQueryData {
 }
 
 async fn query_batch(
-    config: &'static ProxyConfig,
+    config: &'static HttpConfig,
     cancel: CancellationToken,
     transaction: &Transaction<'_>,
     queries: BatchQueryData,
@@ -982,7 +967,7 @@ async fn query_batch(
 }
 
 async fn query_to_json<T: GenericClient>(
-    config: &'static ProxyConfig,
+    config: &'static HttpConfig,
     client: &T,
     data: QueryData,
     current_size: &mut usize,
@@ -1003,9 +988,9 @@ async fn query_to_json<T: GenericClient>(
         rows.push(row);
         // we don't have a streaming response support yet so this is to prevent OOM
         // from a malicious query (eg a cross join)
-        if *current_size > config.http_config.max_response_size_bytes {
+        if *current_size > config.max_response_size_bytes {
             return Err(SqlOverHttpError::ResponseTooLarge(
-                config.http_config.max_response_size_bytes,
+                config.max_response_size_bytes,
             ));
         }
     }
