@@ -94,11 +94,11 @@ impl std::fmt::Display for Backend<'_, (), ()> {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::ControlPlane(api, ()) => match &**api {
-                ControlPlaneBackend::Console(endpoint) => {
+                ControlPlaneBackend::Management(endpoint) => {
                     fmt.debug_tuple("Console").field(&endpoint.url()).finish()
                 }
                 #[cfg(any(test, feature = "testing"))]
-                ControlPlaneBackend::Postgres(endpoint) => {
+                ControlPlaneBackend::PostgresMock(endpoint) => {
                     fmt.debug_tuple("Postgres").field(&endpoint.url()).finish()
                 }
                 #[cfg(test)]

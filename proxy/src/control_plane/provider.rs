@@ -354,11 +354,11 @@ pub(crate) trait Api {
 #[non_exhaustive]
 #[derive(Clone)]
 pub enum ControlPlaneBackend {
-    /// Current Cloud API (V2).
-    Console(neon::Api),
-    /// Local mock of Cloud API (V2).
+    /// Current Management API (V2).
+    Management(neon::Api),
+    /// Local mock control plane.
     #[cfg(any(test, feature = "testing"))]
-    Postgres(mock::Api),
+    PostgresMock(mock::Api),
     /// Internal testing
     #[cfg(test)]
     #[allow(private_interfaces)]
@@ -372,9 +372,9 @@ impl Api for ControlPlaneBackend {
         user_info: &ComputeUserInfo,
     ) -> Result<CachedRoleSecret, errors::GetAuthInfoError> {
         match self {
-            Self::Console(api) => api.get_role_secret(ctx, user_info).await,
+            Self::Management(api) => api.get_role_secret(ctx, user_info).await,
             #[cfg(any(test, feature = "testing"))]
-            Self::Postgres(api) => api.get_role_secret(ctx, user_info).await,
+            Self::PostgresMock(api) => api.get_role_secret(ctx, user_info).await,
             #[cfg(test)]
             Self::Test(_) => {
                 unreachable!("this function should never be called in the test backend")
@@ -388,9 +388,9 @@ impl Api for ControlPlaneBackend {
         user_info: &ComputeUserInfo,
     ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), errors::GetAuthInfoError> {
         match self {
-            Self::Console(api) => api.get_allowed_ips_and_secret(ctx, user_info).await,
+            Self::Management(api) => api.get_allowed_ips_and_secret(ctx, user_info).await,
             #[cfg(any(test, feature = "testing"))]
-            Self::Postgres(api) => api.get_allowed_ips_and_secret(ctx, user_info).await,
+            Self::PostgresMock(api) => api.get_allowed_ips_and_secret(ctx, user_info).await,
             #[cfg(test)]
             Self::Test(api) => api.get_allowed_ips_and_secret(),
         }
@@ -402,9 +402,9 @@ impl Api for ControlPlaneBackend {
         endpoint: EndpointId,
     ) -> anyhow::Result<Vec<AuthRule>> {
         match self {
-            Self::Console(api) => api.get_endpoint_jwks(ctx, endpoint).await,
+            Self::Management(api) => api.get_endpoint_jwks(ctx, endpoint).await,
             #[cfg(any(test, feature = "testing"))]
-            Self::Postgres(api) => api.get_endpoint_jwks(ctx, endpoint).await,
+            Self::PostgresMock(api) => api.get_endpoint_jwks(ctx, endpoint).await,
             #[cfg(test)]
             Self::Test(_api) => Ok(vec![]),
         }
@@ -416,9 +416,9 @@ impl Api for ControlPlaneBackend {
         user_info: &ComputeUserInfo,
     ) -> Result<CachedNodeInfo, errors::WakeComputeError> {
         match self {
-            Self::Console(api) => api.wake_compute(ctx, user_info).await,
+            Self::Management(api) => api.wake_compute(ctx, user_info).await,
             #[cfg(any(test, feature = "testing"))]
-            Self::Postgres(api) => api.wake_compute(ctx, user_info).await,
+            Self::PostgresMock(api) => api.wake_compute(ctx, user_info).await,
             #[cfg(test)]
             Self::Test(api) => api.wake_compute(),
         }

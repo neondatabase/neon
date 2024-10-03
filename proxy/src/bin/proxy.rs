@@ -507,7 +507,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     if let auth::Backend::ControlPlane(api, _) = &config.auth_backend {
-        if let proxy::control_plane::provider::ControlPlaneBackend::Console(api) = &**api {
+        if let proxy::control_plane::provider::ControlPlaneBackend::Management(api) = &**api {
             match (redis_notifications_client, regional_redis_client.clone()) {
                 (None, None) => {}
                 (client1, client2) => {
@@ -659,7 +659,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
                 locks,
                 wake_compute_endpoint_rate_limiter,
             );
-            let api = control_plane::provider::ControlPlaneBackend::Console(api);
+            let api = control_plane::provider::ControlPlaneBackend::Management(api);
             auth::Backend::ControlPlane(MaybeOwned::Owned(api), ())
         }
 
@@ -672,7 +672,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         AuthBackendType::Postgres => {
             let url = args.auth_endpoint.parse()?;
             let api = control_plane::provider::mock::Api::new(url, !args.is_private_access_proxy);
-            let api = control_plane::provider::ControlPlaneBackend::Postgres(api);
+            let api = control_plane::provider::ControlPlaneBackend::PostgresMock(api);
             auth::Backend::ControlPlane(MaybeOwned::Owned(api), ())
         }
     };
