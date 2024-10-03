@@ -158,7 +158,7 @@ def test_import_from_pageserver_small(
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
     env = neon_env_builder.init_start()
 
-    timeline = env.neon_cli.create_branch("test_import_from_pageserver_small")
+    timeline = env.create_branch("test_import_from_pageserver_small")
     endpoint = env.endpoints.create_start("test_import_from_pageserver_small")
 
     num_rows = 3000
@@ -177,7 +177,7 @@ def test_import_from_pageserver_multisegment(
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
     env = neon_env_builder.init_start()
 
-    timeline = env.neon_cli.create_branch("test_import_from_pageserver_multisegment")
+    timeline = env.create_branch("test_import_from_pageserver_multisegment")
     endpoint = env.endpoints.create_start("test_import_from_pageserver_multisegment")
 
     # For `test_import_from_pageserver_multisegment`, we want to make sure that the data

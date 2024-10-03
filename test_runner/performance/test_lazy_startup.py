@@ -33,7 +33,7 @@ def test_lazy_startup(slru: str, neon_env_builder: NeonEnvBuilder, zenbenchmark:
     env = neon_env_builder.init_start()
 
     lazy_slru_download = "true" if slru == "lazy" else "false"
-    tenant, _ = env.neon_cli.create_tenant(
+    tenant, _ = env.create_tenant(
         conf={
             "lazy_slru_download": lazy_slru_download,
         }

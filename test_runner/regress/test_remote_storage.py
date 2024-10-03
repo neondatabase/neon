@@ -230,7 +230,7 @@ def test_remote_storage_upload_queue_retries(
 
     # create tenant with config that will determinstically allow
     # compaction and gc
-    tenant_id, timeline_id = env.neon_cli.create_tenant(
+    tenant_id, timeline_id = env.create_tenant(
         conf={
             # small checkpointing and compaction targets to ensure we generate many upload operations
             "checkpoint_distance": f"{64 * 1024}",
@@ -640,7 +640,9 @@ def test_empty_branch_remote_storage_upload(neon_env_builder: NeonEnvBuilder):
     client = env.pageserver.http_client()
 
     new_branch_name = "new_branch"
-    new_branch_timeline_id = env.neon_cli.create_branch(new_branch_name, "main", env.initial_tenant)
+    new_branch_timeline_id = env.create_branch(
+        new_branch_name, ancestor_branch_name="main", tenant_id=env.initial_tenant
+    )
     assert_nothing_to_upload(client, env.initial_tenant, new_branch_timeline_id)
 
     timelines_before_detach = set(

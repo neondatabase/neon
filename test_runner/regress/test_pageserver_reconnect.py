@@ -14,7 +14,7 @@ from fixtures.neon_fixtures import NeonEnv, PgBin
 # least the code gets exercised.
 def test_pageserver_reconnect(neon_simple_env: NeonEnv, pg_bin: PgBin):
     env = neon_simple_env
-    env.neon_cli.create_branch("test_pageserver_restarts")
+    env.create_branch("test_pageserver_restarts")
     endpoint = env.endpoints.create_start("test_pageserver_restarts")
     n_reconnects = 1000
     timeout = 0.01
@@ -46,7 +46,7 @@ def test_pageserver_reconnect(neon_simple_env: NeonEnv, pg_bin: PgBin):
 # Test handling errors during page server reconnect
 def test_pageserver_reconnect_failure(neon_simple_env: NeonEnv):
     env = neon_simple_env
-    env.neon_cli.create_branch("test_pageserver_reconnect")
+    env.create_branch("test_pageserver_reconnect")
     endpoint = env.endpoints.create_start("test_pageserver_reconnect")
 
     con = endpoint.connect()

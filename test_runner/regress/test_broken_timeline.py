@@ -34,7 +34,7 @@ def test_local_corruption(neon_env_builder: NeonEnvBuilder):
     tenant_timelines: List[Tuple[TenantId, TimelineId, Endpoint]] = []
 
     for _ in range(3):
-        tenant_id, timeline_id = env.neon_cli.create_tenant()
+        tenant_id, timeline_id = env.create_tenant()
 
         endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
         with endpoint.cursor() as cur:
@@ -84,13 +84,11 @@ def test_local_corruption(neon_env_builder: NeonEnvBuilder):
 def test_create_multiple_timelines_parallel(neon_simple_env: NeonEnv):
     env = neon_simple_env
 
-    tenant_id, _ = env.neon_cli.create_tenant()
+    tenant_id, _ = env.create_tenant()
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
         futures = [
-            executor.submit(
-                env.neon_cli.create_timeline, f"test-create-multiple-timelines-{i}", tenant_id
-            )
+            executor.submit(env.create_timeline, f"test-create-multiple-timelines-{i}", tenant_id)
             for i in range(4)
         ]
         for future in futures:
@@ -151,7 +149,7 @@ def test_timeline_init_break_before_checkpoint_recreate(
         ]
     )
 
-    env.neon_cli.create_tenant(env.initial_tenant)
+    env.create_tenant(env.initial_tenant)
     tenant_id = env.initial_tenant
 
     timelines_dir = env.pageserver.timeline_dir(tenant_id)

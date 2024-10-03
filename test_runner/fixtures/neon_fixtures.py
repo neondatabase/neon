@@ -491,7 +491,7 @@ class NeonEnvBuilder:
         log.debug(
             f"Services started, creating initial tenant {env.initial_tenant} and its initial timeline"
         )
-        initial_tenant, initial_timeline = env.neon_cli.create_tenant(
+        initial_tenant, initial_timeline = env.create_tenant(
             tenant_id=env.initial_tenant,
             conf=initial_tenant_conf,
             timeline_id=env.initial_timeline,
@@ -954,8 +954,14 @@ class NeonEnv:
 
     neon_cli - can be used to run the 'neon' CLI tool
 
-    create_tenant() - initializes a new tenant in the page server, returns
-        the tenant id
+    create_tenant() - initializes a new tenant and an initial empty timeline on it,
+        returns the tenant and timeline id
+
+    create_branch() - branch a new timeline from an existing one, returns
+        the new timeline id
+
+    create_timeline() - initializes a new timeline by running initdb, returns
+        the new timeline id
     """
 
     BASE_PAGESERVER_ID = 1
@@ -1310,6 +1316,74 @@ class NeonEnv:
         self.endpoint_counter += 1
         return "ep-" + str(self.endpoint_counter)
 
+    def create_tenant(
+        self,
+        tenant_id: Optional[TenantId] = None,
+        timeline_id: Optional[TimelineId] = None,
+        conf: Optional[Dict[str, Any]] = None,
+        shard_count: Optional[int] = None,
+        shard_stripe_size: Optional[int] = None,
+        placement_policy: Optional[str] = None,
+        set_default: bool = False,
+        aux_file_policy: Optional[AuxFileStore] = None,
+    ) -> Tuple[TenantId, TimelineId]:
+        """
+        Creates a new tenant, returns its id and its initial timeline's id.
+        """
+        tenant_id = tenant_id or TenantId.generate()
+        timeline_id = timeline_id or TimelineId.generate()
+
+        self.neon_cli.create_tenant(
+            tenant_id=tenant_id,
+            timeline_id=timeline_id,
+            pg_version=self.pg_version,
+            conf=conf,
+            shard_count=shard_count,
+            shard_stripe_size=shard_stripe_size,
+            placement_policy=placement_policy,
+            set_default=set_default,
+            aux_file_policy=aux_file_policy,
+        )
+
+        return tenant_id, timeline_id
+
+    def config_tenant(self, tenant_id: Optional[TenantId], conf: Dict[str, str]):
+        """
+        Update tenant config.
+        """
+        tenant_id = tenant_id or self.initial_tenant
+        self.neon_cli.config_tenant(tenant_id, conf)
+
+    def create_branch(
+        self,
+        new_branch_name: str = DEFAULT_BRANCH_NAME,
+        tenant_id: Optional[TenantId] = None,
+        ancestor_branch_name: Optional[str] = None,
+        ancestor_start_lsn: Optional[Lsn] = None,
+        new_timeline_id: Optional[TimelineId] = None,
+    ) -> TimelineId:
+        new_timeline_id = new_timeline_id or TimelineId.generate()
+        tenant_id = tenant_id or self.initial_tenant
+
+        self.neon_cli.create_branch(
+            tenant_id, new_timeline_id, new_branch_name, ancestor_branch_name, ancestor_start_lsn
+        )
+
+        return new_timeline_id
+
+    def create_timeline(
+        self,
+        new_branch_name: str,
+        tenant_id: Optional[TenantId] = None,
+        timeline_id: Optional[TimelineId] = None,
+    ) -> TimelineId:
+        timeline_id = timeline_id or TimelineId.generate()
+        tenant_id = tenant_id or self.initial_tenant
+
+        self.neon_cli.create_timeline(new_branch_name, tenant_id, timeline_id, self.pg_version)
+
+        return timeline_id
+
 
 @pytest.fixture(scope="function")
 def neon_simple_env(
@@ -1559,21 +1633,19 @@ class NeonCli(AbstractNeonCli):
 
     def create_tenant(
         self,
-        tenant_id: Optional[TenantId] = None,
-        timeline_id: Optional[TimelineId] = None,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        pg_version: PgVersion,
         conf: Optional[Dict[str, Any]] = None,
         shard_count: Optional[int] = None,
         shard_stripe_size: Optional[int] = None,
         placement_policy: Optional[str] = None,
         set_default: bool = False,
         aux_file_policy: Optional[AuxFileStore] = None,
-    ) -> Tuple[TenantId, TimelineId]:
+    ):
         """
         Creates a new tenant, returns its id and its initial timeline's id.
         """
-        tenant_id = tenant_id or TenantId.generate()
-        timeline_id = timeline_id or TimelineId.generate()
-
         args = [
             "tenant",
             "create",
@@ -1582,7 +1654,7 @@ class NeonCli(AbstractNeonCli):
             "--timeline-id",
             str(timeline_id),
             "--pg-version",
-            self.env.pg_version,
+            pg_version,
         ]
         if conf is not None:
             args.extend(
@@ -1612,7 +1684,6 @@ class NeonCli(AbstractNeonCli):
 
         res = self.raw_cli(args)
         res.check_returncode()
-        return tenant_id, timeline_id
 
     def import_tenant(self, tenant_id: TenantId):
         args = ["tenant", "import", "--tenant-id", str(tenant_id)]
@@ -1650,8 +1721,9 @@ class NeonCli(AbstractNeonCli):
     def create_timeline(
         self,
         new_branch_name: str,
-        tenant_id: Optional[TenantId] = None,
-        timeline_id: Optional[TimelineId] = None,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        pg_version: PgVersion,
     ) -> TimelineId:
         if timeline_id is None:
             timeline_id = TimelineId.generate()
@@ -1662,11 +1734,11 @@ class NeonCli(AbstractNeonCli):
             "--branch-name",
             new_branch_name,
             "--tenant-id",
-            str(tenant_id or self.env.initial_tenant),
+            str(tenant_id),
             "--timeline-id",
             str(timeline_id),
             "--pg-version",
-            self.env.pg_version,
+            pg_version,
         ]
 
         res = self.raw_cli(cmd)
@@ -1676,23 +1748,21 @@ class NeonCli(AbstractNeonCli):
 
     def create_branch(
         self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
         new_branch_name: str = DEFAULT_BRANCH_NAME,
         ancestor_branch_name: Optional[str] = None,
-        tenant_id: Optional[TenantId] = None,
         ancestor_start_lsn: Optional[Lsn] = None,
-        new_timeline_id: Optional[TimelineId] = None,
-    ) -> TimelineId:
-        if new_timeline_id is None:
-            new_timeline_id = TimelineId.generate()
+    ):
         cmd = [
             "timeline",
             "branch",
             "--branch-name",
             new_branch_name,
             "--timeline-id",
-            str(new_timeline_id),
+            str(timeline_id),
             "--tenant-id",
-            str(tenant_id or self.env.initial_tenant),
+            str(tenant_id),
         ]
         if ancestor_branch_name is not None:
             cmd.extend(["--ancestor-branch-name", ancestor_branch_name])
@@ -1701,8 +1771,6 @@ class NeonCli(AbstractNeonCli):
 
         res = self.raw_cli(cmd)
         res.check_returncode()
-
-        return TimelineId(str(new_timeline_id))
 
     def list_timelines(self, tenant_id: Optional[TenantId] = None) -> List[Tuple[str, TimelineId]]:
         """
@@ -1841,8 +1909,9 @@ class NeonCli(AbstractNeonCli):
         branch_name: str,
         pg_port: int,
         http_port: int,
+        tenant_id: TenantId,
+        pg_version: PgVersion,
         endpoint_id: Optional[str] = None,
-        tenant_id: Optional[TenantId] = None,
         hot_standby: bool = False,
         lsn: Optional[Lsn] = None,
         pageserver_id: Optional[int] = None,
@@ -1852,11 +1921,11 @@ class NeonCli(AbstractNeonCli):
             "endpoint",
             "create",
             "--tenant-id",
-            str(tenant_id or self.env.initial_tenant),
+            str(tenant_id),
             "--branch-name",
             branch_name,
             "--pg-version",
-            self.env.pg_version,
+            pg_version,
         ]
         if lsn is not None:
             args.extend(["--lsn", str(lsn)])
@@ -3953,6 +4022,7 @@ class Endpoint(PgProtocol, LogUtils):
             hot_standby=hot_standby,
             pg_port=self.pg_port,
             http_port=self.http_port,
+            pg_version=self.env.pg_version,
             pageserver_id=pageserver_id,
             allow_multiple=allow_multiple,
         )
@@ -5282,7 +5352,12 @@ def fork_at_current_lsn(
     the WAL up to that LSN to arrive in the pageserver before creating the branch.
     """
     current_lsn = endpoint.safe_psql("SELECT pg_current_wal_lsn()")[0][0]
-    return env.neon_cli.create_branch(new_branch_name, ancestor_branch_name, tenant_id, current_lsn)
+    return env.create_branch(
+        new_branch_name=new_branch_name,
+        tenant_id=tenant_id,
+        ancestor_branch_name=ancestor_branch_name,
+        ancestor_start_lsn=current_lsn,
+    )
 
 
 def import_timeline_from_vanilla_postgres(

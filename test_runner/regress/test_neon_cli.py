@@ -44,12 +44,12 @@ def test_cli_timeline_list(neon_simple_env: NeonEnv):
     helper_compare_timeline_list(pageserver_http_client, env, env.initial_tenant)
 
     # Create a branch for us
-    main_timeline_id = env.neon_cli.create_branch("test_cli_branch_list_main")
+    main_timeline_id = env.create_branch("test_cli_branch_list_main")
     helper_compare_timeline_list(pageserver_http_client, env, env.initial_tenant)
 
     # Create a nested branch
-    nested_timeline_id = env.neon_cli.create_branch(
-        "test_cli_branch_list_nested", "test_cli_branch_list_main"
+    nested_timeline_id = env.create_branch(
+        "test_cli_branch_list_nested", ancestor_branch_name="test_cli_branch_list_main"
     )
     helper_compare_timeline_list(pageserver_http_client, env, env.initial_tenant)
 
@@ -77,13 +77,13 @@ def test_cli_tenant_list(neon_simple_env: NeonEnv):
     helper_compare_tenant_list(pageserver_http_client, env)
 
     # Create new tenant
-    tenant1, _ = env.neon_cli.create_tenant()
+    tenant1, _ = env.create_tenant()
 
     # check tenant1 appeared
     helper_compare_tenant_list(pageserver_http_client, env)
 
     # Create new tenant
-    tenant2, _ = env.neon_cli.create_tenant()
+    tenant2, _ = env.create_tenant()
 
     # check tenant2 appeared
     helper_compare_tenant_list(pageserver_http_client, env)
@@ -98,7 +98,7 @@ def test_cli_tenant_list(neon_simple_env: NeonEnv):
 
 def test_cli_tenant_create(neon_simple_env: NeonEnv):
     env = neon_simple_env
-    tenant_id, _ = env.neon_cli.create_tenant()
+    tenant_id, _ = env.create_tenant()
     timelines = env.neon_cli.list_timelines(tenant_id)
 
     # an initial timeline should be created upon tenant creation

@@ -18,7 +18,7 @@ from fixtures.neon_fixtures import NeonEnvBuilder, WalCraft
 )
 def test_crafted_wal_end(neon_env_builder: NeonEnvBuilder, wal_type: str):
     env = neon_env_builder.init_start()
-    env.neon_cli.create_branch("test_crafted_wal_end")
+    env.create_branch("test_crafted_wal_end")
     env.pageserver.allowed_errors.extend(
         [
             # seems like pageserver stop triggers these

@@ -85,7 +85,7 @@ def test_sharding_autosplit(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
     tenants = {}
     for tenant_id in set(TenantId.generate() for _i in range(0, tenant_count)):
         timeline_id = TimelineId.generate()
-        env.neon_cli.create_tenant(tenant_id, timeline_id, conf=tenant_conf)
+        env.create_tenant(tenant_id, timeline_id, conf=tenant_conf)
         endpoint = env.endpoints.create("main", tenant_id=tenant_id)
         tenants[tenant_id] = TenantState(timeline_id, endpoint)
         endpoint.start()

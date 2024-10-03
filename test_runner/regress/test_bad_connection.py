@@ -22,7 +22,7 @@ def test_compute_pageserver_connection_stress(neon_env_builder: NeonEnvBuilder):
     pageserver_http = env.pageserver.http_client()
     pageserver_http.configure_failpoints(("simulated-bad-compute-connection", "50%return(15)"))
 
-    env.neon_cli.create_branch("test_compute_pageserver_connection_stress")
+    env.create_branch("test_compute_pageserver_connection_stress")
     endpoint = env.endpoints.create_start("test_compute_pageserver_connection_stress")
 
     pg_conn = endpoint.connect()
