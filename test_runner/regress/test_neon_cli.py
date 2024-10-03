@@ -54,7 +54,10 @@ def test_cli_timeline_list(neon_simple_env: NeonEnv):
     helper_compare_timeline_list(pageserver_http_client, env, env.initial_tenant)
 
     # Check that all new branches are visible via CLI
-    timelines_cli = [timeline_id for (_, timeline_id) in env.neon_cli.list_timelines()]
+    timelines_cli = [
+        timeline_id
+        for (_, timeline_id) in env.neon_cli.list_timelines(tenant_id=env.initial_tenant)
+    ]
 
     assert main_timeline_id in timelines_cli
     assert nested_timeline_id in timelines_cli

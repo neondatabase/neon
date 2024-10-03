@@ -98,27 +98,15 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
     )
 
     def import_tar(base, wal):
-        env.neon_cli.raw_cli(
-            [
-                "timeline",
-                "import",
-                "--tenant-id",
-                str(tenant),
-                "--timeline-id",
-                str(timeline),
-                "--branch-name",
-                branch_name,
-                "--base-lsn",
-                start_lsn,
-                "--base-tarfile",
-                base,
-                "--end-lsn",
-                end_lsn,
-                "--wal-tarfile",
-                wal,
-                "--pg-version",
-                env.pg_version,
-            ]
+        env.neon_cli.timeline_import(
+            tenant_id=tenant,
+            timeline_id=timeline,
+            new_branch_name=branch_name,
+            base_tarfile=base,
+            base_lsn=start_lsn,
+            wal_tarfile=wal,
+            end_lsn=end_lsn,
+            pg_version=env.pg_version,
         )
 
     # Importing empty file fails
@@ -268,23 +256,13 @@ def _import(
     branch_name = "import_from_pageserver"
     client = env.pageserver.http_client()
     env.pageserver.tenant_create(tenant)
-    env.neon_cli.raw_cli(
-        [
-            "timeline",
-            "import",
-            "--tenant-id",
-            str(tenant),
-            "--timeline-id",
-            str(timeline),
-            "--branch-name",
-            branch_name,
-            "--base-lsn",
-            str(lsn),
-            "--base-tarfile",
-            str(tar_output_file),
-            "--pg-version",
-            env.pg_version,
-        ]
+    env.neon_cli.timeline_import(
+        tenant_id=tenant,
+        timeline_id=timeline,
+        new_branch_name=branch_name,
+        base_lsn=lsn,
+        base_tarfile=tar_output_file,
+        pg_version=env.pg_version,
     )
 
     # Wait for data to land in s3
