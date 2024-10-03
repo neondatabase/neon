@@ -16,7 +16,7 @@ aws-sdk-s3.workspace = true
 bytes.workspace = true
 camino = { workspace = true, features = ["serde1"] }
 humantime-serde.workspace = true
-hyper0 = { workspace = true, features = ["stream"] }
+hyper = { workspace = true, features = ["stream"] }
 futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true

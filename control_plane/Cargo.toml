@@ -14,7 +14,7 @@ humantime.workspace = true
 nix.workspace = true
 once_cell.workspace = true
 humantime-serde.workspace = true
-hyper0.workspace = true
+hyper.workspace = true
 regex.workspace = true
 reqwest = { workspace = true, features = ["blocking", "json"] }
 scopeguard.workspace = true

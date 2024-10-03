@@ -1,7 +1,7 @@
 //! Tracing wrapper for Hyper HTTP server
 
-use hyper0::HeaderMap;
-use hyper0::{Body, Request, Response};
+use hyper::HeaderMap;
+use hyper::{Body, Request, Response};
 use std::future::Future;
 use tracing::Instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;

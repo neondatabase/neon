@@ -13,8 +13,6 @@ pub mod http;
 pub mod import_datadir;
 pub mod l0_flush;
 
-extern crate hyper0 as hyper;
-
 use futures::{stream::FuturesUnordered, StreamExt};
 pub use pageserver_api::keyspace;
 use tokio_util::sync::CancellationToken;

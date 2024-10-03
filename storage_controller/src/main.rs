@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Context};
 use clap::Parser;
-use hyper0::Uri;
+use hyper::Uri;
 use metrics::launch_timestamp::LaunchTimestamp;
 use metrics::BuildInfo;
 use std::path::PathBuf;
@@ -324,7 +324,7 @@ async fn async_main() -> anyhow::Result<()> {
 
     // Start HTTP server
     let server_shutdown = CancellationToken::new();
-    let server = hyper0::Server::from_tcp(http_listener)?
+    let server = hyper::Server::from_tcp(http_listener)?
         .serve(router_service)
         .with_graceful_shutdown({
             let server_shutdown = server_shutdown.clone();

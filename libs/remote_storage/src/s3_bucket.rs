@@ -33,7 +33,7 @@ use aws_smithy_types::{body::SdkBody, DateTime};
 use aws_smithy_types::{byte_stream::ByteStream, date_time::ConversionError};
 use bytes::Bytes;
 use futures::stream::Stream;
-use hyper0::Body;
+use hyper::Body;
 use scopeguard::ScopeGuard;
 use tokio_util::sync::CancellationToken;
 use utils::backoff;
