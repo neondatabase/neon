@@ -134,9 +134,11 @@ RUN wget https://download.osgeo.org/postgis/source/postgis-3.5.0.tar.gz -O postg
     find /usr/local/pgsql -type f | sed 's|^/usr/local/pgsql/||' > /before.txt &&\
     ./autogen.sh && \
     ./configure --with-sfcgal=/usr/local/bin/sfcgal-config && \
+    make -j $(getconf _NPROCESSORS_ONLN) && \
     make -j $(getconf _NPROCESSORS_ONLN) install && \
     cd extensions/postgis && \
     make clean && \
+    make -j $(getconf _NPROCESSORS_ONLN) && \
     make -j $(getconf _NPROCESSORS_ONLN) install && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/postgis.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/postgis_raster.control && \
@@ -157,7 +159,7 @@ RUN wget https://download.osgeo.org/postgis/source/postgis-3.5.0.tar.gz -O postg
 # not version-specific
 # last release v3.6.2 - Mar 30, 2023
 RUN wget https://github.com/pgRouting/pgrouting/archive/v3.6.2.tar.gz -O pgrouting.tar.gz && \
-    echo "cac297c07d34460887c4f3b522b35c470138760fe358e351ad1db4edb6ee306e pgrouting.tar.gz" | sha256sum --check && \
+    echo "f4a1ed79d6f714e52548eca3bb8e5593c6745f1bde92eb5fb858efd8984dffa2 pgrouting.tar.gz" | sha256sum --check && \
     mkdir pgrouting-src && cd pgrouting-src && tar xzf ../pgrouting.tar.gz --strip-components=1 -C . && \
     mkdir build && cd build && \
     cmake -DCMAKE_BUILD_TYPE=Release .. && \
