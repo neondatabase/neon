@@ -5193,7 +5193,6 @@ dependencies = [
  "fail",
  "futures",
  "hex",
- "http 1.1.0",
  "humantime",
  "hyper 0.14.30",
  "metrics",
