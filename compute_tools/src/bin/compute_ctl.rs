@@ -402,8 +402,7 @@ fn start_postgres(
 ) -> Result<(Option<PostgresHandle>, StartPostgresResult)> {
     // We got all we need, update the state.
     let mut state = compute.state.lock().unwrap();
-    state.status = ComputeStatus::Init;
-    compute.state_changed.notify_all();
+    state.set_status(ComputeStatus::Init, &compute.state_changed);
 
     info!(
         "running compute with features: {:?}",

@@ -109,6 +109,18 @@ impl ComputeState {
             metrics: ComputeMetrics::default(),
         }
     }
+
+    pub fn set_status(&mut self, status: ComputeStatus, state_changed: &Condvar) {
+        let prev = self.status;
+        info!("Changing compute status from {} to {}", prev, status);
+        self.status = status;
+        state_changed.notify_all();
+    }
+
+    pub fn set_failed_status(&mut self, err: anyhow::Error, state_changed: &Condvar) {
+        self.error = Some(format!("{err:?}"));
+        self.set_status(ComputeStatus::Failed, state_changed);
+    }
 }
 
 impl Default for ComputeState {
@@ -303,15 +315,12 @@ impl ComputeNode {
 
     pub fn set_status(&self, status: ComputeStatus) {
         let mut state = self.state.lock().unwrap();
-        state.status = status;
-        self.state_changed.notify_all();
+        state.set_status(status, &self.state_changed);
     }
 
     pub fn set_failed_status(&self, err: anyhow::Error) {
         let mut state = self.state.lock().unwrap();
-        state.error = Some(format!("{err:?}"));
-        state.status = ComputeStatus::Failed;
-        self.state_changed.notify_all();
+        state.set_failed_status(err, &self.state_changed);
     }
 
     pub fn get_status(&self) -> ComputeStatus {
