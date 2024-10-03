@@ -597,7 +597,6 @@ def test_versions_mismatch(
     )
     compatibility_snapshot_dir = Path(compatibility_snapshot_dir_env).resolve()
 
-    neon_env_builder.version_combination = combination
     neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.from_repo_dir(
         compatibility_snapshot_dir / "repo",

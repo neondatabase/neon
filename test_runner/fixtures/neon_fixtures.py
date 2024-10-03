@@ -412,6 +412,7 @@ class NeonEnvBuilder:
         test_name: str,
         top_output_dir: Path,
         test_output_dir: Path,
+        request: FixtureRequest,
         test_overlay_dir: Optional[Path] = None,
         pageserver_remote_storage: Optional[RemoteStorage] = None,
         # toml that will be decomposed into `--config-override` flags during `pageserver --init`
@@ -496,6 +497,8 @@ class NeonEnvBuilder:
         self.compatibility_neon_binpath = compatibility_neon_binpath
         self.compatibility_pg_distrib_dir = compatibility_pg_distrib_dir
         self.version_combination: Optional[int] = None
+        if "combination" in request._pyfuncitem.callspec.params:
+            self.version_combination = request._pyfuncitem.callspec.params["combination"]
         self.mixdir = self.test_output_dir / "mixdir_neon"
 
     def init_configs(self, default_remote_storage_if_missing: bool = True) -> NeonEnv:
@@ -1483,6 +1486,7 @@ def neon_env_builder(
         compatibility_neon_binpath=compatibility_neon_binpath,
         pg_distrib_dir=pg_distrib_dir,
         compatibility_pg_distrib_dir=compatibility_pg_distrib_dir,
+        request=request,
         pg_version=pg_version,
         run_id=run_id,
         preserve_database_files=cast(bool, pytestconfig.getoption("--preserve-database-files")),
