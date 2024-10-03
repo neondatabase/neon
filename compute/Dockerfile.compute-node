@@ -182,18 +182,16 @@ ARG PG_VERSION
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
 RUN apt update && \
-    apt install --no-install-recommends -y ninja-build python3-dev libncurses5 binutils clang
+    apt install --no-install-recommends -y ninja-build python3-dev libncurses5 binutils clang libstdc++-10-dev
 
 # plv8 3.2.3 supports v17
 # last release v3.2.3 - Sep 7, 2024
-# TODO last version uses cmake and has a different dependencies, update this
-# TODO also don't forget to update ln -s hack below
-RUN case "${PG_VERSION}" in "v17") \
-    echo "v17 extensions are not supported yet. Quit" && exit 0;; \
-    esac && \
-    wget https://github.com/plv8/plv8/archive/refs/tags/v3.1.10.tar.gz -O plv8.tar.gz && \
-    echo "7096c3290928561f0d4901b7a52794295dc47f6303102fae3f8e42dd575ad97d plv8.tar.gz" | sha256sum --check && \
-    mkdir plv8-src && cd plv8-src && tar xzf ../plv8.tar.gz --strip-components=1 -C . && \
+# clone the repo instead of downloading the release tarball because plv8 has submodule dependencies
+# and the release tarball doesn't include them
+ENV PLV8_TAG=v3.2.3
+RUN set -e \
+    && git clone --recurse-submodules --depth 1 --branch ${PLV8_TAG} https://github.com/plv8/plv8.git plv8-src && \
+    cd plv8-src && \
     # generate and copy upgrade scripts
     mkdir -p upgrade && ./generate_upgrade.sh 3.1.10 && \
     cp upgrade/* /usr/local/pgsql/share/extension/ && \
@@ -205,6 +203,9 @@ RUN case "${PG_VERSION}" in "v17") \
     cd /usr/local/pgsql/lib/ && \
     ln -s plv8-3.1.10.so plv8-3.1.5.so && \
     ln -s plv8-3.1.10.so plv8-3.1.8.so && \
+    # TODO test this case
+    ln -s plv8-3.2.3.so plv8-3.1.8.so && \
+    ln -s plv8-3.2.3.so plv8-3.1.5.so && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/plv8.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/plcoffee.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/plls.control
