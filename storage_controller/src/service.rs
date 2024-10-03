@@ -3035,6 +3035,9 @@ impl Service {
                     .await
                     .map_err(|e| passthrough_api_error(&latest, e))?;
 
+                // We propagate timeline creations to all attached locations such that a compute
+                // for the new timeline is able to start regardless of the current state of the
+                // tenant shard reconciliation.
                 for location in locations.other {
                     tracing::info!(
                         "Creating timeline on shard {}/{}, stale attached to node {} in generation {:?}",
