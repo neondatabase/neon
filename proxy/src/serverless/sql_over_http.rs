@@ -38,7 +38,6 @@ use crate::error::{ErrorKind, ReportableError, UserFacingError};
 use crate::metrics::{HttpDirection, Metrics};
 use crate::proxy::{run_until_cancelled, NeonOptions};
 use crate::serverless::backend::HttpConnError;
-
 use crate::usage_metrics::{MetricCounter, MetricCounterRecorder};
 use crate::{DbName, RoleName};
 
