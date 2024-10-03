@@ -2613,6 +2613,9 @@ def test_storage_controller_validate_during_migration(neon_env_builder: NeonEnvB
 class MigrationFailpoints(Enum):
     # While only the origin is attached
     PRE_GENERATION_INC = "reconciler-live-migrate-pre-generation-inc"
+    # While only the origin is attached and the db was updated to
+    # point to the new location
+    PRE_AWAIT_LSN = "reconciler-live-migrate-pre-await-lsn"
     # While both locations are attached
     POST_NOTIFY = "reconciler-live-migrate-post-notify"
     # While only the destination is attached
@@ -2638,6 +2641,12 @@ def test_storage_controller_proxy_during_migration(
     """
     neon_env_builder.num_pageservers = 2
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
+
+    neon_env_builder.storage_controller_config = {
+        # Publish long reconcile metric early
+        "long_reconcile_threshold": "5s",
+    }
+
     env = neon_env_builder.init_configs()
     env.start()
 
@@ -2645,12 +2654,36 @@ def test_storage_controller_proxy_during_migration(
     timeline_id = env.initial_timeline
     env.neon_cli.create_tenant(tenant_id, timeline_id)
 
+    # The test stalls a reconcile on purpose to check if the long running
+    # reconcile alert fires.
+    env.storage_controller.allowed_errors.extend(
+        [".*Reconcile passed the long running threshold.*"]
+    )
+
     # Activate a failpoint that will cause live migration to get stuck _after_ the generation has been issued
     # to the new pageserver: this should result in requests routed to the new pageserver.
     env.storage_controller.configure_failpoints((migration_failpoint.value, "pause"))
 
     origin_pageserver = env.get_tenant_pageserver(tenant_id)
     dest_ps_id = [p.id for p in env.pageservers if p.id != origin_pageserver.id][0]
+
+    def long_migration_metric_published():
+        assert (
+            env.storage_controller.get_metric_value(
+                "storage_controller_reconcile_long_running_total",
+                filter={"tenant_id": str(tenant_id), "shard_number": "0"},
+            )
+            == 1
+        )
+
+    def assert_long_migration_metric_not_published():
+        assert (
+            env.storage_controller.get_metric_value(
+                "storage_controller_reconcile_long_running_total",
+                filter={"tenant_id": str(tenant_id), "shard_number": "0"},
+            )
+            is None
+        )
 
     try:
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
@@ -2682,9 +2715,14 @@ def test_storage_controller_proxy_during_migration(
                 # We expect request to land on the origin
                 assert tenant_info["generation"] == 1
 
+            wait_until(10, 1, long_migration_metric_published)
+
             # Eventually migration completes
             env.storage_controller.configure_failpoints((migration_failpoint.value, "off"))
             migrate_fut.result()
+
+            assert_long_migration_metric_not_published()
+
     except:
         # Always disable 'pause' failpoints, even on failure, to avoid hanging in shutdown
         env.storage_controller.configure_failpoints((migration_failpoint.value, "off"))
@@ -2807,3 +2845,77 @@ def test_shard_preferred_azs(neon_env_builder: NeonEnvBuilder):
         attached_to = shard["node_attached"]
         expected_az = env.get_pageserver(attached_to).az_id
         assert shard["preferred_az_id"] == expected_az
+
+
+@run_only_on_default_postgres("Postgres version makes no difference here")
+@pytest.mark.parametrize(
+    "migration_failpoint",
+    [
+        MigrationFailpoints.PRE_GENERATION_INC,
+        MigrationFailpoints.PRE_AWAIT_LSN,
+        MigrationFailpoints.POST_NOTIFY,
+        MigrationFailpoints.POST_DETACH,
+    ],
+)
+def test_timeline_delete_mid_live_migration(neon_env_builder: NeonEnvBuilder, migration_failpoint):
+    neon_env_builder.num_pageservers = 2
+    env = neon_env_builder.init_configs()
+    env.start()
+
+    tenant_id = TenantId.generate()
+    timeline_id = TimelineId.generate()
+    env.storage_controller.tenant_create(tenant_id, placement_policy={"Attached": 1})
+    env.storage_controller.pageserver_api().timeline_create(
+        pg_version=PgVersion.NOT_SET, tenant_id=tenant_id, new_timeline_id=timeline_id
+    )
+
+    shard_zero = TenantShardId(tenant_id, 0, 0)
+    locations = env.storage_controller.get_tenants_placement()[str(shard_zero)]
+
+    assert locations["observed"] == locations["intent"]
+    assert locations["observed"]["attached"] is not None
+    assert len(locations["observed"]["secondary"]) > 0
+
+    attached_location = locations["observed"]["attached"]
+    secondary_location = locations["observed"]["secondary"][0]
+
+    env.storage_controller.configure_failpoints((migration_failpoint.value, "pause"))
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            migrate_fut = executor.submit(
+                env.storage_controller.tenant_shard_migrate,
+                shard_zero,
+                secondary_location,
+            )
+
+            def has_hit_migration_failpoint():
+                expr = f"at failpoint {migration_failpoint.value}"
+                log.info(expr)
+                assert env.storage_controller.log_contains(expr)
+
+            wait_until(10, 1, has_hit_migration_failpoint)
+
+            env.storage_controller.pageserver_api().timeline_delete(
+                tenant_id=tenant_id, timeline_id=timeline_id
+            )
+
+            # Eventually migration completes
+            env.storage_controller.configure_failpoints((migration_failpoint.value, "off"))
+            migrate_fut.result()
+
+            # Ensure that we detached from the old attached location
+            with pytest.raises(PageserverApiException) as exc:
+                env.get_pageserver(attached_location).http_client().timeline_list(tenant_id)
+            assert exc.value.status_code == 404
+
+            # Ensure the timeline is not present on the new attached location
+            client = env.get_pageserver(secondary_location).http_client()
+            assert timeline_id not in {
+                TimelineId(b["timeline_id"]) for b in client.timeline_list(tenant_id)
+            }, f"deleted timeline found on {secondary_location}"
+
+    except:
+        # Always disable 'pause' failpoints, even on failure, to avoid hanging in shutdown
+        env.storage_controller.configure_failpoints((migration_failpoint.value, "off"))
+        raise

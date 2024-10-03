@@ -23,6 +23,7 @@ crc32c.workspace = true
 fail.workspace = true
 hex.workspace = true
 humantime.workspace = true
+http.workspace = true
 hyper.workspace = true
 futures.workspace = true
 once_cell.workspace = true
