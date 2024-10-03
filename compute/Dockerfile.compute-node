@@ -201,11 +201,10 @@ RUN set -e \
     find /usr/local/pgsql/ -name "plv8-*.so" | xargs strip && \
     # don't break computes with installed old version of plv8
     cd /usr/local/pgsql/lib/ && \
-    ln -s plv8-3.1.10.so plv8-3.1.5.so && \
-    ln -s plv8-3.1.10.so plv8-3.1.8.so && \
-    # TODO test this case
+    # TODO test this case !!
     ln -s plv8-3.2.3.so plv8-3.1.8.so && \
     ln -s plv8-3.2.3.so plv8-3.1.5.so && \
+    ln -s plv8-3.2.3.so plv8-3.1.10.so && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/plv8.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/plcoffee.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/plls.control
