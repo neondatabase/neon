@@ -164,8 +164,8 @@ pub struct Listing {
 /// Options for downloads. The default value is a plain GET.
 #[derive(Default)]
 pub struct DownloadOpts {
-    /// If given, returns DownloadError::Unmodified if the object still has the
-    /// same ETag (using If-None-Match).
+    /// If given, returns [`DownloadError::Unmodified`] if the object still has
+    /// the same ETag (using If-None-Match).
     pub etag: Option<Etag>,
 }
 

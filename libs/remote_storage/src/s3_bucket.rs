@@ -290,7 +290,7 @@ impl S3Bucket {
                 // status against http_types::StatusCode instead of pulling it.
                 if e.raw().status().as_u16() == StatusCode::NotModified =>
             {
-                // Count an unmodified heatmap as a success.
+                // Count an unmodified file as a success.
                 crate::metrics::BUCKET_METRICS.req_seconds.observe_elapsed(
                     kind,
                     AttemptOutcome::Ok,
