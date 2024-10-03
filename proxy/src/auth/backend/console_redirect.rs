@@ -31,6 +31,7 @@ pub(crate) enum WebAuthError {
     Io(#[from] std::io::Error),
 }
 
+#[derive(Debug)]
 pub struct ConsoleRedirectBackend {
     console_uri: reqwest::Url,
 }
@@ -70,10 +71,6 @@ pub(crate) fn new_psql_session_id() -> String {
 impl ConsoleRedirectBackend {
     pub fn new(console_uri: reqwest::Url) -> Self {
         Self { console_uri }
-    }
-
-    pub(super) fn url(&self) -> &reqwest::Url {
-        &self.console_uri
     }
 
     pub(crate) async fn authenticate(

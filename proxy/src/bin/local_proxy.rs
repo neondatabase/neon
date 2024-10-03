@@ -291,7 +291,7 @@ fn build_config(args: &LocalProxyCliArgs) -> anyhow::Result<&'static ProxyConfig
 /// auth::Backend is created at proxy startup, and lives forever.
 fn build_auth_backend(
     args: &LocalProxyCliArgs,
-) -> anyhow::Result<&'static auth::Backend<'static, (), ()>> {
+) -> anyhow::Result<&'static auth::Backend<'static, ()>> {
     let auth_backend = proxy::auth::Backend::Local(proxy::auth::backend::MaybeOwned::Owned(
         LocalBackend::new(args.compute),
     ));

@@ -42,7 +42,7 @@ pub(crate) struct PoolingBackend {
     pub(crate) local_pool: Arc<LocalConnPool<tokio_postgres::Client>>,
     pub(crate) pool: Arc<GlobalConnPool<tokio_postgres::Client>>,
     pub(crate) config: &'static ProxyConfig,
-    pub(crate) auth_backend: &'static crate::auth::Backend<'static, (), ()>,
+    pub(crate) auth_backend: &'static crate::auth::Backend<'static, ()>,
     pub(crate) endpoint_rate_limiter: Arc<EndpointRateLimiter>,
 }
 
@@ -135,9 +135,6 @@ impl PoolingBackend {
                     keys: crate::auth::backend::ComputeCredentialKeys::None,
                 })
             }
-            crate::auth::Backend::ConsoleRedirect(_, ()) => Err(AuthError::auth_failed(
-                "JWT login over web auth proxy is not supported",
-            )),
             crate::auth::Backend::Local(_) => {
                 let keys = self
                     .config
@@ -264,7 +261,7 @@ impl PoolingBackend {
         info!(%conn_id, "local_pool: opening a new connection '{conn_info}'");
 
         let mut node_info = match &self.auth_backend {
-            auth::Backend::ControlPlane(_, ()) | auth::Backend::ConsoleRedirect(_, ()) => {
+            auth::Backend::ControlPlane(_, ()) => {
                 unreachable!("only local_proxy can connect to local postgres")
             }
             auth::Backend::Local(local) => local.node_info.clone(),
