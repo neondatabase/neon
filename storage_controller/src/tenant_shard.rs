@@ -425,6 +425,22 @@ pub(crate) enum ReconcileNeeded {
     Yes,
 }
 
+/// Pending modification to the observed state of a tenant shard.
+/// Produced by [`Reconciler::observed_deltas`] and applied in [`Service::process_result`].
+pub(crate) enum ObservedStateDelta {
+    Upsert(Box<(NodeId, ObservedStateLocation)>),
+    Delete(NodeId),
+}
+
+impl ObservedStateDelta {
+    pub(crate) fn node_id(&self) -> &NodeId {
+        match self {
+            Self::Upsert(up) => &up.0,
+            Self::Delete(nid) => nid,
+        }
+    }
+}
+
 /// When a reconcile task completes, it sends this result object
 /// to be applied to the primary TenantShard.
 pub(crate) struct ReconcileResult {
@@ -437,7 +453,7 @@ pub(crate) struct ReconcileResult {
 
     pub(crate) tenant_shard_id: TenantShardId,
     pub(crate) generation: Option<Generation>,
-    pub(crate) observed: ObservedState,
+    pub(crate) observed_deltas: Vec<ObservedStateDelta>,
 
     /// Set [`TenantShard::pending_compute_notification`] from this flag
     pub(crate) pending_compute_notification: bool,
@@ -1123,7 +1139,7 @@ impl TenantShard {
             result,
             tenant_shard_id: reconciler.tenant_shard_id,
             generation: reconciler.generation,
-            observed: reconciler.observed,
+            observed_deltas: reconciler.observed_deltas(),
             pending_compute_notification: reconciler.compute_notify_failure,
         }
     }
@@ -1177,6 +1193,7 @@ impl TenantShard {
             reconciler_config,
             config: self.config.clone(),
             observed: self.observed.clone(),
+            original_observed: self.observed.clone(),
             compute_hook: compute_hook.clone(),
             service_config: service_config.clone(),
             _gate_guard: gate_guard,

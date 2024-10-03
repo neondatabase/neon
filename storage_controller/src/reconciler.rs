@@ -22,7 +22,7 @@ use utils::sync::gate::GateGuard;
 
 use crate::compute_hook::{ComputeHook, NotifyError};
 use crate::node::Node;
-use crate::tenant_shard::{IntentState, ObservedState, ObservedStateLocation};
+use crate::tenant_shard::{IntentState, ObservedState, ObservedStateDelta, ObservedStateLocation};
 
 const DEFAULT_HEATMAP_PERIOD: &str = "60s";
 
@@ -45,7 +45,14 @@ pub(super) struct Reconciler {
     pub(crate) reconciler_config: ReconcilerConfig,
 
     pub(crate) config: TenantConfig,
+
+    /// Observed state from the point of view of the reconciler.
+    /// This gets updated as the reconciliation makes progress.
     pub(crate) observed: ObservedState,
+
+    /// Snapshot of the observed state at the point when the reconciler
+    /// was spawned.
+    pub(crate) original_observed: ObservedState,
 
     pub(crate) service_config: service::Config,
 
@@ -662,9 +669,10 @@ impl Reconciler {
                 Some(conf) => {
                     // Pageserver returned a state: update it in observed.  This may still be an indeterminate (None) state,
                     // if internally the pageserver's TenantSlot was being mutated (e.g. some long running API call is still running)
-                    self.observed
-                        .locations
-                        .insert(attached_node.get_id(), ObservedStateLocation { conf });
+                    self.observed.locations.insert(
+                        attached_node.get_id(),
+                        ObservedStateLocation { conf: conf.clone() },
+                    );
                 }
                 None => {
                     // Pageserver returned 404: we have confirmation that there is no state for this shard on that pageserver.
@@ -844,6 +852,40 @@ impl Reconciler {
         } else {
             Ok(())
         }
+    }
+
+    /// Compare the observed state snapshot from when the reconcile was created
+    /// with the final observed state in order to generate observed state deltas.
+    pub(crate) fn observed_deltas(&self) -> Vec<ObservedStateDelta> {
+        let mut deltas = Vec::default();
+
+        for (node_id, location) in &self.observed.locations {
+            let previous_location = self.original_observed.locations.get(node_id);
+            match previous_location {
+                Some(prev) => {
+                    if location.conf != prev.conf {
+                        deltas.push(ObservedStateDelta::Upsert(Box::new((
+                            *node_id,
+                            location.clone(),
+                        ))));
+                    }
+                }
+                None => {
+                    deltas.push(ObservedStateDelta::Upsert(Box::new((
+                        *node_id,
+                        location.clone(),
+                    ))));
+                }
+            }
+        }
+
+        for node_id in self.original_observed.locations.keys() {
+            if !self.observed.locations.contains_key(node_id) {
+                deltas.push(ObservedStateDelta::Delete(*node_id));
+            }
+        }
+
+        deltas
     }
 
     /// Keep trying to notify the compute indefinitely, only dropping out if:
