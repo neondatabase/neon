@@ -291,6 +291,7 @@ pub struct Tenant {
     timelines_creating: std::sync::Mutex<HashSet<TimelineId>>,
 
     /// Possibly offloaded and archived timelines
+    /// **Lock order**: if acquring both, acquire`timelines` before `timelines_offloaded`
     timelines_offloaded: Mutex<HashMap<TimelineId, Arc<OffloadedTimeline>>>,
 
     // This mutex prevents creation of new timelines during GC.
@@ -1488,6 +1489,7 @@ impl Tenant {
                             true
                         } else {
                             error!("ancestor timeline {ancestor_timeline_id} not found");
+                            debug_assert!(false);
                             return Err(TimelineArchivalError::NotFound);
                         };
                     if has_archived_parent {
@@ -1545,7 +1547,7 @@ impl Tenant {
                     index_part
                 }
                 Err(DownloadError::NotFound) => {
-                    info!(%timeline_id, "index_part not found on remote");
+                    error!(%timeline_id, "index_part not found on remote");
                     return Err(TimelineArchivalError::NotFound);
                 }
                 Err(e) => {
