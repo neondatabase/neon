@@ -28,7 +28,7 @@ use tracing::info;
 
 pub(crate) mod errors {
     use crate::{
-        console::messages::{self, ConsoleError, Reason},
+        control_plane::messages::{self, ConsoleError, Reason},
         error::{io_error, ErrorKind, ReportableError, UserFacingError},
         proxy::retry::CouldRetry,
     };
@@ -353,7 +353,7 @@ pub(crate) trait Api {
 
 #[non_exhaustive]
 #[derive(Clone)]
-pub enum ConsoleBackend {
+pub enum ControlPlaneBackend {
     /// Current Cloud API (V2).
     Console(neon::Api),
     /// Local mock of Cloud API (V2).
@@ -365,7 +365,7 @@ pub enum ConsoleBackend {
     Test(Box<dyn crate::auth::backend::TestBackend>),
 }
 
-impl Api for ConsoleBackend {
+impl Api for ControlPlaneBackend {
     async fn get_role_secret(
         &self,
         ctx: &RequestMonitoring,
@@ -577,7 +577,7 @@ impl WakeComputePermit {
     }
 }
 
-impl FetchAuthRules for ConsoleBackend {
+impl FetchAuthRules for ControlPlaneBackend {
     async fn fetch_auth_rules(
         &self,
         ctx: &RequestMonitoring,

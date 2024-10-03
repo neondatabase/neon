@@ -8,7 +8,7 @@ use std::sync::atomic::{self, AtomicUsize};
 use std::{sync::Arc, sync::Weak};
 use tokio::net::TcpStream;
 
-use crate::console::messages::{ColdStartInfo, MetricsAuxInfo};
+use crate::control_plane::messages::{ColdStartInfo, MetricsAuxInfo};
 use crate::metrics::{HttpEndpointPoolsGuard, Metrics};
 use crate::usage_metrics::{Ids, MetricCounter, USAGE_METRICS};
 use crate::{context::RequestMonitoring, EndpointCacheKey};

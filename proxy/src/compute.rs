@@ -1,8 +1,8 @@
 use crate::{
     auth::parse_endpoint_param,
     cancellation::CancelClosure,
-    console::{errors::WakeComputeError, messages::MetricsAuxInfo, provider::ApiLockError},
     context::RequestMonitoring,
+    control_plane::{errors::WakeComputeError, messages::MetricsAuxInfo, provider::ApiLockError},
     error::{ReportableError, UserFacingError},
     metrics::{Metrics, NumDbConnectionsGuard},
     proxy::neon_option,

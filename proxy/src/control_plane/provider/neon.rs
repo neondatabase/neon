@@ -9,7 +9,7 @@ use super::{
 use crate::{
     auth::backend::{jwt::AuthRule, ComputeUserInfo},
     compute,
-    console::messages::{ColdStartInfo, EndpointJwksResponse, Reason},
+    control_plane::messages::{ColdStartInfo, EndpointJwksResponse, Reason},
     http,
     metrics::{CacheOutcome, Metrics},
     rate_limiter::WakeComputeRateLimiter,

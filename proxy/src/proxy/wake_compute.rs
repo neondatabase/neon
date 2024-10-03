@@ -1,7 +1,7 @@
 use crate::config::RetryConfig;
-use crate::console::messages::{ConsoleError, Reason};
-use crate::console::{errors::WakeComputeError, provider::CachedNodeInfo};
 use crate::context::RequestMonitoring;
+use crate::control_plane::messages::{ConsoleError, Reason};
+use crate::control_plane::{errors::WakeComputeError, provider::CachedNodeInfo};
 use crate::metrics::{
     ConnectOutcome, ConnectionFailuresBreakdownGroup, Metrics, RetriesMetricGroup, RetryType,
     WakeupFailureKind,
@@ -59,7 +59,7 @@ pub(crate) async fn wake_compute<B: ComputeConnectBackend>(
 }
 
 fn report_error(e: &WakeComputeError, retry: bool) {
-    use crate::console::errors::ApiError;
+    use crate::control_plane::errors::ApiError;
     let kind = match e {
         WakeComputeError::BadComputeAddress(_) => WakeupFailureKind::BadComputeAddress,
         WakeComputeError::ApiError(ApiError::Transport(_)) => WakeupFailureKind::ApiTransportError,

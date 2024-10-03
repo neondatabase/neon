@@ -11,7 +11,7 @@ use metrics::{CounterPairAssoc, CounterPairVec, HyperLogLog, HyperLogLogVec};
 
 use tokio::time::{self, Instant};
 
-use crate::console::messages::ColdStartInfo;
+use crate::control_plane::messages::ColdStartInfo;
 
 #[derive(MetricGroup)]
 #[metric(new(thread_pool: Arc<ThreadPoolMetrics>))]

@@ -3,7 +3,7 @@ use crate::{
         self,
         backend::{jwt::JwkCache, AuthRateLimiter},
     },
-    console::locks::ApiLocks,
+    control_plane::locks::ApiLocks,
     rate_limiter::{RateBucketInfo, RateLimitAlgorithm, RateLimiterConfig},
     scram::threadpool::ThreadPool,
     serverless::{cancel_set::CancelSet, GlobalConnPoolOptions},

@@ -1,8 +1,8 @@
 use crate::{
     auth, compute,
     config::AuthenticationConfig,
-    console::{self, provider::NodeInfo},
     context::RequestMonitoring,
+    control_plane::{self, provider::NodeInfo},
     error::{ReportableError, UserFacingError},
     stream::PqStream,
     waiters,
@@ -70,7 +70,7 @@ pub(super) async fn authenticate(
     let (psql_session_id, waiter) = loop {
         let psql_session_id = new_psql_session_id();
 
-        match console::mgmt::get_waiter(&psql_session_id) {
+        match control_plane::mgmt::get_waiter(&psql_session_id) {
             Ok(waiter) => break (psql_session_id, waiter),
             Err(_e) => continue,
         }

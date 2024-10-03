@@ -12,7 +12,7 @@ use proxy::{
     },
     cancellation::CancellationHandlerMain,
     config::{self, AuthenticationConfig, HttpConfig, ProxyConfig, RetryConfig},
-    console::{
+    control_plane::{
         locks::ApiLocks,
         messages::{EndpointJwksResponse, JwksSettings},
     },

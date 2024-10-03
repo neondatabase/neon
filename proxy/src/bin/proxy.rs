@@ -19,8 +19,8 @@ use proxy::config::CacheOptions;
 use proxy::config::HttpConfig;
 use proxy::config::ProjectInfoCacheOptions;
 use proxy::config::ProxyProtocolV2;
-use proxy::console;
 use proxy::context::parquet::ParquetUploadArgs;
+use proxy::control_plane;
 use proxy::http;
 use proxy::http::health_server::AppMetrics;
 use proxy::metrics::Metrics;
@@ -495,7 +495,7 @@ async fn main() -> anyhow::Result<()> {
             proxy: proxy::metrics::Metrics::get(),
         },
     ));
-    maintenance_tasks.spawn(console::mgmt::task_main(mgmt_listener));
+    maintenance_tasks.spawn(control_plane::mgmt::task_main(mgmt_listener));
 
     if let Some(metrics_config) = &config.metric_collection {
         // TODO: Add gc regardles of the metric collection being enabled.
@@ -506,8 +506,8 @@ async fn main() -> anyhow::Result<()> {
         ));
     }
 
-    if let auth::Backend::Console(api, _) = &config.auth_backend {
-        if let proxy::console::provider::ConsoleBackend::Console(api) = &**api {
+    if let auth::Backend::ControlPlane(api, _) = &config.auth_backend {
+        if let proxy::control_plane::provider::ControlPlaneBackend::Console(api) = &**api {
             match (redis_notifications_client, regional_redis_client.clone()) {
                 (None, None) => {}
                 (client1, client2) => {
@@ -623,7 +623,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
                 "Using AllowedIpsCache (wake_compute) with options={project_info_cache_config:?}"
             );
             info!("Using EndpointCacheConfig with options={endpoint_cache_config:?}");
-            let caches = Box::leak(Box::new(console::caches::ApiCaches::new(
+            let caches = Box::leak(Box::new(control_plane::caches::ApiCaches::new(
                 wake_compute_cache_config,
                 project_info_cache_config,
                 endpoint_cache_config,
@@ -636,7 +636,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
                 timeout,
             } = args.wake_compute_lock.parse()?;
             info!(?limiter, shards, ?epoch, "Using NodeLocks (wake_compute)");
-            let locks = Box::leak(Box::new(console::locks::ApiLocks::new(
+            let locks = Box::leak(Box::new(control_plane::locks::ApiLocks::new(
                 "wake_compute_lock",
                 limiter,
                 shards,
@@ -653,27 +653,27 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
             RateBucketInfo::validate(&mut wake_compute_rps_limit)?;
             let wake_compute_endpoint_rate_limiter =
                 Arc::new(WakeComputeRateLimiter::new(wake_compute_rps_limit));
-            let api = console::provider::neon::Api::new(
+            let api = control_plane::provider::neon::Api::new(
                 endpoint,
                 caches,
                 locks,
                 wake_compute_endpoint_rate_limiter,
             );
-            let api = console::provider::ConsoleBackend::Console(api);
-            auth::Backend::Console(MaybeOwned::Owned(api), ())
+            let api = control_plane::provider::ControlPlaneBackend::Console(api);
+            auth::Backend::ControlPlane(MaybeOwned::Owned(api), ())
         }
 
         AuthBackendType::Web => {
             let url = args.uri.parse()?;
-            auth::Backend::Web(MaybeOwned::Owned(url), ())
+            auth::Backend::ConsoleRedirect(MaybeOwned::Owned(url), ())
         }
 
         #[cfg(feature = "testing")]
         AuthBackendType::Postgres => {
             let url = args.auth_endpoint.parse()?;
-            let api = console::provider::mock::Api::new(url, !args.is_private_access_proxy);
-            let api = console::provider::ConsoleBackend::Postgres(api);
-            auth::Backend::Console(MaybeOwned::Owned(api), ())
+            let api = control_plane::provider::mock::Api::new(url, !args.is_private_access_proxy);
+            let api = control_plane::provider::ControlPlaneBackend::Postgres(api);
+            auth::Backend::ControlPlane(MaybeOwned::Owned(api), ())
         }
     };
 
@@ -689,7 +689,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         ?epoch,
         "Using NodeLocks (connect_compute)"
     );
-    let connect_compute_locks = console::locks::ApiLocks::new(
+    let connect_compute_locks = control_plane::locks::ApiLocks::new(
         "connect_compute_lock",
         limiter,
         shards,
