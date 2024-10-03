@@ -90,6 +90,8 @@ use tokio::task::JoinError;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
+extern crate hyper0 as hyper;
+
 pub mod auth;
 pub mod cache;
 pub mod cancellation;
