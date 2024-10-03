@@ -1,18 +1,15 @@
 use crate::auth::backend::ConsoleRedirectBackend;
 use crate::config::{ProxyConfig, ProxyProtocolV2};
-use crate::proxy::{handshake, ErrorSource};
+use crate::proxy::{handshake, prepare_client_connection, ErrorSource};
 use crate::{
     cancellation::{self, CancellationHandlerMain, CancellationHandlerMainInternal},
-    compute,
     context::RequestMonitoring,
     error::ReportableError,
     metrics::{Metrics, NumClientConnectionsGuard},
     protocol2::read_proxy_protocol,
     proxy::handshake::{handshake, HandshakeData},
-    stream::PqStream,
 };
 use futures::TryFutureExt;
-use pq_proto::BeMessage as Be;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
@@ -262,34 +259,4 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
         _conn: conn_gauge,
         _cancel: session,
     }))
-}
-
-/// Finish client connection initialization: confirm auth success, send params, etc.
-#[tracing::instrument(skip_all)]
-async fn prepare_client_connection<P>(
-    node: &compute::PostgresConnection,
-    session: &cancellation::Session<P>,
-    stream: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
-) -> Result<(), std::io::Error> {
-    // Register compute's query cancellation token and produce a new, unique one.
-    // The new token (cancel_key_data) will be sent to the client.
-    let cancel_key_data = session.enable_query_cancellation(node.cancel_closure.clone());
-
-    // Forward all postgres connection params to the client.
-    // Right now the implementation is very hacky and inefficent (ideally,
-    // we don't need an intermediate hashmap), but at least it should be correct.
-    for (name, value) in &node.params {
-        // TODO: Theoretically, this could result in a big pile of params...
-        stream.write_message_noflush(&Be::ParameterStatus {
-            name: name.as_bytes(),
-            value: value.as_bytes(),
-        })?;
-    }
-
-    stream
-        .write_message_noflush(&Be::BackendKeyData(cancel_key_data))?
-        .write_message(&Be::ReadyForQuery)
-        .await?;
-
-    Ok(())
 }
