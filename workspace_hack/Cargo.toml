@@ -23,8 +23,6 @@ aws-sigv4 = { version = "1", features = ["http0-compat", "sign-eventstream", "si
 aws-smithy-async = { version = "1", default-features = false, features = ["rt-tokio"] }
 aws-smithy-http = { version = "0.60", default-features = false, features = ["event-stream"] }
 aws-smithy-types = { version = "1", default-features = false, features = ["byte-stream-poll-next", "http-body-0-4-x", "http-body-1-x", "rt-tokio", "test-util"] }
-axum = { version = "0.7", features = ["ws"] }
-axum-core = { version = "0.4", default-features = false, features = ["tracing"] }
 base64 = { version = "0.21", features = ["alloc"] }
 base64ct = { version = "1", default-features = false, features = ["std"] }
 bytes = { version = "1", features = ["serde"] }

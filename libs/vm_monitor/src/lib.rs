@@ -7,13 +7,11 @@ use axum::{
     extract::{ws::WebSocket, State, WebSocketUpgrade},
     response::Response,
 };
-use axum::{routing::get, Router};
+use axum::{routing::get, Router, Server};
 use clap::Parser;
 use futures::Future;
-use std::net::SocketAddr;
 use std::{fmt::Debug, time::Duration};
 use sysinfo::{RefreshKind, System, SystemExt};
-use tokio::net::TcpListener;
 use tokio::{sync::broadcast, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
@@ -134,14 +132,14 @@ pub async fn start(args: &'static Args, token: CancellationToken) -> anyhow::Res
             args,
         });
 
-    let addr_str = args.addr();
-    let addr: SocketAddr = addr_str.parse().expect("parsing address should not fail");
-
-    let listener = TcpListener::bind(&addr)
-        .await
+    let addr = args.addr();
+    let bound = Server::try_bind(&addr.parse().expect("parsing address should not fail"))
         .with_context(|| format!("failed to bind to {addr}"))?;
-    info!(addr_str, "server bound");
-    axum::serve(listener, app.into_make_service())
+
+    info!(addr, "server bound");
+
+    bound
+        .serve(app.into_make_service())
         .await
         .context("server exited")?;
 
