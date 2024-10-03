@@ -964,8 +964,6 @@ impl<'a> TenantDownloader<'a> {
                     Err(err) => return Err(err.into()),
                 };
 
-                SECONDARY_MODE.download_heatmap.inc(); // TODO: increment on Unmodified
-
                 let mut heatmap_bytes = Vec::new();
                 let mut body = tokio_util::io::StreamReader::new(download.download_stream);
                 let _size = tokio::io::copy_buf(&mut body, &mut heatmap_bytes).await?;
@@ -984,6 +982,7 @@ impl<'a> TenantDownloader<'a> {
         .await
         .ok_or_else(|| UpdateError::Cancelled)
         .and_then(|x| x)
+        .inspect(|_| SECONDARY_MODE.download_heatmap.inc())
     }
 
     /// Download heatmap layers that are not present on local disk, or update their
