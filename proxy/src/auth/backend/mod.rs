@@ -460,7 +460,7 @@ impl<'a> Backend<'a, ComputeUserInfoMaybeEndpoint, &()> {
 
                 let info = backend.authenticate(ctx, config, client).await?;
 
-                Backend::ConsoleRedirect(backend, info)
+                Backend::ConsoleRedirect(backend, info.0)
             }
             Self::Local(_) => {
                 return Err(auth::AuthError::bad_auth_method("invalid for local proxy"))
