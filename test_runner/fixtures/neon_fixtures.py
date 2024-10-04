@@ -516,12 +516,6 @@ class NeonEnvBuilder:
         if "combination" in request._pyfuncitem.callspec.params:
             self.version_combination = request._pyfuncitem.callspec.params["combination"]
         self.mixdir = self.test_output_dir / "mixdir_neon"
-
-    def init_configs(self, default_remote_storage_if_missing: bool = True) -> NeonEnv:
-        # Cannot create more than one environment from one builder
-        assert self.env is None, "environment already initialized"
-        if default_remote_storage_if_missing and self.pageserver_remote_storage is None:
-            self.enable_pageserver_remote_storage(default_remote_storage())
         if self.version_combination is not None:
             assert (
                 self.compatibility_neon_binpath is not None
@@ -530,19 +524,13 @@ class NeonEnvBuilder:
                 self.compatibility_pg_distrib_dir is not None
             ), "compatibility_pg_distrib_dir is required when using mixed versions"
             self.mixdir.mkdir(mode=0o755, exist_ok=True)
+            self._mix_versions()
 
-            for component, paths in COMPONENT_BINARIES.items():
-                directory = (
-                    self.neon_binpath
-                    if bool(self.version_combination & COMPONENT_VERS_BITMAP[component])
-                    else self.compatibility_neon_binpath
-                )
-                for filename in paths:
-                    os.link(directory / filename, self.mixdir / filename)
-            if self.version_combination & COMPONENT_VERS_BITMAP["compute"]:
-                self.pg_distrib_dir = self.compatibility_pg_distrib_dir
-            self.neon_binpath = self.mixdir
-
+    def init_configs(self, default_remote_storage_if_missing: bool = True) -> NeonEnv:
+        # Cannot create more than one environment from one builder
+        assert self.env is None, "environment already initialized"
+        if default_remote_storage_if_missing and self.pageserver_remote_storage is None:
+            self.enable_pageserver_remote_storage(default_remote_storage())
         self.env = NeonEnv(self)
         return self.env
 
@@ -736,6 +724,20 @@ class NeonEnvBuilder:
             toml.dump(config, f)
 
         return self.env
+
+    def _mix_versions(self):
+        assert self.version_combination is not None, "version combination must be set"
+        for component, paths in COMPONENT_BINARIES.items():
+            directory = (
+                self.neon_binpath
+                if bool(self.version_combination & COMPONENT_VERS_BITMAP[component])
+                else self.compatibility_neon_binpath
+            )
+            for filename in paths:
+                os.link(directory / filename, self.mixdir / filename)
+        if self.version_combination & COMPONENT_VERS_BITMAP["compute"]:
+            self.pg_distrib_dir = self.compatibility_pg_distrib_dir
+        self.neon_binpath = self.mixdir
 
     def overlay_mount(self, ident: str, srcdir: Path, dstdir: Path):
         """
