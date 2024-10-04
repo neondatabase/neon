@@ -474,9 +474,9 @@ class NeonEnvBuilder:
 
         self.pageserver_virtual_file_io_engine: Optional[str] = pageserver_virtual_file_io_engine
 
-        self.pageserver_default_tenant_config_compaction_algorithm: Optional[Dict[str, Any]] = (
-            pageserver_default_tenant_config_compaction_algorithm
-        )
+        self.pageserver_default_tenant_config_compaction_algorithm: Optional[
+            Dict[str, Any]
+        ] = pageserver_default_tenant_config_compaction_algorithm
         if self.pageserver_default_tenant_config_compaction_algorithm is not None:
             log.debug(
                 f"Overriding pageserver default compaction algorithm to {self.pageserver_default_tenant_config_compaction_algorithm}"
@@ -1149,9 +1149,9 @@ class NeonEnv:
                 ps_cfg["virtual_file_io_engine"] = self.pageserver_virtual_file_io_engine
             if config.pageserver_default_tenant_config_compaction_algorithm is not None:
                 tenant_config = ps_cfg.setdefault("tenant_config", {})
-                tenant_config["compaction_algorithm"] = (
-                    config.pageserver_default_tenant_config_compaction_algorithm
-                )
+                tenant_config[
+                    "compaction_algorithm"
+                ] = config.pageserver_default_tenant_config_compaction_algorithm
 
             if self.pageserver_remote_storage is not None:
                 ps_cfg["remote_storage"] = remote_storage_to_toml_dict(
@@ -1194,9 +1194,9 @@ class NeonEnv:
             if config.auth_enabled:
                 sk_cfg["auth_enabled"] = True
             if self.safekeepers_remote_storage is not None:
-                sk_cfg["remote_storage"] = (
-                    self.safekeepers_remote_storage.to_toml_inline_table().strip()
-                )
+                sk_cfg[
+                    "remote_storage"
+                ] = self.safekeepers_remote_storage.to_toml_inline_table().strip()
             self.safekeepers.append(
                 Safekeeper(env=self, id=id, port=port, extra_opts=config.safekeeper_extra_opts)
             )
