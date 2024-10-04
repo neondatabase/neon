@@ -109,6 +109,7 @@ pub struct ComputeSpec {
 
     /// Local Proxy configuration used for JWT authentication
     #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub local_proxy_config: Option<LocalProxySpec>,
 }
 
