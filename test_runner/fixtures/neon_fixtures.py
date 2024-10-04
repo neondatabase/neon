@@ -185,7 +185,7 @@ def pg_distrib_dir(base_dir: Path) -> Iterator[Path]:
 
 
 @pytest.fixture(scope="session")
-def compatibility_pg_distrib_dir(base_dir: Path) -> Iterator[Path]:
+def compatibility_pg_distrib_dir(base_dir: Path) -> Optional[Iterator[Path]]:
     if env_compat_postgres_bin := os.environ.get("COMPAT_POSTGRES_DISTRIB_DIR"):
         compat_distrib_dir = Path(env_compat_postgres_bin).resolve()
         if not compat_distrib_dir.exists():
@@ -1401,7 +1401,9 @@ def neon_simple_env(
     top_output_dir: Path,
     test_output_dir: Path,
     neon_binpath: Path,
+    compatibility_neon_binpath: Path,
     pg_distrib_dir: Path,
+    compatibility_pg_distrib_dir: Path,
     pg_version: PgVersion,
     pageserver_virtual_file_io_engine: str,
     pageserver_aux_file_policy: Optional[AuxFileStore],
@@ -1423,7 +1425,9 @@ def neon_simple_env(
         port_distributor=port_distributor,
         mock_s3_server=mock_s3_server,
         neon_binpath=neon_binpath,
+        compatibility_neon_binpath=compatibility_neon_binpath,
         pg_distrib_dir=pg_distrib_dir,
+        compatibility_pg_distrib_dir=compatibility_pg_distrib_dir,
         pg_version=pg_version,
         run_id=run_id,
         preserve_database_files=cast(bool, pytestconfig.getoption("--preserve-database-files")),
@@ -1433,6 +1437,7 @@ def neon_simple_env(
         pageserver_aux_file_policy=pageserver_aux_file_policy,
         pageserver_default_tenant_config_compaction_algorithm=pageserver_default_tenant_config_compaction_algorithm,
         pageserver_io_buffer_alignment=pageserver_io_buffer_alignment,
+        request=request,
     ) as builder:
         env = builder.init_start()
 
