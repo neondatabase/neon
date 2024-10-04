@@ -191,7 +191,8 @@ RUN apt update && \
 # and the release tarball doesn't include them
 ENV PLV8_TAG=v3.2.3
 RUN set -e \
-    && cd / && git clone --recurse-submodules --depth 1 --branch ${PLV8_TAG} https://github.com/plv8/plv8.git plv8-src && \
+    && git clone --recurse-submodules --depth 1 --branch ${PLV8_TAG} https://github.com/plv8/plv8.git plv8-src && \
+    tar -czf plv8.tar.gz --exclude .git plv8-src && \
     cd plv8-src && \
     # generate and copy upgrade scripts
     mkdir -p upgrade && ./generate_upgrade.sh 3.1.10 && \
@@ -1132,7 +1133,7 @@ RUN case "${PG_VERSION}" in "v17") \
 
 #COPY --from=postgis-build /postgis.tar.gz /ext-src/
 #COPY --from=postgis-build /sfcgal/* /usr
-COPY --from=plv8-build /plv8-src /ext-src/plv8-src
+COPY --from=plv8-build /plv8.tar.gz /ext-src/
 COPY --from=h3-pg-build /h3-pg.tar.gz /ext-src/
 COPY --from=unit-pg-build /postgresql-unit.tar.gz /ext-src/
 COPY --from=vector-pg-build /pgvector.tar.gz /ext-src/
