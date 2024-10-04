@@ -41,7 +41,7 @@ pub(crate) struct PoolingBackend {
     pub(crate) pool: Arc<GlobalConnPool<tokio_postgres::Client>>,
 
     pub(crate) config: &'static ProxyConfig,
-    pub(crate) auth_backend: crate::auth::Backend<'static>,
+    pub(crate) auth_backend: crate::auth::ServerlessBackend<'static>,
     pub(crate) endpoint_rate_limiter: Arc<EndpointRateLimiter>,
 }
 
@@ -53,8 +53,8 @@ impl PoolingBackend {
         password: &[u8],
     ) -> Result<ComputeCredentials, AuthError> {
         let cplane = match self.auth_backend {
-            crate::auth::Backend::ControlPlane(cplane) => cplane,
-            crate::auth::Backend::Local(_local) => {
+            crate::auth::ServerlessBackend::ControlPlane(cplane) => cplane,
+            crate::auth::ServerlessBackend::Local(_local) => {
                 return Err(AuthError::bad_auth_method(
                     "password authentication not supported by local_proxy",
                 ))
@@ -122,7 +122,7 @@ impl PoolingBackend {
         jwt: String,
     ) -> Result<ComputeCredentials, AuthError> {
         match &self.auth_backend {
-            crate::auth::Backend::ControlPlane(console) => {
+            crate::auth::ServerlessBackend::ControlPlane(console) => {
                 self.config
                     .authentication_config
                     .jwks_cache
@@ -141,7 +141,7 @@ impl PoolingBackend {
                     keys: crate::auth::backend::ComputeCredentialKeys::None,
                 })
             }
-            crate::auth::Backend::Local(_) => {
+            crate::auth::ServerlessBackend::Local(_) => {
                 let keys = self
                     .config
                     .authentication_config
@@ -191,7 +191,7 @@ impl PoolingBackend {
         info!(%conn_id, "pool: opening a new connection '{conn_info}'");
 
         match &self.auth_backend {
-            crate::auth::Backend::ControlPlane(cplane) => {
+            crate::auth::ServerlessBackend::ControlPlane(cplane) => {
                 crate::proxy::connect_compute::connect_to_compute(
                     ctx,
                     &TokioMechanism {
@@ -207,7 +207,7 @@ impl PoolingBackend {
                 )
                 .await
             }
-            crate::auth::Backend::Local(local_proxy) => {
+            crate::auth::ServerlessBackend::Local(local_proxy) => {
                 crate::proxy::connect_compute::connect_to_compute(
                     ctx,
                     &TokioMechanism {
@@ -234,10 +234,10 @@ impl PoolingBackend {
         conn_info: ConnInfo,
     ) -> Result<http_conn_pool::Client<Send>, HttpConnError> {
         let cplane = match &self.auth_backend {
-            crate::auth::Backend::Local(_) => {
+            crate::auth::ServerlessBackend::Local(_) => {
                 panic!("connect to local_proxy should not be called if we are already local_proxy")
             }
-            crate::auth::Backend::ControlPlane(cplane) => cplane,
+            crate::auth::ServerlessBackend::ControlPlane(cplane) => cplane,
         };
 
         info!("pool: looking for an existing connection");
@@ -291,10 +291,10 @@ impl PoolingBackend {
         }
 
         let local_backend = match &self.auth_backend {
-            auth::Backend::ControlPlane(_) => {
+            auth::ServerlessBackend::ControlPlane(_) => {
                 unreachable!("only local_proxy can connect to local postgres")
             }
-            auth::Backend::Local(local) => local,
+            auth::ServerlessBackend::Local(local) => local,
         };
 
         if !self.local_pool.initialized(&conn_info) {

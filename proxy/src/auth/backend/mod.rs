@@ -32,7 +32,9 @@ use crate::stream::Stream;
 use crate::types::{EndpointCacheKey, EndpointId, RoleName};
 use crate::{scram, stream};
 
-pub enum Backend<'a> {
+/// The [crate::serverless] module can authenticate either using control-plane
+/// to get authentication state, or by using JWKs stored in the filesystem.
+pub enum ServerlessBackend<'a> {
     /// Cloud API (V2).
     ControlPlane(&'a ControlPlaneBackend),
     /// Local proxy uses configured auth credentials and does not wake compute

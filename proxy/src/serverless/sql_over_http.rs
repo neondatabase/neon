@@ -590,7 +590,10 @@ async fn handle_db_inner(
 
     let authenticate_and_connect = Box::pin(
         async {
-            let is_local_proxy = matches!(backend.auth_backend, crate::auth::Backend::Local(_));
+            let is_local_proxy = matches!(
+                backend.auth_backend,
+                crate::auth::ServerlessBackend::Local(_)
+            );
 
             let keys = match auth {
                 AuthData::Password(pw) => {
