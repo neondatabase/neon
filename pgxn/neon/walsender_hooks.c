@@ -191,13 +191,14 @@ NeonOnDemandXLogReaderRoutines(XLogReaderRoutine *xlr)
 
 	if (!wal_reader)
 	{
-		XLogRecPtr	epochStartLsn = pg_atomic_read_u64(&GetWalpropShmemState()->propEpochStartLsn);
+		XLogRecPtr	basebackupLsn = GetRedoStartLsn();
 
-		if (epochStartLsn == 0)
+		/* should never happen */
+		if (basebackupLsn == 0)
 		{
-			elog(ERROR, "Unable to start walsender when propEpochStartLsn is 0!");
+			elog(ERROR, "unable to start walsender when basebackupLsn is 0");
 		}
-		wal_reader = NeonWALReaderAllocate(wal_segment_size, epochStartLsn, "[walsender] ");
+		wal_reader = NeonWALReaderAllocate(wal_segment_size, basebackupLsn, "[walsender] ");
 	}
 	xlr->page_read = NeonWALPageRead;
 	xlr->segment_open = NeonWALReadSegmentOpen;
