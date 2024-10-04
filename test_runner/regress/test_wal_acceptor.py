@@ -894,6 +894,13 @@ def test_timeline_status(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
     assert debug_dump_0["timelines"][0]["timeline_id"] == str(timeline_id)
     assert debug_dump_0["timelines"][0]["wal_last_modified"] != ""
 
+    # debug dump non existing tenant, should return no timelines.
+    debug_dump_non_existent = wa_http_cli_debug.debug_dump(
+        {"tenant_id": "deadbeefdeadbeefdeadbeefdeadbeef"}
+    )
+    log.info(f"debug_dump_non_existend: {debug_dump_non_existent}")
+    assert len(debug_dump_non_existent["timelines"]) == 0
+
     endpoint.safe_psql("create table t(i int)")
 
     # ensure epoch goes up after reboot

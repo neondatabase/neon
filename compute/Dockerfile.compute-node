@@ -880,9 +880,6 @@ RUN case "${PG_VERSION}" in "v17") \
     mkdir pg_session_jwt-src && cd pg_session_jwt-src && tar xzf ../pg_session_jwt.tar.gz --strip-components=1 -C . && \
     sed -i 's/pgrx = "=0.11.3"/pgrx = { version = "=0.11.3", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
     cargo pgrx install --release
-    # it's needed to enable extension because it uses untrusted C language
-    # sed -i 's/superuser = false/superuser = true/g' /usr/local/pgsql/share/extension/pg_session_jwt.control && \
-    # echo "trusted = true" >> /usr/local/pgsql/share/extension/pg_session_jwt.control
 
 #########################################################################################
 #
