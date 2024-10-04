@@ -966,6 +966,8 @@ impl Service {
 
             let res = self.heartbeater.heartbeat(nodes).await;
             if let Ok(deltas) = res {
+                let mut to_handle = Vec::default();
+
                 for (node_id, state) in deltas.0 {
                     let new_availability = match state {
                         PageserverState::Available { utilization, .. } => {
@@ -997,14 +999,23 @@ impl Service {
                         }
                     };
 
+                    let node_lock = trace_exclusive_lock(
+                        &self.node_op_locks,
+                        node_id,
+                        NodeOperations::Configure,
+                    )
+                    .await;
+
                     // This is the code path for geniune availability transitions (i.e node
                     // goes unavailable and/or comes back online).
                     let res = self
-                        .node_configure(node_id, Some(new_availability), None)
+                        .node_state_configure(node_id, Some(new_availability), None, &node_lock)
                         .await;
 
                     match res {
-                        Ok(()) => {}
+                        Ok(transition) => {
+                            to_handle.push((node_id, transition));
+                        }
                         Err(ApiError::NotFound(_)) => {
                             // This should be rare, but legitimate since the heartbeats are done
                             // on a snapshot of the nodes.
@@ -1014,10 +1025,34 @@ impl Service {
                             // Transition to active involves reconciling: if a node responds to a heartbeat then
                             // becomes unavailable again, we may get an error here.
                             tracing::error!(
-                                "Failed to update node {} after heartbeat round: {}",
+                                "Failed to update node state {} after heartbeat round: {}",
                                 node_id,
                                 err
                             );
+                        }
+                    }
+                }
+
+                // We collected all the transitions above and now we handle them.
+                let res = self.handle_node_availability_transitions(to_handle).await;
+                if let Err(errs) = res {
+                    for (node_id, err) in errs {
+                        match err {
+                            ApiError::NotFound(_) => {
+                                // This should be rare, but legitimate since the heartbeats are done
+                                // on a snapshot of the nodes.
+                                tracing::info!(
+                                    "Node {} was not found after heartbeat round",
+                                    node_id
+                                );
+                            }
+                            err => {
+                                tracing::error!(
+                                    "Failed to handle availability transition for {} after heartbeat round: {}",
+                                    node_id,
+                                    err
+                                );
+                            }
                         }
                     }
                 }
