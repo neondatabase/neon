@@ -480,7 +480,7 @@ async fn main() -> anyhow::Result<()> {
             if let Some(serverless_listener) = serverless_listener {
                 client_tasks.spawn(serverless::task_main(
                     config,
-                    auth::Backend::ControlPlane(auth_backend),
+                    auth::ServerlessBackend::ControlPlane(auth_backend),
                     serverless_listener,
                     cancellation_token.clone(),
                     cancellation_handler.clone(),

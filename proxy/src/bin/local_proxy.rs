@@ -197,7 +197,7 @@ async fn main() -> anyhow::Result<()> {
 
     let task = serverless::task_main(
         config,
-        auth::Backend::Local(auth_backend),
+        auth::ServerlessBackend::Local(auth_backend),
         http_listener,
         shutdown.clone(),
         Arc::new(CancellationHandlerMain::new(
