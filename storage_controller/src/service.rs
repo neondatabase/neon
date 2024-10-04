@@ -5299,54 +5299,22 @@ impl Service {
         Ok(())
     }
 
-    pub(crate) async fn node_configure(
+    async fn node_state_configure(
         &self,
         node_id: NodeId,
         availability: Option<NodeAvailability>,
         scheduling: Option<NodeSchedulingPolicy>,
-    ) -> Result<(), ApiError> {
-        let _node_lock =
-            trace_exclusive_lock(&self.node_op_locks, node_id, NodeOperations::Configure).await;
-
+        _nodes_lock: &TracingExclusiveGuard<NodeOperations>,
+    ) -> Result<AvailabilityTransition, ApiError> {
         if let Some(scheduling) = scheduling {
             // Scheduling is a persistent part of Node: we must write updates to the database before
             // applying them in memory
             self.persistence.update_node(node_id, scheduling).await?;
         }
 
-        // If we're activating a node, then before setting it active we must reconcile any shard locations
-        // on that node, in case it is out of sync, e.g. due to being unavailable during controller startup,
-        // by calling [`Self::node_activate_reconcile`]
-        //
-        // The transition we calculate here remains valid later in the function because we hold the op lock on the node:
-        // nothing else can mutate its availability while we run.
-        let availability_transition = if let Some(input_availability) = availability.as_ref() {
-            let (activate_node, availability_transition) = {
-                let locked = self.inner.read().unwrap();
-                let Some(node) = locked.nodes.get(&node_id) else {
-                    return Err(ApiError::NotFound(
-                        anyhow::anyhow!("Node {} not registered", node_id).into(),
-                    ));
-                };
-
-                (
-                    node.clone(),
-                    node.get_availability_transition(input_availability),
-                )
-            };
-
-            if matches!(availability_transition, AvailabilityTransition::ToActive) {
-                self.node_activate_reconcile(activate_node, &_node_lock)
-                    .await?;
-            }
-            availability_transition
-        } else {
-            AvailabilityTransition::Unchanged
-        };
-
         // Apply changes from the request to our in-memory state for the Node
         let mut locked = self.inner.write().unwrap();
-        let (nodes, tenants, scheduler) = locked.parts_mut();
+        let (nodes, _tenants, scheduler) = locked.parts_mut();
 
         let mut new_nodes = (**nodes).clone();
 
@@ -5356,8 +5324,15 @@ impl Service {
             ));
         };
 
-        if let Some(availability) = availability.as_ref() {
-            node.set_availability(availability.clone());
+        let availability_transition = {
+            match availability {
+                Some(ref new_availability) => node.get_availability_transition(new_availability),
+                None => AvailabilityTransition::Unchanged,
+            }
+        };
+
+        if let Some(availability) = availability {
+            node.set_availability(availability);
         }
 
         if let Some(scheduling) = scheduling {
@@ -5368,11 +5343,25 @@ impl Service {
         scheduler.node_upsert(node);
 
         let new_nodes = Arc::new(new_nodes);
+        locked.nodes = new_nodes;
 
+        Ok(availability_transition)
+    }
+
+    async fn handle_node_availability_transition(
+        &self,
+        node_id: NodeId,
+        transition: AvailabilityTransition,
+        nodes_lock: &TracingExclusiveGuard<NodeOperations>,
+    ) -> Result<(), ApiError> {
         // Modify scheduling state for any Tenants that are affected by a change in the node's availability state.
-        match availability_transition {
+        match transition {
             AvailabilityTransition::ToOffline => {
                 tracing::info!("Node {} transition to offline", node_id);
+
+                let mut locked = self.inner.write().unwrap();
+                let (nodes, tenants, scheduler) = locked.parts_mut();
+
                 let mut tenants_affected: usize = 0;
 
                 for (tenant_shard_id, tenant_shard) in tenants {
@@ -5382,14 +5371,14 @@ impl Service {
                         observed_loc.conf = None;
                     }
 
-                    if new_nodes.len() == 1 {
+                    if nodes.len() == 1 {
                         // Special case for single-node cluster: there is no point trying to reschedule
                         // any tenant shards: avoid doing so, in order to avoid spewing warnings about
                         // failures to schedule them.
                         continue;
                     }
 
-                    if !new_nodes
+                    if !nodes
                         .values()
                         .any(|n| matches!(n.may_schedule(), MaySchedule::Yes(_)))
                     {
@@ -5415,10 +5404,7 @@ impl Service {
                                 tracing::warn!(%tenant_shard_id, "Scheduling error when marking pageserver {} offline: {e}", node_id);
                             }
                             Ok(()) => {
-                                if self
-                                    .maybe_reconcile_shard(tenant_shard, &new_nodes)
-                                    .is_some()
-                                {
+                                if self.maybe_reconcile_shard(tenant_shard, nodes).is_some() {
                                     tenants_affected += 1;
                                 };
                             }
@@ -5433,9 +5419,28 @@ impl Service {
             }
             AvailabilityTransition::ToActive => {
                 tracing::info!("Node {} transition to active", node_id);
+
+                let activate_node = {
+                    let locked = self.inner.read().unwrap();
+                    match locked.nodes.get(&node_id) {
+                        Some(n) => n.clone(),
+                        None => {
+                            return Err(ApiError::NotFound(
+                                anyhow::anyhow!("Node not registered").into(),
+                            ));
+                        }
+                    }
+                };
+
+                self.node_activate_reconcile(activate_node.clone(), nodes_lock)
+                    .await?;
+
+                let mut locked = self.inner.write().unwrap();
+                let (nodes, tenants, _scheduler) = locked.parts_mut();
+
                 // When a node comes back online, we must reconcile any tenant that has a None observed
                 // location on the node.
-                for tenant_shard in locked.tenants.values_mut() {
+                for tenant_shard in tenants.values_mut() {
                     // If a reconciliation is already in progress, rely on the previous scheduling
                     // decision and skip triggering a new reconciliation.
                     if tenant_shard.reconciler.is_some() {
@@ -5444,7 +5449,7 @@ impl Service {
 
                     if let Some(observed_loc) = tenant_shard.observed.locations.get_mut(&node_id) {
                         if observed_loc.conf.is_none() {
-                            self.maybe_reconcile_shard(tenant_shard, &new_nodes);
+                            self.maybe_reconcile_shard(tenant_shard, nodes);
                         }
                     }
                 }
@@ -5465,9 +5470,47 @@ impl Service {
             }
         }
 
-        locked.nodes = new_nodes;
-
         Ok(())
+    }
+
+    async fn handle_node_availability_transitions(
+        &self,
+        transitions: Vec<(NodeId, AvailabilityTransition)>,
+    ) -> Result<(), Vec<(NodeId, ApiError)>> {
+        let mut errors = Vec::default();
+        for (node_id, transition) in transitions {
+            let node_lock =
+                trace_exclusive_lock(&self.node_op_locks, node_id, NodeOperations::Configure).await;
+
+            let res = self
+                .handle_node_availability_transition(node_id, transition, &node_lock)
+                .await;
+            if let Err(err) = res {
+                errors.push((node_id, err));
+            }
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
+    }
+
+    pub(crate) async fn node_configure(
+        &self,
+        node_id: NodeId,
+        availability: Option<NodeAvailability>,
+        scheduling: Option<NodeSchedulingPolicy>,
+    ) -> Result<(), ApiError> {
+        let node_lock =
+            trace_exclusive_lock(&self.node_op_locks, node_id, NodeOperations::Configure).await;
+
+        let transition = self
+            .node_state_configure(node_id, availability, scheduling, &node_lock)
+            .await?;
+        self.handle_node_availability_transition(node_id, transition, &node_lock)
+            .await
     }
 
     /// Wrapper around [`Self::node_configure`] which only allows changes while there is no ongoing
