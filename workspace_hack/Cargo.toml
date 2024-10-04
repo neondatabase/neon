@@ -17,12 +17,6 @@ license.workspace = true
 [dependencies]
 ahash = { version = "0.8" }
 anyhow = { version = "1", features = ["backtrace"] }
-aws-config = { version = "1", default-features = false, features = ["rustls", "sso"] }
-aws-runtime = { version = "1", default-features = false, features = ["event-stream", "http-02x", "sigv4a"] }
-aws-sigv4 = { version = "1", features = ["http0-compat", "sign-eventstream", "sigv4a"] }
-aws-smithy-async = { version = "1", default-features = false, features = ["rt-tokio"] }
-aws-smithy-http = { version = "0.60", default-features = false, features = ["event-stream"] }
-aws-smithy-types = { version = "1", default-features = false, features = ["byte-stream-poll-next", "http-body-0-4-x", "http-body-1-x", "rt-tokio", "test-util"] }
 base64 = { version = "0.21", features = ["alloc"] }
 base64ct = { version = "1", default-features = false, features = ["std"] }
 bitflags = { version = "2", default-features = false, features = ["std"] }
@@ -90,7 +84,6 @@ tower = { version = "0.4", default-features = false, features = ["balance", "buf
 tracing = { version = "0.1", features = ["log"] }
 tracing-core = { version = "0.1" }
 url = { version = "2", features = ["serde"] }
-uuid = { version = "1", features = ["serde", "v4", "v7"] }
 zeroize = { version = "1", features = ["derive", "serde"] }
 zstd = { version = "0.13" }
 zstd-safe = { version = "7", default-features = false, features = ["arrays", "legacy", "std", "zdict_builder"] }
