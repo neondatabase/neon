@@ -833,10 +833,13 @@ impl TenantShard {
                 continue;
             };
 
+            // TODO: make this AZ aware: secondary should be chosen "As if I am an attachment, but
+            // in a different AZ to my actual preferred AZ"
+
             // Let the scheduler suggest a node, where it would put us if we were scheduling afresh
             // This implicitly limits the choice to nodes that are available, and prefers nodes
             // with lower utilization.
-            let Ok(candidate_node) = scheduler.schedule_shard::<SecondaryShardTag>(
+            let Ok(candidate_node) = scheduler.schedule_shard::<AttachedShardTag>(
                 &self.intent.all_pageservers(),
                 &self.preferred_az_id,
                 schedule_context,
