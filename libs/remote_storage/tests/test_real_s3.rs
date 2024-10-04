@@ -12,8 +12,8 @@ use anyhow::Context;
 use camino::Utf8Path;
 use futures_util::StreamExt;
 use remote_storage::{
-    DownloadError, GenericRemoteStorage, ListingMode, RemotePath, RemoteStorageConfig,
-    RemoteStorageKind, S3Config,
+    DownloadError, DownloadOpts, GenericRemoteStorage, ListingMode, RemotePath,
+    RemoteStorageConfig, RemoteStorageKind, S3Config,
 };
 use test_context::test_context;
 use test_context::AsyncTestContext;
@@ -121,7 +121,8 @@ async fn s3_time_travel_recovery_works(ctx: &mut MaybeEnabledStorage) -> anyhow:
 
     // A little check to ensure that our clock is not too far off from the S3 clock
     {
-        let dl = retry(|| ctx.client.download(&path2, &cancel)).await?;
+        let opts = DownloadOpts::default();
+        let dl = retry(|| ctx.client.download(&path2, &opts, &cancel)).await?;
         let last_modified = dl.last_modified;
         let half_wt = WAIT_TIME.mul_f32(0.5);
         let t0_hwt = t0 + half_wt;
@@ -159,7 +160,12 @@ async fn s3_time_travel_recovery_works(ctx: &mut MaybeEnabledStorage) -> anyhow:
     let t2_files_recovered = list_files(&ctx.client, &cancel).await?;
     println!("after recovery to t2: {t2_files_recovered:?}");
     assert_eq!(t2_files, t2_files_recovered);
-    let path2_recovered_t2 = download_to_vec(ctx.client.download(&path2, &cancel).await?).await?;
+    let path2_recovered_t2 = download_to_vec(
+        ctx.client
+            .download(&path2, &DownloadOpts::default(), &cancel)
+            .await?,
+    )
+    .await?;
     assert_eq!(path2_recovered_t2, new_data.as_bytes());
 
     // after recovery to t1: path1 is back, path2 has the old content
@@ -170,7 +176,12 @@ async fn s3_time_travel_recovery_works(ctx: &mut MaybeEnabledStorage) -> anyhow:
     let t1_files_recovered = list_files(&ctx.client, &cancel).await?;
     println!("after recovery to t1: {t1_files_recovered:?}");
     assert_eq!(t1_files, t1_files_recovered);
-    let path2_recovered_t1 = download_to_vec(ctx.client.download(&path2, &cancel).await?).await?;
+    let path2_recovered_t1 = download_to_vec(
+        ctx.client
+            .download(&path2, &DownloadOpts::default(), &cancel)
+            .await?,
+    )
+    .await?;
     assert_eq!(path2_recovered_t1, old_data.as_bytes());
 
     // after recovery to t0: everything is gone except for path1
@@ -416,7 +427,7 @@ async fn download_is_timeouted(ctx: &mut MaybeEnabledStorage) {
     let started_at = std::time::Instant::now();
     let mut stream = ctx
         .client
-        .download(&path, &cancel)
+        .download(&path, &DownloadOpts::default(), &cancel)
         .await
         .expect("download succeeds")
         .download_stream;
@@ -491,7 +502,7 @@ async fn download_is_cancelled(ctx: &mut MaybeEnabledStorage) {
     {
         let stream = ctx
             .client
-            .download(&path, &cancel)
+            .download(&path, &DownloadOpts::default(), &cancel)
             .await
             .expect("download succeeds")
             .download_stream;

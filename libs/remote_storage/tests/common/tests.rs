@@ -1,8 +1,7 @@
 use anyhow::Context;
 use camino::Utf8Path;
 use futures::StreamExt;
-use remote_storage::ListingMode;
-use remote_storage::RemotePath;
+use remote_storage::{DownloadError, DownloadOpts, ListingMode, RemotePath};
 use std::sync::Arc;
 use std::{collections::HashSet, num::NonZeroU32};
 use test_context::test_context;
@@ -284,7 +283,10 @@ async fn upload_download_works(ctx: &mut MaybeEnabledStorage) -> anyhow::Result<
     ctx.client.upload(data, len, &path, None, &cancel).await?;
 
     // Normal download request
-    let dl = ctx.client.download(&path, &cancel).await?;
+    let dl = ctx
+        .client
+        .download(&path, &DownloadOpts::default(), &cancel)
+        .await?;
     let buf = download_to_vec(dl).await?;
     assert_eq!(&buf, &orig);
 
@@ -337,6 +339,54 @@ async fn upload_download_works(ctx: &mut MaybeEnabledStorage) -> anyhow::Result<
     Ok(())
 }
 
+/// Tests that conditional downloads work properly, by returning
+/// DownloadError::Unmodified when the object ETag matches the given ETag.
+#[test_context(MaybeEnabledStorage)]
+#[tokio::test]
+async fn download_conditional(ctx: &mut MaybeEnabledStorage) -> anyhow::Result<()> {
+    let MaybeEnabledStorage::Enabled(ctx) = ctx else {
+        return Ok(());
+    };
+    let cancel = CancellationToken::new();
+
+    // Create a file.
+    let path = RemotePath::new(Utf8Path::new(format!("{}/file", ctx.base_prefix).as_str()))?;
+    let data = bytes::Bytes::from_static("foo".as_bytes());
+    let (stream, len) = wrap_stream(data);
+    ctx.client.upload(stream, len, &path, None, &cancel).await?;
+
+    // Download it to obtain its etag.
+    let mut opts = DownloadOpts::default();
+    let download = ctx.client.download(&path, &opts, &cancel).await?;
+
+    // Download with the etag yields DownloadError::Unmodified.
+    opts.etag = Some(download.etag);
+    let result = ctx.client.download(&path, &opts, &cancel).await;
+    assert!(
+        matches!(result, Err(DownloadError::Unmodified)),
+        "expected DownloadError::Unmodified, got {result:?}"
+    );
+
+    // Replace the file contents.
+    let data = bytes::Bytes::from_static("bar".as_bytes());
+    let (stream, len) = wrap_stream(data);
+    ctx.client.upload(stream, len, &path, None, &cancel).await?;
+
+    // A download with the old etag should yield the new file.
+    let download = ctx.client.download(&path, &opts, &cancel).await?;
+    assert_ne!(download.etag, opts.etag.unwrap(), "ETag did not change");
+
+    // A download with the new etag should yield Unmodified again.
+    opts.etag = Some(download.etag);
+    let result = ctx.client.download(&path, &opts, &cancel).await;
+    assert!(
+        matches!(result, Err(DownloadError::Unmodified)),
+        "expected DownloadError::Unmodified, got {result:?}"
+    );
+
+    Ok(())
+}
+
 #[test_context(MaybeEnabledStorage)]
 #[tokio::test]
 async fn copy_works(ctx: &mut MaybeEnabledStorage) -> anyhow::Result<()> {
@@ -364,7 +414,10 @@ async fn copy_works(ctx: &mut MaybeEnabledStorage) -> anyhow::Result<()> {
     // Normal download request
     ctx.client.copy_object(&path, &path_dest, &cancel).await?;
 
-    let dl = ctx.client.download(&path_dest, &cancel).await?;
+    let dl = ctx
+        .client
+        .download(&path_dest, &DownloadOpts::default(), &cancel)
+        .await?;
     let buf = download_to_vec(dl).await?;
     assert_eq!(&buf, &orig);
 
