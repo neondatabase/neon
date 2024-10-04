@@ -426,7 +426,7 @@ pub(crate) enum ReconcileNeeded {
 }
 
 /// Pending modification to the observed state of a tenant shard.
-/// Produced by [`Reconciler::observed_deltas`] and applied in [`Service::process_result`].
+/// Produced by [`Reconciler::observed_deltas`] and applied in [`crate::service::Service::process_result`].
 pub(crate) enum ObservedStateDelta {
     Upsert(Box<(NodeId, ObservedStateLocation)>),
     Delete(NodeId),
