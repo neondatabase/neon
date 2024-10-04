@@ -33,7 +33,7 @@ jobs:
       github-event-name: ${{ github.event_name }}
 
   cancel-previous-e2e-tests:
-    needs: [ check-permissions ]
+    needs: [ check-permissions, promote-images, tag ]
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-22.04
 
@@ -518,7 +518,7 @@ jobs:
 
   trigger-e2e-tests:
     if: ${{ !github.event.pull_request.draft || contains( github.event.pull_request.labels.*.name, 'run-e2e-tests-in-draft') || github.ref_name == 'main' || github.ref_name == 'release' || github.ref_name == 'release-proxy' }}
-    needs: [ check-permissions, promote-images, tag ]
+    needs: [ check-permissions, promote-images, tag, cancel-previous-e2e-tests ]
     uses: ./.github/workflows/trigger-e2e-tests.yml
     secrets: inherit
 

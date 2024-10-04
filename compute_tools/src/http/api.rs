@@ -264,68 +264,72 @@ async fn handle_configure_request(
 
     let body_bytes = hyper::body::to_bytes(req.into_body()).await.unwrap();
     let spec_raw = String::from_utf8(body_bytes.to_vec()).unwrap();
-    if let Ok(request) = serde_json::from_str::<ConfigurationRequest>(&spec_raw) {
-        let spec = request.spec;
+    match serde_json::from_str::<ConfigurationRequest>(&spec_raw) {
+        Ok(request) => {
+            let spec = request.spec;
 
-        let parsed_spec = match ParsedSpec::try_from(spec) {
-            Ok(ps) => ps,
-            Err(msg) => return Err((msg, StatusCode::BAD_REQUEST)),
-        };
+            let parsed_spec = match ParsedSpec::try_from(spec) {
+                Ok(ps) => ps,
+                Err(msg) => return Err((msg, StatusCode::BAD_REQUEST)),
+            };
 
-        // XXX: wrap state update under lock in code blocks. Otherwise,
-        // we will try to `Send` `mut state` into the spawned thread
-        // bellow, which will cause error:
-        // ```
-        // error: future cannot be sent between threads safely
-        // ```
-        {
-            let mut state = compute.state.lock().unwrap();
-            if state.status != ComputeStatus::Empty && state.status != ComputeStatus::Running {
-                let msg = format!(
-                    "invalid compute status for configuration request: {:?}",
-                    state.status.clone()
-                );
-                return Err((msg, StatusCode::PRECONDITION_FAILED));
-            }
-            state.pspec = Some(parsed_spec);
-            state.status = ComputeStatus::ConfigurationPending;
-            compute.state_changed.notify_all();
-            drop(state);
-            info!("set new spec and notified waiters");
-        }
-
-        // Spawn a blocking thread to wait for compute to become Running.
-        // This is needed to do not block the main pool of workers and
-        // be able to serve other requests while some particular request
-        // is waiting for compute to finish configuration.
-        let c = compute.clone();
-        task::spawn_blocking(move || {
-            let mut state = c.state.lock().unwrap();
-            while state.status != ComputeStatus::Running {
-                state = c.state_changed.wait(state).unwrap();
-                info!(
-                    "waiting for compute to become Running, current status: {:?}",
-                    state.status
-                );
-
-                if state.status == ComputeStatus::Failed {
-                    let err = state.error.as_ref().map_or("unknown error", |x| x);
-                    let msg = format!("compute configuration failed: {:?}", err);
-                    return Err((msg, StatusCode::INTERNAL_SERVER_ERROR));
+            // XXX: wrap state update under lock in code blocks. Otherwise,
+            // we will try to `Send` `mut state` into the spawned thread
+            // bellow, which will cause error:
+            // ```
+            // error: future cannot be sent between threads safely
+            // ```
+            {
+                let mut state = compute.state.lock().unwrap();
+                if state.status != ComputeStatus::Empty && state.status != ComputeStatus::Running {
+                    let msg = format!(
+                        "invalid compute status for configuration request: {:?}",
+                        state.status.clone()
+                    );
+                    return Err((msg, StatusCode::PRECONDITION_FAILED));
                 }
+                state.pspec = Some(parsed_spec);
+                state.status = ComputeStatus::ConfigurationPending;
+                compute.state_changed.notify_all();
+                drop(state);
+                info!("set new spec and notified waiters");
             }
 
-            Ok(())
-        })
-        .await
-        .unwrap()?;
+            // Spawn a blocking thread to wait for compute to become Running.
+            // This is needed to do not block the main pool of workers and
+            // be able to serve other requests while some particular request
+            // is waiting for compute to finish configuration.
+            let c = compute.clone();
+            task::spawn_blocking(move || {
+                let mut state = c.state.lock().unwrap();
+                while state.status != ComputeStatus::Running {
+                    state = c.state_changed.wait(state).unwrap();
+                    info!(
+                        "waiting for compute to become Running, current status: {:?}",
+                        state.status
+                    );
 
-        // Return current compute state if everything went well.
-        let state = compute.state.lock().unwrap().clone();
-        let status_response = status_response_from_state(&state);
-        Ok(serde_json::to_string(&status_response).unwrap())
-    } else {
-        Err(("invalid spec".to_string(), StatusCode::BAD_REQUEST))
+                    if state.status == ComputeStatus::Failed {
+                        let err = state.error.as_ref().map_or("unknown error", |x| x);
+                        let msg = format!("compute configuration failed: {:?}", err);
+                        return Err((msg, StatusCode::INTERNAL_SERVER_ERROR));
+                    }
+                }
+
+                Ok(())
+            })
+            .await
+            .unwrap()?;
+
+            // Return current compute state if everything went well.
+            let state = compute.state.lock().unwrap().clone();
+            let status_response = status_response_from_state(&state);
+            Ok(serde_json::to_string(&status_response).unwrap())
+        }
+        Err(err) => {
+            error!("could not parse spec: {spec_raw}");
+            Err((format!("invalid spec: {err:?}"), StatusCode::BAD_REQUEST))
+        }
     }
 }
 
