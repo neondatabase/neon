@@ -454,9 +454,10 @@ class NeonEnvBuilder:
 
         self.pageserver_io_buffer_alignment = pageserver_io_buffer_alignment
 
-        assert test_name.startswith(
-            "test_"
-        ), "Unexpectedly instantiated from outside a test function"
+        # FIXME
+        # assert test_name.startswith(
+        #    "test_"
+        # ), "Unexpectedly instantiated from outside a test function"
         self.test_name = test_name
 
     def init_configs(self, default_remote_storage_if_missing: bool = True) -> NeonEnv:

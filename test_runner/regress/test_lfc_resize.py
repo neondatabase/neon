@@ -7,16 +7,16 @@ import time
 
 import pytest
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv, PgBin
+from fixtures.neon_fixtures import PgBin
+from fixtures.neon_tenant import NeonTestTenant
 
 
 @pytest.mark.timeout(600)
-def test_lfc_resize(neon_simple_env: NeonEnv, pg_bin: PgBin):
+def test_lfc_resize(neon_tenant: NeonTestTenant, pg_bin: PgBin):
     """
     Test resizing the Local File Cache
     """
-    env = neon_simple_env
-    endpoint = env.endpoints.create_start(
+    endpoint = neon_tenant.endpoints.create_start(
         "main",
         config_lines=[
             "neon.file_cache_path='file.cache'",

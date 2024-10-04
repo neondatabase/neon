@@ -3,6 +3,7 @@ from contextlib import closing
 
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, fork_at_current_lsn
+from fixtures.neon_tenant import NeonTestTenant
 from fixtures.utils import query_scalar
 
 
@@ -114,14 +115,13 @@ def test_vm_bit_clear(neon_simple_env: NeonEnv):
     assert cur_new.fetchall() == []
 
 
-def test_vm_bit_clear_on_heap_lock_whitebox(neon_env_builder: NeonEnvBuilder):
+def test_vm_bit_clear_on_heap_lock_whitebox(neon_tenant: NeonTestTenant):
     """
     Test that the ALL_FROZEN VM bit is cleared correctly at a HEAP_LOCK record.
 
     This is a repro for the bug fixed in commit 66fa176cc8.
     """
-    env = neon_env_builder.init_start()
-    endpoint = env.endpoints.create_start(
+    endpoint = neon_tenant.endpoints.create_start(
         "main",
         config_lines=[
             # If auto-analyze runs at the same time that we run VACUUM FREEZE, it

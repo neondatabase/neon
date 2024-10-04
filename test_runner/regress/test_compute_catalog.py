@@ -1,11 +1,9 @@
 import requests
-from fixtures.neon_fixtures import NeonEnv
+from fixtures.neon_tenant import NeonTestTenant
 
 
-def test_compute_catalog(neon_simple_env: NeonEnv):
-    env = neon_simple_env
-
-    endpoint = env.endpoints.create_start("main", config_lines=["log_min_messages=debug1"])
+def test_compute_catalog(neon_tenant: NeonTestTenant):
+    endpoint = neon_tenant.endpoints.create_start("main", config_lines=["log_min_messages=debug1"])
     client = endpoint.http_client()
 
     objects = client.dbs_and_roles()

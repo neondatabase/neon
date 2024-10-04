@@ -5,6 +5,7 @@ pytest_plugins = (
     "fixtures.compute_reconfigure",
     "fixtures.storage_controller_proxy",
     "fixtures.neon_fixtures",
+    "fixtures.neon_tenant",
     "fixtures.benchmark_fixture",
     "fixtures.pg_stats",
     "fixtures.compare_fixtures",

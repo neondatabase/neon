@@ -1,16 +1,15 @@
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv
+from fixtures.neon_tenant import NeonTestTenant
 from fixtures.pg_version import PgVersion
 from fixtures.utils import wait_until
 
 
-def test_neon_superuser(neon_simple_env: NeonEnv, pg_version: PgVersion):
-    env = neon_simple_env
-    env.create_branch("test_neon_superuser_publisher", ancestor_branch_name="main")
-    pub = env.endpoints.create("test_neon_superuser_publisher")
+def test_neon_superuser(neon_tenant: NeonTestTenant, pg_version: PgVersion):
+    neon_tenant.create_branch("test_neon_superuser_publisher", ancestor_branch_name="main")
+    pub = neon_tenant.endpoints.create("test_neon_superuser_publisher")
 
-    env.create_branch("test_neon_superuser_subscriber")
-    sub = env.endpoints.create("test_neon_superuser_subscriber")
+    neon_tenant.create_branch("test_neon_superuser_subscriber")
+    sub = neon_tenant.endpoints.create("test_neon_superuser_subscriber")
 
     pub.respec(skip_pg_catalog_updates=False)
     pub.start()

@@ -2,16 +2,14 @@ import os
 import time
 
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv
+from fixtures.neon_tenant import NeonTestTenant
 from fixtures.utils import query_scalar
 
 
 #
 # Test compute node start after clog truncation
 #
-def test_clog_truncate(neon_simple_env: NeonEnv):
-    env = neon_simple_env
-
+def test_clog_truncate(neon_tenant: NeonTestTenant):
     # set aggressive autovacuum to make sure that truncation will happen
     config = [
         "autovacuum_max_workers=10",
@@ -23,7 +21,7 @@ def test_clog_truncate(neon_simple_env: NeonEnv):
         "autovacuum_freeze_max_age=100000",
     ]
 
-    endpoint = env.endpoints.create_start("main", config_lines=config)
+    endpoint = neon_tenant.endpoints.create_start("main", config_lines=config)
 
     # Install extension containing function needed for test
     endpoint.safe_psql("CREATE EXTENSION neon_test_utils")
@@ -56,12 +54,12 @@ def test_clog_truncate(neon_simple_env: NeonEnv):
 
     # create new branch after clog truncation and start a compute node on it
     log.info(f"create branch at lsn_after_truncation {lsn_after_truncation}")
-    env.create_branch(
+    neon_tenant.create_branch(
         "test_clog_truncate_new",
         ancestor_branch_name="main",
         ancestor_start_lsn=lsn_after_truncation,
     )
-    endpoint2 = env.endpoints.create_start("test_clog_truncate_new")
+    endpoint2 = neon_tenant.endpoints.create_start("test_clog_truncate_new")
 
     # check that new node doesn't contain truncated segment
     pg_xact_0000_path_new = os.path.join(endpoint2.pg_xact_dir_path(), "0000")
