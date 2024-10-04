@@ -9,11 +9,11 @@ from fixtures.utils import wait_until
 # It requires tracking information about replication origins at page server side
 def test_subscriber_restart(neon_simple_env: NeonEnv):
     env = neon_simple_env
-    env.neon_cli.create_branch("publisher")
+    env.create_branch("publisher")
     pub = env.endpoints.create("publisher")
     pub.start()
 
-    sub_timeline_id = env.neon_cli.create_branch("subscriber")
+    sub_timeline_id = env.create_branch("subscriber")
     sub = env.endpoints.create("subscriber")
     sub.start()
 

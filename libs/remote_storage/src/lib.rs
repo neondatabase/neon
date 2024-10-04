@@ -161,6 +161,14 @@ pub struct Listing {
     pub keys: Vec<ListingObject>,
 }
 
+/// Options for downloads. The default value is a plain GET.
+#[derive(Default)]
+pub struct DownloadOpts {
+    /// If given, returns [`DownloadError::Unmodified`] if the object still has
+    /// the same ETag (using If-None-Match).
+    pub etag: Option<Etag>,
+}
+
 /// Storage (potentially remote) API to manage its state.
 /// This storage tries to be unaware of any layered repository context,
 /// providing basic CRUD operations for storage files.
@@ -245,6 +253,7 @@ pub trait RemoteStorage: Send + Sync + 'static {
     async fn download(
         &self,
         from: &RemotePath,
+        opts: &DownloadOpts,
         cancel: &CancellationToken,
     ) -> Result<Download, DownloadError>;
 
@@ -401,16 +410,18 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
         }
     }
 
+    /// See [`RemoteStorage::download`]
     pub async fn download(
         &self,
         from: &RemotePath,
+        opts: &DownloadOpts,
         cancel: &CancellationToken,
     ) -> Result<Download, DownloadError> {
         match self {
-            Self::LocalFs(s) => s.download(from, cancel).await,
-            Self::AwsS3(s) => s.download(from, cancel).await,
-            Self::AzureBlob(s) => s.download(from, cancel).await,
-            Self::Unreliable(s) => s.download(from, cancel).await,
+            Self::LocalFs(s) => s.download(from, opts, cancel).await,
+            Self::AwsS3(s) => s.download(from, opts, cancel).await,
+            Self::AzureBlob(s) => s.download(from, opts, cancel).await,
+            Self::Unreliable(s) => s.download(from, opts, cancel).await,
         }
     }
 
@@ -572,7 +583,7 @@ impl GenericRemoteStorage {
     ) -> Result<Download, DownloadError> {
         match byte_range {
             Some((start, end)) => self.download_byte_range(from, start, end, cancel).await,
-            None => self.download(from, cancel).await,
+            None => self.download(from, &DownloadOpts::default(), cancel).await,
         }
     }
 

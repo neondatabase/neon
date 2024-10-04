@@ -14,7 +14,7 @@ def test_pageserver_lsn_wait_error_start(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
     env.pageserver.http_client()
 
-    tenant_id, timeline_id = env.neon_cli.create_tenant()
+    tenant_id, timeline_id = env.create_tenant()
     expected_timeout_error = f"Timed out while waiting for WAL record at LSN {future_lsn} to arrive"
     env.pageserver.allowed_errors.append(f".*{expected_timeout_error}.*")
 
@@ -57,7 +57,7 @@ def test_pageserver_lsn_wait_error_safekeeper_stop(neon_env_builder: NeonEnvBuil
     env = neon_env_builder.init_start()
     env.pageserver.http_client()
 
-    tenant_id, timeline_id = env.neon_cli.create_tenant()
+    tenant_id, timeline_id = env.create_tenant()
 
     elements_to_insert = 1_000_000
     expected_timeout_error = f"Timed out while waiting for WAL record at LSN {future_lsn} to arrive"

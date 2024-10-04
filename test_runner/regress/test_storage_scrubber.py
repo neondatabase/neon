@@ -135,7 +135,7 @@ def test_scrubber_physical_gc(neon_env_builder: NeonEnvBuilder, shard_count: Opt
 
     tenant_id = TenantId.generate()
     timeline_id = TimelineId.generate()
-    env.neon_cli.create_tenant(tenant_id, timeline_id, shard_count=shard_count)
+    env.create_tenant(tenant_id, timeline_id, shard_count=shard_count)
 
     workload = Workload(env, tenant_id, timeline_id)
     workload.init()
@@ -185,7 +185,7 @@ def test_scrubber_physical_gc_ancestors(
 
     tenant_id = TenantId.generate()
     timeline_id = TimelineId.generate()
-    env.neon_cli.create_tenant(
+    env.create_tenant(
         tenant_id,
         timeline_id,
         shard_count=shard_count,
@@ -303,7 +303,7 @@ def test_scrubber_physical_gc_timeline_deletion(neon_env_builder: NeonEnvBuilder
 
     tenant_id = TenantId.generate()
     timeline_id = TimelineId.generate()
-    env.neon_cli.create_tenant(
+    env.create_tenant(
         tenant_id,
         timeline_id,
         shard_count=None,
@@ -385,7 +385,7 @@ def test_scrubber_physical_gc_ancestors_split(neon_env_builder: NeonEnvBuilder):
     tenant_id = TenantId.generate()
     timeline_id = TimelineId.generate()
     initial_shard_count = 2
-    env.neon_cli.create_tenant(
+    env.create_tenant(
         tenant_id,
         timeline_id,
         shard_count=initial_shard_count,

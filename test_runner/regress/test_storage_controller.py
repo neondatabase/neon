@@ -96,7 +96,7 @@ def test_storage_controller_smoke(
 
     # Creating several tenants should spread out across the pageservers
     for tid in tenant_ids:
-        env.neon_cli.create_tenant(tid, shard_count=shards_per_tenant)
+        env.create_tenant(tid, shard_count=shards_per_tenant)
 
     # Repeating a creation should be idempotent (we are just testing it doesn't return an error)
     env.storage_controller.tenant_create(
@@ -172,7 +172,7 @@ def test_storage_controller_smoke(
     # Create some fresh tenants
     tenant_ids = set(TenantId.generate() for i in range(0, tenant_count))
     for tid in tenant_ids:
-        env.neon_cli.create_tenant(tid, shard_count=shards_per_tenant)
+        env.create_tenant(tid, shard_count=shards_per_tenant)
 
     counts = get_node_shard_counts(env, tenant_ids)
     # Nothing should have been scheduled on the node in Draining
@@ -806,10 +806,7 @@ def test_storage_controller_s3_time_travel_recovery(
     env.storage_controller.consistency_check()
 
     branch_name = "main"
-    timeline_id = env.neon_cli.create_timeline(
-        branch_name,
-        tenant_id=tenant_id,
-    )
+    timeline_id = env.create_timeline(branch_name, tenant_id=tenant_id)
     # Write some nontrivial amount of data into the endpoint and wait until it is uploaded
     with env.endpoints.create_start("main", tenant_id=tenant_id) as endpoint:
         run_pg_bench_small(pg_bin, endpoint.connstr())
@@ -1009,9 +1006,7 @@ def test_storage_controller_tenant_deletion(
 
     tenant_id = TenantId.generate()
     timeline_id = TimelineId.generate()
-    env.neon_cli.create_tenant(
-        tenant_id, timeline_id, shard_count=2, placement_policy='{"Attached":1}'
-    )
+    env.create_tenant(tenant_id, timeline_id, shard_count=2, placement_policy='{"Attached":1}')
 
     # Ensure all the locations are configured, including secondaries
     env.storage_controller.reconcile_until_idle()
@@ -1217,10 +1212,7 @@ def test_storage_controller_heartbeats(
         env.storage_controller.tenant_create(tid)
 
         branch_name = "main"
-        env.neon_cli.create_timeline(
-            branch_name,
-            tenant_id=tid,
-        )
+        env.create_timeline(branch_name, tenant_id=tid)
 
         with env.endpoints.create_start("main", tenant_id=tid) as endpoint:
             run_pg_bench_small(pg_bin, endpoint.connstr())
@@ -1322,9 +1314,9 @@ def test_storage_controller_re_attach(neon_env_builder: NeonEnvBuilder):
 
     # We'll have two tenants.
     tenant_a = TenantId.generate()
-    env.neon_cli.create_tenant(tenant_a, placement_policy='{"Attached":1}')
+    env.create_tenant(tenant_a, placement_policy='{"Attached":1}')
     tenant_b = TenantId.generate()
-    env.neon_cli.create_tenant(tenant_b, placement_policy='{"Attached":1}')
+    env.create_tenant(tenant_b, placement_policy='{"Attached":1}')
 
     # Each pageserver will have one attached and one secondary location
     env.storage_controller.tenant_shard_migrate(
@@ -1647,7 +1639,7 @@ def test_tenant_import(neon_env_builder: NeonEnvBuilder, shard_count, remote_sto
 
     # Create a second timeline to ensure that import finds both
     timeline_a = env.initial_timeline
-    timeline_b = env.neon_cli.create_branch("branch_b", tenant_id=tenant_id)
+    timeline_b = env.create_branch("branch_b", tenant_id=tenant_id)
 
     workload_a = Workload(env, tenant_id, timeline_a, branch_name="main")
     workload_a.init()
@@ -1689,7 +1681,7 @@ def test_tenant_import(neon_env_builder: NeonEnvBuilder, shard_count, remote_sto
     )
 
     # Now import it again
-    env.neon_cli.import_tenant(tenant_id)
+    env.neon_cli.tenant_import(tenant_id)
 
     # Check we found the shards
     describe = env.storage_controller.tenant_describe(tenant_id)
@@ -1731,7 +1723,7 @@ def test_graceful_cluster_restart(neon_env_builder: NeonEnvBuilder):
     for _ in range(0, tenant_count):
         tid = TenantId.generate()
         tenant_ids.append(tid)
-        env.neon_cli.create_tenant(
+        env.create_tenant(
             tid, placement_policy='{"Attached":1}', shard_count=shard_count_per_tenant
         )
 
@@ -1818,7 +1810,7 @@ def test_skip_drain_on_secondary_lag(neon_env_builder: NeonEnvBuilder, pg_bin: P
     env = neon_env_builder.init_configs()
     env.start()
 
-    tid, timeline_id = env.neon_cli.create_tenant(placement_policy='{"Attached":1}')
+    tid, timeline_id = env.create_tenant(placement_policy='{"Attached":1}')
 
     # Give things a chance to settle.
     env.storage_controller.reconcile_until_idle(timeout_secs=30)
@@ -1924,7 +1916,7 @@ def test_background_operation_cancellation(neon_env_builder: NeonEnvBuilder):
     for _ in range(0, tenant_count):
         tid = TenantId.generate()
         tenant_ids.append(tid)
-        env.neon_cli.create_tenant(
+        env.create_tenant(
             tid, placement_policy='{"Attached":1}', shard_count=shard_count_per_tenant
         )
 
@@ -1984,7 +1976,7 @@ def test_storage_controller_node_deletion(
     for _ in range(0, tenant_count):
         tid = TenantId.generate()
         tenant_ids.append(tid)
-        env.neon_cli.create_tenant(
+        env.create_tenant(
             tid, placement_policy='{"Attached":1}', shard_count=shard_count_per_tenant
         )
 
@@ -2109,7 +2101,7 @@ def test_storage_controller_metadata_health(
     )
 
     # Mock tenant with unhealthy scrubber scan result
-    tenant_b, _ = env.neon_cli.create_tenant(shard_count=shard_count)
+    tenant_b, _ = env.create_tenant(shard_count=shard_count)
     tenant_b_shard_ids = (
         env.storage_controller.tenant_shard_split(tenant_b, shard_count=shard_count)
         if shard_count is not None
@@ -2117,7 +2109,7 @@ def test_storage_controller_metadata_health(
     )
 
     # Mock tenant that never gets a health update from scrubber
-    tenant_c, _ = env.neon_cli.create_tenant(shard_count=shard_count)
+    tenant_c, _ = env.create_tenant(shard_count=shard_count)
 
     tenant_c_shard_ids = (
         env.storage_controller.tenant_shard_split(tenant_c, shard_count=shard_count)
@@ -2517,7 +2509,7 @@ def test_storage_controller_validate_during_migration(neon_env_builder: NeonEnvB
 
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
-    env.neon_cli.create_tenant(tenant_id, timeline_id)
+    env.create_tenant(tenant_id, timeline_id)
     env.storage_controller.pageserver_api().set_tenant_config(tenant_id, TENANT_CONF)
 
     # Write enough data that a compaction would do some work (deleting some L0s)
@@ -2652,7 +2644,7 @@ def test_storage_controller_proxy_during_migration(
 
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
-    env.neon_cli.create_tenant(tenant_id, timeline_id)
+    env.create_tenant(tenant_id, timeline_id)
 
     # The test stalls a reconcile on purpose to check if the long running
     # reconcile alert fires.
@@ -2831,7 +2823,7 @@ def test_shard_preferred_azs(neon_env_builder: NeonEnvBuilder):
     # Generate a layer to avoid shard split handling on ps from tripping
     # up on debug assert.
     timeline_id = TimelineId.generate()
-    env.neon_cli.create_timeline("bar", tids[0], timeline_id)
+    env.create_timeline("bar", tids[0], timeline_id)
 
     workload = Workload(env, tids[0], timeline_id, branch_name="bar")
     workload.init()

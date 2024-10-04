@@ -150,7 +150,7 @@ def test_generations_upgrade(neon_env_builder: NeonEnvBuilder):
     env.pageserver.start()
     env.storage_controller.node_configure(env.pageserver.id, {"availability": "Active"})
 
-    env.neon_cli.create_tenant(
+    env.create_tenant(
         tenant_id=env.initial_tenant, conf=TENANT_CONF, timeline_id=env.initial_timeline
     )
 
@@ -643,9 +643,7 @@ def test_upgrade_generationless_local_file_paths(
 
     tenant_id = TenantId.generate()
     timeline_id = TimelineId.generate()
-    env.neon_cli.create_tenant(
-        tenant_id, timeline_id, conf=TENANT_CONF, placement_policy='{"Attached":1}'
-    )
+    env.create_tenant(tenant_id, timeline_id, conf=TENANT_CONF, placement_policy='{"Attached":1}')
 
     workload = Workload(env, tenant_id, timeline_id)
     workload.init()
