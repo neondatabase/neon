@@ -1,12 +1,10 @@
 import concurrent.futures
 import json
-import os
 import threading
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
 from enum import Enum
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import pytest
