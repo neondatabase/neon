@@ -34,6 +34,7 @@ use nix::sys::signal::{kill, Signal};
 use remote_storage::{DownloadError, RemotePath};
 
 use crate::checker::create_availability_check_data;
+use crate::local_proxy;
 use crate::logger::inlinify;
 use crate::pg_helpers::*;
 use crate::spec::*;
@@ -886,6 +887,11 @@ impl ComputeNode {
         // 'Close' connection
         drop(client);
 
+        if let Some(ref local_proxy) = spec.local_proxy_config {
+            info!("configuring local_proxy");
+            local_proxy::configure(local_proxy).context("apply_config local_proxy")?;
+        }
+
         // Run migrations separately to not hold up cold starts
         thread::spawn(move || {
             let mut connstr = connstr.clone();
@@ -934,6 +940,19 @@ impl ComputeNode {
                     error!("error while tuning pgbouncer: {err:?}");
                 }
             });
+        }
+
+        if let Some(ref local_proxy) = spec.local_proxy_config {
+            info!("configuring local_proxy");
+
+            // Spawn a thread to do the configuration,
+            // so that we don't block the main thread that starts Postgres.
+            let local_proxy = local_proxy.clone();
+            let _handle = Some(thread::spawn(move || {
+                if let Err(err) = local_proxy::configure(&local_proxy) {
+                    error!("error while configuring local_proxy: {err:?}");
+                }
+            }));
         }
 
         // Write new config
@@ -1019,6 +1038,19 @@ impl ComputeNode {
                 let res = rt.block_on(tune_pgbouncer(pgbouncer_settings));
                 if let Err(err) = res {
                     error!("error while tuning pgbouncer: {err:?}");
+                }
+            });
+        }
+
+        if let Some(local_proxy) = &pspec.spec.local_proxy_config {
+            info!("configuring local_proxy");
+
+            // Spawn a thread to do the configuration,
+            // so that we don't block the main thread that starts Postgres.
+            let local_proxy = local_proxy.clone();
+            let _handle = thread::spawn(move || {
+                if let Err(err) = local_proxy::configure(&local_proxy) {
+                    error!("error while configuring local_proxy: {err:?}");
                 }
             });
         }
