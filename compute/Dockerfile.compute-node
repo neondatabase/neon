@@ -411,10 +411,7 @@ COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
 # not version-specific
 # last release v2.4.2 - Jul 29, 2023
-RUN case "${PG_VERSION}" in "v17") \
-    echo "v17 extensions are not supported yet. Quit" && exit 0;; \
-    esac && \
-    wget https://github.com/RhodiumToad/ip4r/archive/refs/tags/2.4.2.tar.gz -O ip4r.tar.gz && \
+RUN wget https://github.com/RhodiumToad/ip4r/archive/refs/tags/2.4.2.tar.gz -O ip4r.tar.gz && \
     echo "0f7b1f159974f49a47842a8ab6751aecca1ed1142b6d5e38d81b064b2ead1b4b ip4r.tar.gz" | sha256sum --check && \
     mkdir ip4r-src && cd ip4r-src && tar xzf ../ip4r.tar.gz --strip-components=1 -C . && \
     make -j $(getconf _NPROCESSORS_ONLN) PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
@@ -928,10 +925,7 @@ COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 # pg_ivm v1.9 supports v17
 # last release v1.9 - Jul 31
 ENV PATH="/usr/local/pgsql/bin/:$PATH"
-RUN case "${PG_VERSION}" in "v17") \
-    echo "We'll need to update pg_ivm to 1.9+ for pg17 support" && exit 0;; \
-    esac && \
-    wget https://github.com/sraoss/pg_ivm/archive/refs/tags/v1.9.tar.gz -O pg_ivm.tar.gz && \
+RUN wget https://github.com/sraoss/pg_ivm/archive/refs/tags/v1.9.tar.gz -O pg_ivm.tar.gz && \
     echo "59e15722939f274650abf637f315dd723c87073496ca77236b044cb205270d8b pg_ivm.tar.gz" | sha256sum --check && \
     mkdir pg_ivm-src && cd pg_ivm-src && tar xzf ../pg_ivm.tar.gz --strip-components=1 -C . && \
     make -j $(getconf _NPROCESSORS_ONLN) && \
