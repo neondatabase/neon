@@ -8,6 +8,7 @@ use tracing::{debug, field::display, info};
 
 use crate::{
     auth::{
+        self,
         backend::{local::StaticAuthRules, ComputeCredentials, ComputeUserInfo},
         check_peer_addr_is_in_list, AuthError,
     },
@@ -23,7 +24,7 @@ use crate::{
     error::{ErrorKind, ReportableError, UserFacingError},
     intern::EndpointIdInt,
     proxy::{
-        connect_compute::{ComputeConnectBackend, ConnectMechanism},
+        connect_compute::ConnectMechanism,
         retry::{CouldRetry, ShouldRetryWakeCompute},
     },
     rate_limiter::EndpointRateLimiter,
@@ -240,15 +241,18 @@ impl PoolingBackend {
         .await
     }
 
-    // Wake up the destination if needed. Code here is a bit involved because
-    // we reuse the code from the usual proxy and we need to prepare few structures
-    // that this code expects.
+    /// Connect to postgres over localhost.
+    ///
+    /// We expect postgres to be started here, so we won't do any retries.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called with a non-local_proxy backend.
     #[tracing::instrument(fields(pid = tracing::field::Empty), skip_all)]
-    pub(crate) async fn connect_to_local_compute(
+    pub(crate) async fn connect_to_local_postgres(
         &self,
         ctx: &RequestMonitoring,
         conn_info: ConnInfo,
-        keys: ComputeCredentials,
     ) -> Result<LocalClient<tokio_postgres::Client>, HttpConnError> {
         if let Some(client) = self.local_pool.get(ctx, &conn_info)? {
             return Ok(client);
@@ -257,9 +261,13 @@ impl PoolingBackend {
         let conn_id = uuid::Uuid::new_v4();
         tracing::Span::current().record("conn_id", display(conn_id));
         info!(%conn_id, "local_pool: opening a new connection '{conn_info}'");
-        let backend = self.config.auth_backend.as_ref().map(|()| keys);
 
-        let mut node_info = backend.wake_compute(ctx).await?;
+        let mut node_info = match &self.config.auth_backend {
+            auth::Backend::Console(_, _) | auth::Backend::Web(_, ()) => {
+                unreachable!("only local_proxy can connect to local postgres")
+            }
+            auth::Backend::Local(local) => local.node_info.clone(),
+        };
 
         let config = node_info
             .config
@@ -272,7 +280,7 @@ impl PoolingBackend {
 
         tracing::Span::current().record("pid", tracing::field::display(client.get_process_id()));
 
-        let client = local_conn_pool::poll_client(
+        let handle = local_conn_pool::poll_client(
             self.local_pool.clone(),
             ctx,
             conn_info,
@@ -282,13 +290,14 @@ impl PoolingBackend {
             node_info.aux.clone(),
         );
 
-        let kid = client.get_process_id() as i64;
-        let jwk = p256::PublicKey::from(client.key().verifying_key()).to_jwk();
+        let kid = handle.get_client().get_process_id() as i64;
+        let jwk = p256::PublicKey::from(handle.key().verifying_key()).to_jwk();
 
         debug!(kid, ?jwk, "setting up backend session state");
 
         // initiates the auth session
-        client
+        handle
+            .get_client()
             .query(
                 "select auth.init($1, $2);",
                 &[
@@ -300,7 +309,7 @@ impl PoolingBackend {
 
         info!(?kid, "backend session state init");
 
-        Ok(client)
+        Ok(handle)
     }
 }
 

@@ -41,7 +41,6 @@ use urlencoding;
 use utils::http::error::ApiError;
 
 use crate::auth::backend::ComputeCredentialKeys;
-use crate::auth::backend::ComputeCredentials;
 use crate::auth::backend::ComputeUserInfo;
 use crate::auth::endpoint_sni;
 use crate::auth::ComputeUserInfoParseError;
@@ -651,16 +650,7 @@ async fn handle_db_inner(
 
             let client = match keys.keys {
                 ComputeCredentialKeys::JwtPayload(payload) if is_local_proxy => {
-                    let mut client = backend
-                        .connect_to_local_compute(
-                            ctx,
-                            conn_info,
-                            ComputeCredentials {
-                                info: keys.info,
-                                keys: ComputeCredentialKeys::None,
-                            },
-                        )
-                        .await?;
+                    let mut client = backend.connect_to_local_postgres(ctx, conn_info).await?;
                     client.set_jwt_session(&payload).await?;
                     Client::Local(client)
                 }

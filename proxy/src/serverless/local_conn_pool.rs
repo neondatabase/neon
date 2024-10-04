@@ -5,7 +5,6 @@ use parking_lot::RwLock;
 use rand::rngs::OsRng;
 use serde_json::Value;
 use signature::Signer;
-use std::ops::Deref;
 use std::task::{ready, Poll};
 use std::{collections::HashMap, pin::pin, sync::Arc, sync::Weak, time::Duration};
 use tokio::time::Instant;
@@ -509,19 +508,15 @@ impl<C: ClientInnerExt> Discard<'_, C> {
     }
 }
 
-impl<C: ClientInnerExt> Deref for LocalClient<C> {
-    type Target = C;
-
-    fn deref(&self) -> &Self::Target {
+impl<C: ClientInnerExt> LocalClient<C> {
+    pub fn get_client(&self) -> &C {
         &self
             .inner
             .as_ref()
             .expect("client inner should not be removed")
             .inner
     }
-}
 
-impl<C: ClientInnerExt> LocalClient<C> {
     fn do_drop(&mut self) -> Option<impl FnOnce()> {
         let conn_info = self.conn_info.clone();
         let client = self
