@@ -1462,6 +1462,68 @@ impl Tenant {
         }
     }
 
+    fn check_to_be_archived_has_no_unarchived_children(
+        timeline_id: TimelineId,
+        timelines: &std::sync::MutexGuard<'_, HashMap<TimelineId, Arc<Timeline>>>,
+    ) -> Result<(), TimelineArchivalError> {
+        let children: Vec<TimelineId> = timelines
+            .iter()
+            .filter_map(|(id, entry)| {
+                if entry.get_ancestor_timeline_id() != Some(timeline_id) {
+                    return None;
+                }
+                if entry.is_archived() == Some(true) {
+                    return None;
+                }
+                Some(*id)
+            })
+            .collect();
+
+        if !children.is_empty() {
+            return Err(TimelineArchivalError::HasUnarchivedChildren(children));
+        }
+        Ok(())
+    }
+
+    fn check_ancestor_of_to_be_unarchived_is_not_archived(
+        timeline_id: TimelineId,
+        ancestor_timeline_id: TimelineId,
+        timelines: &std::sync::MutexGuard<'_, HashMap<TimelineId, Arc<Timeline>>>,
+        offloaded_timelines: &std::sync::MutexGuard<
+            '_,
+            HashMap<TimelineId, Arc<OffloadedTimeline>>,
+        >,
+    ) -> Result<(), TimelineArchivalError> {
+        let has_archived_parent = if let Some(ancestor_timeline) = timelines.get(&timeline_id) {
+            ancestor_timeline.is_archived() == Some(true)
+        } else if offloaded_timelines.contains_key(&ancestor_timeline_id) {
+            true
+        } else {
+            error!("ancestor timeline {ancestor_timeline_id} not found");
+            debug_assert!(false);
+            return Err(TimelineArchivalError::NotFound);
+        };
+        if has_archived_parent {
+            return Err(TimelineArchivalError::HasArchivedParent(
+                ancestor_timeline_id,
+            ));
+        }
+        Ok(())
+    }
+
+    fn check_to_be_unarchived_timeline_has_no_archived_parent(
+        timeline: &Arc<Timeline>,
+    ) -> Result<(), TimelineArchivalError> {
+        if let Some(ancestor_timeline) = timeline.ancestor_timeline() {
+            if ancestor_timeline.is_archived() == Some(true) {
+                return Err(TimelineArchivalError::HasArchivedParent(
+                    ancestor_timeline.timeline_id,
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) async fn apply_timeline_archival_config(
         self: &Arc<Self>,
         timeline_id: TimelineId,
@@ -1469,6 +1531,7 @@ impl Tenant {
         ctx: RequestContext,
     ) -> Result<(), TimelineArchivalError> {
         info!("setting timeline archival config");
+        // First part: figure out what is needed to do, and do validation
         let timeline_or_unarchive_offloaded = 'outer: {
             let timelines = self.timelines.lock().unwrap();
 
@@ -1478,61 +1541,31 @@ impl Tenant {
                     return Err(TimelineArchivalError::NotFound);
                 };
                 if new_state == TimelineArchivalState::Archived {
-                    // It's offloaded, so nothing to do for archival
+                    // It's offloaded already, so nothing to do
                     return Ok(());
                 }
                 if let Some(ancestor_timeline_id) = offloaded.ancestor_timeline_id {
-                    let has_archived_parent =
-                        if let Some(ancestor_timeline) = timelines.get(&timeline_id) {
-                            ancestor_timeline.is_archived() == Some(true)
-                        } else if offloaded_timelines.contains_key(&ancestor_timeline_id) {
-                            true
-                        } else {
-                            error!("ancestor timeline {ancestor_timeline_id} not found");
-                            debug_assert!(false);
-                            return Err(TimelineArchivalError::NotFound);
-                        };
-                    if has_archived_parent {
-                        return Err(TimelineArchivalError::HasArchivedParent(
-                            ancestor_timeline_id,
-                        ));
-                    }
+                    Self::check_ancestor_of_to_be_unarchived_is_not_archived(
+                        timeline_id,
+                        ancestor_timeline_id,
+                        &timelines,
+                        &offloaded_timelines,
+                    )?;
                 }
                 break 'outer None;
             };
 
             if new_state == TimelineArchivalState::Unarchived {
-                if let Some(ancestor_timeline) = timeline.ancestor_timeline() {
-                    if ancestor_timeline.is_archived() == Some(true) {
-                        return Err(TimelineArchivalError::HasArchivedParent(
-                            ancestor_timeline.timeline_id,
-                        ));
-                    }
-                }
+                Self::check_to_be_unarchived_timeline_has_no_archived_parent(&timeline)?;
             }
 
             if new_state == TimelineArchivalState::Archived {
-                // Ensure that there are no non-archived child timelines
-                let children: Vec<TimelineId> = timelines
-                    .iter()
-                    .filter_map(|(id, entry)| {
-                        if entry.get_ancestor_timeline_id() != Some(timeline_id) {
-                            return None;
-                        }
-                        if entry.is_archived() == Some(true) {
-                            return None;
-                        }
-                        Some(*id)
-                    })
-                    .collect();
-
-                if !children.is_empty() {
-                    return Err(TimelineArchivalError::HasUnarchivedChildren(children));
-                }
+                Self::check_to_be_archived_has_no_unarchived_children(timeline_id, &timelines)?;
             }
             Some(Arc::clone(timeline))
         };
 
+        // Second part: unarchive timeline (if needed)
         let timeline = if let Some(timeline) = timeline_or_unarchive_offloaded {
             timeline
         } else {
@@ -1597,6 +1630,7 @@ impl Tenant {
             }
         };
 
+        // Third part: upload new timeline archival state and block until it is present in S3
         let upload_needed = timeline
             .remote_client
             .schedule_index_upload_for_timeline_archival_state(new_state)?;
