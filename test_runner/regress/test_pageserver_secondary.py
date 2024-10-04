@@ -650,7 +650,7 @@ def test_secondary_background_downloads(neon_env_builder: NeonEnvBuilder):
         tenant_id = TenantId.generate()
         timeline_a = TimelineId.generate()
         timeline_b = TimelineId.generate()
-        env.neon_cli.create_tenant(
+        env.create_tenant(
             tenant_id,
             timeline_a,
             placement_policy='{"Attached":1}',
@@ -658,7 +658,7 @@ def test_secondary_background_downloads(neon_env_builder: NeonEnvBuilder):
             # to trigger the upload promptly.
             conf={"heatmap_period": f"{upload_period_secs}s"},
         )
-        env.neon_cli.create_timeline("main2", tenant_id, timeline_b)
+        env.create_timeline("main2", tenant_id, timeline_b)
 
         tenant_timelines[tenant_id] = [timeline_a, timeline_b]
 
@@ -778,9 +778,7 @@ def test_slow_secondary_downloads(neon_env_builder: NeonEnvBuilder, via_controll
     tenant_id = TenantId.generate()
     timeline_id = TimelineId.generate()
 
-    env.neon_cli.create_tenant(
-        tenant_id, timeline_id, conf=TENANT_CONF, placement_policy='{"Attached":1}'
-    )
+    env.create_tenant(tenant_id, timeline_id, conf=TENANT_CONF, placement_policy='{"Attached":1}')
 
     attached_to_id = env.storage_controller.locate(tenant_id)[0]["node_id"]
     ps_attached = env.get_pageserver(attached_to_id)

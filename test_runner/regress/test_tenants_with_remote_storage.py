@@ -66,7 +66,7 @@ def test_tenants_many(neon_env_builder: NeonEnvBuilder):
 
     for _ in range(1, 5):
         # Use a tiny checkpoint distance, to create a lot of layers quickly
-        tenant, _ = env.neon_cli.create_tenant(
+        tenant, _ = env.create_tenant(
             conf={
                 "checkpoint_distance": "5000000",
             }

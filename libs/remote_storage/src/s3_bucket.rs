@@ -28,6 +28,7 @@ use aws_sdk_s3::{
     Client,
 };
 use aws_smithy_async::rt::sleep::TokioSleep;
+use http_types::StatusCode;
 
 use aws_smithy_types::{body::SdkBody, DateTime};
 use aws_smithy_types::{byte_stream::ByteStream, date_time::ConversionError};
@@ -44,8 +45,8 @@ use crate::{
     error::Cancelled,
     metrics::{start_counting_cancelled_wait, start_measuring_requests},
     support::PermitCarrying,
-    ConcurrencyLimiter, Download, DownloadError, Listing, ListingMode, ListingObject, RemotePath,
-    RemoteStorage, TimeTravelError, TimeoutOrCancel, MAX_KEYS_PER_DELETE,
+    ConcurrencyLimiter, Download, DownloadError, DownloadOpts, Listing, ListingMode, ListingObject,
+    RemotePath, RemoteStorage, TimeTravelError, TimeoutOrCancel, MAX_KEYS_PER_DELETE,
     REMOTE_STORAGE_PREFIX_SEPARATOR,
 };
 
@@ -67,6 +68,7 @@ pub struct S3Bucket {
 struct GetObjectRequest {
     bucket: String,
     key: String,
+    etag: Option<String>,
     range: Option<String>,
 }
 impl S3Bucket {
@@ -248,13 +250,18 @@ impl S3Bucket {
 
         let started_at = start_measuring_requests(kind);
 
-        let get_object = self
+        let mut builder = self
             .client
             .get_object()
             .bucket(request.bucket)
             .key(request.key)
-            .set_range(request.range)
-            .send();
+            .set_range(request.range);
+
+        if let Some(etag) = request.etag {
+            builder = builder.if_none_match(etag);
+        }
+
+        let get_object = builder.send();
 
         let get_object = tokio::select! {
             res = get_object => res,
@@ -276,6 +283,20 @@ impl S3Bucket {
                     started_at,
                 );
                 return Err(DownloadError::NotFound);
+            }
+            Err(SdkError::ServiceError(e))
+                // aws_smithy_runtime_api::http::response::StatusCode isn't
+                // re-exported by any aws crates, so just check the numeric
+                // status against http_types::StatusCode instead of pulling it.
+                if e.raw().status().as_u16() == StatusCode::NotModified =>
+            {
+                // Count an unmodified file as a success.
+                crate::metrics::BUCKET_METRICS.req_seconds.observe_elapsed(
+                    kind,
+                    AttemptOutcome::Ok,
+                    started_at,
+                );
+                return Err(DownloadError::Unmodified);
             }
             Err(e) => {
                 crate::metrics::BUCKET_METRICS.req_seconds.observe_elapsed(
@@ -773,6 +794,7 @@ impl RemoteStorage for S3Bucket {
     async fn download(
         &self,
         from: &RemotePath,
+        opts: &DownloadOpts,
         cancel: &CancellationToken,
     ) -> Result<Download, DownloadError> {
         // if prefix is not none then download file `prefix/from`
@@ -781,6 +803,7 @@ impl RemoteStorage for S3Bucket {
             GetObjectRequest {
                 bucket: self.bucket_name.clone(),
                 key: self.relative_path_to_s3_object(from),
+                etag: opts.etag.as_ref().map(|e| e.to_string()),
                 range: None,
             },
             cancel,
@@ -807,6 +830,7 @@ impl RemoteStorage for S3Bucket {
             GetObjectRequest {
                 bucket: self.bucket_name.clone(),
                 key: self.relative_path_to_s3_object(from),
+                etag: None,
                 range,
             },
             cancel,

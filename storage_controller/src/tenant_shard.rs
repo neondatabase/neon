@@ -17,6 +17,7 @@ use crate::{
     service::ReconcileResultRequest,
 };
 use futures::future::{self, Either};
+use itertools::Itertools;
 use pageserver_api::controller_api::{
     AvailabilityZone, NodeSchedulingPolicy, PlacementPolicy, ShardSchedulingPolicy,
 };
@@ -1409,6 +1410,32 @@ impl TenantShard {
 
     pub(crate) fn set_preferred_az(&mut self, preferred_az_id: AvailabilityZone) {
         self.preferred_az_id = Some(preferred_az_id);
+    }
+
+    /// Returns all the nodes to which this tenant shard is attached according to the
+    /// observed state and the generations. Return vector is sorted from latest generation
+    /// to earliest.
+    pub(crate) fn attached_locations(&self) -> Vec<(NodeId, Generation)> {
+        self.observed
+            .locations
+            .iter()
+            .filter_map(|(node_id, observed)| {
+                use LocationConfigMode::{AttachedMulti, AttachedSingle, AttachedStale};
+
+                let conf = observed.conf.as_ref()?;
+
+                match (conf.generation, conf.mode) {
+                    (Some(gen), AttachedMulti | AttachedSingle | AttachedStale) => {
+                        Some((*node_id, gen))
+                    }
+                    _ => None,
+                }
+            })
+            .sorted_by(|(_lhs_node_id, lhs_gen), (_rhs_node_id, rhs_gen)| {
+                lhs_gen.cmp(rhs_gen).reverse()
+            })
+            .map(|(node_id, gen)| (node_id, Generation::new(gen)))
+            .collect()
     }
 }
 

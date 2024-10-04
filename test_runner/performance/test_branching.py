@@ -41,7 +41,7 @@ def test_compare_child_and_root_pgbench_perf(neon_compare: NeonCompare):
         )
         neon_compare.zenbenchmark.record_pg_bench_result(branch, res)
 
-    env.neon_cli.create_branch("root")
+    env.create_branch("root")
     endpoint_root = env.endpoints.create_start("root")
     pg_bin.run_capture(["pgbench", "-i", "-I", "dtGvp", endpoint_root.connstr(), "-s10"])
 
@@ -55,14 +55,14 @@ def test_compare_child_and_root_pgbench_perf(neon_compare: NeonCompare):
 
 def test_compare_child_and_root_write_perf(neon_compare: NeonCompare):
     env = neon_compare.env
-    env.neon_cli.create_branch("root")
+    env.create_branch("root")
     endpoint_root = env.endpoints.create_start("root")
 
     endpoint_root.safe_psql(
         "CREATE TABLE foo(key serial primary key, t text default 'foooooooooooooooooooooooooooooooooooooooooooooooooooo')",
     )
 
-    env.neon_cli.create_branch("child", "root")
+    env.create_branch("child", ancestor_branch_name="root")
     endpoint_child = env.endpoints.create_start("child")
 
     with neon_compare.record_duration("root_run_duration"):
@@ -73,7 +73,7 @@ def test_compare_child_and_root_write_perf(neon_compare: NeonCompare):
 
 def test_compare_child_and_root_read_perf(neon_compare: NeonCompare):
     env = neon_compare.env
-    env.neon_cli.create_branch("root")
+    env.create_branch("root")
     endpoint_root = env.endpoints.create_start("root")
 
     endpoint_root.safe_psql_many(
@@ -83,7 +83,7 @@ def test_compare_child_and_root_read_perf(neon_compare: NeonCompare):
         ]
     )
 
-    env.neon_cli.create_branch("child", "root")
+    env.create_branch("child", ancestor_branch_name="root")
     endpoint_child = env.endpoints.create_start("child")
 
     with neon_compare.record_duration("root_run_duration"):

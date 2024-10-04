@@ -40,7 +40,7 @@ def test_walredo_not_left_behind_on_detach(neon_env_builder: NeonEnvBuilder):
         pageserver_http.tenant_status(tenant_id)
 
     # create new nenant
-    tenant_id, _ = env.neon_cli.create_tenant()
+    tenant_id, _ = env.create_tenant()
 
     # assert tenant exists on disk
     assert (env.pageserver.tenant_dir(tenant_id)).exists()

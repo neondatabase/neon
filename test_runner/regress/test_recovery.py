@@ -25,7 +25,7 @@ def test_pageserver_recovery(neon_env_builder: NeonEnvBuilder):
     )
 
     # Create a branch for us
-    env.neon_cli.create_branch("test_pageserver_recovery", "main")
+    env.create_branch("test_pageserver_recovery", ancestor_branch_name="main")
 
     endpoint = env.endpoints.create_start("test_pageserver_recovery")
 

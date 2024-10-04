@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+aws-config.workspace = true
 aws-sdk-s3.workspace = true
 either.workspace = true
 anyhow.workspace = true
@@ -31,7 +32,6 @@ storage_controller_client.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 chrono = { workspace = true, default-features = false, features = ["clock", "serde"] }
 reqwest = { workspace = true, default-features = false, features = ["rustls-tls", "json"] }
-aws-config = { workspace = true, default-features = false, features = ["rustls", "sso"] }
 
 pageserver = { path = "../pageserver" }
 pageserver_api = { path = "../libs/pageserver_api" }

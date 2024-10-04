@@ -218,7 +218,7 @@ def test_restarts_under_load(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.enable_safekeeper_remote_storage(RemoteStorageKind.LOCAL_FS)
     env = neon_env_builder.init_start()
 
-    env.neon_cli.create_branch("test_safekeepers_restarts_under_load")
+    env.create_branch("test_safekeepers_restarts_under_load")
     # Enable backpressure with 1MB maximal lag, because we don't want to block on `wait_for_lsn()` for too long
     endpoint = env.endpoints.create_start(
         "test_safekeepers_restarts_under_load", config_lines=["max_replication_write_lag=1MB"]
@@ -234,7 +234,7 @@ def test_restarts_frequent_checkpoints(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.init_start()
 
-    env.neon_cli.create_branch("test_restarts_frequent_checkpoints")
+    env.create_branch("test_restarts_frequent_checkpoints")
     # Enable backpressure with 1MB maximal lag, because we don't want to block on `wait_for_lsn()` for too long
     endpoint = env.endpoints.create_start(
         "test_restarts_frequent_checkpoints",
@@ -325,7 +325,7 @@ def test_compute_restarts(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.init_start()
 
-    env.neon_cli.create_branch("test_compute_restarts")
+    env.create_branch("test_compute_restarts")
     asyncio.run(run_compute_restarts(env))
 
 
@@ -435,7 +435,7 @@ def test_concurrent_computes(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.init_start()
 
-    env.neon_cli.create_branch("test_concurrent_computes")
+    env.create_branch("test_concurrent_computes")
     asyncio.run(run_concurrent_computes(env))
 
 
@@ -484,7 +484,7 @@ def test_unavailability(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.num_safekeepers = 2
     env = neon_env_builder.init_start()
 
-    env.neon_cli.create_branch("test_safekeepers_unavailability")
+    env.create_branch("test_safekeepers_unavailability")
     endpoint = env.endpoints.create_start("test_safekeepers_unavailability")
 
     asyncio.run(run_unavailability(env, endpoint))
@@ -493,7 +493,7 @@ def test_unavailability(neon_env_builder: NeonEnvBuilder):
 async def run_recovery_uncommitted(env: NeonEnv):
     (sk1, sk2, _) = env.safekeepers
 
-    env.neon_cli.create_branch("test_recovery_uncommitted")
+    env.create_branch("test_recovery_uncommitted")
     ep = env.endpoints.create_start("test_recovery_uncommitted")
     ep.safe_psql("create table t(key int, value text)")
     ep.safe_psql("insert into t select generate_series(1, 100), 'payload'")
@@ -589,7 +589,7 @@ def test_wal_truncation(neon_env_builder: NeonEnvBuilder):
 
 
 async def run_segment_init_failure(env: NeonEnv):
-    env.neon_cli.create_branch("test_segment_init_failure")
+    env.create_branch("test_segment_init_failure")
     ep = env.endpoints.create_start("test_segment_init_failure")
     ep.safe_psql("create table t(key int, value text)")
     ep.safe_psql("insert into t select generate_series(1, 100), 'payload'")
@@ -684,7 +684,7 @@ def test_race_conditions(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.init_start()
 
-    env.neon_cli.create_branch("test_safekeepers_race_conditions")
+    env.create_branch("test_safekeepers_race_conditions")
     endpoint = env.endpoints.create_start("test_safekeepers_race_conditions")
 
     asyncio.run(run_race_conditions(env, endpoint))
@@ -761,7 +761,7 @@ def test_wal_lagging(neon_env_builder: NeonEnvBuilder, test_output_dir: Path, bu
     neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.init_start()
 
-    env.neon_cli.create_branch("test_wal_lagging")
+    env.create_branch("test_wal_lagging")
     endpoint = env.endpoints.create_start("test_wal_lagging")
 
     asyncio.run(run_wal_lagging(env, endpoint, test_output_dir))

@@ -146,7 +146,7 @@ def test_many_timelines(neon_env_builder: NeonEnvBuilder):
     # start postgres on each timeline
     endpoints = []
     for branch_name in branch_names:
-        new_timeline_id = env.neon_cli.create_branch(branch_name)
+        new_timeline_id = env.create_branch(branch_name)
         endpoints.append(env.endpoints.create_start(branch_name))
         branch_names_to_timeline_ids[branch_name] = new_timeline_id
 
@@ -284,7 +284,7 @@ def test_restarts(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.num_safekeepers = n_acceptors
     env = neon_env_builder.init_start()
 
-    env.neon_cli.create_branch("test_safekeepers_restarts")
+    env.create_branch("test_safekeepers_restarts")
     endpoint = env.endpoints.create_start("test_safekeepers_restarts")
 
     # we rely upon autocommit after each statement
@@ -314,7 +314,7 @@ def test_broker(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
 
     tenant_id = env.initial_tenant
-    timeline_id = env.neon_cli.create_branch("test_broker", "main")
+    timeline_id = env.create_branch("test_broker", ancestor_branch_name="main")
 
     endpoint = env.endpoints.create_start("test_broker")
     endpoint.safe_psql("CREATE TABLE t(key int primary key, value text)")
@@ -374,7 +374,7 @@ def test_wal_removal(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
     env = neon_env_builder.init_start()
 
     tenant_id = env.initial_tenant
-    timeline_id = env.neon_cli.create_branch("test_safekeepers_wal_removal")
+    timeline_id = env.create_branch("test_safekeepers_wal_removal")
     endpoint = env.endpoints.create_start("test_safekeepers_wal_removal")
 
     # Note: it is important to insert at least two segments, as currently
@@ -504,7 +504,7 @@ def test_wal_backup(neon_env_builder: NeonEnvBuilder):
     )
 
     tenant_id = env.initial_tenant
-    timeline_id = env.neon_cli.create_branch("test_safekeepers_wal_backup")
+    timeline_id = env.create_branch("test_safekeepers_wal_backup")
     endpoint = env.endpoints.create_start("test_safekeepers_wal_backup")
 
     pg_conn = endpoint.connect()
@@ -561,7 +561,7 @@ def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder):
 
     env = neon_env_builder.init_start()
     tenant_id = env.initial_tenant
-    timeline_id = env.neon_cli.create_branch("test_s3_wal_replay")
+    timeline_id = env.create_branch("test_s3_wal_replay")
 
     endpoint = env.endpoints.create_start("test_s3_wal_replay")
 
@@ -849,7 +849,7 @@ def test_timeline_status(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
     env = neon_env_builder.init_start()
 
     tenant_id = env.initial_tenant
-    timeline_id = env.neon_cli.create_branch("test_timeline_status")
+    timeline_id = env.create_branch("test_timeline_status")
     endpoint = env.endpoints.create_start("test_timeline_status")
 
     wa = env.safekeepers[0]
@@ -948,7 +948,7 @@ def test_start_replication_term(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
 
     tenant_id = env.initial_tenant
-    timeline_id = env.neon_cli.create_branch("test_start_replication_term")
+    timeline_id = env.create_branch("test_start_replication_term")
     endpoint = env.endpoints.create_start("test_start_replication_term")
 
     endpoint.safe_psql("CREATE TABLE t(key int primary key, value text)")
@@ -980,7 +980,7 @@ def test_sk_auth(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
 
     tenant_id = env.initial_tenant
-    timeline_id = env.neon_cli.create_branch("test_sk_auth")
+    timeline_id = env.create_branch("test_sk_auth")
     env.endpoints.create_start("test_sk_auth")
 
     sk = env.safekeepers[0]
@@ -1041,7 +1041,7 @@ def test_restart_endpoint(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.init_start()
 
-    env.neon_cli.create_branch("test_sk_auth_restart_endpoint")
+    env.create_branch("test_sk_auth_restart_endpoint")
     endpoint = env.endpoints.create_start("test_sk_auth_restart_endpoint")
 
     with closing(endpoint.connect()) as conn:
@@ -1125,7 +1125,7 @@ def test_late_init(neon_env_builder: NeonEnvBuilder):
     sk1.stop()
 
     tenant_id = env.initial_tenant
-    timeline_id = env.neon_cli.create_branch("test_late_init")
+    timeline_id = env.create_branch("test_late_init")
     endpoint = env.endpoints.create_start("test_late_init")
     # create and insert smth while safekeeper is down...
     endpoint.safe_psql("create table t(key int, value text)")
@@ -1261,7 +1261,7 @@ def test_lagging_sk(neon_env_builder: NeonEnvBuilder):
     # create and insert smth while safekeeper is down...
     sk1.stop()
     tenant_id = env.initial_tenant
-    timeline_id = env.neon_cli.create_branch("test_lagging_sk")
+    timeline_id = env.create_branch("test_lagging_sk")
     ep = env.endpoints.create_start("test_lagging_sk")
     ep.safe_psql("create table t(key int, value text)")
     # make small insert to be on the same segment
@@ -1348,7 +1348,7 @@ def test_peer_recovery(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
 
     tenant_id = env.initial_tenant
-    timeline_id = env.neon_cli.create_branch("test_peer_recovery")
+    timeline_id = env.create_branch("test_peer_recovery")
     endpoint = env.endpoints.create_start("test_peer_recovery")
 
     endpoint.safe_psql("create table t(key int, value text)")
@@ -1412,7 +1412,7 @@ def test_wp_graceful_shutdown(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
     env = neon_env_builder.init_start()
 
     tenant_id = env.initial_tenant
-    timeline_id = env.neon_cli.create_branch("test_wp_graceful_shutdown")
+    timeline_id = env.create_branch("test_wp_graceful_shutdown")
     ep = env.endpoints.create_start("test_wp_graceful_shutdown")
     ep.safe_psql("create table t(key int, value text)")
     ep.stop()
@@ -1605,7 +1605,7 @@ def test_replace_safekeeper(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.num_safekeepers = 4
     env = neon_env_builder.init_start()
     tenant_id = env.initial_tenant
-    timeline_id = env.neon_cli.create_branch("test_replace_safekeeper")
+    timeline_id = env.create_branch("test_replace_safekeeper")
 
     log.info("Use only first 3 safekeepers")
     env.safekeepers[3].stop()
@@ -1672,12 +1672,12 @@ def test_delete_force(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
 
     # Create two tenants: one will be deleted, other should be preserved.
     tenant_id = env.initial_tenant
-    timeline_id_1 = env.neon_cli.create_branch("br1")  # Active, delete explicitly
-    timeline_id_2 = env.neon_cli.create_branch("br2")  # Inactive, delete explicitly
-    timeline_id_3 = env.neon_cli.create_branch("br3")  # Active, delete with the tenant
-    timeline_id_4 = env.neon_cli.create_branch("br4")  # Inactive, delete with the tenant
+    timeline_id_1 = env.create_branch("br1")  # Active, delete explicitly
+    timeline_id_2 = env.create_branch("br2")  # Inactive, delete explicitly
+    timeline_id_3 = env.create_branch("br3")  # Active, delete with the tenant
+    timeline_id_4 = env.create_branch("br4")  # Inactive, delete with the tenant
 
-    tenant_id_other, timeline_id_other = env.neon_cli.create_tenant()
+    tenant_id_other, timeline_id_other = env.create_tenant()
 
     # Populate branches
     endpoint_1 = env.endpoints.create_start("br1")
@@ -2009,7 +2009,7 @@ def test_idle_reconnections(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
 
     tenant_id = env.initial_tenant
-    timeline_id = env.neon_cli.create_branch("test_idle_reconnections")
+    timeline_id = env.create_branch("test_idle_reconnections")
 
     def collect_stats() -> Dict[str, float]:
         # we need to collect safekeeper_pg_queries_received_total metric from all safekeepers
@@ -2244,7 +2244,7 @@ def test_broker_discovery(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.enable_safekeeper_remote_storage(RemoteStorageKind.LOCAL_FS)
     env = neon_env_builder.init_start()
 
-    env.neon_cli.create_branch("test_broker_discovery")
+    env.create_branch("test_broker_discovery")
 
     endpoint = env.endpoints.create_start(
         "test_broker_discovery",
@@ -2325,7 +2325,7 @@ def test_s3_eviction(
     # start postgres on each timeline
     endpoints: list[Endpoint] = []
     for branch_name in branch_names:
-        timeline_id = env.neon_cli.create_branch(branch_name)
+        timeline_id = env.create_branch(branch_name)
         timelines.append(timeline_id)
 
         endpoints.append(env.endpoints.create_start(branch_name))

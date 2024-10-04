@@ -34,7 +34,7 @@ def test_change_pageserver(neon_env_builder: NeonEnvBuilder, make_httpserver):
         ignore_notify
     )
 
-    env.neon_cli.create_branch("test_change_pageserver")
+    env.create_branch("test_change_pageserver")
     endpoint = env.endpoints.create_start("test_change_pageserver")
 
     # Put this tenant into a dual-attached state
