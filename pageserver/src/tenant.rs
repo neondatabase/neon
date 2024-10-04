@@ -1536,6 +1536,7 @@ impl Tenant {
         let timeline = if let Some(timeline) = timeline_or_unarchive_offloaded {
             timeline
         } else {
+            // Unarchive an offloaded timeline
             let cancel = self.cancel.clone();
             let timeline_preload = self
                 .load_timeline_metadata(timeline_id, self.remote_storage.clone(), cancel)
@@ -2059,11 +2060,12 @@ impl Tenant {
                 .iter()
                 .filter_map(|(timeline_id, timeline)| {
                     let (is_active, can_offload) = (timeline.is_active(), timeline.can_offload());
-                    let can_offload = can_offload && {
+                    let has_no_unarchived_children = {
                         !timelines
                             .iter()
                             .any(|(_id, tl)| tl.get_ancestor_timeline_id() == Some(*timeline_id))
                     };
+                    let can_offload = can_offload && has_no_unarchived_children;
                     if (is_active, can_offload) == (false, false) {
                         None
                     } else {
@@ -2085,24 +2087,26 @@ impl Tenant {
         for (timeline_id, timeline, (can_compact, can_offload)) in &timelines_to_compact_or_offload
         {
             let pending_task_left = if *can_compact {
-                timeline
-                    .compact(cancel, EnumSet::empty(), ctx)
-                    .instrument(info_span!("compact_timeline", %timeline_id))
-                    .await
-                    .inspect_err(|e| match e {
-                        timeline::CompactionError::ShuttingDown => (),
-                        timeline::CompactionError::Other(e) => {
-                            self.compaction_circuit_breaker
-                                .lock()
-                                .unwrap()
-                                .fail(&CIRCUIT_BREAKERS_BROKEN, e);
-                        }
-                    })?
+                Some(
+                    timeline
+                        .compact(cancel, EnumSet::empty(), ctx)
+                        .instrument(info_span!("compact_timeline", %timeline_id))
+                        .await
+                        .inspect_err(|e| match e {
+                            timeline::CompactionError::ShuttingDown => (),
+                            timeline::CompactionError::Other(e) => {
+                                self.compaction_circuit_breaker
+                                    .lock()
+                                    .unwrap()
+                                    .fail(&CIRCUIT_BREAKERS_BROKEN, e);
+                            }
+                        })?,
+                )
             } else {
-                false
+                None
             };
-            has_pending_task |= pending_task_left;
-            if !pending_task_left && *can_offload {
+            has_pending_task |= pending_task_left.unwrap_or(false);
+            if pending_task_left == Some(false) && *can_offload {
                 offload_timeline(self, timeline)
                     .instrument(info_span!("offload_timeline", %timeline_id))
                     .await
