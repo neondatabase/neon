@@ -1583,6 +1583,10 @@ impl Tenant {
             })?;
             let timelines = self.timelines.lock().unwrap();
             if let Some(timeline) = timelines.get(&timeline_id) {
+                let mut offloaded_timelines = self.timelines_offloaded.lock().unwrap();
+                if offloaded_timelines.remove(&timeline_id).is_none() {
+                    warn!("timeline already removed from offloaded timelines");
+                }
                 Arc::clone(timeline)
             } else {
                 warn!("timeline not available directly after attach");
