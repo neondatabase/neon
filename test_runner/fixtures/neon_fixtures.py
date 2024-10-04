@@ -127,6 +127,22 @@ DEFAULT_OUTPUT_DIR: str = "test_output"
 DEFAULT_BRANCH_NAME: str = "main"
 
 BASE_PORT: int = 15000
+# Combination: 0: old, 1: new
+COMPONENT_VERS_BITMAP = {
+    "storage_controller": 0x01,
+    "storage_broker": 0x02,
+    "compute": 0x04,
+    "safekeeper": 0x08,
+    "pageserver": 0x10,
+}
+
+COMPONENT_BINARIES = {
+    "storage_controller": ["storage_controller"],
+    "storage_broker": ["storage_broker"],
+    "compute": ["compute_ctl"],
+    "safekeeper": ["safekeeper"],
+    "pageserver": ["pageserver", "pagectl"],
+}
 
 
 @pytest.fixture(scope="session")
@@ -515,31 +531,15 @@ class NeonEnvBuilder:
             ), "compatibility_pg_distrib_dir is required when using mixed versions"
             self.mixdir.mkdir(mode=0o755, exist_ok=True)
 
-            # Combination: 0: old, 1: new
-            bitmap = {
-                "storage_controller": 0x01,
-                "storage_broker": 0x02,
-                "compute": 0x04,
-                "safekeeper": 0x08,
-                "pageserver": 0x10,
-            }
-
-            binaries = {
-                "storage_controller": ["storage_controller"],
-                "storage_broker": ["storage_broker"],
-                "compute": ["compute_ctl"],
-                "safekeeper": ["safekeeper"],
-                "pageserver": ["pageserver", "pagectl"],
-            }
-            for component, paths in binaries.items():
+            for component, paths in COMPONENT_BINARIES.items():
                 directory = (
                     self.neon_binpath
-                    if bool(self.version_combination & bitmap[component])
+                    if bool(self.version_combination & COMPONENT_VERS_BITMAP[component])
                     else self.compatibility_neon_binpath
                 )
                 for filename in paths:
                     os.link(directory / filename, self.mixdir / filename)
-            if self.version_combination & bitmap["compute"]:
+            if self.version_combination & COMPONENT_VERS_BITMAP["compute"]:
                 self.pg_distrib_dir = self.compatibility_pg_distrib_dir
             self.neon_binpath = self.mixdir
 
