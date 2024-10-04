@@ -305,7 +305,7 @@ async fn refresh_config_inner(path: &Utf8Path) -> anyhow::Result<()> {
 
     let mut jwks_set = vec![];
 
-    for jwks in data.jwks {
+    for jwks in data.jwks.into_iter().flatten() {
         let mut jwks_url = url::Url::from_str(&jwks.jwks_url).context("parsing JWKS url")?;
 
         ensure!(

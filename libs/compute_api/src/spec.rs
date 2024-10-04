@@ -286,7 +286,9 @@ pub type GenericOptions = Option<Vec<GenericOption>>;
 /// use for authorizing connect requests using JWT.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct LocalProxySpec {
-    pub jwks: Vec<JwksSettings>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jwks: Option<Vec<JwksSettings>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
