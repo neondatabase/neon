@@ -192,6 +192,7 @@ RUN apt update && \
 ENV PLV8_TAG=v3.2.3
 RUN set -e \
     && git clone --recurse-submodules --depth 1 --branch ${PLV8_TAG} https://github.com/plv8/plv8.git plv8-src && \
+    tar -czf plv8.tar.gz --exclude .git plv8-src && \
     cd plv8-src && \
     # generate and copy upgrade scripts
     mkdir -p upgrade && ./generate_upgrade.sh 3.1.10 && \
