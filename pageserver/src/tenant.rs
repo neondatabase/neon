@@ -1524,6 +1524,72 @@ impl Tenant {
         Ok(())
     }
 
+    /// Loads the specified (offloaded) timeline from S3 and attaches it as a loaded timeline
+    async fn unoffload_timeline(
+        self: &Arc<Self>,
+        timeline_id: TimelineId,
+        ctx: RequestContext,
+    ) -> Result<Arc<Timeline>, TimelineArchivalError> {
+        let cancel = self.cancel.clone();
+        let timeline_preload = self
+            .load_timeline_metadata(timeline_id, self.remote_storage.clone(), cancel)
+            .await;
+
+        let index_part = match timeline_preload.index_part {
+            Ok(index_part) => {
+                debug!("remote index part exists for timeline {timeline_id}");
+                index_part
+            }
+            Err(DownloadError::NotFound) => {
+                error!(%timeline_id, "index_part not found on remote");
+                return Err(TimelineArchivalError::NotFound);
+            }
+            Err(e) => {
+                // Some (possibly ephemeral) error happened during index_part download.
+                warn!(%timeline_id, "Failed to load index_part from remote storage, failed creation? ({e})");
+                return Err(TimelineArchivalError::Other(
+                    anyhow::Error::new(e).context("downloading index_part from remote storage"),
+                ));
+            }
+        };
+        let index_part = match index_part {
+            MaybeDeletedIndexPart::IndexPart(index_part) => index_part,
+            MaybeDeletedIndexPart::Deleted(_index_part) => {
+                info!("timeline is deleted according to index_part.json");
+                return Err(TimelineArchivalError::NotFound);
+            }
+        };
+        let remote_metadata = index_part.metadata.clone();
+        let timeline_resources = self.build_timeline_resources(timeline_id);
+        self.load_remote_timeline(
+            timeline_id,
+            index_part,
+            remote_metadata,
+            timeline_resources,
+            &ctx,
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "failed to load remote timeline {} for tenant {}",
+                timeline_id, self.tenant_shard_id
+            )
+        })?;
+        let timelines = self.timelines.lock().unwrap();
+        if let Some(timeline) = timelines.get(&timeline_id) {
+            let mut offloaded_timelines = self.timelines_offloaded.lock().unwrap();
+            if offloaded_timelines.remove(&timeline_id).is_none() {
+                warn!("timeline already removed from offloaded timelines");
+            }
+            Ok(Arc::clone(timeline))
+        } else {
+            warn!("timeline not available directly after attach");
+            Err(TimelineArchivalError::Other(anyhow::anyhow!(
+                "timeline not available directly after attach"
+            )))
+        }
+    }
+
     pub(crate) async fn apply_timeline_archival_config(
         self: &Arc<Self>,
         timeline_id: TimelineId,
@@ -1555,12 +1621,16 @@ impl Tenant {
                 break 'outer None;
             };
 
-            if new_state == TimelineArchivalState::Unarchived {
-                Self::check_to_be_unarchived_timeline_has_no_archived_parent(&timeline)?;
-            }
-
-            if new_state == TimelineArchivalState::Archived {
-                Self::check_to_be_archived_has_no_unarchived_children(timeline_id, &timelines)?;
+            // Do some validation. We release the timelines lock below, so there is potential
+            // for race conditions: these checks are more present to prevent misunderstandings of
+            // the API's capabilities, instead of serving as the sole way to defend their invariants.
+            match new_state {
+                TimelineArchivalState::Unarchived => {
+                    Self::check_to_be_unarchived_timeline_has_no_archived_parent(&timeline)?
+                }
+                TimelineArchivalState::Archived => {
+                    Self::check_to_be_archived_has_no_unarchived_children(timeline_id, &timelines)?
+                }
             }
             Some(Arc::clone(timeline))
         };
@@ -1569,65 +1639,8 @@ impl Tenant {
         let timeline = if let Some(timeline) = timeline_or_unarchive_offloaded {
             timeline
         } else {
-            // Unarchive an offloaded timeline
-            let cancel = self.cancel.clone();
-            let timeline_preload = self
-                .load_timeline_metadata(timeline_id, self.remote_storage.clone(), cancel)
-                .await;
-
-            let index_part = match timeline_preload.index_part {
-                Ok(index_part) => {
-                    debug!("remote index part exists for timeline {timeline_id}");
-                    index_part
-                }
-                Err(DownloadError::NotFound) => {
-                    error!(%timeline_id, "index_part not found on remote");
-                    return Err(TimelineArchivalError::NotFound);
-                }
-                Err(e) => {
-                    // Some (possibly ephemeral) error happened during index_part download.
-                    warn!(%timeline_id, "Failed to load index_part from remote storage, failed creation? ({e})");
-                    return Err(TimelineArchivalError::Other(
-                        anyhow::Error::new(e).context("downloading index_part from remote storage"),
-                    ));
-                }
-            };
-            let index_part = match index_part {
-                MaybeDeletedIndexPart::IndexPart(index_part) => index_part,
-                MaybeDeletedIndexPart::Deleted(_index_part) => {
-                    info!("timeline is deleted according to index_part.json");
-                    return Err(TimelineArchivalError::NotFound);
-                }
-            };
-            let remote_metadata = index_part.metadata.clone();
-            let timeline_resources = self.build_timeline_resources(timeline_id);
-            self.load_remote_timeline(
-                timeline_id,
-                index_part,
-                remote_metadata,
-                timeline_resources,
-                &ctx,
-            )
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to load remote timeline {} for tenant {}",
-                    timeline_id, self.tenant_shard_id
-                )
-            })?;
-            let timelines = self.timelines.lock().unwrap();
-            if let Some(timeline) = timelines.get(&timeline_id) {
-                let mut offloaded_timelines = self.timelines_offloaded.lock().unwrap();
-                if offloaded_timelines.remove(&timeline_id).is_none() {
-                    warn!("timeline already removed from offloaded timelines");
-                }
-                Arc::clone(timeline)
-            } else {
-                warn!("timeline not available directly after attach");
-                return Err(TimelineArchivalError::Other(anyhow::anyhow!(
-                    "timeline not available directly after attach"
-                )));
-            }
+            // Turn offloaded timeline into a non-offloaded one
+            self.unoffload_timeline(timeline_id, ctx).await?
         };
 
         // Third part: upload new timeline archival state and block until it is present in S3
