@@ -1265,6 +1265,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytes",
+ "camino",
  "cfg-if",
  "chrono",
  "clap",

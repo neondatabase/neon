@@ -106,6 +106,10 @@ pub struct ComputeSpec {
     // Stripe size for pageserver sharding, in pages
     #[serde(default)]
     pub shard_stripe_size: Option<usize>,
+
+    /// Local Proxy configuration used for JWT authentication
+    #[serde(default)]
+    pub local_proxy_config: Option<LocalProxySpec>,
 }
 
 /// Feature flag to signal `compute_ctl` to enable certain experimental functionality.
