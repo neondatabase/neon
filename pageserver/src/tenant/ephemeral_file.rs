@@ -6,6 +6,8 @@ use crate::config::PageServerConf;
 use crate::context::RequestContext;
 use crate::page_cache;
 use crate::tenant::storage_layer::inmemory_layer::vectored_dio_read::File;
+use crate::virtual_file::dio::IoBufferMut;
+use crate::virtual_file::owned_buffers_io::io_buf_aligned::IoBufAlignedMut;
 use crate::virtual_file::owned_buffers_io::slice::SliceMutExt;
 use crate::virtual_file::owned_buffers_io::util::size_tracking_writer;
 use crate::virtual_file::owned_buffers_io::write::Buffer;
@@ -107,15 +109,16 @@ impl EphemeralFile {
         self.page_cache_file_id
     }
 
-    pub(crate) async fn load_to_vec(&self, ctx: &RequestContext) -> Result<Vec<u8>, io::Error> {
+    pub(crate) async fn load_to_buf(&self, ctx: &RequestContext) -> Result<IoBufferMut, io::Error> {
         let size = self.len().into_usize();
-        let vec = Vec::with_capacity(size);
-        let (slice, nread) = self.read_exact_at_eof_ok(0, vec.slice_full(), ctx).await?;
+        let align = virtual_file::get_io_buffer_alignment();
+        let buf = IoBufferMut::with_capacity_aligned(size, align);
+        let (slice, nread) = self.read_exact_at_eof_ok(0, buf.slice_full(), ctx).await?;
         assert_eq!(nread, size);
-        let vec = slice.into_inner();
-        assert_eq!(vec.len(), nread);
-        assert_eq!(vec.capacity(), size, "we shouldn't be reallocating");
-        Ok(vec)
+        let buf = slice.into_inner();
+        assert_eq!(buf.len(), nread);
+        assert_eq!(buf.capacity(), size, "we shouldn't be reallocating");
+        Ok(buf)
     }
 
     /// Returns the offset at which the first byte of the input was written, for use
@@ -158,7 +161,7 @@ impl EphemeralFile {
 }
 
 impl super::storage_layer::inmemory_layer::vectored_dio_read::File for EphemeralFile {
-    async fn read_exact_at_eof_ok<'a, 'b, B: tokio_epoll_uring::IoBufMut + Send>(
+    async fn read_exact_at_eof_ok<'a, 'b, B: IoBufAlignedMut + Send>(
         &'b self,
         start: u64,
         dst: tokio_epoll_uring::Slice<B>,
@@ -343,9 +346,10 @@ mod tests {
         }
 
         assert!(file.len() as usize == write_nbytes);
+        let align = virtual_file::get_io_buffer_alignment();
         for i in 0..write_nbytes {
             assert_eq!(value_offsets[i], i.into_u64());
-            let buf = Vec::with_capacity(1);
+            let buf = IoBufferMut::with_capacity_aligned(1, align);
             let (buf_slice, nread) = file
                 .read_exact_at_eof_ok(i.into_u64(), buf.slice_full(), &ctx)
                 .await
@@ -385,7 +389,7 @@ mod tests {
 
         // assert the state is as this test expects it to be
         assert_eq!(
-            &file.load_to_vec(&ctx).await.unwrap(),
+            &file.load_to_buf(&ctx).await.unwrap()[..],
             &content[0..cap + cap / 2]
         );
         let md = file
@@ -440,13 +444,17 @@ mod tests {
                 let (buf, nread) = file
                     .read_exact_at_eof_ok(
                         start.into_u64(),
-                        Vec::with_capacity(len).slice_full(),
+                        IoBufferMut::with_capacity_aligned(
+                            len,
+                            virtual_file::get_io_buffer_alignment(),
+                        )
+                        .slice_full(),
                         ctx,
                     )
                     .await
                     .unwrap();
                 assert_eq!(nread, len);
-                assert_eq!(&buf.into_inner(), &content[start..(start + len)]);
+                assert_eq!(&buf.into_inner()[..], &content[start..(start + len)]);
             }
         };
 

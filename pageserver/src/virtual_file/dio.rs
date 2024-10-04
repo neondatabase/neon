@@ -11,12 +11,14 @@ use std::{
 
 use bytes::buf::UninitSlice;
 
+#[derive(Debug)]
 struct IoBufferPtr(*mut u8);
 
 // SAFETY: We gurantees no one besides `IoBufferPtr` itself has the raw pointer.
 unsafe impl Send for IoBufferPtr {}
 
 /// An aligned buffer type used for I/O.
+#[derive(Debug)]
 pub struct IoBufferMut {
     ptr: IoBufferPtr,
     capacity: usize,
@@ -141,6 +143,14 @@ impl IoBufferMut {
         }
     }
 
+    /// Shortens the buffer, keeping the first len bytes.
+    pub fn truncate(&mut self, len: usize) {
+        if len > self.len {
+            return;
+        }
+        self.len = len;
+    }
+
     fn reserve_inner(&mut self, additional: usize) {
         let Some(required_cap) = self.len().checked_add(additional) else {
             capacity_overflow()
@@ -207,6 +217,24 @@ impl Drop for IoBufferMut {
                 Layout::from_size_align_unchecked(self.capacity, self.align),
             )
         }
+    }
+}
+
+impl AsRef<[u8]> for IoBufferMut {
+    fn as_ref(&self) -> &[u8] {
+        self.as_slice()
+    }
+}
+
+impl AsMut<[u8]> for IoBufferMut {
+    fn as_mut(&mut self) -> &mut [u8] {
+        self.as_mut_slice()
+    }
+}
+
+impl PartialEq<[u8]> for IoBufferMut {
+    fn eq(&self, other: &[u8]) -> bool {
+        self.as_slice().eq(other)
     }
 }
 
