@@ -263,7 +263,7 @@ impl PoolingBackend {
         info!(%conn_id, "local_pool: opening a new connection '{conn_info}'");
 
         let mut node_info = match &self.config.auth_backend {
-            auth::Backend::Console(_, _) | auth::Backend::Web(_, ()) => {
+            auth::Backend::Console(_, ()) | auth::Backend::Web(_, ()) => {
                 unreachable!("only local_proxy can connect to local postgres")
             }
             auth::Backend::Local(local) => local.node_info.clone(),
