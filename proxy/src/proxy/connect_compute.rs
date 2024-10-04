@@ -1,5 +1,6 @@
 use crate::{
     auth::backend::ComputeCredentialKeys,
+    compute::COULD_NOT_CONNECT,
     compute::{self, PostgresConnection},
     config::RetryConfig,
     console::{self, errors::WakeComputeError, locks::ApiLocks, CachedNodeInfo, NodeInfo},
