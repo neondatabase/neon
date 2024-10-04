@@ -558,16 +558,14 @@ fn helper_create_connect_info(
         mechanism.clone(),
     ))));
 
-    let creds = ComputeCredentials {
+    api.attach_to_credentials(ComputeCredentials {
         info: ComputeUserInfo {
             endpoint: "endpoint".into(),
             user: "user".into(),
             options: NeonOptions::parse_options_raw(""),
         },
         keys: ComputeCredentialKeys::Password("password".into()),
-    };
-
-    ControlPlaneComputeBackend { api, creds }
+    })
 }
 
 #[tokio::test]

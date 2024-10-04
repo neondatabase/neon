@@ -386,8 +386,8 @@ impl ControlPlaneBackend {
 }
 
 pub struct ControlPlaneComputeBackend<'a> {
-    pub(crate) api: &'a ControlPlaneBackend,
-    pub(crate) creds: ComputeCredentials,
+    api: &'a ControlPlaneBackend,
+    creds: ComputeCredentials,
 }
 
 #[async_trait::async_trait]
