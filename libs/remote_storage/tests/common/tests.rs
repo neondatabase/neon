@@ -1,7 +1,7 @@
 use anyhow::Context;
 use camino::Utf8Path;
 use futures::StreamExt;
-use remote_storage::{DownloadError, DownloadOpts, ListingMode, RemotePath};
+use remote_storage::{DownloadError, DownloadOpts, ListingMode, ListingObject, RemotePath};
 use std::sync::Arc;
 use std::{collections::HashSet, num::NonZeroU32};
 use test_context::test_context;
@@ -426,6 +426,59 @@ async fn copy_works(ctx: &mut MaybeEnabledStorage) -> anyhow::Result<()> {
         .delete_objects(&[path.clone(), path_dest.clone()], &cancel)
         .await
         .with_context(|| format!("{path:?} removal"))?;
+
+    Ok(())
+}
+
+/// Tests that head_object works properly.
+#[test_context(MaybeEnabledStorage)]
+#[tokio::test]
+async fn head_object(ctx: &mut MaybeEnabledStorage) -> anyhow::Result<()> {
+    let MaybeEnabledStorage::Enabled(ctx) = ctx else {
+        return Ok(());
+    };
+    let cancel = CancellationToken::new();
+
+    let path = RemotePath::new(Utf8Path::new(format!("{}/file", ctx.base_prefix).as_str()))?;
+
+    // Errors on missing file.
+    let result = ctx.client.head_object(&path, &cancel).await;
+    assert!(
+        matches!(result, Err(DownloadError::NotFound)),
+        "expected NotFound, got {result:?}"
+    );
+
+    // Create the file.
+    let data = bytes::Bytes::from_static("foo".as_bytes());
+    let (stream, len) = wrap_stream(data);
+    ctx.client.upload(stream, len, &path, None, &cancel).await?;
+
+    // Fetch the head metadata.
+    let object = ctx.client.head_object(&path, &cancel).await?;
+    assert_eq!(
+        object,
+        ListingObject {
+            key: path.clone(),
+            last_modified: object.last_modified, // ignore
+            size: 3
+        }
+    );
+
+    // Wait for a couple of seconds, and then update the file to check the last
+    // modified timestamp.
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+    let data = bytes::Bytes::from_static("bar".as_bytes());
+    let (stream, len) = wrap_stream(data);
+    ctx.client.upload(stream, len, &path, None, &cancel).await?;
+    let new = ctx.client.head_object(&path, &cancel).await?;
+
+    assert!(
+        !new.last_modified
+            .duration_since(object.last_modified)?
+            .is_zero(),
+        "last_modified did not advance"
+    );
 
     Ok(())
 }
