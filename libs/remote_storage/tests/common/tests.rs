@@ -352,7 +352,7 @@ async fn download_conditional(ctx: &mut MaybeEnabledStorage) -> anyhow::Result<(
     // Create a file.
     let path = RemotePath::new(Utf8Path::new(format!("{}/file", ctx.base_prefix).as_str()))?;
     let data = bytes::Bytes::from_static("foo".as_bytes());
-    let (stream, len) = wrap_stream(data.clone());
+    let (stream, len) = wrap_stream(data);
     ctx.client.upload(stream, len, &path, None, &cancel).await?;
 
     // Download it to obtain its etag.
@@ -369,7 +369,7 @@ async fn download_conditional(ctx: &mut MaybeEnabledStorage) -> anyhow::Result<(
 
     // Replace the file contents.
     let data = bytes::Bytes::from_static("bar".as_bytes());
-    let (stream, len) = wrap_stream(data.clone());
+    let (stream, len) = wrap_stream(data);
     ctx.client.upload(stream, len, &path, None, &cancel).await?;
 
     // A download with the old etag should yield the new file.
