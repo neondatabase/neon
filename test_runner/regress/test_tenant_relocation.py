@@ -219,7 +219,7 @@ def test_tenant_relocation(
 
     log.info("tenant to relocate %s initial_timeline_id %s", tenant_id, env.initial_timeline)
 
-    env.neon_cli.create_branch("test_tenant_relocation_main", tenant_id=tenant_id)
+    env.create_branch("test_tenant_relocation_main", tenant_id=tenant_id)
     ep_main = env.endpoints.create_start(
         branch_name="test_tenant_relocation_main", tenant_id=tenant_id
     )
@@ -232,7 +232,7 @@ def test_tenant_relocation(
         expected_sum=500500,
     )
 
-    env.neon_cli.create_branch(
+    env.create_branch(
         new_branch_name="test_tenant_relocation_second",
         ancestor_branch_name="test_tenant_relocation_main",
         ancestor_start_lsn=current_lsn_main,
@@ -404,7 +404,7 @@ def test_emergency_relocate_with_branches_slow_replay(
     # - A logical replication message between the inserts, so that we can conveniently
     #   pause the WAL ingestion between the two inserts.
     # - Child branch, created after the inserts
-    tenant_id, _ = env.neon_cli.create_tenant()
+    tenant_id, _ = env.create_tenant()
 
     main_endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
     with main_endpoint.cursor() as cur:
@@ -417,7 +417,7 @@ def test_emergency_relocate_with_branches_slow_replay(
         current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
 
     main_endpoint.stop()
-    env.neon_cli.create_branch("child", tenant_id=tenant_id, ancestor_start_lsn=current_lsn)
+    env.create_branch("child", tenant_id=tenant_id, ancestor_start_lsn=current_lsn)
 
     # Now kill the pageserver, remove the tenant directory, and restart. This simulates
     # the scenario that a pageserver dies unexpectedly and cannot be recovered, so we relocate
@@ -548,7 +548,7 @@ def test_emergency_relocate_with_branches_createdb(
     pageserver_http = env.pageserver.http_client()
 
     # create new nenant
-    tenant_id, _ = env.neon_cli.create_tenant()
+    tenant_id, _ = env.create_tenant()
 
     main_endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
     with main_endpoint.cursor() as cur:
@@ -556,7 +556,7 @@ def test_emergency_relocate_with_branches_createdb(
 
         cur.execute("CREATE DATABASE neondb")
         current_lsn = Lsn(query_scalar(cur, "SELECT pg_current_wal_flush_lsn()"))
-    env.neon_cli.create_branch("child", tenant_id=tenant_id, ancestor_start_lsn=current_lsn)
+    env.create_branch("child", tenant_id=tenant_id, ancestor_start_lsn=current_lsn)
 
     with main_endpoint.cursor(dbname="neondb") as cur:
         cur.execute("CREATE TABLE test_migrate_one AS SELECT generate_series(1,100)")

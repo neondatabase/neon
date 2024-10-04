@@ -48,7 +48,6 @@ use utils::{
     sync::gate::{Gate, GateGuard},
 };
 
-use std::pin::pin;
 use std::sync::atomic::Ordering as AtomicOrdering;
 use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
@@ -62,6 +61,7 @@ use std::{
     collections::btree_map::Entry,
     ops::{Deref, Range},
 };
+use std::{pin::pin, sync::OnceLock};
 
 use crate::{
     aux_file::AuxFileSizeEstimator,
@@ -71,6 +71,7 @@ use crate::{
         metadata::TimelineMetadata,
         storage_layer::{inmemory_layer::IndexEntry, PersistentLayerDesc},
     },
+    walingest::WalLagCooldown,
     walredo,
 };
 use crate::{
@@ -429,6 +430,8 @@ pub struct Timeline {
     pub(crate) l0_flush_global_state: L0FlushGlobalState,
 
     pub(crate) handles: handle::PerTimelineState<crate::page_service::TenantManagerTypes>,
+
+    pub(crate) attach_wal_lag_cooldown: Arc<OnceLock<WalLagCooldown>>,
 }
 
 pub struct WalReceiverInfo {
@@ -737,6 +740,7 @@ pub enum GetLogicalSizePriority {
 pub(crate) enum CompactFlags {
     ForceRepartition,
     ForceImageLayerCreation,
+    ForceL0Compaction,
     EnhancedGcBottomMostCompaction,
     DryRun,
 }
@@ -2130,6 +2134,7 @@ impl Timeline {
         pg_version: u32,
         state: TimelineState,
         aux_file_policy: Option<AuxFilePolicy>,
+        attach_wal_lag_cooldown: Arc<OnceLock<WalLagCooldown>>,
         cancel: CancellationToken,
     ) -> Arc<Self> {
         let disk_consistent_lsn = metadata.disk_consistent_lsn();
@@ -2271,6 +2276,8 @@ impl Timeline {
                 l0_flush_global_state: resources.l0_flush_global_state,
 
                 handles: Default::default(),
+
+                attach_wal_lag_cooldown,
             };
 
             if aux_file_policy == Some(AuxFilePolicy::V1) {

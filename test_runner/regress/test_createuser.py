@@ -18,7 +18,7 @@ def test_createuser(neon_simple_env: NeonEnv):
         lsn = query_scalar(cur, "SELECT pg_current_wal_insert_lsn()")
 
     # Create a branch
-    env.neon_cli.create_branch("test_createuser2", "main", ancestor_start_lsn=lsn)
+    env.create_branch("test_createuser2", ancestor_branch_name="main", ancestor_start_lsn=lsn)
     endpoint2 = env.endpoints.create_start("test_createuser2")
 
     # Test that you can connect to new branch as a new user

@@ -178,9 +178,9 @@ def test_gc_of_remote_layers(neon_env_builder: NeonEnvBuilder):
 
     def tenant_update_config(changes):
         tenant_config.update(changes)
-        env.neon_cli.config_tenant(tenant_id, tenant_config)
+        env.config_tenant(tenant_id, tenant_config)
 
-    tenant_id, timeline_id = env.neon_cli.create_tenant(conf=tenant_config)
+    tenant_id, timeline_id = env.create_tenant(conf=tenant_config)
     log.info("tenant id is %s", tenant_id)
     env.initial_tenant = tenant_id  # update_and_gc relies on this
     ps_http = env.pageserver.http_client()

@@ -27,8 +27,8 @@ RUN case $DEBIAN_FLAVOR in \
       ;; \
     esac && \
     apt update &&  \
-    apt install -y git autoconf automake libtool build-essential bison flex libreadline-dev \
-    zlib1g-dev libxml2-dev libcurl4-openssl-dev libossp-uuid-dev wget pkg-config libssl-dev \
+    apt install --no-install-recommends -y git autoconf automake libtool build-essential bison flex libreadline-dev \
+    zlib1g-dev libxml2-dev libcurl4-openssl-dev libossp-uuid-dev wget ca-certificates pkg-config libssl-dev \
     libicu-dev libxslt1-dev liblz4-dev libzstd-dev zstd \
     $VERSION_INSTALLS
 
@@ -104,7 +104,7 @@ FROM build-deps AS postgis-build
 ARG PG_VERSION
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 RUN apt update && \
-    apt install -y gdal-bin libboost-dev libboost-thread-dev libboost-filesystem-dev \
+    apt install --no-install-recommends -y gdal-bin libboost-dev libboost-thread-dev libboost-filesystem-dev \
     libboost-system-dev libboost-iostreams-dev libboost-program-options-dev libboost-timer-dev \
     libcgal-dev libgdal-dev libgmp-dev libmpfr-dev libopenscenegraph-dev libprotobuf-c-dev \
     protobuf-c-compiler xsltproc
@@ -182,7 +182,7 @@ RUN case "${PG_VERSION}" in "v17") \
     echo "v17 extensions are not supported yet. Quit" && exit 0;; \
     esac && \
     apt update && \
-    apt install -y ninja-build python3-dev libncurses5 binutils clang
+    apt install --no-install-recommends -y ninja-build python3-dev libncurses5 binutils clang
 
 RUN case "${PG_VERSION}" in "v17") \
     echo "v17 extensions are not supported yet. Quit" && exit 0;; \
@@ -587,7 +587,7 @@ RUN case "${PG_VERSION}" in "v17") \
     echo "v17 extensions are not supported yet. Quit" && exit 0;; \
     esac && \
     apt-get update && \
-    apt-get install -y \
+    apt-get install --no-install-recommends -y \
         libboost-iostreams1.74-dev \
         libboost-regex1.74-dev \
         libboost-serialization1.74-dev \
@@ -752,7 +752,7 @@ ARG PG_VERSION
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
 RUN apt-get update && \
-    apt-get install -y curl libclang-dev && \
+    apt-get install --no-install-recommends -y curl libclang-dev && \
     useradd -ms /bin/bash nonroot -b /home
 
 ENV HOME=/home/nonroot
@@ -880,9 +880,6 @@ RUN case "${PG_VERSION}" in "v17") \
     mkdir pg_session_jwt-src && cd pg_session_jwt-src && tar xzf ../pg_session_jwt.tar.gz --strip-components=1 -C . && \
     sed -i 's/pgrx = "=0.11.3"/pgrx = { version = "=0.11.3", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
     cargo pgrx install --release
-    # it's needed to enable extension because it uses untrusted C language
-    # sed -i 's/superuser = false/superuser = true/g' /usr/local/pgsql/share/extension/pg_session_jwt.control && \
-    # echo "trusted = true" >> /usr/local/pgsql/share/extension/pg_session_jwt.control
 
 #########################################################################################
 #
@@ -1058,9 +1055,12 @@ FROM debian:$DEBIAN_FLAVOR AS pgbouncer
 ARG DEBIAN_FLAVOR
 RUN set -e \
     && apt-get update \
-    && apt-get install -y \
+    && apt-get install --no-install-recommends -y \
         build-essential \
         git \
+        ca-certificates \
+        autoconf \
+        automake \
         libevent-dev \
         libtool \
         pkg-config
@@ -1074,6 +1074,20 @@ RUN set -e \
     && LDFLAGS=-static ./configure --prefix=/usr/local/pgbouncer --without-openssl \
     && make -j $(nproc) dist_man_MANS= \
     && make install dist_man_MANS=
+
+#########################################################################################
+#
+# Compile the Neon-specific `local_proxy` binary
+#
+#########################################################################################
+FROM $REPOSITORY/$IMAGE:$TAG AS local_proxy
+ARG BUILD_TAG
+ENV BUILD_TAG=$BUILD_TAG
+
+USER nonroot
+# Copy entire project to get Cargo.* files with proper dependencies for the whole project
+COPY --chown=nonroot . .
+RUN mold -run cargo build --locked --profile release-line-debug-size-lto --bin local_proxy
 
 #########################################################################################
 #
@@ -1212,6 +1226,10 @@ COPY --from=compute-tools --chown=postgres /home/nonroot/target/release-line-deb
 # pgbouncer and its config
 COPY --from=pgbouncer         /usr/local/pgbouncer/bin/pgbouncer /usr/local/bin/pgbouncer
 COPY --chmod=0666 --chown=postgres compute/etc/pgbouncer.ini /etc/pgbouncer.ini
+
+# local_proxy and its config
+COPY --from=local_proxy --chown=postgres /home/nonroot/target/release-line-debug-size-lto/local_proxy /usr/local/bin/local_proxy
+RUN mkdir -p /etc/local_proxy && chown postgres:postgres /etc/local_proxy
 
 # Metrics exporter binaries and  configuration files
 COPY --from=postgres-exporter /bin/postgres_exporter /bin/postgres_exporter

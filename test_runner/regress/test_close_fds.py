@@ -23,7 +23,7 @@ def test_lsof_pageserver_pid(neon_simple_env: NeonEnv):
     env = neon_simple_env
 
     def start_workload():
-        env.neon_cli.create_branch("test_lsof_pageserver_pid")
+        env.create_branch("test_lsof_pageserver_pid")
         endpoint = env.endpoints.create_start("test_lsof_pageserver_pid")
         with closing(endpoint.connect()) as conn:
             with conn.cursor() as cur:

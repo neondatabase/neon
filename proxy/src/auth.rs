@@ -73,6 +73,9 @@ pub(crate) enum AuthErrorImpl {
 
     #[error("Authentication timed out")]
     UserTimeout(Elapsed),
+
+    #[error("Disconnected due to inactivity after {0}.")]
+    ConfirmationTimeout(humantime::Duration),
 }
 
 #[derive(Debug, Error)]
@@ -103,6 +106,10 @@ impl AuthError {
     pub(crate) fn user_timeout(elapsed: Elapsed) -> Self {
         AuthErrorImpl::UserTimeout(elapsed).into()
     }
+
+    pub(crate) fn confirmation_timeout(timeout: humantime::Duration) -> Self {
+        AuthErrorImpl::ConfirmationTimeout(timeout).into()
+    }
 }
 
 impl<E: Into<AuthErrorImpl>> From<E> for AuthError {
@@ -125,6 +132,7 @@ impl UserFacingError for AuthError {
             AuthErrorImpl::IpAddressNotAllowed(_) => self.to_string(),
             AuthErrorImpl::TooManyConnections => self.to_string(),
             AuthErrorImpl::UserTimeout(_) => self.to_string(),
+            AuthErrorImpl::ConfirmationTimeout(_) => self.to_string(),
         }
     }
 }
@@ -143,6 +151,7 @@ impl ReportableError for AuthError {
             AuthErrorImpl::IpAddressNotAllowed(_) => crate::error::ErrorKind::User,
             AuthErrorImpl::TooManyConnections => crate::error::ErrorKind::RateLimit,
             AuthErrorImpl::UserTimeout(_) => crate::error::ErrorKind::User,
+            AuthErrorImpl::ConfirmationTimeout(_) => crate::error::ErrorKind::User,
         }
     }
 }

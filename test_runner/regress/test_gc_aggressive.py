@@ -68,7 +68,7 @@ async def update_and_gc(env: NeonEnv, endpoint: Endpoint, timeline: TimelineId):
 def test_gc_aggressive(neon_env_builder: NeonEnvBuilder):
     # Disable pitr, because here we want to test branch creation after GC
     env = neon_env_builder.init_start(initial_tenant_conf={"pitr_interval": "0 sec"})
-    timeline = env.neon_cli.create_branch("test_gc_aggressive", "main")
+    timeline = env.create_branch("test_gc_aggressive", ancestor_branch_name="main")
     endpoint = env.endpoints.create_start("test_gc_aggressive")
 
     with endpoint.cursor() as cur:
@@ -99,7 +99,7 @@ def test_gc_index_upload(neon_env_builder: NeonEnvBuilder):
     # Disable time-based pitr, we will use LSN-based thresholds in the manual GC calls
     env = neon_env_builder.init_start(initial_tenant_conf={"pitr_interval": "0 sec"})
     tenant_id = env.initial_tenant
-    timeline_id = env.neon_cli.create_branch("test_gc_index_upload", "main")
+    timeline_id = env.create_branch("test_gc_index_upload", ancestor_branch_name="main")
     endpoint = env.endpoints.create_start("test_gc_index_upload")
 
     pageserver_http = env.pageserver.http_client()

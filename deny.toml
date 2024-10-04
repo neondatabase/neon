@@ -27,10 +27,6 @@ yanked = "warn"
 id = "RUSTSEC-2023-0071"
 reason = "the marvin attack only affects private key decryption, not public key signature verification"
 
-[[advisories.ignore]]
-id = "RUSTSEC-2024-0376"
-reason = "gRPC endpoints in Neon are not exposed externally"
-
 # This section is considered when running `cargo deny check licenses`
 # More documentation for the licenses section can be found here:
 # https://embarkstudios.github.io/cargo-deny/checks/licenses/cfg.html

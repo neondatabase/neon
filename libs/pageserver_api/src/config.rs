@@ -296,7 +296,14 @@ pub mod defaults {
 
     pub const DEFAULT_INGEST_BATCH_SIZE: u64 = 100;
 
-    pub const DEFAULT_MAX_VECTORED_READ_BYTES: usize = 128 * 1024; // 128 KiB
+    /// Soft limit for the maximum size of a vectored read.
+    ///
+    /// This is determined by the largest NeonWalRecord that can exist (minus dbdir and reldir keys
+    /// which are bounded by the blob io limits only). As of this writing, that is a `NeonWalRecord::ClogSetCommitted` record,
+    /// with 32k xids. That's the max number of XIDS on a single CLOG page. The size of such a record
+    /// is `sizeof(Transactionid) * 32768 + (some fixed overhead from 'timestamp`, the Vec length and whatever extra serde serialization adds)`.
+    /// That is, slightly above 128 kB.
+    pub const DEFAULT_MAX_VECTORED_READ_BYTES: usize = 130 * 1024; // 130 KiB
 
     pub const DEFAULT_IMAGE_COMPRESSION: ImageCompressionAlgorithm =
         ImageCompressionAlgorithm::Zstd { level: Some(1) };

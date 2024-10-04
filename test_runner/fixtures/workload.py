@@ -175,7 +175,9 @@ class Workload:
                 if upload:
                     # Wait for written data to be uploaded to S3 (force a checkpoint to trigger upload)
                     ps_http.timeline_checkpoint(
-                        tenant_shard_id, self.timeline_id, wait_until_uploaded=True
+                        tenant_shard_id,
+                        self.timeline_id,
+                        wait_until_uploaded=True,
                     )
                     log.info(f"Churn: waiting for remote LSN {last_flush_lsn}")
                 else:

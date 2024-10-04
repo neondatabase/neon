@@ -87,6 +87,10 @@ pub(crate) struct StorageControllerMetricGroup {
         measured::HistogramVec<DatabaseQueryLatencyLabelGroupSet, 5>,
 
     pub(crate) storage_controller_leadership_status: measured::GaugeVec<LeadershipStatusGroupSet>,
+
+    /// HTTP request status counters for handled requests
+    pub(crate) storage_controller_reconcile_long_running:
+        measured::CounterVec<ReconcileLongRunningLabelGroupSet>,
 }
 
 impl StorageControllerMetrics {
@@ -166,6 +170,17 @@ pub(crate) struct DatabaseQueryLatencyLabelGroup {
 #[label(set = LeadershipStatusGroupSet)]
 pub(crate) struct LeadershipStatusGroup {
     pub(crate) status: LeadershipStatus,
+}
+
+#[derive(measured::LabelGroup, Clone)]
+#[label(set = ReconcileLongRunningLabelGroupSet)]
+pub(crate) struct ReconcileLongRunningLabelGroup<'a> {
+    #[label(dynamic_with = lasso::ThreadedRodeo, default)]
+    pub(crate) tenant_id: &'a str,
+    #[label(dynamic_with = lasso::ThreadedRodeo, default)]
+    pub(crate) shard_number: &'a str,
+    #[label(dynamic_with = lasso::ThreadedRodeo, default)]
+    pub(crate) sequence: &'a str,
 }
 
 #[derive(FixedCardinalityLabel, Clone, Copy)]

@@ -162,7 +162,7 @@ def setup_tenant_template(env: NeonEnv, pg_bin: PgBin, scale: int):
         "checkpoint_distance": 268435456,
         "image_creation_threshold": 3,
     }
-    template_tenant, template_timeline = env.neon_cli.create_tenant(set_default=True)
+    template_tenant, template_timeline = env.create_tenant(set_default=True)
     env.pageserver.tenant_detach(template_tenant)
     env.pageserver.tenant_attach(template_tenant, config)
     ps_http = env.pageserver.http_client()

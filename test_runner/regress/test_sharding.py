@@ -77,7 +77,7 @@ def test_sharding_smoke(
     assert all(s < expect_initdb_size // 2 for s in sizes.values())
 
     # Test that timeline creation works on a sharded tenant
-    timeline_b = env.neon_cli.create_branch("branch_b", tenant_id=tenant_id)
+    timeline_b = env.create_branch("branch_b", tenant_id=tenant_id)
 
     # Test that we can write data to a sharded tenant
     workload = Workload(env, tenant_id, timeline_b, branch_name="branch_b")
@@ -378,7 +378,7 @@ def test_sharding_split_smoke(
     env.start()
     tenant_id = TenantId.generate()
     timeline_id = TimelineId.generate()
-    env.neon_cli.create_tenant(
+    env.create_tenant(
         tenant_id,
         timeline_id,
         shard_count=shard_count,
@@ -1127,7 +1127,7 @@ def test_sharding_split_failures(
     timeline_id = TimelineId.generate()
 
     # Create a tenant with secondary locations enabled
-    env.neon_cli.create_tenant(
+    env.create_tenant(
         tenant_id, timeline_id, shard_count=initial_shard_count, placement_policy='{"Attached":1}'
     )
 
@@ -1441,7 +1441,7 @@ def test_sharding_unlogged_relation(neon_env_builder: NeonEnvBuilder):
 
     tenant_id = TenantId.generate()
     timeline_id = TimelineId.generate()
-    env.neon_cli.create_tenant(tenant_id, timeline_id, shard_count=8)
+    env.create_tenant(tenant_id, timeline_id, shard_count=8)
 
     # We will create many tables to ensure it's overwhelmingly likely that at least one
     # of them doesn't land on shard 0
@@ -1483,7 +1483,7 @@ def test_top_tenants(neon_env_builder: NeonEnvBuilder):
     for i in range(0, n_tenants):
         tenant_id = TenantId.generate()
         timeline_id = TimelineId.generate()
-        env.neon_cli.create_tenant(tenant_id, timeline_id)
+        env.create_tenant(tenant_id, timeline_id)
 
         # Write a different amount of data to each tenant
         w = Workload(env, tenant_id, timeline_id)
