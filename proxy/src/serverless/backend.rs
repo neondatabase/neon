@@ -17,7 +17,7 @@ use super::http_conn_pool::{self, poll_http2_client, Send};
 use super::local_conn_pool::{self, LocalClient, LocalConnPool, EXT_NAME, EXT_SCHEMA, EXT_VERSION};
 use crate::auth::backend::local::StaticAuthRules;
 use crate::auth::backend::{ComputeCredentials, ComputeUserInfo};
-use crate::auth::{self, check_peer_addr_is_in_list, AuthError};
+use crate::auth::{self, check_peer_addr_is_in_list, AuthError, ServerlessBackend};
 use crate::compute;
 use crate::compute_ctl::{
     ComputeCtlError, ExtensionInstallRequest, Privilege, SetRoleGrantsRequest,
@@ -41,7 +41,7 @@ pub(crate) struct PoolingBackend {
     pub(crate) pool: Arc<GlobalConnPool<tokio_postgres::Client>>,
 
     pub(crate) config: &'static ProxyConfig,
-    pub(crate) auth_backend: crate::auth::ServerlessBackend<'static>,
+    pub(crate) auth_backend: ServerlessBackend<'static>,
     pub(crate) endpoint_rate_limiter: Arc<EndpointRateLimiter>,
 }
 
@@ -53,8 +53,8 @@ impl PoolingBackend {
         password: &[u8],
     ) -> Result<ComputeCredentials, AuthError> {
         let cplane = match self.auth_backend {
-            crate::auth::ServerlessBackend::ControlPlane(cplane) => cplane,
-            crate::auth::ServerlessBackend::Local(_local) => {
+            ServerlessBackend::ControlPlane(cplane) => cplane,
+            ServerlessBackend::Local(_local) => {
                 return Err(AuthError::bad_auth_method(
                     "password authentication not supported by local_proxy",
                 ))
@@ -122,7 +122,7 @@ impl PoolingBackend {
         jwt: String,
     ) -> Result<ComputeCredentials, AuthError> {
         match &self.auth_backend {
-            crate::auth::ServerlessBackend::ControlPlane(console) => {
+            ServerlessBackend::ControlPlane(console) => {
                 self.config
                     .authentication_config
                     .jwks_cache
@@ -141,7 +141,7 @@ impl PoolingBackend {
                     keys: crate::auth::backend::ComputeCredentialKeys::None,
                 })
             }
-            crate::auth::ServerlessBackend::Local(_) => {
+            ServerlessBackend::Local(_) => {
                 let keys = self
                     .config
                     .authentication_config
@@ -191,7 +191,7 @@ impl PoolingBackend {
         info!(%conn_id, "pool: opening a new connection '{conn_info}'");
 
         match &self.auth_backend {
-            crate::auth::ServerlessBackend::ControlPlane(cplane) => {
+            ServerlessBackend::ControlPlane(cplane) => {
                 crate::proxy::connect_compute::connect_to_compute(
                     ctx,
                     &TokioMechanism {
@@ -207,7 +207,7 @@ impl PoolingBackend {
                 )
                 .await
             }
-            crate::auth::ServerlessBackend::Local(local_proxy) => {
+            ServerlessBackend::Local(local_proxy) => {
                 crate::proxy::connect_compute::connect_to_compute(
                     ctx,
                     &TokioMechanism {
@@ -234,10 +234,10 @@ impl PoolingBackend {
         conn_info: ConnInfo,
     ) -> Result<http_conn_pool::Client<Send>, HttpConnError> {
         let cplane = match &self.auth_backend {
-            crate::auth::ServerlessBackend::Local(_) => {
+            ServerlessBackend::Local(_) => {
                 panic!("connect to local_proxy should not be called if we are already local_proxy")
             }
-            crate::auth::ServerlessBackend::ControlPlane(cplane) => cplane,
+            ServerlessBackend::ControlPlane(cplane) => cplane,
         };
 
         info!("pool: looking for an existing connection");
