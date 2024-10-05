@@ -515,8 +515,8 @@ impl DeltaLayerWriterInner {
     ) -> anyhow::Result<(PersistentLayerDesc, Utf8PathBuf)> {
         let temp_path = self.path.clone();
         let result = self.finish0(key_end, ctx).await;
-        if result.is_err() {
-            tracing::info!(%temp_path, "cleaning up temporary file after error during writing");
+        if let Err(ref e) = result {
+            tracing::info!(%temp_path, "cleaning up temporary file after error during writing: {e}");
             if let Err(e) = std::fs::remove_file(&temp_path) {
                 tracing::warn!(error=%e, %temp_path, "error cleaning up temporary layer file after error during writing");
             }
