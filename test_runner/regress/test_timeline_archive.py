@@ -117,41 +117,52 @@ def test_timeline_archive(neon_env_builder: NeonEnvBuilder, shard_count: int):
     )
 
 
-def test_timeline_offloading(neon_env_builder: NeonEnvBuilder):
+@pytest.mark.parametrize("manual_offload", [False, True])
+def test_timeline_offloading(neon_env_builder: NeonEnvBuilder, manual_offload: bool):
     env = neon_env_builder.init_start()
     ps_http = env.pageserver.http_client()
 
+    # Turn off gc and compaction loops: we want to issue them manually for better reliability
+    tenant_id, _timeline = env.neon_cli.create_tenant(
+        conf={
+            "gc_period": "0s",
+            "compaction_period": "0s" if manual_offload else "1s",
+        }
+    )
+
     # Create two branches and archive them
-    parent_timeline_id = env.neon_cli.create_branch("test_ancestor_branch_archive_parent")
+    parent_timeline_id = env.neon_cli.create_branch("test_ancestor_branch_archive_parent", tenant_id = tenant_id)
     leaf_timeline_id = env.neon_cli.create_branch(
-        "test_ancestor_branch_archive_branch1", "test_ancestor_branch_archive_parent"
+        "test_ancestor_branch_archive_branch1", "test_ancestor_branch_archive_parent", tenant_id = tenant_id
     )
 
     ps_http.timeline_archival_config(
-        env.initial_tenant,
+        tenant_id,
         leaf_timeline_id,
         state=TimelineArchivalState.ARCHIVED,
     )
     leaf_detail = ps_http.timeline_detail(
-        env.initial_tenant,
+        tenant_id,
         leaf_timeline_id,
     )
     assert leaf_detail["is_archived"] is True
 
     ps_http.timeline_archival_config(
-        env.initial_tenant,
+        tenant_id,
         parent_timeline_id,
         state=TimelineArchivalState.ARCHIVED,
     )
 
     def parent_offloaded():
-        ps_http.timeline_offload(tenant_id=env.initial_tenant, timeline_id=parent_timeline_id)
+        if manual_offload:
+            ps_http.timeline_offload(tenant_id=tenant_id, timeline_id=parent_timeline_id)
         assert env.pageserver.log_contains(
             f".*{parent_timeline_id}.*offloading archived timeline.*"
         )
 
     def leaf_offloaded():
-        ps_http.timeline_offload(tenant_id=env.initial_tenant, timeline_id=leaf_timeline_id)
+        if manual_offload:
+            ps_http.timeline_offload(tenant_id=tenant_id, timeline_id=leaf_timeline_id)
         assert env.pageserver.log_contains(f".*{leaf_timeline_id}.*offloading archived timeline.*")
 
     wait_until(30, 1, leaf_offloaded)

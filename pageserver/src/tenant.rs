@@ -2221,7 +2221,7 @@ impl Tenant {
         }
     }
 
-    pub fn timeline_has_no_unarchived_children(&self, timeline_id: TimelineId) -> bool {
+    pub fn timeline_has_no_attached_children(&self, timeline_id: TimelineId) -> bool {
         let timelines = self.timelines.lock().unwrap();
         !timelines
             .iter()
