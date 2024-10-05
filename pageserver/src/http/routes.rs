@@ -76,6 +76,7 @@ use crate::tenant::secondary::SecondaryController;
 use crate::tenant::size::ModelInputs;
 use crate::tenant::storage_layer::LayerAccessStatsReset;
 use crate::tenant::storage_layer::LayerName;
+use crate::tenant::timeline::offload::offload_timeline;
 use crate::tenant::timeline::CompactFlags;
 use crate::tenant::timeline::CompactionError;
 use crate::tenant::timeline::Timeline;
@@ -1782,6 +1783,49 @@ async fn timeline_compact_handler(
     .await
 }
 
+// Run offload immediately on given timeline.
+async fn timeline_offload_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+
+    let state = get_state(&request);
+
+    async {
+        let tenant = state
+            .tenant_manager
+            .get_attached_tenant_shard(tenant_shard_id)?;
+
+        if tenant.get_offloaded_timeline(timeline_id).is_ok() {
+            return json_response(StatusCode::OK, ())
+        }
+        let timeline =
+            active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
+                .await?;
+
+        let has_no_unarchived_children = tenant.timeline_has_no_unarchived_children(timeline_id);
+        let can_offload = timeline.can_offload();
+        match (can_offload, has_no_unarchived_children) {
+            (true, true) => {
+                offload_timeline(&tenant, &timeline)
+                    .await
+                    .map_err(ApiError::InternalServerError)?;
+            }
+            (_, _) => {
+                let msg = format!("no way to offload timeline, can_offload={can_offload}, has_no_unarchived_children={has_no_unarchived_children}");
+                return Err(ApiError::PreconditionFailed(msg.into_boxed_str()));
+            }
+        }
+
+        json_response(StatusCode::OK, ())
+    }
+    .instrument(info_span!("manual_timeline_offload", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug(), %timeline_id))
+    .await
+}
+
 // Run checkpoint immediately on given timeline.
 async fn timeline_checkpoint_handler(
     request: Request<Body>,
@@ -3008,6 +3052,10 @@ pub fn make_router(
         .put(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/compact",
             |r| api_handler(r, timeline_compact_handler),
+        )
+        .put(
+            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/offload",
+            |r| testing_api_handler("attempt timeline offload", r, timeline_offload_handler),
         )
         .put(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/checkpoint",

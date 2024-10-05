@@ -6,6 +6,7 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
 )
 from fixtures.pageserver.http import PageserverApiException
+from fixtures.utils import wait_until
 
 
 @pytest.mark.parametrize("shard_count", [0, 4])
@@ -114,3 +115,44 @@ def test_timeline_archive(neon_env_builder: NeonEnvBuilder, shard_count: int):
         leaf_timeline_id,
         state=TimelineArchivalState.UNARCHIVED,
     )
+
+
+def test_timeline_offloading(neon_env_builder: NeonEnvBuilder):
+    env = neon_env_builder.init_start()
+    ps_http = env.pageserver.http_client()
+
+    # Create two branches and archive them
+    parent_timeline_id = env.neon_cli.create_branch("test_ancestor_branch_archive_parent")
+    leaf_timeline_id = env.neon_cli.create_branch(
+        "test_ancestor_branch_archive_branch1", "test_ancestor_branch_archive_parent"
+    )
+
+    ps_http.timeline_archival_config(
+        env.initial_tenant,
+        leaf_timeline_id,
+        state=TimelineArchivalState.ARCHIVED,
+    )
+    leaf_detail = ps_http.timeline_detail(
+        env.initial_tenant,
+        leaf_timeline_id,
+    )
+    assert leaf_detail["is_archived"] is True
+
+    ps_http.timeline_archival_config(
+        env.initial_tenant,
+        parent_timeline_id,
+        state=TimelineArchivalState.ARCHIVED,
+    )
+
+    def parent_offloaded():
+        ps_http.timeline_offload(tenant_id=env.initial_tenant, timeline_id=parent_timeline_id)
+        assert env.pageserver.log_contains(
+            f".*{parent_timeline_id}.*offloading archived timeline.*"
+        )
+
+    def leaf_offloaded():
+        ps_http.timeline_offload(tenant_id=env.initial_tenant, timeline_id=leaf_timeline_id)
+        assert env.pageserver.log_contains(f".*{leaf_timeline_id}.*offloading archived timeline.*")
+
+    wait_until(30, 1, leaf_offloaded)
+    wait_until(30, 1, parent_offloaded)

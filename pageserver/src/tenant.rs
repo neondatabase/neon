@@ -1671,6 +1671,21 @@ impl Tenant {
         Ok(())
     }
 
+    pub fn get_offloaded_timeline(
+        &self,
+        timeline_id: TimelineId,
+    ) -> Result<Arc<OffloadedTimeline>, GetTimelineError> {
+        self.timelines_offloaded
+            .lock()
+            .unwrap()
+            .get(&timeline_id)
+            .map(Arc::clone)
+            .ok_or_else(|| GetTimelineError::NotFound {
+                tenant_id: self.tenant_shard_id,
+                timeline_id,
+            })
+    }
+
     pub(crate) fn tenant_shard_id(&self) -> TenantShardId {
         self.tenant_shard_id
     }
@@ -2204,6 +2219,13 @@ impl Tenant {
         for timeline in &timelines {
             timeline.maybe_freeze_ephemeral_layer().await;
         }
+    }
+
+    pub fn timeline_has_no_unarchived_children(&self, timeline_id: TimelineId) -> bool {
+        let timelines = self.timelines.lock().unwrap();
+        !timelines
+            .iter()
+            .any(|(_id, tl)| tl.get_ancestor_timeline_id() == Some(timeline_id))
     }
 
     pub fn current_state(&self) -> TenantState {
