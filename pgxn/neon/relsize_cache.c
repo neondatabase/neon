@@ -277,3 +277,62 @@ relsize_shmem_request(void)
 	RequestNamedLWLockTranche("neon_relsize", 1);
 }
 #endif
+
+
+/*
+ * A debugging function, to print the contents of the relsize cache as NOTICE
+ * messages. This is exposed in the neon_test_utils extension.
+ */
+void
+neon_dump_relsize_cache(void)
+{
+	HASH_SEQ_STATUS status;
+	RelSizeEntry *entry;
+	dlist_iter	iter;
+	int			cnt;
+
+	if (relsize_hash_size == 0)
+	{
+		elog(NOTICE, "relsize cache is disable");
+		return;
+	}
+
+	LWLockAcquire(relsize_lock, LW_EXCLUSIVE);
+
+	elog(NOTICE, "stats: size %lu hits: " UINT64_FORMAT " misses " UINT64_FORMAT " writes " UINT64_FORMAT,
+		 (unsigned long) relsize_ctl->size, relsize_ctl->hits, relsize_ctl->misses, relsize_ctl->writes);
+
+	elog(NOTICE, "hash:");
+	cnt = 0;
+	hash_seq_init(&status, relsize_hash);
+	while ((entry = hash_seq_search(&status)) != NULL)
+	{
+		cnt++;
+		elog(NOTICE, "hash entry %d: rel %u/%u/%u.%u size %u",
+			 cnt,
+			 RelFileInfoFmt(entry->tag.rinfo),
+			 entry->tag.forknum,
+			 entry->size);
+	}
+
+	elog(NOTICE, "LRU:");
+	cnt = 0;
+	dlist_foreach(iter, &relsize_ctl->lru)
+	{
+		entry = dlist_container(RelSizeEntry, lru_node, iter.cur);
+		cnt++;
+		elog(NOTICE, "LRU entry %d: rel %u/%u/%u.%u size %u",
+			 cnt,
+			 RelFileInfoFmt(entry->tag.rinfo),
+			 entry->tag.forknum,
+			 entry->size);
+
+		if (cnt > relsize_hash_size * 2)
+		{
+			elog(NOTICE, "broken LRU chain??");
+			break;
+		}
+	}
+
+	LWLockRelease(relsize_lock);
+}

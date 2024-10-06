@@ -45,6 +45,7 @@ PG_FUNCTION_INFO_V1(get_raw_page_at_lsn_ex);
 PG_FUNCTION_INFO_V1(neon_xlogflush);
 PG_FUNCTION_INFO_V1(trigger_panic);
 PG_FUNCTION_INFO_V1(trigger_segfault);
+PG_FUNCTION_INFO_V1(dump_relsize_cache);
 
 /*
  * Linkage to functions in neon module.
@@ -60,6 +61,10 @@ typedef void (*neon_read_at_lsn_type) (NRelFileInfo rinfo, ForkNumber forkNum, B
 
 static neon_read_at_lsn_type neon_read_at_lsn_ptr;
 
+typedef void (*neon_dump_relsize_cache_type) (void);
+
+static neon_dump_relsize_cache_type neon_dump_relsize_cache_ptr;
+
 /*
  * Module initialize function: fetch function pointers for cross-module calls.
  */
@@ -68,12 +73,18 @@ _PG_init(void)
 {
 	/* Asserts verify that typedefs above match original declarations */
 	AssertVariableIsOfType(&neon_read_at_lsn, neon_read_at_lsn_type);
+	AssertVariableIsOfType(&neon_dump_relsize_cache, neon_dump_relsize_cache_type);
 	neon_read_at_lsn_ptr = (neon_read_at_lsn_type)
 		load_external_function("$libdir/neon", "neon_read_at_lsn",
+							   true, NULL);
+
+	neon_dump_relsize_cache_ptr = (neon_dump_relsize_cache_type)
+		load_external_function("$libdir/neon", "neon_dump_relsize_cache",
 							   true, NULL);
 }
 
 #define neon_read_at_lsn neon_read_at_lsn_ptr
+#define neon_dump_relsize_cache neon_dump_relsize_cache_ptr
 
 /*
  * test_consume_oids(int4), for rapidly consuming OIDs, to test wraparound.
@@ -527,4 +538,12 @@ trigger_segfault(PG_FUNCTION_ARGS)
     int *ptr = NULL;
     *ptr = 42;
     PG_RETURN_VOID();
+}
+
+
+Datum
+dump_relsize_cache(PG_FUNCTION_ARGS)
+{
+	neon_dump_relsize_cache();
+	PG_RETURN_VOID();
 }

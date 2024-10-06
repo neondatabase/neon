@@ -69,3 +69,8 @@ BEGIN
     PERFORM trigger_segfault();
 END;
 $$;
+
+CREATE FUNCTION dump_relsize_cache()
+RETURNS VOID
+AS 'MODULE_PATHNAME', 'dump_relsize_cache'
+LANGUAGE C PARALLEL UNSAFE;
