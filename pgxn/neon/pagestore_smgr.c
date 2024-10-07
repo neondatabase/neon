@@ -886,12 +886,19 @@ Retry:
 				{
 					min_ring_index = Min(min_ring_index, ring_index);
 					/* The buffered request is good enough, return that index */
-					pgBufferUsage.prefetch.duplicates++;
+					if (is_prefetch)
+						pgBufferUsage.prefetch.duplicates++;
+					else
+						pgBufferUsage.prefetch.hits++;
 					continue;
 				}
 			}
 		}
-
+		else if (!is_prefetch)
+		{
+			pgBufferUsage.prefetch.misses += 1;
+			MyNeonCounters->getpage_prefetch_misses_total++;
+		}
 		/*
 		 * We can only leave the block above by finding that there's
 		 * no entry that can satisfy this request, either because there
@@ -2797,7 +2804,6 @@ Retry:
 			if (neon_prefetch_response_usable(reqlsns, slot))
 			{
 				ring_index = slot->my_ring_index;
-				pgBufferUsage.prefetch.hits += 1;
 			}
 			else
 			{
@@ -2827,9 +2833,6 @@ Retry:
 		{
 			if (entry == NULL)
 			{
-				pgBufferUsage.prefetch.misses += 1;
-				MyNeonCounters->getpage_prefetch_misses_total++;
-
 				ring_index = prefetch_register_bufferv(buftag, reqlsns, 1, NULL, false);
 				Assert(ring_index != UINT64_MAX);
 				slot = GetPrfSlot(ring_index);
@@ -3058,6 +3061,9 @@ neon_readv(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 	/* Try to read from local file cache */
 	lfc_result = lfc_readv_select(InfoFromSMgrRel(reln), forknum, blocknum, buffers,
 								  nblocks, read);
+
+	if (lfc_result > 0)
+		MyNeonCounters->file_cache_hits_total += lfc_result;
 
 	/* Read all blocks from LFC, so we're done */
 	if (lfc_result == nblocks)
