@@ -170,6 +170,40 @@ close_range_syscall(unsigned int start_fd, unsigned int count, unsigned int flag
     return syscall(__NR_close_range, start_fd, count, flags);
 }
 
+
+static PgSeccompRule allowed_syscalls[] =
+{
+	/* Hard requirements */
+	PG_SCMP_ALLOW(exit_group),
+	PG_SCMP_ALLOW(pselect6),
+	PG_SCMP_ALLOW(read),
+	PG_SCMP_ALLOW(select),
+	PG_SCMP_ALLOW(write),
+
+	/* Memory allocation */
+	PG_SCMP_ALLOW(brk),
+#ifndef MALLOC_NO_MMAP
+	/* TODO: musl doesn't have mallopt */
+	PG_SCMP_ALLOW(mmap),
+	PG_SCMP_ALLOW(munmap),
+#endif
+	/*
+	 * getpid() is called on assertion failure, in ExceptionalCondition.
+	 * It's not really needed, but seems pointless to hide it either. The
+	 * system call unlikely to expose a kernel vulnerability, and the PID
+	 * is stored in MyProcPid anyway.
+	 */
+	PG_SCMP_ALLOW(getpid),
+
+	/* Enable those for a proper shutdown. */
+#if 0
+	   PG_SCMP_ALLOW(munmap),
+	   PG_SCMP_ALLOW(shmctl),
+	   PG_SCMP_ALLOW(shmdt),
+	   PG_SCMP_ALLOW(unlink),	/* shm_unlink */
+#endif
+};
+
 static void
 enter_seccomp_mode(void)
 {
@@ -183,44 +217,12 @@ enter_seccomp_mode(void)
 				(errcode(ERRCODE_SYSTEM_ERROR),
 				 errmsg("seccomp: could not close files >= fd 3")));
 
-	PgSeccompRule syscalls[] =
-	{
-		/* Hard requirements */
-		PG_SCMP_ALLOW(exit_group),
-		PG_SCMP_ALLOW(pselect6),
-		PG_SCMP_ALLOW(read),
-		PG_SCMP_ALLOW(select),
-		PG_SCMP_ALLOW(write),
-
-		/* Memory allocation */
-		PG_SCMP_ALLOW(brk),
-#ifndef MALLOC_NO_MMAP
-		/* TODO: musl doesn't have mallopt */
-		PG_SCMP_ALLOW(mmap),
-		PG_SCMP_ALLOW(munmap),
-#endif
-		/*
-		 * getpid() is called on assertion failure, in ExceptionalCondition.
-		 * It's not really needed, but seems pointless to hide it either. The
-		 * system call unlikely to expose a kernel vulnerability, and the PID
-		 * is stored in MyProcPid anyway.
-		 */
-		PG_SCMP_ALLOW(getpid),
-
-		/* Enable those for a proper shutdown.
-		PG_SCMP_ALLOW(munmap),
-		PG_SCMP_ALLOW(shmctl),
-		PG_SCMP_ALLOW(shmdt),
-		PG_SCMP_ALLOW(unlink), // shm_unlink
-	 */
-	};
-
 #ifdef MALLOC_NO_MMAP
 	/* Ask glibc not to use mmap() */
 	mallopt(M_MMAP_MAX, 0);
 #endif
 
-	seccomp_load_rules(syscalls, lengthof(syscalls));
+	seccomp_load_rules(allowed_syscalls, lengthof(allowed_syscalls));
 }
 #endif /* HAVE_LIBSECCOMP */
 

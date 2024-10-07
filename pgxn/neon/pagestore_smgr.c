@@ -3747,6 +3747,8 @@ neon_read_slru_segment(SMgrRelation reln, const char* path, int segno, void* buf
 	SlruKind	kind;
 	int			n_blocks;
 	shardno_t	shard_no = 0; /* All SLRUs are at shard 0 */
+	NeonResponse *resp;
+	NeonGetSlruSegmentRequest request;
 
 	/*
 	 * Compute a request LSN to use, similar to neon_get_request_lsns() but the
@@ -3785,8 +3787,7 @@ neon_read_slru_segment(SMgrRelation reln, const char* path, int segno, void* buf
 	else
 		return -1;
 
-	NeonResponse *resp;
-	NeonGetSlruSegmentRequest request = {
+	request = (NeonGetSlruSegmentRequest) {
 		.req.tag = T_NeonGetSlruSegmentRequest,
 		.req.lsn = request_lsn,
 		.req.not_modified_since = not_modified_since,

@@ -170,12 +170,14 @@ lfc_disable(char const *op)
 
 		if (lfc_desc > 0)
 		{
+			int			rc;
+
 			/*
 			 * If the reason of error is ENOSPC, then truncation of file may
 			 * help to reclaim some space
 			 */
 			pgstat_report_wait_start(WAIT_EVENT_NEON_LFC_TRUNCATE);
-			int			rc = ftruncate(lfc_desc, 0);
+			rc = ftruncate(lfc_desc, 0);
 			pgstat_report_wait_end();
 
 			if (rc < 0)
