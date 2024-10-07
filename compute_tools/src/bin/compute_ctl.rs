@@ -218,7 +218,7 @@ fn startup_context_from_env() -> Option<opentelemetry::ContextGuard> {
     }
     if !startup_tracing_carrier.is_empty() {
         use opentelemetry::propagation::TextMapPropagator;
-        use opentelemetry::sdk::propagation::TraceContextPropagator;
+        use opentelemetry_sdk::propagation::TraceContextPropagator;
         let guard = TraceContextPropagator::new()
             .extract(&startup_tracing_carrier)
             .attach();

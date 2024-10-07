@@ -3,7 +3,7 @@ use crate::{
         self,
         backend::{jwt::JwkCache, AuthRateLimiter},
     },
-    console::locks::ApiLocks,
+    control_plane::locks::ApiLocks,
     rate_limiter::{RateBucketInfo, RateLimitAlgorithm, RateLimiterConfig},
     scram::threadpool::ThreadPool,
     serverless::{cancel_set::CancelSet, GlobalConnPoolOptions},
@@ -84,6 +84,7 @@ pub struct AuthenticationConfig {
     pub jwks_cache: JwkCache,
     pub is_auth_broker: bool,
     pub accept_jwts: bool,
+    pub webauth_confirmation_timeout: tokio::time::Duration,
 }
 
 impl TlsConfig {
@@ -371,7 +372,7 @@ pub struct EndpointCacheConfig {
 }
 
 impl EndpointCacheConfig {
-    /// Default options for [`crate::console::provider::NodeInfoCache`].
+    /// Default options for [`crate::control_plane::provider::NodeInfoCache`].
     /// Notice that by default the limiter is empty, which means that cache is disabled.
     pub const CACHE_DEFAULT_OPTIONS: &'static str =
         "initial_batch_size=1000,default_batch_size=10,xread_timeout=5m,stream_name=controlPlane,disable_cache=true,limiter_info=1000@1s,retry_interval=1s";
@@ -446,7 +447,7 @@ pub struct CacheOptions {
 }
 
 impl CacheOptions {
-    /// Default options for [`crate::console::provider::NodeInfoCache`].
+    /// Default options for [`crate::control_plane::provider::NodeInfoCache`].
     pub const CACHE_DEFAULT_OPTIONS: &'static str = "size=4000,ttl=4m";
 
     /// Parse cache options passed via cmdline.
@@ -502,7 +503,7 @@ pub struct ProjectInfoCacheOptions {
 }
 
 impl ProjectInfoCacheOptions {
-    /// Default options for [`crate::console::provider::NodeInfoCache`].
+    /// Default options for [`crate::control_plane::provider::NodeInfoCache`].
     pub const CACHE_DEFAULT_OPTIONS: &'static str =
         "size=10000,ttl=4m,max_roles=10,gc_interval=60m";
 
@@ -621,9 +622,9 @@ pub struct ConcurrencyLockOptions {
 }
 
 impl ConcurrencyLockOptions {
-    /// Default options for [`crate::console::provider::ApiLocks`].
+    /// Default options for [`crate::control_plane::provider::ApiLocks`].
     pub const DEFAULT_OPTIONS_WAKE_COMPUTE_LOCK: &'static str = "permits=0";
-    /// Default options for [`crate::console::provider::ApiLocks`].
+    /// Default options for [`crate::control_plane::provider::ApiLocks`].
     pub const DEFAULT_OPTIONS_CONNECT_COMPUTE_LOCK: &'static str =
         "shards=64,permits=100,epoch=10m,timeout=10ms";
 

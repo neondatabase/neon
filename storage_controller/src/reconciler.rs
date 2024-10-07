@@ -454,7 +454,7 @@ impl Reconciler {
                 Ok(l) => l,
                 Err(e) => {
                     tracing::info!("🕑 Can't get LSNs on node {node} yet, waiting ({e})",);
-                    std::thread::sleep(Duration::from_millis(500));
+                    tokio::time::sleep(Duration::from_millis(500)).await;
                     continue;
                 }
             };
@@ -469,10 +469,7 @@ impl Reconciler {
                         }
                     }
                     None => {
-                        // Expected timeline isn't yet visible on migration destination.
-                        // (IRL we would have to account for timeline deletion, but this
-                        //  is just test helper)
-                        any_behind = true;
+                        // Timeline was deleted in the meantime - ignore it
                     }
                 }
             }
@@ -481,7 +478,7 @@ impl Reconciler {
                 tracing::info!("✅ LSN caught up.  Proceeding...");
                 break;
             } else {
-                std::thread::sleep(Duration::from_millis(500));
+                tokio::time::sleep(Duration::from_millis(500)).await;
             }
         }
 
@@ -562,6 +559,8 @@ impl Reconciler {
         self.location_config(&dest_ps, dest_conf, None, false)
             .await?;
 
+        pausable_failpoint!("reconciler-live-migrate-pre-await-lsn");
+
         if let Some(baseline) = baseline_lsns {
             tracing::info!("🕑 Waiting for LSN to catch up...");
             self.await_lsn(self.tenant_shard_id, &dest_ps, baseline)
@@ -572,30 +571,7 @@ impl Reconciler {
 
         // During a live migration it is unhelpful to proceed if we couldn't notify compute: if we detach
         // the origin without notifying compute, we will render the tenant unavailable.
-        let mut notify_attempts = 0;
-        while let Err(e) = self.compute_notify().await {
-            match e {
-                NotifyError::Fatal(_) => return Err(ReconcileError::Notify(e)),
-                NotifyError::ShuttingDown => return Err(ReconcileError::Cancel),
-                _ => {
-                    tracing::warn!(
-                        "Live migration blocked by compute notification error, retrying: {e}"
-                    );
-                }
-            }
-
-            exponential_backoff(
-                notify_attempts,
-                // Generous waits: control plane operations which might be blocking us usually complete on the order
-                // of hundreds to thousands of milliseconds, so no point busy polling.
-                1.0,
-                10.0,
-                &self.cancel,
-            )
-            .await;
-            notify_attempts += 1;
-        }
-
+        self.compute_notify_blocking(&origin_ps).await?;
         pausable_failpoint!("reconciler-live-migrate-post-notify");
 
         // Downgrade the origin to secondary.  If the tenant's policy is PlacementPolicy::Attached(0), then
@@ -868,6 +844,117 @@ impl Reconciler {
         } else {
             Ok(())
         }
+    }
+
+    /// Keep trying to notify the compute indefinitely, only dropping out if:
+    /// - the node `origin` becomes unavailable -> Ok(())
+    /// - the node `origin` no longer has our tenant shard attached -> Ok(())
+    /// - our cancellation token fires -> Err(ReconcileError::Cancelled)
+    ///
+    /// This is used during live migration, where we do not wish to detach
+    /// an origin location until the compute definitely knows about the new
+    /// location.
+    ///
+    /// In cases where the origin node becomes unavailable, we return success, indicating
+    /// to the caller that they should continue irrespective of whether the compute was notified,
+    /// because the origin node is unusable anyway.  Notification will be retried later via the
+    /// [`Self::compute_notify_failure`] flag.
+    async fn compute_notify_blocking(&mut self, origin: &Node) -> Result<(), ReconcileError> {
+        let mut notify_attempts = 0;
+        while let Err(e) = self.compute_notify().await {
+            match e {
+                NotifyError::Fatal(_) => return Err(ReconcileError::Notify(e)),
+                NotifyError::ShuttingDown => return Err(ReconcileError::Cancel),
+                _ => {
+                    tracing::warn!(
+                        "Live migration blocked by compute notification error, retrying: {e}"
+                    );
+                }
+            }
+
+            // Did the origin pageserver become unavailable?
+            if !origin.is_available() {
+                tracing::info!("Giving up on compute notification because {origin} is unavailable");
+                break;
+            }
+
+            // Does the origin pageserver still host the shard we are interested in?  We should only
+            // continue waiting for compute notification to be acked if the old location is still usable.
+            let tenant_shard_id = self.tenant_shard_id;
+            match origin
+                .with_client_retries(
+                    |client| async move { client.get_location_config(tenant_shard_id).await },
+                    &self.service_config.jwt_token,
+                    1,
+                    3,
+                    Duration::from_secs(5),
+                    &self.cancel,
+                )
+                .await
+            {
+                Some(Ok(Some(location_conf))) => {
+                    if matches!(
+                        location_conf.mode,
+                        LocationConfigMode::AttachedMulti
+                            | LocationConfigMode::AttachedSingle
+                            | LocationConfigMode::AttachedStale
+                    ) {
+                        tracing::debug!(
+                            "Still attached to {origin}, will wait & retry compute notification"
+                        );
+                    } else {
+                        tracing::info!(
+                            "Giving up on compute notification because {origin} is in state {:?}",
+                            location_conf.mode
+                        );
+                        return Ok(());
+                    }
+                    // Fall through
+                }
+                Some(Ok(None)) => {
+                    tracing::info!(
+                        "No longer attached to {origin}, giving up on compute notification"
+                    );
+                    return Ok(());
+                }
+                Some(Err(e)) => {
+                    match e {
+                        mgmt_api::Error::Cancelled => {
+                            tracing::info!(
+                                "Giving up on compute notification because {origin} is unavailable"
+                            );
+                            return Ok(());
+                        }
+                        mgmt_api::Error::ApiError(StatusCode::NOT_FOUND, _) => {
+                            tracing::info!(
+                                "No longer attached to {origin}, giving up on compute notification"
+                            );
+                            return Ok(());
+                        }
+                        e => {
+                            // Other API errors are unexpected here.
+                            tracing::warn!("Unexpected error checking location on {origin}: {e}");
+
+                            // Fall through, we will retry compute notification.
+                        }
+                    }
+                }
+                None => return Err(ReconcileError::Cancel),
+            };
+
+            exponential_backoff(
+                notify_attempts,
+                // Generous waits: control plane operations which might be blocking us usually complete on the order
+                // of hundreds to thousands of milliseconds, so no point busy polling.
+                1.0,
+                10.0,
+                &self.cancel,
+            )
+            .await;
+            notify_attempts += 1;
+        }
+
+        Ok(())
     }
 }
 

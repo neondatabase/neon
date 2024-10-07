@@ -575,7 +575,7 @@ fn start_pageserver(
             .build()
             .map_err(|err| anyhow!(err))?;
         let service = utils::http::RouterService::new(router).unwrap();
-        let server = hyper::Server::from_tcp(http_listener)?
+        let server = hyper0::Server::from_tcp(http_listener)?
             .serve(service)
             .with_graceful_shutdown({
                 let cancel = cancel.clone();

@@ -12,10 +12,25 @@ ARG DEBIAN_FLAVOR=bullseye-slim
 #########################################################################################
 FROM debian:$DEBIAN_FLAVOR AS build-deps
 ARG DEBIAN_FLAVOR
-RUN apt update &&  \
-    apt install -y git autoconf automake libtool build-essential bison flex libreadline-dev \
-    zlib1g-dev libxml2-dev libcurl4-openssl-dev libossp-uuid-dev wget pkg-config libssl-dev \
-    libicu-dev libxslt1-dev liblz4-dev libzstd-dev zstd
+
+RUN case $DEBIAN_FLAVOR in \
+      # Version-specific installs for Bullseye (PG14-PG16):
+      # The h3_pg extension needs a cmake 3.20+, but Debian bullseye has 3.18.
+      # Install newer version (3.25) from backports.
+      bullseye*) \
+        echo "deb http://deb.debian.org/debian bullseye-backports main" > /etc/apt/sources.list.d/bullseye-backports.list; \
+        VERSION_INSTALLS="cmake/bullseye-backports cmake-data/bullseye-backports"; \
+      ;; \
+      # Version-specific installs for Bookworm (PG17):
+      bookworm*) \
+        VERSION_INSTALLS="cmake"; \
+      ;; \
+    esac && \
+    apt update &&  \
+    apt install --no-install-recommends -y git autoconf automake libtool build-essential bison flex libreadline-dev \
+    zlib1g-dev libxml2-dev libcurl4-openssl-dev libossp-uuid-dev wget ca-certificates pkg-config libssl-dev \
+    libicu-dev libxslt1-dev liblz4-dev libzstd-dev zstd \
+    $VERSION_INSTALLS
 
 #########################################################################################
 #
@@ -89,7 +104,7 @@ FROM build-deps AS postgis-build
 ARG PG_VERSION
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 RUN apt update && \
-    apt install -y cmake gdal-bin libboost-dev libboost-thread-dev libboost-filesystem-dev \
+    apt install --no-install-recommends -y gdal-bin libboost-dev libboost-thread-dev libboost-filesystem-dev \
     libboost-system-dev libboost-iostreams-dev libboost-program-options-dev libboost-timer-dev \
     libcgal-dev libgdal-dev libgmp-dev libmpfr-dev libopenscenegraph-dev libprotobuf-c-dev \
     protobuf-c-compiler xsltproc
@@ -167,7 +182,7 @@ RUN case "${PG_VERSION}" in "v17") \
     echo "v17 extensions are not supported yet. Quit" && exit 0;; \
     esac && \
     apt update && \
-    apt install -y ninja-build python3-dev libncurses5 binutils clang
+    apt install --no-install-recommends -y ninja-build python3-dev libncurses5 binutils clang
 
 RUN case "${PG_VERSION}" in "v17") \
     echo "v17 extensions are not supported yet. Quit" && exit 0;; \
@@ -199,27 +214,6 @@ RUN case "${PG_VERSION}" in "v17") \
 FROM build-deps AS h3-pg-build
 ARG PG_VERSION
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
-
-RUN case "${PG_VERSION}" in "v17") \
-    echo "v17 extensions are not supported yet. Quit" && exit 0;; \
-    esac && \
-    case "$(uname -m)" in \
-      "x86_64") \
-        export CMAKE_CHECKSUM=739d372726cb23129d57a539ce1432453448816e345e1545f6127296926b6754 \
-        ;; \
-      "aarch64") \
-        export CMAKE_CHECKSUM=281b42627c9a1beed03e29706574d04c6c53fae4994472e90985ef018dd29c02 \
-        ;; \
-      *) \
-        echo "Unsupported architecture '$(uname -m)'. Supported are x86_64 and aarch64" && exit 1 \
-        ;; \
-    esac && \
-    wget https://github.com/Kitware/CMake/releases/download/v3.24.2/cmake-3.24.2-linux-$(uname -m).sh \
-      -q -O /tmp/cmake-install.sh \
-      && echo "${CMAKE_CHECKSUM} /tmp/cmake-install.sh" | sha256sum --check \
-      && chmod u+x /tmp/cmake-install.sh \
-      && /tmp/cmake-install.sh --skip-license --prefix=/usr/local/ \
-      && rm /tmp/cmake-install.sh
 
 RUN case "${PG_VERSION}" in "v17") \
         mkdir -p /h3/usr/ && \
@@ -506,8 +500,6 @@ RUN case "${PG_VERSION}" in "v17") \
         export TIMESCALEDB_CHECKSUM=584a351c7775f0e067eaa0e7277ea88cab9077cc4c455cbbf09a5d9723dce95d \
         ;; \
     esac && \
-    apt-get update && \
-    apt-get install -y cmake && \
     wget https://github.com/timescale/timescaledb/archive/refs/tags/${TIMESCALEDB_VERSION}.tar.gz -O timescaledb.tar.gz && \
     echo "${TIMESCALEDB_CHECKSUM} timescaledb.tar.gz" | sha256sum --check && \
     mkdir timescaledb-src && cd timescaledb-src && tar xzf ../timescaledb.tar.gz --strip-components=1 -C . && \
@@ -595,8 +587,7 @@ RUN case "${PG_VERSION}" in "v17") \
     echo "v17 extensions are not supported yet. Quit" && exit 0;; \
     esac && \
     apt-get update && \
-    apt-get install -y \
-        cmake \
+    apt-get install --no-install-recommends -y \
         libboost-iostreams1.74-dev \
         libboost-regex1.74-dev \
         libboost-serialization1.74-dev \
@@ -761,7 +752,7 @@ ARG PG_VERSION
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
 RUN apt-get update && \
-    apt-get install -y curl libclang-dev cmake && \
+    apt-get install --no-install-recommends -y curl libclang-dev && \
     useradd -ms /bin/bash nonroot -b /home
 
 ENV HOME=/home/nonroot
@@ -873,6 +864,25 @@ RUN case "${PG_VERSION}" in "v17") \
 
 #########################################################################################
 #
+# Layer "pg-session-jwt-build"
+# Compile "pg_session_jwt" extension
+#
+#########################################################################################
+
+FROM rust-extensions-build AS pg-session-jwt-build
+ARG PG_VERSION
+
+RUN case "${PG_VERSION}" in "v17") \
+    echo "pg_session_jwt does not yet have a release that supports pg17" && exit 0;; \
+    esac && \
+    wget https://github.com/neondatabase/pg_session_jwt/archive/ff0a72440e8ff584dab24b3f9b7c00c56c660b8e.tar.gz -O pg_session_jwt.tar.gz && \
+    echo "1fbb2b5a339263bcf6daa847fad8bccbc0b451cea6a62e6d3bf232b0087f05cb pg_session_jwt.tar.gz" | sha256sum --check && \
+    mkdir pg_session_jwt-src && cd pg_session_jwt-src && tar xzf ../pg_session_jwt.tar.gz --strip-components=1 -C . && \
+    sed -i 's/pgrx = "=0.11.3"/pgrx = { version = "=0.11.3", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
+    cargo pgrx install --release
+
+#########################################################################################
+#
 # Layer "wal2json-build"
 # Compile "wal2json" extension
 #
@@ -967,6 +977,7 @@ COPY --from=timescaledb-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-hint-plan-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-cron-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-pgx-ulid-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pg-session-jwt-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=rdkit-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-uuidv7-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-roaringbitmap-pg-build /usr/local/pgsql/ /usr/local/pgsql/
@@ -1044,9 +1055,12 @@ FROM debian:$DEBIAN_FLAVOR AS pgbouncer
 ARG DEBIAN_FLAVOR
 RUN set -e \
     && apt-get update \
-    && apt-get install -y \
+    && apt-get install --no-install-recommends -y \
         build-essential \
         git \
+        ca-certificates \
+        autoconf \
+        automake \
         libevent-dev \
         libtool \
         pkg-config
@@ -1060,6 +1074,20 @@ RUN set -e \
     && LDFLAGS=-static ./configure --prefix=/usr/local/pgbouncer --without-openssl \
     && make -j $(nproc) dist_man_MANS= \
     && make install dist_man_MANS=
+
+#########################################################################################
+#
+# Compile the Neon-specific `local_proxy` binary
+#
+#########################################################################################
+FROM $REPOSITORY/$IMAGE:$TAG AS local_proxy
+ARG BUILD_TAG
+ENV BUILD_TAG=$BUILD_TAG
+
+USER nonroot
+# Copy entire project to get Cargo.* files with proper dependencies for the whole project
+COPY --chown=nonroot . .
+RUN mold -run cargo build --locked --profile release-line-debug-size-lto --bin local_proxy
 
 #########################################################################################
 #
@@ -1154,11 +1182,6 @@ RUN case "${PG_VERSION}" in "v17") \
     echo "v17 extensions are not supported yet. Quit" && exit 0;; \
     esac && \
     cd /ext-src/pgvector-src && patch -p1 <../pgvector.patch
-# cmake is required for the h3 test
-RUN case "${PG_VERSION}" in "v17") \
-    echo "v17 extensions are not supported yet. Quit" && exit 0;; \
-    esac && \
-    apt-get update && apt-get install -y cmake
 RUN case "${PG_VERSION}" in "v17") \
     echo "v17 extensions are not supported yet. Quit" && exit 0;; \
     esac && \
@@ -1185,7 +1208,6 @@ ENV PGDATABASE=postgres
 #########################################################################################
 FROM debian:$DEBIAN_FLAVOR
 ARG DEBIAN_FLAVOR
-ENV DEBIAN_FLAVOR=$DEBIAN_FLAVOR
 # Add user postgres
 RUN mkdir /var/db && useradd -m -d /var/db/postgres postgres && \
     echo "postgres:test_console_pass" | chpasswd && \
@@ -1204,6 +1226,10 @@ COPY --from=compute-tools --chown=postgres /home/nonroot/target/release-line-deb
 # pgbouncer and its config
 COPY --from=pgbouncer         /usr/local/pgbouncer/bin/pgbouncer /usr/local/bin/pgbouncer
 COPY --chmod=0666 --chown=postgres compute/etc/pgbouncer.ini /etc/pgbouncer.ini
+
+# local_proxy and its config
+COPY --from=local_proxy --chown=postgres /home/nonroot/target/release-line-debug-size-lto/local_proxy /usr/local/bin/local_proxy
+RUN mkdir -p /etc/local_proxy && chown postgres:postgres /etc/local_proxy
 
 # Metrics exporter binaries and  configuration files
 COPY --from=postgres-exporter /bin/postgres_exporter /bin/postgres_exporter

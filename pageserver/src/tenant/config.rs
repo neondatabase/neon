@@ -8,7 +8,6 @@
 //! We cannot use global or default config instead, because wrong settings
 //! may lead to a data loss.
 //!
-use anyhow::bail;
 pub(crate) use pageserver_api::config::TenantConfigToml as TenantConf;
 use pageserver_api::models::AuxFilePolicy;
 use pageserver_api::models::CompactionAlgorithmSettings;
@@ -438,29 +437,6 @@ impl TryFrom<&'_ models::TenantConfig> for TenantConfOpt {
         let tenant_conf: TenantConfOpt = serde_path_to_error::deserialize(deserializer)?;
 
         Ok(tenant_conf)
-    }
-}
-
-impl TryFrom<toml_edit::Item> for TenantConfOpt {
-    type Error = anyhow::Error;
-
-    fn try_from(item: toml_edit::Item) -> Result<Self, Self::Error> {
-        match item {
-            toml_edit::Item::Value(value) => {
-                let d = value.into_deserializer();
-                return serde_path_to_error::deserialize(d)
-                    .map_err(|e| anyhow::anyhow!("{}: {}", e.path(), e.inner().message()));
-            }
-            toml_edit::Item::Table(table) => {
-                let deserializer =
-                    toml_edit::de::Deserializer::from(toml_edit::DocumentMut::from(table));
-                return serde_path_to_error::deserialize(deserializer)
-                    .map_err(|e| anyhow::anyhow!("{}: {}", e.path(), e.inner().message()));
-            }
-            _ => {
-                bail!("expected non-inline table but found {item}")
-            }
-        }
     }
 }
 

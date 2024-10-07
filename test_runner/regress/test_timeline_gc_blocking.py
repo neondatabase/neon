@@ -28,7 +28,7 @@ def test_gc_blocking_by_timeline(neon_env_builder: NeonEnvBuilder, sharded: bool
 
     pss = ManyPageservers(list(map(lambda ps: ScrollableLog(ps, None), env.pageservers)))
 
-    foo_branch = env.neon_cli.create_branch("foo", "main", env.initial_tenant)
+    foo_branch = env.create_branch("foo", ancestor_branch_name="main", tenant_id=env.initial_tenant)
 
     gc_active_line = ".* gc_loop.*: [12] timelines need GC"
     gc_skipped_line = ".* gc_loop.*: Skipping GC: .*"

@@ -98,7 +98,7 @@ def check_backpressure(endpoint: Endpoint, stop_event: threading.Event, polling_
 def test_backpressure_received_lsn_lag(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
     # Create a branch for us
-    env.neon_cli.create_branch("test_backpressure")
+    env.create_branch("test_backpressure")
 
     endpoint = env.endpoints.create(
         "test_backpressure", config_lines=["max_replication_write_lag=30MB"]

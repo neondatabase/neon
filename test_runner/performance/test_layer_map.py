@@ -15,7 +15,7 @@ def test_layer_map(neon_env_builder: NeonEnvBuilder, zenbenchmark):
     # We want to have a lot of lot of layer files to exercise the layer map. Disable
     # GC, and make checkpoint_distance very small, so that we get a lot of small layer
     # files.
-    tenant, timeline = env.neon_cli.create_tenant(
+    tenant, timeline = env.create_tenant(
         conf={
             "gc_period": "0s",
             "checkpoint_distance": "16384",

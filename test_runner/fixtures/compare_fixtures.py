@@ -340,23 +340,27 @@ def neon_with_baseline(request: FixtureRequest) -> PgCompare:
 
 
 @pytest.fixture(scope="function", autouse=True)
-def sync_after_each_test():
-    # The fixture calls `sync(2)` after each test if `SYNC_AFTER_EACH_TEST` env var is `true`
+def sync_between_tests():
+    # The fixture calls `sync(2)` after each test if `SYNC_BETWEEN_TESTS` env var is `true`
     #
-    # In CI, `SYNC_AFTER_EACH_TEST` is set to `true` only for benchmarks (`test_runner/performance`)
+    # In CI, `SYNC_BETWEEN_TESTS` is set to `true` only for benchmarks (`test_runner/performance`)
     # that are run on self-hosted runners because some of these tests are pretty write-heavy
     # and create issues to start the processes within 10s
-    key = "SYNC_AFTER_EACH_TEST"
+    key = "SYNC_BETWEEN_TESTS"
     enabled = os.environ.get(key) == "true"
+
+    if enabled:
+        start = time.time()
+        # we only run benches on unices, the method might not exist on windows
+        os.sync()
+        elapsed = time.time() - start
+        log.info(f"called sync before test {elapsed=}")
 
     yield
 
-    if not enabled:
-        # regress test, or running locally
-        return
-
-    start = time.time()
-    # we only run benches on unices, the method might not exist on windows
-    os.sync()
-    elapsed = time.time() - start
-    log.info(f"called sync after test {elapsed=}")
+    if enabled:
+        start = time.time()
+        # we only run benches on unices, the method might not exist on windows
+        os.sync()
+        elapsed = time.time() - start
+        log.info(f"called sync after test {elapsed=}")
