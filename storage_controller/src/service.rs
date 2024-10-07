@@ -5343,13 +5343,43 @@ impl Service {
         node_id: NodeId,
         availability: Option<NodeAvailability>,
         scheduling: Option<NodeSchedulingPolicy>,
-        _nodes_lock: &TracingExclusiveGuard<NodeOperations>,
+        nodes_lock: &TracingExclusiveGuard<NodeOperations>,
     ) -> Result<AvailabilityTransition, ApiError> {
         if let Some(scheduling) = scheduling {
             // Scheduling is a persistent part of Node: we must write updates to the database before
             // applying them in memory
             self.persistence.update_node(node_id, scheduling).await?;
         }
+
+        // If we're activating a node, then before setting it active we must reconcile any shard locations
+        // on that node, in case it is out of sync, e.g. due to being unavailable during controller startup,
+        // by calling [`Self::node_activate_reconcile`]
+        //
+        // The transition we calculate here remains valid later in the function because we hold the op lock on the node:
+        // nothing else can mutate its availability while we run.
+        let availability_transition = if let Some(input_availability) = availability.as_ref() {
+            let (activate_node, availability_transition) = {
+                let locked = self.inner.read().unwrap();
+                let Some(node) = locked.nodes.get(&node_id) else {
+                    return Err(ApiError::NotFound(
+                        anyhow::anyhow!("Node {} not registered", node_id).into(),
+                    ));
+                };
+
+                (
+                    node.clone(),
+                    node.get_availability_transition(input_availability),
+                )
+            };
+
+            if matches!(availability_transition, AvailabilityTransition::ToActive) {
+                self.node_activate_reconcile(activate_node, nodes_lock)
+                    .await?;
+            }
+            availability_transition
+        } else {
+            AvailabilityTransition::Unchanged
+        };
 
         // Apply changes from the request to our in-memory state for the Node
         let mut locked = self.inner.write().unwrap();
@@ -5361,13 +5391,6 @@ impl Service {
             return Err(ApiError::NotFound(
                 anyhow::anyhow!("Node not registered").into(),
             ));
-        };
-
-        let availability_transition = {
-            match availability {
-                Some(ref new_availability) => node.get_availability_transition(new_availability),
-                None => AvailabilityTransition::Unchanged,
-            }
         };
 
         if let Some(availability) = availability {
@@ -5391,7 +5414,7 @@ impl Service {
         &self,
         node_id: NodeId,
         transition: AvailabilityTransition,
-        nodes_lock: &TracingExclusiveGuard<NodeOperations>,
+        _nodes_lock: &TracingExclusiveGuard<NodeOperations>,
     ) -> Result<(), ApiError> {
         // Modify scheduling state for any Tenants that are affected by a change in the node's availability state.
         match transition {
@@ -5458,21 +5481,6 @@ impl Service {
             }
             AvailabilityTransition::ToActive => {
                 tracing::info!("Node {} transition to active", node_id);
-
-                let activate_node = {
-                    let locked = self.inner.read().unwrap();
-                    match locked.nodes.get(&node_id) {
-                        Some(n) => n.clone(),
-                        None => {
-                            return Err(ApiError::NotFound(
-                                anyhow::anyhow!("Node not registered").into(),
-                            ));
-                        }
-                    }
-                };
-
-                self.node_activate_reconcile(activate_node.clone(), nodes_lock)
-                    .await?;
 
                 let mut locked = self.inner.write().unwrap();
                 let (nodes, tenants, _scheduler) = locked.parts_mut();
