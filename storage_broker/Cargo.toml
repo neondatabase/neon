@@ -10,13 +10,16 @@ bench = []
 [dependencies]
 anyhow.workspace = true
 async-stream.workspace = true
+bytes.workspace = true
 clap = { workspace = true, features = ["derive"] }
 const_format.workspace = true
 futures.workspace = true
 futures-core.workspace = true
 futures-util.workspace = true
 humantime.workspace = true
-hyper0 = { workspace = true, features = ["full"] }
+hyper = { workspace = true, features = ["full"] }
+http-body-util.workspace = true
+hyper-util = "0.1"
 once_cell.workspace = true
 parking_lot.workspace = true
 prost.workspace = true
