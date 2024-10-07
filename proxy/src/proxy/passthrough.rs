@@ -1,7 +1,7 @@
 use crate::{
     cancellation,
     compute::PostgresConnection,
-    console::messages::MetricsAuxInfo,
+    control_plane::messages::MetricsAuxInfo,
     metrics::{Direction, Metrics, NumClientConnectionsGuard, NumConnectionRequestsGuard},
     stream::Stream,
     usage_metrics::{Ids, MetricCounterRecorder, USAGE_METRICS},

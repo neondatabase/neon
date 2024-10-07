@@ -3,8 +3,8 @@ use crate::{
     compute::COULD_NOT_CONNECT,
     compute::{self, PostgresConnection},
     config::RetryConfig,
-    console::{self, errors::WakeComputeError, locks::ApiLocks, CachedNodeInfo, NodeInfo},
     context::RequestMonitoring,
+    control_plane::{self, errors::WakeComputeError, locks::ApiLocks, CachedNodeInfo, NodeInfo},
     error::ReportableError,
     metrics::{ConnectOutcome, ConnectionFailureKind, Metrics, RetriesMetricGroup, RetryType},
     proxy::{
@@ -26,7 +26,7 @@ const CONNECT_TIMEOUT: time::Duration = time::Duration::from_secs(2);
 /// (e.g. the compute node's address might've changed at the wrong time).
 /// Invalidate the cache entry (if any) to prevent subsequent errors.
 #[tracing::instrument(name = "invalidate_cache", skip_all)]
-pub(crate) fn invalidate_cache(node_info: console::CachedNodeInfo) -> NodeInfo {
+pub(crate) fn invalidate_cache(node_info: control_plane::CachedNodeInfo) -> NodeInfo {
     let is_cached = node_info.cached();
     if is_cached {
         warn!("invalidating stalled compute node info cache entry");
@@ -49,7 +49,7 @@ pub(crate) trait ConnectMechanism {
     async fn connect_once(
         &self,
         ctx: &RequestMonitoring,
-        node_info: &console::CachedNodeInfo,
+        node_info: &control_plane::CachedNodeInfo,
         timeout: time::Duration,
     ) -> Result<Self::Connection, Self::ConnectError>;
 
@@ -61,7 +61,7 @@ pub(crate) trait ComputeConnectBackend {
     async fn wake_compute(
         &self,
         ctx: &RequestMonitoring,
-    ) -> Result<CachedNodeInfo, console::errors::WakeComputeError>;
+    ) -> Result<CachedNodeInfo, control_plane::errors::WakeComputeError>;
 
     fn get_keys(&self) -> &ComputeCredentialKeys;
 }
@@ -84,7 +84,7 @@ impl ConnectMechanism for TcpMechanism<'_> {
     async fn connect_once(
         &self,
         ctx: &RequestMonitoring,
-        node_info: &console::CachedNodeInfo,
+        node_info: &control_plane::CachedNodeInfo,
         timeout: time::Duration,
     ) -> Result<PostgresConnection, Self::Error> {
         let host = node_info.config.get_host()?;

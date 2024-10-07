@@ -10,7 +10,7 @@ use crate::{
 use crate::{auth::backend::ComputeUserInfo, compute, error::io_error, scram, url::ApiUrl};
 use crate::{auth::IpPattern, cache::Cached};
 use crate::{
-    console::{
+    control_plane::{
         messages::MetricsAuxInfo,
         provider::{CachedAllowedIps, CachedRoleSecret},
     },
@@ -166,7 +166,7 @@ impl Api {
                 endpoint_id: (&EndpointId::from("endpoint")).into(),
                 project_id: (&ProjectId::from("project")).into(),
                 branch_id: (&BranchId::from("branch")).into(),
-                cold_start_info: crate::console::messages::ColdStartInfo::Warm,
+                cold_start_info: crate::control_plane::messages::ColdStartInfo::Warm,
             },
             allow_self_signed_compute: false,
         };

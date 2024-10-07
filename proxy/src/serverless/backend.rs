@@ -12,13 +12,13 @@ use crate::{
     },
     compute,
     config::{AuthenticationConfig, ProxyConfig},
-    console::{
+    context::RequestMonitoring,
+    control_plane::{
         errors::{GetAuthInfoError, WakeComputeError},
         locks::ApiLocks,
         provider::ApiLockError,
         CachedNodeInfo,
     },
-    context::RequestMonitoring,
     error::{ErrorKind, ReportableError, UserFacingError},
     intern::EndpointIdInt,
     proxy::{
@@ -114,7 +114,7 @@ impl PoolingBackend {
         jwt: String,
     ) -> Result<(), AuthError> {
         match &self.config.auth_backend {
-            crate::auth::Backend::Console(console, ()) => {
+            crate::auth::Backend::ControlPlane(console, ()) => {
                 config
                     .jwks_cache
                     .check_jwt(
@@ -129,7 +129,7 @@ impl PoolingBackend {
 
                 Ok(())
             }
-            crate::auth::Backend::Web(_, ()) => Err(AuthError::auth_failed(
+            crate::auth::Backend::ConsoleRedirect(_, ()) => Err(AuthError::auth_failed(
                 "JWT login over web auth proxy is not supported",
             )),
             crate::auth::Backend::Local(_) => {
