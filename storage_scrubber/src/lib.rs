@@ -28,8 +28,9 @@ use pageserver::tenant::remote_timeline_client::{remote_tenant_path, remote_time
 use pageserver::tenant::TENANTS_SEGMENT_NAME;
 use pageserver_api::shard::TenantShardId;
 use remote_storage::{
-    GenericRemoteStorage, Listing, ListingMode, RemotePath, RemoteStorageConfig, RemoteStorageKind,
-    S3Config, DEFAULT_MAX_KEYS_PER_LIST_RESPONSE, DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT,
+    DownloadOpts, GenericRemoteStorage, Listing, ListingMode, RemotePath, RemoteStorageConfig,
+    RemoteStorageKind, S3Config, DEFAULT_MAX_KEYS_PER_LIST_RESPONSE,
+    DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT,
 };
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
@@ -488,7 +489,10 @@ async fn download_object_with_retries(
     let cancel = CancellationToken::new();
     for trial in 0..MAX_RETRIES {
         let mut buf = Vec::new();
-        let download = match remote_client.download(key, &cancel).await {
+        let download = match remote_client
+            .download(key, &DownloadOpts::default(), &cancel)
+            .await
+        {
             Ok(response) => response,
             Err(e) => {
                 error!("Failed to download object for key {key}: {e}");

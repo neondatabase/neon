@@ -586,6 +586,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         timeline_id: TimelineId,
         force_repartition=False,
         force_image_layer_creation=False,
+        force_l0_compaction=False,
         wait_until_uploaded=False,
         enhanced_gc_bottom_most_compaction=False,
     ):
@@ -595,6 +596,8 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
             query["force_repartition"] = "true"
         if force_image_layer_creation:
             query["force_image_layer_creation"] = "true"
+        if force_l0_compaction:
+            query["force_l0_compaction"] = "true"
         if wait_until_uploaded:
             query["wait_until_uploaded"] = "true"
         if enhanced_gc_bottom_most_compaction:
@@ -701,6 +704,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         timeline_id: TimelineId,
         force_repartition=False,
         force_image_layer_creation=False,
+        force_l0_compaction=False,
         wait_until_uploaded=False,
         compact: Optional[bool] = None,
         **kwargs,
@@ -711,6 +715,8 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
             query["force_repartition"] = "true"
         if force_image_layer_creation:
             query["force_image_layer_creation"] = "true"
+        if force_l0_compaction:
+            query["force_l0_compaction"] = "true"
         if wait_until_uploaded:
             query["wait_until_uploaded"] = "true"
 

@@ -1,3 +1,5 @@
+extern crate hyper0 as hyper;
+
 use hyper::body::HttpBody;
 use std::pin::Pin;
 use std::task::{Context, Poll};

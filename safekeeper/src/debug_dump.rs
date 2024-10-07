@@ -253,6 +253,13 @@ pub async fn build(args: Args) -> Result<Response> {
         });
     }
 
+    // Tokio forbids to drop runtime in async context, so this is a stupid way
+    // to drop it in non async context.
+    tokio::task::spawn_blocking(move || {
+        let _r = runtime;
+    })
+    .await?;
+
     Ok(Response {
         start_time,
         finish_time: Utc::now(),

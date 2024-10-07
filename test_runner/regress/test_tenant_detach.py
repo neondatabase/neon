@@ -72,7 +72,7 @@ def test_tenant_reattach(neon_env_builder: NeonEnvBuilder, mode: str):
     pageserver_http = env.pageserver.http_client()
 
     # create new nenant
-    tenant_id, timeline_id = env.neon_cli.create_tenant()
+    tenant_id, timeline_id = env.create_tenant()
 
     env.pageserver.allowed_errors.extend(PERMIT_PAGE_SERVICE_ERRORS)
 
@@ -241,7 +241,7 @@ def test_tenant_reattach_while_busy(
     pageserver_http = env.pageserver.http_client()
 
     # create new nenant
-    tenant_id, timeline_id = env.neon_cli.create_tenant(
+    tenant_id, timeline_id = env.create_tenant(
         # Create layers aggressively
         conf={"checkpoint_distance": "100000"}
     )

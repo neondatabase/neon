@@ -42,7 +42,7 @@ async def run_worker_for_tenant(
 
 
 async def run_worker(env: NeonEnv, tenant_conf, entries: int) -> Tuple[TenantId, TimelineId, Lsn]:
-    tenant, timeline = env.neon_cli.create_tenant(conf=tenant_conf)
+    tenant, timeline = env.create_tenant(conf=tenant_conf)
     last_flush_lsn = await run_worker_for_tenant(env, entries, tenant)
     return tenant, timeline, last_flush_lsn
 

@@ -84,6 +84,7 @@ pub struct AuthenticationConfig {
     pub jwks_cache: JwkCache,
     pub is_auth_broker: bool,
     pub accept_jwts: bool,
+    pub webauth_confirmation_timeout: tokio::time::Duration,
 }
 
 impl TlsConfig {

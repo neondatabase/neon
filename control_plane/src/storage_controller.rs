@@ -3,7 +3,7 @@ use crate::{
     local_env::{LocalEnv, NeonStorageControllerConf},
 };
 use camino::{Utf8Path, Utf8PathBuf};
-use hyper::Uri;
+use hyper0::Uri;
 use nix::unistd::Pid;
 use pageserver_api::{
     controller_api::{
@@ -515,6 +515,13 @@ impl StorageController {
 
         if let Some(lag) = self.config.max_secondary_lag_bytes.as_ref() {
             args.push(format!("--max-secondary-lag-bytes={lag}"))
+        }
+
+        if let Some(threshold) = self.config.long_reconcile_threshold {
+            args.push(format!(
+                "--long-reconcile-threshold={}",
+                humantime::Duration::from(threshold)
+            ))
         }
 
         args.push(format!(

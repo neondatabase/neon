@@ -1814,7 +1814,7 @@ walprop_pg_wait_event_set(WalProposer *wp, long timeout, Safekeeper **sk, uint32
 	 * If wait is terminated by latch set (walsenders' latch is set on each
 	 * wal flush). (no need for pm death check due to WL_EXIT_ON_PM_DEATH)
 	 */
-	if ((rc == 1 && event.events & WL_LATCH_SET) || late_cv_trigger)
+	if ((rc == 1 && (event.events & WL_LATCH_SET)) || late_cv_trigger)
 	{
 		/* Reset our latch */
 		ResetLatch(MyLatch);
@@ -1826,7 +1826,7 @@ walprop_pg_wait_event_set(WalProposer *wp, long timeout, Safekeeper **sk, uint32
 	 * If the event contains something about the socket, it means we got an
 	 * event from a safekeeper socket.
 	 */
-	if (rc == 1 && (event.events & (WL_SOCKET_MASK)))
+	if (rc == 1 && (event.events & WL_SOCKET_MASK))
 	{
 		*sk = (Safekeeper *) event.user_data;
 		*events = event.events;

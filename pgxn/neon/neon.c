@@ -41,6 +41,9 @@
 #include "pagestore_client.h"
 #include "control_plane_connector.h"
 #include "walsender_hooks.h"
+#if PG_MAJORVERSION_NUM >= 16
+#include "storage/ipc.h"
+#endif
 
 PG_MODULE_MAGIC;
 void		_PG_init(void);
@@ -48,6 +51,23 @@ void		_PG_init(void);
 static int	logical_replication_max_snap_files = 300;
 
 static int  running_xacts_overflow_policy;
+
+#if PG_MAJORVERSION_NUM >= 16
+static shmem_startup_hook_type prev_shmem_startup_hook;
+
+static void neon_shmem_startup_hook(void);
+#endif
+#if PG_MAJORVERSION_NUM >= 17
+uint32		WAIT_EVENT_NEON_LFC_MAINTENANCE;
+uint32		WAIT_EVENT_NEON_LFC_READ;
+uint32		WAIT_EVENT_NEON_LFC_TRUNCATE;
+uint32		WAIT_EVENT_NEON_LFC_WRITE;
+uint32		WAIT_EVENT_NEON_PS_STARTING;
+uint32		WAIT_EVENT_NEON_PS_CONFIGURING;
+uint32		WAIT_EVENT_NEON_PS_SEND;
+uint32		WAIT_EVENT_NEON_PS_READ;
+uint32		WAIT_EVENT_NEON_WAL_DL;
+#endif
 
 enum RunningXactsOverflowPolicies {
 	OP_IGNORE,
@@ -635,6 +655,9 @@ _PG_init(void)
 	 */
 #if PG_VERSION_NUM >= 160000
 	load_file("$libdir/neon_rmgr", false);
+
+	prev_shmem_startup_hook = shmem_startup_hook;
+	shmem_startup_hook = neon_shmem_startup_hook;
 #endif
 
 	pg_init_libpagestore();
@@ -721,3 +744,25 @@ backpressure_throttling_time(PG_FUNCTION_ARGS)
 {
 	PG_RETURN_UINT64(BackpressureThrottlingTime());
 }
+
+#if PG_MAJORVERSION_NUM >= 16
+static void
+neon_shmem_startup_hook(void)
+{
+	/* Initialize */
+	if (prev_shmem_startup_hook)
+		prev_shmem_startup_hook();
+
+#if PG_PG_MAJORVERSION_NUM >= 17
+	WAIT_EVENT_NEON_LFC_MAINTENANCE = WaitEventExtensionNew("Neon/FileCache_Maintenance");
+	WAIT_EVENT_NEON_LFC_READ = WaitEventExtensionNew("Neon/FileCache_Read");
+	WAIT_EVENT_NEON_LFC_TRUNCATE = WaitEventExtensionNew("Neon/FileCache_Truncate");
+	WAIT_EVENT_NEON_LFC_WRITE = WaitEventExtensionNew("Neon/FileCache_Write");
+	WAIT_EVENT_NEON_PS_STARTING = WaitEventExtensionNew("Neon/PS_Starting");
+	WAIT_EVENT_NEON_PS_CONFIGURING = WaitEventExtensionNew("Neon/PS_Configuring");
+	WAIT_EVENT_NEON_PS_SEND = WaitEventExtensionNew("Neon/PS_SendIO");
+	WAIT_EVENT_NEON_PS_READ = WaitEventExtensionNew("Neon/PS_ReadIO");
+	WAIT_EVENT_NEON_WAL_DL = WaitEventExtensionNew("Neon/WAL_Download");
+#endif
+}
+#endif

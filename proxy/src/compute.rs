@@ -20,7 +20,7 @@ use tokio_postgres::tls::MakeTlsConnect;
 use tokio_postgres_rustls::MakeRustlsConnect;
 use tracing::{error, info, warn};
 
-const COULD_NOT_CONNECT: &str = "Couldn't connect to compute node";
+pub const COULD_NOT_CONNECT: &str = "Couldn't connect to compute node";
 
 #[derive(Debug, Error)]
 pub(crate) enum ConnectionError {

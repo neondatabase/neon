@@ -81,7 +81,7 @@ def setup_tenant_template(env: NeonEnv, n_txns: int):
         "image_creation_threshold": 3,
     }
 
-    template_tenant, template_timeline = env.neon_cli.create_tenant(set_default=True)
+    template_tenant, template_timeline = env.create_tenant(set_default=True)
     env.pageserver.tenant_detach(template_tenant)
     env.pageserver.tenant_attach(template_tenant, config)
 

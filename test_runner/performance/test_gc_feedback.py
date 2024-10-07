@@ -11,7 +11,7 @@ def gc_feedback_impl(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenchma
     env = neon_env_builder.init_start()
     client = env.pageserver.http_client()
 
-    tenant_id, _ = env.neon_cli.create_tenant(
+    tenant_id, _ = env.create_tenant(
         conf={
             # disable default GC and compaction
             "gc_period": "1000 m",
@@ -63,7 +63,7 @@ def gc_feedback_impl(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenchma
             log.info(f"Physical storage size {physical_size}")
         if mode == "with_snapshots":
             if step == n_steps / 2:
-                env.neon_cli.create_branch("child")
+                env.create_branch("child")
 
     max_num_of_deltas_above_image = 0
     max_total_num_of_deltas = 0

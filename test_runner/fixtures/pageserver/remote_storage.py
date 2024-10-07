@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, List, Tuple
 
 from fixtures.common_types import TenantId, TimelineId
-from fixtures.neon_fixtures import NeonEnv, Pagectl
+from fixtures.neon_fixtures import NeonEnv
 from fixtures.pageserver.common_types import (
     InvalidFileName,
     parse_layer_file_name,
@@ -35,7 +35,7 @@ def duplicate_one_tenant(env: NeonEnv, template_tenant: TenantId, new_tenant: Te
         for file in tl.iterdir():
             shutil.copy2(file, dst_tl_dir)
             if "__" in file.name:
-                Pagectl(env).raw_cli(
+                env.pagectl.raw_cli(
                     [
                         "layer",
                         "rewrite-summary",

@@ -49,6 +49,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use hex;
 use itertools::Itertools;
 use pageserver_api::config::MaxVectoredReadBytes;
+use pageserver_api::key::DBDIR_KEY;
 use pageserver_api::keyspace::KeySpace;
 use pageserver_api::shard::{ShardIdentity, TenantShardId};
 use rand::{distributions::Alphanumeric, Rng};
@@ -587,14 +588,25 @@ impl ImageLayerInner {
                     .blobs_at
                     .as_slice()
                     .iter()
-                    .map(|(_, blob_meta)| format!("{}@{}", blob_meta.key, blob_meta.lsn))
+                    .filter_map(|(_, blob_meta)| {
+                        if blob_meta.key.is_rel_dir_key() || blob_meta.key == DBDIR_KEY {
+                            // The size of values for these keys is unbounded and can
+                            // grow very large in pathological cases.
+                            None
+                        } else {
+                            Some(format!("{}@{}", blob_meta.key, blob_meta.lsn))
+                        }
+                    })
                     .join(", ");
-                tracing::warn!(
-                    "Oversized vectored read ({} > {}) for keys {}",
-                    buf_size,
-                    max_vectored_read_bytes,
-                    offenders
-                );
+
+                if !offenders.is_empty() {
+                    tracing::warn!(
+                        "Oversized vectored read ({} > {}) for keys {}",
+                        buf_size,
+                        max_vectored_read_bytes,
+                        offenders
+                    );
+                }
             }
 
             let buf = BytesMut::with_capacity(buf_size);

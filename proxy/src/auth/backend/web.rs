@@ -89,7 +89,12 @@ pub(super) async fn authenticate(
 
     // Wait for web console response (see `mgmt`).
     info!(parent: &span, "waiting for console's reply...");
-    let db_info = waiter.await.map_err(WebAuthError::from)?;
+    let db_info = tokio::time::timeout(auth_config.webauth_confirmation_timeout, waiter)
+        .await
+        .map_err(|_elapsed| {
+            auth::AuthError::confirmation_timeout(auth_config.webauth_confirmation_timeout.into())
+        })?
+        .map_err(WebAuthError::from)?;
 
     if auth_config.ip_allowlist_check_enabled {
         if let Some(allowed_ips) = &db_info.allowed_ips {
