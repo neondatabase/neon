@@ -738,7 +738,7 @@ static void
 prefetch_do_request(PrefetchRequest *slot, neon_request_lsns *force_request_lsns)
 {
 	bool		found;
-	uint64		mySlotNo = slot->my_ring_index;
+	uint64		mySlotNo PG_USED_FOR_ASSERTS_ONLY = slot->my_ring_index;
 
 	NeonGetPageRequest request = {
 		.req.tag = T_NeonGetPageRequest,
