@@ -1,3 +1,8 @@
+extern crate hyper0 as hyper;
+
+use hyper::body::HttpBody;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::Duration;
 use tonic::codegen::StdError;
 use tonic::transport::{ClientTlsConfig, Endpoint};
@@ -90,4 +95,57 @@ pub fn parse_proto_ttid(proto_ttid: &ProtoTenantTimelineId) -> Result<TenantTime
         tenant_id,
         timeline_id,
     })
+}
+
+// These several usages don't justify anyhow dependency, though it would work as
+// well.
+type AnyError = Box<dyn std::error::Error + Send + Sync + 'static>;
+
+// Provides impl HttpBody for two different types implementing it. Inspired by
+// https://github.com/hyperium/tonic/blob/master/examples/src/hyper_warp/server.rs
+pub enum EitherBody<A, B> {
+    Left(A),
+    Right(B),
+}
+
+impl<A, B> HttpBody for EitherBody<A, B>
+where
+    A: HttpBody + Send + Unpin,
+    B: HttpBody<Data = A::Data> + Send + Unpin,
+    A::Error: Into<AnyError>,
+    B::Error: Into<AnyError>,
+{
+    type Data = A::Data;
+    type Error = Box<dyn std::error::Error + Send + Sync + 'static>;
+
+    fn is_end_stream(&self) -> bool {
+        match self {
+            EitherBody::Left(b) => b.is_end_stream(),
+            EitherBody::Right(b) => b.is_end_stream(),
+        }
+    }
+
+    fn poll_data(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Self::Data, Self::Error>>> {
+        match self.get_mut() {
+            EitherBody::Left(b) => Pin::new(b).poll_data(cx).map(map_option_err),
+            EitherBody::Right(b) => Pin::new(b).poll_data(cx).map(map_option_err),
+        }
+    }
+
+    fn poll_trailers(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<Option<hyper::HeaderMap>, Self::Error>> {
+        match self.get_mut() {
+            EitherBody::Left(b) => Pin::new(b).poll_trailers(cx).map_err(Into::into),
+            EitherBody::Right(b) => Pin::new(b).poll_trailers(cx).map_err(Into::into),
+        }
+    }
+}
+
+fn map_option_err<T, U: Into<AnyError>>(err: Option<Result<T, U>>) -> Option<Result<T, AnyError>> {
+    err.map(|e| e.map_err(Into::into))
 }
