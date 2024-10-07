@@ -288,8 +288,7 @@ async fn handle_configure_request(
                 return Err((msg, StatusCode::PRECONDITION_FAILED));
             }
             state.pspec = Some(parsed_spec);
-            state.status = ComputeStatus::ConfigurationPending;
-            compute.state_changed.notify_all();
+            state.set_status(ComputeStatus::ConfigurationPending, &compute.state_changed);
             drop(state);
             info!("set new spec and notified waiters");
         }
@@ -362,15 +361,15 @@ async fn handle_terminate_request(compute: &Arc<ComputeNode>) -> Result<(), (Str
         }
         if state.status != ComputeStatus::Empty && state.status != ComputeStatus::Running {
             let msg = format!(
-                "invalid compute status for termination request: {:?}",
-                state.status.clone()
+                "invalid compute status for termination request: {}",
+                state.status
             );
             return Err((msg, StatusCode::PRECONDITION_FAILED));
         }
-        state.status = ComputeStatus::TerminationPending;
-        compute.state_changed.notify_all();
+        state.set_status(ComputeStatus::TerminationPending, &compute.state_changed);
         drop(state);
     }
+
     forward_termination_signal();
     info!("sent signal and notified waiters");
 
@@ -384,7 +383,8 @@ async fn handle_terminate_request(compute: &Arc<ComputeNode>) -> Result<(), (Str
         while state.status != ComputeStatus::Terminated {
             state = c.state_changed.wait(state).unwrap();
             info!(
-                "waiting for compute to become Terminated, current status: {:?}",
+                "waiting for compute to become {}, current status: {:?}",
+                ComputeStatus::Terminated,
                 state.status
             );
         }
