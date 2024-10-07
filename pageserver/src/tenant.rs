@@ -287,11 +287,11 @@ pub struct Tenant {
 
     /// During timeline creation, we first insert the TimelineId to the
     /// creating map, then `timelines`, then remove it from the creating map.
-    /// **Lock order**: if acquring both, acquire`timelines` before `timelines_creating`
+    /// **Lock order**: if acquiring both, acquire`timelines` before `timelines_creating`
     timelines_creating: std::sync::Mutex<HashSet<TimelineId>>,
 
     /// Possibly offloaded and archived timelines
-    /// **Lock order**: if acquring both, acquire`timelines` before `timelines_offloaded`
+    /// **Lock order**: if acquiring both, acquire`timelines` before `timelines_offloaded`
     timelines_offloaded: Mutex<HashMap<TimelineId, Arc<OffloadedTimeline>>>,
 
     // This mutex prevents creation of new timelines during GC.
