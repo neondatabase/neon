@@ -1,5 +1,5 @@
 use crate::{
-    cancellation,
+    cancellation::{self, CancellationHandlerMainInternal},
     compute::PostgresConnection,
     control_plane::messages::MetricsAuxInfo,
     metrics::{Direction, Metrics, NumClientConnectionsGuard, NumConnectionRequestsGuard},
@@ -57,17 +57,17 @@ pub(crate) async fn proxy_pass(
     Ok(())
 }
 
-pub(crate) struct ProxyPassthrough<P, S> {
+pub(crate) struct ProxyPassthrough<S> {
     pub(crate) client: Stream<S>,
     pub(crate) compute: PostgresConnection,
     pub(crate) aux: MetricsAuxInfo,
 
     pub(crate) _req: NumConnectionRequestsGuard<'static>,
     pub(crate) _conn: NumClientConnectionsGuard<'static>,
-    pub(crate) _cancel: cancellation::Session<P>,
+    pub(crate) _cancel: cancellation::Session<CancellationHandlerMainInternal>,
 }
 
-impl<P, S: AsyncRead + AsyncWrite + Unpin> ProxyPassthrough<P, S> {
+impl<S: AsyncRead + AsyncWrite + Unpin> ProxyPassthrough<S> {
     pub(crate) async fn proxy_pass(self) -> Result<(), ErrorSource> {
         let res = proxy_pass(self.client, self.compute.stream, self.aux).await;
         if let Err(err) = self.compute.cancel_closure.try_cancel_query().await {

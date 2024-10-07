@@ -14,7 +14,7 @@ use crate::config::ProxyProtocolV2;
 use crate::control_plane::provider::ControlPlaneBackend;
 use crate::{
     auth,
-    cancellation::{self, CancellationHandlerMain, CancellationHandlerMainInternal},
+    cancellation::{self, CancellationHandlerMain},
     compute,
     config::{ProxyConfig, TlsConfig},
     context::RequestMonitoring,
@@ -256,7 +256,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     mode: ClientMode,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     conn_gauge: NumClientConnectionsGuard<'static>,
-) -> Result<Option<ProxyPassthrough<CancellationHandlerMainInternal, S>>, ClientRequestError> {
+) -> Result<Option<ProxyPassthrough<S>>, ClientRequestError> {
     info!(
         protocol = %ctx.protocol(),
         "handling interactive connection from client"

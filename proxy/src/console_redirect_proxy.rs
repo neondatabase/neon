@@ -4,7 +4,7 @@ use crate::proxy::{
     prepare_client_connection, run_until_cancelled, ClientRequestError, ErrorSource,
 };
 use crate::{
-    cancellation::{CancellationHandlerMain, CancellationHandlerMainInternal},
+    cancellation::CancellationHandlerMain,
     context::RequestMonitoring,
     error::ReportableError,
     metrics::{Metrics, NumClientConnectionsGuard},
@@ -143,7 +143,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     cancellation_handler: Arc<CancellationHandlerMain>,
     stream: S,
     conn_gauge: NumClientConnectionsGuard<'static>,
-) -> Result<Option<ProxyPassthrough<CancellationHandlerMainInternal, S>>, ClientRequestError> {
+) -> Result<Option<ProxyPassthrough<S>>, ClientRequestError> {
     info!(
         protocol = %ctx.protocol(),
         "handling interactive connection from client"
