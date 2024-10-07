@@ -745,7 +745,7 @@ extern TimeLineID walprop_pg_get_timeline_id(void);
  * catch logging.
  */
 #ifdef WALPROPOSER_LIB
-extern void WalProposerLibLog(WalProposer *wp, int elevel, char *fmt,...);
+extern void WalProposerLibLog(WalProposer *wp, int elevel, char *fmt,...) pg_attribute_printf(3, 4);
 #define wp_log(elevel, fmt, ...) WalProposerLibLog(wp, elevel, fmt, ## __VA_ARGS__)
 #else
 #define wp_log(elevel, fmt, ...) elog(elevel, WP_LOG_PREFIX fmt, ## __VA_ARGS__)
