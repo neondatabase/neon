@@ -1,8 +1,10 @@
 use crate::auth::backend::ConsoleRedirectBackend;
 use crate::config::{ProxyConfig, ProxyProtocolV2};
-use crate::proxy::{handshake, prepare_client_connection, ErrorSource};
+use crate::proxy::{
+    prepare_client_connection, run_until_cancelled, ClientRequestError, ErrorSource,
+};
 use crate::{
-    cancellation::{self, CancellationHandlerMain, CancellationHandlerMainInternal},
+    cancellation::{CancellationHandlerMain, CancellationHandlerMainInternal},
     context::RequestMonitoring,
     error::ReportableError,
     metrics::{Metrics, NumClientConnectionsGuard},
@@ -11,7 +13,6 @@ use crate::{
 };
 use futures::TryFutureExt;
 use std::sync::Arc;
-use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, Instrument};
@@ -20,21 +21,6 @@ use crate::proxy::{
     connect_compute::{connect_to_compute, TcpMechanism},
     passthrough::ProxyPassthrough,
 };
-
-pub async fn run_until_cancelled<F: std::future::Future>(
-    f: F,
-    cancellation_token: &CancellationToken,
-) -> Option<F::Output> {
-    match futures::future::select(
-        std::pin::pin!(f),
-        std::pin::pin!(cancellation_token.cancelled()),
-    )
-    .await
-    {
-        futures::future::Either::Left((f, _)) => Some(f),
-        futures::future::Either::Right(((), _)) => None,
-    }
-}
 
 pub async fn task_main(
     config: &'static ProxyConfig,
@@ -148,37 +134,6 @@ pub async fn task_main(
     connections.wait().await;
 
     Ok(())
-}
-
-#[derive(Debug, Error)]
-// almost all errors should be reported to the user, but there's a few cases where we cannot
-// 1. Cancellation: we are not allowed to tell the client any cancellation statuses for security reasons
-// 2. Handshake: handshake reports errors if it can, otherwise if the handshake fails due to protocol violation,
-//    we cannot be sure the client even understands our error message
-// 3. PrepareClient: The client disconnected, so we can't tell them anyway...
-pub(crate) enum ClientRequestError {
-    #[error("{0}")]
-    Cancellation(#[from] cancellation::CancelError),
-    #[error("{0}")]
-    Handshake(#[from] handshake::HandshakeError),
-    #[error("{0}")]
-    HandshakeTimeout(#[from] tokio::time::error::Elapsed),
-    #[error("{0}")]
-    PrepareClient(#[from] std::io::Error),
-    #[error("{0}")]
-    ReportedError(#[from] crate::stream::ReportedError),
-}
-
-impl ReportableError for ClientRequestError {
-    fn get_error_kind(&self) -> crate::error::ErrorKind {
-        match self {
-            ClientRequestError::Cancellation(e) => e.get_error_kind(),
-            ClientRequestError::Handshake(e) => e.get_error_kind(),
-            ClientRequestError::HandshakeTimeout(_) => crate::error::ErrorKind::RateLimit,
-            ClientRequestError::ReportedError(e) => e.get_error_kind(),
-            ClientRequestError::PrepareClient(_) => crate::error::ErrorKind::ClientDisconnect,
-        }
-    }
 }
 
 pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
