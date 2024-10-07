@@ -926,10 +926,10 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 				/* We can reuse a hole that was left behind when the LFC was shrunk previously */
 				FileCacheEntry *hole = dlist_container(FileCacheEntry, list_node, dlist_pop_head_node(&lfc_ctl->holes));
 				uint32		offset = hole->offset;
-				bool		found;
+				bool		hole_found;
 	
-				hash_search_with_hash_value(lfc_hash, &hole->key, hole->hash, HASH_REMOVE, &found);
-				CriticalAssert(found);
+				hash_search_with_hash_value(lfc_hash, &hole->key, hole->hash, HASH_REMOVE, &hole_found);
+				CriticalAssert(hole_found);
 	
 				lfc_ctl->used += 1;
 				entry->offset = offset;	/* reuse the hole */
