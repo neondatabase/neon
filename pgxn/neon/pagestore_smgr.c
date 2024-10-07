@@ -3197,6 +3197,7 @@ hexdump_page(char *page)
 }
 #endif
 
+#if PG_MAJORVERSION_NUM < 17
 /*
  *	neon_write() -- Write the supplied block at the appropriate location.
  *
@@ -3270,6 +3271,7 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, const vo
 		#endif
 #endif
 }
+#endif
 
 
 
