@@ -506,54 +506,7 @@ impl RemoteStorage for LocalFs {
             return Err(DownloadError::Unmodified);
         }
 
-        let source = ReaderStream::new(
-            fs::OpenOptions::new()
-                .read(true)
-                .open(&target_path)
-                .await
-                .with_context(|| {
-                    format!("Failed to open source file {target_path:?} to use in the download")
-                })
-                .map_err(DownloadError::Other)?,
-        );
-
-        let metadata = self
-            .read_storage_metadata(&target_path)
-            .await
-            .map_err(DownloadError::Other)?;
-
-        let cancel_or_timeout = crate::support::cancel_or_timeout(self.timeout, cancel.clone());
-        let source = crate::support::DownloadStream::new(cancel_or_timeout, source);
-
-        Ok(Download {
-            metadata,
-            last_modified: file_metadata
-                .modified()
-                .map_err(|e| DownloadError::Other(anyhow::anyhow!(e).context("Reading mtime")))?,
-            etag,
-            download_stream: Box::pin(source),
-        })
-    }
-
-    async fn download_byte_range(
-        &self,
-        from: &RemotePath,
-        start_inclusive: u64,
-        end_exclusive: Option<u64>,
-        cancel: &CancellationToken,
-    ) -> Result<Download, DownloadError> {
-        if let Some(end_exclusive) = end_exclusive {
-            if end_exclusive <= start_inclusive {
-                return Err(DownloadError::Other(anyhow::anyhow!("Invalid range, start ({start_inclusive}) is not less than end_exclusive ({end_exclusive:?})")));
-            };
-            if start_inclusive == end_exclusive.saturating_sub(1) {
-                return Err(DownloadError::Other(anyhow::anyhow!("Invalid range, start ({start_inclusive}) and end_exclusive ({end_exclusive:?}) difference is zero bytes")));
-            }
-        }
-
-        let target_path = from.with_base(&self.storage_root);
-        let file_metadata = file_metadata(&target_path).await?;
-        let mut source = tokio::fs::OpenOptions::new()
+        let mut file = fs::OpenOptions::new()
             .read(true)
             .open(&target_path)
             .await
@@ -562,31 +515,27 @@ impl RemoteStorage for LocalFs {
             })
             .map_err(DownloadError::Other)?;
 
-        let len = source
-            .metadata()
-            .await
-            .context("query file length")
-            .map_err(DownloadError::Other)?
-            .len();
+        let mut take = file_metadata.len();
+        if let Some((start, end)) = opts.byte_range() {
+            file.seek(io::SeekFrom::Start(start))
+                .await
+                .context("Failed to seek to the range start in a local storage file")
+                .map_err(DownloadError::Other)?;
+            if let Some(end) = end {
+                take = end - start;
+            }
+        }
 
-        source
-            .seek(io::SeekFrom::Start(start_inclusive))
-            .await
-            .context("Failed to seek to the range start in a local storage file")
-            .map_err(DownloadError::Other)?;
+        let source = ReaderStream::new(file.take(take));
 
         let metadata = self
             .read_storage_metadata(&target_path)
             .await
             .map_err(DownloadError::Other)?;
 
-        let source = source.take(end_exclusive.unwrap_or(len) - start_inclusive);
-        let source = ReaderStream::new(source);
-
         let cancel_or_timeout = crate::support::cancel_or_timeout(self.timeout, cancel.clone());
         let source = crate::support::DownloadStream::new(cancel_or_timeout, source);
 
-        let etag = mock_etag(&file_metadata);
         Ok(Download {
             metadata,
             last_modified: file_metadata
@@ -688,7 +637,7 @@ mod fs_tests {
     use super::*;
 
     use camino_tempfile::tempdir;
-    use std::{collections::HashMap, io::Write};
+    use std::{collections::HashMap, io::Write, ops::Bound};
 
     async fn read_and_check_metadata(
         storage: &LocalFs,
@@ -804,10 +753,12 @@ mod fs_tests {
         let (first_part_local, second_part_local) = uploaded_bytes.split_at(3);
 
         let first_part_download = storage
-            .download_byte_range(
+            .download(
                 &upload_target,
-                0,
-                Some(first_part_local.len() as u64),
+                &DownloadOpts {
+                    byte_end: Bound::Excluded(first_part_local.len() as u64),
+                    ..Default::default()
+                },
                 &cancel,
             )
             .await?;
@@ -823,10 +774,15 @@ mod fs_tests {
         );
 
         let second_part_download = storage
-            .download_byte_range(
+            .download(
                 &upload_target,
-                first_part_local.len() as u64,
-                Some((first_part_local.len() + second_part_local.len()) as u64),
+                &DownloadOpts {
+                    byte_start: Bound::Included(first_part_local.len() as u64),
+                    byte_end: Bound::Excluded(
+                        (first_part_local.len() + second_part_local.len()) as u64,
+                    ),
+                    ..Default::default()
+                },
                 &cancel,
             )
             .await?;
@@ -842,7 +798,14 @@ mod fs_tests {
         );
 
         let suffix_bytes = storage
-            .download_byte_range(&upload_target, 13, None, &cancel)
+            .download(
+                &upload_target,
+                &DownloadOpts {
+                    byte_start: Bound::Included(13),
+                    ..Default::default()
+                },
+                &cancel,
+            )
             .await?
             .download_stream;
         let suffix_bytes = aggregate(suffix_bytes).await?;
@@ -850,7 +813,7 @@ mod fs_tests {
         assert_eq!(upload_name, suffix);
 
         let all_bytes = storage
-            .download_byte_range(&upload_target, 0, None, &cancel)
+            .download(&upload_target, &DownloadOpts::default(), &cancel)
             .await?
             .download_stream;
         let all_bytes = aggregate(all_bytes).await?;
@@ -861,48 +824,26 @@ mod fs_tests {
     }
 
     #[tokio::test]
-    async fn download_file_range_negative() -> anyhow::Result<()> {
-        let (storage, cancel) = create_storage()?;
+    #[should_panic(expected = "at or before start")]
+    async fn download_file_range_negative() {
+        let (storage, cancel) = create_storage().unwrap();
         let upload_name = "upload_1";
-        let upload_target = upload_dummy_file(&storage, upload_name, None, &cancel).await?;
+        let upload_target = upload_dummy_file(&storage, upload_name, None, &cancel)
+            .await
+            .unwrap();
 
-        let start = 1_000_000_000;
-        let end = start + 1;
-        match storage
-            .download_byte_range(
+        storage
+            .download(
                 &upload_target,
-                start,
-                Some(end), // exclusive end
+                &DownloadOpts {
+                    byte_start: Bound::Included(10),
+                    byte_end: Bound::Excluded(10),
+                    ..Default::default()
+                },
                 &cancel,
             )
             .await
-        {
-            Ok(_) => panic!("Should not allow downloading wrong ranges"),
-            Err(e) => {
-                let error_string = e.to_string();
-                assert!(error_string.contains("zero bytes"));
-                assert!(error_string.contains(&start.to_string()));
-                assert!(error_string.contains(&end.to_string()));
-            }
-        }
-
-        let start = 10000;
-        let end = 234;
-        assert!(start > end, "Should test an incorrect range");
-        match storage
-            .download_byte_range(&upload_target, start, Some(end), &cancel)
-            .await
-        {
-            Ok(_) => panic!("Should not allow downloading wrong ranges"),
-            Err(e) => {
-                let error_string = e.to_string();
-                assert!(error_string.contains("Invalid range"));
-                assert!(error_string.contains(&start.to_string()));
-                assert!(error_string.contains(&end.to_string()));
-            }
-        }
-
-        Ok(())
+            .unwrap();
     }
 
     #[tokio::test]
@@ -945,10 +886,12 @@ mod fs_tests {
         let (first_part_local, _) = uploaded_bytes.split_at(3);
 
         let partial_download_with_metadata = storage
-            .download_byte_range(
+            .download(
                 &upload_target,
-                0,
-                Some(first_part_local.len() as u64),
+                &DownloadOpts {
+                    byte_end: Bound::Excluded(first_part_local.len() as u64),
+                    ..Default::default()
+                },
                 &cancel,
             )
             .await?;
