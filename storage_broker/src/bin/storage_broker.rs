@@ -683,6 +683,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .http2()
             .timer(TokioTimer::new())
             .keep_alive_interval(Some(args.http2_keepalive_interval))
+            // This matches the tonic server default. It allows us to support production-like workloads.
             .max_concurrent_streams(None);
 
         let storage_broker_server_cloned = storage_broker_server.clone();
