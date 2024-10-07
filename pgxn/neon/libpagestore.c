@@ -440,8 +440,8 @@ pageserver_connect(shardno_t shard_no, int elevel)
 			return false;
 		}
 		shard->state = PS_Connecting_Startup;
-		/* fallthrough */
 	}
+	/* FALLTHROUGH */
 	case PS_Connecting_Startup:
 	{
 		char	   *pagestream_query;
@@ -582,8 +582,8 @@ pageserver_connect(shardno_t shard_no, int elevel)
 		}
 
 		shard->state = PS_Connecting_PageStream;
-		/* fallthrough */
 	}
+	/* FALLTHROUGH */
 	case PS_Connecting_PageStream:
 	{
 		neon_shard_log(shard_no, DEBUG5, "Connection state: Connecting_PageStream");
@@ -628,8 +628,8 @@ pageserver_connect(shardno_t shard_no, int elevel)
 		}
 
 		shard->state = PS_Connected;
-		/* fallthrough */
 	}
+	/* FALLTHROUGH */
 	case PS_Connected:
 		/*
 		 * We successfully connected. Future connections to this PageServer
