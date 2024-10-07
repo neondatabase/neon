@@ -2108,12 +2108,12 @@ impl Tenant {
                 .iter()
                 .filter_map(|(timeline_id, timeline)| {
                     let (is_active, can_offload) = (timeline.is_active(), timeline.can_offload());
-                    let has_no_unarchived_children = {
+                    let has_no_unoffloaded_children = {
                         !timelines
                             .iter()
                             .any(|(_id, tl)| tl.get_ancestor_timeline_id() == Some(*timeline_id))
                     };
-                    let can_offload = can_offload && has_no_unarchived_children;
+                    let can_offload = can_offload && has_no_unoffloaded_children;
                     if (is_active, can_offload) == (false, false) {
                         None
                     } else {
