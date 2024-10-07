@@ -1014,10 +1014,10 @@ impl Service {
 
                     match res {
                         Ok(transition) => {
-                            // Keep hold of the lock on until the availability transitions
-                            // have been handlded in
+                            // Keep hold of the lock until the availability transitions
+                            // have been handled in
                             // [`Service::handle_node_availability_transitions`] in order avoid
-                            // raicng with [`Service::external_node_configure`].
+                            // racing with [`Service::external_node_configure`].
                             to_handle.push((node_id, node_lock, transition));
                         }
                         Err(ApiError::NotFound(_)) => {
