@@ -451,7 +451,7 @@ class NeonEnvBuilder:
         self.default_branch_name = default_branch_name
         self.env: Optional[NeonEnv] = None
         self.keep_remote_storage_contents: bool = True
-        self.neon_binpath = neon_binpath
+        self.neon_binpath = neon_binpath.absolute()
         self.neon_local_binpath = neon_binpath
         self.pg_distrib_dir = pg_distrib_dir
         self.pg_version = pg_version
@@ -489,7 +489,7 @@ class NeonEnvBuilder:
             "test_"
         ), "Unexpectedly instantiated from outside a test function"
         self.test_name = test_name
-        self.compatibility_neon_binpath = compatibility_neon_binpath
+        self.compatibility_neon_binpath = compatibility_neon_binpath.absolute()
         self.compatibility_pg_distrib_dir = compatibility_pg_distrib_dir
         self.version_combination = combination
         self.mixdir = self.test_output_dir / "mixdir_neon"
@@ -711,7 +711,9 @@ class NeonEnvBuilder:
                 else self.compatibility_neon_binpath
             )
             for filename in paths:
-                os.link(directory / filename, self.mixdir / filename)
+                destination = self.mixdir / filename
+                destination.unlink(missing_ok=True)
+                destination.symlink_to(directory / filename)
         if not self.version_combination.compute:
             self.pg_distrib_dir = self.compatibility_pg_distrib_dir
         self.neon_binpath = self.mixdir
