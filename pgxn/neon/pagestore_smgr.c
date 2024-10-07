@@ -215,7 +215,7 @@ typedef struct PrfHashEntry
 	sizeof(BufferTag) \
 )
 
-#define SH_EQUAL(tb, a, b)	(BUFFERTAGS_EQUAL((a)->buftag, (b)->buftag))
+#define SH_EQUAL(tb, a, b)	(BufferTagsEqual(&(a)->buftag, &(b)->buftag))
 #define SH_SCOPE			static inline
 #define SH_DEFINE
 #define SH_DECLARE
@@ -853,7 +853,7 @@ Retry:
 			Assert(slot->status != PRFS_UNUSED);
 			Assert(MyPState->ring_last <= ring_index &&
 				   ring_index < MyPState->ring_unused);
-			Assert(BUFFERTAGS_EQUAL(slot->buftag, hashkey.buftag));
+			Assert(BufferTagsEqual(&slot->buftag, &hashkey.buftag));
 
 			/*
 			 * If the caller specified a request LSN to use, only accept
