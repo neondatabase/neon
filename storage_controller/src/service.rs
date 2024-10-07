@@ -1075,49 +1075,7 @@ impl Service {
 
         match result.result {
             Ok(()) => {
-                for delta in deltas {
-                    match delta {
-                        ObservedStateDelta::Upsert(ups) => {
-                            let (node_id, loc) = *ups;
-
-                            let crnt_gen = tenant
-                                .observed
-                                .locations
-                                .get(&node_id)
-                                .and_then(|loc| loc.conf.as_ref())
-                                .and_then(|conf| conf.generation);
-                            let new_gen = loc.conf.as_ref().and_then(|conf| conf.generation);
-                            match (crnt_gen, new_gen) {
-                                (Some(crnt), Some(new)) if crnt_gen > new_gen => {
-                                    tracing::warn!("Reconcile result with stale generation ({} > {}). Skipping update {}: {:?} and setting observed location to None", crnt, new, node_id, loc);
-                                    tenant
-                                        .observed
-                                        .locations
-                                        .insert(node_id, ObservedStateLocation { conf: None });
-                                    continue;
-                                }
-                                _ => {}
-                            }
-
-                            if let Some(conf) = &loc.conf {
-                                tracing::info!(
-                                    "Updating observed location {}: {:?}",
-                                    node_id,
-                                    conf
-                                );
-                            } else {
-                                tracing::info!("Setting observed location {} to None", node_id,)
-                            }
-
-                            tenant.observed.locations.insert(node_id, loc);
-                        }
-                        ObservedStateDelta::Delete(node_id) => {
-                            tracing::info!("Deleting observed location {}", node_id);
-                            tenant.observed.locations.remove(&node_id);
-                        }
-                    }
-                }
-
+                tenant.apply_observed_deltas(deltas);
                 tenant.waiter.advance(result.sequence);
             }
             Err(e) => {
@@ -1139,47 +1097,10 @@ impl Service {
                 // so that waiters will see the correct error after waiting.
                 tenant.set_last_error(result.sequence, e);
 
-                for delta in deltas {
-                    match delta {
-                        ObservedStateDelta::Upsert(ups) => {
-                            let (node_id, loc) = *ups;
-
-                            let crnt_gen = tenant
-                                .observed
-                                .locations
-                                .get(&node_id)
-                                .and_then(|loc| loc.conf.as_ref())
-                                .and_then(|conf| conf.generation);
-                            let new_gen = loc.conf.as_ref().and_then(|conf| conf.generation);
-                            match (crnt_gen, new_gen) {
-                                (Some(crnt), Some(new)) if crnt_gen > new_gen => {
-                                    tracing::warn!("Reconcile result with stale generation ({} > {}). Skipping update {}: {:?} and setting observed location to None", crnt, new, node_id, loc);
-                                    tenant
-                                        .observed
-                                        .locations
-                                        .insert(node_id, ObservedStateLocation { conf: None });
-                                    continue;
-                                }
-                                _ => {}
-                            }
-
-                            if let Some(conf) = &loc.conf {
-                                tracing::info!(
-                                    "Updating observed location {}: {:?}",
-                                    node_id,
-                                    conf
-                                );
-                            } else {
-                                tracing::info!("Setting observed location {} to None", node_id,)
-                            }
-
-                            tenant.observed.locations.insert(node_id, loc);
-                        }
-                        ObservedStateDelta::Delete(_) => {
-                            // Skip deletions on reconcile failures
-                        }
-                    }
-                }
+                // Skip deletions on reconcile failures
+                let upsert_deltas =
+                    deltas.filter(|delta| matches!(delta, ObservedStateDelta::Upsert(_)));
+                tenant.apply_observed_deltas(upsert_deltas);
             }
         }
 
