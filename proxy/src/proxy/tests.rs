@@ -11,9 +11,11 @@ use crate::auth::backend::{
     ComputeCredentialKeys, ComputeCredentials, ComputeUserInfo, MaybeOwned, TestBackend,
 };
 use crate::config::{CertResolver, RetryConfig};
-use crate::console::messages::{ConsoleError, Details, MetricsAuxInfo, Status};
-use crate::console::provider::{CachedAllowedIps, CachedRoleSecret, ConsoleBackend, NodeInfoCache};
-use crate::console::{self, CachedNodeInfo, NodeInfo};
+use crate::control_plane::messages::{ControlPlaneError, Details, MetricsAuxInfo, Status};
+use crate::control_plane::provider::{
+    CachedAllowedIps, CachedRoleSecret, ControlPlaneBackend, NodeInfoCache,
+};
+use crate::control_plane::{self, CachedNodeInfo, NodeInfo};
 use crate::error::ErrorKind;
 use crate::{sasl, scram, BranchId, EndpointId, ProjectId};
 use anyhow::{bail, Context};
@@ -459,7 +461,7 @@ impl ConnectMechanism for TestConnectMechanism {
     async fn connect_once(
         &self,
         _ctx: &RequestMonitoring,
-        _node_info: &console::CachedNodeInfo,
+        _node_info: &control_plane::CachedNodeInfo,
         _timeout: std::time::Duration,
     ) -> Result<Self::Connection, Self::ConnectError> {
         let mut counter = self.counter.lock().unwrap();
@@ -483,23 +485,23 @@ impl ConnectMechanism for TestConnectMechanism {
 }
 
 impl TestBackend for TestConnectMechanism {
-    fn wake_compute(&self) -> Result<CachedNodeInfo, console::errors::WakeComputeError> {
+    fn wake_compute(&self) -> Result<CachedNodeInfo, control_plane::errors::WakeComputeError> {
         let mut counter = self.counter.lock().unwrap();
         let action = self.sequence[*counter];
         *counter += 1;
         match action {
             ConnectAction::Wake => Ok(helper_create_cached_node_info(self.cache)),
             ConnectAction::WakeFail => {
-                let err = console::errors::ApiError::Console(ConsoleError {
+                let err = control_plane::errors::ApiError::ControlPlane(ControlPlaneError {
                     http_status_code: StatusCode::BAD_REQUEST,
                     error: "TEST".into(),
                     status: None,
                 });
                 assert!(!err.could_retry());
-                Err(console::errors::WakeComputeError::ApiError(err))
+                Err(control_plane::errors::WakeComputeError::ApiError(err))
             }
             ConnectAction::WakeRetry => {
-                let err = console::errors::ApiError::Console(ConsoleError {
+                let err = control_plane::errors::ApiError::ControlPlane(ControlPlaneError {
                     http_status_code: StatusCode::BAD_REQUEST,
                     error: "TEST".into(),
                     status: Some(Status {
@@ -507,13 +509,15 @@ impl TestBackend for TestConnectMechanism {
                         message: "error".into(),
                         details: Details {
                             error_info: None,
-                            retry_info: Some(console::messages::RetryInfo { retry_delay_ms: 1 }),
+                            retry_info: Some(control_plane::messages::RetryInfo {
+                                retry_delay_ms: 1,
+                            }),
                             user_facing_message: None,
                         },
                     }),
                 });
                 assert!(err.could_retry());
-                Err(console::errors::WakeComputeError::ApiError(err))
+                Err(control_plane::errors::WakeComputeError::ApiError(err))
             }
             x => panic!("expecting action {x:?}, wake_compute is called instead"),
         }
@@ -521,7 +525,7 @@ impl TestBackend for TestConnectMechanism {
 
     fn get_allowed_ips_and_secret(
         &self,
-    ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), console::errors::GetAuthInfoError>
+    ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), control_plane::errors::GetAuthInfoError>
     {
         unimplemented!("not used in tests")
     }
@@ -538,7 +542,7 @@ fn helper_create_cached_node_info(cache: &'static NodeInfoCache) -> CachedNodeIn
             endpoint_id: (&EndpointId::from("endpoint")).into(),
             project_id: (&ProjectId::from("project")).into(),
             branch_id: (&BranchId::from("branch")).into(),
-            cold_start_info: crate::console::messages::ColdStartInfo::Warm,
+            cold_start_info: crate::control_plane::messages::ColdStartInfo::Warm,
         },
         allow_self_signed_compute: false,
     };
@@ -549,8 +553,8 @@ fn helper_create_cached_node_info(cache: &'static NodeInfoCache) -> CachedNodeIn
 fn helper_create_connect_info(
     mechanism: &TestConnectMechanism,
 ) -> auth::Backend<'static, ComputeCredentials, &()> {
-    let user_info = auth::Backend::Console(
-        MaybeOwned::Owned(ConsoleBackend::Test(Box::new(mechanism.clone()))),
+    let user_info = auth::Backend::ControlPlane(
+        MaybeOwned::Owned(ControlPlaneBackend::Test(Box::new(mechanism.clone()))),
         ComputeCredentials {
             info: ComputeUserInfo {
                 endpoint: "endpoint".into(),

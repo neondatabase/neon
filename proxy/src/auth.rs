@@ -18,7 +18,7 @@ pub(crate) use flow::*;
 use tokio::time::error::Elapsed;
 
 use crate::{
-    console,
+    control_plane,
     error::{ReportableError, UserFacingError},
 };
 use std::{io, net::IpAddr};
@@ -34,7 +34,7 @@ pub(crate) enum AuthErrorImpl {
     Web(#[from] backend::WebAuthError),
 
     #[error(transparent)]
-    GetAuthInfo(#[from] console::errors::GetAuthInfoError),
+    GetAuthInfo(#[from] control_plane::errors::GetAuthInfoError),
 
     /// SASL protocol errors (includes [SCRAM](crate::scram)).
     #[error(transparent)]

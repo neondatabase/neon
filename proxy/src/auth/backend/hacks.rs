@@ -2,8 +2,8 @@ use super::{ComputeCredentials, ComputeUserInfo, ComputeUserInfoNoEndpoint};
 use crate::{
     auth::{self, AuthFlow},
     config::AuthenticationConfig,
-    console::AuthSecret,
     context::RequestMonitoring,
+    control_plane::AuthSecret,
     intern::EndpointIdInt,
     sasl,
     stream::{self, Stream},

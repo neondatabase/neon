@@ -2,7 +2,7 @@
 pub mod mock;
 pub mod neon;
 
-use super::messages::{ConsoleError, MetricsAuxInfo};
+use super::messages::{ControlPlaneError, MetricsAuxInfo};
 use crate::{
     auth::{
         backend::{
@@ -28,7 +28,7 @@ use tracing::info;
 
 pub(crate) mod errors {
     use crate::{
-        console::messages::{self, ConsoleError, Reason},
+        control_plane::messages::{self, ControlPlaneError, Reason},
         error::{io_error, ErrorKind, ReportableError, UserFacingError},
         proxy::retry::CouldRetry,
     };
@@ -44,7 +44,7 @@ pub(crate) mod errors {
     pub(crate) enum ApiError {
         /// Error returned by the console itself.
         #[error("{REQUEST_FAILED} with {0}")]
-        Console(ConsoleError),
+        ControlPlane(ControlPlaneError),
 
         /// Various IO errors like broken pipe or malformed payload.
         #[error("{REQUEST_FAILED}: {0}")]
@@ -55,7 +55,7 @@ pub(crate) mod errors {
         /// Returns HTTP status code if it's the reason for failure.
         pub(crate) fn get_reason(&self) -> messages::Reason {
             match self {
-                ApiError::Console(e) => e.get_reason(),
+                ApiError::ControlPlane(e) => e.get_reason(),
                 ApiError::Transport(_) => messages::Reason::Unknown,
             }
         }
@@ -65,7 +65,7 @@ pub(crate) mod errors {
         fn to_string_client(&self) -> String {
             match self {
                 // To minimize risks, only select errors are forwarded to users.
-                ApiError::Console(c) => c.get_user_facing_message(),
+                ApiError::ControlPlane(c) => c.get_user_facing_message(),
                 ApiError::Transport(_) => REQUEST_FAILED.to_owned(),
             }
         }
@@ -74,7 +74,7 @@ pub(crate) mod errors {
     impl ReportableError for ApiError {
         fn get_error_kind(&self) -> crate::error::ErrorKind {
             match self {
-                ApiError::Console(e) => match e.get_reason() {
+                ApiError::ControlPlane(e) => match e.get_reason() {
                     Reason::RoleProtected => ErrorKind::User,
                     Reason::ResourceNotFound => ErrorKind::User,
                     Reason::ProjectNotFound => ErrorKind::User,
@@ -91,12 +91,12 @@ pub(crate) mod errors {
                     Reason::LockAlreadyTaken => ErrorKind::ControlPlane,
                     Reason::RunningOperations => ErrorKind::ControlPlane,
                     Reason::Unknown => match &e {
-                        ConsoleError {
+                        ControlPlaneError {
                             http_status_code:
                                 http::StatusCode::NOT_FOUND | http::StatusCode::NOT_ACCEPTABLE,
                             ..
                         } => crate::error::ErrorKind::User,
-                        ConsoleError {
+                        ControlPlaneError {
                             http_status_code: http::StatusCode::UNPROCESSABLE_ENTITY,
                             error,
                             ..
@@ -105,7 +105,7 @@ pub(crate) mod errors {
                         {
                             crate::error::ErrorKind::User
                         }
-                        ConsoleError {
+                        ControlPlaneError {
                             http_status_code: http::StatusCode::LOCKED,
                             error,
                             ..
@@ -114,11 +114,11 @@ pub(crate) mod errors {
                         {
                             crate::error::ErrorKind::User
                         }
-                        ConsoleError {
+                        ControlPlaneError {
                             http_status_code: http::StatusCode::TOO_MANY_REQUESTS,
                             ..
                         } => crate::error::ErrorKind::ServiceRateLimit,
-                        ConsoleError { .. } => crate::error::ErrorKind::ControlPlane,
+                        ControlPlaneError { .. } => crate::error::ErrorKind::ControlPlane,
                     },
                 },
                 ApiError::Transport(_) => crate::error::ErrorKind::ControlPlane,
@@ -131,7 +131,7 @@ pub(crate) mod errors {
             match self {
                 // retry some transport errors
                 Self::Transport(io) => io.could_retry(),
-                Self::Console(e) => e.could_retry(),
+                Self::ControlPlane(e) => e.could_retry(),
             }
         }
     }
@@ -314,7 +314,8 @@ impl NodeInfo {
     }
 }
 
-pub(crate) type NodeInfoCache = TimedLru<EndpointCacheKey, Result<NodeInfo, Box<ConsoleError>>>;
+pub(crate) type NodeInfoCache =
+    TimedLru<EndpointCacheKey, Result<NodeInfo, Box<ControlPlaneError>>>;
 pub(crate) type CachedNodeInfo = Cached<&'static NodeInfoCache, NodeInfo>;
 pub(crate) type CachedRoleSecret = Cached<&'static ProjectInfoCacheImpl, Option<AuthSecret>>;
 pub(crate) type CachedAllowedIps = Cached<&'static ProjectInfoCacheImpl, Arc<Vec<IpPattern>>>;
@@ -353,28 +354,28 @@ pub(crate) trait Api {
 
 #[non_exhaustive]
 #[derive(Clone)]
-pub enum ConsoleBackend {
-    /// Current Cloud API (V2).
-    Console(neon::Api),
-    /// Local mock of Cloud API (V2).
+pub enum ControlPlaneBackend {
+    /// Current Management API (V2).
+    Management(neon::Api),
+    /// Local mock control plane.
     #[cfg(any(test, feature = "testing"))]
-    Postgres(mock::Api),
+    PostgresMock(mock::Api),
     /// Internal testing
     #[cfg(test)]
     #[allow(private_interfaces)]
     Test(Box<dyn crate::auth::backend::TestBackend>),
 }
 
-impl Api for ConsoleBackend {
+impl Api for ControlPlaneBackend {
     async fn get_role_secret(
         &self,
         ctx: &RequestMonitoring,
         user_info: &ComputeUserInfo,
     ) -> Result<CachedRoleSecret, errors::GetAuthInfoError> {
         match self {
-            Self::Console(api) => api.get_role_secret(ctx, user_info).await,
+            Self::Management(api) => api.get_role_secret(ctx, user_info).await,
             #[cfg(any(test, feature = "testing"))]
-            Self::Postgres(api) => api.get_role_secret(ctx, user_info).await,
+            Self::PostgresMock(api) => api.get_role_secret(ctx, user_info).await,
             #[cfg(test)]
             Self::Test(_) => {
                 unreachable!("this function should never be called in the test backend")
@@ -388,9 +389,9 @@ impl Api for ConsoleBackend {
         user_info: &ComputeUserInfo,
     ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), errors::GetAuthInfoError> {
         match self {
-            Self::Console(api) => api.get_allowed_ips_and_secret(ctx, user_info).await,
+            Self::Management(api) => api.get_allowed_ips_and_secret(ctx, user_info).await,
             #[cfg(any(test, feature = "testing"))]
-            Self::Postgres(api) => api.get_allowed_ips_and_secret(ctx, user_info).await,
+            Self::PostgresMock(api) => api.get_allowed_ips_and_secret(ctx, user_info).await,
             #[cfg(test)]
             Self::Test(api) => api.get_allowed_ips_and_secret(),
         }
@@ -402,9 +403,9 @@ impl Api for ConsoleBackend {
         endpoint: EndpointId,
     ) -> anyhow::Result<Vec<AuthRule>> {
         match self {
-            Self::Console(api) => api.get_endpoint_jwks(ctx, endpoint).await,
+            Self::Management(api) => api.get_endpoint_jwks(ctx, endpoint).await,
             #[cfg(any(test, feature = "testing"))]
-            Self::Postgres(api) => api.get_endpoint_jwks(ctx, endpoint).await,
+            Self::PostgresMock(api) => api.get_endpoint_jwks(ctx, endpoint).await,
             #[cfg(test)]
             Self::Test(_api) => Ok(vec![]),
         }
@@ -416,16 +417,16 @@ impl Api for ConsoleBackend {
         user_info: &ComputeUserInfo,
     ) -> Result<CachedNodeInfo, errors::WakeComputeError> {
         match self {
-            Self::Console(api) => api.wake_compute(ctx, user_info).await,
+            Self::Management(api) => api.wake_compute(ctx, user_info).await,
             #[cfg(any(test, feature = "testing"))]
-            Self::Postgres(api) => api.wake_compute(ctx, user_info).await,
+            Self::PostgresMock(api) => api.wake_compute(ctx, user_info).await,
             #[cfg(test)]
             Self::Test(api) => api.wake_compute(),
         }
     }
 }
 
-/// Various caches for [`console`](super).
+/// Various caches for [`control_plane`](super).
 pub struct ApiCaches {
     /// Cache for the `wake_compute` API method.
     pub(crate) node_info: NodeInfoCache,
@@ -454,7 +455,7 @@ impl ApiCaches {
     }
 }
 
-/// Various caches for [`console`](super).
+/// Various caches for [`control_plane`](super).
 pub struct ApiLocks<K> {
     name: &'static str,
     node_locks: DashMap<K, Arc<DynamicLimiter>>,
@@ -577,7 +578,7 @@ impl WakeComputePermit {
     }
 }
 
-impl FetchAuthRules for ConsoleBackend {
+impl FetchAuthRules for ControlPlaneBackend {
     async fn fetch_auth_rules(
         &self,
         ctx: &RequestMonitoring,

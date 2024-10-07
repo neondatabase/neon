@@ -5,11 +5,11 @@ use arc_swap::ArcSwapOption;
 
 use crate::{
     compute::ConnCfg,
-    console::{
+    context::RequestMonitoring,
+    control_plane::{
         messages::{ColdStartInfo, EndpointJwksResponse, MetricsAuxInfo},
         NodeInfo,
     },
-    context::RequestMonitoring,
     intern::{BranchIdTag, EndpointIdTag, InternId, ProjectIdTag},
     EndpointId,
 };
