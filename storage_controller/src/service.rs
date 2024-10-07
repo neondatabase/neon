@@ -1014,7 +1014,11 @@ impl Service {
 
                     match res {
                         Ok(transition) => {
-                            to_handle.push((node_id, transition));
+                            // Keep hold of the lock on until the availability transitions
+                            // have been handlded in
+                            // [`Service::handle_node_availability_transitions`] in order avoid
+                            // raicng with [`Service::external_node_configure`].
+                            to_handle.push((node_id, node_lock, transition));
                         }
                         Err(ApiError::NotFound(_)) => {
                             // This should be rare, but legitimate since the heartbeats are done
@@ -5510,13 +5514,14 @@ impl Service {
 
     async fn handle_node_availability_transitions(
         &self,
-        transitions: Vec<(NodeId, AvailabilityTransition)>,
+        transitions: Vec<(
+            NodeId,
+            TracingExclusiveGuard<NodeOperations>,
+            AvailabilityTransition,
+        )>,
     ) -> Result<(), Vec<(NodeId, ApiError)>> {
         let mut errors = Vec::default();
-        for (node_id, transition) in transitions {
-            let node_lock =
-                trace_exclusive_lock(&self.node_op_locks, node_id, NodeOperations::Configure).await;
-
+        for (node_id, node_lock, transition) in transitions {
             let res = self
                 .handle_node_availability_transition(node_id, transition, &node_lock)
                 .await;
