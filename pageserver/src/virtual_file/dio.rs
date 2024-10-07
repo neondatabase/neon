@@ -6,7 +6,7 @@ use std::{
     cmp,
     mem::{ManuallyDrop, MaybeUninit},
     ops::{Deref, DerefMut},
-    ptr::NonNull,
+    ptr::{addr_of_mut, NonNull},
 };
 
 use bytes::buf::UninitSlice;
@@ -40,16 +40,6 @@ impl IoBufferMut {
     /// * `capacity`, when rounded up to the nearest multiple of `align`,
     ///    must not overflow isize (i.e., the rounded value must be
     ///    less than or equal to `isize::MAX`).
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// let mut buf = IoBufferMut::with_capacity_aligned(4096, 4096);
-    ///
-    /// assert_eq!(buf.len(), 0);
-    /// assert_eq!(buf.capacity(), 4096);
-    /// assert_eq!(buf.align(), 4096);
-    /// ```
     pub fn with_capacity_aligned(capacity: usize, align: usize) -> Self {
         let layout = Layout::from_size_align(capacity, align).expect("Invalid layout");
 
@@ -68,6 +58,15 @@ impl IoBufferMut {
             len: 0,
             align,
         }
+    }
+
+    /// Constructs a new `IoBufferMut` with at least the specified capacity and alignment, filled with zeros.
+    pub fn with_capacity_aligned_zeroed(capacity: usize, align: usize) -> Self {
+        use bytes::BufMut;
+        let mut buf = Self::with_capacity_aligned(capacity, align);
+        buf.put_bytes(0, capacity);
+        buf.len = capacity;
+        buf
     }
 
     /// Returns the total number of bytes the buffer can hold.
@@ -175,6 +174,13 @@ impl IoBufferMut {
         self.ptr = ptr;
         self.capacity = cap;
     }
+
+    /// Consumes and leaks the `IoBufferMut`, returning a mutable reference to the contents, &'a mut [u8].
+    pub fn leak<'a>(self) -> &'a mut [u8] {
+        let mut buf = ManuallyDrop::new(self);
+        // SAFETY: leaking the buffer as intended.
+        unsafe { slice::from_raw_parts_mut(buf.as_mut_ptr(), buf.len) }
+    }
 }
 
 fn capacity_overflow() -> ! {
@@ -220,7 +226,7 @@ impl DerefMut for IoBufferMut {
     }
 }
 
-/// SAFETY: See [`IoBufferMut::advance_mut`]
+/// SAFETY: When advancing the internal cursor, the caller needs to make sure the bytes advcanced past have been initialized.
 unsafe impl bytes::BufMut for IoBufferMut {
     #[inline]
     fn remaining_mut(&self) -> usize {
@@ -312,6 +318,17 @@ mod tests {
         assert_eq!(v.capacity(), ALIGN / 2);
         assert_eq!(v.align(), ALIGN);
         assert_eq!(v.as_ptr().align_offset(ALIGN), 0);
+    }
+
+    #[test]
+    fn test_with_capacity_aligned_zeroed() {
+        const ALIGN: usize = 4 * 1024;
+        let v = IoBufferMut::with_capacity_aligned_zeroed(ALIGN, ALIGN);
+        assert_eq!(v.len(), ALIGN);
+        assert_eq!(v.capacity(), ALIGN);
+        assert_eq!(v.align(), ALIGN);
+        assert_eq!(v.as_ptr().align_offset(ALIGN), 0);
+        assert_eq!(&v[..], &[0; ALIGN])
     }
 
     #[test]
