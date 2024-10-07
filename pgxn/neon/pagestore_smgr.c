@@ -1463,7 +1463,6 @@ log_newpages_copy(NRelFileInfo * rinfo, ForkNumber forkNum, BlockNumber blkno,
 	BlockNumber	blknos[XLR_MAX_BLOCK_ID];
 	Page		pageptrs[XLR_MAX_BLOCK_ID];
 	int			nregistered = 0;
-	XLogRecPtr	result = 0;
 
 	for (int i = 0; i < nblocks; i++)
 	{
@@ -2599,7 +2598,6 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 {
 	uint64		ring_index PG_USED_FOR_ASSERTS_ONLY;
 	BufferTag	tag;
-	bool		io_initiated = false;
 
 	switch (reln->smgr_relpersistence)
 	{
@@ -2623,7 +2621,6 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 	while (nblocks > 0)
 	{
 		int		iterblocks = Min(nblocks, PG_IOV_MAX);
-		int		seqlen = 0;
 		bits8		lfc_present[PG_IOV_MAX / 8];
 		memset(lfc_present, 0, sizeof(lfc_present));
 
@@ -2634,8 +2631,6 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 			blocknum += iterblocks;
 			continue;
 		}
-
-		io_initiated = true;
 
 		tag.blockNum = blocknum;
 		

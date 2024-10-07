@@ -666,7 +666,6 @@ lfc_readv_select(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 	BufferTag	tag;
 	FileCacheEntry *entry;
 	ssize_t		rc;
-	bool		result = true;
 	uint32		hash;
 	uint64		generation;
 	uint32		entry_offset;
