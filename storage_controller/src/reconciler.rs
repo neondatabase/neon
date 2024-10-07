@@ -669,10 +669,9 @@ impl Reconciler {
                 Some(conf) => {
                     // Pageserver returned a state: update it in observed.  This may still be an indeterminate (None) state,
                     // if internally the pageserver's TenantSlot was being mutated (e.g. some long running API call is still running)
-                    self.observed.locations.insert(
-                        attached_node.get_id(),
-                        ObservedStateLocation { conf: conf.clone() },
-                    );
+                    self.observed
+                        .locations
+                        .insert(attached_node.get_id(), ObservedStateLocation { conf });
                 }
                 None => {
                     // Pageserver returned 404: we have confirmation that there is no state for this shard on that pageserver.
@@ -863,7 +862,7 @@ impl Reconciler {
             let previous_location = self.original_observed.locations.get(node_id);
             let do_upsert = match previous_location {
                 // Location config changed for node
-                Some(prev) if location.conf == prev.conf => true,
+                Some(prev) if location.conf != prev.conf => true,
                 // New location config for node
                 None => true,
                 // Location config has not changed for node
