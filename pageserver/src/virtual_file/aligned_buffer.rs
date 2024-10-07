@@ -23,6 +23,34 @@ pub struct AlignedBufferMut<const ALIGN: usize> {
     len: usize,
 }
 
+pub struct AlignedSlice<'a, const ALIGN: usize, const N: usize>(&'a mut [u8; N]);
+
+impl<'a, const ALIGN: usize, const N: usize> AlignedSlice<'a, ALIGN, N> {
+    pub unsafe fn new_unchecked(buf: &'a mut [u8; N]) -> Self {
+        AlignedSlice(buf)
+    }
+}
+
+impl<'a, const ALIGN: usize, const N: usize> Deref for AlignedSlice<'a, ALIGN, N> {
+    type Target = [u8; N];
+
+    fn deref(&self) -> &Self::Target {
+        self.0
+    }
+}
+
+impl<'a, const ALIGN: usize, const N: usize> DerefMut for AlignedSlice<'a, ALIGN, N> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.0
+    }
+}
+
+impl<'a, const ALIGN: usize, const N: usize> AsRef<[u8; N]> for AlignedSlice<'a, ALIGN, N> {
+    fn as_ref(&self) -> &[u8; N] {
+        &self.0
+    }
+}
+
 impl<const ALIGN: usize> AlignedBufferMut<ALIGN> {
     /// Constructs a new, empty `IoBufferMut` with at least the specified capacity and alignment.
     ///

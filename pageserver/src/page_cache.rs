@@ -82,6 +82,7 @@ use once_cell::sync::OnceCell;
 use crate::{
     context::RequestContext,
     metrics::{page_cache_eviction_metrics, PageCacheSizeMetrics},
+    virtual_file::{IoBufferMut, IoPageSlice},
 };
 
 static PAGE_CACHE: OnceCell<PageCache> = OnceCell::new();
@@ -144,7 +145,7 @@ struct SlotInner {
     key: Option<CacheKey>,
     // for `coalesce_readers_permit`
     permit: std::sync::Mutex<Weak<PinnedSlotsPermit>>,
-    buf: &'static mut [u8; PAGE_SZ],
+    buf: IoPageSlice<'static>,
 }
 
 impl Slot {
@@ -234,13 +235,13 @@ impl std::ops::Deref for PageReadGuard<'_> {
     type Target = [u8; PAGE_SZ];
 
     fn deref(&self) -> &Self::Target {
-        self.slot_guard.buf
+        self.slot_guard.buf.deref()
     }
 }
 
 impl AsRef<[u8; PAGE_SZ]> for PageReadGuard<'_> {
     fn as_ref(&self) -> &[u8; PAGE_SZ] {
-        self.slot_guard.buf
+        self.slot_guard.buf.as_ref()
     }
 }
 
@@ -266,7 +267,7 @@ enum PageWriteGuardState<'i> {
 impl std::ops::DerefMut for PageWriteGuard<'_> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         match &mut self.state {
-            PageWriteGuardState::Invalid { inner, _permit } => inner.buf,
+            PageWriteGuardState::Invalid { inner, _permit } => inner.buf.deref_mut(),
             PageWriteGuardState::Downgraded => unreachable!(),
         }
     }
@@ -277,7 +278,7 @@ impl std::ops::Deref for PageWriteGuard<'_> {
 
     fn deref(&self) -> &Self::Target {
         match &self.state {
-            PageWriteGuardState::Invalid { inner, _permit } => inner.buf,
+            PageWriteGuardState::Invalid { inner, _permit } => inner.buf.deref(),
             PageWriteGuardState::Downgraded => unreachable!(),
         }
     }
@@ -643,16 +644,17 @@ impl PageCache {
         // We could use Vec::leak here, but that potentially also leaks
         // uninitialized reserved capacity. With into_boxed_slice and Box::leak
         // this is avoided.
-        let page_buffer = Box::leak(vec![0u8; num_pages * PAGE_SZ].into_boxed_slice());
+        let page_buffer = IoBufferMut::with_capacity_zeroed(num_pages * PAGE_SZ).leak();
 
         let size_metrics = &crate::metrics::PAGE_CACHE_SIZE;
         size_metrics.max_bytes.set_page_sz(num_pages);
         size_metrics.current_bytes_immutable.set_page_sz(0);
 
         let slots = page_buffer
+            // Each chunk has `PAGE_SZ` (8192) bytes, greater than 512, still aligned.
             .chunks_exact_mut(PAGE_SZ)
             .map(|chunk| {
-                let buf: &mut [u8; PAGE_SZ] = chunk.try_into().unwrap();
+                let buf = unsafe { IoPageSlice::new_unchecked(chunk.try_into().unwrap()) };
 
                 Slot {
                     inner: tokio::sync::RwLock::new(SlotInner {
