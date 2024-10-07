@@ -60,6 +60,8 @@ impl IoBufferMut {
         }
     }
 
+
+    /// Constructs a new `IoBufferMut` with at least the specified capacity and alignment, filled with zeros.
     pub fn with_capacity_aligned_zeroed(capacity: usize, align: usize) -> Self {
         use bytes::BufMut;
         let mut buf = Self::with_capacity_aligned(capacity, align);
@@ -174,6 +176,8 @@ impl IoBufferMut {
         self.capacity = cap;
     }
 
+
+    /// Consumes and leaks the `IoBufferMut`, returning a mutable reference to the contents, &'a mut [u8].
     pub fn leak<'a>(self) -> &'a mut [u8] {
         let mut buf = ManuallyDrop::new(self);
         // SAFETY: leaking the buffer as intended.
