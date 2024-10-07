@@ -5,6 +5,8 @@
 use super::storage_layer::delta_layer::{Adapter, DeltaLayerInner};
 use crate::context::RequestContext;
 use crate::page_cache::{self, FileId, PageReadGuard, PageWriteGuard, ReadBufResult, PAGE_SZ};
+#[cfg(test)]
+use crate::virtual_file::dio::IoBufferMut;
 use crate::virtual_file::VirtualFile;
 use bytes::Bytes;
 use std::ops::Deref;
@@ -40,7 +42,7 @@ pub enum BlockLease<'a> {
     #[cfg(test)]
     Arc(std::sync::Arc<[u8; PAGE_SZ]>),
     #[cfg(test)]
-    Vec(Vec<u8>),
+    IoBufferMut(IoBufferMut),
 }
 
 impl From<PageReadGuard<'static>> for BlockLease<'static> {
@@ -67,7 +69,7 @@ impl<'a> Deref for BlockLease<'a> {
             #[cfg(test)]
             BlockLease::Arc(v) => v.deref(),
             #[cfg(test)]
-            BlockLease::Vec(v) => {
+            BlockLease::IoBufferMut(v) => {
                 TryFrom::try_from(&v[..]).expect("caller must ensure that v has PAGE_SZ")
             }
         }

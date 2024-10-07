@@ -2,8 +2,10 @@
 
 use tokio_epoll_uring::IoBufMut;
 
-use crate::virtual_file::dio::IoBufferMut;
+use crate::virtual_file::{dio::IoBufferMut, PageWriteGuardBuf};
 
-pub(crate) trait IoBufAlignedMut: IoBufMut {}
+pub trait IoBufAlignedMut: IoBufMut {}
 
 impl IoBufAlignedMut for IoBufferMut {}
+
+impl IoBufAlignedMut for PageWriteGuardBuf {}
