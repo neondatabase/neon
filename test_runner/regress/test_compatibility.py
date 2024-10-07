@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
 
+import fixtures.utils
 import pytest
 import toml
 from fixtures.common_types import TenantId, TimelineId
@@ -23,6 +24,7 @@ from fixtures.pageserver.utils import (
 )
 from fixtures.pg_version import PgVersion
 from fixtures.remote_storage import RemoteStorageKind, S3Storage, s3_storage
+from fixtures.utils import all_pairs_component_versions
 from fixtures.workload import Workload
 
 #
@@ -584,9 +586,7 @@ def test_historic_storage_formats(
 
 @check_ondisk_data_compatibility_if_enabled
 @pytest.mark.xdist_group("compatibility")
-@pytest.mark.parametrize(
-    "combination", [0x1F, 0x15, 0x02, 0x0C, 0x09, 0x1A], ids=lambda x: f"combination{x:05b}"
-)
+@pytest.mark.parametrize("combination", all_pairs_component_versions(), ids=fixtures.utils.comb_ids)
 def test_versions_mismatch(
     neon_env_builder: NeonEnvBuilder, test_output_dir: Path, pg_version: PgVersion, combination
 ):

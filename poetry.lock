@@ -141,6 +141,20 @@ files = [
 frozenlist = ">=1.1.0"
 
 [[package]]
+name = "allpairspy"
+version = "2.5.1"
+description = "Pairwise test combinations generator"
+optional = false
+python-versions = ">=3.7"
+files = [
+    {file = "allpairspy-2.5.1-py3-none-any.whl", hash = "sha256:3f97cbac2bbee86f4bfceffd0fd91dca740a120c78e9368af2bad81a2b3426e2"},
+    {file = "allpairspy-2.5.1.tar.gz", hash = "sha256:f69d31a3b56eee119d1ec6063e9c732dd44fbba352ef738cb22d9699fc4009fe"},
+]
+
+[package.extras]
+test = ["pytest (>=6.0.1)", "pytest-md-report (>=0.3)"]
+
+[[package]]
 name = "allure-pytest"
 version = "2.13.2"
 description = "Allure pytest integration"
@@ -3378,4 +3392,4 @@ cffi = ["cffi (>=1.11)"]
 [metadata]
 lock-version = "2.0"
 python-versions = "^3.9"
-content-hash = "c09bcb333ab550958b33dbf4fec968c500d8e701fd4c96402cddbd9bb8048055"
+content-hash = "89e6a9bfb945d436a7f703010a4071a194546e6bee2507bed524ad009c0f7599"

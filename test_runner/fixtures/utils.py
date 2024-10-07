@@ -37,9 +37,20 @@ from fixtures.pageserver.common_types import (
 
 if TYPE_CHECKING:
     from fixtures.neon_fixtures import PgBin
+from collections import OrderedDict
+
+from allpairspy import AllPairs
+
 from fixtures.common_types import TimelineId
 
 Fn = TypeVar("Fn", bound=Callable[..., Any])
+COMPONENT_BINARIES = {
+    "storage_controller": ["storage_controller"],
+    "storage_broker": ["storage_broker"],
+    "compute": ["compute_ctl"],
+    "safekeeper": ["safekeeper"],
+    "pageserver": ["pageserver", "pagectl"],
+}
 
 
 def get_self_dir() -> Path:
@@ -613,3 +624,25 @@ def human_bytes(amt: float) -> str:
         amt = amt / 1024
 
     raise RuntimeError("unreachable")
+
+
+def all_pairs_component_versions() -> Iterable[object]:
+    """
+    This function generates all the pairs of old (False) or new (True)
+    versions of the Neon components
+    E.g. Pairs(storage_controller=False, storage_broker=True, compute=True, safekeeper=False, pageserver=False)
+    """
+    for pair in AllPairs(
+        OrderedDict({component: [True, False] for component in COMPONENT_BINARIES.keys()})
+    ):
+        yield pair
+
+
+def comb_ids(comb) -> str:
+    return "combination_" + "".join(
+        [
+            "n" if getattr(comb, a) else "o"
+            for a in comb.__dir__()
+            if not a.startswith("_") and a not in {"index", "count"}
+        ]
+    )

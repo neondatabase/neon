@@ -36,7 +36,12 @@ from fixtures.pg_version import PgVersion, run_only_on_default_postgres
 from fixtures.port_distributor import PortDistributor
 from fixtures.remote_storage import RemoteStorageKind, s3_storage
 from fixtures.storage_controller_proxy import StorageControllerProxy
-from fixtures.utils import run_pg_bench_small, subprocess_capture, wait_until
+from fixtures.utils import (
+    all_pairs_component_versions,
+    run_pg_bench_small,
+    subprocess_capture,
+    wait_until,
+)
 from fixtures.workload import Workload
 from mypy_boto3_s3.type_defs import (
     ObjectTypeDef,
@@ -55,9 +60,7 @@ def get_node_shard_counts(env: NeonEnv, tenant_ids):
     return counts
 
 
-@pytest.mark.parametrize(
-    "combination", [0x1F, 0x15, 0x02, 0x0C, 0x09, 0x1A], ids=lambda x: f"combination{x:05b}"
-)
+@pytest.mark.parametrize("combination", all_pairs_component_versions())
 def test_storage_controller_smoke(neon_env_builder: NeonEnvBuilder, combination):
     """
     Test the basic lifecycle of a storage controller:

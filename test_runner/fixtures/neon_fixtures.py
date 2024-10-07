@@ -89,6 +89,7 @@ from fixtures.safekeeper.http import SafekeeperHttpClient
 from fixtures.safekeeper.utils import are_walreceivers_absent
 from fixtures.utils import (
     ATTACHMENT_NAME_REGEX,
+    COMPONENT_BINARIES,
     allure_add_grafana_links,
     allure_attach_from_dir,
     assert_no_errors,
@@ -127,22 +128,6 @@ DEFAULT_OUTPUT_DIR: str = "test_output"
 DEFAULT_BRANCH_NAME: str = "main"
 
 BASE_PORT: int = 15000
-# Combination: 0: old, 1: new
-COMPONENT_VERS_BITMAP = {
-    "storage_controller": 0x01,
-    "storage_broker": 0x02,
-    "compute": 0x04,
-    "safekeeper": 0x08,
-    "pageserver": 0x10,
-}
-
-COMPONENT_BINARIES = {
-    "storage_controller": ["storage_controller"],
-    "storage_broker": ["storage_broker"],
-    "compute": ["compute_ctl"],
-    "safekeeper": ["safekeeper"],
-    "pageserver": ["pageserver", "pagectl"],
-}
 
 
 @pytest.fixture(scope="session")
@@ -512,7 +497,7 @@ class NeonEnvBuilder:
         self.test_name = test_name
         self.compatibility_neon_binpath = compatibility_neon_binpath
         self.compatibility_pg_distrib_dir = compatibility_pg_distrib_dir
-        self.version_combination: Optional[int] = None
+        self.version_combination: Optional[object] = None
         if "combination" in request._pyfuncitem.callspec.params:
             self.version_combination = request._pyfuncitem.callspec.params["combination"]
         self.mixdir = self.test_output_dir / "mixdir_neon"
@@ -730,12 +715,12 @@ class NeonEnvBuilder:
         for component, paths in COMPONENT_BINARIES.items():
             directory = (
                 self.neon_binpath
-                if bool(self.version_combination & COMPONENT_VERS_BITMAP[component])
+                if getattr(self.version_combination, component)
                 else self.compatibility_neon_binpath
             )
             for filename in paths:
                 os.link(directory / filename, self.mixdir / filename)
-        if self.version_combination & COMPONENT_VERS_BITMAP["compute"]:
+        if not getattr(self.version_combination, "compute"):
             self.pg_distrib_dir = self.compatibility_pg_distrib_dir
         self.neon_binpath = self.mixdir
 
