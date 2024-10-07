@@ -16,7 +16,7 @@ futures.workspace = true
 futures-core.workspace = true
 futures-util.workspace = true
 humantime.workspace = true
-hyper = { workspace = true, features = ["full"] }
+hyper0 = { workspace = true, features = ["full"] }
 once_cell.workspace = true
 parking_lot.workspace = true
 prost.workspace = true

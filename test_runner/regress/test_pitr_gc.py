@@ -57,7 +57,7 @@ def test_pitr_gc(neon_env_builder: NeonEnvBuilder):
 
     # Branch at the point where only 100 rows were inserted
     # It must have been preserved by PITR setting
-    env.neon_cli.create_branch("test_pitr_gc_hundred", "main", ancestor_start_lsn=lsn_a)
+    env.create_branch("test_pitr_gc_hundred", ancestor_branch_name="main", ancestor_start_lsn=lsn_a)
 
     endpoint_hundred = env.endpoints.create_start("test_pitr_gc_hundred")
 

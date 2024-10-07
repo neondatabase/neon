@@ -1,4 +1,5 @@
 import pytest
+from fixtures.common_types import TimelineId
 from fixtures.neon_fixtures import NeonEnvBuilder
 from fixtures.port_distributor import PortDistributor
 
@@ -10,22 +11,36 @@ def test_neon_cli_basics(neon_env_builder: NeonEnvBuilder, port_distributor: Por
     # Skipping the init step that creates a local tenant in Pytest tests
     try:
         env.neon_cli.start()
-        env.neon_cli.create_tenant(tenant_id=env.initial_tenant, set_default=True)
+        env.create_tenant(tenant_id=env.initial_tenant, set_default=True)
 
         main_branch_name = "main"
         pg_port = port_distributor.get_port()
         http_port = port_distributor.get_port()
         env.neon_cli.endpoint_create(
-            main_branch_name, pg_port, http_port, endpoint_id="ep-basic-main"
+            main_branch_name,
+            pg_port,
+            http_port,
+            endpoint_id="ep-basic-main",
+            tenant_id=env.initial_tenant,
+            pg_version=env.pg_version,
         )
         env.neon_cli.endpoint_start("ep-basic-main")
 
         branch_name = "migration-check"
-        env.neon_cli.create_branch(branch_name)
+        env.neon_cli.timeline_branch(
+            tenant_id=env.initial_tenant,
+            timeline_id=TimelineId.generate(),
+            new_branch_name=branch_name,
+        )
         pg_port = port_distributor.get_port()
         http_port = port_distributor.get_port()
         env.neon_cli.endpoint_create(
-            branch_name, pg_port, http_port, endpoint_id=f"ep-{branch_name}"
+            branch_name,
+            pg_port,
+            http_port,
+            endpoint_id=f"ep-{branch_name}",
+            tenant_id=env.initial_tenant,
+            pg_version=env.pg_version,
         )
         env.neon_cli.endpoint_start(f"ep-{branch_name}")
     finally:
@@ -43,12 +58,26 @@ def test_neon_two_primary_endpoints_fail(
 
     pg_port = port_distributor.get_port()
     http_port = port_distributor.get_port()
-    env.neon_cli.endpoint_create(branch_name, pg_port, http_port, "ep1")
+    env.neon_cli.endpoint_create(
+        branch_name,
+        pg_port,
+        http_port,
+        endpoint_id="ep1",
+        tenant_id=env.initial_tenant,
+        pg_version=env.pg_version,
+    )
 
     pg_port = port_distributor.get_port()
     http_port = port_distributor.get_port()
     # ep1 is not running so create will succeed
-    env.neon_cli.endpoint_create(branch_name, pg_port, http_port, "ep2")
+    env.neon_cli.endpoint_create(
+        branch_name,
+        pg_port,
+        http_port,
+        endpoint_id="ep2",
+        tenant_id=env.initial_tenant,
+        pg_version=env.pg_version,
+    )
 
     env.neon_cli.endpoint_start("ep1")
 

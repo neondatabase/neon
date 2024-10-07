@@ -10,6 +10,9 @@
 //!
 //! Only safekeeper message is supported, but it is not hard to add something
 //! else with generics.
+
+extern crate hyper0 as hyper;
+
 use clap::{command, Parser};
 use futures_core::Stream;
 use futures_util::StreamExt;

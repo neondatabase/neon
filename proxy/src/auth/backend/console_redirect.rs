@@ -1,8 +1,8 @@
 use crate::{
     auth, compute,
     config::AuthenticationConfig,
-    console::{self, provider::NodeInfo},
     context::RequestMonitoring,
+    control_plane::{self, provider::NodeInfo},
     error::{ReportableError, UserFacingError},
     stream::PqStream,
     waiters,
@@ -70,7 +70,7 @@ pub(super) async fn authenticate(
     let (psql_session_id, waiter) = loop {
         let psql_session_id = new_psql_session_id();
 
-        match console::mgmt::get_waiter(&psql_session_id) {
+        match control_plane::mgmt::get_waiter(&psql_session_id) {
             Ok(waiter) => break (psql_session_id, waiter),
             Err(_e) => continue,
         }
@@ -89,7 +89,12 @@ pub(super) async fn authenticate(
 
     // Wait for web console response (see `mgmt`).
     info!(parent: &span, "waiting for console's reply...");
-    let db_info = waiter.await.map_err(WebAuthError::from)?;
+    let db_info = tokio::time::timeout(auth_config.webauth_confirmation_timeout, waiter)
+        .await
+        .map_err(|_elapsed| {
+            auth::AuthError::confirmation_timeout(auth_config.webauth_confirmation_timeout.into())
+        })?
+        .map_err(WebAuthError::from)?;
 
     if auth_config.ip_allowlist_check_enabled {
         if let Some(allowed_ips) = &db_info.allowed_ips {

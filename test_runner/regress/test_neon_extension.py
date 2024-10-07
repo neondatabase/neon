@@ -8,7 +8,7 @@ from fixtures.neon_fixtures import NeonEnvBuilder
 # Verify that the neon extension is installed and has the correct version.
 def test_neon_extension(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
-    env.neon_cli.create_branch("test_create_extension_neon")
+    env.create_branch("test_create_extension_neon")
 
     endpoint_main = env.endpoints.create("test_create_extension_neon")
     # don't skip pg_catalog updates - it runs CREATE EXTENSION neon
@@ -35,7 +35,7 @@ def test_neon_extension(neon_env_builder: NeonEnvBuilder):
 # Verify that the neon extension can be upgraded/downgraded.
 def test_neon_extension_compatibility(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
-    env.neon_cli.create_branch("test_neon_extension_compatibility")
+    env.create_branch("test_neon_extension_compatibility")
 
     endpoint_main = env.endpoints.create("test_neon_extension_compatibility")
     # don't skip pg_catalog updates - it runs CREATE EXTENSION neon
@@ -72,7 +72,7 @@ def test_neon_extension_compatibility(neon_env_builder: NeonEnvBuilder):
 # Verify that the neon extension can be auto-upgraded to the latest version.
 def test_neon_extension_auto_upgrade(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
-    env.neon_cli.create_branch("test_neon_extension_auto_upgrade")
+    env.create_branch("test_neon_extension_auto_upgrade")
 
     endpoint_main = env.endpoints.create("test_neon_extension_auto_upgrade")
     # don't skip pg_catalog updates - it runs CREATE EXTENSION neon

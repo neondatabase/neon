@@ -5,26 +5,24 @@ use arc_swap::ArcSwapOption;
 
 use crate::{
     compute::ConnCfg,
-    console::{
+    context::RequestMonitoring,
+    control_plane::{
         messages::{ColdStartInfo, EndpointJwksResponse, MetricsAuxInfo},
         NodeInfo,
     },
-    context::RequestMonitoring,
     intern::{BranchIdTag, EndpointIdTag, InternId, ProjectIdTag},
     EndpointId,
 };
 
-use super::jwt::{AuthRule, FetchAuthRules, JwkCache};
+use super::jwt::{AuthRule, FetchAuthRules};
 
 pub struct LocalBackend {
-    pub(crate) jwks_cache: JwkCache,
     pub(crate) node_info: NodeInfo,
 }
 
 impl LocalBackend {
     pub fn new(postgres_addr: SocketAddr) -> Self {
         LocalBackend {
-            jwks_cache: JwkCache::default(),
             node_info: NodeInfo {
                 config: {
                     let mut cfg = ConnCfg::new();

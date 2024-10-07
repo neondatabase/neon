@@ -547,7 +547,7 @@ def test_historic_storage_formats(
     assert metadata_summary["tenant_count"] >= 1
     assert metadata_summary["timeline_count"] >= 1
 
-    env.neon_cli.import_tenant(dataset.tenant_id)
+    env.neon_cli.tenant_import(dataset.tenant_id)
 
     # Discover timelines
     timelines = env.pageserver.http_client().timeline_list(dataset.tenant_id)

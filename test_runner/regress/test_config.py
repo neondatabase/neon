@@ -38,7 +38,7 @@ def test_safekeepers_reconfigure_reorder(
 ):
     neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.init_start()
-    env.neon_cli.create_branch("test_safekeepers_reconfigure_reorder")
+    env.create_branch("test_safekeepers_reconfigure_reorder")
 
     endpoint = env.endpoints.create_start("test_safekeepers_reconfigure_reorder")
 

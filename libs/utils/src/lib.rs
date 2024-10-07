@@ -2,6 +2,8 @@
 //! between other crates in this repository.
 #![deny(clippy::undocumented_unsafe_blocks)]
 
+extern crate hyper0 as hyper;
+
 pub mod backoff;
 
 /// `Lsn` type implements common tasks on Log Sequence Numbers

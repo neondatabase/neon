@@ -545,7 +545,7 @@ def test_compaction_downloads_on_demand_without_image_creation(neon_env_builder:
         layer_sizes += layer.layer_file_size
         pageserver_http.evict_layer(tenant_id, timeline_id, layer.layer_file_name)
 
-    env.neon_cli.config_tenant(tenant_id, {"compaction_threshold": "3"})
+    env.config_tenant(tenant_id, {"compaction_threshold": "3"})
 
     pageserver_http.timeline_compact(tenant_id, timeline_id)
     layers = pageserver_http.layer_map_info(tenant_id, timeline_id)
@@ -647,7 +647,7 @@ def test_compaction_downloads_on_demand_with_image_creation(neon_env_builder: Ne
     # layers -- threshold of 2 would sound more reasonable, but keeping it as 1
     # to be less flaky
     conf["image_creation_threshold"] = "1"
-    env.neon_cli.config_tenant(tenant_id, {k: str(v) for k, v in conf.items()})
+    env.config_tenant(tenant_id, {k: str(v) for k, v in conf.items()})
 
     pageserver_http.timeline_compact(tenant_id, timeline_id)
     layers = pageserver_http.layer_map_info(tenant_id, timeline_id)

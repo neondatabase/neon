@@ -10,14 +10,14 @@ use crate::proxy::retry::CouldRetry;
 /// Generic error response with human-readable description.
 /// Note that we can't always present it to user as is.
 #[derive(Debug, Deserialize, Clone)]
-pub(crate) struct ConsoleError {
+pub(crate) struct ControlPlaneError {
     pub(crate) error: Box<str>,
     #[serde(skip)]
     pub(crate) http_status_code: http::StatusCode,
     pub(crate) status: Option<Status>,
 }
 
-impl ConsoleError {
+impl ControlPlaneError {
     pub(crate) fn get_reason(&self) -> Reason {
         self.status
             .as_ref()
@@ -51,7 +51,7 @@ impl ConsoleError {
     }
 }
 
-impl Display for ConsoleError {
+impl Display for ControlPlaneError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let msg: &str = self
             .status
@@ -62,7 +62,7 @@ impl Display for ConsoleError {
     }
 }
 
-impl CouldRetry for ConsoleError {
+impl CouldRetry for ControlPlaneError {
     fn could_retry(&self) -> bool {
         // If the error message does not have a status,
         // the error is unknown and probably should not retry automatically
