@@ -111,16 +111,29 @@ RUN apt update && \
     protobuf-c-compiler xsltproc
 
 
-RUN export CGAL_VERSION=5.6 && \
-    wget https://github.com/CGAL/cgal/releases/download/v${CGAL_VERSION}/CGAL-${CGAL_VERSION}.tar.xz && \
-    tar xJf CGAL-${CGAL_VERSION}.tar.xz && \
-    cd CGAL-${CGAL_VERSION} && mkdir build && cd build && cmake .. && make && make install && cd ../..
-
-
 # Postgis 3.5.0 requires SFCGAL 1.4+
-RUN mkdir -p /sfcgal && \
-    wget https://gitlab.com/sfcgal/SFCGAL/-/archive/v1.5.2/SFCGAL-v1.5.2.tar.gz -O SFCGAL.tar.gz && \
-    echo "b946b3c20d53f6e2703046085f0fcfea6c1a4081163f7bedd30b1195801efdd2 SFCGAL.tar.gz" | sha256sum --check && \
+#
+# It would be nice to update all versions together, but we must solve the SFCGAL dependency first.
+# SFCGAL > 1.3 requires CGAL > 5.2, Bullseye's libcgal-dev is 5.2
+# and also we must check backward compatibility with older versions of PostGIS.
+#
+# To move faster, use newer versions only for v17
+RUN case "${PG_VERSION}" in
+    "v17") \
+        export SFCGAL_VERSION=1.5.2 \
+        export SFCGAL_CHECKSUM=b946b3c20d53f6e2703046085f0fcfea6c1a4081163f7bedd30b1195801efdd2 \
+    ;; \
+    "v14" | "v15" | "v16") \
+        export SFCGAL_VERSION=1.3.10
+        export SFCGAL_CHECKSUM=4e39b3b2adada6254a7bdba6d297bb28e1a9835a9f879b74f37e2dab70203232 \
+    ;; \
+    *) \
+        echo "unexpected PostgreSQL version" && exit 1 \
+    ;; \
+    esac && \
+    mkdir -p /sfcgal && \
+    wget https://gitlab.com/sfcgal/SFCGAL/-/archive/v${SFCGAL_VERSION}/SFCGAL-v${SFCGAL_VERSION}.tar.gz -O SFCGAL.tar.gz && \
+    echo "${SFCGAL_CHECKSUM} SFCGAL.tar.gz" | sha256sum --check && \
     mkdir sfcgal-src && cd sfcgal-src && tar xzf ../SFCGAL.tar.gz --strip-components=1 -C . && \
     cmake -DCMAKE_BUILD_TYPE=Release . && make -j $(getconf _NPROCESSORS_ONLN) && \
     DESTDIR=/sfcgal make install -j $(getconf _NPROCESSORS_ONLN) && \
@@ -129,8 +142,21 @@ RUN mkdir -p /sfcgal && \
 ENV PATH="/usr/local/pgsql/bin:$PATH"
 
 # Postgis 3.5.0 supports v17
-RUN wget https://download.osgeo.org/postgis/source/postgis-3.5.0.tar.gz -O postgis.tar.gz && \
-    echo "ca698a22cc2b2b3467ac4e063b43a28413f3004ddd505bdccdd74c56a647f510  postgis.tar.gz" | sha256sum --check && \
+RUN case "${PG_VERSION}" in
+    "v17") \
+        export POSTGIS_VERSION=3.5.0 \
+        export POSTGIS_CHECKSUM=ca698a22cc2b2b3467ac4e063b43a28413f3004ddd505bdccdd74c56a647f510 \
+    ;; \
+    "v14" | "v15" | "v16") \
+        export POSTGIS_VERSION=3.3.3 \
+        export POSTGIS_CHECKSUM=74eb356e3f85f14233791013360881b6748f78081cc688ff9d6f0f673a762d13 \
+    ;; \
+    *) \
+        echo "unexpected PostgreSQL version" && exit 1 \
+    ;; \
+    esac && \
+    wget https://download.osgeo.org/postgis/source/postgis-${POSTGIS_VERSION}.tar.gz -O postgis.tar.gz && \
+    echo "${POSTGIS_CHECKSUM} postgis.tar.gz" | sha256sum --check && \
     mkdir postgis-src && cd postgis-src && tar xzf ../postgis.tar.gz --strip-components=1 -C . && \
     find /usr/local/pgsql -type f | sed 's|^/usr/local/pgsql/||' > /before.txt &&\
     ./autogen.sh && \
