@@ -1486,7 +1486,6 @@ impl Tenant {
     }
 
     fn check_ancestor_of_to_be_unarchived_is_not_archived(
-        timeline_id: TimelineId,
         ancestor_timeline_id: TimelineId,
         timelines: &std::sync::MutexGuard<'_, HashMap<TimelineId, Arc<Timeline>>>,
         offloaded_timelines: &std::sync::MutexGuard<
@@ -1494,15 +1493,18 @@ impl Tenant {
             HashMap<TimelineId, Arc<OffloadedTimeline>>,
         >,
     ) -> Result<(), TimelineArchivalError> {
-        let has_archived_parent = if let Some(ancestor_timeline) = timelines.get(&timeline_id) {
-            ancestor_timeline.is_archived() == Some(true)
-        } else if offloaded_timelines.contains_key(&ancestor_timeline_id) {
-            true
-        } else {
-            error!("ancestor timeline {ancestor_timeline_id} not found");
-            debug_assert!(false);
-            return Err(TimelineArchivalError::NotFound);
-        };
+        let has_archived_parent =
+            if let Some(ancestor_timeline) = timelines.get(&ancestor_timeline_id) {
+                ancestor_timeline.is_archived() == Some(true)
+            } else if offloaded_timelines.contains_key(&ancestor_timeline_id) {
+                true
+            } else {
+                error!("ancestor timeline {ancestor_timeline_id} not found");
+                if cfg!(debug_assertions) {
+                    panic!("ancestor timeline {ancestor_timeline_id} not found");
+                }
+                return Err(TimelineArchivalError::NotFound);
+            };
         if has_archived_parent {
             return Err(TimelineArchivalError::HasArchivedParent(
                 ancestor_timeline_id,
@@ -1612,7 +1614,6 @@ impl Tenant {
                 }
                 if let Some(ancestor_timeline_id) = offloaded.ancestor_timeline_id {
                     Self::check_ancestor_of_to_be_unarchived_is_not_archived(
-                        timeline_id,
                         ancestor_timeline_id,
                         &timelines,
                         &offloaded_timelines,
