@@ -38,7 +38,7 @@ pub(crate) struct PoolingBackend {
     pub(crate) http_conn_pool: Arc<super::http_conn_pool::GlobalConnPool>,
     pub(crate) pool: Arc<GlobalConnPool<tokio_postgres::Client>>,
     pub(crate) config: &'static ProxyConfig,
-    pub(crate) auth_backend: &'static crate::auth::Backend<'static, (), ()>,
+    pub(crate) auth_backend: &'static crate::auth::Backend<'static, ()>,
     pub(crate) endpoint_rate_limiter: Arc<EndpointRateLimiter>,
 }
 
@@ -128,9 +128,6 @@ impl PoolingBackend {
 
                 Ok(())
             }
-            crate::auth::Backend::ConsoleRedirect(_, ()) => Err(AuthError::auth_failed(
-                "JWT login over web auth proxy is not supported",
-            )),
             crate::auth::Backend::Local(_) => {
                 self.config
                     .authentication_config

@@ -54,7 +54,7 @@ pub(crate) const SERVERLESS_DRIVER_SNI: &str = "api";
 
 pub async fn task_main(
     config: &'static ProxyConfig,
-    auth_backend: &'static crate::auth::Backend<'static, (), ()>,
+    auth_backend: &'static crate::auth::Backend<'static, ()>,
     ws_listener: TcpListener,
     cancellation_token: CancellationToken,
     cancellation_handler: Arc<CancellationHandlerMain>,

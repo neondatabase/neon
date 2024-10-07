@@ -314,7 +314,10 @@ async fn main() -> anyhow::Result<()> {
     let config = build_config(&args)?;
     let auth_backend = build_auth_backend(&args)?;
 
-    info!("Authentication backend: {}", auth_backend);
+    match auth_backend {
+        Either::Left(auth_backend) => info!("Authentication backend: {auth_backend}"),
+        Either::Right(auth_backend) => info!("Authentication backend: {auth_backend:?}"),
+    };
     info!("Using region: {}", args.aws_region);
 
     let region_provider =
@@ -461,26 +464,41 @@ async fn main() -> anyhow::Result<()> {
     // client facing tasks. these will exit on error or on cancellation
     // cancellation returns Ok(())
     let mut client_tasks = JoinSet::new();
-    if let Some(proxy_listener) = proxy_listener {
-        client_tasks.spawn(proxy::proxy::task_main(
-            config,
-            auth_backend,
-            proxy_listener,
-            cancellation_token.clone(),
-            cancellation_handler.clone(),
-            endpoint_rate_limiter.clone(),
-        ));
-    }
+    match auth_backend {
+        Either::Left(auth_backend) => {
+            if let Some(proxy_listener) = proxy_listener {
+                client_tasks.spawn(proxy::proxy::task_main(
+                    config,
+                    auth_backend,
+                    proxy_listener,
+                    cancellation_token.clone(),
+                    cancellation_handler.clone(),
+                    endpoint_rate_limiter.clone(),
+                ));
+            }
 
-    if let Some(serverless_listener) = serverless_listener {
-        client_tasks.spawn(serverless::task_main(
-            config,
-            auth_backend,
-            serverless_listener,
-            cancellation_token.clone(),
-            cancellation_handler.clone(),
-            endpoint_rate_limiter.clone(),
-        ));
+            if let Some(serverless_listener) = serverless_listener {
+                client_tasks.spawn(serverless::task_main(
+                    config,
+                    auth_backend,
+                    serverless_listener,
+                    cancellation_token.clone(),
+                    cancellation_handler.clone(),
+                    endpoint_rate_limiter.clone(),
+                ));
+            }
+        }
+        Either::Right(auth_backend) => {
+            if let Some(proxy_listener) = proxy_listener {
+                client_tasks.spawn(proxy::console_redirect_proxy::task_main(
+                    config,
+                    auth_backend,
+                    proxy_listener,
+                    cancellation_token.clone(),
+                    cancellation_handler.clone(),
+                ));
+            }
+        }
     }
 
     client_tasks.spawn(proxy::context::parquet::worker(
@@ -510,7 +528,7 @@ async fn main() -> anyhow::Result<()> {
         ));
     }
 
-    if let auth::Backend::ControlPlane(api, _) = auth_backend {
+    if let Either::Left(auth::Backend::ControlPlane(api, _)) = &auth_backend {
         if let proxy::control_plane::provider::ControlPlaneBackend::Management(api) = &**api {
             match (redis_notifications_client, regional_redis_client.clone()) {
                 (None, None) => {}
@@ -663,7 +681,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         webauth_confirmation_timeout: args.webauth_confirmation_timeout,
     };
 
-    let config = Box::leak(Box::new(ProxyConfig {
+    let config = ProxyConfig {
         tls_config,
         metric_collection,
         allow_self_signed_compute: args.allow_self_signed_compute,
@@ -677,7 +695,9 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         connect_to_compute_retry_config: config::RetryConfig::parse(
             &args.connect_to_compute_retry,
         )?,
-    }));
+    };
+
+    let config = Box::leak(Box::new(config));
 
     tokio::spawn(config.connect_compute_locks.garbage_collect_worker());
 
@@ -687,8 +707,8 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
 /// auth::Backend is created at proxy startup, and lives forever.
 fn build_auth_backend(
     args: &ProxyCliArgs,
-) -> anyhow::Result<&'static auth::Backend<'static, (), ()>> {
-    let auth_backend = match &args.auth_backend {
+) -> anyhow::Result<Either<&'static auth::Backend<'static, ()>, &'static ConsoleRedirectBackend>> {
+    match &args.auth_backend {
         AuthBackendType::Console => {
             let wake_compute_cache_config: CacheOptions = args.wake_compute_cache.parse()?;
             let project_info_cache_config: ProjectInfoCacheOptions =
@@ -738,12 +758,11 @@ fn build_auth_backend(
                 wake_compute_endpoint_rate_limiter,
             );
             let api = control_plane::provider::ControlPlaneBackend::Management(api);
-            auth::Backend::ControlPlane(MaybeOwned::Owned(api), ())
-        }
+            let auth_backend = auth::Backend::ControlPlane(MaybeOwned::Owned(api), ());
 
-        AuthBackendType::Web => {
-            let url = args.uri.parse()?;
-            auth::Backend::ConsoleRedirect(MaybeOwned::Owned(ConsoleRedirectBackend::new(url)), ())
+            let config = Box::leak(Box::new(auth_backend));
+
+            Ok(Either::Left(config))
         }
 
         #[cfg(feature = "testing")]
@@ -751,11 +770,23 @@ fn build_auth_backend(
             let url = args.auth_endpoint.parse()?;
             let api = control_plane::provider::mock::Api::new(url, !args.is_private_access_proxy);
             let api = control_plane::provider::ControlPlaneBackend::PostgresMock(api);
-            auth::Backend::ControlPlane(MaybeOwned::Owned(api), ())
-        }
-    };
 
-    Ok(Box::leak(Box::new(auth_backend)))
+            let auth_backend = auth::Backend::ControlPlane(MaybeOwned::Owned(api), ());
+
+            let config = Box::leak(Box::new(auth_backend));
+
+            Ok(Either::Left(config))
+        }
+
+        AuthBackendType::Web => {
+            let url = args.uri.parse()?;
+            let backend = ConsoleRedirectBackend::new(url);
+
+            let config = Box::leak(Box::new(backend));
+
+            Ok(Either::Right(config))
+        }
+    }
 }
 
 #[cfg(test)]
