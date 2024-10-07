@@ -731,7 +731,48 @@ pub fn handle_extensions(spec: &ComputeSpec, client: &mut Client) -> Result<()> 
             client.simple_query(query)?;
         }
     }
+    Ok(())
+}
 
+/// Create pg_session_jwt in all databases if configured
+#[instrument(skip_all)]
+pub fn handle_jwt_extension(spec: &ComputeSpec, client: &mut Client, connstr: &str) -> Result<()> {
+    if let Some(local_proxy) = &spec.local_proxy_config {
+        if let Some(jwks_list) = &local_proxy.jwks {
+            if !jwks_list.is_empty() {
+                info!("enabling pg_session_jwt extension");
+                let existing_dbs = get_existing_dbs(client)?;
+
+                for db in &spec.cluster.databases {
+                    match existing_dbs.get(&db.name) {
+                        Some(pg_db) => {
+                            if pg_db.restrict_conn || pg_db.invalid {
+                                info!(
+                                    "skipping extension for db {} (invalid: {}, connections not allowed: {})",
+                                    db.name, pg_db.invalid, pg_db.restrict_conn
+                                );
+                                continue;
+                            }
+                        }
+                        None => {
+                            bail!(
+                                "database {} doesn't exist in Postgres after handle_databases()",
+                                db.name
+                            );
+                        }
+                    }
+                    let mut conf = Config::from_str(connstr)?;
+                    conf.dbname(&db.name);
+
+                    let mut db_client = conf.connect(NoTls)?;
+
+                    let query = "CREATE EXTENSION IF NOT EXISTS pg_session_jwt";
+                    info!("creating pg_session_jwt extension with query: {}", query);
+                    db_client.simple_query(query)?;
+                }
+            }
+        }
+    }
     Ok(())
 }
 
