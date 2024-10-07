@@ -1005,7 +1005,7 @@ neon_get_lfc_stats(PG_FUNCTION_ARGS)
 	Datum		result;
 	HeapTuple	tuple;
 	char const *key;
-	uint64		value;
+	uint64		value = 0;
 	Datum		values[NUM_NEON_GET_STATS_COLS];
 	bool		nulls[NUM_NEON_GET_STATS_COLS];
 
