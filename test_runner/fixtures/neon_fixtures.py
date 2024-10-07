@@ -166,8 +166,6 @@ def compatibility_neon_binpath(base_dir: Path, build_type: str) -> Optional[Iter
     comp_binpath = None
     if env_compatibility_neon_binpath := os.environ.get("COMPATIBILITY_NEON_BIN"):
         comp_binpath = Path(env_compatibility_neon_binpath).resolve()
-        if not (comp_binpath / "pageserver").exists():
-            raise Exception(f"compatibility neon binaries not found ad {comp_binpath}")
     yield comp_binpath
 
 
