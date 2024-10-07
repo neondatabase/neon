@@ -60,6 +60,7 @@ impl IoBufferMut {
         }
     }
 
+
     /// Constructs a new `IoBufferMut` with at least the specified capacity and alignment, filled with zeros.
     pub fn with_capacity_aligned_zeroed(capacity: usize, align: usize) -> Self {
         use bytes::BufMut;
@@ -175,6 +176,7 @@ impl IoBufferMut {
         self.capacity = cap;
     }
 
+
     /// Consumes and leaks the `IoBufferMut`, returning a mutable reference to the contents, &'a mut [u8].
     pub fn leak<'a>(self) -> &'a mut [u8] {
         let mut buf = ManuallyDrop::new(self);
@@ -238,7 +240,7 @@ unsafe impl bytes::BufMut for IoBufferMut {
     // SAFETY: Caller needs to make sure the bytes being advanced past have been initialized.
     #[inline]
     unsafe fn advance_mut(&mut self, cnt: usize) {
-        let len = self.len();
+        let len: usize = self.len();
         let remaining = self.remaining_mut();
 
         if remaining < cnt {

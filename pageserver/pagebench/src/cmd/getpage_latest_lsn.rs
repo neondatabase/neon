@@ -63,6 +63,10 @@ pub(crate) struct Args {
     #[clap(long)]
     set_io_alignment: Option<usize>,
 
+    /// Before starting the benchmark, live-reconfigure the pageserver to use specified io mode (buffered vs. direct).
+    #[clap(long)]
+    set_io_mode: Option<pageserver_api::models::virtual_file::IoMode>,
+
     targets: Option<Vec<TenantTimelineId>>,
 }
 
@@ -131,6 +135,10 @@ async fn main_impl(
 
     if let Some(align) = args.set_io_alignment {
         mgmt_api_client.put_io_alignment(align).await?;
+    }
+
+    if let Some(mode) = &args.set_io_mode {
+        mgmt_api_client.put_io_mode(mode).await?;
     }
 
     // discover targets

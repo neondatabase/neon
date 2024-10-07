@@ -59,8 +59,9 @@ pub(crate) enum LayerCmd {
 
 async fn read_delta_file(path: impl AsRef<Path>, ctx: &RequestContext) -> Result<()> {
     let path = Utf8Path::from_path(path.as_ref()).expect("non-Unicode path");
-    virtual_file::init(10, virtual_file::api::IoEngineKind::StdFs, 1);
-    page_cache::init(100);
+    let align = pageserver_api::config::defaults::DEFAULT_IO_BUFFER_ALIGNMENT;
+    virtual_file::init(10, virtual_file::api::IoEngineKind::StdFs, align);
+    page_cache::init(100, align);
     let file = VirtualFile::open(path, ctx).await?;
     let file_id = page_cache::next_file_id();
     let block_reader = FileBlockReader::new(&file, file_id);
@@ -190,12 +191,10 @@ pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
             new_tenant_id,
             new_timeline_id,
         } => {
-            pageserver::virtual_file::init(
-                10,
-                virtual_file::api::IoEngineKind::StdFs,
-                pageserver_api::config::defaults::DEFAULT_IO_BUFFER_ALIGNMENT,
-            );
-            pageserver::page_cache::init(100);
+            let align = pageserver_api::config::defaults::DEFAULT_IO_BUFFER_ALIGNMENT;
+
+            pageserver::virtual_file::init(10, virtual_file::api::IoEngineKind::StdFs, align);
+            pageserver::page_cache::init(100, align);
 
             let ctx = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error);
 

@@ -84,7 +84,7 @@ impl Drop for EphemeralFile {
     fn drop(&mut self) {
         // unlink the file
         // we are clear to do this, because we have entered a gate
-        let path = &self.buffered_writer.as_inner().as_inner().path;
+        let path = self.buffered_writer.as_inner().as_inner().path();
         let res = std::fs::remove_file(path);
         if let Err(e) = res {
             if e.kind() != std::io::ErrorKind::NotFound {
@@ -356,7 +356,7 @@ mod tests {
         }
 
         let file_contents =
-            std::fs::read(&file.buffered_writer.as_inner().as_inner().path).unwrap();
+            std::fs::read(file.buffered_writer.as_inner().as_inner().path()).unwrap();
         assert_eq!(file_contents, &content[0..cap]);
 
         let buffer_contents = file.buffered_writer.inspect_buffer();
@@ -392,7 +392,7 @@ mod tests {
             .buffered_writer
             .as_inner()
             .as_inner()
-            .path
+            .path()
             .metadata()
             .unwrap();
         assert_eq!(
