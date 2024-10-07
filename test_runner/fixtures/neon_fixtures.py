@@ -181,7 +181,7 @@ def pg_distrib_dir(base_dir: Path) -> Iterator[Path]:
 @pytest.fixture(scope="session")
 def compatibility_pg_distrib_dir() -> Optional[Iterator[Path]]:
     compat_distrib_dir = None
-    if env_compat_postgres_bin := os.environ.get("COMPAT_POSTGRES_DISTRIB_DIR"):
+    if env_compat_postgres_bin := os.environ.get("COMPATIBILITY_POSTGRES_DISTRIB_DIR"):
         compat_distrib_dir = Path(env_compat_postgres_bin).resolve()
         if not compat_distrib_dir.exists():
             raise Exception(f"compatibility postgres directory not fount at {compat_distrib_dir}")
@@ -495,7 +495,7 @@ class NeonEnvBuilder:
             ), "the environment variable COMPATIBILITY_NEON_BIN is required when using mixed versions"
             assert (
                 self.compatibility_pg_distrib_dir is not None
-            ), "the environment variable COMPAT_POSTGRES_DISTRIB_DIR is required when using mixed versions"
+            ), "the environment variable COMPATIBILITY_POSTGRES_DISTRIB_DIR is required when using mixed versions"
             self.mixdir.mkdir(mode=0o755, exist_ok=True)
             self._mix_versions()
 
