@@ -861,21 +861,20 @@ impl Reconciler {
 
         for (node_id, location) in &self.observed.locations {
             let previous_location = self.original_observed.locations.get(node_id);
-            match previous_location {
-                Some(prev) => {
-                    if location.conf != prev.conf {
-                        deltas.push(ObservedStateDelta::Upsert(Box::new((
-                            *node_id,
-                            location.clone(),
-                        ))));
-                    }
-                }
-                None => {
-                    deltas.push(ObservedStateDelta::Upsert(Box::new((
-                        *node_id,
-                        location.clone(),
-                    ))));
-                }
+            let do_upsert = match previous_location {
+                // Location config changed for node
+                Some(prev) if location.conf == prev.conf => true,
+                // New location config for node
+                None => true,
+                // Location config has not changed for node
+                _ => false,
+            };
+
+            if do_upsert {
+                deltas.push(ObservedStateDelta::Upsert(Box::new((
+                    *node_id,
+                    location.clone(),
+                ))));
             }
         }
 
