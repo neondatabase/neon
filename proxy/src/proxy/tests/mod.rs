@@ -10,13 +10,14 @@ use super::*;
 use crate::auth::backend::{
     ComputeCredentialKeys, ComputeCredentials, ComputeUserInfo, TestBackend,
 };
-use crate::config::{CertResolver, RetryConfig};
+use crate::config::{CertResolver, ProxyProtocolV2, RetryConfig};
 use crate::control_plane::messages::{ControlPlaneError, Details, MetricsAuxInfo, Status};
 use crate::control_plane::provider::{
     CachedAllowedIps, CachedRoleSecret, ControlPlaneBackend, NodeInfoCache,
 };
 use crate::control_plane::{self, CachedNodeInfo, NodeInfo};
 use crate::error::ErrorKind;
+use crate::protocol2::get_client_conn_info;
 use crate::{sasl, scram, BranchId, EndpointId, ProjectId};
 use anyhow::{bail, Context};
 use async_trait::async_trait;
@@ -177,7 +178,7 @@ async fn dummy_proxy(
     tls: Option<TlsConfig>,
     auth: impl TestAuth + Send,
 ) -> anyhow::Result<()> {
-    let (client, _) = read_proxy_protocol(client).await?;
+    let (client, _) = get_client_conn_info(client, ProxyProtocolV2::Supported).await?;
     let mut stream =
         match handshake(&RequestMonitoring::test(), client, tls.as_ref(), false).await? {
             HandshakeData::Startup(stream, _) => stream,

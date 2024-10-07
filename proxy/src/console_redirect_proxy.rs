@@ -1,21 +1,19 @@
 use crate::auth::backend::ConsoleRedirectBackend;
-use crate::config::{ProxyConfig, ProxyProtocolV2};
-use crate::proxy::{
-    prepare_client_connection, run_until_cancelled, ClientRequestError, ErrorSource,
-};
+use crate::config::ProxyConfig;
+use crate::metrics::Protocol;
+use crate::proxy::{prepare_client_connection, transition_connection, ClientRequestError};
 use crate::{
     cancellation::CancellationHandlerMain,
     context::RequestMonitoring,
-    error::ReportableError,
     metrics::{Metrics, NumClientConnectionsGuard},
-    protocol2::read_proxy_protocol,
     proxy::handshake::{handshake, HandshakeData},
 };
 use futures::TryFutureExt;
+use std::net::IpAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, Instrument};
+use tracing::{info, Instrument};
 
 use crate::proxy::{
     connect_compute::{connect_to_compute, TcpMechanism},
@@ -33,107 +31,53 @@ pub async fn task_main(
         info!("proxy has shut down");
     }
 
-    // When set for the server socket, the keepalive setting
-    // will be inherited by all accepted client sockets.
-    socket2::SockRef::from(&listener).set_keepalive(true)?;
+    super::connection_loop(
+        config,
+        listener,
+        cancellation_token,
+        Protocol::Tcp,
+        C {
+            config,
+            backend,
+            cancellation_handler,
+        },
+    )
+    .await
+}
 
-    let connections = tokio_util::task::task_tracker::TaskTracker::new();
+#[derive(Clone)]
+struct C {
+    config: &'static ProxyConfig,
+    backend: &'static ConsoleRedirectBackend,
+    cancellation_handler: Arc<CancellationHandlerMain>,
+}
 
-    while let Some(accept_result) =
-        run_until_cancelled(listener.accept(), &cancellation_token).await
-    {
-        let (socket, peer_addr) = accept_result?;
+impl super::ConnHandler for C {
+    async fn handle(
+        self,
+        session_id: uuid::Uuid,
+        peer_addr: IpAddr,
+        socket: crate::protocol2::ChainRW<tokio::net::TcpStream>,
+        conn_gauge: crate::metrics::NumClientConnectionsGuard<'static>,
+    ) {
+        let ctx = RequestMonitoring::new(session_id, peer_addr, Protocol::Tcp, &self.config.region);
+        let span = ctx.span();
 
-        let conn_gauge = Metrics::get()
-            .proxy
-            .client_connections
-            .guard(crate::metrics::Protocol::Tcp);
+        let startup = Box::pin(
+            handle_client(
+                self.config,
+                self.backend,
+                &ctx,
+                self.cancellation_handler,
+                socket,
+                conn_gauge,
+            )
+            .instrument(span.clone()),
+        );
 
-        let session_id = uuid::Uuid::new_v4();
-        let cancellation_handler = Arc::clone(&cancellation_handler);
-
-        tracing::info!(protocol = "tcp", %session_id, "accepted new TCP connection");
-
-        connections.spawn(async move {
-            let (socket, peer_addr) = match read_proxy_protocol(socket).await {
-                Err(e) => {
-                    error!("per-client task finished with an error: {e:#}");
-                    return;
-                }
-                Ok((_socket, None)) if config.proxy_protocol_v2 == ProxyProtocolV2::Required => {
-                    error!("missing required proxy protocol header");
-                    return;
-                }
-                Ok((_socket, Some(_))) if config.proxy_protocol_v2 == ProxyProtocolV2::Rejected => {
-                    error!("proxy protocol header not supported");
-                    return;
-                }
-                Ok((socket, Some(addr))) => (socket, addr.ip()),
-                Ok((socket, None)) => (socket, peer_addr.ip()),
-            };
-
-            match socket.inner.set_nodelay(true) {
-                Ok(()) => {}
-                Err(e) => {
-                    error!("per-client task finished with an error: failed to set socket option: {e:#}");
-                    return;
-                }
-            };
-
-            let ctx = RequestMonitoring::new(
-                session_id,
-                peer_addr,
-                crate::metrics::Protocol::Tcp,
-                &config.region,
-            );
-            let span = ctx.span();
-
-            let startup = Box::pin(
-                handle_client(
-                    config,
-                    backend,
-                    &ctx,
-                    cancellation_handler,
-                    socket,
-                    conn_gauge,
-                )
-                .instrument(span.clone()),
-            );
-            let res = startup.await;
-
-            match res {
-                Err(e) => {
-                    // todo: log and push to ctx the error kind
-                    ctx.set_error_kind(e.get_error_kind());
-                    error!(parent: &span, "per-client task finished with an error: {e:#}");
-                }
-                Ok(None) => {
-                    ctx.set_success();
-                }
-                Ok(Some(p)) => {
-                    ctx.set_success();
-                    ctx.log_connect();
-                    match p.proxy_pass().instrument(span.clone()).await {
-                        Ok(()) => {}
-                        Err(ErrorSource::Client(e)) => {
-                            error!(parent: &span, "per-client task finished with an IO error from the client: {e:#}");
-                        }
-                        Err(ErrorSource::Compute(e)) => {
-                            error!(parent: &span, "per-client task finished with an IO error from the compute: {e:#}");
-                        }
-                    }
-                }
-            }
-        });
+        let res = startup.await;
+        transition_connection(ctx, res).await;
     }
-
-    connections.close();
-    drop(listener);
-
-    // Drain connections
-    connections.wait().await;
-
-    Ok(())
 }
 
 pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(

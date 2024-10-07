@@ -2,14 +2,17 @@
 
 use std::{
     io,
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     pin::Pin,
     task::{Context, Poll},
 };
 
+use anyhow::bail;
 use bytes::BytesMut;
 use pin_project_lite::pin_project;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
+
+use crate::config::ProxyProtocolV2;
 
 pin_project! {
     /// A chained [`AsyncRead`] with [`AsyncWrite`] passthrough
@@ -60,7 +63,23 @@ const HEADER: [u8; 12] = [
     0x0D, 0x0A, 0x0D, 0x0A, 0x00, 0x0D, 0x0A, 0x51, 0x55, 0x49, 0x54, 0x0A,
 ];
 
-pub(crate) async fn read_proxy_protocol<T: AsyncRead + Unpin>(
+pub(crate) async fn get_client_conn_info<T: AsyncRead + Unpin>(
+    socket: T,
+    proxy_protocol_v2: ProxyProtocolV2,
+) -> anyhow::Result<(ChainRW<T>, Option<IpAddr>)> {
+    match read_proxy_protocol(socket).await? {
+        (_socket, None) if proxy_protocol_v2 == ProxyProtocolV2::Required => {
+            bail!("missing required proxy protocol header");
+        }
+        (_socket, Some(_)) if proxy_protocol_v2 == ProxyProtocolV2::Rejected => {
+            bail!("proxy protocol header not supported");
+        }
+        (socket, Some(addr)) => Ok((socket, Some(addr.ip()))),
+        (socket, None) => Ok((socket, None)),
+    }
+}
+
+async fn read_proxy_protocol<T: AsyncRead + Unpin>(
     mut read: T,
 ) -> std::io::Result<(ChainRW<T>, Option<SocketAddr>)> {
     let mut buf = BytesMut::with_capacity(128);

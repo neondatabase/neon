@@ -16,7 +16,6 @@ use atomic_take::AtomicTake;
 use bytes::Bytes;
 pub use conn_pool::GlobalConnPoolOptions;
 
-use anyhow::Context;
 use futures::future::{select, Either};
 use futures::TryFutureExt;
 use http::{Method, Response, StatusCode};
@@ -36,19 +35,18 @@ use crate::auth::ServerlessBackend;
 use crate::cancellation::CancellationHandlerMain;
 use crate::config::ProxyConfig;
 use crate::context::RequestMonitoring;
-use crate::metrics::Metrics;
-use crate::protocol2::{read_proxy_protocol, ChainRW};
-use crate::proxy::run_until_cancelled;
+use crate::metrics::{Metrics, Protocol};
+use crate::protocol2::ChainRW;
 use crate::rate_limiter::EndpointRateLimiter;
 use crate::serverless::backend::PoolingBackend;
 use crate::serverless::http_util::{api_error_into_response, json_response};
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::IpAddr;
 use std::pin::{pin, Pin};
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn, Instrument};
+use tracing::{error, info, instrument, warn, Instrument};
 use utils::http::error::ApiError;
 
 pub(crate) const SERVERLESS_DRIVER_SNI: &str = "api";
@@ -125,81 +123,100 @@ pub async fn task_main(
         }
     };
 
-    let connections = tokio_util::task::task_tracker::TaskTracker::new();
-    connections.close(); // allows `connections.wait to complete`
+    let requests = TaskTracker::new();
+    requests.close(); // allows `requests.wait to complete`
 
-    while let Some(res) = run_until_cancelled(ws_listener.accept(), &cancellation_token).await {
-        let (conn, peer_addr) = res.context("could not accept TCP stream")?;
-        if let Err(e) = conn.set_nodelay(true) {
-            tracing::error!("could not set nodelay: {e}");
-            continue;
-        }
-        let conn_id = uuid::Uuid::new_v4();
-        let http_conn_span = tracing::info_span!("http_conn", ?conn_id);
+    crate::connection_loop(
+        config,
+        ws_listener,
+        cancellation_token.clone(),
+        Protocol::Http,
+        C {
+            config,
+            backend,
+            cancellation_handler,
+            endpoint_rate_limiter,
+            tls_acceptor,
+            requests: requests.clone(),
+            cancellation_token,
+        },
+    )
+    .await?;
 
+    requests.wait().await;
+
+    Ok(())
+}
+
+#[derive(Clone)]
+struct C {
+    config: &'static ProxyConfig,
+    backend: Arc<PoolingBackend>,
+    cancellation_handler: Arc<CancellationHandlerMain>,
+    endpoint_rate_limiter: Arc<EndpointRateLimiter>,
+    tls_acceptor: Arc<dyn MaybeTlsAcceptor>,
+    requests: TaskTracker,
+    cancellation_token: CancellationToken,
+}
+
+impl super::ConnHandler for C {
+    #[instrument(name = "http_conn", skip_all, fields(conn_id))]
+    async fn handle(
+        self,
+        conn_id: uuid::Uuid,
+        peer_addr: IpAddr,
+        stream: ChainRW<TcpStream>,
+        conn_gauge: crate::metrics::NumClientConnectionsGuard<'static>,
+    ) {
+        // try and close an old HTTP connection.
+        // picked at random
         let n_connections = Metrics::get()
             .proxy
             .client_connections
             .sample(crate::metrics::Protocol::Http);
-        tracing::trace!(?n_connections, threshold = ?config.http_config.client_conn_threshold, "check");
-        if n_connections > config.http_config.client_conn_threshold {
+        tracing::trace!(?n_connections, threshold = ?self.config.http_config.client_conn_threshold, "check");
+        if n_connections > self.config.http_config.client_conn_threshold {
             tracing::trace!("attempting to cancel a random connection");
-            if let Some(token) = config.http_config.cancel_set.take() {
+            if let Some(token) = self.config.http_config.cancel_set.take() {
                 tracing::debug!("cancelling a random connection");
                 token.cancel();
             }
         }
 
-        let conn_token = cancellation_token.child_token();
-        let tls_acceptor = tls_acceptor.clone();
-        let backend = backend.clone();
-        let connections2 = connections.clone();
-        let cancellation_handler = cancellation_handler.clone();
-        let endpoint_rate_limiter = endpoint_rate_limiter.clone();
-        connections.spawn(
-            async move {
-                let conn_token2 = conn_token.clone();
-                let _cancel_guard = config.http_config.cancel_set.insert(conn_id, conn_token2);
+        let conn_token = self.cancellation_token.child_token();
+        let _cancel_guard = self
+            .config
+            .http_config
+            .cancel_set
+            .insert(conn_id, conn_token.clone());
 
-                let session_id = uuid::Uuid::new_v4();
+        let startup_result = Box::pin(connection_startup(
+            self.config,
+            self.tls_acceptor,
+            conn_id,
+            stream,
+            peer_addr,
+        ))
+        .await;
+        let Some((conn, peer_addr)) = startup_result else {
+            return;
+        };
 
-                let _gauge = Metrics::get()
-                    .proxy
-                    .client_connections
-                    .guard(crate::metrics::Protocol::Http);
+        Box::pin(connection_handler(
+            self.config,
+            self.backend,
+            self.requests,
+            self.cancellation_handler,
+            self.endpoint_rate_limiter,
+            conn_token,
+            conn,
+            peer_addr,
+            conn_id,
+        ))
+        .await;
 
-                let startup_result = Box::pin(connection_startup(
-                    config,
-                    tls_acceptor,
-                    session_id,
-                    conn,
-                    peer_addr,
-                ))
-                .await;
-                let Some((conn, peer_addr)) = startup_result else {
-                    return;
-                };
-
-                Box::pin(connection_handler(
-                    config,
-                    backend,
-                    connections2,
-                    cancellation_handler,
-                    endpoint_rate_limiter,
-                    conn_token,
-                    conn,
-                    peer_addr,
-                    session_id,
-                ))
-                .await;
-            }
-            .instrument(http_conn_span),
-        );
+        drop(conn_gauge);
     }
-
-    connections.wait().await;
-
-    Ok(())
 }
 
 pub(crate) trait AsyncReadWrite: AsyncRead + AsyncWrite + Send + 'static {}
@@ -227,26 +244,14 @@ impl MaybeTlsAcceptor for NoTls {
     }
 }
 
-/// Handles the TCP startup lifecycle.
-/// 1. Parses PROXY protocol V2
-/// 2. Handles TLS handshake
+/// Handles the TLS startup handshake.
 async fn connection_startup(
     config: &ProxyConfig,
     tls_acceptor: Arc<dyn MaybeTlsAcceptor>,
     session_id: uuid::Uuid,
-    conn: TcpStream,
-    peer_addr: SocketAddr,
+    conn: ChainRW<TcpStream>,
+    peer_addr: IpAddr,
 ) -> Option<(AsyncRW, IpAddr)> {
-    // handle PROXY protocol
-    let (conn, peer) = match read_proxy_protocol(conn).await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::error!(?session_id, %peer_addr, "failed to accept TCP connection: invalid PROXY protocol V2 header: {e:#}");
-            return None;
-        }
-    };
-
-    let peer_addr = peer.unwrap_or(peer_addr).ip();
     let has_private_peer_addr = match peer_addr {
         IpAddr::V4(ip) => ip.is_private(),
         IpAddr::V6(_) => false,

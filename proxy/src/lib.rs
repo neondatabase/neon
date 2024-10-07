@@ -82,13 +82,16 @@
     impl_trait_overcaptures,
 )]
 
-use std::convert::Infallible;
+use std::{convert::Infallible, future::Future, net::IpAddr};
 
 use anyhow::{bail, Context};
 use intern::{EndpointIdInt, EndpointIdTag, InternId};
-use tokio::task::JoinError;
+use protocol2::{get_client_conn_info, ChainRW};
+use proxy::run_until_cancelled;
+use tokio::{net::TcpStream, task::JoinError};
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
+use tracing::{error, warn};
+use uuid::Uuid;
 
 extern crate hyper0 as hyper;
 
@@ -275,4 +278,82 @@ impl EndpointId {
     pub(crate) fn as_project(&self) -> ProjectId {
         ProjectId(self.0.clone())
     }
+}
+
+pub(crate) trait ConnHandler: Clone + Send + 'static {
+    fn handle(
+        self,
+        session_id: Uuid,
+        peer_addr: IpAddr,
+        stream: ChainRW<TcpStream>,
+        conn_gauge: metrics::NumClientConnectionsGuard<'static>,
+    ) -> impl Future<Output = ()> + Send;
+}
+
+/// Accept connections, parse the proxy-protocol v2 header and spawn a tracked connection task.
+pub(crate) async fn connection_loop<C>(
+    config: &'static config::ProxyConfig,
+    listener: tokio::net::TcpListener,
+    cancellation_token: CancellationToken,
+    protocol: metrics::Protocol,
+    conn_handler: C,
+) -> anyhow::Result<()>
+where
+    C: ConnHandler,
+{
+    // When set for the server socket, the keepalive setting
+    // will be inherited by all accepted client sockets.
+    socket2::SockRef::from(&listener).set_keepalive(true)?;
+
+    let connections = tokio_util::task::task_tracker::TaskTracker::new();
+
+    while let Some(accept_result) =
+        run_until_cancelled(listener.accept(), &cancellation_token).await
+    {
+        let (socket, peer_addr) = accept_result?;
+
+        let conn_gauge = metrics::Metrics::get()
+            .proxy
+            .client_connections
+            .guard(protocol);
+
+        let session_id = uuid::Uuid::new_v4();
+        let conn_handler = conn_handler.clone();
+
+        tracing::info!(protocol = protocol.as_str(), %session_id, "accepted new TCP connection");
+
+        connections.spawn(async move {
+            let (socket, peer_addr) = match get_client_conn_info(socket, config.proxy_protocol_v2).await {
+                Err(e) => {
+                    error!("per-client task finished with an error: {e:#}");
+                    return;
+                }
+                Ok((socket, Some(addr))) => (socket, addr),
+                Ok((socket, None)) => (socket, peer_addr.ip()),
+            };
+
+            match socket.inner.set_nodelay(true) {
+                Ok(()) => {}
+                Err(e) => {
+                    error!("per-client task finished with an error: failed to set socket option: {e:#}");
+                    return;
+                }
+            };
+
+            conn_handler.handle(
+                session_id,
+                peer_addr,
+                socket,
+                conn_gauge,
+            ).await;
+        });
+    }
+
+    connections.close();
+    drop(listener);
+
+    // Drain connections
+    connections.wait().await;
+
+    Ok(())
 }
