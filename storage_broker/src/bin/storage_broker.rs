@@ -682,7 +682,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         builder
             .http2()
             .timer(TokioTimer::new())
-            .keep_alive_interval(Some(args.http2_keepalive_interval));
+            .keep_alive_interval(Some(args.http2_keepalive_interval))
+            .max_concurrent_streams(None);
 
         let storage_broker_server_cloned = storage_broker_server.clone();
         let connect_info = stream.connect_info();
