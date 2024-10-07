@@ -158,7 +158,7 @@ def neon_binpath(base_dir: Path, build_type: str) -> Iterator[Path]:
 
 
 @pytest.fixture(scope="function")
-def compatibility_neon_binpath(base_dir: Path, build_type: str) -> Optional[Iterator[Path]]:
+def compatibility_neon_binpath() -> Optional[Iterator[Path]]:
     if os.getenv("REMOTE_ENV"):
         return
     comp_binpath = None
@@ -179,7 +179,7 @@ def pg_distrib_dir(base_dir: Path) -> Iterator[Path]:
 
 
 @pytest.fixture(scope="session")
-def compatibility_pg_distrib_dir(base_dir: Path) -> Optional[Iterator[Path]]:
+def compatibility_pg_distrib_dir() -> Optional[Iterator[Path]]:
     compat_distrib_dir = None
     if env_compat_postgres_bin := os.environ.get("COMPAT_POSTGRES_DISTRIB_DIR"):
         compat_distrib_dir = Path(env_compat_postgres_bin).resolve()
@@ -485,7 +485,7 @@ class NeonEnvBuilder:
             "test_"
         ), "Unexpectedly instantiated from outside a test function"
         self.test_name = test_name
-        self.compatibility_neon_binpath = compatibility_neon_binpath.absolute()
+        self.compatibility_neon_binpath = compatibility_neon_binpath
         self.compatibility_pg_distrib_dir = compatibility_pg_distrib_dir
         self.version_combination = combination
         self.mixdir = self.test_output_dir / "mixdir_neon"
