@@ -992,7 +992,7 @@ redo_block_filter(XLogReaderState *record, uint8 block_id)
 	 * If this block isn't one we are currently restoring, then return 'true'
 	 * so that this gets ignored
 	 */
-	return !BUFFERTAGS_EQUAL(target_tag, target_redo_tag);
+	return !BufferTagsEqual(&target_tag, &target_redo_tag);
 }
 
 /*
