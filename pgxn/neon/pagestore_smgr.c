@@ -803,15 +803,19 @@ prefetch_register_bufferv(BufferTag tag, neon_request_lsns *frlsns,
 						  bool is_prefetch)
 {
 	uint64		min_ring_index;
-	PrefetchRequest req;
+	PrefetchRequest hashkey;
 #if USE_ASSERT_CHECKING
 	bool		any_hits = false;
 #endif
 	/* We will never read further ahead than our buffer can store. */
 	nblocks = Max(1, Min(nblocks, readahead_buffer_size));
 
-	/* use an intermediate PrefetchRequest struct to ensure correct alignment */
-	req.buftag = tag;
+	/*
+	 * Use an intermediate PrefetchRequest struct as the hash key to ensure
+	 * correct alignment and that the padding bytes are cleared.
+	 */
+	memset(&hashkey.buftag, 0, sizeof(BufferTag));
+	hashkey.buftag = tag;
 
 Retry:
 	min_ring_index = UINT64_MAX;
@@ -837,8 +841,8 @@ Retry:
 		slot = NULL;
 		entry = NULL;
 
-		req.buftag.blockNum = tag.blockNum + i;
-		entry = prfh_lookup(MyPState->prf_hash, (PrefetchRequest *) &req);
+		hashkey.buftag.blockNum = tag.blockNum + i;
+		entry = prfh_lookup(MyPState->prf_hash, &hashkey);
 
 		if (entry != NULL)
 		{
@@ -849,7 +853,7 @@ Retry:
 			Assert(slot->status != PRFS_UNUSED);
 			Assert(MyPState->ring_last <= ring_index &&
 				   ring_index < MyPState->ring_unused);
-			Assert(BUFFERTAGS_EQUAL(slot->buftag, req.buftag));
+			Assert(BUFFERTAGS_EQUAL(slot->buftag, hashkey.buftag));
 
 			/*
 			 * If the caller specified a request LSN to use, only accept
@@ -981,7 +985,7 @@ Retry:
 		 * We must update the slot data before insertion, because the hash
 		 * function reads the buffer tag from the slot.
 		 */
-		slot->buftag = req.buftag;
+		slot->buftag = hashkey.buftag;
 		slot->shard_no = get_shard_number(&tag);
 		slot->my_ring_index = ring_index;
 
@@ -2749,14 +2753,19 @@ neon_read_at_lsnv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber base_block
 	uint64		ring_index;
 	PrfHashEntry *entry;
 	PrefetchRequest *slot;
-	BufferTag	buftag = {0};
+	PrefetchRequest hashkey;
 
 	Assert(PointerIsValid(request_lsns));
 	Assert(nblocks >= 1);
 
-	CopyNRelFileInfoToBufTag(buftag, rinfo);
-	buftag.forkNum = forkNum;
-	buftag.blockNum = base_blockno;
+	/*
+	 * Use an intermediate PrefetchRequest struct as the hash key to ensure
+	 * correct alignment and that the padding bytes are cleared.
+	 */
+	memset(&hashkey.buftag, 0, sizeof(BufferTag));
+	CopyNRelFileInfoToBufTag(hashkey.buftag, rinfo);
+	hashkey.buftag.forkNum = forkNum;
+	hashkey.buftag.blockNum = base_blockno;
 
 	/*
 	 * The redo process does not lock pages that it needs to replay but are
@@ -2774,7 +2783,7 @@ neon_read_at_lsnv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber base_block
 	 * weren't for the behaviour of the LwLsn cache that uses the highest
 	 * value of the LwLsn cache when the entry is not found.
 	 */
-	prefetch_register_bufferv(buftag, request_lsns, nblocks, mask, false);
+	prefetch_register_bufferv(hashkey.buftag, request_lsns, nblocks, mask, false);
 
 	for (int i = 0; i < nblocks; i++)
 	{
@@ -2795,8 +2804,8 @@ neon_read_at_lsnv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber base_block
 		 * Try to find prefetched page in the list of received pages.
 		 */
 Retry:
-		buftag.blockNum = blockno;
-		entry = prfh_lookup(MyPState->prf_hash, (PrefetchRequest *) &buftag);
+		hashkey.buftag.blockNum = blockno;
+		entry = prfh_lookup(MyPState->prf_hash, &hashkey);
 
 		if (entry != NULL)
 		{
@@ -2833,7 +2842,7 @@ Retry:
 		{
 			if (entry == NULL)
 			{
-				ring_index = prefetch_register_bufferv(buftag, reqlsns, 1, NULL, false);
+				ring_index = prefetch_register_bufferv(hashkey.buftag, reqlsns, 1, NULL, false);
 				Assert(ring_index != UINT64_MAX);
 				slot = GetPrfSlot(ring_index);
 			}
@@ -2858,8 +2867,8 @@ Retry:
 		} while (!prefetch_wait_for(ring_index));
 
 		Assert(slot->status == PRFS_RECEIVED);
-		Assert(memcmp(&buftag, &slot->buftag, sizeof(BufferTag)) == 0);
-		Assert(buftag.blockNum == base_blockno + i);
+		Assert(memcmp(&hashkey.buftag, &slot->buftag, sizeof(BufferTag)) == 0);
+		Assert(hashkey.buftag.blockNum == base_blockno + i);
 
 		resp = slot->response;
 
