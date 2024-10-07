@@ -118,6 +118,8 @@ static UnloggedBuildPhase unlogged_build_phase = UNLOGGED_BUILD_NOT_IN_PROGRESS;
 static bool neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id);
 static bool (*old_redo_read_buffer_filter) (XLogReaderState *record, uint8 block_id) = NULL;
 
+static BlockNumber neon_nblocks(SMgrRelation reln, ForkNumber forknum);
+
 /*
  * Prefetch implementation:
  *
@@ -1775,7 +1777,7 @@ neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, co
 /*
  *	neon_init() -- Initialize private state
  */
-void
+static void
 neon_init(void)
 {
 	Size		prfs_size;
@@ -2165,7 +2167,7 @@ neon_prefetch_response_usable(neon_request_lsns *request_lsns,
 /*
  *	neon_exists() -- Does the physical file exist?
  */
-bool
+static bool
 neon_exists(SMgrRelation reln, ForkNumber forkNum)
 {
 	bool		exists;
@@ -2271,7 +2273,7 @@ neon_exists(SMgrRelation reln, ForkNumber forkNum)
  *
  * If isRedo is true, it's okay for the relation to exist already.
  */
-void
+static void
 neon_create(SMgrRelation reln, ForkNumber forkNum, bool isRedo)
 {
 	switch (reln->smgr_relpersistence)
@@ -2347,7 +2349,7 @@ neon_create(SMgrRelation reln, ForkNumber forkNum, bool isRedo)
  * Note: any failure should be reported as WARNING not ERROR, because
  * we are usually not in a transaction anymore when this is called.
  */
-void
+static void
 neon_unlink(NRelFileInfoBackend rinfo, ForkNumber forkNum, bool isRedo)
 {
 	/*
@@ -2371,7 +2373,7 @@ neon_unlink(NRelFileInfoBackend rinfo, ForkNumber forkNum, bool isRedo)
  *		EOF).  Note that we assume writing a block beyond current EOF
  *		causes intervening file space to become filled with zeroes.
  */
-void
+static void
 #if PG_MAJORVERSION_NUM < 16
 neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 			char *buffer, bool skipFsync)
@@ -2463,7 +2465,7 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 }
 
 #if PG_MAJORVERSION_NUM >= 16
-void
+static void
 neon_zeroextend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blocknum,
 				int nblocks, bool skipFsync)
 {
@@ -2559,7 +2561,7 @@ neon_zeroextend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blocknum,
 /*
  *  neon_open() -- Initialize newly-opened relation.
  */
-void
+static void
 neon_open(SMgrRelation reln)
 {
 	/*
@@ -2577,7 +2579,7 @@ neon_open(SMgrRelation reln)
 /*
  *	neon_close() -- Close the specified relation, if it isn't closed already.
  */
-void
+static void
 neon_close(SMgrRelation reln, ForkNumber forknum)
 {
 	/*
@@ -2592,7 +2594,7 @@ neon_close(SMgrRelation reln, ForkNumber forknum)
 /*
  *	neon_prefetch() -- Initiate asynchronous read of the specified block of a relation
  */
-bool
+static bool
 neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 			  int nblocks)
 {
@@ -2654,7 +2656,7 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 /*
  *	neon_prefetch() -- Initiate asynchronous read of the specified block of a relation
  */
-bool
+static bool
 neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum)
 {
 	uint64		ring_index PG_USED_FOR_ASSERTS_ONLY;
@@ -2698,7 +2700,7 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum)
  * This accepts a range of blocks because flushing several pages at once is
  * considerably more efficient than doing so individually.
  */
-void
+static void
 neon_writeback(SMgrRelation reln, ForkNumber forknum,
 			   BlockNumber blocknum, BlockNumber nblocks)
 {
@@ -2919,10 +2921,10 @@ neon_read_at_lsn(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
  *	neon_read() -- Read the specified block from a relation.
  */
 #if PG_MAJORVERSION_NUM < 16
-void
+static void
 neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, char *buffer)
 #else
-void
+static void
 neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, void *buffer)
 #endif
 {
@@ -3031,7 +3033,7 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, void *buffer
 #endif /* PG_MAJORVERSION_NUM <= 16 */
 
 #if PG_MAJORVERSION_NUM >= 17
-void
+static void
 neon_readv(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 		void **buffers, BlockNumber nblocks)
 {
@@ -3202,7 +3204,7 @@ hexdump_page(char *page)
  *		relation (ie, those before the current EOF).  To extend a relation,
  *		use mdextend().
  */
-void
+static void
 #if PG_MAJORVERSION_NUM < 16
 neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, char *buffer, bool skipFsync)
 #else
@@ -3272,7 +3274,7 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, const vo
 
 
 #if PG_MAJORVERSION_NUM >= 17
-void
+static void
 neon_writev(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
 			 const void **buffers, BlockNumber nblocks, bool skipFsync)
 {
@@ -3322,7 +3324,7 @@ neon_writev(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
 /*
  *	neon_nblocks() -- Get the number of blocks stored in a relation.
  */
-BlockNumber
+static BlockNumber
 neon_nblocks(SMgrRelation reln, ForkNumber forknum)
 {
 	NeonResponse *resp;
@@ -3459,7 +3461,7 @@ neon_dbsize(Oid dbNode)
 /*
  *	neon_truncate() -- Truncate relation to specified number of blocks.
  */
-void
+static void
 neon_truncate(SMgrRelation reln, ForkNumber forknum, BlockNumber nblocks)
 {
 	XLogRecPtr	lsn;
@@ -3528,7 +3530,7 @@ neon_truncate(SMgrRelation reln, ForkNumber forknum, BlockNumber nblocks)
  * crash before the next checkpoint syncs the newly-inactive segment, that
  * segment may survive recovery, reintroducing unwanted data into the table.
  */
-void
+static void
 neon_immedsync(SMgrRelation reln, ForkNumber forknum)
 {
 	switch (reln->smgr_relpersistence)
@@ -3558,8 +3560,8 @@ neon_immedsync(SMgrRelation reln, ForkNumber forknum)
 }
 
 #if PG_MAJORVERSION_NUM >= 17
-void
-neon_regisersync(SMgrRelation reln, ForkNumber forknum)
+static void
+neon_registersync(SMgrRelation reln, ForkNumber forknum)
 {
 	switch (reln->smgr_relpersistence)
 	{
@@ -3889,7 +3891,7 @@ static const struct f_smgr neon_smgr =
 	.smgr_truncate = neon_truncate,
 	.smgr_immedsync = neon_immedsync,
 #if PG_MAJORVERSION_NUM >= 17
-	.smgr_registersync = neon_regisersync,
+	.smgr_registersync = neon_registersync,
 #endif
 	.smgr_start_unlogged_build = neon_start_unlogged_build,
 	.smgr_finish_unlogged_build_phase_1 = neon_finish_unlogged_build_phase_1,
