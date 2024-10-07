@@ -5343,7 +5343,7 @@ impl Service {
         node_id: NodeId,
         availability: Option<NodeAvailability>,
         scheduling: Option<NodeSchedulingPolicy>,
-        nodes_lock: &TracingExclusiveGuard<NodeOperations>,
+        node_lock: &TracingExclusiveGuard<NodeOperations>,
     ) -> Result<AvailabilityTransition, ApiError> {
         if let Some(scheduling) = scheduling {
             // Scheduling is a persistent part of Node: we must write updates to the database before
@@ -5373,7 +5373,7 @@ impl Service {
             };
 
             if matches!(availability_transition, AvailabilityTransition::ToActive) {
-                self.node_activate_reconcile(activate_node, nodes_lock)
+                self.node_activate_reconcile(activate_node, node_lock)
                     .await?;
             }
             availability_transition
@@ -5414,7 +5414,7 @@ impl Service {
         &self,
         node_id: NodeId,
         transition: AvailabilityTransition,
-        _nodes_lock: &TracingExclusiveGuard<NodeOperations>,
+        _node_lock: &TracingExclusiveGuard<NodeOperations>,
     ) -> Result<(), ApiError> {
         // Modify scheduling state for any Tenants that are affected by a change in the node's availability state.
         match transition {
