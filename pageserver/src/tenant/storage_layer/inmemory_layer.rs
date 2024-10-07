@@ -809,9 +809,9 @@ impl InMemoryLayer {
 
         match l0_flush_global_state {
             l0_flush::Inner::Direct { .. } => {
-                let file_contents: Vec<u8> = inner.file.load_to_vec(ctx).await?;
-
-                let file_contents = Bytes::from(file_contents);
+                let file_contents = inner.file.load_to_io_buf(ctx).await?;
+                // TODO(yuchen): see ways to avoid this copy.
+                let file_contents = Bytes::copy_from_slice(&file_contents);
 
                 for (key, vec_map) in inner.index.iter() {
                     // Write all page versions

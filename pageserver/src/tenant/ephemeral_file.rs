@@ -9,7 +9,7 @@ use crate::tenant::storage_layer::inmemory_layer::vectored_dio_read::File;
 use crate::virtual_file::owned_buffers_io::slice::SliceMutExt;
 use crate::virtual_file::owned_buffers_io::util::size_tracking_writer;
 use crate::virtual_file::owned_buffers_io::write::Buffer;
-use crate::virtual_file::{self, owned_buffers_io, VirtualFile};
+use crate::virtual_file::{self, owned_buffers_io, IoBufferMut, VirtualFile};
 use bytes::BytesMut;
 use camino::Utf8PathBuf;
 use num_traits::Num;
@@ -107,15 +107,18 @@ impl EphemeralFile {
         self.page_cache_file_id
     }
 
-    pub(crate) async fn load_to_vec(&self, ctx: &RequestContext) -> Result<Vec<u8>, io::Error> {
+    pub(crate) async fn load_to_io_buf(
+        &self,
+        ctx: &RequestContext,
+    ) -> Result<IoBufferMut, io::Error> {
         let size = self.len().into_usize();
-        let vec = Vec::with_capacity(size);
-        let (slice, nread) = self.read_exact_at_eof_ok(0, vec.slice_full(), ctx).await?;
+        let buf = IoBufferMut::with_capacity(size);
+        let (slice, nread) = self.read_exact_at_eof_ok(0, buf.slice_full(), ctx).await?;
         assert_eq!(nread, size);
-        let vec = slice.into_inner();
-        assert_eq!(vec.len(), nread);
-        assert_eq!(vec.capacity(), size, "we shouldn't be reallocating");
-        Ok(vec)
+        let buf = slice.into_inner();
+        assert_eq!(buf.len(), nread);
+        assert_eq!(buf.capacity(), size, "we shouldn't be reallocating");
+        Ok(buf)
     }
 
     /// Returns the offset at which the first byte of the input was written, for use
@@ -385,7 +388,7 @@ mod tests {
 
         // assert the state is as this test expects it to be
         assert_eq!(
-            &file.load_to_vec(&ctx).await.unwrap(),
+            &file.load_to_io_buf(&ctx).await.unwrap(),
             &content[0..cap + cap / 2]
         );
         let md = file

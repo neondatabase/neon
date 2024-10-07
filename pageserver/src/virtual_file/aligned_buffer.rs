@@ -11,12 +11,14 @@ use std::{
 
 use bytes::buf::UninitSlice;
 
+#[derive(Debug)]
 struct IoBufferPtr(*mut u8);
 
 // SAFETY: We gurantees no one besides `IoBufferPtr` itself has the raw pointer.
 unsafe impl Send for IoBufferPtr {}
 
 /// An aligned buffer type used for I/O.
+#[derive(Debug)]
 pub struct AlignedBufferMut<const ALIGN: usize> {
     ptr: IoBufferPtr,
     capacity: usize,
@@ -249,6 +251,24 @@ impl<const ALIGN: usize> Deref for AlignedBufferMut<ALIGN> {
 impl<const ALIGN: usize> DerefMut for AlignedBufferMut<ALIGN> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.as_mut_slice()
+    }
+}
+
+impl<const ALIGN: usize> AsRef<[u8]> for AlignedBufferMut<ALIGN> {
+    fn as_ref(&self) -> &[u8] {
+        self.as_slice()
+    }
+}
+
+impl<const ALIGN: usize> AsMut<[u8]> for AlignedBufferMut<ALIGN> {
+    fn as_mut(&mut self) -> &mut [u8] {
+        self.as_mut_slice()
+    }
+}
+
+impl<const ALIGN: usize> PartialEq<[u8]> for AlignedBufferMut<ALIGN> {
+    fn eq(&self, other: &[u8]) -> bool {
+        self.as_slice().eq(other)
     }
 }
 
