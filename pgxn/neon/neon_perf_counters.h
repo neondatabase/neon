@@ -15,17 +15,26 @@
 #include "storage/proc.h"
 #endif
 
-static const uint64 getpage_wait_bucket_thresholds[] = {
-	      20,       30,       60,       100,  /* 0      -  100 us */
+static const uint64 io_wait_bucket_thresholds[] = {
+	       2,        3,        6,        10,  /* 0 us   - 10 us */
+	      20,       30,       60,       100,  /* 10 us  - 100 us */
 	     200,      300,      600,	   1000,  /* 100 us - 1 ms */
 	    2000,     3000,     6000,     10000,  /* 1 ms   - 10 ms */
 	   20000,    30000,    60000,    100000,  /* 10 ms  - 100 ms */
 	  200000,   300000,   600000,   1000000,  /* 100 ms - 1 s */
 	 2000000,  3000000,  6000000,  10000000,  /* 1 s - 10 s */
-    20000000, 30000000, 60000000, 100000000,  /* 10 s - 100 s */
 	UINT64_MAX,
 };
-#define NUM_GETPAGE_WAIT_BUCKETS (lengthof(getpage_wait_bucket_thresholds))
+#define NUM_IO_WAIT_BUCKETS (lengthof(io_wait_bucket_thresholds))
+
+typedef struct IOHistogramData
+{
+	uint64		wait_us_count;
+	uint64		wait_us_sum;
+	uint64		wait_us_bucket[NUM_IO_WAIT_BUCKETS];
+} IOHistogramData;
+
+typedef IOHistogramData *IOHistogram;
 
 typedef struct
 {
@@ -39,9 +48,7 @@ typedef struct
 	 * the backend, but the 'neon_backend_perf_counters' view will convert
 	 * them to seconds, to make them more idiomatic as prometheus metrics.
 	 */
-	uint64		getpage_wait_us_count;
-	uint64		getpage_wait_us_sum;
-	uint64		getpage_wait_us_bucket[NUM_GETPAGE_WAIT_BUCKETS];
+	IOHistogramData getpage_hist;
 
 	/*
 	 * Total number of speculative prefetch Getpage requests and synchronous
@@ -50,7 +57,11 @@ typedef struct
 	uint64		getpage_prefetch_requests_total;
 	uint64		getpage_sync_requests_total;
 
-	/* XXX: It's not clear to me when these misses happen. */
+	/*
+	 * Total number of readahead misses; consisting of either prefetches that
+	 * don't satisfy the LSN bounds, or cases where no readahead was issued
+	 * for the read.
+	 */
 	uint64		getpage_prefetch_misses_total;
 
 	/*
@@ -80,6 +91,16 @@ typedef struct
 	 * this can be smaller than pageserver_requests_sent_total.
 	 */
 	uint64		pageserver_send_flushes_total;
+	
+	/*
+	 * Number of open requests to PageServer.
+	 */
+	uint64		pageserver_open_requests;
+
+	/*
+	 * Number of unused prefetches currently cached in this backend.
+	 */
+	uint64		getpage_prefetches_buffered;
 
 	/*
 	 * Number of requests satisfied from the LFC.
@@ -91,6 +112,9 @@ typedef struct
 	 */
 	uint64		file_cache_hits_total;
 
+	/* LFC I/O time buckets */
+	IOHistogramData file_cache_read_hist;
+	IOHistogramData file_cache_write_hist;
 } neon_per_backend_counters;
 
 /* Pointer to the shared memory array of neon_per_backend_counters structs */
@@ -111,6 +135,8 @@ extern neon_per_backend_counters *neon_per_backend_counters_shared;
 #endif
 
 extern void inc_getpage_wait(uint64 latency);
+extern void inc_page_cache_read_wait(uint64 latency);
+extern void inc_page_cache_write_wait(uint64 latency);
 
 extern Size NeonPerfCountersShmemSize(void);
 extern void NeonPerfCountersShmemInit(void);
