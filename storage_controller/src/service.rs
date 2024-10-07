@@ -1079,6 +1079,26 @@ impl Service {
                     match delta {
                         ObservedStateDelta::Upsert(ups) => {
                             let (node_id, loc) = *ups;
+
+                            let crnt_gen = tenant
+                                .observed
+                                .locations
+                                .get(&node_id)
+                                .and_then(|loc| loc.conf.as_ref())
+                                .and_then(|conf| conf.generation);
+                            let new_gen = loc.conf.as_ref().and_then(|conf| conf.generation);
+                            match (crnt_gen, new_gen) {
+                                (Some(crnt), Some(new)) if crnt_gen > new_gen => {
+                                    tracing::warn!("Reconcile result with stale generation ({} > {}). Skipping update {}: {:?} and setting observed location to None", crnt, new, node_id, loc);
+                                    tenant
+                                        .observed
+                                        .locations
+                                        .insert(node_id, ObservedStateLocation { conf: None });
+                                    continue;
+                                }
+                                _ => {}
+                            }
+
                             if let Some(conf) = &loc.conf {
                                 tracing::info!(
                                     "Updating observed location {}: {:?}",
@@ -1123,6 +1143,26 @@ impl Service {
                     match delta {
                         ObservedStateDelta::Upsert(ups) => {
                             let (node_id, loc) = *ups;
+
+                            let crnt_gen = tenant
+                                .observed
+                                .locations
+                                .get(&node_id)
+                                .and_then(|loc| loc.conf.as_ref())
+                                .and_then(|conf| conf.generation);
+                            let new_gen = loc.conf.as_ref().and_then(|conf| conf.generation);
+                            match (crnt_gen, new_gen) {
+                                (Some(crnt), Some(new)) if crnt_gen > new_gen => {
+                                    tracing::warn!("Reconcile result with stale generation ({} > {}). Skipping update {}: {:?} and setting observed location to None", crnt, new, node_id, loc);
+                                    tenant
+                                        .observed
+                                        .locations
+                                        .insert(node_id, ObservedStateLocation { conf: None });
+                                    continue;
+                                }
+                                _ => {}
+                            }
+
                             if let Some(conf) = &loc.conf {
                                 tracing::info!(
                                     "Updating observed location {}: {:?}",
