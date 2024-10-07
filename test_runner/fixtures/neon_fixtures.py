@@ -163,14 +163,11 @@ def neon_binpath(base_dir: Path, build_type: str) -> Iterator[Path]:
 def compatibility_neon_binpath(base_dir: Path, build_type: str) -> Optional[Iterator[Path]]:
     if os.getenv("REMOTE_ENV"):
         return
+    comp_binpath = None
     if env_compatibility_neon_binpath := os.environ.get("COMPATIBILITY_NEON_BIN"):
         comp_binpath = Path(env_compatibility_neon_binpath).resolve()
         if not (comp_binpath / "pageserver").exists():
             raise Exception(f"compatibility neon binaries not found ad {comp_binpath}")
-    else:
-        comp_binpath = base_dir / "neon_previous" / "target" / build_type
-        if not (comp_binpath / "pageserver").exists():
-            comp_binpath = None
     yield comp_binpath
 
 
@@ -187,17 +184,14 @@ def pg_distrib_dir(base_dir: Path) -> Iterator[Path]:
 
 @pytest.fixture(scope="session")
 def compatibility_pg_distrib_dir(base_dir: Path) -> Optional[Iterator[Path]]:
+    compat_distrib_dir = None
     if env_compat_postgres_bin := os.environ.get("COMPAT_POSTGRES_DISTRIB_DIR"):
         compat_distrib_dir = Path(env_compat_postgres_bin).resolve()
         if not compat_distrib_dir.exists():
             raise Exception(f"compatibility postgres directory not fount at {compat_distrib_dir}")
-    else:
-        compat_distrib_dir = base_dir / "neon_previous" / "pg_install"
-        if not compat_distrib_dir.exists():
-            compat_distrib_dir = None
 
     if compat_distrib_dir:
-        log.info(f"pg_distrib_dir is {compat_distrib_dir}")
+        log.info(f"compatibility_pg_distrib_dir is {compat_distrib_dir}")
     yield compat_distrib_dir
 
 
@@ -413,7 +407,7 @@ class NeonEnvBuilder:
         test_name: str,
         top_output_dir: Path,
         test_output_dir: Path,
-        request: FixtureRequest,
+        combination,
         test_overlay_dir: Optional[Path] = None,
         pageserver_remote_storage: Optional[RemoteStorage] = None,
         # toml that will be decomposed into `--config-override` flags during `pageserver --init`
@@ -497,17 +491,15 @@ class NeonEnvBuilder:
         self.test_name = test_name
         self.compatibility_neon_binpath = compatibility_neon_binpath
         self.compatibility_pg_distrib_dir = compatibility_pg_distrib_dir
-        self.version_combination: Optional[object] = None
-        if "combination" in request._pyfuncitem.callspec.params:
-            self.version_combination = request._pyfuncitem.callspec.params["combination"]
+        self.version_combination = combination
         self.mixdir = self.test_output_dir / "mixdir_neon"
         if self.version_combination is not None:
             assert (
                 self.compatibility_neon_binpath is not None
-            ), "compatibility_neon_bindir is required when using mixed versions"
+            ), "the environment variable COMPATIBILITY_NEON_BIN is required when using mixed versions"
             assert (
                 self.compatibility_pg_distrib_dir is not None
-            ), "compatibility_pg_distrib_dir is required when using mixed versions"
+            ), "the environment variable COMPAT_POSTGRES_DISTRIB_DIR is required when using mixed versions"
             self.mixdir.mkdir(mode=0o755, exist_ok=True)
             self._mix_versions()
 
@@ -720,7 +712,7 @@ class NeonEnvBuilder:
             )
             for filename in paths:
                 os.link(directory / filename, self.mixdir / filename)
-        if not getattr(self.version_combination, "compute"):
+        if not self.version_combination.compute:
             self.pg_distrib_dir = self.compatibility_pg_distrib_dir
         self.neon_binpath = self.mixdir
 
@@ -1424,7 +1416,9 @@ def neon_simple_env(
         pageserver_aux_file_policy=pageserver_aux_file_policy,
         pageserver_default_tenant_config_compaction_algorithm=pageserver_default_tenant_config_compaction_algorithm,
         pageserver_io_buffer_alignment=pageserver_io_buffer_alignment,
-        request=request,
+        combination=request._pyfuncitem.callspec.params["combination"]
+        if "combination" in request._pyfuncitem.callspec.params
+        else None,
     ) as builder:
         env = builder.init_start()
 
@@ -1478,7 +1472,9 @@ def neon_env_builder(
         compatibility_neon_binpath=compatibility_neon_binpath,
         pg_distrib_dir=pg_distrib_dir,
         compatibility_pg_distrib_dir=compatibility_pg_distrib_dir,
-        request=request,
+        combination=request._pyfuncitem.callspec.params["combination"]
+        if "combination" in request._pyfuncitem.callspec.params
+        else None,
         pg_version=pg_version,
         run_id=run_id,
         preserve_database_files=cast(bool, pytestconfig.getoption("--preserve-database-files")),
