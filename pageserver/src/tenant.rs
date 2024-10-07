@@ -1627,7 +1627,7 @@ impl Tenant {
             // the API's capabilities, instead of serving as the sole way to defend their invariants.
             match new_state {
                 TimelineArchivalState::Unarchived => {
-                    Self::check_to_be_unarchived_timeline_has_no_archived_parent(&timeline)?
+                    Self::check_to_be_unarchived_timeline_has_no_archived_parent(timeline)?
                 }
                 TimelineArchivalState::Archived => {
                     Self::check_to_be_archived_has_no_unarchived_children(timeline_id, &timelines)?
