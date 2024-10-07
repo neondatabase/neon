@@ -5338,6 +5338,10 @@ impl Service {
         Ok(())
     }
 
+    /// Configure in-memory and persistent state of a node as requested
+    ///
+    /// Note that this function does not trigger any immediate side effects in response
+    /// to the changes. That part is handled by [`Self::handle_node_availability_transition`].
     async fn node_state_configure(
         &self,
         node_id: NodeId,
@@ -5410,6 +5414,11 @@ impl Service {
         Ok(availability_transition)
     }
 
+    /// Handle availability transition of one node
+    ///
+    /// Note that you should first call [`Self::node_state_configure`] to update
+    /// the in-memory state referencing that node. If you need to handle more than one transition
+    /// consider using [`Self::handle_node_availability_transitions`].
     async fn handle_node_availability_transition(
         &self,
         node_id: NodeId,
@@ -5520,6 +5529,10 @@ impl Service {
         Ok(())
     }
 
+    /// Handle availability transition for multiple nodes
+    ///
+    /// Note that you should first call [`Self::node_state_configure`] for
+    /// all nodes being handled here for the handling to use fresh in-memory state.
     async fn handle_node_availability_transitions(
         &self,
         transitions: Vec<(
