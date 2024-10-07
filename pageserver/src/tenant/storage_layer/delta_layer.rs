@@ -1198,7 +1198,6 @@ impl DeltaLayerInner {
         let mut prev: Option<(Key, Lsn, BlobRef)> = None;
 
         let mut read_builder: Option<ChunkedVectoredReadBuilder> = None;
-        let align = virtual_file::get_io_buffer_alignment();
 
         let max_read_size = self
             .max_vectored_read_bytes
@@ -1247,7 +1246,6 @@ impl DeltaLayerInner {
                         offsets.end.pos(),
                         meta,
                         max_read_size,
-                        align,
                     ))
                 }
             } else {

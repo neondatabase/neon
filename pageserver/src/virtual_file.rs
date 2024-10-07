@@ -1330,14 +1330,9 @@ impl OpenFiles {
 /// server startup.
 ///
 #[cfg(not(test))]
-pub fn init(num_slots: usize, engine: IoEngineKind, io_buffer_alignment: usize) {
+pub fn init(num_slots: usize, engine: IoEngineKind) {
     if OPEN_FILES.set(OpenFiles::new(num_slots)).is_err() {
         panic!("virtual_file::init called twice");
-    }
-    if set_io_buffer_alignment(io_buffer_alignment).is_err() {
-        panic!(
-            "IO buffer alignment needs to be a power of two and greater than 512, got {io_buffer_alignment}"
-        );
     }
     io_engine::init(engine);
     crate::metrics::virtual_file_descriptor_cache::SIZE_MAX.set(num_slots as u64);
@@ -1362,45 +1357,9 @@ fn get_open_files() -> &'static OpenFiles {
     }
 }
 
-static IO_BUFFER_ALIGNMENT: AtomicUsize = AtomicUsize::new(DEFAULT_IO_BUFFER_ALIGNMENT);
-
-/// Returns true if the alignment is a power of two and is greater or equal to 512.
-fn is_valid_io_buffer_alignment(align: usize) -> bool {
-    align.is_power_of_two() && align >= 512
-}
-
-/// Sets IO buffer alignment requirement. Returns error if the alignment requirement is
-/// not a power of two or less than 512 bytes.
-#[allow(unused)]
-pub(crate) fn set_io_buffer_alignment(align: usize) -> Result<(), usize> {
-    if is_valid_io_buffer_alignment(align) {
-        IO_BUFFER_ALIGNMENT.store(align, std::sync::atomic::Ordering::Relaxed);
-        Ok(())
-    } else {
-        Err(align)
-    }
-}
-
 /// Gets the io buffer alignment.
-///
-/// This function should be used for getting the actual alignment value to use.
-pub(crate) fn get_io_buffer_alignment() -> usize {
-    let align = IO_BUFFER_ALIGNMENT.load(std::sync::atomic::Ordering::Relaxed);
-
-    if cfg!(test) {
-        let env_var_name = "NEON_PAGESERVER_UNIT_TEST_IO_BUFFER_ALIGNMENT";
-        if let Some(test_align) = utils::env::var(env_var_name) {
-            if is_valid_io_buffer_alignment(test_align) {
-                test_align
-            } else {
-                panic!("IO buffer alignment needs to be a power of two and greater than 512, got {test_align}");
-            }
-        } else {
-            align
-        }
-    } else {
-        align
-    }
+pub(crate) const fn get_io_buffer_alignment() -> usize {
+    DEFAULT_IO_BUFFER_ALIGNMENT
 }
 
 static IO_MODE: AtomicU8 = AtomicU8::new(IoMode::preferred() as u8);

@@ -175,8 +175,6 @@ pub struct PageServerConf {
 
     /// Direct IO settings
     pub virtual_file_io_mode: virtual_file::IoMode,
-
-    pub io_buffer_alignment: usize,
 }
 
 /// Token for authentication to safekeepers
@@ -329,7 +327,6 @@ impl PageServerConf {
             concurrent_tenant_warmup,
             concurrent_tenant_size_logical_size_queries,
             virtual_file_io_engine,
-            io_buffer_alignment,
             tenant_config,
         } = config_toml;
 
@@ -368,7 +365,6 @@ impl PageServerConf {
             max_vectored_read_bytes,
             image_compression,
             ephemeral_bytes_per_memory_kb,
-            io_buffer_alignment,
 
             // ------------------------------------------------------------
             // fields that require additional validation or custom handling

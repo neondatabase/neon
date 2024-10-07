@@ -2380,20 +2380,6 @@ async fn put_io_engine_handler(
     json_response(StatusCode::OK, ())
 }
 
-async fn put_io_alignment_handler(
-    mut r: Request<Body>,
-    _cancel: CancellationToken,
-) -> Result<Response<Body>, ApiError> {
-    check_permission(&r, None)?;
-    let align: usize = json_request(&mut r).await?;
-    crate::virtual_file::set_io_buffer_alignment(align).map_err(|align| {
-        ApiError::PreconditionFailed(
-            format!("Requested io alignment ({align}) is not a power of two").into(),
-        )
-    })?;
-    json_response(StatusCode::OK, ())
-}
-
 async fn put_io_mode_handler(
     mut r: Request<Body>,
     _cancel: CancellationToken,
@@ -3091,9 +3077,6 @@ pub fn make_router(
             |r| api_handler(r, timeline_collect_keyspace),
         )
         .put("/v1/io_engine", |r| api_handler(r, put_io_engine_handler))
-        .put("/v1/io_alignment", |r| {
-            api_handler(r, put_io_alignment_handler)
-        })
         .put("/v1/io_mode", |r| api_handler(r, put_io_mode_handler))
         .put(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/force_aux_policy_switch",

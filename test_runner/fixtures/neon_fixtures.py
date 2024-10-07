@@ -398,7 +398,6 @@ class NeonEnvBuilder:
         pageserver_default_tenant_config_compaction_algorithm: Optional[Dict[str, Any]] = None,
         safekeeper_extra_opts: Optional[list[str]] = None,
         storage_controller_port_override: Optional[int] = None,
-        pageserver_io_buffer_alignment: Optional[int] = None,
         pageserver_virtual_file_io_mode: Optional[str] = None,
     ):
         self.repo_dir = repo_dir
@@ -453,7 +452,6 @@ class NeonEnvBuilder:
 
         self.storage_controller_port_override = storage_controller_port_override
 
-        self.pageserver_io_buffer_alignment = pageserver_io_buffer_alignment
         self.pageserver_virtual_file_io_mode = pageserver_virtual_file_io_mode
 
         assert test_name.startswith(
@@ -1043,7 +1041,6 @@ class NeonEnv:
 
         self.pageserver_virtual_file_io_engine = config.pageserver_virtual_file_io_engine
         self.pageserver_aux_file_policy = config.pageserver_aux_file_policy
-        self.pageserver_io_buffer_alignment = config.pageserver_io_buffer_alignment
         self.pageserver_virtual_file_io_mode = config.pageserver_virtual_file_io_mode
 
         # Create the neon_local's `NeonLocalInitConf`
@@ -1108,8 +1105,6 @@ class NeonEnv:
                         for key, value in override.items():
                             ps_cfg[key] = value
 
-            if self.pageserver_io_buffer_alignment is not None:
-                ps_cfg["io_buffer_alignment"] = self.pageserver_io_buffer_alignment
             if self.pageserver_virtual_file_io_mode is not None:
                 ps_cfg["virtual_file_io_mode"] = self.pageserver_virtual_file_io_mode
 
@@ -1417,7 +1412,6 @@ def neon_simple_env(
     pageserver_virtual_file_io_engine: str,
     pageserver_aux_file_policy: Optional[AuxFileStore],
     pageserver_default_tenant_config_compaction_algorithm: Optional[Dict[str, Any]],
-    pageserver_io_buffer_alignment: Optional[int],
     pageserver_virtual_file_io_mode: Optional[str],
 ) -> Iterator[NeonEnv]:
     """
@@ -1444,7 +1438,6 @@ def neon_simple_env(
         pageserver_virtual_file_io_engine=pageserver_virtual_file_io_engine,
         pageserver_aux_file_policy=pageserver_aux_file_policy,
         pageserver_default_tenant_config_compaction_algorithm=pageserver_default_tenant_config_compaction_algorithm,
-        pageserver_io_buffer_alignment=pageserver_io_buffer_alignment,
         pageserver_virtual_file_io_mode=pageserver_virtual_file_io_mode,
     ) as builder:
         env = builder.init_start()
@@ -1469,7 +1462,6 @@ def neon_env_builder(
     pageserver_default_tenant_config_compaction_algorithm: Optional[Dict[str, Any]],
     pageserver_aux_file_policy: Optional[AuxFileStore],
     record_property: Callable[[str, object], None],
-    pageserver_io_buffer_alignment: Optional[int],
     pageserver_virtual_file_io_mode: Optional[str],
 ) -> Iterator[NeonEnvBuilder]:
     """
@@ -1505,7 +1497,6 @@ def neon_env_builder(
         test_overlay_dir=test_overlay_dir,
         pageserver_aux_file_policy=pageserver_aux_file_policy,
         pageserver_default_tenant_config_compaction_algorithm=pageserver_default_tenant_config_compaction_algorithm,
-        pageserver_io_buffer_alignment=pageserver_io_buffer_alignment,
         pageserver_virtual_file_io_mode=pageserver_virtual_file_io_mode,
     ) as builder:
         yield builder

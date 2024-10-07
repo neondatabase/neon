@@ -59,10 +59,6 @@ pub(crate) struct Args {
     #[clap(long)]
     set_io_engine: Option<pageserver_api::models::virtual_file::IoEngineKind>,
 
-    /// Before starting the benchmark, live-reconfigure the pageserver to use specified alignment for io buffers.
-    #[clap(long)]
-    set_io_alignment: Option<usize>,
-
     /// Before starting the benchmark, live-reconfigure the pageserver to use specified io mode (buffered vs. direct).
     #[clap(long)]
     set_io_mode: Option<pageserver_api::models::virtual_file::IoMode>,
@@ -131,10 +127,6 @@ async fn main_impl(
 
     if let Some(engine_str) = &args.set_io_engine {
         mgmt_api_client.put_io_engine(engine_str).await?;
-    }
-
-    if let Some(align) = args.set_io_alignment {
-        mgmt_api_client.put_io_alignment(align).await?;
     }
 
     if let Some(mode) = &args.set_io_mode {
