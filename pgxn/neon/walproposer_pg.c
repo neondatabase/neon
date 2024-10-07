@@ -538,7 +538,7 @@ nwp_shmem_startup_hook(void)
 }
 
 WalproposerShmemState *
-GetWalpropShmemState()
+GetWalpropShmemState(void)
 {
 	Assert(walprop_shared != NULL);
 	return walprop_shared;

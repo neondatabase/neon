@@ -725,7 +725,7 @@ extern void WalProposerBroadcast(WalProposer *wp, XLogRecPtr startpos, XLogRecPt
 extern void WalProposerPoll(WalProposer *wp);
 extern void WalProposerFree(WalProposer *wp);
 
-extern WalproposerShmemState *GetWalpropShmemState();
+extern WalproposerShmemState *GetWalpropShmemState(void);
 
 /*
  * WaitEventSet API doesn't allow to remove socket, so walproposer_pg uses it to

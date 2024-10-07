@@ -136,7 +136,7 @@ static bool redo_block_filter(XLogReaderState *record, uint8 block_id);
 static void GetPage(StringInfo input_message);
 static void Ping(StringInfo input_message);
 static ssize_t buffered_read(void *buf, size_t count);
-static void CreateFakeSharedMemoryAndSemaphores();
+static void CreateFakeSharedMemoryAndSemaphores(void);
 
 static BufferTag target_redo_tag;
 
@@ -449,7 +449,7 @@ WalRedoMain(int argc, char *argv[])
  * half-initialized postgres.
  */
 static void
-CreateFakeSharedMemoryAndSemaphores()
+CreateFakeSharedMemoryAndSemaphores(void)
 {
 	PGShmemHeader *shim = NULL;
 	PGShmemHeader *hdr;
