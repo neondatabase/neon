@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import concurrent.futures
 import os
 import time
@@ -5,7 +7,6 @@ from contextlib import closing
 from datetime import datetime
 from itertools import chain
 from pathlib import Path
-from typing import List
 
 import pytest
 import requests
@@ -272,7 +273,7 @@ def test_pageserver_metrics_removed_after_detach(neon_env_builder: NeonEnvBuilde
                 assert cur.fetchone() == (5000050000,)
         endpoint.stop()
 
-    def get_ps_metric_samples_for_tenant(tenant_id: TenantId) -> List[Sample]:
+    def get_ps_metric_samples_for_tenant(tenant_id: TenantId) -> list[Sample]:
         ps_metrics = env.pageserver.http_client().get_metrics()
         samples = []
         for metric_name in ps_metrics.metrics:
@@ -459,7 +460,7 @@ def test_pageserver_metrics_many_relations(neon_env_builder: NeonEnvBuilder):
         "pageserver_directory_entries_count", {"tenant_id": str(env.initial_tenant)}
     )
 
-    def only_int(samples: List[Sample]) -> int:
+    def only_int(samples: list[Sample]) -> int:
         assert len(samples) == 1
         return int(samples[0].value)
 

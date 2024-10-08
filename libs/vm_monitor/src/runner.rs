@@ -79,8 +79,7 @@ pub struct Config {
     /// memory.
     ///
     /// The default value of `0.15` means that we *guarantee* sending upscale requests if the
-    /// cgroup is using more than 85% of total memory (even if we're *not* separately reserving
-    /// memory for the file cache).
+    /// cgroup is using more than 85% of total memory.
     cgroup_min_overhead_fraction: f64,
 
     cgroup_downscale_threshold_buffer_bytes: u64,
@@ -97,24 +96,12 @@ impl Default for Config {
 }
 
 impl Config {
-    fn cgroup_threshold(&self, total_mem: u64, file_cache_disk_size: u64) -> u64 {
-        // If the file cache is in tmpfs, then it will count towards shmem usage of the cgroup,
-        // and thus be non-reclaimable, so we should allow for additional memory usage.
-        //
-        // If the file cache sits on disk, our desired stable system state is for it to be fully
-        // page cached (its contents should only be paged to/from disk in situations where we can't
-        // upscale fast enough). Page-cached memory is reclaimable, so we need to lower the
-        // threshold for non-reclaimable memory so we scale up *before* the kernel starts paging
-        // out the file cache.
-        let memory_remaining_for_cgroup = total_mem.saturating_sub(file_cache_disk_size);
-
-        // Even if we're not separately making room for the file cache (if it's in tmpfs), we still
-        // want our threshold to be met gracefully instead of letting postgres get OOM-killed.
+    fn cgroup_threshold(&self, total_mem: u64) -> u64 {
+        // We want our threshold to be met gracefully instead of letting postgres get OOM-killed
+        // (or if there's room, spilling to swap).
         // So we guarantee that there's at least `cgroup_min_overhead_fraction` of total memory
         // remaining above the threshold.
-        let max_threshold = (total_mem as f64 * (1.0 - self.cgroup_min_overhead_fraction)) as u64;
-
-        memory_remaining_for_cgroup.min(max_threshold)
+        (total_mem as f64 * (1.0 - self.cgroup_min_overhead_fraction)) as u64
     }
 }
 
@@ -149,11 +136,6 @@ impl Runner {
 
         let mem = get_total_system_memory();
 
-        let mut file_cache_disk_size = 0;
-
-        // We need to process file cache initialization before cgroup initialization, so that the memory
-        // allocated to the file cache is appropriately taken into account when we decide the cgroup's
-        // memory limits.
         if let Some(connstr) = &args.pgconnstr {
             info!("initializing file cache");
             let config = FileCacheConfig::default();
@@ -184,7 +166,6 @@ impl Runner {
                 info!("file cache size actually got set to {actual_size}")
             }
 
-            file_cache_disk_size = actual_size;
             state.filecache = Some(file_cache);
         }
 
@@ -207,7 +188,7 @@ impl Runner {
                 cgroup.watch(hist_tx).await
             });
 
-            let threshold = state.config.cgroup_threshold(mem, file_cache_disk_size);
+            let threshold = state.config.cgroup_threshold(mem);
             info!(threshold, "set initial cgroup threshold",);
 
             state.cgroup = Some(CgroupState {
@@ -259,9 +240,7 @@ impl Runner {
                 return Ok((false, status.to_owned()));
             }
 
-            let new_threshold = self
-                .config
-                .cgroup_threshold(usable_system_memory, expected_file_cache_size);
+            let new_threshold = self.config.cgroup_threshold(usable_system_memory);
 
             let current = last_history.avg_non_reclaimable;
 
@@ -282,13 +261,11 @@ impl Runner {
 
         // The downscaling has been approved. Downscale the file cache, then the cgroup.
         let mut status = vec![];
-        let mut file_cache_disk_size = 0;
         if let Some(file_cache) = &mut self.filecache {
             let actual_usage = file_cache
                 .set_file_cache_size(expected_file_cache_size)
                 .await
                 .context("failed to set file cache size")?;
-            file_cache_disk_size = actual_usage;
             let message = format!(
                 "set file cache size to {} MiB",
                 bytes_to_mebibytes(actual_usage),
@@ -298,9 +275,7 @@ impl Runner {
         }
 
         if let Some(cgroup) = &mut self.cgroup {
-            let new_threshold = self
-                .config
-                .cgroup_threshold(usable_system_memory, file_cache_disk_size);
+            let new_threshold = self.config.cgroup_threshold(usable_system_memory);
 
             let message = format!(
                 "set cgroup memory threshold from {} MiB to {} MiB, of new total {} MiB",
@@ -329,7 +304,6 @@ impl Runner {
         let new_mem = resources.mem;
         let usable_system_memory = new_mem.saturating_sub(self.config.sys_buffer_bytes);
 
-        let mut file_cache_disk_size = 0;
         if let Some(file_cache) = &mut self.filecache {
             let expected_usage = file_cache.config.calculate_cache_size(usable_system_memory);
             info!(
@@ -342,7 +316,6 @@ impl Runner {
                 .set_file_cache_size(expected_usage)
                 .await
                 .context("failed to set file cache size")?;
-            file_cache_disk_size = actual_usage;
 
             if actual_usage != expected_usage {
                 warn!(
@@ -354,9 +327,7 @@ impl Runner {
         }
 
         if let Some(cgroup) = &mut self.cgroup {
-            let new_threshold = self
-                .config
-                .cgroup_threshold(usable_system_memory, file_cache_disk_size);
+            let new_threshold = self.config.cgroup_threshold(usable_system_memory);
 
             info!(
                 "set cgroup memory threshold from {} MiB to {} MiB of new total {} MiB",

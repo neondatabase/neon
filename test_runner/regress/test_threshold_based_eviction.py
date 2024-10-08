@@ -1,6 +1,7 @@
+from __future__ import annotations
+
 import time
 from dataclasses import dataclass
-from typing import List, Set, Tuple
 
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
@@ -116,8 +117,8 @@ def test_threshold_based_eviction(
     # wait for evictions and assert that they stabilize
     @dataclass
     class ByLocalAndRemote:
-        remote_layers: Set[str]
-        local_layers: Set[str]
+        remote_layers: set[str]
+        local_layers: set[str]
 
     class MapInfoProjection:
         def __init__(self, info: LayerMapInfo):
@@ -149,7 +150,7 @@ def test_threshold_based_eviction(
     consider_stable_when_no_change_for_seconds = 3 * eviction_threshold
     poll_interval = eviction_threshold / 3
     started_waiting_at = time.time()
-    map_info_changes: List[Tuple[float, MapInfoProjection]] = []
+    map_info_changes: list[tuple[float, MapInfoProjection]] = []
     while time.time() - started_waiting_at < observation_window:
         current = (
             time.time(),

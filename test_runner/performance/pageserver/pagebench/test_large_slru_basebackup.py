@@ -1,7 +1,9 @@
+from __future__ import annotations
+
 import asyncio
 import json
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
@@ -12,6 +14,9 @@ from fixtures.utils import get_scale_for_db, humantime_to_ms
 from performance.pageserver.util import (
     setup_pageserver_with_tenants,
 )
+
+if TYPE_CHECKING:
+    from typing import Any
 
 
 @pytest.mark.parametrize("duration", [30])
@@ -29,7 +34,7 @@ def test_basebackup_with_high_slru_count(
     def record(metric, **kwargs):
         zenbenchmark.record(metric_name=f"pageserver_basebackup.{metric}", **kwargs)
 
-    params: Dict[str, Tuple[Any, Dict[str, Any]]] = {}
+    params: dict[str, tuple[Any, dict[str, Any]]] = {}
 
     # params from fixtures
     params.update(
@@ -157,7 +162,7 @@ def run_benchmark(env: NeonEnv, pg_bin: PgBin, record, duration_secs: int):
     results_path = Path(basepath + ".stdout")
     log.info(f"Benchmark results at: {results_path}")
 
-    with open(results_path, "r") as f:
+    with open(results_path) as f:
         results = json.load(f)
     log.info(f"Results:\n{json.dumps(results, sort_keys=True, indent=2)}")
 

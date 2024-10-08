@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import pytest
 from fixtures.neon_fixtures import NeonEnv, NeonPageserver
 from fixtures.pageserver.http import PageserverApiException

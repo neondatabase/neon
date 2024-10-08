@@ -1,10 +1,16 @@
+from __future__ import annotations
+
 import random
 from dataclasses import dataclass
 from enum import Enum
 from functools import total_ordering
-from typing import Any, Dict, Type, TypeVar, Union
+from typing import TYPE_CHECKING, TypeVar
 
-T = TypeVar("T", bound="Id")
+if TYPE_CHECKING:
+    from typing import Any, Union
+
+    T = TypeVar("T", bound="Id")
+
 
 DEFAULT_WAL_SEG_SIZE = 16 * 1024 * 1024
 
@@ -56,7 +62,7 @@ class Lsn:
             return NotImplemented
         return self.lsn_int - other.lsn_int
 
-    def __add__(self, other: Union[int, "Lsn"]) -> "Lsn":
+    def __add__(self, other: Union[int, Lsn]) -> Lsn:
         if isinstance(other, int):
             return Lsn(self.lsn_int + other)
         elif isinstance(other, Lsn):
@@ -70,7 +76,7 @@ class Lsn:
     def as_int(self) -> int:
         return self.lsn_int
 
-    def segment_lsn(self, seg_sz: int = DEFAULT_WAL_SEG_SIZE) -> "Lsn":
+    def segment_lsn(self, seg_sz: int = DEFAULT_WAL_SEG_SIZE) -> Lsn:
         return Lsn(self.lsn_int - (self.lsn_int % seg_sz))
 
     def segno(self, seg_sz: int = DEFAULT_WAL_SEG_SIZE) -> int:
@@ -127,7 +133,7 @@ class Id:
         return hash(str(self.id))
 
     @classmethod
-    def generate(cls: Type[T]) -> T:
+    def generate(cls: type[T]) -> T:
         """Generate a random ID"""
         return cls(random.randbytes(16).hex())
 
@@ -162,7 +168,7 @@ class TenantTimelineId:
     timeline_id: TimelineId
 
     @classmethod
-    def from_json(cls, d: Dict[str, Any]) -> "TenantTimelineId":
+    def from_json(cls, d: dict[str, Any]) -> TenantTimelineId:
         return TenantTimelineId(
             tenant_id=TenantId(d["tenant_id"]),
             timeline_id=TimelineId(d["timeline_id"]),
@@ -181,7 +187,7 @@ class TenantShardId:
         assert self.shard_number < self.shard_count or self.shard_count == 0
 
     @classmethod
-    def parse(cls: Type[TTenantShardId], input) -> TTenantShardId:
+    def parse(cls: type[TTenantShardId], input) -> TTenantShardId:
         if len(input) == 32:
             return cls(
                 tenant_id=TenantId(input),

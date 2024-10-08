@@ -1,9 +1,14 @@
+from __future__ import annotations
+
 import time
-from typing import Any, Dict
+from typing import TYPE_CHECKING
 
 from fixtures.common_types import Lsn, TenantId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder
+
+if TYPE_CHECKING:
+    from typing import Any
 
 
 # Checks that pageserver's walreceiver state is printed in the logs during WAL wait timeout.
@@ -43,7 +48,7 @@ def test_pageserver_lsn_wait_error_start(neon_env_builder: NeonEnvBuilder):
 # Kills one of the safekeepers and ensures that only the active ones are printed in the state.
 def test_pageserver_lsn_wait_error_safekeeper_stop(neon_env_builder: NeonEnvBuilder):
     # Trigger WAL wait timeout faster
-    def customize_pageserver_toml(ps_cfg: Dict[str, Any]):
+    def customize_pageserver_toml(ps_cfg: dict[str, Any]):
         ps_cfg["wait_lsn_timeout"] = "1s"
         tenant_config = ps_cfg.setdefault("tenant_config", {})
         tenant_config["walreceiver_connect_timeout"] = "2s"

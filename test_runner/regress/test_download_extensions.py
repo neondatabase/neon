@@ -1,8 +1,10 @@
+from __future__ import annotations
+
 import os
 import shutil
 from contextlib import closing
 from pathlib import Path
-from typing import Any, Dict
+from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.log_helper import log
@@ -13,6 +15,9 @@ from fixtures.pg_version import PgVersion
 from pytest_httpserver import HTTPServer
 from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
+
+if TYPE_CHECKING:
+    from typing import Any
 
 
 # use neon_env_builder_local fixture to override the default neon_env_builder fixture
@@ -88,7 +93,7 @@ def test_remote_extensions(
     )
 
     # mock remote_extensions spec
-    spec: Dict[str, Any] = {
+    spec: dict[str, Any] = {
         "library_index": {
             "anon": "anon",
         },

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import contextlib
 import enum
 import json
@@ -7,22 +9,10 @@ import subprocess
 import tarfile
 import threading
 import time
+from collections.abc import Iterable
 from hashlib import sha256
 from pathlib import Path
-from typing import (
-    IO,
-    TYPE_CHECKING,
-    Any,
-    Callable,
-    Dict,
-    Iterable,
-    List,
-    Optional,
-    Set,
-    Tuple,
-    TypeVar,
-    Union,
-)
+from typing import TYPE_CHECKING, Any, Callable, TypeVar
 from urllib.parse import urlencode
 
 import allure
@@ -36,20 +26,21 @@ from fixtures.pageserver.common_types import (
 )
 
 if TYPE_CHECKING:
+    from typing import (
+        IO,
+        Optional,
+        Union,
+    )
+
     from fixtures.neon_fixtures import PgBin
 from fixtures.common_types import TimelineId
 
 Fn = TypeVar("Fn", bound=Callable[..., Any])
 
 
-def get_self_dir() -> Path:
-    """Get the path to the directory where this script lives."""
-    return Path(__file__).resolve().parent
-
-
 def subprocess_capture(
     capture_dir: Path,
-    cmd: List[str],
+    cmd: list[str],
     *,
     check=False,
     echo_stderr=False,
@@ -58,7 +49,7 @@ def subprocess_capture(
     timeout=None,
     with_command_header=True,
     **popen_kwargs: Any,
-) -> Tuple[str, Optional[str], int]:
+) -> tuple[str, Optional[str], int]:
     """Run a process and bifurcate its output to files and the `log` logger
 
     stderr and stdout are always captured in files.  They are also optionally
@@ -103,7 +94,7 @@ def subprocess_capture(
                     first = False
                     # prefix the files with the command line so that we can
                     # later understand which file is for what command
-                    self.out_file.write((f"# {' '.join(cmd)}\n\n").encode("utf-8"))
+                    self.out_file.write((f"# {' '.join(cmd)}\n\n").encode())
 
                 # Only bother decoding if we are going to do something more than stream to a file
                 if self.echo or self.capture:
@@ -171,7 +162,7 @@ def global_counter() -> int:
         return _global_counter
 
 
-def print_gc_result(row: Dict[str, Any]):
+def print_gc_result(row: dict[str, Any]):
     log.info("GC duration {elapsed} ms".format_map(row))
     log.info(
         "  total: {layers_total}, needed_by_cutoff {layers_needed_by_cutoff}, needed_by_pitr {layers_needed_by_pitr}"
@@ -309,7 +300,7 @@ def allure_add_grafana_links(host: str, timeline_id: TimelineId, start_ms: int, 
         "proxy logs": f'{{neon_service="proxy-scram", neon_region="{region_id}"}}',
     }
 
-    params: Dict[str, Any] = {
+    params: dict[str, Any] = {
         "datasource": LOGS_STAGING_DATASOURCE_ID,
         "queries": [
             {
@@ -425,7 +416,7 @@ def assert_ge(a, b) -> None:
     assert a >= b
 
 
-def run_pg_bench_small(pg_bin: "PgBin", connstr: str):
+def run_pg_bench_small(pg_bin: PgBin, connstr: str):
     """
     Fast way to populate data.
     For more layers consider combining with these tenant settings:
@@ -470,7 +461,7 @@ def humantime_to_ms(humantime: str) -> float:
     return round(total_ms, 3)
 
 
-def scan_log_for_errors(input: Iterable[str], allowed_errors: List[str]) -> List[Tuple[int, str]]:
+def scan_log_for_errors(input: Iterable[str], allowed_errors: list[str]) -> list[tuple[int, str]]:
     # FIXME: this duplicates test_runner/fixtures/pageserver/allowed_errors.py
     error_or_warn = re.compile(r"\s(ERROR|WARN)")
     errors = []
@@ -520,7 +511,7 @@ class AuxFileStore(str, enum.Enum):
         return f"'aux-{self.value}'"
 
 
-def assert_pageserver_backups_equal(left: Path, right: Path, skip_files: Set[str]):
+def assert_pageserver_backups_equal(left: Path, right: Path, skip_files: set[str]):
     """
     This is essentially:
 
@@ -544,7 +535,7 @@ def assert_pageserver_backups_equal(left: Path, right: Path, skip_files: Set[str
             digest.update(buf)
         return digest.digest()
 
-    def build_hash_list(p: Path) -> List[Tuple[str, bytes]]:
+    def build_hash_list(p: Path) -> list[tuple[str, bytes]]:
         with tarfile.open(p) as f:
             matching_files = (info for info in f if info.isreg() and info.name not in skip_files)
             ret = list(
@@ -592,7 +583,7 @@ class PropagatingThread(threading.Thread):
             self.exc = e
 
     def join(self, timeout=None):
-        super(PropagatingThread, self).join(timeout)
+        super().join(timeout)
         if self.exc:
             raise self.exc
         return self.ret

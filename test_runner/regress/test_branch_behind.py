@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import pytest
 from fixtures.common_types import Lsn, TimelineId
 from fixtures.log_helper import log

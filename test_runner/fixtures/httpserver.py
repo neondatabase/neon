@@ -1,4 +1,4 @@
-from typing import Tuple
+from __future__ import annotations
 
 import pytest
 from pytest_httpserver import HTTPServer
@@ -40,6 +40,6 @@ def httpserver(make_httpserver):
 
 
 @pytest.fixture(scope="function")
-def httpserver_listen_address(port_distributor) -> Tuple[str, int]:
+def httpserver_listen_address(port_distributor) -> tuple[str, int]:
     port = port_distributor.get_port()
     return ("localhost", port)

@@ -1,12 +1,13 @@
+from __future__ import annotations
+
 import os
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from pathlib import Path
 
 import pytest
 from _pytest.mark import ParameterSet
 from fixtures.compare_fixtures import RemoteCompare
 from fixtures.log_helper import log
-from fixtures.utils import get_self_dir
 
 
 @dataclass
@@ -45,7 +46,7 @@ def test_clickbench_create_pg_stat_statements(remote_compare: RemoteCompare):
 #
 # Disable auto formatting for the list of queries so that it's easier to read
 # fmt: off
-QUERIES: Tuple[LabelledQuery, ...] = (
+QUERIES: tuple[LabelledQuery, ...] = (
     ### ClickBench queries:
     LabelledQuery("Q0",  r"SELECT COUNT(*) FROM hits;"),
     LabelledQuery("Q1",  r"SELECT COUNT(*) FROM hits WHERE AdvEngineID <> 0;"),
@@ -105,7 +106,7 @@ QUERIES: Tuple[LabelledQuery, ...] = (
 #
 # Disable auto formatting for the list of queries so that it's easier to read
 # fmt: off
-PGVECTOR_QUERIES: Tuple[LabelledQuery, ...] = (
+PGVECTOR_QUERIES: tuple[LabelledQuery, ...] = (
     LabelledQuery("PGVPREP",  r"ALTER EXTENSION VECTOR UPDATE;"),
     LabelledQuery("PGV0",  r"DROP TABLE IF EXISTS hnsw_test_table;"),
     LabelledQuery("PGV1",  r"CREATE TABLE hnsw_test_table AS TABLE documents WITH NO DATA;"),
@@ -127,7 +128,7 @@ PGVECTOR_QUERIES: Tuple[LabelledQuery, ...] = (
 EXPLAIN_STRING: str = "EXPLAIN (ANALYZE, VERBOSE, BUFFERS, COSTS, SETTINGS, FORMAT JSON)"
 
 
-def get_scale() -> List[str]:
+def get_scale() -> list[str]:
     # We parametrize each tpc-h and clickbench test with scale
     # to distinguish them from each other, but don't really use it inside.
     # Databases are pre-created and passed through BENCHMARK_CONNSTR env variable.
@@ -147,7 +148,7 @@ def run_psql(
     options = f"-cstatement_timeout=0 {env.pg.default_options.get('options', '')}"
     connstr = env.pg.connstr(password=None, options=options)
 
-    environ: Dict[str, str] = {}
+    environ: dict[str, str] = {}
     if password is not None:
         environ["PGPASSWORD"] = password
 
@@ -185,13 +186,13 @@ def test_clickbench(query: LabelledQuery, remote_compare: RemoteCompare, scale: 
     run_psql(remote_compare, query, times=3, explain=explain)
 
 
-def tpch_queuies() -> Tuple[ParameterSet, ...]:
+def tpch_queuies() -> tuple[ParameterSet, ...]:
     """
     A list of queries to run for the TPC-H benchmark.
     - querues in returning tuple are ordered by the query number
     - pytest parameters id is adjusted to match the query id (the numbering starts from 1)
     """
-    queries_dir = get_self_dir().parent / "performance" / "tpc-h" / "queries"
+    queries_dir = Path(__file__).parent / "performance" / "tpc-h" / "queries"
     assert queries_dir.exists(), f"TPC-H queries dir not found: {queries_dir}"
 
     return tuple(

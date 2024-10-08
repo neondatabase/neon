@@ -1,9 +1,11 @@
+from __future__ import annotations
+
 import os
 import queue
 import shutil
 import threading
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.common_types import Lsn, TenantId, TimelineId
@@ -34,6 +36,9 @@ from fixtures.utils import (
     wait_until,
 )
 from requests import ReadTimeout
+
+if TYPE_CHECKING:
+    from typing import Optional
 
 
 #
@@ -423,7 +428,7 @@ def test_remote_timeline_client_calls_started_metric(
         assert timeline_id is not None
         wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
 
-    calls_started: Dict[Tuple[str, str], List[int]] = {
+    calls_started: dict[tuple[str, str], list[int]] = {
         ("layer", "upload"): [0],
         ("index", "upload"): [0],
         ("layer", "delete"): [0],
