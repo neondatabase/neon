@@ -165,12 +165,14 @@ impl GlobalTimelines {
                         match Timeline::load_timeline(&conf, ttid) {
                             Ok(timeline) => {
                                 let tli = Arc::new(timeline);
+                                let mut shared_state = tli.write_shared_state().await;
                                 TIMELINES_STATE
                                     .lock()
                                     .unwrap()
                                     .timelines
                                     .insert(ttid, tli.clone());
                                 tli.bootstrap(
+                                    &mut shared_state,
                                     &conf,
                                     broker_active_set.clone(),
                                     partial_backup_rate_limiter.clone(),
@@ -213,6 +215,7 @@ impl GlobalTimelines {
         match Timeline::load_timeline(&conf, ttid) {
             Ok(timeline) => {
                 let tli = Arc::new(timeline);
+                let mut shared_state = tli.write_shared_state().await;
 
                 // TODO: prevent concurrent timeline creation/loading
                 {
@@ -227,8 +230,13 @@ impl GlobalTimelines {
                     state.timelines.insert(ttid, tli.clone());
                 }
 
-                tli.bootstrap(&conf, broker_active_set, partial_backup_rate_limiter);
-
+                tli.bootstrap(
+                    &mut shared_state,
+                    &conf,
+                    broker_active_set,
+                    partial_backup_rate_limiter,
+                );
+                drop(shared_state);
                 Ok(tli)
             }
             // If we can't load a timeline, it's bad. Caller will figure it out.

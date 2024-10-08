@@ -12,8 +12,8 @@ use metrics::{
     core::{AtomicU64, Collector, Desc, GenericCounter, GenericGaugeVec, Opts},
     proto::MetricFamily,
     register_histogram_vec, register_int_counter, register_int_counter_pair,
-    register_int_counter_pair_vec, register_int_counter_vec, Gauge, HistogramVec, IntCounter,
-    IntCounterPair, IntCounterPairVec, IntCounterVec, IntGaugeVec,
+    register_int_counter_pair_vec, register_int_counter_vec, register_int_gauge, Gauge,
+    HistogramVec, IntCounter, IntCounterPair, IntCounterPairVec, IntCounterVec, IntGaugeVec,
 };
 use once_cell::sync::Lazy;
 
@@ -227,6 +227,14 @@ pub(crate) static EVICTION_EVENTS_COMPLETED: Lazy<IntCounterVec> = Lazy::new(|| 
         "safekeeper_eviction_events_completed_total",
         "Number of eviction state changes, incremented when they complete",
         &["kind"]
+    )
+    .expect("Failed to register metric")
+});
+
+pub static NUM_EVICTED_TIMELINES: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "safekeeper_evicted_timelines",
+        "Number of currently evicted timelines"
     )
     .expect("Failed to register metric")
 });
