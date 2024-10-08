@@ -9,7 +9,7 @@ use std::time::Duration;
 use anyhow::bail;
 use bytes::Bytes;
 use http_body_util::BodyExt;
-use hyper1::body::Body;
+use hyper::body::Body;
 use serde::de::DeserializeOwned;
 
 pub(crate) use reqwest::{Request, Response};
