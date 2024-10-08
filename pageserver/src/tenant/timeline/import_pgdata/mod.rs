@@ -1,6 +1,10 @@
 //! Import a PGDATA directory into a root timeline.
 //!
-//!
+//! TODO:
+//! - asserts / unwraps need to be replaced with errors
+//! - don't download files that we won't read
+//! - download to temporary file instead of in-memory buffer
+//! - version-specific CheckPointData (=> pgv abstraction, already exists for regular walingest)
 
 use std::sync::Arc;
 
@@ -309,7 +313,7 @@ impl PgImportEnv {
         // segment in a given relation (00:spcnode:dbnode:reloid:fork:ff)
         for file in &db.files {
             debug!(%file.path, %file.filesize, "importing file");
-            let len = file.filesize as usize;
+            let len = file.filesize;
             ensure!(len % 8192 == 0);
             let start_blk: u32 = file.segno * (1024 * 1024 * 1024 / 8192);
             let start_key = rel_block_to_key(file.rel_tag, start_blk);
@@ -482,7 +486,7 @@ impl PgDataDirDb {
                 debug!(%path, %size, "found file in dbdir");
                 path.object_name().and_then(|name| {
                     // returns (relnode, forknum, segno)
-                    parse_relfilename(&name).ok().map(|x| (size, x))
+                    parse_relfilename(name).ok().map(|x| (size, x))
                 })
             })
             .sorted_by_key(|(_, relfilename)| *relfilename)
@@ -629,7 +633,9 @@ impl ImportTask for ImportRelBlocksTask {
             let key = rel_block_to_key(rel_tag, blknum);
             if self.shard_identity.is_key_disposable(&key) {
                 // Skip blocks that are not in the shard
+                debug!(%key, "skipping");
             } else {
+                debug!(%key, "importing");
                 let buf = &buf[file_offset as usize..(file_offset + 8192) as usize];
                 layer_writer
                     .put_image(key, Bytes::copy_from_slice(buf), ctx)

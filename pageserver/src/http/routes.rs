@@ -2838,16 +2838,24 @@ async fn put_tenant_timeline_import_pgdata(
         info!(%pgdata_path, "importing pgdata dir");
 
         // Create a LocalFs remote storage with the root at pgdata_path
-        let local_storage = GenericRemoteStorage::LocalFs(LocalFs::new(
-            pgdata_path.clone(),
-            std::time::Duration::from_secs(60), // Use a reasonable timeout
-        ).map_err(ApiError::InternalServerError)?);
+        let local_storage = GenericRemoteStorage::LocalFs(
+            LocalFs::new(
+                pgdata_path.clone(),
+                std::time::Duration::from_secs(60), // Use a reasonable timeout
+            )
+            .map_err(ApiError::InternalServerError)?,
+        );
 
-        let prepared = crate::tenant::timeline::import_pgdata::prepare(local_storage, RemotePath::from_string("").unwrap(), &ctx, &cancel)
-            .await
-            // TODO: differentiate between not-parseable PGDATA (user error)
-            // and truly internal errors (e.g., disk full or IO errors)
-            .map_err(ApiError::InternalServerError)?;
+        let prepared = crate::tenant::timeline::import_pgdata::prepare(
+            local_storage,
+            RemotePath::from_string("").unwrap(),
+            &ctx,
+            &cancel,
+        )
+        .await
+        // TODO: differentiate between not-parseable PGDATA (user error)
+        // and truly internal errors (e.g., disk full or IO errors)
+        .map_err(ApiError::InternalServerError)?;
 
         info!("prepared pgdata");
 
