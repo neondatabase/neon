@@ -628,8 +628,7 @@ def human_bytes(amt: float) -> str:
 
 def all_pairs_component_versions():
     """
-    This function generates all the pairs of old (False) or new (True)
-    versions of the Neon components
+    This function generates all the pairs of old or new versions of the Neon components
     E.g. Pairs(storage_controller='old', storage_broker='new', compute='new', safekeeper='old', pageserver='old')
     then it returns a dictionary with argnames, argvalues and ids
     ids is a sequence of letters where n means the new version of the component and o means the old version

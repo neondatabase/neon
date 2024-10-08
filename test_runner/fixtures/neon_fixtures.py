@@ -1478,6 +1478,11 @@ def neon_simple_env(
 
     # Create the environment in the per-test output directory
     repo_dir = get_test_repo_dir(request, top_output_dir)
+    combination = (
+        request._pyfuncitem.callspec.params["combination"]
+        if "combination" in request._pyfuncitem.callspec.params
+        else None
+    )
 
     with NeonEnvBuilder(
         top_output_dir=top_output_dir,
@@ -1497,9 +1502,7 @@ def neon_simple_env(
         pageserver_aux_file_policy=pageserver_aux_file_policy,
         pageserver_default_tenant_config_compaction_algorithm=pageserver_default_tenant_config_compaction_algorithm,
         pageserver_io_buffer_alignment=pageserver_io_buffer_alignment,
-        combination=request._pyfuncitem.callspec.params["combination"]
-        if "combination" in request._pyfuncitem.callspec.params
-        else None,
+        combination=combination,
     ) as builder:
         env = builder.init_start()
 
