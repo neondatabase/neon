@@ -3914,7 +3914,6 @@ class Safekeeper(LogUtils):
         return self
 
     def stop(self, immediate: bool = False) -> Safekeeper:
-        log.info(f"Stopping safekeeper {self.id}")
         self.env.neon_cli.safekeeper_stop(self.id, immediate)
         self.running = False
         return self
