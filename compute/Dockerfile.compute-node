@@ -120,8 +120,8 @@ RUN apt update && \
 # To move faster, use newer versions only for v17
 RUN case "${PG_VERSION}" in \
     "v17") \
-        export SFCGAL_VERSION=1.5.2 \
-        export SFCGAL_CHECKSUM=b946b3c20d53f6e2703046085f0fcfea6c1a4081163f7bedd30b1195801efdd2 \
+        export SFCGAL_VERSION=1.4.1 \
+        export SFCGAL_CHECKSUM=1800c8a26241588f11cddcf433049e9b9aea902e923414d2ecef33a3295626c3 \
     ;; \
     "v14" | "v15" | "v16") \
         export SFCGAL_VERSION=1.3.10 \
