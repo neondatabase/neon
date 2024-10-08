@@ -170,12 +170,14 @@ lfc_disable(char const *op)
 
 		if (lfc_desc > 0)
 		{
+			int			rc;
+
 			/*
 			 * If the reason of error is ENOSPC, then truncation of file may
 			 * help to reclaim some space
 			 */
 			pgstat_report_wait_start(WAIT_EVENT_NEON_LFC_TRUNCATE);
-			int			rc = ftruncate(lfc_desc, 0);
+			rc = ftruncate(lfc_desc, 0);
 			pgstat_report_wait_end();
 
 			if (rc < 0)
@@ -666,7 +668,6 @@ lfc_readv_select(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 	BufferTag	tag;
 	FileCacheEntry *entry;
 	ssize_t		rc;
-	bool		result = true;
 	uint32		hash;
 	uint64		generation;
 	uint32		entry_offset;
@@ -925,10 +926,10 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 				/* We can reuse a hole that was left behind when the LFC was shrunk previously */
 				FileCacheEntry *hole = dlist_container(FileCacheEntry, list_node, dlist_pop_head_node(&lfc_ctl->holes));
 				uint32		offset = hole->offset;
-				bool		found;
+				bool		hole_found;
 	
-				hash_search_with_hash_value(lfc_hash, &hole->key, hole->hash, HASH_REMOVE, &found);
-				CriticalAssert(found);
+				hash_search_with_hash_value(lfc_hash, &hole->key, hole->hash, HASH_REMOVE, &hole_found);
+				CriticalAssert(hole_found);
 	
 				lfc_ctl->used += 1;
 				entry->offset = offset;	/* reuse the hole */
@@ -1004,7 +1005,7 @@ neon_get_lfc_stats(PG_FUNCTION_ARGS)
 	Datum		result;
 	HeapTuple	tuple;
 	char const *key;
-	uint64		value;
+	uint64		value = 0;
 	Datum		values[NUM_NEON_GET_STATS_COLS];
 	bool		nulls[NUM_NEON_GET_STATS_COLS];
 
