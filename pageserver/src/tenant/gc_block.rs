@@ -141,14 +141,14 @@ impl GcBlock {
         Ok(())
     }
 
-    pub(crate) fn before_delete(&self, timeline: &super::Timeline) {
+    pub(crate) fn before_delete(&self, timeline_id: &super::TimelineId) {
         let unblocked = {
             let mut g = self.reasons.lock().unwrap();
             if g.is_empty() {
                 return;
             }
 
-            g.remove(&timeline.timeline_id);
+            g.remove(timeline_id);
 
             BlockingReasons::clean_and_summarize(g).is_none()
         };

@@ -38,6 +38,7 @@ use std::future::Future;
 use std::sync::Weak;
 use std::time::SystemTime;
 use storage_broker::BrokerClientChannel;
+use timeline::offload::offload_timeline;
 use tokio::io::BufReader;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
@@ -287,8 +288,12 @@ pub struct Tenant {
 
     /// During timeline creation, we first insert the TimelineId to the
     /// creating map, then `timelines`, then remove it from the creating map.
-    /// **Lock order**: if acquring both, acquire`timelines` before `timelines_creating`
+    /// **Lock order**: if acquiring both, acquire`timelines` before `timelines_creating`
     timelines_creating: std::sync::Mutex<HashSet<TimelineId>>,
+
+    /// Possibly offloaded and archived timelines
+    /// **Lock order**: if acquiring both, acquire`timelines` before `timelines_offloaded`
+    timelines_offloaded: Mutex<HashMap<TimelineId, Arc<OffloadedTimeline>>>,
 
     // This mutex prevents creation of new timelines during GC.
     // Adding yet another mutex (in addition to `timelines`) is needed because holding
@@ -480,6 +485,65 @@ impl WalRedoManager {
             WalRedoManager::Prod(_, m) => Some(m.status()),
             #[cfg(test)]
             WalRedoManager::Test(_) => None,
+        }
+    }
+}
+
+pub struct OffloadedTimeline {
+    pub tenant_shard_id: TenantShardId,
+    pub timeline_id: TimelineId,
+    pub ancestor_timeline_id: Option<TimelineId>,
+
+    // TODO: once we persist offloaded state, make this lazily constructed
+    pub remote_client: Arc<RemoteTimelineClient>,
+
+    /// Prevent two tasks from deleting the timeline at the same time. If held, the
+    /// timeline is being deleted. If 'true', the timeline has already been deleted.
+    pub delete_progress: Arc<tokio::sync::Mutex<DeleteTimelineFlow>>,
+}
+
+impl OffloadedTimeline {
+    fn from_timeline(timeline: &Timeline) -> Self {
+        Self {
+            tenant_shard_id: timeline.tenant_shard_id,
+            timeline_id: timeline.timeline_id,
+            ancestor_timeline_id: timeline.get_ancestor_timeline_id(),
+
+            remote_client: timeline.remote_client.clone(),
+            delete_progress: timeline.delete_progress.clone(),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub enum TimelineOrOffloaded {
+    Timeline(Arc<Timeline>),
+    Offloaded(Arc<OffloadedTimeline>),
+}
+
+impl TimelineOrOffloaded {
+    pub fn tenant_shard_id(&self) -> TenantShardId {
+        match self {
+            TimelineOrOffloaded::Timeline(timeline) => timeline.tenant_shard_id,
+            TimelineOrOffloaded::Offloaded(offloaded) => offloaded.tenant_shard_id,
+        }
+    }
+    pub fn timeline_id(&self) -> TimelineId {
+        match self {
+            TimelineOrOffloaded::Timeline(timeline) => timeline.timeline_id,
+            TimelineOrOffloaded::Offloaded(offloaded) => offloaded.timeline_id,
+        }
+    }
+    pub fn delete_progress(&self) -> &Arc<tokio::sync::Mutex<DeleteTimelineFlow>> {
+        match self {
+            TimelineOrOffloaded::Timeline(timeline) => &timeline.delete_progress,
+            TimelineOrOffloaded::Offloaded(offloaded) => &offloaded.delete_progress,
+        }
+    }
+    pub fn remote_client(&self) -> &Arc<RemoteTimelineClient> {
+        match self {
+            TimelineOrOffloaded::Timeline(timeline) => &timeline.remote_client,
+            TimelineOrOffloaded::Offloaded(offloaded) => &offloaded.remote_client,
         }
     }
 }
@@ -1406,52 +1470,192 @@ impl Tenant {
         }
     }
 
-    pub(crate) async fn apply_timeline_archival_config(
-        &self,
+    fn check_to_be_archived_has_no_unarchived_children(
         timeline_id: TimelineId,
-        state: TimelineArchivalState,
+        timelines: &std::sync::MutexGuard<'_, HashMap<TimelineId, Arc<Timeline>>>,
+    ) -> Result<(), TimelineArchivalError> {
+        let children: Vec<TimelineId> = timelines
+            .iter()
+            .filter_map(|(id, entry)| {
+                if entry.get_ancestor_timeline_id() != Some(timeline_id) {
+                    return None;
+                }
+                if entry.is_archived() == Some(true) {
+                    return None;
+                }
+                Some(*id)
+            })
+            .collect();
+
+        if !children.is_empty() {
+            return Err(TimelineArchivalError::HasUnarchivedChildren(children));
+        }
+        Ok(())
+    }
+
+    fn check_ancestor_of_to_be_unarchived_is_not_archived(
+        ancestor_timeline_id: TimelineId,
+        timelines: &std::sync::MutexGuard<'_, HashMap<TimelineId, Arc<Timeline>>>,
+        offloaded_timelines: &std::sync::MutexGuard<
+            '_,
+            HashMap<TimelineId, Arc<OffloadedTimeline>>,
+        >,
+    ) -> Result<(), TimelineArchivalError> {
+        let has_archived_parent =
+            if let Some(ancestor_timeline) = timelines.get(&ancestor_timeline_id) {
+                ancestor_timeline.is_archived() == Some(true)
+            } else if offloaded_timelines.contains_key(&ancestor_timeline_id) {
+                true
+            } else {
+                error!("ancestor timeline {ancestor_timeline_id} not found");
+                if cfg!(debug_assertions) {
+                    panic!("ancestor timeline {ancestor_timeline_id} not found");
+                }
+                return Err(TimelineArchivalError::NotFound);
+            };
+        if has_archived_parent {
+            return Err(TimelineArchivalError::HasArchivedParent(
+                ancestor_timeline_id,
+            ));
+        }
+        Ok(())
+    }
+
+    fn check_to_be_unarchived_timeline_has_no_archived_parent(
+        timeline: &Arc<Timeline>,
+    ) -> Result<(), TimelineArchivalError> {
+        if let Some(ancestor_timeline) = timeline.ancestor_timeline() {
+            if ancestor_timeline.is_archived() == Some(true) {
+                return Err(TimelineArchivalError::HasArchivedParent(
+                    ancestor_timeline.timeline_id,
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Loads the specified (offloaded) timeline from S3 and attaches it as a loaded timeline
+    async fn unoffload_timeline(
+        self: &Arc<Self>,
+        timeline_id: TimelineId,
+        ctx: RequestContext,
+    ) -> Result<Arc<Timeline>, TimelineArchivalError> {
+        let cancel = self.cancel.clone();
+        let timeline_preload = self
+            .load_timeline_metadata(timeline_id, self.remote_storage.clone(), cancel)
+            .await;
+
+        let index_part = match timeline_preload.index_part {
+            Ok(index_part) => {
+                debug!("remote index part exists for timeline {timeline_id}");
+                index_part
+            }
+            Err(DownloadError::NotFound) => {
+                error!(%timeline_id, "index_part not found on remote");
+                return Err(TimelineArchivalError::NotFound);
+            }
+            Err(e) => {
+                // Some (possibly ephemeral) error happened during index_part download.
+                warn!(%timeline_id, "Failed to load index_part from remote storage, failed creation? ({e})");
+                return Err(TimelineArchivalError::Other(
+                    anyhow::Error::new(e).context("downloading index_part from remote storage"),
+                ));
+            }
+        };
+        let index_part = match index_part {
+            MaybeDeletedIndexPart::IndexPart(index_part) => index_part,
+            MaybeDeletedIndexPart::Deleted(_index_part) => {
+                info!("timeline is deleted according to index_part.json");
+                return Err(TimelineArchivalError::NotFound);
+            }
+        };
+        let remote_metadata = index_part.metadata.clone();
+        let timeline_resources = self.build_timeline_resources(timeline_id);
+        self.load_remote_timeline(
+            timeline_id,
+            index_part,
+            remote_metadata,
+            timeline_resources,
+            &ctx,
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "failed to load remote timeline {} for tenant {}",
+                timeline_id, self.tenant_shard_id
+            )
+        })?;
+        let timelines = self.timelines.lock().unwrap();
+        if let Some(timeline) = timelines.get(&timeline_id) {
+            let mut offloaded_timelines = self.timelines_offloaded.lock().unwrap();
+            if offloaded_timelines.remove(&timeline_id).is_none() {
+                warn!("timeline already removed from offloaded timelines");
+            }
+            Ok(Arc::clone(timeline))
+        } else {
+            warn!("timeline not available directly after attach");
+            Err(TimelineArchivalError::Other(anyhow::anyhow!(
+                "timeline not available directly after attach"
+            )))
+        }
+    }
+
+    pub(crate) async fn apply_timeline_archival_config(
+        self: &Arc<Self>,
+        timeline_id: TimelineId,
+        new_state: TimelineArchivalState,
+        ctx: RequestContext,
     ) -> Result<(), TimelineArchivalError> {
         info!("setting timeline archival config");
-        let timeline = {
+        // First part: figure out what is needed to do, and do validation
+        let timeline_or_unarchive_offloaded = 'outer: {
             let timelines = self.timelines.lock().unwrap();
 
             let Some(timeline) = timelines.get(&timeline_id) else {
-                return Err(TimelineArchivalError::NotFound);
+                let offloaded_timelines = self.timelines_offloaded.lock().unwrap();
+                let Some(offloaded) = offloaded_timelines.get(&timeline_id) else {
+                    return Err(TimelineArchivalError::NotFound);
+                };
+                if new_state == TimelineArchivalState::Archived {
+                    // It's offloaded already, so nothing to do
+                    return Ok(());
+                }
+                if let Some(ancestor_timeline_id) = offloaded.ancestor_timeline_id {
+                    Self::check_ancestor_of_to_be_unarchived_is_not_archived(
+                        ancestor_timeline_id,
+                        &timelines,
+                        &offloaded_timelines,
+                    )?;
+                }
+                break 'outer None;
             };
 
-            if state == TimelineArchivalState::Unarchived {
-                if let Some(ancestor_timeline) = timeline.ancestor_timeline() {
-                    if ancestor_timeline.is_archived() == Some(true) {
-                        return Err(TimelineArchivalError::HasArchivedParent(
-                            ancestor_timeline.timeline_id,
-                        ));
-                    }
+            // Do some validation. We release the timelines lock below, so there is potential
+            // for race conditions: these checks are more present to prevent misunderstandings of
+            // the API's capabilities, instead of serving as the sole way to defend their invariants.
+            match new_state {
+                TimelineArchivalState::Unarchived => {
+                    Self::check_to_be_unarchived_timeline_has_no_archived_parent(timeline)?
+                }
+                TimelineArchivalState::Archived => {
+                    Self::check_to_be_archived_has_no_unarchived_children(timeline_id, &timelines)?
                 }
             }
-
-            // Ensure that there are no non-archived child timelines
-            let children: Vec<TimelineId> = timelines
-                .iter()
-                .filter_map(|(id, entry)| {
-                    if entry.get_ancestor_timeline_id() != Some(timeline_id) {
-                        return None;
-                    }
-                    if entry.is_archived() == Some(true) {
-                        return None;
-                    }
-                    Some(*id)
-                })
-                .collect();
-
-            if !children.is_empty() && state == TimelineArchivalState::Archived {
-                return Err(TimelineArchivalError::HasUnarchivedChildren(children));
-            }
-            Arc::clone(timeline)
+            Some(Arc::clone(timeline))
         };
 
+        // Second part: unarchive timeline (if needed)
+        let timeline = if let Some(timeline) = timeline_or_unarchive_offloaded {
+            timeline
+        } else {
+            // Turn offloaded timeline into a non-offloaded one
+            self.unoffload_timeline(timeline_id, ctx).await?
+        };
+
+        // Third part: upload new timeline archival state and block until it is present in S3
         let upload_needed = timeline
             .remote_client
-            .schedule_index_upload_for_timeline_archival_state(state)?;
+            .schedule_index_upload_for_timeline_archival_state(new_state)?;
 
         if upload_needed {
             info!("Uploading new state");
@@ -1884,7 +2088,7 @@ impl Tenant {
     ///
     /// Returns whether we have pending compaction task.
     async fn compaction_iteration(
-        &self,
+        self: &Arc<Self>,
         cancel: &CancellationToken,
         ctx: &RequestContext,
     ) -> Result<bool, timeline::CompactionError> {
@@ -1905,21 +2109,28 @@ impl Tenant {
         // while holding the lock. Then drop the lock and actually perform the
         // compactions.  We don't want to block everything else while the
         // compaction runs.
-        let timelines_to_compact = {
+        let timelines_to_compact_or_offload;
+        {
             let timelines = self.timelines.lock().unwrap();
-            let timelines_to_compact = timelines
+            timelines_to_compact_or_offload = timelines
                 .iter()
                 .filter_map(|(timeline_id, timeline)| {
-                    if timeline.is_active() {
-                        Some((*timeline_id, timeline.clone()))
-                    } else {
+                    let (is_active, can_offload) = (timeline.is_active(), timeline.can_offload());
+                    let has_no_unoffloaded_children = {
+                        !timelines
+                            .iter()
+                            .any(|(_id, tl)| tl.get_ancestor_timeline_id() == Some(*timeline_id))
+                    };
+                    let can_offload = can_offload && has_no_unoffloaded_children;
+                    if (is_active, can_offload) == (false, false) {
                         None
+                    } else {
+                        Some((*timeline_id, timeline.clone(), (is_active, can_offload)))
                     }
                 })
                 .collect::<Vec<_>>();
             drop(timelines);
-            timelines_to_compact
-        };
+        }
 
         // Before doing any I/O work, check our circuit breaker
         if self.compaction_circuit_breaker.lock().unwrap().is_broken() {
@@ -1929,20 +2140,34 @@ impl Tenant {
 
         let mut has_pending_task = false;
 
-        for (timeline_id, timeline) in &timelines_to_compact {
-            has_pending_task |= timeline
-                .compact(cancel, EnumSet::empty(), ctx)
-                .instrument(info_span!("compact_timeline", %timeline_id))
-                .await
-                .inspect_err(|e| match e {
-                    timeline::CompactionError::ShuttingDown => (),
-                    timeline::CompactionError::Other(e) => {
-                        self.compaction_circuit_breaker
-                            .lock()
-                            .unwrap()
-                            .fail(&CIRCUIT_BREAKERS_BROKEN, e);
-                    }
-                })?;
+        for (timeline_id, timeline, (can_compact, can_offload)) in &timelines_to_compact_or_offload
+        {
+            let pending_task_left = if *can_compact {
+                Some(
+                    timeline
+                        .compact(cancel, EnumSet::empty(), ctx)
+                        .instrument(info_span!("compact_timeline", %timeline_id))
+                        .await
+                        .inspect_err(|e| match e {
+                            timeline::CompactionError::ShuttingDown => (),
+                            timeline::CompactionError::Other(e) => {
+                                self.compaction_circuit_breaker
+                                    .lock()
+                                    .unwrap()
+                                    .fail(&CIRCUIT_BREAKERS_BROKEN, e);
+                            }
+                        })?,
+                )
+            } else {
+                None
+            };
+            has_pending_task |= pending_task_left.unwrap_or(false);
+            if pending_task_left == Some(false) && *can_offload {
+                offload_timeline(self, timeline)
+                    .instrument(info_span!("offload_timeline", %timeline_id))
+                    .await
+                    .map_err(timeline::CompactionError::Other)?;
+            }
         }
 
         self.compaction_circuit_breaker
@@ -2852,6 +3077,7 @@ impl Tenant {
             constructed_at: Instant::now(),
             timelines: Mutex::new(HashMap::new()),
             timelines_creating: Mutex::new(HashSet::new()),
+            timelines_offloaded: Mutex::new(HashMap::new()),
             gc_cs: tokio::sync::Mutex::new(()),
             walredo_mgr,
             remote_storage,
