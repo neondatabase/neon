@@ -91,7 +91,7 @@ COPY --from=pg-build /home/nonroot/postgres_install.tar.gz /data/
 # Now, when `docker run ... pageserver` is run, it can start without errors, yet will have some default dummy values.
 RUN mkdir -p /data/.neon/ && \
   echo "id=1234" > "/data/.neon/identity.toml" && \
-  echo "broker_endpoint='http://storage_broker:50051'\n" \
+  echo "broker_endpoint='http://storage_broker:30051'\n" \
        "pg_distrib_dir='/usr/local/'\n" \
        "listen_pg_addr='0.0.0.0:6400'\n" \
        "listen_http_addr='0.0.0.0:9898'\n" \
