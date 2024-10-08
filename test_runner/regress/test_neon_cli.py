@@ -160,6 +160,11 @@ def test_cli_start_stop_multi(neon_env_builder: NeonEnvBuilder):
     env.neon_cli.pageserver_stop(env.BASE_PAGESERVER_ID)
     env.neon_cli.pageserver_stop(env.BASE_PAGESERVER_ID + 1)
 
+    # We will stop the storage controller while it may have requests in
+    # flight, and the pageserver complains when requests are abandoned.
+    for ps in env.pageservers:
+        ps.allowed_errors.append(".*request was dropped before completing.*")
+
     # Keep NeonEnv state up to date, it usually owns starting/stopping services
     env.pageservers[0].running = False
     env.pageservers[1].running = False
