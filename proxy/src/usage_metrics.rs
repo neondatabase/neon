@@ -493,7 +493,7 @@ mod tests {
     use anyhow::Error;
     use chrono::Utc;
     use consumption_metrics::{Event, EventChunk};
-    use hyper::{
+    use hyper0::{
         service::{make_service_fn, service_fn},
         Body, Response,
     };
@@ -509,7 +509,7 @@ mod tests {
         let reports = Arc::new(Mutex::new(vec![]));
         let reports2 = reports.clone();
 
-        let server = hyper::server::Server::from_tcp(listener)
+        let server = hyper0::server::Server::from_tcp(listener)
             .unwrap()
             .serve(make_service_fn(move |_| {
                 let reports = reports.clone();
@@ -517,7 +517,7 @@ mod tests {
                     Ok::<_, Error>(service_fn(move |req| {
                         let reports = reports.clone();
                         async move {
-                            let bytes = hyper::body::to_bytes(req.into_body()).await?;
+                            let bytes = hyper0::body::to_bytes(req.into_body()).await?;
                             let events: EventChunk<'static, Event<Ids, String>> =
                                 serde_json::from_slice(&bytes)?;
                             reports.lock().unwrap().push(events);
