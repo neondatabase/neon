@@ -140,7 +140,7 @@ impl VirtualFile {
 
     pub async fn open_with_options_v2<P: AsRef<Utf8Path>>(
         path: P,
-        open_options: &mut OpenOptions, // Uses `&mut` here to add `O_DIRECT`.
+        open_options: &OpenOptions,
         ctx: &RequestContext, /* TODO: carry a pointer to the metrics in the RequestContext instead of the parsing https://github.com/neondatabase/neon/issues/6107 */
     ) -> Result<Self, std::io::Error> {
         let file = match get_io_mode() {
@@ -152,7 +152,7 @@ impl VirtualFile {
             IoMode::Direct => {
                 let file = VirtualFileInner::open_with_options(
                     path,
-                    open_options.custom_flags(nix::libc::O_DIRECT),
+                    open_options.clone().custom_flags(nix::libc::O_DIRECT),
                     ctx,
                 )
                 .await?;
