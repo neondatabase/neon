@@ -626,23 +626,27 @@ def human_bytes(amt: float) -> str:
     raise RuntimeError("unreachable")
 
 
-def all_pairs_component_versions() -> Iterable[object]:
+def all_pairs_component_versions():
     """
     This function generates all the pairs of old (False) or new (True)
     versions of the Neon components
     E.g. Pairs(storage_controller=False, storage_broker=True, compute=True, safekeeper=False, pageserver=False)
+    then it returns a dictionary with argnames, argvalues and ids
+    ids is a sequence of letters where n means the new version of the component and o means the old version
     """
+    argnames = "combination"
+    argvalues, ids = [], []
     for pair in AllPairs(
         OrderedDict({component: [True, False] for component in COMPONENT_BINARIES.keys()})
     ):
-        yield pair
-
-
-def comb_ids(comb) -> str:
-    return "combination_" + "".join(
-        [
-            "n" if getattr(comb, a) else "o"
-            for a in comb.__dir__()
-            if not a.startswith("_") and a not in {"index", "count"}
-        ]
-    )
+        argvalues.append(pair)
+        ids.append(
+            "combination_"
+            + "".join(
+                [
+                    "n" if getattr(pair, component) else "o"
+                    for component in COMPONENT_BINARIES.keys()
+                ]
+            )
+        )
+    return {"argnames": argnames, "argvalues": argvalues, "ids": ids}

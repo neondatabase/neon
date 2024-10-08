@@ -60,7 +60,7 @@ def get_node_shard_counts(env: NeonEnv, tenant_ids):
     return counts
 
 
-@pytest.mark.parametrize("combination", all_pairs_component_versions())
+@pytest.mark.parametrize(**all_pairs_component_versions())
 def test_storage_controller_smoke(neon_env_builder: NeonEnvBuilder, combination):
     """
     Test the basic lifecycle of a storage controller:

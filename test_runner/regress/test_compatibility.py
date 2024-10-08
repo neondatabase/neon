@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
 
-import fixtures.utils
 import pytest
 import toml
 from fixtures.common_types import TenantId, TimelineId
@@ -582,7 +581,7 @@ def test_historic_storage_formats(
 
 @check_ondisk_data_compatibility_if_enabled
 @pytest.mark.xdist_group("compatibility")
-@pytest.mark.parametrize("combination", all_pairs_component_versions(), ids=fixtures.utils.comb_ids)
+@pytest.mark.parametrize(**all_pairs_component_versions())
 def test_versions_mismatch(
     neon_env_builder: NeonEnvBuilder, test_output_dir: Path, pg_version: PgVersion, combination
 ):
