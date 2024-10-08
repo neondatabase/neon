@@ -44,6 +44,7 @@ pub(crate) use api::IoMode;
 pub(crate) use io_engine::IoEngineKind;
 pub(crate) use metadata::Metadata;
 pub(crate) use open_options::*;
+pub(crate) mod dio;
 
 pub(crate) mod owned_buffers_io {
     //! Abstractions for IO with owned buffers.
@@ -55,6 +56,7 @@ pub(crate) mod owned_buffers_io {
     //! but for the time being we're proving out the primitives in the neon.git repo
     //! for faster iteration.
 
+    pub(crate) mod io_buf_aligned;
     pub(crate) mod io_buf_ext;
     pub(crate) mod slice;
     pub(crate) mod write;
@@ -1356,6 +1358,8 @@ fn get_open_files() -> &'static OpenFiles {
 pub(crate) const fn get_io_buffer_alignment() -> usize {
     DEFAULT_IO_BUFFER_ALIGNMENT
 }
+
+pub(crate) type IoBufferMut = dio::AlignedBufferMut<{ get_io_buffer_alignment() }>;
 
 static IO_MODE: AtomicU8 = AtomicU8::new(IoMode::preferred() as u8);
 
