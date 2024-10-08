@@ -702,7 +702,7 @@ mod tests {
             );
 
             // Check generated HTTP header, which uses an inclusive range.
-            let expect_header = result.map(|(start, end)| match end {
+            let expect_header = expect.map(|(start, end)| match end {
                 Some(end) => format!("bytes={start}-{}", end - 1), // inclusive end
                 None => format!("bytes={start}-"),
             });
