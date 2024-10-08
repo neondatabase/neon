@@ -104,6 +104,7 @@ pub fn spawn(
             pg_auth,
             tcp_listener,
             conf.pg_auth_type,
+            conf.debounce_timeout,
             libpq_ctx,
             cancel.clone(),
         )
@@ -152,6 +153,7 @@ pub async fn libpq_listener_main(
     auth: Option<Arc<SwappableJwtAuth>>,
     listener: tokio::net::TcpListener,
     auth_type: AuthType,
+    debounce_timeout: Option<Duration>,
     listener_ctx: RequestContext,
     listener_cancel: CancellationToken,
 ) -> Connections {
@@ -182,6 +184,7 @@ pub async fn libpq_listener_main(
                     local_auth,
                     socket,
                     auth_type,
+                    debounce_timeout,
                     connection_ctx,
                     connections_cancel.child_token(),
                 ));
@@ -209,6 +212,7 @@ async fn page_service_conn_main(
     auth: Option<Arc<SwappableJwtAuth>>,
     socket: tokio::net::TcpStream,
     auth_type: AuthType,
+    debounce_timeout: Option<Duration>,
     connection_ctx: RequestContext,
     cancel: CancellationToken,
 ) -> ConnectionHandlerResult {
@@ -260,7 +264,7 @@ async fn page_service_conn_main(
     // But it's in a shared crate, so, we store connection_ctx inside PageServerHandler
     // and create the per-query context in process_query ourselves.
     let mut conn_handler =
-        PageServerHandler::new(tenant_manager, auth, connection_ctx, cancel.clone());
+        PageServerHandler::new(tenant_manager, auth, debounce_timeout, connection_ctx, cancel.clone());
     let pgbackend = PostgresBackend::new_from_io(socket, peer_addr, auth_type, None)?;
 
     match pgbackend.run(&mut conn_handler, &cancel).await {
@@ -303,6 +307,9 @@ struct PageServerHandler {
     cancel: CancellationToken,
 
     timeline_handles: TimelineHandles,
+
+    /// See [`PageServerConf::debounce_timeout`]
+    debounce_timeout: Option<Duration>,
 }
 
 struct TimelineHandles {
@@ -520,6 +527,7 @@ impl PageServerHandler {
     pub fn new(
         tenant_manager: Arc<TenantManager>,
         auth: Option<Arc<SwappableJwtAuth>>,
+        debounce_timeout: Option<Duration>,
         connection_ctx: RequestContext,
         cancel: CancellationToken,
     ) -> Self {
@@ -529,6 +537,7 @@ impl PageServerHandler {
             connection_ctx,
             timeline_handles: TimelineHandles::new(tenant_manager),
             cancel,
+            debounce_timeout,
         }
     }
 
@@ -610,19 +619,17 @@ impl PageServerHandler {
             // return or `?` on protocol error
             // `break EXPR` to stop batching. The EXPR will be the first message in the next batch.
             let next_batched: Option<DebouncedFeMessage> = loop {
-                // TODO(vlad): make this pageserver config
-                static BOUNCE_TIMEOUT: Lazy<Duration> = Lazy::new(|| {
-                    utils::env::var::<humantime::Duration, _>("NEON_PAGESERVER_DEBOUNCE")
-                        .unwrap()
-                        .into()
-                });
-                let sleep_fut = if let Some(started_at) = debounce {
-                    futures::future::Either::Left(tokio::time::sleep_until(
-                        (started_at + *BOUNCE_TIMEOUT).into(),
-                    ))
-                } else {
-                    futures::future::Either::Right(futures::future::pending())
+                let sleep_fut = match (self.debounce_timeout, debounce) {
+                    (Some(debounce_timeout), Some(started_at)) => {
+                        futures::future::Either::Left(tokio::time::sleep_until(
+                            (started_at + debounce_timeout).into()
+                        ))
+                    },
+                    _ => {
+                        futures::future::Either::Right(futures::future::pending())
+                    }
                 };
+
                 let msg = tokio::select! {
                     biased;
                     _ = self.cancel.cancelled() => {
@@ -718,6 +725,15 @@ impl PageServerHandler {
                     }
                 };
 
+                let debounce_timeout = match self.debounce_timeout {
+                    Some(value) => value,
+                    None => {
+                        // Debouncing is not enabled.
+                        // Stop batching on the first message.
+                        break Some(this_msg)
+                    }
+                };
+
                 // check if we can debounce
                 match (&mut batched, this_msg) {
                     (None, this_msg) => {
@@ -769,7 +785,7 @@ impl PageServerHandler {
 
                 // debounce impl piece
                 let started_at = debounce.get_or_insert_with(Instant::now);
-                if started_at.elapsed() > *BOUNCE_TIMEOUT {
+                if started_at.elapsed() > debounce_timeout {
                     break None;
                 }
             };
