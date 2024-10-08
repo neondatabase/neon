@@ -157,7 +157,7 @@ def neon_binpath(base_dir: Path, build_type: str) -> Iterator[Path]:
     yield binpath
 
 
-@pytest.fixture(scope="function")
+@pytest.fixture(scope="session")
 def compatibility_neon_binpath() -> Optional[Iterator[Path]]:
     if os.getenv("REMOTE_ENV"):
         return
