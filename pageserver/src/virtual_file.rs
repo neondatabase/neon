@@ -64,39 +64,22 @@ pub(crate) mod owned_buffers_io {
 }
 
 #[derive(Debug)]
-pub enum VirtualFile {
-    Buffered(VirtualFileInner),
-    Direct(VirtualFileInner),
+pub struct VirtualFile {
+    inner: VirtualFileInner,
+    _mode: IoMode,
 }
 
 impl VirtualFile {
-    fn inner(&self) -> &VirtualFileInner {
-        match self {
-            Self::Buffered(file) => file,
-            Self::Direct(file) => file,
-        }
-    }
-
-    fn inner_mut(&mut self) -> &mut VirtualFileInner {
-        match self {
-            Self::Buffered(file) => file,
-            Self::Direct(file) => file,
-        }
-    }
-
-    fn into_inner(self) -> VirtualFileInner {
-        match self {
-            Self::Buffered(file) => file,
-            Self::Direct(file) => file,
-        }
-    }
     /// Open a file in read-only mode. Like File::open.
     pub async fn open<P: AsRef<Utf8Path>>(
         path: P,
         ctx: &RequestContext,
     ) -> Result<Self, std::io::Error> {
-        let file = VirtualFileInner::open(path, ctx).await?;
-        Ok(Self::Buffered(file))
+        let inner = VirtualFileInner::open(path, ctx).await?;
+        Ok(VirtualFile {
+            inner,
+            _mode: IoMode::Buffered,
+        })
     }
 
     /// Open a file in read-only mode. Like File::open.
@@ -113,8 +96,11 @@ impl VirtualFile {
         path: P,
         ctx: &RequestContext,
     ) -> Result<Self, std::io::Error> {
-        let file = VirtualFileInner::create(path, ctx).await?;
-        Ok(Self::Buffered(file))
+        let inner = VirtualFileInner::create(path, ctx).await?;
+        Ok(VirtualFile {
+            inner,
+            _mode: IoMode::Buffered,
+        })
     }
 
     pub async fn create_v2<P: AsRef<Utf8Path>>(
@@ -134,8 +120,11 @@ impl VirtualFile {
         open_options: &OpenOptions,
         ctx: &RequestContext, /* TODO: carry a pointer to the metrics in the RequestContext instead of the parsing https://github.com/neondatabase/neon/issues/6107 */
     ) -> Result<Self, std::io::Error> {
-        let file = VirtualFileInner::open_with_options(path, open_options, ctx).await?;
-        Ok(Self::Buffered(file))
+        let inner = VirtualFileInner::open_with_options(path, open_options, ctx).await?;
+        Ok(VirtualFile {
+            inner,
+            _mode: IoMode::Buffered,
+        })
     }
 
     pub async fn open_with_options_v2<P: AsRef<Utf8Path>>(
@@ -145,25 +134,31 @@ impl VirtualFile {
     ) -> Result<Self, std::io::Error> {
         let file = match get_io_mode() {
             IoMode::Buffered => {
-                let file = VirtualFileInner::open_with_options(path, open_options, ctx).await?;
-                Self::Buffered(file)
+                let inner = VirtualFileInner::open_with_options(path, open_options, ctx).await?;
+                VirtualFile {
+                    inner,
+                    _mode: IoMode::Buffered,
+                }
             }
             #[cfg(target_os = "linux")]
             IoMode::Direct => {
-                let file = VirtualFileInner::open_with_options(
+                let inner = VirtualFileInner::open_with_options(
                     path,
                     open_options.clone().custom_flags(nix::libc::O_DIRECT),
                     ctx,
                 )
                 .await?;
-                Self::Direct(file)
+                VirtualFile {
+                    inner,
+                    _mode: IoMode::Direct,
+                }
             }
         };
         Ok(file)
     }
 
     pub fn path(&self) -> &Utf8Path {
-        self.inner().path.as_path()
+        self.inner.path.as_path()
     }
 
     pub async fn crashsafe_overwrite<B: BoundedBuf<Buf = Buf> + Send, Buf: IoBuf + Send>(
@@ -175,23 +170,23 @@ impl VirtualFile {
     }
 
     pub async fn sync_all(&self) -> Result<(), Error> {
-        self.inner().sync_all().await
+        self.inner.sync_all().await
     }
 
     pub async fn sync_data(&self) -> Result<(), Error> {
-        self.inner().sync_data().await
+        self.inner.sync_data().await
     }
 
     pub async fn metadata(&self) -> Result<Metadata, Error> {
-        self.inner().metadata().await
+        self.inner.metadata().await
     }
 
     pub fn remove(self) {
-        self.into_inner().remove();
+        self.inner.remove();
     }
 
     pub async fn seek(&mut self, pos: SeekFrom) -> Result<u64, Error> {
-        self.inner_mut().seek(pos).await
+        self.inner.seek(pos).await
     }
 
     pub async fn read_exact_at<Buf>(
@@ -203,7 +198,7 @@ impl VirtualFile {
     where
         Buf: IoBufMut + Send,
     {
-        self.inner().read_exact_at(slice, offset, ctx).await
+        self.inner.read_exact_at(slice, offset, ctx).await
     }
 
     pub async fn read_exact_at_page(
@@ -212,7 +207,7 @@ impl VirtualFile {
         offset: u64,
         ctx: &RequestContext,
     ) -> Result<PageWriteGuard<'static>, Error> {
-        self.inner().read_exact_at_page(page, offset, ctx).await
+        self.inner.read_exact_at_page(page, offset, ctx).await
     }
 
     pub async fn write_all_at<Buf: IoBuf + Send>(
@@ -221,7 +216,7 @@ impl VirtualFile {
         offset: u64,
         ctx: &RequestContext,
     ) -> (FullSlice<Buf>, Result<(), Error>) {
-        self.inner().write_all_at(buf, offset, ctx).await
+        self.inner.write_all_at(buf, offset, ctx).await
     }
 
     pub async fn write_all<Buf: IoBuf + Send>(
@@ -229,7 +224,7 @@ impl VirtualFile {
         buf: FullSlice<Buf>,
         ctx: &RequestContext,
     ) -> (FullSlice<Buf>, Result<usize, Error>) {
-        self.inner_mut().write_all(buf, ctx).await
+        self.inner.write_all(buf, ctx).await
     }
 }
 
@@ -1211,11 +1206,11 @@ impl VirtualFile {
         blknum: u32,
         ctx: &RequestContext,
     ) -> Result<crate::tenant::block_io::BlockLease<'_>, std::io::Error> {
-        self.inner().read_blk(blknum, ctx).await
+        self.inner.read_blk(blknum, ctx).await
     }
 
     async fn read_to_end(&mut self, buf: &mut Vec<u8>, ctx: &RequestContext) -> Result<(), Error> {
-        self.inner_mut().read_to_end(buf, ctx).await
+        self.inner.read_to_end(buf, ctx).await
     }
 }
 
