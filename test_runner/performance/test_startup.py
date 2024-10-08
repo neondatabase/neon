@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import requests
 from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
 from fixtures.neon_fixtures import NeonEnvBuilder

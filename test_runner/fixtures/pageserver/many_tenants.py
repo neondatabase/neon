@@ -1,5 +1,7 @@
+from __future__ import annotations
+
 import concurrent.futures
-from typing import Any, Callable, Dict, Tuple
+from typing import TYPE_CHECKING
 
 import fixtures.pageserver.remote_storage
 from fixtures.common_types import TenantId, TimelineId
@@ -10,10 +12,13 @@ from fixtures.neon_fixtures import (
 )
 from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
 
+if TYPE_CHECKING:
+    from typing import Any, Callable
+
 
 def single_timeline(
     neon_env_builder: NeonEnvBuilder,
-    setup_template: Callable[[NeonEnv], Tuple[TenantId, TimelineId, Dict[str, Any]]],
+    setup_template: Callable[[NeonEnv], tuple[TenantId, TimelineId, dict[str, Any]]],
     ncopies: int,
 ) -> NeonEnv:
     """

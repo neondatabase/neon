@@ -1,9 +1,11 @@
+from __future__ import annotations
+
 import json
 import os
 import random
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional, Union
+from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.common_types import TenantId, TenantShardId, TimelineId
@@ -19,6 +21,10 @@ from fixtures.utils import wait_until
 from fixtures.workload import Workload
 from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
+
+if TYPE_CHECKING:
+    from typing import Any, Optional, Union
+
 
 # A tenant configuration that is convenient for generating uploads and deletions
 # without a large amount of postgres traffic.
@@ -193,11 +199,11 @@ def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, make_httpserver, 
                 # state if it was running attached with a stale generation
                 last_state[pageserver.id] = ("Detached", None)
         else:
-            secondary_conf: Optional[Dict[str, Any]] = None
+            secondary_conf: Optional[dict[str, Any]] = None
             if mode == "Secondary":
                 secondary_conf = {"warm": rng.choice([True, False])}
 
-            location_conf: Dict[str, Any] = {
+            location_conf: dict[str, Any] = {
                 "mode": mode,
                 "secondary_conf": secondary_conf,
                 "tenant_conf": {},

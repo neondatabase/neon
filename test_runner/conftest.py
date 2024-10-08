@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 pytest_plugins = (
     "fixtures.pg_version",
     "fixtures.parametrize",

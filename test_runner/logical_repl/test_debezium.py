@@ -2,6 +2,8 @@
 Test the logical replication in Neon with Debezium as a consumer
 """
 
+from __future__ import annotations
+
 import json
 import os
 import time

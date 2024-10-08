@@ -1,5 +1,7 @@
 #! /usr/bin/env python3
 
+from __future__ import annotations
+
 import argparse
 import dataclasses
 import json
@@ -11,7 +13,6 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Tuple
 
 import backoff
 import psycopg2
@@ -91,7 +92,7 @@ def create_table(cur):
     cur.execute(CREATE_TABLE)
 
 
-def parse_test_name(test_name: str) -> Tuple[str, int, str]:
+def parse_test_name(test_name: str) -> tuple[str, int, str]:
     build_type, pg_version = None, None
     if match := TEST_NAME_RE.search(test_name):
         found = match.groupdict()

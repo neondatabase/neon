@@ -2,7 +2,9 @@
 Utilities used by all code in this sub-directory
 """
 
-from typing import Any, Callable, Dict, Optional, Tuple
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
 
 import fixtures.pageserver.many_tenants as many_tenants
 from fixtures.common_types import TenantId, TimelineId
@@ -12,6 +14,9 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
 )
 from fixtures.pageserver.utils import wait_until_all_tenants_state
+
+if TYPE_CHECKING:
+    from typing import Any, Callable, Optional
 
 
 def ensure_pageserver_ready_for_benchmarking(env: NeonEnv, n_tenants: int):
@@ -40,7 +45,7 @@ def setup_pageserver_with_tenants(
     neon_env_builder: NeonEnvBuilder,
     name: str,
     n_tenants: int,
-    setup: Callable[[NeonEnv], Tuple[TenantId, TimelineId, Dict[str, Any]]],
+    setup: Callable[[NeonEnv], tuple[TenantId, TimelineId, dict[str, Any]]],
     timeout_in_seconds: Optional[int] = None,
 ) -> NeonEnv:
     """

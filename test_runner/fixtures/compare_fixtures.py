@@ -1,11 +1,13 @@
+from __future__ import annotations
+
 import os
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
 from contextlib import _GeneratorContextManager, contextmanager
 
 # Type-related stuff
 from pathlib import Path
-from typing import Dict, Iterator, List
 
 import pytest
 from _pytest.fixtures import FixtureRequest
@@ -72,7 +74,7 @@ class PgCompare(ABC):
         pass
 
     @contextmanager
-    def record_pg_stats(self, pg_stats: List[PgStatTable]) -> Iterator[None]:
+    def record_pg_stats(self, pg_stats: list[PgStatTable]) -> Iterator[None]:
         init_data = self._retrieve_pg_stats(pg_stats)
 
         yield
@@ -82,8 +84,8 @@ class PgCompare(ABC):
         for k in set(init_data) & set(data):
             self.zenbenchmark.record(k, data[k] - init_data[k], "", MetricReport.HIGHER_IS_BETTER)
 
-    def _retrieve_pg_stats(self, pg_stats: List[PgStatTable]) -> Dict[str, int]:
-        results: Dict[str, int] = {}
+    def _retrieve_pg_stats(self, pg_stats: list[PgStatTable]) -> dict[str, int]:
+        results: dict[str, int] = {}
 
         with self.pg.connect().cursor() as cur:
             for pg_stat in pg_stats:
