@@ -447,7 +447,7 @@ class NeonEnvBuilder:
         self.default_branch_name = default_branch_name
         self.env: Optional[NeonEnv] = None
         self.keep_remote_storage_contents: bool = True
-        self.neon_binpath = neon_binpath.absolute()
+        self.neon_binpath = neon_binpath
         self.neon_local_binpath = neon_binpath
         self.pg_distrib_dir = pg_distrib_dir
         self.pg_version = pg_version
@@ -708,7 +708,6 @@ class NeonEnvBuilder:
             )
             for filename in paths:
                 destination = self.mixdir / filename
-                destination.unlink(missing_ok=True)
                 destination.symlink_to(directory / filename)
         if not self.version_combination.compute:
             self.pg_distrib_dir = self.compatibility_pg_distrib_dir
