@@ -396,7 +396,7 @@ impl RemoteStorage for LocalFs {
 
                         RemotePath::new(key.strip_prefix(&strip_prefix).unwrap()).unwrap()
                     } else {
-                        key
+                        key.clone()
                     };
 
                     let relative_key = format!("{}", relative_key);
@@ -412,7 +412,11 @@ impl RemoteStorage for LocalFs {
                             key: RemotePath::from_string(&relative_key).unwrap(),
                             // LocalFs is just for testing
                             last_modified: SystemTime::now(),
-                            size: 0,
+                            size: u64::from(
+                                file_metadata(&key.with_base(&self.storage_root))
+                                    .await?
+                                    .len(),
+                            ),
                         });
                     }
                 }

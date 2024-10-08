@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use anyhow::{bail, ensure, Context};
+use anyhow::{bail, ensure};
 use bytes::Bytes;
 
 use itertools::Itertools;
@@ -14,10 +14,9 @@ use pageserver_api::{
     shard::ShardIdentity,
 };
 use postgres_ffi::{pg_constants, relfile_utils::parse_relfilename, ControlFileData, BLCKSZ};
-use tokio::{io::AsyncRead, task::JoinSet};
-use tokio_epoll_uring::BoundedBuf;
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use tracing::debug;
+use tracing::{debug, instrument};
 
 use crate::pgdatadir_mapping::{SlruSegmentDirectory, TwoPhaseDirectory};
 use crate::{
@@ -27,7 +26,6 @@ use crate::{
     task_mgr::TaskKind,
     tenant::storage_layer::ImageLayerWriter,
 };
-use tokio::io::AsyncReadExt;
 
 use pageserver_api::key::Key;
 use pageserver_api::key::{
@@ -45,14 +43,14 @@ use std::ops::Range;
 
 use super::{uninit::UninitializedTimeline, Timeline};
 
-use remote_storage::{
-    Download, GenericRemoteStorage, Listing, ListingObject, RemotePath, RemoteStorage,
-};
+use remote_storage::{Download, GenericRemoteStorage, Listing, ListingObject, RemotePath};
 
-pub(crate) struct Prepared {
+pub(crate) struct Prepared<'a> {
     pgdata_dir: RemotePath,
     control_file: ControlFileData,
+    control_file_buf: Bytes,
     storage: RemoteStorageWrapper,
+    ctx: &'a RequestContext,
 }
 
 /// Prepare for importing a PGDATA dump from remote storage.
@@ -67,28 +65,31 @@ pub(crate) struct Prepared {
 /// # Returns
 ///
 /// Returns a `Prepared` struct containing information about the PGDATA dump.
-pub(crate) async fn prepare(
+pub(crate) async fn prepare<'a>(
     storage: GenericRemoteStorage,
     pgdata_dir: RemotePath,
-    ctx: &RequestContext,
-    cancel: &CancellationToken,
-) -> anyhow::Result<Prepared> {
+    ctx: &'a RequestContext,
+    cancel: &'a CancellationToken,
+) -> anyhow::Result<Prepared<'a>> {
     let storage_wrapper = RemoteStorageWrapper::new(storage, cancel.clone());
 
     let controlfile_path = pgdata_dir.join("global/pg_control");
     let controlfile_buf = storage_wrapper.get(&controlfile_path).await?;
+    // TODO: use `pgv` abstraction (and add it to prepare args)
     let control_file = ControlFileData::decode(&controlfile_buf)?;
 
     let prepared = Prepared {
         pgdata_dir,
         control_file,
+        control_file_buf: controlfile_buf,
         storage: storage_wrapper,
+        ctx,
     };
     prepared.try_pg_version()?;
     Ok(prepared)
 }
 
-impl Prepared {
+impl Prepared<'_> {
     pub(crate) fn base_lsn(&self) -> Lsn {
         Lsn(self.control_file.checkPoint).align()
     }
@@ -112,9 +113,7 @@ impl Prepared {
 
 pub async fn doit(
     uninit_timeline: &UninitializedTimeline<'_>,
-    prepared: Prepared,
-    ctx: &RequestContext,
-    cancel: &CancellationToken,
+    prepared: Prepared<'_>,
 ) -> anyhow::Result<()> {
     let raw_timeline = uninit_timeline.raw_timeline()?;
     // ensure prepare() + doit() were used correctly
@@ -126,12 +125,15 @@ pub async fn doit(
     let Prepared {
         pgdata_dir,
         control_file,
+        control_file_buf,
         storage,
+        ctx,
     } = prepared;
     PgImportEnv {
         timeline: raw_timeline.clone(),
         pgdata_dir,
         control_file,
+        control_file_buf,
         pgdata_lsn,
         tasks: Vec::new(),
         storage,
@@ -145,6 +147,7 @@ struct PgImportEnv {
     timeline: Arc<Timeline>,
     pgdata_dir: RemotePath,
     pgdata_lsn: Lsn,
+    control_file_buf: Bytes,
     control_file: ControlFileData,
     tasks: Vec<AnyImportTask>,
     storage: RemoteStorageWrapper,
@@ -152,10 +155,6 @@ struct PgImportEnv {
 
 impl PgImportEnv {
     async fn doit(mut self, ctx: &RequestContext) -> anyhow::Result<()> {
-        // Read control file
-        let controlfile_path = self.pgdata_dir.join("global").join("pg_control");
-        let controlfile_buf = self.storage.get(&controlfile_path).await?;
-
         let pgdata_lsn = Lsn(self.control_file.checkPoint).align();
 
         self.pgdata_lsn = pgdata_lsn;
@@ -212,7 +211,7 @@ impl PgImportEnv {
         self.tasks
             .push(AnyImportTask::SingleKey(ImportSingleKeyTask::new(
                 CONTROLFILE_KEY,
-                Bytes::from(controlfile_buf),
+                self.control_file_buf.clone(),
             )));
 
         let checkpoint_buf = self.control_file.checkPointCopy.encode()?;
@@ -273,11 +272,12 @@ impl PgImportEnv {
         }
     }
 
+    #[instrument(level = tracing::Level::DEBUG, skip_all, fields(dboid=%db.dboid, tablespace=%db.spcnode, path=%db.path))]
     async fn import_db(&mut self, db: &PgDataDirDb) -> anyhow::Result<()> {
-        debug!(
-            "Importing database (path={}, tablespace={}, dboid={})",
-            db.path, db.spcnode, db.dboid
-        );
+        debug!("start");
+        scopeguard::defer! {
+            debug!("return");
+        }
 
         // Import relmap (00:spcnode:dbnode:00:*:00)
         let relmap_key = relmap_file_key(db.spcnode, db.dboid);
@@ -308,6 +308,7 @@ impl PgImportEnv {
         // Import data (00:spcnode:dbnode:reloid:fork:blk) and set sizes for each last
         // segment in a given relation (00:spcnode:dbnode:reloid:fork:ff)
         for file in &db.files {
+            debug!(%file.path, "importing file");
             let len = file.filesize as usize;
             ensure!(len % 8192 == 0);
             let start_blk: u32 = file.segno * (1024 * 1024 * 1024 / 8192);
@@ -338,7 +339,7 @@ impl PgImportEnv {
     }
 
     async fn import_slru(&mut self, kind: SlruKind, path: &RemotePath) -> anyhow::Result<()> {
-        let segments = self.storage.listdir(path).await?;
+        let segments = self.storage.listfilesindir(path).await?;
         let segments: Vec<(String, u32, usize)> = segments
             .into_iter()
             .filter_map(|(path, size)| {
@@ -424,12 +425,14 @@ impl PgDataDir {
         // Traverse database in increasing oid order
 
         let basedir = &datadir_path.join("base");
-        let db_oids = storage
+        let db_oids: Vec<_> = storage
             .listdir(basedir)
             .await?
             .into_iter()
-            .filter_map(|(path, len)| path.object_name().and_then(|name| name.parse::<u32>().ok()))
-            .sorted();
+            .filter_map(|path| path.object_name().and_then(|name| name.parse::<u32>().ok()))
+            .sorted()
+            .collect();
+        debug!(?db_oids, "found databases");
         let mut databases = Vec::new();
         for dboid in db_oids {
             databases.push(
@@ -463,6 +466,7 @@ impl PgDataDir {
 }
 
 impl PgDataDirDb {
+    #[instrument(level = tracing::Level::DEBUG, skip_all, fields(%dboid, %db_path))]
     async fn new(
         storage: &RemoteStorageWrapper,
         db_path: &RemotePath,
@@ -471,10 +475,11 @@ impl PgDataDirDb {
         datadir_path: &RemotePath,
     ) -> anyhow::Result<Self> {
         let mut files: Vec<PgDataDirDbFile> = storage
-            .listdir(db_path)
+            .listfilesindir(db_path)
             .await?
             .into_iter()
             .filter_map(|(path, size)| {
+                debug!(%path, %size, "found file in dbdir");
                 path.object_name().and_then(|name| {
                     // returns (relnode, forknum, segno)
                     parse_relfilename(&name).ok().map(|x| (size, x))
@@ -531,12 +536,6 @@ impl PgDataDirDb {
             dboid,
         })
     }
-}
-
-async fn read_all_bytes(reader: &mut (impl AsyncRead + Unpin)) -> anyhow::Result<Bytes> {
-    let mut buf: Vec<u8> = vec![];
-    reader.read_to_end(&mut buf).await?;
-    Ok(Bytes::from(buf))
 }
 
 trait ImportTask {
@@ -807,6 +806,8 @@ impl ChunkProcessingJob {
     }
 }
 
+/// Wrap [`remote_storage`] APIs to make it look a bit more like a filesystem API
+/// such as [`tokio::fs`], which was used in the original implementation of the import code.
 #[derive(Clone)]
 struct RemoteStorageWrapper {
     storage: GenericRemoteStorage,
@@ -818,11 +819,18 @@ impl RemoteStorageWrapper {
         Self { storage, cancel }
     }
 
-    async fn listdir(&self, prefix: &RemotePath) -> anyhow::Result<Vec<(RemotePath, usize)>> {
+    #[instrument(level = tracing::Level::DEBUG, skip_all, fields(%path))]
+    async fn listfilesindir(&self, path: &RemotePath) -> anyhow::Result<Vec<(RemotePath, usize)>> {
+        assert!(
+            path.object_name().is_some(),
+            "must specify dirname, without trailing slash"
+        );
+        let path = path.add_trailing_slash();
+
         let Listing { keys, prefixes: _ } = self
             .storage
             .list(
-                Some(prefix),
+                Some(&path),
                 remote_storage::ListingMode::WithDelimiter,
                 None,
                 &self.cancel,
@@ -834,10 +842,35 @@ impl RemoteStorageWrapper {
             .collect())
     }
 
+    #[instrument(level = tracing::Level::DEBUG, skip_all, fields(%path))]
+    async fn listdir(&self, path: &RemotePath) -> anyhow::Result<Vec<RemotePath>> {
+        assert!(
+            path.object_name().is_some(),
+            "must specify dirname, without trailing slash"
+        );
+        let path = path.add_trailing_slash();
+        let Listing { keys, prefixes } = self
+            .storage
+            .list(
+                Some(&path),
+                remote_storage::ListingMode::WithDelimiter,
+                None,
+                &self.cancel,
+            )
+            .await?;
+        let res = keys
+            .into_iter()
+            .map(|ListingObject { key, .. }| key)
+            .chain(prefixes.into_iter())
+            .collect();
+        debug!(?res, "returning");
+        Ok(res)
+    }
+
+    #[instrument(level = tracing::Level::DEBUG, skip_all, fields(%path))]
     async fn get(&self, path: &RemotePath) -> anyhow::Result<Bytes> {
         let Download {
-            mut download_stream,
-            ..
+            download_stream, ..
         } = self.storage.download(path, &self.cancel).await?;
 
         let mut reader = tokio_util::io::StreamReader::new(download_stream);
@@ -845,6 +878,7 @@ impl RemoteStorageWrapper {
         // XXX optimize this, can we get the capacity hint from somewhere?
         let mut buf = Vec::new();
         tokio::io::copy_buf(&mut reader, &mut buf).await?;
+        debug!(len = buf.len(), "done");
         Ok(Bytes::from(buf))
     }
 }

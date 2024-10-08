@@ -2865,7 +2865,7 @@ async fn put_tenant_timeline_import_pgdata(
             .await?;
 
         timeline
-            .import_pgdata(tenant.clone(), prepared, broker_client, &ctx, &cancel)
+            .import_pgdata(tenant.clone(), prepared, broker_client, &ctx)
             .await
             .map_err(ApiError::InternalServerError)?;
 
