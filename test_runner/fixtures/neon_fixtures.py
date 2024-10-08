@@ -3489,8 +3489,6 @@ class Endpoint(PgProtocol, LogUtils):
         if safekeepers is not None:
             self.active_safekeepers = safekeepers
 
-        log.info(f"Starting postgres endpoint {self.endpoint_id}")
-
         self.env.neon_cli.endpoint_start(
             self.endpoint_id,
             safekeepers=self.active_safekeepers,
@@ -3670,8 +3668,6 @@ class Endpoint(PgProtocol, LogUtils):
         Returns self.
         """
 
-        started_at = time.time()
-
         self.create(
             branch_name=branch_name,
             endpoint_id=endpoint_id,
@@ -3686,8 +3682,6 @@ class Endpoint(PgProtocol, LogUtils):
             allow_multiple=allow_multiple,
             basebackup_request_tries=basebackup_request_tries,
         )
-
-        log.info(f"Postgres startup took {time.time() - started_at} seconds")
 
         return self
 
