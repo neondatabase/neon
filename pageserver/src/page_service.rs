@@ -43,7 +43,7 @@ use crate::basebackup;
 use crate::basebackup::BasebackupError;
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
-use crate::metrics::{self, CONSECUTIVE_NONBLOCKING_GETPAGE_REQUESTS_HISTOGRAM};
+use crate::metrics::{self};
 use crate::metrics::{ComputeCommandKind, COMPUTE_COMMANDS_COUNTERS, LIVE_CONNECTIONS};
 use crate::pgdatadir_mapping::Version;
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
@@ -825,7 +825,6 @@ impl PageServerHandler {
                     effective_request_lsn,
                     pages,
                 } => {
-                    CONSECUTIVE_NONBLOCKING_GETPAGE_REQUESTS_HISTOGRAM.observe(pages.len() as f64);
                     span.record("batch_size", pages.len() as u64);
                     static BATCH_ID: Lazy<std::sync::atomic::AtomicUsize> =
                         Lazy::new(|| std::sync::atomic::AtomicUsize::new(0));
