@@ -517,10 +517,12 @@ impl RemoteStorage for LocalFs {
 
         let mut take = file_metadata.len();
         if let Some((start, end)) = opts.byte_range() {
-            file.seek(io::SeekFrom::Start(start))
-                .await
-                .context("Failed to seek to the range start in a local storage file")
-                .map_err(DownloadError::Other)?;
+            if start > 0 {
+                file.seek(io::SeekFrom::Start(start))
+                    .await
+                    .context("Failed to seek to the range start in a local storage file")
+                    .map_err(DownloadError::Other)?;
+            }
             if let Some(end) = end {
                 take = end - start;
             }
