@@ -4,7 +4,8 @@ from typing import Any, Dict, List, Optional, Tuple, Type
 import psycopg2
 import pytest
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv, VanillaPostgres
+from fixtures.neon_fixtures import VanillaPostgres
+from fixtures.neon_tenant import NeonTestTenant
 from pytest_httpserver import HTTPServer
 from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
@@ -288,9 +289,8 @@ def assert_db_connlimit(endpoint: Any, db_name: str, connlimit: int, msg: str):
 # 2. User can ignore, then compute_ctl will drop invalid databases
 #    automatically during full configuration
 # Here we test the latter. The first one is tested in test_ddl_forwarding
-def test_ddl_forwarding_invalid_db(neon_simple_env: NeonEnv):
-    env = neon_simple_env
-    endpoint = env.endpoints.create_start(
+def test_ddl_forwarding_invalid_db(neon_tenant: NeonTestTenant):
+    endpoint = neon_tenant.endpoints.create_start(
         "main",
         # Some non-existent url
         config_lines=["neon.console_url=http://localhost:9999/unknown/api/v0/roles_and_databases"],

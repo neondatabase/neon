@@ -3,19 +3,18 @@ import queue
 import random
 import threading
 import time
+from pathlib import Path
 from typing import List
 
-from fixtures.neon_fixtures import NeonEnvBuilder
+from fixtures.neon_tenant import NeonTestTenant
 from fixtures.utils import query_scalar
 
 
-def test_local_file_cache_unlink(neon_env_builder: NeonEnvBuilder):
-    env = neon_env_builder.init_start()
-
-    cache_dir = os.path.join(env.repo_dir, "file_cache")
+def test_local_file_cache_unlink(neon_tenant: NeonTestTenant, test_output_dir: Path):
+    cache_dir = test_output_dir / Path("file_cache")
     os.mkdir(cache_dir)
 
-    endpoint = env.endpoints.create_start(
+    endpoint = neon_tenant.endpoints.create_start(
         "main",
         config_lines=[
             "shared_buffers='1MB'",
@@ -66,7 +65,7 @@ def test_local_file_cache_unlink(neon_env_builder: NeonEnvBuilder):
     time.sleep(5)
 
     # unlink, this is what we're actually testing
-    new_cache_dir = os.path.join(env.repo_dir, "file_cache_new")
+    new_cache_dir = test_output_dir / Path("file_cache_new")
     os.rename(cache_dir, new_cache_dir)
 
     time.sleep(10)

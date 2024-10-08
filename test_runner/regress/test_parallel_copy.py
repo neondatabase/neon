@@ -1,7 +1,8 @@
 import asyncio
 from io import BytesIO
 
-from fixtures.neon_fixtures import Endpoint, NeonEnv
+from fixtures.neon_fixtures import Endpoint
+from fixtures.neon_tenant import NeonTestTenant
 
 
 async def repeat_bytes(buf, repetitions: int):
@@ -39,9 +40,8 @@ async def parallel_load_same_table(endpoint: Endpoint, n_parallel: int):
 
 
 # Load data into one table with COPY TO from 5 parallel connections
-def test_parallel_copy(neon_simple_env: NeonEnv, n_parallel=5):
-    env = neon_simple_env
-    endpoint = env.endpoints.create_start("main")
+def test_parallel_copy(neon_tenant: NeonTestTenant, n_parallel=5):
+    endpoint = neon_tenant.endpoints.create_start("main")
 
     # Create test table
     conn = endpoint.connect()

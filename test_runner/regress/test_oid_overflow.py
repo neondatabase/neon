@@ -1,11 +1,9 @@
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnvBuilder
+from fixtures.neon_tenant import NeonTestTenant
 
 
-def test_oid_overflow(neon_env_builder: NeonEnvBuilder):
-    env = neon_env_builder.init_start()
-
-    endpoint = env.endpoints.create_start("main")
+def test_oid_overflow(neon_tenant: NeonTestTenant):
+    endpoint = neon_tenant.endpoints.create_start("main")
 
     conn = endpoint.connect()
     cur = conn.cursor()

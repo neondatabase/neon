@@ -14,6 +14,7 @@ from fixtures.neon_fixtures import (
     logical_replication_sync,
     wait_for_last_flush_lsn,
 )
+from fixtures.neon_tenant import NeonTestTenant
 from fixtures.utils import wait_until
 
 
@@ -394,11 +395,9 @@ def test_restart_endpoint(neon_simple_env: NeonEnv, vanilla_pg):
 # records passed ot the WAL redo process are never large enough to hit
 # the bug.
 @pytest.mark.parametrize("pageserver_aux_file_policy", [AuxFileStore.CrossValidation])
-def test_large_records(neon_simple_env: NeonEnv, vanilla_pg):
-    env = neon_simple_env
-
-    env.create_branch("init")
-    endpoint = env.endpoints.create_start("init")
+def test_large_records(neon_tenant: NeonTestTenant, vanilla_pg):
+    neon_tenant.create_branch("init")
+    endpoint = neon_tenant.endpoints.create_start("init")
 
     cur = endpoint.connect().cursor()
     cur.execute("CREATE TABLE reptbl(id int, largeval text);")
@@ -466,14 +465,13 @@ def test_slots_and_branching(neon_simple_env: NeonEnv):
 
 
 @pytest.mark.parametrize("pageserver_aux_file_policy", [AuxFileStore.CrossValidation])
-def test_replication_shutdown(neon_simple_env: NeonEnv):
+def test_replication_shutdown(neon_tenant: NeonTestTenant):
     # Ensure Postgres can exit without stuck when a replication job is active + neon extension installed
-    env = neon_simple_env
-    env.create_branch("test_replication_shutdown_publisher", ancestor_branch_name="main")
-    pub = env.endpoints.create("test_replication_shutdown_publisher")
+    neon_tenant.create_branch("test_replication_shutdown_publisher", ancestor_branch_name="main")
+    pub = neon_tenant.endpoints.create("test_replication_shutdown_publisher")
 
-    env.create_branch("test_replication_shutdown_subscriber")
-    sub = env.endpoints.create("test_replication_shutdown_subscriber")
+    neon_tenant.create_branch("test_replication_shutdown_subscriber")
+    sub = neon_tenant.endpoints.create("test_replication_shutdown_subscriber")
 
     pub.respec(skip_pg_catalog_updates=False)
     pub.start()
