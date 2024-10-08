@@ -1,12 +1,12 @@
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, List, Tuple
 
 import pytest
 from _pytest.mark import ParameterSet
 from fixtures.compare_fixtures import RemoteCompare
 from fixtures.log_helper import log
-from fixtures.utils import get_self_dir
 
 
 @dataclass
@@ -191,7 +191,7 @@ def tpch_queuies() -> Tuple[ParameterSet, ...]:
     - querues in returning tuple are ordered by the query number
     - pytest parameters id is adjusted to match the query id (the numbering starts from 1)
     """
-    queries_dir = get_self_dir().parent / "performance" / "tpc-h" / "queries"
+    queries_dir = Path(__file__).parent / "performance" / "tpc-h" / "queries"
     assert queries_dir.exists(), f"TPC-H queries dir not found: {queries_dir}"
 
     return tuple(
