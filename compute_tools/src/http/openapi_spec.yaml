@@ -418,7 +418,7 @@ components:
           items:
             type: object
             properties:
-              name:
+              extname:
                 type: string
               versions:
                 type: array
