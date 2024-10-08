@@ -703,7 +703,7 @@ class NeonEnvBuilder:
         for component, paths in COMPONENT_BINARIES.items():
             directory = (
                 self.neon_binpath
-                if getattr(self.version_combination, component)
+                if getattr(self.version_combination, component) == "new"
                 else self.compatibility_neon_binpath
             )
             for filename in paths:

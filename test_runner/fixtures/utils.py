@@ -630,21 +630,21 @@ def all_pairs_component_versions():
     """
     This function generates all the pairs of old (False) or new (True)
     versions of the Neon components
-    E.g. Pairs(storage_controller=False, storage_broker=True, compute=True, safekeeper=False, pageserver=False)
+    E.g. Pairs(storage_controller='old', storage_broker='new', compute='new', safekeeper='old', pageserver='old')
     then it returns a dictionary with argnames, argvalues and ids
     ids is a sequence of letters where n means the new version of the component and o means the old version
     """
     argnames = "combination"
     argvalues, ids = [], []
     for pair in AllPairs(
-        OrderedDict({component: [True, False] for component in COMPONENT_BINARIES.keys()})
+        OrderedDict({component: ["new", "old"] for component in COMPONENT_BINARIES.keys()})
     ):
         argvalues.append(pair)
         ids.append(
             "combination_"
             + "".join(
                 [
-                    "n" if getattr(pair, component) else "o"
+                    "n" if getattr(pair, component) == "new" else "o"
                     for component in COMPONENT_BINARIES.keys()
                 ]
             )
