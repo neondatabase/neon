@@ -2,11 +2,10 @@
 //!
 //!
 
-use std::{fs::metadata, sync::Arc};
+use std::sync::Arc;
 
 use anyhow::{bail, ensure, Context};
 use bytes::Bytes;
-use camino::{Utf8Path, Utf8PathBuf};
 
 use itertools::Itertools;
 use pageserver_api::{
@@ -17,18 +16,16 @@ use pageserver_api::{
 use postgres_ffi::{pg_constants, relfile_utils::parse_relfilename, ControlFileData, BLCKSZ};
 use tokio::{io::AsyncRead, task::JoinSet};
 use tokio_epoll_uring::BoundedBuf;
+use tokio_util::sync::CancellationToken;
 use tracing::debug;
-use walkdir::WalkDir;
 
+use crate::pgdatadir_mapping::{SlruSegmentDirectory, TwoPhaseDirectory};
 use crate::{
+    assert_u64_eq_usize::U64IsUsize,
     context::{DownloadBehavior, RequestContext},
     pgdatadir_mapping::{DbDirectory, RelDirectory},
     task_mgr::TaskKind,
     tenant::storage_layer::ImageLayerWriter,
-};
-use crate::{
-    pgdatadir_mapping::{SlruSegmentDirectory, TwoPhaseDirectory},
-    virtual_file::VirtualFile,
 };
 use tokio::io::AsyncReadExt;
 
@@ -48,26 +45,46 @@ use std::ops::Range;
 
 use super::{uninit::UninitializedTimeline, Timeline};
 
+use remote_storage::{
+    Download, GenericRemoteStorage, Listing, ListingObject, RemotePath, RemoteStorage,
+};
+
 pub(crate) struct Prepared {
-    pgdata_dir: Utf8PathBuf,
+    pgdata_dir: RemotePath,
     control_file: ControlFileData,
+    storage: RemoteStorageWrapper,
 }
 
+/// Prepare for importing a PGDATA dump from remote storage.
+///
+/// # Arguments
+///
+/// * `storage` - The remote storage containing the PGDATA dump.
+/// * `pgdata_dir` - The RemotePath prefix inside the storage leading to the root of the PGDATA dump.
+/// * `ctx` - The request context.
+/// * `cancel` - A cancellation token for the operation.
+///
+/// # Returns
+///
+/// Returns a `Prepared` struct containing information about the PGDATA dump.
 pub(crate) async fn prepare(
-    pgdata_dir: Utf8PathBuf,
-    _ctx: &RequestContext,
+    storage: GenericRemoteStorage,
+    pgdata_dir: RemotePath,
+    ctx: &RequestContext,
+    cancel: &CancellationToken,
 ) -> anyhow::Result<Prepared> {
-    // Read control file
-    let controlfile_path = pgdata_dir.join("global").join("pg_control");
-    let controlfile_buf =
-        std::fs::read(&controlfile_path) // XXX async
-            .with_context(|| format!("reading controlfile: {controlfile_path}"))?;
+    let storage_wrapper = RemoteStorageWrapper::new(storage, cancel.clone());
+
+    let controlfile_path = pgdata_dir.join("global/pg_control");
+    let controlfile_buf = storage_wrapper.get(&controlfile_path).await?;
     let control_file = ControlFileData::decode(&controlfile_buf)?;
+
     let prepared = Prepared {
         pgdata_dir,
         control_file,
+        storage: storage_wrapper,
     };
-    prepared.try_pg_version()?; // ensure public pg_version will not error
+    prepared.try_pg_version()?;
     Ok(prepared)
 }
 
@@ -97,6 +114,7 @@ pub async fn doit(
     uninit_timeline: &UninitializedTimeline<'_>,
     prepared: Prepared,
     ctx: &RequestContext,
+    cancel: &CancellationToken,
 ) -> anyhow::Result<()> {
     let raw_timeline = uninit_timeline.raw_timeline()?;
     // ensure prepare() + doit() were used correctly
@@ -108,6 +126,7 @@ pub async fn doit(
     let Prepared {
         pgdata_dir,
         control_file,
+        storage,
     } = prepared;
     PgImportEnv {
         timeline: raw_timeline.clone(),
@@ -115,6 +134,7 @@ pub async fn doit(
         control_file,
         pgdata_lsn,
         tasks: Vec::new(),
+        storage,
     }
     .doit(ctx)
     .await
@@ -123,24 +143,24 @@ pub async fn doit(
 // TODO: rename to `State`
 struct PgImportEnv {
     timeline: Arc<Timeline>,
-    pgdata_dir: Utf8PathBuf,
+    pgdata_dir: RemotePath,
     pgdata_lsn: Lsn,
     control_file: ControlFileData,
     tasks: Vec<AnyImportTask>,
+    storage: RemoteStorageWrapper,
 }
 
 impl PgImportEnv {
     async fn doit(mut self, ctx: &RequestContext) -> anyhow::Result<()> {
         // Read control file
         let controlfile_path = self.pgdata_dir.join("global").join("pg_control");
-        let controlfile_buf = std::fs::read(&controlfile_path)
-            .with_context(|| format!("reading controlfile: {controlfile_path}"))?;
+        let controlfile_buf = self.storage.get(&controlfile_path).await?;
 
         let pgdata_lsn = Lsn(self.control_file.checkPoint).align();
 
         self.pgdata_lsn = pgdata_lsn;
 
-        let datadir = PgDataDir::new(&self.pgdata_dir);
+        let datadir = PgDataDir::new(&self.storage, &self.pgdata_dir).await?;
 
         // Import dbdir (00:00:00 keyspace)
         // This is just constructed here, but will be written to the image layer in the first call to import_db()
@@ -262,8 +282,8 @@ impl PgImportEnv {
         // Import relmap (00:spcnode:dbnode:00:*:00)
         let relmap_key = relmap_file_key(db.spcnode, db.dboid);
         debug!("Constructing relmap entry, key {relmap_key}");
-        let mut relmap_file = tokio::fs::File::open(&db.path.join("pg_filenode.map")).await?;
-        let relmap_buf = read_all_bytes(&mut relmap_file).await?;
+        let relmap_path = db.path.join("pg_filenode.map");
+        let relmap_buf = self.storage.get(&relmap_path).await?;
         self.tasks
             .push(AnyImportTask::SingleKey(ImportSingleKeyTask::new(
                 relmap_key, relmap_buf,
@@ -288,7 +308,7 @@ impl PgImportEnv {
         // Import data (00:spcnode:dbnode:reloid:fork:blk) and set sizes for each last
         // segment in a given relation (00:spcnode:dbnode:reloid:fork:ff)
         for file in &db.files {
-            let len = metadata(&file.path)?.len() as usize;
+            let len = file.filesize as usize;
             ensure!(len % 8192 == 0);
             let start_blk: u32 = file.segno * (1024 * 1024 * 1024 / 8192);
             let start_key = rel_block_to_key(file.rel_tag, start_blk);
@@ -298,6 +318,7 @@ impl PgImportEnv {
                     *self.timeline.get_shard_identity(),
                     start_key..end_key,
                     &file.path,
+                    self.storage.clone(),
                 )));
 
             // Set relsize for the last segment (00:spcnode:dbnode:reloid:fork:ff)
@@ -316,22 +337,23 @@ impl PgImportEnv {
         Ok(())
     }
 
-    async fn import_slru(&mut self, kind: SlruKind, path: &Utf8PathBuf) -> anyhow::Result<()> {
-        let segments: Vec<(String, u32)> = WalkDir::new(path)
-            .max_depth(1)
+    async fn import_slru(&mut self, kind: SlruKind, path: &RemotePath) -> anyhow::Result<()> {
+        let segments = self.storage.listdir(path).await?;
+        let segments: Vec<(String, u32, usize)> = segments
             .into_iter()
-            .filter_map(|entry| {
-                let entry = entry.ok()?;
-                let filename = entry.file_name();
-                let filename = filename.to_string_lossy();
-                let segno = u32::from_str_radix(&filename, 16).ok()?;
-                Some((filename.to_string(), segno))
+            .filter_map(|(path, size)| {
+                let filename = path.object_name()?;
+                let segno = u32::from_str_radix(filename, 16).ok()?;
+                Some((filename.to_string(), segno, size))
             })
             .collect();
 
         // Write SlruDir
         let slrudir_key = slru_dir_to_key(kind);
-        let segnos: HashSet<u32> = segments.iter().map(|(_path, segno)| *segno).collect();
+        let segnos: HashSet<u32> = segments
+            .iter()
+            .map(|(_path, segno, _size)| *segno)
+            .collect();
         let slrudir = SlruSegmentDirectory { segments: segnos };
         let slrudir_buf = SlruSegmentDirectory::ser(&slrudir)?;
         self.tasks
@@ -340,10 +362,10 @@ impl PgImportEnv {
                 Bytes::from(slrudir_buf),
             )));
 
-        for (segpath, segno) in segments {
+        for (segpath, segno, size) in segments {
             // SlruSegBlocks for each segment
-            let p = path.join(Utf8PathBuf::from(segpath));
-            let file_size = std::fs::metadata(&p)?.len();
+            let p = path.join(&segpath);
+            let file_size = size;
             ensure!(file_size % 8192 == 0);
             let nblocks = u32::try_from(file_size / 8192)?;
             let start_key = slru_block_to_key(kind, segno, 0);
@@ -353,6 +375,7 @@ impl PgImportEnv {
                     *self.timeline.get_shard_identity(),
                     start_key..end_key,
                     &p,
+                    self.storage.clone(),
                 )));
 
             // Followed by SlruSegSize
@@ -379,71 +402,86 @@ struct PgDataDir {
 struct PgDataDirDb {
     pub spcnode: u32,
     pub dboid: u32,
-    pub path: Utf8PathBuf,
+    pub path: RemotePath,
     pub files: Vec<PgDataDirDbFile>,
 }
 
 struct PgDataDirDbFile {
-    pub path: Utf8PathBuf,
+    pub path: RemotePath,
     pub rel_tag: RelTag,
     pub segno: u32,
-
+    pub filesize: usize,
     // Cummulative size of the given fork, set only for the last segment of that fork
     pub nblocks: Option<usize>,
 }
 
 impl PgDataDir {
-    fn new(datadir_path: &Utf8PathBuf) -> Self {
+    async fn new(
+        storage: &RemoteStorageWrapper,
+        datadir_path: &RemotePath,
+    ) -> anyhow::Result<Self> {
         // Import ordinary databases, DEFAULTTABLESPACE_OID is smaller than GLOBALTABLESPACE_OID, so import them first
         // Traverse database in increasing oid order
-        let mut databases = WalkDir::new(datadir_path.join("base"))
-            .max_depth(1)
+
+        let basedir = &datadir_path.join("base");
+        let db_oids = storage
+            .listdir(basedir)
+            .await?
             .into_iter()
-            .filter_map(|entry| {
-                entry
-                    .ok()
-                    .and_then(|path| path.file_name().to_string_lossy().parse::<u32>().ok())
-            })
-            .sorted()
-            .map(|dboid| {
+            .filter_map(|(path, len)| path.object_name().and_then(|name| name.parse::<u32>().ok()))
+            .sorted();
+        let mut databases = Vec::new();
+        for dboid in db_oids {
+            databases.push(
                 PgDataDirDb::new(
-                    datadir_path.join("base").join(dboid.to_string()),
+                    storage,
+                    &basedir.join(dboid.to_string()),
                     pg_constants::DEFAULTTABLESPACE_OID,
                     dboid,
                     datadir_path,
                 )
-            })
-            .collect::<Vec<_>>();
+                .await?,
+            );
+        }
 
         // special case for global catalogs
-        databases.push(PgDataDirDb::new(
-            datadir_path.join("global"),
-            postgres_ffi::pg_constants::GLOBALTABLESPACE_OID,
-            0,
-            datadir_path,
-        ));
+        databases.push(
+            PgDataDirDb::new(
+                storage,
+                &datadir_path.join("global"),
+                postgres_ffi::pg_constants::GLOBALTABLESPACE_OID,
+                0,
+                datadir_path,
+            )
+            .await?,
+        );
 
         databases.sort_by_key(|db| (db.spcnode, db.dboid));
 
-        Self { dbs: databases }
+        Ok(Self { dbs: databases })
     }
 }
 
 impl PgDataDirDb {
-    fn new(db_path: Utf8PathBuf, spcnode: u32, dboid: u32, datadir_path: &Utf8PathBuf) -> Self {
-        let mut files: Vec<PgDataDirDbFile> = WalkDir::new(&db_path)
-            .min_depth(1)
-            .max_depth(2)
+    async fn new(
+        storage: &RemoteStorageWrapper,
+        db_path: &RemotePath,
+        spcnode: u32,
+        dboid: u32,
+        datadir_path: &RemotePath,
+    ) -> anyhow::Result<Self> {
+        let mut files: Vec<PgDataDirDbFile> = storage
+            .listdir(db_path)
+            .await?
             .into_iter()
-            .filter_map(|entry| {
-                entry.ok().and_then(|path| {
-                    let relfile = path.file_name().to_string_lossy();
+            .filter_map(|(path, size)| {
+                path.object_name().and_then(|name| {
                     // returns (relnode, forknum, segno)
-                    parse_relfilename(&relfile).ok()
+                    parse_relfilename(&name).ok().map(|x| (size, x))
                 })
             })
             .sorted()
-            .map(|(relnode, forknum, segno)| {
+            .map(|(filesize, (relnode, forknum, segno))| {
                 let rel_tag = RelTag {
                     spcnode,
                     dbnode: dboid,
@@ -452,12 +490,12 @@ impl PgDataDirDb {
                 };
 
                 let path = datadir_path.join(rel_tag.to_segfile_name(segno));
-                let len = metadata(&path).unwrap().len() as usize;
-                assert!(len % BLCKSZ as usize == 0);
-                let nblocks = len / BLCKSZ as usize;
+                assert!(filesize % BLCKSZ as usize == 0); // TODO: this should result in an error
+                let nblocks = filesize / BLCKSZ as usize;
 
                 PgDataDirDbFile {
                     path,
+                    filesize,
                     rel_tag,
                     segno,
                     nblocks: Some(nblocks), // first non-cummulative sizes
@@ -486,12 +524,12 @@ impl PgDataDirDb {
             prev_rel_tag = Some(files[i].rel_tag);
         }
 
-        PgDataDirDb {
+        Ok(PgDataDirDb {
             files,
-            path: db_path,
+            path: db_path.clone(),
             spcnode,
             dboid,
-        }
+        })
     }
 }
 
@@ -549,15 +587,22 @@ impl ImportTask for ImportSingleKeyTask {
 struct ImportRelBlocksTask {
     shard_identity: ShardIdentity,
     key_range: Range<Key>,
-    path: Utf8PathBuf,
+    path: RemotePath,
+    storage: RemoteStorageWrapper,
 }
 
 impl ImportRelBlocksTask {
-    fn new(shard_identity: ShardIdentity, key_range: Range<Key>, path: &Utf8Path) -> Self {
+    fn new(
+        shard_identity: ShardIdentity,
+        key_range: Range<Key>,
+        path: &RemotePath,
+        storage: RemoteStorageWrapper,
+    ) -> Self {
         ImportRelBlocksTask {
             shard_identity,
             key_range,
-            path: path.into(),
+            path: path.clone(),
+            storage,
         }
     }
 }
@@ -573,7 +618,7 @@ impl ImportTask for ImportRelBlocksTask {
         ctx: &RequestContext,
     ) -> anyhow::Result<usize> {
         debug!("Importing relation file {}", self.path);
-        let reader = VirtualFile::open(&self.path, ctx).await?;
+        let buf = self.storage.get(&self.path).await?;
 
         let (rel_tag, start_blk) = self.key_range.start.to_rel_block()?;
         let (_rel_tag, end_blk) = self.key_range.end.to_rel_block()?;
@@ -585,13 +630,9 @@ impl ImportTask for ImportRelBlocksTask {
             if self.shard_identity.is_key_disposable(&key) {
                 // Skip blocks that are not in the shard
             } else {
-                let buf = Vec::with_capacity(8192);
-                let buf = reader
-                    // FIXME: prefetch
-                    .read_exact_at(buf.slice_full(), file_offset, ctx)
-                    .await?;
+                let buf = &buf[file_offset as usize..(file_offset + 8192) as usize];
                 layer_writer
-                    .put_image(key, Bytes::from(buf.into_inner()), ctx)
+                    .put_image(key, Bytes::copy_from_slice(buf), ctx)
                     .await?;
                 nimages += 1;
             }
@@ -605,15 +646,22 @@ impl ImportTask for ImportRelBlocksTask {
 struct ImportSlruBlocksTask {
     shard_identity: ShardIdentity,
     key_range: Range<Key>,
-    path: Utf8PathBuf,
+    path: RemotePath,
+    storage: RemoteStorageWrapper,
 }
 
 impl ImportSlruBlocksTask {
-    fn new(shard_identity: ShardIdentity, key_range: Range<Key>, path: &Utf8Path) -> Self {
+    fn new(
+        shard_identity: ShardIdentity,
+        key_range: Range<Key>,
+        path: &RemotePath,
+        storage: RemoteStorageWrapper,
+    ) -> Self {
         ImportSlruBlocksTask {
             shard_identity,
             key_range,
-            path: path.into(),
+            path: path.clone(),
+            storage,
         }
     }
 }
@@ -629,10 +677,7 @@ impl ImportTask for ImportSlruBlocksTask {
         ctx: &RequestContext,
     ) -> anyhow::Result<usize> {
         debug!("Importing SLRU segment file {}", self.path);
-        let mut reader = tokio::fs::File::open(&self.path)
-            .await
-            .context(format!("opening {}", &self.path))?;
-        let mut buf: [u8; 8192] = [0u8; 8192];
+        let buf = self.storage.get(&self.path).await?;
 
         let (kind, segno, start_blk) = self.key_range.start.to_slru_block()?;
         let (_kind, _segno, end_blk) = self.key_range.end.to_slru_block()?;
@@ -644,10 +689,9 @@ impl ImportTask for ImportSlruBlocksTask {
                 !self.shard_identity.is_key_disposable(&key),
                 "SLRU keys need to go into every shard"
             );
-            reader.read_exact(&mut buf).await?;
-
+            let buf = &buf[(blknum * 8192) as usize..((blknum + 1) * 8192) as usize];
             layer_writer
-                .put_image(key, Bytes::copy_from_slice(&buf), ctx)
+                .put_image(key, Bytes::copy_from_slice(buf), ctx)
                 .await?;
             blknum += 1;
             nimages += 1;
@@ -760,5 +804,47 @@ impl ChunkProcessingJob {
             .schedule_layer_file_upload(resident_layer)?;
 
         Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct RemoteStorageWrapper {
+    storage: GenericRemoteStorage,
+    cancel: CancellationToken,
+}
+
+impl RemoteStorageWrapper {
+    fn new(storage: GenericRemoteStorage, cancel: CancellationToken) -> Self {
+        Self { storage, cancel }
+    }
+
+    async fn listdir(&self, prefix: &RemotePath) -> anyhow::Result<Vec<(RemotePath, usize)>> {
+        let Listing { keys, prefixes: _ } = self
+            .storage
+            .list(
+                Some(prefix),
+                remote_storage::ListingMode::WithDelimiter,
+                None,
+                &self.cancel,
+            )
+            .await?;
+        Ok(keys
+            .into_iter()
+            .map(|ListingObject { key, size, .. }| (key, size.into_usize()))
+            .collect())
+    }
+
+    async fn get(&self, path: &RemotePath) -> anyhow::Result<Bytes> {
+        let Download {
+            mut download_stream,
+            ..
+        } = self.storage.download(path, &self.cancel).await?;
+
+        let mut reader = tokio_util::io::StreamReader::new(download_stream);
+
+        // XXX optimize this, can we get the capacity hint from somewhere?
+        let mut buf = Vec::new();
+        tokio::io::copy_buf(&mut reader, &mut buf).await?;
+        Ok(Bytes::from(buf))
     }
 }

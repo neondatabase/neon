@@ -45,6 +45,8 @@ use pageserver_api::shard::ShardCount;
 use pageserver_api::shard::TenantShardId;
 use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
+use remote_storage::LocalFs;
+use remote_storage::RemotePath;
 use remote_storage::TimeTravelError;
 use tenant_size_model::{svg::SvgBranchKind, SizeResult, StorageModel};
 use tokio_util::io::StreamReader;
@@ -203,7 +205,7 @@ impl From<TenantSlotError> for ApiError {
         use TenantSlotError::*;
         match e {
             NotFound(tenant_id) => {
-                ApiError::NotFound(anyhow::anyhow!("NotFound: tenant {tenant_id}").into())
+                ApiError::NotFound(anyhow!("NotFound: tenant {tenant_id}").into())
             }
             InProgress => {
                 ApiError::ResourceUnavailable("Tenant is being modified concurrently".into())
@@ -217,7 +219,7 @@ impl From<TenantSlotUpsertError> for ApiError {
     fn from(e: TenantSlotUpsertError) -> ApiError {
         use TenantSlotUpsertError::*;
         match e {
-            InternalError(e) => ApiError::InternalServerError(anyhow::anyhow!("{e}")),
+            InternalError(e) => ApiError::InternalServerError(anyhow!("{e}")),
             MapState(e) => e.into(),
             ShuttingDown(_) => ApiError::ShuttingDown,
         }
@@ -2812,7 +2814,7 @@ async fn put_tenant_timeline_import_wal(
 
 async fn put_tenant_timeline_import_pgdata(
     mut request: Request<Body>,
-    _cancel: CancellationToken,
+    cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
     let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
@@ -2835,7 +2837,13 @@ async fn put_tenant_timeline_import_pgdata(
 
         info!(%pgdata_path, "importing pgdata dir");
 
-        let prepared = crate::tenant::timeline::import_pgdata::prepare(pgdata_path, &ctx)
+        // Create a LocalFs remote storage with the root at pgdata_path
+        let local_storage = GenericRemoteStorage::LocalFs(LocalFs::new(
+            pgdata_path.clone(),
+            std::time::Duration::from_secs(60), // Use a reasonable timeout
+        ).map_err(ApiError::InternalServerError)?);
+
+        let prepared = crate::tenant::timeline::import_pgdata::prepare(local_storage, RemotePath::from_string("").unwrap(), &ctx, &cancel)
             .await
             // TODO: differentiate between not-parseable PGDATA (user error)
             // and truly internal errors (e.g., disk full or IO errors)
@@ -2857,7 +2865,7 @@ async fn put_tenant_timeline_import_pgdata(
             .await?;
 
         timeline
-            .import_pgdata(tenant.clone(), prepared, broker_client, &ctx)
+            .import_pgdata(tenant.clone(), prepared, broker_client, &ctx, &cancel)
             .await
             .map_err(ApiError::InternalServerError)?;
 

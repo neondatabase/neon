@@ -2,6 +2,7 @@ use std::{collections::hash_map::Entry, fs, sync::Arc};
 
 use anyhow::Context;
 use camino::Utf8PathBuf;
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info, info_span};
 use utils::{fs_ext, id::TimelineId, lsn::Lsn};
 
@@ -185,6 +186,7 @@ impl<'t> UninitializedTimeline<'t> {
         prepared: import_pgdata::Prepared,
         broker_client: storage_broker::BrokerClientChannel,
         ctx: &RequestContext,
+        cancel: &CancellationToken,
     ) -> anyhow::Result<Arc<Timeline>> {
         // Do the import while everything is at lsn 0.
         // The index parts that get uploaded during the import will look invalid.
@@ -192,7 +194,7 @@ impl<'t> UninitializedTimeline<'t> {
         let base_lsn = prepared.base_lsn();
 
         // This fills the layer map with layers.
-        import_pgdata::doit(&self, prepared, ctx)
+        import_pgdata::doit(&self, prepared, ctx, cancel)
             .await
             .context("import")?;
 
