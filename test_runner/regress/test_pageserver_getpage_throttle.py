@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import copy
 import json
 import uuid
@@ -61,7 +63,7 @@ def test_pageserver_getpage_throttle(neon_env_builder: NeonEnvBuilder, pg_bin: P
         results_path = Path(basepath + ".stdout")
         log.info(f"Benchmark results at: {results_path}")
 
-        with open(results_path, "r") as f:
+        with open(results_path) as f:
             results = json.load(f)
         log.info(f"Results:\n{json.dumps(results, sort_keys=True, indent=2)}")
         return int(results["total"]["request_count"])

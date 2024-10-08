@@ -1,5 +1,7 @@
+from __future__ import annotations
+
 import json
-from typing import Any, Dict
+from typing import TYPE_CHECKING
 
 from fixtures.common_types import Lsn
 from fixtures.neon_fixtures import (
@@ -10,11 +12,14 @@ from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
 from fixtures.utils import wait_until
 from fixtures.workload import Workload
 
+if TYPE_CHECKING:
+    from typing import Any
+
 
 def test_tenant_config(neon_env_builder: NeonEnvBuilder):
     """Test per tenant configuration"""
 
-    def set_some_nondefault_global_config(ps_cfg: Dict[str, Any]):
+    def set_some_nondefault_global_config(ps_cfg: dict[str, Any]):
         ps_cfg["page_cache_size"] = 444
         ps_cfg["wait_lsn_timeout"] = "111 s"
 

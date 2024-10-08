@@ -1,10 +1,12 @@
+from __future__ import annotations
+
 import os
 import shutil
 import threading
 import time
 from contextlib import closing, contextmanager
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.common_types import Lsn, TenantId, TimelineId
@@ -24,6 +26,9 @@ from fixtures.utils import (
     query_scalar,
     wait_until,
 )
+
+if TYPE_CHECKING:
+    from typing import Any, Optional
 
 
 def assert_abs_margin_ratio(a: float, b: float, margin_ratio: float):
@@ -74,7 +79,7 @@ def populate_branch(
     ps_http: PageserverHttpClient,
     create_table: bool,
     expected_sum: Optional[int],
-) -> Tuple[TimelineId, Lsn]:
+) -> tuple[TimelineId, Lsn]:
     # insert some data
     with pg_cur(endpoint) as cur:
         cur.execute("SHOW neon.timeline_id")
@@ -120,7 +125,7 @@ def check_timeline_attached(
     new_pageserver_http_client: PageserverHttpClient,
     tenant_id: TenantId,
     timeline_id: TimelineId,
-    old_timeline_detail: Dict[str, Any],
+    old_timeline_detail: dict[str, Any],
     old_current_lsn: Lsn,
 ):
     # new pageserver should be in sync (modulo wal tail or vacuum activity) with the old one because there was no new writes since checkpoint

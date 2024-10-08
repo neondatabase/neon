@@ -9,15 +9,7 @@ import tempfile
 import textwrap
 from itertools import chain, product
 from pathlib import Path
-from typing import (
-    Any,
-    Dict,
-    List,
-    Optional,
-    Tuple,
-    TypeVar,
-    cast,
-)
+from typing import TYPE_CHECKING, cast
 
 import toml
 
@@ -27,7 +19,15 @@ from fixtures.pageserver.common_types import IndexPartDump
 from fixtures.pg_version import PgVersion
 from fixtures.utils import AuxFileStore
 
-T = TypeVar("T")
+if TYPE_CHECKING:
+    from typing import (
+        Any,
+        Optional,
+        TypeVar,
+        cast,
+    )
+
+    T = TypeVar("T")
 
 
 class AbstractNeonCli(abc.ABC):
@@ -37,7 +37,7 @@ class AbstractNeonCli(abc.ABC):
     Do not use directly, use specific subclasses instead.
     """
 
-    def __init__(self, extra_env: Optional[Dict[str, str]], binpath: Path):
+    def __init__(self, extra_env: Optional[dict[str, str]], binpath: Path):
         self.extra_env = extra_env
         self.binpath = binpath
 
@@ -45,11 +45,11 @@ class AbstractNeonCli(abc.ABC):
 
     def raw_cli(
         self,
-        arguments: List[str],
-        extra_env_vars: Optional[Dict[str, str]] = None,
+        arguments: list[str],
+        extra_env_vars: Optional[dict[str, str]] = None,
         check_return_code=True,
         timeout=None,
-    ) -> "subprocess.CompletedProcess[str]":
+    ) -> subprocess.CompletedProcess[str]:
         """
         Run the command with the specified arguments.
 
@@ -92,9 +92,8 @@ class AbstractNeonCli(abc.ABC):
                 args,
                 env=env_vars,
                 check=False,
-                universal_newlines=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                text=True,
+                capture_output=True,
                 timeout=timeout,
             )
         except subprocess.TimeoutExpired as e:
@@ -118,7 +117,7 @@ class AbstractNeonCli(abc.ABC):
             if len(lines) < 2:
                 log.debug(f"Run {res.args} success: {stripped}")
             else:
-                log.debug("Run %s success:\n%s" % (res.args, textwrap.indent(stripped, indent)))
+                log.debug("Run %s success:\n%s", res.args, textwrap.indent(stripped, indent))
         elif check_return_code:
             # this way command output will be in recorded and shown in CI in failure message
             indent = indent * 2
@@ -175,7 +174,7 @@ class NeonLocalCli(AbstractNeonCli):
 
     def __init__(
         self,
-        extra_env: Optional[Dict[str, str]],
+        extra_env: Optional[dict[str, str]],
         binpath: Path,
         repo_dir: Path,
         pg_distrib_dir: Path,
@@ -197,7 +196,7 @@ class NeonLocalCli(AbstractNeonCli):
         tenant_id: TenantId,
         timeline_id: TimelineId,
         pg_version: PgVersion,
-        conf: Optional[Dict[str, Any]] = None,
+        conf: Optional[dict[str, Any]] = None,
         shard_count: Optional[int] = None,
         shard_stripe_size: Optional[int] = None,
         placement_policy: Optional[str] = None,
@@ -258,7 +257,7 @@ class NeonLocalCli(AbstractNeonCli):
         res = self.raw_cli(["tenant", "set-default", "--tenant-id", str(tenant_id)])
         res.check_returncode()
 
-    def tenant_config(self, tenant_id: TenantId, conf: Dict[str, str]):
+    def tenant_config(self, tenant_id: TenantId, conf: dict[str, str]):
         """
         Update tenant config.
         """
@@ -274,7 +273,7 @@ class NeonLocalCli(AbstractNeonCli):
         res = self.raw_cli(args)
         res.check_returncode()
 
-    def tenant_list(self) -> "subprocess.CompletedProcess[str]":
+    def tenant_list(self) -> subprocess.CompletedProcess[str]:
         res = self.raw_cli(["tenant", "list"])
         res.check_returncode()
         return res
@@ -368,7 +367,7 @@ class NeonLocalCli(AbstractNeonCli):
         res = self.raw_cli(cmd)
         res.check_returncode()
 
-    def timeline_list(self, tenant_id: TenantId) -> List[Tuple[str, TimelineId]]:
+    def timeline_list(self, tenant_id: TenantId) -> list[tuple[str, TimelineId]]:
         """
         Returns a list of (branch_name, timeline_id) tuples out of parsed `neon timeline list` CLI output.
         """
@@ -389,9 +388,9 @@ class NeonLocalCli(AbstractNeonCli):
 
     def init(
         self,
-        init_config: Dict[str, Any],
+        init_config: dict[str, Any],
         force: Optional[str] = None,
-    ) -> "subprocess.CompletedProcess[str]":
+    ) -> subprocess.CompletedProcess[str]:
         with tempfile.NamedTemporaryFile(mode="w+") as init_config_tmpfile:
             init_config_tmpfile.write(toml.dumps(init_config))
             init_config_tmpfile.flush()
@@ -434,15 +433,15 @@ class NeonLocalCli(AbstractNeonCli):
     def pageserver_start(
         self,
         id: int,
-        extra_env_vars: Optional[Dict[str, str]] = None,
+        extra_env_vars: Optional[dict[str, str]] = None,
         timeout_in_seconds: Optional[int] = None,
-    ) -> "subprocess.CompletedProcess[str]":
+    ) -> subprocess.CompletedProcess[str]:
         start_args = ["pageserver", "start", f"--id={id}"]
         if timeout_in_seconds is not None:
             start_args.append(f"--start-timeout={timeout_in_seconds}s")
         return self.raw_cli(start_args, extra_env_vars=extra_env_vars)
 
-    def pageserver_stop(self, id: int, immediate=False) -> "subprocess.CompletedProcess[str]":
+    def pageserver_stop(self, id: int, immediate=False) -> subprocess.CompletedProcess[str]:
         cmd = ["pageserver", "stop", f"--id={id}"]
         if immediate:
             cmd.extend(["-m", "immediate"])
@@ -453,10 +452,10 @@ class NeonLocalCli(AbstractNeonCli):
     def safekeeper_start(
         self,
         id: int,
-        extra_opts: Optional[List[str]] = None,
-        extra_env_vars: Optional[Dict[str, str]] = None,
+        extra_opts: Optional[list[str]] = None,
+        extra_env_vars: Optional[dict[str, str]] = None,
         timeout_in_seconds: Optional[int] = None,
-    ) -> "subprocess.CompletedProcess[str]":
+    ) -> subprocess.CompletedProcess[str]:
         if extra_opts is not None:
             extra_opts = [f"-e={opt}" for opt in extra_opts]
         else:
@@ -469,7 +468,7 @@ class NeonLocalCli(AbstractNeonCli):
 
     def safekeeper_stop(
         self, id: Optional[int] = None, immediate=False
-    ) -> "subprocess.CompletedProcess[str]":
+    ) -> subprocess.CompletedProcess[str]:
         args = ["safekeeper", "stop"]
         if id is not None:
             args.append(str(id))
@@ -479,13 +478,13 @@ class NeonLocalCli(AbstractNeonCli):
 
     def storage_broker_start(
         self, timeout_in_seconds: Optional[int] = None
-    ) -> "subprocess.CompletedProcess[str]":
+    ) -> subprocess.CompletedProcess[str]:
         cmd = ["storage_broker", "start"]
         if timeout_in_seconds is not None:
             cmd.append(f"--start-timeout={timeout_in_seconds}s")
         return self.raw_cli(cmd)
 
-    def storage_broker_stop(self) -> "subprocess.CompletedProcess[str]":
+    def storage_broker_stop(self) -> subprocess.CompletedProcess[str]:
         cmd = ["storage_broker", "stop"]
         return self.raw_cli(cmd)
 
@@ -501,7 +500,7 @@ class NeonLocalCli(AbstractNeonCli):
         lsn: Optional[Lsn] = None,
         pageserver_id: Optional[int] = None,
         allow_multiple=False,
-    ) -> "subprocess.CompletedProcess[str]":
+    ) -> subprocess.CompletedProcess[str]:
         args = [
             "endpoint",
             "create",
@@ -534,12 +533,12 @@ class NeonLocalCli(AbstractNeonCli):
     def endpoint_start(
         self,
         endpoint_id: str,
-        safekeepers: Optional[List[int]] = None,
+        safekeepers: Optional[list[int]] = None,
         remote_ext_config: Optional[str] = None,
         pageserver_id: Optional[int] = None,
         allow_multiple=False,
         basebackup_request_tries: Optional[int] = None,
-    ) -> "subprocess.CompletedProcess[str]":
+    ) -> subprocess.CompletedProcess[str]:
         args = [
             "endpoint",
             "start",
@@ -568,9 +567,9 @@ class NeonLocalCli(AbstractNeonCli):
         endpoint_id: str,
         tenant_id: Optional[TenantId] = None,
         pageserver_id: Optional[int] = None,
-        safekeepers: Optional[List[int]] = None,
+        safekeepers: Optional[list[int]] = None,
         check_return_code=True,
-    ) -> "subprocess.CompletedProcess[str]":
+    ) -> subprocess.CompletedProcess[str]:
         args = ["endpoint", "reconfigure", endpoint_id]
         if tenant_id is not None:
             args.extend(["--tenant-id", str(tenant_id)])
@@ -586,7 +585,7 @@ class NeonLocalCli(AbstractNeonCli):
         destroy=False,
         check_return_code=True,
         mode: Optional[str] = None,
-    ) -> "subprocess.CompletedProcess[str]":
+    ) -> subprocess.CompletedProcess[str]:
         args = [
             "endpoint",
             "stop",
@@ -602,7 +601,7 @@ class NeonLocalCli(AbstractNeonCli):
 
     def mappings_map_branch(
         self, name: str, tenant_id: TenantId, timeline_id: TimelineId
-    ) -> "subprocess.CompletedProcess[str]":
+    ) -> subprocess.CompletedProcess[str]:
         """
         Map tenant id and timeline id to a neon_local branch name. They do not have to exist.
         Usually needed when creating branches via PageserverHttpClient and not neon_local.
@@ -623,10 +622,10 @@ class NeonLocalCli(AbstractNeonCli):
 
         return self.raw_cli(args, check_return_code=True)
 
-    def start(self, check_return_code=True) -> "subprocess.CompletedProcess[str]":
+    def start(self, check_return_code=True) -> subprocess.CompletedProcess[str]:
         return self.raw_cli(["start"], check_return_code=check_return_code)
 
-    def stop(self, check_return_code=True) -> "subprocess.CompletedProcess[str]":
+    def stop(self, check_return_code=True) -> subprocess.CompletedProcess[str]:
         return self.raw_cli(["stop"], check_return_code=check_return_code)
 
 
@@ -638,7 +637,7 @@ class WalCraft(AbstractNeonCli):
 
     COMMAND = "wal_craft"
 
-    def postgres_config(self) -> List[str]:
+    def postgres_config(self) -> list[str]:
         res = self.raw_cli(["print-postgres-config"])
         res.check_returncode()
         return res.stdout.split("\n")

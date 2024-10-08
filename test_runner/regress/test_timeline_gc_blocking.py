@@ -1,7 +1,9 @@
+from __future__ import annotations
+
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.log_helper import log
@@ -11,6 +13,9 @@ from fixtures.neon_fixtures import (
     NeonPageserver,
 )
 from fixtures.pageserver.utils import wait_timeline_detail_404
+
+if TYPE_CHECKING:
+    from typing import Optional
 
 
 @pytest.mark.parametrize("sharded", [True, False])
@@ -98,7 +103,7 @@ class ScrollableLog:
 
 @dataclass(frozen=True)
 class ManyPageservers:
-    many: List[ScrollableLog]
+    many: list[ScrollableLog]
 
     def assert_log_contains(self, what: str):
         for one in self.many:

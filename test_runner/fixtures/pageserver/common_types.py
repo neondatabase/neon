@@ -1,8 +1,13 @@
+from __future__ import annotations
+
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, Tuple, Union
+from typing import TYPE_CHECKING, Union
 
 from fixtures.common_types import KEY_MAX, KEY_MIN, Key, Lsn
+
+if TYPE_CHECKING:
+    from typing import Any
 
 
 @dataclass
@@ -53,7 +58,7 @@ IMAGE_LAYER_FILE_NAME = re.compile(
 )
 
 
-def parse_image_layer(f_name: str) -> Tuple[int, int, int]:
+def parse_image_layer(f_name: str) -> tuple[int, int, int]:
     """Parse an image layer file name. Return key start, key end, and snapshot lsn"""
 
     match = IMAGE_LAYER_FILE_NAME.match(f_name)
@@ -68,7 +73,7 @@ DELTA_LAYER_FILE_NAME = re.compile(
 )
 
 
-def parse_delta_layer(f_name: str) -> Tuple[int, int, int, int]:
+def parse_delta_layer(f_name: str) -> tuple[int, int, int, int]:
     """Parse a delta layer file name. Return key start, key end, lsn start, and lsn end"""
     match = DELTA_LAYER_FILE_NAME.match(f_name)
     if match is None:
@@ -121,11 +126,11 @@ def is_future_layer(layer_file_name: LayerName, disk_consistent_lsn: Lsn):
 
 @dataclass
 class IndexPartDump:
-    layer_metadata: Dict[LayerName, IndexLayerMetadata]
+    layer_metadata: dict[LayerName, IndexLayerMetadata]
     disk_consistent_lsn: Lsn
 
     @classmethod
-    def from_json(cls, d: Dict[str, Any]) -> "IndexPartDump":
+    def from_json(cls, d: dict[str, Any]) -> IndexPartDump:
         return IndexPartDump(
             layer_metadata={
                 parse_layer_file_name(n): IndexLayerMetadata(v["file_size"], v["generation"])

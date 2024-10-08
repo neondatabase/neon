@@ -1,6 +1,9 @@
+from __future__ import annotations
+
 import json
+from collections.abc import MutableMapping
 from pathlib import Path
-from typing import Any, List, MutableMapping, cast
+from typing import TYPE_CHECKING, cast
 
 import pytest
 from _pytest.config import Config
@@ -9,6 +12,9 @@ from allure_commons.types import LabelType
 from allure_pytest.utils import allure_name, allure_suite_labels
 
 from fixtures.log_helper import log
+
+if TYPE_CHECKING:
+    from typing import Any
 
 """
 The plugin reruns flaky tests.
@@ -27,7 +33,7 @@ def pytest_addoption(parser: Parser):
     )
 
 
-def pytest_collection_modifyitems(config: Config, items: List[pytest.Item]):
+def pytest_collection_modifyitems(config: Config, items: list[pytest.Item]):
     if not config.getoption("--flaky-tests-json"):
         return
 
@@ -66,5 +72,5 @@ def pytest_collection_modifyitems(config: Config, items: List[pytest.Item]):
             # - [2] https://github.com/pytest-dev/pytest-timeout/issues/142
             timeout_marker = item.get_closest_marker("timeout")
             if timeout_marker is not None:
-                kwargs = cast(MutableMapping[str, Any], timeout_marker.kwargs)
+                kwargs = cast("MutableMapping[str, Any]", timeout_marker.kwargs)
                 kwargs["func_only"] = True

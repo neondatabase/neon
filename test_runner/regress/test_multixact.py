@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from fixtures.neon_fixtures import NeonEnv, check_restored_datadir_content
 from fixtures.utils import query_scalar
 

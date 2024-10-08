@@ -1,6 +1,7 @@
+from __future__ import annotations
+
 import concurrent.futures
 import os
-from typing import List, Tuple
 
 import pytest
 from fixtures.common_types import TenantId, TimelineId
@@ -31,7 +32,7 @@ def test_local_corruption(neon_env_builder: NeonEnvBuilder):
         ]
     )
 
-    tenant_timelines: List[Tuple[TenantId, TimelineId, Endpoint]] = []
+    tenant_timelines: list[tuple[TenantId, TimelineId, Endpoint]] = []
 
     for _ in range(3):
         tenant_id, timeline_id = env.create_tenant()

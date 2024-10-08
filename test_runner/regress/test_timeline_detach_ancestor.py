@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import datetime
 import enum
 import threading
@@ -5,7 +7,6 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from queue import Empty, Queue
 from threading import Barrier
-from typing import List, Set, Tuple
 
 import pytest
 from fixtures.common_types import Lsn, TimelineId
@@ -48,7 +49,7 @@ class Branchpoint(str, enum.Enum):
         return self.value
 
     @staticmethod
-    def all() -> List["Branchpoint"]:
+    def all() -> list[Branchpoint]:
         return [
             Branchpoint.EARLIER,
             Branchpoint.AT_L0,
@@ -473,7 +474,7 @@ def test_compaction_induced_by_detaches_in_history(
 
     more_good_numbers = range(0, 3)
 
-    branches: List[Tuple[str, TimelineId]] = [("main", env.initial_timeline)]
+    branches: list[tuple[str, TimelineId]] = [("main", env.initial_timeline)]
 
     for num in more_good_numbers:
         branch_name = f"br-{len(branches)}"
@@ -1270,7 +1271,7 @@ def test_retried_detach_ancestor_after_failed_reparenting(neon_env_builder: Neon
             {"request_type": "copy_object", "result": "ok"},
         )
 
-    def reparenting_progress(timelines: List[TimelineId]) -> Tuple[int, Set[TimelineId]]:
+    def reparenting_progress(timelines: list[TimelineId]) -> tuple[int, set[TimelineId]]:
         reparented = 0
         not_reparented = set()
         for timeline in timelines:
@@ -1306,7 +1307,7 @@ def test_retried_detach_ancestor_after_failed_reparenting(neon_env_builder: Neon
 
     http.configure_failpoints(("timeline-detach-ancestor::allow_one_reparented", "return"))
 
-    not_reparented: Set[TimelineId] = set()
+    not_reparented: set[TimelineId] = set()
     # tracked offset in the pageserver log which is at least at the most recent activation
     offset = None
 

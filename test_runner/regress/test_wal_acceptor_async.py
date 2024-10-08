@@ -1,9 +1,11 @@
+from __future__ import annotations
+
 import asyncio
 import random
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import TYPE_CHECKING
 
 import asyncpg
 import pytest
@@ -13,10 +15,14 @@ from fixtures.log_helper import getLogger
 from fixtures.neon_fixtures import Endpoint, NeonEnv, NeonEnvBuilder, Safekeeper
 from fixtures.remote_storage import RemoteStorageKind
 
+if TYPE_CHECKING:
+    from typing import Optional
+
+
 log = getLogger("root.safekeeper_async")
 
 
-class BankClient(object):
+class BankClient:
     def __init__(self, conn: asyncpg.Connection, n_accounts, init_amount):
         self.conn: asyncpg.Connection = conn
         self.n_accounts = n_accounts
@@ -65,7 +71,7 @@ async def bank_transfer(conn: asyncpg.Connection, from_uid, to_uid, amount):
         )
 
 
-class WorkerStats(object):
+class WorkerStats:
     def __init__(self, n_workers):
         self.counters = [0] * n_workers
         self.running = True
@@ -148,7 +154,7 @@ async def wait_for_lsn(
 async def run_restarts_under_load(
     env: NeonEnv,
     endpoint: Endpoint,
-    acceptors: List[Safekeeper],
+    acceptors: list[Safekeeper],
     n_workers=10,
     n_accounts=100,
     init_amount=100000,
@@ -329,7 +335,7 @@ def test_compute_restarts(neon_env_builder: NeonEnvBuilder):
     asyncio.run(run_compute_restarts(env))
 
 
-class BackgroundCompute(object):
+class BackgroundCompute:
     MAX_QUERY_GAP_SECONDS = 2
 
     def __init__(self, index: int, env: NeonEnv, branch: str):
@@ -339,7 +345,7 @@ class BackgroundCompute(object):
         self.running = False
         self.stopped = False
         self.total_tries = 0
-        self.successful_queries: List[int] = []
+        self.successful_queries: list[int] = []
 
     async def run(self):
         if self.running:
@@ -634,7 +640,7 @@ class RaceConditionTest:
 
 
 # shut down random subset of safekeeper, sleep, wake them up, rinse, repeat
-async def xmas_garland(safekeepers: List[Safekeeper], data: RaceConditionTest):
+async def xmas_garland(safekeepers: list[Safekeeper], data: RaceConditionTest):
     while not data.is_stopped:
         data.iteration += 1
         victims = []
@@ -693,7 +699,7 @@ def test_race_conditions(neon_env_builder: NeonEnvBuilder):
 # Check that pageserver can select safekeeper with largest commit_lsn
 # and switch if LSN is not updated for some time (NoWalTimeout).
 async def run_wal_lagging(env: NeonEnv, endpoint: Endpoint, test_output_dir: Path):
-    def adjust_safekeepers(env: NeonEnv, active_sk: List[bool]):
+    def adjust_safekeepers(env: NeonEnv, active_sk: list[bool]):
         # Change the pg ports of the inactive safekeepers in the config file to be
         # invalid, to make them unavailable to the endpoint.  We use
         # ports 10, 11 and 12 to simulate unavailable safekeepers.

@@ -1,10 +1,12 @@
 # It's possible to run any regular test with the local fs remote storage via
 # env ZENITH_PAGESERVER_OVERRIDES="remote_storage={local_path='/tmp/neon_zzz/'}" poetry ......
 
+from __future__ import annotations
+
 import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, DefaultDict, Dict, Tuple
+from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.common_types import Lsn
@@ -25,6 +27,9 @@ from fixtures.pageserver.utils import (
 )
 from fixtures.remote_storage import RemoteStorageKind, S3Storage, s3_storage
 from fixtures.utils import query_scalar, wait_until
+
+if TYPE_CHECKING:
+    from typing import Any
 
 
 def get_num_downloaded_layers(client: PageserverHttpClient):
@@ -505,7 +510,7 @@ def test_compaction_downloads_on_demand_without_image_creation(neon_env_builder:
 
     env = neon_env_builder.init_start(initial_tenant_conf=stringify(conf))
 
-    def downloaded_bytes_and_count(pageserver_http: PageserverHttpClient) -> Tuple[int, int]:
+    def downloaded_bytes_and_count(pageserver_http: PageserverHttpClient) -> tuple[int, int]:
         m = pageserver_http.get_metrics()
         # these are global counters
         total_bytes = m.query_one("pageserver_remote_ondemand_downloaded_bytes_total").value
@@ -634,7 +639,7 @@ def test_compaction_downloads_on_demand_with_image_creation(neon_env_builder: Ne
     layers = pageserver_http.layer_map_info(tenant_id, timeline_id)
     assert not layers.in_memory_layers, "no inmemory layers expected after post-commit checkpoint"
 
-    kinds_before: DefaultDict[str, int] = defaultdict(int)
+    kinds_before: defaultdict[str, int] = defaultdict(int)
 
     for layer in layers.historic_layers:
         kinds_before[layer.kind] += 1
@@ -651,7 +656,7 @@ def test_compaction_downloads_on_demand_with_image_creation(neon_env_builder: Ne
 
     pageserver_http.timeline_compact(tenant_id, timeline_id)
     layers = pageserver_http.layer_map_info(tenant_id, timeline_id)
-    kinds_after: DefaultDict[str, int] = defaultdict(int)
+    kinds_after: defaultdict[str, int] = defaultdict(int)
     for layer in layers.historic_layers:
         kinds_after[layer.kind] += 1
 
@@ -855,5 +860,5 @@ def test_layer_download_timeouted(neon_env_builder: NeonEnvBuilder):
         assert elapsed < 30, "too long passed: {elapsed=}"
 
 
-def stringify(conf: Dict[str, Any]) -> Dict[str, str]:
+def stringify(conf: dict[str, Any]) -> dict[str, str]:
     return dict(map(lambda x: (x[0], str(x[1])), conf.items()))

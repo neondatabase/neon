@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from fixtures.common_types import TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder
