@@ -478,22 +478,20 @@ def test_pageserver_metrics_many_relations(neon_env_builder: NeonEnvBuilder):
     assert counts[2] > COUNT_AT_LEAST_EXPECTED
 
 
-def test_tenants_parallel_creation(neon_simple_env: NeonEnv):
+def test_timelines_parallel_endpoints(neon_simple_env: NeonEnv):
     """
     (Relaxed) regression test for issue that led to https://github.com/neondatabase/neon/pull/9268
-    Create many tenants in parallel and then restart endpoints
+    Create many endpoints in parallel and then restart them
     """
     env = neon_simple_env
     pageserver_http_client = env.pageserver.http_client()
 
-    # This param needs to be 200 to reproduce the limit issue
-    n_threads = 8
+    # This param needs to be 200+ to reproduce the limit issue
+    n_threads = 16
     barrier = threading.Barrier(n_threads)
 
-    def test_tenant():
-        # Create new tenant
-        tenant_id, _ = env.create_tenant()
-        endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
+    def test_timeline(branch_name: str):
+        endpoint = env.endpoints.create_start(branch_name)
         time.sleep(2)
         endpoint.stop()
         time.sleep(2)
@@ -503,8 +501,10 @@ def test_tenants_parallel_creation(neon_simple_env: NeonEnv):
 
     workers = []
 
-    for _ in range(0, n_threads):
-        w = threading.Thread(target=test_tenant)
+    for i in range(0, n_threads):
+        branch_name = f"branch_{i}"
+        timeline_id = env.create_branch(branch_name)
+        w = threading.Thread(target=test_timeline, args=[branch_name])
         workers.append(w)
         w.start()
 
