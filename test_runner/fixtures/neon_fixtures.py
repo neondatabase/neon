@@ -1543,6 +1543,11 @@ def neon_env_builder(
 
     # Create the environment in the test-specific output dir
     repo_dir = os.path.join(test_output_dir, "repo")
+    combination = (
+        request._pyfuncitem.callspec.params["combination"]
+        if "combination" in request._pyfuncitem.callspec.params
+        else None
+    )
 
     # Return the builder to the caller
     with NeonEnvBuilder(
@@ -1554,9 +1559,7 @@ def neon_env_builder(
         compatibility_neon_binpath=compatibility_neon_binpath,
         pg_distrib_dir=pg_distrib_dir,
         compatibility_pg_distrib_dir=compatibility_pg_distrib_dir,
-        combination=request._pyfuncitem.callspec.params["combination"]
-        if "combination" in request._pyfuncitem.callspec.params
-        else None,
+        combination=combination,
         pg_version=pg_version,
         run_id=run_id,
         preserve_database_files=cast(bool, pytestconfig.getoption("--preserve-database-files")),
