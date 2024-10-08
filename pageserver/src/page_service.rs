@@ -263,8 +263,13 @@ async fn page_service_conn_main(
     // and create a child per-query context when it invokes process_query.
     // But it's in a shared crate, so, we store connection_ctx inside PageServerHandler
     // and create the per-query context in process_query ourselves.
-    let mut conn_handler =
-        PageServerHandler::new(tenant_manager, auth, debounce_timeout, connection_ctx, cancel.clone());
+    let mut conn_handler = PageServerHandler::new(
+        tenant_manager,
+        auth,
+        debounce_timeout,
+        connection_ctx,
+        cancel.clone(),
+    );
     let pgbackend = PostgresBackend::new_from_io(socket, peer_addr, auth_type, None)?;
 
     match pgbackend.run(&mut conn_handler, &cancel).await {
@@ -620,14 +625,10 @@ impl PageServerHandler {
             // `break EXPR` to stop batching. The EXPR will be the first message in the next batch.
             let next_batched: Option<DebouncedFeMessage> = loop {
                 let sleep_fut = match (self.debounce_timeout, debounce) {
-                    (Some(debounce_timeout), Some(started_at)) => {
-                        futures::future::Either::Left(tokio::time::sleep_until(
-                            (started_at + debounce_timeout).into()
-                        ))
-                    },
-                    _ => {
-                        futures::future::Either::Right(futures::future::pending())
-                    }
+                    (Some(debounce_timeout), Some(started_at)) => futures::future::Either::Left(
+                        tokio::time::sleep_until((started_at + debounce_timeout).into()),
+                    ),
+                    _ => futures::future::Either::Right(futures::future::pending()),
                 };
 
                 let msg = tokio::select! {
@@ -730,7 +731,7 @@ impl PageServerHandler {
                     None => {
                         // Debouncing is not enabled.
                         // Stop batching on the first message.
-                        break Some(this_msg)
+                        break Some(this_msg);
                     }
                 };
 
