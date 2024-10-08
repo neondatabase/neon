@@ -618,7 +618,7 @@ lfc_evict(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno)
 	 */
 	if (entry->bitmap[chunk_offs >> 5] == 0)
 	{
-		bool		has_remaining_pages;
+		bool		has_remaining_pages = false;
 
 		for (int i = 0; i < CHUNK_BITMAP_SIZE; i++)
 		{
