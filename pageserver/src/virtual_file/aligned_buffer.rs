@@ -203,6 +203,14 @@ impl<const ALIGN: usize> AlignedBufferMut<ALIGN> {
         self.capacity = cap;
     }
 
+    /// Shortens the buffer, keeping the first len bytes.
+    pub fn truncate(&mut self, len: usize) {
+        if len > self.len {
+            return;
+        }
+        self.len = len;
+    }
+
     /// Consumes and leaks the `IoBufferMut`, returning a mutable reference to the contents, &'a mut [u8].
     pub fn leak<'a>(self) -> &'a mut [u8] {
         let mut buf = ManuallyDrop::new(self);

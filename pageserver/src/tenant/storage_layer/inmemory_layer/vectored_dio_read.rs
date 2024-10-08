@@ -9,6 +9,7 @@ use tokio_epoll_uring::{BoundedBuf, IoBufMut, Slice};
 use crate::{
     assert_u64_eq_usize::{U64IsUsize, UsizeIsU64},
     context::RequestContext,
+    virtual_file::{owned_buffers_io::io_buf_aligned::IoBufAlignedMut, IoBufferMut},
 };
 
 /// The file interface we require. At runtime, this is a [`crate::tenant::ephemeral_file::EphemeralFile`].
@@ -24,7 +25,7 @@ pub trait File: Send {
     /// [`std::io::ErrorKind::UnexpectedEof`] error if the file is shorter than `start+dst.len()`.
     ///
     /// No guarantees are made about the remaining bytes in `dst` in case of a short read.
-    async fn read_exact_at_eof_ok<'a, 'b, B: IoBufMut + Send>(
+    async fn read_exact_at_eof_ok<'a, 'b, B: IoBufAlignedMut + Send>(
         &'b self,
         start: u64,
         dst: Slice<B>,
@@ -227,7 +228,7 @@ where
 
     // Execute physical reads and fill the logical read buffers
     // TODO: pipelined reads; prefetch;
-    let get_io_buffer = |nchunks| Vec::with_capacity(nchunks * DIO_CHUNK_SIZE);
+    let get_io_buffer = |nchunks| IoBufferMut::with_capacity(nchunks * DIO_CHUNK_SIZE);
     for PhysicalRead {
         start_chunk_no,
         nchunks,
@@ -459,7 +460,7 @@ mod tests {
         let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
         let file = InMemoryFile::new_random(10);
         let test_read = |pos, len| {
-            let buf = vec![0; len];
+            let buf = IoBufferMut::with_capacity_zeroed(len);
             let fut = file.read_exact_at_eof_ok(pos, buf.slice_full(), &ctx);
             use futures::FutureExt;
             let (slice, nread) = fut
@@ -470,9 +471,9 @@ mod tests {
             buf.truncate(nread);
             buf
         };
-        assert_eq!(test_read(0, 1), &file.content[0..1]);
-        assert_eq!(test_read(1, 2), &file.content[1..3]);
-        assert_eq!(test_read(9, 2), &file.content[9..]);
+        assert_eq!(&test_read(0, 1), &file.content[0..1]);
+        assert_eq!(&test_read(1, 2), &file.content[1..3]);
+        assert_eq!(&test_read(9, 2), &file.content[9..]);
         assert!(test_read(10, 2).is_empty());
         assert!(test_read(11, 2).is_empty());
     }
@@ -609,7 +610,7 @@ mod tests {
     }
 
     impl<'x> File for RecorderFile<'x> {
-        async fn read_exact_at_eof_ok<'a, 'b, B: IoBufMut + Send>(
+        async fn read_exact_at_eof_ok<'a, 'b, B: IoBufAlignedMut + Send>(
             &'b self,
             start: u64,
             dst: Slice<B>,
@@ -782,7 +783,7 @@ mod tests {
             2048,  1024 => Err("foo".to_owned()),
         };
 
-        let buf = Vec::with_capacity(512);
+        let buf = IoBufferMut::with_capacity(512);
         let (buf, nread) = mock_file
             .read_exact_at_eof_ok(0, buf.slice_full(), &ctx)
             .await
@@ -790,7 +791,7 @@ mod tests {
         assert_eq!(nread, 512);
         assert_eq!(&buf.into_inner()[..nread], &[0; 512]);
 
-        let buf = Vec::with_capacity(512);
+        let buf = IoBufferMut::with_capacity(512);
         let (buf, nread) = mock_file
             .read_exact_at_eof_ok(512, buf.slice_full(), &ctx)
             .await
@@ -798,7 +799,7 @@ mod tests {
         assert_eq!(nread, 512);
         assert_eq!(&buf.into_inner()[..nread], &[1; 512]);
 
-        let buf = Vec::with_capacity(512);
+        let buf = IoBufferMut::with_capacity(512);
         let (buf, nread) = mock_file
             .read_exact_at_eof_ok(1024, buf.slice_full(), &ctx)
             .await
@@ -806,7 +807,7 @@ mod tests {
         assert_eq!(nread, 10);
         assert_eq!(&buf.into_inner()[..nread], &[2; 10]);
 
-        let buf = Vec::with_capacity(1024);
+        let buf = IoBufferMut::with_capacity(1024);
         let err = mock_file
             .read_exact_at_eof_ok(2048, buf.slice_full(), &ctx)
             .await

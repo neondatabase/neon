@@ -18,6 +18,7 @@ use crate::page_cache::{PageWriteGuard, PAGE_SZ};
 use crate::tenant::TENANTS_SEGMENT_NAME;
 use camino::{Utf8Path, Utf8PathBuf};
 use once_cell::sync::OnceCell;
+use owned_buffers_io::io_buf_aligned::IoBufAlignedMut;
 use owned_buffers_io::io_buf_ext::FullSlice;
 use pageserver_api::config::defaults::DEFAULT_IO_BUFFER_ALIGNMENT;
 use pageserver_api::shard::TenantShardId;
@@ -198,7 +199,7 @@ impl VirtualFile {
         ctx: &RequestContext,
     ) -> Result<Slice<Buf>, Error>
     where
-        Buf: IoBufMut + Send,
+        Buf: IoBufAlignedMut + Send,
     {
         self.inner.read_exact_at(slice, offset, ctx).await
     }
@@ -773,7 +774,7 @@ impl VirtualFileInner {
         ctx: &RequestContext,
     ) -> Result<Slice<Buf>, Error>
     where
-        Buf: IoBufMut + Send,
+        Buf: IoBufAlignedMut + Send,
     {
         let assert_we_return_original_bounds = if cfg!(debug_assertions) {
             Some((slice.stable_ptr() as usize, slice.bytes_total()))
@@ -1224,12 +1225,14 @@ impl VirtualFileInner {
         ctx: &RequestContext,
     ) -> Result<crate::tenant::block_io::BlockLease<'_>, std::io::Error> {
         use crate::page_cache::PAGE_SZ;
-        let slice = Vec::with_capacity(PAGE_SZ).slice_full();
+        let slice = IoBufferMut::with_capacity(PAGE_SZ).slice_full();
         assert_eq!(slice.bytes_total(), PAGE_SZ);
         let slice = self
             .read_exact_at(slice, blknum as u64 * (PAGE_SZ as u64), ctx)
             .await?;
-        Ok(crate::tenant::block_io::BlockLease::Vec(slice.into_inner()))
+        Ok(crate::tenant::block_io::BlockLease::IoBufferMut(
+            slice.into_inner(),
+        ))
     }
 
     async fn read_to_end(&mut self, buf: &mut Vec<u8>, ctx: &RequestContext) -> Result<(), Error> {
@@ -1401,10 +1404,10 @@ mod tests {
     impl MaybeVirtualFile {
         async fn read_exact_at(
             &self,
-            mut slice: tokio_epoll_uring::Slice<Vec<u8>>,
+            mut slice: tokio_epoll_uring::Slice<IoBufferMut>,
             offset: u64,
             ctx: &RequestContext,
-        ) -> Result<tokio_epoll_uring::Slice<Vec<u8>>, Error> {
+        ) -> Result<tokio_epoll_uring::Slice<IoBufferMut>, Error> {
             match self {
                 MaybeVirtualFile::VirtualFile(file) => file.read_exact_at(slice, offset, ctx).await,
                 MaybeVirtualFile::File(file) => {
@@ -1472,12 +1475,13 @@ mod tests {
             len: usize,
             ctx: &RequestContext,
         ) -> Result<String, Error> {
-            let slice = Vec::with_capacity(len).slice_full();
+            let slice = IoBufferMut::with_capacity(len).slice_full();
             assert_eq!(slice.bytes_total(), len);
             let slice = self.read_exact_at(slice, pos, ctx).await?;
-            let vec = slice.into_inner();
-            assert_eq!(vec.len(), len);
-            Ok(String::from_utf8(vec).unwrap())
+            let buf = slice.into_inner();
+            assert_eq!(buf.len(), len);
+
+            Ok(String::from_utf8(buf.to_vec()).unwrap())
         }
     }
 
@@ -1701,7 +1705,7 @@ mod tests {
             let files = files.clone();
             let ctx = ctx.detached_child(TaskKind::UnitTest, DownloadBehavior::Error);
             let hdl = rt.spawn(async move {
-                let mut buf = vec![0u8; SIZE];
+                let mut buf = IoBufferMut::with_capacity_zeroed(SIZE);
                 let mut rng = rand::rngs::OsRng;
                 for _ in 1..1000 {
                     let f = &files[rng.gen_range(0..files.len())];
@@ -1710,7 +1714,7 @@ mod tests {
                         .await
                         .unwrap()
                         .into_inner();
-                    assert!(buf == SAMPLE);
+                    assert!(&buf[..] == SAMPLE);
                 }
             });
             hdls.push(hdl);

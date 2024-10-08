@@ -6,6 +6,7 @@ use crate::config::PageServerConf;
 use crate::context::RequestContext;
 use crate::page_cache;
 use crate::tenant::storage_layer::inmemory_layer::vectored_dio_read::File;
+use crate::virtual_file::owned_buffers_io::io_buf_aligned::IoBufAlignedMut;
 use crate::virtual_file::owned_buffers_io::slice::SliceMutExt;
 use crate::virtual_file::owned_buffers_io::util::size_tracking_writer;
 use crate::virtual_file::owned_buffers_io::write::Buffer;
@@ -161,7 +162,7 @@ impl EphemeralFile {
 }
 
 impl super::storage_layer::inmemory_layer::vectored_dio_read::File for EphemeralFile {
-    async fn read_exact_at_eof_ok<'a, 'b, B: tokio_epoll_uring::IoBufMut + Send>(
+    async fn read_exact_at_eof_ok<'a, 'b, B: IoBufAlignedMut + Send>(
         &'b self,
         start: u64,
         dst: tokio_epoll_uring::Slice<B>,
@@ -348,7 +349,7 @@ mod tests {
         assert!(file.len() as usize == write_nbytes);
         for i in 0..write_nbytes {
             assert_eq!(value_offsets[i], i.into_u64());
-            let buf = Vec::with_capacity(1);
+            let buf = IoBufferMut::with_capacity(1);
             let (buf_slice, nread) = file
                 .read_exact_at_eof_ok(i.into_u64(), buf.slice_full(), &ctx)
                 .await
@@ -443,7 +444,7 @@ mod tests {
                 let (buf, nread) = file
                     .read_exact_at_eof_ok(
                         start.into_u64(),
-                        Vec::with_capacity(len).slice_full(),
+                        IoBufferMut::with_capacity(len).slice_full(),
                         ctx,
                     )
                     .await
