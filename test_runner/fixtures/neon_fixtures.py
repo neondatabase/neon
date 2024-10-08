@@ -91,7 +91,6 @@ from fixtures.utils import (
     allure_attach_from_dir,
     assert_no_errors,
     get_dir_size,
-    get_self_dir,
     print_gc_result,
     subprocess_capture,
     wait_until,
@@ -130,7 +129,7 @@ BASE_PORT: int = 15000
 @pytest.fixture(scope="session")
 def base_dir() -> Iterator[Path]:
     # find the base directory (currently this is the git root)
-    base_dir = get_self_dir().parent.parent
+    base_dir = Path(__file__).parents[2]
     log.info(f"base_dir is {base_dir}")
 
     yield base_dir
