@@ -825,13 +825,6 @@ impl PageServerHandler {
                     effective_request_lsn,
                     pages,
                 } => {
-                    span.record("batch_size", pages.len() as u64);
-                    static BATCH_ID: Lazy<std::sync::atomic::AtomicUsize> =
-                        Lazy::new(|| std::sync::atomic::AtomicUsize::new(0));
-                    span.record(
-                        "batch_id",
-                        BATCH_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as u64,
-                    );
                     fail::fail_point!("ps::handle-pagerequest-message::getpage");
                     // shard_id is filled in by the handler
                     (
