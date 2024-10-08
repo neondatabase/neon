@@ -202,8 +202,6 @@ impl DownloadOpts {
             Bound::Unbounded => None,
         };
         if let Some(end) = end {
-            // TODO: is it ok to panic here, or can we receive parameters from
-            // unvalidated external inputs?
             assert!(start < end, "range end {end} at or before start {start}");
         }
         Some((start, end))
@@ -583,18 +581,6 @@ impl GenericRemoteStorage {
             })
     }
 
-    /// Downloads the storage object into the `to_path` provided.
-    ///
-    /// TODO: why does this and upload_storage_object even exist? Remove them?
-    pub async fn download_storage_object(
-        &self,
-        from: &RemotePath,
-        opts: &DownloadOpts,
-        cancel: &CancellationToken,
-    ) -> Result<Download, DownloadError> {
-        self.download(from, opts, cancel).await
-    }
-
     /// The name of the bucket/container/etc.
     pub fn bucket_name(&self) -> Option<&str> {
         match self {
@@ -672,9 +658,9 @@ mod tests {
     /// with optional end bound, or None when unbounded.
     #[test]
     fn download_opts_byte_range() {
+        // Consider using test_case or a similar table-driven test framework.
         let cases = [
             // (byte_start, byte_end, expected)
-            // TODO: consider using test_case or a similar table-driven test framework.
             (Bound::Unbounded, Bound::Unbounded, None),
             (Bound::Unbounded, Bound::Included(7), Some((0, Some(8)))),
             (Bound::Unbounded, Bound::Excluded(7), Some((0, Some(7)))),
