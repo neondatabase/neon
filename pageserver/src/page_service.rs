@@ -5,7 +5,7 @@ use anyhow::Context;
 use async_compression::tokio::write::GzipEncoder;
 use bytes::Buf;
 use futures::FutureExt;
-use once_cell::sync::{Lazy, OnceCell};
+use once_cell::sync::OnceCell;
 use pageserver_api::models::{self, TenantState};
 use pageserver_api::models::{
     PagestreamBeMessage, PagestreamDbSizeRequest, PagestreamDbSizeResponse,
@@ -771,7 +771,7 @@ impl PageServerHandler {
                         if *accum_lsn != this_lsn {
                             return false;
                         }
-                        return true;
+                        true
                     }
                     .await =>
                     {
