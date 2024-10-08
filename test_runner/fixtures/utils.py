@@ -53,11 +53,6 @@ COMPONENT_BINARIES = {
 }
 
 
-def get_self_dir() -> Path:
-    """Get the path to the directory where this script lives."""
-    return Path(__file__).resolve().parent
-
-
 def subprocess_capture(
     capture_dir: Path,
     cmd: List[str],
