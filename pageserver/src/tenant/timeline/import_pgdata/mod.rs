@@ -16,7 +16,7 @@ use pageserver_api::{
 use postgres_ffi::{pg_constants, relfile_utils::parse_relfilename, ControlFileData, BLCKSZ};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, instrument};
+use tracing::{debug, info_span, instrument, Instrument};
 
 use crate::pgdatadir_mapping::{SlruSegmentDirectory, TwoPhaseDirectory};
 use crate::{
@@ -252,7 +252,7 @@ impl PgImportEnv {
         for job in parallel_jobs {
             let ctx: RequestContext =
                 ctx.detached_child(TaskKind::ImportPgdata, DownloadBehavior::Error);
-            work.spawn(async move { job.run(&ctx).await });
+            work.spawn(async move { job.run(&ctx).await }.instrument(info_span!("parallel_job")));
         }
         let mut results = Vec::new();
         while let Some(result) = work.join_next().await {
@@ -308,7 +308,7 @@ impl PgImportEnv {
         // Import data (00:spcnode:dbnode:reloid:fork:blk) and set sizes for each last
         // segment in a given relation (00:spcnode:dbnode:reloid:fork:ff)
         for file in &db.files {
-            debug!(%file.path, "importing file");
+            debug!(%file.path, %file.filesize, "importing file");
             let len = file.filesize as usize;
             ensure!(len % 8192 == 0);
             let start_blk: u32 = file.segno * (1024 * 1024 * 1024 / 8192);
@@ -485,7 +485,7 @@ impl PgDataDirDb {
                     parse_relfilename(&name).ok().map(|x| (size, x))
                 })
             })
-            .sorted()
+            .sorted_by_key(|(_, relfilename)| *relfilename)
             .map(|(filesize, (relnode, forknum, segno))| {
                 let rel_tag = RelTag {
                     spcnode,
@@ -611,12 +611,13 @@ impl ImportTask for ImportRelBlocksTask {
         self.key_range.clone()
     }
 
+    #[instrument(level = tracing::Level::DEBUG, skip_all, fields(%self.path))]
     async fn doit(
         self,
         layer_writer: &mut ImageLayerWriter,
         ctx: &RequestContext,
     ) -> anyhow::Result<usize> {
-        debug!("Importing relation file {}", self.path);
+        debug!("Importing relation file");
         let buf = self.storage.get(&self.path).await?;
 
         let (rel_tag, start_blk) = self.key_range.start.to_rel_block()?;
@@ -682,13 +683,15 @@ impl ImportTask for ImportSlruBlocksTask {
         let (_kind, _segno, end_blk) = self.key_range.end.to_slru_block()?;
         let mut blknum = start_blk;
         let mut nimages = 0;
+        let mut file_offset = 0;
         while blknum < end_blk {
             let key = slru_block_to_key(kind, segno, blknum);
             assert!(
                 !self.shard_identity.is_key_disposable(&key),
                 "SLRU keys need to go into every shard"
             );
-            let buf = &buf[(blknum * 8192) as usize..((blknum + 1) * 8192) as usize];
+            let buf = &buf[file_offset..(file_offset + 8192)];
+            file_offset += 8192;
             layer_writer
                 .put_image(key, Bytes::copy_from_slice(buf), ctx)
                 .await?;
@@ -836,10 +839,12 @@ impl RemoteStorageWrapper {
                 &self.cancel,
             )
             .await?;
-        Ok(keys
+        let res = keys
             .into_iter()
             .map(|ListingObject { key, size, .. }| (key, size.into_usize()))
-            .collect())
+            .collect();
+        debug!(?res, "returning");
+        Ok(res)
     }
 
     #[instrument(level = tracing::Level::DEBUG, skip_all, fields(%path))]

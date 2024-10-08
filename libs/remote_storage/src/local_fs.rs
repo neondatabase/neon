@@ -357,22 +357,20 @@ impl RemoteStorage for LocalFs {
                 .list_recursive(prefix)
                 .await
                 .map_err(DownloadError::Other)?;
-            let objects = keys
-                .into_iter()
-                .filter_map(|k| {
-                    let path = k.with_base(&self.storage_root);
-                    if path.is_dir() {
-                        None
-                    } else {
-                        Some(ListingObject {
-                            key: k.clone(),
-                            // LocalFs is just for testing, so just specify a dummy time
-                            last_modified: SystemTime::now(),
-                            size: 0,
-                        })
-                    }
-                })
-                .collect();
+            let mut objects = Vec::with_capacity(keys.len());
+            for key in keys {
+                let path = key.with_base(&self.storage_root);
+                let metadata = file_metadata(&path).await?;
+                if metadata.is_dir() {
+                    continue;
+                }
+                objects.push(ListingObject {
+                    key: key.clone(),
+                    last_modified: metadata.modified()?,
+                    size: metadata.len(),
+                });
+            }
+            let objects = objects;
 
             if let ListingMode::NoDelimiter = mode {
                 result.keys = objects;
@@ -410,13 +408,8 @@ impl RemoteStorage for LocalFs {
                     } else {
                         result.keys.push(ListingObject {
                             key: RemotePath::from_string(&relative_key).unwrap(),
-                            // LocalFs is just for testing
-                            last_modified: SystemTime::now(),
-                            size: u64::from(
-                                file_metadata(&key.with_base(&self.storage_root))
-                                    .await?
-                                    .len(),
-                            ),
+                            last_modified: object.last_modified,
+                            size: object.size,
                         });
                     }
                 }
