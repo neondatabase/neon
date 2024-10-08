@@ -11,10 +11,18 @@ commands:
     user: root
     sysvInitAction: sysinit
     shell: 'chmod 711 /neonvm/bin/resize-swap'
+  - name: chmod-set-disk-quota
+    user: root
+    sysvInitAction: sysinit
+    shell: 'chmod 711 /neonvm/bin/set-disk-quota'
   - name: pgbouncer
     user: postgres
     sysvInitAction: respawn
     shell: '/usr/local/bin/pgbouncer /etc/pgbouncer.ini'
+  - name: local_proxy
+    user: postgres
+    sysvInitAction: respawn
+    shell: '/usr/local/bin/local_proxy --config-path /etc/local_proxy/config.json --pid-path /etc/local_proxy/pid --http 0.0.0.0:10432'
   - name: postgres-exporter
     user: nobody
     sysvInitAction: respawn
@@ -30,11 +38,12 @@ commands:
 shutdownHook: |
   su -p postgres --session-command '/usr/local/bin/pg_ctl stop -D /var/db/postgres/compute/pgdata -m fast --wait -t 10'
 files:
-  - filename: compute_ctl-resize-swap
+  - filename: compute_ctl-sudoers
     content: |
       # Allow postgres user (which is what compute_ctl runs as) to run /neonvm/bin/resize-swap
-      # as root without requiring entering a password (NOPASSWD), regardless of hostname (ALL)
-      postgres ALL=(root) NOPASSWD: /neonvm/bin/resize-swap
+      # and /neonvm/bin/set-disk-quota as root without requiring entering a password (NOPASSWD),
+      # regardless of hostname (ALL)
+      postgres ALL=(root) NOPASSWD: /neonvm/bin/resize-swap, /neonvm/bin/set-disk-quota
   - filename: cgconfig.conf
     content: |
       # Configuration for cgroups in VM compute nodes
@@ -68,7 +77,7 @@ merge: |
              libcgroup2 \
              sudo \
       && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
-  COPY compute_ctl-resize-swap /etc/sudoers.d/compute_ctl-resize-swap
+  COPY compute_ctl-sudoers /etc/sudoers.d/compute_ctl-sudoers
 
   COPY cgconfig.conf /etc/cgconfig.conf
 
