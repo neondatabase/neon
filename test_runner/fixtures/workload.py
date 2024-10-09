@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import threading
-from typing import Any, Optional
+from typing import TYPE_CHECKING
 
 from fixtures.common_types import TenantId, TimelineId
 from fixtures.log_helper import log
@@ -13,6 +13,9 @@ from fixtures.neon_fixtures import (
     wait_for_last_flush_lsn,
 )
 from fixtures.pageserver.utils import wait_for_last_record_lsn
+
+if TYPE_CHECKING:
+    from typing import Any, Optional
 
 # neon_local doesn't handle creating/modifying endpoints concurrently, so we use a mutex
 # to ensure we don't do that: this enables running lots of Workloads in parallel safely.
@@ -100,7 +103,7 @@ class Workload:
             self.env, endpoint, self.tenant_id, self.timeline_id, pageserver_id=pageserver_id
         )
 
-    def write_rows(self, n, pageserver_id: Optional[int] = None, upload: bool = True):
+    def write_rows(self, n: int, pageserver_id: Optional[int] = None, upload: bool = True):
         endpoint = self.endpoint(pageserver_id)
         start = self.expect_rows
         end = start + n - 1
@@ -121,7 +124,9 @@ class Workload:
         else:
             return False
 
-    def churn_rows(self, n, pageserver_id: Optional[int] = None, upload=True, ingest=True):
+    def churn_rows(
+        self, n: int, pageserver_id: Optional[int] = None, upload: bool = True, ingest: bool = True
+    ):
         assert self.expect_rows >= n
 
         max_iters = 10

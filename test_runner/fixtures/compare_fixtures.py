@@ -8,9 +8,11 @@ from contextlib import _GeneratorContextManager, contextmanager
 
 # Type-related stuff
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 from _pytest.fixtures import FixtureRequest
+from typing_extensions import override
 
 from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
 from fixtures.log_helper import log
@@ -23,6 +25,9 @@ from fixtures.neon_fixtures import (
     wait_for_last_flush_lsn,
 )
 from fixtures.pg_stats import PgStatTable
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 
 class PgCompare(ABC):
@@ -65,12 +70,12 @@ class PgCompare(ABC):
 
     @contextmanager
     @abstractmethod
-    def record_pageserver_writes(self, out_name):
+    def record_pageserver_writes(self, out_name: str):
         pass
 
     @contextmanager
     @abstractmethod
-    def record_duration(self, out_name):
+    def record_duration(self, out_name: str):
         pass
 
     @contextmanager
@@ -122,28 +127,34 @@ class NeonCompare(PgCompare):
         self._pg = self.env.endpoints.create_start("main", "main", self.tenant)
 
     @property
+    @override
     def pg(self) -> PgProtocol:
         return self._pg
 
     @property
+    @override
     def zenbenchmark(self) -> NeonBenchmarker:
         return self._zenbenchmark
 
     @property
+    @override
     def pg_bin(self) -> PgBin:
         return self._pg_bin
 
+    @override
     def flush(self, compact: bool = True, gc: bool = True):
         wait_for_last_flush_lsn(self.env, self._pg, self.tenant, self.timeline)
         self.pageserver_http_client.timeline_checkpoint(self.tenant, self.timeline, compact=compact)
         if gc:
             self.pageserver_http_client.timeline_gc(self.tenant, self.timeline, 0)
 
+    @override
     def compact(self):
         self.pageserver_http_client.timeline_compact(
             self.tenant, self.timeline, wait_until_uploaded=True
         )
 
+    @override
     def report_peak_memory_use(self):
         self.zenbenchmark.record(
             "peak_mem",
@@ -152,6 +163,7 @@ class NeonCompare(PgCompare):
             report=MetricReport.LOWER_IS_BETTER,
         )
 
+    @override
     def report_size(self):
         timeline_size = self.zenbenchmark.get_timeline_size(
             self.env.repo_dir, self.tenant, self.timeline
@@ -185,9 +197,11 @@ class NeonCompare(PgCompare):
             "num_files_uploaded", total_files, "", report=MetricReport.LOWER_IS_BETTER
         )
 
+    @override
     def record_pageserver_writes(self, out_name: str) -> _GeneratorContextManager[None]:
         return self.zenbenchmark.record_pageserver_writes(self.env.pageserver, out_name)
 
+    @override
     def record_duration(self, out_name: str) -> _GeneratorContextManager[None]:
         return self.zenbenchmark.record_duration(out_name)
 
@@ -211,26 +225,33 @@ class VanillaCompare(PgCompare):
         self.cur = self.conn.cursor()
 
     @property
+    @override
     def pg(self) -> VanillaPostgres:
         return self._pg
 
     @property
+    @override
     def zenbenchmark(self) -> NeonBenchmarker:
         return self._zenbenchmark
 
     @property
+    @override
     def pg_bin(self) -> PgBin:
         return self._pg.pg_bin
 
+    @override
     def flush(self, compact: bool = False, gc: bool = False):
         self.cur.execute("checkpoint")
 
+    @override
     def compact(self):
         pass
 
+    @override
     def report_peak_memory_use(self):
         pass  # TODO find something
 
+    @override
     def report_size(self):
         data_size = self.pg.get_subdir_size(Path("base"))
         self.zenbenchmark.record(
@@ -245,6 +266,7 @@ class VanillaCompare(PgCompare):
     def record_pageserver_writes(self, out_name: str) -> Iterator[None]:
         yield  # Do nothing
 
+    @override
     def record_duration(self, out_name: str) -> _GeneratorContextManager[None]:
         return self.zenbenchmark.record_duration(out_name)
 
@@ -261,28 +283,35 @@ class RemoteCompare(PgCompare):
         self.cur = self.conn.cursor()
 
     @property
+    @override
     def pg(self) -> PgProtocol:
         return self._pg
 
     @property
+    @override
     def zenbenchmark(self) -> NeonBenchmarker:
         return self._zenbenchmark
 
     @property
+    @override
     def pg_bin(self) -> PgBin:
         return self._pg.pg_bin
 
-    def flush(self):
+    @override
+    def flush(self, compact: bool = False, gc: bool = False):
         # TODO: flush the remote pageserver
         pass
 
+    @override
     def compact(self):
         pass
 
+    @override
     def report_peak_memory_use(self):
         # TODO: get memory usage from remote pageserver
         pass
 
+    @override
     def report_size(self):
         # TODO: get storage size from remote pageserver
         pass
@@ -291,6 +320,7 @@ class RemoteCompare(PgCompare):
     def record_pageserver_writes(self, out_name: str) -> Iterator[None]:
         yield  # Do nothing
 
+    @override
     def record_duration(self, out_name: str) -> _GeneratorContextManager[None]:
         return self.zenbenchmark.record_duration(out_name)
 

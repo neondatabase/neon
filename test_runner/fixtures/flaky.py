@@ -14,7 +14,9 @@ from allure_pytest.utils import allure_name, allure_suite_labels
 from fixtures.log_helper import log
 
 if TYPE_CHECKING:
+    from collections.abc import MutableMapping
     from typing import Any
+
 
 """
 The plugin reruns flaky tests.

@@ -9,7 +9,12 @@ import toml
 from _pytest.python import Metafunc
 
 from fixtures.pg_version import PgVersion
-from fixtures.utils import AuxFileStore
+
+if TYPE_CHECKING:
+    from typing import Any, Optional
+
+    from fixtures.utils import AuxFileStore
+
 
 if TYPE_CHECKING:
     from typing import Any, Optional

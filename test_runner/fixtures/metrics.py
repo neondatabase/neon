@@ -22,7 +22,7 @@ class Metrics:
 
     def query_all(self, name: str, filter: Optional[dict[str, str]] = None) -> list[Sample]:
         filter = filter or {}
-        res = []
+        res: list[Sample] = []
 
         for sample in self.metrics[name]:
             try:
@@ -59,7 +59,7 @@ class MetricsGetter:
         return results[0].value
 
     def get_metrics_values(
-        self, names: list[str], filter: Optional[dict[str, str]] = None, absence_ok=False
+        self, names: list[str], filter: Optional[dict[str, str]] = None, absence_ok: bool = False
     ) -> dict[str, float]:
         """
         When fetching multiple named metrics, it is more efficient to use this
