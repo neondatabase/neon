@@ -1680,7 +1680,7 @@ impl Tenant {
             .unwrap()
             .get(&timeline_id)
             .map(Arc::clone)
-            .ok_or_else(|| GetTimelineError::NotFound {
+            .ok_or(GetTimelineError::NotFound {
                 tenant_id: self.tenant_shard_id,
                 timeline_id,
             })
