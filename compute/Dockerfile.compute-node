@@ -260,24 +260,6 @@ FROM build-deps AS h3-pg-build
 ARG PG_VERSION
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
-RUN case "$(uname -m)" in \
-      "x86_64") \
-        export CMAKE_CHECKSUM=739d372726cb23129d57a539ce1432453448816e345e1545f6127296926b6754 \
-        ;; \
-      "aarch64") \
-        export CMAKE_CHECKSUM=281b42627c9a1beed03e29706574d04c6c53fae4994472e90985ef018dd29c02 \
-        ;; \
-      *) \
-        echo "Unsupported architecture '$(uname -m)'. Supported are x86_64 and aarch64" && exit 1 \
-        ;; \
-    esac && \
-    wget https://github.com/Kitware/CMake/releases/download/v3.24.2/cmake-3.24.2-linux-$(uname -m).sh \
-      -q -O /tmp/cmake-install.sh \
-      && echo "${CMAKE_CHECKSUM} /tmp/cmake-install.sh" | sha256sum --check \
-      && chmod u+x /tmp/cmake-install.sh \
-      && /tmp/cmake-install.sh --skip-license --prefix=/usr/local/ \
-      && rm /tmp/cmake-install.sh
-
 # not version-specific
 # last release v4.1.0 - Jan 18, 2023
 RUN mkdir -p /h3/usr/ && \
