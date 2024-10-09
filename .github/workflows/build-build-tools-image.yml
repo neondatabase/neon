@@ -102,13 +102,13 @@ jobs:
           DEFAULT_DEBIAN_VERSION: bullseye
           IMAGE_TAG: ${{ inputs.image-tag }}
         run: |
-          for debain_version in bullseye bookworm; do
-            tags=("-t" "neondatabase/build-tools:${IMAGE_TAG}-${debain_version}")
-            if [ "${debain_version}" == "${DEFAULT_DEBIAN_VERSION}" ]; then
+          for debian_version in bullseye bookworm; do
+            tags=("-t" "neondatabase/build-tools:${IMAGE_TAG}-${debian_version}")
+            if [ "${debian_version}" == "${DEFAULT_DEBIAN_VERSION}" ]; then
               tags+=("-t" "neondatabase/build-tools:${IMAGE_TAG}")
             fi
 
             docker buildx imagetools create "${tags[@]}" \
-                                              neondatabase/build-tools:${IMAGE_TAG}-${debain_version}-x64 \
-                                              neondatabase/build-tools:${IMAGE_TAG}-${debain_version}-arm64
+                                              neondatabase/build-tools:${IMAGE_TAG}-${debian_version}-x64 \
+                                              neondatabase/build-tools:${IMAGE_TAG}-${debian_version}-arm64
           done

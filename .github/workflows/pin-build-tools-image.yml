@@ -96,19 +96,19 @@ jobs:
         env:
           DEFAULT_DEBIAN_VERSION: bullseye
         run: |
-          for debain_version in bullseye bookworm; do
+          for debian_version in bullseye bookworm; do
             tags=()
 
-            tags+=("-t" "neondatabase/build-tools:${TO_TAG}-${debain_version}")
-            tags+=("-t" "369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${TO_TAG}-${debain_version}")
-            tags+=("-t" "neoneastus2.azurecr.io/neondatabase/build-tools:${TO_TAG}-${debain_version}")
+            tags+=("-t" "neondatabase/build-tools:${TO_TAG}-${debian_version}")
+            tags+=("-t" "369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${TO_TAG}-${debian_version}")
+            tags+=("-t" "neoneastus2.azurecr.io/neondatabase/build-tools:${TO_TAG}-${debian_version}")
 
-            if [ "${debain_version}" == "${DEFAULT_DEBIAN_VERSION}" ]; then
+            if [ "${debian_version}" == "${DEFAULT_DEBIAN_VERSION}" ]; then
               tags+=("-t" "neondatabase/build-tools:${TO_TAG}")
               tags+=("-t" "369495373322.dkr.ecr.eu-central-1.amazonaws.com/build-tools:${TO_TAG}")
               tags+=("-t" "neoneastus2.azurecr.io/neondatabase/build-tools:${TO_TAG}")
             fi
 
             docker buildx imagetools create "${tags[@]}" \
-                                              neondatabase/build-tools:${FROM_TAG}-${debain_version}
+                                              neondatabase/build-tools:${FROM_TAG}-${debian_version}
           done
