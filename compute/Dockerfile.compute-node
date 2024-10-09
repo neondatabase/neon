@@ -187,7 +187,7 @@ RUN case "${PG_VERSION}" in \
 # i.e. release 3.5.0 has new signature for pg_dijkstra function
 #
 # Use new version only for v17
-# last release v3.6.2 - Mar 30, 2023
+# last release v3.6.2 - Mar 30, 2024
 RUN case "${PG_VERSION}" in \
     "v17") \
         export PGROUTING_VERSION=3.6.2 \
