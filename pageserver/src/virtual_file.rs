@@ -1332,10 +1332,11 @@ impl OpenFiles {
 /// server startup.
 ///
 #[cfg(not(test))]
-pub fn init(num_slots: usize, engine: IoEngineKind) {
+pub fn init(num_slots: usize, engine: IoEngineKind, mode: IoMode) {
     if OPEN_FILES.set(OpenFiles::new(num_slots)).is_err() {
         panic!("virtual_file::init called twice");
     }
+    set_io_mode(mode);
     io_engine::init(engine);
     crate::metrics::virtual_file_descriptor_cache::SIZE_MAX.set(num_slots as u64);
 }

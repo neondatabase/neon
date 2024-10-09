@@ -164,7 +164,11 @@ fn criterion_benchmark(c: &mut Criterion) {
     let conf: &'static PageServerConf = Box::leak(Box::new(
         pageserver::config::PageServerConf::dummy_conf(temp_dir.path().to_path_buf()),
     ));
-    virtual_file::init(16384, virtual_file::io_engine_for_bench());
+    virtual_file::init(
+        16384,
+        virtual_file::io_engine_for_bench(),
+        conf.virtual_file_io_mode,
+    );
     page_cache::init(conf.page_cache_size);
 
     {
