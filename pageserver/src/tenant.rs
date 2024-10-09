@@ -1544,6 +1544,7 @@ impl Tenant {
         timeline_id: TimelineId,
         ctx: RequestContext,
     ) -> Result<Arc<Timeline>, TimelineArchivalError> {
+        info!("unoffloading timeline");
         let cancel = self.cancel.clone();
         let timeline_preload = self
             .load_timeline_metadata(timeline_id, self.remote_storage.clone(), cancel)
@@ -1596,6 +1597,7 @@ impl Tenant {
             if offloaded_timelines.remove(&timeline_id).is_none() {
                 warn!("timeline already removed from offloaded timelines");
             }
+            info!("timeline unoffloading complete");
             Ok(Arc::clone(timeline))
         } else {
             warn!("timeline not available directly after attach");
