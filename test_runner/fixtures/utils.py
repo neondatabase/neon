@@ -628,19 +628,23 @@ def all_pairs_component_versions():
     then it returns a dictionary with argnames, argvalues and ids
     ids is a sequence of letters where n means the new version of the component and o means the old version
     """
-    argnames = "combination"
     argvalues, ids = [], []
+    all_new = False
     for pair in AllPairs(
         OrderedDict({component: ["new", "old"] for component in COMPONENT_BINARIES.keys()})
     ):
+        have_old = have_new = False
         argvalues.append(pair)
-        ids.append(
-            "combination_"
-            + "".join(
-                [
-                    "n" if getattr(pair, component) == "new" else "o"
-                    for component in COMPONENT_BINARIES.keys()
-                ]
-            )
-        )
-    return {"argnames": argnames, "argvalues": argvalues, "ids": ids}
+        cur_id = []
+        for component in COMPONENT_BINARIES.keys():
+            if getattr(pair, component) == 'new':
+                cur_id.append('n')
+                have_new = True
+            else:
+                cur_id.append('o')
+                have_old = True
+        ids.append("combination_" + "".join(cur_id))
+        all_new = all_new or (have_new and not have_old)
+        assert not have_new, f"the wrong combination {pair} is generated, we don't expect only old versions"
+    assert all_new, f"the combination of all-new versions was not generated, please check all-pairs setup. {argvalues}"
+    return {"argnames": "combination", "argvalues": argvalues, "ids": ids}
