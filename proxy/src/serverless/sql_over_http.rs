@@ -12,14 +12,14 @@ use http::Method;
 use http_body_util::combinators::BoxBody;
 use http_body_util::BodyExt;
 use http_body_util::Full;
-use hyper1::body::Body;
-use hyper1::body::Incoming;
-use hyper1::header;
-use hyper1::http::HeaderName;
-use hyper1::http::HeaderValue;
-use hyper1::Response;
-use hyper1::StatusCode;
-use hyper1::{HeaderMap, Request};
+use hyper::body::Body;
+use hyper::body::Incoming;
+use hyper::header;
+use hyper::http::HeaderName;
+use hyper::http::HeaderValue;
+use hyper::Response;
+use hyper::StatusCode;
+use hyper::{HeaderMap, Request};
 use pq_proto::StartupMessageParamsBuilder;
 use serde::Serialize;
 use serde_json::Value;
@@ -272,7 +272,7 @@ pub(crate) async fn handle(
     request: Request<Incoming>,
     backend: Arc<PoolingBackend>,
     cancel: CancellationToken,
-) -> Result<Response<BoxBody<Bytes, hyper1::Error>>, ApiError> {
+) -> Result<Response<BoxBody<Bytes, hyper::Error>>, ApiError> {
     let result = handle_inner(cancel, config, &ctx, request, backend).await;
 
     let mut response = match result {
@@ -435,7 +435,7 @@ impl UserFacingError for SqlOverHttpError {
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ReadPayloadError {
     #[error("could not read the HTTP request body: {0}")]
-    Read(#[from] hyper1::Error),
+    Read(#[from] hyper::Error),
     #[error("could not parse the HTTP request body: {0}")]
     Parse(#[from] serde_json::Error),
 }
@@ -476,7 +476,7 @@ struct HttpHeaders {
 }
 
 impl HttpHeaders {
-    fn try_parse(headers: &hyper1::http::HeaderMap) -> Result<Self, SqlOverHttpError> {
+    fn try_parse(headers: &hyper::http::HeaderMap) -> Result<Self, SqlOverHttpError> {
         // Determine the output options. Default behaviour is 'false'. Anything that is not
         // strictly 'true' assumed to be false.
         let raw_output = headers.get(&RAW_TEXT_OUTPUT) == Some(&HEADER_VALUE_TRUE);
@@ -529,7 +529,7 @@ async fn handle_inner(
     ctx: &RequestMonitoring,
     request: Request<Incoming>,
     backend: Arc<PoolingBackend>,
-) -> Result<Response<BoxBody<Bytes, hyper1::Error>>, SqlOverHttpError> {
+) -> Result<Response<BoxBody<Bytes, hyper::Error>>, SqlOverHttpError> {
     let _requeset_gauge = Metrics::get()
         .proxy
         .connection_requests
@@ -577,7 +577,7 @@ async fn handle_db_inner(
     conn_info: ConnInfo,
     auth: AuthData,
     backend: Arc<PoolingBackend>,
-) -> Result<Response<BoxBody<Bytes, hyper1::Error>>, SqlOverHttpError> {
+) -> Result<Response<BoxBody<Bytes, hyper::Error>>, SqlOverHttpError> {
     //
     // Determine the destination and connection params
     //
@@ -744,7 +744,7 @@ async fn handle_auth_broker_inner(
     conn_info: ConnInfo,
     jwt: String,
     backend: Arc<PoolingBackend>,
-) -> Result<Response<BoxBody<Bytes, hyper1::Error>>, SqlOverHttpError> {
+) -> Result<Response<BoxBody<Bytes, hyper::Error>>, SqlOverHttpError> {
     backend
         .authenticate_with_jwt(
             ctx,
