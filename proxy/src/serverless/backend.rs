@@ -3,10 +3,12 @@ use std::{io, sync::Arc, time::Duration};
 use async_trait::async_trait;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use tokio::net::{lookup_host, TcpStream};
-use tracing::{field::display, info};
+use tokio_postgres::types::ToSql;
+use tracing::{debug, field::display, info};
 
 use crate::{
     auth::{
+        self,
         backend::{local::StaticAuthRules, ComputeCredentials, ComputeUserInfo},
         check_peer_addr_is_in_list, AuthError,
     },
@@ -32,10 +34,12 @@ use crate::{
 use super::{
     conn_pool::{poll_client, Client, ConnInfo, GlobalConnPool},
     http_conn_pool::{self, poll_http2_client},
+    local_conn_pool::{self, LocalClient, LocalConnPool},
 };
 
 pub(crate) struct PoolingBackend {
     pub(crate) http_conn_pool: Arc<super::http_conn_pool::GlobalConnPool>,
+    pub(crate) local_pool: Arc<LocalConnPool<tokio_postgres::Client>>,
     pub(crate) pool: Arc<GlobalConnPool<tokio_postgres::Client>>,
     pub(crate) config: &'static ProxyConfig,
     pub(crate) endpoint_rate_limiter: Arc<EndpointRateLimiter>,
@@ -112,7 +116,7 @@ impl PoolingBackend {
         config: &AuthenticationConfig,
         user_info: &ComputeUserInfo,
         jwt: String,
-    ) -> Result<(), AuthError> {
+    ) -> Result<ComputeCredentials, AuthError> {
         match &self.config.auth_backend {
             crate::auth::Backend::ControlPlane(console, ()) => {
                 config
@@ -127,13 +131,16 @@ impl PoolingBackend {
                     .await
                     .map_err(|e| AuthError::auth_failed(e.to_string()))?;
 
-                Ok(())
+                Ok(ComputeCredentials {
+                    info: user_info.clone(),
+                    keys: crate::auth::backend::ComputeCredentialKeys::None,
+                })
             }
             crate::auth::Backend::ConsoleRedirect(_, ()) => Err(AuthError::auth_failed(
                 "JWT login over web auth proxy is not supported",
             )),
             crate::auth::Backend::Local(_) => {
-                config
+                let keys = config
                     .jwks_cache
                     .check_jwt(
                         ctx,
@@ -145,8 +152,10 @@ impl PoolingBackend {
                     .await
                     .map_err(|e| AuthError::auth_failed(e.to_string()))?;
 
-                // todo: rewrite JWT signature with key shared somehow between local proxy and postgres
-                Ok(())
+                Ok(ComputeCredentials {
+                    info: user_info.clone(),
+                    keys,
+                })
             }
         }
     }
@@ -231,6 +240,77 @@ impl PoolingBackend {
         )
         .await
     }
+
+    /// Connect to postgres over localhost.
+    ///
+    /// We expect postgres to be started here, so we won't do any retries.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called with a non-local_proxy backend.
+    #[tracing::instrument(fields(pid = tracing::field::Empty), skip_all)]
+    pub(crate) async fn connect_to_local_postgres(
+        &self,
+        ctx: &RequestMonitoring,
+        conn_info: ConnInfo,
+    ) -> Result<LocalClient<tokio_postgres::Client>, HttpConnError> {
+        if let Some(client) = self.local_pool.get(ctx, &conn_info)? {
+            return Ok(client);
+        }
+
+        let conn_id = uuid::Uuid::new_v4();
+        tracing::Span::current().record("conn_id", display(conn_id));
+        info!(%conn_id, "local_pool: opening a new connection '{conn_info}'");
+
+        let mut node_info = match &self.config.auth_backend {
+            auth::Backend::ControlPlane(_, ()) | auth::Backend::ConsoleRedirect(_, ()) => {
+                unreachable!("only local_proxy can connect to local postgres")
+            }
+            auth::Backend::Local(local) => local.node_info.clone(),
+        };
+
+        let config = node_info
+            .config
+            .user(&conn_info.user_info.user)
+            .dbname(&conn_info.dbname);
+
+        let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
+        let (client, connection) = config.connect(tokio_postgres::NoTls).await?;
+        drop(pause);
+
+        tracing::Span::current().record("pid", tracing::field::display(client.get_process_id()));
+
+        let handle = local_conn_pool::poll_client(
+            self.local_pool.clone(),
+            ctx,
+            conn_info,
+            client,
+            connection,
+            conn_id,
+            node_info.aux.clone(),
+        );
+
+        let kid = handle.get_client().get_process_id() as i64;
+        let jwk = p256::PublicKey::from(handle.key().verifying_key()).to_jwk();
+
+        debug!(kid, ?jwk, "setting up backend session state");
+
+        // initiates the auth session
+        handle
+            .get_client()
+            .query(
+                "select auth.init($1, $2);",
+                &[
+                    &kid as &(dyn ToSql + Sync),
+                    &tokio_postgres::types::Json(jwk),
+                ],
+            )
+            .await?;
+
+        info!(?kid, "backend session state init");
+
+        Ok(handle)
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -241,6 +321,8 @@ pub(crate) enum HttpConnError {
     PostgresConnectionError(#[from] tokio_postgres::Error),
     #[error("could not connection to local-proxy in compute")]
     LocalProxyConnectionError(#[from] LocalProxyConnError),
+    #[error("could not parse JWT payload")]
+    JwtPayloadError(serde_json::Error),
 
     #[error("could not get auth info")]
     GetAuthInfo(#[from] GetAuthInfoError),
@@ -266,6 +348,7 @@ impl ReportableError for HttpConnError {
             HttpConnError::ConnectionClosedAbruptly(_) => ErrorKind::Compute,
             HttpConnError::PostgresConnectionError(p) => p.get_error_kind(),
             HttpConnError::LocalProxyConnectionError(_) => ErrorKind::Compute,
+            HttpConnError::JwtPayloadError(_) => ErrorKind::User,
             HttpConnError::GetAuthInfo(a) => a.get_error_kind(),
             HttpConnError::AuthError(a) => a.get_error_kind(),
             HttpConnError::WakeCompute(w) => w.get_error_kind(),
@@ -280,6 +363,7 @@ impl UserFacingError for HttpConnError {
             HttpConnError::ConnectionClosedAbruptly(_) => self.to_string(),
             HttpConnError::PostgresConnectionError(p) => p.to_string(),
             HttpConnError::LocalProxyConnectionError(p) => p.to_string(),
+            HttpConnError::JwtPayloadError(p) => p.to_string(),
             HttpConnError::GetAuthInfo(c) => c.to_string_client(),
             HttpConnError::AuthError(c) => c.to_string_client(),
             HttpConnError::WakeCompute(c) => c.to_string_client(),
@@ -296,6 +380,7 @@ impl CouldRetry for HttpConnError {
             HttpConnError::PostgresConnectionError(e) => e.could_retry(),
             HttpConnError::LocalProxyConnectionError(e) => e.could_retry(),
             HttpConnError::ConnectionClosedAbruptly(_) => false,
+            HttpConnError::JwtPayloadError(_) => false,
             HttpConnError::GetAuthInfo(_) => false,
             HttpConnError::AuthError(_) => false,
             HttpConnError::WakeCompute(_) => false,
