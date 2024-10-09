@@ -446,7 +446,6 @@ class NeonLocalCli(AbstractNeonCli):
         if immediate:
             cmd.extend(["-m", "immediate"])
 
-        log.info(f"Stopping pageserver with {cmd}")
         return self.raw_cli(cmd)
 
     def safekeeper_start(
