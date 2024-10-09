@@ -2,6 +2,7 @@ use anyhow::Context;
 use camino::Utf8Path;
 use futures::StreamExt;
 use remote_storage::{DownloadError, DownloadOpts, ListingMode, ListingObject, RemotePath};
+use std::ops::Bound;
 use std::sync::Arc;
 use std::{collections::HashSet, num::NonZeroU32};
 use test_context::test_context;
@@ -293,7 +294,15 @@ async fn upload_download_works(ctx: &mut MaybeEnabledStorage) -> anyhow::Result<
     // Full range (end specified)
     let dl = ctx
         .client
-        .download_byte_range(&path, 0, Some(len as u64), &cancel)
+        .download(
+            &path,
+            &DownloadOpts {
+                byte_start: Bound::Included(0),
+                byte_end: Bound::Excluded(len as u64),
+                ..Default::default()
+            },
+            &cancel,
+        )
         .await?;
     let buf = download_to_vec(dl).await?;
     assert_eq!(&buf, &orig);
@@ -301,7 +310,15 @@ async fn upload_download_works(ctx: &mut MaybeEnabledStorage) -> anyhow::Result<
     // partial range (end specified)
     let dl = ctx
         .client
-        .download_byte_range(&path, 4, Some(10), &cancel)
+        .download(
+            &path,
+            &DownloadOpts {
+                byte_start: Bound::Included(4),
+                byte_end: Bound::Excluded(10),
+                ..Default::default()
+            },
+            &cancel,
+        )
         .await?;
     let buf = download_to_vec(dl).await?;
     assert_eq!(&buf, &orig[4..10]);
@@ -309,7 +326,15 @@ async fn upload_download_works(ctx: &mut MaybeEnabledStorage) -> anyhow::Result<
     // partial range (end beyond real end)
     let dl = ctx
         .client
-        .download_byte_range(&path, 8, Some(len as u64 * 100), &cancel)
+        .download(
+            &path,
+            &DownloadOpts {
+                byte_start: Bound::Included(8),
+                byte_end: Bound::Excluded(len as u64 * 100),
+                ..Default::default()
+            },
+            &cancel,
+        )
         .await?;
     let buf = download_to_vec(dl).await?;
     assert_eq!(&buf, &orig[8..]);
@@ -317,7 +342,14 @@ async fn upload_download_works(ctx: &mut MaybeEnabledStorage) -> anyhow::Result<
     // Partial range (end unspecified)
     let dl = ctx
         .client
-        .download_byte_range(&path, 4, None, &cancel)
+        .download(
+            &path,
+            &DownloadOpts {
+                byte_start: Bound::Included(4),
+                ..Default::default()
+            },
+            &cancel,
+        )
         .await?;
     let buf = download_to_vec(dl).await?;
     assert_eq!(&buf, &orig[4..]);
@@ -325,7 +357,14 @@ async fn upload_download_works(ctx: &mut MaybeEnabledStorage) -> anyhow::Result<
     // Full range (end unspecified)
     let dl = ctx
         .client
-        .download_byte_range(&path, 0, None, &cancel)
+        .download(
+            &path,
+            &DownloadOpts {
+                byte_start: Bound::Included(0),
+                ..Default::default()
+            },
+            &cancel,
+        )
         .await?;
     let buf = download_to_vec(dl).await?;
     assert_eq!(&buf, &orig);
