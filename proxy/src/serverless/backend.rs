@@ -429,12 +429,11 @@ impl ConnectMechanism for HyperMechanism {
 
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
 
-        let port = node_info
-            .config
-            .get_ports()
-            .first()
-            .copied()
-            .unwrap_or_else(10432);
+        let port = *node_info.config.get_ports().first().ok_or_else(|| {
+            HttpConnError::WakeCompute(WakeComputeError::BadComputeAddress(
+                "local-proxy port missing on compute address".into(),
+            ))
+        })?;
         let res = connect_http2(&host, port, timeout).await;
         drop(pause);
         let (client, connection) = permit.release_result(res)?;
