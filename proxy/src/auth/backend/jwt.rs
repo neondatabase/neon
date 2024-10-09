@@ -571,7 +571,7 @@ mod tests {
     use bytes::Bytes;
     use http::Response;
     use http_body_util::Full;
-    use hyper1::service::service_fn;
+    use hyper::service::service_fn;
     use hyper_util::rt::TokioIo;
     use rand::rngs::OsRng;
     use rsa::pkcs8::DecodePrivateKey;
@@ -736,7 +736,7 @@ X0n5X2/pBLJzxZc62ccvZYVnctBiFs6HbSnxpuMQCfkt/BcR/ttIepBQQIW86wHL
         });
 
         let listener = TcpListener::bind("0.0.0.0:0").await.unwrap();
-        let server = hyper1::server::conn::http1::Builder::new();
+        let server = hyper::server::conn::http1::Builder::new();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             loop {

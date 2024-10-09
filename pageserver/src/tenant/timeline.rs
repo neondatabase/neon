@@ -7,6 +7,7 @@ pub(crate) mod handle;
 mod init;
 pub mod layer_manager;
 pub(crate) mod logical_size;
+pub mod offload;
 pub mod span;
 pub mod uninit;
 mod walreceiver;
@@ -1556,6 +1557,17 @@ impl Timeline {
         }
     }
 
+    /// Checks if the internal state of the timeline is consistent with it being able to be offloaded.
+    /// This is neccessary but not sufficient for offloading of the timeline as it might have
+    /// child timelines that are not offloaded yet.
+    pub(crate) fn can_offload(&self) -> bool {
+        if self.remote_client.is_archived() != Some(true) {
+            return false;
+        }
+
+        true
+    }
+
     /// Outermost timeline compaction operation; downloads needed layers. Returns whether we have pending
     /// compaction tasks.
     pub(crate) async fn compact(
@@ -1818,7 +1830,6 @@ impl Timeline {
         self.current_state() == TimelineState::Active
     }
 
-    #[allow(unused)]
     pub(crate) fn is_archived(&self) -> Option<bool> {
         self.remote_client.is_archived()
     }

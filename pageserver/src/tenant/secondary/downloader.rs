@@ -950,6 +950,7 @@ impl<'a> TenantDownloader<'a> {
         let cancel = &self.secondary_state.cancel;
         let opts = DownloadOpts {
             etag: prev_etag.cloned(),
+            ..Default::default()
         };
 
         backoff::retry(

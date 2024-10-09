@@ -11,7 +11,7 @@ use serde::Serialize;
 use utils::http::error::ApiError;
 
 /// Like [`ApiError::into_response`]
-pub(crate) fn api_error_into_response(this: ApiError) -> Response<BoxBody<Bytes, hyper1::Error>> {
+pub(crate) fn api_error_into_response(this: ApiError) -> Response<BoxBody<Bytes, hyper::Error>> {
     match this {
         ApiError::BadRequest(err) => HttpErrorBody::response_from_msg_and_status(
             format!("{err:#?}"), // use debug printing so that we give the cause
@@ -67,12 +67,12 @@ impl HttpErrorBody {
     fn response_from_msg_and_status(
         msg: String,
         status: StatusCode,
-    ) -> Response<BoxBody<Bytes, hyper1::Error>> {
+    ) -> Response<BoxBody<Bytes, hyper::Error>> {
         HttpErrorBody { msg }.to_response(status)
     }
 
     /// Same as [`utils::http::error::HttpErrorBody::to_response`]
-    fn to_response(&self, status: StatusCode) -> Response<BoxBody<Bytes, hyper1::Error>> {
+    fn to_response(&self, status: StatusCode) -> Response<BoxBody<Bytes, hyper::Error>> {
         Response::builder()
             .status(status)
             .header(http::header::CONTENT_TYPE, "application/json")
@@ -90,7 +90,7 @@ impl HttpErrorBody {
 pub(crate) fn json_response<T: Serialize>(
     status: StatusCode,
     data: T,
-) -> Result<Response<BoxBody<Bytes, hyper1::Error>>, ApiError> {
+) -> Result<Response<BoxBody<Bytes, hyper::Error>>, ApiError> {
     let json = serde_json::to_string(&data)
         .context("Failed to serialize JSON response")
         .map_err(ApiError::InternalServerError)?;

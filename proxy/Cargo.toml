@@ -39,7 +39,7 @@ http.workspace = true
 humantime.workspace = true
 humantime-serde.workspace = true
 hyper0.workspace = true
-hyper1 = { package = "hyper", version = "1.2", features = ["server"] }
+hyper = { workspace = true, features = ["server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["server", "http1", "http2", "tokio"] }
 http-body-util = { version = "0.1" }
 indexmap.workspace = true
