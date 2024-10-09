@@ -28,7 +28,7 @@ use crate::{
         retry::{CouldRetry, ShouldRetryWakeCompute},
     },
     rate_limiter::EndpointRateLimiter,
-    Host,
+    EndpointId, Host,
 };
 
 use super::{
@@ -222,7 +222,14 @@ impl PoolingBackend {
             .auth_backend
             .as_ref()
             .map(|()| ComputeCredentials {
-                info: conn_info.user_info.clone(),
+                info: ComputeUserInfo {
+                    user: conn_info.user_info.user.clone(),
+                    endpoint: EndpointId::from(format!(
+                        "{}-local-proxy",
+                        conn_info.user_info.endpoint
+                    )),
+                    options: conn_info.user_info.options.clone(),
+                },
                 keys: crate::auth::backend::ComputeCredentialKeys::None,
             });
         crate::proxy::connect_compute::connect_to_compute(
@@ -507,8 +514,12 @@ impl ConnectMechanism for HyperMechanism {
 
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
 
-        // let port = node_info.config.get_ports().first().unwrap_or_else(10432);
-        let res = connect_http2(&host, 10432, timeout).await;
+        let port = *node_info.config.get_ports().first().ok_or_else(|| {
+            HttpConnError::WakeCompute(WakeComputeError::BadComputeAddress(
+                "local-proxy port missing on compute address".into(),
+            ))
+        })?;
+        let res = connect_http2(&host, port, timeout).await;
         drop(pause);
         let (client, connection) = permit.release_result(res)?;
 
