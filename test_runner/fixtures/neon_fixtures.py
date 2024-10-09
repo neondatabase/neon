@@ -181,7 +181,7 @@ def compatibility_pg_distrib_dir() -> Optional[Iterator[Path]]:
     if env_compat_postgres_bin := os.environ.get("COMPATIBILITY_POSTGRES_DISTRIB_DIR"):
         compat_distrib_dir = Path(env_compat_postgres_bin).resolve()
         if not compat_distrib_dir.exists():
-            raise Exception(f"compatibility postgres directory not fount at {compat_distrib_dir}")
+            raise Exception(f"compatibility postgres directory not found at {compat_distrib_dir}")
 
     if compat_distrib_dir:
         log.info(f"compatibility_pg_distrib_dir is {compat_distrib_dir}")
