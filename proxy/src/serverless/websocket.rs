@@ -129,6 +129,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncBufRead for WebSocketRw<S> {
 
 pub(crate) async fn serve_websocket(
     config: &'static ProxyConfig,
+    auth_backend: &'static crate::auth::Backend<'static, (), ()>,
     ctx: RequestMonitoring,
     websocket: OnUpgrade,
     cancellation_handler: Arc<CancellationHandlerMain>,
@@ -145,6 +146,7 @@ pub(crate) async fn serve_websocket(
 
     let res = Box::pin(handle_client(
         config,
+        auth_backend,
         &ctx,
         cancellation_handler,
         WebSocketRw::new(websocket),

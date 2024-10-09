@@ -61,6 +61,7 @@ pub async fn run_until_cancelled<F: std::future::Future>(
 
 pub async fn task_main(
     config: &'static ProxyConfig,
+    auth_backend: &'static auth::Backend<'static, (), ()>,
     listener: tokio::net::TcpListener,
     cancellation_token: CancellationToken,
     cancellation_handler: Arc<CancellationHandlerMain>,
@@ -129,6 +130,7 @@ pub async fn task_main(
             let startup = Box::pin(
                 handle_client(
                     config,
+                    auth_backend,
                     &ctx,
                     cancellation_handler,
                     socket,
@@ -243,8 +245,10 @@ impl ReportableError for ClientRequestError {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     config: &'static ProxyConfig,
+    auth_backend: &'static auth::Backend<'static, (), ()>,
     ctx: &RequestMonitoring,
     cancellation_handler: Arc<CancellationHandlerMain>,
     stream: S,
@@ -285,8 +289,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     let common_names = tls.map(|tls| &tls.common_names);
 
     // Extract credentials which we're going to use for auth.
-    let result = config
-        .auth_backend
+    let result = auth_backend
         .as_ref()
         .map(|()| auth::ComputeUserInfoMaybeEndpoint::parse(ctx, &params, hostname, common_names))
         .transpose();

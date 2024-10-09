@@ -54,6 +54,7 @@ pub(crate) const SERVERLESS_DRIVER_SNI: &str = "api";
 
 pub async fn task_main(
     config: &'static ProxyConfig,
+    auth_backend: &'static crate::auth::Backend<'static, (), ()>,
     ws_listener: TcpListener,
     cancellation_token: CancellationToken,
     cancellation_handler: Arc<CancellationHandlerMain>,
@@ -107,6 +108,7 @@ pub async fn task_main(
         http_conn_pool: Arc::clone(&http_conn_pool),
         pool: Arc::clone(&conn_pool),
         config,
+        auth_backend,
         endpoint_rate_limiter: Arc::clone(&endpoint_rate_limiter),
     });
     let tls_acceptor: Arc<dyn MaybeTlsAcceptor> = match config.tls_config.as_ref() {
@@ -394,6 +396,7 @@ async fn request_handler(
             async move {
                 if let Err(e) = websocket::serve_websocket(
                     config,
+                    backend.auth_backend,
                     ctx,
                     websocket,
                     cancellation_handler,

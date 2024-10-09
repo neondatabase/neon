@@ -25,6 +25,10 @@ pub(crate) enum WebAuthError {
     Io(#[from] std::io::Error),
 }
 
+pub struct ConsoleRedirectBackend {
+    console_uri: reqwest::Url,
+}
+
 impl UserFacingError for WebAuthError {
     fn to_string_client(&self) -> String {
         "Internal error".to_string()
@@ -57,7 +61,26 @@ pub(crate) fn new_psql_session_id() -> String {
     hex::encode(rand::random::<[u8; 8]>())
 }
 
-pub(super) async fn authenticate(
+impl ConsoleRedirectBackend {
+    pub fn new(console_uri: reqwest::Url) -> Self {
+        Self { console_uri }
+    }
+
+    pub(super) fn url(&self) -> &reqwest::Url {
+        &self.console_uri
+    }
+
+    pub(crate) async fn authenticate(
+        &self,
+        ctx: &RequestMonitoring,
+        auth_config: &'static AuthenticationConfig,
+        client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
+    ) -> auth::Result<NodeInfo> {
+        authenticate(ctx, auth_config, &self.console_uri, client).await
+    }
+}
+
+async fn authenticate(
     ctx: &RequestMonitoring,
     auth_config: &'static AuthenticationConfig,
     link_uri: &reqwest::Url,
