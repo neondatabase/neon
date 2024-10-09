@@ -18,6 +18,7 @@ use crate::page_cache::{PageWriteGuard, PAGE_SZ};
 use crate::tenant::TENANTS_SEGMENT_NAME;
 use camino::{Utf8Path, Utf8PathBuf};
 use once_cell::sync::OnceCell;
+use owned_buffers_io::aligned_buffer::{AlignedBufferMut, AlignedSlice, ConstAlign};
 use owned_buffers_io::io_buf_aligned::IoBufAlignedMut;
 use owned_buffers_io::io_buf_ext::FullSlice;
 use pageserver_api::config::defaults::DEFAULT_IO_BUFFER_ALIGNMENT;
@@ -45,7 +46,6 @@ pub(crate) use api::IoMode;
 pub(crate) use io_engine::IoEngineKind;
 pub(crate) use metadata::Metadata;
 pub(crate) use open_options::*;
-pub(crate) mod aligned_buffer;
 
 pub(crate) mod owned_buffers_io {
     //! Abstractions for IO with owned buffers.
@@ -57,6 +57,7 @@ pub(crate) mod owned_buffers_io {
     //! but for the time being we're proving out the primitives in the neon.git repo
     //! for faster iteration.
 
+    pub(crate) mod aligned_buffer;
     pub(crate) mod io_buf_aligned;
     pub(crate) mod io_buf_ext;
     pub(crate) mod slice;
@@ -1362,9 +1363,10 @@ pub(crate) const fn get_io_buffer_alignment() -> usize {
     DEFAULT_IO_BUFFER_ALIGNMENT
 }
 
-pub(crate) type IoBufferMut = aligned_buffer::AlignedBufferMut<{ get_io_buffer_alignment() }>;
+pub(crate) type IoBufferMut = AlignedBufferMut<ConstAlign<{ get_io_buffer_alignment() }>>;
+// pub(crate) type IoBuffer = AlignedBuffer<ConstAlign<{ get_io_buffer_alignment() }>>;
 pub(crate) type IoPageSlice<'a> =
-    aligned_buffer::AlignedSlice<'a, { get_io_buffer_alignment() }, PAGE_SZ>;
+    AlignedSlice<'a, PAGE_SZ, ConstAlign<{ get_io_buffer_alignment() }>>;
 
 static IO_MODE: AtomicU8 = AtomicU8::new(IoMode::preferred() as u8);
 
