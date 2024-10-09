@@ -44,6 +44,7 @@ COPY --chown=nonroot . .
 ARG ADDITIONAL_RUSTFLAGS
 RUN set -e \
     && PQ_LIB_DIR=$(pwd)/pg_install/v${STABLE_PG_VERSION}/lib RUSTFLAGS="-Clinker=clang -Clink-arg=-fuse-ld=mold -Clink-arg=-Wl,--no-rosegment ${ADDITIONAL_RUSTFLAGS}" cargo build \
+      --features profiling \
       --bin pg_sni_router  \
       --bin pageserver  \
       --bin pagectl  \
@@ -109,5 +110,7 @@ USER neon
 EXPOSE 6400
 EXPOSE 9898
 
-CMD ["/usr/local/bin/pageserver", "-D", "/data/.neon"]
+ENV _RJEM_MALLOC_CONF=prof:true,prof_active:false,lg_prof_sample:6,prof_accum:true
 
+ENTRYPOINT exec setarch $(uname -m) -R
+CMD ["/usr/local/bin/pageserver", "-D", "/data/.neon"]

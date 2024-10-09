@@ -1,0 +1,33 @@
+[package]
+name = "microchassis"
+description = "A chassis to increase observability of services and tools"
+version = "0.0.6"
+edition = "2021"
+authors = ["Folke B."]
+repository = "https://github.com/cloneable/microchassis"
+license = "Apache-2.0"
+exclude = [".gitignore", ".github", "target"]
+rust-version = "1.65"
+
+[dependencies]
+backtrace = { version = "0.3", optional = true }
+http = "0.2"
+lazy_static = "1"
+libc = { version = "0.2", optional = true }
+tempfile = "3"
+thiserror = "1"
+tikv-jemalloc-ctl = "0.5"
+tikv-jemalloc-sys = { version = "0.5", features = ["profiling", "stats"] }
+tikv-jemallocator = { version = "0.5", features = ["profiling", "stats"] }
+tracing = { version = "0.1" }
+actix-web = { version = "4", optional = true }
+futures-util = { version = "0.3", optional = true }
+workspace_hack = { version = "0.1", path = "../../workspace_hack" }
+
+[features]
+default = ["std", "jemalloc-profiling"]
+std = ["tikv-jemalloc-ctl/use_std"]
+jemalloc-profiling = ["dep:backtrace"]
+oompanic-allocator = []
+set-jemalloc-global = []
+actix-handlers = ["dep:actix-web", "dep:futures-util"]

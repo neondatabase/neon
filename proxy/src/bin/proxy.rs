@@ -94,6 +94,9 @@ struct ProxyCliArgs {
     /// listen for incoming wss connections on ip:port
     #[clap(long)]
     wss: Option<String>,
+    /// listen for incoming http connections for pprof endpoint on ip:port
+    #[clap(long)]
+    pprof: Option<String>,
     /// redirect unauthenticated users to the given uri in case of web auth
     #[clap(short, long, default_value = "http://localhost:3000/psql_session/")]
     uri: String,
@@ -311,6 +314,47 @@ async fn main() -> anyhow::Result<()> {
 
     let args = ProxyCliArgs::parse();
     let config = build_config(&args)?;
+
+    #[cfg(feature = "profiling")]
+    if let Some(pprof_addr) = args.pprof {
+        use microchassis::profiling::{jeprof, mallctl};
+
+        async fn handle_pprof_request(
+            req: hyper0::Request<hyper0::Body>,
+        ) -> std::io::Result<hyper0::Response<hyper0::Body>> {
+            let (parts, body) = req.into_parts();
+            let body = hyper0::body::to_bytes(body)
+                .await
+                .map_err(std::io::Error::other)?;
+            let req = hyper0::Request::from_parts(parts, body.into());
+            let resp = jeprof::router(req).map_err(std::io::Error::other)?;
+            let resp = resp.map(hyper0::Body::from);
+            Ok(resp)
+        }
+
+        std::thread::Builder::new()
+            .name("pprof".to_string())
+            .spawn(move || {
+                warn!("pprof endpoint starting");
+                mallctl::set_thread_active(false).map_err(std::io::Error::other)?;
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(std::io::Error::other)?;
+                let make_service = hyper0::service::make_service_fn(move |_conn| {
+                    let service = hyper0::service::service_fn(handle_pprof_request);
+                    async move { Ok::<_, std::io::Error>(service) }
+                });
+                let addr = pprof_addr.parse().map_err(std::io::Error::other)?;
+                if let Err(e) = rt
+                    .block_on(async move { hyper0::Server::bind(&addr).serve(make_service).await })
+                {
+                    Err(std::io::Error::other(e))
+                } else {
+                    Ok(())
+                }
+            })?;
+    }
 
     info!("Authentication backend: {}", config.auth_backend);
     info!("Using region: {}", args.aws_region);

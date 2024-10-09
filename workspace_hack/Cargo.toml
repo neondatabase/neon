@@ -15,6 +15,7 @@ license.workspace = true
 
 ### BEGIN HAKARI SECTION
 [dependencies]
+actix-router = { version = "0.5", default-features = false, features = ["http", "unicode"] }
 ahash = { version = "0.8" }
 anyhow = { version = "1", features = ["backtrace"] }
 axum = { version = "0.7", features = ["ws"] }
@@ -52,6 +53,7 @@ lazy_static = { version = "1", default-features = false, features = ["spin_no_st
 libc = { version = "0.2", features = ["extra_traits", "use_std"] }
 log = { version = "0.4", default-features = false, features = ["std"] }
 memchr = { version = "2" }
+mio = { version = "0.8", features = ["net", "os-ext"] }
 nom = { version = "7" }
 num-bigint = { version = "0.4" }
 num-integer = { version = "0.1", features = ["i128"] }
@@ -71,12 +73,15 @@ serde_json = { version = "1", features = ["alloc", "raw_value"] }
 sha2 = { version = "0.10", features = ["asm", "oid"] }
 signature = { version = "2", default-features = false, features = ["digest", "rand_core", "std"] }
 smallvec = { version = "1", default-features = false, features = ["const_new", "write"] }
+socket2 = { version = "0.5", default-features = false, features = ["all"] }
 spki = { version = "0.7", default-features = false, features = ["pem", "std"] }
 subtle = { version = "2" }
 sync_wrapper = { version = "0.1", default-features = false, features = ["futures"] }
-tikv-jemalloc-sys = { version = "0.5" }
+tikv-jemalloc-ctl = { version = "0.5", features = ["use_std"] }
+tikv-jemalloc-sys = { version = "0.5", features = ["profiling", "stats"] }
+tikv-jemallocator = { version = "0.5", features = ["profiling", "stats"] }
 time = { version = "0.3", features = ["macros", "serde-well-known"] }
-tokio = { version = "1", features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "test-util"] }
+tokio = { version = "1", features = ["fs", "io-std", "io-util", "macros", "net", "parking_lot", "process", "rt-multi-thread", "signal", "test-util"] }
 tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev = "20031d7a9ee1addeae6e0968e3899ae6bf01cee2", features = ["with-serde_json-1"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 tokio-util = { version = "0.7", features = ["codec", "compat", "io", "rt"] }
@@ -92,6 +97,7 @@ zstd-safe = { version = "7", default-features = false, features = ["arrays", "le
 zstd-sys = { version = "2", default-features = false, features = ["legacy", "std", "zdict_builder"] }
 
 [build-dependencies]
+actix-router = { version = "0.5", default-features = false, features = ["http", "unicode"] }
 ahash = { version = "0.8" }
 anyhow = { version = "1", features = ["backtrace"] }
 bytes = { version = "1", features = ["serde"] }
@@ -124,6 +130,8 @@ syn-dff4ba8e3ae991db = { package = "syn", version = "1", features = ["extra-trai
 syn-f595c2ba2a3f28df = { package = "syn", version = "2", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
 time-macros = { version = "0.2", default-features = false, features = ["formatting", "parsing", "serde"] }
 toml_edit = { version = "0.22", features = ["serde"] }
+tracing = { version = "0.1", features = ["log"] }
+tracing-core = { version = "0.1" }
 zstd = { version = "0.13" }
 zstd-safe = { version = "7", default-features = false, features = ["arrays", "legacy", "std", "zdict_builder"] }
 zstd-sys = { version = "2", default-features = false, features = ["legacy", "std", "zdict_builder"] }

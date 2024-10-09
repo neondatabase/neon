@@ -33,6 +33,7 @@ members = [
     "libs/postgres_ffi/wal_craft",
     "libs/vm_monitor",
     "libs/walproposer",
+    "libs/microchassis",
 ]
 
 [workspace.package]
@@ -258,11 +259,15 @@ tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", re
 [profile.release]
 # This is useful for profiling and, to some extent, debug.
 # Besides, debug info should not affect the performance.
+lto = false
+opt-level = 1
 debug = true
+strip = false
 
 # disable debug symbols for all packages except this one to decrease binaries size
 [profile.release.package."*"]
-debug = false
+debug = true
+strip = false
 
 [profile.release-line-debug]
 inherits = "release"
