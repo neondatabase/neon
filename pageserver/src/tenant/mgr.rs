@@ -1350,6 +1350,9 @@ impl TenantManager {
         }
     }
 
+    /// Deletes the tenant shard data from remote storage. If an unsharded tenant ID is given for a
+    /// sharded tenant, it will remove all shards for that tenant (i.e. all paths with the tenant ID
+    /// prefix) -- including stale shards.
     async fn delete_tenant_remote(
         &self,
         tenant_shard_id: TenantShardId,
@@ -1391,6 +1394,14 @@ impl TenantManager {
     /// A tenant is considered deleted once it is gone from remote storage.  It is the caller's
     /// responsibility to avoid trying to attach the tenant again or use it any way once deletion
     /// has started: this operation is not atomic, and must be retried until it succeeds.
+    ///
+    /// If an unsharded tenant ID is given for a sharded tenant, it will remove all tenant shards in
+    /// remote storage (by removing all paths with the tenant prefix), but not on local disk.
+    ///
+    /// TODO: consider also removing all local shards, or splitting out separate APIs for
+    /// tenant/shard deletion. This is not currently needed, as the storage controller first
+    /// detaches each shard (deleting local storage) and then deletes the entire tenant to clear all
+    /// of its remote storage, but this is somewhat brittle and non-obvious.
     pub(crate) async fn delete_tenant(
         &self,
         tenant_shard_id: TenantShardId,

@@ -20,6 +20,7 @@ from fixtures.pageserver.utils import (
 )
 from fixtures.remote_storage import RemoteStorageKind, s3_storage
 from fixtures.utils import run_pg_bench_small, wait_until
+from fixtures.workload import Workload
 from requests.exceptions import ReadTimeout
 from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
@@ -404,3 +405,55 @@ def test_tenant_delete_scrubber(pg_bin: PgBin, make_httpserver, neon_env_builder
         cloud_admin_api_token=cloud_admin_token,
     )
     assert healthy
+
+
+def test_tenant_delete_stale_shards(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
+    """
+    Deleting a tenant should also delete any stale (pre-split) shards from remote storage.
+    """
+    remote_storage_kind = s3_storage()
+    neon_env_builder.enable_pageserver_remote_storage(remote_storage_kind)
+
+    env = neon_env_builder.init_start()
+
+    # Create an unsharded tenant.
+    tenant_id, timeline_id = env.create_tenant()
+
+    # Write some data.
+    workload = Workload(env, tenant_id, timeline_id, branch_name="main")
+    workload.init()
+    workload.write_rows(256)
+    workload.validate()
+
+    assert_prefix_not_empty(
+        neon_env_builder.pageserver_remote_storage,
+        prefix="/".join(("tenants", str(tenant_id))),
+    )
+
+    # Upload a heatmap as well.
+    env.pageserver.http_client().tenant_heatmap_upload(tenant_id)
+
+    # Split off a few shards, in two rounds.
+    env.storage_controller.tenant_shard_split(tenant_id, shard_count=4)
+    env.storage_controller.tenant_shard_split(tenant_id, shard_count=16)
+
+    # Delete the tenant. This should also delete data for the unsharded and count=4 parents.
+    env.storage_controller.pageserver_api().tenant_delete(tenant_id=tenant_id)
+
+    assert_prefix_empty(
+        neon_env_builder.pageserver_remote_storage,
+        prefix="/".join(("tenants", str(tenant_id))),
+    )
+
+    dirs = list(env.pageserver.tenant_dir(None).glob(f"{tenant_id}*"))
+    assert dirs == [], f"found tenant directories: {dirs}"
+
+    # The initial tenant should still be there.
+    assert_prefix_not_empty(
+        neon_env_builder.pageserver_remote_storage,
+        prefix="/".join(("tenants", str(env.initial_tenant))),
+    )
+    dirs = list(env.pageserver.tenant_dir(None).glob(f"{env.initial_tenant}*"))
+    assert dirs != [], "missing initial tenant directory"
+
+    env.stop()

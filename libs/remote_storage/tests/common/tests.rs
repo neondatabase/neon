@@ -199,6 +199,138 @@ async fn list_no_delimiter_works(
     Ok(())
 }
 
+/// Tests that giving a partial prefix returns all matches (e.g. "/foo" yields "/foobar/baz"),
+/// but only with NoDelimiter.
+#[test_context(MaybeEnabledStorageWithSimpleTestBlobs)]
+#[tokio::test]
+async fn list_partial_prefix(
+    ctx: &mut MaybeEnabledStorageWithSimpleTestBlobs,
+) -> anyhow::Result<()> {
+    let ctx = match ctx {
+        MaybeEnabledStorageWithSimpleTestBlobs::Enabled(ctx) => ctx,
+        MaybeEnabledStorageWithSimpleTestBlobs::Disabled => return Ok(()),
+        MaybeEnabledStorageWithSimpleTestBlobs::UploadsFailed(e, _) => {
+            anyhow::bail!("S3 init failed: {e:?}")
+        }
+    };
+
+    let cancel = CancellationToken::new();
+    let test_client = Arc::clone(&ctx.enabled.client);
+
+    // Prefix "fold" should match all "folder{i}" directories with NoDelimiter.
+    let objects: HashSet<_> = test_client
+        .list(
+            Some(&RemotePath::from_string("fold")?),
+            ListingMode::NoDelimiter,
+            None,
+            &cancel,
+        )
+        .await?
+        .keys
+        .into_iter()
+        .map(|o| o.key)
+        .collect();
+    assert_eq!(&objects, &ctx.remote_blobs);
+
+    // Prefix "fold" matches nothing with WithDelimiter.
+    let objects: HashSet<_> = test_client
+        .list(
+            Some(&RemotePath::from_string("fold")?),
+            ListingMode::WithDelimiter,
+            None,
+            &cancel,
+        )
+        .await?
+        .keys
+        .into_iter()
+        .map(|o| o.key)
+        .collect();
+    assert!(objects.is_empty());
+
+    // Prefix "" matches everything.
+    let objects: HashSet<_> = test_client
+        .list(
+            Some(&RemotePath::from_string("")?),
+            ListingMode::NoDelimiter,
+            None,
+            &cancel,
+        )
+        .await?
+        .keys
+        .into_iter()
+        .map(|o| o.key)
+        .collect();
+    assert_eq!(&objects, &ctx.remote_blobs);
+
+    // Prefix "" matches nothing with WithDelimiter.
+    let objects: HashSet<_> = test_client
+        .list(
+            Some(&RemotePath::from_string("")?),
+            ListingMode::WithDelimiter,
+            None,
+            &cancel,
+        )
+        .await?
+        .keys
+        .into_iter()
+        .map(|o| o.key)
+        .collect();
+    assert!(objects.is_empty());
+
+    // Prefix "foo" matches nothing.
+    let objects: HashSet<_> = test_client
+        .list(
+            Some(&RemotePath::from_string("foo")?),
+            ListingMode::NoDelimiter,
+            None,
+            &cancel,
+        )
+        .await?
+        .keys
+        .into_iter()
+        .map(|o| o.key)
+        .collect();
+    assert!(objects.is_empty());
+
+    // Prefix "folder2/blob" matches.
+    let objects: HashSet<_> = test_client
+        .list(
+            Some(&RemotePath::from_string("folder2/blob")?),
+            ListingMode::NoDelimiter,
+            None,
+            &cancel,
+        )
+        .await?
+        .keys
+        .into_iter()
+        .map(|o| o.key)
+        .collect();
+    let expect: HashSet<_> = ctx
+        .remote_blobs
+        .iter()
+        .filter(|o| o.get_path().starts_with("folder2"))
+        .cloned()
+        .collect();
+    assert_eq!(&objects, &expect);
+
+    // Prefix "folder2/foo" matches nothing.
+    let objects: HashSet<_> = test_client
+        .list(
+            Some(&RemotePath::from_string("folder2/foo")?),
+            ListingMode::NoDelimiter,
+            None,
+            &cancel,
+        )
+        .await?
+        .keys
+        .into_iter()
+        .map(|o| o.key)
+        .collect();
+    assert!(objects.is_empty());
+
+    Ok(())
+}
+
 #[test_context(MaybeEnabledStorage)]
 #[tokio::test]
 async fn delete_non_exising_works(ctx: &mut MaybeEnabledStorage) -> anyhow::Result<()> {

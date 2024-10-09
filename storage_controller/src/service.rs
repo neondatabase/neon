@@ -2861,17 +2861,12 @@ impl Service {
         let _tenant_lock =
             trace_exclusive_lock(&self.tenant_op_locks, tenant_id, TenantOperations::Delete).await;
 
-        // Detach all shards
-        let (detach_waiters, shard_ids, node) = {
-            let mut shard_ids = Vec::new();
+        // Detach all shards. This also deletes local pageserver shard data.
+        let (detach_waiters, node) = {
             let mut detach_waiters = Vec::new();
             let mut locked = self.inner.write().unwrap();
             let (nodes, tenants, scheduler) = locked.parts_mut();
-            for (tenant_shard_id, shard) in
-                tenants.range_mut(TenantShardId::tenant_range(tenant_id))
-            {
-                shard_ids.push(*tenant_shard_id);
-
+            for (_, shard) in tenants.range_mut(TenantShardId::tenant_range(tenant_id)) {
                 // Update the tenant's intent to remove all attachments
                 shard.policy = PlacementPolicy::Detached;
                 shard
@@ -2891,7 +2886,7 @@ impl Service {
             let node = nodes
                 .get(&node_id)
                 .expect("Pageservers may not be deleted while lock is active");
-            (detach_waiters, shard_ids, node.clone())
+            (detach_waiters, node.clone())
         };
 
         // This reconcile wait can fail in a few ways:
@@ -2906,38 +2901,34 @@ impl Service {
         self.await_waiters(detach_waiters, RECONCILE_TIMEOUT)
             .await?;
 
-        let locations = shard_ids
-            .into_iter()
-            .map(|s| (s, node.clone()))
-            .collect::<Vec<_>>();
-        let results = self.tenant_for_shards_api(
-            locations,
-            |tenant_shard_id, client| async move { client.tenant_delete(tenant_shard_id).await },
-            1,
-            3,
-            RECONCILE_TIMEOUT,
-            &self.cancel,
-        )
-        .await;
-        for result in results {
-            match result {
-                Ok(StatusCode::ACCEPTED) => {
-                    // This should never happen: we waited for detaches to finish above
-                    return Err(ApiError::InternalServerError(anyhow::anyhow!(
-                        "Unexpectedly still attached on {}",
-                        node
-                    )));
-                }
-                Ok(_) => {}
-                Err(mgmt_api::Error::Cancelled) => {
-                    return Err(ApiError::ShuttingDown);
-                }
-                Err(e) => {
-                    // This is unexpected: remote deletion should be infallible, unless the object store
-                    // at large is unavailable.
-                    tracing::error!("Error deleting via node {}: {e}", node);
-                    return Err(ApiError::InternalServerError(anyhow::anyhow!(e)));
-                }
+        // Delete the entire tenant (all shards) from remote storage via a random pageserver.
+        // Passing an unsharded tenant ID will cause the pageserver to remove all remote paths with
+        // the tenant ID prefix, including all shards (even possibly stale ones).
+        match node
+            .with_client_retries(
+                |client| async move {
+                    client
+                        .tenant_delete(TenantShardId::unsharded(tenant_id))
+                        .await
+                },
+                &self.config.jwt_token,
+                1,
+                3,
+                RECONCILE_TIMEOUT,
+                &self.cancel,
+            )
+            .await
+            .unwrap_or(Err(mgmt_api::Error::Cancelled))
+        {
+            Ok(_) => {}
+            Err(mgmt_api::Error::Cancelled) => {
+                return Err(ApiError::ShuttingDown);
+            }
+            Err(e) => {
+                // This is unexpected: remote deletion should be infallible, unless the object store
+                // at large is unavailable.
+                tracing::error!("Error deleting via node {node}: {e}");
+                return Err(ApiError::InternalServerError(anyhow::anyhow!(e)));
             }
         }
 
