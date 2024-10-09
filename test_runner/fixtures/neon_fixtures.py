@@ -1465,7 +1465,7 @@ def neon_simple_env(
     pageserver_virtual_file_io_engine: str,
     pageserver_aux_file_policy: Optional[AuxFileStore],
     pageserver_default_tenant_config_compaction_algorithm: Optional[dict[str, Any]],
-    pageserver_io_buffer_alignment: Optional[int],
+    pageserver_virtual_file_io_mode: Optional[str],
 ) -> Iterator[NeonEnv]:
     """
     Simple Neon environment, with no authentication and no safekeepers.
@@ -1498,7 +1498,7 @@ def neon_simple_env(
         pageserver_virtual_file_io_engine=pageserver_virtual_file_io_engine,
         pageserver_aux_file_policy=pageserver_aux_file_policy,
         pageserver_default_tenant_config_compaction_algorithm=pageserver_default_tenant_config_compaction_algorithm,
-        pageserver_io_buffer_alignment=pageserver_io_buffer_alignment,
+        pageserver_virtual_file_io_mode=pageserver_virtual_file_io_mode,
         combination=combination,
     ) as builder:
         env = builder.init_start()
