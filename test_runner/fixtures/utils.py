@@ -9,7 +9,6 @@ import subprocess
 import tarfile
 import threading
 import time
-from collections import OrderedDict
 from collections.abc import Iterable
 from hashlib import sha256
 from pathlib import Path
@@ -18,7 +17,6 @@ from urllib.parse import urlencode
 
 import allure
 import zstandard
-from allpairspy import AllPairs
 from psycopg2.extensions import cursor
 
 from fixtures.common_types import TimelineId
@@ -45,6 +43,26 @@ COMPONENT_BINARIES = {
     "compute": ["compute_ctl"],
     "safekeeper": ["safekeeper"],
     "pageserver": ["pageserver", "pagectl"],
+}
+
+VERSION_COMBINATIONS = {
+    "argnames": "combination",
+    "argvalues": [
+    {"storage_controller": 'new', "storage_broker":'new', "compute":'new', "safekeeper":'new', "pageserver":'new'},
+    { "storage_controller":'old', "storage_broker":'old', "compute":'old', "safekeeper":'old', "pageserver":'new'},
+    { "storage_controller":'old', "storage_broker":'new', "compute":'old', "safekeeper":'new', "pageserver":'old'},
+    { "storage_controller":'new', "storage_broker":'old', "compute":'new', "safekeeper":'old', "pageserver":'old'},
+    { "storage_controller":'new', "storage_broker":'old', "compute":'old', "safekeeper":'new', "pageserver":'old'},
+    { "storage_controller":'old', "storage_broker":'new', "compute":'new', "safekeeper":'old', "pageserver":'old'}
+],
+    "ids": [
+        "combination_nnnnn",
+        "combination_oooon",
+        "combination_onono",
+        "combination_nonoo",
+        "combination_noono",
+        "combination_onnoo",
+    ]
 }
 
 
@@ -614,34 +632,3 @@ def human_bytes(amt: float) -> str:
         amt = amt / 1024
 
     raise RuntimeError("unreachable")
-
-
-def all_pairs_component_versions():
-    """
-    This function generates all the pairs of old or new versions of the Neon components
-    E.g. Pairs(storage_controller='old', storage_broker='new', compute='new', safekeeper='old', pageserver='old')
-    then it returns a dictionary with argnames, argvalues and ids
-    ids is a sequence of letters where n means the new version of the component and o means the old version
-    """
-    argvalues, ids = [], []
-    all_new = False
-    for pair in AllPairs(
-        OrderedDict({component: ["new", "old"] for component in COMPONENT_BINARIES.keys()})
-    ):
-        have_old = have_new = False
-        argvalues.append(pair)
-        cur_id = []
-        for component in COMPONENT_BINARIES.keys():
-            if getattr(pair, component) == "new":
-                cur_id.append("n")
-                have_new = True
-            else:
-                cur_id.append("o")
-                have_old = True
-        ids.append("combination_" + "".join(cur_id))
-        all_new = all_new or (have_new and not have_old)
-        assert (
-            have_new
-        ), f"the wrong combination {pair} is generated, we don't expect old versions only"
-    assert all_new, f"the combination of all-new versions is not generated, please check all-pairs setup. {argvalues}"
-    return {"argnames": "combination", "argvalues": argvalues, "ids": ids}

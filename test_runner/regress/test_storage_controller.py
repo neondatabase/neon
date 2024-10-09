@@ -10,6 +10,8 @@ from enum import Enum
 from typing import TYPE_CHECKING
 
 import pytest
+
+import fixtures.utils
 from fixtures.auth_tokens import TokenScope
 from fixtures.common_types import TenantId, TenantShardId, TimelineId
 from fixtures.compute_reconfigure import ComputeReconfigure
@@ -39,7 +41,6 @@ from fixtures.port_distributor import PortDistributor
 from fixtures.remote_storage import RemoteStorageKind, s3_storage
 from fixtures.storage_controller_proxy import StorageControllerProxy
 from fixtures.utils import (
-    all_pairs_component_versions,
     run_pg_bench_small,
     subprocess_capture,
     wait_until,
@@ -65,7 +66,7 @@ def get_node_shard_counts(env: NeonEnv, tenant_ids):
     return counts
 
 
-@pytest.mark.parametrize(**all_pairs_component_versions())
+@pytest.mark.parametrize(**fixtures.utils.VERSION_COMBINATIONS)
 def test_storage_controller_smoke(neon_env_builder: NeonEnvBuilder, combination):
     """
     Test the basic lifecycle of a storage controller:

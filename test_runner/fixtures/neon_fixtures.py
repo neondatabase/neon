@@ -700,13 +700,13 @@ class NeonEnvBuilder:
         for component, paths in COMPONENT_BINARIES.items():
             directory = (
                 self.neon_binpath
-                if getattr(self.version_combination, component) == "new"
+                if self.version_combination[component] == "new"
                 else self.compatibility_neon_binpath
             )
             for filename in paths:
                 destination = self.mixdir / filename
-                destination.symlink_to(directory / filename)
-        if not self.version_combination.compute:
+                destination.hardlink_to(directory / filename)
+        if self.version_combination["compute"] == 'old':
             self.pg_distrib_dir = self.compatibility_pg_distrib_dir
         self.neon_binpath = self.mixdir
 

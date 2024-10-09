@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING
 
 import pytest
 import toml
+
+import fixtures.utils
 from fixtures.common_types import TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
@@ -25,7 +27,6 @@ from fixtures.pageserver.utils import (
 )
 from fixtures.pg_version import PgVersion
 from fixtures.remote_storage import RemoteStorageKind, S3Storage, s3_storage
-from fixtures.utils import all_pairs_component_versions
 from fixtures.workload import Workload
 
 if TYPE_CHECKING:
@@ -587,7 +588,7 @@ def test_historic_storage_formats(
 
 @check_ondisk_data_compatibility_if_enabled
 @pytest.mark.xdist_group("compatibility")
-@pytest.mark.parametrize(**all_pairs_component_versions())
+@pytest.mark.parametrize(**fixtures.utils.VERSION_COMBINATIONS)
 def test_versions_mismatch(
     neon_env_builder: NeonEnvBuilder, test_output_dir: Path, pg_version: PgVersion, combination
 ):
