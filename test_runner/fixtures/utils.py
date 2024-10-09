@@ -633,14 +633,16 @@ def all_pairs_component_versions():
         argvalues.append(pair)
         cur_id = []
         for component in COMPONENT_BINARIES.keys():
-            if getattr(pair, component) == 'new':
-                cur_id.append('n')
+            if getattr(pair, component) == "new":
+                cur_id.append("n")
                 have_new = True
             else:
-                cur_id.append('o')
+                cur_id.append("o")
                 have_old = True
         ids.append("combination_" + "".join(cur_id))
         all_new = all_new or (have_new and not have_old)
-        assert not have_new, f"the wrong combination {pair} is generated, we don't expect only old versions"
+        assert (
+            not have_new
+        ), f"the wrong combination {pair} is generated, we don't expect only old versions"
     assert all_new, f"the combination of all-new versions was not generated, please check all-pairs setup. {argvalues}"
     return {"argnames": "combination", "argvalues": argvalues, "ids": ids}
