@@ -1,5 +1,6 @@
 //! Structs representing the JSON formats used in the compute_ctl's HTTP API.
 
+use std::collections::HashSet;
 use std::fmt::Display;
 
 use chrono::{DateTime, Utc};
@@ -154,4 +155,16 @@ pub enum ControlPlaneComputeStatus {
     // Compute is attached to some timeline / endpoint and
     // should be able to start with provided spec.
     Attached,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct InstalledExtension {
+    pub extname: String,
+    pub versions: HashSet<String>,
+    pub n_databases: u32, // Number of databases using this extension
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct InstalledExtensions {
+    pub extensions: Vec<InstalledExtension>,
 }
