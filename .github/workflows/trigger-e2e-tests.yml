@@ -112,7 +112,7 @@ jobs:
                 # This isn't exhaustive, just the paths that are most directly compute-related.
                 # For example, compute_ctl also depends on libs/utils, but we don't trigger
                 # an e2e run on that.
-                vendor/*|pgxn/*|compute_tools/*|libs/vm_monitor/*|compute/Dockerfile.compute-node)
+                vendor/*|pgxn/*|compute_tools/*|compute/Dockerfile.compute-node)
                   platforms=$(echo "${platforms}" | jq --compact-output '. += ["k8s-neonvm"] | unique')
                   ;;
                 *)

@@ -21,7 +21,7 @@
 //!   last activity requests.
 //!
 //! If `AUTOSCALING` environment variable is set, `compute_ctl` will start the
-//! `vm-monitor` located in [`neon/libs/vm_monitor`]. For VM compute nodes,
+//! `vm-monitor` located in [`neon/compute_tools/vm_monitor`]. For VM compute nodes,
 //! `vm-monitor` communicates with the VM autoscaling system. It coordinates
 //! downscaling and requests immediate upscaling under resource pressure.
 //!

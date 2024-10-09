@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "compute_tools",
+    "compute_tools/vm_monitor",
     "control_plane",
     "control_plane/storcon_cli",
     "pageserver",
@@ -31,7 +32,6 @@ members = [
     "libs/remote_storage",
     "libs/tracing-utils",
     "libs/postgres_ffi/wal_craft",
-    "libs/vm_monitor",
     "libs/walproposer",
 ]
 
@@ -235,7 +235,7 @@ storage_controller_client = { path = "./storage_controller/client" }
 tenant_size_model = { version = "0.1", path = "./libs/tenant_size_model/" }
 tracing-utils = { version = "0.1", path = "./libs/tracing-utils/" }
 utils = { version = "0.1", path = "./libs/utils/" }
-vm_monitor = { version = "0.1", path = "./libs/vm_monitor/" }
+vm_monitor = { version = "0.1", path = "./compute_tools/vm_monitor/" }
 walproposer = { version = "0.1", path = "./libs/walproposer/" }
 
 ## Common library dependency
