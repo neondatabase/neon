@@ -164,7 +164,6 @@ RUN case "${PG_VERSION}" in \
     make -j $(getconf _NPROCESSORS_ONLN) install && \
     cd extensions/postgis && \
     make clean && \
-    make -j $(getconf _NPROCESSORS_ONLN) && \
     make -j $(getconf _NPROCESSORS_ONLN) install && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/postgis.control && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/postgis_raster.control && \
