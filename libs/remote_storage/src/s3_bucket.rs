@@ -804,34 +804,7 @@ impl RemoteStorage for S3Bucket {
                 bucket: self.bucket_name.clone(),
                 key: self.relative_path_to_s3_object(from),
                 etag: opts.etag.as_ref().map(|e| e.to_string()),
-                range: None,
-            },
-            cancel,
-        )
-        .await
-    }
-
-    async fn download_byte_range(
-        &self,
-        from: &RemotePath,
-        start_inclusive: u64,
-        end_exclusive: Option<u64>,
-        cancel: &CancellationToken,
-    ) -> Result<Download, DownloadError> {
-        // S3 accepts ranges as https://www.w3.org/Protocols/rfc2616/rfc2616-sec14.html#sec14.35
-        // and needs both ends to be exclusive
-        let end_inclusive = end_exclusive.map(|end| end.saturating_sub(1));
-        let range = Some(match end_inclusive {
-            Some(end_inclusive) => format!("bytes={start_inclusive}-{end_inclusive}"),
-            None => format!("bytes={start_inclusive}-"),
-        });
-
-        self.download_object(
-            GetObjectRequest {
-                bucket: self.bucket_name.clone(),
-                key: self.relative_path_to_s3_object(from),
-                etag: None,
-                range,
+                range: opts.byte_range_header(),
             },
             cancel,
         )
