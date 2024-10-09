@@ -643,6 +643,6 @@ def all_pairs_component_versions():
         all_new = all_new or (have_new and not have_old)
         assert (
             not have_new
-        ), f"the wrong combination {pair} is generated, we don't expect only old versions"
-    assert all_new, f"the combination of all-new versions was not generated, please check all-pairs setup. {argvalues}"
+        ), f"the wrong combination {pair} is generated, we don't expect old versions only"
+    assert all_new, f"the combination of all-new versions is not generated, please check all-pairs setup. {argvalues}"
     return {"argnames": "combination", "argvalues": argvalues, "ids": ids}
