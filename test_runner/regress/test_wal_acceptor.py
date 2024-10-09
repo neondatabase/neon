@@ -2422,7 +2422,7 @@ def test_s3_eviction(
     wait_until(60, 0.5, all_evicted)
     # restart should preserve the metric value
     sk.stop().start()
-    assert sk.http_client().get_metric_value("safekeeper_evicted_timelines") == n_timelines
+    wait_until(60, 0.5, all_evicted)
     # and endpoint start should reduce is
     endpoints[0].start()
 

@@ -42,9 +42,7 @@ use crate::wal_backup::{self, remote_timeline_path};
 use crate::wal_backup_partial::PartialRemoteSegment;
 use crate::{control_file, safekeeper::UNKNOWN_SERVER_VERSION};
 
-use crate::metrics::{
-    FullTimelineInfo, WalStorageMetrics, MISC_OPERATION_SECONDS, NUM_EVICTED_TIMELINES,
-};
+use crate::metrics::{FullTimelineInfo, WalStorageMetrics, MISC_OPERATION_SECONDS};
 use crate::wal_storage::{Storage as wal_storage_iface, WalReader};
 use crate::{debug_dump, timeline_manager, wal_storage};
 use crate::{GlobalTimelines, SafeKeeperConf};
@@ -184,10 +182,6 @@ pub enum StateSK {
 }
 
 impl StateSK {
-    fn is_evicted(&self) -> bool {
-        return matches!(self, StateSK::Offloaded(_));
-    }
-
     pub fn flush_lsn(&self) -> Lsn {
         match self {
             StateSK::Loaded(sk) => sk.wal_store.flush_lsn(),
@@ -649,16 +643,11 @@ impl Timeline {
     /// Bootstrap new or existing timeline starting background tasks.
     pub fn bootstrap(
         self: &Arc<Timeline>,
-        shared_state: &mut WriteGuardSharedState<'_>,
+        _shared_state: &mut WriteGuardSharedState<'_>,
         conf: &SafeKeeperConf,
         broker_active_set: Arc<TimelinesSet>,
         partial_backup_rate_limiter: RateLimiter,
     ) {
-        // If timeline is evicted, reflect that in the metric.
-        if shared_state.sk.is_evicted() {
-            NUM_EVICTED_TIMELINES.inc();
-        }
-
         let (tx, rx) = self.manager_ctl.bootstrap_manager();
 
         // Start manager task which will monitor timeline state and update
@@ -696,13 +685,6 @@ impl Timeline {
             wal_backup::delete_timeline(&self.ttid).await?;
         }
         let dir_existed = delete_dir(&self.timeline_dir).await?;
-        // Do this as the last step; otherwise, retries might do dec multiple
-        // times. Timeline will be put to tombstones immediately after the call
-        // and further delete attempts ignored; this doesn't guarantee absense
-        // of multiple deletion runs in 100%, but good enough.
-        if shared_state.sk.is_evicted() {
-            NUM_EVICTED_TIMELINES.dec();
-        }
         Ok(dir_existed)
     }
 
