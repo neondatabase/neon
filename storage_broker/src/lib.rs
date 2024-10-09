@@ -26,7 +26,7 @@ pub use tonic::Streaming;
 
 pub use hyper::Uri;
 
-pub const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:50051";
+pub const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:30051";
 pub const DEFAULT_ENDPOINT: &str = const_format::formatcp!("http://{DEFAULT_LISTEN_ADDR}");
 
 pub const DEFAULT_KEEPALIVE_INTERVAL: &str = "5000 ms";

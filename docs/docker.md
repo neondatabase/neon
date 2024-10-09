@@ -47,7 +47,7 @@ Creating docker-compose_storage_broker_1       ... done
 
 2. connect compute node
 ```
-$ psql postgresql://cloud_admin:cloud_admin@localhost:55433/postgres
+$ psql postgresql://cloud_admin:cloud_admin@localhost:30433/postgres
 psql (16.3)
 Type "help" for help.
 
@@ -68,7 +68,7 @@ postgres=# select * from t;
 # check the container name you want to see
 $ docker ps
 CONTAINER ID   IMAGE                                              COMMAND                  CREATED         STATUS         PORTS                                                                                      NAMES
-3582f6d76227   docker-compose_compute                             "/shell/compute.sh"      2 minutes ago   Up 2 minutes   0.0.0.0:3080->3080/tcp, :::3080->3080/tcp, 0.0.0.0:55433->55433/tcp, :::55433->55433/tcp   docker-compose_compute_1
+3582f6d76227   docker-compose_compute                             "/shell/compute.sh"      2 minutes ago   Up 2 minutes   0.0.0.0:3080->3080/tcp, :::3080->3080/tcp, 0.0.0.0:30433->30433/tcp, :::30433->30433/tcp   docker-compose_compute_1
 (...omit...)
 
 $ docker logs -f docker-compose_compute_1

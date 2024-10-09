@@ -145,7 +145,7 @@ Initializing pageserver node 1 at '127.0.0.1:64000' in ".neon"
 
 # start pageserver, safekeeper, and broker for their intercommunication
 > cargo neon start
-Starting neon broker at 127.0.0.1:50051.
+Starting neon broker at 127.0.0.1:30051.
 storage_broker started, pid: 2918372
 Starting pageserver node 1 at '127.0.0.1:64000' in ".neon".
 pageserver started, pid: 2918386

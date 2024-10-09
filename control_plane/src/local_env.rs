@@ -141,7 +141,7 @@ pub struct NeonLocalInitConf {
 #[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Debug)]
 #[serde(default)]
 pub struct NeonBroker {
-    /// Broker listen address for storage nodes coordination, e.g. '127.0.0.1:50051'.
+    /// Broker listen address for storage nodes coordination, e.g. '127.0.0.1:30051'.
     pub listen_addr: SocketAddr,
 }
 
