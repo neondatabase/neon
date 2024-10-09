@@ -5,13 +5,13 @@ import hashlib
 import json
 import os
 import re
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Union
 
 import boto3
 import toml
+from moto.server import ThreadedMotoServer
 from mypy_boto3_s3 import S3Client
 
 from fixtures.common_types import TenantId, TenantShardId, TimelineId
@@ -43,7 +43,6 @@ class RemoteStorageUser(str, enum.Enum):
 class MockS3Server:
     """
     Starts a mock S3 server for testing on a port given, errors if the server fails to start or exits prematurely.
-    Relies that `poetry` and `moto` server are installed, since it's the way the tests are run.
 
     Also provides a set of methods to derive the connection properties from and the method to kill the underlying server.
     """
@@ -53,22 +52,8 @@ class MockS3Server:
         port: int,
     ):
         self.port = port
-
-        # XXX: do not use `shell=True` or add `exec ` to the command here otherwise.
-        # We use `self.subprocess.kill()` to shut down the server, which would not "just" work in Linux
-        # if a process is started from the shell process.
-        self.subprocess = subprocess.Popen(["poetry", "run", "moto_server", f"-p{port}"])
-        error = None
-        try:
-            return_code = self.subprocess.poll()
-            if return_code is not None:
-                error = f"expected mock s3 server to run but it exited with code {return_code}. stdout: '{self.subprocess.stdout}', stderr: '{self.subprocess.stderr}'"
-        except Exception as e:
-            error = f"expected mock s3 server to start but it failed with exception: {e}. stdout: '{self.subprocess.stdout}', stderr: '{self.subprocess.stderr}'"
-        if error is not None:
-            log.error(error)
-            self.kill()
-            raise RuntimeError("failed to start s3 mock server")
+        self.server = ThreadedMotoServer(port=port)
+        self.server.start()
 
     def endpoint(self) -> str:
         return f"http://127.0.0.1:{self.port}"
@@ -83,7 +68,7 @@ class MockS3Server:
         return "test"
 
     def kill(self):
-        self.subprocess.kill()
+        self.server.stop()
 
 
 @dataclass
