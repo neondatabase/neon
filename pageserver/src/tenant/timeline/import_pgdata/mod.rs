@@ -2,8 +2,10 @@
 //!
 //! TODO:
 //! - asserts / unwraps need to be replaced with errors
-//! - don't download files that we won't read
-//! - download to temporary file instead of in-memory buffer
+//! - prevent OOMs
+//!     - limit all in-memory buffers / download to disk and read from there
+//!     - limit task concurrency
+//! - for all other files, either download to disk or enforce size limit
 //! - version-specific CheckPointData (=> pgv abstraction, already exists for regular walingest)
 //! - Tenant::cancel nor Timeline::cancel are respected => shutdown not guaranteed
 
@@ -23,13 +25,16 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info_span, instrument, Instrument};
 
-use crate::pgdatadir_mapping::{SlruSegmentDirectory, TwoPhaseDirectory};
 use crate::{
     assert_u64_eq_usize::U64IsUsize,
     context::{DownloadBehavior, RequestContext},
     pgdatadir_mapping::{DbDirectory, RelDirectory},
     task_mgr::TaskKind,
     tenant::storage_layer::ImageLayerWriter,
+};
+use crate::{
+    assert_u64_eq_usize::UsizeIsU64,
+    pgdatadir_mapping::{SlruSegmentDirectory, TwoPhaseDirectory},
 };
 
 use pageserver_api::key::Key;
@@ -635,29 +640,52 @@ impl ImportTask for ImportRelBlocksTask {
         ctx: &RequestContext,
     ) -> anyhow::Result<usize> {
         debug!("Importing relation file");
-        let buf = self.storage.get(&self.path).await?;
 
         let (rel_tag, start_blk) = self.key_range.start.to_rel_block()?;
-        let (_rel_tag, end_blk) = self.key_range.end.to_rel_block()?;
-        let mut blknum = start_blk; /* XXX below code assumes start_blk is 0, that's probably wrong/ */
+        let (rel_tag_end, end_blk) = self.key_range.end.to_rel_block()?;
+        assert_eq!(rel_tag, rel_tag_end);
+
+        let ranges = (start_blk..end_blk)
+            .enumerate()
+            .filter_map(|(i, blknum)| {
+                let key = rel_block_to_key(rel_tag, blknum);
+                if self.shard_identity.is_key_disposable(&key) {
+                    return None;
+                }
+                let file_offset = i.checked_mul(8192).unwrap();
+                Some((
+                    vec![key],
+                    file_offset,
+                    file_offset.checked_add(8192).unwrap(),
+                ))
+            })
+            .coalesce(|(mut acc, acc_start, acc_end), (mut key, start, end)| {
+                assert_eq!(key.len(), 1);
+                assert!(!acc.is_empty());
+                assert!(acc_end > acc_start);
+                if acc_end == start /* TODO additional max range check here, to limit memory consumption per task to X */ {
+                    acc.push(key.pop().unwrap());
+                    Ok((acc, acc_start, end))
+                } else {
+                    Err(((acc, acc_start, acc_end), (key, start, end)))
+                }
+            });
+
         let mut nimages = 0;
-        let mut file_offset: u64 = 0;
-        while blknum < end_blk {
-            let key = rel_block_to_key(rel_tag, blknum);
-            if self.shard_identity.is_key_disposable(&key) {
-                // Skip blocks that are not in the shard
-                debug!(%key, "skipping");
-            } else {
-                debug!(%key, "importing");
-                let buf = &buf[file_offset as usize..(file_offset + 8192) as usize];
-                layer_writer
-                    .put_image(key, Bytes::copy_from_slice(buf), ctx)
-                    .await?;
+        for (keys, range_start, range_end) in ranges {
+            let range_buf = self
+                .storage
+                .get_range(&self.path, range_start.into_u64(), range_end.into_u64())
+                .await?;
+            let mut buf = Bytes::from(range_buf);
+            // TODO: batched writes
+            for key in keys {
+                let image = buf.split_to(8192);
+                layer_writer.put_image(key, image, ctx).await?;
                 nimages += 1;
             }
-            blknum += 1;
-            file_offset += 8192;
         }
+
         Ok(nimages)
     }
 }
@@ -926,6 +954,40 @@ impl RemoteStorageWrapper {
                 Ok(Bytes::from(buf))
             },
             &format!("download {path:?}"),
+            &self.cancel,
+        )
+        .await;
+        debug!(len = res.as_ref().ok().map(|buf| buf.len()), "done");
+        res
+    }
+
+    #[instrument(level = tracing::Level::DEBUG, skip_all, fields(%path))]
+    async fn get_range(
+        &self,
+        path: &RemotePath,
+        start_inclusive: u64,
+        end_exclusive: u64,
+    ) -> Result<Vec<u8>, DownloadError> {
+        let len = end_exclusive
+            .checked_sub(start_inclusive)
+            .unwrap()
+            .into_usize();
+        let res = crate::tenant::remote_timeline_client::download::download_retry_forever(
+            || async {
+                let Download {
+                    download_stream, ..
+                } = self
+                    .storage
+                    .download_byte_range(path, start_inclusive, Some(end_exclusive), &self.cancel)
+                    .await?;
+                let mut reader = tokio_util::io::StreamReader::new(download_stream);
+
+                // XXX optimize this, can we get the capacity hint from somewhere?
+                let mut buf = Vec::with_capacity(len);
+                tokio::io::copy_buf(&mut reader, &mut buf).await?;
+                Ok(buf)
+            },
+            &format!("download range len=0x{len:x} [0x{start_inclusive:x},0x{end_exclusive:x}) from {path:?}"),
             &self.cancel,
         )
         .await;
