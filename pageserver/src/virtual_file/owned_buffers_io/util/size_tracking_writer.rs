@@ -1,6 +1,10 @@
 use crate::{
     context::RequestContext,
-    virtual_file::owned_buffers_io::{io_buf_ext::FullSlice, write::OwnedAsyncWriter},
+    virtual_file::owned_buffers_io::{
+        io_buf_aligned::IoBufAligned,
+        io_buf_ext::FullSlice,
+        write::{AlignedOwnedAsyncWriter, OwnedAsyncWriter},
+    },
 };
 use tokio_epoll_uring::IoBuf;
 
@@ -44,6 +48,22 @@ where
         ctx: &RequestContext,
     ) -> std::io::Result<(usize, FullSlice<Buf>)> {
         let (nwritten, buf) = self.dst.write_all(buf, ctx).await?;
+        self.bytes_amount += u64::try_from(nwritten).unwrap();
+        Ok((nwritten, buf))
+    }
+}
+
+impl<W> AlignedOwnedAsyncWriter for Writer<W>
+where
+    W: AlignedOwnedAsyncWriter,
+{
+    #[inline(always)]
+    async fn write_all_aligned<Buf: IoBufAligned + Send>(
+        &mut self,
+        buf: FullSlice<Buf>,
+        ctx: &RequestContext,
+    ) -> std::io::Result<(usize, FullSlice<Buf>)> {
+        let (nwritten, buf) = self.dst.write_all_aligned(buf, ctx).await?;
         self.bytes_amount += u64::try_from(nwritten).unwrap();
         Ok((nwritten, buf))
     }

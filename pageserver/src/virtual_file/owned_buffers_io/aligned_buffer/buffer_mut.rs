@@ -1,4 +1,7 @@
-use std::ops::{Deref, DerefMut};
+use std::{
+    ops::{Deref, DerefMut},
+    ptr,
+};
 
 use super::{
     alignment::{Alignment, ConstAlign},
@@ -126,6 +129,28 @@ impl<A: Alignment> AlignedBufferMut<A> {
     pub fn freeze(self) -> AlignedBuffer<A> {
         let len = self.len();
         AlignedBuffer::from_raw(self.raw, 0..len)
+    }
+    /// Appends given bytes to this buffer.
+    ///
+    /// If this buffer does not have enough capacity, it is resized first.
+    #[inline]
+    pub fn extend_from_slice(&mut self, extend: &[u8]) {
+        let cnt = extend.len();
+        self.reserve(cnt);
+
+        // SAFETY: memcpy is performed on allocated memory.
+        unsafe {
+            let dst = self.raw.spare_capacity_mut();
+            // Reserved above
+            debug_assert!(dst.len() >= cnt);
+
+            ptr::copy_nonoverlapping(extend.as_ptr(), dst.as_mut_ptr().cast(), cnt);
+        }
+
+        // SAFETY: after extending, the internal cursor should be increment to reflect this.
+        unsafe {
+            bytes::BufMut::advance_mut(self, cnt);
+        }
     }
 }
 

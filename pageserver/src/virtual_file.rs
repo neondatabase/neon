@@ -20,8 +20,9 @@ use camino::{Utf8Path, Utf8PathBuf};
 use once_cell::sync::OnceCell;
 use owned_buffers_io::aligned_buffer::buffer::AlignedBuffer;
 use owned_buffers_io::aligned_buffer::{AlignedBufferMut, AlignedSlice, ConstAlign};
-use owned_buffers_io::io_buf_aligned::IoBufAlignedMut;
+use owned_buffers_io::io_buf_aligned::{IoBufAligned, IoBufAlignedMut};
 use owned_buffers_io::io_buf_ext::FullSlice;
+use owned_buffers_io::write::AlignedOwnedAsyncWriter;
 use pageserver_api::config::defaults::DEFAULT_IO_BUFFER_ALIGNMENT;
 use pageserver_api::shard::TenantShardId;
 use std::fs::File;
@@ -225,6 +226,14 @@ impl VirtualFile {
     }
 
     pub async fn write_all<Buf: IoBuf + Send>(
+        &mut self,
+        buf: FullSlice<Buf>,
+        ctx: &RequestContext,
+    ) -> (FullSlice<Buf>, Result<usize, Error>) {
+        self.inner.write_all(buf, ctx).await
+    }
+
+    pub async fn write_all_aligned<Buf: IoBufAligned + Send>(
         &mut self,
         buf: FullSlice<Buf>,
         ctx: &RequestContext,
@@ -1305,6 +1314,18 @@ impl OwnedAsyncWriter for VirtualFile {
         ctx: &RequestContext,
     ) -> std::io::Result<(usize, FullSlice<Buf>)> {
         let (buf, res) = VirtualFile::write_all(self, buf, ctx).await;
+        res.map(move |v| (v, buf))
+    }
+}
+
+impl AlignedOwnedAsyncWriter for VirtualFile {
+    #[inline(always)]
+    async fn write_all_aligned<Buf: owned_buffers_io::io_buf_aligned::IoBufAligned + Send>(
+        &mut self,
+        buf: FullSlice<Buf>,
+        ctx: &RequestContext,
+    ) -> std::io::Result<(usize, FullSlice<Buf>)> {
+        let (buf, res) = VirtualFile::write_all_aligned(self, buf, ctx).await;
         res.map(move |v| (v, buf))
     }
 }

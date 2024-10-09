@@ -1,14 +1,27 @@
 use bytes::BytesMut;
 use tokio_epoll_uring::IoBuf;
 
-use crate::context::RequestContext;
+use crate::{context::RequestContext, virtual_file::IoBufferMut};
 
-use super::io_buf_ext::{FullSlice, IoBufExt};
+use super::{
+    io_buf_aligned::IoBufAligned,
+    io_buf_ext::{FullSlice, IoBufExt},
+};
 
 /// A trait for doing owned-buffer write IO.
 /// Think [`tokio::io::AsyncWrite`] but with owned buffers.
 pub trait OwnedAsyncWriter {
     async fn write_all<Buf: IoBuf + Send>(
+        &mut self,
+        buf: FullSlice<Buf>,
+        ctx: &RequestContext,
+    ) -> std::io::Result<(usize, FullSlice<Buf>)>;
+}
+
+/// A trait for doing owned-buffer write IO with aligned buffer.
+/// Think [`tokio::io::AsyncWrite`] but with owned buffers.
+pub trait AlignedOwnedAsyncWriter: OwnedAsyncWriter {
+    async fn write_all_aligned<Buf: IoBufAligned + Send>(
         &mut self,
         buf: FullSlice<Buf>,
         ctx: &RequestContext,
@@ -125,6 +138,29 @@ where
         Ok((chunk_len, FullSlice::must_new(chunk)))
     }
 
+    async fn flush(&mut self, ctx: &RequestContext) -> std::io::Result<()> {
+        let buf = self.buf.take().expect("must not use after an error");
+        let buf_len = buf.pending();
+        if buf_len == 0 {
+            self.buf = Some(buf);
+            return Ok(());
+        }
+        let slice = buf.flush();
+        let (nwritten, slice) = self.writer.write_all(slice, ctx).await?;
+        assert_eq!(nwritten, buf_len);
+        self.buf = Some(Buffer::reuse_after_flush(
+            slice.into_raw_slice().into_inner(),
+        ));
+        Ok(())
+    }
+}
+
+impl<B, Buf, W> BufferedWriter<B, W>
+where
+    B: Buffer<IoBuf = Buf> + Send,
+    Buf: IoBufAligned + Send,
+    W: AlignedOwnedAsyncWriter,
+{
     /// Strictly less performant variant of [`Self::write_buffered`] that allows writing borrowed data.
     ///
     /// It is less performant because we always have to copy the borrowed data into the internal buffer
@@ -145,13 +181,13 @@ where
             chunk = &chunk[n..];
             if buf.pending() >= buf.cap() {
                 assert_eq!(buf.pending(), buf.cap());
-                self.flush(ctx).await?;
+                self.flush_aligned(ctx).await?;
             }
         }
         Ok(chunk_len)
     }
 
-    async fn flush(&mut self, ctx: &RequestContext) -> std::io::Result<()> {
+    async fn flush_aligned(&mut self, ctx: &RequestContext) -> std::io::Result<()> {
         let buf = self.buf.take().expect("must not use after an error");
         let buf_len = buf.pending();
         if buf_len == 0 {
@@ -159,7 +195,8 @@ where
             return Ok(());
         }
         let slice = buf.flush();
-        let (nwritten, slice) = self.writer.write_all(slice, ctx).await?;
+        let (nwritten, slice) =
+            AlignedOwnedAsyncWriter::write_all_aligned(&mut self.writer, slice, ctx).await?;
         assert_eq!(nwritten, buf_len);
         self.buf = Some(Buffer::reuse_after_flush(
             slice.into_raw_slice().into_inner(),
@@ -219,6 +256,31 @@ impl Buffer for BytesMut {
     }
 }
 
+impl Buffer for IoBufferMut {
+    type IoBuf = IoBufferMut;
+
+    fn cap(&self) -> usize {
+        self.capacity()
+    }
+
+    fn extend_from_slice(&mut self, other: &[u8]) {
+        IoBufferMut::extend_from_slice(self, other);
+    }
+
+    fn pending(&self) -> usize {
+        self.len()
+    }
+
+    fn flush(self) -> FullSlice<Self::IoBuf> {
+        self.slice_len()
+    }
+
+    fn reuse_after_flush(mut iobuf: Self::IoBuf) -> Self {
+        iobuf.clear();
+        iobuf
+    }
+}
+
 impl OwnedAsyncWriter for Vec<u8> {
     async fn write_all<Buf: IoBuf + Send>(
         &mut self,
@@ -250,6 +312,16 @@ mod tests {
         ) -> std::io::Result<(usize, FullSlice<Buf>)> {
             self.writes.push(Vec::from(&buf[..]));
             Ok((buf.len(), buf))
+        }
+    }
+
+    impl AlignedOwnedAsyncWriter for RecorderWriter {
+        async fn write_all_aligned<Buf: IoBufAligned + Send>(
+            &mut self,
+            buf: FullSlice<Buf>,
+            ctx: &RequestContext,
+        ) -> std::io::Result<(usize, FullSlice<Buf>)> {
+            OwnedAsyncWriter::write_all(self, buf, ctx).await
         }
     }
 
@@ -319,7 +391,7 @@ mod tests {
         let ctx = test_ctx();
         let ctx = &ctx;
         let recorder = RecorderWriter::default();
-        let mut writer = BufferedWriter::new(recorder, BytesMut::with_capacity(2));
+        let mut writer = BufferedWriter::new(recorder, IoBufferMut::with_capacity(2));
 
         writer.write_buffered_borrowed(b"abc", ctx).await?;
         writer.write_buffered_borrowed(b"d", ctx).await?;

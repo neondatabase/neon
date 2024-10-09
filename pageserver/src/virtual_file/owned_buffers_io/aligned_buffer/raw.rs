@@ -2,7 +2,7 @@ use core::slice;
 use std::{
     alloc::{self, Layout},
     cmp,
-    mem::ManuallyDrop,
+    mem::{ManuallyDrop, MaybeUninit},
 };
 
 use super::alignment::{Alignment, ConstAlign};
@@ -183,6 +183,17 @@ impl<A: Alignment> RawAlignedBuffer<A> {
         let mut buf = ManuallyDrop::new(self);
         // SAFETY: leaking the buffer as intended.
         unsafe { slice::from_raw_parts_mut(buf.as_mut_ptr(), buf.len) }
+    }
+
+    #[inline]
+    pub fn spare_capacity_mut(&mut self) -> &mut [MaybeUninit<u8>] {
+        // SAFETY: the returned slice is backed by allocated memory.
+        unsafe {
+            let ptr = self.as_mut_ptr().add(self.len());
+            let len = self.capacity() - self.len();
+
+            slice::from_raw_parts_mut(ptr.cast(), len)
+        }
     }
 }
 
