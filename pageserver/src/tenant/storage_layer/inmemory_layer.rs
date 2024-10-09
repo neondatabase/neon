@@ -14,7 +14,6 @@ use crate::tenant::PageReconstructError;
 use crate::virtual_file::owned_buffers_io::io_buf_ext::IoBufExt;
 use crate::{l0_flush, page_cache};
 use anyhow::{anyhow, Context, Result};
-use bytes::Bytes;
 use camino::Utf8PathBuf;
 use pageserver_api::key::CompactKey;
 use pageserver_api::keyspace::KeySpace;
@@ -811,7 +810,7 @@ impl InMemoryLayer {
             l0_flush::Inner::Direct { .. } => {
                 let file_contents = inner.file.load_to_io_buf(ctx).await?;
                 // TODO(yuchen): see ways to avoid this copy.
-                let file_contents = Bytes::copy_from_slice(&file_contents);
+                let file_contents = file_contents.freeze();
 
                 for (key, vec_map) in inner.index.iter() {
                     // Write all page versions
@@ -825,7 +824,7 @@ impl InMemoryLayer {
                             len,
                             will_init,
                         } = entry;
-                        let buf = Bytes::slice(&file_contents, pos as usize..(pos + len) as usize);
+                        let buf = file_contents.slice(pos as usize, (pos + len) as usize);
                         let (_buf, res) = delta_layer_writer
                             .put_value_bytes(
                                 Key::from_compact(*key),
