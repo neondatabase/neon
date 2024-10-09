@@ -607,6 +607,9 @@ pub enum TimelineArchivalError {
     #[error("Timeout")]
     Timeout,
 
+    #[error("Cancelled")]
+    Cancelled,
+
     #[error("ancestor is archived: {}", .0)]
     HasArchivedParent(TimelineId),
 
@@ -625,6 +628,7 @@ impl Debug for TimelineArchivalError {
         match self {
             Self::NotFound => write!(f, "NotFound"),
             Self::Timeout => write!(f, "Timeout"),
+            Self::Cancelled => write!(f, "Cancelled"),
             Self::HasArchivedParent(p) => f.debug_tuple("HasArchivedParent").field(p).finish(),
             Self::HasUnarchivedChildren(c) => {
                 f.debug_tuple("HasUnarchivedChildren").field(c).finish()
@@ -1554,6 +1558,7 @@ impl Tenant {
                 error!(%timeline_id, "index_part not found on remote");
                 return Err(TimelineArchivalError::NotFound);
             }
+            Err(DownloadError::Cancelled) => return Err(TimelineArchivalError::Cancelled),
             Err(e) => {
                 // Some (possibly ephemeral) error happened during index_part download.
                 warn!(%timeline_id, "Failed to load index_part from remote storage, failed creation? ({e})");

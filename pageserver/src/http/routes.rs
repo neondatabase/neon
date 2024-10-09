@@ -325,6 +325,7 @@ impl From<crate::tenant::TimelineArchivalError> for ApiError {
         match value {
             NotFound => ApiError::NotFound(anyhow::anyhow!("timeline not found").into()),
             Timeout => ApiError::Timeout("hit pageserver internal timeout".into()),
+            Cancelled => ApiError::ShuttingDown,
             e @ HasArchivedParent(_) => {
                 ApiError::PreconditionFailed(e.to_string().into_boxed_str())
             }
