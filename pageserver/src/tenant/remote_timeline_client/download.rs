@@ -591,7 +591,7 @@ where
     .and_then(|x| x)
 }
 
-async fn download_retry_forever<T, O, F>(
+pub(crate) async fn download_retry_forever<T, O, F>(
     op: O,
     description: &str,
     cancel: &CancellationToken,

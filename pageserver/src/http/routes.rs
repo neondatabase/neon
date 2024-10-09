@@ -2841,7 +2841,11 @@ async fn put_tenant_timeline_import_pgdata(
         let local_storage = GenericRemoteStorage::LocalFs(
             LocalFs::new(
                 pgdata_path.clone(),
-                std::time::Duration::from_secs(60), // Use a reasonable timeout
+                // FIXME: we probably want some timeout, and we might be able to assume the max file
+                // size on S3 is 1GiB (postgres segment size). But the problem is that the individual
+                // downloaders don't know enough about concurrent downloads to make a guess on the
+                // expected bandwidth and resulting best timeout.
+                std::time::Duration::from_secs(24 * 60 * 60),
             )
             .map_err(ApiError::InternalServerError)?,
         );

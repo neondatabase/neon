@@ -394,7 +394,7 @@ impl RemoteStorage for LocalFs {
 
                         RemotePath::new(key.strip_prefix(&strip_prefix).unwrap()).unwrap()
                     } else {
-                        key.clone()
+                        key
                     };
 
                     let relative_key = format!("{}", relative_key);

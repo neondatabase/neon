@@ -5,10 +5,11 @@
 //! - don't download files that we won't read
 //! - download to temporary file instead of in-memory buffer
 //! - version-specific CheckPointData (=> pgv abstraction, already exists for regular walingest)
+//! - Tenant::cancel nor Timeline::cancel are respected => shutdown not guaranteed
 
 use std::sync::Arc;
 
-use anyhow::{bail, ensure};
+use anyhow::{bail, ensure, Context};
 use bytes::Bytes;
 
 use itertools::Itertools;
@@ -47,7 +48,9 @@ use std::ops::Range;
 
 use super::{uninit::UninitializedTimeline, Timeline};
 
-use remote_storage::{Download, GenericRemoteStorage, Listing, ListingObject, RemotePath};
+use remote_storage::{
+    Download, DownloadError, GenericRemoteStorage, Listing, ListingObject, RemotePath,
+};
 
 pub(crate) struct Prepared<'a> {
     pgdata_dir: RemotePath,
@@ -260,7 +263,16 @@ impl PgImportEnv {
         }
         let mut results = Vec::new();
         while let Some(result) = work.join_next().await {
-            results.push(result);
+            match result {
+                Ok(res) => {
+                    results.push(res);
+                }
+                Err(_joinset_err) => {
+                    results.push(Err(anyhow::anyhow!(
+                        "parallel job panicked or cancelled, check pageserver logs"
+                    )));
+                }
+            }
         }
 
         if results.iter().all(|r| r.is_ok()) {
@@ -375,6 +387,7 @@ impl PgImportEnv {
             let nblocks = u32::try_from(file_size / 8192)?;
             let start_key = slru_block_to_key(kind, segno, 0);
             let end_key = slru_block_to_key(kind, segno, nblocks);
+            debug!(%p, segno=%segno, %size, %start_key, %end_key, "scheduling SLRU segment");
             self.tasks
                 .push(AnyImportTask::SlruBlocks(ImportSlruBlocksTask::new(
                     *self.timeline.get_shard_identity(),
@@ -829,67 +842,94 @@ impl RemoteStorageWrapper {
     }
 
     #[instrument(level = tracing::Level::DEBUG, skip_all, fields(%path))]
-    async fn listfilesindir(&self, path: &RemotePath) -> anyhow::Result<Vec<(RemotePath, usize)>> {
+    async fn listfilesindir(
+        &self,
+        path: &RemotePath,
+    ) -> Result<Vec<(RemotePath, usize)>, DownloadError> {
         assert!(
             path.object_name().is_some(),
             "must specify dirname, without trailing slash"
         );
         let path = path.add_trailing_slash();
 
-        let Listing { keys, prefixes: _ } = self
-            .storage
-            .list(
-                Some(&path),
-                remote_storage::ListingMode::WithDelimiter,
-                None,
-                &self.cancel,
-            )
-            .await?;
-        let res = keys
-            .into_iter()
-            .map(|ListingObject { key, size, .. }| (key, size.into_usize()))
-            .collect();
+        let res = crate::tenant::remote_timeline_client::download::download_retry_forever(
+            || async {
+                let Listing { keys, prefixes: _ } = self
+                    .storage
+                    .list(
+                        Some(&path),
+                        remote_storage::ListingMode::WithDelimiter,
+                        None,
+                        &self.cancel,
+                    )
+                    .await?;
+                let res = keys
+                    .into_iter()
+                    .map(|ListingObject { key, size, .. }| (key, size.into_usize()))
+                    .collect();
+                Ok(res)
+            },
+            &format!("listfilesindir {path:?}"),
+            &self.cancel,
+        )
+        .await;
         debug!(?res, "returning");
-        Ok(res)
+        res
     }
 
     #[instrument(level = tracing::Level::DEBUG, skip_all, fields(%path))]
-    async fn listdir(&self, path: &RemotePath) -> anyhow::Result<Vec<RemotePath>> {
+    async fn listdir(&self, path: &RemotePath) -> Result<Vec<RemotePath>, DownloadError> {
         assert!(
             path.object_name().is_some(),
             "must specify dirname, without trailing slash"
         );
         let path = path.add_trailing_slash();
-        let Listing { keys, prefixes } = self
-            .storage
-            .list(
-                Some(&path),
-                remote_storage::ListingMode::WithDelimiter,
-                None,
-                &self.cancel,
-            )
-            .await?;
-        let res = keys
-            .into_iter()
-            .map(|ListingObject { key, .. }| key)
-            .chain(prefixes.into_iter())
-            .collect();
+
+        let res = crate::tenant::remote_timeline_client::download::download_retry_forever(
+            || async {
+                let Listing { keys, prefixes } = self
+                    .storage
+                    .list(
+                        Some(&path),
+                        remote_storage::ListingMode::WithDelimiter,
+                        None,
+                        &self.cancel,
+                    )
+                    .await?;
+                let res = keys
+                    .into_iter()
+                    .map(|ListingObject { key, .. }| key)
+                    .chain(prefixes.into_iter())
+                    .collect();
+                Ok(res)
+            },
+            &format!("listdir {path:?}"),
+            &self.cancel,
+        )
+        .await;
         debug!(?res, "returning");
-        Ok(res)
+        res
     }
 
     #[instrument(level = tracing::Level::DEBUG, skip_all, fields(%path))]
-    async fn get(&self, path: &RemotePath) -> anyhow::Result<Bytes> {
-        let Download {
-            download_stream, ..
-        } = self.storage.download(path, &self.cancel).await?;
+    async fn get(&self, path: &RemotePath) -> Result<Bytes, DownloadError> {
+        let res = crate::tenant::remote_timeline_client::download::download_retry_forever(
+            || async {
+                let Download {
+                    download_stream, ..
+                } = self.storage.download(path, &self.cancel).await?;
+                let mut reader = tokio_util::io::StreamReader::new(download_stream);
 
-        let mut reader = tokio_util::io::StreamReader::new(download_stream);
-
-        // XXX optimize this, can we get the capacity hint from somewhere?
-        let mut buf = Vec::new();
-        tokio::io::copy_buf(&mut reader, &mut buf).await?;
-        debug!(len = buf.len(), "done");
-        Ok(Bytes::from(buf))
+                // XXX optimize this, can we get the capacity hint from somewhere?
+                let mut buf = Vec::new();
+                tokio::io::copy_buf(&mut reader, &mut buf).await?;
+                Ok(Bytes::from(buf))
+            },
+            &format!("download {path:?}"),
+            &self.cancel,
+        )
+        .await;
+        debug!(len = res.as_ref().ok().map(|buf| buf.len()), "done");
+        res
     }
 }
