@@ -187,6 +187,9 @@ neon_perf_counters_to_metrics(neon_per_backend_counters *counters)
 
 	Assert(i == NUM_METRICS);
 
+#undef APPEND_METRIC
+#undef NUM_METRICS
+
 	/* NULL entry marks end of array */
 	metrics[i].name = NULL;
 	metrics[i].value = 0;
