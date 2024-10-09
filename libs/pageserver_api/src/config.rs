@@ -104,8 +104,7 @@ pub struct ConfigToml {
     pub image_compression: ImageCompressionAlgorithm,
     pub ephemeral_bytes_per_memory_kb: usize,
     pub l0_flush: Option<crate::models::L0FlushConfig>,
-    pub virtual_file_direct_io: crate::models::virtual_file::DirectIoMode,
-    pub io_buffer_alignment: usize,
+    pub virtual_file_io_mode: Option<crate::models::virtual_file::IoMode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -388,10 +387,7 @@ impl Default for ConfigToml {
             image_compression: (DEFAULT_IMAGE_COMPRESSION),
             ephemeral_bytes_per_memory_kb: (DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB),
             l0_flush: None,
-            virtual_file_direct_io: crate::models::virtual_file::DirectIoMode::default(),
-
-            io_buffer_alignment: DEFAULT_IO_BUFFER_ALIGNMENT,
-
+            virtual_file_io_mode: None,
             tenant_config: TenantConfigToml::default(),
         }
     }

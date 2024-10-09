@@ -194,8 +194,6 @@ pub(crate) struct ChunkedVectoredReadBuilder {
     /// Start offset and metadata for each blob in this read
     blobs_at: VecMap<u64, BlobMeta>,
     max_read_size: Option<usize>,
-    /// Chunk size reads are coalesced into.
-    chunk_size: usize,
 }
 
 /// Computes x / d rounded up.
@@ -204,6 +202,7 @@ fn div_round_up(x: usize, d: usize) -> usize {
 }
 
 impl ChunkedVectoredReadBuilder {
+    const CHUNK_SIZE: usize = virtual_file::get_io_buffer_alignment();
     /// Start building a new vectored read.
     ///
     /// Note that by design, this does not check against reading more than `max_read_size` to
@@ -214,21 +213,19 @@ impl ChunkedVectoredReadBuilder {
         end_offset: u64,
         meta: BlobMeta,
         max_read_size: Option<usize>,
-        chunk_size: usize,
     ) -> Self {
         let mut blobs_at = VecMap::default();
         blobs_at
             .append(start_offset, meta)
             .expect("First insertion always succeeds");
 
-        let start_blk_no = start_offset as usize / chunk_size;
-        let end_blk_no = div_round_up(end_offset as usize, chunk_size);
+        let start_blk_no = start_offset as usize / Self::CHUNK_SIZE;
+        let end_blk_no = div_round_up(end_offset as usize, Self::CHUNK_SIZE);
         Self {
             start_blk_no,
             end_blk_no,
             blobs_at,
             max_read_size,
-            chunk_size,
         }
     }
 
@@ -237,18 +234,12 @@ impl ChunkedVectoredReadBuilder {
         end_offset: u64,
         meta: BlobMeta,
         max_read_size: usize,
-        align: usize,
     ) -> Self {
-        Self::new_impl(start_offset, end_offset, meta, Some(max_read_size), align)
+        Self::new_impl(start_offset, end_offset, meta, Some(max_read_size))
     }
 
-    pub(crate) fn new_streaming(
-        start_offset: u64,
-        end_offset: u64,
-        meta: BlobMeta,
-        align: usize,
-    ) -> Self {
-        Self::new_impl(start_offset, end_offset, meta, None, align)
+    pub(crate) fn new_streaming(start_offset: u64, end_offset: u64, meta: BlobMeta) -> Self {
+        Self::new_impl(start_offset, end_offset, meta, None)
     }
 
     /// Attempts to extend the current read with a new blob if the new blob resides in the same or the immediate next chunk.
@@ -256,12 +247,12 @@ impl ChunkedVectoredReadBuilder {
     /// The resulting size also must be below the max read size.
     pub(crate) fn extend(&mut self, start: u64, end: u64, meta: BlobMeta) -> VectoredReadExtended {
         tracing::trace!(start, end, "trying to extend");
-        let start_blk_no = start as usize / self.chunk_size;
-        let end_blk_no = div_round_up(end as usize, self.chunk_size);
+        let start_blk_no = start as usize / Self::CHUNK_SIZE;
+        let end_blk_no = div_round_up(end as usize, Self::CHUNK_SIZE);
 
         let not_limited_by_max_read_size = {
             if let Some(max_read_size) = self.max_read_size {
-                let coalesced_size = (end_blk_no - self.start_blk_no) * self.chunk_size;
+                let coalesced_size = (end_blk_no - self.start_blk_no) * Self::CHUNK_SIZE;
                 coalesced_size <= max_read_size
             } else {
                 true
@@ -292,12 +283,12 @@ impl ChunkedVectoredReadBuilder {
     }
 
     pub(crate) fn size(&self) -> usize {
-        (self.end_blk_no - self.start_blk_no) * self.chunk_size
+        (self.end_blk_no - self.start_blk_no) * Self::CHUNK_SIZE
     }
 
     pub(crate) fn build(self) -> VectoredRead {
-        let start = (self.start_blk_no * self.chunk_size) as u64;
-        let end = (self.end_blk_no * self.chunk_size) as u64;
+        let start = (self.start_blk_no * Self::CHUNK_SIZE) as u64;
+        let end = (self.end_blk_no * Self::CHUNK_SIZE) as u64;
         VectoredRead {
             start,
             end,
@@ -328,18 +319,14 @@ pub struct VectoredReadPlanner {
     prev: Option<(Key, Lsn, u64, BlobFlag)>,
 
     max_read_size: usize,
-
-    align: usize,
 }
 
 impl VectoredReadPlanner {
     pub fn new(max_read_size: usize) -> Self {
-        let align = virtual_file::get_io_buffer_alignment();
         Self {
             blobs: BTreeMap::new(),
             prev: None,
             max_read_size,
-            align,
         }
     }
 
@@ -418,7 +405,6 @@ impl VectoredReadPlanner {
                         end_offset,
                         BlobMeta { key, lsn },
                         self.max_read_size,
-                        self.align,
                     );
 
                     let prev_read_builder = current_read_builder.replace(next_read_builder);
@@ -472,13 +458,13 @@ impl<'a> VectoredBlobReader<'a> {
         );
 
         if cfg!(debug_assertions) {
-            let align = virtual_file::get_io_buffer_alignment() as u64;
+            const ALIGN: u64 = virtual_file::get_io_buffer_alignment() as u64;
             debug_assert_eq!(
-                read.start % align,
+                read.start % ALIGN,
                 0,
                 "Read start at {} does not satisfy the required io buffer alignment ({} bytes)",
                 read.start,
-                align
+                ALIGN
             );
         }
 
@@ -553,22 +539,18 @@ pub struct StreamingVectoredReadPlanner {
     max_cnt: usize,
     /// Size of the current batch
     cnt: usize,
-
-    align: usize,
 }
 
 impl StreamingVectoredReadPlanner {
     pub fn new(max_read_size: u64, max_cnt: usize) -> Self {
         assert!(max_cnt > 0);
         assert!(max_read_size > 0);
-        let align = virtual_file::get_io_buffer_alignment();
         Self {
             read_builder: None,
             prev: None,
             max_cnt,
             max_read_size,
             cnt: 0,
-            align,
         }
     }
 
@@ -621,7 +603,6 @@ impl StreamingVectoredReadPlanner {
                         start_offset,
                         end_offset,
                         BlobMeta { key, lsn },
-                        self.align,
                     ))
                 };
             }
@@ -656,9 +637,9 @@ mod tests {
     use super::*;
 
     fn validate_read(read: &VectoredRead, offset_range: &[(Key, Lsn, u64, BlobFlag)]) {
-        let align = virtual_file::get_io_buffer_alignment() as u64;
-        assert_eq!(read.start % align, 0);
-        assert_eq!(read.start / align, offset_range.first().unwrap().2 / align);
+        const ALIGN: u64 = virtual_file::get_io_buffer_alignment() as u64;
+        assert_eq!(read.start % ALIGN, 0);
+        assert_eq!(read.start / ALIGN, offset_range.first().unwrap().2 / ALIGN);
 
         let expected_offsets_in_read: Vec<_> = offset_range.iter().map(|o| o.2).collect();
 
@@ -676,32 +657,27 @@ mod tests {
     fn planner_chunked_coalesce_all_test() {
         use crate::virtual_file;
 
-        let chunk_size = virtual_file::get_io_buffer_alignment() as u64;
+        const CHUNK_SIZE: u64 = virtual_file::get_io_buffer_alignment() as u64;
 
-        // The test explicitly does not check chunk size < 512
-        if chunk_size < 512 {
-            return;
-        }
-
-        let max_read_size = chunk_size as usize * 8;
+        let max_read_size = CHUNK_SIZE as usize * 8;
         let key = Key::MIN;
         let lsn = Lsn(0);
 
         let blob_descriptions = [
-            (key, lsn, chunk_size / 8, BlobFlag::None), // Read 1 BEGIN
-            (key, lsn, chunk_size / 4, BlobFlag::Ignore), // Gap
-            (key, lsn, chunk_size / 2, BlobFlag::None),
-            (key, lsn, chunk_size - 2, BlobFlag::Ignore), // Gap
-            (key, lsn, chunk_size, BlobFlag::None),
-            (key, lsn, chunk_size * 2 - 1, BlobFlag::None),
-            (key, lsn, chunk_size * 2 + 1, BlobFlag::Ignore), // Gap
-            (key, lsn, chunk_size * 3 + 1, BlobFlag::None),
-            (key, lsn, chunk_size * 5 + 1, BlobFlag::None),
-            (key, lsn, chunk_size * 6 + 1, BlobFlag::Ignore), // skipped chunk size, but not a chunk: should coalesce.
-            (key, lsn, chunk_size * 7 + 1, BlobFlag::None),
-            (key, lsn, chunk_size * 8, BlobFlag::None), // Read 2 BEGIN (b/c max_read_size)
-            (key, lsn, chunk_size * 9, BlobFlag::Ignore), // ==== skipped a chunk
-            (key, lsn, chunk_size * 10, BlobFlag::None), // Read 3 BEGIN (cannot coalesce)
+            (key, lsn, CHUNK_SIZE / 8, BlobFlag::None), // Read 1 BEGIN
+            (key, lsn, CHUNK_SIZE / 4, BlobFlag::Ignore), // Gap
+            (key, lsn, CHUNK_SIZE / 2, BlobFlag::None),
+            (key, lsn, CHUNK_SIZE - 2, BlobFlag::Ignore), // Gap
+            (key, lsn, CHUNK_SIZE, BlobFlag::None),
+            (key, lsn, CHUNK_SIZE * 2 - 1, BlobFlag::None),
+            (key, lsn, CHUNK_SIZE * 2 + 1, BlobFlag::Ignore), // Gap
+            (key, lsn, CHUNK_SIZE * 3 + 1, BlobFlag::None),
+            (key, lsn, CHUNK_SIZE * 5 + 1, BlobFlag::None),
+            (key, lsn, CHUNK_SIZE * 6 + 1, BlobFlag::Ignore), // skipped chunk size, but not a chunk: should coalesce.
+            (key, lsn, CHUNK_SIZE * 7 + 1, BlobFlag::None),
+            (key, lsn, CHUNK_SIZE * 8, BlobFlag::None), // Read 2 BEGIN (b/c max_read_size)
+            (key, lsn, CHUNK_SIZE * 9, BlobFlag::Ignore), // ==== skipped a chunk
+            (key, lsn, CHUNK_SIZE * 10, BlobFlag::None), // Read 3 BEGIN (cannot coalesce)
         ];
 
         let ranges = [
@@ -780,19 +756,19 @@ mod tests {
 
     #[test]
     fn planner_replacement_test() {
-        let chunk_size = virtual_file::get_io_buffer_alignment() as u64;
-        let max_read_size = 128 * chunk_size as usize;
+        const CHUNK_SIZE: u64 = virtual_file::get_io_buffer_alignment() as u64;
+        let max_read_size = 128 * CHUNK_SIZE as usize;
         let first_key = Key::MIN;
         let second_key = first_key.next();
         let lsn = Lsn(0);
 
         let blob_descriptions = vec![
             (first_key, lsn, 0, BlobFlag::None),          // First in read 1
-            (first_key, lsn, chunk_size, BlobFlag::None), // Last in read 1
-            (second_key, lsn, 2 * chunk_size, BlobFlag::ReplaceAll),
-            (second_key, lsn, 3 * chunk_size, BlobFlag::None),
-            (second_key, lsn, 4 * chunk_size, BlobFlag::ReplaceAll), // First in read 2
-            (second_key, lsn, 5 * chunk_size, BlobFlag::None),       // Last in read 2
+            (first_key, lsn, CHUNK_SIZE, BlobFlag::None), // Last in read 1
+            (second_key, lsn, 2 * CHUNK_SIZE, BlobFlag::ReplaceAll),
+            (second_key, lsn, 3 * CHUNK_SIZE, BlobFlag::None),
+            (second_key, lsn, 4 * CHUNK_SIZE, BlobFlag::ReplaceAll), // First in read 2
+            (second_key, lsn, 5 * CHUNK_SIZE, BlobFlag::None),       // Last in read 2
         ];
 
         let ranges = [&blob_descriptions[0..2], &blob_descriptions[4..]];
@@ -802,7 +778,7 @@ mod tests {
             planner.handle(key, lsn, offset, flag);
         }
 
-        planner.handle_range_end(6 * chunk_size);
+        planner.handle_range_end(6 * CHUNK_SIZE);
 
         let reads = planner.finish();
         assert_eq!(reads.len(), 2);
@@ -947,7 +923,6 @@ mod tests {
         let reserved_bytes = blobs.iter().map(|bl| bl.len()).max().unwrap() * 2 + 16;
         let mut buf = BytesMut::with_capacity(reserved_bytes);
 
-        let align = virtual_file::get_io_buffer_alignment();
         let vectored_blob_reader = VectoredBlobReader::new(&file);
         let meta = BlobMeta {
             key: Key::MIN,
@@ -959,8 +934,7 @@ mod tests {
             if idx + 1 == offsets.len() {
                 continue;
             }
-            let read_builder =
-                ChunkedVectoredReadBuilder::new(*offset, *end, meta, 16 * 4096, align);
+            let read_builder = ChunkedVectoredReadBuilder::new(*offset, *end, meta, 16 * 4096);
             let read = read_builder.build();
             let result = vectored_blob_reader.read_blobs(&read, buf, &ctx).await?;
             assert_eq!(result.blobs.len(), 1);

@@ -152,11 +152,7 @@ pub(crate) async fn main(cmd: &AnalyzeLayerMapCmd) -> Result<()> {
     let ctx = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error);
 
     // Initialize virtual_file (file desriptor cache) and page cache which are needed to access layer persistent B-Tree.
-    pageserver::virtual_file::init(
-        10,
-        virtual_file::api::IoEngineKind::StdFs,
-        pageserver_api::config::defaults::DEFAULT_IO_BUFFER_ALIGNMENT,
-    );
+    pageserver::virtual_file::init(10, virtual_file::api::IoEngineKind::StdFs);
     pageserver::page_cache::init(100);
 
     let mut total_delta_layers = 0usize;
