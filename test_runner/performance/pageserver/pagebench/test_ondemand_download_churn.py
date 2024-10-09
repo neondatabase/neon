@@ -1,6 +1,8 @@
+from __future__ import annotations
+
 import json
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
@@ -13,6 +15,9 @@ from fixtures.neon_fixtures import (
 )
 from fixtures.remote_storage import s3_storage
 from fixtures.utils import humantime_to_ms
+
+if TYPE_CHECKING:
+    from typing import Any
 
 
 @pytest.mark.parametrize("duration", [30])
@@ -30,7 +35,7 @@ def test_download_churn(
     def record(metric, **kwargs):
         zenbenchmark.record(metric_name=f"pageserver_ondemand_download_churn.{metric}", **kwargs)
 
-    params: Dict[str, Tuple[Any, Dict[str, Any]]] = {}
+    params: dict[str, tuple[Any, dict[str, Any]]] = {}
 
     # params from fixtures
     params.update(
@@ -134,7 +139,7 @@ def run_benchmark(
     results_path = Path(basepath + ".stdout")
     log.info(f"Benchmark results at: {results_path}")
 
-    with open(results_path, "r") as f:
+    with open(results_path) as f:
         results = json.load(f)
     log.info(f"Results:\n{json.dumps(results, sort_keys=True, indent=2)}")
 

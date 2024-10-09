@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from fixtures.neon_fixtures import NeonEnv, fork_at_current_lsn
 from fixtures.pg_version import PgVersion
 

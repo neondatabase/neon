@@ -1,14 +1,16 @@
 #! /usr/bin/env python3
 
+from __future__ import annotations
+
 import argparse
 import re
 import sys
-from typing import Iterable, List, Tuple
+from collections.abc import Iterable
 
 
 def scan_pageserver_log_for_errors(
-    input: Iterable[str], allowed_errors: List[str]
-) -> List[Tuple[int, str]]:
+    input: Iterable[str], allowed_errors: list[str]
+) -> list[tuple[int, str]]:
     error_or_warn = re.compile(r"\s(ERROR|WARN)")
     errors = []
     for lineno, line in enumerate(input, start=1):
@@ -113,7 +115,7 @@ DEFAULT_STORAGE_CONTROLLER_ALLOWED_ERRORS = [
 
 
 def _check_allowed_errors(input):
-    allowed_errors: List[str] = list(DEFAULT_PAGESERVER_ALLOWED_ERRORS)
+    allowed_errors: list[str] = list(DEFAULT_PAGESERVER_ALLOWED_ERRORS)
 
     # add any test specifics here; cli parsing is not provided for the
     # difficulty of copypasting regexes as arguments without any quoting

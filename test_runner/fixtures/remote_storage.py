@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import enum
 import hashlib
 import json
@@ -6,7 +8,7 @@ import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Union
 
 import boto3
 import toml
@@ -15,6 +17,10 @@ from mypy_boto3_s3 import S3Client
 from fixtures.common_types import TenantId, TenantShardId, TimelineId
 from fixtures.log_helper import log
 from fixtures.pageserver.common_types import IndexPartDump
+
+if TYPE_CHECKING:
+    from typing import Any, Optional
+
 
 TIMELINE_INDEX_PART_FILE_NAME = "index_part.json"
 TENANT_HEATMAP_FILE_NAME = "heatmap-v1.json"
@@ -142,7 +148,7 @@ class LocalFsStorage:
         with self.heatmap_path(tenant_id).open("r") as f:
             return json.load(f)
 
-    def to_toml_dict(self) -> Dict[str, Any]:
+    def to_toml_dict(self) -> dict[str, Any]:
         return {
             "local_path": str(self.root),
         }
@@ -175,7 +181,7 @@ class S3Storage:
     """formatting deserialized with humantime crate, for example "1s"."""
     custom_timeout: Optional[str] = None
 
-    def access_env_vars(self) -> Dict[str, str]:
+    def access_env_vars(self) -> dict[str, str]:
         if self.aws_profile is not None:
             env = {
                 "AWS_PROFILE": self.aws_profile,
@@ -204,7 +210,7 @@ class S3Storage:
             }
         )
 
-    def to_toml_dict(self) -> Dict[str, Any]:
+    def to_toml_dict(self) -> dict[str, Any]:
         rv = {
             "bucket_name": self.bucket_name,
             "bucket_region": self.bucket_region,
@@ -279,7 +285,7 @@ class S3Storage:
     ) -> str:
         return f"{self.tenant_path(tenant_id)}/timelines/{timeline_id}"
 
-    def get_latest_index_key(self, index_keys: List[str]) -> str:
+    def get_latest_index_key(self, index_keys: list[str]) -> str:
         """
         Gets the latest index file key.
 
@@ -419,7 +425,7 @@ class RemoteStorageKind(str, enum.Enum):
         )
 
 
-def available_remote_storages() -> List[RemoteStorageKind]:
+def available_remote_storages() -> list[RemoteStorageKind]:
     remote_storages = [RemoteStorageKind.LOCAL_FS, RemoteStorageKind.MOCK_S3]
     if os.getenv("ENABLE_REAL_S3_REMOTE_STORAGE") is not None:
         remote_storages.append(RemoteStorageKind.REAL_S3)
@@ -429,7 +435,7 @@ def available_remote_storages() -> List[RemoteStorageKind]:
     return remote_storages
 
 
-def available_s3_storages() -> List[RemoteStorageKind]:
+def available_s3_storages() -> list[RemoteStorageKind]:
     remote_storages = [RemoteStorageKind.MOCK_S3]
     if os.getenv("ENABLE_REAL_S3_REMOTE_STORAGE") is not None:
         remote_storages.append(RemoteStorageKind.REAL_S3)
@@ -459,7 +465,7 @@ def default_remote_storage() -> RemoteStorageKind:
     return RemoteStorageKind.LOCAL_FS
 
 
-def remote_storage_to_toml_dict(remote_storage: RemoteStorage) -> Dict[str, Any]:
+def remote_storage_to_toml_dict(remote_storage: RemoteStorage) -> dict[str, Any]:
     if not isinstance(remote_storage, (LocalFsStorage, S3Storage)):
         raise Exception("invalid remote storage type")
 

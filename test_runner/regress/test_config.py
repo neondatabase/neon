@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 from contextlib import closing
 
@@ -66,7 +68,7 @@ def test_safekeepers_reconfigure_reorder(
             assert new_sks != old_sks, "GUC changes were applied"
 
     log_path = os.path.join(endpoint.endpoint_path(), "compute.log")
-    with open(log_path, "r") as log_file:
+    with open(log_path) as log_file:
         logs = log_file.read()
         # Check that walproposer was not restarted
         assert "restarting walproposer" not in logs

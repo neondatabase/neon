@@ -9,6 +9,8 @@ of the pageserver are:
 - Updates to remote_consistent_lsn may only be made visible after validating generation
 """
 
+from __future__ import annotations
+
 import enum
 import os
 import re

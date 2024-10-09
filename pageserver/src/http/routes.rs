@@ -703,6 +703,8 @@ async fn timeline_archival_config_handler(
     let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
 
+    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
+
     let request_data: TimelineArchivalConfigRequest = json_request(&mut request).await?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
     let state = get_state(&request);
@@ -713,7 +715,7 @@ async fn timeline_archival_config_handler(
             .get_attached_tenant_shard(tenant_shard_id)?;
 
         tenant
-            .apply_timeline_archival_config(timeline_id, request_data.state)
+            .apply_timeline_archival_config(timeline_id, request_data.state, ctx)
             .await?;
         Ok::<_, ApiError>(())
     }

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from fixtures.common_types import TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.safekeeper.http import SafekeeperHttpClient

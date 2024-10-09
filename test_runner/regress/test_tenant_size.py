@@ -1,7 +1,8 @@
+from __future__ import annotations
+
 import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import List, Tuple
 
 import pytest
 from fixtures.common_types import Lsn, TenantId, TimelineId
@@ -302,7 +303,7 @@ def test_single_branch_get_tenant_size_grows(
 
     http_client = env.pageserver.http_client()
 
-    collected_responses: List[Tuple[str, Lsn, int]] = []
+    collected_responses: list[tuple[str, Lsn, int]] = []
 
     size_debug_file = open(test_output_dir / "size_debug.html", "w")
 
@@ -313,7 +314,7 @@ def test_single_branch_get_tenant_size_grows(
         http_client: PageserverHttpClient,
         tenant_id: TenantId,
         timeline_id: TimelineId,
-    ) -> Tuple[Lsn, int]:
+    ) -> tuple[Lsn, int]:
         consistent = False
         size_debug = None
 

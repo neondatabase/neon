@@ -10,6 +10,9 @@
 # in LSN order, writing the oldest layer first. That creates a new 10 MB image
 # layer to be created for each of those small updates.  This is the Write
 # Amplification problem at its finest.
+
+from __future__ import annotations
+
 from contextlib import closing
 
 from fixtures.compare_fixtures import PgCompare

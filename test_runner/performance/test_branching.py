@@ -1,6 +1,7 @@
+from __future__ import annotations
+
 import timeit
 from pathlib import Path
-from typing import List
 
 from fixtures.benchmark_fixture import PgBenchRunResult
 from fixtures.compare_fixtures import NeonCompare
@@ -22,7 +23,7 @@ def test_compare_child_and_root_pgbench_perf(neon_compare: NeonCompare):
     env = neon_compare.env
     pg_bin = neon_compare.pg_bin
 
-    def run_pgbench_on_branch(branch: str, cmd: List[str]):
+    def run_pgbench_on_branch(branch: str, cmd: list[str]):
         run_start_timestamp = utc_now_timestamp()
         t0 = timeit.default_timer()
         out = pg_bin.run_capture(

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from contextlib import closing
 
 from fixtures.benchmark_fixture import MetricReport

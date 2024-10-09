@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import calendar
 import dataclasses
 import enum
@@ -5,12 +7,11 @@ import json
 import os
 import re
 import timeit
+from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-
-# Type-related stuff
-from typing import Callable, ClassVar, Dict, Iterator, Optional
+from typing import TYPE_CHECKING
 
 import allure
 import pytest
@@ -22,6 +23,10 @@ from _pytest.terminal import TerminalReporter
 from fixtures.common_types import TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonPageserver
+
+if TYPE_CHECKING:
+    from typing import Callable, ClassVar, Optional
+
 
 """
 This file contains fixtures for micro-benchmarks.
@@ -138,18 +143,6 @@ class PgBenchRunResult:
 
 @dataclasses.dataclass
 class PgBenchInitResult:
-    # Taken from https://github.com/postgres/postgres/blob/REL_15_1/src/bin/pgbench/pgbench.c#L5144-L5171
-    EXTRACTORS: ClassVar[Dict[str, re.Pattern]] = {  # type: ignore[type-arg]
-        "drop_tables": re.compile(r"drop tables (\d+\.\d+) s"),
-        "create_tables": re.compile(r"create tables (\d+\.\d+) s"),
-        "client_side_generate": re.compile(r"client-side generate (\d+\.\d+) s"),
-        "server_side_generate": re.compile(r"server-side generate (\d+\.\d+) s"),
-        "vacuum": re.compile(r"vacuum (\d+\.\d+) s"),
-        "primary_keys": re.compile(r"primary keys (\d+\.\d+) s"),
-        "foreign_keys": re.compile(r"foreign keys (\d+\.\d+) s"),
-        "total": re.compile(r"done in (\d+\.\d+) s"),  # Total time printed by pgbench
-    }
-
     total: Optional[float]
     drop_tables: Optional[float]
     create_tables: Optional[float]
@@ -161,6 +154,20 @@ class PgBenchInitResult:
     duration: float
     start_timestamp: int
     end_timestamp: int
+
+    # Taken from https://github.com/postgres/postgres/blob/REL_15_1/src/bin/pgbench/pgbench.c#L5144-L5171
+    EXTRACTORS: ClassVar[dict[str, re.Pattern[str]]] = dataclasses.field(
+        default_factory=lambda: {
+            "drop_tables": re.compile(r"drop tables (\d+\.\d+) s"),
+            "create_tables": re.compile(r"create tables (\d+\.\d+) s"),
+            "client_side_generate": re.compile(r"client-side generate (\d+\.\d+) s"),
+            "server_side_generate": re.compile(r"server-side generate (\d+\.\d+) s"),
+            "vacuum": re.compile(r"vacuum (\d+\.\d+) s"),
+            "primary_keys": re.compile(r"primary keys (\d+\.\d+) s"),
+            "foreign_keys": re.compile(r"foreign keys (\d+\.\d+) s"),
+            "total": re.compile(r"done in (\d+\.\d+) s"),  # Total time printed by pgbench
+        }
+    )
 
     @classmethod
     def parse_from_stderr(
@@ -175,7 +182,7 @@ class PgBenchInitResult:
 
         last_line = stderr.splitlines()[-1]
 
-        timings: Dict[str, Optional[float]] = {}
+        timings: dict[str, Optional[float]] = {}
         last_line_items = re.split(r"\(|\)|,", last_line)
         for item in last_line_items:
             for key, regex in cls.EXTRACTORS.items():
@@ -385,7 +392,7 @@ class NeonBenchmarker:
         self,
         pageserver: NeonPageserver,
         metric_name: str,
-        label_filters: Optional[Dict[str, str]] = None,
+        label_filters: Optional[dict[str, str]] = None,
     ) -> int:
         """Fetch the value of given int counter from pageserver metrics."""
         all_metrics = pageserver.http_client().get_metrics()

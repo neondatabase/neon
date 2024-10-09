@@ -1,7 +1,9 @@
+from __future__ import annotations
+
 import os
 import time
 from collections import defaultdict
-from typing import Dict, List, Optional, Union
+from typing import TYPE_CHECKING
 
 import pytest
 import requests
@@ -23,6 +25,9 @@ from fixtures.workload import Workload
 from pytest_httpserver import HTTPServer
 from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
+
+if TYPE_CHECKING:
+    from typing import Optional, Union
 
 
 def test_sharding_smoke(
@@ -635,7 +640,7 @@ def test_sharding_split_stripe_size(
     tenant_id = env.initial_tenant
 
     assert len(notifications) == 1
-    expect: Dict[str, Union[List[Dict[str, int]], str, None, int]] = {
+    expect: dict[str, Union[list[dict[str, int]], str, None, int]] = {
         "tenant_id": str(env.initial_tenant),
         "stripe_size": None,
         "shards": [{"node_id": int(env.pageservers[0].id), "shard_number": 0}],
@@ -651,7 +656,7 @@ def test_sharding_split_stripe_size(
     # Check that we ended up with the stripe size that we expected, both on the pageserver
     # and in the notifications to compute
     assert len(notifications) == 2
-    expect_after: Dict[str, Union[List[Dict[str, int]], str, None, int]] = {
+    expect_after: dict[str, Union[list[dict[str, int]], str, None, int]] = {
         "tenant_id": str(env.initial_tenant),
         "stripe_size": new_stripe_size,
         "shards": [

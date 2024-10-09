@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import enum
 import os
 from typing import Optional
@@ -36,7 +38,7 @@ class PgVersion(str, enum.Enum):
         return f"v{self.value}"
 
     @classmethod
-    def _missing_(cls, value) -> Optional["PgVersion"]:
+    def _missing_(cls, value) -> Optional[PgVersion]:
         known_values = {v.value for _, v in cls.__members__.items()}
 
         # Allow passing version as a string with "v" prefix (e.g. "v14")
