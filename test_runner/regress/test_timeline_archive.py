@@ -1,4 +1,5 @@
 from __future__ import annotations
+import time
 
 import pytest
 from fixtures.common_types import TenantId, TimelineArchivalState, TimelineId
@@ -157,13 +158,32 @@ def test_timeline_offloading(neon_env_builder: NeonEnvBuilder, manual_offload: b
         if manual_offload:
             ps_http.timeline_offload(tenant_id=tenant_id, timeline_id=parent_timeline_id)
         assert env.pageserver.log_contains(
-            f".*{parent_timeline_id}.*offloading archived timeline.*"
+            f".*{parent_timeline_id}.* offloading archived timeline.*"
         )
 
     def leaf_offloaded():
         if manual_offload:
             ps_http.timeline_offload(tenant_id=tenant_id, timeline_id=leaf_timeline_id)
-        assert env.pageserver.log_contains(f".*{leaf_timeline_id}.*offloading archived timeline.*")
+        assert env.pageserver.log_contains(f".*{leaf_timeline_id}.* offloading archived timeline.*")
 
     wait_until(30, 1, leaf_offloaded)
     wait_until(30, 1, parent_offloaded)
+
+    # Let some time pass for things to settle.
+    time.sleep(5)
+
+    ps_http.timeline_archival_config(
+        tenant_id,
+        parent_timeline_id,
+        state=TimelineArchivalState.UNARCHIVED,
+    )
+    ps_http.timeline_archival_config(
+        tenant_id,
+        leaf_timeline_id,
+        state=TimelineArchivalState.UNARCHIVED,
+    )
+    leaf_detail = ps_http.timeline_detail(
+        tenant_id,
+        leaf_timeline_id,
+    )
+    assert leaf_detail["is_archived"] is False
