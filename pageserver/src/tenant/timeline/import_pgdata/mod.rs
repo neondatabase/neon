@@ -11,7 +11,7 @@
 
 use std::sync::Arc;
 
-use anyhow::{bail, ensure, Context};
+use anyhow::{bail, ensure};
 use bytes::Bytes;
 
 use itertools::Itertools;
