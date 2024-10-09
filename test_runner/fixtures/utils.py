@@ -9,6 +9,7 @@ import subprocess
 import tarfile
 import threading
 import time
+from collections import OrderedDict
 from collections.abc import Iterable
 from hashlib import sha256
 from pathlib import Path
@@ -17,8 +18,10 @@ from urllib.parse import urlencode
 
 import allure
 import zstandard
+from allpairspy import AllPairs
 from psycopg2.extensions import cursor
 
+from fixtures.common_types import TimelineId
 from fixtures.log_helper import log
 from fixtures.pageserver.common_types import (
     parse_delta_layer,
@@ -33,11 +36,7 @@ if TYPE_CHECKING:
     )
 
     from fixtures.neon_fixtures import PgBin
-from collections import OrderedDict
 
-from allpairspy import AllPairs
-
-from fixtures.common_types import TimelineId
 
 Fn = TypeVar("Fn", bound=Callable[..., Any])
 COMPONENT_BINARIES = {
