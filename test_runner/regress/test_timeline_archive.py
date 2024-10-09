@@ -123,7 +123,7 @@ def test_timeline_offloading(neon_env_builder: NeonEnvBuilder, manual_offload: b
     ps_http = env.pageserver.http_client()
 
     # Turn off gc and compaction loops: we want to issue them manually for better reliability
-    tenant_id, _timeline = env.neon_cli.create_tenant(
+    tenant_id, _timeline = env.create_tenant(
         conf={
             "gc_period": "0s",
             "compaction_period": "0s" if manual_offload else "1s",
@@ -131,9 +131,9 @@ def test_timeline_offloading(neon_env_builder: NeonEnvBuilder, manual_offload: b
     )
 
     # Create two branches and archive them
-    parent_timeline_id = env.neon_cli.create_branch("test_ancestor_branch_archive_parent", tenant_id = tenant_id)
-    leaf_timeline_id = env.neon_cli.create_branch(
-        "test_ancestor_branch_archive_branch1", "test_ancestor_branch_archive_parent", tenant_id = tenant_id
+    parent_timeline_id = env.create_branch("test_ancestor_branch_archive_parent", tenant_id)
+    leaf_timeline_id = env.create_branch(
+        "test_ancestor_branch_archive_branch1", tenant_id, "test_ancestor_branch_archive_parent"
     )
 
     ps_http.timeline_archival_config(
