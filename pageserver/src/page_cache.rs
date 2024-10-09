@@ -651,9 +651,9 @@ impl PageCache {
         size_metrics.current_bytes_immutable.set_page_sz(0);
 
         let slots = page_buffer
-            // Each chunk has `PAGE_SZ` (8192) bytes, greater than 512, still aligned.
             .chunks_exact_mut(PAGE_SZ)
             .map(|chunk| {
+                // SAFETY: Each chunk has `PAGE_SZ` (8192) bytes, greater than 512, still aligned.
                 let buf = unsafe { IoPageSlice::new_unchecked(chunk.try_into().unwrap()) };
 
                 Slot {

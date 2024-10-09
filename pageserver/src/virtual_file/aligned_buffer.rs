@@ -49,7 +49,7 @@ impl<'a, const ALIGN: usize, const N: usize> DerefMut for AlignedSlice<'a, ALIGN
 
 impl<'a, const ALIGN: usize, const N: usize> AsRef<[u8; N]> for AlignedSlice<'a, ALIGN, N> {
     fn as_ref(&self) -> &[u8; N] {
-        &self.0
+        self.0
     }
 }
 

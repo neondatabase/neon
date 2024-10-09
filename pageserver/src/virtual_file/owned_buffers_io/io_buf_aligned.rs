@@ -8,4 +8,4 @@ pub trait IoBufAlignedMut: IoBufMut {}
 
 impl IoBufAlignedMut for IoBufferMut {}
 
-impl<'a> IoBufAlignedMut for PageWriteGuardBuf {}
+impl IoBufAlignedMut for PageWriteGuardBuf {}

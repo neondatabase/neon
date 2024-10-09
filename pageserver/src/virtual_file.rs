@@ -1366,7 +1366,6 @@ pub(crate) type IoBufferMut = aligned_buffer::AlignedBufferMut<{ get_io_buffer_a
 pub(crate) type IoPageSlice<'a> =
     aligned_buffer::AlignedSlice<'a, { get_io_buffer_alignment() }, PAGE_SZ>;
 
-
 static IO_MODE: AtomicU8 = AtomicU8::new(IoMode::preferred() as u8);
 
 pub(crate) fn set_io_mode(mode: IoMode) {
@@ -1715,7 +1714,7 @@ mod tests {
                         .await
                         .unwrap()
                         .into_inner();
-                    assert!(&buf[..] == SAMPLE);
+                    assert!(buf[..] == SAMPLE);
                 }
             });
             hdls.push(hdl);
