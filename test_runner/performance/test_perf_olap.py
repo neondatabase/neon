@@ -192,7 +192,7 @@ def tpch_queuies() -> tuple[ParameterSet, ...]:
     - querues in returning tuple are ordered by the query number
     - pytest parameters id is adjusted to match the query id (the numbering starts from 1)
     """
-    queries_dir = Path(__file__).parent / "performance" / "tpc-h" / "queries"
+    queries_dir = Path(__file__).parent / "tpc-h" / "queries"
     assert queries_dir.exists(), f"TPC-H queries dir not found: {queries_dir}"
 
     return tuple(
