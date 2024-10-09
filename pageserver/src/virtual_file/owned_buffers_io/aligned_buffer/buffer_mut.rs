@@ -38,7 +38,7 @@ impl<const A: usize> AlignedBufferMut<ConstAlign<A>> {
         use bytes::BufMut;
         let mut buf = Self::with_capacity(capacity);
         buf.put_bytes(0, capacity);
-        // `put_bytes` filled the entire buffer.
+        // SAFETY: `put_bytes` filled the entire buffer.
         unsafe { buf.set_len(capacity) };
         buf
     }

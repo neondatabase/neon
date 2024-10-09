@@ -35,6 +35,7 @@ impl<A: Alignment> AlignedBuffer<A> {
 
     #[inline]
     fn as_ptr(&self) -> *const u8 {
+        // SAFETY: `self.range.start` is guaranteed to be within [0, self.len()).
         unsafe { self.raw.as_ptr().add(self.range.start) }
     }
 
@@ -93,6 +94,7 @@ impl<A: Alignment> PartialEq<[u8]> for AlignedBuffer<A> {
     }
 }
 
+/// SAFETY: the underlying buffer references a stable memory region.
 unsafe impl<A: Alignment> tokio_epoll_uring::IoBuf for AlignedBuffer<A> {
     fn stable_ptr(&self) -> *const u8 {
         self.as_ptr()

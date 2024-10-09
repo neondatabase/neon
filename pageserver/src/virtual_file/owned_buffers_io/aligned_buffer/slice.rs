@@ -35,6 +35,6 @@ impl<'a, const N: usize, A: Alignment> DerefMut for AlignedSlice<'a, N, A> {
 
 impl<'a, const N: usize, A: Alignment> AsRef<[u8; N]> for AlignedSlice<'a, N, A> {
     fn as_ref(&self) -> &[u8; N] {
-        &self.buf
+        self.buf
     }
 }
