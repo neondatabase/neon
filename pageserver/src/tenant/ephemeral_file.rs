@@ -54,7 +54,7 @@ impl EphemeralFile {
                 "ephemeral-{filename_disambiguator}"
             )));
 
-        let file = VirtualFile::open_with_options(
+        let file = VirtualFile::open_with_options_v2(
             &filename,
             virtual_file::OpenOptions::new()
                 .read(true)
