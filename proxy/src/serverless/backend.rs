@@ -257,7 +257,7 @@ pub(crate) enum LocalProxyConnError {
     #[error("error with connection to local-proxy")]
     Io(#[source] std::io::Error),
     #[error("could not establish h2 connection")]
-    H2(#[from] hyper1::Error),
+    H2(#[from] hyper::Error),
 }
 
 impl ReportableError for HttpConnError {
@@ -481,7 +481,7 @@ async fn connect_http2(
         };
     };
 
-    let (client, connection) = hyper1::client::conn::http2::Builder::new(TokioExecutor::new())
+    let (client, connection) = hyper::client::conn::http2::Builder::new(TokioExecutor::new())
         .timer(TokioTimer::new())
         .keep_alive_interval(Duration::from_secs(20))
         .keep_alive_while_idle(true)

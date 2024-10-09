@@ -165,6 +165,32 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
             }
         }
 
+        // get the list of installed extensions
+        // currently only used in python tests
+        // TODO: call it from cplane
+        (&Method::GET, "/installed_extensions") => {
+            info!("serving /installed_extensions GET request");
+            let status = compute.get_status();
+            if status != ComputeStatus::Running {
+                let msg = format!(
+                    "invalid compute status for extensions request: {:?}",
+                    status
+                );
+                error!(msg);
+                return Response::new(Body::from(msg));
+            }
+
+            let connstr = compute.connstr.clone();
+            let res = crate::installed_extensions::get_installed_extensions(connstr).await;
+            match res {
+                Ok(res) => render_json(Body::from(serde_json::to_string(&res).unwrap())),
+                Err(e) => render_json_error(
+                    &format!("could not get list of installed extensions: {}", e),
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                ),
+            }
+        }
+
         // download extension files from remote extension storage on demand
         (&Method::POST, route) if route.starts_with("/extension_server/") => {
             info!("serving {:?} POST request", route);

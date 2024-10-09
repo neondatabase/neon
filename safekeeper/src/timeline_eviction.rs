@@ -15,7 +15,9 @@ use tracing::{debug, info, instrument, warn};
 use utils::crashsafe::durable_rename;
 
 use crate::{
-    metrics::{EvictionEvent, EVICTION_EVENTS_COMPLETED, EVICTION_EVENTS_STARTED},
+    metrics::{
+        EvictionEvent, EVICTION_EVENTS_COMPLETED, EVICTION_EVENTS_STARTED, NUM_EVICTED_TIMELINES,
+    },
     rate_limit::rand_duration,
     timeline_manager::{Manager, StateSnapshot},
     wal_backup,
@@ -93,6 +95,7 @@ impl Manager {
         }
 
         info!("successfully evicted timeline");
+        NUM_EVICTED_TIMELINES.inc();
     }
 
     /// Attempt to restore evicted timeline from remote storage; it must be
@@ -128,6 +131,7 @@ impl Manager {
             tokio::time::Instant::now() + rand_duration(&self.conf.eviction_min_resident);
 
         info!("successfully restored evicted timeline");
+        NUM_EVICTED_TIMELINES.dec();
     }
 }
 

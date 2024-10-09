@@ -2314,12 +2314,12 @@ def test_s3_eviction(
     ]
     if delete_offloaded_wal:
         neon_env_builder.safekeeper_extra_opts.append("--delete-offloaded-wal")
-
-    env = neon_env_builder.init_start(
-        initial_tenant_conf={
-            "checkpoint_timeout": "100ms",
-        }
-    )
+    # make lagging_wal_timeout small to force pageserver quickly forget about
+    # safekeeper after it stops sending updates (timeline is deactivated) to
+    # make test faster. Won't be needed with
+    # https://github.com/neondatabase/neon/issues/8148 fixed.
+    initial_tenant_conf = {"lagging_wal_timeout": "1s", "checkpoint_timeout": "100ms"}
+    env = neon_env_builder.init_start(initial_tenant_conf=initial_tenant_conf)
 
     n_timelines = 5
 
@@ -2407,8 +2407,36 @@ def test_s3_eviction(
         and sk.log_contains("successfully restored evicted timeline")
         for sk in env.safekeepers
     )
-
     assert event_metrics_seen
+
+    # test safekeeper_evicted_timelines metric
+    log.info("testing safekeeper_evicted_timelines metric")
+    # checkpoint pageserver to force remote_consistent_lsn update
+    for i in range(n_timelines):
+        ps_client.timeline_checkpoint(env.initial_tenant, timelines[i], wait_until_uploaded=True)
+    for ep in endpoints:
+        log.info(ep.is_running())
+    sk = env.safekeepers[0]
+
+    # all timelines must be evicted eventually
+    def all_evicted():
+        n_evicted = sk.http_client().get_metric_value("safekeeper_evicted_timelines")
+        assert n_evicted  # make mypy happy
+        assert int(n_evicted) == n_timelines
+
+    wait_until(60, 0.5, all_evicted)
+    # restart should preserve the metric value
+    sk.stop().start()
+    wait_until(60, 0.5, all_evicted)
+    # and endpoint start should reduce is
+    endpoints[0].start()
+
+    def one_unevicted():
+        n_evicted = sk.http_client().get_metric_value("safekeeper_evicted_timelines")
+        assert n_evicted  # make mypy happy
+        assert int(n_evicted) < n_timelines
+
+    wait_until(60, 0.5, one_unevicted)
 
 
 # Test resetting uploaded partial segment state.

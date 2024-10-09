@@ -972,8 +972,6 @@ pub struct TopTenantShardsResponse {
 }
 
 pub mod virtual_file {
-    use std::path::PathBuf;
-
     #[derive(
         Copy,
         Clone,
@@ -994,50 +992,45 @@ pub mod virtual_file {
     }
 
     /// Direct IO modes for a pageserver.
-    #[derive(Debug, PartialEq, Eq, Clone, serde::Deserialize, serde::Serialize, Default)]
-    #[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
-    pub enum DirectIoMode {
-        /// Direct IO disabled (uses usual buffered IO).
-        #[default]
-        Disabled,
-        /// Direct IO disabled (performs checks and perf simulations).
-        Evaluate {
-            /// Alignment check level
-            alignment_check: DirectIoAlignmentCheckLevel,
-            /// Latency padded for performance simulation.
-            latency_padding: DirectIoLatencyPadding,
-        },
-        /// Direct IO enabled.
-        Enabled {
-            /// Actions to perform on alignment error.
-            on_alignment_error: DirectIoOnAlignmentErrorAction,
-        },
+    #[derive(
+        Copy,
+        Clone,
+        PartialEq,
+        Eq,
+        Hash,
+        strum_macros::EnumString,
+        strum_macros::Display,
+        serde_with::DeserializeFromStr,
+        serde_with::SerializeDisplay,
+        Debug,
+    )]
+    #[strum(serialize_all = "kebab-case")]
+    #[repr(u8)]
+    pub enum IoMode {
+        /// Uses buffered IO.
+        Buffered,
+        /// Uses direct IO, error out if the operation fails.
+        #[cfg(target_os = "linux")]
+        Direct,
     }
 
-    #[derive(Debug, PartialEq, Eq, Clone, serde::Deserialize, serde::Serialize, Default)]
-    #[serde(rename_all = "kebab-case")]
-    pub enum DirectIoAlignmentCheckLevel {
-        #[default]
-        Error,
-        Log,
-        None,
+    impl IoMode {
+        pub const fn preferred() -> Self {
+            Self::Buffered
+        }
     }
 
-    #[derive(Debug, PartialEq, Eq, Clone, serde::Deserialize, serde::Serialize, Default)]
-    #[serde(rename_all = "kebab-case")]
-    pub enum DirectIoOnAlignmentErrorAction {
-        Error,
-        #[default]
-        FallbackToBuffered,
-    }
+    impl TryFrom<u8> for IoMode {
+        type Error = u8;
 
-    #[derive(Debug, PartialEq, Eq, Clone, serde::Deserialize, serde::Serialize, Default)]
-    #[serde(tag = "type", rename_all = "kebab-case")]
-    pub enum DirectIoLatencyPadding {
-        /// Pad virtual file operations with IO to a fake file.
-        FakeFileRW { path: PathBuf },
-        #[default]
-        None,
+        fn try_from(value: u8) -> Result<Self, Self::Error> {
+            Ok(match value {
+                v if v == (IoMode::Buffered as u8) => IoMode::Buffered,
+                #[cfg(target_os = "linux")]
+                v if v == (IoMode::Direct as u8) => IoMode::Direct,
+                x => return Err(x),
+            })
+        }
     }
 }
 
