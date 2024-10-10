@@ -621,11 +621,22 @@ impl WalIngest {
                 forknum: VISIBILITYMAP_FORKNUM,
             };
 
+            //
+            // Code copied from PostgreSQL `visibilitymap_prepare_truncate` function in `visibilitymap.c`
+            //
+
+            // last remaining block, byte, and bit
             let mut vm_page_no = rec.blkno / (pg_constants::VM_HEAPBLOCKS_PER_PAGE as u32);
             let trunc_byte = rec.blkno as usize % pg_constants::VM_HEAPBLOCKS_PER_PAGE
                 / pg_constants::VM_HEAPBLOCKS_PER_BYTE;
             let trunc_offset = rec.blkno as usize % pg_constants::VM_HEAPBLOCKS_PER_PAGE
                 * pg_constants::VM_BITS_PER_HEAPBLOCK;
+
+            // Unless the new size is exactly at a visibility map page boundary, the
+            // tail bits in the last remaining map page, representing truncated heap
+            // blocks, need to be cleared. This is not only tidy, but also necessary
+            // because we don't get a chance to clear the bits if the heap is extended
+            // again.
             if trunc_byte != 0 || trunc_offset != 0 {
                 let old_content = modification
                     .tline
@@ -634,7 +645,10 @@ impl WalIngest {
                 let mut new_content = BytesMut::new();
                 new_content.extend_from_slice(&old_content);
                 let map = &mut new_content[pg_constants::MAXALIGN_SIZE_OF_PAGE_HEADER_DATA..];
+
+                // Clear out the unwanted bytes.
                 map[trunc_byte + 1..].fill(0u8);
+
                 /*----
                  * Mask out the unwanted bits of the last remaining byte.
                  *
@@ -646,9 +660,11 @@ impl WalIngest {
                  *----
                  */
                 map[trunc_byte] &= (1 << trunc_offset) - 1;
+
                 modification.put_rel_page_image(rel, vm_page_no, new_content.freeze())?;
                 vm_page_no += 1;
             }
+
             let nblocks = get_relsize(modification, rel, ctx).await?;
             if nblocks > vm_page_no {
                 // check if something to do: VM is larger than truncate position
