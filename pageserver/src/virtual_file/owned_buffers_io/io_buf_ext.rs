@@ -1,5 +1,6 @@
 //! See [`FullSlice`].
 
+use crate::virtual_file::{IoBuffer, IoBufferMut};
 use bytes::{Bytes, BytesMut};
 use std::ops::{Deref, Range};
 use tokio_epoll_uring::{BoundedBuf, IoBuf, Slice};
@@ -76,3 +77,5 @@ macro_rules! impl_io_buf_ext {
 impl_io_buf_ext!(Bytes);
 impl_io_buf_ext!(BytesMut);
 impl_io_buf_ext!(Vec<u8>);
+impl_io_buf_ext!(IoBufferMut);
+impl_io_buf_ext!(IoBuffer);

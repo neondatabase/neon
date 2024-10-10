@@ -6,11 +6,11 @@ use crate::config::PageServerConf;
 use crate::context::RequestContext;
 use crate::page_cache;
 use crate::tenant::storage_layer::inmemory_layer::vectored_dio_read::File;
+use crate::virtual_file::owned_buffers_io::io_buf_aligned::IoBufAlignedMut;
 use crate::virtual_file::owned_buffers_io::slice::SliceMutExt;
 use crate::virtual_file::owned_buffers_io::util::size_tracking_writer;
 use crate::virtual_file::owned_buffers_io::write::Buffer;
-use crate::virtual_file::{self, owned_buffers_io, VirtualFile};
-use bytes::BytesMut;
+use crate::virtual_file::{self, owned_buffers_io, IoBufferMut, VirtualFile};
 use camino::Utf8PathBuf;
 use num_traits::Num;
 use pageserver_api::shard::TenantShardId;
@@ -27,7 +27,7 @@ pub struct EphemeralFile {
     page_cache_file_id: page_cache::FileId,
     bytes_written: u64,
     buffered_writer: owned_buffers_io::write::BufferedWriter<
-        BytesMut,
+        IoBufferMut,
         size_tracking_writer::Writer<VirtualFile>,
     >,
     /// Gate guard is held on as long as we need to do operations in the path (delete on drop)
@@ -54,7 +54,7 @@ impl EphemeralFile {
                 "ephemeral-{filename_disambiguator}"
             )));
 
-        let file = VirtualFile::open_with_options(
+        let file = VirtualFile::open_with_options_v2(
             &filename,
             virtual_file::OpenOptions::new()
                 .read(true)
@@ -73,7 +73,7 @@ impl EphemeralFile {
             bytes_written: 0,
             buffered_writer: owned_buffers_io::write::BufferedWriter::new(
                 size_tracking_writer::Writer::new(file),
-                BytesMut::with_capacity(TAIL_SZ),
+                IoBufferMut::with_capacity(TAIL_SZ),
             ),
             _gate_guard: gate_guard,
         })
@@ -107,15 +107,18 @@ impl EphemeralFile {
         self.page_cache_file_id
     }
 
-    pub(crate) async fn load_to_vec(&self, ctx: &RequestContext) -> Result<Vec<u8>, io::Error> {
+    pub(crate) async fn load_to_io_buf(
+        &self,
+        ctx: &RequestContext,
+    ) -> Result<IoBufferMut, io::Error> {
         let size = self.len().into_usize();
-        let vec = Vec::with_capacity(size);
-        let (slice, nread) = self.read_exact_at_eof_ok(0, vec.slice_full(), ctx).await?;
+        let buf = IoBufferMut::with_capacity(size);
+        let (slice, nread) = self.read_exact_at_eof_ok(0, buf.slice_full(), ctx).await?;
         assert_eq!(nread, size);
-        let vec = slice.into_inner();
-        assert_eq!(vec.len(), nread);
-        assert_eq!(vec.capacity(), size, "we shouldn't be reallocating");
-        Ok(vec)
+        let buf = slice.into_inner();
+        assert_eq!(buf.len(), nread);
+        assert_eq!(buf.capacity(), size, "we shouldn't be reallocating");
+        Ok(buf)
     }
 
     /// Returns the offset at which the first byte of the input was written, for use
@@ -158,7 +161,7 @@ impl EphemeralFile {
 }
 
 impl super::storage_layer::inmemory_layer::vectored_dio_read::File for EphemeralFile {
-    async fn read_exact_at_eof_ok<'a, 'b, B: tokio_epoll_uring::IoBufMut + Send>(
+    async fn read_exact_at_eof_ok<'a, 'b, B: IoBufAlignedMut + Send>(
         &'b self,
         start: u64,
         dst: tokio_epoll_uring::Slice<B>,
@@ -343,16 +346,22 @@ mod tests {
         }
 
         assert!(file.len() as usize == write_nbytes);
-        for i in 0..write_nbytes {
+        let align = virtual_file::get_io_buffer_alignment();
+
+        for i in (0..write_nbytes).step_by(align) {
             assert_eq!(value_offsets[i], i.into_u64());
-            let buf = Vec::with_capacity(1);
+            let buf = IoBufferMut::with_capacity(align);
             let (buf_slice, nread) = file
                 .read_exact_at_eof_ok(i.into_u64(), buf.slice_full(), &ctx)
                 .await
                 .unwrap();
             let buf = buf_slice.into_inner();
-            assert_eq!(nread, 1);
-            assert_eq!(&buf, &content[i..i + 1]);
+            if i + align > write_nbytes {
+                assert_eq!(nread, i % align);
+            } else {
+                assert_eq!(nread, align);
+            }
+            assert_eq!(&buf, &content[i..(i + align).min(write_nbytes)]);
         }
 
         let file_contents =
@@ -385,7 +394,7 @@ mod tests {
 
         // assert the state is as this test expects it to be
         assert_eq!(
-            &file.load_to_vec(&ctx).await.unwrap(),
+            &file.load_to_io_buf(&ctx).await.unwrap(),
             &content[0..cap + cap / 2]
         );
         let md = file
@@ -433,6 +442,7 @@ mod tests {
         file.write_raw(&content, &ctx).await.unwrap();
 
         let test_read = |start: usize, len: usize| {
+            println!("cap={cap}, start={start}, len={len}");
             let file = &file;
             let ctx = &ctx;
             let content = &content;
@@ -440,7 +450,7 @@ mod tests {
                 let (buf, nread) = file
                     .read_exact_at_eof_ok(
                         start.into_u64(),
-                        Vec::with_capacity(len).slice_full(),
+                        IoBufferMut::with_capacity(len).slice_full(),
                         ctx,
                     )
                     .await
@@ -450,16 +460,17 @@ mod tests {
             }
         };
 
+        let align = virtual_file::get_io_buffer_alignment();
         // completely within the file range
-        assert!(20 < cap, "test assumption");
-        test_read(10, 10).await;
+        assert!(align * 2 < cap, "test assumption");
+        test_read(align, align).await;
         // border onto edge of file
-        test_read(cap - 10, 10).await;
+        test_read(cap - align, align).await;
         // read across file and buffer
-        test_read(cap - 10, 20).await;
+        test_read(cap - align, align * 2).await;
         // stay from start of buffer
-        test_read(cap, 10).await;
+        test_read(cap, align).await;
         // completely within buffer
-        test_read(cap + 10, 10).await;
+        test_read(cap + align, align).await;
     }
 }

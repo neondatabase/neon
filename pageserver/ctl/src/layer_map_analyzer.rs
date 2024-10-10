@@ -7,6 +7,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use pageserver::context::{DownloadBehavior, RequestContext};
 use pageserver::task_mgr::TaskKind;
 use pageserver::tenant::{TENANTS_SEGMENT_NAME, TIMELINES_SEGMENT_NAME};
+use pageserver::virtual_file::api::IoMode;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::ops::Range;
@@ -152,7 +153,11 @@ pub(crate) async fn main(cmd: &AnalyzeLayerMapCmd) -> Result<()> {
     let ctx = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error);
 
     // Initialize virtual_file (file desriptor cache) and page cache which are needed to access layer persistent B-Tree.
-    pageserver::virtual_file::init(10, virtual_file::api::IoEngineKind::StdFs);
+    pageserver::virtual_file::init(
+        10,
+        virtual_file::api::IoEngineKind::StdFs,
+        IoMode::preferred(),
+    );
     pageserver::page_cache::init(100);
 
     let mut total_delta_layers = 0usize;
