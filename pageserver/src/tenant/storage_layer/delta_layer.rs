@@ -1539,7 +1539,9 @@ impl<'a> DeltaLayerIterator<'a> {
                 let lsn = DeltaKey::extract_lsn_from_buf(&raw_key);
                 let blob_ref = BlobRef(value);
                 let offset = blob_ref.pos();
-                if let Some(batch_plan) = self.planner.handle(key, lsn, offset) {
+                if let Some(batch_plan) =
+                    self.planner.handle(key, lsn, offset, blob_ref.will_init())
+                {
                     break batch_plan;
                 }
             } else {

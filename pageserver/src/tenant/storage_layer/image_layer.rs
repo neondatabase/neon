@@ -1073,6 +1073,7 @@ impl<'a> ImageLayerIterator<'a> {
                     Key::from_slice(&raw_key[..KEY_SIZE]),
                     self.image_layer.lsn,
                     offset,
+                    true,
                 ) {
                     break batch_plan;
                 }
