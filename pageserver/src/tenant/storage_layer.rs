@@ -232,16 +232,6 @@ impl ValuesReconstructState {
         self.io_concurrency.spawn_io(fut);
     }
 
-    /// Associate a key with the error which it encountered and mark it as done
-    pub(crate) fn on_key_error(&mut self, key: Key, err: PageReconstructError) {
-        let previous = self.keys.insert(key, Err(err));
-        if let Some(Ok(state)) = previous {
-            if state.situation == ValueReconstructSituation::Continue {
-                self.keys_done.add_key(key);
-            }
-        }
-    }
-
     pub(crate) fn on_layer_visited(&mut self, layer: &ReadableLayer) {
         self.layers_visited += 1;
         if let ReadableLayer::PersistentLayer(layer) = layer {

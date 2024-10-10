@@ -622,9 +622,6 @@ impl ImageLayerInner {
                 }
             }
 
-            // Why did on_key_error go away?
-            // There was a good reason for it ...
-
             let read_from = self.file.clone();
             let read_ctx = ctx.attached_child();
             reconstruct_state.spawn_io(async move {
@@ -657,7 +654,6 @@ impl ImageLayerInner {
                     }
                     Err(err) => {
                         for (_, sender) in senders {
-                            // TODO: when can this fail?
                             let _ = sender
                                 .send(Err(std::io::Error::new(err.kind(), "vec read failed")));
                         }
