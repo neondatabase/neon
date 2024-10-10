@@ -70,6 +70,14 @@ def base_dir() -> Iterator[Path]:
     yield base_dir
 
 
+@pytest.fixture(scope="session")
+def compute_config_dir(base_dir: Path) -> Iterator[Path]:
+    """
+    Retrieve the path to the compute configuration directory.
+    """
+    yield base_dir / "compute" / "etc"
+
+
 @pytest.fixture(scope="function")
 def neon_binpath(base_dir: Path, build_type: str) -> Iterator[Path]:
     if os.getenv("REMOTE_ENV"):
