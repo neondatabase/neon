@@ -144,6 +144,45 @@ paths:
                 description: Error text or 'true' if check passed.
                 example: "true"
 
+  /extensions/install:
+    post:
+      tags:
+      - Extensions
+      summary: Install extension if possible.
+      description: ""
+      operationId: installExtension
+      requestBody:
+        description: Extension name and database to install it to.
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - extension
+                - database
+              properties:
+                extension:
+                  type: string
+                  description: Extension name.
+                database:
+                  type: string
+                  description: Database name.
+                  example: "neondb"
+      responses:
+        200:
+          description: Result from extension installation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExtensionInstallResult"
+        500:
+          description: Error during extension installation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericError"
+
   /configure:
     post:
       tags:
@@ -408,6 +447,16 @@ components:
         - configuration_pending
         - configuration
       example: running
+
+    ExtensionInstallResult:
+      type: object
+      properties:
+        extension:
+          description: Name of the extension.
+          type: string
+        version:
+          description: Version of the extension.
+          type: string
 
     InstalledExtensions:
       type: object

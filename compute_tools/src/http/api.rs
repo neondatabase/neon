@@ -10,6 +10,7 @@ use crate::catalog::{get_database_schema, get_dbs_and_roles};
 use crate::compute::forward_termination_signal;
 use crate::compute::{ComputeNode, ComputeState, ParsedSpec};
 use compute_api::requests::ConfigurationRequest;
+use compute_api::responses::ExtensionInstallResult;
 use compute_api::responses::{ComputeStatus, ComputeStatusResponse, GenericAPIError};
 
 use anyhow::Result;
@@ -94,6 +95,38 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
                 Err(e) => {
                     error!("check_writability failed: {}", e);
                     Response::new(Body::from(e.to_string()))
+                }
+            }
+        }
+
+        (&Method::POST, "/extensions/install") => {
+            info!("serving /extensions/install POST request");
+            let status = compute.get_status();
+            if status != ComputeStatus::Running {
+                let msg = format!(
+                    "invalid compute status for extensions request: {:?}",
+                    status
+                );
+                error!(msg);
+                return Response::new(Body::from(msg));
+            }
+
+            let body = hyper::body::to_bytes(req.into_body()).await.unwrap();
+            let body = serde_json::from_slice::<serde_json::Value>(&body).unwrap();
+            let extension = body["extension"].as_str().unwrap();
+            let database = body["database"].as_str().unwrap();
+            let res = compute.install_extension(extension, database);
+            match res {
+                Ok(res) => render_json(Body::from(
+                    serde_json::to_string(&ExtensionInstallResult {
+                        extension: extension.to_string(),
+                        version: res,
+                    })
+                    .unwrap(),
+                )),
+                Err(e) => {
+                    error!("install_extension failed: {}", e);
+                    render_json_error(&e.to_string(), StatusCode::INTERNAL_SERVER_ERROR)
                 }
             }
         }
