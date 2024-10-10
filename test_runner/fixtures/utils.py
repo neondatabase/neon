@@ -54,7 +54,7 @@ VERSIONS_COMBINATIONS = (
     {"storage_controller": "new", "storage_broker": "old", "compute": "old", "safekeeper": "new", "pageserver": "old"},
     {"storage_controller": "old", "storage_broker": "new", "compute": "new", "safekeeper": "old", "pageserver": "old"},
 )
-
+# fmt: on
 
 def subprocess_capture(
     capture_dir: Path,
