@@ -1300,11 +1300,11 @@ def test_storage_controller_heartbeats(
     node_to_tenants = build_node_to_tenants_map(env)
     log.info(f"Back online: {node_to_tenants=}")
 
-    # ... expecting the storage controller to reach a consistent state
-    def storage_controller_consistent():
-        env.storage_controller.consistency_check()
+    # ... background reconciliation may need to run to clean up the location on the node that was offline
+    env.storage_controller.reconcile_until_idle()
 
-    wait_until(30, 1, storage_controller_consistent)
+    # ... expecting the storage controller to reach a consistent state
+    env.storage_controller.consistency_check()
 
 
 def test_storage_controller_re_attach(neon_env_builder: NeonEnvBuilder):
