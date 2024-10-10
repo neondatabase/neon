@@ -10,6 +10,7 @@ use crate::catalog::{get_database_schema, get_dbs_and_roles};
 use crate::compute::forward_termination_signal;
 use crate::compute::{ComputeNode, ComputeState, ParsedSpec};
 use compute_api::requests::ConfigurationRequest;
+use compute_api::responses::ExtensionInstallResult;
 use compute_api::responses::{ComputeStatus, ComputeStatusResponse, GenericAPIError};
 
 use anyhow::Result;
@@ -116,7 +117,13 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
             let database = body["database"].as_str().unwrap();
             let res = compute.install_extension(extension, database);
             match res {
-                Ok(_) => Response::new(Body::from("true")),
+                Ok(res) => render_json(Body::from(
+                    serde_json::to_string(&ExtensionInstallResult {
+                        extension: extension.to_string(),
+                        version: res,
+                    })
+                    .unwrap(),
+                )),
                 Err(e) => {
                     error!("install_extension failed: {}", e);
                     render_json_error(&e.to_string(), StatusCode::INTERNAL_SERVER_ERROR)

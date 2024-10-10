@@ -1368,7 +1368,7 @@ LIMIT 100",
         download_size
     }
 
-    pub fn install_extension(&self, ext_name: &str, db_name: &str) -> Result<()> {
+    pub fn install_extension(&self, ext_name: &str, db_name: &str) -> Result<String> {
         let mut conf =
             Config::from_str(self.connstr.as_str()).context("Failed to parse connection string")?;
         conf.dbname(db_name);
@@ -1387,7 +1387,17 @@ LIMIT 100",
             .execute(&query, &[])
             .context(format!("Failed to execute query: {}", query))?;
 
-        Ok(())
+        let version_query = format!(
+            "SELECT extversion FROM pg_extension WHERE extname = '{}'",
+            ext_name.to_string().pg_quote()
+        );
+
+        let version: String = db_client
+            .query_one(&version_query, &[])
+            .context(format!("Failed to execute query: {}", version_query))?
+            .get(0);
+
+        Ok(version)
     }
 
     #[tokio::main]
