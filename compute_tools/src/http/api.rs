@@ -119,7 +119,7 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
                 Ok(_) => Response::new(Body::from("true")),
                 Err(e) => {
                     error!("install_extension failed: {}", e);
-                    Response::new(Body::from(e.to_string()))
+                    render_json_error(&e.to_string(), StatusCode::INTERNAL_SERVER_ERROR)
                 }
             }
         }
