@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import pytest
 from fixtures.common_types import TenantId, TimelineArchivalState, TimelineId
 from fixtures.neon_fixtures import (
@@ -46,10 +48,11 @@ def test_timeline_archive(neon_env_builder: NeonEnvBuilder, shard_count: int):
 
     # construct a pair of branches to validate that pageserver prohibits
     # archival of ancestor timelines when they have non-archived child branches
-    parent_timeline_id = env.neon_cli.create_branch("test_ancestor_branch_archive_parent")
+    parent_timeline_id = env.create_branch("test_ancestor_branch_archive_parent")
 
-    leaf_timeline_id = env.neon_cli.create_branch(
-        "test_ancestor_branch_archive_branch1", "test_ancestor_branch_archive_parent"
+    leaf_timeline_id = env.create_branch(
+        "test_ancestor_branch_archive_branch1",
+        ancestor_branch_name="test_ancestor_branch_archive_parent",
     )
 
     with pytest.raises(

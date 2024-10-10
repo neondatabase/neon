@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import random
 from contextlib import closing
 from typing import Optional
@@ -169,7 +171,7 @@ def test_pageserver_chaos(
 
     # Use a tiny checkpoint distance, to create a lot of layers quickly.
     # That allows us to stress the compaction and layer flushing logic more.
-    tenant, _ = env.neon_cli.create_tenant(
+    tenant, _ = env.create_tenant(
         conf={
             "checkpoint_distance": "5000000",
         }

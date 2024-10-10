@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import pathlib
 
@@ -31,7 +33,7 @@ def test_createdb(neon_simple_env: NeonEnv, strategy: str):
         lsn = query_scalar(cur, "SELECT pg_current_wal_insert_lsn()")
 
     # Create a branch
-    env.neon_cli.create_branch("test_createdb2", "main", ancestor_start_lsn=lsn)
+    env.create_branch("test_createdb2", ancestor_branch_name="main", ancestor_start_lsn=lsn)
     endpoint2 = env.endpoints.create_start("test_createdb2")
 
     # Test that you can connect to the new database on both branches
@@ -77,10 +79,14 @@ def test_dropdb(neon_simple_env: NeonEnv, test_output_dir):
         lsn_after_drop = query_scalar(cur, "SELECT pg_current_wal_insert_lsn()")
 
     # Create two branches before and after database drop.
-    env.neon_cli.create_branch("test_before_dropdb", "main", ancestor_start_lsn=lsn_before_drop)
+    env.create_branch(
+        "test_before_dropdb", ancestor_branch_name="main", ancestor_start_lsn=lsn_before_drop
+    )
     endpoint_before = env.endpoints.create_start("test_before_dropdb")
 
-    env.neon_cli.create_branch("test_after_dropdb", "main", ancestor_start_lsn=lsn_after_drop)
+    env.create_branch(
+        "test_after_dropdb", ancestor_branch_name="main", ancestor_start_lsn=lsn_after_drop
+    )
     endpoint_after = env.endpoints.create_start("test_after_dropdb")
 
     # Test that database exists on the branch before drop

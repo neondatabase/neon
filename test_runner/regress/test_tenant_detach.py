@@ -1,9 +1,11 @@
+from __future__ import annotations
+
 import asyncio
 import enum
 import random
 import time
 from threading import Thread
-from typing import List, Optional
+from typing import TYPE_CHECKING
 
 import asyncpg
 import pytest
@@ -25,6 +27,10 @@ from fixtures.remote_storage import (
 )
 from fixtures.utils import query_scalar, wait_until
 from prometheus_client.samples import Sample
+
+if TYPE_CHECKING:
+    from typing import Optional
+
 
 # In tests that overlap endpoint activity with tenant attach/detach, there are
 # a variety of warnings that the page service may emit when it cannot acquire
@@ -72,7 +78,7 @@ def test_tenant_reattach(neon_env_builder: NeonEnvBuilder, mode: str):
     pageserver_http = env.pageserver.http_client()
 
     # create new nenant
-    tenant_id, timeline_id = env.neon_cli.create_tenant()
+    tenant_id, timeline_id = env.create_tenant()
 
     env.pageserver.allowed_errors.extend(PERMIT_PAGE_SERVICE_ERRORS)
 
@@ -241,7 +247,7 @@ def test_tenant_reattach_while_busy(
     pageserver_http = env.pageserver.http_client()
 
     # create new nenant
-    tenant_id, timeline_id = env.neon_cli.create_tenant(
+    tenant_id, timeline_id = env.create_tenant(
         # Create layers aggressively
         conf={"checkpoint_distance": "100000"}
     )
@@ -492,7 +498,7 @@ def test_metrics_while_ignoring_broken_tenant_and_reloading(
         r".* Changing Active tenant to Broken state, reason: broken from test"
     )
 
-    def only_int(samples: List[Sample]) -> Optional[int]:
+    def only_int(samples: list[Sample]) -> Optional[int]:
         if len(samples) == 1:
             return int(samples[0].value)
         assert len(samples) == 0

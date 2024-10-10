@@ -1,23 +1,28 @@
+from __future__ import annotations
+
 from collections import defaultdict
-from typing import Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING
 
 from prometheus_client.parser import text_string_to_metric_families
 from prometheus_client.samples import Sample
 
 from fixtures.log_helper import log
 
+if TYPE_CHECKING:
+    from typing import Optional
+
 
 class Metrics:
-    metrics: Dict[str, List[Sample]]
+    metrics: dict[str, list[Sample]]
     name: str
 
     def __init__(self, name: str = ""):
         self.metrics = defaultdict(list)
         self.name = name
 
-    def query_all(self, name: str, filter: Optional[Dict[str, str]] = None) -> List[Sample]:
+    def query_all(self, name: str, filter: Optional[dict[str, str]] = None) -> list[Sample]:
         filter = filter or {}
-        res = []
+        res: list[Sample] = []
 
         for sample in self.metrics[name]:
             try:
@@ -27,7 +32,7 @@ class Metrics:
                 pass
         return res
 
-    def query_one(self, name: str, filter: Optional[Dict[str, str]] = None) -> Sample:
+    def query_one(self, name: str, filter: Optional[dict[str, str]] = None) -> Sample:
         res = self.query_all(name, filter or {})
         assert len(res) == 1, f"expected single sample for {name} {filter}, found {res}"
         return res[0]
@@ -43,7 +48,7 @@ class MetricsGetter:
         raise NotImplementedError()
 
     def get_metric_value(
-        self, name: str, filter: Optional[Dict[str, str]] = None
+        self, name: str, filter: Optional[dict[str, str]] = None
     ) -> Optional[float]:
         metrics = self.get_metrics()
         results = metrics.query_all(name, filter=filter)
@@ -54,8 +59,8 @@ class MetricsGetter:
         return results[0].value
 
     def get_metrics_values(
-        self, names: list[str], filter: Optional[Dict[str, str]] = None, absence_ok=False
-    ) -> Dict[str, float]:
+        self, names: list[str], filter: Optional[dict[str, str]] = None, absence_ok: bool = False
+    ) -> dict[str, float]:
         """
         When fetching multiple named metrics, it is more efficient to use this
         than to call `get_metric_value` repeatedly.
@@ -97,7 +102,7 @@ def parse_metrics(text: str, name: str = "") -> Metrics:
     return metrics
 
 
-def histogram(prefix_without_trailing_underscore: str) -> List[str]:
+def histogram(prefix_without_trailing_underscore: str) -> list[str]:
     assert not prefix_without_trailing_underscore.endswith("_")
     return [f"{prefix_without_trailing_underscore}_{x}" for x in ["bucket", "count", "sum"]]
 
@@ -107,7 +112,7 @@ def counter(name: str) -> str:
     return f"{name}_total"
 
 
-PAGESERVER_PER_TENANT_REMOTE_TIMELINE_CLIENT_METRICS: Tuple[str, ...] = (
+PAGESERVER_PER_TENANT_REMOTE_TIMELINE_CLIENT_METRICS: tuple[str, ...] = (
     "pageserver_remote_timeline_client_calls_started_total",
     "pageserver_remote_timeline_client_calls_finished_total",
     "pageserver_remote_physical_size",
@@ -115,7 +120,7 @@ PAGESERVER_PER_TENANT_REMOTE_TIMELINE_CLIENT_METRICS: Tuple[str, ...] = (
     "pageserver_remote_timeline_client_bytes_finished_total",
 )
 
-PAGESERVER_GLOBAL_METRICS: Tuple[str, ...] = (
+PAGESERVER_GLOBAL_METRICS: tuple[str, ...] = (
     "pageserver_storage_operations_seconds_global_count",
     "pageserver_storage_operations_seconds_global_sum",
     "pageserver_storage_operations_seconds_global_bucket",
@@ -147,7 +152,7 @@ PAGESERVER_GLOBAL_METRICS: Tuple[str, ...] = (
     counter("pageserver_tenant_throttling_count_global"),
 )
 
-PAGESERVER_PER_TENANT_METRICS: Tuple[str, ...] = (
+PAGESERVER_PER_TENANT_METRICS: tuple[str, ...] = (
     "pageserver_current_logical_size",
     "pageserver_resident_physical_size",
     "pageserver_io_operations_bytes_total",

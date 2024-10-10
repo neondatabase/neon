@@ -1,7 +1,9 @@
+from __future__ import annotations
+
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
@@ -17,6 +19,10 @@ from fixtures.utils import get_scale_for_db, humantime_to_ms
 from performance.pageserver.util import (
     setup_pageserver_with_tenants,
 )
+
+if TYPE_CHECKING:
+    from typing import Any
+
 
 # The following tests use pagebench "getpage at latest LSN" to characterize the throughput of the pageserver.
 # originally there was a single test named `test_pageserver_max_throughput_getpage_at_latest_lsn``
@@ -92,7 +98,7 @@ def setup_and_run_pagebench_benchmark(
             metric_name=f"pageserver_max_throughput_getpage_at_latest_lsn.{metric}", **kwargs
         )
 
-    params: Dict[str, Tuple[Any, Dict[str, Any]]] = {}
+    params: dict[str, tuple[Any, dict[str, Any]]] = {}
 
     # params from fixtures
     params.update(
@@ -162,7 +168,7 @@ def setup_tenant_template(env: NeonEnv, pg_bin: PgBin, scale: int):
         "checkpoint_distance": 268435456,
         "image_creation_threshold": 3,
     }
-    template_tenant, template_timeline = env.neon_cli.create_tenant(set_default=True)
+    template_tenant, template_timeline = env.create_tenant(set_default=True)
     env.pageserver.tenant_detach(template_tenant)
     env.pageserver.tenant_attach(template_tenant, config)
     ps_http = env.pageserver.http_client()
@@ -225,7 +231,7 @@ def run_pagebench_benchmark(
     results_path = Path(basepath + ".stdout")
     log.info(f"Benchmark results at: {results_path}")
 
-    with open(results_path, "r") as f:
+    with open(results_path) as f:
         results = json.load(f)
     log.info(f"Results:\n{json.dumps(results, sort_keys=True, indent=2)}")
 

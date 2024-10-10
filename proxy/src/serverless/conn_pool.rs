@@ -17,7 +17,7 @@ use tokio_postgres::tls::NoTlsStream;
 use tokio_postgres::{AsyncMessage, ReadyForQueryStatus, Socket};
 use tokio_util::sync::CancellationToken;
 
-use crate::console::messages::{ColdStartInfo, MetricsAuxInfo};
+use crate::control_plane::messages::{ColdStartInfo, MetricsAuxInfo};
 use crate::metrics::{HttpEndpointPoolsGuard, Metrics};
 use crate::usage_metrics::{Ids, MetricCounter, USAGE_METRICS};
 use crate::{
@@ -760,7 +760,7 @@ mod tests {
                 endpoint_id: (&EndpointId::from("endpoint")).into(),
                 project_id: (&ProjectId::from("project")).into(),
                 branch_id: (&BranchId::from("branch")).into(),
-                cold_start_info: crate::console::messages::ColdStartInfo::Warm,
+                cold_start_info: crate::control_plane::messages::ColdStartInfo::Warm,
             },
             conn_id: uuid::Uuid::new_v4(),
         }

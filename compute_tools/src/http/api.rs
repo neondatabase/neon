@@ -165,6 +165,32 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
             }
         }
 
+        // get the list of installed extensions
+        // currently only used in python tests
+        // TODO: call it from cplane
+        (&Method::GET, "/installed_extensions") => {
+            info!("serving /installed_extensions GET request");
+            let status = compute.get_status();
+            if status != ComputeStatus::Running {
+                let msg = format!(
+                    "invalid compute status for extensions request: {:?}",
+                    status
+                );
+                error!(msg);
+                return Response::new(Body::from(msg));
+            }
+
+            let connstr = compute.connstr.clone();
+            let res = crate::installed_extensions::get_installed_extensions(connstr).await;
+            match res {
+                Ok(res) => render_json(Body::from(serde_json::to_string(&res).unwrap())),
+                Err(e) => render_json_error(
+                    &format!("could not get list of installed extensions: {}", e),
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                ),
+            }
+        }
+
         // download extension files from remote extension storage on demand
         (&Method::POST, route) if route.starts_with("/extension_server/") => {
             info!("serving {:?} POST request", route);
@@ -288,8 +314,7 @@ async fn handle_configure_request(
                 return Err((msg, StatusCode::PRECONDITION_FAILED));
             }
             state.pspec = Some(parsed_spec);
-            state.status = ComputeStatus::ConfigurationPending;
-            compute.state_changed.notify_all();
+            state.set_status(ComputeStatus::ConfigurationPending, &compute.state_changed);
             drop(state);
             info!("set new spec and notified waiters");
         }
@@ -362,15 +387,15 @@ async fn handle_terminate_request(compute: &Arc<ComputeNode>) -> Result<(), (Str
         }
         if state.status != ComputeStatus::Empty && state.status != ComputeStatus::Running {
             let msg = format!(
-                "invalid compute status for termination request: {:?}",
-                state.status.clone()
+                "invalid compute status for termination request: {}",
+                state.status
             );
             return Err((msg, StatusCode::PRECONDITION_FAILED));
         }
-        state.status = ComputeStatus::TerminationPending;
-        compute.state_changed.notify_all();
+        state.set_status(ComputeStatus::TerminationPending, &compute.state_changed);
         drop(state);
     }
+
     forward_termination_signal();
     info!("sent signal and notified waiters");
 
@@ -384,7 +409,8 @@ async fn handle_terminate_request(compute: &Arc<ComputeNode>) -> Result<(), (Str
         while state.status != ComputeStatus::Terminated {
             state = c.state_changed.wait(state).unwrap();
             info!(
-                "waiting for compute to become Terminated, current status: {:?}",
+                "waiting for compute to become {}, current status: {:?}",
+                ComputeStatus::Terminated,
                 state.status
             );
         }

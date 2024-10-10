@@ -11,7 +11,7 @@ use try_lock::TryLock;
 use uuid::Uuid;
 
 use crate::{
-    console::messages::{ColdStartInfo, MetricsAuxInfo},
+    control_plane::messages::{ColdStartInfo, MetricsAuxInfo},
     error::ErrorKind,
     intern::{BranchIdInt, ProjectIdInt},
     metrics::{ConnectOutcome, InvalidEndpointsGroup, LatencyTimer, Metrics, Protocol, Waiting},

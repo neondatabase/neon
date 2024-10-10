@@ -97,5 +97,8 @@ select = [
     "I", # isort
     "W", # pycodestyle
     "B", # bugbear
-    "UP032", # f-string
+    "UP", # pyupgrade
 ]
+
+[tool.ruff.lint.pyupgrade]
+keep-runtime-typing = true # Remove this stanza when we require Python 3.10

@@ -25,7 +25,10 @@ use utils::lsn::Lsn;
 
 use crate::{
     control_file::{FileStorage, Storage},
-    metrics::{MANAGER_ACTIVE_CHANGES, MANAGER_ITERATIONS_TOTAL, MISC_OPERATION_SECONDS},
+    metrics::{
+        MANAGER_ACTIVE_CHANGES, MANAGER_ITERATIONS_TOTAL, MISC_OPERATION_SECONDS,
+        NUM_EVICTED_TIMELINES,
+    },
     rate_limit::{rand_duration, RateLimiter},
     recovery::recovery_main,
     remove_wal::calc_horizon_lsn,
@@ -47,7 +50,7 @@ pub(crate) struct StateSnapshot {
     pub(crate) remote_consistent_lsn: Lsn,
 
     // persistent control file values
-    pub(crate) cfile_peer_horizon_lsn: Lsn,
+    pub(crate) cfile_commit_lsn: Lsn,
     pub(crate) cfile_remote_consistent_lsn: Lsn,
     pub(crate) cfile_backup_lsn: Lsn,
 
@@ -70,7 +73,7 @@ impl StateSnapshot {
             commit_lsn: state.inmem.commit_lsn,
             backup_lsn: state.inmem.backup_lsn,
             remote_consistent_lsn: state.inmem.remote_consistent_lsn,
-            cfile_peer_horizon_lsn: state.peer_horizon_lsn,
+            cfile_commit_lsn: state.commit_lsn,
             cfile_remote_consistent_lsn: state.remote_consistent_lsn,
             cfile_backup_lsn: state.backup_lsn,
             flush_lsn: read_guard.sk.flush_lsn(),
@@ -251,6 +254,11 @@ pub async fn main_task(
         mgr.recovery_task = Some(tokio::spawn(recovery_main(tli, mgr.conf.clone())));
     }
 
+    // If timeline is evicted, reflect that in the metric.
+    if mgr.is_offloaded {
+        NUM_EVICTED_TIMELINES.inc();
+    }
+
     let last_state = 'outer: loop {
         MANAGER_ITERATIONS_TOTAL.inc();
 
@@ -365,6 +373,11 @@ pub async fn main_task(
     if let Some(wal_removal_task) = &mut mgr.wal_removal_task {
         let res = wal_removal_task.await;
         mgr.update_wal_removal_end(res);
+    }
+
+    // If timeline is deleted while evicted decrement the gauge.
+    if mgr.tli.is_cancelled() && mgr.is_offloaded {
+        NUM_EVICTED_TIMELINES.dec();
     }
 
     mgr.set_status(Status::Finished);

@@ -14,11 +14,10 @@ use clap::{command, Parser};
 use futures_core::Stream;
 use futures_util::StreamExt;
 use http_body_util::Full;
+use hyper::body::Incoming;
 use hyper::header::CONTENT_TYPE;
 use hyper::service::service_fn;
 use hyper::{Method, StatusCode};
-use hyper_1 as hyper;
-use hyper_1::body::Incoming;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -683,7 +682,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         builder
             .http2()
             .timer(TokioTimer::new())
-            .keep_alive_interval(Some(args.http2_keepalive_interval));
+            .keep_alive_interval(Some(args.http2_keepalive_interval))
+            // This matches the tonic server default. It allows us to support production-like workloads.
+            .max_concurrent_streams(None);
 
         let storage_broker_server_cloned = storage_broker_server.clone();
         let connect_info = stream.connect_info();

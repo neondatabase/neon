@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import re
 import shutil
@@ -5,7 +7,7 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import TYPE_CHECKING
 
 import pytest
 import toml
@@ -24,6 +26,10 @@ from fixtures.pageserver.utils import (
 from fixtures.pg_version import PgVersion
 from fixtures.remote_storage import RemoteStorageKind, S3Storage, s3_storage
 from fixtures.workload import Workload
+
+if TYPE_CHECKING:
+    from typing import Optional
+
 
 #
 # A test suite that help to prevent unintentionally breaking backward or forward compatibility between Neon releases.
@@ -366,7 +372,7 @@ def check_neon_works(env: NeonEnv, test_output_dir: Path, sql_dump_path: Path, r
 
 
 def dump_differs(
-    first: Path, second: Path, output: Path, allowed_diffs: Optional[List[str]] = None
+    first: Path, second: Path, output: Path, allowed_diffs: Optional[list[str]] = None
 ) -> bool:
     """
     Runs diff(1) command on two SQL dumps and write the output to the given output file.
@@ -517,7 +523,7 @@ def test_historic_storage_formats(
     assert metadata_summary["tenant_count"] >= 1
     assert metadata_summary["timeline_count"] >= 1
 
-    env.neon_cli.import_tenant(dataset.tenant_id)
+    env.neon_cli.tenant_import(dataset.tenant_id)
 
     # Discover timelines
     timelines = env.pageserver.http_client().timeline_list(dataset.tenant_id)

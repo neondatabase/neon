@@ -1,8 +1,11 @@
+from __future__ import annotations
+
 import enum
 import time
 from collections import Counter
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, Tuple
+from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.common_types import Lsn, TenantId, TimelineId
@@ -18,6 +21,10 @@ from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pageserver.utils import wait_for_upload_queue_empty
 from fixtures.remote_storage import RemoteStorageKind
 from fixtures.utils import human_bytes, wait_until
+
+if TYPE_CHECKING:
+    from typing import Any
+
 
 GLOBAL_LRU_LOG_LINE = "tenant_min_resident_size-respecting LRU would not relieve pressure, evicting more following global LRU policy"
 
@@ -59,11 +66,11 @@ def test_min_resident_size_override_handling(
     env.pageserver.stop()
     env.pageserver.start()
 
-    tenant_id, _ = env.neon_cli.create_tenant()
+    tenant_id, _ = env.create_tenant()
     assert_overrides(tenant_id, config_level_override)
 
     # Also ensure that specifying the paramter to create_tenant works, in addition to http-level recconfig.
-    tenant_id, _ = env.neon_cli.create_tenant(conf={"min_resident_size_override": "100"})
+    tenant_id, _ = env.create_tenant(conf={"min_resident_size_override": "100"})
     assert_config(tenant_id, 100, 100)
     ps_http.set_tenant_config(tenant_id, {})
     assert_config(tenant_id, None, config_level_override)
@@ -74,7 +81,7 @@ class EvictionOrder(str, enum.Enum):
     RELATIVE_ORDER_EQUAL = "relative_equal"
     RELATIVE_ORDER_SPARE = "relative_spare"
 
-    def config(self) -> Dict[str, Any]:
+    def config(self) -> dict[str, Any]:
         if self == EvictionOrder.RELATIVE_ORDER_EQUAL:
             return {
                 "type": "RelativeAccessed",
@@ -91,12 +98,12 @@ class EvictionOrder(str, enum.Enum):
 
 @dataclass
 class EvictionEnv:
-    timelines: list[Tuple[TenantId, TimelineId]]
+    timelines: list[tuple[TenantId, TimelineId]]
     neon_env: NeonEnv
     pg_bin: PgBin
     pageserver_http: PageserverHttpClient
     layer_size: int
-    pgbench_init_lsns: Dict[TenantId, Lsn]
+    pgbench_init_lsns: dict[TenantId, Lsn]
 
     @property
     def pageserver(self):
@@ -105,7 +112,7 @@ class EvictionEnv:
         """
         return self.neon_env.pageserver
 
-    def timelines_du(self, pageserver: NeonPageserver) -> Tuple[int, int, int]:
+    def timelines_du(self, pageserver: NeonPageserver) -> tuple[int, int, int]:
         return poor_mans_du(
             self.neon_env,
             [(tid, tlid) for tid, tlid in self.timelines],
@@ -113,13 +120,13 @@ class EvictionEnv:
             verbose=False,
         )
 
-    def du_by_timeline(self, pageserver: NeonPageserver) -> Dict[Tuple[TenantId, TimelineId], int]:
+    def du_by_timeline(self, pageserver: NeonPageserver) -> dict[tuple[TenantId, TimelineId], int]:
         return {
             (tid, tlid): poor_mans_du(self.neon_env, [(tid, tlid)], pageserver, verbose=True)[0]
             for tid, tlid in self.timelines
         }
 
-    def count_layers_per_tenant(self, pageserver: NeonPageserver) -> Dict[TenantId, int]:
+    def count_layers_per_tenant(self, pageserver: NeonPageserver) -> dict[TenantId, int]:
         return count_layers_per_tenant(pageserver, self.timelines)
 
     def warm_up_tenant(self, tenant_id: TenantId):
@@ -204,8 +211,8 @@ class EvictionEnv:
 
 
 def count_layers_per_tenant(
-    pageserver: NeonPageserver, timelines: Iterable[Tuple[TenantId, TimelineId]]
-) -> Dict[TenantId, int]:
+    pageserver: NeonPageserver, timelines: Iterable[tuple[TenantId, TimelineId]]
+) -> dict[TenantId, int]:
     ret: Counter[TenantId] = Counter()
 
     for tenant_id, timeline_id in timelines:
@@ -279,8 +286,8 @@ def _eviction_env(
 
 def pgbench_init_tenant(
     layer_size: int, scale: int, env: NeonEnv, pg_bin: PgBin
-) -> Tuple[TenantId, TimelineId]:
-    tenant_id, timeline_id = env.neon_cli.create_tenant(
+) -> tuple[TenantId, TimelineId]:
+    tenant_id, timeline_id = env.create_tenant(
         conf={
             "gc_period": "0s",
             "compaction_period": "0s",
@@ -672,10 +679,10 @@ def test_fast_growing_tenant(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin, or
 
 def poor_mans_du(
     env: NeonEnv,
-    timelines: Iterable[Tuple[TenantId, TimelineId]],
+    timelines: Iterable[tuple[TenantId, TimelineId]],
     pageserver: NeonPageserver,
     verbose: bool = False,
-) -> Tuple[int, int, int]:
+) -> tuple[int, int, int]:
     """
     Disk usage, largest, smallest layer for layer files over the given (tenant, timeline) tuples;
     this could be done over layers endpoint just as well.

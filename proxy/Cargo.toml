@@ -38,8 +38,8 @@ hostname.workspace = true
 http.workspace = true
 humantime.workspace = true
 humantime-serde.workspace = true
-hyper.workspace = true
-hyper1 = { package = "hyper", version = "1.2", features = ["server"] }
+hyper0.workspace = true
+hyper = { workspace = true, features = ["server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["server", "http1", "http2", "tokio"] }
 http-body-util = { version = "0.1" }
 indexmap.workspace = true
@@ -77,7 +77,7 @@ subtle.workspace = true
 thiserror.workspace = true
 tikv-jemallocator.workspace = true
 tikv-jemalloc-ctl = { workspace = true, features = ["use_std"] }
-tokio-postgres.workspace = true
+tokio-postgres = { workspace = true, features = ["with-serde_json-1"] }
 tokio-postgres-rustls.workspace = true
 tokio-rustls.workspace = true
 tokio-util.workspace = true
@@ -101,7 +101,7 @@ jose-jwa = "0.1.2"
 jose-jwk = { version = "0.1.2", features = ["p256", "p384", "rsa"] }
 signature = "2"
 ecdsa = "0.16"
-p256 = "0.13"
+p256 = { version = "0.13", features = ["jwk"] }
 rsa = "0.9"
 
 workspace_hack.workspace = true

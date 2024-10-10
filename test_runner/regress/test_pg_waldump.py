@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import shutil
 
@@ -12,7 +14,7 @@ def check_wal_segment(pg_waldump_path: str, segment_path: str, test_output_dir):
         test_output_dir, [pg_waldump_path, "--ignore", segment_path]
     )
 
-    with open(f"{output_path}.stdout", "r") as f:
+    with open(f"{output_path}.stdout") as f:
         stdout = f.read()
         assert "ABORT" in stdout
         assert "COMMIT" in stdout

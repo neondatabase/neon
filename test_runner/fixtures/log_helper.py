@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import logging
 import logging.config
 
@@ -29,7 +31,7 @@ LOGGING = {
 }
 
 
-def getLogger(name="root") -> logging.Logger:
+def getLogger(name: str = "root") -> logging.Logger:
     """Method to get logger for tests.
 
     Should be used to get correctly initialized logger."""

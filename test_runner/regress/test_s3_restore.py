@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import time
 from datetime import datetime, timezone
 
@@ -60,9 +62,7 @@ def test_tenant_s3_restore(
     last_flush_lsns = []
 
     for timeline in ["first", "second"]:
-        timeline_id = env.neon_cli.create_branch(
-            timeline, tenant_id=tenant_id, ancestor_branch_name=parent
-        )
+        timeline_id = env.create_branch(timeline, ancestor_branch_name=parent, tenant_id=tenant_id)
         with env.endpoints.create_start(timeline, tenant_id=tenant_id) as endpoint:
             run_pg_bench_small(pg_bin, endpoint.connstr())
             endpoint.safe_psql(f"CREATE TABLE created_{timeline}(id integer);")

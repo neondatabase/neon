@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os.path
 import shutil
 import subprocess
@@ -23,7 +25,7 @@ def test_lsof_pageserver_pid(neon_simple_env: NeonEnv):
     env = neon_simple_env
 
     def start_workload():
-        env.neon_cli.create_branch("test_lsof_pageserver_pid")
+        env.create_branch("test_lsof_pageserver_pid")
         endpoint = env.endpoints.create_start("test_lsof_pageserver_pid")
         with closing(endpoint.connect()) as conn:
             with conn.cursor() as cur:
@@ -39,9 +41,8 @@ def test_lsof_pageserver_pid(neon_simple_env: NeonEnv):
         res = subprocess.run(
             [lsof, path],
             check=False,
-            universal_newlines=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            text=True,
+            capture_output=True,
         )
 
         # parse the `lsof` command's output to get only the list of commands

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import random
 import re
 import statistics
@@ -5,7 +7,6 @@ import threading
 import time
 import timeit
 from contextlib import closing
-from typing import List
 
 import pytest
 from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
@@ -18,7 +19,7 @@ from fixtures.utils import wait_until
 from prometheus_client.samples import Sample
 
 
-def _record_branch_creation_durations(neon_compare: NeonCompare, durs: List[float]):
+def _record_branch_creation_durations(neon_compare: NeonCompare, durs: list[float]):
     neon_compare.zenbenchmark.record(
         "branch_creation_duration_max", max(durs), "s", MetricReport.LOWER_IS_BETTER
     )
@@ -41,7 +42,7 @@ def test_branch_creation_heavy_write(neon_compare: NeonCompare, n_branches: int)
     pg_bin = neon_compare.pg_bin
 
     # Use aggressive GC and checkpoint settings, so GC and compaction happen more often during the test
-    tenant, _ = env.neon_cli.create_tenant(
+    tenant, _ = env.create_tenant(
         conf={
             "gc_period": "5 s",
             "gc_horizon": f"{4 * 1024 ** 2}",
@@ -64,9 +65,9 @@ def test_branch_creation_heavy_write(neon_compare: NeonCompare, n_branches: int)
 
         endpoint.stop()
 
-    env.neon_cli.create_branch("b0", tenant_id=tenant)
+    env.create_branch("b0", tenant_id=tenant)
 
-    threads: List[threading.Thread] = []
+    threads: list[threading.Thread] = []
     threads.append(threading.Thread(target=run_pgbench, args=("b0",), daemon=True))
     threads[-1].start()
 
@@ -78,7 +79,7 @@ def test_branch_creation_heavy_write(neon_compare: NeonCompare, n_branches: int)
         p = random.randint(0, i)
 
         timer = timeit.default_timer()
-        env.neon_cli.create_branch(f"b{i + 1}", f"b{p}", tenant_id=tenant)
+        env.create_branch(f"b{i + 1}", ancestor_branch_name=f"b{p}", tenant_id=tenant)
         dur = timeit.default_timer() - timer
 
         log.info(f"Creating branch b{i+1} took {dur}s")
@@ -104,7 +105,7 @@ def test_branch_creation_many(neon_compare: NeonCompare, n_branches: int, shape:
     # seed the prng so we will measure the same structure every time
     rng = random.Random("2024-02-29")
 
-    env.neon_cli.create_branch("b0")
+    env.create_branch("b0")
 
     endpoint = env.endpoints.create_start("b0")
     neon_compare.pg_bin.run_capture(["pgbench", "-i", "-I", "dtGvp", "-s10", endpoint.connstr()])
@@ -121,7 +122,7 @@ def test_branch_creation_many(neon_compare: NeonCompare, n_branches: int, shape:
 
         timer = timeit.default_timer()
         # each of these uploads to remote storage before completion
-        env.neon_cli.create_branch(f"b{i + 1}", parent)
+        env.create_branch(f"b{i + 1}", ancestor_branch_name=parent)
         dur = timeit.default_timer() - timer
         branch_creation_durations.append(dur)
 
@@ -194,7 +195,7 @@ def wait_and_record_startup_metrics(
         ]
     )
 
-    def metrics_are_filled() -> List[Sample]:
+    def metrics_are_filled() -> list[Sample]:
         m = client.get_metrics()
         samples = m.query_all("pageserver_startup_duration_seconds")
         # we should not have duplicate labels
@@ -222,7 +223,7 @@ def wait_and_record_startup_metrics(
 def test_branch_creation_many_relations(neon_compare: NeonCompare):
     env = neon_compare.env
 
-    timeline_id = env.neon_cli.create_branch("root")
+    timeline_id = env.create_branch("root")
 
     endpoint = env.endpoints.create_start("root")
     with closing(endpoint.connect()) as conn:
@@ -238,7 +239,7 @@ def test_branch_creation_many_relations(neon_compare: NeonCompare):
     )
 
     with neon_compare.record_duration("create_branch_time_not_busy_root"):
-        env.neon_cli.create_branch("child_not_busy", "root")
+        env.create_branch("child_not_busy", ancestor_branch_name="root")
 
     # run a concurrent insertion to make the ancestor "busy" during the branch creation
     thread = threading.Thread(
@@ -247,6 +248,6 @@ def test_branch_creation_many_relations(neon_compare: NeonCompare):
     thread.start()
 
     with neon_compare.record_duration("create_branch_time_busy_root"):
-        env.neon_cli.create_branch("child_busy", "root")
+        env.create_branch("child_busy", ancestor_branch_name="root")
 
     thread.join()

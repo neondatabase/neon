@@ -1,6 +1,8 @@
+from __future__ import annotations
+
 import json
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING
 
 import pytest
 import requests
@@ -9,6 +11,9 @@ from fixtures.common_types import Lsn, TenantId, TenantTimelineId, TimelineId
 from fixtures.log_helper import log
 from fixtures.metrics import Metrics, MetricsGetter, parse_metrics
 from fixtures.utils import wait_until
+
+if TYPE_CHECKING:
+    from typing import Any, Optional, Union
 
 
 # Walreceiver as returned by sk's timeline status endpoint.
@@ -29,7 +34,7 @@ class SafekeeperTimelineStatus:
     backup_lsn: Lsn
     peer_horizon_lsn: Lsn
     remote_consistent_lsn: Lsn
-    walreceivers: List[Walreceiver]
+    walreceivers: list[Walreceiver]
 
 
 class SafekeeperMetrics(Metrics):
@@ -57,7 +62,7 @@ class TermBumpResponse:
     current_term: int
 
     @classmethod
-    def from_json(cls, d: Dict[str, Any]) -> "TermBumpResponse":
+    def from_json(cls, d: dict[str, Any]) -> TermBumpResponse:
         return TermBumpResponse(
             previous_term=d["previous_term"],
             current_term=d["current_term"],
@@ -93,7 +98,7 @@ class SafekeeperHttpClient(requests.Session, MetricsGetter):
         if not self.is_testing_enabled:
             pytest.skip("safekeeper was built without 'testing' feature")
 
-    def configure_failpoints(self, config_strings: Union[Tuple[str, str], List[Tuple[str, str]]]):
+    def configure_failpoints(self, config_strings: Union[tuple[str, str], list[tuple[str, str]]]):
         self.is_testing_enabled_or_skip()
 
         if isinstance(config_strings, tuple):
@@ -113,14 +118,14 @@ class SafekeeperHttpClient(requests.Session, MetricsGetter):
         assert res_json is None
         return res_json
 
-    def tenant_delete_force(self, tenant_id: TenantId) -> Dict[Any, Any]:
+    def tenant_delete_force(self, tenant_id: TenantId) -> dict[Any, Any]:
         res = self.delete(f"http://localhost:{self.port}/v1/tenant/{tenant_id}")
         res.raise_for_status()
         res_json = res.json()
         assert isinstance(res_json, dict)
         return res_json
 
-    def timeline_list(self) -> List[TenantTimelineId]:
+    def timeline_list(self) -> list[TenantTimelineId]:
         res = self.get(f"http://localhost:{self.port}/v1/tenant/timeline")
         res.raise_for_status()
         resj = res.json()
@@ -178,7 +183,7 @@ class SafekeeperHttpClient(requests.Session, MetricsGetter):
     # only_local doesn't remove segments in the remote storage.
     def timeline_delete(
         self, tenant_id: TenantId, timeline_id: TimelineId, only_local: bool = False
-    ) -> Dict[Any, Any]:
+    ) -> dict[Any, Any]:
         res = self.delete(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}",
             params={
@@ -190,7 +195,7 @@ class SafekeeperHttpClient(requests.Session, MetricsGetter):
         assert isinstance(res_json, dict)
         return res_json
 
-    def debug_dump(self, params: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    def debug_dump(self, params: Optional[dict[str, str]] = None) -> dict[str, Any]:
         params = params or {}
         res = self.get(f"http://localhost:{self.port}/v1/debug_dump", params=params)
         res.raise_for_status()
@@ -199,7 +204,7 @@ class SafekeeperHttpClient(requests.Session, MetricsGetter):
         return res_json
 
     def debug_dump_timeline(
-        self, timeline_id: TimelineId, params: Optional[Dict[str, str]] = None
+        self, timeline_id: TimelineId, params: Optional[dict[str, str]] = None
     ) -> Any:
         params = params or {}
         params["timeline_id"] = str(timeline_id)
@@ -214,14 +219,14 @@ class SafekeeperHttpClient(requests.Session, MetricsGetter):
         dump = self.debug_dump_timeline(timeline_id, {"dump_control_file": "true"})
         return dump["control_file"]["eviction_state"]
 
-    def pull_timeline(self, body: Dict[str, Any]) -> Dict[str, Any]:
+    def pull_timeline(self, body: dict[str, Any]) -> dict[str, Any]:
         res = self.post(f"http://localhost:{self.port}/v1/pull_timeline", json=body)
         res.raise_for_status()
         res_json = res.json()
         assert isinstance(res_json, dict)
         return res_json
 
-    def copy_timeline(self, tenant_id: TenantId, timeline_id: TimelineId, body: Dict[str, Any]):
+    def copy_timeline(self, tenant_id: TenantId, timeline_id: TimelineId, body: dict[str, Any]):
         res = self.post(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/copy",
             json=body,
@@ -232,8 +237,8 @@ class SafekeeperHttpClient(requests.Session, MetricsGetter):
         self,
         tenant_id: TenantId,
         timeline_id: TimelineId,
-        patch: Dict[str, Any],
-    ) -> Dict[str, Any]:
+        patch: dict[str, Any],
+    ) -> dict[str, Any]:
         res = self.patch(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/control_file",
             json={
@@ -255,7 +260,7 @@ class SafekeeperHttpClient(requests.Session, MetricsGetter):
 
     def timeline_digest(
         self, tenant_id: TenantId, timeline_id: TimelineId, from_lsn: Lsn, until_lsn: Lsn
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         res = self.get(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/digest",
             params={

@@ -125,8 +125,7 @@ fn main() -> anyhow::Result<()> {
 
     // after setting up logging, log the effective IO engine choice and read path implementations
     info!(?conf.virtual_file_io_engine, "starting with virtual_file IO engine");
-    info!(?conf.virtual_file_direct_io, "starting with virtual_file Direct IO settings");
-    info!(?conf.io_buffer_alignment, "starting with setting for IO buffer alignment");
+    info!(?conf.virtual_file_io_mode, "starting with virtual_file IO mode");
 
     // The tenants directory contains all the pageserver local disk state.
     // Create if not exists and make sure all the contents are durable before proceeding.
@@ -168,11 +167,7 @@ fn main() -> anyhow::Result<()> {
     let scenario = failpoint_support::init();
 
     // Basic initialization of things that don't change after startup
-    virtual_file::init(
-        conf.max_file_descriptors,
-        conf.virtual_file_io_engine,
-        conf.io_buffer_alignment,
-    );
+    virtual_file::init(conf.max_file_descriptors, conf.virtual_file_io_engine);
     page_cache::init(conf.page_cache_size);
 
     start_pageserver(launch_ts, conf).context("Failed to start pageserver")?;
@@ -575,7 +570,7 @@ fn start_pageserver(
             .build()
             .map_err(|err| anyhow!(err))?;
         let service = utils::http::RouterService::new(router).unwrap();
-        let server = hyper::Server::from_tcp(http_listener)?
+        let server = hyper0::Server::from_tcp(http_listener)?
             .serve(service)
             .with_graceful_shutdown({
                 let cancel = cancel.clone();

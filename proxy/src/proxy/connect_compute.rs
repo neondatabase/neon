@@ -1,9 +1,10 @@
 use crate::{
     auth::backend::ComputeCredentialKeys,
+    compute::COULD_NOT_CONNECT,
     compute::{self, PostgresConnection},
     config::RetryConfig,
-    console::{self, errors::WakeComputeError, locks::ApiLocks, CachedNodeInfo, NodeInfo},
     context::RequestMonitoring,
+    control_plane::{self, errors::WakeComputeError, locks::ApiLocks, CachedNodeInfo, NodeInfo},
     error::ReportableError,
     metrics::{ConnectOutcome, ConnectionFailureKind, Metrics, RetriesMetricGroup, RetryType},
     proxy::{
@@ -15,7 +16,7 @@ use crate::{
 use async_trait::async_trait;
 use pq_proto::StartupMessageParams;
 use tokio::time;
-use tracing::{error, info, warn};
+use tracing::{debug, info, warn};
 
 use super::retry::ShouldRetryWakeCompute;
 
@@ -25,7 +26,7 @@ const CONNECT_TIMEOUT: time::Duration = time::Duration::from_secs(2);
 /// (e.g. the compute node's address might've changed at the wrong time).
 /// Invalidate the cache entry (if any) to prevent subsequent errors.
 #[tracing::instrument(name = "invalidate_cache", skip_all)]
-pub(crate) fn invalidate_cache(node_info: console::CachedNodeInfo) -> NodeInfo {
+pub(crate) fn invalidate_cache(node_info: control_plane::CachedNodeInfo) -> NodeInfo {
     let is_cached = node_info.cached();
     if is_cached {
         warn!("invalidating stalled compute node info cache entry");
@@ -48,7 +49,7 @@ pub(crate) trait ConnectMechanism {
     async fn connect_once(
         &self,
         ctx: &RequestMonitoring,
-        node_info: &console::CachedNodeInfo,
+        node_info: &control_plane::CachedNodeInfo,
         timeout: time::Duration,
     ) -> Result<Self::Connection, Self::ConnectError>;
 
@@ -60,7 +61,7 @@ pub(crate) trait ComputeConnectBackend {
     async fn wake_compute(
         &self,
         ctx: &RequestMonitoring,
-    ) -> Result<CachedNodeInfo, console::errors::WakeComputeError>;
+    ) -> Result<CachedNodeInfo, control_plane::errors::WakeComputeError>;
 
     fn get_keys(&self) -> &ComputeCredentialKeys;
 }
@@ -83,7 +84,7 @@ impl ConnectMechanism for TcpMechanism<'_> {
     async fn connect_once(
         &self,
         ctx: &RequestMonitoring,
-        node_info: &console::CachedNodeInfo,
+        node_info: &control_plane::CachedNodeInfo,
         timeout: time::Duration,
     ) -> Result<PostgresConnection, Self::Error> {
         let host = node_info.config.get_host()?;
@@ -116,7 +117,6 @@ where
 
     node_info.set_keys(user_info.get_keys());
     node_info.allow_self_signed_compute = allow_self_signed_compute;
-    // let mut node_info = credentials.get_node_info(ctx, user_info).await?;
     mechanism.update_connect_config(&mut node_info.config);
     let retry_type = RetryType::ConnectToCompute;
 
@@ -139,10 +139,10 @@ where
         Err(e) => e,
     };
 
-    error!(error = ?err, "could not connect to compute node");
+    debug!(error = ?err, COULD_NOT_CONNECT);
 
     let node_info = if !node_info.cached() || !err.should_retry_wake_compute() {
-        // If we just recieved this from cplane and dodn't get it from cache, we shouldn't retry.
+        // If we just recieved this from cplane and didn't get it from cache, we shouldn't retry.
         // Do not need to retrieve a new node_info, just return the old one.
         if should_retry(&err, num_retries, connect_to_compute_retry_config) {
             Metrics::get().proxy.retries_metric.observe(
@@ -191,7 +191,7 @@ where
             }
             Err(e) => {
                 if !should_retry(&e, num_retries, connect_to_compute_retry_config) {
-                    error!(error = ?e, num_retries, retriable = false, "couldn't connect to compute node");
+                    // Don't log an error here, caller will print the error
                     Metrics::get().proxy.retries_metric.observe(
                         RetriesMetricGroup {
                             outcome: ConnectOutcome::Failed,
@@ -202,7 +202,7 @@ where
                     return Err(e.into());
                 }
 
-                warn!(error = ?e, num_retries, retriable = true, "couldn't connect to compute node");
+                warn!(error = ?e, num_retries, retriable = true, COULD_NOT_CONNECT);
             }
         };
 

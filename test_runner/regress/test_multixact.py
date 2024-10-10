@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from fixtures.neon_fixtures import NeonEnv, check_restored_datadir_content
 from fixtures.utils import query_scalar
 
@@ -72,9 +74,7 @@ def test_multixact(neon_simple_env: NeonEnv, test_output_dir):
     assert int(next_multixact_id) > int(next_multixact_id_old)
 
     # Branch at this point
-    env.neon_cli.create_branch(
-        "test_multixact_new", ancestor_branch_name="main", ancestor_start_lsn=lsn
-    )
+    env.create_branch("test_multixact_new", ancestor_branch_name="main", ancestor_start_lsn=lsn)
     endpoint_new = env.endpoints.create_start("test_multixact_new")
 
     next_multixact_id_new = endpoint_new.safe_psql(

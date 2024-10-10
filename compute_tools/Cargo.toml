@@ -11,12 +11,13 @@ testing = []
 
 [dependencies]
 anyhow.workspace = true
+camino.workspace = true
 chrono.workspace = true
 cfg-if.workspace = true
 clap.workspace = true
 flate2.workspace = true
 futures.workspace = true
-hyper = { workspace = true, features = ["full"] }
+hyper0 = { workspace = true, features = ["full"] }
 nix.workspace = true
 notify.workspace = true
 num_cpus.workspace = true

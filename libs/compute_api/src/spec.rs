@@ -106,6 +106,10 @@ pub struct ComputeSpec {
     // Stripe size for pageserver sharding, in pages
     #[serde(default)]
     pub shard_stripe_size: Option<usize>,
+
+    /// Local Proxy configuration used for JWT authentication
+    #[serde(default)]
+    pub local_proxy_config: Option<LocalProxySpec>,
 }
 
 /// Feature flag to signal `compute_ctl` to enable certain experimental functionality.
@@ -278,11 +282,13 @@ pub struct GenericOption {
 /// declare a `trait` on it.
 pub type GenericOptions = Option<Vec<GenericOption>>;
 
-/// Configured the local-proxy application with the relevant JWKS and roles it should
+/// Configured the local_proxy application with the relevant JWKS and roles it should
 /// use for authorizing connect requests using JWT.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct LocalProxySpec {
-    pub jwks: Vec<JwksSettings>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jwks: Option<Vec<JwksSettings>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

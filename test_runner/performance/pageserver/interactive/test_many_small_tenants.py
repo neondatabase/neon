@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import pdb
 
@@ -53,7 +55,7 @@ def setup_env(
             "checkpoint_distance": 268435456,
             "image_creation_threshold": 3,
         }
-        template_tenant, template_timeline = env.neon_cli.create_tenant(set_default=True)
+        template_tenant, template_timeline = env.create_tenant(set_default=True)
         env.pageserver.tenant_detach(template_tenant)
         env.pageserver.tenant_attach(template_tenant, config)
         ep = env.endpoints.create_start("main", tenant_id=template_tenant)

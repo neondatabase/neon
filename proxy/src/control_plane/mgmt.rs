@@ -1,5 +1,5 @@
 use crate::{
-    console::messages::{DatabaseInfo, KickSession},
+    control_plane::messages::{DatabaseInfo, KickSession},
     waiters::{self, Waiter, Waiters},
 };
 use anyhow::Context;
