@@ -144,6 +144,41 @@ paths:
                 description: Error text or 'true' if check passed.
                 example: "true"
 
+  /extensions:
+    post:
+      tags:
+      - Extensions
+      summary: Install extension if possible.
+      description: ""
+      operationId: installExtension
+      requestBody:
+        description: Extension name and database to install it to.
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - extension
+                - database
+              properties:
+                extension:
+                  type: string
+                  description: Extension name.
+                database:
+                  type: string
+                  description: Database name.
+                  example: "neondb"
+      responses:
+        200:
+          description: Result from extension installation
+          content:
+            text/plain:
+              schema:
+                type: string
+                description: Error text or 'true' if extension was installed.
+                example: "true"
+
   /configure:
     post:
       tags:

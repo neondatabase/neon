@@ -19,6 +19,7 @@ use futures::future::join_all;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use nix::unistd::Pid;
+use postgres::config::Config;
 use postgres::error::SqlState;
 use postgres::{Client, NoTls};
 use tracing::{debug, error, info, instrument, warn};
@@ -1365,6 +1366,28 @@ LIMIT 100",
         }
 
         download_size
+    }
+
+    pub fn install_extension(&self, ext_name: &str, db_name: &str) -> Result<()> {
+        let mut conf =
+            Config::from_str(self.connstr.as_str()).context("Failed to parse connection string")?;
+        conf.dbname(db_name);
+
+        let mut db_client = conf
+            .connect(NoTls)
+            .context("Failed to connect to the database")?;
+
+        let query = format!(
+            "CREATE EXTENSION IF NOT EXISTS {}",
+            ext_name.to_string().pg_quote()
+        );
+        info!("creating extension with query: {}", query);
+
+        db_client
+            .execute(&query, &[])
+            .context(format!("Failed to execute query: {}", query))?;
+
+        Ok(())
     }
 
     #[tokio::main]
