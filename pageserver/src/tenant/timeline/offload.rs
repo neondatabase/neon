@@ -19,6 +19,9 @@ pub(crate) async fn offload_timeline(
         return Ok(());
     };
 
+    // Now that the Timeline is in Stopping state, request all the related tasks to shut down.
+    timeline.shutdown(super::ShutdownMode::Hard).await;
+
     // TODO extend guard mechanism above with method
     // to make deletions possible while offloading is in progress
 

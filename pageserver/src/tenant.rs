@@ -607,6 +607,9 @@ pub enum TimelineArchivalError {
     #[error("Timeout")]
     Timeout,
 
+    #[error("Cancelled")]
+    Cancelled,
+
     #[error("ancestor is archived: {}", .0)]
     HasArchivedParent(TimelineId),
 
@@ -625,6 +628,7 @@ impl Debug for TimelineArchivalError {
         match self {
             Self::NotFound => write!(f, "NotFound"),
             Self::Timeout => write!(f, "Timeout"),
+            Self::Cancelled => write!(f, "Cancelled"),
             Self::HasArchivedParent(p) => f.debug_tuple("HasArchivedParent").field(p).finish(),
             Self::HasUnarchivedChildren(c) => {
                 f.debug_tuple("HasUnarchivedChildren").field(c).finish()
@@ -1540,6 +1544,7 @@ impl Tenant {
         timeline_id: TimelineId,
         ctx: RequestContext,
     ) -> Result<Arc<Timeline>, TimelineArchivalError> {
+        info!("unoffloading timeline");
         let cancel = self.cancel.clone();
         let timeline_preload = self
             .load_timeline_metadata(timeline_id, self.remote_storage.clone(), cancel)
@@ -1554,6 +1559,7 @@ impl Tenant {
                 error!(%timeline_id, "index_part not found on remote");
                 return Err(TimelineArchivalError::NotFound);
             }
+            Err(DownloadError::Cancelled) => return Err(TimelineArchivalError::Cancelled),
             Err(e) => {
                 // Some (possibly ephemeral) error happened during index_part download.
                 warn!(%timeline_id, "Failed to load index_part from remote storage, failed creation? ({e})");
@@ -1591,6 +1597,7 @@ impl Tenant {
             if offloaded_timelines.remove(&timeline_id).is_none() {
                 warn!("timeline already removed from offloaded timelines");
             }
+            info!("timeline unoffloading complete");
             Ok(Arc::clone(timeline))
         } else {
             warn!("timeline not available directly after attach");
@@ -1669,6 +1676,21 @@ impl Tenant {
             v.map_err(|e| TimelineArchivalError::Other(anyhow::anyhow!(e)))?;
         }
         Ok(())
+    }
+
+    pub fn get_offloaded_timeline(
+        &self,
+        timeline_id: TimelineId,
+    ) -> Result<Arc<OffloadedTimeline>, GetTimelineError> {
+        self.timelines_offloaded
+            .lock()
+            .unwrap()
+            .get(&timeline_id)
+            .map(Arc::clone)
+            .ok_or(GetTimelineError::NotFound {
+                tenant_id: self.tenant_shard_id,
+                timeline_id,
+            })
     }
 
     pub(crate) fn tenant_shard_id(&self) -> TenantShardId {
@@ -2204,6 +2226,13 @@ impl Tenant {
         for timeline in &timelines {
             timeline.maybe_freeze_ephemeral_layer().await;
         }
+    }
+
+    pub fn timeline_has_no_attached_children(&self, timeline_id: TimelineId) -> bool {
+        let timelines = self.timelines.lock().unwrap();
+        !timelines
+            .iter()
+            .any(|(_id, tl)| tl.get_ancestor_timeline_id() == Some(timeline_id))
     }
 
     pub fn current_state(&self) -> TenantState {
