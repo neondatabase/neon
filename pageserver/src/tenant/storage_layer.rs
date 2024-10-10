@@ -16,12 +16,13 @@ use pageserver_api::key::Key;
 use pageserver_api::keyspace::{KeySpace, KeySpaceRandomAccum};
 use pageserver_api::record::NeonWalRecord;
 use pageserver_api::value::Value;
-use std::cmp::{Ordering, Reverse};
+use std::cmp::Ordering;
 use std::collections::hash_map::Entry;
 use std::collections::{BinaryHeap, HashMap};
 use std::ops::Range;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use utils::bin_ser::BeSer;
 
 use utils::lsn::Lsn;
 
@@ -79,12 +80,18 @@ pub(crate) enum ValueReconstructSituation {
 }
 
 /// Reconstruct data accumulated for a single key during a vectored get
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default)]
 pub(crate) struct VectoredValueReconstructState {
-    pub(crate) records: Vec<(Lsn, NeonWalRecord)>,
-    pub(crate) img: Option<(Lsn, Bytes)>,
+    pub(crate) records: Vec<(
+        Lsn,
+        tokio::sync::oneshot::Receiver<Result<Bytes, std::io::Error>>,
+    )>,
+    pub(crate) img: Option<(
+        Lsn,
+        tokio::sync::oneshot::Receiver<Result<Bytes, std::io::Error>>,
+    )>,
 
-    situation: ValueReconstructSituation,
+    pub(crate) situation: ValueReconstructSituation,
 }
 
 impl VectoredValueReconstructState {
@@ -93,16 +100,57 @@ impl VectoredValueReconstructState {
     }
 }
 
-impl From<VectoredValueReconstructState> for ValueReconstructState {
-    fn from(mut state: VectoredValueReconstructState) -> Self {
-        // walredo expects the records to be descending in terms of Lsn
-        state.records.sort_by_key(|(lsn, _)| Reverse(*lsn));
+pub(crate) async fn convert(
+    _key: Key,
+    from: VectoredValueReconstructState,
+) -> Result<ValueReconstructState, PageReconstructError> {
+    let mut to = ValueReconstructState::default();
 
-        ValueReconstructState {
-            records: state.records,
-            img: state.img,
+    for (lsn, fut) in from.records {
+        match fut.await {
+            Ok(res) => match res {
+                Ok(bytes) => {
+                    let value = Value::des(&bytes)
+                        .map_err(|err| PageReconstructError::Other(err.into()))?;
+
+                    match value {
+                        Value::WalRecord(rec) => {
+                            to.records.push((lsn, rec));
+                        }
+                        Value::Image(img) => {
+                            assert!(to.img.is_none());
+                            to.img = Some((lsn, img));
+                        }
+                    }
+                }
+                Err(err) => {
+                    return Err(PageReconstructError::Other(err.into()));
+                }
+            },
+            Err(err) => {
+                return Err(PageReconstructError::Other(err.into()));
+            }
         }
     }
+
+    if to.img.is_none() && from.img.is_some() {
+        let (lsn, fut) = from.img.expect("Has an image");
+        match fut.await {
+            Ok(res) => match res {
+                Ok(bytes) => {
+                    to.img = Some((lsn, bytes));
+                }
+                Err(err) => {
+                    return Err(PageReconstructError::Other(err.into()));
+                }
+            },
+            Err(err) => {
+                return Err(PageReconstructError::Other(err.into()));
+            }
+        }
+    }
+
+    Ok(to)
 }
 
 /// Bag of data accumulated during a vectored get..
@@ -119,6 +167,37 @@ pub(crate) struct ValuesReconstructState {
     // Statistics that are still accessible as a caller of `get_vectored_impl`.
     layers_visited: u32,
     delta_layers_visited: u32,
+
+    io_concurrency: IoConcurrency,
+}
+
+enum IoConcurrency {
+    Serial {
+        prev_io: Option<tokio::task::JoinHandle<()>>,
+    },
+    Parallel,
+}
+
+impl IoConcurrency {
+    pub(crate) fn spawn_io<F>(&mut self, fut: F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        match self {
+            IoConcurrency::Serial { prev_io } => {
+                let prev = prev_io.take();
+                *prev_io = Some(tokio::spawn(async move {
+                    if let Some(prev) = prev {
+                        prev.await.unwrap();
+                    }
+                    fut.await;
+                }));
+            }
+            IoConcurrency::Parallel => {
+                tokio::spawn(fut);
+            }
+        }
+    }
 }
 
 impl ValuesReconstructState {
@@ -129,7 +208,28 @@ impl ValuesReconstructState {
             keys_with_image_coverage: None,
             layers_visited: 0,
             delta_layers_visited: 0,
+            io_concurrency: {
+                static IO_CONCURRENCY: once_cell::sync::Lazy<String> =
+                    once_cell::sync::Lazy::new(|| {
+                        std::env::var("NEON_PAGESERVER_VALUE_RECONSTRUCT_IO_CONCURRENCY").unwrap()
+                    });
+                match IO_CONCURRENCY.as_str() {
+                    "parallel" => IoConcurrency::Parallel,
+                    "serial" => IoConcurrency::Serial { prev_io: None },
+                    x => panic!(
+                        "Invalid value for NEON_PAGESERVER_VALUE_RECONSTRUCT_IO_CONCURRENCY: {}",
+                        x
+                    ),
+                }
+            },
         }
+    }
+
+    pub(crate) fn spawn_io<F>(&mut self, fut: F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        self.io_concurrency.spawn_io(fut);
     }
 
     /// Associate a key with the error which it encountered and mark it as done
@@ -200,7 +300,8 @@ impl ValuesReconstructState {
         &mut self,
         key: &Key,
         lsn: Lsn,
-        value: Value,
+        completes: bool,
+        value: tokio::sync::oneshot::Receiver<Result<Bytes, std::io::Error>>,
     ) -> ValueReconstructSituation {
         let state = self
             .keys
@@ -208,31 +309,14 @@ impl ValuesReconstructState {
             .or_insert(Ok(VectoredValueReconstructState::default()));
 
         if let Ok(state) = state {
-            let key_done = match state.situation {
+            match state.situation {
                 ValueReconstructSituation::Complete => unreachable!(),
-                ValueReconstructSituation::Continue => match value {
-                    Value::Image(img) => {
-                        state.img = Some((lsn, img));
-                        true
-                    }
-                    Value::WalRecord(rec) => {
-                        debug_assert!(
-                            Some(lsn) > state.get_cached_lsn(),
-                            "Attempt to collect a record below cached LSN for walredo: {} < {}",
-                            lsn,
-                            state
-                                .get_cached_lsn()
-                                .expect("Assertion can only fire if a cached lsn is present")
-                        );
+                ValueReconstructSituation::Continue => {
+                    state.records.push((lsn, value));
+                }
+            }
 
-                        let will_init = rec.will_init();
-                        state.records.push((lsn, rec));
-                        will_init
-                    }
-                },
-            };
-
-            if key_done && state.situation == ValueReconstructSituation::Continue {
+            if completes && state.situation == ValueReconstructSituation::Continue {
                 state.situation = ValueReconstructSituation::Complete;
                 self.keys_done.add_key(*key);
             }
