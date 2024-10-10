@@ -15,15 +15,20 @@ pub fn check_permission(claims: &Claims, tenant_id: Option<TenantId>) -> Result<
             }
             Ok(())
         }
-        (Scope::Admin | Scope::PageServerApi | Scope::GenerationsApi | Scope::Scrubber, _) => {
-            Err(AuthError(
-                format!(
-                    "JWT scope '{:?}' is ineligible for Safekeeper auth",
-                    claims.scope
-                )
-                .into(),
-            ))
-        }
+        (
+            Scope::Admin
+            | Scope::PageServerApi
+            | Scope::GenerationsApi
+            | Scope::Infra
+            | Scope::Scrubber,
+            _,
+        ) => Err(AuthError(
+            format!(
+                "JWT scope '{:?}' is ineligible for Safekeeper auth",
+                claims.scope
+            )
+            .into(),
+        )),
         (Scope::SafekeeperData, _) => Ok(()),
     }
 }
