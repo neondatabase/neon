@@ -38,22 +38,22 @@ if TYPE_CHECKING:
 
 Fn = TypeVar("Fn", bound=Callable[..., Any])
 COMPONENT_BINARIES = {
-    "storage_controller": ["storage_controller"],
-    "storage_broker": ["storage_broker"],
-    "compute": ["compute_ctl"],
-    "safekeeper": ["safekeeper"],
-    "pageserver": ["pageserver", "pagectl"],
+    "storage_controller": ("storage_controller"),
+    "storage_broker": ("storage_broker"),
+    "compute": ("compute_ctl"),
+    "safekeeper": ("safekeeper"),
+    "pageserver": ("pageserver", "pagectl"),
 }
 # Disable auto-formatting for better readability
 # fmt: off
-VERSIONS_COMBINATIONS = [
+VERSIONS_COMBINATIONS = (
     {"storage_controller": "new", "storage_broker": "new", "compute": "new", "safekeeper": "new", "pageserver": "new"},
     {"storage_controller": "old", "storage_broker": "old", "compute": "old", "safekeeper": "old", "pageserver": "new"},
     {"storage_controller": "old", "storage_broker": "new", "compute": "old", "safekeeper": "new", "pageserver": "old"},
     {"storage_controller": "new", "storage_broker": "old", "compute": "new", "safekeeper": "old", "pageserver": "old"},
     {"storage_controller": "new", "storage_broker": "old", "compute": "old", "safekeeper": "new", "pageserver": "old"},
     {"storage_controller": "old", "storage_broker": "new", "compute": "new", "safekeeper": "old", "pageserver": "old"},
-]
+)
 
 
 def subprocess_capture(
@@ -638,5 +638,5 @@ def allpairs_versions():
         cur_id = []
         for state in sorted(pair.values()):
             cur_id.append(state[0])
-        ids.append("combination_" + "".join(cur_id))
+        ids.append(f"combination_{''.join(cur_id)}")
     return {"argnames": "combination", "argvalues": VERSIONS_COMBINATIONS, "ids": ids}
