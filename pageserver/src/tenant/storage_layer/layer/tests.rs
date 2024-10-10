@@ -65,10 +65,13 @@ async fn smoke_test() {
             )
             .await
             .unwrap();
+
         data.keys
             .remove(&CONTROLFILE_KEY)
             .expect("must be present")
-            .expect("should not error")
+            .collect_pending_ios()
+            .await
+            .expect("must not error")
             .img
             .take()
             .expect("tenant harness writes the control file")
@@ -101,7 +104,9 @@ async fn smoke_test() {
         data.keys
             .remove(&CONTROLFILE_KEY)
             .expect("must be present")
-            .expect("should not error")
+            .collect_pending_ios()
+            .await
+            .expect("must not error")
             .img
             .take()
             .expect("tenant harness writes the control file")
