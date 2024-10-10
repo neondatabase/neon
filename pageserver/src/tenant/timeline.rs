@@ -5547,30 +5547,31 @@ impl Timeline {
     #[cfg(test)]
     pub(crate) async fn inspect_image_layers(
         self: &Arc<Timeline>,
-        _lsn: Lsn,
-        _ctx: &RequestContext,
+        lsn: Lsn,
+        ctx: &RequestContext,
     ) -> anyhow::Result<Vec<(Key, Bytes)>> {
-        // let mut all_data = Vec::new();
-        // let guard = self.layers.read().await;
-        // for layer in guard.layer_map()?.iter_historic_layers() {
-        //     if !layer.is_delta() && layer.image_layer_lsn() == lsn {
-        //         let layer = guard.get_from_desc(&layer);
-        //         let mut reconstruct_data = ValuesReconstructState::default();
-        //         layer
-        //             .get_values_reconstruct_data(
-        //                 KeySpace::single(Key::MIN..Key::MAX),
-        //                 lsn..Lsn(lsn.0 + 1),
-        //                 &mut reconstruct_data,
-        //                 ctx,
-        //             )
-        //             .await?;
-        //         for (k, v) in reconstruct_data.keys {
-        //             all_data.push((k, v?.img.unwrap().1));
-        //         }
-        //     }
-        // }
-        // all_data.sort();
-        Ok(Vec::new())
+        let mut all_data = Vec::new();
+        let guard = self.layers.read().await;
+        for layer in guard.layer_map()?.iter_historic_layers() {
+            if !layer.is_delta() && layer.image_layer_lsn() == lsn {
+                let layer = guard.get_from_desc(&layer);
+                let mut reconstruct_data = ValuesReconstructState::default();
+                layer
+                    .get_values_reconstruct_data(
+                        KeySpace::single(Key::MIN..Key::MAX),
+                        lsn..Lsn(lsn.0 + 1),
+                        &mut reconstruct_data,
+                        ctx,
+                    )
+                    .await?;
+                for (k, v) in reconstruct_data.keys {
+                    let v = v.collect_pending_ios().await?;
+                    all_data.push((k, v.img.unwrap().1));
+                }
+            }
+        }
+        all_data.sort();
+        Ok(all_data)
     }
 
     /// Get all historic layer descriptors in the layer map
