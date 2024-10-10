@@ -493,6 +493,8 @@ pub struct OffloadedTimeline {
     pub tenant_shard_id: TenantShardId,
     pub timeline_id: TimelineId,
     pub ancestor_timeline_id: Option<TimelineId>,
+    /// Whether to retain the branch lsn at the ancestor or not
+    pub ancestor_retain_lsn: Option<Lsn>,
 
     // TODO: once we persist offloaded state, make this lazily constructed
     pub remote_client: Arc<RemoteTimelineClient>,
@@ -504,10 +506,14 @@ pub struct OffloadedTimeline {
 
 impl OffloadedTimeline {
     fn from_timeline(timeline: &Timeline) -> Self {
+        let ancestor_retain_lsn = timeline
+            .get_ancestor_timeline_id()
+            .map(|_timeline_id| timeline.get_ancestor_lsn());
         Self {
             tenant_shard_id: timeline.tenant_shard_id,
             timeline_id: timeline.timeline_id,
             ancestor_timeline_id: timeline.get_ancestor_timeline_id(),
+            ancestor_retain_lsn,
 
             remote_client: timeline.remote_client.clone(),
             delete_progress: timeline.delete_progress.clone(),
@@ -2253,12 +2259,13 @@ impl Tenant {
 
         if activating {
             let timelines_accessor = self.timelines.lock().unwrap();
+            let timelines_offloaded_accessor = self.timelines_offloaded.lock().unwrap();
             let timelines_to_activate = timelines_accessor
                 .values()
                 .filter(|timeline| !(timeline.is_broken() || timeline.is_stopping()));
 
             // Before activation, populate each Timeline's GcInfo with information about its children
-            self.initialize_gc_info(&timelines_accessor);
+            self.initialize_gc_info(&timelines_accessor, &timelines_offloaded_accessor);
 
             // Spawn gc and compaction loops. The loops will shut themselves
             // down when they notice that the tenant is inactive.
@@ -3298,6 +3305,7 @@ impl Tenant {
     fn initialize_gc_info(
         &self,
         timelines: &std::sync::MutexGuard<HashMap<TimelineId, Arc<Timeline>>>,
+        timelines_offloaded: &std::sync::MutexGuard<HashMap<TimelineId, Arc<OffloadedTimeline>>>,
     ) {
         // This function must be called before activation: after activation timeline create/delete operations
         // might happen, and this function is not safe to run concurrently with those.
@@ -3312,6 +3320,18 @@ impl Tenant {
                 ancestor_children.push((timeline_entry.get_ancestor_lsn(), *timeline_id));
             }
         });
+        timelines_offloaded
+            .iter()
+            .for_each(|(timeline_id, timeline_entry)| {
+                let Some(ancestor_timeline_id) = &timeline_entry.ancestor_timeline_id else {
+                    return;
+                };
+                let Some(retain_lsn) = timeline_entry.ancestor_retain_lsn else {
+                    return;
+                };
+                let ancestor_children = all_branchpoints.entry(*ancestor_timeline_id).or_default();
+                ancestor_children.push((retain_lsn, *timeline_id));
+            });
 
         // The number of bytes we always keep, irrespective of PITR: this is a constant across timelines
         let horizon = self.get_gc_horizon();
