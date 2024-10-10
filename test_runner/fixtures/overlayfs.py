@@ -1,9 +1,12 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import psutil
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 
 def iter_mounts_beneath(topdir: Path) -> Iterator[Path]:

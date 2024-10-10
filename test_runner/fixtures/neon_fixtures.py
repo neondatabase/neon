@@ -3732,7 +3732,7 @@ class Endpoint(PgProtocol, LogUtils):
         config_lines: Optional[list[str]] = None,
         remote_ext_config: Optional[str] = None,
         pageserver_id: Optional[int] = None,
-        allow_multiple=False,
+        allow_multiple: bool = False,
         basebackup_request_tries: Optional[int] = None,
     ) -> Endpoint:
         """
@@ -4073,7 +4073,7 @@ class Safekeeper(LogUtils):
     def timeline_dir(self, tenant_id, timeline_id) -> Path:
         return self.data_dir / str(tenant_id) / str(timeline_id)
 
-    # List partial uploaded segments of this safekeeper. Works only for
+    # list partial uploaded segments of this safekeeper. Works only for
     # RemoteStorageKind.LOCAL_FS.
     def list_uploaded_segments(self, tenant_id: TenantId, timeline_id: TimelineId):
         tline_path = (
@@ -4368,7 +4368,7 @@ def pytest_addoption(parser: Parser):
     )
 
 
-SMALL_DB_FILE_NAME_REGEX: re.Pattern = re.compile(  # type: ignore[type-arg]
+SMALL_DB_FILE_NAME_REGEX: re.Pattern[str] = re.compile(
     r"config-v1|heatmap-v1|metadata|.+\.(?:toml|pid|json|sql|conf)"
 )
 

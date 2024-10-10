@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, cast
 import requests
 
 if TYPE_CHECKING:
-    from typing import Any, Literal, Optional, Union
+    from typing import Any, Literal, Optional
 
     from fixtures.pg_version import PgVersion
 
@@ -25,9 +25,7 @@ class NeonAPI:
         self.__neon_api_key = neon_api_key
         self.__neon_api_base_url = neon_api_base_url.strip("/")
 
-    def __request(
-        self, method: Union[str, bytes], endpoint: str, **kwargs: Any
-    ) -> requests.Response:
+    def __request(self, method: str | bytes, endpoint: str, **kwargs: Any) -> requests.Response:
         if "headers" not in kwargs:
             kwargs["headers"] = {}
         kwargs["headers"]["Authorization"] = f"Bearer {self.__neon_api_key}"
@@ -187,8 +185,8 @@ class NeonAPI:
     def get_connection_uri(
         self,
         project_id: str,
-        branch_id: Optional[str] = None,
-        endpoint_id: Optional[str] = None,
+        branch_id: str | None = None,
+        endpoint_id: str | None = None,
         database_name: str = "neondb",
         role_name: str = "neondb_owner",
         pooled: bool = True,
@@ -264,7 +262,7 @@ class NeonAPI:
 
 
 class NeonApiEndpoint:
-    def __init__(self, neon_api: NeonAPI, pg_version: PgVersion, project_id: Optional[str]):
+    def __init__(self, neon_api: NeonAPI, pg_version: PgVersion, project_id: str | None):
         self.neon_api = neon_api
         if project_id is None:
             project = neon_api.create_project(pg_version)

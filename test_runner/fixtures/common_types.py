@@ -6,6 +6,8 @@ from enum import Enum
 from functools import total_ordering
 from typing import TYPE_CHECKING, TypeVar
 
+from typing_extensions import override
+
 if TYPE_CHECKING:
     from typing import Any, Union
 
@@ -31,33 +33,36 @@ class Lsn:
             self.lsn_int = (int(left, 16) << 32) + int(right, 16)
         assert 0 <= self.lsn_int <= 0xFFFFFFFF_FFFFFFFF
 
+    @override
     def __str__(self) -> str:
         """Convert lsn from int to standard hex notation."""
         return f"{(self.lsn_int >> 32):X}/{(self.lsn_int & 0xFFFFFFFF):X}"
 
+    @override
     def __repr__(self) -> str:
         return f'Lsn("{str(self)}")'
 
     def __int__(self) -> int:
         return self.lsn_int
 
-    def __lt__(self, other: Any) -> bool:
+    def __lt__(self, other: object) -> bool:
         if not isinstance(other, Lsn):
             return NotImplemented
         return self.lsn_int < other.lsn_int
 
-    def __gt__(self, other: Any) -> bool:
+    def __gt__(self, other: object) -> bool:
         if not isinstance(other, Lsn):
             raise NotImplementedError
         return self.lsn_int > other.lsn_int
 
-    def __eq__(self, other: Any) -> bool:
+    @override
+    def __eq__(self, other: object) -> bool:
         if not isinstance(other, Lsn):
             return NotImplemented
         return self.lsn_int == other.lsn_int
 
     # Returns the difference between two Lsns, in bytes
-    def __sub__(self, other: Any) -> int:
+    def __sub__(self, other: object) -> int:
         if not isinstance(other, Lsn):
             return NotImplemented
         return self.lsn_int - other.lsn_int
@@ -70,6 +75,7 @@ class Lsn:
         else:
             raise NotImplementedError
 
+    @override
     def __hash__(self) -> int:
         return hash(self.lsn_int)
 
@@ -116,19 +122,22 @@ class Id:
         self.id = bytearray.fromhex(x)
         assert len(self.id) == 16
 
+    @override
     def __str__(self) -> str:
         return self.id.hex()
 
-    def __lt__(self, other) -> bool:
+    def __lt__(self, other: object) -> bool:
         if not isinstance(other, type(self)):
             return NotImplemented
         return self.id < other.id
 
-    def __eq__(self, other) -> bool:
+    @override
+    def __eq__(self, other: object) -> bool:
         if not isinstance(other, type(self)):
             return NotImplemented
         return self.id == other.id
 
+    @override
     def __hash__(self) -> int:
         return hash(str(self.id))
 
@@ -139,25 +148,31 @@ class Id:
 
 
 class TenantId(Id):
+    @override
     def __repr__(self) -> str:
         return f'`TenantId("{self.id.hex()}")'
 
+    @override
     def __str__(self) -> str:
         return self.id.hex()
 
 
 class NodeId(Id):
+    @override
     def __repr__(self) -> str:
         return f'`NodeId("{self.id.hex()}")'
 
+    @override
     def __str__(self) -> str:
         return self.id.hex()
 
 
 class TimelineId(Id):
+    @override
     def __repr__(self) -> str:
         return f'TimelineId("{self.id.hex()}")'
 
+    @override
     def __str__(self) -> str:
         return self.id.hex()
 
@@ -187,7 +202,7 @@ class TenantShardId:
         assert self.shard_number < self.shard_count or self.shard_count == 0
 
     @classmethod
-    def parse(cls: type[TTenantShardId], input) -> TTenantShardId:
+    def parse(cls: type[TTenantShardId], input: str) -> TTenantShardId:
         if len(input) == 32:
             return cls(
                 tenant_id=TenantId(input),
@@ -203,6 +218,7 @@ class TenantShardId:
         else:
             raise ValueError(f"Invalid TenantShardId '{input}'")
 
+    @override
     def __str__(self):
         if self.shard_count > 0:
             return f"{self.tenant_id}-{self.shard_number:02x}{self.shard_count:02x}"
@@ -210,22 +226,25 @@ class TenantShardId:
             # Unsharded case: equivalent of Rust TenantShardId::unsharded(tenant_id)
             return str(self.tenant_id)
 
+    @override
     def __repr__(self):
         return self.__str__()
 
     def _tuple(self) -> tuple[TenantId, int, int]:
         return (self.tenant_id, self.shard_number, self.shard_count)
 
-    def __lt__(self, other) -> bool:
+    def __lt__(self, other: object) -> bool:
         if not isinstance(other, type(self)):
             return NotImplemented
         return self._tuple() < other._tuple()
 
-    def __eq__(self, other) -> bool:
+    @override
+    def __eq__(self, other: object) -> bool:
         if not isinstance(other, type(self)):
             return NotImplemented
         return self._tuple() == other._tuple()
 
+    @override
     def __hash__(self) -> int:
         return hash(self._tuple())
 

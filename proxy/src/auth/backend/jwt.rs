@@ -17,6 +17,8 @@ use crate::{
     RoleName,
 };
 
+use super::ComputeCredentialKeys;
+
 // TODO(conrad): make these configurable.
 const CLOCK_SKEW_LEEWAY: Duration = Duration::from_secs(30);
 const MIN_RENEW: Duration = Duration::from_secs(30);
@@ -241,7 +243,7 @@ impl JwkCacheEntryLock {
         endpoint: EndpointId,
         role_name: &RoleName,
         fetch: &F,
-    ) -> Result<(), anyhow::Error> {
+    ) -> Result<ComputeCredentialKeys, anyhow::Error> {
         // JWT compact form is defined to be
         // <B64(Header)> || . || <B64(Payload)> || . || <B64(Signature)>
         // where Signature = alg(<B64(Header)> || . || <B64(Payload)>);
@@ -300,9 +302,9 @@ impl JwkCacheEntryLock {
             key => bail!("unsupported key type {key:?}"),
         };
 
-        let payload = base64::decode_config(payload, base64::URL_SAFE_NO_PAD)
+        let payloadb = base64::decode_config(payload, base64::URL_SAFE_NO_PAD)
             .context("Provided authentication token is not a valid JWT encoding")?;
-        let payload = serde_json::from_slice::<JwtPayload<'_>>(&payload)
+        let payload = serde_json::from_slice::<JwtPayload<'_>>(&payloadb)
             .context("Provided authentication token is not a valid JWT encoding")?;
 
         tracing::debug!(?payload, "JWT signature valid with claims");
@@ -327,7 +329,7 @@ impl JwkCacheEntryLock {
             );
         }
 
-        Ok(())
+        Ok(ComputeCredentialKeys::JwtPayload(payloadb))
     }
 }
 
@@ -339,7 +341,7 @@ impl JwkCache {
         role_name: &RoleName,
         fetch: &F,
         jwt: &str,
-    ) -> Result<(), anyhow::Error> {
+    ) -> Result<ComputeCredentialKeys, anyhow::Error> {
         // try with just a read lock first
         let key = (endpoint.clone(), role_name.clone());
         let entry = self.map.get(&key).as_deref().map(Arc::clone);

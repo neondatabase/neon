@@ -1042,7 +1042,7 @@ def test_storage_controller_tenant_deletion(
         )
 
     # Break the compute hook: we are checking that deletion does not depend on the compute hook being available
-    def break_hook():
+    def break_hook(_body: Any):
         raise RuntimeError("Unexpected call to compute hook")
 
     compute_reconfigure_listener.register_on_notify(break_hook)

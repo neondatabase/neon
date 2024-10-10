@@ -1,7 +1,14 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import pytest
 from pytest_httpserver import HTTPServer
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+    from fixtures.port_distributor import PortDistributor
 
 # TODO: mypy fails with:
 #  Module "fixtures.neon_fixtures" does not explicitly export attribute "PortDistributor"  [attr-defined]
@@ -17,7 +24,7 @@ def httpserver_ssl_context():
 
 
 @pytest.fixture(scope="function")
-def make_httpserver(httpserver_listen_address, httpserver_ssl_context):
+def make_httpserver(httpserver_listen_address, httpserver_ssl_context) -> Iterator[HTTPServer]:
     host, port = httpserver_listen_address
     if not host:
         host = HTTPServer.DEFAULT_LISTEN_HOST
@@ -33,13 +40,13 @@ def make_httpserver(httpserver_listen_address, httpserver_ssl_context):
 
 
 @pytest.fixture(scope="function")
-def httpserver(make_httpserver):
+def httpserver(make_httpserver: HTTPServer) -> Iterator[HTTPServer]:
     server = make_httpserver
     yield server
     server.clear()
 
 
 @pytest.fixture(scope="function")
-def httpserver_listen_address(port_distributor) -> tuple[str, int]:
+def httpserver_listen_address(port_distributor: PortDistributor) -> tuple[str, int]:
     port = port_distributor.get_port()
     return ("localhost", port)
