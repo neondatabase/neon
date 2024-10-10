@@ -638,30 +638,30 @@ impl WalIngest {
             // because we don't get a chance to clear the bits if the heap is extended
             // again.
             if trunc_byte != 0 || trunc_offset != 0 {
-                let old_content = modification
+                if let Ok(old_content) = modification
                     .tline
                     .get_rel_page_at_lsn(rel, vm_page_no, Version::Modified(modification), ctx)
-                    .await?;
-                let mut new_content = BytesMut::new();
-                new_content.extend_from_slice(&old_content);
-                let map = &mut new_content[pg_constants::MAXALIGN_SIZE_OF_PAGE_HEADER_DATA..];
-
-                // Clear out the unwanted bytes.
-                map[trunc_byte + 1..].fill(0u8);
-
-                /*----
-                 * Mask out the unwanted bits of the last remaining byte.
-                 *
-                 * ((1 << 0) - 1) = 00000000
-                 * ((1 << 1) - 1) = 00000001
-                 * ...
-                 * ((1 << 6) - 1) = 00111111
-                 * ((1 << 7) - 1) = 01111111
-                 *----
-                 */
-                map[trunc_byte] &= (1 << trunc_offset) - 1;
-
-                modification.put_rel_page_image(rel, vm_page_no, new_content.freeze())?;
+                    .await
+                {
+                    let mut new_content = BytesMut::new();
+                    new_content.extend_from_slice(&old_content);
+                    let map = &mut new_content[pg_constants::MAXALIGN_SIZE_OF_PAGE_HEADER_DATA..];
+                    map[trunc_byte + 1..].fill(0u8);
+                    /*----
+                     * Mask out the unwanted bits of the last remaining byte.
+                     *
+                     * ((1 << 0) - 1) = 00000000
+                     * ((1 << 1) - 1) = 00000001
+                     * ...
+                     * ((1 << 6) - 1) = 00111111
+                     * ((1 << 7) - 1) = 01111111
+                     *----
+                     */
+                    map[trunc_byte] &= (1 << trunc_offset) - 1;
+                    modification.put_rel_page_image(rel, vm_page_no, new_content.freeze())?;
+                } else {
+                    modification.put_rel_page_image_zero(rel, vm_page_no)?;
+                }
                 vm_page_no += 1;
             }
 
