@@ -8,6 +8,7 @@ use crate::assert_u64_eq_usize::{u64_to_usize, U64IsUsize, UsizeIsU64};
 use crate::config::PageServerConf;
 use crate::context::{PageContentKind, RequestContext, RequestContextBuilder};
 use crate::tenant::ephemeral_file::EphemeralFile;
+use crate::tenant::storage_layer::OnDiskValue;
 use crate::tenant::timeline::GetVectoredError;
 use crate::virtual_file::owned_buffers_io::io_buf_ext::IoBufExt;
 use crate::{l0_flush, page_cache};
@@ -435,7 +436,7 @@ impl InMemoryLayer {
         let mut reads: HashMap<Key, Vec<ValueRead>> = HashMap::new();
         let mut senders: HashMap<
             (Key, Lsn),
-            tokio::sync::oneshot::Sender<Result<Bytes, std::io::Error>>,
+            tokio::sync::oneshot::Sender<Result<OnDiskValue, std::io::Error>>,
         > = Default::default();
 
         for range in keyspace.ranges.iter() {
@@ -501,7 +502,8 @@ impl InMemoryLayer {
                                 .send(Err(std::io::Error::new(e.kind(), "dio vec read failed")));
                         }
                         Ok(value_buf) => {
-                            let _ = sender.send(Ok(value_buf.into()));
+                            let _ =
+                                sender.send(Ok(OnDiskValue::WalRecordOrImage(value_buf.into())));
                         }
                     }
                 }

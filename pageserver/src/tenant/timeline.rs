@@ -73,7 +73,7 @@ use crate::{
         layer_map::{LayerMap, SearchResult},
         metadata::TimelineMetadata,
         storage_layer::{
-            convert, inmemory_layer::IndexEntry, PersistentLayerDesc, ValueReconstructSituation,
+            inmemory_layer::IndexEntry, PersistentLayerDesc, ValueReconstructSituation,
         },
     },
     walingest::WalLagCooldown,
@@ -1152,7 +1152,7 @@ impl Timeline {
                         ValueReconstructSituation::Complete
                     ));
 
-                    let converted = match convert(key, state).await {
+                    let converted = match state.collect_pending_ios().await {
                         Ok(ok) => ok,
                         Err(err) => {
                             return (key, Err(err));

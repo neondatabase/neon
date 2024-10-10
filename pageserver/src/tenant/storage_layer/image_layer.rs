@@ -74,7 +74,7 @@ use utils::{
 };
 
 use super::layer_name::ImageLayerName;
-use super::{AsLayerDesc, LayerName, PersistentLayerDesc, ValuesReconstructState};
+use super::{AsLayerDesc, LayerName, OnDiskValue, PersistentLayerDesc, ValuesReconstructState};
 
 ///
 /// Header stored in the beginning of the file
@@ -584,8 +584,10 @@ impl ImageLayerInner {
             .into();
 
         for read in reads.into_iter() {
-            let mut senders: HashMap<(Key, Lsn), oneshot::Sender<Result<Bytes, std::io::Error>>> =
-                Default::default();
+            let mut senders: HashMap<
+                (Key, Lsn),
+                oneshot::Sender<Result<OnDiskValue, std::io::Error>>,
+            > = Default::default();
             for (_, blob_meta) in read.blobs_at.as_slice() {
                 let (tx, rx) = oneshot::channel();
                 senders.insert((blob_meta.key, blob_meta.lsn), tx);
@@ -644,10 +646,7 @@ impl ImageLayerInner {
                                 }
                             };
 
-                            // TODO: this is silly - sort it out
-                            let image_serialized = Value::ser(&Value::Image(img_buf.into_bytes()))
-                                .expect("stupid but correct");
-                            let _ = sender.send(Ok(image_serialized.into()));
+                            let _ = sender.send(Ok(OnDiskValue::RawImage(img_buf.into_bytes())));
                         }
 
                         assert!(senders.is_empty());

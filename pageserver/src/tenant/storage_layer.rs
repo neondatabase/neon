@@ -79,40 +79,43 @@ pub(crate) enum ValueReconstructSituation {
     Continue,
 }
 
+/// On disk representation of a value loaded in a buffer
+#[derive(Debug)]
+pub(crate) enum OnDiskValue {
+    /// Unencoded [`Value::Image`]
+    RawImage(Bytes),
+    /// Encoded [`Value`]. Can deserialize into an image or a WAL record
+    WalRecordOrImage(Bytes),
+}
+
 /// Reconstruct data accumulated for a single key during a vectored get
 #[derive(Debug, Default)]
 pub(crate) struct VectoredValueReconstructState {
-    pub(crate) records: Vec<(
+    pub(crate) on_disk_values: Vec<(
         Lsn,
-        tokio::sync::oneshot::Receiver<Result<Bytes, std::io::Error>>,
-    )>,
-    pub(crate) img: Option<(
-        Lsn,
-        tokio::sync::oneshot::Receiver<Result<Bytes, std::io::Error>>,
+        tokio::sync::oneshot::Receiver<Result<OnDiskValue, std::io::Error>>,
     )>,
 
     pub(crate) situation: ValueReconstructSituation,
 }
 
 impl VectoredValueReconstructState {
-    fn get_cached_lsn(&self) -> Option<Lsn> {
-        self.img.as_ref().map(|img| img.0)
-    }
-}
+    pub(crate) async fn collect_pending_ios(
+        self,
+    ) -> Result<ValueReconstructState, PageReconstructError> {
+        let mut to = ValueReconstructState::default();
 
-pub(crate) async fn convert(
-    _key: Key,
-    from: VectoredValueReconstructState,
-) -> Result<ValueReconstructState, PageReconstructError> {
-    let mut to = ValueReconstructState::default();
+        for (lsn, fut) in self.on_disk_values {
+            // TODO: IO futures are not failable - we could expect
+            let res = fut
+                .await
+                .map_err(|err| PageReconstructError::Other(err.into()))?;
+            let on_disk_value = res.map_err(|err| PageReconstructError::Other(err.into()))?;
 
-    for (lsn, fut) in from.records {
-        match fut.await {
-            Ok(res) => match res {
-                Ok(bytes) => {
-                    let value = Value::des(&bytes)
-                        .map_err(|err| PageReconstructError::Other(err.into()))?;
-
+            match on_disk_value {
+                OnDiskValue::WalRecordOrImage(buf) => {
+                    let value =
+                        Value::des(&buf).map_err(|err| PageReconstructError::Other(err.into()))?;
                     match value {
                         Value::WalRecord(rec) => {
                             to.records.push((lsn, rec));
@@ -123,34 +126,21 @@ pub(crate) async fn convert(
                         }
                     }
                 }
-                Err(err) => {
-                    return Err(PageReconstructError::Other(err.into()));
+                OnDiskValue::RawImage(img) => {
+                    assert!(to.img.is_none());
+                    to.img = Some((lsn, img));
                 }
-            },
-            Err(err) => {
-                return Err(PageReconstructError::Other(err.into()));
             }
         }
+
+        Ok(to)
     }
 
-    if to.img.is_none() && from.img.is_some() {
-        let (lsn, fut) = from.img.expect("Has an image");
-        match fut.await {
-            Ok(res) => match res {
-                Ok(bytes) => {
-                    to.img = Some((lsn, bytes));
-                }
-                Err(err) => {
-                    return Err(PageReconstructError::Other(err.into()));
-                }
-            },
-            Err(err) => {
-                return Err(PageReconstructError::Other(err.into()));
-            }
-        }
+    fn get_cached_lsn(&self) -> Option<Lsn> {
+        // self.img.as_ref().map(|img| img.0)
+        // TODO: rip this out
+        Some(Lsn(0))
     }
-
-    Ok(to)
 }
 
 /// Bag of data accumulated during a vectored get..
@@ -291,7 +281,7 @@ impl ValuesReconstructState {
         key: &Key,
         lsn: Lsn,
         completes: bool,
-        value: tokio::sync::oneshot::Receiver<Result<Bytes, std::io::Error>>,
+        value: tokio::sync::oneshot::Receiver<Result<OnDiskValue, std::io::Error>>,
     ) -> ValueReconstructSituation {
         let state = self
             .keys
@@ -302,7 +292,7 @@ impl ValuesReconstructState {
             match state.situation {
                 ValueReconstructSituation::Complete => unreachable!(),
                 ValueReconstructSituation::Continue => {
-                    state.records.push((lsn, value));
+                    state.on_disk_values.push((lsn, value));
                 }
             }
 

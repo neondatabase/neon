@@ -77,7 +77,7 @@ use utils::{
     lsn::Lsn,
 };
 
-use super::{AsLayerDesc, LayerName, PersistentLayerDesc, ValuesReconstructState};
+use super::{AsLayerDesc, LayerName, OnDiskValue, PersistentLayerDesc, ValuesReconstructState};
 
 ///
 /// Header stored in the beginning of the file
@@ -1011,7 +1011,7 @@ impl DeltaLayerInner {
         for read in reads.into_iter().rev() {
             let mut senders: HashMap<
                 (Key, Lsn),
-                sync::oneshot::Sender<Result<Bytes, std::io::Error>>,
+                sync::oneshot::Sender<Result<OnDiskValue, std::io::Error>>,
             > = Default::default();
             for (_, blob_meta) in read.blobs_at.as_slice().iter().rev() {
                 let (tx, rx) = sync::oneshot::channel();
@@ -1052,7 +1052,8 @@ impl DeltaLayerInner {
                                 }
                             };
 
-                            let _ = sender.send(Ok(blob_read.into_bytes()));
+                            let _ = sender
+                                .send(Ok(OnDiskValue::WalRecordOrImage(blob_read.into_bytes())));
                         }
 
                         assert!(senders.is_empty());
