@@ -161,7 +161,7 @@ def compatibility_neon_binpath() -> Optional[Iterator[Path]]:
     comp_binpath = None
     if env_compatibility_neon_binpath := os.environ.get("COMPATIBILITY_NEON_BIN"):
         comp_binpath = Path(env_compatibility_neon_binpath).resolve()
-    yield comp_binpath.absolute()
+    yield comp_binpath
 
 
 @pytest.fixture(scope="session")
@@ -493,6 +493,7 @@ class NeonEnvBuilder:
             assert (
                 self.compatibility_pg_distrib_dir is not None
             ), "the environment variable COMPATIBILITY_POSTGRES_DISTRIB_DIR is required when using mixed versions"
+            self.compatibility_neon_binpath = self.compatibility_neon_binpath.absolute()
             self.mixdir.mkdir(mode=0o755, exist_ok=True)
             self._mix_versions()
 
