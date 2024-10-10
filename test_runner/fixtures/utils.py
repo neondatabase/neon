@@ -38,10 +38,10 @@ if TYPE_CHECKING:
 
 Fn = TypeVar("Fn", bound=Callable[..., Any])
 COMPONENT_BINARIES = {
-    "storage_controller": ("storage_controller"),
-    "storage_broker": ("storage_broker"),
-    "compute": ("compute_ctl"),
-    "safekeeper": ("safekeeper"),
+    "storage_controller": ("storage_controller",),
+    "storage_broker": ("storage_broker",),
+    "compute": ("compute_ctl",),
+    "safekeeper": ("safekeeper",),
     "pageserver": ("pageserver", "pagectl"),
 }
 # Disable auto-formatting for better readability

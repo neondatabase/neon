@@ -705,7 +705,7 @@ class NeonEnvBuilder:
             )
             for filename in paths:
                 destination = self.mixdir / filename
-                destination.symlink_to(directory.absolute() / filename)
+                destination.symlink_to(directory / filename)
         if self.version_combination["compute"] == "old":
             self.pg_distrib_dir = self.compatibility_pg_distrib_dir
         self.neon_binpath = self.mixdir
