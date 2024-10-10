@@ -56,6 +56,7 @@ VERSIONS_COMBINATIONS = (
 )
 # fmt: on
 
+
 def subprocess_capture(
     capture_dir: Path,
     cmd: list[str],
