@@ -637,7 +637,7 @@ def allpairs_versions():
     ids = []
     for pair in VERSIONS_COMBINATIONS:
         cur_id = []
-        for state in sorted(pair.values()):
-            cur_id.append(state[0])
+        for component in sorted(pair.keys()):
+            cur_id.append(pair[component][0])
         ids.append(f"combination_{''.join(cur_id)}")
     return {"argnames": "combination", "argvalues": VERSIONS_COMBINATIONS, "ids": ids}
