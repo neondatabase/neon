@@ -131,7 +131,7 @@ pub async fn task_main(
     while let Some(res) = run_until_cancelled(ws_listener.accept(), &cancellation_token).await {
         let (conn, peer_addr) = res.context("could not accept TCP stream")?;
         if let Err(e) = conn.set_nodelay(true) {
-            tracing::error!("could not set nodelay: {e}");
+            tracing::warn!("could not set nodelay: {e}");
             continue;
         }
         let conn_id = uuid::Uuid::new_v4();
@@ -241,7 +241,7 @@ async fn connection_startup(
     let (conn, peer) = match read_proxy_protocol(conn).await {
         Ok(c) => c,
         Err(e) => {
-            tracing::error!(?session_id, %peer_addr, "failed to accept TCP connection: invalid PROXY protocol V2 header: {e:#}");
+            tracing::warn!(?session_id, %peer_addr, "failed to accept TCP connection: invalid PROXY protocol V2 header: {e:#}");
             return None;
         }
     };
@@ -405,7 +405,7 @@ async fn request_handler(
                 )
                 .await
                 {
-                    error!("error in websocket connection: {e:#}");
+                    warn!("error in websocket connection: {e:#}");
                 }
             }
             .instrument(span),

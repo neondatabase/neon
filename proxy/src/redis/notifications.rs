@@ -146,7 +146,7 @@ impl<C: ProjectInfoCache + Send + Sync + 'static> MessageHandler<C> {
                 {
                     Ok(()) => {}
                     Err(e) => {
-                        tracing::error!("failed to cancel session: {e}");
+                        tracing::warn!("failed to cancel session: {e}");
                     }
                 }
             }

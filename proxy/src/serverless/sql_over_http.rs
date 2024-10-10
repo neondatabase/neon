@@ -831,7 +831,7 @@ impl QueryData {
             Either::Right((_cancelled, query)) => {
                 tracing::info!("cancelling query");
                 if let Err(err) = cancel_token.cancel_query(NoTls).await {
-                    tracing::error!(?err, "could not cancel query");
+                    tracing::warn!(?err, "could not cancel query");
                 }
                 // wait for the query cancellation
                 match time::timeout(time::Duration::from_millis(100), query).await {
@@ -920,7 +920,7 @@ impl BatchQueryData {
             }
             Err(SqlOverHttpError::Cancelled(_)) => {
                 if let Err(err) = cancel_token.cancel_query(NoTls).await {
-                    tracing::error!(?err, "could not cancel query");
+                    tracing::warn!(?err, "could not cancel query");
                 }
                 // TODO: after cancelling, wait to see if we can get a status. maybe the connection is still safe.
                 discard.discard();

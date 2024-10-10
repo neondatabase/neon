@@ -456,7 +456,7 @@ async fn parse_body<T: for<'a> serde::Deserialize<'a>>(
     });
     body.http_status_code = status;
 
-    error!("console responded with an error ({status}): {body:?}");
+    warn!("console responded with an error ({status}): {body:?}");
     Err(ApiError::ControlPlane(body))
 }
 
