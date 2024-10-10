@@ -255,10 +255,7 @@ impl ValuesReconstructState {
         completes: bool,
         value: tokio::sync::oneshot::Receiver<Result<OnDiskValue, std::io::Error>>,
     ) -> ValueReconstructSituation {
-        let state = self
-            .keys
-            .entry(*key)
-            .or_insert(VectoredValueReconstructState::default());
+        let state = self.keys.entry(*key).or_default();
 
         match state.situation {
             ValueReconstructSituation::Complete => unreachable!(),
