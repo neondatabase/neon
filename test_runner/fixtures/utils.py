@@ -45,61 +45,50 @@ COMPONENT_BINARIES = {
     "pageserver": ["pageserver", "pagectl"],
 }
 
-VERSION_COMBINATIONS = {
-    "argnames": "combination",
-    "argvalues": [
-        {
-            "storage_controller": "new",
-            "storage_broker": "new",
-            "compute": "new",
-            "safekeeper": "new",
-            "pageserver": "new",
-        },
-        {
-            "storage_controller": "old",
-            "storage_broker": "old",
-            "compute": "old",
-            "safekeeper": "old",
-            "pageserver": "new",
-        },
-        {
-            "storage_controller": "old",
-            "storage_broker": "new",
-            "compute": "old",
-            "safekeeper": "new",
-            "pageserver": "old",
-        },
-        {
-            "storage_controller": "new",
-            "storage_broker": "old",
-            "compute": "new",
-            "safekeeper": "old",
-            "pageserver": "old",
-        },
-        {
-            "storage_controller": "new",
-            "storage_broker": "old",
-            "compute": "old",
-            "safekeeper": "new",
-            "pageserver": "old",
-        },
-        {
-            "storage_controller": "old",
-            "storage_broker": "new",
-            "compute": "new",
-            "safekeeper": "old",
-            "pageserver": "old",
-        },
-    ],
-    "ids": [
-        "combination_nnnnn",
-        "combination_oooon",
-        "combination_onono",
-        "combination_nonoo",
-        "combination_noono",
-        "combination_onnoo",
-    ],
-}
+VERSIONS_COMBINATIONS = [
+    {
+        "storage_controller": "new",
+        "storage_broker": "new",
+        "compute": "new",
+        "safekeeper": "new",
+        "pageserver": "new",
+    },
+    {
+        "storage_controller": "old",
+        "storage_broker": "old",
+        "compute": "old",
+        "safekeeper": "old",
+        "pageserver": "new",
+    },
+    {
+        "storage_controller": "old",
+        "storage_broker": "new",
+        "compute": "old",
+        "safekeeper": "new",
+        "pageserver": "old",
+    },
+    {
+        "storage_controller": "new",
+        "storage_broker": "old",
+        "compute": "new",
+        "safekeeper": "old",
+        "pageserver": "old",
+    },
+    {
+        "storage_controller": "new",
+        "storage_broker": "old",
+        "compute": "old",
+        "safekeeper": "new",
+        "pageserver": "old",
+    },
+    {
+        "storage_controller": "old",
+        "storage_broker": "new",
+        "compute": "new",
+        "safekeeper": "old",
+        "pageserver": "old",
+    },
+]
 
 
 def subprocess_capture(
@@ -668,3 +657,19 @@ def human_bytes(amt: float) -> str:
         amt = amt / 1024
 
     raise RuntimeError("unreachable")
+
+
+def allpairs_versions():
+    """
+    Returns a dictionary with arguments for pytest parametrize
+    to test the compatibility with the previous version of Neon components
+    combinations were pre-computed to test all the pairs of the components with
+    the different versions.
+    """
+    ids = []
+    for pair in VERSIONS_COMBINATIONS:
+        cur_id = []
+        for state in sorted(pair.values()):
+            cur_id.append(state[0])
+        ids.append("combination_" + "".join(cur_id))
+    return {"argnames": "combination", "argvalues": VERSIONS_COMBINATIONS, "ids": ids}

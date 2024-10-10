@@ -9,9 +9,8 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import TYPE_CHECKING
 
-import pytest
-
 import fixtures.utils
+import pytest
 from fixtures.auth_tokens import TokenScope
 from fixtures.common_types import TenantId, TenantShardId, TimelineId
 from fixtures.compute_reconfigure import ComputeReconfigure
@@ -66,7 +65,7 @@ def get_node_shard_counts(env: NeonEnv, tenant_ids):
     return counts
 
 
-@pytest.mark.parametrize(**fixtures.utils.VERSION_COMBINATIONS)
+@pytest.mark.parametrize(**fixtures.utils.allpairs_versions())
 def test_storage_controller_smoke(neon_env_builder: NeonEnvBuilder, combination):
     """
     Test the basic lifecycle of a storage controller:
