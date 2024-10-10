@@ -28,6 +28,9 @@ pub enum ApiError {
     #[error("Resource temporarily unavailable: {0}")]
     ResourceUnavailable(Cow<'static, str>),
 
+    #[error("Too many requests: {0}")]
+    TooManyRequests(Cow<'static, str>),
+
     #[error("Shutting down")]
     ShuttingDown,
 
@@ -72,6 +75,10 @@ impl ApiError {
             ApiError::ResourceUnavailable(err) => HttpErrorBody::response_from_msg_and_status(
                 err.to_string(),
                 StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            ApiError::TooManyRequests(err) => HttpErrorBody::response_from_msg_and_status(
+                err.to_string(),
+                StatusCode::TOO_MANY_REQUESTS,
             ),
             ApiError::Timeout(err) => HttpErrorBody::response_from_msg_and_status(
                 err.to_string(),

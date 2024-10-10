@@ -246,6 +246,11 @@ fn passthrough_api_error(node: &Node, e: mgmt_api::Error) -> ApiError {
             // storage controller's auth configuration.
             ApiError::InternalServerError(anyhow::anyhow!("{node} {status}: {msg}"))
         }
+        mgmt_api::Error::ApiError(status @ StatusCode::TOO_MANY_REQUESTS, msg) => {
+            // Pass through 429 errors: if pageserver is asking us to wait + retry, we in
+            // turn ask our clients to wait + retry
+            ApiError::Conflict(format!("{node} {status}: {status} {msg}"))
+        }
         mgmt_api::Error::ApiError(status, msg) => {
             // Presume general case of pageserver API errors is that we tried to do something
             // that can't be done right now.
