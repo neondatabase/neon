@@ -173,11 +173,15 @@ paths:
         200:
           description: Result from extension installation
           content:
-            text/plain:
+            application/json:
               schema:
-                type: string
-                description: Error text or 'true' if extension was installed.
-                example: "true"
+                $ref: "#/components/schemas/ExtensionInstallResult"
+        500:
+          description: Error during extension installation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericError"
 
   /configure:
     post:
@@ -443,6 +447,16 @@ components:
         - configuration_pending
         - configuration
       example: running
+
+    ExtensionInstallResult:
+      type: object
+      properties:
+        extension:
+          description: Name of the extension.
+          type: string
+        version:
+          description: Version of the extension.
+          type: string
 
     InstalledExtensions:
       type: object
