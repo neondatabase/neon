@@ -151,7 +151,7 @@ def neon_binpath(base_dir: Path, build_type: str) -> Iterator[Path]:
     if not (binpath / "pageserver").exists():
         raise Exception(f"neon binaries not found at '{binpath}'")
 
-    yield binpath
+    yield binpath.absolute()
 
 
 @pytest.fixture(scope="session")
@@ -161,7 +161,7 @@ def compatibility_neon_binpath() -> Optional[Iterator[Path]]:
     comp_binpath = None
     if env_compatibility_neon_binpath := os.environ.get("COMPATIBILITY_NEON_BIN"):
         comp_binpath = Path(env_compatibility_neon_binpath).resolve()
-    yield comp_binpath
+    yield comp_binpath.absolute()
 
 
 @pytest.fixture(scope="session")
@@ -705,7 +705,7 @@ class NeonEnvBuilder:
             )
             for filename in paths:
                 destination = self.mixdir / filename
-                destination.link_to(directory / filename)
+                destination.symlink_to(directory.absolute() / filename)
         if self.version_combination["compute"] == "old":
             self.pg_distrib_dir = self.compatibility_pg_distrib_dir
         self.neon_binpath = self.mixdir
