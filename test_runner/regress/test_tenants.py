@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import os
+import threading
 import time
 from contextlib import closing
 from datetime import datetime
@@ -476,3 +477,37 @@ def test_pageserver_metrics_many_relations(neon_env_builder: NeonEnvBuilder):
     assert counts
     log.info(f"directory counts: {counts}")
     assert counts[2] > COUNT_AT_LEAST_EXPECTED
+
+
+def test_timelines_parallel_endpoints(neon_simple_env: NeonEnv):
+    """
+    (Relaxed) regression test for issue that led to https://github.com/neondatabase/neon/pull/9268
+    Create many endpoints in parallel and then restart them
+    """
+    env = neon_simple_env
+    pageserver_http_client = env.pageserver.http_client()
+
+    # This param needs to be 200+ to reproduce the limit issue
+    n_threads = 16
+    barrier = threading.Barrier(n_threads)
+
+    def test_timeline(branch_name: str):
+        endpoint = env.endpoints.create_start(branch_name)
+        time.sleep(2)
+        endpoint.stop()
+        time.sleep(2)
+        # Use a barrier to make sure we restart endpoints at the same time
+        barrier.wait()
+        endpoint.start()
+
+    workers = []
+
+    for i in range(0, n_threads):
+        branch_name = f"branch_{i}"
+        timeline_id = env.create_branch(branch_name)
+        w = threading.Thread(target=test_timeline, args=[branch_name])
+        workers.append(w)
+        w.start()
+
+    for w in workers:
+        w.join()
