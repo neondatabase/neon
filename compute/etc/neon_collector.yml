@@ -259,6 +259,13 @@ metrics:
       -- completely built. We only WAL-log the completely built snapshot files.
       (SELECT COUNT(*) FROM pg_ls_dir('pg_logical/snapshots') AS name WHERE name LIKE '%.snap') AS num_logical_snapshot_files;
 
+- metric_name: compute_backpressure_throttling_ms
+  type: gauge
+  help: 'Time compute has spent throttled'
+  values: [throttled]
+  query: |
+    SELECT backpressure_throttling_time() AS throttled;
+
 # In all the below metrics, we cast LSNs to floats because Prometheus only supports floats.
 # It's probably fine because float64 can store integers from -2^53 to +2^53 exactly.
 
