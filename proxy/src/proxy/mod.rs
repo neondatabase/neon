@@ -35,7 +35,7 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, Instrument};
+use tracing::{error, info, warn, Instrument};
 
 use self::{
     connect_compute::{connect_to_compute, TcpMechanism},
@@ -95,15 +95,15 @@ pub async fn task_main(
         connections.spawn(async move {
             let (socket, peer_addr) = match read_proxy_protocol(socket).await {
                 Err(e) => {
-                    error!("per-client task finished with an error: {e:#}");
+                    warn!("per-client task finished with an error: {e:#}");
                     return;
                 }
                 Ok((_socket, None)) if config.proxy_protocol_v2 == ProxyProtocolV2::Required => {
-                    error!("missing required proxy protocol header");
+                    warn!("missing required proxy protocol header");
                     return;
                 }
                 Ok((_socket, Some(_))) if config.proxy_protocol_v2 == ProxyProtocolV2::Rejected => {
-                    error!("proxy protocol header not supported");
+                    warn!("proxy protocol header not supported");
                     return;
                 }
                 Ok((socket, Some(addr))) => (socket, addr.ip()),
@@ -144,7 +144,7 @@ pub async fn task_main(
                 Err(e) => {
                     // todo: log and push to ctx the error kind
                     ctx.set_error_kind(e.get_error_kind());
-                    error!(parent: &span, "per-client task finished with an error: {e:#}");
+                    warn!(parent: &span, "per-client task finished with an error: {e:#}");
                 }
                 Ok(None) => {
                     ctx.set_success();
@@ -155,7 +155,7 @@ pub async fn task_main(
                     match p.proxy_pass().instrument(span.clone()).await {
                         Ok(()) => {}
                         Err(ErrorSource::Client(e)) => {
-                            error!(parent: &span, "per-client task finished with an IO error from the client: {e:#}");
+                            warn!(parent: &span, "per-client task finished with an IO error from the client: {e:#}");
                         }
                         Err(ErrorSource::Compute(e)) => {
                             error!(parent: &span, "per-client task finished with an IO error from the compute: {e:#}");

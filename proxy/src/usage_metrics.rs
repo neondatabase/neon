@@ -27,7 +27,7 @@ use std::{
 };
 use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, instrument, trace};
+use tracing::{error, info, instrument, trace, warn};
 use utils::backoff;
 use uuid::{NoContext, Timestamp};
 
@@ -346,7 +346,7 @@ async fn collect_metrics_iteration(
             error!("metrics endpoint refused the sent metrics: {:?}", res);
             for metric in chunk.events.iter().filter(|e| e.value > (1u64 << 40)) {
                 // Report if the metric value is suspiciously large
-                error!("potentially abnormal metric value: {:?}", metric);
+                warn!("potentially abnormal metric value: {:?}", metric);
             }
         }
     }
