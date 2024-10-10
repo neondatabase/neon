@@ -135,12 +135,6 @@ impl VectoredValueReconstructState {
 
         Ok(to)
     }
-
-    fn get_cached_lsn(&self) -> Option<Lsn> {
-        // self.img.as_ref().map(|img| img.0)
-        // TODO: rip this out
-        Some(Lsn(0))
-    }
 }
 
 /// Bag of data accumulated during a vectored get..
@@ -239,29 +233,6 @@ impl ValuesReconstructState {
         self.layers_visited
     }
 
-    /// This function is called after reading a keyspace from a layer.
-    /// It checks if the read path has now moved past the cached Lsn for any keys.
-    ///
-    /// Implementation note: We intentionally iterate over the keys for which we've
-    /// already collected some reconstruct data. This avoids scaling complexity with
-    /// the size of the search space.
-    pub(crate) fn on_lsn_advanced(&mut self, keyspace: &KeySpace, advanced_to: Lsn) {
-        for (key, value) in self.keys.iter_mut() {
-            if !keyspace.contains(key) {
-                continue;
-            }
-
-            if let Ok(state) = value {
-                if state.situation != ValueReconstructSituation::Complete
-                    && state.get_cached_lsn() >= Some(advanced_to)
-                {
-                    state.situation = ValueReconstructSituation::Complete;
-                    self.keys_done.add_key(*key);
-                }
-            }
-        }
-    }
-
     /// On hitting image layer, we can mark all keys in this range as done, because
     /// if the image layer does not contain a key, it is deleted/never added.
     pub(crate) fn on_image_layer_visited(&mut self, key_range: &Range<Key>) {
@@ -305,15 +276,6 @@ impl ValuesReconstructState {
         } else {
             ValueReconstructSituation::Complete
         }
-    }
-
-    /// Returns the Lsn at which this key is cached if one exists.
-    /// The read path should go no further than this Lsn for the given key.
-    pub(crate) fn get_cached_lsn(&self, key: &Key) -> Option<Lsn> {
-        self.keys
-            .get(key)
-            .and_then(|k| k.as_ref().ok())
-            .and_then(|state| state.get_cached_lsn())
     }
 
     /// Returns the key space describing the keys that have

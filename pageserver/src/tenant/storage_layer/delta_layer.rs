@@ -47,7 +47,6 @@ use crate::virtual_file::{self, MaybeFatalIo, VirtualFile};
 use crate::TEMP_FILE_SUFFIX;
 use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION};
 use anyhow::{bail, ensure, Context, Result};
-use bytes::Bytes;
 use camino::{Utf8Path, Utf8PathBuf};
 use futures::StreamExt;
 use itertools::Itertools;
@@ -840,8 +839,6 @@ impl DeltaLayerInner {
     // Look up the keys in the provided keyspace and update
     // the reconstruct state with whatever is found.
     //
-    // If the key is cached, go no further than the cached Lsn.
-    //
     // Currently, the index is visited for each range, but this
     // can be further optimised to visit the index only once.
     pub(super) async fn get_values_reconstruct_data(
@@ -873,7 +870,6 @@ impl DeltaLayerInner {
             data_end_offset,
             index_reader,
             planner,
-            reconstruct_state,
             ctx,
         )
         .await
@@ -881,8 +877,6 @@ impl DeltaLayerInner {
 
         self.do_reads_and_update_state(reads, reconstruct_state, ctx)
             .await;
-
-        reconstruct_state.on_lsn_advanced(&keyspace, lsn_range.start);
 
         Ok(())
     }
@@ -893,7 +887,6 @@ impl DeltaLayerInner {
         data_end_offset: u64,
         index_reader: DiskBtreeReader<Reader, DELTA_KEY_SIZE>,
         mut planner: VectoredReadPlanner,
-        reconstruct_state: &mut ValuesReconstructState,
         ctx: &RequestContext,
     ) -> anyhow::Result<Vec<VectoredRead>>
     where
@@ -920,10 +913,9 @@ impl DeltaLayerInner {
                 assert!(key >= range.start);
 
                 let outside_lsn_range = !lsn_range.contains(&lsn);
-                let below_cached_lsn = reconstruct_state.get_cached_lsn(&key) >= Some(lsn);
 
                 let flag = {
-                    if outside_lsn_range || below_cached_lsn {
+                    if outside_lsn_range {
                         BlobFlag::Ignore
                     } else if blob_ref.will_init() {
                         BlobFlag::ReplaceAll
@@ -1660,7 +1652,6 @@ pub(crate) mod test {
             .expect("In memory disk finish should never fail");
         let reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(0, root_offset, disk);
         let planner = VectoredReadPlanner::new(100);
-        let mut reconstruct_state = ValuesReconstructState::new();
         let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
 
         let keyspace = KeySpace {
@@ -1678,7 +1669,6 @@ pub(crate) mod test {
             disk_offset,
             reader,
             planner,
-            &mut reconstruct_state,
             &ctx,
         )
         .await
@@ -1922,7 +1912,6 @@ pub(crate) mod test {
             );
 
             let planner = VectoredReadPlanner::new(constants::MAX_VECTORED_READ_BYTES);
-            let mut reconstruct_state = ValuesReconstructState::new();
             let keyspace = pick_random_keyspace(rng, &entries_meta.key_range);
             let data_end_offset = inner.index_start_blk as u64 * PAGE_SZ as u64;
 
@@ -1932,7 +1921,6 @@ pub(crate) mod test {
                 data_end_offset,
                 index_reader,
                 planner,
-                &mut reconstruct_state,
                 &ctx,
             )
             .await?;

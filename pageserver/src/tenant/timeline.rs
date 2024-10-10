@@ -938,8 +938,6 @@ impl Timeline {
             ranges: vec![key..key.next()],
         };
 
-        // Initialise the reconstruct state for the key with the cache
-        // entry returned above.
         let mut reconstruct_state = ValuesReconstructState::new();
 
         let vectored_res = self

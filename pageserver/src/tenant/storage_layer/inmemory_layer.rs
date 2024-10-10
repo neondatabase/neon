@@ -414,8 +414,6 @@ impl InMemoryLayer {
 
     // Look up the keys in the provided keyspace and update
     // the reconstruct state with whatever is found.
-    //
-    // If the key is cached, go no further than the cached Lsn.
     pub(crate) async fn get_values_reconstruct_data(
         &self,
         keyspace: KeySpace,
@@ -439,18 +437,15 @@ impl InMemoryLayer {
             tokio::sync::oneshot::Sender<Result<OnDiskValue, std::io::Error>>,
         > = Default::default();
 
+        let lsn_range = self.start_lsn..end_lsn;
+
         for range in keyspace.ranges.iter() {
             for (key, vec_map) in inner
                 .index
                 .range(range.start.to_compact()..range.end.to_compact())
             {
                 let key = Key::from_compact(*key);
-                let lsn_range = match reconstruct_state.get_cached_lsn(&key) {
-                    Some(cached_lsn) => (cached_lsn + 1)..end_lsn,
-                    None => self.start_lsn..end_lsn,
-                };
-
-                let slice = vec_map.slice_range(lsn_range);
+                let slice = vec_map.slice_range(lsn_range.clone());
 
                 for (entry_lsn, index_entry) in slice.iter().rev() {
                     let IndexEntryUnpacked {
@@ -511,8 +506,6 @@ impl InMemoryLayer {
 
             assert!(senders.is_empty());
         });
-
-        reconstruct_state.on_lsn_advanced(&keyspace, self.start_lsn);
 
         Ok(())
     }
