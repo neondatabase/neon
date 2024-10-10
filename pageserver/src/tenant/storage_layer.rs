@@ -195,7 +195,8 @@ impl ValuesReconstructState {
             io_concurrency: {
                 static IO_CONCURRENCY: once_cell::sync::Lazy<String> =
                     once_cell::sync::Lazy::new(|| {
-                        std::env::var("NEON_PAGESERVER_VALUE_RECONSTRUCT_IO_CONCURRENCY").unwrap()
+                        std::env::var("NEON_PAGESERVER_VALUE_RECONSTRUCT_IO_CONCURRENCY")
+                            .unwrap_or_else(|_| "serial".to_string())
                     });
                 match IO_CONCURRENCY.as_str() {
                     "parallel" => IoConcurrency::Parallel,
