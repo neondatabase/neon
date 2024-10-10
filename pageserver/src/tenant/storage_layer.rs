@@ -141,7 +141,7 @@ impl VectoredValueReconstructState {
 pub(crate) struct ValuesReconstructState {
     /// The keys will be removed after `get_vectored` completes. The caller outside `Timeline`
     /// should not expect to get anything from this hashmap.
-    pub(crate) keys: HashMap<Key, Result<VectoredValueReconstructState, PageReconstructError>>,
+    pub(crate) keys: HashMap<Key, VectoredValueReconstructState>,
     /// The keys which are already retrieved
     keys_done: KeySpaceRandomAccum,
 
@@ -257,25 +257,21 @@ impl ValuesReconstructState {
         let state = self
             .keys
             .entry(*key)
-            .or_insert(Ok(VectoredValueReconstructState::default()));
+            .or_insert(VectoredValueReconstructState::default());
 
-        if let Ok(state) = state {
-            match state.situation {
-                ValueReconstructSituation::Complete => unreachable!(),
-                ValueReconstructSituation::Continue => {
-                    state.on_disk_values.push((lsn, value));
-                }
+        match state.situation {
+            ValueReconstructSituation::Complete => unreachable!(),
+            ValueReconstructSituation::Continue => {
+                state.on_disk_values.push((lsn, value));
             }
-
-            if completes && state.situation == ValueReconstructSituation::Continue {
-                state.situation = ValueReconstructSituation::Complete;
-                self.keys_done.add_key(*key);
-            }
-
-            state.situation
-        } else {
-            ValueReconstructSituation::Complete
         }
+
+        if completes && state.situation == ValueReconstructSituation::Continue {
+            state.situation = ValueReconstructSituation::Complete;
+            self.keys_done.add_key(*key);
+        }
+
+        state.situation
     }
 
     /// Returns the key space describing the keys that have

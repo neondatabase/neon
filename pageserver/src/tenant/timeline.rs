@@ -1140,11 +1140,10 @@ impl Timeline {
         let layers_visited = reconstruct_state.get_layers_visited();
 
         let futs = FuturesUnordered::new();
-        for (key, res) in std::mem::take(&mut reconstruct_state.keys) {
+        for (key, state) in std::mem::take(&mut reconstruct_state.keys) {
             futs.push({
                 let walredo_self = self.myself.upgrade().expect("&self method holds the arc");
                 async move {
-                    let state = res.expect("Read path is infallible");
                     assert!(matches!(
                         state.situation,
                         ValueReconstructSituation::Complete
