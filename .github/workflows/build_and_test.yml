@@ -193,16 +193,15 @@ jobs:
         with:
           submodules: true
 
-#      Disabled for now
-#      - name: Restore cargo deps cache
-#        id: cache_cargo
-#        uses: actions/cache@v4
-#        with:
-#          path: |
-#            !~/.cargo/registry/src
-#            ~/.cargo/git/
-#            target/
-#          key: v1-${{ runner.os }}-${{ runner.arch }}-cargo-clippy-${{ hashFiles('rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+      - name: Cache cargo deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            !~/.cargo/registry/src
+            ~/.cargo/git
+            target
+          key: v1-${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('./Cargo.lock') }}-${{ hashFiles('./rust-toolchain.toml') }}-rust
 
       # Some of our rust modules use FFI and need those to be checked
       - name: Get postgres headers
