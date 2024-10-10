@@ -1623,7 +1623,6 @@ def test_safekeeper_without_pageserver_and_pg_restore(
     with env:
         env.init()
         assert env.postgres is not None
-        env.postgres.connstr()
         shared_buffers = env.postgres.safe_psql("show shared_buffers")[0][0]
         log.info(f"shared_buffers: {shared_buffers}")
         size_before = env.postgres.safe_psql("select pg_database_size('postgres');")[0][0]
@@ -1665,56 +1664,44 @@ def test_safekeeper_without_pageserver_and_waltest(
     )
 
     wal_test = """
-CREATE OR REPLACE FUNCTION public.waltest()
- RETURNS text
- LANGUAGE plpgsql
+CREATE OR REPLACE FUNCTION public.wal_bandwidth_test()
+RETURNS text
+LANGUAGE plpgsql
 AS $function$
 declare
   i int;
   j int;
-  lastts timestamp;
-  nowts timestamp;
-  lag bigint;
-  bandwidth numeric;
   lastlsn pg_lsn;
   nowlsn pg_lsn;
+  lastts timestamp;
+  nowts timestamp;
+  bandwidth numeric;
 
-  moving_avg numeric;
   result text := '';  -- Initialize an empty string to capture messages
 begin
-  moving_avg = 0;
-  for i in 1..1000 loop -- 1 GiB of WAL
-    loop
-      nowlsn = pg_current_wal_insert_lsn();
-      lag = (select nowlsn - received_lsn from backpressure_lsns());
-      if lag > 200_000_000 then
-        exit;
-      end if;
+  for i in 1..100 loop
 
-      -- emit 1 MB of WAL
-      for j in 1..100 loop
+    lastlsn = pg_current_wal_insert_lsn();
+    lastts = clock_timestamp();
+
+    -- Emit 100 MB of WAL
+    for j in 1..10000 loop
         perform pg_logical_emit_message(false, '', repeat('x', 10486));
-      end loop;
     end loop;
+
+    nowlsn = pg_current_wal_insert_lsn();
     nowts = clock_timestamp();
 
-    if lastlsn is not null then
-      bandwidth = (nowlsn - lastlsn) / (extract(epoch from nowts) - extract(epoch from lastts));
+    bandwidth = (nowlsn - lastlsn) / (extract(epoch from nowts) - extract(epoch from lastts));
 
-      moving_avg = moving_avg + bandwidth / 10 - (moving_avg / 10);
+    -- Capture the message instead of raising a notice
+    result := result || format('bandwidth: %s kB / s%s',
+                               lpad(round(bandwidth / 1024)::text, 10),
+                               chr(10));  -- Newline for formatting
 
-      -- Capture the message instead of raising a notice
-      result := result || format('bandwidth: %s kB / s (avg %s kB / s)%s',
-        lpad(round(bandwidth / 1024)::text, 10),
-        lpad(round(moving_avg / 1024)::text, 10),
-        chr(10)  -- Newline for formatting
-      );
-    end if;
-    lastlsn = nowlsn;
-    lastts = nowts;
-    perform pg_sleep(0.1);
   end loop;
-  return result;  -- Return the concatenated string
+
+  return result;  -- Return the concatenated string of messages
 end;
 $function$
 ;
@@ -1723,26 +1710,27 @@ $function$
     with env:
         env.init()
         assert env.postgres is not None
-        env.postgres.connstr()
         shared_buffers = env.postgres.safe_psql("show shared_buffers")[0][0]
         log.info(f"shared_buffers: {shared_buffers}")
         size_before = env.postgres.safe_psql("select pg_database_size('postgres');")[0][0]
         log.info(f"Database size before test: {size_before}")
-        env.postgres.safe_psql("create extension neon;")
+        #env.postgres.safe_psql("create extension neon;")
         env.postgres.safe_psql(wal_test)
-        env.postgres.safe_psql("SET statement_timeout=0;")
         start_time = time.time()
-        output = env.postgres.safe_psql("select waltest();")[0][0]
+        output = env.postgres.safe_psql("""
+            SET statement_timeout = 0;
+            select wal_bandwidth_test();
+        """)[0][0]
         end_time = time.time()
         duration = end_time - start_time
         log.info(output)
         size_after = env.postgres.safe_psql("select pg_database_size('postgres');")[0][0]
-        log.info(f"Database size after test: {size_after}")
+        log.info(f"Database size after test (irrelevant because no real WAL records, no relations): {size_after}")
         # Calculate the restore rate in bytes/second
         restored_size = size_after - size_before
         restore_rate = restored_size / duration
         log.info(f"test duration: {duration:.2f} seconds")
-        log.info(f"Average ingest rate: {restore_rate:.2f} bytes/second")
+        log.info(f"Average ingest rate(irrelevant because no real WAL records, no relations): {restore_rate:.2f} bytes/second")
 
 def test_safekeeper_without_pageserver(
     test_output_dir: str,
