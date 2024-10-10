@@ -208,6 +208,11 @@ def test_storage_controller_many_tenants(
             f"Created {len(tenants)} tenants in {time.time() - t1}, {len(tenants) / (time.time() - t1)}/s"
         )
 
+        # Waiting for optimizer to stabilize, if it disagrees with scheduling (the correct behavior
+        # would be for original scheduling decisions to always match optimizer's preference)
+        # (workaround for https://github.com/neondatabase/neon/issues/8969)
+        env.storage_controller.reconcile_until_idle(timeout_secs=120)
+
         # Create timelines in those tenants which are going to get one
         t1 = time.time()
         timeline_create_futs = []
