@@ -21,7 +21,7 @@
 //!
 //! Every image layer file consists of three parts: "summary",
 //! "index", and "values".  The summary is a fixed size header at the
-//! beginningof the file, and it contains basic information about the
+//! beginning of the file, and it contains basic information about the
 //! layer, and offsets to the other parts. The "index" is a B-tree,
 //! mapping from Key to an offset in the "values" part.  The
 //! actual page images are stored in the "values" part.
