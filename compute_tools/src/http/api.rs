@@ -99,8 +99,8 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
             }
         }
 
-        (&Method::POST, "/extensions") => {
-            info!("serving /extensions POST request");
+        (&Method::POST, "/extensions/install") => {
+            info!("serving /extensions/install POST request");
             let status = compute.get_status();
             if status != ComputeStatus::Running {
                 let msg = format!(
