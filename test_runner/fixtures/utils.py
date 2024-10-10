@@ -44,50 +44,15 @@ COMPONENT_BINARIES = {
     "safekeeper": ["safekeeper"],
     "pageserver": ["pageserver", "pagectl"],
 }
-
+# Disable auto-formatting for better readability
+# fmt: off
 VERSIONS_COMBINATIONS = [
-    {
-        "storage_controller": "new",
-        "storage_broker": "new",
-        "compute": "new",
-        "safekeeper": "new",
-        "pageserver": "new",
-    },
-    {
-        "storage_controller": "old",
-        "storage_broker": "old",
-        "compute": "old",
-        "safekeeper": "old",
-        "pageserver": "new",
-    },
-    {
-        "storage_controller": "old",
-        "storage_broker": "new",
-        "compute": "old",
-        "safekeeper": "new",
-        "pageserver": "old",
-    },
-    {
-        "storage_controller": "new",
-        "storage_broker": "old",
-        "compute": "new",
-        "safekeeper": "old",
-        "pageserver": "old",
-    },
-    {
-        "storage_controller": "new",
-        "storage_broker": "old",
-        "compute": "old",
-        "safekeeper": "new",
-        "pageserver": "old",
-    },
-    {
-        "storage_controller": "old",
-        "storage_broker": "new",
-        "compute": "new",
-        "safekeeper": "old",
-        "pageserver": "old",
-    },
+    {"storage_controller": "new", "storage_broker": "new", "compute": "new", "safekeeper": "new", "pageserver": "new"},
+    {"storage_controller": "old", "storage_broker": "old", "compute": "old", "safekeeper": "old", "pageserver": "new"},
+    {"storage_controller": "old", "storage_broker": "new", "compute": "old", "safekeeper": "new", "pageserver": "old"},
+    {"storage_controller": "new", "storage_broker": "old", "compute": "new", "safekeeper": "old", "pageserver": "old"},
+    {"storage_controller": "new", "storage_broker": "old", "compute": "old", "safekeeper": "new", "pageserver": "old"},
+    {"storage_controller": "old", "storage_broker": "new", "compute": "new", "safekeeper": "old", "pageserver": "old"},
 ]
 
 
