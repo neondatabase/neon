@@ -22,6 +22,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use utils::failpoint_support;
 use utils::id::TenantTimelineId;
 use utils::pageserver_feedback::PageserverFeedback;
+use utils::timeout::timeout_cancellable;
 
 use std::cmp::{max, min};
 use std::net::SocketAddr;
@@ -29,7 +30,6 @@ use std::str;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch::Receiver;
-use tokio::time::timeout;
 use tracing::*;
 use utils::{bin_ser::BeSer, lsn::Lsn};
 
@@ -450,6 +450,8 @@ impl SafekeeperPostgresHandler {
         // switch to copy
         pgb.write_message(&BeMessage::CopyBothResponse).await?;
 
+        let tli_cancel = tli.cancel.clone();
+
         let wal_reader = tli.get_walreader(start_pos).await?;
 
         // Split to concurrently receive and send data; replies are generally
@@ -479,6 +481,9 @@ impl SafekeeperPostgresHandler {
             // todo: add read|write .context to these errors
             r = sender.run() => r,
             r = reply_reader.run() => r,
+            _ = tli_cancel.cancelled() => {
+                Err(CopyStreamHandlerEnd::Cancelled)
+            }
         };
 
         let ws_state = ws_guard
@@ -557,6 +562,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> WalSender<'_, IO> {
     /// Send WAL until
     /// - an error occurs
     /// - receiver is caughtup and there is no computes (if streaming up to commit_lsn)
+    /// - timeline's cancellation token fires
     ///
     /// Err(CopyStreamHandlerEnd) is always returned; Result is used only for ?
     /// convenience.
@@ -601,15 +607,20 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> WalSender<'_, IO> {
             };
             let send_buf = &send_buf[..send_size];
 
-            // and send it
-            self.pgb
-                .write_message(&BeMessage::XLogData(XLogDataBody {
-                    wal_start: self.start_pos.0,
-                    wal_end: self.end_pos.0,
-                    timestamp: get_current_timestamp(),
-                    data: send_buf,
-                }))
-                .await?;
+            // and send it, while respecting Timeline::cancel
+            let msg = BeMessage::XLogData(XLogDataBody {
+                wal_start: self.start_pos.0,
+                wal_end: self.end_pos.0,
+                timestamp: get_current_timestamp(),
+                data: send_buf,
+            });
+            tokio::select! {
+                r = self.pgb
+                .write_message(&msg) => {r?;},
+                _ = self.tli.tli.cancel.cancelled() => {
+                    return Err(CopyStreamHandlerEnd::Cancelled);
+                }
+            }
 
             if let Some(appname) = &self.appname {
                 if appname == "replica" {
@@ -674,13 +685,19 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> WalSender<'_, IO> {
                 }
             }
 
-            self.pgb
-                .write_message(&BeMessage::KeepAlive(WalSndKeepAlive {
-                    wal_end: self.end_pos.0,
-                    timestamp: get_current_timestamp(),
-                    request_reply: true,
-                }))
-                .await?;
+            let msg = BeMessage::KeepAlive(WalSndKeepAlive {
+                wal_end: self.end_pos.0,
+                timestamp: get_current_timestamp(),
+                request_reply: true,
+            });
+
+            tokio::select! {
+                r = self.pgb
+                .write_message(&msg) => {r?;},
+                _ = self.tli.tli.cancel.cancelled() => {
+                    return Err(CopyStreamHandlerEnd::Cancelled)
+                }
+            }
         }
     }
 
@@ -703,7 +720,9 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> WalSender<'_, IO> {
             return Ok(None);
         }
 
-        let res = timeout(POLL_STATE_TIMEOUT, async move {
+        let tli_cancel = self.tli.tli.cancel.clone();
+
+        let res = timeout_cancellable(POLL_STATE_TIMEOUT, &tli_cancel, async move {
             loop {
                 let end_pos = self.end_watch.get();
                 if end_pos > self.start_pos {
@@ -727,7 +746,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> WalSender<'_, IO> {
             Ok(Ok(commit_lsn)) => Ok(Some(commit_lsn)),
             // error inside closure
             Ok(Err(err)) => Err(err),
-            // timeout
+            // timeout or cancelled
             Err(_) => Ok(None),
         }
     }
@@ -743,7 +762,14 @@ struct ReplyReader<IO> {
 impl<IO: AsyncRead + AsyncWrite + Unpin> ReplyReader<IO> {
     async fn run(&mut self) -> Result<(), CopyStreamHandlerEnd> {
         loop {
-            let msg = self.reader.read_copy_message().await?;
+            let msg = tokio::select! {
+                r = self.reader.read_copy_message() => {
+                    r?
+                },
+                _ = self.tli.tli.cancel.cancelled() => {
+                    return Err(CopyStreamHandlerEnd::Cancelled);
+                }
+            };
             self.handle_feedback(&msg).await?
         }
     }

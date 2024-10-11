@@ -33,6 +33,7 @@ use tokio::task;
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::id::TenantTimelineId;
 use utils::lsn::Lsn;
@@ -252,12 +253,22 @@ impl SafekeeperPostgresHandler {
         // sends, so this avoids deadlocks.
         let mut pgb_reader = pgb.split().context("START_WAL_PUSH split")?;
         let peer_addr = *pgb.get_peer_addr();
+
+        let reader_cancel = match tli {
+            Some(tli) => tli.tli.cancel.clone(),
+            None => {
+                // Timeline not yet created, can't be cancelled, use a dummy token
+                CancellationToken::new()
+            }
+        };
+
         let mut network_reader = NetworkReader {
             ttid: self.ttid,
             conn_id: self.conn_id,
             pgb_reader: &mut pgb_reader,
             peer_addr,
             acceptor_handle: &mut acceptor_handle,
+            cancel: reader_cancel,
         };
 
         // Read first message and create timeline if needed.
@@ -271,10 +282,11 @@ impl SafekeeperPostgresHandler {
                     .subscribe();
             *tli = Some(timeline.wal_residence_guard().await?);
 
+            let timeline_cancel = timeline.cancel.clone();
             tokio::select! {
                 // todo: add read|write .context to these errors
                 r = network_reader.run(msg_tx, msg_rx, reply_tx, timeline, next_msg) => r,
-                r = network_write(pgb, reply_rx, pageserver_feedback_rx) => r,
+                r = network_write(pgb, reply_rx, pageserver_feedback_rx, &timeline_cancel) => r,
             }
         } else {
             res.map(|_| ())
@@ -318,6 +330,7 @@ struct NetworkReader<'a, IO> {
     // WalAcceptor is spawned when we learn server info from walproposer and
     // create timeline; handle is put here.
     acceptor_handle: &'a mut Option<JoinHandle<anyhow::Result<()>>>,
+    cancel: CancellationToken,
 }
 
 impl<'a, IO: AsyncRead + AsyncWrite + Unpin> NetworkReader<'a, IO> {
@@ -325,7 +338,7 @@ impl<'a, IO: AsyncRead + AsyncWrite + Unpin> NetworkReader<'a, IO> {
         &mut self,
     ) -> Result<(WalResidentTimeline, ProposerAcceptorMessage), CopyStreamHandlerEnd> {
         // Receive information about server to create timeline, if not yet.
-        let next_msg = read_message(self.pgb_reader).await?;
+        let next_msg = read_message(self.pgb_reader, &self.cancel).await?;
         let tli = match next_msg {
             ProposerAcceptorMessage::Greeting(ref greeting) => {
                 info!(
@@ -360,6 +373,8 @@ impl<'a, IO: AsyncRead + AsyncWrite + Unpin> NetworkReader<'a, IO> {
         tli: WalResidentTimeline,
         next_msg: ProposerAcceptorMessage,
     ) -> Result<(), CopyStreamHandlerEnd> {
+        let tli_cancel = tli.tli.cancel.clone();
+
         *self.acceptor_handle = Some(WalAcceptor::spawn(
             tli,
             msg_rx,
@@ -368,7 +383,7 @@ impl<'a, IO: AsyncRead + AsyncWrite + Unpin> NetworkReader<'a, IO> {
         ));
 
         // Forward all messages to WalAcceptor
-        read_network_loop(self.pgb_reader, msg_tx, next_msg).await
+        read_network_loop(self.pgb_reader, msg_tx, next_msg, &tli_cancel).await
     }
 }
 
@@ -376,8 +391,16 @@ impl<'a, IO: AsyncRead + AsyncWrite + Unpin> NetworkReader<'a, IO> {
 /// TODO: Return Ok(None) on graceful termination.
 async fn read_message<IO: AsyncRead + AsyncWrite + Unpin>(
     pgb_reader: &mut PostgresBackendReader<IO>,
+    cancel: &CancellationToken,
 ) -> Result<ProposerAcceptorMessage, CopyStreamHandlerEnd> {
-    let copy_data = pgb_reader.read_copy_message().await?;
+    let copy_data = tokio::select! {
+        copy_data = pgb_reader.read_copy_message() => {
+            copy_data?
+        },
+        _ = cancel.cancelled() => {
+            return Err(CopyStreamHandlerEnd::Cancelled)
+        }
+    };
     let msg = ProposerAcceptorMessage::parse(copy_data)?;
     Ok(msg)
 }
@@ -386,12 +409,22 @@ async fn read_network_loop<IO: AsyncRead + AsyncWrite + Unpin>(
     pgb_reader: &mut PostgresBackendReader<IO>,
     msg_tx: Sender<ProposerAcceptorMessage>,
     mut next_msg: ProposerAcceptorMessage,
+    cancel: &CancellationToken,
 ) -> Result<(), CopyStreamHandlerEnd> {
     loop {
-        if msg_tx.send(next_msg).await.is_err() {
+        let send_result = tokio::select! {
+            send_result = msg_tx.send(next_msg) => {
+                send_result
+            }
+            _ = cancel.cancelled() => {
+                return Err(CopyStreamHandlerEnd::Cancelled)
+            }
+        };
+
+        if send_result.is_err() {
             return Ok(()); // chan closed, WalAcceptor terminated
         }
-        next_msg = read_message(pgb_reader).await?;
+        next_msg = read_message(pgb_reader, cancel).await?;
     }
 }
 
@@ -402,6 +435,7 @@ async fn network_write<IO: AsyncRead + AsyncWrite + Unpin>(
     pgb_writer: &mut PostgresBackend<IO>,
     mut reply_rx: Receiver<AcceptorProposerMessage>,
     mut pageserver_feedback_rx: tokio::sync::broadcast::Receiver<PageserverFeedback>,
+    cancel: &CancellationToken,
 ) -> Result<(), CopyStreamHandlerEnd> {
     let mut buf = BytesMut::with_capacity(128);
 
@@ -431,7 +465,10 @@ async fn network_write<IO: AsyncRead + AsyncWrite + Unpin>(
                         Some(AcceptorProposerMessage::AppendResponse(append_response))
                     }
                     _ => None,
-                }
+                },
+            _ = cancel.cancelled() => {
+                return Err(CopyStreamHandlerEnd::Cancelled)
+            }
         };
 
         let Some(msg) = msg else {
@@ -500,6 +537,11 @@ impl WalAcceptor {
         let mut next_keepalive = Instant::now();
 
         while let Some(mut next_msg) = self.msg_rx.recv().await {
+            // Drop out if timeline is cancelled
+            if self.tli.is_cancelled() {
+                break;
+            }
+
             // Update walreceiver state in shmem for reporting.
             if let ProposerAcceptorMessage::Elected(_) = &next_msg {
                 walreceiver_guard.get().status = WalReceiverStatus::Streaming;
@@ -555,6 +597,7 @@ impl WalAcceptor {
                 next_keepalive = Instant::now() + KEEPALIVE_INTERVAL;
             }
         }
+
         Ok(())
     }
 }
