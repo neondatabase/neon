@@ -104,7 +104,7 @@ pub fn spawn(
             pg_auth,
             tcp_listener,
             conf.pg_auth_type,
-            conf.debounce_timeout,
+            conf.server_side_batch_timeout,
             libpq_ctx,
             cancel.clone(),
         )
@@ -153,7 +153,7 @@ pub async fn libpq_listener_main(
     auth: Option<Arc<SwappableJwtAuth>>,
     listener: tokio::net::TcpListener,
     auth_type: AuthType,
-    debounce_timeout: Option<Duration>,
+    server_side_batch_timeout: Option<Duration>,
     listener_ctx: RequestContext,
     listener_cancel: CancellationToken,
 ) -> Connections {
@@ -184,7 +184,7 @@ pub async fn libpq_listener_main(
                     local_auth,
                     socket,
                     auth_type,
-                    debounce_timeout,
+                    server_side_batch_timeout,
                     connection_ctx,
                     connections_cancel.child_token(),
                 ));
@@ -212,7 +212,7 @@ async fn page_service_conn_main(
     auth: Option<Arc<SwappableJwtAuth>>,
     socket: tokio::net::TcpStream,
     auth_type: AuthType,
-    debounce_timeout: Option<Duration>,
+    server_side_batch_timeout: Option<Duration>,
     connection_ctx: RequestContext,
     cancel: CancellationToken,
 ) -> ConnectionHandlerResult {
@@ -266,7 +266,7 @@ async fn page_service_conn_main(
     let mut conn_handler = PageServerHandler::new(
         tenant_manager,
         auth,
-        debounce_timeout,
+        server_side_batch_timeout,
         connection_ctx,
         cancel.clone(),
     );
@@ -313,8 +313,8 @@ struct PageServerHandler {
 
     timeline_handles: TimelineHandles,
 
-    /// See [`PageServerConf::debounce_timeout`]
-    debounce_timeout: Option<Duration>,
+    /// See [`PageServerConf::server_side_batch_timeout`]
+    server_side_batch_timeout: Option<Duration>,
 }
 
 struct TimelineHandles {
@@ -532,7 +532,7 @@ impl PageServerHandler {
     pub fn new(
         tenant_manager: Arc<TenantManager>,
         auth: Option<Arc<SwappableJwtAuth>>,
-        debounce_timeout: Option<Duration>,
+        server_side_batch_timeout: Option<Duration>,
         connection_ctx: RequestContext,
         cancel: CancellationToken,
     ) -> Self {
@@ -542,7 +542,7 @@ impl PageServerHandler {
             connection_ctx,
             timeline_handles: TimelineHandles::new(tenant_manager),
             cancel,
-            debounce_timeout,
+            server_side_batch_timeout,
         }
     }
 
@@ -607,7 +607,7 @@ impl PageServerHandler {
 
         let mut batched = None;
         'outer: loop {
-            enum DebouncedFeMessage {
+            enum BatchedFeMessage {
                 Exists(models::PagestreamExistsRequest),
                 Nblocks(models::PagestreamNblocksRequest),
                 GetPage {
@@ -620,13 +620,13 @@ impl PageServerHandler {
                 GetSlruSegment(models::PagestreamGetSlruSegmentRequest),
                 RespondError(Span, PageStreamError),
             }
-            let mut debounce: Option<std::time::Instant> = None;
+            let mut batch_started_at: Option<std::time::Instant> = None;
             // return or `?` on protocol error
             // `break EXPR` to stop batching. The EXPR will be the first message in the next batch.
-            let next_batched: Option<DebouncedFeMessage> = loop {
-                let sleep_fut = match (self.debounce_timeout, debounce) {
-                    (Some(debounce_timeout), Some(started_at)) => futures::future::Either::Left(
-                        tokio::time::sleep_until((started_at + debounce_timeout).into()),
+            let next_batched: Option<BatchedFeMessage> = loop {
+                let sleep_fut = match (self.server_side_batch_timeout, batch_started_at) {
+                    (Some(batch_timeout), Some(started_at)) => futures::future::Either::Left(
+                        tokio::time::sleep_until((started_at + batch_timeout).into()),
                     ),
                     _ => futures::future::Either::Right(futures::future::pending()),
                 };
@@ -661,11 +661,11 @@ impl PageServerHandler {
                 let neon_fe_msg = PagestreamFeMessage::parse(&mut copy_data_bytes.reader())?;
 
                 let this_msg = match neon_fe_msg {
-                    PagestreamFeMessage::Exists(msg) => DebouncedFeMessage::Exists(msg),
-                    PagestreamFeMessage::Nblocks(msg) => DebouncedFeMessage::Nblocks(msg),
-                    PagestreamFeMessage::DbSize(msg) => DebouncedFeMessage::DbSize(msg),
+                    PagestreamFeMessage::Exists(msg) => BatchedFeMessage::Exists(msg),
+                    PagestreamFeMessage::Nblocks(msg) => BatchedFeMessage::Nblocks(msg),
+                    PagestreamFeMessage::DbSize(msg) => BatchedFeMessage::DbSize(msg),
                     PagestreamFeMessage::GetSlruSegment(msg) => {
-                        DebouncedFeMessage::GetSlruSegment(msg)
+                        BatchedFeMessage::GetSlruSegment(msg)
                     }
                     PagestreamFeMessage::GetPage(PagestreamGetPageRequest {
                         request_lsn,
@@ -693,14 +693,14 @@ impl PageServerHandler {
                                 // Closing the connection by returning ``::Reconnect` has the side effect of rate-limiting above message, via
                                 // client's reconnect backoff, as well as hopefully prompting the client to load its updated configuration
                                 // and talk to a different pageserver.
-                                break Some(DebouncedFeMessage::RespondError(
+                                break Some(BatchedFeMessage::RespondError(
                                     span,
                                     PageStreamError::Reconnect(
                                         "getpage@lsn request routed to wrong shard".into(),
                                     ),
                                 ));
                             }
-                            Err(e) => break Some(DebouncedFeMessage::RespondError(span, e.into())),
+                            Err(e) => break Some(BatchedFeMessage::RespondError(span, e.into())),
                         };
                         let effective_request_lsn = match Self::wait_or_get_last_lsn(
                             &shard,
@@ -714,10 +714,10 @@ impl PageServerHandler {
                         {
                             Ok(lsn) => lsn,
                             Err(e) => {
-                                break Some(DebouncedFeMessage::RespondError(span, e));
+                                break Some(BatchedFeMessage::RespondError(span, e));
                             }
                         };
-                        DebouncedFeMessage::GetPage {
+                        BatchedFeMessage::GetPage {
                             span,
                             shard,
                             effective_request_lsn,
@@ -726,7 +726,7 @@ impl PageServerHandler {
                     }
                 };
 
-                let debounce_timeout = match self.debounce_timeout {
+                let batch_timeout = match self.server_side_batch_timeout {
                     Some(value) => value,
                     None => {
                         // Debouncing is not enabled.
@@ -735,19 +735,19 @@ impl PageServerHandler {
                     }
                 };
 
-                // check if we can debounce
+                // check if we can batch
                 match (&mut batched, this_msg) {
                     (None, this_msg) => {
                         batched = Some(this_msg);
                     }
                     (
-                        Some(DebouncedFeMessage::GetPage {
+                        Some(BatchedFeMessage::GetPage {
                             span: _,
                             shard: accum_shard,
                             pages: accum_pages,
                             effective_request_lsn: accum_lsn,
                         }),
-                        DebouncedFeMessage::GetPage {
+                        BatchedFeMessage::GetPage {
                             span: _,
                             shard: this_shard,
                             pages: this_pages,
@@ -784,9 +784,9 @@ impl PageServerHandler {
                     }
                 }
 
-                // debounce impl piece
-                let started_at = debounce.get_or_insert_with(Instant::now);
-                if started_at.elapsed() > debounce_timeout {
+                // batching impl piece
+                let started_at = batch_started_at.get_or_insert_with(Instant::now);
+                if started_at.elapsed() > batch_timeout {
                     break None;
                 }
             };
@@ -796,7 +796,7 @@ impl PageServerHandler {
                 smallvec::SmallVec<[Result<PagestreamBeMessage, PageStreamError>; 1]>,
                 _,
             ) = match batched.take().expect("loop above ensures this") {
-                DebouncedFeMessage::Exists(req) => {
+                BatchedFeMessage::Exists(req) => {
                     fail::fail_point!("ps::handle-pagerequest-message::exists");
                     let span = tracing::info_span!("handle_get_rel_exists_request", rel = %req.rel, req_lsn = %req.request_lsn);
                     (
@@ -808,7 +808,7 @@ impl PageServerHandler {
                         span,
                     )
                 }
-                DebouncedFeMessage::Nblocks(req) => {
+                BatchedFeMessage::Nblocks(req) => {
                     fail::fail_point!("ps::handle-pagerequest-message::nblocks");
                     let span = tracing::info_span!("handle_get_nblocks_request", rel = %req.rel, req_lsn = %req.request_lsn);
                     (
@@ -820,7 +820,7 @@ impl PageServerHandler {
                         span,
                     )
                 }
-                DebouncedFeMessage::GetPage {
+                BatchedFeMessage::GetPage {
                     span,
                     shard,
                     effective_request_lsn,
@@ -846,7 +846,7 @@ impl PageServerHandler {
                         span,
                     )
                 }
-                DebouncedFeMessage::DbSize(req) => {
+                BatchedFeMessage::DbSize(req) => {
                     fail::fail_point!("ps::handle-pagerequest-message::dbsize");
                     let span = tracing::info_span!("handle_db_size_request", dbnode = %req.dbnode, req_lsn = %req.request_lsn);
                     (
@@ -858,7 +858,7 @@ impl PageServerHandler {
                         span,
                     )
                 }
-                DebouncedFeMessage::GetSlruSegment(req) => {
+                BatchedFeMessage::GetSlruSegment(req) => {
                     fail::fail_point!("ps::handle-pagerequest-message::slrusegment");
                     let span = tracing::info_span!("handle_get_slru_segment_request", kind = %req.kind, segno = %req.segno, req_lsn = %req.request_lsn);
                     (
@@ -875,7 +875,7 @@ impl PageServerHandler {
                         span,
                     )
                 }
-                DebouncedFeMessage::RespondError(span, e) => {
+                BatchedFeMessage::RespondError(span, e) => {
                     // We've already decided to respond with an error, so we don't need to
                     // call the handler.
                     (smallvec::smallvec![Err(e)], span)

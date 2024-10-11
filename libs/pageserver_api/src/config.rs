@@ -106,7 +106,7 @@ pub struct ConfigToml {
     pub l0_flush: Option<crate::models::L0FlushConfig>,
     pub virtual_file_direct_io: crate::models::virtual_file::DirectIoMode,
     pub io_buffer_alignment: usize,
-    pub debounce_timeout: Option<Duration>,
+    pub server_side_batch_timeout: Option<Duration>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -313,7 +313,7 @@ pub mod defaults {
 
     pub const DEFAULT_IO_BUFFER_ALIGNMENT: usize = 512;
 
-    pub const DEFAULT_DEBOUNCE_TIMEOUT: Option<&str> = None;
+    pub const DEFAULT_SERVER_SIDE_BATCH_TIMEOUT: Option<&str> = None;
 }
 
 impl Default for ConfigToml {
@@ -395,7 +395,7 @@ impl Default for ConfigToml {
 
             io_buffer_alignment: DEFAULT_IO_BUFFER_ALIGNMENT,
 
-            debounce_timeout: DEFAULT_DEBOUNCE_TIMEOUT
+            server_side_batch_timeout: DEFAULT_SERVER_SIDE_BATCH_TIMEOUT
                 .map(|duration| humantime::parse_duration(duration).unwrap()),
 
             tenant_config: TenantConfigToml::default(),

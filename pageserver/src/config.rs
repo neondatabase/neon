@@ -180,7 +180,7 @@ pub struct PageServerConf {
 
     /// Maximum amount of time for which a get page request request
     /// might be held up for request merging.
-    pub debounce_timeout: Option<Duration>,
+    pub server_side_batch_timeout: Option<Duration>,
 }
 
 /// Token for authentication to safekeepers
@@ -334,7 +334,7 @@ impl PageServerConf {
             concurrent_tenant_size_logical_size_queries,
             virtual_file_io_engine,
             io_buffer_alignment,
-            debounce_timeout,
+            server_side_batch_timeout,
             tenant_config,
         } = config_toml;
 
@@ -375,7 +375,7 @@ impl PageServerConf {
             ephemeral_bytes_per_memory_kb,
             virtual_file_direct_io,
             io_buffer_alignment,
-            debounce_timeout,
+            server_side_batch_timeout,
 
             // ------------------------------------------------------------
             // fields that require additional validation or custom handling
