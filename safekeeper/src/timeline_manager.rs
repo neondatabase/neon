@@ -543,6 +543,11 @@ impl Manager {
 
         if removal_horizon_segno > self.last_removed_segno {
             // we need to remove WAL
+            let Ok(timeline_gate_guard) = self.tli.gate.enter() else {
+                tracing::info!("Timeline shutdown, not spawning WAL removal task");
+                return;
+            };
+
             let remover = match self.tli.read_shared_state().await.sk {
                 StateSK::Loaded(ref sk) => {
                     crate::wal_storage::Storage::remove_up_to(&sk.wal_store, removal_horizon_segno)
@@ -557,6 +562,8 @@ impl Manager {
 
             self.wal_removal_task = Some(tokio::spawn(
                 async move {
+                    let _timeline_gate_guard = timeline_gate_guard;
+
                     remover.await?;
                     Ok(removal_horizon_segno)
                 }
