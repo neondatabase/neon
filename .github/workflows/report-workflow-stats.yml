@@ -33,7 +33,7 @@ jobs:
       actions: read
     steps:
     - name: Export GH Workflow Stats
-      uses: fedordikarev/gh-workflow-stats-action@v0.1.4
+      uses: neondatabase/gh-workflow-stats-action@v0.1.4
       with:
         DB_URI: ${{ secrets.GH_REPORT_STATS_DB_RW_CONNSTR }}
         DB_TABLE: "gh_workflow_stats_neon"
