@@ -32,15 +32,15 @@ use crate::{
 };
 
 use super::{
-    conn_pool::{poll_client, Client, ConnInfo, GlobalConnPool},
+    conn_pool::{poll_client, Client, ConnInfo, ConnPool, EndpointConnPool},
     http_conn_pool::{self, poll_http2_client},
-    local_conn_pool::{self, LocalClient, LocalConnPool},
+    local_conn_pool::{self, LocalClient},
 };
 
 pub(crate) struct PoolingBackend {
     pub(crate) http_conn_pool: Arc<super::http_conn_pool::GlobalConnPool>,
-    pub(crate) local_pool: Arc<LocalConnPool<tokio_postgres::Client>>,
-    pub(crate) pool: Arc<GlobalConnPool<tokio_postgres::Client>>,
+    pub(crate) local_pool: Arc<ConnPool<tokio_postgres::Client>>,
+    pub(crate) pool: Arc<ConnPool<tokio_postgres::Client>>,
     pub(crate) config: &'static ProxyConfig,
     pub(crate) endpoint_rate_limiter: Arc<EndpointRateLimiter>,
 }
@@ -439,7 +439,7 @@ impl ShouldRetryWakeCompute for LocalProxyConnError {
 }
 
 struct TokioMechanism {
-    pool: Arc<GlobalConnPool<tokio_postgres::Client>>,
+    pool: Arc<ConnPool<tokio_postgres::Client>>,
     conn_info: ConnInfo,
     conn_id: uuid::Uuid,
 

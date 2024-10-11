@@ -64,8 +64,8 @@ pub async fn task_main(
         info!("websocket server has shut down");
     }
 
-    let local_pool = local_conn_pool::LocalConnPool::new(&config.http_config);
-    let conn_pool = conn_pool::GlobalConnPool::new(&config.http_config);
+    let local_pool = conn_pool::ConnPool::new(&config.http_config);
+    let conn_pool = conn_pool::ConnPool::new(&config.http_config);
     {
         let conn_pool = Arc::clone(&conn_pool);
         tokio::spawn(async move {
