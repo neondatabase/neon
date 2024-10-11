@@ -1,9 +1,10 @@
 use std::{io, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
+use ecdsa::SigningKey;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
+use rand::rngs::OsRng;
 use tokio::net::{lookup_host, TcpStream};
-use tokio_postgres::types::ToSql;
 use tracing::{debug, field::display, info};
 
 use crate::{
@@ -276,45 +277,46 @@ impl PoolingBackend {
             auth::Backend::Local(local) => local.node_info.clone(),
         };
 
+        let key = SigningKey::random(&mut OsRng);
+        let jwk = p256::PublicKey::from(key.verifying_key()).to_jwk();
+        let jwk = serde_json::to_string(&jwk).expect("serializing jwk to json should not fail");
+
         let config = node_info
             .config
             .user(&conn_info.user_info.user)
-            .dbname(&conn_info.dbname);
+            .dbname(&conn_info.dbname)
+            .options(&format!("-c neon.auth.jwk={jwk}"));
 
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
         let (client, connection) = config.connect(tokio_postgres::NoTls).await?;
         drop(pause);
 
-        tracing::Span::current().record("pid", tracing::field::display(client.get_process_id()));
+        let pid = client.get_process_id();
+        tracing::Span::current().record("pid", pid);
 
-        let handle = local_conn_pool::poll_client(
+        let mut handle = local_conn_pool::poll_client(
             self.local_pool.clone(),
             ctx,
             conn_info,
             client,
             connection,
+            key,
             conn_id,
             node_info.aux.clone(),
         );
 
-        let kid = handle.get_client().get_process_id() as i64;
-        let jwk = p256::PublicKey::from(handle.key().verifying_key()).to_jwk();
+        {
+            let (client, mut discard) = handle.inner();
+            debug!(?pid, "setting up backend session state");
 
-        debug!(kid, ?jwk, "setting up backend session state");
+            // initiates the auth session
+            if let Err(e) = client.query("select auth.init();", &[]).await {
+                discard.discard();
+                return Err(e.into());
+            }
 
-        // initiates the auth session
-        handle
-            .get_client()
-            .query(
-                "select auth.init($1, $2);",
-                &[
-                    &kid as &(dyn ToSql + Sync),
-                    &tokio_postgres::types::Json(jwk),
-                ],
-            )
-            .await?;
-
-        info!(?kid, "backend session state init");
+            info!(?pid, "backend session state initialized");
+        }
 
         Ok(handle)
     }

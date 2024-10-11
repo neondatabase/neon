@@ -2,7 +2,6 @@ use futures::{future::poll_fn, Future};
 use jose_jwk::jose_b64::base64ct::{Base64UrlUnpadded, Encoding};
 use p256::ecdsa::{Signature, SigningKey};
 use parking_lot::RwLock;
-use rand::rngs::OsRng;
 use serde_json::Value;
 use signature::Signer;
 use std::task::{ready, Poll};
@@ -12,7 +11,6 @@ use tokio_postgres::tls::NoTlsStream;
 use tokio_postgres::types::ToSql;
 use tokio_postgres::{AsyncMessage, ReadyForQueryStatus, Socket};
 use tokio_util::sync::CancellationToken;
-use typed_json::json;
 
 use crate::control_plane::messages::{ColdStartInfo, MetricsAuxInfo};
 use crate::metrics::Metrics;
@@ -251,6 +249,7 @@ pub(crate) fn poll_client(
     conn_info: ConnInfo,
     client: tokio_postgres::Client,
     mut connection: tokio_postgres::Connection<Socket, NoTlsStream>,
+    key: SigningKey,
     conn_id: uuid::Uuid,
     aux: MetricsAuxInfo,
 ) -> LocalClient<tokio_postgres::Client> {
@@ -346,8 +345,6 @@ pub(crate) fn poll_client(
     }
     .instrument(span));
 
-    let key = SigningKey::random(&mut OsRng);
-
     let inner = ClientInner {
         inner: client,
         session: tx,
@@ -430,13 +427,6 @@ impl<C: ClientInnerExt> LocalClient<C> {
         let inner = inner.as_mut().expect("client inner should not be removed");
         (&mut inner.inner, Discard { conn_info, pool })
     }
-    pub(crate) fn key(&self) -> &SigningKey {
-        let inner = &self
-            .inner
-            .as_ref()
-            .expect("client inner should not be removed");
-        &inner.key
-    }
 }
 
 impl LocalClient<tokio_postgres::Client> {
@@ -447,23 +437,15 @@ impl LocalClient<tokio_postgres::Client> {
             .expect("client inner should not be removed");
         inner.jti += 1;
 
-        let kid = inner.inner.get_process_id();
-        let header = json!({"kid":kid}).to_string();
-
         let mut payload = serde_json::from_slice::<serde_json::Map<String, Value>>(payload)
             .map_err(HttpConnError::JwtPayloadError)?;
         payload.insert("jti".to_string(), Value::Number(inner.jti.into()));
         let payload = Value::Object(payload).to_string();
 
-        debug!(
-            kid,
-            jti = inner.jti,
-            ?header,
-            ?payload,
-            "signing new ephemeral JWT"
-        );
+        let pid = inner.inner.get_process_id();
+        debug!(pid, jti = inner.jti, ?payload, "signing new ephemeral JWT");
 
-        let token = sign_jwt(&inner.key, header, payload);
+        let token = sign_jwt(&inner.key, payload.as_bytes());
 
         // initiates the auth session
         inner.inner.simple_query("discard all").await?;
@@ -475,20 +457,39 @@ impl LocalClient<tokio_postgres::Client> {
             )
             .await?;
 
-        info!(kid, jti = inner.jti, "user session state init");
+        info!(pid, jti = inner.jti, "user session state init");
 
         Ok(())
     }
 }
 
-fn sign_jwt(sk: &SigningKey, header: String, payload: String) -> String {
-    let header = Base64UrlUnpadded::encode_string(header.as_bytes());
-    let payload = Base64UrlUnpadded::encode_string(payload.as_bytes());
+fn sign_jwt(sk: &SigningKey, payload: &[u8]) -> String {
+    let header_len = 3;
+    let payload_len = Base64UrlUnpadded::encoded_len(payload);
+    let signature_len = Base64UrlUnpadded::encoded_len(&[0; 64]);
 
-    let message = format!("{header}.{payload}");
-    let sig: Signature = sk.sign(message.as_bytes());
-    let base64_sig = Base64UrlUnpadded::encode_string(&sig.to_bytes());
-    format!("{message}.{base64_sig}")
+    let mut jwt = Vec::with_capacity(header_len + payload_len + signature_len + 2);
+
+    // we only need an empty header.
+    // base64url("{}") == "e30"
+    jwt.extend_from_slice(b"e30.");
+
+    // encode the jwt payload in-place - inspired from impl of Base64UrlUnpadded::encode_string
+    jwt.resize(4 + payload_len, 0);
+    let res = Base64UrlUnpadded::encode(payload, &mut jwt[4..]).expect("encoding error");
+    debug_assert_eq!(payload_len, res.len());
+
+    // create the signature
+    let sig: Signature = sk.sign(&jwt);
+
+    // encode the jwt signature in-place
+    jwt.push(b'.');
+    let n = jwt.len();
+    jwt.resize(n + signature_len, 0);
+    let res = Base64UrlUnpadded::encode(&sig.to_bytes(), &mut jwt[n..]).expect("encoding error");
+    debug_assert_eq!(signature_len, res.len());
+
+    String::from_utf8(jwt).expect("base64url encoding for JWT should be valid utf8")
 }
 
 impl<C: ClientInnerExt> Discard<'_, C> {
@@ -509,14 +510,6 @@ impl<C: ClientInnerExt> Discard<'_, C> {
 }
 
 impl<C: ClientInnerExt> LocalClient<C> {
-    pub fn get_client(&self) -> &C {
-        &self
-            .inner
-            .as_ref()
-            .expect("client inner should not be removed")
-            .inner
-    }
-
     fn do_drop(&mut self) -> Option<impl FnOnce()> {
         let conn_info = self.conn_info.clone();
         let client = self
