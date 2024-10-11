@@ -6,6 +6,7 @@
 use std::collections::HashSet;
 use std::future::Future;
 use std::str::FromStr;
+use std::time::SystemTime;
 
 use anyhow::{anyhow, Context};
 use camino::{Utf8Path, Utf8PathBuf};
@@ -343,10 +344,10 @@ async fn do_download_index_part(
     timeline_id: &TimelineId,
     index_generation: Generation,
     cancel: &CancellationToken,
-) -> Result<(IndexPart, Generation), DownloadError> {
+) -> Result<(IndexPart, Generation, SystemTime), DownloadError> {
     let remote_path = remote_index_path(tenant_shard_id, timeline_id, index_generation);
 
-    let index_part_bytes = download_retry_forever(
+    let (index_part_bytes, index_part_mtime) = download_retry_forever(
         || async {
             let download = storage
                 .download(&remote_path, &DownloadOpts::default(), cancel)
@@ -359,7 +360,7 @@ async fn do_download_index_part(
 
             tokio::io::copy_buf(&mut stream, &mut bytes).await?;
 
-            Ok(bytes)
+            Ok((bytes, download.last_modified))
         },
         &format!("download {remote_path:?}"),
         cancel,
@@ -370,7 +371,7 @@ async fn do_download_index_part(
         .with_context(|| format!("deserialize index part file at {remote_path:?}"))
         .map_err(DownloadError::Other)?;
 
-    Ok((index_part, index_generation))
+    Ok((index_part, index_generation, index_part_mtime))
 }
 
 /// index_part.json objects are suffixed with a generation number, so we cannot
@@ -385,7 +386,7 @@ pub(crate) async fn download_index_part(
     timeline_id: &TimelineId,
     my_generation: Generation,
     cancel: &CancellationToken,
-) -> Result<(IndexPart, Generation), DownloadError> {
+) -> Result<(IndexPart, Generation, SystemTime), DownloadError> {
     debug_assert_current_span_has_tenant_and_timeline_id();
 
     if my_generation.is_none() {

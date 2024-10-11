@@ -2202,7 +2202,7 @@ async fn tenant_scan_remote_handler(
                          %timeline_id))
             .await
             {
-                Ok((index_part, index_generation)) => {
+                Ok((index_part, index_generation, _index_mtime)) => {
                     tracing::info!("Found timeline {tenant_shard_id}/{timeline_id} metadata (gen {index_generation:?}, {} layers, {} consistent LSN)",
                         index_part.layer_metadata.len(), index_part.metadata.disk_consistent_lsn());
                     generation = std::cmp::max(generation, index_generation);

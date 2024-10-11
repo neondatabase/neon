@@ -505,7 +505,7 @@ impl RemoteTimelineClient {
             },
         );
 
-        let (index_part, _index_generation) = download::download_index_part(
+        let (index_part, _index_generation, _index_last_modified) = download::download_index_part(
             &self.storage_impl,
             &self.tenant_shard_id,
             &self.timeline_id,
