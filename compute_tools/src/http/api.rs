@@ -9,9 +9,10 @@ use crate::catalog::SchemaDumpError;
 use crate::catalog::{get_database_schema, get_dbs_and_roles};
 use crate::compute::forward_termination_signal;
 use crate::compute::{ComputeNode, ComputeState, ParsedSpec};
-use compute_api::requests::ConfigurationRequest;
-use compute_api::responses::ExtensionInstallResult;
-use compute_api::responses::{ComputeStatus, ComputeStatusResponse, GenericAPIError};
+use compute_api::requests::{ConfigurationRequest, ExtensionInstallRequest};
+use compute_api::responses::{
+    ComputeStatus, ComputeStatusResponse, ExtensionInstallResult, GenericAPIError,
+};
 
 use anyhow::Result;
 use hyper::header::CONTENT_TYPE;
@@ -111,15 +112,14 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
                 return Response::new(Body::from(msg));
             }
 
-            let body = hyper::body::to_bytes(req.into_body()).await.unwrap();
-            let body = serde_json::from_slice::<serde_json::Value>(&body).unwrap();
-            let extension = body["extension"].as_str().unwrap();
-            let database = body["database"].as_str().unwrap();
-            let res = compute.install_extension(extension, database);
+            let request = hyper::body::to_bytes(req.into_body()).await.unwrap();
+            let request = serde_json::from_slice::<ExtensionInstallRequest>(&request).unwrap();
+            let res =
+                compute.install_extension(&request.extension, &request.database, &request.version);
             match res {
                 Ok(res) => render_json(Body::from(
                     serde_json::to_string(&ExtensionInstallResult {
-                        extension: extension.to_string(),
+                        extension: request.extension,
                         version: res,
                     })
                     .unwrap(),

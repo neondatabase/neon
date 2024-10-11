@@ -10,7 +10,7 @@ paths:
   /status:
     get:
       tags:
-      - Info
+        - Info
       summary: Get compute node internal status.
       description: ""
       operationId: getComputeStatus
@@ -25,7 +25,7 @@ paths:
   /metrics.json:
     get:
       tags:
-      - Info
+        - Info
       summary: Get compute node startup metrics in JSON format.
       description: ""
       operationId: getComputeMetricsJSON
@@ -40,7 +40,7 @@ paths:
   /insights:
     get:
       tags:
-      - Info
+        - Info
       summary: Get current compute insights in JSON format.
       description: |
         Note, that this doesn't include any historical data.
@@ -56,7 +56,7 @@ paths:
   /installed_extensions:
     get:
       tags:
-      - Info
+        - Info
       summary: Get installed extensions.
       description: ""
       operationId: getInstalledExtensions
@@ -70,7 +70,7 @@ paths:
   /info:
     get:
       tags:
-      - Info
+        - Info
       summary: Get info about the compute pod / VM.
       description: ""
       operationId: getInfo
@@ -130,7 +130,7 @@ paths:
   /check_writability:
     post:
       tags:
-      - Check
+        - Check
       summary: Check that we can write new data on this compute.
       description: ""
       operationId: checkComputeWritability
@@ -147,7 +147,7 @@ paths:
   /extensions/install:
     post:
       tags:
-      - Extensions
+        - Extensions
       summary: Install extension if possible.
       description: ""
       operationId: installExtension
@@ -157,18 +157,7 @@ paths:
         content:
           application/json:
             schema:
-              type: object
-              required:
-                - extension
-                - database
-              properties:
-                extension:
-                  type: string
-                  description: Extension name.
-                database:
-                  type: string
-                  description: Database name.
-                  example: "neondb"
+              $ref: "#/components/schemas/ExtensionInstallRequest"
       responses:
         200:
           description: Result from extension installation
@@ -186,7 +175,7 @@ paths:
   /configure:
     post:
       tags:
-      - Configure
+        - Configure
       summary: Perform compute node configuration.
       description: |
         This is a blocking API endpoint, i.e. it blocks waiting until
@@ -240,7 +229,7 @@ paths:
   /extension_server:
     post:
       tags:
-      - Extension
+        - Extension
       summary: Download extension from S3 to local folder.
       description: ""
       operationId: downloadExtension
@@ -269,7 +258,7 @@ paths:
   /terminate:
     post:
       tags:
-      - Terminate
+        - Terminate
       summary: Terminate Postgres and wait for it to exit
       description: ""
       operationId: terminate
@@ -408,7 +397,7 @@ components:
             moment, when spec was received.
           example: "2022-10-12T07:20:50.52Z"
         status:
-          $ref: '#/components/schemas/ComputeStatus'
+          $ref: "#/components/schemas/ComputeStatus"
         last_active:
           type: string
           description: |
@@ -448,15 +437,37 @@ components:
         - configuration
       example: running
 
+    ExtensionInstallRequest:
+      type: object
+      required:
+        - extension
+        - database
+        - version
+      properties:
+        extension:
+          type: string
+          description: Extension name.
+          example: "pg_session_jwt"
+        version:
+          type: string
+          description: Version of the extension.
+          example: "1.0.0"
+        database:
+          type: string
+          description: Database name.
+          example: "neondb"
+
     ExtensionInstallResult:
       type: object
       properties:
         extension:
           description: Name of the extension.
           type: string
+          example: "pg_session_jwt"
         version:
           description: Version of the extension.
           type: string
+          example: "1.0.0"
 
     InstalledExtensions:
       type: object
