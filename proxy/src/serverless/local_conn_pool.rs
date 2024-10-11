@@ -1,8 +1,9 @@
 use futures::{future::poll_fn, Future};
+use indexmap::IndexMap;
 use jose_jwk::jose_b64::base64ct::{Base64UrlUnpadded, Encoding};
 use p256::ecdsa::{Signature, SigningKey};
 use parking_lot::RwLock;
-use serde_json::Value;
+use serde_json::value::RawValue;
 use signature::Signer;
 use std::task::{ready, Poll};
 use std::{collections::HashMap, pin::pin, sync::Arc, sync::Weak, time::Duration};
@@ -457,15 +458,32 @@ impl LocalClient<tokio_postgres::Client> {
     }
 }
 
-fn resign_jwt(sk: &SigningKey, payload: &[u8], jti: u64) -> Result<String, HttpConnError> {
-    // TODO: can we avoid a full deser+ser here?
-    // i.e. just update inplace?
-    let mut payload = serde_json::from_slice::<serde_json::Map<String, Value>>(payload)
-        .map_err(HttpConnError::JwtPayloadError)?;
-    payload.insert("jti".to_string(), Value::Number(jti.into()));
-    let payload = Value::Object(payload).to_string();
+/// implements relatively efficient in-place json object key upserting
+///
+/// only supports top-level keys
+fn upsert_json_object(
+    payload: &[u8],
+    key: &str,
+    value: &RawValue,
+) -> Result<String, serde_json::Error> {
+    let mut payload = serde_json::from_slice::<IndexMap<&str, &RawValue>>(payload)?;
+    payload.insert(key, value);
+    serde_json::to_string(&payload)
+}
 
+fn resign_jwt(sk: &SigningKey, payload: &[u8], jti: u64) -> Result<String, HttpConnError> {
+    let mut buffer = itoa::Buffer::new();
+
+    // encode the jti integer to a json rawvalue
+    let jti = serde_json::from_str::<&RawValue>(buffer.format(jti)).unwrap();
+
+    // update the jti in-place
+    let payload =
+        upsert_json_object(payload, "jti", jti).map_err(HttpConnError::JwtPayloadError)?;
+
+    // sign the jwt
     let token = sign_jwt(sk, payload.as_bytes());
+
     Ok(token)
 }
 
@@ -554,6 +572,6 @@ mod tests {
         let data = br#"{"foo":"bar", "jti": "foo\nbar", "nested": {"jti": "tricky nesting"}}"#;
 
         let jwt = resign_jwt(&key, data, 2).unwrap();
-        assert_eq!(jwt, "e30.eyJmb28iOiJiYXIiLCJqdGkiOjIsIm5lc3RlZCI6eyJqdGkiOiJ0cmlja3kgbmVzdGluZyJ9fQ.MVqrBp2klw3wY30Dw0tUD2fxpia0rAP1_-kQ1Cv5EBRCUeei7g8Rqnqn6QXhbVEkmgOWghlwa7GzyF-n1dEgpg");
+        assert_eq!(jwt, "e30.eyJmb28iOiJiYXIiLCJqdGkiOjIsIm5lc3RlZCI6eyJqdGkiOiAidHJpY2t5IG5lc3RpbmcifX0.qZnHxDfNigd7eegbHtcjK-l3Gv-zQtx6-6x-uP1IBfwS4Z4Jepc3T3RfRaIbPpWOjeVBrhLjB3jir5_LtSVPXQ");
     }
 }
