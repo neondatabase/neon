@@ -17,12 +17,22 @@ use std::str::FromStr;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tokio::fs;
 use tracing::*;
+use utils::crashsafe::{durable_rename, fsync_async_opt};
 use utils::id::{TenantId, TenantTimelineId, TimelineId};
 use utils::lsn::Lsn;
 
+// Timeline entry in the global map: either a ready timeline, or mark that it is
+// being created.
+#[derive(Clone)]
+enum GlobalMapTimeline {
+    CreationInProgress,
+    Timeline(Arc<Timeline>),
+}
+
 struct GlobalTimelinesState {
-    timelines: HashMap<TenantTimelineId, Arc<Timeline>>,
+    timelines: HashMap<TenantTimelineId, GlobalMapTimeline>,
 
     // A tombstone indicates this timeline used to exist has been deleted.  These are used to prevent
     // on-demand timeline creation from recreating deleted timelines.  This is only soft-enforced, as
@@ -56,21 +66,30 @@ impl GlobalTimelinesState {
     }
 
     /// Insert timeline into the map. Returns error if timeline with the same id already exists.
-    fn try_insert(&mut self, timeline: Arc<Timeline>) -> Result<()> {
-        let ttid = timeline.ttid;
-        if self.timelines.contains_key(&ttid) {
-            bail!(TimelineError::AlreadyExists(ttid));
+    fn try_insert(&mut self, ttid: TenantTimelineId, timeline: GlobalMapTimeline) -> Result<()> {
+        match self.timelines.get(&ttid) {
+            Some(GlobalMapTimeline::CreationInProgress) => {
+                bail!(TimelineError::CreationInProgress(ttid));
+            }
+            Some(GlobalMapTimeline::Timeline(_)) => {
+                bail!(TimelineError::AlreadyExists(ttid));
+            }
+            _ => {}
         }
         self.timelines.insert(ttid, timeline);
         Ok(())
     }
 
-    /// Get timeline from the map. Returns error if timeline doesn't exist.
+    /// Get timeline from the map. Returns error if timeline doesn't exist or
+    /// creation is in progress.
     fn get(&self, ttid: &TenantTimelineId) -> Result<Arc<Timeline>, TimelineError> {
-        self.timelines
-            .get(ttid)
-            .cloned()
-            .ok_or(TimelineError::NotFound(*ttid))
+        match self.timelines.get(ttid).cloned() {
+            Some(GlobalMapTimeline::Timeline(tli)) => Ok(tli),
+            Some(GlobalMapTimeline::CreationInProgress) => {
+                Err(TimelineError::CreationInProgress(*ttid))
+            }
+            None => Err(TimelineError::NotFound(*ttid)),
+        }
     }
 
     fn delete(&mut self, ttid: TenantTimelineId) {
@@ -163,14 +182,13 @@ impl GlobalTimelines {
                     {
                         let ttid = TenantTimelineId::new(tenant_id, timeline_id);
                         match Timeline::load_timeline(&conf, ttid) {
-                            Ok(timeline) => {
-                                let tli = Arc::new(timeline);
+                            Ok(tli) => {
                                 let mut shared_state = tli.write_shared_state().await;
                                 TIMELINES_STATE
                                     .lock()
                                     .unwrap()
                                     .timelines
-                                    .insert(ttid, tli.clone());
+                                    .insert(ttid, GlobalMapTimeline::Timeline(tli.clone()));
                                 tli.bootstrap(
                                     &mut shared_state,
                                     &conf,
@@ -202,46 +220,6 @@ impl GlobalTimelines {
     /// Take a lock for timeline loading.
     pub async fn loading_lock() -> Arc<tokio::sync::Mutex<TimelineLoadLock>> {
         TIMELINES_STATE.lock().unwrap().load_lock.clone()
-    }
-
-    /// Load timeline from disk to the memory.
-    pub async fn load_timeline<'a>(
-        _guard: &tokio::sync::MutexGuard<'a, TimelineLoadLock>,
-        ttid: TenantTimelineId,
-    ) -> Result<Arc<Timeline>> {
-        let (conf, broker_active_set, partial_backup_rate_limiter) =
-            TIMELINES_STATE.lock().unwrap().get_dependencies();
-
-        match Timeline::load_timeline(&conf, ttid) {
-            Ok(timeline) => {
-                let tli = Arc::new(timeline);
-                let mut shared_state = tli.write_shared_state().await;
-
-                // TODO: prevent concurrent timeline creation/loading
-                {
-                    let mut state = TIMELINES_STATE.lock().unwrap();
-
-                    // We may be have been asked to load a timeline that was previously deleted (e.g. from `pull_timeline.rs`).  We trust
-                    // that the human doing this manual intervention knows what they are doing, and remove its tombstone.
-                    if state.tombstones.remove(&ttid).is_some() {
-                        warn!("Un-deleted timeline {ttid}");
-                    }
-
-                    state.timelines.insert(ttid, tli.clone());
-                }
-
-                tli.bootstrap(
-                    &mut shared_state,
-                    &conf,
-                    broker_active_set,
-                    partial_backup_rate_limiter,
-                );
-                drop(shared_state);
-                Ok(tli)
-            }
-            // If we can't load a timeline, it's bad. Caller will figure it out.
-            Err(e) => bail!("failed to load timeline {}, reason: {:?}", ttid, e),
-        }
     }
 
     /// Get the number of timelines in the map.
@@ -300,7 +278,7 @@ impl GlobalTimelines {
             TIMELINES_STATE
                 .lock()
                 .unwrap()
-                .try_insert(timeline.clone())?;
+                .try_insert(ttid, GlobalMapTimeline::Timeline(timeline.clone()))?;
 
             // Write the new timeline to the disk and start background workers.
             // Bootstrap is transactional, so if it fails, the timeline will be deleted,
@@ -333,6 +311,131 @@ impl GlobalTimelines {
         Ok(timeline)
     }
 
+    /// Move timeline from a temp directory to the main storage, and load it to
+    /// the global map. Creating timeline in this way ensures atomicity: rename
+    /// is atomic, so either move of the whole datadir succeeds or it doesn't,
+    /// but corrupted data dir shouldn't be possible.
+    ///
+    /// We'd like to avoid holding map lock while doing IO, so it's a 3 step
+    /// process:
+    /// 1) check the global map that timeline doesn't exist and mark that we're
+    ///    creating it;
+    /// 2) move the directory and load the timeline
+    /// 3) take lock again and insert the timeline into the global map.
+    pub async fn load_temp_timeline(
+        ttid: TenantTimelineId,
+        tmp_path: &Utf8PathBuf,
+        check_tombstone: bool,
+    ) -> Result<Arc<Timeline>> {
+        // Check for existence and mark that we're creating it.
+        let (conf, broker_active_set, partial_backup_rate_limiter) = {
+            let mut state = TIMELINES_STATE.lock().unwrap();
+            match state.timelines.get(&ttid) {
+                Some(GlobalMapTimeline::CreationInProgress) => {
+                    bail!(TimelineError::CreationInProgress(ttid));
+                }
+                Some(GlobalMapTimeline::Timeline(_)) => {
+                    bail!(TimelineError::AlreadyExists(ttid));
+                }
+                _ => {}
+            }
+            if check_tombstone {
+                if state.tombstones.contains_key(&ttid) {
+                    anyhow::bail!("timeline {ttid} is deleted, refusing to recreate");
+                }
+            } else {
+                // We may be have been asked to load a timeline that was previously deleted (e.g. from `pull_timeline.rs`).  We trust
+                // that the human doing this manual intervention knows what they are doing, and remove its tombstone.
+                if state.tombstones.remove(&ttid).is_some() {
+                    warn!("un-deleted timeline {ttid}");
+                }
+            }
+            state
+                .timelines
+                .insert(ttid, GlobalMapTimeline::CreationInProgress);
+            state.get_dependencies()
+        };
+
+        // Do the actual move and reflect the result in the map.
+        match GlobalTimelines::install_temp_timeline(ttid, tmp_path, &conf).await {
+            Ok(timeline) => {
+                let mut timeline_shared_state = timeline.write_shared_state().await;
+                let mut state = TIMELINES_STATE.lock().unwrap();
+                assert!(matches!(
+                    state.timelines.get(&ttid),
+                    Some(GlobalMapTimeline::CreationInProgress)
+                ));
+
+                state
+                    .timelines
+                    .insert(ttid, GlobalMapTimeline::Timeline(timeline.clone()));
+                drop(state);
+                timeline.bootstrap(
+                    &mut timeline_shared_state,
+                    &conf,
+                    broker_active_set,
+                    partial_backup_rate_limiter,
+                );
+                drop(timeline_shared_state);
+                Ok(timeline)
+            }
+            Err(e) => {
+                // Init failed, remove the marker from the map
+                let mut state = TIMELINES_STATE.lock().unwrap();
+                assert!(matches!(
+                    state.timelines.get(&ttid),
+                    Some(GlobalMapTimeline::CreationInProgress)
+                ));
+                state.timelines.remove(&ttid);
+                Err(e)
+            }
+        }
+    }
+
+    /// Main part of load_temp_timeline: do the move and load.
+    async fn install_temp_timeline(
+        ttid: TenantTimelineId,
+        tmp_path: &Utf8PathBuf,
+        conf: &SafeKeeperConf,
+    ) -> Result<Arc<Timeline>> {
+        let tenant_path = get_tenant_dir(conf, &ttid.tenant_id);
+        let timeline_path = get_timeline_dir(conf, &ttid);
+
+        // We must have already checked that timeline doesn't exist in the map,
+        // but there might be existing datadir: if timeline is corrupted it is
+        // not loaded. We don't want to overwrite such a dir, so check for its
+        // existence.
+        match fs::metadata(&timeline_path).await {
+            Ok(_) => {
+                // Timeline directory exists on disk, we should leave state unchanged
+                // and return error.
+                bail!(TimelineError::Invalid(ttid));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(e.into());
+            }
+        }
+
+        info!(
+            "moving timeline {} from {} to {}",
+            ttid, tmp_path, timeline_path
+        );
+
+        // Now it is safe to move the timeline directory to the correct
+        // location. First, create tenant directory.
+        tokio::fs::create_dir(&tenant_path).await?;
+        // fsync it
+        fsync_async_opt(&tenant_path, !conf.no_sync).await?;
+        // and its creation
+        fsync_async_opt(&conf.workdir, !conf.no_sync).await?;
+
+        // Do the move.
+        durable_rename(tmp_path, &timeline_path, !conf.no_sync).await?;
+
+        Timeline::load_timeline(conf, ttid)
+    }
+
     /// Get a timeline from the global map. If it's not present, it doesn't exist on disk,
     /// or was corrupted and couldn't be loaded on startup. Returned timeline is always valid,
     /// i.e. loaded in memory and not cancelled.
@@ -358,8 +461,16 @@ impl GlobalTimelines {
         global_lock
             .timelines
             .values()
-            .filter(|t| !t.is_cancelled())
-            .cloned()
+            .filter_map(|t| match t {
+                GlobalMapTimeline::Timeline(t) => {
+                    if t.is_cancelled() {
+                        None
+                    } else {
+                        Some(t.clone())
+                    }
+                }
+                _ => None,
+            })
             .collect()
     }
 
@@ -370,8 +481,11 @@ impl GlobalTimelines {
         global_lock
             .timelines
             .values()
+            .filter_map(|t| match t {
+                GlobalMapTimeline::Timeline(t) => Some(t.clone()),
+                _ => None,
+            })
             .filter(|t| t.ttid.tenant_id == tenant_id)
-            .cloned()
             .collect()
     }
 

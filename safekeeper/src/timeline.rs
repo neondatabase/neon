@@ -450,6 +450,8 @@ pub enum TimelineError {
     Cancelled(TenantTimelineId),
     #[error("Timeline {0} was not found in global map")]
     NotFound(TenantTimelineId),
+    #[error("Timeline {0} creation is in progress")]
+    CreationInProgress(TenantTimelineId),
     #[error("Timeline {0} exists on disk, but wasn't loaded on startup")]
     Invalid(TenantTimelineId),
     #[error("Timeline {0} is already exists")]
@@ -514,7 +516,7 @@ pub struct Timeline {
 
 impl Timeline {
     /// Load existing timeline from disk.
-    pub fn load_timeline(conf: &SafeKeeperConf, ttid: TenantTimelineId) -> Result<Timeline> {
+    pub fn load_timeline(conf: &SafeKeeperConf, ttid: TenantTimelineId) -> Result<Arc<Timeline>> {
         let _enter = info_span!("load_timeline", timeline = %ttid.timeline_id).entered();
 
         let shared_state = SharedState::restore(conf, &ttid)?;
@@ -528,7 +530,7 @@ impl Timeline {
 
         let walreceivers = WalReceivers::new();
         let remote_path = remote_timeline_path(&ttid)?;
-        Ok(Timeline {
+        Ok(Arc::new(Timeline {
             ttid,
             remote_path,
             commit_lsn_watch_tx,
@@ -547,7 +549,7 @@ impl Timeline {
             wal_backup_active: AtomicBool::new(false),
             last_removed_segno: AtomicU64::new(0),
             mgr_status: AtomicStatus::new(),
-        })
+        }))
     }
 
     /// Create a new timeline, which is not yet persisted to disk.
