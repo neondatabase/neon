@@ -7,6 +7,10 @@ inputs:
   path:
     description: "A directory or file to upload"
     required: true
+  skip-if-does-not-exist:
+    description: "Allow to skip if path doesn't exist, fail otherwise"
+    default: false
+    required: false
   prefix:
     description: "S3 prefix. Default is '${GITHUB_SHA}/${GITHUB_RUN_ID}/${GITHUB_RUN_ATTEMPT}'"
     required: false
@@ -15,10 +19,12 @@ runs:
   using: "composite"
   steps:
     - name: Prepare artifact
+      id: prepare-artifact
       shell: bash -euxo pipefail {0}
       env:
         SOURCE: ${{ inputs.path }}
         ARCHIVE: /tmp/uploads/${{ inputs.name }}.tar.zst
+        SKIP_IF_DOES_NOT_EXIST: ${{ inputs.skip-if-does-not-exist }}
       run: |
         mkdir -p $(dirname $ARCHIVE)
 
@@ -33,14 +39,22 @@ runs:
         elif [ -f ${SOURCE} ]; then
           time tar -cf ${ARCHIVE} --zstd ${SOURCE}
         elif ! ls ${SOURCE} > /dev/null 2>&1; then
-          echo >&2 "${SOURCE} does not exist"
-          exit 2
+          if [ "${SKIP_IF_DOES_NOT_EXIST}" = "true" ]; then
+            echo 'SKIPPED=true' >> $GITHUB_OUTPUT
+            exit 0
+          else
+            echo >&2 "${SOURCE} does not exist"
+            exit 2
+          fi
         else
           echo >&2 "${SOURCE} is neither a directory nor a file, do not know how to handle it"
           exit 3
         fi
 
+        echo 'SKIPPED=false' >> $GITHUB_OUTPUT
+
     - name: Upload artifact
+      if: ${{ steps.prepare-artifact.outputs.SKIPPED == 'false' }}
       shell: bash -euxo pipefail {0}
       env:
         SOURCE: ${{ inputs.path }}
