@@ -72,7 +72,7 @@ def test_tenant_reattach(neon_env_builder: NeonEnvBuilder, mode: str):
     pageserver_http = env.pageserver.http_client()
 
     # create new nenant
-    tenant_id, timeline_id = env.neon_cli.create_tenant()
+    tenant_id, timeline_id = env.create_tenant()
 
     env.pageserver.allowed_errors.extend(PERMIT_PAGE_SERVICE_ERRORS)
 
@@ -241,7 +241,7 @@ def test_tenant_reattach_while_busy(
     pageserver_http = env.pageserver.http_client()
 
     # create new nenant
-    tenant_id, timeline_id = env.neon_cli.create_tenant(
+    tenant_id, timeline_id = env.create_tenant(
         # Create layers aggressively
         conf={"checkpoint_distance": "100000"}
     )
@@ -266,13 +266,13 @@ def test_tenant_reattach_while_busy(
 
 
 def test_tenant_detach_smoke(neon_env_builder: NeonEnvBuilder):
-    env = neon_env_builder.init_start()
+    env = neon_env_builder.init_start(initial_tenant_conf={"lsn_lease_length": "0s"})
     pageserver_http = env.pageserver.http_client()
 
     env.pageserver.allowed_errors.extend(PERMIT_PAGE_SERVICE_ERRORS)
 
     # create new nenant
-    tenant_id, timeline_id = env.neon_cli.create_tenant()
+    tenant_id, timeline_id = env.initial_tenant, env.initial_timeline
 
     # assert tenant exists on disk
     assert env.pageserver.tenant_dir(tenant_id).exists()

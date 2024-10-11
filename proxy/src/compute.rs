@@ -1,8 +1,8 @@
 use crate::{
     auth::parse_endpoint_param,
     cancellation::CancelClosure,
-    console::{errors::WakeComputeError, messages::MetricsAuxInfo, provider::ApiLockError},
     context::RequestMonitoring,
+    control_plane::{errors::WakeComputeError, messages::MetricsAuxInfo, provider::ApiLockError},
     error::{ReportableError, UserFacingError},
     metrics::{Metrics, NumDbConnectionsGuard},
     proxy::neon_option,
@@ -20,7 +20,7 @@ use tokio_postgres::tls::MakeTlsConnect;
 use tokio_postgres_rustls::MakeRustlsConnect;
 use tracing::{error, info, warn};
 
-const COULD_NOT_CONNECT: &str = "Couldn't connect to compute node";
+pub const COULD_NOT_CONNECT: &str = "Couldn't connect to compute node";
 
 #[derive(Debug, Error)]
 pub(crate) enum ConnectionError {

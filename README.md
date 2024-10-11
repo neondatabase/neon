@@ -58,10 +58,16 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 1. Install XCode and dependencies
 ```
 xcode-select --install
-brew install protobuf openssl flex bison icu4c pkg-config
+brew install protobuf openssl flex bison icu4c pkg-config m4
 
 # add openssl to PATH, required for ed25519 keys generation in neon_local
 echo 'export PATH="$(brew --prefix openssl)/bin:$PATH"' >> ~/.zshrc
+```
+
+If you get errors about missing `m4` you may have to install it manually:
+```
+brew install m4
+brew link --force m4
 ```
 
 2. [Install Rust](https://www.rust-lang.org/tools/install)

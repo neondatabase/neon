@@ -33,7 +33,8 @@ use uuid::{NoContext, Timestamp};
 
 const PROXY_IO_BYTES_PER_CLIENT: &str = "proxy_io_bytes_per_client";
 
-const DEFAULT_HTTP_REPORTING_TIMEOUT: Duration = Duration::from_secs(60);
+const HTTP_REPORTING_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const HTTP_REPORTING_RETRY_DURATION: Duration = Duration::from_secs(60);
 
 /// Key that uniquely identifies the object, this metric describes.
 /// Currently, endpoint_id is enough, but this may change later,
@@ -223,7 +224,10 @@ pub async fn task_main(config: &MetricCollectionConfig) -> anyhow::Result<Infall
         info!("metrics collector has shut down");
     }
 
-    let http_client = http::new_client_with_timeout(DEFAULT_HTTP_REPORTING_TIMEOUT);
+    let http_client = http::new_client_with_timeout(
+        HTTP_REPORTING_REQUEST_TIMEOUT,
+        HTTP_REPORTING_RETRY_DURATION,
+    );
     let hostname = hostname::get()?.as_os_str().to_string_lossy().into_owned();
 
     let mut prev = Utc::now();

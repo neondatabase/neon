@@ -273,10 +273,20 @@ async fn page_service_conn_main(
                 info!("Postgres client disconnected ({io_error})");
                 Ok(())
             } else {
-                Err(io_error).context("Postgres connection error")
+                let tenant_id = conn_handler.timeline_handles.tenant_id();
+                Err(io_error).context(format!(
+                    "Postgres connection error for tenant_id={:?} client at peer_addr={}",
+                    tenant_id, peer_addr
+                ))
             }
         }
-        other => other.context("Postgres query error"),
+        other => {
+            let tenant_id = conn_handler.timeline_handles.tenant_id();
+            other.context(format!(
+                "Postgres query error for tenant_id={:?} client peer_addr={}",
+                tenant_id, peer_addr
+            ))
+        }
     }
 }
 
@@ -339,6 +349,10 @@ impl TimelineHandles {
                     GetActiveTimelineError::Timeline(GetTimelineError::ShuttingDown)
                 }
             })
+    }
+
+    fn tenant_id(&self) -> Option<TenantId> {
+        self.wrapper.tenant_id.get().copied()
     }
 }
 
@@ -819,7 +833,7 @@ impl PageServerHandler {
         set_tracing_field_shard_id(&timeline);
 
         let lease = timeline
-            .make_lsn_lease(lsn, timeline.get_lsn_lease_length(), ctx)
+            .renew_lsn_lease(lsn, timeline.get_lsn_lease_length(), ctx)
             .inspect_err(|e| {
                 warn!("{e}");
             })
@@ -1199,7 +1213,6 @@ impl PageServerHandler {
     }
 }
 
-#[async_trait::async_trait]
 impl<IO> postgres_backend::Handler<IO> for PageServerHandler
 where
     IO: AsyncRead + AsyncWrite + Send + Sync + Unpin,

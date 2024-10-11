@@ -5,12 +5,15 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-hyper.workspace = true
-opentelemetry = { workspace = true, features=["rt-tokio"] }
-opentelemetry-otlp = { workspace = true, default-features=false, features = ["http-proto", "trace", "http", "reqwest-client"] }
+hyper0.workspace = true
+opentelemetry = { workspace = true, features = ["trace"] }
+opentelemetry_sdk = { workspace = true, features = ["rt-tokio"] }
+opentelemetry-otlp = { workspace = true, default-features = false, features = ["http-proto", "trace", "http", "reqwest-client"] }
 opentelemetry-semantic-conventions.workspace = true
-reqwest = { workspace = true, default-features = false, features = ["rustls-tls"] }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
 tracing.workspace = true
 tracing-opentelemetry.workspace = true
 tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tracing-subscriber.workspace = true    # For examples in docs

@@ -1,4 +1,5 @@
 //! In-memory index to track the tenant files on the remote storage.
+//!
 //! Able to restore itself from the storage index parts, that are located in every timeline's remote directory and contain all data about
 //! remote timeline layers and its metadata.
 

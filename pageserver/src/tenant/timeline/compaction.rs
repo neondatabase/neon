@@ -29,8 +29,9 @@ use utils::id::TimelineId;
 
 use crate::context::{AccessStatsBehavior, RequestContext, RequestContextBuilder};
 use crate::page_cache;
-use crate::tenant::config::defaults::{DEFAULT_CHECKPOINT_DISTANCE, DEFAULT_COMPACTION_THRESHOLD};
+use crate::tenant::checks::check_valid_layermap;
 use crate::tenant::remote_timeline_client::WaitCompletionError;
+use crate::tenant::storage_layer::filter_iterator::FilterIterator;
 use crate::tenant::storage_layer::merge_iterator::MergeIterator;
 use crate::tenant::storage_layer::split_writer::{
     SplitDeltaLayerWriter, SplitImageLayerWriter, SplitWriterResult,
@@ -43,6 +44,9 @@ use crate::tenant::timeline::{drop_rlock, DeltaLayerWriter, ImageLayerWriter};
 use crate::tenant::timeline::{Layer, ResidentLayer};
 use crate::tenant::DeltaLayer;
 use crate::virtual_file::{MaybeFatalIo, VirtualFile};
+use pageserver_api::config::tenant_conf_defaults::{
+    DEFAULT_CHECKPOINT_DISTANCE, DEFAULT_COMPACTION_THRESHOLD,
+};
 
 use crate::keyspace::KeySpace;
 use crate::repository::{Key, Value};
@@ -349,7 +353,13 @@ impl Timeline {
 
                 // 2. Compact
                 let timer = self.metrics.compact_time_histo.start_timer();
-                let fully_compacted = self.compact_level0(target_file_size, ctx).await?;
+                let fully_compacted = self
+                    .compact_level0(
+                        target_file_size,
+                        flags.contains(CompactFlags::ForceL0Compaction),
+                        ctx,
+                    )
+                    .await?;
                 timer.stop_and_record();
 
                 let mut partitioning = dense_partitioning;
@@ -386,7 +396,7 @@ impl Timeline {
                 // error but continue.
                 //
                 // Suppress error when it's due to cancellation
-                if !self.cancel.is_cancelled() {
+                if !self.cancel.is_cancelled() && !err.is_cancelled() {
                     tracing::error!("could not compact, repartitioning keyspace failed: {err:?}");
                 }
                 (1, false)
@@ -561,9 +571,11 @@ impl Timeline {
                 .await?;
 
             if keys_written > 0 {
-                let new_layer = image_layer_writer
-                    .finish(self, ctx)
+                let (desc, path) = image_layer_writer
+                    .finish(ctx)
                     .await
+                    .map_err(CompactionError::Other)?;
+                let new_layer = Layer::finish_creating(self.conf, self, desc, &path)
                     .map_err(CompactionError::Other)?;
                 tracing::info!(layer=%new_layer, "Rewrote layer, {} -> {} bytes",
                     layer.metadata().file_size,
@@ -652,6 +664,7 @@ impl Timeline {
     async fn compact_level0(
         self: &Arc<Self>,
         target_file_size: u64,
+        force_compaction_ignore_threshold: bool,
         ctx: &RequestContext,
     ) -> Result<bool, CompactionError> {
         let CompactLevel0Phase1Result {
@@ -673,9 +686,15 @@ impl Timeline {
             let now = tokio::time::Instant::now();
             stats.read_lock_acquisition_micros =
                 DurationRecorder::Recorded(RecordedDuration(now - begin), now);
-            self.compact_level0_phase1(phase1_layers_locked, stats, target_file_size, &ctx)
-                .instrument(phase1_span)
-                .await?
+            self.compact_level0_phase1(
+                phase1_layers_locked,
+                stats,
+                target_file_size,
+                force_compaction_ignore_threshold,
+                &ctx,
+            )
+            .instrument(phase1_span)
+            .await?
         };
 
         if new_layers.is_empty() && deltas_to_compact.is_empty() {
@@ -694,6 +713,7 @@ impl Timeline {
         guard: tokio::sync::RwLockReadGuard<'a, LayerManager>,
         mut stats: CompactLevel0Phase1StatsBuilder,
         target_file_size: u64,
+        force_compaction_ignore_threshold: bool,
         ctx: &RequestContext,
     ) -> Result<CompactLevel0Phase1Result, CompactionError> {
         stats.read_lock_held_spawn_blocking_startup_micros =
@@ -705,11 +725,26 @@ impl Timeline {
         // Only compact if enough layers have accumulated.
         let threshold = self.get_compaction_threshold();
         if level0_deltas.is_empty() || level0_deltas.len() < threshold {
-            debug!(
-                level0_deltas = level0_deltas.len(),
-                threshold, "too few deltas to compact"
-            );
-            return Ok(CompactLevel0Phase1Result::default());
+            if force_compaction_ignore_threshold {
+                if !level0_deltas.is_empty() {
+                    info!(
+                        level0_deltas = level0_deltas.len(),
+                        threshold, "too few deltas to compact, but forcing compaction"
+                    );
+                } else {
+                    info!(
+                        level0_deltas = level0_deltas.len(),
+                        threshold, "too few deltas to compact, cannot force compaction"
+                    );
+                    return Ok(CompactLevel0Phase1Result::default());
+                }
+            } else {
+                debug!(
+                    level0_deltas = level0_deltas.len(),
+                    threshold, "too few deltas to compact"
+                );
+                return Ok(CompactLevel0Phase1Result::default());
+            }
         }
 
         let mut level0_deltas = level0_deltas
@@ -914,137 +949,13 @@ impl Timeline {
         // we're compacting, in key, LSN order.
         // If there's both a Value::Image and Value::WalRecord for the same (key,lsn),
         // then the Value::Image is ordered before Value::WalRecord.
-        //
-        // TODO(https://github.com/neondatabase/neon/issues/8184): remove the page cached blob_io
-        // option and validation code once we've reached confidence.
-        enum AllValuesIter<'a> {
-            PageCachedBlobIo {
-                all_keys_iter: VecIter<'a>,
-            },
-            StreamingKmergeBypassingPageCache {
-                merge_iter: MergeIterator<'a>,
-            },
-            ValidatingStreamingKmergeBypassingPageCache {
-                mode: CompactL0BypassPageCacheValidation,
-                merge_iter: MergeIterator<'a>,
-                all_keys_iter: VecIter<'a>,
-            },
-        }
-        type VecIter<'a> = std::slice::Iter<'a, DeltaEntry<'a>>; // TODO: distinguished lifetimes
-        impl AllValuesIter<'_> {
-            async fn next_all_keys_iter(
-                iter: &mut VecIter<'_>,
-                ctx: &RequestContext,
-            ) -> anyhow::Result<Option<(Key, Lsn, Value)>> {
-                let Some(DeltaEntry {
-                    key,
-                    lsn,
-                    val: value_ref,
-                    ..
-                }) = iter.next()
-                else {
-                    return Ok(None);
-                };
-                let value = value_ref.load(ctx).await?;
-                Ok(Some((*key, *lsn, value)))
+        let mut all_values_iter = {
+            let mut deltas = Vec::with_capacity(deltas_to_compact.len());
+            for l in deltas_to_compact.iter() {
+                let l = l.get_as_delta(ctx).await.map_err(CompactionError::Other)?;
+                deltas.push(l);
             }
-            async fn next(
-                &mut self,
-                ctx: &RequestContext,
-            ) -> anyhow::Result<Option<(Key, Lsn, Value)>> {
-                match self {
-                    AllValuesIter::PageCachedBlobIo { all_keys_iter: iter } => {
-                      Self::next_all_keys_iter(iter, ctx).await
-                    }
-                    AllValuesIter::StreamingKmergeBypassingPageCache { merge_iter } => merge_iter.next().await,
-                    AllValuesIter::ValidatingStreamingKmergeBypassingPageCache { mode, merge_iter, all_keys_iter } => async {
-                        // advance both iterators
-                        let all_keys_iter_item = Self::next_all_keys_iter(all_keys_iter, ctx).await;
-                        let merge_iter_item = merge_iter.next().await;
-                        // compare results & log warnings as needed
-                        macro_rules! rate_limited_warn {
-                            ($($arg:tt)*) => {{
-                                if cfg!(debug_assertions) || cfg!(feature = "testing") {
-                                    warn!($($arg)*);
-                                    panic!("CompactL0BypassPageCacheValidation failure, check logs");
-                                }
-                                use once_cell::sync::Lazy;
-                                use utils::rate_limit::RateLimit;
-                                use std::sync::Mutex;
-                                use std::time::Duration;
-                                static LOGGED: Lazy<Mutex<RateLimit>> =
-                                    Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(10))));
-                                let mut rate_limit = LOGGED.lock().unwrap();
-                                rate_limit.call(|| {
-                                    warn!($($arg)*);
-                                });
-                            }}
-                        }
-                        match (&all_keys_iter_item, &merge_iter_item) {
-                            (Err(_), Err(_)) => {
-                                // don't bother asserting equivality of the errors
-                            }
-                            (Err(all_keys), Ok(merge)) => {
-                                rate_limited_warn!(?merge, "all_keys_iter returned an error where merge did not: {all_keys:?}");
-                            },
-                            (Ok(all_keys), Err(merge)) => {
-                                rate_limited_warn!(?all_keys, "merge returned an error where all_keys_iter did not: {merge:?}");
-                            },
-                            (Ok(None), Ok(None)) => { }
-                            (Ok(Some(all_keys)), Ok(None)) => {
-                                rate_limited_warn!(?all_keys, "merge returned None where all_keys_iter returned Some");
-                            }
-                            (Ok(None), Ok(Some(merge))) => {
-                                rate_limited_warn!(?merge, "all_keys_iter returned None where merge returned Some");
-                            }
-                            (Ok(Some((all_keys_key, all_keys_lsn, all_keys_value))), Ok(Some((merge_key, merge_lsn, merge_value)))) => {
-                                match mode {
-                                    // TODO: in this mode, we still load the value from disk for both iterators, even though we only need the all_keys_iter one
-                                    CompactL0BypassPageCacheValidation::KeyLsn => {
-                                        let all_keys = (all_keys_key, all_keys_lsn);
-                                        let merge = (merge_key, merge_lsn);
-                                        if all_keys != merge {
-                                            rate_limited_warn!(?all_keys, ?merge, "merge returned a different (Key,LSN) than all_keys_iter");
-                                        }
-                                    }
-                                    CompactL0BypassPageCacheValidation::KeyLsnValue => {
-                                        let all_keys = (all_keys_key, all_keys_lsn, all_keys_value);
-                                        let merge = (merge_key, merge_lsn, merge_value);
-                                        if all_keys != merge {
-                                            rate_limited_warn!(?all_keys, ?merge, "merge returned a different (Key,LSN,Value) than all_keys_iter");
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        // in case of mismatch, trust the legacy all_keys_iter_item
-                        all_keys_iter_item
-                    }.instrument(info_span!("next")).await
-                }
-            }
-        }
-        let mut all_values_iter = match &self.conf.compact_level0_phase1_value_access {
-            CompactL0Phase1ValueAccess::PageCachedBlobIo => AllValuesIter::PageCachedBlobIo {
-                all_keys_iter: all_keys.iter(),
-            },
-            CompactL0Phase1ValueAccess::StreamingKmerge { validate } => {
-                let merge_iter = {
-                    let mut deltas = Vec::with_capacity(deltas_to_compact.len());
-                    for l in deltas_to_compact.iter() {
-                        let l = l.get_as_delta(ctx).await.map_err(CompactionError::Other)?;
-                        deltas.push(l);
-                    }
-                    MergeIterator::create(&deltas, &[], ctx)
-                };
-                match validate {
-                    None => AllValuesIter::StreamingKmergeBypassingPageCache { merge_iter },
-                    Some(validate) => AllValuesIter::ValidatingStreamingKmergeBypassingPageCache {
-                        mode: validate.clone(),
-                        merge_iter,
-                        all_keys_iter: all_keys.iter(),
-                    },
-                }
-            }
+            MergeIterator::create(&deltas, &[], ctx)
         };
 
         // This iterator walks through all keys and is needed to calculate size used by each key
@@ -1121,7 +1032,7 @@ impl Timeline {
         let mut keys = 0;
 
         while let Some((key, lsn, value)) = all_values_iter
-            .next(ctx)
+            .next()
             .await
             .map_err(CompactionError::Other)?
         {
@@ -1435,43 +1346,6 @@ impl TryFrom<CompactLevel0Phase1StatsBuilder> for CompactLevel0Phase1Stats {
                 .new_deltas_size
                 .ok_or_else(|| anyhow!("new_deltas_size not set"))?,
         })
-    }
-}
-
-#[derive(Debug, PartialEq, Eq, Clone, serde::Deserialize, serde::Serialize)]
-#[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
-pub enum CompactL0Phase1ValueAccess {
-    /// The old way.
-    PageCachedBlobIo,
-    /// The new way.
-    StreamingKmerge {
-        /// If set, we run both the old way and the new way, validate that
-        /// they are identical (=> [`CompactL0BypassPageCacheValidation`]),
-        /// and if the validation fails,
-        /// - in tests: fail them with a panic or
-        /// - in prod, log a rate-limited warning and use the old way's results.
-        ///
-        /// If not set, we only run the new way and trust its results.
-        validate: Option<CompactL0BypassPageCacheValidation>,
-    },
-}
-
-/// See [`CompactL0Phase1ValueAccess::StreamingKmerge`].
-#[derive(Debug, PartialEq, Eq, Clone, serde::Deserialize, serde::Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum CompactL0BypassPageCacheValidation {
-    /// Validate that the series of (key, lsn) pairs are the same.
-    KeyLsn,
-    /// Validate that the entire output of old and new way is identical.
-    KeyLsnValue,
-}
-
-impl Default for CompactL0Phase1ValueAccess {
-    fn default() -> Self {
-        CompactL0Phase1ValueAccess::StreamingKmerge {
-            // TODO(https://github.com/neondatabase/neon/issues/8184): change to None once confident
-            validate: Some(CompactL0BypassPageCacheValidation::KeyLsnValue),
-        }
     }
 }
 
@@ -1933,6 +1807,7 @@ impl Timeline {
             gc_cutoff,
             lowest_retain_lsn
         );
+
         // Step 1: (In the future) construct a k-merge iterator over all layers. For now, simply collect all keys + LSNs.
         // Also, verify if the layer map can be split by drawing a horizontal line at every LSN start/end split point.
         let mut lsn_split_point = BTreeSet::new(); // TODO: use a better data structure (range tree / range set?)
@@ -1950,20 +1825,12 @@ impl Timeline {
                 stat.visit_image_layer(desc.file_size());
             }
         }
-        for layer in &layer_selection {
-            let desc = layer.layer_desc();
-            let key_range = &desc.key_range;
-            if desc.is_delta() && key_range.start.next() != key_range.end {
-                let lsn_range = desc.lsn_range.clone();
-                let intersects = lsn_split_point.range(lsn_range).collect_vec();
-                if intersects.len() > 1 {
-                    bail!(
-                        "cannot run gc-compaction because it violates the layer map LSN split assumption: layer {} intersects with LSN [{}]",
-                        desc.key(),
-                        intersects.into_iter().map(|lsn| lsn.to_string()).join(", ")
-                    );
-                }
-            }
+        let layer_names: Vec<crate::tenant::storage_layer::LayerName> = layer_selection
+            .iter()
+            .map(|layer| layer.layer_desc().layer_name())
+            .collect_vec();
+        if let Some(err) = check_valid_layermap(&layer_names) {
+            bail!("cannot run gc-compaction because {}", err);
         }
         // The maximum LSN we are processing in this compaction loop
         let end_lsn = layer_selection
@@ -1973,7 +1840,6 @@ impl Timeline {
             .unwrap();
         // We don't want any of the produced layers to cover the full key range (i.e., MIN..MAX) b/c it will then be recognized
         // as an L0 layer.
-        let hack_end_key = Key::NON_L0_MAX;
         let mut delta_layers = Vec::new();
         let mut image_layers = Vec::new();
         let mut downloaded_layers = Vec::new();
@@ -1990,7 +1856,12 @@ impl Timeline {
                 image_layers.push(layer);
             }
         }
-        let mut merge_iter = MergeIterator::create(&delta_layers, &image_layers, ctx);
+        let (dense_ks, sparse_ks) = self.collect_gc_compaction_keyspace().await?;
+        let mut merge_iter = FilterIterator::create(
+            MergeIterator::create(&delta_layers, &image_layers, ctx),
+            dense_ks,
+            sparse_ks,
+        )?;
         // Step 2: Produce images+deltas. TODO: ensure newly-produced delta does not overlap with other deltas.
         // Data of the same key.
         let mut accumulated_values = Vec::new();
@@ -2019,10 +1890,8 @@ impl Timeline {
             self.conf,
             self.timeline_id,
             self.tenant_shard_id,
-            Key::MIN,
             lowest_retain_lsn..end_lsn,
             self.get_compaction_target_size(),
-            ctx,
         )
         .await?;
 
@@ -2129,7 +1998,7 @@ impl Timeline {
         let produced_image_layers = if let Some(writer) = image_layer_writer {
             if !dry_run {
                 writer
-                    .finish_with_discard_fn(self, ctx, hack_end_key, discard)
+                    .finish_with_discard_fn(self, ctx, Key::MAX, discard)
                     .await?
             } else {
                 let (layers, _) = writer.take()?;
@@ -2142,7 +2011,7 @@ impl Timeline {
 
         let produced_delta_layers = if !dry_run {
             delta_layer_writer
-                .finish_with_discard_fn(self, ctx, hack_end_key, discard)
+                .finish_with_discard_fn(self, ctx, discard)
                 .await?
         } else {
             let (layers, _) = delta_layer_writer.take()?;

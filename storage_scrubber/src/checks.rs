@@ -1,12 +1,12 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
-use anyhow::Context;
 use itertools::Itertools;
+use pageserver::tenant::checks::check_valid_layermap;
 use pageserver::tenant::layer_map::LayerMap;
 use pageserver::tenant::remote_timeline_client::index::LayerFileMetadata;
 use pageserver_api::shard::ShardIndex;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 use utils::generation::Generation;
 use utils::id::TimelineId;
 
@@ -28,9 +28,8 @@ pub(crate) struct TimelineAnalysis {
     /// yet.
     pub(crate) warnings: Vec<String>,
 
-    /// Keys not referenced in metadata: candidates for removal, but NOT NECESSARILY: beware
-    /// of races between reading the metadata and reading the objects.
-    pub(crate) garbage_keys: Vec<String>,
+    /// Objects whose keys were not recognized at all, i.e. not layer files, not indices, and not initdb archive.
+    pub(crate) unknown_keys: Vec<String>,
 }
 
 impl TimelineAnalysis {
@@ -38,7 +37,7 @@ impl TimelineAnalysis {
         Self {
             errors: Vec::new(),
             warnings: Vec::new(),
-            garbage_keys: Vec::new(),
+            unknown_keys: Vec::new(),
         }
     }
 
@@ -46,56 +45,6 @@ impl TimelineAnalysis {
     pub(crate) fn is_healthy(&self) -> bool {
         self.errors.is_empty() && self.warnings.is_empty()
     }
-}
-
-/// Checks whether a layer map is valid (i.e., is a valid result of the current compaction algorithm if nothing goes wrong).
-/// The function checks if we can split the LSN range of a delta layer only at the LSNs of the delta layers. For example,
-///
-/// ```plain
-/// |       |                 |       |
-/// |   1   |    |   2   |    |   3   |
-/// |       |    |       |    |       |
-/// ```
-///
-/// This is not a valid layer map because the LSN range of layer 1 intersects with the LSN range of layer 2. 1 and 2 should have
-/// the same LSN range.
-///
-/// The exception is that when layer 2 only contains a single key, it could be split over the LSN range. For example,
-///
-/// ```plain
-/// |       |    |   2   |    |       |
-/// |   1   |    |-------|    |   3   |
-/// |       |    |   4   |    |       |
-///
-/// If layer 2 and 4 contain the same single key, this is also a valid layer map.
-fn check_valid_layermap(metadata: &HashMap<LayerName, LayerFileMetadata>) -> Option<String> {
-    let mut lsn_split_point = BTreeSet::new(); // TODO: use a better data structure (range tree / range set?)
-    let mut all_delta_layers = Vec::new();
-    for (name, _) in metadata.iter() {
-        if let LayerName::Delta(layer) = name {
-            if layer.key_range.start.next() != layer.key_range.end {
-                all_delta_layers.push(layer.clone());
-            }
-        }
-    }
-    for layer in &all_delta_layers {
-        let lsn_range = &layer.lsn_range;
-        lsn_split_point.insert(lsn_range.start);
-        lsn_split_point.insert(lsn_range.end);
-    }
-    for layer in &all_delta_layers {
-        let lsn_range = layer.lsn_range.clone();
-        let intersects = lsn_split_point.range(lsn_range).collect_vec();
-        if intersects.len() > 1 {
-            let err = format!(
-                        "layer violates the layer map LSN split assumption: layer {} intersects with LSN [{}]",
-                        layer,
-                        intersects.into_iter().map(|lsn| lsn.to_string()).join(", ")
-                    );
-            return Some(err);
-        }
-    }
-    None
 }
 
 pub(crate) async fn branch_cleanup_and_check_errors(
@@ -108,7 +57,7 @@ pub(crate) async fn branch_cleanup_and_check_errors(
 ) -> TimelineAnalysis {
     let mut result = TimelineAnalysis::new();
 
-    info!("Checking timeline {id}");
+    info!("Checking timeline");
 
     if let Some(s3_active_branch) = s3_active_branch {
         info!(
@@ -129,7 +78,7 @@ pub(crate) async fn branch_cleanup_and_check_errors(
     match s3_data {
         Some(s3_data) => {
             result
-                .garbage_keys
+                .unknown_keys
                 .extend(s3_data.unknown_keys.into_iter().map(|k| k.key.to_string()));
 
             match s3_data.blob_data {
@@ -177,7 +126,8 @@ pub(crate) async fn branch_cleanup_and_check_errors(
                         }
                     }
 
-                    if let Some(err) = check_valid_layermap(&index_part.layer_metadata) {
+                    let layer_names = index_part.layer_metadata.keys().cloned().collect_vec();
+                    if let Some(err) = check_valid_layermap(&layer_names) {
                         result.errors.push(format!(
                             "index_part.json contains invalid layer map structure: {err}"
                         ));
@@ -252,10 +202,10 @@ pub(crate) async fn branch_cleanup_and_check_errors(
         warn!("Timeline metadata warnings: {0:?}", result.warnings);
     }
 
-    if !result.garbage_keys.is_empty() {
-        error!(
-            "The following keys should be removed from S3: {0:?}",
-            result.garbage_keys
+    if !result.unknown_keys.is_empty() {
+        warn!(
+            "The following keys are not recognized: {0:?}",
+            result.unknown_keys
         )
     }
 
@@ -342,10 +292,10 @@ impl TenantObjectListing {
 pub(crate) struct RemoteTimelineBlobData {
     pub(crate) blob_data: BlobDataParseResult,
 
-    // Index objects that were not used when loading `blob_data`, e.g. those from old generations
+    /// Index objects that were not used when loading `blob_data`, e.g. those from old generations
     pub(crate) unused_index_keys: Vec<ListingObject>,
 
-    // Objects whose keys were not recognized at all, i.e. not layer files, not indices
+    /// Objects whose keys were not recognized at all, i.e. not layer files, not indices
     pub(crate) unknown_keys: Vec<ListingObject>,
 }
 
@@ -377,11 +327,54 @@ pub(crate) fn parse_layer_object_name(name: &str) -> Result<(LayerName, Generati
     }
 }
 
+/// Note (<https://github.com/neondatabase/neon/issues/8872>):
+/// Since we do not gurantee the order of the listing, we could list layer keys right before
+/// pageserver `RemoteTimelineClient` deletes the layer files and then the index.
+/// In the rare case, this would give back a transient error where the index key is missing.
+///
+/// To avoid generating false positive, we try streaming the listing for a second time.
 pub(crate) async fn list_timeline_blobs(
     remote_client: &GenericRemoteStorage,
     id: TenantShardTimelineId,
     root_target: &RootTarget,
 ) -> anyhow::Result<RemoteTimelineBlobData> {
+    let res = list_timeline_blobs_impl(remote_client, id, root_target).await?;
+    match res {
+        ListTimelineBlobsResult::Ready(data) => Ok(data),
+        ListTimelineBlobsResult::MissingIndexPart(_) => {
+            // Retry if index is missing.
+            let data = list_timeline_blobs_impl(remote_client, id, root_target)
+                .await?
+                .into_data();
+            Ok(data)
+        }
+    }
+}
+
+enum ListTimelineBlobsResult {
+    /// Blob data is ready to be intepreted.
+    Ready(RemoteTimelineBlobData),
+    /// List timeline blobs has layer files but is missing [`IndexPart`].
+    MissingIndexPart(RemoteTimelineBlobData),
+}
+
+impl ListTimelineBlobsResult {
+    /// Get the inner blob data regardless the status.
+    pub fn into_data(self) -> RemoteTimelineBlobData {
+        match self {
+            ListTimelineBlobsResult::Ready(data) => data,
+            ListTimelineBlobsResult::MissingIndexPart(data) => data,
+        }
+    }
+}
+
+/// Returns [`ListTimelineBlobsResult::MissingIndexPart`] if blob data has layer files
+/// but is missing [`IndexPart`], otherwise returns [`ListTimelineBlobsResult::Ready`].
+async fn list_timeline_blobs_impl(
+    remote_client: &GenericRemoteStorage,
+    id: TenantShardTimelineId,
+    root_target: &RootTarget,
+) -> anyhow::Result<ListTimelineBlobsResult> {
     let mut s3_layers = HashSet::new();
 
     let mut errors = Vec::new();
@@ -423,30 +416,28 @@ pub(crate) async fn list_timeline_blobs(
                     s3_layers.insert((new_layer, gen));
                 }
                 Err(e) => {
-                    tracing::info!("Error parsing key {maybe_layer_name}");
-                    errors.push(
-                        format!("S3 list response got an object with key {key} that is not a layer name: {e}"),
-                    );
+                    tracing::info!("Error parsing {maybe_layer_name} as layer name: {e}");
                     unknown_keys.push(obj);
                 }
             },
             None => {
-                tracing::warn!("Unknown key {key}");
-                errors.push(format!("S3 list response got an object with odd key {key}"));
+                tracing::info!("S3 listed an unknown key: {key}");
                 unknown_keys.push(obj);
             }
         }
     }
 
-    if index_part_keys.is_empty() && s3_layers.is_empty() && initdb_archive {
-        tracing::debug!(
-            "Timeline is empty apart from initdb archive: expected post-deletion state."
-        );
-        return Ok(RemoteTimelineBlobData {
+    if index_part_keys.is_empty() && s3_layers.is_empty() {
+        tracing::debug!("Timeline is empty: expected post-deletion state.");
+        if initdb_archive {
+            tracing::info!("Timeline is post deletion but initdb archive is still present.");
+        }
+
+        return Ok(ListTimelineBlobsResult::Ready(RemoteTimelineBlobData {
             blob_data: BlobDataParseResult::Relic,
             unused_index_keys: index_part_keys,
-            unknown_keys: Vec::new(),
-        });
+            unknown_keys,
+        }));
     }
 
     // Choose the index_part with the highest generation
@@ -472,19 +463,43 @@ pub(crate) async fn list_timeline_blobs(
     match index_part_object.as_ref() {
         Some(selected) => index_part_keys.retain(|k| k != selected),
         None => {
-            errors.push("S3 list response got no index_part.json file".to_string());
+            // It is possible that the branch gets deleted after we got some layer files listed
+            // and we no longer have the index file in the listing.
+            errors.push(
+                "S3 list response got no index_part.json file but still has layer files"
+                    .to_string(),
+            );
+            return Ok(ListTimelineBlobsResult::MissingIndexPart(
+                RemoteTimelineBlobData {
+                    blob_data: BlobDataParseResult::Incorrect { errors, s3_layers },
+                    unused_index_keys: index_part_keys,
+                    unknown_keys,
+                },
+            ));
         }
     }
 
     if let Some(index_part_object_key) = index_part_object.as_ref() {
         let index_part_bytes =
-            download_object_with_retries(remote_client, &index_part_object_key.key)
-                .await
-                .context("index_part.json download")?;
+            match download_object_with_retries(remote_client, &index_part_object_key.key).await {
+                Ok(index_part_bytes) => index_part_bytes,
+                Err(e) => {
+                    // It is possible that the branch gets deleted in-between we list the objects
+                    // and we download the index part file.
+                    errors.push(format!("failed to download index_part.json: {e}"));
+                    return Ok(ListTimelineBlobsResult::MissingIndexPart(
+                        RemoteTimelineBlobData {
+                            blob_data: BlobDataParseResult::Incorrect { errors, s3_layers },
+                            unused_index_keys: index_part_keys,
+                            unknown_keys,
+                        },
+                    ));
+                }
+            };
 
         match serde_json::from_slice(&index_part_bytes) {
             Ok(index_part) => {
-                return Ok(RemoteTimelineBlobData {
+                return Ok(ListTimelineBlobsResult::Ready(RemoteTimelineBlobData {
                     blob_data: BlobDataParseResult::Parsed {
                         index_part: Box::new(index_part),
                         index_part_generation,
@@ -492,7 +507,7 @@ pub(crate) async fn list_timeline_blobs(
                     },
                     unused_index_keys: index_part_keys,
                     unknown_keys,
-                })
+                }))
             }
             Err(index_parse_error) => errors.push(format!(
                 "index_part.json body parsing error: {index_parse_error}"
@@ -506,9 +521,9 @@ pub(crate) async fn list_timeline_blobs(
         );
     }
 
-    Ok(RemoteTimelineBlobData {
+    Ok(ListTimelineBlobsResult::Ready(RemoteTimelineBlobData {
         blob_data: BlobDataParseResult::Incorrect { errors, s3_layers },
         unused_index_keys: index_part_keys,
         unknown_keys,
-    })
+    }))
 }

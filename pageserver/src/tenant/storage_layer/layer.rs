@@ -439,11 +439,32 @@ impl Layer {
 
     fn record_access(&self, ctx: &RequestContext) {
         if self.0.access_stats.record_access(ctx) {
-            // Visibility was modified to Visible
-            tracing::info!(
-                "Layer {} became visible as a result of access",
-                self.0.desc.key()
-            );
+            // Visibility was modified to Visible: maybe log about this
+            match ctx.task_kind() {
+                TaskKind::CalculateSyntheticSize
+                | TaskKind::OndemandLogicalSizeCalculation
+                | TaskKind::GarbageCollector
+                | TaskKind::MgmtRequest => {
+                    // This situation is expected in code paths do binary searches of the LSN space to resolve
+                    // an LSN to a timestamp, which happens during GC, during GC cutoff calculations in synthetic size,
+                    // and on-demand for certain HTTP API requests. On-demand logical size calculation is also included
+                    // because it is run as a sub-task of synthetic size.
+                }
+                _ => {
+                    // In all other contexts, it is unusual to do I/O involving layers which are not visible at
+                    // some branch tip, so we log the fact that we are accessing something that the visibility
+                    // calculation thought should not be visible.
+                    //
+                    // This case is legal in brief time windows: for example an in-flight getpage request can hold on to a layer object
+                    // which was covered by a concurrent compaction.
+                    tracing::info!(
+                        layer=%self,
+                        "became visible as a result of access",
+                    );
+                }
+            }
+
+            // Update the timeline's visible bytes count
             if let Some(tl) = self.0.timeline.upgrade() {
                 tl.metrics
                     .visible_physical_size_gauge
@@ -667,7 +688,9 @@ impl Drop for LayerInner {
             // and we could be delaying shutdown for nothing.
         }
 
-        if let Some(timeline) = self.timeline.upgrade() {
+        let timeline = self.timeline.upgrade();
+
+        if let Some(timeline) = timeline.as_ref() {
             // Only need to decrement metrics if the timeline still exists: otherwise
             // it will have already de-registered these metrics via TimelineMetrics::shutdown
             if self.desc.is_delta() {
@@ -698,7 +721,6 @@ impl Drop for LayerInner {
         let path = std::mem::take(&mut self.path);
         let file_name = self.layer_desc().layer_name();
         let file_size = self.layer_desc().file_size;
-        let timeline = self.timeline.clone();
         let meta = self.metadata();
         let status = self.status.take();
 
@@ -708,7 +730,7 @@ impl Drop for LayerInner {
             // carry this until we are finished for [`Layer::wait_drop`] support
             let _status = status;
 
-            let Some(timeline) = timeline.upgrade() else {
+            let Some(timeline) = timeline else {
                 // no need to nag that timeline is gone: under normal situation on
                 // task_mgr::remove_tenant_from_memory the timeline is gone before we get dropped.
                 LAYER_IMPL_METRICS.inc_deletes_failed(DeleteFailed::TimelineGone);

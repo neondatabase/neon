@@ -16,9 +16,9 @@
 //! Note that the vectored blob api does *not* go through the page cache.
 
 use std::collections::BTreeMap;
-use std::num::NonZeroUsize;
+use std::ops::Deref;
 
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use pageserver_api::key::Key;
 use tokio::io::AsyncWriteExt;
 use tokio_epoll_uring::BoundedBuf;
@@ -29,9 +29,6 @@ use crate::context::RequestContext;
 use crate::tenant::blob_io::{BYTE_UNCOMPRESSED, BYTE_ZSTD, LEN_COMPRESSION_BIT_MASK};
 use crate::virtual_file::{self, VirtualFile};
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct MaxVectoredReadBytes(pub NonZeroUsize);
-
 /// Metadata bundled with the start and end offset of a blob.
 #[derive(Copy, Clone, Debug)]
 pub struct BlobMeta {
@@ -39,11 +36,123 @@ pub struct BlobMeta {
     pub lsn: Lsn,
 }
 
-/// Blob offsets into [`VectoredBlobsBuf::buf`]
+/// A view into the vectored blobs read buffer.
+#[derive(Clone, Debug)]
+pub(crate) enum BufView<'a> {
+    Slice(&'a [u8]),
+    Bytes(bytes::Bytes),
+}
+
+impl<'a> BufView<'a> {
+    /// Creates a new slice-based view on the blob.
+    pub fn new_slice(slice: &'a [u8]) -> Self {
+        Self::Slice(slice)
+    }
+
+    /// Creates a new [`bytes::Bytes`]-based view on the blob.
+    pub fn new_bytes(bytes: bytes::Bytes) -> Self {
+        Self::Bytes(bytes)
+    }
+
+    /// Convert the view into `Bytes`.
+    ///
+    /// If using slice as the underlying storage, the copy will be an O(n) operation.
+    pub fn into_bytes(self) -> Bytes {
+        match self {
+            BufView::Slice(slice) => Bytes::copy_from_slice(slice),
+            BufView::Bytes(bytes) => bytes,
+        }
+    }
+
+    /// Creates a sub-view of the blob based on the range.
+    fn view(&self, range: std::ops::Range<usize>) -> Self {
+        match self {
+            BufView::Slice(slice) => BufView::Slice(&slice[range]),
+            BufView::Bytes(bytes) => BufView::Bytes(bytes.slice(range)),
+        }
+    }
+}
+
+impl<'a> Deref for BufView<'a> {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            BufView::Slice(slice) => slice,
+            BufView::Bytes(bytes) => bytes,
+        }
+    }
+}
+
+impl<'a> AsRef<[u8]> for BufView<'a> {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            BufView::Slice(slice) => slice,
+            BufView::Bytes(bytes) => bytes.as_ref(),
+        }
+    }
+}
+
+impl<'a> From<&'a [u8]> for BufView<'a> {
+    fn from(value: &'a [u8]) -> Self {
+        Self::new_slice(value)
+    }
+}
+
+impl From<Bytes> for BufView<'_> {
+    fn from(value: Bytes) -> Self {
+        Self::new_bytes(value)
+    }
+}
+
+/// Blob offsets into [`VectoredBlobsBuf::buf`]. The byte ranges is potentially compressed,
+/// subject to [`VectoredBlob::compression_bits`].
 pub struct VectoredBlob {
-    pub start: usize,
-    pub end: usize,
+    /// Blob metadata.
     pub meta: BlobMeta,
+    /// Start offset.
+    start: usize,
+    /// End offset.
+    end: usize,
+    /// Compression used on the the blob.
+    compression_bits: u8,
+}
+
+impl VectoredBlob {
+    /// Reads a decompressed view of the blob.
+    pub(crate) async fn read<'a>(&self, buf: &BufView<'a>) -> Result<BufView<'a>, std::io::Error> {
+        let view = buf.view(self.start..self.end);
+
+        match self.compression_bits {
+            BYTE_UNCOMPRESSED => Ok(view),
+            BYTE_ZSTD => {
+                let mut decompressed_vec = Vec::new();
+                let mut decoder =
+                    async_compression::tokio::write::ZstdDecoder::new(&mut decompressed_vec);
+                decoder.write_all(&view).await?;
+                decoder.flush().await?;
+                // Zero-copy conversion from `Vec` to `Bytes`
+                Ok(BufView::new_bytes(Bytes::from(decompressed_vec)))
+            }
+            bits => {
+                let error = std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("Failed to decompress blob for {}@{}, {}..{}: invalid compression byte {bits:x}", self.meta.key, self.meta.lsn, self.start, self.end),
+                );
+                Err(error)
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for VectoredBlob {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}@{}, {}..{}",
+            self.meta.key, self.meta.lsn, self.start, self.end
+        )
+    }
 }
 
 /// Return type of [`VectoredBlobReader::read_blobs`]
@@ -76,171 +185,7 @@ pub(crate) enum VectoredReadExtended {
     No,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum VectoredReadCoalesceMode {
-    /// Only coalesce exactly adjacent reads.
-    AdjacentOnly,
-    /// In addition to adjacent reads, also consider reads whose corresponding
-    /// `end` and `start` offsets reside at the same chunk.
-    Chunked(usize),
-}
-
-impl VectoredReadCoalesceMode {
-    /// [`AdjacentVectoredReadBuilder`] is used if alignment requirement is 0,
-    /// whereas [`ChunkedVectoredReadBuilder`] is used for alignment requirement 1 and higher.
-    pub(crate) fn get() -> Self {
-        let align = virtual_file::get_io_buffer_alignment_raw();
-        if align == 0 {
-            VectoredReadCoalesceMode::AdjacentOnly
-        } else {
-            VectoredReadCoalesceMode::Chunked(align)
-        }
-    }
-}
-
-pub(crate) enum VectoredReadBuilder {
-    Adjacent(AdjacentVectoredReadBuilder),
-    Chunked(ChunkedVectoredReadBuilder),
-}
-
-impl VectoredReadBuilder {
-    fn new_impl(
-        start_offset: u64,
-        end_offset: u64,
-        meta: BlobMeta,
-        max_read_size: Option<usize>,
-        mode: VectoredReadCoalesceMode,
-    ) -> Self {
-        match mode {
-            VectoredReadCoalesceMode::AdjacentOnly => Self::Adjacent(
-                AdjacentVectoredReadBuilder::new(start_offset, end_offset, meta, max_read_size),
-            ),
-            VectoredReadCoalesceMode::Chunked(chunk_size) => {
-                Self::Chunked(ChunkedVectoredReadBuilder::new(
-                    start_offset,
-                    end_offset,
-                    meta,
-                    max_read_size,
-                    chunk_size,
-                ))
-            }
-        }
-    }
-
-    pub(crate) fn new(
-        start_offset: u64,
-        end_offset: u64,
-        meta: BlobMeta,
-        max_read_size: usize,
-        mode: VectoredReadCoalesceMode,
-    ) -> Self {
-        Self::new_impl(start_offset, end_offset, meta, Some(max_read_size), mode)
-    }
-
-    pub(crate) fn new_streaming(
-        start_offset: u64,
-        end_offset: u64,
-        meta: BlobMeta,
-        mode: VectoredReadCoalesceMode,
-    ) -> Self {
-        Self::new_impl(start_offset, end_offset, meta, None, mode)
-    }
-
-    pub(crate) fn extend(&mut self, start: u64, end: u64, meta: BlobMeta) -> VectoredReadExtended {
-        match self {
-            VectoredReadBuilder::Adjacent(builder) => builder.extend(start, end, meta),
-            VectoredReadBuilder::Chunked(builder) => builder.extend(start, end, meta),
-        }
-    }
-
-    pub(crate) fn build(self) -> VectoredRead {
-        match self {
-            VectoredReadBuilder::Adjacent(builder) => builder.build(),
-            VectoredReadBuilder::Chunked(builder) => builder.build(),
-        }
-    }
-
-    pub(crate) fn size(&self) -> usize {
-        match self {
-            VectoredReadBuilder::Adjacent(builder) => builder.size(),
-            VectoredReadBuilder::Chunked(builder) => builder.size(),
-        }
-    }
-}
-
-pub(crate) struct AdjacentVectoredReadBuilder {
-    /// Start offset of the read.
-    start: u64,
-    // End offset of the read.
-    end: u64,
-    /// Start offset and metadata for each blob in this read
-    blobs_at: VecMap<u64, BlobMeta>,
-    max_read_size: Option<usize>,
-}
-
-impl AdjacentVectoredReadBuilder {
-    /// Start building a new vectored read.
-    ///
-    /// Note that by design, this does not check against reading more than `max_read_size` to
-    /// support reading larger blobs than the configuration value. The builder will be single use
-    /// however after that.
-    pub(crate) fn new(
-        start_offset: u64,
-        end_offset: u64,
-        meta: BlobMeta,
-        max_read_size: Option<usize>,
-    ) -> Self {
-        let mut blobs_at = VecMap::default();
-        blobs_at
-            .append(start_offset, meta)
-            .expect("First insertion always succeeds");
-
-        Self {
-            start: start_offset,
-            end: end_offset,
-            blobs_at,
-            max_read_size,
-        }
-    }
-    /// Attempt to extend the current read with a new blob if the start
-    /// offset matches with the current end of the vectored read
-    /// and the resuting size is below the max read size
-    pub(crate) fn extend(&mut self, start: u64, end: u64, meta: BlobMeta) -> VectoredReadExtended {
-        tracing::trace!(start, end, "trying to extend");
-        let size = (end - start) as usize;
-        let not_limited_by_max_read_size = {
-            if let Some(max_read_size) = self.max_read_size {
-                self.size() + size <= max_read_size
-            } else {
-                true
-            }
-        };
-
-        if self.end == start && not_limited_by_max_read_size {
-            self.end = end;
-            self.blobs_at
-                .append(start, meta)
-                .expect("LSNs are ordered within vectored reads");
-
-            return VectoredReadExtended::Yes;
-        }
-
-        VectoredReadExtended::No
-    }
-
-    pub(crate) fn size(&self) -> usize {
-        (self.end - self.start) as usize
-    }
-
-    pub(crate) fn build(self) -> VectoredRead {
-        VectoredRead {
-            start: self.start,
-            end: self.end,
-            blobs_at: self.blobs_at,
-        }
-    }
-}
-
+/// A vectored read builder that tries to coalesce all reads that fits in a chunk.
 pub(crate) struct ChunkedVectoredReadBuilder {
     /// Start block number
     start_blk_no: usize,
@@ -264,7 +209,7 @@ impl ChunkedVectoredReadBuilder {
     /// Note that by design, this does not check against reading more than `max_read_size` to
     /// support reading larger blobs than the configuration value. The builder will be single use
     /// however after that.
-    pub(crate) fn new(
+    fn new_impl(
         start_offset: u64,
         end_offset: u64,
         meta: BlobMeta,
@@ -285,6 +230,25 @@ impl ChunkedVectoredReadBuilder {
             max_read_size,
             chunk_size,
         }
+    }
+
+    pub(crate) fn new(
+        start_offset: u64,
+        end_offset: u64,
+        meta: BlobMeta,
+        max_read_size: usize,
+        align: usize,
+    ) -> Self {
+        Self::new_impl(start_offset, end_offset, meta, Some(max_read_size), align)
+    }
+
+    pub(crate) fn new_streaming(
+        start_offset: u64,
+        end_offset: u64,
+        meta: BlobMeta,
+        align: usize,
+    ) -> Self {
+        Self::new_impl(start_offset, end_offset, meta, None, align)
     }
 
     /// Attempts to extend the current read with a new blob if the new blob resides in the same or the immediate next chunk.
@@ -365,17 +329,17 @@ pub struct VectoredReadPlanner {
 
     max_read_size: usize,
 
-    mode: VectoredReadCoalesceMode,
+    align: usize,
 }
 
 impl VectoredReadPlanner {
     pub fn new(max_read_size: usize) -> Self {
-        let mode = VectoredReadCoalesceMode::get();
+        let align = virtual_file::get_io_buffer_alignment();
         Self {
             blobs: BTreeMap::new(),
             prev: None,
             max_read_size,
-            mode,
+            align,
         }
     }
 
@@ -436,7 +400,7 @@ impl VectoredReadPlanner {
     }
 
     pub fn finish(self) -> Vec<VectoredRead> {
-        let mut current_read_builder: Option<VectoredReadBuilder> = None;
+        let mut current_read_builder: Option<ChunkedVectoredReadBuilder> = None;
         let mut reads = Vec::new();
 
         for (key, blobs_for_key) in self.blobs {
@@ -449,12 +413,12 @@ impl VectoredReadPlanner {
                 };
 
                 if extended == VectoredReadExtended::No {
-                    let next_read_builder = VectoredReadBuilder::new(
+                    let next_read_builder = ChunkedVectoredReadBuilder::new(
                         start_offset,
                         end_offset,
                         BlobMeta { key, lsn },
                         self.max_read_size,
-                        self.mode,
+                        self.align,
                     );
 
                     let prev_read_builder = current_read_builder.replace(next_read_builder);
@@ -518,7 +482,7 @@ impl<'a> VectoredBlobReader<'a> {
             );
         }
 
-        let mut buf = self
+        let buf = self
             .file
             .read_exact_at(buf.slice(0..read.size()), read.start, ctx)
             .await?
@@ -532,9 +496,6 @@ impl<'a> VectoredBlobReader<'a> {
         // Blobs in `read` only provide their starting offset. The end offset
         // of a blob is implicit: the start of the next blob if one exists
         // or the end of the read.
-
-        // Some scratch space, put here for reusing the allocation
-        let mut decompressed_vec = Vec::new();
 
         for (blob_start, meta) in blobs_at {
             let blob_start_in_buf = blob_start - start_offset;
@@ -561,35 +522,14 @@ impl<'a> VectoredBlobReader<'a> {
                 )
             };
 
-            let start_raw = blob_start_in_buf + size_length;
-            let end_raw = start_raw + blob_size;
-            let (start, end);
-            if compression_bits == BYTE_UNCOMPRESSED {
-                start = start_raw as usize;
-                end = end_raw as usize;
-            } else if compression_bits == BYTE_ZSTD {
-                let mut decoder =
-                    async_compression::tokio::write::ZstdDecoder::new(&mut decompressed_vec);
-                decoder
-                    .write_all(&buf[start_raw as usize..end_raw as usize])
-                    .await?;
-                decoder.flush().await?;
-                start = buf.len();
-                buf.extend_from_slice(&decompressed_vec);
-                end = buf.len();
-                decompressed_vec.clear();
-            } else {
-                let error = std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("invalid compression byte {compression_bits:x}"),
-                );
-                return Err(error);
-            }
+            let start = (blob_start_in_buf + size_length) as usize;
+            let end = start + blob_size as usize;
 
             metas.push(VectoredBlob {
                 start,
                 end,
                 meta: *meta,
+                compression_bits,
             });
         }
 
@@ -597,11 +537,13 @@ impl<'a> VectoredBlobReader<'a> {
     }
 }
 
-/// Read planner used in [`crate::tenant::storage_layer::image_layer::ImageLayerIterator`]. It provides a streaming API for
-/// getting read blobs. It returns a batch when `handle` gets called and when the current key would just exceed the read_size and
+/// Read planner used in [`crate::tenant::storage_layer::image_layer::ImageLayerIterator`].
+///
+/// It provides a streaming API for getting read blobs. It returns a batch when
+/// `handle` gets called and when the current key would just exceed the read_size and
 /// max_cnt constraints.
 pub struct StreamingVectoredReadPlanner {
-    read_builder: Option<VectoredReadBuilder>,
+    read_builder: Option<ChunkedVectoredReadBuilder>,
     // Arguments for previous blob passed into [`StreamingVectoredReadPlanner::handle`]
     prev: Option<(Key, Lsn, u64)>,
     /// Max read size per batch. This is not a strict limit. If there are [0, 100) and [100, 200), while the `max_read_size` is 150,
@@ -612,21 +554,21 @@ pub struct StreamingVectoredReadPlanner {
     /// Size of the current batch
     cnt: usize,
 
-    mode: VectoredReadCoalesceMode,
+    align: usize,
 }
 
 impl StreamingVectoredReadPlanner {
     pub fn new(max_read_size: u64, max_cnt: usize) -> Self {
         assert!(max_cnt > 0);
         assert!(max_read_size > 0);
-        let mode = VectoredReadCoalesceMode::get();
+        let align = virtual_file::get_io_buffer_alignment();
         Self {
             read_builder: None,
             prev: None,
             max_cnt,
             max_read_size,
             cnt: 0,
-            mode,
+            align,
         }
     }
 
@@ -675,11 +617,11 @@ impl StreamingVectoredReadPlanner {
             }
             None => {
                 self.read_builder = {
-                    Some(VectoredReadBuilder::new_streaming(
+                    Some(ChunkedVectoredReadBuilder::new_streaming(
                         start_offset,
                         end_offset,
                         BlobMeta { key, lsn },
-                        self.mode,
+                        self.align,
                     ))
                 };
             }
@@ -1005,7 +947,7 @@ mod tests {
         let reserved_bytes = blobs.iter().map(|bl| bl.len()).max().unwrap() * 2 + 16;
         let mut buf = BytesMut::with_capacity(reserved_bytes);
 
-        let mode = VectoredReadCoalesceMode::get();
+        let align = virtual_file::get_io_buffer_alignment();
         let vectored_blob_reader = VectoredBlobReader::new(&file);
         let meta = BlobMeta {
             key: Key::MIN,
@@ -1017,13 +959,19 @@ mod tests {
             if idx + 1 == offsets.len() {
                 continue;
             }
-            let read_builder = VectoredReadBuilder::new(*offset, *end, meta, 16 * 4096, mode);
+            let read_builder =
+                ChunkedVectoredReadBuilder::new(*offset, *end, meta, 16 * 4096, align);
             let read = read_builder.build();
             let result = vectored_blob_reader.read_blobs(&read, buf, &ctx).await?;
             assert_eq!(result.blobs.len(), 1);
             let read_blob = &result.blobs[0];
-            let read_buf = &result.buf[read_blob.start..read_blob.end];
-            assert_eq!(blob, read_buf, "mismatch for idx={idx} at offset={offset}");
+            let view = BufView::new_slice(&result.buf);
+            let read_buf = read_blob.read(&view).await?;
+            assert_eq!(
+                &blob[..],
+                &read_buf[..],
+                "mismatch for idx={idx} at offset={offset}"
+            );
             buf = result.buf;
         }
         Ok(())

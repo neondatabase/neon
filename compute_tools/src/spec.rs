@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs::File;
 use std::path::Path;
 use std::str::FromStr;
@@ -189,6 +190,15 @@ pub fn handle_roles(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
     let mut xact = client.transaction()?;
     let existing_roles: Vec<Role> = get_existing_roles(&mut xact)?;
 
+    let mut jwks_roles = HashSet::new();
+    if let Some(local_proxy) = &spec.local_proxy_config {
+        for jwks_setting in local_proxy.jwks.iter().flatten() {
+            for role_name in &jwks_setting.role_names {
+                jwks_roles.insert(role_name.clone());
+            }
+        }
+    }
+
     // Print a list of existing Postgres roles (only in debug mode)
     if span_enabled!(Level::INFO) {
         let mut vec = Vec::new();
@@ -308,6 +318,9 @@ pub fn handle_roles(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
                     "CREATE ROLE {} INHERIT CREATEROLE CREATEDB BYPASSRLS REPLICATION IN ROLE neon_superuser",
                     name.pg_quote()
                 );
+                if jwks_roles.contains(name.as_str()) {
+                    query = format!("CREATE ROLE {}", name.pg_quote());
+                }
                 info!("running role create query: '{}'", &query);
                 query.push_str(&role.to_pg_options());
                 xact.execute(query.as_str(), &[])?;
@@ -792,6 +805,9 @@ pub fn handle_migrations(client: &mut Client) -> Result<()> {
         include_str!("./migrations/0009-revoke_replication_for_previously_allowed_roles.sql"),
         include_str!(
             "./migrations/0010-grant_snapshot_synchronization_funcs_to_neon_superuser.sql"
+        ),
+        include_str!(
+            "./migrations/0011-grant_pg_show_replication_origin_status_to_neon_superuser.sql"
         ),
     ];
 

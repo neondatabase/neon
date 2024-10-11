@@ -22,13 +22,12 @@ from fixtures.utils import query_scalar
 #
 def test_readonly_node(neon_simple_env: NeonEnv):
     env = neon_simple_env
-    env.neon_cli.create_branch("test_readonly_node", "empty")
-    endpoint_main = env.endpoints.create_start("test_readonly_node")
+    endpoint_main = env.endpoints.create_start("main")
 
     env.pageserver.allowed_errors.extend(
         [
             ".*basebackup .* failed: invalid basebackup lsn.*",
-            ".*page_service.*handle_make_lsn_lease.*.*tried to request a page version that was garbage collected",
+            ".*/lsn_lease.*invalid lsn lease request.*",
         ]
     )
 
@@ -74,12 +73,12 @@ def test_readonly_node(neon_simple_env: NeonEnv):
 
     # Create first read-only node at the point where only 100 rows were inserted
     endpoint_hundred = env.endpoints.create_start(
-        branch_name="test_readonly_node", endpoint_id="ep-readonly_node_hundred", lsn=lsn_a
+        branch_name="main", endpoint_id="ep-readonly_node_hundred", lsn=lsn_a
     )
 
     # And another at the point where 200100 rows were inserted
     endpoint_more = env.endpoints.create_start(
-        branch_name="test_readonly_node", endpoint_id="ep-readonly_node_more", lsn=lsn_b
+        branch_name="main", endpoint_id="ep-readonly_node_more", lsn=lsn_b
     )
 
     # On the 'hundred' node, we should see only 100 rows
@@ -100,7 +99,7 @@ def test_readonly_node(neon_simple_env: NeonEnv):
 
     # Check creating a node at segment boundary
     endpoint = env.endpoints.create_start(
-        branch_name="test_readonly_node",
+        branch_name="main",
         endpoint_id="ep-branch_segment_boundary",
         lsn=Lsn("0/3000000"),
     )
@@ -109,10 +108,10 @@ def test_readonly_node(neon_simple_env: NeonEnv):
     assert cur.fetchone() == (1,)
 
     # Create node at pre-initdb lsn
-    with pytest.raises(Exception, match="invalid basebackup lsn"):
+    with pytest.raises(Exception, match="invalid lsn lease request"):
         # compute node startup with invalid LSN should fail
         env.endpoints.create_start(
-            branch_name="test_readonly_node",
+            branch_name="main",
             endpoint_id="ep-readonly_node_preinitdb",
             lsn=Lsn("0/42"),
         )
@@ -123,6 +122,7 @@ def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
     Test static endpoint is protected from GC by acquiring and renewing lsn leases.
     """
 
+    LSN_LEASE_LENGTH = 8
     neon_env_builder.num_pageservers = 2
     # GC is manual triggered.
     env = neon_env_builder.init_start(
@@ -140,7 +140,7 @@ def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
             "image_creation_threshold": "1",
             "image_layer_creation_check_threshold": "0",
             # Short lease length to fit test.
-            "lsn_lease_length": "3s",
+            "lsn_lease_length": f"{LSN_LEASE_LENGTH}s",
         },
         initial_tenant_shard_count=2,
     )
@@ -167,13 +167,34 @@ def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
             )
         return last_flush_lsn
 
+    def trigger_gc_and_select(env: NeonEnv, ep_static: Endpoint):
+        """
+        Trigger GC manually on all pageservers. Then run an `SELECT` query.
+        """
+        for shard, ps in tenant_get_shards(env, env.initial_tenant):
+            client = ps.http_client()
+            gc_result = client.timeline_gc(shard, env.initial_timeline, 0)
+            log.info(f"{gc_result=}")
+
+            assert (
+                gc_result["layers_removed"] == 0
+            ), "No layers should be removed, old layers are guarded by leases."
+
+        with ep_static.cursor() as cur:
+            cur.execute("SELECT count(*) FROM t0")
+            assert cur.fetchone() == (ROW_COUNT,)
+
     # Insert some records on main branch
     with env.endpoints.create_start("main") as ep_main:
         with ep_main.cursor() as cur:
             cur.execute("CREATE TABLE t0(v0 int primary key, v1 text)")
-        lsn = None
+        lsn = Lsn(0)
         for i in range(2):
             lsn = generate_updates_on_main(env, ep_main, i)
+
+        # Round down to the closest LSN on page boundary (unnormalized).
+        XLOG_BLCKSZ = 8192
+        lsn = Lsn((int(lsn) // XLOG_BLCKSZ) * XLOG_BLCKSZ)
 
         with env.endpoints.create_start(
             branch_name="main",
@@ -184,29 +205,37 @@ def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
                 cur.execute("SELECT count(*) FROM t0")
                 assert cur.fetchone() == (ROW_COUNT,)
 
-            time.sleep(3)
+            # Wait for static compute to renew lease at least once.
+            time.sleep(LSN_LEASE_LENGTH / 2)
 
             generate_updates_on_main(env, ep_main, i, end=100)
 
-            # Trigger GC
-            for shard, ps in tenant_get_shards(env, env.initial_tenant):
-                client = ps.http_client()
-                gc_result = client.timeline_gc(shard, env.initial_timeline, 0)
-                log.info(f"{gc_result=}")
+            trigger_gc_and_select(env, ep_static)
 
-                assert (
-                    gc_result["layers_removed"] == 0
-                ), "No layers should be removed, old layers are guarded by leases."
+            # Trigger Pageserver restarts
+            for ps in env.pageservers:
+                ps.stop()
+                # Static compute should have at least one lease request failure due to connection.
+                time.sleep(LSN_LEASE_LENGTH / 2)
+                ps.start()
 
-            with ep_static.cursor() as cur:
-                cur.execute("SELECT count(*) FROM t0")
-                assert cur.fetchone() == (ROW_COUNT,)
+            trigger_gc_and_select(env, ep_static)
+
+            # Reconfigure pageservers
+            env.pageservers[0].stop()
+            env.storage_controller.node_configure(
+                env.pageservers[0].id, {"availability": "Offline"}
+            )
+            env.storage_controller.reconcile_until_idle()
+
+            trigger_gc_and_select(env, ep_static)
 
         # Do some update so we can increment latest_gc_cutoff
         generate_updates_on_main(env, ep_main, i, end=100)
 
+    # Wait for the existing lease to expire.
+    time.sleep(LSN_LEASE_LENGTH + 1)
     # Now trigger GC again, layers should be removed.
-    time.sleep(4)
     for shard, ps in tenant_get_shards(env, env.initial_tenant):
         client = ps.http_client()
         gc_result = client.timeline_gc(shard, env.initial_timeline, 0)
@@ -218,14 +247,10 @@ def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
 # Similar test, but with more data, and we force checkpoints
 def test_timetravel(neon_simple_env: NeonEnv):
     env = neon_simple_env
-    pageserver_http_client = env.pageserver.http_client()
-    env.neon_cli.create_branch("test_timetravel", "empty")
-    endpoint = env.endpoints.create_start("test_timetravel")
-
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
     client = env.pageserver.http_client()
-
-    tenant_id = endpoint.safe_psql("show neon.tenant_id")[0][0]
-    timeline_id = endpoint.safe_psql("show neon.timeline_id")[0][0]
+    endpoint = env.endpoints.create_start("main")
 
     lsns = []
 
@@ -249,7 +274,7 @@ def test_timetravel(neon_simple_env: NeonEnv):
         wait_for_last_record_lsn(client, tenant_id, timeline_id, current_lsn)
 
         # run checkpoint manually to force a new layer file
-        pageserver_http_client.timeline_checkpoint(tenant_id, timeline_id)
+        client.timeline_checkpoint(tenant_id, timeline_id)
 
     ##### Restart pageserver
     env.endpoints.stop_all()
@@ -258,7 +283,7 @@ def test_timetravel(neon_simple_env: NeonEnv):
 
     for i, lsn in lsns:
         endpoint_old = env.endpoints.create_start(
-            branch_name="test_timetravel", endpoint_id=f"ep-old_lsn_{i}", lsn=lsn
+            branch_name="main", endpoint_id=f"ep-old_lsn_{i}", lsn=lsn
         )
         with endpoint_old.cursor() as cur:
             assert query_scalar(cur, f"select count(*) from testtab where iteration={i}") == 100000

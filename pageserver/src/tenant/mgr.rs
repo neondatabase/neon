@@ -30,8 +30,8 @@ use utils::{backoff, completion, crashsafe};
 
 use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
-use crate::control_plane_client::{
-    ControlPlaneClient, ControlPlaneGenerationsApi, RetryForeverError,
+use crate::controller_upcall_client::{
+    ControlPlaneGenerationsApi, ControllerUpcallClient, RetryForeverError,
 };
 use crate::deletion_queue::DeletionQueueClient;
 use crate::http::routes::ACTIVE_TENANT_TIMEOUT;
@@ -122,7 +122,7 @@ pub(crate) enum ShardSelector {
     Known(ShardIndex),
 }
 
-/// A convenience for use with the re_attach ControlPlaneClient function: rather
+/// A convenience for use with the re_attach ControllerUpcallClient function: rather
 /// than the serializable struct, we build this enum that encapsulates
 /// the invariant that attached tenants always have generations.
 ///
@@ -219,7 +219,11 @@ async fn safe_rename_tenant_dir(path: impl AsRef<Utf8Path>) -> std::io::Result<U
         + TEMP_FILE_SUFFIX;
     let tmp_path = path_with_suffix_extension(&path, &rand_suffix);
     fs::rename(path.as_ref(), &tmp_path).await?;
-    fs::File::open(parent).await?.sync_all().await?;
+    fs::File::open(parent)
+        .await?
+        .sync_all()
+        .await
+        .maybe_fatal_err("safe_rename_tenant_dir")?;
     Ok(tmp_path)
 }
 
@@ -282,9 +286,10 @@ impl BackgroundPurges {
 static TENANTS: Lazy<std::sync::RwLock<TenantsMap>> =
     Lazy::new(|| std::sync::RwLock::new(TenantsMap::Initializing));
 
-/// The TenantManager is responsible for storing and mutating the collection of all tenants
-/// that this pageserver process has state for.  Every Tenant and SecondaryTenant instance
-/// lives inside the TenantManager.
+/// Responsible for storing and mutating the collection of all tenants
+/// that this pageserver has state for.
+///
+/// Every Tenant and SecondaryTenant instance lives inside the TenantManager.
 ///
 /// The most important role of the TenantManager is to prevent conflicts: e.g. trying to attach
 /// the same tenant twice concurrently, or trying to configure the same tenant into secondary
@@ -340,7 +345,7 @@ async fn init_load_generations(
             "Emergency mode!  Tenants will be attached unsafely using their last known generation"
         );
         emergency_generations(tenant_confs)
-    } else if let Some(client) = ControlPlaneClient::new(conf, cancel) {
+    } else if let Some(client) = ControllerUpcallClient::new(conf, cancel) {
         info!("Calling control plane API to re-attach tenants");
         // If we are configured to use the control plane API, then it is the source of truth for what tenants to load.
         match client.re_attach(conf).await {
@@ -2192,6 +2197,82 @@ impl TenantManager {
 
         Ok((wanted_bytes, shard_count as u32))
     }
+
+    #[instrument(skip_all, fields(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), %timeline_id))]
+    pub(crate) async fn immediate_gc(
+        &self,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+        gc_req: TimelineGcRequest,
+        cancel: CancellationToken,
+        ctx: &RequestContext,
+    ) -> Result<GcResult, ApiError> {
+        let tenant = {
+            let guard = self.tenants.read().unwrap();
+            guard
+                .get(&tenant_shard_id)
+                .cloned()
+                .with_context(|| format!("tenant {tenant_shard_id}"))
+                .map_err(|e| ApiError::NotFound(e.into()))?
+        };
+
+        let gc_horizon = gc_req.gc_horizon.unwrap_or_else(|| tenant.get_gc_horizon());
+        // Use tenant's pitr setting
+        let pitr = tenant.get_pitr_interval();
+
+        tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
+
+        // Run in task_mgr to avoid race with tenant_detach operation
+        let ctx: RequestContext =
+            ctx.detached_child(TaskKind::GarbageCollector, DownloadBehavior::Download);
+
+        let _gate_guard = tenant.gate.enter().map_err(|_| ApiError::ShuttingDown)?;
+
+        fail::fail_point!("immediate_gc_task_pre");
+
+        #[allow(unused_mut)]
+        let mut result = tenant
+            .gc_iteration(Some(timeline_id), gc_horizon, pitr, &cancel, &ctx)
+            .await;
+        // FIXME: `gc_iteration` can return an error for multiple reasons; we should handle it
+        // better once the types support it.
+
+        #[cfg(feature = "testing")]
+        {
+            // we need to synchronize with drop completion for python tests without polling for
+            // log messages
+            if let Ok(result) = result.as_mut() {
+                let mut js = tokio::task::JoinSet::new();
+                for layer in std::mem::take(&mut result.doomed_layers) {
+                    js.spawn(layer.wait_drop());
+                }
+                tracing::info!(
+                    total = js.len(),
+                    "starting to wait for the gc'd layers to be dropped"
+                );
+                while let Some(res) = js.join_next().await {
+                    res.expect("wait_drop should not panic");
+                }
+            }
+
+            let timeline = tenant.get_timeline(timeline_id, false).ok();
+            let rtc = timeline.as_ref().map(|x| &x.remote_client);
+
+            if let Some(rtc) = rtc {
+                // layer drops schedule actions on remote timeline client to actually do the
+                // deletions; don't care about the shutdown error, just exit fast
+                drop(rtc.wait_completion().await);
+            }
+        }
+
+        result.map_err(|e| match e {
+            GcError::TenantCancelled | GcError::TimelineCancelled => ApiError::ShuttingDown,
+            GcError::TimelineNotFound => {
+                ApiError::NotFound(anyhow::anyhow!("Timeline not found").into())
+            }
+            other => ApiError::InternalServerError(anyhow::anyhow!(other)),
+        })
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -2336,7 +2417,7 @@ enum TenantSlotDropError {
 /// Errors that can happen any time we are walking the tenant map to try and acquire
 /// the TenantSlot for a particular tenant.
 #[derive(Debug, thiserror::Error)]
-pub enum TenantMapError {
+pub(crate) enum TenantMapError {
     // Tried to read while initializing
     #[error("tenant map is still initializing")]
     StillInitializing,
@@ -2346,8 +2427,9 @@ pub enum TenantMapError {
     ShuttingDown,
 }
 
-/// Guards a particular tenant_id's content in the TenantsMap.  While this
-/// structure exists, the TenantsMap will contain a [`TenantSlot::InProgress`]
+/// Guards a particular tenant_id's content in the TenantsMap.
+///
+/// While this structure exists, the TenantsMap will contain a [`TenantSlot::InProgress`]
 /// for this tenant, which acts as a marker for any operations targeting
 /// this tenant to retry later, or wait for the InProgress state to end.
 ///
@@ -2365,7 +2447,7 @@ pub enum TenantMapError {
 /// The `old_value` may be dropped before the SlotGuard is dropped, by calling
 /// `drop_old_value`.  It is an error to call this without shutting down
 /// the conents of `old_value`.
-pub struct SlotGuard {
+pub(crate) struct SlotGuard {
     tenant_shard_id: TenantShardId,
     old_value: Option<TenantSlot>,
     upserted: bool,
@@ -2757,81 +2839,6 @@ use {
     crate::repository::GcResult, pageserver_api::models::TimelineGcRequest,
     utils::http::error::ApiError,
 };
-
-#[instrument(skip_all, fields(tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), %timeline_id))]
-pub(crate) async fn immediate_gc(
-    tenant_shard_id: TenantShardId,
-    timeline_id: TimelineId,
-    gc_req: TimelineGcRequest,
-    cancel: CancellationToken,
-    ctx: &RequestContext,
-) -> Result<GcResult, ApiError> {
-    let tenant = {
-        let guard = TENANTS.read().unwrap();
-        guard
-            .get(&tenant_shard_id)
-            .cloned()
-            .with_context(|| format!("tenant {tenant_shard_id}"))
-            .map_err(|e| ApiError::NotFound(e.into()))?
-    };
-
-    let gc_horizon = gc_req.gc_horizon.unwrap_or_else(|| tenant.get_gc_horizon());
-    // Use tenant's pitr setting
-    let pitr = tenant.get_pitr_interval();
-
-    tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
-
-    // Run in task_mgr to avoid race with tenant_detach operation
-    let ctx: RequestContext =
-        ctx.detached_child(TaskKind::GarbageCollector, DownloadBehavior::Download);
-
-    let _gate_guard = tenant.gate.enter().map_err(|_| ApiError::ShuttingDown)?;
-
-    fail::fail_point!("immediate_gc_task_pre");
-
-    #[allow(unused_mut)]
-    let mut result = tenant
-        .gc_iteration(Some(timeline_id), gc_horizon, pitr, &cancel, &ctx)
-        .await;
-    // FIXME: `gc_iteration` can return an error for multiple reasons; we should handle it
-    // better once the types support it.
-
-    #[cfg(feature = "testing")]
-    {
-        // we need to synchronize with drop completion for python tests without polling for
-        // log messages
-        if let Ok(result) = result.as_mut() {
-            let mut js = tokio::task::JoinSet::new();
-            for layer in std::mem::take(&mut result.doomed_layers) {
-                js.spawn(layer.wait_drop());
-            }
-            tracing::info!(
-                total = js.len(),
-                "starting to wait for the gc'd layers to be dropped"
-            );
-            while let Some(res) = js.join_next().await {
-                res.expect("wait_drop should not panic");
-            }
-        }
-
-        let timeline = tenant.get_timeline(timeline_id, false).ok();
-        let rtc = timeline.as_ref().map(|x| &x.remote_client);
-
-        if let Some(rtc) = rtc {
-            // layer drops schedule actions on remote timeline client to actually do the
-            // deletions; don't care about the shutdown error, just exit fast
-            drop(rtc.wait_completion().await);
-        }
-    }
-
-    result.map_err(|e| match e {
-        GcError::TenantCancelled | GcError::TimelineCancelled => ApiError::ShuttingDown,
-        GcError::TimelineNotFound => {
-            ApiError::NotFound(anyhow::anyhow!("Timeline not found").into())
-        }
-        other => ApiError::InternalServerError(anyhow::anyhow!(other)),
-    })
-}
 
 #[cfg(test)]
 mod tests {

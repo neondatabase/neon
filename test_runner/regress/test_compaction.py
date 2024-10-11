@@ -63,7 +63,10 @@ page_cache_size=10
             log.info(f"Running churn round {i}/{churn_rounds} ...")
 
         workload.churn_rows(row_count, env.pageserver.id)
-        ps_http.timeline_compact(tenant_id, timeline_id)
+        # Force L0 compaction to ensure the number of layers is within bounds; we don't want to count L0 layers
+        # in this benchmark. In other words, this smoke test ensures number of L1 layers are bound.
+        ps_http.timeline_compact(tenant_id, timeline_id, force_l0_compaction=True)
+        assert ps_http.perf_info(tenant_id, timeline_id)[0]["num_of_l0"] <= 1
 
     log.info("Validating at workload end ...")
     workload.validate(env.pageserver.id)
@@ -240,6 +243,7 @@ def test_uploads_and_deletions(
         "image_creation_threshold": "1",
         "image_layer_creation_check_threshold": "0",
         "compaction_algorithm": json.dumps({"kind": compaction_algorithm.value}),
+        "lsn_lease_length": "0s",
     }
     env = neon_env_builder.init_start(initial_tenant_conf=tenant_conf)
 

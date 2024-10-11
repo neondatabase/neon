@@ -5,7 +5,7 @@ from fixtures.pageserver.http import PageserverHttpClient
 
 
 def check_tenant(env: NeonEnv, pageserver_http: PageserverHttpClient):
-    tenant_id, timeline_id = env.neon_cli.create_tenant()
+    tenant_id, timeline_id = env.create_tenant()
     endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
     # we rely upon autocommit after each statement
     res_1 = endpoint.safe_psql_many(

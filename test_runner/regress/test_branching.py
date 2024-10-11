@@ -38,7 +38,7 @@ def test_branching_with_pgbench(
     env = neon_simple_env
 
     # Use aggressive GC and checkpoint settings, so that we also exercise GC during the test
-    tenant, _ = env.neon_cli.create_tenant(
+    tenant, _ = env.create_tenant(
         conf={
             "gc_period": "5 s",
             "gc_horizon": f"{1024 ** 2}",
@@ -52,10 +52,10 @@ def test_branching_with_pgbench(
     def run_pgbench(connstr: str):
         log.info(f"Start a pgbench workload on pg {connstr}")
 
-        pg_bin.run_capture(["pgbench", "-i", f"-s{scale}", connstr])
+        pg_bin.run_capture(["pgbench", "-i", "-I", "dtGvp", f"-s{scale}", connstr])
         pg_bin.run_capture(["pgbench", "-T15", connstr])
 
-    env.neon_cli.create_branch("b0", tenant_id=tenant)
+    env.create_branch("b0", tenant_id=tenant)
     endpoints: List[Endpoint] = []
     endpoints.append(env.endpoints.create_start("b0", tenant_id=tenant))
 
@@ -84,9 +84,9 @@ def test_branching_with_pgbench(
             threads = []
 
         if ty == "cascade":
-            env.neon_cli.create_branch(f"b{i + 1}", f"b{i}", tenant_id=tenant)
+            env.create_branch(f"b{i + 1}", ancestor_branch_name=f"b{i}", tenant_id=tenant)
         else:
-            env.neon_cli.create_branch(f"b{i + 1}", "b0", tenant_id=tenant)
+            env.create_branch(f"b{i + 1}", ancestor_branch_name="b0", tenant_id=tenant)
 
         endpoints.append(env.endpoints.create_start(f"b{i + 1}", tenant_id=tenant))
 
@@ -120,7 +120,7 @@ def test_branching_unnormalized_start_lsn(neon_simple_env: NeonEnv, pg_bin: PgBi
 
     env = neon_simple_env
 
-    env.neon_cli.create_branch("b0")
+    env.create_branch("b0")
     endpoint0 = env.endpoints.create_start("b0")
 
     pg_bin.run_capture(["pgbench", "-i", endpoint0.connstr()])
@@ -133,7 +133,7 @@ def test_branching_unnormalized_start_lsn(neon_simple_env: NeonEnv, pg_bin: PgBi
     start_lsn = Lsn((int(curr_lsn) - XLOG_BLCKSZ) // XLOG_BLCKSZ * XLOG_BLCKSZ)
 
     log.info(f"Branching b1 from b0 starting at lsn {start_lsn}...")
-    env.neon_cli.create_branch("b1", "b0", ancestor_start_lsn=start_lsn)
+    env.create_branch("b1", ancestor_branch_name="b0", ancestor_start_lsn=start_lsn)
     endpoint1 = env.endpoints.create_start("b1")
 
     pg_bin.run_capture(["pgbench", "-i", endpoint1.connstr()])
@@ -173,7 +173,7 @@ def test_cannot_create_endpoint_on_non_uploaded_timeline(neon_env_builder: NeonE
 
         wait_until_paused(env, "before-upload-index-pausable")
 
-        env.neon_cli.map_branch(initial_branch, env.initial_tenant, env.initial_timeline)
+        env.neon_cli.mappings_map_branch(initial_branch, env.initial_tenant, env.initial_timeline)
 
         with pytest.raises(RuntimeError, match="ERROR: Not found: Timeline"):
             env.endpoints.create_start(
@@ -419,7 +419,7 @@ def test_duplicate_creation(neon_env_builder: NeonEnvBuilder):
 
 
 def test_branching_while_stuck_find_gc_cutoffs(neon_env_builder: NeonEnvBuilder):
-    env = neon_env_builder.init_start()
+    env = neon_env_builder.init_start(initial_tenant_conf={"lsn_lease_length": "0s"})
 
     client = env.pageserver.http_client()
 
@@ -432,9 +432,7 @@ def test_branching_while_stuck_find_gc_cutoffs(neon_env_builder: NeonEnvBuilder)
 
         wait_until_paused(env, failpoint)
 
-        env.neon_cli.create_branch(
-            tenant_id=env.initial_tenant, ancestor_branch_name="main", new_branch_name="branch"
-        )
+        env.create_branch("branch", ancestor_branch_name="main")
 
         client.configure_failpoints((failpoint, "off"))
 

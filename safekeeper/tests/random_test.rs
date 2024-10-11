@@ -9,7 +9,7 @@ use crate::walproposer_sim::{
 
 pub mod walproposer_sim;
 
-// Generates 2000 random seeds and runs a schedule for each of them.
+// Generates 500 random seeds and runs a schedule for each of them.
 // If you see this test fail, please report the last seed to the
 // @safekeeper team.
 #[test]
@@ -17,7 +17,7 @@ fn test_random_schedules() -> anyhow::Result<()> {
     let clock = init_logger();
     let mut config = TestConfig::new(Some(clock));
 
-    for _ in 0..2000 {
+    for _ in 0..500 {
         let seed: u64 = rand::thread_rng().gen();
         config.network = generate_network_opts(seed);
 

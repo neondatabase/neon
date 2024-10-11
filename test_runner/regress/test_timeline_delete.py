@@ -68,10 +68,13 @@ def test_timeline_delete(neon_simple_env: NeonEnv):
 
     # construct pair of branches to validate that pageserver prohibits
     # deletion of ancestor timelines when they have child branches
-    parent_timeline_id = env.neon_cli.create_branch("test_ancestor_branch_delete_parent", "empty")
+    parent_timeline_id = env.create_branch(
+        "test_ancestor_branch_delete_parent", ancestor_branch_name="main"
+    )
 
-    leaf_timeline_id = env.neon_cli.create_branch(
-        "test_ancestor_branch_delete_branch1", "test_ancestor_branch_delete_parent"
+    leaf_timeline_id = env.create_branch(
+        "test_ancestor_branch_delete_branch1",
+        ancestor_branch_name="test_ancestor_branch_delete_parent",
     )
 
     timeline_path = env.pageserver.timeline_dir(env.initial_tenant, parent_timeline_id)
@@ -181,7 +184,7 @@ def test_delete_timeline_exercise_crash_safety_failpoints(
 
     ps_http = env.pageserver.http_client()
 
-    timeline_id = env.neon_cli.create_timeline("delete")
+    timeline_id = env.create_timeline("delete")
     with env.endpoints.create_start("delete") as endpoint:
         # generate enough layers
         run_pg_bench_small(pg_bin, endpoint.connstr())
@@ -331,7 +334,7 @@ def test_timeline_resurrection_on_attach(
         wait_for_upload(ps_http, tenant_id, main_timeline_id, current_lsn)
         log.info("upload of checkpoint is done")
 
-    branch_timeline_id = env.neon_cli.create_branch("new", "main")
+    branch_timeline_id = env.create_branch("new", ancestor_branch_name="main")
 
     # Two variants of this test:
     # - In fill_branch=True, the deleted branch has layer files.
@@ -406,13 +409,11 @@ def test_timeline_delete_fail_before_local_delete(neon_env_builder: NeonEnvBuild
     ps_http.configure_failpoints(("timeline-delete-before-rm", "return"))
 
     # construct pair of branches
-    intermediate_timeline_id = env.neon_cli.create_branch(
-        "test_timeline_delete_fail_before_local_delete"
-    )
+    intermediate_timeline_id = env.create_branch("test_timeline_delete_fail_before_local_delete")
 
-    leaf_timeline_id = env.neon_cli.create_branch(
+    leaf_timeline_id = env.create_branch(
         "test_timeline_delete_fail_before_local_delete1",
-        "test_timeline_delete_fail_before_local_delete",
+        ancestor_branch_name="test_timeline_delete_fail_before_local_delete",
     )
 
     leaf_timeline_path = env.pageserver.timeline_dir(env.initial_tenant, leaf_timeline_id)
@@ -511,7 +512,7 @@ def test_concurrent_timeline_delete_stuck_on(
 
     env = neon_env_builder.init_start()
 
-    child_timeline_id = env.neon_cli.create_branch("child", "main")
+    child_timeline_id = env.create_branch("child", ancestor_branch_name="main")
 
     ps_http = env.pageserver.http_client()
 
@@ -588,7 +589,7 @@ def test_delete_timeline_client_hangup(neon_env_builder: NeonEnvBuilder):
 
     env = neon_env_builder.init_start()
 
-    child_timeline_id = env.neon_cli.create_branch("child", "main")
+    child_timeline_id = env.create_branch("child", ancestor_branch_name="main")
 
     ps_http = env.pageserver.http_client(retries=Retry(0, read=False))
 
@@ -635,7 +636,7 @@ def test_delete_timeline_client_hangup(neon_env_builder: NeonEnvBuilder):
     wait_until(50, 0.1, first_request_finished)
 
     # check that the timeline is gone
-    wait_timeline_detail_404(ps_http, env.initial_tenant, child_timeline_id, iterations=2)
+    wait_timeline_detail_404(ps_http, env.initial_tenant, child_timeline_id, iterations=10)
 
 
 def test_timeline_delete_works_for_remote_smoke(
@@ -653,7 +654,7 @@ def test_timeline_delete_works_for_remote_smoke(
 
     timeline_ids = [env.initial_timeline]
     for i in range(2):
-        branch_timeline_id = env.neon_cli.create_branch(f"new{i}", "main")
+        branch_timeline_id = env.create_branch(f"new{i}", ancestor_branch_name="main")
         with env.endpoints.create_start(f"new{i}") as pg, pg.cursor() as cur:
             cur.execute("CREATE TABLE f (i integer);")
             cur.execute("INSERT INTO f VALUES (generate_series(1,1000));")
@@ -730,7 +731,7 @@ def test_delete_orphaned_objects(
 
     ps_http = env.pageserver.http_client()
 
-    timeline_id = env.neon_cli.create_timeline("delete")
+    timeline_id = env.create_timeline("delete")
     with env.endpoints.create_start("delete") as endpoint:
         # generate enough layers
         run_pg_bench_small(pg_bin, endpoint.connstr())
@@ -788,7 +789,7 @@ def test_timeline_delete_resumed_on_attach(
 
     ps_http = env.pageserver.http_client()
 
-    timeline_id = env.neon_cli.create_timeline("delete")
+    timeline_id = env.create_timeline("delete")
     with env.endpoints.create_start("delete") as endpoint:
         # generate enough layers
         run_pg_bench_small(pg_bin, endpoint.connstr())

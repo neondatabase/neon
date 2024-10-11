@@ -18,20 +18,18 @@ atomic-take.workspace = true
 aws-config.workspace = true
 aws-sdk-iam.workspace = true
 aws-sigv4.workspace = true
-aws-types.workspace = true
 base64.workspace = true
 bstr.workspace = true
 bytes = { workspace = true, features = ["serde"] }
 camino.workspace = true
 chrono.workspace = true
 clap.workspace = true
+compute_api.workspace = true
 consumption_metrics.workspace = true
-crossbeam-deque.workspace = true
 dashmap.workspace = true
 env_logger.workspace = true
 framed-websockets.workspace = true
 futures.workspace = true
-git-version.workspace = true
 hashbrown.workspace = true
 hashlink.workspace = true
 hex.workspace = true
@@ -40,7 +38,7 @@ hostname.workspace = true
 http.workspace = true
 humantime.workspace = true
 humantime-serde.workspace = true
-hyper.workspace = true
+hyper0.workspace = true
 hyper1 = { package = "hyper", version = "1.2", features = ["server"] }
 hyper-util = { version = "0.1", features = ["server", "http1", "http2", "tokio"] }
 http-body-util = { version = "0.1" }
@@ -48,11 +46,9 @@ indexmap.workspace = true
 ipnet.workspace = true
 itertools.workspace = true
 lasso = { workspace = true, features = ["multi-threaded"] }
-md5.workspace = true
 measured = { workspace = true, features = ["lasso"] }
 metrics.workspace = true
 once_cell.workspace = true
-opentelemetry.workspace = true
 parking_lot.workspace = true
 parquet.workspace = true
 parquet_derive.workspace = true
@@ -67,7 +63,6 @@ reqwest.workspace = true
 reqwest-middleware = { workspace = true, features = ["json"] }
 reqwest-retry.workspace = true
 reqwest-tracing.workspace = true
-routerify.workspace = true
 rustc-hash.workspace = true
 rustls-pemfile.workspace = true
 rustls.workspace = true
@@ -79,7 +74,6 @@ smol_str.workspace = true
 smallvec.workspace = true
 socket2.workspace = true
 subtle.workspace = true
-task-local-extensions.workspace = true
 thiserror.workspace = true
 tikv-jemallocator.workspace = true
 tikv-jemalloc-ctl = { workspace = true, features = ["use_std"] }
@@ -88,8 +82,6 @@ tokio-postgres-rustls.workspace = true
 tokio-rustls.workspace = true
 tokio-util.workspace = true
 tokio = { workspace = true, features = ["signal"] }
-tower-service.workspace = true
-tracing-opentelemetry.workspace = true
 tracing-subscriber.workspace = true
 tracing-utils.workspace = true
 tracing.workspace = true

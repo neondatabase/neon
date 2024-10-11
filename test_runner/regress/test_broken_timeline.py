@@ -34,7 +34,7 @@ def test_local_corruption(neon_env_builder: NeonEnvBuilder):
     tenant_timelines: List[Tuple[TenantId, TimelineId, Endpoint]] = []
 
     for _ in range(3):
-        tenant_id, timeline_id = env.neon_cli.create_tenant()
+        tenant_id, timeline_id = env.create_tenant()
 
         endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
         with endpoint.cursor() as cur:
@@ -84,13 +84,11 @@ def test_local_corruption(neon_env_builder: NeonEnvBuilder):
 def test_create_multiple_timelines_parallel(neon_simple_env: NeonEnv):
     env = neon_simple_env
 
-    tenant_id, _ = env.neon_cli.create_tenant()
+    tenant_id, _ = env.create_tenant()
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
         futures = [
-            executor.submit(
-                env.neon_cli.create_timeline, f"test-create-multiple-timelines-{i}", tenant_id
-            )
+            executor.submit(env.create_timeline, f"test-create-multiple-timelines-{i}", tenant_id)
             for i in range(4)
         ]
         for future in futures:
@@ -111,7 +109,7 @@ def test_timeline_init_break_before_checkpoint(neon_env_builder: NeonEnvBuilder)
     tenant_id = env.initial_tenant
 
     timelines_dir = env.pageserver.timeline_dir(tenant_id)
-    old_tenant_timelines = env.neon_cli.list_timelines(tenant_id)
+    old_tenant_timelines = env.neon_cli.timeline_list(tenant_id)
     initial_timeline_dirs = [d for d in timelines_dir.iterdir()]
 
     # Introduce failpoint during timeline init (some intermediate files are on disk), before it's checkpointed.
@@ -123,7 +121,7 @@ def test_timeline_init_break_before_checkpoint(neon_env_builder: NeonEnvBuilder)
     env.pageserver.restart(immediate=True)
 
     # Creating the timeline didn't finish. The other timelines on tenant should still be present and work normally.
-    new_tenant_timelines = env.neon_cli.list_timelines(tenant_id)
+    new_tenant_timelines = env.neon_cli.timeline_list(tenant_id)
     assert (
         new_tenant_timelines == old_tenant_timelines
     ), f"Pageserver after restart should ignore non-initialized timelines for tenant {tenant_id}"
@@ -151,11 +149,11 @@ def test_timeline_init_break_before_checkpoint_recreate(
         ]
     )
 
-    env.neon_cli.create_tenant(env.initial_tenant)
+    env.create_tenant(env.initial_tenant)
     tenant_id = env.initial_tenant
 
     timelines_dir = env.pageserver.timeline_dir(tenant_id)
-    old_tenant_timelines = env.neon_cli.list_timelines(tenant_id)
+    old_tenant_timelines = env.neon_cli.timeline_list(tenant_id)
     initial_timeline_dirs = [d for d in timelines_dir.iterdir()]
 
     # Some fixed timeline ID (like control plane does)
@@ -176,7 +174,7 @@ def test_timeline_init_break_before_checkpoint_recreate(
     env.pageserver.restart(immediate=True)
 
     # Creating the timeline didn't finish. The other timelines on tenant should still be present and work normally.
-    new_tenant_timelines = env.neon_cli.list_timelines(tenant_id)
+    new_tenant_timelines = env.neon_cli.timeline_list(tenant_id)
     assert (
         new_tenant_timelines == old_tenant_timelines
     ), f"Pageserver after restart should ignore non-initialized timelines for tenant {tenant_id}"
@@ -201,7 +199,7 @@ def test_timeline_create_break_after_dir_creation(neon_env_builder: NeonEnvBuild
     tenant_id = env.initial_tenant
 
     timelines_dir = env.pageserver.timeline_dir(tenant_id)
-    old_tenant_timelines = env.neon_cli.list_timelines(tenant_id)
+    old_tenant_timelines = env.neon_cli.timeline_list(tenant_id)
     initial_timeline_dirs = [d for d in timelines_dir.iterdir()]
 
     # Introduce failpoint when creating a new timeline, right after creating its directory
@@ -211,7 +209,7 @@ def test_timeline_create_break_after_dir_creation(neon_env_builder: NeonEnvBuild
 
     # Creating the timeline didn't finish. The other timelines on tenant should still be present and work normally.
     # "New" timeline is not present in the list, allowing pageserver to retry the same request
-    new_tenant_timelines = env.neon_cli.list_timelines(tenant_id)
+    new_tenant_timelines = env.neon_cli.timeline_list(tenant_id)
     assert (
         new_tenant_timelines == old_tenant_timelines
     ), f"Pageserver after restart should ignore non-initialized timelines for tenant {tenant_id}"

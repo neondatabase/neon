@@ -59,6 +59,7 @@ use utils::http::endpoint::request_span;
 use utils::http::request::must_parse_query_param;
 use utils::http::request::{get_request_param, must_get_query_param, parse_query_param};
 
+use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::deletion_queue::DeletionQueueClient;
 use crate::pgdatadir_mapping::LsnForTimestamp;
@@ -83,7 +84,6 @@ use crate::tenant::timeline::CompactionError;
 use crate::tenant::timeline::Timeline;
 use crate::tenant::GetTimelineError;
 use crate::tenant::{LogicalSizeCalculationCause, PageReconstructError};
-use crate::{config::PageServerConf, tenant::mgr};
 use crate::{disk_usage_eviction_task, tenant};
 use pageserver_api::models::{
     StatusResponse, TenantConfigRequest, TenantInfo, TimelineCreateRequest, TimelineGcRequest,
@@ -471,7 +471,7 @@ async fn build_timeline_info_common(
         pg_version: timeline.pg_version,
 
         state,
-        is_archived,
+        is_archived: Some(is_archived),
 
         walreceiver_status,
 
@@ -590,6 +590,10 @@ async fn timeline_create_handler(
             ),
             Err(e @ tenant::CreateTimelineError::AncestorNotActive) => json_response(
                 StatusCode::SERVICE_UNAVAILABLE,
+                HttpErrorBody::from_msg(e.to_string()),
+            ),
+            Err(e @ tenant::CreateTimelineError::AncestorArchived) => json_response(
+                StatusCode::NOT_ACCEPTABLE,
                 HttpErrorBody::from_msg(e.to_string()),
             ),
             Err(tenant::CreateTimelineError::ShuttingDown) => json_response(
@@ -823,7 +827,7 @@ async fn get_lsn_by_timestamp_handler(
 
     let lease = if with_lease {
         timeline
-            .make_lsn_lease(lsn, timeline.get_lsn_lease_length_for_ts(), &ctx)
+            .init_lsn_lease(lsn, timeline.get_lsn_lease_length_for_ts(), &ctx)
             .inspect_err(|_| {
                 warn!("fail to grant a lease to {}", lsn);
             })
@@ -1783,9 +1787,18 @@ async fn lsn_lease_handler(
     let timeline =
         active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
             .await?;
-    let result = timeline
-        .make_lsn_lease(lsn, timeline.get_lsn_lease_length(), &ctx)
-        .map_err(|e| ApiError::InternalServerError(e.context("lsn lease http handler")))?;
+
+    let result = async {
+        timeline
+            .init_lsn_lease(lsn, timeline.get_lsn_lease_length(), &ctx)
+            .map_err(|e| {
+                ApiError::InternalServerError(
+                    e.context(format!("invalid lsn lease request at {lsn}")),
+                )
+            })
+    }
+    .instrument(info_span!("init_lsn_lease", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug(), %timeline_id))
+    .await?;
 
     json_response(StatusCode::OK, result)
 }
@@ -1801,8 +1814,13 @@ async fn timeline_gc_handler(
 
     let gc_req: TimelineGcRequest = json_request(&mut request).await?;
 
+    let state = get_state(&request);
+
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
-    let gc_result = mgr::immediate_gc(tenant_shard_id, timeline_id, gc_req, cancel, &ctx).await?;
+    let gc_result = state
+        .tenant_manager
+        .immediate_gc(tenant_shard_id, timeline_id, gc_req, cancel, &ctx)
+        .await?;
 
     json_response(StatusCode::OK, gc_result)
 }
@@ -1819,6 +1837,10 @@ async fn timeline_compact_handler(
     let state = get_state(&request);
 
     let mut flags = EnumSet::empty();
+
+    if Some(true) == parse_query_param::<_, bool>(&request, "force_l0_compaction")? {
+        flags |= CompactFlags::ForceL0Compaction;
+    }
     if Some(true) == parse_query_param::<_, bool>(&request, "force_repartition")? {
         flags |= CompactFlags::ForceRepartition;
     }
@@ -1865,6 +1887,9 @@ async fn timeline_checkpoint_handler(
     let state = get_state(&request);
 
     let mut flags = EnumSet::empty();
+    if Some(true) == parse_query_param::<_, bool>(&request, "force_l0_compaction")? {
+        flags |= CompactFlags::ForceL0Compaction;
+    }
     if Some(true) == parse_query_param::<_, bool>(&request, "force_repartition")? {
         flags |= CompactFlags::ForceRepartition;
     }
@@ -2171,7 +2196,7 @@ async fn disk_usage_eviction_run(
         evict_bytes: u64,
 
         #[serde(default)]
-        eviction_order: crate::disk_usage_eviction_task::EvictionOrder,
+        eviction_order: pageserver_api::config::EvictionOrder,
     }
 
     #[derive(Debug, Clone, Copy, serde::Serialize)]
@@ -2207,7 +2232,7 @@ async fn disk_usage_eviction_run(
         &state.remote_storage,
         usage,
         &state.tenant_manager,
-        config.eviction_order,
+        config.eviction_order.into(),
         &cancel,
     )
     .await;
@@ -3126,7 +3151,7 @@ pub fn make_router(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/preserve_initdb_archive",
             |r| api_handler(r, timeline_preserve_initdb_handler),
         )
-        .post(
+        .put(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/archival_config",
             |r| api_handler(r, timeline_archival_config_handler),
         )

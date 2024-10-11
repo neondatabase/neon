@@ -30,9 +30,8 @@ use pageserver_api::reltag::{RelTag, SlruKind};
 
 use postgres_ffi::dispatch_pgversion;
 use postgres_ffi::pg_constants::{DEFAULTTABLESPACE_OID, GLOBALTABLESPACE_OID};
-use postgres_ffi::pg_constants::{PGDATA_SPECIAL_FILES, PGDATA_SUBDIRS, PG_HBA};
+use postgres_ffi::pg_constants::{PGDATA_SPECIAL_FILES, PG_HBA};
 use postgres_ffi::relfile_utils::{INIT_FORKNUM, MAIN_FORKNUM};
-use postgres_ffi::TransactionId;
 use postgres_ffi::XLogFileName;
 use postgres_ffi::PG_TLI;
 use postgres_ffi::{BLCKSZ, RELSEG_SIZE, WAL_SEGMENT_SIZE};
@@ -255,8 +254,11 @@ where
 
         let lazy_slru_download = self.timeline.get_lazy_slru_download() && !self.full_backup;
 
+        let pgversion = self.timeline.pg_version;
+        let subdirs = dispatch_pgversion!(pgversion, &pgv::bindings::PGDATA_SUBDIRS[..]);
+
         // Create pgdata subdirs structure
-        for dir in PGDATA_SUBDIRS.iter() {
+        for dir in subdirs.iter() {
             let header = new_tar_header_dir(dir)?;
             self.ar
                 .append(&header, &mut io::empty())
@@ -606,7 +608,7 @@ where
     //
     // Extract twophase state files
     //
-    async fn add_twophase_file(&mut self, xid: TransactionId) -> Result<(), BasebackupError> {
+    async fn add_twophase_file(&mut self, xid: u64) -> Result<(), BasebackupError> {
         let img = self
             .timeline
             .get_twophase_file(xid, self.lsn, self.ctx)
@@ -617,7 +619,11 @@ where
         buf.extend_from_slice(&img[..]);
         let crc = crc32c::crc32c(&img[..]);
         buf.put_u32_le(crc);
-        let path = format!("pg_twophase/{:>08X}", xid);
+        let path = if self.timeline.pg_version < 17 {
+            format!("pg_twophase/{:>08X}", xid)
+        } else {
+            format!("pg_twophase/{:>016X}", xid)
+        };
         let header = new_tar_header(&path, buf.len() as u64)?;
         self.ar
             .append(&header, &buf[..])

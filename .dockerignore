@@ -5,26 +5,22 @@
 !Cargo.toml
 !Makefile
 !rust-toolchain.toml
-!scripts/combine_control_files.py
 !scripts/ninstall.sh
-!vm-cgconfig.conf
 !docker-compose/run-tests.sh
 
 # Directories
 !.cargo/
 !.config/
+!compute/
 !compute_tools/
 !control_plane/
 !libs/
-!neon_local/
 !pageserver/
-!patches/
 !pgxn/
 !proxy/
 !storage_scrubber/
 !safekeeper/
 !storage_broker/
 !storage_controller/
-!trace/
 !vendor/postgres-*/
 !workspace_hack/

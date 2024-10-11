@@ -6,12 +6,14 @@ pub mod basebackup;
 pub mod config;
 pub mod consumption_metrics;
 pub mod context;
-pub mod control_plane_client;
+pub mod controller_upcall_client;
 pub mod deletion_queue;
 pub mod disk_usage_eviction_task;
 pub mod http;
 pub mod import_datadir;
 pub mod l0_flush;
+
+extern crate hyper0 as hyper;
 
 use futures::{stream::FuturesUnordered, StreamExt};
 pub use pageserver_api::keyspace;
@@ -21,7 +23,6 @@ pub mod aux_file;
 pub mod metrics;
 pub mod page_cache;
 pub mod page_service;
-pub mod pg_import;
 pub mod pgdatadir_mapping;
 pub mod repository;
 pub mod span;

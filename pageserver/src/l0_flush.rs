@@ -1,9 +1,7 @@
 use std::{num::NonZeroUsize, sync::Arc};
 
-#[derive(Debug, PartialEq, Eq, Clone, serde::Deserialize)]
-#[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum L0FlushConfig {
-    #[serde(rename_all = "snake_case")]
     Direct { max_concurrency: NonZeroUsize },
 }
 
@@ -12,6 +10,16 @@ impl Default for L0FlushConfig {
         Self::Direct {
             // TODO: using num_cpus results in different peak memory usage on different instance types.
             max_concurrency: NonZeroUsize::new(usize::max(1, num_cpus::get())).unwrap(),
+        }
+    }
+}
+
+impl From<pageserver_api::models::L0FlushConfig> for L0FlushConfig {
+    fn from(config: pageserver_api::models::L0FlushConfig) -> Self {
+        match config {
+            pageserver_api::models::L0FlushConfig::Direct { max_concurrency } => {
+                Self::Direct { max_concurrency }
+            }
         }
     }
 }

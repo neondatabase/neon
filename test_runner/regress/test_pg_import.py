@@ -109,7 +109,7 @@ def test_pgdata_import_smoke(
     import_duration = time.monotonic() - start
     log.info(f"import complete; duration={import_duration:.2f}s")
 
-    env.neon_cli.map_branch("imported", tenant_id, timeline_id)
+    env.neon_cli.mappings_map_branch("imported", tenant_id, timeline_id)
 
     #
     # Get some timeline details for later.
@@ -204,7 +204,12 @@ def test_pgdata_import_smoke(
     #
 
     # ... at the tip
-    _ = env.neon_cli.create_branch("br-tip", "imported", tenant_id, ancestor_start_lsn=rw_lsn)
+    _ = env.create_branch(
+        new_branch_name="br-tip",
+        ancestor_branch_name="imported",
+        tenant_id=tenant_id,
+        ancestor_start_lsn=rw_lsn,
+    )
     br_tip_endpoint = env.endpoints.create_start(
         branch_name="br-tip", endpoint_id="br-tip-ro", tenant_id=tenant_id
     )
@@ -212,8 +217,11 @@ def test_pgdata_import_smoke(
     br_tip_endpoint.safe_psql("select * from othertable")
 
     # ... at the initdb lsn
-    _ = env.neon_cli.create_branch(
-        "br-initdb", "imported", tenant_id, ancestor_start_lsn=initdb_lsn
+    _ = env.create_branch(
+        new_branch_name="br-initdb",
+        ancestor_branch_name="imported",
+        tenant_id=tenant_id,
+        ancestor_start_lsn=initdb_lsn,
     )
     br_initdb_endpoint = env.endpoints.create_start(
         branch_name="br-initdb", endpoint_id="br-initdb-ro", tenant_id=tenant_id

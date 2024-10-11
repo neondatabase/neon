@@ -27,7 +27,7 @@ use crate::tenant::Generation;
 use crate::virtual_file::owned_buffers_io::io_buf_ext::IoBufExt;
 use crate::virtual_file::{on_fatal_io_error, MaybeFatalIo, VirtualFile};
 use crate::TEMP_FILE_SUFFIX;
-use remote_storage::{DownloadError, GenericRemoteStorage, ListingMode, RemotePath};
+use remote_storage::{DownloadError, DownloadOpts, GenericRemoteStorage, ListingMode, RemotePath};
 use utils::crashsafe::path_with_suffix_extension;
 use utils::id::{TenantId, TimelineId};
 use utils::pausable_failpoint;
@@ -153,7 +153,9 @@ async fn download_object<'a>(
                     .with_context(|| format!("create a destination file for layer '{dst_path}'"))
                     .map_err(DownloadError::Other)?;
 
-                let download = storage.download(src_path, cancel).await?;
+                let download = storage
+                    .download(src_path, &DownloadOpts::default(), cancel)
+                    .await?;
 
                 pausable_failpoint!("before-downloading-layer-stream-pausable");
 
@@ -178,6 +180,7 @@ async fn download_object<'a>(
                 destination_file
                     .flush()
                     .await
+                    .maybe_fatal_err("download_object sync_all")
                     .with_context(|| format!("flush source file at {dst_path}"))
                     .map_err(DownloadError::Other)?;
 
@@ -185,6 +188,7 @@ async fn download_object<'a>(
                 destination_file
                     .sync_all()
                     .await
+                    .maybe_fatal_err("download_object sync_all")
                     .with_context(|| format!("failed to fsync source file at {dst_path}"))
                     .map_err(DownloadError::Other)?;
 
@@ -202,7 +206,9 @@ async fn download_object<'a>(
                     .with_context(|| format!("create a destination file for layer '{dst_path}'"))
                     .map_err(DownloadError::Other)?;
 
-                let mut download = storage.download(src_path, cancel).await?;
+                let mut download = storage
+                    .download(src_path, &DownloadOpts::default(), cancel)
+                    .await?;
 
                 pausable_failpoint!("before-downloading-layer-stream-pausable");
 
@@ -232,6 +238,7 @@ async fn download_object<'a>(
                 destination_file
                     .sync_all()
                     .await
+                    .maybe_fatal_err("download_object sync_all")
                     .with_context(|| format!("failed to fsync source file at {dst_path}"))
                     .map_err(DownloadError::Other)?;
 
@@ -341,7 +348,9 @@ async fn do_download_index_part(
 
     let index_part_bytes = download_retry_forever(
         || async {
-            let download = storage.download(&remote_path, cancel).await?;
+            let download = storage
+                .download(&remote_path, &DownloadOpts::default(), cancel)
+                .await?;
 
             let mut bytes = Vec::new();
 
@@ -523,10 +532,15 @@ pub(crate) async fn download_initdb_tar_zst(
                 .with_context(|| format!("tempfile creation {temp_path}"))
                 .map_err(DownloadError::Other)?;
 
-            let download = match storage.download(&remote_path, cancel).await {
+            let download = match storage
+                .download(&remote_path, &DownloadOpts::default(), cancel)
+                .await
+            {
                 Ok(dl) => dl,
                 Err(DownloadError::NotFound) => {
-                    storage.download(&remote_preserved_path, cancel).await?
+                    storage
+                        .download(&remote_preserved_path, &DownloadOpts::default(), cancel)
+                        .await?
                 }
                 Err(other) => Err(other)?,
             };
@@ -548,7 +562,7 @@ pub(crate) async fn download_initdb_tar_zst(
         cancel,
     )
     .await
-    .map_err(|e| {
+    .inspect_err(|_e| {
         // Do a best-effort attempt at deleting the temporary file upon encountering an error.
         // We don't have async here nor do we want to pile on any extra errors.
         if let Err(e) = std::fs::remove_file(&temp_path) {
@@ -556,7 +570,6 @@ pub(crate) async fn download_initdb_tar_zst(
                 warn!("error deleting temporary file {temp_path}: {e}");
             }
         }
-        e
     })?;
 
     Ok((temp_path, file))

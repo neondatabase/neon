@@ -14,7 +14,7 @@ from fixtures.neon_fixtures import NeonEnv, PgBin
 # least the code gets exercised.
 def test_pageserver_reconnect(neon_simple_env: NeonEnv, pg_bin: PgBin):
     env = neon_simple_env
-    env.neon_cli.create_branch("test_pageserver_restarts")
+    env.create_branch("test_pageserver_restarts")
     endpoint = env.endpoints.create_start("test_pageserver_restarts")
     n_reconnects = 1000
     timeout = 0.01
@@ -22,7 +22,7 @@ def test_pageserver_reconnect(neon_simple_env: NeonEnv, pg_bin: PgBin):
 
     def run_pgbench(connstr: str):
         log.info(f"Start a pgbench workload on pg {connstr}")
-        pg_bin.run_capture(["pgbench", "-i", f"-s{scale}", connstr])
+        pg_bin.run_capture(["pgbench", "-i", "-I", "dtGvp", f"-s{scale}", connstr])
         pg_bin.run_capture(["pgbench", f"-T{int(n_reconnects*timeout)}", connstr])
 
     thread = threading.Thread(target=run_pgbench, args=(endpoint.connstr(),), daemon=True)
@@ -46,7 +46,7 @@ def test_pageserver_reconnect(neon_simple_env: NeonEnv, pg_bin: PgBin):
 # Test handling errors during page server reconnect
 def test_pageserver_reconnect_failure(neon_simple_env: NeonEnv):
     env = neon_simple_env
-    env.neon_cli.create_branch("test_pageserver_reconnect")
+    env.create_branch("test_pageserver_reconnect")
     endpoint = env.endpoints.create_start("test_pageserver_reconnect")
 
     con = endpoint.connect()

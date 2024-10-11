@@ -45,6 +45,8 @@ pub use azure_core::Etag;
 
 pub use error::{DownloadError, TimeTravelError, TimeoutOrCancel};
 
+/// Default concurrency limit for S3 operations
+///
 /// Currently, sync happens with AWS S3, that has two limits on requests per second:
 /// ~200 RPS for IAM services
 /// <https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/UsingWithRDS.IAMDBAuth.html>
@@ -125,10 +127,6 @@ impl RemotePath {
         &self.0
     }
 
-    pub fn extension(&self) -> Option<&str> {
-        self.0.extension()
-    }
-
     pub fn strip_prefix(&self, p: &RemotePath) -> Result<&Utf8Path, std::path::StripPrefixError> {
         self.0.strip_prefix(&p.0)
     }
@@ -161,6 +159,14 @@ pub struct ListingObject {
 pub struct Listing {
     pub prefixes: Vec<RemotePath>,
     pub keys: Vec<ListingObject>,
+}
+
+/// Options for downloads. The default value is a plain GET.
+#[derive(Default)]
+pub struct DownloadOpts {
+    /// If given, returns [`DownloadError::Unmodified`] if the object still has
+    /// the same ETag (using If-None-Match).
+    pub etag: Option<Etag>,
 }
 
 /// Storage (potentially remote) API to manage its state.
@@ -247,6 +253,7 @@ pub trait RemoteStorage: Send + Sync + 'static {
     async fn download(
         &self,
         from: &RemotePath,
+        opts: &DownloadOpts,
         cancel: &CancellationToken,
     ) -> Result<Download, DownloadError>;
 
@@ -300,7 +307,9 @@ pub trait RemoteStorage: Send + Sync + 'static {
     ) -> Result<(), TimeTravelError>;
 }
 
-/// DownloadStream is sensitive to the timeout and cancellation used with the original
+/// Data part of an ongoing [`Download`].
+///
+/// `DownloadStream` is sensitive to the timeout and cancellation used with the original
 /// [`RemoteStorage::download`] request. The type yields `std::io::Result<Bytes>` to be compatible
 /// with `tokio::io::copy_buf`.
 // This has 'static because safekeepers do not use cancellation tokens (yet)
@@ -401,16 +410,18 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
         }
     }
 
+    /// See [`RemoteStorage::download`]
     pub async fn download(
         &self,
         from: &RemotePath,
+        opts: &DownloadOpts,
         cancel: &CancellationToken,
     ) -> Result<Download, DownloadError> {
         match self {
-            Self::LocalFs(s) => s.download(from, cancel).await,
-            Self::AwsS3(s) => s.download(from, cancel).await,
-            Self::AzureBlob(s) => s.download(from, cancel).await,
-            Self::Unreliable(s) => s.download(from, cancel).await,
+            Self::LocalFs(s) => s.download(from, opts, cancel).await,
+            Self::AwsS3(s) => s.download(from, opts, cancel).await,
+            Self::AzureBlob(s) => s.download(from, opts, cancel).await,
+            Self::Unreliable(s) => s.download(from, opts, cancel).await,
         }
     }
 
@@ -572,7 +583,7 @@ impl GenericRemoteStorage {
     ) -> Result<Download, DownloadError> {
         match byte_range {
             Some((start, end)) => self.download_byte_range(from, start, end, cancel).await,
-            None => self.download(from, cancel).await,
+            None => self.download(from, &DownloadOpts::default(), cancel).await,
         }
     }
 

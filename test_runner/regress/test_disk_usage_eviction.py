@@ -59,11 +59,11 @@ def test_min_resident_size_override_handling(
     env.pageserver.stop()
     env.pageserver.start()
 
-    tenant_id, _ = env.neon_cli.create_tenant()
+    tenant_id, _ = env.create_tenant()
     assert_overrides(tenant_id, config_level_override)
 
     # Also ensure that specifying the paramter to create_tenant works, in addition to http-level recconfig.
-    tenant_id, _ = env.neon_cli.create_tenant(conf={"min_resident_size_override": "100"})
+    tenant_id, _ = env.create_tenant(conf={"min_resident_size_override": "100"})
     assert_config(tenant_id, 100, 100)
     ps_http.set_tenant_config(tenant_id, {})
     assert_config(tenant_id, None, config_level_override)
@@ -280,7 +280,7 @@ def _eviction_env(
 def pgbench_init_tenant(
     layer_size: int, scale: int, env: NeonEnv, pg_bin: PgBin
 ) -> Tuple[TenantId, TimelineId]:
-    tenant_id, timeline_id = env.neon_cli.create_tenant(
+    tenant_id, timeline_id = env.create_tenant(
         conf={
             "gc_period": "0s",
             "compaction_period": "0s",
@@ -291,7 +291,7 @@ def pgbench_init_tenant(
     )
 
     with env.endpoints.create_start("main", tenant_id=tenant_id) as endpoint:
-        pg_bin.run(["pgbench", "-i", f"-s{scale}", endpoint.connstr()])
+        pg_bin.run(["pgbench", "-i", "-I", "dtGvp", f"-s{scale}", endpoint.connstr()])
         wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
 
     return (tenant_id, timeline_id)

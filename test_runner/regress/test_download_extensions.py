@@ -44,6 +44,8 @@ def test_remote_extensions(
 ):
     if pg_version == PgVersion.V16:
         pytest.skip("TODO: PG16 extension building")
+    if pg_version == PgVersion.V17:
+        pytest.skip("TODO: PG17 extension building")
 
     # setup mock http server
     # that expects request for anon.tar.zst
@@ -79,7 +81,7 @@ def test_remote_extensions(
     # Start a compute node with remote_extension spec
     # and check that it can download the extensions and use them to CREATE EXTENSION.
     env = neon_env_builder_local.init_start()
-    env.neon_cli.create_branch("test_remote_extensions")
+    env.create_branch("test_remote_extensions")
     endpoint = env.endpoints.create(
         "test_remote_extensions",
         config_lines=["log_min_messages=debug3"],

@@ -11,7 +11,9 @@ from fixtures.utils import print_gc_result, query_scalar
 #
 def test_branch_behind(neon_env_builder: NeonEnvBuilder):
     # Disable pitr, because here we want to test branch creation after GC
-    env = neon_env_builder.init_start(initial_tenant_conf={"pitr_interval": "0 sec"})
+    env = neon_env_builder.init_start(
+        initial_tenant_conf={"pitr_interval": "0 sec", "lsn_lease_length": "0s"}
+    )
 
     error_regexes = [
         ".*invalid branch start lsn.*",
@@ -21,7 +23,7 @@ def test_branch_behind(neon_env_builder: NeonEnvBuilder):
     env.storage_controller.allowed_errors.extend(error_regexes)
 
     # Branch at the point where only 100 rows were inserted
-    branch_behind_timeline_id = env.neon_cli.create_branch("test_branch_behind")
+    branch_behind_timeline_id = env.create_branch("test_branch_behind")
     endpoint_main = env.endpoints.create_start("test_branch_behind")
 
     main_cur = endpoint_main.connect().cursor()
@@ -56,8 +58,10 @@ def test_branch_behind(neon_env_builder: NeonEnvBuilder):
     log.info(f"LSN after 200100 rows: {lsn_b}")
 
     # Branch at the point where only 100 rows were inserted
-    env.neon_cli.create_branch(
-        "test_branch_behind_hundred", "test_branch_behind", ancestor_start_lsn=lsn_a
+    env.create_branch(
+        "test_branch_behind_hundred",
+        ancestor_branch_name="test_branch_behind",
+        ancestor_start_lsn=lsn_a,
     )
 
     # Insert many more rows. This generates enough WAL to fill a few segments.
@@ -73,8 +77,10 @@ def test_branch_behind(neon_env_builder: NeonEnvBuilder):
     log.info(f"LSN after 400100 rows: {lsn_c}")
 
     # Branch at the point where only 200100 rows were inserted
-    env.neon_cli.create_branch(
-        "test_branch_behind_more", "test_branch_behind", ancestor_start_lsn=lsn_b
+    env.create_branch(
+        "test_branch_behind_more",
+        ancestor_branch_name="test_branch_behind",
+        ancestor_start_lsn=lsn_b,
     )
 
     endpoint_hundred = env.endpoints.create_start("test_branch_behind_hundred")
@@ -95,15 +101,17 @@ def test_branch_behind(neon_env_builder: NeonEnvBuilder):
     pageserver_http = env.pageserver.http_client()
 
     # branch at segment boundary
-    env.neon_cli.create_branch(
-        "test_branch_segment_boundary", "test_branch_behind", ancestor_start_lsn=Lsn("0/3000000")
+    env.create_branch(
+        "test_branch_segment_boundary",
+        ancestor_branch_name="test_branch_behind",
+        ancestor_start_lsn=Lsn("0/3000000"),
     )
     endpoint = env.endpoints.create_start("test_branch_segment_boundary")
     assert endpoint.safe_psql("SELECT 1")[0][0] == 1
 
     # branch at pre-initdb lsn (from main branch)
     with pytest.raises(Exception, match="invalid branch start lsn: .*"):
-        env.neon_cli.create_branch("test_branch_preinitdb", ancestor_start_lsn=Lsn("0/42"))
+        env.create_branch("test_branch_preinitdb", ancestor_start_lsn=Lsn("0/42"))
     # retry the same with the HTTP API, so that we can inspect the status code
     with pytest.raises(TimelineCreate406):
         new_timeline_id = TimelineId.generate()
@@ -114,8 +122,10 @@ def test_branch_behind(neon_env_builder: NeonEnvBuilder):
 
     # branch at pre-ancestor lsn
     with pytest.raises(Exception, match="less than timeline ancestor lsn"):
-        env.neon_cli.create_branch(
-            "test_branch_preinitdb", "test_branch_behind", ancestor_start_lsn=Lsn("0/42")
+        env.create_branch(
+            "test_branch_preinitdb",
+            ancestor_branch_name="test_branch_behind",
+            ancestor_start_lsn=Lsn("0/42"),
         )
     # retry the same with the HTTP API, so that we can inspect the status code
     with pytest.raises(TimelineCreate406):
@@ -137,8 +147,10 @@ def test_branch_behind(neon_env_builder: NeonEnvBuilder):
     print_gc_result(gc_result)
     with pytest.raises(Exception, match="invalid branch start lsn: .*"):
         # this gced_lsn is pretty random, so if gc is disabled this woudln't fail
-        env.neon_cli.create_branch(
-            "test_branch_create_fail", "test_branch_behind", ancestor_start_lsn=gced_lsn
+        env.create_branch(
+            "test_branch_create_fail",
+            ancestor_branch_name="test_branch_behind",
+            ancestor_start_lsn=gced_lsn,
         )
     # retry the same with the HTTP API, so that we can inspect the status code
     with pytest.raises(TimelineCreate406):

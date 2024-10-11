@@ -290,9 +290,8 @@ def assert_db_connlimit(endpoint: Any, db_name: str, connlimit: int, msg: str):
 # Here we test the latter. The first one is tested in test_ddl_forwarding
 def test_ddl_forwarding_invalid_db(neon_simple_env: NeonEnv):
     env = neon_simple_env
-    env.neon_cli.create_branch("test_ddl_forwarding_invalid_db", "empty")
     endpoint = env.endpoints.create_start(
-        "test_ddl_forwarding_invalid_db",
+        "main",
         # Some non-existent url
         config_lines=["neon.console_url=http://localhost:9999/unknown/api/v0/roles_and_databases"],
     )

@@ -30,7 +30,7 @@ use crate::{
     context::{DownloadBehavior, RequestContext},
     pgdatadir_mapping::{DbDirectory, RelDirectory},
     task_mgr::TaskKind,
-    tenant::storage_layer::ImageLayerWriter,
+    tenant::storage_layer::{ImageLayerWriter, Layer},
 };
 use crate::{
     assert_u64_eq_usize::UsizeIsU64,
@@ -54,7 +54,7 @@ use std::ops::Range;
 use super::{uninit::UninitializedTimeline, Timeline};
 
 use remote_storage::{
-    Download, DownloadError, GenericRemoteStorage, Listing, ListingObject, RemotePath,
+    Download, DownloadError, DownloadOpts, GenericRemoteStorage, Listing, ListingObject, RemotePath,
 };
 
 pub(crate) struct Prepared<'a> {
@@ -253,7 +253,7 @@ impl PgImportEnv {
             current_chunk.push(task);
         }
         parallel_jobs.push(ChunkProcessingJob::new(
-            last_end_key..Key::NON_L0_MAX,
+            last_end_key..Key::MAX,
             current_chunk,
             &self,
         ));
@@ -831,7 +831,8 @@ impl ChunkProcessingJob {
         }
 
         let resident_layer = if nimages > 0 {
-            writer.finish(&self.timeline, ctx).await?
+            let (desc, path) = writer.finish(ctx).await?;
+            Layer::finish_creating(self.timeline.conf, &self.timeline, desc, &path)?
         } else {
             // dropping the writer cleans up
             return Ok(());
@@ -945,7 +946,10 @@ impl RemoteStorageWrapper {
             || async {
                 let Download {
                     download_stream, ..
-                } = self.storage.download(path, &self.cancel).await?;
+                } = self
+                    .storage
+                    .download(path, &DownloadOpts::default(), &self.cancel)
+                    .await?;
                 let mut reader = tokio_util::io::StreamReader::new(download_stream);
 
                 // XXX optimize this, can we get the capacity hint from somewhere?

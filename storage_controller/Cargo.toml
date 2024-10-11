@@ -15,16 +15,13 @@ testing = []
 
 [dependencies]
 anyhow.workspace = true
-aws-config.workspace = true
 bytes.workspace = true
-camino.workspace = true
 chrono.workspace = true
 clap.workspace = true
 fail.workspace = true
 futures.workspace = true
-git-version.workspace = true
 hex.workspace = true
-hyper.workspace = true
+hyper0.workspace = true
 humantime.workspace = true
 itertools.workspace = true
 lasso.workspace = true

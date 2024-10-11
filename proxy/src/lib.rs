@@ -3,7 +3,7 @@
 #![deny(
     deprecated,
     future_incompatible,
-    // TODO: consider let_underscore
+    let_underscore,
     nonstandard_style,
     rust_2024_compatibility
 )]
@@ -44,16 +44,14 @@
     clippy::items_after_statements,
 )]
 // List of temporarily allowed lints.
-// TODO: Switch to except() once stable with 1.81.
 // TODO: fix code and reduce list or move to permanent list above.
-#![allow(
+#![expect(
     clippy::cargo_common_metadata,
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_precision_loss,
     clippy::cast_sign_loss,
     clippy::doc_markdown,
-    clippy::implicit_hasher,
     clippy::inline_always,
     clippy::match_same_arms,
     clippy::match_wild_err_arm,
@@ -61,23 +59,30 @@
     clippy::missing_panics_doc,
     clippy::module_name_repetitions,
     clippy::needless_pass_by_value,
-    clippy::needless_raw_string_hashes,
     clippy::redundant_closure_for_method_calls,
-    clippy::return_self_not_must_use,
     clippy::similar_names,
     clippy::single_match_else,
     clippy::struct_excessive_bools,
     clippy::struct_field_names,
     clippy::too_many_lines,
-    clippy::unreadable_literal,
-    clippy::unused_async,
-    clippy::unused_self,
-    clippy::wildcard_imports
+    clippy::unused_self
+)]
+#![cfg_attr(
+    any(test, feature = "testing"),
+    allow(
+        clippy::needless_raw_string_hashes,
+        clippy::unreadable_literal,
+        clippy::unused_async,
+    )
 )]
 // List of temporarily allowed lints to unblock beta/nightly.
-#![allow(unknown_lints, clippy::manual_inspect)]
+#![allow(
+    unknown_lints,
+    // TODO: 1.82: Add `use<T>` where necessary and remove from this list.
+    impl_trait_overcaptures,
+)]
 
-use std::{convert::Infallible, future::Future};
+use std::convert::Infallible;
 
 use anyhow::{bail, Context};
 use intern::{EndpointIdInt, EndpointIdTag, InternId};
@@ -85,13 +90,15 @@ use tokio::task::JoinError;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
+extern crate hyper0 as hyper;
+
 pub mod auth;
 pub mod cache;
 pub mod cancellation;
 pub mod compute;
 pub mod config;
-pub mod console;
 pub mod context;
+pub mod control_plane;
 pub mod error;
 pub mod http;
 pub mod intern;
@@ -112,13 +119,12 @@ pub mod usage_metrics;
 pub mod waiters;
 
 /// Handle unix signals appropriately.
-pub async fn handle_signals<F, Fut>(
+pub async fn handle_signals<F>(
     token: CancellationToken,
     mut refresh_config: F,
 ) -> anyhow::Result<Infallible>
 where
-    F: FnMut() -> Fut,
-    Fut: Future<Output = anyhow::Result<()>>,
+    F: FnMut(),
 {
     use tokio::signal::unix::{signal, SignalKind};
 
@@ -131,7 +137,7 @@ where
             // Hangup is commonly used for config reload.
             _ = hangup.recv() => {
                 warn!("received SIGHUP");
-                refresh_config().await?;
+                refresh_config();
             }
             // Shut down the whole application.
             _ = interrupt.recv() => {

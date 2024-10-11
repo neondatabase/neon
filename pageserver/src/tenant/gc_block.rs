@@ -6,6 +6,7 @@ use super::remote_timeline_client::index::GcBlockingReason;
 
 type Storage = HashMap<TimelineId, enumset::EnumSet<GcBlockingReason>>;
 
+/// GcBlock provides persistent (per-timeline) gc blocking.
 #[derive(Default)]
 pub(crate) struct GcBlock {
     /// The timelines which have current reasons to block gc.
@@ -13,6 +14,12 @@ pub(crate) struct GcBlock {
     /// LOCK ORDER: this is held locked while scheduling the next index_part update. This is done
     /// to keep the this field up to date with RemoteTimelineClient `upload_queue.dirty`.
     reasons: std::sync::Mutex<Storage>,
+
+    /// GC background task or manually run `Tenant::gc_iteration` holds a lock on this.
+    ///
+    /// Do not add any more features taking and forbidding taking this lock. It should be
+    /// `tokio::sync::Notify`, but that is rarely used. On the other side, [`GcBlock::insert`]
+    /// synchronizes with gc attempts by locking and unlocking this mutex.
     blocking: tokio::sync::Mutex<()>,
 }
 
@@ -42,6 +49,9 @@ impl GcBlock {
         }
     }
 
+    /// Describe the current gc blocking reasons.
+    ///
+    /// TODO: make this json serializable.
     pub(crate) fn summary(&self) -> Option<BlockingReasons> {
         let g = self.reasons.lock().unwrap();
 

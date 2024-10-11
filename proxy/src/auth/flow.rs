@@ -3,8 +3,8 @@
 use super::{backend::ComputeCredentialKeys, AuthErrorImpl, PasswordHackPayload};
 use crate::{
     config::TlsServerEndPoint,
-    console::AuthSecret,
     context::RequestMonitoring,
+    control_plane::AuthSecret,
     intern::EndpointIdInt,
     sasl,
     scram::{self, threadpool::ThreadPool},

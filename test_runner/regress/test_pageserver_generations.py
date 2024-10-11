@@ -53,6 +53,7 @@ TENANT_CONF = {
     # create image layers eagerly, so that GC can remove some layers
     "image_creation_threshold": "1",
     "image_layer_creation_check_threshold": "0",
+    "lsn_lease_length": "0s",
 }
 
 
@@ -134,7 +135,7 @@ def test_generations_upgrade(neon_env_builder: NeonEnvBuilder):
     )
 
     env = neon_env_builder.init_configs()
-    env.broker.try_start()
+    env.broker.start()
     for sk in env.safekeepers:
         sk.start()
     env.storage_controller.start()
@@ -142,15 +143,14 @@ def test_generations_upgrade(neon_env_builder: NeonEnvBuilder):
     # We will start a pageserver with no control_plane_api set, so it won't be able to self-register
     env.storage_controller.node_register(env.pageserver)
 
-    replaced_config = env.pageserver.patch_config_toml_nonrecursive(
-        {
-            "control_plane_api": "",
-        }
-    )
+    def remove_control_plane_api_field(config):
+        return config.pop("control_plane_api")
+
+    control_plane_api = env.pageserver.edit_config_toml(remove_control_plane_api_field)
     env.pageserver.start()
     env.storage_controller.node_configure(env.pageserver.id, {"availability": "Active"})
 
-    env.neon_cli.create_tenant(
+    env.create_tenant(
         tenant_id=env.initial_tenant, conf=TENANT_CONF, timeline_id=env.initial_timeline
     )
 
@@ -179,7 +179,11 @@ def test_generations_upgrade(neon_env_builder: NeonEnvBuilder):
 
     env.pageserver.stop()
     # Starting without the override that disabled control_plane_api
-    env.pageserver.patch_config_toml_nonrecursive(replaced_config)
+    env.pageserver.patch_config_toml_nonrecursive(
+        {
+            "control_plane_api": control_plane_api,
+        }
+    )
     env.pageserver.start()
 
     generate_uploads_and_deletions(env, pageserver=env.pageserver, init=False)
@@ -545,6 +549,14 @@ def test_multi_attach(
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
 
+    # Instruct the storage controller to not interfere with our low level configuration
+    # of the pageserver's attachment states.  Otherwise when it sees nodes go offline+return,
+    # it would send its own requests that would conflict with the test's.
+    env.storage_controller.tenant_policy_update(tenant_id, {"scheduling": "Stop"})
+    env.storage_controller.allowed_errors.extend(
+        [".*Scheduling is disabled by policy Stop.*", ".*Skipping reconcile for policy Stop.*"]
+    )
+
     # Initially, the tenant will be attached to the first pageserver (first is default in our test harness)
     wait_until(10, 0.2, lambda: assert_tenant_state(http_clients[0], tenant_id, "Active"))
     _detail = http_clients[0].timeline_detail(tenant_id, timeline_id)
@@ -631,9 +643,7 @@ def test_upgrade_generationless_local_file_paths(
 
     tenant_id = TenantId.generate()
     timeline_id = TimelineId.generate()
-    env.neon_cli.create_tenant(
-        tenant_id, timeline_id, conf=TENANT_CONF, placement_policy='{"Attached":1}'
-    )
+    env.create_tenant(tenant_id, timeline_id, conf=TENANT_CONF, placement_policy='{"Attached":1}')
 
     workload = Workload(env, tenant_id, timeline_id)
     workload.init()

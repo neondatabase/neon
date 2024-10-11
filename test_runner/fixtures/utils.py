@@ -42,11 +42,6 @@ from fixtures.common_types import TimelineId
 Fn = TypeVar("Fn", bound=Callable[..., Any])
 
 
-def get_self_dir() -> Path:
-    """Get the path to the directory where this script lives."""
-    return Path(__file__).resolve().parent
-
-
 def subprocess_capture(
     capture_dir: Path,
     cmd: List[str],
@@ -236,7 +231,7 @@ def get_scale_for_db(size_mb: int) -> int:
 
 
 ATTACHMENT_NAME_REGEX: re.Pattern = re.compile(  # type: ignore[type-arg]
-    r"regression\.diffs|.+\.(?:log|stderr|stdout|filediff|metrics|html|walredo)"
+    r"regression\.(diffs|out)|.+\.(?:log|stderr|stdout|filediff|metrics|html|walredo)"
 )
 
 

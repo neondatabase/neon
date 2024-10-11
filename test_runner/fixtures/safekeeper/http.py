@@ -8,6 +8,7 @@ import requests
 from fixtures.common_types import Lsn, TenantId, TenantTimelineId, TimelineId
 from fixtures.log_helper import log
 from fixtures.metrics import Metrics, MetricsGetter, parse_metrics
+from fixtures.utils import wait_until
 
 
 # Walreceiver as returned by sk's timeline status endpoint.
@@ -48,6 +49,19 @@ class SafekeeperMetrics(Metrics):
         return self.query_one(
             "safekeeper_commit_lsn", {"tenant_id": str(tenant_id), "timeline_id": str(timeline_id)}
         ).value
+
+
+@dataclass
+class TermBumpResponse:
+    previous_term: int
+    current_term: int
+
+    @classmethod
+    def from_json(cls, d: Dict[str, Any]) -> "TermBumpResponse":
+        return TermBumpResponse(
+            previous_term=d["previous_term"],
+            current_term=d["current_term"],
+        )
 
 
 class SafekeeperHttpClient(requests.Session, MetricsGetter):
@@ -148,6 +162,16 @@ class SafekeeperHttpClient(requests.Session, MetricsGetter):
             walreceivers=walreceivers,
         )
 
+    # Get timeline_start_lsn, waiting until it's nonzero. It is a way to ensure
+    # that the timeline is fully initialized at the safekeeper.
+    def get_non_zero_timeline_start_lsn(self, tenant_id: TenantId, timeline_id: TimelineId) -> Lsn:
+        def timeline_start_lsn_non_zero() -> Lsn:
+            s = self.timeline_status(tenant_id, timeline_id).timeline_start_lsn
+            assert s > Lsn(0)
+            return s
+
+        return wait_until(30, 1, timeline_start_lsn_non_zero)
+
     def get_commit_lsn(self, tenant_id: TenantId, timeline_id: TimelineId) -> Lsn:
         return self.timeline_status(tenant_id, timeline_id).commit_lsn
 
@@ -173,6 +197,22 @@ class SafekeeperHttpClient(requests.Session, MetricsGetter):
         res_json = json.loads(res.text)
         assert isinstance(res_json, dict)
         return res_json
+
+    def debug_dump_timeline(
+        self, timeline_id: TimelineId, params: Optional[Dict[str, str]] = None
+    ) -> Any:
+        params = params or {}
+        params["timeline_id"] = str(timeline_id)
+        dump = self.debug_dump(params)
+        return dump["timelines"][0]
+
+    def get_partial_backup(self, timeline_id: TimelineId) -> Any:
+        dump = self.debug_dump_timeline(timeline_id, {"dump_control_file": "true"})
+        return dump["control_file"]["partial_backup"]
+
+    def get_eviction_state(self, timeline_id: TimelineId) -> Any:
+        dump = self.debug_dump_timeline(timeline_id, {"dump_control_file": "true"})
+        return dump["control_file"]["eviction_state"]
 
     def pull_timeline(self, body: Dict[str, Any]) -> Dict[str, Any]:
         res = self.post(f"http://localhost:{self.port}/v1/pull_timeline", json=body)
@@ -227,6 +267,30 @@ class SafekeeperHttpClient(requests.Session, MetricsGetter):
         res_json = res.json()
         assert isinstance(res_json, dict)
         return res_json
+
+    def backup_partial_reset(self, tenant_id: TenantId, timeline_id: TimelineId):
+        res = self.post(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/backup_partial_reset",
+            json={},
+        )
+        res.raise_for_status()
+        return res.json()
+
+    def term_bump(
+        self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        term: Optional[int],
+    ) -> TermBumpResponse:
+        body = {}
+        if term is not None:
+            body["term"] = term
+        res = self.post(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/term_bump",
+            json=body,
+        )
+        res.raise_for_status()
+        return TermBumpResponse.from_json(res.json())
 
     def record_safekeeper_info(self, tenant_id: TenantId, timeline_id: TimelineId, body):
         res = self.post(

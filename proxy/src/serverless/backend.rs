@@ -1,6 +1,8 @@
-use std::{sync::Arc, time::Duration};
+use std::{io, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
+use tokio::net::{lookup_host, TcpStream};
 use tracing::{field::display, info};
 
 use crate::{
@@ -10,13 +12,13 @@ use crate::{
     },
     compute,
     config::{AuthenticationConfig, ProxyConfig},
-    console::{
+    context::RequestMonitoring,
+    control_plane::{
         errors::{GetAuthInfoError, WakeComputeError},
         locks::ApiLocks,
         provider::ApiLockError,
         CachedNodeInfo,
     },
-    context::RequestMonitoring,
     error::{ErrorKind, ReportableError, UserFacingError},
     intern::EndpointIdInt,
     proxy::{
@@ -27,9 +29,13 @@ use crate::{
     Host,
 };
 
-use super::conn_pool::{poll_client, AuthData, Client, ConnInfo, GlobalConnPool};
+use super::{
+    conn_pool::{poll_client, Client, ConnInfo, GlobalConnPool},
+    http_conn_pool::{self, poll_http2_client},
+};
 
 pub(crate) struct PoolingBackend {
+    pub(crate) http_conn_pool: Arc<super::http_conn_pool::GlobalConnPool>,
     pub(crate) pool: Arc<GlobalConnPool<tokio_postgres::Client>>,
     pub(crate) config: &'static ProxyConfig,
     pub(crate) endpoint_rate_limiter: Arc<EndpointRateLimiter>,
@@ -50,7 +56,9 @@ impl PoolingBackend {
             .as_ref()
             .map(|()| user_info.clone());
         let (allowed_ips, maybe_secret) = backend.get_allowed_ips_and_secret(ctx).await?;
-        if !check_peer_addr_is_in_list(&ctx.peer_addr(), &allowed_ips) {
+        if config.ip_allowlist_check_enabled
+            && !check_peer_addr_is_in_list(&ctx.peer_addr(), &allowed_ips)
+        {
             return Err(AuthError::ip_address_not_allowed(ctx.peer_addr()));
         }
         if !self
@@ -101,32 +109,44 @@ impl PoolingBackend {
     pub(crate) async fn authenticate_with_jwt(
         &self,
         ctx: &RequestMonitoring,
+        config: &AuthenticationConfig,
         user_info: &ComputeUserInfo,
-        jwt: &str,
-    ) -> Result<ComputeCredentials, AuthError> {
+        jwt: String,
+    ) -> Result<(), AuthError> {
         match &self.config.auth_backend {
-            crate::auth::Backend::Console(_, ()) => {
-                Err(AuthError::auth_failed("JWT login is not yet supported"))
-            }
-            crate::auth::Backend::Web(_, ()) => Err(AuthError::auth_failed(
-                "JWT login over web auth proxy is not supported",
-            )),
-            crate::auth::Backend::Local(cache) => {
-                cache
+            crate::auth::Backend::ControlPlane(console, ()) => {
+                config
                     .jwks_cache
                     .check_jwt(
                         ctx,
                         user_info.endpoint.clone(),
-                        user_info.user.clone(),
-                        &StaticAuthRules,
-                        jwt,
+                        &user_info.user,
+                        &**console,
+                        &jwt,
                     )
                     .await
                     .map_err(|e| AuthError::auth_failed(e.to_string()))?;
-                Ok(ComputeCredentials {
-                    info: user_info.clone(),
-                    keys: crate::auth::backend::ComputeCredentialKeys::None,
-                })
+
+                Ok(())
+            }
+            crate::auth::Backend::ConsoleRedirect(_, ()) => Err(AuthError::auth_failed(
+                "JWT login over web auth proxy is not supported",
+            )),
+            crate::auth::Backend::Local(_) => {
+                config
+                    .jwks_cache
+                    .check_jwt(
+                        ctx,
+                        user_info.endpoint.clone(),
+                        &user_info.user,
+                        &StaticAuthRules,
+                        &jwt,
+                    )
+                    .await
+                    .map_err(|e| AuthError::auth_failed(e.to_string()))?;
+
+                // todo: rewrite JWT signature with key shared somehow between local proxy and postgres
+                Ok(())
             }
         }
     }
@@ -172,14 +192,55 @@ impl PoolingBackend {
         )
         .await
     }
+
+    // Wake up the destination if needed
+    #[tracing::instrument(fields(pid = tracing::field::Empty), skip_all)]
+    pub(crate) async fn connect_to_local_proxy(
+        &self,
+        ctx: &RequestMonitoring,
+        conn_info: ConnInfo,
+    ) -> Result<http_conn_pool::Client, HttpConnError> {
+        info!("pool: looking for an existing connection");
+        if let Some(client) = self.http_conn_pool.get(ctx, &conn_info) {
+            return Ok(client);
+        }
+
+        let conn_id = uuid::Uuid::new_v4();
+        tracing::Span::current().record("conn_id", display(conn_id));
+        info!(%conn_id, "pool: opening a new connection '{conn_info}'");
+        let backend = self
+            .config
+            .auth_backend
+            .as_ref()
+            .map(|()| ComputeCredentials {
+                info: conn_info.user_info.clone(),
+                keys: crate::auth::backend::ComputeCredentialKeys::None,
+            });
+        crate::proxy::connect_compute::connect_to_compute(
+            ctx,
+            &HyperMechanism {
+                conn_id,
+                conn_info,
+                pool: self.http_conn_pool.clone(),
+                locks: &self.config.connect_compute_locks,
+            },
+            &backend,
+            false, // do not allow self signed compute for http flow
+            self.config.wake_compute_retry_config,
+            self.config.connect_to_compute_retry_config,
+        )
+        .await
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum HttpConnError {
     #[error("pooled connection closed at inconsistent state")]
     ConnectionClosedAbruptly(#[from] tokio::sync::watch::error::SendError<uuid::Uuid>),
-    #[error("could not connection to compute")]
-    ConnectionError(#[from] tokio_postgres::Error),
+    #[error("could not connection to postgres in compute")]
+    PostgresConnectionError(#[from] tokio_postgres::Error),
+    #[error("could not connection to local-proxy in compute")]
+    LocalProxyConnectionError(#[from] LocalProxyConnError),
 
     #[error("could not get auth info")]
     GetAuthInfo(#[from] GetAuthInfoError),
@@ -191,11 +252,20 @@ pub(crate) enum HttpConnError {
     TooManyConnectionAttempts(#[from] ApiLockError),
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum LocalProxyConnError {
+    #[error("error with connection to local-proxy")]
+    Io(#[source] std::io::Error),
+    #[error("could not establish h2 connection")]
+    H2(#[from] hyper1::Error),
+}
+
 impl ReportableError for HttpConnError {
     fn get_error_kind(&self) -> ErrorKind {
         match self {
             HttpConnError::ConnectionClosedAbruptly(_) => ErrorKind::Compute,
-            HttpConnError::ConnectionError(p) => p.get_error_kind(),
+            HttpConnError::PostgresConnectionError(p) => p.get_error_kind(),
+            HttpConnError::LocalProxyConnectionError(_) => ErrorKind::Compute,
             HttpConnError::GetAuthInfo(a) => a.get_error_kind(),
             HttpConnError::AuthError(a) => a.get_error_kind(),
             HttpConnError::WakeCompute(w) => w.get_error_kind(),
@@ -208,7 +278,8 @@ impl UserFacingError for HttpConnError {
     fn to_string_client(&self) -> String {
         match self {
             HttpConnError::ConnectionClosedAbruptly(_) => self.to_string(),
-            HttpConnError::ConnectionError(p) => p.to_string(),
+            HttpConnError::PostgresConnectionError(p) => p.to_string(),
+            HttpConnError::LocalProxyConnectionError(p) => p.to_string(),
             HttpConnError::GetAuthInfo(c) => c.to_string_client(),
             HttpConnError::AuthError(c) => c.to_string_client(),
             HttpConnError::WakeCompute(c) => c.to_string_client(),
@@ -222,7 +293,8 @@ impl UserFacingError for HttpConnError {
 impl CouldRetry for HttpConnError {
     fn could_retry(&self) -> bool {
         match self {
-            HttpConnError::ConnectionError(e) => e.could_retry(),
+            HttpConnError::PostgresConnectionError(e) => e.could_retry(),
+            HttpConnError::LocalProxyConnectionError(e) => e.could_retry(),
             HttpConnError::ConnectionClosedAbruptly(_) => false,
             HttpConnError::GetAuthInfo(_) => false,
             HttpConnError::AuthError(_) => false,
@@ -234,10 +306,42 @@ impl CouldRetry for HttpConnError {
 impl ShouldRetryWakeCompute for HttpConnError {
     fn should_retry_wake_compute(&self) -> bool {
         match self {
-            HttpConnError::ConnectionError(e) => e.should_retry_wake_compute(),
+            HttpConnError::PostgresConnectionError(e) => e.should_retry_wake_compute(),
             // we never checked cache validity
             HttpConnError::TooManyConnectionAttempts(_) => false,
             _ => true,
+        }
+    }
+}
+
+impl ReportableError for LocalProxyConnError {
+    fn get_error_kind(&self) -> ErrorKind {
+        match self {
+            LocalProxyConnError::Io(_) => ErrorKind::Compute,
+            LocalProxyConnError::H2(_) => ErrorKind::Compute,
+        }
+    }
+}
+
+impl UserFacingError for LocalProxyConnError {
+    fn to_string_client(&self) -> String {
+        "Could not establish HTTP connection to the database".to_string()
+    }
+}
+
+impl CouldRetry for LocalProxyConnError {
+    fn could_retry(&self) -> bool {
+        match self {
+            LocalProxyConnError::Io(_) => false,
+            LocalProxyConnError::H2(_) => false,
+        }
+    }
+}
+impl ShouldRetryWakeCompute for LocalProxyConnError {
+    fn should_retry_wake_compute(&self) -> bool {
+        match self {
+            LocalProxyConnError::Io(_) => false,
+            LocalProxyConnError::H2(_) => false,
         }
     }
 }
@@ -272,13 +376,6 @@ impl ConnectMechanism for TokioMechanism {
             .dbname(&self.conn_info.dbname)
             .connect_timeout(timeout);
 
-        match &self.conn_info.auth {
-            AuthData::Jwt(_) => {}
-            AuthData::Password(pw) => {
-                config.password(pw);
-            }
-        }
-
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
         let res = config.connect(tokio_postgres::NoTls).await;
         drop(pause);
@@ -297,4 +394,100 @@ impl ConnectMechanism for TokioMechanism {
     }
 
     fn update_connect_config(&self, _config: &mut compute::ConnCfg) {}
+}
+
+struct HyperMechanism {
+    pool: Arc<http_conn_pool::GlobalConnPool>,
+    conn_info: ConnInfo,
+    conn_id: uuid::Uuid,
+
+    /// connect_to_compute concurrency lock
+    locks: &'static ApiLocks<Host>,
+}
+
+#[async_trait]
+impl ConnectMechanism for HyperMechanism {
+    type Connection = http_conn_pool::Client;
+    type ConnectError = HttpConnError;
+    type Error = HttpConnError;
+
+    async fn connect_once(
+        &self,
+        ctx: &RequestMonitoring,
+        node_info: &CachedNodeInfo,
+        timeout: Duration,
+    ) -> Result<Self::Connection, Self::ConnectError> {
+        let host = node_info.config.get_host()?;
+        let permit = self.locks.get_permit(&host).await?;
+
+        let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
+
+        // let port = node_info.config.get_ports().first().unwrap_or_else(10432);
+        let res = connect_http2(&host, 10432, timeout).await;
+        drop(pause);
+        let (client, connection) = permit.release_result(res)?;
+
+        Ok(poll_http2_client(
+            self.pool.clone(),
+            ctx,
+            &self.conn_info,
+            client,
+            connection,
+            self.conn_id,
+            node_info.aux.clone(),
+        ))
+    }
+
+    fn update_connect_config(&self, _config: &mut compute::ConnCfg) {}
+}
+
+async fn connect_http2(
+    host: &str,
+    port: u16,
+    timeout: Duration,
+) -> Result<(http_conn_pool::Send, http_conn_pool::Connect), LocalProxyConnError> {
+    // assumption: host is an ip address so this should not actually perform any requests.
+    // todo: add that assumption as a guarantee in the control-plane API.
+    let mut addrs = lookup_host((host, port))
+        .await
+        .map_err(LocalProxyConnError::Io)?;
+
+    let mut last_err = None;
+
+    let stream = loop {
+        let Some(addr) = addrs.next() else {
+            return Err(last_err.unwrap_or_else(|| {
+                LocalProxyConnError::Io(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "could not resolve any addresses",
+                ))
+            }));
+        };
+
+        match tokio::time::timeout(timeout, TcpStream::connect(addr)).await {
+            Ok(Ok(stream)) => {
+                stream.set_nodelay(true).map_err(LocalProxyConnError::Io)?;
+                break stream;
+            }
+            Ok(Err(e)) => {
+                last_err = Some(LocalProxyConnError::Io(e));
+            }
+            Err(e) => {
+                last_err = Some(LocalProxyConnError::Io(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    e,
+                )));
+            }
+        };
+    };
+
+    let (client, connection) = hyper1::client::conn::http2::Builder::new(TokioExecutor::new())
+        .timer(TokioTimer::new())
+        .keep_alive_interval(Duration::from_secs(20))
+        .keep_alive_while_idle(true)
+        .keep_alive_timeout(Duration::from_secs(5))
+        .handshake(TokioIo::new(stream))
+        .await?;
+
+    Ok((client, connection))
 }

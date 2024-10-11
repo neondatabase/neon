@@ -1,7 +1,9 @@
-//! This module defines `RequestContext`, a structure that we use throughout
-//! the pageserver to propagate high-level context from places
-//! that _originate_ activity down to the shared code paths at the
-//! heart of the pageserver. It's inspired by Golang's `context.Context`.
+//! Defines [`RequestContext`].
+//!
+//! It is a structure that we use throughout the pageserver to propagate
+//! high-level context from places that _originate_ activity down to the
+//! shared code paths at the heart of the pageserver. It's inspired by
+//! Golang's `context.Context`.
 //!
 //! For example, in `Timeline::get(page_nr, lsn)` we need to answer the following questions:
 //! 1. What high-level activity ([`TaskKind`]) needs this page?

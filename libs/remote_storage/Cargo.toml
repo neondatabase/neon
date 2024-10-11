@@ -13,14 +13,11 @@ aws-smithy-async.workspace = true
 aws-smithy-types.workspace = true
 aws-config.workspace = true
 aws-sdk-s3.workspace = true
-aws-credential-types.workspace = true
 bytes.workspace = true
 camino = { workspace = true, features = ["serde1"] }
-humantime.workspace = true
 humantime-serde.workspace = true
-hyper = { workspace = true, features = ["stream"] }
+hyper0 = { workspace = true, features = ["stream"] }
 futures.workspace = true
-rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["sync", "fs", "io-util"] }

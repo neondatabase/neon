@@ -18,8 +18,8 @@ use utils::http::endpoint::{prometheus_metrics_handler, request_span, ChannelWri
 use utils::http::request::parse_query_param;
 
 use postgres_ffi::WAL_SEGMENT_SIZE;
-use safekeeper_api::models::TimelineCreateRequest;
 use safekeeper_api::models::{SkTimelineInfo, TimelineCopyRequest};
+use safekeeper_api::models::{TimelineCreateRequest, TimelineTermBumpRequest};
 use utils::{
     auth::SwappableJwtAuth,
     http::{
@@ -389,6 +389,47 @@ async fn timeline_digest_handler(request: Request<Body>) -> Result<Response<Body
     json_response(StatusCode::OK, response)
 }
 
+/// Unevict timeline and remove uploaded partial segment(s) from the remote storage.
+/// Successfull response returns list of segments existed before the deletion.
+/// Aimed for one-off usage not normally needed.
+async fn timeline_backup_partial_reset(request: Request<Body>) -> Result<Response<Body>, ApiError> {
+    let ttid = TenantTimelineId::new(
+        parse_request_param(&request, "tenant_id")?,
+        parse_request_param(&request, "timeline_id")?,
+    );
+    check_permission(&request, Some(ttid.tenant_id))?;
+
+    let tli = GlobalTimelines::get(ttid).map_err(ApiError::from)?;
+
+    let response = tli
+        .backup_partial_reset()
+        .await
+        .map_err(ApiError::InternalServerError)?;
+    json_response(StatusCode::OK, response)
+}
+
+/// Make term at least as high as one in request. If one in request is None,
+/// increment current one.
+async fn timeline_term_bump_handler(
+    mut request: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    let ttid = TenantTimelineId::new(
+        parse_request_param(&request, "tenant_id")?,
+        parse_request_param(&request, "timeline_id")?,
+    );
+    check_permission(&request, Some(ttid.tenant_id))?;
+
+    let request_data: TimelineTermBumpRequest = json_request(&mut request).await?;
+
+    let tli = GlobalTimelines::get(ttid).map_err(ApiError::from)?;
+    let response = tli
+        .term_bump(request_data.term)
+        .await
+        .map_err(ApiError::InternalServerError)?;
+
+    json_response(StatusCode::OK, response)
+}
+
 /// Used only in tests to hand craft required data.
 async fn record_safekeeper_info(mut request: Request<Body>) -> Result<Response<Body>, ApiError> {
     let ttid = TenantTimelineId::new(
@@ -440,6 +481,7 @@ async fn dump_debug_handler(mut request: Request<Body>) -> Result<Response<Body>
     let mut dump_memory: Option<bool> = None;
     let mut dump_disk_content: Option<bool> = None;
     let mut dump_term_history: Option<bool> = None;
+    let mut dump_wal_last_modified: Option<bool> = None;
     let mut tenant_id: Option<TenantId> = None;
     let mut timeline_id: Option<TimelineId> = None;
 
@@ -453,6 +495,7 @@ async fn dump_debug_handler(mut request: Request<Body>) -> Result<Response<Body>
             "dump_memory" => dump_memory = Some(parse_kv_str(&k, &v)?),
             "dump_disk_content" => dump_disk_content = Some(parse_kv_str(&k, &v)?),
             "dump_term_history" => dump_term_history = Some(parse_kv_str(&k, &v)?),
+            "dump_wal_last_modified" => dump_wal_last_modified = Some(parse_kv_str(&k, &v)?),
             "tenant_id" => tenant_id = Some(parse_kv_str(&k, &v)?),
             "timeline_id" => timeline_id = Some(parse_kv_str(&k, &v)?),
             _ => Err(ApiError::BadRequest(anyhow::anyhow!(
@@ -467,6 +510,7 @@ async fn dump_debug_handler(mut request: Request<Body>) -> Result<Response<Body>
     let dump_memory = dump_memory.unwrap_or(dump_all);
     let dump_disk_content = dump_disk_content.unwrap_or(dump_all);
     let dump_term_history = dump_term_history.unwrap_or(true);
+    let dump_wal_last_modified = dump_wal_last_modified.unwrap_or(dump_all);
 
     let args = debug_dump::Args {
         dump_all,
@@ -474,6 +518,7 @@ async fn dump_debug_handler(mut request: Request<Body>) -> Result<Response<Body>
         dump_memory,
         dump_disk_content,
         dump_term_history,
+        dump_wal_last_modified,
         tenant_id,
         timeline_id,
     };
@@ -607,6 +652,14 @@ pub fn make_router(conf: SafeKeeperConf) -> RouterBuilder<hyper::Body, ApiError>
         .get("/v1/tenant/:tenant_id/timeline/:timeline_id/digest", |r| {
             request_span(r, timeline_digest_handler)
         })
+        .post(
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/backup_partial_reset",
+            |r| request_span(r, timeline_backup_partial_reset),
+        )
+        .post(
+            "/v1/tenant/:tenant_id/timeline/:timeline_id/term_bump",
+            |r| request_span(r, timeline_term_bump_handler),
+        )
         .post("/v1/record_safekeeper_info/:tenant_id/:timeline_id", |r| {
             request_span(r, record_safekeeper_info)
         })

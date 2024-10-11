@@ -178,7 +178,7 @@ def test_backward_compatibility(
         neon_env_builder.num_safekeepers = 3
         env = neon_env_builder.from_repo_dir(compatibility_snapshot_dir / "repo")
         env.pageserver.allowed_errors.append(ingest_lag_log_line)
-        neon_env_builder.start()
+        env.start()
 
         check_neon_works(
             env,
@@ -252,7 +252,7 @@ def test_forward_compatibility(
         # not using env.pageserver.version because it was initialized before
         prev_pageserver_version_str = env.get_binary_version("pageserver")
         prev_pageserver_version_match = re.search(
-            "Neon page server git-env:(.*) failpoints: (.*), features: (.*)",
+            "Neon page server git(?:-env)?:(.*) failpoints: (.*), features: (.*)",
             prev_pageserver_version_str,
         )
         if prev_pageserver_version_match is not None:
@@ -263,12 +263,12 @@ def test_forward_compatibility(
             )
 
         # does not include logs from previous runs
-        assert not env.pageserver.log_contains("git-env:" + prev_pageserver_version)
+        assert not env.pageserver.log_contains(f"git(-env)?:{prev_pageserver_version}")
 
-        neon_env_builder.start()
+        env.start()
 
         # ensure the specified pageserver is running
-        assert env.pageserver.log_contains("git-env:" + prev_pageserver_version)
+        assert env.pageserver.log_contains(f"git(-env)?:{prev_pageserver_version}")
 
         check_neon_works(
             env,
@@ -517,7 +517,7 @@ def test_historic_storage_formats(
     assert metadata_summary["tenant_count"] >= 1
     assert metadata_summary["timeline_count"] >= 1
 
-    env.neon_cli.import_tenant(dataset.tenant_id)
+    env.neon_cli.tenant_import(dataset.tenant_id)
 
     # Discover timelines
     timelines = env.pageserver.http_client().timeline_list(dataset.tenant_id)

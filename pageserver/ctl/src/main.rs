@@ -20,14 +20,13 @@ use clap::{Parser, Subcommand};
 use index_part::IndexPartCmd;
 use layers::LayerCmd;
 use pageserver::{
-    config::defaults::DEFAULT_IO_BUFFER_ALIGNMENT,
     context::{DownloadBehavior, RequestContext},
     page_cache,
     task_mgr::TaskKind,
     tenant::{dump_layerfile_from_path, metadata::TimelineMetadata},
     virtual_file,
 };
-use pageserver_api::shard::TenantShardId;
+use pageserver_api::{config::defaults::DEFAULT_IO_BUFFER_ALIGNMENT, shard::TenantShardId};
 use postgres_ffi::ControlFileData;
 use remote_storage::{RemotePath, RemoteStorageConfig};
 use tokio_util::sync::CancellationToken;
@@ -175,7 +174,7 @@ async fn main() -> anyhow::Result<()> {
                 println!("specified prefix '{}' failed validation", cmd.prefix);
                 return Ok(());
             };
-            let toml_document = toml_edit::Document::from_str(&cmd.config_toml_str)?;
+            let toml_document = toml_edit::DocumentMut::from_str(&cmd.config_toml_str)?;
             let toml_item = toml_document
                 .get("remote_storage")
                 .expect("need remote_storage");
