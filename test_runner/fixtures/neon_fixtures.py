@@ -4280,6 +4280,7 @@ SKIP_FILES = frozenset(
         "postmaster.opts",
         "postmaster.pid",
         "pg_control",
+        "pg_dynshmem",
     )
 )
 

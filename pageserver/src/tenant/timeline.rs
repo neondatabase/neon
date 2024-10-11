@@ -4157,10 +4157,12 @@ impl Timeline {
             // Normal path: we have written some data into the new image layer for this
             // partition, so flush it to disk.
             let (desc, path) = image_layer_writer.finish(ctx).await?;
+            let file_size = desc.file_size;
             let image_layer = Layer::finish_creating(self.conf, self, desc, &path)?;
             info!(
-                "created image layer for metadata {}",
-                image_layer.local_path()
+                "created image layer for metadata {} size {}",
+                image_layer.local_path(),
+                file_size,
             );
             Ok(ImageLayerCreationOutcome {
                 image: Some(image_layer),
@@ -4474,10 +4476,8 @@ impl Timeline {
     /// Switch aux file policy and schedule upload to the index part.
     pub(crate) fn do_switch_aux_policy(&self, policy: AuxFilePolicy) -> anyhow::Result<()> {
         self.last_aux_file_policy.store(Some(policy));
-        if self.get_disk_consistent_lsn().is_valid() {
-            self.remote_client
-                .schedule_index_upload_for_aux_file_policy_update(Some(policy))?;
-        }
+        self.remote_client
+            .schedule_index_upload_for_aux_file_policy_update(Some(policy))?;
         Ok(())
     }
 }

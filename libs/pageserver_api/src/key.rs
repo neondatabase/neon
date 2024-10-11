@@ -758,6 +758,10 @@ impl Key {
             && self.field6 == 1
     }
 
+    pub fn is_aux_file_key(&self) -> bool {
+        self.field1 = AUX_KEY_PREFIX
+    }
+
     /// Guaranteed to return `Ok()` if [`Self::is_rel_block_key`] returns `true` for `key`.
     #[inline(always)]
     pub fn to_rel_block(self) -> anyhow::Result<(RelTag, BlockNumber)> {
