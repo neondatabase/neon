@@ -664,12 +664,35 @@ USER root
 
 #########################################################################################
 #
-# Layers "pg-onnx-build" and "pg-neon-ai-pg-build"
-# Compile "pg_neon_ai" extension
+# Layers "pg-onnx-build" and "pgrag-pg-build"
+# Compile "pgrag" extensions
 #
 #########################################################################################
 
-FROM rust-extensions-build AS pg-onnx-build
+FROM build-deps AS newer-rust-extensions-build
+COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
+
+RUN apt-get update && \
+    apt-get install -y curl libclang-dev cmake && \
+    useradd -ms /bin/bash nonroot -b /home
+
+ENV HOME=/home/nonroot
+ENV PATH="/home/nonroot/.cargo/bin:/usr/local/pgsql/bin/:$PATH"
+USER nonroot
+WORKDIR /home/nonroot
+ARG PG_VERSION
+
+RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux-gnu/rustup-init && \
+    chmod +x rustup-init && \
+    ./rustup-init -y --no-modify-path --profile minimal --default-toolchain stable && \
+    rm rustup-init && \
+    cargo install --locked --version 0.12.5 cargo-pgrx && \
+    /bin/bash -c 'cargo pgrx init --pg${PG_VERSION:1}=/usr/local/pgsql/bin/pg_config'
+
+USER root
+
+
+FROM newer-rust-extensions-build AS pg-onnx-build
 ARG PG_VERSION
 
 RUN apt-get update && apt-get install -y python3 python3-pip && \
@@ -678,16 +701,26 @@ RUN apt-get update && apt-get install -y python3 python3-pip && \
     mkdir onnxruntime-src && cd onnxruntime-src && tar xzf ../onnxruntime.tar.gz --strip-components=1 -C . && \
     ./build.sh --config Release --parallel --skip_submodule_sync --skip_tests --allow_running_as_root
 
-FROM pg-onnx-build AS pg-neon-ai-pg-build
+
+FROM pg-onnx-build AS pgrag-pg-build
 ARG PG_VERSION
 
-RUN wget https://github.com/neondatabase/pg_rag/archive/refs/heads/main.tar.gz -O pg_neon_ai.tar.gz &&  \
-    mkdir pg_neon_ai-src && cd pg_neon_ai-src && tar xzf ../pg_neon_ai.tar.gz --strip-components=1 -C . && \
-    cd bge_small_en_v15 && tar xzf model.onnx.tar.gz && cd .. && \
-    cd jina_reranker_v1_tiny_en && tar xzf model.onnx.tar.gz && cd .. && \
-    sed -i 's/pgrx = "0.11.3"/pgrx = { version = "0.11.3", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
+RUN wget https://github.com/neondatabase/pgrag/archive/refs/heads/main.tar.gz -O pgrag.tar.gz &&  \
+    mkdir pgrag-src && cd pgrag-src && tar xzf ../pgrag.tar.gz --strip-components=1 -C . && \
+    cd lib/bge_small_en_v15 && tar xzf model.onnx.tar.gz && cd ../.. && \
+    cd lib/jina_reranker_v1_tiny_en && tar xzf model.onnx.tar.gz && cd ../.. && \
+    cd exts/rag && \
+    sed -i 's/pgrx = "0.12.5"/pgrx = { version = "0.12.5", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
     ORT_LIB_LOCATION=/home/nonroot/onnxruntime-src/build/Linux cargo pgrx install --release && \
-    echo "trusted = true" >> /usr/local/pgsql/share/extension/neon_ai.control
+    echo "trusted = true" >> /usr/local/pgsql/share/extension/rag.control && \
+    cd ../rag_bge_small_en_v15 && \
+    sed -i 's/pgrx = "0.12.5"/pgrx = { version = "0.12.5", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
+    ORT_LIB_LOCATION=/home/nonroot/onnxruntime-src/build/Linux cargo pgrx install --release && \
+    echo "trusted = true" >> /usr/local/pgsql/share/extension/rag_bge_small_en_v15.control && \
+    cd ../rag_jina_reranker_v1_tiny_en && \
+    sed -i 's/pgrx = "0.12.5"/pgrx = { version = "0.12.5", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
+    ORT_LIB_LOCATION=/home/nonroot/onnxruntime-src/build/Linux cargo pgrx install --release && \
+    echo "trusted = true" >> /usr/local/pgsql/share/extension/rag_jina_reranker_v1_tiny_en.control
 
 
 #########################################################################################
@@ -837,7 +870,7 @@ COPY --from=h3-pg-build /h3/usr /
 COPY --from=unit-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=vector-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pgjwt-pg-build /usr/local/pgsql/ /usr/local/pgsql/
-COPY --from=pg-neon-ai-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pgrag-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-jsonschema-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-graphql-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-tiktoken-pg-build /usr/local/pgsql/ /usr/local/pgsql/
@@ -957,7 +990,7 @@ COPY --from=unit-pg-build /postgresql-unit.tar.gz /ext-src/
 COPY --from=vector-pg-build /pgvector.tar.gz /ext-src/
 COPY --from=vector-pg-build /pgvector.patch /ext-src/
 COPY --from=pgjwt-pg-build /pgjwt.tar.gz /ext-src
-COPY --from=pg-neon-ai-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pgrag-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 #COPY --from=pg-jsonschema-pg-build /home/nonroot/pg_jsonschema.tar.gz /ext-src
 #COPY --from=pg-graphql-pg-build /home/nonroot/pg_graphql.tar.gz /ext-src
 #COPY --from=pg-tiktoken-pg-build /home/nonroot/pg_tiktoken.tar.gz /ext-src
