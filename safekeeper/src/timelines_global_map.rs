@@ -5,8 +5,10 @@
 use crate::defaults::DEFAULT_EVICTION_CONCURRENCY;
 use crate::rate_limit::RateLimiter;
 use crate::safekeeper::ServerInfo;
+use crate::state::TimelinePersistentState;
 use crate::timeline::{get_tenant_dir, get_timeline_dir, Timeline, TimelineError};
 use crate::timelines_set::TimelinesSet;
+use crate::wal_storage::Storage;
 use crate::{control_file, wal_storage, SafeKeeperConf};
 use anyhow::{bail, Context, Result};
 use camino::Utf8PathBuf;
@@ -64,21 +66,6 @@ impl GlobalTimelinesState {
             self.broker_active_set.clone(),
             self.global_rate_limiter.clone(),
         )
-    }
-
-    /// Insert timeline into the map. Returns error if timeline with the same id already exists.
-    fn try_insert(&mut self, ttid: TenantTimelineId, timeline: GlobalMapTimeline) -> Result<()> {
-        match self.timelines.get(&ttid) {
-            Some(GlobalMapTimeline::CreationInProgress) => {
-                bail!(TimelineError::CreationInProgress(ttid));
-            }
-            Some(GlobalMapTimeline::Timeline(_)) => {
-                bail!(TimelineError::AlreadyExists(ttid));
-            }
-            _ => {}
-        }
-        self.timelines.insert(ttid, timeline);
-        Ok(())
     }
 
     /// Get timeline from the map. Returns error if timeline doesn't exist or
@@ -245,7 +232,7 @@ impl GlobalTimelines {
         commit_lsn: Lsn,
         local_start_lsn: Lsn,
     ) -> Result<Arc<Timeline>> {
-        let (conf, broker_active_set, partial_backup_rate_limiter) = {
+        let (conf, _, _) = {
             let state = TIMELINES_STATE.lock().unwrap();
             if let Ok(timeline) = state.get(&ttid) {
                 // Timeline already exists, return it.
@@ -261,54 +248,15 @@ impl GlobalTimelines {
 
         info!("creating new timeline {}", ttid);
 
-        let timeline = Arc::new(Timeline::create_empty(
-            &conf,
-            ttid,
-            server_info,
-            commit_lsn,
-            local_start_lsn,
-        )?);
+        // Do on disk initialization in tmp dir.
+        let (_tmp_dir, tmp_dir_path) = create_temp_timeline_dir(&conf, ttid).await?;
 
-        // Take a lock and finish the initialization holding this mutex. No other threads
-        // can interfere with creation after we will insert timeline into the map.
-        {
-            let mut shared_state = timeline.write_shared_state().await;
-
-            // We can get a race condition here in case of concurrent create calls, but only
-            // in theory. create() will return valid timeline on the next try.
-            TIMELINES_STATE
-                .lock()
-                .unwrap()
-                .try_insert(ttid, GlobalMapTimeline::Timeline(timeline.clone()))?;
-
-            // Write the new timeline to the disk and start background workers.
-            // Bootstrap is transactional, so if it fails, the timeline will be deleted,
-            // and the state on disk should remain unchanged.
-            if let Err(e) = timeline
-                .init_new(
-                    &mut shared_state,
-                    &conf,
-                    broker_active_set,
-                    partial_backup_rate_limiter,
-                )
-                .await
-            {
-                // Note: the most likely reason for init failure is that the timeline
-                // directory already exists on disk. This happens when timeline is corrupted
-                // and wasn't loaded from disk on startup because of that. We want to preserve
-                // the timeline directory in this case, for further inspection.
-
-                // TODO: this is an unusual error, perhaps we should send it to sentry
-                // TODO: compute will try to create timeline every second, we should add backoff
-                error!("failed to init new timeline {}: {}", ttid, e);
-
-                // Timeline failed to init, it cannot be used. Remove it from the map.
-                TIMELINES_STATE.lock().unwrap().timelines.remove(&ttid);
-                return Err(e);
-            }
-            // We are done with bootstrap, release the lock, return the timeline.
-            // {} block forces release before .await
-        }
+        // TODO: currently we create only cfile. It would be reasonable to
+        // immediately initialize first WAL segment as well.
+        let state =
+            TimelinePersistentState::new(&ttid, server_info, vec![], commit_lsn, local_start_lsn)?;
+        control_file::FileStorage::create_new(tmp_dir_path.clone(), &conf, state).await?;
+        let timeline = GlobalTimelines::load_temp_timeline(ttid, &tmp_dir_path, true).await?;
         Ok(timeline)
     }
 

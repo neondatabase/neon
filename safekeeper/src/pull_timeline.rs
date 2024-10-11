@@ -1,7 +1,6 @@
 use anyhow::{anyhow, bail, Context, Result};
 use bytes::Bytes;
 use camino::Utf8PathBuf;
-use camino_tempfile::Utf8TempDir;
 use chrono::{DateTime, Utc};
 use futures::{SinkExt, StreamExt, TryStreamExt};
 use postgres_ffi::{XLogFileName, XLogSegNo, PG_TLI};
@@ -19,7 +18,7 @@ use tokio_util::{
 use tracing::{error, info, instrument};
 
 use crate::{
-    control_file::{self, CONTROL_FILE_NAME},
+    control_file::CONTROL_FILE_NAME,
     debug_dump,
     http::{
         client::{self, Client},
@@ -30,8 +29,8 @@ use crate::{
     timeline::WalResidentTimeline,
     timelines_global_map::{create_temp_timeline_dir, validate_temp_timeline},
     wal_backup,
-    wal_storage::{self, open_wal_file, Storage},
-    GlobalTimelines, SafeKeeperConf,
+    wal_storage::open_wal_file,
+    GlobalTimelines,
 };
 use utils::{
     crashsafe::fsync_async_opt,
