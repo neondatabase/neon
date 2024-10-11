@@ -208,16 +208,26 @@ pub enum TimelineState {
     Broken { reason: String, backtrace: String },
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct TimelineCreateRequest {
     pub new_timeline_id: TimelineId,
-    #[serde(default)]
-    pub ancestor_timeline_id: Option<TimelineId>,
-    #[serde(default)]
-    pub existing_initdb_timeline_id: Option<TimelineId>,
-    #[serde(default)]
-    pub ancestor_start_lsn: Option<Lsn>,
-    pub pg_version: Option<u32>,
+    #[serde(flatten)]
+    pub mode: TimelineCreateRequestMode,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum TimelineCreateRequestMode {
+    Bootstrap {
+        #[serde(default)]
+        existing_initdb_timeline_id: Option<TimelineId>,
+        pg_version: Option<u32>,
+    },
+    Branch {
+        ancestor_timeline_id: TimelineId,
+        #[serde(default)]
+        ancestor_start_lsn: Option<Lsn>,
+        pg_version: Option<u32>,
+    },
 }
 
 #[derive(Serialize, Deserialize, Clone)]

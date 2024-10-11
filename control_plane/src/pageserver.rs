@@ -529,28 +529,6 @@ impl PageServerNode {
         Ok(self.http_client.list_timelines(*tenant_shard_id).await?)
     }
 
-    pub async fn timeline_create(
-        &self,
-        tenant_shard_id: TenantShardId,
-        new_timeline_id: TimelineId,
-        ancestor_start_lsn: Option<Lsn>,
-        ancestor_timeline_id: Option<TimelineId>,
-        pg_version: Option<u32>,
-        existing_initdb_timeline_id: Option<TimelineId>,
-    ) -> anyhow::Result<TimelineInfo> {
-        let req = models::TimelineCreateRequest {
-            new_timeline_id,
-            ancestor_start_lsn,
-            ancestor_timeline_id,
-            pg_version,
-            existing_initdb_timeline_id,
-        };
-        Ok(self
-            .http_client
-            .timeline_create(tenant_shard_id, &req)
-            .await?)
-    }
-
     /// Import a basebackup prepared using either:
     /// a) `pg_basebackup -F tar`, or
     /// b) The `fullbackup` pageserver endpoint
