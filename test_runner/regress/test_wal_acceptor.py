@@ -1504,7 +1504,7 @@ class SafekeeperEnv:
             str(i),
             "--broker-endpoint",
             self.fake_broker_endpoint,
-            "--no-sync",
+            # "--no-sync",
         ]
         log.info(f'Running command "{" ".join(cmd)}"')
 
