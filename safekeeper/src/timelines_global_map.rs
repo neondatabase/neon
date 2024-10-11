@@ -362,8 +362,13 @@ impl GlobalTimelines {
         );
 
         // Now it is safe to move the timeline directory to the correct
-        // location. First, create tenant directory.
-        tokio::fs::create_dir(&tenant_path).await?;
+        // location. First, create tenant directory. Ignore error if it already
+        // exists.
+        if let Err(e) = tokio::fs::create_dir(&tenant_path).await {
+            if e.kind() != std::io::ErrorKind::AlreadyExists {
+                return Err(e.into());
+            }
+        }
         // fsync it
         fsync_async_opt(&tenant_path, !conf.no_sync).await?;
         // and its creation
