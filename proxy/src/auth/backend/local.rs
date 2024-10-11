@@ -4,6 +4,7 @@ use anyhow::Context;
 use arc_swap::ArcSwapOption;
 
 use crate::{
+    auth::backend::jwt::JwtError,
     compute::ConnCfg,
     context::RequestMonitoring,
     control_plane::{
@@ -53,11 +54,12 @@ impl FetchAuthRules for StaticAuthRules {
         &self,
         _ctx: &RequestMonitoring,
         _endpoint: EndpointId,
-    ) -> anyhow::Result<Vec<AuthRule>> {
+    ) -> Result<Vec<AuthRule>, JwtError> {
         let mappings = JWKS_ROLE_MAP.load();
         let role_mappings = mappings
             .as_deref()
-            .context("JWKs settings for this role were not configured")?;
+            .context("JWKs settings for this role were not configured")
+            .map_err(JwtError::Anyhow)?;
         let mut rules = vec![];
         for setting in &role_mappings.jwks {
             rules.push(AuthRule {

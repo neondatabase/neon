@@ -6,7 +6,7 @@ use super::messages::{ControlPlaneError, MetricsAuxInfo};
 use crate::{
     auth::{
         backend::{
-            jwt::{AuthRule, FetchAuthRules},
+            jwt::{AuthRule, FetchAuthRules, JwtError},
             ComputeCredentialKeys, ComputeUserInfo,
         },
         IpPattern,
@@ -583,7 +583,9 @@ impl FetchAuthRules for ControlPlaneBackend {
         &self,
         ctx: &RequestMonitoring,
         endpoint: EndpointId,
-    ) -> anyhow::Result<Vec<AuthRule>> {
-        self.get_endpoint_jwks(ctx, endpoint).await
+    ) -> Result<Vec<AuthRule>, JwtError> {
+        self.get_endpoint_jwks(ctx, endpoint)
+            .await
+            .map_err(JwtError::Anyhow)
     }
 }
