@@ -256,6 +256,9 @@ def test_forward_compatibility(
         assert (
             neon_env_builder.compatibility_neon_binpath is not None
         ), "the environment variable COMPATIBILITY_NEON_BIN is required"
+        assert (
+            neon_env_builder.compatibility_pg_distrib_dir is not None
+        ), "the environment variable COMPATIBILITY_POSTGRES_DISTRIB_DIR is required"
         neon_env_builder.neon_binpath = neon_env_builder.compatibility_neon_binpath
         neon_env_builder.pg_distrib_dir = neon_env_builder.compatibility_pg_distrib_dir
 
