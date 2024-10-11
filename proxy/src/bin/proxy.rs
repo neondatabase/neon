@@ -10,6 +10,7 @@ use futures::future::Either;
 use proxy::auth;
 use proxy::auth::backend::jwt::JwkCache;
 use proxy::auth::backend::AuthRateLimiter;
+use proxy::auth::backend::ConsoleRedirectBackend;
 use proxy::auth::backend::MaybeOwned;
 use proxy::cancellation::CancelMap;
 use proxy::cancellation::CancellationHandler;
@@ -311,8 +312,9 @@ async fn main() -> anyhow::Result<()> {
 
     let args = ProxyCliArgs::parse();
     let config = build_config(&args)?;
+    let auth_backend = build_auth_backend(&args)?;
 
-    info!("Authentication backend: {}", config.auth_backend);
+    info!("Authentication backend: {}", auth_backend);
     info!("Using region: {}", args.aws_region);
 
     let region_provider =
@@ -462,6 +464,7 @@ async fn main() -> anyhow::Result<()> {
     if let Some(proxy_listener) = proxy_listener {
         client_tasks.spawn(proxy::proxy::task_main(
             config,
+            auth_backend,
             proxy_listener,
             cancellation_token.clone(),
             cancellation_handler.clone(),
@@ -472,6 +475,7 @@ async fn main() -> anyhow::Result<()> {
     if let Some(serverless_listener) = serverless_listener {
         client_tasks.spawn(serverless::task_main(
             config,
+            auth_backend,
             serverless_listener,
             cancellation_token.clone(),
             cancellation_handler.clone(),
@@ -506,7 +510,7 @@ async fn main() -> anyhow::Result<()> {
         ));
     }
 
-    if let auth::Backend::ControlPlane(api, _) = &config.auth_backend {
+    if let auth::Backend::ControlPlane(api, _) = auth_backend {
         if let proxy::control_plane::provider::ControlPlaneBackend::Management(api) = &**api {
             match (redis_notifications_client, regional_redis_client.clone()) {
                 (None, None) => {}
@@ -610,6 +614,80 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         bail!("dynamic rate limiter should be disabled");
     }
 
+    let config::ConcurrencyLockOptions {
+        shards,
+        limiter,
+        epoch,
+        timeout,
+    } = args.connect_compute_lock.parse()?;
+    info!(
+        ?limiter,
+        shards,
+        ?epoch,
+        "Using NodeLocks (connect_compute)"
+    );
+    let connect_compute_locks = control_plane::locks::ApiLocks::new(
+        "connect_compute_lock",
+        limiter,
+        shards,
+        timeout,
+        epoch,
+        &Metrics::get().proxy.connect_compute_lock,
+    )?;
+
+    let http_config = HttpConfig {
+        accept_websockets: !args.is_auth_broker,
+        pool_options: GlobalConnPoolOptions {
+            max_conns_per_endpoint: args.sql_over_http.sql_over_http_pool_max_conns_per_endpoint,
+            gc_epoch: args.sql_over_http.sql_over_http_pool_gc_epoch,
+            pool_shards: args.sql_over_http.sql_over_http_pool_shards,
+            idle_timeout: args.sql_over_http.sql_over_http_idle_timeout,
+            opt_in: args.sql_over_http.sql_over_http_pool_opt_in,
+            max_total_conns: args.sql_over_http.sql_over_http_pool_max_total_conns,
+        },
+        cancel_set: CancelSet::new(args.sql_over_http.sql_over_http_cancel_set_shards),
+        client_conn_threshold: args.sql_over_http.sql_over_http_client_conn_threshold,
+        max_request_size_bytes: args.sql_over_http.sql_over_http_max_request_size_bytes,
+        max_response_size_bytes: args.sql_over_http.sql_over_http_max_response_size_bytes,
+    };
+    let authentication_config = AuthenticationConfig {
+        jwks_cache: JwkCache::default(),
+        thread_pool,
+        scram_protocol_timeout: args.scram_protocol_timeout,
+        rate_limiter_enabled: args.auth_rate_limit_enabled,
+        rate_limiter: AuthRateLimiter::new(args.auth_rate_limit.clone()),
+        rate_limit_ip_subnet: args.auth_rate_limit_ip_subnet,
+        ip_allowlist_check_enabled: !args.is_private_access_proxy,
+        is_auth_broker: args.is_auth_broker,
+        accept_jwts: args.is_auth_broker,
+        webauth_confirmation_timeout: args.webauth_confirmation_timeout,
+    };
+
+    let config = Box::leak(Box::new(ProxyConfig {
+        tls_config,
+        metric_collection,
+        allow_self_signed_compute: args.allow_self_signed_compute,
+        http_config,
+        authentication_config,
+        proxy_protocol_v2: args.proxy_protocol_v2,
+        handshake_timeout: args.handshake_timeout,
+        region: args.region.clone(),
+        wake_compute_retry_config: config::RetryConfig::parse(&args.wake_compute_retry)?,
+        connect_compute_locks,
+        connect_to_compute_retry_config: config::RetryConfig::parse(
+            &args.connect_to_compute_retry,
+        )?,
+    }));
+
+    tokio::spawn(config.connect_compute_locks.garbage_collect_worker());
+
+    Ok(config)
+}
+
+/// auth::Backend is created at proxy startup, and lives forever.
+fn build_auth_backend(
+    args: &ProxyCliArgs,
+) -> anyhow::Result<&'static auth::Backend<'static, (), ()>> {
     let auth_backend = match &args.auth_backend {
         AuthBackendType::Console => {
             let wake_compute_cache_config: CacheOptions = args.wake_compute_cache.parse()?;
@@ -665,7 +743,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
 
         AuthBackendType::Web => {
             let url = args.uri.parse()?;
-            auth::Backend::ConsoleRedirect(MaybeOwned::Owned(url), ())
+            auth::Backend::ConsoleRedirect(MaybeOwned::Owned(ConsoleRedirectBackend::new(url)), ())
         }
 
         #[cfg(feature = "testing")]
@@ -677,75 +755,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         }
     };
 
-    let config::ConcurrencyLockOptions {
-        shards,
-        limiter,
-        epoch,
-        timeout,
-    } = args.connect_compute_lock.parse()?;
-    info!(
-        ?limiter,
-        shards,
-        ?epoch,
-        "Using NodeLocks (connect_compute)"
-    );
-    let connect_compute_locks = control_plane::locks::ApiLocks::new(
-        "connect_compute_lock",
-        limiter,
-        shards,
-        timeout,
-        epoch,
-        &Metrics::get().proxy.connect_compute_lock,
-    )?;
-
-    let http_config = HttpConfig {
-        accept_websockets: !args.is_auth_broker,
-        pool_options: GlobalConnPoolOptions {
-            max_conns_per_endpoint: args.sql_over_http.sql_over_http_pool_max_conns_per_endpoint,
-            gc_epoch: args.sql_over_http.sql_over_http_pool_gc_epoch,
-            pool_shards: args.sql_over_http.sql_over_http_pool_shards,
-            idle_timeout: args.sql_over_http.sql_over_http_idle_timeout,
-            opt_in: args.sql_over_http.sql_over_http_pool_opt_in,
-            max_total_conns: args.sql_over_http.sql_over_http_pool_max_total_conns,
-        },
-        cancel_set: CancelSet::new(args.sql_over_http.sql_over_http_cancel_set_shards),
-        client_conn_threshold: args.sql_over_http.sql_over_http_client_conn_threshold,
-        max_request_size_bytes: args.sql_over_http.sql_over_http_max_request_size_bytes,
-        max_response_size_bytes: args.sql_over_http.sql_over_http_max_response_size_bytes,
-    };
-    let authentication_config = AuthenticationConfig {
-        jwks_cache: JwkCache::default(),
-        thread_pool,
-        scram_protocol_timeout: args.scram_protocol_timeout,
-        rate_limiter_enabled: args.auth_rate_limit_enabled,
-        rate_limiter: AuthRateLimiter::new(args.auth_rate_limit.clone()),
-        rate_limit_ip_subnet: args.auth_rate_limit_ip_subnet,
-        ip_allowlist_check_enabled: !args.is_private_access_proxy,
-        is_auth_broker: args.is_auth_broker,
-        accept_jwts: args.is_auth_broker,
-        webauth_confirmation_timeout: args.webauth_confirmation_timeout,
-    };
-
-    let config = Box::leak(Box::new(ProxyConfig {
-        tls_config,
-        auth_backend,
-        metric_collection,
-        allow_self_signed_compute: args.allow_self_signed_compute,
-        http_config,
-        authentication_config,
-        proxy_protocol_v2: args.proxy_protocol_v2,
-        handshake_timeout: args.handshake_timeout,
-        region: args.region.clone(),
-        wake_compute_retry_config: config::RetryConfig::parse(&args.wake_compute_retry)?,
-        connect_compute_locks,
-        connect_to_compute_retry_config: config::RetryConfig::parse(
-            &args.connect_to_compute_retry,
-        )?,
-    }));
-
-    tokio::spawn(config.connect_compute_locks.garbage_collect_worker());
-
-    Ok(config)
+    Ok(Box::leak(Box::new(auth_backend)))
 }
 
 #[cfg(test)]
