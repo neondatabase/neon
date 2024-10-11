@@ -505,7 +505,7 @@ impl RemoteTimelineClient {
             },
         );
 
-        let (index_part, _index_generation, _index_last_modified) = download::download_index_part(
+        let (index_part, index_generation, index_last_modified) = download::download_index_part(
             &self.storage_impl,
             &self.tenant_shard_id,
             &self.timeline_id,
@@ -518,6 +518,45 @@ impl RemoteTimelineClient {
             Arc::clone(&self.metrics),
         )
         .await?;
+
+        // Defense in depth: monotonicity of generation numbers is an important correctness guarantee, so when we see a very
+        // old index, we do extra checks in case this is the result of backward time-travel of the generation number (e.g.
+        // in case of a bug in the service that issues generation numbers). Indices are allowed to be old, but we expect that
+        // when we load an old index we are loading the _latest_ index: if we are asked to load an old index and there is
+        // also a newer index available, that is surprising.
+        const INDEX_AGE_CHECKS_THRESHOLD: Duration = Duration::from_secs(14 * 24 * 3600);
+        let index_age = index_last_modified.elapsed().unwrap_or_else(|e| {
+            tracing::warn!("Index has modification time in the future: {e}");
+            Duration::ZERO
+        });
+        if index_age > INDEX_AGE_CHECKS_THRESHOLD {
+            tracing::info!(
+                ?index_generation,
+                age = index_age.as_secs_f64(),
+                "Loaded an old index, checking for other indices..."
+            );
+
+            // Find the highest-generation index
+            let (_latest_index_part, latest_index_generation, latest_index_mtime) =
+                download::download_index_part(
+                    &self.storage_impl,
+                    &self.tenant_shard_id,
+                    &self.timeline_id,
+                    Generation::MAX,
+                    cancel,
+                )
+                .await?;
+
+            if latest_index_generation > index_generation {
+                // Unexpected!  Why are we loading such an old index if a more recent one exists?
+                tracing::warn!(
+                    ?index_generation,
+                    ?latest_index_generation,
+                    ?latest_index_mtime,
+                    "Found a newer index while loading an old one"
+                );
+            }
+        }
 
         if index_part.deleted_at.is_some() {
             Ok(MaybeDeletedIndexPart::Deleted(index_part))
