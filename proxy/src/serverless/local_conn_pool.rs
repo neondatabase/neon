@@ -243,6 +243,7 @@ impl<C: ClientInnerExt> LocalConnPool<C> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn poll_client(
     global_pool: Arc<LocalConnPool<tokio_postgres::Client>>,
     ctx: &RequestMonitoring,
