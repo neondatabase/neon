@@ -7,9 +7,10 @@ use crate::rate_limit::RateLimiter;
 use crate::safekeeper::ServerInfo;
 use crate::timeline::{get_tenant_dir, get_timeline_dir, Timeline, TimelineError};
 use crate::timelines_set::TimelinesSet;
-use crate::SafeKeeperConf;
+use crate::{control_file, wal_storage, SafeKeeperConf};
 use anyhow::{bail, Context, Result};
 use camino::Utf8PathBuf;
+use camino_tempfile::Utf8TempDir;
 use once_cell::sync::Lazy;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -617,4 +618,52 @@ fn delete_dir(path: Utf8PathBuf) -> Result<bool> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(e) => Err(e.into()),
     }
+}
+
+/// Create temp directory for a new timeline. It needs to be located on the same
+/// filesystem as the rest of the timelines. It will be automatically deleted when
+/// Utf8TempDir goes out of scope.
+pub async fn create_temp_timeline_dir(
+    conf: &SafeKeeperConf,
+    ttid: TenantTimelineId,
+) -> Result<(Utf8TempDir, Utf8PathBuf)> {
+    // conf.workdir is usually /storage/safekeeper/data
+    // will try to transform it into /storage/safekeeper/tmp
+    let temp_base = conf
+        .workdir
+        .parent()
+        .ok_or(anyhow::anyhow!("workdir has no parent"))?
+        .join("tmp");
+
+    tokio::fs::create_dir_all(&temp_base).await?;
+
+    let tli_dir = camino_tempfile::Builder::new()
+        .suffix("_temptli")
+        .prefix(&format!("{}_{}_", ttid.tenant_id, ttid.timeline_id))
+        .tempdir_in(temp_base)?;
+
+    let tli_dir_path = tli_dir.path().to_path_buf();
+
+    Ok((tli_dir, tli_dir_path))
+}
+
+/// Do basic validation of a temp timeline, before moving it to the global map.
+pub async fn validate_temp_timeline(
+    conf: &SafeKeeperConf,
+    ttid: TenantTimelineId,
+    path: &Utf8PathBuf,
+) -> Result<(Lsn, Lsn)> {
+    let control_path = path.join("safekeeper.control");
+
+    let control_store = control_file::FileStorage::load_control_file(control_path)?;
+    if control_store.server.wal_seg_size == 0 {
+        bail!("wal_seg_size is not set");
+    }
+
+    let wal_store = wal_storage::PhysicalStorage::new(&ttid, path.clone(), conf, &control_store)?;
+
+    let commit_lsn = control_store.commit_lsn;
+    let flush_lsn = wal_store.flush_lsn();
+
+    Ok((commit_lsn, flush_lsn))
 }

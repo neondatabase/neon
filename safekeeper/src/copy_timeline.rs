@@ -13,9 +13,9 @@ use utils::{id::TenantTimelineId, lsn::Lsn};
 
 use crate::{
     control_file::{FileStorage, Storage},
-    pull_timeline::{create_temp_timeline_dir, validate_temp_timeline},
     state::TimelinePersistentState,
     timeline::{Timeline, TimelineError, WalResidentTimeline},
+    timelines_global_map::{create_temp_timeline_dir, validate_temp_timeline},
     wal_backup::copy_s3_segments,
     wal_storage::{wal_file_paths, WalReader},
     GlobalTimelines,
