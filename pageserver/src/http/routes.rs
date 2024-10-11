@@ -541,22 +541,12 @@ async fn timeline_create_handler(
 
         tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
 
-        if let Some(ancestor_id) = request_data.ancestor_timeline_id.as_ref() {
-            tracing::info!(%ancestor_id, "starting to branch");
-        } else {
-            tracing::info!("bootstrapping");
-        }
+        // earlier versions of the code had pg_version and ancestor_lsn in the span
+        // => continue to provide that information, but, through a log messaget hat doesn't require us to destructure
+        tracing::info!(?request_data, "creating timeline");
 
         match tenant
-            .create_timeline(
-                new_timeline_id,
-                request_data.ancestor_timeline_id,
-                request_data.ancestor_start_lsn,
-                request_data.pg_version.unwrap_or(crate::DEFAULT_PG_VERSION),
-                request_data.existing_initdb_timeline_id,
-                state.broker_client.clone(),
-                &ctx,
-            )
+            .create_timeline(request_data, state.broker_client.clone(), &ctx)
             .await
         {
             Ok(new_timeline) => {
@@ -607,8 +597,6 @@ async fn timeline_create_handler(
         tenant_id = %tenant_shard_id.tenant_id,
         shard_id = %tenant_shard_id.shard_slug(),
         timeline_id = %new_timeline_id,
-        lsn=?request_data.ancestor_start_lsn,
-        pg_version=?request_data.pg_version
     ))
     .await
 }

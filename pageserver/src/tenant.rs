@@ -23,6 +23,7 @@ use pageserver_api::models;
 use pageserver_api::models::AuxFilePolicy;
 use pageserver_api::models::LsnLease;
 use pageserver_api::models::TimelineArchivalState;
+use pageserver_api::models::TimelineCreateRequest;
 use pageserver_api::models::TimelineState;
 use pageserver_api::models::TopTenantShardItem;
 use pageserver_api::models::WalRedoManagerStatus;
@@ -100,6 +101,7 @@ use crate::tenant::storage_layer::ImageLayer;
 use crate::walingest::WalLagCooldown;
 use crate::walredo;
 use crate::InitializationOrder;
+use crate::DEFAULT_PG_VERSION;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -1655,14 +1657,45 @@ impl Tenant {
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn create_timeline(
         self: &Arc<Tenant>,
-        new_timeline_id: TimelineId,
-        ancestor_timeline_id: Option<TimelineId>,
-        mut ancestor_start_lsn: Option<Lsn>,
-        pg_version: u32,
-        load_existing_initdb: Option<TimelineId>,
+        request: TimelineCreateRequest,
         broker_client: storage_broker::BrokerClientChannel,
         ctx: &RequestContext,
     ) -> Result<Arc<Timeline>, CreateTimelineError> {
+        // TODO: previously these variable were function arguments; push `request` further downwards.
+        let TimelineCreateRequest {
+            new_timeline_id,
+            mode,
+        } = request;
+        let ancestor_timeline_id: Option<TimelineId>;
+        let mut ancestor_start_lsn: Option<Lsn>;
+        let pg_version: u32;
+        let load_existing_initdb: Option<TimelineId>;
+        match mode {
+            models::TimelineCreateRequestMode::Bootstrap {
+                existing_initdb_timeline_id: load_existing_initdb_arg,
+                pg_version: pg_version_arg,
+            } => {
+                ancestor_timeline_id = None;
+                ancestor_start_lsn = None;
+                load_existing_initdb = load_existing_initdb_arg;
+                // TODO: practically, is this ever None
+                pg_version = pg_version_arg.unwrap_or(DEFAULT_PG_VERSION);
+            }
+            models::TimelineCreateRequestMode::Branch {
+                ancestor_timeline_id: ancestor_timeline_id_arg,
+                ancestor_start_lsn: ancestor_start_lsn_arg,
+                pg_version: pg_version_arg,
+            } => {
+                ancestor_timeline_id = Some(ancestor_timeline_id_arg);
+                // TODO: practically, is this ever None?
+                ancestor_start_lsn = ancestor_start_lsn_arg;
+                // TODO 1: this seems wrong, we should inherit by default;
+                // TODO 2: practically, is this ever None?
+                pg_version = pg_version_arg.unwrap_or(DEFAULT_PG_VERSION);
+                load_existing_initdb = None;
+            }
+        }
+
         if !self.is_active() {
             if matches!(self.current_state(), TenantState::Stopping { .. }) {
                 return Err(CreateTimelineError::ShuttingDown);
