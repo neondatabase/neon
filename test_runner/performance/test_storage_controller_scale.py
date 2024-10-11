@@ -395,6 +395,11 @@ def test_storage_controller_many_tenants(
 
         log.info(f"Filled pageserver {ps.id} in {time.time() - t1}s")
 
+        # Waiting for optimizer to stabilize, if it disagrees with scheduling (the correct behavior
+        # would be for original scheduling decisions to always match optimizer's preference)
+        # (workaround for https://github.com/neondatabase/neon/issues/8969)
+        env.storage_controller.reconcile_until_idle(timeout_secs=120)
+
         shard_counts = get_consistent_node_shard_counts(env, total_shards)
         log.info(f"Shard counts after filling node {ps.id}: {shard_counts}")
 
