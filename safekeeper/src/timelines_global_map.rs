@@ -44,12 +44,8 @@ struct GlobalTimelinesState {
 
     conf: Option<SafeKeeperConf>,
     broker_active_set: Arc<TimelinesSet>,
-    load_lock: Arc<tokio::sync::Mutex<TimelineLoadLock>>,
     global_rate_limiter: RateLimiter,
 }
-
-// Used to prevent concurrent timeline loading.
-pub struct TimelineLoadLock;
 
 impl GlobalTimelinesState {
     /// Get configuration, which must be set once during init.
@@ -92,7 +88,6 @@ static TIMELINES_STATE: Lazy<Mutex<GlobalTimelinesState>> = Lazy::new(|| {
         tombstones: HashMap::new(),
         conf: None,
         broker_active_set: Arc::new(TimelinesSet::default()),
-        load_lock: Arc::new(tokio::sync::Mutex::new(TimelineLoadLock)),
         global_rate_limiter: RateLimiter::new(1, 1),
     })
 });
@@ -203,11 +198,6 @@ impl GlobalTimelines {
         }
 
         Ok(())
-    }
-
-    /// Take a lock for timeline loading.
-    pub async fn loading_lock() -> Arc<tokio::sync::Mutex<TimelineLoadLock>> {
-        TIMELINES_STATE.lock().unwrap().load_lock.clone()
     }
 
     /// Get the number of timelines in the map.
