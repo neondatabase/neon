@@ -75,6 +75,7 @@ from fixtures.safekeeper.http import SafekeeperHttpClient
 from fixtures.safekeeper.utils import wait_walreceivers_absent
 from fixtures.utils import (
     ATTACHMENT_NAME_REGEX,
+    COMPONENT_BINARIES,
     allure_add_grafana_links,
     assert_no_errors,
     get_dir_size,
@@ -316,11 +317,14 @@ class NeonEnvBuilder:
         run_id: uuid.UUID,
         mock_s3_server: MockS3Server,
         neon_binpath: Path,
+        compatibility_neon_binpath: Path,
         pg_distrib_dir: Path,
+        compatibility_pg_distrib_dir: Path,
         pg_version: PgVersion,
         test_name: str,
         top_output_dir: Path,
         test_output_dir: Path,
+        combination,
         test_overlay_dir: Optional[Path] = None,
         pageserver_remote_storage: Optional[RemoteStorage] = None,
         # toml that will be decomposed into `--config-override` flags during `pageserver --init`
@@ -402,6 +406,19 @@ class NeonEnvBuilder:
             "test_"
         ), "Unexpectedly instantiated from outside a test function"
         self.test_name = test_name
+        self.compatibility_neon_binpath = compatibility_neon_binpath
+        self.compatibility_pg_distrib_dir = compatibility_pg_distrib_dir
+        self.version_combination = combination
+        self.mixdir = self.test_output_dir / "mixdir_neon"
+        if self.version_combination is not None:
+            assert (
+                self.compatibility_neon_binpath is not None
+            ), "the environment variable COMPATIBILITY_NEON_BIN is required when using mixed versions"
+            assert (
+                self.compatibility_pg_distrib_dir is not None
+            ), "the environment variable COMPATIBILITY_POSTGRES_DISTRIB_DIR is required when using mixed versions"
+            self.mixdir.mkdir(mode=0o755, exist_ok=True)
+            self._mix_versions()
 
     def init_configs(self, default_remote_storage_if_missing: bool = True) -> NeonEnv:
         # Cannot create more than one environment from one builder
@@ -601,6 +618,21 @@ class NeonEnvBuilder:
             toml.dump(config, f)
 
         return self.env
+
+    def _mix_versions(self):
+        assert self.version_combination is not None, "version combination must be set"
+        for component, paths in COMPONENT_BINARIES.items():
+            directory = (
+                self.neon_binpath
+                if self.version_combination[component] == "new"
+                else self.compatibility_neon_binpath
+            )
+            for filename in paths:
+                destination = self.mixdir / filename
+                destination.symlink_to(directory / filename)
+        if self.version_combination["compute"] == "old":
+            self.pg_distrib_dir = self.compatibility_pg_distrib_dir
+        self.neon_binpath = self.mixdir
 
     def overlay_mount(self, ident: str, srcdir: Path, dstdir: Path):
         """
@@ -1350,7 +1382,9 @@ def neon_simple_env(
     top_output_dir: Path,
     test_output_dir: Path,
     neon_binpath: Path,
+    compatibility_neon_binpath: Path,
     pg_distrib_dir: Path,
+    compatibility_pg_distrib_dir: Path,
     pg_version: PgVersion,
     pageserver_virtual_file_io_engine: str,
     pageserver_aux_file_policy: Optional[AuxFileStore],
@@ -1365,6 +1399,11 @@ def neon_simple_env(
 
     # Create the environment in the per-test output directory
     repo_dir = get_test_repo_dir(request, top_output_dir)
+    combination = (
+        request._pyfuncitem.callspec.params["combination"]
+        if "combination" in request._pyfuncitem.callspec.params
+        else None
+    )
 
     with NeonEnvBuilder(
         top_output_dir=top_output_dir,
@@ -1372,7 +1411,9 @@ def neon_simple_env(
         port_distributor=port_distributor,
         mock_s3_server=mock_s3_server,
         neon_binpath=neon_binpath,
+        compatibility_neon_binpath=compatibility_neon_binpath,
         pg_distrib_dir=pg_distrib_dir,
+        compatibility_pg_distrib_dir=compatibility_pg_distrib_dir,
         pg_version=pg_version,
         run_id=run_id,
         preserve_database_files=cast(bool, pytestconfig.getoption("--preserve-database-files")),
@@ -1382,6 +1423,7 @@ def neon_simple_env(
         pageserver_aux_file_policy=pageserver_aux_file_policy,
         pageserver_default_tenant_config_compaction_algorithm=pageserver_default_tenant_config_compaction_algorithm,
         pageserver_virtual_file_io_mode=pageserver_virtual_file_io_mode,
+        combination=combination,
     ) as builder:
         env = builder.init_start()
 
@@ -1395,7 +1437,9 @@ def neon_env_builder(
     port_distributor: PortDistributor,
     mock_s3_server: MockS3Server,
     neon_binpath: Path,
+    compatibility_neon_binpath: Path,
     pg_distrib_dir: Path,
+    compatibility_pg_distrib_dir: Path,
     pg_version: PgVersion,
     run_id: uuid.UUID,
     request: FixtureRequest,
@@ -1422,6 +1466,11 @@ def neon_env_builder(
 
     # Create the environment in the test-specific output dir
     repo_dir = os.path.join(test_output_dir, "repo")
+    combination = (
+        request._pyfuncitem.callspec.params["combination"]
+        if "combination" in request._pyfuncitem.callspec.params
+        else None
+    )
 
     # Return the builder to the caller
     with NeonEnvBuilder(
@@ -1430,7 +1479,10 @@ def neon_env_builder(
         port_distributor=port_distributor,
         mock_s3_server=mock_s3_server,
         neon_binpath=neon_binpath,
+        compatibility_neon_binpath=compatibility_neon_binpath,
         pg_distrib_dir=pg_distrib_dir,
+        compatibility_pg_distrib_dir=compatibility_pg_distrib_dir,
+        combination=combination,
         pg_version=pg_version,
         run_id=run_id,
         preserve_database_files=cast(bool, pytestconfig.getoption("--preserve-database-files")),

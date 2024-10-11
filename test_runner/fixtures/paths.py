@@ -95,7 +95,17 @@ def neon_binpath(base_dir: Path, build_type: str) -> Iterator[Path]:
     if not (binpath / "pageserver").exists():
         raise Exception(f"neon binaries not found at '{binpath}'")
 
-    yield binpath
+    yield binpath.absolute()
+
+
+@pytest.fixture(scope="session")
+def compatibility_neon_binpath() -> Optional[Iterator[Path]]:
+    if os.getenv("REMOTE_ENV"):
+        return
+    comp_binpath = None
+    if env_compatibility_neon_binpath := os.environ.get("COMPATIBILITY_NEON_BIN"):
+        comp_binpath = Path(env_compatibility_neon_binpath).resolve().absolute()
+    yield comp_binpath
 
 
 @pytest.fixture(scope="session")
@@ -107,6 +117,19 @@ def pg_distrib_dir(base_dir: Path) -> Iterator[Path]:
 
     log.info(f"pg_distrib_dir is {distrib_dir}")
     yield distrib_dir
+
+
+@pytest.fixture(scope="session")
+def compatibility_pg_distrib_dir() -> Optional[Iterator[Path]]:
+    compat_distrib_dir = None
+    if env_compat_postgres_bin := os.environ.get("COMPATIBILITY_POSTGRES_DISTRIB_DIR"):
+        compat_distrib_dir = Path(env_compat_postgres_bin).resolve()
+        if not compat_distrib_dir.exists():
+            raise Exception(f"compatibility postgres directory not found at {compat_distrib_dir}")
+
+    if compat_distrib_dir:
+        log.info(f"compatibility_pg_distrib_dir is {compat_distrib_dir}")
+    yield compat_distrib_dir
 
 
 @pytest.fixture(scope="session")
