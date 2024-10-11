@@ -587,6 +587,51 @@ impl Debug for SetStoppingError {
     }
 }
 
+#[derive(Debug)]
+pub(crate) enum CreateTimelineParams {
+    Bootstrap(CreateTimelineParamsBootstrap),
+    Branch(CreateTimelineParamsBranch),
+}
+
+#[derive(Debug)]
+pub(crate) struct CreateTimelineParamsBootstrap {
+    pub(crate) new_timeline_id: TimelineId,
+    pub(crate) existing_initdb_timeline_id: Option<TimelineId>,
+    pub(crate) pg_version: u32,
+}
+
+#[derive(Debug)]
+pub(crate) struct CreateTimelineParamsBranch {
+    pub(crate) new_timeline_id: TimelineId,
+    pub(crate) ancestor_timeline_id: TimelineId,
+    pub(crate) ancestor_start_lsn: Option<Lsn>,
+}
+
+impl CreateTimelineParams {
+    pub fn new_timeline_id(&self) -> TimelineId {
+        match self {
+            Self::Bootstrap(CreateTimelineParamsBootstrap {
+                new_timeline_id, ..
+            }) => *new_timeline_id,
+            Self::Branch(CreateTimelineParamsBranch {
+                new_timeline_id, ..
+            }) => *new_timeline_id,
+        }
+    }
+}
+
+pub(crate) struct CreatingTimelineStateBootstrap {
+    pub(crate) pg_version: u32,
+}
+
+pub(crate) enum CreatingTimelineState {
+    Bootstrap(CreatingTimelineStateBootstrap),
+    Branch {
+        ancestor_timeline_id: TimelineId,
+        ancestor_start_lsn: Lsn,
+    },
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum CreateTimelineError {
     #[error("creation of timeline with the given ID is in progress")]
@@ -1657,45 +1702,10 @@ impl Tenant {
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn create_timeline(
         self: &Arc<Tenant>,
-        request: TimelineCreateRequest,
+        params: CreateTimelineParams,
         broker_client: storage_broker::BrokerClientChannel,
         ctx: &RequestContext,
     ) -> Result<Arc<Timeline>, CreateTimelineError> {
-        // TODO: previously these variable were function arguments; push `request` further downwards.
-        let TimelineCreateRequest {
-            new_timeline_id,
-            mode,
-        } = request;
-        let ancestor_timeline_id: Option<TimelineId>;
-        let mut ancestor_start_lsn: Option<Lsn>;
-        let pg_version: u32;
-        let load_existing_initdb: Option<TimelineId>;
-        match mode {
-            models::TimelineCreateRequestMode::Bootstrap {
-                existing_initdb_timeline_id: load_existing_initdb_arg,
-                pg_version: pg_version_arg,
-            } => {
-                ancestor_timeline_id = None;
-                ancestor_start_lsn = None;
-                load_existing_initdb = load_existing_initdb_arg;
-                // TODO: practically, is this ever None
-                pg_version = pg_version_arg.unwrap_or(DEFAULT_PG_VERSION);
-            }
-            models::TimelineCreateRequestMode::Branch {
-                ancestor_timeline_id: ancestor_timeline_id_arg,
-                ancestor_start_lsn: ancestor_start_lsn_arg,
-                pg_version: pg_version_arg,
-            } => {
-                ancestor_timeline_id = Some(ancestor_timeline_id_arg);
-                // TODO: practically, is this ever None?
-                ancestor_start_lsn = ancestor_start_lsn_arg;
-                // TODO 1: this seems wrong, we should inherit by default;
-                // TODO 2: practically, is this ever None?
-                pg_version = pg_version_arg.unwrap_or(DEFAULT_PG_VERSION);
-                load_existing_initdb = None;
-            }
-        }
-
         if !self.is_active() {
             if matches!(self.current_state(), TenantState::Stopping { .. }) {
                 return Err(CreateTimelineError::ShuttingDown);
@@ -1711,54 +1721,25 @@ impl Tenant {
             .enter()
             .map_err(|_| CreateTimelineError::ShuttingDown)?;
 
-        // Get exclusive access to the timeline ID: this ensures that it does not already exist,
-        // and that no other creation attempts will be allowed in while we are working.
-        let create_guard = match self.create_timeline_create_guard(new_timeline_id) {
-            Ok(m) => m,
-            Err(TimelineExclusionError::AlreadyCreating) => {
-                // Creation is in progress, we cannot create it again, and we cannot
-                // check if this request matches the existing one, so caller must try
-                // again later.
-                return Err(CreateTimelineError::AlreadyCreating);
+        let loaded_timeline = match params {
+            CreateTimelineParams::Bootstrap(CreateTimelineParamsBootstrap {
+                new_timeline_id,
+                existing_initdb_timeline_id,
+                pg_version,
+            }) => {
+                self.bootstrap_timeline(
+                    new_timeline_id,
+                    pg_version,
+                    existing_initdb_timeline_id,
+                    ctx,
+                )
+                .await?
             }
-            Err(TimelineExclusionError::Other(e)) => {
-                return Err(CreateTimelineError::Other(e));
-            }
-            Err(TimelineExclusionError::AlreadyExists(existing)) => {
-                debug!("timeline {new_timeline_id} already exists");
-
-                // Idempotency: creating the same timeline twice is not an error, unless
-                // the second creation has different parameters.
-                if existing.get_ancestor_timeline_id() != ancestor_timeline_id
-                    || existing.pg_version != pg_version
-                    || (ancestor_start_lsn.is_some()
-                        && ancestor_start_lsn != Some(existing.get_ancestor_lsn()))
-                {
-                    return Err(CreateTimelineError::Conflict);
-                }
-
-                // Wait for uploads to complete, so that when we return Ok, the timeline
-                // is known to be durable on remote storage. Just like we do at the end of
-                // this function, after we have created the timeline ourselves.
-                //
-                // We only really care that the initial version of `index_part.json` has
-                // been uploaded. That's enough to remember that the timeline
-                // exists. However, there is no function to wait specifically for that so
-                // we just wait for all in-progress uploads to finish.
-                existing
-                    .remote_client
-                    .wait_completion()
-                    .await
-                    .context("wait for timeline uploads to complete")?;
-
-                return Ok(existing);
-            }
-        };
-
-        pausable_failpoint!("timeline-creation-after-uninit");
-
-        let loaded_timeline = match ancestor_timeline_id {
-            Some(ancestor_timeline_id) => {
+            CreateTimelineParams::Branch(CreateTimelineParamsBranch {
+                new_timeline_id,
+                ancestor_timeline_id,
+                mut ancestor_start_lsn,
+            }) => {
                 let ancestor_timeline = self
                     .get_timeline(ancestor_timeline_id, false)
                     .context("Cannot branch off the timeline that's not present in pageserver")?;
@@ -1805,24 +1786,8 @@ impl Tenant {
                         })?;
                 }
 
-                self.branch_timeline(
-                    &ancestor_timeline,
-                    new_timeline_id,
-                    ancestor_start_lsn,
-                    create_guard,
-                    ctx,
-                )
-                .await?
-            }
-            None => {
-                self.bootstrap_timeline(
-                    new_timeline_id,
-                    pg_version,
-                    load_existing_initdb,
-                    create_guard,
-                    ctx,
-                )
-                .await?
+                self.branch_timeline(&ancestor_timeline, new_timeline_id, ancestor_start_lsn, ctx)
+                    .await?
             }
         };
 
@@ -1830,14 +1795,11 @@ impl Tenant {
         // the timeline is visible in [`Self::timelines`], but it is _not_ durable yet.  We must
         // not send a success to the caller until it is.  The same applies to handling retries,
         // see the handling of [`TimelineExclusionError::AlreadyExists`] above.
-        let kind = ancestor_timeline_id
-            .map(|_| "branched")
-            .unwrap_or("bootstrapped");
         loaded_timeline
             .remote_client
             .wait_completion()
             .await
-            .with_context(|| format!("wait for {} timeline initial uploads to complete", kind))?;
+            .with_context(|| format!("wait for timeline initial uploads to complete"))?;
 
         loaded_timeline.activate(self.clone(), broker_client, None, ctx);
 
@@ -3335,10 +3297,9 @@ impl Tenant {
         src_timeline: &Arc<Timeline>,
         dst_id: TimelineId,
         start_lsn: Option<Lsn>,
-        timeline_create_guard: TimelineCreateGuard<'_>,
         ctx: &RequestContext,
     ) -> Result<Arc<Timeline>, CreateTimelineError> {
-        self.branch_timeline_impl(src_timeline, dst_id, start_lsn, timeline_create_guard, ctx)
+        self.branch_timeline_impl(src_timeline, dst_id, start_lsn, ctx)
             .await
     }
 
@@ -3347,7 +3308,6 @@ impl Tenant {
         src_timeline: &Arc<Timeline>,
         dst_id: TimelineId,
         start_lsn: Option<Lsn>,
-        timeline_create_guard: TimelineCreateGuard<'_>,
         _ctx: &RequestContext,
     ) -> Result<Arc<Timeline>, CreateTimelineError> {
         let src_id = src_timeline.timeline_id;
@@ -3363,6 +3323,21 @@ impl Tenant {
             info!("branching timeline {dst_id} from timeline {src_id} at last record LSN: {lsn}");
             lsn
         });
+
+        // we finally have determined the ancestor_start_lsn, so we can get claim exclusivity now
+        let timeline_create_guard = match self
+            .start_creating_timeline(
+                dst_id,
+                CreatingTimelineState::Branch {
+                    ancestor_timeline_id: src_timeline.timeline_id,
+                    ancestor_start_lsn: start_lsn,
+                },
+            )
+            .await?
+        {
+            either::Either::Left(guard) => guard,
+            either::Either::Right(timeline) => return Ok(timeline),
+        };
 
         // Ensure that `start_lsn` is valid, i.e. the LSN is within the PITR
         // horizon on the source timeline
@@ -3463,15 +3438,87 @@ impl Tenant {
         load_existing_initdb: Option<TimelineId>,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Timeline>> {
-        let create_guard = self.create_timeline_create_guard(timeline_id).unwrap();
-        self.bootstrap_timeline(
-            timeline_id,
-            pg_version,
-            load_existing_initdb,
-            create_guard,
-            ctx,
-        )
-        .await
+        self.bootstrap_timeline(timeline_id, pg_version, load_existing_initdb, ctx)
+            .await
+    }
+
+    /// Get exclusive access to the timeline ID for creation.
+    ///
+    /// Timeline-creating code paths must use this function before making changes
+    /// to in-memory or persistent state.
+    ///
+    /// The `state` parameter is a description of the timeline creation operation
+    /// we intend to perform.
+    /// If the timeline was already created in the meantime, we check whether this
+    /// request conflicts or is idempotent , based on `state`.
+    async fn start_creating_timeline(
+        &self,
+        new_timeline_id: TimelineId,
+        state: CreatingTimelineState,
+    ) -> Result<either::Either<TimelineCreateGuard<'_>, Arc<Timeline>>, CreateTimelineError> {
+        match self.create_timeline_create_guard(new_timeline_id) {
+            Ok(create_guard) => Ok(either::Either::Left(create_guard)),
+            Err(TimelineExclusionError::AlreadyCreating) => {
+                // Creation is in progress, we cannot create it again, and we cannot
+                // check if this request matches the existing one, so caller must try
+                // again later.
+                return Err(CreateTimelineError::AlreadyCreating);
+            }
+            Err(TimelineExclusionError::Other(e)) => {
+                return Err(CreateTimelineError::Other(e));
+            }
+            Err(TimelineExclusionError::AlreadyExists(existing)) => {
+                debug!("timeline already exists");
+
+                // Idempotency: creating the same timeline twice is not an error, unless
+                // the second creation has different parameters.
+                //
+                // TODO: this is a crutch; we should store the CreateTimelineState as an
+                // immutable attribute in the index part, and compare them using derive(`Eq`).
+                match state {
+                    CreatingTimelineState::Bootstrap(CreatingTimelineStateBootstrap {
+                        pg_version,
+                    }) => {
+                        if existing.pg_version != pg_version {
+                            return Err(CreateTimelineError::Conflict);
+                        }
+                        if existing.get_ancestor_timeline_id() != None {
+                            return Err(CreateTimelineError::Conflict);
+                        }
+                        if existing.get_ancestor_lsn() != Lsn::INVALID {
+                            return Err(CreateTimelineError::Conflict);
+                        }
+                    }
+                    CreatingTimelineState::Branch {
+                        ancestor_timeline_id,
+                        ancestor_start_lsn,
+                    } => {
+                        if existing.get_ancestor_timeline_id() != Some(ancestor_timeline_id) {
+                            return Err(CreateTimelineError::Conflict);
+                        }
+                        if existing.get_ancestor_lsn() != ancestor_start_lsn {
+                            return Err(CreateTimelineError::Conflict);
+                        }
+                    }
+                }
+
+                // Wait for uploads to complete, so that when we return Ok, the timeline
+                // is known to be durable on remote storage. Just like we do at the end of
+                // this function, after we have created the timeline ourselves.
+                //
+                // We only really care that the initial version of `index_part.json` has
+                // been uploaded. That's enough to remember that the timeline
+                // exists. However, there is no function to wait specifically for that so
+                // we just wait for all in-progress uploads to finish.
+                existing
+                    .remote_client
+                    .wait_completion()
+                    .await
+                    .context("wait for timeline uploads to complete")?;
+
+                Ok(either::Either::Right(existing))
+            }
+        }
     }
 
     async fn upload_initdb(
@@ -3532,9 +3579,19 @@ impl Tenant {
         timeline_id: TimelineId,
         pg_version: u32,
         load_existing_initdb: Option<TimelineId>,
-        timeline_create_guard: TimelineCreateGuard<'_>,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Timeline>> {
+        let timeline_create_guard = match self
+            .start_creating_timeline(
+                timeline_id,
+                CreatingTimelineState::Bootstrap(CreatingTimelineStateBootstrap { pg_version }),
+            )
+            .await?
+        {
+            either::Either::Left(guard) => guard,
+            either::Either::Right(timeline) => return Ok(timeline),
+        };
+
         // create a `tenant/{tenant_id}/timelines/basebackup-{timeline_id}.{TEMP_FILE_SUFFIX}/`
         // temporary directory for basebackup files for the given timeline.
 

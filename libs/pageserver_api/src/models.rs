@@ -208,14 +208,14 @@ pub enum TimelineState {
     Broken { reason: String, backtrace: String },
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct TimelineCreateRequest {
     pub new_timeline_id: TimelineId,
     #[serde(flatten)]
     pub mode: TimelineCreateRequestMode,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone)]
 pub enum TimelineCreateRequestMode {
     Bootstrap {
         #[serde(default)]
@@ -226,6 +226,8 @@ pub enum TimelineCreateRequestMode {
         ancestor_timeline_id: TimelineId,
         #[serde(default)]
         ancestor_start_lsn: Option<Lsn>,
+        // TODO: cplane sets this, but, the current branching code always
+        // inherits the ancestor's pg_version. This field is effectively ignored.
         pg_version: Option<u32>,
     },
 }
