@@ -53,7 +53,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use futures::StreamExt;
 use itertools::Itertools;
 use pageserver_api::config::MaxVectoredReadBytes;
-use pageserver_api::key::DBDIR_KEY;
+use pageserver_api::key::{AUX_FILES_KEY, DBDIR_KEY};
 use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::ImageCompressionAlgorithm;
 use pageserver_api::shard::TenantShardId;
@@ -964,7 +964,11 @@ impl DeltaLayerInner {
                 .as_slice()
                 .iter()
                 .filter_map(|(_, blob_meta)| {
-                    if blob_meta.key.is_rel_dir_key() || blob_meta.key == DBDIR_KEY {
+                    if blob_meta.key.is_rel_dir_key()
+                        || blob_meta.key == DBDIR_KEY
+                        || blob_meta.key == AUX_FILES_KEY
+                        || blob_meta.key.is_aux_file_key()
+                    {
                         // The size of values for these keys is unbounded and can
                         // grow very large in pathological cases.
                         None
