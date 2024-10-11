@@ -37,6 +37,23 @@ if TYPE_CHECKING:
 
 
 Fn = TypeVar("Fn", bound=Callable[..., Any])
+COMPONENT_BINARIES = {
+    "storage_controller": ("storage_controller",),
+    "storage_broker": ("storage_broker",),
+    "compute": ("compute_ctl",),
+    "safekeeper": ("safekeeper",),
+    "pageserver": ("pageserver", "pagectl"),
+}
+# Disable auto-formatting for better readability
+# fmt: off
+VERSIONS_COMBINATIONS = (
+    {"storage_controller": "new", "storage_broker": "new", "compute": "new", "safekeeper": "new", "pageserver": "new"},
+    {"storage_controller": "new", "storage_broker": "new", "compute": "old", "safekeeper": "old", "pageserver": "old"},
+    {"storage_controller": "new", "storage_broker": "new", "compute": "old", "safekeeper": "old", "pageserver": "new"},
+    {"storage_controller": "new", "storage_broker": "new", "compute": "old", "safekeeper": "new", "pageserver": "new"},
+    {"storage_controller": "old", "storage_broker": "old", "compute": "new", "safekeeper": "new", "pageserver": "new"},
+)
+# fmt: on
 
 
 def subprocess_capture(
@@ -607,3 +624,19 @@ def human_bytes(amt: float) -> str:
         amt = amt / 1024
 
     raise RuntimeError("unreachable")
+
+
+def allpairs_versions():
+    """
+    Returns a dictionary with arguments for pytest parametrize
+    to test the compatibility with the previous version of Neon components
+    combinations were pre-computed to test all the pairs of the components with
+    the different versions.
+    """
+    ids = []
+    for pair in VERSIONS_COMBINATIONS:
+        cur_id = []
+        for component in sorted(pair.keys()):
+            cur_id.append(pair[component][0])
+        ids.append(f"combination_{''.join(cur_id)}")
+    return {"argnames": "combination", "argvalues": VERSIONS_COMBINATIONS, "ids": ids}
