@@ -13,7 +13,7 @@ use utils::{id::TenantTimelineId, lsn::Lsn};
 
 use crate::{
     control_file::{FileStorage, Storage},
-    pull_timeline::{create_temp_timeline_dir, load_temp_timeline, validate_temp_timeline},
+    pull_timeline::{create_temp_timeline_dir, validate_temp_timeline},
     state::TimelinePersistentState,
     timeline::{Timeline, TimelineError, WalResidentTimeline},
     wal_backup::copy_s3_segments,
@@ -159,7 +159,7 @@ pub async fn handle_request(request: Request) -> Result<()> {
 
     // now we have a ready timeline in a temp directory
     validate_temp_timeline(conf, request.destination_ttid, &tli_dir_path).await?;
-    load_temp_timeline(conf, request.destination_ttid, &tli_dir_path).await?;
+    GlobalTimelines::load_temp_timeline(request.destination_ttid, &tli_dir_path, true).await?;
 
     Ok(())
 }

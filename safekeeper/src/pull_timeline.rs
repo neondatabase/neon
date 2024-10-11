@@ -9,7 +9,6 @@ use serde::{Deserialize, Serialize};
 use std::{
     cmp::min,
     io::{self, ErrorKind},
-    sync::Arc,
 };
 use tokio::{fs::OpenOptions, io::AsyncWrite, sync::mpsc, task};
 use tokio_tar::{Archive, Builder, Header};
@@ -28,13 +27,13 @@ use crate::{
     },
     safekeeper::Term,
     state::TimelinePersistentState,
-    timeline::{get_tenant_dir, get_timeline_dir, Timeline, TimelineError, WalResidentTimeline},
+    timeline::WalResidentTimeline,
     wal_backup,
     wal_storage::{self, open_wal_file, Storage},
     GlobalTimelines, SafeKeeperConf,
 };
 use utils::{
-    crashsafe::{durable_rename, fsync_async_opt},
+    crashsafe::fsync_async_opt,
     id::{NodeId, TenantId, TenantTimelineId, TimelineId},
     logging::SecretString,
     lsn::Lsn,
@@ -428,7 +427,7 @@ async fn pull_timeline(
     assert!(status.commit_lsn <= status.flush_lsn);
 
     // Finally, load the timeline.
-    let _tli = load_temp_timeline(conf, ttid, &tli_dir_path).await?;
+    let _tli = GlobalTimelines::load_temp_timeline(ttid, &tli_dir_path, false).await?;
 
     Ok(Response {
         safekeeper_host: host,
@@ -481,47 +480,4 @@ pub async fn validate_temp_timeline(
     let flush_lsn = wal_store.flush_lsn();
 
     Ok((commit_lsn, flush_lsn))
-}
-
-/// Move timeline from a temp directory to the main storage, and load it to the global map.
-///
-/// This operation is done under a lock to prevent bugs if several concurrent requests are
-/// trying to load the same timeline. Note that it doesn't guard against creating the
-/// timeline with the same ttid, but no one should be doing this anyway.
-pub async fn load_temp_timeline(
-    conf: &SafeKeeperConf,
-    ttid: TenantTimelineId,
-    tmp_path: &Utf8PathBuf,
-) -> Result<Arc<Timeline>> {
-    // Take a lock to prevent concurrent loadings
-    let load_lock = GlobalTimelines::loading_lock().await;
-    let guard = load_lock.lock().await;
-
-    if !matches!(GlobalTimelines::get(ttid), Err(TimelineError::NotFound(_))) {
-        bail!("timeline already exists, cannot overwrite it")
-    }
-
-    // Move timeline dir to the correct location
-    let timeline_path = get_timeline_dir(conf, &ttid);
-
-    info!(
-        "moving timeline {} from {} to {}",
-        ttid, tmp_path, timeline_path
-    );
-    tokio::fs::create_dir_all(get_tenant_dir(conf, &ttid.tenant_id)).await?;
-    // fsync tenant dir creation
-    fsync_async_opt(&conf.workdir, !conf.no_sync).await?;
-    durable_rename(tmp_path, &timeline_path, !conf.no_sync).await?;
-
-    let tli = GlobalTimelines::load_timeline(&guard, ttid)
-        .await
-        .context("Failed to load timeline after copy")?;
-
-    info!(
-        "loaded timeline {}, flush_lsn={}",
-        ttid,
-        tli.get_flush_lsn().await
-    );
-
-    Ok(tli)
 }
