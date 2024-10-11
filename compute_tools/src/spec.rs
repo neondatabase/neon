@@ -330,8 +330,10 @@ pub fn handle_roles(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
                 // If the role we're creating is intended for JWT login, we have
                 // to make sure it can execute functions in the auth schema.
                 if jwks_roles.contains(name.as_str()) {
-                    let mut grant_query =
-                        format!("GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA auth TO {}");
+                    let mut grant_query = format!(
+                        "GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA auth TO {}",
+                        name.pg_quote()
+                    );
                     info!("running grant query for JWT role: '{}'", &grant_query);
                     grant_query.push_str(&role.to_pg_options());
                     xact.execute(grant_query.as_str(), &[])?;
