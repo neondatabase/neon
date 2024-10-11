@@ -1848,7 +1848,7 @@ impl<'a> DatadirModification<'a> {
                 // We already updated aux files in `self`: emit a delta and update our latest value.
                 dir.upsert(file_path.clone(), content.clone());
                 n_files = dir.files.len();
-                if n_files == 0 || aux_files.n_deltas == MAX_AUX_FILE_DELTAS {
+                if aux_files.n_deltas == MAX_AUX_FILE_DELTAS {
                     self.put(
                         AUX_FILES_KEY,
                         Value::Image(Bytes::from(
