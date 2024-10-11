@@ -318,12 +318,24 @@ pub fn handle_roles(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
                     "CREATE ROLE {} INHERIT CREATEROLE CREATEDB BYPASSRLS REPLICATION IN ROLE neon_superuser",
                     name.pg_quote()
                 );
+                // If the role we're creating is intended for JWT login, we do
+                // not give it any attributes.
                 if jwks_roles.contains(name.as_str()) {
                     query = format!("CREATE ROLE {}", name.pg_quote());
                 }
                 info!("running role create query: '{}'", &query);
                 query.push_str(&role.to_pg_options());
                 xact.execute(query.as_str(), &[])?;
+
+                // If the role we're creating is intended for JWT login, we have
+                // to make sure it can execute functions in the auth schema.
+                if jwks_roles.contains(name.as_str()) {
+                    let mut grant_query =
+                        format!("GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA auth TO {}");
+                    info!("running grant query for JWT role: '{}'", &grant_query);
+                    grant_query.push_str(&role.to_pg_options());
+                    xact.execute(grant_query.as_str(), &[])?;
+                }
             }
         }
 
