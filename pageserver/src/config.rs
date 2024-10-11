@@ -52,7 +52,7 @@ pub mod defaults {
     use pageserver_api::models::ImageCompressionAlgorithm;
     pub use storage_broker::DEFAULT_ENDPOINT as BROKER_DEFAULT_ENDPOINT;
 
-    pub const DEFAULT_WAIT_LSN_TIMEOUT: &str = "60 s";
+    pub const DEFAULT_WAIT_LSN_TIMEOUT: &str = "300 s";
     pub const DEFAULT_WAL_REDO_TIMEOUT: &str = "60 s";
 
     pub const DEFAULT_SUPERUSER: &str = "cloud_admin";

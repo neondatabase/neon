@@ -389,6 +389,11 @@ def test_duplicate_creation(neon_env_builder: NeonEnvBuilder):
         repeat_result = ps_http.timeline_create(
             env.pg_version, env.initial_tenant, success_timeline, timeout=60
         )
+        # remote_consistent_lsn_visible will be published only after we've
+        # confirmed the generation, which is not part of what we await during
+        # timeline creation (uploads). mask it out here to avoid flakyness.
+        del success_result["remote_consistent_lsn_visible"]
+        del repeat_result["remote_consistent_lsn_visible"]
         assert repeat_result == success_result
     finally:
         env.pageserver.stop(immediate=True)

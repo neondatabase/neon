@@ -210,24 +210,28 @@ async fn compaction_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
                 Duration::from_secs(10)
             } else {
                 // Run compaction
-                if let Err(e) = tenant.compaction_iteration(&cancel, &ctx).await {
-                    let wait_duration = backoff::exponential_backoff_duration_seconds(
-                        error_run_count + 1,
-                        1.0,
-                        MAX_BACKOFF_SECS,
-                    );
-                    error_run_count += 1;
-                    let wait_duration = Duration::from_secs_f64(wait_duration);
-                    log_compaction_error(
-                        &e,
-                        error_run_count,
-                        &wait_duration,
-                        cancel.is_cancelled(),
-                    );
-                    wait_duration
-                } else {
-                    error_run_count = 0;
-                    period
+                match tenant.compaction_iteration(&cancel, &ctx).await {
+                    Err(e) => {
+                        let wait_duration = backoff::exponential_backoff_duration_seconds(
+                            error_run_count + 1,
+                            1.0,
+                            MAX_BACKOFF_SECS,
+                        );
+                        error_run_count += 1;
+                        let wait_duration = Duration::from_secs_f64(wait_duration);
+                        log_compaction_error(
+                            &e,
+                            error_run_count,
+                            &wait_duration,
+                            cancel.is_cancelled(),
+                        );
+                        wait_duration
+                    }
+                    Ok(has_pending_task) => {
+                        error_run_count = 0;
+                        // schedule the next compaction immediately in case there is a pending compaction task
+                        if has_pending_task { Duration::from_secs(0) } else { period }
+                    }
                 }
             };
 
