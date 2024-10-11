@@ -6,6 +6,7 @@ use super::{
     raw::RawAlignedBuffer,
 };
 
+/// A mutable aligned buffer type.
 #[derive(Debug)]
 pub struct AlignedBufferMut<A: Alignment> {
     raw: RawAlignedBuffer<A>,
@@ -207,7 +208,7 @@ fn panic_advance(idx: usize, len: usize) -> ! {
     );
 }
 
-/// Safety: [`IoBufferMut`] has exclusive ownership of the io buffer,
+/// Safety: [`AlignedBufferMut`] has exclusive ownership of the io buffer,
 /// and the location remains stable even if [`Self`] is moved.
 unsafe impl<A: Alignment> tokio_epoll_uring::IoBuf for AlignedBufferMut<A> {
     fn stable_ptr(&self) -> *const u8 {

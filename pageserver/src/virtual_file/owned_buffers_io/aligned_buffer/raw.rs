@@ -16,7 +16,7 @@ unsafe impl Send for AlignedBufferPtr {}
 // SAFETY: We gurantees no one besides `IoBufferPtr` itself has the raw pointer.
 unsafe impl Sync for AlignedBufferPtr {}
 
-/// An aligned buffer type used for I/O.
+/// An aligned buffer type.
 #[derive(Debug)]
 pub struct RawAlignedBuffer<A: Alignment> {
     ptr: AlignedBufferPtr,
