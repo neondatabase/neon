@@ -38,6 +38,7 @@ use pageserver_api::models::TenantShardSplitRequest;
 use pageserver_api::models::TenantShardSplitResponse;
 use pageserver_api::models::TenantSorting;
 use pageserver_api::models::TimelineArchivalConfigRequest;
+use pageserver_api::models::TimelineCreateRequestMode;
 use pageserver_api::models::TopTenantShardItem;
 use pageserver_api::models::TopTenantShardsRequest;
 use pageserver_api::models::TopTenantShardsResponse;
@@ -82,6 +83,7 @@ use crate::tenant::timeline::CompactionError;
 use crate::tenant::timeline::Timeline;
 use crate::tenant::GetTimelineError;
 use crate::tenant::{LogicalSizeCalculationCause, PageReconstructError};
+use crate::DEFAULT_PG_VERSION;
 use crate::{disk_usage_eviction_task, tenant};
 use pageserver_api::models::{
     StatusResponse, TenantConfigRequest, TenantInfo, TimelineCreateRequest, TimelineGcRequest,
@@ -527,6 +529,26 @@ async fn timeline_create_handler(
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
 
     let new_timeline_id = request_data.new_timeline_id;
+    // fill in the default pg_version if not provided & convert request into domain model
+    let params: tenant::CreateTimelineParams = match request_data.mode {
+        TimelineCreateRequestMode::Bootstrap {
+            existing_initdb_timeline_id,
+            pg_version,
+        } => tenant::CreateTimelineParams::Bootstrap(tenant::CreateTimelineParamsBootstrap {
+            new_timeline_id,
+            existing_initdb_timeline_id,
+            pg_version: pg_version.unwrap_or(DEFAULT_PG_VERSION),
+        }),
+        TimelineCreateRequestMode::Branch {
+            ancestor_timeline_id,
+            ancestor_start_lsn,
+            pg_version: _,
+        } => tenant::CreateTimelineParams::Branch(tenant::CreateTimelineParamsBranch {
+            new_timeline_id,
+            ancestor_timeline_id,
+            ancestor_start_lsn,
+        }),
+    };
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Error);
 
@@ -541,10 +563,10 @@ async fn timeline_create_handler(
 
         // earlier versions of the code had pg_version and ancestor_lsn in the span
         // => continue to provide that information, but, through a log messaget hat doesn't require us to destructure
-        tracing::info!(?request_data, "creating timeline");
+        tracing::info!(?params, "creating timeline");
 
         match tenant
-            .create_timeline(request_data, state.broker_client.clone(), &ctx)
+            .create_timeline(params, state.broker_client.clone(), &ctx)
             .await
         {
             Ok(new_timeline) => {
