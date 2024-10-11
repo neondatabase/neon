@@ -17,7 +17,7 @@ use crate::metrics::Metrics;
 use crate::usage_metrics::{Ids, MetricCounter, USAGE_METRICS};
 use crate::{context::RequestMonitoring, DbName, RoleName};
 
-use tracing::{debug, error, warn, Span};
+use tracing::{error, warn, Span};
 use tracing::{info, info_span, Instrument};
 
 use super::backend::HttpConnError;
@@ -436,17 +436,9 @@ impl LocalClient<tokio_postgres::Client> {
             .inner
             .as_mut()
             .expect("client inner should not be removed");
+
         inner.jti += 1;
-
-        let mut payload = serde_json::from_slice::<serde_json::Map<String, Value>>(payload)
-            .map_err(HttpConnError::JwtPayloadError)?;
-        payload.insert("jti".to_string(), Value::Number(inner.jti.into()));
-        let payload = Value::Object(payload).to_string();
-
-        let pid = inner.inner.get_process_id();
-        debug!(pid, jti = inner.jti, ?payload, "signing new ephemeral JWT");
-
-        let token = sign_jwt(&inner.key, payload.as_bytes());
+        let token = resign_jwt(&inner.key, payload, inner.jti)?;
 
         // initiates the auth session
         inner.inner.simple_query("discard all").await?;
@@ -458,10 +450,23 @@ impl LocalClient<tokio_postgres::Client> {
             )
             .await?;
 
+        let pid = inner.inner.get_process_id();
         info!(pid, jti = inner.jti, "user session state init");
 
         Ok(())
     }
+}
+
+fn resign_jwt(sk: &SigningKey, payload: &[u8], jti: u64) -> Result<String, HttpConnError> {
+    // TODO: can we avoid a full deser+ser here?
+    // i.e. just update inplace?
+    let mut payload = serde_json::from_slice::<serde_json::Map<String, Value>>(payload)
+        .map_err(HttpConnError::JwtPayloadError)?;
+    payload.insert("jti".to_string(), Value::Number(jti.into()));
+    let payload = Value::Object(payload).to_string();
+
+    let token = sign_jwt(sk, payload.as_bytes());
+    Ok(token)
 }
 
 fn sign_jwt(sk: &SigningKey, payload: &[u8]) -> String {
@@ -534,5 +539,21 @@ impl<C: ClientInnerExt> Drop for LocalClient<C> {
         if let Some(drop) = self.do_drop() {
             tokio::task::spawn_blocking(drop);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use p256::ecdsa::SigningKey;
+
+    use super::resign_jwt;
+
+    #[test]
+    fn jwt_token_snapshot() {
+        let key = SigningKey::from_bytes(&[1; 32].into()).unwrap();
+        let data = br#"{"foo":"bar", "jti": "foo\nbar", "nested": {"jti": "tricky nesting"}}"#;
+
+        let jwt = resign_jwt(&key, data, 2).unwrap();
+        assert_eq!(jwt, "e30.eyJmb28iOiJiYXIiLCJqdGkiOjIsIm5lc3RlZCI6eyJqdGkiOiJ0cmlja3kgbmVzdGluZyJ9fQ.MVqrBp2klw3wY30Dw0tUD2fxpia0rAP1_-kQ1Cv5EBRCUeei7g8Rqnqn6QXhbVEkmgOWghlwa7GzyF-n1dEgpg");
     }
 }
