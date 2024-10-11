@@ -349,7 +349,7 @@ ARG PG_VERSION
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
 # not version-specific
-# doesn't use releases, last commit f3d82fd - Mar 2, 2023 
+# doesn't use releases, last commit f3d82fd - Mar 2, 2023
 RUN wget https://github.com/michelp/pgjwt/archive/f3d82fd30151e754e19ce5d6a06c71c20689ce3d.tar.gz -O pgjwt.tar.gz && \
     echo "dae8ed99eebb7593b43013f6532d772b12dfecd55548d2673f2dfd0163f6d2b9 pgjwt.tar.gz" | sha256sum --check && \
     mkdir pgjwt-src && cd pgjwt-src && tar xzf ../pgjwt.tar.gz --strip-components=1 -C . && \
@@ -1169,6 +1169,18 @@ RUN rm -r /usr/local/pgsql/include
 # if they were to be used by other libraries.
 RUN rm /usr/local/pgsql/lib/lib*.a
 
+#########################################################################################
+#
+# Preprocess the sql_exporter configuration files
+#
+#########################################################################################
+FROM $REPOSITORY/$IMAGE:$TAG AS sql_exporter_preprocessor
+
+USER nonroot
+
+COPY --chown=nonroot compute compute
+
+RUN make -C compute
 
 #########################################################################################
 #
@@ -1287,10 +1299,10 @@ RUN mkdir -p /etc/local_proxy && chown postgres:postgres /etc/local_proxy
 COPY --from=postgres-exporter /bin/postgres_exporter /bin/postgres_exporter
 COPY --from=sql-exporter      /bin/sql_exporter      /bin/sql_exporter
 
-COPY --chmod=0644 compute/etc/sql_exporter.yml               /etc/sql_exporter.yml
-COPY --chmod=0644 compute/etc/neon_collector.yml             /etc/neon_collector.yml
-COPY --chmod=0644 compute/etc/sql_exporter_autoscaling.yml   /etc/sql_exporter_autoscaling.yml
-COPY --chmod=0644 compute/etc/neon_collector_autoscaling.yml /etc/neon_collector_autoscaling.yml
+COPY --from=sql_exporter_preprocessor --chmod=0644 /home/nonroot/compute/etc/sql_exporter.yml               /etc/sql_exporter.yml
+COPY --from=sql_exporter_preprocessor --chmod=0644 /home/nonroot/compute/etc/neon_collector.yml             /etc/neon_collector.yml
+COPY --from=sql_exporter_preprocessor --chmod=0644 /home/nonroot/compute/etc/sql_exporter_autoscaling.yml   /etc/sql_exporter_autoscaling.yml
+COPY --from=sql_exporter_preprocessor --chmod=0644 /home/nonroot/compute/etc/neon_collector_autoscaling.yml /etc/neon_collector_autoscaling.yml
 
 # Create remote extension download directory
 RUN mkdir /usr/local/download_extensions && chown -R postgres:postgres /usr/local/download_extensions
