@@ -1504,6 +1504,7 @@ class SafekeeperEnv:
             str(i),
             "--broker-endpoint",
             self.fake_broker_endpoint,
+            "--no-sync",
         ]
         log.info(f'Running command "{" ".join(cmd)}"')
 
@@ -1563,25 +1564,30 @@ class SafekeeperEnv:
                 self.kill_safekeeper(sk_proc.args[6])
 
 
-def run_pg_restore(pg_bin: PgBin, dump_file: Path, postgres: ProposerPostgres):
-    env_vars = {
-        "PGOPTIONS": "-c maintenance_work_mem=4388608 -c max_parallel_maintenance_workers=7"
-    }
+def run_pg_restore(pg_bin: PgBin, dump_file: Path, postgres: ProposerPostgres, table_names: List[str]):
+    # env_vars = {
+    #     "PGOPTIONS": "-c maintenance_work_mem=4388608 -c max_parallel_maintenance_workers=7",
+    # }
 
     postgres.connstr
 
     pg_restore_command: List[str] = [
         "pg_restore",
-        "-t", "hits",             # Table to restore
         "-v",                     # Verbose output
-        "-d", postgres.connstr(),  # Target database
+        "-d", postgres.connstr(options='-c maintenance_work_mem=4388608 -c max_parallel_maintenance_workers=7 -cstatement_timeout=0'),  # Target database
         "--no-owner",             # Do not restore ownership
         "--jobs=4",               # Number of parallel jobs
         str(dump_file),     # Dump file
     ]
 
-    pg_bin.run(pg_restore_command, env=env_vars)
+     # Add table names to the command
+    for table in table_names:
+        pg_restore_command.insert(-2, "-t")
+        pg_restore_command.insert(-2, table)
+
+    pg_bin.run(pg_restore_command)
     return None
+
 
 def download_pg_dump(database_name: str) -> Path:
     dump_file_path = Path(f"/tmp/{database_name}.pg_dump")
@@ -1629,7 +1635,7 @@ def test_safekeeper_without_pageserver_and_pg_restore(
         log.info(f"Database size before restore: {size_before}")
         
         start_time = time.time()
-        run_pg_restore(pg_bin, dump_file_path, env.postgres)
+        run_pg_restore(pg_bin, dump_file_path, env.postgres, ["hits"])
         end_time = time.time()
         duration = end_time - start_time
         size_after = env.postgres.safe_psql("select pg_database_size('postgres');")[0][0]
@@ -1640,7 +1646,51 @@ def test_safekeeper_without_pageserver_and_pg_restore(
         log.info(f"pg_restore duration: {duration:.2f} seconds")
         log.info(f"Restore rate: {restore_rate:.2f} bytes/second")
 
+def test_safekeeper_without_pageserver_and_pg_restore_tpch(
+    test_output_dir: str,
+    port_distributor: PortDistributor,
+    pg_bin: PgBin,
+    neon_binpath: Path,
+):
+    # Create the environment in the test-specific output dir
+    repo_dir = Path(os.path.join(test_output_dir, "repo"))
 
+    # Download the pg_dump file if it doesn't exist
+    database_name = "tpch"  # Replace with your database name
+    dump_file_path = download_pg_dump(database_name)
+
+    pg_conf_options: dict[str, str] = {
+        "shared_buffers": "8GB",
+    }
+
+    env = SafekeeperEnv(
+        repo_dir,
+        port_distributor,
+        pg_bin,
+        neon_binpath,
+        pg_conf_options=pg_conf_options,
+    )
+
+    with env:
+        env.init()
+        assert env.postgres is not None
+        shared_buffers = env.postgres.safe_psql("show shared_buffers")[0][0]
+        log.info(f"shared_buffers: {shared_buffers}")
+        size_before = env.postgres.safe_psql("select pg_database_size('postgres');")[0][0]
+        log.info(f"Database size before restore: {size_before}")
+        
+        table_names = ["customer", "lineitem", "nation", "orders", "part", "partsupp", "region", "supplier"]
+        start_time = time.time()
+        run_pg_restore(pg_bin, dump_file_path, env.postgres, table_names)
+        end_time = time.time()
+        duration = end_time - start_time
+        size_after = env.postgres.safe_psql("select pg_database_size('postgres');")[0][0]
+        log.info(f"Database size after restore: {size_after}")
+        # Calculate the restore rate in bytes/second
+        restored_size = size_after - size_before
+        restore_rate = restored_size / duration
+        log.info(f"pg_restore duration: {duration:.2f} seconds")
+        log.info(f"Restore rate: {restore_rate:.2f} bytes/second")
 
 def test_safekeeper_without_pageserver_and_waltest(
     test_output_dir: str,
