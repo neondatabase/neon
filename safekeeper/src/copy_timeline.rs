@@ -12,7 +12,7 @@ use tracing::{info, warn};
 use utils::{id::TenantTimelineId, lsn::Lsn};
 
 use crate::{
-    control_file::{FileStorage, Storage},
+    control_file::FileStorage,
     state::TimelinePersistentState,
     timeline::{Timeline, TimelineError, WalResidentTimeline},
     timelines_global_map::{create_temp_timeline_dir, validate_temp_timeline},
@@ -149,13 +149,12 @@ pub async fn handle_request(request: Request) -> Result<()> {
         vec![],
         request.until_lsn,
         start_lsn,
-    );
+    )?;
     new_state.timeline_start_lsn = start_lsn;
     new_state.peer_horizon_lsn = request.until_lsn;
     new_state.backup_lsn = new_backup_lsn;
 
-    let mut file_storage = FileStorage::create_new(tli_dir_path.clone(), conf, new_state.clone())?;
-    file_storage.persist(&new_state).await?;
+    FileStorage::create_new(tli_dir_path.clone(), conf, new_state.clone()).await?;
 
     // now we have a ready timeline in a temp directory
     validate_temp_timeline(conf, request.destination_ttid, &tli_dir_path).await?;
