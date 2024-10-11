@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import pytest
 from fixtures.neon_fixtures import NeonEnvBuilder, wait_for_last_flush_lsn
 
@@ -16,7 +18,7 @@ def test_bulk_update(neon_env_builder: NeonEnvBuilder, zenbenchmark, fillfactor)
     env = neon_env_builder.init_start()
     n_records = 1000000
 
-    timeline_id = env.neon_cli.create_branch("test_bulk_update")
+    timeline_id = env.create_branch("test_bulk_update")
     tenant_id = env.initial_tenant
     endpoint = env.endpoints.create_start("test_bulk_update")
     cur = endpoint.connect().cursor()

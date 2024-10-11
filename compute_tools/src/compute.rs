@@ -10,6 +10,7 @@ use std::sync::atomic::AtomicU32;
 use std::sync::atomic::Ordering;
 use std::sync::{Condvar, Mutex, RwLock};
 use std::thread;
+use std::time::Duration;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -33,6 +34,7 @@ use nix::sys::signal::{kill, Signal};
 use remote_storage::{DownloadError, RemotePath};
 
 use crate::checker::create_availability_check_data;
+use crate::local_proxy;
 use crate::logger::inlinify;
 use crate::pg_helpers::*;
 use crate::spec::*;
@@ -106,6 +108,18 @@ impl ComputeState {
             pspec: None,
             metrics: ComputeMetrics::default(),
         }
+    }
+
+    pub fn set_status(&mut self, status: ComputeStatus, state_changed: &Condvar) {
+        let prev = self.status;
+        info!("Changing compute status from {} to {}", prev, status);
+        self.status = status;
+        state_changed.notify_all();
+    }
+
+    pub fn set_failed_status(&mut self, err: anyhow::Error, state_changed: &Condvar) {
+        self.error = Some(format!("{err:?}"));
+        self.set_status(ComputeStatus::Failed, state_changed);
     }
 }
 
@@ -301,8 +315,12 @@ impl ComputeNode {
 
     pub fn set_status(&self, status: ComputeStatus) {
         let mut state = self.state.lock().unwrap();
-        state.status = status;
-        self.state_changed.notify_all();
+        state.set_status(status, &self.state_changed);
+    }
+
+    pub fn set_failed_status(&self, err: anyhow::Error) {
+        let mut state = self.state.lock().unwrap();
+        state.set_failed_status(err, &self.state_changed);
     }
 
     pub fn get_status(&self) -> ComputeStatus {
@@ -400,7 +418,15 @@ impl ComputeNode {
     pub fn get_basebackup(&self, compute_state: &ComputeState, lsn: Lsn) -> Result<()> {
         let mut retry_period_ms = 500.0;
         let mut attempts = 0;
-        let max_attempts = 10;
+        const DEFAULT_ATTEMPTS: u16 = 10;
+        #[cfg(feature = "testing")]
+        let max_attempts = if let Ok(v) = env::var("NEON_COMPUTE_TESTING_BASEBACKUP_RETRIES") {
+            u16::from_str(&v).unwrap()
+        } else {
+            DEFAULT_ATTEMPTS
+        };
+        #[cfg(not(feature = "testing"))]
+        let max_attempts = DEFAULT_ATTEMPTS;
         loop {
             let result = self.try_get_basebackup(compute_state, lsn);
             match result {
@@ -702,7 +728,7 @@ impl ComputeNode {
         info!("running initdb");
         let initdb_bin = Path::new(&self.pgbin).parent().unwrap().join("initdb");
         Command::new(initdb_bin)
-            .args(["-D", pgdata])
+            .args(["--pgdata", pgdata])
             .output()
             .expect("cannot start initdb process");
 
@@ -870,6 +896,11 @@ impl ComputeNode {
         // 'Close' connection
         drop(client);
 
+        if let Some(ref local_proxy) = spec.local_proxy_config {
+            info!("configuring local_proxy");
+            local_proxy::configure(local_proxy).context("apply_config local_proxy")?;
+        }
+
         // Run migrations separately to not hold up cold starts
         thread::spawn(move || {
             let mut connstr = connstr.clone();
@@ -918,6 +949,19 @@ impl ComputeNode {
                     error!("error while tuning pgbouncer: {err:?}");
                 }
             });
+        }
+
+        if let Some(ref local_proxy) = spec.local_proxy_config {
+            info!("configuring local_proxy");
+
+            // Spawn a thread to do the configuration,
+            // so that we don't block the main thread that starts Postgres.
+            let local_proxy = local_proxy.clone();
+            let _handle = Some(thread::spawn(move || {
+                if let Err(err) = local_proxy::configure(&local_proxy) {
+                    error!("error while configuring local_proxy: {err:?}");
+                }
+            }));
         }
 
         // Write new config
@@ -1003,6 +1047,19 @@ impl ComputeNode {
                 let res = rt.block_on(tune_pgbouncer(pgbouncer_settings));
                 if let Err(err) = res {
                     error!("error while tuning pgbouncer: {err:?}");
+                }
+            });
+        }
+
+        if let Some(local_proxy) = &pspec.spec.local_proxy_config {
+            info!("configuring local_proxy");
+
+            // Spawn a thread to do the configuration,
+            // so that we don't block the main thread that starts Postgres.
+            let local_proxy = local_proxy.clone();
+            let _handle = thread::spawn(move || {
+                if let Err(err) = local_proxy::configure(&local_proxy) {
+                    error!("error while configuring local_proxy: {err:?}");
                 }
             });
         }
@@ -1122,6 +1179,9 @@ impl ComputeNode {
     //
     // Use that as a default location and pattern, except macos where core dumps are written
     // to /cores/ directory by default.
+    //
+    // With default Linux settings, the core dump file is called just "core", so check for
+    // that too.
     pub fn check_for_core_dumps(&self) -> Result<()> {
         let core_dump_dir = match std::env::consts::OS {
             "macos" => Path::new("/cores/"),
@@ -1133,8 +1193,17 @@ impl ComputeNode {
         let files = fs::read_dir(core_dump_dir)?;
         let cores = files.filter_map(|entry| {
             let entry = entry.ok()?;
-            let _ = entry.file_name().to_str()?.strip_prefix("core.")?;
-            Some(entry.path())
+
+            let is_core_dump = match entry.file_name().to_str()? {
+                n if n.starts_with("core.") => true,
+                "core" => true,
+                _ => false,
+            };
+            if is_core_dump {
+                Some(entry.path())
+            } else {
+                None
+            }
         });
 
         // Print backtrace for each core dump
@@ -1384,6 +1453,58 @@ LIMIT 100",
             remote_ext_metrics.total_ext_download_size += download_size;
         }
         Ok(remote_ext_metrics)
+    }
+
+    /// Waits until current thread receives a state changed notification and
+    /// the pageserver connection strings has changed.
+    ///
+    /// The operation will time out after a specified duration.
+    pub fn wait_timeout_while_pageserver_connstr_unchanged(&self, duration: Duration) {
+        let state = self.state.lock().unwrap();
+        let old_pageserver_connstr = state
+            .pspec
+            .as_ref()
+            .expect("spec must be set")
+            .pageserver_connstr
+            .clone();
+        let mut unchanged = true;
+        let _ = self
+            .state_changed
+            .wait_timeout_while(state, duration, |s| {
+                let pageserver_connstr = &s
+                    .pspec
+                    .as_ref()
+                    .expect("spec must be set")
+                    .pageserver_connstr;
+                unchanged = pageserver_connstr == &old_pageserver_connstr;
+                unchanged
+            })
+            .unwrap();
+        if !unchanged {
+            info!("Pageserver config changed");
+        }
+    }
+
+    // Gather info about installed extensions
+    pub fn get_installed_extensions(&self) -> Result<()> {
+        let connstr = self.connstr.clone();
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("failed to create runtime");
+        let result = rt
+            .block_on(crate::installed_extensions::get_installed_extensions(
+                connstr,
+            ))
+            .expect("failed to get installed extensions");
+
+        info!(
+            "{}",
+            serde_json::to_string(&result).expect("failed to serialize extensions list")
+        );
+
+        Ok(())
     }
 }
 

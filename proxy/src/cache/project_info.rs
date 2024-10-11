@@ -16,7 +16,7 @@ use tracing::{debug, info};
 use crate::{
     auth::IpPattern,
     config::ProjectInfoCacheOptions,
-    console::AuthSecret,
+    control_plane::AuthSecret,
     intern::{EndpointIdInt, ProjectIdInt, RoleNameInt},
     EndpointId, RoleName,
 };
@@ -24,7 +24,7 @@ use crate::{
 use super::{Cache, Cached};
 
 #[async_trait]
-pub trait ProjectInfoCache {
+pub(crate) trait ProjectInfoCache {
     fn invalidate_allowed_ips_for_project(&self, project_id: ProjectIdInt);
     fn invalidate_role_secret_for_project(&self, project_id: ProjectIdInt, role_name: RoleNameInt);
     async fn decrement_active_listeners(&self);
@@ -37,7 +37,7 @@ struct Entry<T> {
 }
 
 impl<T> Entry<T> {
-    pub fn new(value: T) -> Self {
+    pub(crate) fn new(value: T) -> Self {
         Self {
             created_at: Instant::now(),
             value,
@@ -64,7 +64,7 @@ impl EndpointInfo {
             Some(t) => t < created_at,
         }
     }
-    pub fn get_role_secret(
+    pub(crate) fn get_role_secret(
         &self,
         role_name: RoleNameInt,
         valid_since: Instant,
@@ -81,7 +81,7 @@ impl EndpointInfo {
         None
     }
 
-    pub fn get_allowed_ips(
+    pub(crate) fn get_allowed_ips(
         &self,
         valid_since: Instant,
         ignore_cache_since: Option<Instant>,
@@ -96,10 +96,10 @@ impl EndpointInfo {
         }
         None
     }
-    pub fn invalidate_allowed_ips(&mut self) {
+    pub(crate) fn invalidate_allowed_ips(&mut self) {
         self.allowed_ips = None;
     }
-    pub fn invalidate_role_secret(&mut self, role_name: RoleNameInt) {
+    pub(crate) fn invalidate_role_secret(&mut self, role_name: RoleNameInt) {
         self.secret.remove(&role_name);
     }
 }
@@ -178,7 +178,7 @@ impl ProjectInfoCache for ProjectInfoCacheImpl {
 }
 
 impl ProjectInfoCacheImpl {
-    pub fn new(config: ProjectInfoCacheOptions) -> Self {
+    pub(crate) fn new(config: ProjectInfoCacheOptions) -> Self {
         Self {
             cache: DashMap::new(),
             project2ep: DashMap::new(),
@@ -189,7 +189,7 @@ impl ProjectInfoCacheImpl {
         }
     }
 
-    pub fn get_role_secret(
+    pub(crate) fn get_role_secret(
         &self,
         endpoint_id: &EndpointId,
         role_name: &RoleName,
@@ -212,7 +212,7 @@ impl ProjectInfoCacheImpl {
         }
         Some(Cached::new_uncached(value))
     }
-    pub fn get_allowed_ips(
+    pub(crate) fn get_allowed_ips(
         &self,
         endpoint_id: &EndpointId,
     ) -> Option<Cached<&Self, Arc<Vec<IpPattern>>>> {
@@ -230,7 +230,7 @@ impl ProjectInfoCacheImpl {
         }
         Some(Cached::new_uncached(value))
     }
-    pub fn insert_role_secret(
+    pub(crate) fn insert_role_secret(
         &self,
         project_id: ProjectIdInt,
         endpoint_id: EndpointIdInt,
@@ -247,7 +247,7 @@ impl ProjectInfoCacheImpl {
             entry.secret.insert(role_name, secret.into());
         }
     }
-    pub fn insert_allowed_ips(
+    pub(crate) fn insert_allowed_ips(
         &self,
         project_id: ProjectIdInt,
         endpoint_id: EndpointIdInt,
@@ -274,13 +274,13 @@ impl ProjectInfoCacheImpl {
         let ttl_disabled_since_us = self
             .ttl_disabled_since_us
             .load(std::sync::atomic::Ordering::Relaxed);
-        let ignore_cache_since = if ttl_disabled_since_us != u64::MAX {
+        let ignore_cache_since = if ttl_disabled_since_us == u64::MAX {
+            None
+        } else {
             let ignore_cache_since = self.start_time + Duration::from_micros(ttl_disabled_since_us);
             // We are fine if entry is not older than ttl or was added before we are getting notifications.
             valid_since = valid_since.min(ignore_cache_since);
             Some(ignore_cache_since)
-        } else {
-            None
         };
         (valid_since, ignore_cache_since)
     }
@@ -306,7 +306,7 @@ impl ProjectInfoCacheImpl {
         let mut removed = 0;
         let shard = self.project2ep.shards()[shard].write();
         for (_, endpoints) in shard.iter() {
-            for endpoint in endpoints.get().iter() {
+            for endpoint in endpoints.get() {
                 self.cache.remove(endpoint);
                 removed += 1;
             }
@@ -319,7 +319,7 @@ impl ProjectInfoCacheImpl {
 
 /// Lookup info for project info cache.
 /// This is used to invalidate cache entries.
-pub struct CachedLookupInfo {
+pub(crate) struct CachedLookupInfo {
     /// Search by this key.
     endpoint_id: EndpointIdInt,
     lookup_type: LookupType,

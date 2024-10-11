@@ -12,8 +12,10 @@ use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use utils::id::TenantId;
 
-/// A unique identifier of a persistent layer. This is different from `LayerDescriptor`, which is only used in the
-/// benchmarks. This struct contains all necessary information to find the image / delta layer. It also provides
+/// A unique identifier of a persistent layer.
+///
+/// This is different from `LayerDescriptor`, which is only used in the benchmarks.
+/// This struct contains all necessary information to find the image / delta layer. It also provides
 /// a unified way to generate layer information like file name.
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize, Hash)]
 pub struct PersistentLayerDesc {
@@ -39,6 +41,20 @@ pub struct PersistentLayerKey {
     pub key_range: Range<Key>,
     pub lsn_range: Range<Lsn>,
     pub is_delta: bool,
+}
+
+impl std::fmt::Display for PersistentLayerKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}..{} {}..{} is_delta={}",
+            self.key_range.start,
+            self.key_range.end,
+            self.lsn_range.start,
+            self.lsn_range.end,
+            self.is_delta
+        )
+    }
 }
 
 impl PersistentLayerDesc {

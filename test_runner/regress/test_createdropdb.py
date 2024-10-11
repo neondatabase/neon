@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import pathlib
 
@@ -17,9 +19,7 @@ def test_createdb(neon_simple_env: NeonEnv, strategy: str):
     if env.pg_version == PgVersion.V14 and strategy == "wal_log":
         pytest.skip("wal_log strategy not supported on PostgreSQL 14")
 
-    env.neon_cli.create_branch("test_createdb", "empty")
-
-    endpoint = env.endpoints.create_start("test_createdb")
+    endpoint = env.endpoints.create_start("main")
 
     with endpoint.cursor() as cur:
         # Cause a 'relmapper' change in the original branch
@@ -33,7 +33,7 @@ def test_createdb(neon_simple_env: NeonEnv, strategy: str):
         lsn = query_scalar(cur, "SELECT pg_current_wal_insert_lsn()")
 
     # Create a branch
-    env.neon_cli.create_branch("test_createdb2", "test_createdb", ancestor_start_lsn=lsn)
+    env.create_branch("test_createdb2", ancestor_branch_name="main", ancestor_start_lsn=lsn)
     endpoint2 = env.endpoints.create_start("test_createdb2")
 
     # Test that you can connect to the new database on both branches
@@ -62,8 +62,7 @@ def test_createdb(neon_simple_env: NeonEnv, strategy: str):
 #
 def test_dropdb(neon_simple_env: NeonEnv, test_output_dir):
     env = neon_simple_env
-    env.neon_cli.create_branch("test_dropdb", "empty")
-    endpoint = env.endpoints.create_start("test_dropdb")
+    endpoint = env.endpoints.create_start("main")
 
     with endpoint.cursor() as cur:
         cur.execute("CREATE DATABASE foodb")
@@ -80,13 +79,13 @@ def test_dropdb(neon_simple_env: NeonEnv, test_output_dir):
         lsn_after_drop = query_scalar(cur, "SELECT pg_current_wal_insert_lsn()")
 
     # Create two branches before and after database drop.
-    env.neon_cli.create_branch(
-        "test_before_dropdb", "test_dropdb", ancestor_start_lsn=lsn_before_drop
+    env.create_branch(
+        "test_before_dropdb", ancestor_branch_name="main", ancestor_start_lsn=lsn_before_drop
     )
     endpoint_before = env.endpoints.create_start("test_before_dropdb")
 
-    env.neon_cli.create_branch(
-        "test_after_dropdb", "test_dropdb", ancestor_start_lsn=lsn_after_drop
+    env.create_branch(
+        "test_after_dropdb", ancestor_branch_name="main", ancestor_start_lsn=lsn_after_drop
     )
     endpoint_after = env.endpoints.create_start("test_after_dropdb")
 

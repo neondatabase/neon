@@ -5,10 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-async-trait.workspace = true
 anyhow.workspace = true
 bytes.workspace = true
-futures.workspace = true
 rustls.workspace = true
 serde.workspace = true
 thiserror.workspace = true
@@ -18,7 +16,6 @@ tokio-rustls.workspace = true
 tracing.workspace = true
 
 pq_proto.workspace = true
-workspace_hack.workspace = true
 
 [dev-dependencies]
 once_cell.workspace = true

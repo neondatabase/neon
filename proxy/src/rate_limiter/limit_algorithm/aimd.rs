@@ -10,24 +10,23 @@ use super::{LimitAlgorithm, Outcome, Sample};
 ///
 /// Reduces available concurrency by a factor when load-based errors are detected.
 #[derive(Clone, Copy, Debug, serde::Deserialize, PartialEq)]
-pub struct Aimd {
+pub(crate) struct Aimd {
     /// Minimum limit for AIMD algorithm.
-    pub min: usize,
+    pub(crate) min: usize,
     /// Maximum limit for AIMD algorithm.
-    pub max: usize,
+    pub(crate) max: usize,
     /// Decrease AIMD decrease by value in case of error.
-    pub dec: f32,
+    pub(crate) dec: f32,
     /// Increase AIMD increase by value in case of success.
-    pub inc: usize,
+    pub(crate) inc: usize,
     /// A threshold below which the limit won't be increased.
-    pub utilisation: f32,
+    pub(crate) utilisation: f32,
 }
 
 impl LimitAlgorithm for Aimd {
     fn update(&self, old_limit: usize, sample: Sample) -> usize {
-        use Outcome::*;
         match sample.outcome {
-            Success => {
+            Outcome::Success => {
                 let utilisation = sample.in_flight as f32 / old_limit as f32;
 
                 if utilisation > self.utilisation {
@@ -42,7 +41,7 @@ impl LimitAlgorithm for Aimd {
                     old_limit
                 }
             }
-            Overload => {
+            Outcome::Overload => {
                 let limit = old_limit as f32 * self.dec;
 
                 // Floor instead of round, so the limit reduces even with small numbers.

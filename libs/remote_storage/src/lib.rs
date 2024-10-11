@@ -19,7 +19,8 @@ mod simulate_failures;
 mod support;
 
 use std::{
-    collections::HashMap, fmt::Debug, num::NonZeroU32, pin::Pin, sync::Arc, time::SystemTime,
+    collections::HashMap, fmt::Debug, num::NonZeroU32, ops::Bound, pin::Pin, sync::Arc,
+    time::SystemTime,
 };
 
 use anyhow::Context;
@@ -45,6 +46,8 @@ pub use azure_core::Etag;
 
 pub use error::{DownloadError, TimeTravelError, TimeoutOrCancel};
 
+/// Default concurrency limit for S3 operations
+///
 /// Currently, sync happens with AWS S3, that has two limits on requests per second:
 /// ~200 RPS for IAM services
 /// <https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/UsingWithRDS.IAMDBAuth.html>
@@ -125,10 +128,6 @@ impl RemotePath {
         &self.0
     }
 
-    pub fn extension(&self) -> Option<&str> {
-        self.0.extension()
-    }
-
     pub fn strip_prefix(&self, p: &RemotePath) -> Result<&Utf8Path, std::path::StripPrefixError> {
         self.0.strip_prefix(&p.0)
     }
@@ -144,21 +143,80 @@ impl RemotePath {
 ///
 /// The WithDelimiter mode will populate `prefixes` and `keys` in the result.  The
 /// NoDelimiter mode will only populate `keys`.
+#[derive(Copy, Clone)]
 pub enum ListingMode {
     WithDelimiter,
     NoDelimiter,
 }
 
-#[derive(PartialEq, Eq, Debug)]
+#[derive(PartialEq, Eq, Debug, Clone)]
 pub struct ListingObject {
     pub key: RemotePath,
     pub last_modified: SystemTime,
+    pub size: u64,
 }
 
 #[derive(Default)]
 pub struct Listing {
     pub prefixes: Vec<RemotePath>,
     pub keys: Vec<ListingObject>,
+}
+
+/// Options for downloads. The default value is a plain GET.
+pub struct DownloadOpts {
+    /// If given, returns [`DownloadError::Unmodified`] if the object still has
+    /// the same ETag (using If-None-Match).
+    pub etag: Option<Etag>,
+    /// The start of the byte range to download, or unbounded.
+    pub byte_start: Bound<u64>,
+    /// The end of the byte range to download, or unbounded. Must be after the
+    /// start bound.
+    pub byte_end: Bound<u64>,
+}
+
+impl Default for DownloadOpts {
+    fn default() -> Self {
+        Self {
+            etag: Default::default(),
+            byte_start: Bound::Unbounded,
+            byte_end: Bound::Unbounded,
+        }
+    }
+}
+
+impl DownloadOpts {
+    /// Returns the byte range with inclusive start and exclusive end, or None
+    /// if unbounded.
+    pub fn byte_range(&self) -> Option<(u64, Option<u64>)> {
+        if self.byte_start == Bound::Unbounded && self.byte_end == Bound::Unbounded {
+            return None;
+        }
+        let start = match self.byte_start {
+            Bound::Excluded(i) => i + 1,
+            Bound::Included(i) => i,
+            Bound::Unbounded => 0,
+        };
+        let end = match self.byte_end {
+            Bound::Excluded(i) => Some(i),
+            Bound::Included(i) => Some(i + 1),
+            Bound::Unbounded => None,
+        };
+        if let Some(end) = end {
+            assert!(start < end, "range end {end} at or before start {start}");
+        }
+        Some((start, end))
+    }
+
+    /// Returns the byte range as an RFC 2616 Range header value with inclusive
+    /// bounds, or None if unbounded.
+    pub fn byte_range_header(&self) -> Option<String> {
+        self.byte_range()
+            .map(|(start, end)| (start, end.map(|end| end - 1))) // make end inclusive
+            .map(|(start, end)| match end {
+                Some(end) => format!("bytes={start}-{end}"),
+                None => format!("bytes={start}-"),
+            })
+    }
 }
 
 /// Storage (potentially remote) API to manage its state.
@@ -213,6 +271,13 @@ pub trait RemoteStorage: Send + Sync + 'static {
         Ok(combined)
     }
 
+    /// Obtain metadata information about an object.
+    async fn head_object(
+        &self,
+        key: &RemotePath,
+        cancel: &CancellationToken,
+    ) -> Result<ListingObject, DownloadError>;
+
     /// Streams the local file contents into remote into the remote storage entry.
     ///
     /// If the operation fails because of timeout or cancellation, the root cause of the error will be
@@ -238,21 +303,7 @@ pub trait RemoteStorage: Send + Sync + 'static {
     async fn download(
         &self,
         from: &RemotePath,
-        cancel: &CancellationToken,
-    ) -> Result<Download, DownloadError>;
-
-    /// Streams a given byte range of the remote storage entry contents.
-    ///
-    /// The returned download stream will obey initial timeout and cancellation signal by erroring
-    /// on whichever happens first. Only one of the reasons will fail the stream, which is usually
-    /// enough for `tokio::io::copy_buf` usage. If needed the error can be filtered out.
-    ///
-    /// Returns the metadata, if any was stored with the file previously.
-    async fn download_byte_range(
-        &self,
-        from: &RemotePath,
-        start_inclusive: u64,
-        end_exclusive: Option<u64>,
+        opts: &DownloadOpts,
         cancel: &CancellationToken,
     ) -> Result<Download, DownloadError>;
 
@@ -291,7 +342,9 @@ pub trait RemoteStorage: Send + Sync + 'static {
     ) -> Result<(), TimeTravelError>;
 }
 
-/// DownloadStream is sensitive to the timeout and cancellation used with the original
+/// Data part of an ongoing [`Download`].
+///
+/// `DownloadStream` is sensitive to the timeout and cancellation used with the original
 /// [`RemoteStorage::download`] request. The type yields `std::io::Result<Bytes>` to be compatible
 /// with `tokio::io::copy_buf`.
 // This has 'static because safekeepers do not use cancellation tokens (yet)
@@ -361,6 +414,20 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
         }
     }
 
+    // See [`RemoteStorage::head_object`].
+    pub async fn head_object(
+        &self,
+        key: &RemotePath,
+        cancel: &CancellationToken,
+    ) -> Result<ListingObject, DownloadError> {
+        match self {
+            Self::LocalFs(s) => s.head_object(key, cancel).await,
+            Self::AwsS3(s) => s.head_object(key, cancel).await,
+            Self::AzureBlob(s) => s.head_object(key, cancel).await,
+            Self::Unreliable(s) => s.head_object(key, cancel).await,
+        }
+    }
+
     /// See [`RemoteStorage::upload`]
     pub async fn upload(
         &self,
@@ -378,43 +445,18 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
         }
     }
 
+    /// See [`RemoteStorage::download`]
     pub async fn download(
         &self,
         from: &RemotePath,
+        opts: &DownloadOpts,
         cancel: &CancellationToken,
     ) -> Result<Download, DownloadError> {
         match self {
-            Self::LocalFs(s) => s.download(from, cancel).await,
-            Self::AwsS3(s) => s.download(from, cancel).await,
-            Self::AzureBlob(s) => s.download(from, cancel).await,
-            Self::Unreliable(s) => s.download(from, cancel).await,
-        }
-    }
-
-    pub async fn download_byte_range(
-        &self,
-        from: &RemotePath,
-        start_inclusive: u64,
-        end_exclusive: Option<u64>,
-        cancel: &CancellationToken,
-    ) -> Result<Download, DownloadError> {
-        match self {
-            Self::LocalFs(s) => {
-                s.download_byte_range(from, start_inclusive, end_exclusive, cancel)
-                    .await
-            }
-            Self::AwsS3(s) => {
-                s.download_byte_range(from, start_inclusive, end_exclusive, cancel)
-                    .await
-            }
-            Self::AzureBlob(s) => {
-                s.download_byte_range(from, start_inclusive, end_exclusive, cancel)
-                    .await
-            }
-            Self::Unreliable(s) => {
-                s.download_byte_range(from, start_inclusive, end_exclusive, cancel)
-                    .await
-            }
+            Self::LocalFs(s) => s.download(from, opts, cancel).await,
+            Self::AwsS3(s) => s.download(from, opts, cancel).await,
+            Self::AzureBlob(s) => s.download(from, opts, cancel).await,
+            Self::Unreliable(s) => s.download(from, opts, cancel).await,
         }
     }
 
@@ -539,20 +581,6 @@ impl GenericRemoteStorage {
             })
     }
 
-    /// Downloads the storage object into the `to_path` provided.
-    /// `byte_range` could be specified to dowload only a part of the file, if needed.
-    pub async fn download_storage_object(
-        &self,
-        byte_range: Option<(u64, Option<u64>)>,
-        from: &RemotePath,
-        cancel: &CancellationToken,
-    ) -> Result<Download, DownloadError> {
-        match byte_range {
-            Some((start, end)) => self.download_byte_range(from, start, end, cancel).await,
-            None => self.download(from, cancel).await,
-        }
-    }
-
     /// The name of the bucket/container/etc.
     pub fn bucket_name(&self) -> Option<&str> {
         match self {
@@ -596,6 +624,7 @@ impl ConcurrencyLimiter {
             RequestKind::Delete => &self.write,
             RequestKind::Copy => &self.write,
             RequestKind::TimeTravel => &self.write,
+            RequestKind::Head => &self.read,
         }
     }
 
@@ -624,6 +653,76 @@ impl ConcurrencyLimiter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// DownloadOpts::byte_range() should generate (inclusive, exclusive) ranges
+    /// with optional end bound, or None when unbounded.
+    #[test]
+    fn download_opts_byte_range() {
+        // Consider using test_case or a similar table-driven test framework.
+        let cases = [
+            // (byte_start, byte_end, expected)
+            (Bound::Unbounded, Bound::Unbounded, None),
+            (Bound::Unbounded, Bound::Included(7), Some((0, Some(8)))),
+            (Bound::Unbounded, Bound::Excluded(7), Some((0, Some(7)))),
+            (Bound::Included(3), Bound::Unbounded, Some((3, None))),
+            (Bound::Included(3), Bound::Included(7), Some((3, Some(8)))),
+            (Bound::Included(3), Bound::Excluded(7), Some((3, Some(7)))),
+            (Bound::Excluded(3), Bound::Unbounded, Some((4, None))),
+            (Bound::Excluded(3), Bound::Included(7), Some((4, Some(8)))),
+            (Bound::Excluded(3), Bound::Excluded(7), Some((4, Some(7)))),
+            // 1-sized ranges are fine, 0 aren't and will panic (separate test).
+            (Bound::Included(3), Bound::Included(3), Some((3, Some(4)))),
+            (Bound::Included(3), Bound::Excluded(4), Some((3, Some(4)))),
+        ];
+
+        for (byte_start, byte_end, expect) in cases {
+            let opts = DownloadOpts {
+                byte_start,
+                byte_end,
+                ..Default::default()
+            };
+            let result = opts.byte_range();
+            assert_eq!(
+                result, expect,
+                "byte_start={byte_start:?} byte_end={byte_end:?}"
+            );
+
+            // Check generated HTTP header, which uses an inclusive range.
+            let expect_header = expect.map(|(start, end)| match end {
+                Some(end) => format!("bytes={start}-{}", end - 1), // inclusive end
+                None => format!("bytes={start}-"),
+            });
+            assert_eq!(
+                opts.byte_range_header(),
+                expect_header,
+                "byte_start={byte_start:?} byte_end={byte_end:?}"
+            );
+        }
+    }
+
+    /// DownloadOpts::byte_range() zero-sized byte range should panic.
+    #[test]
+    #[should_panic]
+    fn download_opts_byte_range_zero() {
+        DownloadOpts {
+            byte_start: Bound::Included(3),
+            byte_end: Bound::Excluded(3),
+            ..Default::default()
+        }
+        .byte_range();
+    }
+
+    /// DownloadOpts::byte_range() negative byte range should panic.
+    #[test]
+    #[should_panic]
+    fn download_opts_byte_range_negative() {
+        DownloadOpts {
+            byte_start: Bound::Included(3),
+            byte_end: Bound::Included(2),
+            ..Default::default()
+        }
+        .byte_range();
+    }
 
     #[test]
     fn test_object_name() {

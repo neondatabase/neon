@@ -32,6 +32,7 @@
 #include "utils/builtins.h"
 #include "utils/pg_lsn.h"
 #include "utils/guc.h"
+#include "utils/guc_tables.h"
 #include "utils/wait_event.h"
 
 #include "extension_server.h"
@@ -40,6 +41,9 @@
 #include "pagestore_client.h"
 #include "control_plane_connector.h"
 #include "walsender_hooks.h"
+#if PG_MAJORVERSION_NUM >= 16
+#include "storage/ipc.h"
+#endif
 
 PG_MODULE_MAGIC;
 void		_PG_init(void);
@@ -47,6 +51,23 @@ void		_PG_init(void);
 static int	logical_replication_max_snap_files = 300;
 
 static int  running_xacts_overflow_policy;
+
+#if PG_MAJORVERSION_NUM >= 16
+static shmem_startup_hook_type prev_shmem_startup_hook;
+
+static void neon_shmem_startup_hook(void);
+#endif
+#if PG_MAJORVERSION_NUM >= 17
+uint32		WAIT_EVENT_NEON_LFC_MAINTENANCE;
+uint32		WAIT_EVENT_NEON_LFC_READ;
+uint32		WAIT_EVENT_NEON_LFC_TRUNCATE;
+uint32		WAIT_EVENT_NEON_LFC_WRITE;
+uint32		WAIT_EVENT_NEON_PS_STARTING;
+uint32		WAIT_EVENT_NEON_PS_CONFIGURING;
+uint32		WAIT_EVENT_NEON_PS_SEND;
+uint32		WAIT_EVENT_NEON_PS_READ;
+uint32		WAIT_EVENT_NEON_WAL_DL;
+#endif
 
 enum RunningXactsOverflowPolicies {
 	OP_IGNORE,
@@ -68,10 +89,10 @@ InitLogicalReplicationMonitor(void)
 
 	DefineCustomIntVariable(
 							"neon.logical_replication_max_snap_files",
-							"Maximum allowed logical replication .snap files",
+							"Maximum allowed logical replication .snap files. When exceeded, slots are dropped until the limit is met. -1 disables the limit.",
 							NULL,
 							&logical_replication_max_snap_files,
-							300, 0, INT_MAX,
+							300, -1, INT_MAX,
 							PGC_SIGHUP,
 							0,
 							NULL, NULL, NULL);
@@ -190,6 +211,13 @@ LogicalSlotsMonitorMain(Datum main_arg)
 	for (;;)
 	{
 		XLogRecPtr	cutoff_lsn;
+
+		/* In case of a SIGHUP, just reload the configuration. */
+		if (ConfigReloadPending)
+		{
+			ConfigReloadPending = false;
+			ProcessConfigFile(PGC_SIGHUP);
+		}
 
 		/*
 		 * If there are too many .snap files, just drop all logical slots to
@@ -584,6 +612,40 @@ RestoreRunningXactsFromClog(CheckPoint *checkpoint, TransactionId **xids, int *n
 	return false;
 }
 
+
+/*
+ * pgbouncer is able to track GUCs reported by Postgres.
+ * But most parameters cannot be tracked this way. The only parameters that can be tracked are ones
+ * that Postgres reports to the client. Unfortunately `search_path` is not reported by Postgres:
+ * https://www.postgresql.org/message-id/flat/CAGECzQQ6xFcgrg%2Be0p9mCumtK362TiA6vTiiZKoYbS8OXggwuQ%40mail.gmail.com#be4bfd7a9cf1f0633bdb2d1790a0a1be
+ * This code sets GUC_REPORT flag for `search_path`making it possible to include it in
+ * pgbouncer's `track_extra_parameters` list.
+ *
+ * This code is inspired by how the Citus extension does this, see
+ * https://github.com/citusdata/citus/blob/2a263fe69a707d16ef24378f7650742386b0968f/src/backend/distributed/shared_library_init.c#L2694
+ */
+static void
+ReportSearchPath(void)
+{
+#if PG_VERSION_NUM >= 160000
+	int nGucs = 0;
+	struct config_generic **gucs = get_guc_variables(&nGucs);
+#else
+	struct config_generic **gucs = get_guc_variables();
+	int nGucs = GetNumConfigOptions();
+#endif
+
+	for (int i = 0; i < nGucs; i++)
+	{
+		struct config_generic *guc = (struct config_generic *) gucs[i];
+
+		if (strcmp(guc->name, "search_path") == 0)
+		{
+			guc->flags |= GUC_REPORT;
+		}
+	}
+}
+
 void
 _PG_init(void)
 {
@@ -593,12 +655,16 @@ _PG_init(void)
 	 */
 #if PG_VERSION_NUM >= 160000
 	load_file("$libdir/neon_rmgr", false);
+
+	prev_shmem_startup_hook = shmem_startup_hook;
+	shmem_startup_hook = neon_shmem_startup_hook;
 #endif
 
 	pg_init_libpagestore();
 	pg_init_walproposer();
 	WalSender_Custom_XLogReaderRoutines = NeonOnDemandXLogReaderRoutines;
 	LogicalFuncs_Custom_XLogReaderRoutines = NeonOnDemandXLogReaderRoutines;
+	SlotFuncs_Custom_XLogReaderRoutines = NeonOnDemandXLogReaderRoutines;
 
 	InitLogicalReplicationMonitor();
 
@@ -626,6 +692,8 @@ _PG_init(void)
 	 * extension was loaded will be removed.
 	 */
 	EmitWarningsOnPlaceholders("neon");
+
+	ReportSearchPath();
 }
 
 PG_FUNCTION_INFO_V1(pg_cluster_size);
@@ -676,3 +744,25 @@ backpressure_throttling_time(PG_FUNCTION_ARGS)
 {
 	PG_RETURN_UINT64(BackpressureThrottlingTime());
 }
+
+#if PG_MAJORVERSION_NUM >= 16
+static void
+neon_shmem_startup_hook(void)
+{
+	/* Initialize */
+	if (prev_shmem_startup_hook)
+		prev_shmem_startup_hook();
+
+#if PG_PG_MAJORVERSION_NUM >= 17
+	WAIT_EVENT_NEON_LFC_MAINTENANCE = WaitEventExtensionNew("Neon/FileCache_Maintenance");
+	WAIT_EVENT_NEON_LFC_READ = WaitEventExtensionNew("Neon/FileCache_Read");
+	WAIT_EVENT_NEON_LFC_TRUNCATE = WaitEventExtensionNew("Neon/FileCache_Truncate");
+	WAIT_EVENT_NEON_LFC_WRITE = WaitEventExtensionNew("Neon/FileCache_Write");
+	WAIT_EVENT_NEON_PS_STARTING = WaitEventExtensionNew("Neon/PS_Starting");
+	WAIT_EVENT_NEON_PS_CONFIGURING = WaitEventExtensionNew("Neon/PS_Configuring");
+	WAIT_EVENT_NEON_PS_SEND = WaitEventExtensionNew("Neon/PS_SendIO");
+	WAIT_EVENT_NEON_PS_READ = WaitEventExtensionNew("Neon/PS_ReadIO");
+	WAIT_EVENT_NEON_WAL_DL = WaitEventExtensionNew("Neon/WAL_Download");
+#endif
+}
+#endif

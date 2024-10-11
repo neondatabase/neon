@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import os
 import threading
@@ -168,7 +170,7 @@ def test_hot_standby_gc(neon_env_builder: NeonEnvBuilder, pause_apply: bool):
             # re-execute the query, it will make GetPage
             # requests. This does not clear the last-written LSN cache
             # so we still remember the LSNs of the pages.
-            s_cur.execute("SELECT clear_buffer_cache()")
+            secondary.clear_shared_buffers(cursor=s_cur)
 
             if pause_apply:
                 s_cur.execute("SELECT pg_wal_replay_pause()")
@@ -198,9 +200,6 @@ def test_hot_standby_gc(neon_env_builder: NeonEnvBuilder, pause_apply: bool):
 
 def run_pgbench(connstr: str, pg_bin: PgBin):
     log.info(f"Start a pgbench workload on pg {connstr}")
-    # s10 is about 150MB of data. In debug mode init takes about 15s on SSD.
-    pg_bin.run_capture(["pgbench", "-i", "-s10", connstr])
-    log.info("pgbench init done")
     pg_bin.run_capture(["pgbench", "-T60", connstr])
 
 
@@ -222,7 +221,7 @@ def pgbench_accounts_initialized(ep):
 # Without hs feedback enabled we'd see 'User query might have needed to see row
 # versions that must be removed.' errors.
 def test_hot_standby_feedback(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
-    env = neon_env_builder.init_start()
+    env = neon_env_builder.init_start(initial_tenant_conf={"lsn_lease_length": "0s"})
     agressive_vacuum_conf = [
         "log_autovacuum_min_duration = 0",
         "autovacuum_naptime = 10s",
@@ -247,9 +246,15 @@ def test_hot_standby_feedback(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
             log.info(
                 f"primary connstr is {primary.connstr()}, secondary connstr {secondary.connstr()}"
             )
+
+            # s10 is about 150MB of data. In debug mode init takes about 15s on SSD.
+            pg_bin.run_capture(["pgbench", "-i", "-I", "dtGvp", "-s10", primary.connstr()])
+            log.info("pgbench init done in primary")
+
             t = threading.Thread(target=run_pgbench, args=(primary.connstr(), pg_bin))
             t.start()
-            # Wait until pgbench_accounts is created + filled on replica *and*
+
+            # Wait until we see that the pgbench_accounts is created + filled on replica *and*
             # index is created. Otherwise index creation would conflict with
             # read queries and hs feedback won't save us.
             wait_until(60, 1.0, partial(pgbench_accounts_initialized, secondary))
@@ -332,6 +337,7 @@ def test_replica_query_race(neon_simple_env: NeonEnv):
                 log.info(f"read {reads}: counter {readcounter}, last update {writecounter}")
             reads += 1
 
+            # FIXME: what about LFC clearing?
             await conn.execute("SELECT clear_buffer_cache()")
 
     async def both():

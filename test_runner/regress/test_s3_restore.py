@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import time
 from datetime import datetime, timezone
 
@@ -8,9 +10,9 @@ from fixtures.neon_fixtures import (
     PgBin,
 )
 from fixtures.pageserver.utils import (
-    MANY_SMALL_LAYERS_TENANT_CONFIG,
     assert_prefix_empty,
     enable_remote_storage_versioning,
+    many_small_layers_tenant_config,
     wait_for_upload,
 )
 from fixtures.remote_storage import RemoteStorageKind, s3_storage
@@ -33,7 +35,7 @@ def test_tenant_s3_restore(
 
     # change it back after initdb, recovery doesn't work if the two
     # index_part.json uploads happen at same second or too close to each other.
-    initial_tenant_conf = MANY_SMALL_LAYERS_TENANT_CONFIG
+    initial_tenant_conf = many_small_layers_tenant_config()
     del initial_tenant_conf["checkpoint_distance"]
 
     env = neon_env_builder.init_start(initial_tenant_conf)
@@ -50,7 +52,7 @@ def test_tenant_s3_restore(
     tenant_id = env.initial_tenant
 
     # now lets create the small layers
-    ps_http.set_tenant_config(tenant_id, MANY_SMALL_LAYERS_TENANT_CONFIG)
+    ps_http.set_tenant_config(tenant_id, many_small_layers_tenant_config())
 
     # Default tenant and the one we created
     assert ps_http.get_metric_value("pageserver_tenant_manager_slots", {"mode": "attached"}) == 1
@@ -60,9 +62,7 @@ def test_tenant_s3_restore(
     last_flush_lsns = []
 
     for timeline in ["first", "second"]:
-        timeline_id = env.neon_cli.create_branch(
-            timeline, tenant_id=tenant_id, ancestor_branch_name=parent
-        )
+        timeline_id = env.create_branch(timeline, ancestor_branch_name=parent, tenant_id=tenant_id)
         with env.endpoints.create_start(timeline, tenant_id=tenant_id) as endpoint:
             run_pg_bench_small(pg_bin, endpoint.connstr())
             endpoint.safe_psql(f"CREATE TABLE created_{timeline}(id integer);")

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import pdb
 
@@ -14,7 +16,7 @@ from performance.pageserver.util import ensure_pageserver_ready_for_benchmarking
 
 """
 Usage:
-DEFAULT_PG_VERSION=15 BUILD_TYPE=debug NEON_ENV_BUILDER_USE_OVERLAYFS_FOR_SNAPSHOTS=1 INTERACTIVE=true \
+DEFAULT_PG_VERSION=16 BUILD_TYPE=debug NEON_ENV_BUILDER_USE_OVERLAYFS_FOR_SNAPSHOTS=1 INTERACTIVE=true \
     ./scripts/pytest --timeout 0 test_runner/performance/pageserver/interactive/test_many_small_tenants.py
 """
 
@@ -53,7 +55,7 @@ def setup_env(
             "checkpoint_distance": 268435456,
             "image_creation_threshold": 3,
         }
-        template_tenant, template_timeline = env.neon_cli.create_tenant(set_default=True)
+        template_tenant, template_timeline = env.create_tenant(set_default=True)
         env.pageserver.tenant_detach(template_tenant)
         env.pageserver.tenant_attach(template_tenant, config)
         ep = env.endpoints.create_start("main", tenant_id=template_tenant)

@@ -12,8 +12,8 @@ use std::{collections::hash_map::Entry, sync::Arc};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    Download, DownloadError, GenericRemoteStorage, Listing, ListingMode, RemotePath, RemoteStorage,
-    StorageMetadata, TimeTravelError,
+    Download, DownloadError, DownloadOpts, GenericRemoteStorage, Listing, ListingMode, RemotePath,
+    RemoteStorage, StorageMetadata, TimeTravelError,
 };
 
 pub struct UnreliableWrapper {
@@ -30,6 +30,7 @@ pub struct UnreliableWrapper {
 #[derive(Debug, Hash, Eq, PartialEq)]
 enum RemoteOp {
     ListPrefixes(Option<RemotePath>),
+    HeadObject(RemotePath),
     Upload(RemotePath),
     Download(RemotePath),
     Delete(RemotePath),
@@ -137,6 +138,16 @@ impl RemoteStorage for UnreliableWrapper {
         self.inner.list(prefix, mode, max_keys, cancel).await
     }
 
+    async fn head_object(
+        &self,
+        key: &RemotePath,
+        cancel: &CancellationToken,
+    ) -> Result<crate::ListingObject, DownloadError> {
+        self.attempt(RemoteOp::HeadObject(key.clone()))
+            .map_err(DownloadError::Other)?;
+        self.inner.head_object(key, cancel).await
+    }
+
     async fn upload(
         &self,
         data: impl Stream<Item = std::io::Result<Bytes>> + Send + Sync + 'static,
@@ -156,28 +167,14 @@ impl RemoteStorage for UnreliableWrapper {
     async fn download(
         &self,
         from: &RemotePath,
+        opts: &DownloadOpts,
         cancel: &CancellationToken,
     ) -> Result<Download, DownloadError> {
+        // Note: We treat any byte range as an "attempt" of the same operation.
+        // We don't pay attention to the ranges. That's good enough for now.
         self.attempt(RemoteOp::Download(from.clone()))
             .map_err(DownloadError::Other)?;
-        self.inner.download(from, cancel).await
-    }
-
-    async fn download_byte_range(
-        &self,
-        from: &RemotePath,
-        start_inclusive: u64,
-        end_exclusive: Option<u64>,
-        cancel: &CancellationToken,
-    ) -> Result<Download, DownloadError> {
-        // Note: We treat any download_byte_range as an "attempt" of the same
-        // operation. We don't pay attention to the ranges. That's good enough
-        // for now.
-        self.attempt(RemoteOp::Download(from.clone()))
-            .map_err(DownloadError::Other)?;
-        self.inner
-            .download_byte_range(from, start_inclusive, end_exclusive, cancel)
-            .await
+        self.inner.download(from, opts, cancel).await
     }
 
     async fn delete(&self, path: &RemotePath, cancel: &CancellationToken) -> anyhow::Result<()> {

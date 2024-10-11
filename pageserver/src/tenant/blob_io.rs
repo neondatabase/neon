@@ -24,9 +24,16 @@ use tracing::warn;
 use crate::context::RequestContext;
 use crate::page_cache::PAGE_SZ;
 use crate::tenant::block_io::BlockCursor;
+use crate::virtual_file::owned_buffers_io::io_buf_ext::{FullSlice, IoBufExt};
 use crate::virtual_file::VirtualFile;
 use std::cmp::min;
 use std::io::{Error, ErrorKind};
+
+#[derive(Copy, Clone, Debug)]
+pub struct CompressionInfo {
+    pub written_compressed: bool,
+    pub compressed_size: Option<usize>,
+}
 
 impl<'a> BlockCursor<'a> {
     /// Read a blob into a new buffer.
@@ -141,7 +148,7 @@ pub(super) const LEN_COMPRESSION_BIT_MASK: u8 = 0xf0;
 
 /// The maximum size of blobs we support. The highest few bits
 /// are reserved for compression and other further uses.
-const MAX_SUPPORTED_LEN: usize = 0x0fff_ffff;
+pub(crate) const MAX_SUPPORTED_BLOB_LEN: usize = 0x0fff_ffff;
 
 pub(super) const BYTE_UNCOMPRESSED: u8 = 0x80;
 pub(super) const BYTE_ZSTD: u8 = BYTE_UNCOMPRESSED | 0x10;
@@ -180,11 +187,11 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
     /// You need to make sure that the internal buffer is empty, otherwise
     /// data will be written in wrong order.
     #[inline(always)]
-    async fn write_all_unbuffered<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
+    async fn write_all_unbuffered<Buf: IoBuf + Send>(
         &mut self,
-        src_buf: B,
+        src_buf: FullSlice<Buf>,
         ctx: &RequestContext,
-    ) -> (B::Buf, Result<(), Error>) {
+    ) -> (FullSlice<Buf>, Result<(), Error>) {
         let (src_buf, res) = self.inner.write_all(src_buf, ctx).await;
         let nbytes = match res {
             Ok(nbytes) => nbytes,
@@ -198,8 +205,9 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
     /// Flushes the internal buffer to the underlying `VirtualFile`.
     pub async fn flush_buffer(&mut self, ctx: &RequestContext) -> Result<(), Error> {
         let buf = std::mem::take(&mut self.buf);
-        let (mut buf, res) = self.inner.write_all(buf, ctx).await;
+        let (slice, res) = self.inner.write_all(buf.slice_len(), ctx).await;
         res?;
+        let mut buf = slice.into_raw_slice().into_inner();
         buf.clear();
         self.buf = buf;
         Ok(())
@@ -216,19 +224,30 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
     }
 
     /// Internal, possibly buffered, write function
-    async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
+    async fn write_all<Buf: IoBuf + Send>(
         &mut self,
-        src_buf: B,
+        src_buf: FullSlice<Buf>,
         ctx: &RequestContext,
-    ) -> (B::Buf, Result<(), Error>) {
+    ) -> (FullSlice<Buf>, Result<(), Error>) {
+        let src_buf = src_buf.into_raw_slice();
+        let src_buf_bounds = src_buf.bounds();
+        let restore = move |src_buf_slice: Slice<_>| {
+            FullSlice::must_new(Slice::from_buf_bounds(
+                src_buf_slice.into_inner(),
+                src_buf_bounds,
+            ))
+        };
+
         if !BUFFERED {
             assert!(self.buf.is_empty());
-            return self.write_all_unbuffered(src_buf, ctx).await;
+            return self
+                .write_all_unbuffered(FullSlice::must_new(src_buf), ctx)
+                .await;
         }
         let remaining = Self::CAPACITY - self.buf.len();
         let src_buf_len = src_buf.bytes_init();
         if src_buf_len == 0 {
-            return (Slice::into_inner(src_buf.slice_full()), Ok(()));
+            return (restore(src_buf), Ok(()));
         }
         let mut src_buf = src_buf.slice(0..src_buf_len);
         // First try to copy as much as we can into the buffer
@@ -239,7 +258,7 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
         // Then, if the buffer is full, flush it out
         if self.buf.len() == Self::CAPACITY {
             if let Err(e) = self.flush_buffer(ctx).await {
-                return (Slice::into_inner(src_buf), Err(e));
+                return (restore(src_buf), Err(e));
             }
         }
         // Finally, write the tail of src_buf:
@@ -252,66 +271,71 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
                 let copied = self.write_into_buffer(&src_buf);
                 // We just verified above that src_buf fits into our internal buffer.
                 assert_eq!(copied, src_buf.len());
-                Slice::into_inner(src_buf)
+                restore(src_buf)
             } else {
-                let (src_buf, res) = self.write_all_unbuffered(src_buf, ctx).await;
+                let (src_buf, res) = self
+                    .write_all_unbuffered(FullSlice::must_new(src_buf), ctx)
+                    .await;
                 if let Err(e) = res {
                     return (src_buf, Err(e));
                 }
                 src_buf
             }
         } else {
-            Slice::into_inner(src_buf)
+            restore(src_buf)
         };
         (src_buf, Ok(()))
     }
 
     /// Write a blob of data. Returns the offset that it was written to,
     /// which can be used to retrieve the data later.
-    pub async fn write_blob<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
+    pub async fn write_blob<Buf: IoBuf + Send>(
         &mut self,
-        srcbuf: B,
+        srcbuf: FullSlice<Buf>,
         ctx: &RequestContext,
-    ) -> (B::Buf, Result<u64, Error>) {
-        self.write_blob_maybe_compressed(srcbuf, ctx, ImageCompressionAlgorithm::Disabled)
-            .await
+    ) -> (FullSlice<Buf>, Result<u64, Error>) {
+        let (buf, res) = self
+            .write_blob_maybe_compressed(srcbuf, ctx, ImageCompressionAlgorithm::Disabled)
+            .await;
+        (buf, res.map(|(off, _compression_info)| off))
     }
 
     /// Write a blob of data. Returns the offset that it was written to,
     /// which can be used to retrieve the data later.
-    pub async fn write_blob_maybe_compressed<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
+    pub(crate) async fn write_blob_maybe_compressed<Buf: IoBuf + Send>(
         &mut self,
-        srcbuf: B,
+        srcbuf: FullSlice<Buf>,
         ctx: &RequestContext,
         algorithm: ImageCompressionAlgorithm,
-    ) -> (B::Buf, Result<u64, Error>) {
+    ) -> (FullSlice<Buf>, Result<(u64, CompressionInfo), Error>) {
         let offset = self.offset;
+        let mut compression_info = CompressionInfo {
+            written_compressed: false,
+            compressed_size: None,
+        };
 
-        let len = srcbuf.bytes_init();
+        let len = srcbuf.len();
 
         let mut io_buf = self.io_buf.take().expect("we always put it back below");
         io_buf.clear();
         let mut compressed_buf = None;
-        let ((io_buf, hdr_res), srcbuf) = async {
+        let ((io_buf_slice, hdr_res), srcbuf) = async {
             if len < 128 {
                 // Short blob. Write a 1-byte length header
                 io_buf.put_u8(len as u8);
-                (
-                    self.write_all(io_buf, ctx).await,
-                    srcbuf.slice_full().into_inner(),
-                )
+                (self.write_all(io_buf.slice_len(), ctx).await, srcbuf)
             } else {
                 // Write a 4-byte length header
-                if len > MAX_SUPPORTED_LEN {
+                if len > MAX_SUPPORTED_BLOB_LEN {
                     return (
                         (
-                            io_buf,
+                            io_buf.slice_len(),
                             Err(Error::new(
                                 ErrorKind::Other,
                                 format!("blob too large ({len} bytes)"),
                             )),
                         ),
-                        srcbuf.slice_full().into_inner(),
+                        srcbuf,
                     );
                 }
                 let (high_bit_mask, len_written, srcbuf) = match algorithm {
@@ -324,42 +348,41 @@ impl<const BUFFERED: bool> BlobWriter<BUFFERED> {
                         } else {
                             async_compression::tokio::write::ZstdEncoder::new(Vec::new())
                         };
-                        let slice = srcbuf.slice_full();
-                        encoder.write_all(&slice[..]).await.unwrap();
+                        encoder.write_all(&srcbuf[..]).await.unwrap();
                         encoder.shutdown().await.unwrap();
                         let compressed = encoder.into_inner();
+                        compression_info.compressed_size = Some(compressed.len());
                         if compressed.len() < len {
+                            compression_info.written_compressed = true;
                             let compressed_len = compressed.len();
                             compressed_buf = Some(compressed);
-                            (BYTE_ZSTD, compressed_len, slice.into_inner())
+                            (BYTE_ZSTD, compressed_len, srcbuf)
                         } else {
-                            (BYTE_UNCOMPRESSED, len, slice.into_inner())
+                            (BYTE_UNCOMPRESSED, len, srcbuf)
                         }
                     }
-                    ImageCompressionAlgorithm::Disabled => {
-                        (BYTE_UNCOMPRESSED, len, srcbuf.slice_full().into_inner())
-                    }
+                    ImageCompressionAlgorithm::Disabled => (BYTE_UNCOMPRESSED, len, srcbuf),
                 };
                 let mut len_buf = (len_written as u32).to_be_bytes();
                 assert_eq!(len_buf[0] & 0xf0, 0);
                 len_buf[0] |= high_bit_mask;
                 io_buf.extend_from_slice(&len_buf[..]);
-                (self.write_all(io_buf, ctx).await, srcbuf)
+                (self.write_all(io_buf.slice_len(), ctx).await, srcbuf)
             }
         }
         .await;
-        self.io_buf = Some(io_buf);
+        self.io_buf = Some(io_buf_slice.into_raw_slice().into_inner());
         match hdr_res {
             Ok(_) => (),
-            Err(e) => return (Slice::into_inner(srcbuf.slice(..)), Err(e)),
+            Err(e) => return (srcbuf, Err(e)),
         }
         let (srcbuf, res) = if let Some(compressed_buf) = compressed_buf {
-            let (_buf, res) = self.write_all(compressed_buf, ctx).await;
-            (Slice::into_inner(srcbuf.slice(..)), res)
+            let (_buf, res) = self.write_all(compressed_buf.slice_len(), ctx).await;
+            (srcbuf, res)
         } else {
             self.write_all(srcbuf, ctx).await
         };
-        (srcbuf, res.map(|_| offset))
+        (srcbuf, res.map(|_| (offset, compression_info)))
     }
 }
 
@@ -416,21 +439,23 @@ pub(crate) mod tests {
             let mut wtr = BlobWriter::<BUFFERED>::new(file, 0);
             for blob in blobs.iter() {
                 let (_, res) = if compression {
-                    wtr.write_blob_maybe_compressed(
-                        blob.clone(),
-                        ctx,
-                        ImageCompressionAlgorithm::Zstd { level: Some(1) },
-                    )
-                    .await
+                    let res = wtr
+                        .write_blob_maybe_compressed(
+                            blob.clone().slice_len(),
+                            ctx,
+                            ImageCompressionAlgorithm::Zstd { level: Some(1) },
+                        )
+                        .await;
+                    (res.0, res.1.map(|(off, _)| off))
                 } else {
-                    wtr.write_blob(blob.clone(), ctx).await
+                    wtr.write_blob(blob.clone().slice_len(), ctx).await
                 };
                 let offs = res?;
                 offsets.push(offs);
             }
             // Write out one page worth of zeros so that we can
             // read again with read_blk
-            let (_, res) = wtr.write_blob(vec![0; PAGE_SZ], ctx).await;
+            let (_, res) = wtr.write_blob(vec![0; PAGE_SZ].slice_len(), ctx).await;
             let offs = res?;
             println!("Writing final blob at offs={offs}");
             wtr.flush_buffer(ctx).await?;

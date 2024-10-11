@@ -19,6 +19,10 @@ on:
         description: 'debug or release'
         required: true
         type: string
+      pg-versions:
+        description: 'a json array of postgres versions to run regression tests on'
+        required: true
+        type: string
 
 defaults:
   run:
@@ -58,7 +62,7 @@ jobs:
           #
           git config --global --add safe.directory ${{ github.workspace }}
           git config --global --add safe.directory ${GITHUB_WORKSPACE}
-          for r in 14 15 16; do
+          for r in 14 15 16 17; do
             git config --global --add safe.directory "${{ github.workspace }}/vendor/postgres-v$r"
             git config --global --add safe.directory "${GITHUB_WORKSPACE}/vendor/postgres-v$r"
           done
@@ -66,7 +70,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
-          fetch-depth: 1
 
       - name: Set pg 14 revision for caching
         id: pg_v14_rev
@@ -80,6 +83,10 @@ jobs:
         id: pg_v16_rev
         run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-v16) >> $GITHUB_OUTPUT
 
+      - name: Set pg 17 revision for caching
+        id: pg_v17_rev
+        run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-v17) >> $GITHUB_OUTPUT
+
       # Set some environment variables used by all the steps.
       #
       # CARGO_FLAGS is extra options to pass to "cargo build", "cargo test" etc.
@@ -91,10 +98,15 @@ jobs:
       # We run tests with addtional features, that are turned off by default (e.g. in release builds), see
       # corresponding Cargo.toml files for their descriptions.
       - name: Set env variables
+        env:
+          ARCH: ${{ inputs.arch }}
         run: |
           CARGO_FEATURES="--features testing"
-          if [[ $BUILD_TYPE == "debug" ]]; then
+          if [[ $BUILD_TYPE == "debug" && $ARCH == 'x64' ]]; then
             cov_prefix="scripts/coverage --profraw-prefix=$GITHUB_JOB --dir=/tmp/coverage run"
+            CARGO_FLAGS="--locked"
+          elif [[ $BUILD_TYPE == "debug" ]]; then
+            cov_prefix=""
             CARGO_FLAGS="--locked"
           elif [[ $BUILD_TYPE == "release" ]]; then
             cov_prefix=""
@@ -128,6 +140,13 @@ jobs:
           path: pg_install/v16
           key: v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.build-type }}-pg-${{ steps.pg_v16_rev.outputs.pg_rev }}-${{ hashFiles('Makefile', 'Dockerfile.build-tools') }}
 
+      - name: Cache postgres v17 build
+        id: cache_pg_17
+        uses: actions/cache@v4
+        with:
+          path: pg_install/v17
+          key: v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.build-type }}-pg-${{ steps.pg_v17_rev.outputs.pg_rev }}-${{ hashFiles('Makefile', 'Dockerfile.build-tools') }}
+
       - name: Build postgres v14
         if: steps.cache_pg_14.outputs.cache-hit != 'true'
         run: mold -run make postgres-v14 -j$(nproc)
@@ -139,6 +158,10 @@ jobs:
       - name: Build postgres v16
         if: steps.cache_pg_16.outputs.cache-hit != 'true'
         run: mold -run make postgres-v16 -j$(nproc)
+
+      - name: Build postgres v17
+        if: steps.cache_pg_17.outputs.cache-hit != 'true'
+        run: mold -run make postgres-v17 -j$(nproc)
 
       - name: Build neon extensions
         run: mold -run make neon-pg-ext -j$(nproc)
@@ -155,6 +178,8 @@ jobs:
       # Do install *before* running rust tests because they might recompile the
       # binaries with different features/flags.
       - name: Install rust binaries
+        env:
+          ARCH: ${{ inputs.arch }}
         run: |
           # Install target binaries
           mkdir -p /tmp/neon/bin/
@@ -169,7 +194,7 @@ jobs:
           done
 
           # Install test executables and write list of all binaries (for code coverage)
-          if [[ $BUILD_TYPE == "debug" ]]; then
+          if [[ $BUILD_TYPE == "debug" && $ARCH == 'x64' ]]; then
             # Keep bloated coverage data files away from the rest of the artifact
             mkdir -p /tmp/coverage/
 
@@ -200,14 +225,18 @@ jobs:
         run: |
           PQ_LIB_DIR=$(pwd)/pg_install/v16/lib
           export PQ_LIB_DIR
-          LD_LIBRARY_PATH=$(pwd)/pg_install/v16/lib
+          LD_LIBRARY_PATH=$(pwd)/pg_install/v17/lib
           export LD_LIBRARY_PATH
 
           #nextest does not yet support running doctests
-          cargo test --doc $CARGO_FLAGS $CARGO_FEATURES
+          ${cov_prefix} cargo test --doc $CARGO_FLAGS $CARGO_FEATURES
 
+          # run all non-pageserver tests
+          ${cov_prefix} cargo nextest run $CARGO_FLAGS $CARGO_FEATURES -E '!package(pageserver)'
+
+          # run pageserver tests with different settings
           for io_engine in std-fs tokio-epoll-uring ; do
-            NEON_PAGESERVER_UNIT_TEST_VIRTUAL_FILE_IOENGINE=$io_engine ${cov_prefix} cargo nextest run $CARGO_FLAGS $CARGO_FEATURES
+            NEON_PAGESERVER_UNIT_TEST_VIRTUAL_FILE_IOENGINE=$io_engine ${cov_prefix} cargo nextest run $CARGO_FLAGS $CARGO_FEATURES  -E 'package(pageserver)'
           done
 
           # Run separate tests for real S3
@@ -226,7 +255,15 @@ jobs:
           ${cov_prefix} cargo nextest run $CARGO_FLAGS $CARGO_FEATURES -E 'package(remote_storage)' -E 'test(test_real_azure)'
 
       - name: Install postgres binaries
-        run: cp -a pg_install /tmp/neon/pg_install
+        run: |
+          # Use tar to copy files matching the pattern, preserving the paths in the destionation
+          tar c \
+            pg_install/v* \
+            pg_install/build/*/src/test/regress/*.so \
+            pg_install/build/*/src/test/regress/pg_regress \
+            pg_install/build/*/src/test/isolation/isolationtester \
+            pg_install/build/*/src/test/isolation/pg_isolation_regress \
+            | tar  x -C /tmp/neon
 
       - name: Upload Neon artifact
         uses: ./.github/actions/upload
@@ -240,8 +277,8 @@ jobs:
         uses: ./.github/actions/save-coverage-data
 
   regress-tests:
-    # Run test on x64 only
-    if: inputs.arch == 'x64'
+    # Don't run regression tests on debug arm64 builds
+    if: inputs.build-type != 'debug' || inputs.arch != 'arm64'
     needs: [ build-neon ]
     runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', inputs.arch == 'arm64' && 'large-arm64' || 'large')) }}
     container:
@@ -254,12 +291,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pg_version: [ v14, v15, v16 ]
+        pg_version: ${{ fromJson(inputs.pg-versions) }}
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: true
-          fetch-depth: 1
 
       - name: Pytest regression tests
         uses: ./.github/actions/run-python-test-set
@@ -284,5 +320,5 @@ jobs:
       - name: Merge and upload coverage data
         if: |
           false &&
-          inputs.build-type == 'debug' && matrix.pg_version == 'v14'
+          inputs.build-type == 'debug' && matrix.pg_version == 'v16'
         uses: ./.github/actions/save-coverage-data

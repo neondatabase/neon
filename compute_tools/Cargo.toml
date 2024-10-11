@@ -4,22 +4,27 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+# Enables test specific features.
+testing = []
+
 [dependencies]
 anyhow.workspace = true
-async-compression.workspace = true
+camino.workspace = true
 chrono.workspace = true
 cfg-if.workspace = true
 clap.workspace = true
 flate2.workspace = true
 futures.workspace = true
-hyper = { workspace = true, features = ["full"] }
+hyper0 = { workspace = true, features = ["full"] }
 nix.workspace = true
 notify.workspace = true
 num_cpus.workspace = true
 opentelemetry.workspace = true
+opentelemetry_sdk.workspace = true
 postgres.workspace = true
 regex.workspace = true
-serde.workspace = true
 serde_json.workspace = true
 signal-hook.workspace = true
 tar.workspace = true
@@ -38,7 +43,6 @@ url.workspace = true
 compute_api.workspace = true
 utils.workspace = true
 workspace_hack.workspace = true
-toml_edit.workspace = true
 remote_storage = { version = "0.1", path = "../libs/remote_storage/" }
 vm_monitor = { version = "0.1", path = "../libs/vm_monitor/" }
 zstd = "0.13"

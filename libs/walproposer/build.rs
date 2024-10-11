@@ -4,7 +4,8 @@
 use std::{env, path::PathBuf, process::Command};
 
 use anyhow::{anyhow, Context};
-use bindgen::CargoCallbacks;
+
+const WALPROPOSER_PG_VERSION: &str = "v17";
 
 fn main() -> anyhow::Result<()> {
     // Tell cargo to invalidate the built crate whenever the wrapper changes
@@ -37,7 +38,10 @@ fn main() -> anyhow::Result<()> {
     // Rebuild crate when libwalproposer.a changes
     println!("cargo:rerun-if-changed={walproposer_lib_search_str}/libwalproposer.a");
 
-    let pg_config_bin = pg_install_abs.join("v16").join("bin").join("pg_config");
+    let pg_config_bin = pg_install_abs
+        .join(WALPROPOSER_PG_VERSION)
+        .join("bin")
+        .join("pg_config");
     let inc_server_path: String = if pg_config_bin.exists() {
         let output = Command::new(pg_config_bin)
             .arg("--includedir-server")
@@ -54,7 +58,7 @@ fn main() -> anyhow::Result<()> {
             .into()
     } else {
         let server_path = pg_install_abs
-            .join("v16")
+            .join(WALPROPOSER_PG_VERSION)
             .join("include")
             .join("postgresql")
             .join("server")
@@ -64,16 +68,25 @@ fn main() -> anyhow::Result<()> {
             .map_err(|s| anyhow!("Bad postgres server path {s:?}"))?
     };
 
+    let unwind_abi_functions = [
+        "log_internal",
+        "recovery_download",
+        "start_streaming",
+        "finish_sync_safekeepers",
+        "wait_event_set",
+        "WalProposerStart",
+    ];
+
     // The bindgen::Builder is the main entry point
     // to bindgen, and lets you build up options for
     // the resulting bindings.
-    let bindings = bindgen::Builder::default()
+    let mut builder = bindgen::Builder::default()
         // The input header we would like to generate
         // bindings for.
         .header("bindgen_deps.h")
         // Tell cargo to invalidate the built crate whenever any of the
         // included header files changed.
-        .parse_callbacks(Box::new(CargoCallbacks))
+        .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
         .allowlist_type("WalProposer")
         .allowlist_type("WalProposerConfig")
         .allowlist_type("walproposer_api")
@@ -95,6 +108,7 @@ fn main() -> anyhow::Result<()> {
         .allowlist_var("ERROR")
         .allowlist_var("FATAL")
         .allowlist_var("PANIC")
+        .allowlist_var("PG_VERSION_NUM")
         .allowlist_var("WPEVENT")
         .allowlist_var("WL_LATCH_SET")
         .allowlist_var("WL_SOCKET_READABLE")
@@ -104,7 +118,12 @@ fn main() -> anyhow::Result<()> {
         .allowlist_var("WL_SOCKET_MASK")
         .clang_arg("-DWALPROPOSER_LIB")
         .clang_arg(format!("-I{pgxn_neon}"))
-        .clang_arg(format!("-I{inc_server_path}"))
+        .clang_arg(format!("-I{inc_server_path}"));
+
+    for name in unwind_abi_functions {
+        builder = builder.override_abi(bindgen::Abi::CUnwind, name);
+    }
+    let bindings = builder
         // Finish the builder and generate the bindings.
         .generate()
         // Unwrap the Result and panic on failure.

@@ -1,0 +1,78 @@
+name: Add `external` label to issues and PRs created by external users
+
+on:
+  issues:
+    types:
+      - opened
+  pull_request_target:
+    types:
+      - opened
+  workflow_dispatch:
+    inputs:
+      github-actor:
+        description: 'GitHub username. If empty, the username of the current user will be used'
+        required: false
+
+# No permission for GITHUB_TOKEN by default; the **minimal required** set of permissions should be granted in each job.
+permissions: {}
+
+env:
+  LABEL: external
+
+jobs:
+  check-user:
+    runs-on: ubuntu-22.04
+
+    outputs:
+      is-member: ${{ steps.check-user.outputs.is-member }}
+
+    steps:
+    - name: Check whether `${{ github.actor }}` is a member of `${{ github.repository_owner }}`
+      id: check-user
+      env:
+        GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
+        ACTOR: ${{ inputs.github-actor || github.actor }}
+      run: |
+        expected_error="User does not exist or is not a member of the organization"
+        output_file=output.txt
+
+        for i in $(seq 1 10); do
+          if gh api "/orgs/${GITHUB_REPOSITORY_OWNER}/members/${ACTOR}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" > ${output_file}; then
+
+            is_member=true
+            break
+          elif grep -q "${expected_error}" ${output_file}; then
+            is_member=false
+            break
+          elif [ $i -eq 10 ]; then
+            title="Failed to get memmbership status for ${ACTOR}"
+            message="The latest GitHub API error message: '$(cat ${output_file})'"
+            echo "::error file=.github/workflows/label-for-external-users.yml,title=${title}::${message}"
+
+            exit 1
+          fi
+
+          sleep 1
+        done
+
+        echo "is-member=${is_member}" | tee -a ${GITHUB_OUTPUT}
+
+  add-label:
+    if: needs.check-user.outputs.is-member == 'false'
+    needs: [ check-user ]
+
+    runs-on: ubuntu-22.04
+    permissions:
+      pull-requests: write # for `gh pr edit`
+      issues: write        # for `gh issue edit`
+
+    steps:
+    - name: Add `${{ env.LABEL }}` label
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        ITEM_NUMBER: ${{ github.event[github.event_name == 'pull_request_target' && 'pull_request' || 'issue'].number }}
+        GH_CLI_COMMAND: ${{ github.event_name == 'pull_request_target' && 'pr' || 'issue' }}
+      run: |
+        gh ${GH_CLI_COMMAND} --repo ${GITHUB_REPOSITORY} edit --add-label=${LABEL} ${ITEM_NUMBER}

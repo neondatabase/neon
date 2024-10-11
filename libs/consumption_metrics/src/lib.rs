@@ -5,7 +5,7 @@ use chrono::{DateTime, Utc};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, serde::Deserialize, Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
 #[serde(tag = "type")]
 pub enum EventType {
     #[serde(rename = "absolute")]
@@ -107,7 +107,7 @@ pub const CHUNK_SIZE: usize = 1000;
 
 // Just a wrapper around a slice of events
 // to serialize it as `{"events" : [ ] }
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize, Deserialize)]
 pub struct EventChunk<'a, T: Clone> {
     pub events: std::borrow::Cow<'a, [T]>,
 }

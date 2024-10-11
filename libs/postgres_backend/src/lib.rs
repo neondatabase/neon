@@ -69,8 +69,10 @@ impl QueryError {
 }
 
 /// Returns true if the given error is a normal consequence of a network issue,
-/// or the client closing the connection. These errors can happen during normal
-/// operations, and don't indicate a bug in our code.
+/// or the client closing the connection.
+///
+/// These errors can happen during normal operations,
+/// and don't indicate a bug in our code.
 pub fn is_expected_io_error(e: &io::Error) -> bool {
     use io::ErrorKind::*;
     matches!(
@@ -79,17 +81,16 @@ pub fn is_expected_io_error(e: &io::Error) -> bool {
     )
 }
 
-#[async_trait::async_trait]
 pub trait Handler<IO> {
     /// Handle single query.
     /// postgres_backend will issue ReadyForQuery after calling this (this
     /// might be not what we want after CopyData streaming, but currently we don't
     /// care). It will also flush out the output buffer.
-    async fn process_query(
+    fn process_query(
         &mut self,
         pgb: &mut PostgresBackend<IO>,
         query_string: &str,
-    ) -> Result<(), QueryError>;
+    ) -> impl Future<Output = Result<(), QueryError>>;
 
     /// Called on startup packet receival, allows to process params.
     ///
@@ -278,16 +279,6 @@ pub struct PostgresBackend<IO> {
 }
 
 pub type PostgresBackendTCP = PostgresBackend<tokio::net::TcpStream>;
-
-pub fn query_from_cstring(query_string: Bytes) -> Vec<u8> {
-    let mut query_string = query_string.to_vec();
-    if let Some(ch) = query_string.last() {
-        if *ch == 0 {
-            query_string.pop();
-        }
-    }
-    query_string
-}
 
 /// Cast a byte slice to a string slice, dropping null terminator if there's one.
 fn cstr_to_str(bytes: &[u8]) -> anyhow::Result<&str> {
@@ -993,6 +984,7 @@ pub fn short_error(e: &QueryError) -> String {
 }
 
 fn log_query_error(query: &str, e: &QueryError) {
+    // If you want to change the log level of a specific error, also re-categorize it in `BasebackupQueryTimeOngoingRecording`.
     match e {
         QueryError::Disconnected(ConnectionError::Io(io_error)) => {
             if is_expected_io_error(io_error) {

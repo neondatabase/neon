@@ -13,7 +13,7 @@ use desim::{
     node_os::NodeOs,
     proto::{AnyMessage, NetEvent, NodeEvent},
 };
-use hyper::Uri;
+use http::Uri;
 use safekeeper::{
     safekeeper::{ProposerAcceptorMessage, SafeKeeper, ServerInfo, UNKNOWN_SERVER_VERSION},
     state::{TimelinePersistentState, TimelineState},
@@ -181,7 +181,6 @@ pub fn run_server(os: NodeOs, disk: Arc<SafekeeperDisk>) -> Result<()> {
         sk_auth_token: None,
         current_thread_runtime: false,
         walsenders_keep_horizon: false,
-        partial_backup_enabled: false,
         partial_backup_timeout: Duration::from_secs(0),
         disable_periodic_broker_push: false,
         enable_offload: false,

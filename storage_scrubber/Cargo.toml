@@ -5,21 +5,14 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+aws-config.workspace = true
 aws-sdk-s3.workspace = true
-aws-smithy-async.workspace = true
 either.workspace = true
-tokio-rustls.workspace = true
 anyhow.workspace = true
 hex.workspace = true
 humantime.workspace = true
-thiserror.workspace = true
-rand.workspace = true
-bytes.workspace = true
-bincode.workspace = true
-crc32c.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-serde_with.workspace = true
 workspace_hack.workspace = true
 utils.workspace = true
 async-stream.workspace = true
@@ -39,7 +32,6 @@ storage_controller_client.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 chrono = { workspace = true, default-features = false, features = ["clock", "serde"] }
 reqwest = { workspace = true, default-features = false, features = ["rustls-tls", "json"] }
-aws-config = { workspace = true, default-features = false, features = ["rustls", "sso"] }
 
 pageserver = { path = "../pageserver" }
 pageserver_api = { path = "../libs/pageserver_api" }

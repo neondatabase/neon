@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -32,7 +34,7 @@ def test_lsn_mapping(neon_env_builder: NeonEnvBuilder, with_lease: bool):
     """
     env = neon_env_builder.init_start()
 
-    tenant_id, _ = env.neon_cli.create_tenant(
+    tenant_id, _ = env.create_tenant(
         conf={
             # disable default GC and compaction
             "gc_period": "1000 m",
@@ -43,7 +45,7 @@ def test_lsn_mapping(neon_env_builder: NeonEnvBuilder, with_lease: bool):
         }
     )
 
-    timeline_id = env.neon_cli.create_branch("test_lsn_mapping", tenant_id=tenant_id)
+    timeline_id = env.create_branch("test_lsn_mapping", tenant_id=tenant_id)
     endpoint_main = env.endpoints.create_start("test_lsn_mapping", tenant_id=tenant_id)
     timeline_id = endpoint_main.safe_psql("show neon.timeline_id")[0][0]
 
@@ -123,8 +125,8 @@ def test_lsn_mapping(neon_env_builder: NeonEnvBuilder, with_lease: bool):
             endpoint_here.stop_and_destroy()
 
         # Do the "past" check again at a new branch to ensure that we don't return something before the branch cutoff
-        timeline_id_child = env.neon_cli.create_branch(
-            "test_lsn_mapping_child", tenant_id=tenant_id, ancestor_branch_name="test_lsn_mapping"
+        timeline_id_child = env.create_branch(
+            "test_lsn_mapping_child", ancestor_branch_name="test_lsn_mapping", tenant_id=tenant_id
         )
 
         # Timestamp is in the unreachable past
@@ -190,7 +192,7 @@ def test_ts_of_lsn_api(neon_env_builder: NeonEnvBuilder):
 
     env = neon_env_builder.init_start()
 
-    new_timeline_id = env.neon_cli.create_branch("test_ts_of_lsn_api")
+    new_timeline_id = env.create_branch("test_ts_of_lsn_api")
     endpoint_main = env.endpoints.create_start("test_ts_of_lsn_api")
 
     cur = endpoint_main.connect().cursor()

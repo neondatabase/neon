@@ -1,9 +1,11 @@
+from __future__ import annotations
+
 import os
 import queue
 import shutil
 import threading
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.common_types import Lsn, TenantId, TimelineId
@@ -12,7 +14,6 @@ from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     wait_for_last_flush_lsn,
 )
-from fixtures.pageserver.common_types import parse_layer_file_name
 from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
 from fixtures.pageserver.utils import (
     timeline_delete_wait_completed,
@@ -35,6 +36,9 @@ from fixtures.utils import (
     wait_until,
 )
 from requests import ReadTimeout
+
+if TYPE_CHECKING:
+    from typing import Optional
 
 
 #
@@ -231,7 +235,7 @@ def test_remote_storage_upload_queue_retries(
 
     # create tenant with config that will determinstically allow
     # compaction and gc
-    tenant_id, timeline_id = env.neon_cli.create_tenant(
+    tenant_id, timeline_id = env.create_tenant(
         conf={
             # small checkpointing and compaction targets to ensure we generate many upload operations
             "checkpoint_distance": f"{64 * 1024}",
@@ -245,6 +249,7 @@ def test_remote_storage_upload_queue_retries(
             # create image layers eagerly, so that GC can remove some layers
             "image_creation_threshold": "1",
             "image_layer_creation_check_threshold": "0",
+            "lsn_lease_length": "0s",
         }
     )
 
@@ -313,6 +318,7 @@ def test_remote_storage_upload_queue_retries(
 
     def churn_while_failpoints_active(result):
         overwrite_data_and_wait_for_it_to_arrive_at_pageserver("c")
+        # this call will wait for the failpoints to be turned off
         client.timeline_checkpoint(tenant_id, timeline_id)
         client.timeline_compact(tenant_id, timeline_id)
         overwrite_data_and_wait_for_it_to_arrive_at_pageserver("d")
@@ -332,8 +338,8 @@ def test_remote_storage_upload_queue_retries(
     # Exponential back-off in upload queue, so, gracious timeouts.
 
     wait_until(30, 1, lambda: assert_gt(get_queued_count(file_kind="layer", op_kind="upload"), 0))
-    wait_until(30, 1, lambda: assert_ge(get_queued_count(file_kind="index", op_kind="upload"), 2))
-    wait_until(30, 1, lambda: assert_gt(get_queued_count(file_kind="layer", op_kind="delete"), 0))
+    wait_until(30, 1, lambda: assert_ge(get_queued_count(file_kind="index", op_kind="upload"), 1))
+    wait_until(30, 1, lambda: assert_eq(get_queued_count(file_kind="layer", op_kind="delete"), 0))
 
     # unblock churn operations
     configure_storage_sync_failpoints("off")
@@ -391,6 +397,7 @@ def test_remote_timeline_client_calls_started_metric(
             # disable background compaction and GC. We invoke it manually when we want it to happen.
             "gc_period": "0s",
             "compaction_period": "0s",
+            "lsn_lease_length": "0s",
         }
     )
 
@@ -421,7 +428,7 @@ def test_remote_timeline_client_calls_started_metric(
         assert timeline_id is not None
         wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
 
-    calls_started: Dict[Tuple[str, str], List[int]] = {
+    calls_started: dict[tuple[str, str], list[int]] = {
         ("layer", "upload"): [0],
         ("index", "upload"): [0],
         ("layer", "delete"): [0],
@@ -638,7 +645,9 @@ def test_empty_branch_remote_storage_upload(neon_env_builder: NeonEnvBuilder):
     client = env.pageserver.http_client()
 
     new_branch_name = "new_branch"
-    new_branch_timeline_id = env.neon_cli.create_branch(new_branch_name, "main", env.initial_tenant)
+    new_branch_timeline_id = env.create_branch(
+        new_branch_name, ancestor_branch_name="main", tenant_id=env.initial_tenant
+    )
     assert_nothing_to_upload(client, env.initial_tenant, new_branch_timeline_id)
 
     timelines_before_detach = set(
@@ -769,11 +778,11 @@ def test_empty_branch_remote_storage_upload_on_restart(neon_env_builder: NeonEnv
         create_thread.join()
 
 
-def test_compaction_waits_for_upload(
+def test_paused_upload_stalls_checkpoint(
     neon_env_builder: NeonEnvBuilder,
 ):
     """
-    This test forces a race between upload and compaction.
+    This test checks that checkpoints block on uploads to remote storage.
     """
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
@@ -786,6 +795,10 @@ def test_compaction_waits_for_upload(
             # disable PITR
             "pitr_interval": "0s",
         }
+    )
+
+    env.pageserver.allowed_errors.append(
+        f".*PUT.* path=/v1/tenant/{env.initial_tenant}/timeline.* request was dropped before completing"
     )
 
     tenant_id = env.initial_tenant
@@ -808,76 +821,9 @@ def test_compaction_waits_for_upload(
         endpoint.safe_psql("CREATE TABLE foo AS SELECT x FROM generate_series(1, 10000) g(x)")
         wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
 
-        client.timeline_checkpoint(tenant_id, timeline_id)
-        deltas_at_first = len(client.layer_map_info(tenant_id, timeline_id).delta_layers())
-        assert (
-            deltas_at_first == 2
-        ), "are you fixing #5863? just add one more checkpoint after 'CREATE TABLE bar ...' statement."
-
-        endpoint.safe_psql("CREATE TABLE bar AS SELECT x FROM generate_series(1, 10000) g(x)")
-        endpoint.safe_psql("UPDATE foo SET x = 0 WHERE x = 1")
-        wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
-
-    layers_before_last_checkpoint = client.layer_map_info(tenant_id, timeline_id).historic_by_name()
-    upload_stuck_layers = layers_before_last_checkpoint - layers_at_creation.historic_by_name()
-
-    assert len(upload_stuck_layers) > 0
-
-    for name in upload_stuck_layers:
-        assert env.pageserver.layer_exists(
-            tenant_id, timeline_id, parse_layer_file_name(name)
-        ), "while uploads are stuck the layers should be present on disk"
-
-    # now this will do the L0 => L1 compaction and want to remove
-    # upload_stuck_layers and the original initdb L0
-    client.timeline_checkpoint(tenant_id, timeline_id)
-
-    # as uploads are paused, the upload_stuck_layers should still be with us
-    for name in upload_stuck_layers:
-        assert env.pageserver.layer_exists(
-            tenant_id, timeline_id, parse_layer_file_name(name)
-        ), "uploads are stuck still over compaction"
-
-    compacted_layers = client.layer_map_info(tenant_id, timeline_id).historic_by_name()
-    overlap = compacted_layers.intersection(upload_stuck_layers)
-    assert len(overlap) == 0, "none of the L0's should remain after L0 => L1 compaction"
-    assert (
-        len(compacted_layers) == 1
-    ), "there should be one L1 after L0 => L1 compaction (without #5863 being fixed)"
-
-    def layer_deletes_completed():
-        m = client.get_metric_value("pageserver_layer_completed_deletes_total")
-        if m is None:
-            return 0
-        return int(m)
-
-    # if initdb created an initial delta layer, it might already be gc'd
-    # because it was uploaded before the failpoint was enabled. however, the
-    # deletion is not guaranteed to be complete.
-    assert layer_deletes_completed() <= 1
-
-    client.configure_failpoints(("before-upload-layer-pausable", "off"))
-
-    # Ensure that this actually terminates
-    wait_upload_queue_empty(client, tenant_id, timeline_id)
-
-    def until_layer_deletes_completed():
-        deletes = layer_deletes_completed()
-        log.info(f"layer_deletes: {deletes}")
-        # ensure that initdb delta layer AND the previously stuck are now deleted
-        assert deletes >= len(upload_stuck_layers) + 1
-
-    wait_until(10, 1, until_layer_deletes_completed)
-
-    for name in upload_stuck_layers:
-        assert not env.pageserver.layer_exists(
-            tenant_id, timeline_id, parse_layer_file_name(name)
-        ), "l0 should now be removed because of L0 => L1 compaction and completed uploads"
-
-    # We should not have hit the error handling path in uploads where a uploaded file is gone
-    assert not env.pageserver.log_contains(
-        "File to upload doesn't exist. Likely the file has been deleted and an upload is not required any more."
-    )
+        with pytest.raises(ReadTimeout):
+            client.timeline_checkpoint(tenant_id, timeline_id, timeout=5)
+        client.configure_failpoints(("before-upload-layer-pausable", "off"))
 
 
 def wait_upload_queue_empty(

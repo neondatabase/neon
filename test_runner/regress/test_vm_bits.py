@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import time
 from contextlib import closing
 
@@ -13,8 +15,7 @@ from fixtures.utils import query_scalar
 def test_vm_bit_clear(neon_simple_env: NeonEnv):
     env = neon_simple_env
 
-    env.neon_cli.create_branch("test_vm_bit_clear", "empty")
-    endpoint = env.endpoints.create_start("test_vm_bit_clear")
+    endpoint = env.endpoints.create_start("main")
 
     pg_conn = endpoint.connect()
     cur = pg_conn.cursor()
@@ -58,11 +59,11 @@ def test_vm_bit_clear(neon_simple_env: NeonEnv):
     cur.execute("UPDATE vmtest_cold_update2 SET id = 5000, filler=repeat('x', 200) WHERE id = 1")
 
     # Branch at this point, to test that later
-    fork_at_current_lsn(env, endpoint, "test_vm_bit_clear_new", "test_vm_bit_clear")
+    fork_at_current_lsn(env, endpoint, "test_vm_bit_clear_new", "main")
 
     # Clear the buffer cache, to force the VM page to be re-fetched from
     # the page server
-    cur.execute("SELECT clear_buffer_cache()")
+    endpoint.clear_shared_buffers(cursor=cur)
 
     # Check that an index-only scan doesn't see the deleted row. If the
     # clearing of the VM bit was not replayed correctly, this would incorrectly
@@ -248,7 +249,7 @@ def test_vm_bit_clear_on_heap_lock_blackbox(neon_env_builder: NeonEnvBuilder):
     # in a "clean" way. Our neon extension will write a full-page image of the VM
     # page, and we want to avoid that. A clean shutdown will also not do, for the
     # same reason.
-    endpoint.stop(mode="immediate")
+    endpoint.stop(mode="immediate", sks_wait_walreceiver_gone=(env.safekeepers, timeline_id))
 
     endpoint.start()
     pg_conn = endpoint.connect()

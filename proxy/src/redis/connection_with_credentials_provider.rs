@@ -6,7 +6,7 @@ use redis::{
     ConnectionInfo, IntoConnectionInfo, RedisConnectionInfo, RedisResult,
 };
 use tokio::task::JoinHandle;
-use tracing::{error, info};
+use tracing::{debug, error, info, warn};
 
 use super::elasticache::CredentialsProvider;
 
@@ -81,7 +81,7 @@ impl ConnectionWithCredentialsProvider {
         redis::cmd("PING").query_async(con).await
     }
 
-    pub async fn connect(&mut self) -> anyhow::Result<()> {
+    pub(crate) async fn connect(&mut self) -> anyhow::Result<()> {
         let _guard = self.mutex.lock().await;
         if let Some(con) = self.con.as_mut() {
             match Self::ping(con).await {
@@ -89,7 +89,7 @@ impl ConnectionWithCredentialsProvider {
                     return Ok(());
                 }
                 Err(e) => {
-                    error!("Error during PING: {e:?}");
+                    warn!("Error during PING: {e:?}");
                 }
             }
         } else {
@@ -98,7 +98,7 @@ impl ConnectionWithCredentialsProvider {
         info!("Establishing a new connection...");
         self.con = None;
         if let Some(f) = self.refresh_token_task.take() {
-            f.abort()
+            f.abort();
         }
         let mut con = self
             .get_client()
@@ -109,7 +109,10 @@ impl ConnectionWithCredentialsProvider {
             let credentials_provider = credentials_provider.clone();
             let con2 = con.clone();
             let f = tokio::spawn(async move {
-                let _ = Self::keep_connection(con2, credentials_provider).await;
+                Self::keep_connection(con2, credentials_provider)
+                    .await
+                    .inspect_err(|e| debug!("keep_connection failed: {e}"))
+                    .ok();
             });
             self.refresh_token_task = Some(f);
         }
@@ -118,7 +121,7 @@ impl ConnectionWithCredentialsProvider {
                 info!("Connection succesfully established");
             }
             Err(e) => {
-                error!("Connection is broken. Error during PING: {e:?}");
+                warn!("Connection is broken. Error during PING: {e:?}");
             }
         }
         self.con = Some(con);
@@ -149,7 +152,7 @@ impl ConnectionWithCredentialsProvider {
 
     // PubSub does not support credentials refresh.
     // Requires manual reconnection every 12h.
-    pub async fn get_async_pubsub(&self) -> anyhow::Result<redis::aio::PubSub> {
+    pub(crate) async fn get_async_pubsub(&self) -> anyhow::Result<redis::aio::PubSub> {
         Ok(self.get_client().await?.get_async_pubsub().await?)
     }
 
@@ -187,7 +190,10 @@ impl ConnectionWithCredentialsProvider {
     }
     /// Sends an already encoded (packed) command into the TCP socket and
     /// reads the single response from it.
-    pub async fn send_packed_command(&mut self, cmd: &redis::Cmd) -> RedisResult<redis::Value> {
+    pub(crate) async fn send_packed_command(
+        &mut self,
+        cmd: &redis::Cmd,
+    ) -> RedisResult<redis::Value> {
         // Clone connection to avoid having to lock the ArcSwap in write mode
         let con = self.con.as_mut().ok_or(redis::RedisError::from((
             redis::ErrorKind::IoError,
@@ -199,7 +205,7 @@ impl ConnectionWithCredentialsProvider {
     /// Sends multiple already encoded (packed) command into the TCP socket
     /// and reads `count` responses from it.  This is used to implement
     /// pipelining.
-    pub async fn send_packed_commands(
+    pub(crate) async fn send_packed_commands(
         &mut self,
         cmd: &redis::Pipeline,
         offset: usize,

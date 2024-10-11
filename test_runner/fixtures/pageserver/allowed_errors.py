@@ -1,14 +1,16 @@
 #! /usr/bin/env python3
 
+from __future__ import annotations
+
 import argparse
 import re
 import sys
-from typing import Iterable, List, Tuple
+from collections.abc import Iterable
 
 
 def scan_pageserver_log_for_errors(
-    input: Iterable[str], allowed_errors: List[str]
-) -> List[Tuple[int, str]]:
+    input: Iterable[str], allowed_errors: list[str]
+) -> list[tuple[int, str]]:
     error_or_warn = re.compile(r"\s(ERROR|WARN)")
     errors = []
     for lineno, line in enumerate(input, start=1):
@@ -52,9 +54,6 @@ DEFAULT_PAGESERVER_ALLOWED_ERRORS = (
     ".*Error processing HTTP request: Forbidden",
     # intentional failpoints
     ".*failpoint ",
-    # FIXME: These need investigation
-    ".*manual_gc.*is_shutdown_requested\\(\\) called in an unexpected task or thread.*",
-    ".*tenant_list: timeline is not found in remote index while it is present in the tenants registry.*",
     # Tenant::delete_timeline() can cause any of the four following errors.
     # FIXME: we shouldn't be considering it an error: https://github.com/neondatabase/neon/issues/2946
     ".*could not flush frozen layer.*queue is in state Stopped",  # when schedule layer upload fails because queued got closed before compaction got killed
@@ -116,7 +115,7 @@ DEFAULT_STORAGE_CONTROLLER_ALLOWED_ERRORS = [
 
 
 def _check_allowed_errors(input):
-    allowed_errors: List[str] = list(DEFAULT_PAGESERVER_ALLOWED_ERRORS)
+    allowed_errors: list[str] = list(DEFAULT_PAGESERVER_ALLOWED_ERRORS)
 
     # add any test specifics here; cli parsing is not provided for the
     # difficulty of copypasting regexes as arguments without any quoting

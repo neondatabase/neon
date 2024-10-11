@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import time
 from pathlib import Path
 
@@ -12,11 +14,9 @@ def test_lfc_working_set_approximation(neon_simple_env: NeonEnv):
     cache_dir = Path(env.repo_dir) / "file_cache"
     cache_dir.mkdir(exist_ok=True)
 
-    branchname = "test_approximate_working_set_size"
-    env.neon_cli.create_branch(branchname, "empty")
-    log.info(f"Creating endopint with 1MB shared_buffers and 64 MB LFC for branch {branchname}")
+    log.info("Creating endpoint with 1MB shared_buffers and 64 MB LFC")
     endpoint = env.endpoints.create_start(
-        branchname,
+        "main",
         config_lines=[
             "shared_buffers='1MB'",
             f"neon.file_cache_path='{cache_dir}/file.cache'",

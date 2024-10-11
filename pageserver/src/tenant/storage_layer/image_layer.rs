@@ -1,7 +1,9 @@
 //! An ImageLayer represents an image or a snapshot of a key-range at
-//! one particular LSN. It contains an image of all key-value pairs
-//! in its key-range. Any key that falls into the image layer's range
-//! but does not exist in the layer, does not exist.
+//! one particular LSN.
+//!
+//! It contains an image of all key-value pairs in its key-range. Any key
+//! that falls into the image layer's range but does not exist in the layer,
+//! does not exist.
 //!
 //! An image layer is stored in a file on disk. The file is stored in
 //! timelines/<timeline_id> directory.  Currently, there are no
@@ -28,26 +30,26 @@ use crate::context::{PageContentKind, RequestContext, RequestContextBuilder};
 use crate::page_cache::{self, FileId, PAGE_SZ};
 use crate::repository::{Key, Value, KEY_SIZE};
 use crate::tenant::blob_io::BlobWriter;
-use crate::tenant::block_io::{BlockBuf, BlockReader, FileBlockReader};
+use crate::tenant::block_io::{BlockBuf, FileBlockReader};
 use crate::tenant::disk_btree::{
     DiskBtreeBuilder, DiskBtreeIterator, DiskBtreeReader, VisitDirection,
 };
-use crate::tenant::storage_layer::{
-    LayerAccessStats, ValueReconstructResult, ValueReconstructState,
-};
 use crate::tenant::timeline::GetVectoredError;
 use crate::tenant::vectored_blob_io::{
-    BlobFlag, MaxVectoredReadBytes, StreamingVectoredReadPlanner, VectoredBlobReader, VectoredRead,
+    BlobFlag, BufView, StreamingVectoredReadPlanner, VectoredBlobReader, VectoredRead,
     VectoredReadPlanner,
 };
-use crate::tenant::{PageReconstructError, Timeline};
-use crate::virtual_file::{self, VirtualFile};
+use crate::tenant::PageReconstructError;
+use crate::virtual_file::owned_buffers_io::io_buf_ext::IoBufExt;
+use crate::virtual_file::{self, MaybeFatalIo, VirtualFile};
 use crate::{IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX};
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::{Bytes, BytesMut};
 use camino::{Utf8Path, Utf8PathBuf};
 use hex;
 use itertools::Itertools;
+use pageserver_api::config::MaxVectoredReadBytes;
+use pageserver_api::key::DBDIR_KEY;
 use pageserver_api::keyspace::KeySpace;
 use pageserver_api::shard::{ShardIdentity, TenantShardId};
 use rand::{distributions::Alphanumeric, Rng};
@@ -58,7 +60,6 @@ use std::io::SeekFrom;
 use std::ops::Range;
 use std::os::unix::prelude::FileExt;
 use std::str::FromStr;
-use std::sync::Arc;
 use tokio::sync::OnceCell;
 use tokio_stream::StreamExt;
 use tracing::*;
@@ -70,9 +71,7 @@ use utils::{
 };
 
 use super::layer_name::ImageLayerName;
-use super::{
-    AsLayerDesc, Layer, LayerName, PersistentLayerDesc, ResidentLayer, ValuesReconstructState,
-};
+use super::{AsLayerDesc, LayerName, PersistentLayerDesc, ValuesReconstructState};
 
 ///
 /// Header stored in the beginning of the file
@@ -137,7 +136,6 @@ pub struct ImageLayer {
     pub desc: PersistentLayerDesc,
     // This entry contains an image of all pages as of this LSN, should be the same as desc.lsn
     pub lsn: Lsn,
-    access_stats: LayerAccessStats,
     inner: OnceCell<ImageLayerInner>,
 }
 
@@ -168,6 +166,17 @@ pub struct ImageLayerInner {
     file_id: FileId,
 
     max_vectored_read_bytes: Option<MaxVectoredReadBytes>,
+}
+
+impl ImageLayerInner {
+    pub(crate) fn layer_dbg_info(&self) -> String {
+        format!(
+            "image {}..{} {}",
+            self.key_range().start,
+            self.key_range().end,
+            self.lsn()
+        )
+    }
 }
 
 impl std::fmt::Debug for ImageLayerInner {
@@ -255,7 +264,6 @@ impl ImageLayer {
     /// not loaded already.
     ///
     async fn load(&self, ctx: &RequestContext) -> Result<&ImageLayerInner> {
-        self.access_stats.record_access(ctx);
         self.inner
             .get_or_try_init(|| self.load_inner(ctx))
             .await
@@ -306,7 +314,6 @@ impl ImageLayer {
                 metadata.len(),
             ), // Now we assume image layer ALWAYS covers the full range. This may change in the future.
             lsn: summary.lsn,
-            access_stats: Default::default(),
             inner: OnceCell::new(),
         })
     }
@@ -360,7 +367,7 @@ impl ImageLayer {
         // TODO: could use smallvec here but it's a pain with Slice<T>
         Summary::ser_into(&new_summary, &mut buf).context("serialize")?;
         file.seek(SeekFrom::Start(0)).await?;
-        let (_buf, res) = file.write_all(buf, ctx).await;
+        let (_buf, res) = file.write_all(buf.slice_len(), ctx).await;
         res?;
         Ok(())
     }
@@ -375,9 +382,6 @@ impl ImageLayerInner {
         self.lsn
     }
 
-    /// Returns nested result following Result<Result<_, OpErr>, Critical>:
-    /// - inner has the success or transient failure
-    /// - outer has the permanent failure
     pub(super) async fn load(
         path: &Utf8Path,
         lsn: Lsn,
@@ -385,7 +389,7 @@ impl ImageLayerInner {
         max_vectored_read_bytes: Option<MaxVectoredReadBytes>,
         ctx: &RequestContext,
     ) -> anyhow::Result<Self> {
-        let file = VirtualFile::open(path, ctx)
+        let file = VirtualFile::open_v2(path, ctx)
             .await
             .context("open layer file")?;
         let file_id = page_cache::next_file_id();
@@ -429,46 +433,6 @@ impl ImageLayerInner {
         })
     }
 
-    pub(super) async fn get_value_reconstruct_data(
-        &self,
-        key: Key,
-        reconstruct_state: &mut ValueReconstructState,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<ValueReconstructResult> {
-        let block_reader = FileBlockReader::new(&self.file, self.file_id);
-        let tree_reader =
-            DiskBtreeReader::new(self.index_start_blk, self.index_root_blk, &block_reader);
-
-        let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
-        key.write_to_byte_slice(&mut keybuf);
-        if let Some(offset) = tree_reader
-            .get(
-                &keybuf,
-                &RequestContextBuilder::extend(ctx)
-                    .page_content_kind(PageContentKind::ImageLayerBtreeNode)
-                    .build(),
-            )
-            .await?
-        {
-            let blob = block_reader
-                .block_cursor()
-                .read_blob(
-                    offset,
-                    &RequestContextBuilder::extend(ctx)
-                        .page_content_kind(PageContentKind::ImageLayerValue)
-                        .build(),
-                )
-                .await
-                .with_context(|| format!("failed to read value from offset {}", offset))?;
-            let value = Bytes::from(blob);
-
-            reconstruct_state.img = Some((self.lsn, value));
-            Ok(ValueReconstructResult::Complete)
-        } else {
-            Ok(ValueReconstructResult::Missing)
-        }
-    }
-
     // Look up the keys in the provided keyspace and update
     // the reconstruct state with whatever is found.
     pub(super) async fn get_values_reconstruct_data(
@@ -488,33 +452,6 @@ impl ImageLayerInner {
         reconstruct_state.on_image_layer_visited(&self.key_range);
 
         Ok(())
-    }
-
-    /// Load all key-values in the delta layer, should be replaced by an iterator-based interface in the future.
-    pub(super) async fn load_key_values(
-        &self,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<Vec<(Key, Lsn, Value)>> {
-        let block_reader = FileBlockReader::new(&self.file, self.file_id);
-        let tree_reader =
-            DiskBtreeReader::new(self.index_start_blk, self.index_root_blk, &block_reader);
-        let mut result = Vec::new();
-        let mut stream = Box::pin(tree_reader.into_stream(&[0; KEY_SIZE], ctx));
-        let block_reader = FileBlockReader::new(&self.file, self.file_id);
-        let cursor = block_reader.block_cursor();
-        while let Some(item) = stream.next().await {
-            // TODO: dedup code with get_reconstruct_value
-            let (raw_key, offset) = item?;
-            let key = Key::from_slice(&raw_key[..KEY_SIZE]);
-            // TODO: ctx handling and sharding
-            let blob = cursor
-                .read_blob(offset, ctx)
-                .await
-                .with_context(|| format!("failed to read value from offset {}", offset))?;
-            let value = Bytes::from(blob);
-            result.push((key, self.lsn, Value::Image(value)));
-        }
-        Ok(result)
     }
 
     /// Traverse the layer's index to build read operations on the overlap of the input keyspace
@@ -612,15 +549,15 @@ impl ImageLayerInner {
 
             let buf = BytesMut::with_capacity(buf_size);
             let blobs_buf = vectored_blob_reader.read_blobs(&read, buf, ctx).await?;
-
             let frozen_buf = blobs_buf.buf.freeze();
+            let view = BufView::new_bytes(frozen_buf);
 
             for meta in blobs_buf.blobs.iter() {
-                let img_buf = frozen_buf.slice(meta.start..meta.end);
+                let img_buf = meta.read(&view).await?;
 
                 key_count += 1;
                 writer
-                    .put_image(meta.meta.key, img_buf, ctx)
+                    .put_image(meta.meta.key, img_buf.into_bytes(), ctx)
                     .await
                     .context(format!("Storing key {}", meta.meta.key))?;
             }
@@ -651,14 +588,25 @@ impl ImageLayerInner {
                     .blobs_at
                     .as_slice()
                     .iter()
-                    .map(|(_, blob_meta)| format!("{}@{}", blob_meta.key, blob_meta.lsn))
+                    .filter_map(|(_, blob_meta)| {
+                        if blob_meta.key.is_rel_dir_key() || blob_meta.key == DBDIR_KEY {
+                            // The size of values for these keys is unbounded and can
+                            // grow very large in pathological cases.
+                            None
+                        } else {
+                            Some(format!("{}@{}", blob_meta.key, blob_meta.lsn))
+                        }
+                    })
                     .join(", ");
-                tracing::warn!(
-                    "Oversized vectored read ({} > {}) for keys {}",
-                    buf_size,
-                    max_vectored_read_bytes,
-                    offenders
-                );
+
+                if !offenders.is_empty() {
+                    tracing::warn!(
+                        "Oversized vectored read ({} > {}) for keys {}",
+                        buf_size,
+                        max_vectored_read_bytes,
+                        offenders
+                    );
+                }
             }
 
             let buf = BytesMut::with_capacity(buf_size);
@@ -667,13 +615,28 @@ impl ImageLayerInner {
             match res {
                 Ok(blobs_buf) => {
                     let frozen_buf = blobs_buf.buf.freeze();
-
+                    let view = BufView::new_bytes(frozen_buf);
                     for meta in blobs_buf.blobs.iter() {
-                        let img_buf = frozen_buf.slice(meta.start..meta.end);
+                        let img_buf = meta.read(&view).await;
+
+                        let img_buf = match img_buf {
+                            Ok(img_buf) => img_buf,
+                            Err(e) => {
+                                reconstruct_state.on_key_error(
+                                    meta.meta.key,
+                                    PageReconstructError::Other(anyhow!(e).context(format!(
+                                        "Failed to decompress blob from virtual file {}",
+                                        self.file.path(),
+                                    ))),
+                                );
+
+                                continue;
+                            }
+                        };
                         reconstruct_state.update_key(
                             &meta.meta.key,
                             self.lsn,
-                            Value::Image(img_buf),
+                            Value::Image(img_buf.into_bytes()),
                         );
                     }
                 }
@@ -684,7 +647,7 @@ impl ImageLayerInner {
                             blob_meta.key,
                             PageReconstructError::from(anyhow!(
                                 "Failed to read blobs from virtual file {}: {}",
-                                self.file.path,
+                                self.file.path(),
                                 kind
                             )),
                         );
@@ -734,8 +697,22 @@ struct ImageLayerWriterInner {
     // Total uncompressed bytes passed into put_image
     uncompressed_bytes: u64,
 
+    // Like `uncompressed_bytes`,
+    // but only of images we might consider for compression
+    uncompressed_bytes_eligible: u64,
+
+    // Like `uncompressed_bytes`, but only of images
+    // where we have chosen their compressed form
+    uncompressed_bytes_chosen: u64,
+
+    // Number of keys in the layer.
+    num_keys: usize,
+
     blob_writer: BlobWriter<false>,
     tree: DiskBtreeBuilder<BlockBuf, KEY_SIZE>,
+
+    #[cfg(feature = "testing")]
+    last_written_key: Key,
 }
 
 impl ImageLayerWriterInner {
@@ -790,6 +767,11 @@ impl ImageLayerWriterInner {
             tree: tree_builder,
             blob_writer,
             uncompressed_bytes: 0,
+            uncompressed_bytes_eligible: 0,
+            uncompressed_bytes_chosen: 0,
+            num_keys: 0,
+            #[cfg(feature = "testing")]
+            last_written_key: Key::MIN,
         };
 
         Ok(writer)
@@ -808,17 +790,32 @@ impl ImageLayerWriterInner {
     ) -> anyhow::Result<()> {
         ensure!(self.key_range.contains(&key));
         let compression = self.conf.image_compression;
-        self.uncompressed_bytes += img.len() as u64;
+        let uncompressed_len = img.len() as u64;
+        self.uncompressed_bytes += uncompressed_len;
+        self.num_keys += 1;
         let (_img, res) = self
             .blob_writer
-            .write_blob_maybe_compressed(img, ctx, compression)
+            .write_blob_maybe_compressed(img.slice_len(), ctx, compression)
             .await;
         // TODO: re-use the buffer for `img` further upstack
-        let off = res?;
+        let (off, compression_info) = res?;
+        if compression_info.compressed_size.is_some() {
+            // The image has been considered for compression at least
+            self.uncompressed_bytes_eligible += uncompressed_len;
+        }
+        if compression_info.written_compressed {
+            // The image has been compressed
+            self.uncompressed_bytes_chosen += uncompressed_len;
+        }
 
         let mut keybuf: [u8; KEY_SIZE] = [0u8; KEY_SIZE];
         key.write_to_byte_slice(&mut keybuf);
         self.tree.append(&keybuf, off)?;
+
+        #[cfg(feature = "testing")]
+        {
+            self.last_written_key = key;
+        }
 
         Ok(())
     }
@@ -828,15 +825,18 @@ impl ImageLayerWriterInner {
     ///
     async fn finish(
         self,
-        timeline: &Arc<Timeline>,
         ctx: &RequestContext,
-    ) -> anyhow::Result<ResidentLayer> {
+        end_key: Option<Key>,
+    ) -> anyhow::Result<(PersistentLayerDesc, Utf8PathBuf)> {
         let index_start_blk =
             ((self.blob_writer.size() + PAGE_SZ as u64 - 1) / PAGE_SZ as u64) as u32;
 
         // Calculate compression ratio
         let compressed_size = self.blob_writer.size() - PAGE_SZ as u64; // Subtract PAGE_SZ for header
         crate::metrics::COMPRESSION_IMAGE_INPUT_BYTES.inc_by(self.uncompressed_bytes);
+        crate::metrics::COMPRESSION_IMAGE_INPUT_BYTES_CONSIDERED
+            .inc_by(self.uncompressed_bytes_eligible);
+        crate::metrics::COMPRESSION_IMAGE_INPUT_BYTES_CHOSEN.inc_by(self.uncompressed_bytes_chosen);
         crate::metrics::COMPRESSION_IMAGE_OUTPUT_BYTES.inc_by(compressed_size);
 
         let mut file = self.blob_writer.into_inner();
@@ -846,9 +846,15 @@ impl ImageLayerWriterInner {
             .await?;
         let (index_root_blk, block_buf) = self.tree.finish()?;
         for buf in block_buf.blocks {
-            let (_buf, res) = file.write_all(buf, ctx).await;
+            let (_buf, res) = file.write_all(buf.slice_len(), ctx).await;
             res?;
         }
+
+        let final_key_range = if let Some(end_key) = end_key {
+            self.key_range.start..end_key
+        } else {
+            self.key_range.clone()
+        };
 
         // Fill in the summary on blk 0
         let summary = Summary {
@@ -856,7 +862,7 @@ impl ImageLayerWriterInner {
             format_version: STORAGE_FORMAT_VERSION,
             tenant_id: self.tenant_shard_id.tenant_id,
             timeline_id: self.timeline_id,
-            key_range: self.key_range.clone(),
+            key_range: final_key_range.clone(),
             lsn: self.lsn,
             index_start_blk,
             index_root_blk,
@@ -866,7 +872,7 @@ impl ImageLayerWriterInner {
         // TODO: could use smallvec here but it's a pain with Slice<T>
         Summary::ser_into(&summary, &mut buf)?;
         file.seek(SeekFrom::Start(0)).await?;
-        let (_buf, res) = file.write_all(buf, ctx).await;
+        let (_buf, res) = file.write_all(buf.slice_len(), ctx).await;
         res?;
 
         let metadata = file
@@ -877,24 +883,31 @@ impl ImageLayerWriterInner {
         let desc = PersistentLayerDesc::new_img(
             self.tenant_shard_id,
             self.timeline_id,
-            self.key_range.clone(),
+            final_key_range,
             self.lsn,
             metadata.len(),
         );
+
+        #[cfg(feature = "testing")]
+        if let Some(end_key) = end_key {
+            assert!(
+                self.last_written_key < end_key,
+                "written key violates end_key range"
+            );
+        }
 
         // Note: Because we open the file in write-only mode, we cannot
         // reuse the same VirtualFile for reading later. That's why we don't
         // set inner.file here. The first read will have to re-open it.
 
         // fsync the file
-        file.sync_all().await?;
+        file.sync_all()
+            .await
+            .maybe_fatal_err("image_layer sync_all")?;
 
-        // FIXME: why not carry the virtualfile here, it supports renaming?
-        let layer = Layer::finish_creating(self.conf, timeline, desc, &self.path)?;
+        trace!("created image layer {}", self.path);
 
-        info!("created image layer {}", layer.local_path());
-
-        Ok(layer)
+        Ok((desc, self.path))
     }
 }
 
@@ -958,15 +971,33 @@ impl ImageLayerWriter {
         self.inner.as_mut().unwrap().put_image(key, img, ctx).await
     }
 
+    /// Estimated size of the image layer.
+    pub(crate) fn estimated_size(&self) -> u64 {
+        let inner = self.inner.as_ref().unwrap();
+        inner.blob_writer.size() + inner.tree.borrow_writer().size() + PAGE_SZ as u64
+    }
+
+    pub(crate) fn num_keys(&self) -> usize {
+        self.inner.as_ref().unwrap().num_keys
+    }
+
     ///
     /// Finish writing the image layer.
     ///
     pub(crate) async fn finish(
         mut self,
-        timeline: &Arc<Timeline>,
         ctx: &RequestContext,
-    ) -> anyhow::Result<super::ResidentLayer> {
-        self.inner.take().unwrap().finish(timeline, ctx).await
+    ) -> anyhow::Result<(PersistentLayerDesc, Utf8PathBuf)> {
+        self.inner.take().unwrap().finish(ctx, None).await
+    }
+
+    /// Finish writing the image layer with an end key, used in [`super::split_writer::SplitImageLayerWriter`]. The end key determines the end of the image layer's covered range and is exclusive.
+    pub(super) async fn finish_with_end_key(
+        mut self,
+        end_key: Key,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<(PersistentLayerDesc, Utf8PathBuf)> {
+        self.inner.take().unwrap().finish(ctx, Some(end_key)).await
     }
 }
 
@@ -988,6 +1019,10 @@ pub struct ImageLayerIterator<'a> {
 }
 
 impl<'a> ImageLayerIterator<'a> {
+    pub(crate) fn layer_dbg_info(&self) -> String {
+        self.image_layer.layer_dbg_info()
+    }
+
     /// Retrieve a batch of key-value pairs into the iterator buffer.
     async fn next_batch(&mut self) -> anyhow::Result<()> {
         assert!(self.key_values_batch.is_empty());
@@ -1020,10 +1055,15 @@ impl<'a> ImageLayerIterator<'a> {
         let blobs_buf = vectored_blob_reader
             .read_blobs(&plan, buf, self.ctx)
             .await?;
-        let frozen_buf: Bytes = blobs_buf.buf.freeze();
+        let frozen_buf = blobs_buf.buf.freeze();
+        let view = BufView::new_bytes(frozen_buf);
         for meta in blobs_buf.blobs.iter() {
-            let img_buf = frozen_buf.slice(meta.start..meta.end);
-            next_batch.push_back((meta.meta.key, self.image_layer.lsn, Value::Image(img_buf)));
+            let img_buf = meta.read(&view).await?;
+            next_batch.push_back((
+                meta.meta.key,
+                self.image_layer.lsn,
+                Value::Image(img_buf.into_bytes()),
+            ));
         }
         self.key_values_batch = next_batch;
         Ok(())
@@ -1066,7 +1106,7 @@ mod test {
         tenant::{
             config::TenantConf,
             harness::{TenantHarness, TIMELINE_ID},
-            storage_layer::ResidentLayer,
+            storage_layer::{Layer, ResidentLayer},
             vectored_blob_io::StreamingVectoredReadPlanner,
             Tenant, Timeline,
         },
@@ -1137,7 +1177,8 @@ mod test {
 
                 key = key.next();
             }
-            writer.finish(&timeline, &ctx).await.unwrap()
+            let (desc, path) = writer.finish(&ctx).await.unwrap();
+            Layer::finish_creating(tenant.conf, &timeline, desc, &path).unwrap()
         };
         let original_size = resident.metadata().file_size;
 
@@ -1199,7 +1240,9 @@ mod test {
                 .await
                 .unwrap();
             let replacement = if wrote_keys > 0 {
-                Some(filtered_writer.finish(&timeline, &ctx).await.unwrap())
+                let (desc, path) = filtered_writer.finish(&ctx).await.unwrap();
+                let resident = Layer::finish_creating(tenant.conf, &timeline, desc, &path).unwrap();
+                Some(resident)
             } else {
                 None
             };
@@ -1272,7 +1315,8 @@ mod test {
         for (key, img) in images {
             writer.put_image(key, img, ctx).await?;
         }
-        let img_layer = writer.finish(tline, ctx).await?;
+        let (desc, path) = writer.finish(ctx).await?;
+        let img_layer = Layer::finish_creating(tenant.conf, tline, desc, &path)?;
 
         Ok::<_, anyhow::Error>(img_layer)
     }
@@ -1339,7 +1383,7 @@ mod test {
                         // every key should be a batch b/c the value is larger than max_read_size
                         assert_eq!(iter.key_values_batch.len(), 1);
                     } else {
-                        assert_eq!(iter.key_values_batch.len(), batch_size);
+                        assert!(iter.key_values_batch.len() <= batch_size);
                     }
                     if num_items >= N {
                         break;

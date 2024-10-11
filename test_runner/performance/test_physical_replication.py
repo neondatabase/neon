@@ -18,7 +18,7 @@ from fixtures.neon_api import connection_parameters_to_env
 from fixtures.pg_version import PgVersion
 
 if TYPE_CHECKING:
-    from typing import Any, List, Optional
+    from typing import Any, Optional
 
     from fixtures.benchmark_fixture import NeonBenchmarker
     from fixtures.neon_api import NeonAPI
@@ -85,7 +85,7 @@ def test_ro_replica_lag(
             endpoint_id=replica["endpoint"]["id"],
         )["uri"]
 
-        pg_bin.run_capture(["pgbench", "-i", "-s100"], env=master_env)
+        pg_bin.run_capture(["pgbench", "-i", "-I", "dtGvp", "-s100"], env=master_env)
 
         master_workload = pg_bin.run_nonblocking(
             ["pgbench", "-c10", pgbench_duration, "-Mprepared"],
@@ -212,7 +212,7 @@ def test_replication_start_stop(
         for i in range(num_replicas):
             replica_env[i]["PGHOST"] = replicas[i]["endpoint"]["host"]
 
-        pg_bin.run_capture(["pgbench", "-i", "-s10"], env=master_env)
+        pg_bin.run_capture(["pgbench", "-i", "-I", "dtGvp", "-s10"], env=master_env)
 
         # Sync replicas
         with psycopg2.connect(master_connstr) as conn_master:
@@ -233,7 +233,7 @@ def test_replication_start_stop(
             ],
             env=master_env,
         )
-        replica_pgbench: List[Optional[subprocess.Popen[Any]]] = [None for _ in range(num_replicas)]
+        replica_pgbench: list[Optional[subprocess.Popen[Any]]] = [None for _ in range(num_replicas)]
 
         # Use the bits of iconfig to tell us which configuration we are on. For example
         # a iconfig of 2 is 10 in binary, indicating replica 0 is suspended and replica 1 is

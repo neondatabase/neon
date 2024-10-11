@@ -7,16 +7,19 @@ use futures::future::try_join;
 use futures::future::Either;
 use futures::StreamExt;
 use futures::TryFutureExt;
+use http::header::AUTHORIZATION;
+use http::Method;
+use http_body_util::combinators::BoxBody;
 use http_body_util::BodyExt;
 use http_body_util::Full;
-use hyper1::body::Body;
-use hyper1::body::Incoming;
-use hyper1::header;
-use hyper1::http::HeaderName;
-use hyper1::http::HeaderValue;
-use hyper1::Response;
-use hyper1::StatusCode;
-use hyper1::{HeaderMap, Request};
+use hyper::body::Body;
+use hyper::body::Incoming;
+use hyper::header;
+use hyper::http::HeaderName;
+use hyper::http::HeaderValue;
+use hyper::Response;
+use hyper::StatusCode;
+use hyper::{HeaderMap, Request};
 use pq_proto::StartupMessageParamsBuilder;
 use serde::Serialize;
 use serde_json::Value;
@@ -34,11 +37,14 @@ use tracing::error;
 use tracing::info;
 use typed_json::json;
 use url::Url;
+use urlencoding;
 use utils::http::error::ApiError;
 
+use crate::auth::backend::ComputeCredentialKeys;
 use crate::auth::backend::ComputeUserInfo;
 use crate::auth::endpoint_sni;
 use crate::auth::ComputeUserInfoParseError;
+use crate::config::AuthenticationConfig;
 use crate::config::ProxyConfig;
 use crate::config::TlsConfig;
 use crate::context::RequestMonitoring;
@@ -50,17 +56,22 @@ use crate::metrics::Metrics;
 use crate::proxy::run_until_cancelled;
 use crate::proxy::NeonOptions;
 use crate::serverless::backend::HttpConnError;
+use crate::usage_metrics::MetricCounter;
 use crate::usage_metrics::MetricCounterRecorder;
 use crate::DbName;
 use crate::RoleName;
 
+use super::backend::LocalProxyConnError;
 use super::backend::PoolingBackend;
-use super::conn_pool::Client;
+use super::conn_pool;
+use super::conn_pool::AuthData;
 use super::conn_pool::ConnInfo;
+use super::conn_pool::ConnInfoWithAuth;
 use super::http_util::json_response;
 use super::json::json_to_pg_text;
 use super::json::pg_text_row_to_json;
 use super::json::JsonConversionError;
+use super::local_conn_pool;
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -84,9 +95,7 @@ enum Payload {
     Batch(BatchQueryData),
 }
 
-const MAX_RESPONSE_SIZE: usize = 10 * 1024 * 1024; // 10 MiB
-const MAX_REQUEST_SIZE: u64 = 10 * 1024 * 1024; // 10 MiB
-
+static CONN_STRING: HeaderName = HeaderName::from_static("neon-connection-string");
 static RAW_TEXT_OUTPUT: HeaderName = HeaderName::from_static("neon-raw-text-output");
 static ARRAY_MODE: HeaderName = HeaderName::from_static("neon-array-mode");
 static ALLOW_POOL: HeaderName = HeaderName::from_static("neon-pool-opt-in");
@@ -106,9 +115,9 @@ where
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum ConnInfoError {
+pub(crate) enum ConnInfoError {
     #[error("invalid header: {0}")]
-    InvalidHeader(&'static str),
+    InvalidHeader(&'static HeaderName),
     #[error("invalid connection string: {0}")]
     UrlParseError(#[from] url::ParseError),
     #[error("incorrect scheme")]
@@ -121,14 +130,22 @@ pub enum ConnInfoError {
     MissingUsername,
     #[error("invalid username: {0}")]
     InvalidUsername(#[from] std::string::FromUtf8Error),
-    #[error("missing password")]
-    MissingPassword,
+    #[error("missing authentication credentials: {0}")]
+    MissingCredentials(Credentials),
     #[error("missing hostname")]
     MissingHostname,
     #[error("invalid hostname: {0}")]
     InvalidEndpoint(#[from] ComputeUserInfoParseError),
     #[error("malformed endpoint")]
     MalformedEndpoint,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum Credentials {
+    #[error("required password")]
+    Password,
+    #[error("required authorization bearer token in JWT format")]
+    BearerJwt,
 }
 
 impl ReportableError for ConnInfoError {
@@ -144,18 +161,19 @@ impl UserFacingError for ConnInfoError {
 }
 
 fn get_conn_info(
-    ctx: &mut RequestMonitoring,
+    config: &'static AuthenticationConfig,
+    ctx: &RequestMonitoring,
     headers: &HeaderMap,
-    tls: &TlsConfig,
-) -> Result<ConnInfo, ConnInfoError> {
+    tls: Option<&TlsConfig>,
+) -> Result<ConnInfoWithAuth, ConnInfoError> {
     // HTTP only uses cleartext (for now and likely always)
     ctx.set_auth_method(crate::context::AuthMethod::Cleartext);
 
     let connection_string = headers
-        .get("Neon-Connection-String")
-        .ok_or(ConnInfoError::InvalidHeader("Neon-Connection-String"))?
+        .get(&CONN_STRING)
+        .ok_or(ConnInfoError::InvalidHeader(&CONN_STRING))?
         .to_str()
-        .map_err(|_| ConnInfoError::InvalidHeader("Neon-Connection-String"))?;
+        .map_err(|_| ConnInfoError::InvalidHeader(&CONN_STRING))?;
 
     let connection_url = Url::parse(connection_string)?;
 
@@ -168,7 +186,8 @@ fn get_conn_info(
         .path_segments()
         .ok_or(ConnInfoError::MissingDbName)?;
 
-    let dbname: DbName = url_path.next().ok_or(ConnInfoError::InvalidDbName)?.into();
+    let dbname: DbName =
+        urlencoding::decode(url_path.next().ok_or(ConnInfoError::InvalidDbName)?)?.into();
     ctx.set_dbname(dbname.clone());
 
     let username = RoleName::from(urlencoding::decode(connection_url.username())?);
@@ -177,17 +196,51 @@ fn get_conn_info(
     }
     ctx.set_user(username.clone());
 
-    let password = connection_url
-        .password()
-        .ok_or(ConnInfoError::MissingPassword)?;
-    let password = urlencoding::decode_binary(password.as_bytes());
+    let auth = if let Some(auth) = headers.get(&AUTHORIZATION) {
+        if !config.accept_jwts {
+            return Err(ConnInfoError::MissingCredentials(Credentials::Password));
+        }
 
-    let hostname = connection_url
-        .host_str()
-        .ok_or(ConnInfoError::MissingHostname)?;
+        let auth = auth
+            .to_str()
+            .map_err(|_| ConnInfoError::InvalidHeader(&AUTHORIZATION))?;
+        AuthData::Jwt(
+            auth.strip_prefix("Bearer ")
+                .ok_or(ConnInfoError::MissingCredentials(Credentials::BearerJwt))?
+                .into(),
+        )
+    } else if let Some(pass) = connection_url.password() {
+        // wrong credentials provided
+        if config.accept_jwts {
+            return Err(ConnInfoError::MissingCredentials(Credentials::BearerJwt));
+        }
 
-    let endpoint =
-        endpoint_sni(hostname, &tls.common_names)?.ok_or(ConnInfoError::MalformedEndpoint)?;
+        AuthData::Password(match urlencoding::decode_binary(pass.as_bytes()) {
+            std::borrow::Cow::Borrowed(b) => b.into(),
+            std::borrow::Cow::Owned(b) => b.into(),
+        })
+    } else if config.accept_jwts {
+        return Err(ConnInfoError::MissingCredentials(Credentials::BearerJwt));
+    } else {
+        return Err(ConnInfoError::MissingCredentials(Credentials::Password));
+    };
+
+    let endpoint = match connection_url.host() {
+        Some(url::Host::Domain(hostname)) => {
+            if let Some(tls) = tls {
+                endpoint_sni(hostname, &tls.common_names)?
+                    .ok_or(ConnInfoError::MalformedEndpoint)?
+            } else {
+                hostname
+                    .split_once('.')
+                    .map_or(hostname, |(prefix, _)| prefix)
+                    .into()
+            }
+        }
+        Some(url::Host::Ipv4(_) | url::Host::Ipv6(_)) | None => {
+            return Err(ConnInfoError::MissingHostname)
+        }
+    };
     ctx.set_endpoint_id(endpoint.clone());
 
     let pairs = connection_url.query_pairs();
@@ -203,7 +256,6 @@ fn get_conn_info(
             options = Some(NeonOptions::parse_options_raw(&value));
         }
     }
-    ctx.set_db_options(params.freeze());
 
     let user_info = ComputeUserInfo {
         endpoint,
@@ -211,25 +263,19 @@ fn get_conn_info(
         options: options.unwrap_or_default(),
     };
 
-    Ok(ConnInfo {
-        user_info,
-        dbname,
-        password: match password {
-            std::borrow::Cow::Borrowed(b) => b.into(),
-            std::borrow::Cow::Owned(b) => b.into(),
-        },
-    })
+    let conn_info = ConnInfo { user_info, dbname };
+    Ok(ConnInfoWithAuth { conn_info, auth })
 }
 
 // TODO: return different http error codes
-pub async fn handle(
+pub(crate) async fn handle(
     config: &'static ProxyConfig,
-    mut ctx: RequestMonitoring,
+    ctx: RequestMonitoring,
     request: Request<Incoming>,
     backend: Arc<PoolingBackend>,
     cancel: CancellationToken,
-) -> Result<Response<Full<Bytes>>, ApiError> {
-    let result = handle_inner(cancel, config, &mut ctx, request, backend).await;
+) -> Result<Response<BoxBody<Bytes, hyper::Error>>, ApiError> {
+    let result = handle_inner(cancel, config, &ctx, request, backend).await;
 
     let mut response = match result {
         Ok(r) => {
@@ -260,7 +306,7 @@ pub async fn handle(
 
             let mut message = e.to_string_client();
             let db_error = match &e {
-                SqlOverHttpError::ConnectCompute(HttpConnError::ConnectionError(e))
+                SqlOverHttpError::ConnectCompute(HttpConnError::PostgresConnectionError(e))
                 | SqlOverHttpError::Postgres(e) => e.as_db_error(),
                 _ => None,
             };
@@ -335,17 +381,17 @@ pub async fn handle(
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum SqlOverHttpError {
+pub(crate) enum SqlOverHttpError {
     #[error("{0}")]
     ReadPayload(#[from] ReadPayloadError),
     #[error("{0}")]
     ConnectCompute(#[from] HttpConnError),
     #[error("{0}")]
     ConnInfo(#[from] ConnInfoError),
-    #[error("request is too large (max is {MAX_REQUEST_SIZE} bytes)")]
-    RequestTooLarge,
-    #[error("response is too large (max is {MAX_RESPONSE_SIZE} bytes)")]
-    ResponseTooLarge,
+    #[error("request is too large (max is {0} bytes)")]
+    RequestTooLarge(u64),
+    #[error("response is too large (max is {0} bytes)")]
+    ResponseTooLarge(usize),
     #[error("invalid isolation level")]
     InvalidIsolationLevel,
     #[error("{0}")]
@@ -362,8 +408,8 @@ impl ReportableError for SqlOverHttpError {
             SqlOverHttpError::ReadPayload(e) => e.get_error_kind(),
             SqlOverHttpError::ConnectCompute(e) => e.get_error_kind(),
             SqlOverHttpError::ConnInfo(e) => e.get_error_kind(),
-            SqlOverHttpError::RequestTooLarge => ErrorKind::User,
-            SqlOverHttpError::ResponseTooLarge => ErrorKind::User,
+            SqlOverHttpError::RequestTooLarge(_) => ErrorKind::User,
+            SqlOverHttpError::ResponseTooLarge(_) => ErrorKind::User,
             SqlOverHttpError::InvalidIsolationLevel => ErrorKind::User,
             SqlOverHttpError::Postgres(p) => p.get_error_kind(),
             SqlOverHttpError::JsonConversion(_) => ErrorKind::Postgres,
@@ -378,8 +424,8 @@ impl UserFacingError for SqlOverHttpError {
             SqlOverHttpError::ReadPayload(p) => p.to_string(),
             SqlOverHttpError::ConnectCompute(c) => c.to_string_client(),
             SqlOverHttpError::ConnInfo(c) => c.to_string_client(),
-            SqlOverHttpError::RequestTooLarge => self.to_string(),
-            SqlOverHttpError::ResponseTooLarge => self.to_string(),
+            SqlOverHttpError::RequestTooLarge(_) => self.to_string(),
+            SqlOverHttpError::ResponseTooLarge(_) => self.to_string(),
             SqlOverHttpError::InvalidIsolationLevel => self.to_string(),
             SqlOverHttpError::Postgres(p) => p.to_string(),
             SqlOverHttpError::JsonConversion(_) => "could not parse postgres response".to_string(),
@@ -389,9 +435,9 @@ impl UserFacingError for SqlOverHttpError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum ReadPayloadError {
+pub(crate) enum ReadPayloadError {
     #[error("could not read the HTTP request body: {0}")]
-    Read(#[from] hyper1::Error),
+    Read(#[from] hyper::Error),
     #[error("could not parse the HTTP request body: {0}")]
     Parse(#[from] serde_json::Error),
 }
@@ -406,7 +452,7 @@ impl ReportableError for ReadPayloadError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum SqlOverHttpCancel {
+pub(crate) enum SqlOverHttpCancel {
     #[error("query was cancelled")]
     Postgres,
     #[error("query was cancelled while stuck trying to connect to the database")]
@@ -432,7 +478,7 @@ struct HttpHeaders {
 }
 
 impl HttpHeaders {
-    fn try_parse(headers: &hyper1::http::HeaderMap) -> Result<Self, SqlOverHttpError> {
+    fn try_parse(headers: &hyper::http::HeaderMap) -> Result<Self, SqlOverHttpError> {
         // Determine the output options. Default behaviour is 'false'. Anything that is not
         // strictly 'true' assumed to be false.
         let raw_output = headers.get(&RAW_TEXT_OUTPUT) == Some(&HEADER_VALUE_TRUE);
@@ -482,24 +528,62 @@ fn map_isolation_level_to_headers(level: IsolationLevel) -> Option<HeaderValue> 
 async fn handle_inner(
     cancel: CancellationToken,
     config: &'static ProxyConfig,
-    ctx: &mut RequestMonitoring,
+    ctx: &RequestMonitoring,
     request: Request<Incoming>,
     backend: Arc<PoolingBackend>,
-) -> Result<Response<Full<Bytes>>, SqlOverHttpError> {
-    let _requeset_gauge = Metrics::get().proxy.connection_requests.guard(ctx.protocol);
+) -> Result<Response<BoxBody<Bytes, hyper::Error>>, SqlOverHttpError> {
+    let _requeset_gauge = Metrics::get()
+        .proxy
+        .connection_requests
+        .guard(ctx.protocol());
     info!(
-        protocol = %ctx.protocol,
+        protocol = %ctx.protocol(),
         "handling interactive connection from client"
     );
 
+    let conn_info = get_conn_info(
+        &config.authentication_config,
+        ctx,
+        request.headers(),
+        config.tls_config.as_ref(),
+    )?;
+    info!(
+        user = conn_info.conn_info.user_info.user.as_str(),
+        "credentials"
+    );
+
+    match conn_info.auth {
+        AuthData::Jwt(jwt) if config.authentication_config.is_auth_broker => {
+            handle_auth_broker_inner(config, ctx, request, conn_info.conn_info, jwt, backend).await
+        }
+        auth => {
+            handle_db_inner(
+                cancel,
+                config,
+                ctx,
+                request,
+                conn_info.conn_info,
+                auth,
+                backend,
+            )
+            .await
+        }
+    }
+}
+
+async fn handle_db_inner(
+    cancel: CancellationToken,
+    config: &'static ProxyConfig,
+    ctx: &RequestMonitoring,
+    request: Request<Incoming>,
+    conn_info: ConnInfo,
+    auth: AuthData,
+    backend: Arc<PoolingBackend>,
+) -> Result<Response<BoxBody<Bytes, hyper::Error>>, SqlOverHttpError> {
     //
     // Determine the destination and connection params
     //
     let headers = request.headers();
-
-    // TLS config should be there.
-    let conn_info = get_conn_info(ctx, headers, config.tls_config.as_ref().unwrap())?;
-    info!(user = conn_info.user_info.user.as_str(), "credentials");
 
     // Allow connection pooling only if explicitly requested
     // or if we have decided that http pool is no longer opt-in
@@ -510,7 +594,7 @@ async fn handle_inner(
 
     let request_content_length = match request.body().size_hint().upper() {
         Some(v) => v,
-        None => MAX_REQUEST_SIZE + 1,
+        None => config.http_config.max_request_size_bytes + 1,
     };
     info!(request_content_length, "request size in bytes");
     Metrics::get()
@@ -520,8 +604,10 @@ async fn handle_inner(
 
     // we don't have a streaming request support yet so this is to prevent OOM
     // from a malicious user sending an extremely large request body
-    if request_content_length > MAX_REQUEST_SIZE {
-        return Err(SqlOverHttpError::RequestTooLarge);
+    if request_content_length > config.http_config.max_request_size_bytes {
+        return Err(SqlOverHttpError::RequestTooLarge(
+            config.http_config.max_request_size_bytes,
+        ));
     }
 
     let fetch_and_process_request = Box::pin(
@@ -536,15 +622,49 @@ async fn handle_inner(
 
     let authenticate_and_connect = Box::pin(
         async {
-            let keys = backend
-                .authenticate(ctx, &config.authentication_config, &conn_info)
-                .await?;
-            let client = backend
-                .connect_to_compute(ctx, conn_info, keys, !allow_pool)
-                .await?;
+            let is_local_proxy =
+                matches!(backend.config.auth_backend, crate::auth::Backend::Local(_));
+
+            let keys = match auth {
+                AuthData::Password(pw) => {
+                    backend
+                        .authenticate_with_password(
+                            ctx,
+                            &config.authentication_config,
+                            &conn_info.user_info,
+                            &pw,
+                        )
+                        .await?
+                }
+                AuthData::Jwt(jwt) => {
+                    backend
+                        .authenticate_with_jwt(
+                            ctx,
+                            &config.authentication_config,
+                            &conn_info.user_info,
+                            jwt,
+                        )
+                        .await?
+                }
+            };
+
+            let client = match keys.keys {
+                ComputeCredentialKeys::JwtPayload(payload) if is_local_proxy => {
+                    let mut client = backend.connect_to_local_postgres(ctx, conn_info).await?;
+                    client.set_jwt_session(&payload).await?;
+                    Client::Local(client)
+                }
+                _ => {
+                    let client = backend
+                        .connect_to_compute(ctx, conn_info, keys, !allow_pool)
+                        .await?;
+                    Client::Remote(client)
+                }
+            };
+
             // not strictly necessary to mark success here,
             // but it's just insurance for if we forget it somewhere else
-            ctx.latency_timer.success();
+            ctx.success();
             Ok::<_, HttpConnError>(client)
         }
         .map_err(SqlOverHttpError::from),
@@ -570,7 +690,10 @@ async fn handle_inner(
 
     // Now execute the query and return the result.
     let json_output = match payload {
-        Payload::Single(stmt) => stmt.process(cancel, &mut client, parsed_headers).await?,
+        Payload::Single(stmt) => {
+            stmt.process(config, cancel, &mut client, parsed_headers)
+                .await?
+        }
         Payload::Batch(statements) => {
             if parsed_headers.txn_read_only {
                 response = response.header(TXN_READ_ONLY.clone(), &HEADER_VALUE_TRUE);
@@ -586,7 +709,7 @@ async fn handle_inner(
             }
 
             statements
-                .process(cancel, &mut client, parsed_headers)
+                .process(config, cancel, &mut client, parsed_headers)
                 .await?
         }
     };
@@ -595,7 +718,11 @@ async fn handle_inner(
 
     let len = json_output.len();
     let response = response
-        .body(Full::new(Bytes::from(json_output)))
+        .body(
+            Full::new(Bytes::from(json_output))
+                .map_err(|x| match x {})
+                .boxed(),
+        )
         // only fails if invalid status code or invalid header/values are given.
         // these are not user configurable so it cannot fail dynamically
         .expect("building response payload should not fail");
@@ -611,18 +738,78 @@ async fn handle_inner(
     Ok(response)
 }
 
+static HEADERS_TO_FORWARD: &[&HeaderName] = &[
+    &AUTHORIZATION,
+    &CONN_STRING,
+    &RAW_TEXT_OUTPUT,
+    &ARRAY_MODE,
+    &TXN_ISOLATION_LEVEL,
+    &TXN_READ_ONLY,
+    &TXN_DEFERRABLE,
+];
+
+async fn handle_auth_broker_inner(
+    config: &'static ProxyConfig,
+    ctx: &RequestMonitoring,
+    request: Request<Incoming>,
+    conn_info: ConnInfo,
+    jwt: String,
+    backend: Arc<PoolingBackend>,
+) -> Result<Response<BoxBody<Bytes, hyper::Error>>, SqlOverHttpError> {
+    backend
+        .authenticate_with_jwt(
+            ctx,
+            &config.authentication_config,
+            &conn_info.user_info,
+            jwt,
+        )
+        .await
+        .map_err(HttpConnError::from)?;
+
+    let mut client = backend.connect_to_local_proxy(ctx, conn_info).await?;
+
+    let local_proxy_uri = ::http::Uri::from_static("http://proxy.local/sql");
+
+    let (mut parts, body) = request.into_parts();
+    let mut req = Request::builder().method(Method::POST).uri(local_proxy_uri);
+
+    // todo(conradludgate): maybe auth-broker should parse these and re-serialize
+    // these instead just to ensure they remain normalised.
+    for &h in HEADERS_TO_FORWARD {
+        if let Some(hv) = parts.headers.remove(h) {
+            req = req.header(h, hv);
+        }
+    }
+
+    let req = req
+        .body(body)
+        .expect("all headers and params received via hyper should be valid for request");
+
+    // todo: map body to count egress
+    let _metrics = client.metrics();
+
+    Ok(client
+        .inner
+        .send_request(req)
+        .await
+        .map_err(LocalProxyConnError::from)
+        .map_err(HttpConnError::from)?
+        .map(|b| b.boxed()))
+}
+
 impl QueryData {
     async fn process(
         self,
+        config: &'static ProxyConfig,
         cancel: CancellationToken,
-        client: &mut Client<tokio_postgres::Client>,
+        client: &mut Client,
         parsed_headers: HttpHeaders,
     ) -> Result<String, SqlOverHttpError> {
         let (inner, mut discard) = client.inner();
         let cancel_token = inner.cancel_token();
 
         let res = match select(
-            pin!(query_to_json(&*inner, self, &mut 0, parsed_headers)),
+            pin!(query_to_json(config, &*inner, self, &mut 0, parsed_headers)),
             pin!(cancel.cancelled()),
         )
         .await
@@ -644,7 +831,7 @@ impl QueryData {
             Either::Right((_cancelled, query)) => {
                 tracing::info!("cancelling query");
                 if let Err(err) = cancel_token.cancel_query(NoTls).await {
-                    tracing::error!(?err, "could not cancel query");
+                    tracing::warn!(?err, "could not cancel query");
                 }
                 // wait for the query cancellation
                 match time::timeout(time::Duration::from_millis(100), query).await {
@@ -659,7 +846,9 @@ impl QueryData {
                     // query failed or was cancelled.
                     Ok(Err(error)) => {
                         let db_error = match &error {
-                            SqlOverHttpError::ConnectCompute(HttpConnError::ConnectionError(e))
+                            SqlOverHttpError::ConnectCompute(
+                                HttpConnError::PostgresConnectionError(e),
+                            )
                             | SqlOverHttpError::Postgres(e) => e.as_db_error(),
                             _ => None,
                         };
@@ -685,8 +874,9 @@ impl QueryData {
 impl BatchQueryData {
     async fn process(
         self,
+        config: &'static ProxyConfig,
         cancel: CancellationToken,
-        client: &mut Client<tokio_postgres::Client>,
+        client: &mut Client,
         parsed_headers: HttpHeaders,
     ) -> Result<String, SqlOverHttpError> {
         info!("starting transaction");
@@ -703,53 +893,58 @@ impl BatchQueryData {
             builder = builder.deferrable(true);
         }
 
-        let transaction = builder.start().await.map_err(|e| {
+        let transaction = builder.start().await.inspect_err(|_| {
             // if we cannot start a transaction, we should return immediately
             // and not return to the pool. connection is clearly broken
             discard.discard();
-            e
         })?;
 
-        let json_output =
-            match query_batch(cancel.child_token(), &transaction, self, parsed_headers).await {
-                Ok(json_output) => {
-                    info!("commit");
-                    let status = transaction.commit().await.map_err(|e| {
-                        // if we cannot commit - for now don't return connection to pool
-                        // TODO: get a query status from the error
-                        discard.discard();
-                        e
-                    })?;
-                    discard.check_idle(status);
-                    json_output
-                }
-                Err(SqlOverHttpError::Cancelled(_)) => {
-                    if let Err(err) = cancel_token.cancel_query(NoTls).await {
-                        tracing::error!(?err, "could not cancel query");
-                    }
-                    // TODO: after cancelling, wait to see if we can get a status. maybe the connection is still safe.
+        let json_output = match query_batch(
+            config,
+            cancel.child_token(),
+            &transaction,
+            self,
+            parsed_headers,
+        )
+        .await
+        {
+            Ok(json_output) => {
+                info!("commit");
+                let status = transaction.commit().await.inspect_err(|_| {
+                    // if we cannot commit - for now don't return connection to pool
+                    // TODO: get a query status from the error
                     discard.discard();
+                })?;
+                discard.check_idle(status);
+                json_output
+            }
+            Err(SqlOverHttpError::Cancelled(_)) => {
+                if let Err(err) = cancel_token.cancel_query(NoTls).await {
+                    tracing::warn!(?err, "could not cancel query");
+                }
+                // TODO: after cancelling, wait to see if we can get a status. maybe the connection is still safe.
+                discard.discard();
 
-                    return Err(SqlOverHttpError::Cancelled(SqlOverHttpCancel::Postgres));
-                }
-                Err(err) => {
-                    info!("rollback");
-                    let status = transaction.rollback().await.map_err(|e| {
-                        // if we cannot rollback - for now don't return connection to pool
-                        // TODO: get a query status from the error
-                        discard.discard();
-                        e
-                    })?;
-                    discard.check_idle(status);
-                    return Err(err);
-                }
-            };
+                return Err(SqlOverHttpError::Cancelled(SqlOverHttpCancel::Postgres));
+            }
+            Err(err) => {
+                info!("rollback");
+                let status = transaction.rollback().await.inspect_err(|_| {
+                    // if we cannot rollback - for now don't return connection to pool
+                    // TODO: get a query status from the error
+                    discard.discard();
+                })?;
+                discard.check_idle(status);
+                return Err(err);
+            }
+        };
 
         Ok(json_output)
     }
 }
 
 async fn query_batch(
+    config: &'static ProxyConfig,
     cancel: CancellationToken,
     transaction: &Transaction<'_>,
     queries: BatchQueryData,
@@ -759,6 +954,7 @@ async fn query_batch(
     let mut current_size = 0;
     for stmt in queries.queries {
         let query = pin!(query_to_json(
+            config,
             transaction,
             stmt,
             &mut current_size,
@@ -787,6 +983,7 @@ async fn query_batch(
 }
 
 async fn query_to_json<T: GenericClient>(
+    config: &'static ProxyConfig,
     client: &T,
     data: QueryData,
     current_size: &mut usize,
@@ -807,8 +1004,10 @@ async fn query_to_json<T: GenericClient>(
         rows.push(row);
         // we don't have a streaming response support yet so this is to prevent OOM
         // from a malicious query (eg a cross join)
-        if *current_size > MAX_RESPONSE_SIZE {
-            return Err(SqlOverHttpError::ResponseTooLarge);
+        if *current_size > config.http_config.max_response_size_bytes {
+            return Err(SqlOverHttpError::ResponseTooLarge(
+                config.http_config.max_response_size_bytes,
+            ));
         }
     }
 
@@ -869,4 +1068,51 @@ async fn query_to_json<T: GenericClient>(
     });
 
     Ok((ready, results))
+}
+
+enum Client {
+    Remote(conn_pool::Client<tokio_postgres::Client>),
+    Local(local_conn_pool::LocalClient<tokio_postgres::Client>),
+}
+
+enum Discard<'a> {
+    Remote(conn_pool::Discard<'a, tokio_postgres::Client>),
+    Local(local_conn_pool::Discard<'a, tokio_postgres::Client>),
+}
+
+impl Client {
+    fn metrics(&self) -> Arc<MetricCounter> {
+        match self {
+            Client::Remote(client) => client.metrics(),
+            Client::Local(local_client) => local_client.metrics(),
+        }
+    }
+
+    fn inner(&mut self) -> (&mut tokio_postgres::Client, Discard<'_>) {
+        match self {
+            Client::Remote(client) => {
+                let (c, d) = client.inner();
+                (c, Discard::Remote(d))
+            }
+            Client::Local(local_client) => {
+                let (c, d) = local_client.inner();
+                (c, Discard::Local(d))
+            }
+        }
+    }
+}
+
+impl Discard<'_> {
+    fn check_idle(&mut self, status: ReadyForQueryStatus) {
+        match self {
+            Discard::Remote(discard) => discard.check_idle(status),
+            Discard::Local(discard) => discard.check_idle(status),
+        }
+    }
+    fn discard(&mut self) {
+        match self {
+            Discard::Remote(discard) => discard.discard(),
+            Discard::Local(discard) => discard.discard(),
+        }
+    }
 }

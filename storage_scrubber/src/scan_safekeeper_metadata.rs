@@ -1,13 +1,13 @@
 use std::{collections::HashSet, str::FromStr, sync::Arc};
 
-use aws_sdk_s3::Client;
 use futures::stream::{StreamExt, TryStreamExt};
 use once_cell::sync::OnceCell;
 use pageserver_api::shard::TenantShardId;
 use postgres_ffi::{XLogFileName, PG_TLI};
+use remote_storage::GenericRemoteStorage;
 use serde::Serialize;
 use tokio_postgres::types::PgLsn;
-use tracing::{error, info, trace};
+use tracing::{debug, error, info};
 use utils::{
     id::{TenantId, TenantTimelineId, TimelineId},
     lsn::Lsn,
@@ -54,6 +54,23 @@ impl MetadataSummary {
     }
 }
 
+#[derive(serde::Deserialize)]
+pub struct TimelineLsnData {
+    tenant_id: String,
+    timeline_id: String,
+    timeline_start_lsn: Lsn,
+    backup_lsn: Lsn,
+}
+
+pub enum DatabaseOrList {
+    Database {
+        tenant_ids: Vec<TenantId>,
+        connstr: String,
+        table: String,
+    },
+    List(Vec<TimelineLsnData>),
+}
+
 /// Scan the safekeeper metadata in an S3 bucket, reporting errors and
 /// statistics.
 ///
@@ -63,68 +80,39 @@ impl MetadataSummary {
 /// the project wasn't deleted in the meanwhile.
 pub async fn scan_safekeeper_metadata(
     bucket_config: BucketConfig,
-    tenant_ids: Vec<TenantId>,
-    dump_db_connstr: String,
-    dump_db_table: String,
+    db_or_list: DatabaseOrList,
 ) -> anyhow::Result<MetadataSummary> {
     info!(
-        "checking bucket {}, region {}, dump_db_table {}",
-        bucket_config.bucket, bucket_config.region, dump_db_table
+        "checking bucket {}, region {}",
+        bucket_config.bucket, bucket_config.region
     );
-    // Use rustls (Neon requires TLS)
-    let root_store = TLS_ROOTS.get_or_try_init(load_certs)?.clone();
-    let client_config = rustls::ClientConfig::builder()
-        .with_root_certificates(root_store)
-        .with_no_client_auth();
-    let tls_connector = tokio_postgres_rustls::MakeRustlsConnect::new(client_config);
-    let (client, connection) = tokio_postgres::connect(&dump_db_connstr, tls_connector).await?;
-    // The connection object performs the actual communication with the database,
-    // so spawn it off to run on its own.
-    tokio::spawn(async move {
-        if let Err(e) = connection.await {
-            eprintln!("connection error: {}", e);
-        }
-    });
 
-    let tenant_filter_clause = if !tenant_ids.is_empty() {
-        format!(
-            "and tenant_id in ({})",
-            tenant_ids
-                .iter()
-                .map(|t| format!("'{}'", t))
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
-    } else {
-        "".to_owned()
-    };
-    let query = format!(
-        "select tenant_id, timeline_id, min(timeline_start_lsn), max(backup_lsn) from \"{}\" where not is_cancelled {} group by tenant_id, timeline_id;",
-        dump_db_table, tenant_filter_clause,
-    );
-    info!("query is {}", query);
-    let timelines = client.query(&query, &[]).await?;
-    info!("loaded {} timelines", timelines.len());
-
-    let (s3_client, target) = init_remote(bucket_config, NodeKind::Safekeeper).await?;
+    let (remote_client, target) = init_remote(bucket_config, NodeKind::Safekeeper).await?;
     let console_config = ConsoleConfig::from_env()?;
     let cloud_admin_api_client = CloudAdminApiClient::new(console_config);
 
-    let checks = futures::stream::iter(timelines.iter().map(Ok)).map_ok(|row| {
-        let tenant_id = TenantId::from_str(row.get(0)).expect("failed to parse tenant_id");
-        let timeline_id = TimelineId::from_str(row.get(1)).expect("failed to parse tenant_id");
-        let timeline_start_lsn_pg: PgLsn = row.get(2);
-        let timeline_start_lsn: Lsn = Lsn(u64::from(timeline_start_lsn_pg));
-        let backup_lsn_pg: PgLsn = row.get(3);
-        let backup_lsn: Lsn = Lsn(u64::from(backup_lsn_pg));
+    let timelines = match db_or_list {
+        DatabaseOrList::Database {
+            tenant_ids,
+            connstr,
+            table,
+        } => load_timelines_from_db(tenant_ids, connstr, table).await?,
+        DatabaseOrList::List(list) => list,
+    };
+    info!("loaded {} timelines", timelines.len());
+
+    let checks = futures::stream::iter(timelines.into_iter().map(Ok)).map_ok(|timeline| {
+        let tenant_id = TenantId::from_str(&timeline.tenant_id).expect("failed to parse tenant_id");
+        let timeline_id =
+            TimelineId::from_str(&timeline.timeline_id).expect("failed to parse tenant_id");
         let ttid = TenantTimelineId::new(tenant_id, timeline_id);
         check_timeline(
-            &s3_client,
+            &remote_client,
             &target,
             &cloud_admin_api_client,
             ttid,
-            timeline_start_lsn,
-            backup_lsn,
+            timeline.timeline_start_lsn,
+            timeline.backup_lsn,
         )
     });
     // Run multiple check_timeline's concurrently.
@@ -156,18 +144,16 @@ struct TimelineCheckResult {
 /// errors are logged to stderr; returns Ok(true) if timeline is consistent,
 /// Ok(false) if not, Err if failed to check.
 async fn check_timeline(
-    s3_client: &Client,
+    remote_client: &GenericRemoteStorage,
     root: &RootTarget,
     api_client: &CloudAdminApiClient,
     ttid: TenantTimelineId,
     timeline_start_lsn: Lsn,
     backup_lsn: Lsn,
 ) -> anyhow::Result<TimelineCheckResult> {
-    trace!(
+    debug!(
         "checking ttid {}, should contain WAL [{}-{}]",
-        ttid,
-        timeline_start_lsn,
-        backup_lsn
+        ttid, timeline_start_lsn, backup_lsn
     );
     // calculate expected segfiles
     let expected_first_segno = timeline_start_lsn.segment_number(WAL_SEGSIZE);
@@ -177,7 +163,7 @@ async fn check_timeline(
             .map(|segno| XLogFileName(PG_TLI, segno, WAL_SEGSIZE)),
     );
     let expected_files_num = expected_segfiles.len();
-    trace!("expecting {} files", expected_segfiles.len(),);
+    debug!("expecting {} files", expected_segfiles.len(),);
 
     // now list s3 and check if it misses something
     let ttshid =
@@ -187,13 +173,19 @@ async fn check_timeline(
     // we need files, so unset it.
     timeline_dir_target.delimiter = String::new();
 
-    let mut stream = std::pin::pin!(stream_listing(s3_client, &timeline_dir_target));
+    let prefix_str = &timeline_dir_target
+        .prefix_in_bucket
+        .strip_prefix("/")
+        .unwrap_or(&timeline_dir_target.prefix_in_bucket);
+
+    let mut stream = std::pin::pin!(stream_listing(remote_client, &timeline_dir_target));
     while let Some(obj) = stream.next().await {
-        let obj = obj?;
-        let key = obj.key();
+        let (key, _obj) = obj?;
 
         let seg_name = key
-            .strip_prefix(&timeline_dir_target.prefix_in_bucket)
+            .get_path()
+            .as_str()
+            .strip_prefix(prefix_str)
             .expect("failed to extract segment name");
         expected_segfiles.remove(seg_name);
     }
@@ -246,3 +238,65 @@ fn load_certs() -> Result<Arc<rustls::RootCertStore>, std::io::Error> {
     Ok(Arc::new(store))
 }
 static TLS_ROOTS: OnceCell<Arc<rustls::RootCertStore>> = OnceCell::new();
+
+async fn load_timelines_from_db(
+    tenant_ids: Vec<TenantId>,
+    dump_db_connstr: String,
+    dump_db_table: String,
+) -> anyhow::Result<Vec<TimelineLsnData>> {
+    info!("loading from table {dump_db_table}");
+
+    // Use rustls (Neon requires TLS)
+    let root_store = TLS_ROOTS.get_or_try_init(load_certs)?.clone();
+    let client_config = rustls::ClientConfig::builder()
+        .with_root_certificates(root_store)
+        .with_no_client_auth();
+    let tls_connector = tokio_postgres_rustls::MakeRustlsConnect::new(client_config);
+    let (client, connection) = tokio_postgres::connect(&dump_db_connstr, tls_connector).await?;
+    // The connection object performs the actual communication with the database,
+    // so spawn it off to run on its own.
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            eprintln!("connection error: {}", e);
+        }
+    });
+
+    let tenant_filter_clause = if !tenant_ids.is_empty() {
+        format!(
+            "and tenant_id in ({})",
+            tenant_ids
+                .iter()
+                .map(|t| format!("'{}'", t))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    } else {
+        "".to_owned()
+    };
+    let query = format!(
+        "select tenant_id, timeline_id, min(timeline_start_lsn), max(backup_lsn) \
+        from \"{dump_db_table}\" \
+        where not is_cancelled {tenant_filter_clause} \
+        group by tenant_id, timeline_id;"
+    );
+    info!("query is {}", query);
+    let timelines = client.query(&query, &[]).await?;
+
+    let timelines = timelines
+        .into_iter()
+        .map(|row| {
+            let tenant_id = row.get(0);
+            let timeline_id = row.get(1);
+            let timeline_start_lsn_pg: PgLsn = row.get(2);
+            let backup_lsn_pg: PgLsn = row.get(3);
+
+            TimelineLsnData {
+                tenant_id,
+                timeline_id,
+                timeline_start_lsn: Lsn(u64::from(timeline_start_lsn_pg)),
+                backup_lsn: Lsn(u64::from(backup_lsn_pg)),
+            }
+        })
+        .collect::<Vec<TimelineLsnData>>();
+    Ok(timelines)
+}

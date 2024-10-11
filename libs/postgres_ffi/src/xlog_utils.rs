@@ -26,11 +26,12 @@ use bytes::{Buf, Bytes};
 use log::*;
 
 use serde::Serialize;
+use std::ffi::OsStr;
 use std::fs::File;
 use std::io::prelude::*;
 use std::io::ErrorKind;
 use std::io::SeekFrom;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::SystemTime;
 use utils::bin_ser::DeserializeError;
 use utils::bin_ser::SerializeError;
@@ -78,19 +79,34 @@ pub fn XLogFileName(tli: TimeLineID, logSegNo: XLogSegNo, wal_segsz_bytes: usize
     )
 }
 
-pub fn XLogFromFileName(fname: &str, wal_seg_size: usize) -> (XLogSegNo, TimeLineID) {
-    let tli = u32::from_str_radix(&fname[0..8], 16).unwrap();
-    let log = u32::from_str_radix(&fname[8..16], 16).unwrap() as XLogSegNo;
-    let seg = u32::from_str_radix(&fname[16..24], 16).unwrap() as XLogSegNo;
-    (log * XLogSegmentsPerXLogId(wal_seg_size) + seg, tli)
+pub fn XLogFromFileName(
+    fname: &OsStr,
+    wal_seg_size: usize,
+) -> anyhow::Result<(XLogSegNo, TimeLineID)> {
+    if let Some(fname_str) = fname.to_str() {
+        let tli = u32::from_str_radix(&fname_str[0..8], 16)?;
+        let log = u32::from_str_radix(&fname_str[8..16], 16)? as XLogSegNo;
+        let seg = u32::from_str_radix(&fname_str[16..24], 16)? as XLogSegNo;
+        Ok((log * XLogSegmentsPerXLogId(wal_seg_size) + seg, tli))
+    } else {
+        anyhow::bail!("non-ut8 filename: {:?}", fname);
+    }
 }
 
-pub fn IsXLogFileName(fname: &str) -> bool {
-    return fname.len() == XLOG_FNAME_LEN && fname.chars().all(|c| c.is_ascii_hexdigit());
+pub fn IsXLogFileName(fname: &OsStr) -> bool {
+    if let Some(fname) = fname.to_str() {
+        fname.len() == XLOG_FNAME_LEN && fname.chars().all(|c| c.is_ascii_hexdigit())
+    } else {
+        false
+    }
 }
 
-pub fn IsPartialXLogFileName(fname: &str) -> bool {
-    fname.ends_with(".partial") && IsXLogFileName(&fname[0..fname.len() - 8])
+pub fn IsPartialXLogFileName(fname: &OsStr) -> bool {
+    if let Some(fname) = fname.to_str() {
+        fname.ends_with(".partial") && IsXLogFileName(OsStr::new(&fname[0..fname.len() - 8]))
+    } else {
+        false
+    }
 }
 
 /// If LSN points to the beginning of the page, then shift it to first record,
@@ -135,6 +151,8 @@ pub fn get_current_timestamp() -> TimestampTz {
 mod timestamp_conversions {
     use std::time::Duration;
 
+    use anyhow::Context;
+
     use super::*;
 
     const UNIX_EPOCH_JDATE: u64 = 2440588; // == date2j(1970, 1, 1)
@@ -154,18 +172,18 @@ mod timestamp_conversions {
         }
     }
 
-    pub fn from_pg_timestamp(time: TimestampTz) -> SystemTime {
+    pub fn try_from_pg_timestamp(time: TimestampTz) -> anyhow::Result<SystemTime> {
         let time: u64 = time
             .try_into()
-            .expect("timestamp before millenium (postgres epoch)");
+            .context("timestamp before millenium (postgres epoch)")?;
         let since_unix_epoch = time + SECS_DIFF_UNIX_TO_POSTGRES_EPOCH * USECS_PER_SEC;
         SystemTime::UNIX_EPOCH
             .checked_add(Duration::from_micros(since_unix_epoch))
-            .expect("SystemTime overflow")
+            .context("SystemTime overflow")
     }
 }
 
-pub use timestamp_conversions::{from_pg_timestamp, to_pg_timestamp};
+pub use timestamp_conversions::{to_pg_timestamp, try_from_pg_timestamp};
 
 // Returns (aligned) end_lsn of the last record in data_dir with WAL segments.
 // start_lsn must point to some previously known record boundary (beginning of
@@ -256,13 +274,6 @@ fn open_wal_segment(seg_file_path: &Path) -> anyhow::Result<Option<File>> {
             _ => Err(e.into()),
         },
     }
-}
-
-pub fn main() {
-    let mut data_dir = PathBuf::new();
-    data_dir.push(".");
-    let wal_end = find_end_of_wal(&data_dir, WAL_SEGMENT_SIZE, Lsn(0)).unwrap();
-    println!("wal_end={:?}", wal_end);
 }
 
 impl XLogRecord {
@@ -545,14 +556,14 @@ mod tests {
     #[test]
     fn test_ts_conversion() {
         let now = SystemTime::now();
-        let round_trip = from_pg_timestamp(to_pg_timestamp(now));
+        let round_trip = try_from_pg_timestamp(to_pg_timestamp(now)).unwrap();
 
         let now_since = now.duration_since(SystemTime::UNIX_EPOCH).unwrap();
         let round_trip_since = round_trip.duration_since(SystemTime::UNIX_EPOCH).unwrap();
         assert_eq!(now_since.as_micros(), round_trip_since.as_micros());
 
         let now_pg = get_current_timestamp();
-        let round_trip_pg = to_pg_timestamp(from_pg_timestamp(now_pg));
+        let round_trip_pg = to_pg_timestamp(try_from_pg_timestamp(now_pg).unwrap());
 
         assert_eq!(now_pg, round_trip_pg);
     }

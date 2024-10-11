@@ -1,4 +1,3 @@
-use tracing_opentelemetry::OpenTelemetryLayer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::prelude::*;
 
@@ -23,8 +22,7 @@ pub fn init_tracing_and_logging(default_log_level: &str) -> anyhow::Result<()> {
         .with_writer(std::io::stderr);
 
     // Initialize OpenTelemetry
-    let otlp_layer =
-        tracing_utils::init_tracing_without_runtime("compute_ctl").map(OpenTelemetryLayer::new);
+    let otlp_layer = tracing_utils::init_tracing_without_runtime("compute_ctl");
 
     // Put it all together
     tracing_subscriber::registry()

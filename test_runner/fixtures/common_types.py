@@ -1,9 +1,18 @@
+from __future__ import annotations
+
 import random
 from dataclasses import dataclass
+from enum import Enum
 from functools import total_ordering
-from typing import Any, Type, TypeVar, Union
+from typing import TYPE_CHECKING, TypeVar
 
-T = TypeVar("T", bound="Id")
+from typing_extensions import override
+
+if TYPE_CHECKING:
+    from typing import Any, Union
+
+    T = TypeVar("T", bound="Id")
+
 
 DEFAULT_WAL_SEG_SIZE = 16 * 1024 * 1024
 
@@ -12,7 +21,7 @@ DEFAULT_WAL_SEG_SIZE = 16 * 1024 * 1024
 class Lsn:
     """
     Datatype for an LSN. Internally it is a 64-bit integer, but the string
-    representation is like "1/123abcd". See also pg_lsn datatype in Postgres
+    representation is like "1/0123abcd". See also pg_lsn datatype in Postgres
     """
 
     def __init__(self, x: Union[int, str]):
@@ -24,38 +33,41 @@ class Lsn:
             self.lsn_int = (int(left, 16) << 32) + int(right, 16)
         assert 0 <= self.lsn_int <= 0xFFFFFFFF_FFFFFFFF
 
+    @override
     def __str__(self) -> str:
         """Convert lsn from int to standard hex notation."""
         return f"{(self.lsn_int >> 32):X}/{(self.lsn_int & 0xFFFFFFFF):X}"
 
+    @override
     def __repr__(self) -> str:
         return f'Lsn("{str(self)}")'
 
     def __int__(self) -> int:
         return self.lsn_int
 
-    def __lt__(self, other: Any) -> bool:
+    def __lt__(self, other: object) -> bool:
         if not isinstance(other, Lsn):
             return NotImplemented
         return self.lsn_int < other.lsn_int
 
-    def __gt__(self, other: Any) -> bool:
+    def __gt__(self, other: object) -> bool:
         if not isinstance(other, Lsn):
             raise NotImplementedError
         return self.lsn_int > other.lsn_int
 
-    def __eq__(self, other: Any) -> bool:
+    @override
+    def __eq__(self, other: object) -> bool:
         if not isinstance(other, Lsn):
             return NotImplemented
         return self.lsn_int == other.lsn_int
 
     # Returns the difference between two Lsns, in bytes
-    def __sub__(self, other: Any) -> int:
+    def __sub__(self, other: object) -> int:
         if not isinstance(other, Lsn):
             return NotImplemented
         return self.lsn_int - other.lsn_int
 
-    def __add__(self, other: Union[int, "Lsn"]) -> "Lsn":
+    def __add__(self, other: Union[int, Lsn]) -> Lsn:
         if isinstance(other, int):
             return Lsn(self.lsn_int + other)
         elif isinstance(other, Lsn):
@@ -63,13 +75,14 @@ class Lsn:
         else:
             raise NotImplementedError
 
+    @override
     def __hash__(self) -> int:
         return hash(self.lsn_int)
 
     def as_int(self) -> int:
         return self.lsn_int
 
-    def segment_lsn(self, seg_sz: int = DEFAULT_WAL_SEG_SIZE) -> "Lsn":
+    def segment_lsn(self, seg_sz: int = DEFAULT_WAL_SEG_SIZE) -> Lsn:
         return Lsn(self.lsn_int - (self.lsn_int % seg_sz))
 
     def segno(self, seg_sz: int = DEFAULT_WAL_SEG_SIZE) -> int:
@@ -109,42 +122,72 @@ class Id:
         self.id = bytearray.fromhex(x)
         assert len(self.id) == 16
 
+    @override
     def __str__(self) -> str:
         return self.id.hex()
 
-    def __lt__(self, other) -> bool:
+    def __lt__(self, other: object) -> bool:
         if not isinstance(other, type(self)):
             return NotImplemented
         return self.id < other.id
 
-    def __eq__(self, other) -> bool:
+    @override
+    def __eq__(self, other: object) -> bool:
         if not isinstance(other, type(self)):
             return NotImplemented
         return self.id == other.id
 
+    @override
     def __hash__(self) -> int:
         return hash(str(self.id))
 
     @classmethod
-    def generate(cls: Type[T]) -> T:
+    def generate(cls: type[T]) -> T:
         """Generate a random ID"""
         return cls(random.randbytes(16).hex())
 
 
 class TenantId(Id):
+    @override
     def __repr__(self) -> str:
         return f'`TenantId("{self.id.hex()}")'
 
+    @override
+    def __str__(self) -> str:
+        return self.id.hex()
+
+
+class NodeId(Id):
+    @override
+    def __repr__(self) -> str:
+        return f'`NodeId("{self.id.hex()}")'
+
+    @override
     def __str__(self) -> str:
         return self.id.hex()
 
 
 class TimelineId(Id):
+    @override
     def __repr__(self) -> str:
         return f'TimelineId("{self.id.hex()}")'
 
+    @override
     def __str__(self) -> str:
         return self.id.hex()
+
+
+@dataclass
+class TenantTimelineId:
+    tenant_id: TenantId
+    timeline_id: TimelineId
+
+    @classmethod
+    def from_json(cls, d: dict[str, Any]) -> TenantTimelineId:
+        return TenantTimelineId(
+            tenant_id=TenantId(d["tenant_id"]),
+            timeline_id=TimelineId(d["timeline_id"]),
+        )
 
 
 # Workaround for compat with python 3.9, which does not have `typing.Self`
@@ -159,7 +202,7 @@ class TenantShardId:
         assert self.shard_number < self.shard_count or self.shard_count == 0
 
     @classmethod
-    def parse(cls: Type[TTenantShardId], input) -> TTenantShardId:
+    def parse(cls: type[TTenantShardId], input: str) -> TTenantShardId:
         if len(input) == 32:
             return cls(
                 tenant_id=TenantId(input),
@@ -175,6 +218,7 @@ class TenantShardId:
         else:
             raise ValueError(f"Invalid TenantShardId '{input}'")
 
+    @override
     def __str__(self):
         if self.shard_count > 0:
             return f"{self.tenant_id}-{self.shard_number:02x}{self.shard_count:02x}"
@@ -182,21 +226,30 @@ class TenantShardId:
             # Unsharded case: equivalent of Rust TenantShardId::unsharded(tenant_id)
             return str(self.tenant_id)
 
+    @override
     def __repr__(self):
         return self.__str__()
 
     def _tuple(self) -> tuple[TenantId, int, int]:
         return (self.tenant_id, self.shard_number, self.shard_count)
 
-    def __lt__(self, other) -> bool:
+    def __lt__(self, other: object) -> bool:
         if not isinstance(other, type(self)):
             return NotImplemented
         return self._tuple() < other._tuple()
 
-    def __eq__(self, other) -> bool:
+    @override
+    def __eq__(self, other: object) -> bool:
         if not isinstance(other, type(self)):
             return NotImplemented
         return self._tuple() == other._tuple()
 
+    @override
     def __hash__(self) -> int:
         return hash(self._tuple())
+
+
+# TODO: Replace with `StrEnum` when we upgrade to python 3.11
+class TimelineArchivalState(str, Enum):
+    ARCHIVED = "Archived"
+    UNARCHIVED = "Unarchived"

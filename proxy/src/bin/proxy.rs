@@ -5,8 +5,10 @@ use aws_config::meta::region::RegionProviderChain;
 use aws_config::profile::ProfileFileCredentialsProvider;
 use aws_config::provider_config::ProviderConfig;
 use aws_config::web_identity_token::WebIdentityTokenCredentialsProvider;
+use aws_config::Region;
 use futures::future::Either;
 use proxy::auth;
+use proxy::auth::backend::jwt::JwkCache;
 use proxy::auth::backend::AuthRateLimiter;
 use proxy::auth::backend::MaybeOwned;
 use proxy::cancellation::CancelMap;
@@ -16,8 +18,9 @@ use proxy::config::AuthenticationConfig;
 use proxy::config::CacheOptions;
 use proxy::config::HttpConfig;
 use proxy::config::ProjectInfoCacheOptions;
-use proxy::console;
+use proxy::config::ProxyProtocolV2;
 use proxy::context::parquet::ParquetUploadArgs;
+use proxy::control_plane;
 use proxy::http;
 use proxy::http::health_server::AppMetrics;
 use proxy::metrics::Metrics;
@@ -59,11 +62,15 @@ use clap::{Parser, ValueEnum};
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 #[derive(Clone, Debug, ValueEnum)]
-enum AuthBackend {
+enum AuthBackendType {
     Console,
+    // clap only shows the name, not the alias, in usage text.
+    // TODO: swap name/alias and deprecate "link"
+    #[value(name("link"), alias("web"))]
+    Web,
+
     #[cfg(feature = "testing")]
     Postgres,
-    Link,
 }
 
 /// Neon proxy/router
@@ -76,8 +83,8 @@ struct ProxyCliArgs {
     /// listen for incoming client connections on ip:port
     #[clap(short, long, default_value = "127.0.0.1:4432")]
     proxy: String,
-    #[clap(value_enum, long, default_value_t = AuthBackend::Link)]
-    auth_backend: AuthBackend,
+    #[clap(value_enum, long, default_value_t = AuthBackendType::Web)]
+    auth_backend: AuthBackendType,
     /// listen for management callback connection on ip:port
     #[clap(short, long, default_value = "127.0.0.1:7000")]
     mgmt: String,
@@ -87,7 +94,7 @@ struct ProxyCliArgs {
     /// listen for incoming wss connections on ip:port
     #[clap(long)]
     wss: Option<String>,
-    /// redirect unauthenticated users to the given uri in case of link auth
+    /// redirect unauthenticated users to the given uri in case of web auth
     #[clap(short, long, default_value = "http://localhost:3000/psql_session/")]
     uri: String,
     /// cloud API endpoint for authenticating users
@@ -97,6 +104,9 @@ struct ProxyCliArgs {
         default_value = "http://localhost:3000/authenticate_proxy_request/"
     )]
     auth_endpoint: String,
+    /// if this is not local proxy, this toggles whether we accept jwt or passwords for http
+    #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
+    is_auth_broker: bool,
     /// path to TLS key for client postgres connections
     ///
     /// tls-key and tls-cert are for backwards compatibility, we can put all certs in one dir
@@ -139,15 +149,12 @@ struct ProxyCliArgs {
     /// size of the threadpool for password hashing
     #[clap(long, default_value_t = 4)]
     scram_thread_pool_size: u8,
-    /// Require that all incoming requests have a Proxy Protocol V2 packet **and** have an IP address associated.
-    #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
-    require_client_ip: bool,
     /// Disable dynamic rate limiter and store the metrics to ensure its production behaviour.
     #[clap(long, default_value_t = true, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
     disable_dynamic_rate_limiter: bool,
     /// Endpoint rate limiter max number of requests per second.
     ///
-    /// Provided in the form '<Requests Per Second>@<Bucket Duration Size>'.
+    /// Provided in the form `<Requests Per Second>@<Bucket Duration Size>`.
     /// Can be given multiple times for different bucket sizes.
     #[clap(long, default_values_t = RateBucketInfo::DEFAULT_ENDPOINT_SET)]
     endpoint_rps_limit: Vec<RateBucketInfo>,
@@ -172,9 +179,6 @@ struct ProxyCliArgs {
     /// cache for `role_secret` (use `size=0` to disable)
     #[clap(long, default_value = config::CacheOptions::CACHE_DEFAULT_OPTIONS)]
     role_secret_cache: String,
-    /// disable ip check for http requests. If it is too time consuming, it could be turned off.
-    #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
-    disable_ip_check_for_http: bool,
     /// redis url for notifications (if empty, redis_host:port will be used for both notifications and streaming connections)
     #[clap(long)]
     redis_notifications: Option<String>,
@@ -223,6 +227,19 @@ struct ProxyCliArgs {
     /// Whether to retry the wake_compute request
     #[clap(long, default_value = config::RetryConfig::WAKE_COMPUTE_DEFAULT_VALUES)]
     wake_compute_retry: String,
+
+    /// Configure if this is a private access proxy for the POC: In that case the proxy will ignore the IP allowlist
+    #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
+    is_private_access_proxy: bool,
+
+    /// Configure whether all incoming requests have a Proxy Protocol V2 packet.
+    // TODO(conradludgate): switch default to rejected or required once we've updated all deployments
+    #[clap(value_enum, long, default_value_t = ProxyProtocolV2::Supported)]
+    proxy_protocol_v2: ProxyProtocolV2,
+
+    /// Time the proxy waits for the webauth session to be confirmed by the control plane.
+    #[clap(long, default_value = "2m", value_parser = humantime::parse_duration)]
+    webauth_confirmation_timeout: std::time::Duration,
 }
 
 #[derive(clap::Args, Clone, Copy, Debug)]
@@ -263,6 +280,12 @@ struct SqlOverHttpArgs {
 
     #[clap(long, default_value_t = 64)]
     sql_over_http_cancel_set_shards: usize,
+
+    #[clap(long, default_value_t = 10 * 1024 * 1024)] // 10 MiB
+    sql_over_http_max_request_size_bytes: u64,
+
+    #[clap(long, default_value_t = 10 * 1024 * 1024)] // 10 MiB
+    sql_over_http_max_response_size_bytes: usize,
 }
 
 #[tokio::main]
@@ -290,9 +313,10 @@ async fn main() -> anyhow::Result<()> {
     let config = build_config(&args)?;
 
     info!("Authentication backend: {}", config.auth_backend);
-    info!("Using region: {}", config.aws_region);
+    info!("Using region: {}", args.aws_region);
 
-    let region_provider = RegionProviderChain::default_provider().or_else(&*config.aws_region); // Replace with your Redis region if needed
+    let region_provider =
+        RegionProviderChain::default_provider().or_else(Region::new(args.aws_region.clone()));
     let provider_conf =
         ProviderConfig::without_region().with_region(region_provider.region().await);
     let aws_credentials_provider = {
@@ -318,7 +342,7 @@ async fn main() -> anyhow::Result<()> {
     };
     let elasticache_credentials_provider = Arc::new(elasticache::CredentialsProvider::new(
         elasticache::AWSIRSAConfig::new(
-            config.aws_region.clone(),
+            args.aws_region.clone(),
             args.redis_cluster_name,
             args.redis_user_id,
         ),
@@ -369,18 +393,39 @@ async fn main() -> anyhow::Result<()> {
     info!("Starting mgmt on {mgmt_address}");
     let mgmt_listener = TcpListener::bind(mgmt_address).await?;
 
-    let proxy_address: SocketAddr = args.proxy.parse()?;
-    info!("Starting proxy on {proxy_address}");
-    let proxy_listener = TcpListener::bind(proxy_address).await?;
+    let proxy_listener = if !args.is_auth_broker {
+        let proxy_address: SocketAddr = args.proxy.parse()?;
+        info!("Starting proxy on {proxy_address}");
+
+        Some(TcpListener::bind(proxy_address).await?)
+    } else {
+        None
+    };
+
+    // TODO: rename the argument to something like serverless.
+    // It now covers more than just websockets, it also covers SQL over HTTP.
+    let serverless_listener = if let Some(serverless_address) = args.wss {
+        let serverless_address: SocketAddr = serverless_address.parse()?;
+        info!("Starting wss on {serverless_address}");
+        Some(TcpListener::bind(serverless_address).await?)
+    } else if args.is_auth_broker {
+        bail!("wss arg must be present for auth-broker")
+    } else {
+        None
+    };
+
     let cancellation_token = CancellationToken::new();
 
     let cancel_map = CancelMap::default();
+
+    let redis_rps_limit = Vec::leak(args.redis_rps_limit.clone());
+    RateBucketInfo::validate(redis_rps_limit)?;
 
     let redis_publisher = match &regional_redis_client {
         Some(redis_publisher) => Some(Arc::new(Mutex::new(RedisPublisherClient::new(
             redis_publisher.clone(),
             args.region.clone(),
-            &config.redis_rps_limit,
+            redis_rps_limit,
         )?))),
         None => None,
     };
@@ -414,21 +459,17 @@ async fn main() -> anyhow::Result<()> {
     // client facing tasks. these will exit on error or on cancellation
     // cancellation returns Ok(())
     let mut client_tasks = JoinSet::new();
-    client_tasks.spawn(proxy::proxy::task_main(
-        config,
-        proxy_listener,
-        cancellation_token.clone(),
-        cancellation_handler.clone(),
-        endpoint_rate_limiter.clone(),
-    ));
+    if let Some(proxy_listener) = proxy_listener {
+        client_tasks.spawn(proxy::proxy::task_main(
+            config,
+            proxy_listener,
+            cancellation_token.clone(),
+            cancellation_handler.clone(),
+            endpoint_rate_limiter.clone(),
+        ));
+    }
 
-    // TODO: rename the argument to something like serverless.
-    // It now covers more than just websockets, it also covers SQL over HTTP.
-    if let Some(serverless_address) = args.wss {
-        let serverless_address: SocketAddr = serverless_address.parse()?;
-        info!("Starting wss on {serverless_address}");
-        let serverless_listener = TcpListener::bind(serverless_address).await?;
-
+    if let Some(serverless_listener) = serverless_listener {
         client_tasks.spawn(serverless::task_main(
             config,
             serverless_listener,
@@ -445,7 +486,7 @@ async fn main() -> anyhow::Result<()> {
 
     // maintenance tasks. these never return unless there's an error
     let mut maintenance_tasks = JoinSet::new();
-    maintenance_tasks.spawn(proxy::handle_signals(cancellation_token.clone()));
+    maintenance_tasks.spawn(proxy::handle_signals(cancellation_token.clone(), || {}));
     maintenance_tasks.spawn(http::health_server::task_main(
         http_listener,
         AppMetrics {
@@ -454,7 +495,7 @@ async fn main() -> anyhow::Result<()> {
             proxy: proxy::metrics::Metrics::get(),
         },
     ));
-    maintenance_tasks.spawn(console::mgmt::task_main(mgmt_listener));
+    maintenance_tasks.spawn(control_plane::mgmt::task_main(mgmt_listener));
 
     if let Some(metrics_config) = &config.metric_collection {
         // TODO: Add gc regardles of the metric collection being enabled.
@@ -465,8 +506,8 @@ async fn main() -> anyhow::Result<()> {
         ));
     }
 
-    if let auth::BackendType::Console(api, _) = &config.auth_backend {
-        if let proxy::console::provider::ConsoleBackend::Console(api) = &**api {
+    if let auth::Backend::ControlPlane(api, _) = &config.auth_backend {
+        if let proxy::control_plane::provider::ControlPlaneBackend::Management(api) = &**api {
             match (redis_notifications_client, regional_redis_client.clone()) {
                 (None, None) => {}
                 (client1, client2) => {
@@ -570,7 +611,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
     }
 
     let auth_backend = match &args.auth_backend {
-        AuthBackend::Console => {
+        AuthBackendType::Console => {
             let wake_compute_cache_config: CacheOptions = args.wake_compute_cache.parse()?;
             let project_info_cache_config: ProjectInfoCacheOptions =
                 args.project_info_cache.parse()?;
@@ -582,7 +623,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
                 "Using AllowedIpsCache (wake_compute) with options={project_info_cache_config:?}"
             );
             info!("Using EndpointCacheConfig with options={endpoint_cache_config:?}");
-            let caches = Box::leak(Box::new(console::caches::ApiCaches::new(
+            let caches = Box::leak(Box::new(control_plane::caches::ApiCaches::new(
                 wake_compute_cache_config,
                 project_info_cache_config,
                 endpoint_cache_config,
@@ -595,7 +636,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
                 timeout,
             } = args.wake_compute_lock.parse()?;
             info!(?limiter, shards, ?epoch, "Using NodeLocks (wake_compute)");
-            let locks = Box::leak(Box::new(console::locks::ApiLocks::new(
+            let locks = Box::leak(Box::new(control_plane::locks::ApiLocks::new(
                 "wake_compute_lock",
                 limiter,
                 shards,
@@ -612,25 +653,27 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
             RateBucketInfo::validate(&mut wake_compute_rps_limit)?;
             let wake_compute_endpoint_rate_limiter =
                 Arc::new(WakeComputeRateLimiter::new(wake_compute_rps_limit));
-            let api = console::provider::neon::Api::new(
+            let api = control_plane::provider::neon::Api::new(
                 endpoint,
                 caches,
                 locks,
                 wake_compute_endpoint_rate_limiter,
             );
-            let api = console::provider::ConsoleBackend::Console(api);
-            auth::BackendType::Console(MaybeOwned::Owned(api), ())
+            let api = control_plane::provider::ControlPlaneBackend::Management(api);
+            auth::Backend::ControlPlane(MaybeOwned::Owned(api), ())
         }
-        #[cfg(feature = "testing")]
-        AuthBackend::Postgres => {
-            let url = args.auth_endpoint.parse()?;
-            let api = console::provider::mock::Api::new(url);
-            let api = console::provider::ConsoleBackend::Postgres(api);
-            auth::BackendType::Console(MaybeOwned::Owned(api), ())
-        }
-        AuthBackend::Link => {
+
+        AuthBackendType::Web => {
             let url = args.uri.parse()?;
-            auth::BackendType::Link(MaybeOwned::Owned(url), ())
+            auth::Backend::ConsoleRedirect(MaybeOwned::Owned(url), ())
+        }
+
+        #[cfg(feature = "testing")]
+        AuthBackendType::Postgres => {
+            let url = args.auth_endpoint.parse()?;
+            let api = control_plane::provider::mock::Api::new(url, !args.is_private_access_proxy);
+            let api = control_plane::provider::ControlPlaneBackend::PostgresMock(api);
+            auth::Backend::ControlPlane(MaybeOwned::Owned(api), ())
         }
     };
 
@@ -646,7 +689,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         ?epoch,
         "Using NodeLocks (connect_compute)"
     );
-    let connect_compute_locks = console::locks::ApiLocks::new(
+    let connect_compute_locks = control_plane::locks::ApiLocks::new(
         "connect_compute_lock",
         limiter,
         shards,
@@ -656,7 +699,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
     )?;
 
     let http_config = HttpConfig {
-        request_timeout: args.sql_over_http.sql_over_http_timeout,
+        accept_websockets: !args.is_auth_broker,
         pool_options: GlobalConnPoolOptions {
             max_conns_per_endpoint: args.sql_over_http.sql_over_http_pool_max_conns_per_endpoint,
             gc_epoch: args.sql_over_http.sql_over_http_pool_gc_epoch,
@@ -667,17 +710,21 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         },
         cancel_set: CancelSet::new(args.sql_over_http.sql_over_http_cancel_set_shards),
         client_conn_threshold: args.sql_over_http.sql_over_http_client_conn_threshold,
+        max_request_size_bytes: args.sql_over_http.sql_over_http_max_request_size_bytes,
+        max_response_size_bytes: args.sql_over_http.sql_over_http_max_response_size_bytes,
     };
     let authentication_config = AuthenticationConfig {
+        jwks_cache: JwkCache::default(),
         thread_pool,
         scram_protocol_timeout: args.scram_protocol_timeout,
         rate_limiter_enabled: args.auth_rate_limit_enabled,
         rate_limiter: AuthRateLimiter::new(args.auth_rate_limit.clone()),
         rate_limit_ip_subnet: args.auth_rate_limit_ip_subnet,
+        ip_allowlist_check_enabled: !args.is_private_access_proxy,
+        is_auth_broker: args.is_auth_broker,
+        accept_jwts: args.is_auth_broker,
+        webauth_confirmation_timeout: args.webauth_confirmation_timeout,
     };
-
-    let mut redis_rps_limit = args.redis_rps_limit.clone();
-    RateBucketInfo::validate(&mut redis_rps_limit)?;
 
     let config = Box::leak(Box::new(ProxyConfig {
         tls_config,
@@ -686,12 +733,9 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         allow_self_signed_compute: args.allow_self_signed_compute,
         http_config,
         authentication_config,
-        require_client_ip: args.require_client_ip,
-        disable_ip_check_for_http: args.disable_ip_check_for_http,
-        redis_rps_limit,
+        proxy_protocol_v2: args.proxy_protocol_v2,
         handshake_timeout: args.handshake_timeout,
         region: args.region.clone(),
-        aws_region: args.aws_region.clone(),
         wake_compute_retry_config: config::RetryConfig::parse(&args.wake_compute_retry)?,
         connect_compute_locks,
         connect_to_compute_retry_config: config::RetryConfig::parse(

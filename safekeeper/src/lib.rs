@@ -1,4 +1,7 @@
 #![deny(clippy::undocumented_unsafe_blocks)]
+
+extern crate hyper0 as hyper;
+
 use camino::Utf8PathBuf;
 use once_cell::sync::Lazy;
 use remote_storage::RemoteStorageConfig;
@@ -21,6 +24,7 @@ pub mod json_ctrl;
 pub mod metrics;
 pub mod patch_control_file;
 pub mod pull_timeline;
+pub mod rate_limit;
 pub mod receive_wal;
 pub mod recovery;
 pub mod remove_wal;
@@ -53,6 +57,7 @@ pub mod defaults {
     pub const DEFAULT_PARTIAL_BACKUP_TIMEOUT: &str = "15m";
     pub const DEFAULT_CONTROL_FILE_SAVE_INTERVAL: &str = "300s";
     pub const DEFAULT_PARTIAL_BACKUP_CONCURRENCY: &str = "5";
+    pub const DEFAULT_EVICTION_CONCURRENCY: usize = 2;
 
     // By default, our required residency before eviction is the same as the period that passes
     // before uploading a partial segment, so that in normal operation the eviction can happen
@@ -91,7 +96,6 @@ pub struct SafeKeeperConf {
     pub sk_auth_token: Option<SecretString>,
     pub current_thread_runtime: bool,
     pub walsenders_keep_horizon: bool,
-    pub partial_backup_enabled: bool,
     pub partial_backup_timeout: Duration,
     pub disable_periodic_broker_push: bool,
     pub enable_offload: bool,
@@ -135,7 +139,6 @@ impl SafeKeeperConf {
             max_offloader_lag_bytes: defaults::DEFAULT_MAX_OFFLOADER_LAG_BYTES,
             current_thread_runtime: false,
             walsenders_keep_horizon: false,
-            partial_backup_enabled: false,
             partial_backup_timeout: Duration::from_secs(0),
             disable_periodic_broker_push: false,
             enable_offload: false,
@@ -161,7 +164,7 @@ pub static HTTP_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
         .thread_name("HTTP worker")
         .enable_all()
         .build()
-        .expect("Failed to create WAL service runtime")
+        .expect("Failed to create HTTP runtime")
 });
 
 pub static BROKER_RUNTIME: Lazy<Runtime> = Lazy::new(|| {

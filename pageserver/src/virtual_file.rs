@@ -1,6 +1,7 @@
-//!
 //! VirtualFile is like a normal File, but it's not bound directly to
-//! a file descriptor. Instead, the file is opened when it's read from,
+//! a file descriptor.
+//!
+//! Instead, the file is opened when it's read from,
 //! and if too many files are open globally in the system, least-recently
 //! used ones are closed.
 //!
@@ -17,23 +18,29 @@ use crate::page_cache::{PageWriteGuard, PAGE_SZ};
 use crate::tenant::TENANTS_SEGMENT_NAME;
 use camino::{Utf8Path, Utf8PathBuf};
 use once_cell::sync::OnceCell;
+use owned_buffers_io::io_buf_ext::FullSlice;
+use pageserver_api::config::defaults::DEFAULT_IO_BUFFER_ALIGNMENT;
 use pageserver_api::shard::TenantShardId;
 use std::fs::File;
 use std::io::{Error, ErrorKind, Seek, SeekFrom};
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::OpenOptionsExt;
 use tokio_epoll_uring::{BoundedBuf, IoBuf, IoBufMut, Slice};
 
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use tokio::time::Instant;
 
 pub use pageserver_api::models::virtual_file as api;
 pub(crate) mod io_engine;
 pub use io_engine::feature_test as io_engine_feature_test;
+pub use io_engine::io_engine_for_bench;
 pub use io_engine::FeatureTestResult as IoEngineFeatureTestResult;
 mod metadata;
 mod open_options;
 use self::owned_buffers_io::write::OwnedAsyncWriter;
+pub(crate) use api::IoMode;
 pub(crate) use io_engine::IoEngineKind;
 pub(crate) use metadata::Metadata;
 pub(crate) use open_options::*;
@@ -48,10 +55,176 @@ pub(crate) mod owned_buffers_io {
     //! but for the time being we're proving out the primitives in the neon.git repo
     //! for faster iteration.
 
+    pub(crate) mod io_buf_ext;
     pub(crate) mod slice;
     pub(crate) mod write;
     pub(crate) mod util {
         pub(crate) mod size_tracking_writer;
+    }
+}
+
+#[derive(Debug)]
+pub struct VirtualFile {
+    inner: VirtualFileInner,
+    _mode: IoMode,
+}
+
+impl VirtualFile {
+    /// Open a file in read-only mode. Like File::open.
+    pub async fn open<P: AsRef<Utf8Path>>(
+        path: P,
+        ctx: &RequestContext,
+    ) -> Result<Self, std::io::Error> {
+        let inner = VirtualFileInner::open(path, ctx).await?;
+        Ok(VirtualFile {
+            inner,
+            _mode: IoMode::Buffered,
+        })
+    }
+
+    /// Open a file in read-only mode. Like File::open.
+    ///
+    /// `O_DIRECT` will be enabled base on `virtual_file_io_mode`.
+    pub async fn open_v2<P: AsRef<Utf8Path>>(
+        path: P,
+        ctx: &RequestContext,
+    ) -> Result<Self, std::io::Error> {
+        Self::open_with_options_v2(path.as_ref(), OpenOptions::new().read(true), ctx).await
+    }
+
+    pub async fn create<P: AsRef<Utf8Path>>(
+        path: P,
+        ctx: &RequestContext,
+    ) -> Result<Self, std::io::Error> {
+        let inner = VirtualFileInner::create(path, ctx).await?;
+        Ok(VirtualFile {
+            inner,
+            _mode: IoMode::Buffered,
+        })
+    }
+
+    pub async fn create_v2<P: AsRef<Utf8Path>>(
+        path: P,
+        ctx: &RequestContext,
+    ) -> Result<Self, std::io::Error> {
+        VirtualFile::open_with_options_v2(
+            path.as_ref(),
+            OpenOptions::new().write(true).create(true).truncate(true),
+            ctx,
+        )
+        .await
+    }
+
+    pub async fn open_with_options<P: AsRef<Utf8Path>>(
+        path: P,
+        open_options: &OpenOptions,
+        ctx: &RequestContext, /* TODO: carry a pointer to the metrics in the RequestContext instead of the parsing https://github.com/neondatabase/neon/issues/6107 */
+    ) -> Result<Self, std::io::Error> {
+        let inner = VirtualFileInner::open_with_options(path, open_options, ctx).await?;
+        Ok(VirtualFile {
+            inner,
+            _mode: IoMode::Buffered,
+        })
+    }
+
+    pub async fn open_with_options_v2<P: AsRef<Utf8Path>>(
+        path: P,
+        open_options: &OpenOptions,
+        ctx: &RequestContext, /* TODO: carry a pointer to the metrics in the RequestContext instead of the parsing https://github.com/neondatabase/neon/issues/6107 */
+    ) -> Result<Self, std::io::Error> {
+        let file = match get_io_mode() {
+            IoMode::Buffered => {
+                let inner = VirtualFileInner::open_with_options(path, open_options, ctx).await?;
+                VirtualFile {
+                    inner,
+                    _mode: IoMode::Buffered,
+                }
+            }
+            #[cfg(target_os = "linux")]
+            IoMode::Direct => {
+                let inner = VirtualFileInner::open_with_options(
+                    path,
+                    open_options.clone().custom_flags(nix::libc::O_DIRECT),
+                    ctx,
+                )
+                .await?;
+                VirtualFile {
+                    inner,
+                    _mode: IoMode::Direct,
+                }
+            }
+        };
+        Ok(file)
+    }
+
+    pub fn path(&self) -> &Utf8Path {
+        self.inner.path.as_path()
+    }
+
+    pub async fn crashsafe_overwrite<B: BoundedBuf<Buf = Buf> + Send, Buf: IoBuf + Send>(
+        final_path: Utf8PathBuf,
+        tmp_path: Utf8PathBuf,
+        content: B,
+    ) -> std::io::Result<()> {
+        VirtualFileInner::crashsafe_overwrite(final_path, tmp_path, content).await
+    }
+
+    pub async fn sync_all(&self) -> Result<(), Error> {
+        self.inner.sync_all().await
+    }
+
+    pub async fn sync_data(&self) -> Result<(), Error> {
+        self.inner.sync_data().await
+    }
+
+    pub async fn metadata(&self) -> Result<Metadata, Error> {
+        self.inner.metadata().await
+    }
+
+    pub fn remove(self) {
+        self.inner.remove();
+    }
+
+    pub async fn seek(&mut self, pos: SeekFrom) -> Result<u64, Error> {
+        self.inner.seek(pos).await
+    }
+
+    pub async fn read_exact_at<Buf>(
+        &self,
+        slice: Slice<Buf>,
+        offset: u64,
+        ctx: &RequestContext,
+    ) -> Result<Slice<Buf>, Error>
+    where
+        Buf: IoBufMut + Send,
+    {
+        self.inner.read_exact_at(slice, offset, ctx).await
+    }
+
+    pub async fn read_exact_at_page(
+        &self,
+        page: PageWriteGuard<'static>,
+        offset: u64,
+        ctx: &RequestContext,
+    ) -> Result<PageWriteGuard<'static>, Error> {
+        self.inner.read_exact_at_page(page, offset, ctx).await
+    }
+
+    pub async fn write_all_at<Buf: IoBuf + Send>(
+        &self,
+        buf: FullSlice<Buf>,
+        offset: u64,
+        ctx: &RequestContext,
+    ) -> (FullSlice<Buf>, Result<(), Error>) {
+        self.inner.write_all_at(buf, offset, ctx).await
+    }
+
+    pub async fn write_all<Buf: IoBuf + Send>(
+        &mut self,
+        buf: FullSlice<Buf>,
+        ctx: &RequestContext,
+    ) -> (FullSlice<Buf>, Result<usize, Error>) {
+        self.inner.write_all(buf, ctx).await
     }
 }
 
@@ -71,7 +244,7 @@ pub(crate) mod owned_buffers_io {
 /// 'tag' field is used to detect whether the handle still is valid or not.
 ///
 #[derive(Debug)]
-pub struct VirtualFile {
+pub struct VirtualFileInner {
     /// Lazy handle to the global file descriptor cache. The slot that this points to
     /// might contain our File, or it may be empty, or it may contain a File that
     /// belongs to a different VirtualFile.
@@ -344,12 +517,12 @@ macro_rules! with_file {
     }};
 }
 
-impl VirtualFile {
+impl VirtualFileInner {
     /// Open a file in read-only mode. Like File::open.
     pub async fn open<P: AsRef<Utf8Path>>(
         path: P,
         ctx: &RequestContext,
-    ) -> Result<VirtualFile, std::io::Error> {
+    ) -> Result<VirtualFileInner, std::io::Error> {
         Self::open_with_options(path.as_ref(), OpenOptions::new().read(true), ctx).await
     }
 
@@ -358,7 +531,7 @@ impl VirtualFile {
     pub async fn create<P: AsRef<Utf8Path>>(
         path: P,
         ctx: &RequestContext,
-    ) -> Result<VirtualFile, std::io::Error> {
+    ) -> Result<VirtualFileInner, std::io::Error> {
         Self::open_with_options(
             path.as_ref(),
             OpenOptions::new().write(true).create(true).truncate(true),
@@ -376,7 +549,7 @@ impl VirtualFile {
         path: P,
         open_options: &OpenOptions,
         _ctx: &RequestContext, /* TODO: carry a pointer to the metrics in the RequestContext instead of the parsing https://github.com/neondatabase/neon/issues/6107 */
-    ) -> Result<VirtualFile, std::io::Error> {
+    ) -> Result<VirtualFileInner, std::io::Error> {
         let path_ref = path.as_ref();
         let path_str = path_ref.to_string();
         let parts = path_str.split('/').collect::<Vec<&str>>();
@@ -417,7 +590,7 @@ impl VirtualFile {
         reopen_options.create_new(false);
         reopen_options.truncate(false);
 
-        let vfile = VirtualFile {
+        let vfile = VirtualFileInner {
             handle: RwLock::new(handle),
             pos: 0,
             path: path_ref.to_path_buf(),
@@ -460,6 +633,7 @@ impl VirtualFile {
                 &[]
             };
             utils::crashsafe::overwrite(&final_path, &tmp_path, content)
+                .maybe_fatal_err("crashsafe_overwrite")
         })
         .await
         .expect("blocking task is never aborted")
@@ -469,7 +643,7 @@ impl VirtualFile {
     pub async fn sync_all(&self) -> Result<(), Error> {
         with_file!(self, StorageIoOperation::Fsync, |file_guard| {
             let (_file_guard, res) = io_engine::get().sync_all(file_guard).await;
-            res
+            res.maybe_fatal_err("sync_all")
         })
     }
 
@@ -477,7 +651,7 @@ impl VirtualFile {
     pub async fn sync_data(&self) -> Result<(), Error> {
         with_file!(self, StorageIoOperation::Fsync, |file_guard| {
             let (_file_guard, res) = io_engine::get().sync_data(file_guard).await;
-            res
+            res.maybe_fatal_err("sync_data")
         })
     }
 
@@ -635,24 +809,24 @@ impl VirtualFile {
     }
 
     // Copied from https://doc.rust-lang.org/1.72.0/src/std/os/unix/fs.rs.html#219-235
-    pub async fn write_all_at<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
+    pub async fn write_all_at<Buf: IoBuf + Send>(
         &self,
-        buf: B,
+        buf: FullSlice<Buf>,
         mut offset: u64,
         ctx: &RequestContext,
-    ) -> (B::Buf, Result<(), Error>) {
-        let buf_len = buf.bytes_init();
-        if buf_len == 0 {
-            return (Slice::into_inner(buf.slice_full()), Ok(()));
-        }
-        let mut buf = buf.slice(0..buf_len);
+    ) -> (FullSlice<Buf>, Result<(), Error>) {
+        let buf = buf.into_raw_slice();
+        let bounds = buf.bounds();
+        let restore =
+            |buf: Slice<_>| FullSlice::must_new(Slice::from_buf_bounds(buf.into_inner(), bounds));
+        let mut buf = buf;
         while !buf.is_empty() {
-            let res;
-            (buf, res) = self.write_at(buf, offset, ctx).await;
+            let (tmp, res) = self.write_at(FullSlice::must_new(buf), offset, ctx).await;
+            buf = tmp.into_raw_slice();
             match res {
                 Ok(0) => {
                     return (
-                        Slice::into_inner(buf),
+                        restore(buf),
                         Err(Error::new(
                             std::io::ErrorKind::WriteZero,
                             "failed to write whole buffer",
@@ -664,33 +838,33 @@ impl VirtualFile {
                     offset += n as u64;
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(e) => return (Slice::into_inner(buf), Err(e)),
+                Err(e) => return (restore(buf), Err(e)),
             }
         }
-        (Slice::into_inner(buf), Ok(()))
+        (restore(buf), Ok(()))
     }
 
-    /// Writes `buf.slice(0..buf.bytes_init())`.
-    /// Returns the IoBuf that is underlying the BoundedBuf `buf`.
-    /// I.e., the returned value's `bytes_init()` method returns something different than the `bytes_init()` that was passed in.
-    /// It's quite brittle and easy to mis-use, so, we return the size in the Ok() variant.
-    pub async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
+    /// Writes `buf` to the file at the current offset.
+    ///
+    /// Panics if there is an uninitialized range in `buf`, as that is most likely a bug in the caller.
+    pub async fn write_all<Buf: IoBuf + Send>(
         &mut self,
-        buf: B,
+        buf: FullSlice<Buf>,
         ctx: &RequestContext,
-    ) -> (B::Buf, Result<usize, Error>) {
-        let nbytes = buf.bytes_init();
-        if nbytes == 0 {
-            return (Slice::into_inner(buf.slice_full()), Ok(0));
-        }
-        let mut buf = buf.slice(0..nbytes);
+    ) -> (FullSlice<Buf>, Result<usize, Error>) {
+        let buf = buf.into_raw_slice();
+        let bounds = buf.bounds();
+        let restore =
+            |buf: Slice<_>| FullSlice::must_new(Slice::from_buf_bounds(buf.into_inner(), bounds));
+        let nbytes = buf.len();
+        let mut buf = buf;
         while !buf.is_empty() {
-            let res;
-            (buf, res) = self.write(buf, ctx).await;
+            let (tmp, res) = self.write(FullSlice::must_new(buf), ctx).await;
+            buf = tmp.into_raw_slice();
             match res {
                 Ok(0) => {
                     return (
-                        Slice::into_inner(buf),
+                        restore(buf),
                         Err(Error::new(
                             std::io::ErrorKind::WriteZero,
                             "failed to write whole buffer",
@@ -701,17 +875,17 @@ impl VirtualFile {
                     buf = buf.slice(n..);
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(e) => return (Slice::into_inner(buf), Err(e)),
+                Err(e) => return (restore(buf), Err(e)),
             }
         }
-        (Slice::into_inner(buf), Ok(nbytes))
+        (restore(buf), Ok(nbytes))
     }
 
     async fn write<B: IoBuf + Send>(
         &mut self,
-        buf: Slice<B>,
+        buf: FullSlice<B>,
         ctx: &RequestContext,
-    ) -> (Slice<B>, Result<usize, std::io::Error>) {
+    ) -> (FullSlice<B>, Result<usize, std::io::Error>) {
         let pos = self.pos;
         let (buf, res) = self.write_at(buf, pos, ctx).await;
         let n = match res {
@@ -752,12 +926,24 @@ impl VirtualFile {
         })
     }
 
+    /// The function aborts the process if the error is fatal.
     async fn write_at<B: IoBuf + Send>(
         &self,
-        buf: Slice<B>,
+        buf: FullSlice<B>,
         offset: u64,
         _ctx: &RequestContext, /* TODO: use for metrics: https://github.com/neondatabase/neon/issues/6107 */
-    ) -> (Slice<B>, Result<usize, Error>) {
+    ) -> (FullSlice<B>, Result<usize, Error>) {
+        let (slice, result) = self.write_at_inner(buf, offset, _ctx).await;
+        let result = result.maybe_fatal_err("write_at");
+        (slice, result)
+    }
+
+    async fn write_at_inner<B: IoBuf + Send>(
+        &self,
+        buf: FullSlice<B>,
+        offset: u64,
+        _ctx: &RequestContext, /* TODO: use for metrics: https://github.com/neondatabase/neon/issues/6107 */
+    ) -> (FullSlice<B>, Result<usize, Error>) {
         let file_guard = match self.lock_file().await {
             Ok(file_guard) => file_guard,
             Err(e) => return (buf, Err(e)),
@@ -1020,6 +1206,21 @@ impl VirtualFile {
         blknum: u32,
         ctx: &RequestContext,
     ) -> Result<crate::tenant::block_io::BlockLease<'_>, std::io::Error> {
+        self.inner.read_blk(blknum, ctx).await
+    }
+
+    async fn read_to_end(&mut self, buf: &mut Vec<u8>, ctx: &RequestContext) -> Result<(), Error> {
+        self.inner.read_to_end(buf, ctx).await
+    }
+}
+
+#[cfg(test)]
+impl VirtualFileInner {
+    pub(crate) async fn read_blk(
+        &self,
+        blknum: u32,
+        ctx: &RequestContext,
+    ) -> Result<crate::tenant::block_io::BlockLease<'_>, std::io::Error> {
         use crate::page_cache::PAGE_SZ;
         let slice = Vec::with_capacity(PAGE_SZ).slice_full();
         assert_eq!(slice.bytes_total(), PAGE_SZ);
@@ -1048,7 +1249,7 @@ impl VirtualFile {
     }
 }
 
-impl Drop for VirtualFile {
+impl Drop for VirtualFileInner {
     /// If a VirtualFile is dropped, close the underlying file if it was open.
     fn drop(&mut self) {
         let handle = self.handle.get_mut();
@@ -1091,11 +1292,11 @@ impl Drop for VirtualFile {
 
 impl OwnedAsyncWriter for VirtualFile {
     #[inline(always)]
-    async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
+    async fn write_all<Buf: IoBuf + Send>(
         &mut self,
-        buf: B,
+        buf: FullSlice<Buf>,
         ctx: &RequestContext,
-    ) -> std::io::Result<(usize, B::Buf)> {
+    ) -> std::io::Result<(usize, FullSlice<Buf>)> {
         let (buf, res) = VirtualFile::write_all(self, buf, ctx).await;
         res.map(move |v| (v, buf))
     }
@@ -1151,13 +1352,28 @@ fn get_open_files() -> &'static OpenFiles {
     }
 }
 
+/// Gets the io buffer alignment.
+pub(crate) const fn get_io_buffer_alignment() -> usize {
+    DEFAULT_IO_BUFFER_ALIGNMENT
+}
+
+static IO_MODE: AtomicU8 = AtomicU8::new(IoMode::preferred() as u8);
+
+pub(crate) fn set_io_mode(mode: IoMode) {
+    IO_MODE.store(mode as u8, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub(crate) fn get_io_mode() -> IoMode {
+    IoMode::try_from(IO_MODE.load(Ordering::Relaxed)).unwrap()
+}
 #[cfg(test)]
 mod tests {
     use crate::context::DownloadBehavior;
     use crate::task_mgr::TaskKind;
 
     use super::*;
-    use owned_buffers_io::slice::SliceExt;
+    use owned_buffers_io::io_buf_ext::IoBufExt;
+    use owned_buffers_io::slice::SliceMutExt;
     use rand::seq::SliceRandom;
     use rand::thread_rng;
     use rand::Rng;
@@ -1191,9 +1407,9 @@ mod tests {
                 }
             }
         }
-        async fn write_all_at<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
+        async fn write_all_at<Buf: IoBuf + Send>(
             &self,
-            buf: B,
+            buf: FullSlice<Buf>,
             offset: u64,
             ctx: &RequestContext,
         ) -> Result<(), Error> {
@@ -1202,13 +1418,7 @@ mod tests {
                     let (_buf, res) = file.write_all_at(buf, offset, ctx).await;
                     res
                 }
-                MaybeVirtualFile::File(file) => {
-                    let buf_len = buf.bytes_init();
-                    if buf_len == 0 {
-                        return Ok(());
-                    }
-                    file.write_all_at(&buf.slice(0..buf_len), offset)
-                }
+                MaybeVirtualFile::File(file) => file.write_all_at(&buf[..], offset),
             }
         }
         async fn seek(&mut self, pos: SeekFrom) -> Result<u64, Error> {
@@ -1217,9 +1427,9 @@ mod tests {
                 MaybeVirtualFile::File(file) => file.seek(pos),
             }
         }
-        async fn write_all<B: BoundedBuf<Buf = Buf>, Buf: IoBuf + Send>(
+        async fn write_all<Buf: IoBuf + Send>(
             &mut self,
-            buf: B,
+            buf: FullSlice<Buf>,
             ctx: &RequestContext,
         ) -> Result<(), Error> {
             match self {
@@ -1227,13 +1437,7 @@ mod tests {
                     let (_buf, res) = file.write_all(buf, ctx).await;
                     res.map(|_| ())
                 }
-                MaybeVirtualFile::File(file) => {
-                    let buf_len = buf.bytes_init();
-                    if buf_len == 0 {
-                        return Ok(());
-                    }
-                    file.write_all(&buf.slice(0..buf_len))
-                }
+                MaybeVirtualFile::File(file) => file.write_all(&buf[..]),
             }
         }
 
@@ -1345,7 +1549,9 @@ mod tests {
             &ctx,
         )
         .await?;
-        file_a.write_all(b"foobar".to_vec(), &ctx).await?;
+        file_a
+            .write_all(b"foobar".to_vec().slice_len(), &ctx)
+            .await?;
 
         // cannot read from a file opened in write-only mode
         let _ = file_a.read_string(&ctx).await.unwrap_err();
@@ -1354,7 +1560,10 @@ mod tests {
         let mut file_a = A::open(path_a, OpenOptions::new().read(true).to_owned(), &ctx).await?;
 
         // cannot write to a file opened in read-only mode
-        let _ = file_a.write_all(b"bar".to_vec(), &ctx).await.unwrap_err();
+        let _ = file_a
+            .write_all(b"bar".to_vec().slice_len(), &ctx)
+            .await
+            .unwrap_err();
 
         // Try simple read
         assert_eq!("foobar", file_a.read_string(&ctx).await?);
@@ -1397,8 +1606,12 @@ mod tests {
             &ctx,
         )
         .await?;
-        file_b.write_all_at(b"BAR".to_vec(), 3, &ctx).await?;
-        file_b.write_all_at(b"FOO".to_vec(), 0, &ctx).await?;
+        file_b
+            .write_all_at(b"BAR".to_vec().slice_len(), 3, &ctx)
+            .await?;
+        file_b
+            .write_all_at(b"FOO".to_vec().slice_len(), 0, &ctx)
+            .await?;
 
         assert_eq!(file_b.read_string_at(2, 3, &ctx).await?, "OBA");
 
@@ -1461,7 +1674,7 @@ mod tests {
         // Open the file many times.
         let mut files = Vec::new();
         for _ in 0..VIRTUAL_FILES {
-            let f = VirtualFile::open_with_options(
+            let f = VirtualFileInner::open_with_options(
                 &test_file_path,
                 OpenOptions::new().read(true),
                 &ctx,
@@ -1513,7 +1726,7 @@ mod tests {
         let path = testdir.join("myfile");
         let tmp_path = testdir.join("myfile.tmp");
 
-        VirtualFile::crashsafe_overwrite(path.clone(), tmp_path.clone(), b"foo".to_vec())
+        VirtualFileInner::crashsafe_overwrite(path.clone(), tmp_path.clone(), b"foo".to_vec())
             .await
             .unwrap();
         let mut file = MaybeVirtualFile::from(VirtualFile::open(&path, &ctx).await.unwrap());
@@ -1522,7 +1735,7 @@ mod tests {
         assert!(!tmp_path.exists());
         drop(file);
 
-        VirtualFile::crashsafe_overwrite(path.clone(), tmp_path.clone(), b"bar".to_vec())
+        VirtualFileInner::crashsafe_overwrite(path.clone(), tmp_path.clone(), b"bar".to_vec())
             .await
             .unwrap();
         let mut file = MaybeVirtualFile::from(VirtualFile::open(&path, &ctx).await.unwrap());
@@ -1545,7 +1758,7 @@ mod tests {
         std::fs::write(&tmp_path, "some preexisting junk that should be removed").unwrap();
         assert!(tmp_path.exists());
 
-        VirtualFile::crashsafe_overwrite(path.clone(), tmp_path.clone(), b"foo".to_vec())
+        VirtualFileInner::crashsafe_overwrite(path.clone(), tmp_path.clone(), b"foo".to_vec())
             .await
             .unwrap();
 

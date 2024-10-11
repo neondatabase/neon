@@ -44,6 +44,8 @@ use std::{thread, time::Duration};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::Arg;
+use compute_tools::disk_quota::set_disk_quota;
+use compute_tools::lsn_lease::launch_lsn_lease_bg_task_for_static;
 use signal_hook::consts::{SIGQUIT, SIGTERM};
 use signal_hook::{consts::SIGINT, iterator::Signals};
 use tracing::{error, info, warn};
@@ -150,6 +152,7 @@ fn process_cli(matches: &clap::ArgMatches) -> Result<ProcessCliResult> {
     let spec_json = matches.get_one::<String>("spec");
     let spec_path = matches.get_one::<String>("spec-path");
     let resize_swap_on_bind = matches.get_flag("resize-swap-on-bind");
+    let set_disk_quota_for_fs = matches.get_one::<String>("set-disk-quota-for-fs");
 
     Ok(ProcessCliResult {
         connstr,
@@ -160,6 +163,7 @@ fn process_cli(matches: &clap::ArgMatches) -> Result<ProcessCliResult> {
         spec_json,
         spec_path,
         resize_swap_on_bind,
+        set_disk_quota_for_fs,
     })
 }
 
@@ -172,6 +176,7 @@ struct ProcessCliResult<'clap> {
     spec_json: Option<&'clap String>,
     spec_path: Option<&'clap String>,
     resize_swap_on_bind: bool,
+    set_disk_quota_for_fs: Option<&'clap String>,
 }
 
 fn startup_context_from_env() -> Option<opentelemetry::ContextGuard> {
@@ -213,7 +218,7 @@ fn startup_context_from_env() -> Option<opentelemetry::ContextGuard> {
     }
     if !startup_tracing_carrier.is_empty() {
         use opentelemetry::propagation::TextMapPropagator;
-        use opentelemetry::sdk::propagation::TraceContextPropagator;
+        use opentelemetry_sdk::propagation::TraceContextPropagator;
         let guard = TraceContextPropagator::new()
             .extract(&startup_tracing_carrier)
             .attach();
@@ -292,6 +297,7 @@ fn wait_spec(
         pgbin,
         ext_remote_storage,
         resize_swap_on_bind,
+        set_disk_quota_for_fs,
         http_port,
         ..
     }: ProcessCliResult,
@@ -366,10 +372,13 @@ fn wait_spec(
         state.start_time = now;
     }
 
+    launch_lsn_lease_bg_task_for_static(&compute);
+
     Ok(WaitSpecResult {
         compute,
         http_port,
         resize_swap_on_bind,
+        set_disk_quota_for_fs: set_disk_quota_for_fs.cloned(),
     })
 }
 
@@ -378,6 +387,7 @@ struct WaitSpecResult {
     // passed through from ProcessCliResult
     http_port: u16,
     resize_swap_on_bind: bool,
+    set_disk_quota_for_fs: Option<String>,
 }
 
 fn start_postgres(
@@ -387,12 +397,12 @@ fn start_postgres(
         compute,
         http_port,
         resize_swap_on_bind,
+        set_disk_quota_for_fs,
     }: WaitSpecResult,
 ) -> Result<(Option<PostgresHandle>, StartPostgresResult)> {
     // We got all we need, update the state.
     let mut state = compute.state.lock().unwrap();
-    state.status = ComputeStatus::Init;
-    compute.state_changed.notify_all();
+    state.set_status(ComputeStatus::Init, &compute.state_changed);
 
     info!(
         "running compute with features: {:?}",
@@ -400,6 +410,7 @@ fn start_postgres(
     );
     // before we release the mutex, fetch the swap size (if any) for later.
     let swap_size_bytes = state.pspec.as_ref().unwrap().spec.swap_size_bytes;
+    let disk_quota_bytes = state.pspec.as_ref().unwrap().spec.disk_quota_bytes;
     drop(state);
 
     // Launch remaining service threads
@@ -419,8 +430,8 @@ fn start_postgres(
         // OOM-killed during startup because swap wasn't available yet.
         match resize_swap(size_bytes) {
             Ok(()) => {
-                let size_gib = size_bytes as f32 / (1 << 20) as f32; // just for more coherent display.
-                info!(%size_bytes, %size_gib, "resized swap");
+                let size_mib = size_bytes as f32 / (1 << 20) as f32; // just for more coherent display.
+                info!(%size_bytes, %size_mib, "resized swap");
             }
             Err(err) => {
                 let err = err.context("failed to resize swap");
@@ -429,10 +440,29 @@ fn start_postgres(
                 // Mark compute startup as failed; don't try to start postgres, and report this
                 // error to the control plane when it next asks.
                 prestartup_failed = true;
-                let mut state = compute.state.lock().unwrap();
-                state.error = Some(format!("{err:?}"));
-                state.status = ComputeStatus::Failed;
-                compute.state_changed.notify_all();
+                compute.set_failed_status(err);
+                delay_exit = true;
+            }
+        }
+    }
+
+    // Set disk quota if the compute spec says so
+    if let (Some(disk_quota_bytes), Some(disk_quota_fs_mountpoint)) =
+        (disk_quota_bytes, set_disk_quota_for_fs)
+    {
+        match set_disk_quota(disk_quota_bytes, &disk_quota_fs_mountpoint) {
+            Ok(()) => {
+                let size_mib = disk_quota_bytes as f32 / (1 << 20) as f32; // just for more coherent display.
+                info!(%disk_quota_bytes, %size_mib, "set disk quota");
+            }
+            Err(err) => {
+                let err = err.context("failed to set disk quota");
+                error!("{err:#}");
+
+                // Mark compute startup as failed; don't try to start postgres, and report this
+                // error to the control plane when it next asks.
+                prestartup_failed = true;
+                compute.set_failed_status(err);
                 delay_exit = true;
             }
         }
@@ -447,16 +477,7 @@ fn start_postgres(
             Ok(pg) => Some(pg),
             Err(err) => {
                 error!("could not start the compute node: {:#}", err);
-                let mut state = compute.state.lock().unwrap();
-                state.error = Some(format!("{:?}", err));
-                state.status = ComputeStatus::Failed;
-                // Notify others that Postgres failed to start. In case of configuring the
-                // empty compute, it's likely that API handler is still waiting for compute
-                // state change. With this we will notify it that compute is in Failed state,
-                // so control plane will know about it earlier and record proper error instead
-                // of timeout.
-                compute.state_changed.notify_all();
-                drop(state); // unlock
+                compute.set_failed_status(err);
                 delay_exit = true;
                 None
             }
@@ -746,6 +767,11 @@ fn cli() -> clap::Command {
             Arg::new("resize-swap-on-bind")
                 .long("resize-swap-on-bind")
                 .action(clap::ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("set-disk-quota-for-fs")
+                .long("set-disk-quota-for-fs")
+                .value_name("SET_DISK_QUOTA_FOR_FS")
         )
 }
 

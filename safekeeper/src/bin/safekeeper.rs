@@ -19,7 +19,7 @@ use std::fs::{self, File};
 use std::io::{ErrorKind, Write};
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use storage_broker::Uri;
 
 use tracing::*;
@@ -170,11 +170,6 @@ struct Args {
     /// still needed for existing replication connection.
     #[arg(long)]
     walsenders_keep_horizon: bool,
-    /// Enable partial backup. If disabled, safekeeper will not upload partial
-    /// segments to remote storage.
-    /// TODO: now partial backup is always enabled, remove this flag.
-    #[arg(long)]
-    partial_backup_enabled: bool,
     /// Controls how long backup will wait until uploading the partial segment.
     #[arg(long, value_parser = humantime::parse_duration, default_value = DEFAULT_PARTIAL_BACKUP_TIMEOUT, verbatim_doc_comment)]
     partial_backup_timeout: Duration,
@@ -266,6 +261,15 @@ async fn main() -> anyhow::Result<()> {
     // Change into the data directory.
     std::env::set_current_dir(&workdir)?;
 
+    // Prevent running multiple safekeepers on the same directory
+    let lock_file_path = workdir.join(PID_FILE_NAME);
+    let lock_file =
+        pid_file::claim_for_current_process(&lock_file_path).context("claim pid file")?;
+    info!("claimed pid file at {lock_file_path:?}");
+    // ensure that the lock file is held even if the main thread of the process is panics
+    // we need to release the lock file only when the current process is gone
+    std::mem::forget(lock_file);
+
     // Set or read our ID.
     let id = set_id(&workdir, args.id.map(NodeId))?;
     if args.init {
@@ -347,7 +351,6 @@ async fn main() -> anyhow::Result<()> {
         sk_auth_token,
         current_thread_runtime: args.current_thread_runtime,
         walsenders_keep_horizon: args.walsenders_keep_horizon,
-        partial_backup_enabled: true,
         partial_backup_timeout: args.partial_backup_timeout,
         disable_periodic_broker_push: args.disable_periodic_broker_push,
         enable_offload: args.enable_offload,
@@ -370,15 +373,17 @@ async fn main() -> anyhow::Result<()> {
 type JoinTaskRes = Result<anyhow::Result<()>, JoinError>;
 
 async fn start_safekeeper(conf: SafeKeeperConf) -> Result<()> {
-    // Prevent running multiple safekeepers on the same directory
-    let lock_file_path = conf.workdir.join(PID_FILE_NAME);
-    let lock_file =
-        pid_file::claim_for_current_process(&lock_file_path).context("claim pid file")?;
-    info!("claimed pid file at {lock_file_path:?}");
-
-    // ensure that the lock file is held even if the main thread of the process is panics
-    // we need to release the lock file only when the current process is gone
-    std::mem::forget(lock_file);
+    // fsync the datadir to make sure we have a consistent state on disk.
+    if !conf.no_sync {
+        let dfd = File::open(&conf.workdir).context("open datadir for syncfs")?;
+        let started = Instant::now();
+        utils::crashsafe::syncfs(dfd)?;
+        let elapsed = started.elapsed();
+        info!(
+            elapsed_ms = elapsed.as_millis(),
+            "syncfs data directory done"
+        );
+    }
 
     info!("starting safekeeper WAL service on {}", conf.listen_pg_addr);
     let pg_listener = tcp_listener::bind(conf.listen_pg_addr.clone()).map_err(|e| {

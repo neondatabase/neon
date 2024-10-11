@@ -1,7 +1,9 @@
+from __future__ import annotations
+
 import os
 import time
 from collections import defaultdict
-from typing import Dict, List, Optional, Union
+from typing import TYPE_CHECKING
 
 import pytest
 import requests
@@ -21,8 +23,12 @@ from fixtures.remote_storage import s3_storage
 from fixtures.utils import wait_until
 from fixtures.workload import Workload
 from pytest_httpserver import HTTPServer
+from typing_extensions import override
 from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
+
+if TYPE_CHECKING:
+    from typing import Optional, Union
 
 
 def test_sharding_smoke(
@@ -77,7 +83,7 @@ def test_sharding_smoke(
     assert all(s < expect_initdb_size // 2 for s in sizes.values())
 
     # Test that timeline creation works on a sharded tenant
-    timeline_b = env.neon_cli.create_branch("branch_b", tenant_id=tenant_id)
+    timeline_b = env.create_branch("branch_b", tenant_id=tenant_id)
 
     # Test that we can write data to a sharded tenant
     workload = Workload(env, tenant_id, timeline_b, branch_name="branch_b")
@@ -124,7 +130,8 @@ def test_sharding_smoke(
 
     # Check the scrubber isn't confused by sharded content, then disable
     # it during teardown because we'll have deleted by then
-    env.storage_scrubber.scan_metadata()
+    healthy, _ = env.storage_scrubber.scan_metadata()
+    assert healthy
 
     env.storage_controller.pageserver_api().tenant_delete(tenant_id)
     assert_prefix_empty(
@@ -199,6 +206,7 @@ def test_sharding_split_compaction(neon_env_builder: NeonEnvBuilder, failpoint: 
         # Disable automatic creation of image layers, as we will create them explicitly when we want them
         "image_creation_threshold": 9999,
         "image_layer_creation_check_threshold": 0,
+        "lsn_lease_length": "0s",
     }
 
     neon_env_builder.storage_controller_config = {
@@ -373,10 +381,10 @@ def test_sharding_split_smoke(
     non_default_tenant_config = {"gc_horizon": 77 * 1024 * 1024}
 
     env = neon_env_builder.init_configs(True)
-    neon_env_builder.start()
+    env.start()
     tenant_id = TenantId.generate()
     timeline_id = TimelineId.generate()
-    env.neon_cli.create_tenant(
+    env.create_tenant(
         tenant_id,
         timeline_id,
         shard_count=shard_count,
@@ -393,6 +401,7 @@ def test_sharding_split_smoke(
 
     # Note which pageservers initially hold a shard after tenant creation
     pre_split_pageserver_ids = [loc["node_id"] for loc in env.storage_controller.locate(tenant_id)]
+    log.info("Pre-split pageservers: {pre_split_pageserver_ids}")
 
     # For pageservers holding a shard, validate their ingest statistics
     # reflect a proper splitting of the WAL.
@@ -554,9 +563,9 @@ def test_sharding_split_smoke(
     assert sum(total.values()) == split_shard_count * 2
     check_effective_tenant_config()
 
-    # More specific check: that we are fully balanced.  This is deterministic because
-    # the order in which we consider shards for optimization is deterministic, and the
-    # order of preference of nodes is also deterministic (lower node IDs win).
+    # More specific check: that we are fully balanced.  It is deterministic that we will get exactly
+    # one shard on each pageserver, because for these small shards the utilization metric is
+    # dominated by shard count.
     log.info(f"total: {total}")
     assert total == {
         1: 1,
@@ -576,8 +585,14 @@ def test_sharding_split_smoke(
         15: 1,
         16: 1,
     }
+
+    # The controller is not required to lay out the attached locations in any particular way, but
+    # all the pageservers that originally held an attached shard should still hold one, otherwise
+    # it would indicate that we had done some unnecessary migration.
     log.info(f"attached: {attached}")
-    assert attached == {1: 1, 2: 1, 3: 1, 5: 1, 6: 1, 7: 1, 9: 1, 11: 1}
+    for ps_id in pre_split_pageserver_ids:
+        log.info("Pre-split pageserver {ps_id} should still hold an attached location")
+        assert ps_id in attached
 
     # Ensure post-split pageserver locations survive a restart (i.e. the child shards
     # correctly wrote config to disk, and the storage controller responds correctly
@@ -626,7 +641,7 @@ def test_sharding_split_stripe_size(
     tenant_id = env.initial_tenant
 
     assert len(notifications) == 1
-    expect: Dict[str, Union[List[Dict[str, int]], str, None, int]] = {
+    expect: dict[str, Union[list[dict[str, int]], str, None, int]] = {
         "tenant_id": str(env.initial_tenant),
         "stripe_size": None,
         "shards": [{"node_id": int(env.pageservers[0].id), "shard_number": 0}],
@@ -642,7 +657,7 @@ def test_sharding_split_stripe_size(
     # Check that we ended up with the stripe size that we expected, both on the pageserver
     # and in the notifications to compute
     assert len(notifications) == 2
-    expect_after: Dict[str, Union[List[Dict[str, int]], str, None, int]] = {
+    expect_after: dict[str, Union[list[dict[str, int]], str, None, int]] = {
         "tenant_id": str(env.initial_tenant),
         "stripe_size": new_stripe_size,
         "shards": [
@@ -940,6 +955,7 @@ class PageserverFailpoint(Failure):
         self.pageserver_id = pageserver_id
         self._mitigate = mitigate
 
+    @override
     def apply(self, env: NeonEnv):
         pageserver = env.get_pageserver(self.pageserver_id)
         pageserver.allowed_errors.extend(
@@ -947,19 +963,23 @@ class PageserverFailpoint(Failure):
         )
         pageserver.http_client().configure_failpoints((self.failpoint, "return(1)"))
 
+    @override
     def clear(self, env: NeonEnv):
         pageserver = env.get_pageserver(self.pageserver_id)
         pageserver.http_client().configure_failpoints((self.failpoint, "off"))
         if self._mitigate:
             env.storage_controller.node_configure(self.pageserver_id, {"availability": "Active"})
 
+    @override
     def expect_available(self):
         return True
 
+    @override
     def can_mitigate(self):
         return self._mitigate
 
-    def mitigate(self, env):
+    @override
+    def mitigate(self, env: NeonEnv):
         env.storage_controller.node_configure(self.pageserver_id, {"availability": "Offline"})
 
 
@@ -969,9 +989,11 @@ class StorageControllerFailpoint(Failure):
         self.pageserver_id = None
         self.action = action
 
+    @override
     def apply(self, env: NeonEnv):
         env.storage_controller.configure_failpoints((self.failpoint, self.action))
 
+    @override
     def clear(self, env: NeonEnv):
         if "panic" in self.action:
             log.info("Restarting storage controller after panic")
@@ -980,16 +1002,19 @@ class StorageControllerFailpoint(Failure):
         else:
             env.storage_controller.configure_failpoints((self.failpoint, "off"))
 
+    @override
     def expect_available(self):
         # Controller panics _do_ leave pageservers available, but our test code relies
         # on using the locate API to update configurations in Workload, so we must skip
         # these actions when the controller has been panicked.
         return "panic" not in self.action
 
+    @override
     def can_mitigate(self):
         return False
 
-    def fails_forward(self, env):
+    @override
+    def fails_forward(self, env: NeonEnv):
         # Edge case: the very last failpoint that simulates a DB connection error, where
         # the abort path will fail-forward and result in a complete split.
         fail_forward = self.failpoint == "shard-split-post-complete"
@@ -1003,6 +1028,7 @@ class StorageControllerFailpoint(Failure):
 
         return fail_forward
 
+    @override
     def expect_exception(self):
         if "panic" in self.action:
             return requests.exceptions.ConnectionError
@@ -1015,18 +1041,22 @@ class NodeKill(Failure):
         self.pageserver_id = pageserver_id
         self._mitigate = mitigate
 
+    @override
     def apply(self, env: NeonEnv):
         pageserver = env.get_pageserver(self.pageserver_id)
         pageserver.stop(immediate=True)
 
+    @override
     def clear(self, env: NeonEnv):
         pageserver = env.get_pageserver(self.pageserver_id)
         pageserver.start()
 
+    @override
     def expect_available(self):
         return False
 
-    def mitigate(self, env):
+    @override
+    def mitigate(self, env: NeonEnv):
         env.storage_controller.node_configure(self.pageserver_id, {"availability": "Offline"})
 
 
@@ -1045,21 +1075,26 @@ class CompositeFailure(Failure):
                 self.pageserver_id = f.pageserver_id
                 break
 
+    @override
     def apply(self, env: NeonEnv):
         for f in self.failures:
             f.apply(env)
 
-    def clear(self, env):
+    @override
+    def clear(self, env: NeonEnv):
         for f in self.failures:
             f.clear(env)
 
+    @override
     def expect_available(self):
         return all(f.expect_available() for f in self.failures)
 
-    def mitigate(self, env):
+    @override
+    def mitigate(self, env: NeonEnv):
         for f in self.failures:
             f.mitigate(env)
 
+    @override
     def expect_exception(self):
         expect = set(f.expect_exception() for f in self.failures)
 
@@ -1118,7 +1153,7 @@ def test_sharding_split_failures(
     timeline_id = TimelineId.generate()
 
     # Create a tenant with secondary locations enabled
-    env.neon_cli.create_tenant(
+    env.create_tenant(
         tenant_id, timeline_id, shard_count=initial_shard_count, placement_policy='{"Attached":1}'
     )
 
@@ -1197,7 +1232,7 @@ def test_sharding_split_failures(
 
         assert attached_count == initial_shard_count
 
-    def assert_split_done(exclude_ps_id=None) -> None:
+    def assert_split_done(exclude_ps_id: Optional[int] = None) -> None:
         secondary_count = 0
         attached_count = 0
         for ps in env.pageservers:
@@ -1428,11 +1463,11 @@ def test_sharding_unlogged_relation(neon_env_builder: NeonEnvBuilder):
 
     neon_env_builder.num_pageservers = 2
     env = neon_env_builder.init_configs()
-    neon_env_builder.start()
+    env.start()
 
     tenant_id = TenantId.generate()
     timeline_id = TimelineId.generate()
-    env.neon_cli.create_tenant(tenant_id, timeline_id, shard_count=8)
+    env.create_tenant(tenant_id, timeline_id, shard_count=8)
 
     # We will create many tables to ensure it's overwhelmingly likely that at least one
     # of them doesn't land on shard 0
@@ -1467,14 +1502,14 @@ def test_top_tenants(neon_env_builder: NeonEnvBuilder):
     """
 
     env = neon_env_builder.init_configs()
-    neon_env_builder.start()
+    env.start()
 
     tenants = []
     n_tenants = 8
     for i in range(0, n_tenants):
         tenant_id = TenantId.generate()
         timeline_id = TimelineId.generate()
-        env.neon_cli.create_tenant(tenant_id, timeline_id)
+        env.create_tenant(tenant_id, timeline_id)
 
         # Write a different amount of data to each tenant
         w = Workload(env, tenant_id, timeline_id)

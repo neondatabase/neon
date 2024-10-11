@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import concurrent.futures
 import os
 import time
@@ -5,7 +7,6 @@ from contextlib import closing
 from datetime import datetime
 from itertools import chain
 from pathlib import Path
-from typing import List
 
 import pytest
 import requests
@@ -32,7 +33,7 @@ from prometheus_client.samples import Sample
 def test_tenant_creation_fails(neon_simple_env: NeonEnv):
     tenants_dir = neon_simple_env.pageserver.tenant_dir()
     initial_tenants = sorted(
-        map(lambda t: t.split()[0], neon_simple_env.neon_cli.list_tenants().stdout.splitlines())
+        map(lambda t: t.split()[0], neon_simple_env.neon_cli.tenant_list().stdout.splitlines())
     )
     [d for d in tenants_dir.iterdir()]
 
@@ -59,11 +60,11 @@ def test_tenant_creation_fails(neon_simple_env: NeonEnv):
     # an empty tenant dir with no config in it.
     neon_simple_env.pageserver.allowed_errors.append(".*Failed to load tenant config.*")
     new_tenants = sorted(
-        map(lambda t: t.split()[0], neon_simple_env.neon_cli.list_tenants().stdout.splitlines())
+        map(lambda t: t.split()[0], neon_simple_env.neon_cli.tenant_list().stdout.splitlines())
     )
     assert initial_tenants == new_tenants, "should not create new tenants"
 
-    neon_simple_env.neon_cli.create_tenant()
+    neon_simple_env.create_tenant()
 
 
 def test_tenants_normal_work(neon_env_builder: NeonEnvBuilder):
@@ -71,11 +72,11 @@ def test_tenants_normal_work(neon_env_builder: NeonEnvBuilder):
 
     env = neon_env_builder.init_start()
     """Tests tenants with and without wal acceptors"""
-    tenant_1, _ = env.neon_cli.create_tenant()
-    tenant_2, _ = env.neon_cli.create_tenant()
+    tenant_1, _ = env.create_tenant()
+    tenant_2, _ = env.create_tenant()
 
-    env.neon_cli.create_timeline("test_tenants_normal_work", tenant_id=tenant_1)
-    env.neon_cli.create_timeline("test_tenants_normal_work", tenant_id=tenant_2)
+    env.create_timeline("test_tenants_normal_work", tenant_id=tenant_1)
+    env.create_timeline("test_tenants_normal_work", tenant_id=tenant_2)
 
     endpoint_tenant1 = env.endpoints.create_start(
         "test_tenants_normal_work",
@@ -102,11 +103,11 @@ def test_metrics_normal_work(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.pageserver_config_override = "availability_zone='test_ps_az'"
 
     env = neon_env_builder.init_start()
-    tenant_1, _ = env.neon_cli.create_tenant()
-    tenant_2, _ = env.neon_cli.create_tenant()
+    tenant_1, _ = env.create_tenant()
+    tenant_2, _ = env.create_tenant()
 
-    timeline_1 = env.neon_cli.create_timeline("test_metrics_normal_work", tenant_id=tenant_1)
-    timeline_2 = env.neon_cli.create_timeline("test_metrics_normal_work", tenant_id=tenant_2)
+    timeline_1 = env.create_timeline("test_metrics_normal_work", tenant_id=tenant_1)
+    timeline_2 = env.create_timeline("test_metrics_normal_work", tenant_id=tenant_2)
 
     endpoint_tenant1 = env.endpoints.create_start("test_metrics_normal_work", tenant_id=tenant_1)
     endpoint_tenant2 = env.endpoints.create_start("test_metrics_normal_work", tenant_id=tenant_2)
@@ -250,11 +251,11 @@ def test_pageserver_metrics_removed_after_detach(neon_env_builder: NeonEnvBuilde
     neon_env_builder.num_safekeepers = 3
 
     env = neon_env_builder.init_start()
-    tenant_1, _ = env.neon_cli.create_tenant()
-    tenant_2, _ = env.neon_cli.create_tenant()
+    tenant_1, _ = env.create_tenant()
+    tenant_2, _ = env.create_tenant()
 
-    env.neon_cli.create_timeline("test_metrics_removed_after_detach", tenant_id=tenant_1)
-    env.neon_cli.create_timeline("test_metrics_removed_after_detach", tenant_id=tenant_2)
+    env.create_timeline("test_metrics_removed_after_detach", tenant_id=tenant_1)
+    env.create_timeline("test_metrics_removed_after_detach", tenant_id=tenant_2)
 
     endpoint_tenant1 = env.endpoints.create_start(
         "test_metrics_removed_after_detach", tenant_id=tenant_1
@@ -272,7 +273,7 @@ def test_pageserver_metrics_removed_after_detach(neon_env_builder: NeonEnvBuilde
                 assert cur.fetchone() == (5000050000,)
         endpoint.stop()
 
-    def get_ps_metric_samples_for_tenant(tenant_id: TenantId) -> List[Sample]:
+    def get_ps_metric_samples_for_tenant(tenant_id: TenantId) -> list[Sample]:
         ps_metrics = env.pageserver.http_client().get_metrics()
         samples = []
         for metric_name in ps_metrics.metrics:
@@ -372,8 +373,10 @@ def test_create_churn_during_restart(neon_env_builder: NeonEnvBuilder):
     tenant_id: TenantId = env.initial_tenant
     timeline_id = env.initial_timeline
 
-    # Multiple creation requests which race will generate this error
+    # Multiple creation requests which race will generate this error on the pageserver
+    # and storage controller respectively
     env.pageserver.allowed_errors.append(".*Conflict: Tenant is already being modified.*")
+    env.storage_controller.allowed_errors.append(".*Conflict: Tenant is already being modified.*")
 
     # Tenant creation requests which arrive out of order will generate complaints about
     # generation nubmers out of order.
@@ -457,7 +460,7 @@ def test_pageserver_metrics_many_relations(neon_env_builder: NeonEnvBuilder):
         "pageserver_directory_entries_count", {"tenant_id": str(env.initial_tenant)}
     )
 
-    def only_int(samples: List[Sample]) -> int:
+    def only_int(samples: list[Sample]) -> int:
         assert len(samples) == 1
         return int(samples[0].value)
 

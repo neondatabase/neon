@@ -1,4 +1,6 @@
-//! Timeline residence guard is needed to ensure that WAL segments are present on disk,
+//! Timeline residence guard
+//!
+//! It is needed to ensure that WAL segments are present on disk,
 //! as long as the code is holding the guard. This file implements guard logic, to issue
 //! and drop guards, and to notify the manager when the guard is dropped.
 

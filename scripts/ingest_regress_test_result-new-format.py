@@ -1,5 +1,7 @@
 #! /usr/bin/env python3
 
+from __future__ import annotations
+
 import argparse
 import dataclasses
 import json
@@ -11,13 +13,13 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Tuple
 
 import backoff
 import psycopg2
 from psycopg2.extras import execute_values
 
 CREATE_TABLE = """
+CREATE TYPE arch AS ENUM ('ARM64', 'X64', 'UNKNOWN');
 CREATE TABLE IF NOT EXISTS results (
     id           BIGSERIAL PRIMARY KEY,
     parent_suite TEXT NOT NULL,
@@ -28,6 +30,7 @@ CREATE TABLE IF NOT EXISTS results (
     stopped_at   TIMESTAMPTZ NOT NULL,
     duration     INT NOT NULL,
     flaky        BOOLEAN NOT NULL,
+    arch         arch DEFAULT 'X64',
     build_type   TEXT NOT NULL,
     pg_version   INT NOT NULL,
     run_id       BIGINT NOT NULL,
@@ -35,7 +38,7 @@ CREATE TABLE IF NOT EXISTS results (
     reference    TEXT NOT NULL,
     revision     CHAR(40) NOT NULL,
     raw          JSONB COMPRESSION lz4 NOT NULL,
-    UNIQUE (parent_suite, suite, name, build_type, pg_version, started_at, stopped_at, run_id)
+    UNIQUE (parent_suite, suite, name, arch, build_type, pg_version, started_at, stopped_at, run_id)
 );
 """
 
@@ -50,6 +53,7 @@ class Row:
     stopped_at: datetime
     duration: int
     flaky: bool
+    arch: str
     build_type: str
     pg_version: int
     run_id: int
@@ -88,7 +92,7 @@ def create_table(cur):
     cur.execute(CREATE_TABLE)
 
 
-def parse_test_name(test_name: str) -> Tuple[str, int, str]:
+def parse_test_name(test_name: str) -> tuple[str, int, str]:
     build_type, pg_version = None, None
     if match := TEST_NAME_RE.search(test_name):
         found = match.groupdict()
@@ -121,6 +125,14 @@ def ingest_test_result(
         raw.pop("labels")
         raw.pop("extra")
 
+        # All allure parameters are prefixed with "__", see test_runner/fixtures/parametrize.py
+        parameters = {
+            p["name"].removeprefix("__"): p["value"]
+            for p in test["parameters"]
+            if p["name"].startswith("__")
+        }
+        arch = parameters.get("arch", "UNKNOWN").strip("'")
+
         build_type, pg_version, unparametrized_name = parse_test_name(test["name"])
         labels = {label["name"]: label["value"] for label in test["labels"]}
         row = Row(
@@ -132,6 +144,7 @@ def ingest_test_result(
             stopped_at=datetime.fromtimestamp(test["time"]["stop"] / 1000, tz=timezone.utc),
             duration=test["time"]["duration"],
             flaky=test["flaky"] or test["retriesStatusChange"],
+            arch=arch,
             build_type=build_type,
             pg_version=pg_version,
             run_id=run_id,

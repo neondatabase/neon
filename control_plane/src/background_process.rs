@@ -151,7 +151,7 @@ where
                     print!(".");
                     io::stdout().flush().unwrap();
                 }
-                thread::sleep(RETRY_INTERVAL);
+                tokio::time::sleep(RETRY_INTERVAL).await;
             }
             Err(e) => {
                 println!("error starting process {process_name:?}: {e:#}");
@@ -289,7 +289,7 @@ fn fill_remote_storage_secrets_vars(mut cmd: &mut Command) -> &mut Command {
 
 fn fill_env_vars_prefixed_neon(mut cmd: &mut Command) -> &mut Command {
     for (var, val) in std::env::vars() {
-        if var.starts_with("NEON_PAGESERVER_") {
+        if var.starts_with("NEON_") {
             cmd = cmd.env(var, val);
         }
     }
@@ -379,7 +379,7 @@ where
     }
 }
 
-fn process_has_stopped(pid: Pid) -> anyhow::Result<bool> {
+pub(crate) fn process_has_stopped(pid: Pid) -> anyhow::Result<bool> {
     match kill(pid, None) {
         // Process exists, keep waiting
         Ok(_) => Ok(false),

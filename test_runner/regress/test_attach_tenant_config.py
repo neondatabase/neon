@@ -1,5 +1,8 @@
+from __future__ import annotations
+
+from collections.abc import Generator
 from dataclasses import dataclass
-from typing import Generator, Optional
+from typing import Optional
 
 import pytest
 from fixtures.common_types import TenantId
@@ -41,7 +44,7 @@ def negative_env(neon_env_builder: NeonEnvBuilder) -> Generator[NegativeTests, N
     assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
 
     ps_http = env.pageserver.http_client()
-    (tenant_id, _) = env.neon_cli.create_tenant()
+    (tenant_id, _) = env.create_tenant()
     assert ps_http.tenant_config(tenant_id).tenant_specific_overrides == {}
     config_pre_detach = ps_http.tenant_config(tenant_id)
     assert tenant_id in [TenantId(t["id"]) for t in ps_http.tenant_list()]
@@ -109,7 +112,7 @@ def test_empty_config(positive_env: NeonEnv, content_type: Optional[str]):
     """
     env = positive_env
     ps_http = env.pageserver.http_client()
-    (tenant_id, _) = env.neon_cli.create_tenant()
+    (tenant_id, _) = env.create_tenant()
     assert ps_http.tenant_config(tenant_id).tenant_specific_overrides == {}
     config_pre_detach = ps_http.tenant_config(tenant_id)
     assert tenant_id in [TenantId(t["id"]) for t in ps_http.tenant_list()]
@@ -162,7 +165,6 @@ def test_fully_custom_config(positive_env: NeonEnv):
         "min_resident_size_override": 23,
         "timeline_get_throttle": {
             "task_kinds": ["PageRequestHandler"],
-            "fair": True,
             "initial": 0,
             "refill_interval": "1s",
             "refill_amount": 1000,
@@ -183,7 +185,7 @@ def test_fully_custom_config(positive_env: NeonEnv):
         fully_custom_config.keys()
     ), "ensure we cover all config options"
 
-    (tenant_id, _) = env.neon_cli.create_tenant()
+    (tenant_id, _) = env.create_tenant()
     ps_http.set_tenant_config(tenant_id, fully_custom_config)
     our_tenant_config = ps_http.tenant_config(tenant_id)
     assert our_tenant_config.tenant_specific_overrides == fully_custom_config

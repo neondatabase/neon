@@ -1,13 +1,21 @@
+from __future__ import annotations
+
+import os
+import time
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
 from contextlib import _GeneratorContextManager, contextmanager
 
 # Type-related stuff
-from typing import Dict, Iterator, List
+from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 from _pytest.fixtures import FixtureRequest
+from typing_extensions import override
 
 from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
+from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
     PgBin,
@@ -17,6 +25,9 @@ from fixtures.neon_fixtures import (
     wait_for_last_flush_lsn,
 )
 from fixtures.pg_stats import PgStatTable
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 
 class PgCompare(ABC):
@@ -42,7 +53,11 @@ class PgCompare(ABC):
         pass
 
     @abstractmethod
-    def flush(self):
+    def flush(self, compact: bool = False, gc: bool = False):
+        pass
+
+    @abstractmethod
+    def compact(self):
         pass
 
     @abstractmethod
@@ -55,16 +70,16 @@ class PgCompare(ABC):
 
     @contextmanager
     @abstractmethod
-    def record_pageserver_writes(self, out_name):
+    def record_pageserver_writes(self, out_name: str):
         pass
 
     @contextmanager
     @abstractmethod
-    def record_duration(self, out_name):
+    def record_duration(self, out_name: str):
         pass
 
     @contextmanager
-    def record_pg_stats(self, pg_stats: List[PgStatTable]) -> Iterator[None]:
+    def record_pg_stats(self, pg_stats: list[PgStatTable]) -> Iterator[None]:
         init_data = self._retrieve_pg_stats(pg_stats)
 
         yield
@@ -74,8 +89,8 @@ class PgCompare(ABC):
         for k in set(init_data) & set(data):
             self.zenbenchmark.record(k, data[k] - init_data[k], "", MetricReport.HIGHER_IS_BETTER)
 
-    def _retrieve_pg_stats(self, pg_stats: List[PgStatTable]) -> Dict[str, int]:
-        results: Dict[str, int] = {}
+    def _retrieve_pg_stats(self, pg_stats: list[PgStatTable]) -> dict[str, int]:
+        results: dict[str, int] = {}
 
         with self.pg.connect().cursor() as cur:
             for pg_stat in pg_stats:
@@ -98,7 +113,6 @@ class NeonCompare(PgCompare):
         zenbenchmark: NeonBenchmarker,
         neon_simple_env: NeonEnv,
         pg_bin: PgBin,
-        branch_name: str,
     ):
         self.env = neon_simple_env
         self._zenbenchmark = zenbenchmark
@@ -106,37 +120,41 @@ class NeonCompare(PgCompare):
         self.pageserver_http_client = self.env.pageserver.http_client()
 
         # note that neon_simple_env now uses LOCAL_FS remote storage
-
-        # Create tenant
-        tenant_conf: Dict[str, str] = {}
-        self.tenant, _ = self.env.neon_cli.create_tenant(conf=tenant_conf)
-
-        # Create timeline
-        self.timeline = self.env.neon_cli.create_timeline(branch_name, tenant_id=self.tenant)
+        self.tenant = self.env.initial_tenant
+        self.timeline = self.env.initial_timeline
 
         # Start pg
-        self._pg = self.env.endpoints.create_start(branch_name, "main", self.tenant)
+        self._pg = self.env.endpoints.create_start("main", "main", self.tenant)
 
     @property
+    @override
     def pg(self) -> PgProtocol:
         return self._pg
 
     @property
+    @override
     def zenbenchmark(self) -> NeonBenchmarker:
         return self._zenbenchmark
 
     @property
+    @override
     def pg_bin(self) -> PgBin:
         return self._pg_bin
 
-    def flush(self):
+    @override
+    def flush(self, compact: bool = True, gc: bool = True):
         wait_for_last_flush_lsn(self.env, self._pg, self.tenant, self.timeline)
-        self.pageserver_http_client.timeline_checkpoint(self.tenant, self.timeline)
-        self.pageserver_http_client.timeline_gc(self.tenant, self.timeline, 0)
+        self.pageserver_http_client.timeline_checkpoint(self.tenant, self.timeline, compact=compact)
+        if gc:
+            self.pageserver_http_client.timeline_gc(self.tenant, self.timeline, 0)
 
+    @override
     def compact(self):
-        self.pageserver_http_client.timeline_compact(self.tenant, self.timeline)
+        self.pageserver_http_client.timeline_compact(
+            self.tenant, self.timeline, wait_until_uploaded=True
+        )
 
+    @override
     def report_peak_memory_use(self):
         self.zenbenchmark.record(
             "peak_mem",
@@ -145,6 +163,7 @@ class NeonCompare(PgCompare):
             report=MetricReport.LOWER_IS_BETTER,
         )
 
+    @override
     def report_size(self):
         timeline_size = self.zenbenchmark.get_timeline_size(
             self.env.repo_dir, self.tenant, self.timeline
@@ -178,9 +197,11 @@ class NeonCompare(PgCompare):
             "num_files_uploaded", total_files, "", report=MetricReport.LOWER_IS_BETTER
         )
 
+    @override
     def record_pageserver_writes(self, out_name: str) -> _GeneratorContextManager[None]:
         return self.zenbenchmark.record_pageserver_writes(self.env.pageserver, out_name)
 
+    @override
     def record_duration(self, out_name: str) -> _GeneratorContextManager[None]:
         return self.zenbenchmark.record_duration(out_name)
 
@@ -204,29 +225,39 @@ class VanillaCompare(PgCompare):
         self.cur = self.conn.cursor()
 
     @property
+    @override
     def pg(self) -> VanillaPostgres:
         return self._pg
 
     @property
+    @override
     def zenbenchmark(self) -> NeonBenchmarker:
         return self._zenbenchmark
 
     @property
+    @override
     def pg_bin(self) -> PgBin:
         return self._pg.pg_bin
 
-    def flush(self):
+    @override
+    def flush(self, compact: bool = False, gc: bool = False):
         self.cur.execute("checkpoint")
 
+    @override
+    def compact(self):
+        pass
+
+    @override
     def report_peak_memory_use(self):
         pass  # TODO find something
 
+    @override
     def report_size(self):
-        data_size = self.pg.get_subdir_size("base")
+        data_size = self.pg.get_subdir_size(Path("base"))
         self.zenbenchmark.record(
             "data_size", data_size / (1024 * 1024), "MB", report=MetricReport.LOWER_IS_BETTER
         )
-        wal_size = self.pg.get_subdir_size("pg_wal")
+        wal_size = self.pg.get_subdir_size(Path("pg_wal"))
         self.zenbenchmark.record(
             "wal_size", wal_size / (1024 * 1024), "MB", report=MetricReport.LOWER_IS_BETTER
         )
@@ -235,6 +266,7 @@ class VanillaCompare(PgCompare):
     def record_pageserver_writes(self, out_name: str) -> Iterator[None]:
         yield  # Do nothing
 
+    @override
     def record_duration(self, out_name: str) -> _GeneratorContextManager[None]:
         return self.zenbenchmark.record_duration(out_name)
 
@@ -251,25 +283,35 @@ class RemoteCompare(PgCompare):
         self.cur = self.conn.cursor()
 
     @property
+    @override
     def pg(self) -> PgProtocol:
         return self._pg
 
     @property
+    @override
     def zenbenchmark(self) -> NeonBenchmarker:
         return self._zenbenchmark
 
     @property
+    @override
     def pg_bin(self) -> PgBin:
         return self._pg.pg_bin
 
-    def flush(self):
+    @override
+    def flush(self, compact: bool = False, gc: bool = False):
         # TODO: flush the remote pageserver
         pass
 
+    @override
+    def compact(self):
+        pass
+
+    @override
     def report_peak_memory_use(self):
         # TODO: get memory usage from remote pageserver
         pass
 
+    @override
     def report_size(self):
         # TODO: get storage size from remote pageserver
         pass
@@ -278,19 +320,18 @@ class RemoteCompare(PgCompare):
     def record_pageserver_writes(self, out_name: str) -> Iterator[None]:
         yield  # Do nothing
 
+    @override
     def record_duration(self, out_name: str) -> _GeneratorContextManager[None]:
         return self.zenbenchmark.record_duration(out_name)
 
 
 @pytest.fixture(scope="function")
 def neon_compare(
-    request: FixtureRequest,
     zenbenchmark: NeonBenchmarker,
     pg_bin: PgBin,
     neon_simple_env: NeonEnv,
 ) -> NeonCompare:
-    branch_name = request.node.name
-    return NeonCompare(zenbenchmark, neon_simple_env, pg_bin, branch_name)
+    return NeonCompare(zenbenchmark, neon_simple_env, pg_bin)
 
 
 @pytest.fixture(scope="function")
@@ -328,3 +369,30 @@ def neon_with_baseline(request: FixtureRequest) -> PgCompare:
     fixture = request.getfixturevalue(request.param)
     assert isinstance(fixture, PgCompare), f"test error: fixture {fixture} is not PgCompare"
     return fixture
+
+
+@pytest.fixture(scope="function", autouse=True)
+def sync_between_tests():
+    # The fixture calls `sync(2)` after each test if `SYNC_BETWEEN_TESTS` env var is `true`
+    #
+    # In CI, `SYNC_BETWEEN_TESTS` is set to `true` only for benchmarks (`test_runner/performance`)
+    # that are run on self-hosted runners because some of these tests are pretty write-heavy
+    # and create issues to start the processes within 10s
+    key = "SYNC_BETWEEN_TESTS"
+    enabled = os.environ.get(key) == "true"
+
+    if enabled:
+        start = time.time()
+        # we only run benches on unices, the method might not exist on windows
+        os.sync()
+        elapsed = time.time() - start
+        log.info(f"called sync before test {elapsed=}")
+
+    yield
+
+    if enabled:
+        start = time.time()
+        # we only run benches on unices, the method might not exist on windows
+        os.sync()
+        elapsed = time.time() - start
+        log.info(f"called sync after test {elapsed=}")

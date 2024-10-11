@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from contextlib import closing
 
 import pytest
@@ -17,7 +19,7 @@ def test_compaction(neon_compare: NeonCompare):
     env = neon_compare.env
     pageserver_http = env.pageserver.http_client()
 
-    tenant_id, timeline_id = env.neon_cli.create_tenant(
+    tenant_id, timeline_id = env.create_tenant(
         conf={
             # Disable background GC and compaction, we'll run compaction manually.
             "gc_period": "0s",
@@ -68,7 +70,7 @@ def test_compaction_l0_memory(neon_compare: NeonCompare):
     env = neon_compare.env
     pageserver_http = env.pageserver.http_client()
 
-    tenant_id, timeline_id = env.neon_cli.create_tenant(
+    tenant_id, timeline_id = env.create_tenant(
         conf={
             # Initially disable compaction so that we will build up a stack of L0s
             "compaction_period": "0s",

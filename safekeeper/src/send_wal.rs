@@ -758,9 +758,8 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> ReplyReader<IO> {
                 // pq_sendint32(&reply_message, xmin);
                 // pq_sendint32(&reply_message, xmin_epoch);
                 // So it is two big endian 32-bit words in low endian order!
-                hs_feedback.xmin = (hs_feedback.xmin >> 32) | (hs_feedback.xmin << 32);
-                hs_feedback.catalog_xmin =
-                    (hs_feedback.catalog_xmin >> 32) | (hs_feedback.catalog_xmin << 32);
+                hs_feedback.xmin = hs_feedback.xmin.rotate_left(32);
+                hs_feedback.catalog_xmin = hs_feedback.catalog_xmin.rotate_left(32);
                 self.ws_guard
                     .walsenders
                     .record_hs_feedback(self.ws_guard.id, &hs_feedback);

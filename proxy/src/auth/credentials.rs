@@ -16,7 +16,7 @@ use thiserror::Error;
 use tracing::{info, warn};
 
 #[derive(Debug, Error, PartialEq, Eq, Clone)]
-pub enum ComputeUserInfoParseError {
+pub(crate) enum ComputeUserInfoParseError {
     #[error("Parameter '{0}' is missing in startup packet.")]
     MissingKey(&'static str),
 
@@ -51,20 +51,20 @@ impl ReportableError for ComputeUserInfoParseError {
 /// Various client credentials which we use for authentication.
 /// Note that we don't store any kind of client key or password here.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ComputeUserInfoMaybeEndpoint {
-    pub user: RoleName,
-    pub endpoint_id: Option<EndpointId>,
-    pub options: NeonOptions,
+pub(crate) struct ComputeUserInfoMaybeEndpoint {
+    pub(crate) user: RoleName,
+    pub(crate) endpoint_id: Option<EndpointId>,
+    pub(crate) options: NeonOptions,
 }
 
 impl ComputeUserInfoMaybeEndpoint {
     #[inline]
-    pub fn endpoint(&self) -> Option<&str> {
+    pub(crate) fn endpoint(&self) -> Option<&str> {
         self.endpoint_id.as_deref()
     }
 }
 
-pub fn endpoint_sni(
+pub(crate) fn endpoint_sni(
     sni: &str,
     common_names: &HashSet<String>,
 ) -> Result<Option<EndpointId>, ComputeUserInfoParseError> {
@@ -83,16 +83,18 @@ pub fn endpoint_sni(
 }
 
 impl ComputeUserInfoMaybeEndpoint {
-    pub fn parse(
-        ctx: &mut RequestMonitoring,
+    pub(crate) fn parse(
+        ctx: &RequestMonitoring,
         params: &StartupMessageParams,
         sni: Option<&str>,
         common_names: Option<&HashSet<String>>,
     ) -> Result<Self, ComputeUserInfoParseError> {
-        use ComputeUserInfoParseError::*;
-
         // Some parameters are stored in the startup message.
-        let get_param = |key| params.get(key).ok_or(MissingKey(key));
+        let get_param = |key| {
+            params
+                .get(key)
+                .ok_or(ComputeUserInfoParseError::MissingKey(key))
+        };
         let user: RoleName = get_param("user")?.into();
 
         // Project name might be passed via PG's command-line options.
@@ -122,12 +124,18 @@ impl ComputeUserInfoMaybeEndpoint {
         let endpoint = match (endpoint_option, endpoint_from_domain) {
             // Invariant: if we have both project name variants, they should match.
             (Some(option), Some(domain)) if option != domain => {
-                Some(Err(InconsistentProjectNames { domain, option }))
+                Some(Err(ComputeUserInfoParseError::InconsistentProjectNames {
+                    domain,
+                    option,
+                }))
             }
             // Invariant: project name may not contain certain characters.
-            (a, b) => a.or(b).map(|name| match project_name_valid(name.as_ref()) {
-                false => Err(MalformedProjectName(name)),
-                true => Ok(name),
+            (a, b) => a.or(b).map(|name| {
+                if project_name_valid(name.as_ref()) {
+                    Ok(name)
+                } else {
+                    Err(ComputeUserInfoParseError::MalformedProjectName(name))
+                }
             }),
         }
         .transpose()?;
@@ -165,12 +173,12 @@ impl ComputeUserInfoMaybeEndpoint {
     }
 }
 
-pub fn check_peer_addr_is_in_list(peer_addr: &IpAddr, ip_list: &[IpPattern]) -> bool {
+pub(crate) fn check_peer_addr_is_in_list(peer_addr: &IpAddr, ip_list: &[IpPattern]) -> bool {
     ip_list.is_empty() || ip_list.iter().any(|pattern| check_ip(peer_addr, pattern))
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub enum IpPattern {
+pub(crate) enum IpPattern {
     Subnet(ipnet::IpNet),
     Range(IpAddr, IpAddr),
     Single(IpAddr),
@@ -186,7 +194,7 @@ impl<'de> serde::de::Deserialize<'de> for IpPattern {
         impl<'de> serde::de::Visitor<'de> for StrVisitor {
             type Value = IpPattern;
 
-            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 write!(formatter, "comma separated list with ip address, ip address range, or ip address subnet mask")
             }
 
@@ -249,8 +257,8 @@ mod tests {
     fn parse_bare_minimum() -> anyhow::Result<()> {
         // According to postgresql, only `user` should be required.
         let options = StartupMessageParams::new([("user", "john_doe")]);
-        let mut ctx = RequestMonitoring::test();
-        let user_info = ComputeUserInfoMaybeEndpoint::parse(&mut ctx, &options, None, None)?;
+        let ctx = RequestMonitoring::test();
+        let user_info = ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, None, None)?;
         assert_eq!(user_info.user, "john_doe");
         assert_eq!(user_info.endpoint_id, None);
 
@@ -264,8 +272,8 @@ mod tests {
             ("database", "world"), // should be ignored
             ("foo", "bar"),        // should be ignored
         ]);
-        let mut ctx = RequestMonitoring::test();
-        let user_info = ComputeUserInfoMaybeEndpoint::parse(&mut ctx, &options, None, None)?;
+        let ctx = RequestMonitoring::test();
+        let user_info = ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, None, None)?;
         assert_eq!(user_info.user, "john_doe");
         assert_eq!(user_info.endpoint_id, None);
 
@@ -279,9 +287,9 @@ mod tests {
         let sni = Some("foo.localhost");
         let common_names = Some(["localhost".into()].into());
 
-        let mut ctx = RequestMonitoring::test();
+        let ctx = RequestMonitoring::test();
         let user_info =
-            ComputeUserInfoMaybeEndpoint::parse(&mut ctx, &options, sni, common_names.as_ref())?;
+            ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, sni, common_names.as_ref())?;
         assert_eq!(user_info.user, "john_doe");
         assert_eq!(user_info.endpoint_id.as_deref(), Some("foo"));
         assert_eq!(user_info.options.get_cache_key("foo"), "foo");
@@ -296,8 +304,8 @@ mod tests {
             ("options", "-ckey=1 project=bar -c geqo=off"),
         ]);
 
-        let mut ctx = RequestMonitoring::test();
-        let user_info = ComputeUserInfoMaybeEndpoint::parse(&mut ctx, &options, None, None)?;
+        let ctx = RequestMonitoring::test();
+        let user_info = ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, None, None)?;
         assert_eq!(user_info.user, "john_doe");
         assert_eq!(user_info.endpoint_id.as_deref(), Some("bar"));
 
@@ -311,8 +319,8 @@ mod tests {
             ("options", "-ckey=1 endpoint=bar -c geqo=off"),
         ]);
 
-        let mut ctx = RequestMonitoring::test();
-        let user_info = ComputeUserInfoMaybeEndpoint::parse(&mut ctx, &options, None, None)?;
+        let ctx = RequestMonitoring::test();
+        let user_info = ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, None, None)?;
         assert_eq!(user_info.user, "john_doe");
         assert_eq!(user_info.endpoint_id.as_deref(), Some("bar"));
 
@@ -329,8 +337,8 @@ mod tests {
             ),
         ]);
 
-        let mut ctx = RequestMonitoring::test();
-        let user_info = ComputeUserInfoMaybeEndpoint::parse(&mut ctx, &options, None, None)?;
+        let ctx = RequestMonitoring::test();
+        let user_info = ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, None, None)?;
         assert_eq!(user_info.user, "john_doe");
         assert!(user_info.endpoint_id.is_none());
 
@@ -344,8 +352,8 @@ mod tests {
             ("options", "-ckey=1 endpoint=bar project=foo -c geqo=off"),
         ]);
 
-        let mut ctx = RequestMonitoring::test();
-        let user_info = ComputeUserInfoMaybeEndpoint::parse(&mut ctx, &options, None, None)?;
+        let ctx = RequestMonitoring::test();
+        let user_info = ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, None, None)?;
         assert_eq!(user_info.user, "john_doe");
         assert!(user_info.endpoint_id.is_none());
 
@@ -359,9 +367,9 @@ mod tests {
         let sni = Some("baz.localhost");
         let common_names = Some(["localhost".into()].into());
 
-        let mut ctx = RequestMonitoring::test();
+        let ctx = RequestMonitoring::test();
         let user_info =
-            ComputeUserInfoMaybeEndpoint::parse(&mut ctx, &options, sni, common_names.as_ref())?;
+            ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, sni, common_names.as_ref())?;
         assert_eq!(user_info.user, "john_doe");
         assert_eq!(user_info.endpoint_id.as_deref(), Some("baz"));
 
@@ -374,16 +382,16 @@ mod tests {
 
         let common_names = Some(["a.com".into(), "b.com".into()].into());
         let sni = Some("p1.a.com");
-        let mut ctx = RequestMonitoring::test();
+        let ctx = RequestMonitoring::test();
         let user_info =
-            ComputeUserInfoMaybeEndpoint::parse(&mut ctx, &options, sni, common_names.as_ref())?;
+            ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, sni, common_names.as_ref())?;
         assert_eq!(user_info.endpoint_id.as_deref(), Some("p1"));
 
         let common_names = Some(["a.com".into(), "b.com".into()].into());
         let sni = Some("p1.b.com");
-        let mut ctx = RequestMonitoring::test();
+        let ctx = RequestMonitoring::test();
         let user_info =
-            ComputeUserInfoMaybeEndpoint::parse(&mut ctx, &options, sni, common_names.as_ref())?;
+            ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, sni, common_names.as_ref())?;
         assert_eq!(user_info.endpoint_id.as_deref(), Some("p1"));
 
         Ok(())
@@ -397,10 +405,9 @@ mod tests {
         let sni = Some("second.localhost");
         let common_names = Some(["localhost".into()].into());
 
-        let mut ctx = RequestMonitoring::test();
-        let err =
-            ComputeUserInfoMaybeEndpoint::parse(&mut ctx, &options, sni, common_names.as_ref())
-                .expect_err("should fail");
+        let ctx = RequestMonitoring::test();
+        let err = ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, sni, common_names.as_ref())
+            .expect_err("should fail");
         match err {
             InconsistentProjectNames { domain, option } => {
                 assert_eq!(option, "first");
@@ -417,10 +424,9 @@ mod tests {
         let sni = Some("project.localhost");
         let common_names = Some(["example.com".into()].into());
 
-        let mut ctx = RequestMonitoring::test();
-        let err =
-            ComputeUserInfoMaybeEndpoint::parse(&mut ctx, &options, sni, common_names.as_ref())
-                .expect_err("should fail");
+        let ctx = RequestMonitoring::test();
+        let err = ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, sni, common_names.as_ref())
+            .expect_err("should fail");
         match err {
             UnknownCommonName { cn } => {
                 assert_eq!(cn, "localhost");
@@ -438,9 +444,9 @@ mod tests {
 
         let sni = Some("project.localhost");
         let common_names = Some(["localhost".into()].into());
-        let mut ctx = RequestMonitoring::test();
+        let ctx = RequestMonitoring::test();
         let user_info =
-            ComputeUserInfoMaybeEndpoint::parse(&mut ctx, &options, sni, common_names.as_ref())?;
+            ComputeUserInfoMaybeEndpoint::parse(&ctx, &options, sni, common_names.as_ref())?;
         assert_eq!(user_info.endpoint_id.as_deref(), Some("project"));
         assert_eq!(
             user_info.options.get_cache_key("project"),
@@ -531,5 +537,18 @@ mod tests {
             &IpPattern::Range(peer_addr, peer_addr_prev)
         ));
         Ok(())
+    }
+
+    #[test]
+    fn test_connection_blocker() {
+        fn check(v: serde_json::Value) -> bool {
+            let peer_addr = IpAddr::from([127, 0, 0, 1]);
+            let ip_list: Vec<IpPattern> = serde_json::from_value(v).unwrap();
+            check_peer_addr_is_in_list(&peer_addr, &ip_list)
+        }
+
+        assert!(check(json!([])));
+        assert!(check(json!(["127.0.0.1"])));
+        assert!(!check(json!(["255.255.255.255"])));
     }
 }

@@ -1,5 +1,5 @@
 use anyhow::{anyhow, bail};
-use hyper::{header::CONTENT_TYPE, Body, Request, Response, StatusCode};
+use hyper0::{header::CONTENT_TYPE, Body, Request, Response, StatusCode};
 use measured::{text::BufferedTextEncoder, MetricGroup};
 use metrics::NeonMetrics;
 use std::{
@@ -21,7 +21,7 @@ async fn status_handler(_: Request<Body>) -> Result<Response<Body>, ApiError> {
     json_response(StatusCode::OK, "")
 }
 
-fn make_router(metrics: AppMetrics) -> RouterBuilder<hyper::Body, ApiError> {
+fn make_router(metrics: AppMetrics) -> RouterBuilder<hyper0::Body, ApiError> {
     let state = Arc::new(Mutex::new(PrometheusHandler {
         encoder: BufferedTextEncoder::new(),
         metrics,
@@ -45,7 +45,7 @@ pub async fn task_main(
 
     let service = || RouterService::new(make_router(metrics).build()?);
 
-    hyper::Server::from_tcp(http_listener)?
+    hyper0::Server::from_tcp(http_listener)?
         .serve(service().map_err(|e| anyhow!(e))?)
         .await?;
 

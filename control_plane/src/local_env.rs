@@ -27,7 +27,7 @@ use crate::pageserver::PageServerNode;
 use crate::pageserver::PAGESERVER_REMOTE_STORAGE_DIR;
 use crate::safekeeper::SafekeeperNode;
 
-pub const DEFAULT_PG_VERSION: u32 = 15;
+pub const DEFAULT_PG_VERSION: u32 = 16;
 
 //
 // This data structures represents neon_local CLI config
@@ -156,8 +156,21 @@ pub struct NeonStorageControllerConf {
     #[serde(with = "humantime_serde")]
     pub max_warming_up: Duration,
 
+    pub start_as_candidate: bool,
+
+    /// Database url used when running multiple storage controller instances
+    pub database_url: Option<SocketAddr>,
+
     /// Threshold for auto-splitting a tenant into shards
     pub split_threshold: Option<u64>,
+
+    pub max_secondary_lag_bytes: Option<u64>,
+
+    #[serde(with = "humantime_serde")]
+    pub heartbeat_interval: Duration,
+
+    #[serde(with = "humantime_serde")]
+    pub long_reconcile_threshold: Option<Duration>,
 }
 
 impl NeonStorageControllerConf {
@@ -165,6 +178,9 @@ impl NeonStorageControllerConf {
     const DEFAULT_MAX_OFFLINE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
 
     const DEFAULT_MAX_WARMING_UP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+    // Very tight heartbeat interval to speed up tests
+    const DEFAULT_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 }
 
 impl Default for NeonStorageControllerConf {
@@ -172,7 +188,12 @@ impl Default for NeonStorageControllerConf {
         Self {
             max_offline: Self::DEFAULT_MAX_OFFLINE_INTERVAL,
             max_warming_up: Self::DEFAULT_MAX_WARMING_UP_INTERVAL,
+            start_as_candidate: false,
+            database_url: None,
             split_threshold: None,
+            max_secondary_lag_bytes: None,
+            heartbeat_interval: Self::DEFAULT_HEARTBEAT_INTERVAL,
+            long_reconcile_threshold: None,
         }
     }
 }
@@ -325,7 +346,7 @@ impl LocalEnv {
 
         #[allow(clippy::manual_range_patterns)]
         match pg_version {
-            14 | 15 | 16 => Ok(path.join(format!("v{pg_version}"))),
+            14 | 15 | 16 | 17 => Ok(path.join(format!("v{pg_version}"))),
             _ => bail!("Unsupported postgres version: {}", pg_version),
         }
     }
@@ -387,6 +408,36 @@ impl LocalEnv {
             let joined = have_ids.join(",");
             bail!("could not find pageserver {id}, have ids {joined}")
         }
+    }
+
+    /// Inspect the base data directory and extract the instance id and instance directory path
+    /// for all storage controller instances
+    pub async fn storage_controller_instances(&self) -> std::io::Result<Vec<(u8, PathBuf)>> {
+        let mut instances = Vec::default();
+
+        let dir = std::fs::read_dir(self.base_data_dir.clone())?;
+        for dentry in dir {
+            let dentry = dentry?;
+            let is_dir = dentry.metadata()?.is_dir();
+            let filename = dentry.file_name().into_string().unwrap();
+            let parsed_instance_id = match filename.strip_prefix("storage_controller_") {
+                Some(suffix) => suffix.parse::<u8>().ok(),
+                None => None,
+            };
+
+            let is_instance_dir = is_dir && parsed_instance_id.is_some();
+
+            if !is_instance_dir {
+                continue;
+            }
+
+            instances.push((
+                parsed_instance_id.expect("Checked previously"),
+                dentry.path(),
+            ));
+        }
+
+        Ok(instances)
     }
 
     pub fn register_branch_mapping(
@@ -514,7 +565,6 @@ impl LocalEnv {
                 #[derive(serde::Serialize, serde::Deserialize)]
                 // (allow unknown fields, unlike PageServerConf)
                 struct PageserverConfigTomlSubset {
-                    id: NodeId,
                     listen_pg_addr: String,
                     listen_http_addr: String,
                     pg_auth_type: AuthType,
@@ -526,18 +576,30 @@ impl LocalEnv {
                         .with_context(|| format!("read {:?}", config_toml_path))?,
                 )
                 .context("parse pageserver.toml")?;
+                let identity_toml_path = dentry.path().join("identity.toml");
+                #[derive(serde::Serialize, serde::Deserialize)]
+                struct IdentityTomlSubset {
+                    id: NodeId,
+                }
+                let identity_toml: IdentityTomlSubset = toml_edit::de::from_str(
+                    &std::fs::read_to_string(&identity_toml_path)
+                        .with_context(|| format!("read {:?}", identity_toml_path))?,
+                )
+                .context("parse identity.toml")?;
                 let PageserverConfigTomlSubset {
-                    id: config_toml_id,
                     listen_pg_addr,
                     listen_http_addr,
                     pg_auth_type,
                     http_auth_type,
                 } = config_toml;
+                let IdentityTomlSubset {
+                    id: identity_toml_id,
+                } = identity_toml;
                 let conf = PageServerConf {
                     id: {
                         anyhow::ensure!(
-                            config_toml_id == id,
-                            "id mismatch: config_toml.id={config_toml_id} id={id}",
+                            identity_toml_id == id,
+                            "id mismatch: identity.toml:id={identity_toml_id} pageserver_(.*) id={id}",
                         );
                         id
                     },

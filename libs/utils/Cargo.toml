@@ -14,19 +14,18 @@ testing = ["fail/failpoints"]
 arc-swap.workspace = true
 sentry.workspace = true
 async-compression.workspace = true
-async-trait.workspace = true
 anyhow.workspace = true
 bincode.workspace = true
 bytes.workspace = true
 camino.workspace = true
 chrono.workspace = true
+git-version.workspace = true
 hex = { workspace = true, features = ["serde"] }
 humantime.workspace = true
-hyper = { workspace = true, features = ["full"] }
+hyper0 = { workspace = true, features = ["full"] }
 fail.workspace = true
 futures = { workspace = true}
 jsonwebtoken.workspace = true
-leaky-bucket.workspace = true
 nix.workspace = true
 once_cell.workspace = true
 pin-project-lite.workspace = true
@@ -39,12 +38,11 @@ thiserror.workspace = true
 tokio.workspace = true
 tokio-tar.workspace = true
 tokio-util.workspace = true
-toml_edit.workspace = true
+toml_edit = { workspace = true, features = ["serde"] }
 tracing.workspace = true
 tracing-error.workspace = true
 tracing-subscriber = { workspace = true, features = ["json", "registry"] }
 rand.workspace = true
-serde_with.workspace = true
 strum.workspace = true
 strum_macros.workspace = true
 url.workspace = true
@@ -54,7 +52,6 @@ walkdir.workspace = true
 pq_proto.workspace = true
 postgres_connection.workspace = true
 metrics.workspace = true
-workspace_hack.workspace = true
 
 const_format.workspace = true
 
@@ -71,6 +68,7 @@ criterion.workspace = true
 hex-literal.workspace = true
 camino-tempfile.workspace = true
 serde_assert.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 
 [[bench]]
 name = "benchmarks"

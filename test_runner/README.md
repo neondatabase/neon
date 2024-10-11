@@ -18,8 +18,7 @@ Prerequisites:
 
 Regression tests are in the 'regress' directory. They can be run in
 parallel to minimize total runtime. Most regression test sets up their
-environment with its own pageservers and safekeepers (but see
-`TEST_SHARED_FIXTURES`).
+environment with its own pageservers and safekeepers.
 
 'pg_clients' contains tests for connecting with various client
 libraries. Each client test uses a Dockerfile that pulls an image that
@@ -65,17 +64,17 @@ By default performance tests are excluded. To run them explicitly pass performan
 Useful environment variables:
 
 `NEON_BIN`: The directory where neon binaries can be found.
+`COMPATIBILITY_NEON_BIN`: The directory where the previous version of Neon binaries can be found
 `POSTGRES_DISTRIB_DIR`: The directory where postgres distribution can be found.
 Since pageserver supports several postgres versions, `POSTGRES_DISTRIB_DIR` must contain
 a subdirectory for each version with naming convention `v{PG_VERSION}/`.
 Inside that dir, a `bin/postgres` binary should be present.
+`COMPATIBILITY_POSTGRES_DISTRIB_DIR`: The directory where the prevoius version of postgres distribution can be found.
 `DEFAULT_PG_VERSION`: The version of Postgres to use,
 This is used to construct full path to the postgres binaries.
-Format is 2-digit major version nubmer, i.e. `DEFAULT_PG_VERSION="14"`. Alternatively,
-you can use `--pg-version` argument.
+Format is 2-digit major version nubmer, i.e. `DEFAULT_PG_VERSION=16`
 `TEST_OUTPUT`: Set the directory where test state and test output files
 should go.
-`TEST_SHARED_FIXTURES`: Try to re-use a single pageserver for all the tests.
 `RUST_LOG`: logging configuration to pass into Neon CLI
 
 Useful parameters and commands:
@@ -260,11 +259,8 @@ compute Postgres nodes. The connections between them can be configured to use JW
 authentication tokens, and some other configuration options can be tweaked too.
 
 The easiest way to get access to a Neon Environment is by using the `neon_simple_env`
-fixture. The 'simple' env may be shared across multiple tests, so don't shut down the nodes
-or make other destructive changes in that environment. Also don't assume that
-there are no tenants or branches or data in the cluster. For convenience, there is a
-branch called `empty`, though. The convention is to create a test-specific branch of
-that and load any test data there, instead of the 'main' branch.
+fixture. For convenience, there is a branch called `main` in environments created with
+'neon_simple_env', ready to be used in the test.
 
 For more complicated cases, you can build a custom Neon Environment, with the `neon_env`
 fixture:
@@ -298,6 +294,16 @@ def test_foobar2(neon_env_builder: NeonEnvBuilder):
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
     client.timeline_detail(tenant_id=tenant_id, timeline_id=timeline_id)
+```
+
+All the test which rely on NeonEnvBuilder, can check the various version combinations of the components.
+To do this yuo may want to add the parametrize decorator with the function fixtures.utils.allpairs_versions()
+E.g.
+
+```python
+@pytest.mark.parametrize(**fixtures.utils.allpairs_versions())
+def test_something(
+...
 ```
 
 For more information about pytest fixtures, see https://docs.pytest.org/en/stable/fixture.html

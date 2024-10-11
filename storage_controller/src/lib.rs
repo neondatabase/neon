@@ -1,15 +1,20 @@
 use serde::Serialize;
 use utils::seqwait::MonotonicCounter;
 
+extern crate hyper0 as hyper;
+
 mod auth;
 mod background_node_operations;
 mod compute_hook;
+mod drain_utils;
 mod heartbeater;
 pub mod http;
 mod id_lock_map;
+mod leadership;
 pub mod metrics;
 mod node;
 mod pageserver_client;
+mod peer_client;
 pub mod persistence;
 mod reconciler;
 mod scheduler;

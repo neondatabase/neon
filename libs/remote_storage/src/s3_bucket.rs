@@ -23,17 +23,18 @@ use aws_config::{
 use aws_sdk_s3::{
     config::{AsyncSleep, IdentityCache, Region, SharedAsyncSleep},
     error::SdkError,
-    operation::get_object::GetObjectError,
+    operation::{get_object::GetObjectError, head_object::HeadObjectError},
     types::{Delete, DeleteMarkerEntry, ObjectIdentifier, ObjectVersion, StorageClass},
     Client,
 };
 use aws_smithy_async::rt::sleep::TokioSleep;
+use http_types::StatusCode;
 
 use aws_smithy_types::{body::SdkBody, DateTime};
 use aws_smithy_types::{byte_stream::ByteStream, date_time::ConversionError};
 use bytes::Bytes;
 use futures::stream::Stream;
-use hyper::Body;
+use hyper0::Body;
 use scopeguard::ScopeGuard;
 use tokio_util::sync::CancellationToken;
 use utils::backoff;
@@ -44,8 +45,8 @@ use crate::{
     error::Cancelled,
     metrics::{start_counting_cancelled_wait, start_measuring_requests},
     support::PermitCarrying,
-    ConcurrencyLimiter, Download, DownloadError, Listing, ListingMode, ListingObject, RemotePath,
-    RemoteStorage, TimeTravelError, TimeoutOrCancel, MAX_KEYS_PER_DELETE,
+    ConcurrencyLimiter, Download, DownloadError, DownloadOpts, Listing, ListingMode, ListingObject,
+    RemotePath, RemoteStorage, TimeTravelError, TimeoutOrCancel, MAX_KEYS_PER_DELETE,
     REMOTE_STORAGE_PREFIX_SEPARATOR,
 };
 
@@ -67,6 +68,7 @@ pub struct S3Bucket {
 struct GetObjectRequest {
     bucket: String,
     key: String,
+    etag: Option<String>,
     range: Option<String>,
 }
 impl S3Bucket {
@@ -248,13 +250,18 @@ impl S3Bucket {
 
         let started_at = start_measuring_requests(kind);
 
-        let get_object = self
+        let mut builder = self
             .client
             .get_object()
             .bucket(request.bucket)
             .key(request.key)
-            .set_range(request.range)
-            .send();
+            .set_range(request.range);
+
+        if let Some(etag) = request.etag {
+            builder = builder.if_none_match(etag);
+        }
+
+        let get_object = builder.send();
 
         let get_object = tokio::select! {
             res = get_object => res,
@@ -276,6 +283,20 @@ impl S3Bucket {
                     started_at,
                 );
                 return Err(DownloadError::NotFound);
+            }
+            Err(SdkError::ServiceError(e))
+                // aws_smithy_runtime_api::http::response::StatusCode isn't
+                // re-exported by any aws crates, so just check the numeric
+                // status against http_types::StatusCode instead of pulling it.
+                if e.raw().status().as_u16() == StatusCode::NotModified =>
+            {
+                // Count an unmodified file as a success.
+                crate::metrics::BUCKET_METRICS.req_seconds.observe_elapsed(
+                    kind,
+                    AttemptOutcome::Ok,
+                    started_at,
+                );
+                return Err(DownloadError::Unmodified);
             }
             Err(e) => {
                 crate::metrics::BUCKET_METRICS.req_seconds.observe_elapsed(
@@ -565,9 +586,12 @@ impl RemoteStorage for S3Bucket {
                         }
                     };
 
+                    let size = object.size.unwrap_or(0) as u64;
+
                     result.keys.push(ListingObject{
                         key,
-                        last_modified
+                        last_modified,
+                        size,
                     });
                     if let Some(mut mk) = max_keys {
                         assert!(mk > 0);
@@ -599,6 +623,78 @@ impl RemoteStorage for S3Bucket {
                 };
             }
         }
+    }
+
+    async fn head_object(
+        &self,
+        key: &RemotePath,
+        cancel: &CancellationToken,
+    ) -> Result<ListingObject, DownloadError> {
+        let kind = RequestKind::Head;
+        let _permit = self.permit(kind, cancel).await?;
+
+        let started_at = start_measuring_requests(kind);
+
+        let head_future = self
+            .client
+            .head_object()
+            .bucket(self.bucket_name())
+            .key(self.relative_path_to_s3_object(key))
+            .send();
+
+        let head_future = tokio::time::timeout(self.timeout, head_future);
+
+        let res = tokio::select! {
+            res = head_future => res,
+            _ = cancel.cancelled() => return Err(TimeoutOrCancel::Cancel.into()),
+        };
+
+        let res = res.map_err(|_e| DownloadError::Timeout)?;
+
+        // do not incl. timeouts as errors in metrics but cancellations
+        let started_at = ScopeGuard::into_inner(started_at);
+        crate::metrics::BUCKET_METRICS
+            .req_seconds
+            .observe_elapsed(kind, &res, started_at);
+
+        let data = match res {
+            Ok(object_output) => object_output,
+            Err(SdkError::ServiceError(e)) if matches!(e.err(), HeadObjectError::NotFound(_)) => {
+                // Count this in the AttemptOutcome::Ok bucket, because 404 is not
+                // an error: we expect to sometimes fetch an object and find it missing,
+                // e.g. when probing for timeline indices.
+                crate::metrics::BUCKET_METRICS.req_seconds.observe_elapsed(
+                    kind,
+                    AttemptOutcome::Ok,
+                    started_at,
+                );
+                return Err(DownloadError::NotFound);
+            }
+            Err(e) => {
+                crate::metrics::BUCKET_METRICS.req_seconds.observe_elapsed(
+                    kind,
+                    AttemptOutcome::Err,
+                    started_at,
+                );
+
+                return Err(DownloadError::Other(
+                    anyhow::Error::new(e).context("s3 head object"),
+                ));
+            }
+        };
+
+        let (Some(last_modified), Some(size)) = (data.last_modified, data.content_length) else {
+            return Err(DownloadError::Other(anyhow!(
+                "head_object doesn't contain last_modified or content_length"
+            )))?;
+        };
+        Ok(ListingObject {
+            key: key.to_owned(),
+            last_modified: SystemTime::try_from(last_modified).map_err(|e| {
+                DownloadError::Other(anyhow!("can't convert time '{last_modified}': {e}"))
+            })?,
+            size: size as u64,
+        })
     }
 
     async fn upload(
@@ -698,6 +794,7 @@ impl RemoteStorage for S3Bucket {
     async fn download(
         &self,
         from: &RemotePath,
+        opts: &DownloadOpts,
         cancel: &CancellationToken,
     ) -> Result<Download, DownloadError> {
         // if prefix is not none then download file `prefix/from`
@@ -706,33 +803,8 @@ impl RemoteStorage for S3Bucket {
             GetObjectRequest {
                 bucket: self.bucket_name.clone(),
                 key: self.relative_path_to_s3_object(from),
-                range: None,
-            },
-            cancel,
-        )
-        .await
-    }
-
-    async fn download_byte_range(
-        &self,
-        from: &RemotePath,
-        start_inclusive: u64,
-        end_exclusive: Option<u64>,
-        cancel: &CancellationToken,
-    ) -> Result<Download, DownloadError> {
-        // S3 accepts ranges as https://www.w3.org/Protocols/rfc2616/rfc2616-sec14.html#sec14.35
-        // and needs both ends to be exclusive
-        let end_inclusive = end_exclusive.map(|end| end.saturating_sub(1));
-        let range = Some(match end_inclusive {
-            Some(end_inclusive) => format!("bytes={start_inclusive}-{end_inclusive}"),
-            None => format!("bytes={start_inclusive}-"),
-        });
-
-        self.download_object(
-            GetObjectRequest {
-                bucket: self.bucket_name.clone(),
-                key: self.relative_path_to_s3_object(from),
-                range,
+                etag: opts.etag.as_ref().map(|e| e.to_string()),
+                range: opts.byte_range_header(),
             },
             cancel,
         )

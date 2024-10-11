@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import threading
 import time
 
@@ -53,7 +55,7 @@ def test_branch_and_gc(neon_simple_env: NeonEnv, build_type: str):
     env = neon_simple_env
     pageserver_http_client = env.pageserver.http_client()
 
-    tenant, _ = env.neon_cli.create_tenant(
+    tenant, timeline_main = env.create_tenant(
         conf={
             # disable background GC
             "gc_period": "0s",
@@ -70,8 +72,7 @@ def test_branch_and_gc(neon_simple_env: NeonEnv, build_type: str):
         }
     )
 
-    timeline_main = env.neon_cli.create_timeline("test_main", tenant_id=tenant)
-    endpoint_main = env.endpoints.create_start("test_main", tenant_id=tenant)
+    endpoint_main = env.endpoints.create_start("main", tenant_id=tenant)
 
     main_cur = endpoint_main.connect().cursor()
 
@@ -91,8 +92,8 @@ def test_branch_and_gc(neon_simple_env: NeonEnv, build_type: str):
     pageserver_http_client.timeline_checkpoint(tenant, timeline_main)
     pageserver_http_client.timeline_gc(tenant, timeline_main, lsn2 - lsn1 + 1024)
 
-    env.neon_cli.create_branch(
-        "test_branch", "test_main", tenant_id=tenant, ancestor_start_lsn=lsn1
+    env.create_branch(
+        "test_branch", ancestor_branch_name="main", ancestor_start_lsn=lsn1, tenant_id=tenant
     )
     endpoint_branch = env.endpoints.create_start("test_branch", tenant_id=tenant)
 
@@ -128,7 +129,7 @@ def test_branch_creation_before_gc(neon_simple_env: NeonEnv):
     env.storage_controller.allowed_errors.extend(error_regexes)
 
     # Disable background GC but set the `pitr_interval` to be small, so GC can delete something
-    tenant, _ = env.neon_cli.create_tenant(
+    tenant, _ = env.create_tenant(
         conf={
             # disable background GC
             "gc_period": "0s",
@@ -142,10 +143,11 @@ def test_branch_creation_before_gc(neon_simple_env: NeonEnv):
             "image_creation_threshold": "1",
             # set PITR interval to be small, so we can do GC
             "pitr_interval": "0 s",
+            "lsn_lease_length": "0s",
         }
     )
 
-    b0 = env.neon_cli.create_branch("b0", tenant_id=tenant)
+    b0 = env.create_branch("b0", tenant_id=tenant)
     endpoint0 = env.endpoints.create_start("b0", tenant_id=tenant)
     res = endpoint0.safe_psql_many(
         queries=[
@@ -176,7 +178,7 @@ def test_branch_creation_before_gc(neon_simple_env: NeonEnv):
 
     # The starting LSN is invalid as the corresponding record is scheduled to be removed by in-queue GC.
     with pytest.raises(Exception, match="invalid branch start lsn: .*"):
-        env.neon_cli.create_branch("b1", "b0", tenant_id=tenant, ancestor_start_lsn=lsn)
+        env.create_branch("b1", ancestor_branch_name="b0", ancestor_start_lsn=lsn, tenant_id=tenant)
     # retry the same with the HTTP API, so that we can inspect the status code
     with pytest.raises(TimelineCreate406):
         new_timeline_id = TimelineId.generate()

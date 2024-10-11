@@ -13,20 +13,18 @@ testing = ["fail/failpoints"]
 [dependencies]
 async-stream.workspace = true
 anyhow.workspace = true
-async-trait.workspace = true
 byteorder.workspace = true
 bytes.workspace = true
 camino.workspace = true
 camino-tempfile.workspace = true
 chrono.workspace = true
 clap = { workspace = true, features = ["derive"] }
-const_format.workspace = true
 crc32c.workspace = true
 fail.workspace = true
-git-version.workspace = true
 hex.workspace = true
 humantime.workspace = true
-hyper.workspace = true
+http.workspace = true
+hyper0.workspace = true
 futures.workspace = true
 once_cell.workspace = true
 parking_lot.workspace = true
@@ -38,8 +36,6 @@ scopeguard.workspace = true
 reqwest = { workspace = true, features = ["json"] }
 serde.workspace = true
 serde_json.workspace = true
-serde_with.workspace = true
-signal-hook.workspace = true
 strum.workspace = true
 strum_macros.workspace = true
 thiserror.workspace = true
@@ -48,7 +44,6 @@ tokio-util = { workspace = true }
 tokio-io-timeout.workspace = true
 tokio-postgres.workspace = true
 tokio-tar.workspace = true
-toml_edit.workspace = true
 tracing.workspace = true
 url.workspace = true
 metrics.workspace = true

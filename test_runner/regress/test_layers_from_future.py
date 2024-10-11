@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import time
 
 from fixtures.common_types import Lsn
@@ -56,7 +58,7 @@ def test_issue_5878(neon_env_builder: NeonEnvBuilder):
         "compaction_target_size": f"{128 * (1024**3)}",  # make it so that we only have 1 partition => image coverage for delta layers => enables gc of delta layers
     }
 
-    tenant_id, timeline_id = env.neon_cli.create_tenant(conf=tenant_config)
+    tenant_id, timeline_id = env.create_tenant(conf=tenant_config)
 
     endpoint = env.endpoints.create_start("main", tenant_id=tenant_id)
 

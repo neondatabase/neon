@@ -3,8 +3,8 @@
 use super::{backend::ComputeCredentialKeys, AuthErrorImpl, PasswordHackPayload};
 use crate::{
     config::TlsServerEndPoint,
-    console::AuthSecret,
     context::RequestMonitoring,
+    control_plane::AuthSecret,
     intern::EndpointIdInt,
     sasl,
     scram::{self, threadpool::ThreadPool},
@@ -17,17 +17,20 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::info;
 
 /// Every authentication selector is supposed to implement this trait.
-pub trait AuthMethod {
+pub(crate) trait AuthMethod {
     /// Any authentication selector should provide initial backend message
     /// containing auth method name and parameters, e.g. md5 salt.
     fn first_message(&self, channel_binding: bool) -> BeMessage<'_>;
 }
 
 /// Initial state of [`AuthFlow`].
-pub struct Begin;
+pub(crate) struct Begin;
 
 /// Use [SCRAM](crate::scram)-based auth in [`AuthFlow`].
-pub struct Scram<'a>(pub &'a scram::ServerSecret, pub &'a mut RequestMonitoring);
+pub(crate) struct Scram<'a>(
+    pub(crate) &'a scram::ServerSecret,
+    pub(crate) &'a RequestMonitoring,
+);
 
 impl AuthMethod for Scram<'_> {
     #[inline(always)]
@@ -44,7 +47,7 @@ impl AuthMethod for Scram<'_> {
 
 /// Use an ad hoc auth flow (for clients which don't support SNI) proposed in
 /// <https://github.com/neondatabase/cloud/issues/1620#issuecomment-1165332290>.
-pub struct PasswordHack;
+pub(crate) struct PasswordHack;
 
 impl AuthMethod for PasswordHack {
     #[inline(always)]
@@ -55,10 +58,10 @@ impl AuthMethod for PasswordHack {
 
 /// Use clear-text password auth called `password` in docs
 /// <https://www.postgresql.org/docs/current/auth-password.html>
-pub struct CleartextPassword {
-    pub pool: Arc<ThreadPool>,
-    pub endpoint: EndpointIdInt,
-    pub secret: AuthSecret,
+pub(crate) struct CleartextPassword {
+    pub(crate) pool: Arc<ThreadPool>,
+    pub(crate) endpoint: EndpointIdInt,
+    pub(crate) secret: AuthSecret,
 }
 
 impl AuthMethod for CleartextPassword {
@@ -70,7 +73,7 @@ impl AuthMethod for CleartextPassword {
 
 /// This wrapper for [`PqStream`] performs client authentication.
 #[must_use]
-pub struct AuthFlow<'a, S, State> {
+pub(crate) struct AuthFlow<'a, S, State> {
     /// The underlying stream which implements libpq's protocol.
     stream: &'a mut PqStream<Stream<S>>,
     /// State might contain ancillary data (see [`Self::begin`]).
@@ -81,7 +84,7 @@ pub struct AuthFlow<'a, S, State> {
 /// Initial state of the stream wrapper.
 impl<'a, S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'a, S, Begin> {
     /// Create a new wrapper for client authentication.
-    pub fn new(stream: &'a mut PqStream<Stream<S>>) -> Self {
+    pub(crate) fn new(stream: &'a mut PqStream<Stream<S>>) -> Self {
         let tls_server_end_point = stream.get_ref().tls_server_end_point();
 
         Self {
@@ -92,7 +95,7 @@ impl<'a, S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'a, S, Begin> {
     }
 
     /// Move to the next step by sending auth method's name & params to client.
-    pub async fn begin<M: AuthMethod>(self, method: M) -> io::Result<AuthFlow<'a, S, M>> {
+    pub(crate) async fn begin<M: AuthMethod>(self, method: M) -> io::Result<AuthFlow<'a, S, M>> {
         self.stream
             .write_message(&method.first_message(self.tls_server_end_point.supported()))
             .await?;
@@ -107,7 +110,7 @@ impl<'a, S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'a, S, Begin> {
 
 impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, PasswordHack> {
     /// Perform user authentication. Raise an error in case authentication failed.
-    pub async fn get_password(self) -> super::Result<PasswordHackPayload> {
+    pub(crate) async fn get_password(self) -> super::Result<PasswordHackPayload> {
         let msg = self.stream.read_password_message().await?;
         let password = msg
             .strip_suffix(&[0])
@@ -126,7 +129,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, PasswordHack> {
 
 impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, CleartextPassword> {
     /// Perform user authentication. Raise an error in case authentication failed.
-    pub async fn authenticate(self) -> super::Result<sasl::Outcome<ComputeCredentialKeys>> {
+    pub(crate) async fn authenticate(self) -> super::Result<sasl::Outcome<ComputeCredentialKeys>> {
         let msg = self.stream.read_password_message().await?;
         let password = msg
             .strip_suffix(&[0])
@@ -151,11 +154,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, CleartextPassword> {
 /// Stream wrapper for handling [SCRAM](crate::scram) auth.
 impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, Scram<'_>> {
     /// Perform user authentication. Raise an error in case authentication failed.
-    pub async fn authenticate(self) -> super::Result<sasl::Outcome<scram::ScramKey>> {
+    pub(crate) async fn authenticate(self) -> super::Result<sasl::Outcome<scram::ScramKey>> {
         let Scram(secret, ctx) = self.state;
 
         // pause the timer while we communicate with the client
-        let _paused = ctx.latency_timer.pause(crate::metrics::Waiting::Client);
+        let _paused = ctx.latency_timer_pause(crate::metrics::Waiting::Client);
 
         // Initial client message contains the chosen auth method's name.
         let msg = self.stream.read_password_message().await?;
@@ -168,10 +171,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, Scram<'_>> {
         }
 
         match sasl.method {
-            SCRAM_SHA_256 => ctx.auth_method = Some(crate::context::AuthMethod::ScramSha256),
-            SCRAM_SHA_256_PLUS => {
-                ctx.auth_method = Some(crate::context::AuthMethod::ScramSha256Plus)
-            }
+            SCRAM_SHA_256 => ctx.set_auth_method(crate::context::AuthMethod::ScramSha256),
+            SCRAM_SHA_256_PLUS => ctx.set_auth_method(crate::context::AuthMethod::ScramSha256Plus),
             _ => {}
         }
         info!("client chooses {}", sasl.method);

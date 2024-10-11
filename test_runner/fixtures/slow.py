@@ -1,8 +1,14 @@
-from typing import Any, List
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
 
 import pytest
 from _pytest.config import Config
 from _pytest.config.argparsing import Parser
+
+if TYPE_CHECKING:
+    from typing import Any
+
 
 """
 This plugin allows tests to be marked as slow using pytest.mark.slow. By default slow
@@ -21,7 +27,7 @@ def pytest_configure(config: Config):
     config.addinivalue_line("markers", "slow: mark test as slow to run")
 
 
-def pytest_collection_modifyitems(config: Config, items: List[Any]):
+def pytest_collection_modifyitems(config: Config, items: list[Any]):
     if config.getoption("--runslow"):
         # --runslow given in cli: do not skip slow tests
         return

@@ -9,11 +9,13 @@ of the pageserver are:
 - Updates to remote_consistent_lsn may only be made visible after validating generation
 """
 
+from __future__ import annotations
+
 import enum
 import os
 import re
 import time
-from typing import Optional
+from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.common_types import TenantId, TimelineId
@@ -38,6 +40,10 @@ from fixtures.remote_storage import (
 from fixtures.utils import wait_until
 from fixtures.workload import Workload
 
+if TYPE_CHECKING:
+    from typing import Optional
+
+
 # A tenant configuration that is convenient for generating uploads and deletions
 # without a large amount of postgres traffic.
 TENANT_CONF = {
@@ -53,6 +59,7 @@ TENANT_CONF = {
     # create image layers eagerly, so that GC can remove some layers
     "image_creation_threshold": "1",
     "image_layer_creation_check_threshold": "0",
+    "lsn_lease_length": "0s",
 }
 
 
@@ -134,7 +141,7 @@ def test_generations_upgrade(neon_env_builder: NeonEnvBuilder):
     )
 
     env = neon_env_builder.init_configs()
-    env.broker.try_start()
+    env.broker.start()
     for sk in env.safekeepers:
         sk.start()
     env.storage_controller.start()
@@ -142,15 +149,14 @@ def test_generations_upgrade(neon_env_builder: NeonEnvBuilder):
     # We will start a pageserver with no control_plane_api set, so it won't be able to self-register
     env.storage_controller.node_register(env.pageserver)
 
-    replaced_config = env.pageserver.patch_config_toml_nonrecursive(
-        {
-            "control_plane_api": "",
-        }
-    )
+    def remove_control_plane_api_field(config):
+        return config.pop("control_plane_api")
+
+    control_plane_api = env.pageserver.edit_config_toml(remove_control_plane_api_field)
     env.pageserver.start()
     env.storage_controller.node_configure(env.pageserver.id, {"availability": "Active"})
 
-    env.neon_cli.create_tenant(
+    env.create_tenant(
         tenant_id=env.initial_tenant, conf=TENANT_CONF, timeline_id=env.initial_timeline
     )
 
@@ -179,7 +185,11 @@ def test_generations_upgrade(neon_env_builder: NeonEnvBuilder):
 
     env.pageserver.stop()
     # Starting without the override that disabled control_plane_api
-    env.pageserver.patch_config_toml_nonrecursive(replaced_config)
+    env.pageserver.patch_config_toml_nonrecursive(
+        {
+            "control_plane_api": control_plane_api,
+        }
+    )
     env.pageserver.start()
 
     generate_uploads_and_deletions(env, pageserver=env.pageserver, init=False)
@@ -214,12 +224,11 @@ def test_generations_upgrade(neon_env_builder: NeonEnvBuilder):
 
     # Having written a mixture of generation-aware and legacy index_part.json,
     # ensure the scrubber handles the situation as expected.
-    metadata_summary = env.storage_scrubber.scan_metadata()
+    healthy, metadata_summary = env.storage_scrubber.scan_metadata()
     assert metadata_summary["tenant_count"] == 1  # Scrubber should have seen our timeline
     assert metadata_summary["timeline_count"] == 1
     assert metadata_summary["timeline_shard_count"] == 1
-    assert not metadata_summary["with_errors"]
-    assert not metadata_summary["with_warnings"]
+    assert healthy
 
 
 def test_deferred_deletion(neon_env_builder: NeonEnvBuilder):
@@ -546,6 +555,14 @@ def test_multi_attach(
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
 
+    # Instruct the storage controller to not interfere with our low level configuration
+    # of the pageserver's attachment states.  Otherwise when it sees nodes go offline+return,
+    # it would send its own requests that would conflict with the test's.
+    env.storage_controller.tenant_policy_update(tenant_id, {"scheduling": "Stop"})
+    env.storage_controller.allowed_errors.extend(
+        [".*Scheduling is disabled by policy Stop.*", ".*Skipping reconcile for policy Stop.*"]
+    )
+
     # Initially, the tenant will be attached to the first pageserver (first is default in our test harness)
     wait_until(10, 0.2, lambda: assert_tenant_state(http_clients[0], tenant_id, "Active"))
     _detail = http_clients[0].timeline_detail(tenant_id, timeline_id)
@@ -632,9 +649,7 @@ def test_upgrade_generationless_local_file_paths(
 
     tenant_id = TenantId.generate()
     timeline_id = TimelineId.generate()
-    env.neon_cli.create_tenant(
-        tenant_id, timeline_id, conf=TENANT_CONF, placement_policy='{"Attached":1}'
-    )
+    env.create_tenant(tenant_id, timeline_id, conf=TENANT_CONF, placement_policy='{"Attached":1}')
 
     workload = Workload(env, tenant_id, timeline_id)
     workload.init()
@@ -655,14 +670,17 @@ def test_upgrade_generationless_local_file_paths(
         pageserver.stop()
         timeline_dir = pageserver.timeline_dir(tenant_id, timeline_id)
         files_renamed = 0
+        log.info(f"Renaming files in {timeline_dir}")
         for filename in os.listdir(timeline_dir):
-            path = os.path.join(timeline_dir, filename)
-            log.info(f"Found file {path}")
-            if path.endswith("-v1-00000001"):
-                new_path = path[:-12]
-                os.rename(path, new_path)
-                log.info(f"Renamed {path} -> {new_path}")
+            if filename.endswith("-v1-00000001"):
+                new_filename = filename[:-12]
+                os.rename(
+                    os.path.join(timeline_dir, filename), os.path.join(timeline_dir, new_filename)
+                )
+                log.info(f"Renamed {filename} -> {new_filename}")
                 files_renamed += 1
+            else:
+                log.info(f"Keeping {filename}")
 
         assert files_renamed > 0
 

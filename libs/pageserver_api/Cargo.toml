@@ -4,6 +4,10 @@ version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 
+[features]
+# See pageserver/Cargo.toml
+testing = ["dep:nix"]
+
 [dependencies]
 serde.workspace = true
 serde_with.workspace = true
@@ -21,10 +25,14 @@ hex.workspace = true
 humantime.workspace = true
 thiserror.workspace = true
 humantime-serde.workspace = true
-chrono.workspace = true
+chrono = { workspace = true, features = ["serde"] }
 itertools.workspace = true
-
-workspace_hack.workspace = true
+storage_broker.workspace = true
+camino = {workspace = true, features = ["serde1"]}
+remote_storage.workspace = true
+postgres_backend.workspace = true
+nix = {workspace = true, optional = true}
+reqwest.workspace = true
 
 [dev-dependencies]
 bincode.workspace = true

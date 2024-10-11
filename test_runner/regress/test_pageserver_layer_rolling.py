@@ -1,7 +1,9 @@
+from __future__ import annotations
+
 import asyncio
 import os
 import time
-from typing import Optional, Tuple
+from typing import TYPE_CHECKING
 
 import psutil
 import pytest
@@ -15,6 +17,10 @@ from fixtures.neon_fixtures import (
 from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pageserver.utils import wait_for_last_record_lsn, wait_for_upload
 from fixtures.utils import wait_until
+
+if TYPE_CHECKING:
+    from typing import Optional
+
 
 TIMELINE_COUNT = 10
 ENTRIES_PER_TIMELINE = 10_000
@@ -41,21 +47,21 @@ async def run_worker_for_tenant(
         return last_flush_lsn
 
 
-async def run_worker(env: NeonEnv, tenant_conf, entries: int) -> Tuple[TenantId, TimelineId, Lsn]:
-    tenant, timeline = env.neon_cli.create_tenant(conf=tenant_conf)
+async def run_worker(env: NeonEnv, tenant_conf, entries: int) -> tuple[TenantId, TimelineId, Lsn]:
+    tenant, timeline = env.create_tenant(conf=tenant_conf)
     last_flush_lsn = await run_worker_for_tenant(env, entries, tenant)
     return tenant, timeline, last_flush_lsn
 
 
 async def workload(
     env: NeonEnv, tenant_conf, timelines: int, entries: int
-) -> list[Tuple[TenantId, TimelineId, Lsn]]:
+) -> list[tuple[TenantId, TimelineId, Lsn]]:
     workers = [asyncio.create_task(run_worker(env, tenant_conf, entries)) for _ in range(timelines)]
     return await asyncio.gather(*workers)
 
 
 def wait_until_pageserver_is_caught_up(
-    env: NeonEnv, last_flush_lsns: list[Tuple[TenantId, TimelineId, Lsn]]
+    env: NeonEnv, last_flush_lsns: list[tuple[TenantId, TimelineId, Lsn]]
 ):
     for tenant, timeline, last_flush_lsn in last_flush_lsns:
         shards = tenant_get_shards(env, tenant)
@@ -67,7 +73,7 @@ def wait_until_pageserver_is_caught_up(
 
 
 def wait_until_pageserver_has_uploaded(
-    env: NeonEnv, last_flush_lsns: list[Tuple[TenantId, TimelineId, Lsn]]
+    env: NeonEnv, last_flush_lsns: list[tuple[TenantId, TimelineId, Lsn]]
 ):
     for tenant, timeline, last_flush_lsn in last_flush_lsns:
         shards = tenant_get_shards(env, tenant)
@@ -247,9 +253,10 @@ def test_total_size_limit(neon_env_builder: NeonEnvBuilder):
 
     compaction_period_s = 10
 
+    checkpoint_distance = 1024**3
     tenant_conf = {
         # Large space + time thresholds: effectively disable these limits
-        "checkpoint_distance": f"{1024 ** 4}",
+        "checkpoint_distance": f"{checkpoint_distance}",
         "checkpoint_timeout": "3600s",
         "compaction_period": f"{compaction_period_s}s",
     }
@@ -269,7 +276,11 @@ def test_total_size_limit(neon_env_builder: NeonEnvBuilder):
     for tenant, timeline, last_flush_lsn in last_flush_lsns:
         http_client = env.pageserver.http_client()
         initdb_lsn = Lsn(http_client.timeline_detail(tenant, timeline)["initdb_lsn"])
-        total_bytes_ingested += last_flush_lsn - initdb_lsn
+        this_timeline_ingested = last_flush_lsn - initdb_lsn
+        assert (
+            this_timeline_ingested < checkpoint_distance * 0.8
+        ), "this test is supposed to fill InMemoryLayer"
+        total_bytes_ingested += this_timeline_ingested
 
     log.info(f"Ingested {total_bytes_ingested} bytes since initdb (vs max dirty {max_dirty_data})")
     assert total_bytes_ingested > max_dirty_data

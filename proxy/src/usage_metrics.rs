@@ -27,13 +27,14 @@ use std::{
 };
 use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, instrument, trace};
+use tracing::{error, info, instrument, trace, warn};
 use utils::backoff;
 use uuid::{NoContext, Timestamp};
 
 const PROXY_IO_BYTES_PER_CLIENT: &str = "proxy_io_bytes_per_client";
 
-const DEFAULT_HTTP_REPORTING_TIMEOUT: Duration = Duration::from_secs(60);
+const HTTP_REPORTING_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const HTTP_REPORTING_RETRY_DURATION: Duration = Duration::from_secs(60);
 
 /// Key that uniquely identifies the object, this metric describes.
 /// Currently, endpoint_id is enough, but this may change later,
@@ -43,12 +44,12 @@ const DEFAULT_HTTP_REPORTING_TIMEOUT: Duration = Duration::from_secs(60);
 /// so while the project-id is unique across regions the whole pipeline will work correctly
 /// because we enrich the event with project_id in the control-plane endpoint.
 #[derive(Eq, Hash, PartialEq, Serialize, Deserialize, Debug, Clone)]
-pub struct Ids {
-    pub endpoint_id: EndpointIdInt,
-    pub branch_id: BranchIdInt,
+pub(crate) struct Ids {
+    pub(crate) endpoint_id: EndpointIdInt,
+    pub(crate) branch_id: BranchIdInt,
 }
 
-pub trait MetricCounterRecorder {
+pub(crate) trait MetricCounterRecorder {
     /// Record that some bytes were sent from the proxy to the client
     fn record_egress(&self, bytes: u64);
     /// Record that some connections were opened
@@ -92,7 +93,7 @@ impl MetricCounterReporter for MetricBackupCounter {
 }
 
 #[derive(Debug)]
-pub struct MetricCounter {
+pub(crate) struct MetricCounter {
     transmitted: AtomicU64,
     opened_connections: AtomicUsize,
     backup: Arc<MetricBackupCounter>,
@@ -173,14 +174,14 @@ impl<C: MetricCounterReporter> Clearable for C {
 type FastHasher = std::hash::BuildHasherDefault<rustc_hash::FxHasher>;
 
 #[derive(Default)]
-pub struct Metrics {
+pub(crate) struct Metrics {
     endpoints: DashMap<Ids, Arc<MetricCounter>, FastHasher>,
     backup_endpoints: DashMap<Ids, Arc<MetricBackupCounter>, FastHasher>,
 }
 
 impl Metrics {
     /// Register a new byte metrics counter for this endpoint
-    pub fn register(&self, ids: Ids) -> Arc<MetricCounter> {
+    pub(crate) fn register(&self, ids: Ids) -> Arc<MetricCounter> {
         let backup = if let Some(entry) = self.backup_endpoints.get(&ids) {
             entry.clone()
         } else {
@@ -215,7 +216,7 @@ impl Metrics {
     }
 }
 
-pub static USAGE_METRICS: Lazy<Metrics> = Lazy::new(Metrics::default);
+pub(crate) static USAGE_METRICS: Lazy<Metrics> = Lazy::new(Metrics::default);
 
 pub async fn task_main(config: &MetricCollectionConfig) -> anyhow::Result<Infallible> {
     info!("metrics collector config: {config:?}");
@@ -223,7 +224,10 @@ pub async fn task_main(config: &MetricCollectionConfig) -> anyhow::Result<Infall
         info!("metrics collector has shut down");
     }
 
-    let http_client = http::new_client_with_timeout(DEFAULT_HTTP_REPORTING_TIMEOUT);
+    let http_client = http::new_client_with_timeout(
+        HTTP_REPORTING_REQUEST_TIMEOUT,
+        HTTP_REPORTING_RETRY_DURATION,
+    );
     let hostname = hostname::get()?.as_os_str().to_string_lossy().into_owned();
 
     let mut prev = Utc::now();
@@ -342,7 +346,7 @@ async fn collect_metrics_iteration(
             error!("metrics endpoint refused the sent metrics: {:?}", res);
             for metric in chunk.events.iter().filter(|e| e.value > (1u64 << 40)) {
                 // Report if the metric value is suspiciously large
-                error!("potentially abnormal metric value: {:?}", metric);
+                warn!("potentially abnormal metric value: {:?}", metric);
             }
         }
     }
@@ -450,12 +454,9 @@ async fn upload_events_chunk(
     remote_path: &RemotePath,
     cancel: &CancellationToken,
 ) -> anyhow::Result<()> {
-    let storage = match storage {
-        Some(storage) => storage,
-        None => {
-            error!("no remote storage configured");
-            return Ok(());
-        }
+    let Some(storage) = storage else {
+        error!("no remote storage configured");
+        return Ok(());
     };
     let data = serde_json::to_vec(&chunk).context("serialize metrics")?;
     let mut encoder = GzipEncoder::new(Vec::new());
@@ -484,49 +485,51 @@ async fn upload_events_chunk(
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        net::TcpListener,
-        sync::{Arc, Mutex},
-    };
+    use super::*;
 
+    use crate::{http, BranchId, EndpointId};
     use anyhow::Error;
     use chrono::Utc;
     use consumption_metrics::{Event, EventChunk};
-    use hyper::{
-        service::{make_service_fn, service_fn},
-        Body, Response,
-    };
+    use http_body_util::BodyExt;
+    use hyper::{body::Incoming, server::conn::http1, service::service_fn, Request, Response};
+    use hyper_util::rt::TokioIo;
+    use std::sync::{Arc, Mutex};
+    use tokio::net::TcpListener;
     use url::Url;
-
-    use super::*;
-    use crate::{http, BranchId, EndpointId};
 
     #[tokio::test]
     async fn metrics() {
-        let listener = TcpListener::bind("0.0.0.0:0").unwrap();
+        type Report = EventChunk<'static, Event<Ids, String>>;
+        let reports: Arc<Mutex<Vec<Report>>> = Arc::default();
 
-        let reports = Arc::new(Mutex::new(vec![]));
-        let reports2 = reports.clone();
-
-        let server = hyper::server::Server::from_tcp(listener)
-            .unwrap()
-            .serve(make_service_fn(move |_| {
-                let reports = reports.clone();
-                async move {
-                    Ok::<_, Error>(service_fn(move |req| {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn({
+            let reports = reports.clone();
+            async move {
+                loop {
+                    if let Ok((stream, _addr)) = listener.accept().await {
                         let reports = reports.clone();
-                        async move {
-                            let bytes = hyper::body::to_bytes(req.into_body()).await?;
-                            let events: EventChunk<'static, Event<Ids, String>> =
-                                serde_json::from_slice(&bytes)?;
-                            reports.lock().unwrap().push(events);
-                            Ok::<_, Error>(Response::new(Body::from(vec![])))
-                        }
-                    }))
+                        http1::Builder::new()
+                            .serve_connection(
+                                TokioIo::new(stream),
+                                service_fn(move |req: Request<Incoming>| {
+                                    let reports = reports.clone();
+                                    async move {
+                                        let bytes = req.into_body().collect().await?.to_bytes();
+                                        let events = serde_json::from_slice(&bytes)?;
+                                        reports.lock().unwrap().push(events);
+                                        Ok::<_, Error>(Response::new(String::new()))
+                                    }
+                                }),
+                            )
+                            .await
+                            .unwrap();
+                    }
                 }
-            }));
-        let addr = server.local_addr();
-        tokio::spawn(server);
+            }
+        });
 
         let metrics = Metrics::default();
         let client = http::new_client();
@@ -535,7 +538,7 @@ mod tests {
 
         // no counters have been registered
         collect_metrics_iteration(&metrics.endpoints, &client, &endpoint, "foo", now, now).await;
-        let r = std::mem::take(&mut *reports2.lock().unwrap());
+        let r = std::mem::take(&mut *reports.lock().unwrap());
         assert!(r.is_empty());
 
         // register a new counter
@@ -547,7 +550,7 @@ mod tests {
 
         // the counter should be observed despite 0 egress
         collect_metrics_iteration(&metrics.endpoints, &client, &endpoint, "foo", now, now).await;
-        let r = std::mem::take(&mut *reports2.lock().unwrap());
+        let r = std::mem::take(&mut *reports.lock().unwrap());
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].events.len(), 1);
         assert_eq!(r[0].events[0].value, 0);
@@ -557,7 +560,7 @@ mod tests {
 
         // egress should be observered
         collect_metrics_iteration(&metrics.endpoints, &client, &endpoint, "foo", now, now).await;
-        let r = std::mem::take(&mut *reports2.lock().unwrap());
+        let r = std::mem::take(&mut *reports.lock().unwrap());
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].events.len(), 1);
         assert_eq!(r[0].events[0].value, 1);
@@ -567,7 +570,7 @@ mod tests {
 
         // we do not observe the counter
         collect_metrics_iteration(&metrics.endpoints, &client, &endpoint, "foo", now, now).await;
-        let r = std::mem::take(&mut *reports2.lock().unwrap());
+        let r = std::mem::take(&mut *reports.lock().unwrap());
         assert!(r.is_empty());
 
         // counter is unregistered

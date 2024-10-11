@@ -13,8 +13,6 @@ defaults:
 env:
   # A concurrency group that we use for e2e-tests runs, matches `concurrency.group` above with `github.repository` as a prefix
   E2E_CONCURRENCY_GROUP: ${{ github.repository }}-e2e-tests-${{ github.ref_name }}-${{ github.ref_name == 'main' && github.sha || 'anysha' }}
-  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_DEV }}
-  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY_DEV }}
 
 jobs:
   cancel-previous-e2e-tests:
@@ -36,8 +34,8 @@ jobs:
       build-tag: ${{ steps.build-tag.outputs.tag }}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      # Need `fetch-depth: 0` to count the number of commits in the branch
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -64,19 +62,35 @@ jobs:
     needs: [ tag ]
     runs-on: ubuntu-22.04
     env:
+      EVENT_ACTION: ${{ github.event.action }}
+      GH_TOKEN: ${{ secrets.CI_ACCESS_TOKEN }}
       TAG: ${{ needs.tag.outputs.build-tag }}
     steps:
-      - name: check if ecr image are present
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_DEV }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY_DEV }}
+      - name: Wait for `promote-images` job to finish
+        # It's important to have a timeout here, the script in the step can run infinitely
+        timeout-minutes: 60
         run: |
-          for REPO in neon compute-tools compute-node-v14 vm-compute-node-v14 compute-node-v15 vm-compute-node-v15 compute-node-v16 vm-compute-node-v16; do
-            OUTPUT=$(aws ecr describe-images --repository-name ${REPO} --region eu-central-1 --query "imageDetails[?imageTags[?contains(@, '${TAG}')]]" --output text)
-            if [ "$OUTPUT" == "" ]; then
-              echo "$REPO with image tag $TAG not found" >> $GITHUB_OUTPUT
-              exit 1
-            fi
+          if [ "${GITHUB_EVENT_NAME}" != "pull_request" ] || [ "${EVENT_ACTION}" != "ready_for_review" ]; then
+            exit 0
+          fi
+
+          # For PRs we use the run id as the tag
+          BUILD_AND_TEST_RUN_ID=${TAG}
+          while true; do
+            conclusion=$(gh run --repo ${GITHUB_REPOSITORY} view ${BUILD_AND_TEST_RUN_ID} --json jobs --jq '.jobs[] | select(.name == "promote-images") | .conclusion')
+            case "$conclusion" in
+              success)
+                break
+                ;;
+              failure | cancelled | skipped)
+                echo "The 'promote-images' job didn't succeed: '${conclusion}'. Exiting..."
+                exit 1
+                ;;
+              *)
+                echo "The 'promote-images' hasn't succeed yet. Waiting..."
+                sleep 60
+                ;;
+            esac
           done
 
       - name: Set e2e-platforms
@@ -88,12 +102,17 @@ jobs:
           # Default set of platforms to run e2e tests on
           platforms='["docker", "k8s"]'
 
-          # If the PR changes vendor/, pgxn/ or libs/vm_monitor/ directories, or Dockerfile.compute-node, add k8s-neonvm to the list of platforms.
+          # If a PR changes anything that affects computes, add k8s-neonvm to the list of platforms.
           # If the workflow run is not a pull request, add k8s-neonvm to the list.
           if [ "$GITHUB_EVENT_NAME" == "pull_request" ]; then
             for f in $(gh api "/repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" --paginate --jq '.[].filename'); do
               case "$f" in
-                vendor/*|pgxn/*|libs/vm_monitor/*|Dockerfile.compute-node)
+                # List of directories that contain code which affect compute images.
+                #
+                # This isn't exhaustive, just the paths that are most directly compute-related.
+                # For example, compute_ctl also depends on libs/utils, but we don't trigger
+                # an e2e run on that.
+                vendor/*|pgxn/*|compute_tools/*|libs/vm_monitor/*|compute/Dockerfile.compute-node)
                   platforms=$(echo "${platforms}" | jq --compact-output '. += ["k8s-neonvm"] | unique')
                   ;;
                 *)

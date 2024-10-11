@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from typing import Optional
 
 from fixtures.common_types import Lsn, TenantId, TimelineId
@@ -59,7 +61,7 @@ def check_client(env: NeonEnv, client: PageserverHttpClient):
 def test_pageserver_http_get_wal_receiver_not_found(neon_simple_env: NeonEnv):
     env = neon_simple_env
     with env.pageserver.http_client() as client:
-        tenant_id, timeline_id = env.neon_cli.create_tenant()
+        tenant_id, timeline_id = env.create_tenant()
 
         timeline_details = client.timeline_detail(
             tenant_id=tenant_id, timeline_id=timeline_id, include_non_incremental_logical_size=True
@@ -108,7 +110,7 @@ def expect_updated_msg_lsn(
 def test_pageserver_http_get_wal_receiver_success(neon_simple_env: NeonEnv):
     env = neon_simple_env
     with env.pageserver.http_client() as client:
-        tenant_id, timeline_id = env.neon_cli.create_tenant()
+        tenant_id, timeline_id = env.create_tenant()
         endpoint = env.endpoints.create_start(DEFAULT_BRANCH_NAME, tenant_id=tenant_id)
 
         # insert something to force sk -> ps message

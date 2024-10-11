@@ -8,8 +8,7 @@ use std::time::Duration;
 pub use pageserver_api::key::{Key, KEY_SIZE};
 
 /// A 'value' stored for a one Key.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(test, derive(PartialEq))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Value {
     /// An Image value contains a full copy of the value
     Image(Bytes),
