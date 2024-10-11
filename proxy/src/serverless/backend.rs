@@ -285,7 +285,7 @@ impl PoolingBackend {
             .config
             .user(&conn_info.user_info.user)
             .dbname(&conn_info.dbname)
-            .options(&format!("-c neon.auth.jwk={jwk}"));
+            .options(&format!("-c pg_session_jwt.jwk={jwk}"));
 
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
         let (client, connection) = config.connect(tokio_postgres::NoTls).await?;
