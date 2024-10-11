@@ -22,7 +22,7 @@ use futures::TryFutureExt;
 use std::{sync::Arc, time::Duration};
 use tokio::time::Instant;
 use tokio_postgres::config::SslMode;
-use tracing::{debug, error, info, info_span, warn, Instrument};
+use tracing::{debug, info, info_span, warn, Instrument};
 
 const X_REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
 
@@ -456,7 +456,7 @@ async fn parse_body<T: for<'a> serde::Deserialize<'a>>(
     });
     body.http_status_code = status;
 
-    error!("console responded with an error ({status}): {body:?}");
+    warn!("console responded with an error ({status}): {body:?}");
     Err(ApiError::ControlPlane(body))
 }
 

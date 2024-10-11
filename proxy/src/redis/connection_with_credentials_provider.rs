@@ -6,7 +6,7 @@ use redis::{
     ConnectionInfo, IntoConnectionInfo, RedisConnectionInfo, RedisResult,
 };
 use tokio::task::JoinHandle;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use super::elasticache::CredentialsProvider;
 
@@ -89,7 +89,7 @@ impl ConnectionWithCredentialsProvider {
                     return Ok(());
                 }
                 Err(e) => {
-                    error!("Error during PING: {e:?}");
+                    warn!("Error during PING: {e:?}");
                 }
             }
         } else {
@@ -121,7 +121,7 @@ impl ConnectionWithCredentialsProvider {
                 info!("Connection succesfully established");
             }
             Err(e) => {
-                error!("Connection is broken. Error during PING: {e:?}");
+                warn!("Connection is broken. Error during PING: {e:?}");
             }
         }
         self.con = Some(con);
