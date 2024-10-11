@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use tokio::fs::{self};
 use tokio_util::sync::CancellationToken;
 use utils::id::TenantId;
+use utils::sync::gate::Gate;
 
 use std::cmp::max;
 use std::ops::{Deref, DerefMut};
@@ -465,6 +466,10 @@ pub struct Timeline {
     timeline_dir: Utf8PathBuf,
     manager_ctl: ManagerCtl,
 
+    /// Hold this gate from code that depends on the Timeline's non-shut-down state.  While holding
+    /// this gate, you must respect [`Timeline::cancel`]
+    pub(crate) gate: Gate,
+
     /// Delete/cancel will trigger this, background tasks should drop out as soon as it fires
     pub(crate) cancel: CancellationToken,
 
@@ -503,6 +508,7 @@ impl Timeline {
             mutex: RwLock::new(shared_state),
             walsenders: WalSenders::new(walreceivers.clone()),
             walreceivers,
+            gate: Default::default(),
             cancel: CancellationToken::default(),
             timeline_dir: get_timeline_dir(conf, &ttid),
             manager_ctl: ManagerCtl::new(),
@@ -596,6 +602,10 @@ impl Timeline {
         only_local: bool,
     ) -> Result<bool> {
         self.cancel(shared_state);
+
+        // Wait for any concurrent tasks to stop using this timeline, to avoid e.g. attempts
+        // to read deleted files.
+        self.gate.close().await;
 
         // TODO: It's better to wait for s3 offloader termination before
         // removing data from s3. Though since s3 doesn't have transactions it
