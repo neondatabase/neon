@@ -34,6 +34,7 @@ pub(crate) struct PoolingBackend {
     pub(crate) http_conn_pool: Arc<super::http_conn_pool::GlobalConnPool>,
     pub(crate) local_pool: Arc<LocalConnPool<tokio_postgres::Client>>,
     pub(crate) pool: Arc<GlobalConnPool<tokio_postgres::Client>>,
+
     pub(crate) config: &'static ProxyConfig,
     pub(crate) auth_backend: &'static crate::auth::Backend<'static, ()>,
     pub(crate) endpoint_rate_limiter: Arc<EndpointRateLimiter>,
@@ -249,16 +250,41 @@ impl PoolingBackend {
             return Ok(client);
         }
 
+        let local_backend = match &self.auth_backend {
+            auth::Backend::ControlPlane(_, ()) => {
+                unreachable!("only local_proxy can connect to local postgres")
+            }
+            auth::Backend::Local(local) => local,
+        };
+
+        #[allow(unreachable_code, clippy::todo)]
+        if !self.local_pool.initialized(&conn_info) {
+            // only install and grant usage one at a time.
+            let _permit = local_backend.initialize.acquire().await.unwrap();
+
+            // check again for race
+            if !self.local_pool.initialized(&conn_info) {
+                local_backend
+                    .compute_ctl
+                    .install_extension(&conn_info.dbname, "pg_session_jwt")
+                    .await
+                    .map_err(|_| HttpConnError::LocalProxyConnectionError(todo!()))?;
+
+                local_backend
+                    .compute_ctl
+                    .grant_role(&conn_info.dbname, &conn_info.user_info.user, "auth")
+                    .await
+                    .map_err(|_| HttpConnError::LocalProxyConnectionError(todo!()))?;
+
+                self.local_pool.set_initialized(&conn_info);
+            }
+        }
+
         let conn_id = uuid::Uuid::new_v4();
         tracing::Span::current().record("conn_id", display(conn_id));
         info!(%conn_id, "local_pool: opening a new connection '{conn_info}'");
 
-        let mut node_info = match &self.auth_backend {
-            auth::Backend::ControlPlane(_, ()) => {
-                unreachable!("only local_proxy can connect to local postgres")
-            }
-            auth::Backend::Local(local) => local.node_info.clone(),
-        };
+        let mut node_info = local_backend.node_info.clone();
 
         let (key, jwk) = create_random_jwk();
 
