@@ -9,10 +9,10 @@ use tokio_postgres::Row;
 // as parameters.
 //
 pub(crate) fn json_to_pg_text(json: Vec<Value>) -> Vec<Option<String>> {
-    json.iter().map(json_value_to_pg_text).collect()
+    json.into_iter().map(json_value_to_pg_text).collect()
 }
 
-fn json_value_to_pg_text(value: &Value) -> Option<String> {
+fn json_value_to_pg_text(value: Value) -> Option<String> {
     match value {
         // special care for nulls
         Value::Null => None,
@@ -21,10 +21,10 @@ fn json_value_to_pg_text(value: &Value) -> Option<String> {
         v @ (Value::Bool(_) | Value::Number(_) | Value::Object(_)) => Some(v.to_string()),
 
         // avoid escaping here, as we pass this as a parameter
-        Value::String(s) => Some(s.to_string()),
+        Value::String(s) => Some(s),
 
         // special care for arrays
-        Value::Array(_) => json_array_to_pg_array(value),
+        Value::Array(arr) => Some(json_array_to_pg_array(arr)),
     }
 }
 
@@ -36,7 +36,18 @@ fn json_value_to_pg_text(value: &Value) -> Option<String> {
 //
 // Example of the same escaping in node-postgres: packages/pg/lib/utils.js
 //
-fn json_array_to_pg_array(value: &Value) -> Option<String> {
+fn json_array_to_pg_array(arr: Vec<Value>) -> String {
+    let vals = arr
+        .into_iter()
+        .map(json_array_to_pg_array_inner)
+        .map(|v| v.unwrap_or_else(|| "NULL".to_string()))
+        .collect::<Vec<_>>()
+        .join(",");
+
+    format!("{{{vals}}}")
+}
+
+fn json_array_to_pg_array_inner(value: Value) -> Option<String> {
     match value {
         // special care for nulls
         Value::Null => None,
@@ -44,19 +55,10 @@ fn json_array_to_pg_array(value: &Value) -> Option<String> {
         // convert to text with escaping
         // here string needs to be escaped, as it is part of the array
         v @ (Value::Bool(_) | Value::Number(_) | Value::String(_)) => Some(v.to_string()),
-        v @ Value::Object(_) => json_array_to_pg_array(&Value::String(v.to_string())),
+        v @ Value::Object(_) => json_array_to_pg_array_inner(Value::String(v.to_string())),
 
         // recurse into array
-        Value::Array(arr) => {
-            let vals = arr
-                .iter()
-                .map(json_array_to_pg_array)
-                .map(|v| v.unwrap_or_else(|| "NULL".to_string()))
-                .collect::<Vec<_>>()
-                .join(",");
-
-            Some(format!("{{{vals}}}"))
-        }
+        Value::Array(arr) => Some(json_array_to_pg_array(arr)),
     }
 }
 
