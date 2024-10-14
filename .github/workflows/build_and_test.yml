@@ -606,9 +606,8 @@ jobs:
         version:
           # Much data was already generated on old PG versions with bullseye's
           # libraries, the locales of which can cause data incompatibilities.
-          # However, new PG versions should check if they can be built on newer
-          # images, as that reduces the support burden of old and ancient
-          # distros.
+          # However, new PG versions should be build on newer images,
+          # as that reduces the support burden of old and ancient distros.
           - pg: v14
             debian: bullseye
           - pg: v15
@@ -724,11 +723,7 @@ jobs:
     strategy:
       matrix:
         version:
-          # Much data was already generated on old PG versions with bullseye's
-          # libraries, the locales of which can cause data incompatibilities.
-          # However, new PG versions should check if they can be built on newer
-          # images, as that reduces the support burden of old and ancient
-          # distros.
+          # see the comment for `compute-node-image-arch` job
           - pg: v14
             debian: bullseye
           - pg: v15
@@ -791,11 +786,7 @@ jobs:
       fail-fast: false
       matrix:
         version:
-          # Much data was already generated on old PG versions with bullseye's
-          # libraries, the locales of which can cause data incompatibilities.
-          # However, new PG versions should check if they can be built on newer
-          # images, as that reduces the support burden of old and ancient
-          # distros.
+          # see the comment for `compute-node-image-arch` job
           - pg: v14
             debian: bullseye
           - pg: v15
