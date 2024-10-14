@@ -4909,7 +4909,10 @@ mod tests {
         {
             let branchpoints = &tline.gc_info.read().unwrap().retain_lsns;
             assert_eq!(branchpoints.len(), 1);
-            assert_eq!(branchpoints[0], (Lsn(0x40), NEW_TIMELINE_ID, false));
+            assert_eq!(
+                branchpoints[0],
+                (Lsn(0x40), NEW_TIMELINE_ID, MaybeOffloaded::No)
+            );
         }
 
         // You can read the key from the child branch even though the parent is
@@ -8292,8 +8295,8 @@ mod tests {
             let mut guard = tline.gc_info.write().unwrap();
             *guard = GcInfo {
                 retain_lsns: vec![
-                    (Lsn(0x10), tline.timeline_id, false),
-                    (Lsn(0x20), tline.timeline_id, false),
+                    (Lsn(0x10), tline.timeline_id, MaybeOffloaded::No),
+                    (Lsn(0x20), tline.timeline_id, MaybeOffloaded::No),
                 ],
                 cutoffs: GcCutoffs {
                     time: Lsn(0x30),
@@ -8520,8 +8523,8 @@ mod tests {
             let mut guard = tline.gc_info.write().unwrap();
             *guard = GcInfo {
                 retain_lsns: vec![
-                    (Lsn(0x10), tline.timeline_id, false),
-                    (Lsn(0x20), tline.timeline_id, false),
+                    (Lsn(0x10), tline.timeline_id, MaybeOffloaded::No),
+                    (Lsn(0x20), tline.timeline_id, MaybeOffloaded::No),
                 ],
                 cutoffs: GcCutoffs {
                     time: Lsn(0x30),
@@ -8754,7 +8757,7 @@ mod tests {
             // Update GC info
             let mut guard = parent_tline.gc_info.write().unwrap();
             *guard = GcInfo {
-                retain_lsns: vec![(Lsn(0x18), branch_tline.timeline_id, false)],
+                retain_lsns: vec![(Lsn(0x18), branch_tline.timeline_id, MaybeOffloaded::No)],
                 cutoffs: GcCutoffs {
                     time: Lsn(0x10),
                     space: Lsn(0x10),
@@ -8768,7 +8771,7 @@ mod tests {
             // Update GC info
             let mut guard = branch_tline.gc_info.write().unwrap();
             *guard = GcInfo {
-                retain_lsns: vec![(Lsn(0x40), branch_tline.timeline_id, false)],
+                retain_lsns: vec![(Lsn(0x40), branch_tline.timeline_id, MaybeOffloaded::No)],
                 cutoffs: GcCutoffs {
                     time: Lsn(0x50),
                     space: Lsn(0x50),

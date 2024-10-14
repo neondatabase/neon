@@ -139,7 +139,10 @@ use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 
 use super::{
-    config::TenantConf, storage_layer::{inmemory_layer, LayerVisibilityHint}, upload_queue::NotInitialized, MaybeOffloaded,
+    config::TenantConf,
+    storage_layer::{inmemory_layer, LayerVisibilityHint},
+    upload_queue::NotInitialized,
+    MaybeOffloaded,
 };
 use super::{debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenantConf};
 use super::{remote_timeline_client::index::IndexPart, storage_layer::LayerFringe};
@@ -466,7 +469,12 @@ impl GcInfo {
         self.cutoffs.select_min()
     }
 
-    pub(super) fn insert_child(&mut self, child_id: TimelineId, child_lsn: Lsn, is_offloaded: MaybeOffloaded) {
+    pub(super) fn insert_child(
+        &mut self,
+        child_id: TimelineId,
+        child_lsn: Lsn,
+        is_offloaded: MaybeOffloaded,
+    ) {
         self.retain_lsns.push((child_lsn, child_id, is_offloaded));
         self.retain_lsns.sort_by_key(|i| i.0);
     }
