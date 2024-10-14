@@ -27,7 +27,7 @@ RUN case $DEBIAN_VERSION in \
         VERSION_INSTALLS="cmake"; \
       ;; \
       *) \
-        echo "Unknown Debain version ${DEBIAN_VERSION}}" && exit 1 \
+        echo "Unknown Debian version ${DEBIAN_VERSION}" && exit 1 \
       ;; \
     esac && \
     apt update &&  \
@@ -1321,7 +1321,7 @@ RUN apt update && \
         VERSION_INSTALLS="libicu72 libgdal32 libproj25"; \
       ;; \
       *) \
-        echo "Unknown Debain version ${DEBIAN_VERSION}}" && exit 1 \
+        echo "Unknown Debian version ${DEBIAN_VERSION}" && exit 1 \
       ;; \
     esac && \
     apt install --no-install-recommends -y \
