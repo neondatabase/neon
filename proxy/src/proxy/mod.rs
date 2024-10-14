@@ -61,7 +61,7 @@ pub async fn run_until_cancelled<F: std::future::Future>(
 
 pub async fn task_main(
     config: &'static ProxyConfig,
-    auth_backend: &'static auth::Backend<'static, (), ()>,
+    auth_backend: &'static auth::Backend<'static, ()>,
     listener: tokio::net::TcpListener,
     cancellation_token: CancellationToken,
     cancellation_handler: Arc<CancellationHandlerMain>,
@@ -248,7 +248,7 @@ impl ReportableError for ClientRequestError {
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
     config: &'static ProxyConfig,
-    auth_backend: &'static auth::Backend<'static, (), ()>,
+    auth_backend: &'static auth::Backend<'static, ()>,
     ctx: &RequestMonitoring,
     cancellation_handler: Arc<CancellationHandlerMain>,
     stream: S,
@@ -356,7 +356,7 @@ pub(crate) async fn handle_client<S: AsyncRead + AsyncWrite + Unpin>(
 
 /// Finish client connection initialization: confirm auth success, send params, etc.
 #[tracing::instrument(skip_all)]
-async fn prepare_client_connection<P>(
+pub(crate) async fn prepare_client_connection<P>(
     node: &compute::PostgresConnection,
     session: &cancellation::Session<P>,
     stream: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,

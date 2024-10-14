@@ -95,6 +95,7 @@ pub mod cache;
 pub mod cancellation;
 pub mod compute;
 pub mod config;
+pub mod console_redirect_proxy;
 pub mod context;
 pub mod control_plane;
 pub mod error;

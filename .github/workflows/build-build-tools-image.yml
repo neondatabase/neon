@@ -19,9 +19,16 @@ defaults:
   run:
     shell: bash -euo pipefail {0}
 
-concurrency:
-  group: build-build-tools-image-${{ inputs.image-tag }}
-  cancel-in-progress: false
+# The initial idea was to prevent the waste of resources by not re-building the `build-tools` image
+# for the same tag in parallel workflow runs, and queue them to be skipped once we have
+# the first image pushed to Docker registry, but GitHub's concurrency mechanism is not working as expected.
+# GitHub can't have more than 1 job in a queue and removes the previous one, it causes failures if the dependent jobs.
+#
+# Ref https://github.com/orgs/community/discussions/41518
+#
+# concurrency:
+#   group: build-build-tools-image-${{ inputs.image-tag }}
+#   cancel-in-progress: false
 
 # No permission for GITHUB_TOKEN by default; the **minimal required** set of permissions should be granted in each job.
 permissions: {}
