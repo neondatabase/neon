@@ -1910,7 +1910,7 @@ impl Tenant {
             .enter()
             .map_err(|_| CreateTimelineError::ShuttingDown)?;
 
-        let loaded_timeline = match params {
+        match params {
             CreateTimelineParams::Bootstrap(CreateTimelineParamsBootstrap {
                 new_timeline_id,
                 existing_initdb_timeline_id,
@@ -1920,9 +1920,10 @@ impl Tenant {
                     new_timeline_id,
                     pg_version,
                     existing_initdb_timeline_id,
+                    broker_client,
                     ctx,
                 )
-                .await?
+                .await
             }
             CreateTimelineParams::Branch(CreateTimelineParamsBranch {
                 new_timeline_id,
@@ -1975,24 +1976,10 @@ impl Tenant {
                         })?;
                 }
 
-                self.branch_timeline(&ancestor_timeline, new_timeline_id, ancestor_start_lsn, ctx)
-                    .await?
+                self.branch_timeline(&ancestor_timeline, new_timeline_id, ancestor_start_lsn, broker_client, ctx)
+                    .await
             }
-        };
-
-        // At this point we have dropped our guard on [`Self::timelines_creating`], and
-        // the timeline is visible in [`Self::timelines`], but it is _not_ durable yet.  We must
-        // not send a success to the caller until it is.  The same applies to handling retries,
-        // see the handling of [`TimelineExclusionError::AlreadyExists`] above.
-        loaded_timeline
-            .remote_client
-            .wait_completion()
-            .await
-            .context("wait for timeline initial uploads to complete")?;
-
-        loaded_timeline.activate(self.clone(), broker_client, None, ctx);
-
-        Ok(loaded_timeline)
+        }
     }
 
     pub(crate) async fn delete_timeline(
@@ -3500,25 +3487,25 @@ impl Tenant {
     }
 
     /// Branch an existing timeline.
-    ///
-    /// The caller is responsible for activating the returned timeline.
     async fn branch_timeline(
-        &self,
+        self: &Arc<Self>,
         src_timeline: &Arc<Timeline>,
         dst_id: TimelineId,
         start_lsn: Option<Lsn>,
+        broker_client: storage_broker::BrokerClientChannel,
         ctx: &RequestContext,
     ) -> Result<Arc<Timeline>, CreateTimelineError> {
-        self.branch_timeline_impl(src_timeline, dst_id, start_lsn, ctx)
+        self.branch_timeline_impl(src_timeline, dst_id, start_lsn, broker_client, ctx)
             .await
     }
 
     async fn branch_timeline_impl(
-        &self,
+        self: &Arc<Self>,
         src_timeline: &Arc<Timeline>,
         dst_id: TimelineId,
         start_lsn: Option<Lsn>,
-        _ctx: &RequestContext,
+        broker_client: storage_broker::BrokerClientChannel,
+        ctx: &RequestContext,
     ) -> Result<Arc<Timeline>, CreateTimelineError> {
         let src_id = src_timeline.timeline_id;
 
@@ -3635,6 +3622,18 @@ impl Tenant {
             .schedule_index_upload_for_full_metadata_update(&metadata)
             .context("branch initial metadata upload")?;
 
+        // At this point we have dropped our guard on [`Self::timelines_creating`], and
+        // the timeline is visible in [`Self::timelines`], but it is _not_ durable yet.  We must
+        // not send a success to the caller until it is.  The same applies to handling retries,
+        // that is done in [`Self::start_creating_timeline`].
+        new_timeline
+            .remote_client
+            .wait_completion()
+            .await
+            .context("wait for timeline initial uploads to complete")?;
+
+        new_timeline.activate(self.clone(), broker_client, None, ctx);
+
         Ok(new_timeline)
     }
 
@@ -3732,6 +3731,10 @@ impl Tenant {
                     .await
                     .context("wait for timeline uploads to complete")?;
 
+                // TODO: shouldn't we also wait for timeline to become active?
+                // Code before this(https://github.com/neondatabase/neon/pull/9366) refactoring
+                // didn't do it.
+
                 Ok(either::Either::Right(existing))
             }
         }
@@ -3788,13 +3791,12 @@ impl Tenant {
 
     /// - run initdb to init temporary instance and get bootstrap data
     /// - after initialization completes, tar up the temp dir and upload it to S3.
-    ///
-    /// The caller is responsible for activating the returned timeline.
     async fn bootstrap_timeline(
-        &self,
+        self: &Arc<Self>,
         timeline_id: TimelineId,
         pg_version: u32,
         load_existing_initdb: Option<TimelineId>,
+        broker_client: storage_broker::BrokerClientChannel,
         ctx: &RequestContext,
     ) -> Result<Arc<Timeline>, CreateTimelineError> {
         let timeline_create_guard = match self
@@ -3944,6 +3946,18 @@ impl Tenant {
 
         // All done!
         let timeline = raw_timeline.finish_creation()?;
+
+        // At this point we have dropped our guard on [`Self::timelines_creating`], and
+        // the timeline is visible in [`Self::timelines`], but it is _not_ durable yet.  We must
+        // not send a success to the caller until it is.  The same applies to handling retries,
+        // that is done in [`Self::start_creating_timeline`].
+        timeline
+            .remote_client
+            .wait_completion()
+            .await
+            .context("wait for timeline initial uploads to complete")?;
+
+        timeline.activate(self.clone(), broker_client, None, ctx);
 
         Ok(timeline)
     }
