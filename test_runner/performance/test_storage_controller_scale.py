@@ -33,6 +33,7 @@ def get_consistent_node_shard_counts(env: NeonEnv, total_shards) -> defaultdict[
         if tenant_placement[tid]["intent"]["attached"]
         == tenant_placement[tid]["observed"]["attached"]
     }
+
     assert len(matching) == total_shards
 
     attached_per_node: defaultdict[str, int] = defaultdict(int)
@@ -106,8 +107,8 @@ def test_storage_controller_many_tenants(
         ps.allowed_errors.append(".*request was dropped before completing.*")
 
     # Total tenants
-    small_tenant_count = 7900
-    large_tenant_count = 100
+    small_tenant_count = 7800
+    large_tenant_count = 200
     tenant_count = small_tenant_count + large_tenant_count
     large_tenant_shard_count = 8
     total_shards = small_tenant_count + large_tenant_count * large_tenant_shard_count
@@ -115,15 +116,39 @@ def test_storage_controller_many_tenants(
     # A small stripe size to encourage all shards to get some data
     stripe_size = 1
 
-    tenants = list(TenantId.generate() for _i in range(0, tenant_count))
+    # We use a fixed seed to make the test somewhat reproducible: we want a randomly
+    # chosen order in the sense that it's arbitrary, but not in the sense that it should change every run.
+    rng = random.Random(1234)
+
+    class Tenant:
+        def __init__(self):
+            # Tenants may optionally contain a timeline
+            self.timeline_id = None
+
+            # Tenants may be marked as 'large' to get multiple shard during creation phase
+            self.large = False
+
+    tenant_ids = list(TenantId.generate() for _i in range(0, tenant_count))
+    tenants = dict((tid, Tenant()) for tid in tenant_ids)
 
     # We will create timelines in only a subset of tenants, because creating timelines
     # does many megabytes of IO, and we want to densely simulate huge tenant counts on
     # a single test node.
     tenant_timelines_count = 100
-    tenant_timelines = {}
-    for i in range(0, tenant_timelines_count):
-        tenant_timelines[tenants[i]] = TimelineId.generate()
+
+    # These lists are maintained for use with rng.choice
+    tenants_with_timelines = list(rng.sample(tenants.keys(), tenant_timelines_count))
+    tenants_without_timelines = list(
+        tenant_id for tenant_id in tenants if tenant_id not in tenants_with_timelines
+    )
+
+    # For our sharded tenants, we will make half of them with timelines and half without
+    assert large_tenant_count >= tenant_timelines_count / 2
+    for tenant_id in tenants_with_timelines[0 : large_tenant_count // 2]:
+        tenants[tenant_id].large = True
+
+    for tenant_id in tenants_without_timelines[0 : large_tenant_count // 2]:
+        tenants[tenant_id].large = True
 
     virtual_ps_http = PageserverHttpClient(env.storage_controller_port, lambda: True)
 
@@ -135,10 +160,6 @@ def test_storage_controller_many_tenants(
         assert rss is not None
         log.info(f"Resident memory: {rss} ({ rss / total_shards} per shard)")
         assert rss < expect_memory_per_shard * total_shards
-
-    # We use a fixed seed to make the test somewhat reproducible: we want a randomly
-    # chosen order in the sense that it's arbitrary, but not in the sense that it should change every run.
-    rng = random.Random(1234)
 
     # Issue more concurrent operations than the storage controller's reconciler concurrency semaphore
     # permits, to ensure that we are exercising stressing that.
@@ -156,34 +177,15 @@ def test_storage_controller_many_tenants(
     run_ops = api_concurrency * 4
     assert run_ops < len(tenants)
 
-    # Plan operations: ensure each tenant with a timeline gets at least
-    # one of each operation type.  Then add other tenants to make up the
-    # numbers.
-    ops_plan = []
-    for tenant_id in tenant_timelines:
-        ops_plan.append((tenant_id, Operation.TIMELINE_OPS))
-        ops_plan.append((tenant_id, Operation.SHARD_MIGRATE))
-        ops_plan.append((tenant_id, Operation.TENANT_PASSTHROUGH))
-
-    for _i in range(0, run_ops - len(ops_plan)):
-        ops_plan.append(
-            (
-                rng.choice(tenants),
-                rng.choice([Operation.SHARD_MIGRATE, Operation.TENANT_PASSTHROUGH]),
-            )
-        )
-
     # Creation phase: make a lot of tenants, and create timelines in a subset of them
     # This executor has concurrency set modestly, to avoid overloading pageservers with timeline creations.
     with concurrent.futures.ThreadPoolExecutor(max_workers=create_concurrency) as executor:
         tenant_create_futs = []
         t1 = time.time()
 
-        large_tenants_created = 0
-        for tenant_id in tenants:
-            if large_tenants_created < large_tenant_count:
+        for tenant_id, tenant in tenants.items():
+            if tenant.large:
                 shard_count = large_tenant_shard_count
-                large_tenants_created += 1
             else:
                 shard_count = 1
 
@@ -211,12 +213,14 @@ def test_storage_controller_many_tenants(
         # Waiting for optimizer to stabilize, if it disagrees with scheduling (the correct behavior
         # would be for original scheduling decisions to always match optimizer's preference)
         # (workaround for https://github.com/neondatabase/neon/issues/8969)
-        env.storage_controller.reconcile_until_idle(timeout_secs=120)
+        env.storage_controller.reconcile_until_idle(max_interval=0.1, timeout_secs=120)
 
         # Create timelines in those tenants which are going to get one
         t1 = time.time()
         timeline_create_futs = []
-        for tenant_id, timeline_id in tenant_timelines.items():
+        for tenant_id in tenants_with_timelines:
+            timeline_id = TimelineId.generate()
+            tenants[tenant_id].timeline_id = timeline_id
             f = executor.submit(
                 env.storage_controller.pageserver_api().timeline_create,
                 PgVersion.NOT_SET,
@@ -228,7 +232,27 @@ def test_storage_controller_many_tenants(
         for f in timeline_create_futs:
             f.result()
         log.info(
-            f"Created {len(tenant_timelines)} timelines in {time.time() - t1}, {len(tenant_timelines) / (time.time() - t1)}/s"
+            f"Created {len(tenants_with_timelines)} timelines in {time.time() - t1}, {len(tenants_with_timelines) / (time.time() - t1)}/s"
+        )
+
+    # Plan operations: ensure each tenant with a timeline gets at least
+    # one of each operation type.  Then add other tenants to make up the
+    # numbers.
+    ops_plan = []
+    for tenant_id in tenants_with_timelines:
+        ops_plan.append((tenant_id, Operation.TIMELINE_OPS))
+        ops_plan.append((tenant_id, Operation.SHARD_MIGRATE))
+        ops_plan.append((tenant_id, Operation.TENANT_PASSTHROUGH))
+
+    # Fill up remaining run_ops with migrations of tenants without timelines
+    other_migrate_tenants = rng.sample(tenants_without_timelines, run_ops - len(ops_plan))
+
+    for tenant_id in other_migrate_tenants:
+        ops_plan.append(
+            (
+                tenant_id,
+                rng.choice([Operation.SHARD_MIGRATE, Operation.TENANT_PASSTHROUGH]),
+            )
         )
 
     # Exercise phase: pick pseudo-random operations to do on the tenants + timelines
@@ -253,14 +277,15 @@ def test_storage_controller_many_tenants(
         futs = []
         for tenant_id, op in ops_plan:
             if op == Operation.TIMELINE_OPS:
-                timeline_id = tenant_timelines[tenant_id]
+                op_timeline_id = tenants[tenant_id].timeline_id
+                assert op_timeline_id is not None
 
                 # Exercise operations that modify tenant scheduling state but require traversing
                 # the fan-out-to-all-shards functionality.
                 f = executor.submit(
                     exercise_timeline_ops,
                     tenant_id,
-                    timeline_id,
+                    op_timeline_id,
                 )
             elif op == Operation.SHARD_MIGRATE:
                 # A reconciler operation: migrate a shard.
@@ -398,7 +423,7 @@ def test_storage_controller_many_tenants(
         # Waiting for optimizer to stabilize, if it disagrees with scheduling (the correct behavior
         # would be for original scheduling decisions to always match optimizer's preference)
         # (workaround for https://github.com/neondatabase/neon/issues/8969)
-        env.storage_controller.reconcile_until_idle(timeout_secs=120)
+        env.storage_controller.reconcile_until_idle(max_interval=0.1, timeout_secs=120)
 
         shard_counts = get_consistent_node_shard_counts(env, total_shards)
         log.info(f"Shard counts after filling node {ps.id}: {shard_counts}")
