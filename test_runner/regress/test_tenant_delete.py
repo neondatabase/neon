@@ -443,6 +443,7 @@ def test_tenant_delete_stale_shards(neon_env_builder: NeonEnvBuilder, pg_bin: Pg
     assert_prefix_empty(
         neon_env_builder.pageserver_remote_storage,
         prefix="/".join(("tenants", str(tenant_id))),
+        delimiter="",  # match partial prefixes, i.e. all shards
     )
 
     dirs = list(env.pageserver.tenant_dir(None).glob(f"{tenant_id}*"))
