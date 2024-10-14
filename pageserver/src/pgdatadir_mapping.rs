@@ -196,10 +196,38 @@ impl Timeline {
         version: Version<'_>,
         ctx: &RequestContext,
     ) -> Result<Bytes, PageReconstructError> {
-        let pages = smallvec::smallvec![(tag, blknum)];
-        let res = self.get_rel_page_at_lsn_batched(pages, version, ctx).await;
-        assert_eq!(res.len(), 1);
-        res.into_iter().next().unwrap()
+        match version {
+            lsn_version @ Version::Lsn(_) => {
+                let pages = smallvec::smallvec![(tag, blknum)];
+                let res = self
+                    .get_rel_page_at_lsn_batched(pages, lsn_version, ctx)
+                    .await;
+                assert_eq!(res.len(), 1);
+                res.into_iter().next().unwrap()
+            }
+            Version::Modified(modification) => {
+                if tag.relnode == 0 {
+                    return Err(PageReconstructError::Other(
+                        RelationError::InvalidRelnode.into(),
+                    ));
+                }
+
+                let nblocks = self.get_rel_size(tag, version, ctx).await?;
+                if blknum >= nblocks {
+                    debug!(
+                        "read beyond EOF at {} blk {} at {}, size is {}: returning all-zeros page",
+                        tag,
+                        blknum,
+                        version.get_lsn(),
+                        nblocks
+                    );
+                    return Ok(ZERO_PAGE.clone());
+                }
+
+                let key = rel_block_to_key(tag, blknum);
+                modification.get(key, ctx).await
+            }
+        }
     }
 
     /// Like [`Self::get_rel_page_at_lsn`], but returns a batch of pages.
