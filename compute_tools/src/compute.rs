@@ -109,6 +109,18 @@ impl ComputeState {
             metrics: ComputeMetrics::default(),
         }
     }
+
+    pub fn set_status(&mut self, status: ComputeStatus, state_changed: &Condvar) {
+        let prev = self.status;
+        info!("Changing compute status from {} to {}", prev, status);
+        self.status = status;
+        state_changed.notify_all();
+    }
+
+    pub fn set_failed_status(&mut self, err: anyhow::Error, state_changed: &Condvar) {
+        self.error = Some(format!("{err:?}"));
+        self.set_status(ComputeStatus::Failed, state_changed);
+    }
 }
 
 impl Default for ComputeState {
@@ -303,15 +315,12 @@ impl ComputeNode {
 
     pub fn set_status(&self, status: ComputeStatus) {
         let mut state = self.state.lock().unwrap();
-        state.status = status;
-        self.state_changed.notify_all();
+        state.set_status(status, &self.state_changed);
     }
 
     pub fn set_failed_status(&self, err: anyhow::Error) {
         let mut state = self.state.lock().unwrap();
-        state.error = Some(format!("{err:?}"));
-        state.status = ComputeStatus::Failed;
-        self.state_changed.notify_all();
+        state.set_failed_status(err, &self.state_changed);
     }
 
     pub fn get_status(&self) -> ComputeStatus {
@@ -1474,6 +1483,28 @@ LIMIT 100",
         if !unchanged {
             info!("Pageserver config changed");
         }
+    }
+
+    // Gather info about installed extensions
+    pub fn get_installed_extensions(&self) -> Result<()> {
+        let connstr = self.connstr.clone();
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("failed to create runtime");
+        let result = rt
+            .block_on(crate::installed_extensions::get_installed_extensions(
+                connstr,
+            ))
+            .expect("failed to get installed extensions");
+
+        info!(
+            "{}",
+            serde_json::to_string(&result).expect("failed to serialize extensions list")
+        );
+
+        Ok(())
     }
 }
 

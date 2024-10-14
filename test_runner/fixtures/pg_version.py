@@ -1,8 +1,15 @@
+from __future__ import annotations
+
 import enum
 import os
-from typing import Optional
+from typing import TYPE_CHECKING
 
 import pytest
+from typing_extensions import override
+
+if TYPE_CHECKING:
+    from typing import Optional
+
 
 """
 This fixture is used to determine which version of Postgres to use for tests.
@@ -22,10 +29,12 @@ class PgVersion(str, enum.Enum):
     NOT_SET = "<-POSTRGRES VERSION IS NOT SET->"
 
     # Make it less confusing in logs
+    @override
     def __repr__(self) -> str:
         return f"'{self.value}'"
 
     # Make this explicit for Python 3.11 compatibility, which changes the behavior of enums
+    @override
     def __str__(self) -> str:
         return self.value
 
@@ -36,7 +45,8 @@ class PgVersion(str, enum.Enum):
         return f"v{self.value}"
 
     @classmethod
-    def _missing_(cls, value) -> Optional["PgVersion"]:
+    @override
+    def _missing_(cls, value: object) -> Optional[PgVersion]:
         known_values = {v.value for _, v in cls.__members__.items()}
 
         # Allow passing version as a string with "v" prefix (e.g. "v14")

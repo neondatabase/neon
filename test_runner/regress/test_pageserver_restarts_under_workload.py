@@ -1,6 +1,9 @@
 # This test spawns pgbench in a thread in the background and concurrently restarts pageserver,
 # checking how client is able to transparently restore connection to pageserver
 #
+
+from __future__ import annotations
+
 import threading
 import time
 

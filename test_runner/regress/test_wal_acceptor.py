@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import filecmp
 import logging
 import os
@@ -12,7 +14,7 @@ from contextlib import closing
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING
 
 import psycopg2
 import psycopg2.errors
@@ -55,6 +57,9 @@ from fixtures.utils import (
     start_in_background,
     wait_until,
 )
+
+if TYPE_CHECKING:
+    from typing import Any, Optional
 
 
 def wait_lsn_force_checkpoint(
@@ -124,8 +129,8 @@ class TimelineMetrics:
     timeline_id: TimelineId
     last_record_lsn: Lsn
     # One entry per each Safekeeper, order is the same
-    flush_lsns: List[Lsn] = field(default_factory=list)
-    commit_lsns: List[Lsn] = field(default_factory=list)
+    flush_lsns: list[Lsn] = field(default_factory=list)
+    commit_lsns: list[Lsn] = field(default_factory=list)
 
 
 # Run page server and multiple acceptors, and multiple compute nodes running
@@ -152,7 +157,7 @@ def test_many_timelines(neon_env_builder: NeonEnvBuilder):
 
     tenant_id = env.initial_tenant
 
-    def collect_metrics(message: str) -> List[TimelineMetrics]:
+    def collect_metrics(message: str) -> list[TimelineMetrics]:
         with env.pageserver.http_client() as pageserver_http:
             timeline_details = [
                 pageserver_http.timeline_detail(
@@ -765,7 +770,7 @@ class ProposerPostgres(PgProtocol):
 
         stdout_filename = basepath + ".stdout"
 
-        with open(stdout_filename, "r") as stdout_f:
+        with open(stdout_filename) as stdout_f:
             stdout = stdout_f.read()
             return Lsn(stdout.strip("\n "))
 
@@ -934,7 +939,7 @@ def test_timeline_status(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
     assert debug_dump_1["config"]["id"] == env.safekeepers[0].id
 
 
-class DummyConsumer(object):
+class DummyConsumer:
     def __call__(self, msg):
         pass
 
@@ -1162,7 +1167,7 @@ def is_flush_lsn_aligned(sk_http_clis, tenant_id, timeline_id):
 
 # Assert by xxd that WAL on given safekeepers is identical. No compute must be
 # running for this to be reliable.
-def cmp_sk_wal(sks: List[Safekeeper], tenant_id: TenantId, timeline_id: TimelineId):
+def cmp_sk_wal(sks: list[Safekeeper], tenant_id: TenantId, timeline_id: TimelineId):
     assert len(sks) >= 2, "cmp_sk_wal makes sense with >= 2 safekeepers passed"
     sk_http_clis = [sk.http_client() for sk in sks]
 
@@ -1448,12 +1453,12 @@ class SafekeeperEnv:
         self.pg_bin = pg_bin
         self.num_safekeepers = num_safekeepers
         self.bin_safekeeper = str(neon_binpath / "safekeeper")
-        self.safekeepers: Optional[List[subprocess.CompletedProcess[Any]]] = None
+        self.safekeepers: Optional[list[subprocess.CompletedProcess[Any]]] = None
         self.postgres: Optional[ProposerPostgres] = None
         self.tenant_id: Optional[TenantId] = None
         self.timeline_id: Optional[TimelineId] = None
 
-    def init(self) -> "SafekeeperEnv":
+    def init(self) -> SafekeeperEnv:
         assert self.postgres is None, "postgres is already initialized"
         assert self.safekeepers is None, "safekeepers are already initialized"
 
@@ -1534,7 +1539,7 @@ class SafekeeperEnv:
     def kill_safekeeper(self, sk_dir):
         """Read pid file and kill process"""
         pid_file = os.path.join(sk_dir, "safekeeper.pid")
-        with open(pid_file, "r") as f:
+        with open(pid_file) as f:
             pid = int(f.read())
             log.info(f"Killing safekeeper with pid {pid}")
             os.kill(pid, signal.SIGKILL)
@@ -1593,7 +1598,7 @@ def test_replace_safekeeper(neon_env_builder: NeonEnvBuilder):
                 sum_after = query_scalar(cur, "SELECT SUM(key) FROM t")
                 assert sum_after == sum_before + 5000050000
 
-    def show_statuses(safekeepers: List[Safekeeper], tenant_id: TenantId, timeline_id: TimelineId):
+    def show_statuses(safekeepers: list[Safekeeper], tenant_id: TenantId, timeline_id: TimelineId):
         for sk in safekeepers:
             http_cli = sk.http_client()
             try:
@@ -1802,7 +1807,7 @@ def test_pull_timeline(neon_env_builder: NeonEnvBuilder, live_sk_change: bool):
                 sum_after = query_scalar(cur, "SELECT SUM(key) FROM t")
                 assert sum_after == sum_before + 5000050000
 
-    def show_statuses(safekeepers: List[Safekeeper], tenant_id: TenantId, timeline_id: TimelineId):
+    def show_statuses(safekeepers: list[Safekeeper], tenant_id: TenantId, timeline_id: TimelineId):
         for sk in safekeepers:
             http_cli = sk.http_client(auth_token=env.auth_keys.generate_tenant_token(tenant_id))
             try:
@@ -2011,14 +2016,14 @@ def test_idle_reconnections(neon_env_builder: NeonEnvBuilder):
     tenant_id = env.initial_tenant
     timeline_id = env.create_branch("test_idle_reconnections")
 
-    def collect_stats() -> Dict[str, float]:
+    def collect_stats() -> dict[str, float]:
         # we need to collect safekeeper_pg_queries_received_total metric from all safekeepers
         sk_metrics = [
             parse_metrics(sk.http_client().get_metrics_str(), f"safekeeper_{sk.id}")
             for sk in env.safekeepers
         ]
 
-        total: Dict[str, float] = {}
+        total: dict[str, float] = {}
 
         for sk in sk_metrics:
             queries_received = sk.query_all("safekeeper_pg_queries_received_total")
@@ -2309,12 +2314,12 @@ def test_s3_eviction(
     ]
     if delete_offloaded_wal:
         neon_env_builder.safekeeper_extra_opts.append("--delete-offloaded-wal")
-
-    env = neon_env_builder.init_start(
-        initial_tenant_conf={
-            "checkpoint_timeout": "100ms",
-        }
-    )
+    # make lagging_wal_timeout small to force pageserver quickly forget about
+    # safekeeper after it stops sending updates (timeline is deactivated) to
+    # make test faster. Won't be needed with
+    # https://github.com/neondatabase/neon/issues/8148 fixed.
+    initial_tenant_conf = {"lagging_wal_timeout": "1s", "checkpoint_timeout": "100ms"}
+    env = neon_env_builder.init_start(initial_tenant_conf=initial_tenant_conf)
 
     n_timelines = 5
 
@@ -2402,8 +2407,36 @@ def test_s3_eviction(
         and sk.log_contains("successfully restored evicted timeline")
         for sk in env.safekeepers
     )
-
     assert event_metrics_seen
+
+    # test safekeeper_evicted_timelines metric
+    log.info("testing safekeeper_evicted_timelines metric")
+    # checkpoint pageserver to force remote_consistent_lsn update
+    for i in range(n_timelines):
+        ps_client.timeline_checkpoint(env.initial_tenant, timelines[i], wait_until_uploaded=True)
+    for ep in endpoints:
+        log.info(ep.is_running())
+    sk = env.safekeepers[0]
+
+    # all timelines must be evicted eventually
+    def all_evicted():
+        n_evicted = sk.http_client().get_metric_value("safekeeper_evicted_timelines")
+        assert n_evicted  # make mypy happy
+        assert int(n_evicted) == n_timelines
+
+    wait_until(60, 0.5, all_evicted)
+    # restart should preserve the metric value
+    sk.stop().start()
+    wait_until(60, 0.5, all_evicted)
+    # and endpoint start should reduce is
+    endpoints[0].start()
+
+    def one_unevicted():
+        n_evicted = sk.http_client().get_metric_value("safekeeper_evicted_timelines")
+        assert n_evicted  # make mypy happy
+        assert int(n_evicted) < n_timelines
+
+    wait_until(60, 0.5, one_unevicted)
 
 
 # Test resetting uploaded partial segment state.

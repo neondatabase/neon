@@ -94,7 +94,6 @@ neon_perf_counters_to_metrics(neon_per_backend_counters *counters)
 	metric_t   *metrics = palloc((NUM_METRICS + 1) * sizeof(metric_t));
 	uint64		bucket_accum;
 	int			i = 0;
-	Datum		getpage_wait_str;
 
 	metrics[i].name = "getpage_wait_seconds_count";
 	metrics[i].is_bucket = false;
@@ -224,7 +223,6 @@ neon_get_perf_counters(PG_FUNCTION_ARGS)
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 	Datum		values[3];
 	bool		nulls[3];
-	Datum		getpage_wait_str;
 	neon_per_backend_counters totals = {0};
 	metric_t   *metrics;
 

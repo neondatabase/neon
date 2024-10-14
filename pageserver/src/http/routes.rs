@@ -17,6 +17,7 @@ use hyper::header;
 use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
 use metrics::launch_timestamp::LaunchTimestamp;
+use pageserver_api::models::virtual_file::IoMode;
 use pageserver_api::models::AuxFilePolicy;
 use pageserver_api::models::DownloadRemoteLayersTaskSpawnRequest;
 use pageserver_api::models::IngestAuxFilesRequest;
@@ -703,6 +704,8 @@ async fn timeline_archival_config_handler(
     let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
 
+    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
+
     let request_data: TimelineArchivalConfigRequest = json_request(&mut request).await?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
     let state = get_state(&request);
@@ -713,7 +716,7 @@ async fn timeline_archival_config_handler(
             .get_attached_tenant_shard(tenant_shard_id)?;
 
         tenant
-            .apply_timeline_archival_config(timeline_id, request_data.state)
+            .apply_timeline_archival_config(timeline_id, request_data.state, ctx)
             .await?;
         Ok::<_, ApiError>(())
     }
@@ -2379,17 +2382,13 @@ async fn put_io_engine_handler(
     json_response(StatusCode::OK, ())
 }
 
-async fn put_io_alignment_handler(
+async fn put_io_mode_handler(
     mut r: Request<Body>,
     _cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
     check_permission(&r, None)?;
-    let align: usize = json_request(&mut r).await?;
-    crate::virtual_file::set_io_buffer_alignment(align).map_err(|align| {
-        ApiError::PreconditionFailed(
-            format!("Requested io alignment ({align}) is not a power of two").into(),
-        )
-    })?;
+    let mode: IoMode = json_request(&mut r).await?;
+    crate::virtual_file::set_io_mode(mode);
     json_response(StatusCode::OK, ())
 }
 
@@ -3080,9 +3079,7 @@ pub fn make_router(
             |r| api_handler(r, timeline_collect_keyspace),
         )
         .put("/v1/io_engine", |r| api_handler(r, put_io_engine_handler))
-        .put("/v1/io_alignment", |r| {
-            api_handler(r, put_io_alignment_handler)
-        })
+        .put("/v1/io_mode", |r| api_handler(r, put_io_mode_handler))
         .put(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/force_aux_policy_switch",
             |r| api_handler(r, force_aux_policy_switch_handler),

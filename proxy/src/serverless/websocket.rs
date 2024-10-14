@@ -12,7 +12,7 @@ use anyhow::Context as _;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use framed_websockets::{Frame, OpCode, WebSocketServer};
 use futures::{Sink, Stream};
-use hyper1::upgrade::OnUpgrade;
+use hyper::upgrade::OnUpgrade;
 use hyper_util::rt::TokioIo;
 use pin_project_lite::pin_project;
 

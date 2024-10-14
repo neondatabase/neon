@@ -1,5 +1,8 @@
 //! Structs representing the JSON formats used in the compute_ctl's HTTP API.
 
+use std::collections::HashSet;
+use std::fmt::Display;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize, Serializer};
 
@@ -56,6 +59,21 @@ pub enum ComputeStatus {
     TerminationPending,
     // Terminated Postgres
     Terminated,
+}
+
+impl Display for ComputeStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ComputeStatus::Empty => f.write_str("empty"),
+            ComputeStatus::ConfigurationPending => f.write_str("configuration-pending"),
+            ComputeStatus::Init => f.write_str("init"),
+            ComputeStatus::Running => f.write_str("running"),
+            ComputeStatus::Configuration => f.write_str("configuration"),
+            ComputeStatus::Failed => f.write_str("failed"),
+            ComputeStatus::TerminationPending => f.write_str("termination-pending"),
+            ComputeStatus::Terminated => f.write_str("terminated"),
+        }
+    }
 }
 
 fn rfc3339_serialize<S>(x: &Option<DateTime<Utc>>, s: S) -> Result<S::Ok, S::Error>
@@ -137,4 +155,16 @@ pub enum ControlPlaneComputeStatus {
     // Compute is attached to some timeline / endpoint and
     // should be able to start with provided spec.
     Attached,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct InstalledExtension {
+    pub extname: String,
+    pub versions: HashSet<String>,
+    pub n_databases: u32, // Number of databases using this extension
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct InstalledExtensions {
+    pub extensions: Vec<InstalledExtension>,
 }

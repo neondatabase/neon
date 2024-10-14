@@ -8,6 +8,7 @@ mod conn_pool;
 mod http_conn_pool;
 mod http_util;
 mod json;
+mod local_conn_pool;
 mod sql_over_http;
 mod websocket;
 
@@ -22,7 +23,7 @@ use futures::TryFutureExt;
 use http::{Method, Response, StatusCode};
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Empty};
-use hyper1::body::Incoming;
+use hyper::body::Incoming;
 use hyper_util::rt::TokioExecutor;
 use hyper_util::server::conn::auto::Builder;
 use rand::rngs::StdRng;
@@ -63,6 +64,7 @@ pub async fn task_main(
         info!("websocket server has shut down");
     }
 
+    let local_pool = local_conn_pool::LocalConnPool::new(&config.http_config);
     let conn_pool = conn_pool::GlobalConnPool::new(&config.http_config);
     {
         let conn_pool = Arc::clone(&conn_pool);
@@ -105,6 +107,7 @@ pub async fn task_main(
 
     let backend = Arc::new(PoolingBackend {
         http_conn_pool: Arc::clone(&http_conn_pool),
+        local_pool,
         pool: Arc::clone(&conn_pool),
         config,
         endpoint_rate_limiter: Arc::clone(&endpoint_rate_limiter),
@@ -302,7 +305,7 @@ async fn connection_handler(
     let server = Builder::new(TokioExecutor::new());
     let conn = server.serve_connection_with_upgrades(
         hyper_util::rt::TokioIo::new(conn),
-        hyper1::service::service_fn(move |req: hyper1::Request<Incoming>| {
+        hyper::service::service_fn(move |req: hyper::Request<Incoming>| {
             // First HTTP request shares the same session ID
             let session_id = session_id.take().unwrap_or_else(uuid::Uuid::new_v4);
 
@@ -355,7 +358,7 @@ async fn connection_handler(
 
 #[allow(clippy::too_many_arguments)]
 async fn request_handler(
-    mut request: hyper1::Request<Incoming>,
+    mut request: hyper::Request<Incoming>,
     config: &'static ProxyConfig,
     backend: Arc<PoolingBackend>,
     ws_connections: TaskTracker,
@@ -365,7 +368,7 @@ async fn request_handler(
     // used to cancel in-flight HTTP requests. not used to cancel websockets
     http_cancellation_token: CancellationToken,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
-) -> Result<Response<BoxBody<Bytes, hyper1::Error>>, ApiError> {
+) -> Result<Response<BoxBody<Bytes, hyper::Error>>, ApiError> {
     let host = request
         .headers()
         .get("host")

@@ -89,7 +89,6 @@ typedef struct
 
 #if PG_VERSION_NUM >= 150000
 static shmem_request_hook_type prev_shmem_request_hook = NULL;
-static void walproposer_shmem_request(void);
 #endif
 static shmem_startup_hook_type prev_shmem_startup_hook;
 static PagestoreShmemState *pagestore_shared;
@@ -441,8 +440,8 @@ pageserver_connect(shardno_t shard_no, int elevel)
 			return false;
 		}
 		shard->state = PS_Connecting_Startup;
-		/* fallthrough */
 	}
+	/* FALLTHROUGH */
 	case PS_Connecting_Startup:
 	{
 		char	   *pagestream_query;
@@ -453,8 +452,6 @@ pageserver_connect(shardno_t shard_no, int elevel)
 
 		do
 		{
-			WaitEvent	event;
-
 			switch (poll_result)
 			{
 			default: /* unknown/unused states are handled as a failed connection */
@@ -585,8 +582,8 @@ pageserver_connect(shardno_t shard_no, int elevel)
 		}
 
 		shard->state = PS_Connecting_PageStream;
-		/* fallthrough */
 	}
+	/* FALLTHROUGH */
 	case PS_Connecting_PageStream:
 	{
 		neon_shard_log(shard_no, DEBUG5, "Connection state: Connecting_PageStream");
@@ -631,8 +628,8 @@ pageserver_connect(shardno_t shard_no, int elevel)
 		}
 
 		shard->state = PS_Connected;
-		/* fallthrough */
 	}
+	/* FALLTHROUGH */
 	case PS_Connected:
 		/*
 		 * We successfully connected. Future connections to this PageServer

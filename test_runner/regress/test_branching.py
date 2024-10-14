@@ -1,8 +1,9 @@
+from __future__ import annotations
+
 import random
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import List
 
 import pytest
 from fixtures.common_types import Lsn, TimelineId
@@ -56,10 +57,10 @@ def test_branching_with_pgbench(
         pg_bin.run_capture(["pgbench", "-T15", connstr])
 
     env.create_branch("b0", tenant_id=tenant)
-    endpoints: List[Endpoint] = []
+    endpoints: list[Endpoint] = []
     endpoints.append(env.endpoints.create_start("b0", tenant_id=tenant))
 
-    threads: List[threading.Thread] = []
+    threads: list[threading.Thread] = []
     threads.append(
         threading.Thread(target=run_pgbench, args=(endpoints[0].connstr(),), daemon=True)
     )

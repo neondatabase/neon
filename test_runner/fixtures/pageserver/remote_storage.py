@@ -1,10 +1,12 @@
+from __future__ import annotations
+
 import concurrent.futures
 import os
 import queue
 import shutil
 import threading
 from pathlib import Path
-from typing import Any, List, Tuple
+from typing import TYPE_CHECKING
 
 from fixtures.common_types import TenantId, TimelineId
 from fixtures.neon_fixtures import NeonEnv
@@ -13,6 +15,9 @@ from fixtures.pageserver.common_types import (
     parse_layer_file_name,
 )
 from fixtures.remote_storage import LocalFsStorage
+
+if TYPE_CHECKING:
+    from typing import Any
 
 
 def duplicate_one_tenant(env: NeonEnv, template_tenant: TenantId, new_tenant: TenantId):
@@ -50,13 +55,13 @@ def duplicate_one_tenant(env: NeonEnv, template_tenant: TenantId, new_tenant: Te
     return None
 
 
-def duplicate_tenant(env: NeonEnv, template_tenant: TenantId, ncopies: int) -> List[TenantId]:
+def duplicate_tenant(env: NeonEnv, template_tenant: TenantId, ncopies: int) -> list[TenantId]:
     assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
 
     def work(tenant_id):
         duplicate_one_tenant(env, template_tenant, tenant_id)
 
-    new_tenants: List[TenantId] = [TenantId.generate() for _ in range(0, ncopies)]
+    new_tenants: list[TenantId] = [TenantId.generate() for _ in range(0, ncopies)]
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
         executor.map(work, new_tenants)
     return new_tenants
@@ -79,7 +84,7 @@ def local_layer_name_from_remote_name(remote_name: str) -> str:
 
 
 def copy_all_remote_layer_files_to_local_tenant_dir(
-    env: NeonEnv, tenant_timelines: List[Tuple[TenantId, TimelineId]]
+    env: NeonEnv, tenant_timelines: list[tuple[TenantId, TimelineId]]
 ):
     remote_storage = env.pageserver_remote_storage
     assert isinstance(remote_storage, LocalFsStorage)

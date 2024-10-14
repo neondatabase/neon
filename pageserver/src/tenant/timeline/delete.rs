@@ -15,7 +15,7 @@ use crate::{
     tenant::{
         metadata::TimelineMetadata,
         remote_timeline_client::{PersistIndexPartWithDeletedFlagError, RemoteTimelineClient},
-        CreateTimelineCause, DeleteTimelineError, Tenant,
+        CreateTimelineCause, DeleteTimelineError, Tenant, TimelineOrOffloaded,
     },
 };
 
@@ -24,12 +24,14 @@ use super::{Timeline, TimelineResources};
 /// Mark timeline as deleted in S3 so we won't pick it up next time
 /// during attach or pageserver restart.
 /// See comment in persist_index_part_with_deleted_flag.
-async fn set_deleted_in_remote_index(timeline: &Timeline) -> Result<(), DeleteTimelineError> {
-    match timeline
-        .remote_client
+async fn set_deleted_in_remote_index(
+    timeline: &TimelineOrOffloaded,
+) -> Result<(), DeleteTimelineError> {
+    let res = timeline
+        .remote_client()
         .persist_index_part_with_deleted_flag()
-        .await
-    {
+        .await;
+    match res {
         // If we (now, or already) marked it successfully as deleted, we can proceed
         Ok(()) | Err(PersistIndexPartWithDeletedFlagError::AlreadyDeleted(_)) => (),
         // Bail out otherwise
@@ -127,9 +129,9 @@ pub(super) async fn delete_local_timeline_directory(
 }
 
 /// Removes remote layers and an index file after them.
-async fn delete_remote_layers_and_index(timeline: &Timeline) -> anyhow::Result<()> {
+async fn delete_remote_layers_and_index(timeline: &TimelineOrOffloaded) -> anyhow::Result<()> {
     timeline
-        .remote_client
+        .remote_client()
         .delete_all()
         .await
         .context("delete_all")
@@ -137,27 +139,41 @@ async fn delete_remote_layers_and_index(timeline: &Timeline) -> anyhow::Result<(
 
 /// It is important that this gets called when DeletionGuard is being held.
 /// For more context see comments in [`DeleteTimelineFlow::prepare`]
-async fn remove_timeline_from_tenant(
+async fn remove_maybe_offloaded_timeline_from_tenant(
     tenant: &Tenant,
-    timeline: &Timeline,
+    timeline: &TimelineOrOffloaded,
     _: &DeletionGuard, // using it as a witness
 ) -> anyhow::Result<()> {
     // Remove the timeline from the map.
+    // This observes the locking order between timelines and timelines_offloaded
     let mut timelines = tenant.timelines.lock().unwrap();
+    let mut timelines_offloaded = tenant.timelines_offloaded.lock().unwrap();
+    let offloaded_children_exist = timelines_offloaded
+        .iter()
+        .any(|(_, entry)| entry.ancestor_timeline_id == Some(timeline.timeline_id()));
     let children_exist = timelines
         .iter()
-        .any(|(_, entry)| entry.get_ancestor_timeline_id() == Some(timeline.timeline_id));
-    // XXX this can happen because `branch_timeline` doesn't check `TimelineState::Stopping`.
-    // We already deleted the layer files, so it's probably best to panic.
-    // (Ideally, above remove_dir_all is atomic so we don't see this timeline after a restart)
-    if children_exist {
+        .any(|(_, entry)| entry.get_ancestor_timeline_id() == Some(timeline.timeline_id()));
+    // XXX this can happen because of race conditions with branch creation.
+    // We already deleted the remote layer files, so it's probably best to panic.
+    if children_exist || offloaded_children_exist {
         panic!("Timeline grew children while we removed layer files");
     }
 
-    timelines
-        .remove(&timeline.timeline_id)
-        .expect("timeline that we were deleting was concurrently removed from 'timelines' map");
+    match timeline {
+        TimelineOrOffloaded::Timeline(timeline) => {
+            timelines.remove(&timeline.timeline_id).expect(
+                "timeline that we were deleting was concurrently removed from 'timelines' map",
+            );
+        }
+        TimelineOrOffloaded::Offloaded(timeline) => {
+            timelines_offloaded
+                .remove(&timeline.timeline_id)
+                .expect("timeline that we were deleting was concurrently removed from 'timelines_offloaded' map");
+        }
+    }
 
+    drop(timelines_offloaded);
     drop(timelines);
 
     Ok(())
@@ -207,9 +223,11 @@ impl DeleteTimelineFlow {
         guard.mark_in_progress()?;
 
         // Now that the Timeline is in Stopping state, request all the related tasks to shut down.
-        timeline.shutdown(super::ShutdownMode::Hard).await;
+        if let TimelineOrOffloaded::Timeline(timeline) = &timeline {
+            timeline.shutdown(super::ShutdownMode::Hard).await;
+        }
 
-        tenant.gc_block.before_delete(&timeline);
+        tenant.gc_block.before_delete(&timeline.timeline_id());
 
         fail::fail_point!("timeline-delete-before-index-deleted-at", |_| {
             Err(anyhow::anyhow!(
@@ -285,15 +303,16 @@ impl DeleteTimelineFlow {
 
         guard.mark_in_progress()?;
 
+        let timeline = TimelineOrOffloaded::Timeline(timeline);
         Self::schedule_background(guard, tenant.conf, tenant, timeline);
 
         Ok(())
     }
 
-    fn prepare(
+    pub(super) fn prepare(
         tenant: &Tenant,
         timeline_id: TimelineId,
-    ) -> Result<(Arc<Timeline>, DeletionGuard), DeleteTimelineError> {
+    ) -> Result<(TimelineOrOffloaded, DeletionGuard), DeleteTimelineError> {
         // Note the interaction between this guard and deletion guard.
         // Here we attempt to lock deletion guard when we're holding a lock on timelines.
         // This is important because when you take into account `remove_timeline_from_tenant`
@@ -307,8 +326,14 @@ impl DeleteTimelineFlow {
         let timelines = tenant.timelines.lock().unwrap();
 
         let timeline = match timelines.get(&timeline_id) {
-            Some(t) => t,
-            None => return Err(DeleteTimelineError::NotFound),
+            Some(t) => TimelineOrOffloaded::Timeline(Arc::clone(t)),
+            None => {
+                let offloaded_timelines = tenant.timelines_offloaded.lock().unwrap();
+                match offloaded_timelines.get(&timeline_id) {
+                    Some(t) => TimelineOrOffloaded::Offloaded(Arc::clone(t)),
+                    None => return Err(DeleteTimelineError::NotFound),
+                }
+            }
         };
 
         // Ensure that there are no child timelines **attached to that pageserver**,
@@ -334,30 +359,32 @@ impl DeleteTimelineFlow {
         // to remove the timeline from it.
         // Always if you have two locks that are taken in different order this can result in a deadlock.
 
-        let delete_progress = Arc::clone(&timeline.delete_progress);
+        let delete_progress = Arc::clone(timeline.delete_progress());
         let delete_lock_guard = match delete_progress.try_lock_owned() {
             Ok(guard) => DeletionGuard(guard),
             Err(_) => {
                 // Unfortunately if lock fails arc is consumed.
                 return Err(DeleteTimelineError::AlreadyInProgress(Arc::clone(
-                    &timeline.delete_progress,
+                    timeline.delete_progress(),
                 )));
             }
         };
 
-        timeline.set_state(TimelineState::Stopping);
+        if let TimelineOrOffloaded::Timeline(timeline) = &timeline {
+            timeline.set_state(TimelineState::Stopping);
+        }
 
-        Ok((Arc::clone(timeline), delete_lock_guard))
+        Ok((timeline, delete_lock_guard))
     }
 
     fn schedule_background(
         guard: DeletionGuard,
         conf: &'static PageServerConf,
         tenant: Arc<Tenant>,
-        timeline: Arc<Timeline>,
+        timeline: TimelineOrOffloaded,
     ) {
-        let tenant_shard_id = timeline.tenant_shard_id;
-        let timeline_id = timeline.timeline_id;
+        let tenant_shard_id = timeline.tenant_shard_id();
+        let timeline_id = timeline.timeline_id();
 
         task_mgr::spawn(
             task_mgr::BACKGROUND_RUNTIME.handle(),
@@ -368,7 +395,9 @@ impl DeleteTimelineFlow {
             async move {
                 if let Err(err) = Self::background(guard, conf, &tenant, &timeline).await {
                     error!("Error: {err:#}");
-                    timeline.set_broken(format!("{err:#}"))
+                    if let TimelineOrOffloaded::Timeline(timeline) = timeline {
+                        timeline.set_broken(format!("{err:#}"))
+                    }
                 };
                 Ok(())
             }
@@ -380,15 +409,19 @@ impl DeleteTimelineFlow {
         mut guard: DeletionGuard,
         conf: &PageServerConf,
         tenant: &Tenant,
-        timeline: &Timeline,
+        timeline: &TimelineOrOffloaded,
     ) -> Result<(), DeleteTimelineError> {
-        delete_local_timeline_directory(conf, tenant.tenant_shard_id, timeline).await?;
+        // Offloaded timelines have no local state
+        // TODO: once we persist offloaded information, delete the timeline from there, too
+        if let TimelineOrOffloaded::Timeline(timeline) = timeline {
+            delete_local_timeline_directory(conf, tenant.tenant_shard_id, timeline).await?;
+        }
 
         delete_remote_layers_and_index(timeline).await?;
 
         pausable_failpoint!("in_progress_delete");
 
-        remove_timeline_from_tenant(tenant, timeline, &guard).await?;
+        remove_maybe_offloaded_timeline_from_tenant(tenant, timeline, &guard).await?;
 
         *guard = Self::Finished;
 
@@ -400,7 +433,7 @@ impl DeleteTimelineFlow {
     }
 }
 
-struct DeletionGuard(OwnedMutexGuard<DeleteTimelineFlow>);
+pub(super) struct DeletionGuard(OwnedMutexGuard<DeleteTimelineFlow>);
 
 impl Deref for DeletionGuard {
     type Target = DeleteTimelineFlow;

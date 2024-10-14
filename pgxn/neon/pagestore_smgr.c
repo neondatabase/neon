@@ -118,6 +118,8 @@ static UnloggedBuildPhase unlogged_build_phase = UNLOGGED_BUILD_NOT_IN_PROGRESS;
 static bool neon_redo_read_buffer_filter(XLogReaderState *record, uint8 block_id);
 static bool (*old_redo_read_buffer_filter) (XLogReaderState *record, uint8 block_id) = NULL;
 
+static BlockNumber neon_nblocks(SMgrRelation reln, ForkNumber forknum);
+
 /*
  * Prefetch implementation:
  *
@@ -215,7 +217,7 @@ typedef struct PrfHashEntry
 	sizeof(BufferTag) \
 )
 
-#define SH_EQUAL(tb, a, b)	(BUFFERTAGS_EQUAL((a)->buftag, (b)->buftag))
+#define SH_EQUAL(tb, a, b)	(BufferTagsEqual(&(a)->buftag, &(b)->buftag))
 #define SH_SCOPE			static inline
 #define SH_DEFINE
 #define SH_DECLARE
@@ -736,7 +738,7 @@ static void
 prefetch_do_request(PrefetchRequest *slot, neon_request_lsns *force_request_lsns)
 {
 	bool		found;
-	uint64		mySlotNo = slot->my_ring_index;
+	uint64		mySlotNo PG_USED_FOR_ASSERTS_ONLY = slot->my_ring_index;
 
 	NeonGetPageRequest request = {
 		.req.tag = T_NeonGetPageRequest,
@@ -803,15 +805,19 @@ prefetch_register_bufferv(BufferTag tag, neon_request_lsns *frlsns,
 						  bool is_prefetch)
 {
 	uint64		min_ring_index;
-	PrefetchRequest req;
+	PrefetchRequest hashkey;
 #if USE_ASSERT_CHECKING
 	bool		any_hits = false;
 #endif
 	/* We will never read further ahead than our buffer can store. */
 	nblocks = Max(1, Min(nblocks, readahead_buffer_size));
 
-	/* use an intermediate PrefetchRequest struct to ensure correct alignment */
-	req.buftag = tag;
+	/*
+	 * Use an intermediate PrefetchRequest struct as the hash key to ensure
+	 * correct alignment and that the padding bytes are cleared.
+	 */
+	memset(&hashkey.buftag, 0, sizeof(BufferTag));
+	hashkey.buftag = tag;
 
 Retry:
 	min_ring_index = UINT64_MAX;
@@ -837,8 +843,8 @@ Retry:
 		slot = NULL;
 		entry = NULL;
 
-		req.buftag.blockNum = tag.blockNum + i;
-		entry = prfh_lookup(MyPState->prf_hash, (PrefetchRequest *) &req);
+		hashkey.buftag.blockNum = tag.blockNum + i;
+		entry = prfh_lookup(MyPState->prf_hash, &hashkey);
 
 		if (entry != NULL)
 		{
@@ -849,7 +855,7 @@ Retry:
 			Assert(slot->status != PRFS_UNUSED);
 			Assert(MyPState->ring_last <= ring_index &&
 				   ring_index < MyPState->ring_unused);
-			Assert(BUFFERTAGS_EQUAL(slot->buftag, req.buftag));
+			Assert(BufferTagsEqual(&slot->buftag, &hashkey.buftag));
 
 			/*
 			 * If the caller specified a request LSN to use, only accept
@@ -981,7 +987,7 @@ Retry:
 		 * We must update the slot data before insertion, because the hash
 		 * function reads the buffer tag from the slot.
 		 */
-		slot->buftag = req.buftag;
+		slot->buftag = hashkey.buftag;
 		slot->shard_no = get_shard_number(&tag);
 		slot->my_ring_index = ring_index;
 
@@ -1459,7 +1465,6 @@ log_newpages_copy(NRelFileInfo * rinfo, ForkNumber forkNum, BlockNumber blkno,
 	BlockNumber	blknos[XLR_MAX_BLOCK_ID];
 	Page		pageptrs[XLR_MAX_BLOCK_ID];
 	int			nregistered = 0;
-	XLogRecPtr	result = 0;
 
 	for (int i = 0; i < nblocks; i++)
 	{
@@ -1772,7 +1777,7 @@ neon_wallog_page(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, co
 /*
  *	neon_init() -- Initialize private state
  */
-void
+static void
 neon_init(void)
 {
 	Size		prfs_size;
@@ -2162,7 +2167,7 @@ neon_prefetch_response_usable(neon_request_lsns *request_lsns,
 /*
  *	neon_exists() -- Does the physical file exist?
  */
-bool
+static bool
 neon_exists(SMgrRelation reln, ForkNumber forkNum)
 {
 	bool		exists;
@@ -2268,7 +2273,7 @@ neon_exists(SMgrRelation reln, ForkNumber forkNum)
  *
  * If isRedo is true, it's okay for the relation to exist already.
  */
-void
+static void
 neon_create(SMgrRelation reln, ForkNumber forkNum, bool isRedo)
 {
 	switch (reln->smgr_relpersistence)
@@ -2344,7 +2349,7 @@ neon_create(SMgrRelation reln, ForkNumber forkNum, bool isRedo)
  * Note: any failure should be reported as WARNING not ERROR, because
  * we are usually not in a transaction anymore when this is called.
  */
-void
+static void
 neon_unlink(NRelFileInfoBackend rinfo, ForkNumber forkNum, bool isRedo)
 {
 	/*
@@ -2368,7 +2373,7 @@ neon_unlink(NRelFileInfoBackend rinfo, ForkNumber forkNum, bool isRedo)
  *		EOF).  Note that we assume writing a block beyond current EOF
  *		causes intervening file space to become filled with zeroes.
  */
-void
+static void
 #if PG_MAJORVERSION_NUM < 16
 neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 			char *buffer, bool skipFsync)
@@ -2460,7 +2465,7 @@ neon_extend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno,
 }
 
 #if PG_MAJORVERSION_NUM >= 16
-void
+static void
 neon_zeroextend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blocknum,
 				int nblocks, bool skipFsync)
 {
@@ -2556,7 +2561,7 @@ neon_zeroextend(SMgrRelation reln, ForkNumber forkNum, BlockNumber blocknum,
 /*
  *  neon_open() -- Initialize newly-opened relation.
  */
-void
+static void
 neon_open(SMgrRelation reln)
 {
 	/*
@@ -2574,7 +2579,7 @@ neon_open(SMgrRelation reln)
 /*
  *	neon_close() -- Close the specified relation, if it isn't closed already.
  */
-void
+static void
 neon_close(SMgrRelation reln, ForkNumber forknum)
 {
 	/*
@@ -2589,13 +2594,12 @@ neon_close(SMgrRelation reln, ForkNumber forknum)
 /*
  *	neon_prefetch() -- Initiate asynchronous read of the specified block of a relation
  */
-bool
+static bool
 neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 			  int nblocks)
 {
 	uint64		ring_index PG_USED_FOR_ASSERTS_ONLY;
 	BufferTag	tag;
-	bool		io_initiated = false;
 
 	switch (reln->smgr_relpersistence)
 	{
@@ -2619,7 +2623,6 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 	while (nblocks > 0)
 	{
 		int		iterblocks = Min(nblocks, PG_IOV_MAX);
-		int		seqlen = 0;
 		bits8		lfc_present[PG_IOV_MAX / 8];
 		memset(lfc_present, 0, sizeof(lfc_present));
 
@@ -2630,8 +2633,6 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 			blocknum += iterblocks;
 			continue;
 		}
-
-		io_initiated = true;
 
 		tag.blockNum = blocknum;
 		
@@ -2655,7 +2656,7 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 /*
  *	neon_prefetch() -- Initiate asynchronous read of the specified block of a relation
  */
-bool
+static bool
 neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum)
 {
 	uint64		ring_index PG_USED_FOR_ASSERTS_ONLY;
@@ -2699,7 +2700,7 @@ neon_prefetch(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum)
  * This accepts a range of blocks because flushing several pages at once is
  * considerably more efficient than doing so individually.
  */
-void
+static void
 neon_writeback(SMgrRelation reln, ForkNumber forknum,
 			   BlockNumber blocknum, BlockNumber nblocks)
 {
@@ -2749,14 +2750,19 @@ neon_read_at_lsnv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber base_block
 	uint64		ring_index;
 	PrfHashEntry *entry;
 	PrefetchRequest *slot;
-	BufferTag	buftag = {0};
+	PrefetchRequest hashkey;
 
 	Assert(PointerIsValid(request_lsns));
 	Assert(nblocks >= 1);
 
-	CopyNRelFileInfoToBufTag(buftag, rinfo);
-	buftag.forkNum = forkNum;
-	buftag.blockNum = base_blockno;
+	/*
+	 * Use an intermediate PrefetchRequest struct as the hash key to ensure
+	 * correct alignment and that the padding bytes are cleared.
+	 */
+	memset(&hashkey.buftag, 0, sizeof(BufferTag));
+	CopyNRelFileInfoToBufTag(hashkey.buftag, rinfo);
+	hashkey.buftag.forkNum = forkNum;
+	hashkey.buftag.blockNum = base_blockno;
 
 	/*
 	 * The redo process does not lock pages that it needs to replay but are
@@ -2774,7 +2780,7 @@ neon_read_at_lsnv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber base_block
 	 * weren't for the behaviour of the LwLsn cache that uses the highest
 	 * value of the LwLsn cache when the entry is not found.
 	 */
-	prefetch_register_bufferv(buftag, request_lsns, nblocks, mask, false);
+	prefetch_register_bufferv(hashkey.buftag, request_lsns, nblocks, mask, false);
 
 	for (int i = 0; i < nblocks; i++)
 	{
@@ -2795,8 +2801,8 @@ neon_read_at_lsnv(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber base_block
 		 * Try to find prefetched page in the list of received pages.
 		 */
 Retry:
-		buftag.blockNum = blockno;
-		entry = prfh_lookup(MyPState->prf_hash, (PrefetchRequest *) &buftag);
+		hashkey.buftag.blockNum = blockno;
+		entry = prfh_lookup(MyPState->prf_hash, &hashkey);
 
 		if (entry != NULL)
 		{
@@ -2833,7 +2839,7 @@ Retry:
 		{
 			if (entry == NULL)
 			{
-				ring_index = prefetch_register_bufferv(buftag, reqlsns, 1, NULL, false);
+				ring_index = prefetch_register_bufferv(hashkey.buftag, reqlsns, 1, NULL, false);
 				Assert(ring_index != UINT64_MAX);
 				slot = GetPrfSlot(ring_index);
 			}
@@ -2858,8 +2864,8 @@ Retry:
 		} while (!prefetch_wait_for(ring_index));
 
 		Assert(slot->status == PRFS_RECEIVED);
-		Assert(memcmp(&buftag, &slot->buftag, sizeof(BufferTag)) == 0);
-		Assert(buftag.blockNum == base_blockno + i);
+		Assert(memcmp(&hashkey.buftag, &slot->buftag, sizeof(BufferTag)) == 0);
+		Assert(hashkey.buftag.blockNum == base_blockno + i);
 
 		resp = slot->response;
 
@@ -2915,10 +2921,10 @@ neon_read_at_lsn(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
  *	neon_read() -- Read the specified block from a relation.
  */
 #if PG_MAJORVERSION_NUM < 16
-void
+static void
 neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, char *buffer)
 #else
-void
+static void
 neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, void *buffer)
 #endif
 {
@@ -3027,7 +3033,7 @@ neon_read(SMgrRelation reln, ForkNumber forkNum, BlockNumber blkno, void *buffer
 #endif /* PG_MAJORVERSION_NUM <= 16 */
 
 #if PG_MAJORVERSION_NUM >= 17
-void
+static void
 neon_readv(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 		void **buffers, BlockNumber nblocks)
 {
@@ -3191,6 +3197,7 @@ hexdump_page(char *page)
 }
 #endif
 
+#if PG_MAJORVERSION_NUM < 17
 /*
  *	neon_write() -- Write the supplied block at the appropriate location.
  *
@@ -3198,7 +3205,7 @@ hexdump_page(char *page)
  *		relation (ie, those before the current EOF).  To extend a relation,
  *		use mdextend().
  */
-void
+static void
 #if PG_MAJORVERSION_NUM < 16
 neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, char *buffer, bool skipFsync)
 #else
@@ -3264,11 +3271,12 @@ neon_write(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum, const vo
 		#endif
 #endif
 }
+#endif
 
 
 
 #if PG_MAJORVERSION_NUM >= 17
-void
+static void
 neon_writev(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
 			 const void **buffers, BlockNumber nblocks, bool skipFsync)
 {
@@ -3318,7 +3326,7 @@ neon_writev(SMgrRelation reln, ForkNumber forknum, BlockNumber blkno,
 /*
  *	neon_nblocks() -- Get the number of blocks stored in a relation.
  */
-BlockNumber
+static BlockNumber
 neon_nblocks(SMgrRelation reln, ForkNumber forknum)
 {
 	NeonResponse *resp;
@@ -3455,7 +3463,7 @@ neon_dbsize(Oid dbNode)
 /*
  *	neon_truncate() -- Truncate relation to specified number of blocks.
  */
-void
+static void
 neon_truncate(SMgrRelation reln, ForkNumber forknum, BlockNumber nblocks)
 {
 	XLogRecPtr	lsn;
@@ -3524,7 +3532,7 @@ neon_truncate(SMgrRelation reln, ForkNumber forknum, BlockNumber nblocks)
  * crash before the next checkpoint syncs the newly-inactive segment, that
  * segment may survive recovery, reintroducing unwanted data into the table.
  */
-void
+static void
 neon_immedsync(SMgrRelation reln, ForkNumber forknum)
 {
 	switch (reln->smgr_relpersistence)
@@ -3554,8 +3562,8 @@ neon_immedsync(SMgrRelation reln, ForkNumber forknum)
 }
 
 #if PG_MAJORVERSION_NUM >= 17
-void
-neon_regisersync(SMgrRelation reln, ForkNumber forknum)
+static void
+neon_registersync(SMgrRelation reln, ForkNumber forknum)
 {
 	switch (reln->smgr_relpersistence)
 	{
@@ -3739,6 +3747,8 @@ neon_read_slru_segment(SMgrRelation reln, const char* path, int segno, void* buf
 	SlruKind	kind;
 	int			n_blocks;
 	shardno_t	shard_no = 0; /* All SLRUs are at shard 0 */
+	NeonResponse *resp;
+	NeonGetSlruSegmentRequest request;
 
 	/*
 	 * Compute a request LSN to use, similar to neon_get_request_lsns() but the
@@ -3777,8 +3787,7 @@ neon_read_slru_segment(SMgrRelation reln, const char* path, int segno, void* buf
 	else
 		return -1;
 
-	NeonResponse *resp;
-	NeonGetSlruSegmentRequest request = {
+	request = (NeonGetSlruSegmentRequest) {
 		.req.tag = T_NeonGetSlruSegmentRequest,
 		.req.lsn = request_lsn,
 		.req.not_modified_since = not_modified_since,
@@ -3885,7 +3894,7 @@ static const struct f_smgr neon_smgr =
 	.smgr_truncate = neon_truncate,
 	.smgr_immedsync = neon_immedsync,
 #if PG_MAJORVERSION_NUM >= 17
-	.smgr_registersync = neon_regisersync,
+	.smgr_registersync = neon_registersync,
 #endif
 	.smgr_start_unlogged_build = neon_start_unlogged_build,
 	.smgr_finish_unlogged_build_phase_1 = neon_finish_unlogged_build_phase_1,

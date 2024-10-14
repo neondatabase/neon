@@ -174,9 +174,7 @@ pub struct PageServerConf {
     pub l0_flush: crate::l0_flush::L0FlushConfig,
 
     /// Direct IO settings
-    pub virtual_file_direct_io: virtual_file::DirectIoMode,
-
-    pub io_buffer_alignment: usize,
+    pub virtual_file_io_mode: virtual_file::IoMode,
 
     /// Maximum amount of time for which a get page request request
     /// might be held up for request merging.
@@ -329,11 +327,10 @@ impl PageServerConf {
             image_compression,
             ephemeral_bytes_per_memory_kb,
             l0_flush,
-            virtual_file_direct_io,
+            virtual_file_io_mode,
             concurrent_tenant_warmup,
             concurrent_tenant_size_logical_size_queries,
             virtual_file_io_engine,
-            io_buffer_alignment,
             server_side_batch_timeout,
             tenant_config,
         } = config_toml;
@@ -373,8 +370,6 @@ impl PageServerConf {
             max_vectored_read_bytes,
             image_compression,
             ephemeral_bytes_per_memory_kb,
-            virtual_file_direct_io,
-            io_buffer_alignment,
             server_side_batch_timeout,
 
             // ------------------------------------------------------------
@@ -414,6 +409,7 @@ impl PageServerConf {
             l0_flush: l0_flush
                 .map(crate::l0_flush::L0FlushConfig::from)
                 .unwrap_or_default(),
+            virtual_file_io_mode: virtual_file_io_mode.unwrap_or(virtual_file::IoMode::preferred()),
         };
 
         // ------------------------------------------------------------

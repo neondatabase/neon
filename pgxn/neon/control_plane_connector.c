@@ -146,15 +146,14 @@ ConstructDeltaMessage()
 	if (RootTable.role_table)
 	{
 		JsonbValue	roles;
+		HASH_SEQ_STATUS status;
+		RoleEntry  *entry;
 
 		roles.type = jbvString;
 		roles.val.string.val = "roles";
 		roles.val.string.len = strlen(roles.val.string.val);
 		pushJsonbValue(&state, WJB_KEY, &roles);
 		pushJsonbValue(&state, WJB_BEGIN_ARRAY, NULL);
-
-		HASH_SEQ_STATUS status;
-		RoleEntry  *entry;
 
 		hash_seq_init(&status, RootTable.role_table);
 		while ((entry = hash_seq_search(&status)) != NULL)
@@ -190,10 +189,12 @@ ConstructDeltaMessage()
 		}
 		pushJsonbValue(&state, WJB_END_ARRAY, NULL);
 	}
-	JsonbValue *result = pushJsonbValue(&state, WJB_END_OBJECT, NULL);
-	Jsonb	   *jsonb = JsonbValueToJsonb(result);
+	{
+		JsonbValue *result = pushJsonbValue(&state, WJB_END_OBJECT, NULL);
+		Jsonb	   *jsonb = JsonbValueToJsonb(result);
 
-	return JsonbToCString(NULL, &jsonb->root, 0 /* estimated_len */ );
+		return JsonbToCString(NULL, &jsonb->root, 0 /* estimated_len */ );
+	}
 }
 
 #define ERROR_SIZE 1024
@@ -272,31 +273,27 @@ SendDeltasToControlPlane()
 		curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION, ErrorWriteCallback);
 	}
 
-	char	   *message = ConstructDeltaMessage();
-	ErrorString str;
-
-	str.size = 0;
-
-	curl_easy_setopt(handle, CURLOPT_POSTFIELDS, message);
-	curl_easy_setopt(handle, CURLOPT_WRITEDATA, &str);
-
-	const int	num_retries = 5;
-	CURLcode	curl_status;
-
-	for (int i = 0; i < num_retries; i++)
 	{
-		if ((curl_status = curl_easy_perform(handle)) == 0)
-			break;
-		elog(LOG, "Curl request failed on attempt %d: %s", i, CurlErrorBuf);
-		pg_usleep(1000 * 1000);
-	}
-	if (curl_status != CURLE_OK)
-	{
-		elog(ERROR, "Failed to perform curl request: %s", CurlErrorBuf);
-	}
-	else
-	{
+		char	   *message = ConstructDeltaMessage();
+		ErrorString str;
+		const int	num_retries = 5;
+		CURLcode	curl_status;
 		long		response_code;
+
+		str.size = 0;
+
+		curl_easy_setopt(handle, CURLOPT_POSTFIELDS, message);
+		curl_easy_setopt(handle, CURLOPT_WRITEDATA, &str);
+
+		for (int i = 0; i < num_retries; i++)
+		{
+			if ((curl_status = curl_easy_perform(handle)) == 0)
+				break;
+			elog(LOG, "Curl request failed on attempt %d: %s", i, CurlErrorBuf);
+			pg_usleep(1000 * 1000);
+		}
+		if (curl_status != CURLE_OK)
+			elog(ERROR, "Failed to perform curl request: %s", CurlErrorBuf);
 
 		if (curl_easy_getinfo(handle, CURLINFO_RESPONSE_CODE, &response_code) != CURLE_UNKNOWN_OPTION)
 		{
@@ -376,9 +373,10 @@ MergeTable()
 
 	if (old_table->db_table)
 	{
-		InitDbTableIfNeeded();
 		DbEntry    *entry;
 		HASH_SEQ_STATUS status;
+
+		InitDbTableIfNeeded();
 
 		hash_seq_init(&status, old_table->db_table);
 		while ((entry = hash_seq_search(&status)) != NULL)
@@ -421,9 +419,10 @@ MergeTable()
 
 	if (old_table->role_table)
 	{
-		InitRoleTableIfNeeded();
 		RoleEntry  *entry;
 		HASH_SEQ_STATUS status;
+
+		InitRoleTableIfNeeded();
 
 		hash_seq_init(&status, old_table->role_table);
 		while ((entry = hash_seq_search(&status)) != NULL)
@@ -515,9 +514,12 @@ RoleIsNeonSuperuser(const char *role_name)
 static void
 HandleCreateDb(CreatedbStmt *stmt)
 {
-	InitDbTableIfNeeded();
 	DefElem    *downer = NULL;
 	ListCell   *option;
+	bool		found = false;
+	DbEntry    *entry;
+
+	InitDbTableIfNeeded();
 
 	foreach(option, stmt->options)
 	{
@@ -526,13 +528,11 @@ HandleCreateDb(CreatedbStmt *stmt)
 		if (strcmp(defel->defname, "owner") == 0)
 			downer = defel;
 	}
-	bool		found = false;
-	DbEntry    *entry = hash_search(
-									CurrentDdlTable->db_table,
-									stmt->dbname,
-									HASH_ENTER,
-									&found);
 
+	entry = hash_search(CurrentDdlTable->db_table,
+						stmt->dbname,
+						HASH_ENTER,
+						&found);
 	if (!found)
 		memset(entry->old_name, 0, sizeof(entry->old_name));
 
@@ -554,21 +554,24 @@ HandleCreateDb(CreatedbStmt *stmt)
 static void
 HandleAlterOwner(AlterOwnerStmt *stmt)
 {
+	const char *name;
+	bool		found = false;
+	DbEntry    *entry;
+	const char *new_owner;
+
 	if (stmt->objectType != OBJECT_DATABASE)
 		return;
 	InitDbTableIfNeeded();
-	const char *name = strVal(stmt->object);
-	bool		found = false;
-	DbEntry    *entry = hash_search(
-									CurrentDdlTable->db_table,
-									name,
-									HASH_ENTER,
-									&found);
 
+	name = strVal(stmt->object);
+	entry = hash_search(CurrentDdlTable->db_table,
+						name,
+						HASH_ENTER,
+						&found);
 	if (!found)
 		memset(entry->old_name, 0, sizeof(entry->old_name));
-	const char *new_owner = get_rolespec_name(stmt->newowner);
 
+	new_owner = get_rolespec_name(stmt->newowner);
 	if (RoleIsNeonSuperuser(new_owner))
 		elog(ERROR, "can't alter owner to neon_superuser");
 	entry->owner = get_role_oid(new_owner, false);
@@ -578,21 +581,23 @@ HandleAlterOwner(AlterOwnerStmt *stmt)
 static void
 HandleDbRename(RenameStmt *stmt)
 {
+	bool		found = false;
+	DbEntry    *entry;
+	DbEntry    *entry_for_new_name;
+
 	Assert(stmt->renameType == OBJECT_DATABASE);
 	InitDbTableIfNeeded();
-	bool		found = false;
-	DbEntry    *entry = hash_search(
-									CurrentDdlTable->db_table,
-									stmt->subname,
-									HASH_FIND,
-									&found);
-	DbEntry    *entry_for_new_name = hash_search(
-												 CurrentDdlTable->db_table,
-												 stmt->newname,
-												 HASH_ENTER,
-												 NULL);
+	entry = hash_search(CurrentDdlTable->db_table,
+						stmt->subname,
+						HASH_FIND,
+						&found);
 
+	entry_for_new_name = hash_search(CurrentDdlTable->db_table,
+									 stmt->newname,
+									 HASH_ENTER,
+									 NULL);
 	entry_for_new_name->type = Op_Set;
+
 	if (found)
 	{
 		if (entry->old_name[0] != '\0')
@@ -600,8 +605,7 @@ HandleDbRename(RenameStmt *stmt)
 		else
 			strlcpy(entry_for_new_name->old_name, entry->name, NAMEDATALEN);
 		entry_for_new_name->owner = entry->owner;
-		hash_search(
-					CurrentDdlTable->db_table,
+		hash_search(CurrentDdlTable->db_table,
 					stmt->subname,
 					HASH_REMOVE,
 					NULL);
@@ -616,14 +620,15 @@ HandleDbRename(RenameStmt *stmt)
 static void
 HandleDropDb(DropdbStmt *stmt)
 {
-	InitDbTableIfNeeded();
 	bool		found = false;
-	DbEntry    *entry = hash_search(
-									CurrentDdlTable->db_table,
-									stmt->dbname,
-									HASH_ENTER,
-									&found);
+	DbEntry    *entry;
 
+	InitDbTableIfNeeded();
+
+	entry = hash_search(CurrentDdlTable->db_table,
+						stmt->dbname,
+						HASH_ENTER,
+						&found);
 	entry->type = Op_Delete;
 	entry->owner = InvalidOid;
 	if (!found)
@@ -633,16 +638,14 @@ HandleDropDb(DropdbStmt *stmt)
 static void
 HandleCreateRole(CreateRoleStmt *stmt)
 {
-	InitRoleTableIfNeeded();
 	bool		found = false;
-	RoleEntry  *entry = hash_search(
-									CurrentDdlTable->role_table,
-									stmt->role,
-									HASH_ENTER,
-									&found);
-	DefElem    *dpass = NULL;
+	RoleEntry  *entry;
+	DefElem    *dpass;
 	ListCell   *option;
 
+	InitRoleTableIfNeeded();
+
+	dpass = NULL;
 	foreach(option, stmt->options)
 	{
 		DefElem    *defel = lfirst(option);
@@ -650,6 +653,11 @@ HandleCreateRole(CreateRoleStmt *stmt)
 		if (strcmp(defel->defname, "password") == 0)
 			dpass = defel;
 	}
+
+	entry = hash_search(CurrentDdlTable->role_table,
+						stmt->role,
+						HASH_ENTER,
+						&found);
 	if (!found)
 		memset(entry->old_name, 0, sizeof(entry->old_name));
 	if (dpass && dpass->arg)
@@ -662,14 +670,18 @@ HandleCreateRole(CreateRoleStmt *stmt)
 static void
 HandleAlterRole(AlterRoleStmt *stmt)
 {
-	InitRoleTableIfNeeded();
-	DefElem    *dpass = NULL;
-	ListCell   *option;
 	const char *role_name = stmt->role->rolename;
+	DefElem    *dpass;
+	ListCell   *option;
+	bool		found = false;
+	RoleEntry  *entry;
+
+	InitRoleTableIfNeeded();
 
 	if (RoleIsNeonSuperuser(role_name) && !superuser())
 		elog(ERROR, "can't ALTER neon_superuser");
 
+	dpass = NULL;
 	foreach(option, stmt->options)
 	{
 		DefElem    *defel = lfirst(option);
@@ -680,13 +692,11 @@ HandleAlterRole(AlterRoleStmt *stmt)
 	/* We only care about updates to the password */
 	if (!dpass)
 		return;
-	bool		found = false;
-	RoleEntry  *entry = hash_search(
-									CurrentDdlTable->role_table,
-									role_name,
-									HASH_ENTER,
-									&found);
 
+	entry = hash_search(CurrentDdlTable->role_table,
+						role_name,
+						HASH_ENTER,
+						&found);
 	if (!found)
 		memset(entry->old_name, 0, sizeof(entry->old_name));
 	if (dpass->arg)
@@ -699,20 +709,22 @@ HandleAlterRole(AlterRoleStmt *stmt)
 static void
 HandleRoleRename(RenameStmt *stmt)
 {
-	InitRoleTableIfNeeded();
-	Assert(stmt->renameType == OBJECT_ROLE);
 	bool		found = false;
-	RoleEntry  *entry = hash_search(
-									CurrentDdlTable->role_table,
-									stmt->subname,
-									HASH_FIND,
-									&found);
+	RoleEntry  *entry;
+	RoleEntry  *entry_for_new_name;
 
-	RoleEntry  *entry_for_new_name = hash_search(
-												 CurrentDdlTable->role_table,
-												 stmt->newname,
-												 HASH_ENTER,
-												 NULL);
+	Assert(stmt->renameType == OBJECT_ROLE);
+	InitRoleTableIfNeeded();
+
+	entry = hash_search(CurrentDdlTable->role_table,
+						stmt->subname,
+						HASH_FIND,
+						&found);
+
+	entry_for_new_name = hash_search(CurrentDdlTable->role_table,
+									 stmt->newname,
+									 HASH_ENTER,
+									 NULL);
 
 	entry_for_new_name->type = Op_Set;
 	if (found)
@@ -738,8 +750,9 @@ HandleRoleRename(RenameStmt *stmt)
 static void
 HandleDropRole(DropRoleStmt *stmt)
 {
-	InitRoleTableIfNeeded();
 	ListCell   *item;
+
+	InitRoleTableIfNeeded();
 
 	foreach(item, stmt->roles)
 	{

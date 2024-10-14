@@ -7,7 +7,7 @@ use crate::metrics::{
     WakeupFailureKind,
 };
 use crate::proxy::retry::{retry_after, should_retry};
-use hyper1::StatusCode;
+use hyper::StatusCode;
 use tracing::{error, info, warn};
 
 use super::connect_compute::ComputeConnectBackend;

@@ -1,5 +1,6 @@
+from __future__ import annotations
+
 from contextlib import closing
-from typing import Set
 
 import pytest
 from fixtures.log_helper import log
@@ -7,7 +8,7 @@ from fixtures.neon_fixtures import Endpoint, NeonEnv, NeonPageserver
 from fixtures.pageserver.http import PageserverHttpClient
 from psycopg2.errors import QueryCanceled
 
-CRITICAL_PG_PS_WAIT_FAILPOINTS: Set[str] = {
+CRITICAL_PG_PS_WAIT_FAILPOINTS: set[str] = {
     "ps::connection-start::pre-login",
     "ps::connection-start::startup-packet",
     "ps::connection-start::process-query",
@@ -92,7 +93,7 @@ def test_cancellations(neon_simple_env: NeonEnv):
         connect_works_correctly(failpoint, ep, ps, ps_http)
 
 
-ENABLED_FAILPOINTS: Set[str] = set()
+ENABLED_FAILPOINTS: set[str] = set()
 
 
 def connect_works_correctly(

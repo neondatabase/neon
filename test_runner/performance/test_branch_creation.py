@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import random
 import re
 import statistics
@@ -5,7 +7,6 @@ import threading
 import time
 import timeit
 from contextlib import closing
-from typing import List
 
 import pytest
 from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
@@ -18,7 +19,7 @@ from fixtures.utils import wait_until
 from prometheus_client.samples import Sample
 
 
-def _record_branch_creation_durations(neon_compare: NeonCompare, durs: List[float]):
+def _record_branch_creation_durations(neon_compare: NeonCompare, durs: list[float]):
     neon_compare.zenbenchmark.record(
         "branch_creation_duration_max", max(durs), "s", MetricReport.LOWER_IS_BETTER
     )
@@ -66,7 +67,7 @@ def test_branch_creation_heavy_write(neon_compare: NeonCompare, n_branches: int)
 
     env.create_branch("b0", tenant_id=tenant)
 
-    threads: List[threading.Thread] = []
+    threads: list[threading.Thread] = []
     threads.append(threading.Thread(target=run_pgbench, args=("b0",), daemon=True))
     threads[-1].start()
 
@@ -194,7 +195,7 @@ def wait_and_record_startup_metrics(
         ]
     )
 
-    def metrics_are_filled() -> List[Sample]:
+    def metrics_are_filled() -> list[Sample]:
         m = client.get_metrics()
         samples = m.query_all("pageserver_startup_duration_seconds")
         # we should not have duplicate labels
