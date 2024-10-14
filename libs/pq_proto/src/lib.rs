@@ -1046,19 +1046,4 @@ mod tests {
         let data = [0, 0, 0, 7, 0, 0, 0, 0];
         FeStartupPacket::parse(&mut BytesMut::from_iter(data)).unwrap_err();
     }
-
-    #[test]
-    fn vlad() {
-        let bytes = b"\x02\xff\xff\xff\xff\xff\xff\xff\xff\0\0\x01\xdc\xf6\xd0\xba\xe0\0\0\x06\x7f\0\0}\xe2\0\t\xe6a\0\0\0\0D";
-        let be_msg = BeMessage::CopyData(&bytes[..]);
-        let mut bytes = BytesMut::new();
-        let pagestream_v2 = "pagestream_v2";
-        bytes.put_slice(pagestream_v2.as_bytes());
-        BeMessage::write(&mut bytes, &be_msg).unwrap();
-
-        let query = FeMessage::Query(bytes.into());
-
-        let res = FeMessage::parse(&mut bytes);
-        println!("{res:?}");
-    }
 }
