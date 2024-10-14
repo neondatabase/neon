@@ -36,10 +36,10 @@ jobs:
         with:
           token: ${{ github.token }}
           filters: |
-            postgres-v14: vendor/postgres-v14 Makefile .github/workflows/build-macos.yaml pgxn/
-            postgres-v15: vendor/postgres-v15 Makefile .github/workflows/build-macos.yaml pgxn/
-            postgres-v16: vendor/postgres-v16 Makefile .github/workflows/build-macos.yaml pgxn/
-            postgres-v17: vendor/postgres-v17 Makefile .github/workflows/build-macos.yaml pgxn/
+            postgres-v14: ['vendor/postgres-v14/**', 'Makefile', '.github/workflows/build-macos.yml', 'pgxn/**']
+            postgres-v15: ['vendor/postgres-v15/**', 'Makefile', '.github/workflows/build-macos.yml', 'pgxn/**']
+            postgres-v16: ['vendor/postgres-v16/**', 'Makefile', '.github/workflows/build-macos.yml', 'pgxn/**']
+            postgres-v17: ['vendor/postgres-v17/**', 'Makefile', '.github/workflows/build-macos.yml', 'pgxn/**']
           base: ${{ github.event_name != 'pull_request' && (github.event.merge_group.base_ref || github.ref_name) || '' }}
           ref: ${{ github.event_name != 'pull_request' && (github.event.merge_group.head_ref || github.ref) || ''}}
 
@@ -66,4 +66,5 @@ jobs:
 
       - name: Build ${{ matrix.postgres-version }}
         run: |
-          echo make ${{ matrix.postgres-verion }}
+          echo make ${{ matrix.postgres-version }}
+          echo make $(echo "${{ matrix.postgres-version }}" | sed -e 's/postgres-/neon-pg-ext-/')
