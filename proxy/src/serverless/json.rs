@@ -271,25 +271,29 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn json_to_pg_text_test(json: Vec<Value>) -> Vec<Option<String>> {
+        json_to_pg_text(json)
+    }
+
     #[test]
     fn test_atomic_types_to_pg_params() {
         let json = vec![Value::Bool(true), Value::Bool(false)];
-        let pg_params = json_to_pg_text(json);
+        let pg_params = json_to_pg_text_test(json);
         assert_eq!(
             pg_params,
             vec![Some("true".to_owned()), Some("false".to_owned())]
         );
 
         let json = vec![Value::Number(serde_json::Number::from(42))];
-        let pg_params = json_to_pg_text(json);
+        let pg_params = json_to_pg_text_test(json);
         assert_eq!(pg_params, vec![Some("42".to_owned())]);
 
         let json = vec![Value::String("foo\"".to_string())];
-        let pg_params = json_to_pg_text(json);
+        let pg_params = json_to_pg_text_test(json);
         assert_eq!(pg_params, vec![Some("foo\"".to_owned())]);
 
         let json = vec![Value::Null];
-        let pg_params = json_to_pg_text(json);
+        let pg_params = json_to_pg_text_test(json);
         assert_eq!(pg_params, vec![None]);
     }
 
@@ -298,7 +302,7 @@ mod tests {
         // atoms and escaping
         let json = "[true, false, null, \"NULL\", 42, \"foo\", \"bar\\\"-\\\\\"]";
         let json: Value = serde_json::from_str(json).unwrap();
-        let pg_params = json_to_pg_text(vec![json]);
+        let pg_params = json_to_pg_text_test(vec![json]);
         assert_eq!(
             pg_params,
             vec![Some(
@@ -309,7 +313,7 @@ mod tests {
         // nested arrays
         let json = "[[true, false], [null, 42], [\"foo\", \"bar\\\"-\\\\\"]]";
         let json: Value = serde_json::from_str(json).unwrap();
-        let pg_params = json_to_pg_text(vec![json]);
+        let pg_params = json_to_pg_text_test(vec![json]);
         assert_eq!(
             pg_params,
             vec![Some(
@@ -319,7 +323,7 @@ mod tests {
         // array of objects
         let json = r#"[{"foo": 1},{"bar": 2}]"#;
         let json: Value = serde_json::from_str(json).unwrap();
-        let pg_params = json_to_pg_text(vec![json]);
+        let pg_params = json_to_pg_text_test(vec![json]);
         assert_eq!(
             pg_params,
             vec![Some(r#"{"{\"foo\":1}","{\"bar\":2}"}"#.to_owned())]
