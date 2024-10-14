@@ -21,6 +21,11 @@ pub enum NeonWalRecord {
     /// Native PostgreSQL WAL record
     Postgres { will_init: bool, rec: Bytes },
 
+    // Truncate visibility map page
+    TruncateVisibilityMap {
+        trunc_byte: usize,
+        trunc_offs: usize,
+    },
     /// Clear bits in heap visibility map. ('flags' is bitmap of bits to clear)
     ClearVisibilityMapFlags {
         new_heap_blkno: Option<u32>,
@@ -711,7 +716,7 @@ impl XlXactParsedRecord {
     /// functions in PostgreSQL (in src/backend/access/rmgr/xactdesc.c)
     pub fn decode(buf: &mut Bytes, mut xid: TransactionId, xl_info: u8) -> XlXactParsedRecord {
         let info = xl_info & pg_constants::XLOG_XACT_OPMASK;
-        // The record starts with time of commit/abort
+        // The record starts with time of' commit/abort
         let xact_time = buf.get_i64_le();
         let xinfo = if xl_info & pg_constants::XLOG_XACT_HAS_INFO != 0 {
             buf.get_u32_le()
