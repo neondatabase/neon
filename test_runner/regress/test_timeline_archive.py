@@ -162,7 +162,7 @@ def test_timeline_offloading(neon_env_builder: NeonEnvBuilder, manual_offload: b
     if manual_offload:
         with pytest.raises(
             PageserverApiException,
-            match="no way to offload timeline, can_offload=true, has_no_attached_children=false",
+            match="timeline has attached children",
         ):
             # This only tests the (made for testing only) http handler,
             # but still demonstrates the constraints we have.

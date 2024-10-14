@@ -1801,25 +1801,25 @@ async fn timeline_offload_handler(
             .get_attached_tenant_shard(tenant_shard_id)?;
 
         if tenant.get_offloaded_timeline(timeline_id).is_ok() {
-            return json_response(StatusCode::OK, ())
+            return json_response(StatusCode::OK, ());
         }
         let timeline =
             active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
                 .await?;
 
-        let has_no_attached_children = tenant.timeline_has_no_attached_children(timeline_id);
-        let can_offload = timeline.can_offload();
-        match (can_offload, has_no_attached_children) {
-            (true, true) => {
-                offload_timeline(&tenant, &timeline)
-                    .await
-                    .map_err(ApiError::InternalServerError)?;
-            }
-            (_, _) => {
-                let msg = format!("no way to offload timeline, can_offload={can_offload}, has_no_attached_children={has_no_attached_children}");
-                return Err(ApiError::PreconditionFailed(msg.into_boxed_str()));
-            }
+        if !tenant.timeline_has_no_attached_children(timeline_id) {
+            return Err(ApiError::PreconditionFailed(
+                "timeline has attached children".into(),
+            ));
         }
+        if !timeline.can_offload() {
+            return Err(ApiError::PreconditionFailed(
+                "Timeline::can_offload() returned false".into(),
+            ));
+        }
+        offload_timeline(&tenant, &timeline)
+            .await
+            .map_err(ApiError::InternalServerError)?;
 
         json_response(StatusCode::OK, ())
     }
