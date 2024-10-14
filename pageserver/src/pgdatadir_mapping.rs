@@ -279,9 +279,6 @@ impl Timeline {
         match self.get_vectored(keyspace, request_lsn, ctx).await {
             Ok(results) => {
                 for (key, res) in results {
-                    if let Err(err) = &res {
-                        warn!(%key, ?err, "a key inside get_vectored failed with a per-key error");
-                    }
                     let mut interests = key_states.range_mut((key, 0)..(key.next(), 0)).peekable();
                     let first_interest = interests.next().unwrap();
                     let next_interest = interests.peek().is_some();
@@ -321,7 +318,6 @@ impl Timeline {
                 }
             }
             Err(err) => {
-                warn!(?err, "get_vectored failed with a global error, mapping that error to per-key failure");
                 // this cannot really happen because get_vectored only errors globally on invalid LSN or too large batch size
                 for ((_, _), state) in key_states.iter_mut() {
                     // this whole `match` is a lot like `From<GetVectoredError> for PageReconstructError`
