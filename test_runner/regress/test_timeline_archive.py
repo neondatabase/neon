@@ -170,9 +170,6 @@ def test_timeline_offloading(neon_env_builder: NeonEnvBuilder, manual_offload: b
     wait_until(30, 1, leaf_offloaded)
     wait_until(30, 1, parent_offloaded)
 
-    # Let some time pass for things to settle.
-    time.sleep(5)
-
     ps_http.timeline_archival_config(
         tenant_id,
         parent_timeline_id,
