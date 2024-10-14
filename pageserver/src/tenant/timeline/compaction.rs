@@ -42,7 +42,7 @@ use crate::tenant::storage_layer::{
 use crate::tenant::timeline::ImageLayerCreationOutcome;
 use crate::tenant::timeline::{drop_rlock, DeltaLayerWriter, ImageLayerWriter};
 use crate::tenant::timeline::{Layer, ResidentLayer};
-use crate::tenant::DeltaLayer;
+use crate::tenant::{DeltaLayer, MaybeOffloaded};
 use crate::virtual_file::{MaybeFatalIo, VirtualFile};
 use pageserver_api::config::tenant_conf_defaults::{
     DEFAULT_CHECKPOINT_DISTANCE, DEFAULT_COMPACTION_THRESHOLD,
@@ -640,7 +640,7 @@ impl Timeline {
 
             let mut readable_points = Vec::with_capacity(children.len() + 1);
             for (child_lsn, _child_timeline_id, is_offloaded) in &children {
-                if *is_offloaded {
+                if *is_offloaded == MaybeOffloaded::Yes {
                     continue;
                 }
                 readable_points.push(*child_lsn);

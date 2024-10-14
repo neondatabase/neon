@@ -139,8 +139,7 @@ use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 
 use super::{
-    config::TenantConf, storage_layer::inmemory_layer, storage_layer::LayerVisibilityHint,
-    upload_queue::NotInitialized,
+    config::TenantConf, storage_layer::{inmemory_layer, LayerVisibilityHint}, upload_queue::NotInitialized, MaybeOffloaded,
 };
 use super::{debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenantConf};
 use super::{remote_timeline_client::index::IndexPart, storage_layer::LayerFringe};
@@ -450,7 +449,7 @@ pub(crate) struct GcInfo {
     /// Currently, this includes all points where child branches have
     /// been forked off from. In the future, could also include
     /// explicit user-defined snapshot points.
-    pub(crate) retain_lsns: Vec<(Lsn, TimelineId, bool)>,
+    pub(crate) retain_lsns: Vec<(Lsn, TimelineId, MaybeOffloaded)>,
 
     /// The cutoff coordinates, which are combined by selecting the minimum.
     pub(crate) cutoffs: GcCutoffs,
@@ -467,7 +466,7 @@ impl GcInfo {
         self.cutoffs.select_min()
     }
 
-    pub(super) fn insert_child(&mut self, child_id: TimelineId, child_lsn: Lsn, is_offloaded: bool) {
+    pub(super) fn insert_child(&mut self, child_id: TimelineId, child_lsn: Lsn, is_offloaded: MaybeOffloaded) {
         self.retain_lsns.push((child_lsn, child_id, is_offloaded));
         self.retain_lsns.sort_by_key(|i| i.0);
     }
@@ -2165,7 +2164,7 @@ impl Timeline {
         if let Some(ancestor) = &ancestor {
             let mut ancestor_gc_info = ancestor.gc_info.write().unwrap();
             // If we construct an explicit timeline object, it's obviously not offloaded
-            let is_offloaded = false;
+            let is_offloaded = MaybeOffloaded::No;
             ancestor_gc_info.insert_child(timeline_id, metadata.ancestor_lsn(), is_offloaded);
         }
 
