@@ -19,7 +19,7 @@ def test_lfc_resize(neon_simple_env: NeonEnv, pg_bin: PgBin):
     Test resizing the Local File Cache
     """
     env = neon_simple_env
-    cache_dir = Path(env.repo_dir) / "file_cache"
+    cache_dir = env.repo_dir / "file_cache"
     cache_dir.mkdir(exist_ok=True)
     env.create_branch("test_lfc_resize")
     endpoint = env.endpoints.create_start(
