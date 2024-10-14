@@ -242,7 +242,7 @@ impl WalBackupTask {
 
         let mut retry_attempt = 0u32;
         // offload loop
-        loop {
+        while !self.timeline.cancel.is_cancelled() {
             if retry_attempt == 0 {
                 // wait for new WAL to arrive
                 if let Err(e) = self.commit_lsn_watch_rx.changed().await {
