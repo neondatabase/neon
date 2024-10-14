@@ -162,6 +162,57 @@ TODO: describe memory footprint per timeline on safekeepers .vs current memory s
 
 ## Optimizations
 
+### Handling Laggard Shards
+
+Phase 3 describes how we can re-use a single buffer on the safekeeper in order to serve subscriptions from
+multiple shards. On the happy path we can indeed use a single cursor to serve all shards of one tenant subscribed
+to the same safekeeper. This section proposes how to handle cases when one or more shards attempt to subscribe
+at LSNs in the past. This may happen during live migrations and pageserver restarts/crashes.
+
+Things to keep in mind when thinking about this:
+* safekeepers keep data on disk until it has been sent to the pageserver
+* timeline (and implicitly timeline + shard) safekeeper assingments are not stable
+* shard might jump back by a couple hundred MiB when restarting/migrating
+* advancing only some of the shards is not useful
+
+Laggard shards are problematic because the cursor merging described in Phase 3 cannot be applied.
+This means that the safekeeper will have to hydrate WAL from S3 in order to serve the laggard.
+
+The core proposal here is to make safekeepers aware of the current `remote_consistent_lsn`
+of each (tenant, timeline, shard) tuple. This allows more advanced shards to stop pushing
+data into the pageserver until all shards are caught up.
+
+More specifically, we can use the storage broker to gossip this information across the safekeeper
+cluster. Safekeepers aleady subscribe to updates of `SafekeeperTimelineInfo` from the storage broker.
+This struct already contains everything we need apart from the shard identifier. With the shard identifier
+included, each safekeeper can have a clear picture of the current WAL location of each shard.
+
+We can implement a simple catch-up protocol:
+* We define the "shard X cursor" as the `remote_consistent_lsn` of shard X
+* We define the `high_watermark_cursor_lsn` as the `remote_consistent_lsn` of the most advanced shard.
+* If safekeeper A detects that the cursor of any given shard X is lagging by more than a configurable
+threshold (call it `max_shard_cursor_lag`), then it records the current `high_watermark_cursor_lsn`
+in memory and stops pushing data to the pageserver for any shard with a cursor greater or equal to
+`high_watermark_cursor_lsn`. This rule also applies for new subscriptions from the pageserver.
+
+Broker outages are already bad for the ingest path, but this proposed change would make any outage
+worse. To work around this we can:
+1. Make the catch-up protocol optional. If safekeepers detect broker unavailability, then the
+`high_watermark_cursor_lsn` gating does not apply.
+2. Make the storage broker highly available. We've already done this for the storage controller
+(rolling update, leadership, proxying from stepped down to new leader).
+3. Do peer to peer safekeeper communication.
+
+#### Tweaking the Safekeeper Selection Algorithm
+
+If the broker becomes aware of the `remote_consistent_lsn` of each shard we can make the safekeeper
+selection algorithm used on the pageserver smarter by aplying the following heuristic:
+Given a choice between two safekeepers, pick the one with an active cursor that has the biggest
+chance of being merged with the cursor of the new shard. If we already have a laggy shard with
+a cursor at LSN 10k and the pageserver wants WAL for another laggy shard starting from LSN 11k,
+then we can pick the safekeeper serving the cursor at LSN 10k.
+
+
 ### Pipelining first ingest phase
 
 The first ingest phase is a stateless transformation of a binary WAL record into a pre-processed
