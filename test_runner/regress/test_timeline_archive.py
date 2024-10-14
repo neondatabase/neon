@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import time
-
 import pytest
 from fixtures.common_types import TenantId, TimelineArchivalState, TimelineId
 from fixtures.neon_fixtures import (
@@ -160,6 +158,15 @@ def test_timeline_offloading(neon_env_builder: NeonEnvBuilder, manual_offload: b
             env.pageserver.log_contains(f".*{timeline_id}.* offloading archived timeline.*")
             is not None
         )
+
+    if manual_offload:
+        with pytest.raises(
+            PageserverApiException,
+            match="no way to offload timeline, can_offload=true, has_no_attached_children=false",
+        ):
+            # This only tests the (made for testing only) http handler,
+            # but still demonstrates the constraints we have.
+            ps_http.timeline_offload(tenant_id=tenant_id, timeline_id=parent_timeline_id)
 
     def parent_offloaded():
         if manual_offload:
