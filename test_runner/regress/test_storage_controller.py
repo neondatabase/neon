@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import TYPE_CHECKING
 
+import fixtures.utils
 import pytest
 from fixtures.auth_tokens import TokenScope
 from fixtures.common_types import TenantId, TenantShardId, TimelineId
@@ -38,7 +39,11 @@ from fixtures.pg_version import PgVersion, run_only_on_default_postgres
 from fixtures.port_distributor import PortDistributor
 from fixtures.remote_storage import RemoteStorageKind, s3_storage
 from fixtures.storage_controller_proxy import StorageControllerProxy
-from fixtures.utils import run_pg_bench_small, subprocess_capture, wait_until
+from fixtures.utils import (
+    run_pg_bench_small,
+    subprocess_capture,
+    wait_until,
+)
 from fixtures.workload import Workload
 from mypy_boto3_s3.type_defs import (
     ObjectTypeDef,
@@ -60,9 +65,8 @@ def get_node_shard_counts(env: NeonEnv, tenant_ids):
     return counts
 
 
-def test_storage_controller_smoke(
-    neon_env_builder: NeonEnvBuilder,
-):
+@pytest.mark.parametrize(**fixtures.utils.allpairs_versions())
+def test_storage_controller_smoke(neon_env_builder: NeonEnvBuilder, combination):
     """
     Test the basic lifecycle of a storage controller:
     - Restarting
@@ -1038,7 +1042,7 @@ def test_storage_controller_tenant_deletion(
         )
 
     # Break the compute hook: we are checking that deletion does not depend on the compute hook being available
-    def break_hook():
+    def break_hook(_body: Any):
         raise RuntimeError("Unexpected call to compute hook")
 
     compute_reconfigure_listener.register_on_notify(break_hook)
@@ -1300,11 +1304,11 @@ def test_storage_controller_heartbeats(
     node_to_tenants = build_node_to_tenants_map(env)
     log.info(f"Back online: {node_to_tenants=}")
 
-    # ... expecting the storage controller to reach a consistent state
-    def storage_controller_consistent():
-        env.storage_controller.consistency_check()
+    # ... background reconciliation may need to run to clean up the location on the node that was offline
+    env.storage_controller.reconcile_until_idle()
 
-    wait_until(30, 1, storage_controller_consistent)
+    # ... expecting the storage controller to reach a consistent state
+    env.storage_controller.consistency_check()
 
 
 def test_storage_controller_re_attach(neon_env_builder: NeonEnvBuilder):

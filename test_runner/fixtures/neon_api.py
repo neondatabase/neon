@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, cast
 import requests
 
 if TYPE_CHECKING:
-    from typing import Any, Literal, Optional, Union
+    from typing import Any, Literal, Optional
 
     from fixtures.pg_version import PgVersion
 
@@ -25,9 +25,7 @@ class NeonAPI:
         self.__neon_api_key = neon_api_key
         self.__neon_api_base_url = neon_api_base_url.strip("/")
 
-    def __request(
-        self, method: Union[str, bytes], endpoint: str, **kwargs: Any
-    ) -> requests.Response:
+    def __request(self, method: str | bytes, endpoint: str, **kwargs: Any) -> requests.Response:
         if "headers" not in kwargs:
             kwargs["headers"] = {}
         kwargs["headers"]["Authorization"] = f"Bearer {self.__neon_api_key}"

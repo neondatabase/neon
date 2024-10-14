@@ -13,6 +13,7 @@ import boto3
 import toml
 from moto.server import ThreadedMotoServer
 from mypy_boto3_s3 import S3Client
+from typing_extensions import override
 
 from fixtures.common_types import TenantId, TenantShardId, TimelineId
 from fixtures.log_helper import log
@@ -36,6 +37,7 @@ class RemoteStorageUser(str, enum.Enum):
     EXTENSIONS = "ext"
     SAFEKEEPER = "safekeeper"
 
+    @override
     def __str__(self) -> str:
         return self.value
 
@@ -81,11 +83,13 @@ class LocalFsStorage:
     def timeline_path(self, tenant_id: TenantId, timeline_id: TimelineId) -> Path:
         return self.tenant_path(tenant_id) / "timelines" / str(timeline_id)
 
-    def timeline_latest_generation(self, tenant_id, timeline_id):
+    def timeline_latest_generation(
+        self, tenant_id: TenantId, timeline_id: TimelineId
+    ) -> Optional[int]:
         timeline_files = os.listdir(self.timeline_path(tenant_id, timeline_id))
         index_parts = [f for f in timeline_files if f.startswith("index_part")]
 
-        def parse_gen(filename):
+        def parse_gen(filename: str) -> Optional[int]:
             log.info(f"parsing index_part '{filename}'")
             parts = filename.split("-")
             if len(parts) == 2:
@@ -93,7 +97,7 @@ class LocalFsStorage:
             else:
                 return None
 
-        generations = sorted([parse_gen(f) for f in index_parts])
+        generations = sorted([parse_gen(f) for f in index_parts])  # type: ignore
         if len(generations) == 0:
             raise RuntimeError(f"No index_part found for {tenant_id}/{timeline_id}")
         return generations[-1]
@@ -122,14 +126,14 @@ class LocalFsStorage:
         filename = f"{local_name}-{generation:08x}"
         return self.timeline_path(tenant_id, timeline_id) / filename
 
-    def index_content(self, tenant_id: TenantId, timeline_id: TimelineId):
+    def index_content(self, tenant_id: TenantId, timeline_id: TimelineId) -> Any:
         with self.index_path(tenant_id, timeline_id).open("r") as f:
             return json.load(f)
 
     def heatmap_path(self, tenant_id: TenantId) -> Path:
         return self.tenant_path(tenant_id) / TENANT_HEATMAP_FILE_NAME
 
-    def heatmap_content(self, tenant_id):
+    def heatmap_content(self, tenant_id: TenantId) -> Any:
         with self.heatmap_path(tenant_id).open("r") as f:
             return json.load(f)
 
@@ -297,7 +301,7 @@ class S3Storage:
     def heatmap_key(self, tenant_id: TenantId) -> str:
         return f"{self.tenant_path(tenant_id)}/{TENANT_HEATMAP_FILE_NAME}"
 
-    def heatmap_content(self, tenant_id: TenantId):
+    def heatmap_content(self, tenant_id: TenantId) -> Any:
         r = self.client.get_object(Bucket=self.bucket_name, Key=self.heatmap_key(tenant_id))
         return json.loads(r["Body"].read().decode("utf-8"))
 
@@ -317,7 +321,7 @@ class RemoteStorageKind(str, enum.Enum):
     def configure(
         self,
         repo_dir: Path,
-        mock_s3_server,
+        mock_s3_server: MockS3Server,
         run_id: str,
         test_name: str,
         user: RemoteStorageUser,
@@ -451,15 +455,9 @@ def default_remote_storage() -> RemoteStorageKind:
 
 
 def remote_storage_to_toml_dict(remote_storage: RemoteStorage) -> dict[str, Any]:
-    if not isinstance(remote_storage, (LocalFsStorage, S3Storage)):
-        raise Exception("invalid remote storage type")
-
     return remote_storage.to_toml_dict()
 
 
 # serialize as toml inline table
 def remote_storage_to_toml_inline_table(remote_storage: RemoteStorage) -> str:
-    if not isinstance(remote_storage, (LocalFsStorage, S3Storage)):
-        raise Exception("invalid remote storage type")
-
     return remote_storage.to_toml_inline_table()

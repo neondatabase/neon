@@ -48,13 +48,14 @@ use std::pin::{pin, Pin};
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn, Instrument};
+use tracing::{info, warn, Instrument};
 use utils::http::error::ApiError;
 
 pub(crate) const SERVERLESS_DRIVER_SNI: &str = "api";
 
 pub async fn task_main(
     config: &'static ProxyConfig,
+    auth_backend: &'static crate::auth::Backend<'static, (), ()>,
     ws_listener: TcpListener,
     cancellation_token: CancellationToken,
     cancellation_handler: Arc<CancellationHandlerMain>,
@@ -110,6 +111,7 @@ pub async fn task_main(
         local_pool,
         pool: Arc::clone(&conn_pool),
         config,
+        auth_backend,
         endpoint_rate_limiter: Arc::clone(&endpoint_rate_limiter),
     });
     let tls_acceptor: Arc<dyn MaybeTlsAcceptor> = match config.tls_config.as_ref() {
@@ -241,7 +243,7 @@ async fn connection_startup(
     let (conn, peer) = match read_proxy_protocol(conn).await {
         Ok(c) => c,
         Err(e) => {
-            tracing::error!(?session_id, %peer_addr, "failed to accept TCP connection: invalid PROXY protocol V2 header: {e:#}");
+            tracing::warn!(?session_id, %peer_addr, "failed to accept TCP connection: invalid PROXY protocol V2 header: {e:#}");
             return None;
         }
     };
@@ -397,6 +399,7 @@ async fn request_handler(
             async move {
                 if let Err(e) = websocket::serve_websocket(
                     config,
+                    backend.auth_backend,
                     ctx,
                     websocket,
                     cancellation_handler,
@@ -405,7 +408,7 @@ async fn request_handler(
                 )
                 .await
                 {
-                    error!("error in websocket connection: {e:#}");
+                    warn!("error in websocket connection: {e:#}");
                 }
             }
             .instrument(span),

@@ -18,7 +18,6 @@ from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from fcntl import LOCK_EX, LOCK_UN, flock
 from functools import cached_property
 from pathlib import Path
 from types import TracebackType
@@ -59,6 +58,7 @@ from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pageserver.utils import (
     wait_for_last_record_lsn,
 )
+from fixtures.paths import get_test_repo_dir, shared_snapshot_dir
 from fixtures.pg_version import PgVersion
 from fixtures.port_distributor import PortDistributor
 from fixtures.remote_storage import (
@@ -75,8 +75,8 @@ from fixtures.safekeeper.http import SafekeeperHttpClient
 from fixtures.safekeeper.utils import wait_walreceivers_absent
 from fixtures.utils import (
     ATTACHMENT_NAME_REGEX,
+    COMPONENT_BINARIES,
     allure_add_grafana_links,
-    allure_attach_from_dir,
     assert_no_errors,
     get_dir_size,
     print_gc_result,
@@ -95,6 +95,8 @@ if TYPE_CHECKING:
         TypeVar,
         Union,
     )
+
+    from fixtures.paths import SnapshotDirLocked
 
     T = TypeVar("T")
 
@@ -118,63 +120,9 @@ put directly-importable functions into utils.py or another separate file.
 
 Env = dict[str, str]
 
-DEFAULT_OUTPUT_DIR: str = "test_output"
 DEFAULT_BRANCH_NAME: str = "main"
 
 BASE_PORT: int = 15000
-
-
-@pytest.fixture(scope="session")
-def base_dir() -> Iterator[Path]:
-    # find the base directory (currently this is the git root)
-    base_dir = Path(__file__).parents[2]
-    log.info(f"base_dir is {base_dir}")
-
-    yield base_dir
-
-
-@pytest.fixture(scope="function")
-def neon_binpath(base_dir: Path, build_type: str) -> Iterator[Path]:
-    if os.getenv("REMOTE_ENV"):
-        # we are in remote env and do not have neon binaries locally
-        # this is the case for benchmarks run on self-hosted runner
-        return
-
-    # Find the neon binaries.
-    if env_neon_bin := os.environ.get("NEON_BIN"):
-        binpath = Path(env_neon_bin)
-    else:
-        binpath = base_dir / "target" / build_type
-    log.info(f"neon_binpath is {binpath}")
-
-    if not (binpath / "pageserver").exists():
-        raise Exception(f"neon binaries not found at '{binpath}'")
-
-    yield binpath
-
-
-@pytest.fixture(scope="session")
-def pg_distrib_dir(base_dir: Path) -> Iterator[Path]:
-    if env_postgres_bin := os.environ.get("POSTGRES_DISTRIB_DIR"):
-        distrib_dir = Path(env_postgres_bin).resolve()
-    else:
-        distrib_dir = base_dir / "pg_install"
-
-    log.info(f"pg_distrib_dir is {distrib_dir}")
-    yield distrib_dir
-
-
-@pytest.fixture(scope="session")
-def top_output_dir(base_dir: Path) -> Iterator[Path]:
-    # Compute the top-level directory for all tests.
-    if env_test_output := os.environ.get("TEST_OUTPUT"):
-        output_dir = Path(env_test_output).resolve()
-    else:
-        output_dir = base_dir / DEFAULT_OUTPUT_DIR
-    output_dir.mkdir(exist_ok=True)
-
-    log.info(f"top_output_dir is {output_dir}")
-    yield output_dir
 
 
 @pytest.fixture(scope="session")
@@ -369,11 +317,14 @@ class NeonEnvBuilder:
         run_id: uuid.UUID,
         mock_s3_server: MockS3Server,
         neon_binpath: Path,
+        compatibility_neon_binpath: Path,
         pg_distrib_dir: Path,
+        compatibility_pg_distrib_dir: Path,
         pg_version: PgVersion,
         test_name: str,
         top_output_dir: Path,
         test_output_dir: Path,
+        combination,
         test_overlay_dir: Optional[Path] = None,
         pageserver_remote_storage: Optional[RemoteStorage] = None,
         # toml that will be decomposed into `--config-override` flags during `pageserver --init`
@@ -455,6 +406,19 @@ class NeonEnvBuilder:
             "test_"
         ), "Unexpectedly instantiated from outside a test function"
         self.test_name = test_name
+        self.compatibility_neon_binpath = compatibility_neon_binpath
+        self.compatibility_pg_distrib_dir = compatibility_pg_distrib_dir
+        self.version_combination = combination
+        self.mixdir = self.test_output_dir / "mixdir_neon"
+        if self.version_combination is not None:
+            assert (
+                self.compatibility_neon_binpath is not None
+            ), "the environment variable COMPATIBILITY_NEON_BIN is required when using mixed versions"
+            assert (
+                self.compatibility_pg_distrib_dir is not None
+            ), "the environment variable COMPATIBILITY_POSTGRES_DISTRIB_DIR is required when using mixed versions"
+            self.mixdir.mkdir(mode=0o755, exist_ok=True)
+            self._mix_versions()
 
     def init_configs(self, default_remote_storage_if_missing: bool = True) -> NeonEnv:
         # Cannot create more than one environment from one builder
@@ -654,6 +618,21 @@ class NeonEnvBuilder:
             toml.dump(config, f)
 
         return self.env
+
+    def _mix_versions(self):
+        assert self.version_combination is not None, "version combination must be set"
+        for component, paths in COMPONENT_BINARIES.items():
+            directory = (
+                self.neon_binpath
+                if self.version_combination[component] == "new"
+                else self.compatibility_neon_binpath
+            )
+            for filename in paths:
+                destination = self.mixdir / filename
+                destination.symlink_to(directory / filename)
+        if self.version_combination["compute"] == "old":
+            self.pg_distrib_dir = self.compatibility_pg_distrib_dir
+        self.neon_binpath = self.mixdir
 
     def overlay_mount(self, ident: str, srcdir: Path, dstdir: Path):
         """
@@ -1403,7 +1382,9 @@ def neon_simple_env(
     top_output_dir: Path,
     test_output_dir: Path,
     neon_binpath: Path,
+    compatibility_neon_binpath: Path,
     pg_distrib_dir: Path,
+    compatibility_pg_distrib_dir: Path,
     pg_version: PgVersion,
     pageserver_virtual_file_io_engine: str,
     pageserver_aux_file_policy: Optional[AuxFileStore],
@@ -1418,6 +1399,11 @@ def neon_simple_env(
 
     # Create the environment in the per-test output directory
     repo_dir = get_test_repo_dir(request, top_output_dir)
+    combination = (
+        request._pyfuncitem.callspec.params["combination"]
+        if "combination" in request._pyfuncitem.callspec.params
+        else None
+    )
 
     with NeonEnvBuilder(
         top_output_dir=top_output_dir,
@@ -1425,7 +1411,9 @@ def neon_simple_env(
         port_distributor=port_distributor,
         mock_s3_server=mock_s3_server,
         neon_binpath=neon_binpath,
+        compatibility_neon_binpath=compatibility_neon_binpath,
         pg_distrib_dir=pg_distrib_dir,
+        compatibility_pg_distrib_dir=compatibility_pg_distrib_dir,
         pg_version=pg_version,
         run_id=run_id,
         preserve_database_files=cast(bool, pytestconfig.getoption("--preserve-database-files")),
@@ -1435,6 +1423,7 @@ def neon_simple_env(
         pageserver_aux_file_policy=pageserver_aux_file_policy,
         pageserver_default_tenant_config_compaction_algorithm=pageserver_default_tenant_config_compaction_algorithm,
         pageserver_virtual_file_io_mode=pageserver_virtual_file_io_mode,
+        combination=combination,
     ) as builder:
         env = builder.init_start()
 
@@ -1448,7 +1437,9 @@ def neon_env_builder(
     port_distributor: PortDistributor,
     mock_s3_server: MockS3Server,
     neon_binpath: Path,
+    compatibility_neon_binpath: Path,
     pg_distrib_dir: Path,
+    compatibility_pg_distrib_dir: Path,
     pg_version: PgVersion,
     run_id: uuid.UUID,
     request: FixtureRequest,
@@ -1475,6 +1466,11 @@ def neon_env_builder(
 
     # Create the environment in the test-specific output dir
     repo_dir = os.path.join(test_output_dir, "repo")
+    combination = (
+        request._pyfuncitem.callspec.params["combination"]
+        if "combination" in request._pyfuncitem.callspec.params
+        else None
+    )
 
     # Return the builder to the caller
     with NeonEnvBuilder(
@@ -1483,7 +1479,10 @@ def neon_env_builder(
         port_distributor=port_distributor,
         mock_s3_server=mock_s3_server,
         neon_binpath=neon_binpath,
+        compatibility_neon_binpath=compatibility_neon_binpath,
         pg_distrib_dir=pg_distrib_dir,
+        compatibility_pg_distrib_dir=compatibility_pg_distrib_dir,
+        combination=combination,
         pg_version=pg_version,
         run_id=run_id,
         preserve_database_files=cast(bool, pytestconfig.getoption("--preserve-database-files")),
@@ -3657,7 +3656,7 @@ class Endpoint(PgProtocol, LogUtils):
         config_lines: Optional[list[str]] = None,
         remote_ext_config: Optional[str] = None,
         pageserver_id: Optional[int] = None,
-        allow_multiple=False,
+        allow_multiple: bool = False,
         basebackup_request_tries: Optional[int] = None,
     ) -> Endpoint:
         """
@@ -3998,7 +3997,7 @@ class Safekeeper(LogUtils):
     def timeline_dir(self, tenant_id, timeline_id) -> Path:
         return self.data_dir / str(tenant_id) / str(timeline_id)
 
-    # List partial uploaded segments of this safekeeper. Works only for
+    # list partial uploaded segments of this safekeeper. Works only for
     # RemoteStorageKind.LOCAL_FS.
     def list_uploaded_segments(self, tenant_id: TenantId, timeline_id: TimelineId):
         tline_path = (
@@ -4246,44 +4245,6 @@ class StorageScrubber:
             raise
 
 
-def _get_test_dir(request: FixtureRequest, top_output_dir: Path, prefix: str) -> Path:
-    """Compute the path to a working directory for an individual test."""
-    test_name = request.node.name
-    test_dir = top_output_dir / f"{prefix}{test_name.replace('/', '-')}"
-
-    # We rerun flaky tests multiple times, use a separate directory for each run.
-    if (suffix := getattr(request.node, "execution_count", None)) is not None:
-        test_dir = test_dir.parent / f"{test_dir.name}-{suffix}"
-
-    log.info(f"get_test_output_dir is {test_dir}")
-    # make mypy happy
-    assert isinstance(test_dir, Path)
-    return test_dir
-
-
-def get_test_output_dir(request: FixtureRequest, top_output_dir: Path) -> Path:
-    """
-    The working directory for a test.
-    """
-    return _get_test_dir(request, top_output_dir, "")
-
-
-def get_test_overlay_dir(request: FixtureRequest, top_output_dir: Path) -> Path:
-    """
-    Directory that contains `upperdir` and `workdir` for overlayfs mounts
-    that a test creates. See `NeonEnvBuilder.overlay_mount`.
-    """
-    return _get_test_dir(request, top_output_dir, "overlay-")
-
-
-def get_shared_snapshot_dir_path(top_output_dir: Path, snapshot_name: str) -> Path:
-    return top_output_dir / "shared-snapshots" / snapshot_name
-
-
-def get_test_repo_dir(request: FixtureRequest, top_output_dir: Path) -> Path:
-    return get_test_output_dir(request, top_output_dir) / "repo"
-
-
 def pytest_addoption(parser: Parser):
     parser.addoption(
         "--preserve-database-files",
@@ -4293,152 +4254,9 @@ def pytest_addoption(parser: Parser):
     )
 
 
-SMALL_DB_FILE_NAME_REGEX: re.Pattern = re.compile(  # type: ignore[type-arg]
+SMALL_DB_FILE_NAME_REGEX: re.Pattern[str] = re.compile(
     r"config-v1|heatmap-v1|metadata|.+\.(?:toml|pid|json|sql|conf)"
 )
-
-
-# This is autouse, so the test output directory always gets created, even
-# if a test doesn't put anything there.
-#
-# NB: we request the overlay dir fixture so the fixture does its cleanups
-@pytest.fixture(scope="function", autouse=True)
-def test_output_dir(
-    request: FixtureRequest, top_output_dir: Path, test_overlay_dir: Path
-) -> Iterator[Path]:
-    """Create the working directory for an individual test."""
-
-    # one directory per test
-    test_dir = get_test_output_dir(request, top_output_dir)
-    log.info(f"test_output_dir is {test_dir}")
-    shutil.rmtree(test_dir, ignore_errors=True)
-    test_dir.mkdir()
-
-    yield test_dir
-
-    # Allure artifacts creation might involve the creation of `.tar.zst` archives,
-    # which aren't going to be used if Allure results collection is not enabled
-    # (i.e. --alluredir is not set).
-    # Skip `allure_attach_from_dir` in this case
-    if not request.config.getoption("--alluredir"):
-        return
-
-    preserve_database_files = False
-    for k, v in request.node.user_properties:
-        # NB: the neon_env_builder fixture uses this fixture (test_output_dir).
-        # So, neon_env_builder's cleanup runs before here.
-        # The cleanup propagates NeonEnvBuilder.preserve_database_files into this user property.
-        if k == "preserve_database_files":
-            assert isinstance(v, bool)
-            preserve_database_files = v
-
-    allure_attach_from_dir(test_dir, preserve_database_files)
-
-
-class FileAndThreadLock:
-    def __init__(self, path: Path):
-        self.path = path
-        self.thread_lock = threading.Lock()
-        self.fd: Optional[int] = None
-
-    def __enter__(self):
-        self.fd = os.open(self.path, os.O_CREAT | os.O_WRONLY)
-        # lock thread lock before file lock so that there's no race
-        # around flocking / funlocking the file lock
-        self.thread_lock.acquire()
-        flock(self.fd, LOCK_EX)
-
-    def __exit__(self, exc_type, exc_value, exc_traceback):
-        assert self.fd is not None
-        assert self.thread_lock.locked()  # ... by us
-        flock(self.fd, LOCK_UN)
-        self.thread_lock.release()
-        os.close(self.fd)
-        self.fd = None
-
-
-class SnapshotDirLocked:
-    def __init__(self, parent: SnapshotDir):
-        self._parent = parent
-
-    def is_initialized(self):
-        # TODO: in the future, take a `tag` as argument and store it in the marker in set_initialized.
-        # Then, in this function, compare marker file contents with the tag to invalidate the snapshot if the tag changed.
-        return self._parent._marker_file_path.exists()
-
-    def set_initialized(self):
-        self._parent._marker_file_path.write_text("")
-
-    @property
-    def path(self) -> Path:
-        return self._parent._path / "snapshot"
-
-
-class SnapshotDir:
-    _path: Path
-
-    def __init__(self, path: Path):
-        self._path = path
-        assert self._path.is_dir()
-        self._lock = FileAndThreadLock(self._lock_file_path)
-
-    @property
-    def _lock_file_path(self) -> Path:
-        return self._path / "initializing.flock"
-
-    @property
-    def _marker_file_path(self) -> Path:
-        return self._path / "initialized.marker"
-
-    def __enter__(self) -> SnapshotDirLocked:
-        self._lock.__enter__()
-        return SnapshotDirLocked(self)
-
-    def __exit__(self, exc_type, exc_value, exc_traceback):
-        self._lock.__exit__(exc_type, exc_value, exc_traceback)
-
-
-def shared_snapshot_dir(top_output_dir, ident: str) -> SnapshotDir:
-    snapshot_dir_path = get_shared_snapshot_dir_path(top_output_dir, ident)
-    snapshot_dir_path.mkdir(exist_ok=True, parents=True)
-    return SnapshotDir(snapshot_dir_path)
-
-
-@pytest.fixture(scope="function")
-def test_overlay_dir(request: FixtureRequest, top_output_dir: Path) -> Optional[Path]:
-    """
-    Idempotently create a test's overlayfs mount state directory.
-    If the functionality isn't enabled via env var, returns None.
-
-    The procedure cleans up after previous runs that were aborted (e.g. due to Ctrl-C, OOM kills, etc).
-    """
-
-    if os.getenv("NEON_ENV_BUILDER_USE_OVERLAYFS_FOR_SNAPSHOTS") is None:
-        return None
-
-    overlay_dir = get_test_overlay_dir(request, top_output_dir)
-    log.info(f"test_overlay_dir is {overlay_dir}")
-
-    overlay_dir.mkdir(exist_ok=True)
-    # unmount stale overlayfs mounts which subdirectories of `overlay_dir/*` as the overlayfs `upperdir` and `workdir`
-    for mountpoint in overlayfs.iter_mounts_beneath(get_test_output_dir(request, top_output_dir)):
-        cmd = ["sudo", "umount", str(mountpoint)]
-        log.info(
-            f"Unmounting stale overlayfs mount probably created during earlier test run: {cmd}"
-        )
-        subprocess.run(cmd, capture_output=True, check=True)
-    # the overlayfs `workdir`` is owned by `root`, shutil.rmtree won't work.
-    cmd = ["sudo", "rm", "-rf", str(overlay_dir)]
-    subprocess.run(cmd, capture_output=True, check=True)
-
-    overlay_dir.mkdir()
-
-    return overlay_dir
-
-    # no need to clean up anything: on clean shutdown,
-    # NeonEnvBuilder.overlay_cleanup_teardown takes care of cleanup
-    # and on unclean shutdown, this function will take care of it
-    # on the next test run
 
 
 SKIP_DIRS = frozenset(

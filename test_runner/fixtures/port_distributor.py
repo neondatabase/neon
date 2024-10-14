@@ -59,10 +59,7 @@ class PortDistributor:
         if isinstance(value, int):
             return self._replace_port_int(value)
 
-        if isinstance(value, str):
-            return self._replace_port_str(value)
-
-        raise TypeError(f"unsupported type {type(value)} of {value=}")
+        return self._replace_port_str(value)
 
     def _replace_port_int(self, value: int) -> int:
         known_port = self.port_map.get(value)
@@ -75,7 +72,7 @@ class PortDistributor:
         # Use regex to find port in a string
         # urllib.parse.urlparse produces inconvenient results for cases without scheme like "localhost:5432"
         # See https://bugs.python.org/issue27657
-        ports = re.findall(r":(\d+)(?:/|$)", value)
+        ports: list[str] = re.findall(r":(\d+)(?:/|$)", value)
         assert len(ports) == 1, f"can't find port in {value}"
         port_int = int(ports[0])
 

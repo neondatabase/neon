@@ -886,7 +886,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         self,
         tenant_id: Union[TenantId, TenantShardId],
         timeline_id: TimelineId,
-        batch_size: int | None = None,
+        batch_size: Optional[int] = None,
         **kwargs,
     ) -> set[TimelineId]:
         params = {}
