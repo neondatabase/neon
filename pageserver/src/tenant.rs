@@ -1920,7 +1920,7 @@ impl Tenant {
                     new_timeline_id,
                     pg_version,
                     existing_initdb_timeline_id,
-                    broker_client,
+                    ActivateTimelineArgs::Yes { broker_client },
                     ctx,
                 )
                 .await
@@ -1976,8 +1976,14 @@ impl Tenant {
                         })?;
                 }
 
-                self.branch_timeline(&ancestor_timeline, new_timeline_id, ancestor_start_lsn, broker_client, ctx)
-                    .await
+                self.branch_timeline(
+                    &ancestor_timeline,
+                    new_timeline_id,
+                    ancestor_start_lsn,
+                    ActivateTimelineArgs::Yes { broker_client },
+                    ctx,
+                )
+                .await
             }
         }
     }
@@ -2754,6 +2760,14 @@ where
     Ok(result)
 }
 
+enum ActivateTimelineArgs {
+    Yes {
+        broker_client: storage_broker::BrokerClientChannel,
+    },
+    #[cfg(test)]
+    No,
+}
+
 impl Tenant {
     pub fn tenant_specific_overrides(&self) -> TenantConfOpt {
         self.tenant_conf.load().tenant_conf.clone()
@@ -3422,14 +3436,20 @@ impl Tenant {
     /// timeline background tasks are launched, except the flush loop.
     #[cfg(test)]
     async fn branch_timeline_test(
-        &self,
+        self: &Arc<Self>,
         src_timeline: &Arc<Timeline>,
         dst_id: TimelineId,
         ancestor_lsn: Option<Lsn>,
         ctx: &RequestContext,
     ) -> Result<Arc<Timeline>, CreateTimelineError> {
         let tl = self
-            .branch_timeline_impl(src_timeline, dst_id, ancestor_lsn, ctx)
+            .branch_timeline_impl(
+                src_timeline,
+                dst_id,
+                ancestor_lsn,
+                ActivateTimelineArgs::No,
+                ctx,
+            )
             .await?;
         tl.set_state(TimelineState::Active);
         Ok(tl)
@@ -3439,7 +3459,7 @@ impl Tenant {
     #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub async fn branch_timeline_test_with_layers(
-        &self,
+        self: &Arc<Self>,
         src_timeline: &Arc<Timeline>,
         dst_id: TimelineId,
         ancestor_lsn: Option<Lsn>,
@@ -3492,10 +3512,10 @@ impl Tenant {
         src_timeline: &Arc<Timeline>,
         dst_id: TimelineId,
         start_lsn: Option<Lsn>,
-        broker_client: storage_broker::BrokerClientChannel,
+        activate: ActivateTimelineArgs,
         ctx: &RequestContext,
     ) -> Result<Arc<Timeline>, CreateTimelineError> {
-        self.branch_timeline_impl(src_timeline, dst_id, start_lsn, broker_client, ctx)
+        self.branch_timeline_impl(src_timeline, dst_id, start_lsn, activate, ctx)
             .await
     }
 
@@ -3504,7 +3524,7 @@ impl Tenant {
         src_timeline: &Arc<Timeline>,
         dst_id: TimelineId,
         start_lsn: Option<Lsn>,
-        broker_client: storage_broker::BrokerClientChannel,
+        activate: ActivateTimelineArgs,
         ctx: &RequestContext,
     ) -> Result<Arc<Timeline>, CreateTimelineError> {
         let src_id = src_timeline.timeline_id;
@@ -3632,7 +3652,13 @@ impl Tenant {
             .await
             .context("wait for timeline initial uploads to complete")?;
 
-        new_timeline.activate(self.clone(), broker_client, None, ctx);
+        match activate {
+            ActivateTimelineArgs::Yes { broker_client } => {
+                new_timeline.activate(self.clone(), broker_client, None, ctx);
+            }
+            #[cfg(test)]
+            ActivateTimelineArgs::No => {}
+        }
 
         Ok(new_timeline)
     }
@@ -3641,14 +3667,21 @@ impl Tenant {
     #[cfg(test)]
     #[tracing::instrument(skip_all, fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), %timeline_id))]
     pub(crate) async fn bootstrap_timeline_test(
-        &self,
+        self: &Arc<Self>,
         timeline_id: TimelineId,
         pg_version: u32,
         load_existing_initdb: Option<TimelineId>,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Timeline>> {
-        self.bootstrap_timeline(timeline_id, pg_version, load_existing_initdb, ctx)
-            .await
+        self.bootstrap_timeline(
+            timeline_id,
+            pg_version,
+            load_existing_initdb,
+            ActivateTimelineArgs::No,
+            ctx,
+        )
+        .await
+        .map_err(anyhow::Error::new)
     }
 
     /// Get exclusive access to the timeline ID for creation.
@@ -3796,7 +3829,7 @@ impl Tenant {
         timeline_id: TimelineId,
         pg_version: u32,
         load_existing_initdb: Option<TimelineId>,
-        broker_client: storage_broker::BrokerClientChannel,
+        activate: ActivateTimelineArgs,
         ctx: &RequestContext,
     ) -> Result<Arc<Timeline>, CreateTimelineError> {
         let timeline_create_guard = match self
@@ -3957,7 +3990,13 @@ impl Tenant {
             .await
             .context("wait for timeline initial uploads to complete")?;
 
-        timeline.activate(self.clone(), broker_client, None, ctx);
+        match activate {
+            ActivateTimelineArgs::Yes { broker_client } => {
+                timeline.activate(self.clone(), broker_client, None, ctx);
+            }
+            #[cfg(test)]
+            ActivateTimelineArgs::No => {}
+        }
 
         Ok(timeline)
     }

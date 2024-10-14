@@ -474,7 +474,6 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         existing_initdb_timeline_id: Optional[TimelineId] = None,
         **kwargs,
     ) -> dict[Any, Any]:
-
         body: dict[str, Any] = {
             "new_timeline_id": str(new_timeline_id),
         }
