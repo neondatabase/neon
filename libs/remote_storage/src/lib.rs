@@ -19,7 +19,12 @@ mod simulate_failures;
 mod support;
 
 use std::{
-    collections::HashMap, fmt::Debug, num::NonZeroU32, ops::Bound, pin::Pin, sync::Arc,
+    collections::HashMap,
+    fmt::Debug,
+    num::NonZeroU32,
+    ops::Bound,
+    pin::{pin, Pin},
+    sync::Arc,
     time::SystemTime,
 };
 
@@ -28,6 +33,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 
 use bytes::Bytes;
 use futures::{stream::Stream, StreamExt};
+use itertools::Itertools as _;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
@@ -261,7 +267,7 @@ pub trait RemoteStorage: Send + Sync + 'static {
         max_keys: Option<NonZeroU32>,
         cancel: &CancellationToken,
     ) -> Result<Listing, DownloadError> {
-        let mut stream = std::pin::pin!(self.list_streaming(prefix, mode, max_keys, cancel));
+        let mut stream = pin!(self.list_streaming(prefix, mode, max_keys, cancel));
         let mut combined = stream.next().await.expect("At least one item required")?;
         while let Some(list) = stream.next().await {
             let list = list?;
@@ -323,6 +329,37 @@ pub trait RemoteStorage: Send + Sync + 'static {
         paths: &'a [RemotePath],
         cancel: &CancellationToken,
     ) -> anyhow::Result<()>;
+
+    /// Deletes all objects matching the given prefix.
+    ///
+    /// NB: this uses NoDelimiter and will match partial prefixes. For example, the prefix /a/b will
+    /// delete /a/b, /a/b/*, /a/bc, /a/bc/*, etc.
+    ///
+    /// If the operation fails because of timeout or cancellation, the root cause of the error will
+    /// be set to `TimeoutOrCancel`. In such situation it is unknown which deletions, if any, went
+    /// through.
+    ///
+    /// TODO: add an integration test.
+    async fn delete_prefix(
+        &self,
+        prefix: &RemotePath,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<()> {
+        let mut stream =
+            pin!(self.list_streaming(Some(prefix), ListingMode::NoDelimiter, None, cancel));
+        while let Some(result) = stream.next().await {
+            let keys = match result {
+                Ok(listing) if listing.keys.is_empty() => continue,
+                Ok(listing) => listing.keys.into_iter().map(|o| o.key).collect_vec(),
+                Err(DownloadError::Cancelled) => return Err(TimeoutOrCancel::Cancel.into()),
+                Err(DownloadError::Timeout) => return Err(TimeoutOrCancel::Timeout.into()),
+                Err(err) => return Err(err.into()),
+            };
+            tracing::info!("Deleting {} keys from remote storage", keys.len());
+            self.delete_objects(&keys, cancel).await?;
+        }
+        Ok(())
+    }
 
     /// Copy a remote object inside a bucket from one path to another.
     async fn copy(
@@ -485,6 +522,20 @@ impl<Other: RemoteStorage> GenericRemoteStorage<Arc<Other>> {
             Self::AwsS3(s) => s.delete_objects(paths, cancel).await,
             Self::AzureBlob(s) => s.delete_objects(paths, cancel).await,
             Self::Unreliable(s) => s.delete_objects(paths, cancel).await,
+        }
+    }
+
+    /// See [`RemoteStorage::delete_prefix`]
+    pub async fn delete_prefix(
+        &self,
+        prefix: &RemotePath,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<()> {
+        match self {
+            Self::LocalFs(s) => s.delete_prefix(prefix, cancel).await,
+            Self::AwsS3(s) => s.delete_prefix(prefix, cancel).await,
+            Self::AzureBlob(s) => s.delete_prefix(prefix, cancel).await,
+            Self::Unreliable(s) => s.delete_prefix(prefix, cancel).await,
         }
     }
 

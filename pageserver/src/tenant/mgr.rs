@@ -11,6 +11,7 @@ use pageserver_api::shard::{
 };
 use pageserver_api::upcall_api::ReAttachResponseTenant;
 use rand::{distributions::Alphanumeric, Rng};
+use remote_storage::TimeoutOrCancel;
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -1350,45 +1351,6 @@ impl TenantManager {
         }
     }
 
-    /// Deletes the tenant shard data from remote storage. If an unsharded tenant ID is given for a
-    /// sharded tenant, it will remove all shards for that tenant (i.e. all paths with the tenant ID
-    /// prefix) -- including stale shards.
-    async fn delete_tenant_remote(
-        &self,
-        tenant_shard_id: TenantShardId,
-    ) -> Result<(), DeleteTenantError> {
-        let remote_path = remote_tenant_path(&tenant_shard_id);
-        let mut keys_stream = self.resources.remote_storage.list_streaming(
-            Some(&remote_path),
-            remote_storage::ListingMode::NoDelimiter,
-            None,
-            &self.cancel,
-        );
-        while let Some(chunk) = keys_stream.next().await {
-            let keys = match chunk {
-                Ok(listing) => listing.keys,
-                Err(remote_storage::DownloadError::Cancelled) => {
-                    return Err(DeleteTenantError::Cancelled)
-                }
-                Err(remote_storage::DownloadError::NotFound) => return Ok(()),
-                Err(other) => return Err(DeleteTenantError::Other(anyhow::anyhow!(other))),
-            };
-
-            if keys.is_empty() {
-                tracing::info!("Remote storage already deleted");
-            } else {
-                tracing::info!("Deleting {} keys from remote storage", keys.len());
-                let keys = keys.into_iter().map(|o| o.key).collect::<Vec<_>>();
-                self.resources
-                    .remote_storage
-                    .delete_objects(&keys, &self.cancel)
-                    .await?;
-            }
-        }
-
-        Ok(())
-    }
-
     /// If a tenant is attached, detach it.  Then remove its data from remote storage.
     ///
     /// A tenant is considered deleted once it is gone from remote storage.  It is the caller's
@@ -1453,25 +1415,27 @@ impl TenantManager {
         //   in 500 responses to delete requests.
         // - We keep the `SlotGuard` during this I/O, so that if a concurrent delete request comes in, it will
         //   503/retry, rather than kicking off a wasteful concurrent deletion.
-        match backoff::retry(
-            || async move { self.delete_tenant_remote(tenant_shard_id).await },
-            |e| match e {
-                DeleteTenantError::Cancelled => true,
-                DeleteTenantError::SlotError(_) => {
-                    unreachable!("Remote deletion doesn't touch slots")
-                }
-                _ => false,
+        backoff::retry(
+            || async move {
+                self.resources
+                    .remote_storage
+                    .delete_prefix(&remote_tenant_path(&tenant_shard_id), &self.cancel)
+                    .await
             },
+            TimeoutOrCancel::caused_by_cancel,
             1,
             3,
             &format!("delete_tenant[tenant_shard_id={tenant_shard_id}]"),
             &self.cancel,
         )
         .await
-        {
-            Some(r) => r,
-            None => Err(DeleteTenantError::Cancelled),
-        }
+        .unwrap_or(Err(TimeoutOrCancel::Cancel.into()))
+        .map_err(|err| {
+            if TimeoutOrCancel::caused_by_cancel(&err) {
+                return DeleteTenantError::Cancelled;
+            }
+            DeleteTenantError::Other(err)
+        })
     }
 
     #[instrument(skip_all, fields(tenant_id=%tenant.get_tenant_shard_id().tenant_id, shard_id=%tenant.get_tenant_shard_id().shard_slug(), new_shard_count=%new_shard_count.literal()))]
