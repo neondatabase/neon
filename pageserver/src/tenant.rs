@@ -3441,9 +3441,8 @@ impl Tenant {
         ancestor_lsn: Option<Lsn>,
         ctx: &RequestContext,
     ) -> Result<Arc<Timeline>, CreateTimelineError> {
-        let create_guard = self.create_timeline_create_guard(dst_id).unwrap();
         let tl = self
-            .branch_timeline_impl(src_timeline, dst_id, ancestor_lsn, create_guard, ctx)
+            .branch_timeline_impl(src_timeline, dst_id, ancestor_lsn, ctx)
             .await?;
         tl.set_state(TimelineState::Active);
         Ok(tl)
@@ -3668,7 +3667,10 @@ impl Tenant {
         state: CreatingTimelineState,
     ) -> Result<either::Either<TimelineCreateGuard<'_>, Arc<Timeline>>, CreateTimelineError> {
         match self.create_timeline_create_guard(new_timeline_id) {
-            Ok(create_guard) => Ok(either::Either::Left(create_guard)),
+            Ok(create_guard) => {
+                pausable_failpoint!("timeline-creation-after-uninit");
+                Ok(either::Either::Left(create_guard))
+            }
             Err(TimelineExclusionError::AlreadyCreating) => {
                 // Creation is in progress, we cannot create it again, and we cannot
                 // check if this request matches the existing one, so caller must try
@@ -3794,7 +3796,7 @@ impl Tenant {
         pg_version: u32,
         load_existing_initdb: Option<TimelineId>,
         ctx: &RequestContext,
-    ) -> anyhow::Result<Arc<Timeline>> {
+    ) -> Result<Arc<Timeline>, CreateTimelineError> {
         let timeline_create_guard = match self
             .start_creating_timeline(
                 timeline_id,
@@ -3869,7 +3871,9 @@ impl Tenant {
                 .context("extract initdb tar")?;
         } else {
             // Init temporarily repo to get bootstrap data, this creates a directory in the `pgdata_path` path
-            run_initdb(self.conf, &pgdata_path, pg_version, &self.cancel).await?;
+            run_initdb(self.conf, &pgdata_path, pg_version, &self.cancel)
+                .await
+                .context("run initdb")?;
 
             // Upload the created data dir to S3
             if self.tenant_shard_id().is_shard_zero() {
@@ -3924,7 +3928,9 @@ impl Tenant {
         })?;
 
         fail::fail_point!("before-checkpoint-new-timeline", |_| {
-            anyhow::bail!("failpoint before-checkpoint-new-timeline");
+            Err(CreateTimelineError::Other(anyhow::anyhow!(
+                "failpoint before-checkpoint-new-timeline"
+            )))
         });
 
         unfinished_timeline

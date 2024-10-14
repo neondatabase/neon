@@ -216,6 +216,7 @@ pub struct TimelineCreateRequest {
 }
 
 #[derive(Serialize, Deserialize, Clone)]
+#[serde(untagged)]
 pub enum TimelineCreateRequestMode {
     Bootstrap {
         #[serde(default)]
