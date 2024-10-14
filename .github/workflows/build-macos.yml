@@ -18,29 +18,12 @@ env:
 # - You can call a maximum of 20 unique reusable workflows from a single workflow file.
 # https://docs.github.com/en/actions/sharing-automations/reusing-workflows#limitations
 jobs:
-  check-permissions:
-    if: ${{ !contains(github.event.pull_request.labels.*.name, 'run-no-ci') }}
-    uses: ./.github/workflows/check-permissions.yml
-    with:
-      github-event-name: ${{ github.event_name}}
-
-  check-build-tools-image:
-    needs: [ check-permissions ]
-    uses: ./.github/workflows/check-build-tools-image.yml
-
-  build-build-tools-image:
-    needs: [ check-build-tools-image ]
-    uses: ./.github/workflows/build-build-tools-image.yml
-    with:
-      image-tag: ${{ needs.check-build-tools-image.outputs.image-tag }}
-    secrets: inherit
-
   files-changed:
     name: Detect what files changed
     runs-on: ubuntu-22.04
     timeout-minutes: 3
     outputs:
-      postgres_changes: ${{ steps.postgres_changes.outputs.chnages }}
+      postgres_changes: ${{ steps.postgres_changes.outputs.changes }}
     steps:
       - name: Checkout
         uses: actions/checkout@6ccd57f4c5d15bdc2fef309bd9fb6cc9db2ef1c6 # v4.1.7
@@ -61,7 +44,7 @@ jobs:
           ref: ${{ github.event_name != 'pull_request' && (github.event.merge_group.head_ref || github.ref) || ''}}
 
   check-macos-build:
-    needs: [ check-permissions, files-changed ]
+    needs: [ files-changed ]
     if: |
       contains(github.event.pull_request.labels.*.name, 'run-extra-build-macos')  ||
       contains(github.event.pull_request.labels.*.name, 'run-extra-build-*') ||
