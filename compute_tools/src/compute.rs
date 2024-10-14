@@ -1381,18 +1381,28 @@ LIMIT 100",
             .connect(NoTls)
             .context("Failed to connect to the database")?;
 
-        let query = "CREATE EXTENSION IF NOT EXISTS $1 WITH VERSION $2";
-        db_client
-            .query(query, &[&ext_name, &ext_version])
-            .context(format!("Failed to execute query: {}", query))?;
-
         let version_query = "SELECT extversion FROM pg_extension WHERE extname = $1";
-        let version: String = db_client
+        let version: Result<String> = db_client
             .query_one(version_query, &[&ext_name])
-            .context(format!("Failed to execute query: {}", version_query))?
-            .get(0);
+            .context(format!("Failed to execute query: {}", version_query))
+            .map(|row| row.get(0));
 
-        Ok(version)
+        if let Ok(installed_version) = version {
+            if installed_version == ext_version {
+                return Ok(installed_version);
+            }
+            let query = "ALTER EXTENSION $1 UPDATE TO $2";
+            db_client
+                .execute(query, &[&ext_name, &ext_version])
+                .context(format!("Failed to execute query: {}", query))?;
+        } else {
+            let query = "CREATE EXTENSION IF NOT EXISTS $1 WITH VERSION $2";
+            db_client
+                .execute(query, &[&ext_name, &ext_version])
+                .context(format!("Failed to execute query: {}", query))?;
+        }
+
+        Ok(ext_version.to_string())
     }
 
     #[tokio::main]
