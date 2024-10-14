@@ -265,7 +265,6 @@ impl Timeline {
         // turn vectored_gets into a keyspace
         let keyspace = {
             // add_key reuqires monotonicity
-            vectored_gets.sort_unstable();
             let mut acc = KeySpaceAccum::new();
             for key in vectored_gets
                 .into_iter()
