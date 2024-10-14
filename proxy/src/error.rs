@@ -49,6 +49,10 @@ pub enum ErrorKind {
     #[label(rename = "serviceratelimit")]
     ServiceRateLimit,
 
+    /// Proxy quota limit violation
+    #[label(rename = "quota")]
+    Quota,
+
     /// internal errors
     Service,
 
@@ -70,6 +74,7 @@ impl ErrorKind {
             ErrorKind::ClientDisconnect => "clientdisconnect",
             ErrorKind::RateLimit => "ratelimit",
             ErrorKind::ServiceRateLimit => "serviceratelimit",
+            ErrorKind::Quota => "quota",
             ErrorKind::Service => "service",
             ErrorKind::ControlPlane => "controlplane",
             ErrorKind::Postgres => "postgres",

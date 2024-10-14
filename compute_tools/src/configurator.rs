@@ -24,8 +24,7 @@ fn configurator_main_loop(compute: &Arc<ComputeNode>) {
         // Re-check the status after waking up
         if state.status == ComputeStatus::ConfigurationPending {
             info!("got configuration request");
-            state.status = ComputeStatus::Configuration;
-            compute.state_changed.notify_all();
+            state.set_status(ComputeStatus::Configuration, &compute.state_changed);
             drop(state);
 
             let mut new_status = ComputeStatus::Failed;

@@ -1,5 +1,5 @@
 use dashmap::DashMap;
-use hyper1::client::conn::http2;
+use hyper::client::conn::http2;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use parking_lot::RwLock;
 use rand::Rng;
@@ -8,7 +8,7 @@ use std::sync::atomic::{self, AtomicUsize};
 use std::{sync::Arc, sync::Weak};
 use tokio::net::TcpStream;
 
-use crate::console::messages::{ColdStartInfo, MetricsAuxInfo};
+use crate::control_plane::messages::{ColdStartInfo, MetricsAuxInfo};
 use crate::metrics::{HttpEndpointPoolsGuard, Metrics};
 use crate::usage_metrics::{Ids, MetricCounter, USAGE_METRICS};
 use crate::{context::RequestMonitoring, EndpointCacheKey};
@@ -18,9 +18,9 @@ use tracing::{info, info_span, Instrument};
 
 use super::conn_pool::ConnInfo;
 
-pub(crate) type Send = http2::SendRequest<hyper1::body::Incoming>;
+pub(crate) type Send = http2::SendRequest<hyper::body::Incoming>;
 pub(crate) type Connect =
-    http2::Connection<TokioIo<TcpStream>, hyper1::body::Incoming, TokioExecutor>;
+    http2::Connection<TokioIo<TcpStream>, hyper::body::Incoming, TokioExecutor>;
 
 #[derive(Clone)]
 struct ConnPoolEntry {

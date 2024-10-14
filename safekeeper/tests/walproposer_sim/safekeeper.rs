@@ -13,7 +13,7 @@ use desim::{
     node_os::NodeOs,
     proto::{AnyMessage, NetEvent, NodeEvent},
 };
-use hyper0::Uri;
+use http::Uri;
 use safekeeper::{
     safekeeper::{ProposerAcceptorMessage, SafeKeeper, ServerInfo, UNKNOWN_SERVER_VERSION},
     state::{TimelinePersistentState, TimelineState},

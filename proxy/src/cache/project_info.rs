@@ -16,7 +16,7 @@ use tracing::{debug, info};
 use crate::{
     auth::IpPattern,
     config::ProjectInfoCacheOptions,
-    console::AuthSecret,
+    control_plane::AuthSecret,
     intern::{EndpointIdInt, ProjectIdInt, RoleNameInt},
     EndpointId, RoleName,
 };

@@ -20,6 +20,8 @@ from shutdown checkpoint, using the CLOG scanning mechanism, waiting for
 running-xacts record and for in-progress transactions to finish etc.
 """
 
+from __future__ import annotations
+
 import threading
 from contextlib import closing
 

@@ -286,6 +286,9 @@ safekeepers_cmp(char *old, char *new)
 static void
 assign_neon_safekeepers(const char *newval, void *extra)
 {
+	char	   *newval_copy;
+	char	   *oldval;
+
 	if (!am_walproposer)
 		return;
 
@@ -295,8 +298,8 @@ assign_neon_safekeepers(const char *newval, void *extra)
 	}
 
 	/* Copy values because we will modify them in split_safekeepers_list() */
-	char *newval_copy = pstrdup(newval);
-	char *oldval = pstrdup(wal_acceptors_list);
+	newval_copy = pstrdup(newval);
+	oldval = pstrdup(wal_acceptors_list);
 
 	/* 
 	 * TODO: restarting through FATAL is stupid and introduces 1s delay before
@@ -538,7 +541,7 @@ nwp_shmem_startup_hook(void)
 }
 
 WalproposerShmemState *
-GetWalpropShmemState()
+GetWalpropShmemState(void)
 {
 	Assert(walprop_shared != NULL);
 	return walprop_shared;

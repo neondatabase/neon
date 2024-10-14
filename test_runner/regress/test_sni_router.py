@@ -1,13 +1,18 @@
+from __future__ import annotations
+
 import socket
 import subprocess
 from pathlib import Path
 from types import TracebackType
-from typing import Optional, Type
+from typing import TYPE_CHECKING
 
 import backoff
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import PgProtocol, VanillaPostgres
 from fixtures.port_distributor import PortDistributor
+
+if TYPE_CHECKING:
+    from typing import Optional
 
 
 def generate_tls_cert(cn, certout, keyout):
@@ -53,7 +58,7 @@ class PgSniRouter(PgProtocol):
         self._popen: Optional[subprocess.Popen[bytes]] = None
         self.test_output_dir = test_output_dir
 
-    def start(self) -> "PgSniRouter":
+    def start(self) -> PgSniRouter:
         assert self._popen is None
         args = [
             str(self.neon_binpath / "pg_sni_router"),
@@ -86,12 +91,12 @@ class PgSniRouter(PgProtocol):
         if self._popen:
             self._popen.wait(timeout=2)
 
-    def __enter__(self) -> "PgSniRouter":
+    def __enter__(self) -> PgSniRouter:
         return self
 
     def __exit__(
         self,
-        exc_type: Optional[Type[BaseException]],
+        exc_type: Optional[type[BaseException]],
         exc: Optional[BaseException],
         tb: Optional[TracebackType],
     ):

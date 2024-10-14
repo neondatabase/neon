@@ -1,7 +1,7 @@
 use crate::{
     cancellation,
     compute::PostgresConnection,
-    console::messages::MetricsAuxInfo,
+    control_plane::messages::MetricsAuxInfo,
     metrics::{Direction, Metrics, NumClientConnectionsGuard, NumConnectionRequestsGuard},
     stream::Stream,
     usage_metrics::{Ids, MetricCounterRecorder, USAGE_METRICS},
@@ -71,7 +71,7 @@ impl<P, S: AsyncRead + AsyncWrite + Unpin> ProxyPassthrough<P, S> {
     pub(crate) async fn proxy_pass(self) -> Result<(), ErrorSource> {
         let res = proxy_pass(self.client, self.compute.stream, self.aux).await;
         if let Err(err) = self.compute.cancel_closure.try_cancel_query().await {
-            tracing::error!(?err, "could not cancel the query in the database");
+            tracing::warn!(?err, "could not cancel the query in the database");
         }
         res
     }

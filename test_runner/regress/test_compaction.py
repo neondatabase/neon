@@ -1,8 +1,10 @@
+from __future__ import annotations
+
 import enum
 import json
 import os
 import time
-from typing import Optional
+from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.log_helper import log
@@ -13,6 +15,10 @@ from fixtures.neon_fixtures import (
 from fixtures.pageserver.http import PageserverApiException
 from fixtures.utils import wait_until
 from fixtures.workload import Workload
+
+if TYPE_CHECKING:
+    from typing import Optional
+
 
 AGGRESIVE_COMPACTION_TENANT_CONF = {
     # Disable gc and compaction. The test runs compaction manually.

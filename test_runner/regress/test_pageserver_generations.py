@@ -9,11 +9,13 @@ of the pageserver are:
 - Updates to remote_consistent_lsn may only be made visible after validating generation
 """
 
+from __future__ import annotations
+
 import enum
 import os
 import re
 import time
-from typing import Optional
+from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.common_types import TenantId, TimelineId
@@ -37,6 +39,10 @@ from fixtures.remote_storage import (
 )
 from fixtures.utils import wait_until
 from fixtures.workload import Workload
+
+if TYPE_CHECKING:
+    from typing import Optional
+
 
 # A tenant configuration that is convenient for generating uploads and deletions
 # without a large amount of postgres traffic.
@@ -664,14 +670,17 @@ def test_upgrade_generationless_local_file_paths(
         pageserver.stop()
         timeline_dir = pageserver.timeline_dir(tenant_id, timeline_id)
         files_renamed = 0
+        log.info(f"Renaming files in {timeline_dir}")
         for filename in os.listdir(timeline_dir):
-            path = os.path.join(timeline_dir, filename)
-            log.info(f"Found file {path}")
-            if path.endswith("-v1-00000001"):
-                new_path = path[:-12]
-                os.rename(path, new_path)
-                log.info(f"Renamed {path} -> {new_path}")
+            if filename.endswith("-v1-00000001"):
+                new_filename = filename[:-12]
+                os.rename(
+                    os.path.join(timeline_dir, filename), os.path.join(timeline_dir, new_filename)
+                )
+                log.info(f"Renamed {filename} -> {new_filename}")
                 files_renamed += 1
+            else:
+                log.info(f"Keeping {filename}")
 
         assert files_renamed > 0
 

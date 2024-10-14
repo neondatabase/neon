@@ -8,6 +8,7 @@ mod conn_pool;
 mod http_conn_pool;
 mod http_util;
 mod json;
+mod local_conn_pool;
 mod sql_over_http;
 mod websocket;
 
@@ -22,7 +23,7 @@ use futures::TryFutureExt;
 use http::{Method, Response, StatusCode};
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Empty};
-use hyper1::body::Incoming;
+use hyper::body::Incoming;
 use hyper_util::rt::TokioExecutor;
 use hyper_util::server::conn::auto::Builder;
 use rand::rngs::StdRng;
@@ -47,13 +48,14 @@ use std::pin::{pin, Pin};
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn, Instrument};
+use tracing::{info, warn, Instrument};
 use utils::http::error::ApiError;
 
 pub(crate) const SERVERLESS_DRIVER_SNI: &str = "api";
 
 pub async fn task_main(
     config: &'static ProxyConfig,
+    auth_backend: &'static crate::auth::Backend<'static, (), ()>,
     ws_listener: TcpListener,
     cancellation_token: CancellationToken,
     cancellation_handler: Arc<CancellationHandlerMain>,
@@ -63,6 +65,7 @@ pub async fn task_main(
         info!("websocket server has shut down");
     }
 
+    let local_pool = local_conn_pool::LocalConnPool::new(&config.http_config);
     let conn_pool = conn_pool::GlobalConnPool::new(&config.http_config);
     {
         let conn_pool = Arc::clone(&conn_pool);
@@ -105,8 +108,10 @@ pub async fn task_main(
 
     let backend = Arc::new(PoolingBackend {
         http_conn_pool: Arc::clone(&http_conn_pool),
+        local_pool,
         pool: Arc::clone(&conn_pool),
         config,
+        auth_backend,
         endpoint_rate_limiter: Arc::clone(&endpoint_rate_limiter),
     });
     let tls_acceptor: Arc<dyn MaybeTlsAcceptor> = match config.tls_config.as_ref() {
@@ -238,7 +243,7 @@ async fn connection_startup(
     let (conn, peer) = match read_proxy_protocol(conn).await {
         Ok(c) => c,
         Err(e) => {
-            tracing::error!(?session_id, %peer_addr, "failed to accept TCP connection: invalid PROXY protocol V2 header: {e:#}");
+            tracing::warn!(?session_id, %peer_addr, "failed to accept TCP connection: invalid PROXY protocol V2 header: {e:#}");
             return None;
         }
     };
@@ -302,7 +307,7 @@ async fn connection_handler(
     let server = Builder::new(TokioExecutor::new());
     let conn = server.serve_connection_with_upgrades(
         hyper_util::rt::TokioIo::new(conn),
-        hyper1::service::service_fn(move |req: hyper1::Request<Incoming>| {
+        hyper::service::service_fn(move |req: hyper::Request<Incoming>| {
             // First HTTP request shares the same session ID
             let session_id = session_id.take().unwrap_or_else(uuid::Uuid::new_v4);
 
@@ -355,7 +360,7 @@ async fn connection_handler(
 
 #[allow(clippy::too_many_arguments)]
 async fn request_handler(
-    mut request: hyper1::Request<Incoming>,
+    mut request: hyper::Request<Incoming>,
     config: &'static ProxyConfig,
     backend: Arc<PoolingBackend>,
     ws_connections: TaskTracker,
@@ -365,7 +370,7 @@ async fn request_handler(
     // used to cancel in-flight HTTP requests. not used to cancel websockets
     http_cancellation_token: CancellationToken,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
-) -> Result<Response<BoxBody<Bytes, hyper1::Error>>, ApiError> {
+) -> Result<Response<BoxBody<Bytes, hyper::Error>>, ApiError> {
     let host = request
         .headers()
         .get("host")
@@ -394,6 +399,7 @@ async fn request_handler(
             async move {
                 if let Err(e) = websocket::serve_websocket(
                     config,
+                    backend.auth_backend,
                     ctx,
                     websocket,
                     cancellation_handler,
@@ -402,7 +408,7 @@ async fn request_handler(
                 )
                 .await
                 {
-                    error!("error in websocket connection: {e:#}");
+                    warn!("error in websocket connection: {e:#}");
                 }
             }
             .instrument(span),

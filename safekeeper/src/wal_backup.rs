@@ -17,7 +17,9 @@ use std::time::Duration;
 use postgres_ffi::v14::xlog_utils::XLogSegNoOffsetToRecPtr;
 use postgres_ffi::XLogFileName;
 use postgres_ffi::{XLogSegNo, PG_TLI};
-use remote_storage::{GenericRemoteStorage, ListingMode, RemotePath, StorageMetadata};
+use remote_storage::{
+    DownloadOpts, GenericRemoteStorage, ListingMode, RemotePath, StorageMetadata,
+};
 use tokio::fs::File;
 
 use tokio::select;
@@ -503,8 +505,12 @@ pub async fn read_object(
 
     let cancel = CancellationToken::new();
 
+    let opts = DownloadOpts {
+        byte_start: std::ops::Bound::Included(offset),
+        ..Default::default()
+    };
     let download = storage
-        .download_storage_object(Some((offset, None)), file_path, &cancel)
+        .download(file_path, &opts, &cancel)
         .await
         .with_context(|| {
             format!("Failed to open WAL segment download stream for remote path {file_path:?}")

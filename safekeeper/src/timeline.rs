@@ -631,13 +631,19 @@ impl Timeline {
 
             return Err(e);
         }
-        self.bootstrap(conf, broker_active_set, partial_backup_rate_limiter);
+        self.bootstrap(
+            shared_state,
+            conf,
+            broker_active_set,
+            partial_backup_rate_limiter,
+        );
         Ok(())
     }
 
     /// Bootstrap new or existing timeline starting background tasks.
     pub fn bootstrap(
         self: &Arc<Timeline>,
+        _shared_state: &mut WriteGuardSharedState<'_>,
         conf: &SafeKeeperConf,
         broker_active_set: Arc<TimelinesSet>,
         partial_backup_rate_limiter: RateLimiter,

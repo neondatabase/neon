@@ -317,9 +317,8 @@ pub async fn scan_pageserver_metadata(
         tenant_timeline_results.push((ttid, data));
     }
 
-    let tenant_id = tenant_id.expect("Must be set if results are present");
-
     if !tenant_timeline_results.is_empty() {
+        let tenant_id = tenant_id.expect("Must be set if results are present");
         analyze_tenant(
             &remote_client,
             tenant_id,

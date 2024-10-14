@@ -10,6 +10,7 @@ use futures::future::Either;
 use proxy::auth;
 use proxy::auth::backend::jwt::JwkCache;
 use proxy::auth::backend::AuthRateLimiter;
+use proxy::auth::backend::ConsoleRedirectBackend;
 use proxy::auth::backend::MaybeOwned;
 use proxy::cancellation::CancelMap;
 use proxy::cancellation::CancellationHandler;
@@ -19,8 +20,8 @@ use proxy::config::CacheOptions;
 use proxy::config::HttpConfig;
 use proxy::config::ProjectInfoCacheOptions;
 use proxy::config::ProxyProtocolV2;
-use proxy::console;
 use proxy::context::parquet::ParquetUploadArgs;
+use proxy::control_plane;
 use proxy::http;
 use proxy::http::health_server::AppMetrics;
 use proxy::metrics::Metrics;
@@ -311,8 +312,9 @@ async fn main() -> anyhow::Result<()> {
 
     let args = ProxyCliArgs::parse();
     let config = build_config(&args)?;
+    let auth_backend = build_auth_backend(&args)?;
 
-    info!("Authentication backend: {}", config.auth_backend);
+    info!("Authentication backend: {}", auth_backend);
     info!("Using region: {}", args.aws_region);
 
     let region_provider =
@@ -462,6 +464,7 @@ async fn main() -> anyhow::Result<()> {
     if let Some(proxy_listener) = proxy_listener {
         client_tasks.spawn(proxy::proxy::task_main(
             config,
+            auth_backend,
             proxy_listener,
             cancellation_token.clone(),
             cancellation_handler.clone(),
@@ -472,6 +475,7 @@ async fn main() -> anyhow::Result<()> {
     if let Some(serverless_listener) = serverless_listener {
         client_tasks.spawn(serverless::task_main(
             config,
+            auth_backend,
             serverless_listener,
             cancellation_token.clone(),
             cancellation_handler.clone(),
@@ -495,7 +499,7 @@ async fn main() -> anyhow::Result<()> {
             proxy: proxy::metrics::Metrics::get(),
         },
     ));
-    maintenance_tasks.spawn(console::mgmt::task_main(mgmt_listener));
+    maintenance_tasks.spawn(control_plane::mgmt::task_main(mgmt_listener));
 
     if let Some(metrics_config) = &config.metric_collection {
         // TODO: Add gc regardles of the metric collection being enabled.
@@ -506,8 +510,8 @@ async fn main() -> anyhow::Result<()> {
         ));
     }
 
-    if let auth::Backend::Console(api, _) = &config.auth_backend {
-        if let proxy::console::provider::ConsoleBackend::Console(api) = &**api {
+    if let auth::Backend::ControlPlane(api, _) = auth_backend {
+        if let proxy::control_plane::provider::ControlPlaneBackend::Management(api) = &**api {
             match (redis_notifications_client, regional_redis_client.clone()) {
                 (None, None) => {}
                 (client1, client2) => {
@@ -610,73 +614,6 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         bail!("dynamic rate limiter should be disabled");
     }
 
-    let auth_backend = match &args.auth_backend {
-        AuthBackendType::Console => {
-            let wake_compute_cache_config: CacheOptions = args.wake_compute_cache.parse()?;
-            let project_info_cache_config: ProjectInfoCacheOptions =
-                args.project_info_cache.parse()?;
-            let endpoint_cache_config: config::EndpointCacheConfig =
-                args.endpoint_cache_config.parse()?;
-
-            info!("Using NodeInfoCache (wake_compute) with options={wake_compute_cache_config:?}");
-            info!(
-                "Using AllowedIpsCache (wake_compute) with options={project_info_cache_config:?}"
-            );
-            info!("Using EndpointCacheConfig with options={endpoint_cache_config:?}");
-            let caches = Box::leak(Box::new(console::caches::ApiCaches::new(
-                wake_compute_cache_config,
-                project_info_cache_config,
-                endpoint_cache_config,
-            )));
-
-            let config::ConcurrencyLockOptions {
-                shards,
-                limiter,
-                epoch,
-                timeout,
-            } = args.wake_compute_lock.parse()?;
-            info!(?limiter, shards, ?epoch, "Using NodeLocks (wake_compute)");
-            let locks = Box::leak(Box::new(console::locks::ApiLocks::new(
-                "wake_compute_lock",
-                limiter,
-                shards,
-                timeout,
-                epoch,
-                &Metrics::get().wake_compute_lock,
-            )?));
-            tokio::spawn(locks.garbage_collect_worker());
-
-            let url = args.auth_endpoint.parse()?;
-            let endpoint = http::Endpoint::new(url, http::new_client());
-
-            let mut wake_compute_rps_limit = args.wake_compute_limit.clone();
-            RateBucketInfo::validate(&mut wake_compute_rps_limit)?;
-            let wake_compute_endpoint_rate_limiter =
-                Arc::new(WakeComputeRateLimiter::new(wake_compute_rps_limit));
-            let api = console::provider::neon::Api::new(
-                endpoint,
-                caches,
-                locks,
-                wake_compute_endpoint_rate_limiter,
-            );
-            let api = console::provider::ConsoleBackend::Console(api);
-            auth::Backend::Console(MaybeOwned::Owned(api), ())
-        }
-
-        AuthBackendType::Web => {
-            let url = args.uri.parse()?;
-            auth::Backend::Web(MaybeOwned::Owned(url), ())
-        }
-
-        #[cfg(feature = "testing")]
-        AuthBackendType::Postgres => {
-            let url = args.auth_endpoint.parse()?;
-            let api = console::provider::mock::Api::new(url, !args.is_private_access_proxy);
-            let api = console::provider::ConsoleBackend::Postgres(api);
-            auth::Backend::Console(MaybeOwned::Owned(api), ())
-        }
-    };
-
     let config::ConcurrencyLockOptions {
         shards,
         limiter,
@@ -689,7 +626,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         ?epoch,
         "Using NodeLocks (connect_compute)"
     );
-    let connect_compute_locks = console::locks::ApiLocks::new(
+    let connect_compute_locks = control_plane::locks::ApiLocks::new(
         "connect_compute_lock",
         limiter,
         shards,
@@ -728,7 +665,6 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
 
     let config = Box::leak(Box::new(ProxyConfig {
         tls_config,
-        auth_backend,
         metric_collection,
         allow_self_signed_compute: args.allow_self_signed_compute,
         http_config,
@@ -746,6 +682,80 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
     tokio::spawn(config.connect_compute_locks.garbage_collect_worker());
 
     Ok(config)
+}
+
+/// auth::Backend is created at proxy startup, and lives forever.
+fn build_auth_backend(
+    args: &ProxyCliArgs,
+) -> anyhow::Result<&'static auth::Backend<'static, (), ()>> {
+    let auth_backend = match &args.auth_backend {
+        AuthBackendType::Console => {
+            let wake_compute_cache_config: CacheOptions = args.wake_compute_cache.parse()?;
+            let project_info_cache_config: ProjectInfoCacheOptions =
+                args.project_info_cache.parse()?;
+            let endpoint_cache_config: config::EndpointCacheConfig =
+                args.endpoint_cache_config.parse()?;
+
+            info!("Using NodeInfoCache (wake_compute) with options={wake_compute_cache_config:?}");
+            info!(
+                "Using AllowedIpsCache (wake_compute) with options={project_info_cache_config:?}"
+            );
+            info!("Using EndpointCacheConfig with options={endpoint_cache_config:?}");
+            let caches = Box::leak(Box::new(control_plane::caches::ApiCaches::new(
+                wake_compute_cache_config,
+                project_info_cache_config,
+                endpoint_cache_config,
+            )));
+
+            let config::ConcurrencyLockOptions {
+                shards,
+                limiter,
+                epoch,
+                timeout,
+            } = args.wake_compute_lock.parse()?;
+            info!(?limiter, shards, ?epoch, "Using NodeLocks (wake_compute)");
+            let locks = Box::leak(Box::new(control_plane::locks::ApiLocks::new(
+                "wake_compute_lock",
+                limiter,
+                shards,
+                timeout,
+                epoch,
+                &Metrics::get().wake_compute_lock,
+            )?));
+            tokio::spawn(locks.garbage_collect_worker());
+
+            let url = args.auth_endpoint.parse()?;
+            let endpoint = http::Endpoint::new(url, http::new_client());
+
+            let mut wake_compute_rps_limit = args.wake_compute_limit.clone();
+            RateBucketInfo::validate(&mut wake_compute_rps_limit)?;
+            let wake_compute_endpoint_rate_limiter =
+                Arc::new(WakeComputeRateLimiter::new(wake_compute_rps_limit));
+            let api = control_plane::provider::neon::Api::new(
+                endpoint,
+                caches,
+                locks,
+                wake_compute_endpoint_rate_limiter,
+            );
+            let api = control_plane::provider::ControlPlaneBackend::Management(api);
+            auth::Backend::ControlPlane(MaybeOwned::Owned(api), ())
+        }
+
+        AuthBackendType::Web => {
+            let url = args.uri.parse()?;
+            auth::Backend::ConsoleRedirect(MaybeOwned::Owned(ConsoleRedirectBackend::new(url)), ())
+        }
+
+        #[cfg(feature = "testing")]
+        AuthBackendType::Postgres => {
+            let url = args.auth_endpoint.parse()?;
+            let api = control_plane::provider::mock::Api::new(url, !args.is_private_access_proxy);
+            let api = control_plane::provider::ControlPlaneBackend::PostgresMock(api);
+            auth::Backend::ControlPlane(MaybeOwned::Owned(api), ())
+        }
+    };
+
+    Ok(Box::leak(Box::new(auth_backend)))
 }
 
 #[cfg(test)]

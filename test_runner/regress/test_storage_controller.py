@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import concurrent.futures
 import json
 import threading
@@ -5,8 +7,9 @@ import time
 from collections import defaultdict
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from typing import TYPE_CHECKING
 
+import fixtures.utils
 import pytest
 from fixtures.auth_tokens import TokenScope
 from fixtures.common_types import TenantId, TenantShardId, TimelineId
@@ -36,7 +39,11 @@ from fixtures.pg_version import PgVersion, run_only_on_default_postgres
 from fixtures.port_distributor import PortDistributor
 from fixtures.remote_storage import RemoteStorageKind, s3_storage
 from fixtures.storage_controller_proxy import StorageControllerProxy
-from fixtures.utils import run_pg_bench_small, subprocess_capture, wait_until
+from fixtures.utils import (
+    run_pg_bench_small,
+    subprocess_capture,
+    wait_until,
+)
 from fixtures.workload import Workload
 from mypy_boto3_s3.type_defs import (
     ObjectTypeDef,
@@ -45,6 +52,9 @@ from pytest_httpserver import HTTPServer
 from urllib3 import Retry
 from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
+
+if TYPE_CHECKING:
+    from typing import Any, Optional, Union
 
 
 def get_node_shard_counts(env: NeonEnv, tenant_ids):
@@ -55,9 +65,8 @@ def get_node_shard_counts(env: NeonEnv, tenant_ids):
     return counts
 
 
-def test_storage_controller_smoke(
-    neon_env_builder: NeonEnvBuilder,
-):
+@pytest.mark.parametrize(**fixtures.utils.allpairs_versions())
+def test_storage_controller_smoke(neon_env_builder: NeonEnvBuilder, combination):
     """
     Test the basic lifecycle of a storage controller:
     - Restarting
@@ -490,7 +499,7 @@ def test_storage_controller_compute_hook(
 
     # Initial notification from tenant creation
     assert len(notifications) == 1
-    expect: Dict[str, Union[List[Dict[str, int]], str, None, int]] = {
+    expect: dict[str, Union[list[dict[str, int]], str, None, int]] = {
         "tenant_id": str(env.initial_tenant),
         "stripe_size": None,
         "shards": [{"node_id": int(env.pageservers[0].id), "shard_number": 0}],
@@ -597,7 +606,7 @@ def test_storage_controller_stuck_compute_hook(
 
     # Initial notification from tenant creation
     assert len(notifications) == 1
-    expect: Dict[str, Union[List[Dict[str, int]], str, None, int]] = {
+    expect: dict[str, Union[list[dict[str, int]], str, None, int]] = {
         "tenant_id": str(env.initial_tenant),
         "stripe_size": None,
         "shards": [{"node_id": int(env.pageservers[0].id), "shard_number": 0}],
@@ -834,7 +843,7 @@ def test_storage_controller_s3_time_travel_recovery(
     # Simulate a "disaster": delete some random files from remote storage for one of the shards
     assert env.pageserver_remote_storage
     shard_id_for_list = "0002"
-    objects: List[ObjectTypeDef] = list_prefix(
+    objects: list[ObjectTypeDef] = list_prefix(
         env.pageserver_remote_storage,
         f"tenants/{tenant_id}-{shard_id_for_list}/timelines/{timeline_id}/",
     ).get("Contents", [])
@@ -885,7 +894,7 @@ def test_storage_controller_auth(neon_env_builder: NeonEnvBuilder):
     api = env.storage_controller_api
 
     tenant_id = TenantId.generate()
-    body: Dict[str, Any] = {"new_tenant_id": str(tenant_id)}
+    body: dict[str, Any] = {"new_tenant_id": str(tenant_id)}
 
     env.storage_controller.allowed_errors.append(".*Unauthorized.*")
     env.storage_controller.allowed_errors.append(".*Forbidden.*")
@@ -1033,7 +1042,7 @@ def test_storage_controller_tenant_deletion(
         )
 
     # Break the compute hook: we are checking that deletion does not depend on the compute hook being available
-    def break_hook():
+    def break_hook(_body: Any):
         raise RuntimeError("Unexpected call to compute hook")
 
     compute_reconfigure_listener.register_on_notify(break_hook)
@@ -1228,9 +1237,9 @@ def test_storage_controller_heartbeats(
         log.info(f"{node_to_tenants=}")
 
         # Check that all the tenants have been attached
-        assert sum((len(ts) for ts in node_to_tenants.values())) == len(tenant_ids)
+        assert sum(len(ts) for ts in node_to_tenants.values()) == len(tenant_ids)
         # Check that each node got one tenant
-        assert all((len(ts) == 1 for ts in node_to_tenants.values()))
+        assert all(len(ts) == 1 for ts in node_to_tenants.values())
 
     wait_until(10, 1, tenants_placed)
 
@@ -1295,11 +1304,11 @@ def test_storage_controller_heartbeats(
     node_to_tenants = build_node_to_tenants_map(env)
     log.info(f"Back online: {node_to_tenants=}")
 
-    # ... expecting the storage controller to reach a consistent state
-    def storage_controller_consistent():
-        env.storage_controller.consistency_check()
+    # ... background reconciliation may need to run to clean up the location on the node that was offline
+    env.storage_controller.reconcile_until_idle()
 
-    wait_until(30, 1, storage_controller_consistent)
+    # ... expecting the storage controller to reach a consistent state
+    env.storage_controller.consistency_check()
 
 
 def test_storage_controller_re_attach(neon_env_builder: NeonEnvBuilder):
@@ -2071,10 +2080,10 @@ def test_storage_controller_metadata_health(
 
     def update_and_query_metadata_health(
         env: NeonEnv,
-        healthy: List[TenantShardId],
-        unhealthy: List[TenantShardId],
+        healthy: list[TenantShardId],
+        unhealthy: list[TenantShardId],
         outdated_duration: str = "1h",
-    ) -> Tuple[Set[str], Set[str]]:
+    ) -> tuple[set[str], set[str]]:
         """
         Update metadata health. Then list tenant shards with unhealthy and
         outdated metadata health status.
@@ -2389,7 +2398,7 @@ def test_storage_controller_ps_restarted_during_drain(neon_env_builder: NeonEnvB
     env.storage_controller.reconcile_until_idle()
 
     attached_id = int(env.storage_controller.locate(env.initial_tenant)[0]["node_id"])
-    attached = next((ps for ps in env.pageservers if ps.id == attached_id))
+    attached = next(ps for ps in env.pageservers if ps.id == attached_id)
 
     def attached_is_draining():
         details = env.storage_controller.node_status(attached.id)
