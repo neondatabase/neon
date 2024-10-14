@@ -743,7 +743,7 @@ impl PageServerHandler {
                 None => {
                     // Debouncing is not enabled.
                     // Stop batching on the first message.
-                    break Some(this_msg);
+                    return Ok(Some(BatchOrEof::Batch(vec![this_msg])));
                 }
             };
 
