@@ -1905,6 +1905,13 @@ impl<'a> DatadirModification<'a> {
         }
 
         self.pending_bytes += val_serialized_size;
+        if Key::from_compact(key).is_rel_vm_block_key() {
+            let backtrace = std::backtrace::Backtrace::capture();
+
+            if backtrace.status() == std::backtrace::BacktraceStatus::Captured {
+                info!("Update VM page {key}\n{backtrace}");
+            }
+        }
         self.pending_data_pages
             .push((key, self.lsn, val_serialized_size, val))
     }
