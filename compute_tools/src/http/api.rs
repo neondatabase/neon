@@ -19,6 +19,7 @@ use hyper::{Body, Method, Request, Response, Server, StatusCode};
 use tokio::task;
 use tracing::{debug, error, info, warn};
 use tracing_utils::http::OtelName;
+use utils::http::endpoint::prometheus_metrics_handler;
 use utils::http::request::must_get_query_param;
 
 fn status_response_from_state(state: &ComputeState) -> ComputeStatusResponse {
@@ -62,6 +63,18 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
             Response::new(Body::from(serde_json::to_string(&metrics).unwrap()))
         }
 
+        // Prometheus metrics
+        (&Method::GET, "/metrics") => {
+            info!("serving /metrics GET request");
+            match prometheus_metrics_handler(req).await {
+                Ok(response) => response,
+                Err(err) => {
+                    let msg = format!("error handling /metrics request: {err}");
+                    error!(msg);
+                    render_json_error(&msg, StatusCode::INTERNAL_SERVER_ERROR)
+                }
+            }
+        }
         // Collect Postgres current usage insights
         (&Method::GET, "/insights") => {
             info!("serving /insights GET request");
@@ -180,8 +193,15 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
                 return Response::new(Body::from(msg));
             }
 
+            let compute_state = compute.state.lock().unwrap().clone();
+            let pspec = compute_state.pspec.as_ref().expect("spec must be set");
             let connstr = compute.connstr.clone();
-            let res = crate::installed_extensions::get_installed_extensions(connstr).await;
+            let res = crate::installed_extensions::get_installed_extensions(
+                connstr,
+                pspec.tenant_id,
+                pspec.timeline_id,
+            )
+            .await;
             match res {
                 Ok(res) => render_json(Body::from(serde_json::to_string(&res).unwrap())),
                 Err(e) => render_json_error(
