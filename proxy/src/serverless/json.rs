@@ -20,14 +20,14 @@ pub(crate) fn json_to_pg_text(
 }
 
 fn json_value_to_pg_text(value: &RawValue) -> Result<Option<String>, serde_json::Error> {
-    let value = serde_json::from_str(value.get())?;
-    match value {
+    let lazy_value = serde_json::from_str(value.get())?;
+    match lazy_value {
         // special care for nulls
         LazyValue::Null => Ok(None),
 
         // convert to text with escaping
-        v @ (LazyValue::Bool(_) | LazyValue::Number(_) | LazyValue::Object(_)) => {
-            Ok(Some(v.to_string()))
+        LazyValue::Bool | LazyValue::Number | LazyValue::Object => {
+            Ok(Some(value.get().to_string()))
         }
 
         // avoid escaping here, as we pass this as a parameter
@@ -46,7 +46,7 @@ fn json_value_to_pg_text(value: &RawValue) -> Result<Option<String>, serde_json:
 //
 // Example of the same escaping in node-postgres: packages/pg/lib/utils.js
 //
-fn json_array_to_pg_array(arr: Vec<&RawValue>) ->  Result<String, serde_json::Error> {
+fn json_array_to_pg_array(arr: Vec<&RawValue>) -> Result<String, serde_json::Error> {
     let mut output = String::new();
     let mut first = true;
 
@@ -68,17 +68,17 @@ fn json_array_to_pg_array(arr: Vec<&RawValue>) ->  Result<String, serde_json::Er
 }
 
 fn json_array_to_pg_array_inner(value: &RawValue) -> Result<Option<String>, serde_json::Error> {
-    let value = serde_json::from_str(value.get())?;
-    match value {
+    let lazy_value = serde_json::from_str(value.get())?;
+    match lazy_value {
         // special care for nulls
         LazyValue::Null => Ok(None),
 
         // convert to text with escaping
         // here string needs to be escaped, as it is part of the array
-        v @ (LazyValue::Bool(_) | LazyValue::Number(_) | LazyValue::String(_)) => {
-            Ok(Some(v.to_string()))
+        LazyValue::Bool | LazyValue::Number | LazyValue::String(_) => {
+            Ok(Some(value.get().to_string()))
         }
-        v @ LazyValue::Object(_) => Ok(Some(json!(v.to_string()).to_string())),
+        LazyValue::Object => Ok(Some(json!(value.get().to_string()).to_string())),
 
         // recurse into array
         LazyValue::Array(arr) => Ok(Some(json_array_to_pg_array(arr)?)),

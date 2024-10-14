@@ -8,20 +8,19 @@
 use core::fmt;
 use std::borrow::Cow;
 
-use indexmap::IndexMap;
 use serde::{
-    de::{MapAccess, SeqAccess, Visitor},
-    Deserialize, Serialize,
+    de::{IgnoredAny, MapAccess, SeqAccess, Visitor},
+    Deserialize,
 };
-use serde_json::{value::RawValue, Number};
+use serde_json::value::RawValue;
 
 pub enum LazyValue<'de> {
     Null,
-    Bool(bool),
-    Number(Number),
+    Bool,
+    Number,
     String(Cow<'de, str>),
     Array(Vec<&'de RawValue>),
-    Object(IndexMap<String, &'de RawValue>),
+    Object,
 }
 
 impl<'de> Deserialize<'de> for LazyValue<'de> {
@@ -40,23 +39,23 @@ impl<'de> Deserialize<'de> for LazyValue<'de> {
             }
 
             #[inline]
-            fn visit_bool<E>(self, value: bool) -> Result<LazyValue<'de>, E> {
-                Ok(LazyValue::Bool(value))
+            fn visit_bool<E>(self, _value: bool) -> Result<LazyValue<'de>, E> {
+                Ok(LazyValue::Bool)
             }
 
             #[inline]
-            fn visit_i64<E>(self, value: i64) -> Result<LazyValue<'de>, E> {
-                Ok(LazyValue::Number(value.into()))
+            fn visit_i64<E>(self, _value: i64) -> Result<LazyValue<'de>, E> {
+                Ok(LazyValue::Number)
             }
 
             #[inline]
-            fn visit_u64<E>(self, value: u64) -> Result<LazyValue<'de>, E> {
-                Ok(LazyValue::Number(value.into()))
+            fn visit_u64<E>(self, _value: u64) -> Result<LazyValue<'de>, E> {
+                Ok(LazyValue::Number)
             }
 
             #[inline]
-            fn visit_f64<E>(self, value: f64) -> Result<LazyValue<'de>, E> {
-                Ok(Number::from_f64(value).map_or(LazyValue::Null, LazyValue::Number))
+            fn visit_f64<E>(self, _value: f64) -> Result<LazyValue<'de>, E> {
+                Ok(LazyValue::Number)
             }
 
             #[inline]
@@ -116,48 +115,12 @@ impl<'de> Deserialize<'de> for LazyValue<'de> {
             where
                 V: MapAccess<'de>,
             {
-                let mut values = IndexMap::new();
-
-                while let Some((key, value)) = visitor.next_entry()? {
-                    values.insert(key, value);
-                }
-
-                Ok(LazyValue::Object(values))
+                while visitor.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+                Ok(LazyValue::Object)
             }
         }
 
         deserializer.deserialize_any(ValueVisitor)
-    }
-}
-
-impl Serialize for LazyValue<'_> {
-    #[inline]
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: ::serde::Serializer,
-    {
-        match self {
-            LazyValue::Null => serializer.serialize_unit(),
-            LazyValue::Bool(b) => serializer.serialize_bool(*b),
-            LazyValue::Number(n) => n.serialize(serializer),
-            LazyValue::String(s) => serializer.serialize_str(s),
-            LazyValue::Array(v) => v.serialize(serializer),
-            LazyValue::Object(m) => {
-                use serde::ser::SerializeMap;
-                let mut map = serializer.serialize_map(Some(m.len()))?;
-                for (k, v) in m {
-                    map.serialize_entry(k, v)?;
-                }
-                map.end()
-            }
-        }
-    }
-}
-
-#[allow(clippy::to_string_trait_impl)]
-impl ToString for LazyValue<'_> {
-    fn to_string(&self) -> String {
-        serde_json::to_string(self).expect("json encoding a LazyValue should never error")
     }
 }
 
@@ -181,13 +144,9 @@ mod tests {
 
         let lazy: LazyValue = serde_json::from_str(&json).unwrap();
 
-        let LazyValue::Object(object) = lazy else {
+        let LazyValue::Object = lazy else {
             panic!("expected object")
         };
-        assert_eq!(object.len(), 2);
-
-        assert_eq!(object["foo"].get(), r#"{"bar":1}"#);
-        assert_eq!(object["baz"].get(), r#"[2,3]"#);
     }
 
     #[test]
