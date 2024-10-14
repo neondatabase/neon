@@ -10,7 +10,7 @@ from typing import List
 
 import pytest
 import requests
-from fixtures.common_types import Lsn, TenantId
+from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.metrics import (
     PAGESERVER_GLOBAL_METRICS,
@@ -490,11 +490,9 @@ def test_timelines_parallel_endpoints(neon_simple_env: NeonEnv):
     n_threads = 16
     barrier = threading.Barrier(n_threads)
 
-    def test_timeline(branch_name: str):
+    def test_timeline(branch_name: str, timeline_id: TimelineId):
         endpoint = env.endpoints.create_start(branch_name)
-        time.sleep(2)
         endpoint.stop()
-        time.sleep(2)
         # Use a barrier to make sure we restart endpoints at the same time
         barrier.wait()
         endpoint.start()
@@ -504,7 +502,7 @@ def test_timelines_parallel_endpoints(neon_simple_env: NeonEnv):
     for i in range(0, n_threads):
         branch_name = f"branch_{i}"
         timeline_id = env.create_branch(branch_name)
-        w = threading.Thread(target=test_timeline, args=[branch_name])
+        w = threading.Thread(target=test_timeline, args=[branch_name, timeline_id])
         workers.append(w)
         w.start()
 
