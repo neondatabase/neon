@@ -1,30 +1,40 @@
+use itertools::Itertools;
+use serde_json::value::RawValue;
 use serde_json::Map;
 use serde_json::Value;
 use tokio_postgres::types::Kind;
 use tokio_postgres::types::Type;
 use tokio_postgres::Row;
+use typed_json::json;
+
+use super::json_raw_value::LazyValue;
 
 //
 // Convert json non-string types to strings, so that they can be passed to Postgres
 // as parameters.
 //
-pub(crate) fn json_to_pg_text(json: Vec<Value>) -> Vec<Option<String>> {
-    json.into_iter().map(json_value_to_pg_text).collect()
+pub(crate) fn json_to_pg_text(
+    json: Vec<&RawValue>,
+) -> Result<Vec<Option<String>>, serde_json::Error> {
+    json.into_iter().map(json_value_to_pg_text).try_collect()
 }
 
-fn json_value_to_pg_text(value: Value) -> Option<String> {
+fn json_value_to_pg_text(value: &RawValue) -> Result<Option<String>, serde_json::Error> {
+    let value = serde_json::from_str(value.get())?;
     match value {
         // special care for nulls
-        Value::Null => None,
+        LazyValue::Null => Ok(None),
 
         // convert to text with escaping
-        v @ (Value::Bool(_) | Value::Number(_) | Value::Object(_)) => Some(v.to_string()),
+        v @ (LazyValue::Bool(_) | LazyValue::Number(_) | LazyValue::Object(_)) => {
+            Ok(Some(v.to_string()))
+        }
 
         // avoid escaping here, as we pass this as a parameter
-        Value::String(s) => Some(s),
+        LazyValue::String(s) => Ok(Some(s.into_owned())),
 
         // special care for arrays
-        Value::Array(arr) => Some(json_array_to_pg_array(arr)),
+        LazyValue::Array(arr) => Ok(Some(json_array_to_pg_array(arr)?)),
     }
 }
 
@@ -36,7 +46,7 @@ fn json_value_to_pg_text(value: Value) -> Option<String> {
 //
 // Example of the same escaping in node-postgres: packages/pg/lib/utils.js
 //
-fn json_array_to_pg_array(arr: Vec<Value>) -> String {
+fn json_array_to_pg_array(arr: Vec<&RawValue>) ->  Result<String, serde_json::Error> {
     let mut output = String::new();
     let mut first = true;
 
@@ -48,27 +58,30 @@ fn json_array_to_pg_array(arr: Vec<Value>) -> String {
         }
         first = false;
 
-        let value = json_array_to_pg_array_inner(value);
+        let value = json_array_to_pg_array_inner(value)?;
         output.push_str(value.as_deref().unwrap_or("NULL"));
     }
 
     output.push('}');
 
-    output
+    Ok(output)
 }
 
-fn json_array_to_pg_array_inner(value: Value) -> Option<String> {
+fn json_array_to_pg_array_inner(value: &RawValue) -> Result<Option<String>, serde_json::Error> {
+    let value = serde_json::from_str(value.get())?;
     match value {
         // special care for nulls
-        Value::Null => None,
+        LazyValue::Null => Ok(None),
 
         // convert to text with escaping
         // here string needs to be escaped, as it is part of the array
-        v @ (Value::Bool(_) | Value::Number(_) | Value::String(_)) => Some(v.to_string()),
-        v @ Value::Object(_) => json_array_to_pg_array_inner(Value::String(v.to_string())),
+        v @ (LazyValue::Bool(_) | LazyValue::Number(_) | LazyValue::String(_)) => {
+            Ok(Some(v.to_string()))
+        }
+        v @ LazyValue::Object(_) => Ok(Some(json!(v.to_string()).to_string())),
 
         // recurse into array
-        Value::Array(arr) => Some(json_array_to_pg_array(arr)),
+        LazyValue::Array(arr) => Ok(Some(json_array_to_pg_array(arr)?)),
     }
 }
 
@@ -271,8 +284,10 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn json_to_pg_text_test(json: Vec<Value>) -> Vec<Option<String>> {
-        json_to_pg_text(json)
+    fn json_to_pg_text_test(json: Vec<serde_json::Value>) -> Vec<Option<String>> {
+        let json = serde_json::Value::Array(json).to_string();
+        let json: Vec<&RawValue> = serde_json::from_str(&json).unwrap();
+        json_to_pg_text(json).unwrap()
     }
 
     #[test]

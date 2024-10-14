@@ -22,7 +22,7 @@ use hyper::StatusCode;
 use hyper::{HeaderMap, Request};
 use pq_proto::StartupMessageParamsBuilder;
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::value::RawValue;
 use tokio::time;
 use tokio_postgres::error::DbError;
 use tokio_postgres::error::ErrorPosition;
@@ -111,8 +111,8 @@ where
     D: serde::de::Deserializer<'de>,
 {
     // TODO: consider avoiding the allocation here.
-    let json: Vec<Value> = serde::de::Deserialize::deserialize(deserializer)?;
-    Ok(json_to_pg_text(json))
+    let json: Vec<&RawValue> = serde::de::Deserialize::deserialize(deserializer)?;
+    json_to_pg_text(json).map_err(serde::de::Error::custom)
 }
 
 #[derive(Debug, thiserror::Error)]
