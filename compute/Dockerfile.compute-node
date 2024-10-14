@@ -661,7 +661,7 @@ RUN apt-get update && \
         libboost-serialization1.74-dev \
         libboost-system1.74-dev \
         libeigen3-dev \
-        libboost-all-dev \
+        libboost-all-dev
 
 # rdkit Release_2024_09_1 supports v17
 # last release Release_2024_09_1 - Sep 27, 2024
