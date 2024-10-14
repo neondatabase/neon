@@ -526,7 +526,11 @@ impl RemoteTimelineClient {
         // also a newer index available, that is surprising.
         const INDEX_AGE_CHECKS_THRESHOLD: Duration = Duration::from_secs(14 * 24 * 3600);
         let index_age = index_last_modified.elapsed().unwrap_or_else(|e| {
-            tracing::warn!("Index has modification time in the future: {e}");
+            if e.duration() > Duration::from_secs(5) {
+                // We only warn if the S3 clock and our local clock are >5s out: because this is a low resolution
+                // timestamp, it is common to be out by at least 1 second.
+                tracing::warn!("Index has modification time in the future: {e}");
+            }
             Duration::ZERO
         });
         if index_age > INDEX_AGE_CHECKS_THRESHOLD {
