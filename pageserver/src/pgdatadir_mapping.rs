@@ -203,6 +203,8 @@ impl Timeline {
     }
 
     /// Like [`get_rel_page_at_lsn`], but returns a batch of pages.
+    ///
+    /// The ordering of the returned vec corresponds to the ordering of `pages`.
     pub(crate) async fn get_rel_page_at_lsn_batched(
         &self,
         pages: smallvec::SmallVec<[(RelTag, BlockNumber); 1]>,
