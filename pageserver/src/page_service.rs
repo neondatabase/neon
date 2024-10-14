@@ -682,8 +682,6 @@ impl PageServerHandler {
                             // Closing the connection by returning ``::Reconnect` has the side effect of rate-limiting above message, via
                             // client's reconnect backoff, as well as hopefully prompting the client to load its updated configuration
                             // and talk to a different pageserver.
-                            // TODO(vlad) -> these breaks are buggy
-
                             let error = BatchedFeMessage::RespondError(
                                 span,
                                 PageStreamError::Reconnect(
