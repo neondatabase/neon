@@ -484,7 +484,6 @@ def test_timelines_parallel_endpoints(neon_simple_env: NeonEnv):
     Create many endpoints in parallel and then restart them
     """
     env = neon_simple_env
-    pageserver_http_client = env.pageserver.http_client()
 
     # This param needs to be 200+ to reproduce the limit issue
     n_threads = 16
