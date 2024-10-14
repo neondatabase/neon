@@ -1,9 +1,11 @@
+from __future__ import annotations
+
 import os
 import queue
 import shutil
 import threading
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.common_types import Lsn, TenantId, TimelineId
@@ -34,6 +36,9 @@ from fixtures.utils import (
     wait_until,
 )
 from requests import ReadTimeout
+
+if TYPE_CHECKING:
+    from typing import Optional
 
 
 #
@@ -230,7 +235,7 @@ def test_remote_storage_upload_queue_retries(
 
     # create tenant with config that will determinstically allow
     # compaction and gc
-    tenant_id, timeline_id = env.neon_cli.create_tenant(
+    tenant_id, timeline_id = env.create_tenant(
         conf={
             # small checkpointing and compaction targets to ensure we generate many upload operations
             "checkpoint_distance": f"{64 * 1024}",
@@ -244,6 +249,7 @@ def test_remote_storage_upload_queue_retries(
             # create image layers eagerly, so that GC can remove some layers
             "image_creation_threshold": "1",
             "image_layer_creation_check_threshold": "0",
+            "lsn_lease_length": "0s",
         }
     )
 
@@ -391,6 +397,7 @@ def test_remote_timeline_client_calls_started_metric(
             # disable background compaction and GC. We invoke it manually when we want it to happen.
             "gc_period": "0s",
             "compaction_period": "0s",
+            "lsn_lease_length": "0s",
         }
     )
 
@@ -421,7 +428,7 @@ def test_remote_timeline_client_calls_started_metric(
         assert timeline_id is not None
         wait_for_last_flush_lsn(env, endpoint, tenant_id, timeline_id)
 
-    calls_started: Dict[Tuple[str, str], List[int]] = {
+    calls_started: dict[tuple[str, str], list[int]] = {
         ("layer", "upload"): [0],
         ("index", "upload"): [0],
         ("layer", "delete"): [0],
@@ -638,7 +645,9 @@ def test_empty_branch_remote_storage_upload(neon_env_builder: NeonEnvBuilder):
     client = env.pageserver.http_client()
 
     new_branch_name = "new_branch"
-    new_branch_timeline_id = env.neon_cli.create_branch(new_branch_name, "main", env.initial_tenant)
+    new_branch_timeline_id = env.create_branch(
+        new_branch_name, ancestor_branch_name="main", tenant_id=env.initial_tenant
+    )
     assert_nothing_to_upload(client, env.initial_tenant, new_branch_timeline_id)
 
     timelines_before_detach = set(

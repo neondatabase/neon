@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import random
 import time
 
@@ -10,14 +12,19 @@ from fixtures.neon_fixtures import NeonEnvBuilder
 @pytest.mark.timeout(600)
 def test_compute_pageserver_connection_stress(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
-    env.pageserver.allowed_errors.append(".*simulated connection error.*")
+    env.pageserver.allowed_errors.append(".*simulated connection error.*")  # this is never hit
+
+    # the real reason (Simulated Connection Error) is on the next line, and we cannot filter this out.
+    env.pageserver.allowed_errors.append(
+        ".*ERROR error in page_service connection task: Postgres query error"
+    )
 
     # Enable failpoint before starting everything else up so that we exercise the retry
     # on fetching basebackup
     pageserver_http = env.pageserver.http_client()
     pageserver_http.configure_failpoints(("simulated-bad-compute-connection", "50%return(15)"))
 
-    env.neon_cli.create_branch("test_compute_pageserver_connection_stress")
+    env.create_branch("test_compute_pageserver_connection_stress")
     endpoint = env.endpoints.create_start("test_compute_pageserver_connection_stress")
 
     pg_conn = endpoint.connect()
@@ -69,3 +76,7 @@ def test_compute_pageserver_connection_stress(neon_env_builder: NeonEnvBuilder):
             cur.fetchall()
         times_executed += 1
     log.info(f"Workload executed {times_executed} times")
+
+    # do a graceful shutdown which would had caught the allowed_errors before
+    # https://github.com/neondatabase/neon/pull/8632
+    env.pageserver.stop()

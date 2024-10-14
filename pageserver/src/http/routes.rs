@@ -17,6 +17,7 @@ use hyper::header;
 use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
 use metrics::launch_timestamp::LaunchTimestamp;
+use pageserver_api::models::virtual_file::IoMode;
 use pageserver_api::models::AuxFilePolicy;
 use pageserver_api::models::DownloadRemoteLayersTaskSpawnRequest;
 use pageserver_api::models::IngestAuxFilesRequest;
@@ -56,6 +57,7 @@ use utils::http::endpoint::request_span;
 use utils::http::request::must_parse_query_param;
 use utils::http::request::{get_request_param, must_get_query_param, parse_query_param};
 
+use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::deletion_queue::DeletionQueueClient;
 use crate::pgdatadir_mapping::LsnForTimestamp;
@@ -80,7 +82,6 @@ use crate::tenant::timeline::CompactionError;
 use crate::tenant::timeline::Timeline;
 use crate::tenant::GetTimelineError;
 use crate::tenant::{LogicalSizeCalculationCause, PageReconstructError};
-use crate::{config::PageServerConf, tenant::mgr};
 use crate::{disk_usage_eviction_task, tenant};
 use pageserver_api::models::{
     StatusResponse, TenantConfigRequest, TenantInfo, TimelineCreateRequest, TimelineGcRequest,
@@ -178,10 +179,8 @@ fn check_permission(request: &Request<Body>, tenant_id: Option<TenantId>) -> Res
 impl From<PageReconstructError> for ApiError {
     fn from(pre: PageReconstructError) -> ApiError {
         match pre {
-            PageReconstructError::Other(pre) => ApiError::InternalServerError(pre),
-            PageReconstructError::MissingKey(e) => {
-                ApiError::InternalServerError(anyhow::anyhow!("{e}"))
-            }
+            PageReconstructError::Other(other) => ApiError::InternalServerError(other),
+            PageReconstructError::MissingKey(e) => ApiError::InternalServerError(e.into()),
             PageReconstructError::Cancelled => ApiError::Cancelled,
             PageReconstructError::AncestorLsnTimeout(e) => ApiError::Timeout(format!("{e}").into()),
             PageReconstructError::WalRedo(pre) => ApiError::InternalServerError(pre),
@@ -320,6 +319,27 @@ impl From<crate::tenant::DeleteTimelineError> for ApiError {
     }
 }
 
+impl From<crate::tenant::TimelineArchivalError> for ApiError {
+    fn from(value: crate::tenant::TimelineArchivalError) -> Self {
+        use crate::tenant::TimelineArchivalError::*;
+        match value {
+            NotFound => ApiError::NotFound(anyhow::anyhow!("timeline not found").into()),
+            Timeout => ApiError::Timeout("hit pageserver internal timeout".into()),
+            e @ HasArchivedParent(_) => {
+                ApiError::PreconditionFailed(e.to_string().into_boxed_str())
+            }
+            HasUnarchivedChildren(children) => ApiError::PreconditionFailed(
+                format!(
+                    "Cannot archive timeline which has non-archived child timelines: {children:?}"
+                )
+                .into_boxed_str(),
+            ),
+            a @ AlreadyInProgress => ApiError::Conflict(a.to_string()),
+            Other(e) => ApiError::InternalServerError(e),
+        }
+    }
+}
+
 impl From<crate::tenant::mgr::DeleteTimelineError> for ApiError {
     fn from(value: crate::tenant::mgr::DeleteTimelineError) -> Self {
         use crate::tenant::mgr::DeleteTimelineError::*;
@@ -407,6 +427,8 @@ async fn build_timeline_info_common(
     let current_logical_size = timeline.get_current_logical_size(logical_size_task_priority, ctx);
     let current_physical_size = Some(timeline.layer_size_sum().await);
     let state = timeline.current_state();
+    // Report is_archived = false if the timeline is still loading
+    let is_archived = timeline.is_archived().unwrap_or(false);
     let remote_consistent_lsn_projected = timeline
         .get_remote_consistent_lsn_projected()
         .unwrap_or(Lsn(0));
@@ -447,6 +469,7 @@ async fn build_timeline_info_common(
         pg_version: timeline.pg_version,
 
         state,
+        is_archived: Some(is_archived),
 
         walreceiver_status,
 
@@ -567,6 +590,10 @@ async fn timeline_create_handler(
                 StatusCode::SERVICE_UNAVAILABLE,
                 HttpErrorBody::from_msg(e.to_string()),
             ),
+            Err(e @ tenant::CreateTimelineError::AncestorArchived) => json_response(
+                StatusCode::NOT_ACCEPTABLE,
+                HttpErrorBody::from_msg(e.to_string()),
+            ),
             Err(tenant::CreateTimelineError::ShuttingDown) => json_response(
                 StatusCode::SERVICE_UNAVAILABLE,
                 HttpErrorBody::from_msg("tenant shutting down".to_string()),
@@ -677,6 +704,8 @@ async fn timeline_archival_config_handler(
     let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
 
+    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
+
     let request_data: TimelineArchivalConfigRequest = json_request(&mut request).await?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
     let state = get_state(&request);
@@ -687,10 +716,8 @@ async fn timeline_archival_config_handler(
             .get_attached_tenant_shard(tenant_shard_id)?;
 
         tenant
-            .apply_timeline_archival_config(timeline_id, request_data.state)
-            .await
-            .context("applying archival config")
-            .map_err(ApiError::InternalServerError)?;
+            .apply_timeline_archival_config(timeline_id, request_data.state, ctx)
+            .await?;
         Ok::<_, ApiError>(())
     }
     .instrument(info_span!("timeline_archival_config",
@@ -800,7 +827,7 @@ async fn get_lsn_by_timestamp_handler(
 
     let lease = if with_lease {
         timeline
-            .make_lsn_lease(lsn, timeline.get_lsn_lease_length_for_ts(), &ctx)
+            .init_lsn_lease(lsn, timeline.get_lsn_lease_length_for_ts(), &ctx)
             .inspect_err(|_| {
                 warn!("fail to grant a lease to {}", lsn);
             })
@@ -854,7 +881,10 @@ async fn get_timestamp_of_lsn_handler(
 
     match result {
         Some(time) => {
-            let time = format_rfc3339(postgres_ffi::from_pg_timestamp(time)).to_string();
+            let time = format_rfc3339(
+                postgres_ffi::try_from_pg_timestamp(time).map_err(ApiError::InternalServerError)?,
+            )
+            .to_string();
             json_response(StatusCode::OK, time)
         }
         None => Err(ApiError::NotFound(
@@ -1162,7 +1192,10 @@ async fn layer_map_info_handler(
     let timeline =
         active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
             .await?;
-    let layer_map_info = timeline.layer_map_info(reset).await;
+    let layer_map_info = timeline
+        .layer_map_info(reset)
+        .await
+        .map_err(|_shutdown| ApiError::ShuttingDown)?;
 
     json_response(StatusCode::OK, layer_map_info)
 }
@@ -1662,9 +1695,18 @@ async fn lsn_lease_handler(
     let timeline =
         active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
             .await?;
-    let result = timeline
-        .make_lsn_lease(lsn, timeline.get_lsn_lease_length(), &ctx)
-        .map_err(|e| ApiError::InternalServerError(e.context("lsn lease http handler")))?;
+
+    let result = async {
+        timeline
+            .init_lsn_lease(lsn, timeline.get_lsn_lease_length(), &ctx)
+            .map_err(|e| {
+                ApiError::InternalServerError(
+                    e.context(format!("invalid lsn lease request at {lsn}")),
+                )
+            })
+    }
+    .instrument(info_span!("init_lsn_lease", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug(), %timeline_id))
+    .await?;
 
     json_response(StatusCode::OK, result)
 }
@@ -1680,8 +1722,13 @@ async fn timeline_gc_handler(
 
     let gc_req: TimelineGcRequest = json_request(&mut request).await?;
 
+    let state = get_state(&request);
+
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
-    let gc_result = mgr::immediate_gc(tenant_shard_id, timeline_id, gc_req, cancel, &ctx).await?;
+    let gc_result = state
+        .tenant_manager
+        .immediate_gc(tenant_shard_id, timeline_id, gc_req, cancel, &ctx)
+        .await?;
 
     json_response(StatusCode::OK, gc_result)
 }
@@ -1698,6 +1745,10 @@ async fn timeline_compact_handler(
     let state = get_state(&request);
 
     let mut flags = EnumSet::empty();
+
+    if Some(true) == parse_query_param::<_, bool>(&request, "force_l0_compaction")? {
+        flags |= CompactFlags::ForceL0Compaction;
+    }
     if Some(true) == parse_query_param::<_, bool>(&request, "force_repartition")? {
         flags |= CompactFlags::ForceRepartition;
     }
@@ -1705,13 +1756,12 @@ async fn timeline_compact_handler(
         flags |= CompactFlags::ForceImageLayerCreation;
     }
     if Some(true) == parse_query_param::<_, bool>(&request, "enhanced_gc_bottom_most_compaction")? {
-        if !cfg!(feature = "testing") {
-            return Err(ApiError::InternalServerError(anyhow!(
-                "enhanced_gc_bottom_most_compaction is only available in testing mode"
-            )));
-        }
         flags |= CompactFlags::EnhancedGcBottomMostCompaction;
     }
+    if Some(true) == parse_query_param::<_, bool>(&request, "dry_run")? {
+        flags |= CompactFlags::DryRun;
+    }
+
     let wait_until_uploaded =
         parse_query_param::<_, bool>(&request, "wait_until_uploaded")?.unwrap_or(false);
 
@@ -1745,6 +1795,9 @@ async fn timeline_checkpoint_handler(
     let state = get_state(&request);
 
     let mut flags = EnumSet::empty();
+    if Some(true) == parse_query_param::<_, bool>(&request, "force_l0_compaction")? {
+        flags |= CompactFlags::ForceL0Compaction;
+    }
     if Some(true) == parse_query_param::<_, bool>(&request, "force_repartition")? {
         flags |= CompactFlags::ForceRepartition;
     }
@@ -1784,9 +1837,11 @@ async fn timeline_checkpoint_handler(
         }
 
         if wait_until_uploaded {
+            tracing::info!("Waiting for uploads to complete...");
             timeline.remote_client.wait_completion().await
             // XXX map to correct ApiError for the cases where it's due to shutdown
             .context("wait completion").map_err(ApiError::InternalServerError)?;
+            tracing::info!("Uploads completed up to {}", timeline.get_remote_consistent_lsn_projected().unwrap_or(Lsn(0)));
         }
 
         json_response(StatusCode::OK, ())
@@ -1884,7 +1939,7 @@ async fn timeline_detach_ancestor_handler(
         // drop(tenant);
 
         let resp = match progress {
-            detach_ancestor::Progress::Prepared(_guard, prepared) => {
+            detach_ancestor::Progress::Prepared(attempt, prepared) => {
                 // it would be great to tag the guard on to the tenant activation future
                 let reparented_timelines = state
                     .tenant_manager
@@ -1892,11 +1947,10 @@ async fn timeline_detach_ancestor_handler(
                         tenant_shard_id,
                         timeline_id,
                         prepared,
+                        attempt,
                         ctx,
                     )
-                    .await
-                    .context("timeline detach ancestor completion")
-                    .map_err(ApiError::InternalServerError)?;
+                    .await?;
 
                 AncestorDetached {
                     reparented_timelines,
@@ -2050,7 +2104,7 @@ async fn disk_usage_eviction_run(
         evict_bytes: u64,
 
         #[serde(default)]
-        eviction_order: crate::disk_usage_eviction_task::EvictionOrder,
+        eviction_order: pageserver_api::config::EvictionOrder,
     }
 
     #[derive(Debug, Clone, Copy, serde::Serialize)]
@@ -2086,7 +2140,7 @@ async fn disk_usage_eviction_run(
         &state.remote_storage,
         usage,
         &state.tenant_manager,
-        config.eviction_order,
+        config.eviction_order.into(),
         &cancel,
     )
     .await;
@@ -2328,6 +2382,16 @@ async fn put_io_engine_handler(
     json_response(StatusCode::OK, ())
 }
 
+async fn put_io_mode_handler(
+    mut r: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    check_permission(&r, None)?;
+    let mode: IoMode = json_request(&mut r).await?;
+    crate::virtual_file::set_io_mode(mode);
+    json_response(StatusCode::OK, ())
+}
+
 /// Polled by control plane.
 ///
 /// See [`crate::utilization`].
@@ -2354,8 +2418,9 @@ async fn get_utilization(
     // regenerate at most 1Hz to allow polling at any rate.
     if !still_valid {
         let path = state.conf.tenants_path();
-        let doc = crate::utilization::regenerate(path.as_std_path())
-            .map_err(ApiError::InternalServerError)?;
+        let doc =
+            crate::utilization::regenerate(state.conf, path.as_std_path(), &state.tenant_manager)
+                .map_err(ApiError::InternalServerError)?;
 
         let mut buf = Vec::new();
         serde_json::to_writer(&mut buf, &doc)
@@ -2914,7 +2979,7 @@ pub fn make_router(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/preserve_initdb_archive",
             |r| api_handler(r, timeline_preserve_initdb_handler),
         )
-        .post(
+        .put(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/archival_config",
             |r| api_handler(r, timeline_archival_config_handler),
         )
@@ -2939,7 +3004,7 @@ pub fn make_router(
         )
         .put(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/compact",
-            |r| testing_api_handler("run timeline compaction", r, timeline_compact_handler),
+            |r| api_handler(r, timeline_compact_handler),
         )
         .put(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/checkpoint",
@@ -3014,6 +3079,7 @@ pub fn make_router(
             |r| api_handler(r, timeline_collect_keyspace),
         )
         .put("/v1/io_engine", |r| api_handler(r, put_io_engine_handler))
+        .put("/v1/io_mode", |r| api_handler(r, put_io_mode_handler))
         .put(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/force_aux_policy_switch",
             |r| api_handler(r, force_aux_policy_switch_handler),

@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+import copy
 import json
 import uuid
 
@@ -60,7 +63,7 @@ def test_pageserver_getpage_throttle(neon_env_builder: NeonEnvBuilder, pg_bin: P
         results_path = Path(basepath + ".stdout")
         log.info(f"Benchmark results at: {results_path}")
 
-        with open(results_path, "r") as f:
+        with open(results_path) as f:
             results = json.load(f)
         log.info(f"Results:\n{json.dumps(results, sort_keys=True, indent=2)}")
         return int(results["total"]["request_count"])
@@ -116,3 +119,58 @@ def test_pageserver_getpage_throttle(neon_env_builder: NeonEnvBuilder, pg_bin: P
     assert (
         duration_secs >= 10 * actual_smgr_query_seconds
     ), "smgr metrics should not include throttle wait time"
+
+
+throttle_config_with_field_fair_set = {
+    "task_kinds": ["PageRequestHandler"],
+    "fair": True,
+    "initial": 27,
+    "refill_interval": "43s",
+    "refill_amount": 23,
+    "max": 42,
+}
+
+
+def assert_throttle_config_with_field_fair_set(conf):
+    """
+    Field `fair` is ignored, so, responses don't contain it
+    """
+    without_fair = copy.deepcopy(throttle_config_with_field_fair_set)
+    without_fair.pop("fair")
+
+    assert conf == without_fair
+
+
+def test_throttle_fair_config_is_settable_but_ignored_in_mgmt_api(neon_env_builder: NeonEnvBuilder):
+    """
+    To be removed after https://github.com/neondatabase/neon/pull/8539 is rolled out.
+    """
+    env = neon_env_builder.init_start()
+    ps_http = env.pageserver.http_client()
+    # with_fair config should still be settable
+    ps_http.set_tenant_config(
+        env.initial_tenant,
+        {"timeline_get_throttle": throttle_config_with_field_fair_set},
+    )
+    conf = ps_http.tenant_config(env.initial_tenant)
+    assert_throttle_config_with_field_fair_set(conf.effective_config["timeline_get_throttle"])
+    assert_throttle_config_with_field_fair_set(
+        conf.tenant_specific_overrides["timeline_get_throttle"]
+    )
+
+
+def test_throttle_fair_config_is_settable_but_ignored_in_config_toml(
+    neon_env_builder: NeonEnvBuilder,
+):
+    """
+    To be removed after https://github.com/neondatabase/neon/pull/8539 is rolled out.
+    """
+
+    def set_tenant_config(ps_cfg):
+        ps_cfg["tenant_config"] = {"timeline_get_throttle": throttle_config_with_field_fair_set}
+
+    neon_env_builder.pageserver_config_override = set_tenant_config
+    env = neon_env_builder.init_start()
+    ps_http = env.pageserver.http_client()
+    conf = ps_http.tenant_config(env.initial_tenant)
+    assert_throttle_config_with_field_fair_set(conf.effective_config["timeline_get_throttle"])

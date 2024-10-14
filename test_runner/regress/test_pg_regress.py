@@ -144,7 +144,13 @@ def test_pg_regress(
     )
 
     # Connect to postgres and create a database called "regression".
-    endpoint = env.endpoints.create_start("main")
+    endpoint = env.endpoints.create_start(
+        "main",
+        config_lines=[
+            # Enable the test mode, so that we don't need to patch the test cases.
+            "neon.regress_test_mode = true",
+        ],
+    )
     endpoint.safe_psql(f"CREATE DATABASE {DBNAME}")
 
     # Create some local directories for pg_regress to run in.
@@ -207,7 +213,14 @@ def test_isolation(
 
     # Connect to postgres and create a database called "regression".
     # isolation tests use prepared transactions, so enable them
-    endpoint = env.endpoints.create_start("main", config_lines=["max_prepared_transactions=100"])
+    endpoint = env.endpoints.create_start(
+        "main",
+        config_lines=[
+            "max_prepared_transactions=100",
+            # Enable the test mode, so that we don't need to patch the test cases.
+            "neon.regress_test_mode = true",
+        ],
+    )
     endpoint.safe_psql(f"CREATE DATABASE {DBNAME}")
 
     # Create some local directories for pg_isolation_regress to run in.
@@ -268,7 +281,13 @@ def test_sql_regress(
     )
 
     # Connect to postgres and create a database called "regression".
-    endpoint = env.endpoints.create_start("main")
+    endpoint = env.endpoints.create_start(
+        "main",
+        config_lines=[
+            # Enable the test mode, so that we don't need to patch the test cases.
+            "neon.regress_test_mode = true",
+        ],
+    )
     endpoint.safe_psql(f"CREATE DATABASE {DBNAME}")
 
     # Create some local directories for pg_regress to run in.

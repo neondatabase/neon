@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import time
 
@@ -11,7 +13,6 @@ from fixtures.utils import query_scalar
 #
 def test_clog_truncate(neon_simple_env: NeonEnv):
     env = neon_simple_env
-    env.neon_cli.create_branch("test_clog_truncate", "empty")
 
     # set aggressive autovacuum to make sure that truncation will happen
     config = [
@@ -24,7 +25,7 @@ def test_clog_truncate(neon_simple_env: NeonEnv):
         "autovacuum_freeze_max_age=100000",
     ]
 
-    endpoint = env.endpoints.create_start("test_clog_truncate", config_lines=config)
+    endpoint = env.endpoints.create_start("main", config_lines=config)
 
     # Install extension containing function needed for test
     endpoint.safe_psql("CREATE EXTENSION neon_test_utils")
@@ -57,8 +58,10 @@ def test_clog_truncate(neon_simple_env: NeonEnv):
 
     # create new branch after clog truncation and start a compute node on it
     log.info(f"create branch at lsn_after_truncation {lsn_after_truncation}")
-    env.neon_cli.create_branch(
-        "test_clog_truncate_new", "test_clog_truncate", ancestor_start_lsn=lsn_after_truncation
+    env.create_branch(
+        "test_clog_truncate_new",
+        ancestor_branch_name="main",
+        ancestor_start_lsn=lsn_after_truncation,
     )
     endpoint2 = env.endpoints.create_start("test_clog_truncate_new")
 

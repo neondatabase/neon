@@ -12,6 +12,7 @@ use measured::{label::LabelValue, metric::histogram, FixedCardinalityLabel, Metr
 use metrics::NeonMetrics;
 use once_cell::sync::Lazy;
 use std::sync::Mutex;
+use strum::IntoEnumIterator;
 
 use crate::{
     persistence::{DatabaseError, DatabaseOperation},
@@ -86,6 +87,10 @@ pub(crate) struct StorageControllerMetricGroup {
         measured::HistogramVec<DatabaseQueryLatencyLabelGroupSet, 5>,
 
     pub(crate) storage_controller_leadership_status: measured::GaugeVec<LeadershipStatusGroupSet>,
+
+    /// HTTP request status counters for handled requests
+    pub(crate) storage_controller_reconcile_long_running:
+        measured::CounterVec<ReconcileLongRunningLabelGroupSet>,
 }
 
 impl StorageControllerMetrics {
@@ -167,6 +172,17 @@ pub(crate) struct LeadershipStatusGroup {
     pub(crate) status: LeadershipStatus,
 }
 
+#[derive(measured::LabelGroup, Clone)]
+#[label(set = ReconcileLongRunningLabelGroupSet)]
+pub(crate) struct ReconcileLongRunningLabelGroup<'a> {
+    #[label(dynamic_with = lasso::ThreadedRodeo, default)]
+    pub(crate) tenant_id: &'a str,
+    #[label(dynamic_with = lasso::ThreadedRodeo, default)]
+    pub(crate) shard_number: &'a str,
+    #[label(dynamic_with = lasso::ThreadedRodeo, default)]
+    pub(crate) sequence: &'a str,
+}
+
 #[derive(FixedCardinalityLabel, Clone, Copy)]
 pub(crate) enum ReconcileOutcome {
     #[label(rename = "ok")]
@@ -229,6 +245,7 @@ pub(crate) enum DatabaseErrorLabel {
     Connection,
     ConnectionPool,
     Logical,
+    Migration,
 }
 
 impl DatabaseError {
@@ -238,6 +255,22 @@ impl DatabaseError {
             Self::Connection(_) => DatabaseErrorLabel::Connection,
             Self::ConnectionPool(_) => DatabaseErrorLabel::ConnectionPool,
             Self::Logical(_) => DatabaseErrorLabel::Logical,
+            Self::Migration(_) => DatabaseErrorLabel::Migration,
+        }
+    }
+}
+
+/// Update the leadership status metric gauges to reflect the requested status
+pub(crate) fn update_leadership_status(status: LeadershipStatus) {
+    let status_metric = &METRICS_REGISTRY
+        .metrics_group
+        .storage_controller_leadership_status;
+
+    for s in LeadershipStatus::iter() {
+        if s == status {
+            status_metric.set(LeadershipStatusGroup { status: s }, 1);
+        } else {
+            status_metric.set(LeadershipStatusGroup { status: s }, 0);
         }
     }
 }

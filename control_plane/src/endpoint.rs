@@ -561,6 +561,7 @@ impl Endpoint {
             operation_uuid: None,
             features: self.features.clone(),
             swap_size_bytes: None,
+            disk_quota_bytes: None,
             cluster: Cluster {
                 cluster_id: None, // project ID: not used
                 name: None,       // project name: not used
@@ -598,6 +599,7 @@ impl Endpoint {
             remote_extensions,
             pgbouncer_settings: None,
             shard_stripe_size: Some(shard_stripe_size),
+            local_proxy_config: None,
         };
         let spec_path = self.endpoint_path().join("spec.json");
         std::fs::write(spec_path, serde_json::to_string_pretty(&spec)?)?;
@@ -702,7 +704,7 @@ impl Endpoint {
                     }
                 }
             }
-            std::thread::sleep(ATTEMPT_INTERVAL);
+            tokio::time::sleep(ATTEMPT_INTERVAL).await;
         }
 
         // disarm the scopeguard, let the child outlive this function (and neon_local invoction)
@@ -824,11 +826,12 @@ impl Endpoint {
         // cleanup work to do after postgres stops, like syncing safekeepers,
         // etc.
         //
-        // If destroying, send it SIGTERM before waiting. Sometimes we do *not*
-        // want this cleanup: tests intentionally do stop when majority of
-        // safekeepers is down, so sync-safekeepers would hang otherwise. This
-        // could be a separate flag though.
-        self.wait_for_compute_ctl_to_exit(destroy)?;
+        // If destroying or stop mode is immediate, send it SIGTERM before
+        // waiting. Sometimes we do *not* want this cleanup: tests intentionally
+        // do stop when majority of safekeepers is down, so sync-safekeepers
+        // would hang otherwise. This could be a separate flag though.
+        let send_sigterm = destroy || mode == "immediate";
+        self.wait_for_compute_ctl_to_exit(send_sigterm)?;
         if destroy {
             println!(
                 "Destroying postgres data directory '{}'",

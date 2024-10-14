@@ -4,6 +4,9 @@
 #
 # This can be useful in disaster recovery.
 #
+
+from __future__ import annotations
+
 import argparse
 
 import psycopg2

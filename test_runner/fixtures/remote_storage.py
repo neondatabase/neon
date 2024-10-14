@@ -1,20 +1,27 @@
+from __future__ import annotations
+
 import enum
 import hashlib
 import json
 import os
 import re
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Union
 
 import boto3
 import toml
+from moto.server import ThreadedMotoServer
 from mypy_boto3_s3 import S3Client
+from typing_extensions import override
 
 from fixtures.common_types import TenantId, TenantShardId, TimelineId
 from fixtures.log_helper import log
 from fixtures.pageserver.common_types import IndexPartDump
+
+if TYPE_CHECKING:
+    from typing import Any, Optional
+
 
 TIMELINE_INDEX_PART_FILE_NAME = "index_part.json"
 TENANT_HEATMAP_FILE_NAME = "heatmap-v1.json"
@@ -30,6 +37,7 @@ class RemoteStorageUser(str, enum.Enum):
     EXTENSIONS = "ext"
     SAFEKEEPER = "safekeeper"
 
+    @override
     def __str__(self) -> str:
         return self.value
 
@@ -37,7 +45,6 @@ class RemoteStorageUser(str, enum.Enum):
 class MockS3Server:
     """
     Starts a mock S3 server for testing on a port given, errors if the server fails to start or exits prematurely.
-    Relies that `poetry` and `moto` server are installed, since it's the way the tests are run.
 
     Also provides a set of methods to derive the connection properties from and the method to kill the underlying server.
     """
@@ -47,22 +54,8 @@ class MockS3Server:
         port: int,
     ):
         self.port = port
-
-        # XXX: do not use `shell=True` or add `exec ` to the command here otherwise.
-        # We use `self.subprocess.kill()` to shut down the server, which would not "just" work in Linux
-        # if a process is started from the shell process.
-        self.subprocess = subprocess.Popen(["poetry", "run", "moto_server", f"-p{port}"])
-        error = None
-        try:
-            return_code = self.subprocess.poll()
-            if return_code is not None:
-                error = f"expected mock s3 server to run but it exited with code {return_code}. stdout: '{self.subprocess.stdout}', stderr: '{self.subprocess.stderr}'"
-        except Exception as e:
-            error = f"expected mock s3 server to start but it failed with exception: {e}. stdout: '{self.subprocess.stdout}', stderr: '{self.subprocess.stderr}'"
-        if error is not None:
-            log.error(error)
-            self.kill()
-            raise RuntimeError("failed to start s3 mock server")
+        self.server = ThreadedMotoServer(port=port)
+        self.server.start()
 
     def endpoint(self) -> str:
         return f"http://127.0.0.1:{self.port}"
@@ -77,7 +70,7 @@ class MockS3Server:
         return "test"
 
     def kill(self):
-        self.subprocess.kill()
+        self.server.stop()
 
 
 @dataclass
@@ -90,11 +83,13 @@ class LocalFsStorage:
     def timeline_path(self, tenant_id: TenantId, timeline_id: TimelineId) -> Path:
         return self.tenant_path(tenant_id) / "timelines" / str(timeline_id)
 
-    def timeline_latest_generation(self, tenant_id, timeline_id):
+    def timeline_latest_generation(
+        self, tenant_id: TenantId, timeline_id: TimelineId
+    ) -> Optional[int]:
         timeline_files = os.listdir(self.timeline_path(tenant_id, timeline_id))
         index_parts = [f for f in timeline_files if f.startswith("index_part")]
 
-        def parse_gen(filename):
+        def parse_gen(filename: str) -> Optional[int]:
             log.info(f"parsing index_part '{filename}'")
             parts = filename.split("-")
             if len(parts) == 2:
@@ -102,7 +97,7 @@ class LocalFsStorage:
             else:
                 return None
 
-        generations = sorted([parse_gen(f) for f in index_parts])
+        generations = sorted([parse_gen(f) for f in index_parts])  # type: ignore
         if len(generations) == 0:
             raise RuntimeError(f"No index_part found for {tenant_id}/{timeline_id}")
         return generations[-1]
@@ -131,18 +126,18 @@ class LocalFsStorage:
         filename = f"{local_name}-{generation:08x}"
         return self.timeline_path(tenant_id, timeline_id) / filename
 
-    def index_content(self, tenant_id: TenantId, timeline_id: TimelineId):
+    def index_content(self, tenant_id: TenantId, timeline_id: TimelineId) -> Any:
         with self.index_path(tenant_id, timeline_id).open("r") as f:
             return json.load(f)
 
     def heatmap_path(self, tenant_id: TenantId) -> Path:
         return self.tenant_path(tenant_id) / TENANT_HEATMAP_FILE_NAME
 
-    def heatmap_content(self, tenant_id):
+    def heatmap_content(self, tenant_id: TenantId) -> Any:
         with self.heatmap_path(tenant_id).open("r") as f:
             return json.load(f)
 
-    def to_toml_dict(self) -> Dict[str, Any]:
+    def to_toml_dict(self) -> dict[str, Any]:
         return {
             "local_path": str(self.root),
         }
@@ -175,11 +170,16 @@ class S3Storage:
     """formatting deserialized with humantime crate, for example "1s"."""
     custom_timeout: Optional[str] = None
 
-    def access_env_vars(self) -> Dict[str, str]:
+    def access_env_vars(self) -> dict[str, str]:
         if self.aws_profile is not None:
-            return {
+            env = {
                 "AWS_PROFILE": self.aws_profile,
             }
+            # Pass through HOME env var because AWS_PROFILE needs it in order to work
+            home = os.getenv("HOME")
+            if home is not None:
+                env["HOME"] = home
+            return env
         if self.access_key is not None and self.secret_key is not None:
             return {
                 "AWS_ACCESS_KEY_ID": self.access_key,
@@ -199,7 +199,7 @@ class S3Storage:
             }
         )
 
-    def to_toml_dict(self) -> Dict[str, Any]:
+    def to_toml_dict(self) -> dict[str, Any]:
         rv = {
             "bucket_name": self.bucket_name,
             "bucket_region": self.bucket_region,
@@ -274,7 +274,7 @@ class S3Storage:
     ) -> str:
         return f"{self.tenant_path(tenant_id)}/timelines/{timeline_id}"
 
-    def get_latest_index_key(self, index_keys: List[str]) -> str:
+    def get_latest_index_key(self, index_keys: list[str]) -> str:
         """
         Gets the latest index file key.
 
@@ -301,7 +301,7 @@ class S3Storage:
     def heatmap_key(self, tenant_id: TenantId) -> str:
         return f"{self.tenant_path(tenant_id)}/{TENANT_HEATMAP_FILE_NAME}"
 
-    def heatmap_content(self, tenant_id: TenantId):
+    def heatmap_content(self, tenant_id: TenantId) -> Any:
         r = self.client.get_object(Bucket=self.bucket_name, Key=self.heatmap_key(tenant_id))
         return json.loads(r["Body"].read().decode("utf-8"))
 
@@ -321,7 +321,7 @@ class RemoteStorageKind(str, enum.Enum):
     def configure(
         self,
         repo_dir: Path,
-        mock_s3_server,
+        mock_s3_server: MockS3Server,
         run_id: str,
         test_name: str,
         user: RemoteStorageUser,
@@ -414,7 +414,7 @@ class RemoteStorageKind(str, enum.Enum):
         )
 
 
-def available_remote_storages() -> List[RemoteStorageKind]:
+def available_remote_storages() -> list[RemoteStorageKind]:
     remote_storages = [RemoteStorageKind.LOCAL_FS, RemoteStorageKind.MOCK_S3]
     if os.getenv("ENABLE_REAL_S3_REMOTE_STORAGE") is not None:
         remote_storages.append(RemoteStorageKind.REAL_S3)
@@ -424,7 +424,7 @@ def available_remote_storages() -> List[RemoteStorageKind]:
     return remote_storages
 
 
-def available_s3_storages() -> List[RemoteStorageKind]:
+def available_s3_storages() -> list[RemoteStorageKind]:
     remote_storages = [RemoteStorageKind.MOCK_S3]
     if os.getenv("ENABLE_REAL_S3_REMOTE_STORAGE") is not None:
         remote_storages.append(RemoteStorageKind.REAL_S3)
@@ -454,16 +454,10 @@ def default_remote_storage() -> RemoteStorageKind:
     return RemoteStorageKind.LOCAL_FS
 
 
-def remote_storage_to_toml_dict(remote_storage: RemoteStorage) -> Dict[str, Any]:
-    if not isinstance(remote_storage, (LocalFsStorage, S3Storage)):
-        raise Exception("invalid remote storage type")
-
+def remote_storage_to_toml_dict(remote_storage: RemoteStorage) -> dict[str, Any]:
     return remote_storage.to_toml_dict()
 
 
 # serialize as toml inline table
 def remote_storage_to_toml_inline_table(remote_storage: RemoteStorage) -> str:
-    if not isinstance(remote_storage, (LocalFsStorage, S3Storage)):
-        raise Exception("invalid remote storage type")
-
     return remote_storage.to_toml_inline_table()

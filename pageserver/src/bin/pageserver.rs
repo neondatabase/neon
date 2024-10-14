@@ -5,6 +5,7 @@
 use std::env;
 use std::env::{var, VarError};
 use std::io::Read;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,7 +15,7 @@ use clap::{Arg, ArgAction, Command};
 
 use metrics::launch_timestamp::{set_launch_timestamp_metric, LaunchTimestamp};
 use pageserver::config::PageserverIdentity;
-use pageserver::control_plane_client::ControlPlaneClient;
+use pageserver::controller_upcall_client::ControllerUpcallClient;
 use pageserver::disk_usage_eviction_task::{self, launch_disk_usage_global_eviction_task};
 use pageserver::metrics::{STARTUP_DURATION, STARTUP_IS_LOADING};
 use pageserver::task_mgr::{COMPUTE_REQUEST_RUNTIME, WALRECEIVER_RUNTIME};
@@ -36,6 +37,7 @@ use pageserver::{
     virtual_file,
 };
 use postgres_backend::AuthType;
+use utils::crashsafe::syncfs;
 use utils::failpoint_support;
 use utils::logging::TracingErrorLayerEnablement;
 use utils::{
@@ -123,14 +125,42 @@ fn main() -> anyhow::Result<()> {
 
     // after setting up logging, log the effective IO engine choice and read path implementations
     info!(?conf.virtual_file_io_engine, "starting with virtual_file IO engine");
-    info!(?conf.get_impl, "starting with get page implementation");
-    info!(?conf.get_vectored_impl, "starting with vectored get page implementation");
-    info!(?conf.compact_level0_phase1_value_access, "starting with setting for compact_level0_phase1_value_access");
+    info!(?conf.virtual_file_io_mode, "starting with virtual_file IO mode");
 
+    // The tenants directory contains all the pageserver local disk state.
+    // Create if not exists and make sure all the contents are durable before proceeding.
+    // Ensuring durability eliminates a whole bug class where we come up after an unclean shutdown.
+    // After unclea shutdown, we don't know if all the filesystem content we can read via syscalls is actually durable or not.
+    // Examples for that: OOM kill, systemd killing us during shutdown, self abort due to unrecoverable IO error.
     let tenants_path = conf.tenants_path();
-    if !tenants_path.exists() {
-        utils::crashsafe::create_dir_all(conf.tenants_path())
-            .with_context(|| format!("Failed to create tenants root dir at '{tenants_path}'"))?;
+    {
+        let open = || {
+            nix::dir::Dir::open(
+                tenants_path.as_std_path(),
+                nix::fcntl::OFlag::O_DIRECTORY | nix::fcntl::OFlag::O_RDONLY,
+                nix::sys::stat::Mode::empty(),
+            )
+        };
+        let dirfd = match open() {
+            Ok(dirfd) => dirfd,
+            Err(e) => match e {
+                nix::errno::Errno::ENOENT => {
+                    utils::crashsafe::create_dir_all(&tenants_path).with_context(|| {
+                        format!("Failed to create tenants root dir at '{tenants_path}'")
+                    })?;
+                    open().context("open tenants dir after creating it")?
+                }
+                e => anyhow::bail!(e),
+            },
+        };
+
+        let started = Instant::now();
+        syncfs(dirfd)?;
+        let elapsed = started.elapsed();
+        info!(
+            elapsed_ms = elapsed.as_millis(),
+            "made tenant directory contents durable"
+        );
     }
 
     // Initialize up failpoints support
@@ -173,27 +203,15 @@ fn initialize_config(
         }
     };
 
-    let config: toml_edit::Document = match std::fs::File::open(cfg_file_path) {
-        Ok(mut f) => {
-            let md = f.metadata().context("stat config file")?;
-            if md.is_file() {
-                let mut s = String::new();
-                f.read_to_string(&mut s).context("read config file")?;
-                s.parse().context("parse config file toml")?
-            } else {
-                anyhow::bail!("directory entry exists but is not a file: {cfg_file_path}");
-            }
-        }
-        Err(e) => {
-            anyhow::bail!("open pageserver config: {e}: {cfg_file_path}");
-        }
-    };
-
-    debug!("Using pageserver toml: {config}");
-
-    // Construct the runtime representation
-    let conf = PageServerConf::parse_and_validate(identity.id, &config, workdir)
-        .context("Failed to parse pageserver configuration")?;
+    let config_file_contents =
+        std::fs::read_to_string(cfg_file_path).context("read config file from filesystem")?;
+    let config_toml = serde_path_to_error::deserialize(
+        toml_edit::de::Deserializer::from_str(&config_file_contents)
+            .context("build toml deserializer")?,
+    )
+    .context("deserialize config toml")?;
+    let conf = PageServerConf::parse_and_validate(identity.id, config_toml, workdir)
+        .context("runtime-validation of config toml")?;
 
     Ok(Box::leak(Box::new(conf)))
 }
@@ -373,7 +391,7 @@ fn start_pageserver(
     // Set up deletion queue
     let (deletion_queue, deletion_workers) = DeletionQueue::new(
         remote_storage.clone(),
-        ControlPlaneClient::new(conf, &shutdown_pageserver),
+        ControllerUpcallClient::new(conf, &shutdown_pageserver),
         conf,
     );
     if let Some(deletion_workers) = deletion_workers {
@@ -552,7 +570,7 @@ fn start_pageserver(
             .build()
             .map_err(|err| anyhow!(err))?;
         let service = utils::http::RouterService::new(router).unwrap();
-        let server = hyper::Server::from_tcp(http_listener)?
+        let server = hyper0::Server::from_tcp(http_listener)?
             .serve(service)
             .with_graceful_shutdown({
                 let cancel = cancel.clone();

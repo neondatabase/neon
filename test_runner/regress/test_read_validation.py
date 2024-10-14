@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from contextlib import closing
 
 from fixtures.log_helper import log
@@ -15,17 +17,8 @@ extensions = ["pageinspect", "neon_test_utils", "pg_buffercache"]
 #
 def test_read_validation(neon_simple_env: NeonEnv):
     env = neon_simple_env
-    env.neon_cli.create_branch("test_read_validation", "empty")
 
-    endpoint = env.endpoints.create_start(
-        "test_read_validation",
-        # Use protocol version 2, because the code that constructs the V1 messages
-        # assumes that a primary always wants to read the latest version of a page,
-        # and therefore doesn't work with the test functions below to read an older
-        # page version.
-        config_lines=["neon.protocol_version=2"],
-    )
-
+    endpoint = env.endpoints.create_start("main")
     with closing(endpoint.connect()) as con:
         with con.cursor() as c:
             for e in extensions:
@@ -61,7 +54,7 @@ def test_read_validation(neon_simple_env: NeonEnv):
 
             log.info("Clear buffer cache to ensure no stale pages are brought into the cache")
 
-            c.execute("select clear_buffer_cache()")
+            endpoint.clear_shared_buffers(cursor=c)
 
             cache_entries = query_scalar(
                 c, f"select count(*) from pg_buffercache where relfilenode = {relfilenode}"
@@ -136,18 +129,9 @@ def test_read_validation(neon_simple_env: NeonEnv):
 
 def test_read_validation_neg(neon_simple_env: NeonEnv):
     env = neon_simple_env
-    env.neon_cli.create_branch("test_read_validation_neg", "empty")
-
     env.pageserver.allowed_errors.append(".*invalid LSN\\(0\\) in request.*")
 
-    endpoint = env.endpoints.create_start(
-        "test_read_validation_neg",
-        # Use protocol version 2, because the code that constructs the V1 messages
-        # assumes that a primary always wants to read the latest version of a page,
-        # and therefore doesn't work with the test functions below to read an older
-        # page version.
-        config_lines=["neon.protocol_version=2"],
-    )
+    endpoint = env.endpoints.create_start("main")
 
     with closing(endpoint.connect()) as con:
         with con.cursor() as c:

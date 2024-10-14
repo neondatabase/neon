@@ -6,8 +6,5 @@ license.workspace = true
 
 [dependencies]
 serde.workspace = true
-serde_with.workspace = true
 const_format.workspace = true
 utils.workspace = true
-
-workspace_hack.workspace = true

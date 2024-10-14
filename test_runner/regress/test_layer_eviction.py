@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import time
 
 import pytest
@@ -173,13 +175,14 @@ def test_gc_of_remote_layers(neon_env_builder: NeonEnvBuilder):
         # "image_creation_threshold": set at runtime
         "compaction_target_size": f"{128 * (1024**2)}",  # make it so that we only have 1 partition => image coverage for delta layers => enables gc of delta layers
         "image_layer_creation_check_threshold": "0",  # always check if a new image layer can be created
+        "lsn_lease_length": "0s",
     }
 
     def tenant_update_config(changes):
         tenant_config.update(changes)
-        env.neon_cli.config_tenant(tenant_id, tenant_config)
+        env.config_tenant(tenant_id, tenant_config)
 
-    tenant_id, timeline_id = env.neon_cli.create_tenant(conf=tenant_config)
+    tenant_id, timeline_id = env.create_tenant(conf=tenant_config)
     log.info("tenant id is %s", tenant_id)
     env.initial_tenant = tenant_id  # update_and_gc relies on this
     ps_http = env.pageserver.http_client()

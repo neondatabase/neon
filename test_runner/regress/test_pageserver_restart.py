@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import random
 from contextlib import closing
 from typing import Optional
@@ -159,6 +161,8 @@ def test_pageserver_chaos(
     if build_type == "debug":
         pytest.skip("times out in debug builds")
 
+    # same rationale as with the immediate stop; we might leave orphan layers behind.
+    neon_env_builder.disable_scrub_on_exit()
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
     if shard_count is not None:
         neon_env_builder.num_pageservers = shard_count
@@ -167,13 +171,12 @@ def test_pageserver_chaos(
 
     # Use a tiny checkpoint distance, to create a lot of layers quickly.
     # That allows us to stress the compaction and layer flushing logic more.
-    tenant, _ = env.neon_cli.create_tenant(
+    tenant, _ = env.create_tenant(
         conf={
             "checkpoint_distance": "5000000",
         }
     )
-    env.neon_cli.create_timeline("test_pageserver_chaos", tenant_id=tenant)
-    endpoint = env.endpoints.create_start("test_pageserver_chaos", tenant_id=tenant)
+    endpoint = env.endpoints.create_start("main", tenant_id=tenant)
 
     # Create table, and insert some rows. Make it big enough that it doesn't fit in
     # shared_buffers, otherwise the SELECT after restart will just return answer
@@ -220,3 +223,11 @@ def test_pageserver_chaos(
         # Check that all the updates are visible
         num_updates = endpoint.safe_psql("SELECT sum(updates) FROM foo")[0][0]
         assert num_updates == i * 100000
+
+    # currently pageserver cannot tolerate the fact that "s3" goes away, and if
+    # we succeeded in a compaction before shutdown, there might be a lot of
+    # uploads pending, certainly more than what we can ingest with MOCK_S3
+    #
+    # so instead, do a fast shutdown for this one test.
+    # See https://github.com/neondatabase/neon/issues/8709
+    env.stop(immediate=True)

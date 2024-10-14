@@ -213,7 +213,7 @@ WalProposerPoll(WalProposer *wp)
 		rc = wp->api.wait_event_set(wp, timeout, &sk, &events);
 
 		/* Exit loop if latch is set (we got new WAL) */
-		if ((rc == 1 && events & WL_LATCH_SET))
+		if (rc == 1 && (events & WL_LATCH_SET))
 			break;
 
 		/*
@@ -252,8 +252,6 @@ WalProposerPoll(WalProposer *wp)
 		/* timeout expired: poll state */
 		if (rc == 0 || TimeToReconnect(wp, now) <= 0)
 		{
-			TimestampTz now;
-
 			/*
 			 * If no WAL was generated during timeout (and we have already
 			 * collected the quorum), then send empty keepalive message
@@ -269,8 +267,7 @@ WalProposerPoll(WalProposer *wp)
 			now = wp->api.get_current_timestamp(wp);
 			for (int i = 0; i < wp->n_safekeepers; i++)
 			{
-				Safekeeper *sk = &wp->safekeeper[i];
-
+				sk = &wp->safekeeper[i];
 				if (TimestampDifferenceExceeds(sk->latestMsgReceivedAt, now,
 											   wp->config->safekeeper_connection_timeout))
 				{
@@ -1038,9 +1035,12 @@ DetermineEpochStartLsn(WalProposer *wp)
 		if (SkipXLogPageHeader(wp, wp->propEpochStartLsn) != wp->api.get_redo_start_lsn(wp))
 		{
 			/*
-			 * However, allow to proceed if previously elected leader was me;
-			 * plain restart of walproposer not intervened by concurrent
-			 * compute (who could generate WAL) is ok.
+			 * However, allow to proceed if last_log_term on the node which gave
+			 * the highest vote (i.e. point where we are going to start writing)
+			 * actually had been won by me; plain restart of walproposer not
+			 * intervened by concurrent compute which wrote WAL is ok.
+			 *
+			 * This avoids compute crash after manual term_bump.
 			 */
 			if (!((dth->n_entries >= 1) && (dth->entries[dth->n_entries - 1].term ==
 											pg_atomic_read_u64(&walprop_shared->mineLastElectedTerm))))
@@ -1077,7 +1077,7 @@ SendProposerElected(Safekeeper *sk)
 	ProposerElected msg;
 	TermHistory *th;
 	term_t		lastCommonTerm;
-	int			i;
+	int			idx;
 
 	/* Now that we are ready to send it's a good moment to create WAL reader */
 	wp->api.wal_reader_allocate(sk);
@@ -1096,15 +1096,15 @@ SendProposerElected(Safekeeper *sk)
 	/* We must start somewhere. */
 	Assert(wp->propTermHistory.n_entries >= 1);
 
-	for (i = 0; i < Min(wp->propTermHistory.n_entries, th->n_entries); i++)
+	for (idx = 0; idx < Min(wp->propTermHistory.n_entries, th->n_entries); idx++)
 	{
-		if (wp->propTermHistory.entries[i].term != th->entries[i].term)
+		if (wp->propTermHistory.entries[idx].term != th->entries[idx].term)
 			break;
 		/* term must begin everywhere at the same point */
-		Assert(wp->propTermHistory.entries[i].lsn == th->entries[i].lsn);
+		Assert(wp->propTermHistory.entries[idx].lsn == th->entries[idx].lsn);
 	}
-	i--;						/* step back to the last common term */
-	if (i < 0)
+	idx--;						/* step back to the last common term */
+	if (idx < 0)
 	{
 		/* safekeeper is empty or no common point, start from the beginning */
 		sk->startStreamingAt = wp->propTermHistory.entries[0].lsn;
@@ -1125,14 +1125,14 @@ SendProposerElected(Safekeeper *sk)
 		 * proposer, LSN it is currently writing, but then we just pick
 		 * safekeeper pos as it obviously can't be higher.
 		 */
-		if (wp->propTermHistory.entries[i].term == wp->propTerm)
+		if (wp->propTermHistory.entries[idx].term == wp->propTerm)
 		{
 			sk->startStreamingAt = sk->voteResponse.flushLsn;
 		}
 		else
 		{
-			XLogRecPtr	propEndLsn = wp->propTermHistory.entries[i + 1].lsn;
-			XLogRecPtr	skEndLsn = (i + 1 < th->n_entries ? th->entries[i + 1].lsn : sk->voteResponse.flushLsn);
+			XLogRecPtr	propEndLsn = wp->propTermHistory.entries[idx + 1].lsn;
+			XLogRecPtr	skEndLsn = (idx + 1 < th->n_entries ? th->entries[idx + 1].lsn : sk->voteResponse.flushLsn);
 
 			sk->startStreamingAt = Min(propEndLsn, skEndLsn);
 		}
@@ -1146,7 +1146,7 @@ SendProposerElected(Safekeeper *sk)
 	msg.termHistory = &wp->propTermHistory;
 	msg.timelineStartLsn = wp->timelineStartLsn;
 
-	lastCommonTerm = i >= 0 ? wp->propTermHistory.entries[i].term : 0;
+	lastCommonTerm = idx >= 0 ? wp->propTermHistory.entries[idx].term : 0;
 	wp_log(LOG,
 		   "sending elected msg to node " UINT64_FORMAT " term=" UINT64_FORMAT ", startStreamingAt=%X/%X (lastCommonTerm=" UINT64_FORMAT "), termHistory.n_entries=%u to %s:%s, timelineStartLsn=%X/%X",
 		   sk->greetResponse.nodeId, msg.term, LSN_FORMAT_ARGS(msg.startStreamingAt), lastCommonTerm, msg.termHistory->n_entries, sk->host, sk->port, LSN_FORMAT_ARGS(msg.timelineStartLsn));
@@ -1442,12 +1442,17 @@ RecvAppendResponses(Safekeeper *sk)
 		if (sk->appendResponse.term > wp->propTerm)
 		{
 			/*
-			 * Another compute with higher term is running. Panic to restart
-			 * PG as we likely need to retake basebackup. However, don't dump
-			 * core as this is kinda expected scenario.
+			 *
+			 * Term has changed to higher one, probably another compute is
+			 * running. If this is the case we could PANIC as well because
+			 * likely it inserted some data and our basebackup is unsuitable
+			 * anymore. However, we also bump term manually (term_bump endpoint)
+			 * on safekeepers for migration purposes, in this case we do want
+			 * compute to stay alive. So restart walproposer with FATAL instead
+			 * of panicking; if basebackup is spoiled next election will notice
+			 * this.
 			 */
-			disable_core_dump();
-			wp_log(PANIC, "WAL acceptor %s:%s with term " INT64_FORMAT " rejected our request, our term " INT64_FORMAT ", meaning another compute is running at the same time, and it conflicts with us",
+			wp_log(FATAL, "WAL acceptor %s:%s with term " INT64_FORMAT " rejected our request, our term " INT64_FORMAT ", meaning another compute is running at the same time, and it conflicts with us",
 				   sk->host, sk->port,
 				   sk->appendResponse.term, wp->propTerm);
 		}
@@ -1633,7 +1638,7 @@ UpdateDonorShmem(WalProposer *wp)
  * Process AppendResponse message from safekeeper.
  */
 static void
-HandleSafekeeperResponse(WalProposer *wp, Safekeeper *sk)
+HandleSafekeeperResponse(WalProposer *wp, Safekeeper *fromsk)
 {
 	XLogRecPtr	candidateTruncateLsn;
 	XLogRecPtr	newCommitLsn;
@@ -1652,7 +1657,7 @@ HandleSafekeeperResponse(WalProposer *wp, Safekeeper *sk)
 	 * and WAL is committed by the quorum. BroadcastAppendRequest() should be
 	 * called to notify safekeepers about the new commitLsn.
 	 */
-	wp->api.process_safekeeper_feedback(wp, sk);
+	wp->api.process_safekeeper_feedback(wp, fromsk);
 
 	/*
 	 * Try to advance truncateLsn -- the last record flushed to all

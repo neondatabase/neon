@@ -1,14 +1,23 @@
+from __future__ import annotations
+
 import json
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
 from fixtures.log_helper import log
-from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder, PgBin, wait_for_last_flush_lsn
-from fixtures.pageserver.utils import wait_for_upload_queue_empty
+from fixtures.neon_fixtures import (
+    NeonEnv,
+    NeonEnvBuilder,
+    PgBin,
+    flush_ep_to_pageserver,
+)
 from fixtures.remote_storage import s3_storage
 from fixtures.utils import humantime_to_ms
+
+if TYPE_CHECKING:
+    from typing import Any
 
 
 @pytest.mark.parametrize("duration", [30])
@@ -26,7 +35,7 @@ def test_download_churn(
     def record(metric, **kwargs):
         zenbenchmark.record(metric_name=f"pageserver_ondemand_download_churn.{metric}", **kwargs)
 
-    params: Dict[str, Tuple[Any, Dict[str, Any]]] = {}
+    params: dict[str, tuple[Any, dict[str, Any]]] = {}
 
     # params from fixtures
     params.update(
@@ -95,9 +104,9 @@ def setup_env(neon_env_builder: NeonEnvBuilder, pg_bin: PgBin):
             f"INSERT INTO data SELECT lpad(i::text, {bytes_per_row}, '0') FROM generate_series(1, {int(nrows)})  as i",
             options="-c statement_timeout=0",
         )
-        wait_for_last_flush_lsn(env, ep, tenant_id, timeline_id)
-    # TODO: this is a bit imprecise, there could be frozen layers being written out that we don't observe here
-    wait_for_upload_queue_empty(client, tenant_id, timeline_id)
+        flush_ep_to_pageserver(env, ep, tenant_id, timeline_id)
+
+    client.timeline_checkpoint(tenant_id, timeline_id, compact=False, wait_until_uploaded=True)
 
     return env
 
@@ -130,7 +139,7 @@ def run_benchmark(
     results_path = Path(basepath + ".stdout")
     log.info(f"Benchmark results at: {results_path}")
 
-    with open(results_path, "r") as f:
+    with open(results_path) as f:
         results = json.load(f)
     log.info(f"Results:\n{json.dumps(results, sort_keys=True, indent=2)}")
 

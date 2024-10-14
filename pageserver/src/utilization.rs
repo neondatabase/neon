@@ -5,12 +5,17 @@
 
 use anyhow::Context;
 use std::path::Path;
+use utils::serde_percent::Percent;
 
 use pageserver_api::models::PageserverUtilization;
 
-pub(crate) fn regenerate(tenants_path: &Path) -> anyhow::Result<PageserverUtilization> {
-    // TODO: currently the http api ratelimits this to 1Hz at most, which is probably good enough
+use crate::{config::PageServerConf, metrics::NODE_UTILIZATION_SCORE, tenant::mgr::TenantManager};
 
+pub(crate) fn regenerate(
+    conf: &PageServerConf,
+    tenants_path: &Path,
+    tenant_manager: &TenantManager,
+) -> anyhow::Result<PageserverUtilization> {
     let statvfs = nix::sys::statvfs::statvfs(tenants_path)
         .map_err(std::io::Error::from)
         .context("statvfs tenants directory")?;
@@ -34,17 +39,32 @@ pub(crate) fn regenerate(tenants_path: &Path) -> anyhow::Result<PageserverUtiliz
 
     let captured_at = std::time::SystemTime::now();
 
-    let doc = PageserverUtilization {
+    // Calculate aggregate utilization from tenants on this pageserver
+    let (disk_wanted_bytes, shard_count) = tenant_manager.calculate_utilization()?;
+
+    // Fetch the fraction of disk space which may be used
+    let disk_usable_pct = match conf.disk_usage_based_eviction.clone() {
+        Some(e) => e.max_usage_pct,
+        None => Percent::new(100).unwrap(),
+    };
+
+    // Express a static value for how many shards we may schedule on one node
+    const MAX_SHARDS: u32 = 20000;
+
+    let mut doc = PageserverUtilization {
         disk_usage_bytes: used,
         free_space_bytes: free,
-        // lower is better; start with a constant
-        //
-        // note that u64::MAX will be output as i64::MAX as u64, but that should not matter
-        utilization_score: u64::MAX,
+        disk_wanted_bytes,
+        disk_usable_pct,
+        shard_count,
+        max_shard_count: MAX_SHARDS,
+        utilization_score: None,
         captured_at: utils::serde_system_time::SystemTime(captured_at),
     };
 
-    // TODO: make utilization_score into a metric
+    // Initialize `PageserverUtilization::utilization_score`
+    let score = doc.cached_score();
+    NODE_UTILIZATION_SCORE.set(score);
 
     Ok(doc)
 }

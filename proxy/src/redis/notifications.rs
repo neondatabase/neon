@@ -58,9 +58,9 @@ pub(crate) struct PasswordUpdate {
 }
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub(crate) struct CancelSession {
-    pub region_id: Option<String>,
-    pub cancel_key_data: CancelKeyData,
-    pub session_id: Uuid,
+    pub(crate) region_id: Option<String>,
+    pub(crate) cancel_key_data: CancelKeyData,
+    pub(crate) session_id: Uuid,
 }
 
 fn deserialize_json_string<'de, D, T>(deserializer: D) -> Result<T, D::Error>
@@ -89,7 +89,7 @@ impl<C: ProjectInfoCache + Send + Sync + 'static> Clone for MessageHandler<C> {
 }
 
 impl<C: ProjectInfoCache + Send + Sync + 'static> MessageHandler<C> {
-    pub fn new(
+    pub(crate) fn new(
         cache: Arc<C>,
         cancellation_handler: Arc<CancellationHandler<()>>,
         region_id: String,
@@ -100,15 +100,14 @@ impl<C: ProjectInfoCache + Send + Sync + 'static> MessageHandler<C> {
             region_id,
         }
     }
-    pub async fn increment_active_listeners(&self) {
+    pub(crate) async fn increment_active_listeners(&self) {
         self.cache.increment_active_listeners().await;
     }
-    pub async fn decrement_active_listeners(&self) {
+    pub(crate) async fn decrement_active_listeners(&self) {
         self.cache.decrement_active_listeners().await;
     }
     #[tracing::instrument(skip(self, msg), fields(session_id = tracing::field::Empty))]
     async fn handle_message(&self, msg: redis::Msg) -> anyhow::Result<()> {
-        use Notification::*;
         let payload: String = msg.get_payload()?;
         tracing::debug!(?payload, "received a message payload");
 
@@ -124,7 +123,7 @@ impl<C: ProjectInfoCache + Send + Sync + 'static> MessageHandler<C> {
         };
         tracing::debug!(?msg, "received a message");
         match msg {
-            Cancel(cancel_session) => {
+            Notification::Cancel(cancel_session) => {
                 tracing::Span::current().record(
                     "session_id",
                     tracing::field::display(cancel_session.session_id),
@@ -147,18 +146,18 @@ impl<C: ProjectInfoCache + Send + Sync + 'static> MessageHandler<C> {
                 {
                     Ok(()) => {}
                     Err(e) => {
-                        tracing::error!("failed to cancel session: {e}");
+                        tracing::warn!("failed to cancel session: {e}");
                     }
                 }
             }
-            _ => {
+            Notification::AllowedIpsUpdate { .. } | Notification::PasswordUpdate { .. } => {
                 invalidate_cache(self.cache.clone(), msg.clone());
-                if matches!(msg, AllowedIpsUpdate { .. }) {
+                if matches!(msg, Notification::AllowedIpsUpdate { .. }) {
                     Metrics::get()
                         .proxy
                         .redis_events_count
                         .inc(RedisEventsCount::AllowedIpsUpdate);
-                } else if matches!(msg, PasswordUpdate { .. }) {
+                } else if matches!(msg, Notification::PasswordUpdate { .. }) {
                     Metrics::get()
                         .proxy
                         .redis_events_count
@@ -180,16 +179,16 @@ impl<C: ProjectInfoCache + Send + Sync + 'static> MessageHandler<C> {
 }
 
 fn invalidate_cache<C: ProjectInfoCache>(cache: Arc<C>, msg: Notification) {
-    use Notification::*;
     match msg {
-        AllowedIpsUpdate { allowed_ips_update } => {
-            cache.invalidate_allowed_ips_for_project(allowed_ips_update.project_id)
+        Notification::AllowedIpsUpdate { allowed_ips_update } => {
+            cache.invalidate_allowed_ips_for_project(allowed_ips_update.project_id);
         }
-        PasswordUpdate { password_update } => cache.invalidate_role_secret_for_project(
-            password_update.project_id,
-            password_update.role_name,
-        ),
-        Cancel(_) => unreachable!("cancel message should be handled separately"),
+        Notification::PasswordUpdate { password_update } => cache
+            .invalidate_role_secret_for_project(
+                password_update.project_id,
+                password_update.role_name,
+            ),
+        Notification::Cancel(_) => unreachable!("cancel message should be handled separately"),
     }
 }
 

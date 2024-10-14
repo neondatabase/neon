@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::checks::{list_timeline_blobs, BlobDataParseResult, S3TimelineBlobData};
+use crate::checks::{list_timeline_blobs, BlobDataParseResult, RemoteTimelineBlobData};
 use crate::metadata_stream::{stream_tenant_shards, stream_tenant_timelines};
 use crate::{
-    download_object_to_file, init_remote, BucketConfig, NodeKind, RootTarget, TenantShardTimelineId,
+    download_object_to_file_s3, init_remote, init_remote_s3, BucketConfig, NodeKind, RootTarget,
+    TenantShardTimelineId,
 };
 use anyhow::Context;
 use async_stream::stream;
@@ -15,6 +16,7 @@ use pageserver::tenant::remote_timeline_client::index::LayerFileMetadata;
 use pageserver::tenant::storage_layer::LayerName;
 use pageserver::tenant::IndexPart;
 use pageserver_api::shard::TenantShardId;
+use remote_storage::GenericRemoteStorage;
 use utils::generation::Generation;
 use utils::id::TenantId;
 
@@ -34,7 +36,8 @@ impl SnapshotDownloader {
         output_path: Utf8PathBuf,
         concurrency: usize,
     ) -> anyhow::Result<Self> {
-        let (s3_client, s3_root) = init_remote(bucket_config.clone(), NodeKind::Pageserver).await?;
+        let (s3_client, s3_root) =
+            init_remote_s3(bucket_config.clone(), NodeKind::Pageserver).await?;
         Ok(Self {
             s3_client,
             s3_root,
@@ -91,7 +94,7 @@ impl SnapshotDownloader {
             let Some(version) = versions.versions.as_ref().and_then(|v| v.first()) else {
                 return Err(anyhow::anyhow!("No versions found for {remote_layer_path}"));
             };
-            download_object_to_file(
+            download_object_to_file_s3(
                 &self.s3_client,
                 &self.bucket_config.bucket,
                 &remote_layer_path,
@@ -215,11 +218,11 @@ impl SnapshotDownloader {
     }
 
     pub async fn download(&self) -> anyhow::Result<()> {
-        let (s3_client, target) =
+        let (remote_client, target) =
             init_remote(self.bucket_config.clone(), NodeKind::Pageserver).await?;
 
         // Generate a stream of TenantShardId
-        let shards = stream_tenant_shards(&s3_client, &target, self.tenant_id).await?;
+        let shards = stream_tenant_shards(&remote_client, &target, self.tenant_id).await?;
         let shards: Vec<TenantShardId> = shards.try_collect().await?;
 
         // Only read from shards that have the highest count: avoids redundantly downloading
@@ -237,18 +240,19 @@ impl SnapshotDownloader {
 
         for shard in shards.into_iter().filter(|s| s.shard_count == shard_count) {
             // Generate a stream of TenantTimelineId
-            let timelines = stream_tenant_timelines(&s3_client, &self.s3_root, shard).await?;
+            let timelines = stream_tenant_timelines(&remote_client, &target, shard).await?;
 
             // Generate a stream of S3TimelineBlobData
             async fn load_timeline_index(
-                s3_client: &Client,
+                remote_client: &GenericRemoteStorage,
                 target: &RootTarget,
                 ttid: TenantShardTimelineId,
-            ) -> anyhow::Result<(TenantShardTimelineId, S3TimelineBlobData)> {
-                let data = list_timeline_blobs(s3_client, ttid, target).await?;
+            ) -> anyhow::Result<(TenantShardTimelineId, RemoteTimelineBlobData)> {
+                let data = list_timeline_blobs(remote_client, ttid, target).await?;
                 Ok((ttid, data))
             }
-            let timelines = timelines.map_ok(|ttid| load_timeline_index(&s3_client, &target, ttid));
+            let timelines =
+                timelines.map_ok(|ttid| load_timeline_index(&remote_client, &target, ttid));
             let mut timelines = std::pin::pin!(timelines.try_buffered(8));
 
             while let Some(i) = timelines.next().await {
@@ -269,7 +273,7 @@ impl SnapshotDownloader {
                         .context("Downloading timeline")?;
                     }
                     BlobDataParseResult::Relic => {}
-                    BlobDataParseResult::Incorrect(_) => {
+                    BlobDataParseResult::Incorrect { .. } => {
                         tracing::error!("Bad metadata in timeline {ttid}");
                     }
                 };
@@ -278,7 +282,7 @@ impl SnapshotDownloader {
 
         for (ttid, layers) in ancestor_layers.into_iter() {
             tracing::info!(
-                "Downloading {} layers from ancvestor timeline {ttid}...",
+                "Downloading {} layers from ancestor timeline {ttid}...",
                 layers.len()
             );
 

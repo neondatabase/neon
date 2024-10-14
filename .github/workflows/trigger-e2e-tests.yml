@@ -34,8 +34,8 @@ jobs:
       build-tag: ${{ steps.build-tag.outputs.tag }}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      # Need `fetch-depth: 0` to count the number of commits in the branch
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -102,12 +102,17 @@ jobs:
           # Default set of platforms to run e2e tests on
           platforms='["docker", "k8s"]'
 
-          # If the PR changes vendor/, pgxn/ or libs/vm_monitor/ directories, or Dockerfile.compute-node, add k8s-neonvm to the list of platforms.
+          # If a PR changes anything that affects computes, add k8s-neonvm to the list of platforms.
           # If the workflow run is not a pull request, add k8s-neonvm to the list.
           if [ "$GITHUB_EVENT_NAME" == "pull_request" ]; then
             for f in $(gh api "/repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" --paginate --jq '.[].filename'); do
               case "$f" in
-                vendor/*|pgxn/*|libs/vm_monitor/*|Dockerfile.compute-node)
+                # List of directories that contain code which affect compute images.
+                #
+                # This isn't exhaustive, just the paths that are most directly compute-related.
+                # For example, compute_ctl also depends on libs/utils, but we don't trigger
+                # an e2e run on that.
+                vendor/*|pgxn/*|compute_tools/*|libs/vm_monitor/*|compute/Dockerfile.compute-node)
                   platforms=$(echo "${platforms}" | jq --compact-output '. += ["k8s-neonvm"] | unique')
                   ;;
                 *)

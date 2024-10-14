@@ -17,7 +17,9 @@ use std::time::Duration;
 use postgres_ffi::v14::xlog_utils::XLogSegNoOffsetToRecPtr;
 use postgres_ffi::XLogFileName;
 use postgres_ffi::{XLogSegNo, PG_TLI};
-use remote_storage::{GenericRemoteStorage, ListingMode, RemotePath, StorageMetadata};
+use remote_storage::{
+    DownloadOpts, GenericRemoteStorage, ListingMode, RemotePath, StorageMetadata,
+};
 use tokio::fs::File;
 
 use tokio::select;
@@ -203,7 +205,7 @@ struct WalBackupTask {
 }
 
 /// Offload single timeline.
-#[instrument(name = "WAL backup", skip_all, fields(ttid = %tli.ttid))]
+#[instrument(name = "wal_backup", skip_all, fields(ttid = %tli.ttid))]
 async fn backup_task_main(
     tli: WalResidentTimeline,
     parallel_jobs: usize,
@@ -315,7 +317,7 @@ async fn backup_lsn_range(
         anyhow::bail!("parallel_jobs must be >= 1");
     }
 
-    let remote_timeline_path = remote_timeline_path(&timeline.ttid)?;
+    let remote_timeline_path = &timeline.remote_path;
     let start_lsn = *backup_lsn;
     let segments = get_segments(start_lsn, end_lsn, wal_seg_size);
 
@@ -328,11 +330,7 @@ async fn backup_lsn_range(
     loop {
         let added_task = match iter.next() {
             Some(s) => {
-                uploads.push_back(backup_single_segment(
-                    s,
-                    timeline_dir,
-                    &remote_timeline_path,
-                ));
+                uploads.push_back(backup_single_segment(s, timeline_dir, remote_timeline_path));
                 true
             }
             None => false,
@@ -483,6 +481,16 @@ pub(crate) async fn backup_partial_segment(
         .await
 }
 
+pub(crate) async fn copy_partial_segment(
+    source: &RemotePath,
+    destination: &RemotePath,
+) -> Result<()> {
+    let storage = get_configured_remote_storage();
+    let cancel = CancellationToken::new();
+
+    storage.copy_object(source, destination, &cancel).await
+}
+
 pub async fn read_object(
     file_path: &RemotePath,
     offset: u64,
@@ -497,8 +505,12 @@ pub async fn read_object(
 
     let cancel = CancellationToken::new();
 
+    let opts = DownloadOpts {
+        byte_start: std::ops::Bound::Included(offset),
+        ..Default::default()
+    };
     let download = storage
-        .download_storage_object(Some((offset, None)), file_path, &cancel)
+        .download(file_path, &opts, &cancel)
         .await
         .with_context(|| {
             format!("Failed to open WAL segment download stream for remote path {file_path:?}")

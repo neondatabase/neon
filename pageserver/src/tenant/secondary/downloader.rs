@@ -22,7 +22,7 @@ use crate::{
             FAILED_REMOTE_OP_RETRIES,
         },
         span::debug_assert_current_span_has_tenant_id,
-        storage_layer::{layer::local_layer_path, LayerName},
+        storage_layer::{layer::local_layer_path, LayerName, LayerVisibilityHint},
         tasks::{warn_when_period_overrun, BackgroundLoopKind},
     },
     virtual_file::{on_fatal_io_error, MaybeFatalIo, VirtualFile},
@@ -49,13 +49,13 @@ use futures::Future;
 use metrics::UIntGauge;
 use pageserver_api::models::SecondaryProgress;
 use pageserver_api::shard::TenantShardId;
-use remote_storage::{DownloadError, Etag, GenericRemoteStorage};
+use remote_storage::{DownloadError, DownloadOpts, Etag, GenericRemoteStorage};
 
 use tokio_util::sync::CancellationToken;
 use tracing::{info_span, instrument, warn, Instrument};
 use utils::{
     backoff, completion::Barrier, crashsafe::path_with_suffix_extension, failpoint_support, fs_ext,
-    id::TimelineId, serde_system_time,
+    id::TimelineId, pausable_failpoint, serde_system_time,
 };
 
 use super::{
@@ -296,6 +296,9 @@ impl SecondaryDetail {
                         }),
                         last_activity_ts: ods.access_time,
                         relative_last_activity: finite_f32::FiniteF32::ZERO,
+                        // Secondary location layers are presumed visible, because Covered layers
+                        // are excluded from the heatmap
+                        visibility: LayerVisibilityHint::Visible,
                     }
                 }));
 
@@ -826,6 +829,12 @@ impl<'a> TenantDownloader<'a> {
             layers_downloaded: 0,
             bytes_downloaded: 0,
         };
+
+        // Also expose heatmap bytes_total as a metric
+        self.secondary_state
+            .heatmap_total_size_metric
+            .set(heatmap_stats.bytes);
+
         // Accumulate list of things to delete while holding the detail lock, for execution after dropping the lock
         let mut delete_layers = Vec::new();
         let mut delete_timelines = Vec::new();
@@ -935,36 +944,35 @@ impl<'a> TenantDownloader<'a> {
     ) -> Result<HeatMapDownload, UpdateError> {
         debug_assert_current_span_has_tenant_id();
         let tenant_shard_id = self.secondary_state.get_tenant_shard_id();
-        // TODO: pull up etag check into the request, to do a conditional GET rather than
-        // issuing a GET and then maybe ignoring the response body
-        // (https://github.com/neondatabase/neon/issues/6199)
         tracing::debug!("Downloading heatmap for secondary tenant",);
 
         let heatmap_path = remote_heatmap_path(tenant_shard_id);
         let cancel = &self.secondary_state.cancel;
+        let opts = DownloadOpts {
+            etag: prev_etag.cloned(),
+            ..Default::default()
+        };
 
         backoff::retry(
             || async {
-                let download = self
+                let download = match self
                     .remote_storage
-                    .download(&heatmap_path, cancel)
+                    .download(&heatmap_path, &opts, cancel)
                     .await
-                    .map_err(UpdateError::from)?;
+                {
+                    Ok(download) => download,
+                    Err(DownloadError::Unmodified) => return Ok(HeatMapDownload::Unmodified),
+                    Err(err) => return Err(err.into()),
+                };
 
-                SECONDARY_MODE.download_heatmap.inc();
-
-                if Some(&download.etag) == prev_etag {
-                    Ok(HeatMapDownload::Unmodified)
-                } else {
-                    let mut heatmap_bytes = Vec::new();
-                    let mut body = tokio_util::io::StreamReader::new(download.download_stream);
-                    let _size = tokio::io::copy_buf(&mut body, &mut heatmap_bytes).await?;
-                    Ok(HeatMapDownload::Modified(HeatMapModified {
-                        etag: download.etag,
-                        last_modified: download.last_modified,
-                        bytes: heatmap_bytes,
-                    }))
-                }
+                let mut heatmap_bytes = Vec::new();
+                let mut body = tokio_util::io::StreamReader::new(download.download_stream);
+                let _size = tokio::io::copy_buf(&mut body, &mut heatmap_bytes).await?;
+                Ok(HeatMapDownload::Modified(HeatMapModified {
+                    etag: download.etag,
+                    last_modified: download.last_modified,
+                    bytes: heatmap_bytes,
+                }))
             },
             |e| matches!(e, UpdateError::NoData | UpdateError::Cancelled),
             FAILED_DOWNLOAD_WARN_THRESHOLD,
@@ -975,6 +983,7 @@ impl<'a> TenantDownloader<'a> {
         .await
         .ok_or_else(|| UpdateError::Cancelled)
         .and_then(|x| x)
+        .inspect(|_| SECONDARY_MODE.download_heatmap.inc())
     }
 
     /// Download heatmap layers that are not present on local disk, or update their
@@ -1146,11 +1155,13 @@ impl<'a> TenantDownloader<'a> {
         layer: HeatMapLayer,
         ctx: &RequestContext,
     ) -> Result<Option<HeatMapLayer>, UpdateError> {
-        // Failpoint for simulating slow remote storage
+        // Failpoints for simulating slow remote storage
         failpoint_support::sleep_millis_async!(
             "secondary-layer-download-sleep",
             &self.secondary_state.cancel
         );
+
+        pausable_failpoint!("secondary-layer-download-pausable");
 
         let local_path = local_layer_path(
             self.conf,

@@ -1,8 +1,10 @@
+from __future__ import annotations
+
 import os
 import shutil
 from contextlib import closing
 from pathlib import Path
-from typing import Any, Dict
+from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.log_helper import log
@@ -13,6 +15,9 @@ from fixtures.pg_version import PgVersion
 from pytest_httpserver import HTTPServer
 from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
+
+if TYPE_CHECKING:
+    from typing import Any
 
 
 # use neon_env_builder_local fixture to override the default neon_env_builder fixture
@@ -44,6 +49,8 @@ def test_remote_extensions(
 ):
     if pg_version == PgVersion.V16:
         pytest.skip("TODO: PG16 extension building")
+    if pg_version == PgVersion.V17:
+        pytest.skip("TODO: PG17 extension building")
 
     # setup mock http server
     # that expects request for anon.tar.zst
@@ -79,14 +86,14 @@ def test_remote_extensions(
     # Start a compute node with remote_extension spec
     # and check that it can download the extensions and use them to CREATE EXTENSION.
     env = neon_env_builder_local.init_start()
-    env.neon_cli.create_branch("test_remote_extensions")
+    env.create_branch("test_remote_extensions")
     endpoint = env.endpoints.create(
         "test_remote_extensions",
         config_lines=["log_min_messages=debug3"],
     )
 
     # mock remote_extensions spec
-    spec: Dict[str, Any] = {
+    spec: dict[str, Any] = {
         "library_index": {
             "anon": "anon",
         },

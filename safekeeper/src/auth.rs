@@ -1,6 +1,9 @@
 use utils::auth::{AuthError, Claims, Scope};
 use utils::id::TenantId;
 
+/// If tenant_id is provided, allow if token (claims) is for this tenant or
+/// whole safekeeper scope (SafekeeperData). Else, allow only if token is
+/// SafekeeperData.
 pub fn check_permission(claims: &Claims, tenant_id: Option<TenantId>) -> Result<(), AuthError> {
     match (&claims.scope, tenant_id) {
         (Scope::Tenant, None) => Err(AuthError(
@@ -12,15 +15,20 @@ pub fn check_permission(claims: &Claims, tenant_id: Option<TenantId>) -> Result<
             }
             Ok(())
         }
-        (Scope::Admin | Scope::PageServerApi | Scope::GenerationsApi | Scope::Scrubber, _) => {
-            Err(AuthError(
-                format!(
-                    "JWT scope '{:?}' is ineligible for Safekeeper auth",
-                    claims.scope
-                )
-                .into(),
-            ))
-        }
+        (
+            Scope::Admin
+            | Scope::PageServerApi
+            | Scope::GenerationsApi
+            | Scope::Infra
+            | Scope::Scrubber,
+            _,
+        ) => Err(AuthError(
+            format!(
+                "JWT scope '{:?}' is ineligible for Safekeeper auth",
+                claims.scope
+            )
+            .into(),
+        )),
         (Scope::SafekeeperData, _) => Ok(()),
     }
 }

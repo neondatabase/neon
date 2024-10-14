@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 
+from __future__ import annotations
+
 import argparse
 import enum
+import os
 import subprocess
 import sys
-from typing import List
 
 
 @enum.unique
@@ -54,12 +56,12 @@ def mypy() -> str:
     return "poetry run mypy"
 
 
-def get_commit_files() -> List[str]:
+def get_commit_files() -> list[str]:
     files = subprocess.check_output("git diff --cached --name-only --diff-filter=ACM".split())
     return files.decode().splitlines()
 
 
-def check(name: str, suffix: str, cmd: str, changed_files: List[str], no_color: bool = False):
+def check(name: str, suffix: str, cmd: str, changed_files: list[str], no_color: bool = False):
     print(f"Checking: {name} ", end="")
     applicable_files = list(filter(lambda fname: fname.strip().endswith(suffix), changed_files))
     if not applicable_files:
@@ -93,7 +95,7 @@ if __name__ == "__main__":
         "--no-color",
         action="store_true",
         help="disable colored output",
-        default=not sys.stdout.isatty(),
+        default=not sys.stdout.isatty() or os.getenv("TERM") == "dumb",
     )
     args = parser.parse_args()
 

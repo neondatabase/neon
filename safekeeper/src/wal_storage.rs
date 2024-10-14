@@ -15,6 +15,7 @@ use postgres_ffi::v14::xlog_utils::{IsPartialXLogFileName, IsXLogFileName, XLogF
 use postgres_ffi::{dispatch_pgversion, XLogSegNo, PG_TLI};
 use remote_storage::RemotePath;
 use std::cmp::{max, min};
+use std::future::Future;
 use std::io::{self, SeekFrom};
 use std::pin::Pin;
 use tokio::fs::{self, remove_file, File, OpenOptions};
@@ -35,8 +36,9 @@ use postgres_ffi::XLOG_BLCKSZ;
 use pq_proto::SystemId;
 use utils::{id::TenantTimelineId, lsn::Lsn};
 
-#[async_trait::async_trait]
 pub trait Storage {
+    // Last written LSN.
+    fn write_lsn(&self) -> Lsn;
     /// LSN of last durably stored WAL record.
     fn flush_lsn(&self) -> Lsn;
 
@@ -44,16 +46,19 @@ pub trait Storage {
     /// the segment and short header at the page of given LSN. This is only used
     /// for timeline initialization because compute will stream data only since
     /// init_lsn. Other segment headers are included in compute stream.
-    async fn initialize_first_segment(&mut self, init_lsn: Lsn) -> Result<()>;
+    fn initialize_first_segment(
+        &mut self,
+        init_lsn: Lsn,
+    ) -> impl Future<Output = Result<()>> + Send;
 
     /// Write piece of WAL from buf to disk, but not necessarily sync it.
-    async fn write_wal(&mut self, startpos: Lsn, buf: &[u8]) -> Result<()>;
+    fn write_wal(&mut self, startpos: Lsn, buf: &[u8]) -> impl Future<Output = Result<()>> + Send;
 
     /// Truncate WAL at specified LSN, which must be the end of WAL record.
-    async fn truncate_wal(&mut self, end_pos: Lsn) -> Result<()>;
+    fn truncate_wal(&mut self, end_pos: Lsn) -> impl Future<Output = Result<()>> + Send;
 
     /// Durably store WAL on disk, up to the last written WAL record.
-    async fn flush_wal(&mut self) -> Result<()>;
+    fn flush_wal(&mut self) -> impl Future<Output = Result<()>> + Send;
 
     /// Remove all segments <= given segno. Returns function doing that as we
     /// want to perform it without timeline lock.
@@ -93,7 +98,19 @@ pub struct PhysicalStorage {
     /// Also can be ahead of record_lsn, if happen to be in the middle of a WAL record.
     write_lsn: Lsn,
 
-    /// The LSN of the last WAL record written to disk. Still can be not fully flushed.
+    /// The LSN of the last WAL record written to disk. Still can be not fully
+    /// flushed.
+    ///
+    /// Note: Normally it (and flush_record_lsn) is <= write_lsn, but after xlog
+    /// switch ingest the reverse is true because we don't bump write_lsn up to
+    /// the next segment: WAL stream from the compute doesn't have the gap and
+    /// for simplicity / as a sanity check we disallow any non-sequential
+    /// writes, so write zeros as is.
+    ///
+    /// Similar effect is in theory possible due to LSN alignment: if record
+    /// ends at *2, decoder will report end lsn as *8 even though we haven't
+    /// written these zeros yet. In practice compute likely never sends
+    /// non-aligned chunks of data.
     write_record_lsn: Lsn,
 
     /// The LSN of the last WAL record flushed to disk.
@@ -162,8 +179,7 @@ impl PhysicalStorage {
             )
         };
 
-        // TODO: do we really know that write_lsn is fully flushed to disk?
-        //      If not, maybe it's better to call fsync() here to be sure?
+        // note: this assumes we fsync'ed whole datadir on start.
         let flush_lsn = write_lsn;
 
         debug!(
@@ -325,8 +341,11 @@ impl PhysicalStorage {
     }
 }
 
-#[async_trait::async_trait]
 impl Storage for PhysicalStorage {
+    // Last written LSN.
+    fn write_lsn(&self) -> Lsn {
+        self.write_lsn
+    }
     /// flush_lsn returns LSN of last durably stored WAL record.
     fn flush_lsn(&self) -> Lsn {
         self.flush_record_lsn
@@ -432,11 +451,12 @@ impl Storage for PhysicalStorage {
             .with_label_values(&["truncate_wal"])
             .start_timer();
 
-        // Streaming must not create a hole, so truncate cannot be called on non-written lsn
-        if self.write_lsn != Lsn(0) && end_pos > self.write_lsn {
+        // Streaming must not create a hole, so truncate cannot be called on
+        // non-written lsn.
+        if self.write_record_lsn != Lsn(0) && end_pos > self.write_record_lsn {
             bail!(
-                "truncate_wal called on non-written WAL, write_lsn={}, end_pos={}",
-                self.write_lsn,
+                "truncate_wal called on non-written WAL, write_record_lsn={}, end_pos={}",
+                self.write_record_lsn,
                 end_pos
             );
         }
@@ -519,20 +539,17 @@ async fn remove_segments_from_disk(
     while let Some(entry) = entries.next_entry().await? {
         let entry_path = entry.path();
         let fname = entry_path.file_name().unwrap();
-
-        if let Some(fname_str) = fname.to_str() {
-            /* Ignore files that are not XLOG segments */
-            if !IsXLogFileName(fname_str) && !IsPartialXLogFileName(fname_str) {
-                continue;
-            }
-            let (segno, _) = XLogFromFileName(fname_str, wal_seg_size);
-            if remove_predicate(segno) {
-                remove_file(entry_path).await?;
-                n_removed += 1;
-                min_removed = min(min_removed, segno);
-                max_removed = max(max_removed, segno);
-                REMOVED_WAL_SEGMENTS.inc();
-            }
+        /* Ignore files that are not XLOG segments */
+        if !IsXLogFileName(fname) && !IsPartialXLogFileName(fname) {
+            continue;
+        }
+        let (segno, _) = XLogFromFileName(fname, wal_seg_size)?;
+        if remove_predicate(segno) {
+            remove_file(entry_path).await?;
+            n_removed += 1;
+            min_removed = min(min_removed, segno);
+            max_removed = max(max_removed, segno);
+            REMOVED_WAL_SEGMENTS.inc();
         }
     }
 

@@ -1,5 +1,7 @@
+from __future__ import annotations
+
 import time
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING
 
 from mypy_boto3_s3.type_defs import (
     DeleteObjectOutputTypeDef,
@@ -13,6 +15,9 @@ from fixtures.log_helper import log
 from fixtures.pageserver.http import PageserverApiException, PageserverHttpClient
 from fixtures.remote_storage import RemoteStorage, RemoteStorageKind, S3Storage
 from fixtures.utils import wait_until
+
+if TYPE_CHECKING:
+    from typing import Any, Optional, Union
 
 
 def assert_tenant_state(
@@ -66,7 +71,7 @@ def wait_for_upload(
     )
 
 
-def _tenant_in_expected_state(tenant_info: Dict[str, Any], expected_state: str):
+def _tenant_in_expected_state(tenant_info: dict[str, Any], expected_state: str):
     if tenant_info["state"]["slug"] == expected_state:
         return True
     if tenant_info["state"]["slug"] == "Broken":
@@ -80,7 +85,7 @@ def wait_until_tenant_state(
     expected_state: str,
     iterations: int,
     period: float = 1.0,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Does not use `wait_until` for debugging purposes
     """
@@ -136,7 +141,7 @@ def wait_until_timeline_state(
     expected_state: str,
     iterations: int,
     period: float = 1.0,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Does not use `wait_until` for debugging purposes
     """
@@ -147,7 +152,7 @@ def wait_until_timeline_state(
             if isinstance(timeline["state"], str):
                 if timeline["state"] == expected_state:
                     return timeline
-            elif isinstance(timeline, Dict):
+            elif isinstance(timeline, dict):
                 if timeline["state"].get(expected_state):
                     return timeline
 
@@ -235,7 +240,7 @@ def wait_for_upload_queue_empty(
 
         # this is `started left join finished`; if match, subtracting start from finished, resulting in queue depth
         remaining_labels = ["shard_id", "file_kind", "op_kind"]
-        tl: List[Tuple[Any, float]] = []
+        tl: list[tuple[Any, float]] = []
         for s in started:
             found = False
             for f in finished:
@@ -302,7 +307,7 @@ def assert_prefix_empty(
     assert remote_storage is not None
     response = list_prefix(remote_storage, prefix)
     keys = response["KeyCount"]
-    objects: List[ObjectTypeDef] = response.get("Contents", [])
+    objects: list[ObjectTypeDef] = response.get("Contents", [])
     common_prefixes = response.get("CommonPrefixes", [])
 
     is_mock_s3 = isinstance(remote_storage, S3Storage) and not remote_storage.cleanup
@@ -430,12 +435,17 @@ def enable_remote_storage_versioning(
     return response
 
 
-MANY_SMALL_LAYERS_TENANT_CONFIG = {
-    "gc_period": "0s",
-    "compaction_period": "0s",
-    "checkpoint_distance": 1024**2,
-    "image_creation_threshold": 100,
-}
+def many_small_layers_tenant_config() -> dict[str, Any]:
+    """
+    Create a new dict to avoid issues with deleting from the global value.
+    In python, the global is mutable.
+    """
+    return {
+        "gc_period": "0s",
+        "compaction_period": "0s",
+        "checkpoint_distance": 1024**2,
+        "image_creation_threshold": 100,
+    }
 
 
 def poll_for_remote_storage_iterations(remote_storage_kind: RemoteStorageKind) -> int:

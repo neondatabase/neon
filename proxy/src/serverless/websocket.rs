@@ -12,7 +12,7 @@ use anyhow::Context as _;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use framed_websockets::{Frame, OpCode, WebSocketServer};
 use futures::{Sink, Stream};
-use hyper1::upgrade::OnUpgrade;
+use hyper::upgrade::OnUpgrade;
 use hyper_util::rt::TokioIo;
 use pin_project_lite::pin_project;
 
@@ -27,7 +27,7 @@ use tracing::warn;
 pin_project! {
     /// This is a wrapper around a [`WebSocketStream`] that
     /// implements [`AsyncRead`] and [`AsyncWrite`].
-    pub struct WebSocketRw<S> {
+    pub(crate) struct WebSocketRw<S> {
         #[pin]
         stream: WebSocketServer<S>,
         recv: Bytes,
@@ -36,7 +36,7 @@ pin_project! {
 }
 
 impl<S> WebSocketRw<S> {
-    pub fn new(stream: WebSocketServer<S>) -> Self {
+    pub(crate) fn new(stream: WebSocketServer<S>) -> Self {
         Self {
             stream,
             recv: Bytes::new(),
@@ -127,9 +127,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncBufRead for WebSocketRw<S> {
     }
 }
 
-pub async fn serve_websocket(
+pub(crate) async fn serve_websocket(
     config: &'static ProxyConfig,
-    mut ctx: RequestMonitoring,
+    auth_backend: &'static crate::auth::Backend<'static, (), ()>,
+    ctx: RequestMonitoring,
     websocket: OnUpgrade,
     cancellation_handler: Arc<CancellationHandlerMain>,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
@@ -145,7 +146,8 @@ pub async fn serve_websocket(
 
     let res = Box::pin(handle_client(
         config,
-        &mut ctx,
+        auth_backend,
+        &ctx,
         cancellation_handler,
         WebSocketRw::new(websocket),
         ClientMode::Websockets { hostname },

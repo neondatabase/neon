@@ -4,14 +4,14 @@ use lasso::ThreadedRodeo;
 use measured::{
     label::{FixedCardinalitySet, LabelGroupSet, LabelName, LabelSet, LabelValue, StaticLabelSet},
     metric::{histogram::Thresholds, name::MetricName},
-    Counter, CounterVec, FixedCardinalityLabel, Gauge, GaugeVec, Histogram, HistogramVec,
-    LabelGroup, MetricGroup,
+    Counter, CounterVec, FixedCardinalityLabel, Gauge, Histogram, HistogramVec, LabelGroup,
+    MetricGroup,
 };
 use metrics::{CounterPairAssoc, CounterPairVec, HyperLogLog, HyperLogLogVec};
 
 use tokio::time::{self, Instant};
 
-use crate::console::messages::ColdStartInfo;
+use crate::control_plane::messages::ColdStartInfo;
 
 #[derive(MetricGroup)]
 #[metric(new(thread_pool: Arc<ThreadPoolMetrics>))]
@@ -252,7 +252,7 @@ impl Drop for HttpEndpointPoolsGuard<'_> {
 }
 
 impl HttpEndpointPools {
-    pub fn guard(&self) -> HttpEndpointPoolsGuard {
+    pub fn guard(&self) -> HttpEndpointPoolsGuard<'_> {
         self.http_pool_endpoints_registered_total.inc();
         HttpEndpointPoolsGuard {
             dec: &self.http_pool_endpoints_unregistered_total,
@@ -370,6 +370,7 @@ pub struct CancellationRequest {
     pub kind: CancellationOutcome,
 }
 
+#[derive(Clone, Copy)]
 pub enum Waiting {
     Cplane,
     Client,
@@ -396,12 +397,8 @@ pub struct LatencyTimer {
     protocol: Protocol,
     cold_start_info: ColdStartInfo,
     outcome: ConnectOutcome,
-}
 
-pub struct LatencyTimerPause<'a> {
-    timer: &'a mut LatencyTimer,
-    start: time::Instant,
-    waiting_for: Waiting,
+    skip_reporting: bool,
 }
 
 impl LatencyTimer {
@@ -414,14 +411,30 @@ impl LatencyTimer {
             cold_start_info: ColdStartInfo::Unknown,
             // assume failed unless otherwise specified
             outcome: ConnectOutcome::Failed,
+            skip_reporting: false,
         }
     }
 
-    pub fn pause(&mut self, waiting_for: Waiting) -> LatencyTimerPause<'_> {
-        LatencyTimerPause {
-            timer: self,
-            start: Instant::now(),
-            waiting_for,
+    pub(crate) fn noop(protocol: Protocol) -> Self {
+        Self {
+            start: time::Instant::now(),
+            stop: None,
+            accumulated: Accumulated::default(),
+            protocol,
+            cold_start_info: ColdStartInfo::Unknown,
+            // assume failed unless otherwise specified
+            outcome: ConnectOutcome::Failed,
+            skip_reporting: true,
+        }
+    }
+
+    pub fn unpause(&mut self, start: Instant, waiting_for: Waiting) {
+        let dur = start.elapsed();
+        match waiting_for {
+            Waiting::Cplane => self.accumulated.cplane += dur,
+            Waiting::Client => self.accumulated.client += dur,
+            Waiting::Compute => self.accumulated.compute += dur,
+            Waiting::RetryTimeout => self.accumulated.retry += dur,
         }
     }
 
@@ -438,18 +451,6 @@ impl LatencyTimer {
     }
 }
 
-impl Drop for LatencyTimerPause<'_> {
-    fn drop(&mut self) {
-        let dur = self.start.elapsed();
-        match self.waiting_for {
-            Waiting::Cplane => self.timer.accumulated.cplane += dur,
-            Waiting::Client => self.timer.accumulated.client += dur,
-            Waiting::Compute => self.timer.accumulated.compute += dur,
-            Waiting::RetryTimeout => self.timer.accumulated.retry += dur,
-        }
-    }
-}
-
 #[derive(FixedCardinalityLabel, Clone, Copy, Debug)]
 pub enum ConnectOutcome {
     Success,
@@ -458,6 +459,10 @@ pub enum ConnectOutcome {
 
 impl Drop for LatencyTimer {
     fn drop(&mut self) {
+        if self.skip_reporting {
+            return;
+        }
+
         let duration = self
             .stop
             .unwrap_or_else(time::Instant::now)
@@ -563,6 +568,7 @@ pub enum RedisEventsCount {
 }
 
 pub struct ThreadPoolWorkers(usize);
+#[derive(Copy, Clone)]
 pub struct ThreadPoolWorkerId(pub usize);
 
 impl LabelValue for ThreadPoolWorkerId {
@@ -628,9 +634,6 @@ impl FixedCardinalitySet for ThreadPoolWorkers {
 #[derive(MetricGroup)]
 #[metric(new(workers: usize))]
 pub struct ThreadPoolMetrics {
-    pub injector_queue_depth: Gauge,
-    #[metric(init = GaugeVec::with_label_set(ThreadPoolWorkers(workers)))]
-    pub worker_queue_depth: GaugeVec<ThreadPoolWorkers>,
     #[metric(init = CounterVec::with_label_set(ThreadPoolWorkers(workers)))]
     pub worker_task_turns_total: CounterVec<ThreadPoolWorkers>,
     #[metric(init = CounterVec::with_label_set(ThreadPoolWorkers(workers)))]

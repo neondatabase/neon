@@ -1,5 +1,7 @@
+from __future__ import annotations
+
 import concurrent.futures
-from typing import Any, Callable, Dict, Tuple
+from typing import TYPE_CHECKING
 
 import fixtures.pageserver.remote_storage
 from fixtures.common_types import TenantId, TimelineId
@@ -10,10 +12,13 @@ from fixtures.neon_fixtures import (
 )
 from fixtures.remote_storage import LocalFsStorage, RemoteStorageKind
 
+if TYPE_CHECKING:
+    from typing import Any, Callable
+
 
 def single_timeline(
     neon_env_builder: NeonEnvBuilder,
-    setup_template: Callable[[NeonEnv], Tuple[TenantId, TimelineId, Dict[str, Any]]],
+    setup_template: Callable[[NeonEnv], tuple[TenantId, TimelineId, dict[str, Any]]],
     ncopies: int,
 ) -> NeonEnv:
     """
@@ -39,7 +44,7 @@ def single_timeline(
     log.info("detach template tenant form pageserver")
     env.pageserver.tenant_detach(template_tenant)
 
-    log.info(f"duplicating template tenant {ncopies} times in S3")
+    log.info(f"duplicating template tenant {ncopies} times in remote storage")
     tenants = fixtures.pageserver.remote_storage.duplicate_tenant(env, template_tenant, ncopies)
 
     # In theory we could just attach all the tenants, force on-demand downloads via mgmt API, and be done.

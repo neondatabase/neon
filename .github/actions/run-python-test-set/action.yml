@@ -43,7 +43,7 @@ inputs:
   pg_version:
     description: 'Postgres version to use for tests'
     required: false
-    default: 'v14'
+    default: 'v16'
   benchmark_durations:
     description: 'benchmark durations JSON'
     required: false
@@ -71,7 +71,7 @@ runs:
       if: inputs.build_type != 'remote'
       uses: ./.github/actions/download
       with:
-        name: compatibility-snapshot-${{ inputs.build_type }}-pg${{ inputs.pg_version }}
+        name: compatibility-snapshot-${{ runner.arch }}-${{ inputs.build_type }}-pg${{ inputs.pg_version }}
         path: /tmp/compatibility_snapshot_pg${{ inputs.pg_version }}
         prefix: latest
         # The lack of compatibility snapshot (for example, for the new Postgres version)
@@ -83,7 +83,6 @@ runs:
       uses: actions/checkout@v4
       with:
         submodules: true
-        fetch-depth: 1
 
     - name: Cache poetry deps
       uses: actions/cache@v4
@@ -170,10 +169,8 @@ runs:
           EXTRA_PARAMS="--durations-path $TEST_OUTPUT/benchmark_durations.json $EXTRA_PARAMS"
         fi
 
-        if [[ "${{ inputs.build_type }}" == "debug" ]]; then
+        if [[ $BUILD_TYPE == "debug" && $RUNNER_ARCH == 'X64' ]]; then
           cov_prefix=(scripts/coverage "--profraw-prefix=$GITHUB_JOB" --dir=/tmp/coverage run)
-        elif [[ "${{ inputs.build_type }}" == "release" ]]; then
-          cov_prefix=()
         else
           cov_prefix=()
         fi
@@ -214,13 +211,16 @@ runs:
         fi
 
     - name: Upload compatibility snapshot
-      if: github.ref_name == 'release'
+      # Note, that we use `github.base_ref` which is a target branch for a PR
+      if: github.event_name == 'pull_request' && github.base_ref == 'release'
       uses: ./.github/actions/upload
       with:
-        name: compatibility-snapshot-${{ inputs.build_type }}-pg${{ inputs.pg_version }}-${{ github.run_id }}
+        name: compatibility-snapshot-${{ runner.arch }}-${{ inputs.build_type }}-pg${{ inputs.pg_version }}
         # Directory is created by test_compatibility.py::test_create_snapshot, keep the path in sync with the test
         path: /tmp/test_output/compatibility_snapshot_pg${{ inputs.pg_version }}/
-        prefix: latest
+        # The lack of compatibility snapshot shouldn't fail the job
+        # (for example if we didn't run the test for non build-and-test workflow)
+        skip-if-does-not-exist: true
 
     - name: Upload test results
       if: ${{ !cancelled() }}

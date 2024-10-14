@@ -20,6 +20,7 @@
 #include "utils/guc.h"
 #include "postmaster/interrupt.h"
 
+#include "neon.h"
 #include "neon_walreader.h"
 #include "walproposer.h"
 
@@ -159,7 +160,7 @@ NeonWALPageRead(
 							  WL_LATCH_SET | WL_EXIT_ON_PM_DEATH | reader_events,
 							  sock,
 							  timeout_ms,
-							  WAIT_EVENT_WAL_SENDER_MAIN);
+							  WAIT_EVENT_NEON_WAL_DL);
 		}
 	}
 }
@@ -181,15 +182,23 @@ NeonWALReadSegmentClose(XLogReaderState *xlogreader)
 void
 NeonOnDemandXLogReaderRoutines(XLogReaderRoutine *xlr)
 {
+	/*
+	 * If safekeepers are not configured, assume we don't need neon_walreader,
+	 * i.e. running neon fork locally.
+	 */
+	if (wal_acceptors_list[0] == '\0')
+		return;
+
 	if (!wal_reader)
 	{
-		XLogRecPtr	epochStartLsn = pg_atomic_read_u64(&GetWalpropShmemState()->propEpochStartLsn);
+		XLogRecPtr	basebackupLsn = GetRedoStartLsn();
 
-		if (epochStartLsn == 0)
+		/* should never happen */
+		if (basebackupLsn == 0)
 		{
-			elog(ERROR, "Unable to start walsender when propEpochStartLsn is 0!");
+			elog(ERROR, "unable to start walsender when basebackupLsn is 0");
 		}
-		wal_reader = NeonWALReaderAllocate(wal_segment_size, epochStartLsn, "[walsender] ");
+		wal_reader = NeonWALReaderAllocate(wal_segment_size, basebackupLsn, "[walsender] ");
 	}
 	xlr->page_read = NeonWALPageRead;
 	xlr->segment_open = NeonWALReadSegmentOpen;

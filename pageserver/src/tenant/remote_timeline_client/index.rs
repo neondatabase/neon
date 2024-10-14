@@ -1,4 +1,5 @@
 //! In-memory index to track the tenant files on the remote storage.
+//!
 //! Able to restore itself from the storage index parts, that are located in every timeline's remote directory and contain all data about
 //! remote timeline layers and its metadata.
 
@@ -216,26 +217,47 @@ fn is_false(b: &bool) -> bool {
 impl Lineage {
     const REMEMBER_AT_MOST: usize = 100;
 
-    pub(crate) fn record_previous_ancestor(&mut self, old_ancestor: &TimelineId) {
+    pub(crate) fn record_previous_ancestor(&mut self, old_ancestor: &TimelineId) -> bool {
         if self.reparenting_history.last() == Some(old_ancestor) {
             // do not re-record it
-            return;
-        }
+            false
+        } else {
+            #[cfg(feature = "testing")]
+            {
+                let existing = self
+                    .reparenting_history
+                    .iter()
+                    .position(|x| x == old_ancestor);
+                assert_eq!(
+                    existing, None,
+                    "we cannot reparent onto and off and onto the same timeline twice"
+                );
+            }
+            let drop_oldest = self.reparenting_history.len() + 1 >= Self::REMEMBER_AT_MOST;
 
-        let drop_oldest = self.reparenting_history.len() + 1 >= Self::REMEMBER_AT_MOST;
-
-        self.reparenting_history_truncated |= drop_oldest;
-        if drop_oldest {
-            self.reparenting_history.remove(0);
+            self.reparenting_history_truncated |= drop_oldest;
+            if drop_oldest {
+                self.reparenting_history.remove(0);
+            }
+            self.reparenting_history.push(*old_ancestor);
+            true
         }
-        self.reparenting_history.push(*old_ancestor);
     }
 
-    pub(crate) fn record_detaching(&mut self, branchpoint: &(TimelineId, Lsn)) {
-        assert!(self.original_ancestor.is_none());
-
-        self.original_ancestor =
-            Some((branchpoint.0, branchpoint.1, chrono::Utc::now().naive_utc()));
+    /// Returns true if anything changed.
+    pub(crate) fn record_detaching(&mut self, branchpoint: &(TimelineId, Lsn)) -> bool {
+        if let Some((id, lsn, _)) = self.original_ancestor {
+            assert_eq!(
+                &(id, lsn),
+                branchpoint,
+                "detaching attempt has to be for the same ancestor we are already detached from"
+            );
+            false
+        } else {
+            self.original_ancestor =
+                Some((branchpoint.0, branchpoint.1, chrono::Utc::now().naive_utc()));
+            true
+        }
     }
 
     /// The queried lsn is most likely the basebackup lsn, and this answers question "is it allowed
@@ -247,8 +269,14 @@ impl Lineage {
             .is_some_and(|(_, ancestor_lsn, _)| ancestor_lsn == lsn)
     }
 
-    pub(crate) fn is_detached_from_original_ancestor(&self) -> bool {
+    /// Returns true if the timeline originally had an ancestor, and no longer has one.
+    pub(crate) fn is_detached_from_ancestor(&self) -> bool {
         self.original_ancestor.is_some()
+    }
+
+    /// Returns original ancestor timeline id and lsn that this timeline has been detached from.
+    pub(crate) fn detached_previous_ancestor(&self) -> Option<(TimelineId, Lsn)> {
+        self.original_ancestor.map(|(id, lsn, _)| (id, lsn))
     }
 
     pub(crate) fn is_reparented(&self) -> bool {

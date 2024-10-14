@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import os
 import re
@@ -18,7 +20,6 @@ from fixtures.neon_fixtures import (
 from fixtures.pageserver.utils import (
     timeline_delete_wait_completed,
     wait_for_last_record_lsn,
-    wait_for_upload,
 )
 from fixtures.remote_storage import RemoteStorageKind
 from fixtures.utils import assert_pageserver_backups_equal, subprocess_capture
@@ -99,27 +100,15 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
     )
 
     def import_tar(base, wal):
-        env.neon_cli.raw_cli(
-            [
-                "timeline",
-                "import",
-                "--tenant-id",
-                str(tenant),
-                "--timeline-id",
-                str(timeline),
-                "--branch-name",
-                branch_name,
-                "--base-lsn",
-                start_lsn,
-                "--base-tarfile",
-                base,
-                "--end-lsn",
-                end_lsn,
-                "--wal-tarfile",
-                wal,
-                "--pg-version",
-                env.pg_version,
-            ]
+        env.neon_cli.timeline_import(
+            tenant_id=tenant,
+            timeline_id=timeline,
+            new_branch_name=branch_name,
+            base_tarfile=base,
+            base_lsn=start_lsn,
+            wal_tarfile=wal,
+            end_lsn=end_lsn,
+            pg_version=env.pg_version,
         )
 
     # Importing empty file fails
@@ -144,7 +133,7 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
 
     # Wait for data to land in s3
     wait_for_last_record_lsn(client, tenant, timeline, Lsn(end_lsn))
-    wait_for_upload(client, tenant, timeline, Lsn(end_lsn))
+    client.timeline_checkpoint(tenant, timeline, compact=False, wait_until_uploaded=True)
 
     # Check it worked
     endpoint = env.endpoints.create_start(branch_name, tenant_id=tenant)
@@ -159,7 +148,7 @@ def test_import_from_pageserver_small(
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
     env = neon_env_builder.init_start()
 
-    timeline = env.neon_cli.create_branch("test_import_from_pageserver_small")
+    timeline = env.create_branch("test_import_from_pageserver_small")
     endpoint = env.endpoints.create_start("test_import_from_pageserver_small")
 
     num_rows = 3000
@@ -178,7 +167,7 @@ def test_import_from_pageserver_multisegment(
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
     env = neon_env_builder.init_start()
 
-    timeline = env.neon_cli.create_branch("test_import_from_pageserver_multisegment")
+    timeline = env.create_branch("test_import_from_pageserver_multisegment")
     endpoint = env.endpoints.create_start("test_import_from_pageserver_multisegment")
 
     # For `test_import_from_pageserver_multisegment`, we want to make sure that the data
@@ -269,28 +258,18 @@ def _import(
     branch_name = "import_from_pageserver"
     client = env.pageserver.http_client()
     env.pageserver.tenant_create(tenant)
-    env.neon_cli.raw_cli(
-        [
-            "timeline",
-            "import",
-            "--tenant-id",
-            str(tenant),
-            "--timeline-id",
-            str(timeline),
-            "--branch-name",
-            branch_name,
-            "--base-lsn",
-            str(lsn),
-            "--base-tarfile",
-            str(tar_output_file),
-            "--pg-version",
-            env.pg_version,
-        ]
+    env.neon_cli.timeline_import(
+        tenant_id=tenant,
+        timeline_id=timeline,
+        new_branch_name=branch_name,
+        base_lsn=lsn,
+        base_tarfile=tar_output_file,
+        pg_version=env.pg_version,
     )
 
     # Wait for data to land in s3
     wait_for_last_record_lsn(client, tenant, timeline, lsn)
-    wait_for_upload(client, tenant, timeline, lsn)
+    client.timeline_checkpoint(tenant, timeline, compact=False, wait_until_uploaded=True)
 
     # Check it worked
     endpoint = env.endpoints.create_start(branch_name, tenant_id=tenant, lsn=lsn)

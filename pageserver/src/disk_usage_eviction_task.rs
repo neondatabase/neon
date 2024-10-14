@@ -41,19 +41,15 @@
 // - The `#[allow(dead_code)]` above various structs are to suppress warnings about only the Debug impl
 //   reading these fields. We use the Debug impl for semi-structured logging, though.
 
-use std::{
-    sync::Arc,
-    time::{Duration, SystemTime},
-};
+use std::{sync::Arc, time::SystemTime};
 
 use anyhow::Context;
-use pageserver_api::shard::TenantShardId;
+use pageserver_api::{config::DiskUsageEvictionTaskConfig, shard::TenantShardId};
 use remote_storage::GenericRemoteStorage;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn, Instrument};
-use utils::serde_percent::Percent;
 use utils::{completion, id::TimelineId};
 
 use crate::{
@@ -64,28 +60,14 @@ use crate::{
         mgr::TenantManager,
         remote_timeline_client::LayerFileMetadata,
         secondary::SecondaryTenant,
-        storage_layer::{AsLayerDesc, EvictionError, Layer, LayerName},
+        storage_layer::{AsLayerDesc, EvictionError, Layer, LayerName, LayerVisibilityHint},
     },
     CancellableTask, DiskUsageEvictionTask,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DiskUsageEvictionTaskConfig {
-    pub max_usage_pct: Percent,
-    pub min_avail_bytes: u64,
-    #[serde(with = "humantime_serde")]
-    pub period: Duration,
-    #[cfg(feature = "testing")]
-    pub mock_statvfs: Option<crate::statvfs::mock::Behavior>,
-    /// Select sorting for evicted layers
-    #[serde(default)]
-    pub eviction_order: EvictionOrder,
-}
-
 /// Selects the sort order for eviction candidates *after* per tenant `min_resident_size`
 /// partitioning.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "args")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EvictionOrder {
     /// Order the layers to be evicted by how recently they have been accessed relatively within
     /// the set of resident layers of a tenant.
@@ -96,25 +78,24 @@ pub enum EvictionOrder {
         /// we read tenants is deterministic. If we find the need to use this as `false`, we need
         /// to ensure nondeterminism by adding in a random number to break the
         /// `relative_last_activity==0.0` ties.
-        #[serde(default = "default_highest_layer_count_loses_first")]
         highest_layer_count_loses_first: bool,
     },
 }
 
-impl Default for EvictionOrder {
-    fn default() -> Self {
-        Self::RelativeAccessed {
-            highest_layer_count_loses_first: true,
+impl From<pageserver_api::config::EvictionOrder> for EvictionOrder {
+    fn from(value: pageserver_api::config::EvictionOrder) -> Self {
+        match value {
+            pageserver_api::config::EvictionOrder::RelativeAccessed {
+                highest_layer_count_loses_first,
+            } => Self::RelativeAccessed {
+                highest_layer_count_loses_first,
+            },
         }
     }
 }
 
-fn default_highest_layer_count_loses_first() -> bool {
-    true
-}
-
 impl EvictionOrder {
-    fn sort(&self, candidates: &mut [(MinResidentSizePartition, EvictionCandidate)]) {
+    fn sort(&self, candidates: &mut [(EvictionPartition, EvictionCandidate)]) {
         use EvictionOrder::*;
 
         match self {
@@ -295,7 +276,7 @@ async fn disk_usage_eviction_task_iteration(
         storage,
         usage_pre,
         tenant_manager,
-        task_config.eviction_order,
+        task_config.eviction_order.into(),
         cancel,
     )
     .await;
@@ -644,6 +625,7 @@ pub(crate) struct EvictionCandidate {
     pub(crate) layer: EvictionLayer,
     pub(crate) last_activity_ts: SystemTime,
     pub(crate) relative_last_activity: finite_f32::FiniteF32,
+    pub(crate) visibility: LayerVisibilityHint,
 }
 
 impl std::fmt::Display for EvictionLayer {
@@ -685,14 +667,22 @@ impl std::fmt::Debug for EvictionCandidate {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum MinResidentSizePartition {
+enum EvictionPartition {
+    // A layer that is un-wanted by the tenant: evict all these first, before considering
+    // any other layers
+    EvictNow,
+
+    // Above the minimum size threshold: this layer is a candidate for eviction.
     Above,
+
+    // Below the minimum size threshold: this layer should only be evicted if all the
+    // tenants' layers above the minimum size threshold have already been considered.
     Below,
 }
 
 enum EvictionCandidates {
     Cancelled,
-    Finished(Vec<(MinResidentSizePartition, EvictionCandidate)>),
+    Finished(Vec<(EvictionPartition, EvictionCandidate)>),
 }
 
 /// Gather the eviction candidates.
@@ -890,8 +880,10 @@ async fn collect_eviction_candidates(
             max_layer_size
         };
 
-        // Sort layers most-recently-used first, then partition by
-        // cumsum above/below min_resident_size.
+        // Sort layers most-recently-used first, then calculate [`EvictionPartition`] for each layer,
+        // where the inputs are:
+        //  - whether the layer is visible
+        //  - whether the layer is above/below the min_resident_size cutline
         tenant_candidates
             .sort_unstable_by_key(|layer_info| std::cmp::Reverse(layer_info.last_activity_ts));
         let mut cumsum: i128 = 0;
@@ -908,12 +900,23 @@ async fn collect_eviction_candidates(
                     candidate.relative_last_activity =
                         eviction_order.relative_last_activity(total, i);
 
-                    let partition = if cumsum > min_resident_size as i128 {
-                        MinResidentSizePartition::Above
-                    } else {
-                        MinResidentSizePartition::Below
+                    let partition = match candidate.visibility {
+                        LayerVisibilityHint::Covered => {
+                            // Covered layers are evicted first
+                            EvictionPartition::EvictNow
+                        }
+                        LayerVisibilityHint::Visible => {
+                            cumsum += i128::from(candidate.layer.get_file_size());
+
+                            if cumsum > min_resident_size as i128 {
+                                EvictionPartition::Above
+                            } else {
+                                // The most recent layers below the min_resident_size threshold
+                                // are the last to be evicted.
+                                EvictionPartition::Below
+                            }
+                        }
                     };
-                    cumsum += i128::from(candidate.layer.get_file_size());
 
                     (partition, candidate)
                 });
@@ -981,7 +984,7 @@ async fn collect_eviction_candidates(
                         // Secondary locations' layers are always considered above the min resident size,
                         // i.e. secondary locations are permitted to be trimmed to zero layers if all
                         // the layers have sufficiently old access times.
-                        MinResidentSizePartition::Above,
+                        EvictionPartition::Above,
                         candidate,
                     )
                 });
@@ -1009,7 +1012,9 @@ async fn collect_eviction_candidates(
         }
     }
 
-    debug_assert!(MinResidentSizePartition::Above < MinResidentSizePartition::Below,
+    debug_assert!(EvictionPartition::Above < EvictionPartition::Below,
+        "as explained in the function's doc comment, layers that aren't in the tenant's min_resident_size are evicted first");
+    debug_assert!(EvictionPartition::EvictNow < EvictionPartition::Above,
         "as explained in the function's doc comment, layers that aren't in the tenant's min_resident_size are evicted first");
 
     eviction_order.sort(&mut candidates);
@@ -1022,7 +1027,7 @@ async fn collect_eviction_candidates(
 ///
 /// Returns the amount of candidates selected, with the planned usage.
 fn select_victims<U: Usage>(
-    candidates: &[(MinResidentSizePartition, EvictionCandidate)],
+    candidates: &[(EvictionPartition, EvictionCandidate)],
     usage_pre: U,
 ) -> VictimSelection<U> {
     let mut usage_when_switched = None;
@@ -1034,7 +1039,7 @@ fn select_victims<U: Usage>(
             break;
         }
 
-        if partition == &MinResidentSizePartition::Below && usage_when_switched.is_none() {
+        if partition == &EvictionPartition::Below && usage_when_switched.is_none() {
             usage_when_switched = Some((usage_planned, i));
         }
 
@@ -1233,7 +1238,6 @@ mod filesystem_level_usage {
 
     #[test]
     fn max_usage_pct_pressure() {
-        use super::EvictionOrder;
         use super::Usage as _;
         use std::time::Duration;
         use utils::serde_percent::Percent;
@@ -1245,7 +1249,7 @@ mod filesystem_level_usage {
                 period: Duration::MAX,
                 #[cfg(feature = "testing")]
                 mock_statvfs: None,
-                eviction_order: EvictionOrder::default(),
+                eviction_order: pageserver_api::config::EvictionOrder::default(),
             },
             total_bytes: 100_000,
             avail_bytes: 0,

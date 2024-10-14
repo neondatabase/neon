@@ -20,6 +20,8 @@ from shutdown checkpoint, using the CLOG scanning mechanism, waiting for
 running-xacts record and for in-progress transactions to finish etc.
 """
 
+from __future__ import annotations
+
 import threading
 from contextlib import closing
 
@@ -103,6 +105,7 @@ def test_replica_start_scan_clog_crashed_xids(neon_simple_env: NeonEnv):
     # Initialize the primary, a test table, and a helper function to create lots
     # of subtransactions.
     env = neon_simple_env
+    timeline_id = env.initial_timeline
     primary = env.endpoints.create_start(branch_name="main", endpoint_id="primary")
     primary_conn = primary.connect()
     primary_cur = primary_conn.cursor()
@@ -114,7 +117,7 @@ def test_replica_start_scan_clog_crashed_xids(neon_simple_env: NeonEnv):
     # chance to write abort records for them.
     primary_cur.execute("begin")
     primary_cur.execute("select create_subxacts(100000)")
-    primary.stop(mode="immediate")
+    primary.stop(mode="immediate", sks_wait_walreceiver_gone=(env.safekeepers, timeline_id))
 
     # Restart the primary. Do some light work, and shut it down cleanly
     primary.start()
@@ -659,6 +662,7 @@ def test_replica_start_with_too_many_unused_xids(neon_simple_env: NeonEnv):
 
     # Initialize the primary and a test table
     env = neon_simple_env
+    timeline_id = env.initial_timeline
     primary = env.endpoints.create_start(branch_name="main", endpoint_id="primary")
     with primary.cursor() as primary_cur:
         primary_cur.execute("create table t(pk serial primary key, payload integer)")
@@ -667,7 +671,7 @@ def test_replica_start_with_too_many_unused_xids(neon_simple_env: NeonEnv):
         with primary.cursor() as primary_cur:
             primary_cur.execute("insert into t (payload) values (0)")
         # restart primary
-        primary.stop("immediate")
+        primary.stop("immediate", sks_wait_walreceiver_gone=(env.safekeepers, timeline_id))
         primary.start()
 
     # Wait for the WAL to be flushed

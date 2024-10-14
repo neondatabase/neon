@@ -3,6 +3,7 @@ use std::{
     collections::{binary_heap, BinaryHeap},
 };
 
+use anyhow::bail;
 use pageserver_api::key::Key;
 use utils::lsn::Lsn;
 
@@ -26,6 +27,13 @@ impl<'a> LayerRef<'a> {
             Self::Delta(x) => LayerIterRef::Delta(x.iter(ctx)),
         }
     }
+
+    fn layer_dbg_info(&self) -> String {
+        match self {
+            Self::Image(x) => x.layer_dbg_info(),
+            Self::Delta(x) => x.layer_dbg_info(),
+        }
+    }
 }
 
 enum LayerIterRef<'a> {
@@ -38,6 +46,13 @@ impl LayerIterRef<'_> {
         match self {
             Self::Delta(x) => x.next().await,
             Self::Image(x) => x.next().await,
+        }
+    }
+
+    fn layer_dbg_info(&self) -> String {
+        match self {
+            Self::Image(x) => x.layer_dbg_info(),
+            Self::Delta(x) => x.layer_dbg_info(),
         }
     }
 }
@@ -75,6 +90,11 @@ impl<'a> PeekableLayerIterRef<'a> {
     async fn next(&mut self) -> anyhow::Result<Option<(Key, Lsn, Value)>> {
         let result = self.peeked.take();
         self.peeked = self.iter.next().await?;
+        if let (Some((k1, l1, _)), Some((k2, l2, _))) = (&self.peeked, &result) {
+            if (k1, l1) < (k2, l2) {
+                bail!("iterator is not ordered: {}", self.iter.layer_dbg_info());
+            }
+        }
         Ok(result)
     }
 }
@@ -178,7 +198,12 @@ impl<'a> IteratorWrapper<'a> {
         let iter = PeekableLayerIterRef::create(iter).await?;
         if let Some((k1, l1, _)) = iter.peek() {
             let (k2, l2) = first_key_lower_bound;
-            debug_assert!((k1, l1) >= (k2, l2));
+            if (k1, l1) < (k2, l2) {
+                bail!(
+                    "layer key range did not include the first key in the layer: {}",
+                    layer.layer_dbg_info()
+                );
+            }
         }
         *self = Self::Loaded { iter };
         Ok(())
@@ -201,9 +226,11 @@ impl<'a> IteratorWrapper<'a> {
     }
 }
 
-/// A merge iterator over delta/image layer iterators. When duplicated records are
-/// found, the iterator will not perform any deduplication, and the caller should handle
-/// these situation. By saying duplicated records, there are many possibilities:
+/// A merge iterator over delta/image layer iterators.
+///
+/// When duplicated records are found, the iterator will not perform any
+/// deduplication, and the caller should handle these situation. By saying
+/// duplicated records, there are many possibilities:
 ///
 /// * Two same delta at the same LSN.
 /// * Two same image at the same LSN.

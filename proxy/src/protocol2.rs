@@ -13,9 +13,9 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
 
 pin_project! {
     /// A chained [`AsyncRead`] with [`AsyncWrite`] passthrough
-    pub struct ChainRW<T> {
+    pub(crate) struct ChainRW<T> {
         #[pin]
-        pub inner: T,
+        pub(crate) inner: T,
         buf: BytesMut,
     }
 }
@@ -60,7 +60,7 @@ const HEADER: [u8; 12] = [
     0x0D, 0x0A, 0x0D, 0x0A, 0x00, 0x0D, 0x0A, 0x51, 0x55, 0x49, 0x54, 0x0A,
 ];
 
-pub async fn read_proxy_protocol<T: AsyncRead + Unpin>(
+pub(crate) async fn read_proxy_protocol<T: AsyncRead + Unpin>(
     mut read: T,
 ) -> std::io::Result<(ChainRW<T>, Option<SocketAddr>)> {
     let mut buf = BytesMut::with_capacity(128);

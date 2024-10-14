@@ -932,7 +932,7 @@ components:
           description: Whether to poll remote storage for layers to download.  If false, secondary locations don't download anything.
     ArchivalConfigRequest:
       type: object
-      required
+      required:
         - state
       properties:
         state:

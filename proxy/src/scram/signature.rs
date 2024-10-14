@@ -4,14 +4,14 @@ use super::key::{ScramKey, SCRAM_KEY_LEN};
 
 /// A collection of message parts needed to derive the client's signature.
 #[derive(Debug)]
-pub struct SignatureBuilder<'a> {
-    pub client_first_message_bare: &'a str,
-    pub server_first_message: &'a str,
-    pub client_final_message_without_proof: &'a str,
+pub(crate) struct SignatureBuilder<'a> {
+    pub(crate) client_first_message_bare: &'a str,
+    pub(crate) server_first_message: &'a str,
+    pub(crate) client_final_message_without_proof: &'a str,
 }
 
 impl SignatureBuilder<'_> {
-    pub fn build(&self, key: &ScramKey) -> Signature {
+    pub(crate) fn build(&self, key: &ScramKey) -> Signature {
         let parts = [
             self.client_first_message_bare.as_bytes(),
             b",",
@@ -28,13 +28,13 @@ impl SignatureBuilder<'_> {
 /// produces `ClientKey` that we need for authentication.
 #[derive(Debug)]
 #[repr(transparent)]
-pub struct Signature {
+pub(crate) struct Signature {
     bytes: [u8; SCRAM_KEY_LEN],
 }
 
 impl Signature {
     /// Derive `ClientKey` from client's signature and proof.
-    pub fn derive_client_key(&self, proof: &[u8; SCRAM_KEY_LEN]) -> ScramKey {
+    pub(crate) fn derive_client_key(&self, proof: &[u8; SCRAM_KEY_LEN]) -> ScramKey {
         // This is how the proof is calculated:
         //
         // 1. sha256(ClientKey) -> StoredKey

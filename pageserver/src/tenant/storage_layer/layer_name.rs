@@ -217,8 +217,9 @@ impl fmt::Display for ImageLayerName {
     }
 }
 
-/// LayerName is the logical identity of a layer within a LayerMap at a moment in time.  The
-/// LayerName is not a unique filename, as the same LayerName may have multiple physical incarnations
+/// LayerName is the logical identity of a layer within a LayerMap at a moment in time.
+///
+/// The LayerName is not a unique filename, as the same LayerName may have multiple physical incarnations
 /// over time (e.g. across shard splits or compression). The physical filenames of layers in local
 /// storage and object names in remote storage consist of the LayerName plus some extra qualifiers
 /// that uniquely identify the physical incarnation of a layer (see [crate::tenant::remote_timeline_client::remote_layer_path])
@@ -255,6 +256,10 @@ impl LayerName {
             LayerName::Image(layer) => &layer.key_range,
             LayerName::Delta(layer) => &layer.key_range,
         }
+    }
+
+    pub fn is_delta(&self) -> bool {
+        matches!(self, LayerName::Delta(_))
     }
 }
 

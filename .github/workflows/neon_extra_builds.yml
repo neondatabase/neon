@@ -56,7 +56,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: true
-          fetch-depth: 1
 
       - name: Install macOS postgres dependencies
         run: brew install flex bison openssl protobuf icu4c pkg-config
@@ -72,6 +71,10 @@ jobs:
       - name: Set pg 16 revision for caching
         id: pg_v16_rev
         run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-v16) >> $GITHUB_OUTPUT
+
+      - name: Set pg 17 revision for caching
+        id: pg_v17_rev
+        run: echo pg_rev=$(git rev-parse HEAD:vendor/postgres-v17) >> $GITHUB_OUTPUT
 
       - name: Cache postgres v14 build
         id: cache_pg_14
@@ -93,6 +96,13 @@ jobs:
         with:
           path: pg_install/v16
           key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-${{ steps.pg_v16_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
+
+      - name: Cache postgres v17 build
+        id: cache_pg_17
+        uses: actions/cache@v4
+        with:
+          path: pg_install/v17
+          key: v1-${{ runner.os }}-${{ runner.arch }}-${{ env.BUILD_TYPE }}-pg-${{ steps.pg_v17_rev.outputs.pg_rev }}-${{ hashFiles('Makefile') }}
 
       - name: Set extra env for macOS
         run: |
@@ -120,6 +130,10 @@ jobs:
       - name: Build postgres v16
         if: steps.cache_pg_16.outputs.cache-hit != 'true'
         run: make postgres-v16 -j$(sysctl -n hw.ncpu)
+
+      - name: Build postgres v17
+        if: steps.cache_pg_17.outputs.cache-hit != 'true'
+        run: make postgres-v17 -j$(sysctl -n hw.ncpu)
 
       - name: Build neon extensions
         run: make neon-pg-ext -j$(sysctl -n hw.ncpu)
@@ -149,8 +163,6 @@ jobs:
 
     env:
       BUILD_TYPE: release
-      # remove the cachepot wrapper and build without crate caches
-      RUSTC_WRAPPER: ""
       # build with incremental compilation produce partial results
       # so do not attempt to cache this build, also disable the incremental compilation
       CARGO_INCREMENTAL: 0
@@ -160,7 +172,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: true
-          fetch-depth: 1
 
       # Some of our rust modules use FFI and need those to be checked
       - name: Get postgres headers
@@ -170,7 +181,7 @@ jobs:
         run: make walproposer-lib -j$(nproc)
 
       - name: Produce the build stats
-        run: PQ_LIB_DIR=$(pwd)/pg_install/v16/lib cargo build --all --release --timings -j$(nproc)
+        run: PQ_LIB_DIR=$(pwd)/pg_install/v17/lib cargo build --all --release --timings -j$(nproc)
 
       - name: Upload the build stats
         id: upload-stats

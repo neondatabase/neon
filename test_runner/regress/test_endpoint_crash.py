@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import pytest
 from fixtures.neon_fixtures import NeonEnvBuilder
 
@@ -15,7 +17,7 @@ def test_endpoint_crash(neon_env_builder: NeonEnvBuilder, sql_func: str):
     Test that triggering crash from neon_test_utils crashes the endpoint
     """
     env = neon_env_builder.init_start()
-    env.neon_cli.create_branch("test_endpoint_crash")
+    env.create_branch("test_endpoint_crash")
     endpoint = env.endpoints.create_start("test_endpoint_crash")
 
     endpoint.safe_psql("CREATE EXTENSION neon_test_utils;")

@@ -4,17 +4,20 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from typing import TYPE_CHECKING, Any
 
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from fixtures.common_types import Lsn, TenantId, TenantShardId, TimelineId
+from fixtures.common_types import Lsn, TenantId, TenantShardId, TimelineArchivalState, TimelineId
 from fixtures.log_helper import log
 from fixtures.metrics import Metrics, MetricsGetter, parse_metrics
 from fixtures.pg_version import PgVersion
 from fixtures.utils import Fn
+
+if TYPE_CHECKING:
+    from typing import Optional, Union
 
 
 class PageserverApiException(Exception):
@@ -43,7 +46,7 @@ class InMemoryLayerInfo:
     lsn_end: Optional[str]
 
     @classmethod
-    def from_json(cls, d: Dict[str, Any]) -> InMemoryLayerInfo:
+    def from_json(cls, d: dict[str, Any]) -> InMemoryLayerInfo:
         return InMemoryLayerInfo(
             kind=d["kind"],
             lsn_start=d["lsn_start"],
@@ -61,9 +64,10 @@ class HistoricLayerInfo:
     remote: bool
     # None for image layers, true if pageserver thinks this is an L0 delta layer
     l0: Optional[bool]
+    visible: bool
 
     @classmethod
-    def from_json(cls, d: Dict[str, Any]) -> HistoricLayerInfo:
+    def from_json(cls, d: dict[str, Any]) -> HistoricLayerInfo:
         # instead of parsing the key range lets keep the definition of "L0" in pageserver
         l0_ness = d.get("l0")
         assert l0_ness is None or isinstance(l0_ness, bool)
@@ -79,58 +83,59 @@ class HistoricLayerInfo:
             lsn_end=d.get("lsn_end"),
             remote=d["remote"],
             l0=l0_ness,
+            visible=d["access_stats"]["visible"],
         )
 
 
 @dataclass
 class LayerMapInfo:
-    in_memory_layers: List[InMemoryLayerInfo]
-    historic_layers: List[HistoricLayerInfo]
+    in_memory_layers: list[InMemoryLayerInfo]
+    historic_layers: list[HistoricLayerInfo]
 
     @classmethod
-    def from_json(cls, d: Dict[str, Any]) -> LayerMapInfo:
+    def from_json(cls, d: dict[str, Any]) -> LayerMapInfo:
         info = LayerMapInfo(in_memory_layers=[], historic_layers=[])
 
         json_in_memory_layers = d["in_memory_layers"]
-        assert isinstance(json_in_memory_layers, List)
+        assert isinstance(json_in_memory_layers, list)
         for json_in_memory_layer in json_in_memory_layers:
             info.in_memory_layers.append(InMemoryLayerInfo.from_json(json_in_memory_layer))
 
         json_historic_layers = d["historic_layers"]
-        assert isinstance(json_historic_layers, List)
+        assert isinstance(json_historic_layers, list)
         for json_historic_layer in json_historic_layers:
             info.historic_layers.append(HistoricLayerInfo.from_json(json_historic_layer))
 
         return info
 
-    def kind_count(self) -> Dict[str, int]:
-        counts: Dict[str, int] = defaultdict(int)
+    def kind_count(self) -> dict[str, int]:
+        counts: dict[str, int] = defaultdict(int)
         for inmem_layer in self.in_memory_layers:
             counts[inmem_layer.kind] += 1
         for hist_layer in self.historic_layers:
             counts[hist_layer.kind] += 1
         return counts
 
-    def delta_layers(self) -> List[HistoricLayerInfo]:
+    def delta_layers(self) -> list[HistoricLayerInfo]:
         return [x for x in self.historic_layers if x.kind == "Delta"]
 
-    def image_layers(self) -> List[HistoricLayerInfo]:
+    def image_layers(self) -> list[HistoricLayerInfo]:
         return [x for x in self.historic_layers if x.kind == "Image"]
 
-    def delta_l0_layers(self) -> List[HistoricLayerInfo]:
+    def delta_l0_layers(self) -> list[HistoricLayerInfo]:
         return [x for x in self.historic_layers if x.kind == "Delta" and x.l0]
 
-    def historic_by_name(self) -> Set[str]:
+    def historic_by_name(self) -> set[str]:
         return set(x.layer_file_name for x in self.historic_layers)
 
 
 @dataclass
 class TenantConfig:
-    tenant_specific_overrides: Dict[str, Any]
-    effective_config: Dict[str, Any]
+    tenant_specific_overrides: dict[str, Any]
+    effective_config: dict[str, Any]
 
     @classmethod
-    def from_json(cls, d: Dict[str, Any]) -> TenantConfig:
+    def from_json(cls, d: dict[str, Any]) -> TenantConfig:
         return TenantConfig(
             tenant_specific_overrides=d["tenant_specific_overrides"],
             effective_config=d["effective_config"],
@@ -207,7 +212,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
     def check_status(self):
         self.get(f"http://localhost:{self.port}/v1/status").raise_for_status()
 
-    def configure_failpoints(self, config_strings: Tuple[str, str] | List[Tuple[str, str]]):
+    def configure_failpoints(self, config_strings: tuple[str, str] | list[tuple[str, str]]):
         self.is_testing_enabled_or_skip()
 
         if isinstance(config_strings, tuple):
@@ -231,7 +236,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         res = self.post(f"http://localhost:{self.port}/v1/reload_auth_validation_keys")
         self.verbose_error(res)
 
-    def tenant_list(self) -> List[Dict[Any, Any]]:
+    def tenant_list(self) -> list[dict[Any, Any]]:
         res = self.get(f"http://localhost:{self.port}/v1/tenant")
         self.verbose_error(res)
         res_json = res.json()
@@ -242,7 +247,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         self,
         tenant_id: Union[TenantId, TenantShardId],
         generation: int,
-        config: None | Dict[str, Any] = None,
+        config: None | dict[str, Any] = None,
     ):
         config = config or {}
 
@@ -322,7 +327,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
 
     def tenant_status(
         self, tenant_id: Union[TenantId, TenantShardId], activate: bool = False
-    ) -> Dict[Any, Any]:
+    ) -> dict[Any, Any]:
         """
         :activate: hint the server not to accelerate activation of this tenant in response
         to this query.  False by default for tests, because they generally want to observed the
@@ -359,6 +364,12 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         self.verbose_error(res)
         return (res.status_code, res.json())
 
+    def tenant_secondary_status(self, tenant_id: Union[TenantId, TenantShardId]):
+        url = f"http://localhost:{self.port}/v1/tenant/{tenant_id}/secondary/status"
+        res = self.get(url)
+        self.verbose_error(res)
+        return res.json()
+
     def set_tenant_config(self, tenant_id: Union[TenantId, TenantShardId], config: dict[str, Any]):
         assert "tenant_id" not in config.keys()
         res = self.put(
@@ -370,8 +381,8 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
     def patch_tenant_config_client_side(
         self,
         tenant_id: TenantId,
-        inserts: Optional[Dict[str, Any]] = None,
-        removes: Optional[List[str]] = None,
+        inserts: Optional[dict[str, Any]] = None,
+        removes: Optional[list[str]] = None,
     ):
         current = self.tenant_config(tenant_id).tenant_specific_overrides
         if inserts is not None:
@@ -386,7 +397,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
 
     def tenant_size_and_modelinputs(
         self, tenant_id: Union[TenantId, TenantShardId]
-    ) -> Tuple[int, Dict[str, Any]]:
+    ) -> tuple[int, dict[str, Any]]:
         """
         Returns the tenant size, together with the model inputs as the second tuple item.
         """
@@ -416,7 +427,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         tenant_id: Union[TenantId, TenantShardId],
         timestamp: datetime,
         done_if_after: datetime,
-        shard_counts: Optional[List[int]] = None,
+        shard_counts: Optional[list[int]] = None,
     ):
         """
         Issues a request to perform time travel operations on the remote storage
@@ -424,7 +435,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
 
         if shard_counts is None:
             shard_counts = []
-        body: Dict[str, Any] = {
+        body: dict[str, Any] = {
             "shard_counts": shard_counts,
         }
         res = self.put(
@@ -438,7 +449,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         tenant_id: Union[TenantId, TenantShardId],
         include_non_incremental_logical_size: bool = False,
         include_timeline_dir_layer_file_size_sum: bool = False,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         params = {}
         if include_non_incremental_logical_size:
             params["include-non-incremental-logical-size"] = "true"
@@ -462,8 +473,8 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         ancestor_start_lsn: Optional[Lsn] = None,
         existing_initdb_timeline_id: Optional[TimelineId] = None,
         **kwargs,
-    ) -> Dict[Any, Any]:
-        body: Dict[str, Any] = {
+    ) -> dict[Any, Any]:
+        body: dict[str, Any] = {
             "new_timeline_id": str(new_timeline_id),
             "ancestor_start_lsn": str(ancestor_start_lsn) if ancestor_start_lsn else None,
             "ancestor_timeline_id": str(ancestor_timeline_id) if ancestor_timeline_id else None,
@@ -496,7 +507,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         include_timeline_dir_layer_file_size_sum: bool = False,
         force_await_initial_logical_size: bool = False,
         **kwargs,
-    ) -> Dict[Any, Any]:
+    ) -> dict[Any, Any]:
         params = {}
         if include_non_incremental_logical_size:
             params["include-non-incremental-logical-size"] = "true"
@@ -578,6 +589,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         timeline_id: TimelineId,
         force_repartition=False,
         force_image_layer_creation=False,
+        force_l0_compaction=False,
         wait_until_uploaded=False,
         enhanced_gc_bottom_most_compaction=False,
     ):
@@ -587,6 +599,8 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
             query["force_repartition"] = "true"
         if force_image_layer_creation:
             query["force_image_layer_creation"] = "true"
+        if force_l0_compaction:
+            query["force_l0_compaction"] = "true"
         if wait_until_uploaded:
             query["wait_until_uploaded"] = "true"
         if enhanced_gc_bottom_most_compaction:
@@ -610,6 +624,22 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         )
         res = self.post(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/preserve_initdb_archive",
+        )
+        self.verbose_error(res)
+
+    def timeline_archival_config(
+        self,
+        tenant_id: Union[TenantId, TenantShardId],
+        timeline_id: TimelineId,
+        state: TimelineArchivalState,
+    ):
+        config = {"state": state.value}
+        log.info(
+            f"requesting timeline archival config {config} for tenant {tenant_id} and timeline {timeline_id}"
+        )
+        res = self.put(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/archival_config",
+            json=config,
         )
         self.verbose_error(res)
 
@@ -677,6 +707,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         timeline_id: TimelineId,
         force_repartition=False,
         force_image_layer_creation=False,
+        force_l0_compaction=False,
         wait_until_uploaded=False,
         compact: Optional[bool] = None,
         **kwargs,
@@ -687,6 +718,8 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
             query["force_repartition"] = "true"
         if force_image_layer_creation:
             query["force_image_layer_creation"] = "true"
+        if force_l0_compaction:
+            query["force_l0_compaction"] = "true"
         if wait_until_uploaded:
             query["wait_until_uploaded"] = "true"
 
@@ -814,7 +847,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         )
         if len(res) != 2:
             return None
-        inc, dec = [res[metric] for metric in metrics]
+        inc, dec = (res[metric] for metric in metrics)
         queue_count = int(inc) - int(dec)
         assert queue_count >= 0
         return queue_count
@@ -853,9 +886,9 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         self,
         tenant_id: Union[TenantId, TenantShardId],
         timeline_id: TimelineId,
-        batch_size: int | None = None,
+        batch_size: Optional[int] = None,
         **kwargs,
-    ) -> List[TimelineId]:
+    ) -> set[TimelineId]:
         params = {}
         if batch_size is not None:
             params["batch_size"] = batch_size
@@ -866,7 +899,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         )
         self.verbose_error(res)
         json = res.json()
-        return list(map(TimelineId, json["reparented_timelines"]))
+        return set(map(TimelineId, json["reparented_timelines"]))
 
     def evict_layer(
         self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId, layer_name: str

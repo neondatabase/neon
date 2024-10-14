@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from pathlib import Path
 
 from fixtures.log_helper import log
@@ -10,11 +12,9 @@ def test_explain_with_lfc_stats(neon_simple_env: NeonEnv):
     cache_dir = Path(env.repo_dir) / "file_cache"
     cache_dir.mkdir(exist_ok=True)
 
-    branchname = "test_explain_with_lfc_stats"
-    env.neon_cli.create_branch(branchname, "empty")
-    log.info(f"Creating endopint with 1MB shared_buffers and 64 MB LFC for branch {branchname}")
+    log.info("Creating endpoint with 1MB shared_buffers and 64 MB LFC")
     endpoint = env.endpoints.create_start(
-        branchname,
+        "main",
         config_lines=[
             "shared_buffers='1MB'",
             f"neon.file_cache_path='{cache_dir}/file.cache'",

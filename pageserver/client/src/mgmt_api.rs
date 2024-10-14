@@ -12,6 +12,8 @@ use utils::{
 
 pub use reqwest::Body as ReqwestBody;
 
+use crate::BlockUnblock;
+
 pub mod util;
 
 #[derive(Debug, Clone)]
@@ -419,6 +421,24 @@ impl Client {
         }
     }
 
+    pub async fn timeline_archival_config(
+        &self,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+        req: &TimelineArchivalConfigRequest,
+    ) -> Result<()> {
+        let uri = format!(
+            "{}/v1/tenant/{tenant_shard_id}/timeline/{timeline_id}/archival_config",
+            self.mgmt_api_endpoint
+        );
+
+        self.request(Method::PUT, &uri, req)
+            .await?
+            .json()
+            .await
+            .map_err(Error::ReceiveBody)
+    }
+
     pub async fn timeline_detach_ancestor(
         &self,
         tenant_shard_id: TenantShardId,
@@ -434,6 +454,20 @@ impl Client {
             .json()
             .await
             .map_err(Error::ReceiveBody)
+    }
+
+    pub async fn timeline_block_unblock_gc(
+        &self,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+        dir: BlockUnblock,
+    ) -> Result<()> {
+        let uri = format!(
+            "{}/v1/tenant/{tenant_shard_id}/timeline/{timeline_id}/{dir}_gc",
+            self.mgmt_api_endpoint,
+        );
+
+        self.request(Method::POST, &uri, ()).await.map(|_| ())
     }
 
     pub async fn tenant_reset(&self, tenant_shard_id: TenantShardId) -> Result<()> {
@@ -500,6 +534,19 @@ impl Client {
     ) -> Result<()> {
         let uri = format!("{}/v1/io_engine", self.mgmt_api_endpoint);
         self.request(Method::PUT, uri, engine)
+            .await?
+            .json()
+            .await
+            .map_err(Error::ReceiveBody)
+    }
+
+    /// Configs io mode at runtime.
+    pub async fn put_io_mode(
+        &self,
+        mode: &pageserver_api::models::virtual_file::IoMode,
+    ) -> Result<()> {
+        let uri = format!("{}/v1/io_mode", self.mgmt_api_endpoint);
+        self.request(Method::PUT, uri, mode)
             .await?
             .json()
             .await
@@ -687,6 +734,24 @@ impl Client {
             .await
             .map_err(Error::SendRequest)?
             .error_from_body()
+            .await?
+            .json()
+            .await
+            .map_err(Error::ReceiveBody)
+    }
+
+    pub async fn timeline_init_lsn_lease(
+        &self,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+        lsn: Lsn,
+    ) -> Result<LsnLease> {
+        let uri = format!(
+            "{}/v1/tenant/{tenant_shard_id}/timeline/{timeline_id}/lsn_lease",
+            self.mgmt_api_endpoint,
+        );
+
+        self.request(Method::POST, &uri, LsnLeaseRequest { lsn })
             .await?
             .json()
             .await

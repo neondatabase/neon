@@ -17,6 +17,7 @@ use crate::SafeKeeperConf;
 use postgres_backend::{AuthType, PostgresBackend};
 
 /// Accept incoming TCP connections and spawn them into a background thread.
+///
 /// allowed_auth_scope is either SafekeeperData (wide JWT tokens giving access
 /// to any tenant are allowed) or Tenant (only tokens giving access to specific
 /// tenant are allowed). Doesn't matter if auth is disabled in conf.

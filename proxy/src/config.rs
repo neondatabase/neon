@@ -1,12 +1,13 @@
 use crate::{
-    auth::{self, backend::AuthRateLimiter},
-    console::locks::ApiLocks,
+    auth::backend::{jwt::JwkCache, AuthRateLimiter},
+    control_plane::locks::ApiLocks,
     rate_limiter::{RateBucketInfo, RateLimitAlgorithm, RateLimiterConfig},
     scram::threadpool::ThreadPool,
     serverless::{cancel_set::CancelSet, GlobalConnPoolOptions},
     Host,
 };
 use anyhow::{bail, ensure, Context, Ok};
+use clap::ValueEnum;
 use itertools::Itertools;
 use remote_storage::RemoteStorageConfig;
 use rustls::{
@@ -25,20 +26,26 @@ use x509_parser::oid_registry;
 
 pub struct ProxyConfig {
     pub tls_config: Option<TlsConfig>,
-    pub auth_backend: auth::BackendType<'static, (), ()>,
     pub metric_collection: Option<MetricCollectionConfig>,
     pub allow_self_signed_compute: bool,
     pub http_config: HttpConfig,
     pub authentication_config: AuthenticationConfig,
-    pub require_client_ip: bool,
-    pub disable_ip_check_for_http: bool,
-    pub redis_rps_limit: Vec<RateBucketInfo>,
+    pub proxy_protocol_v2: ProxyProtocolV2,
     pub region: String,
     pub handshake_timeout: Duration,
-    pub aws_region: String,
     pub wake_compute_retry_config: RetryConfig,
     pub connect_compute_locks: ApiLocks<Host>,
     pub connect_to_compute_retry_config: RetryConfig,
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum, PartialEq)]
+pub enum ProxyProtocolV2 {
+    /// Connection will error if PROXY protocol v2 header is missing
+    Required,
+    /// Connection will parse PROXY protocol v2 header, but accept the connection if it's missing.
+    Supported,
+    /// Connection will error if PROXY protocol v2 header is provided
+    Rejected,
 }
 
 #[derive(Debug)]
@@ -55,10 +62,12 @@ pub struct TlsConfig {
 }
 
 pub struct HttpConfig {
-    pub request_timeout: tokio::time::Duration,
+    pub accept_websockets: bool,
     pub pool_options: GlobalConnPoolOptions,
     pub cancel_set: CancelSet,
     pub client_conn_threshold: u64,
+    pub max_request_size_bytes: u64,
+    pub max_response_size_bytes: usize,
 }
 
 pub struct AuthenticationConfig {
@@ -67,6 +76,11 @@ pub struct AuthenticationConfig {
     pub rate_limiter_enabled: bool,
     pub rate_limiter: AuthRateLimiter,
     pub rate_limit_ip_subnet: u8,
+    pub ip_allowlist_check_enabled: bool,
+    pub jwks_cache: JwkCache,
+    pub is_auth_broker: bool,
+    pub accept_jwts: bool,
+    pub webauth_confirmation_timeout: tokio::time::Duration,
 }
 
 impl TlsConfig {
@@ -159,7 +173,7 @@ pub enum TlsServerEndPoint {
 }
 
 impl TlsServerEndPoint {
-    pub fn new(cert: &CertificateDer) -> anyhow::Result<Self> {
+    pub fn new(cert: &CertificateDer<'_>) -> anyhow::Result<Self> {
         let sha256_oids = [
             // I'm explicitly not adding MD5 or SHA1 here... They're bad.
             oid_registry::OID_SIG_ECDSA_WITH_SHA256,
@@ -250,18 +264,26 @@ impl CertResolver {
 
         let common_name = pem.subject().to_string();
 
-        // We only use non-wildcard certificates in link proxy so it seems okay to treat them the same as
-        // wildcard ones as we don't use SNI there. That treatment only affects certificate selection, so
-        // verify-full will still check wildcard match. Old coding here just ignored non-wildcard common names
-        // and passed None instead, which blows up number of cases downstream code should handle. Proper coding
-        // here should better avoid Option for common_names, and do wildcard-based certificate selection instead
-        // of cutting off '*.' parts.
-        let common_name = if common_name.starts_with("CN=*.") {
-            common_name.strip_prefix("CN=*.").map(|s| s.to_string())
+        // We need to get the canonical name for this certificate so we can match them against any domain names
+        // seen within the proxy codebase.
+        //
+        // In scram-proxy we use wildcard certificates only, with the database endpoint as the wildcard subdomain, taken from SNI.
+        // We need to remove the wildcard prefix for the purposes of certificate selection.
+        //
+        // auth-broker does not use SNI and instead uses the Neon-Connection-String header.
+        // Auth broker has the subdomain `apiauth` we need to remove for the purposes of validating the Neon-Connection-String.
+        //
+        // Console Web proxy does not use any wildcard domains and does not need any certificate selection or conn string
+        // validation, so let's we can continue with any common-name
+        let common_name = if let Some(s) = common_name.strip_prefix("CN=*.") {
+            s.to_string()
+        } else if let Some(s) = common_name.strip_prefix("CN=apiauth.") {
+            s.to_string()
+        } else if let Some(s) = common_name.strip_prefix("CN=") {
+            s.to_string()
         } else {
-            common_name.strip_prefix("CN=").map(|s| s.to_string())
-        }
-        .context("Failed to parse common name from certificate")?;
+            bail!("Failed to parse common name from certificate")
+        };
 
         let cert = Arc::new(rustls::sign::CertifiedKey::new(cert_chain, key));
 
@@ -282,7 +304,7 @@ impl CertResolver {
 impl rustls::server::ResolvesServerCert for CertResolver {
     fn resolve(
         &self,
-        client_hello: rustls::server::ClientHello,
+        client_hello: rustls::server::ClientHello<'_>,
     ) -> Option<Arc<rustls::sign::CertifiedKey>> {
         self.resolve(client_hello.server_name()).map(|x| x.0)
     }
@@ -321,7 +343,7 @@ impl CertResolver {
             // a) Instead of multi-cert approach use single cert with extra
             //    domains listed in Subject Alternative Name (SAN).
             // b) Deploy separate proxy instances for extra domains.
-            self.default.as_ref().cloned()
+            self.default.clone()
         }
     }
 }
@@ -346,7 +368,7 @@ pub struct EndpointCacheConfig {
 }
 
 impl EndpointCacheConfig {
-    /// Default options for [`crate::console::provider::NodeInfoCache`].
+    /// Default options for [`crate::control_plane::provider::NodeInfoCache`].
     /// Notice that by default the limiter is empty, which means that cache is disabled.
     pub const CACHE_DEFAULT_OPTIONS: &'static str =
         "initial_batch_size=1000,default_batch_size=10,xread_timeout=5m,stream_name=controlPlane,disable_cache=true,limiter_info=1000@1s,retry_interval=1s";
@@ -421,7 +443,7 @@ pub struct CacheOptions {
 }
 
 impl CacheOptions {
-    /// Default options for [`crate::console::provider::NodeInfoCache`].
+    /// Default options for [`crate::control_plane::provider::NodeInfoCache`].
     pub const CACHE_DEFAULT_OPTIONS: &'static str = "size=4000,ttl=4m";
 
     /// Parse cache options passed via cmdline.
@@ -477,7 +499,7 @@ pub struct ProjectInfoCacheOptions {
 }
 
 impl ProjectInfoCacheOptions {
-    /// Default options for [`crate::console::provider::NodeInfoCache`].
+    /// Default options for [`crate::control_plane::provider::NodeInfoCache`].
     pub const CACHE_DEFAULT_OPTIONS: &'static str =
         "size=10000,ttl=4m,max_roles=10,gc_interval=60m";
 
@@ -563,7 +585,7 @@ impl RetryConfig {
             match key {
                 "num_retries" => num_retries = Some(value.parse()?),
                 "base_retry_wait_duration" => {
-                    base_retry_wait_duration = Some(humantime::parse_duration(value)?)
+                    base_retry_wait_duration = Some(humantime::parse_duration(value)?);
                 }
                 "retry_wait_exponent_base" => retry_wait_exponent_base = Some(value.parse()?),
                 unknown => bail!("unknown key: {unknown}"),
@@ -596,9 +618,9 @@ pub struct ConcurrencyLockOptions {
 }
 
 impl ConcurrencyLockOptions {
-    /// Default options for [`crate::console::provider::ApiLocks`].
+    /// Default options for [`crate::control_plane::provider::ApiLocks`].
     pub const DEFAULT_OPTIONS_WAKE_COMPUTE_LOCK: &'static str = "permits=0";
-    /// Default options for [`crate::console::provider::ApiLocks`].
+    /// Default options for [`crate::control_plane::provider::ApiLocks`].
     pub const DEFAULT_OPTIONS_CONNECT_COMPUTE_LOCK: &'static str =
         "shards=64,permits=100,epoch=10m,timeout=10ms";
 

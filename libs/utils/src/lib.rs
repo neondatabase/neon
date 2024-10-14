@@ -2,6 +2,8 @@
 //! between other crates in this repository.
 #![deny(clippy::undocumented_unsafe_blocks)]
 
+extern crate hyper0 as hyper;
+
 pub mod backoff;
 
 /// `Lsn` type implements common tasks on Log Sequence Numbers
@@ -43,15 +45,8 @@ pub mod logging;
 pub mod lock_file;
 pub mod pid_file;
 
-// Misc
-pub mod accum;
-pub mod shutdown;
-
 // Utility for binding TcpListeners with proper socket options.
 pub mod tcp_listener;
-
-// Utility for putting a raw file descriptor into non-blocking mode
-pub mod nonblock;
 
 // Default signal handling
 pub mod sentry_init;
@@ -71,6 +66,7 @@ pub mod postgres_client;
 
 pub mod tracing_span_assert;
 
+pub mod leaky_bucket;
 pub mod rate_limit;
 
 /// Simple once-barrier and a guard which keeps barrier awaiting.
@@ -97,6 +93,10 @@ pub mod poison;
 pub mod toml_edit_ext;
 
 pub mod circuit_breaker;
+
+// Re-export used in macro. Avoids adding git-version as dep in target crates.
+#[doc(hidden)]
+pub use git_version;
 
 /// This is a shortcut to embed git sha into binaries and avoid copying the same build script to all packages
 ///
@@ -128,7 +128,7 @@ pub mod circuit_breaker;
 ///
 /// #############################################################################################
 /// TODO this macro is not the way the library is intended to be used, see <https://github.com/neondatabase/neon/issues/1565> for details.
-/// We use `cachepot` to reduce our current CI build times: <https://github.com/neondatabase/cloud/pull/1033#issuecomment-1100935036>
+/// We used `cachepot` to reduce our current CI build times: <https://github.com/neondatabase/cloud/pull/1033#issuecomment-1100935036>
 /// Yet, it seems to ignore the GIT_VERSION env variable, passed to Docker build, even with build.rs that contains
 /// `println!("cargo:rerun-if-env-changed=GIT_VERSION");` code for cachepot cache invalidation.
 /// The problem needs further investigation and regular `const` declaration instead of a macro.
@@ -137,7 +137,7 @@ macro_rules! project_git_version {
     ($const_identifier:ident) => {
         // this should try GIT_VERSION first only then git_version::git_version!
         const $const_identifier: &::core::primitive::str = {
-            const __COMMIT_FROM_GIT: &::core::primitive::str = git_version::git_version! {
+            const __COMMIT_FROM_GIT: &::core::primitive::str = $crate::git_version::git_version! {
                 prefix = "",
                 fallback = "unknown",
                 args = ["--abbrev=40", "--always", "--dirty=-modified"] // always use full sha

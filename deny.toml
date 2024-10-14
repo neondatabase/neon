@@ -4,6 +4,7 @@
 # to your expectations and requirements.
 
 # Root options
+[graph]
 targets = [
     { triple = "x86_64-unknown-linux-gnu" },
     { triple = "aarch64-unknown-linux-gnu" },
@@ -12,6 +13,7 @@ targets = [
 ]
 all-features = false
 no-default-features = false
+[output]
 feature-depth = 1
 
 # This section is considered when running `cargo deny check advisories`
@@ -19,17 +21,16 @@ feature-depth = 1
 # https://embarkstudios.github.io/cargo-deny/checks/advisories/cfg.html
 [advisories]
 db-urls = ["https://github.com/rustsec/advisory-db"]
-vulnerability = "deny"
-unmaintained = "warn"
 yanked = "warn"
-notice = "warn"
-ignore = []
+
+[[advisories.ignore]]
+id = "RUSTSEC-2023-0071"
+reason = "the marvin attack only affects private key decryption, not public key signature verification"
 
 # This section is considered when running `cargo deny check licenses`
 # More documentation for the licenses section can be found here:
 # https://embarkstudios.github.io/cargo-deny/checks/licenses/cfg.html
 [licenses]
-unlicensed = "deny"
 allow = [
     "Apache-2.0",
     "Artistic-2.0",
@@ -42,10 +43,6 @@ allow = [
     "OpenSSL",
     "Unicode-DFS-2016",
 ]
-deny = []
-copyleft = "warn"
-allow-osi-fsf-free = "neither"
-default = "deny"
 confidence-threshold = 0.8
 exceptions = [
     # Zlib license has some restrictions if we decide to change sth

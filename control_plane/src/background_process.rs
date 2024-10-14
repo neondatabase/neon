@@ -151,7 +151,7 @@ where
                     print!(".");
                     io::stdout().flush().unwrap();
                 }
-                thread::sleep(RETRY_INTERVAL);
+                tokio::time::sleep(RETRY_INTERVAL).await;
             }
             Err(e) => {
                 println!("error starting process {process_name:?}: {e:#}");
@@ -379,7 +379,7 @@ where
     }
 }
 
-fn process_has_stopped(pid: Pid) -> anyhow::Result<bool> {
+pub(crate) fn process_has_stopped(pid: Pid) -> anyhow::Result<bool> {
     match kill(pid, None) {
         // Process exists, keep waiting
         Ok(_) => Ok(false),

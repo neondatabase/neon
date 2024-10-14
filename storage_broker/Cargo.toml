@@ -16,15 +16,15 @@ const_format.workspace = true
 futures.workspace = true
 futures-core.workspace = true
 futures-util.workspace = true
-git-version.workspace = true
 humantime.workspace = true
 hyper = { workspace = true, features = ["full"] }
+http-body-util.workspace = true
+hyper-util = "0.1"
 once_cell.workspace = true
 parking_lot.workspace = true
 prost.workspace = true
 tonic.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread"] }
-tokio-stream.workspace = true
 tracing.workspace = true
 metrics.workspace = true
 utils.workspace = true

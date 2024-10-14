@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder
 
@@ -37,7 +39,7 @@ def test_oid_overflow(neon_env_builder: NeonEnvBuilder):
     oid = cur.fetchall()[0][0]
     log.info(f"t2.relfilenode={oid}")
 
-    cur.execute("SELECT clear_buffer_cache()")
+    endpoint.clear_shared_buffers(cursor=cur)
 
     cur.execute("SELECT x from t1")
     assert cur.fetchone() == (1,)

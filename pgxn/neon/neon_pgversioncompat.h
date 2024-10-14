@@ -6,7 +6,14 @@
 #ifndef NEON_PGVERSIONCOMPAT_H
 #define NEON_PGVERSIONCOMPAT_H
 
+#include "fmgr.h"
+#include "storage/buf_internals.h"
+
+#if PG_MAJORVERSION_NUM < 17
 #define NRelFileInfoBackendIsTemp(rinfo) (rinfo.backend != InvalidBackendId)
+#else
+#define NRelFileInfoBackendIsTemp(rinfo) (rinfo.backend != INVALID_PROC_NUMBER)
+#endif
 
 #define RelFileInfoEquals(a, b) ( \
 	NInfoGetSpcOid(a) == NInfoGetSpcOid(b) && \
@@ -14,11 +21,24 @@
 	NInfoGetRelNumber(a) == NInfoGetRelNumber(b) \
 )
 
-/* buftag population & RelFileNode/RelFileLocator rework */
+/* These macros were turned into static inline functions in v16 */
 #if PG_MAJORVERSION_NUM < 16
+static inline bool
+BufferTagsEqual(const BufferTag *tag1, const BufferTag *tag2)
+{
+	return BUFFERTAGS_EQUAL(*tag1, *tag2);
+}
 
-#define InitBufferTag(tag, rfn, fn, bn) INIT_BUFFERTAG(*tag, *rfn, fn, bn)
+static inline void
+InitBufferTag(BufferTag *tag, const RelFileNode *rnode,
+			  ForkNumber forkNum, BlockNumber blockNum)
+{
+	INIT_BUFFERTAG(*tag, *rnode, forkNum, blockNum);
+}
+#endif
 
+/* RelFileNode -> RelFileLocator rework */
+#if PG_MAJORVERSION_NUM < 16
 #define USE_RELFILENODE
 
 #define RELFILEINFO_HDR "storage/relfilenode.h"
@@ -50,9 +70,13 @@
 #define CopyNRelFileInfoToBufTag(tag, rinfo) \
 	do { \
 		(tag).rnode = (rinfo); \
-	} while (false);
+	} while (false)
 
 #define BufTagGetNRelFileInfo(tag) tag.rnode
+
+#define BufTagGetRelNumber(tagp) ((tagp)->rnode.relNode)
+
+#define InvalidRelFileNumber InvalidOid
 
 #define SMgrRelGetRelInfo(reln) \
 	(reln->smgr_rnode.node)
@@ -62,8 +86,6 @@
 #else							/* major version >= 16 */
 
 #define USE_RELFILELOCATOR
-
-#define BUFFERTAGS_EQUAL(a, b) BufferTagsEqual(&(a), &(b))
 
 #define RELFILEINFO_HDR "storage/relfilelocator.h"
 
@@ -94,7 +116,7 @@
 		(tag).spcOid = (rinfo).spcOid; \
 		(tag).dbOid = (rinfo).dbOid; \
 		(tag).relNumber = (rinfo).relNumber; \
-	} while (false);
+	} while (false)
 
 #define BufTagGetNRelFileInfo(tag) \
 	((RelFileLocator) { \
@@ -107,6 +129,16 @@
 	((reln)->smgr_rlocator)
 
 #define DropRelationAllLocalBuffers DropRelationAllLocalBuffers
+#endif
+
+#if PG_MAJORVERSION_NUM < 17
+#define ProcNumber BackendId
+#define INVALID_PROC_NUMBER InvalidBackendId
+#define AmAutoVacuumWorkerProcess() (IsAutoVacuumWorkerProcess())
+#endif
+
+#if PG_MAJORVERSION_NUM < 15
+extern void InitMaterializedSRF(FunctionCallInfo fcinfo, bits32 flags);
 #endif
 
 #endif							/* NEON_PGVERSIONCOMPAT_H */

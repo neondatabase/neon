@@ -1,6 +1,8 @@
 //! Periodically collect consumption metrics for all active tenants
 //! and push them to a HTTP endpoint.
 use crate::config::PageServerConf;
+use crate::consumption_metrics::metrics::MetricsKey;
+use crate::consumption_metrics::upload::KeyGen as _;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::task_mgr::{self, TaskKind, BACKGROUND_RUNTIME};
 use crate::tenant::size::CalculateSyntheticSizeError;
@@ -8,6 +10,7 @@ use crate::tenant::tasks::BackgroundLoopKind;
 use crate::tenant::{mgr::TenantManager, LogicalSizeCalculationCause, Tenant};
 use camino::Utf8PathBuf;
 use consumption_metrics::EventType;
+use itertools::Itertools as _;
 use pageserver_api::models::TenantState;
 use remote_storage::{GenericRemoteStorage, RemoteStorageConfig};
 use reqwest::Url;
@@ -19,9 +22,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::id::NodeId;
 
-mod metrics;
-use crate::consumption_metrics::metrics::MetricsKey;
 mod disk_cache;
+mod metrics;
 mod upload;
 
 const DEFAULT_HTTP_REPORTING_TIMEOUT: Duration = Duration::from_secs(60);
@@ -143,6 +145,12 @@ async fn collect_metrics(
         // these are point in time, with variable "now"
         let metrics = metrics::collect_all_metrics(&tenant_manager, &cached_metrics, &ctx).await;
 
+        // Pre-generate event idempotency keys, to reuse them across the bucket
+        // and HTTP sinks.
+        let idempotency_keys = std::iter::repeat_with(|| node_id.as_str().generate())
+            .take(metrics.len())
+            .collect_vec();
+
         let metrics = Arc::new(metrics);
 
         // why not race cancellation here? because we are one of the last tasks, and if we are
@@ -161,10 +169,16 @@ async fn collect_metrics(
             }
 
             if let Some(bucket_client) = &bucket_client {
-                let res =
-                    upload::upload_metrics_bucket(bucket_client, &cancel, &node_id, &metrics).await;
+                let res = upload::upload_metrics_bucket(
+                    bucket_client,
+                    &cancel,
+                    &node_id,
+                    &metrics,
+                    &idempotency_keys,
+                )
+                .await;
                 if let Err(e) = res {
-                    tracing::error!("failed to upload to S3: {e:#}");
+                    tracing::error!("failed to upload to remote storage: {e:#}");
                 }
             }
         };
@@ -174,9 +188,9 @@ async fn collect_metrics(
                 &client,
                 metric_collection_endpoint,
                 &cancel,
-                &node_id,
                 &metrics,
                 &mut cached_metrics,
+                &idempotency_keys,
             )
             .await;
             if let Err(e) = res {

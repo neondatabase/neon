@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import ssl
 
 import pytest
@@ -53,7 +55,7 @@ async def test_websockets(static_proxy: NeonProxy):
         assert auth_response[1:5] == b"\x00\x00\x00\x08", "should be 8 bytes long message"
         assert auth_response[5:9] == b"\x00\x00\x00\x00", "should be authenticated"
 
-        query_message = "SELECT 1".encode("utf-8") + b"\0"
+        query_message = b"SELECT 1" + b"\0"
         length = (4 + len(query_message)).to_bytes(4, byteorder="big")
         await websocket.send([b"Q", length, query_message])
 
@@ -132,7 +134,7 @@ async def test_websockets_pipelined(static_proxy: NeonProxy):
 
         auth_message = password.encode("utf-8") + b"\0"
         length1 = (4 + len(auth_message)).to_bytes(4, byteorder="big")
-        query_message = "SELECT 1".encode("utf-8") + b"\0"
+        query_message = b"SELECT 1" + b"\0"
         length2 = (4 + len(query_message)).to_bytes(4, byteorder="big")
         await websocket.send(
             length0

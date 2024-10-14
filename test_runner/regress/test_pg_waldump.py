@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import shutil
 
@@ -12,7 +14,7 @@ def check_wal_segment(pg_waldump_path: str, segment_path: str, test_output_dir):
         test_output_dir, [pg_waldump_path, "--ignore", segment_path]
     )
 
-    with open(f"{output_path}.stdout", "r") as f:
+    with open(f"{output_path}.stdout") as f:
         stdout = f.read()
         assert "ABORT" in stdout
         assert "COMMIT" in stdout
@@ -22,8 +24,8 @@ def check_wal_segment(pg_waldump_path: str, segment_path: str, test_output_dir):
 def test_pg_waldump(neon_simple_env: NeonEnv, test_output_dir, pg_bin: PgBin):
     env = neon_simple_env
     tenant_id = env.initial_tenant
-    timeline_id = env.neon_cli.create_branch("test_pg_waldump", "empty")
-    endpoint = env.endpoints.create_start("test_pg_waldump")
+    timeline_id = env.initial_timeline
+    endpoint = env.endpoints.create_start("main")
 
     cur = endpoint.connect().cursor()
     cur.execute(

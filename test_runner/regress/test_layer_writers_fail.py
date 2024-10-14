@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import pytest
 from fixtures.neon_fixtures import NeonEnv, NeonPageserver
 from fixtures.pageserver.http import PageserverApiException
@@ -8,7 +10,7 @@ def test_image_layer_writer_fail_before_finish(neon_simple_env: NeonEnv):
     env = neon_simple_env
     pageserver_http = env.pageserver.http_client()
 
-    tenant_id, timeline_id = env.neon_cli.create_tenant(
+    tenant_id, timeline_id = env.create_tenant(
         conf={
             # small checkpoint distance to create more delta layer files
             "checkpoint_distance": f"{1024 ** 2}",
@@ -52,7 +54,7 @@ def test_delta_layer_writer_fail_before_finish(neon_simple_env: NeonEnv):
     env = neon_simple_env
     pageserver_http = env.pageserver.http_client()
 
-    tenant_id, timeline_id = env.neon_cli.create_tenant(
+    tenant_id, timeline_id = env.create_tenant(
         conf={
             # small checkpoint distance to create more delta layer files
             "checkpoint_distance": f"{1024 ** 2}",

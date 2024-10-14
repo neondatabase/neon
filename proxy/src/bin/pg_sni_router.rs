@@ -133,7 +133,7 @@ async fn main() -> anyhow::Result<()> {
         proxy_listener,
         cancellation_token.clone(),
     ));
-    let signals_task = tokio::spawn(proxy::handle_signals(cancellation_token));
+    let signals_task = tokio::spawn(proxy::handle_signals(cancellation_token, || {}));
 
     // the signal task cant ever succeed.
     // the main task can error, or can succeed on cancellation.
@@ -205,7 +205,7 @@ async fn task_main(
 const ERR_INSECURE_CONNECTION: &str = "connection is insecure (try using `sslmode=require`)";
 
 async fn ssl_handshake<S: AsyncRead + AsyncWrite + Unpin>(
-    ctx: &mut RequestMonitoring,
+    ctx: &RequestMonitoring,
     raw_stream: S,
     tls_config: Arc<rustls::ServerConfig>,
     tls_server_end_point: TlsServerEndPoint,
@@ -256,13 +256,13 @@ async fn ssl_handshake<S: AsyncRead + AsyncWrite + Unpin>(
 }
 
 async fn handle_client(
-    mut ctx: RequestMonitoring,
+    ctx: RequestMonitoring,
     dest_suffix: Arc<String>,
     tls_config: Arc<rustls::ServerConfig>,
     tls_server_end_point: TlsServerEndPoint,
     stream: impl AsyncRead + AsyncWrite + Unpin,
 ) -> anyhow::Result<()> {
-    let mut tls_stream = ssl_handshake(&mut ctx, stream, tls_config, tls_server_end_point).await?;
+    let mut tls_stream = ssl_handshake(&ctx, stream, tls_config, tls_server_end_point).await?;
 
     // Cut off first part of the SNI domain
     // We receive required destination details in the format of
