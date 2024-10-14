@@ -218,17 +218,20 @@ pub struct TimelineCreateRequest {
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(untagged)]
 pub enum TimelineCreateRequestMode {
-    Bootstrap {
-        #[serde(default)]
-        existing_initdb_timeline_id: Option<TimelineId>,
-        pg_version: Option<u32>,
-    },
     Branch {
         ancestor_timeline_id: TimelineId,
         #[serde(default)]
         ancestor_start_lsn: Option<Lsn>,
         // TODO: cplane sets this, but, the current branching code always
         // inherits the ancestor's pg_version. This field is effectively ignored.
+        pg_version: Option<u32>,
+    },
+    // NB: ordered after Branch because serde(untagged)
+    // will otherwise interpret Bootstrap as a Branch,
+    // with ignored unknown fields `ancestor_timeline_id`, `ancestor_start_lsn`.
+    Bootstrap {
+        #[serde(default)]
+        existing_initdb_timeline_id: Option<TimelineId>,
         pg_version: Option<u32>,
     },
 }
