@@ -777,7 +777,7 @@ impl PageServerHandler {
                         != (this_shard.tenant_shard_id, this_shard.timeline_id)
                     {
                         // TODO: we _could_ batch & execute each shard seperately (and in parallel).
-                        // But the current logig for keeping responses in order does not support that.
+                        // But the current logic for keeping responses in order does not support that.
                         return false;
                     }
                     // the vectored get currently only supports a single LSN, so, bounce as soon
@@ -865,22 +865,22 @@ impl PageServerHandler {
             for batch in batched {
                 // invoke handler function
                 let (handler_results, span): (
-                    smallvec::SmallVec<[Result<PagestreamBeMessage, PageStreamError>; 1]>,
+                    Vec<Result<PagestreamBeMessage, PageStreamError>>,
                     _,
                 ) = match batch {
                     BatchedFeMessage::Exists(req) => {
                         fail::fail_point!("ps::handle-pagerequest-message::exists");
                         let span = tracing::info_span!("handle_get_rel_exists_request", rel = %req.rel, req_lsn = %req.request_lsn);
                         (
-                            smallvec::smallvec![
+                            vec![
                                 self.handle_get_rel_exists_request(
                                     tenant_id,
                                     timeline_id,
                                     &req,
-                                    &ctx
+                                    &ctx,
                                 )
                                 .instrument(span.clone())
-                                .await
+                                .await,
                             ],
                             span,
                         )
@@ -889,7 +889,7 @@ impl PageServerHandler {
                         fail::fail_point!("ps::handle-pagerequest-message::nblocks");
                         let span = tracing::info_span!("handle_get_nblocks_request", rel = %req.rel, req_lsn = %req.request_lsn);
                         (
-                            smallvec::smallvec![
+                            vec![
                                 self.handle_get_nblocks_request(tenant_id, timeline_id, &req, &ctx)
                                     .instrument(span.clone())
                                     .await,
@@ -927,10 +927,10 @@ impl PageServerHandler {
                         fail::fail_point!("ps::handle-pagerequest-message::dbsize");
                         let span = tracing::info_span!("handle_db_size_request", dbnode = %req.dbnode, req_lsn = %req.request_lsn);
                         (
-                            smallvec::smallvec![
+                            vec![
                                 self.handle_db_size_request(tenant_id, timeline_id, &req, &ctx)
                                     .instrument(span.clone())
-                                    .await
+                                    .await,
                             ],
                             span,
                         )
@@ -939,15 +939,15 @@ impl PageServerHandler {
                         fail::fail_point!("ps::handle-pagerequest-message::slrusegment");
                         let span = tracing::info_span!("handle_get_slru_segment_request", kind = %req.kind, segno = %req.segno, req_lsn = %req.request_lsn);
                         (
-                            smallvec::smallvec![
+                            vec![
                                 self.handle_get_slru_segment_request(
                                     tenant_id,
                                     timeline_id,
                                     &req,
-                                    &ctx
+                                    &ctx,
                                 )
                                 .instrument(span.clone())
-                                .await
+                                .await,
                             ],
                             span,
                         )
@@ -955,7 +955,7 @@ impl PageServerHandler {
                     BatchedFeMessage::RespondError(span, e) => {
                         // We've already decided to respond with an error, so we don't need to
                         // call the handler.
-                        (smallvec::smallvec![Err(e)], span)
+                        (vec![Err(e)], span)
                     }
                 };
 
@@ -1260,7 +1260,7 @@ impl PageServerHandler {
         effective_lsn: Lsn,
         pages: smallvec::SmallVec<[(RelTag, BlockNumber); 1]>,
         ctx: &RequestContext,
-    ) -> smallvec::SmallVec<[Result<PagestreamBeMessage, PageStreamError>; 1]> {
+    ) -> Vec<Result<PagestreamBeMessage, PageStreamError>> {
         debug_assert_current_span_has_tenant_and_timeline_id();
         let _timer = timeline.query_metrics.start_timer_many(
             metrics::SmgrQueryType::GetPageAtLsn,
@@ -1272,7 +1272,8 @@ impl PageServerHandler {
             .get_rel_page_at_lsn_batched(pages, Version::Lsn(effective_lsn), ctx)
             .await;
 
-        smallvec::SmallVec::from_iter(pages.into_iter().map(|page| {
+        // TODO: This copies the buffers
+        Vec::from_iter(pages.into_iter().map(|page| {
             page.map(|page| {
                 PagestreamBeMessage::GetPage(models::PagestreamGetPageResponse { page })
             })

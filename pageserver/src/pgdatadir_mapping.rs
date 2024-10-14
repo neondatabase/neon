@@ -210,43 +210,39 @@ impl Timeline {
         pages: smallvec::SmallVec<[(RelTag, BlockNumber); 1]>,
         version: Version<'_>,
         ctx: &RequestContext,
-    ) -> smallvec::SmallVec<[Result<Bytes, PageReconstructError>; 1]> {
+    ) -> Vec<Result<Bytes, PageReconstructError>> {
         debug_assert_current_span_has_tenant_and_timeline_id();
         let request_lsn = match version {
             Version::Lsn(lsn) => lsn,
             Version::Modified(_) => panic!("unsupported"),
         };
-        enum KeyState {
-            NeedsVectoredGet,
-            Done(Result<Bytes, PageReconstructError>),
-        }
-        let mut key_states = BTreeMap::new();
-        let mut vectored_gets: smallvec::SmallVec<[_; 1]> =
-            smallvec::SmallVec::with_capacity(pages.len());
-        for (response_order, (tag, blknum)) in pages.into_iter().enumerate() {
-            let key = rel_block_to_key(tag, blknum);
-            use std::collections::btree_map::Entry;
-            let key_state_slot = match key_states.entry((key, response_order)) {
-                Entry::Occupied(_entry) => unreachable!(
-                    "enumerate makes keys unique, even if batch contains same key twice"
-                ),
-                Entry::Vacant(entry) => entry,
-            };
 
+        let mut slots_filled = 0;
+        let page_count = pages.len();
+
+        let mut result = Vec::with_capacity(pages.len());
+        let result_slots = result.spare_capacity_mut();
+
+        let mut keys_slots: BTreeMap<Key, smallvec::SmallVec<[usize; 1]>> = BTreeMap::default();
+        for (response_slot_idx, (tag, blknum)) in pages.into_iter().enumerate() {
             if tag.relnode == 0 {
-                key_state_slot.insert(KeyState::Done(Err(PageReconstructError::Other(
+                result_slots[response_slot_idx].write(Err(PageReconstructError::Other(
                     RelationError::InvalidRelnode.into(),
-                ))));
+                )));
+
+                slots_filled += 1;
                 continue;
             }
 
             let nblocks = match self.get_rel_size(tag, version, ctx).await {
                 Ok(nblocks) => nblocks,
                 Err(err) => {
-                    key_state_slot.insert(KeyState::Done(Err(err)));
+                    result_slots[response_slot_idx].write(Err(err));
+                    slots_filled += 1;
                     continue;
                 }
             };
+
             if blknum >= nblocks {
                 debug!(
                     "read beyond EOF at {} blk {} at {}, size is {}: returning all-zeros page",
@@ -255,23 +251,26 @@ impl Timeline {
                     version.get_lsn(),
                     nblocks
                 );
-                key_state_slot.insert(KeyState::Done(Ok(ZERO_PAGE.clone())));
+                result_slots[response_slot_idx].write(Ok(ZERO_PAGE.clone()));
+                slots_filled += 1;
                 continue;
             }
 
-            vectored_gets.push(key);
-            key_state_slot.insert(KeyState::NeedsVectoredGet);
+            let key = rel_block_to_key(tag, blknum);
+
+            let key_slots = keys_slots.entry(key).or_default();
+            key_slots.push(response_slot_idx);
         }
-        // turn vectored_gets into a keyspace
+
         let keyspace = {
             // add_key reuqires monotonicity
             let mut acc = KeySpaceAccum::new();
-            for key in vectored_gets
-                .into_iter()
+            for key in keys_slots
+                .keys()
                 // in fact it requires strong monotonicity
                 .dedup()
             {
-                acc.add_key(key);
+                acc.add_key(*key);
             }
             acc.to_keyspace()
         };
@@ -279,98 +278,87 @@ impl Timeline {
         match self.get_vectored(keyspace, request_lsn, ctx).await {
             Ok(results) => {
                 for (key, res) in results {
-                    let mut interests = key_states.range_mut((key, 0)..(key.next(), 0)).peekable();
-                    let first_interest = interests.next().unwrap();
-                    let next_interest = interests.peek().is_some();
-                    if !next_interest {
-                        match first_interest.1 {
-                            KeyState::NeedsVectoredGet => {
-                                *first_interest.1 = KeyState::Done(res);
-                            }
-                            KeyState::Done(_) => unreachable!(),
-                        }
-                        continue;
-                    } else {
-                        for ((_, _), state) in [first_interest].into_iter().chain(interests) {
-                            match state {
-                                KeyState::NeedsVectoredGet => {
-                                    *state = KeyState::Done(match &res {
-                                        Ok(buf) => Ok(buf.clone()),
-                                        // this `match` is working around the fact that we cannot Clone the PageReconstructError
-                                        Err(err) => Err(match err {
-                                            PageReconstructError::Cancelled => {
-                                                PageReconstructError::Cancelled
-                                            }
+                    let mut key_slots = keys_slots.remove(&key).unwrap().into_iter();
+                    let first_slot = key_slots.next().unwrap();
 
-                                            x @ PageReconstructError::Other(_) |
-                                            x @ PageReconstructError::AncestorLsnTimeout(_) |
-                                            x @ PageReconstructError::WalRedo(_) |
-                                            x @ PageReconstructError::MissingKey(_) => {
-                                                PageReconstructError::Other(anyhow::anyhow!("there was more than one request for this key in the batch, error logged once: {x:?}"))
-                                            },
-                                        }),
-                                    });
+                    for slot in key_slots {
+                        let clone = match &res {
+                            Ok(buf) => Ok(buf.clone()),
+                            Err(err) => Err(match err {
+                                PageReconstructError::Cancelled => {
+                                    PageReconstructError::Cancelled
                                 }
-                                KeyState::Done(_) => unreachable!(),
-                            }
-                        }
+
+                                x @ PageReconstructError::Other(_) |
+                                x @ PageReconstructError::AncestorLsnTimeout(_) |
+                                x @ PageReconstructError::WalRedo(_) |
+                                x @ PageReconstructError::MissingKey(_) => {
+                                    PageReconstructError::Other(anyhow::anyhow!("there was more than one request for this key in the batch, error logged once: {x:?}"))
+                                },
+                            }),
+                        };
+
+                        result_slots[slot].write(clone);
+                        slots_filled += 1;
                     }
+
+                    result_slots[first_slot].write(res);
+                    slots_filled += 1;
                 }
             }
             Err(err) => {
                 // this cannot really happen because get_vectored only errors globally on invalid LSN or too large batch size
-                for ((_, _), state) in key_states.iter_mut() {
+                for slot in keys_slots.values().flatten() {
                     // this whole `match` is a lot like `From<GetVectoredError> for PageReconstructError`
                     // but without taking ownership of the GetVectoredError
-                    match &err {
+                    let err = match &err {
                         GetVectoredError::Cancelled => {
-                            *state = KeyState::Done(Err(PageReconstructError::Cancelled));
+                            Err(PageReconstructError::Cancelled)
                         }
                         // TODO: restructure get_vectored API to make this error per-key
                         GetVectoredError::MissingKey(err) => {
-                            *state = KeyState::Done(Err(PageReconstructError::Other(anyhow::anyhow!("whole vectored get request failed because one or more of the requested keys were missing: {err:?}"))));
+                            Err(PageReconstructError::Other(anyhow::anyhow!("whole vectored get request failed because one or more of the requested keys were missing: {err:?}")))
                         }
                         // TODO: restructure get_vectored API to make this error per-key
                         GetVectoredError::GetReadyAncestorError(err) => {
-                            *state = KeyState::Done(Err(PageReconstructError::Other(anyhow::anyhow!("whole vectored get request failed because one or more key required ancestor that wasn't ready: {err:?}"))));
+                            Err(PageReconstructError::Other(anyhow::anyhow!("whole vectored get request failed because one or more key required ancestor that wasn't ready: {err:?}")))
                         }
                         // TODO: restructure get_vectored API to make this error per-key
                         GetVectoredError::Other(err) => {
-                            *state = KeyState::Done(Err(PageReconstructError::Other(
+                            Err(PageReconstructError::Other(
                                 anyhow::anyhow!("whole vectored get request failed: {err:?}"),
-                            )));
+                            ))
                         }
                         // TODO: we can prevent this error class by moving this check into the type system
                         GetVectoredError::InvalidLsn(e) => {
-                            *state =
-                                KeyState::Done(Err(anyhow::anyhow!("invalid LSN: {e:?}").into()));
+                            Err(anyhow::anyhow!("invalid LSN: {e:?}").into())
                         }
                         // NB: this should never happen in practice because we limit MAX_GET_VECTORED_KEYS
                         // TODO: we can prevent this error class by moving this check into the type system
                         GetVectoredError::Oversized(err) => {
-                            *state = KeyState::Done(Err(anyhow::anyhow!(
+                            Err(anyhow::anyhow!(
                                 "batching oversized: {err:?}"
                             )
-                            .into()));
+                            .into())
                         }
-                    }
+                    };
+
+                    result_slots[*slot].write(err);
                 }
+
+                slots_filled += keys_slots.values().map(|slots| slots.len()).sum::<usize>();
             }
         };
 
-        // get the results into the order in which they were requested
-        let mut return_order: smallvec::SmallVec<[_; Timeline::MAX_GET_VECTORED_KEYS as usize]> =
-            smallvec::SmallVec::with_capacity(key_states.len());
-        return_order.extend(key_states.keys().map(|(key, idx)| (*key, *idx)));
-        return_order.sort_unstable_by_key(|(_, idx)| *idx);
-        let mut res = smallvec::SmallVec::with_capacity(key_states.len());
-        res.extend(return_order.into_iter().map(|key_states_key| {
-            match key_states.remove(&key_states_key).unwrap() {
-                KeyState::Done(res) => res,
-                KeyState::NeedsVectoredGet => unreachable!(),
-            }
-        }));
-        res
+        assert_eq!(slots_filled, page_count);
+        // SAFETY:
+        // 1. `result` and any of its uninint members are not read from until this point
+        // 2. The length below is tracked at run-time and matches the number of requested pages.
+        unsafe {
+            result.set_len(page_count);
+        }
+
+        result
     }
 
     // Get size of a database in blocks
