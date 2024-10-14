@@ -202,7 +202,7 @@ impl Timeline {
         res.into_iter().next().unwrap()
     }
 
-    /// Like [`get_rel_page_at_lsn`], but returns a batch of pages.
+    /// Like [`Self::get_rel_page_at_lsn`], but returns a batch of pages.
     ///
     /// The ordering of the returned vec corresponds to the ordering of `pages`.
     pub(crate) async fn get_rel_page_at_lsn_batched(
