@@ -34,7 +34,7 @@ pub(crate) enum AuthErrorImpl {
     Web(#[from] backend::WebAuthError),
 
     #[error(transparent)]
-    GetAuthInfo(#[from] control_plane::errors::GetAuthInfoError),
+    GetAuthInfo(#[from] control_plane::api::errors::GetAuthInfoError),
 
     /// SASL protocol errors (includes [SCRAM](crate::scram)).
     #[error(transparent)]

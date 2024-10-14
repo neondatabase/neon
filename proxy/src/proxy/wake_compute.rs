@@ -1,7 +1,7 @@
 use crate::config::RetryConfig;
 use crate::context::RequestMonitoring;
-use crate::control_plane::messages::{ControlPlaneError, Reason};
-use crate::control_plane::{errors::WakeComputeError, provider::CachedNodeInfo};
+use crate::control_plane::api::messages::{ControlPlaneError, Reason};
+use crate::control_plane::{api::errors::WakeComputeError, CachedNodeInfo};
 use crate::metrics::{
     ConnectOutcome, ConnectionFailuresBreakdownGroup, Metrics, RetriesMetricGroup, RetryType,
     WakeupFailureKind,
@@ -59,11 +59,15 @@ pub(crate) async fn wake_compute<B: ComputeConnectBackend>(
 }
 
 fn report_error(e: &WakeComputeError, retry: bool) {
-    use crate::control_plane::errors::ApiError;
+    use crate::control_plane::api::errors::ControlPlaneApiError;
     let kind = match e {
         WakeComputeError::BadComputeAddress(_) => WakeupFailureKind::BadComputeAddress,
-        WakeComputeError::ApiError(ApiError::Transport(_)) => WakeupFailureKind::ApiTransportError,
-        WakeComputeError::ApiError(ApiError::ControlPlane(e)) => match e.get_reason() {
+        WakeComputeError::ControlPlaneApi(ControlPlaneApiError::Transport(_)) => {
+            WakeupFailureKind::ApiTransportError
+        }
+        WakeComputeError::ControlPlaneApi(ControlPlaneApiError::ControlPlane(e)) => match e
+            .get_reason()
+        {
             Reason::RoleProtected => WakeupFailureKind::ApiConsoleBadRequest,
             Reason::ResourceNotFound => WakeupFailureKind::ApiConsoleBadRequest,
             Reason::ProjectNotFound => WakeupFailureKind::ApiConsoleBadRequest,

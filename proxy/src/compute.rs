@@ -2,7 +2,10 @@ use crate::{
     auth::parse_endpoint_param,
     cancellation::CancelClosure,
     context::RequestMonitoring,
-    control_plane::{errors::WakeComputeError, messages::MetricsAuxInfo, provider::ApiLockError},
+    control_plane::api::{
+        errors::{ApiLockError, WakeComputeError},
+        messages::MetricsAuxInfo,
+    },
     error::{ReportableError, UserFacingError},
     metrics::{Metrics, NumDbConnectionsGuard},
     proxy::neon_option,

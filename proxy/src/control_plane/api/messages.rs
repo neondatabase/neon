@@ -3,7 +3,6 @@ use serde::{Deserialize, Serialize};
 use std::fmt::{self, Display};
 
 use crate::auth::IpPattern;
-
 use crate::intern::{BranchIdInt, EndpointIdInt, ProjectIdInt, RoleNameInt};
 use crate::proxy::retry::CouldRetry;
 
@@ -26,7 +25,7 @@ impl ControlPlaneError {
     }
 
     pub(crate) fn get_user_facing_message(&self) -> String {
-        use super::provider::errors::REQUEST_FAILED;
+        use super::errors::REQUEST_FAILED;
         self.status
             .as_ref()
             .and_then(|s| s.details.user_facing_message.as_ref())

@@ -16,8 +16,8 @@ use proxy::{
     cancellation::CancellationHandlerMain,
     config::{self, AuthenticationConfig, HttpConfig, ProxyConfig, RetryConfig},
     control_plane::{
-        locks::ApiLocks,
-        messages::{EndpointJwksResponse, JwksSettings},
+        api::messages::{EndpointJwksResponse, JwksSettings},
+        provider::ApiLocks,
     },
     http::health_server::AppMetrics,
     intern::RoleNameInt,

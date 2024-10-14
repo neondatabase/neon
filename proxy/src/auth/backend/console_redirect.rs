@@ -4,7 +4,7 @@ use crate::{
     compute,
     config::AuthenticationConfig,
     context::RequestMonitoring,
-    control_plane::{self, provider::NodeInfo, CachedNodeInfo},
+    control_plane::{self, CachedNodeInfo, NodeInfo},
     error::{ReportableError, UserFacingError},
     proxy::connect_compute::ComputeConnectBackend,
     stream::PqStream,
@@ -92,7 +92,7 @@ impl ComputeConnectBackend for ConsoleRedirectNodeInfo {
     async fn wake_compute(
         &self,
         _ctx: &RequestMonitoring,
-    ) -> Result<CachedNodeInfo, control_plane::errors::WakeComputeError> {
+    ) -> Result<CachedNodeInfo, control_plane::api::errors::WakeComputeError> {
         Ok(Cached::new_uncached(self.0.clone()))
     }
 

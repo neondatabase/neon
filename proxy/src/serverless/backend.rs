@@ -16,9 +16,8 @@ use crate::{
     config::ProxyConfig,
     context::RequestMonitoring,
     control_plane::{
-        errors::{GetAuthInfoError, WakeComputeError},
-        locks::ApiLocks,
-        provider::ApiLockError,
+        api::errors::{ApiLockError, GetAuthInfoError, WakeComputeError},
+        provider::ApiLocks,
         CachedNodeInfo,
     },
     error::{ErrorKind, ReportableError, UserFacingError},

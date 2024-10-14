@@ -20,9 +20,10 @@ use crate::auth::credentials::check_peer_addr_is_in_list;
 use crate::auth::{validate_password_and_exchange, AuthError};
 use crate::cache::Cached;
 use crate::context::RequestMonitoring;
-use crate::control_plane::errors::GetAuthInfoError;
-use crate::control_plane::provider::{CachedRoleSecret, ControlPlaneBackend};
+use crate::control_plane::api::errors::GetAuthInfoError;
+use crate::control_plane::provider::ControlPlaneClient;
 use crate::control_plane::AuthSecret;
+use crate::control_plane::CachedRoleSecret;
 use crate::intern::EndpointIdInt;
 use crate::metrics::Metrics;
 use crate::proxy::connect_compute::ComputeConnectBackend;
@@ -32,11 +33,7 @@ use crate::stream::Stream;
 use crate::{
     auth::{self, ComputeUserInfoMaybeEndpoint},
     config::AuthenticationConfig,
-    control_plane::{
-        self,
-        provider::{CachedAllowedIps, CachedNodeInfo},
-        Api,
-    },
+    control_plane::{self, api::ControlPlaneApi, CachedAllowedIps, CachedNodeInfo},
     stream,
 };
 use crate::{scram, EndpointCacheKey, EndpointId, RoleName};
@@ -68,17 +65,20 @@ impl<T> std::ops::Deref for MaybeOwned<'_, T> {
 ///   backends which require them for the authentication process.
 pub enum Backend<'a, T> {
     /// Cloud API (V2).
-    ControlPlane(MaybeOwned<'a, ControlPlaneBackend>, T),
+    ControlPlane(MaybeOwned<'a, ControlPlaneClient>, T),
     /// Local proxy uses configured auth credentials and does not wake compute
     Local(MaybeOwned<'a, LocalBackend>),
 }
 
 #[cfg(test)]
 pub(crate) trait TestBackend: Send + Sync + 'static {
-    fn wake_compute(&self) -> Result<CachedNodeInfo, control_plane::errors::WakeComputeError>;
+    fn wake_compute(&self) -> Result<CachedNodeInfo, control_plane::api::errors::WakeComputeError>;
     fn get_allowed_ips_and_secret(
         &self,
-    ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), control_plane::errors::GetAuthInfoError>;
+    ) -> Result<
+        (CachedAllowedIps, Option<CachedRoleSecret>),
+        control_plane::api::errors::GetAuthInfoError,
+    >;
     fn dyn_clone(&self) -> Box<dyn TestBackend>;
 }
 
@@ -93,17 +93,17 @@ impl std::fmt::Display for Backend<'_, ()> {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::ControlPlane(api, ()) => match &**api {
-                ControlPlaneBackend::Management(endpoint) => fmt
+                ControlPlaneClient::Management(endpoint) => fmt
                     .debug_tuple("ControlPlane::Management")
                     .field(&endpoint.url())
                     .finish(),
                 #[cfg(any(test, feature = "testing"))]
-                ControlPlaneBackend::PostgresMock(endpoint) => fmt
+                ControlPlaneClient::PostgresMock(endpoint) => fmt
                     .debug_tuple("ControlPlane::PostgresMock")
                     .field(&endpoint.url())
                     .finish(),
                 #[cfg(test)]
-                ControlPlaneBackend::Test(_) => fmt.debug_tuple("ControlPlane::Test").finish(),
+                ControlPlaneClient::Test(_) => fmt.debug_tuple("ControlPlane::Test").finish(),
             },
             Self::Local(_) => fmt.debug_tuple("Local").finish(),
         }
@@ -288,7 +288,7 @@ impl AuthenticationConfig {
 /// All authentication flows will emit an AuthenticationOk message if successful.
 async fn auth_quirks(
     ctx: &RequestMonitoring,
-    api: &impl control_plane::Api,
+    api: &impl control_plane::api::ControlPlaneApi,
     user_info: ComputeUserInfoMaybeEndpoint,
     client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
     allow_cleartext: bool,
@@ -483,7 +483,7 @@ impl ComputeConnectBackend for Backend<'_, ComputeCredentials> {
     async fn wake_compute(
         &self,
         ctx: &RequestMonitoring,
-    ) -> Result<CachedNodeInfo, control_plane::errors::WakeComputeError> {
+    ) -> Result<CachedNodeInfo, control_plane::api::errors::WakeComputeError> {
         match self {
             Self::ControlPlane(api, creds) => api.wake_compute(ctx, &creds.info).await,
             Self::Local(local) => Ok(Cached::new_uncached(local.node_info.clone())),
@@ -509,18 +509,13 @@ mod tests {
         authentication::sasl::{ChannelBinding, ScramSha256},
         message::{backend::Message as PgMessage, frontend},
     };
-    use provider::AuthSecret;
     use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
     use crate::{
         auth::{backend::MaskedIp, ComputeUserInfoMaybeEndpoint, IpPattern},
         config::AuthenticationConfig,
         context::RequestMonitoring,
-        control_plane::{
-            self,
-            provider::{self, CachedAllowedIps, CachedRoleSecret},
-            CachedNodeInfo,
-        },
+        control_plane::{self, AuthSecret, CachedAllowedIps, CachedNodeInfo, CachedRoleSecret},
         proxy::NeonOptions,
         rate_limiter::{EndpointRateLimiter, RateBucketInfo},
         scram::{threadpool::ThreadPool, ServerSecret},
@@ -534,12 +529,12 @@ mod tests {
         secret: AuthSecret,
     }
 
-    impl control_plane::Api for Auth {
+    impl control_plane::api::ControlPlaneApi for Auth {
         async fn get_role_secret(
             &self,
             _ctx: &RequestMonitoring,
             _user_info: &super::ComputeUserInfo,
-        ) -> Result<CachedRoleSecret, control_plane::errors::GetAuthInfoError> {
+        ) -> Result<CachedRoleSecret, control_plane::api::errors::GetAuthInfoError> {
             Ok(CachedRoleSecret::new_uncached(Some(self.secret.clone())))
         }
 
@@ -549,7 +544,7 @@ mod tests {
             _user_info: &super::ComputeUserInfo,
         ) -> Result<
             (CachedAllowedIps, Option<CachedRoleSecret>),
-            control_plane::errors::GetAuthInfoError,
+            control_plane::api::errors::GetAuthInfoError,
         > {
             Ok((
                 CachedAllowedIps::new_uncached(Arc::new(self.ips.clone())),
@@ -569,7 +564,7 @@ mod tests {
             &self,
             _ctx: &RequestMonitoring,
             _user_info: &super::ComputeUserInfo,
-        ) -> Result<CachedNodeInfo, control_plane::errors::WakeComputeError> {
+        ) -> Result<CachedNodeInfo, control_plane::api::errors::WakeComputeError> {
             unimplemented!()
         }
     }

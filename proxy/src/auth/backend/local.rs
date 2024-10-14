@@ -7,7 +7,7 @@ use crate::{
     compute::ConnCfg,
     context::RequestMonitoring,
     control_plane::{
-        messages::{ColdStartInfo, EndpointJwksResponse, MetricsAuxInfo},
+        api::messages::{ColdStartInfo, EndpointJwksResponse, MetricsAuxInfo},
         NodeInfo,
     },
     intern::{BranchIdTag, EndpointIdTag, InternId, ProjectIdTag},

@@ -1,6 +1,6 @@
 use crate::{
     auth::backend::{jwt::JwkCache, AuthRateLimiter},
-    control_plane::locks::ApiLocks,
+    control_plane::provider::ApiLocks,
     rate_limiter::{RateBucketInfo, RateLimitAlgorithm, RateLimiterConfig},
     scram::threadpool::ThreadPool,
     serverless::{cancel_set::CancelSet, GlobalConnPoolOptions},

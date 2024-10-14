@@ -1,10 +1,13 @@
+use std::time::Duration;
+
 use crate::{
     auth::backend::ComputeCredentialKeys,
-    compute::COULD_NOT_CONNECT,
-    compute::{self, PostgresConnection},
+    compute::{self, PostgresConnection, COULD_NOT_CONNECT},
     config::RetryConfig,
     context::RequestMonitoring,
-    control_plane::{self, errors::WakeComputeError, locks::ApiLocks, CachedNodeInfo, NodeInfo},
+    control_plane::{
+        self, api::errors::WakeComputeError, provider::ApiLocks, CachedNodeInfo, NodeInfo,
+    },
     error::ReportableError,
     metrics::{ConnectOutcome, ConnectionFailureKind, Metrics, RetriesMetricGroup, RetryType},
     proxy::{
@@ -61,7 +64,7 @@ pub(crate) trait ComputeConnectBackend {
     async fn wake_compute(
         &self,
         ctx: &RequestMonitoring,
-    ) -> Result<CachedNodeInfo, control_plane::errors::WakeComputeError>;
+    ) -> Result<CachedNodeInfo, WakeComputeError>;
 
     fn get_keys(&self) -> &ComputeCredentialKeys;
 }
@@ -89,12 +92,28 @@ impl ConnectMechanism for TcpMechanism<'_> {
     ) -> Result<PostgresConnection, Self::Error> {
         let host = node_info.config.get_host()?;
         let permit = self.locks.get_permit(&host).await?;
-        permit.release_result(node_info.connect(ctx, timeout).await)
+        permit.release_result(node_info_connect(ctx, node_info, timeout).await)
     }
 
     fn update_connect_config(&self, config: &mut compute::ConnCfg) {
         config.set_startup_params(self.params);
     }
+}
+
+async fn node_info_connect(
+    ctx: &RequestMonitoring,
+    node_info: &NodeInfo,
+    timeout: Duration,
+) -> Result<compute::PostgresConnection, compute::ConnectionError> {
+    node_info
+        .config
+        .connect(
+            ctx,
+            node_info.allow_self_signed_compute,
+            node_info.aux.clone(),
+            timeout,
+        )
+        .await
 }
 
 /// Try to connect to the compute node, retrying if necessary.

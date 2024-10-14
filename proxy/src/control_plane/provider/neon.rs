@@ -1,15 +1,19 @@
-//! Production console backend.
+//! Production control plane backend.
 
-use super::{
-    super::messages::{ControlPlaneError, GetRoleSecret, WakeCompute},
-    errors::{ApiError, GetAuthInfoError, WakeComputeError},
-    ApiCaches, ApiLocks, AuthInfo, AuthSecret, CachedAllowedIps, CachedNodeInfo, CachedRoleSecret,
-    NodeInfo,
-};
 use crate::{
     auth::backend::{jwt::AuthRule, ComputeUserInfo},
     compute,
-    control_plane::messages::{ColdStartInfo, EndpointJwksResponse, Reason},
+    control_plane::{
+        api::{
+            errors::{ControlPlaneApiError, GetAuthInfoError, WakeComputeError},
+            messages::{
+                ColdStartInfo, ControlPlaneError, EndpointJwksResponse, GetRoleSecret, Reason,
+                WakeCompute,
+            },
+        },
+        provider::{ApiCaches, ApiLocks},
+        AuthInfo, AuthSecret, CachedAllowedIps, CachedNodeInfo, CachedRoleSecret, NodeInfo,
+    },
     http,
     metrics::{CacheOutcome, Metrics},
     rate_limiter::WakeComputeRateLimiter,
@@ -27,7 +31,7 @@ use tracing::{debug, info, info_span, warn, Instrument};
 const X_REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
 
 #[derive(Clone)]
-pub struct Api {
+pub struct NeonControlPlaneClient {
     endpoint: http::Endpoint,
     pub caches: &'static ApiCaches,
     pub(crate) locks: &'static ApiLocks<EndpointCacheKey>,
@@ -36,7 +40,7 @@ pub struct Api {
     jwt: Arc<str>,
 }
 
-impl Api {
+impl NeonControlPlaneClient {
     /// Construct an API object containing the auth parameters.
     pub fn new(
         endpoint: http::Endpoint,
@@ -248,7 +252,7 @@ impl Api {
     }
 }
 
-impl super::Api for Api {
+impl super::ControlPlaneApi for NeonControlPlaneClient {
     #[tracing::instrument(skip_all)]
     async fn get_role_secret(
         &self,
@@ -348,7 +352,7 @@ impl super::Api for Api {
                     let (cached, info) = cached.take_value();
                     let info = info.map_err(|c| {
                         info!(key = &*key, "found cached wake_compute error");
-                        WakeComputeError::ApiError(ApiError::ControlPlane(*c))
+                        WakeComputeError::ControlPlaneApi(ControlPlaneApiError::ControlPlane(*c))
                     })?;
 
                     debug!(key = &*key, "found cached compute node info");
@@ -395,9 +399,11 @@ impl super::Api for Api {
                 Ok(cached.map(|()| node))
             }
             Err(err) => match err {
-                WakeComputeError::ApiError(ApiError::ControlPlane(err)) => {
+                WakeComputeError::ControlPlaneApi(ControlPlaneApiError::ControlPlane(err)) => {
                     let Some(status) = &err.status else {
-                        return Err(WakeComputeError::ApiError(ApiError::ControlPlane(err)));
+                        return Err(WakeComputeError::ControlPlaneApi(
+                            ControlPlaneApiError::ControlPlane(err),
+                        ));
                     };
 
                     let reason = status
@@ -407,7 +413,9 @@ impl super::Api for Api {
 
                     // if we can retry this error, do not cache it.
                     if reason.can_retry() {
-                        return Err(WakeComputeError::ApiError(ApiError::ControlPlane(err)));
+                        return Err(WakeComputeError::ControlPlaneApi(
+                            ControlPlaneApiError::ControlPlane(err),
+                        ));
                     }
 
                     // at this point, we should only have quota errors.
@@ -422,7 +430,9 @@ impl super::Api for Api {
                         Duration::from_secs(30),
                     );
 
-                    Err(WakeComputeError::ApiError(ApiError::ControlPlane(err)))
+                    Err(WakeComputeError::ControlPlaneApi(
+                        ControlPlaneApiError::ControlPlane(err),
+                    ))
                 }
                 err => return Err(err),
             },
@@ -433,7 +443,7 @@ impl super::Api for Api {
 /// Parse http response body, taking status code into account.
 async fn parse_body<T: for<'a> serde::Deserialize<'a>>(
     response: http::Response,
-) -> Result<T, ApiError> {
+) -> Result<T, ControlPlaneApiError> {
     let status = response.status();
     if status.is_success() {
         // We shouldn't log raw body because it may contain secrets.
@@ -457,7 +467,7 @@ async fn parse_body<T: for<'a> serde::Deserialize<'a>>(
     body.http_status_code = status;
 
     warn!("console responded with an error ({status}): {body:?}");
-    Err(ApiError::ControlPlane(body))
+    Err(ControlPlaneApiError::ControlPlane(body))
 }
 
 fn parse_host_port(input: &str) -> Option<(&str, u16)> {

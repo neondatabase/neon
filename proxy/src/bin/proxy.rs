@@ -529,7 +529,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     if let Either::Left(auth::Backend::ControlPlane(api, _)) = &auth_backend {
-        if let proxy::control_plane::provider::ControlPlaneBackend::Management(api) = &**api {
+        if let proxy::control_plane::provider::ControlPlaneClient::Management(api) = &**api {
             match (redis_notifications_client, regional_redis_client.clone()) {
                 (None, None) => {}
                 (client1, client2) => {
@@ -644,7 +644,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         ?epoch,
         "Using NodeLocks (connect_compute)"
     );
-    let connect_compute_locks = control_plane::locks::ApiLocks::new(
+    let connect_compute_locks = control_plane::provider::ApiLocks::new(
         "connect_compute_lock",
         limiter,
         shards,
@@ -721,7 +721,7 @@ fn build_auth_backend(
                 "Using AllowedIpsCache (wake_compute) with options={project_info_cache_config:?}"
             );
             info!("Using EndpointCacheConfig with options={endpoint_cache_config:?}");
-            let caches = Box::leak(Box::new(control_plane::caches::ApiCaches::new(
+            let caches = Box::leak(Box::new(control_plane::provider::ApiCaches::new(
                 wake_compute_cache_config,
                 project_info_cache_config,
                 endpoint_cache_config,
@@ -734,7 +734,7 @@ fn build_auth_backend(
                 timeout,
             } = args.wake_compute_lock.parse()?;
             info!(?limiter, shards, ?epoch, "Using NodeLocks (wake_compute)");
-            let locks = Box::leak(Box::new(control_plane::locks::ApiLocks::new(
+            let locks = Box::leak(Box::new(control_plane::provider::ApiLocks::new(
                 "wake_compute_lock",
                 limiter,
                 shards,
@@ -751,13 +751,13 @@ fn build_auth_backend(
             RateBucketInfo::validate(&mut wake_compute_rps_limit)?;
             let wake_compute_endpoint_rate_limiter =
                 Arc::new(WakeComputeRateLimiter::new(wake_compute_rps_limit));
-            let api = control_plane::provider::neon::Api::new(
+            let api = control_plane::provider::neon::NeonControlPlaneClient::new(
                 endpoint,
                 caches,
                 locks,
                 wake_compute_endpoint_rate_limiter,
             );
-            let api = control_plane::provider::ControlPlaneBackend::Management(api);
+            let api = control_plane::provider::ControlPlaneClient::Management(api);
             let auth_backend = auth::Backend::ControlPlane(MaybeOwned::Owned(api), ());
 
             let config = Box::leak(Box::new(auth_backend));
@@ -768,8 +768,11 @@ fn build_auth_backend(
         #[cfg(feature = "testing")]
         AuthBackendType::Postgres => {
             let url = args.auth_endpoint.parse()?;
-            let api = control_plane::provider::mock::Api::new(url, !args.is_private_access_proxy);
-            let api = control_plane::provider::ControlPlaneBackend::PostgresMock(api);
+            let api = control_plane::provider::mock::MockControlPlane::new(
+                url,
+                !args.is_private_access_proxy,
+            );
+            let api = control_plane::provider::ControlPlaneClient::PostgresMock(api);
 
             let auth_backend = auth::Backend::ControlPlane(MaybeOwned::Owned(api), ());
 

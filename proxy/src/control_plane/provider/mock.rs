@@ -1,9 +1,8 @@
 //! Mock console backend which relies on a user-provided postgres instance.
 
-use super::{
-    errors::{ApiError, GetAuthInfoError, WakeComputeError},
-    AuthInfo, AuthSecret, CachedNodeInfo, NodeInfo,
-};
+use crate::control_plane::api::messages::ColdStartInfo;
+use crate::control_plane::api::ControlPlaneApi;
+use crate::control_plane::{AuthInfo, AuthSecret, CachedNodeInfo, NodeInfo};
 use crate::{
     auth::backend::jwt::AuthRule, context::RequestMonitoring, intern::RoleNameInt, RoleName,
 };
@@ -11,8 +10,9 @@ use crate::{auth::backend::ComputeUserInfo, compute, error::io_error, scram, url
 use crate::{auth::IpPattern, cache::Cached};
 use crate::{
     control_plane::{
-        messages::MetricsAuxInfo,
-        provider::{CachedAllowedIps, CachedRoleSecret},
+        api::errors::{ControlPlaneApiError, GetAuthInfoError, WakeComputeError},
+        api::messages::MetricsAuxInfo,
+        CachedAllowedIps, CachedRoleSecret,
     },
     BranchId, EndpointId, ProjectId,
 };
@@ -28,25 +28,25 @@ enum MockApiError {
     PasswordNotSet(tokio_postgres::Error),
 }
 
-impl From<MockApiError> for ApiError {
+impl From<MockApiError> for ControlPlaneApiError {
     fn from(e: MockApiError) -> Self {
         io_error(e).into()
     }
 }
 
-impl From<tokio_postgres::Error> for ApiError {
+impl From<tokio_postgres::Error> for ControlPlaneApiError {
     fn from(e: tokio_postgres::Error) -> Self {
         io_error(e).into()
     }
 }
 
 #[derive(Clone)]
-pub struct Api {
+pub struct MockControlPlane {
     endpoint: ApiUrl,
     ip_allowlist_check_enabled: bool,
 }
 
-impl Api {
+impl MockControlPlane {
     pub fn new(endpoint: ApiUrl, ip_allowlist_check_enabled: bool) -> Self {
         Self {
             endpoint,
@@ -166,7 +166,7 @@ impl Api {
                 endpoint_id: (&EndpointId::from("endpoint")).into(),
                 project_id: (&ProjectId::from("project")).into(),
                 branch_id: (&BranchId::from("branch")).into(),
-                cold_start_info: crate::control_plane::messages::ColdStartInfo::Warm,
+                cold_start_info: ColdStartInfo::Warm,
             },
             allow_self_signed_compute: false,
         };
@@ -195,7 +195,7 @@ async fn get_execute_postgres_query(
     Ok(Some(entry))
 }
 
-impl super::Api for Api {
+impl ControlPlaneApi for MockControlPlane {
     #[tracing::instrument(skip_all)]
     async fn get_role_secret(
         &self,
