@@ -209,10 +209,21 @@ pub enum TimelineState {
 }
 
 #[derive(Serialize, Deserialize, Clone)]
+pub struct TimelineCreateRequest {
+    pub new_timeline_id: TimelineId,
+    #[serde(flatten)]
+    pub mode: TimelineCreateRequestMode,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
 #[serde(untagged)]
-pub enum TimelineCreateRequest {
+pub enum TimelineCreateRequestMode {
+    Bootstrap {
+        #[serde(default)]
+        existing_initdb_timeline_id: Option<TimelineId>,
+        pg_version: Option<u32>,
+    },
     Branch {
-        new_timeline_id: TimelineId,
         ancestor_timeline_id: TimelineId,
         #[serde(default)]
         ancestor_start_lsn: Option<Lsn>,
@@ -220,26 +231,6 @@ pub enum TimelineCreateRequest {
         // inherits the ancestor's pg_version. This field is effectively ignored.
         pg_version: Option<u32>,
     },
-    // NB: ordered after Branch because serde(untagged) requires that
-    Bootstrap {
-        new_timeline_id: TimelineId,
-        #[serde(default)]
-        existing_initdb_timeline_id: Option<TimelineId>,
-        pg_version: Option<u32>,
-    },
-}
-
-impl TimelineCreateRequest {
-    pub fn new_timeline_id(&self) -> TimelineId {
-        match self {
-            TimelineCreateRequest::Bootstrap {
-                new_timeline_id, ..
-            } => *new_timeline_id,
-            TimelineCreateRequest::Branch {
-                new_timeline_id, ..
-            } => *new_timeline_id,
-        }
-    }
 }
 
 #[derive(Serialize, Deserialize, Clone)]

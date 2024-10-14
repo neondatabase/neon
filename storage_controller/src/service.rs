@@ -3035,7 +3035,7 @@ impl Service {
         tracing::info!(
             "Creating timeline {}/{}",
             tenant_id,
-            create_req.new_timeline_id(),
+            create_req.new_timeline_id,
         );
 
         let _tenant_lock = trace_shared_lock(
@@ -3068,7 +3068,7 @@ impl Service {
                 tracing::info!(
                     "Creating timeline on shard {}/{}, attached to node {latest} in generation {:?}",
                     tenant_shard_id,
-                    create_req.new_timeline_id(),
+                    create_req.new_timeline_id,
                     locations.latest.generation
                 );
 
@@ -3087,7 +3087,7 @@ impl Service {
                     tracing::info!(
                         "Creating timeline on shard {}/{}, stale attached to node {} in generation {:?}",
                         tenant_shard_id,
-                        create_req.new_timeline_id(),
+                        create_req.new_timeline_id,
                         location.node,
                         location.generation
                     );
@@ -3130,8 +3130,8 @@ impl Service {
             .await?;
 
             // Propagate the LSN that shard zero picked, if caller didn't provide one
-            match &mut create_req{
-                models::TimelineCreateRequest::Branch { ancestor_start_lsn, .. } if ancestor_start_lsn.is_none() => {
+            match &mut create_req.mode {
+                models::TimelineCreateRequestMode::Branch { ancestor_start_lsn, .. } if ancestor_start_lsn.is_none() => {
                     *ancestor_start_lsn = timeline_info.ancestor_lsn;
                 },
                 _ => {}

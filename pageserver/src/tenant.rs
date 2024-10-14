@@ -3599,8 +3599,6 @@ impl Tenant {
             src_timeline.pg_version,
         );
 
-        debug!(?metadata, "timeline metadata");
-
         let uninitialized_timeline = self
             .prepare_new_timeline(
                 dst_id,

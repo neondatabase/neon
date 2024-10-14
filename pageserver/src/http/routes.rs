@@ -38,6 +38,7 @@ use pageserver_api::models::TenantShardSplitRequest;
 use pageserver_api::models::TenantShardSplitResponse;
 use pageserver_api::models::TenantSorting;
 use pageserver_api::models::TimelineArchivalConfigRequest;
+use pageserver_api::models::TimelineCreateRequestMode;
 use pageserver_api::models::TopTenantShardItem;
 use pageserver_api::models::TopTenantShardsRequest;
 use pageserver_api::models::TopTenantShardsResponse;
@@ -527,11 +528,10 @@ async fn timeline_create_handler(
     let request_data: TimelineCreateRequest = json_request(&mut request).await?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
 
-    let new_timeline_id = request_data.new_timeline_id();
+    let new_timeline_id = request_data.new_timeline_id;
     // fill in the default pg_version if not provided & convert request into domain model
-    let params: tenant::CreateTimelineParams = match request_data {
-        TimelineCreateRequest::Bootstrap {
-            new_timeline_id,
+    let params: tenant::CreateTimelineParams = match request_data.mode {
+        TimelineCreateRequestMode::Bootstrap {
             existing_initdb_timeline_id,
             pg_version,
         } => tenant::CreateTimelineParams::Bootstrap(tenant::CreateTimelineParamsBootstrap {
@@ -539,8 +539,7 @@ async fn timeline_create_handler(
             existing_initdb_timeline_id,
             pg_version: pg_version.unwrap_or(DEFAULT_PG_VERSION),
         }),
-        TimelineCreateRequest::Branch {
-            new_timeline_id,
+        TimelineCreateRequestMode::Branch {
             ancestor_timeline_id,
             ancestor_start_lsn,
             pg_version: _,
