@@ -1874,6 +1874,7 @@ impl<'a> DatadirModification<'a> {
             // data pages during ingest.
             if cfg!(debug_assertions) {
                 for (dirty_key, _, _, _) in &self.pending_data_pages {
+                    tracing::error!("dirty_key={dirty_key}");
                     debug_assert!(&key.to_compact() != dirty_key);
                 }
 
@@ -1905,13 +1906,6 @@ impl<'a> DatadirModification<'a> {
         }
 
         self.pending_bytes += val_serialized_size;
-        if Key::from_compact(key).is_rel_vm_block_key() {
-            let backtrace = std::backtrace::Backtrace::capture();
-
-            if backtrace.status() == std::backtrace::BacktraceStatus::Captured {
-                info!("Update VM page {key}\n{backtrace}");
-            }
-        }
         self.pending_data_pages
             .push((key, self.lsn, val_serialized_size, val))
     }
