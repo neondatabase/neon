@@ -24,7 +24,7 @@ max_file_descriptors = '100'
 # initial superuser role name to use when creating a new tenant
 initial_superuser_name = 'cloud_admin'
 
-broker_endpoint = 'http://127.0.0.1:50051'
+broker_endpoint = 'http://127.0.0.1:30051'
 
 # [remote_storage]
 ```
@@ -51,7 +51,7 @@ Note that TOML distinguishes between strings and integers, the former require si
 #### broker_endpoint
 
 A storage broker endpoint to connect and pull the information from. Default is
-`'http://127.0.0.1:50051'`. 
+`'http://127.0.0.1:30051'`.
 
 #### checkpoint_distance
 

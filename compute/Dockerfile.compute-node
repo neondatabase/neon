@@ -1249,7 +1249,7 @@ RUN case "${PG_VERSION}" in "v17") \
     patch -p1 </ext-src/pg_cron.patch
 ENV PATH=/usr/local/pgsql/bin:$PATH
 ENV PGHOST=compute
-ENV PGPORT=55433
+ENV PGPORT=30433
 ENV PGUSER=cloud_admin
 ENV PGDATABASE=postgres
 #########################################################################################

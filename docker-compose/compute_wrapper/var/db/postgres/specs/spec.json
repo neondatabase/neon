@@ -40,7 +40,7 @@
             },
             {
                 "name": "port",
-                "value": "55433",
+                "value": "30433",
                 "vartype": "integer"
             },
             {
