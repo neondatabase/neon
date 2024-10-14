@@ -144,7 +144,7 @@ paths:
                 description: Error text or 'true' if check passed.
                 example: "true"
 
-  /extensions/install:
+  /extensions:
     post:
       tags:
         - Extensions
