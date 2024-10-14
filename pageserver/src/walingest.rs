@@ -637,7 +637,9 @@ impl WalIngest {
             // blocks, need to be cleared. This is not only tidy, but also necessary
             // because we don't get a chance to clear the bits if the heap is extended
             // again.
-            if trunc_byte != 0 || trunc_offset != 0 {
+            if (trunc_byte != 0 || trunc_offset != 0)
+                && self.shard.is_key_local(&rel_block_to_key(rel, vm_page_no))
+            {
                 if let Ok(old_content) = modification
                     .tline
                     .get_rel_page_at_lsn(rel, vm_page_no, Version::Modified(modification), ctx)
