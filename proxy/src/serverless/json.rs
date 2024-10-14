@@ -37,14 +37,24 @@ fn json_value_to_pg_text(value: Value) -> Option<String> {
 // Example of the same escaping in node-postgres: packages/pg/lib/utils.js
 //
 fn json_array_to_pg_array(arr: Vec<Value>) -> String {
-    let vals = arr
-        .into_iter()
-        .map(json_array_to_pg_array_inner)
-        .map(|v| v.unwrap_or_else(|| "NULL".to_string()))
-        .collect::<Vec<_>>()
-        .join(",");
+    let mut output = String::new();
+    let mut first = true;
 
-    format!("{{{vals}}}")
+    output.push('{');
+
+    for value in arr {
+        if !first {
+            output.push(',');
+        }
+        first = false;
+
+        let value = json_array_to_pg_array_inner(value);
+        output.push_str(value.as_deref().unwrap_or("NULL"));
+    }
+
+    output.push('}');
+
+    output
 }
 
 fn json_array_to_pg_array_inner(value: Value) -> Option<String> {
