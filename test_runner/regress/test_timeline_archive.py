@@ -125,7 +125,7 @@ def test_timeline_offloading(neon_env_builder: NeonEnvBuilder, manual_offload: b
     ps_http = env.pageserver.http_client()
 
     # Turn off gc and compaction loops: we want to issue them manually for better reliability
-    tenant_id, _timeline = env.create_tenant(
+    tenant_id, initial_timeline_id = env.create_tenant(
         conf={
             "gc_period": "0s",
             "compaction_period": "0s" if manual_offload else "1s",
@@ -155,17 +155,21 @@ def test_timeline_offloading(neon_env_builder: NeonEnvBuilder, manual_offload: b
         state=TimelineArchivalState.ARCHIVED,
     )
 
+    def timeline_offloaded(timeline_id: TimelineId) -> bool:
+        return (
+            env.pageserver.log_contains(f".*{timeline_id}.* offloading archived timeline.*")
+            is not None
+        )
+
     def parent_offloaded():
         if manual_offload:
             ps_http.timeline_offload(tenant_id=tenant_id, timeline_id=parent_timeline_id)
-        assert env.pageserver.log_contains(
-            f".*{parent_timeline_id}.* offloading archived timeline.*"
-        )
+        assert timeline_offloaded(parent_timeline_id)
 
     def leaf_offloaded():
         if manual_offload:
             ps_http.timeline_offload(tenant_id=tenant_id, timeline_id=leaf_timeline_id)
-        assert env.pageserver.log_contains(f".*{leaf_timeline_id}.* offloading archived timeline.*")
+        assert timeline_offloaded(leaf_timeline_id)
 
     wait_until(30, 1, leaf_offloaded)
     wait_until(30, 1, parent_offloaded)
@@ -185,3 +189,5 @@ def test_timeline_offloading(neon_env_builder: NeonEnvBuilder, manual_offload: b
         leaf_timeline_id,
     )
     assert leaf_detail["is_archived"] is False
+
+    assert not timeline_offloaded(initial_timeline_id)
