@@ -37,14 +37,11 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 /// ```mermaid
 /// stateDiagram-v2
 ///
-///     [*] --> Loading: spawn_load()
 ///     [*] --> Attaching: spawn_attach()
 ///
-///     Loading --> Activating: activate()
 ///     Attaching --> Activating: activate()
 ///     Activating --> Active: infallible
 ///
-///     Loading --> Broken: load() failure
 ///     Attaching --> Broken: attach() failure
 ///
 ///     Active --> Stopping: set_stopping(), part of shutdown & detach
@@ -68,10 +65,6 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 )]
 #[serde(tag = "slug", content = "data")]
 pub enum TenantState {
-    /// This tenant is being loaded from local disk.
-    ///
-    /// `set_stopping()` and `set_broken()` do not work in this state and wait for it to pass.
-    Loading,
     /// This tenant is being attached to the pageserver.
     ///
     /// `set_stopping()` and `set_broken()` do not work in this state and wait for it to pass.
@@ -121,8 +114,6 @@ impl TenantState {
             // But, our attach task might still be fetching the remote timelines, etc.
             // So, return `Maybe` while Attaching, making Console wait for the attach task to finish.
             Self::Attaching | Self::Activating(ActivatingFrom::Attaching) => Maybe,
-            // tenant mgr startup distinguishes attaching from loading via marker file.
-            Self::Loading | Self::Activating(ActivatingFrom::Loading) => Attached,
             // We only reach Active after successful load / attach.
             // So, call atttachment status Attached.
             Self::Active => Attached,
@@ -191,10 +182,11 @@ impl LsnLease {
 }
 
 /// The only [`TenantState`] variants we could be `TenantState::Activating` from.
+///
+/// XXX: We used to have more variants here, but now it's just one, which makes this rather
+/// useless. Remove, once we've checked that there's no client code left that looks at this.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ActivatingFrom {
-    /// Arrived to [`TenantState::Activating`] from [`TenantState::Loading`]
-    Loading,
     /// Arrived to [`TenantState::Activating`] from [`TenantState::Attaching`]
     Attaching,
 }
@@ -980,8 +972,6 @@ pub struct TopTenantShardsResponse {
 }
 
 pub mod virtual_file {
-    use std::path::PathBuf;
-
     #[derive(
         Copy,
         Clone,
@@ -1002,50 +992,45 @@ pub mod virtual_file {
     }
 
     /// Direct IO modes for a pageserver.
-    #[derive(Debug, PartialEq, Eq, Clone, serde::Deserialize, serde::Serialize, Default)]
-    #[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
-    pub enum DirectIoMode {
-        /// Direct IO disabled (uses usual buffered IO).
-        #[default]
-        Disabled,
-        /// Direct IO disabled (performs checks and perf simulations).
-        Evaluate {
-            /// Alignment check level
-            alignment_check: DirectIoAlignmentCheckLevel,
-            /// Latency padded for performance simulation.
-            latency_padding: DirectIoLatencyPadding,
-        },
-        /// Direct IO enabled.
-        Enabled {
-            /// Actions to perform on alignment error.
-            on_alignment_error: DirectIoOnAlignmentErrorAction,
-        },
+    #[derive(
+        Copy,
+        Clone,
+        PartialEq,
+        Eq,
+        Hash,
+        strum_macros::EnumString,
+        strum_macros::Display,
+        serde_with::DeserializeFromStr,
+        serde_with::SerializeDisplay,
+        Debug,
+    )]
+    #[strum(serialize_all = "kebab-case")]
+    #[repr(u8)]
+    pub enum IoMode {
+        /// Uses buffered IO.
+        Buffered,
+        /// Uses direct IO, error out if the operation fails.
+        #[cfg(target_os = "linux")]
+        Direct,
     }
 
-    #[derive(Debug, PartialEq, Eq, Clone, serde::Deserialize, serde::Serialize, Default)]
-    #[serde(rename_all = "kebab-case")]
-    pub enum DirectIoAlignmentCheckLevel {
-        #[default]
-        Error,
-        Log,
-        None,
+    impl IoMode {
+        pub const fn preferred() -> Self {
+            Self::Buffered
+        }
     }
 
-    #[derive(Debug, PartialEq, Eq, Clone, serde::Deserialize, serde::Serialize, Default)]
-    #[serde(rename_all = "kebab-case")]
-    pub enum DirectIoOnAlignmentErrorAction {
-        Error,
-        #[default]
-        FallbackToBuffered,
-    }
+    impl TryFrom<u8> for IoMode {
+        type Error = u8;
 
-    #[derive(Debug, PartialEq, Eq, Clone, serde::Deserialize, serde::Serialize, Default)]
-    #[serde(tag = "type", rename_all = "kebab-case")]
-    pub enum DirectIoLatencyPadding {
-        /// Pad virtual file operations with IO to a fake file.
-        FakeFileRW { path: PathBuf },
-        #[default]
-        None,
+        fn try_from(value: u8) -> Result<Self, Self::Error> {
+            Ok(match value {
+                v if v == (IoMode::Buffered as u8) => IoMode::Buffered,
+                #[cfg(target_os = "linux")]
+                v if v == (IoMode::Direct as u8) => IoMode::Direct,
+                x => return Err(x),
+            })
+        }
     }
 }
 
@@ -1562,11 +1547,8 @@ mod tests {
 
     #[test]
     fn tenantstatus_activating_serde() {
-        let states = [
-            TenantState::Activating(ActivatingFrom::Loading),
-            TenantState::Activating(ActivatingFrom::Attaching),
-        ];
-        let expected = "[{\"slug\":\"Activating\",\"data\":\"Loading\"},{\"slug\":\"Activating\",\"data\":\"Attaching\"}]";
+        let states = [TenantState::Activating(ActivatingFrom::Attaching)];
+        let expected = "[{\"slug\":\"Activating\",\"data\":\"Attaching\"}]";
 
         let actual = serde_json::to_string(&states).unwrap();
 
@@ -1581,13 +1563,7 @@ mod tests {
     fn tenantstatus_activating_strum() {
         // tests added, because we use these for metrics
         let examples = [
-            (line!(), TenantState::Loading, "Loading"),
             (line!(), TenantState::Attaching, "Attaching"),
-            (
-                line!(),
-                TenantState::Activating(ActivatingFrom::Loading),
-                "Activating",
-            ),
             (
                 line!(),
                 TenantState::Activating(ActivatingFrom::Attaching),

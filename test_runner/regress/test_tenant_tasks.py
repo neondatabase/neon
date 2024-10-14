@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from fixtures.common_types import TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder
@@ -31,8 +33,8 @@ def test_tenant_tasks(neon_env_builder: NeonEnvBuilder):
             timeline_delete_wait_completed(client, tenant, t)
 
     # Create tenant, start compute
-    tenant, _ = env.neon_cli.create_tenant()
-    env.neon_cli.create_timeline(name, tenant_id=tenant)
+    tenant, _ = env.create_tenant()
+    env.create_timeline(name, tenant_id=tenant)
     endpoint = env.endpoints.create_start(name, tenant_id=tenant)
     assert_tenant_state(
         client,

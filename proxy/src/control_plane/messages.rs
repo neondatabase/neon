@@ -1,25 +1,23 @@
 use measured::FixedCardinalityLabel;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::fmt::{self, Display};
 
 use crate::auth::IpPattern;
 
-use crate::intern::{BranchIdInt, EndpointIdInt, ProjectIdInt};
+use crate::intern::{BranchIdInt, EndpointIdInt, ProjectIdInt, RoleNameInt};
 use crate::proxy::retry::CouldRetry;
-use crate::RoleName;
 
 /// Generic error response with human-readable description.
 /// Note that we can't always present it to user as is.
 #[derive(Debug, Deserialize, Clone)]
-pub(crate) struct ConsoleError {
+pub(crate) struct ControlPlaneError {
     pub(crate) error: Box<str>,
     #[serde(skip)]
     pub(crate) http_status_code: http::StatusCode,
     pub(crate) status: Option<Status>,
 }
 
-impl ConsoleError {
+impl ControlPlaneError {
     pub(crate) fn get_reason(&self) -> Reason {
         self.status
             .as_ref()
@@ -53,7 +51,7 @@ impl ConsoleError {
     }
 }
 
-impl Display for ConsoleError {
+impl Display for ControlPlaneError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let msg: &str = self
             .status
@@ -64,7 +62,7 @@ impl Display for ConsoleError {
     }
 }
 
-impl CouldRetry for ConsoleError {
+impl CouldRetry for ControlPlaneError {
     fn could_retry(&self) -> bool {
         // If the error message does not have a status,
         // the error is unknown and probably should not retry automatically
@@ -349,11 +347,6 @@ impl ColdStartInfo {
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct JwksRoleMapping {
-    pub roles: HashMap<RoleName, EndpointJwksResponse>,
-}
-
-#[derive(Debug, Deserialize, Clone)]
 pub struct EndpointJwksResponse {
     pub jwks: Vec<JwksSettings>,
 }
@@ -361,11 +354,10 @@ pub struct EndpointJwksResponse {
 #[derive(Debug, Deserialize, Clone)]
 pub struct JwksSettings {
     pub id: String,
-    pub project_id: ProjectIdInt,
-    pub branch_id: BranchIdInt,
     pub jwks_url: url::Url,
     pub provider_name: String,
     pub jwt_audience: Option<String>,
+    pub role_names: Vec<RoleNameInt>,
 }
 
 #[cfg(test)]

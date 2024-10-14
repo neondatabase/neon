@@ -26,10 +26,10 @@ use crate::{
         ShardGenerationState, TenantFilter,
     },
     reconciler::{ReconcileError, ReconcileUnits, ReconcilerConfig, ReconcilerConfigBuilder},
-    scheduler::{AttachedShardTag, MaySchedule, ScheduleContext, ScheduleError, ScheduleMode},
+    scheduler::{MaySchedule, ScheduleContext, ScheduleError, ScheduleMode},
     tenant_shard::{
-        MigrateAttachment, ReconcileNeeded, ReconcilerStatus, ScheduleOptimization,
-        ScheduleOptimizationAction,
+        MigrateAttachment, ObservedStateDelta, ReconcileNeeded, ReconcilerStatus,
+        ScheduleOptimization, ScheduleOptimizationAction,
     },
 };
 use anyhow::Context;
@@ -127,6 +127,9 @@ pub const MAX_WARMING_UP_INTERVAL_DEFAULT: Duration = Duration::from_secs(300);
 
 /// How often to send heartbeats to registered nodes?
 pub const HEARTBEAT_INTERVAL_DEFAULT: Duration = Duration::from_secs(5);
+
+/// How long is too long for a reconciliation?
+pub const LONG_RECONCILE_THRESHOLD_DEFAULT: Duration = Duration::from_secs(120);
 
 #[derive(Clone, strum_macros::Display)]
 enum TenantOperations {
@@ -348,6 +351,8 @@ pub struct Config {
     pub start_as_candidate: bool,
 
     pub http_service_port: i32,
+
+    pub long_reconcile_threshold: Duration,
 }
 
 impl From<DatabaseError> for ApiError {
@@ -520,6 +525,21 @@ pub(crate) enum ReconcileResultRequest {
     ReconcileResult(ReconcileResult),
     Stop,
 }
+
+#[derive(Clone)]
+struct MutationLocation {
+    node: Node,
+    generation: Generation,
+}
+
+#[derive(Clone)]
+struct ShardMutationLocations {
+    latest: MutationLocation,
+    other: Vec<MutationLocation>,
+}
+
+#[derive(Default, Clone)]
+struct TenantMutationLocations(BTreeMap<TenantShardId, ShardMutationLocations>);
 
 impl Service {
     pub fn get_config(&self) -> &Config {
@@ -946,6 +966,8 @@ impl Service {
 
             let res = self.heartbeater.heartbeat(nodes).await;
             if let Ok(deltas) = res {
+                let mut to_handle = Vec::default();
+
                 for (node_id, state) in deltas.0 {
                     let new_availability = match state {
                         PageserverState::Available { utilization, .. } => {
@@ -977,14 +999,27 @@ impl Service {
                         }
                     };
 
+                    let node_lock = trace_exclusive_lock(
+                        &self.node_op_locks,
+                        node_id,
+                        NodeOperations::Configure,
+                    )
+                    .await;
+
                     // This is the code path for geniune availability transitions (i.e node
                     // goes unavailable and/or comes back online).
                     let res = self
-                        .node_configure(node_id, Some(new_availability), None)
+                        .node_state_configure(node_id, Some(new_availability), None, &node_lock)
                         .await;
 
                     match res {
-                        Ok(()) => {}
+                        Ok(transition) => {
+                            // Keep hold of the lock until the availability transitions
+                            // have been handled in
+                            // [`Service::handle_node_availability_transitions`] in order avoid
+                            // racing with [`Service::external_node_configure`].
+                            to_handle.push((node_id, node_lock, transition));
+                        }
                         Err(ApiError::NotFound(_)) => {
                             // This should be rare, but legitimate since the heartbeats are done
                             // on a snapshot of the nodes.
@@ -994,10 +1029,34 @@ impl Service {
                             // Transition to active involves reconciling: if a node responds to a heartbeat then
                             // becomes unavailable again, we may get an error here.
                             tracing::error!(
-                                "Failed to update node {} after heartbeat round: {}",
+                                "Failed to update node state {} after heartbeat round: {}",
                                 node_id,
                                 err
                             );
+                        }
+                    }
+                }
+
+                // We collected all the transitions above and now we handle them.
+                let res = self.handle_node_availability_transitions(to_handle).await;
+                if let Err(errs) = res {
+                    for (node_id, err) in errs {
+                        match err {
+                            ApiError::NotFound(_) => {
+                                // This should be rare, but legitimate since the heartbeats are done
+                                // on a snapshot of the nodes.
+                                tracing::info!(
+                                    "Node {} was not found after heartbeat round",
+                                    node_id
+                                );
+                            }
+                            err => {
+                                tracing::error!(
+                                    "Failed to handle availability transition for {} after heartbeat round: {}",
+                                    node_id,
+                                    err
+                                );
+                            }
                         }
                     }
                 }
@@ -1013,7 +1072,7 @@ impl Service {
         tenant_id=%result.tenant_shard_id.tenant_id, shard_id=%result.tenant_shard_id.shard_slug(),
         sequence=%result.sequence
     ))]
-    fn process_result(&self, mut result: ReconcileResult) {
+    fn process_result(&self, result: ReconcileResult) {
         let mut locked = self.inner.write().unwrap();
         let (nodes, tenants, _scheduler) = locked.parts_mut();
         let Some(tenant) = tenants.get_mut(&result.tenant_shard_id) else {
@@ -1035,22 +1094,27 @@ impl Service {
 
         // In case a node was deleted while this reconcile is in flight, filter it out of the update we will
         // make to the tenant
-        result
-            .observed
-            .locations
-            .retain(|node_id, _loc| nodes.contains_key(node_id));
+        let deltas = result.observed_deltas.into_iter().flat_map(|delta| {
+            // In case a node was deleted while this reconcile is in flight, filter it out of the update we will
+            // make to the tenant
+            let node = nodes.get(delta.node_id())?;
+
+            if node.is_available() {
+                return Some(delta);
+            }
+
+            // In case a node became unavailable concurrently with the reconcile, observed
+            // locations on it are now uncertain. By convention, set them to None in order
+            // for them to get refreshed when the node comes back online.
+            Some(ObservedStateDelta::Upsert(Box::new((
+                node.get_id(),
+                ObservedStateLocation { conf: None },
+            ))))
+        });
 
         match result.result {
             Ok(()) => {
-                for (node_id, loc) in &result.observed.locations {
-                    if let Some(conf) = &loc.conf {
-                        tracing::info!("Updating observed location {}: {:?}", node_id, conf);
-                    } else {
-                        tracing::info!("Setting observed location {} to None", node_id,)
-                    }
-                }
-
-                tenant.observed = result.observed;
+                tenant.apply_observed_deltas(deltas);
                 tenant.waiter.advance(result.sequence);
             }
             Err(e) => {
@@ -1072,9 +1136,10 @@ impl Service {
                 // so that waiters will see the correct error after waiting.
                 tenant.set_last_error(result.sequence, e);
 
-                for (node_id, o) in result.observed.locations {
-                    tenant.observed.locations.insert(node_id, o);
-                }
+                // Skip deletions on reconcile failures
+                let upsert_deltas =
+                    deltas.filter(|delta| matches!(delta, ObservedStateDelta::Upsert(_)));
+                tenant.apply_observed_deltas(upsert_deltas);
             }
         }
 
@@ -1265,6 +1330,8 @@ impl Service {
 
         #[cfg(feature = "testing")]
         {
+            use pageserver_api::controller_api::AvailabilityZone;
+
             // Hack: insert scheduler state for all nodes referenced by shards, as compatibility
             // tests only store the shards, not the nodes.  The nodes will be loaded shortly
             // after when pageservers start up and register.
@@ -1282,7 +1349,7 @@ impl Service {
                     123,
                     "".to_string(),
                     123,
-                    "test_az".to_string(),
+                    AvailabilityZone("test_az".to_string()),
                 );
 
                 scheduler.node_upsert(&node);
@@ -2099,7 +2166,7 @@ impl Service {
                     let az_id = locked
                         .nodes
                         .get(&resp.node_id)
-                        .map(|n| n.get_availability_zone_id().to_string())?;
+                        .map(|n| n.get_availability_zone_id().clone())?;
 
                     Some((resp.shard_id, az_id))
                 })
@@ -2629,8 +2696,7 @@ impl Service {
             let scheduler = &mut locked.scheduler;
             // Right now we only perform the operation on a single node without parallelization
             // TODO fan out the operation to multiple nodes for better performance
-            let node_id =
-                scheduler.schedule_shard::<AttachedShardTag>(&[], &ScheduleContext::default())?;
+            let node_id = scheduler.any_available_node()?;
             let node = locked
                 .nodes
                 .get(&node_id)
@@ -2816,8 +2882,7 @@ impl Service {
 
             // Pick an arbitrary node to use for remote deletions (does not have to be where the tenant
             // was attached, just has to be able to see the S3 content)
-            let node_id =
-                scheduler.schedule_shard::<AttachedShardTag>(&[], &ScheduleContext::default())?;
+            let node_id = scheduler.any_available_node()?;
             let node = nodes
                 .get(&node_id)
                 .expect("Pageservers may not be deleted while lock is active");
@@ -2982,38 +3047,83 @@ impl Service {
         failpoint_support::sleep_millis_async!("tenant-create-timeline-shared-lock");
 
         self.tenant_remote_mutation(tenant_id, move |mut targets| async move {
-            if targets.is_empty() {
+            if targets.0.is_empty() {
                 return Err(ApiError::NotFound(
                     anyhow::anyhow!("Tenant not found").into(),
                 ));
             };
-            let shard_zero = targets.remove(0);
+
+            let (shard_zero_tid, shard_zero_locations) =
+                targets.0.pop_first().expect("Must have at least one shard");
+            assert!(shard_zero_tid.is_shard_zero());
 
             async fn create_one(
                 tenant_shard_id: TenantShardId,
-                node: Node,
+                locations: ShardMutationLocations,
                 jwt: Option<String>,
                 create_req: TimelineCreateRequest,
             ) -> Result<TimelineInfo, ApiError> {
+                let latest = locations.latest.node;
+
                 tracing::info!(
-                    "Creating timeline on shard {}/{}, attached to node {node}",
+                    "Creating timeline on shard {}/{}, attached to node {latest} in generation {:?}",
                     tenant_shard_id,
                     create_req.new_timeline_id,
+                    locations.latest.generation
                 );
-                let client = PageserverClient::new(node.get_id(), node.base_url(), jwt.as_deref());
 
-                client
+                let client =
+                    PageserverClient::new(latest.get_id(), latest.base_url(), jwt.as_deref());
+
+                let timeline_info = client
                     .timeline_create(tenant_shard_id, &create_req)
                     .await
-                    .map_err(|e| passthrough_api_error(&node, e))
+                    .map_err(|e| passthrough_api_error(&latest, e))?;
+
+                // We propagate timeline creations to all attached locations such that a compute
+                // for the new timeline is able to start regardless of the current state of the
+                // tenant shard reconciliation.
+                for location in locations.other {
+                    tracing::info!(
+                        "Creating timeline on shard {}/{}, stale attached to node {} in generation {:?}",
+                        tenant_shard_id,
+                        create_req.new_timeline_id,
+                        location.node,
+                        location.generation
+                    );
+
+                    let client = PageserverClient::new(
+                        location.node.get_id(),
+                        location.node.base_url(),
+                        jwt.as_deref(),
+                    );
+
+                    let res = client
+                        .timeline_create(tenant_shard_id, &create_req)
+                        .await;
+
+                    if let Err(e) = res {
+                        match e {
+                            mgmt_api::Error::ApiError(StatusCode::NOT_FOUND, _) => {
+                                // Tenant might have been detached from the stale location,
+                                // so ignore 404s.
+                            },
+                            _ => {
+                                return Err(passthrough_api_error(&location.node, e));
+                            }
+                        }
+                    }
+                }
+
+                Ok(timeline_info)
             }
 
             // Because the caller might not provide an explicit LSN, we must do the creation first on a single shard, and then
             // use whatever LSN that shard picked when creating on subsequent shards.  We arbitrarily use shard zero as the shard
             // that will get the first creation request, and propagate the LSN to all the >0 shards.
             let timeline_info = create_one(
-                shard_zero.0,
-                shard_zero.1,
+                shard_zero_tid,
+                shard_zero_locations,
                 self.config.jwt_token.clone(),
                 create_req.clone(),
             )
@@ -3026,14 +3136,24 @@ impl Service {
             }
 
             // Create timeline on remaining shards with number >0
-            if !targets.is_empty() {
+            if !targets.0.is_empty() {
                 // If we had multiple shards, issue requests for the remainder now.
                 let jwt = &self.config.jwt_token;
                 self.tenant_for_shards(
-                    targets.iter().map(|t| (t.0, t.1.clone())).collect(),
-                    |tenant_shard_id: TenantShardId, node: Node| {
+                    targets
+                        .0
+                        .iter()
+                        .map(|t| (*t.0, t.1.latest.node.clone()))
+                        .collect(),
+                    |tenant_shard_id: TenantShardId, _node: Node| {
                         let create_req = create_req.clone();
-                        Box::pin(create_one(tenant_shard_id, node, jwt.clone(), create_req))
+                        let mutation_locations = targets.0.remove(&tenant_shard_id).unwrap();
+                        Box::pin(create_one(
+                            tenant_shard_id,
+                            mutation_locations,
+                            jwt.clone(),
+                            create_req,
+                        ))
                     },
                 )
                 .await?;
@@ -3063,7 +3183,7 @@ impl Service {
         .await;
 
         self.tenant_remote_mutation(tenant_id, move |targets| async move {
-            if targets.is_empty() {
+            if targets.0.is_empty() {
                 return Err(ApiError::NotFound(
                     anyhow::anyhow!("Tenant not found").into(),
                 ));
@@ -3094,8 +3214,9 @@ impl Service {
 
             // no shard needs to go first/last; the operation should be idempotent
             // TODO: it would be great to ensure that all shards return the same error
+            let locations = targets.0.iter().map(|t| (*t.0, t.1.latest.node.clone())).collect();
             let results = self
-                .tenant_for_shards(targets, |tenant_shard_id, node| {
+                .tenant_for_shards(locations, |tenant_shard_id, node| {
                     futures::FutureExt::boxed(config_one(
                         tenant_shard_id,
                         timeline_id,
@@ -3126,7 +3247,7 @@ impl Service {
         .await;
 
         self.tenant_remote_mutation(tenant_id, move |targets| async move {
-            if targets.is_empty() {
+            if targets.0.is_empty() {
                 return Err(ApiError::NotFound(
                     anyhow::anyhow!("Tenant not found").into(),
                 ));
@@ -3174,8 +3295,9 @@ impl Service {
             }
 
             // no shard needs to go first/last; the operation should be idempotent
+            let locations = targets.0.iter().map(|t| (*t.0, t.1.latest.node.clone())).collect();
             let mut results = self
-                .tenant_for_shards(targets, |tenant_shard_id, node| {
+                .tenant_for_shards(locations, |tenant_shard_id, node| {
                     futures::FutureExt::boxed(detach_one(
                         tenant_shard_id,
                         timeline_id,
@@ -3222,7 +3344,7 @@ impl Service {
         .await;
 
         self.tenant_remote_mutation(tenant_id, move |targets| async move {
-            if targets.is_empty() {
+            if targets.0.is_empty() {
                 return Err(ApiError::NotFound(
                     anyhow::anyhow!("Tenant not found").into(),
                 ));
@@ -3244,7 +3366,12 @@ impl Service {
             }
 
             // no shard needs to go first/last; the operation should be idempotent
-            self.tenant_for_shards(targets, |tenant_shard_id, node| {
+            let locations = targets
+                .0
+                .iter()
+                .map(|t| (*t.0, t.1.latest.node.clone()))
+                .collect();
+            self.tenant_for_shards(locations, |tenant_shard_id, node| {
                 futures::FutureExt::boxed(do_one(
                     tenant_shard_id,
                     timeline_id,
@@ -3339,11 +3466,11 @@ impl Service {
         op: O,
     ) -> Result<R, ApiError>
     where
-        O: FnOnce(Vec<(TenantShardId, Node)>) -> F,
+        O: FnOnce(TenantMutationLocations) -> F,
         F: std::future::Future<Output = R>,
     {
-        let target_gens = {
-            let mut targets = Vec::new();
+        let mutation_locations = {
+            let mut locations = TenantMutationLocations::default();
 
             // Load the currently attached pageservers for the latest generation of each shard.  This can
             // run concurrently with reconciliations, and it is not guaranteed that the node we find here
@@ -3394,14 +3521,50 @@ impl Service {
                     .ok_or(ApiError::Conflict(format!(
                         "Raced with removal of node {node_id}"
                     )))?;
-                targets.push((tenant_shard_id, node.clone(), generation));
+                let generation = generation.expect("Checked above");
+
+                let tenant = locked.tenants.get(&tenant_shard_id);
+
+                // TODO(vlad): Abstract the logic that finds stale attached locations
+                // from observed state into a [`Service`] method.
+                let other_locations = match tenant {
+                    Some(tenant) => {
+                        let mut other = tenant.attached_locations();
+                        let latest_location_index =
+                            other.iter().position(|&l| l == (node.get_id(), generation));
+                        if let Some(idx) = latest_location_index {
+                            other.remove(idx);
+                        }
+
+                        other
+                    }
+                    None => Vec::default(),
+                };
+
+                let location = ShardMutationLocations {
+                    latest: MutationLocation {
+                        node: node.clone(),
+                        generation,
+                    },
+                    other: other_locations
+                        .into_iter()
+                        .filter_map(|(node_id, generation)| {
+                            let node = locked.nodes.get(&node_id)?;
+
+                            Some(MutationLocation {
+                                node: node.clone(),
+                                generation,
+                            })
+                        })
+                        .collect(),
+                };
+                locations.0.insert(tenant_shard_id, location);
             }
 
-            targets
+            locations
         };
 
-        let targets = target_gens.iter().map(|t| (t.0, t.1.clone())).collect();
-        let result = op(targets).await;
+        let result = op(mutation_locations.clone()).await;
 
         // Post-check: are all the generations of all the shards the same as they were initially?  This proves that
         // our remote operation executed on the latest generation and is therefore persistent.
@@ -3417,9 +3580,10 @@ impl Service {
                      }| (tenant_shard_id, generation),
                 )
                 .collect::<Vec<_>>()
-                != target_gens
+                != mutation_locations
+                    .0
                     .into_iter()
-                    .map(|i| (i.0, i.2))
+                    .map(|i| (i.0, Some(i.1.latest.generation)))
                     .collect::<Vec<_>>()
             {
                 // We raced with something that incremented the generation, and therefore cannot be
@@ -3449,12 +3613,14 @@ impl Service {
         .await;
 
         self.tenant_remote_mutation(tenant_id, move |mut targets| async move {
-            if targets.is_empty() {
+            if targets.0.is_empty() {
                 return Err(ApiError::NotFound(
                     anyhow::anyhow!("Tenant not found").into(),
                 ));
             }
-            let shard_zero = targets.remove(0);
+
+            let (shard_zero_tid, shard_zero_locations) = targets.0.pop_first().expect("Must have at least one shard");
+            assert!(shard_zero_tid.is_shard_zero());
 
             async fn delete_one(
                 tenant_shard_id: TenantShardId,
@@ -3477,8 +3643,9 @@ impl Service {
                     })
             }
 
+            let locations = targets.0.iter().map(|t| (*t.0, t.1.latest.node.clone())).collect();
             let statuses = self
-                .tenant_for_shards(targets, |tenant_shard_id: TenantShardId, node: Node| {
+                .tenant_for_shards(locations, |tenant_shard_id: TenantShardId, node: Node| {
                     Box::pin(delete_one(
                         tenant_shard_id,
                         timeline_id,
@@ -3496,9 +3663,9 @@ impl Service {
             // Delete shard zero last: this is not strictly necessary, but since a caller's GET on a timeline will be routed
             // to shard zero, it gives a more obvious behavior that a GET returns 404 once the deletion is done.
             let shard_zero_status = delete_one(
-                shard_zero.0,
+                shard_zero_tid,
                 timeline_id,
-                shard_zero.1,
+                shard_zero_locations.latest.node,
                 self.config.jwt_token.clone(),
             )
             .await?;
@@ -3508,34 +3675,66 @@ impl Service {
 
     /// When you need to send an HTTP request to the pageserver that holds shard0 of a tenant, this
     /// function looks up and returns node. If the tenant isn't found, returns Err(ApiError::NotFound)
-    pub(crate) fn tenant_shard0_node(
+    pub(crate) async fn tenant_shard0_node(
         &self,
         tenant_id: TenantId,
     ) -> Result<(Node, TenantShardId), ApiError> {
-        let locked = self.inner.read().unwrap();
-        let Some((tenant_shard_id, shard)) = locked
-            .tenants
-            .range(TenantShardId::tenant_range(tenant_id))
-            .next()
+        // Look up in-memory state and maybe use the node from there.
+        {
+            let locked = self.inner.read().unwrap();
+            let Some((tenant_shard_id, shard)) = locked
+                .tenants
+                .range(TenantShardId::tenant_range(tenant_id))
+                .next()
+            else {
+                return Err(ApiError::NotFound(
+                    anyhow::anyhow!("Tenant {tenant_id} not found").into(),
+                ));
+            };
+
+            let Some(intent_node_id) = shard.intent.get_attached() else {
+                tracing::warn!(
+                    tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(),
+                    "Shard not scheduled (policy {:?}), cannot generate pass-through URL",
+                    shard.policy
+                );
+                return Err(ApiError::Conflict(
+                    "Cannot call timeline API on non-attached tenant".to_string(),
+                ));
+            };
+
+            if shard.reconciler.is_none() {
+                // Optimization: while no reconcile is in flight, we may trust our in-memory state
+                // to tell us which pageserver to use. Otherwise we will fall through and hit the database
+                let Some(node) = locked.nodes.get(intent_node_id) else {
+                    // This should never happen
+                    return Err(ApiError::InternalServerError(anyhow::anyhow!(
+                        "Shard refers to nonexistent node"
+                    )));
+                };
+                return Ok((node.clone(), *tenant_shard_id));
+            }
+        };
+
+        // Look up the latest attached pageserver location from the database
+        // generation state: this will reflect the progress of any ongoing migration.
+        // Note that it is not guaranteed to _stay_ here, our caller must still handle
+        // the case where they call through to the pageserver and get a 404.
+        let db_result = self.persistence.tenant_generations(tenant_id).await?;
+        let Some(ShardGenerationState {
+            tenant_shard_id,
+            generation: _,
+            generation_pageserver: Some(node_id),
+        }) = db_result.first()
         else {
-            return Err(ApiError::NotFound(
-                anyhow::anyhow!("Tenant {tenant_id} not found").into(),
+            // This can happen if we raced with a tenant deletion or a shard split.  On a retry
+            // the caller will either succeed (shard split case), get a proper 404 (deletion case),
+            // or a conflict response (case where tenant was detached in background)
+            return Err(ApiError::ResourceUnavailable(
+                "Shard {} not found in database, or is not attached".into(),
             ));
         };
-
-        // TODO: should use the ID last published to compute_hook, rather than the intent: the intent might
-        // point to somewhere we haven't attached yet.
-        let Some(node_id) = shard.intent.get_attached() else {
-            tracing::warn!(
-                tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(),
-                "Shard not scheduled (policy {:?}), cannot generate pass-through URL",
-                shard.policy
-            );
-            return Err(ApiError::Conflict(
-                "Cannot call timeline API on non-attached tenant".to_string(),
-            ));
-        };
-
+        let locked = self.inner.read().unwrap();
         let Some(node) = locked.nodes.get(node_id) else {
             // This should never happen
             return Err(ApiError::InternalServerError(anyhow::anyhow!(
@@ -4481,7 +4680,7 @@ impl Service {
                     let az_id = locked
                         .nodes
                         .get(node_id)
-                        .map(|n| n.get_availability_zone_id().to_string())?;
+                        .map(|n| n.get_availability_zone_id().clone())?;
 
                     Some((*tid, az_id))
                 })
@@ -4942,7 +5141,12 @@ impl Service {
 
             {
                 let mut nodes_mut = (**nodes).clone();
-                nodes_mut.remove(&node_id);
+                if let Some(mut removed_node) = nodes_mut.remove(&node_id) {
+                    // Ensure that any reconciler holding an Arc<> to this node will
+                    // drop out when trying to RPC to it (setting Offline state sets the
+                    // cancellation token on the Node object).
+                    removed_node.set_availability(NodeAvailability::Offline);
+                }
                 *nodes = Arc::new(nodes_mut);
             }
         }
@@ -5140,15 +5344,17 @@ impl Service {
         Ok(())
     }
 
-    pub(crate) async fn node_configure(
+    /// Configure in-memory and persistent state of a node as requested
+    ///
+    /// Note that this function does not trigger any immediate side effects in response
+    /// to the changes. That part is handled by [`Self::handle_node_availability_transition`].
+    async fn node_state_configure(
         &self,
         node_id: NodeId,
         availability: Option<NodeAvailability>,
         scheduling: Option<NodeSchedulingPolicy>,
-    ) -> Result<(), ApiError> {
-        let _node_lock =
-            trace_exclusive_lock(&self.node_op_locks, node_id, NodeOperations::Configure).await;
-
+        node_lock: &TracingExclusiveGuard<NodeOperations>,
+    ) -> Result<AvailabilityTransition, ApiError> {
         if let Some(scheduling) = scheduling {
             // Scheduling is a persistent part of Node: we must write updates to the database before
             // applying them in memory
@@ -5177,7 +5383,7 @@ impl Service {
             };
 
             if matches!(availability_transition, AvailabilityTransition::ToActive) {
-                self.node_activate_reconcile(activate_node, &_node_lock)
+                self.node_activate_reconcile(activate_node, node_lock)
                     .await?;
             }
             availability_transition
@@ -5187,7 +5393,7 @@ impl Service {
 
         // Apply changes from the request to our in-memory state for the Node
         let mut locked = self.inner.write().unwrap();
-        let (nodes, tenants, scheduler) = locked.parts_mut();
+        let (nodes, _tenants, scheduler) = locked.parts_mut();
 
         let mut new_nodes = (**nodes).clone();
 
@@ -5197,8 +5403,8 @@ impl Service {
             ));
         };
 
-        if let Some(availability) = availability.as_ref() {
-            node.set_availability(availability.clone());
+        if let Some(availability) = availability {
+            node.set_availability(availability);
         }
 
         if let Some(scheduling) = scheduling {
@@ -5209,11 +5415,30 @@ impl Service {
         scheduler.node_upsert(node);
 
         let new_nodes = Arc::new(new_nodes);
+        locked.nodes = new_nodes;
 
+        Ok(availability_transition)
+    }
+
+    /// Handle availability transition of one node
+    ///
+    /// Note that you should first call [`Self::node_state_configure`] to update
+    /// the in-memory state referencing that node. If you need to handle more than one transition
+    /// consider using [`Self::handle_node_availability_transitions`].
+    async fn handle_node_availability_transition(
+        &self,
+        node_id: NodeId,
+        transition: AvailabilityTransition,
+        _node_lock: &TracingExclusiveGuard<NodeOperations>,
+    ) -> Result<(), ApiError> {
         // Modify scheduling state for any Tenants that are affected by a change in the node's availability state.
-        match availability_transition {
+        match transition {
             AvailabilityTransition::ToOffline => {
                 tracing::info!("Node {} transition to offline", node_id);
+
+                let mut locked = self.inner.write().unwrap();
+                let (nodes, tenants, scheduler) = locked.parts_mut();
+
                 let mut tenants_affected: usize = 0;
 
                 for (tenant_shard_id, tenant_shard) in tenants {
@@ -5223,14 +5448,14 @@ impl Service {
                         observed_loc.conf = None;
                     }
 
-                    if new_nodes.len() == 1 {
+                    if nodes.len() == 1 {
                         // Special case for single-node cluster: there is no point trying to reschedule
                         // any tenant shards: avoid doing so, in order to avoid spewing warnings about
                         // failures to schedule them.
                         continue;
                     }
 
-                    if !new_nodes
+                    if !nodes
                         .values()
                         .any(|n| matches!(n.may_schedule(), MaySchedule::Yes(_)))
                     {
@@ -5256,10 +5481,7 @@ impl Service {
                                 tracing::warn!(%tenant_shard_id, "Scheduling error when marking pageserver {} offline: {e}", node_id);
                             }
                             Ok(()) => {
-                                if self
-                                    .maybe_reconcile_shard(tenant_shard, &new_nodes)
-                                    .is_some()
-                                {
+                                if self.maybe_reconcile_shard(tenant_shard, nodes).is_some() {
                                     tenants_affected += 1;
                                 };
                             }
@@ -5274,9 +5496,13 @@ impl Service {
             }
             AvailabilityTransition::ToActive => {
                 tracing::info!("Node {} transition to active", node_id);
+
+                let mut locked = self.inner.write().unwrap();
+                let (nodes, tenants, _scheduler) = locked.parts_mut();
+
                 // When a node comes back online, we must reconcile any tenant that has a None observed
                 // location on the node.
-                for tenant_shard in locked.tenants.values_mut() {
+                for tenant_shard in tenants.values_mut() {
                     // If a reconciliation is already in progress, rely on the previous scheduling
                     // decision and skip triggering a new reconciliation.
                     if tenant_shard.reconciler.is_some() {
@@ -5285,7 +5511,7 @@ impl Service {
 
                     if let Some(observed_loc) = tenant_shard.observed.locations.get_mut(&node_id) {
                         if observed_loc.conf.is_none() {
-                            self.maybe_reconcile_shard(tenant_shard, &new_nodes);
+                            self.maybe_reconcile_shard(tenant_shard, nodes);
                         }
                     }
                 }
@@ -5306,9 +5532,52 @@ impl Service {
             }
         }
 
-        locked.nodes = new_nodes;
-
         Ok(())
+    }
+
+    /// Handle availability transition for multiple nodes
+    ///
+    /// Note that you should first call [`Self::node_state_configure`] for
+    /// all nodes being handled here for the handling to use fresh in-memory state.
+    async fn handle_node_availability_transitions(
+        &self,
+        transitions: Vec<(
+            NodeId,
+            TracingExclusiveGuard<NodeOperations>,
+            AvailabilityTransition,
+        )>,
+    ) -> Result<(), Vec<(NodeId, ApiError)>> {
+        let mut errors = Vec::default();
+        for (node_id, node_lock, transition) in transitions {
+            let res = self
+                .handle_node_availability_transition(node_id, transition, &node_lock)
+                .await;
+            if let Err(err) = res {
+                errors.push((node_id, err));
+            }
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
+    }
+
+    pub(crate) async fn node_configure(
+        &self,
+        node_id: NodeId,
+        availability: Option<NodeAvailability>,
+        scheduling: Option<NodeSchedulingPolicy>,
+    ) -> Result<(), ApiError> {
+        let node_lock =
+            trace_exclusive_lock(&self.node_op_locks, node_id, NodeOperations::Configure).await;
+
+        let transition = self
+            .node_state_configure(node_id, availability, scheduling, &node_lock)
+            .await?;
+        self.handle_node_availability_transition(node_id, transition, &node_lock)
+            .await
     }
 
     /// Wrapper around [`Self::node_configure`] which only allows changes while there is no ongoing

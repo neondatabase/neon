@@ -213,32 +213,6 @@ extern const f_smgr *smgr_neon(ProcNumber backend, NRelFileInfo rinfo);
 extern void smgr_init_neon(void);
 extern void readahead_buffer_resize(int newsize, void *extra);
 
-/* Neon storage manager functionality */
-
-extern void neon_init(void);
-extern void neon_open(SMgrRelation reln);
-extern void neon_close(SMgrRelation reln, ForkNumber forknum);
-extern void neon_create(SMgrRelation reln, ForkNumber forknum, bool isRedo);
-extern bool neon_exists(SMgrRelation reln, ForkNumber forknum);
-extern void neon_unlink(NRelFileInfoBackend rnode, ForkNumber forknum, bool isRedo);
-#if PG_MAJORVERSION_NUM < 16
-extern void neon_extend(SMgrRelation reln, ForkNumber forknum,
-						BlockNumber blocknum, char *buffer, bool skipFsync);
-#else
-extern void neon_extend(SMgrRelation reln, ForkNumber forknum,
-						BlockNumber blocknum, const void *buffer, bool skipFsync);
-extern void neon_zeroextend(SMgrRelation reln, ForkNumber forknum,
-							BlockNumber blocknum, int nbuffers, bool skipFsync);
-#endif
-
-#if PG_MAJORVERSION_NUM >=17
-extern bool neon_prefetch(SMgrRelation reln, ForkNumber forknum,
-						  BlockNumber blocknum, int nblocks);
-#else
-extern bool neon_prefetch(SMgrRelation reln, ForkNumber forknum,
-						  BlockNumber blocknum);
-#endif
-
 /*
  * LSN values associated with each request to the pageserver
  */
@@ -278,13 +252,7 @@ extern PGDLLEXPORT void neon_read_at_lsn(NRelFileInfo rnode, ForkNumber forkNum,
 extern PGDLLEXPORT void neon_read_at_lsn(NRelFileInfo rnode, ForkNumber forkNum, BlockNumber blkno,
 										 neon_request_lsns request_lsns, void *buffer);
 #endif
-extern void neon_writeback(SMgrRelation reln, ForkNumber forknum,
-						   BlockNumber blocknum, BlockNumber nblocks);
-extern BlockNumber neon_nblocks(SMgrRelation reln, ForkNumber forknum);
 extern int64 neon_dbsize(Oid dbNode);
-extern void neon_truncate(SMgrRelation reln, ForkNumber forknum,
-						  BlockNumber nblocks);
-extern void neon_immedsync(SMgrRelation reln, ForkNumber forknum);
 
 /* utils for neon relsize cache */
 extern void relsize_hash_init(void);

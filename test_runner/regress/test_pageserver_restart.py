@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import random
 from contextlib import closing
 from typing import Optional
@@ -169,13 +171,12 @@ def test_pageserver_chaos(
 
     # Use a tiny checkpoint distance, to create a lot of layers quickly.
     # That allows us to stress the compaction and layer flushing logic more.
-    tenant, _ = env.neon_cli.create_tenant(
+    tenant, _ = env.create_tenant(
         conf={
             "checkpoint_distance": "5000000",
         }
     )
-    env.neon_cli.create_timeline("test_pageserver_chaos", tenant_id=tenant)
-    endpoint = env.endpoints.create_start("test_pageserver_chaos", tenant_id=tenant)
+    endpoint = env.endpoints.create_start("main", tenant_id=tenant)
 
     # Create table, and insert some rows. Make it big enough that it doesn't fit in
     # shared_buffers, otherwise the SELECT after restart will just return answer

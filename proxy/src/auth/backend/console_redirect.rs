@@ -1,8 +1,8 @@
 use crate::{
     auth, compute,
     config::AuthenticationConfig,
-    console::{self, provider::NodeInfo},
     context::RequestMonitoring,
+    control_plane::{self, provider::NodeInfo},
     error::{ReportableError, UserFacingError},
     stream::PqStream,
     waiters,
@@ -23,6 +23,10 @@ pub(crate) enum WebAuthError {
 
     #[error(transparent)]
     Io(#[from] std::io::Error),
+}
+
+pub struct ConsoleRedirectBackend {
+    console_uri: reqwest::Url,
 }
 
 impl UserFacingError for WebAuthError {
@@ -57,7 +61,26 @@ pub(crate) fn new_psql_session_id() -> String {
     hex::encode(rand::random::<[u8; 8]>())
 }
 
-pub(super) async fn authenticate(
+impl ConsoleRedirectBackend {
+    pub fn new(console_uri: reqwest::Url) -> Self {
+        Self { console_uri }
+    }
+
+    pub(super) fn url(&self) -> &reqwest::Url {
+        &self.console_uri
+    }
+
+    pub(crate) async fn authenticate(
+        &self,
+        ctx: &RequestMonitoring,
+        auth_config: &'static AuthenticationConfig,
+        client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
+    ) -> auth::Result<NodeInfo> {
+        authenticate(ctx, auth_config, &self.console_uri, client).await
+    }
+}
+
+async fn authenticate(
     ctx: &RequestMonitoring,
     auth_config: &'static AuthenticationConfig,
     link_uri: &reqwest::Url,
@@ -70,7 +93,7 @@ pub(super) async fn authenticate(
     let (psql_session_id, waiter) = loop {
         let psql_session_id = new_psql_session_id();
 
-        match console::mgmt::get_waiter(&psql_session_id) {
+        match control_plane::mgmt::get_waiter(&psql_session_id) {
             Ok(waiter) => break (psql_session_id, waiter),
             Err(_e) => continue,
         }
@@ -89,7 +112,12 @@ pub(super) async fn authenticate(
 
     // Wait for web console response (see `mgmt`).
     info!(parent: &span, "waiting for console's reply...");
-    let db_info = waiter.await.map_err(WebAuthError::from)?;
+    let db_info = tokio::time::timeout(auth_config.webauth_confirmation_timeout, waiter)
+        .await
+        .map_err(|_elapsed| {
+            auth::AuthError::confirmation_timeout(auth_config.webauth_confirmation_timeout.into())
+        })?
+        .map_err(WebAuthError::from)?;
 
     if auth_config.ip_allowlist_check_enabled {
         if let Some(allowed_ips) = &db_info.allowed_ips {

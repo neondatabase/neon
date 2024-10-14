@@ -1,6 +1,8 @@
 use serde::Serialize;
 use utils::seqwait::MonotonicCounter;
 
+extern crate hyper0 as hyper;
+
 mod auth;
 mod background_node_operations;
 mod compute_hook;

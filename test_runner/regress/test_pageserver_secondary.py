@@ -1,9 +1,11 @@
+from __future__ import annotations
+
 import json
 import os
 import random
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional, Union
+from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.common_types import TenantId, TenantShardId, TimelineId
@@ -19,6 +21,10 @@ from fixtures.utils import wait_until
 from fixtures.workload import Workload
 from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
+
+if TYPE_CHECKING:
+    from typing import Any, Optional, Union
+
 
 # A tenant configuration that is convenient for generating uploads and deletions
 # without a large amount of postgres traffic.
@@ -193,11 +199,11 @@ def test_location_conf_churn(neon_env_builder: NeonEnvBuilder, make_httpserver, 
                 # state if it was running attached with a stale generation
                 last_state[pageserver.id] = ("Detached", None)
         else:
-            secondary_conf: Optional[Dict[str, Any]] = None
+            secondary_conf: Optional[dict[str, Any]] = None
             if mode == "Secondary":
                 secondary_conf = {"warm": rng.choice([True, False])}
 
-            location_conf: Dict[str, Any] = {
+            location_conf: dict[str, Any] = {
                 "mode": mode,
                 "secondary_conf": secondary_conf,
                 "tenant_conf": {},
@@ -650,7 +656,7 @@ def test_secondary_background_downloads(neon_env_builder: NeonEnvBuilder):
         tenant_id = TenantId.generate()
         timeline_a = TimelineId.generate()
         timeline_b = TimelineId.generate()
-        env.neon_cli.create_tenant(
+        env.create_tenant(
             tenant_id,
             timeline_a,
             placement_policy='{"Attached":1}',
@@ -658,7 +664,7 @@ def test_secondary_background_downloads(neon_env_builder: NeonEnvBuilder):
             # to trigger the upload promptly.
             conf={"heatmap_period": f"{upload_period_secs}s"},
         )
-        env.neon_cli.create_timeline("main2", tenant_id, timeline_b)
+        env.create_timeline("main2", tenant_id, timeline_b)
 
         tenant_timelines[tenant_id] = [timeline_a, timeline_b]
 
@@ -778,9 +784,7 @@ def test_slow_secondary_downloads(neon_env_builder: NeonEnvBuilder, via_controll
     tenant_id = TenantId.generate()
     timeline_id = TimelineId.generate()
 
-    env.neon_cli.create_tenant(
-        tenant_id, timeline_id, conf=TENANT_CONF, placement_policy='{"Attached":1}'
-    )
+    env.create_tenant(tenant_id, timeline_id, conf=TENANT_CONF, placement_policy='{"Attached":1}')
 
     attached_to_id = env.storage_controller.locate(tenant_id)[0]["node_id"]
     ps_attached = env.get_pageserver(attached_to_id)

@@ -17,6 +17,7 @@ use hyper::header;
 use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
 use metrics::launch_timestamp::LaunchTimestamp;
+use pageserver_api::models::virtual_file::IoMode;
 use pageserver_api::models::AuxFilePolicy;
 use pageserver_api::models::DownloadRemoteLayersTaskSpawnRequest;
 use pageserver_api::models::IngestAuxFilesRequest;
@@ -56,6 +57,7 @@ use utils::http::endpoint::request_span;
 use utils::http::request::must_parse_query_param;
 use utils::http::request::{get_request_param, must_get_query_param, parse_query_param};
 
+use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::deletion_queue::DeletionQueueClient;
 use crate::pgdatadir_mapping::LsnForTimestamp;
@@ -80,7 +82,6 @@ use crate::tenant::timeline::CompactionError;
 use crate::tenant::timeline::Timeline;
 use crate::tenant::GetTimelineError;
 use crate::tenant::{LogicalSizeCalculationCause, PageReconstructError};
-use crate::{config::PageServerConf, tenant::mgr};
 use crate::{disk_usage_eviction_task, tenant};
 use pageserver_api::models::{
     StatusResponse, TenantConfigRequest, TenantInfo, TimelineCreateRequest, TimelineGcRequest,
@@ -589,6 +590,10 @@ async fn timeline_create_handler(
                 StatusCode::SERVICE_UNAVAILABLE,
                 HttpErrorBody::from_msg(e.to_string()),
             ),
+            Err(e @ tenant::CreateTimelineError::AncestorArchived) => json_response(
+                StatusCode::NOT_ACCEPTABLE,
+                HttpErrorBody::from_msg(e.to_string()),
+            ),
             Err(tenant::CreateTimelineError::ShuttingDown) => json_response(
                 StatusCode::SERVICE_UNAVAILABLE,
                 HttpErrorBody::from_msg("tenant shutting down".to_string()),
@@ -699,6 +704,8 @@ async fn timeline_archival_config_handler(
     let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
 
+    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
+
     let request_data: TimelineArchivalConfigRequest = json_request(&mut request).await?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
     let state = get_state(&request);
@@ -709,7 +716,7 @@ async fn timeline_archival_config_handler(
             .get_attached_tenant_shard(tenant_shard_id)?;
 
         tenant
-            .apply_timeline_archival_config(timeline_id, request_data.state)
+            .apply_timeline_archival_config(timeline_id, request_data.state, ctx)
             .await?;
         Ok::<_, ApiError>(())
     }
@@ -820,7 +827,7 @@ async fn get_lsn_by_timestamp_handler(
 
     let lease = if with_lease {
         timeline
-            .make_lsn_lease(lsn, timeline.get_lsn_lease_length_for_ts(), &ctx)
+            .init_lsn_lease(lsn, timeline.get_lsn_lease_length_for_ts(), &ctx)
             .inspect_err(|_| {
                 warn!("fail to grant a lease to {}", lsn);
             })
@@ -1688,9 +1695,18 @@ async fn lsn_lease_handler(
     let timeline =
         active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
             .await?;
-    let result = timeline
-        .make_lsn_lease(lsn, timeline.get_lsn_lease_length(), &ctx)
-        .map_err(|e| ApiError::InternalServerError(e.context("lsn lease http handler")))?;
+
+    let result = async {
+        timeline
+            .init_lsn_lease(lsn, timeline.get_lsn_lease_length(), &ctx)
+            .map_err(|e| {
+                ApiError::InternalServerError(
+                    e.context(format!("invalid lsn lease request at {lsn}")),
+                )
+            })
+    }
+    .instrument(info_span!("init_lsn_lease", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug(), %timeline_id))
+    .await?;
 
     json_response(StatusCode::OK, result)
 }
@@ -1706,8 +1722,13 @@ async fn timeline_gc_handler(
 
     let gc_req: TimelineGcRequest = json_request(&mut request).await?;
 
+    let state = get_state(&request);
+
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
-    let gc_result = mgr::immediate_gc(tenant_shard_id, timeline_id, gc_req, cancel, &ctx).await?;
+    let gc_result = state
+        .tenant_manager
+        .immediate_gc(tenant_shard_id, timeline_id, gc_req, cancel, &ctx)
+        .await?;
 
     json_response(StatusCode::OK, gc_result)
 }
@@ -1724,6 +1745,10 @@ async fn timeline_compact_handler(
     let state = get_state(&request);
 
     let mut flags = EnumSet::empty();
+
+    if Some(true) == parse_query_param::<_, bool>(&request, "force_l0_compaction")? {
+        flags |= CompactFlags::ForceL0Compaction;
+    }
     if Some(true) == parse_query_param::<_, bool>(&request, "force_repartition")? {
         flags |= CompactFlags::ForceRepartition;
     }
@@ -1770,6 +1795,9 @@ async fn timeline_checkpoint_handler(
     let state = get_state(&request);
 
     let mut flags = EnumSet::empty();
+    if Some(true) == parse_query_param::<_, bool>(&request, "force_l0_compaction")? {
+        flags |= CompactFlags::ForceL0Compaction;
+    }
     if Some(true) == parse_query_param::<_, bool>(&request, "force_repartition")? {
         flags |= CompactFlags::ForceRepartition;
     }
@@ -2354,17 +2382,13 @@ async fn put_io_engine_handler(
     json_response(StatusCode::OK, ())
 }
 
-async fn put_io_alignment_handler(
+async fn put_io_mode_handler(
     mut r: Request<Body>,
     _cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
     check_permission(&r, None)?;
-    let align: usize = json_request(&mut r).await?;
-    crate::virtual_file::set_io_buffer_alignment(align).map_err(|align| {
-        ApiError::PreconditionFailed(
-            format!("Requested io alignment ({align}) is not a power of two").into(),
-        )
-    })?;
+    let mode: IoMode = json_request(&mut r).await?;
+    crate::virtual_file::set_io_mode(mode);
     json_response(StatusCode::OK, ())
 }
 
@@ -3055,9 +3079,7 @@ pub fn make_router(
             |r| api_handler(r, timeline_collect_keyspace),
         )
         .put("/v1/io_engine", |r| api_handler(r, put_io_engine_handler))
-        .put("/v1/io_alignment", |r| {
-            api_handler(r, put_io_alignment_handler)
-        })
+        .put("/v1/io_mode", |r| api_handler(r, put_io_mode_handler))
         .put(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/force_aux_policy_switch",
             |r| api_handler(r, force_aux_policy_switch_handler),

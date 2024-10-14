@@ -8,6 +8,8 @@ use metrics::{
 };
 use once_cell::sync::Lazy;
 use pageserver_api::shard::TenantShardId;
+use postgres_backend::{is_expected_io_error, QueryError};
+use pq_proto::framed::ConnectionError;
 use strum::{EnumCount, VariantNames};
 use strum_macros::{IntoStaticStr, VariantNames};
 use tracing::warn;
@@ -1508,6 +1510,7 @@ static COMPUTE_STARTUP_BUCKETS: Lazy<[f64; 28]> = Lazy::new(|| {
 pub(crate) struct BasebackupQueryTime {
     ok: Histogram,
     error: Histogram,
+    client_error: Histogram,
 }
 
 pub(crate) static BASEBACKUP_QUERY_TIME: Lazy<BasebackupQueryTime> = Lazy::new(|| {
@@ -1521,6 +1524,7 @@ pub(crate) static BASEBACKUP_QUERY_TIME: Lazy<BasebackupQueryTime> = Lazy::new(|
     BasebackupQueryTime {
         ok: vec.get_metric_with_label_values(&["ok"]).unwrap(),
         error: vec.get_metric_with_label_values(&["error"]).unwrap(),
+        client_error: vec.get_metric_with_label_values(&["client_error"]).unwrap(),
     }
 });
 
@@ -1557,7 +1561,7 @@ impl BasebackupQueryTime {
 }
 
 impl<'a, 'c> BasebackupQueryTimeOngoingRecording<'a, 'c> {
-    pub(crate) fn observe<T, E>(self, res: &Result<T, E>) {
+    pub(crate) fn observe<T>(self, res: &Result<T, QueryError>) {
         let elapsed = self.start.elapsed();
         let ex_throttled = self
             .ctx
@@ -1576,10 +1580,15 @@ impl<'a, 'c> BasebackupQueryTimeOngoingRecording<'a, 'c> {
                 elapsed
             }
         };
-        let metric = if res.is_ok() {
-            &self.parent.ok
-        } else {
-            &self.parent.error
+        // If you want to change categorize of a specific error, also change it in `log_query_error`.
+        let metric = match res {
+            Ok(_) => &self.parent.ok,
+            Err(QueryError::Disconnected(ConnectionError::Io(io_error)))
+                if is_expected_io_error(io_error) =>
+            {
+                &self.parent.client_error
+            }
+            Err(_) => &self.parent.error,
         };
         metric.observe(ex_throttled.as_secs_f64());
     }
@@ -3208,45 +3217,38 @@ pub(crate) mod tenant_throttling {
 
     impl TimelineGet {
         pub(crate) fn new(tenant_shard_id: &TenantShardId) -> Self {
+            let per_tenant_label_values = &[
+                KIND,
+                &tenant_shard_id.tenant_id.to_string(),
+                &tenant_shard_id.shard_slug().to_string(),
+            ];
             TimelineGet {
                 count_accounted_start: {
                     GlobalAndPerTenantIntCounter {
                         global: COUNT_ACCOUNTED_START.with_label_values(&[KIND]),
-                        per_tenant: COUNT_ACCOUNTED_START_PER_TENANT.with_label_values(&[
-                            KIND,
-                            &tenant_shard_id.tenant_id.to_string(),
-                            &tenant_shard_id.shard_slug().to_string(),
-                        ]),
+                        per_tenant: COUNT_ACCOUNTED_START_PER_TENANT
+                            .with_label_values(per_tenant_label_values),
                     }
                 },
                 count_accounted_finish: {
                     GlobalAndPerTenantIntCounter {
                         global: COUNT_ACCOUNTED_FINISH.with_label_values(&[KIND]),
-                        per_tenant: COUNT_ACCOUNTED_FINISH_PER_TENANT.with_label_values(&[
-                            KIND,
-                            &tenant_shard_id.tenant_id.to_string(),
-                            &tenant_shard_id.shard_slug().to_string(),
-                        ]),
+                        per_tenant: COUNT_ACCOUNTED_FINISH_PER_TENANT
+                            .with_label_values(per_tenant_label_values),
                     }
                 },
                 wait_time: {
                     GlobalAndPerTenantIntCounter {
                         global: WAIT_USECS.with_label_values(&[KIND]),
-                        per_tenant: WAIT_USECS_PER_TENANT.with_label_values(&[
-                            KIND,
-                            &tenant_shard_id.tenant_id.to_string(),
-                            &tenant_shard_id.shard_slug().to_string(),
-                        ]),
+                        per_tenant: WAIT_USECS_PER_TENANT
+                            .with_label_values(per_tenant_label_values),
                     }
                 },
                 count_throttled: {
                     GlobalAndPerTenantIntCounter {
                         global: WAIT_COUNT.with_label_values(&[KIND]),
-                        per_tenant: WAIT_COUNT_PER_TENANT.with_label_values(&[
-                            KIND,
-                            &tenant_shard_id.tenant_id.to_string(),
-                            &tenant_shard_id.shard_slug().to_string(),
-                        ]),
+                        per_tenant: WAIT_COUNT_PER_TENANT
+                            .with_label_values(per_tenant_label_values),
                     }
                 },
             }

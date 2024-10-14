@@ -9,7 +9,7 @@ use std::time::Duration;
 use anyhow::bail;
 use bytes::Bytes;
 use http_body_util::BodyExt;
-use hyper1::body::Body;
+use hyper::body::Body;
 use serde::de::DeserializeOwned;
 
 pub(crate) use reqwest::{Request, Response};
@@ -86,9 +86,17 @@ impl Endpoint {
 
     /// Return a [builder](RequestBuilder) for a `GET` request,
     /// appending a single `path` segment to the base endpoint URL.
-    pub(crate) fn get(&self, path: &str) -> RequestBuilder {
+    pub(crate) fn get_path(&self, path: &str) -> RequestBuilder {
+        self.get_with_url(|u| {
+            u.path_segments_mut().push(path);
+        })
+    }
+
+    /// Return a [builder](RequestBuilder) for a `GET` request,
+    /// accepting a closure to modify the url path segments for more complex paths queries.
+    pub(crate) fn get_with_url(&self, f: impl for<'a> FnOnce(&'a mut ApiUrl)) -> RequestBuilder {
         let mut url = self.endpoint.clone();
-        url.path_segments_mut().push(path);
+        f(&mut url);
         self.client.get(url.into_inner())
     }
 
@@ -144,7 +152,7 @@ mod tests {
 
         // Validate that this pattern makes sense.
         let req = endpoint
-            .get("frobnicate")
+            .get_path("frobnicate")
             .query(&[
                 ("foo", Some("10")), // should be just `foo=10`
                 ("bar", None),       // shouldn't be passed at all
@@ -162,7 +170,7 @@ mod tests {
         let endpoint = Endpoint::new(url, Client::new());
 
         let req = endpoint
-            .get("frobnicate")
+            .get_path("frobnicate")
             .query(&[("session_id", uuid::Uuid::nil())])
             .build()?;
 

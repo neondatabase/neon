@@ -1,5 +1,7 @@
+from __future__ import annotations
+
 from types import TracebackType
-from typing import Any, Dict, List, Optional, Tuple, Type
+from typing import TYPE_CHECKING
 
 import psycopg2
 import pytest
@@ -8,6 +10,9 @@ from fixtures.neon_fixtures import NeonEnv, VanillaPostgres
 from pytest_httpserver import HTTPServer
 from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
+
+if TYPE_CHECKING:
+    from typing import Any, Optional
 
 
 def handle_db(dbs, roles, operation):
@@ -43,7 +48,7 @@ def handle_role(dbs, roles, operation):
 
 
 def ddl_forward_handler(
-    request: Request, dbs: Dict[str, str], roles: Dict[str, str], ddl: "DdlForwardingContext"
+    request: Request, dbs: dict[str, str], roles: dict[str, str], ddl: DdlForwardingContext
 ) -> Response:
     log.info(f"Received request with data {request.get_data(as_text=True)}")
     if ddl.fail:
@@ -69,8 +74,8 @@ class DdlForwardingContext:
         self.pg = vanilla_pg
         self.host = host
         self.port = port
-        self.dbs: Dict[str, str] = {}
-        self.roles: Dict[str, str] = {}
+        self.dbs: dict[str, str] = {}
+        self.roles: dict[str, str] = {}
         self.fail = False
         endpoint = "/test/roles_and_databases"
         ddl_url = f"http://{host}:{port}{endpoint}"
@@ -91,13 +96,13 @@ class DdlForwardingContext:
 
     def __exit__(
         self,
-        exc_type: Optional[Type[BaseException]],
+        exc_type: Optional[type[BaseException]],
         exc: Optional[BaseException],
         tb: Optional[TracebackType],
     ):
         self.pg.stop()
 
-    def send(self, query: str) -> List[Tuple[Any, ...]]:
+    def send(self, query: str) -> list[tuple[Any, ...]]:
         return self.pg.safe_psql(query)
 
     def wait(self, timeout=3):
@@ -106,7 +111,7 @@ class DdlForwardingContext:
     def failures(self, bool):
         self.fail = bool
 
-    def send_and_wait(self, query: str, timeout=3) -> List[Tuple[Any, ...]]:
+    def send_and_wait(self, query: str, timeout=3) -> list[tuple[Any, ...]]:
         res = self.send(query)
         self.wait(timeout=timeout)
         return res

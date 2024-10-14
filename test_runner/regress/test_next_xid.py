@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import time
 from pathlib import Path
@@ -189,7 +191,7 @@ def test_import_at_2bil(
 # calculate the SLRU segments that a particular multixid or multixid-offsets falls into.
 BLCKSZ = 8192
 MULTIXACT_OFFSETS_PER_PAGE = int(BLCKSZ / 4)
-SLRU_PAGES_PER_SEGMENT = int(32)
+SLRU_PAGES_PER_SEGMENT = 32
 MXACT_MEMBER_BITS_PER_XACT = 8
 MXACT_MEMBER_FLAGS_PER_BYTE = 1
 MULTIXACT_FLAGBYTES_PER_GROUP = 4
@@ -435,7 +437,9 @@ $$;
 
     # Wait until pageserver has received all the data, and restart the endpoint
     wait_for_wal_insert_lsn(env, endpoint, tenant_id, timeline_id)
-    endpoint.stop(mode="immediate")  # 'immediate' to avoid writing shutdown checkpoint
+    endpoint.stop(
+        mode="immediate", sks_wait_walreceiver_gone=(env.safekeepers, timeline_id)
+    )  # 'immediate' to avoid writing shutdown checkpoint
     endpoint.start()
 
     # Check that the next-multixid value wrapped around correctly

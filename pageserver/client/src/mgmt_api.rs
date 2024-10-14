@@ -540,10 +540,13 @@ impl Client {
             .map_err(Error::ReceiveBody)
     }
 
-    /// Configs io buffer alignment at runtime.
-    pub async fn put_io_alignment(&self, align: usize) -> Result<()> {
-        let uri = format!("{}/v1/io_alignment", self.mgmt_api_endpoint);
-        self.request(Method::PUT, uri, align)
+    /// Configs io mode at runtime.
+    pub async fn put_io_mode(
+        &self,
+        mode: &pageserver_api::models::virtual_file::IoMode,
+    ) -> Result<()> {
+        let uri = format!("{}/v1/io_mode", self.mgmt_api_endpoint);
+        self.request(Method::PUT, uri, mode)
             .await?
             .json()
             .await
@@ -731,6 +734,24 @@ impl Client {
             .await
             .map_err(Error::SendRequest)?
             .error_from_body()
+            .await?
+            .json()
+            .await
+            .map_err(Error::ReceiveBody)
+    }
+
+    pub async fn timeline_init_lsn_lease(
+        &self,
+        tenant_shard_id: TenantShardId,
+        timeline_id: TimelineId,
+        lsn: Lsn,
+    ) -> Result<LsnLease> {
+        let uri = format!(
+            "{}/v1/tenant/{tenant_shard_id}/timeline/{timeline_id}/lsn_lease",
+            self.mgmt_api_endpoint,
+        );
+
+        self.request(Method::POST, &uri, LsnLeaseRequest { lsn })
             .await?
             .json()
             .await

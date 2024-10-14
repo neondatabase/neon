@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from fixtures.neon_fixtures import NeonEnvBuilder
 
 
@@ -9,7 +11,7 @@ def test_pageserver_catchup_while_compute_down(neon_env_builder: NeonEnvBuilder)
     neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.init_start()
 
-    env.neon_cli.create_branch("test_pageserver_catchup_while_compute_down")
+    env.create_branch("test_pageserver_catchup_while_compute_down")
     # Make shared_buffers large to ensure we won't query pageserver while it is down.
     endpoint = env.endpoints.create_start(
         "test_pageserver_catchup_while_compute_down", config_lines=["shared_buffers=512MB"]

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 from threading import Thread
 
@@ -78,7 +80,7 @@ def test_tenant_delete_smoke(
     # may need to retry on some remote storage errors injected by the test harness
     error_tolerant_delete(ps_http, tenant_id)
 
-    env.neon_cli.create_tenant(
+    env.create_tenant(
         tenant_id=tenant_id,
         conf=many_small_layers_tenant_config(),
     )
@@ -89,9 +91,7 @@ def test_tenant_delete_smoke(
     # create two timelines one being the parent of another
     parent = None
     for timeline in ["first", "second"]:
-        timeline_id = env.neon_cli.create_branch(
-            timeline, tenant_id=tenant_id, ancestor_branch_name=parent
-        )
+        timeline_id = env.create_branch(timeline, ancestor_branch_name=parent, tenant_id=tenant_id)
         with env.endpoints.create_start(timeline, tenant_id=tenant_id) as endpoint:
             run_pg_bench_small(pg_bin, endpoint.connstr())
             wait_for_last_flush_lsn(env, endpoint, tenant=tenant_id, timeline=timeline_id)
@@ -339,7 +339,7 @@ def test_tenant_delete_scrubber(pg_bin: PgBin, make_httpserver, neon_env_builder
     ps_http = env.pageserver.http_client()
     # create a tenant separate from the main tenant so that we have one remaining
     # after we deleted it, as the scrubber treats empty buckets as an error.
-    (tenant_id, timeline_id) = env.neon_cli.create_tenant()
+    (tenant_id, timeline_id) = env.create_tenant()
 
     with env.endpoints.create_start("main", tenant_id=tenant_id) as endpoint:
         run_pg_bench_small(pg_bin, endpoint.connstr())

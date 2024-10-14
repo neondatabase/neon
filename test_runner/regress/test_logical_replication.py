@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import time
 from functools import partial
 from random import choice
@@ -219,7 +221,7 @@ def test_ondemand_wal_download_in_replication_slot_funcs(neon_env_builder: NeonE
     neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.init_start()
 
-    env.neon_cli.create_branch("init")
+    env.create_branch("init")
     endpoint = env.endpoints.create_start("init")
 
     with endpoint.connect().cursor() as cur:
@@ -270,7 +272,7 @@ def test_lr_with_slow_safekeeper(neon_env_builder: NeonEnvBuilder, vanilla_pg):
     neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.init_start()
 
-    env.neon_cli.create_branch("init")
+    env.create_branch("init")
     endpoint = env.endpoints.create_start("init")
 
     with endpoint.connect().cursor() as cur:
@@ -336,7 +338,7 @@ FROM generate_series(1, 16384) AS seq; -- Inserts enough rows to exceed 16MB of 
     assert [r[0] for r in vanilla_pg.safe_psql("select * from t")] == [1, 2, 3]
 
     log_path = vanilla_pg.pgdatadir / "pg.log"
-    with open(log_path, "r") as log_file:
+    with open(log_path) as log_file:
         logs = log_file.read()
         assert "could not receive data from WAL stream" not in logs
 
@@ -352,7 +354,7 @@ FROM generate_series(1, 16384) AS seq; -- Inserts enough rows to exceed 16MB of 
 def test_restart_endpoint(neon_simple_env: NeonEnv, vanilla_pg):
     env = neon_simple_env
 
-    env.neon_cli.create_branch("init")
+    env.create_branch("init")
     endpoint = env.endpoints.create_start("init")
     tenant_id = endpoint.safe_psql("show neon.tenant_id")[0][0]
     timeline_id = endpoint.safe_psql("show neon.timeline_id")[0][0]
@@ -397,7 +399,7 @@ def test_restart_endpoint(neon_simple_env: NeonEnv, vanilla_pg):
 def test_large_records(neon_simple_env: NeonEnv, vanilla_pg):
     env = neon_simple_env
 
-    env.neon_cli.create_branch("init")
+    env.create_branch("init")
     endpoint = env.endpoints.create_start("init")
 
     cur = endpoint.connect().cursor()
@@ -445,7 +447,7 @@ def test_large_records(neon_simple_env: NeonEnv, vanilla_pg):
 def test_slots_and_branching(neon_simple_env: NeonEnv):
     env = neon_simple_env
 
-    tenant, timeline = env.neon_cli.create_tenant()
+    tenant, timeline = env.create_tenant()
     env.pageserver.http_client()
 
     main_branch = env.endpoints.create_start("main", tenant_id=tenant)
@@ -457,7 +459,7 @@ def test_slots_and_branching(neon_simple_env: NeonEnv):
     wait_for_last_flush_lsn(env, main_branch, tenant, timeline)
 
     # Create branch ws.
-    env.neon_cli.create_branch("ws", "main", tenant_id=tenant)
+    env.create_branch("ws", ancestor_branch_name="main", tenant_id=tenant)
     ws_branch = env.endpoints.create_start("ws", tenant_id=tenant)
 
     # Check that we can create slot with the same name
@@ -469,10 +471,10 @@ def test_slots_and_branching(neon_simple_env: NeonEnv):
 def test_replication_shutdown(neon_simple_env: NeonEnv):
     # Ensure Postgres can exit without stuck when a replication job is active + neon extension installed
     env = neon_simple_env
-    env.neon_cli.create_branch("test_replication_shutdown_publisher", "main")
+    env.create_branch("test_replication_shutdown_publisher", ancestor_branch_name="main")
     pub = env.endpoints.create("test_replication_shutdown_publisher")
 
-    env.neon_cli.create_branch("test_replication_shutdown_subscriber")
+    env.create_branch("test_replication_shutdown_subscriber")
     sub = env.endpoints.create("test_replication_shutdown_subscriber")
 
     pub.respec(skip_pg_catalog_updates=False)
@@ -575,7 +577,7 @@ def test_subscriber_synchronous_commit(neon_simple_env: NeonEnv, vanilla_pg):
     vanilla_pg.start()
     vanilla_pg.safe_psql("create extension neon;")
 
-    env.neon_cli.create_branch("subscriber")
+    env.create_branch("subscriber")
     sub = env.endpoints.create("subscriber")
     sub.start()
 

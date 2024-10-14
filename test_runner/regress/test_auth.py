@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 from contextlib import closing
 from pathlib import Path
@@ -76,7 +78,7 @@ def test_compute_auth_to_pageserver(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
 
     branch = "test_compute_auth_to_pageserver"
-    env.neon_cli.create_branch(branch)
+    env.create_branch(branch)
     endpoint = env.endpoints.create_start(branch)
 
     with closing(endpoint.connect()) as conn:
@@ -186,7 +188,7 @@ def test_auth_failures(neon_env_builder: NeonEnvBuilder, auth_enabled: bool):
     env = neon_env_builder.init_start()
 
     branch = f"test_auth_failures_auth_enabled_{auth_enabled}"
-    timeline_id = env.neon_cli.create_branch(branch)
+    timeline_id = env.create_branch(branch)
     env.endpoints.create_start(branch)
 
     tenant_token = env.auth_keys.generate_tenant_token(env.initial_tenant)

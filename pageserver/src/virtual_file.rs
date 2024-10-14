@@ -23,10 +23,12 @@ use pageserver_api::config::defaults::DEFAULT_IO_BUFFER_ALIGNMENT;
 use pageserver_api::shard::TenantShardId;
 use std::fs::File;
 use std::io::{Error, ErrorKind, Seek, SeekFrom};
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::OpenOptionsExt;
 use tokio_epoll_uring::{BoundedBuf, IoBuf, IoBufMut, Slice};
 
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use tokio::time::Instant;
 
@@ -38,7 +40,7 @@ pub use io_engine::FeatureTestResult as IoEngineFeatureTestResult;
 mod metadata;
 mod open_options;
 use self::owned_buffers_io::write::OwnedAsyncWriter;
-pub(crate) use api::DirectIoMode;
+pub(crate) use api::IoMode;
 pub(crate) use io_engine::IoEngineKind;
 pub(crate) use metadata::Metadata;
 pub(crate) use open_options::*;
@@ -61,6 +63,171 @@ pub(crate) mod owned_buffers_io {
     }
 }
 
+#[derive(Debug)]
+pub struct VirtualFile {
+    inner: VirtualFileInner,
+    _mode: IoMode,
+}
+
+impl VirtualFile {
+    /// Open a file in read-only mode. Like File::open.
+    pub async fn open<P: AsRef<Utf8Path>>(
+        path: P,
+        ctx: &RequestContext,
+    ) -> Result<Self, std::io::Error> {
+        let inner = VirtualFileInner::open(path, ctx).await?;
+        Ok(VirtualFile {
+            inner,
+            _mode: IoMode::Buffered,
+        })
+    }
+
+    /// Open a file in read-only mode. Like File::open.
+    ///
+    /// `O_DIRECT` will be enabled base on `virtual_file_io_mode`.
+    pub async fn open_v2<P: AsRef<Utf8Path>>(
+        path: P,
+        ctx: &RequestContext,
+    ) -> Result<Self, std::io::Error> {
+        Self::open_with_options_v2(path.as_ref(), OpenOptions::new().read(true), ctx).await
+    }
+
+    pub async fn create<P: AsRef<Utf8Path>>(
+        path: P,
+        ctx: &RequestContext,
+    ) -> Result<Self, std::io::Error> {
+        let inner = VirtualFileInner::create(path, ctx).await?;
+        Ok(VirtualFile {
+            inner,
+            _mode: IoMode::Buffered,
+        })
+    }
+
+    pub async fn create_v2<P: AsRef<Utf8Path>>(
+        path: P,
+        ctx: &RequestContext,
+    ) -> Result<Self, std::io::Error> {
+        VirtualFile::open_with_options_v2(
+            path.as_ref(),
+            OpenOptions::new().write(true).create(true).truncate(true),
+            ctx,
+        )
+        .await
+    }
+
+    pub async fn open_with_options<P: AsRef<Utf8Path>>(
+        path: P,
+        open_options: &OpenOptions,
+        ctx: &RequestContext, /* TODO: carry a pointer to the metrics in the RequestContext instead of the parsing https://github.com/neondatabase/neon/issues/6107 */
+    ) -> Result<Self, std::io::Error> {
+        let inner = VirtualFileInner::open_with_options(path, open_options, ctx).await?;
+        Ok(VirtualFile {
+            inner,
+            _mode: IoMode::Buffered,
+        })
+    }
+
+    pub async fn open_with_options_v2<P: AsRef<Utf8Path>>(
+        path: P,
+        open_options: &OpenOptions,
+        ctx: &RequestContext, /* TODO: carry a pointer to the metrics in the RequestContext instead of the parsing https://github.com/neondatabase/neon/issues/6107 */
+    ) -> Result<Self, std::io::Error> {
+        let file = match get_io_mode() {
+            IoMode::Buffered => {
+                let inner = VirtualFileInner::open_with_options(path, open_options, ctx).await?;
+                VirtualFile {
+                    inner,
+                    _mode: IoMode::Buffered,
+                }
+            }
+            #[cfg(target_os = "linux")]
+            IoMode::Direct => {
+                let inner = VirtualFileInner::open_with_options(
+                    path,
+                    open_options.clone().custom_flags(nix::libc::O_DIRECT),
+                    ctx,
+                )
+                .await?;
+                VirtualFile {
+                    inner,
+                    _mode: IoMode::Direct,
+                }
+            }
+        };
+        Ok(file)
+    }
+
+    pub fn path(&self) -> &Utf8Path {
+        self.inner.path.as_path()
+    }
+
+    pub async fn crashsafe_overwrite<B: BoundedBuf<Buf = Buf> + Send, Buf: IoBuf + Send>(
+        final_path: Utf8PathBuf,
+        tmp_path: Utf8PathBuf,
+        content: B,
+    ) -> std::io::Result<()> {
+        VirtualFileInner::crashsafe_overwrite(final_path, tmp_path, content).await
+    }
+
+    pub async fn sync_all(&self) -> Result<(), Error> {
+        self.inner.sync_all().await
+    }
+
+    pub async fn sync_data(&self) -> Result<(), Error> {
+        self.inner.sync_data().await
+    }
+
+    pub async fn metadata(&self) -> Result<Metadata, Error> {
+        self.inner.metadata().await
+    }
+
+    pub fn remove(self) {
+        self.inner.remove();
+    }
+
+    pub async fn seek(&mut self, pos: SeekFrom) -> Result<u64, Error> {
+        self.inner.seek(pos).await
+    }
+
+    pub async fn read_exact_at<Buf>(
+        &self,
+        slice: Slice<Buf>,
+        offset: u64,
+        ctx: &RequestContext,
+    ) -> Result<Slice<Buf>, Error>
+    where
+        Buf: IoBufMut + Send,
+    {
+        self.inner.read_exact_at(slice, offset, ctx).await
+    }
+
+    pub async fn read_exact_at_page(
+        &self,
+        page: PageWriteGuard<'static>,
+        offset: u64,
+        ctx: &RequestContext,
+    ) -> Result<PageWriteGuard<'static>, Error> {
+        self.inner.read_exact_at_page(page, offset, ctx).await
+    }
+
+    pub async fn write_all_at<Buf: IoBuf + Send>(
+        &self,
+        buf: FullSlice<Buf>,
+        offset: u64,
+        ctx: &RequestContext,
+    ) -> (FullSlice<Buf>, Result<(), Error>) {
+        self.inner.write_all_at(buf, offset, ctx).await
+    }
+
+    pub async fn write_all<Buf: IoBuf + Send>(
+        &mut self,
+        buf: FullSlice<Buf>,
+        ctx: &RequestContext,
+    ) -> (FullSlice<Buf>, Result<usize, Error>) {
+        self.inner.write_all(buf, ctx).await
+    }
+}
+
 ///
 /// A virtual file descriptor. You can use this just like std::fs::File, but internally
 /// the underlying file is closed if the system is low on file descriptors,
@@ -77,7 +244,7 @@ pub(crate) mod owned_buffers_io {
 /// 'tag' field is used to detect whether the handle still is valid or not.
 ///
 #[derive(Debug)]
-pub struct VirtualFile {
+pub struct VirtualFileInner {
     /// Lazy handle to the global file descriptor cache. The slot that this points to
     /// might contain our File, or it may be empty, or it may contain a File that
     /// belongs to a different VirtualFile.
@@ -350,12 +517,12 @@ macro_rules! with_file {
     }};
 }
 
-impl VirtualFile {
+impl VirtualFileInner {
     /// Open a file in read-only mode. Like File::open.
     pub async fn open<P: AsRef<Utf8Path>>(
         path: P,
         ctx: &RequestContext,
-    ) -> Result<VirtualFile, std::io::Error> {
+    ) -> Result<VirtualFileInner, std::io::Error> {
         Self::open_with_options(path.as_ref(), OpenOptions::new().read(true), ctx).await
     }
 
@@ -364,7 +531,7 @@ impl VirtualFile {
     pub async fn create<P: AsRef<Utf8Path>>(
         path: P,
         ctx: &RequestContext,
-    ) -> Result<VirtualFile, std::io::Error> {
+    ) -> Result<VirtualFileInner, std::io::Error> {
         Self::open_with_options(
             path.as_ref(),
             OpenOptions::new().write(true).create(true).truncate(true),
@@ -382,7 +549,7 @@ impl VirtualFile {
         path: P,
         open_options: &OpenOptions,
         _ctx: &RequestContext, /* TODO: carry a pointer to the metrics in the RequestContext instead of the parsing https://github.com/neondatabase/neon/issues/6107 */
-    ) -> Result<VirtualFile, std::io::Error> {
+    ) -> Result<VirtualFileInner, std::io::Error> {
         let path_ref = path.as_ref();
         let path_str = path_ref.to_string();
         let parts = path_str.split('/').collect::<Vec<&str>>();
@@ -423,7 +590,7 @@ impl VirtualFile {
         reopen_options.create_new(false);
         reopen_options.truncate(false);
 
-        let vfile = VirtualFile {
+        let vfile = VirtualFileInner {
             handle: RwLock::new(handle),
             pos: 0,
             path: path_ref.to_path_buf(),
@@ -466,6 +633,7 @@ impl VirtualFile {
                 &[]
             };
             utils::crashsafe::overwrite(&final_path, &tmp_path, content)
+                .maybe_fatal_err("crashsafe_overwrite")
         })
         .await
         .expect("blocking task is never aborted")
@@ -475,7 +643,7 @@ impl VirtualFile {
     pub async fn sync_all(&self) -> Result<(), Error> {
         with_file!(self, StorageIoOperation::Fsync, |file_guard| {
             let (_file_guard, res) = io_engine::get().sync_all(file_guard).await;
-            res
+            res.maybe_fatal_err("sync_all")
         })
     }
 
@@ -483,7 +651,7 @@ impl VirtualFile {
     pub async fn sync_data(&self) -> Result<(), Error> {
         with_file!(self, StorageIoOperation::Fsync, |file_guard| {
             let (_file_guard, res) = io_engine::get().sync_data(file_guard).await;
-            res
+            res.maybe_fatal_err("sync_data")
         })
     }
 
@@ -1038,6 +1206,21 @@ impl VirtualFile {
         blknum: u32,
         ctx: &RequestContext,
     ) -> Result<crate::tenant::block_io::BlockLease<'_>, std::io::Error> {
+        self.inner.read_blk(blknum, ctx).await
+    }
+
+    async fn read_to_end(&mut self, buf: &mut Vec<u8>, ctx: &RequestContext) -> Result<(), Error> {
+        self.inner.read_to_end(buf, ctx).await
+    }
+}
+
+#[cfg(test)]
+impl VirtualFileInner {
+    pub(crate) async fn read_blk(
+        &self,
+        blknum: u32,
+        ctx: &RequestContext,
+    ) -> Result<crate::tenant::block_io::BlockLease<'_>, std::io::Error> {
         use crate::page_cache::PAGE_SZ;
         let slice = Vec::with_capacity(PAGE_SZ).slice_full();
         assert_eq!(slice.bytes_total(), PAGE_SZ);
@@ -1066,7 +1249,7 @@ impl VirtualFile {
     }
 }
 
-impl Drop for VirtualFile {
+impl Drop for VirtualFileInner {
     /// If a VirtualFile is dropped, close the underlying file if it was open.
     fn drop(&mut self) {
         let handle = self.handle.get_mut();
@@ -1142,12 +1325,9 @@ impl OpenFiles {
 /// server startup.
 ///
 #[cfg(not(test))]
-pub fn init(num_slots: usize, engine: IoEngineKind, io_buffer_alignment: usize) {
+pub fn init(num_slots: usize, engine: IoEngineKind) {
     if OPEN_FILES.set(OpenFiles::new(num_slots)).is_err() {
         panic!("virtual_file::init called twice");
-    }
-    if set_io_buffer_alignment(io_buffer_alignment).is_err() {
-        panic!("IO buffer alignment ({io_buffer_alignment}) is not a power of two");
     }
     io_engine::init(engine);
     crate::metrics::virtual_file_descriptor_cache::SIZE_MAX.set(num_slots as u64);
@@ -1172,53 +1352,20 @@ fn get_open_files() -> &'static OpenFiles {
     }
 }
 
-static IO_BUFFER_ALIGNMENT: AtomicUsize = AtomicUsize::new(DEFAULT_IO_BUFFER_ALIGNMENT);
-
-/// Returns true if `x` is zero or a power of two.
-fn is_zero_or_power_of_two(x: usize) -> bool {
-    (x == 0) || ((x & (x - 1)) == 0)
+/// Gets the io buffer alignment.
+pub(crate) const fn get_io_buffer_alignment() -> usize {
+    DEFAULT_IO_BUFFER_ALIGNMENT
 }
 
-#[allow(unused)]
-pub(crate) fn set_io_buffer_alignment(align: usize) -> Result<(), usize> {
-    if is_zero_or_power_of_two(align) {
-        IO_BUFFER_ALIGNMENT.store(align, std::sync::atomic::Ordering::Relaxed);
-        Ok(())
-    } else {
-        Err(align)
-    }
+static IO_MODE: AtomicU8 = AtomicU8::new(IoMode::preferred() as u8);
+
+pub(crate) fn set_io_mode(mode: IoMode) {
+    IO_MODE.store(mode as u8, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// Gets the io buffer alignment requirement. Returns 0 if there is no requirement specified.
-///
-/// This function should be used to check the raw config value.
-pub(crate) fn get_io_buffer_alignment_raw() -> usize {
-    let align = IO_BUFFER_ALIGNMENT.load(std::sync::atomic::Ordering::Relaxed);
-
-    if cfg!(test) {
-        let env_var_name = "NEON_PAGESERVER_UNIT_TEST_IO_BUFFER_ALIGNMENT";
-        if let Some(test_align) = utils::env::var(env_var_name) {
-            if is_zero_or_power_of_two(test_align) {
-                test_align
-            } else {
-                panic!("IO buffer alignment ({test_align}) is not a power of two");
-            }
-        } else {
-            align
-        }
-    } else {
-        align
-    }
+pub(crate) fn get_io_mode() -> IoMode {
+    IoMode::try_from(IO_MODE.load(Ordering::Relaxed)).unwrap()
 }
-
-/// Gets the io buffer alignment requirement. Returns 1 if the alignment config is set to zero.
-///
-/// This function should be used for getting the actual alignment value to use.
-pub(crate) fn get_io_buffer_alignment() -> usize {
-    let align = get_io_buffer_alignment_raw();
-    align.max(1)
-}
-
 #[cfg(test)]
 mod tests {
     use crate::context::DownloadBehavior;
@@ -1527,7 +1674,7 @@ mod tests {
         // Open the file many times.
         let mut files = Vec::new();
         for _ in 0..VIRTUAL_FILES {
-            let f = VirtualFile::open_with_options(
+            let f = VirtualFileInner::open_with_options(
                 &test_file_path,
                 OpenOptions::new().read(true),
                 &ctx,
@@ -1579,7 +1726,7 @@ mod tests {
         let path = testdir.join("myfile");
         let tmp_path = testdir.join("myfile.tmp");
 
-        VirtualFile::crashsafe_overwrite(path.clone(), tmp_path.clone(), b"foo".to_vec())
+        VirtualFileInner::crashsafe_overwrite(path.clone(), tmp_path.clone(), b"foo".to_vec())
             .await
             .unwrap();
         let mut file = MaybeVirtualFile::from(VirtualFile::open(&path, &ctx).await.unwrap());
@@ -1588,7 +1735,7 @@ mod tests {
         assert!(!tmp_path.exists());
         drop(file);
 
-        VirtualFile::crashsafe_overwrite(path.clone(), tmp_path.clone(), b"bar".to_vec())
+        VirtualFileInner::crashsafe_overwrite(path.clone(), tmp_path.clone(), b"bar".to_vec())
             .await
             .unwrap();
         let mut file = MaybeVirtualFile::from(VirtualFile::open(&path, &ctx).await.unwrap());
@@ -1611,7 +1758,7 @@ mod tests {
         std::fs::write(&tmp_path, "some preexisting junk that should be removed").unwrap();
         assert!(tmp_path.exists());
 
-        VirtualFile::crashsafe_overwrite(path.clone(), tmp_path.clone(), b"foo".to_vec())
+        VirtualFileInner::crashsafe_overwrite(path.clone(), tmp_path.clone(), b"foo".to_vec())
             .await
             .unwrap();
 

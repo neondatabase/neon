@@ -27,19 +27,20 @@ NeonPerfCountersShmemSize(void)
 {
 	Size		size = 0;
 
-	size = add_size(size, mul_size(MaxBackends, sizeof(neon_per_backend_counters)));
+	size = add_size(size, mul_size(NUM_NEON_PERF_COUNTER_SLOTS,
+								   sizeof(neon_per_backend_counters)));
 
 	return size;
 }
 
-bool
+void
 NeonPerfCountersShmemInit(void)
 {
 	bool		found;
 
 	neon_per_backend_counters_shared =
 		ShmemInitStruct("Neon perf counters",
-						mul_size(MaxBackends,
+						mul_size(NUM_NEON_PERF_COUNTER_SLOTS,
 								 sizeof(neon_per_backend_counters)),
 						&found);
 	Assert(found == IsUnderPostmaster);
@@ -93,7 +94,6 @@ neon_perf_counters_to_metrics(neon_per_backend_counters *counters)
 	metric_t   *metrics = palloc((NUM_METRICS + 1) * sizeof(metric_t));
 	uint64		bucket_accum;
 	int			i = 0;
-	Datum		getpage_wait_str;
 
 	metrics[i].name = "getpage_wait_seconds_count";
 	metrics[i].is_bucket = false;
@@ -137,7 +137,7 @@ neon_perf_counters_to_metrics(neon_per_backend_counters *counters)
 	metrics[i].is_bucket = false;
 	metrics[i].value = (double) counters->pageserver_requests_sent_total;
 	i++;
-	metrics[i].name = "pageserver_requests_disconnects_total";
+	metrics[i].name = "pageserver_disconnects_total";
 	metrics[i].is_bucket = false;
 	metrics[i].value = (double) counters->pageserver_disconnects_total;
 	i++;
@@ -192,7 +192,7 @@ neon_get_backend_perf_counters(PG_FUNCTION_ARGS)
 	/* We put all the tuples into a tuplestore in one go. */
 	InitMaterializedSRF(fcinfo, 0);
 
-	for (int procno = 0; procno < MaxBackends; procno++)
+	for (int procno = 0; procno < NUM_NEON_PERF_COUNTER_SLOTS; procno++)
 	{
 		PGPROC	   *proc = GetPGProcByNumber(procno);
 		int			pid = proc->pid;
@@ -223,7 +223,6 @@ neon_get_perf_counters(PG_FUNCTION_ARGS)
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 	Datum		values[3];
 	bool		nulls[3];
-	Datum		getpage_wait_str;
 	neon_per_backend_counters totals = {0};
 	metric_t   *metrics;
 
@@ -231,7 +230,7 @@ neon_get_perf_counters(PG_FUNCTION_ARGS)
 	InitMaterializedSRF(fcinfo, 0);
 
 	/* Aggregate the counters across all backends */
-	for (int procno = 0; procno < MaxBackends; procno++)
+	for (int procno = 0; procno < NUM_NEON_PERF_COUNTER_SLOTS; procno++)
 	{
 		neon_per_backend_counters *counters = &neon_per_backend_counters_shared[procno];
 

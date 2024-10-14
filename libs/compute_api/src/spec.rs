@@ -50,6 +50,16 @@ pub struct ComputeSpec {
     #[serde(default)]
     pub swap_size_bytes: Option<u64>,
 
+    /// If compute_ctl was passed `--set-disk-quota-for-fs`, a value of `Some(_)` instructs
+    /// compute_ctl to run `/neonvm/bin/set-disk-quota` with the given size and fs, when the
+    /// spec is first received.
+    ///
+    /// Both this field and `--set-disk-quota-for-fs` are required, so that the control plane's
+    /// spec generation doesn't need to be aware of the actual compute it's running on, while
+    /// guaranteeing gradual rollout of disk quota.
+    #[serde(default)]
+    pub disk_quota_bytes: Option<u64>,
+
     /// Expected cluster state at the end of transition process.
     pub cluster: Cluster,
     pub delta_operations: Option<Vec<DeltaOp>>,
@@ -96,6 +106,10 @@ pub struct ComputeSpec {
     // Stripe size for pageserver sharding, in pages
     #[serde(default)]
     pub shard_stripe_size: Option<usize>,
+
+    /// Local Proxy configuration used for JWT authentication
+    #[serde(default)]
+    pub local_proxy_config: Option<LocalProxySpec>,
 }
 
 /// Feature flag to signal `compute_ctl` to enable certain experimental functionality.
@@ -267,6 +281,24 @@ pub struct GenericOption {
 /// Optional collection of `GenericOption`'s. Type alias allows us to
 /// declare a `trait` on it.
 pub type GenericOptions = Option<Vec<GenericOption>>;
+
+/// Configured the local_proxy application with the relevant JWKS and roles it should
+/// use for authorizing connect requests using JWT.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct LocalProxySpec {
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jwks: Option<Vec<JwksSettings>>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct JwksSettings {
+    pub id: String,
+    pub role_names: Vec<String>,
+    pub jwks_url: String,
+    pub provider_name: String,
+    pub jwt_audience: Option<String>,
+}
 
 #[cfg(test)]
 mod tests {

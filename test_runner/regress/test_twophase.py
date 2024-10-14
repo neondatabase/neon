@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 from pathlib import Path
 
@@ -96,7 +98,7 @@ def test_twophase(neon_simple_env: NeonEnv):
     Test branching, when a transaction is in prepared state
     """
     env = neon_simple_env
-    env.neon_cli.create_branch("test_twophase")
+    env.create_branch("test_twophase")
 
     twophase_test_on_timeline(env)
 
@@ -147,7 +149,7 @@ def test_twophase_at_wal_segment_start(neon_simple_env: NeonEnv):
     very first page of a WAL segment and the server was started up at that first page.
     """
     env = neon_simple_env
-    timeline_id = env.neon_cli.create_branch("test_twophase", "main")
+    timeline_id = env.create_branch("test_twophase", ancestor_branch_name="main")
 
     endpoint = env.endpoints.create_start(
         "test_twophase", config_lines=["max_prepared_transactions=5"]

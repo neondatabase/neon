@@ -1,27 +1,28 @@
 mod classic;
+mod console_redirect;
 mod hacks;
 pub mod jwt;
 pub mod local;
-mod web;
 
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+pub use console_redirect::ConsoleRedirectBackend;
+pub(crate) use console_redirect::WebAuthError;
 use ipnet::{Ipv4Net, Ipv6Net};
 use local::LocalBackend;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_postgres::config::AuthKeys;
 use tracing::{info, warn};
-pub(crate) use web::WebAuthError;
 
 use crate::auth::credentials::check_peer_addr_is_in_list;
 use crate::auth::{validate_password_and_exchange, AuthError};
 use crate::cache::Cached;
-use crate::console::errors::GetAuthInfoError;
-use crate::console::provider::{CachedRoleSecret, ConsoleBackend};
-use crate::console::{AuthSecret, NodeInfo};
 use crate::context::RequestMonitoring;
+use crate::control_plane::errors::GetAuthInfoError;
+use crate::control_plane::provider::{CachedRoleSecret, ControlPlaneBackend};
+use crate::control_plane::{AuthSecret, NodeInfo};
 use crate::intern::EndpointIdInt;
 use crate::metrics::Metrics;
 use crate::proxy::connect_compute::ComputeConnectBackend;
@@ -31,12 +32,12 @@ use crate::stream::Stream;
 use crate::{
     auth::{self, ComputeUserInfoMaybeEndpoint},
     config::AuthenticationConfig,
-    console::{
+    control_plane::{
         self,
         provider::{CachedAllowedIps, CachedNodeInfo},
         Api,
     },
-    stream, url,
+    stream,
 };
 use crate::{scram, EndpointCacheKey, EndpointId, RoleName};
 
@@ -67,36 +68,49 @@ impl<T> std::ops::Deref for MaybeOwned<'_, T> {
 ///   backends which require them for the authentication process.
 pub enum Backend<'a, T, D> {
     /// Cloud API (V2).
-    Console(MaybeOwned<'a, ConsoleBackend>, T),
+    ControlPlane(MaybeOwned<'a, ControlPlaneBackend>, T),
     /// Authentication via a web browser.
-    Web(MaybeOwned<'a, url::ApiUrl>, D),
+    ConsoleRedirect(MaybeOwned<'a, ConsoleRedirectBackend>, D),
     /// Local proxy uses configured auth credentials and does not wake compute
     Local(MaybeOwned<'a, LocalBackend>),
 }
 
 #[cfg(test)]
 pub(crate) trait TestBackend: Send + Sync + 'static {
-    fn wake_compute(&self) -> Result<CachedNodeInfo, console::errors::WakeComputeError>;
+    fn wake_compute(&self) -> Result<CachedNodeInfo, control_plane::errors::WakeComputeError>;
     fn get_allowed_ips_and_secret(
         &self,
-    ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), console::errors::GetAuthInfoError>;
+    ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), control_plane::errors::GetAuthInfoError>;
+    fn dyn_clone(&self) -> Box<dyn TestBackend>;
+}
+
+#[cfg(test)]
+impl Clone for Box<dyn TestBackend> {
+    fn clone(&self) -> Self {
+        TestBackend::dyn_clone(&**self)
+    }
 }
 
 impl std::fmt::Display for Backend<'_, (), ()> {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Console(api, ()) => match &**api {
-                ConsoleBackend::Console(endpoint) => {
-                    fmt.debug_tuple("Console").field(&endpoint.url()).finish()
-                }
+            Self::ControlPlane(api, ()) => match &**api {
+                ControlPlaneBackend::Management(endpoint) => fmt
+                    .debug_tuple("ControlPlane::Management")
+                    .field(&endpoint.url())
+                    .finish(),
                 #[cfg(any(test, feature = "testing"))]
-                ConsoleBackend::Postgres(endpoint) => {
-                    fmt.debug_tuple("Postgres").field(&endpoint.url()).finish()
-                }
+                ControlPlaneBackend::PostgresMock(endpoint) => fmt
+                    .debug_tuple("ControlPlane::PostgresMock")
+                    .field(&endpoint.url())
+                    .finish(),
                 #[cfg(test)]
-                ConsoleBackend::Test(_) => fmt.debug_tuple("Test").finish(),
+                ControlPlaneBackend::Test(_) => fmt.debug_tuple("ControlPlane::Test").finish(),
             },
-            Self::Web(url, ()) => fmt.debug_tuple("Web").field(&url.as_str()).finish(),
+            Self::ConsoleRedirect(backend, ()) => fmt
+                .debug_tuple("ConsoleRedirect")
+                .field(&backend.url().as_str())
+                .finish(),
             Self::Local(_) => fmt.debug_tuple("Local").finish(),
         }
     }
@@ -107,8 +121,8 @@ impl<T, D> Backend<'_, T, D> {
     /// This helps us pass structured config to async tasks.
     pub(crate) fn as_ref(&self) -> Backend<'_, &T, &D> {
         match self {
-            Self::Console(c, x) => Backend::Console(MaybeOwned::Borrowed(c), x),
-            Self::Web(c, x) => Backend::Web(MaybeOwned::Borrowed(c), x),
+            Self::ControlPlane(c, x) => Backend::ControlPlane(MaybeOwned::Borrowed(c), x),
+            Self::ConsoleRedirect(c, x) => Backend::ConsoleRedirect(MaybeOwned::Borrowed(c), x),
             Self::Local(l) => Backend::Local(MaybeOwned::Borrowed(l)),
         }
     }
@@ -120,8 +134,8 @@ impl<'a, T, D> Backend<'a, T, D> {
     /// a function to a contained value.
     pub(crate) fn map<R>(self, f: impl FnOnce(T) -> R) -> Backend<'a, R, D> {
         match self {
-            Self::Console(c, x) => Backend::Console(c, f(x)),
-            Self::Web(c, x) => Backend::Web(c, x),
+            Self::ControlPlane(c, x) => Backend::ControlPlane(c, f(x)),
+            Self::ConsoleRedirect(c, x) => Backend::ConsoleRedirect(c, x),
             Self::Local(l) => Backend::Local(l),
         }
     }
@@ -131,8 +145,8 @@ impl<'a, T, D, E> Backend<'a, Result<T, E>, D> {
     /// This is most useful for error handling.
     pub(crate) fn transpose(self) -> Result<Backend<'a, T, D>, E> {
         match self {
-            Self::Console(c, x) => x.map(|x| Backend::Console(c, x)),
-            Self::Web(c, x) => Ok(Backend::Web(c, x)),
+            Self::ControlPlane(c, x) => x.map(|x| Backend::ControlPlane(c, x)),
+            Self::ConsoleRedirect(c, x) => Ok(Backend::ConsoleRedirect(c, x)),
             Self::Local(l) => Ok(Backend::Local(l)),
         }
     }
@@ -162,10 +176,12 @@ impl ComputeUserInfo {
     }
 }
 
+#[cfg_attr(test, derive(Debug))]
 pub(crate) enum ComputeCredentialKeys {
     #[cfg(any(test, feature = "testing"))]
     Password(Vec<u8>),
     AuthKeys(AuthKeys),
+    JwtPayload(Vec<u8>),
     None,
 }
 
@@ -226,7 +242,6 @@ impl AuthenticationConfig {
     pub(crate) fn check_rate_limit(
         &self,
         ctx: &RequestMonitoring,
-        config: &AuthenticationConfig,
         secret: AuthSecret,
         endpoint: &EndpointId,
         is_cleartext: bool,
@@ -250,7 +265,7 @@ impl AuthenticationConfig {
         let limit_not_exceeded = self.rate_limiter.check(
             (
                 endpoint_int,
-                MaskedIp::new(ctx.peer_addr(), config.rate_limit_ip_subnet),
+                MaskedIp::new(ctx.peer_addr(), self.rate_limit_ip_subnet),
             ),
             password_weight,
         );
@@ -282,7 +297,7 @@ impl AuthenticationConfig {
 /// All authentication flows will emit an AuthenticationOk message if successful.
 async fn auth_quirks(
     ctx: &RequestMonitoring,
-    api: &impl console::Api,
+    api: &impl control_plane::Api,
     user_info: ComputeUserInfoMaybeEndpoint,
     client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
     allow_cleartext: bool,
@@ -324,7 +339,6 @@ async fn auth_quirks(
     let secret = if let Some(secret) = secret {
         config.check_rate_limit(
             ctx,
-            config,
             secret,
             &info.endpoint,
             unauthenticated_password.is_some() || allow_cleartext,
@@ -404,8 +418,8 @@ impl<'a> Backend<'a, ComputeUserInfoMaybeEndpoint, &()> {
     /// Get username from the credentials.
     pub(crate) fn get_user(&self) -> &str {
         match self {
-            Self::Console(_, user_info) => &user_info.user,
-            Self::Web(_, ()) => "web",
+            Self::ControlPlane(_, user_info) => &user_info.user,
+            Self::ConsoleRedirect(_, ()) => "web",
             Self::Local(_) => "local",
         }
     }
@@ -421,7 +435,7 @@ impl<'a> Backend<'a, ComputeUserInfoMaybeEndpoint, &()> {
         endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     ) -> auth::Result<Backend<'a, ComputeCredentials, NodeInfo>> {
         let res = match self {
-            Self::Console(api, user_info) => {
+            Self::ControlPlane(api, user_info) => {
                 info!(
                     user = &*user_info.user,
                     project = user_info.endpoint(),
@@ -438,15 +452,15 @@ impl<'a> Backend<'a, ComputeUserInfoMaybeEndpoint, &()> {
                     endpoint_rate_limiter,
                 )
                 .await?;
-                Backend::Console(api, credentials)
+                Backend::ControlPlane(api, credentials)
             }
             // NOTE: this auth backend doesn't use client credentials.
-            Self::Web(url, ()) => {
+            Self::ConsoleRedirect(backend, ()) => {
                 info!("performing web authentication");
 
-                let info = web::authenticate(ctx, config, &url, client).await?;
+                let info = backend.authenticate(ctx, config, client).await?;
 
-                Backend::Web(url, info)
+                Backend::ConsoleRedirect(backend, info)
             }
             Self::Local(_) => {
                 return Err(auth::AuthError::bad_auth_method("invalid for local proxy"))
@@ -464,8 +478,8 @@ impl Backend<'_, ComputeUserInfo, &()> {
         ctx: &RequestMonitoring,
     ) -> Result<CachedRoleSecret, GetAuthInfoError> {
         match self {
-            Self::Console(api, user_info) => api.get_role_secret(ctx, user_info).await,
-            Self::Web(_, ()) => Ok(Cached::new_uncached(None)),
+            Self::ControlPlane(api, user_info) => api.get_role_secret(ctx, user_info).await,
+            Self::ConsoleRedirect(_, ()) => Ok(Cached::new_uncached(None)),
             Self::Local(_) => Ok(Cached::new_uncached(None)),
         }
     }
@@ -475,8 +489,10 @@ impl Backend<'_, ComputeUserInfo, &()> {
         ctx: &RequestMonitoring,
     ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), GetAuthInfoError> {
         match self {
-            Self::Console(api, user_info) => api.get_allowed_ips_and_secret(ctx, user_info).await,
-            Self::Web(_, ()) => Ok((Cached::new_uncached(Arc::new(vec![])), None)),
+            Self::ControlPlane(api, user_info) => {
+                api.get_allowed_ips_and_secret(ctx, user_info).await
+            }
+            Self::ConsoleRedirect(_, ()) => Ok((Cached::new_uncached(Arc::new(vec![])), None)),
             Self::Local(_) => Ok((Cached::new_uncached(Arc::new(vec![])), None)),
         }
     }
@@ -487,18 +503,18 @@ impl ComputeConnectBackend for Backend<'_, ComputeCredentials, NodeInfo> {
     async fn wake_compute(
         &self,
         ctx: &RequestMonitoring,
-    ) -> Result<CachedNodeInfo, console::errors::WakeComputeError> {
+    ) -> Result<CachedNodeInfo, control_plane::errors::WakeComputeError> {
         match self {
-            Self::Console(api, creds) => api.wake_compute(ctx, &creds.info).await,
-            Self::Web(_, info) => Ok(Cached::new_uncached(info.clone())),
+            Self::ControlPlane(api, creds) => api.wake_compute(ctx, &creds.info).await,
+            Self::ConsoleRedirect(_, info) => Ok(Cached::new_uncached(info.clone())),
             Self::Local(local) => Ok(Cached::new_uncached(local.node_info.clone())),
         }
     }
 
     fn get_keys(&self) -> &ComputeCredentialKeys {
         match self {
-            Self::Console(_, creds) => &creds.keys,
-            Self::Web(_, _) => &ComputeCredentialKeys::None,
+            Self::ControlPlane(_, creds) => &creds.keys,
+            Self::ConsoleRedirect(_, _) => &ComputeCredentialKeys::None,
             Self::Local(_) => &ComputeCredentialKeys::None,
         }
     }
@@ -509,10 +525,10 @@ impl ComputeConnectBackend for Backend<'_, ComputeCredentials, &()> {
     async fn wake_compute(
         &self,
         ctx: &RequestMonitoring,
-    ) -> Result<CachedNodeInfo, console::errors::WakeComputeError> {
+    ) -> Result<CachedNodeInfo, control_plane::errors::WakeComputeError> {
         match self {
-            Self::Console(api, creds) => api.wake_compute(ctx, &creds.info).await,
-            Self::Web(_, ()) => {
+            Self::ControlPlane(api, creds) => api.wake_compute(ctx, &creds.info).await,
+            Self::ConsoleRedirect(_, ()) => {
                 unreachable!("web auth flow doesn't support waking the compute")
             }
             Self::Local(local) => Ok(Cached::new_uncached(local.node_info.clone())),
@@ -521,8 +537,8 @@ impl ComputeConnectBackend for Backend<'_, ComputeCredentials, &()> {
 
     fn get_keys(&self) -> &ComputeCredentialKeys {
         match self {
-            Self::Console(_, creds) => &creds.keys,
-            Self::Web(_, ()) => &ComputeCredentialKeys::None,
+            Self::ControlPlane(_, creds) => &creds.keys,
+            Self::ConsoleRedirect(_, ()) => &ComputeCredentialKeys::None,
             Self::Local(_) => &ComputeCredentialKeys::None,
         }
     }
@@ -545,31 +561,31 @@ mod tests {
     use crate::{
         auth::{backend::MaskedIp, ComputeUserInfoMaybeEndpoint, IpPattern},
         config::AuthenticationConfig,
-        console::{
+        context::RequestMonitoring,
+        control_plane::{
             self,
             provider::{self, CachedAllowedIps, CachedRoleSecret},
             CachedNodeInfo,
         },
-        context::RequestMonitoring,
         proxy::NeonOptions,
         rate_limiter::{EndpointRateLimiter, RateBucketInfo},
         scram::{threadpool::ThreadPool, ServerSecret},
         stream::{PqStream, Stream},
     };
 
-    use super::{auth_quirks, AuthRateLimiter};
+    use super::{auth_quirks, jwt::JwkCache, AuthRateLimiter};
 
     struct Auth {
         ips: Vec<IpPattern>,
         secret: AuthSecret,
     }
 
-    impl console::Api for Auth {
+    impl control_plane::Api for Auth {
         async fn get_role_secret(
             &self,
             _ctx: &RequestMonitoring,
             _user_info: &super::ComputeUserInfo,
-        ) -> Result<CachedRoleSecret, console::errors::GetAuthInfoError> {
+        ) -> Result<CachedRoleSecret, control_plane::errors::GetAuthInfoError> {
             Ok(CachedRoleSecret::new_uncached(Some(self.secret.clone())))
         }
 
@@ -577,30 +593,44 @@ mod tests {
             &self,
             _ctx: &RequestMonitoring,
             _user_info: &super::ComputeUserInfo,
-        ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), console::errors::GetAuthInfoError>
-        {
+        ) -> Result<
+            (CachedAllowedIps, Option<CachedRoleSecret>),
+            control_plane::errors::GetAuthInfoError,
+        > {
             Ok((
                 CachedAllowedIps::new_uncached(Arc::new(self.ips.clone())),
                 Some(CachedRoleSecret::new_uncached(Some(self.secret.clone()))),
             ))
         }
 
+        async fn get_endpoint_jwks(
+            &self,
+            _ctx: &RequestMonitoring,
+            _endpoint: crate::EndpointId,
+        ) -> anyhow::Result<Vec<super::jwt::AuthRule>> {
+            unimplemented!()
+        }
+
         async fn wake_compute(
             &self,
             _ctx: &RequestMonitoring,
             _user_info: &super::ComputeUserInfo,
-        ) -> Result<CachedNodeInfo, console::errors::WakeComputeError> {
+        ) -> Result<CachedNodeInfo, control_plane::errors::WakeComputeError> {
             unimplemented!()
         }
     }
 
     static CONFIG: Lazy<AuthenticationConfig> = Lazy::new(|| AuthenticationConfig {
+        jwks_cache: JwkCache::default(),
         thread_pool: ThreadPool::new(1),
         scram_protocol_timeout: std::time::Duration::from_secs(5),
         rate_limiter_enabled: true,
         rate_limiter: AuthRateLimiter::new(&RateBucketInfo::DEFAULT_AUTH_SET),
         rate_limit_ip_subnet: 64,
         ip_allowlist_check_enabled: true,
+        is_auth_broker: false,
+        accept_jwts: false,
+        webauth_confirmation_timeout: std::time::Duration::from_secs(5),
     });
 
     async fn read_message(r: &mut (impl AsyncRead + Unpin), b: &mut BytesMut) -> PgMessage {

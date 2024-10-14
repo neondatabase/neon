@@ -8,11 +8,16 @@ use anyhow::{bail, ensure, Context};
 use arc_swap::ArcSwapOption;
 use dashmap::DashMap;
 use jose_jwk::crypto::KeyInfo;
-use serde::{Deserialize, Deserializer};
+use serde::{de::Visitor, Deserialize, Deserializer};
 use signature::Verifier;
 use tokio::time::Instant;
 
-use crate::{context::RequestMonitoring, http::parse_json_body_with_limit, EndpointId, RoleName};
+use crate::{
+    context::RequestMonitoring, http::parse_json_body_with_limit, intern::RoleNameInt, EndpointId,
+    RoleName,
+};
+
+use super::ComputeCredentialKeys;
 
 // TODO(conrad): make these configurable.
 const CLOCK_SKEW_LEEWAY: Duration = Duration::from_secs(30);
@@ -27,7 +32,6 @@ pub(crate) trait FetchAuthRules: Clone + Send + Sync + 'static {
         &self,
         ctx: &RequestMonitoring,
         endpoint: EndpointId,
-        role_name: RoleName,
     ) -> impl Future<Output = anyhow::Result<Vec<AuthRule>>> + Send;
 }
 
@@ -35,10 +39,11 @@ pub(crate) struct AuthRule {
     pub(crate) id: String,
     pub(crate) jwks_url: url::Url,
     pub(crate) audience: Option<String>,
+    pub(crate) role_names: Vec<RoleNameInt>,
 }
 
 #[derive(Default)]
-pub(crate) struct JwkCache {
+pub struct JwkCache {
     client: reqwest::Client,
 
     map: DashMap<(EndpointId, RoleName), Arc<JwkCacheEntryLock>>,
@@ -54,18 +59,28 @@ pub(crate) struct JwkCacheEntry {
 }
 
 impl JwkCacheEntry {
-    fn find_jwk_and_audience(&self, key_id: &str) -> Option<(&jose_jwk::Jwk, Option<&str>)> {
-        self.key_sets.values().find_map(|key_set| {
-            key_set
-                .find_key(key_id)
-                .map(|jwk| (jwk, key_set.audience.as_deref()))
-        })
+    fn find_jwk_and_audience(
+        &self,
+        key_id: &str,
+        role_name: &RoleName,
+    ) -> Option<(&jose_jwk::Jwk, Option<&str>)> {
+        self.key_sets
+            .values()
+            // make sure our requested role has access to the key set
+            .filter(|key_set| key_set.role_names.iter().any(|role| **role == **role_name))
+            // try and find the requested key-id in the key set
+            .find_map(|key_set| {
+                key_set
+                    .find_key(key_id)
+                    .map(|jwk| (jwk, key_set.audience.as_deref()))
+            })
     }
 }
 
 struct KeySet {
     jwks: jose_jwk::JwkSet,
     audience: Option<String>,
+    role_names: Vec<RoleNameInt>,
 }
 
 impl KeySet {
@@ -106,7 +121,6 @@ impl JwkCacheEntryLock {
         ctx: &RequestMonitoring,
         client: &reqwest::Client,
         endpoint: EndpointId,
-        role_name: RoleName,
         auth_rules: &F,
     ) -> anyhow::Result<Arc<JwkCacheEntry>> {
         // double check that no one beat us to updating the cache.
@@ -119,11 +133,10 @@ impl JwkCacheEntryLock {
             }
         }
 
-        let rules = auth_rules
-            .fetch_auth_rules(ctx, endpoint, role_name)
-            .await?;
+        let rules = auth_rules.fetch_auth_rules(ctx, endpoint).await?;
         let mut key_sets =
             ahash::HashMap::with_capacity_and_hasher(rules.len(), ahash::RandomState::new());
+
         // TODO(conrad): run concurrently
         // TODO(conrad): strip the JWKs urls (should be checked by cplane as well - cloud#16284)
         for rule in rules {
@@ -151,6 +164,7 @@ impl JwkCacheEntryLock {
                                 KeySet {
                                     jwks,
                                     audience: rule.audience,
+                                    role_names: rule.role_names,
                                 },
                             );
                         }
@@ -173,7 +187,6 @@ impl JwkCacheEntryLock {
         ctx: &RequestMonitoring,
         client: &reqwest::Client,
         endpoint: EndpointId,
-        role_name: RoleName,
         fetch: &F,
     ) -> Result<Arc<JwkCacheEntry>, anyhow::Error> {
         let now = Instant::now();
@@ -183,9 +196,7 @@ impl JwkCacheEntryLock {
         let Some(cached) = guard else {
             let _paused = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
             let permit = self.acquire_permit().await;
-            return self
-                .renew_jwks(permit, ctx, client, endpoint, role_name, fetch)
-                .await;
+            return self.renew_jwks(permit, ctx, client, endpoint, fetch).await;
         };
 
         let last_update = now.duration_since(cached.last_retrieved);
@@ -196,9 +207,7 @@ impl JwkCacheEntryLock {
             let permit = self.acquire_permit().await;
 
             // it's been too long since we checked the keys. wait for them to update.
-            return self
-                .renew_jwks(permit, ctx, client, endpoint, role_name, fetch)
-                .await;
+            return self.renew_jwks(permit, ctx, client, endpoint, fetch).await;
         }
 
         // every 5 minutes we should spawn a job to eagerly update the token.
@@ -212,7 +221,7 @@ impl JwkCacheEntryLock {
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
                     if let Err(e) = entry
-                        .renew_jwks(permit, &ctx, &client, endpoint, role_name, &fetch)
+                        .renew_jwks(permit, &ctx, &client, endpoint, &fetch)
                         .await
                     {
                         tracing::warn!(error=?e, "could not fetch JWKs in background job");
@@ -232,9 +241,9 @@ impl JwkCacheEntryLock {
         jwt: &str,
         client: &reqwest::Client,
         endpoint: EndpointId,
-        role_name: RoleName,
+        role_name: &RoleName,
         fetch: &F,
-    ) -> Result<(), anyhow::Error> {
+    ) -> Result<ComputeCredentialKeys, anyhow::Error> {
         // JWT compact form is defined to be
         // <B64(Header)> || . || <B64(Payload)> || . || <B64(Signature)>
         // where Signature = alg(<B64(Header)> || . || <B64(Payload)>);
@@ -254,30 +263,22 @@ impl JwkCacheEntryLock {
         let sig = base64::decode_config(signature, base64::URL_SAFE_NO_PAD)
             .context("Provided authentication token is not a valid JWT encoding")?;
 
-        ensure!(header.typ == "JWT");
         let kid = header.key_id.context("missing key id")?;
 
         let mut guard = self
-            .get_or_update_jwk_cache(ctx, client, endpoint.clone(), role_name.clone(), fetch)
+            .get_or_update_jwk_cache(ctx, client, endpoint.clone(), fetch)
             .await?;
 
         // get the key from the JWKs if possible. If not, wait for the keys to update.
         let (jwk, expected_audience) = loop {
-            match guard.find_jwk_and_audience(kid) {
+            match guard.find_jwk_and_audience(kid, role_name) {
                 Some(jwk) => break jwk,
                 None if guard.last_retrieved.elapsed() > MIN_RENEW => {
                     let _paused = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
 
                     let permit = self.acquire_permit().await;
                     guard = self
-                        .renew_jwks(
-                            permit,
-                            ctx,
-                            client,
-                            endpoint.clone(),
-                            role_name.clone(),
-                            fetch,
-                        )
+                        .renew_jwks(permit, ctx, client, endpoint.clone(), fetch)
                         .await?;
                 }
                 _ => {
@@ -296,38 +297,39 @@ impl JwkCacheEntryLock {
                 verify_ec_signature(header_payload.as_bytes(), &sig, key)?;
             }
             jose_jwk::Key::Rsa(key) => {
-                verify_rsa_signature(header_payload.as_bytes(), &sig, key, &jwk.prm.alg)?;
+                verify_rsa_signature(header_payload.as_bytes(), &sig, key, &header.algorithm)?;
             }
             key => bail!("unsupported key type {key:?}"),
         };
 
-        let payload = base64::decode_config(payload, base64::URL_SAFE_NO_PAD)
+        let payloadb = base64::decode_config(payload, base64::URL_SAFE_NO_PAD)
             .context("Provided authentication token is not a valid JWT encoding")?;
-        let payload = serde_json::from_slice::<JwtPayload<'_>>(&payload)
+        let payload = serde_json::from_slice::<JwtPayload<'_>>(&payloadb)
             .context("Provided authentication token is not a valid JWT encoding")?;
 
         tracing::debug!(?payload, "JWT signature valid with claims");
 
-        match (expected_audience, payload.audience) {
-            // check the audience matches
-            (Some(aud1), Some(aud2)) => ensure!(aud1 == aud2, "invalid JWT token audience"),
-            // the audience is expected but is missing
-            (Some(_), None) => bail!("invalid JWT token audience"),
-            // we don't care for the audience field
-            (None, _) => {}
+        if let Some(aud) = expected_audience {
+            ensure!(
+                payload.audience.0.iter().any(|s| s == aud),
+                "invalid JWT token audience"
+            );
         }
 
         let now = SystemTime::now();
 
         if let Some(exp) = payload.expiration {
-            ensure!(now < exp + CLOCK_SKEW_LEEWAY);
+            ensure!(now < exp + CLOCK_SKEW_LEEWAY, "JWT token has expired");
         }
 
         if let Some(nbf) = payload.not_before {
-            ensure!(nbf < now + CLOCK_SKEW_LEEWAY);
+            ensure!(
+                nbf < now + CLOCK_SKEW_LEEWAY,
+                "JWT token is not yet ready to use"
+            );
         }
 
-        Ok(())
+        Ok(ComputeCredentialKeys::JwtPayload(payloadb))
     }
 }
 
@@ -336,10 +338,10 @@ impl JwkCache {
         &self,
         ctx: &RequestMonitoring,
         endpoint: EndpointId,
-        role_name: RoleName,
+        role_name: &RoleName,
         fetch: &F,
         jwt: &str,
-    ) -> Result<(), anyhow::Error> {
+    ) -> Result<ComputeCredentialKeys, anyhow::Error> {
         // try with just a read lock first
         let key = (endpoint.clone(), role_name.clone());
         let entry = self.map.get(&key).as_deref().map(Arc::clone);
@@ -377,7 +379,7 @@ fn verify_rsa_signature(
     data: &[u8],
     sig: &[u8],
     key: &jose_jwk::Rsa,
-    alg: &Option<jose_jwa::Algorithm>,
+    alg: &jose_jwa::Algorithm,
 ) -> anyhow::Result<()> {
     use jose_jwa::{Algorithm, Signing};
     use rsa::{
@@ -388,7 +390,7 @@ fn verify_rsa_signature(
     let key = RsaPublicKey::try_from(key).map_err(|_| anyhow::anyhow!("invalid RSA key"))?;
 
     match alg {
-        Some(Algorithm::Signing(Signing::Rs256)) => {
+        Algorithm::Signing(Signing::Rs256) => {
             let key = VerifyingKey::<sha2::Sha256>::new(key);
             let sig = Signature::try_from(sig)?;
             key.verify(data, &sig)?;
@@ -402,9 +404,6 @@ fn verify_rsa_signature(
 /// <https://datatracker.ietf.org/doc/html/rfc7515#section-4.1>
 #[derive(serde::Deserialize, serde::Serialize)]
 struct JwtHeader<'a> {
-    /// must be "JWT"
-    #[serde(rename = "typ")]
-    typ: &'a str,
     /// must be a supported alg
     #[serde(rename = "alg")]
     algorithm: jose_jwa::Algorithm,
@@ -414,11 +413,12 @@ struct JwtHeader<'a> {
 }
 
 /// <https://datatracker.ietf.org/doc/html/rfc7519#section-4.1>
-#[derive(serde::Deserialize, serde::Serialize, Debug)]
+#[derive(serde::Deserialize, Debug)]
+#[allow(dead_code)]
 struct JwtPayload<'a> {
     /// Audience - Recipient for which the JWT is intended
-    #[serde(rename = "aud")]
-    audience: Option<&'a str>,
+    #[serde(rename = "aud", default)]
+    audience: OneOrMany,
     /// Expiration - Time after which the JWT expires
     #[serde(deserialize_with = "numeric_date_opt", rename = "exp", default)]
     expiration: Option<SystemTime>,
@@ -439,6 +439,59 @@ struct JwtPayload<'a> {
     /// Unique session identifier
     #[serde(rename = "sid")]
     session_id: Option<&'a str>,
+}
+
+/// `OneOrMany` supports parsing either a single item or an array of items.
+///
+/// Needed for <https://datatracker.ietf.org/doc/html/rfc7519#section-4.1.3>
+///
+/// > The "aud" (audience) claim identifies the recipients that the JWT is
+/// > intended for.  Each principal intended to process the JWT MUST
+/// > identify itself with a value in the audience claim.  If the principal
+/// > processing the claim does not identify itself with a value in the
+/// > "aud" claim when this claim is present, then the JWT MUST be
+/// > rejected.  In the general case, the "aud" value is **an array of case-
+/// > sensitive strings**, each containing a StringOrURI value.  In the
+/// > special case when the JWT has one audience, the "aud" value MAY be a
+/// > **single case-sensitive string** containing a StringOrURI value.  The
+/// > interpretation of audience values is generally application specific.
+/// > Use of this claim is OPTIONAL.
+#[derive(Default, Debug)]
+struct OneOrMany(Vec<String>);
+
+impl<'de> Deserialize<'de> for OneOrMany {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct OneOrManyVisitor;
+        impl<'de> Visitor<'de> for OneOrManyVisitor {
+            type Value = OneOrMany;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a single string or an array of strings")
+            }
+
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(OneOrMany(vec![v.to_owned()]))
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                let mut v = vec![];
+                while let Some(s) = seq.next_element()? {
+                    v.push(s);
+                }
+                Ok(OneOrMany(v))
+            }
+        }
+        deserializer.deserialize_any(OneOrManyVisitor)
+    }
 }
 
 fn numeric_date_opt<'de, D: Deserializer<'de>>(d: D) -> Result<Option<SystemTime>, D::Error> {
@@ -520,7 +573,7 @@ mod tests {
     use bytes::Bytes;
     use http::Response;
     use http_body_util::Full;
-    use hyper1::service::service_fn;
+    use hyper::service::service_fn;
     use hyper_util::rt::TokioIo;
     use rand::rngs::OsRng;
     use rsa::pkcs8::DecodePrivateKey;
@@ -534,7 +587,6 @@ mod tests {
             key: jose_jwk::Key::Ec(pk),
             prm: jose_jwk::Parameters {
                 kid: Some(kid),
-                alg: Some(jose_jwa::Algorithm::Signing(jose_jwa::Signing::Es256)),
                 ..Default::default()
             },
         };
@@ -548,7 +600,6 @@ mod tests {
             key: jose_jwk::Key::Rsa(pk),
             prm: jose_jwk::Parameters {
                 kid: Some(kid),
-                alg: Some(jose_jwa::Algorithm::Signing(jose_jwa::Signing::Rs256)),
                 ..Default::default()
             },
         };
@@ -557,7 +608,6 @@ mod tests {
 
     fn build_jwt_payload(kid: String, sig: jose_jwa::Signing) -> String {
         let header = JwtHeader {
-            typ: "JWT",
             algorithm: jose_jwa::Algorithm::Signing(sig),
             key_id: Some(&kid),
         };
@@ -572,7 +622,7 @@ mod tests {
         format!("{header}.{body}")
     }
 
-    fn new_ec_jwt(kid: String, key: p256::SecretKey) -> String {
+    fn new_ec_jwt(kid: String, key: &p256::SecretKey) -> String {
         use p256::ecdsa::{Signature, SigningKey};
 
         let payload = build_jwt_payload(kid, jose_jwa::Signing::Es256);
@@ -660,11 +710,6 @@ X0n5X2/pBLJzxZc62ccvZYVnctBiFs6HbSnxpuMQCfkt/BcR/ttIepBQQIW86wHL
         let (ec1, jwk3) = new_ec_jwk("3".into());
         let (ec2, jwk4) = new_ec_jwk("4".into());
 
-        let jwt1 = new_rsa_jwt("1".into(), rs1);
-        let jwt2 = new_rsa_jwt("2".into(), rs2);
-        let jwt3 = new_ec_jwt("3".into(), ec1);
-        let jwt4 = new_ec_jwt("4".into(), ec2);
-
         let foo_jwks = jose_jwk::JwkSet {
             keys: vec![jwk1, jwk3],
         };
@@ -693,7 +738,7 @@ X0n5X2/pBLJzxZc62ccvZYVnctBiFs6HbSnxpuMQCfkt/BcR/ttIepBQQIW86wHL
         });
 
         let listener = TcpListener::bind("0.0.0.0:0").await.unwrap();
-        let server = hyper1::server::conn::http1::Builder::new();
+        let server = hyper::server::conn::http1::Builder::new();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             loop {
@@ -706,47 +751,98 @@ X0n5X2/pBLJzxZc62ccvZYVnctBiFs6HbSnxpuMQCfkt/BcR/ttIepBQQIW86wHL
         let client = reqwest::Client::new();
 
         #[derive(Clone)]
-        struct Fetch(SocketAddr);
+        struct Fetch(SocketAddr, Vec<RoleNameInt>);
 
         impl FetchAuthRules for Fetch {
             async fn fetch_auth_rules(
                 &self,
                 _ctx: &RequestMonitoring,
                 _endpoint: EndpointId,
-                _role_name: RoleName,
             ) -> anyhow::Result<Vec<AuthRule>> {
                 Ok(vec![
                     AuthRule {
                         id: "foo".to_owned(),
                         jwks_url: format!("http://{}/foo", self.0).parse().unwrap(),
                         audience: None,
+                        role_names: self.1.clone(),
                     },
                     AuthRule {
                         id: "bar".to_owned(),
                         jwks_url: format!("http://{}/bar", self.0).parse().unwrap(),
                         audience: None,
+                        role_names: self.1.clone(),
                     },
                 ])
             }
         }
 
-        let role_name = RoleName::from("user");
+        let role_name1 = RoleName::from("anonymous");
+        let role_name2 = RoleName::from("authenticated");
+
+        let fetch = Fetch(
+            addr,
+            vec![
+                RoleNameInt::from(&role_name1),
+                RoleNameInt::from(&role_name2),
+            ],
+        );
+
         let endpoint = EndpointId::from("ep");
 
         let jwk_cache = Arc::new(JwkCacheEntryLock::default());
 
-        for token in [jwt1, jwt2, jwt3, jwt4] {
-            jwk_cache
-                .check_jwt(
-                    &RequestMonitoring::test(),
-                    &token,
-                    &client,
-                    endpoint.clone(),
-                    role_name.clone(),
-                    &Fetch(addr),
-                )
-                .await
-                .unwrap();
+        let jwt1 = new_rsa_jwt("1".into(), rs1);
+        let jwt2 = new_rsa_jwt("2".into(), rs2);
+        let jwt3 = new_ec_jwt("3".into(), &ec1);
+        let jwt4 = new_ec_jwt("4".into(), &ec2);
+
+        // had the wrong kid, therefore will have the wrong ecdsa signature
+        let bad_jwt = new_ec_jwt("3".into(), &ec2);
+        // this role_name is not accepted
+        let bad_role_name = RoleName::from("cloud_admin");
+
+        let err = jwk_cache
+            .check_jwt(
+                &RequestMonitoring::test(),
+                &bad_jwt,
+                &client,
+                endpoint.clone(),
+                &role_name1,
+                &fetch,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("signature error"));
+
+        let err = jwk_cache
+            .check_jwt(
+                &RequestMonitoring::test(),
+                &jwt1,
+                &client,
+                endpoint.clone(),
+                &bad_role_name,
+                &fetch,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("jwk not found"));
+
+        let tokens = [jwt1, jwt2, jwt3, jwt4];
+        let role_names = [role_name1, role_name2];
+        for role in &role_names {
+            for token in &tokens {
+                jwk_cache
+                    .check_jwt(
+                        &RequestMonitoring::test(),
+                        token,
+                        &client,
+                        endpoint.clone(),
+                        role,
+                        &fetch,
+                    )
+                    .await
+                    .unwrap();
+            }
         }
     }
 }

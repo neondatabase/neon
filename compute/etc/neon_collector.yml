@@ -94,6 +94,68 @@ metrics:
   query: |
     select sum(pg_database_size(datname)) as total from pg_database;
 
+- metric_name: getpage_wait_seconds_count
+  type: counter
+  help: 'Number of getpage requests'
+  values: [getpage_wait_seconds_count]
+  query_ref: neon_perf_counters
+
+- metric_name: getpage_wait_seconds_sum
+  type: counter
+  help: 'Time spent in getpage requests'
+  values: [getpage_wait_seconds_sum]
+  query_ref: neon_perf_counters
+
+- metric_name: getpage_prefetch_requests_total
+  type: counter
+  help: 'Number of getpage issued for prefetching'
+  values: [getpage_prefetch_requests_total]
+  query_ref: neon_perf_counters
+
+- metric_name: getpage_sync_requests_total
+  type: counter
+  help: 'Number of synchronous getpage issued'
+  values: [getpage_sync_requests_total]
+  query_ref: neon_perf_counters
+
+- metric_name: getpage_prefetch_misses_total
+  type: counter
+  help: 'Total number of readahead misses; consisting of either prefetches that don''t satisfy the LSN bounds once the prefetch got read by the backend, or cases where somehow no readahead was issued for the read'
+  values: [getpage_prefetch_misses_total]
+  query_ref: neon_perf_counters
+
+- metric_name: getpage_prefetch_discards_total
+  type: counter
+  help: 'Number of prefetch responses issued but not used'
+  values: [getpage_prefetch_discards_total]
+  query_ref: neon_perf_counters
+
+- metric_name: pageserver_requests_sent_total
+  type: counter
+  help: 'Number of all requests sent to the pageserver (not just GetPage requests)'
+  values: [pageserver_requests_sent_total]
+  query_ref: neon_perf_counters
+
+- metric_name: pageserver_disconnects_total
+  type: counter
+  help: 'Number of times that the connection to the pageserver was lost'
+  values: [pageserver_disconnects_total]
+  query_ref: neon_perf_counters
+
+- metric_name: pageserver_send_flushes_total
+  type: counter
+  help: 'Number of flushes to the pageserver connection'
+  values: [pageserver_send_flushes_total]
+  query_ref: neon_perf_counters
+
+- metric_name: getpage_wait_seconds_bucket
+  type: counter
+  help: 'Histogram buckets of getpage request latency'
+  key_labels:
+      - bucket_le
+  values: [value]
+  query_ref: getpage_wait_seconds_buckets
+
 # DEPRECATED
 - metric_name: lfc_approximate_working_set_size
   type: gauge
@@ -195,7 +257,7 @@ metrics:
       -- Postgres creates temporary snapshot files of the form %X-%X.snap.%d.tmp. These
       -- temporary snapshot files are renamed to the actual snapshot files after they are
       -- completely built. We only WAL-log the completely built snapshot files.
-      (SELECT COUNT(*) FROM pg_ls_logicalsnapdir() WHERE name LIKE '%.snap') AS num_logical_snapshot_files;
+      (SELECT COUNT(*) FROM pg_ls_dir('pg_logical/snapshots') AS name WHERE name LIKE '%.snap') AS num_logical_snapshot_files;
 
 # In all the below metrics, we cast LSNs to floats because Prometheus only supports floats.
 # It's probably fine because float64 can store integers from -2^53 to +2^53 exactly.
@@ -245,3 +307,25 @@ metrics:
            CASE WHEN wal_status = 'lost' THEN 1 ELSE 0 END AS wal_is_lost
     FROM pg_replication_slots;
 
+queries:
+  - query_name: neon_perf_counters
+    query: |
+      WITH c AS (
+        SELECT pg_catalog.jsonb_object_agg(metric, value) jb FROM neon.neon_perf_counters
+      )
+      SELECT d.*
+      FROM pg_catalog.jsonb_to_record((select jb from c)) as d(
+          getpage_wait_seconds_count numeric,
+          getpage_wait_seconds_sum numeric,
+          getpage_prefetch_requests_total numeric,
+          getpage_sync_requests_total numeric,
+          getpage_prefetch_misses_total numeric,
+          getpage_prefetch_discards_total numeric,
+          pageserver_requests_sent_total numeric,
+          pageserver_disconnects_total numeric,
+          pageserver_send_flushes_total numeric
+      );
+
+  - query_name: getpage_wait_seconds_buckets
+    query: |
+      SELECT bucket_le, value FROM neon.neon_perf_counters WHERE metric = 'getpage_wait_seconds_bucket';

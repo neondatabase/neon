@@ -1,7 +1,9 @@
+from __future__ import annotations
+
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.log_helper import log
@@ -11,6 +13,9 @@ from fixtures.neon_fixtures import (
     NeonPageserver,
 )
 from fixtures.pageserver.utils import wait_timeline_detail_404
+
+if TYPE_CHECKING:
+    from typing import Optional
 
 
 @pytest.mark.parametrize("sharded", [True, False])
@@ -28,7 +33,7 @@ def test_gc_blocking_by_timeline(neon_env_builder: NeonEnvBuilder, sharded: bool
 
     pss = ManyPageservers(list(map(lambda ps: ScrollableLog(ps, None), env.pageservers)))
 
-    foo_branch = env.neon_cli.create_branch("foo", "main", env.initial_tenant)
+    foo_branch = env.create_branch("foo", ancestor_branch_name="main", tenant_id=env.initial_tenant)
 
     gc_active_line = ".* gc_loop.*: [12] timelines need GC"
     gc_skipped_line = ".* gc_loop.*: Skipping GC: .*"
@@ -45,10 +50,7 @@ def test_gc_blocking_by_timeline(neon_env_builder: NeonEnvBuilder, sharded: bool
     tenant_after = http.tenant_status(env.initial_tenant)
     assert tenant_before != tenant_after
     gc_blocking = tenant_after["gc_blocking"]
-    assert (
-        gc_blocking
-        == "BlockingReasons { tenant_blocked_by_lsn_lease_deadline: false, timelines: 1, reasons: EnumSet(Manual) }"
-    )
+    assert gc_blocking == "BlockingReasons { timelines: 1, reasons: EnumSet(Manual) }"
 
     wait_for_another_gc_round()
     pss.assert_log_contains(gc_skipped_line)
@@ -101,7 +103,7 @@ class ScrollableLog:
 
 @dataclass(frozen=True)
 class ManyPageservers:
-    many: List[ScrollableLog]
+    many: list[ScrollableLog]
 
     def assert_log_contains(self, what: str):
         for one in self.many:

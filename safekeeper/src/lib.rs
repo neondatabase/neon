@@ -1,4 +1,7 @@
 #![deny(clippy::undocumented_unsafe_blocks)]
+
+extern crate hyper0 as hyper;
+
 use camino::Utf8PathBuf;
 use once_cell::sync::Lazy;
 use remote_storage::RemoteStorageConfig;
@@ -161,7 +164,7 @@ pub static HTTP_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
         .thread_name("HTTP worker")
         .enable_all()
         .build()
-        .expect("Failed to create WAL service runtime")
+        .expect("Failed to create HTTP runtime")
 });
 
 pub static BROKER_RUNTIME: Lazy<Runtime> = Lazy::new(|| {

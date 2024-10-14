@@ -12,7 +12,7 @@ use anyhow::Context as _;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use framed_websockets::{Frame, OpCode, WebSocketServer};
 use futures::{Sink, Stream};
-use hyper1::upgrade::OnUpgrade;
+use hyper::upgrade::OnUpgrade;
 use hyper_util::rt::TokioIo;
 use pin_project_lite::pin_project;
 
@@ -129,6 +129,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncBufRead for WebSocketRw<S> {
 
 pub(crate) async fn serve_websocket(
     config: &'static ProxyConfig,
+    auth_backend: &'static crate::auth::Backend<'static, (), ()>,
     ctx: RequestMonitoring,
     websocket: OnUpgrade,
     cancellation_handler: Arc<CancellationHandlerMain>,
@@ -145,6 +146,7 @@ pub(crate) async fn serve_websocket(
 
     let res = Box::pin(handle_client(
         config,
+        auth_backend,
         &ctx,
         cancellation_handler,
         WebSocketRw::new(websocket),

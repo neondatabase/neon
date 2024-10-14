@@ -330,7 +330,6 @@ async fn gc_loop(tenant: Arc<Tenant>, cancel: CancellationToken) {
             RequestContext::todo_child(TaskKind::GarbageCollector, DownloadBehavior::Download);
 
         let mut first = true;
-        tenant.gc_block.set_lsn_lease_deadline(tenant.get_lsn_lease_length());
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => {
@@ -481,8 +480,7 @@ async fn ingest_housekeeping_loop(tenant: Arc<Tenant>, cancel: CancellationToken
                 let allowed_rps = tenant.timeline_get_throttle.steady_rps();
                 let delta = now - prev;
                 info!(
-                    n_seconds=%format_args!("{:.3}",
-                    delta.as_secs_f64()),
+                    n_seconds=%format_args!("{:.3}", delta.as_secs_f64()),
                     count_accounted = count_accounted_finish,  // don't break existing log scraping
                     count_throttled,
                     sum_throttled_usecs,

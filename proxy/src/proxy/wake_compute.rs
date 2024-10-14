@@ -1,13 +1,13 @@
 use crate::config::RetryConfig;
-use crate::console::messages::{ConsoleError, Reason};
-use crate::console::{errors::WakeComputeError, provider::CachedNodeInfo};
 use crate::context::RequestMonitoring;
+use crate::control_plane::messages::{ControlPlaneError, Reason};
+use crate::control_plane::{errors::WakeComputeError, provider::CachedNodeInfo};
 use crate::metrics::{
     ConnectOutcome, ConnectionFailuresBreakdownGroup, Metrics, RetriesMetricGroup, RetryType,
     WakeupFailureKind,
 };
 use crate::proxy::retry::{retry_after, should_retry};
-use hyper1::StatusCode;
+use hyper::StatusCode;
 use tracing::{error, info, warn};
 
 use super::connect_compute::ComputeConnectBackend;
@@ -59,11 +59,11 @@ pub(crate) async fn wake_compute<B: ComputeConnectBackend>(
 }
 
 fn report_error(e: &WakeComputeError, retry: bool) {
-    use crate::console::errors::ApiError;
+    use crate::control_plane::errors::ApiError;
     let kind = match e {
         WakeComputeError::BadComputeAddress(_) => WakeupFailureKind::BadComputeAddress,
         WakeComputeError::ApiError(ApiError::Transport(_)) => WakeupFailureKind::ApiTransportError,
-        WakeComputeError::ApiError(ApiError::Console(e)) => match e.get_reason() {
+        WakeComputeError::ApiError(ApiError::ControlPlane(e)) => match e.get_reason() {
             Reason::RoleProtected => WakeupFailureKind::ApiConsoleBadRequest,
             Reason::ResourceNotFound => WakeupFailureKind::ApiConsoleBadRequest,
             Reason::ProjectNotFound => WakeupFailureKind::ApiConsoleBadRequest,
@@ -80,7 +80,7 @@ fn report_error(e: &WakeComputeError, retry: bool) {
             Reason::LockAlreadyTaken => WakeupFailureKind::ApiConsoleLocked,
             Reason::RunningOperations => WakeupFailureKind::ApiConsoleLocked,
             Reason::Unknown => match e {
-                ConsoleError {
+                ControlPlaneError {
                     http_status_code: StatusCode::LOCKED,
                     ref error,
                     ..
@@ -89,27 +89,27 @@ fn report_error(e: &WakeComputeError, retry: bool) {
                 {
                     WakeupFailureKind::QuotaExceeded
                 }
-                ConsoleError {
+                ControlPlaneError {
                     http_status_code: StatusCode::UNPROCESSABLE_ENTITY,
                     ref error,
                     ..
                 } if error.contains("compute time quota of non-primary branches is exceeded") => {
                     WakeupFailureKind::QuotaExceeded
                 }
-                ConsoleError {
+                ControlPlaneError {
                     http_status_code: StatusCode::LOCKED,
                     ..
                 } => WakeupFailureKind::ApiConsoleLocked,
-                ConsoleError {
+                ControlPlaneError {
                     http_status_code: StatusCode::BAD_REQUEST,
                     ..
                 } => WakeupFailureKind::ApiConsoleBadRequest,
-                ConsoleError {
+                ControlPlaneError {
                     http_status_code, ..
                 } if http_status_code.is_server_error() => {
                     WakeupFailureKind::ApiConsoleOtherServerError
                 }
-                ConsoleError { .. } => WakeupFailureKind::ApiConsoleOtherError,
+                ControlPlaneError { .. } => WakeupFailureKind::ApiConsoleOtherError,
             },
         },
         WakeComputeError::TooManyConnections => WakeupFailureKind::ApiConsoleLocked,

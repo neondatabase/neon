@@ -21,7 +21,10 @@
 //! redo Postgres process, but some records it can handle directly with
 //! bespoken Rust code.
 
+use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::Duration;
+use std::time::Instant;
 use std::time::SystemTime;
 
 use pageserver_api::shard::ShardIdentity;
@@ -69,7 +72,29 @@ impl CheckPoint {
     }
 }
 
+/// Temporary limitation of WAL lag warnings after attach
+///
+/// After tenant attach, we want to limit WAL lag warnings because
+/// we don't look at the WAL until the attach is complete, which
+/// might take a while.
+pub struct WalLagCooldown {
+    /// Until when should this limitation apply at all
+    active_until: std::time::Instant,
+    /// The maximum lag to suppress. Lags above this limit get reported anyways.
+    max_lag: Duration,
+}
+
+impl WalLagCooldown {
+    pub fn new(attach_start: Instant, attach_duration: Duration) -> Self {
+        Self {
+            active_until: attach_start + attach_duration * 3 + Duration::from_secs(120),
+            max_lag: attach_duration * 2 + Duration::from_secs(60),
+        }
+    }
+}
+
 pub struct WalIngest {
+    attach_wal_lag_cooldown: Arc<OnceLock<WalLagCooldown>>,
     shard: ShardIdentity,
     checkpoint: CheckPoint,
     checkpoint_modified: bool,
@@ -103,6 +128,7 @@ impl WalIngest {
             shard: *timeline.get_shard_identity(),
             checkpoint,
             checkpoint_modified: false,
+            attach_wal_lag_cooldown: timeline.attach_wal_lag_cooldown.clone(),
             warn_ingest_lag: WarnIngestLag {
                 lag_msg_ratelimit: RateLimit::new(std::time::Duration::from_secs(10)),
                 future_lsn_msg_ratelimit: RateLimit::new(std::time::Duration::from_secs(10)),
@@ -1429,6 +1455,13 @@ impl WalIngest {
                     Ok(lag) => {
                         if lag > conf.wait_lsn_timeout {
                             rate_limits.lag_msg_ratelimit.call2(|rate_limit_stats| {
+                                if let Some(cooldown) = self.attach_wal_lag_cooldown.get() {
+                                    if std::time::Instant::now() < cooldown.active_until && lag <= cooldown.max_lag {
+                                        return;
+                                    }
+                                } else {
+                                    // Still loading? We shouldn't be here
+                                }
                                 let lag = humantime::format_duration(lag);
                                 warn!(%rate_limit_stats, %lag, "ingesting record with timestamp lagging more than wait_lsn_timeout");
                             })

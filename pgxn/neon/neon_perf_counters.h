@@ -96,6 +96,14 @@ typedef struct
 /* Pointer to the shared memory array of neon_per_backend_counters structs */
 extern neon_per_backend_counters *neon_per_backend_counters_shared;
 
+/*
+ * Size of the perf counters array in shared memory. One slot for each backend
+ * and aux process. IOW one for each PGPROC slot, except for slots reserved
+ * for prepared transactions, because they're not real processes and cannot do
+ * I/O.
+ */
+#define NUM_NEON_PERF_COUNTER_SLOTS (MaxBackends + NUM_AUXILIARY_PROCS)
+
 #if PG_VERSION_NUM >= 170000
 #define MyNeonCounters (&neon_per_backend_counters_shared[MyProcNumber])
 #else
@@ -105,7 +113,7 @@ extern neon_per_backend_counters *neon_per_backend_counters_shared;
 extern void inc_getpage_wait(uint64 latency);
 
 extern Size NeonPerfCountersShmemSize(void);
-extern bool NeonPerfCountersShmemInit(void);
+extern void NeonPerfCountersShmemInit(void);
 
 
 #endif							/* NEON_PERF_COUNTERS_H */

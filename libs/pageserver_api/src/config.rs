@@ -104,8 +104,7 @@ pub struct ConfigToml {
     pub image_compression: ImageCompressionAlgorithm,
     pub ephemeral_bytes_per_memory_kb: usize,
     pub l0_flush: Option<crate::models::L0FlushConfig>,
-    pub virtual_file_direct_io: crate::models::virtual_file::DirectIoMode,
-    pub io_buffer_alignment: usize,
+    pub virtual_file_io_mode: Option<crate::models::virtual_file::IoMode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -296,7 +295,14 @@ pub mod defaults {
 
     pub const DEFAULT_INGEST_BATCH_SIZE: u64 = 100;
 
-    pub const DEFAULT_MAX_VECTORED_READ_BYTES: usize = 128 * 1024; // 128 KiB
+    /// Soft limit for the maximum size of a vectored read.
+    ///
+    /// This is determined by the largest NeonWalRecord that can exist (minus dbdir and reldir keys
+    /// which are bounded by the blob io limits only). As of this writing, that is a `NeonWalRecord::ClogSetCommitted` record,
+    /// with 32k xids. That's the max number of XIDS on a single CLOG page. The size of such a record
+    /// is `sizeof(Transactionid) * 32768 + (some fixed overhead from 'timestamp`, the Vec length and whatever extra serde serialization adds)`.
+    /// That is, slightly above 128 kB.
+    pub const DEFAULT_MAX_VECTORED_READ_BYTES: usize = 130 * 1024; // 130 KiB
 
     pub const DEFAULT_IMAGE_COMPRESSION: ImageCompressionAlgorithm =
         ImageCompressionAlgorithm::Zstd { level: Some(1) };
@@ -381,10 +387,7 @@ impl Default for ConfigToml {
             image_compression: (DEFAULT_IMAGE_COMPRESSION),
             ephemeral_bytes_per_memory_kb: (DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB),
             l0_flush: None,
-            virtual_file_direct_io: crate::models::virtual_file::DirectIoMode::default(),
-
-            io_buffer_alignment: DEFAULT_IO_BUFFER_ALIGNMENT,
-
+            virtual_file_io_mode: None,
             tenant_config: TenantConfigToml::default(),
         }
     }

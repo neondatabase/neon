@@ -561,6 +561,7 @@ impl Endpoint {
             operation_uuid: None,
             features: self.features.clone(),
             swap_size_bytes: None,
+            disk_quota_bytes: None,
             cluster: Cluster {
                 cluster_id: None, // project ID: not used
                 name: None,       // project name: not used
@@ -598,6 +599,7 @@ impl Endpoint {
             remote_extensions,
             pgbouncer_settings: None,
             shard_stripe_size: Some(shard_stripe_size),
+            local_proxy_config: None,
         };
         let spec_path = self.endpoint_path().join("spec.json");
         std::fs::write(spec_path, serde_json::to_string_pretty(&spec)?)?;

@@ -1,8 +1,11 @@
+from __future__ import annotations
+
 import statistics
 import threading
 import time
 import timeit
-from typing import Any, Callable, Generator, List
+from collections.abc import Generator
+from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker
@@ -12,6 +15,9 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder, PgBin, flush_ep_to_pageserver
 
 from performance.test_perf_pgbench import get_durations_matrix, get_scales_matrix
+
+if TYPE_CHECKING:
+    from typing import Any, Callable
 
 
 @pytest.fixture(params=["vanilla", "neon_off", "neon_on"])
@@ -202,7 +208,7 @@ def record_lsn_write_lag(env: PgCompare, run_cond: Callable[[], bool], pool_inte
     if not isinstance(env, NeonCompare):
         return
 
-    lsn_write_lags: List[Any] = []
+    lsn_write_lags: list[Any] = []
     last_received_lsn = Lsn(0)
     last_pg_flush_lsn = Lsn(0)
 

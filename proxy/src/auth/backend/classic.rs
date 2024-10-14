@@ -3,8 +3,8 @@ use crate::{
     auth::{self, backend::ComputeCredentialKeys, AuthFlow},
     compute,
     config::AuthenticationConfig,
-    console::AuthSecret,
     context::RequestMonitoring,
+    control_plane::AuthSecret,
     sasl,
     stream::{PqStream, Stream},
 };

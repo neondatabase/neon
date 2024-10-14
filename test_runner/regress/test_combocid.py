@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from fixtures.neon_fixtures import NeonEnvBuilder, flush_ep_to_pageserver
 
 

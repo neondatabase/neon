@@ -218,6 +218,9 @@ runs:
         name: compatibility-snapshot-${{ runner.arch }}-${{ inputs.build_type }}-pg${{ inputs.pg_version }}
         # Directory is created by test_compatibility.py::test_create_snapshot, keep the path in sync with the test
         path: /tmp/test_output/compatibility_snapshot_pg${{ inputs.pg_version }}/
+        # The lack of compatibility snapshot shouldn't fail the job
+        # (for example if we didn't run the test for non build-and-test workflow)
+        skip-if-does-not-exist: true
 
     - name: Upload test results
       if: ${{ !cancelled() }}

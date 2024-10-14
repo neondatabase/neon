@@ -36,11 +36,12 @@ use crate::tenant::disk_btree::{
 };
 use crate::tenant::timeline::GetVectoredError;
 use crate::tenant::vectored_blob_io::{
-    BlobFlag, StreamingVectoredReadPlanner, VectoredBlobReader, VectoredRead, VectoredReadPlanner,
+    BlobFlag, BufView, StreamingVectoredReadPlanner, VectoredBlobReader, VectoredRead,
+    VectoredReadPlanner,
 };
 use crate::tenant::PageReconstructError;
 use crate::virtual_file::owned_buffers_io::io_buf_ext::IoBufExt;
-use crate::virtual_file::{self, VirtualFile};
+use crate::virtual_file::{self, MaybeFatalIo, VirtualFile};
 use crate::{IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX};
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use bytes::{Bytes, BytesMut};
@@ -48,6 +49,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use hex;
 use itertools::Itertools;
 use pageserver_api::config::MaxVectoredReadBytes;
+use pageserver_api::key::DBDIR_KEY;
 use pageserver_api::keyspace::KeySpace;
 use pageserver_api::shard::{ShardIdentity, TenantShardId};
 use rand::{distributions::Alphanumeric, Rng};
@@ -387,7 +389,7 @@ impl ImageLayerInner {
         max_vectored_read_bytes: Option<MaxVectoredReadBytes>,
         ctx: &RequestContext,
     ) -> anyhow::Result<Self> {
-        let file = VirtualFile::open(path, ctx)
+        let file = VirtualFile::open_v2(path, ctx)
             .await
             .context("open layer file")?;
         let file_id = page_cache::next_file_id();
@@ -547,15 +549,15 @@ impl ImageLayerInner {
 
             let buf = BytesMut::with_capacity(buf_size);
             let blobs_buf = vectored_blob_reader.read_blobs(&read, buf, ctx).await?;
-
             let frozen_buf = blobs_buf.buf.freeze();
+            let view = BufView::new_bytes(frozen_buf);
 
             for meta in blobs_buf.blobs.iter() {
-                let img_buf = frozen_buf.slice(meta.start..meta.end);
+                let img_buf = meta.read(&view).await?;
 
                 key_count += 1;
                 writer
-                    .put_image(meta.meta.key, img_buf, ctx)
+                    .put_image(meta.meta.key, img_buf.into_bytes(), ctx)
                     .await
                     .context(format!("Storing key {}", meta.meta.key))?;
             }
@@ -586,14 +588,25 @@ impl ImageLayerInner {
                     .blobs_at
                     .as_slice()
                     .iter()
-                    .map(|(_, blob_meta)| format!("{}@{}", blob_meta.key, blob_meta.lsn))
+                    .filter_map(|(_, blob_meta)| {
+                        if blob_meta.key.is_rel_dir_key() || blob_meta.key == DBDIR_KEY {
+                            // The size of values for these keys is unbounded and can
+                            // grow very large in pathological cases.
+                            None
+                        } else {
+                            Some(format!("{}@{}", blob_meta.key, blob_meta.lsn))
+                        }
+                    })
                     .join(", ");
-                tracing::warn!(
-                    "Oversized vectored read ({} > {}) for keys {}",
-                    buf_size,
-                    max_vectored_read_bytes,
-                    offenders
-                );
+
+                if !offenders.is_empty() {
+                    tracing::warn!(
+                        "Oversized vectored read ({} > {}) for keys {}",
+                        buf_size,
+                        max_vectored_read_bytes,
+                        offenders
+                    );
+                }
             }
 
             let buf = BytesMut::with_capacity(buf_size);
@@ -602,13 +615,28 @@ impl ImageLayerInner {
             match res {
                 Ok(blobs_buf) => {
                     let frozen_buf = blobs_buf.buf.freeze();
-
+                    let view = BufView::new_bytes(frozen_buf);
                     for meta in blobs_buf.blobs.iter() {
-                        let img_buf = frozen_buf.slice(meta.start..meta.end);
+                        let img_buf = meta.read(&view).await;
+
+                        let img_buf = match img_buf {
+                            Ok(img_buf) => img_buf,
+                            Err(e) => {
+                                reconstruct_state.on_key_error(
+                                    meta.meta.key,
+                                    PageReconstructError::Other(anyhow!(e).context(format!(
+                                        "Failed to decompress blob from virtual file {}",
+                                        self.file.path(),
+                                    ))),
+                                );
+
+                                continue;
+                            }
+                        };
                         reconstruct_state.update_key(
                             &meta.meta.key,
                             self.lsn,
-                            Value::Image(img_buf),
+                            Value::Image(img_buf.into_bytes()),
                         );
                     }
                 }
@@ -619,7 +647,7 @@ impl ImageLayerInner {
                             blob_meta.key,
                             PageReconstructError::from(anyhow!(
                                 "Failed to read blobs from virtual file {}: {}",
-                                self.file.path,
+                                self.file.path(),
                                 kind
                             )),
                         );
@@ -873,7 +901,9 @@ impl ImageLayerWriterInner {
         // set inner.file here. The first read will have to re-open it.
 
         // fsync the file
-        file.sync_all().await?;
+        file.sync_all()
+            .await
+            .maybe_fatal_err("image_layer sync_all")?;
 
         trace!("created image layer {}", self.path);
 
@@ -1025,10 +1055,15 @@ impl<'a> ImageLayerIterator<'a> {
         let blobs_buf = vectored_blob_reader
             .read_blobs(&plan, buf, self.ctx)
             .await?;
-        let frozen_buf: Bytes = blobs_buf.buf.freeze();
+        let frozen_buf = blobs_buf.buf.freeze();
+        let view = BufView::new_bytes(frozen_buf);
         for meta in blobs_buf.blobs.iter() {
-            let img_buf = frozen_buf.slice(meta.start..meta.end);
-            next_batch.push_back((meta.meta.key, self.image_layer.lsn, Value::Image(img_buf)));
+            let img_buf = meta.read(&view).await?;
+            next_batch.push_back((
+                meta.meta.key,
+                self.image_layer.lsn,
+                Value::Image(img_buf.into_bytes()),
+            ));
         }
         self.key_values_batch = next_batch;
         Ok(())

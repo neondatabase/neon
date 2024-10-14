@@ -1,8 +1,10 @@
+from __future__ import annotations
+
 import enum
 import json
 import os
 import time
-from typing import Optional
+from typing import TYPE_CHECKING
 
 import pytest
 from fixtures.log_helper import log
@@ -13,6 +15,10 @@ from fixtures.neon_fixtures import (
 from fixtures.pageserver.http import PageserverApiException
 from fixtures.utils import wait_until
 from fixtures.workload import Workload
+
+if TYPE_CHECKING:
+    from typing import Optional
+
 
 AGGRESIVE_COMPACTION_TENANT_CONF = {
     # Disable gc and compaction. The test runs compaction manually.
@@ -63,7 +69,10 @@ page_cache_size=10
             log.info(f"Running churn round {i}/{churn_rounds} ...")
 
         workload.churn_rows(row_count, env.pageserver.id)
-        ps_http.timeline_compact(tenant_id, timeline_id)
+        # Force L0 compaction to ensure the number of layers is within bounds; we don't want to count L0 layers
+        # in this benchmark. In other words, this smoke test ensures number of L1 layers are bound.
+        ps_http.timeline_compact(tenant_id, timeline_id, force_l0_compaction=True)
+        assert ps_http.perf_info(tenant_id, timeline_id)[0]["num_of_l0"] <= 1
 
     log.info("Validating at workload end ...")
     workload.validate(env.pageserver.id)

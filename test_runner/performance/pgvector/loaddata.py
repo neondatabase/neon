@@ -1,10 +1,12 @@
+from __future__ import annotations
+
 import sys
 from pathlib import Path
 
-import numpy as np
-import pandas as pd
+import numpy as np  # type: ignore [import]
+import pandas as pd  # type: ignore [import]
 import psycopg2
-from pgvector.psycopg2 import register_vector
+from pgvector.psycopg2 import register_vector  # type: ignore [import]
 from psycopg2.extras import execute_values
 
 

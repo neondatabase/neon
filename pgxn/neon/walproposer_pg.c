@@ -286,6 +286,9 @@ safekeepers_cmp(char *old, char *new)
 static void
 assign_neon_safekeepers(const char *newval, void *extra)
 {
+	char	   *newval_copy;
+	char	   *oldval;
+
 	if (!am_walproposer)
 		return;
 
@@ -295,8 +298,8 @@ assign_neon_safekeepers(const char *newval, void *extra)
 	}
 
 	/* Copy values because we will modify them in split_safekeepers_list() */
-	char *newval_copy = pstrdup(newval);
-	char *oldval = pstrdup(wal_acceptors_list);
+	newval_copy = pstrdup(newval);
+	oldval = pstrdup(wal_acceptors_list);
 
 	/* 
 	 * TODO: restarting through FATAL is stupid and introduces 1s delay before
@@ -422,6 +425,9 @@ backpressure_throttling_impl(void)
 	TimestampTz start,
 				stop;
 	bool		retry = false;
+	char	   *new_status = NULL;
+	const char *old_status;
+	int			len;
 
 	if (PointerIsValid(PrevProcessInterruptsCallback))
 		retry = PrevProcessInterruptsCallback();
@@ -442,14 +448,24 @@ backpressure_throttling_impl(void)
 	if (lag == 0)
 		return retry;
 
-	/* Suspend writers until replicas catch up */
-	set_ps_display("backpressure throttling");
+
+	old_status = get_ps_display(&len);
+	new_status = (char *) palloc(len + 64 + 1);
+	memcpy(new_status, old_status, len);
+	snprintf(new_status + len, 64, "backpressure throttling: lag %lu", lag);
+	set_ps_display(new_status);
+	new_status[len] = '\0'; /* truncate off " backpressure ..." to later reset the ps */
 
 	elog(DEBUG2, "backpressure throttling: lag %lu", lag);
 	start = GetCurrentTimestamp();
 	pg_usleep(BACK_PRESSURE_DELAY);
 	stop = GetCurrentTimestamp();
 	pg_atomic_add_fetch_u64(&walprop_shared->backpressureThrottlingTime, stop - start);
+
+	/* Reset ps display */
+	set_ps_display(new_status);
+	pfree(new_status);
+
 	return true;
 }
 
@@ -525,7 +541,7 @@ nwp_shmem_startup_hook(void)
 }
 
 WalproposerShmemState *
-GetWalpropShmemState()
+GetWalpropShmemState(void)
 {
 	Assert(walprop_shared != NULL);
 	return walprop_shared;
@@ -1473,11 +1489,33 @@ walprop_pg_wal_read(Safekeeper *sk, char *buf, XLogRecPtr startptr, Size count, 
 {
 	NeonWALReadResult res;
 
-	res = NeonWALRead(sk->xlogreader,
-					  buf,
-					  startptr,
-					  count,
-					  walprop_pg_get_timeline_id());
+#if PG_MAJORVERSION_NUM >= 17
+	if (!sk->wp->config->syncSafekeepers)
+	{
+		Size	rbytes;
+		rbytes = WALReadFromBuffers(buf, startptr, count,
+									walprop_pg_get_timeline_id());
+
+		startptr += rbytes;
+		count -= rbytes;
+	}
+#endif
+
+	if (count == 0)
+	{
+		res = NEON_WALREAD_SUCCESS;
+	}
+	else
+	{
+		Assert(count > 0);
+
+		/* Now read the remaining WAL from the WAL file */
+		res = NeonWALRead(sk->xlogreader,
+						  buf,
+						  startptr,
+						  count,
+						  walprop_pg_get_timeline_id());
+	}
 
 	if (res == NEON_WALREAD_SUCCESS)
 	{
@@ -1779,7 +1817,7 @@ walprop_pg_wait_event_set(WalProposer *wp, long timeout, Safekeeper **sk, uint32
 	 * If wait is terminated by latch set (walsenders' latch is set on each
 	 * wal flush). (no need for pm death check due to WL_EXIT_ON_PM_DEATH)
 	 */
-	if ((rc == 1 && event.events & WL_LATCH_SET) || late_cv_trigger)
+	if ((rc == 1 && (event.events & WL_LATCH_SET)) || late_cv_trigger)
 	{
 		/* Reset our latch */
 		ResetLatch(MyLatch);
@@ -1791,7 +1829,7 @@ walprop_pg_wait_event_set(WalProposer *wp, long timeout, Safekeeper **sk, uint32
 	 * If the event contains something about the socket, it means we got an
 	 * event from a safekeeper socket.
 	 */
-	if (rc == 1 && (event.events & (WL_SOCKET_MASK)))
+	if (rc == 1 && (event.events & WL_SOCKET_MASK))
 	{
 		*sk = (Safekeeper *) event.user_data;
 		*events = event.events;

@@ -42,6 +42,7 @@
 
 #include "hll.h"
 #include "bitmap.h"
+#include "neon.h"
 
 #define CriticalAssert(cond) do if (!(cond)) elog(PANIC, "Assertion %s failed at %s:%d: ", #cond, __FILE__, __LINE__); while (0)
 
@@ -169,11 +170,15 @@ lfc_disable(char const *op)
 
 		if (lfc_desc > 0)
 		{
+			int			rc;
+
 			/*
 			 * If the reason of error is ENOSPC, then truncation of file may
 			 * help to reclaim some space
 			 */
-			int			rc = ftruncate(lfc_desc, 0);
+			pgstat_report_wait_start(WAIT_EVENT_NEON_LFC_TRUNCATE);
+			rc = ftruncate(lfc_desc, 0);
+			pgstat_report_wait_end();
 
 			if (rc < 0)
 				elog(WARNING, "Failed to truncate local file cache %s: %m", lfc_path);
@@ -613,7 +618,7 @@ lfc_evict(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno)
 	 */
 	if (entry->bitmap[chunk_offs >> 5] == 0)
 	{
-		bool		has_remaining_pages;
+		bool		has_remaining_pages = false;
 
 		for (int i = 0; i < CHUNK_BITMAP_SIZE; i++)
 		{
@@ -663,7 +668,6 @@ lfc_readv_select(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 	BufferTag	tag;
 	FileCacheEntry *entry;
 	ssize_t		rc;
-	bool		result = true;
 	uint32		hash;
 	uint64		generation;
 	uint32		entry_offset;
@@ -769,8 +773,10 @@ lfc_readv_select(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 
 		if (iteration_hits != 0)
 		{
+			pgstat_report_wait_start(WAIT_EVENT_NEON_LFC_READ);
 			rc = preadv(lfc_desc, iov, blocks_in_chunk,
 						((off_t) entry_offset * BLOCKS_PER_CHUNK + chunk_offs) * BLCKSZ);
+			pgstat_report_wait_end();
 
 			if (rc != (BLCKSZ * blocks_in_chunk))
 			{
@@ -920,10 +926,10 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 				/* We can reuse a hole that was left behind when the LFC was shrunk previously */
 				FileCacheEntry *hole = dlist_container(FileCacheEntry, list_node, dlist_pop_head_node(&lfc_ctl->holes));
 				uint32		offset = hole->offset;
-				bool		found;
+				bool		hole_found;
 	
-				hash_search_with_hash_value(lfc_hash, &hole->key, hole->hash, HASH_REMOVE, &found);
-				CriticalAssert(found);
+				hash_search_with_hash_value(lfc_hash, &hole->key, hole->hash, HASH_REMOVE, &hole_found);
+				CriticalAssert(hole_found);
 	
 				lfc_ctl->used += 1;
 				entry->offset = offset;	/* reuse the hole */
@@ -944,8 +950,11 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 		lfc_ctl->writes += blocks_in_chunk;
 		LWLockRelease(lfc_lock);
 
+		pgstat_report_wait_start(WAIT_EVENT_NEON_LFC_WRITE);
 		rc = pwritev(lfc_desc, iov, blocks_in_chunk,
 					 ((off_t) entry_offset * BLOCKS_PER_CHUNK + chunk_offs) * BLCKSZ);
+		pgstat_report_wait_end();
+
 		if (rc != BLCKSZ * blocks_in_chunk)
 		{
 			lfc_disable("write");
@@ -996,7 +1005,7 @@ neon_get_lfc_stats(PG_FUNCTION_ARGS)
 	Datum		result;
 	HeapTuple	tuple;
 	char const *key;
-	uint64		value;
+	uint64		value = 0;
 	Datum		values[NUM_NEON_GET_STATS_COLS];
 	bool		nulls[NUM_NEON_GET_STATS_COLS];
 

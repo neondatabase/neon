@@ -1,8 +1,9 @@
+from __future__ import annotations
+
 import sys
 import tarfile
 import tempfile
 from pathlib import Path
-from typing import List
 
 import pytest
 import zstandard
@@ -38,7 +39,7 @@ def test_wal_restore(
     pg_distrib_dir: Path,
 ):
     env = neon_env_builder.init_start()
-    env.neon_cli.create_branch("test_wal_restore")
+    env.create_branch("test_wal_restore")
     endpoint = env.endpoints.create_start("test_wal_restore")
     endpoint.safe_psql("create table t as select generate_series(1,300000)")
     tenant_id = TenantId(endpoint.safe_psql("show neon.tenant_id")[0][0])
@@ -165,7 +166,7 @@ def test_wal_restore_http(neon_env_builder: NeonEnvBuilder, broken_tenant: bool)
 
     if broken_tenant:
         ps_client.tenant_detach(tenant_id)
-        objects: List[ObjectTypeDef] = list_prefix(
+        objects: list[ObjectTypeDef] = list_prefix(
             env.pageserver_remote_storage, f"tenants/{tenant_id}/timelines/{timeline_id}/"
         ).get("Contents", [])
         for obj in objects:

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import time
 
@@ -56,8 +58,10 @@ def test_clog_truncate(neon_simple_env: NeonEnv):
 
     # create new branch after clog truncation and start a compute node on it
     log.info(f"create branch at lsn_after_truncation {lsn_after_truncation}")
-    env.neon_cli.create_branch(
-        "test_clog_truncate_new", "main", ancestor_start_lsn=lsn_after_truncation
+    env.create_branch(
+        "test_clog_truncate_new",
+        ancestor_branch_name="main",
+        ancestor_start_lsn=lsn_after_truncation,
     )
     endpoint2 = env.endpoints.create_start("test_clog_truncate_new")
 

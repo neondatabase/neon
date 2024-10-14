@@ -89,7 +89,6 @@ typedef struct
 
 #if PG_VERSION_NUM >= 150000
 static shmem_request_hook_type prev_shmem_request_hook = NULL;
-static void walproposer_shmem_request(void);
 #endif
 static shmem_startup_hook_type prev_shmem_startup_hook;
 static PagestoreShmemState *pagestore_shared;
@@ -441,8 +440,8 @@ pageserver_connect(shardno_t shard_no, int elevel)
 			return false;
 		}
 		shard->state = PS_Connecting_Startup;
-		/* fallthrough */
 	}
+	/* FALLTHROUGH */
 	case PS_Connecting_Startup:
 	{
 		char	   *pagestream_query;
@@ -453,8 +452,6 @@ pageserver_connect(shardno_t shard_no, int elevel)
 
 		do
 		{
-			WaitEvent	event;
-
 			switch (poll_result)
 			{
 			default: /* unknown/unused states are handled as a failed connection */
@@ -490,7 +487,7 @@ pageserver_connect(shardno_t shard_no, int elevel)
 											   WL_EXIT_ON_PM_DEATH | WL_LATCH_SET | WL_SOCKET_READABLE,
 											   PQsocket(shard->conn),
 											   0,
-											   PG_WAIT_EXTENSION);
+											   WAIT_EVENT_NEON_PS_STARTING);
 					elog(DEBUG5, "PGRES_POLLING_READING=>%d", rc);
 					if (rc & WL_LATCH_SET)
 					{
@@ -512,7 +509,7 @@ pageserver_connect(shardno_t shard_no, int elevel)
 											   WL_EXIT_ON_PM_DEATH | WL_LATCH_SET | WL_SOCKET_WRITEABLE,
 											   PQsocket(shard->conn),
 											   0,
-											   PG_WAIT_EXTENSION);
+											   WAIT_EVENT_NEON_PS_STARTING);
 					elog(DEBUG5, "PGRES_POLLING_WRITING=>%d", rc);
 					if (rc & WL_LATCH_SET)
 					{
@@ -585,8 +582,8 @@ pageserver_connect(shardno_t shard_no, int elevel)
 		}
 
 		shard->state = PS_Connecting_PageStream;
-		/* fallthrough */
 	}
+	/* FALLTHROUGH */
 	case PS_Connecting_PageStream:
 	{
 		neon_shard_log(shard_no, DEBUG5, "Connection state: Connecting_PageStream");
@@ -608,7 +605,8 @@ pageserver_connect(shardno_t shard_no, int elevel)
 			WaitEvent	event;
 
 			/* Sleep until there's something to do */
-			(void) WaitEventSetWait(shard->wes_read, -1L, &event, 1, PG_WAIT_EXTENSION);
+			(void) WaitEventSetWait(shard->wes_read, -1L, &event, 1,
+									WAIT_EVENT_NEON_PS_CONFIGURING);
 			ResetLatch(MyLatch);
 
 			CHECK_FOR_INTERRUPTS();
@@ -630,8 +628,8 @@ pageserver_connect(shardno_t shard_no, int elevel)
 		}
 
 		shard->state = PS_Connected;
-		/* fallthrough */
 	}
+	/* FALLTHROUGH */
 	case PS_Connected:
 		/*
 		 * We successfully connected. Future connections to this PageServer
@@ -656,7 +654,8 @@ static int
 call_PQgetCopyData(shardno_t shard_no, char **buffer)
 {
 	int			ret;
-	PGconn	   *pageserver_conn = page_servers[shard_no].conn;
+	PageServer *shard = &page_servers[shard_no];
+	PGconn	   *pageserver_conn = shard->conn;
 
 retry:
 	ret = PQgetCopyData(pageserver_conn, buffer, 1 /* async */ );
@@ -666,7 +665,8 @@ retry:
 		WaitEvent	event;
 
 		/* Sleep until there's something to do */
-		(void) WaitEventSetWait(page_servers[shard_no].wes_read, -1L, &event, 1, PG_WAIT_EXTENSION);
+		(void) WaitEventSetWait(shard->wes_read, -1L, &event, 1,
+								WAIT_EVENT_NEON_PS_READ);
 		ResetLatch(MyLatch);
 
 		CHECK_FOR_INTERRUPTS();
@@ -937,7 +937,7 @@ PagestoreShmemInit(void)
 
 	LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
 	pagestore_shared = ShmemInitStruct("libpagestore shared state",
-									   PagestoreShmemSize(),
+									   sizeof(PagestoreShmemState),
 									   &found);
 	if (!found)
 	{

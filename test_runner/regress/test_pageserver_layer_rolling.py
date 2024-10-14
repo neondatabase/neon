@@ -1,7 +1,9 @@
+from __future__ import annotations
+
 import asyncio
 import os
 import time
-from typing import Optional, Tuple
+from typing import TYPE_CHECKING
 
 import psutil
 import pytest
@@ -15,6 +17,10 @@ from fixtures.neon_fixtures import (
 from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pageserver.utils import wait_for_last_record_lsn, wait_for_upload
 from fixtures.utils import wait_until
+
+if TYPE_CHECKING:
+    from typing import Optional
+
 
 TIMELINE_COUNT = 10
 ENTRIES_PER_TIMELINE = 10_000
@@ -41,21 +47,21 @@ async def run_worker_for_tenant(
         return last_flush_lsn
 
 
-async def run_worker(env: NeonEnv, tenant_conf, entries: int) -> Tuple[TenantId, TimelineId, Lsn]:
-    tenant, timeline = env.neon_cli.create_tenant(conf=tenant_conf)
+async def run_worker(env: NeonEnv, tenant_conf, entries: int) -> tuple[TenantId, TimelineId, Lsn]:
+    tenant, timeline = env.create_tenant(conf=tenant_conf)
     last_flush_lsn = await run_worker_for_tenant(env, entries, tenant)
     return tenant, timeline, last_flush_lsn
 
 
 async def workload(
     env: NeonEnv, tenant_conf, timelines: int, entries: int
-) -> list[Tuple[TenantId, TimelineId, Lsn]]:
+) -> list[tuple[TenantId, TimelineId, Lsn]]:
     workers = [asyncio.create_task(run_worker(env, tenant_conf, entries)) for _ in range(timelines)]
     return await asyncio.gather(*workers)
 
 
 def wait_until_pageserver_is_caught_up(
-    env: NeonEnv, last_flush_lsns: list[Tuple[TenantId, TimelineId, Lsn]]
+    env: NeonEnv, last_flush_lsns: list[tuple[TenantId, TimelineId, Lsn]]
 ):
     for tenant, timeline, last_flush_lsn in last_flush_lsns:
         shards = tenant_get_shards(env, tenant)
@@ -67,7 +73,7 @@ def wait_until_pageserver_is_caught_up(
 
 
 def wait_until_pageserver_has_uploaded(
-    env: NeonEnv, last_flush_lsns: list[Tuple[TenantId, TimelineId, Lsn]]
+    env: NeonEnv, last_flush_lsns: list[tuple[TenantId, TimelineId, Lsn]]
 ):
     for tenant, timeline, last_flush_lsn in last_flush_lsns:
         shards = tenant_get_shards(env, tenant)

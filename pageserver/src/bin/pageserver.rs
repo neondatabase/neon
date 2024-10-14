@@ -15,7 +15,7 @@ use clap::{Arg, ArgAction, Command};
 
 use metrics::launch_timestamp::{set_launch_timestamp_metric, LaunchTimestamp};
 use pageserver::config::PageserverIdentity;
-use pageserver::control_plane_client::ControlPlaneClient;
+use pageserver::controller_upcall_client::ControllerUpcallClient;
 use pageserver::disk_usage_eviction_task::{self, launch_disk_usage_global_eviction_task};
 use pageserver::metrics::{STARTUP_DURATION, STARTUP_IS_LOADING};
 use pageserver::task_mgr::{COMPUTE_REQUEST_RUNTIME, WALRECEIVER_RUNTIME};
@@ -125,8 +125,7 @@ fn main() -> anyhow::Result<()> {
 
     // after setting up logging, log the effective IO engine choice and read path implementations
     info!(?conf.virtual_file_io_engine, "starting with virtual_file IO engine");
-    info!(?conf.virtual_file_direct_io, "starting with virtual_file Direct IO settings");
-    info!(?conf.io_buffer_alignment, "starting with setting for IO buffer alignment");
+    info!(?conf.virtual_file_io_mode, "starting with virtual_file IO mode");
 
     // The tenants directory contains all the pageserver local disk state.
     // Create if not exists and make sure all the contents are durable before proceeding.
@@ -168,11 +167,7 @@ fn main() -> anyhow::Result<()> {
     let scenario = failpoint_support::init();
 
     // Basic initialization of things that don't change after startup
-    virtual_file::init(
-        conf.max_file_descriptors,
-        conf.virtual_file_io_engine,
-        conf.io_buffer_alignment,
-    );
+    virtual_file::init(conf.max_file_descriptors, conf.virtual_file_io_engine);
     page_cache::init(conf.page_cache_size);
 
     start_pageserver(launch_ts, conf).context("Failed to start pageserver")?;
@@ -396,7 +391,7 @@ fn start_pageserver(
     // Set up deletion queue
     let (deletion_queue, deletion_workers) = DeletionQueue::new(
         remote_storage.clone(),
-        ControlPlaneClient::new(conf, &shutdown_pageserver),
+        ControllerUpcallClient::new(conf, &shutdown_pageserver),
         conf,
     );
     if let Some(deletion_workers) = deletion_workers {
@@ -575,7 +570,7 @@ fn start_pageserver(
             .build()
             .map_err(|err| anyhow!(err))?;
         let service = utils::http::RouterService::new(router).unwrap();
-        let server = hyper::Server::from_tcp(http_listener)?
+        let server = hyper0::Server::from_tcp(http_listener)?
             .serve(service)
             .with_graceful_shutdown({
                 let cancel = cancel.clone();

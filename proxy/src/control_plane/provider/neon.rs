@@ -1,33 +1,39 @@
 //! Production console backend.
 
 use super::{
-    super::messages::{ConsoleError, GetRoleSecret, WakeCompute},
+    super::messages::{ControlPlaneError, GetRoleSecret, WakeCompute},
     errors::{ApiError, GetAuthInfoError, WakeComputeError},
     ApiCaches, ApiLocks, AuthInfo, AuthSecret, CachedAllowedIps, CachedNodeInfo, CachedRoleSecret,
     NodeInfo,
 };
 use crate::{
-    auth::backend::ComputeUserInfo,
+    auth::backend::{jwt::AuthRule, ComputeUserInfo},
     compute,
-    console::messages::{ColdStartInfo, Reason},
+    control_plane::messages::{ColdStartInfo, EndpointJwksResponse, Reason},
     http,
     metrics::{CacheOutcome, Metrics},
     rate_limiter::WakeComputeRateLimiter,
-    scram, EndpointCacheKey,
+    scram, EndpointCacheKey, EndpointId,
 };
 use crate::{cache::Cached, context::RequestMonitoring};
+use ::http::{header::AUTHORIZATION, HeaderName};
+use anyhow::bail;
 use futures::TryFutureExt;
 use std::{sync::Arc, time::Duration};
 use tokio::time::Instant;
 use tokio_postgres::config::SslMode;
-use tracing::{debug, error, info, info_span, warn, Instrument};
+use tracing::{debug, info, info_span, warn, Instrument};
 
+const X_REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
+
+#[derive(Clone)]
 pub struct Api {
     endpoint: http::Endpoint,
     pub caches: &'static ApiCaches,
     pub(crate) locks: &'static ApiLocks<EndpointCacheKey>,
     pub(crate) wake_compute_endpoint_rate_limiter: Arc<WakeComputeRateLimiter>,
-    jwt: String,
+    // put in a shared ref so we don't copy secrets all over in memory
+    jwt: Arc<str>,
 }
 
 impl Api {
@@ -38,7 +44,9 @@ impl Api {
         locks: &'static ApiLocks<EndpointCacheKey>,
         wake_compute_endpoint_rate_limiter: Arc<WakeComputeRateLimiter>,
     ) -> Self {
-        let jwt = std::env::var("NEON_PROXY_TO_CONTROLPLANE_TOKEN").unwrap_or_default();
+        let jwt = std::env::var("NEON_PROXY_TO_CONTROLPLANE_TOKEN")
+            .unwrap_or_default()
+            .into();
         Self {
             endpoint,
             caches,
@@ -71,9 +79,9 @@ impl Api {
         async {
             let request = self
                 .endpoint
-                .get("proxy_get_role_secret")
-                .header("X-Request-ID", &request_id)
-                .header("Authorization", format!("Bearer {}", &self.jwt))
+                .get_path("proxy_get_role_secret")
+                .header(X_REQUEST_ID, &request_id)
+                .header(AUTHORIZATION, format!("Bearer {}", &self.jwt))
                 .query(&[("session_id", ctx.session_id())])
                 .query(&[
                     ("application_name", application_name.as_str()),
@@ -125,6 +133,61 @@ impl Api {
         .await
     }
 
+    async fn do_get_endpoint_jwks(
+        &self,
+        ctx: &RequestMonitoring,
+        endpoint: EndpointId,
+    ) -> anyhow::Result<Vec<AuthRule>> {
+        if !self
+            .caches
+            .endpoints_cache
+            .is_valid(ctx, &endpoint.normalize())
+            .await
+        {
+            bail!("endpoint not found");
+        }
+        let request_id = ctx.session_id().to_string();
+        async {
+            let request = self
+                .endpoint
+                .get_with_url(|url| {
+                    url.path_segments_mut()
+                        .push("endpoints")
+                        .push(endpoint.as_str())
+                        .push("jwks");
+                })
+                .header(X_REQUEST_ID, &request_id)
+                .header(AUTHORIZATION, format!("Bearer {}", &self.jwt))
+                .query(&[("session_id", ctx.session_id())])
+                .build()?;
+
+            info!(url = request.url().as_str(), "sending http request");
+            let start = Instant::now();
+            let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Cplane);
+            let response = self.endpoint.execute(request).await?;
+            drop(pause);
+            info!(duration = ?start.elapsed(), "received http response");
+
+            let body = parse_body::<EndpointJwksResponse>(response).await?;
+
+            let rules = body
+                .jwks
+                .into_iter()
+                .map(|jwks| AuthRule {
+                    id: jwks.id,
+                    jwks_url: jwks.jwks_url,
+                    audience: jwks.jwt_audience,
+                    role_names: jwks.role_names,
+                })
+                .collect();
+
+            Ok(rules)
+        }
+        .map_err(crate::error::log_error)
+        .instrument(info_span!("http", id = request_id))
+        .await
+    }
+
     async fn do_wake_compute(
         &self,
         ctx: &RequestMonitoring,
@@ -135,7 +198,7 @@ impl Api {
         async {
             let mut request_builder = self
                 .endpoint
-                .get("proxy_wake_compute")
+                .get_path("proxy_wake_compute")
                 .header("X-Request-ID", &request_id)
                 .header("Authorization", format!("Bearer {}", &self.jwt))
                 .query(&[("session_id", ctx.session_id())])
@@ -263,6 +326,15 @@ impl super::Api for Api {
     }
 
     #[tracing::instrument(skip_all)]
+    async fn get_endpoint_jwks(
+        &self,
+        ctx: &RequestMonitoring,
+        endpoint: EndpointId,
+    ) -> anyhow::Result<Vec<AuthRule>> {
+        self.do_get_endpoint_jwks(ctx, endpoint).await
+    }
+
+    #[tracing::instrument(skip_all)]
     async fn wake_compute(
         &self,
         ctx: &RequestMonitoring,
@@ -276,7 +348,7 @@ impl super::Api for Api {
                     let (cached, info) = cached.take_value();
                     let info = info.map_err(|c| {
                         info!(key = &*key, "found cached wake_compute error");
-                        WakeComputeError::ApiError(ApiError::Console(*c))
+                        WakeComputeError::ApiError(ApiError::ControlPlane(*c))
                     })?;
 
                     debug!(key = &*key, "found cached compute node info");
@@ -323,9 +395,9 @@ impl super::Api for Api {
                 Ok(cached.map(|()| node))
             }
             Err(err) => match err {
-                WakeComputeError::ApiError(ApiError::Console(err)) => {
+                WakeComputeError::ApiError(ApiError::ControlPlane(err)) => {
                     let Some(status) = &err.status else {
-                        return Err(WakeComputeError::ApiError(ApiError::Console(err)));
+                        return Err(WakeComputeError::ApiError(ApiError::ControlPlane(err)));
                     };
 
                     let reason = status
@@ -335,7 +407,7 @@ impl super::Api for Api {
 
                     // if we can retry this error, do not cache it.
                     if reason.can_retry() {
-                        return Err(WakeComputeError::ApiError(ApiError::Console(err)));
+                        return Err(WakeComputeError::ApiError(ApiError::ControlPlane(err)));
                     }
 
                     // at this point, we should only have quota errors.
@@ -350,7 +422,7 @@ impl super::Api for Api {
                         Duration::from_secs(30),
                     );
 
-                    Err(WakeComputeError::ApiError(ApiError::Console(err)))
+                    Err(WakeComputeError::ApiError(ApiError::ControlPlane(err)))
                 }
                 err => return Err(err),
             },
@@ -376,7 +448,7 @@ async fn parse_body<T: for<'a> serde::Deserialize<'a>>(
     // as the fact that the request itself has failed.
     let mut body = serde_json::from_slice(&s).unwrap_or_else(|e| {
         warn!("failed to parse error body: {e}");
-        ConsoleError {
+        ControlPlaneError {
             error: "reason unclear (malformed error message)".into(),
             http_status_code: status,
             status: None,
@@ -384,8 +456,8 @@ async fn parse_body<T: for<'a> serde::Deserialize<'a>>(
     });
     body.http_status_code = status;
 
-    error!("console responded with an error ({status}): {body:?}");
-    Err(ApiError::Console(body))
+    warn!("console responded with an error ({status}): {body:?}");
+    Err(ApiError::ControlPlane(body))
 }
 
 fn parse_host_port(input: &str) -> Option<(&str, u16)> {

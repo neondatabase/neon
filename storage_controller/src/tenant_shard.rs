@@ -5,7 +5,9 @@ use std::{
 };
 
 use crate::{
-    metrics::{self, ReconcileCompleteLabelGroup, ReconcileOutcome},
+    metrics::{
+        self, ReconcileCompleteLabelGroup, ReconcileLongRunningLabelGroup, ReconcileOutcome,
+    },
     persistence::TenantShardPersistence,
     reconciler::{ReconcileUnits, ReconcilerConfig},
     scheduler::{
@@ -14,8 +16,10 @@ use crate::{
     },
     service::ReconcileResultRequest,
 };
+use futures::future::{self, Either};
+use itertools::Itertools;
 use pageserver_api::controller_api::{
-    NodeSchedulingPolicy, PlacementPolicy, ShardSchedulingPolicy,
+    AvailabilityZone, NodeSchedulingPolicy, PlacementPolicy, ShardSchedulingPolicy,
 };
 use pageserver_api::{
     models::{LocationConfig, LocationConfigMode, TenantConfig},
@@ -146,7 +150,7 @@ pub(crate) struct TenantShard {
 
     // We should attempt to schedule this shard in the provided AZ to
     // decrease chances of cross-AZ compute.
-    preferred_az_id: Option<String>,
+    preferred_az_id: Option<AvailabilityZone>,
 }
 
 #[derive(Default, Clone, Debug, Serialize)]
@@ -421,6 +425,22 @@ pub(crate) enum ReconcileNeeded {
     Yes,
 }
 
+/// Pending modification to the observed state of a tenant shard.
+/// Produced by [`Reconciler::observed_deltas`] and applied in [`crate::service::Service::process_result`].
+pub(crate) enum ObservedStateDelta {
+    Upsert(Box<(NodeId, ObservedStateLocation)>),
+    Delete(NodeId),
+}
+
+impl ObservedStateDelta {
+    pub(crate) fn node_id(&self) -> &NodeId {
+        match self {
+            Self::Upsert(up) => &up.0,
+            Self::Delete(nid) => nid,
+        }
+    }
+}
+
 /// When a reconcile task completes, it sends this result object
 /// to be applied to the primary TenantShard.
 pub(crate) struct ReconcileResult {
@@ -433,7 +453,7 @@ pub(crate) struct ReconcileResult {
 
     pub(crate) tenant_shard_id: TenantShardId,
     pub(crate) generation: Option<Generation>,
-    pub(crate) observed: ObservedState,
+    pub(crate) observed_deltas: Vec<ObservedStateDelta>,
 
     /// Set [`TenantShard::pending_compute_notification`] from this flag
     pub(crate) pending_compute_notification: bool,
@@ -540,14 +560,22 @@ impl TenantShard {
             Ok((true, promote_secondary))
         } else {
             // Pick a fresh node: either we had no secondaries or none were schedulable
-            let node_id =
-                scheduler.schedule_shard::<AttachedShardTag>(&self.intent.secondary, context)?;
+            let node_id = scheduler.schedule_shard::<AttachedShardTag>(
+                &self.intent.secondary,
+                &self.preferred_az_id,
+                context,
+            )?;
             tracing::debug!("Selected {} as attached", node_id);
             self.intent.set_attached(scheduler, Some(node_id));
             Ok((true, node_id))
         }
     }
 
+    #[instrument(skip_all, fields(
+        tenant_id=%self.tenant_shard_id.tenant_id,
+        shard_id=%self.tenant_shard_id.shard_slug(),
+        sequence=%self.sequence
+    ))]
     pub(crate) fn schedule(
         &mut self,
         scheduler: &mut Scheduler,
@@ -617,8 +645,11 @@ impl TenantShard {
 
                 let mut used_pageservers = vec![attached_node_id];
                 while self.intent.secondary.len() < secondary_count {
-                    let node_id = scheduler
-                        .schedule_shard::<SecondaryShardTag>(&used_pageservers, context)?;
+                    let node_id = scheduler.schedule_shard::<SecondaryShardTag>(
+                        &used_pageservers,
+                        &self.preferred_az_id,
+                        context,
+                    )?;
                     self.intent.push_secondary(scheduler, node_id);
                     used_pageservers.push(node_id);
                     modified = true;
@@ -631,7 +662,11 @@ impl TenantShard {
                     modified = true;
                 } else if self.intent.secondary.is_empty() {
                     // Populate secondary by scheduling a fresh node
-                    let node_id = scheduler.schedule_shard::<SecondaryShardTag>(&[], context)?;
+                    let node_id = scheduler.schedule_shard::<SecondaryShardTag>(
+                        &[],
+                        &self.preferred_az_id,
+                        context,
+                    )?;
                     self.intent.push_secondary(scheduler, node_id);
                     modified = true;
                 }
@@ -810,6 +845,7 @@ impl TenantShard {
             // with lower utilization.
             let Ok(candidate_node) = scheduler.schedule_shard::<SecondaryShardTag>(
                 &self.intent.all_pageservers(),
+                &self.preferred_az_id,
                 schedule_context,
             ) else {
                 // A scheduling error means we have no possible candidate replacements
@@ -1067,6 +1103,47 @@ impl TenantShard {
         }
     }
 
+    async fn reconcile(
+        sequence: Sequence,
+        mut reconciler: Reconciler,
+        must_notify: bool,
+    ) -> ReconcileResult {
+        // Attempt to make observed state match intent state
+        let result = reconciler.reconcile().await;
+
+        // If we know we had a pending compute notification from some previous action, send a notification irrespective
+        // of whether the above reconcile() did any work
+        if result.is_ok() && must_notify {
+            // If this fails we will send the need to retry in [`ReconcileResult::pending_compute_notification`]
+            reconciler.compute_notify().await.ok();
+        }
+
+        // Update result counter
+        let outcome_label = match &result {
+            Ok(_) => ReconcileOutcome::Success,
+            Err(ReconcileError::Cancel) => ReconcileOutcome::Cancel,
+            Err(_) => ReconcileOutcome::Error,
+        };
+
+        metrics::METRICS_REGISTRY
+            .metrics_group
+            .storage_controller_reconcile_complete
+            .inc(ReconcileCompleteLabelGroup {
+                status: outcome_label,
+            });
+
+        // Constructing result implicitly drops Reconciler, freeing any ReconcileUnits before the Service might
+        // try and schedule more work in response to our result.
+        ReconcileResult {
+            sequence,
+            result,
+            tenant_shard_id: reconciler.tenant_shard_id,
+            generation: reconciler.generation,
+            observed_deltas: reconciler.observed_deltas(),
+            pending_compute_notification: reconciler.compute_notify_failure,
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     #[instrument(skip_all, fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug()))]
     pub(crate) fn spawn_reconciler(
@@ -1106,7 +1183,7 @@ impl TenantShard {
 
         let reconciler_cancel = cancel.child_token();
         let reconciler_intent = TargetState::from_intent(pageservers, &self.intent);
-        let mut reconciler = Reconciler {
+        let reconciler = Reconciler {
             tenant_shard_id: self.tenant_shard_id,
             shard: self.shard,
             placement_policy: self.policy.clone(),
@@ -1116,6 +1193,7 @@ impl TenantShard {
             reconciler_config,
             config: self.config.clone(),
             observed: self.observed.clone(),
+            original_observed: self.observed.clone(),
             compute_hook: compute_hook.clone(),
             service_config: service_config.clone(),
             _gate_guard: gate_guard,
@@ -1126,6 +1204,7 @@ impl TenantShard {
         };
 
         let reconcile_seq = self.sequence;
+        let long_reconcile_threshold = service_config.long_reconcile_threshold;
 
         tracing::info!(seq=%reconcile_seq, "Spawning Reconciler for sequence {}", self.sequence);
         let must_notify = self.pending_compute_notification;
@@ -1162,40 +1241,54 @@ impl TenantShard {
                     return;
                 }
 
-                // Attempt to make observed state match intent state
-                let result = reconciler.reconcile().await;
+                let (tenant_id_label, shard_number_label, sequence_label) = {
+                    (
+                        reconciler.tenant_shard_id.tenant_id.to_string(),
+                        reconciler.tenant_shard_id.shard_number.0.to_string(),
+                        reconcile_seq.to_string(),
+                    )
+                };
 
-                // If we know we had a pending compute notification from some previous action, send a notification irrespective
-                // of whether the above reconcile() did any work
-                if result.is_ok() && must_notify {
-                    // If this fails we will send the need to retry in [`ReconcileResult::pending_compute_notification`]
-                    reconciler.compute_notify().await.ok();
+                let label_group = ReconcileLongRunningLabelGroup {
+                    tenant_id: &tenant_id_label,
+                    shard_number: &shard_number_label,
+                    sequence: &sequence_label,
+                };
+
+                let reconcile_fut = Self::reconcile(reconcile_seq, reconciler, must_notify);
+                let long_reconcile_fut = {
+                    let label_group = label_group.clone();
+                    async move {
+                        tokio::time::sleep(long_reconcile_threshold).await;
+
+                        tracing::warn!("Reconcile passed the long running threshold of {long_reconcile_threshold:?}");
+
+                        metrics::METRICS_REGISTRY
+                            .metrics_group
+                            .storage_controller_reconcile_long_running
+                            .inc(label_group);
+                    }
+                };
+
+                let reconcile_fut = std::pin::pin!(reconcile_fut);
+                let long_reconcile_fut = std::pin::pin!(long_reconcile_fut);
+
+                let (was_long, result) =
+                    match future::select(reconcile_fut, long_reconcile_fut).await {
+                        Either::Left((reconcile_result, _)) => (false, reconcile_result),
+                        Either::Right((_, reconcile_fut)) => (true, reconcile_fut.await),
+                    };
+
+                if was_long {
+                    let id = metrics::METRICS_REGISTRY
+                        .metrics_group
+                        .storage_controller_reconcile_long_running
+                        .with_labels(label_group);
+                    metrics::METRICS_REGISTRY
+                        .metrics_group
+                        .storage_controller_reconcile_long_running
+                        .remove_metric(id);
                 }
-
-                // Update result counter
-                let outcome_label = match &result {
-                    Ok(_) => ReconcileOutcome::Success,
-                    Err(ReconcileError::Cancel) => ReconcileOutcome::Cancel,
-                    Err(_) => ReconcileOutcome::Error,
-                };
-
-                metrics::METRICS_REGISTRY
-                    .metrics_group
-                    .storage_controller_reconcile_complete
-                    .inc(ReconcileCompleteLabelGroup {
-                        status: outcome_label,
-                    });
-
-                // Constructing result implicitly drops Reconciler, freeing any ReconcileUnits before the Service might
-                // try and schedule more work in response to our result.
-                let result = ReconcileResult {
-                    sequence: reconcile_seq,
-                    result,
-                    tenant_shard_id: reconciler.tenant_shard_id,
-                    generation: reconciler.generation,
-                    observed: reconciler.observed,
-                    pending_compute_notification: reconciler.compute_notify_failure,
-                };
 
                 result_tx
                     .send(ReconcileResultRequest::ReconcileResult(result))
@@ -1308,7 +1401,7 @@ impl TenantShard {
             pending_compute_notification: false,
             delayed_reconcile: false,
             scheduling_policy: serde_json::from_str(&tsp.scheduling_policy).unwrap(),
-            preferred_az_id: tsp.preferred_az_id,
+            preferred_az_id: tsp.preferred_az_id.map(AvailabilityZone),
         })
     }
 
@@ -1324,16 +1417,98 @@ impl TenantShard {
             config: serde_json::to_string(&self.config).unwrap(),
             splitting: SplitState::default(),
             scheduling_policy: serde_json::to_string(&self.scheduling_policy).unwrap(),
-            preferred_az_id: self.preferred_az_id.clone(),
+            preferred_az_id: self.preferred_az_id.as_ref().map(|az| az.0.clone()),
         }
     }
 
-    pub(crate) fn preferred_az(&self) -> Option<&str> {
-        self.preferred_az_id.as_deref()
+    pub(crate) fn preferred_az(&self) -> Option<&AvailabilityZone> {
+        self.preferred_az_id.as_ref()
     }
 
-    pub(crate) fn set_preferred_az(&mut self, preferred_az_id: String) {
+    pub(crate) fn set_preferred_az(&mut self, preferred_az_id: AvailabilityZone) {
         self.preferred_az_id = Some(preferred_az_id);
+    }
+
+    /// Returns all the nodes to which this tenant shard is attached according to the
+    /// observed state and the generations. Return vector is sorted from latest generation
+    /// to earliest.
+    pub(crate) fn attached_locations(&self) -> Vec<(NodeId, Generation)> {
+        self.observed
+            .locations
+            .iter()
+            .filter_map(|(node_id, observed)| {
+                use LocationConfigMode::{AttachedMulti, AttachedSingle, AttachedStale};
+
+                let conf = observed.conf.as_ref()?;
+
+                match (conf.generation, conf.mode) {
+                    (Some(gen), AttachedMulti | AttachedSingle | AttachedStale) => {
+                        Some((*node_id, gen))
+                    }
+                    _ => None,
+                }
+            })
+            .sorted_by(|(_lhs_node_id, lhs_gen), (_rhs_node_id, rhs_gen)| {
+                lhs_gen.cmp(rhs_gen).reverse()
+            })
+            .map(|(node_id, gen)| (node_id, Generation::new(gen)))
+            .collect()
+    }
+
+    /// Update the observed state of the tenant by applying incremental deltas
+    ///
+    /// Deltas are generated by reconcilers via [`Reconciler::observed_deltas`].
+    /// They are then filtered in [`crate::service::Service::process_result`].
+    pub(crate) fn apply_observed_deltas(
+        &mut self,
+        deltas: impl Iterator<Item = ObservedStateDelta>,
+    ) {
+        for delta in deltas {
+            match delta {
+                ObservedStateDelta::Upsert(ups) => {
+                    let (node_id, loc) = *ups;
+
+                    // If the generation of the observed location in the delta is lagging
+                    // behind the current one, then we have a race condition and cannot
+                    // be certain about the true observed state. Set the observed state
+                    // to None in order to reflect this.
+                    let crnt_gen = self
+                        .observed
+                        .locations
+                        .get(&node_id)
+                        .and_then(|loc| loc.conf.as_ref())
+                        .and_then(|conf| conf.generation);
+                    let new_gen = loc.conf.as_ref().and_then(|conf| conf.generation);
+                    match (crnt_gen, new_gen) {
+                        (Some(crnt), Some(new)) if crnt_gen > new_gen => {
+                            tracing::warn!(
+                                "Skipping observed state update {}: {:?} and using None due to stale generation ({} > {})",
+                                node_id, loc, crnt, new
+                            );
+
+                            self.observed
+                                .locations
+                                .insert(node_id, ObservedStateLocation { conf: None });
+
+                            continue;
+                        }
+                        _ => {}
+                    }
+
+                    if let Some(conf) = &loc.conf {
+                        tracing::info!("Updating observed location {}: {:?}", node_id, conf);
+                    } else {
+                        tracing::info!("Setting observed location {} to None", node_id,)
+                    }
+
+                    self.observed.locations.insert(node_id, loc);
+                }
+                ObservedStateDelta::Delete(node_id) => {
+                    tracing::info!("Deleting observed location {}", node_id);
+                    self.observed.locations.remove(&node_id);
+                }
+            }
+        }
     }
 }
 
@@ -1345,6 +1520,7 @@ pub(crate) mod tests {
         controller_api::NodeAvailability,
         shard::{ShardCount, ShardNumber},
     };
+    use rand::{rngs::StdRng, SeedableRng};
     use utils::id::TenantId;
 
     use crate::scheduler::test_utils::make_test_nodes;
@@ -1373,7 +1549,11 @@ pub(crate) mod tests {
         )
     }
 
-    fn make_test_tenant(policy: PlacementPolicy, shard_count: ShardCount) -> Vec<TenantShard> {
+    fn make_test_tenant(
+        policy: PlacementPolicy,
+        shard_count: ShardCount,
+        preferred_az: Option<AvailabilityZone>,
+    ) -> Vec<TenantShard> {
         let tenant_id = TenantId::generate();
 
         (0..shard_count.count())
@@ -1385,7 +1565,7 @@ pub(crate) mod tests {
                     shard_number,
                     shard_count,
                 };
-                TenantShard::new(
+                let mut ts = TenantShard::new(
                     tenant_shard_id,
                     ShardIdentity::new(
                         shard_number,
@@ -1394,7 +1574,13 @@ pub(crate) mod tests {
                     )
                     .unwrap(),
                     policy.clone(),
-                )
+                );
+
+                if let Some(az) = &preferred_az {
+                    ts.set_preferred_az(az.clone());
+                }
+
+                ts
             })
             .collect()
     }
@@ -1405,7 +1591,7 @@ pub(crate) mod tests {
     fn tenant_ha_scheduling() -> anyhow::Result<()> {
         // Start with three nodes.  Our tenant will only use two.  The third one is
         // expected to remain unused.
-        let mut nodes = make_test_nodes(3);
+        let mut nodes = make_test_nodes(3, &[]);
 
         let mut scheduler = Scheduler::new(nodes.values());
         let mut context = ScheduleContext::default();
@@ -1457,7 +1643,7 @@ pub(crate) mod tests {
 
     #[test]
     fn intent_from_observed() -> anyhow::Result<()> {
-        let nodes = make_test_nodes(3);
+        let nodes = make_test_nodes(3, &[]);
         let mut scheduler = Scheduler::new(nodes.values());
 
         let mut tenant_shard = make_test_tenant_shard(PlacementPolicy::Attached(1));
@@ -1507,7 +1693,7 @@ pub(crate) mod tests {
 
     #[test]
     fn scheduling_mode() -> anyhow::Result<()> {
-        let nodes = make_test_nodes(3);
+        let nodes = make_test_nodes(3, &[]);
         let mut scheduler = Scheduler::new(nodes.values());
 
         let mut tenant_shard = make_test_tenant_shard(PlacementPolicy::Attached(1));
@@ -1532,7 +1718,7 @@ pub(crate) mod tests {
 
     #[test]
     fn optimize_attachment() -> anyhow::Result<()> {
-        let nodes = make_test_nodes(3);
+        let nodes = make_test_nodes(3, &[]);
         let mut scheduler = Scheduler::new(nodes.values());
 
         let mut shard_a = make_test_tenant_shard(PlacementPolicy::Attached(1));
@@ -1599,7 +1785,7 @@ pub(crate) mod tests {
 
     #[test]
     fn optimize_secondary() -> anyhow::Result<()> {
-        let nodes = make_test_nodes(4);
+        let nodes = make_test_nodes(4, &[]);
         let mut scheduler = Scheduler::new(nodes.values());
 
         let mut shard_a = make_test_tenant_shard(PlacementPolicy::Attached(1));
@@ -1698,14 +1884,14 @@ pub(crate) mod tests {
     /// that it converges.
     #[test]
     fn optimize_add_nodes() -> anyhow::Result<()> {
-        let nodes = make_test_nodes(4);
+        let nodes = make_test_nodes(4, &[]);
 
         // Only show the scheduler a couple of nodes
         let mut scheduler = Scheduler::new([].iter());
         scheduler.node_upsert(nodes.get(&NodeId(1)).unwrap());
         scheduler.node_upsert(nodes.get(&NodeId(2)).unwrap());
 
-        let mut shards = make_test_tenant(PlacementPolicy::Attached(1), ShardCount::new(4));
+        let mut shards = make_test_tenant(PlacementPolicy::Attached(1), ShardCount::new(4), None);
         let mut schedule_context = ScheduleContext::default();
         for shard in &mut shards {
             assert!(shard
@@ -1754,16 +1940,16 @@ pub(crate) mod tests {
     fn initial_scheduling_is_optimal() -> anyhow::Result<()> {
         use itertools::Itertools;
 
-        let nodes = make_test_nodes(2);
+        let nodes = make_test_nodes(2, &[]);
 
         let mut scheduler = Scheduler::new([].iter());
         scheduler.node_upsert(nodes.get(&NodeId(1)).unwrap());
         scheduler.node_upsert(nodes.get(&NodeId(2)).unwrap());
 
-        let mut a = make_test_tenant(PlacementPolicy::Attached(1), ShardCount::new(4));
+        let mut a = make_test_tenant(PlacementPolicy::Attached(1), ShardCount::new(4), None);
         let a_context = Rc::new(RefCell::new(ScheduleContext::default()));
 
-        let mut b = make_test_tenant(PlacementPolicy::Attached(1), ShardCount::new(4));
+        let mut b = make_test_tenant(PlacementPolicy::Attached(1), ShardCount::new(4), None);
         let b_context = Rc::new(RefCell::new(ScheduleContext::default()));
 
         let a_shards_with_context = a.iter_mut().map(|shard| (shard, a_context.clone()));
@@ -1786,6 +1972,149 @@ pub(crate) mod tests {
             shard.intent.clear(&mut scheduler);
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn random_az_shard_scheduling() -> anyhow::Result<()> {
+        use rand::seq::SliceRandom;
+
+        for seed in 0..50 {
+            eprintln!("Running test with seed {seed}");
+            let mut rng = StdRng::seed_from_u64(seed);
+
+            let az_a_tag = AvailabilityZone("az-a".to_string());
+            let az_b_tag = AvailabilityZone("az-b".to_string());
+            let azs = [az_a_tag, az_b_tag];
+            let nodes = make_test_nodes(4, &azs);
+            let mut shards_per_az: HashMap<AvailabilityZone, u32> = HashMap::new();
+
+            let mut scheduler = Scheduler::new([].iter());
+            for node in nodes.values() {
+                scheduler.node_upsert(node);
+            }
+
+            let mut shards = Vec::default();
+            let mut contexts = Vec::default();
+            let mut az_picker = azs.iter().cycle().cloned();
+            for i in 0..100 {
+                let az = az_picker.next().unwrap();
+                let shard_count = i % 4 + 1;
+                *shards_per_az.entry(az.clone()).or_default() += shard_count;
+
+                let tenant_shards = make_test_tenant(
+                    PlacementPolicy::Attached(1),
+                    ShardCount::new(shard_count.try_into().unwrap()),
+                    Some(az),
+                );
+                let context = Rc::new(RefCell::new(ScheduleContext::default()));
+
+                contexts.push(context.clone());
+                let with_ctx = tenant_shards
+                    .into_iter()
+                    .map(|shard| (shard, context.clone()));
+                for shard_with_ctx in with_ctx {
+                    shards.push(shard_with_ctx);
+                }
+            }
+
+            shards.shuffle(&mut rng);
+
+            #[derive(Default, Debug)]
+            struct NodeStats {
+                attachments: u32,
+                secondaries: u32,
+            }
+
+            let mut node_stats: HashMap<NodeId, NodeStats> = HashMap::default();
+            let mut attachments_in_wrong_az = 0;
+            let mut secondaries_in_wrong_az = 0;
+
+            for (shard, context) in &mut shards {
+                let context = &mut *context.borrow_mut();
+                shard.schedule(&mut scheduler, context).unwrap();
+
+                let attached_node = shard.intent.get_attached().unwrap();
+                let stats = node_stats.entry(attached_node).or_default();
+                stats.attachments += 1;
+
+                let secondary_node = *shard.intent.get_secondary().first().unwrap();
+                let stats = node_stats.entry(secondary_node).or_default();
+                stats.secondaries += 1;
+
+                let attached_node_az = nodes
+                    .get(&attached_node)
+                    .unwrap()
+                    .get_availability_zone_id();
+                let secondary_node_az = nodes
+                    .get(&secondary_node)
+                    .unwrap()
+                    .get_availability_zone_id();
+                let preferred_az = shard.preferred_az().unwrap();
+
+                if attached_node_az != preferred_az {
+                    eprintln!(
+                        "{} attachment was scheduled in AZ {} but preferred AZ {}",
+                        shard.tenant_shard_id, attached_node_az, preferred_az
+                    );
+                    attachments_in_wrong_az += 1;
+                }
+
+                if secondary_node_az == preferred_az {
+                    eprintln!(
+                        "{} secondary was scheduled in AZ {} which matches preference",
+                        shard.tenant_shard_id, attached_node_az
+                    );
+                    secondaries_in_wrong_az += 1;
+                }
+            }
+
+            let mut violations = Vec::default();
+
+            if attachments_in_wrong_az > 0 {
+                violations.push(format!(
+                    "{} attachments scheduled to the incorrect AZ",
+                    attachments_in_wrong_az
+                ));
+            }
+
+            if secondaries_in_wrong_az > 0 {
+                violations.push(format!(
+                    "{} secondaries scheduled to the incorrect AZ",
+                    secondaries_in_wrong_az
+                ));
+            }
+
+            eprintln!(
+                "attachments_in_wrong_az={} secondaries_in_wrong_az={}",
+                attachments_in_wrong_az, secondaries_in_wrong_az
+            );
+
+            for (node_id, stats) in &node_stats {
+                let node_az = nodes.get(node_id).unwrap().get_availability_zone_id();
+                let ideal_attachment_load = shards_per_az.get(node_az).unwrap() / 2;
+                let allowed_attachment_load =
+                    (ideal_attachment_load - 1)..(ideal_attachment_load + 2);
+
+                if !allowed_attachment_load.contains(&stats.attachments) {
+                    violations.push(format!(
+                        "Found {} attachments on node {}, but expected {}",
+                        stats.attachments, node_id, ideal_attachment_load
+                    ));
+                }
+
+                eprintln!(
+                    "{}: attachments={} secondaries={} ideal_attachment_load={}",
+                    node_id, stats.attachments, stats.secondaries, ideal_attachment_load
+                );
+            }
+
+            assert!(violations.is_empty(), "{violations:?}");
+
+            for (mut shard, _ctx) in shards {
+                shard.intent.clear(&mut scheduler);
+            }
+        }
         Ok(())
     }
 }
