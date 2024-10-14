@@ -1,0 +1,86 @@
+name: Check neon with MacOS builds
+
+on:
+  workflow_call:
+
+concurrency:
+  # Allow only one workflow per any non-`main` branch.
+  group: ${{ github.workflow }}-${{ github.ref_name }}-${{ github.ref_name == 'main' && github.sha || 'anysha' }}
+  cancel-in-progress: true
+
+env:
+  RUST_BACKTRACE: 1
+  COPT: '-Werror'
+
+# TODO: move `check-*` and `files-changed` jobs to the "Caller" Workflow
+# We should care about that as Github has limitations:
+# - You can connect up to four levels of workflows
+# - You can call a maximum of 20 unique reusable workflows from a single workflow file.
+# https://docs.github.com/en/actions/sharing-automations/reusing-workflows#limitations
+jobs:
+  check-permissions:
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'run-no-ci') }}
+    uses: ./.github/workflows/check-permissions.yml
+    with:
+      github-event-name: ${{ github.event_name}}
+
+  check-build-tools-image:
+    needs: [ check-permissions ]
+    uses: ./.github/workflows/check-build-tools-image.yml
+
+  build-build-tools-image:
+    needs: [ check-build-tools-image ]
+    uses: ./.github/workflows/build-build-tools-image.yml
+    with:
+      image-tag: ${{ needs.check-build-tools-image.outputs.image-tag }}
+    secrets: inherit
+
+  files-changed:
+    name: Detect what files changed
+    runs-on: ubuntu-22.04
+    timeout-minutes: 3
+    outputs:
+      postgres_changes: ${{ steps.postgres_changes.outputs.chnages }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@6ccd57f4c5d15bdc2fef309bd9fb6cc9db2ef1c6 # v4.1.7
+        with:
+          submodules: true
+
+      - name: Check for Postgres changes
+        uses: dorny/paths-filter@1441771bbfdd59dcd748680ee64ebd8faab1a242  #v3
+        id: postgres_changes
+        with:
+          token: ${{ github.token }}
+          filters: |
+            postgres-v14: vendor/postgres-v14 Makefile .github/workflows/build-macos.yaml pgxn/
+            postgres-v15: vendor/postgres-v15 Makefile .github/workflows/build-macos.yaml pgxn/
+            postgres-v16: vendor/postgres-v16 Makefile .github/workflows/build-macos.yaml pgxn/
+            postgres-v17: vendor/postgres-v17 Makefile .github/workflows/build-macos.yaml pgxn/
+          base: ${{ github.event_name != 'pull_request' && (github.event.merge_group.base_ref || github.ref_name) || '' }}
+          ref: ${{ github.event_name != 'pull_request' && (github.event.merge_group.head_ref || github.ref) || ''}}
+
+  check-macos-build:
+    needs: [ check-permissions, files-changed ]
+    if: |
+      contains(github.event.pull_request.labels.*.name, 'run-extra-build-macos')  ||
+      contains(github.event.pull_request.labels.*.name, 'run-extra-build-*') ||
+      github.ref_name == 'main'
+    timeout-minutes: 30
+    runs-on: macos-14
+    strategy:
+      matrix:
+        postgres-version: ${{ fromJSON(needs.files-changed.outputs.postgres_changes) }}
+    env:
+      # Use release build only, to have less debug info around
+      # Hence keeping target/ (and general cache size) smaller
+      BUILD_TYPE: release
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Build ${{ matrix.postgres-version }}
+        run: |
+          echo make ${{ matrix.postgres-verion }}
