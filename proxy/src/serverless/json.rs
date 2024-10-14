@@ -14,9 +14,9 @@ use super::json_raw_value::LazyValue;
 // as parameters.
 //
 pub(crate) fn json_to_pg_text(
-    json: Vec<&RawValue>,
+    json: &[&RawValue],
 ) -> Result<Vec<Option<String>>, serde_json::Error> {
-    json.into_iter().map(json_value_to_pg_text).try_collect()
+    json.iter().copied().map(json_value_to_pg_text).try_collect()
 }
 
 fn json_value_to_pg_text(value: &RawValue) -> Result<Option<String>, serde_json::Error> {
@@ -287,7 +287,7 @@ mod tests {
     fn json_to_pg_text_test(json: Vec<serde_json::Value>) -> Vec<Option<String>> {
         let json = serde_json::Value::Array(json).to_string();
         let json: Vec<&RawValue> = serde_json::from_str(&json).unwrap();
-        json_to_pg_text(json).unwrap()
+        json_to_pg_text(&json).unwrap()
     }
 
     #[test]
