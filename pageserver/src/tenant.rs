@@ -23,7 +23,6 @@ use pageserver_api::models;
 use pageserver_api::models::AuxFilePolicy;
 use pageserver_api::models::LsnLease;
 use pageserver_api::models::TimelineArchivalState;
-use pageserver_api::models::TimelineCreateRequest;
 use pageserver_api::models::TimelineState;
 use pageserver_api::models::TopTenantShardItem;
 use pageserver_api::models::WalRedoManagerStatus;
@@ -102,7 +101,6 @@ use crate::tenant::storage_layer::ImageLayer;
 use crate::walingest::WalLagCooldown;
 use crate::walredo;
 use crate::InitializationOrder;
-use crate::DEFAULT_PG_VERSION;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -669,19 +667,6 @@ pub(crate) struct CreateTimelineParamsBranch {
     pub(crate) new_timeline_id: TimelineId,
     pub(crate) ancestor_timeline_id: TimelineId,
     pub(crate) ancestor_start_lsn: Option<Lsn>,
-}
-
-impl CreateTimelineParams {
-    pub fn new_timeline_id(&self) -> TimelineId {
-        match self {
-            Self::Bootstrap(CreateTimelineParamsBootstrap {
-                new_timeline_id, ..
-            }) => *new_timeline_id,
-            Self::Branch(CreateTimelineParamsBranch {
-                new_timeline_id, ..
-            }) => *new_timeline_id,
-        }
-    }
 }
 
 pub(crate) struct CreatingTimelineStateBootstrap {
@@ -2003,7 +1988,7 @@ impl Tenant {
             .remote_client
             .wait_completion()
             .await
-            .with_context(|| format!("wait for timeline initial uploads to complete"))?;
+            .context("wait for timeline initial uploads to complete")?;
 
         loaded_timeline.activate(self.clone(), broker_client, None, ctx);
 
@@ -3688,11 +3673,9 @@ impl Tenant {
                 // Creation is in progress, we cannot create it again, and we cannot
                 // check if this request matches the existing one, so caller must try
                 // again later.
-                return Err(CreateTimelineError::AlreadyCreating);
+                Err(CreateTimelineError::AlreadyCreating)
             }
-            Err(TimelineExclusionError::Other(e)) => {
-                return Err(CreateTimelineError::Other(e));
-            }
+            Err(TimelineExclusionError::Other(e)) => Err(CreateTimelineError::Other(e)),
             Err(TimelineExclusionError::AlreadyExists(existing)) => {
                 debug!("timeline already exists");
 
@@ -3706,12 +3689,15 @@ impl Tenant {
                         pg_version,
                     }) => {
                         if existing.pg_version != pg_version {
+                            info!("timeline already exists with different pg_version");
                             return Err(CreateTimelineError::Conflict);
                         }
-                        if existing.get_ancestor_timeline_id() != None {
+                        if existing.get_ancestor_timeline_id().is_some() {
+                            info!("timeline already exists with an ancestor");
                             return Err(CreateTimelineError::Conflict);
                         }
                         if existing.get_ancestor_lsn() != Lsn::INVALID {
+                            info!("timeline already exists with an ancestor LSN");
                             return Err(CreateTimelineError::Conflict);
                         }
                     }
@@ -3720,9 +3706,11 @@ impl Tenant {
                         ancestor_start_lsn,
                     } => {
                         if existing.get_ancestor_timeline_id() != Some(ancestor_timeline_id) {
+                            info!("timeline already exists with different ancestor");
                             return Err(CreateTimelineError::Conflict);
                         }
                         if existing.get_ancestor_lsn() != ancestor_start_lsn {
+                            info!("timeline already exists with different ancestor LSN");
                             return Err(CreateTimelineError::Conflict);
                         }
                     }
