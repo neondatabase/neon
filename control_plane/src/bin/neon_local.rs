@@ -26,7 +26,7 @@ use pageserver_api::config::{
 use pageserver_api::controller_api::{
     NodeAvailabilityWrapper, PlacementPolicy, TenantCreateRequest,
 };
-use pageserver_api::models::{ShardParameters, TimelineCreateRequest, TimelineInfo};
+use pageserver_api::models::{ShardParameters, TimelineInfo};
 use pageserver_api::shard::{ShardCount, ShardStripeSize, TenantShardId};
 use postgres_backend::AuthType;
 use postgres_connection::parse_host_port;
@@ -1071,12 +1071,10 @@ async fn handle_tenant(subcmd: &TenantCmd, env: &mut local_env::LocalEnv) -> any
             storage_controller
                 .tenant_timeline_create(
                     tenant_id,
-                    TimelineCreateRequest {
+                    pageserver_api::models::TimelineCreateRequest::Bootstrap {
                         new_timeline_id,
-                        mode: pageserver_api::models::TimelineCreateRequestMode::Bootstrap {
-                            existing_initdb_timeline_id: None,
-                            pg_version: Some(args.pg_version),
-                        },
+                        existing_initdb_timeline_id: None,
+                        pg_version: Some(args.pg_version),
                     },
                 )
                 .await?;
@@ -1131,12 +1129,10 @@ async fn handle_timeline(cmd: &TimelineCmd, env: &mut local_env::LocalEnv) -> Re
             let new_timeline_id = new_timeline_id_opt.unwrap_or(TimelineId::generate());
 
             let storage_controller = StorageController::from_env(env);
-            let create_req = TimelineCreateRequest {
+            let create_req = pageserver_api::models::TimelineCreateRequest::Bootstrap {
                 new_timeline_id,
-                mode: pageserver_api::models::TimelineCreateRequestMode::Bootstrap {
-                    existing_initdb_timeline_id: None,
-                    pg_version: Some(args.pg_version),
-                },
+                existing_initdb_timeline_id: None,
+                pg_version: Some(args.pg_version),
             };
             let timeline_info = storage_controller
                 .tenant_timeline_create(tenant_id, create_req)
@@ -1187,13 +1183,11 @@ async fn handle_timeline(cmd: &TimelineCmd, env: &mut local_env::LocalEnv) -> Re
 
             let start_lsn = args.ancestor_start_lsn;
             let storage_controller = StorageController::from_env(env);
-            let create_req = TimelineCreateRequest {
+            let create_req = pageserver_api::models::TimelineCreateRequest::Branch {
                 new_timeline_id,
-                mode: pageserver_api::models::TimelineCreateRequestMode::Branch {
-                    ancestor_timeline_id,
-                    ancestor_start_lsn: start_lsn,
-                    pg_version: None,
-                },
+                ancestor_timeline_id,
+                ancestor_start_lsn: start_lsn,
+                pg_version: None,
             };
             let timeline_info = storage_controller
                 .tenant_timeline_create(tenant_id, create_req)

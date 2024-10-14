@@ -851,7 +851,7 @@ impl StorageController {
             .await
     }
 
-    #[instrument(skip_all, fields(%tenant_id, timeline_id=%req.new_timeline_id))]
+    #[instrument(skip_all, fields(%tenant_id, timeline_id=%req.new_timeline_id()))]
     pub async fn tenant_timeline_create(
         &self,
         tenant_id: TenantId,
