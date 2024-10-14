@@ -450,7 +450,7 @@ pub(crate) struct GcInfo {
     /// Currently, this includes all points where child branches have
     /// been forked off from. In the future, could also include
     /// explicit user-defined snapshot points.
-    pub(crate) retain_lsns: Vec<(Lsn, TimelineId)>,
+    pub(crate) retain_lsns: Vec<(Lsn, TimelineId, bool)>,
 
     /// The cutoff coordinates, which are combined by selecting the minimum.
     pub(crate) cutoffs: GcCutoffs,
@@ -467,8 +467,8 @@ impl GcInfo {
         self.cutoffs.select_min()
     }
 
-    pub(super) fn insert_child(&mut self, child_id: TimelineId, child_lsn: Lsn) {
-        self.retain_lsns.push((child_lsn, child_id));
+    pub(super) fn insert_child(&mut self, child_id: TimelineId, child_lsn: Lsn, is_offloaded: bool) {
+        self.retain_lsns.push((child_lsn, child_id, is_offloaded));
         self.retain_lsns.sort_by_key(|i| i.0);
     }
 
@@ -2164,7 +2164,9 @@ impl Timeline {
 
         if let Some(ancestor) = &ancestor {
             let mut ancestor_gc_info = ancestor.gc_info.write().unwrap();
-            ancestor_gc_info.insert_child(timeline_id, metadata.ancestor_lsn());
+            // If we construct an explicit timeline object, it's obviously not offloaded
+            let is_offloaded = false;
+            ancestor_gc_info.insert_child(timeline_id, metadata.ancestor_lsn(), is_offloaded);
         }
 
         Arc::new_cyclic(|myself| {
@@ -4875,7 +4877,7 @@ impl Timeline {
             let retain_lsns = gc_info
                 .retain_lsns
                 .iter()
-                .map(|(lsn, _child_id)| *lsn)
+                .map(|(lsn, _child_id, _is_offloaded)| *lsn)
                 .collect();
 
             // Gets the maximum LSN that holds the valid lease.

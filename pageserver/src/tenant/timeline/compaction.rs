@@ -639,7 +639,10 @@ impl Timeline {
             let children = self.gc_info.read().unwrap().retain_lsns.clone();
 
             let mut readable_points = Vec::with_capacity(children.len() + 1);
-            for (child_lsn, _child_timeline_id) in &children {
+            for (child_lsn, _child_timeline_id, is_offloaded) in &children {
+                if *is_offloaded {
+                    continue;
+                }
                 readable_points.push(*child_lsn);
             }
             readable_points.push(head_lsn);
@@ -1741,7 +1744,7 @@ impl Timeline {
             let gc_info = self.gc_info.read().unwrap();
             let mut retain_lsns_below_horizon = Vec::new();
             let gc_cutoff = gc_info.cutoffs.select_min();
-            for (lsn, _timeline_id) in &gc_info.retain_lsns {
+            for (lsn, _timeline_id, _is_offloaded) in &gc_info.retain_lsns {
                 if lsn < &gc_cutoff {
                     retain_lsns_below_horizon.push(*lsn);
                 }

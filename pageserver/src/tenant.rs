@@ -3313,11 +3313,16 @@ impl Tenant {
 
         // Scan all timelines. For each timeline, remember the timeline ID and
         // the branch point where it was created.
-        let mut all_branchpoints: BTreeMap<TimelineId, Vec<(Lsn, TimelineId)>> = BTreeMap::new();
+        let mut all_branchpoints: BTreeMap<TimelineId, Vec<(Lsn, TimelineId, bool)>> =
+            BTreeMap::new();
         timelines.iter().for_each(|(timeline_id, timeline_entry)| {
             if let Some(ancestor_timeline_id) = &timeline_entry.get_ancestor_timeline_id() {
                 let ancestor_children = all_branchpoints.entry(*ancestor_timeline_id).or_default();
-                ancestor_children.push((timeline_entry.get_ancestor_lsn(), *timeline_id));
+                ancestor_children.push((
+                    timeline_entry.get_ancestor_lsn(),
+                    *timeline_id,
+                    false,
+                ));
             }
         });
         timelines_offloaded
@@ -3330,7 +3335,7 @@ impl Tenant {
                     return;
                 };
                 let ancestor_children = all_branchpoints.entry(*ancestor_timeline_id).or_default();
-                ancestor_children.push((retain_lsn, *timeline_id));
+                ancestor_children.push((retain_lsn, *timeline_id, true));
             });
 
         // The number of bytes we always keep, irrespective of PITR: this is a constant across timelines
@@ -3338,7 +3343,7 @@ impl Tenant {
 
         // Populate each timeline's GcInfo with information about its child branches
         for timeline in timelines.values() {
-            let mut branchpoints: Vec<(Lsn, TimelineId)> = all_branchpoints
+            let mut branchpoints: Vec<(Lsn, TimelineId, bool)> = all_branchpoints
                 .remove(&timeline.timeline_id)
                 .unwrap_or_default();
 
