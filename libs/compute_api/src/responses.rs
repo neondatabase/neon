@@ -168,3 +168,8 @@ pub struct InstalledExtension {
 pub struct InstalledExtensions {
     pub extensions: Vec<InstalledExtension>,
 }
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct SetRoleGrantsResult {
+    pub extension: String,
+}

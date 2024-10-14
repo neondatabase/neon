@@ -19,6 +19,7 @@ use futures::future::join_all;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use nix::unistd::Pid;
+use postgres::config::Config;
 use postgres::error::SqlState;
 use postgres::{Client, NoTls};
 use tracing::{debug, error, info, instrument, warn};
@@ -1365,6 +1366,28 @@ LIMIT 100",
         }
 
         download_size
+    }
+
+    pub fn set_role_grants(
+        &self,
+        db_name: &str,
+        schema_name: &str,
+        privilege: &str,
+        role_name: &str,
+    ) -> Result<()> {
+        let mut conf = Config::from_str(self.connstr.as_str()).unwrap();
+        conf.dbname(db_name);
+
+        let mut db_client = conf
+            .connect(NoTls)
+            .context("Failed to connect to the database")?;
+
+        let query = "GRANT $1 ON SCHEMA $2 TO $3";
+        db_client
+            .execute(query, &[&schema_name, &privilege, &role_name])
+            .context(format!("Failed to execute query: {}", query))?;
+
+        Ok(())
     }
 
     #[tokio::main]

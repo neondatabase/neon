@@ -12,3 +12,11 @@ use serde::Deserialize;
 pub struct ConfigurationRequest {
     pub spec: ComputeSpec,
 }
+
+#[derive(Deserialize, Debug)]
+pub struct SetRoleGrantsRequest {
+    pub database: String,
+    pub schema: String,
+    pub privilege: String,
+    pub role: String,
+}

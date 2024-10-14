@@ -9,8 +9,10 @@ use crate::catalog::SchemaDumpError;
 use crate::catalog::{get_database_schema, get_dbs_and_roles};
 use crate::compute::forward_termination_signal;
 use crate::compute::{ComputeNode, ComputeState, ParsedSpec};
-use compute_api::requests::ConfigurationRequest;
-use compute_api::responses::{ComputeStatus, ComputeStatusResponse, GenericAPIError};
+use compute_api::requests::{ConfigurationRequest, SetRoleGrantsRequest};
+use compute_api::responses::{
+    ComputeStatus, ComputeStatusResponse, GenericAPIError, SetRoleGrantsResult,
+};
 
 use anyhow::Result;
 use hyper::header::CONTENT_TYPE;
@@ -161,6 +163,35 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
                 Err(e) => {
                     error!("can't get schema dump: {}", e);
                     render_json_error("can't get schema dump", StatusCode::INTERNAL_SERVER_ERROR)
+                }
+            }
+        }
+
+        (&Method::POST, "/grants") => {
+            info!("serving /grants POST request");
+            let status = compute.get_status();
+            if status != ComputeStatus::Running {
+                let msg = format!(
+                    "invalid compute status for set_role_grants request: {:?}",
+                    status
+                );
+                error!(msg);
+                return Response::new(Body::from(msg));
+            }
+
+            let request = hyper::body::to_bytes(req.into_body()).await.unwrap();
+            let request = serde_json::from_slice::<SetRoleGrantsRequest>(&request).unwrap();
+            let res = compute.set_role_grants(
+                &request.database,
+                &request.schema,
+                &request.privilege,
+                &request.role,
+            );
+            match res {
+                Ok(_) => Response::new(Body::from("true")),
+                Err(e) => {
+                    error!("set_role_grants failed: {}", e);
+                    Response::new(Body::from(e.to_string()))
                 }
             }
         }
