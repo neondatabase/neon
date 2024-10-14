@@ -163,7 +163,10 @@ impl ShardIdentity {
     /// Shards must ingest _at least_ keys which return true from this check.
     pub fn is_key_local(&self, key: &Key) -> bool {
         assert!(!self.is_broken());
-        if self.count < ShardCount(2) || (key_is_shard0(key) && self.number == ShardNumber(0)) {
+        if self.count < ShardCount(2)
+            || (key_is_shard0(key) && self.number == ShardNumber(0))
+            || key.is_rel_vm_block_key()
+        {
             true
         } else {
             key_to_shard_number(self.count, self.stripe_size, key) == self.number

@@ -1061,8 +1061,7 @@ page_server_request(void const *req)
 	 * Current sharding model assumes that all metadata is present only at shard 0.
 	 * We still need to call get_shard_no() to check if shard map is up-to-date.
 	 */
-	if (((NeonRequest *) req)->tag != T_NeonGetPageRequest ||
-		((NeonGetPageRequest *) req)->forknum != MAIN_FORKNUM)
+	if (((NeonRequest *) req)->tag != T_NeonGetPageRequest)
 	{
 		shard_no = 0;
 	}
