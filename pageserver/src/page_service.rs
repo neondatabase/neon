@@ -26,8 +26,8 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::SystemTime;
 use std::time::{Duration, Instant};
-use tokio::io::AsyncWriteExt;
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::*;
@@ -1137,10 +1137,10 @@ impl PageServerHandler {
             .await
             .map_err(map_basebackup_error)?;
         } else {
-            let mut writer = pgb.copyout_writer();
+            let mut writer = BufWriter::new(pgb.copyout_writer());
             if gzip {
                 let mut encoder = GzipEncoder::with_quality(
-                    writer,
+                    &mut writer,
                     // NOTE using fast compression because it's on the critical path
                     //      for compute startup. For an empty database, we get
                     //      <100KB with this method. The Level::Best compression method
@@ -1175,6 +1175,10 @@ impl PageServerHandler {
                 .await
                 .map_err(map_basebackup_error)?;
             }
+            writer
+                .flush()
+                .await
+                .map_err(|e| map_basebackup_error(BasebackupError::Client(e)))?;
         }
 
         pgb.write_message_noflush(&BeMessage::CopyDone)
