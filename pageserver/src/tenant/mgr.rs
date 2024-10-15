@@ -1357,13 +1357,11 @@ impl TenantManager {
     /// responsibility to avoid trying to attach the tenant again or use it any way once deletion
     /// has started: this operation is not atomic, and must be retried until it succeeds.
     ///
-    /// If an unsharded tenant ID is given for a sharded tenant, it will remove all tenant shards in
-    /// remote storage (by removing all paths with the tenant prefix), but not on local disk.
-    ///
-    /// TODO: consider also removing all local shards, or splitting out separate APIs for
-    /// tenant/shard deletion. This is not currently needed, as the storage controller first
-    /// detaches each shard (deleting local storage) and then deletes the entire tenant to clear all
-    /// of its remote storage, but this is somewhat brittle and non-obvious.
+    /// As a special case, if an unsharded tenant ID is given for a sharded tenant, it will remove
+    /// all tenant shards in remote storage (removing all paths with the tenant prefix). The storage
+    /// controller uses this to purge all remote tenant data, including any stale parent shards that
+    /// may remain after splits. Ideally, this special case would be handled elsewhere. See:
+    /// https://github.com/neondatabase/neon/pull/9394
     pub(crate) async fn delete_tenant(
         &self,
         tenant_shard_id: TenantShardId,
@@ -1415,6 +1413,8 @@ impl TenantManager {
         //   in 500 responses to delete requests.
         // - We keep the `SlotGuard` during this I/O, so that if a concurrent delete request comes in, it will
         //   503/retry, rather than kicking off a wasteful concurrent deletion.
+        // NB: this also deletes partial prefixes, i.e. a <tenant_id> path will delete all
+        // <tenant_id>_<shard_id>/* objects. See method comment for why.
         backoff::retry(
             || async move {
                 self.resources
