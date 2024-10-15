@@ -1,5 +1,6 @@
 use std::{collections::HashSet, str::FromStr, sync::Arc};
 
+use anyhow::bail;
 use futures::stream::{StreamExt, TryStreamExt};
 use once_cell::sync::OnceCell;
 use pageserver_api::shard::TenantShardId;
@@ -231,10 +232,15 @@ async fn check_timeline(
     })
 }
 
-fn load_certs() -> Result<Arc<rustls::RootCertStore>, std::io::Error> {
-    let der_certs = rustls_native_certs::load_native_certs()?;
+fn load_certs() -> anyhow::Result<Arc<rustls::RootCertStore>> {
+    let der_certs = rustls_native_certs::load_native_certs();
+
+    if !der_certs.errors.is_empty() {
+        bail!("could not load native tls certs: {:?}", der_certs.errors);
+    }
+
     let mut store = rustls::RootCertStore::empty();
-    store.add_parsable_certificates(der_certs);
+    store.add_parsable_certificates(der_certs.certs);
     Ok(Arc::new(store))
 }
 static TLS_ROOTS: OnceCell<Arc<rustls::RootCertStore>> = OnceCell::new();

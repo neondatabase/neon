@@ -38,6 +38,9 @@ pub(crate) enum ConnectionError {
     #[error("{COULD_NOT_CONNECT}: {0}")]
     CouldNotConnect(#[from] io::Error),
 
+    #[error("Couldn't load native TLS certificates: {0:?}")]
+    TlsCertificateError(Vec<rustls_native_certs::Error>),
+
     #[error("{COULD_NOT_CONNECT}: {0}")]
     TlsError(#[from] InvalidDnsNameError),
 
@@ -84,6 +87,7 @@ impl ReportableError for ConnectionError {
             }
             ConnectionError::Postgres(_) => crate::error::ErrorKind::Compute,
             ConnectionError::CouldNotConnect(_) => crate::error::ErrorKind::Compute,
+            ConnectionError::TlsCertificateError(_) => crate::error::ErrorKind::Service,
             ConnectionError::TlsError(_) => crate::error::ErrorKind::Compute,
             ConnectionError::WakeComputeError(e) => e.get_error_kind(),
             ConnectionError::TooManyConnectionAttempts(e) => e.get_error_kind(),
@@ -297,7 +301,10 @@ impl ConnCfg {
                 .dangerous()
                 .with_custom_certificate_verifier(verifier)
         } else {
-            let root_store = TLS_ROOTS.get_or_try_init(load_certs)?.clone();
+            let root_store = TLS_ROOTS
+                .get_or_try_init(load_certs)
+                .map_err(ConnectionError::TlsCertificateError)?
+                .clone();
             rustls::ClientConfig::builder().with_root_certificates(root_store)
         };
         let client_config = client_config.with_no_client_auth();
@@ -359,10 +366,15 @@ fn filtered_options(params: &StartupMessageParams) -> Option<String> {
     Some(options)
 }
 
-fn load_certs() -> Result<Arc<rustls::RootCertStore>, io::Error> {
-    let der_certs = rustls_native_certs::load_native_certs()?;
+fn load_certs() -> Result<Arc<rustls::RootCertStore>, Vec<rustls_native_certs::Error>> {
+    let der_certs = rustls_native_certs::load_native_certs();
+
+    if !der_certs.errors.is_empty() {
+        return Err(der_certs.errors);
+    }
+
     let mut store = rustls::RootCertStore::empty();
-    store.add_parsable_certificates(der_certs);
+    store.add_parsable_certificates(der_certs.certs);
     Ok(Arc::new(store))
 }
 static TLS_ROOTS: OnceCell<Arc<rustls::RootCertStore>> = OnceCell::new();
