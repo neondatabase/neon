@@ -7,7 +7,7 @@ use anyhow::{bail, ensure, Context, Ok};
 use clap::ValueEnum;
 use itertools::Itertools;
 use remote_storage::RemoteStorageConfig;
-use rustls::crypto::ring::sign;
+use rustls::crypto::aws_lc_rs::sign;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use sha2::{Digest, Sha256};
 use tracing::{error, info};
