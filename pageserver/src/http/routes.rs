@@ -1285,6 +1285,7 @@ async fn timeline_layer_file_scan_disposable_keys(
     for (i, key) in keys.into_iter().enumerate() {
         if shard_identity.is_key_disposable(&key) {
             disposable_count += 1;
+            tracing::debug!(key = %key, key.dbg=?key, "disposable key");
         } else {
             not_disposable_count += 1;
         }

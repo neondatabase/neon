@@ -188,7 +188,9 @@ def test_sharding_split_unsharded(
         "compact-shard-ancestors-persistent",
     ],
 )
-def test_sharding_split_compaction(neon_env_builder: NeonEnvBuilder, failpoint: Optional[str]):
+def test_sharding_split_compaction(
+    neon_env_builder: NeonEnvBuilder, failpoint: Optional[str], build_type: str
+):
     """
     Test that after a split, we clean up parent layer data in the child shards via compaction.
     """
@@ -322,9 +324,14 @@ def test_sharding_split_compaction(neon_env_builder: NeonEnvBuilder, failpoint: 
             # Physical size should shrink because layers are smaller
             assert detail_after["current_physical_size"] < detail_before["current_physical_size"]
 
-    # Validate size statistics
+    # Validate filtering compaction actually happened
     for shard in shards:
         ps = env.get_tenant_pageserver(shard)
+
+        log.info("scan all layer files for disposable keys, there shouldn't be any")
+        ps.timeline_assert_no_disposable_keys(shard, timeline_id)
+
+        log.info("check sizes")
         timeline_info = ps.http_client().timeline_detail(shard, timeline_id)
         reported_size = timeline_info["current_physical_size"]
         layer_paths = ps.list_layers(shard, timeline_id)

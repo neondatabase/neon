@@ -1,5 +1,4 @@
 import time
-from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
 from typing import Optional
 
@@ -9,7 +8,6 @@ import pytest
 from fixtures.common_types import Lsn, TenantId, TenantShardId, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder, VanillaPostgres
-from fixtures.pageserver.http import HistoricLayerInfo, PageserverHttpClient
 from fixtures.remote_storage import RemoteStorageKind
 
 num_rows = 1000
@@ -157,35 +155,9 @@ def test_pgdata_import_smoke(
     #
 
     shards = env.storage_controller.locate(tenant_id)
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        futs = []
-        for shard in shards:
-            shard_ps = env.get_pageserver(shard["node_id"])
-            tenant_shard_id = TenantShardId.parse(shard["shard_id"])
-            shard_ps_http = shard_ps.http_client()
-            shard_layer_map = shard_ps_http.layer_map_info(tenant_shard_id, timeline_id)
-            for layer in shard_layer_map.historic_layers:
-
-                def do_layer(
-                    shard_ps_http: PageserverHttpClient,
-                    tenant_shard_id: TenantShardId,
-                    timeline_id: TimelineId,
-                    layer: HistoricLayerInfo,
-                ):
-                    return (
-                        layer,
-                        shard_ps_http.timeline_layer_scan_disposable_keys(
-                            tenant_shard_id, timeline_id, layer.layer_file_name
-                        ),
-                    )
-
-                futs.append(
-                    executor.submit(do_layer, shard_ps_http, tenant_shard_id, timeline_id, layer)
-                )
-        for fut in futs:
-            layer, result = fut.result()
-            assert result["disposable_count"] == 0
-            assert result["not_disposable_count"] > 0  # sanity check
+    for shard in shards:
+        shard_ps = env.get_pageserver(shard["node_id"])
+        shard_ps.timeline_assert_no_disposable_keys(shard["shard_id"], timeline_id)
 
     #
     # validate that we can write

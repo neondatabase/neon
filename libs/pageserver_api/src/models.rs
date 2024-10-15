@@ -1056,7 +1056,6 @@ pub struct ScanDisposableKeysResponse {
     pub not_disposable_count: usize,
 }
 
-
 // Wrapped in libpq CopyData
 #[derive(PartialEq, Eq, Debug)]
 pub enum PagestreamFeMessage {
