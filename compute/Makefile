@@ -35,3 +35,11 @@ clean:
 		etc/neon_collector_autoscaling.yml \
 		etc/sql_exporter.yml \
 		etc/sql_exporter_autoscaling.yml
+
+.PHONY: jsonnetfmt-test
+jsonnetfmt-test:
+	jsonnetfmt --test $(jsonnet_files)
+
+.PHONY: jsonnetfmt-format
+jsonnetfmt-format:
+	jsonnetfmt --in-place $(jsonnet_files)

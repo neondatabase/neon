@@ -136,8 +136,7 @@ jobs:
 
       - name: Check Jsonnet code formatting
         run: |
-          jsonnetfmt --test \
-            $(find . -type f -name '*.jsonnet' -o -name '*.libsonnet')
+          make -C compute jsonnetfmt-test
 
   # Check that the vendor/postgres-* submodules point to the
   # corresponding REL_*_STABLE_neon branches.
