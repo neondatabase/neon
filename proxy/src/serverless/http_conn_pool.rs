@@ -16,22 +16,22 @@ use crate::{context::RequestMonitoring, EndpointCacheKey};
 use tracing::{debug, error};
 use tracing::{info, info_span, Instrument};
 
-use super::conn_pool::ConnInfo;
+use super::conn_pool_lib::{ClientInnerExt, ConnInfo};
 
 pub(crate) type Send = http2::SendRequest<hyper::body::Incoming>;
 pub(crate) type Connect =
     http2::Connection<TokioIo<TcpStream>, hyper::body::Incoming, TokioExecutor>;
 
 #[derive(Clone)]
-struct ConnPoolEntry {
-    conn: Send,
+pub(crate) struct ConnPoolEntry<C: ClientInnerExt + Clone> {
+    conn: C,
     conn_id: uuid::Uuid,
     aux: MetricsAuxInfo,
 }
 
 // Per-endpoint connection pool
 // Number of open connections is limited by the `max_conns_per_endpoint`.
-pub(crate) struct EndpointConnPool {
+pub(crate) struct EndpointConnPool<C: ClientInnerExt + Clone> {
     // TODO(conrad):
     // either we should open more connections depending on stream count
     // (not exposed by hyper, need our own counter)
@@ -41,13 +41,13 @@ pub(crate) struct EndpointConnPool {
     // seems somewhat redundant though.
     //
     // Probably we should run a semaphore and just the single conn. TBD.
-    conns: VecDeque<ConnPoolEntry>,
+    conns: VecDeque<ConnPoolEntry<C>>,
     _guard: HttpEndpointPoolsGuard<'static>,
     global_connections_count: Arc<AtomicUsize>,
 }
 
-impl EndpointConnPool {
-    fn get_conn_entry(&mut self) -> Option<ConnPoolEntry> {
+impl<C: ClientInnerExt + Clone> EndpointConnPool<C> {
+    fn get_conn_entry(&mut self) -> Option<ConnPoolEntry<C>> {
         let Self { conns, .. } = self;
 
         loop {
@@ -82,7 +82,7 @@ impl EndpointConnPool {
     }
 }
 
-impl Drop for EndpointConnPool {
+impl<C: ClientInnerExt + Clone> Drop for EndpointConnPool<C> {
     fn drop(&mut self) {
         if !self.conns.is_empty() {
             self.global_connections_count
@@ -96,12 +96,12 @@ impl Drop for EndpointConnPool {
     }
 }
 
-pub(crate) struct GlobalConnPool {
+pub(crate) struct GlobalConnPool<C: ClientInnerExt + Clone> {
     // endpoint -> per-endpoint connection pool
     //
     // That should be a fairly conteded map, so return reference to the per-endpoint
     // pool as early as possible and release the lock.
-    global_pool: DashMap<EndpointCacheKey, Arc<RwLock<EndpointConnPool>>>,
+    global_pool: DashMap<EndpointCacheKey, Arc<RwLock<EndpointConnPool<C>>>>,
 
     /// Number of endpoint-connection pools
     ///
@@ -116,7 +116,7 @@ pub(crate) struct GlobalConnPool {
     config: &'static crate::config::HttpConfig,
 }
 
-impl GlobalConnPool {
+impl<C: ClientInnerExt + Clone> GlobalConnPool<C> {
     pub(crate) fn new(config: &'static crate::config::HttpConfig) -> Arc<Self> {
         let shards = config.pool_options.pool_shards;
         Arc::new(Self {
@@ -211,7 +211,7 @@ impl GlobalConnPool {
         self: &Arc<Self>,
         ctx: &RequestMonitoring,
         conn_info: &ConnInfo,
-    ) -> Option<Client> {
+    ) -> Option<Client<C>> {
         let endpoint = conn_info.endpoint_cache_key()?;
         let endpoint_pool = self.get_or_create_endpoint_pool(&endpoint);
         let client = endpoint_pool.write().get_conn_entry()?;
@@ -229,7 +229,7 @@ impl GlobalConnPool {
     fn get_or_create_endpoint_pool(
         self: &Arc<Self>,
         endpoint: &EndpointCacheKey,
-    ) -> Arc<RwLock<EndpointConnPool>> {
+    ) -> Arc<RwLock<EndpointConnPool<C>>> {
         // fast path
         if let Some(pool) = self.global_pool.get(endpoint) {
             return pool.clone();
@@ -269,14 +269,14 @@ impl GlobalConnPool {
 }
 
 pub(crate) fn poll_http2_client(
-    global_pool: Arc<GlobalConnPool>,
+    global_pool: Arc<GlobalConnPool<Send>>,
     ctx: &RequestMonitoring,
     conn_info: &ConnInfo,
     client: Send,
     connection: Connect,
     conn_id: uuid::Uuid,
     aux: MetricsAuxInfo,
-) -> Client {
+) -> Client<Send> {
     let conn_gauge = Metrics::get().proxy.db_connections.guard(ctx.protocol());
     let session_id = ctx.session_id();
 
@@ -323,13 +323,13 @@ pub(crate) fn poll_http2_client(
     Client::new(client, aux)
 }
 
-pub(crate) struct Client {
-    pub(crate) inner: Send,
+pub(crate) struct Client<C: ClientInnerExt + Clone> {
+    pub(crate) inner: C,
     aux: MetricsAuxInfo,
 }
 
-impl Client {
-    pub(self) fn new(inner: Send, aux: MetricsAuxInfo) -> Self {
+impl<C: ClientInnerExt + Clone> Client<C> {
+    pub(self) fn new(inner: C, aux: MetricsAuxInfo) -> Self {
         Self { inner, aux }
     }
 
@@ -338,5 +338,16 @@ impl Client {
             endpoint_id: self.aux.endpoint_id,
             branch_id: self.aux.branch_id,
         })
+    }
+}
+
+impl ClientInnerExt for Send {
+    fn is_closed(&self) -> bool {
+        self.is_closed()
+    }
+
+    fn get_process_id(&self) -> i32 {
+        // ideally throw something meaningful
+        -1
     }
 }

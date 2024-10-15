@@ -64,10 +64,10 @@ use crate::RoleName;
 
 use super::backend::LocalProxyConnError;
 use super::backend::PoolingBackend;
-use super::conn_pool;
 use super::conn_pool::AuthData;
-use super::conn_pool::ConnInfo;
 use super::conn_pool::ConnInfoWithAuth;
+use super::conn_pool_lib;
+use super::conn_pool_lib::ConnInfo;
 use super::http_util::json_response;
 use super::json::json_to_pg_text;
 use super::json::pg_text_row_to_json;
@@ -641,7 +641,8 @@ async fn handle_db_inner(
             let client = match keys.keys {
                 ComputeCredentialKeys::JwtPayload(payload) if is_local_proxy => {
                     let mut client = backend.connect_to_local_postgres(ctx, conn_info).await?;
-                    client.set_jwt_session(&payload).await?;
+                    let (cli_inner, _dsc) = client.client_inner();
+                    cli_inner.set_jwt_session(&payload).await?;
                     Client::Local(client)
                 }
                 _ => {
@@ -1055,12 +1056,12 @@ async fn query_to_json<T: GenericClient>(
 }
 
 enum Client {
-    Remote(conn_pool::Client<tokio_postgres::Client>),
+    Remote(conn_pool_lib::Client<tokio_postgres::Client>),
     Local(local_conn_pool::LocalClient<tokio_postgres::Client>),
 }
 
 enum Discard<'a> {
-    Remote(conn_pool::Discard<'a, tokio_postgres::Client>),
+    Remote(conn_pool_lib::Discard<'a, tokio_postgres::Client>),
     Local(local_conn_pool::Discard<'a, tokio_postgres::Client>),
 }
 
@@ -1075,7 +1076,7 @@ impl Client {
     fn inner(&mut self) -> (&mut tokio_postgres::Client, Discard<'_>) {
         match self {
             Client::Remote(client) => {
-                let (c, d) = client.inner();
+                let (c, d) = client.inner_mut();
                 (c, Discard::Remote(d))
             }
             Client::Local(local_client) => {

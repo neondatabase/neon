@@ -32,13 +32,14 @@ use crate::{
 };
 
 use super::{
-    conn_pool::{poll_client, Client, ConnInfo, GlobalConnPool},
-    http_conn_pool::{self, poll_http2_client},
+    conn_pool::poll_client,
+    conn_pool_lib::{Client, ConnInfo, GlobalConnPool},
+    http_conn_pool::{self, poll_http2_client, Send},
     local_conn_pool::{self, LocalClient, LocalConnPool},
 };
 
 pub(crate) struct PoolingBackend {
-    pub(crate) http_conn_pool: Arc<super::http_conn_pool::GlobalConnPool>,
+    pub(crate) http_conn_pool: Arc<super::http_conn_pool::GlobalConnPool<Send>>,
     pub(crate) local_pool: Arc<LocalConnPool<tokio_postgres::Client>>,
     pub(crate) pool: Arc<GlobalConnPool<tokio_postgres::Client>>,
     pub(crate) config: &'static ProxyConfig,
@@ -209,7 +210,7 @@ impl PoolingBackend {
         &self,
         ctx: &RequestMonitoring,
         conn_info: ConnInfo,
-    ) -> Result<http_conn_pool::Client, HttpConnError> {
+    ) -> Result<http_conn_pool::Client<Send>, HttpConnError> {
         info!("pool: looking for an existing connection");
         if let Some(client) = self.http_conn_pool.get(ctx, &conn_info) {
             return Ok(client);
@@ -281,7 +282,7 @@ impl PoolingBackend {
 
         tracing::Span::current().record("pid", tracing::field::display(client.get_process_id()));
 
-        let handle = local_conn_pool::poll_client(
+        let mut handle = local_conn_pool::poll_client(
             self.local_pool.clone(),
             ctx,
             conn_info,
@@ -292,7 +293,8 @@ impl PoolingBackend {
         );
 
         let kid = handle.get_client().get_process_id() as i64;
-        let jwk = p256::PublicKey::from(handle.key().verifying_key()).to_jwk();
+        let (cli_inner, _dsc) = handle.client_inner();
+        let jwk = p256::PublicKey::from(cli_inner.key().verifying_key()).to_jwk();
 
         debug!(kid, ?jwk, "setting up backend session state");
 
@@ -483,7 +485,7 @@ impl ConnectMechanism for TokioMechanism {
 }
 
 struct HyperMechanism {
-    pool: Arc<http_conn_pool::GlobalConnPool>,
+    pool: Arc<http_conn_pool::GlobalConnPool<Send>>,
     conn_info: ConnInfo,
     conn_id: uuid::Uuid,
 
@@ -493,7 +495,7 @@ struct HyperMechanism {
 
 #[async_trait]
 impl ConnectMechanism for HyperMechanism {
-    type Connection = http_conn_pool::Client;
+    type Connection = http_conn_pool::Client<Send>;
     type ConnectError = HttpConnError;
     type Error = HttpConnError;
 
