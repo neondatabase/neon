@@ -716,6 +716,9 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
         Ok(())
     }
 
+    // Proto looks like this:
+    // FeMessage::Query("pagestream_v2{FeMessage::CopyData(PagesetreamFeMessage::GetPage(..))}")
+
     async fn process_message(
         &mut self,
         handler: &mut impl Handler<IO>,

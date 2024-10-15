@@ -105,6 +105,7 @@ pub struct ConfigToml {
     pub ephemeral_bytes_per_memory_kb: usize,
     pub l0_flush: Option<crate::models::L0FlushConfig>,
     pub virtual_file_io_mode: Option<crate::models::virtual_file::IoMode>,
+    pub server_side_batch_timeout: Option<Duration>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -310,6 +311,8 @@ pub mod defaults {
     pub const DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB: usize = 0;
 
     pub const DEFAULT_IO_BUFFER_ALIGNMENT: usize = 512;
+
+    pub const DEFAULT_SERVER_SIDE_BATCH_TIMEOUT: Option<&str> = None;
 }
 
 impl Default for ConfigToml {
@@ -388,6 +391,8 @@ impl Default for ConfigToml {
             ephemeral_bytes_per_memory_kb: (DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB),
             l0_flush: None,
             virtual_file_io_mode: None,
+            server_side_batch_timeout: DEFAULT_SERVER_SIDE_BATCH_TIMEOUT
+                .map(|duration| humantime::parse_duration(duration).unwrap()),
             tenant_config: TenantConfigToml::default(),
         }
     }
