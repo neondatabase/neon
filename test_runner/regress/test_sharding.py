@@ -329,7 +329,12 @@ def test_sharding_split_compaction(
         ps = env.get_tenant_pageserver(shard)
 
         log.info("scan all layer files for disposable keys, there shouldn't be any")
-        ps.timeline_assert_no_disposable_keys(shard, timeline_id)
+        result = ps.timeline_scan_no_disposable_keys(shard, timeline_id)
+        tally = result.tally
+        raw_page_count = tally.not_disposable_count + tally.disposable_count
+        assert tally.not_disposable_count > (
+            raw_page_count // 2
+        ), "compaction doesn't rewrite layers that are >=50pct local"
 
         log.info("check sizes")
         timeline_info = ps.http_client().timeline_detail(shard, timeline_id)
