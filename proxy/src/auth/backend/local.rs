@@ -1,9 +1,9 @@
 use std::net::SocketAddr;
 
-use anyhow::Context;
 use arc_swap::ArcSwapOption;
 
 use crate::{
+    auth::backend::jwt::FetchAuthRulesError,
     compute::ConnCfg,
     context::RequestMonitoring,
     control_plane::{
@@ -53,11 +53,11 @@ impl FetchAuthRules for StaticAuthRules {
         &self,
         _ctx: &RequestMonitoring,
         _endpoint: EndpointId,
-    ) -> anyhow::Result<Vec<AuthRule>> {
+    ) -> Result<Vec<AuthRule>, FetchAuthRulesError> {
         let mappings = JWKS_ROLE_MAP.load();
         let role_mappings = mappings
             .as_deref()
-            .context("JWKs settings for this role were not configured")?;
+            .ok_or(FetchAuthRulesError::RoleJwksNotConfigured)?;
         let mut rules = vec![];
         for setting in &role_mappings.jwks {
             rules.push(AuthRule {

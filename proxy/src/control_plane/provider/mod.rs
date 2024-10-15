@@ -6,7 +6,7 @@ use super::messages::{ControlPlaneError, MetricsAuxInfo};
 use crate::{
     auth::{
         backend::{
-            jwt::{AuthRule, FetchAuthRules},
+            jwt::{AuthRule, FetchAuthRules, FetchAuthRulesError},
             ComputeCredentialKeys, ComputeUserInfo,
         },
         IpPattern,
@@ -44,7 +44,7 @@ pub(crate) mod errors {
     pub(crate) enum ApiError {
         /// Error returned by the console itself.
         #[error("{REQUEST_FAILED} with {0}")]
-        ControlPlane(ControlPlaneError),
+        ControlPlane(Box<ControlPlaneError>),
 
         /// Various IO errors like broken pipe or malformed payload.
         #[error("{REQUEST_FAILED}: {0}")]
@@ -90,7 +90,7 @@ pub(crate) mod errors {
                     Reason::ConcurrencyLimitReached => ErrorKind::ControlPlane,
                     Reason::LockAlreadyTaken => ErrorKind::ControlPlane,
                     Reason::RunningOperations => ErrorKind::ControlPlane,
-                    Reason::Unknown => match &e {
+                    Reason::Unknown => match &**e {
                         ControlPlaneError {
                             http_status_code:
                                 http::StatusCode::NOT_FOUND | http::StatusCode::NOT_ACCEPTABLE,
@@ -246,6 +246,33 @@ pub(crate) mod errors {
             }
         }
     }
+
+    #[derive(Debug, Error)]
+    pub enum GetEndpointJwksError {
+        #[error("endpoint not found")]
+        EndpointNotFound,
+
+        #[error("failed to build control plane request: {0}")]
+        RequestBuild(#[source] reqwest::Error),
+
+        #[error("failed to send control plane request: {0}")]
+        RequestExecute(#[source] reqwest_middleware::Error),
+
+        #[error(transparent)]
+        ControlPlane(#[from] ApiError),
+
+        #[cfg(any(test, feature = "testing"))]
+        #[error(transparent)]
+        TokioPostgres(#[from] tokio_postgres::Error),
+
+        #[cfg(any(test, feature = "testing"))]
+        #[error(transparent)]
+        ParseUrl(#[from] url::ParseError),
+
+        #[cfg(any(test, feature = "testing"))]
+        #[error(transparent)]
+        TaskJoin(#[from] tokio::task::JoinError),
+    }
 }
 
 /// Auth secret which is managed by the cloud.
@@ -342,7 +369,7 @@ pub(crate) trait Api {
         &self,
         ctx: &RequestMonitoring,
         endpoint: EndpointId,
-    ) -> anyhow::Result<Vec<AuthRule>>;
+    ) -> Result<Vec<AuthRule>, errors::GetEndpointJwksError>;
 
     /// Wake up the compute node and return the corresponding connection info.
     async fn wake_compute(
@@ -401,7 +428,7 @@ impl Api for ControlPlaneBackend {
         &self,
         ctx: &RequestMonitoring,
         endpoint: EndpointId,
-    ) -> anyhow::Result<Vec<AuthRule>> {
+    ) -> Result<Vec<AuthRule>, errors::GetEndpointJwksError> {
         match self {
             Self::Management(api) => api.get_endpoint_jwks(ctx, endpoint).await,
             #[cfg(any(test, feature = "testing"))]
@@ -583,7 +610,9 @@ impl FetchAuthRules for ControlPlaneBackend {
         &self,
         ctx: &RequestMonitoring,
         endpoint: EndpointId,
-    ) -> anyhow::Result<Vec<AuthRule>> {
-        self.get_endpoint_jwks(ctx, endpoint).await
+    ) -> Result<Vec<AuthRule>, FetchAuthRulesError> {
+        self.get_endpoint_jwks(ctx, endpoint)
+            .await
+            .map_err(FetchAuthRulesError::GetEndpointJwks)
     }
 }

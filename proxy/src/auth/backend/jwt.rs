@@ -4,20 +4,19 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use anyhow::{bail, ensure, Context};
 use arc_swap::ArcSwapOption;
 use dashmap::DashMap;
 use jose_jwk::crypto::KeyInfo;
 use serde::{de::Visitor, Deserialize, Deserializer};
 use signature::Verifier;
+use thiserror::Error;
 use tokio::time::Instant;
 
 use crate::{
-    context::RequestMonitoring, http::parse_json_body_with_limit, intern::RoleNameInt, EndpointId,
-    RoleName,
+    auth::backend::ComputeCredentialKeys, context::RequestMonitoring,
+    control_plane::errors::GetEndpointJwksError, http::parse_json_body_with_limit,
+    intern::RoleNameInt, EndpointId, RoleName,
 };
-
-use super::ComputeCredentialKeys;
 
 // TODO(conrad): make these configurable.
 const CLOCK_SKEW_LEEWAY: Duration = Duration::from_secs(30);
@@ -32,7 +31,16 @@ pub(crate) trait FetchAuthRules: Clone + Send + Sync + 'static {
         &self,
         ctx: &RequestMonitoring,
         endpoint: EndpointId,
-    ) -> impl Future<Output = anyhow::Result<Vec<AuthRule>>> + Send;
+    ) -> impl Future<Output = Result<Vec<AuthRule>, FetchAuthRulesError>> + Send;
+}
+
+#[derive(Error, Debug)]
+pub(crate) enum FetchAuthRulesError {
+    #[error(transparent)]
+    GetEndpointJwks(#[from] GetEndpointJwksError),
+
+    #[error("JWKs settings for this role were not configured")]
+    RoleJwksNotConfigured,
 }
 
 pub(crate) struct AuthRule {
@@ -122,7 +130,7 @@ impl JwkCacheEntryLock {
         client: &reqwest::Client,
         endpoint: EndpointId,
         auth_rules: &F,
-    ) -> anyhow::Result<Arc<JwkCacheEntry>> {
+    ) -> Result<Arc<JwkCacheEntry>, JwtError> {
         // double check that no one beat us to updating the cache.
         let now = Instant::now();
         let guard = self.cached.load_full();
@@ -188,7 +196,7 @@ impl JwkCacheEntryLock {
         client: &reqwest::Client,
         endpoint: EndpointId,
         fetch: &F,
-    ) -> Result<Arc<JwkCacheEntry>, anyhow::Error> {
+    ) -> Result<Arc<JwkCacheEntry>, JwtError> {
         let now = Instant::now();
         let guard = self.cached.load_full();
 
@@ -243,27 +251,24 @@ impl JwkCacheEntryLock {
         endpoint: EndpointId,
         role_name: &RoleName,
         fetch: &F,
-    ) -> Result<ComputeCredentialKeys, anyhow::Error> {
+    ) -> Result<ComputeCredentialKeys, JwtError> {
         // JWT compact form is defined to be
         // <B64(Header)> || . || <B64(Payload)> || . || <B64(Signature)>
         // where Signature = alg(<B64(Header)> || . || <B64(Payload)>);
 
         let (header_payload, signature) = jwt
             .rsplit_once('.')
-            .context("Provided authentication token is not a valid JWT encoding")?;
+            .ok_or(JwtEncodingError::InvalidCompactForm)?;
         let (header, payload) = header_payload
             .split_once('.')
-            .context("Provided authentication token is not a valid JWT encoding")?;
+            .ok_or(JwtEncodingError::InvalidCompactForm)?;
 
-        let header = base64::decode_config(header, base64::URL_SAFE_NO_PAD)
-            .context("Provided authentication token is not a valid JWT encoding")?;
-        let header = serde_json::from_slice::<JwtHeader<'_>>(&header)
-            .context("Provided authentication token is not a valid JWT encoding")?;
+        let header = base64::decode_config(header, base64::URL_SAFE_NO_PAD)?;
+        let header = serde_json::from_slice::<JwtHeader<'_>>(&header)?;
 
-        let sig = base64::decode_config(signature, base64::URL_SAFE_NO_PAD)
-            .context("Provided authentication token is not a valid JWT encoding")?;
+        let sig = base64::decode_config(signature, base64::URL_SAFE_NO_PAD)?;
 
-        let kid = header.key_id.context("missing key id")?;
+        let kid = header.key_id.ok_or(JwtError::MissingKeyId)?;
 
         let mut guard = self
             .get_or_update_jwk_cache(ctx, client, endpoint.clone(), fetch)
@@ -281,16 +286,13 @@ impl JwkCacheEntryLock {
                         .renew_jwks(permit, ctx, client, endpoint.clone(), fetch)
                         .await?;
                 }
-                _ => {
-                    bail!("jwk not found");
-                }
+                _ => return Err(JwtError::JwkNotFound),
             }
         };
 
-        ensure!(
-            jwk.is_supported(&header.algorithm),
-            "signature algorithm not supported"
-        );
+        if !jwk.is_supported(&header.algorithm) {
+            return Err(JwtError::SignatureAlgorithmNotSupported);
+        }
 
         match &jwk.key {
             jose_jwk::Key::Ec(key) => {
@@ -299,34 +301,32 @@ impl JwkCacheEntryLock {
             jose_jwk::Key::Rsa(key) => {
                 verify_rsa_signature(header_payload.as_bytes(), &sig, key, &header.algorithm)?;
             }
-            key => bail!("unsupported key type {key:?}"),
+            key => return Err(JwtError::UnsupportedKeyType(key.into())),
         };
 
-        let payloadb = base64::decode_config(payload, base64::URL_SAFE_NO_PAD)
-            .context("Provided authentication token is not a valid JWT encoding")?;
-        let payload = serde_json::from_slice::<JwtPayload<'_>>(&payloadb)
-            .context("Provided authentication token is not a valid JWT encoding")?;
+        let payloadb = base64::decode_config(payload, base64::URL_SAFE_NO_PAD)?;
+        let payload = serde_json::from_slice::<JwtPayload<'_>>(&payloadb)?;
 
         tracing::debug!(?payload, "JWT signature valid with claims");
 
         if let Some(aud) = expected_audience {
-            ensure!(
-                payload.audience.0.iter().any(|s| s == aud),
-                "invalid JWT token audience"
-            );
+            if payload.audience.0.iter().all(|s| s != aud) {
+                return Err(JwtError::InvalidJwtTokenAudience);
+            }
         }
 
         let now = SystemTime::now();
 
         if let Some(exp) = payload.expiration {
-            ensure!(now < exp + CLOCK_SKEW_LEEWAY, "JWT token has expired");
+            if now >= exp + CLOCK_SKEW_LEEWAY {
+                return Err(JwtError::JwtTokenHasExpired);
+            }
         }
 
         if let Some(nbf) = payload.not_before {
-            ensure!(
-                nbf < now + CLOCK_SKEW_LEEWAY,
-                "JWT token is not yet ready to use"
-            );
+            if nbf >= now + CLOCK_SKEW_LEEWAY {
+                return Err(JwtError::JwtTokenNotYetReadyToUse);
+            }
         }
 
         Ok(ComputeCredentialKeys::JwtPayload(payloadb))
@@ -341,7 +341,7 @@ impl JwkCache {
         role_name: &RoleName,
         fetch: &F,
         jwt: &str,
-    ) -> Result<ComputeCredentialKeys, anyhow::Error> {
+    ) -> Result<ComputeCredentialKeys, JwtError> {
         // try with just a read lock first
         let key = (endpoint.clone(), role_name.clone());
         let entry = self.map.get(&key).as_deref().map(Arc::clone);
@@ -357,19 +357,18 @@ impl JwkCache {
     }
 }
 
-fn verify_ec_signature(data: &[u8], sig: &[u8], key: &jose_jwk::Ec) -> anyhow::Result<()> {
+fn verify_ec_signature(data: &[u8], sig: &[u8], key: &jose_jwk::Ec) -> Result<(), JwtError> {
     use ecdsa::Signature;
     use signature::Verifier;
 
     match key.crv {
         jose_jwk::EcCurves::P256 => {
-            let pk =
-                p256::PublicKey::try_from(key).map_err(|_| anyhow::anyhow!("invalid P256 key"))?;
+            let pk = p256::PublicKey::try_from(key).map_err(JwtError::InvalidP256Key)?;
             let key = p256::ecdsa::VerifyingKey::from(&pk);
             let sig = Signature::from_slice(sig)?;
             key.verify(data, &sig)?;
         }
-        key => bail!("unsupported ec key type {key:?}"),
+        key => return Err(JwtError::UnsupportedEcKeyType(key)),
     }
 
     Ok(())
@@ -380,14 +379,14 @@ fn verify_rsa_signature(
     sig: &[u8],
     key: &jose_jwk::Rsa,
     alg: &jose_jwa::Algorithm,
-) -> anyhow::Result<()> {
+) -> Result<(), JwtError> {
     use jose_jwa::{Algorithm, Signing};
     use rsa::{
         pkcs1v15::{Signature, VerifyingKey},
         RsaPublicKey,
     };
 
-    let key = RsaPublicKey::try_from(key).map_err(|_| anyhow::anyhow!("invalid RSA key"))?;
+    let key = RsaPublicKey::try_from(key).map_err(JwtError::InvalidRsaKey)?;
 
     match alg {
         Algorithm::Signing(Signing::Rs256) => {
@@ -395,7 +394,7 @@ fn verify_rsa_signature(
             let sig = Signature::try_from(sig)?;
             key.verify(data, &sig)?;
         }
-        _ => bail!("invalid RSA signing algorithm"),
+        _ => return Err(JwtError::InvalidRsaSigningAlgorithm),
     };
 
     Ok(())
@@ -558,6 +557,99 @@ impl Drop for JwkRenewalPermit<'_> {
             Some(JwkRenewalPermitInner::Borrowed(p)) => *p,
         };
         entry.lookup.add_permits(1);
+    }
+}
+
+#[derive(Error, Debug)]
+#[non_exhaustive]
+pub(crate) enum JwtError {
+    #[error("jwk not found")]
+    JwkNotFound,
+
+    #[error("missing key id")]
+    MissingKeyId,
+
+    #[error("Provided authentication token is not a valid JWT encoding")]
+    JwtEncoding(#[from] JwtEncodingError),
+
+    #[error("invalid JWT token audience")]
+    InvalidJwtTokenAudience,
+
+    #[error("JWT token has expired")]
+    JwtTokenHasExpired,
+
+    #[error("JWT token is not yet ready to use")]
+    JwtTokenNotYetReadyToUse,
+
+    #[error("invalid P256 key")]
+    InvalidP256Key(jose_jwk::crypto::Error),
+
+    #[error("invalid RSA key")]
+    InvalidRsaKey(jose_jwk::crypto::Error),
+
+    #[error("invalid RSA signing algorithm")]
+    InvalidRsaSigningAlgorithm,
+
+    #[error("unsupported EC key type {0:?}")]
+    UnsupportedEcKeyType(jose_jwk::EcCurves),
+
+    #[error("unsupported key type {0:?}")]
+    UnsupportedKeyType(KeyType),
+
+    #[error("signature algorithm not supported")]
+    SignatureAlgorithmNotSupported,
+
+    #[error("signature error: {0}")]
+    Signature(#[from] signature::Error),
+
+    #[error("failed to fetch auth rules: {0}")]
+    FetchAuthRules(#[from] FetchAuthRulesError),
+}
+
+impl From<base64::DecodeError> for JwtError {
+    fn from(err: base64::DecodeError) -> Self {
+        JwtEncodingError::Base64Decode(err).into()
+    }
+}
+
+impl From<serde_json::Error> for JwtError {
+    fn from(err: serde_json::Error) -> Self {
+        JwtEncodingError::SerdeJson(err).into()
+    }
+}
+
+#[derive(Error, Debug)]
+#[non_exhaustive]
+pub enum JwtEncodingError {
+    #[error(transparent)]
+    Base64Decode(#[from] base64::DecodeError),
+
+    #[error(transparent)]
+    SerdeJson(#[from] serde_json::Error),
+
+    #[error("invalid compact form")]
+    InvalidCompactForm,
+}
+
+#[allow(dead_code, reason = "Debug use only")]
+#[derive(Debug)]
+pub(crate) enum KeyType {
+    Ec(jose_jwk::EcCurves),
+    Rsa,
+    Oct,
+    Okp(jose_jwk::OkpCurves),
+    Unknown,
+}
+
+impl From<&jose_jwk::Key> for KeyType {
+    fn from(key: &jose_jwk::Key) -> Self {
+        match key {
+            jose_jwk::Key::Ec(ec) => Self::Ec(ec.crv),
+            jose_jwk::Key::Rsa(_rsa) => Self::Rsa,
+            jose_jwk::Key::Oct(_oct) => Self::Oct,
+            jose_jwk::Key::Okp(okp) => Self::Okp(okp.crv),
+            _ => Self::Unknown,
+        }
     }
 }
 
@@ -758,7 +850,7 @@ X0n5X2/pBLJzxZc62ccvZYVnctBiFs6HbSnxpuMQCfkt/BcR/ttIepBQQIW86wHL
                 &self,
                 _ctx: &RequestMonitoring,
                 _endpoint: EndpointId,
-            ) -> anyhow::Result<Vec<AuthRule>> {
+            ) -> Result<Vec<AuthRule>, FetchAuthRulesError> {
                 Ok(vec![
                     AuthRule {
                         id: "foo".to_owned(),
