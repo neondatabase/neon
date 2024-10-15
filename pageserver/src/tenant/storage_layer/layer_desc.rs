@@ -57,6 +57,34 @@ impl std::fmt::Display for PersistentLayerKey {
     }
 }
 
+impl From<ImageLayerName> for PersistentLayerKey {
+    fn from(image_layer_name: ImageLayerName) -> Self {
+        Self {
+            key_range: image_layer_name.key_range,
+            lsn_range: PersistentLayerDesc::image_layer_lsn_range(image_layer_name.lsn),
+            is_delta: false,
+        }
+    }
+}
+
+impl From<DeltaLayerName> for PersistentLayerKey {
+    fn from(delta_layer_name: DeltaLayerName) -> Self {
+        Self {
+            key_range: delta_layer_name.key_range,
+            lsn_range: delta_layer_name.lsn_range,
+            is_delta: true,
+        }
+    }
+}
+
+impl From<LayerName> for PersistentLayerKey {
+    fn from(layer_name: LayerName) -> Self {
+        match layer_name {
+            LayerName::Image(i) => i.into(),
+            LayerName::Delta(d) => d.into(),
+        }
+    }
+}
 impl PersistentLayerDesc {
     pub fn key(&self) -> PersistentLayerKey {
         PersistentLayerKey {

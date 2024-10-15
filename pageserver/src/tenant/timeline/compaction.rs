@@ -851,7 +851,12 @@ impl Timeline {
                 if self.cancel.is_cancelled() {
                     return Err(CompactionError::ShuttingDown);
                 }
-                all_keys.extend(l.load_keys(ctx).await.map_err(CompactionError::Other)?);
+                let delta = l.get_as_delta(ctx).await.map_err(CompactionError::Other)?;
+                let keys = delta
+                    .index_entries(ctx)
+                    .await
+                    .map_err(CompactionError::Other)?;
+                all_keys.extend(keys);
             }
             // The current stdlib sorting implementation is designed in a way where it is
             // particularly fast where the slice is made up of sorted sub-ranges.
@@ -2420,7 +2425,7 @@ impl CompactionDeltaLayer<TimelineAdaptor> for ResidentDeltaLayer {
     type DeltaEntry<'a> = DeltaEntry<'a>;
 
     async fn load_keys<'a>(&self, ctx: &RequestContext) -> anyhow::Result<Vec<DeltaEntry<'_>>> {
-        self.0.load_keys(ctx).await
+        self.0.get_as_delta(ctx).await?.index_entries(ctx).await
     }
 }
 

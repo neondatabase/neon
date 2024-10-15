@@ -1050,6 +1050,12 @@ pub mod virtual_file {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScanDisposableKeysResponse {
+    pub disposable_count: usize,
+    pub not_disposable_count: usize,
+}
+
 // Wrapped in libpq CopyData
 #[derive(PartialEq, Eq, Debug)]
 pub enum PagestreamFeMessage {

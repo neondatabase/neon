@@ -1210,6 +1210,99 @@ async fn layer_map_info_handler(
     json_response(StatusCode::OK, layer_map_info)
 }
 
+#[instrument(skip_all, fields(tenant_id, shard_id, timeline_id, layer_name))]
+async fn timeline_layer_file_scan_disposable_keys(
+    request: Request<Body>,
+    cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+    let layer_name: LayerName = parse_request_param(&request, "layer_name")?;
+
+    tracing::Span::current().record(
+        "tenant_id",
+        tracing::field::display(&tenant_shard_id.tenant_id),
+    );
+    tracing::Span::current().record(
+        "shard_id",
+        tracing::field::display(tenant_shard_id.shard_slug()),
+    );
+    tracing::Span::current().record("timeline_id", tracing::field::display(&timeline_id));
+    tracing::Span::current().record("layer_name", tracing::field::display(&layer_name));
+
+    let state = get_state(&request);
+
+    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+
+    // technically the timeline need not be active for this scan to complete
+    let timeline =
+        active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
+            .await?;
+
+    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
+
+    let guard = timeline.layers.read().await;
+    let Some(layer) = guard.try_get_from_key(&layer_name.clone().into()) else {
+        return Err(ApiError::NotFound(
+            anyhow::anyhow!("Layer {tenant_shard_id}/{timeline_id}/{layer_name} not found").into(),
+        ));
+    };
+
+    let resident_layer = layer
+        .download_and_keep_resident()
+        .await
+        .map_err(|err| match err {
+            tenant::storage_layer::layer::DownloadError::TimelineShutdown
+            | tenant::storage_layer::layer::DownloadError::DownloadCancelled => {
+                ApiError::ShuttingDown
+            }
+            tenant::storage_layer::layer::DownloadError::ContextAndConfigReallyDeniesDownloads
+            | tenant::storage_layer::layer::DownloadError::DownloadRequired
+            | tenant::storage_layer::layer::DownloadError::NotFile(_)
+            | tenant::storage_layer::layer::DownloadError::DownloadFailed
+            | tenant::storage_layer::layer::DownloadError::PreStatFailed(_) => {
+                ApiError::InternalServerError(err.into())
+            }
+            #[cfg(test)]
+            tenant::storage_layer::layer::DownloadError::Failpoint(_) => {
+                ApiError::InternalServerError(err.into())
+            }
+        })?;
+
+    let keys = resident_layer
+        .load_keys(&ctx)
+        .await
+        .map_err(ApiError::InternalServerError)?;
+
+    let shard_identity = timeline.get_shard_identity();
+
+    let mut disposable_count = 0;
+    let mut not_disposable_count = 0;
+    let cancel = cancel.clone();
+    for (i, key) in keys.into_iter().enumerate() {
+        if shard_identity.is_key_disposable(&key) {
+            disposable_count += 1;
+            tracing::debug!(key = %key, key.dbg=?key, "disposable key");
+        } else {
+            not_disposable_count += 1;
+        }
+        #[allow(clippy::collapsible_if)]
+        if i % 10000 == 0 {
+            if cancel.is_cancelled() || timeline.cancel.is_cancelled() || timeline.is_stopping() {
+                return Err(ApiError::ShuttingDown);
+            }
+        }
+    }
+
+    json_response(
+        StatusCode::OK,
+        pageserver_api::models::ScanDisposableKeysResponse {
+            disposable_count,
+            not_disposable_count,
+        },
+    )
+}
+
 async fn layer_download_handler(
     request: Request<Body>,
     _cancel: CancellationToken,
@@ -3046,6 +3139,10 @@ pub fn make_router(
         .delete(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/layer/:layer_file_name",
             |r| api_handler(r, evict_timeline_layer_handler),
+        )
+        .post(
+            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/layer/:layer_name/scan_disposable_keys",
+            |r| api_handler(r, timeline_layer_file_scan_disposable_keys),
         )
         .post(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/block_gc",
