@@ -178,6 +178,10 @@ impl RemoteStorageConfig {
     pub fn from_toml(toml: &toml_edit::Item) -> anyhow::Result<RemoteStorageConfig> {
         Ok(utils::toml_edit_ext::deserialize_item(toml)?)
     }
+
+    pub fn from_toml_string(toml: &str) -> anyhow::Result<RemoteStorageConfig> {
+        Self::from_toml(&toml.parse()?)
+    }
 }
 
 #[cfg(test)]

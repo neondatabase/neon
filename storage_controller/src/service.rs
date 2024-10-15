@@ -53,6 +53,7 @@ use pageserver_api::{
         TopTenantShardsRequest,
     },
 };
+use remote_storage::{GenericRemoteStorage, RemoteStorageConfig};
 use reqwest::StatusCode;
 use tracing::{instrument, Instrument};
 
@@ -323,6 +324,9 @@ pub struct Config {
     /// assume it is running in a test environment and try to update neon_local.
     pub compute_hook_url: Option<String>,
 
+    /// The remote storage config for pageserver data.
+    pub pageserver_remote_storage: RemoteStorageConfig,
+
     /// Grace period within which a pageserver does not respond to heartbeats, but is still
     /// considered active. Once the grace period elapses, the next heartbeat failure will
     /// mark the pagseserver offline.
@@ -385,6 +389,8 @@ pub struct Service {
     inner: Arc<std::sync::RwLock<ServiceState>>,
     config: Config,
     persistence: Arc<Persistence>,
+    #[allow(dead_code)] // will be used shortly
+    pageserver_remote_storage: GenericRemoteStorage,
     compute_hook: Arc<ComputeHook>,
     result_tx: tokio::sync::mpsc::UnboundedSender<ReconcileResultRequest>,
 
@@ -1248,7 +1254,11 @@ impl Service {
         }
     }
 
-    pub async fn spawn(config: Config, persistence: Arc<Persistence>) -> anyhow::Result<Arc<Self>> {
+    pub async fn spawn(
+        config: Config,
+        persistence: Arc<Persistence>,
+        pageserver_remote_storage: GenericRemoteStorage,
+    ) -> anyhow::Result<Arc<Self>> {
         let (result_tx, result_rx) = tokio::sync::mpsc::unbounded_channel();
         let (abort_tx, abort_rx) = tokio::sync::mpsc::unbounded_channel();
 
@@ -1417,6 +1427,7 @@ impl Service {
             ))),
             config: config.clone(),
             persistence,
+            pageserver_remote_storage,
             compute_hook: Arc::new(ComputeHook::new(config.clone())),
             result_tx,
             heartbeater,

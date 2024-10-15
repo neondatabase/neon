@@ -424,6 +424,17 @@ impl StorageController {
 
         let database_url = format!("postgresql://localhost:{}/{DB_NAME}", postgres_port);
 
+        // It would be nice to format this as an inline table, but the toml crate doesn't support it
+        // so it's not trivial.
+        let pageserver_remote_storage = toml::to_string(
+            &self
+                .env
+                .pageservers
+                .first()
+                .expect("must have at least one pageserver")
+                .remote_storage,
+        )?;
+
         // We support running a startup SQL script to fiddle with the database before we launch storcon.
         // This is used by the test suite.
         let startup_script_path = self
@@ -470,6 +481,8 @@ impl StorageController {
             "--dev",
             "--database-url",
             &database_url,
+            "--pageserver-remote-storage",
+            &pageserver_remote_storage,
             "--max-offline-interval",
             &humantime::Duration::from(self.config.max_offline).to_string(),
             "--max-warming-up-interval",

@@ -13,7 +13,7 @@ use control_plane::local_env::{
     InitForceMode, LocalEnv, NeonBroker, NeonLocalInitConf, NeonLocalInitPageserverConf,
     SafekeeperConf,
 };
-use control_plane::pageserver::PageServerNode;
+use control_plane::pageserver::{PageServerNode, PAGESERVER_REMOTE_STORAGE_DIR};
 use control_plane::safekeeper::SafekeeperNode;
 use control_plane::storage_controller::{
     NeonStorageControllerStartArgs, NeonStorageControllerStopArgs, StorageController,
@@ -30,6 +30,7 @@ use pageserver_api::models::{ShardParameters, TimelineCreateRequest, TimelineInf
 use pageserver_api::shard::{ShardCount, ShardStripeSize, TenantShardId};
 use postgres_backend::AuthType;
 use postgres_connection::parse_host_port;
+use remote_storage::{RemoteStorageConfig, RemoteStorageKind};
 use safekeeper_api::{
     DEFAULT_HTTP_LISTEN_PORT as DEFAULT_SAFEKEEPER_HTTP_PORT,
     DEFAULT_PG_LISTEN_PORT as DEFAULT_SAFEKEEPER_PG_PORT,
@@ -943,6 +944,12 @@ fn handle_init(args: &InitCmdArgs) -> anyhow::Result<LocalEnv> {
                         listen_http_addr: format!("127.0.0.1:{http_port}"),
                         pg_auth_type: AuthType::Trust,
                         http_auth_type: AuthType::Trust,
+                        remote_storage: RemoteStorageConfig {
+                            storage: RemoteStorageKind::LocalFs {
+                                local_path: PAGESERVER_REMOTE_STORAGE_DIR.into(),
+                            },
+                            timeout: RemoteStorageConfig::DEFAULT_TIMEOUT,
+                        },
                         other: Default::default(),
                     }
                 })

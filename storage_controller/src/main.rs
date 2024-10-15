@@ -3,6 +3,7 @@ use clap::Parser;
 use hyper0::Uri;
 use metrics::launch_timestamp::LaunchTimestamp;
 use metrics::BuildInfo;
+use remote_storage::{GenericRemoteStorage, RemoteStorageConfig};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -57,6 +58,11 @@ struct Cli {
     /// URL to connect to postgres, like postgresql://localhost:1234/storage_controller
     #[arg(long)]
     database_url: Option<String>,
+
+    /// Remote storage configuration for pageserver data as a TOML inline table, e.g.
+    ///   { bucket_name = "<BUCKETNAME>", bucket_region = "<REGION>" }
+    #[arg(long, value_parser = RemoteStorageConfig::from_toml_string, verbatim_doc_comment)]
+    pageserver_remote_storage: RemoteStorageConfig,
 
     /// Flag to enable dev mode, which permits running without auth
     #[arg(long, default_value = "false")]
@@ -278,6 +284,7 @@ async fn async_main() -> anyhow::Result<()> {
         control_plane_jwt_token: secrets.control_plane_jwt_token,
         peer_jwt_token: secrets.peer_jwt_token,
         compute_hook_url: args.compute_hook_url,
+        pageserver_remote_storage: args.pageserver_remote_storage,
         max_offline_interval: args
             .max_offline_interval
             .map(humantime::Duration::into)
@@ -309,8 +316,10 @@ async fn async_main() -> anyhow::Result<()> {
     Persistence::await_connection(&secrets.database_url, args.db_connect_timeout.into()).await?;
 
     let persistence = Arc::new(Persistence::new(secrets.database_url));
+    let pageserver_remote_storage =
+        GenericRemoteStorage::from_config(&config.pageserver_remote_storage).await?;
 
-    let service = Service::spawn(config, persistence.clone()).await?;
+    let service = Service::spawn(config, persistence, pageserver_remote_storage).await?;
 
     let http_listener = tcp_listener::bind(args.listen)?;
 

@@ -7,6 +7,7 @@ use anyhow::{bail, Context};
 
 use clap::ValueEnum;
 use postgres_backend::AuthType;
+use remote_storage::{RemoteStorageConfig, RemoteStorageKind};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -225,6 +226,7 @@ pub struct PageServerConf {
     pub listen_http_addr: String,
     pub pg_auth_type: AuthType,
     pub http_auth_type: AuthType,
+    pub remote_storage: RemoteStorageConfig,
 }
 
 impl Default for PageServerConf {
@@ -235,6 +237,12 @@ impl Default for PageServerConf {
             listen_http_addr: String::new(),
             pg_auth_type: AuthType::Trust,
             http_auth_type: AuthType::Trust,
+            remote_storage: RemoteStorageConfig {
+                storage: RemoteStorageKind::LocalFs {
+                    local_path: PAGESERVER_REMOTE_STORAGE_DIR.into(),
+                },
+                timeout: RemoteStorageConfig::DEFAULT_TIMEOUT,
+            },
         }
     }
 }
@@ -249,6 +257,7 @@ pub struct NeonLocalInitPageserverConf {
     pub listen_http_addr: String,
     pub pg_auth_type: AuthType,
     pub http_auth_type: AuthType,
+    pub remote_storage: RemoteStorageConfig,
     #[serde(flatten)]
     pub other: HashMap<String, toml::Value>,
 }
@@ -261,6 +270,7 @@ impl From<&NeonLocalInitPageserverConf> for PageServerConf {
             listen_http_addr,
             pg_auth_type,
             http_auth_type,
+            remote_storage,
             other: _,
         } = conf;
         Self {
@@ -269,6 +279,7 @@ impl From<&NeonLocalInitPageserverConf> for PageServerConf {
             listen_http_addr: listen_http_addr.clone(),
             pg_auth_type: *pg_auth_type,
             http_auth_type: *http_auth_type,
+            remote_storage: remote_storage.clone(),
         }
     }
 }
@@ -569,6 +580,7 @@ impl LocalEnv {
                     listen_http_addr: String,
                     pg_auth_type: AuthType,
                     http_auth_type: AuthType,
+                    remote_storage: RemoteStorageConfig,
                 }
                 let config_toml_path = dentry.path().join("pageserver.toml");
                 let config_toml: PageserverConfigTomlSubset = toml_edit::de::from_str(
@@ -591,6 +603,7 @@ impl LocalEnv {
                     listen_http_addr,
                     pg_auth_type,
                     http_auth_type,
+                    remote_storage,
                 } = config_toml;
                 let IdentityTomlSubset {
                     id: identity_toml_id,
@@ -607,6 +620,7 @@ impl LocalEnv {
                     listen_http_addr,
                     pg_auth_type,
                     http_auth_type,
+                    remote_storage,
                 };
                 pageservers.push(conf);
             }

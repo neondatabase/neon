@@ -129,7 +129,7 @@ struct Args {
     /// Safekeeper offloads WAL to
     ///   [prefix_in_bucket/]<tenant_id>/<timeline_id>/<segment_file>, mirroring
     /// structure on the file system.
-    #[arg(long, value_parser = parse_remote_storage, verbatim_doc_comment)]
+    #[arg(long, value_parser = RemoteStorageConfig::from_toml_string, verbatim_doc_comment)]
     remote_storage: Option<RemoteStorageConfig>,
     /// Safekeeper won't be elected for WAL offloading if it is lagging for more than this value in bytes
     #[arg(long, default_value_t = DEFAULT_MAX_OFFLOADER_LAG_BYTES)]
@@ -575,10 +575,6 @@ fn set_id(workdir: &Utf8Path, given_id: Option<NodeId>) -> Result<NodeId> {
         },
     }
     Ok(my_id)
-}
-
-fn parse_remote_storage(storage_conf: &str) -> anyhow::Result<RemoteStorageConfig> {
-    RemoteStorageConfig::from_toml(&storage_conf.parse()?)
 }
 
 #[test]
