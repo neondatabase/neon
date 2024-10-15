@@ -3,7 +3,8 @@ ARG REPOSITORY=neondatabase
 ARG IMAGE=build-tools
 ARG TAG=pinned
 ARG BUILD_TAG
-ARG DEBIAN_FLAVOR=bullseye-slim
+ARG DEBIAN_VERSION=bullseye
+ARG DEBIAN_FLAVOR=${DEBIAN_VERSION}-slim
 
 #########################################################################################
 #
@@ -11,20 +12,23 @@ ARG DEBIAN_FLAVOR=bullseye-slim
 #
 #########################################################################################
 FROM debian:$DEBIAN_FLAVOR AS build-deps
-ARG DEBIAN_FLAVOR
+ARG DEBIAN_VERSION
 
-RUN case $DEBIAN_FLAVOR in \
+RUN case $DEBIAN_VERSION in \
       # Version-specific installs for Bullseye (PG14-PG16):
       # The h3_pg extension needs a cmake 3.20+, but Debian bullseye has 3.18.
       # Install newer version (3.25) from backports.
       # libstdc++-10-dev is required for plv8
-      bullseye*) \
+      bullseye) \
         echo "deb http://deb.debian.org/debian bullseye-backports main" > /etc/apt/sources.list.d/bullseye-backports.list; \
         VERSION_INSTALLS="cmake/bullseye-backports cmake-data/bullseye-backports libstdc++-10-dev"; \
       ;; \
       # Version-specific installs for Bookworm (PG17):
-      bookworm*) \
+      bookworm) \
         VERSION_INSTALLS="cmake libstdc++-12-dev"; \
+      ;; \
+      *) \
+        echo "Unknown Debian version ${DEBIAN_VERSION}" && exit 1 \
       ;; \
     esac && \
     apt update &&  \
@@ -1138,7 +1142,6 @@ RUN cd compute_tools && mold -run cargo build --locked --profile release-line-de
 #########################################################################################
 
 FROM debian:$DEBIAN_FLAVOR AS compute-tools-image
-ARG DEBIAN_FLAVOR
 
 COPY --from=compute-tools /home/nonroot/target/release-line-debug-size-lto/compute_ctl /usr/local/bin/compute_ctl
 
@@ -1149,7 +1152,6 @@ COPY --from=compute-tools /home/nonroot/target/release-line-debug-size-lto/compu
 #########################################################################################
 
 FROM debian:$DEBIAN_FLAVOR AS pgbouncer
-ARG DEBIAN_FLAVOR
 RUN set -e \
     && apt-get update \
     && apt-get install --no-install-recommends -y \
@@ -1304,7 +1306,7 @@ ENV PGDATABASE=postgres
 #
 #########################################################################################
 FROM debian:$DEBIAN_FLAVOR
-ARG DEBIAN_FLAVOR
+ARG DEBIAN_VERSION
 # Add user postgres
 RUN mkdir /var/db && useradd -m -d /var/db/postgres postgres && \
     echo "postgres:test_console_pass" | chpasswd && \
@@ -1352,18 +1354,21 @@ RUN mkdir /usr/local/download_extensions && chown -R postgres:postgres /usr/loca
 
 
 RUN apt update && \
-    case $DEBIAN_FLAVOR in \
+    case $DEBIAN_VERSION in \
       # Version-specific installs for Bullseye (PG14-PG16):
       # libicu67, locales for collations (including ICU and plpgsql_check)
       # libgdal28, libproj19 for PostGIS
-      bullseye*) \
+      bullseye) \
         VERSION_INSTALLS="libicu67 libgdal28 libproj19"; \
       ;; \
       # Version-specific installs for Bookworm (PG17):
       # libicu72, locales for collations (including ICU and plpgsql_check)
       # libgdal32, libproj25 for PostGIS
-      bookworm*) \
+      bookworm) \
         VERSION_INSTALLS="libicu72 libgdal32 libproj25"; \
+      ;; \
+      *) \
+        echo "Unknown Debian version ${DEBIAN_VERSION}" && exit 1 \
       ;; \
     esac && \
     apt install --no-install-recommends -y \
