@@ -17,6 +17,6 @@ pub struct ConfigurationRequest {
 pub struct SetRoleGrantsRequest {
     pub database: String,
     pub schema: String,
-    pub privilege: String,
+    pub privileges: Vec<String>,
     pub role: String,
 }

@@ -170,6 +170,9 @@ pub struct InstalledExtensions {
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
-pub struct SetRoleGrantsResult {
-    pub extension: String,
+pub struct SetRoleGrantsResponse {
+    pub database: String,
+    pub schema: String,
+    pub privileges: Vec<String>,
+    pub role: String,
 }

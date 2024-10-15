@@ -38,6 +38,7 @@ use crate::checker::create_availability_check_data;
 use crate::local_proxy;
 use crate::logger::inlinify;
 use crate::pg_helpers::*;
+use crate::privilege::Privilege;
 use crate::spec::*;
 use crate::sync_sk::{check_if_synced, ping_safekeeper};
 use crate::{config, extension_server};
@@ -1372,7 +1373,7 @@ LIMIT 100",
         &self,
         db_name: &str,
         schema_name: &str,
-        privilege: &str,
+        privileges: &[Privilege],
         role_name: &str,
     ) -> Result<()> {
         let mut conf = Config::from_str(self.connstr.as_str()).unwrap();
@@ -1384,7 +1385,18 @@ LIMIT 100",
 
         let query = "GRANT $1 ON SCHEMA $2 TO $3";
         db_client
-            .execute(query, &[&schema_name, &privilege, &role_name])
+            .execute(
+                query,
+                &[
+                    &privileges
+                        .iter()
+                        .map(|p| p.as_str())
+                        .collect::<Vec<&str>>()
+                        .join(", "),
+                    &schema_name,
+                    &role_name,
+                ],
+            )
             .context(format!("Failed to execute query: {}", query))?;
 
         Ok(())

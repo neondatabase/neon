@@ -127,6 +127,34 @@ paths:
               schema:
                 $ref: "#/components/schemas/GenericError"
 
+  /grants:
+    post:
+      tags:
+        - Grants
+      summary: Apply grants to the database.
+      description: ""
+      operationId: setRoleGrants
+      requestBody:
+        description: Grants request.
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: SetRoleGrantsRequest
+      responses:
+        200:
+          description: Grants applied.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SetRoleGrantsResponse"
+        500:
+          description: Error occurred during grants application.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericError"
+
   /check_writability:
     post:
       tags:
@@ -431,23 +459,55 @@ components:
       type: object
       required:
         - database
+        - schema
+        - privileges
         - role
-        - grants
       properties:
         database:
           type: string
           description: Database name.
           example: "neondb"
+        schema:
+          type: string
+          description: Schema name.
+          example: "public"
+        privileges:
+          type: array
+          items:
+            type: string
+          description: List of privileges to set.
+          example: ["SELECT", "INSERT"]
         role:
           type: string
           description: Role name.
           example: "neon"
-        grants:
+
+    SetRoleGrantsResponse:
+      type: object
+      required:
+        - database
+        - schema
+        - privileges
+        - role
+      properties:
+        database:
+          type: string
+          description: Database name.
+          example: "neondb"
+        schema:
+          type: string
+          description: Schema name.
+          example: "public"
+        privileges:
           type: array
           items:
             type: string
-          description: List of grants to set.
+          description: List of privileges set.
           example: ["SELECT", "INSERT"]
+        role:
+          type: string
+          description: Role name.
+          example: "neon"
 
     #
     # Errors
