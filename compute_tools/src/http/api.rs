@@ -9,6 +9,7 @@ use crate::catalog::SchemaDumpError;
 use crate::catalog::{get_database_schema, get_dbs_and_roles};
 use crate::compute::forward_termination_signal;
 use crate::compute::{ComputeNode, ComputeState, ParsedSpec};
+use crate::installed_extensions;
 use compute_api::requests::ConfigurationRequest;
 use compute_api::responses::{ComputeStatus, ComputeStatusResponse, GenericAPIError};
 
@@ -16,10 +17,11 @@ use anyhow::Result;
 use hyper::header::CONTENT_TYPE;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Request, Response, Server, StatusCode};
+use metrics::Encoder;
+use metrics::TextEncoder;
 use tokio::task;
 use tracing::{debug, error, info, warn};
 use tracing_utils::http::OtelName;
-use utils::http::endpoint::prometheus_metrics_handler;
 use utils::http::request::must_get_query_param;
 
 fn status_response_from_state(state: &ComputeState) -> ComputeStatusResponse {
@@ -65,8 +67,18 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
 
         // Prometheus metrics
         (&Method::GET, "/metrics") => {
-            info!("serving /metrics GET request");
-            match prometheus_metrics_handler(req).await {
+            debug!("serving /metrics GET request");
+
+            let mut buffer = vec![];
+            let metrics = installed_extensions::collect();
+            let encoder = TextEncoder::new();
+            encoder.encode(&metrics, &mut buffer).unwrap();
+
+            match Response::builder()
+                .status(StatusCode::OK)
+                .header(CONTENT_TYPE, encoder.format_type())
+                .body(Body::from(buffer))
+            {
                 Ok(response) => response,
                 Err(err) => {
                     let msg = format!("error handling /metrics request: {err}");
