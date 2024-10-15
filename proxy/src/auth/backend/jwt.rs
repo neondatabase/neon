@@ -301,7 +301,7 @@ impl JwkCacheEntryLock {
             jose_jwk::Key::Rsa(key) => {
                 verify_rsa_signature(header_payload.as_bytes(), &sig, key, &header.algorithm)?;
             }
-            key => return Err(JwtError::UnsupportedKeyType(Box::new(key.clone()))), // TODO: just type, not full key
+            key => return Err(JwtError::UnsupportedKeyType(key.into())),
         };
 
         let payloadb = base64::decode_config(payload, base64::URL_SAFE_NO_PAD)?;
@@ -594,7 +594,7 @@ pub(crate) enum JwtError {
     UnsupportedEcKeyType(jose_jwk::EcCurves),
 
     #[error("unsupported key type {0:?}")]
-    UnsupportedKeyType(Box<jose_jwk::Key>),
+    UnsupportedKeyType(KeyType),
 
     #[error("signature algorithm not supported")]
     SignatureAlgorithmNotSupported,
@@ -629,6 +629,28 @@ pub enum JwtEncodingError {
 
     #[error("invalid compact form")]
     InvalidCompactForm,
+}
+
+#[allow(dead_code, reason = "Debug use only")]
+#[derive(Debug)]
+pub(crate) enum KeyType {
+    Ec(jose_jwk::EcCurves),
+    Rsa,
+    Oct,
+    Okp(jose_jwk::OkpCurves),
+    Unknown,
+}
+
+impl From<&jose_jwk::Key> for KeyType {
+    fn from(key: &jose_jwk::Key) -> Self {
+        match key {
+            jose_jwk::Key::Ec(ec) => Self::Ec(ec.crv),
+            jose_jwk::Key::Rsa(_rsa) => Self::Rsa,
+            jose_jwk::Key::Oct(_oct) => Self::Oct,
+            jose_jwk::Key::Okp(okp) => Self::Okp(okp.crv),
+            _ => Self::Unknown,
+        }
+    }
 }
 
 #[cfg(test)]
