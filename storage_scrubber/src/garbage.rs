@@ -250,13 +250,16 @@ async fn find_garbage_inner(
                     &target.tenant_root(&tenant_shard_id),
                 )
                 .await?;
-                let object = tenant_objects.keys.first().unwrap();
-                if object.key.get_path().as_str().ends_with("heatmap-v1.json") {
-                    tracing::info!("Tenant {tenant_shard_id}: is missing in console and is only a heatmap (known historic deletion bug)");
-                    garbage.append_buggy(GarbageEntity::Tenant(tenant_shard_id));
-                    continue;
+                if let Some(object) = tenant_objects.keys.first() {
+                    if object.key.get_path().as_str().ends_with("heatmap-v1.json") {
+                        tracing::info!("Tenant {tenant_shard_id}: is missing in console and is only a heatmap (known historic deletion bug)");
+                        garbage.append_buggy(GarbageEntity::Tenant(tenant_shard_id));
+                        continue;
+                    } else {
+                        tracing::info!("Tenant {tenant_shard_id} is missing in console and contains one object: {}", object.key);
+                    }
                 } else {
-                    tracing::info!("Tenant {tenant_shard_id} is missing in console and contains one object: {}", object.key);
+                    tracing::info!("Tenant {tenant_shard_id} is missing in console appears to have been deleted while we ran");
                 }
             } else {
                 // A console-unknown tenant with timelines: check if these timelines only contain initdb.tar.zst, from the initial
