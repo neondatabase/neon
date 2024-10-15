@@ -488,32 +488,37 @@ fn resign_jwt(sk: &SigningKey, payload: &[u8], jti: u64) -> Result<String, HttpC
 }
 
 fn sign_jwt(sk: &SigningKey, payload: &[u8]) -> String {
-    let header_len = 3;
+    let header_len = 20;
     let payload_len = Base64UrlUnpadded::encoded_len(payload);
     let signature_len = Base64UrlUnpadded::encoded_len(&[0; 64]);
+    let total_len = header_len + payload_len + signature_len + 2;
 
-    let mut jwt = Vec::with_capacity(header_len + payload_len + signature_len + 2);
+    let mut jwt = String::with_capacity(total_len);
+    let cap = jwt.capacity();
 
-    // we only need an empty header.
-    // base64url("{}") == "e30"
-    jwt.extend_from_slice(b"e30.");
+    // we only need an empty header with the alg specified.
+    // base64url(r#"{"alg":"ES256"}"#) == "eyJhbGciOiJFUzI1NiJ9"
+    jwt.push_str("eyJhbGciOiJFUzI1NiJ9.");
 
-    // encode the jwt payload in-place - inspired from impl of Base64UrlUnpadded::encode_string
-    jwt.resize(4 + payload_len, 0);
-    let res = Base64UrlUnpadded::encode(payload, &mut jwt[4..]).expect("encoding error");
-    debug_assert_eq!(payload_len, res.len());
+    // encode the jwt payload in-place
+    base64::encode_config_buf(payload, base64::URL_SAFE_NO_PAD, &mut jwt);
 
-    // create the signature
-    let sig: Signature = sk.sign(&jwt);
+    // create the signature from the encoded header || payload
+    let sig: Signature = sk.sign(jwt.as_bytes());
+
+    jwt.push('.');
 
     // encode the jwt signature in-place
-    jwt.push(b'.');
-    let n = jwt.len();
-    jwt.resize(n + signature_len, 0);
-    let res = Base64UrlUnpadded::encode(&sig.to_bytes(), &mut jwt[n..]).expect("encoding error");
-    debug_assert_eq!(signature_len, res.len());
+    base64::encode_config_buf(sig.to_bytes(), base64::URL_SAFE_NO_PAD, &mut jwt);
 
-    String::from_utf8(jwt).expect("base64url encoding for JWT should be valid utf8")
+    debug_assert_eq!(
+        jwt.len(),
+        total_len,
+        "the jwt len should match our expected len"
+    );
+    debug_assert_eq!(jwt.capacity(), cap, "the jwt capacity should not change");
+
+    jwt
 }
 
 impl<C: ClientInnerExt> Discard<'_, C> {
@@ -563,15 +568,26 @@ impl<C: ClientInnerExt> Drop for LocalClient<C> {
 #[cfg(test)]
 mod tests {
     use p256::ecdsa::SigningKey;
+    use typed_json::json;
 
     use super::resign_jwt;
 
     #[test]
     fn jwt_token_snapshot() {
         let key = SigningKey::from_bytes(&[1; 32].into()).unwrap();
-        let data = br#"{"foo":"bar", "jti": "foo\nbar", "nested": {"jti": "tricky nesting"}}"#;
+        let data =
+            json!({"foo":"bar","jti":"foo\nbar","nested":{"jti":"tricky nesting"}}).to_string();
 
-        let jwt = resign_jwt(&key, data, 2).unwrap();
-        assert_eq!(jwt, "e30.eyJmb28iOiJiYXIiLCJqdGkiOjIsIm5lc3RlZCI6eyJqdGkiOiAidHJpY2t5IG5lc3RpbmcifX0.qZnHxDfNigd7eegbHtcjK-l3Gv-zQtx6-6x-uP1IBfwS4Z4Jepc3T3RfRaIbPpWOjeVBrhLjB3jir5_LtSVPXQ");
+        let jwt = resign_jwt(&key, data.as_bytes(), 2).unwrap();
+
+        // To validate the JWT, copy the JWT string and paste it into https://jwt.io/.
+        // In the public-key box, paste the following jwk public key
+        // `{"kty":"EC","crv":"P-256","x":"b_A7lJJBzh2t1DUZ5pYOCoW0GmmgXDKBA6orzhWUyhY","y":"PE91OlW_AdxT9sCwx-7ni0DG_30lqW4igrmJzvccFEo"}`
+
+        // let pub_key = p256::ecdsa::VerifyingKey::from(&key);
+        // let pub_key = p256::PublicKey::from(pub_key);
+        // println!("{}", pub_key.to_jwk_string());
+
+        assert_eq!(jwt, "eyJhbGciOiJFUzI1NiJ9.eyJmb28iOiJiYXIiLCJqdGkiOjIsIm5lc3RlZCI6eyJqdGkiOiJ0cmlja3kgbmVzdGluZyJ9fQ.pYf0LxoJ8sDgpmsYOgrbNecOSipnPBEGwnZzB-JhW2cONrKlqRsgXwK8_cOsyolGy-hTTe8GXbWTl_UdpF5RyA");
     }
 }

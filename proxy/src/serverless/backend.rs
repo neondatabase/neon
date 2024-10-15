@@ -1,8 +1,8 @@
 use std::{io, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use ecdsa::SigningKey;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
+use p256::{ecdsa::SigningKey, elliptic_curve::JwkEcKey};
 use rand::rngs::OsRng;
 use tokio::net::{lookup_host, TcpStream};
 use tracing::{debug, field::display, info};
@@ -277,15 +277,16 @@ impl PoolingBackend {
             auth::Backend::Local(local) => local.node_info.clone(),
         };
 
-        let key = SigningKey::random(&mut OsRng);
-        let jwk = p256::PublicKey::from(key.verifying_key()).to_jwk();
-        let jwk = serde_json::to_string(&jwk).expect("serializing jwk to json should not fail");
+        let (key, jwk) = create_random_jwk();
 
         let config = node_info
             .config
             .user(&conn_info.user_info.user)
             .dbname(&conn_info.dbname)
-            .options(&format!("-c pg_session_jwt.jwk={jwk}"));
+            .options(&format!(
+                "-c pg_session_jwt.jwk={}",
+                serde_json::to_string(&jwk).expect("serializing jwk to json should not fail")
+            ));
 
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
         let (client, connection) = config.connect(tokio_postgres::NoTls).await?;
@@ -307,19 +308,25 @@ impl PoolingBackend {
 
         {
             let (client, mut discard) = handle.inner();
-            debug!(?pid, "setting up backend session state");
+            debug!("setting up backend session state");
 
             // initiates the auth session
-            if let Err(e) = client.query("select auth.init();", &[]).await {
+            if let Err(e) = client.query("select auth.init()", &[]).await {
                 discard.discard();
                 return Err(e.into());
             }
 
-            info!(?pid, "backend session state initialized");
+            info!("backend session state initialized");
         }
 
         Ok(handle)
     }
+}
+
+fn create_random_jwk() -> (SigningKey, JwkEcKey) {
+    let key = SigningKey::random(&mut OsRng);
+    let jwk = p256::PublicKey::from(key.verifying_key()).to_jwk();
+    (key, jwk)
 }
 
 #[derive(Debug, thiserror::Error)]
