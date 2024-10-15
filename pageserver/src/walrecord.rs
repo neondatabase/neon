@@ -21,11 +21,6 @@ pub enum NeonWalRecord {
     /// Native PostgreSQL WAL record
     Postgres { will_init: bool, rec: Bytes },
 
-    // Truncate visibility map page
-    TruncateVisibilityMap {
-        trunc_byte: usize,
-        trunc_offs: usize,
-    },
     /// Clear bits in heap visibility map. ('flags' is bitmap of bits to clear)
     ClearVisibilityMapFlags {
         new_heap_blkno: Option<u32>,
@@ -53,6 +48,11 @@ pub enum NeonWalRecord {
     AuxFile {
         file_path: String,
         content: Option<Bytes>,
+    },
+    // Truncate visibility map page
+    TruncateVisibilityMap {
+        trunc_byte: usize,
+        trunc_offs: usize,
     },
 
     /// A testing record for unit testing purposes. It supports append data to an existing image, or clear it.
