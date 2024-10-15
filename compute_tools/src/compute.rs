@@ -26,6 +26,7 @@ use tracing::{debug, error, info, instrument, warn};
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 
+use compute_api::privilege::Privilege;
 use compute_api::responses::{ComputeMetrics, ComputeStatus};
 use compute_api::spec::{ComputeFeature, ComputeMode, ComputeSpec};
 use utils::measured_stream::MeasuredReader;
@@ -38,7 +39,6 @@ use crate::checker::create_availability_check_data;
 use crate::local_proxy;
 use crate::logger::inlinify;
 use crate::pg_helpers::*;
-use crate::privilege::Privilege;
 use crate::spec::*;
 use crate::sync_sk::{check_if_synced, ping_safekeeper};
 use crate::{config, extension_server};

@@ -22,7 +22,6 @@ mod migration;
 pub mod monitor;
 pub mod params;
 pub mod pg_helpers;
-pub mod privilege;
 pub mod spec;
 pub mod swap;
 pub mod sync_sk;
