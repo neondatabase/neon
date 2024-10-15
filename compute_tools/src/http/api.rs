@@ -205,15 +205,8 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
                 return Response::new(Body::from(msg));
             }
 
-            let compute_state = compute.state.lock().unwrap().clone();
-            let pspec = compute_state.pspec.as_ref().expect("spec must be set");
             let connstr = compute.connstr.clone();
-            let res = crate::installed_extensions::get_installed_extensions(
-                connstr,
-                pspec.tenant_id,
-                pspec.timeline_id,
-            )
-            .await;
+            let res = crate::installed_extensions::get_installed_extensions(connstr).await;
             match res {
                 Ok(res) => render_json(Body::from(serde_json::to_string(&res).unwrap())),
                 Err(e) => render_json_error(

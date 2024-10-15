@@ -3,8 +3,6 @@ use metrics::proto::MetricFamily;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use url::Url;
-use utils::id::TenantId;
-use utils::id::TimelineId;
 
 use anyhow::Result;
 use postgres::{Client, NoTls};
@@ -42,11 +40,7 @@ fn list_dbs(client: &mut Client) -> Result<Vec<String>> {
 /// Connect to every database (see list_dbs above) and get the list of installed extensions.
 /// Same extension can be installed in multiple databases with different versions,
 /// we only keep the highest and lowest version across all databases.
-pub async fn get_installed_extensions(
-    connstr: Url,
-    tenant_id: TenantId,
-    timeline_id: TimelineId,
-) -> Result<InstalledExtensions> {
+pub async fn get_installed_extensions(connstr: Url) -> Result<InstalledExtensions> {
     let mut connstr = connstr.clone();
 
     task::spawn_blocking(move || {
@@ -99,12 +93,7 @@ pub async fn get_installed_extensions(
             };
 
             INSTALLED_EXTENSIONS
-                .with_label_values(&[
-                    &tenant_id.to_string(),
-                    &timeline_id.to_string(),
-                    &ext.extname,
-                    &versions,
-                ])
+                .with_label_values(&[&ext.extname, &versions])
                 .set(ext.n_databases as u64);
         }
 
@@ -117,7 +106,7 @@ static INSTALLED_EXTENSIONS: Lazy<UIntGaugeVec> = Lazy::new(|| {
     register_uint_gauge_vec!(
         "installed_extensions",
         "Number of databases where extension is installed, versions passed as label",
-        &["tenant_id", "timeline_id", "extension_name", "versions"]
+        &["extension_name", "versions"]
     )
     .expect("failed to define a metric")
 });

@@ -1490,11 +1490,6 @@ LIMIT 100",
     pub fn get_installed_extensions(&self) -> Result<()> {
         let connstr = self.connstr.clone();
 
-        let compute_state = self.state.lock().unwrap().clone();
-        let pspec = compute_state.pspec.as_ref().expect("spec must be set");
-        let tenant_id = pspec.tenant_id;
-        let timeline_id = pspec.timeline_id;
-
         thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -1503,8 +1498,6 @@ LIMIT 100",
             let result = rt
                 .block_on(crate::installed_extensions::get_installed_extensions(
                     connstr,
-                    tenant_id,
-                    timeline_id,
                 ))
                 .expect("failed to get installed extensions");
 
