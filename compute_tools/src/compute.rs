@@ -145,14 +145,19 @@ impl TryFrom<ComputeSpec> for ParsedSpec {
     type Error = String;
     fn try_from(spec: ComputeSpec) -> Result<Self, String> {
         match spec.mode {
-            ComputeMode::FastImport => Ok(ParsedSpec {
-                spec,
-                pageserver_connstr: "fastimport-mode-does-not-need-it".to_owned(),
-                safekeeper_connstrings: vec![],
-                storage_auth_token: None,
-                tenant_id: TenantTimelineId::empty().tenant_id,
-                timeline_id: TenantTimelineId::empty().timeline_id,
-            }),
+            ComputeMode::FastImport => {
+                if spec.fast_import.is_none() {
+                    return Err("fast_import spec should be provided for ComputeMode::FastImport".to_owned());
+                }
+                Ok(ParsedSpec {
+                            spec,
+                            pageserver_connstr: "fastimport-mode-does-not-need-it".to_owned(),
+                            safekeeper_connstrings: vec![],
+                            storage_auth_token: None,
+                            tenant_id: TenantTimelineId::empty().tenant_id,
+                            timeline_id: TenantTimelineId::empty().timeline_id,
+                        })
+            },
             _ => {
                 // Extract the options from the spec file that are needed to connect to
                 // the storage system.

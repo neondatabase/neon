@@ -10,6 +10,7 @@ chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 regex.workspace = true
+camino.workspace = true
 
 utils = { path = "../utils" }
 remote_storage = { version = "0.1", path = "../remote_storage/" }

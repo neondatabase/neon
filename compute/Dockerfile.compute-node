@@ -345,7 +345,7 @@ ARG PG_VERSION
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
 # not version-specific
-# doesn't use releases, last commit f3d82fd - Mar 2, 2023 
+# doesn't use releases, last commit f3d82fd - Mar 2, 2023
 RUN wget https://github.com/michelp/pgjwt/archive/f3d82fd30151e754e19ce5d6a06c71c20689ce3d.tar.gz -O pgjwt.tar.gz && \
     echo "dae8ed99eebb7593b43013f6532d772b12dfecd55548d2673f2dfd0163f6d2b9 pgjwt.tar.gz" | sha256sum --check && \
     mkdir pgjwt-src && cd pgjwt-src && tar xzf ../pgjwt.tar.gz --strip-components=1 -C . && \
@@ -1004,39 +1004,39 @@ FROM build-deps AS neon-pg-ext-build
 ARG PG_VERSION
 
 # Public extensions
-COPY --from=postgis-build /usr/local/pgsql/ /usr/local/pgsql/
-COPY --from=postgis-build /sfcgal/* /
-COPY --from=plv8-build /usr/local/pgsql/ /usr/local/pgsql/
-COPY --from=h3-pg-build /usr/local/pgsql/ /usr/local/pgsql/
-COPY --from=h3-pg-build /h3/usr /
-COPY --from=unit-pg-build /usr/local/pgsql/ /usr/local/pgsql/
-COPY --from=vector-pg-build /usr/local/pgsql/ /usr/local/pgsql/
-COPY --from=pgjwt-pg-build /usr/local/pgsql/ /usr/local/pgsql/
-COPY --from=pg-jsonschema-pg-build /usr/local/pgsql/ /usr/local/pgsql/
-COPY --from=pg-graphql-pg-build /usr/local/pgsql/ /usr/local/pgsql/
-COPY --from=pg-tiktoken-pg-build /usr/local/pgsql/ /usr/local/pgsql/
-COPY --from=hypopg-pg-build /usr/local/pgsql/ /usr/local/pgsql/
-COPY --from=pg-hashids-pg-build /usr/local/pgsql/ /usr/local/pgsql/
-COPY --from=rum-pg-build /usr/local/pgsql/ /usr/local/pgsql/
-COPY --from=pgtap-pg-build /usr/local/pgsql/ /usr/local/pgsql/
-COPY --from=ip4r-pg-build /usr/local/pgsql/ /usr/local/pgsql/
-COPY --from=prefix-pg-build /usr/local/pgsql/ /usr/local/pgsql/
-COPY --from=hll-pg-build /usr/local/pgsql/ /usr/local/pgsql/
-COPY --from=plpgsql-check-pg-build /usr/local/pgsql/ /usr/local/pgsql/
-COPY --from=timescaledb-pg-build /usr/local/pgsql/ /usr/local/pgsql/
-COPY --from=pg-hint-plan-pg-build /usr/local/pgsql/ /usr/local/pgsql/
-COPY --from=pg-cron-pg-build /usr/local/pgsql/ /usr/local/pgsql/
-COPY --from=pg-pgx-ulid-build /usr/local/pgsql/ /usr/local/pgsql/
-COPY --from=pg-session-jwt-build /usr/local/pgsql/ /usr/local/pgsql/
-COPY --from=rdkit-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+#COPY --from=postgis-build /usr/local/pgsql/ /usr/local/pgsql/
+# COPY --from=postgis-build /sfcgal/* /
+# COPY --from=plv8-build /usr/local/pgsql/ /usr/local/pgsql/
+# COPY --from=h3-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+# COPY --from=h3-pg-build /h3/usr /
+# COPY --from=unit-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+# COPY --from=vector-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+# COPY --from=pgjwt-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+# COPY --from=pg-jsonschema-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+# COPY --from=pg-graphql-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+# COPY --from=pg-tiktoken-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+# COPY --from=hypopg-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+# COPY --from=pg-hashids-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+# COPY --from=rum-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+# COPY --from=pgtap-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+# COPY --from=ip4r-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+# COPY --from=prefix-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+# COPY --from=hll-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+# COPY --from=plpgsql-check-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+# COPY --from=timescaledb-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+# COPY --from=pg-hint-plan-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+# COPY --from=pg-cron-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+# COPY --from=pg-pgx-ulid-build /usr/local/pgsql/ /usr/local/pgsql/
+# COPY --from=pg-session-jwt-build /usr/local/pgsql/ /usr/local/pgsql/
+# COPY --from=rdkit-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-uuidv7-pg-build /usr/local/pgsql/ /usr/local/pgsql/
-COPY --from=pg-roaringbitmap-pg-build /usr/local/pgsql/ /usr/local/pgsql/
-COPY --from=pg-semver-pg-build /usr/local/pgsql/ /usr/local/pgsql/
-COPY --from=pg-embedding-pg-build /usr/local/pgsql/ /usr/local/pgsql/
-COPY --from=wal2json-pg-build /usr/local/pgsql /usr/local/pgsql
-COPY --from=pg-anon-pg-build /usr/local/pgsql/ /usr/local/pgsql/
-COPY --from=pg-ivm-build /usr/local/pgsql/ /usr/local/pgsql/
-COPY --from=pg-partman-build /usr/local/pgsql/ /usr/local/pgsql/
+# COPY --from=pg-roaringbitmap-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+# COPY --from=pg-semver-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+# COPY --from=pg-embedding-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+# COPY --from=wal2json-pg-build /usr/local/pgsql /usr/local/pgsql
+# COPY --from=pg-anon-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+# COPY --from=pg-ivm-build /usr/local/pgsql/ /usr/local/pgsql/
+# COPY --from=pg-partman-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY pgxn/ pgxn/
 
 RUN make -j $(getconf _NPROCESSORS_ONLN) \
@@ -1341,6 +1341,24 @@ RUN apt update && \
         $VERSION_INSTALLS && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* && \
     localedef -i en_US -c -f UTF-8 -A /usr/share/locale/locale.alias en_US.UTF-8
+
+# s5cmd 2.2.2 from https://github.com/peak/s5cmd/releases/tag/v2.2.2
+ARG TARGETARCH
+ADD https://github.com/peak/s5cmd/releases/download/v2.2.2/s5cmd_2.2.2_linux_$TARGETARCH.deb /tmp/s5cmd.deb
+RUN set -ex; \
+    \
+    # Determine the expected checksum based on TARGETARCH
+    if [ "${TARGETARCH}" = "amd64" ]; then \
+        CHECKSUM="392c385320cd5ffa435759a95af77c215553d967e4b1c0fffe52e4f14c29cf85"; \
+    elif [ "${TARGETARCH}" = "arm64" ]; then \
+        CHECKSUM="939bee3cf4b5604ddb00e67f8c157b91d7c7a5b553d1fbb6890fad32894b7b46"; \
+    else \
+        echo "Unsupported architecture: ${TARGETARCH}"; exit 1; \
+    fi; \
+    \
+    # Compute and validate the checksum
+    echo "${CHECKSUM}  /tmp/s5cmd.deb" | sha256sum -c -
+RUN dpkg -i /tmp/s5cmd.deb && rm /tmp/s5cmd.deb
 
 ENV LANG=en_US.utf8
 USER postgres

@@ -2,9 +2,10 @@ use std::{fmt::Display, process::ExitStatus, str::FromStr, sync::Arc};
 
 use anyhow::Context;
 use aws_config::BehaviorVersion;
-use camino::Utf8PathBuf;
+use camino::Utf8Path;
+use compute_api::spec::FastImportSpec;
 use compute_tools::compute::{ComputeNode, ParsedSpec};
-use nix::{libc::SIGTERM, unistd::Pid};
+use nix::unistd::Pid;
 use tracing::{info, info_span, warn, Instrument};
 
 #[path = "fast_import/child_stdio_to_log.rs"]
@@ -36,13 +37,30 @@ pub(crate) async fn entrypoint(
     .context("decode base64-encoded encrypted connection string")?;
     let destination_s3_uri: s3_uri::S3Uri = must_get_config_var("NEON_IMPORTER_PGDATA_DESTINATION");
 
-    let working_directory: Utf8PathBuf = todo!();
+    let FastImportSpec { working_directory } = pspec
+        .spec
+        .fast_import
+        .context("missing fast import spec in compute spec")?;
+
+    let pgdata = Utf8Path::new(&compute.pgdata);
+    let pgdata = pgdata
+        .canonicalize_utf8()
+        .with_context(|| format!("canonicalize pgdata {pgdata}"))?;
+    let working_directory = working_directory
+        .canonicalize_utf8()
+        .with_context(|| format!("canonicalize working directory {working_directory}"))?;
+    if pgdata
+        .parent()
+        .context("pgdata must not be root directory")?
+        != working_directory
+    {
+        anyhow::bail!("pgdata must be direct subdirectory inside working directory\npgdata = {pgdata}\nworking_directory = {working_directory}");
+    }
 
     //
     // Setup clients
     //
     let aws_config = aws_config::load_defaults(BehaviorVersion::v2024_03_28()).await;
-    let s3_client = aws_sdk_s3::Client::new(&aws_config);
     let kms_client = aws_sdk_kms::Client::new(&aws_config);
 
     //
@@ -52,15 +70,16 @@ pub(crate) async fn entrypoint(
         let testdir = working_directory.join("testdir");
         let testfile = testdir.join("testfile");
         let dest_testdir = destination_s3_uri.append("/testdir/");
-        std::fs::create_dir(testdir).context("create test directory")?;
-        std::fs::write(testfile, "testcontent").context("write test file")?;
+        std::fs::create_dir(&testdir).context("create test directory")?;
+        std::fs::write(&testfile, "testcontent").context("write test file")?;
         s5cmd::sync(&testdir, &dest_testdir)
+            .await
             .context("sync test directory to destination (more details might be in logs)")?;
-        std::fs::remove_file(testfile).context("remove test file")?;
-        s5cmd::sync(&testdir, &dest_testdir).context(
+        std::fs::remove_file(&testfile).context("remove test file")?;
+        s5cmd::sync(&testdir, &dest_testdir).await.context(
             "secod sync of test directory to destination (more details might be in logs)",
         )?;
-        std::fs::remove_dir(testdir).context("remove test directory")?;
+        std::fs::remove_dir(&testdir).context("remove test directory")?;
     }
 
     //
@@ -68,7 +87,7 @@ pub(crate) async fn entrypoint(
     //
 
     let source_connection_string = {
-        let output = kms_client
+        let mut output = kms_client
             .decrypt()
             .key_id(source_connstring_kms_encryption_key_id)
             .ciphertext_blob(aws_sdk_s3::primitives::Blob::new(
@@ -78,7 +97,8 @@ pub(crate) async fn entrypoint(
             .await
             .context("decrypt source connection string")?;
         let plaintext = output
-            .plaintext()
+            .plaintext
+            .take()
             .context("get plaintext source connection string")?;
         String::from_utf8(plaintext.into_inner())
             .context("parse source connection string as utf8")?
@@ -109,8 +129,8 @@ pub(crate) async fn entrypoint(
 
     // dump into the working directory
     {
-        let pg_dump = tokio::process::Command::new("pg_dump")
-            .args(common_args)
+        let mut pg_dump = tokio::process::Command::new("pg_dump")
+            .args(&common_args)
             // source db (db name included in connection string)
             .arg("-d")
             .arg(&source_connection_string)
@@ -142,8 +162,8 @@ pub(crate) async fn entrypoint(
 
     // restore from working directory into vanilla postgres
     {
-        let pg_restore = tokio::process::Command::new("pg_restore")
-            .args(common_args)
+        let mut pg_restore = tokio::process::Command::new("pg_restore")
+            .args(&common_args)
             .arg("-d")
             .arg(&compute.connstr.as_str())
             // how we restore
@@ -188,16 +208,27 @@ pub(crate) async fn entrypoint(
         }
     }
 
-    // write status
-    let status_dir = working_directory.join("status");
-    std::fs::create_dir(&status_dir).context("create status directory")?;
-    std::fs::write(
-        status_dir.join("status"),
-        serde_json::json!({"done": true}).to_string(),
+    // upload pgdata
+    s5cmd::sync(
+        Utf8Path::new(&compute.pgdata),
+        &destination_s3_uri.append("/pgdata/"),
     )
-    .context("write status file")?;
+    .await
+    .context("sync dump directory to destination")?;
 
-    // sync pgdata into s3
-    todo!()
-    // s5cmd::sync(&working_directory, &destination_s3_uri)
+    // write status
+    {
+        let status_dir = working_directory.join("status");
+        std::fs::create_dir(&status_dir).context("create status directory")?;
+        std::fs::write(
+            status_dir.join("status"),
+            serde_json::json!({"done": true}).to_string(),
+        )
+        .context("write status file")?;
+        s5cmd::sync(&status_dir, &destination_s3_uri.append("/status/"))
+            .await
+            .context("sync status directory to destination")?;
+    }
+
+    Ok(())
 }

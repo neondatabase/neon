@@ -44,6 +44,12 @@ impl S3Uri {
     }
 }
 
+impl ToString for S3Uri {
+    fn to_string(&self) -> String {
+        format!("s3://{}/{}", self.bucket, self.key)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

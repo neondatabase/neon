@@ -110,6 +110,9 @@ pub struct ComputeSpec {
     /// Local Proxy configuration used for JWT authentication
     #[serde(default)]
     pub local_proxy_config: Option<LocalProxySpec>,
+
+    #[serde(default)]
+    pub fast_import: Option<FastImportSpec>,
 }
 
 /// Feature flag to signal `compute_ctl` to enable certain experimental functionality.
@@ -213,7 +216,7 @@ pub enum ComputeMode {
     /// Future versions may want to distinguish between replicas with hot standby
     /// feedback and other kinds of replication configurations.
     Replica,
-    FastImport
+    FastImport,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -299,6 +302,11 @@ pub struct JwksSettings {
     pub jwks_url: String,
     pub provider_name: String,
     pub jwt_audience: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct FastImportSpec {
+    pub working_directory: camino::Utf8PathBuf,
 }
 
 #[cfg(test)]
