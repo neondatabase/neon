@@ -29,6 +29,7 @@ use utils::id::TimelineId;
 
 use crate::context::{AccessStatsBehavior, RequestContext, RequestContextBuilder};
 use crate::page_cache;
+use crate::statvfs::Statvfs;
 use crate::tenant::checks::check_valid_layermap;
 use crate::tenant::remote_timeline_client::WaitCompletionError;
 use crate::tenant::storage_layer::filter_iterator::FilterIterator;
@@ -1693,8 +1694,14 @@ impl Timeline {
 
     /// Check how much space is left on the disk
     async fn check_available_space(self: &Arc<Self>) -> anyhow::Result<u64> {
-        let base_path = self.conf.tenants_path();
-        fs2::free_space(base_path).context("fs2::free_space")
+        let tenants_dir = self.conf.tenants_path();
+
+        let stat = Statvfs::get(&tenants_dir, None)
+            .context("statvfs failed, presumably directory got unlinked")?;
+
+        let (avail_bytes, _) = stat.get_avail_total_bytes();
+
+        Ok(avail_bytes)
     }
 
     /// Check if the compaction can proceed safely without running out of space. We assume the size

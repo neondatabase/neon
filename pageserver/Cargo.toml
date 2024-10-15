@@ -26,7 +26,6 @@ consumption_metrics.workspace = true
 crc32c.workspace = true
 either.workspace = true
 fail.workspace = true
-fs2.workspace = true
 futures.workspace = true
 hex.workspace = true
 humantime.workspace = true
