@@ -261,19 +261,18 @@ RUN case "${PG_VERSION}" in \
     export PATH="/usr/local/pgsql/bin:$PATH" && \
     make DOCKER=1 -j $(getconf _NPROCESSORS_ONLN) install && \
     rm -rf /plv8-* && \
-    find /usr/local/pgsql/ -name "plv8-*.so" | xargs strip
-
+    find /usr/local/pgsql/ -name "plv8-*.so" | xargs strip && \
     # don't break computes with installed old version of plv8
-RUN cd /usr/local/pgsql/lib/ && \
+    cd /usr/local/pgsql/lib/ && \
     case "${PG_VERSION}" in \
     "v17") \
         ln -s plv8-3.2.3.so plv8-3.1.8.so && \
         ln -s plv8-3.2.3.so plv8-3.1.5.so && \
-        ln -s plv8-3.2.3.so plv8-3.1.10.so && \
+        ln -s plv8-3.2.3.so plv8-3.1.10.so \
     ;; \
     "v14" | "v15" | "v16") \
         ln -s plv8-3.1.10.so plv8-3.1.5.so && \
-        ln -s plv8-3.1.10.so plv8-3.1.8.so && \
+        ln -s plv8-3.1.10.so plv8-3.1.8.so \
     ;; \
     esac && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/plv8.control && \
