@@ -392,6 +392,10 @@ impl InMemoryLayer {
         self.end_lsn.get().copied().unwrap_or(Lsn::MAX)
     }
 
+    pub(crate) fn start_lsn(&self) -> Lsn {
+        self.start_lsn
+    }
+
     pub(crate) fn get_lsn_range(&self) -> Range<Lsn> {
         self.start_lsn..self.end_lsn_or_max()
     }
