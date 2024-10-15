@@ -1387,7 +1387,7 @@ LIMIT 100",
             "GRANT {} ON SCHEMA {} TO {}",
             privileges
                 .iter()
-                .map(|p| p.as_str().to_string())
+                .map(|p| p.to_string())
                 .collect::<Vec<String>>()
                 .join(", "),
             schema_name,
