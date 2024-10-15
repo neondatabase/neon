@@ -16,13 +16,13 @@ use remote_storage::{GenericRemoteStorage, ListingMode, ListingObject, RemotePat
 use serde::{Deserialize, Serialize};
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
-use utils::id::TenantId;
+use utils::{backoff, id::TenantId};
 
 use crate::{
     cloud_admin_api::{CloudAdminApiClient, MaybeDeleted, ProjectData},
     init_remote, list_objects_with_retries,
     metadata_stream::{stream_tenant_timelines, stream_tenants},
-    BucketConfig, ConsoleConfig, NodeKind, TenantShardTimelineId, TraversingDepth,
+    BucketConfig, ConsoleConfig, NodeKind, TenantShardTimelineId, TraversingDepth, MAX_RETRIES,
 };
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -406,14 +406,22 @@ pub async fn get_tenant_objects(
     // TODO: apply extra validation based on object modification time.  Don't purge
     // tenants where any timeline's index_part.json has been touched recently.
 
-    let list = s3_client
-        .list(
-            Some(&tenant_root),
-            ListingMode::NoDelimiter,
-            None,
-            &CancellationToken::new(),
-        )
-        .await?;
+    let cancel = CancellationToken::new();
+    let list = match backoff::retry(
+        || s3_client.list(Some(&tenant_root), ListingMode::NoDelimiter, None, &cancel),
+        |_| false,
+        3,
+        MAX_RETRIES as u32,
+        "get_tenant_objects",
+        &cancel,
+    )
+    .await
+    {
+        None => {
+            unreachable!("Using a dummy cancellation token");
+        }
+        Some(r) => r?,
+    };
     Ok(list.keys)
 }
 
@@ -424,14 +432,30 @@ pub async fn get_timeline_objects(
     tracing::debug!("Listing objects in timeline {ttid}");
     let timeline_root = super::remote_timeline_path_id(&ttid);
 
-    let list = s3_client
-        .list(
-            Some(&timeline_root),
-            ListingMode::NoDelimiter,
-            None,
-            &CancellationToken::new(),
-        )
-        .await?;
+    let cancel = CancellationToken::new();
+    let list = match backoff::retry(
+        || {
+            s3_client.list(
+                Some(&timeline_root),
+                ListingMode::NoDelimiter,
+                None,
+                &cancel,
+            )
+        },
+        |_| false,
+        3,
+        MAX_RETRIES as u32,
+        "get_timeline_objects",
+        &cancel,
+    )
+    .await
+    {
+        None => {
+            unreachable!("Using a dummy cancellation token");
+        }
+        Some(r) => r?,
+    };
+
     Ok(list.keys)
 }
 
