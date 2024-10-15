@@ -43,6 +43,7 @@ jobs:
 
     strategy:
       matrix:
+        debian-version: [ bullseye, bookworm ]
         arch: [ x64, arm64 ]
 
     runs-on: ${{ fromJson(format('["self-hosted", "{0}"]', matrix.arch == 'arm64' && 'large-arm64' || 'large')) }}
@@ -81,21 +82,21 @@ jobs:
 
       - uses: docker/build-push-action@v6
         with:
+          file: Dockerfile.build-tools
           context: .
           provenance: false
           push: true
           pull: true
-          file: Dockerfile.build-tools
-          cache-from: type=registry,ref=cache.neon.build/build-tools:cache-${{ matrix.arch }}
-          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/build-tools:cache-{0},mode=max', matrix.arch) || '' }}
-          tags: neondatabase/build-tools:${{ inputs.image-tag }}-${{ matrix.arch }}
+          build-args: |
+            DEBIAN_VERSION=${{ matrix.debian-version }}
+          cache-from: type=registry,ref=cache.neon.build/build-tools:cache-${{ matrix.debian-version }}-${{ matrix.arch }}
+          cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/build-tools:cache-{0}-{1},mode=max', matrix.debian-version, matrix.arch) || '' }}
+          tags: |
+            neondatabase/build-tools:${{ inputs.image-tag }}-${{ matrix.debian-version }}-${{ matrix.arch }}
 
   merge-images:
     needs: [ build-image ]
     runs-on: ubuntu-22.04
-
-    env:
-      IMAGE_TAG: ${{ inputs.image-tag }}
 
     steps:
       - uses: docker/login-action@v3
@@ -104,7 +105,17 @@ jobs:
           password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
 
       - name: Create multi-arch image
+        env:
+          DEFAULT_DEBIAN_VERSION: bullseye
+          IMAGE_TAG: ${{ inputs.image-tag }}
         run: |
-          docker buildx imagetools create -t neondatabase/build-tools:${IMAGE_TAG} \
-                                             neondatabase/build-tools:${IMAGE_TAG}-x64 \
-                                             neondatabase/build-tools:${IMAGE_TAG}-arm64
+          for debian_version in bullseye bookworm; do
+            tags=("-t" "neondatabase/build-tools:${IMAGE_TAG}-${debian_version}")
+            if [ "${debian_version}" == "${DEFAULT_DEBIAN_VERSION}" ]; then
+              tags+=("-t" "neondatabase/build-tools:${IMAGE_TAG}")
+            fi
+
+            docker buildx imagetools create "${tags[@]}" \
+                                              neondatabase/build-tools:${IMAGE_TAG}-${debian_version}-x64 \
+                                              neondatabase/build-tools:${IMAGE_TAG}-${debian_version}-arm64
+          done
