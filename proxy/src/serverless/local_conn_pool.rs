@@ -526,14 +526,6 @@ impl<C: ClientInnerExt> LocalClient<C> {
         })
     }
 
-    pub fn get_client(&self) -> &C {
-        &self
-            .inner
-            .as_ref()
-            .expect("client inner should not be removed")
-            .inner
-    }
-
     fn do_drop(&mut self) -> Option<impl FnOnce()> {
         let conn_info = self.conn_info.clone();
         let client = self

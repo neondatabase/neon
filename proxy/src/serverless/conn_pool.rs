@@ -4,6 +4,7 @@ use std::{
     fmt,
     task::{ready, Poll},
 };
+
 use std::{pin::pin, sync::Arc, sync::Weak};
 
 use tokio::time::Instant;
@@ -18,7 +19,14 @@ use crate::metrics::Metrics;
 use tracing::{error, warn};
 use tracing::{info, info_span, Instrument};
 
-use super::conn_pool_lib::*;
+use super::conn_pool_lib::{Client, ClientInnerExt, ConnInfo, GlobalConnPool};
+
+#[cfg(test)]
+use {
+    super::conn_pool_lib::GlobalConnPoolOptions,
+    crate::auth::backend::ComputeUserInfo,
+    std::{sync::atomic, time::Duration},
+};
 
 #[derive(Debug, Clone)]
 pub(crate) struct ConnInfoWithAuth {
