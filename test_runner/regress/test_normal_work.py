@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv, NeonEnvBuilder

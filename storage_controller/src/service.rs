@@ -28,8 +28,8 @@ use crate::{
     reconciler::{ReconcileError, ReconcileUnits, ReconcilerConfig, ReconcilerConfigBuilder},
     scheduler::{MaySchedule, ScheduleContext, ScheduleError, ScheduleMode},
     tenant_shard::{
-        MigrateAttachment, ReconcileNeeded, ReconcilerStatus, ScheduleOptimization,
-        ScheduleOptimizationAction,
+        MigrateAttachment, ObservedStateDelta, ReconcileNeeded, ReconcilerStatus,
+        ScheduleOptimization, ScheduleOptimizationAction,
     },
 };
 use anyhow::Context;
@@ -1073,7 +1073,7 @@ impl Service {
         tenant_id=%result.tenant_shard_id.tenant_id, shard_id=%result.tenant_shard_id.shard_slug(),
         sequence=%result.sequence
     ))]
-    fn process_result(&self, mut result: ReconcileResult) {
+    fn process_result(&self, result: ReconcileResult) {
         let mut locked = self.inner.write().unwrap();
         let (nodes, tenants, _scheduler) = locked.parts_mut();
         let Some(tenant) = tenants.get_mut(&result.tenant_shard_id) else {
@@ -1095,22 +1095,27 @@ impl Service {
 
         // In case a node was deleted while this reconcile is in flight, filter it out of the update we will
         // make to the tenant
-        result
-            .observed
-            .locations
-            .retain(|node_id, _loc| nodes.contains_key(node_id));
+        let deltas = result.observed_deltas.into_iter().flat_map(|delta| {
+            // In case a node was deleted while this reconcile is in flight, filter it out of the update we will
+            // make to the tenant
+            let node = nodes.get(delta.node_id())?;
+
+            if node.is_available() {
+                return Some(delta);
+            }
+
+            // In case a node became unavailable concurrently with the reconcile, observed
+            // locations on it are now uncertain. By convention, set them to None in order
+            // for them to get refreshed when the node comes back online.
+            Some(ObservedStateDelta::Upsert(Box::new((
+                node.get_id(),
+                ObservedStateLocation { conf: None },
+            ))))
+        });
 
         match result.result {
             Ok(()) => {
-                for (node_id, loc) in &result.observed.locations {
-                    if let Some(conf) = &loc.conf {
-                        tracing::info!("Updating observed location {}: {:?}", node_id, conf);
-                    } else {
-                        tracing::info!("Setting observed location {} to None", node_id,)
-                    }
-                }
-
-                tenant.observed = result.observed;
+                tenant.apply_observed_deltas(deltas);
                 tenant.waiter.advance(result.sequence);
             }
             Err(e) => {
@@ -1132,9 +1137,10 @@ impl Service {
                 // so that waiters will see the correct error after waiting.
                 tenant.set_last_error(result.sequence, e);
 
-                for (node_id, o) in result.observed.locations {
-                    tenant.observed.locations.insert(node_id, o);
-                }
+                // Skip deletions on reconcile failures
+                let upsert_deltas =
+                    deltas.filter(|delta| matches!(delta, ObservedStateDelta::Upsert(_)));
+                tenant.apply_observed_deltas(upsert_deltas);
             }
         }
 

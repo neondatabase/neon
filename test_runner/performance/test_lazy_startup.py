@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import pytest
 import requests
 from fixtures.benchmark_fixture import MetricReport, NeonBenchmarker

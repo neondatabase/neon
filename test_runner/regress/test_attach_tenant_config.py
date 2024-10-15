@@ -1,5 +1,8 @@
+from __future__ import annotations
+
+from collections.abc import Generator
 from dataclasses import dataclass
-from typing import Generator, Optional
+from typing import Optional
 
 import pytest
 from fixtures.common_types import TenantId

@@ -496,26 +496,12 @@ impl RemoteStorage for AzureBlobStorage {
             builder = builder.if_match(IfMatchCondition::NotMatch(etag.to_string()))
         }
 
-        self.download_for_builder(builder, cancel).await
-    }
-
-    async fn download_byte_range(
-        &self,
-        from: &RemotePath,
-        start_inclusive: u64,
-        end_exclusive: Option<u64>,
-        cancel: &CancellationToken,
-    ) -> Result<Download, DownloadError> {
-        let blob_client = self.client.blob_client(self.relative_path_to_name(from));
-
-        let mut builder = blob_client.get();
-
-        let range: Range = if let Some(end_exclusive) = end_exclusive {
-            (start_inclusive..end_exclusive).into()
-        } else {
-            (start_inclusive..).into()
-        };
-        builder = builder.range(range);
+        if let Some((start, end)) = opts.byte_range() {
+            builder = builder.range(match end {
+                Some(end) => Range::Range(start..end),
+                None => Range::RangeFrom(start..),
+            });
+        }
 
         self.download_for_builder(builder, cancel).await
     }

@@ -1,15 +1,20 @@
 #! /usr/bin/env python3
 
+from __future__ import annotations
+
 import argparse
 import json
 import logging
 import os
 from collections import defaultdict
-from typing import Any, DefaultDict, Dict, Optional
+from typing import TYPE_CHECKING
 
 import psycopg2
 import psycopg2.extras
 import toml
+
+if TYPE_CHECKING:
+    from typing import Any, Optional
 
 FLAKY_TESTS_QUERY = """
     SELECT
@@ -33,7 +38,7 @@ def main(args: argparse.Namespace):
     build_type = args.build_type
     pg_version = args.pg_version
 
-    res: DefaultDict[str, DefaultDict[str, Dict[str, bool]]]
+    res: defaultdict[str, defaultdict[str, dict[str, bool]]]
     res = defaultdict(lambda: defaultdict(dict))
 
     try:
@@ -60,7 +65,7 @@ def main(args: argparse.Namespace):
         pageserver_virtual_file_io_engine_parameter = ""
 
     # re-use existing records of flaky tests from before parametrization by compaction_algorithm
-    def get_pageserver_default_tenant_config_compaction_algorithm() -> Optional[Dict[str, Any]]:
+    def get_pageserver_default_tenant_config_compaction_algorithm() -> Optional[dict[str, Any]]:
         """Duplicated from parametrize.py"""
         toml_table = os.getenv("PAGESERVER_DEFAULT_TENANT_CONFIG_COMPACTION_ALGORITHM")
         if toml_table is None:

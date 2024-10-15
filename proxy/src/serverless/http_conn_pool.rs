@@ -1,5 +1,5 @@
 use dashmap::DashMap;
-use hyper1::client::conn::http2;
+use hyper::client::conn::http2;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use parking_lot::RwLock;
 use rand::Rng;
@@ -18,9 +18,9 @@ use tracing::{info, info_span, Instrument};
 
 use super::conn_pool::ConnInfo;
 
-pub(crate) type Send = http2::SendRequest<hyper1::body::Incoming>;
+pub(crate) type Send = http2::SendRequest<hyper::body::Incoming>;
 pub(crate) type Connect =
-    http2::Connection<TokioIo<TcpStream>, hyper1::body::Incoming, TokioExecutor>;
+    http2::Connection<TokioIo<TcpStream>, hyper::body::Incoming, TokioExecutor>;
 
 #[derive(Clone)]
 struct ConnPoolEntry {

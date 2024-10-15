@@ -1,5 +1,7 @@
 """Tests for the code in test fixtures"""
 
+from __future__ import annotations
+
 from fixtures.neon_fixtures import NeonEnvBuilder
 
 

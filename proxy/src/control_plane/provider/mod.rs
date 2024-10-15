@@ -81,12 +81,12 @@ pub(crate) mod errors {
                     Reason::EndpointNotFound => ErrorKind::User,
                     Reason::BranchNotFound => ErrorKind::User,
                     Reason::RateLimitExceeded => ErrorKind::ServiceRateLimit,
-                    Reason::NonDefaultBranchComputeTimeExceeded => ErrorKind::User,
-                    Reason::ActiveTimeQuotaExceeded => ErrorKind::User,
-                    Reason::ComputeTimeQuotaExceeded => ErrorKind::User,
-                    Reason::WrittenDataQuotaExceeded => ErrorKind::User,
-                    Reason::DataTransferQuotaExceeded => ErrorKind::User,
-                    Reason::LogicalSizeQuotaExceeded => ErrorKind::User,
+                    Reason::NonDefaultBranchComputeTimeExceeded => ErrorKind::Quota,
+                    Reason::ActiveTimeQuotaExceeded => ErrorKind::Quota,
+                    Reason::ComputeTimeQuotaExceeded => ErrorKind::Quota,
+                    Reason::WrittenDataQuotaExceeded => ErrorKind::Quota,
+                    Reason::DataTransferQuotaExceeded => ErrorKind::Quota,
+                    Reason::LogicalSizeQuotaExceeded => ErrorKind::Quota,
                     Reason::ConcurrencyLimitReached => ErrorKind::ControlPlane,
                     Reason::LockAlreadyTaken => ErrorKind::ControlPlane,
                     Reason::RunningOperations => ErrorKind::ControlPlane,
@@ -103,7 +103,7 @@ pub(crate) mod errors {
                         } if error
                             .contains("compute time quota of non-primary branches is exceeded") =>
                         {
-                            crate::error::ErrorKind::User
+                            crate::error::ErrorKind::Quota
                         }
                         ControlPlaneError {
                             http_status_code: http::StatusCode::LOCKED,
@@ -112,7 +112,7 @@ pub(crate) mod errors {
                         } if error.contains("quota exceeded")
                             || error.contains("the limit for current plan reached") =>
                         {
-                            crate::error::ErrorKind::User
+                            crate::error::ErrorKind::Quota
                         }
                         ControlPlaneError {
                             http_status_code: http::StatusCode::TOO_MANY_REQUESTS,
@@ -309,7 +309,7 @@ impl NodeInfo {
             #[cfg(any(test, feature = "testing"))]
             ComputeCredentialKeys::Password(password) => self.config.password(password),
             ComputeCredentialKeys::AuthKeys(auth_keys) => self.config.auth_keys(*auth_keys),
-            ComputeCredentialKeys::None => &mut self.config,
+            ComputeCredentialKeys::JwtPayload(_) | ComputeCredentialKeys::None => &mut self.config,
         };
     }
 }

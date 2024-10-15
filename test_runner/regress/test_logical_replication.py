@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import time
 from functools import partial
 from random import choice
@@ -336,7 +338,7 @@ FROM generate_series(1, 16384) AS seq; -- Inserts enough rows to exceed 16MB of 
     assert [r[0] for r in vanilla_pg.safe_psql("select * from t")] == [1, 2, 3]
 
     log_path = vanilla_pg.pgdatadir / "pg.log"
-    with open(log_path, "r") as log_file:
+    with open(log_path) as log_file:
         logs = log_file.read()
         assert "could not receive data from WAL stream" not in logs
 

@@ -9,7 +9,7 @@
 //! - version-specific CheckPointData (=> pgv abstraction, already exists for regular walingest)
 //! - Tenant::cancel nor Timeline::cancel are respected => shutdown not guaranteed
 
-use std::sync::Arc;
+use std::{ops::Bound, sync::Arc};
 
 use anyhow::{bail, ensure};
 use bytes::Bytes;
@@ -982,11 +982,17 @@ impl RemoteStorageWrapper {
                     download_stream, ..
                 } = self
                     .storage
-                    .download_byte_range(path, start_inclusive, Some(end_exclusive), &self.cancel)
+                    .download(
+                        path,
+                        &DownloadOpts {
+                            etag: None,
+                            byte_start: Bound::Included(start_inclusive),
+                            byte_end: Bound::Excluded(end_exclusive)
+                        },
+                        &self.cancel)
                     .await?;
                 let mut reader = tokio_util::io::StreamReader::new(download_stream);
 
-                // XXX optimize this, can we get the capacity hint from somewhere?
                 let mut buf = Vec::with_capacity(len);
                 tokio::io::copy_buf(&mut reader, &mut buf).await?;
                 Ok(buf)

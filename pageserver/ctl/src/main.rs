@@ -26,7 +26,7 @@ use pageserver::{
     tenant::{dump_layerfile_from_path, metadata::TimelineMetadata},
     virtual_file,
 };
-use pageserver_api::{config::defaults::DEFAULT_IO_BUFFER_ALIGNMENT, shard::TenantShardId};
+use pageserver_api::shard::TenantShardId;
 use postgres_ffi::ControlFileData;
 use remote_storage::{RemotePath, RemoteStorageConfig};
 use tokio_util::sync::CancellationToken;
@@ -205,11 +205,7 @@ fn read_pg_control_file(control_file_path: &Utf8Path) -> anyhow::Result<()> {
 
 async fn print_layerfile(path: &Utf8Path) -> anyhow::Result<()> {
     // Basic initialization of things that don't change after startup
-    virtual_file::init(
-        10,
-        virtual_file::api::IoEngineKind::StdFs,
-        DEFAULT_IO_BUFFER_ALIGNMENT,
-    );
+    virtual_file::init(10, virtual_file::api::IoEngineKind::StdFs);
     page_cache::init(100);
     let ctx = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error);
     dump_layerfile_from_path(path, true, &ctx).await

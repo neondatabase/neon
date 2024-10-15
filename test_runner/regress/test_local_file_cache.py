@@ -1,9 +1,10 @@
+from __future__ import annotations
+
 import os
 import queue
 import random
 import threading
 import time
-from typing import List
 
 from fixtures.neon_fixtures import NeonEnvBuilder
 from fixtures.utils import query_scalar
@@ -57,7 +58,7 @@ def test_local_file_cache_unlink(neon_env_builder: NeonEnvBuilder):
         n_updates_performed_q.put(n_updates_performed)
 
     n_updates_performed_q: queue.Queue[int] = queue.Queue()
-    threads: List[threading.Thread] = []
+    threads: list[threading.Thread] = []
     for _i in range(n_threads):
         thread = threading.Thread(target=run_updates, args=(n_updates_performed_q,), daemon=True)
         thread.start()

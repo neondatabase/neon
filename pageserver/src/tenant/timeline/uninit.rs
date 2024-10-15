@@ -122,7 +122,7 @@ impl<'t> UninitializedTimeline<'t> {
         drop(raw_timeline);
 
         // load from object storage like Tenant::attach does
-        let resources = tenant.make_timeline_resources(timeline_id);
+        let resources = tenant.build_timeline_resources(timeline_id);
         let index_part = resources
             .remote_client
             .download_index_file(&tenant.cancel)

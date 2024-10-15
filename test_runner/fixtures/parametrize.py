@@ -1,5 +1,7 @@
+from __future__ import annotations
+
 import os
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING
 
 import allure
 import pytest
@@ -7,7 +9,16 @@ import toml
 from _pytest.python import Metafunc
 
 from fixtures.pg_version import PgVersion
-from fixtures.utils import AuxFileStore
+
+if TYPE_CHECKING:
+    from typing import Any, Optional
+
+    from fixtures.utils import AuxFileStore
+
+
+if TYPE_CHECKING:
+    from typing import Any, Optional
+
 
 """
 Dynamically parametrize tests by different parameters
@@ -35,8 +46,8 @@ def pageserver_virtual_file_io_engine() -> Optional[str]:
 
 
 @pytest.fixture(scope="function", autouse=True)
-def pageserver_io_buffer_alignment() -> Optional[int]:
-    return None
+def pageserver_virtual_file_io_mode() -> Optional[str]:
+    return os.getenv("PAGESERVER_VIRTUAL_FILE_IO_MODE")
 
 
 @pytest.fixture(scope="function", autouse=True)
@@ -44,7 +55,7 @@ def pageserver_aux_file_policy() -> Optional[AuxFileStore]:
     return None
 
 
-def get_pageserver_default_tenant_config_compaction_algorithm() -> Optional[Dict[str, Any]]:
+def get_pageserver_default_tenant_config_compaction_algorithm() -> Optional[dict[str, Any]]:
     toml_table = os.getenv("PAGESERVER_DEFAULT_TENANT_CONFIG_COMPACTION_ALGORITHM")
     if toml_table is None:
         return None
@@ -54,7 +65,7 @@ def get_pageserver_default_tenant_config_compaction_algorithm() -> Optional[Dict
 
 
 @pytest.fixture(scope="function", autouse=True)
-def pageserver_default_tenant_config_compaction_algorithm() -> Optional[Dict[str, Any]]:
+def pageserver_default_tenant_config_compaction_algorithm() -> Optional[dict[str, Any]]:
     return get_pageserver_default_tenant_config_compaction_algorithm()
 
 

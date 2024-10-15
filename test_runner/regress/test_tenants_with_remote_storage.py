@@ -6,10 +6,11 @@
 # checkpoint_distance setting so that a lot of layer files are created.
 #
 
+from __future__ import annotations
+
 import asyncio
 import os
 from pathlib import Path
-from typing import List, Tuple
 
 from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import log
@@ -62,7 +63,7 @@ async def all_tenants_workload(env: NeonEnv, tenants_endpoints):
 def test_tenants_many(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
 
-    tenants_endpoints: List[Tuple[TenantId, Endpoint]] = []
+    tenants_endpoints: list[tuple[TenantId, Endpoint]] = []
 
     for _ in range(1, 5):
         # Use a tiny checkpoint distance, to create a lot of layers quickly

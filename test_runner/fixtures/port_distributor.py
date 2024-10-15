@@ -1,9 +1,14 @@
+from __future__ import annotations
+
 import re
 import socket
 from contextlib import closing
-from typing import Dict, Union
+from typing import TYPE_CHECKING
 
 from fixtures.log_helper import log
+
+if TYPE_CHECKING:
+    from typing import Union
 
 
 def can_bind(host: str, port: int) -> bool:
@@ -24,7 +29,7 @@ def can_bind(host: str, port: int) -> bool:
             sock.bind((host, port))
             sock.listen()
             return True
-        except socket.error:
+        except OSError:
             log.info(f"Port {port} is in use, skipping")
             return False
         finally:
@@ -34,7 +39,7 @@ def can_bind(host: str, port: int) -> bool:
 class PortDistributor:
     def __init__(self, base_port: int, port_number: int):
         self.iterator = iter(range(base_port, base_port + port_number))
-        self.port_map: Dict[int, int] = {}
+        self.port_map: dict[int, int] = {}
 
     def get_port(self) -> int:
         for port in self.iterator:
@@ -54,10 +59,7 @@ class PortDistributor:
         if isinstance(value, int):
             return self._replace_port_int(value)
 
-        if isinstance(value, str):
-            return self._replace_port_str(value)
-
-        raise TypeError(f"unsupported type {type(value)} of {value=}")
+        return self._replace_port_str(value)
 
     def _replace_port_int(self, value: int) -> int:
         known_port = self.port_map.get(value)
@@ -70,7 +72,7 @@ class PortDistributor:
         # Use regex to find port in a string
         # urllib.parse.urlparse produces inconvenient results for cases without scheme like "localhost:5432"
         # See https://bugs.python.org/issue27657
-        ports = re.findall(r":(\d+)(?:/|$)", value)
+        ports: list[str] = re.findall(r":(\d+)(?:/|$)", value)
         assert len(ports) == 1, f"can't find port in {value}"
         port_int = int(ports[0])
 
