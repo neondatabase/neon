@@ -71,13 +71,16 @@ use rlimit::{setrlimit, Resource};
 // in-case of not-set environment var
 const BUILD_TAG_DEFAULT: &str = "latest";
 
+#[path = "compute_ctl/fast_import.rs"]
+mod fast_import;
+
 fn main() -> Result<()> {
     let (build_tag, clap_args) = init()?;
 
     // enable core dumping for all child processes
     setrlimit(Resource::CORE, rlimit::INFINITY, rlimit::INFINITY)?;
 
-    let (pg_handle, start_pg_result) = {
+    let (mut pg_handle, start_pg_result) = {
         // Enter startup tracing context
         let _startup_context_guard = startup_context_from_env();
 
@@ -90,6 +93,32 @@ fn main() -> Result<()> {
         start_postgres(&clap_args, wait_spec_result)?
 
         // Startup is finished, exit the startup tracing span
+    };
+
+    // divert into fast_import code if needed
+    if let Some((child, _)) = &mut pg_handle {
+        let guard = start_pg_result.compute.state.lock().unwrap();
+        let spec = guard
+            .pspec
+            .as_ref()
+            .expect("once we reach here, pspec is always set");
+        let spec = spec.clone();
+        drop(guard);
+        if matches!(spec.spec.mode, compute_api::spec::ComputeMode::FastImport) {
+            let res = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(fast_import::entrypoint(
+                    spec,
+                    start_pg_result.compute.clone(),
+                    child,
+                ));
+            if let Err(e) = res {
+                error!("fast import failed: {:#}", e);
+            }
+
+        }
     };
 
     // PostgreSQL is now running, if startup was successful. Wait until it exits.

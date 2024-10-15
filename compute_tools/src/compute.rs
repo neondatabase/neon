@@ -695,16 +695,22 @@ impl ComputeNode {
                     .enable_all()
                     .build()
                     .unwrap();
-                rt.block_on(postgres_initdb::do_run_initdb(postgres_initdb::RunInitdbArgs {
-                    superuser: "cloud_admin", // XXX: this shouldn't be hard-coded
-                    initdb_bin: {
-                        // get_pg_version is just as bad as this
-                        let pgbin = Utf8Path::new(&self.pgbin);
-                        pgbin.parent().expect("pgbin has no parent").join("initdb").as_ref()
+                rt.block_on(postgres_initdb::do_run_initdb(
+                    postgres_initdb::RunInitdbArgs {
+                        superuser: "cloud_admin", // XXX: this shouldn't be hard-coded
+                        initdb_bin: {
+                            // get_pg_version is just as bad as this
+                            let pgbin = Utf8Path::new(&self.pgbin);
+                            pgbin
+                                .parent()
+                                .expect("pgbin has no parent")
+                                .join("initdb")
+                                .as_ref()
+                        },
+                        library_search_path: None, // TODO: is this right? Prob works in compute image, not sure about neon_local.
+                        pgdata: &self.pgdata,
                     },
-                    library_search_path: None, // TODO: is this right? Prob works in compute image, not sure about neon_local.
-                    pgdata: &self.pgdata,
-                }))?;
+                ))?;
                 config::write_postgres_conf(
                     &pgdata_path.join("postgresql.conf"),
                     &pspec.spec,
