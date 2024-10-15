@@ -9,7 +9,10 @@ use super::{
 use crate::{
     auth::backend::{jwt::AuthRule, ComputeUserInfo},
     compute,
-    control_plane::messages::{ColdStartInfo, EndpointJwksResponse, Reason},
+    control_plane::{
+        errors::GetEndpointJwksError,
+        messages::{ColdStartInfo, EndpointJwksResponse, Reason},
+    },
     http,
     metrics::{CacheOutcome, Metrics},
     rate_limiter::WakeComputeRateLimiter,
@@ -17,7 +20,6 @@ use crate::{
 };
 use crate::{cache::Cached, context::RequestMonitoring};
 use ::http::{header::AUTHORIZATION, HeaderName};
-use anyhow::bail;
 use futures::TryFutureExt;
 use std::{sync::Arc, time::Duration};
 use tokio::time::Instant;
@@ -137,14 +139,14 @@ impl Api {
         &self,
         ctx: &RequestMonitoring,
         endpoint: EndpointId,
-    ) -> anyhow::Result<Vec<AuthRule>> {
+    ) -> Result<Vec<AuthRule>, GetEndpointJwksError> {
         if !self
             .caches
             .endpoints_cache
             .is_valid(ctx, &endpoint.normalize())
             .await
         {
-            bail!("endpoint not found");
+            return Err(GetEndpointJwksError::EndpointNotFound);
         }
         let request_id = ctx.session_id().to_string();
         async {
@@ -159,12 +161,17 @@ impl Api {
                 .header(X_REQUEST_ID, &request_id)
                 .header(AUTHORIZATION, format!("Bearer {}", &self.jwt))
                 .query(&[("session_id", ctx.session_id())])
-                .build()?;
+                .build()
+                .map_err(GetEndpointJwksError::RequestBuild)?;
 
             info!(url = request.url().as_str(), "sending http request");
             let start = Instant::now();
             let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Cplane);
-            let response = self.endpoint.execute(request).await?;
+            let response = self
+                .endpoint
+                .execute(request)
+                .await
+                .map_err(GetEndpointJwksError::RequestExecute)?;
             drop(pause);
             info!(duration = ?start.elapsed(), "received http response");
 
@@ -330,7 +337,7 @@ impl super::Api for Api {
         &self,
         ctx: &RequestMonitoring,
         endpoint: EndpointId,
-    ) -> anyhow::Result<Vec<AuthRule>> {
+    ) -> Result<Vec<AuthRule>, GetEndpointJwksError> {
         self.do_get_endpoint_jwks(ctx, endpoint).await
     }
 

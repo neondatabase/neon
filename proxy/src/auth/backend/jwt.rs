@@ -14,7 +14,8 @@ use tokio::time::Instant;
 
 use crate::{
     auth::backend::ComputeCredentialKeys, context::RequestMonitoring,
-    http::parse_json_body_with_limit, intern::RoleNameInt, EndpointId, RoleName,
+    control_plane::errors::GetEndpointJwksError, http::parse_json_body_with_limit,
+    intern::RoleNameInt, EndpointId, RoleName,
 };
 
 // TODO(conrad): make these configurable.
@@ -30,7 +31,16 @@ pub(crate) trait FetchAuthRules: Clone + Send + Sync + 'static {
         &self,
         ctx: &RequestMonitoring,
         endpoint: EndpointId,
-    ) -> impl Future<Output = Result<Vec<AuthRule>, JwtError>> + Send;
+    ) -> impl Future<Output = Result<Vec<AuthRule>, FetchAuthRulesError>> + Send;
+}
+
+#[derive(Error, Debug)]
+pub(crate) enum FetchAuthRulesError {
+    #[error(transparent)]
+    GetEndpointJwks(#[from] GetEndpointJwksError),
+
+    #[error("JWKs settings for this role were not configured")]
+    RoleJwksNotConfigured,
 }
 
 pub(crate) struct AuthRule {
@@ -552,7 +562,7 @@ impl Drop for JwkRenewalPermit<'_> {
 
 #[derive(Error, Debug)]
 #[non_exhaustive]
-pub enum JwtError {
+pub(crate) enum JwtError {
     #[error("jwk not found")]
     JwkNotFound,
 
@@ -589,13 +599,11 @@ pub enum JwtError {
     #[error("signature algorithm not supported")]
     SignatureAlgorithmNotSupported,
 
-    #[error("signature error {0}")]
+    #[error("signature error: {0}")]
     Signature(#[from] signature::Error),
 
-    // To support incoming errors during migration.
-    // TODO: Remove variant after migration.
-    #[error(transparent)]
-    Anyhow(anyhow::Error), // No #[from].
+    #[error("failed to fetch auth rules: {0}")]
+    FetchAuthRules(#[from] FetchAuthRulesError),
 }
 
 impl From<base64::DecodeError> for JwtError {
@@ -820,7 +828,7 @@ X0n5X2/pBLJzxZc62ccvZYVnctBiFs6HbSnxpuMQCfkt/BcR/ttIepBQQIW86wHL
                 &self,
                 _ctx: &RequestMonitoring,
                 _endpoint: EndpointId,
-            ) -> Result<Vec<AuthRule>, JwtError> {
+            ) -> Result<Vec<AuthRule>, FetchAuthRulesError> {
                 Ok(vec![
                     AuthRule {
                         id: "foo".to_owned(),
