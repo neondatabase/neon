@@ -79,7 +79,7 @@ fn report_error(e: &WakeComputeError, retry: bool) {
             Reason::ConcurrencyLimitReached => WakeupFailureKind::ApiConsoleLocked,
             Reason::LockAlreadyTaken => WakeupFailureKind::ApiConsoleLocked,
             Reason::RunningOperations => WakeupFailureKind::ApiConsoleLocked,
-            Reason::Unknown => match e {
+            Reason::Unknown => match **e {
                 ControlPlaneError {
                     http_status_code: StatusCode::LOCKED,
                     ref error,

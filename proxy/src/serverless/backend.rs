@@ -2,8 +2,9 @@ use std::{io, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
+use p256::{ecdsa::SigningKey, elliptic_curve::JwkEcKey};
+use rand::rngs::OsRng;
 use tokio::net::{lookup_host, TcpStream};
-use tokio_postgres::types::ToSql;
 use tracing::{debug, field::display, info};
 
 use crate::{
@@ -43,7 +44,7 @@ pub(crate) struct PoolingBackend {
     pub(crate) local_pool: Arc<LocalConnPool<tokio_postgres::Client>>,
     pub(crate) pool: Arc<GlobalConnPool<tokio_postgres::Client>>,
     pub(crate) config: &'static ProxyConfig,
-    pub(crate) auth_backend: &'static crate::auth::Backend<'static, (), ()>,
+    pub(crate) auth_backend: &'static crate::auth::Backend<'static, ()>,
     pub(crate) endpoint_rate_limiter: Arc<EndpointRateLimiter>,
 }
 
@@ -136,9 +137,6 @@ impl PoolingBackend {
                     keys: crate::auth::backend::ComputeCredentialKeys::None,
                 })
             }
-            crate::auth::Backend::ConsoleRedirect(_, ()) => Err(AuthError::auth_failed(
-                "JWT login over web auth proxy is not supported",
-            )),
             crate::auth::Backend::Local(_) => {
                 let keys = self
                     .config
@@ -265,22 +263,29 @@ impl PoolingBackend {
         info!(%conn_id, "local_pool: opening a new connection '{conn_info}'");
 
         let mut node_info = match &self.auth_backend {
-            auth::Backend::ControlPlane(_, ()) | auth::Backend::ConsoleRedirect(_, ()) => {
+            auth::Backend::ControlPlane(_, ()) => {
                 unreachable!("only local_proxy can connect to local postgres")
             }
             auth::Backend::Local(local) => local.node_info.clone(),
         };
 
+        let (key, jwk) = create_random_jwk();
+
         let config = node_info
             .config
             .user(&conn_info.user_info.user)
-            .dbname(&conn_info.dbname);
+            .dbname(&conn_info.dbname)
+            .options(&format!(
+                "-c pg_session_jwt.jwk={}",
+                serde_json::to_string(&jwk).expect("serializing jwk to json should not fail")
+            ));
 
         let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
         let (client, connection) = config.connect(tokio_postgres::NoTls).await?;
         drop(pause);
 
-        tracing::Span::current().record("pid", tracing::field::display(client.get_process_id()));
+        let pid = client.get_process_id();
+        tracing::Span::current().record("pid", pid);
 
         let mut handle = local_conn_pool::poll_client(
             self.local_pool.clone(),
@@ -288,32 +293,32 @@ impl PoolingBackend {
             conn_info,
             client,
             connection,
+            key,
             conn_id,
             node_info.aux.clone(),
         );
 
-        let kid = handle.get_client().get_process_id() as i64;
-        let (cli_inner, _dsc) = handle.client_inner();
-        let jwk = p256::PublicKey::from(cli_inner.key().verifying_key()).to_jwk();
+        {
+            let (client, mut discard) = handle.inner();
+            debug!("setting up backend session state");
 
-        debug!(kid, ?jwk, "setting up backend session state");
+            // initiates the auth session
+            if let Err(e) = client.query("select auth.init()", &[]).await {
+                discard.discard();
+                return Err(e.into());
+            }
 
-        // initiates the auth session
-        handle
-            .get_client()
-            .query(
-                "select auth.init($1, $2);",
-                &[
-                    &kid as &(dyn ToSql + Sync),
-                    &tokio_postgres::types::Json(jwk),
-                ],
-            )
-            .await?;
-
-        info!(?kid, "backend session state init");
+            info!("backend session state initialized");
+        }
 
         Ok(handle)
     }
+}
+
+fn create_random_jwk() -> (SigningKey, JwkEcKey) {
+    let key = SigningKey::random(&mut OsRng);
+    let jwk = p256::PublicKey::from(key.verifying_key()).to_jwk();
+    (key, jwk)
 }
 
 #[derive(Debug, thiserror::Error)]

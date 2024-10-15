@@ -492,30 +492,32 @@ impl TestBackend for TestConnectMechanism {
         match action {
             ConnectAction::Wake => Ok(helper_create_cached_node_info(self.cache)),
             ConnectAction::WakeFail => {
-                let err = control_plane::errors::ApiError::ControlPlane(ControlPlaneError {
-                    http_status_code: StatusCode::BAD_REQUEST,
-                    error: "TEST".into(),
-                    status: None,
-                });
+                let err =
+                    control_plane::errors::ApiError::ControlPlane(Box::new(ControlPlaneError {
+                        http_status_code: StatusCode::BAD_REQUEST,
+                        error: "TEST".into(),
+                        status: None,
+                    }));
                 assert!(!err.could_retry());
                 Err(control_plane::errors::WakeComputeError::ApiError(err))
             }
             ConnectAction::WakeRetry => {
-                let err = control_plane::errors::ApiError::ControlPlane(ControlPlaneError {
-                    http_status_code: StatusCode::BAD_REQUEST,
-                    error: "TEST".into(),
-                    status: Some(Status {
-                        code: "error".into(),
-                        message: "error".into(),
-                        details: Details {
-                            error_info: None,
-                            retry_info: Some(control_plane::messages::RetryInfo {
-                                retry_delay_ms: 1,
-                            }),
-                            user_facing_message: None,
-                        },
-                    }),
-                });
+                let err =
+                    control_plane::errors::ApiError::ControlPlane(Box::new(ControlPlaneError {
+                        http_status_code: StatusCode::BAD_REQUEST,
+                        error: "TEST".into(),
+                        status: Some(Status {
+                            code: "error".into(),
+                            message: "error".into(),
+                            details: Details {
+                                error_info: None,
+                                retry_info: Some(control_plane::messages::RetryInfo {
+                                    retry_delay_ms: 1,
+                                }),
+                                user_facing_message: None,
+                            },
+                        }),
+                    }));
                 assert!(err.could_retry());
                 Err(control_plane::errors::WakeComputeError::ApiError(err))
             }
@@ -552,7 +554,7 @@ fn helper_create_cached_node_info(cache: &'static NodeInfoCache) -> CachedNodeIn
 
 fn helper_create_connect_info(
     mechanism: &TestConnectMechanism,
-) -> auth::Backend<'static, ComputeCredentials, &()> {
+) -> auth::Backend<'static, ComputeCredentials> {
     let user_info = auth::Backend::ControlPlane(
         MaybeOwned::Owned(ControlPlaneBackend::Test(Box::new(mechanism.clone()))),
         ComputeCredentials {
