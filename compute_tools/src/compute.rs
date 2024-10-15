@@ -1383,20 +1383,18 @@ LIMIT 100",
             .connect(NoTls)
             .context("Failed to connect to the database")?;
 
-        let query = "GRANT $1 ON SCHEMA $2 TO $3";
+        let query = format!(
+            "GRANT {} ON SCHEMA {} TO {}",
+            privileges
+                .iter()
+                .map(|p| p.as_str().to_string())
+                .collect::<Vec<String>>()
+                .join(", "),
+            schema_name,
+            role_name
+        );
         db_client
-            .execute(
-                query,
-                &[
-                    &privileges
-                        .iter()
-                        .map(|p| p.as_str())
-                        .collect::<Vec<&str>>()
-                        .join(", "),
-                    &schema_name,
-                    &role_name,
-                ],
-            )
+            .simple_query(&query)
             .context(format!("Failed to execute query: {}", query))?;
 
         Ok(())
