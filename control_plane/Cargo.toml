@@ -12,6 +12,7 @@ comfy-table.workspace = true
 futures.workspace = true
 humantime.workspace = true
 nix.workspace = true
+num_cpus.workspace = true
 once_cell.workspace = true
 humantime-serde.workspace = true
 hyper0.workspace = true

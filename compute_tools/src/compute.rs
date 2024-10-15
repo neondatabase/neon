@@ -14,14 +14,18 @@ use std::time::Duration;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
+use camino::Utf8Path;
 use chrono::{DateTime, Utc};
 use futures::future::join_all;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use nix::unistd::Pid;
+use pageserver::tenant::do_run_initdb;
+use pageserver::tenant::RunInitdbArgs;
 use postgres::error::SqlState;
 use postgres::{Client, NoTls};
 use tracing::{debug, error, info, instrument, warn};
+use utils::id::TenantTimelineId;
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 
@@ -142,62 +146,77 @@ pub struct ParsedSpec {
 impl TryFrom<ComputeSpec> for ParsedSpec {
     type Error = String;
     fn try_from(spec: ComputeSpec) -> Result<Self, String> {
-        // Extract the options from the spec file that are needed to connect to
-        // the storage system.
-        //
-        // For backwards-compatibility, the top-level fields in the spec file
-        // may be empty. In that case, we need to dig them from the GUCs in the
-        // cluster.settings field.
-        let pageserver_connstr = spec
-            .pageserver_connstring
-            .clone()
-            .or_else(|| spec.cluster.settings.find("neon.pageserver_connstring"))
-            .ok_or("pageserver connstr should be provided")?;
-        let safekeeper_connstrings = if spec.safekeeper_connstrings.is_empty() {
-            if matches!(spec.mode, ComputeMode::Primary) {
-                spec.cluster
-                    .settings
-                    .find("neon.safekeepers")
-                    .ok_or("safekeeper connstrings should be provided")?
-                    .split(',')
-                    .map(|str| str.to_string())
-                    .collect()
-            } else {
-                vec![]
-            }
-        } else {
-            spec.safekeeper_connstrings.clone()
-        };
-        let storage_auth_token = spec.storage_auth_token.clone();
-        let tenant_id: TenantId = if let Some(tenant_id) = spec.tenant_id {
-            tenant_id
-        } else {
-            spec.cluster
-                .settings
-                .find("neon.tenant_id")
-                .ok_or("tenant id should be provided")
-                .map(|s| TenantId::from_str(&s))?
-                .or(Err("invalid tenant id"))?
-        };
-        let timeline_id: TimelineId = if let Some(timeline_id) = spec.timeline_id {
-            timeline_id
-        } else {
-            spec.cluster
-                .settings
-                .find("neon.timeline_id")
-                .ok_or("timeline id should be provided")
-                .map(|s| TimelineId::from_str(&s))?
-                .or(Err("invalid timeline id"))?
-        };
+        match spec.mode {
+            ComputeMode::FastImport => Ok(ParsedSpec {
+                spec,
+                pageserver_connstr: "fastimport-mode-does-not-need-it".to_owned(),
+                safekeeper_connstrings: vec![],
+                storage_auth_token: None,
+                tenant_id: TenantTimelineId::empty().tenant_id,
+                timeline_id: TenantTimelineId::empty().timeline_id,
+            }),
+            _ => {
+                // Extract the options from the spec file that are needed to connect to
+                // the storage system.
+                //
+                // For backwards-compatibility, the top-level fields in the spec file
+                // may be empty. In that case, we need to dig them from the GUCs in the
+                // cluster.settings field.
+                let pageserver_connstr = match spec.mode {
+                    ComputeMode::FastImport => "fastimport-mode-does-not-need-it".to_owned(),
+                    _ => spec
+                        .pageserver_connstring
+                        .clone()
+                        .or_else(|| spec.cluster.settings.find("neon.pageserver_connstring"))
+                        .ok_or("pageserver connstr should be provided")?,
+                };
+                let safekeeper_connstrings = if spec.safekeeper_connstrings.is_empty() {
+                    if matches!(spec.mode, ComputeMode::Primary) {
+                        spec.cluster
+                            .settings
+                            .find("neon.safekeepers")
+                            .ok_or("safekeeper connstrings should be provided")?
+                            .split(',')
+                            .map(|str| str.to_string())
+                            .collect()
+                    } else {
+                        vec![]
+                    }
+                } else {
+                    spec.safekeeper_connstrings.clone()
+                };
+                let storage_auth_token = spec.storage_auth_token.clone();
+                let tenant_id: TenantId = if let Some(tenant_id) = spec.tenant_id {
+                    tenant_id
+                } else {
+                    spec.cluster
+                        .settings
+                        .find("neon.tenant_id")
+                        .ok_or("tenant id should be provided")
+                        .map(|s| TenantId::from_str(&s))?
+                        .or(Err("invalid tenant id"))?
+                };
+                let timeline_id: TimelineId = if let Some(timeline_id) = spec.timeline_id {
+                    timeline_id
+                } else {
+                    spec.cluster
+                        .settings
+                        .find("neon.timeline_id")
+                        .ok_or("timeline id should be provided")
+                        .map(|s| TimelineId::from_str(&s))?
+                        .or(Err("invalid timeline id"))?
+                };
 
-        Ok(ParsedSpec {
-            spec,
-            pageserver_connstr,
-            safekeeper_connstrings,
-            storage_auth_token,
-            tenant_id,
-            timeline_id,
-        })
+                Ok(ParsedSpec {
+                    spec,
+                    pageserver_connstr,
+                    safekeeper_connstrings,
+                    storage_auth_token,
+                    tenant_id,
+                    timeline_id,
+                })
+            }
+        }
     }
 }
 
@@ -616,19 +635,21 @@ impl ComputeNode {
         let spec = &pspec.spec;
         let pgdata_path = Path::new(&self.pgdata);
 
-        // Remove/create an empty pgdata directory and put configuration there.
-        self.create_pgdata()?;
-        config::write_postgres_conf(
-            &pgdata_path.join("postgresql.conf"),
-            &pspec.spec,
-            Some(extension_server_port),
-        )?;
-
         // Syncing safekeepers is only safe with primary nodes: if a primary
         // is already connected it will be kicked out, so a secondary (standby)
         // cannot sync safekeepers.
-        let lsn = match spec.mode {
+        let setup_neon_pgdata = || {
+            self.create_pgdata()?;
+            config::write_postgres_conf(
+                &pgdata_path.join("postgresql.conf"),
+                &pspec.spec,
+                Some(extension_server_port),
+            )?;
+            anyhow::Ok(())
+        };
+        let basebackup_lsn = match spec.mode {
             ComputeMode::Primary => {
+                setup_neon_pgdata()?;
                 info!("checking if safekeepers are synced");
                 let lsn = if let Ok(Some(lsn)) = self.check_safekeepers_synced(compute_state) {
                     lsn
@@ -638,28 +659,61 @@ impl ComputeNode {
                         .with_context(|| "failed to sync safekeepers")?
                 };
                 info!("safekeepers synced at LSN {}", lsn);
-                lsn
+                Some(lsn)
             }
             ComputeMode::Static(lsn) => {
+                setup_neon_pgdata()?;
                 info!("Starting read-only node at static LSN {}", lsn);
-                lsn
+                Some(lsn)
             }
             ComputeMode::Replica => {
+                setup_neon_pgdata()?;
                 info!("Initializing standby from latest Pageserver LSN");
-                Lsn(0)
+                Some(Lsn(0))
+            }
+            ComputeMode::FastImport => {
+                info!("Seeding fast-import node using initdb");
+                None
             }
         };
 
-        info!(
-            "getting basebackup@{} from pageserver {}",
-            lsn, &pspec.pageserver_connstr
-        );
-        self.get_basebackup(compute_state, lsn).with_context(|| {
-            format!(
-                "failed to get basebackup@{} from pageserver {}",
-                lsn, &pspec.pageserver_connstr
-            )
-        })?;
+        match basebackup_lsn {
+            Some(lsn) => {
+                info!(
+                    "getting basebackup@{} from pageserver {}",
+                    lsn, &pspec.pageserver_connstr
+                );
+                self.get_basebackup(compute_state, lsn).with_context(|| {
+                    format!(
+                        "failed to get basebackup@{} from pageserver {}",
+                        lsn, &pspec.pageserver_connstr
+                    )
+                })?;
+            }
+            None => {
+                info!("running initdb");
+                self.create_pgdata()?;
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                rt.block_on(do_run_initdb(RunInitdbArgs {
+                    superuser: pageserver_api::config::defaults::DEFAULT_SUPERUSER, // cloud_admin
+                    initdb_bin: {
+                        // get_pg_version is just as bad as this
+                        let pgbin = Utf8Path::new(&self.pgbin);
+                        pgbin.parent().expect("pgbin has no parent").join("initdb").as_ref()
+                    },
+                    library_search_path: None, // TODO: is this right? Prob works in compute image, not sure about neon_local.
+                    pgdata: &self.pgdata,
+                }))?;
+                config::write_postgres_conf(
+                    &pgdata_path.join("postgresql.conf"),
+                    &pspec.spec,
+                    None,
+                )?;
+            }
+        }
 
         // Update pg_hba.conf received with basebackup.
         update_pg_hba(pgdata_path)?;
@@ -707,7 +761,7 @@ impl ComputeNode {
         symlink("/dev/shm/", pgdata_path.join("pg_dynshmem"))?;
 
         match spec.mode {
-            ComputeMode::Primary => {}
+            ComputeMode::Primary | ComputeMode::FastImport => {}
             ComputeMode::Replica | ComputeMode::Static(..) => {
                 add_standby_signal(pgdata_path)?;
             }

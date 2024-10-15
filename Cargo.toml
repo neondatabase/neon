@@ -220,6 +220,7 @@ tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", re
 compute_api = { version = "0.1", path = "./libs/compute_api/" }
 consumption_metrics = { version = "0.1", path = "./libs/consumption_metrics/" }
 metrics = { version = "0.1", path = "./libs/metrics/" }
+pageserver = { path = "./pageserver" }
 pageserver_api = { version = "0.1", path = "./libs/pageserver_api/" }
 pageserver_client = { path = "./pageserver/client" }
 pageserver_compaction = { version = "0.1", path = "./pageserver/compaction/" }

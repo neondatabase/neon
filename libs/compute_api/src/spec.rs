@@ -213,6 +213,7 @@ pub enum ComputeMode {
     /// Future versions may want to distinguish between replicas with hot standby
     /// feedback and other kinds of replication configurations.
     Replica,
+    FastImport
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]

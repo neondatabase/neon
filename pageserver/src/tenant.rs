@@ -700,7 +700,7 @@ pub enum CreateTimelineError {
 }
 
 #[derive(thiserror::Error, Debug)]
-enum InitdbError {
+pub enum InitdbError {
     Other(anyhow::Error),
     Cancelled,
     Spawn(std::io::Result<()>),
@@ -4294,21 +4294,57 @@ async fn run_initdb(
 
     let _permit = INIT_DB_SEMAPHORE.acquire().await;
 
-    let initdb_command = tokio::process::Command::new(&initdb_bin_path)
-        .args(["--pgdata", initdb_target_dir.as_ref()])
-        .args(["--username", &conf.superuser])
+    let res = do_run_initdb(RunInitdbArgs {
+        superuser: &conf.superuser,
+        initdb_bin: initdb_bin_path.as_ref(),
+        library_search_path: Some(&initdb_lib_dir),
+        pgdata: initdb_target_dir.as_ref(),
+    })
+    .await;
+
+    // This isn't true cancellation support, see above. Still return an error to
+    // excercise the cancellation code path.
+    if cancel.is_cancelled() {
+        return Err(InitdbError::Cancelled);
+    }
+
+    res
+}
+
+pub struct RunInitdbArgs<'a> {
+    pub superuser: &'a str,
+    pub initdb_bin: &'a str,
+    pub library_search_path: Option<&'a Utf8Path>,
+    pub pgdata: &'a str,
+}
+pub async fn do_run_initdb(args: RunInitdbArgs<'_>) -> Result<(), InitdbError> {
+    let RunInitdbArgs {
+        superuser,
+        initdb_bin: initdb_bin_path,
+        library_search_path,
+        pgdata,
+    } = args;
+    let mut initdb_command_builder = tokio::process::Command::new(initdb_bin_path);
+    initdb_command_builder
+        .args(["--pgdata", pgdata.as_ref()])
+        .args(["--username", superuser])
         .args(["--encoding", "utf8"])
         .arg("--no-instructions")
         .arg("--no-sync")
-        .env_clear()
-        .env("LD_LIBRARY_PATH", &initdb_lib_dir)
-        .env("DYLD_LIBRARY_PATH", &initdb_lib_dir)
+        .env_clear();
+    if let Some(initdb_lib_dir) = library_search_path {
+        initdb_command_builder
+            .env("LD_LIBRARY_PATH", initdb_lib_dir)
+            .env("DYLD_LIBRARY_PATH", initdb_lib_dir);
+    }
+    initdb_command_builder
         .stdin(std::process::Stdio::null())
         // stdout invocation produces the same output every time, we don't need it
         .stdout(std::process::Stdio::null())
         // we would be interested in the stderr output, if there was any
-        .stderr(std::process::Stdio::piped())
-        .spawn()?;
+        .stderr(std::process::Stdio::piped());
+
+    let initdb_command = initdb_command_builder.spawn()?;
 
     // Ideally we'd select here with the cancellation token, but the problem is that
     // we can't safely terminate initdb: it launches processes of its own, and killing
@@ -4321,12 +4357,6 @@ async fn run_initdb(
             initdb_output.status,
             initdb_output.stderr,
         ));
-    }
-
-    // This isn't true cancellation support, see above. Still return an error to
-    // excercise the cancellation code path.
-    if cancel.is_cancelled() {
-        return Err(InitdbError::Cancelled);
     }
 
     Ok(())
