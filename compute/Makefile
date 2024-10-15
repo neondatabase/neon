@@ -1,4 +1,6 @@
-jsonnet_files = $(wildcard etc/*.jsonnet etc/*.libsonnet)
+jsonnet_files = $(wildcard \
+	etc/*.jsonnet \
+	etc/sql_exporter/*.libsonnet)
 
 .PHONY: all
 all: neon_collector.yml neon_collector_autoscaling.yml sql_exporter.yml sql_exporter_autoscaling.yml
