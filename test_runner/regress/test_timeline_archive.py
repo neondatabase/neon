@@ -197,4 +197,6 @@ def test_timeline_offloading(neon_env_builder: NeonEnvBuilder, manual_offload: b
     )
     assert leaf_detail["is_archived"] is False
 
+    endpoint = env.endpoints.create_start("test_ancestor_branch_archive_branch1", tenant_id = tenant_id)
+
     assert not timeline_offloaded(initial_timeline_id)
