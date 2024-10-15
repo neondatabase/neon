@@ -3350,7 +3350,7 @@ impl Tenant {
     /// Populate all Timelines' `GcInfo` with information about their children.  We do not set the
     /// PITR cutoffs here, because that requires I/O: this is done later, before GC, by [`Self::refresh_gc_info_internal`]
     ///
-    /// Subsequently, parent-child relationships are updated incrementally during timeline creation/deletion.
+    /// Subsequently, parent-child relationships are updated incrementally inside [`Timeline::new`] and [`Timeline::drop`].
     fn initialize_gc_info(
         &self,
         timelines: &std::sync::MutexGuard<HashMap<TimelineId, Arc<Timeline>>>,
