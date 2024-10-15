@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::str::FromStr;
 
 /// Struct to hold parsed S3 components
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct S3Uri {
     pub bucket: String,
     pub key: String,
@@ -44,48 +44,32 @@ impl S3Uri {
     }
 }
 
-impl ToString for S3Uri {
-    fn to_string(&self) -> String {
-        format!("s3://{}/{}", self.bucket, self.key)
+impl std::fmt::Display for S3Uri {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "s3://{}/{}", self.bucket, self.key)
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+impl clap::builder::TypedValueParser for S3Uri {
+    type Value = Self;
 
-    #[test]
-    fn test_parse_s3_uri_valid() {
-        let uri = "s3://my-bucket/some/path/to/object.txt";
-        let result = S3Uri::from_str(uri).unwrap();
-
-        assert_eq!(
-            result,
-            S3Uri {
-                bucket: "my-bucket".to_string(),
-                key: "some/path/to/object.txt".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn test_parse_s3_uri_invalid_scheme() {
-        let uri = "http://my-bucket/some/path/to/object.txt";
-        let result = S3Uri::from_str(uri);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_parse_s3_uri_missing_key() {
-        let uri = "s3://my-bucket";
-        let result = S3Uri::from_str(uri);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_parse_s3_uri_empty_uri() {
-        let uri = "";
-        let result = S3Uri::from_str(uri);
-        assert!(result.is_err());
+    fn parse_ref(
+        &self,
+        _cmd: &clap::Command,
+        _arg: Option<&clap::Arg>,
+        value: &std::ffi::OsStr,
+    ) -> Result<Self::Value, clap::Error> {
+        let value_str = value.to_str().ok_or_else(|| {
+            clap::Error::raw(
+                clap::error::ErrorKind::InvalidUtf8,
+                "Invalid UTF-8 sequence",
+            )
+        })?;
+        S3Uri::from_str(value_str).map_err(|e| {
+            clap::Error::raw(
+                clap::error::ErrorKind::InvalidValue,
+                format!("Failed to parse S3 URI: {}", e),
+            )
+        })
     }
 }

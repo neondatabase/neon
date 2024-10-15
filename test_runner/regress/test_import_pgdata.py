@@ -159,7 +159,9 @@ def test_pgdata_import_smoke(
         shard_ps = env.get_pageserver(shard["node_id"])
         result = shard_ps.timeline_scan_no_disposable_keys(shard["shard_id"], timeline_id)
         assert result.tally.disposable_count == 0
-        assert result.tally.not_disposable_count > 0, "sanity check, each shard should have some data"
+        assert (
+            result.tally.not_disposable_count > 0
+        ), "sanity check, each shard should have some data"
 
     #
     # validate that we can write

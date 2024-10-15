@@ -393,21 +393,6 @@ impl Endpoint {
                     conf.append("recovery_prefetch", "off");
                 }
             }
-            ComputeMode::FastImport => {
-                conf.append("wal_level", "minimal");
-                conf.append("shared_buffers", "10GB");
-                conf.append("max_wal_senders", "0");
-                conf.append("fsync", "off");
-                conf.append("full_page_writes", "off");
-                conf.append("synchronous_commit", "off");
-                conf.append("maintenance_work_mem", "8388608");
-                let nproc = num_cpus::get();
-                conf.append("max_parallel_maintenance_workers", &format!("{}", nproc));
-                conf.append("max_parallel_workers", &format!("{}", nproc));
-                conf.append("max_parallel_workers_per_gather", &format!("{}", nproc));
-                conf.append("max_worker_processes", &format!("{}", nproc));
-                conf.append("effective_io_concurrency", "100");
-            }
         }
 
         Ok(conf)
@@ -615,7 +600,6 @@ impl Endpoint {
             pgbouncer_settings: None,
             shard_stripe_size: Some(shard_stripe_size),
             local_proxy_config: None,
-            fast_import: None,
         };
         let spec_path = self.endpoint_path().join("spec.json");
         std::fs::write(spec_path, serde_json::to_string_pretty(&spec)?)?;

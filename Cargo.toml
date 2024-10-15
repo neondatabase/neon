@@ -153,7 +153,7 @@ sentry = { version = "0.32", default-features = false, features = ["backtrace", 
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1"
 serde_path_to_error = "0.1"
-serde_with = "2.0"
+serde_with = { version = "2.0", features = [ "base64" ] }
 serde_assert = "0.5.0"
 sha2 = "0.10.2"
 signal-hook = "0.3"

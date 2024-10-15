@@ -1,5 +1,5 @@
-use tokio::process::{ChildStderr, ChildStdout};
 use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::process::{ChildStderr, ChildStdout};
 use tracing::info;
 
 /// Asynchronously relays the output from a child process's `stdout` and `stderr` to the tracing log.
@@ -10,10 +10,7 @@ use tracing::info;
 /// * `stdout`: An `Option<ChildStdout>` from the child process.
 /// * `stderr`: An `Option<ChildStderr>` from the child process.
 ///
-pub(crate) async fn relay_process_output(
-    stdout: Option<ChildStdout>,
-    stderr: Option<ChildStderr>,
-) {
+pub(crate) async fn relay_process_output(stdout: Option<ChildStdout>, stderr: Option<ChildStderr>) {
     let stdout_fut = async {
         if let Some(stdout) = stdout {
             let reader = BufReader::new(stdout);

@@ -4275,11 +4275,12 @@ async fn run_initdb(
 
     let res = postgres_initdb::do_run_initdb(postgres_initdb::RunInitdbArgs {
         superuser: &conf.superuser,
-        initdb_bin: initdb_bin_path.as_ref(),
-        library_search_path: Some(&initdb_lib_dir),
-        pgdata: initdb_target_dir.as_ref(),
+        initdb_bin: &initdb_bin_path,
+        library_search_path: &initdb_lib_dir,
+        pgdata: initdb_target_dir,
     })
-    .await.map_err(InitdbError::Inner);
+    .await
+    .map_err(InitdbError::Inner);
 
     // This isn't true cancellation support, see above. Still return an error to
     // excercise the cancellation code path.

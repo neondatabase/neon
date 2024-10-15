@@ -10,9 +10,9 @@ use camino::Utf8Path;
 
 pub struct RunInitdbArgs<'a> {
     pub superuser: &'a str,
-    pub initdb_bin: &'a str,
-    pub library_search_path: Option<&'a Utf8Path>,
-    pub pgdata: &'a str,
+    pub initdb_bin: &'a Utf8Path,
+    pub library_search_path: &'a Utf8Path,
+    pub pgdata: &'a Utf8Path,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -56,13 +56,9 @@ pub async fn do_run_initdb(args: RunInitdbArgs<'_>) -> Result<(), Error> {
         .args(["--encoding", "utf8"])
         .arg("--no-instructions")
         .arg("--no-sync")
-        .env_clear();
-    if let Some(initdb_lib_dir) = library_search_path {
-        initdb_command_builder
-            .env("LD_LIBRARY_PATH", initdb_lib_dir)
-            .env("DYLD_LIBRARY_PATH", initdb_lib_dir);
-    }
-    initdb_command_builder
+        .env_clear()
+        .env("LD_LIBRARY_PATH", library_search_path)
+        .env("DYLD_LIBRARY_PATH", library_search_path)
         .stdin(std::process::Stdio::null())
         // stdout invocation produces the same output every time, we don't need it
         .stdout(std::process::Stdio::null())

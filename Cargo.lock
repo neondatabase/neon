@@ -1267,7 +1267,9 @@ dependencies = [
  "reqwest 0.12.4",
  "rlimit",
  "rust-ini",
+ "serde",
  "serde_json",
+ "serde_with",
  "signal-hook",
  "tar",
  "thiserror",
@@ -1364,7 +1366,6 @@ dependencies = [
  "humantime-serde",
  "hyper 0.14.30",
  "nix 0.27.1",
- "num_cpus",
  "once_cell",
  "pageserver_api",
  "pageserver_client",
@@ -4133,6 +4134,7 @@ dependencies = [
  "camino",
  "thiserror",
  "tokio",
+ "workspace_hack",
 ]
 
 [[package]]
@@ -7318,6 +7320,7 @@ dependencies = [
  "anyhow",
  "axum",
  "axum-core",
+ "base64 0.13.1",
  "base64 0.21.1",
  "base64ct",
  "bytes",
