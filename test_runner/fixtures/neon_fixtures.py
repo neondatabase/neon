@@ -3533,7 +3533,7 @@ class Endpoint(PgProtocol, LogUtils):
         return self.endpoint_path() / "postgresql.conf"
 
     def lfc_path(self) -> Path:
-        """Path to the lfc dir"""
+        """Path to the lfc file"""
         return self.endpoint_path() / "file_cache" / "file.cache"
 
     def config(self, lines: list[str]) -> Endpoint:

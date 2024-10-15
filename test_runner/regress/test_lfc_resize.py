@@ -25,7 +25,6 @@ def test_lfc_resize(neon_simple_env: NeonEnv, pg_bin: PgBin):
     endpoint = env.endpoints.create_start(
         "main",
         config_lines=[
-            f"neon.file_cache_path='{cache_dir}/file.cache'",
             "neon.max_file_cache_size=1GB",
             "neon.file_cache_size_limit=1GB",
         ],
@@ -67,8 +66,8 @@ def test_lfc_resize(neon_simple_env: NeonEnv, pg_bin: PgBin):
     cur.execute("select pg_reload_conf()")
     nretries = 10
     while True:
-        lfc_file_path = f"{endpoint.pg_data_dir_path()}/file.cache"
-        lfc_file_size = os.path.getsize(lfc_file_path)
+        lfc_file_path = endpoint.lfc_path()
+        lfc_file_size = lfc_file_path.stat().st_size
         res = subprocess.run(
             ["ls", "-sk", lfc_file_path], check=True, text=True, capture_output=True
         )
