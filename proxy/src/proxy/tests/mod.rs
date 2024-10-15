@@ -39,8 +39,6 @@ fn generate_certs(
     pki_types::CertificateDer<'static>,
     pki_types::PrivateKeyDer<'static>,
 )> {
-    // rcgen::CertificateParams::new(vec![]).unwrap();
-
     let ca_key = rcgen::KeyPair::generate()?;
     let ca = {
         let mut params = rcgen::CertificateParams::default();
