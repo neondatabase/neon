@@ -1387,7 +1387,7 @@ LIMIT 100",
             "GRANT {} ON SCHEMA {} TO {}",
             privileges
                 .iter()
-                .map(|p| p.to_string())
+                .map(|p| serde_json::to_string(p).unwrap())
                 .collect::<Vec<String>>()
                 .join(", "),
             schema_name,

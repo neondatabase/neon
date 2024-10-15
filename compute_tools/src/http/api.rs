@@ -2,7 +2,6 @@ use std::convert::Infallible;
 use std::net::IpAddr;
 use std::net::Ipv6Addr;
 use std::net::SocketAddr;
-use std::str::FromStr;
 use std::sync::Arc;
 use std::thread;
 
@@ -10,7 +9,6 @@ use crate::catalog::SchemaDumpError;
 use crate::catalog::{get_database_schema, get_dbs_and_roles};
 use crate::compute::forward_termination_signal;
 use crate::compute::{ComputeNode, ComputeState, ParsedSpec};
-use crate::privilege::Privilege;
 use compute_api::requests::{ConfigurationRequest, SetRoleGrantsRequest};
 use compute_api::responses::{
     ComputeStatus, ComputeStatusResponse, GenericAPIError, SetRoleGrantsResponse,
@@ -184,24 +182,10 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
             let request = hyper::body::to_bytes(req.into_body()).await.unwrap();
             let request = serde_json::from_slice::<SetRoleGrantsRequest>(&request).unwrap();
 
-            let privileges: Result<Vec<Privilege>, _> = request
-                .privileges
-                .iter()
-                .map(|p| Privilege::from_str(p.as_str()))
-                .collect();
-            let privileges = match privileges {
-                Ok(privs) => privs,
-                Err(_) => {
-                    let msg = format!("Invalid privilege in request: {:?}", &request.privileges);
-                    error!(msg);
-                    return Response::new(Body::from(msg));
-                }
-            };
-
             let res = compute.set_role_grants(
                 &request.database,
                 &request.schema,
-                &privileges,
+                &request.privileges,
                 &request.role,
             );
             match res {

@@ -6,7 +6,10 @@ use std::fmt::Display;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize, Serializer};
 
-use crate::spec::{ComputeSpec, Database, Role};
+use crate::{
+    privilege::Privilege,
+    spec::{ComputeSpec, Database, Role},
+};
 
 #[derive(Serialize, Debug, Deserialize)]
 pub struct GenericAPIError {
@@ -173,6 +176,6 @@ pub struct InstalledExtensions {
 pub struct SetRoleGrantsResponse {
     pub database: String,
     pub schema: String,
-    pub privileges: Vec<String>,
+    pub privileges: Vec<Privilege>,
     pub role: String,
 }
