@@ -338,8 +338,6 @@ pub trait RemoteStorage: Send + Sync + 'static {
     /// If the operation fails because of timeout or cancellation, the root cause of the error will
     /// be set to `TimeoutOrCancel`. In such situation it is unknown which deletions, if any, went
     /// through.
-    ///
-    /// TODO: add an integration test.
     async fn delete_prefix(
         &self,
         prefix: &RemotePath,
