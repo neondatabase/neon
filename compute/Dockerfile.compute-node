@@ -1273,6 +1273,7 @@ RUN mkdir /var/db && useradd -m -d /var/db/postgres postgres && \
 
 COPY --from=postgres-cleanup-layer --chown=postgres /usr/local/pgsql /usr/local
 COPY --from=compute-tools --chown=postgres /home/nonroot/target/release-line-debug-size-lto/compute_ctl /usr/local/bin/compute_ctl
+COPY --from=compute-tools --chown=postgres /home/nonroot/target/release-line-debug-size-lto/fast_import /usr/local/bin/fast_import
 
 # pgbouncer and its config
 COPY --from=pgbouncer         /usr/local/pgbouncer/bin/pgbouncer /usr/local/bin/pgbouncer

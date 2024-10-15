@@ -1,9 +1,21 @@
+//!
+//! # Local Testing
+//!
+//! - Comment out most of the pgxns in The Dockerfile.compute-tools to speed up the build.
+//! - Build the image with the following command:
+//!
+//! ```bash
+//! christian@neon-hetzner-dev-christian:[~/src/neon]: docker buildx build --build-arg DEBIAN_FLAVOR=bullseye-slim --build-arg GIT_VERSION=local --build-arg PG_VERSION=v14 --build-arg BUILD_TAG="$(date --iso-8601=s -u)"  -t localhost:3030/localregistry/compute-node-v14:latest -f compute/Dockerfile.com
+//! christian@neon-hetzner-dev-christian:[~/src/neon]: docker push localhost:3030/localregistry/compute-node-v14:latest
+//! ```
+
 use anyhow::Context;
 use aws_config::BehaviorVersion;
 use camino::{Utf8Path, Utf8PathBuf};
 use clap::Parser;
 use nix::unistd::Pid;
 use tracing::{info, info_span, warn, Instrument};
+use utils::fs_ext::is_directory_empty;
 
 #[path = "fast_import/child_stdio_to_log.rs"]
 mod child_stdio_to_log;
@@ -14,18 +26,27 @@ mod s5cmd;
 
 #[derive(clap::Parser)]
 struct Args {
+    #[clap(long)]
     working_directory: Utf8PathBuf,
+    #[clap(long, env = "NEON_IMPORTER_S3_PREFIX")]
     s3_prefix: s3_uri::S3Uri,
+    #[clap(long)]
     pg_bin_dir: Utf8PathBuf,
+    #[clap(long)]
     pg_lib_dir: Utf8PathBuf,
 }
 
 #[serde_with::serde_as]
 #[derive(serde::Deserialize)]
 struct Spec {
+    encryption_secret: EncryptionSecret,
     #[serde_as(as = "serde_with::base64::Base64")]
-    source_connstring_kms_encrypted_base64: Vec<u8>,
-    source_connstring_kms_key_id: String,
+    source_connstring_ciphertext_base64: Vec<u8>,
+}
+
+#[derive(serde::Deserialize)]
+enum EncryptionSecret {
+    KMS { key_id: String },
 }
 
 #[tokio::main]
@@ -56,9 +77,21 @@ pub(crate) async fn main() -> anyhow::Result<()> {
         serde_json::from_slice(&object.into_bytes()).context("parse spec as json")?
     };
 
-    tokio::fs::create_dir(&working_directory)
-        .await
-        .context("create working directory")?;
+    match tokio::fs::create_dir(&working_directory).await {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            if !is_directory_empty(&working_directory)
+                .await
+                .context("check if working directory is empty")?
+            {
+                anyhow::bail!("working directory is not empty");
+            } else {
+                // ok
+            }
+        }
+        Err(e) => return Err(anyhow::Error::new(e).context("create working directory")),
+    }
+
     let pgdata_dir = working_directory.join("pgdata");
     tokio::fs::create_dir(&pgdata_dir)
         .await
@@ -131,21 +164,25 @@ pub(crate) async fn main() -> anyhow::Result<()> {
     // Decrypt connection string
     //
     let source_connection_string = {
-        let mut output = kms_client
-            .decrypt()
-            .key_id(spec.source_connstring_kms_key_id)
-            .ciphertext_blob(aws_sdk_s3::primitives::Blob::new(
-                spec.source_connstring_kms_encrypted_base64,
-            ))
-            .send()
-            .await
-            .context("decrypt source connection string")?;
-        let plaintext = output
-            .plaintext
-            .take()
-            .context("get plaintext source connection string")?;
-        String::from_utf8(plaintext.into_inner())
-            .context("parse source connection string as utf8")?
+        match spec.encryption_secret {
+            EncryptionSecret::KMS { key_id } => {
+                let mut output = kms_client
+                    .decrypt()
+                    .key_id(key_id)
+                    .ciphertext_blob(aws_sdk_s3::primitives::Blob::new(
+                        spec.source_connstring_ciphertext_base64,
+                    ))
+                    .send()
+                    .await
+                    .context("decrypt source connection string")?;
+                let plaintext = output
+                    .plaintext
+                    .take()
+                    .context("get plaintext source connection string")?;
+                String::from_utf8(plaintext.into_inner())
+                    .context("parse source connection string as utf8")?
+            }
+        }
     };
 
     //
@@ -177,7 +214,7 @@ pub(crate) async fn main() -> anyhow::Result<()> {
 
     info!("dump into the working directory");
     {
-        let mut pg_dump = tokio::process::Command::new("pg_dump")
+        let mut pg_dump = tokio::process::Command::new(pg_bin_dir.join("pg_dump"))
             .args(&common_args)
             // source db (db name included in connection string)
             .arg("-d")
@@ -210,7 +247,7 @@ pub(crate) async fn main() -> anyhow::Result<()> {
 
     info!("restore from working directory into vanilla postgres");
     {
-        let mut pg_restore = tokio::process::Command::new("pg_restore")
+        let mut pg_restore = tokio::process::Command::new(pg_bin_dir.join("pg_restore"))
             .args(&common_args)
             .arg("-d")
             .arg(&restore_pg_connstring)
@@ -263,12 +300,13 @@ pub(crate) async fn main() -> anyhow::Result<()> {
     {
         let status_dir = working_directory.join("status");
         std::fs::create_dir(&status_dir).context("create status directory")?;
+        let status_file = status_dir.join("status");
         std::fs::write(
-            status_dir.join("status"),
+            &status_file,
             serde_json::json!({"done": true}).to_string(),
         )
         .context("write status file")?;
-        s5cmd::sync(&status_dir, &s3_prefix.append("/status/"))
+        s5cmd::sync(&status_file, &s3_prefix.append("/status/pgdata"))
             .await
             .context("sync status directory to destination")?;
     }

@@ -74,7 +74,7 @@ bytes = "1.0"
 camino = "1.1.6"
 cfg-if = "1.0.0"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-clap = { version = "4.0", features = ["derive"] }
+clap = { version = "4.0", features = ["derive", "env"] }
 comfy-table = "7.1"
 const_format = "0.2"
 crc32c = "0.6"
