@@ -20,8 +20,6 @@ use futures::future::join_all;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use nix::unistd::Pid;
-use pageserver::tenant::do_run_initdb;
-use pageserver::tenant::RunInitdbArgs;
 use postgres::error::SqlState;
 use postgres::{Client, NoTls};
 use tracing::{debug, error, info, instrument, warn};
@@ -697,8 +695,8 @@ impl ComputeNode {
                     .enable_all()
                     .build()
                     .unwrap();
-                rt.block_on(do_run_initdb(RunInitdbArgs {
-                    superuser: pageserver_api::config::defaults::DEFAULT_SUPERUSER, // cloud_admin
+                rt.block_on(postgres_initdb::do_run_initdb(postgres_initdb::RunInitdbArgs {
+                    superuser: "cloud_admin", // XXX: this shouldn't be hard-coded
                     initdb_bin: {
                         // get_pg_version is just as bad as this
                         let pgbin = Utf8Path::new(&self.pgbin);

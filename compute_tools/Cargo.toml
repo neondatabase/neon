@@ -40,8 +40,7 @@ tracing-utils.workspace = true
 thiserror.workspace = true
 url.workspace = true
 
-pageserver.workspace = true
-pageserver_api.workspace = true
+postgres_initdb.workspace = true
 compute_api.workspace = true
 utils.workspace = true
 workspace_hack.workspace = true

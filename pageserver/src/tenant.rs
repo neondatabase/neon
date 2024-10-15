@@ -33,7 +33,6 @@ use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
 use remote_storage::TimeoutOrCancel;
 use std::collections::BTreeMap;
-use std::fmt;
 use std::future::Future;
 use std::sync::Weak;
 use std::time::SystemTime;
@@ -701,32 +700,12 @@ pub enum CreateTimelineError {
 
 #[derive(thiserror::Error, Debug)]
 pub enum InitdbError {
-    Other(anyhow::Error),
+    #[error("Operation was cancelled")]
     Cancelled,
-    Spawn(std::io::Result<()>),
-    Failed(std::process::ExitStatus, Vec<u8>),
-}
-
-impl fmt::Display for InitdbError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            InitdbError::Cancelled => write!(f, "Operation was cancelled"),
-            InitdbError::Spawn(e) => write!(f, "Spawn error: {:?}", e),
-            InitdbError::Failed(status, stderr) => write!(
-                f,
-                "Command failed with status {:?}: {}",
-                status,
-                String::from_utf8_lossy(stderr)
-            ),
-            InitdbError::Other(e) => write!(f, "Error: {:?}", e),
-        }
-    }
-}
-
-impl From<std::io::Error> for InitdbError {
-    fn from(error: std::io::Error) -> Self {
-        InitdbError::Spawn(Err(error))
-    }
+    #[error(transparent)]
+    Other(anyhow::Error),
+    #[error(transparent)]
+    Inner(postgres_initdb::Error),
 }
 
 enum CreateTimelineCause {
@@ -4294,13 +4273,13 @@ async fn run_initdb(
 
     let _permit = INIT_DB_SEMAPHORE.acquire().await;
 
-    let res = do_run_initdb(RunInitdbArgs {
+    let res = postgres_initdb::do_run_initdb(postgres_initdb::RunInitdbArgs {
         superuser: &conf.superuser,
         initdb_bin: initdb_bin_path.as_ref(),
         library_search_path: Some(&initdb_lib_dir),
         pgdata: initdb_target_dir.as_ref(),
     })
-    .await;
+    .await.map_err(InitdbError::Inner);
 
     // This isn't true cancellation support, see above. Still return an error to
     // excercise the cancellation code path.
@@ -4309,57 +4288,6 @@ async fn run_initdb(
     }
 
     res
-}
-
-pub struct RunInitdbArgs<'a> {
-    pub superuser: &'a str,
-    pub initdb_bin: &'a str,
-    pub library_search_path: Option<&'a Utf8Path>,
-    pub pgdata: &'a str,
-}
-pub async fn do_run_initdb(args: RunInitdbArgs<'_>) -> Result<(), InitdbError> {
-    let RunInitdbArgs {
-        superuser,
-        initdb_bin: initdb_bin_path,
-        library_search_path,
-        pgdata,
-    } = args;
-    let mut initdb_command_builder = tokio::process::Command::new(initdb_bin_path);
-    initdb_command_builder
-        .args(["--pgdata", pgdata.as_ref()])
-        .args(["--username", superuser])
-        .args(["--encoding", "utf8"])
-        .arg("--no-instructions")
-        .arg("--no-sync")
-        .env_clear();
-    if let Some(initdb_lib_dir) = library_search_path {
-        initdb_command_builder
-            .env("LD_LIBRARY_PATH", initdb_lib_dir)
-            .env("DYLD_LIBRARY_PATH", initdb_lib_dir);
-    }
-    initdb_command_builder
-        .stdin(std::process::Stdio::null())
-        // stdout invocation produces the same output every time, we don't need it
-        .stdout(std::process::Stdio::null())
-        // we would be interested in the stderr output, if there was any
-        .stderr(std::process::Stdio::piped());
-
-    let initdb_command = initdb_command_builder.spawn()?;
-
-    // Ideally we'd select here with the cancellation token, but the problem is that
-    // we can't safely terminate initdb: it launches processes of its own, and killing
-    // initdb doesn't kill them. After we return from this function, we want the target
-    // directory to be able to be cleaned up.
-    // See https://github.com/neondatabase/neon/issues/6385
-    let initdb_output = initdb_command.wait_with_output().await?;
-    if !initdb_output.status.success() {
-        return Err(InitdbError::Failed(
-            initdb_output.status,
-            initdb_output.stderr,
-        ));
-    }
-
-    Ok(())
 }
 
 /// Dump contents of a layer file to stdout.

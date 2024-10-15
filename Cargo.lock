@@ -1233,9 +1233,8 @@ dependencies = [
  "num_cpus",
  "opentelemetry",
  "opentelemetry_sdk",
- "pageserver",
- "pageserver_api",
  "postgres",
+ "postgres_initdb",
  "regex",
  "remote_storage",
  "reqwest 0.12.4",
@@ -3626,6 +3625,7 @@ dependencies = [
  "postgres_backend",
  "postgres_connection",
  "postgres_ffi",
+ "postgres_initdb",
  "pq_proto",
  "procfs",
  "rand 0.8.5",
@@ -4096,6 +4096,16 @@ dependencies = [
  "serde",
  "thiserror",
  "utils",
+]
+
+[[package]]
+name = "postgres_initdb"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "camino",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]

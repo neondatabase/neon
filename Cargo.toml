@@ -33,6 +33,7 @@ members = [
     "libs/postgres_ffi/wal_craft",
     "libs/vm_monitor",
     "libs/walproposer",
+    "libs/postgres_initdb",
 ]
 
 [workspace.package]
@@ -227,6 +228,7 @@ pageserver_compaction = { version = "0.1", path = "./pageserver/compaction/" }
 postgres_backend = { version = "0.1", path = "./libs/postgres_backend/" }
 postgres_connection = { version = "0.1", path = "./libs/postgres_connection/" }
 postgres_ffi = { version = "0.1", path = "./libs/postgres_ffi/" }
+postgres_initdb = { path = "./libs/postgres_initdb" }
 pq_proto = { version = "0.1", path = "./libs/pq_proto/" }
 remote_storage = { version = "0.1", path = "./libs/remote_storage/" }
 safekeeper_api = { version = "0.1", path = "./libs/safekeeper_api" }
