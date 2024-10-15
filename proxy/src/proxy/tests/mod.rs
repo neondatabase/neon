@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use http::StatusCode;
 use retry::{retry_after, ShouldRetryWakeCompute};
 use rstest::rstest;
+use rustls::crypto::aws_lc_rs;
 use rustls::pki_types;
 use tokio_postgres::config::SslMode;
 use tokio_postgres::tls::{MakeTlsConnect, NoTls};
@@ -94,10 +95,13 @@ fn generate_tls_config<'a>(
     let (ca, cert, key) = generate_certs(hostname, common_name)?;
 
     let tls_config = {
-        let config = rustls::ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(vec![cert.clone()], key.clone_key())?
-            .into();
+        let config =
+            rustls::ServerConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
+                .with_safe_default_protocol_versions()
+                .context("aws_lc_rs should support the default protocol versions")?
+                .with_no_client_auth()
+                .with_single_cert(vec![cert.clone()], key.clone_key())?
+                .into();
 
         let mut cert_resolver = CertResolver::new();
         cert_resolver.add_cert(key, vec![cert], true)?;
