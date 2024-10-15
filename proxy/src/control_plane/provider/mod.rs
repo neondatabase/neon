@@ -44,7 +44,7 @@ pub(crate) mod errors {
     pub(crate) enum ApiError {
         /// Error returned by the console itself.
         #[error("{REQUEST_FAILED} with {0}")]
-        ControlPlane(ControlPlaneError),
+        ControlPlane(Box<ControlPlaneError>),
 
         /// Various IO errors like broken pipe or malformed payload.
         #[error("{REQUEST_FAILED}: {0}")]
@@ -90,7 +90,7 @@ pub(crate) mod errors {
                     Reason::ConcurrencyLimitReached => ErrorKind::ControlPlane,
                     Reason::LockAlreadyTaken => ErrorKind::ControlPlane,
                     Reason::RunningOperations => ErrorKind::ControlPlane,
-                    Reason::Unknown => match &e {
+                    Reason::Unknown => match &**e {
                         ControlPlaneError {
                             http_status_code:
                                 http::StatusCode::NOT_FOUND | http::StatusCode::NOT_ACCEPTABLE,

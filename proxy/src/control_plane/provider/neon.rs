@@ -355,7 +355,7 @@ impl super::Api for Api {
                     let (cached, info) = cached.take_value();
                     let info = info.map_err(|c| {
                         info!(key = &*key, "found cached wake_compute error");
-                        WakeComputeError::ApiError(ApiError::ControlPlane(*c))
+                        WakeComputeError::ApiError(ApiError::ControlPlane(Box::new(*c)))
                     })?;
 
                     debug!(key = &*key, "found cached compute node info");
@@ -425,7 +425,7 @@ impl super::Api for Api {
 
                     self.caches.node_info.insert_ttl(
                         key,
-                        Err(Box::new(err.clone())),
+                        Err(err.clone()),
                         Duration::from_secs(30),
                     );
 
@@ -464,7 +464,7 @@ async fn parse_body<T: for<'a> serde::Deserialize<'a>>(
     body.http_status_code = status;
 
     warn!("console responded with an error ({status}): {body:?}");
-    Err(ApiError::ControlPlane(body))
+    Err(ApiError::ControlPlane(Box::new(body)))
 }
 
 fn parse_host_port(input: &str) -> Option<(&str, u16)> {

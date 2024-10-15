@@ -301,7 +301,7 @@ impl JwkCacheEntryLock {
             jose_jwk::Key::Rsa(key) => {
                 verify_rsa_signature(header_payload.as_bytes(), &sig, key, &header.algorithm)?;
             }
-            key => return Err(JwtError::UnsupportedKeyType(key.clone())), // TODO: just type, not full key
+            key => return Err(JwtError::UnsupportedKeyType(Box::new(key.clone()))), // TODO: just type, not full key
         };
 
         let payloadb = base64::decode_config(payload, base64::URL_SAFE_NO_PAD)?;
@@ -594,7 +594,7 @@ pub(crate) enum JwtError {
     UnsupportedEcKeyType(jose_jwk::EcCurves),
 
     #[error("unsupported key type {0:?}")]
-    UnsupportedKeyType(jose_jwk::Key),
+    UnsupportedKeyType(Box<jose_jwk::Key>),
 
     #[error("signature algorithm not supported")]
     SignatureAlgorithmNotSupported,
