@@ -1565,6 +1565,7 @@ impl Timeline {
     }
 
     /// Checks if the internal state of the timeline is consistent with it being able to be offloaded.
+    ///
     /// This is neccessary but not sufficient for offloading of the timeline as it might have
     /// child timelines that are not offloaded yet.
     pub(crate) fn can_offload(&self) -> bool {

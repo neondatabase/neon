@@ -2187,7 +2187,7 @@ impl Tenant {
                             .iter()
                             .any(|(_id, tl)| tl.get_ancestor_timeline_id() == Some(*timeline_id))
                     };
-                    let can_offload = can_offload && has_no_unoffloaded_children;
+                    let can_offload = can_offload && has_no_unoffloaded_children && self.conf.timeline_offloading;
                     if (is_active, can_offload) == (false, false) {
                         None
                     } else {
