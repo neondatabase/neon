@@ -1386,8 +1386,6 @@ class NeonEnv:
 
         self.neon_cli.timeline_create_pgdata_import(new_branch_name, tenant_id, req)
 
-        return req.new_timeline_id
-
 
 @pytest.fixture(scope="function")
 def neon_simple_env(

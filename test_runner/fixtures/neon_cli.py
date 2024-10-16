@@ -321,7 +321,7 @@ class NeonLocalCli(AbstractNeonCli):
             "--tenant-id",
             str(tenant_id),
             "--request-json",
-            req.to_json(),
+            json.dumps(req),
         ]
 
         res = self.raw_cli(cmd)

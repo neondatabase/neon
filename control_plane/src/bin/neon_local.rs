@@ -298,7 +298,7 @@ struct TimelineCreateRawCmdArgs {
     branch_name: String,
 
     #[clap(long)]
-    request_json: serde_json::Value,
+    request_json: String,
 }
 
 #[derive(clap::Args)]
@@ -1177,7 +1177,7 @@ async fn handle_timeline(cmd: &TimelineCmd, env: &mut local_env::LocalEnv) -> Re
             let new_branch_name = branch_name;
 
             let storage_controller = StorageController::from_env(env);
-            let req: TimelineCreateRequest = serde_json::from_value(request_json.clone())?;
+            let req: TimelineCreateRequest = serde_json::from_str(request_json)?;
 
             let timeline_info = storage_controller
                 .tenant_timeline_create(tenant_id, req)

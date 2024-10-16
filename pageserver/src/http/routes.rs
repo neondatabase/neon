@@ -549,35 +549,36 @@ async fn timeline_create_handler(
             ancestor_timeline_id,
             ancestor_start_lsn,
         }),
-        TimelineCreateRequestMode::ImportPgdata(TimelineCreateRequestModeImportPgdata {
-            location,
-            idempotency_key,
-        }) => {
-            tenant::CreateTimelineParams::ImportPgdata(tenant::CreateTimelineParamsImportPgdata {
-                idempotency_key:
-                    tenant::timeline::import_pgdata::flow::index_part_format::IdempotencyKey::new(
-                        idempotency_key.0,
-                    ),
-                new_timeline_id,
-                location: {
-                    use pageserver_api::models::ImportPgdataLocation;
-                    use tenant::timeline::import_pgdata::flow::index_part_format::Location;
-                    match location {
-                        #[cfg(feature = "testing")]
-                        ImportPgdataLocation::LocalFs { path } => Location::LocalFs { path },
-                        ImportPgdataLocation::AwsS3 {
-                            region,
-                            bucket,
-                            key,
-                        } => Location::AwsS3 {
-                            region,
-                            bucket,
-                            key,
-                        },
-                    }
+        TimelineCreateRequestMode::ImportPgdata {
+            import_pgdata:
+                TimelineCreateRequestModeImportPgdata {
+                    location,
+                    idempotency_key,
                 },
-            })
-        }
+        } => tenant::CreateTimelineParams::ImportPgdata(tenant::CreateTimelineParamsImportPgdata {
+            idempotency_key:
+                tenant::timeline::import_pgdata::flow::index_part_format::IdempotencyKey::new(
+                    idempotency_key.0,
+                ),
+            new_timeline_id,
+            location: {
+                use pageserver_api::models::ImportPgdataLocation;
+                use tenant::timeline::import_pgdata::flow::index_part_format::Location;
+                match location {
+                    #[cfg(feature = "testing")]
+                    ImportPgdataLocation::LocalFs { path } => Location::LocalFs { path },
+                    ImportPgdataLocation::AwsS3 {
+                        region,
+                        bucket,
+                        key,
+                    } => Location::AwsS3 {
+                        region,
+                        bucket,
+                        key,
+                    },
+                }
+            },
+        }),
     };
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Error);

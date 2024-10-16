@@ -94,9 +94,15 @@ def test_pgdata_import_smoke(
     vanilla_pg.stop()
 
     #
-    # Simulate the step that is done by fast_import
+    # We have a Postgres data directory now.
+    # Make a localfs remote storage that looks like `fast_import` created it.
     # TODO: actually exercise fast_import here
+    # TODO: test s3 remote storage
     #
+
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
+    env = neon_env_builder.init_start()
+
     importbucket = neon_env_builder.repo_dir / "importbucket"
     importbucket.mkdir()
     vanilla_pg.pgdatadir.rename(importbucket / "pgdata")
@@ -105,11 +111,8 @@ def test_pgdata_import_smoke(
     (statusdir / "pgdata").write_text(json.dumps({"done": True}))
 
     #
-    # We have a Postgres data directory to import now
+    # Do the import
     #
-
-    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
-    env = neon_env_builder.init_start()
 
     tenant_id = TenantId.generate()
     env.storage_controller.tenant_create(
@@ -121,23 +124,17 @@ def test_pgdata_import_smoke(
     start = time.monotonic()
 
     idempotency = ImportPgdataIdemptencyKey.random()
-    log.info("idempotency key {idempotency}")
+    log.info(f"idempotency key {idempotency}")
     while True:
         env.create_timeline_raw(
             "imported",
-            TimelineCreateRequest(
-                new_timeline_id=timeline_id,
-                mode=TimelineCreateRequestMode(
-                    ImportPgdata=TimelineCreateRequestModeImportPgdata(
-                        idempotency_key=idempotency,
-                        location=ImportPgdataLocation(
-                            LocalFs=LocalFs(
-                                path=str(importbucket.absolute()),
-                            )
-                        ),
-                    )
-                ),
-            ),
+            {
+                "new_timeline_id": str(timeline_id),
+                "import_pgdata": {
+                    "idempotency_key": str(idempotency),
+                    "location": {"LocalFs": {"path": str(importbucket.absolute())}},
+                },
+            }
         )
         locations = env.storage_controller.locate(tenant_id)
         active_count = 0
@@ -152,11 +149,14 @@ def test_pgdata_import_smoke(
             except PageserverApiException as e:
                 if e.status_code == 404:
                     log.info("not found, import is in progress")
+                elif e.status_code == 429:
+                    log.info("import is in progress")
                 else:
                     raise
         if active_count == len(locations):
             log.info("all shards are active")
             break
+        time.sleep(1)
 
     import_duration = time.monotonic() - start
     log.info(f"import complete; duration={import_duration:.2f}s")

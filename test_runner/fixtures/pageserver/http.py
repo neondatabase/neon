@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 import time
 from collections import defaultdict
@@ -11,11 +12,13 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from fixtures.common_types import Lsn, TenantId, TenantShardId, TimelineArchivalState, TimelineId
+from fixtures.common_types import Id, Lsn, TenantId, TenantShardId, TimelineArchivalState, TimelineId
 from fixtures.log_helper import log
 from fixtures.metrics import Metrics, MetricsGetter, parse_metrics
 from fixtures.pg_version import PgVersion
 from fixtures.utils import Fn
+import random
+import string
 
 if TYPE_CHECKING:
     from typing import Optional, Union
@@ -34,8 +37,7 @@ class ImportPgdataIdemptencyKey:
 
     @staticmethod
     def random() -> ImportPgdataIdemptencyKey:
-        import random
-        import string
+
 
         return ImportPgdataIdemptencyKey(
             "".join(random.choices(string.ascii_letters + string.digits, k=20))
@@ -79,15 +81,19 @@ class TimelineCreateRequest:
     mode: TimelineCreateRequestMode
 
     def to_json(self) -> str:
-        return json.dumps(self, default=lambda o: o.__dict__, indent=4)
+        class EnhancedJSONEncoder(json.JSONEncoder):
+            def default(self, o):
+                if dataclasses.is_dataclass(o):
+                    return dataclasses.asdict(o)
+                elif isinstance(o, Id):
+                    return o.id.hex()
+                return super().default(o)
 
-    @staticmethod
-    def from_json(data: str) -> TimelineCreateRequest:
-        json_dict = json.loads(data)
-        mode_data = json_dict.pop("mode")
-        mode = TimelineCreateRequestMode(**mode_data)
-        return TimelineCreateRequest(mode=mode, **json_dict)
-
+        # mode is flattened
+        this = dataclasses.asdict(self)
+        mode = this.pop("mode")
+        this.update(mode)
+        return json.dumps(self, cls=EnhancedJSONEncoder)
 
 class TimelineCreate406(PageserverApiException):
     def __init__(self, res: requests.Response):

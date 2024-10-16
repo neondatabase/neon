@@ -2194,6 +2194,7 @@ impl Tenant {
         Ok(timeline)
     }
 
+    #[instrument(skip_all, fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), timeline_id=%timeline.timeline_id))]
     async fn create_timeline_import_pgdata_task(
         self: Arc<Tenant>,
         timeline: Arc<Timeline>,
@@ -2201,6 +2202,8 @@ impl Tenant {
         activate: ActivateTimelineArgs,
         timeline_create_guard: TimelineCreateGuard,
     ) -> Result<(), anyhow::Error> {
+        debug_assert_current_span_has_tenant_and_timeline_id();
+
         let ctx = RequestContext::new(TaskKind::ImportPgdata, DownloadBehavior::Warn);
 
         import_pgdata::doit(&timeline, index_part, &ctx, self.cancel.clone())
