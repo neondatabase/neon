@@ -20,7 +20,6 @@ use enumset::EnumSet;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use pageserver_api::models;
-use pageserver_api::models::AuxFilePolicy;
 use pageserver_api::models::LsnLease;
 use pageserver_api::models::TimelineArchivalState;
 use pageserver_api::models::TimelineState;
@@ -800,7 +799,6 @@ impl Tenant {
         index_part: Option<IndexPart>,
         metadata: TimelineMetadata,
         ancestor: Option<Arc<Timeline>>,
-        last_aux_file_policy: Option<AuxFilePolicy>,
         _ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         let tenant_id = self.tenant_shard_id;
@@ -811,10 +809,6 @@ impl Tenant {
             ancestor.clone(),
             resources,
             CreateTimelineCause::Load,
-            // This could be derived from ancestor branch + index part. Though the only caller of `timeline_init_and_sync` is `load_remote_timeline`,
-            // there will potentially be other caller of this function in the future, and we don't know whether `index_part` or `ancestor` takes precedence.
-            // Therefore, we pass this field explicitly for now, and remove it once we fully migrate to aux file v2.
-            last_aux_file_policy,
         )?;
         let disk_consistent_lsn = timeline.get_disk_consistent_lsn();
         anyhow::ensure!(
@@ -829,10 +823,6 @@ impl Tenant {
 
         if let Some(index_part) = index_part.as_ref() {
             timeline.remote_client.init_upload_queue(index_part)?;
-
-            timeline
-                .last_aux_file_policy
-                .store(index_part.last_aux_file_policy());
         } else {
             // No data on the remote storage, but we have local metadata file. We can end up
             // here with timeline_create being interrupted before finishing index part upload.
@@ -1403,15 +1393,12 @@ impl Tenant {
             None
         };
 
-        let last_aux_file_policy = index_part.last_aux_file_policy();
-
         self.timeline_init_and_sync(
             timeline_id,
             resources,
             Some(index_part),
             remote_metadata,
             ancestor,
-            last_aux_file_policy,
             ctx,
         )
         .await
@@ -1823,7 +1810,6 @@ impl Tenant {
             &new_metadata,
             create_guard,
             initdb_lsn,
-            None,
             None,
         )
         .await
@@ -3031,7 +3017,6 @@ impl Tenant {
         ancestor: Option<Arc<Timeline>>,
         resources: TimelineResources,
         cause: CreateTimelineCause,
-        last_aux_file_policy: Option<AuxFilePolicy>,
     ) -> anyhow::Result<Arc<Timeline>> {
         let state = match cause {
             CreateTimelineCause::Load => {
@@ -3060,7 +3045,6 @@ impl Tenant {
             resources,
             pg_version,
             state,
-            last_aux_file_policy,
             self.attach_wal_lag_cooldown.clone(),
             self.cancel.child_token(),
         );
@@ -3719,7 +3703,6 @@ impl Tenant {
                 timeline_create_guard,
                 start_lsn + 1,
                 Some(Arc::clone(src_timeline)),
-                src_timeline.last_aux_file_policy.load(),
             )
             .await?;
 
@@ -3913,7 +3896,6 @@ impl Tenant {
                 timeline_create_guard,
                 pgdata_lsn,
                 None,
-                None,
             )
             .await?;
 
@@ -3985,7 +3967,6 @@ impl Tenant {
         create_guard: TimelineCreateGuard<'a>,
         start_lsn: Lsn,
         ancestor: Option<Arc<Timeline>>,
-        last_aux_file_policy: Option<AuxFilePolicy>,
     ) -> anyhow::Result<UninitializedTimeline<'a>> {
         let tenant_shard_id = self.tenant_shard_id;
 
@@ -4001,7 +3982,6 @@ impl Tenant {
                 ancestor,
                 resources,
                 CreateTimelineCause::Load,
-                last_aux_file_policy,
             )
             .context("Failed to create timeline data structure")?;
 
@@ -4599,7 +4579,6 @@ mod tests {
 
     use super::*;
     use crate::keyspace::KeySpaceAccum;
-    use crate::pgdatadir_mapping::AuxFilesDirectory;
     use crate::repository::{Key, Value};
     use crate::tenant::harness::*;
     use crate::tenant::timeline::CompactFlags;
@@ -4608,7 +4587,7 @@ mod tests {
     use bytes::{Bytes, BytesMut};
     use hex_literal::hex;
     use itertools::Itertools;
-    use pageserver_api::key::{AUX_FILES_KEY, AUX_KEY_PREFIX, NON_INHERITED_RANGE};
+    use pageserver_api::key::{AUX_KEY_PREFIX, NON_INHERITED_RANGE};
     use pageserver_api::keyspace::KeySpace;
     use pageserver_api::models::{CompactionAlgorithm, CompactionAlgorithmSettings};
     use rand::{thread_rng, Rng};
@@ -4617,7 +4596,6 @@ mod tests {
     use tests::timeline::{GetVectoredError, ShutdownMode};
     use timeline::compaction::{KeyHistoryRetention, KeyLogAtLsn};
     use timeline::{DeltaLayerTestDesc, GcInfo};
-    use utils::bin_ser::BeSer;
     use utils::id::TenantId;
 
     static TEST_KEY: Lazy<Key> =
@@ -6421,16 +6399,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_branch_copies_dirty_aux_file_flag() {
-        let harness = TenantHarness::create("test_branch_copies_dirty_aux_file_flag")
-            .await
-            .unwrap();
+    async fn test_aux_file_e2e() {
+        let harness = TenantHarness::create("test_aux_file_e2e").await.unwrap();
 
-        // the default aux file policy to switch is v2 if not set by the admins
-        assert_eq!(
-            harness.tenant_conf.switch_aux_file_policy,
-            AuxFilePolicy::default_tenant_config()
-        );
         let (tenant, ctx) = harness.load().await;
 
         let mut lsn = Lsn(0x08);
@@ -6439,9 +6410,6 @@ mod tests {
             .create_test_timeline(TIMELINE_ID, lsn, DEFAULT_PG_VERSION, &ctx)
             .await
             .unwrap();
-
-        // no aux file is written at this point, so the persistent flag should be unset
-        assert_eq!(tline.last_aux_file_policy.load(), None);
 
         {
             lsn += 8;
@@ -6452,30 +6420,6 @@ mod tests {
                 .unwrap();
             modification.commit(&ctx).await.unwrap();
         }
-
-        // there is no tenant manager to pass the configuration through, so lets mimic it
-        tenant.set_new_location_config(
-            AttachedTenantConf::try_from(LocationConf::attached_single(
-                TenantConfOpt {
-                    switch_aux_file_policy: Some(AuxFilePolicy::V2),
-                    ..Default::default()
-                },
-                tenant.generation,
-                &pageserver_api::models::ShardParameters::default(),
-            ))
-            .unwrap(),
-        );
-
-        assert_eq!(
-            tline.get_switch_aux_file_policy(),
-            AuxFilePolicy::V2,
-            "wanted state has been updated"
-        );
-        assert_eq!(
-            tline.last_aux_file_policy.load(),
-            Some(AuxFilePolicy::V2),
-            "aux file is written with switch_aux_file_policy unset (which is v2), so we should use v2 there"
-        );
 
         // we can read everything from the storage
         let files = tline.list_aux_files(lsn, &ctx).await.unwrap();
@@ -6494,12 +6438,6 @@ mod tests {
             modification.commit(&ctx).await.unwrap();
         }
 
-        assert_eq!(
-            tline.last_aux_file_policy.load(),
-            Some(AuxFilePolicy::V2),
-            "keep v2 storage format when new files are written"
-        );
-
         let files = tline.list_aux_files(lsn, &ctx).await.unwrap();
         assert_eq!(
             files.get("pg_logical/mappings/test2"),
@@ -6511,321 +6449,9 @@ mod tests {
             .await
             .unwrap();
 
-        // child copies the last flag even if that is not on remote storage yet
-        assert_eq!(child.get_switch_aux_file_policy(), AuxFilePolicy::V2);
-        assert_eq!(child.last_aux_file_policy.load(), Some(AuxFilePolicy::V2));
-
         let files = child.list_aux_files(lsn, &ctx).await.unwrap();
         assert_eq!(files.get("pg_logical/mappings/test1"), None);
         assert_eq!(files.get("pg_logical/mappings/test2"), None);
-
-        // even if we crash here without flushing parent timeline with it's new
-        // last_aux_file_policy we are safe, because child was never meant to access ancestor's
-        // files. the ancestor can even switch back to V1 because of a migration safely.
-    }
-
-    #[tokio::test]
-    async fn aux_file_policy_switch() {
-        let mut harness = TenantHarness::create("aux_file_policy_switch")
-            .await
-            .unwrap();
-        harness.tenant_conf.switch_aux_file_policy = AuxFilePolicy::CrossValidation; // set to cross-validation mode
-        let (tenant, ctx) = harness.load().await;
-
-        let mut lsn = Lsn(0x08);
-
-        let tline: Arc<Timeline> = tenant
-            .create_test_timeline(TIMELINE_ID, lsn, DEFAULT_PG_VERSION, &ctx)
-            .await
-            .unwrap();
-
-        assert_eq!(
-            tline.last_aux_file_policy.load(),
-            None,
-            "no aux file is written so it should be unset"
-        );
-
-        {
-            lsn += 8;
-            let mut modification = tline.begin_modification(lsn);
-            modification
-                .put_file("pg_logical/mappings/test1", b"first", &ctx)
-                .await
-                .unwrap();
-            modification.commit(&ctx).await.unwrap();
-        }
-
-        // there is no tenant manager to pass the configuration through, so lets mimic it
-        tenant.set_new_location_config(
-            AttachedTenantConf::try_from(LocationConf::attached_single(
-                TenantConfOpt {
-                    switch_aux_file_policy: Some(AuxFilePolicy::V2),
-                    ..Default::default()
-                },
-                tenant.generation,
-                &pageserver_api::models::ShardParameters::default(),
-            ))
-            .unwrap(),
-        );
-
-        assert_eq!(
-            tline.get_switch_aux_file_policy(),
-            AuxFilePolicy::V2,
-            "wanted state has been updated"
-        );
-        assert_eq!(
-            tline.last_aux_file_policy.load(),
-            Some(AuxFilePolicy::CrossValidation),
-            "dirty index_part.json reflected state is yet to be updated"
-        );
-
-        // we can still read the auxfile v1 before we ingest anything new
-        let files = tline.list_aux_files(lsn, &ctx).await.unwrap();
-        assert_eq!(
-            files.get("pg_logical/mappings/test1"),
-            Some(&bytes::Bytes::from_static(b"first"))
-        );
-
-        {
-            lsn += 8;
-            let mut modification = tline.begin_modification(lsn);
-            modification
-                .put_file("pg_logical/mappings/test2", b"second", &ctx)
-                .await
-                .unwrap();
-            modification.commit(&ctx).await.unwrap();
-        }
-
-        assert_eq!(
-            tline.last_aux_file_policy.load(),
-            Some(AuxFilePolicy::V2),
-            "ingesting a file should apply the wanted switch state when applicable"
-        );
-
-        let files = tline.list_aux_files(lsn, &ctx).await.unwrap();
-        assert_eq!(
-            files.get("pg_logical/mappings/test1"),
-            Some(&bytes::Bytes::from_static(b"first")),
-            "cross validation writes to both v1 and v2 so this should be available in v2"
-        );
-        assert_eq!(
-            files.get("pg_logical/mappings/test2"),
-            Some(&bytes::Bytes::from_static(b"second"))
-        );
-
-        // mimic again by trying to flip it from V2 to V1 (not switched to while ingesting a file)
-        tenant.set_new_location_config(
-            AttachedTenantConf::try_from(LocationConf::attached_single(
-                TenantConfOpt {
-                    switch_aux_file_policy: Some(AuxFilePolicy::V1),
-                    ..Default::default()
-                },
-                tenant.generation,
-                &pageserver_api::models::ShardParameters::default(),
-            ))
-            .unwrap(),
-        );
-
-        {
-            lsn += 8;
-            let mut modification = tline.begin_modification(lsn);
-            modification
-                .put_file("pg_logical/mappings/test2", b"third", &ctx)
-                .await
-                .unwrap();
-            modification.commit(&ctx).await.unwrap();
-        }
-
-        assert_eq!(
-            tline.get_switch_aux_file_policy(),
-            AuxFilePolicy::V1,
-            "wanted state has been updated again, even if invalid request"
-        );
-
-        assert_eq!(
-            tline.last_aux_file_policy.load(),
-            Some(AuxFilePolicy::V2),
-            "ingesting a file should apply the wanted switch state when applicable"
-        );
-
-        let files = tline.list_aux_files(lsn, &ctx).await.unwrap();
-        assert_eq!(
-            files.get("pg_logical/mappings/test1"),
-            Some(&bytes::Bytes::from_static(b"first"))
-        );
-        assert_eq!(
-            files.get("pg_logical/mappings/test2"),
-            Some(&bytes::Bytes::from_static(b"third"))
-        );
-
-        // mimic again by trying to flip it from from V1 to V2 (not switched to while ingesting a file)
-        tenant.set_new_location_config(
-            AttachedTenantConf::try_from(LocationConf::attached_single(
-                TenantConfOpt {
-                    switch_aux_file_policy: Some(AuxFilePolicy::V2),
-                    ..Default::default()
-                },
-                tenant.generation,
-                &pageserver_api::models::ShardParameters::default(),
-            ))
-            .unwrap(),
-        );
-
-        {
-            lsn += 8;
-            let mut modification = tline.begin_modification(lsn);
-            modification
-                .put_file("pg_logical/mappings/test3", b"last", &ctx)
-                .await
-                .unwrap();
-            modification.commit(&ctx).await.unwrap();
-        }
-
-        assert_eq!(tline.get_switch_aux_file_policy(), AuxFilePolicy::V2);
-
-        assert_eq!(tline.last_aux_file_policy.load(), Some(AuxFilePolicy::V2));
-
-        let files = tline.list_aux_files(lsn, &ctx).await.unwrap();
-        assert_eq!(
-            files.get("pg_logical/mappings/test1"),
-            Some(&bytes::Bytes::from_static(b"first"))
-        );
-        assert_eq!(
-            files.get("pg_logical/mappings/test2"),
-            Some(&bytes::Bytes::from_static(b"third"))
-        );
-        assert_eq!(
-            files.get("pg_logical/mappings/test3"),
-            Some(&bytes::Bytes::from_static(b"last"))
-        );
-    }
-
-    #[tokio::test]
-    async fn aux_file_policy_force_switch() {
-        let mut harness = TenantHarness::create("aux_file_policy_force_switch")
-            .await
-            .unwrap();
-        harness.tenant_conf.switch_aux_file_policy = AuxFilePolicy::V1;
-        let (tenant, ctx) = harness.load().await;
-
-        let mut lsn = Lsn(0x08);
-
-        let tline: Arc<Timeline> = tenant
-            .create_test_timeline(TIMELINE_ID, lsn, DEFAULT_PG_VERSION, &ctx)
-            .await
-            .unwrap();
-
-        assert_eq!(
-            tline.last_aux_file_policy.load(),
-            None,
-            "no aux file is written so it should be unset"
-        );
-
-        {
-            lsn += 8;
-            let mut modification = tline.begin_modification(lsn);
-            modification
-                .put_file("pg_logical/mappings/test1", b"first", &ctx)
-                .await
-                .unwrap();
-            modification.commit(&ctx).await.unwrap();
-        }
-
-        tline.do_switch_aux_policy(AuxFilePolicy::V2).unwrap();
-
-        assert_eq!(
-            tline.last_aux_file_policy.load(),
-            Some(AuxFilePolicy::V2),
-            "dirty index_part.json reflected state is yet to be updated"
-        );
-
-        // lose all data from v1
-        let files = tline.list_aux_files(lsn, &ctx).await.unwrap();
-        assert_eq!(files.get("pg_logical/mappings/test1"), None);
-
-        {
-            lsn += 8;
-            let mut modification = tline.begin_modification(lsn);
-            modification
-                .put_file("pg_logical/mappings/test2", b"second", &ctx)
-                .await
-                .unwrap();
-            modification.commit(&ctx).await.unwrap();
-        }
-
-        // read data ingested in v2
-        let files = tline.list_aux_files(lsn, &ctx).await.unwrap();
-        assert_eq!(
-            files.get("pg_logical/mappings/test2"),
-            Some(&bytes::Bytes::from_static(b"second"))
-        );
-        // lose all data from v1
-        assert_eq!(files.get("pg_logical/mappings/test1"), None);
-    }
-
-    #[tokio::test]
-    async fn aux_file_policy_auto_detect() {
-        let mut harness = TenantHarness::create("aux_file_policy_auto_detect")
-            .await
-            .unwrap();
-        harness.tenant_conf.switch_aux_file_policy = AuxFilePolicy::V2; // set to cross-validation mode
-        let (tenant, ctx) = harness.load().await;
-
-        let mut lsn = Lsn(0x08);
-
-        let tline: Arc<Timeline> = tenant
-            .create_test_timeline(TIMELINE_ID, lsn, DEFAULT_PG_VERSION, &ctx)
-            .await
-            .unwrap();
-
-        assert_eq!(
-            tline.last_aux_file_policy.load(),
-            None,
-            "no aux file is written so it should be unset"
-        );
-
-        {
-            lsn += 8;
-            let mut modification = tline.begin_modification(lsn);
-            let buf = AuxFilesDirectory::ser(&AuxFilesDirectory {
-                files: vec![(
-                    "test_file".to_string(),
-                    Bytes::copy_from_slice(b"test_file"),
-                )]
-                .into_iter()
-                .collect(),
-            })
-            .unwrap();
-            modification.put_for_test(AUX_FILES_KEY, Value::Image(Bytes::from(buf)));
-            modification.commit(&ctx).await.unwrap();
-        }
-
-        {
-            lsn += 8;
-            let mut modification = tline.begin_modification(lsn);
-            modification
-                .put_file("pg_logical/mappings/test1", b"first", &ctx)
-                .await
-                .unwrap();
-            modification.commit(&ctx).await.unwrap();
-        }
-
-        assert_eq!(
-            tline.last_aux_file_policy.load(),
-            Some(AuxFilePolicy::V1),
-            "keep using v1 because there are aux files writting with v1"
-        );
-
-        // we can still read the auxfile v1
-        let files = tline.list_aux_files(lsn, &ctx).await.unwrap();
-        assert_eq!(
-            files.get("pg_logical/mappings/test1"),
-            Some(&bytes::Bytes::from_static(b"first"))
-        );
-        assert_eq!(
-            files.get("test_file"),
-            Some(&bytes::Bytes::from_static(b"test_file"))
-        );
     }
 
     #[tokio::test]

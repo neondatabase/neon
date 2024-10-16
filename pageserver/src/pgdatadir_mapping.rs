@@ -22,7 +22,6 @@ use pageserver_api::key::{
     CompactKey, AUX_FILES_KEY, CHECKPOINT_KEY, CONTROLFILE_KEY, DBDIR_KEY, TWOPHASEDIR_KEY,
 };
 use pageserver_api::keyspace::SparseKeySpace;
-use pageserver_api::models::AuxFilePolicy;
 use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
 use postgres_ffi::relfile_utils::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
 use postgres_ffi::BLCKSZ;
@@ -33,7 +32,7 @@ use std::ops::ControlFlow;
 use std::ops::Range;
 use strum::IntoEnumIterator;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, trace, warn};
 use utils::bin_ser::DeserializeError;
 use utils::pausable_failpoint;
 use utils::{bin_ser::BeSer, lsn::Lsn};
@@ -677,21 +676,6 @@ impl Timeline {
         self.get(CHECKPOINT_KEY, lsn, ctx).await
     }
 
-    async fn list_aux_files_v1(
-        &self,
-        lsn: Lsn,
-        ctx: &RequestContext,
-    ) -> Result<HashMap<String, Bytes>, PageReconstructError> {
-        match self.get(AUX_FILES_KEY, lsn, ctx).await {
-            Ok(buf) => Ok(AuxFilesDirectory::des(&buf)?.files),
-            Err(e) => {
-                // This is expected: historical databases do not have the key.
-                debug!("Failed to get info about AUX files: {}", e);
-                Ok(HashMap::new())
-            }
-        }
-    }
-
     async fn list_aux_files_v2(
         &self,
         lsn: Lsn,
@@ -722,10 +706,7 @@ impl Timeline {
         lsn: Lsn,
         ctx: &RequestContext,
     ) -> Result<(), PageReconstructError> {
-        let current_policy = self.last_aux_file_policy.load();
-        if let Some(AuxFilePolicy::V2) | Some(AuxFilePolicy::CrossValidation) = current_policy {
-            self.list_aux_files_v2(lsn, ctx).await?;
-        }
+        self.list_aux_files_v2(lsn, ctx).await?;
         Ok(())
     }
 
@@ -734,51 +715,7 @@ impl Timeline {
         lsn: Lsn,
         ctx: &RequestContext,
     ) -> Result<HashMap<String, Bytes>, PageReconstructError> {
-        let current_policy = self.last_aux_file_policy.load();
-        match current_policy {
-            Some(AuxFilePolicy::V1) => {
-                let res = self.list_aux_files_v1(lsn, ctx).await?;
-                let empty_str = if res.is_empty() { ", empty" } else { "" };
-                warn!(
-                    "this timeline is using deprecated aux file policy V1 (policy=v1{empty_str})"
-                );
-                Ok(res)
-            }
-            None => {
-                let res = self.list_aux_files_v1(lsn, ctx).await?;
-                if !res.is_empty() {
-                    warn!("this timeline is using deprecated aux file policy V1 (policy=None)");
-                }
-                Ok(res)
-            }
-            Some(AuxFilePolicy::V2) => self.list_aux_files_v2(lsn, ctx).await,
-            Some(AuxFilePolicy::CrossValidation) => {
-                let v1_result = self.list_aux_files_v1(lsn, ctx).await;
-                let v2_result = self.list_aux_files_v2(lsn, ctx).await;
-                match (v1_result, v2_result) {
-                    (Ok(v1), Ok(v2)) => {
-                        if v1 != v2 {
-                            tracing::error!(
-                                "unmatched aux file v1 v2 result:\nv1 {v1:?}\nv2 {v2:?}"
-                            );
-                            return Err(PageReconstructError::Other(anyhow::anyhow!(
-                                "unmatched aux file v1 v2 result"
-                            )));
-                        }
-                        Ok(v1)
-                    }
-                    (Ok(_), Err(v2)) => {
-                        tracing::error!("aux file v1 returns Ok while aux file v2 returns an err");
-                        Err(v2)
-                    }
-                    (Err(v1), Ok(_)) => {
-                        tracing::error!("aux file v2 returns Ok while aux file v1 returns an err");
-                        Err(v1)
-                    }
-                    (Err(_), Err(v2)) => Err(v2),
-                }
-            }
-        }
+        self.list_aux_files_v2(lsn, ctx).await
     }
 
     pub(crate) async fn get_replorigins(
@@ -954,9 +891,6 @@ impl Timeline {
 
         result.add_key(CONTROLFILE_KEY);
         result.add_key(CHECKPOINT_KEY);
-        if self.get(AUX_FILES_KEY, lsn, ctx).await.is_ok() {
-            result.add_key(AUX_FILES_KEY);
-        }
 
         // Add extra keyspaces in the test cases. Some test cases write keys into the storage without
         // creating directory keys. These test cases will add such keyspaces into `extra_test_dense_keyspace`
@@ -1166,9 +1100,6 @@ impl<'a> DatadirModification<'a> {
         self.pending_directory_entries.push((DirectoryKind::Db, 0));
         self.put(DBDIR_KEY, Value::Image(buf.into()));
 
-        // Create AuxFilesDirectory
-        self.init_aux_dir()?;
-
         let buf = if self.tline.pg_version >= 17 {
             TwoPhaseDirectoryV17::ser(&TwoPhaseDirectoryV17 {
                 xids: HashSet::new(),
@@ -1347,9 +1278,6 @@ impl<'a> DatadirModification<'a> {
             // 'true', now write the updated 'dbdirs' map back.
             let buf = DbDirectory::ser(&dbdir)?;
             self.put(DBDIR_KEY, Value::Image(buf.into()));
-
-            // Create AuxFilesDirectory as well
-            self.init_aux_dir()?;
         }
         if r.is_none() {
             // Create RelDirectory
@@ -1726,200 +1654,60 @@ impl<'a> DatadirModification<'a> {
         Ok(())
     }
 
-    pub fn init_aux_dir(&mut self) -> anyhow::Result<()> {
-        if let AuxFilePolicy::V2 = self.tline.get_switch_aux_file_policy() {
-            return Ok(());
-        }
-        let buf = AuxFilesDirectory::ser(&AuxFilesDirectory {
-            files: HashMap::new(),
-        })?;
-        self.pending_directory_entries
-            .push((DirectoryKind::AuxFiles, 0));
-        self.put(AUX_FILES_KEY, Value::Image(Bytes::from(buf)));
-        Ok(())
-    }
-
     pub async fn put_file(
         &mut self,
         path: &str,
         content: &[u8],
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        let switch_policy = self.tline.get_switch_aux_file_policy();
-
-        let policy = {
-            let current_policy = self.tline.last_aux_file_policy.load();
-            // Allowed switch path:
-            // * no aux files -> v1/v2/cross-validation
-            // * cross-validation->v2
-
-            let current_policy = if current_policy.is_none() {
-                // This path will only be hit once per tenant: we will decide the final policy in this code block.
-                // The next call to `put_file` will always have `last_aux_file_policy != None`.
-                let lsn = Lsn::max(self.tline.get_last_record_lsn(), self.lsn);
-                let aux_files_key_v1 = self.tline.list_aux_files_v1(lsn, ctx).await?;
-                if aux_files_key_v1.is_empty() {
-                    None
-                } else {
-                    warn!("this timeline is using deprecated aux file policy V1 (detected existing v1 files)");
-                    self.tline.do_switch_aux_policy(AuxFilePolicy::V1)?;
-                    Some(AuxFilePolicy::V1)
-                }
-            } else {
-                current_policy
-            };
-
-            if AuxFilePolicy::is_valid_migration_path(current_policy, switch_policy) {
-                self.tline.do_switch_aux_policy(switch_policy)?;
-                info!(current=?current_policy, next=?switch_policy, "switching aux file policy");
-                switch_policy
-            } else {
-                // This branch handles non-valid migration path, and the case that switch_policy == current_policy.
-                // And actually, because the migration path always allow unspecified -> *, this unwrap_or will never be hit.
-                current_policy.unwrap_or(AuxFilePolicy::default_tenant_config())
-            }
+        let key = aux_file::encode_aux_file_key(path);
+        // retrieve the key from the engine
+        let old_val = match self.get(key, ctx).await {
+            Ok(val) => Some(val),
+            Err(PageReconstructError::MissingKey(_)) => None,
+            Err(e) => return Err(e.into()),
         };
-
-        if let AuxFilePolicy::V2 | AuxFilePolicy::CrossValidation = policy {
-            let key = aux_file::encode_aux_file_key(path);
-            // retrieve the key from the engine
-            let old_val = match self.get(key, ctx).await {
-                Ok(val) => Some(val),
-                Err(PageReconstructError::MissingKey(_)) => None,
-                Err(e) => return Err(e.into()),
-            };
-            let files: Vec<(&str, &[u8])> = if let Some(ref old_val) = old_val {
-                aux_file::decode_file_value(old_val)?
+        let files: Vec<(&str, &[u8])> = if let Some(ref old_val) = old_val {
+            aux_file::decode_file_value(old_val)?
+        } else {
+            Vec::new()
+        };
+        let mut other_files = Vec::with_capacity(files.len());
+        let mut modifying_file = None;
+        for file @ (p, content) in files {
+            if path == p {
+                assert!(
+                    modifying_file.is_none(),
+                    "duplicated entries found for {}",
+                    path
+                );
+                modifying_file = Some(content);
             } else {
-                Vec::new()
-            };
-            let mut other_files = Vec::with_capacity(files.len());
-            let mut modifying_file = None;
-            for file @ (p, content) in files {
-                if path == p {
-                    assert!(
-                        modifying_file.is_none(),
-                        "duplicated entries found for {}",
-                        path
-                    );
-                    modifying_file = Some(content);
-                } else {
-                    other_files.push(file);
-                }
+                other_files.push(file);
             }
-            let mut new_files = other_files;
-            match (modifying_file, content.is_empty()) {
-                (Some(old_content), false) => {
-                    self.tline
-                        .aux_file_size_estimator
-                        .on_update(old_content.len(), content.len());
-                    new_files.push((path, content));
-                }
-                (Some(old_content), true) => {
-                    self.tline
-                        .aux_file_size_estimator
-                        .on_remove(old_content.len());
-                    // not adding the file key to the final `new_files` vec.
-                }
-                (None, false) => {
-                    self.tline.aux_file_size_estimator.on_add(content.len());
-                    new_files.push((path, content));
-                }
-                (None, true) => warn!("removing non-existing aux file: {}", path),
-            }
-            let new_val = aux_file::encode_file_value(&new_files)?;
-            self.put(key, Value::Image(new_val.into()));
         }
-
-        if let AuxFilePolicy::V1 | AuxFilePolicy::CrossValidation = policy {
-            let file_path = path.to_string();
-            let content = if content.is_empty() {
-                None
-            } else {
-                Some(Bytes::copy_from_slice(content))
-            };
-
-            let n_files;
-            let mut aux_files = self.tline.aux_files.lock().await;
-            if let Some(mut dir) = aux_files.dir.take() {
-                // We already updated aux files in `self`: emit a delta and update our latest value.
-                dir.upsert(file_path.clone(), content.clone());
-                n_files = dir.files.len();
-                if aux_files.n_deltas == MAX_AUX_FILE_DELTAS {
-                    self.put(
-                        AUX_FILES_KEY,
-                        Value::Image(Bytes::from(
-                            AuxFilesDirectory::ser(&dir).context("serialize")?,
-                        )),
-                    );
-                    aux_files.n_deltas = 0;
-                } else {
-                    self.put(
-                        AUX_FILES_KEY,
-                        Value::WalRecord(NeonWalRecord::AuxFile { file_path, content }),
-                    );
-                    aux_files.n_deltas += 1;
-                }
-                aux_files.dir = Some(dir);
-            } else {
-                // Check if the AUX_FILES_KEY is initialized
-                match self.get(AUX_FILES_KEY, ctx).await {
-                    Ok(dir_bytes) => {
-                        let mut dir = AuxFilesDirectory::des(&dir_bytes)?;
-                        // Key is already set, we may append a delta
-                        self.put(
-                            AUX_FILES_KEY,
-                            Value::WalRecord(NeonWalRecord::AuxFile {
-                                file_path: file_path.clone(),
-                                content: content.clone(),
-                            }),
-                        );
-                        dir.upsert(file_path, content);
-                        n_files = dir.files.len();
-                        aux_files.dir = Some(dir);
-                    }
-                    Err(
-                        e @ (PageReconstructError::Cancelled
-                        | PageReconstructError::AncestorLsnTimeout(_)),
-                    ) => {
-                        // Important that we do not interpret a shutdown error as "not found" and thereby
-                        // reset the map.
-                        return Err(e.into());
-                    }
-                    // Note: we added missing key error variant in https://github.com/neondatabase/neon/pull/7393 but
-                    // the original code assumes all other errors are missing keys. Therefore, we keep the code path
-                    // the same for now, though in theory, we should only match the `MissingKey` variant.
-                    Err(
-                        e @ (PageReconstructError::Other(_)
-                        | PageReconstructError::WalRedo(_)
-                        | PageReconstructError::MissingKey(_)),
-                    ) => {
-                        // Key is missing, we must insert an image as the basis for subsequent deltas.
-
-                        if !matches!(e, PageReconstructError::MissingKey(_)) {
-                            let e = utils::error::report_compact_sources(&e);
-                            tracing::warn!("treating error as if it was a missing key: {}", e);
-                        }
-
-                        let mut dir = AuxFilesDirectory {
-                            files: HashMap::new(),
-                        };
-                        dir.upsert(file_path, content);
-                        self.put(
-                            AUX_FILES_KEY,
-                            Value::Image(Bytes::from(
-                                AuxFilesDirectory::ser(&dir).context("serialize")?,
-                            )),
-                        );
-                        n_files = 1;
-                        aux_files.dir = Some(dir);
-                    }
-                }
+        let mut new_files = other_files;
+        match (modifying_file, content.is_empty()) {
+            (Some(old_content), false) => {
+                self.tline
+                    .aux_file_size_estimator
+                    .on_update(old_content.len(), content.len());
+                new_files.push((path, content));
             }
-
-            self.pending_directory_entries
-                .push((DirectoryKind::AuxFiles, n_files));
+            (Some(old_content), true) => {
+                self.tline
+                    .aux_file_size_estimator
+                    .on_remove(old_content.len());
+                // not adding the file key to the final `new_files` vec.
+            }
+            (None, false) => {
+                self.tline.aux_file_size_estimator.on_add(content.len());
+                new_files.push((path, content));
+            }
+            (None, true) => warn!("removing non-existing aux file: {}", path),
         }
+        let new_val = aux_file::encode_file_value(&new_files)?;
+        self.put(key, Value::Image(new_val.into()));
 
         Ok(())
     }
@@ -2089,12 +1877,6 @@ impl<'a> DatadirModification<'a> {
         self.tline.get(key, lsn, ctx).await
     }
 
-    /// Only used during unit tests, force putting a key into the modification.
-    #[cfg(test)]
-    pub(crate) fn put_for_test(&mut self, key: Key, val: Value) {
-        self.put(key, val);
-    }
-
     fn put(&mut self, key: Key, val: Value) {
         if Self::is_data_key(&key) {
             self.put_data(key.to_compact(), val)
@@ -2210,21 +1992,6 @@ struct RelDirectory {
     // TODO: Store it as a btree or radix tree or something else that spans multiple
     // key-value pairs, if you have a lot of relations
     rels: HashSet<(Oid, u8)>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Default, PartialEq)]
-pub(crate) struct AuxFilesDirectory {
-    pub(crate) files: HashMap<String, Bytes>,
-}
-
-impl AuxFilesDirectory {
-    pub(crate) fn upsert(&mut self, key: String, value: Option<Bytes>) {
-        if let Some(value) = value {
-            self.files.insert(key, value);
-        } else {
-            self.files.remove(&key);
-        }
-    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]

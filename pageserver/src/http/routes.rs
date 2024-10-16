@@ -18,7 +18,6 @@ use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
 use metrics::launch_timestamp::LaunchTimestamp;
 use pageserver_api::models::virtual_file::IoMode;
-use pageserver_api::models::AuxFilePolicy;
 use pageserver_api::models::DownloadRemoteLayersTaskSpawnRequest;
 use pageserver_api::models::IngestAuxFilesRequest;
 use pageserver_api::models::ListAuxFilesRequest;
@@ -474,8 +473,6 @@ async fn build_timeline_info_common(
         is_archived: Some(is_archived),
 
         walreceiver_status,
-
-        last_aux_file_policy: timeline.last_aux_file_policy.load(),
     };
     Ok(info)
 }
@@ -2399,31 +2396,6 @@ async fn post_tracing_event_handler(
     json_response(StatusCode::OK, ())
 }
 
-async fn force_aux_policy_switch_handler(
-    mut r: Request<Body>,
-    _cancel: CancellationToken,
-) -> Result<Response<Body>, ApiError> {
-    check_permission(&r, None)?;
-    let tenant_shard_id: TenantShardId = parse_request_param(&r, "tenant_shard_id")?;
-    let timeline_id: TimelineId = parse_request_param(&r, "timeline_id")?;
-    let policy: AuxFilePolicy = json_request(&mut r).await?;
-
-    let state = get_state(&r);
-
-    let tenant = state
-        .tenant_manager
-        .get_attached_tenant_shard(tenant_shard_id)?;
-    tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
-    let timeline =
-        active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
-            .await?;
-    timeline
-        .do_switch_aux_policy(policy)
-        .map_err(ApiError::InternalServerError)?;
-
-    json_response(StatusCode::OK, ())
-}
-
 async fn put_io_engine_handler(
     mut r: Request<Body>,
     _cancel: CancellationToken,
@@ -3136,10 +3108,6 @@ pub fn make_router(
         )
         .put("/v1/io_engine", |r| api_handler(r, put_io_engine_handler))
         .put("/v1/io_mode", |r| api_handler(r, put_io_mode_handler))
-        .put(
-            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/force_aux_policy_switch",
-            |r| api_handler(r, force_aux_policy_switch_handler),
-        )
         .get("/v1/utilization", |r| api_handler(r, get_utilization))
         .post(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/ingest_aux_files",
