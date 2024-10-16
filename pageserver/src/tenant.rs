@@ -1184,7 +1184,6 @@ impl Tenant {
         };
 
         let mut timelines_to_resume_deletions = vec![];
-        let mut timelines_to_resume_import_pgdata = vec![];
 
         let mut remote_index_and_client = HashMap::new();
         let mut timeline_ancestors = HashMap::new();
@@ -1219,8 +1218,7 @@ impl Tenant {
                 }
             };
             match index_part {
-                MaybeDeletedIndexPart::IndexPart(index_part)
-                | MaybeDeletedIndexPart::Importing(index_part) => {
+                MaybeDeletedIndexPart::IndexPart(index_part) => {
                     timeline_ancestors.insert(timeline_id, index_part.metadata.clone());
                     remote_index_and_client.insert(timeline_id, (index_part, preload.client));
                 }
@@ -1595,12 +1593,6 @@ impl Tenant {
             MaybeDeletedIndexPart::Deleted(_index_part) => {
                 info!("timeline is deleted according to index_part.json");
                 return Err(TimelineArchivalError::NotFound);
-            }
-            MaybeDeletedIndexPart::Importing(_index_part) => {
-                info!("timeline is importing pgdata according to index_part.json");
-                return Err(TimelineArchivalError::Other(anyhow::anyhow!(
-                    "timeline is importing pgdata according to index_part.json"
-                )));
             }
         };
         let remote_metadata = index_part.metadata.clone();
@@ -2734,9 +2726,6 @@ impl Tenant {
             let index_part = match result {
                 MaybeDeletedIndexPart::Deleted(_) => {
                     anyhow::bail!("Timeline deletion happened concurrently with split")
-                }
-                MaybeDeletedIndexPart::Importing(_) => {
-                    anyhow::bail!("Timeline import happened concurrently with split")
                 }
                 MaybeDeletedIndexPart::IndexPart(p) => p,
             };

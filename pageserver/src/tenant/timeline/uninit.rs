@@ -132,7 +132,7 @@ impl<'t> UninitializedTimeline<'t> {
                 // likely concurrent delete call, cplane should prevent this
                 anyhow::bail!("index part says deleted but we are not done creating yet, this should not happen but")
             }
-            MaybeDeletedIndexPart::Importing(p) | MaybeDeletedIndexPart::IndexPart(p) => p,
+            MaybeDeletedIndexPart::IndexPart(p) => p,
         };
         let metadata = index_part.metadata.clone();
         let timeline = self

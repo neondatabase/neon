@@ -275,7 +275,6 @@ const DELETION_QUEUE_FLUSH_TIMEOUT: Duration = Duration::from_secs(10);
 pub enum MaybeDeletedIndexPart {
     IndexPart(IndexPart),
     Deleted(IndexPart),
-    Importing(IndexPart),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -522,8 +521,6 @@ impl RemoteTimelineClient {
 
         if index_part.deleted_at.is_some() {
             Ok(MaybeDeletedIndexPart::Deleted(index_part))
-        } else if index_part.import_pgdata.is_some() {
-            Ok(MaybeDeletedIndexPart::Importing(index_part))
         } else {
             Ok(MaybeDeletedIndexPart::IndexPart(index_part))
         }
@@ -2432,7 +2429,6 @@ mod tests {
             .unwrap()
         {
             MaybeDeletedIndexPart::IndexPart(index_part) => index_part,
-            MaybeDeletedIndexPart::Importing(_) => panic!("unexpectedly got importing index part"),
             MaybeDeletedIndexPart::Deleted(_) => panic!("unexpectedly got deleted index part"),
         };
         let initial_layers = initial_index_part
@@ -2536,7 +2532,6 @@ mod tests {
             .unwrap()
         {
             MaybeDeletedIndexPart::IndexPart(index_part) => index_part,
-            MaybeDeletedIndexPart::Importing(_) => panic!("unexpectedly got importing index part"),
             MaybeDeletedIndexPart::Deleted(_) => panic!("unexpectedly got deleted index part"),
         };
 
@@ -2740,7 +2735,6 @@ mod tests {
             MaybeDeletedIndexPart::IndexPart(index_part) => {
                 assert_eq!(&index_part, expected);
             }
-            MaybeDeletedIndexPart::Importing(_) => panic!("unexpectedly got importing index part"),
             MaybeDeletedIndexPart::Deleted(_index_part) => panic!("Test doesn't set deleted_at"),
         }
     }
