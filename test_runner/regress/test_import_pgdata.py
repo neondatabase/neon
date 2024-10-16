@@ -135,7 +135,8 @@ def test_pgdata_import_smoke(
                 "idempotency_key": str(idempotency),
                 "location": {"LocalFs": {"path": str(importbucket.absolute())}},
             },
-        }
+        },
+        tenant_id=tenant_id,
     )
     while True:
         locations = env.storage_controller.locate(tenant_id)
@@ -145,8 +146,9 @@ def test_pgdata_import_smoke(
             ps = env.get_pageserver(location["node_id"])
             try:
                 detail = ps.http_client().timeline_detail(shard_id, timeline_id)
-                log.info(f"shard {shard_id} status: {detail['status']}")
-                if detail["status"] == "active":
+                state = detail["state"]
+                log.info(f"shard {shard_id} state: {state}")
+                if state == "Active":
                     active_count += 1
             except PageserverApiException as e:
                 if e.status_code == 404:

@@ -49,6 +49,14 @@ pub enum Location {
 }
 
 impl Root {
+    pub fn is_done(&self) -> bool {
+        match self {
+            Root::V1(v1) => match v1 {
+                V1::Done(_) => true,
+                V1::InProgress(_) => false,
+            },
+        }
+    }
     pub fn idempotency_key(&self) -> &IdempotencyKey {
         match self {
             Root::V1(v1) => match v1 {

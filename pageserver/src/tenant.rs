@@ -761,6 +761,15 @@ enum CreateTimelineCause {
     Delete,
 }
 
+enum LoadTimelineCause {
+    Attach,
+    Unoffload,
+    ImportPgdata {
+        create_guard: TimelineCreateGuard,
+        activate: ActivateTimelineArgs,
+    },
+}
+
 #[derive(thiserror::Error, Debug)]
 pub(crate) enum GcError {
     // The tenant is shutting down
@@ -844,7 +853,8 @@ impl Tenant {
         metadata: TimelineMetadata,
         ancestor: Option<Arc<Timeline>>,
         last_aux_file_policy: Option<AuxFilePolicy>,
-        _ctx: &RequestContext,
+        cause: LoadTimelineCause,
+        ctx: &RequestContext,
     ) -> anyhow::Result<TimelineInitAndSyncResult> {
         let tenant_id = self.tenant_shard_id;
 
@@ -906,7 +916,13 @@ impl Tenant {
             })?;
 
         match import_pgdata {
-            Some(import_pgdata) => {
+            Some(import_pgdata) if !import_pgdata.is_done() => {
+                match cause {
+                    LoadTimelineCause::Attach | LoadTimelineCause::Unoffload => (),
+                    LoadTimelineCause::ImportPgdata { .. } => {
+                        unreachable!("ImportPgdata should not be reloading timeline import is done and persisted as such in s3")
+                    }
+                }
                 let mut guard = self.timelines_creating.lock().unwrap();
                 if !guard.insert(timeline_id) {
                     // We should never try and load the same timeline twice during startup
@@ -930,7 +946,7 @@ impl Tenant {
                     },
                 ))
             }
-            None => {
+            Some(_) | None => {
                 {
                     let mut timelines_accessor = self.timelines.lock().unwrap();
                     match timelines_accessor.entry(timeline_id) {
@@ -961,6 +977,25 @@ impl Tenant {
                             .is_some(),
                     "Timeline has no ancestor and no layer files"
                 );
+
+                match cause {
+                    LoadTimelineCause::Attach | LoadTimelineCause::Unoffload => (),
+                    LoadTimelineCause::ImportPgdata {
+                        create_guard,
+                        activate,
+                    } => {
+                        // TODO: see the comment in the task code above how I'm not so certain
+                        // it is safe to activate here because of concurrent shutdowns.
+                        match activate {
+                            ActivateTimelineArgs::Yes { broker_client } => {
+                                info!("activating timeline after reload from pgdata import task");
+                                timeline.activate(self.clone(), broker_client, None, ctx);
+                            }
+                            ActivateTimelineArgs::No => (),
+                        }
+                        drop(create_guard);
+                    }
+                }
 
                 Ok(TimelineInitAndSyncResult::ReadyToActivate(timeline))
             }
@@ -1332,6 +1367,7 @@ impl Tenant {
                         timeline_get_throttle: self.timeline_get_throttle.clone(),
                         l0_flush_global_state: self.l0_flush_global_state.clone(),
                     },
+                    LoadTimelineCause::Attach,
                     ctx,
                 )
                 .await
@@ -1480,6 +1516,7 @@ impl Tenant {
         index_part: IndexPart,
         remote_metadata: TimelineMetadata,
         resources: TimelineResources,
+        cause: LoadTimelineCause,
         ctx: &RequestContext,
     ) -> anyhow::Result<TimelineInitAndSyncResult> {
         span::debug_assert_current_span_has_tenant_id();
@@ -1511,6 +1548,7 @@ impl Tenant {
             remote_metadata,
             ancestor,
             last_aux_file_policy,
+            cause,
             ctx,
         )
         .await
@@ -1691,6 +1729,7 @@ impl Tenant {
             index_part,
             remote_metadata,
             timeline_resources,
+            LoadTimelineCause::Unoffload,
             &ctx,
         )
         .await
@@ -2205,11 +2244,33 @@ impl Tenant {
         index_part: import_pgdata::flow::index_part_format::Root,
         activate: ActivateTimelineArgs,
         timeline_create_guard: TimelineCreateGuard,
-    ) -> Result<(), anyhow::Error> {
+    ) {
         debug_assert_current_span_has_tenant_and_timeline_id();
         info!("starting");
         scopeguard::defer! {info!("exiting")};
 
+        let res = self
+            .create_timeline_import_pgdata_task_impl(
+                timeline,
+                index_part,
+                activate,
+                timeline_create_guard,
+            )
+            .await;
+        if let Err(e) = &res {
+            error!(%e, "task failed");
+            // TODO sleep & retry, sensitive to tenant shutdown
+            // TODO: allow timeline deletion requests => should cancel the task
+        }
+    }
+
+    async fn create_timeline_import_pgdata_task_impl(
+        self: Arc<Tenant>,
+        timeline: Arc<Timeline>,
+        index_part: import_pgdata::flow::index_part_format::Root,
+        activate: ActivateTimelineArgs,
+        timeline_create_guard: TimelineCreateGuard,
+    ) -> Result<(), anyhow::Error> {
         let ctx = RequestContext::new(TaskKind::ImportPgdata, DownloadBehavior::Warn);
 
         info!("importing pgdata");
@@ -2254,24 +2315,12 @@ impl Tenant {
             MaybeDeletedIndexPart::IndexPart(p) => p,
         };
         let metadata = index_part.metadata.clone();
-        let timeline = self
-            .load_remote_timeline(timeline_id, index_part, metadata, resources, &ctx)
+        self
+            .load_remote_timeline(timeline_id, index_part, metadata, resources, LoadTimelineCause::ImportPgdata{
+                create_guard: timeline_create_guard, activate, }, &ctx)
             .await?
             .ready_to_activate()
             .context("implementation error: reloaded timeline still needs import after import reported success")?;
-
-        info!("timeline loaded");
-
-        match activate {
-            ActivateTimelineArgs::Yes { broker_client } => {
-                timeline.activate(self.clone(), broker_client, None, &ctx);
-            }
-            ActivateTimelineArgs::No => (),
-        }
-
-        // Finish the creation process & drop the tenant gate guard inside the timeline_create_guard.
-        // Holding the tenant gate guard ensures this task does not outlive the tenant.
-        drop(timeline_create_guard);
 
         anyhow::Ok(())
     }
