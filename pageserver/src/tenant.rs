@@ -632,7 +632,7 @@ pub enum TimelineArchivalError {
     AlreadyInProgress,
 
     #[error(transparent)]
-    Other(#[from] anyhow::Error),
+    Other(anyhow::Error),
 }
 
 impl Debug for TimelineArchivalError {
@@ -1602,7 +1602,8 @@ impl Tenant {
                 "failed to load remote timeline {} for tenant {}",
                 timeline_id, self.tenant_shard_id
             )
-        })?;
+        })
+        .map_err(TimelineArchivalError::Other)?;
         let timelines = self.timelines.lock().unwrap();
         if let Some(timeline) = timelines.get(&timeline_id) {
             let mut offloaded_timelines = self.timelines_offloaded.lock().unwrap();
@@ -1681,7 +1682,7 @@ impl Tenant {
                 if timeline.cancel.is_cancelled() {
                     return Err(TimelineArchivalError::Cancelled);
                 } else {
-                    return Err(e.into());
+                    return Err(TimelineArchivalError::Other(e));
                 }
             }
         };
