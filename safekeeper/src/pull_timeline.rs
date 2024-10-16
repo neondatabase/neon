@@ -55,13 +55,14 @@ pub async fn stream_snapshot(
                 .await
                 .ok();
         }
-        Ok(None) => {
-            unimplemented!();
-        }
-        Ok(Some(resident_tli)) => {
-            if let Err(e) =
-                stream_snapshot_resident_guts(resident_tli, source, destination, tx.clone()).await
-            {
+        Ok(maybe_resident_tli) => {
+            if let Err(e) = match maybe_resident_tli {
+                Some(resident_tli) => {
+                    stream_snapshot_resident_guts(resident_tli, source, destination, tx.clone())
+                        .await
+                }
+                None => stream_snapshot_offloaded_guts(tli, source, destination, tx.clone()).await,
+            } {
                 // Error type/contents don't matter as they won't can't reach the client
                 // (hyper likely doesn't do anything with it), but http stream will be
                 // prematurely terminated. It would be nice to try to send the error in
@@ -93,6 +94,44 @@ impl Drop for SnapshotContext {
             shared_state.wal_removal_on_hold = false;
         });
     }
+}
+
+/// Implementation of snapshot for an offloaded timeline, only reads control file
+///
+/// TODO: do we need an anti-residence guard to protect us from concurrent writes, or
+/// can we just ~atomically read the checkpoint?
+pub(crate) async fn stream_snapshot_offloaded_guts(
+    tli: Arc<Timeline>,
+    source: NodeId,
+    destination: NodeId,
+    tx: mpsc::Sender<Result<Bytes>>,
+) -> Result<()> {
+    // tokio-tar wants Write implementor, but we have mpsc tx <Result<Bytes>>;
+    // use SinkWriter as a Write impl. That is,
+    // - create Sink from the tx. It returns PollSendError if chan is closed.
+    let sink = PollSender::new(tx);
+    // - SinkWriter needs sink error to be io one, map it.
+    let sink_io_err = sink.sink_map_err(|_| io::Error::from(ErrorKind::BrokenPipe));
+    // - SinkWriter wants sink type to be just Bytes, not Result<Bytes>, so map
+    //   it with with(). Note that with() accepts async function which we don't
+    //   need and allows the map to fail, which we don't need either, but hence
+    //   two Oks.
+    let oksink = sink_io_err.with(|b: Bytes| async { io::Result::Ok(Result::Ok(b)) });
+    // - SinkWriter (not surprisingly) wants sink of &[u8], not bytes, so wrap
+    // into CopyToBytes. This is a data copy.
+    let copy_to_bytes = CopyToBytes::new(oksink);
+    let mut writer = SinkWriter::new(copy_to_bytes);
+    let pinned_writer = std::pin::pin!(writer);
+
+    // Note that tokio_tar append_* funcs use tokio::io::copy with 8KB buffer
+    // which is also likely suboptimal.
+    let mut ar = Builder::new_non_terminated(pinned_writer);
+
+    tli.snapshot_offloaded(&mut ar, source, destination).await?;
+
+    ar.finish().await?;
+
+    Ok(())
 }
 
 /// Implementation of snapshot for a timeline which is resident (includes some segment data)
@@ -152,6 +191,54 @@ pub async fn stream_snapshot_resident_guts(
     ar.finish().await?;
 
     Ok(())
+}
+
+impl Timeline {
+    /// Simple snapshot for an offloaded timeline: we will only upload a renamed partial segment and
+    /// pass a modified control file into the provided tar stream (nothing with data segments on disk, since
+    /// we are offloaded and there aren't any)
+    async fn snapshot_offloaded<W: AsyncWrite + Unpin + Send>(
+        self: &Arc<Timeline>,
+        ar: &mut tokio_tar::Builder<W>,
+        source: NodeId,
+        destination: NodeId,
+    ) -> Result<()> {
+        let shared_state = self.write_shared_state().await;
+
+        let mut control_store = TimelinePersistentState::clone(shared_state.sk.state());
+        // Modify the partial segment of the in-memory copy for the control file to
+        // point to the destination safekeeper.
+        let replace = control_store
+            .partial_backup
+            .replace_uploaded_segment(source, destination)?;
+
+        if let Some(replace) = replace {
+            // The deserialized control file has an uploaded partial. We upload a copy
+            // of it to object storage for the destination safekeeper and send an updated
+            // control file in the snapshot.
+            tracing::info!(
+                "Replacing uploaded partial segment in in-mem control file: {replace:?}"
+            );
+
+            let remote_timeline_path = &self.remote_path;
+            wal_backup::copy_partial_segment(
+                &replace.previous.remote_path(remote_timeline_path),
+                &replace.current.remote_path(remote_timeline_path),
+            )
+            .await?;
+        }
+
+        let buf = control_store
+            .write_to_buf()
+            .with_context(|| "failed to serialize control store")?;
+        let mut header = Header::new_gnu();
+        header.set_size(buf.len().try_into().expect("never breaches u64"));
+        ar.append_data(&mut header, CONTROL_FILE_NAME, buf.as_slice())
+            .await
+            .with_context(|| "failed to append to archive")?;
+
+        Ok(())
+    }
 }
 
 impl WalResidentTimeline {
