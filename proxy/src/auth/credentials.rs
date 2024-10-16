@@ -1,19 +1,21 @@
 //! User credentials used in authentication.
 
-use crate::{
-    auth::password_hack::parse_endpoint_param,
-    context::RequestMonitoring,
-    error::{ReportableError, UserFacingError},
-    metrics::{Metrics, SniKind},
-    proxy::NeonOptions,
-    serverless::SERVERLESS_DRIVER_SNI,
-    EndpointId, RoleName,
-};
+use std::collections::HashSet;
+use std::net::IpAddr;
+use std::str::FromStr;
+
 use itertools::Itertools;
 use pq_proto::StartupMessageParams;
-use std::{collections::HashSet, net::IpAddr, str::FromStr};
 use thiserror::Error;
 use tracing::{info, warn};
+
+use crate::auth::password_hack::parse_endpoint_param;
+use crate::context::RequestMonitoring;
+use crate::error::{ReportableError, UserFacingError};
+use crate::metrics::{Metrics, SniKind};
+use crate::proxy::NeonOptions;
+use crate::serverless::SERVERLESS_DRIVER_SNI;
+use crate::{EndpointId, RoleName};
 
 #[derive(Debug, Error, PartialEq, Eq, Clone)]
 pub(crate) enum ComputeUserInfoParseError {
@@ -249,9 +251,10 @@ fn project_name_valid(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use serde_json::json;
     use ComputeUserInfoParseError::*;
+
+    use super::*;
 
     #[test]
     fn parse_bare_minimum() -> anyhow::Result<()> {

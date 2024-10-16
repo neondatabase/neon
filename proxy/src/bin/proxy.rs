@@ -1,3 +1,8 @@
+use std::net::SocketAddr;
+use std::pin::pin;
+use std::sync::Arc;
+
+use anyhow::bail;
 use aws_config::environment::EnvironmentVariableCredentialsProvider;
 use aws_config::imds::credentials::ImdsCredentialsProvider;
 use aws_config::meta::credentials::CredentialsProviderChain;
@@ -7,51 +12,34 @@ use aws_config::provider_config::ProviderConfig;
 use aws_config::web_identity_token::WebIdentityTokenCredentialsProvider;
 use aws_config::Region;
 use futures::future::Either;
-use proxy::auth;
 use proxy::auth::backend::jwt::JwkCache;
-use proxy::auth::backend::AuthRateLimiter;
-use proxy::auth::backend::MaybeOwned;
-use proxy::cancellation::CancelMap;
-use proxy::cancellation::CancellationHandler;
-use proxy::config::remote_storage_from_toml;
-use proxy::config::AuthenticationConfig;
-use proxy::config::CacheOptions;
-use proxy::config::HttpConfig;
-use proxy::config::ProjectInfoCacheOptions;
-use proxy::config::ProxyProtocolV2;
+use proxy::auth::backend::{AuthRateLimiter, ConsoleRedirectBackend, MaybeOwned};
+use proxy::cancellation::{CancelMap, CancellationHandler};
+use proxy::config::{
+    self, remote_storage_from_toml, AuthenticationConfig, CacheOptions, HttpConfig,
+    ProjectInfoCacheOptions, ProxyConfig, ProxyProtocolV2,
+};
 use proxy::context::parquet::ParquetUploadArgs;
-use proxy::control_plane;
-use proxy::http;
 use proxy::http::health_server::AppMetrics;
 use proxy::metrics::Metrics;
-use proxy::rate_limiter::EndpointRateLimiter;
-use proxy::rate_limiter::LeakyBucketConfig;
-use proxy::rate_limiter::RateBucketInfo;
-use proxy::rate_limiter::WakeComputeRateLimiter;
+use proxy::rate_limiter::{
+    EndpointRateLimiter, LeakyBucketConfig, RateBucketInfo, WakeComputeRateLimiter,
+};
 use proxy::redis::cancellation_publisher::RedisPublisherClient;
 use proxy::redis::connection_with_credentials_provider::ConnectionWithCredentialsProvider;
-use proxy::redis::elasticache;
-use proxy::redis::notifications;
+use proxy::redis::{elasticache, notifications};
 use proxy::scram::threadpool::ThreadPool;
 use proxy::serverless::cancel_set::CancelSet;
 use proxy::serverless::GlobalConnPoolOptions;
-use proxy::usage_metrics;
-
-use anyhow::bail;
-use proxy::config::{self, ProxyConfig};
-use proxy::serverless;
+use proxy::{auth, control_plane, http, serverless, usage_metrics};
 use remote_storage::RemoteStorageConfig;
-use std::net::SocketAddr;
-use std::pin::pin;
-use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use tracing::info;
-use tracing::warn;
-use tracing::Instrument;
-use utils::{project_build_tag, project_git_version, sentry_init::init_sentry};
+use tracing::{info, warn, Instrument};
+use utils::sentry_init::init_sentry;
+use utils::{project_build_tag, project_git_version};
 
 project_git_version!(GIT_VERSION);
 project_build_tag!(BUILD_TAG);
@@ -311,8 +299,12 @@ async fn main() -> anyhow::Result<()> {
 
     let args = ProxyCliArgs::parse();
     let config = build_config(&args)?;
+    let auth_backend = build_auth_backend(&args)?;
 
-    info!("Authentication backend: {}", config.auth_backend);
+    match auth_backend {
+        Either::Left(auth_backend) => info!("Authentication backend: {auth_backend}"),
+        Either::Right(auth_backend) => info!("Authentication backend: {auth_backend:?}"),
+    };
     info!("Using region: {}", args.aws_region);
 
     let region_provider =
@@ -459,24 +451,41 @@ async fn main() -> anyhow::Result<()> {
     // client facing tasks. these will exit on error or on cancellation
     // cancellation returns Ok(())
     let mut client_tasks = JoinSet::new();
-    if let Some(proxy_listener) = proxy_listener {
-        client_tasks.spawn(proxy::proxy::task_main(
-            config,
-            proxy_listener,
-            cancellation_token.clone(),
-            cancellation_handler.clone(),
-            endpoint_rate_limiter.clone(),
-        ));
-    }
+    match auth_backend {
+        Either::Left(auth_backend) => {
+            if let Some(proxy_listener) = proxy_listener {
+                client_tasks.spawn(proxy::proxy::task_main(
+                    config,
+                    auth_backend,
+                    proxy_listener,
+                    cancellation_token.clone(),
+                    cancellation_handler.clone(),
+                    endpoint_rate_limiter.clone(),
+                ));
+            }
 
-    if let Some(serverless_listener) = serverless_listener {
-        client_tasks.spawn(serverless::task_main(
-            config,
-            serverless_listener,
-            cancellation_token.clone(),
-            cancellation_handler.clone(),
-            endpoint_rate_limiter.clone(),
-        ));
+            if let Some(serverless_listener) = serverless_listener {
+                client_tasks.spawn(serverless::task_main(
+                    config,
+                    auth_backend,
+                    serverless_listener,
+                    cancellation_token.clone(),
+                    cancellation_handler.clone(),
+                    endpoint_rate_limiter.clone(),
+                ));
+            }
+        }
+        Either::Right(auth_backend) => {
+            if let Some(proxy_listener) = proxy_listener {
+                client_tasks.spawn(proxy::console_redirect_proxy::task_main(
+                    config,
+                    auth_backend,
+                    proxy_listener,
+                    cancellation_token.clone(),
+                    cancellation_handler.clone(),
+                ));
+            }
+        }
     }
 
     client_tasks.spawn(proxy::context::parquet::worker(
@@ -506,7 +515,7 @@ async fn main() -> anyhow::Result<()> {
         ));
     }
 
-    if let auth::Backend::ControlPlane(api, _) = &config.auth_backend {
+    if let Either::Left(auth::Backend::ControlPlane(api, _)) = &auth_backend {
         if let proxy::control_plane::provider::ControlPlaneBackend::Management(api) = &**api {
             match (redis_notifications_client, regional_redis_client.clone()) {
                 (None, None) => {}
@@ -610,73 +619,6 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         bail!("dynamic rate limiter should be disabled");
     }
 
-    let auth_backend = match &args.auth_backend {
-        AuthBackendType::Console => {
-            let wake_compute_cache_config: CacheOptions = args.wake_compute_cache.parse()?;
-            let project_info_cache_config: ProjectInfoCacheOptions =
-                args.project_info_cache.parse()?;
-            let endpoint_cache_config: config::EndpointCacheConfig =
-                args.endpoint_cache_config.parse()?;
-
-            info!("Using NodeInfoCache (wake_compute) with options={wake_compute_cache_config:?}");
-            info!(
-                "Using AllowedIpsCache (wake_compute) with options={project_info_cache_config:?}"
-            );
-            info!("Using EndpointCacheConfig with options={endpoint_cache_config:?}");
-            let caches = Box::leak(Box::new(control_plane::caches::ApiCaches::new(
-                wake_compute_cache_config,
-                project_info_cache_config,
-                endpoint_cache_config,
-            )));
-
-            let config::ConcurrencyLockOptions {
-                shards,
-                limiter,
-                epoch,
-                timeout,
-            } = args.wake_compute_lock.parse()?;
-            info!(?limiter, shards, ?epoch, "Using NodeLocks (wake_compute)");
-            let locks = Box::leak(Box::new(control_plane::locks::ApiLocks::new(
-                "wake_compute_lock",
-                limiter,
-                shards,
-                timeout,
-                epoch,
-                &Metrics::get().wake_compute_lock,
-            )?));
-            tokio::spawn(locks.garbage_collect_worker());
-
-            let url = args.auth_endpoint.parse()?;
-            let endpoint = http::Endpoint::new(url, http::new_client());
-
-            let mut wake_compute_rps_limit = args.wake_compute_limit.clone();
-            RateBucketInfo::validate(&mut wake_compute_rps_limit)?;
-            let wake_compute_endpoint_rate_limiter =
-                Arc::new(WakeComputeRateLimiter::new(wake_compute_rps_limit));
-            let api = control_plane::provider::neon::Api::new(
-                endpoint,
-                caches,
-                locks,
-                wake_compute_endpoint_rate_limiter,
-            );
-            let api = control_plane::provider::ControlPlaneBackend::Management(api);
-            auth::Backend::ControlPlane(MaybeOwned::Owned(api), ())
-        }
-
-        AuthBackendType::Web => {
-            let url = args.uri.parse()?;
-            auth::Backend::ConsoleRedirect(MaybeOwned::Owned(url), ())
-        }
-
-        #[cfg(feature = "testing")]
-        AuthBackendType::Postgres => {
-            let url = args.auth_endpoint.parse()?;
-            let api = control_plane::provider::mock::Api::new(url, !args.is_private_access_proxy);
-            let api = control_plane::provider::ControlPlaneBackend::PostgresMock(api);
-            auth::Backend::ControlPlane(MaybeOwned::Owned(api), ())
-        }
-    };
-
     let config::ConcurrencyLockOptions {
         shards,
         limiter,
@@ -726,9 +668,8 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         webauth_confirmation_timeout: args.webauth_confirmation_timeout,
     };
 
-    let config = Box::leak(Box::new(ProxyConfig {
+    let config = ProxyConfig {
         tls_config,
-        auth_backend,
         metric_collection,
         allow_self_signed_compute: args.allow_self_signed_compute,
         http_config,
@@ -741,11 +682,98 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         connect_to_compute_retry_config: config::RetryConfig::parse(
             &args.connect_to_compute_retry,
         )?,
-    }));
+    };
+
+    let config = Box::leak(Box::new(config));
 
     tokio::spawn(config.connect_compute_locks.garbage_collect_worker());
 
     Ok(config)
+}
+
+/// auth::Backend is created at proxy startup, and lives forever.
+fn build_auth_backend(
+    args: &ProxyCliArgs,
+) -> anyhow::Result<Either<&'static auth::Backend<'static, ()>, &'static ConsoleRedirectBackend>> {
+    match &args.auth_backend {
+        AuthBackendType::Console => {
+            let wake_compute_cache_config: CacheOptions = args.wake_compute_cache.parse()?;
+            let project_info_cache_config: ProjectInfoCacheOptions =
+                args.project_info_cache.parse()?;
+            let endpoint_cache_config: config::EndpointCacheConfig =
+                args.endpoint_cache_config.parse()?;
+
+            info!("Using NodeInfoCache (wake_compute) with options={wake_compute_cache_config:?}");
+            info!(
+                "Using AllowedIpsCache (wake_compute) with options={project_info_cache_config:?}"
+            );
+            info!("Using EndpointCacheConfig with options={endpoint_cache_config:?}");
+            let caches = Box::leak(Box::new(control_plane::caches::ApiCaches::new(
+                wake_compute_cache_config,
+                project_info_cache_config,
+                endpoint_cache_config,
+            )));
+
+            let config::ConcurrencyLockOptions {
+                shards,
+                limiter,
+                epoch,
+                timeout,
+            } = args.wake_compute_lock.parse()?;
+            info!(?limiter, shards, ?epoch, "Using NodeLocks (wake_compute)");
+            let locks = Box::leak(Box::new(control_plane::locks::ApiLocks::new(
+                "wake_compute_lock",
+                limiter,
+                shards,
+                timeout,
+                epoch,
+                &Metrics::get().wake_compute_lock,
+            )?));
+            tokio::spawn(locks.garbage_collect_worker());
+
+            let url = args.auth_endpoint.parse()?;
+            let endpoint = http::Endpoint::new(url, http::new_client());
+
+            let mut wake_compute_rps_limit = args.wake_compute_limit.clone();
+            RateBucketInfo::validate(&mut wake_compute_rps_limit)?;
+            let wake_compute_endpoint_rate_limiter =
+                Arc::new(WakeComputeRateLimiter::new(wake_compute_rps_limit));
+            let api = control_plane::provider::neon::Api::new(
+                endpoint,
+                caches,
+                locks,
+                wake_compute_endpoint_rate_limiter,
+            );
+            let api = control_plane::provider::ControlPlaneBackend::Management(api);
+            let auth_backend = auth::Backend::ControlPlane(MaybeOwned::Owned(api), ());
+
+            let config = Box::leak(Box::new(auth_backend));
+
+            Ok(Either::Left(config))
+        }
+
+        #[cfg(feature = "testing")]
+        AuthBackendType::Postgres => {
+            let url = args.auth_endpoint.parse()?;
+            let api = control_plane::provider::mock::Api::new(url, !args.is_private_access_proxy);
+            let api = control_plane::provider::ControlPlaneBackend::PostgresMock(api);
+
+            let auth_backend = auth::Backend::ControlPlane(MaybeOwned::Owned(api), ());
+
+            let config = Box::leak(Box::new(auth_backend));
+
+            Ok(Either::Left(config))
+        }
+
+        AuthBackendType::Web => {
+            let url = args.uri.parse()?;
+            let backend = ConsoleRedirectBackend::new(url);
+
+            let config = Box::leak(Box::new(backend));
+
+            Ok(Either::Right(config))
+        }
+    }
 }
 
 #[cfg(test)]

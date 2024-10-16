@@ -16,7 +16,6 @@ import toml
 from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.pageserver.common_types import IndexPartDump
-from fixtures.pageserver.http import TimelineCreateRequest
 from fixtures.pg_version import PgVersion
 from fixtures.utils import AuxFileStore
 
@@ -311,7 +310,7 @@ class NeonLocalCli(AbstractNeonCli):
         self,
         new_branch_name: str,
         tenant_id: TenantId,
-        req: TimelineCreateRequest,
+        req: dict[str, Any],
     ):
         cmd = [
             "timeline",

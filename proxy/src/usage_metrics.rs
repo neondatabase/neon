@@ -1,35 +1,32 @@
 //! Periodically collect proxy consumption metrics
 //! and push them to a HTTP endpoint.
-use crate::{
-    config::{MetricBackupCollectionConfig, MetricCollectionConfig},
-    context::parquet::{FAILED_UPLOAD_MAX_RETRIES, FAILED_UPLOAD_WARN_THRESHOLD},
-    http,
-    intern::{BranchIdInt, EndpointIdInt},
-};
+use std::convert::Infallible;
+use std::pin::pin;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
 use anyhow::Context;
 use async_compression::tokio::write::GzipEncoder;
 use bytes::Bytes;
 use chrono::{DateTime, Datelike, Timelike, Utc};
 use consumption_metrics::{idempotency_key, Event, EventChunk, EventType, CHUNK_SIZE};
-use dashmap::{mapref::entry::Entry, DashMap};
+use dashmap::mapref::entry::Entry;
+use dashmap::DashMap;
 use futures::future::select;
 use once_cell::sync::Lazy;
 use remote_storage::{GenericRemoteStorage, RemotePath, TimeoutOrCancel};
 use serde::{Deserialize, Serialize};
-use std::{
-    convert::Infallible,
-    pin::pin,
-    sync::{
-        atomic::{AtomicU64, AtomicUsize, Ordering},
-        Arc,
-    },
-    time::Duration,
-};
 use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, instrument, trace, warn};
 use utils::backoff;
 use uuid::{NoContext, Timestamp};
+
+use crate::config::{MetricBackupCollectionConfig, MetricCollectionConfig};
+use crate::context::parquet::{FAILED_UPLOAD_MAX_RETRIES, FAILED_UPLOAD_WARN_THRESHOLD};
+use crate::http;
+use crate::intern::{BranchIdInt, EndpointIdInt};
 
 const PROXY_IO_BYTES_PER_CLIENT: &str = "proxy_io_bytes_per_client";
 
@@ -485,18 +482,22 @@ async fn upload_events_chunk(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::sync::{Arc, Mutex};
 
-    use crate::{http, BranchId, EndpointId};
     use anyhow::Error;
     use chrono::Utc;
     use consumption_metrics::{Event, EventChunk};
     use http_body_util::BodyExt;
-    use hyper::{body::Incoming, server::conn::http1, service::service_fn, Request, Response};
+    use hyper::body::Incoming;
+    use hyper::server::conn::http1;
+    use hyper::service::service_fn;
+    use hyper::{Request, Response};
     use hyper_util::rt::TokioIo;
-    use std::sync::{Arc, Mutex};
     use tokio::net::TcpListener;
     use url::Url;
+
+    use super::*;
+    use crate::{http, BranchId, EndpointId};
 
     #[tokio::test]
     async fn metrics() {

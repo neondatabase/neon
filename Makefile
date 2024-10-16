@@ -291,6 +291,7 @@ postgres-check: \
 # This doesn't remove the effects of 'configure'.
 .PHONY: clean
 clean: postgres-clean neon-pg-clean-ext
+	$(MAKE) -C compute clean
 	$(CARGO_CMD_PREFIX) cargo clean
 
 # This removes everything

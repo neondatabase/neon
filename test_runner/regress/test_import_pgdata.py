@@ -11,12 +11,7 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder, VanillaPostgres
 from fixtures.pageserver.http import (
     ImportPgdataIdemptencyKey,
-    ImportPgdataLocation,
-    LocalFs,
     PageserverApiException,
-    TimelineCreateRequest,
-    TimelineCreateRequestMode,
-    TimelineCreateRequestModeImportPgdata,
 )
 from fixtures.remote_storage import RemoteStorageKind
 

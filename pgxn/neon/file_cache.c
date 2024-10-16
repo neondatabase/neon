@@ -43,6 +43,7 @@
 #include "hll.h"
 #include "bitmap.h"
 #include "neon.h"
+#include "neon_perf_counters.h"
 
 #define CriticalAssert(cond) do if (!(cond)) elog(PANIC, "Assertion %s failed at %s:%d: ", #cond, __FILE__, __LINE__); while (0)
 
@@ -114,7 +115,9 @@ typedef struct FileCacheControl
 	uint32		limit;			/* shared copy of lfc_size_limit */
 	uint64		hits;
 	uint64		misses;
-	uint64		writes;
+	uint64		writes;			/* number of writes issued */
+	uint64		time_read;		/* time spent reading (us) */
+	uint64		time_write;		/* time spent writing (us) */
 	dlist_head	lru;			/* double linked list for LRU replacement
 								 * algorithm */
 	dlist_head  holes;          /* double linked list of punched holes */
@@ -270,6 +273,8 @@ lfc_shmem_startup(void)
 		lfc_ctl->hits = 0;
 		lfc_ctl->misses = 0;
 		lfc_ctl->writes = 0;
+		lfc_ctl->time_read = 0;
+		lfc_ctl->time_write = 0;
 		dlist_init(&lfc_ctl->lru);
 		dlist_init(&lfc_ctl->holes);
 
@@ -701,6 +706,7 @@ lfc_readv_select(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 		int		blocks_in_chunk = Min(nblocks, BLOCKS_PER_CHUNK - (blkno % BLOCKS_PER_CHUNK));
 		int		iteration_hits = 0;
 		int		iteration_misses = 0;
+		uint64	io_time_us = 0;
 		Assert(blocks_in_chunk > 0);
 
 		for (int i = 0; i < blocks_in_chunk; i++)
@@ -795,6 +801,13 @@ lfc_readv_select(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 			lfc_ctl->misses += iteration_misses;
 			pgBufferUsage.file_cache.hits += iteration_hits;
 			pgBufferUsage.file_cache.misses += iteration_misses;
+
+			if (iteration_hits)
+			{
+				lfc_ctl->time_read += io_time_us;
+				inc_page_cache_read_wait(io_time_us);
+			}
+
 			CriticalAssert(entry->access_count > 0);
 			if (--entry->access_count == 0)
 				dlist_push_tail(&lfc_ctl->lru, &entry->list_node);
@@ -859,6 +872,7 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 		struct iovec iov[PG_IOV_MAX];
 		int		chunk_offs = blkno & (BLOCKS_PER_CHUNK - 1);
 		int		blocks_in_chunk = Min(nblocks, BLOCKS_PER_CHUNK - (blkno % BLOCKS_PER_CHUNK));
+		instr_time io_start, io_end;
 		Assert(blocks_in_chunk > 0);
 
 		for (int i = 0; i < blocks_in_chunk; i++)
@@ -947,12 +961,13 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 
 		generation = lfc_ctl->generation;
 		entry_offset = entry->offset;
-		lfc_ctl->writes += blocks_in_chunk;
 		LWLockRelease(lfc_lock);
 
 		pgstat_report_wait_start(WAIT_EVENT_NEON_LFC_WRITE);
+		INSTR_TIME_SET_CURRENT(io_start);
 		rc = pwritev(lfc_desc, iov, blocks_in_chunk,
 					 ((off_t) entry_offset * BLOCKS_PER_CHUNK + chunk_offs) * BLCKSZ);
+		INSTR_TIME_SET_CURRENT(io_end);
 		pgstat_report_wait_end();
 
 		if (rc != BLCKSZ * blocks_in_chunk)
@@ -965,9 +980,17 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 
 			if (lfc_ctl->generation == generation)
 			{
+				uint64	time_spent_us;
 				CriticalAssert(LFC_ENABLED());
 				/* Place entry to the head of LRU list */
 				CriticalAssert(entry->access_count > 0);
+
+				lfc_ctl->writes += blocks_in_chunk;
+				INSTR_TIME_SUBTRACT(io_start, io_end);
+				time_spent_us = INSTR_TIME_GET_MICROSEC(io_start);
+				lfc_ctl->time_write += time_spent_us;
+				inc_page_cache_write_wait(time_spent_us);
+
 				if (--entry->access_count == 0)
 					dlist_push_tail(&lfc_ctl->lru, &entry->list_node);
 

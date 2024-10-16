@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import random
+import string
 import time
 from collections import defaultdict
 from dataclasses import dataclass
@@ -12,13 +14,18 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from fixtures.common_types import Id, Lsn, TenantId, TenantShardId, TimelineArchivalState, TimelineId
+from fixtures.common_types import (
+    Id,
+    Lsn,
+    TenantId,
+    TenantShardId,
+    TimelineArchivalState,
+    TimelineId,
+)
 from fixtures.log_helper import log
 from fixtures.metrics import Metrics, MetricsGetter, parse_metrics
 from fixtures.pg_version import PgVersion
 from fixtures.utils import Fn
-import random
-import string
 
 if TYPE_CHECKING:
     from typing import Optional, Union
@@ -37,8 +44,6 @@ class ImportPgdataIdemptencyKey:
 
     @staticmethod
     def random() -> ImportPgdataIdemptencyKey:
-
-
         return ImportPgdataIdemptencyKey(
             "".join(random.choices(string.ascii_letters + string.digits, k=20))
         )
@@ -94,6 +99,7 @@ class TimelineCreateRequest:
         mode = this.pop("mode")
         this.update(mode)
         return json.dumps(self, cls=EnhancedJSONEncoder)
+
 
 class TimelineCreate406(PageserverApiException):
     def __init__(self, res: requests.Response):
@@ -671,6 +677,22 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         )
         log.info(f"Got GC request response code: {res.status_code}")
         self.verbose_error(res)
+
+    def timeline_offload(
+        self,
+        tenant_id: Union[TenantId, TenantShardId],
+        timeline_id: TimelineId,
+    ):
+        self.is_testing_enabled_or_skip()
+
+        log.info(f"Requesting offload: tenant {tenant_id}, timeline {timeline_id}")
+        res = self.put(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/offload",
+        )
+        log.info(f"Got offload request response code: {res.status_code}")
+        self.verbose_error(res)
+        res_json = res.json()
+        assert res_json is None
 
     def timeline_compact(
         self,
