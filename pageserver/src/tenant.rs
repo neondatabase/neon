@@ -16,7 +16,6 @@ use anyhow::{bail, Context};
 use arc_swap::ArcSwap;
 use camino::Utf8Path;
 use camino::Utf8PathBuf;
-use either::Either;
 use enumset::EnumSet;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
@@ -2083,21 +2082,22 @@ impl Tenant {
                     ActivateTimelineArgs::Yes { broker_client },
                     ctx,
                 )
-                .await?;
-                todo!("bubble up something that results in 202")
+                .await
             }
         }
     }
 
-    /// Upload the index file to remote storage, persisting the intent to import.
-    /// Then load the timeline object from the prepared remote state, like we do during tenant attach.
-    /// The actual import job is spawned during attach.
+    /// The returned [`Arc<Timeline>`] is NOT in the [`Tenant::timelines`] map until the import
+    /// completes in the background. A DIFFERENT [`Arc<Timeline>`] will be inserted into the
+    /// [`Tenant::timelines`] map when the import completes.
+    /// We only return an [`Arc<Timeline>`] here so the API handler can create a [`pageserver_api::models::TimelineInfo`]
+    /// for the response.
     async fn create_timeline_import_pgdata(
         self: &Arc<Tenant>,
         params: CreateTimelineParamsImportPgdata,
         activate: ActivateTimelineArgs,
         ctx: &RequestContext,
-    ) -> Result<either::Either<(), Arc<Timeline>>, CreateTimelineError> {
+    ) -> Result<Arc<Timeline>, CreateTimelineError> {
         let CreateTimelineParamsImportPgdata {
             new_timeline_id,
             location,
@@ -2124,9 +2124,7 @@ impl Tenant {
             .await?
         {
             StartCreatingTimelineResult::CreateGuard(guard) => guard,
-            StartCreatingTimelineResult::Idempotent(timeline) => {
-                return Ok(Either::Right(timeline))
-            }
+            StartCreatingTimelineResult::Idempotent(timeline) => return Ok(timeline),
         };
 
         let (control_file, index_part) = import_pgdata::create(
@@ -2186,14 +2184,14 @@ impl Tenant {
         let (timeline, timeline_create_guard) = uninit_timeline.finish_creation_myself();
 
         tokio::spawn(self.clone().create_timeline_import_pgdata_task(
-            timeline,
+            timeline.clone(),
             index_part,
             activate,
             timeline_create_guard,
         ));
 
-        // NB: the timeline doesn't exist in self.timelines at this point, only in self.timelines_creating
-        Ok(Either::Left(()))
+        // NB: the timeline doesn't exist in self.timelines at this point, only thing that references
+        Ok(timeline)
     }
 
     async fn create_timeline_import_pgdata_task(
@@ -2221,12 +2219,13 @@ impl Tenant {
         // down while bootstrapping/branching + activating), but, the race condition is much more likely
         // to manifest because of the long runtime of this import task.
 
-        timeline.shutdown(ShutdownMode::Hard).await; // in theory this shouldn't even .await anything except for coop yield
-        let Some(timeline) = Arc::into_inner(timeline) else {
-            anyhow::bail!("implementation error: timeline that we shut down was still referenced from somewhere");
-        };
+        //        in theory this shouldn't even .await anything except for coop yield
+        timeline.shutdown(ShutdownMode::Hard).await;
+        // TODO: we can't do the following check because create_timeline_import_pgdata must return an Arc<Timeline>
+        // let Some(timeline) = Arc::into_inner(timeline) else {
+        //     anyhow::bail!("implementation error: timeline that we shut down was still referenced from somewhere");
+        // };
         let timeline_id = timeline.timeline_id;
-        drop(timeline);
 
         // load from object storage like Tenant::attach does
         let resources = self.build_timeline_resources(timeline_id);
