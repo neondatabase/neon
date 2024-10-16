@@ -20,7 +20,6 @@ use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use nix::unistd::Pid;
 use postgres::error::SqlState;
-use postgres::Row;
 use postgres::{Client, NoTls};
 use tracing::{debug, error, info, instrument, warn};
 use utils::id::{TenantId, TimelineId};
@@ -1394,14 +1393,8 @@ LIMIT 100",
             .map(|row| row.get(0));
 
         // sanitize the inputs as postgres idents.
-        // should we instead use `Escaping::pg_quote`?
-        let format_query = "SELECT quote_ident($1) ext_name, quote_ident($2) ext_version";
-        let format: Row = db_client
-            .query_one(format_query, &[&ext_name, &ext_version])
-            .await
-            .with_context(|| format!("Failed to execute query: {}", format_query))?;
-        let ext_name: String = format.get("ext_name");
-        let ext_version: String = format.get("ext_version");
+        let ext_name: String = ext_name.to_string().pg_quote();
+        let ext_version: String = ext_version.to_string().pg_quote();
 
         if let Some(installed_version) = version {
             if installed_version == ext_version {
