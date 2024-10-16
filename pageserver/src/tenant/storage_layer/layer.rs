@@ -19,7 +19,7 @@ use crate::task_mgr::TaskKind;
 use crate::tenant::timeline::{CompactionError, GetVectoredError};
 use crate::tenant::{remote_timeline_client::LayerFileMetadata, Timeline};
 
-use super::delta_layer::{self, DeltaEntry};
+use super::delta_layer::{self};
 use super::image_layer::{self};
 use super::{
     AsLayerDesc, ImageLayerWriter, LayerAccessStats, LayerAccessStatsReset, LayerName,
@@ -1837,23 +1837,22 @@ impl ResidentLayer {
     pub(crate) async fn load_keys<'a>(
         &'a self,
         ctx: &RequestContext,
-    ) -> anyhow::Result<Vec<DeltaEntry<'a>>> {
+    ) -> anyhow::Result<Vec<pageserver_api::key::Key>> {
         use LayerKind::*;
 
         let owner = &self.owner.0;
-        match self.downloaded.get(owner, ctx).await? {
-            Delta(ref d) => {
-                // this is valid because the DownloadedLayer::kind is a OnceCell, not a
-                // Mutex<OnceCell>, so we cannot go and deinitialize the value with OnceCell::take
-                // while it's being held.
-                self.owner.record_access(ctx);
+        let inner = self.downloaded.get(owner, ctx).await?;
 
-                delta_layer::DeltaLayerInner::load_keys(d, ctx)
-                    .await
-                    .with_context(|| format!("Layer index is corrupted for {self}"))
-            }
-            Image(_) => anyhow::bail!(format!("cannot load_keys on a image layer {self}")),
-        }
+        // this is valid because the DownloadedLayer::kind is a OnceCell, not a
+        // Mutex<OnceCell>, so we cannot go and deinitialize the value with OnceCell::take
+        // while it's being held.
+        self.owner.record_access(ctx);
+
+        let res = match inner {
+            Delta(ref d) => delta_layer::DeltaLayerInner::load_keys(d, ctx).await,
+            Image(ref i) => image_layer::ImageLayerInner::load_keys(i, ctx).await,
+        };
+        res.with_context(|| format!("Layer index is corrupted for {self}"))
     }
 
     /// Read all they keys in this layer which match the ShardIdentity, and write them all to
