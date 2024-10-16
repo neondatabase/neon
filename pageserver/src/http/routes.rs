@@ -9,7 +9,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
-use camino::Utf8PathBuf;
 use enumset::EnumSet;
 use futures::StreamExt;
 use futures::TryFutureExt;
@@ -47,8 +46,6 @@ use pageserver_api::shard::ShardCount;
 use pageserver_api::shard::TenantShardId;
 use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
-use remote_storage::LocalFs;
-use remote_storage::RemotePath;
 use remote_storage::TimeTravelError;
 use tenant_size_model::{svg::SvgBranchKind, SizeResult, StorageModel};
 use tokio_util::io::StreamReader;

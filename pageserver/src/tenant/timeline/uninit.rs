@@ -8,12 +8,7 @@ use utils::{fs_ext, id::TimelineId, lsn::Lsn};
 use crate::{
     context::RequestContext,
     import_datadir,
-    tenant::{
-        metadata::TimelineMetadata,
-        remote_timeline_client::MaybeDeletedIndexPart,
-        timeline::{import_pgdata, ShutdownMode},
-        Tenant,
-    },
+    tenant::Tenant,
 };
 
 use super::Timeline;

@@ -13,7 +13,7 @@ use utils::id::TimelineId;
 use crate::tenant::metadata::TimelineMetadata;
 use crate::tenant::storage_layer::LayerName;
 use crate::tenant::timeline::import_pgdata;
-use crate::tenant::{CreatingTimelineStateImportPgdata, Generation};
+use crate::tenant::Generation;
 use pageserver_api::shard::ShardIndex;
 
 use utils::lsn::Lsn;
@@ -571,6 +571,7 @@ mod tests {
             lineage: Lineage::default(),
             gc_blocking: None,
             last_aux_file_policy: None,
+            import_pgdata: None,
         };
 
         let part = IndexPart::from_s3_bytes(example.as_bytes()).unwrap();
@@ -617,6 +618,7 @@ mod tests {
             },
             gc_blocking: None,
             last_aux_file_policy: None,
+            import_pgdata: None,
         };
 
         let part = IndexPart::from_s3_bytes(example.as_bytes()).unwrap();
@@ -668,6 +670,7 @@ mod tests {
             },
             gc_blocking: None,
             last_aux_file_policy: Some(AuxFilePolicy::V2),
+            import_pgdata: None,
         };
 
         let part = IndexPart::from_s3_bytes(example.as_bytes()).unwrap();
@@ -724,6 +727,7 @@ mod tests {
             lineage: Default::default(),
             gc_blocking: None,
             last_aux_file_policy: Default::default(),
+            import_pgdata: None,
         };
 
         let part = IndexPart::from_s3_bytes(example.as_bytes()).unwrap();
@@ -781,6 +785,7 @@ mod tests {
             lineage: Default::default(),
             gc_blocking: None,
             last_aux_file_policy: Default::default(),
+            import_pgdata: None,
         };
 
         let part = IndexPart::from_s3_bytes(example.as_bytes()).unwrap();
@@ -843,6 +848,7 @@ mod tests {
             }),
             last_aux_file_policy: Default::default(),
             archived_at: None,
+            import_pgdata: None,
         };
 
         let part = IndexPart::from_s3_bytes(example.as_bytes()).unwrap();

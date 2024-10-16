@@ -243,7 +243,7 @@ use super::metadata::MetadataUpdate;
 use super::storage_layer::{Layer, LayerName, ResidentLayer};
 use super::timeline::import_pgdata;
 use super::upload_queue::{NotInitialized, SetDeletedFlagProgress};
-use super::{CreatingTimelineStateImportPgdata, Generation};
+use super::Generation;
 
 pub(crate) use download::{
     download_index_part, is_temp_download_file, list_remote_tenant_shards, list_remote_timelines,

@@ -20,7 +20,6 @@ use either::Either;
 use enumset::EnumSet;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
-use metadata::MetadataUpdate;
 use pageserver_api::models;
 use pageserver_api::models::AuxFilePolicy;
 use pageserver_api::models::LsnLease;

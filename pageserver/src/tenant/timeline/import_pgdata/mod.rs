@@ -55,17 +55,13 @@ use utils::lsn::Lsn;
 use std::collections::HashSet;
 use std::ops::Range;
 
-use super::{uninit::UninitializedTimeline, Timeline};
+use super::Timeline;
 
 use remote_storage::{
     Download, DownloadError, DownloadOpts, GenericRemoteStorage, Listing, ListingObject, RemotePath,
 };
 
-pub struct Prepared {
-    pgdata_dir: RemotePath,
-    control_file: ControlFile,
-    storage: GenericRemoteStorage,
-}
+
 
 static PGDATA_DIR: Lazy<RemotePath> =
     Lazy::new(|| RemotePath::from_string("pgdata").unwrap());
@@ -171,7 +167,7 @@ pub async fn doit(
         storage,
     }
     .doit(ctx)
-    .await;
+    .await?;
 
     // mark as done in index_part
     timeline

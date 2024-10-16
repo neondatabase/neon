@@ -1,4 +1,3 @@
-use crate::tenant::{CreateTimelineParamsImportPgdata, IndexPart};
 
 pub mod index_part_format;
 // pub(crate) mod state;
