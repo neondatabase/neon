@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 from collections import defaultdict
 from dataclasses import dataclass
@@ -15,7 +16,6 @@ from fixtures.log_helper import log
 from fixtures.metrics import Metrics, MetricsGetter, parse_metrics
 from fixtures.pg_version import PgVersion
 from fixtures.utils import Fn
-import json
 
 if TYPE_CHECKING:
     from typing import Optional, Union
@@ -29,64 +29,65 @@ class PageserverApiException(Exception):
 
 
 @dataclass
-class TimelineCreateRequestMode:
-    @dataclass
-    class Branch:
-        ancestor_timeline_id: TimelineId
-        ancestor_start_lsn: Optional[Lsn] = None
-        pg_version: Optional[int] = None
-
-    @dataclass
-    class Bootstrap:
-        existing_initdb_timeline_id: Optional[TenantId] = None
-        pg_version: Optional[int] = None
-
-    @dataclass
-    class ImportPgdata:
-        s3_uri: str
-
-    mode: Union[Branch, Bootstrap, ImportPgdata]
+class ImportPgdataIdemptencyKey:
+    key: str
 
     @staticmethod
-    def from_dict(d: Dict[str, Any]) -> TimelineCreateRequestMode:
-        if "ancestor_timeline_id" in d:
-            return TimelineCreateRequestMode(TimelineCreateRequestMode.Branch(**d))
-        elif "existing_initdb_timeline_id" in d:
-            return TimelineCreateRequestMode(TimelineCreateRequestMode.Bootstrap(**d))
-        elif "s3_uri" in d:
-            return TimelineCreateRequestMode(TimelineCreateRequestMode.ImportPgdata(**d))
-        else:
-            raise ValueError("Invalid TimelineCreateRequestMode")
+    def random() -> ImportPgdataIdemptencyKey:
+        import random
+        import string
 
-    def to_dict(self) -> Dict[str, Any]:
-        if isinstance(self.mode, TimelineCreateRequestMode.Branch):
-            return {"ancestor_timeline_id": self.mode.ancestor_timeline_id,
-                    "ancestor_start_lsn": self.mode.ancestor_start_lsn,
-                    "pg_version": self.mode.pg_version}
-        elif isinstance(self.mode, TimelineCreateRequestMode.Bootstrap):
-            return {"existing_initdb_timeline_id": self.mode.existing_initdb_timeline_id,
-                    "pg_version": self.mode.pg_version}
-        elif isinstance(self.mode, TimelineCreateRequestMode.ImportPgdata):
-            return {"s3_uri": self.mode.s3_uri}
-        else:
-            raise ValueError("Invalid TimelineCreateRequestMode")
+        return ImportPgdataIdemptencyKey(
+            "".join(random.choices(string.ascii_letters + string.digits, k=20))
+        )
+
+
+@dataclass
+class LocalFs:
+    path: str
+
+
+@dataclass
+class AwsS3:
+    region: str
+    bucket: str
+    key: str
+
+
+@dataclass
+class ImportPgdataLocation:
+    LocalFs: Optional[LocalFs] = None
+    AwsS3: Optional[AwsS3] = None
+
+
+@dataclass
+class TimelineCreateRequestModeImportPgdata:
+    location: ImportPgdataLocation
+    idempotency_key: ImportPgdataIdemptencyKey
+
+
+@dataclass
+class TimelineCreateRequestMode:
+    Branch: Optional[Dict[str, Any]] = None
+    Bootstrap: Optional[Dict[str, Any]] = None
+    ImportPgdata: Optional[TimelineCreateRequestModeImportPgdata] = None
+
 
 @dataclass
 class TimelineCreateRequest:
     new_timeline_id: TimelineId
     mode: TimelineCreateRequestMode
 
+    def to_json(self) -> str:
+        return json.dumps(self, default=lambda o: o.__dict__, indent=4)
+
     @staticmethod
     def from_json(data: str) -> TimelineCreateRequest:
-        d = json.loads(data)
-        mode = TimelineCreateRequestMode.from_dict(d["mode"])
-        return TimelineCreateRequest(new_timeline_id=d["new_timeline_id"], mode=mode)
+        json_dict = json.loads(data)
+        mode_data = json_dict.pop("mode")
+        mode = TimelineCreateRequestMode(**mode_data)
+        return TimelineCreateRequest(mode=mode, **json_dict)
 
-    def to_json(self) -> str:
-        return json.dumps({
-            "new_timeline_id": self.new_timeline_id,
-            "mode": self.mode.to_dict()
-        })
 
 class TimelineCreate406(PageserverApiException):
     def __init__(self, res: requests.Response):

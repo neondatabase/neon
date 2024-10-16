@@ -1,3 +1,4 @@
+import json
 import time
 from enum import Enum
 from typing import Optional
@@ -8,6 +9,15 @@ import pytest
 from fixtures.common_types import Lsn, TenantId, TenantShardId, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder, VanillaPostgres
+from fixtures.pageserver.http import (
+    ImportPgdataIdemptencyKey,
+    ImportPgdataLocation,
+    LocalFs,
+    PageserverApiException,
+    TimelineCreateRequest,
+    TimelineCreateRequestMode,
+    TimelineCreateRequestModeImportPgdata,
+)
 from fixtures.remote_storage import RemoteStorageKind
 
 num_rows = 1000
@@ -84,6 +94,17 @@ def test_pgdata_import_smoke(
     vanilla_pg.stop()
 
     #
+    # Simulate the step that is done by fast_import
+    # TODO: actually exercise fast_import here
+    #
+    importbucket = neon_env_builder.repo_dir / "importbucket"
+    importbucket.mkdir()
+    vanilla_pg.pgdatadir.rename(importbucket / "pgdata")
+    statusdir = importbucket / "status"
+    statusdir.mkdir()
+    (statusdir / "pgdata").write_text(json.dumps({"done": True}))
+
+    #
     # We have a Postgres data directory to import now
     #
 
@@ -98,16 +119,47 @@ def test_pgdata_import_smoke(
     timeline_id = TimelineId.generate()
     log.info("starting import")
     start = time.monotonic()
-    env.storage_controller.timeline_import_from_pgdata(tenant_id, vanilla_pg.pgdatadir, timeline_id)
-    env.storage_controller.allowed_errors.append(
-        # FIXME: the import operation should not be a blocking HTTP call, but something
-        # that can be polled for completion => we don't have such a transitory state in the system yet.
-        ".*import_pgdata.*Shared lock by TimelineImportFromPgdata was held for"
-    )
+
+    idempotency = ImportPgdataIdemptencyKey.random()
+    log.info("idempotency key {idempotency}")
+    while True:
+        env.create_timeline_raw(
+            "imported",
+            TimelineCreateRequest(
+                new_timeline_id=timeline_id,
+                mode=TimelineCreateRequestMode(
+                    ImportPgdata=TimelineCreateRequestModeImportPgdata(
+                        idempotency_key=idempotency,
+                        location=ImportPgdataLocation(
+                            LocalFs=LocalFs(
+                                path=str(importbucket.absolute()),
+                            )
+                        ),
+                    )
+                ),
+            ),
+        )
+        locations = env.storage_controller.locate(tenant_id)
+        active_count = 0
+        for location in locations:
+            shard_id = location["shard_id"]
+            ps = env.get_pageserver(location["node_id"])
+            try:
+                detail = ps.http_client().timeline_detail(shard_id, timeline_id)
+                log.info(f"shard {shard_id} status: {detail['status']}")
+                if detail["status"] == "active":
+                    active_count += 1
+            except PageserverApiException as e:
+                if e.status_code == 404:
+                    log.info("not found, import is in progress")
+                else:
+                    raise
+        if active_count == len(locations):
+            log.info("all shards are active")
+            break
+
     import_duration = time.monotonic() - start
     log.info(f"import complete; duration={import_duration:.2f}s")
-
-    env.neon_cli.mappings_map_branch("imported", tenant_id, timeline_id)
 
     #
     # Get some timeline details for later.
@@ -211,5 +263,3 @@ def test_create_timeline_queues_operation(
     neon_env_builder: NeonEnvBuilder,
 ):
     env = neon_env_builder.init_start()
-
-    env.create_timeline_pgdata_import("import", "s3://nonexistent")

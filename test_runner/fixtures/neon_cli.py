@@ -16,6 +16,7 @@ import toml
 from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.pageserver.common_types import IndexPartDump
+from fixtures.pageserver.http import TimelineCreateRequest
 from fixtures.pg_version import PgVersion
 from fixtures.utils import AuxFileStore
 
@@ -310,29 +311,21 @@ class NeonLocalCli(AbstractNeonCli):
         self,
         new_branch_name: str,
         tenant_id: TenantId,
-        timeline_id: TimelineId,
-        s3_uri: str,
-    ) -> TimelineId:
-        if timeline_id is None:
-            timeline_id = TimelineId.generate()
-
+        req: TimelineCreateRequest,
+    ):
         cmd = [
             "timeline",
-            "create-pgdata-import",
+            "create-raw",
             "--branch-name",
             new_branch_name,
             "--tenant-id",
             str(tenant_id),
-            "--timeline-id",
-            str(timeline_id),
-            "--s3-uri",
-            s3_uri,
+            "--request-json",
+            req.to_json(),
         ]
 
         res = self.raw_cli(cmd)
         res.check_returncode()
-
-        return timeline_id
 
     def timeline_branch(
         self,

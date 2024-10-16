@@ -58,6 +58,7 @@ from fixtures.pageserver.http import (
     HistoricLayerInfo,
     PageserverHttpClient,
     ScanDisposableKeysResponse,
+    TimelineCreateRequest,
 )
 from fixtures.pageserver.utils import (
     wait_for_last_record_lsn,
@@ -1375,22 +1376,17 @@ class NeonEnv:
 
         return timeline_id
 
-    def create_timeline_pgdata_import(
+    def create_timeline_raw(
         self,
         new_branch_name: str,
-        s3_uri: str,
+        req: TimelineCreateRequest,
         tenant_id: Optional[TenantId] = None,
-        timeline_id: Optional[TimelineId] = None,
     ):
-        timeline_id = timeline_id or TimelineId.generate()
         tenant_id = tenant_id or self.initial_tenant
 
-        self.neon_cli.timeline_create_pgdata_import(
-            new_branch_name, tenant_id, timeline_id, s3_uri
-        )
+        self.neon_cli.timeline_create_pgdata_import(new_branch_name, tenant_id, req)
 
-        return timeline_id
-
+        return req.new_timeline_id
 
 
 @pytest.fixture(scope="function")
@@ -1996,9 +1992,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
             headers=self.headers(TokenScope.ADMIN),
         )
 
-    def timeline_create(
-        self, tenant_id: TenantId, pgdata_dir: Path, timeline_id: TimelineId
-    ):
+    def timeline_create(self, tenant_id: TenantId, pgdata_dir: Path, timeline_id: TimelineId):
         self.request(
             "PUT",
             f"{self.api}/v1/tenant/{tenant_id}/timeline/{timeline_id}/import_pgdata",
