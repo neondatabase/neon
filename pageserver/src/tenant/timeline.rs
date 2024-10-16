@@ -2639,20 +2639,23 @@ impl Timeline {
                 {
                     Some(cancel) => cancel.cancel(),
                     None => {
-                        let state = self.current_state();
-                        if matches!(
-                            state,
-                            TimelineState::Broken { .. } | TimelineState::Stopping
-                        ) {
-
-                            // Can happen when timeline detail endpoint is used when deletion is ongoing (or its broken).
-                            // Don't make noise.
-                        } else {
-                            warn!("unexpected: cancel_wait_for_background_loop_concurrency_limit_semaphore not set, priority-boosting of logical size calculation will not work");
-                            debug_assert!(false);
+                        match self.current_state() {
+                            TimelineState::Broken { .. } | TimelineState::Stopping => {
+                                // Can happen when timeline detail endpoint is used when deletion is ongoing (or its broken).
+                                // Don't make noise.
+                            }
+                            TimelineState::Loading => {
+                                // Import does not return an activated timeline.
+                                info!("discarding priority boost for logical size calculation because timeline is not yet active");
+                            }
+                            TimelineState::Active => {
+                                // activation should be setting the once cell
+                                warn!("unexpected: cancel_wait_for_background_loop_concurrency_limit_semaphore not set, priority-boosting of logical size calculation will not work");
+                                debug_assert!(false);
+                            }
                         }
                     }
-                };
+                }
             }
         }
 
