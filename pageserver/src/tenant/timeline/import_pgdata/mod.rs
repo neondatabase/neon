@@ -65,18 +65,10 @@ use remote_storage::{
 static PGDATA_DIR: Lazy<RemotePath> = Lazy::new(|| RemotePath::from_string("pgdata").unwrap());
 
 pub(crate) async fn create<'a>(
-    request: pageserver_api::models::TimelineCreateRequestModeImportPgdata,
+    location: Location,
     ctx: &RequestContext,
     cancel: CancellationToken,
 ) -> anyhow::Result<(ControlFile, index_part_format::Root)> {
-    let pageserver_api::models::TimelineCreateRequestModeImportPgdata {
-        location: api_location,
-    } = request;
-    let location = match api_location {
-        #[cfg(feature = "testing")]
-        ImportPgdataLocation::LocalFs { local_path } => todo!(),
-        ImportPgdataLocation::AwsS3 { bucket, key } => Location::AwsS3 { bucket, key },
-    };
     let storage_wrapper = make_storage_wrapper(&location, cancel)?;
     let control_file = get_control_file(&PGDATA_DIR, &storage_wrapper).await?;
 

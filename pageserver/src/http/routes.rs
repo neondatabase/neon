@@ -554,7 +554,18 @@ async fn timeline_create_handler(
         }) => {
             tenant::CreateTimelineParams::ImportPgdata(tenant::CreateTimelineParamsImportPgdata {
                 new_timeline_id,
-                location,
+                location: {
+                    use pageserver_api::models::ImportPgdataLocation;
+                    use tenant::timeline::import_pgdata::flow::index_part_format::Location;
+                    let location = match location {
+                        #[cfg(feature = "testing")]
+                        ImportPgdataLocation::LocalFs { path } => Location::LocalFs { path },
+                        ImportPgdataLocation::AwsS3 { bucket, key } => {
+                            Location::AwsS3 { bucket, key }
+                        }
+                    };
+                    location
+                },
             })
         }
     };

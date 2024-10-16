@@ -677,7 +677,7 @@ pub(crate) struct CreateTimelineParamsBranch {
 #[derive(Debug)]
 pub(crate) struct CreateTimelineParamsImportPgdata {
     pub(crate) new_timeline_id: TimelineId,
-    pub(crate) location: pageserver_api::models::ImportPgdataLocation,
+    pub(crate) location: import_pgdata::flow::index_part_format::Location,
 }
 
 pub(crate) struct CreatingTimelineStateBootstrap {
@@ -2088,8 +2088,7 @@ impl Tenant {
             either::Either::Right(timeline) => return Ok(Either::Right(timeline)),
         };
 
-        let (control_file, index_part) =
-            import_pgdata::create(todo!("s3_uri"), ctx, self.cancel).await?;
+        let (control_file, index_part) = import_pgdata::create(location, ctx, self.cancel).await?;
 
         // This is almost like create_empty_timeline, but we got the creation guard earlier.
         let uninit_timeline = {

@@ -2,6 +2,7 @@ pub mod detach_ancestor;
 pub mod partitioning;
 pub mod utilization;
 
+use camino::Utf8PathBuf;
 pub use utilization::PageserverUtilization;
 
 use std::{
@@ -246,7 +247,7 @@ pub struct TimelineCreateRequestModeImportPgdata {
 pub enum ImportPgdataLocation {
     #[cfg(feature = "testing")]
     LocalFs {
-        local_path: String,
+        path: Utf8PathBuf,
     },
     AwsS3 {
         bucket: String,
