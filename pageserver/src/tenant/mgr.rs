@@ -1361,7 +1361,7 @@ impl TenantManager {
     /// all tenant shards in remote storage (removing all paths with the tenant prefix). The storage
     /// controller uses this to purge all remote tenant data, including any stale parent shards that
     /// may remain after splits. Ideally, this special case would be handled elsewhere. See:
-    /// https://github.com/neondatabase/neon/pull/9394
+    /// <https://github.com/neondatabase/neon/pull/9394>.
     pub(crate) async fn delete_tenant(
         &self,
         tenant_shard_id: TenantShardId,
