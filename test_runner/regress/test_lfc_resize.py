@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-import os
 import random
 import re
 import subprocess
 import threading
 import time
-from pathlib import Path
 
 import pytest
 from fixtures.log_helper import log
@@ -28,6 +26,7 @@ def test_lfc_resize(neon_simple_env: NeonEnv, pg_bin: PgBin):
             "neon.max_file_cache_size=1GB",
             "neon.file_cache_size_limit=1GB",
         ],
+        use_lfc=True,
     )
     n_resize = 10
     scale = 100

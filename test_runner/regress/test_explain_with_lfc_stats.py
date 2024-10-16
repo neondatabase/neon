@@ -17,10 +17,10 @@ def test_explain_with_lfc_stats(neon_simple_env: NeonEnv):
         "main",
         config_lines=[
             "shared_buffers='1MB'",
-            f"neon.file_cache_path='{cache_dir}/file.cache'",
             "neon.max_file_cache_size='128MB'",
             "neon.file_cache_size_limit='64MB'",
         ],
+        use_lfc=True,
     )
 
     cur = endpoint.connect().cursor()

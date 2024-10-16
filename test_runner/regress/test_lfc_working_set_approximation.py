@@ -18,11 +18,10 @@ def test_lfc_working_set_approximation(neon_simple_env: NeonEnv):
     endpoint = env.endpoints.create_start(
         "main",
         config_lines=[
-            "shared_buffers='1MB'",
-            f"neon.file_cache_path='{cache_dir}/file.cache'",
             "neon.max_file_cache_size='128MB'",
             "neon.file_cache_size_limit='64MB'",
         ],
+        use_lfc=True,
     )
 
     cur = endpoint.connect().cursor()
@@ -86,6 +85,7 @@ def test_sliding_working_set_approximation(neon_simple_env: NeonEnv):
             "neon.max_file_cache_size=256MB",
             "neon.file_cache_size_limit=245MB",
         ],
+        use_lfc=True,
     )
     conn = endpoint.connect()
     cur = conn.cursor()
