@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import os
+import threading
 import time
 from contextlib import closing
 from datetime import datetime
@@ -10,7 +11,7 @@ from pathlib import Path
 
 import pytest
 import requests
-from fixtures.common_types import Lsn, TenantId
+from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.metrics import (
     PAGESERVER_GLOBAL_METRICS,
@@ -18,6 +19,7 @@ from fixtures.metrics import (
     parse_metrics,
 )
 from fixtures.neon_fixtures import (
+    Endpoint,
     NeonEnv,
     NeonEnvBuilder,
     wait_for_last_flush_lsn,
@@ -476,3 +478,38 @@ def test_pageserver_metrics_many_relations(neon_env_builder: NeonEnvBuilder):
     assert counts
     log.info(f"directory counts: {counts}")
     assert counts[2] > COUNT_AT_LEAST_EXPECTED
+
+
+def test_timelines_parallel_endpoints(neon_simple_env: NeonEnv):
+    """
+    (Relaxed) regression test for issue that led to https://github.com/neondatabase/neon/pull/9268
+    Create many endpoints in parallel and then restart them
+    """
+    env = neon_simple_env
+
+    # This param needs to be 200+ to reproduce the limit issue
+    n_threads = 16
+    barrier = threading.Barrier(n_threads)
+
+    def test_timeline(branch_name: str, timeline_id: TimelineId, endpoint: Endpoint):
+        endpoint.start()
+        endpoint.stop()
+        # Use a barrier to make sure we restart endpoints at the same time
+        barrier.wait()
+        endpoint.start()
+
+    workers = []
+
+    for i in range(0, n_threads):
+        branch_name = f"branch_{i}"
+        timeline_id = env.create_branch(branch_name)
+        endpoint = env.endpoints.create(branch_name)
+        w = threading.Thread(target=test_timeline, args=[branch_name, timeline_id, endpoint])
+        workers.append(w)
+
+    # Only start the restarts once we're done creating all timelines & endpoints
+    for w in workers:
+        w.start()
+
+    for w in workers:
+        w.join()

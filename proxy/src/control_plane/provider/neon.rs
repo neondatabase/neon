@@ -1,28 +1,30 @@
 //! Production console backend.
 
-use super::{
-    super::messages::{ControlPlaneError, GetRoleSecret, WakeCompute},
-    errors::{ApiError, GetAuthInfoError, WakeComputeError},
-    ApiCaches, ApiLocks, AuthInfo, AuthSecret, CachedAllowedIps, CachedNodeInfo, CachedRoleSecret,
-    NodeInfo,
-};
-use crate::{
-    auth::backend::{jwt::AuthRule, ComputeUserInfo},
-    compute,
-    control_plane::messages::{ColdStartInfo, EndpointJwksResponse, Reason},
-    http,
-    metrics::{CacheOutcome, Metrics},
-    rate_limiter::WakeComputeRateLimiter,
-    scram, EndpointCacheKey, EndpointId,
-};
-use crate::{cache::Cached, context::RequestMonitoring};
-use ::http::{header::AUTHORIZATION, HeaderName};
-use anyhow::bail;
+use std::sync::Arc;
+use std::time::Duration;
+
+use ::http::header::AUTHORIZATION;
+use ::http::HeaderName;
 use futures::TryFutureExt;
-use std::{sync::Arc, time::Duration};
 use tokio::time::Instant;
 use tokio_postgres::config::SslMode;
 use tracing::{debug, info, info_span, warn, Instrument};
+
+use super::super::messages::{ControlPlaneError, GetRoleSecret, WakeCompute};
+use super::errors::{ApiError, GetAuthInfoError, WakeComputeError};
+use super::{
+    ApiCaches, ApiLocks, AuthInfo, AuthSecret, CachedAllowedIps, CachedNodeInfo, CachedRoleSecret,
+    NodeInfo,
+};
+use crate::auth::backend::jwt::AuthRule;
+use crate::auth::backend::ComputeUserInfo;
+use crate::cache::Cached;
+use crate::context::RequestMonitoring;
+use crate::control_plane::errors::GetEndpointJwksError;
+use crate::control_plane::messages::{ColdStartInfo, EndpointJwksResponse, Reason};
+use crate::metrics::{CacheOutcome, Metrics};
+use crate::rate_limiter::WakeComputeRateLimiter;
+use crate::{compute, http, scram, EndpointCacheKey, EndpointId};
 
 const X_REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
 
@@ -137,14 +139,14 @@ impl Api {
         &self,
         ctx: &RequestMonitoring,
         endpoint: EndpointId,
-    ) -> anyhow::Result<Vec<AuthRule>> {
+    ) -> Result<Vec<AuthRule>, GetEndpointJwksError> {
         if !self
             .caches
             .endpoints_cache
             .is_valid(ctx, &endpoint.normalize())
             .await
         {
-            bail!("endpoint not found");
+            return Err(GetEndpointJwksError::EndpointNotFound);
         }
         let request_id = ctx.session_id().to_string();
         async {
@@ -159,12 +161,17 @@ impl Api {
                 .header(X_REQUEST_ID, &request_id)
                 .header(AUTHORIZATION, format!("Bearer {}", &self.jwt))
                 .query(&[("session_id", ctx.session_id())])
-                .build()?;
+                .build()
+                .map_err(GetEndpointJwksError::RequestBuild)?;
 
             info!(url = request.url().as_str(), "sending http request");
             let start = Instant::now();
             let pause = ctx.latency_timer_pause(crate::metrics::Waiting::Cplane);
-            let response = self.endpoint.execute(request).await?;
+            let response = self
+                .endpoint
+                .execute(request)
+                .await
+                .map_err(GetEndpointJwksError::RequestExecute)?;
             drop(pause);
             info!(duration = ?start.elapsed(), "received http response");
 
@@ -330,7 +337,7 @@ impl super::Api for Api {
         &self,
         ctx: &RequestMonitoring,
         endpoint: EndpointId,
-    ) -> anyhow::Result<Vec<AuthRule>> {
+    ) -> Result<Vec<AuthRule>, GetEndpointJwksError> {
         self.do_get_endpoint_jwks(ctx, endpoint).await
     }
 
@@ -348,7 +355,7 @@ impl super::Api for Api {
                     let (cached, info) = cached.take_value();
                     let info = info.map_err(|c| {
                         info!(key = &*key, "found cached wake_compute error");
-                        WakeComputeError::ApiError(ApiError::ControlPlane(*c))
+                        WakeComputeError::ApiError(ApiError::ControlPlane(Box::new(*c)))
                     })?;
 
                     debug!(key = &*key, "found cached compute node info");
@@ -418,7 +425,7 @@ impl super::Api for Api {
 
                     self.caches.node_info.insert_ttl(
                         key,
-                        Err(Box::new(err.clone())),
+                        Err(err.clone()),
                         Duration::from_secs(30),
                     );
 
@@ -457,7 +464,7 @@ async fn parse_body<T: for<'a> serde::Deserialize<'a>>(
     body.http_status_code = status;
 
     warn!("console responded with an error ({status}): {body:?}");
-    Err(ApiError::ControlPlane(body))
+    Err(ApiError::ControlPlane(Box::new(body)))
 }
 
 fn parse_host_port(input: &str) -> Option<(&str, u16)> {

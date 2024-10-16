@@ -1986,11 +1986,11 @@ class NeonStorageController(MetricsGetter, LogUtils):
         log.info(f"reconcile_all waited for {n} shards")
         return n
 
-    def reconcile_until_idle(self, timeout_secs=30):
+    def reconcile_until_idle(self, timeout_secs=30, max_interval=5):
         start_at = time.time()
         n = 1
-        delay_sec = 0.5
-        delay_max = 5
+        delay_sec = 0.1
+        delay_max = max_interval
         while n > 0:
             n = self.reconcile_all()
             if n == 0:
@@ -4280,6 +4280,7 @@ SKIP_FILES = frozenset(
         "postmaster.opts",
         "postmaster.pid",
         "pg_control",
+        "pg_dynshmem",
     )
 )
 

@@ -14,15 +14,15 @@ pub(crate) use password_hack::parse_endpoint_param;
 use password_hack::PasswordHackPayload;
 
 mod flow;
+use std::io;
+use std::net::IpAddr;
+
 pub(crate) use flow::*;
+use thiserror::Error;
 use tokio::time::error::Elapsed;
 
-use crate::{
-    control_plane,
-    error::{ReportableError, UserFacingError},
-};
-use std::{io, net::IpAddr};
-use thiserror::Error;
+use crate::control_plane;
+use crate::error::{ReportableError, UserFacingError};
 
 /// Convenience wrapper for the authentication error.
 pub(crate) type Result<T> = std::result::Result<T, AuthError>;

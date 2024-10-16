@@ -1,33 +1,31 @@
+use std::collections::HashMap;
+use std::fmt;
+use std::ops::Deref;
+use std::pin::pin;
+use std::sync::atomic::{self, AtomicUsize};
+use std::sync::{Arc, Weak};
+use std::task::{ready, Poll};
+use std::time::Duration;
+
 use dashmap::DashMap;
-use futures::{future::poll_fn, Future};
+use futures::future::poll_fn;
+use futures::Future;
 use parking_lot::RwLock;
 use rand::Rng;
 use smallvec::SmallVec;
-use std::{collections::HashMap, pin::pin, sync::Arc, sync::Weak, time::Duration};
-use std::{
-    fmt,
-    task::{ready, Poll},
-};
-use std::{
-    ops::Deref,
-    sync::atomic::{self, AtomicUsize},
-};
 use tokio::time::Instant;
 use tokio_postgres::tls::NoTlsStream;
 use tokio_postgres::{AsyncMessage, ReadyForQueryStatus, Socket};
 use tokio_util::sync::CancellationToken;
+use tracing::{debug, error, info, info_span, warn, Instrument, Span};
 
+use super::backend::HttpConnError;
+use crate::auth::backend::ComputeUserInfo;
+use crate::context::RequestMonitoring;
 use crate::control_plane::messages::{ColdStartInfo, MetricsAuxInfo};
 use crate::metrics::{HttpEndpointPoolsGuard, Metrics};
 use crate::usage_metrics::{Ids, MetricCounter, USAGE_METRICS};
-use crate::{
-    auth::backend::ComputeUserInfo, context::RequestMonitoring, DbName, EndpointCacheKey, RoleName,
-};
-
-use tracing::{debug, error, warn, Span};
-use tracing::{info, info_span, Instrument};
-
-use super::backend::HttpConnError;
+use crate::{DbName, EndpointCacheKey, RoleName};
 
 #[derive(Debug, Clone)]
 pub(crate) struct ConnInfoWithAuth {
@@ -724,13 +722,13 @@ impl<C: ClientInnerExt> Drop for Client<C> {
 
 #[cfg(test)]
 mod tests {
-    use std::{mem, sync::atomic::AtomicBool};
-
-    use crate::{
-        proxy::NeonOptions, serverless::cancel_set::CancelSet, BranchId, EndpointId, ProjectId,
-    };
+    use std::mem;
+    use std::sync::atomic::AtomicBool;
 
     use super::*;
+    use crate::proxy::NeonOptions;
+    use crate::serverless::cancel_set::CancelSet;
+    use crate::{BranchId, EndpointId, ProjectId};
 
     struct MockClient(Arc<AtomicBool>);
     impl MockClient {

@@ -1,20 +1,23 @@
 //! Main authentication flow.
 
-use super::{backend::ComputeCredentialKeys, AuthErrorImpl, PasswordHackPayload};
-use crate::{
-    config::TlsServerEndPoint,
-    context::RequestMonitoring,
-    control_plane::AuthSecret,
-    intern::EndpointIdInt,
-    sasl,
-    scram::{self, threadpool::ThreadPool},
-    stream::{PqStream, Stream},
-};
+use std::io;
+use std::sync::Arc;
+
 use postgres_protocol::authentication::sasl::{SCRAM_SHA_256, SCRAM_SHA_256_PLUS};
 use pq_proto::{BeAuthenticationSaslMessage, BeMessage, BeMessage as Be};
-use std::{io, sync::Arc};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::info;
+
+use super::backend::ComputeCredentialKeys;
+use super::{AuthErrorImpl, PasswordHackPayload};
+use crate::config::TlsServerEndPoint;
+use crate::context::RequestMonitoring;
+use crate::control_plane::AuthSecret;
+use crate::intern::EndpointIdInt;
+use crate::sasl;
+use crate::scram::threadpool::ThreadPool;
+use crate::scram::{self};
+use crate::stream::{PqStream, Stream};
 
 /// Every authentication selector is supposed to implement this trait.
 pub(crate) trait AuthMethod {

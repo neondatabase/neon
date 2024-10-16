@@ -97,7 +97,21 @@ impl ComputeControlPlane {
         for endpoint_dir in std::fs::read_dir(env.endpoints_path())
             .with_context(|| format!("failed to list {}", env.endpoints_path().display()))?
         {
-            let ep = Endpoint::from_dir_entry(endpoint_dir?, &env)?;
+            let ep_res = Endpoint::from_dir_entry(endpoint_dir?, &env);
+            let ep = match ep_res {
+                Ok(ep) => ep,
+                Err(e) => match e.downcast::<std::io::Error>() {
+                    Ok(e) => {
+                        // A parallel task could delete an endpoint while we have just scanned the directory
+                        if e.kind() == std::io::ErrorKind::NotFound {
+                            continue;
+                        } else {
+                            Err(e)?
+                        }
+                    }
+                    Err(e) => Err(e)?,
+                },
+            };
             endpoints.insert(ep.endpoint_id.clone(), Arc::new(ep));
         }
 

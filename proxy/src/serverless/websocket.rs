@@ -1,13 +1,7 @@
-use crate::proxy::ErrorSource;
-use crate::{
-    cancellation::CancellationHandlerMain,
-    config::ProxyConfig,
-    context::RequestMonitoring,
-    error::{io_error, ReportableError},
-    metrics::Metrics,
-    proxy::{handle_client, ClientMode},
-    rate_limiter::EndpointRateLimiter,
-};
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{ready, Context, Poll};
+
 use anyhow::Context as _;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use framed_websockets::{Frame, OpCode, WebSocketServer};
@@ -15,14 +9,16 @@ use futures::{Sink, Stream};
 use hyper::upgrade::OnUpgrade;
 use hyper_util::rt::TokioIo;
 use pin_project_lite::pin_project;
-
-use std::{
-    pin::Pin,
-    sync::Arc,
-    task::{ready, Context, Poll},
-};
 use tokio::io::{self, AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
 use tracing::warn;
+
+use crate::cancellation::CancellationHandlerMain;
+use crate::config::ProxyConfig;
+use crate::context::RequestMonitoring;
+use crate::error::{io_error, ReportableError};
+use crate::metrics::Metrics;
+use crate::proxy::{handle_client, ClientMode, ErrorSource};
+use crate::rate_limiter::EndpointRateLimiter;
 
 pin_project! {
     /// This is a wrapper around a [`WebSocketStream`] that
@@ -129,7 +125,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncBufRead for WebSocketRw<S> {
 
 pub(crate) async fn serve_websocket(
     config: &'static ProxyConfig,
-    auth_backend: &'static crate::auth::Backend<'static, (), ()>,
+    auth_backend: &'static crate::auth::Backend<'static, ()>,
     ctx: RequestMonitoring,
     websocket: OnUpgrade,
     cancellation_handler: Arc<CancellationHandlerMain>,
@@ -184,14 +180,11 @@ mod tests {
 
     use framed_websockets::WebSocketServer;
     use futures::{SinkExt, StreamExt};
-    use tokio::{
-        io::{duplex, AsyncReadExt, AsyncWriteExt},
-        task::JoinSet,
-    };
-    use tokio_tungstenite::{
-        tungstenite::{protocol::Role, Message},
-        WebSocketStream,
-    };
+    use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
+    use tokio::task::JoinSet;
+    use tokio_tungstenite::tungstenite::protocol::Role;
+    use tokio_tungstenite::tungstenite::Message;
+    use tokio_tungstenite::WebSocketStream;
 
     use super::WebSocketRw;
 

@@ -4,6 +4,16 @@ mod mitm;
 
 use std::time::Duration;
 
+use anyhow::{bail, Context};
+use async_trait::async_trait;
+use http::StatusCode;
+use retry::{retry_after, ShouldRetryWakeCompute};
+use rstest::rstest;
+use rustls::pki_types;
+use tokio_postgres::config::SslMode;
+use tokio_postgres::tls::{MakeTlsConnect, NoTls};
+use tokio_postgres_rustls::{MakeRustlsConnect, RustlsStream};
+
 use super::connect_compute::ConnectMechanism;
 use super::retry::CouldRetry;
 use super::*;
@@ -18,15 +28,6 @@ use crate::control_plane::provider::{
 use crate::control_plane::{self, CachedNodeInfo, NodeInfo};
 use crate::error::ErrorKind;
 use crate::{sasl, scram, BranchId, EndpointId, ProjectId};
-use anyhow::{bail, Context};
-use async_trait::async_trait;
-use http::StatusCode;
-use retry::{retry_after, ShouldRetryWakeCompute};
-use rstest::rstest;
-use rustls::pki_types;
-use tokio_postgres::config::SslMode;
-use tokio_postgres::tls::{MakeTlsConnect, NoTls};
-use tokio_postgres_rustls::{MakeRustlsConnect, RustlsStream};
 
 /// Generate a set of TLS certificates: CA + server.
 fn generate_certs(
@@ -336,7 +337,8 @@ async fn scram_auth_mock() -> anyhow::Result<()> {
         generate_tls_config("generic-project-name.localhost", "localhost")?;
     let proxy = tokio::spawn(dummy_proxy(client, Some(server_config), Scram::mock()));
 
-    use rand::{distributions::Alphanumeric, Rng};
+    use rand::distributions::Alphanumeric;
+    use rand::Rng;
     let password: String = rand::thread_rng()
         .sample_iter(&Alphanumeric)
         .take(rand::random::<u8>() as usize)
@@ -492,30 +494,32 @@ impl TestBackend for TestConnectMechanism {
         match action {
             ConnectAction::Wake => Ok(helper_create_cached_node_info(self.cache)),
             ConnectAction::WakeFail => {
-                let err = control_plane::errors::ApiError::ControlPlane(ControlPlaneError {
-                    http_status_code: StatusCode::BAD_REQUEST,
-                    error: "TEST".into(),
-                    status: None,
-                });
+                let err =
+                    control_plane::errors::ApiError::ControlPlane(Box::new(ControlPlaneError {
+                        http_status_code: StatusCode::BAD_REQUEST,
+                        error: "TEST".into(),
+                        status: None,
+                    }));
                 assert!(!err.could_retry());
                 Err(control_plane::errors::WakeComputeError::ApiError(err))
             }
             ConnectAction::WakeRetry => {
-                let err = control_plane::errors::ApiError::ControlPlane(ControlPlaneError {
-                    http_status_code: StatusCode::BAD_REQUEST,
-                    error: "TEST".into(),
-                    status: Some(Status {
-                        code: "error".into(),
-                        message: "error".into(),
-                        details: Details {
-                            error_info: None,
-                            retry_info: Some(control_plane::messages::RetryInfo {
-                                retry_delay_ms: 1,
-                            }),
-                            user_facing_message: None,
-                        },
-                    }),
-                });
+                let err =
+                    control_plane::errors::ApiError::ControlPlane(Box::new(ControlPlaneError {
+                        http_status_code: StatusCode::BAD_REQUEST,
+                        error: "TEST".into(),
+                        status: Some(Status {
+                            code: "error".into(),
+                            message: "error".into(),
+                            details: Details {
+                                error_info: None,
+                                retry_info: Some(control_plane::messages::RetryInfo {
+                                    retry_delay_ms: 1,
+                                }),
+                                user_facing_message: None,
+                            },
+                        }),
+                    }));
                 assert!(err.could_retry());
                 Err(control_plane::errors::WakeComputeError::ApiError(err))
             }
@@ -552,7 +556,7 @@ fn helper_create_cached_node_info(cache: &'static NodeInfoCache) -> CachedNodeIn
 
 fn helper_create_connect_info(
     mechanism: &TestConnectMechanism,
-) -> auth::Backend<'static, ComputeCredentials, &()> {
+) -> auth::Backend<'static, ComputeCredentials> {
     let user_info = auth::Backend::ControlPlane(
         MaybeOwned::Owned(ControlPlaneBackend::Test(Box::new(mechanism.clone()))),
         ComputeCredentials {

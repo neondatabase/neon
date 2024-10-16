@@ -1,16 +1,17 @@
+use hyper::StatusCode;
+use tracing::{error, info, warn};
+
+use super::connect_compute::ComputeConnectBackend;
 use crate::config::RetryConfig;
 use crate::context::RequestMonitoring;
+use crate::control_plane::errors::WakeComputeError;
 use crate::control_plane::messages::{ControlPlaneError, Reason};
-use crate::control_plane::{errors::WakeComputeError, provider::CachedNodeInfo};
+use crate::control_plane::provider::CachedNodeInfo;
 use crate::metrics::{
     ConnectOutcome, ConnectionFailuresBreakdownGroup, Metrics, RetriesMetricGroup, RetryType,
     WakeupFailureKind,
 };
 use crate::proxy::retry::{retry_after, should_retry};
-use hyper::StatusCode;
-use tracing::{error, info, warn};
-
-use super::connect_compute::ComputeConnectBackend;
 
 pub(crate) async fn wake_compute<B: ComputeConnectBackend>(
     num_retries: &mut u32,
@@ -79,7 +80,7 @@ fn report_error(e: &WakeComputeError, retry: bool) {
             Reason::ConcurrencyLimitReached => WakeupFailureKind::ApiConsoleLocked,
             Reason::LockAlreadyTaken => WakeupFailureKind::ApiConsoleLocked,
             Reason::RunningOperations => WakeupFailureKind::ApiConsoleLocked,
-            Reason::Unknown => match e {
+            Reason::Unknown => match **e {
                 ControlPlaneError {
                     http_status_code: StatusCode::LOCKED,
                     ref error,

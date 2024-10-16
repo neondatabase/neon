@@ -1,10 +1,8 @@
 //! A set for cancelling random http connections
 
-use std::{
-    hash::{BuildHasher, BuildHasherDefault},
-    num::NonZeroUsize,
-    time::Duration,
-};
+use std::hash::{BuildHasher, BuildHasherDefault};
+use std::num::NonZeroUsize;
+use std::time::Duration;
 
 use indexmap::IndexMap;
 use parking_lot::Mutex;

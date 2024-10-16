@@ -2695,6 +2695,7 @@ checksum = "ad227c3af19d4914570ad36d30409928b75967c298feb9ea1969db3a610bb14e"
 dependencies = [
  "equivalent",
  "hashbrown 0.14.5",
+ "serde",
 ]
 
 [[package]]
@@ -2794,9 +2795,9 @@ dependencies = [
 
 [[package]]
 name = "itoa"
-version = "1.0.6"
+version = "1.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "453ad9f582a441959e5f0d088b02ce04cfe8d51a8eaf077f12ac6d3e94164ca6"
+checksum = "49f1f14873335454500d59611f1cf4a4b0f786f9ac11f4312a78e4cf2566695b"
 
 [[package]]
 name = "jobserver"
@@ -4296,6 +4297,7 @@ dependencies = [
  "indexmap 2.0.1",
  "ipnet",
  "itertools 0.10.5",
+ "itoa",
  "jose-jwa",
  "jose-jwk",
  "lasso",
@@ -4646,9 +4648,10 @@ dependencies = [
  "camino-tempfile",
  "futures",
  "futures-util",
+ "http-body-util",
  "http-types",
  "humantime-serde",
- "hyper 0.14.30",
+ "hyper 1.4.1",
  "itertools 0.10.5",
  "metrics",
  "once_cell",
@@ -7307,6 +7310,7 @@ dependencies = [
  "hyper 1.4.1",
  "hyper-util",
  "indexmap 1.9.3",
+ "indexmap 2.0.1",
  "itertools 0.12.1",
  "lazy_static",
  "libc",

@@ -1,20 +1,15 @@
 use std::net::SocketAddr;
 
-use anyhow::Context;
 use arc_swap::ArcSwapOption;
 
-use crate::{
-    compute::ConnCfg,
-    context::RequestMonitoring,
-    control_plane::{
-        messages::{ColdStartInfo, EndpointJwksResponse, MetricsAuxInfo},
-        NodeInfo,
-    },
-    intern::{BranchIdTag, EndpointIdTag, InternId, ProjectIdTag},
-    EndpointId,
-};
-
 use super::jwt::{AuthRule, FetchAuthRules};
+use crate::auth::backend::jwt::FetchAuthRulesError;
+use crate::compute::ConnCfg;
+use crate::context::RequestMonitoring;
+use crate::control_plane::messages::{ColdStartInfo, EndpointJwksResponse, MetricsAuxInfo};
+use crate::control_plane::NodeInfo;
+use crate::intern::{BranchIdTag, EndpointIdTag, InternId, ProjectIdTag};
+use crate::EndpointId;
 
 pub struct LocalBackend {
     pub(crate) node_info: NodeInfo,
@@ -53,11 +48,11 @@ impl FetchAuthRules for StaticAuthRules {
         &self,
         _ctx: &RequestMonitoring,
         _endpoint: EndpointId,
-    ) -> anyhow::Result<Vec<AuthRule>> {
+    ) -> Result<Vec<AuthRule>, FetchAuthRulesError> {
         let mappings = JWKS_ROLE_MAP.load();
         let role_mappings = mappings
             .as_deref()
-            .context("JWKs settings for this role were not configured")?;
+            .ok_or(FetchAuthRulesError::RoleJwksNotConfigured)?;
         let mut rules = vec![];
         for setting in &role_mappings.jwks {
             rules.push(AuthRule {

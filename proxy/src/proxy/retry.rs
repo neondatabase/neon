@@ -1,6 +1,10 @@
-use crate::{compute, config::RetryConfig};
-use std::{error::Error, io};
+use std::error::Error;
+use std::io;
+
 use tokio::time;
+
+use crate::compute;
+use crate::config::RetryConfig;
 
 pub(crate) trait CouldRetry {
     /// Returns true if the error could be retried
