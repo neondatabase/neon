@@ -67,7 +67,7 @@ use self::metadata::TimelineMetadata;
 use self::mgr::GetActiveTenantError;
 use self::mgr::GetTenantError;
 use self::remote_timeline_client::upload::upload_index_part;
-use self::remote_timeline_client::RemoteTimelineClient;
+use self::remote_timeline_client::{RemoteTimelineClient, WaitCompletionError};
 use self::timeline::uninit::TimelineCreateGuard;
 use self::timeline::uninit::TimelineExclusionError;
 use self::timeline::uninit::UninitializedTimeline;
@@ -1696,7 +1696,14 @@ impl Tenant {
                 tracing::warn!("reached timeout for waiting on upload queue");
                 return Err(TimelineArchivalError::Timeout);
             };
-            v.map_err(|e| TimelineArchivalError::Other(anyhow::anyhow!(e)))?;
+            v.map_err(|e| match e {
+                WaitCompletionError::NotInitialized(e) => {
+                    TimelineArchivalError::Other(anyhow::anyhow!(e))
+                }
+                WaitCompletionError::UploadQueueShutDownOrStopped => {
+                    TimelineArchivalError::Cancelled
+                }
+            })?;
         }
         Ok(())
     }
