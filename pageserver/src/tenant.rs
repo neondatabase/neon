@@ -1672,9 +1672,19 @@ impl Tenant {
         };
 
         // Third part: upload new timeline archival state and block until it is present in S3
-        let upload_needed = timeline
+        let upload_needed = match timeline
             .remote_client
-            .schedule_index_upload_for_timeline_archival_state(new_state)?;
+            .schedule_index_upload_for_timeline_archival_state(new_state)
+        {
+            Ok(upload_needed) => upload_needed,
+            Err(e) => {
+                if timeline.cancel.is_cancelled() {
+                    return Err(TimelineArchivalError::Cancelled);
+                } else {
+                    return Err(e.into());
+                }
+            }
+        };
 
         if upload_needed {
             info!("Uploading new state");
