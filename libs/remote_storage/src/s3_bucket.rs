@@ -28,13 +28,15 @@ use aws_sdk_s3::{
     Client,
 };
 use aws_smithy_async::rt::sleep::TokioSleep;
+use http_body_util::StreamBody;
 use http_types::StatusCode;
 
 use aws_smithy_types::{body::SdkBody, DateTime};
 use aws_smithy_types::{byte_stream::ByteStream, date_time::ConversionError};
 use bytes::Bytes;
 use futures::stream::Stream;
-use hyper0::Body;
+use futures_util::StreamExt;
+use hyper::body::Frame;
 use scopeguard::ScopeGuard;
 use tokio_util::sync::CancellationToken;
 use utils::backoff;
@@ -710,8 +712,8 @@ impl RemoteStorage for S3Bucket {
 
         let started_at = start_measuring_requests(kind);
 
-        let body = Body::wrap_stream(from);
-        let bytes_stream = ByteStream::new(SdkBody::from_body_0_4(body));
+        let body = StreamBody::new(from.map(|x| x.map(Frame::data)));
+        let bytes_stream = ByteStream::new(SdkBody::from_body_1_x(body));
 
         let upload = self
             .client

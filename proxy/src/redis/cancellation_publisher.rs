@@ -5,12 +5,9 @@ use redis::AsyncCommands;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+use super::connection_with_credentials_provider::ConnectionWithCredentialsProvider;
+use super::notifications::{CancelSession, Notification, PROXY_CHANNEL_NAME};
 use crate::rate_limiter::{GlobalRateLimiter, RateBucketInfo};
-
-use super::{
-    connection_with_credentials_provider::ConnectionWithCredentialsProvider,
-    notifications::{CancelSession, Notification, PROXY_CHANNEL_NAME},
-};
 
 pub trait CancellationPublisherMut: Send + Sync + 'static {
     #[allow(async_fn_in_trait)]

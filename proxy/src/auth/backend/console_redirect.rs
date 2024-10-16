@@ -1,15 +1,3 @@
-use crate::{
-    auth,
-    cache::Cached,
-    compute,
-    config::AuthenticationConfig,
-    context::RequestMonitoring,
-    control_plane::{self, provider::NodeInfo, CachedNodeInfo},
-    error::{ReportableError, UserFacingError},
-    proxy::connect_compute::ComputeConnectBackend,
-    stream::PqStream,
-    waiters,
-};
 use async_trait::async_trait;
 use pq_proto::BeMessage as Be;
 use thiserror::Error;
@@ -18,6 +6,15 @@ use tokio_postgres::config::SslMode;
 use tracing::{info, info_span};
 
 use super::ComputeCredentialKeys;
+use crate::cache::Cached;
+use crate::config::AuthenticationConfig;
+use crate::context::RequestMonitoring;
+use crate::control_plane::provider::NodeInfo;
+use crate::control_plane::{self, CachedNodeInfo};
+use crate::error::{ReportableError, UserFacingError};
+use crate::proxy::connect_compute::ComputeConnectBackend;
+use crate::stream::PqStream;
+use crate::{auth, compute, waiters};
 
 #[derive(Debug, Error)]
 pub(crate) enum WebAuthError {

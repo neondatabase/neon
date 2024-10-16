@@ -1,11 +1,9 @@
 //! Proxy Protocol V2 implementation
 
-use std::{
-    io,
-    net::SocketAddr,
-    pin::Pin,
-    task::{Context, Poll},
-};
+use std::io;
+use std::net::SocketAddr;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
 use bytes::BytesMut;
 use pin_project_lite::pin_project;

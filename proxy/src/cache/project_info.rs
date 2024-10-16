@@ -1,9 +1,8 @@
-use std::{
-    collections::HashSet,
-    convert::Infallible,
-    sync::{atomic::AtomicU64, Arc},
-    time::Duration,
-};
+use std::collections::HashSet;
+use std::convert::Infallible;
+use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -13,15 +12,12 @@ use tokio::sync::Mutex;
 use tokio::time::Instant;
 use tracing::{debug, info};
 
-use crate::{
-    auth::IpPattern,
-    config::ProjectInfoCacheOptions,
-    control_plane::AuthSecret,
-    intern::{EndpointIdInt, ProjectIdInt, RoleNameInt},
-    EndpointId, RoleName,
-};
-
 use super::{Cache, Cached};
+use crate::auth::IpPattern;
+use crate::config::ProjectInfoCacheOptions;
+use crate::control_plane::AuthSecret;
+use crate::intern::{EndpointIdInt, ProjectIdInt, RoleNameInt};
+use crate::{EndpointId, RoleName};
 
 #[async_trait]
 pub(crate) trait ProjectInfoCache {
@@ -371,7 +367,8 @@ impl Cache for ProjectInfoCacheImpl {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{scram::ServerSecret, ProjectId};
+    use crate::scram::ServerSecret;
+    use crate::ProjectId;
 
     #[tokio::test]
     async fn test_project_info_cache_settings() {

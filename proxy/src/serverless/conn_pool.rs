@@ -1,23 +1,20 @@
-use futures::{future::poll_fn, Future};
+use std::fmt;
+use std::pin::pin;
+use std::sync::{Arc, Weak};
+use std::task::{ready, Poll};
+
+use futures::future::poll_fn;
+use futures::Future;
 use smallvec::SmallVec;
-use std::{
-    fmt,
-    task::{ready, Poll},
-};
-
-use std::{pin::pin, sync::Arc, sync::Weak};
-
 use tokio::time::Instant;
 use tokio_postgres::tls::NoTlsStream;
 use tokio_postgres::{AsyncMessage, Socket};
 use tokio_util::sync::CancellationToken;
+use tracing::{error, info, info_span, warn, Instrument};
 
 use crate::context::RequestMonitoring;
 use crate::control_plane::messages::MetricsAuxInfo;
 use crate::metrics::Metrics;
-
-use tracing::{error, warn};
-use tracing::{info, info_span, Instrument};
 
 use super::conn_pool_lib::{Client, ClientInnerExt, ConnInfo, GlobalConnPool};
 
@@ -210,13 +207,13 @@ impl<C: ClientInnerExt> Drop for ClientInnerRemote<C> {
 
 #[cfg(test)]
 mod tests {
-    use std::{mem, sync::atomic::AtomicBool};
-
-    use crate::{
-        proxy::NeonOptions, serverless::cancel_set::CancelSet, BranchId, EndpointId, ProjectId,
-    };
+    use std::mem;
+    use std::sync::atomic::AtomicBool;
 
     use super::*;
+    use crate::proxy::NeonOptions;
+    use crate::serverless::cancel_set::CancelSet;
+    use crate::{BranchId, EndpointId, ProjectId};
 
     struct MockClient(Arc<AtomicBool>);
     impl MockClient {

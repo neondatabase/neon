@@ -1,10 +1,13 @@
 //! Abstraction for the string-oriented SASL protocols.
 
-use super::{messages::ServerMessage, Mechanism};
-use crate::stream::PqStream;
 use std::io;
+
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::info;
+
+use super::messages::ServerMessage;
+use super::Mechanism;
+use crate::stream::PqStream;
 
 /// Abstracts away all peculiarities of the libpq's protocol.
 pub(crate) struct SaslStream<'a, S> {

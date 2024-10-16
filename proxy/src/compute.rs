@@ -1,24 +1,30 @@
-use crate::{
-    auth::parse_endpoint_param,
-    cancellation::CancelClosure,
-    context::RequestMonitoring,
-    control_plane::{errors::WakeComputeError, messages::MetricsAuxInfo, provider::ApiLockError},
-    error::{ReportableError, UserFacingError},
-    metrics::{Metrics, NumDbConnectionsGuard},
-    proxy::neon_option,
-    Host,
-};
+use std::io;
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::Duration;
+
 use futures::{FutureExt, TryFutureExt};
 use itertools::Itertools;
 use once_cell::sync::OnceCell;
 use pq_proto::StartupMessageParams;
-use rustls::{client::danger::ServerCertVerifier, pki_types::InvalidDnsNameError};
-use std::{io, net::SocketAddr, sync::Arc, time::Duration};
+use rustls::client::danger::ServerCertVerifier;
+use rustls::pki_types::InvalidDnsNameError;
 use thiserror::Error;
 use tokio::net::TcpStream;
 use tokio_postgres::tls::MakeTlsConnect;
 use tokio_postgres_rustls::MakeRustlsConnect;
 use tracing::{error, info, warn};
+
+use crate::auth::parse_endpoint_param;
+use crate::cancellation::CancelClosure;
+use crate::context::RequestMonitoring;
+use crate::control_plane::errors::WakeComputeError;
+use crate::control_plane::messages::MetricsAuxInfo;
+use crate::control_plane::provider::ApiLockError;
+use crate::error::{ReportableError, UserFacingError};
+use crate::metrics::{Metrics, NumDbConnectionsGuard};
+use crate::proxy::neon_option;
+use crate::Host;
 
 pub const COULD_NOT_CONNECT: &str = "Couldn't connect to compute node";
 

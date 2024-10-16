@@ -6,13 +6,14 @@
 
 use std::fmt::Debug;
 
-use super::*;
 use bytes::{Bytes, BytesMut};
 use futures::{SinkExt, StreamExt};
 use postgres_protocol::message::frontend;
 use tokio::io::{AsyncReadExt, DuplexStream};
 use tokio_postgres::tls::TlsConnect;
 use tokio_util::codec::{Decoder, Encoder};
+
+use super::*;
 
 enum Intercept {
     None,

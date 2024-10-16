@@ -16,7 +16,7 @@ use fail::fail_point;
 use pageserver_api::key::Key;
 use postgres_ffi::pg_constants;
 use std::fmt::Write as FmtWrite;
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 use tokio::io;
 use tokio::io::AsyncWrite;
 use tracing::*;
@@ -352,12 +352,25 @@ where
             }
         }
 
-        for (path, content) in self
+        let start_time = Instant::now();
+        let aux_files = self
             .timeline
             .list_aux_files(self.lsn, self.ctx)
             .await
-            .map_err(|e| BasebackupError::Server(e.into()))?
-        {
+            .map_err(|e| BasebackupError::Server(e.into()))?;
+        let aux_scan_time = start_time.elapsed();
+        let aux_estimated_size = aux_files
+            .values()
+            .map(|content| content.len())
+            .sum::<usize>();
+        info!(
+            "Scanned {} aux files in {}ms, aux file content size = {}",
+            aux_files.len(),
+            aux_scan_time.as_millis(),
+            aux_estimated_size
+        );
+
+        for (path, content) in aux_files {
             if path.starts_with("pg_replslot") {
                 let offs = pg_constants::REPL_SLOT_ON_DISK_OFFSETOF_RESTART_LSN;
                 let restart_lsn = Lsn(u64::from_le_bytes(

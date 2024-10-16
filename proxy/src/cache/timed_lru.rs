@@ -1,9 +1,6 @@
-use std::{
-    borrow::Borrow,
-    hash::Hash,
-    time::{Duration, Instant},
-};
-use tracing::debug;
+use std::borrow::Borrow;
+use std::hash::Hash;
+use std::time::{Duration, Instant};
 
 // This seems to make more sense than `lru` or `cached`:
 //
@@ -15,8 +12,10 @@ use tracing::debug;
 //
 // On the other hand, `hashlink` has good download stats and appears to be maintained.
 use hashlink::{linked_hash_map::RawEntryMut, LruCache};
+use tracing::debug;
 
-use super::{common::Cached, timed_lru, Cache};
+use super::common::Cached;
+use super::{timed_lru, Cache};
 
 /// An implementation of timed LRU cache with fixed capacity.
 /// Key properties:

@@ -1,12 +1,11 @@
 //! Things stolen from `libs/utils/src/http` to add hyper 1.0 compatibility
 //! Will merge back in at some point in the future.
 
-use bytes::Bytes;
-
 use anyhow::Context;
+use bytes::Bytes;
 use http::{Response, StatusCode};
-use http_body_util::{combinators::BoxBody, BodyExt, Full};
-
+use http_body_util::combinators::BoxBody;
+use http_body_util::{BodyExt, Full};
 use serde::Serialize;
 use utils::http::error::ApiError;
 

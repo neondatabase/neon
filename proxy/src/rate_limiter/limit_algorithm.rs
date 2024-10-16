@@ -1,10 +1,12 @@
 //! Algorithms for controlling concurrency limits.
+use std::pin::pin;
+use std::sync::Arc;
+use std::time::Duration;
+
 use parking_lot::Mutex;
-use std::{pin::pin, sync::Arc, time::Duration};
-use tokio::{
-    sync::Notify,
-    time::{error::Elapsed, Instant},
-};
+use tokio::sync::Notify;
+use tokio::time::error::Elapsed;
+use tokio::time::Instant;
 
 use self::aimd::Aimd;
 

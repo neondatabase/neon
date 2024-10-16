@@ -1,22 +1,22 @@
+use std::collections::VecDeque;
+use std::sync::atomic::{self, AtomicUsize};
+use std::sync::{Arc, Weak};
+
 use dashmap::DashMap;
 use hyper::client::conn::http2;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use parking_lot::RwLock;
 use rand::Rng;
-use std::collections::VecDeque;
-use std::sync::atomic::{self, AtomicUsize};
-use std::{sync::Arc, sync::Weak};
 use tokio::net::TcpStream;
+use tracing::{debug, error, info, info_span, Instrument};
 
+use crate::context::RequestMonitoring;
 use crate::control_plane::messages::{ColdStartInfo, MetricsAuxInfo};
 use crate::metrics::{HttpEndpointPoolsGuard, Metrics};
 use crate::usage_metrics::{Ids, MetricCounter, USAGE_METRICS};
-use crate::{context::RequestMonitoring, EndpointCacheKey};
-
-use tracing::{debug, error};
-use tracing::{info, info_span, Instrument};
 
 use super::conn_pool_lib::{ClientInnerExt, ConnInfo};
+use crate::EndpointCacheKey;
 
 pub(crate) type Send = http2::SendRequest<hyper::body::Incoming>;
 pub(crate) type Connect =
