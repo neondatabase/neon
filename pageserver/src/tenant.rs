@@ -16,6 +16,7 @@ use anyhow::{bail, Context};
 use arc_swap::ArcSwap;
 use camino::Utf8Path;
 use camino::Utf8PathBuf;
+use either::Either;
 use enumset::EnumSet;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
@@ -33,13 +34,14 @@ use pageserver_api::shard::TenantShardId;
 use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
 use remote_storage::TimeoutOrCancel;
-use timeline::import_pgdata;
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::sync::Weak;
 use std::time::SystemTime;
 use storage_broker::BrokerClientChannel;
+use timeline::import_pgdata;
 use timeline::offload::offload_timeline;
+use timeline::ShutdownMode;
 use tokio::io::BufReader;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
@@ -356,6 +358,8 @@ pub struct Tenant {
     pub(crate) gc_block: gc_block::GcBlock,
 
     l0_flush_global_state: L0FlushGlobalState,
+
+    myself: Arc<Self>,
 }
 
 impl std::fmt::Debug for Tenant {
@@ -681,8 +685,6 @@ pub(crate) struct CreatingTimelineStateBootstrap {
     pub(crate) pg_version: u32,
 }
 
-/// This is part of the serialized state in [`IndexPart`].
-#[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct CreatingTimelineStateImportPgdata {
     pub(crate) s3_uri: String,
 }
@@ -936,17 +938,20 @@ impl Tenant {
         let attach_mode = attached_conf.location.attach_mode;
         let generation = attached_conf.location.generation;
 
-        let tenant = Arc::new(Tenant::new(
-            TenantState::Attaching,
-            conf,
-            attached_conf,
-            shard_identity,
-            Some(wal_redo_manager),
-            tenant_shard_id,
-            remote_storage.clone(),
-            deletion_queue_client,
-            l0_flush_global_state,
-        ));
+        let tenant = Arc::new_cyclic(|myself| {
+            Tenant::new(
+                TenantState::Attaching,
+                conf,
+                attached_conf,
+                shard_identity,
+                Some(wal_redo_manager),
+                tenant_shard_id,
+                remote_storage.clone(),
+                deletion_queue_client,
+                l0_flush_global_state,
+                myself.clone(),
+            )
+        });
 
         // The attach task will carry a GateGuard, so that shutdown() reliably waits for it to drop out if
         // we shut down while attaching.
@@ -1254,25 +1259,58 @@ impl Tenant {
                 assert!(prev.is_none());
             }
 
-            // TODO again handle early failure
-            self.load_remote_timeline(
-                timeline_id,
-                index_part,
-                remote_metadata,
-                TimelineResources {
-                    remote_client,
-                    timeline_get_throttle: self.timeline_get_throttle.clone(),
-                    l0_flush_global_state: self.l0_flush_global_state.clone(),
-                },
-                ctx,
-            )
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to load remote timeline {} for tenant {}",
-                    timeline_id, self.tenant_shard_id
+            if let Some(import_pgdata) = index_part.import_pgdata {
+                let guard = async move {
+                    let guard_or_arc = self
+                        .start_creating_timeline(
+                            timeline_id,
+                            CreatingTimelineState::ImportPgdata(
+                                CreatingTimelineStateImportPgdata {
+                                    s3_uri: import_pgdata.s3_uri,
+                                },
+                            ),
+                        )
+                        .await
+                        .context("start_creating_timeline failed, this should not happen")?;
+                    match guard_or_arc {
+                        either::Either::Left(guard) => Ok(guard),
+                        either::Either::Right(arc) => {
+                            anyhow::bail!("timeline object already exists, this should not happen during attach")
+                        }
+                    }
+                }
+                .await
+                .with_context(|| {
+                    format!(
+                        "resume import of timeline {}/{}",
+                        self.tenant_shard_id, timeline_id
+                    )
+                })?;
+                tokio::spawn(
+                    self.clone()
+                        .create_timeline_import_pgdata_task(todo!(), guard),
+                );
+            } else {
+                // TODO again handle early failure
+                self.load_remote_timeline(
+                    timeline_id,
+                    index_part,
+                    remote_metadata,
+                    TimelineResources {
+                        remote_client,
+                        timeline_get_throttle: self.timeline_get_throttle.clone(),
+                        l0_flush_global_state: self.l0_flush_global_state.clone(),
+                    },
+                    ctx,
                 )
-            })?;
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to load remote timeline {} for tenant {}",
+                        timeline_id, self.tenant_shard_id
+                    )
+                })?;
+            }
         }
 
         // Walk through deleted timelines, resume deletion
@@ -1990,7 +2028,8 @@ impl Tenant {
                     ActivateTimelineArgs::Yes { broker_client },
                     ctx,
                 )
-                .await
+                .await?;
+                todo!("bubble up something that results in 202")
             }
         }
     }
@@ -2004,18 +2043,18 @@ impl Tenant {
         new_timeline_id: TimelineId,
         activate: ActivateTimelineArgs,
         ctx: &RequestContext,
-    ) -> Result<Arc<Timeline>, CreateTimelineError> {
+    ) -> Result<either::Either<(), Arc<Timeline>>, CreateTimelineError> {
         //
         // There's probably a simpler way to upload an index part, but, remote_timeline_client
         // is the canonical way we do it.
         // - create an empty timeline in-memory
         // - use its remote_timeline_client to do the upload
         // - dispose of the uninit timeline
-        // - reload the timeline object from remote, like during attach
+        // - keep the creation guard alive
 
         let timeline_create_guard = match self
             .start_creating_timeline(
-                timeline_id,
+                new_timeline_id,
                 CreatingTimelineState::ImportPgdata(CreatingTimelineStateImportPgdata {
                     s3_uri: s3_uri.clone(),
                 }),
@@ -2023,63 +2062,131 @@ impl Tenant {
             .await?
         {
             either::Either::Left(guard) => guard,
-            either::Either::Right(timeline) => return Ok(timeline),
+            either::Either::Right(timeline) => return Ok(Either::Right(timeline)),
         };
 
-        let new_metadata = TimelineMetadata::new(
-            // Initialize disk_consistent LSN to 0, The caller must import some data to
-            // make it valid, before calling finish_creation()
-            Lsn(0),
-            None,
-            None,
-            Lsn(0),
-            initdb_lsn,
-            initdb_lsn,
-            pg_version,
-        );
-        let uninit_timeline = self
-            .prepare_new_timeline(
-                new_timeline_id,
-                &new_metadata,
-                create_guard,
-                initdb_lsn,
-                None,
-                None,
-            )
-            .await
-            .context("prepare new timeline")?;
+        let pgdata_remote_storage = GenericRemoteStorage::LocalFs(remote_storage::LocalFs::new(
+            todo!("s3_uri"),
+            // FIXME: we probably want some timeout, and we might be able to assume the max file
+            // size on S3 is 1GiB (postgres segment size). But the problem is that the individual
+            // downloaders don't know enough about concurrent downloads to make a guess on the
+            // expected bandwidth and resulting best timeout.
+            std::time::Duration::from_secs(24 * 60 * 60),
+        )?);
+        let prepared =
+            import_pgdata::prepare(pgdata_remote_storage, todo!("s3_uri"), ctx, self.cancel)
+                .await?;
 
-        let timeline = uninit_timeline.raw_timeline().unwrap();
-        timeline
+        info!("prepared pgdata");
+
+        // TODO: should dedup this code with bootstrap_timeline
+        let uninit_timeline = self
+            .create_empty_timeline(
+                new_timeline_id,
+                prepared.base_lsn(),
+                prepared.pg_version(),
+                &ctx,
+            )
+            .await?;
+
+        uninit_timeline
+            .raw_timeline()
+            .unwrap()
             .remote_client
             .schedule_index_upload_for_import_pgdata_state_update(Some(
                 CreatingTimelineStateImportPgdata {
                     s3_uri: s3_uri.clone(),
                 },
-            ))
-            .context("schedule initial index upload");
-        timeline
+            ))?;
+
+        uninit_timeline
+            .raw_timeline()
+            .unwrap()
             .remote_client
             .wait_completion()
             .await
             .context("wait for initial index upload")?;
 
-        drop(timeline);
-        let timeline = uninit_timeline
-            .finish_by_reloading_timeline_from_remote(ctx)
+        tokio::spawn(self.clone().create_timeline_import_pgdata_task(
+            uninit_timeline.finish_creation_myself(),
+            timeline_create_guard,
+        ));
+
+        // NB: the timeline doesn't exist in self.timelines at this point, only in self.timelines_creating
+        Ok(Either::Left(()))
+    }
+
+    fn create_timeline_import_pgdata_task(
+        self: Arc<Tenant>,
+        timeline: Arc<Timeline>,
+        prepared: import_pgdata::Prepared,
+        activate: ActivateTimelineArgs,
+        timeline_create_guard: TimelineCreateGuard,
+    ) -> impl Future<Output = Result<(), anyhow::Error>> {
+        let tenant = Arc::clone(&self);
+        async move {
+            let ctx = RequestContext::new(TaskKind::ImportPgdata, DownloadBehavior::Warn);
+
+            // This fills the layer map with layers.
+            import_pgdata::doit(
+                &timeline,
+                prepared,
+                &ctx,
+                tenant.cancel.clone(), /* TODO: separate cancellation token for the in-progress import? */
+            )
             .await
-            .context("finish by reloading timeline from remote")?;
+            .context("import")?;
 
-        match activate {
-            ActivateTimelineArgs::Yes { broker_client } => {
-                timeline
-                    .activate(self.clone(), broker_client, None, ctx)
-                    .await?;
+            timeline
+                .remote_client
+                .schedule_index_upload_for_import_pgdata_state_update(None)?;
+
+            timeline.remote_client.wait_completion().await?;
+
+            //
+            // Reload timeline from remote.
+            // This proves that the remote state is attachable, and it reuses the code.
+            // TODO: must not do this if tenant is shutting down / has shut down
+            //
+
+            timeline.shutdown(ShutdownMode::Hard).await; // in theory this shouldn't even .await anything except for coop yield
+            let Some(timeline) = Arc::into_inner(timeline) else {
+                anyhow::bail!("implementation error: timeline that we shut down was still referenced from somewhere");
+            };
+            let timeline_id = timeline.timeline_id;
+            drop(timeline);
+
+            // load from object storage like Tenant::attach does
+            let resources = tenant.build_timeline_resources(timeline_id);
+            let index_part = resources
+                .remote_client
+                .download_index_file(&tenant.cancel)
+                .await?;
+            let index_part = match index_part {
+                MaybeDeletedIndexPart::Deleted(_) => {
+                    // likely concurrent delete call, cplane should prevent this
+                    anyhow::bail!("index part says deleted but we are not done creating yet, this should not happen but")
+                }
+                MaybeDeletedIndexPart::IndexPart(p) => p,
+            };
+            let metadata = index_part.metadata.clone();
+            let timeline = self
+                .owning_tenant
+                .load_remote_timeline(timeline_id, index_part, metadata, resources, ctx)
+                .await?;
+
+            match activate {
+                ActivateTimelineArgs::Yes { broker_client } => {
+                    timeline.activate(tenant, broker_client, None, &ctx);
+                }
+                ActivateTimelineArgs::No => (),
             }
-            ActivateTimelineArgs::No => (),
-        }
 
-        Ok(timeline)
+            // Finish the creation process
+            drop(timeline_create_guard);
+
+            anyhow::Ok(())
+        }
     }
 
     pub(crate) async fn delete_timeline(
@@ -2440,7 +2547,8 @@ impl Tenant {
                 let timeline_id = timeline.timeline_id;
                 let span = tracing::info_span!("timeline_shutdown", %timeline_id, ?shutdown_mode);
                 js.spawn(async move { timeline.shutdown(shutdown_mode).instrument(span).await });
-            })
+            });
+            todo!("shut down ongoing import tasks")
         };
         // test_long_timeline_create_then_tenant_delete is leaning on this message
         tracing::info!("Waiting for timelines...");
@@ -2858,7 +2966,6 @@ enum ActivateTimelineArgs {
     Yes {
         broker_client: storage_broker::BrokerClientChannel,
     },
-    #[cfg(test)]
     No,
 }
 
@@ -3082,6 +3189,7 @@ impl Tenant {
         remote_storage: GenericRemoteStorage,
         deletion_queue_client: DeletionQueueClient,
         l0_flush_global_state: L0FlushGlobalState,
+        myself: Weak<Tenant>,
     ) -> Tenant {
         debug_assert!(
             !attached_conf.location.generation.is_none() || conf.control_plane_api.is_none()
@@ -3181,6 +3289,7 @@ impl Tenant {
             ongoing_timeline_detach: std::sync::Mutex::default(),
             gc_block: Default::default(),
             l0_flush_global_state,
+            myself,
         }
     }
 
@@ -3791,7 +3900,7 @@ impl Tenant {
         &self,
         new_timeline_id: TimelineId,
         state: CreatingTimelineState,
-    ) -> Result<either::Either<TimelineCreateGuard<'_>, Arc<Timeline>>, CreateTimelineError> {
+    ) -> Result<either::Either<TimelineCreateGuard, Arc<Timeline>>, CreateTimelineError> {
         match self.create_timeline_create_guard(new_timeline_id) {
             Ok(create_guard) => {
                 pausable_failpoint!("timeline-creation-after-uninit");
@@ -3841,6 +3950,9 @@ impl Tenant {
                             info!("timeline already exists with different ancestor LSN");
                             return Err(CreateTimelineError::Conflict);
                         }
+                    }
+                    CreatingTimelineState::ImportPgdata(import_pgdata) => {
+                        todo!("idempotency checking would require keeping track of S3 import URI into eternity")
                     }
                 }
 
@@ -4121,7 +4233,7 @@ impl Tenant {
         &'a self,
         new_timeline_id: TimelineId,
         new_metadata: &TimelineMetadata,
-        create_guard: TimelineCreateGuard<'a>,
+        create_guard: TimelineCreateGuard,
         start_lsn: Lsn,
         ancestor: Option<Arc<Timeline>>,
         last_aux_file_policy: Option<AuxFilePolicy>,
@@ -4621,24 +4733,27 @@ pub(crate) mod harness {
         ) -> anyhow::Result<Arc<Tenant>> {
             let walredo_mgr = Arc::new(WalRedoManager::from(TestRedoManager));
 
-            let tenant = Arc::new(Tenant::new(
-                TenantState::Attaching,
-                self.conf,
-                AttachedTenantConf::try_from(LocationConf::attached_single(
-                    TenantConfOpt::from(self.tenant_conf.clone()),
-                    self.generation,
-                    &ShardParameters::default(),
-                ))
-                .unwrap(),
-                // This is a legacy/test code path: sharding isn't supported here.
-                ShardIdentity::unsharded(),
-                Some(walredo_mgr),
-                self.tenant_shard_id,
-                self.remote_storage.clone(),
-                self.deletion_queue.new_client(),
-                // TODO: ideally we should run all unit tests with both configs
-                L0FlushGlobalState::new(L0FlushConfig::default()),
-            ));
+            let tenant = Arc::new_cyclic(|myself| {
+                Tenant::new(
+                    TenantState::Attaching,
+                    self.conf,
+                    AttachedTenantConf::try_from(LocationConf::attached_single(
+                        TenantConfOpt::from(self.tenant_conf.clone()),
+                        self.generation,
+                        &ShardParameters::default(),
+                    ))
+                    .unwrap(),
+                    // This is a legacy/test code path: sharding isn't supported here.
+                    ShardIdentity::unsharded(),
+                    Some(walredo_mgr),
+                    self.tenant_shard_id,
+                    self.remote_storage.clone(),
+                    self.deletion_queue.new_client(),
+                    // TODO: ideally we should run all unit tests with both configs
+                    L0FlushGlobalState::new(L0FlushConfig::default()),
+                    myself,
+                )
+            });
 
             let preload = tenant
                 .preload(&self.remote_storage, CancellationToken::new())

@@ -1,7 +1,8 @@
 use core::panic;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use tokio::sync::Notify;
+use tokio_util::sync::CancellationToken;
 use tracing::{info, info_span, instrument};
 use utils::{
     id::TimelineId,
@@ -102,7 +103,7 @@ impl Timeline {
                     cancel,
                     receiver,
                 });
-                return ActivateEffect::DelayUntilImportDone(notify);
+                todo!()
             }
             Inner::Running => {
                 warn!("task is already running, this should not happen");

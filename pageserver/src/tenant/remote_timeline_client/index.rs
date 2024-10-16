@@ -12,6 +12,7 @@ use utils::id::TimelineId;
 
 use crate::tenant::metadata::TimelineMetadata;
 use crate::tenant::storage_layer::LayerName;
+use crate::tenant::timeline::import_pgdata;
 use crate::tenant::{CreatingTimelineStateImportPgdata, Generation};
 use pageserver_api::shard::ShardIndex;
 
@@ -38,8 +39,8 @@ pub struct IndexPart {
     pub archived_at: Option<NaiveDateTime>,
 
     #[serde(default)]
-    #[serde(skip_serializing_if = "HashMap::is_empty")]
-    pub import_pgdata: Option<CreatingTimelineStateImportPgdata>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub import_pgdata: Option<import_pgdata::flow::index_part_format::Root>,
 
     /// Per layer file name metadata, which can be present for a present or missing layer file.
     ///

@@ -298,7 +298,7 @@ struct TimelineCreatePgdataImportCmdArgs {
     tenant_id: Option<TenantId>,
 
     #[clap(long, help = "New timeline's ID")]
-    timeline_id: TimelineId,
+    timeline_id: Option<TimelineId>,
 
     #[clap(long, help = "Human-readable alias for the new timeline")]
     branch_name: String,
@@ -1213,8 +1213,7 @@ async fn handle_timeline(cmd: &TimelineCmd, env: &mut local_env::LocalEnv) -> Re
             env.register_branch_mapping(new_branch_name.to_string(), tenant_id, new_timeline_id)?;
 
             println!(
-                "Created timeline '{}' in importing mode for tenant: {tenant_id}",
-                timeline_info.timeline_id
+                "Created timeline '{new_timeline_id}' in importing mode for tenant: {tenant_id}",
             );
         }
         // TODO: rename to import-basebackup-plus-wal

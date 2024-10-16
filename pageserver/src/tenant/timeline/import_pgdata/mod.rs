@@ -59,12 +59,11 @@ use remote_storage::{
     Download, DownloadError, DownloadOpts, GenericRemoteStorage, Listing, ListingObject, RemotePath,
 };
 
-pub(crate) struct Prepared<'a> {
+pub(crate) struct Prepared {
     pgdata_dir: RemotePath,
     control_file: ControlFileData,
     control_file_buf: Bytes,
-    storage: RemoteStorageWrapper,
-    ctx: &'a RequestContext,
+    storage: GenericRemoteStorage,
 }
 
 /// Prepare for importing a PGDATA dump from remote storage.
@@ -82,10 +81,10 @@ pub(crate) struct Prepared<'a> {
 pub(crate) async fn prepare<'a>(
     storage: GenericRemoteStorage,
     pgdata_dir: RemotePath,
-    ctx: &'a RequestContext,
-    cancel: &'a CancellationToken,
-) -> anyhow::Result<Prepared<'a>> {
-    let storage_wrapper = RemoteStorageWrapper::new(storage, cancel.clone());
+    ctx: &RequestContext,
+    cancel: CancellationToken,
+) -> anyhow::Result<Prepared> {
+    let storage_wrapper = RemoteStorageWrapper::new(storage, cancel);
 
     let controlfile_path = pgdata_dir.join("global/pg_control");
     let controlfile_buf = storage_wrapper.get(&controlfile_path).await?;
@@ -96,14 +95,13 @@ pub(crate) async fn prepare<'a>(
         pgdata_dir,
         control_file,
         control_file_buf: controlfile_buf,
-        storage: storage_wrapper,
-        ctx,
+        storage: storage_wrapper.storage,
     };
     prepared.try_pg_version()?;
     Ok(prepared)
 }
 
-impl Prepared<'_> {
+impl Prepared {
     pub(crate) fn base_lsn(&self) -> Lsn {
         Lsn(self.control_file.checkPoint).align()
     }
@@ -126,14 +124,15 @@ impl Prepared<'_> {
 }
 
 pub async fn doit(
-    uninit_timeline: &UninitializedTimeline<'_>,
-    prepared: Prepared<'_>,
+    timeline: &Arc<Timeline>,
+    prepared: Prepared,
+    ctx: &RequestContext,
+    cancel: CancellationToken,
 ) -> anyhow::Result<()> {
-    let raw_timeline = uninit_timeline.raw_timeline()?;
     // ensure prepare() + doit() were used correctly
-    assert_eq!(raw_timeline.pg_version, prepared.pg_version());
-    assert_eq!(raw_timeline.ancestor_lsn, Lsn(0));
-    assert!(raw_timeline.ancestor_timeline.is_none());
+    assert_eq!(timeline.pg_version, prepared.pg_version());
+    assert_eq!(timeline.ancestor_lsn, Lsn(0));
+    assert!(timeline.ancestor_timeline.is_none());
 
     let pgdata_lsn = prepared.base_lsn();
     let Prepared {
@@ -141,16 +140,15 @@ pub async fn doit(
         control_file,
         control_file_buf,
         storage,
-        ctx,
     } = prepared;
     PgImportEnv {
-        timeline: raw_timeline.clone(),
+        timeline: timeline.clone(),
         pgdata_dir,
         control_file,
         control_file_buf,
         pgdata_lsn,
         tasks: Vec::new(),
-        storage,
+        storage: RemoteStorageWrapper::new(storage, cancel),
     }
     .doit(ctx)
     .await

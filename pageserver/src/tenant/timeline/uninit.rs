@@ -28,14 +28,14 @@ use super::Timeline;
 pub struct UninitializedTimeline<'t> {
     pub(crate) owning_tenant: &'t Tenant,
     timeline_id: TimelineId,
-    raw_timeline: Option<(Arc<Timeline>, TimelineCreateGuard<'t>)>,
+    raw_timeline: Option<(Arc<Timeline>, TimelineCreateGuard)>,
 }
 
 impl<'t> UninitializedTimeline<'t> {
     pub(crate) fn new(
         owning_tenant: &'t Tenant,
         timeline_id: TimelineId,
-        raw_timeline: Option<(Arc<Timeline>, TimelineCreateGuard<'t>)>,
+        raw_timeline: Option<(Arc<Timeline>, TimelineCreateGuard)>,
     ) -> Self {
         Self {
             owning_tenant,
@@ -92,54 +92,8 @@ impl<'t> UninitializedTimeline<'t> {
         }
     }
 
-    /// Finish creation by dropping the in-memory struct and reloading the timeline from object storage.
-    ///
-    /// XXX factor this out into a method on tenant and
-    /// share code with Tenant::attach
-    /// Like, Tenant::reload_timeline() or whatever.
-    ///
-    /// Returns a not-activated timeline that's already in the tenant's timelines map.
-    ///
-    // Not recoverable.
-    pub(crate) async fn finish_by_reloading_timeline_from_remote(
-        mut self,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<Arc<Timeline>> {
-        let tenant = self.owning_tenant;
-        let timeline_id = self.timeline_id;
-        let tenant_shard_id = tenant.tenant_shard_id;
-
-        let Some((raw_timeline, _create_guard)) = self.raw_timeline.take() else {
-            return Err(anyhow::anyhow!(
-                "No timeline for initialization found for {tenant_shard_id}/{timeline_id}"
-            ));
-        };
-
-        raw_timeline.shutdown(ShutdownMode::Hard).await; // in theory this shouldn't even .await anything except for coop yield
-        let Some(raw_timeline) = Arc::into_inner(raw_timeline) else {
-            anyhow::bail!("implementation error: timeline that we shut down was still referenced from somewhere");
-        };
-        drop(raw_timeline);
-
-        // load from object storage like Tenant::attach does
-        let resources = tenant.build_timeline_resources(timeline_id);
-        let index_part = resources
-            .remote_client
-            .download_index_file(&tenant.cancel)
-            .await?;
-        let index_part = match index_part {
-            MaybeDeletedIndexPart::Deleted(_) => {
-                // likely concurrent delete call, cplane should prevent this
-                anyhow::bail!("index part says deleted but we are not done creating yet, this should not happen but")
-            }
-            MaybeDeletedIndexPart::IndexPart(p) => p,
-        };
-        let metadata = index_part.metadata.clone();
-        let timeline = self
-            .owning_tenant
-            .load_remote_timeline(timeline_id, index_part, metadata, resources, ctx)
-            .await?;
-        Ok(timeline)
+    pub(crate) fn finish_creation_myself(self) -> Arc<Timeline> {
+        self.raw_timeline.expect("already checked").0
     }
 
     /// Prepares timeline data by loading it from the basebackup archive.
@@ -174,61 +128,6 @@ impl<'t> UninitializedTimeline<'t> {
 
         // All the data has been imported. Insert the Timeline into the tenant's timelines map
         let tl = self.finish_creation()?;
-        tl.activate(tenant, broker_client, None, ctx);
-        Ok(tl)
-    }
-
-    /// Prepares timeline data by loading it from the basebackup archive.
-    pub(crate) async fn import_pgdata(
-        self,
-        tenant: Arc<Tenant>,
-        prepared: import_pgdata::Prepared<'_>,
-        broker_client: storage_broker::BrokerClientChannel,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<Arc<Timeline>> {
-        // Do the import while everything is at lsn 0.
-        // The index parts that get uploaded during the import will look invalid.
-
-        let base_lsn = prepared.base_lsn();
-
-        // This fills the layer map with layers.
-        import_pgdata::doit(&self, prepared)
-            .await
-            .context("import")?;
-
-        let raw_timeline = self.raw_timeline()?;
-
-        // FIXME: The 'disk_consistent_lsn' should be the LSN at the *end* of the
-        // checkpoint record, and prev_record_lsn should point to its beginning.
-        // We should read the real end of the record from the WAL, but here we
-        // just fake it.
-        let disk_consistent_lsn = Lsn(base_lsn.0 + 8);
-        let prev_record_lsn = base_lsn;
-        let metadata = TimelineMetadata::new(
-            disk_consistent_lsn,
-            Some(prev_record_lsn),
-            None,     // no ancestor
-            Lsn(0),   // no ancestor lsn
-            base_lsn, // latest_gc_cutoff_lsn
-            base_lsn, // initdb_lsn
-            raw_timeline.pg_version,
-        );
-        raw_timeline
-            .remote_client
-            .schedule_index_upload_for_full_metadata_update(&metadata)?;
-        raw_timeline.remote_client.wait_completion().await?;
-        // TODO: what guarantees _today_ and _in the future_ that no more uploads
-        // will happen after? Maybe just shutdown the timeline
-        // => for now, we'll put in a bunch of assertions after reloading
-
-        let tl = self.finish_by_reloading_timeline_from_remote(ctx).await?;
-
-        assert_eq!(tl.disk_consistent_lsn.load(), disk_consistent_lsn);
-        assert_eq!(tl.get_prev_record_lsn(), prev_record_lsn);
-        assert_eq!(tl.initdb_lsn, base_lsn);
-        assert_eq!(*tl.latest_gc_cutoff_lsn.read(), base_lsn);
-        // TODO: assert remote timeline client's metadata eq exactly our `metadata` variable
-
         tl.activate(tenant, broker_client, None, ctx);
         Ok(tl)
     }
@@ -275,8 +174,8 @@ pub(crate) fn cleanup_timeline_directory(create_guard: TimelineCreateGuard) {
 /// A guard for timeline creations in process: as long as this object exists, the timeline ID
 /// is kept in `[Tenant::timelines_creating]` to exclude concurrent attempts to create the same timeline.
 #[must_use]
-pub(crate) struct TimelineCreateGuard<'t> {
-    owning_tenant: &'t Tenant,
+pub(crate) struct TimelineCreateGuard {
+    pub(crate) owning_tenant: Arc<Tenant>,
     timeline_id: TimelineId,
     pub(crate) timeline_path: Utf8PathBuf,
 }
@@ -294,9 +193,9 @@ pub(crate) enum TimelineExclusionError {
     Other(#[from] anyhow::Error),
 }
 
-impl<'t> TimelineCreateGuard<'t> {
+impl<'t> TimelineCreateGuard {
     pub(crate) fn new(
-        owning_tenant: &'t Tenant,
+        owning_tenant: &Tenant,
         timeline_id: TimelineId,
         timeline_path: Utf8PathBuf,
     ) -> Result<Self, TimelineExclusionError> {
@@ -315,7 +214,7 @@ impl<'t> TimelineCreateGuard<'t> {
         } else {
             creating_timelines.insert(timeline_id);
             Ok(Self {
-                owning_tenant,
+                owning_tenant: owning_tenant,
                 timeline_id,
                 timeline_path,
             })
@@ -323,7 +222,7 @@ impl<'t> TimelineCreateGuard<'t> {
     }
 }
 
-impl Drop for TimelineCreateGuard<'_> {
+impl Drop for TimelineCreateGuard {
     fn drop(&mut self) {
         self.owning_tenant
             .timelines_creating

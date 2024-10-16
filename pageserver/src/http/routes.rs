@@ -2853,82 +2853,6 @@ async fn put_tenant_timeline_import_wal(
     }.instrument(span).await
 }
 
-async fn put_tenant_timeline_import_pgdata(
-    mut request: Request<Body>,
-    cancel: CancellationToken,
-) -> Result<Response<Body>, ApiError> {
-    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
-    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
-
-    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
-
-    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Warn);
-
-    let span = info_span!("import_pgdata", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug(), timeline_id=%timeline_id);
-    async move {
-        let state = get_state(&request);
-        let tenant = state
-            .tenant_manager
-            .get_attached_tenant_shard(tenant_shard_id)?;
-
-        let broker_client = state.broker_client.clone();
-        let pgdata_path: String = json_request(&mut request).await?;
-        // TODO: think about security implications - in the end we prob want the PGDATA to be in S3 anyways
-        let pgdata_path = Utf8PathBuf::from(pgdata_path);
-
-        info!(%pgdata_path, "importing pgdata dir");
-
-        // Create a LocalFs remote storage with the root at pgdata_path
-        let local_storage = GenericRemoteStorage::LocalFs(
-            LocalFs::new(
-                pgdata_path.clone(),
-                // FIXME: we probably want some timeout, and we might be able to assume the max file
-                // size on S3 is 1GiB (postgres segment size). But the problem is that the individual
-                // downloaders don't know enough about concurrent downloads to make a guess on the
-                // expected bandwidth and resulting best timeout.
-                std::time::Duration::from_secs(24 * 60 * 60),
-            )
-            .map_err(ApiError::InternalServerError)?,
-        );
-
-        let prepared = crate::tenant::timeline::import_pgdata::prepare(
-            local_storage,
-            RemotePath::from_string("").unwrap(),
-            &ctx,
-            &cancel,
-        )
-        .await
-        // TODO: differentiate between not-parseable PGDATA (user error)
-        // and truly internal errors (e.g., disk full or IO errors)
-        .map_err(ApiError::InternalServerError)?;
-
-        info!("prepared pgdata");
-
-        tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
-
-        // TODO: should dedup this code with bootstrap_timeline
-        let timeline = tenant
-            .create_empty_timeline(
-                timeline_id,
-                prepared.base_lsn(),
-                prepared.pg_version(),
-                &ctx,
-            )
-            .map_err(ApiError::InternalServerError)
-            .await?;
-
-        timeline
-            .import_pgdata(tenant.clone(), prepared, broker_client, &ctx)
-            .await
-            .map_err(ApiError::InternalServerError)?;
-
-        info!("done");
-        json_response(StatusCode::OK, ())
-    }
-    .instrument(span)
-    .await
-}
-
 /// Read the end of a tar archive.
 ///
 /// A tar archive normally ends with two consecutive blocks of zeros, 512 bytes each.
@@ -3297,10 +3221,6 @@ pub fn make_router(
         .put(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/import_wal",
             |r| api_handler(r, put_tenant_timeline_import_wal),
-        )
-        .put(
-            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/import_pgdata",
-            |r| api_handler(r, put_tenant_timeline_import_pgdata),
         )
         .any(handler_404))
 }

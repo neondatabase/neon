@@ -685,7 +685,7 @@ impl RemoteTimelineClient {
     pub(crate) fn schedule_index_upload_for_import_pgdata_state_update(
         self: &Arc<Self>,
         state: Option<CreatingTimelineStateImportPgdata>,
-    ) -> anyhow::Result<bool> {
+    ) -> anyhow::Result<()> {
         let mut guard = self.upload_queue.lock().unwrap();
         let upload_queue = guard.initialized_mut()?;
         upload_queue.dirty.import_pgdata = state;
