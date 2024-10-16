@@ -16,7 +16,9 @@ use std::{ops::Bound, sync::Arc};
 use anyhow::{bail, ensure};
 use bytes::Bytes;
 
+use flow::index_part_format::{self, InProgress};
 use itertools::Itertools;
+use once_cell::sync::Lazy;
 use pageserver_api::{
     key::{rel_block_to_key, rel_dir_to_key, rel_size_to_key, relmap_file_key, DBDIR_KEY},
     reltag::RelTag,
@@ -59,58 +61,75 @@ use remote_storage::{
     Download, DownloadError, DownloadOpts, GenericRemoteStorage, Listing, ListingObject, RemotePath,
 };
 
-pub(crate) struct Prepared {
+pub struct Prepared {
     pgdata_dir: RemotePath,
-    control_file: ControlFileData,
-    control_file_buf: Bytes,
+    control_file: ControlFile,
     storage: GenericRemoteStorage,
 }
 
-/// Prepare for importing a PGDATA dump from remote storage.
-///
-/// # Arguments
-///
-/// * `storage` - The remote storage containing the PGDATA dump.
-/// * `pgdata_dir` - The RemotePath prefix inside the storage leading to the root of the PGDATA dump.
-/// * `ctx` - The request context.
-/// * `cancel` - A cancellation token for the operation.
-///
-/// # Returns
-///
-/// Returns a `Prepared` struct containing information about the PGDATA dump.
-pub(crate) async fn prepare<'a>(
-    storage: GenericRemoteStorage,
-    pgdata_dir: RemotePath,
+static PGDATA_DIR: Lazy<RemotePath> =
+    Lazy::new(|| RemotePath::from_string("pgdata").unwrap());
+
+pub(crate) async fn create<'a>(
+    s3_uri: String,
     ctx: &RequestContext,
     cancel: CancellationToken,
-) -> anyhow::Result<Prepared> {
-    let storage_wrapper = RemoteStorageWrapper::new(storage, cancel);
+) -> anyhow::Result<(ControlFile, index_part_format::Root)> {
+    let storage_wrapper = storage_wrapper_from_s3_uri(&s3_uri, cancel)?;
+    let control_file = get_control_file(&PGDATA_DIR, &storage_wrapper).await?;
 
-    let controlfile_path = pgdata_dir.join("global/pg_control");
-    let controlfile_buf = storage_wrapper.get(&controlfile_path).await?;
-    // TODO: use `pgv` abstraction (and add it to prepare args)
-    let control_file = ControlFileData::decode(&controlfile_buf)?;
+    let index_part = index_part_format::Root::V1(index_part_format::V1::InProgress(
+        index_part_format::InProgress { s3_uri },
+    ));
 
-    let prepared = Prepared {
-        pgdata_dir,
-        control_file,
-        control_file_buf: controlfile_buf,
-        storage: storage_wrapper.storage,
-    };
-    prepared.try_pg_version()?;
-    Ok(prepared)
+    Ok((control_file, index_part))
 }
 
-impl Prepared {
+fn storage_wrapper_from_s3_uri(
+    s3_uri: &String,
+    cancel: CancellationToken,
+) -> Result<RemoteStorageWrapper, anyhow::Error> {
+    let pgdata_remote_storage = GenericRemoteStorage::LocalFs(remote_storage::LocalFs::new(
+        todo!("s3_uri"),
+        // FIXME: we probably want some timeout, and we might be able to assume the max file
+        // size on S3 is 1GiB (postgres segment size). But the problem is that the individual
+        // downloaders don't know enough about concurrent downloads to make a guess on the
+        // expected bandwidth and resulting best timeout.
+        std::time::Duration::from_secs(24 * 60 * 60),
+    )?);
+    let storage_wrapper = RemoteStorageWrapper::new(pgdata_remote_storage, cancel);
+    Ok(storage_wrapper)
+}
+
+pub struct ControlFile {
+    control_file_data: ControlFileData,
+    control_file_buf: Bytes,
+}
+async fn get_control_file(
+    pgdata_dir: &RemotePath,
+    storage_wrapper: &RemoteStorageWrapper,
+) -> Result<ControlFile, anyhow::Error> {
+    let control_file_path = pgdata_dir.join("global/pg_control");
+    let control_file_buf = storage_wrapper.get(&control_file_path).await?;
+    let control_file_data = ControlFileData::decode(&control_file_buf)?;
+    let control_file = ControlFile {
+        control_file_data,
+        control_file_buf,
+    };
+    control_file.try_pg_version()?; // so that we can offer infallible pg_version()
+    Ok(control_file)
+}
+
+impl ControlFile {
     pub(crate) fn base_lsn(&self) -> Lsn {
-        Lsn(self.control_file.checkPoint).align()
+        Lsn(self.control_file_data.checkPoint).align()
     }
     pub(crate) fn pg_version(&self) -> u32 {
         self.try_pg_version()
             .expect("prepare() checks that try_pg_version doesn't error")
     }
     fn try_pg_version(&self) -> anyhow::Result<u32> {
-        Ok(match self.control_file.catalog_version_no {
+        Ok(match self.control_file_data.catalog_version_no {
             // thesea are from catversion.h
             202107181 => 14,
             202209061 => 15,
@@ -125,33 +144,42 @@ impl Prepared {
 
 pub async fn doit(
     timeline: &Arc<Timeline>,
-    prepared: Prepared,
+    index_part: index_part_format::Root,
     ctx: &RequestContext,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
-    // ensure prepare() + doit() were used correctly
-    assert_eq!(timeline.pg_version, prepared.pg_version());
-    assert_eq!(timeline.ancestor_lsn, Lsn(0));
-    assert!(timeline.ancestor_timeline.is_none());
+    let v1 = match index_part {
+        index_part_format::Root::V1(v1) => v1,
+    };
+    let InProgress { s3_uri } = match v1 {
+        index_part_format::V1::Done => return Ok(()),
+        index_part_format::V1::InProgress(in_progress) => in_progress,
+    };
 
-    let pgdata_lsn = prepared.base_lsn();
-    let Prepared {
-        pgdata_dir,
-        control_file,
-        control_file_buf,
-        storage,
-    } = prepared;
+    let storage = storage_wrapper_from_s3_uri(&s3_uri, cancel.clone())?;
+
+    let control_file = get_control_file(&PGDATA_DIR, &storage).await?;
+
+    let pgdata_lsn = control_file.base_lsn();
+
     PgImportEnv {
         timeline: timeline.clone(),
-        pgdata_dir,
+        pgdata_dir: PGDATA_DIR.clone(),
         control_file,
-        control_file_buf,
         pgdata_lsn,
         tasks: Vec::new(),
-        storage: RemoteStorageWrapper::new(storage, cancel),
+        storage,
     }
     .doit(ctx)
-    .await
+    .await;
+
+    // mark as done in index_part
+    timeline
+        .remote_client
+        .schedule_index_upload_for_import_pgdata_state_update(None)?;
+    timeline.remote_client.wait_completion().await?;
+
+    Ok(())
 }
 
 // TODO: rename to `State`
@@ -159,15 +187,14 @@ struct PgImportEnv {
     timeline: Arc<Timeline>,
     pgdata_dir: RemotePath,
     pgdata_lsn: Lsn,
-    control_file_buf: Bytes,
-    control_file: ControlFileData,
+    control_file: ControlFile,
     tasks: Vec<AnyImportTask>,
     storage: RemoteStorageWrapper,
 }
 
 impl PgImportEnv {
     async fn doit(mut self, ctx: &RequestContext) -> anyhow::Result<()> {
-        let pgdata_lsn = Lsn(self.control_file.checkPoint).align();
+        let pgdata_lsn = Lsn(self.control_file.control_file_data.checkPoint).align();
 
         self.pgdata_lsn = pgdata_lsn;
 
@@ -223,10 +250,10 @@ impl PgImportEnv {
         self.tasks
             .push(AnyImportTask::SingleKey(ImportSingleKeyTask::new(
                 CONTROLFILE_KEY,
-                self.control_file_buf.clone(),
+                self.control_file.control_file_buf.clone(),
             )));
 
-        let checkpoint_buf = self.control_file.checkPointCopy.encode()?;
+        let checkpoint_buf = self.control_file.control_file_data.checkPointCopy.encode()?;
         self.tasks
             .push(AnyImportTask::SingleKey(ImportSingleKeyTask::new(
                 CHECKPOINT_KEY,

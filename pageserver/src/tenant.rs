@@ -805,7 +805,7 @@ impl Tenant {
     /// it is marked as Active.
     #[allow(clippy::too_many_arguments)]
     async fn timeline_init_and_sync(
-        &self,
+        self: &Arc<Self>,
         timeline_id: TimelineId,
         resources: TimelineResources,
         mut index_part: IndexPart,
@@ -853,66 +853,79 @@ impl Tenant {
                 format!("Failed to load layermap for timeline {tenant_id}/{timeline_id}")
             })?;
 
-        if let Some(import_pgdata) = import_pgdata {
-            let guard = async move {
-                let guard_or_arc = self
-                    .start_creating_timeline(
-                        timeline_id,
-                        CreatingTimelineState::ImportPgdata(CreatingTimelineStateImportPgdata {}),
-                    )
-                    .await
-                    .context("start_creating_timeline failed, this should not happen")?;
-                match guard_or_arc {
-                    either::Either::Left(guard) => Ok(guard),
-                    either::Either::Right(arc) => {
-                        anyhow::bail!(
-                            "timeline object already exists, this should not happen during attach"
-                        )
+        match import_pgdata {
+            Some(import_pgdata) => {
+                let guard = async move {
+                        let guard_or_arc = self
+                            .start_creating_timeline(
+                                timeline_id,
+                                CreatingTimelineState::ImportPgdata(CreatingTimelineStateImportPgdata {}),
+                            )
+                            .await
+                            .context("start_creating_timeline failed, this should not happen")?;
+                        match guard_or_arc {
+                            either::Either::Left(guard) => Ok(guard),
+                            either::Either::Right(arc) => {
+                                anyhow::bail!(
+                                    "timeline object already exists, this should not happen during attach"
+                                )
+                            }
+                        }
                     }
-                }
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "resume import of timeline {}/{}",
+                            self.tenant_shard_id, timeline_id
+                        )
+                    })?;
+                tokio::task::spawn({
+                    let tenant = self.clone();
+                    async move {
+                        tenant.create_timeline_import_pgdata_task(
+                            timeline,
+                            import_pgdata,
+                            ActivateTimelineArgs::No,
+                            guard,
+                        ).await
+                    }
+                });
             }
-            .await
-            .with_context(|| {
-                format!(
-                    "resume import of timeline {}/{}",
-                    self.tenant_shard_id, timeline_id
-                )
-            })?;
-            todo!("resume flow")
-        } else {
-            {
-                let mut timelines_accessor = self.timelines.lock().unwrap();
-                match timelines_accessor.entry(timeline_id) {
-                    // We should never try and load the same timeline twice during startup
-                    Entry::Occupied(_) => {
-                        unreachable!(
+            None => {
+                {
+                    let mut timelines_accessor = self.timelines.lock().unwrap();
+                    match timelines_accessor.entry(timeline_id) {
+                        // We should never try and load the same timeline twice during startup
+                        Entry::Occupied(_) => {
+                            unreachable!(
                             "Timeline {tenant_id}/{timeline_id} already exists in the tenant map"
                         );
-                    }
-                    Entry::Vacant(v) => {
-                        v.insert(Arc::clone(&timeline));
-                        timeline.maybe_spawn_flush_loop();
+                        }
+                        Entry::Vacant(v) => {
+                            v.insert(Arc::clone(&timeline));
+                            timeline.maybe_spawn_flush_loop();
+                        }
                     }
                 }
+
+                // Sanity check: a timeline should have some content.
+                anyhow::ensure!(
+                    ancestor.is_some()
+                        || timeline
+                            .layers
+                            .read()
+                            .await
+                            .layer_map()
+                            .expect("currently loading, layer manager cannot be shutdown already")
+                            .iter_historic_layers()
+                            .next()
+                            .is_some(),
+                    "Timeline has no ancestor and no layer files"
+                );
             }
-
-            // Sanity check: a timeline should have some content.
-            anyhow::ensure!(
-                ancestor.is_some()
-                    || timeline
-                        .layers
-                        .read()
-                        .await
-                        .layer_map()
-                        .expect("currently loading, layer manager cannot be shutdown already")
-                        .iter_historic_layers()
-                        .next()
-                        .is_some(),
-                "Timeline has no ancestor and no layer files"
-            );
-
-            Ok(())
         }
+
+        Ok(())
     }
 
     /// Attach a tenant that's available in cloud storage.
@@ -1402,7 +1415,7 @@ impl Tenant {
 
     #[instrument(skip_all, fields(timeline_id=%timeline_id))]
     async fn load_remote_timeline(
-        &self,
+        self: &Arc<Self>,
         timeline_id: TimelineId,
         index_part: IndexPart,
         remote_metadata: TimelineMetadata,
@@ -2040,24 +2053,13 @@ impl Tenant {
             either::Either::Right(timeline) => return Ok(Either::Right(timeline)),
         };
 
-        let pgdata_remote_storage = GenericRemoteStorage::LocalFs(remote_storage::LocalFs::new(
-            todo!("s3_uri"),
-            // FIXME: we probably want some timeout, and we might be able to assume the max file
-            // size on S3 is 1GiB (postgres segment size). But the problem is that the individual
-            // downloaders don't know enough about concurrent downloads to make a guess on the
-            // expected bandwidth and resulting best timeout.
-            std::time::Duration::from_secs(24 * 60 * 60),
-        )?);
-        let prepared =
-            import_pgdata::prepare(pgdata_remote_storage, todo!("s3_uri"), ctx, self.cancel)
-                .await?;
-
-        info!("prepared pgdata");
+        let (control_file, index_part) =
+            import_pgdata::create(todo!("s3_uri"), ctx, self.cancel).await?;
 
         // This is almost like create_empty_timeline, but we got the creation guard earlier.
         let uninit_timeline = {
-            let initdb_lsn = prepared.base_lsn();
-            let pg_version = prepared.pg_version();
+            let initdb_lsn = control_file.base_lsn();
+            let pg_version = control_file.pg_version();
             let _ctx: &RequestContext = &ctx;
             async move {
                 let new_metadata = TimelineMetadata::new(
@@ -2088,13 +2090,7 @@ impl Tenant {
             .raw_timeline()
             .unwrap()
             .remote_client
-            .schedule_index_upload_for_import_pgdata_state_update(Some(
-                import_pgdata::flow::index_part_format::Root::V1(
-                    import_pgdata::flow::index_part_format::V1::InProgress(
-                        import_pgdata::flow::index_part_format::InProgress { s3_uri },
-                    ),
-                ),
-            ))?;
+            .schedule_index_upload_for_import_pgdata_state_update(Some(index_part.clone()))?;
 
         uninit_timeline
             .raw_timeline()
@@ -2105,9 +2101,10 @@ impl Tenant {
             .context("wait for initial index upload")?;
 
         let (timeline, timeline_create_guard) = uninit_timeline.finish_creation_myself();
+
         tokio::spawn(self.clone().create_timeline_import_pgdata_task(
             timeline,
-            prepared,
+            index_part,
             activate,
             timeline_create_guard,
         ));
@@ -2116,75 +2113,66 @@ impl Tenant {
         Ok(Either::Left(()))
     }
 
-    fn create_timeline_import_pgdata_task(
+    async fn create_timeline_import_pgdata_task(
         self: Arc<Tenant>,
         timeline: Arc<Timeline>,
-        prepared: import_pgdata::Prepared,
+        index_part: import_pgdata::flow::index_part_format::Root,
         activate: ActivateTimelineArgs,
         timeline_create_guard: TimelineCreateGuard,
-    ) -> impl Future<Output = Result<(), anyhow::Error>> {
-        let tenant = Arc::clone(&self);
-        async move {
-            let ctx = RequestContext::new(TaskKind::ImportPgdata, DownloadBehavior::Warn);
+    ) -> Result<(), anyhow::Error> {
+        let ctx = RequestContext::new(TaskKind::ImportPgdata, DownloadBehavior::Warn);
 
-            // This fills the layer map with layers.
-            import_pgdata::doit(
-                &timeline,
-                prepared,
-                &ctx,
-                tenant.cancel.clone(), /* TODO: separate cancellation token for the in-progress import? */
-            )
-            .await
-            .context("import")?;
+        // This fills the layer map with layers and updates the index part.
+        let update_index_part = import_pgdata::doit(
+            &timeline,
+            index_part,
+            &ctx,
+            self.cancel.clone(), /* TODO: separate cancellation token for the in-progress import? */
+        )
+        .await
+        .context("import")?;
 
-            timeline
-                .remote_client
-                .schedule_index_upload_for_import_pgdata_state_update(None)?;
+        //
+        // Reload timeline from remote.
+        // This proves that the remote state is attachable, and it reuses the code.
+        // TODO: must not do this if tenant is shutting down / has shut down
+        //
 
-            timeline.remote_client.wait_completion().await?;
+        timeline.shutdown(ShutdownMode::Hard).await; // in theory this shouldn't even .await anything except for coop yield
+        let Some(timeline) = Arc::into_inner(timeline) else {
+            anyhow::bail!("implementation error: timeline that we shut down was still referenced from somewhere");
+        };
+        let timeline_id = timeline.timeline_id;
+        drop(timeline);
 
-            //
-            // Reload timeline from remote.
-            // This proves that the remote state is attachable, and it reuses the code.
-            // TODO: must not do this if tenant is shutting down / has shut down
-            //
-
-            timeline.shutdown(ShutdownMode::Hard).await; // in theory this shouldn't even .await anything except for coop yield
-            let Some(timeline) = Arc::into_inner(timeline) else {
-                anyhow::bail!("implementation error: timeline that we shut down was still referenced from somewhere");
-            };
-            let timeline_id = timeline.timeline_id;
-            drop(timeline);
-
-            // load from object storage like Tenant::attach does
-            let resources = tenant.build_timeline_resources(timeline_id);
-            let index_part = resources
-                .remote_client
-                .download_index_file(&tenant.cancel)
-                .await?;
-            let index_part = match index_part {
-                MaybeDeletedIndexPart::Deleted(_) => {
-                    // likely concurrent delete call, cplane should prevent this
-                    anyhow::bail!("index part says deleted but we are not done creating yet, this should not happen but")
-                }
-                MaybeDeletedIndexPart::IndexPart(p) => p,
-            };
-            let metadata = index_part.metadata.clone();
-            self.load_remote_timeline(timeline_id, index_part, metadata, resources, &ctx)
-                .await?;
-
-            match activate {
-                ActivateTimelineArgs::Yes { broker_client } => {
-                    todo!()
-                }
-                ActivateTimelineArgs::No => (),
+        // load from object storage like Tenant::attach does
+        let resources = self.build_timeline_resources(timeline_id);
+        let index_part = resources
+            .remote_client
+            .download_index_file(&self.cancel)
+            .await?;
+        let index_part = match index_part {
+            MaybeDeletedIndexPart::Deleted(_) => {
+                // likely concurrent delete call, cplane should prevent this
+                anyhow::bail!("index part says deleted but we are not done creating yet, this should not happen but")
             }
+            MaybeDeletedIndexPart::IndexPart(p) => p,
+        };
+        let metadata = index_part.metadata.clone();
+        self.load_remote_timeline(timeline_id, index_part, metadata, resources, &ctx)
+            .await?;
 
-            // Finish the creation process
-            drop(timeline_create_guard);
-
-            anyhow::Ok(())
+        match activate {
+            ActivateTimelineArgs::Yes { broker_client } => {
+                todo!()
+            }
+            ActivateTimelineArgs::No => (),
         }
+
+        // Finish the creation process
+        drop(timeline_create_guard);
+
+        anyhow::Ok(())
     }
 
     pub(crate) async fn delete_timeline(
