@@ -561,7 +561,8 @@ mod tests {
             &self,
             _ctx: &RequestMonitoring,
             _endpoint: crate::EndpointId,
-        ) -> anyhow::Result<Vec<super::jwt::AuthRule>> {
+        ) -> Result<Vec<super::jwt::AuthRule>, control_plane::errors::GetEndpointJwksError>
+        {
             unimplemented!()
         }
 

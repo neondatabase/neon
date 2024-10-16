@@ -349,7 +349,7 @@ ARG PG_VERSION
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
 # not version-specific
-# doesn't use releases, last commit f3d82fd - Mar 2, 2023 
+# doesn't use releases, last commit f3d82fd - Mar 2, 2023
 RUN wget https://github.com/michelp/pgjwt/archive/f3d82fd30151e754e19ce5d6a06c71c20689ce3d.tar.gz -O pgjwt.tar.gz && \
     echo "dae8ed99eebb7593b43013f6532d772b12dfecd55548d2673f2dfd0163f6d2b9 pgjwt.tar.gz" | sha256sum --check && \
     mkdir pgjwt-src && cd pgjwt-src && tar xzf ../pgjwt.tar.gz --strip-components=1 -C . && \
@@ -929,8 +929,8 @@ ARG PG_VERSION
 RUN case "${PG_VERSION}" in "v17") \
     echo "pg_session_jwt does not yet have a release that supports pg17" && exit 0;; \
     esac && \
-    wget https://github.com/neondatabase/pg_session_jwt/archive/ff0a72440e8ff584dab24b3f9b7c00c56c660b8e.tar.gz -O pg_session_jwt.tar.gz && \
-    echo "1fbb2b5a339263bcf6daa847fad8bccbc0b451cea6a62e6d3bf232b0087f05cb pg_session_jwt.tar.gz" | sha256sum --check && \
+    wget https://github.com/neondatabase/pg_session_jwt/archive/5aee2625af38213650e1a07ae038fdc427250ee4.tar.gz -O pg_session_jwt.tar.gz && \
+    echo "5d91b10bc1347d36cffc456cb87bec25047935d6503dc652ca046f04760828e7 pg_session_jwt.tar.gz" | sha256sum --check && \
     mkdir pg_session_jwt-src && cd pg_session_jwt-src && tar xzf ../pg_session_jwt.tar.gz --strip-components=1 -C . && \
     sed -i 's/pgrx = "=0.11.3"/pgrx = { version = "=0.11.3", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
     cargo pgrx install --release
@@ -1169,6 +1169,18 @@ RUN rm -r /usr/local/pgsql/include
 # if they were to be used by other libraries.
 RUN rm /usr/local/pgsql/lib/lib*.a
 
+#########################################################################################
+#
+# Preprocess the sql_exporter configuration files
+#
+#########################################################################################
+FROM $REPOSITORY/$IMAGE:$TAG AS sql_exporter_preprocessor
+
+USER nonroot
+
+COPY --chown=nonroot compute compute
+
+RUN make -C compute
 
 #########################################################################################
 #
@@ -1287,10 +1299,10 @@ RUN mkdir -p /etc/local_proxy && chown postgres:postgres /etc/local_proxy
 COPY --from=postgres-exporter /bin/postgres_exporter /bin/postgres_exporter
 COPY --from=sql-exporter      /bin/sql_exporter      /bin/sql_exporter
 
-COPY --chmod=0644 compute/etc/sql_exporter.yml               /etc/sql_exporter.yml
-COPY --chmod=0644 compute/etc/neon_collector.yml             /etc/neon_collector.yml
-COPY --chmod=0644 compute/etc/sql_exporter_autoscaling.yml   /etc/sql_exporter_autoscaling.yml
-COPY --chmod=0644 compute/etc/neon_collector_autoscaling.yml /etc/neon_collector_autoscaling.yml
+COPY --from=sql_exporter_preprocessor --chmod=0644 /home/nonroot/compute/etc/sql_exporter.yml               /etc/sql_exporter.yml
+COPY --from=sql_exporter_preprocessor --chmod=0644 /home/nonroot/compute/etc/neon_collector.yml             /etc/neon_collector.yml
+COPY --from=sql_exporter_preprocessor --chmod=0644 /home/nonroot/compute/etc/sql_exporter_autoscaling.yml   /etc/sql_exporter_autoscaling.yml
+COPY --from=sql_exporter_preprocessor --chmod=0644 /home/nonroot/compute/etc/neon_collector_autoscaling.yml /etc/neon_collector_autoscaling.yml
 
 # Create remote extension download directory
 RUN mkdir /usr/local/download_extensions && chown -R postgres:postgres /usr/local/download_extensions

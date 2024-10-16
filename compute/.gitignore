@@ -1,0 +1,5 @@
+# sql_exporter config files generated from Jsonnet
+etc/neon_collector.yml
+etc/neon_collector_autoscaling.yml
+etc/sql_exporter.yml
+etc/sql_exporter_autoscaling.yml

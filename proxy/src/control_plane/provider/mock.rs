@@ -5,7 +5,8 @@ use super::{
     AuthInfo, AuthSecret, CachedNodeInfo, NodeInfo,
 };
 use crate::{
-    auth::backend::jwt::AuthRule, context::RequestMonitoring, intern::RoleNameInt, RoleName,
+    auth::backend::jwt::AuthRule, context::RequestMonitoring,
+    control_plane::errors::GetEndpointJwksError, intern::RoleNameInt, RoleName,
 };
 use crate::{auth::backend::ComputeUserInfo, compute, error::io_error, scram, url::ApiUrl};
 use crate::{auth::IpPattern, cache::Cached};
@@ -120,7 +121,10 @@ impl Api {
         })
     }
 
-    async fn do_get_endpoint_jwks(&self, endpoint: EndpointId) -> anyhow::Result<Vec<AuthRule>> {
+    async fn do_get_endpoint_jwks(
+        &self,
+        endpoint: EndpointId,
+    ) -> Result<Vec<AuthRule>, GetEndpointJwksError> {
         let (client, connection) =
             tokio_postgres::connect(self.endpoint.as_str(), tokio_postgres::NoTls).await?;
 
@@ -224,7 +228,7 @@ impl super::Api for Api {
         &self,
         _ctx: &RequestMonitoring,
         endpoint: EndpointId,
-    ) -> anyhow::Result<Vec<AuthRule>> {
+    ) -> Result<Vec<AuthRule>, GetEndpointJwksError> {
         self.do_get_endpoint_jwks(endpoint).await
     }
 
