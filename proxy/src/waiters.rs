@@ -1,8 +1,9 @@
+use std::pin::Pin;
+use std::task;
+
 use hashbrown::HashMap;
 use parking_lot::Mutex;
 use pin_project_lite::pin_project;
-use std::pin::Pin;
-use std::task;
 use thiserror::Error;
 use tokio::sync::oneshot;
 
@@ -99,8 +100,9 @@ impl<T> std::future::Future for Waiter<'_, T> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::sync::Arc;
+
+    use super::*;
 
     #[tokio::test]
     async fn test_waiter() -> anyhow::Result<()> {

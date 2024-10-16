@@ -1,30 +1,30 @@
 //! Production console backend.
 
-use super::{
-    super::messages::{ControlPlaneError, GetRoleSecret, WakeCompute},
-    errors::{ApiError, GetAuthInfoError, WakeComputeError},
-    ApiCaches, ApiLocks, AuthInfo, AuthSecret, CachedAllowedIps, CachedNodeInfo, CachedRoleSecret,
-    NodeInfo,
-};
-use crate::{
-    auth::backend::{jwt::AuthRule, ComputeUserInfo},
-    compute,
-    control_plane::{
-        errors::GetEndpointJwksError,
-        messages::{ColdStartInfo, EndpointJwksResponse, Reason},
-    },
-    http,
-    metrics::{CacheOutcome, Metrics},
-    rate_limiter::WakeComputeRateLimiter,
-    scram, EndpointCacheKey, EndpointId,
-};
-use crate::{cache::Cached, context::RequestMonitoring};
-use ::http::{header::AUTHORIZATION, HeaderName};
+use std::sync::Arc;
+use std::time::Duration;
+
+use ::http::header::AUTHORIZATION;
+use ::http::HeaderName;
 use futures::TryFutureExt;
-use std::{sync::Arc, time::Duration};
 use tokio::time::Instant;
 use tokio_postgres::config::SslMode;
 use tracing::{debug, info, info_span, warn, Instrument};
+
+use super::super::messages::{ControlPlaneError, GetRoleSecret, WakeCompute};
+use super::errors::{ApiError, GetAuthInfoError, WakeComputeError};
+use super::{
+    ApiCaches, ApiLocks, AuthInfo, AuthSecret, CachedAllowedIps, CachedNodeInfo, CachedRoleSecret,
+    NodeInfo,
+};
+use crate::auth::backend::jwt::AuthRule;
+use crate::auth::backend::ComputeUserInfo;
+use crate::cache::Cached;
+use crate::context::RequestMonitoring;
+use crate::control_plane::errors::GetEndpointJwksError;
+use crate::control_plane::messages::{ColdStartInfo, EndpointJwksResponse, Reason};
+use crate::metrics::{CacheOutcome, Metrics};
+use crate::rate_limiter::WakeComputeRateLimiter;
+use crate::{compute, http, scram, EndpointCacheKey, EndpointId};
 
 const X_REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
 

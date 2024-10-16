@@ -1,15 +1,14 @@
-use super::{ComputeCredentials, ComputeUserInfo, ComputeUserInfoNoEndpoint};
-use crate::{
-    auth::{self, AuthFlow},
-    config::AuthenticationConfig,
-    context::RequestMonitoring,
-    control_plane::AuthSecret,
-    intern::EndpointIdInt,
-    sasl,
-    stream::{self, Stream},
-};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{info, warn};
+
+use super::{ComputeCredentials, ComputeUserInfo, ComputeUserInfoNoEndpoint};
+use crate::auth::{self, AuthFlow};
+use crate::config::AuthenticationConfig;
+use crate::context::RequestMonitoring;
+use crate::control_plane::AuthSecret;
+use crate::intern::EndpointIdInt;
+use crate::sasl;
+use crate::stream::{self, Stream};
 
 /// Compared to [SCRAM](crate::scram), cleartext password auth saves
 /// one round trip and *expensive* computations (>= 4096 HMAC iterations).

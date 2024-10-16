@@ -1,22 +1,22 @@
-use std::{
-    future::Future,
-    sync::Arc,
-    time::{Duration, SystemTime},
-};
+use std::future::Future;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use arc_swap::ArcSwapOption;
 use dashmap::DashMap;
 use jose_jwk::crypto::KeyInfo;
-use serde::{de::Visitor, Deserialize, Deserializer};
+use serde::de::Visitor;
+use serde::{Deserialize, Deserializer};
 use signature::Verifier;
 use thiserror::Error;
 use tokio::time::Instant;
 
-use crate::{
-    auth::backend::ComputeCredentialKeys, context::RequestMonitoring,
-    control_plane::errors::GetEndpointJwksError, http::parse_json_body_with_limit,
-    intern::RoleNameInt, EndpointId, RoleName,
-};
+use crate::auth::backend::ComputeCredentialKeys;
+use crate::context::RequestMonitoring;
+use crate::control_plane::errors::GetEndpointJwksError;
+use crate::http::parse_json_body_with_limit;
+use crate::intern::RoleNameInt;
+use crate::{EndpointId, RoleName};
 
 // TODO(conrad): make these configurable.
 const CLOCK_SKEW_LEEWAY: Duration = Duration::from_secs(30);
@@ -381,10 +381,8 @@ fn verify_rsa_signature(
     alg: &jose_jwa::Algorithm,
 ) -> Result<(), JwtError> {
     use jose_jwa::{Algorithm, Signing};
-    use rsa::{
-        pkcs1v15::{Signature, VerifyingKey},
-        RsaPublicKey,
-    };
+    use rsa::pkcs1v15::{Signature, VerifyingKey};
+    use rsa::RsaPublicKey;
 
     let key = RsaPublicKey::try_from(key).map_err(JwtError::InvalidRsaKey)?;
 
@@ -655,11 +653,9 @@ impl From<&jose_jwk::Key> for KeyType {
 
 #[cfg(test)]
 mod tests {
-    use crate::RoleName;
-
-    use super::*;
-
-    use std::{future::IntoFuture, net::SocketAddr, time::SystemTime};
+    use std::future::IntoFuture;
+    use std::net::SocketAddr;
+    use std::time::SystemTime;
 
     use base64::URL_SAFE_NO_PAD;
     use bytes::Bytes;
@@ -671,6 +667,9 @@ mod tests {
     use rsa::pkcs8::DecodePrivateKey;
     use signature::Signer;
     use tokio::net::TcpListener;
+
+    use super::*;
+    use crate::RoleName;
 
     fn new_ec_jwk(kid: String) -> (p256::SecretKey, jose_jwk::Jwk) {
         let sk = p256::SecretKey::random(&mut OsRng);

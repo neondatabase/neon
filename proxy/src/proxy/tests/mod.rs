@@ -4,6 +4,16 @@ mod mitm;
 
 use std::time::Duration;
 
+use anyhow::{bail, Context};
+use async_trait::async_trait;
+use http::StatusCode;
+use retry::{retry_after, ShouldRetryWakeCompute};
+use rstest::rstest;
+use rustls::pki_types;
+use tokio_postgres::config::SslMode;
+use tokio_postgres::tls::{MakeTlsConnect, NoTls};
+use tokio_postgres_rustls::{MakeRustlsConnect, RustlsStream};
+
 use super::connect_compute::ConnectMechanism;
 use super::retry::CouldRetry;
 use super::*;
@@ -18,15 +28,6 @@ use crate::control_plane::provider::{
 use crate::control_plane::{self, CachedNodeInfo, NodeInfo};
 use crate::error::ErrorKind;
 use crate::{sasl, scram, BranchId, EndpointId, ProjectId};
-use anyhow::{bail, Context};
-use async_trait::async_trait;
-use http::StatusCode;
-use retry::{retry_after, ShouldRetryWakeCompute};
-use rstest::rstest;
-use rustls::pki_types;
-use tokio_postgres::config::SslMode;
-use tokio_postgres::tls::{MakeTlsConnect, NoTls};
-use tokio_postgres_rustls::{MakeRustlsConnect, RustlsStream};
 
 /// Generate a set of TLS certificates: CA + server.
 fn generate_certs(
@@ -336,7 +337,8 @@ async fn scram_auth_mock() -> anyhow::Result<()> {
         generate_tls_config("generic-project-name.localhost", "localhost")?;
     let proxy = tokio::spawn(dummy_proxy(client, Some(server_config), Scram::mock()));
 
-    use rand::{distributions::Alphanumeric, Rng};
+    use rand::distributions::Alphanumeric;
+    use rand::Rng;
     let password: String = rand::thread_rng()
         .sample_iter(&Alphanumeric)
         .take(rand::random::<u8>() as usize)

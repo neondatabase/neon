@@ -1,7 +1,5 @@
-use serde_json::Map;
-use serde_json::Value;
-use tokio_postgres::types::Kind;
-use tokio_postgres::types::Type;
+use serde_json::{Map, Value};
+use tokio_postgres::types::{Kind, Type};
 use tokio_postgres::Row;
 
 //
@@ -256,8 +254,9 @@ fn _pg_array_parse(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use serde_json::json;
+
+    use super::*;
 
     #[test]
     fn test_atomic_types_to_pg_params() {
