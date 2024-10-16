@@ -2137,28 +2137,32 @@ impl Tenant {
         )
         .await?;
 
-        // This is almost like create_empty_timeline, but we got the creation guard earlier.
         let mut uninit_timeline = {
-            let initdb_lsn = control_file.base_lsn();
+            let base_lsn = control_file.base_lsn();
             let pg_version = control_file.pg_version();
             let _ctx: &RequestContext = ctx;
             async move {
-                let new_metadata = TimelineMetadata::new(
-                    // Initialize disk_consistent LSN to 0, The caller must import some data to
-                    // make it valid, before calling finish_creation()
-                    Lsn(0),
-                    None,
-                    None,
-                    Lsn(0),
-                    initdb_lsn,
-                    initdb_lsn,
+                // FIXME: The 'disk_consistent_lsn' should be the LSN at the *end* of the
+                // checkpoint record, and prev_record_lsn should point to its beginning.
+                // We should read the real end of the record from the WAL, but here we
+                // just fake it.
+                let disk_consistent_lsn = Lsn(base_lsn.0 + 8);
+                let prev_record_lsn = base_lsn;
+                let metadata = TimelineMetadata::new(
+                    disk_consistent_lsn,
+                    Some(prev_record_lsn),
+                    None,     // no ancestor
+                    Lsn(0),   // no ancestor lsn
+                    base_lsn, // latest_gc_cutoff_lsn
+                    base_lsn, // initdb_lsn
                     pg_version,
                 );
+
                 self.prepare_new_timeline(
                     new_timeline_id,
-                    &new_metadata,
+                    &metadata,
                     timeline_create_guard,
-                    initdb_lsn,
+                    disk_consistent_lsn + 1,
                     None,
                     None,
                 )
@@ -2203,12 +2207,16 @@ impl Tenant {
         timeline_create_guard: TimelineCreateGuard,
     ) -> Result<(), anyhow::Error> {
         debug_assert_current_span_has_tenant_and_timeline_id();
+        info!("starting");
+        scopeguard::defer! {info!("exiting")};
 
         let ctx = RequestContext::new(TaskKind::ImportPgdata, DownloadBehavior::Warn);
 
+        info!("importing pgdata");
         import_pgdata::doit(&timeline, index_part, &ctx, self.cancel.clone())
             .await
             .context("import")?;
+        info!("import done");
 
         //
         // Reload timeline from remote.
@@ -2223,7 +2231,9 @@ impl Tenant {
         // to manifest because of the long runtime of this import task.
 
         //        in theory this shouldn't even .await anything except for coop yield
+        info!("shutting down timeline");
         timeline.shutdown(ShutdownMode::Hard).await;
+        info!("timeline shut down, reloading from remote");
         // TODO: we can't do the following check because create_timeline_import_pgdata must return an Arc<Timeline>
         // let Some(timeline) = Arc::into_inner(timeline) else {
         //     anyhow::bail!("implementation error: timeline that we shut down was still referenced from somewhere");
@@ -2249,6 +2259,8 @@ impl Tenant {
             .await?
             .ready_to_activate()
             .context("implementation error: reloaded timeline still needs import after import reported success")?;
+
+        info!("timeline loaded");
 
         match activate {
             ActivateTimelineArgs::Yes { broker_client } => {

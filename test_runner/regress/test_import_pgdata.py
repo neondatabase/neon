@@ -125,17 +125,19 @@ def test_pgdata_import_smoke(
 
     idempotency = ImportPgdataIdemptencyKey.random()
     log.info(f"idempotency key {idempotency}")
+    # TODO: teach neon_local CLI about the idempotency & 429 error so we can run inside the loop
+    # and check for 429
+    env.create_timeline_raw(
+        "imported",
+        {
+            "new_timeline_id": str(timeline_id),
+            "import_pgdata": {
+                "idempotency_key": str(idempotency),
+                "location": {"LocalFs": {"path": str(importbucket.absolute())}},
+            },
+        }
+    )
     while True:
-        env.create_timeline_raw(
-            "imported",
-            {
-                "new_timeline_id": str(timeline_id),
-                "import_pgdata": {
-                    "idempotency_key": str(idempotency),
-                    "location": {"LocalFs": {"path": str(importbucket.absolute())}},
-                },
-            }
-        )
         locations = env.storage_controller.locate(tenant_id)
         active_count = 0
         for location in locations:
