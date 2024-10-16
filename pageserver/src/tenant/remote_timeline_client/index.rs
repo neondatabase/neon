@@ -391,6 +391,7 @@ mod tests {
             lineage: Lineage::default(),
             gc_blocking: None,
             last_aux_file_policy: None,
+            import_pgdata: None,
         };
 
         let part = IndexPart::from_s3_bytes(example.as_bytes()).unwrap();
@@ -435,6 +436,7 @@ mod tests {
             lineage: Lineage::default(),
             gc_blocking: None,
             last_aux_file_policy: None,
+            import_pgdata: None,
         };
 
         let part = IndexPart::from_s3_bytes(example.as_bytes()).unwrap();
@@ -528,6 +530,7 @@ mod tests {
             lineage: Lineage::default(),
             gc_blocking: None,
             last_aux_file_policy: None,
+            import_pgdata: None,
         };
 
         let empty_layers_parsed = IndexPart::from_s3_bytes(empty_layers_json.as_bytes()).unwrap();

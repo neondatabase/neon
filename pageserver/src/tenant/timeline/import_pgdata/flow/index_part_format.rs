@@ -13,7 +13,13 @@ pub enum V1 {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(transparent)]
-pub(crate) struct IdempotencyKey(String);
+pub struct IdempotencyKey(String);
+
+impl IdempotencyKey {
+    pub fn new(s: String) -> Self {
+        Self(s)
+    }
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct InProgress {
@@ -32,10 +38,9 @@ pub struct Done {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum Location {
     #[cfg(feature = "testing")]
-    LocalFs {
-        path: Utf8PathBuf,
-    },
+    LocalFs { path: Utf8PathBuf },
     AwsS3 {
+        region: String,
         bucket: String,
         key: String,
     },

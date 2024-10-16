@@ -551,9 +551,13 @@ async fn timeline_create_handler(
         }),
         TimelineCreateRequestMode::ImportPgdata(TimelineCreateRequestModeImportPgdata {
             location,
+            idempotency_key,
         }) => {
             tenant::CreateTimelineParams::ImportPgdata(tenant::CreateTimelineParamsImportPgdata {
-                idempotency_key: todo!("idempotency in API"),
+                idempotency_key:
+                    tenant::timeline::import_pgdata::flow::index_part_format::IdempotencyKey::new(
+                        idempotency_key,
+                    ),
                 new_timeline_id,
                 location: {
                     use pageserver_api::models::ImportPgdataLocation;
@@ -561,9 +565,15 @@ async fn timeline_create_handler(
                     let location = match location {
                         #[cfg(feature = "testing")]
                         ImportPgdataLocation::LocalFs { path } => Location::LocalFs { path },
-                        ImportPgdataLocation::AwsS3 { bucket, key } => {
-                            Location::AwsS3 { bucket, key }
-                        }
+                        ImportPgdataLocation::AwsS3 {
+                            region,
+                            bucket,
+                            key,
+                        } => Location::AwsS3 {
+                            region,
+                            bucket,
+                            key,
+                        },
                     };
                     location
                 },

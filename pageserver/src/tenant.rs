@@ -1343,7 +1343,9 @@ impl Tenant {
                 })?;
 
             match effect {
-                TimelineInitAndSyncResult::ReadyToActivate(arc) => (),
+                TimelineInitAndSyncResult::ReadyToActivate(_) => {
+                    // activation happens later, on Tenant::activate
+                }
                 TimelineInitAndSyncResult::NeedsSpawnImportPgdata(
                     TimelineInitAndSyncNeedsSpawnImportPgdata {
                         timeline,

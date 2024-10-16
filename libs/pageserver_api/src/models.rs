@@ -241,15 +241,15 @@ pub enum TimelineCreateRequestMode {
 #[derive(Serialize, Deserialize, Clone)]
 pub struct TimelineCreateRequestModeImportPgdata {
     pub location: ImportPgdataLocation,
+    pub idempotency_key: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum ImportPgdataLocation {
     #[cfg(feature = "testing")]
-    LocalFs {
-        path: Utf8PathBuf,
-    },
+    LocalFs { path: Utf8PathBuf },
     AwsS3 {
+        region: String,
         bucket: String,
         key: String,
     },

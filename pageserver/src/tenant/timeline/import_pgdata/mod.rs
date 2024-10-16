@@ -13,7 +13,7 @@ pub(crate) mod flow;
 
 use std::{ops::Bound, sync::Arc};
 
-use anyhow::{bail, ensure};
+use anyhow::{bail, ensure, Context};
 use bytes::Bytes;
 
 use flow::index_part_format::{self, InProgress, Location};
@@ -68,7 +68,7 @@ pub(crate) async fn create<'a>(
     ctx: &RequestContext,
     cancel: CancellationToken,
 ) -> anyhow::Result<(ControlFile, index_part_format::Root)> {
-    let storage_wrapper = make_storage_wrapper(&in_progress.location, cancel)?;
+    let storage_wrapper = make_storage_wrapper(&in_progress.location, cancel).await?;
     let control_file = get_control_file(&PGDATA_DIR, &storage_wrapper).await?;
 
     let index_part = index_part_format::Root::V1(index_part_format::V1::InProgress(in_progress));
@@ -76,7 +76,7 @@ pub(crate) async fn create<'a>(
     Ok((control_file, index_part))
 }
 
-fn make_storage_wrapper(
+async fn make_storage_wrapper(
     location: &index_part_format::Location,
     cancel: CancellationToken,
 ) -> Result<RemoteStorageWrapper, anyhow::Error> {
@@ -90,7 +90,31 @@ fn make_storage_wrapper(
         Location::LocalFs { path } => {
             GenericRemoteStorage::LocalFs(remote_storage::LocalFs::new(path.clone(), timeout)?)
         }
-        Location::AwsS3 { bucket, key } => todo!(),
+        Location::AwsS3 {
+            region,
+            bucket,
+            key,
+        } => {
+            // TODO: think about security implications of letting the client specify the bucket & prefix.
+            // It's the most flexible right now, but, possibly we want to move bucket name into PS conf
+            // and force the timeline_id into the prefix?
+            GenericRemoteStorage::AwsS3(Arc::new(
+                remote_storage::S3Bucket::new(
+                    &remote_storage::S3Config {
+                        bucket_name: bucket.clone(),
+                        prefix_in_bucket: Some(key.clone()),
+                        bucket_region: region.clone(),
+                        endpoint: None, //  by specifying None here, remote_storage/aws-sdk-rust will infer from env
+                        concurrency_limit: 100.try_into().unwrap(), // TODO: think about this
+                        max_keys_per_list_response: Some(1000), // TODO: think about this
+                        upload_storage_class: None, // irrelevant
+                    },
+                    timeout,
+                )
+                .await
+                .context("setup s3 bucket")?,
+            ))
+        }
     };
     let storage_wrapper = RemoteStorageWrapper::new(location_storage, cancel);
     Ok(storage_wrapper)
@@ -155,7 +179,7 @@ pub async fn doit(
         index_part_format::V1::InProgress(in_progress) => in_progress,
     };
 
-    let storage = make_storage_wrapper(&location, cancel.clone())?;
+    let storage = make_storage_wrapper(&location, cancel.clone()).await?;
 
     let control_file = get_control_file(&PGDATA_DIR, &storage).await?;
 
