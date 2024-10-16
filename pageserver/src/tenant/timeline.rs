@@ -21,7 +21,6 @@ use chrono::{DateTime, Utc};
 use enumset::EnumSet;
 use fail::fail_point;
 use handle::ShardTimelineId;
-use import_pgdata::flow::state::ActivateEffect;
 use once_cell::sync::Lazy;
 use pageserver_api::{
     key::{
@@ -48,7 +47,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::*;
 use utils::{
     fs_ext, pausable_failpoint,
-    sync::gate::{Gate, GateError, GateGuard},
+    sync::gate::{Gate, GateGuard},
 };
 
 use std::sync::atomic::Ordering as AtomicOrdering;
@@ -373,8 +372,6 @@ pub struct Timeline {
     download_all_remote_layers_task_info: RwLock<Option<DownloadRemoteLayersTaskInfo>>,
 
     state: watch::Sender<TimelineState>,
-
-    pub(crate) import_progress: import_pgdata::flow::PerTimelineState>,
 
     /// Prevent two tasks from deleting the timeline at the same time. If held, the
     /// timeline is being deleted. If 'true', the timeline has already been deleted.
@@ -1635,46 +1632,13 @@ impl Timeline {
         background_jobs_can_start: Option<&completion::Barrier>,
         ctx: &RequestContext,
     ) {
-
-        let gate_guard = match self.gate.enter() {
-            Ok(guard) => guard,
-            Err(GateError::GateClosed) => {
-                // TODO: when can this happen in practice?
-                return;
-            },
-        };
-
-        let self_clone = self.clone();
-        let activation_work = move |guard| {
-            let mut self_ = self_clone;
-            if self_.tenant_shard_id.is_shard_zero() {
-                // Logical size is only maintained accurately on shard zero.
-                self_.spawn_initial_logical_size_computation_task(ctx);
-            }
-            self_.launch_wal_receiver(ctx, broker_client);
-            self_.set_state(TimelineState::Active);
-            self_.launch_eviction_task(parent, background_jobs_can_start);
-        };
-
-        let effect = self.import_progress.activate(gate_guard);
-
-        match effect {
-            ActivateEffect::ActivateNow(gate_guard) => {
-                activation_work(gate_guard);
-            }
-            ActivateEffect::DelayUntilImportDone(waiter) => {
-                tokio::spawn(async move {
-                    let gate_guard = match waiter.await {
-                        Ok(guard) => guard,
-                        Err(_cancelled) => {
-                            info!("delayed timeline activation cancelled because import task shut down");
-                        },
-                    };
-                    // we're still holding the gate open, so it's safe to launch these tasks now
-                    activation_work(gate_guard);
-                })
-            }
+        if self.tenant_shard_id.is_shard_zero() {
+            // Logical size is only maintained accurately on shard zero.
+            self.spawn_initial_logical_size_computation_task(ctx);
         }
+        self.launch_wal_receiver(ctx, broker_client);
+        self.set_state(TimelineState::Active);
+        self.launch_eviction_task(parent, background_jobs_can_start);
     }
 
     /// After this function returns, there are no timeline-scoped tasks are left running.
@@ -2183,7 +2147,6 @@ impl Timeline {
         state: TimelineState,
         aux_file_policy: Option<AuxFilePolicy>,
         attach_wal_lag_cooldown: Arc<OnceLock<WalLagCooldown>>,
-        import_pgdata_state: import_pgdata::flow::PerTimelineState,
         cancel: CancellationToken,
     ) -> Arc<Self> {
         let disk_consistent_lsn = metadata.disk_consistent_lsn();
@@ -2299,8 +2262,6 @@ impl Timeline {
                     EvictionTaskTimelineState::default(),
                 ),
                 delete_progress: Arc::new(tokio::sync::Mutex::new(DeleteTimelineFlow::default())),
-
-                import_progress: import_pgdata_state,
 
                 cancel,
                 gate: Gate::default(),

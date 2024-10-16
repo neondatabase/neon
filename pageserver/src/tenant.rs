@@ -808,7 +808,7 @@ impl Tenant {
         &self,
         timeline_id: TimelineId,
         resources: TimelineResources,
-        index_part: IndexPart,
+        index_part: Option<IndexPart>,
         metadata: TimelineMetadata,
         ancestor: Option<Arc<Timeline>>,
         last_aux_file_policy: Option<AuxFilePolicy>,
@@ -838,20 +838,31 @@ impl Tenant {
             "these are used interchangeably"
         );
 
-        timeline.remote_client.init_upload_queue(&index_part)?;
+        if let Some(index_part) = index_part.as_ref() {
+            timeline.remote_client.init_upload_queue(index_part)?;
+
+            timeline
+                .last_aux_file_policy
+                .store(index_part.last_aux_file_policy());
+        } else {
+            // No data on the remote storage, but we have local metadata file. We can end up
+            // here with timeline_create being interrupted before finishing index part upload.
+            // By doing what we do here, the index part upload is retried.
+            // If control plane retries timeline creation in the meantime, the mgmt API handler
+            // for timeline creation will coalesce on the upload we queue here.
+
+            // FIXME: this branch should be dead code as we no longer write local metadata.
+
+            timeline
+                .remote_client
+                .init_upload_queue_for_empty_remote(&metadata)?;
+            timeline
+                .remote_client
+                .schedule_index_upload_for_full_metadata_update(&metadata)?;
+        }
 
         timeline
-            .last_aux_file_policy
-            .store(index_part.last_aux_file_policy());
-
-        let import_progress = timeline
-            .import_progress
-            .try_lock()
-            .expect("we just created the timeline object, no-one else references it");
-        *import_progress = index_part.import_pgdata;
-
-        timeline
-            .load_layer_map(disk_consistent_lsn, &index_part)
+            .load_layer_map(disk_consistent_lsn, index_part)
             .await
             .with_context(|| {
                 format!("Failed to load layermap for timeline {tenant_id}/{timeline_id}")
@@ -1408,7 +1419,7 @@ impl Tenant {
         self.timeline_init_and_sync(
             timeline_id,
             resources,
-            index_part,
+            Some(index_part),
             remote_metadata,
             ancestor,
             last_aux_file_policy,
@@ -3022,7 +3033,6 @@ impl Tenant {
         resources: TimelineResources,
         cause: CreateTimelineCause,
         last_aux_file_policy: Option<AuxFilePolicy>,
-        import_pgdata_state: import_pgdata::flow::PerTimelineState,
     ) -> anyhow::Result<Arc<Timeline>> {
         let state = match cause {
             CreateTimelineCause::Load => {
@@ -3054,7 +3064,6 @@ impl Tenant {
             last_aux_file_policy,
             self.attach_wal_lag_cooldown.clone(),
             self.cancel.child_token(),
-            import_pgdata_state,
         );
 
         Ok(timeline)
