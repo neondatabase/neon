@@ -5,11 +5,7 @@ use camino::Utf8PathBuf;
 use tracing::{error, info, info_span};
 use utils::{fs_ext, id::TimelineId, lsn::Lsn};
 
-use crate::{
-    context::RequestContext,
-    import_datadir,
-    tenant::Tenant,
-};
+use crate::{context::RequestContext, import_datadir, tenant::Tenant};
 
 use super::Timeline;
 

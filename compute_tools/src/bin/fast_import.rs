@@ -301,11 +301,8 @@ pub(crate) async fn main() -> anyhow::Result<()> {
         let status_dir = working_directory.join("status");
         std::fs::create_dir(&status_dir).context("create status directory")?;
         let status_file = status_dir.join("status");
-        std::fs::write(
-            &status_file,
-            serde_json::json!({"done": true}).to_string(),
-        )
-        .context("write status file")?;
+        std::fs::write(&status_file, serde_json::json!({"done": true}).to_string())
+            .context("write status file")?;
         s5cmd::sync(&status_file, &s3_prefix.append("/status/pgdata"))
             .await
             .context("sync status directory to destination")?;

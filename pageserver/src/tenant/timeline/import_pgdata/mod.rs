@@ -16,11 +16,12 @@ use std::{ops::Bound, sync::Arc};
 use anyhow::{bail, ensure};
 use bytes::Bytes;
 
-use flow::index_part_format::{self, InProgress};
+use flow::index_part_format::{self, InProgress, Location};
 use itertools::Itertools;
 use once_cell::sync::Lazy;
 use pageserver_api::{
     key::{rel_block_to_key, rel_dir_to_key, rel_size_to_key, relmap_file_key, DBDIR_KEY},
+    models::ImportPgdataLocation,
     reltag::RelTag,
     shard::ShardIdentity,
 };
@@ -61,28 +62,33 @@ use remote_storage::{
     Download, DownloadError, DownloadOpts, GenericRemoteStorage, Listing, ListingObject, RemotePath,
 };
 
-
-
-static PGDATA_DIR: Lazy<RemotePath> =
-    Lazy::new(|| RemotePath::from_string("pgdata").unwrap());
+static PGDATA_DIR: Lazy<RemotePath> = Lazy::new(|| RemotePath::from_string("pgdata").unwrap());
 
 pub(crate) async fn create<'a>(
-    s3_uri: String,
+    request: pageserver_api::models::TimelineCreateRequestModeImportPgdata,
     ctx: &RequestContext,
     cancel: CancellationToken,
 ) -> anyhow::Result<(ControlFile, index_part_format::Root)> {
-    let storage_wrapper = storage_wrapper_from_s3_uri(&s3_uri, cancel)?;
+    let pageserver_api::models::TimelineCreateRequestModeImportPgdata {
+        location: api_location,
+    } = request;
+    let location = match api_location {
+        #[cfg(feature = "testing")]
+        ImportPgdataLocation::LocalFs { local_path } => todo!(),
+        ImportPgdataLocation::AwsS3 { bucket, key } => Location::AwsS3 { bucket, key },
+    };
+    let storage_wrapper = make_storage_wrapper(&location, cancel)?;
     let control_file = get_control_file(&PGDATA_DIR, &storage_wrapper).await?;
 
     let index_part = index_part_format::Root::V1(index_part_format::V1::InProgress(
-        index_part_format::InProgress { s3_uri },
+        index_part_format::InProgress { location },
     ));
 
     Ok((control_file, index_part))
 }
 
-fn storage_wrapper_from_s3_uri(
-    s3_uri: &String,
+fn make_storage_wrapper(
+    location: &index_part_format::Location,
     cancel: CancellationToken,
 ) -> Result<RemoteStorageWrapper, anyhow::Error> {
     let pgdata_remote_storage = GenericRemoteStorage::LocalFs(remote_storage::LocalFs::new(
@@ -147,12 +153,12 @@ pub async fn doit(
     let v1 = match index_part {
         index_part_format::Root::V1(v1) => v1,
     };
-    let InProgress { s3_uri } = match v1 {
+    let InProgress { location } = match v1 {
         index_part_format::V1::Done => return Ok(()),
         index_part_format::V1::InProgress(in_progress) => in_progress,
     };
 
-    let storage = storage_wrapper_from_s3_uri(&s3_uri, cancel.clone())?;
+    let storage = make_storage_wrapper(&location, cancel.clone())?;
 
     let control_file = get_control_file(&PGDATA_DIR, &storage).await?;
 
@@ -249,7 +255,11 @@ impl PgImportEnv {
                 self.control_file.control_file_buf.clone(),
             )));
 
-        let checkpoint_buf = self.control_file.control_file_data.checkPointCopy.encode()?;
+        let checkpoint_buf = self
+            .control_file
+            .control_file_data
+            .checkPointCopy
+            .encode()?;
         self.tasks
             .push(AnyImportTask::SingleKey(ImportSingleKeyTask::new(
                 CHECKPOINT_KEY,

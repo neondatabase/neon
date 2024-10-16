@@ -234,9 +234,24 @@ pub enum TimelineCreateRequestMode {
         existing_initdb_timeline_id: Option<TimelineId>,
         pg_version: Option<u32>,
     },
-    ImportPgdata {
-        s3_uri: String,
-    }
+    ImportPgdata(TimelineCreateRequestModeImportPgdata),
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct TimelineCreateRequestModeImportPgdata {
+    pub location: ImportPgdataLocation,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum ImportPgdataLocation {
+    #[cfg(feature = "testing")]
+    LocalFs {
+        local_path: String,
+    },
+    AwsS3 {
+        bucket: String,
+        key: String,
+    },
 }
 
 #[derive(Serialize, Deserialize, Clone)]

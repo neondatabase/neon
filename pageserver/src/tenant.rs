@@ -677,7 +677,7 @@ pub(crate) struct CreateTimelineParamsBranch {
 #[derive(Debug)]
 pub(crate) struct CreateTimelineParamsImportPgdata {
     pub(crate) new_timeline_id: TimelineId,
-    pub(crate) s3_uri: String,
+    pub(crate) location: pageserver_api::models::ImportPgdataLocation,
 }
 
 pub(crate) struct CreatingTimelineStateBootstrap {
@@ -2043,13 +2043,9 @@ impl Tenant {
                 )
                 .await
             }
-            CreateTimelineParams::ImportPgdata(CreateTimelineParamsImportPgdata {
-                new_timeline_id,
-                s3_uri,
-            }) => {
+            CreateTimelineParams::ImportPgdata(params) => {
                 self.create_timeline_import_pgdata(
-                    s3_uri,
-                    new_timeline_id,
+                    params,
                     ActivateTimelineArgs::Yes { broker_client },
                     ctx,
                 )
@@ -2064,11 +2060,15 @@ impl Tenant {
     /// The actual import job is spawned during attach.
     async fn create_timeline_import_pgdata(
         self: &Arc<Tenant>,
-        s3_uri: String,
-        new_timeline_id: TimelineId,
+        params: CreateTimelineParamsImportPgdata,
         activate: ActivateTimelineArgs,
         ctx: &RequestContext,
     ) -> Result<either::Either<(), Arc<Timeline>>, CreateTimelineError> {
+        let CreateTimelineParamsImportPgdata {
+            new_timeline_id,
+            location,
+        } = params;
+
         //
         // There's probably a simpler way to upload an index part, but, remote_timeline_client
         // is the canonical way we do it.

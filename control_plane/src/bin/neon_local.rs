@@ -27,7 +27,9 @@ use pageserver_api::config::{
 use pageserver_api::controller_api::{
     NodeAvailabilityWrapper, PlacementPolicy, TenantCreateRequest,
 };
-use pageserver_api::models::{ShardParameters, TimelineCreateRequest, TimelineInfo};
+use pageserver_api::models::{
+    ShardParameters, TimelineCreateRequest, TimelineCreateRequestModeImportPgdata, TimelineInfo,
+};
 use pageserver_api::shard::{ShardCount, ShardStripeSize, TenantShardId};
 use postgres_backend::AuthType;
 use postgres_connection::parse_host_port;
@@ -1202,9 +1204,11 @@ async fn handle_timeline(cmd: &TimelineCmd, env: &mut local_env::LocalEnv) -> Re
             let storage_controller = StorageController::from_env(env);
             let create_req = TimelineCreateRequest {
                 new_timeline_id,
-                mode: pageserver_api::models::TimelineCreateRequestMode::ImportPgdata {
-                    s3_uri: args.s3_uri,
-                },
+                mode: pageserver_api::models::TimelineCreateRequestMode::ImportPgdata(
+                    TimelineCreateRequestModeImportPgdata {
+                        location: args.s3_uri,
+                    },
+                ),
             };
             storage_controller
                 .tenant_timeline_create(tenant_id, create_req)

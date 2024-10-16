@@ -39,6 +39,7 @@ use pageserver_api::models::TenantShardSplitResponse;
 use pageserver_api::models::TenantSorting;
 use pageserver_api::models::TimelineArchivalConfigRequest;
 use pageserver_api::models::TimelineCreateRequestMode;
+use pageserver_api::models::TimelineCreateRequestModeImportPgdata;
 use pageserver_api::models::TopTenantShardItem;
 use pageserver_api::models::TopTenantShardsRequest;
 use pageserver_api::models::TopTenantShardsResponse;
@@ -548,10 +549,12 @@ async fn timeline_create_handler(
             ancestor_timeline_id,
             ancestor_start_lsn,
         }),
-        TimelineCreateRequestMode::ImportPgdata { s3_uri } => {
+        TimelineCreateRequestMode::ImportPgdata(TimelineCreateRequestModeImportPgdata {
+            location,
+        }) => {
             tenant::CreateTimelineParams::ImportPgdata(tenant::CreateTimelineParamsImportPgdata {
                 new_timeline_id,
-                s3_uri,
+                location,
             })
         }
     };
