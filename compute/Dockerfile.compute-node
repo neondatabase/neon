@@ -1221,12 +1221,13 @@ RUN rm /usr/local/pgsql/lib/lib*.a
 #
 #########################################################################################
 FROM $REPOSITORY/$IMAGE:$TAG AS sql_exporter_preprocessor
+ARG PG_VERSION
 
 USER nonroot
 
 COPY --chown=nonroot compute compute
 
-RUN make -C compute
+RUN make PG_VERSION="${PG_VERSION}" -C compute
 
 #########################################################################################
 #
