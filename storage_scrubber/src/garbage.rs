@@ -410,7 +410,7 @@ pub async fn get_tenant_objects(
     // tenants where any timeline's index_part.json has been touched recently.
 
     let cancel = CancellationToken::new();
-    let list = match backoff::retry(
+    let list = backoff::retry(
         || s3_client.list(Some(&tenant_root), ListingMode::NoDelimiter, None, &cancel),
         |_| false,
         3,
@@ -419,12 +419,7 @@ pub async fn get_tenant_objects(
         &cancel,
     )
     .await
-    {
-        None => {
-            unreachable!("Using a dummy cancellation token");
-        }
-        Some(r) => r?,
-    };
+    .expect("dummy cancellation token")?;
     Ok(list.keys)
 }
 
@@ -436,7 +431,7 @@ pub async fn get_timeline_objects(
     let timeline_root = super::remote_timeline_path_id(&ttid);
 
     let cancel = CancellationToken::new();
-    let list = match backoff::retry(
+    let list = backoff::retry(
         || {
             s3_client.list(
                 Some(&timeline_root),
@@ -452,12 +447,7 @@ pub async fn get_timeline_objects(
         &cancel,
     )
     .await
-    {
-        None => {
-            unreachable!("Using a dummy cancellation token");
-        }
-        Some(r) => r?,
-    };
+    .expect("dummy cancellation token")?;
 
     Ok(list.keys)
 }
