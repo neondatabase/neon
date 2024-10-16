@@ -33,6 +33,7 @@ fn list_dbs(client: &mut Client) -> Result<Vec<String>> {
 }
 
 /// Connect to every database (see list_dbs above) and get the list of installed extensions.
+///
 /// Same extension can be installed in multiple databases with different versions,
 /// we only keep the highest and lowest version across all databases.
 pub async fn get_installed_extensions(connstr: Url) -> Result<InstalledExtensions> {
