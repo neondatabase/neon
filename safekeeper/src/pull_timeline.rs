@@ -44,18 +44,32 @@ use utils::{
 /// Stream tar archive of timeline to tx.
 #[instrument(name = "snapshot", skip_all, fields(ttid = %tli.ttid))]
 pub async fn stream_snapshot(
-    tli: WalResidentTimeline,
+    tli: Arc<Timeline>,
     source: NodeId,
     destination: NodeId,
     tx: mpsc::Sender<Result<Bytes>>,
 ) {
-    if let Err(e) = stream_snapshot_guts(tli, source, destination, tx.clone()).await {
-        // Error type/contents don't matter as they won't can't reach the client
-        // (hyper likely doesn't do anything with it), but http stream will be
-        // prematurely terminated. It would be nice to try to send the error in
-        // trailers though.
-        tx.send(Err(anyhow!("snapshot failed"))).await.ok();
-        error!("snapshot failed: {:#}", e);
+    match tli.try_wal_residence_guard().await {
+        Err(e) => {
+            tx.send(Err(anyhow!("Error checking residence: {:#}", e)))
+                .await
+                .ok();
+        }
+        Ok(None) => {
+            unimplemented!();
+        }
+        Ok(Some(resident_tli)) => {
+            if let Err(e) =
+                stream_snapshot_resident_guts(resident_tli, source, destination, tx.clone()).await
+            {
+                // Error type/contents don't matter as they won't can't reach the client
+                // (hyper likely doesn't do anything with it), but http stream will be
+                // prematurely terminated. It would be nice to try to send the error in
+                // trailers though.
+                tx.send(Err(anyhow!("snapshot failed"))).await.ok();
+                error!("snapshot failed: {:#}", e);
+            }
+        }
     }
 }
 
@@ -81,7 +95,8 @@ impl Drop for SnapshotContext {
     }
 }
 
-pub async fn stream_snapshot_guts(
+/// Implementation of snapshot for a timeline which is resident (includes some segment data)
+pub async fn stream_snapshot_resident_guts(
     tli: WalResidentTimeline,
     source: NodeId,
     destination: NodeId,
