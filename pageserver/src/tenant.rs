@@ -67,7 +67,7 @@ use self::metadata::TimelineMetadata;
 use self::mgr::GetActiveTenantError;
 use self::mgr::GetTenantError;
 use self::remote_timeline_client::upload::upload_index_part;
-use self::remote_timeline_client::RemoteTimelineClient;
+use self::remote_timeline_client::{RemoteTimelineClient, WaitCompletionError};
 use self::timeline::uninit::TimelineCreateGuard;
 use self::timeline::uninit::TimelineExclusionError;
 use self::timeline::uninit::UninitializedTimeline;
@@ -632,7 +632,7 @@ pub enum TimelineArchivalError {
     AlreadyInProgress,
 
     #[error(transparent)]
-    Other(#[from] anyhow::Error),
+    Other(anyhow::Error),
 }
 
 impl Debug for TimelineArchivalError {
@@ -1602,7 +1602,8 @@ impl Tenant {
                 "failed to load remote timeline {} for tenant {}",
                 timeline_id, self.tenant_shard_id
             )
-        })?;
+        })
+        .map_err(TimelineArchivalError::Other)?;
         let timelines = self.timelines.lock().unwrap();
         if let Some(timeline) = timelines.get(&timeline_id) {
             let mut offloaded_timelines = self.timelines_offloaded.lock().unwrap();
@@ -1672,9 +1673,19 @@ impl Tenant {
         };
 
         // Third part: upload new timeline archival state and block until it is present in S3
-        let upload_needed = timeline
+        let upload_needed = match timeline
             .remote_client
-            .schedule_index_upload_for_timeline_archival_state(new_state)?;
+            .schedule_index_upload_for_timeline_archival_state(new_state)
+        {
+            Ok(upload_needed) => upload_needed,
+            Err(e) => {
+                if timeline.cancel.is_cancelled() {
+                    return Err(TimelineArchivalError::Cancelled);
+                } else {
+                    return Err(TimelineArchivalError::Other(e));
+                }
+            }
+        };
 
         if upload_needed {
             info!("Uploading new state");
@@ -1685,7 +1696,14 @@ impl Tenant {
                 tracing::warn!("reached timeout for waiting on upload queue");
                 return Err(TimelineArchivalError::Timeout);
             };
-            v.map_err(|e| TimelineArchivalError::Other(anyhow::anyhow!(e)))?;
+            v.map_err(|e| match e {
+                WaitCompletionError::NotInitialized(e) => {
+                    TimelineArchivalError::Other(anyhow::anyhow!(e))
+                }
+                WaitCompletionError::UploadQueueShutDownOrStopped => {
+                    TimelineArchivalError::Cancelled
+                }
+            })?;
         }
         Ok(())
     }
