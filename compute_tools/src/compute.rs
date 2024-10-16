@@ -19,8 +19,8 @@ use futures::future::join_all;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use nix::unistd::Pid;
-use postgres::config::Config;
 use postgres::error::SqlState;
+use postgres::Row;
 use postgres::{Client, NoTls};
 use tracing::{debug, error, info, instrument, warn};
 use utils::id::{TenantId, TimelineId};
@@ -1387,24 +1387,34 @@ LIMIT 100",
         tokio::spawn(conn);
 
         let version_query = "SELECT extversion FROM pg_extension WHERE extname = $1";
-        let version: Result<String> = db_client
-            .query_one(version_query, &[&ext_name])
+        let version: Option<String> = db_client
+            .query_opt(version_query, &[&ext_name])
             .await
-            .context(format!("Failed to execute query: {}", version_query))
+            .with_context(|| format!("Failed to execute query: {}", version_query))?
             .map(|row| row.get(0));
 
-        if let Ok(installed_version) = version {
+        // sanitize the inputs as postgres idents.
+        // should we instead use `Escaping::pg_quote`?
+        let format_query = "SELECT quote_ident($1) ext_name, quote_ident($2) ext_version";
+        let format: Row = db_client
+            .query_one(format_query, &[&ext_name, &ext_version])
+            .await
+            .with_context(|| format!("Failed to execute query: {}", format_query))?;
+        let ext_name: String = format.get("ext_name");
+        let ext_version: String = format.get("ext_version");
+
+        if let Some(installed_version) = version {
             if installed_version == ext_version {
                 return Ok(installed_version);
             }
-            let query = format!("ALTER EXTENSION {ext_name:?} UPDATE TO {ext_version:?}");
+            let query = format!("ALTER EXTENSION {ext_name} UPDATE TO {ext_version}");
             db_client
                 .simple_query(&query)
                 .await
                 .context(format!("Failed to execute query: {}", query))?;
         } else {
             let query =
-                format!("CREATE EXTENSION IF NOT EXISTS {ext_name:?} WITH VERSION {ext_version:?}");
+                format!("CREATE EXTENSION IF NOT EXISTS {ext_name} WITH VERSION {ext_version}");
             db_client
                 .simple_query(&query)
                 .await
