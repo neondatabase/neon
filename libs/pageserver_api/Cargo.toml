@@ -33,6 +33,7 @@ remote_storage.workspace = true
 postgres_backend.workspace = true
 nix = {workspace = true, optional = true}
 reqwest.workspace = true
+rand.workspace = true
 
 [dev-dependencies]
 bincode.workspace = true

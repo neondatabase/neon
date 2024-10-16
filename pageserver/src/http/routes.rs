@@ -556,7 +556,7 @@ async fn timeline_create_handler(
             tenant::CreateTimelineParams::ImportPgdata(tenant::CreateTimelineParamsImportPgdata {
                 idempotency_key:
                     tenant::timeline::import_pgdata::flow::index_part_format::IdempotencyKey::new(
-                        idempotency_key,
+                        idempotency_key.0,
                     ),
                 new_timeline_id,
                 location: {
