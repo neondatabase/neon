@@ -28,9 +28,9 @@ use pageserver_api::{
     },
     keyspace::{KeySpaceAccum, KeySpaceRandomAccum, SparseKeyPartitioning},
     models::{
-        AuxFilePolicy, CompactionAlgorithm, CompactionAlgorithmSettings,
-        DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest, EvictionPolicy,
-        InMemoryLayerInfo, LayerMapInfo, LsnLease, TimelineState,
+        CompactionAlgorithm, CompactionAlgorithmSettings, DownloadRemoteLayersTaskInfo,
+        DownloadRemoteLayersTaskSpawnRequest, EvictionPolicy, InMemoryLayerInfo, LayerMapInfo,
+        LsnLease, TimelineState,
     },
     reltag::BlockNumber,
     shard::{ShardIdentity, ShardNumber, TenantShardId},
