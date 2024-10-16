@@ -205,3 +205,11 @@ def test_pgdata_import_smoke(
     validate_vanilla_equivalence(br_initdb_endpoint)
     with pytest.raises(psycopg2.errors.UndefinedTable):
         br_initdb_endpoint.safe_psql("select * from othertable")
+
+
+def test_create_timeline_queues_operation(
+    neon_env_builder: NeonEnvBuilder,
+):
+    env = neon_env_builder.init_start()
+
+    env.create_timeline_pgdata_import("import", "s3://nonexistent")

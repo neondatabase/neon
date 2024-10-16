@@ -225,6 +225,7 @@ enum TimelineCmd {
     List(TimelineListCmdArgs),
     Branch(TimelineBranchCmdArgs),
     Create(TimelineCreateCmdArgs),
+    CreatePgdataImport(TimelineCreatePgdataImportCmdArgs),
     Import(TimelineImportCmdArgs),
     ImportPgdata(TimelineImportPgdataCmdArgs),
 }
@@ -285,6 +286,25 @@ struct TimelineCreateCmdArgs {
     #[arg(default_value_t = DEFAULT_PG_VERSION)]
     #[clap(long, help = "Postgres version")]
     pg_version: u32,
+}
+
+#[derive(clap::Args)]
+#[clap(about = "Create a new timeline from PGDATA in S3")]
+struct TimelineCreatePgdataImportCmdArgs {
+    #[clap(
+        long = "tenant-id",
+        help = "Tenant id. Represented as a hexadecimal string 32 symbols length"
+    )]
+    tenant_id: Option<TenantId>,
+
+    #[clap(long, help = "New timeline's ID")]
+    timeline_id: TimelineId,
+
+    #[clap(long, help = "Human-readable alias for the new timeline")]
+    branch_name: String,
+
+    #[clap(long)]
+    s3_uri: String,
 }
 
 #[derive(clap::Args)]
@@ -1168,6 +1188,32 @@ async fn handle_timeline(cmd: &TimelineCmd, env: &mut local_env::LocalEnv) -> Re
 
             println!(
                 "Created timeline '{}' at Lsn {last_record_lsn} for tenant: {tenant_id}",
+                timeline_info.timeline_id
+            );
+        }
+        TimelineCmd::CreatePgdataImport(args) => {
+            // basically like ::Create above, just a different request
+
+            let tenant_id = get_tenant_id(args.tenant_id, env)?;
+            let new_branch_name = &args.branch_name;
+            let new_timeline_id_opt = args.timeline_id;
+            let new_timeline_id = new_timeline_id_opt.unwrap_or(TimelineId::generate());
+
+            let storage_controller = StorageController::from_env(env);
+            let create_req = TimelineCreateRequest {
+                new_timeline_id,
+                mode: pageserver_api::models::TimelineCreateRequestMode::ImportPgdata {
+                    s3_uri: args.s3_uri,
+                },
+            };
+            storage_controller
+                .tenant_timeline_create(tenant_id, create_req)
+                .await?;
+
+            env.register_branch_mapping(new_branch_name.to_string(), tenant_id, new_timeline_id)?;
+
+            println!(
+                "Created timeline '{}' in importing mode for tenant: {tenant_id}",
                 timeline_info.timeline_id
             );
         }

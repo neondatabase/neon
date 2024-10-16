@@ -4,7 +4,7 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Dict
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -15,6 +15,7 @@ from fixtures.log_helper import log
 from fixtures.metrics import Metrics, MetricsGetter, parse_metrics
 from fixtures.pg_version import PgVersion
 from fixtures.utils import Fn
+import json
 
 if TYPE_CHECKING:
     from typing import Optional, Union
@@ -26,6 +27,66 @@ class PageserverApiException(Exception):
         self.message = message
         self.status_code = status_code
 
+
+@dataclass
+class TimelineCreateRequestMode:
+    @dataclass
+    class Branch:
+        ancestor_timeline_id: TimelineId
+        ancestor_start_lsn: Optional[Lsn] = None
+        pg_version: Optional[int] = None
+
+    @dataclass
+    class Bootstrap:
+        existing_initdb_timeline_id: Optional[TenantId] = None
+        pg_version: Optional[int] = None
+
+    @dataclass
+    class ImportPgdata:
+        s3_uri: str
+
+    mode: Union[Branch, Bootstrap, ImportPgdata]
+
+    @staticmethod
+    def from_dict(d: Dict[str, Any]) -> TimelineCreateRequestMode:
+        if "ancestor_timeline_id" in d:
+            return TimelineCreateRequestMode(TimelineCreateRequestMode.Branch(**d))
+        elif "existing_initdb_timeline_id" in d:
+            return TimelineCreateRequestMode(TimelineCreateRequestMode.Bootstrap(**d))
+        elif "s3_uri" in d:
+            return TimelineCreateRequestMode(TimelineCreateRequestMode.ImportPgdata(**d))
+        else:
+            raise ValueError("Invalid TimelineCreateRequestMode")
+
+    def to_dict(self) -> Dict[str, Any]:
+        if isinstance(self.mode, TimelineCreateRequestMode.Branch):
+            return {"ancestor_timeline_id": self.mode.ancestor_timeline_id,
+                    "ancestor_start_lsn": self.mode.ancestor_start_lsn,
+                    "pg_version": self.mode.pg_version}
+        elif isinstance(self.mode, TimelineCreateRequestMode.Bootstrap):
+            return {"existing_initdb_timeline_id": self.mode.existing_initdb_timeline_id,
+                    "pg_version": self.mode.pg_version}
+        elif isinstance(self.mode, TimelineCreateRequestMode.ImportPgdata):
+            return {"s3_uri": self.mode.s3_uri}
+        else:
+            raise ValueError("Invalid TimelineCreateRequestMode")
+
+@dataclass
+class TimelineCreateRequest:
+    new_timeline_id: TimelineId
+    mode: TimelineCreateRequestMode
+
+    @staticmethod
+    def from_json(data: str) -> TimelineCreateRequest:
+        d = json.loads(data)
+        mode = TimelineCreateRequestMode.from_dict(d["mode"])
+        return TimelineCreateRequest(new_timeline_id=d["new_timeline_id"], mode=mode)
+
+    def to_json(self) -> str:
+        return json.dumps({
+            "new_timeline_id": self.new_timeline_id,
+            "mode": self.mode.to_dict()
+        })
 
 class TimelineCreate406(PageserverApiException):
     def __init__(self, res: requests.Response):

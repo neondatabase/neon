@@ -1,7 +1,5 @@
-use crate::tenant::CreateTimelineParamsImportPgdata;
+use crate::tenant::{CreateTimelineParamsImportPgdata, IndexPart};
 
-pub(crate) struct Flow {
-    params: CreateTimelineParamsImportPgdata,
-}
-
-
+mod index_part_format;
+pub(crate) mod state;
+use state::Timeline as PerTimelineState;

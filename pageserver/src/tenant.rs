@@ -33,6 +33,7 @@ use pageserver_api::shard::TenantShardId;
 use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
 use remote_storage::TimeoutOrCancel;
+use timeline::import_pgdata;
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::sync::Weak;
@@ -807,7 +808,7 @@ impl Tenant {
         &self,
         timeline_id: TimelineId,
         resources: TimelineResources,
-        index_part: Option<IndexPart>,
+        index_part: IndexPart,
         metadata: TimelineMetadata,
         ancestor: Option<Arc<Timeline>>,
         last_aux_file_policy: Option<AuxFilePolicy>,
@@ -837,31 +838,20 @@ impl Tenant {
             "these are used interchangeably"
         );
 
-        if let Some(index_part) = index_part.as_ref() {
-            timeline.remote_client.init_upload_queue(index_part)?;
-
-            timeline
-                .last_aux_file_policy
-                .store(index_part.last_aux_file_policy());
-        } else {
-            // No data on the remote storage, but we have local metadata file. We can end up
-            // here with timeline_create being interrupted before finishing index part upload.
-            // By doing what we do here, the index part upload is retried.
-            // If control plane retries timeline creation in the meantime, the mgmt API handler
-            // for timeline creation will coalesce on the upload we queue here.
-
-            // FIXME: this branch should be dead code as we no longer write local metadata.
-
-            timeline
-                .remote_client
-                .init_upload_queue_for_empty_remote(&metadata)?;
-            timeline
-                .remote_client
-                .schedule_index_upload_for_full_metadata_update(&metadata)?;
-        }
+        timeline.remote_client.init_upload_queue(&index_part)?;
 
         timeline
-            .load_layer_map(disk_consistent_lsn, index_part)
+            .last_aux_file_policy
+            .store(index_part.last_aux_file_policy());
+
+        let import_progress = timeline
+            .import_progress
+            .try_lock()
+            .expect("we just created the timeline object, no-one else references it");
+        *import_progress = index_part.import_pgdata;
+
+        timeline
+            .load_layer_map(disk_consistent_lsn, &index_part)
             .await
             .with_context(|| {
                 format!("Failed to load layermap for timeline {tenant_id}/{timeline_id}")
@@ -1418,7 +1408,7 @@ impl Tenant {
         self.timeline_init_and_sync(
             timeline_id,
             resources,
-            Some(index_part),
+            index_part,
             remote_metadata,
             ancestor,
             last_aux_file_policy,
@@ -1983,71 +1973,102 @@ impl Tenant {
                 new_timeline_id,
                 s3_uri,
             }) => {
-                //
-                // Idempotently create the timeline object in memory and in S3.
-                //
-
-                let timeline_create_guard = match self
-                    .start_creating_timeline(
-                        timeline_id,
-                        CreatingTimelineState::ImportPgdata(CreatingTimelineStateImportPgdata {
-                            s3_uri: s3_uri.clone(),
-                        }),
-                    )
-                    .await?
-                {
-                    either::Either::Left(guard) => guard,
-                    either::Either::Right(timeline) => return Ok(timeline),
-                };
-
-                let new_metadata = TimelineMetadata::new(
-                    // Initialize disk_consistent LSN to 0, The caller must import some data to
-                    // make it valid, before calling finish_creation()
-                    Lsn(0),
-                    None,
-                    None,
-                    Lsn(0),
-                    initdb_lsn,
-                    initdb_lsn,
-                    pg_version,
-                );
-                let uninit_timeline = self
-                    .prepare_new_timeline(
-                        new_timeline_id,
-                        &new_metadata,
-                        create_guard,
-                        initdb_lsn,
-                        None,
-                        None,
-                    )
-                    .await
-                    .context("prepare new timeline")?;
-
-                let timeline = uninit_timeline.raw_timeline().unwrap();
-                timeline
-                    .remote_client
-                    .schedule_index_upload_for_import_pgdata_state_update(Some(
-                        CreatingTimelineStateImportPgdata {
-                            s3_uri: s3_uri.clone(),
-                        },
-                    ))
-                    .context("schedule initial index upload");
-                timeline
-                    .remote_client
-                    .wait_completion()
-                    .await
-                    .context("wait for initial index upload")?;
-
-                drop(timeline);
-
-                let timeline = uninit_timeline
-                    .finish_by_reloading_timeline_from_remote(ctx)
-                    .await
-                    .context("finish by reloading timeline from remote")?;
-
-                Ok(timeline)
+                self.create_timeline_import_pgdata(
+                    s3_uri,
+                    new_timeline_id,
+                    ActivateTimelineArgs::Yes { broker_client },
+                    ctx,
+                )
+                .await
             }
         }
+    }
+
+    /// Upload the index file to remote storage, persisting the intent to import.
+    /// Then load the timeline object from the prepared remote state, like we do during tenant attach.
+    /// The actual import job is spawned during attach.
+    async fn create_timeline_import_pgdata(
+        self: &Arc<Tenant>,
+        s3_uri: String,
+        new_timeline_id: TimelineId,
+        activate: ActivateTimelineArgs,
+        ctx: &RequestContext,
+    ) -> Result<Arc<Timeline>, CreateTimelineError> {
+        //
+        // There's probably a simpler way to upload an index part, but, remote_timeline_client
+        // is the canonical way we do it.
+        // - create an empty timeline in-memory
+        // - use its remote_timeline_client to do the upload
+        // - dispose of the uninit timeline
+        // - reload the timeline object from remote, like during attach
+
+        let timeline_create_guard = match self
+            .start_creating_timeline(
+                timeline_id,
+                CreatingTimelineState::ImportPgdata(CreatingTimelineStateImportPgdata {
+                    s3_uri: s3_uri.clone(),
+                }),
+            )
+            .await?
+        {
+            either::Either::Left(guard) => guard,
+            either::Either::Right(timeline) => return Ok(timeline),
+        };
+
+        let new_metadata = TimelineMetadata::new(
+            // Initialize disk_consistent LSN to 0, The caller must import some data to
+            // make it valid, before calling finish_creation()
+            Lsn(0),
+            None,
+            None,
+            Lsn(0),
+            initdb_lsn,
+            initdb_lsn,
+            pg_version,
+        );
+        let uninit_timeline = self
+            .prepare_new_timeline(
+                new_timeline_id,
+                &new_metadata,
+                create_guard,
+                initdb_lsn,
+                None,
+                None,
+            )
+            .await
+            .context("prepare new timeline")?;
+
+        let timeline = uninit_timeline.raw_timeline().unwrap();
+        timeline
+            .remote_client
+            .schedule_index_upload_for_import_pgdata_state_update(Some(
+                CreatingTimelineStateImportPgdata {
+                    s3_uri: s3_uri.clone(),
+                },
+            ))
+            .context("schedule initial index upload");
+        timeline
+            .remote_client
+            .wait_completion()
+            .await
+            .context("wait for initial index upload")?;
+
+        drop(timeline);
+        let timeline = uninit_timeline
+            .finish_by_reloading_timeline_from_remote(ctx)
+            .await
+            .context("finish by reloading timeline from remote")?;
+
+        match activate {
+            ActivateTimelineArgs::Yes { broker_client } => {
+                timeline
+                    .activate(self.clone(), broker_client, None, ctx)
+                    .await?;
+            }
+            ActivateTimelineArgs::No => (),
+        }
+
+        Ok(timeline)
     }
 
     pub(crate) async fn delete_timeline(
@@ -3001,6 +3022,7 @@ impl Tenant {
         resources: TimelineResources,
         cause: CreateTimelineCause,
         last_aux_file_policy: Option<AuxFilePolicy>,
+        import_pgdata_state: import_pgdata::flow::PerTimelineState,
     ) -> anyhow::Result<Arc<Timeline>> {
         let state = match cause {
             CreateTimelineCause::Load => {
@@ -3032,6 +3054,7 @@ impl Tenant {
             last_aux_file_policy,
             self.attach_wal_lag_cooldown.clone(),
             self.cancel.child_token(),
+            import_pgdata_state,
         );
 
         Ok(timeline)

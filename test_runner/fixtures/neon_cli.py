@@ -306,6 +306,34 @@ class NeonLocalCli(AbstractNeonCli):
 
         return timeline_id
 
+    def timeline_create_pgdata_import(
+        self,
+        new_branch_name: str,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        s3_uri: str,
+    ) -> TimelineId:
+        if timeline_id is None:
+            timeline_id = TimelineId.generate()
+
+        cmd = [
+            "timeline",
+            "create-pgdata-import",
+            "--branch-name",
+            new_branch_name,
+            "--tenant-id",
+            str(tenant_id),
+            "--timeline-id",
+            str(timeline_id),
+            "--s3-uri",
+            s3_uri,
+        ]
+
+        res = self.raw_cli(cmd)
+        res.check_returncode()
+
+        return timeline_id
+
     def timeline_branch(
         self,
         tenant_id: TenantId,

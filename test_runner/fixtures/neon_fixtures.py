@@ -1375,6 +1375,23 @@ class NeonEnv:
 
         return timeline_id
 
+    def create_timeline_pgdata_import(
+        self,
+        new_branch_name: str,
+        s3_uri: str,
+        tenant_id: Optional[TenantId] = None,
+        timeline_id: Optional[TimelineId] = None,
+    ):
+        timeline_id = timeline_id or TimelineId.generate()
+        tenant_id = tenant_id or self.initial_tenant
+
+        self.neon_cli.timeline_create_pgdata_import(
+            new_branch_name, tenant_id, timeline_id, s3_uri
+        )
+
+        return timeline_id
+
+
 
 @pytest.fixture(scope="function")
 def neon_simple_env(
@@ -1977,6 +1994,16 @@ class NeonStorageController(MetricsGetter, LogUtils):
             "POST",
             f"{self.api}/debug/v1/tenant/{tenant_id}/import",
             headers=self.headers(TokenScope.ADMIN),
+        )
+
+    def timeline_create(
+        self, tenant_id: TenantId, pgdata_dir: Path, timeline_id: TimelineId
+    ):
+        self.request(
+            "PUT",
+            f"{self.api}/v1/tenant/{tenant_id}/timeline/{timeline_id}/import_pgdata",
+            json=str(pgdata_dir),
+            headers=self.headers(TokenScope.TENANT),
         )
 
     def timeline_import_from_pgdata(
