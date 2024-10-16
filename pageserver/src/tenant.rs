@@ -696,6 +696,27 @@ pub(crate) enum CreatingTimelineState {
     ImportPgdata(CreatingTimelineStateImportPgdata),
 }
 
+#[must_use]
+struct TimelineInitAndSyncNeedsSpawnImportPgdata {
+    timeline: Arc<Timeline>,
+    import_pgdata: import_pgdata::flow::index_part_format::Root,
+    guard: TimelineCreateGuard,
+}
+
+enum TimelineInitAndSyncResult {
+    ReadyToActivate(Arc<Timeline>),
+    NeedsSpawnImportPgdata(TimelineInitAndSyncNeedsSpawnImportPgdata),
+}
+
+impl TimelineInitAndSyncResult {
+    fn ready_to_activate(&self) -> Option<&Arc<Timeline>> {
+        match self {
+            Self::ReadyToActivate(timeline) => Some(timeline),
+            _ => None,
+        }
+    }
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum CreateTimelineError {
     #[error("creation of timeline with the given ID is in progress")]
@@ -813,7 +834,7 @@ impl Tenant {
         ancestor: Option<Arc<Timeline>>,
         last_aux_file_policy: Option<AuxFilePolicy>,
         _ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<TimelineInitAndSyncResult> {
         let tenant_id = self.tenant_shard_id;
 
         let timeline = self.create_timeline_struct(
@@ -879,17 +900,13 @@ impl Tenant {
                             self.tenant_shard_id, timeline_id
                         )
                     })?;
-                tokio::task::spawn({
-                    let tenant = self.clone();
-                    async move {
-                        tenant.create_timeline_import_pgdata_task(
-                            timeline,
-                            import_pgdata,
-                            ActivateTimelineArgs::No,
-                            guard,
-                        ).await
-                    }
-                });
+                return Ok(TimelineInitAndSyncResult::NeedsSpawnImportPgdata(
+                    TimelineInitAndSyncNeedsSpawnImportPgdata {
+                        timeline,
+                        import_pgdata,
+                        guard,
+                    },
+                ));
             }
             None => {
                 {
@@ -922,10 +939,10 @@ impl Tenant {
                             .is_some(),
                     "Timeline has no ancestor and no layer files"
                 );
+
+                return Ok(TimelineInitAndSyncResult::ReadyToActivate(timeline));
             }
         }
-
-        Ok(())
     }
 
     /// Attach a tenant that's available in cloud storage.
@@ -1283,24 +1300,43 @@ impl Tenant {
             }
 
             // TODO again handle early failure
-            self.load_remote_timeline(
-                timeline_id,
-                index_part,
-                remote_metadata,
-                TimelineResources {
-                    remote_client,
-                    timeline_get_throttle: self.timeline_get_throttle.clone(),
-                    l0_flush_global_state: self.l0_flush_global_state.clone(),
-                },
-                ctx,
-            )
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to load remote timeline {} for tenant {}",
-                    timeline_id, self.tenant_shard_id
+            let effect = self
+                .load_remote_timeline(
+                    timeline_id,
+                    index_part,
+                    remote_metadata,
+                    TimelineResources {
+                        remote_client,
+                        timeline_get_throttle: self.timeline_get_throttle.clone(),
+                        l0_flush_global_state: self.l0_flush_global_state.clone(),
+                    },
+                    ctx,
                 )
-            })?;
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to load remote timeline {} for tenant {}",
+                        timeline_id, self.tenant_shard_id
+                    )
+                })?;
+
+            match effect {
+                TimelineInitAndSyncResult::ReadyToActivate(arc) => (),
+                TimelineInitAndSyncResult::NeedsSpawnImportPgdata(
+                    TimelineInitAndSyncNeedsSpawnImportPgdata {
+                        timeline,
+                        import_pgdata,
+                        guard,
+                    },
+                ) => {
+                    tokio::task::spawn(self.clone().create_timeline_import_pgdata_task(
+                        timeline,
+                        import_pgdata,
+                        ActivateTimelineArgs::No,
+                        guard,
+                    ));
+                }
+            }
         }
 
         // Walk through deleted timelines, resume deletion
@@ -1421,7 +1457,7 @@ impl Tenant {
         remote_metadata: TimelineMetadata,
         resources: TimelineResources,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<TimelineInitAndSyncResult> {
         span::debug_assert_current_span_has_tenant_id();
 
         info!("downloading index file for timeline {}", timeline_id);
@@ -2120,6 +2156,9 @@ impl Tenant {
         activate: ActivateTimelineArgs,
         timeline_create_guard: TimelineCreateGuard,
     ) -> Result<(), anyhow::Error> {
+        let _tenant_gate = self.gate.enter()?;
+        // TODO: make more sensitive to tenant shutdown
+
         let ctx = RequestContext::new(TaskKind::ImportPgdata, DownloadBehavior::Warn);
 
         // This fills the layer map with layers and updates the index part.
@@ -2159,8 +2198,11 @@ impl Tenant {
             MaybeDeletedIndexPart::IndexPart(p) => p,
         };
         let metadata = index_part.metadata.clone();
-        self.load_remote_timeline(timeline_id, index_part, metadata, resources, &ctx)
-            .await?;
+        let timeline = self
+            .load_remote_timeline(timeline_id, index_part, metadata, resources, &ctx)
+            .await?
+            .ready_to_activate()
+            .context("implementation error: reloaded timeline still needs import after import reported success")?;
 
         match activate {
             ActivateTimelineArgs::Yes { broker_client } => {
