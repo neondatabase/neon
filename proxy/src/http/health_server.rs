@@ -1,19 +1,18 @@
+use std::convert::Infallible;
+use std::net::TcpListener;
+use std::sync::{Arc, Mutex};
+
 use anyhow::{anyhow, bail};
-use hyper0::{header::CONTENT_TYPE, Body, Request, Response, StatusCode};
-use measured::{text::BufferedTextEncoder, MetricGroup};
+use hyper0::header::CONTENT_TYPE;
+use hyper0::{Body, Request, Response, StatusCode};
+use measured::text::BufferedTextEncoder;
+use measured::MetricGroup;
 use metrics::NeonMetrics;
-use std::{
-    convert::Infallible,
-    net::TcpListener,
-    sync::{Arc, Mutex},
-};
 use tracing::{info, info_span};
-use utils::http::{
-    endpoint::{self, request_span},
-    error::ApiError,
-    json::json_response,
-    RouterBuilder, RouterService,
-};
+use utils::http::endpoint::{self, request_span};
+use utils::http::error::ApiError;
+use utils::http::json::json_response;
+use utils::http::{RouterBuilder, RouterService};
 
 use crate::jemalloc;
 

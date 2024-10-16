@@ -1,16 +1,14 @@
-use crate::{
-    cancellation,
-    compute::PostgresConnection,
-    control_plane::messages::MetricsAuxInfo,
-    metrics::{Direction, Metrics, NumClientConnectionsGuard, NumConnectionRequestsGuard},
-    stream::Stream,
-    usage_metrics::{Ids, MetricCounterRecorder, USAGE_METRICS},
-};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::info;
 use utils::measured_stream::MeasuredStream;
 
 use super::copy_bidirectional::ErrorSource;
+use crate::cancellation;
+use crate::compute::PostgresConnection;
+use crate::control_plane::messages::MetricsAuxInfo;
+use crate::metrics::{Direction, Metrics, NumClientConnectionsGuard, NumConnectionRequestsGuard};
+use crate::stream::Stream;
+use crate::usage_metrics::{Ids, MetricCounterRecorder, USAGE_METRICS};
 
 /// Forward bytes in both directions (client <-> compute).
 #[tracing::instrument(skip_all)]

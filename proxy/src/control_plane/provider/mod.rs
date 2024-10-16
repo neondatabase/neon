@@ -2,39 +2,36 @@
 pub mod mock;
 pub mod neon;
 
-use super::messages::{ControlPlaneError, MetricsAuxInfo};
-use crate::{
-    auth::{
-        backend::{
-            jwt::{AuthRule, FetchAuthRules, FetchAuthRulesError},
-            ComputeCredentialKeys, ComputeUserInfo,
-        },
-        IpPattern,
-    },
-    cache::{endpoints::EndpointsCache, project_info::ProjectInfoCacheImpl, Cached, TimedLru},
-    compute,
-    config::{CacheOptions, EndpointCacheConfig, ProjectInfoCacheOptions},
-    context::RequestMonitoring,
-    error::ReportableError,
-    intern::ProjectIdInt,
-    metrics::ApiLockMetrics,
-    rate_limiter::{DynamicLimiter, Outcome, RateLimiterConfig, Token},
-    scram, EndpointCacheKey, EndpointId,
-};
+use std::hash::Hash;
+use std::sync::Arc;
+use std::time::Duration;
+
 use dashmap::DashMap;
-use std::{hash::Hash, sync::Arc, time::Duration};
 use tokio::time::Instant;
 use tracing::info;
 
+use super::messages::{ControlPlaneError, MetricsAuxInfo};
+use crate::auth::backend::jwt::{AuthRule, FetchAuthRules, FetchAuthRulesError};
+use crate::auth::backend::{ComputeCredentialKeys, ComputeUserInfo};
+use crate::auth::IpPattern;
+use crate::cache::endpoints::EndpointsCache;
+use crate::cache::project_info::ProjectInfoCacheImpl;
+use crate::cache::{Cached, TimedLru};
+use crate::config::{CacheOptions, EndpointCacheConfig, ProjectInfoCacheOptions};
+use crate::context::RequestMonitoring;
+use crate::error::ReportableError;
+use crate::intern::ProjectIdInt;
+use crate::metrics::ApiLockMetrics;
+use crate::rate_limiter::{DynamicLimiter, Outcome, RateLimiterConfig, Token};
+use crate::{compute, scram, EndpointCacheKey, EndpointId};
+
 pub(crate) mod errors {
-    use crate::{
-        control_plane::messages::{self, ControlPlaneError, Reason},
-        error::{io_error, ErrorKind, ReportableError, UserFacingError},
-        proxy::retry::CouldRetry,
-    };
     use thiserror::Error;
 
     use super::ApiLockError;
+    use crate::control_plane::messages::{self, ControlPlaneError, Reason};
+    use crate::error::{io_error, ErrorKind, ReportableError, UserFacingError};
+    use crate::proxy::retry::CouldRetry;
 
     /// A go-to error message which doesn't leak any detail.
     pub(crate) const REQUEST_FAILED: &str = "Console request failed";

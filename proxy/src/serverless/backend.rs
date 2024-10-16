@@ -1,42 +1,34 @@
-use std::{io, sync::Arc, time::Duration};
+use std::io;
+use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
-use p256::{ecdsa::SigningKey, elliptic_curve::JwkEcKey};
+use p256::ecdsa::SigningKey;
+use p256::elliptic_curve::JwkEcKey;
 use rand::rngs::OsRng;
 use tokio::net::{lookup_host, TcpStream};
-use tracing::{debug, field::display, info};
+use tracing::field::display;
+use tracing::{debug, info};
 
-use crate::{
-    auth::{
-        self,
-        backend::{local::StaticAuthRules, ComputeCredentials, ComputeUserInfo},
-        check_peer_addr_is_in_list, AuthError,
-    },
-    compute,
-    config::ProxyConfig,
-    context::RequestMonitoring,
-    control_plane::{
-        errors::{GetAuthInfoError, WakeComputeError},
-        locks::ApiLocks,
-        provider::ApiLockError,
-        CachedNodeInfo,
-    },
-    error::{ErrorKind, ReportableError, UserFacingError},
-    intern::EndpointIdInt,
-    proxy::{
-        connect_compute::ConnectMechanism,
-        retry::{CouldRetry, ShouldRetryWakeCompute},
-    },
-    rate_limiter::EndpointRateLimiter,
-    EndpointId, Host,
-};
-
-use super::{
-    conn_pool::{poll_client, Client, ConnInfo, GlobalConnPool},
-    http_conn_pool::{self, poll_http2_client},
-    local_conn_pool::{self, LocalClient, LocalConnPool},
-};
+use super::conn_pool::{poll_client, Client, ConnInfo, GlobalConnPool};
+use super::http_conn_pool::{self, poll_http2_client};
+use super::local_conn_pool::{self, LocalClient, LocalConnPool};
+use crate::auth::backend::local::StaticAuthRules;
+use crate::auth::backend::{ComputeCredentials, ComputeUserInfo};
+use crate::auth::{self, check_peer_addr_is_in_list, AuthError};
+use crate::config::ProxyConfig;
+use crate::context::RequestMonitoring;
+use crate::control_plane::errors::{GetAuthInfoError, WakeComputeError};
+use crate::control_plane::locks::ApiLocks;
+use crate::control_plane::provider::ApiLockError;
+use crate::control_plane::CachedNodeInfo;
+use crate::error::{ErrorKind, ReportableError, UserFacingError};
+use crate::intern::EndpointIdInt;
+use crate::proxy::connect_compute::ConnectMechanism;
+use crate::proxy::retry::{CouldRetry, ShouldRetryWakeCompute};
+use crate::rate_limiter::EndpointRateLimiter;
+use crate::{compute, EndpointId, Host};
 
 pub(crate) struct PoolingBackend {
     pub(crate) http_conn_pool: Arc<super::http_conn_pool::GlobalConnPool>,

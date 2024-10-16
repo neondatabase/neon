@@ -60,11 +60,10 @@ impl LimitAlgorithm for Aimd {
 mod tests {
     use std::time::Duration;
 
+    use super::*;
     use crate::rate_limiter::limit_algorithm::{
         DynamicLimiter, RateLimitAlgorithm, RateLimiterConfig,
     };
-
-    use super::*;
 
     #[tokio::test(start_paused = true)]
     async fn increase_decrease() {

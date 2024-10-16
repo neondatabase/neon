@@ -1,28 +1,26 @@
-use crate::{
-    auth::backend::{jwt::JwkCache, AuthRateLimiter},
-    control_plane::locks::ApiLocks,
-    rate_limiter::{RateBucketInfo, RateLimitAlgorithm, RateLimiterConfig},
-    scram::threadpool::ThreadPool,
-    serverless::{cancel_set::CancelSet, GlobalConnPoolOptions},
-    Host,
-};
+use std::collections::{HashMap, HashSet};
+use std::str::FromStr;
+use std::sync::Arc;
+use std::time::Duration;
+
 use anyhow::{bail, ensure, Context, Ok};
 use clap::ValueEnum;
 use itertools::Itertools;
 use remote_storage::RemoteStorageConfig;
-use rustls::{
-    crypto::ring::sign,
-    pki_types::{CertificateDer, PrivateKeyDer},
-};
+use rustls::crypto::ring::sign;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use sha2::{Digest, Sha256};
-use std::{
-    collections::{HashMap, HashSet},
-    str::FromStr,
-    sync::Arc,
-    time::Duration,
-};
 use tracing::{error, info};
 use x509_parser::oid_registry;
+
+use crate::auth::backend::jwt::JwkCache;
+use crate::auth::backend::AuthRateLimiter;
+use crate::control_plane::locks::ApiLocks;
+use crate::rate_limiter::{RateBucketInfo, RateLimitAlgorithm, RateLimiterConfig};
+use crate::scram::threadpool::ThreadPool;
+use crate::serverless::cancel_set::CancelSet;
+use crate::serverless::GlobalConnPoolOptions;
+use crate::Host;
 
 pub struct ProxyConfig {
     pub tls_config: Option<TlsConfig>,
@@ -692,9 +690,8 @@ impl FromStr for ConcurrencyLockOptions {
 
 #[cfg(test)]
 mod tests {
-    use crate::rate_limiter::Aimd;
-
     use super::*;
+    use crate::rate_limiter::Aimd;
 
     #[test]
     fn test_parse_cache_options() -> anyhow::Result<()> {

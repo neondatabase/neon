@@ -1,10 +1,9 @@
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
 
 use futures::FutureExt;
-use redis::{
-    aio::{ConnectionLike, MultiplexedConnection},
-    ConnectionInfo, IntoConnectionInfo, RedisConnectionInfo, RedisResult,
-};
+use redis::aio::{ConnectionLike, MultiplexedConnection};
+use redis::{ConnectionInfo, IntoConnectionInfo, RedisConnectionInfo, RedisResult};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 

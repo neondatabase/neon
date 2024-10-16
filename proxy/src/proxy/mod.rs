@@ -7,40 +7,32 @@ pub(crate) mod handshake;
 pub(crate) mod passthrough;
 pub(crate) mod retry;
 pub(crate) mod wake_compute;
-pub use copy_bidirectional::copy_bidirectional_client_compute;
-pub use copy_bidirectional::ErrorSource;
+use std::sync::Arc;
 
-use crate::config::ProxyProtocolV2;
-use crate::{
-    auth,
-    cancellation::{self, CancellationHandlerMain, CancellationHandlerMainInternal},
-    compute,
-    config::{ProxyConfig, TlsConfig},
-    context::RequestMonitoring,
-    error::ReportableError,
-    metrics::{Metrics, NumClientConnectionsGuard},
-    protocol2::read_proxy_protocol,
-    proxy::handshake::{handshake, HandshakeData},
-    rate_limiter::EndpointRateLimiter,
-    stream::{PqStream, Stream},
-    EndpointCacheKey,
-};
+pub use copy_bidirectional::{copy_bidirectional_client_compute, ErrorSource};
 use futures::TryFutureExt;
 use itertools::Itertools;
 use once_cell::sync::OnceCell;
 use pq_proto::{BeMessage as Be, StartupMessageParams};
 use regex::Regex;
 use smol_str::{format_smolstr, SmolStr};
-use std::sync::Arc;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn, Instrument};
 
-use self::{
-    connect_compute::{connect_to_compute, TcpMechanism},
-    passthrough::ProxyPassthrough,
-};
+use self::connect_compute::{connect_to_compute, TcpMechanism};
+use self::passthrough::ProxyPassthrough;
+use crate::cancellation::{self, CancellationHandlerMain, CancellationHandlerMainInternal};
+use crate::config::{ProxyConfig, ProxyProtocolV2, TlsConfig};
+use crate::context::RequestMonitoring;
+use crate::error::ReportableError;
+use crate::metrics::{Metrics, NumClientConnectionsGuard};
+use crate::protocol2::read_proxy_protocol;
+use crate::proxy::handshake::{handshake, HandshakeData};
+use crate::rate_limiter::EndpointRateLimiter;
+use crate::stream::{PqStream, Stream};
+use crate::{auth, compute, EndpointCacheKey};
 
 const ERR_INSECURE_CONNECTION: &str = "connection is insecure (try using `sslmode=require`)";
 

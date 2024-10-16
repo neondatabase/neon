@@ -1,3 +1,8 @@
+use std::net::SocketAddr;
+use std::pin::pin;
+use std::sync::Arc;
+
+use anyhow::bail;
 use aws_config::environment::EnvironmentVariableCredentialsProvider;
 use aws_config::imds::credentials::ImdsCredentialsProvider;
 use aws_config::meta::credentials::CredentialsProviderChain;
@@ -7,52 +12,34 @@ use aws_config::provider_config::ProviderConfig;
 use aws_config::web_identity_token::WebIdentityTokenCredentialsProvider;
 use aws_config::Region;
 use futures::future::Either;
-use proxy::auth;
 use proxy::auth::backend::jwt::JwkCache;
-use proxy::auth::backend::AuthRateLimiter;
-use proxy::auth::backend::ConsoleRedirectBackend;
-use proxy::auth::backend::MaybeOwned;
-use proxy::cancellation::CancelMap;
-use proxy::cancellation::CancellationHandler;
-use proxy::config::remote_storage_from_toml;
-use proxy::config::AuthenticationConfig;
-use proxy::config::CacheOptions;
-use proxy::config::HttpConfig;
-use proxy::config::ProjectInfoCacheOptions;
-use proxy::config::ProxyProtocolV2;
+use proxy::auth::backend::{AuthRateLimiter, ConsoleRedirectBackend, MaybeOwned};
+use proxy::cancellation::{CancelMap, CancellationHandler};
+use proxy::config::{
+    self, remote_storage_from_toml, AuthenticationConfig, CacheOptions, HttpConfig,
+    ProjectInfoCacheOptions, ProxyConfig, ProxyProtocolV2,
+};
 use proxy::context::parquet::ParquetUploadArgs;
-use proxy::control_plane;
-use proxy::http;
 use proxy::http::health_server::AppMetrics;
 use proxy::metrics::Metrics;
-use proxy::rate_limiter::EndpointRateLimiter;
-use proxy::rate_limiter::LeakyBucketConfig;
-use proxy::rate_limiter::RateBucketInfo;
-use proxy::rate_limiter::WakeComputeRateLimiter;
+use proxy::rate_limiter::{
+    EndpointRateLimiter, LeakyBucketConfig, RateBucketInfo, WakeComputeRateLimiter,
+};
 use proxy::redis::cancellation_publisher::RedisPublisherClient;
 use proxy::redis::connection_with_credentials_provider::ConnectionWithCredentialsProvider;
-use proxy::redis::elasticache;
-use proxy::redis::notifications;
+use proxy::redis::{elasticache, notifications};
 use proxy::scram::threadpool::ThreadPool;
 use proxy::serverless::cancel_set::CancelSet;
 use proxy::serverless::GlobalConnPoolOptions;
-use proxy::usage_metrics;
-
-use anyhow::bail;
-use proxy::config::{self, ProxyConfig};
-use proxy::serverless;
+use proxy::{auth, control_plane, http, serverless, usage_metrics};
 use remote_storage::RemoteStorageConfig;
-use std::net::SocketAddr;
-use std::pin::pin;
-use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use tracing::info;
-use tracing::warn;
-use tracing::Instrument;
-use utils::{project_build_tag, project_git_version, sentry_init::init_sentry};
+use tracing::{info, warn, Instrument};
+use utils::sentry_init::init_sentry;
+use utils::{project_build_tag, project_git_version};
 
 project_git_version!(GIT_VERSION);
 project_build_tag!(BUILD_TAG);

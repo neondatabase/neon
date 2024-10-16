@@ -17,29 +17,22 @@ use tokio_postgres::config::AuthKeys;
 use tracing::{info, warn};
 
 use crate::auth::credentials::check_peer_addr_is_in_list;
-use crate::auth::{validate_password_and_exchange, AuthError};
+use crate::auth::{self, validate_password_and_exchange, AuthError, ComputeUserInfoMaybeEndpoint};
 use crate::cache::Cached;
+use crate::config::AuthenticationConfig;
 use crate::context::RequestMonitoring;
 use crate::control_plane::errors::GetAuthInfoError;
-use crate::control_plane::provider::{CachedRoleSecret, ControlPlaneBackend};
-use crate::control_plane::AuthSecret;
+use crate::control_plane::provider::{
+    CachedAllowedIps, CachedNodeInfo, CachedRoleSecret, ControlPlaneBackend,
+};
+use crate::control_plane::{self, Api, AuthSecret};
 use crate::intern::EndpointIdInt;
 use crate::metrics::Metrics;
 use crate::proxy::connect_compute::ComputeConnectBackend;
 use crate::proxy::NeonOptions;
 use crate::rate_limiter::{BucketRateLimiter, EndpointRateLimiter, RateBucketInfo};
 use crate::stream::Stream;
-use crate::{
-    auth::{self, ComputeUserInfoMaybeEndpoint},
-    config::AuthenticationConfig,
-    control_plane::{
-        self,
-        provider::{CachedAllowedIps, CachedNodeInfo},
-        Api,
-    },
-    stream,
-};
-use crate::{scram, EndpointCacheKey, EndpointId, RoleName};
+use crate::{scram, stream, EndpointCacheKey, EndpointId, RoleName};
 
 /// Alternative to [`std::borrow::Cow`] but doesn't need `T: ToOwned` as we don't need that functionality
 pub enum MaybeOwned<'a, T> {
@@ -500,34 +493,32 @@ impl ComputeConnectBackend for Backend<'_, ComputeCredentials> {
 
 #[cfg(test)]
 mod tests {
-    use std::{net::IpAddr, sync::Arc, time::Duration};
+    use std::net::IpAddr;
+    use std::sync::Arc;
+    use std::time::Duration;
 
     use bytes::BytesMut;
     use fallible_iterator::FallibleIterator;
     use once_cell::sync::Lazy;
-    use postgres_protocol::{
-        authentication::sasl::{ChannelBinding, ScramSha256},
-        message::{backend::Message as PgMessage, frontend},
-    };
+    use postgres_protocol::authentication::sasl::{ChannelBinding, ScramSha256};
+    use postgres_protocol::message::backend::Message as PgMessage;
+    use postgres_protocol::message::frontend;
     use provider::AuthSecret;
     use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
-    use crate::{
-        auth::{backend::MaskedIp, ComputeUserInfoMaybeEndpoint, IpPattern},
-        config::AuthenticationConfig,
-        context::RequestMonitoring,
-        control_plane::{
-            self,
-            provider::{self, CachedAllowedIps, CachedRoleSecret},
-            CachedNodeInfo,
-        },
-        proxy::NeonOptions,
-        rate_limiter::{EndpointRateLimiter, RateBucketInfo},
-        scram::{threadpool::ThreadPool, ServerSecret},
-        stream::{PqStream, Stream},
-    };
-
-    use super::{auth_quirks, jwt::JwkCache, AuthRateLimiter};
+    use super::jwt::JwkCache;
+    use super::{auth_quirks, AuthRateLimiter};
+    use crate::auth::backend::MaskedIp;
+    use crate::auth::{ComputeUserInfoMaybeEndpoint, IpPattern};
+    use crate::config::AuthenticationConfig;
+    use crate::context::RequestMonitoring;
+    use crate::control_plane::provider::{self, CachedAllowedIps, CachedRoleSecret};
+    use crate::control_plane::{self, CachedNodeInfo};
+    use crate::proxy::NeonOptions;
+    use crate::rate_limiter::{EndpointRateLimiter, RateBucketInfo};
+    use crate::scram::threadpool::ThreadPool;
+    use crate::scram::ServerSecret;
+    use crate::stream::{PqStream, Stream};
 
     struct Auth {
         ips: Vec<IpPattern>,
