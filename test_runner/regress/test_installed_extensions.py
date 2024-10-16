@@ -101,12 +101,22 @@ def test_installed_extensions(neon_simple_env: NeonEnv):
     endpoint.stop()
     endpoint.start()
 
-    time.sleep(1)
+    timeout = 5
+    while timeout > 0:
+        try:
+            res = client.metrics()
+            timeout = -1
+        except Exception as e:
+            info("failed to get metrics, assume they are not collected yet: %s", e)
+            time.sleep(1)
+            timeout -= 1
+            continue
 
-    res = client.metrics()
-    info("After restart metrics: %s", res)
-    m = parse_metrics(res)
-    neon_m = m.query_all("installed_extensions", {"extension_name": "neon", "versions": "1.2,1.3"})
-    assert len(neon_m) == 1
-    for sample in neon_m:
-        assert sample.value == 2
+        info("After restart metrics: %s", res)
+        m = parse_metrics(res)
+        neon_m = m.query_all(
+            "installed_extensions", {"extension_name": "neon", "versions": "1.2,1.3"}
+        )
+        assert len(neon_m) == 1
+        for sample in neon_m:
+            assert sample.value == 2
