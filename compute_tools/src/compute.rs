@@ -1369,32 +1369,35 @@ LIMIT 100",
         download_size
     }
 
-    pub fn set_role_grants(
+    pub async fn set_role_grants(
         &self,
         db_name: &str,
         schema_name: &str,
         privileges: &[Privilege],
         role_name: &str,
     ) -> Result<()> {
+        use tokio_postgres::config::Config;
+        use tokio_postgres::NoTls;
+
         let mut conf = Config::from_str(self.connstr.as_str()).unwrap();
         conf.dbname(db_name);
 
-        let mut db_client = conf
+        let (db_client, conn) = conf
             .connect(NoTls)
+            .await
             .context("Failed to connect to the database")?;
+        tokio::spawn(conn);
 
+        // todo: pg_quote
         let query = format!(
             "GRANT {} ON SCHEMA {} TO {}",
-            privileges
-                .iter()
-                .map(|p| serde_json::to_string(p).unwrap())
-                .collect::<Vec<String>>()
-                .join(", "),
+            privileges.iter().map(|p| p.as_str()).join(", "),
             schema_name,
             role_name
         );
         db_client
             .simple_query(&query)
+            .await
             .context(format!("Failed to execute query: {}", query))?;
 
         Ok(())

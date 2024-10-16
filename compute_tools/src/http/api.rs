@@ -182,14 +182,16 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
             let request = hyper::body::to_bytes(req.into_body()).await.unwrap();
             let request = serde_json::from_slice::<SetRoleGrantsRequest>(&request).unwrap();
 
-            let res = compute.set_role_grants(
-                &request.database,
-                &request.schema,
-                &request.privileges,
-                &request.role,
-            );
+            let res = compute
+                .set_role_grants(
+                    &request.database,
+                    &request.schema,
+                    &request.privileges,
+                    &request.role,
+                )
+                .await;
             match res {
-                Ok(_) => render_json(Body::from(
+                Ok(()) => render_json(Body::from(
                     serde_json::to_string(&SetRoleGrantsResponse {
                         database: request.database,
                         schema: request.schema,
