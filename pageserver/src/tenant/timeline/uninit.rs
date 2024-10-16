@@ -3,7 +3,7 @@ use std::{collections::hash_map::Entry, fs, sync::Arc};
 use anyhow::Context;
 use camino::Utf8PathBuf;
 use tracing::{error, info, info_span};
-use utils::{fs_ext, id::TimelineId, lsn::Lsn};
+use utils::{fs_ext, id::TimelineId, lsn::Lsn, sync::gate::GateGuard};
 
 use crate::{
     context::RequestContext,
@@ -170,6 +170,7 @@ pub(crate) fn cleanup_timeline_directory(create_guard: TimelineCreateGuard) {
 /// is kept in `[Tenant::timelines_creating]` to exclude concurrent attempts to create the same timeline.
 #[must_use]
 pub(crate) struct TimelineCreateGuard {
+    pub(crate) _tenant_gate_guard: GateGuard,
     pub(crate) owning_tenant: Arc<Tenant>,
     pub(crate) timeline_id: TimelineId,
     pub(crate) timeline_path: Utf8PathBuf,
@@ -205,6 +206,11 @@ impl<'t> TimelineCreateGuard {
             .myself
             .upgrade()
             .ok_or(TimelineExclusionError::ShuttingDown)?;
+        let _tenant_gate_guard = owning_tenant
+            .gate
+            .enter()
+            .map_err(|_| TimelineExclusionError::ShuttingDown)?;
+
         // Lock order: this is the only place we take both locks.  During drop() we only
         // lock creating_timelines
         let timelines = owning_tenant.timelines.lock().unwrap();
@@ -225,6 +231,7 @@ impl<'t> TimelineCreateGuard {
             drop(timelines);
             drop(creating_timelines);
             Ok(Self {
+                _tenant_gate_guard,
                 owning_tenant: owning_tenant,
                 timeline_id,
                 timeline_path,

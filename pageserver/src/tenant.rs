@@ -914,6 +914,7 @@ impl Tenant {
                     unreachable!("Timeline {tenant_id}/{timeline_id} is already being created")
                 }
                 let timeline_create_guard = TimelineCreateGuard {
+                    _tenant_gate_guard: self.gate.enter()?,
                     owning_tenant: self.clone(),
                     timeline_id,
                     idempotency,
@@ -2134,7 +2135,6 @@ impl Tenant {
                 location,
                 started_at,
             },
-            ctx,
             self.cancel.clone(),
         )
         .await?;
@@ -2203,26 +2203,23 @@ impl Tenant {
         activate: ActivateTimelineArgs,
         timeline_create_guard: TimelineCreateGuard,
     ) -> Result<(), anyhow::Error> {
-        let _tenant_gate = self.gate.enter()?;
-        // TODO: make more sensitive to tenant shutdown
-
         let ctx = RequestContext::new(TaskKind::ImportPgdata, DownloadBehavior::Warn);
 
-        // This fills the layer map with layers and updates the index part.
-        let update_index_part = import_pgdata::doit(
-            &timeline,
-            index_part,
-            &ctx,
-            self.cancel.clone(), /* TODO: separate cancellation token for the in-progress import? */
-        )
-        .await
-        .context("import")?;
+        import_pgdata::doit(&timeline, index_part, &ctx, self.cancel.clone())
+            .await
+            .context("import")?;
 
         //
         // Reload timeline from remote.
         // This proves that the remote state is attachable, and it reuses the code.
-        // TODO: must not do this if tenant is shutting down / has shut down
         //
+        // TODO: think about whether this is safe to do with concurrent Tenant::shutdown.
+        // timeline_create_guard hols the tenant gate open, so, shutdown cannot _complete_ until we exit.
+        // But our activate() call might launch new background tasks after Tenant::shutdown
+        // already went past shutting down the Tenant::timelines, which this timeline here is no part of.
+        // I think the same problem exists with the bootstrap & branch mgmt API tasks (tenant shutting
+        // down while bootstrapping/branching + activating), but, the race condition is much more likely
+        // to manifest because of the long runtime of this import task.
 
         timeline.shutdown(ShutdownMode::Hard).await; // in theory this shouldn't even .await anything except for coop yield
         let Some(timeline) = Arc::into_inner(timeline) else {
@@ -2258,7 +2255,8 @@ impl Tenant {
             ActivateTimelineArgs::No => (),
         }
 
-        // Finish the creation process
+        // Finish the creation process & drop the tenant gate guard inside the timeline_create_guard.
+        // Holding the tenant gate guard ensures this task does not outlive the tenant.
         drop(timeline_create_guard);
 
         anyhow::Ok(())
@@ -2623,7 +2621,6 @@ impl Tenant {
                 let span = tracing::info_span!("timeline_shutdown", %timeline_id, ?shutdown_mode);
                 js.spawn(async move { timeline.shutdown(shutdown_mode).instrument(span).await });
             });
-            todo!("shut down ongoing import tasks")
         };
         // test_long_timeline_create_then_tenant_delete is leaning on this message
         tracing::info!("Waiting for timelines...");

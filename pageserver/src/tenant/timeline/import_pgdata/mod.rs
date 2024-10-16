@@ -65,7 +65,6 @@ static PGDATA_DIR: Lazy<RemotePath> = Lazy::new(|| RemotePath::from_string("pgda
 
 pub(crate) async fn create<'a>(
     in_progress: index_part_format::InProgress,
-    ctx: &RequestContext,
     cancel: CancellationToken,
 ) -> anyhow::Result<(ControlFile, index_part_format::Root)> {
     let storage_wrapper = make_storage_wrapper(&in_progress.location, cancel).await?;
