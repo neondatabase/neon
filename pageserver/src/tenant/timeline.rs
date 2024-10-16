@@ -19,6 +19,7 @@ use camino::Utf8Path;
 use chrono::{DateTime, Utc};
 use enumset::EnumSet;
 use fail::fail_point;
+use futures::{stream::FuturesUnordered, StreamExt};
 use handle::ShardTimelineId;
 use once_cell::sync::Lazy;
 use pageserver_api::{
@@ -70,7 +71,9 @@ use crate::{
         config::AttachmentMode,
         layer_map::{LayerMap, SearchResult},
         metadata::TimelineMetadata,
-        storage_layer::{inmemory_layer::IndexEntry, PersistentLayerDesc},
+        storage_layer::{
+            inmemory_layer::IndexEntry, PersistentLayerDesc, ValueReconstructSituation,
+        },
     },
     walingest::WalLagCooldown,
     walredo,
@@ -939,8 +942,6 @@ impl Timeline {
             ranges: vec![key..key.next()],
         };
 
-        // Initialise the reconstruct state for the key with the cache
-        // entry returned above.
         let mut reconstruct_state = ValuesReconstructState::new();
 
         let vectored_res = self
@@ -1140,22 +1141,37 @@ impl Timeline {
         let reconstruct_timer = crate::metrics::RECONSTRUCT_TIME
             .for_get_kind(get_kind)
             .start_timer();
-        let mut results: BTreeMap<Key, Result<Bytes, PageReconstructError>> = BTreeMap::new();
         let layers_visited = reconstruct_state.get_layers_visited();
 
-        for (key, res) in std::mem::take(&mut reconstruct_state.keys) {
-            match res {
-                Err(err) => {
-                    results.insert(key, Err(err));
-                }
-                Ok(state) => {
-                    let state = ValueReconstructState::from(state);
+        let futs = FuturesUnordered::new();
+        for (key, state) in std::mem::take(&mut reconstruct_state.keys) {
+            futs.push({
+                let walredo_self = self.myself.upgrade().expect("&self method holds the arc");
+                async move {
+                    assert!(matches!(
+                        state.situation,
+                        ValueReconstructSituation::Complete
+                    ));
 
-                    let reconstruct_res = self.reconstruct_value(key, lsn, state).await;
-                    results.insert(key, reconstruct_res);
+                    let converted = match state.collect_pending_ios().await {
+                        Ok(ok) => ok,
+                        Err(err) => {
+                            return (key, Err(err));
+                        }
+                    };
+
+                    (
+                        key,
+                        walredo_self.reconstruct_value(key, lsn, converted).await,
+                    )
                 }
-            }
+            });
         }
+
+        let results = futs
+            .collect::<BTreeMap<Key, Result<Bytes, PageReconstructError>>>()
+            .await;
+
         reconstruct_timer.stop_and_record();
 
         // For aux file keys (v1 or v2) the vectored read path does not return an error
@@ -5566,7 +5582,8 @@ impl Timeline {
                     )
                     .await?;
                 for (k, v) in reconstruct_data.keys {
-                    all_data.push((k, v?.img.unwrap().1));
+                    let v = v.collect_pending_ios().await?;
+                    all_data.push((k, v.img.unwrap().1));
                 }
             }
         }
