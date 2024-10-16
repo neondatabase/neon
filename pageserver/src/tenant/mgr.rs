@@ -1422,7 +1422,7 @@ impl TenantManager {
                     .delete_prefix(&remote_tenant_path(&tenant_shard_id), &self.cancel)
                     .await
             },
-            TimeoutOrCancel::caused_by_cancel,
+            |_| false, // backoff::retry handles cancellation
             1,
             3,
             &format!("delete_tenant[tenant_shard_id={tenant_shard_id}]"),
