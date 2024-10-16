@@ -3464,12 +3464,12 @@ class Endpoint(PgProtocol, LogUtils):
         config_lines = ["max_replication_write_lag=15MB"] + config_lines
 
         # Delete file cache if it exists (and we're recreating the endpoint)
-        if (lfc_path := Path(self.lfc_path())).exists():
-            lfc_path.unlink()
-        else:
-            lfc_path.parent.mkdir(parents=True)
-
         if use_lfc:
+            if (lfc_path := Path(self.lfc_path())).exists():
+                lfc_path.unlink()
+            else:
+                lfc_path.parent.mkdir(parents=True, exist_ok=True)
+
             config_lines = [
                 "shared_buffers = 512kB",
                 f"neon.file_cache_path = '{self.lfc_path()}'",
