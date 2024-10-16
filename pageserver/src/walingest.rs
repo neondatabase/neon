@@ -152,6 +152,22 @@ struct DbaseDrop {
     tablespace_ids: Vec<u32>,
 }
 
+enum ClogRecord {
+    ZeroPage(ClogZeroPage),
+    Truncate(ClogTruncate),
+}
+
+struct ClogZeroPage {
+    segno: u32,
+    rpageno: u32,
+}
+
+struct ClogTruncate {
+    pageno: u32,
+    oldest_xid: u32,
+    oldest_xid_db: u32,
+}
+
 impl WalIngest {
     pub async fn new(
         timeline: &Timeline,
@@ -279,30 +295,21 @@ impl WalIngest {
                 trace!("XLOG_TBLSPC_CREATE/DROP is not handled yet");
             }
             pg_constants::RM_CLOG_ID => {
-                let info = decoded.xl_info & !pg_constants::XLR_INFO_MASK;
+                // [`Self::decode_clog_record`] may never fail and always returns.
+                // It has this interface to match all the other decoding methods.
+                let clog_record = Self::decode_clog_record(&mut buf, &decoded, pg_version)
+                    .unwrap()
+                    .unwrap();
 
-                if info == pg_constants::CLOG_ZEROPAGE {
-                    let pageno = if pg_version < 17 {
-                        buf.get_u32_le()
-                    } else {
-                        buf.get_u64_le() as u32
-                    };
-                    let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
-                    let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
-                    self.put_slru_page_image(
-                        modification,
-                        SlruKind::Clog,
-                        segno,
-                        rpageno,
-                        ZERO_PAGE.clone(),
-                        ctx,
-                    )
-                    .await?;
-                } else {
-                    assert!(info == pg_constants::CLOG_TRUNCATE);
-                    let xlrec = XlClogTruncate::decode(&mut buf, pg_version);
-                    self.ingest_clog_truncate_record(modification, &xlrec, ctx)
-                        .await?;
+                match clog_record {
+                    ClogRecord::ZeroPage(zero_page) => {
+                        self.ingest_clog_zero_page_record(zero_page, modification, ctx)
+                            .await?;
+                    }
+                    ClogRecord::Truncate(truncate) => {
+                        self.ingest_clog_truncate_record(truncate, modification, ctx)
+                            .await?;
+                    }
                 }
             }
             pg_constants::RM_XACT_ID => {
@@ -1783,13 +1790,19 @@ impl WalIngest {
 
     async fn ingest_clog_truncate_record(
         &mut self,
+        truncate: ClogTruncate,
         modification: &mut DatadirModification<'_>,
-        xlrec: &XlClogTruncate,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
+        let ClogTruncate {
+            pageno,
+            oldest_xid,
+            oldest_xid_db,
+        } = truncate;
+
         info!(
             "RM_CLOG_ID truncate pageno {} oldestXid {} oldestXidDB {}",
-            xlrec.pageno, xlrec.oldest_xid, xlrec.oldest_xid_db
+            pageno, oldest_xid, oldest_xid_db
         );
 
         // In Postgres, oldestXid and oldestXidDB are updated in memory when the CLOG is
@@ -1797,8 +1810,8 @@ impl WalIngest {
         // later. In Neon, a server can start at any LSN, not just on a checkpoint record,
         // so we keep the oldestXid and oldestXidDB up-to-date.
         enum_pgversion_dispatch!(&mut self.checkpoint, CheckPoint, cp, {
-            cp.oldestXid = xlrec.oldest_xid;
-            cp.oldestXidDB = xlrec.oldest_xid_db;
+            cp.oldestXid = oldest_xid;
+            cp.oldestXidDB = oldest_xid_db;
         });
         self.checkpoint_modified = true;
 
@@ -1815,7 +1828,7 @@ impl WalIngest {
         // the current endpoint page must not be eligible for removal.
         // See SimpleLruTruncate() in slru.c
         if dispatch_pgversion!(modification.tline.pg_version, {
-            pgv::nonrelfile_utils::clogpage_precedes(latest_page_number, xlrec.pageno)
+            pgv::nonrelfile_utils::clogpage_precedes(latest_page_number, pageno)
         }) {
             info!("could not truncate directory pg_xact apparent wraparound");
             return Ok(());
@@ -1835,7 +1848,7 @@ impl WalIngest {
             let segpage = segno * pg_constants::SLRU_PAGES_PER_SEGMENT;
 
             let may_delete = dispatch_pgversion!(modification.tline.pg_version, {
-                pgv::nonrelfile_utils::slru_may_delete_clogsegment(segpage, xlrec.pageno)
+                pgv::nonrelfile_utils::slru_may_delete_clogsegment(segpage, pageno)
             });
 
             if may_delete {
@@ -1847,6 +1860,54 @@ impl WalIngest {
         }
 
         Ok(())
+    }
+
+    async fn ingest_clog_zero_page_record(
+        &mut self,
+        zero_page: ClogZeroPage,
+        modification: &mut DatadirModification<'_>,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
+        let ClogZeroPage { segno, rpageno } = zero_page;
+
+        self.put_slru_page_image(
+            modification,
+            SlruKind::Clog,
+            segno,
+            rpageno,
+            ZERO_PAGE.clone(),
+            ctx,
+        )
+        .await
+    }
+
+    fn decode_clog_record(
+        buf: &mut Bytes,
+        decoded: &DecodedWALRecord,
+        pg_version: u32,
+    ) -> anyhow::Result<Option<ClogRecord>> {
+        let info = decoded.xl_info & !pg_constants::XLR_INFO_MASK;
+
+        if info == pg_constants::CLOG_ZEROPAGE {
+            let pageno = if pg_version < 17 {
+                buf.get_u32_le()
+            } else {
+                buf.get_u64_le() as u32
+            };
+            let segno = pageno / pg_constants::SLRU_PAGES_PER_SEGMENT;
+            let rpageno = pageno % pg_constants::SLRU_PAGES_PER_SEGMENT;
+
+            Ok(Some(ClogRecord::ZeroPage(ClogZeroPage { segno, rpageno })))
+        } else {
+            assert!(info == pg_constants::CLOG_TRUNCATE);
+            let xlrec = XlClogTruncate::decode(buf, pg_version);
+
+            Ok(Some(ClogRecord::Truncate(ClogTruncate {
+                pageno: xlrec.pageno,
+                oldest_xid: xlrec.oldest_xid,
+                oldest_xid_db: xlrec.oldest_xid_db,
+            })))
+        }
     }
 
     fn ingest_multixact_create_record(
