@@ -241,6 +241,7 @@ use self::index::IndexPart;
 
 use super::metadata::MetadataUpdate;
 use super::storage_layer::{Layer, LayerName, ResidentLayer};
+use super::timeline::import_pgdata;
 use super::upload_queue::{NotInitialized, SetDeletedFlagProgress};
 use super::{CreatingTimelineStateImportPgdata, Generation};
 
@@ -684,12 +685,13 @@ impl RemoteTimelineClient {
     /// Launch an index-file upload operation in the background, setting `import_pgdata` field.
     pub(crate) fn schedule_index_upload_for_import_pgdata_state_update(
         self: &Arc<Self>,
-        state: Option<CreatingTimelineStateImportPgdata>,
+        state: Option<import_pgdata::flow::index_part_format::Root>,
     ) -> anyhow::Result<()> {
         let mut guard = self.upload_queue.lock().unwrap();
         let upload_queue = guard.initialized_mut()?;
         upload_queue.dirty.import_pgdata = state;
         self.schedule_index_upload(upload_queue)?;
+        Ok(())
     }
 
     ///

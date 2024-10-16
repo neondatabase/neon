@@ -359,7 +359,7 @@ pub struct Tenant {
 
     l0_flush_global_state: L0FlushGlobalState,
 
-    myself: Arc<Self>,
+    myself: Weak<Self>,
 }
 
 impl std::fmt::Debug for Tenant {
@@ -685,9 +685,7 @@ pub(crate) struct CreatingTimelineStateBootstrap {
     pub(crate) pg_version: u32,
 }
 
-pub(crate) struct CreatingTimelineStateImportPgdata {
-    pub(crate) s3_uri: String,
-}
+pub(crate) struct CreatingTimelineStateImportPgdata {}
 
 pub(crate) enum CreatingTimelineState {
     Bootstrap(CreatingTimelineStateBootstrap),
@@ -810,12 +808,12 @@ impl Tenant {
         &self,
         timeline_id: TimelineId,
         resources: TimelineResources,
-        index_part: Option<IndexPart>,
+        mut index_part: IndexPart,
         metadata: TimelineMetadata,
         ancestor: Option<Arc<Timeline>>,
         last_aux_file_policy: Option<AuxFilePolicy>,
         _ctx: &RequestContext,
-    ) -> anyhow::Result<Arc<Timeline>> {
+    ) -> anyhow::Result<()> {
         let tenant_id = self.tenant_shard_id;
 
         let timeline = self.create_timeline_struct(
@@ -840,28 +838,13 @@ impl Tenant {
             "these are used interchangeably"
         );
 
-        if let Some(index_part) = index_part.as_ref() {
-            timeline.remote_client.init_upload_queue(index_part)?;
+        timeline.remote_client.init_upload_queue(&index_part)?;
 
-            timeline
-                .last_aux_file_policy
-                .store(index_part.last_aux_file_policy());
-        } else {
-            // No data on the remote storage, but we have local metadata file. We can end up
-            // here with timeline_create being interrupted before finishing index part upload.
-            // By doing what we do here, the index part upload is retried.
-            // If control plane retries timeline creation in the meantime, the mgmt API handler
-            // for timeline creation will coalesce on the upload we queue here.
+        timeline
+            .last_aux_file_policy
+            .store(index_part.last_aux_file_policy());
 
-            // FIXME: this branch should be dead code as we no longer write local metadata.
-
-            timeline
-                .remote_client
-                .init_upload_queue_for_empty_remote(&metadata)?;
-            timeline
-                .remote_client
-                .schedule_index_upload_for_full_metadata_update(&metadata)?;
-        }
+        let import_pgdata = index_part.import_pgdata.take();
 
         timeline
             .load_layer_map(disk_consistent_lsn, index_part)
@@ -870,39 +853,66 @@ impl Tenant {
                 format!("Failed to load layermap for timeline {tenant_id}/{timeline_id}")
             })?;
 
-        {
-            // avoiding holding it across awaits
-            let mut timelines_accessor = self.timelines.lock().unwrap();
-            match timelines_accessor.entry(timeline_id) {
-                // We should never try and load the same timeline twice during startup
-                Entry::Occupied(_) => {
-                    unreachable!(
-                        "Timeline {tenant_id}/{timeline_id} already exists in the tenant map"
-                    );
-                }
-                Entry::Vacant(v) => {
-                    v.insert(Arc::clone(&timeline));
-                    timeline.maybe_spawn_flush_loop();
+        if let Some(import_pgdata) = import_pgdata {
+            let guard = async move {
+                let guard_or_arc = self
+                    .start_creating_timeline(
+                        timeline_id,
+                        CreatingTimelineState::ImportPgdata(CreatingTimelineStateImportPgdata {}),
+                    )
+                    .await
+                    .context("start_creating_timeline failed, this should not happen")?;
+                match guard_or_arc {
+                    either::Either::Left(guard) => Ok(guard),
+                    either::Either::Right(arc) => {
+                        anyhow::bail!(
+                            "timeline object already exists, this should not happen during attach"
+                        )
+                    }
                 }
             }
-        };
+            .await
+            .with_context(|| {
+                format!(
+                    "resume import of timeline {}/{}",
+                    self.tenant_shard_id, timeline_id
+                )
+            })?;
+            todo!("resume flow")
+        } else {
+            {
+                let mut timelines_accessor = self.timelines.lock().unwrap();
+                match timelines_accessor.entry(timeline_id) {
+                    // We should never try and load the same timeline twice during startup
+                    Entry::Occupied(_) => {
+                        unreachable!(
+                            "Timeline {tenant_id}/{timeline_id} already exists in the tenant map"
+                        );
+                    }
+                    Entry::Vacant(v) => {
+                        v.insert(Arc::clone(&timeline));
+                        timeline.maybe_spawn_flush_loop();
+                    }
+                }
+            }
 
-        // Sanity check: a timeline should have some content.
-        anyhow::ensure!(
-            ancestor.is_some()
-                || timeline
-                    .layers
-                    .read()
-                    .await
-                    .layer_map()
-                    .expect("currently loading, layer manager cannot be shutdown already")
-                    .iter_historic_layers()
-                    .next()
-                    .is_some(),
-            "Timeline has no ancestor and no layer files"
-        );
+            // Sanity check: a timeline should have some content.
+            anyhow::ensure!(
+                ancestor.is_some()
+                    || timeline
+                        .layers
+                        .read()
+                        .await
+                        .layer_map()
+                        .expect("currently loading, layer manager cannot be shutdown already")
+                        .iter_historic_layers()
+                        .next()
+                        .is_some(),
+                "Timeline has no ancestor and no layer files"
+            );
 
-        Ok(timeline)
+            Ok(())
+        }
     }
 
     /// Attach a tenant that's available in cloud storage.
@@ -1259,58 +1269,25 @@ impl Tenant {
                 assert!(prev.is_none());
             }
 
-            if let Some(import_pgdata) = index_part.import_pgdata {
-                let guard = async move {
-                    let guard_or_arc = self
-                        .start_creating_timeline(
-                            timeline_id,
-                            CreatingTimelineState::ImportPgdata(
-                                CreatingTimelineStateImportPgdata {
-                                    s3_uri: import_pgdata.s3_uri,
-                                },
-                            ),
-                        )
-                        .await
-                        .context("start_creating_timeline failed, this should not happen")?;
-                    match guard_or_arc {
-                        either::Either::Left(guard) => Ok(guard),
-                        either::Either::Right(arc) => {
-                            anyhow::bail!("timeline object already exists, this should not happen during attach")
-                        }
-                    }
-                }
-                .await
-                .with_context(|| {
-                    format!(
-                        "resume import of timeline {}/{}",
-                        self.tenant_shard_id, timeline_id
-                    )
-                })?;
-                tokio::spawn(
-                    self.clone()
-                        .create_timeline_import_pgdata_task(todo!(), guard),
-                );
-            } else {
-                // TODO again handle early failure
-                self.load_remote_timeline(
-                    timeline_id,
-                    index_part,
-                    remote_metadata,
-                    TimelineResources {
-                        remote_client,
-                        timeline_get_throttle: self.timeline_get_throttle.clone(),
-                        l0_flush_global_state: self.l0_flush_global_state.clone(),
-                    },
-                    ctx,
+            // TODO again handle early failure
+            self.load_remote_timeline(
+                timeline_id,
+                index_part,
+                remote_metadata,
+                TimelineResources {
+                    remote_client,
+                    timeline_get_throttle: self.timeline_get_throttle.clone(),
+                    l0_flush_global_state: self.l0_flush_global_state.clone(),
+                },
+                ctx,
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to load remote timeline {} for tenant {}",
+                    timeline_id, self.tenant_shard_id
                 )
-                .await
-                .with_context(|| {
-                    format!(
-                        "failed to load remote timeline {} for tenant {}",
-                        timeline_id, self.tenant_shard_id
-                    )
-                })?;
-            }
+            })?;
         }
 
         // Walk through deleted timelines, resume deletion
@@ -1431,7 +1408,7 @@ impl Tenant {
         remote_metadata: TimelineMetadata,
         resources: TimelineResources,
         ctx: &RequestContext,
-    ) -> anyhow::Result<Arc<Timeline>> {
+    ) -> anyhow::Result<()> {
         span::debug_assert_current_span_has_tenant_id();
 
         info!("downloading index file for timeline {}", timeline_id);
@@ -1457,7 +1434,7 @@ impl Tenant {
         self.timeline_init_and_sync(
             timeline_id,
             resources,
-            Some(index_part),
+            index_part,
             remote_metadata,
             ancestor,
             last_aux_file_policy,
@@ -2055,9 +2032,7 @@ impl Tenant {
         let timeline_create_guard = match self
             .start_creating_timeline(
                 new_timeline_id,
-                CreatingTimelineState::ImportPgdata(CreatingTimelineStateImportPgdata {
-                    s3_uri: s3_uri.clone(),
-                }),
+                CreatingTimelineState::ImportPgdata(CreatingTimelineStateImportPgdata {}),
             )
             .await?
         {
@@ -2079,24 +2054,46 @@ impl Tenant {
 
         info!("prepared pgdata");
 
-        // TODO: should dedup this code with bootstrap_timeline
-        let uninit_timeline = self
-            .create_empty_timeline(
-                new_timeline_id,
-                prepared.base_lsn(),
-                prepared.pg_version(),
-                &ctx,
-            )
-            .await?;
+        // This is almost like create_empty_timeline, but we got the creation guard earlier.
+        let uninit_timeline = {
+            let initdb_lsn = prepared.base_lsn();
+            let pg_version = prepared.pg_version();
+            let _ctx: &RequestContext = &ctx;
+            async move {
+                let new_metadata = TimelineMetadata::new(
+                    // Initialize disk_consistent LSN to 0, The caller must import some data to
+                    // make it valid, before calling finish_creation()
+                    Lsn(0),
+                    None,
+                    None,
+                    Lsn(0),
+                    initdb_lsn,
+                    initdb_lsn,
+                    pg_version,
+                );
+                self.prepare_new_timeline(
+                    new_timeline_id,
+                    &new_metadata,
+                    timeline_create_guard,
+                    initdb_lsn,
+                    None,
+                    None,
+                )
+                .await
+            }
+        }
+        .await?;
 
         uninit_timeline
             .raw_timeline()
             .unwrap()
             .remote_client
             .schedule_index_upload_for_import_pgdata_state_update(Some(
-                CreatingTimelineStateImportPgdata {
-                    s3_uri: s3_uri.clone(),
-                },
+                import_pgdata::flow::index_part_format::Root::V1(
+                    import_pgdata::flow::index_part_format::V1::InProgress(
+                        import_pgdata::flow::index_part_format::InProgress { s3_uri },
+                    ),
+                ),
             ))?;
 
         uninit_timeline
@@ -2107,8 +2104,11 @@ impl Tenant {
             .await
             .context("wait for initial index upload")?;
 
+        let (timeline, timeline_create_guard) = uninit_timeline.finish_creation_myself();
         tokio::spawn(self.clone().create_timeline_import_pgdata_task(
-            uninit_timeline.finish_creation_myself(),
+            timeline,
+            prepared,
+            activate,
             timeline_create_guard,
         ));
 
@@ -2170,14 +2170,12 @@ impl Tenant {
                 MaybeDeletedIndexPart::IndexPart(p) => p,
             };
             let metadata = index_part.metadata.clone();
-            let timeline = self
-                .owning_tenant
-                .load_remote_timeline(timeline_id, index_part, metadata, resources, ctx)
+            self.load_remote_timeline(timeline_id, index_part, metadata, resources, &ctx)
                 .await?;
 
             match activate {
                 ActivateTimelineArgs::Yes { broker_client } => {
-                    timeline.activate(tenant, broker_client, None, &ctx);
+                    todo!()
                 }
                 ActivateTimelineArgs::No => (),
             }
@@ -3859,7 +3857,6 @@ impl Tenant {
             ActivateTimelineArgs::Yes { broker_client } => {
                 new_timeline.activate(self.clone(), broker_client, None, ctx);
             }
-            #[cfg(test)]
             ActivateTimelineArgs::No => {}
         }
 
@@ -3906,6 +3903,7 @@ impl Tenant {
                 pausable_failpoint!("timeline-creation-after-uninit");
                 Ok(either::Either::Left(create_guard))
             }
+            Err(TimelineExclusionError::ShuttingDown) => Err(CreateTimelineError::ShuttingDown),
             Err(TimelineExclusionError::AlreadyCreating) => {
                 // Creation is in progress, we cannot create it again, and we cannot
                 // check if this request matches the existing one, so caller must try
@@ -4200,7 +4198,6 @@ impl Tenant {
             ActivateTimelineArgs::Yes { broker_client } => {
                 timeline.activate(self.clone(), broker_client, None, ctx);
             }
-            #[cfg(test)]
             ActivateTimelineArgs::No => {}
         }
 

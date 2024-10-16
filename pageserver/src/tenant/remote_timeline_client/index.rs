@@ -113,6 +113,7 @@ impl IndexPart {
             lineage: Default::default(),
             gc_blocking: None,
             last_aux_file_policy: None,
+            import_pgdata: None,
         }
     }
 

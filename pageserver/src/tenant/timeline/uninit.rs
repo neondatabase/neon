@@ -92,8 +92,8 @@ impl<'t> UninitializedTimeline<'t> {
         }
     }
 
-    pub(crate) fn finish_creation_myself(self) -> Arc<Timeline> {
-        self.raw_timeline.expect("already checked").0
+    pub(crate) fn finish_creation_myself(&mut self) -> (Arc<Timeline>, TimelineCreateGuard) {
+        self.raw_timeline.take().expect("already checked")
     }
 
     /// Prepares timeline data by loading it from the basebackup archive.
@@ -187,6 +187,8 @@ pub(crate) enum TimelineExclusionError {
     AlreadyExists(Arc<Timeline>),
     #[error("Already creating")]
     AlreadyCreating,
+    #[error("Shutting down")]
+    ShuttingDown,
 
     // e.g. I/O errors, or some failure deep in postgres initdb
     #[error(transparent)]
@@ -199,6 +201,10 @@ impl<'t> TimelineCreateGuard {
         timeline_id: TimelineId,
         timeline_path: Utf8PathBuf,
     ) -> Result<Self, TimelineExclusionError> {
+        let owning_tenant = owning_tenant
+            .myself
+            .upgrade()
+            .ok_or(TimelineExclusionError::ShuttingDown)?;
         // Lock order: this is the only place we take both locks.  During drop() we only
         // lock creating_timelines
         let timelines = owning_tenant.timelines.lock().unwrap();
@@ -213,6 +219,8 @@ impl<'t> TimelineCreateGuard {
             Err(TimelineExclusionError::AlreadyCreating)
         } else {
             creating_timelines.insert(timeline_id);
+            drop(timelines);
+            drop(creating_timelines);
             Ok(Self {
                 owning_tenant: owning_tenant,
                 timeline_id,
