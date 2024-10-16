@@ -482,6 +482,7 @@ mod tests {
             lineage: Lineage::default(),
             gc_blocking: None,
             last_aux_file_policy: None,
+            import_pgdata: None,
         };
 
         let part = IndexPart::from_s3_bytes(example.as_bytes()).unwrap();

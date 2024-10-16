@@ -4797,7 +4797,7 @@ pub(crate) mod harness {
                     self.deletion_queue.new_client(),
                     // TODO: ideally we should run all unit tests with both configs
                     L0FlushGlobalState::new(L0FlushConfig::default()),
-                    myself,
+                    myself.clone(),
                 )
             });
 
