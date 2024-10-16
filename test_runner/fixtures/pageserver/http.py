@@ -5,7 +5,7 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Dict
+from typing import TYPE_CHECKING, Any
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -68,8 +68,8 @@ class TimelineCreateRequestModeImportPgdata:
 
 @dataclass
 class TimelineCreateRequestMode:
-    Branch: Optional[Dict[str, Any]] = None
-    Bootstrap: Optional[Dict[str, Any]] = None
+    Branch: Optional[dict[str, Any]] = None
+    Bootstrap: Optional[dict[str, Any]] = None
     ImportPgdata: Optional[TimelineCreateRequestModeImportPgdata] = None
 
 

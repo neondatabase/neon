@@ -2,6 +2,7 @@ pub mod detach_ancestor;
 pub mod partitioning;
 pub mod utilization;
 
+#[cfg(feature = "testing")]
 use camino::Utf8PathBuf;
 pub use utilization::PageserverUtilization;
 

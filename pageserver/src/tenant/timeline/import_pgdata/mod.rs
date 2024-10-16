@@ -166,9 +166,7 @@ pub async fn doit(
     ctx: &RequestContext,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
-    let v1 = match index_part {
-        index_part_format::Root::V1(v1) => v1,
-    };
+    let index_part_format::Root::V1(v1) = index_part;
     let InProgress {
         location,
         idempotency_key,

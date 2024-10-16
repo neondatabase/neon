@@ -1,5 +1,7 @@
-use camino::Utf8PathBuf;
 use serde::{Deserialize, Serialize};
+
+#[cfg(feature = "testing")]
+use camino::Utf8PathBuf;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum Root {

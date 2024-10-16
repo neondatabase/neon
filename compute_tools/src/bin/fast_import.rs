@@ -46,6 +46,7 @@ struct Spec {
 
 #[derive(serde::Deserialize)]
 enum EncryptionSecret {
+    #[allow(clippy::upper_case_acronyms)]
     KMS { key_id: String },
 }
 

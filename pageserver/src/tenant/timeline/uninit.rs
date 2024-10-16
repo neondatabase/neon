@@ -195,7 +195,7 @@ pub(crate) enum TimelineExclusionError {
     Other(#[from] anyhow::Error),
 }
 
-impl<'t> TimelineCreateGuard {
+impl TimelineCreateGuard {
     pub(crate) fn new(
         owning_tenant: &Tenant,
         timeline_id: TimelineId,
@@ -232,7 +232,7 @@ impl<'t> TimelineCreateGuard {
             drop(creating_timelines);
             Ok(Self {
                 _tenant_gate_guard,
-                owning_tenant: owning_tenant,
+                owning_tenant,
                 timeline_id,
                 timeline_path,
                 idempotency,

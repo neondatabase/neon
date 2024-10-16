@@ -922,13 +922,13 @@ impl Tenant {
                         .conf
                         .timeline_path(&timeline.tenant_shard_id, &timeline.timeline_id),
                 };
-                return Ok(TimelineInitAndSyncResult::NeedsSpawnImportPgdata(
+                Ok(TimelineInitAndSyncResult::NeedsSpawnImportPgdata(
                     TimelineInitAndSyncNeedsSpawnImportPgdata {
                         timeline,
                         import_pgdata,
                         guard: timeline_create_guard,
                     },
-                ));
+                ))
             }
             None => {
                 {
@@ -962,7 +962,7 @@ impl Tenant {
                     "Timeline has no ancestor and no layer files"
                 );
 
-                return Ok(TimelineInitAndSyncResult::ReadyToActivate(timeline));
+                Ok(TimelineInitAndSyncResult::ReadyToActivate(timeline))
             }
         }
     }
@@ -2141,7 +2141,7 @@ impl Tenant {
         let mut uninit_timeline = {
             let initdb_lsn = control_file.base_lsn();
             let pg_version = control_file.pg_version();
-            let _ctx: &RequestContext = &ctx;
+            let _ctx: &RequestContext = ctx;
             async move {
                 let new_metadata = TimelineMetadata::new(
                     // Initialize disk_consistent LSN to 0, The caller must import some data to
@@ -3203,6 +3203,7 @@ impl Tenant {
     /// `validate_ancestor == false` is used when a timeline is created for deletion
     /// and we might not have the ancestor present anymore which is fine for to be
     /// deleted timelines.
+    #[allow(clippy::too_many_arguments)]
     fn create_timeline_struct(
         &self,
         new_timeline_id: TimelineId,
