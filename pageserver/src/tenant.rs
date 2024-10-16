@@ -31,6 +31,7 @@ use pageserver_api::shard::TenantShardId;
 use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
 use remote_storage::TimeoutOrCancel;
+use remote_timeline_client::manifest::OffloadedTimelineManifest;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
@@ -72,6 +73,7 @@ use self::timeline::uninit::TimelineExclusionError;
 use self::timeline::uninit::UninitializedTimeline;
 use self::timeline::EvictionTaskTenantState;
 use self::timeline::GcCutoffs;
+use self::timeline::TimelineDeleteProgress;
 use self::timeline::TimelineResources;
 use self::timeline::WaitLsnError;
 use crate::config::PageServerConf;
@@ -500,7 +502,7 @@ pub struct OffloadedTimeline {
 
     /// Prevent two tasks from deleting the timeline at the same time. If held, the
     /// timeline is being deleted. If 'true', the timeline has already been deleted.
-    pub delete_progress: Arc<tokio::sync::Mutex<DeleteTimelineFlow>>,
+    pub delete_progress: TimelineDeleteProgress,
 }
 
 impl OffloadedTimeline {
@@ -516,6 +518,25 @@ impl OffloadedTimeline {
 
             remote_client: timeline.remote_client.clone(),
             delete_progress: timeline.delete_progress.clone(),
+        }
+    }
+    fn from_manifest(
+        tenant_shard_id: TenantShardId,
+        remote_timeline_client: Arc<RemoteTimelineClient>,
+        manifest: &OffloadedTimelineManifest,
+    ) -> Self {
+        let OffloadedTimelineManifest {
+            timeline_id,
+            ancestor_timeline_id,
+            ancestor_retain_lsn,
+        } = manifest.clone();
+        Self {
+            tenant_shard_id,
+            timeline_id,
+            ancestor_timeline_id,
+            ancestor_retain_lsn,
+            remote_client: remote_timeline_client,
+            delete_progress: Timeline::make_delete_progress(),
         }
     }
 }
@@ -3939,18 +3960,21 @@ impl Tenant {
         Ok(timeline)
     }
 
-    /// Call this before constructing a timeline, to build its required structures
-    fn build_timeline_resources(&self, timeline_id: TimelineId) -> TimelineResources {
-        let remote_client = RemoteTimelineClient::new(
+    fn build_timeline_remote_client(&self, timeline_id: TimelineId) -> RemoteTimelineClient {
+        RemoteTimelineClient::new(
             self.remote_storage.clone(),
             self.deletion_queue_client.clone(),
             self.conf,
             self.tenant_shard_id,
             timeline_id,
             self.generation,
-        );
+        )
+    }
+
+    /// Call this before constructing a timeline, to build its required structures
+    fn build_timeline_resources(&self, timeline_id: TimelineId) -> TimelineResources {
         TimelineResources {
-            remote_client,
+            remote_client: self.build_timeline_remote_client(timeline_id),
             timeline_get_throttle: self.timeline_get_throttle.clone(),
             l0_flush_global_state: self.l0_flush_global_state.clone(),
         }

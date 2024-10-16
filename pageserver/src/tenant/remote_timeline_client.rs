@@ -180,6 +180,7 @@
 
 pub(crate) mod download;
 pub mod index;
+pub mod manifest;
 pub(crate) mod upload;
 
 use anyhow::Context;
@@ -2195,6 +2196,15 @@ impl<'a> UploadQueueAccessor<'a> {
 
 pub fn remote_tenant_path(tenant_shard_id: &TenantShardId) -> RemotePath {
     let path = format!("tenants/{tenant_shard_id}");
+    RemotePath::from_string(&path).expect("Failed to construct path")
+}
+
+pub fn remote_tenant_manifest_path(
+    tenant_shard_id: &TenantShardId,
+    _generation: Generation,
+) -> RemotePath {
+    // TODO: generation support
+    let path = format!("tenants/{tenant_shard_id}/tenant-manifest.json");
     RemotePath::from_string(&path).expect("Failed to construct path")
 }
 
