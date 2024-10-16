@@ -234,6 +234,9 @@ pub enum TimelineCreateRequestMode {
         existing_initdb_timeline_id: Option<TimelineId>,
         pg_version: Option<u32>,
     },
+    ImportPgdata {
+        s3_uri: String,
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone)]

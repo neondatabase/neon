@@ -242,7 +242,7 @@ use self::index::IndexPart;
 use super::metadata::MetadataUpdate;
 use super::storage_layer::{Layer, LayerName, ResidentLayer};
 use super::upload_queue::{NotInitialized, SetDeletedFlagProgress};
-use super::Generation;
+use super::{CreatingTimelineStateImportPgdata, Generation};
 
 pub(crate) use download::{
     download_index_part, is_temp_download_file, list_remote_tenant_shards, list_remote_timelines,
@@ -679,6 +679,17 @@ impl RemoteTimelineClient {
 
         let need_wait = need_change(&upload_queue.clean.0.archived_at, state).is_some();
         Ok(need_wait)
+    }
+
+    /// Launch an index-file upload operation in the background, setting `import_pgdata` field.
+    pub(crate) fn schedule_index_upload_for_import_pgdata_state_update(
+        self: &Arc<Self>,
+        state: Option<CreatingTimelineStateImportPgdata>,
+    ) -> anyhow::Result<bool> {
+        let mut guard = self.upload_queue.lock().unwrap();
+        let upload_queue = guard.initialized_mut()?;
+        upload_queue.dirty.import_pgdata = state;
+        self.schedule_index_upload(upload_queue)?;
     }
 
     ///

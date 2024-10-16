@@ -9,6 +9,8 @@
 //! - version-specific CheckPointData (=> pgv abstraction, already exists for regular walingest)
 //! - Tenant::cancel nor Timeline::cancel are respected => shutdown not guaranteed
 
+pub(crate) mod flow;
+
 use std::{ops::Bound, sync::Arc};
 
 use anyhow::{bail, ensure};

@@ -373,6 +373,8 @@ pub struct Timeline {
 
     state: watch::Sender<TimelineState>,
 
+    pub(crate) import_progress: Arc<tokio::sync::Mutex<import_pgdata::flow::Flow>>,
+
     /// Prevent two tasks from deleting the timeline at the same time. If held, the
     /// timeline is being deleted. If 'true', the timeline has already been deleted.
     pub delete_progress: Arc<tokio::sync::Mutex<DeleteTimelineFlow>>,

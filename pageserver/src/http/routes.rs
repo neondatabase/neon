@@ -551,6 +551,12 @@ async fn timeline_create_handler(
             ancestor_timeline_id,
             ancestor_start_lsn,
         }),
+        TimelineCreateRequestMode::ImportPgdata { s3_uri } => {
+            tenant::CreateTimelineParams::ImportPgdata(tenant::CreateTimelineParamsImportPgdata {
+                new_timeline_id,
+                s3_uri,
+            })
+        }
     };
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Error);

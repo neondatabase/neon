@@ -19,6 +19,7 @@ use camino::Utf8PathBuf;
 use enumset::EnumSet;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
+use metadata::MetadataUpdate;
 use pageserver_api::models;
 use pageserver_api::models::AuxFilePolicy;
 use pageserver_api::models::LsnLease;
@@ -652,6 +653,7 @@ impl Debug for SetStoppingError {
 pub(crate) enum CreateTimelineParams {
     Bootstrap(CreateTimelineParamsBootstrap),
     Branch(CreateTimelineParamsBranch),
+    ImportPgdata(CreateTimelineParamsImportPgdata),
 }
 
 #[derive(Debug)]
@@ -668,8 +670,20 @@ pub(crate) struct CreateTimelineParamsBranch {
     pub(crate) ancestor_start_lsn: Option<Lsn>,
 }
 
+#[derive(Debug)]
+pub(crate) struct CreateTimelineParamsImportPgdata {
+    pub(crate) new_timeline_id: TimelineId,
+    pub(crate) s3_uri: String,
+}
+
 pub(crate) struct CreatingTimelineStateBootstrap {
     pub(crate) pg_version: u32,
+}
+
+/// This is part of the serialized state in [`IndexPart`].
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct CreatingTimelineStateImportPgdata {
+    pub(crate) s3_uri: String,
 }
 
 pub(crate) enum CreatingTimelineState {
@@ -678,6 +692,7 @@ pub(crate) enum CreatingTimelineState {
         ancestor_timeline_id: TimelineId,
         ancestor_start_lsn: Lsn,
     },
+    ImportPgdata(CreatingTimelineStateImportPgdata),
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -1963,6 +1978,74 @@ impl Tenant {
                     ctx,
                 )
                 .await
+            }
+            CreateTimelineParams::ImportPgdata(CreateTimelineParamsImportPgdata {
+                new_timeline_id,
+                s3_uri,
+            }) => {
+                //
+                // Idempotently create the timeline object in memory and in S3.
+                //
+
+                let timeline_create_guard = match self
+                    .start_creating_timeline(
+                        timeline_id,
+                        CreatingTimelineState::ImportPgdata(CreatingTimelineStateImportPgdata {
+                            s3_uri: s3_uri.clone(),
+                        }),
+                    )
+                    .await?
+                {
+                    either::Either::Left(guard) => guard,
+                    either::Either::Right(timeline) => return Ok(timeline),
+                };
+
+                let new_metadata = TimelineMetadata::new(
+                    // Initialize disk_consistent LSN to 0, The caller must import some data to
+                    // make it valid, before calling finish_creation()
+                    Lsn(0),
+                    None,
+                    None,
+                    Lsn(0),
+                    initdb_lsn,
+                    initdb_lsn,
+                    pg_version,
+                );
+                let uninit_timeline = self
+                    .prepare_new_timeline(
+                        new_timeline_id,
+                        &new_metadata,
+                        create_guard,
+                        initdb_lsn,
+                        None,
+                        None,
+                    )
+                    .await
+                    .context("prepare new timeline")?;
+
+                let timeline = uninit_timeline.raw_timeline().unwrap();
+                timeline
+                    .remote_client
+                    .schedule_index_upload_for_import_pgdata_state_update(Some(
+                        CreatingTimelineStateImportPgdata {
+                            s3_uri: s3_uri.clone(),
+                        },
+                    ))
+                    .context("schedule initial index upload");
+                timeline
+                    .remote_client
+                    .wait_completion()
+                    .await
+                    .context("wait for initial index upload")?;
+
+                drop(timeline);
+
+                let timeline = uninit_timeline
+                    .finish_by_reloading_timeline_from_remote(ctx)
+                    .await
+                    .context("finish by reloading timeline from remote")?;
+
+                Ok(timeline)
             }
         }
     }
