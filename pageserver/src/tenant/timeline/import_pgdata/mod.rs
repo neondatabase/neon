@@ -80,15 +80,19 @@ fn make_storage_wrapper(
     location: &index_part_format::Location,
     cancel: CancellationToken,
 ) -> Result<RemoteStorageWrapper, anyhow::Error> {
-    let pgdata_remote_storage = GenericRemoteStorage::LocalFs(remote_storage::LocalFs::new(
-        todo!("s3_uri"),
-        // FIXME: we probably want some timeout, and we might be able to assume the max file
-        // size on S3 is 1GiB (postgres segment size). But the problem is that the individual
-        // downloaders don't know enough about concurrent downloads to make a guess on the
-        // expected bandwidth and resulting best timeout.
-        std::time::Duration::from_secs(24 * 60 * 60),
-    )?);
-    let storage_wrapper = RemoteStorageWrapper::new(pgdata_remote_storage, cancel);
+    // FIXME: we probably want some timeout, and we might be able to assume the max file
+    // size on S3 is 1GiB (postgres segment size). But the problem is that the individual
+    // downloaders don't know enough about concurrent downloads to make a guess on the
+    // expected bandwidth and resulting best timeout.
+    let timeout = std::time::Duration::from_secs(24 * 60 * 60);
+    let location_storage = match location {
+        #[cfg(feature = "testing")]
+        Location::LocalFs { path } => {
+            GenericRemoteStorage::LocalFs(remote_storage::LocalFs::new(path.clone(), timeout)?)
+        }
+        Location::AwsS3 { bucket, key } => todo!(),
+    };
+    let storage_wrapper = RemoteStorageWrapper::new(location_storage, cancel);
     Ok(storage_wrapper)
 }
 
