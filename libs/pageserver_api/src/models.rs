@@ -262,11 +262,13 @@ pub struct ImportPgdataIdemptencyKey(pub String);
 impl ImportPgdataIdemptencyKey {
     pub fn random() -> Self {
         use rand::{distributions::Alphanumeric, Rng};
-        Self(rand::thread_rng()
-            .sample_iter(&Alphanumeric)
-            .take(20)
-            .map(char::from)
-            .collect())
+        Self(
+            rand::thread_rng()
+                .sample_iter(&Alphanumeric)
+                .take(20)
+                .map(char::from)
+                .collect(),
+        )
     }
 }
 
