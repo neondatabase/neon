@@ -1554,6 +1554,7 @@ impl Tenant {
     async fn unoffload_timeline(
         self: &Arc<Self>,
         timeline_id: TimelineId,
+        broker_client: storage_broker::BrokerClientChannel,
         ctx: RequestContext,
     ) -> Result<Arc<Timeline>, TimelineArchivalError> {
         info!("unoffloading timeline");
@@ -1605,25 +1606,37 @@ impl Tenant {
         })
         .map_err(TimelineArchivalError::Other)?;
         let timelines = self.timelines.lock().unwrap();
-        if let Some(timeline) = timelines.get(&timeline_id) {
-            let mut offloaded_timelines = self.timelines_offloaded.lock().unwrap();
-            if offloaded_timelines.remove(&timeline_id).is_none() {
-                warn!("timeline already removed from offloaded timelines");
-            }
-            info!("timeline unoffloading complete");
-            Ok(Arc::clone(timeline))
-        } else {
+        let Some(timeline) = timelines.get(&timeline_id) else {
             warn!("timeline not available directly after attach");
-            Err(TimelineArchivalError::Other(anyhow::anyhow!(
+            return Err(TimelineArchivalError::Other(anyhow::anyhow!(
                 "timeline not available directly after attach"
-            )))
+            )));
+        };
+        let mut offloaded_timelines = self.timelines_offloaded.lock().unwrap();
+        if offloaded_timelines.remove(&timeline_id).is_none() {
+            warn!("timeline already removed from offloaded timelines");
         }
+
+        // Activate the timeline (if it makes sense)
+        if !(timeline.is_broken() || timeline.is_stopping()) {
+            let background_jobs_can_start = None;
+            timeline.activate(
+                self.clone(),
+                broker_client.clone(),
+                background_jobs_can_start,
+                &ctx,
+            );
+        }
+
+        info!("timeline unoffloading complete");
+        Ok(Arc::clone(timeline))
     }
 
     pub(crate) async fn apply_timeline_archival_config(
         self: &Arc<Self>,
         timeline_id: TimelineId,
         new_state: TimelineArchivalState,
+        broker_client: storage_broker::BrokerClientChannel,
         ctx: RequestContext,
     ) -> Result<(), TimelineArchivalError> {
         info!("setting timeline archival config");
@@ -1664,12 +1677,13 @@ impl Tenant {
             Some(Arc::clone(timeline))
         };
 
-        // Second part: unarchive timeline (if needed)
+        // Second part: unoffload timeline (if needed)
         let timeline = if let Some(timeline) = timeline_or_unarchive_offloaded {
             timeline
         } else {
             // Turn offloaded timeline into a non-offloaded one
-            self.unoffload_timeline(timeline_id, ctx).await?
+            self.unoffload_timeline(timeline_id, broker_client, ctx)
+                .await?
         };
 
         // Third part: upload new timeline archival state and block until it is present in S3
@@ -3354,7 +3368,7 @@ impl Tenant {
     /// Populate all Timelines' `GcInfo` with information about their children.  We do not set the
     /// PITR cutoffs here, because that requires I/O: this is done later, before GC, by [`Self::refresh_gc_info_internal`]
     ///
-    /// Subsequently, parent-child relationships are updated incrementally during timeline creation/deletion.
+    /// Subsequently, parent-child relationships are updated incrementally inside [`Timeline::new`] and [`Timeline::drop`].
     fn initialize_gc_info(
         &self,
         timelines: &std::sync::MutexGuard<HashMap<TimelineId, Arc<Timeline>>>,
