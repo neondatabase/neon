@@ -19,7 +19,6 @@ use futures::future::join_all;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use nix::unistd::Pid;
-use postgres::config::Config;
 use postgres::error::SqlState;
 use postgres::{Client, NoTls};
 use tracing::{debug, error, info, instrument, warn};
@@ -1388,12 +1387,18 @@ LIMIT 100",
             .context("Failed to connect to the database")?;
         tokio::spawn(conn);
 
-        // todo: pg_quote
         let query = format!(
             "GRANT {} ON SCHEMA {} TO {}",
-            privileges.iter().map(|p| p.as_str()).join(", "),
-            schema_name,
-            role_name
+            privileges
+                .iter()
+                // should not be quoted as it's part of the command.
+                // is already sanitized so it's ok
+                .map(|p| serde_json::to_string(p).unwrap())
+                .collect::<Vec<String>>()
+                .join(", "),
+            // quote the schema and role name as identifiers to sanitize them.
+            schema_name.to_string().pg_quote(),
+            role_name.to_string().pg_quote(),
         );
         db_client
             .simple_query(&query)
