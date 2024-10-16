@@ -3989,13 +3989,25 @@ impl Tenant {
             Err(TimelineExclusionError::AlreadyExists { existing, arg }) => {
                 {
                     let existing = &existing.create_idempotency;
-                    let _span = info_span!("idempotency_check").entered();
-                    if existing != &arg {
-                        warn!(?existing, ?arg, "idempotency conflict, failing request");
-                        return Err(CreateTimelineError::Conflict);
+                    let _span = info_span!("idempotency_check", ?existing, ?arg).entered();
+
+                    match (existing, &arg) {
+                        // FailWithConflict => no idempotency check
+                        (CreateTimelineIdempotency::FailWithConflict, _)
+                        | (_, CreateTimelineIdempotency::FailWithConflict) => {
+                            warn!("timeline already exists, failing request");
+                            return Err(CreateTimelineError::Conflict);
+                        }
+                        // Idempotent <=> CreateTimelineIdempotency is identical
+                        (x, y) if x == y => {
+                            info!("timeline already exists and idempotency matches, succeeding request");
+                            // fallthrough
+                        }
+                        (_, _) => {
+                            warn!("idempotency conflict, failing request");
+                            return Err(CreateTimelineError::Conflict);
+                        }
                     }
-                    info!("timeline already exists and idempotency matches, succeeding request");
-                    // fallthrough
                 }
 
                 // Wait for uploads to complete, so that when we return Ok, the timeline
@@ -4965,7 +4977,10 @@ mod tests {
             .await
         {
             Ok(_) => panic!("duplicate timeline creation should fail"),
-            Err(e) => assert_eq!(e.to_string(), "Already exists".to_string()),
+            Err(e) => assert_eq!(
+                e.to_string(),
+                "timeline already exists with different parameters".to_string()
+            ),
         }
 
         Ok(())
