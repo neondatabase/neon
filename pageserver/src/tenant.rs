@@ -32,6 +32,7 @@ use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
 use remote_storage::TimeoutOrCancel;
 use remote_timeline_client::manifest::OffloadedTimelineManifest;
+use remote_timeline_client::manifest::TenantManifest;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
@@ -242,6 +243,7 @@ struct TimelinePreload {
 }
 
 pub(crate) struct TenantPreload {
+    tenant_manifest: TenantManifest,
     timelines: HashMap<TimelineId, TimelinePreload>,
 }
 
@@ -1152,14 +1154,26 @@ impl Tenant {
             cancel.clone(),
         )
         .await?;
+        let tenant_manifest = match remote_timeline_client::do_download_tenant_manifest(
+            remote_storage,
+            &self.tenant_shard_id,
+            &cancel,
+        )
+        .await
+        {
+            Ok((tenant_manifest, _generation)) => tenant_manifest,
+            Err(DownloadError::NotFound) => TenantManifest::empty(),
+            Err(e) => Err(e)?,
+        };
 
-        info!("found {} timelines", remote_timeline_ids.len(),);
+        info!("found {} timelines", remote_timeline_ids.len());
 
         for k in other_keys {
             warn!("Unexpected non timeline key {k}");
         }
 
         Ok(TenantPreload {
+            tenant_manifest,
             timelines: self
                 .load_timelines_metadata(remote_timeline_ids, remote_storage, cancel)
                 .await?,
@@ -1184,12 +1198,34 @@ impl Tenant {
             anyhow::bail!("local-only deployment is no longer supported, https://github.com/neondatabase/neon/issues/5624");
         };
 
+        let mut offloaded_timeline_ids = HashSet::new();
+        let mut offloaded_timelines_list = Vec::new();
+        for timeline_manifest in preload.tenant_manifest.offloaded_timelines.iter() {
+            let timeline_id = timeline_manifest.timeline_id;
+            let timeline_client =
+                self.build_timeline_client(timeline_id, self.remote_storage.clone());
+            let offloaded_timeline = OffloadedTimeline::from_manifest(
+                self.tenant_shard_id,
+                Arc::new(timeline_client),
+                timeline_manifest,
+            );
+            offloaded_timelines_list.push((timeline_id, Arc::new(offloaded_timeline)));
+            offloaded_timeline_ids.insert(timeline_id);
+        }
+        {
+            let mut offloaded_timelines_accessor = self.timelines_offloaded.lock().unwrap();
+            offloaded_timelines_accessor.extend(offloaded_timelines_list.into_iter());
+        }
+
         let mut timelines_to_resume_deletions = vec![];
 
         let mut remote_index_and_client = HashMap::new();
         let mut timeline_ancestors = HashMap::new();
         let mut existent_timelines = HashSet::new();
         for (timeline_id, preload) in preload.timelines {
+            if offloaded_timeline_ids.contains(&timeline_id) {
+                continue;
+            }
             let index_part = match preload.index_part {
                 Ok(i) => {
                     debug!("remote index part exists for timeline {timeline_id}");
@@ -1464,20 +1500,28 @@ impl Tenant {
         Ok(timeline_preloads)
     }
 
-    fn load_timeline_metadata(
-        self: &Arc<Tenant>,
+    fn build_timeline_client(
+        &self,
         timeline_id: TimelineId,
         remote_storage: GenericRemoteStorage,
-        cancel: CancellationToken,
-    ) -> impl Future<Output = TimelinePreload> {
-        let client = RemoteTimelineClient::new(
+    ) -> RemoteTimelineClient {
+        RemoteTimelineClient::new(
             remote_storage.clone(),
             self.deletion_queue_client.clone(),
             self.conf,
             self.tenant_shard_id,
             timeline_id,
             self.generation,
-        );
+        )
+    }
+
+    fn load_timeline_metadata(
+        self: &Arc<Tenant>,
+        timeline_id: TimelineId,
+        remote_storage: GenericRemoteStorage,
+        cancel: CancellationToken,
+    ) -> impl Future<Output = TimelinePreload> {
+        let client = self.build_timeline_client(timeline_id, remote_storage);
         async move {
             debug_assert_current_span_has_tenant_and_timeline_id();
             debug!("starting index part download");

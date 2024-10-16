@@ -246,7 +246,8 @@ use super::upload_queue::{NotInitialized, SetDeletedFlagProgress};
 use super::Generation;
 
 pub(crate) use download::{
-    download_index_part, is_temp_download_file, list_remote_tenant_shards, list_remote_timelines,
+    do_download_tenant_manifest, download_index_part, is_temp_download_file,
+    list_remote_tenant_shards, list_remote_timelines,
 };
 pub(crate) use index::LayerFileMetadata;
 
@@ -2201,10 +2202,12 @@ pub fn remote_tenant_path(tenant_shard_id: &TenantShardId) -> RemotePath {
 
 pub fn remote_tenant_manifest_path(
     tenant_shard_id: &TenantShardId,
-    _generation: Generation,
+    generation: Generation,
 ) -> RemotePath {
-    // TODO: generation support
-    let path = format!("tenants/{tenant_shard_id}/tenant-manifest.json");
+    let path = format!(
+        "tenants/{tenant_shard_id}/tenant-manifest.json{}",
+        generation.get_suffix()
+    );
     RemotePath::from_string(&path).expect("Failed to construct path")
 }
 
