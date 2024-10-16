@@ -114,13 +114,14 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
 
             let request = hyper::body::to_bytes(req.into_body()).await.unwrap();
             let request = serde_json::from_slice::<ExtensionInstallRequest>(&request).unwrap();
-            let res =
-                compute.install_extension(&request.extension, &request.database, &request.version);
+            let res = compute
+                .install_extension(&request.extension, &request.database, &request.version)
+                .await;
             match res {
-                Ok(res) => render_json(Body::from(
+                Ok(version) => render_json(Body::from(
                     serde_json::to_string(&ExtensionInstallResult {
                         extension: request.extension,
-                        version: res,
+                        version,
                     })
                     .unwrap(),
                 )),
