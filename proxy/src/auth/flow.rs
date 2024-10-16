@@ -9,7 +9,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::info;
 
 use super::backend::ComputeCredentialKeys;
-use super::{AuthErrorImpl, PasswordHackPayload};
+use super::{AuthError, PasswordHackPayload};
 use crate::config::TlsServerEndPoint;
 use crate::context::RequestMonitoring;
 use crate::control_plane::AuthSecret;
@@ -117,14 +117,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, PasswordHack> {
         let msg = self.stream.read_password_message().await?;
         let password = msg
             .strip_suffix(&[0])
-            .ok_or(AuthErrorImpl::MalformedPassword("missing terminator"))?;
+            .ok_or(AuthError::MalformedPassword("missing terminator"))?;
 
         let payload = PasswordHackPayload::parse(password)
             // If we ended up here and the payload is malformed, it means that
             // the user neither enabled SNI nor resorted to any other method
             // for passing the project name we rely on. We should show them
             // the most helpful error message and point to the documentation.
-            .ok_or(AuthErrorImpl::MissingEndpointName)?;
+            .ok_or(AuthError::MissingEndpointName)?;
 
         Ok(payload)
     }
@@ -136,7 +136,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, CleartextPassword> {
         let msg = self.stream.read_password_message().await?;
         let password = msg
             .strip_suffix(&[0])
-            .ok_or(AuthErrorImpl::MalformedPassword("missing terminator"))?;
+            .ok_or(AuthError::MalformedPassword("missing terminator"))?;
 
         let outcome = validate_password_and_exchange(
             &self.state.pool,
@@ -166,7 +166,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, Scram<'_>> {
         // Initial client message contains the chosen auth method's name.
         let msg = self.stream.read_password_message().await?;
         let sasl = sasl::FirstMessage::parse(&msg)
-            .ok_or(AuthErrorImpl::MalformedPassword("bad sasl message"))?;
+            .ok_or(AuthError::MalformedPassword("bad sasl message"))?;
 
         // Currently, the only supported SASL method is SCRAM.
         if !scram::METHODS.contains(&sasl.method) {
