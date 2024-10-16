@@ -21,7 +21,6 @@ use itertools::Itertools;
 use once_cell::sync::Lazy;
 use pageserver_api::{
     key::{rel_block_to_key, rel_dir_to_key, rel_size_to_key, relmap_file_key, DBDIR_KEY},
-    models::ImportPgdataLocation,
     reltag::RelTag,
     shard::ShardIdentity,
 };
@@ -65,16 +64,14 @@ use remote_storage::{
 static PGDATA_DIR: Lazy<RemotePath> = Lazy::new(|| RemotePath::from_string("pgdata").unwrap());
 
 pub(crate) async fn create<'a>(
-    location: Location,
+    in_progress: index_part_format::InProgress,
     ctx: &RequestContext,
     cancel: CancellationToken,
 ) -> anyhow::Result<(ControlFile, index_part_format::Root)> {
-    let storage_wrapper = make_storage_wrapper(&location, cancel)?;
+    let storage_wrapper = make_storage_wrapper(&in_progress.location, cancel)?;
     let control_file = get_control_file(&PGDATA_DIR, &storage_wrapper).await?;
 
-    let index_part = index_part_format::Root::V1(index_part_format::V1::InProgress(
-        index_part_format::InProgress { location },
-    ));
+    let index_part = index_part_format::Root::V1(index_part_format::V1::InProgress(in_progress));
 
     Ok((control_file, index_part))
 }
@@ -145,8 +142,12 @@ pub async fn doit(
     let v1 = match index_part {
         index_part_format::Root::V1(v1) => v1,
     };
-    let InProgress { location } = match v1 {
-        index_part_format::V1::Done => return Ok(()),
+    let InProgress {
+        location,
+        idempotency_key,
+        started_at,
+    } = match v1 {
+        index_part_format::V1::Done(_) => return Ok(()),
         index_part_format::V1::InProgress(in_progress) => in_progress,
     };
 
@@ -170,7 +171,13 @@ pub async fn doit(
     // mark as done in index_part
     timeline
         .remote_client
-        .schedule_index_upload_for_import_pgdata_state_update(None)?;
+        .schedule_index_upload_for_import_pgdata_state_update(Some(index_part_format::Root::V1(
+            index_part_format::V1::Done(index_part_format::Done {
+                idempotency_key,
+                started_at,
+                finished_at: chrono::Utc::now().naive_utc(),
+            }),
+        )))?;
     timeline.remote_client.wait_completion().await?;
 
     Ok(())

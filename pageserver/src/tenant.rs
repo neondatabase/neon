@@ -678,21 +678,34 @@ pub(crate) struct CreateTimelineParamsBranch {
 pub(crate) struct CreateTimelineParamsImportPgdata {
     pub(crate) new_timeline_id: TimelineId,
     pub(crate) location: import_pgdata::flow::index_part_format::Location,
+    pub(crate) idempotency_key: import_pgdata::flow::index_part_format::IdempotencyKey,
 }
 
-pub(crate) struct CreatingTimelineStateBootstrap {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CreatingTimelineIdempotencyBootstrap {
     pub(crate) pg_version: u32,
 }
 
-pub(crate) struct CreatingTimelineStateImportPgdata {}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CreatingTimelineIdempotencyImportPgdata {
+    idempotency_key: import_pgdata::flow::index_part_format::IdempotencyKey,
+}
 
-pub(crate) enum CreatingTimelineState {
-    Bootstrap(CreatingTimelineStateBootstrap),
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CreateTimelineIdempotency {
+    FailWithConflict,
+    Bootstrap(CreatingTimelineIdempotencyBootstrap),
     Branch {
         ancestor_timeline_id: TimelineId,
         ancestor_start_lsn: Lsn,
     },
-    ImportPgdata(CreatingTimelineStateImportPgdata),
+    ImportPgdata(CreatingTimelineIdempotencyImportPgdata),
+}
+
+#[must_use]
+enum StartCreatingTimelineResult {
+    CreateGuard(TimelineCreateGuard),
+    Idempotent(Arc<Timeline>),
 }
 
 #[must_use]
@@ -708,7 +721,7 @@ enum TimelineInitAndSyncResult {
 }
 
 impl TimelineInitAndSyncResult {
-    fn ready_to_activate(&self) -> Option<&Arc<Timeline>> {
+    fn ready_to_activate(self) -> Option<Arc<Timeline>> {
         match self {
             Self::ReadyToActivate(timeline) => Some(timeline),
             _ => None,
@@ -836,6 +849,27 @@ impl Tenant {
     ) -> anyhow::Result<TimelineInitAndSyncResult> {
         let tenant_id = self.tenant_shard_id;
 
+        let import_pgdata = index_part.import_pgdata.take();
+        let idempotency = match &import_pgdata {
+            Some(import_pgdata) => {
+                CreateTimelineIdempotency::ImportPgdata(CreatingTimelineIdempotencyImportPgdata {
+                    idempotency_key: import_pgdata.idempotency_key().clone(),
+                })
+            }
+            None => {
+                if metadata.ancestor_timeline().is_none() {
+                    CreateTimelineIdempotency::Bootstrap(CreatingTimelineIdempotencyBootstrap {
+                        pg_version: metadata.pg_version(),
+                    })
+                } else {
+                    CreateTimelineIdempotency::Branch {
+                        ancestor_timeline_id: metadata.ancestor_timeline().unwrap(),
+                        ancestor_start_lsn: metadata.ancestor_lsn(),
+                    }
+                }
+            }
+        };
+
         let timeline = self.create_timeline_struct(
             timeline_id,
             &metadata,
@@ -846,6 +880,7 @@ impl Tenant {
             // there will potentially be other caller of this function in the future, and we don't know whether `index_part` or `ancestor` takes precedence.
             // Therefore, we pass this field explicitly for now, and remove it once we fully migrate to aux file v2.
             last_aux_file_policy,
+            idempotency.clone(),
         )?;
         let disk_consistent_lsn = timeline.get_disk_consistent_lsn();
         anyhow::ensure!(
@@ -864,8 +899,6 @@ impl Tenant {
             .last_aux_file_policy
             .store(index_part.last_aux_file_policy());
 
-        let import_pgdata = index_part.import_pgdata.take();
-
         timeline
             .load_layer_map(disk_consistent_lsn, index_part)
             .await
@@ -875,35 +908,25 @@ impl Tenant {
 
         match import_pgdata {
             Some(import_pgdata) => {
-                let guard = async move {
-                        let guard_or_arc = self
-                            .start_creating_timeline(
-                                timeline_id,
-                                CreatingTimelineState::ImportPgdata(CreatingTimelineStateImportPgdata {}),
-                            )
-                            .await
-                            .context("start_creating_timeline failed, this should not happen")?;
-                        match guard_or_arc {
-                            either::Either::Left(guard) => Ok(guard),
-                            either::Either::Right(arc) => {
-                                anyhow::bail!(
-                                    "timeline object already exists, this should not happen during attach"
-                                )
-                            }
-                        }
-                    }
-                    .await
-                    .with_context(|| {
-                        format!(
-                            "resume import of timeline {}/{}",
-                            self.tenant_shard_id, timeline_id
-                        )
-                    })?;
+                let mut guard = self.timelines_creating.lock().unwrap();
+                if !guard.insert(timeline_id) {
+                    // We should never try and load the same timeline twice during startup
+                    unreachable!("Timeline {tenant_id}/{timeline_id} is already being created")
+                }
+                let timeline_create_guard = TimelineCreateGuard {
+                    owning_tenant: self.clone(),
+                    timeline_id,
+                    idempotency,
+                    // The users of this specific return value don't need the timline_path in there.
+                    timeline_path: timeline
+                        .conf
+                        .timeline_path(&timeline.tenant_shard_id, &timeline.timeline_id),
+                };
                 return Ok(TimelineInitAndSyncResult::NeedsSpawnImportPgdata(
                     TimelineInitAndSyncNeedsSpawnImportPgdata {
                         timeline,
                         import_pgdata,
-                        guard,
+                        guard: timeline_create_guard,
                     },
                 ));
             }
@@ -1829,7 +1852,15 @@ impl Tenant {
         );
 
         // Protect against concurrent attempts to use this TimelineId
-        let create_guard = self.create_timeline_create_guard(new_timeline_id)?;
+        let create_guard = match self
+            .start_creating_timeline(new_timeline_id, CreateTimelineIdempotency::FailWithConflict)
+            .await?
+        {
+            StartCreatingTimelineResult::CreateGuard(guard) => guard,
+            StartCreatingTimelineResult::Idempotent(_) => {
+                unreachable!("FailWithConflict implies we get an error instead")
+            }
+        };
 
         let new_metadata = TimelineMetadata::new(
             // Initialize disk_consistent LSN to 0, The caller must import some data to
@@ -2067,7 +2098,10 @@ impl Tenant {
         let CreateTimelineParamsImportPgdata {
             new_timeline_id,
             location,
+            idempotency_key,
         } = params;
+
+        let started_at = chrono::Utc::now().naive_utc();
 
         //
         // There's probably a simpler way to upload an index part, but, remote_timeline_client
@@ -2080,18 +2114,31 @@ impl Tenant {
         let timeline_create_guard = match self
             .start_creating_timeline(
                 new_timeline_id,
-                CreatingTimelineState::ImportPgdata(CreatingTimelineStateImportPgdata {}),
+                CreateTimelineIdempotency::ImportPgdata(CreatingTimelineIdempotencyImportPgdata {
+                    idempotency_key: idempotency_key.clone(),
+                }),
             )
             .await?
         {
-            either::Either::Left(guard) => guard,
-            either::Either::Right(timeline) => return Ok(Either::Right(timeline)),
+            StartCreatingTimelineResult::CreateGuard(guard) => guard,
+            StartCreatingTimelineResult::Idempotent(timeline) => {
+                return Ok(Either::Right(timeline))
+            }
         };
 
-        let (control_file, index_part) = import_pgdata::create(location, ctx, self.cancel).await?;
+        let (control_file, index_part) = import_pgdata::create(
+            import_pgdata::flow::index_part_format::InProgress {
+                idempotency_key,
+                location,
+                started_at,
+            },
+            ctx,
+            self.cancel.clone(),
+        )
+        .await?;
 
         // This is almost like create_empty_timeline, but we got the creation guard earlier.
-        let uninit_timeline = {
+        let mut uninit_timeline = {
             let initdb_lsn = control_file.base_lsn();
             let pg_version = control_file.pg_version();
             let _ctx: &RequestContext = &ctx;
@@ -2204,7 +2251,7 @@ impl Tenant {
 
         match activate {
             ActivateTimelineArgs::Yes { broker_client } => {
-                todo!()
+                timeline.activate(self.clone(), broker_client, None, &ctx);
             }
             ActivateTimelineArgs::No => (),
         }
@@ -3166,6 +3213,7 @@ impl Tenant {
         resources: TimelineResources,
         cause: CreateTimelineCause,
         last_aux_file_policy: Option<AuxFilePolicy>,
+        create_idempotency: CreateTimelineIdempotency,
     ) -> anyhow::Result<Arc<Timeline>> {
         let state = match cause {
             CreateTimelineCause::Load => {
@@ -3196,6 +3244,7 @@ impl Tenant {
             state,
             last_aux_file_policy,
             self.attach_wal_lag_cooldown.clone(),
+            create_idempotency,
             self.cancel.child_token(),
         );
 
@@ -3774,15 +3823,15 @@ impl Tenant {
         let timeline_create_guard = match self
             .start_creating_timeline(
                 dst_id,
-                CreatingTimelineState::Branch {
+                CreateTimelineIdempotency::Branch {
                     ancestor_timeline_id: src_timeline.timeline_id,
                     ancestor_start_lsn: start_lsn,
                 },
             )
             .await?
         {
-            either::Either::Left(guard) => guard,
-            either::Either::Right(timeline) => return Ok(timeline),
+            StartCreatingTimelineResult::CreateGuard(guard) => guard,
+            StartCreatingTimelineResult::Idempotent(timeline) => return Ok(timeline),
         };
 
         // Ensure that `start_lsn` is valid, i.e. the LSN is within the PITR
@@ -3924,12 +3973,12 @@ impl Tenant {
     async fn start_creating_timeline(
         &self,
         new_timeline_id: TimelineId,
-        state: CreatingTimelineState,
-    ) -> Result<either::Either<TimelineCreateGuard, Arc<Timeline>>, CreateTimelineError> {
-        match self.create_timeline_create_guard(new_timeline_id) {
+        idempotency: CreateTimelineIdempotency,
+    ) -> Result<StartCreatingTimelineResult, CreateTimelineError> {
+        match self.create_timeline_create_guard(new_timeline_id, idempotency) {
             Ok(create_guard) => {
                 pausable_failpoint!("timeline-creation-after-uninit");
-                Ok(either::Either::Left(create_guard))
+                Ok(StartCreatingTimelineResult::CreateGuard(create_guard))
             }
             Err(TimelineExclusionError::ShuttingDown) => Err(CreateTimelineError::ShuttingDown),
             Err(TimelineExclusionError::AlreadyCreating) => {
@@ -3939,47 +3988,16 @@ impl Tenant {
                 Err(CreateTimelineError::AlreadyCreating)
             }
             Err(TimelineExclusionError::Other(e)) => Err(CreateTimelineError::Other(e)),
-            Err(TimelineExclusionError::AlreadyExists(existing)) => {
-                debug!("timeline already exists");
-
-                // Idempotency: creating the same timeline twice is not an error, unless
-                // the second creation has different parameters.
-                //
-                // TODO: this is a crutch; we should store the CreateTimelineState as an
-                // immutable attribute in the index part, and compare them using derive(`Eq`).
-                match state {
-                    CreatingTimelineState::Bootstrap(CreatingTimelineStateBootstrap {
-                        pg_version,
-                    }) => {
-                        if existing.pg_version != pg_version {
-                            info!("timeline already exists with different pg_version");
-                            return Err(CreateTimelineError::Conflict);
-                        }
-                        if existing.get_ancestor_timeline_id().is_some() {
-                            info!("timeline already exists with an ancestor");
-                            return Err(CreateTimelineError::Conflict);
-                        }
-                        if existing.get_ancestor_lsn() != Lsn::INVALID {
-                            info!("timeline already exists with an ancestor LSN");
-                            return Err(CreateTimelineError::Conflict);
-                        }
+            Err(TimelineExclusionError::AlreadyExists { existing, arg }) => {
+                {
+                    let existing = &existing.create_idempotency;
+                    let _span = info_span!("idempotency_check").entered();
+                    if existing != &arg {
+                        warn!(?existing, ?arg, "idempotency conflict, failing request");
+                        return Err(CreateTimelineError::Conflict);
                     }
-                    CreatingTimelineState::Branch {
-                        ancestor_timeline_id,
-                        ancestor_start_lsn,
-                    } => {
-                        if existing.get_ancestor_timeline_id() != Some(ancestor_timeline_id) {
-                            info!("timeline already exists with different ancestor");
-                            return Err(CreateTimelineError::Conflict);
-                        }
-                        if existing.get_ancestor_lsn() != ancestor_start_lsn {
-                            info!("timeline already exists with different ancestor LSN");
-                            return Err(CreateTimelineError::Conflict);
-                        }
-                    }
-                    CreatingTimelineState::ImportPgdata(import_pgdata) => {
-                        todo!("idempotency checking would require keeping track of S3 import URI into eternity")
-                    }
+                    info!("timeline already exists and idempotency matches, succeeding request");
+                    // fallthrough
                 }
 
                 // Wait for uploads to complete, so that when we return Ok, the timeline
@@ -4000,7 +4018,7 @@ impl Tenant {
                 // Code before this(https://github.com/neondatabase/neon/pull/9366) refactoring
                 // didn't do it.
 
-                Ok(either::Either::Right(existing))
+                Ok(StartCreatingTimelineResult::Idempotent(existing))
             }
         }
     }
@@ -4067,12 +4085,14 @@ impl Tenant {
         let timeline_create_guard = match self
             .start_creating_timeline(
                 timeline_id,
-                CreatingTimelineState::Bootstrap(CreatingTimelineStateBootstrap { pg_version }),
+                CreateTimelineIdempotency::Bootstrap(CreatingTimelineIdempotencyBootstrap {
+                    pg_version,
+                }),
             )
             .await?
         {
-            either::Either::Left(guard) => guard,
-            either::Either::Right(timeline) => return Ok(timeline),
+            StartCreatingTimelineResult::CreateGuard(guard) => guard,
+            StartCreatingTimelineResult::Idempotent(timeline) => return Ok(timeline),
         };
 
         // create a `tenant/{tenant_id}/timelines/basebackup-{timeline_id}.{TEMP_FILE_SUFFIX}/`
@@ -4278,6 +4298,7 @@ impl Tenant {
                 resources,
                 CreateTimelineCause::Load,
                 last_aux_file_policy,
+                create_guard.idempotency.clone(),
             )
             .context("Failed to create timeline data structure")?;
 
@@ -4318,12 +4339,14 @@ impl Tenant {
     fn create_timeline_create_guard(
         &self,
         timeline_id: TimelineId,
+        idempotency: CreateTimelineIdempotency,
     ) -> Result<TimelineCreateGuard, TimelineExclusionError> {
         let tenant_shard_id = self.tenant_shard_id;
 
         let timeline_path = self.conf.timeline_path(&tenant_shard_id, &timeline_id);
 
-        let create_guard = TimelineCreateGuard::new(self, timeline_id, timeline_path.clone())?;
+        let create_guard =
+            TimelineCreateGuard::new(self, timeline_id, timeline_path.clone(), idempotency)?;
 
         // At this stage, we have got exclusive access to in-memory state for this timeline ID
         // for creation.

@@ -434,6 +434,8 @@ pub struct Timeline {
     pub(crate) handles: handle::PerTimelineState<crate::page_service::TenantManagerTypes>,
 
     pub(crate) attach_wal_lag_cooldown: Arc<OnceLock<WalLagCooldown>>,
+
+    pub(crate) create_idempotency: crate::tenant::CreateTimelineIdempotency,
 }
 
 pub struct WalReceiverInfo {
@@ -2147,6 +2149,7 @@ impl Timeline {
         state: TimelineState,
         aux_file_policy: Option<AuxFilePolicy>,
         attach_wal_lag_cooldown: Arc<OnceLock<WalLagCooldown>>,
+        create_idempotency: crate::tenant::CreateTimelineIdempotency,
         cancel: CancellationToken,
     ) -> Arc<Self> {
         let disk_consistent_lsn = metadata.disk_consistent_lsn();
@@ -2290,6 +2293,8 @@ impl Timeline {
                 handles: Default::default(),
 
                 attach_wal_lag_cooldown,
+
+                create_idempotency,
             };
 
             if aux_file_policy == Some(AuxFilePolicy::V1) {

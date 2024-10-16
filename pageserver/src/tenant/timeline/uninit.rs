@@ -5,7 +5,11 @@ use camino::Utf8PathBuf;
 use tracing::{error, info, info_span};
 use utils::{fs_ext, id::TimelineId, lsn::Lsn};
 
-use crate::{context::RequestContext, import_datadir, tenant::Tenant};
+use crate::{
+    context::RequestContext,
+    import_datadir,
+    tenant::{CreateTimelineIdempotency, Tenant},
+};
 
 use super::Timeline;
 
@@ -167,15 +171,19 @@ pub(crate) fn cleanup_timeline_directory(create_guard: TimelineCreateGuard) {
 #[must_use]
 pub(crate) struct TimelineCreateGuard {
     pub(crate) owning_tenant: Arc<Tenant>,
-    timeline_id: TimelineId,
+    pub(crate) timeline_id: TimelineId,
     pub(crate) timeline_path: Utf8PathBuf,
+    pub(crate) idempotency: CreateTimelineIdempotency,
 }
 
 /// Errors when acquiring exclusive access to a timeline ID for creation
 #[derive(thiserror::Error, Debug)]
 pub(crate) enum TimelineExclusionError {
     #[error("Already exists")]
-    AlreadyExists(Arc<Timeline>),
+    AlreadyExists {
+        existing: Arc<Timeline>,
+        arg: CreateTimelineIdempotency,
+    },
     #[error("Already creating")]
     AlreadyCreating,
     #[error("Shutting down")]
@@ -191,6 +199,7 @@ impl<'t> TimelineCreateGuard {
         owning_tenant: &Tenant,
         timeline_id: TimelineId,
         timeline_path: Utf8PathBuf,
+        idempotency: CreateTimelineIdempotency,
     ) -> Result<Self, TimelineExclusionError> {
         let owning_tenant = owning_tenant
             .myself
@@ -205,7 +214,10 @@ impl<'t> TimelineCreateGuard {
         > = owning_tenant.timelines_creating.lock().unwrap();
 
         if let Some(existing) = timelines.get(&timeline_id) {
-            Err(TimelineExclusionError::AlreadyExists(existing.clone()))
+            Err(TimelineExclusionError::AlreadyExists {
+                existing: existing.clone(),
+                arg: idempotency,
+            })
         } else if creating_timelines.contains(&timeline_id) {
             Err(TimelineExclusionError::AlreadyCreating)
         } else {
@@ -216,6 +228,7 @@ impl<'t> TimelineCreateGuard {
                 owning_tenant: owning_tenant,
                 timeline_id,
                 timeline_path,
+                idempotency,
             })
         }
     }

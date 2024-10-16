@@ -553,6 +553,7 @@ async fn timeline_create_handler(
             location,
         }) => {
             tenant::CreateTimelineParams::ImportPgdata(tenant::CreateTimelineParamsImportPgdata {
+                idempotency_key: todo!("idempotency in API"),
                 new_timeline_id,
                 location: {
                     use pageserver_api::models::ImportPgdataLocation;
