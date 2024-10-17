@@ -52,6 +52,12 @@ enum EncryptionSecret {
 
 #[tokio::main]
 pub(crate) async fn main() -> anyhow::Result<()> {
+    utils::logging::init(
+        utils::logging::LogFormat::Plain,
+        utils::logging::TracingErrorLayerEnablement::EnableWithRustLogFilter,
+        utils::logging::Output::Stdout,
+    )?;
+
     let Args {
         working_directory,
         s3_prefix,
