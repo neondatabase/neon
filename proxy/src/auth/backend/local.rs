@@ -1,23 +1,32 @@
 use std::net::SocketAddr;
 
 use arc_swap::ArcSwapOption;
+use tokio::sync::Semaphore;
 
 use super::jwt::{AuthRule, FetchAuthRules};
 use crate::auth::backend::jwt::FetchAuthRulesError;
 use crate::compute::ConnCfg;
+use crate::compute_ctl::ComputeCtlApi;
 use crate::context::RequestMonitoring;
 use crate::control_plane::messages::{ColdStartInfo, EndpointJwksResponse, MetricsAuxInfo};
 use crate::control_plane::NodeInfo;
 use crate::intern::{BranchIdTag, EndpointIdTag, InternId, ProjectIdTag};
-use crate::EndpointId;
+use crate::url::ApiUrl;
+use crate::{http, EndpointId};
 
 pub struct LocalBackend {
+    pub(crate) initialize: Semaphore,
+    pub(crate) compute_ctl: ComputeCtlApi,
     pub(crate) node_info: NodeInfo,
 }
 
 impl LocalBackend {
-    pub fn new(postgres_addr: SocketAddr) -> Self {
+    pub fn new(postgres_addr: SocketAddr, compute_ctl: ApiUrl) -> Self {
         LocalBackend {
+            initialize: Semaphore::new(1),
+            compute_ctl: ComputeCtlApi {
+                api: http::Endpoint::new(compute_ctl, http::new_client()),
+            },
             node_info: NodeInfo {
                 config: {
                     let mut cfg = ConnCfg::new();
