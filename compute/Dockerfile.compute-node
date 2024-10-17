@@ -669,7 +669,7 @@ RUN apt-get update && \
 #
 # Use new version only for v17
 # because Release_2024_09_1 has some backward incompatible changes
-# https://github.com/rdkit/rdkit/releases/tag/Release_2024_09_1 
+# https://github.com/rdkit/rdkit/releases/tag/Release_2024_09_1
 ENV PATH="/usr/local/pgsql/bin/:/usr/local/pgsql/:$PATH"
 RUN case "${PG_VERSION}" in \
     "v17") \
@@ -1132,7 +1132,7 @@ ENV BUILD_TAG=$BUILD_TAG
 USER nonroot
 # Copy entire project to get Cargo.* files with proper dependencies for the whole project
 COPY --chown=nonroot . .
-RUN cd compute_tools && mold -run cargo build --locked --profile release-line-debug-size-lto
+RUN cd compute_tools && mold -run cargo build --locked
 
 #########################################################################################
 #
@@ -1142,8 +1142,8 @@ RUN cd compute_tools && mold -run cargo build --locked --profile release-line-de
 
 FROM debian:$DEBIAN_FLAVOR AS compute-tools-image
 
-COPY --from=compute-tools /home/nonroot/target/release-line-debug-size-lto/compute_ctl /usr/local/bin/compute_ctl
-COPY --from=compute-tools /home/nonroot/target/release-line-debug-size-lto/fast_import /usr/local/bin/fast_import
+COPY --from=compute-tools /home/nonroot/target/debug/compute_ctl /usr/local/bin/compute_ctl
+COPY --from=compute-tools /home/nonroot/target/debug/fast_import /usr/local/bin/fast_import
 
 #########################################################################################
 #
@@ -1186,7 +1186,7 @@ ENV BUILD_TAG=$BUILD_TAG
 USER nonroot
 # Copy entire project to get Cargo.* files with proper dependencies for the whole project
 COPY --chown=nonroot . .
-RUN mold -run cargo build --locked --profile release-line-debug-size-lto --bin local_proxy
+RUN mold -run cargo build --locked --bin local_proxy
 
 #########################################################################################
 #
@@ -1333,15 +1333,15 @@ RUN mkdir /var/db && useradd -m -d /var/db/postgres postgres && \
     mkdir -p -m 777 /neon/cache
 
 COPY --from=postgres-cleanup-layer --chown=postgres /usr/local/pgsql /usr/local
-COPY --from=compute-tools --chown=postgres /home/nonroot/target/release-line-debug-size-lto/compute_ctl /usr/local/bin/compute_ctl
-COPY --from=compute-tools --chown=postgres /home/nonroot/target/release-line-debug-size-lto/fast_import /usr/local/bin/fast_import
+COPY --from=compute-tools-image --chown=postgres /usr/local/bin/compute_ctl /usr/local/bin/compute_ctl
+COPY --from=compute-tools-image --chown=postgres /usr/local/bin/fast_import /usr/local/bin/fast_import
 
 # pgbouncer and its config
 COPY --from=pgbouncer         /usr/local/pgbouncer/bin/pgbouncer /usr/local/bin/pgbouncer
 COPY --chmod=0666 --chown=postgres compute/etc/pgbouncer.ini /etc/pgbouncer.ini
 
 # local_proxy and its config
-COPY --from=local_proxy --chown=postgres /home/nonroot/target/release-line-debug-size-lto/local_proxy /usr/local/bin/local_proxy
+COPY --from=local_proxy --chown=postgres /home/nonroot/target/debug/local_proxy /usr/local/bin/local_proxy
 RUN mkdir -p /etc/local_proxy && chown postgres:postgres /etc/local_proxy
 
 # Metrics exporter binaries and  configuration files
