@@ -1404,14 +1404,14 @@ LIMIT 100",
             db_client
                 .simple_query(&query)
                 .await
-                .context(format!("Failed to execute query: {}", query))?;
+                .with_context(|| format!("Failed to execute query: {}", query))?;
         } else {
             let query =
                 format!("CREATE EXTENSION IF NOT EXISTS {ext_name} WITH VERSION {ext_version}");
             db_client
                 .simple_query(&query)
                 .await
-                .context(format!("Failed to execute query: {}", query))?;
+                .with_context(|| format!("Failed to execute query: {}", query))?;
         }
 
         Ok(ext_version.to_string())
