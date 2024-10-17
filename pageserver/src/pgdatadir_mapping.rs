@@ -1866,15 +1866,25 @@ impl<'a> DatadirModification<'a> {
                 match self.get(AUX_FILES_KEY, ctx).await {
                     Ok(dir_bytes) => {
                         let mut dir = AuxFilesDirectory::des(&dir_bytes)?;
+                        let is_empty = dir.files.is_empty();
                         // Key is already set, we may append a delta
-                        self.put(
-                            AUX_FILES_KEY,
-                            Value::WalRecord(NeonWalRecord::AuxFile {
-                                file_path: file_path.clone(),
-                                content: content.clone(),
-                            }),
-                        );
-                        dir.upsert(file_path, content);
+                        dir.upsert(file_path.clone(), content.clone());
+                        if is_empty {
+                            self.put(
+                                AUX_FILES_KEY,
+                                Value::Image(Bytes::from(
+                                    AuxFilesDirectory::ser(&dir).context("serialize")?,
+                                )),
+                            );
+                        } else {
+                            self.put(
+                                AUX_FILES_KEY,
+                                Value::WalRecord(NeonWalRecord::AuxFile {
+                                    file_path,
+                                    content: content.clone(),
+                                }),
+                            );
+                        }
                         n_files = dir.files.len();
                         aux_files.dir = Some(dir);
                     }
