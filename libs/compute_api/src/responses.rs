@@ -6,7 +6,7 @@ use std::fmt::Display;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize, Serializer};
 
-use crate::spec::{ComputeSpec, Database, Role};
+use crate::spec::{ComputeSpec, Database, ExtVersion, PgIdent, Role};
 
 #[derive(Serialize, Debug, Deserialize)]
 pub struct GenericAPIError {
@@ -167,4 +167,10 @@ pub struct InstalledExtension {
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct InstalledExtensions {
     pub extensions: Vec<InstalledExtension>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct ExtensionInstallResult {
+    pub extension: PgIdent,
+    pub version: ExtVersion,
 }

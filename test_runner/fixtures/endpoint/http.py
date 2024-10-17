@@ -28,3 +28,13 @@ class EndpointHttpClient(requests.Session):
         res = self.get(f"http://localhost:{self.port}/installed_extensions")
         res.raise_for_status()
         return res.json()
+
+    def extensions(self, extension: str, version: str, database: str):
+        body = {
+            "extension": extension,
+            "version": version,
+            "database": database,
+        }
+        res = self.post(f"http://localhost:{self.port}/extensions", json=body)
+        res.raise_for_status()
+        return res.json()
