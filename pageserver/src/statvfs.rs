@@ -90,7 +90,7 @@ pub mod mock {
                 let used_bytes = walk_dir_disk_usage(tenants_dir, name_filter.as_deref()).unwrap();
 
                 // round it up to the nearest block multiple
-                let used_blocks = (used_bytes + (blocksize - 1)) / blocksize;
+                let used_blocks = used_bytes.div_ceil(*blocksize);
 
                 if used_blocks > *total_blocks {
                     panic!(

@@ -921,7 +921,6 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackendReader<IO> {
 /// A futures::AsyncWrite implementation that wraps all data written to it in CopyData
 /// messages.
 ///
-
 pub struct CopyDataWriter<'a, IO> {
     pgb: &'a mut PostgresBackend<IO>,
 }
