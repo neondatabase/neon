@@ -1387,7 +1387,7 @@ LIMIT 100",
         tokio::spawn(conn);
 
         let version_query = "SELECT extversion FROM pg_extension WHERE extname = $1";
-        let version: Option<String> = db_client
+        let version: Option<ExtVersion> = db_client
             .query_opt(version_query, &[&ext_name])
             .await
             .with_context(|| format!("Failed to execute query: {}", version_query))?

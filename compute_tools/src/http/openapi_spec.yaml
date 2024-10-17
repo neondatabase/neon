@@ -165,6 +165,13 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ExtensionInstallResult"
+        412:
+          description: |
+            Compute is in the wrong state for processing the request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericError"
         500:
           description: Error during extension installation.
           content:
