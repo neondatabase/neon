@@ -1,24 +1,25 @@
 //! Connection request monitoring contexts
 
+use std::net::IpAddr;
+
 use chrono::Utc;
 use once_cell::sync::OnceCell;
 use pq_proto::StartupMessageParams;
 use smol_str::SmolStr;
-use std::net::IpAddr;
 use tokio::sync::mpsc;
-use tracing::{debug, field::display, info, info_span, Span};
+use tracing::field::display;
+use tracing::{debug, info, info_span, Span};
 use try_lock::TryLock;
 use uuid::Uuid;
 
-use crate::{
-    control_plane::messages::{ColdStartInfo, MetricsAuxInfo},
-    error::ErrorKind,
-    intern::{BranchIdInt, ProjectIdInt},
-    metrics::{ConnectOutcome, InvalidEndpointsGroup, LatencyTimer, Metrics, Protocol, Waiting},
-    DbName, EndpointId, RoleName,
-};
-
 use self::parquet::RequestData;
+use crate::control_plane::messages::{ColdStartInfo, MetricsAuxInfo};
+use crate::error::ErrorKind;
+use crate::intern::{BranchIdInt, ProjectIdInt};
+use crate::metrics::{
+    ConnectOutcome, InvalidEndpointsGroup, LatencyTimer, Metrics, Protocol, Waiting,
+};
+use crate::{DbName, EndpointId, RoleName};
 
 pub mod parquet;
 

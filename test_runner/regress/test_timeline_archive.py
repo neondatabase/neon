@@ -119,6 +119,10 @@ def test_timeline_archive(neon_env_builder: NeonEnvBuilder, shard_count: int):
 
 @pytest.mark.parametrize("manual_offload", [False, True])
 def test_timeline_offloading(neon_env_builder: NeonEnvBuilder, manual_offload: bool):
+    if not manual_offload:
+        # (automatic) timeline offloading defaults to false for now
+        neon_env_builder.pageserver_config_override = "timeline_offloading = true"
+
     env = neon_env_builder.init_start()
     ps_http = env.pageserver.http_client()
 
@@ -135,6 +139,17 @@ def test_timeline_offloading(neon_env_builder: NeonEnvBuilder, manual_offload: b
     leaf_timeline_id = env.create_branch(
         "test_ancestor_branch_archive_branch1", tenant_id, "test_ancestor_branch_archive_parent"
     )
+
+    with env.endpoints.create_start(
+        "test_ancestor_branch_archive_branch1", tenant_id=tenant_id
+    ) as endpoint:
+        endpoint.safe_psql_many(
+            [
+                "CREATE TABLE foo(key serial primary key, t text default 'data_content')",
+                "INSERT INTO foo SELECT FROM generate_series(1,1000)",
+            ]
+        )
+        sum = endpoint.safe_psql("SELECT sum(key) from foo where key > 50")
 
     ps_http.timeline_archival_config(
         tenant_id,
@@ -196,5 +211,11 @@ def test_timeline_offloading(neon_env_builder: NeonEnvBuilder, manual_offload: b
         leaf_timeline_id,
     )
     assert leaf_detail["is_archived"] is False
+
+    with env.endpoints.create_start(
+        "test_ancestor_branch_archive_branch1", tenant_id=tenant_id
+    ) as endpoint:
+        sum_again = endpoint.safe_psql("SELECT sum(key) from foo where key > 50")
+        assert sum == sum_again
 
     assert not timeline_offloaded(initial_timeline_id)

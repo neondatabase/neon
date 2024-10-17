@@ -1565,6 +1565,7 @@ impl Timeline {
     }
 
     /// Checks if the internal state of the timeline is consistent with it being able to be offloaded.
+    ///
     /// This is neccessary but not sufficient for offloading of the timeline as it might have
     /// child timelines that are not offloaded yet.
     pub(crate) fn can_offload(&self) -> bool {
@@ -3092,7 +3093,6 @@ impl Timeline {
 }
 
 impl Timeline {
-    #[allow(unknown_lints)] // doc_lazy_continuation is still a new lint
     #[allow(clippy::doc_lazy_continuation)]
     /// Get the data needed to reconstruct all keys in the provided keyspace
     ///

@@ -120,6 +120,24 @@ jobs:
       - name: Run mypy to check types
         run: poetry run mypy .
 
+  check-codestyle-jsonnet:
+    needs: [ check-permissions, build-build-tools-image ]
+    runs-on: [ self-hosted, small ]
+    container:
+      image: ${{ needs.build-build-tools-image.outputs.image }}
+      credentials:
+        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
+        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
+      options: --init
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check Jsonnet code formatting
+        run: |
+          make -C compute jsonnetfmt-test
+
   # Check that the vendor/postgres-* submodules point to the
   # corresponding REL_*_STABLE_neon branches.
   check-submodules:
@@ -1082,7 +1100,6 @@ jobs:
         run: |
           if [[ "$GITHUB_REF_NAME" == "main" ]]; then
             gh workflow --repo neondatabase/infra run deploy-dev.yml --ref main -f branch=main -f dockerTag=${{needs.tag.outputs.build-tag}} -f deployPreprodRegion=false
-            gh workflow --repo neondatabase/azure run deploy.yml -f dockerTag=${{needs.tag.outputs.build-tag}}
           elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
             gh workflow --repo neondatabase/infra run deploy-dev.yml --ref main \
               -f deployPgSniRouter=false \

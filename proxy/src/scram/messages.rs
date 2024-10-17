@@ -1,11 +1,12 @@
 //! Definitions for SCRAM messages.
 
+use std::fmt;
+use std::ops::Range;
+
 use super::base64_decode_array;
 use super::key::{ScramKey, SCRAM_KEY_LEN};
 use super::signature::SignatureBuilder;
 use crate::sasl::ChannelBinding;
-use std::fmt;
-use std::ops::Range;
 
 /// Faithfully taken from PostgreSQL.
 pub(crate) const SCRAM_RAW_NONCE_LEN: usize = 18;

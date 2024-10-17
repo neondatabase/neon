@@ -27,6 +27,7 @@ RUN set -e \
         gnupg \
         gzip \
         jq \
+        jsonnet \
         libcurl4-openssl-dev \
         libbz2-dev \
         libffi-dev \

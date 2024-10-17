@@ -209,7 +209,8 @@ impl sasl::Mechanism for Exchange<'_> {
     type Output = super::ScramKey;
 
     fn exchange(mut self, input: &str) -> sasl::Result<sasl::Step<Self, Self::Output>> {
-        use {sasl::Step, ExchangeState};
+        use sasl::Step;
+        use ExchangeState;
         match &self.state {
             ExchangeState::Initial(init) => {
                 match init.transition(self.secret, &self.tls_server_end_point, input)? {
