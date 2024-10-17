@@ -1443,8 +1443,8 @@ LIMIT 100",
                 .iter()
                 // should not be quoted as it's part of the command.
                 // is already sanitized so it's ok
-                .map(|p| serde_json::to_string(p).unwrap())
-                .collect::<Vec<String>>()
+                .map(|p| p.as_str())
+                .collect::<Vec<&'static str>>()
                 .join(", "),
             // quote the schema and role name as identifiers to sanitize them.
             schema_name.to_string().pg_quote(),
