@@ -8,6 +8,7 @@ use itertools::Itertools;
 use once_cell::sync::OnceCell;
 use pq_proto::StartupMessageParams;
 use rustls::client::danger::ServerCertVerifier;
+use rustls::crypto::aws_lc_rs;
 use rustls::pki_types::InvalidDnsNameError;
 use thiserror::Error;
 use tokio::net::TcpStream;
@@ -37,6 +38,9 @@ pub(crate) enum ConnectionError {
 
     #[error("{COULD_NOT_CONNECT}: {0}")]
     CouldNotConnect(#[from] io::Error),
+
+    #[error("Couldn't load native TLS certificates: {0:?}")]
+    TlsCertificateError(Vec<rustls_native_certs::Error>),
 
     #[error("{COULD_NOT_CONNECT}: {0}")]
     TlsError(#[from] InvalidDnsNameError),
@@ -84,6 +88,7 @@ impl ReportableError for ConnectionError {
             }
             ConnectionError::Postgres(_) => crate::error::ErrorKind::Compute,
             ConnectionError::CouldNotConnect(_) => crate::error::ErrorKind::Compute,
+            ConnectionError::TlsCertificateError(_) => crate::error::ErrorKind::Service,
             ConnectionError::TlsError(_) => crate::error::ErrorKind::Compute,
             ConnectionError::WakeComputeError(e) => e.get_error_kind(),
             ConnectionError::TooManyConnectionAttempts(e) => e.get_error_kind(),
@@ -293,12 +298,20 @@ impl ConnCfg {
         let client_config = if allow_self_signed_compute {
             // Allow all certificates for creating the connection
             let verifier = Arc::new(AcceptEverythingVerifier);
-            rustls::ClientConfig::builder()
+            rustls::ClientConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
+                .with_safe_default_protocol_versions()
+                .expect("aws_lc_rs should support the default protocol versions")
                 .dangerous()
                 .with_custom_certificate_verifier(verifier)
         } else {
-            let root_store = TLS_ROOTS.get_or_try_init(load_certs)?.clone();
-            rustls::ClientConfig::builder().with_root_certificates(root_store)
+            let root_store = TLS_ROOTS
+                .get_or_try_init(load_certs)
+                .map_err(ConnectionError::TlsCertificateError)?
+                .clone();
+            rustls::ClientConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
+                .with_safe_default_protocol_versions()
+                .expect("aws_lc_rs should support the default protocol versions")
+                .with_root_certificates(root_store)
         };
         let client_config = client_config.with_no_client_auth();
 
@@ -359,10 +372,15 @@ fn filtered_options(params: &StartupMessageParams) -> Option<String> {
     Some(options)
 }
 
-fn load_certs() -> Result<Arc<rustls::RootCertStore>, io::Error> {
-    let der_certs = rustls_native_certs::load_native_certs()?;
+fn load_certs() -> Result<Arc<rustls::RootCertStore>, Vec<rustls_native_certs::Error>> {
+    let der_certs = rustls_native_certs::load_native_certs();
+
+    if !der_certs.errors.is_empty() {
+        return Err(der_certs.errors);
+    }
+
     let mut store = rustls::RootCertStore::empty();
-    store.add_parsable_certificates(der_certs);
+    store.add_parsable_certificates(der_certs.certs);
     Ok(Arc::new(store))
 }
 static TLS_ROOTS: OnceCell<Arc<rustls::RootCertStore>> = OnceCell::new();

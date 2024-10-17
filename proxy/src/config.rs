@@ -7,7 +7,7 @@ use anyhow::{bail, ensure, Context, Ok};
 use clap::ValueEnum;
 use itertools::Itertools;
 use remote_storage::RemoteStorageConfig;
-use rustls::crypto::ring::sign;
+use rustls::crypto::aws_lc_rs::{self, sign};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use sha2::{Digest, Sha256};
 use tracing::{error, info};
@@ -126,12 +126,12 @@ pub fn configure_tls(
     let cert_resolver = Arc::new(cert_resolver);
 
     // allow TLS 1.2 to be compatible with older client libraries
-    let mut config = rustls::ServerConfig::builder_with_protocol_versions(&[
-        &rustls::version::TLS13,
-        &rustls::version::TLS12,
-    ])
-    .with_no_client_auth()
-    .with_cert_resolver(cert_resolver.clone());
+    let mut config =
+        rustls::ServerConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
+            .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
+            .context("aws_lc_rs should support TLS1.2 and TLS1.3")?
+            .with_no_client_auth()
+            .with_cert_resolver(cert_resolver.clone());
 
     config.alpn_protocols = vec![PG_ALPN_PROTOCOL.to_vec()];
 
