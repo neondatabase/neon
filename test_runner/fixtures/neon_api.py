@@ -185,8 +185,8 @@ class NeonAPI:
     def get_connection_uri(
         self,
         project_id: str,
-        branch_id: str | None = None,
-        endpoint_id: str | None = None,
+        branch_id: Optional[str] = None,
+        endpoint_id: Optional[str] = None,
         database_name: str = "neondb",
         role_name: str = "neondb_owner",
         pooled: bool = True,
@@ -262,7 +262,7 @@ class NeonAPI:
 
 
 class NeonApiEndpoint:
-    def __init__(self, neon_api: NeonAPI, pg_version: PgVersion, project_id: str | None):
+    def __init__(self, neon_api: NeonAPI, pg_version: PgVersion, project_id: Optional[str]):
         self.neon_api = neon_api
         if project_id is None:
             project = neon_api.create_project(pg_version)

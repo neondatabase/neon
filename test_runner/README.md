@@ -64,10 +64,12 @@ By default performance tests are excluded. To run them explicitly pass performan
 Useful environment variables:
 
 `NEON_BIN`: The directory where neon binaries can be found.
+`COMPATIBILITY_NEON_BIN`: The directory where the previous version of Neon binaries can be found
 `POSTGRES_DISTRIB_DIR`: The directory where postgres distribution can be found.
 Since pageserver supports several postgres versions, `POSTGRES_DISTRIB_DIR` must contain
 a subdirectory for each version with naming convention `v{PG_VERSION}/`.
 Inside that dir, a `bin/postgres` binary should be present.
+`COMPATIBILITY_POSTGRES_DISTRIB_DIR`: The directory where the prevoius version of postgres distribution can be found.
 `DEFAULT_PG_VERSION`: The version of Postgres to use,
 This is used to construct full path to the postgres binaries.
 Format is 2-digit major version nubmer, i.e. `DEFAULT_PG_VERSION=16`
@@ -292,6 +294,16 @@ def test_foobar2(neon_env_builder: NeonEnvBuilder):
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline
     client.timeline_detail(tenant_id=tenant_id, timeline_id=timeline_id)
+```
+
+All the test which rely on NeonEnvBuilder, can check the various version combinations of the components.
+To do this yuo may want to add the parametrize decorator with the function fixtures.utils.allpairs_versions()
+E.g.
+
+```python
+@pytest.mark.parametrize(**fixtures.utils.allpairs_versions())
+def test_something(
+...
 ```
 
 For more information about pytest fixtures, see https://docs.pytest.org/en/stable/fixture.html

@@ -1,20 +1,23 @@
 //! Main authentication flow.
 
-use super::{backend::ComputeCredentialKeys, AuthErrorImpl, PasswordHackPayload};
-use crate::{
-    config::TlsServerEndPoint,
-    context::RequestMonitoring,
-    control_plane::AuthSecret,
-    intern::EndpointIdInt,
-    sasl,
-    scram::{self, threadpool::ThreadPool},
-    stream::{PqStream, Stream},
-};
+use std::io;
+use std::sync::Arc;
+
 use postgres_protocol::authentication::sasl::{SCRAM_SHA_256, SCRAM_SHA_256_PLUS};
 use pq_proto::{BeAuthenticationSaslMessage, BeMessage, BeMessage as Be};
-use std::{io, sync::Arc};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::info;
+
+use super::backend::ComputeCredentialKeys;
+use super::{AuthError, PasswordHackPayload};
+use crate::config::TlsServerEndPoint;
+use crate::context::RequestMonitoring;
+use crate::control_plane::AuthSecret;
+use crate::intern::EndpointIdInt;
+use crate::sasl;
+use crate::scram::threadpool::ThreadPool;
+use crate::scram::{self};
+use crate::stream::{PqStream, Stream};
 
 /// Every authentication selector is supposed to implement this trait.
 pub(crate) trait AuthMethod {
@@ -114,14 +117,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, PasswordHack> {
         let msg = self.stream.read_password_message().await?;
         let password = msg
             .strip_suffix(&[0])
-            .ok_or(AuthErrorImpl::MalformedPassword("missing terminator"))?;
+            .ok_or(AuthError::MalformedPassword("missing terminator"))?;
 
         let payload = PasswordHackPayload::parse(password)
             // If we ended up here and the payload is malformed, it means that
             // the user neither enabled SNI nor resorted to any other method
             // for passing the project name we rely on. We should show them
             // the most helpful error message and point to the documentation.
-            .ok_or(AuthErrorImpl::MissingEndpointName)?;
+            .ok_or(AuthError::MissingEndpointName)?;
 
         Ok(payload)
     }
@@ -133,7 +136,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, CleartextPassword> {
         let msg = self.stream.read_password_message().await?;
         let password = msg
             .strip_suffix(&[0])
-            .ok_or(AuthErrorImpl::MalformedPassword("missing terminator"))?;
+            .ok_or(AuthError::MalformedPassword("missing terminator"))?;
 
         let outcome = validate_password_and_exchange(
             &self.state.pool,
@@ -163,7 +166,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AuthFlow<'_, S, Scram<'_>> {
         // Initial client message contains the chosen auth method's name.
         let msg = self.stream.read_password_message().await?;
         let sasl = sasl::FirstMessage::parse(&msg)
-            .ok_or(AuthErrorImpl::MalformedPassword("bad sasl message"))?;
+            .ok_or(AuthError::MalformedPassword("bad sasl message"))?;
 
         // Currently, the only supported SASL method is SCRAM.
         if !scram::METHODS.contains(&sasl.method) {

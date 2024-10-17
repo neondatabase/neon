@@ -2,76 +2,43 @@ use std::pin::pin;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use futures::future::select;
-use futures::future::try_join;
-use futures::future::Either;
-use futures::StreamExt;
-use futures::TryFutureExt;
+use futures::future::{select, try_join, Either};
+use futures::{StreamExt, TryFutureExt};
 use http::header::AUTHORIZATION;
 use http::Method;
 use http_body_util::combinators::BoxBody;
-use http_body_util::BodyExt;
-use http_body_util::Full;
-use hyper::body::Body;
-use hyper::body::Incoming;
-use hyper::header;
-use hyper::http::HeaderName;
-use hyper::http::HeaderValue;
-use hyper::Response;
-use hyper::StatusCode;
-use hyper::{HeaderMap, Request};
+use http_body_util::{BodyExt, Full};
+use hyper::body::{Body, Incoming};
+use hyper::http::{HeaderName, HeaderValue};
+use hyper::{header, HeaderMap, Request, Response, StatusCode};
 use pq_proto::StartupMessageParamsBuilder;
 use serde::Serialize;
 use serde_json::Value;
 use tokio::time;
-use tokio_postgres::error::DbError;
-use tokio_postgres::error::ErrorPosition;
-use tokio_postgres::error::SqlState;
-use tokio_postgres::GenericClient;
-use tokio_postgres::IsolationLevel;
-use tokio_postgres::NoTls;
-use tokio_postgres::ReadyForQueryStatus;
-use tokio_postgres::Transaction;
+use tokio_postgres::error::{DbError, ErrorPosition, SqlState};
+use tokio_postgres::{GenericClient, IsolationLevel, NoTls, ReadyForQueryStatus, Transaction};
 use tokio_util::sync::CancellationToken;
-use tracing::error;
-use tracing::info;
+use tracing::{error, info};
 use typed_json::json;
 use url::Url;
 use urlencoding;
 use utils::http::error::ApiError;
 
-use crate::auth::backend::ComputeCredentialKeys;
-use crate::auth::backend::ComputeUserInfo;
-use crate::auth::endpoint_sni;
-use crate::auth::ComputeUserInfoParseError;
-use crate::config::AuthenticationConfig;
-use crate::config::ProxyConfig;
-use crate::config::TlsConfig;
-use crate::context::RequestMonitoring;
-use crate::error::ErrorKind;
-use crate::error::ReportableError;
-use crate::error::UserFacingError;
-use crate::metrics::HttpDirection;
-use crate::metrics::Metrics;
-use crate::proxy::run_until_cancelled;
-use crate::proxy::NeonOptions;
-use crate::serverless::backend::HttpConnError;
-use crate::usage_metrics::MetricCounter;
-use crate::usage_metrics::MetricCounterRecorder;
-use crate::DbName;
-use crate::RoleName;
-
-use super::backend::LocalProxyConnError;
-use super::backend::PoolingBackend;
-use super::conn_pool;
-use super::conn_pool::AuthData;
-use super::conn_pool::ConnInfo;
-use super::conn_pool::ConnInfoWithAuth;
+use super::backend::{LocalProxyConnError, PoolingBackend};
+use super::conn_pool::{AuthData, ConnInfo, ConnInfoWithAuth};
 use super::http_util::json_response;
-use super::json::json_to_pg_text;
-use super::json::pg_text_row_to_json;
-use super::json::JsonConversionError;
-use super::local_conn_pool;
+use super::json::{json_to_pg_text, pg_text_row_to_json, JsonConversionError};
+use super::{conn_pool, local_conn_pool};
+use crate::auth::backend::{ComputeCredentialKeys, ComputeUserInfo};
+use crate::auth::{endpoint_sni, ComputeUserInfoParseError};
+use crate::config::{AuthenticationConfig, HttpConfig, ProxyConfig, TlsConfig};
+use crate::context::RequestMonitoring;
+use crate::error::{ErrorKind, ReportableError, UserFacingError};
+use crate::metrics::{HttpDirection, Metrics};
+use crate::proxy::{run_until_cancelled, NeonOptions};
+use crate::serverless::backend::HttpConnError;
+use crate::usage_metrics::{MetricCounter, MetricCounterRecorder};
+use crate::{DbName, RoleName};
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -554,7 +521,7 @@ async fn handle_inner(
 
     match conn_info.auth {
         AuthData::Jwt(jwt) if config.authentication_config.is_auth_broker => {
-            handle_auth_broker_inner(config, ctx, request, conn_info.conn_info, jwt, backend).await
+            handle_auth_broker_inner(ctx, request, conn_info.conn_info, jwt, backend).await
         }
         auth => {
             handle_db_inner(
@@ -622,28 +589,17 @@ async fn handle_db_inner(
 
     let authenticate_and_connect = Box::pin(
         async {
-            let is_local_proxy =
-                matches!(backend.config.auth_backend, crate::auth::Backend::Local(_));
+            let is_local_proxy = matches!(backend.auth_backend, crate::auth::Backend::Local(_));
 
             let keys = match auth {
                 AuthData::Password(pw) => {
                     backend
-                        .authenticate_with_password(
-                            ctx,
-                            &config.authentication_config,
-                            &conn_info.user_info,
-                            &pw,
-                        )
+                        .authenticate_with_password(ctx, &conn_info.user_info, &pw)
                         .await?
                 }
                 AuthData::Jwt(jwt) => {
                     backend
-                        .authenticate_with_jwt(
-                            ctx,
-                            &config.authentication_config,
-                            &conn_info.user_info,
-                            jwt,
-                        )
+                        .authenticate_with_jwt(ctx, &conn_info.user_info, jwt)
                         .await?
                 }
             };
@@ -691,7 +647,7 @@ async fn handle_db_inner(
     // Now execute the query and return the result.
     let json_output = match payload {
         Payload::Single(stmt) => {
-            stmt.process(config, cancel, &mut client, parsed_headers)
+            stmt.process(&config.http_config, cancel, &mut client, parsed_headers)
                 .await?
         }
         Payload::Batch(statements) => {
@@ -709,7 +665,7 @@ async fn handle_db_inner(
             }
 
             statements
-                .process(config, cancel, &mut client, parsed_headers)
+                .process(&config.http_config, cancel, &mut client, parsed_headers)
                 .await?
         }
     };
@@ -749,7 +705,6 @@ static HEADERS_TO_FORWARD: &[&HeaderName] = &[
 ];
 
 async fn handle_auth_broker_inner(
-    config: &'static ProxyConfig,
     ctx: &RequestMonitoring,
     request: Request<Incoming>,
     conn_info: ConnInfo,
@@ -757,12 +712,7 @@ async fn handle_auth_broker_inner(
     backend: Arc<PoolingBackend>,
 ) -> Result<Response<BoxBody<Bytes, hyper::Error>>, SqlOverHttpError> {
     backend
-        .authenticate_with_jwt(
-            ctx,
-            &config.authentication_config,
-            &conn_info.user_info,
-            jwt,
-        )
+        .authenticate_with_jwt(ctx, &conn_info.user_info, jwt)
         .await
         .map_err(HttpConnError::from)?;
 
@@ -800,7 +750,7 @@ async fn handle_auth_broker_inner(
 impl QueryData {
     async fn process(
         self,
-        config: &'static ProxyConfig,
+        config: &'static HttpConfig,
         cancel: CancellationToken,
         client: &mut Client,
         parsed_headers: HttpHeaders,
@@ -831,7 +781,7 @@ impl QueryData {
             Either::Right((_cancelled, query)) => {
                 tracing::info!("cancelling query");
                 if let Err(err) = cancel_token.cancel_query(NoTls).await {
-                    tracing::error!(?err, "could not cancel query");
+                    tracing::warn!(?err, "could not cancel query");
                 }
                 // wait for the query cancellation
                 match time::timeout(time::Duration::from_millis(100), query).await {
@@ -874,7 +824,7 @@ impl QueryData {
 impl BatchQueryData {
     async fn process(
         self,
-        config: &'static ProxyConfig,
+        config: &'static HttpConfig,
         cancel: CancellationToken,
         client: &mut Client,
         parsed_headers: HttpHeaders,
@@ -920,7 +870,7 @@ impl BatchQueryData {
             }
             Err(SqlOverHttpError::Cancelled(_)) => {
                 if let Err(err) = cancel_token.cancel_query(NoTls).await {
-                    tracing::error!(?err, "could not cancel query");
+                    tracing::warn!(?err, "could not cancel query");
                 }
                 // TODO: after cancelling, wait to see if we can get a status. maybe the connection is still safe.
                 discard.discard();
@@ -944,7 +894,7 @@ impl BatchQueryData {
 }
 
 async fn query_batch(
-    config: &'static ProxyConfig,
+    config: &'static HttpConfig,
     cancel: CancellationToken,
     transaction: &Transaction<'_>,
     queries: BatchQueryData,
@@ -983,7 +933,7 @@ async fn query_batch(
 }
 
 async fn query_to_json<T: GenericClient>(
-    config: &'static ProxyConfig,
+    config: &'static HttpConfig,
     client: &T,
     data: QueryData,
     current_size: &mut usize,
@@ -1004,9 +954,9 @@ async fn query_to_json<T: GenericClient>(
         rows.push(row);
         // we don't have a streaming response support yet so this is to prevent OOM
         // from a malicious query (eg a cross join)
-        if *current_size > config.http_config.max_response_size_bytes {
+        if *current_size > config.max_response_size_bytes {
             return Err(SqlOverHttpError::ResponseTooLarge(
-                config.http_config.max_response_size_bytes,
+                config.max_response_size_bytes,
             ));
         }
     }

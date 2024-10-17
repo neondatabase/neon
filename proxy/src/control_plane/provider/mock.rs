@@ -1,26 +1,28 @@
 //! Mock console backend which relies on a user-provided postgres instance.
 
-use super::{
-    errors::{ApiError, GetAuthInfoError, WakeComputeError},
-    AuthInfo, AuthSecret, CachedNodeInfo, NodeInfo,
-};
-use crate::{
-    auth::backend::jwt::AuthRule, context::RequestMonitoring, intern::RoleNameInt, RoleName,
-};
-use crate::{auth::backend::ComputeUserInfo, compute, error::io_error, scram, url::ApiUrl};
-use crate::{auth::IpPattern, cache::Cached};
-use crate::{
-    control_plane::{
-        messages::MetricsAuxInfo,
-        provider::{CachedAllowedIps, CachedRoleSecret},
-    },
-    BranchId, EndpointId, ProjectId,
-};
+use std::str::FromStr;
+use std::sync::Arc;
+
 use futures::TryFutureExt;
-use std::{str::FromStr, sync::Arc};
 use thiserror::Error;
-use tokio_postgres::{config::SslMode, Client};
+use tokio_postgres::config::SslMode;
+use tokio_postgres::Client;
 use tracing::{error, info, info_span, warn, Instrument};
+
+use super::errors::{ApiError, GetAuthInfoError, WakeComputeError};
+use super::{AuthInfo, AuthSecret, CachedNodeInfo, NodeInfo};
+use crate::auth::backend::jwt::AuthRule;
+use crate::auth::backend::ComputeUserInfo;
+use crate::auth::IpPattern;
+use crate::cache::Cached;
+use crate::context::RequestMonitoring;
+use crate::control_plane::errors::GetEndpointJwksError;
+use crate::control_plane::messages::MetricsAuxInfo;
+use crate::control_plane::provider::{CachedAllowedIps, CachedRoleSecret};
+use crate::error::io_error;
+use crate::intern::RoleNameInt;
+use crate::url::ApiUrl;
+use crate::{compute, scram, BranchId, EndpointId, ProjectId, RoleName};
 
 #[derive(Debug, Error)]
 enum MockApiError {
@@ -120,7 +122,10 @@ impl Api {
         })
     }
 
-    async fn do_get_endpoint_jwks(&self, endpoint: EndpointId) -> anyhow::Result<Vec<AuthRule>> {
+    async fn do_get_endpoint_jwks(
+        &self,
+        endpoint: EndpointId,
+    ) -> Result<Vec<AuthRule>, GetEndpointJwksError> {
         let (client, connection) =
             tokio_postgres::connect(self.endpoint.as_str(), tokio_postgres::NoTls).await?;
 
@@ -224,7 +229,7 @@ impl super::Api for Api {
         &self,
         _ctx: &RequestMonitoring,
         endpoint: EndpointId,
-    ) -> anyhow::Result<Vec<AuthRule>> {
+    ) -> Result<Vec<AuthRule>, GetEndpointJwksError> {
         self.do_get_endpoint_jwks(endpoint).await
     }
 

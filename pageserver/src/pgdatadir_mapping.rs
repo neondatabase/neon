@@ -1545,9 +1545,6 @@ impl<'a> DatadirModification<'a> {
             // Update relation size cache
             self.tline.set_cached_rel_size(rel, self.lsn, nblocks);
 
-            // Update relation size cache
-            self.tline.set_cached_rel_size(rel, self.lsn, nblocks);
-
             // Update logical database size.
             self.pending_nblocks -= old_size as i64 - nblocks as i64;
         }

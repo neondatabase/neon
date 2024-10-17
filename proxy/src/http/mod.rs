@@ -10,17 +10,15 @@ use anyhow::bail;
 use bytes::Bytes;
 use http_body_util::BodyExt;
 use hyper::body::Body;
+pub(crate) use reqwest::{Request, Response};
+use reqwest_middleware::RequestBuilder;
+pub(crate) use reqwest_middleware::{ClientWithMiddleware, Error};
+pub(crate) use reqwest_retry::policies::ExponentialBackoff;
+pub(crate) use reqwest_retry::RetryTransientMiddleware;
 use serde::de::DeserializeOwned;
 
-pub(crate) use reqwest::{Request, Response};
-pub(crate) use reqwest_middleware::{ClientWithMiddleware, Error};
-pub(crate) use reqwest_retry::{policies::ExponentialBackoff, RetryTransientMiddleware};
-
-use crate::{
-    metrics::{ConsoleRequest, Metrics},
-    url::ApiUrl,
-};
-use reqwest_middleware::RequestBuilder;
+use crate::metrics::{ConsoleRequest, Metrics};
+use crate::url::ApiUrl;
 
 /// This is the preferred way to create new http clients,
 /// because it takes care of observability (OpenTelemetry).
@@ -142,8 +140,9 @@ pub(crate) async fn parse_json_body_with_limit<D: DeserializeOwned>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use reqwest::Client;
+
+    use super::*;
 
     #[test]
     fn optional_query_params() -> anyhow::Result<()> {

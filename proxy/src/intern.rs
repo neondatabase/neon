@@ -1,6 +1,8 @@
-use std::{
-    hash::BuildHasherDefault, marker::PhantomData, num::NonZeroUsize, ops::Index, sync::OnceLock,
-};
+use std::hash::BuildHasherDefault;
+use std::marker::PhantomData;
+use std::num::NonZeroUsize;
+use std::ops::Index;
+use std::sync::OnceLock;
 
 use lasso::{Capacity, MemoryLimits, Spur, ThreadedRodeo};
 use rustc_hash::FxHasher;
@@ -208,9 +210,8 @@ impl From<ProjectId> for ProjectIdInt {
 mod tests {
     use std::sync::OnceLock;
 
-    use crate::intern::StringInterner;
-
     use super::InternId;
+    use crate::intern::StringInterner;
 
     struct MyId;
     impl InternId for MyId {
@@ -222,7 +223,8 @@ mod tests {
 
     #[test]
     fn push_many_strings() {
-        use rand::{rngs::StdRng, Rng, SeedableRng};
+        use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
         use rand_distr::Zipf;
 
         let endpoint_dist = Zipf::new(500000, 0.8).unwrap();

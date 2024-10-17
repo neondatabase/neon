@@ -67,7 +67,7 @@ use self::metadata::TimelineMetadata;
 use self::mgr::GetActiveTenantError;
 use self::mgr::GetTenantError;
 use self::remote_timeline_client::upload::upload_index_part;
-use self::remote_timeline_client::RemoteTimelineClient;
+use self::remote_timeline_client::{RemoteTimelineClient, WaitCompletionError};
 use self::timeline::uninit::TimelineCreateGuard;
 use self::timeline::uninit::TimelineExclusionError;
 use self::timeline::uninit::UninitializedTimeline;
@@ -493,6 +493,8 @@ pub struct OffloadedTimeline {
     pub tenant_shard_id: TenantShardId,
     pub timeline_id: TimelineId,
     pub ancestor_timeline_id: Option<TimelineId>,
+    /// Whether to retain the branch lsn at the ancestor or not
+    pub ancestor_retain_lsn: Option<Lsn>,
 
     // TODO: once we persist offloaded state, make this lazily constructed
     pub remote_client: Arc<RemoteTimelineClient>,
@@ -504,15 +506,25 @@ pub struct OffloadedTimeline {
 
 impl OffloadedTimeline {
     fn from_timeline(timeline: &Timeline) -> Self {
+        let ancestor_retain_lsn = timeline
+            .get_ancestor_timeline_id()
+            .map(|_timeline_id| timeline.get_ancestor_lsn());
         Self {
             tenant_shard_id: timeline.tenant_shard_id,
             timeline_id: timeline.timeline_id,
             ancestor_timeline_id: timeline.get_ancestor_timeline_id(),
+            ancestor_retain_lsn,
 
             remote_client: timeline.remote_client.clone(),
             delete_progress: timeline.delete_progress.clone(),
         }
     }
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+pub enum MaybeOffloaded {
+    Yes,
+    No,
 }
 
 #[derive(Clone)]
@@ -607,6 +619,9 @@ pub enum TimelineArchivalError {
     #[error("Timeout")]
     Timeout,
 
+    #[error("Cancelled")]
+    Cancelled,
+
     #[error("ancestor is archived: {}", .0)]
     HasArchivedParent(TimelineId),
 
@@ -617,7 +632,7 @@ pub enum TimelineArchivalError {
     AlreadyInProgress,
 
     #[error(transparent)]
-    Other(#[from] anyhow::Error),
+    Other(anyhow::Error),
 }
 
 impl Debug for TimelineArchivalError {
@@ -625,6 +640,7 @@ impl Debug for TimelineArchivalError {
         match self {
             Self::NotFound => write!(f, "NotFound"),
             Self::Timeout => write!(f, "Timeout"),
+            Self::Cancelled => write!(f, "Cancelled"),
             Self::HasArchivedParent(p) => f.debug_tuple("HasArchivedParent").field(p).finish(),
             Self::HasUnarchivedChildren(c) => {
                 f.debug_tuple("HasUnarchivedChildren").field(c).finish()
@@ -1538,8 +1554,10 @@ impl Tenant {
     async fn unoffload_timeline(
         self: &Arc<Self>,
         timeline_id: TimelineId,
+        broker_client: storage_broker::BrokerClientChannel,
         ctx: RequestContext,
     ) -> Result<Arc<Timeline>, TimelineArchivalError> {
+        info!("unoffloading timeline");
         let cancel = self.cancel.clone();
         let timeline_preload = self
             .load_timeline_metadata(timeline_id, self.remote_storage.clone(), cancel)
@@ -1554,6 +1572,7 @@ impl Tenant {
                 error!(%timeline_id, "index_part not found on remote");
                 return Err(TimelineArchivalError::NotFound);
             }
+            Err(DownloadError::Cancelled) => return Err(TimelineArchivalError::Cancelled),
             Err(e) => {
                 // Some (possibly ephemeral) error happened during index_part download.
                 warn!(%timeline_id, "Failed to load index_part from remote storage, failed creation? ({e})");
@@ -1584,26 +1603,40 @@ impl Tenant {
                 "failed to load remote timeline {} for tenant {}",
                 timeline_id, self.tenant_shard_id
             )
-        })?;
+        })
+        .map_err(TimelineArchivalError::Other)?;
         let timelines = self.timelines.lock().unwrap();
-        if let Some(timeline) = timelines.get(&timeline_id) {
-            let mut offloaded_timelines = self.timelines_offloaded.lock().unwrap();
-            if offloaded_timelines.remove(&timeline_id).is_none() {
-                warn!("timeline already removed from offloaded timelines");
-            }
-            Ok(Arc::clone(timeline))
-        } else {
+        let Some(timeline) = timelines.get(&timeline_id) else {
             warn!("timeline not available directly after attach");
-            Err(TimelineArchivalError::Other(anyhow::anyhow!(
+            return Err(TimelineArchivalError::Other(anyhow::anyhow!(
                 "timeline not available directly after attach"
-            )))
+            )));
+        };
+        let mut offloaded_timelines = self.timelines_offloaded.lock().unwrap();
+        if offloaded_timelines.remove(&timeline_id).is_none() {
+            warn!("timeline already removed from offloaded timelines");
         }
+
+        // Activate the timeline (if it makes sense)
+        if !(timeline.is_broken() || timeline.is_stopping()) {
+            let background_jobs_can_start = None;
+            timeline.activate(
+                self.clone(),
+                broker_client.clone(),
+                background_jobs_can_start,
+                &ctx,
+            );
+        }
+
+        info!("timeline unoffloading complete");
+        Ok(Arc::clone(timeline))
     }
 
     pub(crate) async fn apply_timeline_archival_config(
         self: &Arc<Self>,
         timeline_id: TimelineId,
         new_state: TimelineArchivalState,
+        broker_client: storage_broker::BrokerClientChannel,
         ctx: RequestContext,
     ) -> Result<(), TimelineArchivalError> {
         info!("setting timeline archival config");
@@ -1644,18 +1677,29 @@ impl Tenant {
             Some(Arc::clone(timeline))
         };
 
-        // Second part: unarchive timeline (if needed)
+        // Second part: unoffload timeline (if needed)
         let timeline = if let Some(timeline) = timeline_or_unarchive_offloaded {
             timeline
         } else {
             // Turn offloaded timeline into a non-offloaded one
-            self.unoffload_timeline(timeline_id, ctx).await?
+            self.unoffload_timeline(timeline_id, broker_client, ctx)
+                .await?
         };
 
         // Third part: upload new timeline archival state and block until it is present in S3
-        let upload_needed = timeline
+        let upload_needed = match timeline
             .remote_client
-            .schedule_index_upload_for_timeline_archival_state(new_state)?;
+            .schedule_index_upload_for_timeline_archival_state(new_state)
+        {
+            Ok(upload_needed) => upload_needed,
+            Err(e) => {
+                if timeline.cancel.is_cancelled() {
+                    return Err(TimelineArchivalError::Cancelled);
+                } else {
+                    return Err(TimelineArchivalError::Other(e));
+                }
+            }
+        };
 
         if upload_needed {
             info!("Uploading new state");
@@ -1666,9 +1710,31 @@ impl Tenant {
                 tracing::warn!("reached timeout for waiting on upload queue");
                 return Err(TimelineArchivalError::Timeout);
             };
-            v.map_err(|e| TimelineArchivalError::Other(anyhow::anyhow!(e)))?;
+            v.map_err(|e| match e {
+                WaitCompletionError::NotInitialized(e) => {
+                    TimelineArchivalError::Other(anyhow::anyhow!(e))
+                }
+                WaitCompletionError::UploadQueueShutDownOrStopped => {
+                    TimelineArchivalError::Cancelled
+                }
+            })?;
         }
         Ok(())
+    }
+
+    pub fn get_offloaded_timeline(
+        &self,
+        timeline_id: TimelineId,
+    ) -> Result<Arc<OffloadedTimeline>, GetTimelineError> {
+        self.timelines_offloaded
+            .lock()
+            .unwrap()
+            .get(&timeline_id)
+            .map(Arc::clone)
+            .ok_or(GetTimelineError::NotFound {
+                tenant_id: self.tenant_shard_id,
+                timeline_id,
+            })
     }
 
     pub(crate) fn tenant_shard_id(&self) -> TenantShardId {
@@ -2206,6 +2272,13 @@ impl Tenant {
         }
     }
 
+    pub fn timeline_has_no_attached_children(&self, timeline_id: TimelineId) -> bool {
+        let timelines = self.timelines.lock().unwrap();
+        !timelines
+            .iter()
+            .any(|(_id, tl)| tl.get_ancestor_timeline_id() == Some(timeline_id))
+    }
+
     pub fn current_state(&self) -> TenantState {
         self.state.borrow().clone()
     }
@@ -2253,12 +2326,13 @@ impl Tenant {
 
         if activating {
             let timelines_accessor = self.timelines.lock().unwrap();
+            let timelines_offloaded_accessor = self.timelines_offloaded.lock().unwrap();
             let timelines_to_activate = timelines_accessor
                 .values()
                 .filter(|timeline| !(timeline.is_broken() || timeline.is_stopping()));
 
             // Before activation, populate each Timeline's GcInfo with information about its children
-            self.initialize_gc_info(&timelines_accessor);
+            self.initialize_gc_info(&timelines_accessor, &timelines_offloaded_accessor);
 
             // Spawn gc and compaction loops. The loops will shut themselves
             // down when they notice that the tenant is inactive.
@@ -3294,10 +3368,11 @@ impl Tenant {
     /// Populate all Timelines' `GcInfo` with information about their children.  We do not set the
     /// PITR cutoffs here, because that requires I/O: this is done later, before GC, by [`Self::refresh_gc_info_internal`]
     ///
-    /// Subsequently, parent-child relationships are updated incrementally during timeline creation/deletion.
+    /// Subsequently, parent-child relationships are updated incrementally inside [`Timeline::new`] and [`Timeline::drop`].
     fn initialize_gc_info(
         &self,
         timelines: &std::sync::MutexGuard<HashMap<TimelineId, Arc<Timeline>>>,
+        timelines_offloaded: &std::sync::MutexGuard<HashMap<TimelineId, Arc<OffloadedTimeline>>>,
     ) {
         // This function must be called before activation: after activation timeline create/delete operations
         // might happen, and this function is not safe to run concurrently with those.
@@ -3305,20 +3380,37 @@ impl Tenant {
 
         // Scan all timelines. For each timeline, remember the timeline ID and
         // the branch point where it was created.
-        let mut all_branchpoints: BTreeMap<TimelineId, Vec<(Lsn, TimelineId)>> = BTreeMap::new();
+        let mut all_branchpoints: BTreeMap<TimelineId, Vec<(Lsn, TimelineId, MaybeOffloaded)>> =
+            BTreeMap::new();
         timelines.iter().for_each(|(timeline_id, timeline_entry)| {
             if let Some(ancestor_timeline_id) = &timeline_entry.get_ancestor_timeline_id() {
                 let ancestor_children = all_branchpoints.entry(*ancestor_timeline_id).or_default();
-                ancestor_children.push((timeline_entry.get_ancestor_lsn(), *timeline_id));
+                ancestor_children.push((
+                    timeline_entry.get_ancestor_lsn(),
+                    *timeline_id,
+                    MaybeOffloaded::No,
+                ));
             }
         });
+        timelines_offloaded
+            .iter()
+            .for_each(|(timeline_id, timeline_entry)| {
+                let Some(ancestor_timeline_id) = &timeline_entry.ancestor_timeline_id else {
+                    return;
+                };
+                let Some(retain_lsn) = timeline_entry.ancestor_retain_lsn else {
+                    return;
+                };
+                let ancestor_children = all_branchpoints.entry(*ancestor_timeline_id).or_default();
+                ancestor_children.push((retain_lsn, *timeline_id, MaybeOffloaded::Yes));
+            });
 
         // The number of bytes we always keep, irrespective of PITR: this is a constant across timelines
         let horizon = self.get_gc_horizon();
 
         // Populate each timeline's GcInfo with information about its child branches
         for timeline in timelines.values() {
-            let mut branchpoints: Vec<(Lsn, TimelineId)> = all_branchpoints
+            let mut branchpoints: Vec<(Lsn, TimelineId, MaybeOffloaded)> = all_branchpoints
                 .remove(&timeline.timeline_id)
                 .unwrap_or_default();
 
@@ -4878,7 +4970,10 @@ mod tests {
         {
             let branchpoints = &tline.gc_info.read().unwrap().retain_lsns;
             assert_eq!(branchpoints.len(), 1);
-            assert_eq!(branchpoints[0], (Lsn(0x40), NEW_TIMELINE_ID));
+            assert_eq!(
+                branchpoints[0],
+                (Lsn(0x40), NEW_TIMELINE_ID, MaybeOffloaded::No)
+            );
         }
 
         // You can read the key from the child branch even though the parent is
@@ -8261,8 +8356,8 @@ mod tests {
             let mut guard = tline.gc_info.write().unwrap();
             *guard = GcInfo {
                 retain_lsns: vec![
-                    (Lsn(0x10), tline.timeline_id),
-                    (Lsn(0x20), tline.timeline_id),
+                    (Lsn(0x10), tline.timeline_id, MaybeOffloaded::No),
+                    (Lsn(0x20), tline.timeline_id, MaybeOffloaded::No),
                 ],
                 cutoffs: GcCutoffs {
                     time: Lsn(0x30),
@@ -8489,8 +8584,8 @@ mod tests {
             let mut guard = tline.gc_info.write().unwrap();
             *guard = GcInfo {
                 retain_lsns: vec![
-                    (Lsn(0x10), tline.timeline_id),
-                    (Lsn(0x20), tline.timeline_id),
+                    (Lsn(0x10), tline.timeline_id, MaybeOffloaded::No),
+                    (Lsn(0x20), tline.timeline_id, MaybeOffloaded::No),
                 ],
                 cutoffs: GcCutoffs {
                     time: Lsn(0x30),
@@ -8723,7 +8818,7 @@ mod tests {
             // Update GC info
             let mut guard = parent_tline.gc_info.write().unwrap();
             *guard = GcInfo {
-                retain_lsns: vec![(Lsn(0x18), branch_tline.timeline_id)],
+                retain_lsns: vec![(Lsn(0x18), branch_tline.timeline_id, MaybeOffloaded::No)],
                 cutoffs: GcCutoffs {
                     time: Lsn(0x10),
                     space: Lsn(0x10),
@@ -8737,7 +8832,7 @@ mod tests {
             // Update GC info
             let mut guard = branch_tline.gc_info.write().unwrap();
             *guard = GcInfo {
-                retain_lsns: vec![(Lsn(0x40), branch_tline.timeline_id)],
+                retain_lsns: vec![(Lsn(0x40), branch_tline.timeline_id, MaybeOffloaded::No)],
                 cutoffs: GcCutoffs {
                     time: Lsn(0x50),
                     space: Lsn(0x50),

@@ -77,6 +77,7 @@ use crate::tenant::secondary::SecondaryController;
 use crate::tenant::size::ModelInputs;
 use crate::tenant::storage_layer::LayerAccessStatsReset;
 use crate::tenant::storage_layer::LayerName;
+use crate::tenant::timeline::offload::offload_timeline;
 use crate::tenant::timeline::CompactFlags;
 use crate::tenant::timeline::CompactionError;
 use crate::tenant::timeline::Timeline;
@@ -325,6 +326,7 @@ impl From<crate::tenant::TimelineArchivalError> for ApiError {
         match value {
             NotFound => ApiError::NotFound(anyhow::anyhow!("timeline not found").into()),
             Timeout => ApiError::Timeout("hit pageserver internal timeout".into()),
+            Cancelled => ApiError::ShuttingDown,
             e @ HasArchivedParent(_) => {
                 ApiError::PreconditionFailed(e.to_string().into_boxed_str())
             }
@@ -715,8 +717,15 @@ async fn timeline_archival_config_handler(
             .tenant_manager
             .get_attached_tenant_shard(tenant_shard_id)?;
 
+        tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
+
         tenant
-            .apply_timeline_archival_config(timeline_id, request_data.state, ctx)
+            .apply_timeline_archival_config(
+                timeline_id,
+                request_data.state,
+                state.broker_client.clone(),
+                ctx,
+            )
             .await?;
         Ok::<_, ApiError>(())
     }
@@ -1780,6 +1789,49 @@ async fn timeline_compact_handler(
         json_response(StatusCode::OK, ())
     }
     .instrument(info_span!("manual_compaction", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug(), %timeline_id))
+    .await
+}
+
+// Run offload immediately on given timeline.
+async fn timeline_offload_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+
+    let state = get_state(&request);
+
+    async {
+        let tenant = state
+            .tenant_manager
+            .get_attached_tenant_shard(tenant_shard_id)?;
+
+        if tenant.get_offloaded_timeline(timeline_id).is_ok() {
+            return json_response(StatusCode::OK, ());
+        }
+        let timeline =
+            active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
+                .await?;
+
+        if !tenant.timeline_has_no_attached_children(timeline_id) {
+            return Err(ApiError::PreconditionFailed(
+                "timeline has attached children".into(),
+            ));
+        }
+        if !timeline.can_offload() {
+            return Err(ApiError::PreconditionFailed(
+                "Timeline::can_offload() returned false".into(),
+            ));
+        }
+        offload_timeline(&tenant, &timeline)
+            .await
+            .map_err(ApiError::InternalServerError)?;
+
+        json_response(StatusCode::OK, ())
+    }
+    .instrument(info_span!("manual_timeline_offload", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug(), %timeline_id))
     .await
 }
 
@@ -3005,6 +3057,10 @@ pub fn make_router(
         .put(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/compact",
             |r| api_handler(r, timeline_compact_handler),
+        )
+        .put(
+            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/offload",
+            |r| testing_api_handler("attempt timeline offload", r, timeline_offload_handler),
         )
         .put(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/checkpoint",

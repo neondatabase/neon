@@ -636,7 +636,7 @@ async fn handle_tenant_list(
 }
 
 async fn handle_node_register(req: Request<Body>) -> Result<Response<Body>, ApiError> {
-    check_permissions(&req, Scope::Admin)?;
+    check_permissions(&req, Scope::Infra)?;
 
     let mut req = match maybe_forward(req).await {
         ForwardOutcome::Forwarded(res) => {
@@ -1182,7 +1182,7 @@ async fn handle_get_safekeeper(req: Request<Body>) -> Result<Response<Body>, Api
 /// Assumes information is only relayed to storage controller after first selecting an unique id on
 /// control plane database, which means we have an id field in the request and payload.
 async fn handle_upsert_safekeeper(mut req: Request<Body>) -> Result<Response<Body>, ApiError> {
-    check_permissions(&req, Scope::Admin)?;
+    check_permissions(&req, Scope::Infra)?;
 
     let body = json_request::<SafekeeperPersistence>(&mut req).await?;
     let id = parse_request_param::<i64>(&req, "id")?;
