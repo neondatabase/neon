@@ -526,6 +526,10 @@ impl ComputeNode {
 
     // Fast path for sync_safekeepers. If they're already synced we get the lsn
     // in one roundtrip. If not, we should do a full sync_safekeepers.
+    //
+    // NB: currently unused, see: https://github.com/neondatabase/neon/issues/9259. Consider
+    // removing this, or improving it e.g. by using a different protocol, bumping the safekeeper
+    // term, or flushing the Safekeeper WAL on STATUS_TIMELINE.
     pub fn check_safekeepers_synced(&self, compute_state: &ComputeState) -> Result<Option<Lsn>> {
         let start_time = Utc::now();
 
@@ -629,14 +633,10 @@ impl ComputeNode {
         // cannot sync safekeepers.
         let lsn = match spec.mode {
             ComputeMode::Primary => {
-                info!("checking if safekeepers are synced");
-                let lsn = if let Ok(Some(lsn)) = self.check_safekeepers_synced(compute_state) {
-                    lsn
-                } else {
-                    info!("starting safekeepers syncing");
-                    self.sync_safekeepers(pspec.storage_auth_token.clone())
-                        .with_context(|| "failed to sync safekeepers")?
-                };
+                info!("starting safekeepers syncing");
+                let lsn = self
+                    .sync_safekeepers(pspec.storage_auth_token.clone())
+                    .with_context(|| "failed to sync safekeepers")?;
                 info!("safekeepers synced at LSN {}", lsn);
                 lsn
             }
