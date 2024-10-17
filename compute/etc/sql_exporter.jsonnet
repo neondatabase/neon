@@ -28,7 +28,7 @@ function(collector_file, application_name='sql_exporter') {
     // Collectors (referenced by name) to execute on the target.
     // Glob patterns are supported (see <https://pkg.go.dev/path/filepath#Match> for syntax).
     collectors: [
-      'neon_collector_autoscaling',
+      'neon_collector',
     ],
   },
 

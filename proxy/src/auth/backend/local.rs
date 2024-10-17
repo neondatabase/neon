@@ -2,19 +2,14 @@ use std::net::SocketAddr;
 
 use arc_swap::ArcSwapOption;
 
-use crate::{
-    auth::backend::jwt::FetchAuthRulesError,
-    compute::ConnCfg,
-    context::RequestMonitoring,
-    control_plane::{
-        messages::{ColdStartInfo, EndpointJwksResponse, MetricsAuxInfo},
-        NodeInfo,
-    },
-    intern::{BranchIdTag, EndpointIdTag, InternId, ProjectIdTag},
-    EndpointId,
-};
-
 use super::jwt::{AuthRule, FetchAuthRules};
+use crate::auth::backend::jwt::FetchAuthRulesError;
+use crate::compute::ConnCfg;
+use crate::context::RequestMonitoring;
+use crate::control_plane::messages::{ColdStartInfo, EndpointJwksResponse, MetricsAuxInfo};
+use crate::control_plane::NodeInfo;
+use crate::intern::{BranchIdTag, EndpointIdTag, InternId, ProjectIdTag};
+use crate::EndpointId;
 
 pub struct LocalBackend {
     pub(crate) node_info: NodeInfo,

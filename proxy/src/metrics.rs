@@ -1,14 +1,16 @@
 use std::sync::{Arc, OnceLock};
 
 use lasso::ThreadedRodeo;
+use measured::label::{
+    FixedCardinalitySet, LabelGroupSet, LabelName, LabelSet, LabelValue, StaticLabelSet,
+};
+use measured::metric::histogram::Thresholds;
+use measured::metric::name::MetricName;
 use measured::{
-    label::{FixedCardinalitySet, LabelGroupSet, LabelName, LabelSet, LabelValue, StaticLabelSet},
-    metric::{histogram::Thresholds, name::MetricName},
     Counter, CounterVec, FixedCardinalityLabel, Gauge, Histogram, HistogramVec, LabelGroup,
     MetricGroup,
 };
 use metrics::{CounterPairAssoc, CounterPairVec, HyperLogLog, HyperLogLogVec};
-
 use tokio::time::{self, Instant};
 
 use crate::control_plane::messages::ColdStartInfo;

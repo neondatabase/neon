@@ -2,77 +2,45 @@ use std::pin::pin;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use futures::future::select;
-use futures::future::try_join;
-use futures::future::Either;
-use futures::StreamExt;
-use futures::TryFutureExt;
+use futures::future::{select, try_join, Either};
+use futures::{StreamExt, TryFutureExt};
 use http::header::AUTHORIZATION;
 use http::Method;
 use http_body_util::combinators::BoxBody;
-use http_body_util::BodyExt;
-use http_body_util::Full;
-use hyper::body::Body;
-use hyper::body::Incoming;
-use hyper::header;
-use hyper::http::HeaderName;
-use hyper::http::HeaderValue;
-use hyper::Response;
-use hyper::StatusCode;
-use hyper::{HeaderMap, Request};
+use http_body_util::{BodyExt, Full};
+use hyper::body::{Body, Incoming};
+use hyper::http::{HeaderName, HeaderValue};
+use hyper::{header, HeaderMap, Request, Response, StatusCode};
 use pq_proto::StartupMessageParamsBuilder;
 use serde::Serialize;
 use serde_json::Value;
 use tokio::time;
-use tokio_postgres::error::DbError;
-use tokio_postgres::error::ErrorPosition;
-use tokio_postgres::error::SqlState;
-use tokio_postgres::GenericClient;
-use tokio_postgres::IsolationLevel;
-use tokio_postgres::NoTls;
-use tokio_postgres::ReadyForQueryStatus;
-use tokio_postgres::Transaction;
+use tokio_postgres::error::{DbError, ErrorPosition, SqlState};
+use tokio_postgres::{GenericClient, IsolationLevel, NoTls, ReadyForQueryStatus, Transaction};
 use tokio_util::sync::CancellationToken;
-use tracing::error;
-use tracing::info;
+use tracing::{error, info};
 use typed_json::json;
 use url::Url;
 use urlencoding;
 use utils::http::error::ApiError;
 
-use crate::auth::backend::ComputeCredentialKeys;
-use crate::auth::backend::ComputeUserInfo;
-use crate::auth::endpoint_sni;
-use crate::auth::ComputeUserInfoParseError;
-use crate::config::AuthenticationConfig;
-use crate::config::HttpConfig;
-use crate::config::ProxyConfig;
-use crate::config::TlsConfig;
-use crate::context::RequestMonitoring;
-use crate::error::ErrorKind;
-use crate::error::ReportableError;
-use crate::error::UserFacingError;
-use crate::metrics::HttpDirection;
-use crate::metrics::Metrics;
-use crate::proxy::run_until_cancelled;
-use crate::proxy::NeonOptions;
-use crate::serverless::backend::HttpConnError;
-use crate::usage_metrics::MetricCounter;
-use crate::usage_metrics::MetricCounterRecorder;
-use crate::DbName;
-use crate::RoleName;
-
-use super::backend::LocalProxyConnError;
-use super::backend::PoolingBackend;
-use super::conn_pool;
-use super::conn_pool::AuthData;
-use super::conn_pool::ConnInfo;
-use super::conn_pool::ConnInfoWithAuth;
+use super::backend::{LocalProxyConnError, PoolingBackend};
+use super::conn_pool::{AuthData, ConnInfoWithAuth};
+use super::conn_pool_lib::{self, ConnInfo};
 use super::http_util::json_response;
-use super::json::json_to_pg_text;
-use super::json::pg_text_row_to_json;
-use super::json::JsonConversionError;
+use super::json::{json_to_pg_text, pg_text_row_to_json, JsonConversionError};
 use super::local_conn_pool;
+use crate::auth::backend::{ComputeCredentialKeys, ComputeUserInfo};
+use crate::auth::{endpoint_sni, ComputeUserInfoParseError};
+use crate::config::{AuthenticationConfig, HttpConfig, ProxyConfig, TlsConfig};
+use crate::context::RequestMonitoring;
+use crate::error::{ErrorKind, ReportableError, UserFacingError};
+use crate::metrics::{HttpDirection, Metrics};
+use crate::proxy::{run_until_cancelled, NeonOptions};
+use crate::serverless::backend::HttpConnError;
+
+use crate::usage_metrics::{MetricCounter, MetricCounterRecorder};
+use crate::{DbName, RoleName};
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -641,7 +609,8 @@ async fn handle_db_inner(
             let client = match keys.keys {
                 ComputeCredentialKeys::JwtPayload(payload) if is_local_proxy => {
                     let mut client = backend.connect_to_local_postgres(ctx, conn_info).await?;
-                    client.set_jwt_session(&payload).await?;
+                    let (cli_inner, _dsc) = client.client_inner();
+                    cli_inner.set_jwt_session(&payload).await?;
                     Client::Local(client)
                 }
                 _ => {
@@ -1055,12 +1024,12 @@ async fn query_to_json<T: GenericClient>(
 }
 
 enum Client {
-    Remote(conn_pool::Client<tokio_postgres::Client>),
+    Remote(conn_pool_lib::Client<tokio_postgres::Client>),
     Local(local_conn_pool::LocalClient<tokio_postgres::Client>),
 }
 
 enum Discard<'a> {
-    Remote(conn_pool::Discard<'a, tokio_postgres::Client>),
+    Remote(conn_pool_lib::Discard<'a, tokio_postgres::Client>),
     Local(local_conn_pool::Discard<'a, tokio_postgres::Client>),
 }
 
@@ -1075,7 +1044,7 @@ impl Client {
     fn inner(&mut self) -> (&mut tokio_postgres::Client, Discard<'_>) {
         match self {
             Client::Remote(client) => {
-                let (c, d) = client.inner();
+                let (c, d) = client.inner_mut();
                 (c, Discard::Remote(d))
             }
             Client::Local(local_client) => {

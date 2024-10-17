@@ -1074,8 +1074,9 @@ impl Service {
     /// the observed state of the tenant such that subsequent calls to [`TenantShard::get_reconcile_needed`]
     /// will indicate that reconciliation is not needed.
     #[instrument(skip_all, fields(
-        tenant_id=%result.tenant_shard_id.tenant_id, shard_id=%result.tenant_shard_id.shard_slug(),
-        sequence=%result.sequence
+        seq=%result.sequence,
+        tenant_id=%result.tenant_shard_id.tenant_id,
+        shard_id=%result.tenant_shard_id.shard_slug(),
     ))]
     fn process_result(&self, result: ReconcileResult) {
         let mut locked = self.inner.write().unwrap();

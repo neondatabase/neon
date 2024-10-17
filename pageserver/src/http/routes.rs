@@ -720,7 +720,12 @@ async fn timeline_archival_config_handler(
         tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
 
         tenant
-            .apply_timeline_archival_config(timeline_id, request_data.state, ctx)
+            .apply_timeline_archival_config(
+                timeline_id,
+                request_data.state,
+                state.broker_client.clone(),
+                ctx,
+            )
             .await?;
         Ok::<_, ApiError>(())
     }

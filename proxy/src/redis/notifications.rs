@@ -1,4 +1,5 @@
-use std::{convert::Infallible, sync::Arc};
+use std::convert::Infallible;
+use std::sync::Arc;
 
 use futures::StreamExt;
 use pq_proto::CancelKeyData;
@@ -8,12 +9,10 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use super::connection_with_credentials_provider::ConnectionWithCredentialsProvider;
-use crate::{
-    cache::project_info::ProjectInfoCache,
-    cancellation::{CancelMap, CancellationHandler},
-    intern::{ProjectIdInt, RoleNameInt},
-    metrics::{Metrics, RedisErrors, RedisEventsCount},
-};
+use crate::cache::project_info::ProjectInfoCache;
+use crate::cancellation::{CancelMap, CancellationHandler};
+use crate::intern::{ProjectIdInt, RoleNameInt};
+use crate::metrics::{Metrics, RedisErrors, RedisEventsCount};
 
 const CPLANE_CHANNEL_NAME: &str = "neondb-proxy-ws-updates";
 pub(crate) const PROXY_CHANNEL_NAME: &str = "neondb-proxy-to-proxy-updates";
@@ -269,10 +268,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use crate::{ProjectId, RoleName};
+    use serde_json::json;
 
     use super::*;
-    use serde_json::json;
+    use crate::{ProjectId, RoleName};
 
     #[test]
     fn parse_allowed_ips() -> anyhow::Result<()> {
