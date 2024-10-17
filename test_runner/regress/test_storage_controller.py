@@ -18,6 +18,7 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnv,
     NeonEnvBuilder,
+    NeonPageserver,
     PageserverAvailability,
     PageserverSchedulingPolicy,
     PgBin,
@@ -289,16 +290,19 @@ def test_storage_controller_restart(neon_env_builder: NeonEnvBuilder):
     env.storage_controller.consistency_check()
 
 
-@pytest.mark.parametrize("warm_up", [True, False])
-def test_storage_controller_onboarding(neon_env_builder: NeonEnvBuilder, warm_up: bool):
+def prepare_onboarding_env(
+    neon_env_builder: NeonEnvBuilder,
+) -> tuple[NeonEnv, NeonPageserver, TenantId, int]:
     """
-    We onboard tenants to the sharding service by treating it as a 'virtual pageserver'
-    which provides the /location_config API.  This is similar to creating a tenant,
-    but imports the generation number.
+    For tests that do onboarding of a tenant to the storage controller, a small dance to
+    set up one pageserver that won't be managed by the storage controller and create
+    a tenant there.
     """
-
     # One pageserver to simulate legacy environment, two to be managed by storage controller
     neon_env_builder.num_pageservers = 3
+
+    # Enable tests to use methods that require real S3 API
+    neon_env_builder.enable_pageserver_remote_storage(s3_storage())
 
     # Start services by hand so that we can skip registration on one of the pageservers
     env = neon_env_builder.init_configs()
@@ -320,7 +324,6 @@ def test_storage_controller_onboarding(neon_env_builder: NeonEnvBuilder, warm_up
     # will be attached after onboarding
     env.pageservers[1].start()
     env.pageservers[2].start()
-    virtual_ps_http = PageserverHttpClient(env.storage_controller_port, lambda: True)
 
     for sk in env.safekeepers:
         sk.start()
@@ -329,6 +332,23 @@ def test_storage_controller_onboarding(neon_env_builder: NeonEnvBuilder, warm_up
     tenant_id = TenantId.generate()
     generation = 123
     origin_ps.tenant_create(tenant_id, generation=generation)
+
+    origin_ps.http_client().timeline_create(PgVersion.NOT_SET, tenant_id, TimelineId.generate())
+
+    return (env, origin_ps, tenant_id, generation)
+
+
+@pytest.mark.parametrize("warm_up", [True, False])
+def test_storage_controller_onboarding(neon_env_builder: NeonEnvBuilder, warm_up: bool):
+    """
+    We onboard tenants to the sharding service by treating it as a 'virtual pageserver'
+    which provides the /location_config API.  This is similar to creating a tenant,
+    but imports the generation number.
+    """
+
+    env, origin_ps, tenant_id, generation = prepare_onboarding_env(neon_env_builder)
+
+    virtual_ps_http = PageserverHttpClient(env.storage_controller_port, lambda: True)
 
     # As if doing a live migration, first configure origin into stale mode
     r = origin_ps.http_client().tenant_location_conf(
@@ -464,6 +484,69 @@ def test_storage_controller_onboarding(neon_env_builder: NeonEnvBuilder, warm_up
     assert dest_tenant_conf_after.tenant_specific_overrides == modified_tenant_conf
 
     env.storage_controller.consistency_check()
+
+
+def test_storage_controller_onboard_detached(neon_env_builder: NeonEnvBuilder):
+    """
+    Sometimes, the control plane wants to delete a tenant that wasn't attached to any pageserver,
+    and also wasn't ever registered with the storage controller.
+
+    It may do this by calling /location_conf in mode Detached and then calling the delete API
+    as normal.
+    """
+
+    env, origin_ps, tenant_id, generation = prepare_onboarding_env(neon_env_builder)
+
+    remote_prefix = "/".join(
+        (
+            "tenants",
+            str(tenant_id),
+        )
+    )
+
+    # Detach it from its original pageserver.
+    origin_ps.http_client().tenant_location_conf(
+        tenant_id,
+        {
+            "mode": "Detached",
+            "secondary_conf": None,
+            "tenant_conf": {},
+            "generation": None,
+        },
+    )
+
+    # Since we will later assert that remote data is gone, as a control also check it was ever there
+    assert_prefix_not_empty(
+        neon_env_builder.pageserver_remote_storage,
+        prefix=remote_prefix,
+    )
+
+    # Register with storage controller in Detached state
+    virtual_ps_http = PageserverHttpClient(env.storage_controller_port, lambda: True)
+    generation += 1
+    r = virtual_ps_http.tenant_location_conf(
+        tenant_id,
+        {
+            "mode": "Detached",
+            "secondary_conf": None,
+            "tenant_conf": {},
+            "generation": generation,
+        },
+    )
+    assert len(r["shards"]) == 0  # location_conf tells us there are no attached shards
+
+    # Onboarding in Detached state shouldn't have attached it to any pageserver
+    for ps in env.pageservers:
+        assert ps.http_client().tenant_list() == []
+
+    # Delete it via the storage controller
+    virtual_ps_http.tenant_delete(tenant_id)
+
+    # Check that we really deleted it
+    assert_prefix_empty(
+        neon_env_builder.pageserver_remote_storage,
+        prefix=remote_prefix,
+    )
 
 
 def test_storage_controller_compute_hook(
