@@ -449,7 +449,8 @@ def test_tenant_delete_stale_shards(neon_env_builder: NeonEnvBuilder, pg_bin: Pg
     dirs = list(env.pageserver.tenant_dir(None).glob(f"{tenant_id}*"))
     assert dirs == [], f"found tenant directories: {dirs}"
 
-    # The initial tenant should still be there.
+    # The initial tenant created by the test harness should still be there.
+    # Only the tenant we deleted should be removed.
     assert_prefix_not_empty(
         neon_env_builder.pageserver_remote_storage,
         prefix="/".join(("tenants", str(env.initial_tenant))),
