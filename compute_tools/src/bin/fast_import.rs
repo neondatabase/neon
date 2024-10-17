@@ -293,7 +293,7 @@ pub(crate) async fn main() -> anyhow::Result<()> {
     }
 
     info!("upload pgdata");
-    s5cmd::sync(Utf8Path::new(&pgdata_dir), &s3_prefix.append("/pgdata/"))
+    s5cmd::sync(Utf8Path::new(&pgdata_dir), &s3_prefix.append("/"))
         .await
         .context("sync dump directory to destination")?;
 
