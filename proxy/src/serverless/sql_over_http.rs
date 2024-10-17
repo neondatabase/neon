@@ -38,7 +38,6 @@ use crate::error::{ErrorKind, ReportableError, UserFacingError};
 use crate::metrics::{HttpDirection, Metrics};
 use crate::proxy::{run_until_cancelled, NeonOptions};
 use crate::serverless::backend::HttpConnError;
-
 use crate::usage_metrics::{MetricCounter, MetricCounterRecorder};
 use crate::{DbName, RoleName};
 
@@ -591,7 +590,10 @@ async fn handle_db_inner(
 
     let authenticate_and_connect = Box::pin(
         async {
-            let is_local_proxy = matches!(backend.auth_backend, crate::auth::Backend::Local(_));
+            let is_local_proxy = matches!(
+                backend.auth_backend,
+                crate::auth::ServerlessBackend::Local(_)
+            );
 
             let keys = match auth {
                 AuthData::Password(pw) => {
