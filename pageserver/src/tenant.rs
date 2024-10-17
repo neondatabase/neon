@@ -31,8 +31,9 @@ use pageserver_api::shard::TenantShardId;
 use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
 use remote_storage::TimeoutOrCancel;
-use remote_timeline_client::manifest::OffloadedTimelineManifest;
-use remote_timeline_client::manifest::TenantManifest;
+use remote_timeline_client::manifest::{
+    OffloadedTimelineManifest, TenantManifest, LATEST_TENANT_MANIFEST_VERSION,
+};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
@@ -539,6 +540,19 @@ impl OffloadedTimeline {
             ancestor_retain_lsn,
             remote_client: remote_timeline_client,
             delete_progress: Timeline::make_delete_progress(),
+        }
+    }
+    fn manifest(&self) -> OffloadedTimelineManifest {
+        let Self {
+            timeline_id,
+            ancestor_timeline_id,
+            ancestor_retain_lsn,
+            ..
+        } = self;
+        OffloadedTimelineManifest {
+            timeline_id: timeline_id.clone(),
+            ancestor_timeline_id: ancestor_timeline_id.clone(),
+            ancestor_retain_lsn: ancestor_retain_lsn.clone(),
         }
     }
 }
@@ -1612,7 +1626,7 @@ impl Tenant {
         info!("unoffloading timeline");
         let cancel = self.cancel.clone();
         let timeline_preload = self
-            .load_timeline_metadata(timeline_id, self.remote_storage.clone(), cancel)
+            .load_timeline_metadata(timeline_id, self.remote_storage.clone(), cancel.clone())
             .await;
 
         let index_part = match timeline_preload.index_part {
@@ -1657,17 +1671,37 @@ impl Tenant {
             )
         })
         .map_err(TimelineArchivalError::Other)?;
-        let timelines = self.timelines.lock().unwrap();
-        let Some(timeline) = timelines.get(&timeline_id) else {
-            warn!("timeline not available directly after attach");
-            return Err(TimelineArchivalError::Other(anyhow::anyhow!(
-                "timeline not available directly after attach"
-            )));
+
+        let timeline = {
+            let timelines = self.timelines.lock().unwrap();
+            let Some(timeline) = timelines.get(&timeline_id) else {
+                warn!("timeline not available directly after attach");
+                // This is not a panic because no locks are held between `load_remote_timeline`
+                // which puts the timeline into timelines, and our look into the timeline map.
+                return Err(TimelineArchivalError::Other(anyhow::anyhow!(
+                    "timeline not available directly after attach"
+                )));
+            };
+            let mut offloaded_timelines = self.timelines_offloaded.lock().unwrap();
+            if offloaded_timelines.remove(&timeline_id).is_none() {
+                warn!("timeline already removed from offloaded timelines");
+            }
+            Arc::clone(timeline)
         };
-        let mut offloaded_timelines = self.timelines_offloaded.lock().unwrap();
-        if offloaded_timelines.remove(&timeline_id).is_none() {
-            warn!("timeline already removed from offloaded timelines");
-        }
+
+        // Upload new list of offloaded timelines to S3
+        let manifest = self.tenant_manifest();
+        // TODO: generation support
+        let generation = Generation::none();
+        remote_timeline_client::upload_tenant_manifest(
+            &self.remote_storage,
+            &self.tenant_shard_id,
+            generation,
+            &manifest,
+            &cancel,
+        )
+        .await
+        .map_err(TimelineArchivalError::Other)?;
 
         // Activate the timeline (if it makes sense)
         if !(timeline.is_broken() || timeline.is_stopping()) {
@@ -1681,7 +1715,7 @@ impl Tenant {
         }
 
         info!("timeline unoffloading complete");
-        Ok(Arc::clone(timeline))
+        Ok(timeline)
     }
 
     pub(crate) async fn apply_timeline_archival_config(
@@ -3010,6 +3044,21 @@ impl Tenant {
         tenant_conf
             .lsn_lease_length
             .unwrap_or(self.conf.default_tenant_conf.lsn_lease_length)
+    }
+
+    pub(crate) fn tenant_manifest(&self) -> TenantManifest {
+        let timelines_offloaded = self.timelines_offloaded.lock().unwrap();
+
+        let mut timeline_manifests = timelines_offloaded
+            .iter()
+            .map(|(_timeline_id, offloaded)| offloaded.manifest())
+            .collect::<Vec<_>>();
+        timeline_manifests.sort_by_key(|timeline_manifest| timeline_manifest.timeline_id);
+
+        TenantManifest {
+            version: LATEST_TENANT_MANIFEST_VERSION,
+            offloaded_timelines: timeline_manifests,
+        }
     }
 
     pub fn set_new_tenant_config(&self, new_tenant_conf: TenantConfOpt) {

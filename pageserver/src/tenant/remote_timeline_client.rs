@@ -192,7 +192,6 @@ use pageserver_api::models::TimelineArchivalState;
 use pageserver_api::shard::{ShardIndex, TenantShardId};
 use scopeguard::ScopeGuard;
 use tokio_util::sync::CancellationToken;
-pub(crate) use upload::upload_initdb_dir;
 use utils::backoff::{
     self, exponential_backoff, DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS,
 };
@@ -250,6 +249,7 @@ pub(crate) use download::{
     list_remote_tenant_shards, list_remote_timelines,
 };
 pub(crate) use index::LayerFileMetadata;
+pub(crate) use upload::{upload_initdb_dir, upload_tenant_manifest};
 
 // Occasional network issues and such can cause remote operations to fail, and
 // that's expected. If a download fails, we log it at info-level, and retry.

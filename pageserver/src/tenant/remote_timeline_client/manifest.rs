@@ -18,7 +18,7 @@ pub struct OffloadedTimelineManifest {
     pub ancestor_retain_lsn: Option<Lsn>,
 }
 
-const LATEST_TENANT_MANIFEST_VERSION: usize = 1;
+pub const LATEST_TENANT_MANIFEST_VERSION: usize = 1;
 
 impl TenantManifest {
     pub fn empty() -> Self {

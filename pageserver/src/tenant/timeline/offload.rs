@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use crate::tenant::{OffloadedTimeline, Tenant, TimelineOrOffloaded};
+use utils::generation::Generation;
+
+use crate::tenant::{remote_timeline_client, OffloadedTimeline, Tenant, TimelineOrOffloaded};
 
 use super::{
     delete::{delete_local_timeline_directory, DeleteTimelineFlow, DeletionGuard},
@@ -25,8 +27,6 @@ pub(crate) async fn offload_timeline(
     // TODO extend guard mechanism above with method
     // to make deletions possible while offloading is in progress
 
-    // TODO mark timeline as offloaded in S3
-
     let conf = &tenant.conf;
     delete_local_timeline_directory(conf, tenant.tenant_shard_id, &timeline).await?;
 
@@ -39,6 +39,22 @@ pub(crate) async fn offload_timeline(
             Arc::new(OffloadedTimeline::from_timeline(&timeline)),
         );
     }
+
+    // Last step: mark timeline as offloaded in S3
+    // TODO: maybe move this step above, right above deletion of the local timeline directory,
+    // then there is no potential race condition where we partially offload a timeline, and
+    // at the next restart attach it again.
+    let manifest = tenant.tenant_manifest();
+    // TODO: generation support
+    let generation = Generation::none();
+    remote_timeline_client::upload_tenant_manifest(
+        &tenant.remote_storage,
+        &tenant.tenant_shard_id,
+        generation,
+        &manifest,
+        &tenant.cancel,
+    )
+    .await?;
 
     Ok(())
 }
