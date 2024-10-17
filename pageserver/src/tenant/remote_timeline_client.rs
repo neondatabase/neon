@@ -180,6 +180,7 @@
 
 pub(crate) mod download;
 pub mod index;
+pub mod manifest;
 pub(crate) mod upload;
 
 use anyhow::Context;
@@ -191,7 +192,6 @@ use pageserver_api::models::TimelineArchivalState;
 use pageserver_api::shard::{ShardIndex, TenantShardId};
 use scopeguard::ScopeGuard;
 use tokio_util::sync::CancellationToken;
-pub(crate) use upload::upload_initdb_dir;
 use utils::backoff::{
     self, exponential_backoff, DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS,
 };
@@ -245,9 +245,11 @@ use super::upload_queue::{NotInitialized, SetDeletedFlagProgress};
 use super::Generation;
 
 pub(crate) use download::{
-    download_index_part, is_temp_download_file, list_remote_tenant_shards, list_remote_timelines,
+    do_download_tenant_manifest, download_index_part, is_temp_download_file,
+    list_remote_tenant_shards, list_remote_timelines,
 };
 pub(crate) use index::LayerFileMetadata;
+pub(crate) use upload::{upload_initdb_dir, upload_tenant_manifest};
 
 // Occasional network issues and such can cause remote operations to fail, and
 // that's expected. If a download fails, we log it at info-level, and retry.
@@ -2195,6 +2197,17 @@ impl<'a> UploadQueueAccessor<'a> {
 
 pub fn remote_tenant_path(tenant_shard_id: &TenantShardId) -> RemotePath {
     let path = format!("tenants/{tenant_shard_id}");
+    RemotePath::from_string(&path).expect("Failed to construct path")
+}
+
+pub fn remote_tenant_manifest_path(
+    tenant_shard_id: &TenantShardId,
+    generation: Generation,
+) -> RemotePath {
+    let path = format!(
+        "tenants/{tenant_shard_id}/tenant-manifest.json{}",
+        generation.get_suffix()
+    );
     RemotePath::from_string(&path).expect("Failed to construct path")
 }
 

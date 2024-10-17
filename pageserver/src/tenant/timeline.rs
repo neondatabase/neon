@@ -371,7 +371,7 @@ pub struct Timeline {
 
     /// Prevent two tasks from deleting the timeline at the same time. If held, the
     /// timeline is being deleted. If 'true', the timeline has already been deleted.
-    pub delete_progress: Arc<tokio::sync::Mutex<DeleteTimelineFlow>>,
+    pub delete_progress: TimelineDeleteProgress,
 
     eviction_task_timeline_state: tokio::sync::Mutex<EvictionTaskTimelineState>,
 
@@ -425,6 +425,8 @@ pub struct Timeline {
 
     pub(crate) attach_wal_lag_cooldown: Arc<OnceLock<WalLagCooldown>>,
 }
+
+pub type TimelineDeleteProgress = Arc<tokio::sync::Mutex<DeleteTimelineFlow>>;
 
 pub struct WalReceiverInfo {
     pub wal_source_connconf: PgConnectionConfig,
@@ -2250,7 +2252,7 @@ impl Timeline {
                 eviction_task_timeline_state: tokio::sync::Mutex::new(
                     EvictionTaskTimelineState::default(),
                 ),
-                delete_progress: Arc::new(tokio::sync::Mutex::new(DeleteTimelineFlow::default())),
+                delete_progress: Self::make_delete_progress(),
 
                 cancel,
                 gate: Gate::default(),
@@ -2649,6 +2651,10 @@ impl Timeline {
         }
 
         current_size
+    }
+
+    pub fn make_delete_progress() -> TimelineDeleteProgress {
+        Arc::new(tokio::sync::Mutex::new(DeleteTimelineFlow::default()))
     }
 
     fn spawn_initial_logical_size_computation_task(self: &Arc<Self>, ctx: &RequestContext) {
