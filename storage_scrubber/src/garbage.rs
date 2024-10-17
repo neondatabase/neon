@@ -16,13 +16,13 @@ use remote_storage::{GenericRemoteStorage, ListingMode, ListingObject, RemotePat
 use serde::{Deserialize, Serialize};
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
-use utils::id::TenantId;
+use utils::{backoff, id::TenantId};
 
 use crate::{
     cloud_admin_api::{CloudAdminApiClient, MaybeDeleted, ProjectData},
     init_remote, list_objects_with_retries,
     metadata_stream::{stream_tenant_timelines, stream_tenants},
-    BucketConfig, ConsoleConfig, NodeKind, TenantShardTimelineId, TraversingDepth,
+    BucketConfig, ConsoleConfig, NodeKind, TenantShardTimelineId, TraversingDepth, MAX_RETRIES,
 };
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -250,13 +250,16 @@ async fn find_garbage_inner(
                     &target.tenant_root(&tenant_shard_id),
                 )
                 .await?;
-                let object = tenant_objects.keys.first().unwrap();
-                if object.key.get_path().as_str().ends_with("heatmap-v1.json") {
-                    tracing::info!("Tenant {tenant_shard_id}: is missing in console and is only a heatmap (known historic deletion bug)");
-                    garbage.append_buggy(GarbageEntity::Tenant(tenant_shard_id));
-                    continue;
+                if let Some(object) = tenant_objects.keys.first() {
+                    if object.key.get_path().as_str().ends_with("heatmap-v1.json") {
+                        tracing::info!("Tenant {tenant_shard_id}: is missing in console and is only a heatmap (known historic deletion bug)");
+                        garbage.append_buggy(GarbageEntity::Tenant(tenant_shard_id));
+                        continue;
+                    } else {
+                        tracing::info!("Tenant {tenant_shard_id} is missing in console and contains one object: {}", object.key);
+                    }
                 } else {
-                    tracing::info!("Tenant {tenant_shard_id} is missing in console and contains one object: {}", object.key);
+                    tracing::info!("Tenant {tenant_shard_id} is missing in console appears to have been deleted while we ran");
                 }
             } else {
                 // A console-unknown tenant with timelines: check if these timelines only contain initdb.tar.zst, from the initial
@@ -406,14 +409,17 @@ pub async fn get_tenant_objects(
     // TODO: apply extra validation based on object modification time.  Don't purge
     // tenants where any timeline's index_part.json has been touched recently.
 
-    let list = s3_client
-        .list(
-            Some(&tenant_root),
-            ListingMode::NoDelimiter,
-            None,
-            &CancellationToken::new(),
-        )
-        .await?;
+    let cancel = CancellationToken::new();
+    let list = backoff::retry(
+        || s3_client.list(Some(&tenant_root), ListingMode::NoDelimiter, None, &cancel),
+        |_| false,
+        3,
+        MAX_RETRIES as u32,
+        "get_tenant_objects",
+        &cancel,
+    )
+    .await
+    .expect("dummy cancellation token")?;
     Ok(list.keys)
 }
 
@@ -424,14 +430,25 @@ pub async fn get_timeline_objects(
     tracing::debug!("Listing objects in timeline {ttid}");
     let timeline_root = super::remote_timeline_path_id(&ttid);
 
-    let list = s3_client
-        .list(
-            Some(&timeline_root),
-            ListingMode::NoDelimiter,
-            None,
-            &CancellationToken::new(),
-        )
-        .await?;
+    let cancel = CancellationToken::new();
+    let list = backoff::retry(
+        || {
+            s3_client.list(
+                Some(&timeline_root),
+                ListingMode::NoDelimiter,
+                None,
+                &cancel,
+            )
+        },
+        |_| false,
+        3,
+        MAX_RETRIES as u32,
+        "get_timeline_objects",
+        &cancel,
+    )
+    .await
+    .expect("dummy cancellation token")?;
+
     Ok(list.keys)
 }
 
