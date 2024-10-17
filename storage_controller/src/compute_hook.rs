@@ -576,15 +576,29 @@ impl ComputeHook {
             })
         };
 
-        if result.is_ok() {
-            // Before dropping the send lock, stash the request we just sent so that
-            // subsequent callers can avoid redundantly re-sending the same thing.
-            *send_lock_guard = Some(ComputeRemoteState {
-                request,
-                applied: true,
-            });
+        match result {
+            Ok(_) => {
+                // Before dropping the send lock, stash the request we just sent so that
+                // subsequent callers can avoid redundantly re-sending the same thing.
+                *send_lock_guard = Some(ComputeRemoteState {
+                    request,
+                    applied: true,
+                });
+            }
+            Err(NotifyError::Busy) => {
+                // Busy result means that the server responded and has stored the new configuration,
+                // but was not able to fully apply it to the compute
+                *send_lock_guard = Some(ComputeRemoteState {
+                    request,
+                    applied: false,
+                });
+            }
+            Err(_) => {
+                // General error case: we can no longer know the remote state, so clear it.  This will result in
+                // the logic in maybe_send recognizing that we should call the hook again.
+                *send_lock_guard = None;
+            }
         }
-
         result
     }
 
