@@ -11,22 +11,28 @@ def test_extensions(neon_simple_env: NeonEnv):
     env.create_branch("test_extensions")
 
     endpoint = env.endpoints.create_start("test_extensions")
-    extension = "pg_session_jwt"
-    version = "0.0.1"
+    extension = "neon_test_utils"
     database = "test_extensions"
 
     endpoint.safe_psql("CREATE DATABASE test_extensions")
 
-    client = endpoint.http_client()
-
     with endpoint.connect(dbname=database) as pg_conn:
         with pg_conn.cursor() as cur:
             cur.execute(
-                "SELECT extname, extversion FROM pg_extension WHERE extname = pg_session_jwt",
+                "SELECT default_version FROM pg_available_extensions WHERE name = 'neon_test_utils'"
             )
-            res = cur.fetchall()
-            assert not res, "The 'pg_session_jwt' extension is installed"
+            res = cur.fetchone()
+            assert res is not None
+            version = res[0]
 
+        with pg_conn.cursor() as cur:
+            cur.execute(
+                "SELECT extname, extversion FROM pg_extension WHERE extname = 'neon_test_utils'",
+            )
+            res = cur.fetchone()
+            assert not res, "The 'neon_test_utils' extension is installed"
+
+    client = endpoint.http_client()
     res = client.extensions(extension, version, database)
 
     info("Extension install result: %s", res)
@@ -35,9 +41,10 @@ def test_extensions(neon_simple_env: NeonEnv):
     with endpoint.connect(dbname=database) as pg_conn:
         with pg_conn.cursor() as cur:
             cur.execute(
-                "SELECT extname, extversion FROM pg_extension WHERE extname = pg_session_jwt",
+                "SELECT extname, extversion FROM pg_extension WHERE extname = 'neon_test_utils'",
             )
-            res = cur.fetchall()
-            db_extension_name, db_extension_version = res
+            res = cur.fetchone()
+            assert res is not None
+            (db_extension_name, db_extension_version) = res
 
     assert db_extension_name == extension and db_extension_version == version
