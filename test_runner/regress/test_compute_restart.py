@@ -5,7 +5,7 @@ from fixtures.neon_fixtures import NeonEnv
 
 def test_compute_restart(neon_simple_env: NeonEnv):
     env = neon_simple_env
-    env.neon_cli.create_branch("publisher")
+    env.create_branch("publisher")
     pub = env.endpoints.create("publisher")
     pub.start()
 
