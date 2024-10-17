@@ -32,6 +32,7 @@ use tracing::{debug, info, info_span, instrument, Instrument};
 
 use crate::{
     assert_u64_eq_usize::U64IsUsize,
+    config::PageServerConf,
     context::{DownloadBehavior, RequestContext},
     pgdatadir_mapping::{DbDirectory, RelDirectory},
     task_mgr::TaskKind,
@@ -65,10 +66,11 @@ use remote_storage::{
 static PGDATA_DIR: Lazy<RemotePath> = Lazy::new(|| RemotePath::from_string("pgdata").unwrap());
 
 pub(crate) async fn create<'a>(
+    conf: &'static PageServerConf,
     in_progress: index_part_format::InProgress,
     cancel: CancellationToken,
 ) -> anyhow::Result<(ControlFile, index_part_format::Root)> {
-    let storage_wrapper = make_storage_wrapper(&in_progress.location, cancel).await?;
+    let storage_wrapper = make_storage_wrapper(conf, &in_progress.location, cancel).await?;
 
     let spec = get_spec(&storage_wrapper).await?;
     info!(?spec, "found spec");
@@ -81,6 +83,7 @@ pub(crate) async fn create<'a>(
 }
 
 async fn make_storage_wrapper(
+    conf: &'static PageServerConf,
     location: &index_part_format::Location,
     cancel: CancellationToken,
 ) -> Result<RemoteStorageWrapper, anyhow::Error> {
@@ -108,10 +111,13 @@ async fn make_storage_wrapper(
                         bucket_name: bucket.clone(),
                         prefix_in_bucket: Some(key.clone()),
                         bucket_region: region.clone(),
-                        endpoint: None, //  by specifying None here, remote_storage/aws-sdk-rust will infer from env
+                        endpoint: conf
+                            .import_pgdata_aws_endpoint_url
+                            .clone()
+                            .map(|url| url.to_string()), //  by specifying None here, remote_storage/aws-sdk-rust will infer from env
                         concurrency_limit: 100.try_into().unwrap(), // TODO: think about this
-                        max_keys_per_list_response: Some(1000), // TODO: think about this
-                        upload_storage_class: None, // irrelevant
+                        max_keys_per_list_response: Some(1000),     // TODO: think about this
+                        upload_storage_class: None,                 // irrelevant
                     },
                     timeout,
                 )
@@ -184,7 +190,7 @@ pub async fn doit(
         index_part_format::V1::InProgress(in_progress) => in_progress,
     };
 
-    let storage = make_storage_wrapper(&location, cancel.clone()).await?;
+    let storage = make_storage_wrapper(timeline.conf, &location, cancel.clone()).await?;
 
     info!("get spec early so we know we'll be able to upcall when done");
     let Some(spec) = get_spec(&storage).await? else {
