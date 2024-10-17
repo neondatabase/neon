@@ -978,7 +978,7 @@ impl LayerInner {
         let timeline = self
             .timeline
             .upgrade()
-            .ok_or_else(|| DownloadError::TimelineShutdown)?;
+            .ok_or(DownloadError::TimelineShutdown)?;
 
         // count cancellations, which currently remain largely unexpected
         let init_cancelled = scopeguard::guard((), |_| LAYER_IMPL_METRICS.inc_init_cancelled());

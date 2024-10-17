@@ -122,7 +122,7 @@ impl<'a> WriteGuardSharedState<'a> {
     }
 }
 
-impl<'a> Deref for WriteGuardSharedState<'a> {
+impl Deref for WriteGuardSharedState<'_> {
     type Target = SharedState;
 
     fn deref(&self) -> &Self::Target {
@@ -130,13 +130,13 @@ impl<'a> Deref for WriteGuardSharedState<'a> {
     }
 }
 
-impl<'a> DerefMut for WriteGuardSharedState<'a> {
+impl DerefMut for WriteGuardSharedState<'_> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.guard
     }
 }
 
-impl<'a> Drop for WriteGuardSharedState<'a> {
+impl Drop for WriteGuardSharedState<'_> {
     fn drop(&mut self) {
         let term_flush_lsn =
             TermLsn::from((self.guard.sk.last_log_term(), self.guard.sk.flush_lsn()));

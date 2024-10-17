@@ -131,7 +131,7 @@ struct OnDiskNode<'a, const L: usize> {
     values: &'a [u8],
 }
 
-impl<'a, const L: usize> OnDiskNode<'a, L> {
+impl<const L: usize> OnDiskNode<'_, L> {
     ///
     /// Interpret a PAGE_SZ page as a node.
     ///

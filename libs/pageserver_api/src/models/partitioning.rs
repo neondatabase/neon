@@ -16,7 +16,7 @@ impl serde::Serialize for Partitioning {
     {
         pub struct KeySpace<'a>(&'a crate::keyspace::KeySpace);
 
-        impl<'a> serde::Serialize for KeySpace<'a> {
+        impl serde::Serialize for KeySpace<'_> {
             fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
             where
                 S: serde::Serializer,
@@ -44,7 +44,7 @@ impl serde::Serialize for Partitioning {
 
 pub struct WithDisplay<'a, T>(&'a T);
 
-impl<'a, T: std::fmt::Display> serde::Serialize for WithDisplay<'a, T> {
+impl<T: std::fmt::Display> serde::Serialize for WithDisplay<'_, T> {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
@@ -55,7 +55,7 @@ impl<'a, T: std::fmt::Display> serde::Serialize for WithDisplay<'a, T> {
 
 pub struct KeyRange<'a>(&'a std::ops::Range<crate::key::Key>);
 
-impl<'a> serde::Serialize for KeyRange<'a> {
+impl serde::Serialize for KeyRange<'_> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,

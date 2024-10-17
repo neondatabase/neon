@@ -99,21 +99,21 @@ impl<'a> PeekableLayerIterRef<'a> {
     }
 }
 
-impl<'a> std::cmp::PartialEq for IteratorWrapper<'a> {
+impl std::cmp::PartialEq for IteratorWrapper<'_> {
     fn eq(&self, other: &Self) -> bool {
         self.cmp(other) == Ordering::Equal
     }
 }
 
-impl<'a> std::cmp::Eq for IteratorWrapper<'a> {}
+impl std::cmp::Eq for IteratorWrapper<'_> {}
 
-impl<'a> std::cmp::PartialOrd for IteratorWrapper<'a> {
+impl std::cmp::PartialOrd for IteratorWrapper<'_> {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl<'a> std::cmp::Ord for IteratorWrapper<'a> {
+impl std::cmp::Ord for IteratorWrapper<'_> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         use std::cmp::Ordering;
         let a = self.peek_next_key_lsn_value();

@@ -73,7 +73,7 @@ struct DropKey<'a, T> {
     registry: &'a Waiters<T>,
 }
 
-impl<'a, T> Drop for DropKey<'a, T> {
+impl<T> Drop for DropKey<'_, T> {
     fn drop(&mut self) {
         self.registry.0.lock().remove(&self.key);
     }

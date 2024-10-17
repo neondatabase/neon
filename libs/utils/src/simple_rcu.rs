@@ -152,7 +152,7 @@ pub struct RcuWriteGuard<'a, V> {
     inner: RwLockWriteGuard<'a, RcuInner<V>>,
 }
 
-impl<'a, V> Deref for RcuWriteGuard<'a, V> {
+impl<V> Deref for RcuWriteGuard<'_, V> {
     type Target = V;
 
     fn deref(&self) -> &V {
@@ -160,7 +160,7 @@ impl<'a, V> Deref for RcuWriteGuard<'a, V> {
     }
 }
 
-impl<'a, V> RcuWriteGuard<'a, V> {
+impl<V> RcuWriteGuard<'_, V> {
     ///
     /// Store a new value. The new value will be written to the Rcu immediately,
     /// and will be immediately seen by any `read` calls that start afterwards.

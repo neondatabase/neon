@@ -2182,7 +2182,7 @@ pub(crate) struct UploadQueueAccessor<'a> {
     inner: std::sync::MutexGuard<'a, UploadQueue>,
 }
 
-impl<'a> UploadQueueAccessor<'a> {
+impl UploadQueueAccessor<'_> {
     pub(crate) fn latest_uploaded_index_part(&self) -> &IndexPart {
         match &*self.inner {
             UploadQueue::Initialized(x) => &x.clean.0,

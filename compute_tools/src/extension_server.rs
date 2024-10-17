@@ -107,7 +107,7 @@ pub fn get_pg_version(pgbin: &str) -> String {
     // pg_config --version returns a (platform specific) human readable string
     // such as "PostgreSQL 15.4". We parse this to v14/v15/v16 etc.
     let human_version = get_pg_config("--version", pgbin);
-    return parse_pg_version(&human_version).to_string();
+    parse_pg_version(&human_version).to_string()
 }
 
 fn parse_pg_version(human_version: &str) -> &str {

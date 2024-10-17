@@ -104,7 +104,7 @@ struct Options<'a> {
     options: &'a StartupMessageParams,
 }
 
-impl<'a> serde::Serialize for Options<'a> {
+impl serde::Serialize for Options<'_> {
     fn serialize<S>(&self, s: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,

@@ -654,7 +654,7 @@ impl std::fmt::Debug for EvictionCandidate {
         let ts = chrono::DateTime::<chrono::Utc>::from(self.last_activity_ts);
         let ts = ts.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
         struct DisplayIsDebug<'a, T>(&'a T);
-        impl<'a, T: std::fmt::Display> std::fmt::Debug for DisplayIsDebug<'a, T> {
+        impl<T: std::fmt::Display> std::fmt::Debug for DisplayIsDebug<'_, T> {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 write!(f, "{}", self.0)
             }

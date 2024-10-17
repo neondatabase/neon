@@ -375,7 +375,7 @@ pub async fn task_backup(
         let now = Utc::now();
         collect_metrics_backup_iteration(
             &USAGE_METRICS.backup_endpoints,
-            &storage,
+            storage.as_ref(),
             &hostname,
             prev,
             now,
@@ -395,7 +395,7 @@ pub async fn task_backup(
 #[instrument(skip_all)]
 async fn collect_metrics_backup_iteration(
     endpoints: &DashMap<Ids, Arc<MetricBackupCounter>, FastHasher>,
-    storage: &Option<GenericRemoteStorage>,
+    storage: Option<&GenericRemoteStorage>,
     hostname: &str,
     prev: DateTime<Utc>,
     now: DateTime<Utc>,
@@ -446,7 +446,7 @@ async fn collect_metrics_backup_iteration(
 }
 
 async fn upload_events_chunk(
-    storage: &Option<GenericRemoteStorage>,
+    storage: Option<&GenericRemoteStorage>,
     chunk: EventChunk<'_, Event<Ids, &'static str>>,
     remote_path: &RemotePath,
     cancel: &CancellationToken,
@@ -577,10 +577,10 @@ mod tests {
         // counter is unregistered
         assert!(metrics.endpoints.is_empty());
 
-        collect_metrics_backup_iteration(&metrics.backup_endpoints, &None, "foo", now, now, 1000)
+        collect_metrics_backup_iteration(&metrics.backup_endpoints, None, "foo", now, now, 1000)
             .await;
         assert!(!metrics.backup_endpoints.is_empty());
-        collect_metrics_backup_iteration(&metrics.backup_endpoints, &None, "foo", now, now, 1000)
+        collect_metrics_backup_iteration(&metrics.backup_endpoints, None, "foo", now, now, 1000)
             .await;
         // backup counter is unregistered after the second iteration
         assert!(metrics.backup_endpoints.is_empty());

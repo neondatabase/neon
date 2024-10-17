@@ -828,8 +828,7 @@ impl ImageLayerWriterInner {
         ctx: &RequestContext,
         end_key: Option<Key>,
     ) -> anyhow::Result<(PersistentLayerDesc, Utf8PathBuf)> {
-        let index_start_blk =
-            ((self.blob_writer.size() + PAGE_SZ as u64 - 1) / PAGE_SZ as u64) as u32;
+        let index_start_blk = self.blob_writer.size().div_ceil(PAGE_SZ as u64) as u32;
 
         // Calculate compression ratio
         let compressed_size = self.blob_writer.size() - PAGE_SZ as u64; // Subtract PAGE_SZ for header

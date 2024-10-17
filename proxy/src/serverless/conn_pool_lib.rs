@@ -1,25 +1,23 @@
+use std::collections::HashMap;
+use std::ops::Deref;
+use std::sync::atomic::{self, AtomicUsize};
+use std::sync::{Arc, Weak};
+use std::time::Duration;
+
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use rand::Rng;
-use std::{collections::HashMap, sync::Arc, sync::Weak, time::Duration};
-use std::{
-    ops::Deref,
-    sync::atomic::{self, AtomicUsize},
-};
 use tokio_postgres::ReadyForQueryStatus;
+use tracing::{debug, info, Span};
 
+use super::backend::HttpConnError;
+use super::conn_pool::ClientInnerRemote;
+use crate::auth::backend::ComputeUserInfo;
+use crate::context::RequestMonitoring;
 use crate::control_plane::messages::ColdStartInfo;
 use crate::metrics::{HttpEndpointPoolsGuard, Metrics};
 use crate::usage_metrics::{Ids, MetricCounter, USAGE_METRICS};
-use crate::{
-    auth::backend::ComputeUserInfo, context::RequestMonitoring, DbName, EndpointCacheKey, RoleName,
-};
-
-use super::conn_pool::ClientInnerRemote;
-use tracing::info;
-use tracing::{debug, Span};
-
-use super::backend::HttpConnError;
+use crate::{DbName, EndpointCacheKey, RoleName};
 
 #[derive(Debug, Clone)]
 pub(crate) struct ConnInfo {
@@ -482,7 +480,7 @@ impl<C: ClientInnerExt> Client<C> {
         })
     }
 
-    pub(crate) fn do_drop(&mut self) -> Option<impl FnOnce()> {
+    pub(crate) fn do_drop(&mut self) -> Option<impl FnOnce() + use<C>> {
         let conn_info = self.conn_info.clone();
         let client = self
             .inner

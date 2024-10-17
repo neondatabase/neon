@@ -50,13 +50,13 @@ impl From<PageReadGuard<'static>> for BlockLease<'static> {
 }
 
 #[cfg(test)]
-impl<'a> From<std::sync::Arc<[u8; PAGE_SZ]>> for BlockLease<'a> {
+impl From<std::sync::Arc<[u8; PAGE_SZ]>> for BlockLease<'_> {
     fn from(value: std::sync::Arc<[u8; PAGE_SZ]>) -> Self {
         BlockLease::Arc(value)
     }
 }
 
-impl<'a> Deref for BlockLease<'a> {
+impl Deref for BlockLease<'_> {
     type Target = [u8; PAGE_SZ];
 
     fn deref(&self) -> &Self::Target {

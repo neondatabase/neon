@@ -558,7 +558,7 @@ pub struct RetryConfig {
 }
 
 impl RetryConfig {
-    /// Default options for RetryConfig.
+    // Default options for RetryConfig.
 
     /// Total delay for 5 retries with 200ms base delay and 2 backoff factor is about 6s.
     pub const CONNECT_TO_COMPUTE_DEFAULT_VALUES: &'static str =

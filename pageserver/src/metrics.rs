@@ -1189,7 +1189,7 @@ struct GlobalAndPerTimelineHistogramTimer<'a, 'c> {
     op: SmgrQueryType,
 }
 
-impl<'a, 'c> Drop for GlobalAndPerTimelineHistogramTimer<'a, 'c> {
+impl Drop for GlobalAndPerTimelineHistogramTimer<'_, '_> {
     fn drop(&mut self) {
         let elapsed = self.start.elapsed();
         let ex_throttled = self
@@ -1560,7 +1560,7 @@ impl BasebackupQueryTime {
     }
 }
 
-impl<'a, 'c> BasebackupQueryTimeOngoingRecording<'a, 'c> {
+impl BasebackupQueryTimeOngoingRecording<'_, '_> {
     pub(crate) fn observe<T>(self, res: &Result<T, QueryError>) {
         let elapsed = self.start.elapsed();
         let ex_throttled = self

@@ -529,8 +529,7 @@ impl DeltaLayerWriterInner {
         key_end: Key,
         ctx: &RequestContext,
     ) -> anyhow::Result<(PersistentLayerDesc, Utf8PathBuf)> {
-        let index_start_blk =
-            ((self.blob_writer.size() + PAGE_SZ as u64 - 1) / PAGE_SZ as u64) as u32;
+        let index_start_blk = self.blob_writer.size().div_ceil(PAGE_SZ as u64) as u32;
 
         let mut file = self.blob_writer.into_inner(ctx).await?;
 

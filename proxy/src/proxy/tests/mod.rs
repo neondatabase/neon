@@ -73,11 +73,11 @@ impl ClientConfig<'_> {
         self,
     ) -> anyhow::Result<
         impl tokio_postgres::tls::TlsConnect<
-            S,
-            Error = impl std::fmt::Debug,
-            Future = impl Send,
-            Stream = RustlsStream<S>,
-        >,
+                S,
+                Error = impl std::fmt::Debug + use<S>,
+                Future = impl Send + use<S>,
+                Stream = RustlsStream<S>,
+            > + use<S>,
     > {
         let mut mk = MakeRustlsConnect::new(self.config);
         let tls = MakeTlsConnect::<S>::make_tls_connect(&mut mk, self.hostname)?;

@@ -727,7 +727,7 @@ pub const SQLSTATE_INTERNAL_ERROR: &[u8; 5] = b"XX000";
 pub const SQLSTATE_ADMIN_SHUTDOWN: &[u8; 5] = b"57P01";
 pub const SQLSTATE_SUCCESSFUL_COMPLETION: &[u8; 5] = b"00000";
 
-impl<'a> BeMessage<'a> {
+impl BeMessage<'_> {
     /// Serialize `message` to the given `buf`.
     /// Apart from smart memory managemet, BytesMut is good here as msg len
     /// precedes its body and it is handy to write it down first and then fill

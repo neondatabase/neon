@@ -108,7 +108,6 @@ impl scheduler::Completion for WriteComplete {
 /// when we last did a write.  We only populate this after doing at least one
 /// write for a tenant -- this avoids holding state for tenants that have
 /// uploads disabled.
-
 struct UploaderTenantState {
     // This Weak only exists to enable culling idle instances of this type
     // when the Tenant has been deallocated.
