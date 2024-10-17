@@ -9,8 +9,10 @@ use crate::catalog::SchemaDumpError;
 use crate::catalog::{get_database_schema, get_dbs_and_roles};
 use crate::compute::forward_termination_signal;
 use crate::compute::{ComputeNode, ComputeState, ParsedSpec};
-use compute_api::requests::ConfigurationRequest;
-use compute_api::responses::{ComputeStatus, ComputeStatusResponse, GenericAPIError};
+use compute_api::requests::{ConfigurationRequest, ExtensionInstallRequest};
+use compute_api::responses::{
+    ComputeStatus, ComputeStatusResponse, ExtensionInstallResult, GenericAPIError,
+};
 
 use anyhow::Result;
 use hyper::header::CONTENT_TYPE;
@@ -94,6 +96,38 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
                 Err(e) => {
                     error!("check_writability failed: {}", e);
                     Response::new(Body::from(e.to_string()))
+                }
+            }
+        }
+
+        (&Method::POST, "/extensions") => {
+            info!("serving /extensions POST request");
+            let status = compute.get_status();
+            if status != ComputeStatus::Running {
+                let msg = format!(
+                    "invalid compute status for extensions request: {:?}",
+                    status
+                );
+                error!(msg);
+                return Response::new(Body::from(msg));
+            }
+
+            let request = hyper::body::to_bytes(req.into_body()).await.unwrap();
+            let request = serde_json::from_slice::<ExtensionInstallRequest>(&request).unwrap();
+            let res = compute
+                .install_extension(&request.extension, &request.database, &request.version)
+                .await;
+            match res {
+                Ok(version) => render_json(Body::from(
+                    serde_json::to_string(&ExtensionInstallResult {
+                        extension: request.extension,
+                        version,
+                    })
+                    .unwrap(),
+                )),
+                Err(e) => {
+                    error!("install_extension failed: {}", e);
+                    render_json_error(&e.to_string(), StatusCode::INTERNAL_SERVER_ERROR)
                 }
             }
         }

@@ -12,3 +12,10 @@ use serde::Deserialize;
 pub struct ConfigurationRequest {
     pub spec: ComputeSpec,
 }
+
+#[derive(Deserialize, Debug)]
+pub struct ExtensionInstallRequest {
+    pub extension: String,
+    pub database: String,
+    pub version: String,
+}
