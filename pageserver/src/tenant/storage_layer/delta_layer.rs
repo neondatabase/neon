@@ -44,11 +44,11 @@ use crate::tenant::vectored_blob_io::{
 };
 use crate::tenant::PageReconstructError;
 use crate::virtual_file::owned_buffers_io::io_buf_ext::{FullSlice, IoBufExt};
+use crate::virtual_file::IoBufferMut;
 use crate::virtual_file::{self, MaybeFatalIo, VirtualFile};
 use crate::{walrecord, TEMP_FILE_SUFFIX};
 use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION};
 use anyhow::{anyhow, bail, ensure, Context, Result};
-use bytes::BytesMut;
 use camino::{Utf8Path, Utf8PathBuf};
 use futures::StreamExt;
 use itertools::Itertools;
@@ -1003,7 +1003,7 @@ impl DeltaLayerInner {
             .0
             .into();
         let buf_size = Self::get_min_read_buffer_size(&reads, max_vectored_read_bytes);
-        let mut buf = Some(BytesMut::with_capacity(buf_size));
+        let mut buf = Some(IoBufferMut::with_capacity(buf_size));
 
         // Note that reads are processed in reverse order (from highest key+lsn).
         // This is the order that `ReconstructState` requires such that it can
@@ -1030,7 +1030,7 @@ impl DeltaLayerInner {
 
                     // We have "lost" the buffer since the lower level IO api
                     // doesn't return the buffer on error. Allocate a new one.
-                    buf = Some(BytesMut::with_capacity(buf_size));
+                    buf = Some(IoBufferMut::with_capacity(buf_size));
 
                     continue;
                 }
@@ -1204,7 +1204,7 @@ impl DeltaLayerInner {
             .map(|x| x.0.get())
             .unwrap_or(8192);
 
-        let mut buffer = Some(BytesMut::with_capacity(max_read_size));
+        let mut buffer = Some(IoBufferMut::with_capacity(max_read_size));
 
         // FIXME: buffering of DeltaLayerWriter
         let mut per_blob_copy = Vec::new();
@@ -1562,12 +1562,11 @@ impl<'a> DeltaLayerIterator<'a> {
         let vectored_blob_reader = VectoredBlobReader::new(&self.delta_layer.file);
         let mut next_batch = std::collections::VecDeque::new();
         let buf_size = plan.size();
-        let buf = BytesMut::with_capacity(buf_size);
+        let buf = IoBufferMut::with_capacity(buf_size);
         let blobs_buf = vectored_blob_reader
             .read_blobs(&plan, buf, self.ctx)
             .await?;
-        let frozen_buf = blobs_buf.buf.freeze();
-        let view = BufView::new_bytes(frozen_buf);
+        let view = BufView::new_slice(&blobs_buf.buf);
         for meta in blobs_buf.blobs.iter() {
             let blob_read = meta.read(&view).await?;
             let value = Value::des(&blob_read)?;
@@ -1942,7 +1941,7 @@ pub(crate) mod test {
                 &vectored_reads,
                 constants::MAX_VECTORED_READ_BYTES,
             );
-            let mut buf = Some(BytesMut::with_capacity(buf_size));
+            let mut buf = Some(IoBufferMut::with_capacity(buf_size));
 
             for read in vectored_reads {
                 let blobs_buf = vectored_blob_reader
