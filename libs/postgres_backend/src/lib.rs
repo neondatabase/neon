@@ -926,7 +926,7 @@ pub struct CopyDataWriter<'a, IO> {
     pgb: &'a mut PostgresBackend<IO>,
 }
 
-impl<'a, IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for CopyDataWriter<'a, IO> {
+impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for CopyDataWriter<'_, IO> {
     fn poll_write(
         self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
