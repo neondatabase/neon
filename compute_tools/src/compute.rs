@@ -1121,6 +1121,7 @@ impl ComputeNode {
                 self.pg_reload_conf()?;
             }
             self.post_apply_config()?;
+            self.get_installed_extensions()?;
         }
 
         let startup_end_time = Utc::now();
@@ -1500,7 +1501,7 @@ LIMIT 100",
             .expect("failed to get installed extensions");
 
         info!(
-            "{}",
+            "[NEON_EXT_STAT] {}",
             serde_json::to_string(&result).expect("failed to serialize extensions list")
         );
 
