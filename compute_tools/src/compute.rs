@@ -1121,6 +1121,7 @@ impl ComputeNode {
                 self.pg_reload_conf()?;
             }
             self.post_apply_config()?;
+            self.get_installed_extensions()?;
         }
 
         let startup_end_time = Utc::now();
@@ -1489,20 +1490,22 @@ LIMIT 100",
     pub fn get_installed_extensions(&self) -> Result<()> {
         let connstr = self.connstr.clone();
 
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("failed to create runtime");
-        let result = rt
-            .block_on(crate::installed_extensions::get_installed_extensions(
-                connstr,
-            ))
-            .expect("failed to get installed extensions");
+        thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("failed to create runtime");
+            let result = rt
+                .block_on(crate::installed_extensions::get_installed_extensions(
+                    connstr,
+                ))
+                .expect("failed to get installed extensions");
 
-        info!(
-            "{}",
-            serde_json::to_string(&result).expect("failed to serialize extensions list")
-        );
+            info!(
+                "{}",
+                serde_json::to_string(&result).expect("failed to serialize extensions list")
+            );
+        });
 
         Ok(())
     }

@@ -1,4 +1,5 @@
 use compute_api::responses::{InstalledExtension, InstalledExtensions};
+use metrics::proto::MetricFamily;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use url::Url;
@@ -6,6 +7,10 @@ use url::Url;
 use anyhow::Result;
 use postgres::{Client, NoTls};
 use tokio::task;
+
+use metrics::core::Collector;
+use metrics::{register_uint_gauge_vec, UIntGaugeVec};
+use once_cell::sync::Lazy;
 
 /// We don't reuse get_existing_dbs() just for code clarity
 /// and to make database listing query here more explicit.
@@ -73,9 +78,40 @@ pub async fn get_installed_extensions(connstr: Url) -> Result<InstalledExtension
             }
         }
 
-        Ok(InstalledExtensions {
+        let res = InstalledExtensions {
             extensions: extensions_map.values().cloned().collect(),
-        })
+        };
+
+        // set the prometheus metrics
+        for ext in res.extensions.iter() {
+            let versions = {
+                let mut vec: Vec<_> = ext.versions.iter().cloned().collect();
+                vec.sort();
+                vec.iter()
+                    .map(|x| x.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            };
+
+            INSTALLED_EXTENSIONS
+                .with_label_values(&[&ext.extname, &versions])
+                .set(ext.n_databases as u64);
+        }
+
+        Ok(res)
     })
     .await?
+}
+
+static INSTALLED_EXTENSIONS: Lazy<UIntGaugeVec> = Lazy::new(|| {
+    register_uint_gauge_vec!(
+        "installed_extensions",
+        "Number of databases where extension is installed, versions passed as label",
+        &["extension_name", "versions"]
+    )
+    .expect("failed to define a metric")
+});
+
+pub fn collect() -> Vec<MetricFamily> {
+    INSTALLED_EXTENSIONS.collect()
 }

@@ -28,3 +28,8 @@ class EndpointHttpClient(requests.Session):
         res = self.get(f"http://localhost:{self.port}/installed_extensions")
         res.raise_for_status()
         return res.json()
+
+    def metrics(self):
+        res = self.get(f"http://localhost:{self.port}/metrics")
+        res.raise_for_status()
+        return res.text
