@@ -224,6 +224,7 @@ enum TimelineCmd {
     List(TimelineListCmdArgs),
     Branch(TimelineBranchCmdArgs),
     Create(TimelineCreateCmdArgs),
+    CreateRaw(TimelineCreateRawCmdArgs),
     Import(TimelineImportCmdArgs),
 }
 
@@ -283,6 +284,21 @@ struct TimelineCreateCmdArgs {
     #[arg(default_value_t = DEFAULT_PG_VERSION)]
     #[clap(long, help = "Postgres version")]
     pg_version: u32,
+}
+
+#[derive(clap::Args)]
+struct TimelineCreateRawCmdArgs {
+    #[clap(
+        long = "tenant-id",
+        help = "Tenant id. Represented as a hexadecimal string 32 symbols length"
+    )]
+    tenant_id: Option<TenantId>,
+
+    #[clap(long, help = "Human-readable alias for the new timeline")]
+    branch_name: String,
+
+    #[clap(long)]
+    request_json: String,
 }
 
 #[derive(clap::Args)]
@@ -1073,10 +1089,10 @@ async fn handle_tenant(subcmd: &TenantCmd, env: &mut local_env::LocalEnv) -> any
                     tenant_id,
                     TimelineCreateRequest {
                         new_timeline_id,
-                        ancestor_timeline_id: None,
-                        ancestor_start_lsn: None,
-                        existing_initdb_timeline_id: None,
-                        pg_version: Some(args.pg_version),
+                        mode: pageserver_api::models::TimelineCreateRequestMode::Bootstrap {
+                            existing_initdb_timeline_id: None,
+                            pg_version: Some(args.pg_version),
+                        },
                     },
                 )
                 .await?;
@@ -1133,10 +1149,10 @@ async fn handle_timeline(cmd: &TimelineCmd, env: &mut local_env::LocalEnv) -> Re
             let storage_controller = StorageController::from_env(env);
             let create_req = TimelineCreateRequest {
                 new_timeline_id,
-                ancestor_timeline_id: None,
-                existing_initdb_timeline_id: None,
-                ancestor_start_lsn: None,
-                pg_version: Some(args.pg_version),
+                mode: pageserver_api::models::TimelineCreateRequestMode::Bootstrap {
+                    existing_initdb_timeline_id: None,
+                    pg_version: Some(args.pg_version),
+                },
             };
             let timeline_info = storage_controller
                 .tenant_timeline_create(tenant_id, create_req)
@@ -1150,6 +1166,31 @@ async fn handle_timeline(cmd: &TimelineCmd, env: &mut local_env::LocalEnv) -> Re
                 timeline_info.timeline_id
             );
         }
+        TimelineCmd::CreateRaw(TimelineCreateRawCmdArgs {
+            tenant_id,
+            branch_name,
+            request_json,
+        }) => {
+            // basically like ::Create above, just a different way to compose the request
+
+            let tenant_id = get_tenant_id(*tenant_id, env)?;
+            let new_branch_name = branch_name;
+
+            let storage_controller = StorageController::from_env(env);
+            let req: TimelineCreateRequest = serde_json::from_str(request_json)?;
+
+            let timeline_info = storage_controller
+                .tenant_timeline_create(tenant_id, req)
+                .await?;
+            let new_timeline_id = timeline_info.timeline_id;
+
+            env.register_branch_mapping(new_branch_name.to_string(), tenant_id, new_timeline_id)?;
+
+            println!(
+                "Created timeline '{new_timeline_id}' in importing mode for tenant: {tenant_id}",
+            );
+        }
+        // TODO: rename to import-basebackup-plus-wal
         TimelineCmd::Import(args) => {
             let tenant_id = get_tenant_id(args.tenant_id, env)?;
             let timeline_id = args.timeline_id;
@@ -1189,10 +1230,11 @@ async fn handle_timeline(cmd: &TimelineCmd, env: &mut local_env::LocalEnv) -> Re
             let storage_controller = StorageController::from_env(env);
             let create_req = TimelineCreateRequest {
                 new_timeline_id,
-                ancestor_timeline_id: Some(ancestor_timeline_id),
-                existing_initdb_timeline_id: None,
-                ancestor_start_lsn: start_lsn,
-                pg_version: None,
+                mode: pageserver_api::models::TimelineCreateRequestMode::Branch {
+                    ancestor_timeline_id,
+                    ancestor_start_lsn: start_lsn,
+                    pg_version: None,
+                },
             };
             let timeline_info = storage_controller
                 .tenant_timeline_create(tenant_id, create_req)

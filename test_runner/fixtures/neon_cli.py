@@ -306,6 +306,26 @@ class NeonLocalCli(AbstractNeonCli):
 
         return timeline_id
 
+    def timeline_create_pgdata_import(
+        self,
+        new_branch_name: str,
+        tenant_id: TenantId,
+        req: dict[str, Any],
+    ):
+        cmd = [
+            "timeline",
+            "create-raw",
+            "--branch-name",
+            new_branch_name,
+            "--tenant-id",
+            str(tenant_id),
+            "--request-json",
+            json.dumps(req),
+        ]
+
+        res = self.raw_cli(cmd)
+        res.check_returncode()
+
     def timeline_branch(
         self,
         tenant_id: TenantId,

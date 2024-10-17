@@ -2,6 +2,8 @@ pub mod detach_ancestor;
 pub mod partitioning;
 pub mod utilization;
 
+#[cfg(feature = "testing")]
+use camino::Utf8PathBuf;
 pub use utilization::PageserverUtilization;
 
 use std::{
@@ -211,13 +213,65 @@ pub enum TimelineState {
 #[derive(Serialize, Deserialize, Clone)]
 pub struct TimelineCreateRequest {
     pub new_timeline_id: TimelineId,
-    #[serde(default)]
-    pub ancestor_timeline_id: Option<TimelineId>,
-    #[serde(default)]
-    pub existing_initdb_timeline_id: Option<TimelineId>,
-    #[serde(default)]
-    pub ancestor_start_lsn: Option<Lsn>,
-    pub pg_version: Option<u32>,
+    #[serde(flatten)]
+    pub mode: TimelineCreateRequestMode,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(untagged)]
+pub enum TimelineCreateRequestMode {
+    Branch {
+        ancestor_timeline_id: TimelineId,
+        #[serde(default)]
+        ancestor_start_lsn: Option<Lsn>,
+        // TODO: cplane sets this, but, the current branching code always
+        // inherits the ancestor's pg_version. This field is effectively ignored.
+        pg_version: Option<u32>,
+    },
+    ImportPgdata {
+        import_pgdata: TimelineCreateRequestModeImportPgdata,
+    },
+    // NB: Bootstrap is all-optional, and thus the serde(untagged) will cause serde to stop at Bootstrap.
+    // (serde picks the first matching enum variant, in declaration order).
+    Bootstrap {
+        #[serde(default)]
+        existing_initdb_timeline_id: Option<TimelineId>,
+        pg_version: Option<u32>,
+    },
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct TimelineCreateRequestModeImportPgdata {
+    pub location: ImportPgdataLocation,
+    pub idempotency_key: ImportPgdataIdemptencyKey,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum ImportPgdataLocation {
+    #[cfg(feature = "testing")]
+    LocalFs { path: Utf8PathBuf },
+    AwsS3 {
+        region: String,
+        bucket: String,
+        key: String,
+    },
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(transparent)]
+pub struct ImportPgdataIdemptencyKey(pub String);
+
+impl ImportPgdataIdemptencyKey {
+    pub fn random() -> Self {
+        use rand::{distributions::Alphanumeric, Rng};
+        Self(
+            rand::thread_rng()
+                .sample_iter(&Alphanumeric)
+                .take(20)
+                .map(char::from)
+                .collect(),
+        )
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -1032,6 +1086,12 @@ pub mod virtual_file {
             })
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScanDisposableKeysResponse {
+    pub disposable_count: usize,
+    pub not_disposable_count: usize,
 }
 
 // Wrapped in libpq CopyData

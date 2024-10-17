@@ -4,6 +4,7 @@ pub mod delete;
 pub(crate) mod detach_ancestor;
 mod eviction_task;
 pub(crate) mod handle;
+pub(crate) mod import_pgdata;
 mod init;
 pub mod layer_manager;
 pub(crate) mod logical_size;
@@ -435,6 +436,8 @@ pub struct Timeline {
     pub(crate) handles: handle::PerTimelineState<crate::page_service::TenantManagerTypes>,
 
     pub(crate) attach_wal_lag_cooldown: Arc<OnceLock<WalLagCooldown>>,
+
+    pub(crate) create_idempotency: crate::tenant::CreateTimelineIdempotency,
 }
 
 pub struct WalReceiverInfo {
@@ -1875,7 +1878,7 @@ impl Timeline {
         }
     }
 
-    pub(crate) async fn layer_map_info(
+    pub(crate) async fn scan_for_shard_notlocal_keys(
         &self,
         reset: LayerAccessStatsReset,
     ) -> Result<LayerMapInfo, layer_manager::Shutdown> {
@@ -2154,6 +2157,7 @@ impl Timeline {
         state: TimelineState,
         aux_file_policy: Option<AuxFilePolicy>,
         attach_wal_lag_cooldown: Arc<OnceLock<WalLagCooldown>>,
+        create_idempotency: crate::tenant::CreateTimelineIdempotency,
         cancel: CancellationToken,
     ) -> Arc<Self> {
         let disk_consistent_lsn = metadata.disk_consistent_lsn();
@@ -2299,6 +2303,8 @@ impl Timeline {
                 handles: Default::default(),
 
                 attach_wal_lag_cooldown,
+
+                create_idempotency,
             };
 
             if aux_file_policy == Some(AuxFilePolicy::V1) {
@@ -2433,7 +2439,7 @@ impl Timeline {
     pub(super) async fn load_layer_map(
         &self,
         disk_consistent_lsn: Lsn,
-        index_part: Option<IndexPart>,
+        index_part: IndexPart,
     ) -> anyhow::Result<()> {
         use init::{Decision::*, Discovered, DismissedLayer};
         use LayerName::*;
@@ -2497,8 +2503,7 @@ impl Timeline {
                     );
                 }
 
-                let decided =
-                    init::reconcile(discovered_layers, index_part.as_ref(), disk_consistent_lsn);
+                let decided = init::reconcile(discovered_layers, &index_part, disk_consistent_lsn);
 
                 let mut loaded_layers = Vec::new();
                 let mut needs_cleanup = Vec::new();
@@ -2644,20 +2649,23 @@ impl Timeline {
                 {
                     Some(cancel) => cancel.cancel(),
                     None => {
-                        let state = self.current_state();
-                        if matches!(
-                            state,
-                            TimelineState::Broken { .. } | TimelineState::Stopping
-                        ) {
-
-                            // Can happen when timeline detail endpoint is used when deletion is ongoing (or its broken).
-                            // Don't make noise.
-                        } else {
-                            warn!("unexpected: cancel_wait_for_background_loop_concurrency_limit_semaphore not set, priority-boosting of logical size calculation will not work");
-                            debug_assert!(false);
+                        match self.current_state() {
+                            TimelineState::Broken { .. } | TimelineState::Stopping => {
+                                // Can happen when timeline detail endpoint is used when deletion is ongoing (or its broken).
+                                // Don't make noise.
+                            }
+                            TimelineState::Loading => {
+                                // Import does not return an activated timeline.
+                                info!("discarding priority boost for logical size calculation because timeline is not yet active");
+                            }
+                            TimelineState::Active => {
+                                // activation should be setting the once cell
+                                warn!("unexpected: cancel_wait_for_background_loop_concurrency_limit_semaphore not set, priority-boosting of logical size calculation will not work");
+                                debug_assert!(false);
+                            }
                         }
                     }
-                };
+                }
             }
         }
 
@@ -4728,7 +4736,7 @@ impl Timeline {
     }
 
     /// Schedules the uploads of the given image layers
-    fn upload_new_image_layers(
+    pub(self) fn upload_new_image_layers(
         self: &Arc<Self>,
         new_images: impl IntoIterator<Item = ResidentLayer>,
     ) -> Result<(), super::upload_queue::NotInitialized> {

@@ -285,6 +285,7 @@ impl DeleteTimelineFlow {
                 CreateTimelineCause::Delete,
                 // Aux file policy is not needed for deletion, assuming deletion does not read aux keyspace
                 None,
+                crate::tenant::CreateTimelineIdempotency::FailWithConflict, // doesn't matter what we put here
             )
             .context("create_timeline_struct")?;
 

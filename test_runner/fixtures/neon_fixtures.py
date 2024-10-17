@@ -54,7 +54,11 @@ from fixtures.pageserver.allowed_errors import (
     DEFAULT_STORAGE_CONTROLLER_ALLOWED_ERRORS,
 )
 from fixtures.pageserver.common_types import LayerName, parse_layer_file_name
-from fixtures.pageserver.http import PageserverHttpClient
+from fixtures.pageserver.http import (
+    HistoricLayerInfo,
+    PageserverHttpClient,
+    ScanDisposableKeysResponse,
+)
 from fixtures.pageserver.utils import (
     wait_for_last_record_lsn,
 )
@@ -1371,6 +1375,16 @@ class NeonEnv:
 
         return timeline_id
 
+    def create_timeline_raw(
+        self,
+        new_branch_name: str,
+        req: dict[str, Any],
+        tenant_id: Optional[TenantId] = None,
+    ):
+        tenant_id = tenant_id or self.initial_tenant
+
+        self.neon_cli.timeline_create_pgdata_import(new_branch_name, tenant_id, req)
+
 
 @pytest.fixture(scope="function")
 def neon_simple_env(
@@ -1973,6 +1987,24 @@ class NeonStorageController(MetricsGetter, LogUtils):
             "POST",
             f"{self.api}/debug/v1/tenant/{tenant_id}/import",
             headers=self.headers(TokenScope.ADMIN),
+        )
+
+    def timeline_create(self, tenant_id: TenantId, pgdata_dir: Path, timeline_id: TimelineId):
+        self.request(
+            "PUT",
+            f"{self.api}/v1/tenant/{tenant_id}/timeline/{timeline_id}/import_pgdata",
+            json=str(pgdata_dir),
+            headers=self.headers(TokenScope.TENANT),
+        )
+
+    def timeline_import_from_pgdata(
+        self, tenant_id: TenantId, pgdata_dir: Path, timeline_id: TimelineId
+    ):
+        self.request(
+            "PUT",
+            f"{self.api}/v1/tenant/{tenant_id}/timeline/{timeline_id}/import_pgdata",
+            json=str(pgdata_dir),
+            headers=self.headers(TokenScope.TENANT),
         )
 
     def reconcile_all(self):
@@ -2644,6 +2676,43 @@ class NeonPageserver(PgProtocol, LogUtils):
     ) -> bool:
         layers = self.list_layers(tenant_id, timeline_id)
         return layer_name in [parse_layer_file_name(p.name) for p in layers]
+
+    def timeline_scan_no_disposable_keys(
+        self, tenant_shard_id: TenantShardId, timeline_id: TimelineId
+    ) -> TimelineAssertNoDisposableKeysResult:
+        ps_http = self.http_client()
+        tally = ScanDisposableKeysResponse(0, 0)
+        per_layer = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+            futs = []
+            shard_layer_map = ps_http.layer_map_info(tenant_shard_id, timeline_id)
+            for layer in shard_layer_map.historic_layers:
+
+                def do_layer(
+                    shard_ps_http: PageserverHttpClient,
+                    tenant_shard_id: TenantShardId,
+                    timeline_id: TimelineId,
+                    layer: HistoricLayerInfo,
+                ) -> tuple[HistoricLayerInfo, ScanDisposableKeysResponse]:
+                    return (
+                        layer,
+                        shard_ps_http.timeline_layer_scan_disposable_keys(
+                            tenant_shard_id, timeline_id, layer.layer_file_name
+                        ),
+                    )
+
+                futs.append(executor.submit(do_layer, ps_http, tenant_shard_id, timeline_id, layer))
+            for fut in futs:
+                layer, result = fut.result()
+                tally += result
+                per_layer.append((layer, result))
+        return TimelineAssertNoDisposableKeysResult(tally, per_layer)
+
+
+@dataclass
+class TimelineAssertNoDisposableKeysResult:
+    tally: ScanDisposableKeysResponse
+    per_layer: list[tuple[HistoricLayerInfo, ScanDisposableKeysResponse]]
 
 
 class PgBin:

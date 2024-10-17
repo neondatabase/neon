@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import dataclasses
+import json
+import random
+import string
 import time
 from collections import defaultdict
 from dataclasses import dataclass
@@ -10,7 +14,14 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from fixtures.common_types import Lsn, TenantId, TenantShardId, TimelineArchivalState, TimelineId
+from fixtures.common_types import (
+    Id,
+    Lsn,
+    TenantId,
+    TenantShardId,
+    TimelineArchivalState,
+    TimelineId,
+)
 from fixtures.log_helper import log
 from fixtures.metrics import Metrics, MetricsGetter, parse_metrics
 from fixtures.pg_version import PgVersion
@@ -25,6 +36,69 @@ class PageserverApiException(Exception):
         super().__init__(message)
         self.message = message
         self.status_code = status_code
+
+
+@dataclass
+class ImportPgdataIdemptencyKey:
+    key: str
+
+    @staticmethod
+    def random() -> ImportPgdataIdemptencyKey:
+        return ImportPgdataIdemptencyKey(
+            "".join(random.choices(string.ascii_letters + string.digits, k=20))
+        )
+
+
+@dataclass
+class LocalFs:
+    path: str
+
+
+@dataclass
+class AwsS3:
+    region: str
+    bucket: str
+    key: str
+
+
+@dataclass
+class ImportPgdataLocation:
+    LocalFs: Optional[LocalFs] = None
+    AwsS3: Optional[AwsS3] = None
+
+
+@dataclass
+class TimelineCreateRequestModeImportPgdata:
+    location: ImportPgdataLocation
+    idempotency_key: ImportPgdataIdemptencyKey
+
+
+@dataclass
+class TimelineCreateRequestMode:
+    Branch: Optional[dict[str, Any]] = None
+    Bootstrap: Optional[dict[str, Any]] = None
+    ImportPgdata: Optional[TimelineCreateRequestModeImportPgdata] = None
+
+
+@dataclass
+class TimelineCreateRequest:
+    new_timeline_id: TimelineId
+    mode: TimelineCreateRequestMode
+
+    def to_json(self) -> str:
+        class EnhancedJSONEncoder(json.JSONEncoder):
+            def default(self, o):
+                if dataclasses.is_dataclass(o):
+                    return dataclasses.asdict(o)
+                elif isinstance(o, Id):
+                    return o.id.hex()
+                return super().default(o)
+
+        # mode is flattened
+        this = dataclasses.asdict(self)
+        mode = this.pop("mode")
+        this.update(mode)
+        return json.dumps(self, cls=EnhancedJSONEncoder)
 
 
 class TimelineCreate406(PageserverApiException):
@@ -127,6 +201,26 @@ class LayerMapInfo:
 
     def historic_by_name(self) -> set[str]:
         return set(x.layer_file_name for x in self.historic_layers)
+
+
+@dataclass(frozen=True, slots=True)
+class ScanDisposableKeysResponse:
+    disposable_count: int
+    not_disposable_count: int
+
+    def __add__(self, b):
+        a = self
+        assert isinstance(a, ScanDisposableKeysResponse)
+        assert isinstance(b, ScanDisposableKeysResponse)
+        return ScanDisposableKeysResponse(
+            a.disposable_count + b.disposable_count, a.not_disposable_count + b.not_disposable_count
+        )
+
+    @classmethod
+    def from_json(cls, d: dict[str, Any]) -> ScanDisposableKeysResponse:
+        disposable_count = d["disposable_count"]
+        not_disposable_count = d["not_disposable_count"]
+        return ScanDisposableKeysResponse(disposable_count, not_disposable_count)
 
 
 @dataclass
@@ -476,12 +570,13 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
     ) -> dict[Any, Any]:
         body: dict[str, Any] = {
             "new_timeline_id": str(new_timeline_id),
-            "ancestor_start_lsn": str(ancestor_start_lsn) if ancestor_start_lsn else None,
-            "ancestor_timeline_id": str(ancestor_timeline_id) if ancestor_timeline_id else None,
-            "existing_initdb_timeline_id": str(existing_initdb_timeline_id)
-            if existing_initdb_timeline_id
-            else None,
         }
+        if ancestor_timeline_id:
+            body["ancestor_timeline_id"] = str(ancestor_timeline_id)
+        if ancestor_start_lsn:
+            body["ancestor_start_lsn"] = str(ancestor_start_lsn)
+        if existing_initdb_timeline_id:
+            body["existing_initdb_timeline_id"] = str(existing_initdb_timeline_id)
         if pg_version != PgVersion.NOT_SET:
             body["pg_version"] = int(pg_version)
 
@@ -878,6 +973,16 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         )
         self.verbose_error(res)
         return LayerMapInfo.from_json(res.json())
+
+    def timeline_layer_scan_disposable_keys(
+        self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId, layer_name: str
+    ) -> ScanDisposableKeysResponse:
+        res = self.post(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/layer/{layer_name}/scan_disposable_keys",
+        )
+        self.verbose_error(res)
+        assert res.status_code == 200
+        return ScanDisposableKeysResponse.from_json(res.json())
 
     def download_layer(
         self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId, layer_name: str

@@ -3,9 +3,13 @@ use std::{collections::hash_map::Entry, fs, sync::Arc};
 use anyhow::Context;
 use camino::Utf8PathBuf;
 use tracing::{error, info, info_span};
-use utils::{fs_ext, id::TimelineId, lsn::Lsn};
+use utils::{fs_ext, id::TimelineId, lsn::Lsn, sync::gate::GateGuard};
 
-use crate::{context::RequestContext, import_datadir, tenant::Tenant};
+use crate::{
+    context::RequestContext,
+    import_datadir,
+    tenant::{CreateTimelineIdempotency, Tenant},
+};
 
 use super::Timeline;
 
@@ -19,14 +23,14 @@ use super::Timeline;
 pub struct UninitializedTimeline<'t> {
     pub(crate) owning_tenant: &'t Tenant,
     timeline_id: TimelineId,
-    raw_timeline: Option<(Arc<Timeline>, TimelineCreateGuard<'t>)>,
+    raw_timeline: Option<(Arc<Timeline>, TimelineCreateGuard)>,
 }
 
 impl<'t> UninitializedTimeline<'t> {
     pub(crate) fn new(
         owning_tenant: &'t Tenant,
         timeline_id: TimelineId,
-        raw_timeline: Option<(Arc<Timeline>, TimelineCreateGuard<'t>)>,
+        raw_timeline: Option<(Arc<Timeline>, TimelineCreateGuard)>,
     ) -> Self {
         Self {
             owning_tenant,
@@ -81,6 +85,10 @@ impl<'t> UninitializedTimeline<'t> {
                 Ok(new_timeline)
             }
         }
+    }
+
+    pub(crate) fn finish_creation_myself(&mut self) -> (Arc<Timeline>, TimelineCreateGuard) {
+        self.raw_timeline.take().expect("already checked")
     }
 
     /// Prepares timeline data by loading it from the basebackup archive.
@@ -161,31 +169,48 @@ pub(crate) fn cleanup_timeline_directory(create_guard: TimelineCreateGuard) {
 /// A guard for timeline creations in process: as long as this object exists, the timeline ID
 /// is kept in `[Tenant::timelines_creating]` to exclude concurrent attempts to create the same timeline.
 #[must_use]
-pub(crate) struct TimelineCreateGuard<'t> {
-    owning_tenant: &'t Tenant,
-    timeline_id: TimelineId,
+pub(crate) struct TimelineCreateGuard {
+    pub(crate) _tenant_gate_guard: GateGuard,
+    pub(crate) owning_tenant: Arc<Tenant>,
+    pub(crate) timeline_id: TimelineId,
     pub(crate) timeline_path: Utf8PathBuf,
+    pub(crate) idempotency: CreateTimelineIdempotency,
 }
 
 /// Errors when acquiring exclusive access to a timeline ID for creation
 #[derive(thiserror::Error, Debug)]
 pub(crate) enum TimelineExclusionError {
     #[error("Already exists")]
-    AlreadyExists(Arc<Timeline>),
+    AlreadyExists {
+        existing: Arc<Timeline>,
+        arg: CreateTimelineIdempotency,
+    },
     #[error("Already creating")]
     AlreadyCreating,
+    #[error("Shutting down")]
+    ShuttingDown,
 
     // e.g. I/O errors, or some failure deep in postgres initdb
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
 
-impl<'t> TimelineCreateGuard<'t> {
+impl TimelineCreateGuard {
     pub(crate) fn new(
-        owning_tenant: &'t Tenant,
+        owning_tenant: &Tenant,
         timeline_id: TimelineId,
         timeline_path: Utf8PathBuf,
+        idempotency: CreateTimelineIdempotency,
     ) -> Result<Self, TimelineExclusionError> {
+        let owning_tenant = owning_tenant
+            .myself
+            .upgrade()
+            .ok_or(TimelineExclusionError::ShuttingDown)?;
+        let _tenant_gate_guard = owning_tenant
+            .gate
+            .enter()
+            .map_err(|_| TimelineExclusionError::ShuttingDown)?;
+
         // Lock order: this is the only place we take both locks.  During drop() we only
         // lock creating_timelines
         let timelines = owning_tenant.timelines.lock().unwrap();
@@ -195,21 +220,28 @@ impl<'t> TimelineCreateGuard<'t> {
         > = owning_tenant.timelines_creating.lock().unwrap();
 
         if let Some(existing) = timelines.get(&timeline_id) {
-            Err(TimelineExclusionError::AlreadyExists(existing.clone()))
+            Err(TimelineExclusionError::AlreadyExists {
+                existing: existing.clone(),
+                arg: idempotency,
+            })
         } else if creating_timelines.contains(&timeline_id) {
             Err(TimelineExclusionError::AlreadyCreating)
         } else {
             creating_timelines.insert(timeline_id);
+            drop(timelines);
+            drop(creating_timelines);
             Ok(Self {
+                _tenant_gate_guard,
                 owning_tenant,
                 timeline_id,
                 timeline_path,
+                idempotency,
             })
         }
     }
 }
 
-impl Drop for TimelineCreateGuard<'_> {
+impl Drop for TimelineCreateGuard {
     fn drop(&mut self) {
         self.owning_tenant
             .timelines_creating

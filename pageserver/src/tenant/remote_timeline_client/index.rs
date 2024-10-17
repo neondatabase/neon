@@ -12,6 +12,7 @@ use utils::id::TimelineId;
 
 use crate::tenant::metadata::TimelineMetadata;
 use crate::tenant::storage_layer::LayerName;
+use crate::tenant::timeline::import_pgdata;
 use crate::tenant::Generation;
 use pageserver_api::shard::ShardIndex;
 
@@ -36,6 +37,10 @@ pub struct IndexPart {
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub archived_at: Option<NaiveDateTime>,
+
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub import_pgdata: Option<import_pgdata::flow::index_part_format::Root>,
 
     /// Per layer file name metadata, which can be present for a present or missing layer file.
     ///
@@ -108,6 +113,7 @@ impl IndexPart {
             lineage: Default::default(),
             gc_blocking: None,
             last_aux_file_policy: None,
+            import_pgdata: None,
         }
     }
 
@@ -385,6 +391,7 @@ mod tests {
             lineage: Lineage::default(),
             gc_blocking: None,
             last_aux_file_policy: None,
+            import_pgdata: None,
         };
 
         let part = IndexPart::from_s3_bytes(example.as_bytes()).unwrap();
@@ -429,6 +436,7 @@ mod tests {
             lineage: Lineage::default(),
             gc_blocking: None,
             last_aux_file_policy: None,
+            import_pgdata: None,
         };
 
         let part = IndexPart::from_s3_bytes(example.as_bytes()).unwrap();
@@ -474,6 +482,7 @@ mod tests {
             lineage: Lineage::default(),
             gc_blocking: None,
             last_aux_file_policy: None,
+            import_pgdata: None,
         };
 
         let part = IndexPart::from_s3_bytes(example.as_bytes()).unwrap();
@@ -522,6 +531,7 @@ mod tests {
             lineage: Lineage::default(),
             gc_blocking: None,
             last_aux_file_policy: None,
+            import_pgdata: None,
         };
 
         let empty_layers_parsed = IndexPart::from_s3_bytes(empty_layers_json.as_bytes()).unwrap();
@@ -565,6 +575,7 @@ mod tests {
             lineage: Lineage::default(),
             gc_blocking: None,
             last_aux_file_policy: None,
+            import_pgdata: None,
         };
 
         let part = IndexPart::from_s3_bytes(example.as_bytes()).unwrap();
@@ -611,6 +622,7 @@ mod tests {
             },
             gc_blocking: None,
             last_aux_file_policy: None,
+            import_pgdata: None,
         };
 
         let part = IndexPart::from_s3_bytes(example.as_bytes()).unwrap();
@@ -662,6 +674,7 @@ mod tests {
             },
             gc_blocking: None,
             last_aux_file_policy: Some(AuxFilePolicy::V2),
+            import_pgdata: None,
         };
 
         let part = IndexPart::from_s3_bytes(example.as_bytes()).unwrap();
@@ -718,6 +731,7 @@ mod tests {
             lineage: Default::default(),
             gc_blocking: None,
             last_aux_file_policy: Default::default(),
+            import_pgdata: None,
         };
 
         let part = IndexPart::from_s3_bytes(example.as_bytes()).unwrap();
@@ -775,6 +789,7 @@ mod tests {
             lineage: Default::default(),
             gc_blocking: None,
             last_aux_file_policy: Default::default(),
+            import_pgdata: None,
         };
 
         let part = IndexPart::from_s3_bytes(example.as_bytes()).unwrap();
@@ -837,6 +852,7 @@ mod tests {
             }),
             last_aux_file_policy: Default::default(),
             archived_at: None,
+            import_pgdata: None,
         };
 
         let part = IndexPart::from_s3_bytes(example.as_bytes()).unwrap();

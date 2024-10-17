@@ -43,6 +43,7 @@ postgres.workspace = true
 postgres_backend.workspace = true
 postgres-protocol.workspace = true
 postgres-types.workspace = true
+postgres_initdb.workspace = true
 rand.workspace = true
 range-set-blaze = { version = "0.1.16", features = ["alloc"] }
 regex.workspace = true
@@ -68,6 +69,7 @@ url.workspace = true
 walkdir.workspace = true
 metrics.workspace = true
 pageserver_api.workspace = true
+pageserver_client.workspace = true # for ResponseErrorMessageExt TOOD refactor that
 pageserver_compaction.workspace = true
 postgres_connection.workspace = true
 postgres_ffi.workspace = true

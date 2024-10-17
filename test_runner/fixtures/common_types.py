@@ -190,6 +190,25 @@ class TenantTimelineId:
         )
 
 
+@dataclass
+class ShardIndex:
+    shard_number: int
+    shard_count: int
+
+    # cf impl Display for ShardIndex
+    @override
+    def __str__(self) -> str:
+        return f"{self.shard_number:02x}{self.shard_count:02x}"
+
+    @classmethod
+    def parse(cls: type[ShardIndex], input: str) -> ShardIndex:
+        assert len(input) == 4
+        return cls(
+            shard_number=int(input[0:2], 16),
+            shard_count=int(input[2:4], 16),
+        )
+
+
 # Workaround for compat with python 3.9, which does not have `typing.Self`
 TTenantShardId = TypeVar("TTenantShardId", bound="TenantShardId")
 
@@ -225,6 +244,10 @@ class TenantShardId:
         else:
             # Unsharded case: equivalent of Rust TenantShardId::unsharded(tenant_id)
             return str(self.tenant_id)
+
+    @property
+    def shard_index(self) -> ShardIndex:
+        return ShardIndex(self.shard_number, self.shard_count)
 
     @override
     def __repr__(self):

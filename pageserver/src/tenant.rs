@@ -33,12 +33,13 @@ use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
 use remote_storage::TimeoutOrCancel;
 use std::collections::BTreeMap;
-use std::fmt;
 use std::future::Future;
 use std::sync::Weak;
 use std::time::SystemTime;
 use storage_broker::BrokerClientChannel;
+use timeline::import_pgdata;
 use timeline::offload::offload_timeline;
+use timeline::ShutdownMode;
 use tokio::io::BufReader;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
@@ -355,6 +356,8 @@ pub struct Tenant {
     pub(crate) gc_block: gc_block::GcBlock,
 
     l0_flush_global_state: L0FlushGlobalState,
+
+    myself: Weak<Self>,
 }
 
 impl std::fmt::Debug for Tenant {
@@ -665,6 +668,82 @@ impl Debug for SetStoppingError {
     }
 }
 
+#[derive(Debug)]
+pub(crate) enum CreateTimelineParams {
+    Bootstrap(CreateTimelineParamsBootstrap),
+    Branch(CreateTimelineParamsBranch),
+    ImportPgdata(CreateTimelineParamsImportPgdata),
+}
+
+#[derive(Debug)]
+pub(crate) struct CreateTimelineParamsBootstrap {
+    pub(crate) new_timeline_id: TimelineId,
+    pub(crate) existing_initdb_timeline_id: Option<TimelineId>,
+    pub(crate) pg_version: u32,
+}
+
+#[derive(Debug)]
+pub(crate) struct CreateTimelineParamsBranch {
+    pub(crate) new_timeline_id: TimelineId,
+    pub(crate) ancestor_timeline_id: TimelineId,
+    pub(crate) ancestor_start_lsn: Option<Lsn>,
+}
+
+#[derive(Debug)]
+pub(crate) struct CreateTimelineParamsImportPgdata {
+    pub(crate) new_timeline_id: TimelineId,
+    pub(crate) location: import_pgdata::flow::index_part_format::Location,
+    pub(crate) idempotency_key: import_pgdata::flow::index_part_format::IdempotencyKey,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CreatingTimelineIdempotencyBootstrap {
+    pub(crate) pg_version: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CreatingTimelineIdempotencyImportPgdata {
+    idempotency_key: import_pgdata::flow::index_part_format::IdempotencyKey,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CreateTimelineIdempotency {
+    FailWithConflict,
+    Bootstrap(CreatingTimelineIdempotencyBootstrap),
+    Branch {
+        ancestor_timeline_id: TimelineId,
+        ancestor_start_lsn: Lsn,
+    },
+    ImportPgdata(CreatingTimelineIdempotencyImportPgdata),
+}
+
+#[must_use]
+enum StartCreatingTimelineResult {
+    CreateGuard(TimelineCreateGuard),
+    Idempotent(Arc<Timeline>),
+}
+
+#[must_use]
+struct TimelineInitAndSyncNeedsSpawnImportPgdata {
+    timeline: Arc<Timeline>,
+    import_pgdata: import_pgdata::flow::index_part_format::Root,
+    guard: TimelineCreateGuard,
+}
+
+enum TimelineInitAndSyncResult {
+    ReadyToActivate(Arc<Timeline>),
+    NeedsSpawnImportPgdata(TimelineInitAndSyncNeedsSpawnImportPgdata),
+}
+
+impl TimelineInitAndSyncResult {
+    fn ready_to_activate(self) -> Option<Arc<Timeline>> {
+        match self {
+            Self::ReadyToActivate(timeline) => Some(timeline),
+            _ => None,
+        }
+    }
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum CreateTimelineError {
     #[error("creation of timeline with the given ID is in progress")]
@@ -684,38 +763,27 @@ pub enum CreateTimelineError {
 }
 
 #[derive(thiserror::Error, Debug)]
-enum InitdbError {
-    Other(anyhow::Error),
+pub enum InitdbError {
+    #[error("Operation was cancelled")]
     Cancelled,
-    Spawn(std::io::Result<()>),
-    Failed(std::process::ExitStatus, Vec<u8>),
-}
-
-impl fmt::Display for InitdbError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            InitdbError::Cancelled => write!(f, "Operation was cancelled"),
-            InitdbError::Spawn(e) => write!(f, "Spawn error: {:?}", e),
-            InitdbError::Failed(status, stderr) => write!(
-                f,
-                "Command failed with status {:?}: {}",
-                status,
-                String::from_utf8_lossy(stderr)
-            ),
-            InitdbError::Other(e) => write!(f, "Error: {:?}", e),
-        }
-    }
-}
-
-impl From<std::io::Error> for InitdbError {
-    fn from(error: std::io::Error) -> Self {
-        InitdbError::Spawn(Err(error))
-    }
+    #[error(transparent)]
+    Other(anyhow::Error),
+    #[error(transparent)]
+    Inner(postgres_initdb::Error),
 }
 
 enum CreateTimelineCause {
     Load,
     Delete,
+}
+
+enum LoadTimelineCause {
+    Attach,
+    Unoffload,
+    ImportPgdata {
+        create_guard: TimelineCreateGuard,
+        activate: ActivateTimelineArgs,
+    },
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -794,16 +862,38 @@ impl Tenant {
     /// it is marked as Active.
     #[allow(clippy::too_many_arguments)]
     async fn timeline_init_and_sync(
-        &self,
+        self: &Arc<Self>,
         timeline_id: TimelineId,
         resources: TimelineResources,
-        index_part: Option<IndexPart>,
+        mut index_part: IndexPart,
         metadata: TimelineMetadata,
         ancestor: Option<Arc<Timeline>>,
         last_aux_file_policy: Option<AuxFilePolicy>,
-        _ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+        cause: LoadTimelineCause,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<TimelineInitAndSyncResult> {
         let tenant_id = self.tenant_shard_id;
+
+        let import_pgdata = index_part.import_pgdata.take();
+        let idempotency = match &import_pgdata {
+            Some(import_pgdata) => {
+                CreateTimelineIdempotency::ImportPgdata(CreatingTimelineIdempotencyImportPgdata {
+                    idempotency_key: import_pgdata.idempotency_key().clone(),
+                })
+            }
+            None => {
+                if metadata.ancestor_timeline().is_none() {
+                    CreateTimelineIdempotency::Bootstrap(CreatingTimelineIdempotencyBootstrap {
+                        pg_version: metadata.pg_version(),
+                    })
+                } else {
+                    CreateTimelineIdempotency::Branch {
+                        ancestor_timeline_id: metadata.ancestor_timeline().unwrap(),
+                        ancestor_start_lsn: metadata.ancestor_lsn(),
+                    }
+                }
+            }
+        };
 
         let timeline = self.create_timeline_struct(
             timeline_id,
@@ -815,6 +905,7 @@ impl Tenant {
             // there will potentially be other caller of this function in the future, and we don't know whether `index_part` or `ancestor` takes precedence.
             // Therefore, we pass this field explicitly for now, and remove it once we fully migrate to aux file v2.
             last_aux_file_policy,
+            idempotency.clone(),
         )?;
         let disk_consistent_lsn = timeline.get_disk_consistent_lsn();
         anyhow::ensure!(
@@ -827,28 +918,11 @@ impl Tenant {
             "these are used interchangeably"
         );
 
-        if let Some(index_part) = index_part.as_ref() {
-            timeline.remote_client.init_upload_queue(index_part)?;
+        timeline.remote_client.init_upload_queue(&index_part)?;
 
-            timeline
-                .last_aux_file_policy
-                .store(index_part.last_aux_file_policy());
-        } else {
-            // No data on the remote storage, but we have local metadata file. We can end up
-            // here with timeline_create being interrupted before finishing index part upload.
-            // By doing what we do here, the index part upload is retried.
-            // If control plane retries timeline creation in the meantime, the mgmt API handler
-            // for timeline creation will coalesce on the upload we queue here.
-
-            // FIXME: this branch should be dead code as we no longer write local metadata.
-
-            timeline
-                .remote_client
-                .init_upload_queue_for_empty_remote(&metadata)?;
-            timeline
-                .remote_client
-                .schedule_index_upload_for_full_metadata_update(&metadata)?;
-        }
+        timeline
+            .last_aux_file_policy
+            .store(index_part.last_aux_file_policy());
 
         timeline
             .load_layer_map(disk_consistent_lsn, index_part)
@@ -857,39 +931,91 @@ impl Tenant {
                 format!("Failed to load layermap for timeline {tenant_id}/{timeline_id}")
             })?;
 
-        {
-            // avoiding holding it across awaits
-            let mut timelines_accessor = self.timelines.lock().unwrap();
-            match timelines_accessor.entry(timeline_id) {
-                // We should never try and load the same timeline twice during startup
-                Entry::Occupied(_) => {
-                    unreachable!(
-                        "Timeline {tenant_id}/{timeline_id} already exists in the tenant map"
-                    );
+        match import_pgdata {
+            Some(import_pgdata) if !import_pgdata.is_done() => {
+                match cause {
+                    LoadTimelineCause::Attach | LoadTimelineCause::Unoffload => (),
+                    LoadTimelineCause::ImportPgdata { .. } => {
+                        unreachable!("ImportPgdata should not be reloading timeline import is done and persisted as such in s3")
+                    }
                 }
-                Entry::Vacant(v) => {
-                    v.insert(Arc::clone(&timeline));
-                    timeline.maybe_spawn_flush_loop();
+                let mut guard = self.timelines_creating.lock().unwrap();
+                if !guard.insert(timeline_id) {
+                    // We should never try and load the same timeline twice during startup
+                    unreachable!("Timeline {tenant_id}/{timeline_id} is already being created")
                 }
+                let timeline_create_guard = TimelineCreateGuard {
+                    _tenant_gate_guard: self.gate.enter()?,
+                    owning_tenant: self.clone(),
+                    timeline_id,
+                    idempotency,
+                    // The users of this specific return value don't need the timline_path in there.
+                    timeline_path: timeline
+                        .conf
+                        .timeline_path(&timeline.tenant_shard_id, &timeline.timeline_id),
+                };
+                Ok(TimelineInitAndSyncResult::NeedsSpawnImportPgdata(
+                    TimelineInitAndSyncNeedsSpawnImportPgdata {
+                        timeline,
+                        import_pgdata,
+                        guard: timeline_create_guard,
+                    },
+                ))
             }
-        };
+            Some(_) | None => {
+                {
+                    let mut timelines_accessor = self.timelines.lock().unwrap();
+                    match timelines_accessor.entry(timeline_id) {
+                        // We should never try and load the same timeline twice during startup
+                        Entry::Occupied(_) => {
+                            unreachable!(
+                            "Timeline {tenant_id}/{timeline_id} already exists in the tenant map"
+                        );
+                        }
+                        Entry::Vacant(v) => {
+                            v.insert(Arc::clone(&timeline));
+                            timeline.maybe_spawn_flush_loop();
+                        }
+                    }
+                }
 
-        // Sanity check: a timeline should have some content.
-        anyhow::ensure!(
-            ancestor.is_some()
-                || timeline
-                    .layers
-                    .read()
-                    .await
-                    .layer_map()
-                    .expect("currently loading, layer manager cannot be shutdown already")
-                    .iter_historic_layers()
-                    .next()
-                    .is_some(),
-            "Timeline has no ancestor and no layer files"
-        );
+                // Sanity check: a timeline should have some content.
+                anyhow::ensure!(
+                    ancestor.is_some()
+                        || timeline
+                            .layers
+                            .read()
+                            .await
+                            .layer_map()
+                            .expect("currently loading, layer manager cannot be shutdown already")
+                            .iter_historic_layers()
+                            .next()
+                            .is_some(),
+                    "Timeline has no ancestor and no layer files"
+                );
 
-        Ok(())
+                match cause {
+                    LoadTimelineCause::Attach | LoadTimelineCause::Unoffload => (),
+                    LoadTimelineCause::ImportPgdata {
+                        create_guard,
+                        activate,
+                    } => {
+                        // TODO: see the comment in the task code above how I'm not so certain
+                        // it is safe to activate here because of concurrent shutdowns.
+                        match activate {
+                            ActivateTimelineArgs::Yes { broker_client } => {
+                                info!("activating timeline after reload from pgdata import task");
+                                timeline.activate(self.clone(), broker_client, None, ctx);
+                            }
+                            ActivateTimelineArgs::No => (),
+                        }
+                        drop(create_guard);
+                    }
+                }
+
+                Ok(TimelineInitAndSyncResult::ReadyToActivate(timeline))
+            }
+        }
     }
 
     /// Attach a tenant that's available in cloud storage.
@@ -925,17 +1051,20 @@ impl Tenant {
         let attach_mode = attached_conf.location.attach_mode;
         let generation = attached_conf.location.generation;
 
-        let tenant = Arc::new(Tenant::new(
-            TenantState::Attaching,
-            conf,
-            attached_conf,
-            shard_identity,
-            Some(wal_redo_manager),
-            tenant_shard_id,
-            remote_storage.clone(),
-            deletion_queue_client,
-            l0_flush_global_state,
-        ));
+        let tenant = Arc::new_cyclic(|myself| {
+            Tenant::new(
+                TenantState::Attaching,
+                conf,
+                attached_conf,
+                shard_identity,
+                Some(wal_redo_manager),
+                tenant_shard_id,
+                remote_storage.clone(),
+                deletion_queue_client,
+                l0_flush_global_state,
+                myself.clone(),
+            )
+        });
 
         // The attach task will carry a GateGuard, so that shutdown() reliably waits for it to drop out if
         // we shut down while attaching.
@@ -1244,24 +1373,46 @@ impl Tenant {
             }
 
             // TODO again handle early failure
-            self.load_remote_timeline(
-                timeline_id,
-                index_part,
-                remote_metadata,
-                TimelineResources {
-                    remote_client,
-                    timeline_get_throttle: self.timeline_get_throttle.clone(),
-                    l0_flush_global_state: self.l0_flush_global_state.clone(),
-                },
-                ctx,
-            )
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to load remote timeline {} for tenant {}",
-                    timeline_id, self.tenant_shard_id
+            let effect = self
+                .load_remote_timeline(
+                    timeline_id,
+                    index_part,
+                    remote_metadata,
+                    TimelineResources {
+                        remote_client,
+                        timeline_get_throttle: self.timeline_get_throttle.clone(),
+                        l0_flush_global_state: self.l0_flush_global_state.clone(),
+                    },
+                    LoadTimelineCause::Attach,
+                    ctx,
                 )
-            })?;
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to load remote timeline {} for tenant {}",
+                        timeline_id, self.tenant_shard_id
+                    )
+                })?;
+
+            match effect {
+                TimelineInitAndSyncResult::ReadyToActivate(_) => {
+                    // activation happens later, on Tenant::activate
+                }
+                TimelineInitAndSyncResult::NeedsSpawnImportPgdata(
+                    TimelineInitAndSyncNeedsSpawnImportPgdata {
+                        timeline,
+                        import_pgdata,
+                        guard,
+                    },
+                ) => {
+                    tokio::task::spawn(self.clone().create_timeline_import_pgdata_task(
+                        timeline,
+                        import_pgdata,
+                        ActivateTimelineArgs::No,
+                        guard,
+                    ));
+                }
+            }
         }
 
         // Walk through deleted timelines, resume deletion
@@ -1376,13 +1527,14 @@ impl Tenant {
 
     #[instrument(skip_all, fields(timeline_id=%timeline_id))]
     async fn load_remote_timeline(
-        &self,
+        self: &Arc<Self>,
         timeline_id: TimelineId,
         index_part: IndexPart,
         remote_metadata: TimelineMetadata,
         resources: TimelineResources,
+        cause: LoadTimelineCause,
         ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<TimelineInitAndSyncResult> {
         span::debug_assert_current_span_has_tenant_id();
 
         info!("downloading index file for timeline {}", timeline_id);
@@ -1408,10 +1560,11 @@ impl Tenant {
         self.timeline_init_and_sync(
             timeline_id,
             resources,
-            Some(index_part),
+            index_part,
             remote_metadata,
             ancestor,
             last_aux_file_policy,
+            cause,
             ctx,
         )
         .await
@@ -1595,6 +1748,7 @@ impl Tenant {
             index_part,
             remote_metadata,
             timeline_resources,
+            LoadTimelineCause::Unoffload,
             &ctx,
         )
         .await
@@ -1805,7 +1959,15 @@ impl Tenant {
         );
 
         // Protect against concurrent attempts to use this TimelineId
-        let create_guard = self.create_timeline_create_guard(new_timeline_id)?;
+        let create_guard = match self
+            .start_creating_timeline(new_timeline_id, CreateTimelineIdempotency::FailWithConflict)
+            .await?
+        {
+            StartCreatingTimelineResult::CreateGuard(guard) => guard,
+            StartCreatingTimelineResult::Idempotent(_) => {
+                unreachable!("FailWithConflict implies we get an error instead")
+            }
+        };
 
         let new_metadata = TimelineMetadata::new(
             // Initialize disk_consistent LSN to 0, The caller must import some data to
@@ -1925,11 +2087,7 @@ impl Tenant {
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn create_timeline(
         self: &Arc<Tenant>,
-        new_timeline_id: TimelineId,
-        ancestor_timeline_id: Option<TimelineId>,
-        mut ancestor_start_lsn: Option<Lsn>,
-        pg_version: u32,
-        load_existing_initdb: Option<TimelineId>,
+        params: CreateTimelineParams,
         broker_client: storage_broker::BrokerClientChannel,
         ctx: &RequestContext,
     ) -> Result<Arc<Timeline>, CreateTimelineError> {
@@ -1948,54 +2106,26 @@ impl Tenant {
             .enter()
             .map_err(|_| CreateTimelineError::ShuttingDown)?;
 
-        // Get exclusive access to the timeline ID: this ensures that it does not already exist,
-        // and that no other creation attempts will be allowed in while we are working.
-        let create_guard = match self.create_timeline_create_guard(new_timeline_id) {
-            Ok(m) => m,
-            Err(TimelineExclusionError::AlreadyCreating) => {
-                // Creation is in progress, we cannot create it again, and we cannot
-                // check if this request matches the existing one, so caller must try
-                // again later.
-                return Err(CreateTimelineError::AlreadyCreating);
+        match params {
+            CreateTimelineParams::Bootstrap(CreateTimelineParamsBootstrap {
+                new_timeline_id,
+                existing_initdb_timeline_id,
+                pg_version,
+            }) => {
+                self.bootstrap_timeline(
+                    new_timeline_id,
+                    pg_version,
+                    existing_initdb_timeline_id,
+                    ActivateTimelineArgs::Yes { broker_client },
+                    ctx,
+                )
+                .await
             }
-            Err(TimelineExclusionError::Other(e)) => {
-                return Err(CreateTimelineError::Other(e));
-            }
-            Err(TimelineExclusionError::AlreadyExists(existing)) => {
-                debug!("timeline {new_timeline_id} already exists");
-
-                // Idempotency: creating the same timeline twice is not an error, unless
-                // the second creation has different parameters.
-                if existing.get_ancestor_timeline_id() != ancestor_timeline_id
-                    || existing.pg_version != pg_version
-                    || (ancestor_start_lsn.is_some()
-                        && ancestor_start_lsn != Some(existing.get_ancestor_lsn()))
-                {
-                    return Err(CreateTimelineError::Conflict);
-                }
-
-                // Wait for uploads to complete, so that when we return Ok, the timeline
-                // is known to be durable on remote storage. Just like we do at the end of
-                // this function, after we have created the timeline ourselves.
-                //
-                // We only really care that the initial version of `index_part.json` has
-                // been uploaded. That's enough to remember that the timeline
-                // exists. However, there is no function to wait specifically for that so
-                // we just wait for all in-progress uploads to finish.
-                existing
-                    .remote_client
-                    .wait_completion()
-                    .await
-                    .context("wait for timeline uploads to complete")?;
-
-                return Ok(existing);
-            }
-        };
-
-        pausable_failpoint!("timeline-creation-after-uninit");
-
-        let loaded_timeline = match ancestor_timeline_id {
-            Some(ancestor_timeline_id) => {
+            CreateTimelineParams::Branch(CreateTimelineParamsBranch {
+                new_timeline_id,
+                ancestor_timeline_id,
+                mut ancestor_start_lsn,
+            }) => {
                 let ancestor_timeline = self
                     .get_timeline(ancestor_timeline_id, false)
                     .context("Cannot branch off the timeline that's not present in pageserver")?;
@@ -2046,39 +2176,219 @@ impl Tenant {
                     &ancestor_timeline,
                     new_timeline_id,
                     ancestor_start_lsn,
-                    create_guard,
+                    ActivateTimelineArgs::Yes { broker_client },
                     ctx,
                 )
-                .await?
+                .await
             }
-            None => {
-                self.bootstrap_timeline(
-                    new_timeline_id,
-                    pg_version,
-                    load_existing_initdb,
-                    create_guard,
+            CreateTimelineParams::ImportPgdata(params) => {
+                self.create_timeline_import_pgdata(
+                    params,
+                    ActivateTimelineArgs::Yes { broker_client },
                     ctx,
                 )
-                .await?
+                .await
             }
+        }
+    }
+
+    /// The returned [`Arc<Timeline>`] is NOT in the [`Tenant::timelines`] map until the import
+    /// completes in the background. A DIFFERENT [`Arc<Timeline>`] will be inserted into the
+    /// [`Tenant::timelines`] map when the import completes.
+    /// We only return an [`Arc<Timeline>`] here so the API handler can create a [`pageserver_api::models::TimelineInfo`]
+    /// for the response.
+    async fn create_timeline_import_pgdata(
+        self: &Arc<Tenant>,
+        params: CreateTimelineParamsImportPgdata,
+        activate: ActivateTimelineArgs,
+        ctx: &RequestContext,
+    ) -> Result<Arc<Timeline>, CreateTimelineError> {
+        let CreateTimelineParamsImportPgdata {
+            new_timeline_id,
+            location,
+            idempotency_key,
+        } = params;
+
+        let started_at = chrono::Utc::now().naive_utc();
+
+        //
+        // There's probably a simpler way to upload an index part, but, remote_timeline_client
+        // is the canonical way we do it.
+        // - create an empty timeline in-memory
+        // - use its remote_timeline_client to do the upload
+        // - dispose of the uninit timeline
+        // - keep the creation guard alive
+
+        let timeline_create_guard = match self
+            .start_creating_timeline(
+                new_timeline_id,
+                CreateTimelineIdempotency::ImportPgdata(CreatingTimelineIdempotencyImportPgdata {
+                    idempotency_key: idempotency_key.clone(),
+                }),
+            )
+            .await?
+        {
+            StartCreatingTimelineResult::CreateGuard(guard) => guard,
+            StartCreatingTimelineResult::Idempotent(timeline) => return Ok(timeline),
         };
 
-        // At this point we have dropped our guard on [`Self::timelines_creating`], and
-        // the timeline is visible in [`Self::timelines`], but it is _not_ durable yet.  We must
-        // not send a success to the caller until it is.  The same applies to handling retries,
-        // see the handling of [`TimelineExclusionError::AlreadyExists`] above.
-        let kind = ancestor_timeline_id
-            .map(|_| "branched")
-            .unwrap_or("bootstrapped");
-        loaded_timeline
+        let (control_file, index_part) = import_pgdata::create(
+            import_pgdata::flow::index_part_format::InProgress {
+                idempotency_key,
+                location,
+                started_at,
+            },
+            self.cancel.clone(),
+        )
+        .await?;
+
+        let mut uninit_timeline = {
+            let base_lsn = control_file.base_lsn();
+            let pg_version = control_file.pg_version();
+            let _ctx: &RequestContext = ctx;
+            async move {
+                // FIXME: The 'disk_consistent_lsn' should be the LSN at the *end* of the
+                // checkpoint record, and prev_record_lsn should point to its beginning.
+                // We should read the real end of the record from the WAL, but here we
+                // just fake it.
+                let disk_consistent_lsn = Lsn(base_lsn.0 + 8);
+                let prev_record_lsn = base_lsn;
+                let metadata = TimelineMetadata::new(
+                    disk_consistent_lsn,
+                    Some(prev_record_lsn),
+                    None,     // no ancestor
+                    Lsn(0),   // no ancestor lsn
+                    base_lsn, // latest_gc_cutoff_lsn
+                    base_lsn, // initdb_lsn
+                    pg_version,
+                );
+
+                self.prepare_new_timeline(
+                    new_timeline_id,
+                    &metadata,
+                    timeline_create_guard,
+                    disk_consistent_lsn + 1,
+                    None,
+                    None,
+                )
+                .await
+            }
+        }
+        .await?;
+
+        uninit_timeline
+            .raw_timeline()
+            .unwrap()
+            .remote_client
+            .schedule_index_upload_for_import_pgdata_state_update(Some(index_part.clone()))?;
+
+        uninit_timeline
+            .raw_timeline()
+            .unwrap()
             .remote_client
             .wait_completion()
             .await
-            .with_context(|| format!("wait for {} timeline initial uploads to complete", kind))?;
+            .context("wait for initial index upload")?;
 
-        loaded_timeline.activate(self.clone(), broker_client, None, ctx);
+        let (timeline, timeline_create_guard) = uninit_timeline.finish_creation_myself();
 
-        Ok(loaded_timeline)
+        tokio::spawn(self.clone().create_timeline_import_pgdata_task(
+            timeline.clone(),
+            index_part,
+            activate,
+            timeline_create_guard,
+        ));
+
+        // NB: the timeline doesn't exist in self.timelines at this point, only thing that references
+        Ok(timeline)
+    }
+
+    #[instrument(skip_all, fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), timeline_id=%timeline.timeline_id))]
+    async fn create_timeline_import_pgdata_task(
+        self: Arc<Tenant>,
+        timeline: Arc<Timeline>,
+        index_part: import_pgdata::flow::index_part_format::Root,
+        activate: ActivateTimelineArgs,
+        timeline_create_guard: TimelineCreateGuard,
+    ) {
+        debug_assert_current_span_has_tenant_and_timeline_id();
+        info!("starting");
+        scopeguard::defer! {info!("exiting")};
+
+        let res = self
+            .create_timeline_import_pgdata_task_impl(
+                timeline,
+                index_part,
+                activate,
+                timeline_create_guard,
+            )
+            .await;
+        if let Err(err) = &res {
+            error!(?err, "task failed");
+            // TODO sleep & retry, sensitive to tenant shutdown
+            // TODO: allow timeline deletion requests => should cancel the task
+        }
+    }
+
+    async fn create_timeline_import_pgdata_task_impl(
+        self: Arc<Tenant>,
+        timeline: Arc<Timeline>,
+        index_part: import_pgdata::flow::index_part_format::Root,
+        activate: ActivateTimelineArgs,
+        timeline_create_guard: TimelineCreateGuard,
+    ) -> Result<(), anyhow::Error> {
+        let ctx = RequestContext::new(TaskKind::ImportPgdata, DownloadBehavior::Warn);
+
+        info!("importing pgdata");
+        import_pgdata::doit(&timeline, index_part, &ctx, self.cancel.clone())
+            .await
+            .context("import")?;
+        info!("import done");
+
+        //
+        // Reload timeline from remote.
+        // This proves that the remote state is attachable, and it reuses the code.
+        //
+        // TODO: think about whether this is safe to do with concurrent Tenant::shutdown.
+        // timeline_create_guard hols the tenant gate open, so, shutdown cannot _complete_ until we exit.
+        // But our activate() call might launch new background tasks after Tenant::shutdown
+        // already went past shutting down the Tenant::timelines, which this timeline here is no part of.
+        // I think the same problem exists with the bootstrap & branch mgmt API tasks (tenant shutting
+        // down while bootstrapping/branching + activating), but, the race condition is much more likely
+        // to manifest because of the long runtime of this import task.
+
+        //        in theory this shouldn't even .await anything except for coop yield
+        info!("shutting down timeline");
+        timeline.shutdown(ShutdownMode::Hard).await;
+        info!("timeline shut down, reloading from remote");
+        // TODO: we can't do the following check because create_timeline_import_pgdata must return an Arc<Timeline>
+        // let Some(timeline) = Arc::into_inner(timeline) else {
+        //     anyhow::bail!("implementation error: timeline that we shut down was still referenced from somewhere");
+        // };
+        let timeline_id = timeline.timeline_id;
+
+        // load from object storage like Tenant::attach does
+        let resources = self.build_timeline_resources(timeline_id);
+        let index_part = resources
+            .remote_client
+            .download_index_file(&self.cancel)
+            .await?;
+        let index_part = match index_part {
+            MaybeDeletedIndexPart::Deleted(_) => {
+                // likely concurrent delete call, cplane should prevent this
+                anyhow::bail!("index part says deleted but we are not done creating yet, this should not happen but")
+            }
+            MaybeDeletedIndexPart::IndexPart(p) => p,
+        };
+        let metadata = index_part.metadata.clone();
+        self
+            .load_remote_timeline(timeline_id, index_part, metadata, resources, LoadTimelineCause::ImportPgdata{
+                create_guard: timeline_create_guard, activate, }, &ctx)
+            .await?
+            .ready_to_activate()
+            .context("implementation error: reloaded timeline still needs import after import reported success")?;
+
+        anyhow::Ok(())
     }
 
     pub(crate) async fn delete_timeline(
@@ -2448,7 +2758,7 @@ impl Tenant {
                 let timeline_id = timeline.timeline_id;
                 let span = tracing::info_span!("timeline_shutdown", %timeline_id, ?shutdown_mode);
                 js.spawn(async move { timeline.shutdown(shutdown_mode).instrument(span).await });
-            })
+            });
         };
         // test_long_timeline_create_then_tenant_delete is leaning on this message
         tracing::info!("Waiting for timelines...");
@@ -2862,6 +3172,13 @@ where
     Ok(result)
 }
 
+enum ActivateTimelineArgs {
+    Yes {
+        broker_client: storage_broker::BrokerClientChannel,
+    },
+    No,
+}
+
 impl Tenant {
     pub fn tenant_specific_overrides(&self) -> TenantConfOpt {
         self.tenant_conf.load().tenant_conf.clone()
@@ -3025,6 +3342,7 @@ impl Tenant {
     /// `validate_ancestor == false` is used when a timeline is created for deletion
     /// and we might not have the ancestor present anymore which is fine for to be
     /// deleted timelines.
+    #[allow(clippy::too_many_arguments)]
     fn create_timeline_struct(
         &self,
         new_timeline_id: TimelineId,
@@ -3033,6 +3351,7 @@ impl Tenant {
         resources: TimelineResources,
         cause: CreateTimelineCause,
         last_aux_file_policy: Option<AuxFilePolicy>,
+        create_idempotency: CreateTimelineIdempotency,
     ) -> anyhow::Result<Arc<Timeline>> {
         let state = match cause {
             CreateTimelineCause::Load => {
@@ -3063,6 +3382,7 @@ impl Tenant {
             state,
             last_aux_file_policy,
             self.attach_wal_lag_cooldown.clone(),
+            create_idempotency,
             self.cancel.child_token(),
         );
 
@@ -3082,6 +3402,7 @@ impl Tenant {
         remote_storage: GenericRemoteStorage,
         deletion_queue_client: DeletionQueueClient,
         l0_flush_global_state: L0FlushGlobalState,
+        myself: Weak<Tenant>,
     ) -> Tenant {
         debug_assert!(
             !attached_conf.location.generation.is_none() || conf.control_plane_api.is_none()
@@ -3181,6 +3502,7 @@ impl Tenant {
             ongoing_timeline_detach: std::sync::Mutex::default(),
             gc_block: Default::default(),
             l0_flush_global_state,
+            myself,
         }
     }
 
@@ -3548,15 +3870,20 @@ impl Tenant {
     /// timeline background tasks are launched, except the flush loop.
     #[cfg(test)]
     async fn branch_timeline_test(
-        &self,
+        self: &Arc<Self>,
         src_timeline: &Arc<Timeline>,
         dst_id: TimelineId,
         ancestor_lsn: Option<Lsn>,
         ctx: &RequestContext,
     ) -> Result<Arc<Timeline>, CreateTimelineError> {
-        let create_guard = self.create_timeline_create_guard(dst_id).unwrap();
         let tl = self
-            .branch_timeline_impl(src_timeline, dst_id, ancestor_lsn, create_guard, ctx)
+            .branch_timeline_impl(
+                src_timeline,
+                dst_id,
+                ancestor_lsn,
+                ActivateTimelineArgs::No,
+                ctx,
+            )
             .await?;
         tl.set_state(TimelineState::Active);
         Ok(tl)
@@ -3566,7 +3893,7 @@ impl Tenant {
     #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub async fn branch_timeline_test_with_layers(
-        &self,
+        self: &Arc<Self>,
         src_timeline: &Arc<Timeline>,
         dst_id: TimelineId,
         ancestor_lsn: Option<Lsn>,
@@ -3614,27 +3941,25 @@ impl Tenant {
     }
 
     /// Branch an existing timeline.
-    ///
-    /// The caller is responsible for activating the returned timeline.
     async fn branch_timeline(
-        &self,
+        self: &Arc<Self>,
         src_timeline: &Arc<Timeline>,
         dst_id: TimelineId,
         start_lsn: Option<Lsn>,
-        timeline_create_guard: TimelineCreateGuard<'_>,
+        activate: ActivateTimelineArgs,
         ctx: &RequestContext,
     ) -> Result<Arc<Timeline>, CreateTimelineError> {
-        self.branch_timeline_impl(src_timeline, dst_id, start_lsn, timeline_create_guard, ctx)
+        self.branch_timeline_impl(src_timeline, dst_id, start_lsn, activate, ctx)
             .await
     }
 
     async fn branch_timeline_impl(
-        &self,
+        self: &Arc<Self>,
         src_timeline: &Arc<Timeline>,
         dst_id: TimelineId,
         start_lsn: Option<Lsn>,
-        timeline_create_guard: TimelineCreateGuard<'_>,
-        _ctx: &RequestContext,
+        activate: ActivateTimelineArgs,
+        ctx: &RequestContext,
     ) -> Result<Arc<Timeline>, CreateTimelineError> {
         let src_id = src_timeline.timeline_id;
 
@@ -3649,6 +3974,21 @@ impl Tenant {
             info!("branching timeline {dst_id} from timeline {src_id} at last record LSN: {lsn}");
             lsn
         });
+
+        // we finally have determined the ancestor_start_lsn, so we can get claim exclusivity now
+        let timeline_create_guard = match self
+            .start_creating_timeline(
+                dst_id,
+                CreateTimelineIdempotency::Branch {
+                    ancestor_timeline_id: src_timeline.timeline_id,
+                    ancestor_start_lsn: start_lsn,
+                },
+            )
+            .await?
+        {
+            StartCreatingTimelineResult::CreateGuard(guard) => guard,
+            StartCreatingTimelineResult::Idempotent(timeline) => return Ok(timeline),
+        };
 
         // Ensure that `start_lsn` is valid, i.e. the LSN is within the PITR
         // horizon on the source timeline
@@ -3736,6 +4076,23 @@ impl Tenant {
             .schedule_index_upload_for_full_metadata_update(&metadata)
             .context("branch initial metadata upload")?;
 
+        // At this point we have dropped our guard on [`Self::timelines_creating`], and
+        // the timeline is visible in [`Self::timelines`], but it is _not_ durable yet.  We must
+        // not send a success to the caller until it is.  The same applies to handling retries,
+        // that is done in [`Self::start_creating_timeline`].
+        new_timeline
+            .remote_client
+            .wait_completion()
+            .await
+            .context("wait for timeline initial uploads to complete")?;
+
+        match activate {
+            ActivateTimelineArgs::Yes { broker_client } => {
+                new_timeline.activate(self.clone(), broker_client, None, ctx);
+            }
+            ActivateTimelineArgs::No => {}
+        }
+
         Ok(new_timeline)
     }
 
@@ -3743,21 +4100,95 @@ impl Tenant {
     #[cfg(test)]
     #[tracing::instrument(skip_all, fields(tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), %timeline_id))]
     pub(crate) async fn bootstrap_timeline_test(
-        &self,
+        self: &Arc<Self>,
         timeline_id: TimelineId,
         pg_version: u32,
         load_existing_initdb: Option<TimelineId>,
         ctx: &RequestContext,
     ) -> anyhow::Result<Arc<Timeline>> {
-        let create_guard = self.create_timeline_create_guard(timeline_id).unwrap();
         self.bootstrap_timeline(
             timeline_id,
             pg_version,
             load_existing_initdb,
-            create_guard,
+            ActivateTimelineArgs::No,
             ctx,
         )
         .await
+        .map_err(anyhow::Error::new)
+    }
+
+    /// Get exclusive access to the timeline ID for creation.
+    ///
+    /// Timeline-creating code paths must use this function before making changes
+    /// to in-memory or persistent state.
+    ///
+    /// The `state` parameter is a description of the timeline creation operation
+    /// we intend to perform.
+    /// If the timeline was already created in the meantime, we check whether this
+    /// request conflicts or is idempotent , based on `state`.
+    async fn start_creating_timeline(
+        &self,
+        new_timeline_id: TimelineId,
+        idempotency: CreateTimelineIdempotency,
+    ) -> Result<StartCreatingTimelineResult, CreateTimelineError> {
+        match self.create_timeline_create_guard(new_timeline_id, idempotency) {
+            Ok(create_guard) => {
+                pausable_failpoint!("timeline-creation-after-uninit");
+                Ok(StartCreatingTimelineResult::CreateGuard(create_guard))
+            }
+            Err(TimelineExclusionError::ShuttingDown) => Err(CreateTimelineError::ShuttingDown),
+            Err(TimelineExclusionError::AlreadyCreating) => {
+                // Creation is in progress, we cannot create it again, and we cannot
+                // check if this request matches the existing one, so caller must try
+                // again later.
+                Err(CreateTimelineError::AlreadyCreating)
+            }
+            Err(TimelineExclusionError::Other(e)) => Err(CreateTimelineError::Other(e)),
+            Err(TimelineExclusionError::AlreadyExists { existing, arg }) => {
+                {
+                    let existing = &existing.create_idempotency;
+                    let _span = info_span!("idempotency_check", ?existing, ?arg).entered();
+
+                    match (existing, &arg) {
+                        // FailWithConflict => no idempotency check
+                        (CreateTimelineIdempotency::FailWithConflict, _)
+                        | (_, CreateTimelineIdempotency::FailWithConflict) => {
+                            warn!("timeline already exists, failing request");
+                            return Err(CreateTimelineError::Conflict);
+                        }
+                        // Idempotent <=> CreateTimelineIdempotency is identical
+                        (x, y) if x == y => {
+                            info!("timeline already exists and idempotency matches, succeeding request");
+                            // fallthrough
+                        }
+                        (_, _) => {
+                            warn!("idempotency conflict, failing request");
+                            return Err(CreateTimelineError::Conflict);
+                        }
+                    }
+                }
+
+                // Wait for uploads to complete, so that when we return Ok, the timeline
+                // is known to be durable on remote storage. Just like we do at the end of
+                // this function, after we have created the timeline ourselves.
+                //
+                // We only really care that the initial version of `index_part.json` has
+                // been uploaded. That's enough to remember that the timeline
+                // exists. However, there is no function to wait specifically for that so
+                // we just wait for all in-progress uploads to finish.
+                existing
+                    .remote_client
+                    .wait_completion()
+                    .await
+                    .context("wait for timeline uploads to complete")?;
+
+                // TODO: shouldn't we also wait for timeline to become active?
+                // Code before this(https://github.com/neondatabase/neon/pull/9366) refactoring
+                // didn't do it.
+
+                Ok(StartCreatingTimelineResult::Idempotent(existing))
+            }
+        }
     }
 
     async fn upload_initdb(
@@ -3811,16 +4242,27 @@ impl Tenant {
 
     /// - run initdb to init temporary instance and get bootstrap data
     /// - after initialization completes, tar up the temp dir and upload it to S3.
-    ///
-    /// The caller is responsible for activating the returned timeline.
     async fn bootstrap_timeline(
-        &self,
+        self: &Arc<Self>,
         timeline_id: TimelineId,
         pg_version: u32,
         load_existing_initdb: Option<TimelineId>,
-        timeline_create_guard: TimelineCreateGuard<'_>,
+        activate: ActivateTimelineArgs,
         ctx: &RequestContext,
-    ) -> anyhow::Result<Arc<Timeline>> {
+    ) -> Result<Arc<Timeline>, CreateTimelineError> {
+        let timeline_create_guard = match self
+            .start_creating_timeline(
+                timeline_id,
+                CreateTimelineIdempotency::Bootstrap(CreatingTimelineIdempotencyBootstrap {
+                    pg_version,
+                }),
+            )
+            .await?
+        {
+            StartCreatingTimelineResult::CreateGuard(guard) => guard,
+            StartCreatingTimelineResult::Idempotent(timeline) => return Ok(timeline),
+        };
+
         // create a `tenant/{tenant_id}/timelines/basebackup-{timeline_id}.{TEMP_FILE_SUFFIX}/`
         // temporary directory for basebackup files for the given timeline.
 
@@ -3884,7 +4326,9 @@ impl Tenant {
                 .context("extract initdb tar")?;
         } else {
             // Init temporarily repo to get bootstrap data, this creates a directory in the `pgdata_path` path
-            run_initdb(self.conf, &pgdata_path, pg_version, &self.cancel).await?;
+            run_initdb(self.conf, &pgdata_path, pg_version, &self.cancel)
+                .await
+                .context("run initdb")?;
 
             // Upload the created data dir to S3
             if self.tenant_shard_id().is_shard_zero() {
@@ -3939,7 +4383,9 @@ impl Tenant {
         })?;
 
         fail::fail_point!("before-checkpoint-new-timeline", |_| {
-            anyhow::bail!("failpoint before-checkpoint-new-timeline");
+            Err(CreateTimelineError::Other(anyhow::anyhow!(
+                "failpoint before-checkpoint-new-timeline"
+            )))
         });
 
         unfinished_timeline
@@ -3953,6 +4399,23 @@ impl Tenant {
 
         // All done!
         let timeline = raw_timeline.finish_creation()?;
+
+        // At this point we have dropped our guard on [`Self::timelines_creating`], and
+        // the timeline is visible in [`Self::timelines`], but it is _not_ durable yet.  We must
+        // not send a success to the caller until it is.  The same applies to handling retries,
+        // that is done in [`Self::start_creating_timeline`].
+        timeline
+            .remote_client
+            .wait_completion()
+            .await
+            .context("wait for timeline initial uploads to complete")?;
+
+        match activate {
+            ActivateTimelineArgs::Yes { broker_client } => {
+                timeline.activate(self.clone(), broker_client, None, ctx);
+            }
+            ActivateTimelineArgs::No => {}
+        }
 
         Ok(timeline)
     }
@@ -3983,7 +4446,7 @@ impl Tenant {
         &'a self,
         new_timeline_id: TimelineId,
         new_metadata: &TimelineMetadata,
-        create_guard: TimelineCreateGuard<'a>,
+        create_guard: TimelineCreateGuard,
         start_lsn: Lsn,
         ancestor: Option<Arc<Timeline>>,
         last_aux_file_policy: Option<AuxFilePolicy>,
@@ -4003,6 +4466,7 @@ impl Tenant {
                 resources,
                 CreateTimelineCause::Load,
                 last_aux_file_policy,
+                create_guard.idempotency.clone(),
             )
             .context("Failed to create timeline data structure")?;
 
@@ -4043,12 +4507,14 @@ impl Tenant {
     fn create_timeline_create_guard(
         &self,
         timeline_id: TimelineId,
+        idempotency: CreateTimelineIdempotency,
     ) -> Result<TimelineCreateGuard, TimelineExclusionError> {
         let tenant_shard_id = self.tenant_shard_id;
 
         let timeline_path = self.conf.timeline_path(&tenant_shard_id, &timeline_id);
 
-        let create_guard = TimelineCreateGuard::new(self, timeline_id, timeline_path.clone())?;
+        let create_guard =
+            TimelineCreateGuard::new(self, timeline_id, timeline_path.clone(), idempotency)?;
 
         // At this stage, we have got exclusive access to in-memory state for this timeline ID
         // for creation.
@@ -4250,34 +4716,14 @@ async fn run_initdb(
 
     let _permit = INIT_DB_SEMAPHORE.acquire().await;
 
-    let initdb_command = tokio::process::Command::new(&initdb_bin_path)
-        .args(["--pgdata", initdb_target_dir.as_ref()])
-        .args(["--username", &conf.superuser])
-        .args(["--encoding", "utf8"])
-        .arg("--no-instructions")
-        .arg("--no-sync")
-        .env_clear()
-        .env("LD_LIBRARY_PATH", &initdb_lib_dir)
-        .env("DYLD_LIBRARY_PATH", &initdb_lib_dir)
-        .stdin(std::process::Stdio::null())
-        // stdout invocation produces the same output every time, we don't need it
-        .stdout(std::process::Stdio::null())
-        // we would be interested in the stderr output, if there was any
-        .stderr(std::process::Stdio::piped())
-        .spawn()?;
-
-    // Ideally we'd select here with the cancellation token, but the problem is that
-    // we can't safely terminate initdb: it launches processes of its own, and killing
-    // initdb doesn't kill them. After we return from this function, we want the target
-    // directory to be able to be cleaned up.
-    // See https://github.com/neondatabase/neon/issues/6385
-    let initdb_output = initdb_command.wait_with_output().await?;
-    if !initdb_output.status.success() {
-        return Err(InitdbError::Failed(
-            initdb_output.status,
-            initdb_output.stderr,
-        ));
-    }
+    let res = postgres_initdb::do_run_initdb(postgres_initdb::RunInitdbArgs {
+        superuser: &conf.superuser,
+        initdb_bin: &initdb_bin_path,
+        library_search_path: &initdb_lib_dir,
+        pgdata: initdb_target_dir,
+    })
+    .await
+    .map_err(InitdbError::Inner);
 
     // This isn't true cancellation support, see above. Still return an error to
     // excercise the cancellation code path.
@@ -4285,7 +4731,7 @@ async fn run_initdb(
         return Err(InitdbError::Cancelled);
     }
 
-    Ok(())
+    res
 }
 
 /// Dump contents of a layer file to stdout.
@@ -4503,24 +4949,27 @@ pub(crate) mod harness {
         ) -> anyhow::Result<Arc<Tenant>> {
             let walredo_mgr = Arc::new(WalRedoManager::from(TestRedoManager));
 
-            let tenant = Arc::new(Tenant::new(
-                TenantState::Attaching,
-                self.conf,
-                AttachedTenantConf::try_from(LocationConf::attached_single(
-                    TenantConfOpt::from(self.tenant_conf.clone()),
-                    self.generation,
-                    &ShardParameters::default(),
-                ))
-                .unwrap(),
-                // This is a legacy/test code path: sharding isn't supported here.
-                ShardIdentity::unsharded(),
-                Some(walredo_mgr),
-                self.tenant_shard_id,
-                self.remote_storage.clone(),
-                self.deletion_queue.new_client(),
-                // TODO: ideally we should run all unit tests with both configs
-                L0FlushGlobalState::new(L0FlushConfig::default()),
-            ));
+            let tenant = Arc::new_cyclic(|myself| {
+                Tenant::new(
+                    TenantState::Attaching,
+                    self.conf,
+                    AttachedTenantConf::try_from(LocationConf::attached_single(
+                        TenantConfOpt::from(self.tenant_conf.clone()),
+                        self.generation,
+                        &ShardParameters::default(),
+                    ))
+                    .unwrap(),
+                    // This is a legacy/test code path: sharding isn't supported here.
+                    ShardIdentity::unsharded(),
+                    Some(walredo_mgr),
+                    self.tenant_shard_id,
+                    self.remote_storage.clone(),
+                    self.deletion_queue.new_client(),
+                    // TODO: ideally we should run all unit tests with both configs
+                    L0FlushGlobalState::new(L0FlushConfig::default()),
+                    myself.clone(),
+                )
+            });
 
             let preload = tenant
                 .preload(&self.remote_storage, CancellationToken::new())
@@ -4686,7 +5135,10 @@ mod tests {
             .await
         {
             Ok(_) => panic!("duplicate timeline creation should fail"),
-            Err(e) => assert_eq!(e.to_string(), "Already exists".to_string()),
+            Err(e) => assert_eq!(
+                e.to_string(),
+                "timeline already exists with different parameters".to_string()
+            ),
         }
 
         Ok(())
