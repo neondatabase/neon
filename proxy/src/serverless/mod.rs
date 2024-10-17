@@ -5,6 +5,7 @@
 mod backend;
 pub mod cancel_set;
 mod conn_pool;
+mod conn_pool_lib;
 mod http_conn_pool;
 mod http_util;
 mod json;
@@ -20,7 +21,7 @@ use anyhow::Context;
 use async_trait::async_trait;
 use atomic_take::AtomicTake;
 use bytes::Bytes;
-pub use conn_pool::GlobalConnPoolOptions;
+pub use conn_pool_lib::GlobalConnPoolOptions;
 use futures::future::{select, Either};
 use futures::TryFutureExt;
 use http::{Method, Response, StatusCode};
@@ -65,7 +66,7 @@ pub async fn task_main(
     }
 
     let local_pool = local_conn_pool::LocalConnPool::new(&config.http_config);
-    let conn_pool = conn_pool::GlobalConnPool::new(&config.http_config);
+    let conn_pool = conn_pool_lib::GlobalConnPool::new(&config.http_config);
     {
         let conn_pool = Arc::clone(&conn_pool);
         tokio::spawn(async move {
