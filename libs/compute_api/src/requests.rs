@@ -1,6 +1,6 @@
 //! Structs representing the JSON formats used in the compute_ctl's HTTP API.
 
-use crate::{privilege::Privilege, spec::ComputeSpec};
+use crate::{privilege::Privilege, spec::{ComputeSpec, PgIdent}};
 use serde::Deserialize;
 
 /// Request of the /configure API
@@ -15,8 +15,8 @@ pub struct ConfigurationRequest {
 
 #[derive(Deserialize, Debug)]
 pub struct SetRoleGrantsRequest {
-    pub database: String,
-    pub schema: String,
+    pub database: PgIdent,
+    pub schema: PgIdent,
     pub privileges: Vec<Privilege>,
-    pub role: String,
+    pub role: PgIdent,
 }
