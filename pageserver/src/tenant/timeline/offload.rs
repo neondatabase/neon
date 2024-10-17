@@ -44,6 +44,8 @@ pub(crate) async fn offload_timeline(
     // TODO: maybe move this step above, right above deletion of the local timeline directory,
     // then there is no potential race condition where we partially offload a timeline, and
     // at the next restart attach it again.
+    // For that to happen, we'd need to make the manifest reflect our *intended* state,
+    // not our actual state of offloaded timelines.
     let manifest = tenant.tenant_manifest();
     // TODO: generation support
     let generation = Generation::none();
