@@ -860,14 +860,24 @@ ENV PATH="/home/nonroot/.cargo/bin:/usr/local/pgsql/bin/:$PATH"
 USER nonroot
 WORKDIR /home/nonroot
 
-RUN case "${PG_VERSION}" in "v17") \
-    echo "v17 is not supported yet by pgrx. Quit" && exit 0;; \
+# Use new version only for v17
+# TODO test and update pgrx for older versions too
+RUN case "${PG_VERSION}" in \
+    "v17") \
+        export PGRX_VERSION=0.12.6 \
+    ;; \
+    "v14" | "v15" | "v16") \
+        export PGRX_VERSION=0.11.3 \
+    ;; \
+    *) \
+        echo "unexpected PostgreSQL version" && exit 1 \
+    ;; \
     esac && \
     curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux-gnu/rustup-init && \
     chmod +x rustup-init && \
     ./rustup-init -y --no-modify-path --profile minimal --default-toolchain stable && \
     rm rustup-init && \
-    cargo install --locked --version 0.11.3 cargo-pgrx && \
+    cargo install --locked --version ${PGRX_VERSION} cargo-pgrx && \
     /bin/bash -c 'cargo pgrx init --pg${PG_VERSION:1}=/usr/local/pgsql/bin/pg_config'
 
 USER root
@@ -882,18 +892,36 @@ USER root
 FROM rust-extensions-build AS pg-jsonschema-pg-build
 ARG PG_VERSION
 
-RUN case "${PG_VERSION}" in "v17") \
-    echo "pg_jsonschema does not yet have a release that supports pg17" && exit 0;; \
+# version 0.3.3 supports v17
+# last release v0.3.3 - Oct 16, 2024
+#
+# there were no breaking changes
+# so we can use the same version for all versions
+# when we're ready to bump pgrx for everyone
+RUN case "${PG_VERSION}" in \
+    "v17") \
+        export PG_JSONSCHEMA_VERSION=0.3.3 \
+        export PG_JSONSCHEMA_CHECKSUM=40c2cffab4187e0233cb8c3bde013be92218c282f95f4469c5282f6b30d64eac \
+        export PGRX_VERSION=0.12.6 \
+    ;; \
+    "v14" | "v15" | "v16") \
+        export PG_JSONSCHEMA_VERSION=0.3.1 \
+        export PG_JSONSCHEMA_CHECKSUM=61df3db1ed83cf24f6aa39c826f8818bfa4f0bd33b587fd6b2b1747985642297 \
+        export PGRX_VERSION=0.11.3 \
+    ;; \
+    *) \
+        echo "unexpected PostgreSQL version" && exit 1 \
+    ;; \
     esac && \
-    wget https://github.com/supabase/pg_jsonschema/archive/refs/tags/v0.3.1.tar.gz -O pg_jsonschema.tar.gz && \
-    echo "61df3db1ed83cf24f6aa39c826f8818bfa4f0bd33b587fd6b2b1747985642297 pg_jsonschema.tar.gz" | sha256sum --check && \
+    wget https://github.com/supabase/pg_jsonschema/archive/refs/tags/v${PG_JSONSCHEMA_VERSION}.tar.gz -O pg_jsonschema.tar.gz && \
+    echo "${PG_JSONSCHEMA_CHECKSUM} pg_jsonschema.tar.gz" | sha256sum --check && \
     mkdir pg_jsonschema-src && cd pg_jsonschema-src && tar xzf ../pg_jsonschema.tar.gz --strip-components=1 -C . && \
     # see commit 252b3685a27a0f4c31a0f91e983c6314838e89e8
     # `unsafe-postgres` feature allows to build pgx extensions
     # against postgres forks that decided to change their ABI name (like us).
     # With that we can build extensions without forking them and using stock
     # pgx. As this feature is new few manual version bumps were required.
-    sed -i 's/pgrx = "0.11.3"/pgrx = { version = "0.11.3", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
+    sed -i 's/pgrx = "${PGRX_VERSION}"/pgrx = { version = "${PGRX_VERSION}", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
     cargo pgrx install --release && \
     echo "trusted = true" >> /usr/local/pgsql/share/extension/pg_jsonschema.control
 
@@ -907,13 +935,31 @@ RUN case "${PG_VERSION}" in "v17") \
 FROM rust-extensions-build AS pg-graphql-pg-build
 ARG PG_VERSION
 
-RUN case "${PG_VERSION}" in "v17") \
-    echo "pg_graphql does not yet have a release that supports pg17 as of now" && exit 0;; \
+# version 1.5.9 supports v17
+# last release v1.5.9 - Oct 16, 2024
+#
+# looks like there were no breaking changes
+# so we can use the same version for all versions
+# when we're ready to bump pgrx for everyone
+RUN case "${PG_VERSION}" in \
+    "v17") \
+        export PG_GRAPHQL_VERSION=1.5.9 \
+        export PG_GRAPHQL_CHECKSUM=cf768385a41278be1333472204fc0328118644ae443182cf52f7b9b23277e497 \
+        export PGRX_VERSION=0.12.6 \
+    ;; \
+    "v14" | "v15" | "v16") \
+        export PG_GRAPHQL_VERSION=1.5.7 \
+        export PG_GRAPHQL_CHECKSUM=2b3e567a5b31019cb97ae0e33263c1bcc28580be5a444ac4c8ece5c4be2aea41 \
+        export PGRX_VERSION=0.11.3 \
+    ;; \
+    *) \
+        echo "unexpected PostgreSQL version" && exit 1 \
+    ;; \
     esac && \
-    wget https://github.com/supabase/pg_graphql/archive/refs/tags/v1.5.7.tar.gz -O pg_graphql.tar.gz && \
-    echo "2b3e567a5b31019cb97ae0e33263c1bcc28580be5a444ac4c8ece5c4be2aea41 pg_graphql.tar.gz" | sha256sum --check && \
+    wget https://github.com/supabase/pg_graphql/archive/refs/tags/v${PG_GRAPHQL_VERSION}.tar.gz -O pg_graphql.tar.gz && \
+    echo "${PG_GRAPHQL_CHECKSUM} pg_graphql.tar.gz" | sha256sum --check && \
     mkdir pg_graphql-src && cd pg_graphql-src && tar xzf ../pg_graphql.tar.gz --strip-components=1 -C . && \
-    sed -i 's/pgrx = "=0.11.3"/pgrx = { version = "0.11.3", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
+    sed -i 's/pgrx = "=${PGRX_VERSION}"/pgrx = { version = "${PGRX_VERSION}", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
     cargo pgrx install --release && \
     # it's needed to enable extension because it uses untrusted C language
     sed -i 's/superuser = false/superuser = true/g' /usr/local/pgsql/share/extension/pg_graphql.control && \
@@ -930,6 +976,10 @@ FROM rust-extensions-build AS pg-tiktoken-pg-build
 ARG PG_VERSION
 
 # 26806147b17b60763039c6a6878884c41a262318 made on 26/09/2023
+# doesn't support pg17 yet
+# it depends on pgrx which doesn't support pg17
+#
+# Also, we need to start using releases instead of commits
 RUN case "${PG_VERSION}" in "v17") \
     echo "pg_tiktoken does not have versions, nor support for pg17" && exit 0;; \
     esac && \
@@ -952,6 +1002,9 @@ RUN case "${PG_VERSION}" in "v17") \
 FROM rust-extensions-build AS pg-pgx-ulid-build
 ARG PG_VERSION
 
+# doesn't support pg17 yet
+# it depends on pgrx which doesn't support pg17
+# https://github.com/pksunkara/pgx_ulid/issues/51
 RUN case "${PG_VERSION}" in "v17") \
     echo "pgx_ulid does not support pg17 as of the latest version (0.1.5)" && exit 0;; \
     esac && \
@@ -972,13 +1025,25 @@ RUN case "${PG_VERSION}" in "v17") \
 FROM rust-extensions-build AS pg-session-jwt-build
 ARG PG_VERSION
 
-RUN case "${PG_VERSION}" in "v17") \
-    echo "pg_session_jwt does not yet have a release that supports pg17" && exit 0;; \
+# doesn't support pg17 yet
+# it depends on pgrx which doesn't support pg17
+RUN case "${PG_VERSION}" in \
+    "v17") \
+        echo "pg_session_jwt does not yet have a release that supports pg17" && exit 0;; \
+    ;; \
+    "v14" | "v15" | "v16") \
+        export PG_SESSION_JWT_VERSION=0.1.1 \
+        esport PG_SESSION_JWT_CHECKSUM=5d91b10bc1347d36cffc456cb87bec25047935d6503dc652ca046f04760828e7 \
+        export PGRX_VERSION=0.11.3 \
+    ;; \
+    *) \
+        echo "unexpected PostgreSQL version" && exit 1 \
+    ;; \
     esac && \
-    wget https://github.com/neondatabase/pg_session_jwt/archive/e642528f429dd3f5403845a50191b78d434b84a6.tar.gz -O pg_session_jwt.tar.gz && \
-    echo "1a69210703cc91224785e59a0a67562dd9eed9a0914ac84b11447582ca0d5b93 pg_session_jwt.tar.gz" | sha256sum --check && \
+    wget https://github.com/neondatabase/pg_session_jwt/archive/refs/tags/v${PG_SESSION_JWT_VERSION}.tar.gz -O pg_session_jwt.tar.gz && \
+    echo "${PG_SESSION_JWT_CHECKSUM} pg_session_jwt.tar.gz" | sha256sum --check && \
     mkdir pg_session_jwt-src && cd pg_session_jwt-src && tar xzf ../pg_session_jwt.tar.gz --strip-components=1 -C . && \
-    sed -i 's/pgrx = "=0.11.3"/pgrx = { version = "=0.11.3", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
+    sed -i 's/pgrx = "=${PGRX_VERSION}"/pgrx = { version = "=${PGRX_VERSION}", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
     cargo pgrx install --release
 
 #########################################################################################
