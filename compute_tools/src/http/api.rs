@@ -109,7 +109,7 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
                     status
                 );
                 error!(msg);
-                return Response::new(Body::from(msg));
+                return render_json_error(&msg, StatusCode::PRECONDITION_FAILED);
             }
 
             let request = hyper::body::to_bytes(req.into_body()).await.unwrap();
