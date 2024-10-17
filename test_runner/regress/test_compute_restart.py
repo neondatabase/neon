@@ -1,8 +1,6 @@
 import threading
-import time
 
 from fixtures.neon_fixtures import NeonEnv
-from fixtures.utils import wait_until
 
 
 def test_compute_restart(neon_simple_env: NeonEnv):
@@ -11,7 +9,7 @@ def test_compute_restart(neon_simple_env: NeonEnv):
     pub = env.endpoints.create("publisher")
     pub.start()
 
-    sub_timeline_id = env.neon_cli.create_branch("subscriber")
+    sub_timeline_id = env.create_branch("subscriber")
     sub = env.endpoints.create("subscriber")
     sub.start()
 
@@ -38,4 +36,3 @@ def test_compute_restart(neon_simple_env: NeonEnv):
             sub.start()
 
         thread.join()
-
