@@ -273,7 +273,6 @@ impl PoolingBackend {
                     .install_extension(&ExtensionInstallRequest {
                         extension: EXT_NAME,
                         database: conn_info.dbname.clone(),
-                        // todo: move to const or config
                         version: EXT_VERSION,
                     })
                     .await?;
@@ -281,7 +280,6 @@ impl PoolingBackend {
                 local_backend
                     .compute_ctl
                     .grant_role(&SetRoleGrantsRequest {
-                        // fixed for pg_session_jwt
                         schema: EXT_SCHEMA,
                         privileges: vec![Privilege::Usage],
                         database: conn_info.dbname.clone(),
