@@ -558,10 +558,10 @@ select sent_lsn, flush_lsn, pg_current_wal_flush_lsn() from pg_stat_replication 
     return publisher_flush_lsn
 
 
-# Test that subscriber takes into account quorum committed flush_lsn in
-# flush_lsn reporting to publisher. Without this, it may ack too far, losing
-# data on restart because publisher advances START_REPLICATION position to the
-# confirmed_flush_lsn of the slot.
+# Test that neon subscriber takes into account quorum committed flush_lsn in
+# flush_lsn reporting to publisher. Without this, subscriber may ack too far,
+# losing data on restart because publisher implicitly advances positition given
+# in START_REPLICATION to the confirmed_flush_lsn of the slot.
 def test_subscriber_synchronous_commit(neon_simple_env: NeonEnv, vanilla_pg):
     env = neon_simple_env
     # use vanilla as publisher to allow writes on it when safekeeper is down
@@ -578,7 +578,10 @@ def test_subscriber_synchronous_commit(neon_simple_env: NeonEnv, vanilla_pg):
     vanilla_pg.safe_psql("create extension neon;")
 
     env.create_branch("subscriber")
-    sub = env.endpoints.create("subscriber")
+    # We want all data to fit into shared_buffers because later we stop
+    # safekeeper and insert more; this shouldn't cause page requests as they
+    # will be stuck.
+    sub = env.endpoints.create("subscriber", config_lines=["shared_buffers=128MB"])
     sub.start()
 
     with vanilla_pg.cursor() as pcur:
