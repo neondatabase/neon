@@ -9,9 +9,12 @@ use crate::catalog::SchemaDumpError;
 use crate::catalog::{get_database_schema, get_dbs_and_roles};
 use crate::compute::forward_termination_signal;
 use crate::compute::{ComputeNode, ComputeState, ParsedSpec};
-use compute_api::requests::{ConfigurationRequest, ExtensionInstallRequest};
+use compute_api::requests::{
+    ExtensionInstallRequest, {ConfigurationRequest, SetRoleGrantsRequest},
+};
 use compute_api::responses::{
     ComputeStatus, ComputeStatusResponse, ExtensionInstallResult, GenericAPIError,
+    SetRoleGrantsResponse,
 };
 
 use anyhow::Result;
@@ -195,6 +198,46 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
                 Err(e) => {
                     error!("can't get schema dump: {}", e);
                     render_json_error("can't get schema dump", StatusCode::INTERNAL_SERVER_ERROR)
+                }
+            }
+        }
+
+        (&Method::POST, "/grants") => {
+            info!("serving /grants POST request");
+            let status = compute.get_status();
+            if status != ComputeStatus::Running {
+                let msg = format!(
+                    "invalid compute status for set_role_grants request: {:?}",
+                    status
+                );
+                error!(msg);
+                return Response::new(Body::from(msg));
+            }
+
+            let request = hyper::body::to_bytes(req.into_body()).await.unwrap();
+            let request = serde_json::from_slice::<SetRoleGrantsRequest>(&request).unwrap();
+
+            let res = compute
+                .set_role_grants(
+                    &request.database,
+                    &request.schema,
+                    &request.privileges,
+                    &request.role,
+                )
+                .await;
+            match res {
+                Ok(()) => render_json(Body::from(
+                    serde_json::to_string(&SetRoleGrantsResponse {
+                        database: request.database,
+                        schema: request.schema,
+                        role: request.role,
+                        privileges: request.privileges,
+                    })
+                    .unwrap(),
+                )),
+                Err(e) => {
+                    error!("set_role_grants failed: {}", e);
+                    Response::new(Body::from(e.to_string()))
                 }
             }
         }

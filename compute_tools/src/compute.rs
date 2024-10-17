@@ -25,6 +25,7 @@ use tracing::{debug, error, info, instrument, warn};
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 
+use compute_api::privilege::Privilege;
 use compute_api::responses::{ComputeMetrics, ComputeStatus};
 use compute_api::spec::{ComputeFeature, ComputeMode, ComputeSpec};
 use utils::measured_stream::MeasuredReader;
@@ -1415,6 +1416,46 @@ LIMIT 100",
         }
 
         Ok(ext_version.to_string())
+    }
+
+    pub async fn set_role_grants(
+        &self,
+        db_name: &str,
+        schema_name: &str,
+        privileges: &[Privilege],
+        role_name: &str,
+    ) -> Result<()> {
+        use tokio_postgres::config::Config;
+        use tokio_postgres::NoTls;
+
+        let mut conf = Config::from_str(self.connstr.as_str()).unwrap();
+        conf.dbname(db_name);
+
+        let (db_client, conn) = conf
+            .connect(NoTls)
+            .await
+            .context("Failed to connect to the database")?;
+        tokio::spawn(conn);
+
+        let query = format!(
+            "GRANT {} ON SCHEMA {} TO {}",
+            privileges
+                .iter()
+                // should not be quoted as it's part of the command.
+                // is already sanitized so it's ok
+                .map(|p| serde_json::to_string(p).unwrap())
+                .collect::<Vec<String>>()
+                .join(", "),
+            // quote the schema and role name as identifiers to sanitize them.
+            schema_name.to_string().pg_quote(),
+            role_name.to_string().pg_quote(),
+        );
+        db_client
+            .simple_query(&query)
+            .await
+            .context(format!("Failed to execute query: {}", query))?;
+
+        Ok(())
     }
 
     #[tokio::main]
