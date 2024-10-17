@@ -36,7 +36,10 @@ use crate::{
     context::{DownloadBehavior, RequestContext},
     pgdatadir_mapping::{DbDirectory, RelDirectory},
     task_mgr::TaskKind,
-    tenant::storage_layer::{ImageLayerWriter, Layer},
+    tenant::{
+        metadata::TimelineMetadata,
+        storage_layer::{ImageLayerWriter, Layer},
+    },
 };
 use crate::{
     assert_u64_eq_usize::UsizeIsU64,
@@ -64,23 +67,6 @@ use remote_storage::{
 };
 
 static PGDATA_DIR: Lazy<RemotePath> = Lazy::new(|| RemotePath::from_string("pgdata").unwrap());
-
-pub(crate) async fn create<'a>(
-    conf: &'static PageServerConf,
-    in_progress: index_part_format::InProgress,
-    cancel: CancellationToken,
-) -> anyhow::Result<(ControlFile, index_part_format::Root)> {
-    let storage_wrapper = make_storage_wrapper(conf, &in_progress.location, cancel).await?;
-
-    let spec = get_spec(&storage_wrapper).await?;
-    info!(?spec, "found spec");
-
-    let control_file = get_control_file(&PGDATA_DIR, &storage_wrapper).await?;
-
-    let index_part = index_part_format::Root::V1(index_part_format::V1::InProgress(in_progress));
-
-    Ok((control_file, index_part))
-}
 
 async fn make_storage_wrapper(
     conf: &'static PageServerConf,
@@ -139,6 +125,7 @@ async fn get_control_file(
     storage_wrapper: &RemoteStorageWrapper,
 ) -> Result<ControlFile, anyhow::Error> {
     let control_file_path = pgdata_dir.join("global/pg_control");
+    info!("get control file from {control_file_path}");
     let control_file_buf = storage_wrapper.get(&control_file_path).await?;
     let control_file_data = ControlFileData::decode(&control_file_buf)?;
     let control_file = ControlFile {
@@ -285,12 +272,47 @@ pub async fn doit(
         //
         info!("do the import");
         let control_file = get_control_file(&PGDATA_DIR, &storage).await?;
-        let pgdata_lsn = control_file.base_lsn();
+        let base_lsn = control_file.base_lsn();
+
+        info!("update TimelineMetadata based on LSNs from control file");
+        {
+            let pg_version = control_file.pg_version();
+            let _ctx: &RequestContext = ctx;
+            async move {
+                // FIXME: The 'disk_consistent_lsn' should be the LSN at the *end* of the
+                // checkpoint record, and prev_record_lsn should point to its beginning.
+                // We should read the real end of the record from the WAL, but here we
+                // just fake it.
+                let disk_consistent_lsn = Lsn(base_lsn.0 + 8);
+                let prev_record_lsn = base_lsn;
+                let metadata = TimelineMetadata::new(
+                    disk_consistent_lsn,
+                    Some(prev_record_lsn),
+                    None,     // no ancestor
+                    Lsn(0),   // no ancestor lsn
+                    base_lsn, // latest_gc_cutoff_lsn
+                    base_lsn, // initdb_lsn
+                    pg_version,
+                );
+
+                let _start_lsn = disk_consistent_lsn + 1;
+
+                timeline
+                    .remote_client
+                    .schedule_index_upload_for_full_metadata_update(&metadata)?;
+
+                timeline.remote_client.wait_completion().await?;
+
+                anyhow::Ok(())
+            }
+        }
+        .await?;
+
         PgImportEnv {
             timeline: timeline.clone(),
             pgdata_dir: PGDATA_DIR.clone(),
             control_file,
-            pgdata_lsn,
+            pgdata_lsn: base_lsn,
             tasks: Vec::new(),
             storage: storage.clone(),
         }
@@ -310,6 +332,11 @@ pub async fn doit(
     // Ensure at-least-once deliver of the upcall to cplane
     // before we mark the task as done and never come here again.
     //
+    info!("send final progress update");
+    upcall_client
+        .send_progress_until_success(&spec)
+        .instrument(info_span!("final_progress_update"))
+        .await?;
 
     //
     // Mark as done in index_part.
@@ -326,6 +353,7 @@ pub async fn doit(
                 finished_at: chrono::Utc::now().naive_utc(),
             }),
         )))?;
+
     timeline.remote_client.wait_completion().await?;
 
     Ok(())

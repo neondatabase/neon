@@ -2232,42 +2232,27 @@ impl Tenant {
             StartCreatingTimelineResult::Idempotent(timeline) => return Ok(timeline),
         };
 
-        let (control_file, index_part) = import_pgdata::create(
-            import_pgdata::flow::index_part_format::InProgress {
-                idempotency_key,
-                location,
-                started_at,
-            },
-            self.cancel.clone(),
-        )
-        .await?;
-
         let mut uninit_timeline = {
-            let base_lsn = control_file.base_lsn();
-            let pg_version = control_file.pg_version();
-            let _ctx: &RequestContext = ctx;
+            let this = &self;
+            let initdb_lsn = Lsn(0);
+            let _ctx = ctx;
             async move {
-                // FIXME: The 'disk_consistent_lsn' should be the LSN at the *end* of the
-                // checkpoint record, and prev_record_lsn should point to its beginning.
-                // We should read the real end of the record from the WAL, but here we
-                // just fake it.
-                let disk_consistent_lsn = Lsn(base_lsn.0 + 8);
-                let prev_record_lsn = base_lsn;
-                let metadata = TimelineMetadata::new(
-                    disk_consistent_lsn,
-                    Some(prev_record_lsn),
-                    None,     // no ancestor
-                    Lsn(0),   // no ancestor lsn
-                    base_lsn, // latest_gc_cutoff_lsn
-                    base_lsn, // initdb_lsn
-                    pg_version,
+                let new_metadata = TimelineMetadata::new(
+                    // Initialize disk_consistent LSN to 0, The caller must import some data to
+                    // make it valid, before calling finish_creation()
+                    Lsn(0),
+                    None,
+                    None,
+                    Lsn(0),
+                    initdb_lsn,
+                    initdb_lsn,
+                    15,
                 );
-
-                self.prepare_new_timeline(
+                this.prepare_new_timeline(
                     new_timeline_id,
-                    &metadata,
+                    &new_metadata,
                     timeline_create_guard,
-                    disk_consistent_lsn + 1,
+                    initdb_lsn,
                     None,
                     None,
                 )
@@ -2276,6 +2261,13 @@ impl Tenant {
         }
         .await?;
 
+        let in_progress = import_pgdata::flow::index_part_format::InProgress {
+            idempotency_key,
+            location,
+            started_at,
+        };
+        let index_part =
+            import_pgdata::flow::index_part_format::Root::V1(import_pgdata::flow::index_part_format::V1::InProgress(in_progress));
         uninit_timeline
             .raw_timeline()
             .unwrap()
