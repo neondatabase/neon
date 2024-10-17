@@ -26,7 +26,7 @@ use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 
 use compute_api::responses::{ComputeMetrics, ComputeStatus};
-use compute_api::spec::{ComputeFeature, ComputeMode, ComputeSpec};
+use compute_api::spec::{ComputeFeature, ComputeMode, ComputeSpec, ExtVersion};
 use utils::measured_stream::MeasuredReader;
 
 use nix::sys::signal::{kill, Signal};
@@ -1372,7 +1372,7 @@ LIMIT 100",
         ext_name: &str,
         db_name: &str,
         ext_version: &str,
-    ) -> Result<String> {
+    ) -> Result<ExtVersion> {
         use tokio_postgres::config::Config;
         use tokio_postgres::NoTls;
 
@@ -1414,7 +1414,7 @@ LIMIT 100",
                 .with_context(|| format!("Failed to execute query: {}", query))?;
         }
 
-        Ok(ext_version.to_string())
+        Ok(ext_version)
     }
 
     #[tokio::main]
