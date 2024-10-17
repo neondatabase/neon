@@ -15,6 +15,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+use compute_api::spec::PgIdent;
 use futures::future::join_all;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
@@ -1369,9 +1370,9 @@ LIMIT 100",
 
     pub async fn install_extension(
         &self,
-        ext_name: &str,
-        db_name: &str,
-        ext_version: &str,
+        ext_name: &PgIdent,
+        db_name: &PgIdent,
+        ext_version: ExtVersion,
     ) -> Result<ExtVersion> {
         use tokio_postgres::config::Config;
         use tokio_postgres::NoTls;
@@ -1393,21 +1394,21 @@ LIMIT 100",
             .map(|row| row.get(0));
 
         // sanitize the inputs as postgres idents.
-        let ext_name: String = ext_name.to_string().pg_quote();
-        let ext_version: String = ext_version.to_string().pg_quote();
+        let ext_name: String = ext_name.pg_quote();
+        let quoted_version: String = ext_version.pg_quote();
 
         if let Some(installed_version) = version {
             if installed_version == ext_version {
                 return Ok(installed_version);
             }
-            let query = format!("ALTER EXTENSION {ext_name} UPDATE TO {ext_version}");
+            let query = format!("ALTER EXTENSION {ext_name} UPDATE TO {quoted_version}");
             db_client
                 .simple_query(&query)
                 .await
                 .with_context(|| format!("Failed to execute query: {}", query))?;
         } else {
             let query =
-                format!("CREATE EXTENSION IF NOT EXISTS {ext_name} WITH VERSION {ext_version}");
+                format!("CREATE EXTENSION IF NOT EXISTS {ext_name} WITH VERSION {quoted_version}");
             db_client
                 .simple_query(&query)
                 .await
