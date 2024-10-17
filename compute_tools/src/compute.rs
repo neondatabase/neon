@@ -15,6 +15,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+use compute_api::spec::PgIdent;
 use futures::future::join_all;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
@@ -1370,10 +1371,10 @@ LIMIT 100",
 
     pub async fn set_role_grants(
         &self,
-        db_name: &str,
-        schema_name: &str,
+        db_name: &PgIdent,
+        schema_name: &PgIdent,
         privileges: &[Privilege],
-        role_name: &str,
+        role_name: &PgIdent,
     ) -> Result<()> {
         use tokio_postgres::config::Config;
         use tokio_postgres::NoTls;
@@ -1398,8 +1399,8 @@ LIMIT 100",
                 .collect::<Vec<&'static str>>()
                 .join(", "),
             // quote the schema and role name as identifiers to sanitize them.
-            schema_name.to_string().pg_quote(),
-            role_name.to_string().pg_quote(),
+            schema_name.pg_quote(),
+            role_name.pg_quote(),
         );
         db_client
             .simple_query(&query)
