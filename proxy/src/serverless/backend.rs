@@ -11,8 +11,9 @@ use tokio::net::{lookup_host, TcpStream};
 use tracing::field::display;
 use tracing::{debug, info};
 
-use super::conn_pool::{poll_client, Client, ConnInfo, GlobalConnPool};
-use super::http_conn_pool::{self, poll_http2_client};
+use super::conn_pool::poll_client;
+use super::conn_pool_lib::{Client, ConnInfo, GlobalConnPool};
+use super::http_conn_pool::{self, poll_http2_client, Send};
 use super::local_conn_pool::{self, LocalClient, LocalConnPool};
 use crate::auth::backend::local::StaticAuthRules;
 use crate::auth::backend::{ComputeCredentials, ComputeUserInfo};
@@ -31,7 +32,7 @@ use crate::rate_limiter::EndpointRateLimiter;
 use crate::{compute, EndpointId, Host};
 
 pub(crate) struct PoolingBackend {
-    pub(crate) http_conn_pool: Arc<super::http_conn_pool::GlobalConnPool>,
+    pub(crate) http_conn_pool: Arc<super::http_conn_pool::GlobalConnPool<Send>>,
     pub(crate) local_pool: Arc<LocalConnPool<tokio_postgres::Client>>,
     pub(crate) pool: Arc<GlobalConnPool<tokio_postgres::Client>>,
     pub(crate) config: &'static ProxyConfig,
@@ -199,7 +200,7 @@ impl PoolingBackend {
         &self,
         ctx: &RequestMonitoring,
         conn_info: ConnInfo,
-    ) -> Result<http_conn_pool::Client, HttpConnError> {
+    ) -> Result<http_conn_pool::Client<Send>, HttpConnError> {
         info!("pool: looking for an existing connection");
         if let Some(client) = self.http_conn_pool.get(ctx, &conn_info) {
             return Ok(client);
@@ -481,7 +482,7 @@ impl ConnectMechanism for TokioMechanism {
 }
 
 struct HyperMechanism {
-    pool: Arc<http_conn_pool::GlobalConnPool>,
+    pool: Arc<http_conn_pool::GlobalConnPool<Send>>,
     conn_info: ConnInfo,
     conn_id: uuid::Uuid,
 
@@ -491,7 +492,7 @@ struct HyperMechanism {
 
 #[async_trait]
 impl ConnectMechanism for HyperMechanism {
-    type Connection = http_conn_pool::Client;
+    type Connection = http_conn_pool::Client<Send>;
     type ConnectError = HttpConnError;
     type Error = HttpConnError;
 

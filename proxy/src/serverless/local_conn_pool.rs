@@ -20,11 +20,12 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, info_span, warn, Instrument, Span};
 
 use super::backend::HttpConnError;
-use super::conn_pool::{ClientInnerExt, ConnInfo};
+use super::conn_pool_lib::{ClientInnerExt, ConnInfo};
 use crate::context::RequestMonitoring;
 use crate::control_plane::messages::{ColdStartInfo, MetricsAuxInfo};
 use crate::metrics::Metrics;
 use crate::usage_metrics::{Ids, MetricCounter, USAGE_METRICS};
+
 use crate::{DbName, RoleName};
 
 struct ConnPoolEntry<C: ClientInnerExt> {
@@ -362,7 +363,7 @@ pub(crate) fn poll_client(
     LocalClient::new(inner, conn_info, pool_clone)
 }
 
-struct ClientInner<C: ClientInnerExt> {
+pub(crate) struct ClientInner<C: ClientInnerExt> {
     inner: C,
     session: tokio::sync::watch::Sender<uuid::Uuid>,
     cancel: CancellationToken,
@@ -387,13 +388,24 @@ impl<C: ClientInnerExt> ClientInner<C> {
     }
 }
 
-impl<C: ClientInnerExt> LocalClient<C> {
-    pub(crate) fn metrics(&self) -> Arc<MetricCounter> {
-        let aux = &self.inner.as_ref().unwrap().aux;
-        USAGE_METRICS.register(Ids {
-            endpoint_id: aux.endpoint_id,
-            branch_id: aux.branch_id,
-        })
+impl ClientInner<tokio_postgres::Client> {
+    pub(crate) async fn set_jwt_session(&mut self, payload: &[u8]) -> Result<(), HttpConnError> {
+        self.jti += 1;
+        let token = resign_jwt(&self.key, payload, self.jti)?;
+
+        // initiates the auth session
+        self.inner.simple_query("discard all").await?;
+        self.inner
+            .query(
+                "select auth.jwt_session_init($1)",
+                &[&token as &(dyn ToSql + Sync)],
+            )
+            .await?;
+
+        let pid = self.inner.get_process_id();
+        info!(pid, jti = self.jti, "user session state init");
+
+        Ok(())
     }
 }
 
@@ -422,6 +434,18 @@ impl<C: ClientInnerExt> LocalClient<C> {
             pool,
         }
     }
+
+    pub(crate) fn client_inner(&mut self) -> (&mut ClientInner<C>, Discard<'_, C>) {
+        let Self {
+            inner,
+            pool,
+            conn_info,
+            span: _,
+        } = self;
+        let inner_m = inner.as_mut().expect("client inner should not be removed");
+        (inner_m, Discard { conn_info, pool })
+    }
+
     pub(crate) fn inner(&mut self) -> (&mut C, Discard<'_, C>) {
         let Self {
             inner,
@@ -431,33 +455,6 @@ impl<C: ClientInnerExt> LocalClient<C> {
         } = self;
         let inner = inner.as_mut().expect("client inner should not be removed");
         (&mut inner.inner, Discard { conn_info, pool })
-    }
-}
-
-impl LocalClient<tokio_postgres::Client> {
-    pub(crate) async fn set_jwt_session(&mut self, payload: &[u8]) -> Result<(), HttpConnError> {
-        let inner = self
-            .inner
-            .as_mut()
-            .expect("client inner should not be removed");
-
-        inner.jti += 1;
-        let token = resign_jwt(&inner.key, payload, inner.jti)?;
-
-        // initiates the auth session
-        inner.inner.simple_query("discard all").await?;
-        inner
-            .inner
-            .query(
-                "select auth.jwt_session_init($1)",
-                &[&token as &(dyn ToSql + Sync)],
-            )
-            .await?;
-
-        let pid = inner.inner.get_process_id();
-        info!(pid, jti = inner.jti, "user session state init");
-
-        Ok(())
     }
 }
 
@@ -524,24 +521,15 @@ fn sign_jwt(sk: &SigningKey, payload: &[u8]) -> String {
     jwt
 }
 
-impl<C: ClientInnerExt> Discard<'_, C> {
-    pub(crate) fn check_idle(&mut self, status: ReadyForQueryStatus) {
-        let conn_info = &self.conn_info;
-        if status != ReadyForQueryStatus::Idle && std::mem::take(self.pool).strong_count() > 0 {
-            info!(
-                "local_pool: throwing away connection '{conn_info}' because connection is not idle"
-            );
-        }
-    }
-    pub(crate) fn discard(&mut self) {
-        let conn_info = &self.conn_info;
-        if std::mem::take(self.pool).strong_count() > 0 {
-            info!("local_pool: throwing away connection '{conn_info}' because connection is potentially in a broken state");
-        }
-    }
-}
-
 impl<C: ClientInnerExt> LocalClient<C> {
+    pub(crate) fn metrics(&self) -> Arc<MetricCounter> {
+        let aux = &self.inner.as_ref().unwrap().aux;
+        USAGE_METRICS.register(Ids {
+            endpoint_id: aux.endpoint_id,
+            branch_id: aux.branch_id,
+        })
+    }
+
     fn do_drop(&mut self) -> Option<impl FnOnce()> {
         let conn_info = self.conn_info.clone();
         let client = self
@@ -564,6 +552,23 @@ impl<C: ClientInnerExt> Drop for LocalClient<C> {
     fn drop(&mut self) {
         if let Some(drop) = self.do_drop() {
             tokio::task::spawn_blocking(drop);
+        }
+    }
+}
+
+impl<C: ClientInnerExt> Discard<'_, C> {
+    pub(crate) fn check_idle(&mut self, status: ReadyForQueryStatus) {
+        let conn_info = &self.conn_info;
+        if status != ReadyForQueryStatus::Idle && std::mem::take(self.pool).strong_count() > 0 {
+            info!(
+                "local_pool: throwing away connection '{conn_info}' because connection is not idle"
+            );
+        }
+    }
+    pub(crate) fn discard(&mut self) {
+        let conn_info = &self.conn_info;
+        if std::mem::take(self.pool).strong_count() > 0 {
+            info!("local_pool: throwing away connection '{conn_info}' because connection is potentially in a broken state");
         }
     }
 }
