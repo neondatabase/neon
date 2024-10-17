@@ -2323,8 +2323,8 @@ impl Tenant {
                 timeline_create_guard,
             )
             .await;
-        if let Err(e) = &res {
-            error!(%e, "task failed");
+        if let Err(err) = &res {
+            error!(?err, "task failed");
             // TODO sleep & retry, sensitive to tenant shutdown
             // TODO: allow timeline deletion requests => should cancel the task
         }

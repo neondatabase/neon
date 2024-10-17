@@ -137,7 +137,7 @@ def test_pgdata_import_smoke(
         locations = env.storage_controller.locate(tenant_id)
         active_count = 0
         for location in locations:
-            shard_id = location["shard_id"]
+            shard_id = TenantShardId.parse(location["shard_id"])
             ps = env.get_pageserver(location["node_id"])
             try:
                 detail = ps.http_client().timeline_detail(shard_id, timeline_id)
@@ -148,10 +148,21 @@ def test_pgdata_import_smoke(
             except PageserverApiException as e:
                 if e.status_code == 404:
                     log.info("not found, import is in progress")
+                    continue
                 elif e.status_code == 429:
                     log.info("import is in progress")
+                    continue
                 else:
                     raise
+
+            shard_status_file = statusdir / f"shard-{shard_id.shard_index}"
+            if state == "Active":
+                shard_status_file_contents = (
+                    shard_status_file.read_text()
+                )  # Active state implies import is done
+                shard_status = json.loads(shard_status_file_contents)
+                assert shard_status["done"] is True
+
         if active_count == len(locations):
             log.info("all shards are active")
             break
@@ -182,6 +193,10 @@ def test_pgdata_import_smoke(
     assert disk_consistent_lsn == initdb_lsn + 8
     assert last_record_lsn == disk_consistent_lsn
     # TODO: assert these values are the same everywhere
+
+    #
+    # Validate the resulting remote storage state.
+    #
 
     #
     # Validate the imported data

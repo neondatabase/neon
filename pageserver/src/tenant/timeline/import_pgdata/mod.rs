@@ -25,9 +25,10 @@ use pageserver_api::{
     shard::ShardIdentity,
 };
 use postgres_ffi::{pg_constants, relfile_utils::parse_relfilename, ControlFileData, BLCKSZ};
+use serde::de::DeserializeOwned;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info_span, instrument, Instrument};
+use tracing::{debug, info, info_span, instrument, Instrument};
 
 use crate::{
     assert_u64_eq_usize::U64IsUsize,
@@ -160,6 +161,8 @@ impl ControlFile {
     }
 }
 
+mod status;
+
 pub async fn doit(
     timeline: &Arc<Timeline>,
     index_part: index_part_format::Root,
@@ -178,22 +181,109 @@ pub async fn doit(
 
     let storage = make_storage_wrapper(&location, cancel.clone()).await?;
 
-    let control_file = get_control_file(&PGDATA_DIR, &storage).await?;
+    let status_prefix = RemotePath::from_string("status").unwrap();
 
-    let pgdata_lsn = control_file.base_lsn();
+    //
+    // See if shard is done.
+    // TODO: incorporate generations into status key for split brain safety. Figure out together with checkpointing.
+    //
+    let shard_status_key =
+        status_prefix.join(format!("shard-{}", timeline.tenant_shard_id.shard_slug()));
+    let shard_status: Option<status::ShardStatus> = storage.get_json(&shard_status_key).await?;
+    info!(?shard_status, "peeking shard status");
+    if shard_status.map(|st| st.done).unwrap_or(false) {
+        info!("shard status indicates that the shard is done, skipping import");
+    } else {
+        // TODO: checkpoint the progress into the IndexPart instead of restarting
+        // from the beginning.
 
-    PgImportEnv {
-        timeline: timeline.clone(),
-        pgdata_dir: PGDATA_DIR.clone(),
-        control_file,
-        pgdata_lsn,
-        tasks: Vec::new(),
-        storage,
+        //
+        // Wipe the slate clean
+        //
+        info!("wipe the slate clean");
+        {
+            // TODO: do we need to hold GC lock for this?
+            let mut guard = timeline.layers.write().await;
+            assert!(
+                guard.layer_map()?.open_layer.is_none(),
+                "while importing, there should be no in-memory layer" // this just seems like a good place to assert it
+            );
+            let all_layers_keys = guard.all_persistent_layers();
+            let all_layers: Vec<_> = all_layers_keys
+                .iter()
+                .map(|key| guard.get_from_key(key))
+                .collect();
+            let open = guard.open_mut().context("open_mut")?;
+
+            timeline.remote_client.schedule_gc_update(&all_layers)?;
+            open.finish_gc_timeline(&all_layers);
+        }
+
+        //
+        // Wait for pgdata to finish uploading
+        //
+        info!("wait for pgdata to reach status 'done'");
+        let pgdata_status_key = status_prefix.join("pgdata");
+        loop {
+            let res = async {
+                let pgdata_status: Option<status::PgdataStatus> = storage
+                    .get_json(&pgdata_status_key)
+                    .await
+                    .context("get pgdata status")?;
+                info!(?pgdata_status, "peeking pgdata status");
+                if pgdata_status.map(|st| st.done).unwrap_or(false) {
+                    Ok(())
+                } else {
+                    Err(anyhow::anyhow!("pgdata not done yet"))
+                }
+            }
+            .await;
+            match res {
+                Ok(_) => break,
+                Err(err) => {
+                    info!(?err, "indefintely waiting for pgdata to finish");
+                    if tokio::time::timeout(std::time::Duration::from_secs(10), cancel.cancelled())
+                        .await
+                        .is_ok()
+                    {
+                        bail!("cancelled while waiting for pgdata");
+                    }
+                }
+            }
+        }
+
+        //
+        // Do the import
+        //
+        info!("do the import");
+        let control_file = get_control_file(&PGDATA_DIR, &storage).await?;
+        let pgdata_lsn = control_file.base_lsn();
+        PgImportEnv {
+            timeline: timeline.clone(),
+            pgdata_dir: PGDATA_DIR.clone(),
+            control_file,
+            pgdata_lsn,
+            tasks: Vec::new(),
+            storage: storage.clone(),
+        }
+        .doit(ctx)
+        .await?;
+
+        //
+        // Communicate that shard is done.
+        //
+        storage
+            .put_json(&shard_status_key, &status::ShardStatus { done: true })
+            .await
+            .context("put shard status")?;
     }
-    .doit(ctx)
-    .await?;
 
-    // mark as done in index_part
+    //
+    // Mark as done in index_part.
+    // This makes subsequent timeline loads enter the normal load code path
+    // instead of spawning the import task and calling this here function.
+    //
+    info!("mark import as complete in index part");
     timeline
         .remote_client
         .schedule_index_upload_for_import_pgdata_state_update(Some(index_part_format::Root::V1(
@@ -1020,6 +1110,48 @@ impl RemoteStorageWrapper {
         .await;
         debug!(len = res.as_ref().ok().map(|buf| buf.len()), "done");
         res
+    }
+
+    #[instrument(level = tracing::Level::DEBUG, skip_all, fields(%path))]
+    async fn get_json<T: DeserializeOwned>(
+        &self,
+        path: &RemotePath,
+    ) -> Result<Option<T>, DownloadError> {
+        let buf = match self.get(path).await {
+            Ok(buf) => buf,
+            Err(DownloadError::NotFound) => return Ok(None),
+            Err(err) => return Err(err),
+        };
+        let res = serde_json::from_slice(&buf)
+            .context("serialize")
+            // TODO: own error type
+            .map_err(DownloadError::Other)?;
+        Ok(Some(res))
+    }
+
+    #[instrument(level = tracing::Level::DEBUG, skip_all, fields(%path))]
+    async fn put_json<T>(&self, path: &RemotePath, value: &T) -> anyhow::Result<()>
+    where
+        T: serde::Serialize,
+    {
+        let buf = serde_json::to_vec(value)?;
+        let bytes = Bytes::from(buf);
+        utils::backoff::retry(
+            || async {
+                let size = bytes.len();
+                let bytes = futures::stream::once(futures::future::ready(Ok(bytes.clone())));
+                self.storage
+                    .upload_storage_object(bytes, size, path, &self.cancel)
+                    .await
+            },
+            remote_storage::TimeoutOrCancel::caused_by_cancel,
+            1,
+            u32::MAX,
+            &format!("put json {path}"),
+            &self.cancel,
+        )
+        .await
+        .expect("practically infinite retries")
     }
 
     #[instrument(level = tracing::Level::DEBUG, skip_all, fields(%path))]
