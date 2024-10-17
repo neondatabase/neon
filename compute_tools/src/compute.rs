@@ -1387,6 +1387,7 @@ LIMIT 100",
             .context("Failed to connect to the database")?;
         tokio::spawn(conn);
 
+        // TODO: support other types of grants apart from schemas?
         let query = format!(
             "GRANT {} ON SCHEMA {} TO {}",
             privileges
@@ -1403,7 +1404,7 @@ LIMIT 100",
         db_client
             .simple_query(&query)
             .await
-            .context(format!("Failed to execute query: {}", query))?;
+            .with_context(|| format!("Failed to execute query: {}", query))?;
 
         Ok(())
     }

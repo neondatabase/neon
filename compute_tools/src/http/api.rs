@@ -176,7 +176,7 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
                     status
                 );
                 error!(msg);
-                return Response::new(Body::from(msg));
+                return render_json_error(&msg, StatusCode::PRECONDITION_FAILED);
             }
 
             let request = hyper::body::to_bytes(req.into_body()).await.unwrap();
@@ -200,10 +200,12 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
                     })
                     .unwrap(),
                 )),
-                Err(e) => {
-                    error!("set_role_grants failed: {}", e);
-                    Response::new(Body::from(e.to_string()))
-                }
+                Err(e) => render_json_error(
+                    &format!("could not grant role privileges to the schema: {e}"),
+                    // TODO: can we filter on role/schema not found errors
+                    // and return appropriate error code?
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                ),
             }
         }
 
