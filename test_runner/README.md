@@ -6,7 +6,7 @@ Prerequisites:
 - Correctly configured Python, see [`/docs/sourcetree.md`](/docs/sourcetree.md#using-python)
 - Neon and Postgres binaries
     - See the root [README.md](/README.md) for build directions
-      If you want to test tests with test-only APIs, you would need to add `--features testing` to Rust code build commands.
+      To run tests you need to add `--features testing` to Rust code build commands.
       For convenience, repository cargo config contains `build_testing` alias, that serves as a subcommand, adding the required feature flags.
       Usage example: `cargo build_testing --release` is equivalent to `cargo build --features testing --release`
     - Tests can be run from the git tree; or see the environment variables
