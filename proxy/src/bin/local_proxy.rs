@@ -25,6 +25,7 @@ use proxy::rate_limiter::{
 use proxy::scram::threadpool::ThreadPool;
 use proxy::serverless::cancel_set::CancelSet;
 use proxy::serverless::{self, GlobalConnPoolOptions};
+use proxy::url::ApiUrl;
 use proxy::RoleName;
 
 project_git_version!(GIT_VERSION);
@@ -80,7 +81,10 @@ struct LocalProxyCliArgs {
     connect_to_compute_retry: String,
     /// Address of the postgres server
     #[clap(long, default_value = "127.0.0.1:5432")]
-    compute: SocketAddr,
+    postgres: SocketAddr,
+    /// Address of the compute-ctl api service
+    #[clap(long, default_value = "http://127.0.0.1:3080/")]
+    compute_ctl: ApiUrl,
     /// Path of the local proxy config file
     #[clap(long, default_value = "./local_proxy.json")]
     config_path: Utf8PathBuf,
@@ -295,7 +299,7 @@ fn build_auth_backend(
     args: &LocalProxyCliArgs,
 ) -> anyhow::Result<&'static auth::Backend<'static, ()>> {
     let auth_backend = proxy::auth::Backend::Local(proxy::auth::backend::MaybeOwned::Owned(
-        LocalBackend::new(args.compute),
+        LocalBackend::new(args.postgres, args.compute_ctl.clone()),
     ));
 
     Ok(Box::leak(Box::new(auth_backend)))
