@@ -646,6 +646,21 @@ impl Timeline {
                 readable_points.push(*child_lsn);
             }
             readable_points.push(head_lsn);
+
+            // The Timeline get page process will walk all InMemoryLayers before it starts walking historic
+            // layers.  That means it might fail to see image layers that overlap with the LSN range of
+            // InMemoryLayers, so there is a de-facto read point at the start_lsn of the oldest InMemoryLayer.
+            //
+            // This behavior in the getpage path is considered a but, and including InMemoryLayer's start_lsn here
+            // is a workaround.  See https://github.com/neondatabase/neon/issues/9185
+            if let Some(oldest_inmemory_layer) = layer_map.frozen_layers.front() {
+                readable_points.push(oldest_inmemory_layer.start_lsn())
+            } else if let Some(open_layer) = layer_map.open_layer.as_ref() {
+                readable_points.push(open_layer.start_lsn());
+            }
+
+            readable_points.sort();
+
             readable_points
         };
 
