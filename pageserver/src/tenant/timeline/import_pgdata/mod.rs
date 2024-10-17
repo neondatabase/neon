@@ -69,6 +69,10 @@ pub(crate) async fn create<'a>(
     cancel: CancellationToken,
 ) -> anyhow::Result<(ControlFile, index_part_format::Root)> {
     let storage_wrapper = make_storage_wrapper(&in_progress.location, cancel).await?;
+
+    let spec = get_spec(&storage_wrapper).await?;
+    info!(?spec, "found spec");
+
     let control_file = get_control_file(&PGDATA_DIR, &storage_wrapper).await?;
 
     let index_part = index_part_format::Root::V1(index_part_format::V1::InProgress(in_progress));
@@ -161,7 +165,8 @@ impl ControlFile {
     }
 }
 
-mod status;
+mod s3_state;
+pub(crate) mod upcall_api;
 
 pub async fn doit(
     timeline: &Arc<Timeline>,
@@ -181,6 +186,23 @@ pub async fn doit(
 
     let storage = make_storage_wrapper(&location, cancel.clone()).await?;
 
+    info!("get spec early so we know we'll be able to upcall when done");
+    let Some(spec) = get_spec(&storage).await? else {
+        bail!("spec not found")
+    };
+
+    let upcall_client =
+        upcall_api::Client::new(timeline.conf, cancel.clone()).context("create upcall client")?;
+
+    //
+    // send an early progress update to clean up k8s job early and generate potentially useful logs
+    //
+    info!("send early progress update");
+    upcall_client
+        .send_progress_until_success(&spec)
+        .instrument(info_span!("early_progress_update"))
+        .await?;
+
     let status_prefix = RemotePath::from_string("status").unwrap();
 
     //
@@ -189,7 +211,7 @@ pub async fn doit(
     //
     let shard_status_key =
         status_prefix.join(format!("shard-{}", timeline.tenant_shard_id.shard_slug()));
-    let shard_status: Option<status::ShardStatus> = storage.get_json(&shard_status_key).await?;
+    let shard_status: Option<s3_state::ShardStatus> = storage.get_json(&shard_status_key).await?;
     info!(?shard_status, "peeking shard status");
     if shard_status.map(|st| st.done).unwrap_or(false) {
         info!("shard status indicates that the shard is done, skipping import");
@@ -226,7 +248,7 @@ pub async fn doit(
         let pgdata_status_key = status_prefix.join("pgdata");
         loop {
             let res = async {
-                let pgdata_status: Option<status::PgdataStatus> = storage
+                let pgdata_status: Option<s3_state::PgdataStatus> = storage
                     .get_json(&pgdata_status_key)
                     .await
                     .context("get pgdata status")?;
@@ -273,10 +295,15 @@ pub async fn doit(
         // Communicate that shard is done.
         //
         storage
-            .put_json(&shard_status_key, &status::ShardStatus { done: true })
+            .put_json(&shard_status_key, &s3_state::ShardStatus { done: true })
             .await
             .context("put shard status")?;
     }
+
+    //
+    // Ensure at-least-once deliver of the upcall to cplane
+    // before we mark the task as done and never come here again.
+    //
 
     //
     // Mark as done in index_part.
@@ -296,6 +323,13 @@ pub async fn doit(
     timeline.remote_client.wait_completion().await?;
 
     Ok(())
+}
+
+async fn get_spec(storage: &RemoteStorageWrapper) -> Result<Option<s3_state::Spec>, anyhow::Error> {
+    storage
+        .get_json(&RemotePath::from_string("spec.json").unwrap())
+        .await
+        .context("get spec")
 }
 
 // TODO: rename to `State`

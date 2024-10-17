@@ -96,6 +96,8 @@ pub struct ConfigToml {
     pub control_plane_api: Option<reqwest::Url>,
     pub control_plane_api_token: Option<String>,
     pub control_plane_emergency_mode: bool,
+    pub import_pgdata_upcall_api: Option<reqwest::Url>,
+    pub import_pgdata_upcall_api_token: Option<String>,
     pub heatmap_upload_concurrency: usize,
     pub secondary_download_concurrency: usize,
     pub virtual_file_io_engine: Option<crate::models::virtual_file::IoEngineKind>,
@@ -373,6 +375,9 @@ impl Default for ConfigToml {
             control_plane_api: (None),
             control_plane_api_token: (None),
             control_plane_emergency_mode: (false),
+
+            import_pgdata_upcall_api: (None),
+            import_pgdata_upcall_api_token: (None),
 
             heatmap_upload_concurrency: (DEFAULT_HEATMAP_UPLOAD_CONCURRENCY),
             secondary_download_concurrency: (DEFAULT_SECONDARY_DOWNLOAD_CONCURRENCY),

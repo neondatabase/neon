@@ -1,4 +1,5 @@
 import json
+import re
 import time
 from enum import Enum
 from typing import Optional
@@ -14,6 +15,9 @@ from fixtures.pageserver.http import (
     PageserverApiException,
 )
 from fixtures.remote_storage import RemoteStorageKind
+from pytest_httpserver import HTTPServer
+from werkzeug.wrappers.request import Request
+from werkzeug.wrappers.response import Response
 
 num_rows = 1000
 
@@ -39,7 +43,30 @@ def test_pgdata_import_smoke(
     shard_count: Optional[int],
     stripe_size: int,
     rel_block_size: RelBlockSize,
+    make_httpserver: HTTPServer,
 ):
+    #
+    # Setup fake control plane for import progress
+    #
+    def handler(request: Request) -> Response:
+        log.info(f"control plane request: {request.json}")
+        return Response(json.dumps({}), status=200)
+
+    cplane_mgmt_api_server = make_httpserver
+    cplane_mgmt_api_server.expect_request(re.compile(".*")).respond_with_handler(handler)
+
+
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
+    env = neon_env_builder.init_start()
+
+    env.pageserver.patch_config_toml_nonrecursive(
+        {
+            "import_pgdata_upcall_api": f"http://{cplane_mgmt_api_server.host}:{cplane_mgmt_api_server.port}/path/to/mgmt/api"
+        }
+    )
+    env.pageserver.stop()
+    env.pageserver.start()
+
     #
     # Put data in vanilla pg
     #
@@ -90,20 +117,21 @@ def test_pgdata_import_smoke(
 
     #
     # We have a Postgres data directory now.
-    # Make a localfs remote storage that looks like `fast_import` created it.
+    # Make a localfs remote storage that looks like how after `fast_import` ran.
     # TODO: actually exercise fast_import here
     # TODO: test s3 remote storage
     #
-
-    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
-    env = neon_env_builder.init_start()
-
     importbucket = neon_env_builder.repo_dir / "importbucket"
     importbucket.mkdir()
+    # what cplane writes before scheduling fast_import
+    specpath = importbucket/ "spec.json"
+    specpath.write_text(json.dumps({"branch_id": "somebranch", "project_id": "someproject"}))
+    # what fast_import writes
     vanilla_pg.pgdatadir.rename(importbucket / "pgdata")
     statusdir = importbucket / "status"
     statusdir.mkdir()
     (statusdir / "pgdata").write_text(json.dumps({"done": True}))
+
 
     #
     # Do the import

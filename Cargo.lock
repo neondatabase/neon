@@ -3646,6 +3646,7 @@ dependencies = [
  "num_cpus",
  "once_cell",
  "pageserver_api",
+ "pageserver_client",
  "pageserver_compaction",
  "pin-project-lite",
  "postgres",
