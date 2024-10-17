@@ -58,6 +58,8 @@ pub(crate) async fn main() -> anyhow::Result<()> {
         utils::logging::Output::Stdout,
     )?;
 
+    info!("starting");
+
     let Args {
         working_directory,
         s3_prefix,
@@ -209,9 +211,6 @@ pub(crate) async fn main() -> anyhow::Result<()> {
         // format
         "--format".to_string(),
         "directory".to_string(),
-        // location
-        "--file".to_string(),
-        dumpdir.to_string(),
         // concurrency
         "--jobs".to_string(),
         num_cpus::get().to_string(),
@@ -223,10 +222,12 @@ pub(crate) async fn main() -> anyhow::Result<()> {
     {
         let mut pg_dump = tokio::process::Command::new(pg_bin_dir.join("pg_dump"))
             .args(&common_args)
-            // source db (db name included in connection string)
-            .arg("-d")
-            .arg(&source_connection_string)
+            .arg("-f")
+            .arg(&dumpdir)
             .arg("--no-sync")
+            // POSITIONAL args
+            // source db (db name included in connection string)
+            .arg(&source_connection_string)
             // how we run it
             .env_clear()
             .kill_on_drop(true)
@@ -258,8 +259,8 @@ pub(crate) async fn main() -> anyhow::Result<()> {
             .args(&common_args)
             .arg("-d")
             .arg(&restore_pg_connstring)
-            // how we restore
-            .arg("--single-transaction")
+            // POSITIONAL args
+            .arg(&dumpdir)
             // how we run it
             .env_clear()
             .kill_on_drop(true)
