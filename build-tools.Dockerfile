@@ -142,7 +142,7 @@ RUN wget -O /tmp/openssl-${OPENSSL_VERSION}.tar.gz https://www.openssl.org/sourc
 # Use the same version of libicu as the compute nodes so that
 # clusters created using inidb on pageserver can be used by computes.
 #
-# TODO: at this time, Dockerfile.compute-node uses the debian bullseye libicu
+# TODO: at this time, compute-node.Dockerfile uses the debian bullseye libicu
 # package, which is 67.1. We're duplicating that knowledge here, and also, technically,
 # Debian has a few patches on top of 67.1 that we're not adding here.
 ENV ICU_VERSION=67.1
