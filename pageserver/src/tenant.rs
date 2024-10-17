@@ -496,7 +496,7 @@ impl WalRedoManager {
 /// A very lightweight memory representation of an offloaded timeline.
 ///
 /// We need to store the list of offloaded timelines so that we can perform operations on them,
-/// like unoffloading them, or (at a later date), perform flattening.
+/// like unoffloading them, or (at a later date), decide to perform flattening.
 /// This type has a much smaller memory impact than [`Timeline`], and thus we can store many
 /// more offloaded timelines than we can manage ones that aren't.
 pub struct OffloadedTimeline {
