@@ -482,7 +482,7 @@ impl<C: ClientInnerExt> Client<C> {
         })
     }
 
-    pub(crate) fn do_drop(&mut self) -> Option<impl FnOnce()> {
+    pub(crate) fn do_drop(&mut self) -> Option<impl FnOnce() + use<C>> {
         let conn_info = self.conn_info.clone();
         let client = self
             .inner
