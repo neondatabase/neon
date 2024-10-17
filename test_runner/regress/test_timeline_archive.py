@@ -119,6 +119,10 @@ def test_timeline_archive(neon_env_builder: NeonEnvBuilder, shard_count: int):
 
 @pytest.mark.parametrize("manual_offload", [False, True])
 def test_timeline_offloading(neon_env_builder: NeonEnvBuilder, manual_offload: bool):
+    if not manual_offload:
+        # (automatic) timeline offloading defaults to false for now
+        neon_env_builder.pageserver_config_override = "timeline_offloading = true"
+
     env = neon_env_builder.init_start()
     ps_http = env.pageserver.http_client()
 
