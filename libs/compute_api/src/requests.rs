@@ -1,6 +1,9 @@
 //! Structs representing the JSON formats used in the compute_ctl's HTTP API.
 
-use crate::{privilege::Privilege, spec::{ComputeSpec, PgIdent}};
+use crate::{
+    privilege::Privilege,
+    spec::{ComputeSpec, PgIdent},
+};
 use serde::Deserialize;
 
 /// Request of the /configure API

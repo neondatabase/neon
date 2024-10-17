@@ -27,7 +27,9 @@ def test_role_grants(neon_simple_env: NeonEnv):
             raise e
 
     client = endpoint.http_client()
-    res = client.set_role_grants("test_role_grants", "test_role", "test_schema", ["CREATE", "USAGE"])
+    res = client.set_role_grants(
+        "test_role_grants", "test_role", "test_schema", ["CREATE", "USAGE"]
+    )
 
     # confirm we have access
     with pg_conn.cursor() as cur:
