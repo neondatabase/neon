@@ -33,10 +33,10 @@ def test_extensions(neon_simple_env: NeonEnv):
             assert not res, "The 'neon_test_utils' extension is installed"
 
     client = endpoint.http_client()
-    res = client.extensions(extension, version, database)
+    install_res = client.extensions(extension, version, database)
 
     info("Extension install result: %s", res)
-    assert res["extension"] == extension and res["version"] == version
+    assert install_res["extension"] == extension and install_res["version"] == version
 
     with endpoint.connect(dbname=database) as pg_conn:
         with pg_conn.cursor() as cur:
