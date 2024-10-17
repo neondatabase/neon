@@ -114,13 +114,16 @@ fn generate_tls_config<'a>(
     };
 
     let client_config = {
-        let config = rustls::ClientConfig::builder()
-            .with_root_certificates({
-                let mut store = rustls::RootCertStore::empty();
-                store.add(ca)?;
-                store
-            })
-            .with_no_client_auth();
+        let config =
+            rustls::ClientConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
+                .with_safe_default_protocol_versions()
+                .context("aws_lc_rs should support the default protocol versions")?
+                .with_root_certificates({
+                    let mut store = rustls::RootCertStore::empty();
+                    store.add(ca)?;
+                    store
+                })
+                .with_no_client_auth();
 
         ClientConfig { config, hostname }
     };

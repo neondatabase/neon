@@ -96,7 +96,7 @@ async fn simple_select_ssl() {
     let server_cfg =
         rustls::ServerConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
             .with_safe_default_protocol_versions()
-            .expect("aws_lc_rs should support TLS1.2 and TLS1.3")
+            .expect("aws_lc_rs should support the default protocol versions")
             .with_no_client_auth()
             .with_single_cert(vec![CERT.clone()], KEY.clone_key())
             .unwrap();
@@ -109,13 +109,16 @@ async fn simple_select_ssl() {
         pgbackend.run(&mut handler, &CancellationToken::new()).await
     });
 
-    let client_cfg = rustls::ClientConfig::builder()
-        .with_root_certificates({
-            let mut store = rustls::RootCertStore::empty();
-            store.add(CERT.clone()).unwrap();
-            store
-        })
-        .with_no_client_auth();
+    let client_cfg =
+        rustls::ClientConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
+            .with_safe_default_protocol_versions()
+            .expect("aws_lc_rs should support the default protocol versions")
+            .with_root_certificates({
+                let mut store = rustls::RootCertStore::empty();
+                store.add(CERT.clone()).unwrap();
+                store
+            })
+            .with_no_client_auth();
     let mut make_tls_connect = tokio_postgres_rustls::MakeRustlsConnect::new(client_cfg);
     let tls_connect = <MakeRustlsConnect as MakeTlsConnect<TcpStream>>::make_tls_connect(
         &mut make_tls_connect,
