@@ -74,11 +74,12 @@ pub(crate) async fn update_task(mgr: &mut Manager, need_backup: bool, state: &St
 
             let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
-            let async_task = backup_task_main(
-                mgr.wal_resident_timeline(),
-                mgr.conf.backup_parallel_jobs,
-                shutdown_rx,
-            );
+            let Ok(resident) = mgr.wal_resident_timeline() else {
+                info!("Timeline shut down");
+                return;
+            };
+
+            let async_task = backup_task_main(resident, mgr.conf.backup_parallel_jobs, shutdown_rx);
 
             let handle = if mgr.conf.current_thread_runtime {
                 tokio::spawn(async_task)
@@ -241,7 +242,7 @@ impl WalBackupTask {
 
         let mut retry_attempt = 0u32;
         // offload loop
-        loop {
+        while !self.timeline.cancel.is_cancelled() {
             if retry_attempt == 0 {
                 // wait for new WAL to arrive
                 if let Err(e) = self.commit_lsn_watch_rx.changed().await {
