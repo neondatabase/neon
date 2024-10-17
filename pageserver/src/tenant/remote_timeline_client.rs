@@ -196,6 +196,7 @@ use utils::backoff::{
     self, exponential_backoff, DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS,
 };
 use utils::pausable_failpoint;
+use utils::shard::ShardNumber;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -2144,6 +2145,28 @@ impl RemoteTimelineClient {
         let mut inner = self.upload_queue.lock().unwrap();
         inner.initialized_mut()?;
         Ok(UploadQueueAccessor { inner })
+    }
+
+    /// 'foreign' in the sense that it does not belong to this tenant shard.  This method
+    /// is used during GC for other shards to get the index of shard zero.
+    pub(crate) async fn download_foreign_index(
+        &self,
+        shard_number: ShardNumber,
+        cancel: &CancellationToken,
+    ) -> Result<(IndexPart, Generation), DownloadError> {
+        let foreign_shard_id = TenantShardId {
+            shard_number,
+            shard_count: self.tenant_shard_id.shard_count,
+            tenant_id: self.tenant_shard_id.tenant_id,
+        };
+        download_index_part(
+            &self.storage_impl,
+            &foreign_shard_id,
+            &self.timeline_id,
+            Generation::MAX,
+            cancel,
+        )
+        .await
     }
 }
 
