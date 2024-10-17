@@ -798,7 +798,7 @@ COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
 ENV PATH="/usr/local/pgsql/bin/:$PATH"
 RUN wget https://github.com/skyzh/pg_sudo/archive/refs/heads/main.tar.gz -O pg_sudo.tar.gz && \
-    mkdir pg_sudo-src && cd skyzh/anon-patch-src && tar xzf ../pg_sudo.tar.gz --strip-components=1 -C . && \
+    mkdir pg_sudo-src && cd pg_sudo-src && tar xzf ../pg_sudo.tar.gz --strip-components=1 -C . && \
     make -j $(getconf _NPROCESSORS_ONLN) && \
     make -j $(getconf _NPROCESSORS_ONLN) install && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/pg_neon_sudo.control
