@@ -617,31 +617,34 @@ lfc_evict(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno)
 	/* remove the page from the cache */
 	entry->bitmap[chunk_offs >> 5] &= ~(1 << (chunk_offs & (32 - 1)));
 
-	/*
-	 * If the chunk has no live entries, we can position the chunk to be
-	 * recycled first.
-	 */
-	if (entry->bitmap[chunk_offs >> 5] == 0)
+	if (entry->access_count == 0)
 	{
-		bool		has_remaining_pages = false;
-
-		for (int i = 0; i < CHUNK_BITMAP_SIZE; i++)
-		{
-			if (entry->bitmap[i] != 0)
-			{
-				has_remaining_pages = true;
-				break;
-			}
-		}
-
 		/*
-		 * Put the entry at the position that is first to be reclaimed when we
-		 * have no cached pages remaining in the chunk
+		 * If the chunk has no live entries, we can position the chunk to be
+		 * recycled first.
 		 */
-		if (!has_remaining_pages)
+		if (entry->bitmap[chunk_offs >> 5] == 0)
 		{
-			dlist_delete(&entry->list_node);
-			dlist_push_head(&lfc_ctl->lru, &entry->list_node);
+			bool		has_remaining_pages = false;
+
+			for (int i = 0; i < CHUNK_BITMAP_SIZE; i++)
+			{
+				if (entry->bitmap[i] != 0)
+				{
+					has_remaining_pages = true;
+					break;
+				}
+			}
+
+			/*
+			 * Put the entry at the position that is first to be reclaimed when we
+			 * have no cached pages remaining in the chunk
+			 */
+			if (!has_remaining_pages)
+			{
+				dlist_delete(&entry->list_node);
+				dlist_push_head(&lfc_ctl->lru, &entry->list_node);
+			}
 		}
 	}
 
