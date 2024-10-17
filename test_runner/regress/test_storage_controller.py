@@ -778,12 +778,10 @@ def test_storage_controller_compute_hook_revert(
     # Migrate A -> B, and make notifications fail while this is happening
     handle_params["status"] = 423
 
-    try:
-        env.storage_controller.tenant_shard_migrate(tenant_shard_id, pageserver_b.id)
-    except StorageControllerApiException as e:
+    with pytest.raises(StorageControllerApiException, match="Timeout waiting for shard"):
         # We expect the controller to give us an error because its reconciliation timed out
         # waiting for the compute hook.
-        log.info(f"Migration API failed as expected: {e}")
+        env.storage_controller.tenant_shard_migrate(tenant_shard_id, pageserver_b.id)
 
     # Although the migration API failed, the hook should still see pageserver B (it remembers what
     # was posted even when returning an error code)
@@ -811,6 +809,15 @@ def test_storage_controller_compute_hook_revert(
 
     # Preempt heartbeats for determinism
     env.storage_controller.node_configure(pageserver_a.id, {"availability": "Active"})
+    # Starting node will prompt a reconcile to clean up old AttachedStale location, for a deterministic test
+    # we want that complete before we start our migration.  Tolerate failure because our compute hook is
+    # still configured to fail
+    try:
+        env.storage_controller.reconcile_all()
+    except StorageControllerApiException as e:
+        # This exception _might_ be raised: it depends if our reconcile_all hit the on-node-activation
+        # Reconciler lifetime or ran after it already completed.
+        log.info(f"Expected error from reconcile_all: {e}")
 
     # Migrate B -> A, with a working compute hook: the controller should notify the hook because the
     # last update it made that was acked (423) by the compute was for node B.
