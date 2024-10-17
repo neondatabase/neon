@@ -578,7 +578,7 @@ def test_subscriber_synchronous_commit(neon_simple_env: NeonEnv, vanilla_pg):
     vanilla_pg.safe_psql("create extension neon;")
 
     env.create_branch("subscriber")
-    sub = env.endpoints.create("subscriber")
+    sub = env.endpoints.create("subscriber", config_lines=["shared_buffers = 1MB"])
     sub.start()
 
     with vanilla_pg.cursor() as pcur:
