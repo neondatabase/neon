@@ -353,13 +353,10 @@ COPY compute/patches/pgvector.patch /pgvector.patch
 # because we build the images on different machines than where we run them.
 # Pass OPTFLAGS="" to remove it.
 #
-# v17 is not supported yet because of upstream issue
-# https://github.com/pgvector/pgvector/issues/669
-RUN case "${PG_VERSION}" in "v17") \
-    echo "v17 extensions are not supported yet. Quit" && exit 0;; \
-    esac && \
-    wget https://github.com/pgvector/pgvector/archive/refs/tags/v0.7.2.tar.gz -O pgvector.tar.gz && \
-    echo "617fba855c9bcb41a2a9bc78a78567fd2e147c72afd5bf9d37b31b9591632b30 pgvector.tar.gz" | sha256sum --check && \
+# vector 0.7.4 supports v17
+# last release v0.7.4 - Aug 5, 2024
+RUN wget https://github.com/pgvector/pgvector/archive/refs/tags/v0.7.4.tar.gz -O pgvector.tar.gz && \
+    echo "0341edf89b1924ae0d552f617e14fb7f8867c0194ed775bcc44fa40288642583 pgvector.tar.gz" | sha256sum --check && \
     mkdir pgvector-src && cd pgvector-src && tar xzf ../pgvector.tar.gz --strip-components=1 -C . && \
     patch -p1 < /pgvector.patch && \
     make -j $(getconf _NPROCESSORS_ONLN) OPTFLAGS="" PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
