@@ -14,3 +14,22 @@ pub enum Privilege {
     Temporary,
     Execute,
 }
+
+impl Privilege {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Privilege::Select => "SELECT",
+            Privilege::Insert => "INSERT",
+            Privilege::Update => "UPDATE",
+            Privilege::Delete => "DELETE",
+            Privilege::Truncate => "TRUNCATE",
+            Privilege::References => "REFERENCES",
+            Privilege::Trigger => "TRIGGER",
+            Privilege::Usage => "USAGE",
+            Privilege::Create => "CREATE",
+            Privilege::Connect => "CONNECT",
+            Privilege::Temporary => "TEMPORARY",
+            Privilege::Execute => "EXECUTE",
+        }
+    }
+}
