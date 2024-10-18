@@ -17,12 +17,81 @@ pub(crate) struct ControlPlaneError {
     pub(crate) status: Option<Status>,
 }
 
+use crate::error::ErrorKind;
+use crate::metrics::WakeupFailureKind;
+
+// Centralized function that maps Reason to both ErrorKind and WakeupFailureKind
+fn map_reason(reason: Reason) -> (ErrorKind, WakeupFailureKind) {
+    match reason {
+        Reason::RoleProtected => (ErrorKind::User, WakeupFailureKind::ApiConsoleBadRequest),
+        Reason::ResourceNotFound => (ErrorKind::User, WakeupFailureKind::ApiConsoleBadRequest),
+        Reason::ProjectNotFound => (ErrorKind::User, WakeupFailureKind::ApiConsoleBadRequest),
+        Reason::EndpointNotFound => (ErrorKind::User, WakeupFailureKind::ApiConsoleBadRequest),
+        Reason::BranchNotFound => (ErrorKind::User, WakeupFailureKind::ApiConsoleBadRequest),
+        Reason::RateLimitExceeded => (
+            ErrorKind::ServiceRateLimit,
+            WakeupFailureKind::ApiConsoleLocked,
+        ),
+        Reason::NonDefaultBranchComputeTimeExceeded => {
+            (ErrorKind::Quota, WakeupFailureKind::QuotaExceeded)
+        }
+        Reason::ActiveTimeQuotaExceeded => (ErrorKind::Quota, WakeupFailureKind::QuotaExceeded),
+        Reason::ComputeTimeQuotaExceeded => (ErrorKind::Quota, WakeupFailureKind::QuotaExceeded),
+        Reason::WrittenDataQuotaExceeded => (ErrorKind::Quota, WakeupFailureKind::QuotaExceeded),
+        Reason::DataTransferQuotaExceeded => (ErrorKind::Quota, WakeupFailureKind::QuotaExceeded),
+        Reason::LogicalSizeQuotaExceeded => (ErrorKind::Quota, WakeupFailureKind::QuotaExceeded),
+        Reason::ConcurrencyLimitReached => {
+            (ErrorKind::ControlPlane, WakeupFailureKind::ApiConsoleLocked)
+        }
+        Reason::LockAlreadyTaken => (ErrorKind::ControlPlane, WakeupFailureKind::ApiConsoleLocked),
+        Reason::RunningOperations => (ErrorKind::ControlPlane, WakeupFailureKind::ApiConsoleLocked),
+        Reason::ActiveEndpointsLimitExceeded => {
+            (ErrorKind::ControlPlane, WakeupFailureKind::ApiConsoleLocked)
+        }
+        Reason::Unknown => (
+            crate::error::ErrorKind::ControlPlane,
+            WakeupFailureKind::ApiConsoleOtherError,
+        ),
+    }
+}
+
+pub(crate) trait FromReason {
+    fn have_errtype(error_kind: ErrorKind, wakeup_failure_kind: WakeupFailureKind) -> Self;
+}
+
+// Implement FromReason for ErrorKind
+impl FromReason for ErrorKind {
+    fn have_errtype(error_kind: ErrorKind, _: WakeupFailureKind) -> Self {
+        error_kind
+    }
+}
+
+// Implement FromReason for WakeupFailureKind
+impl FromReason for WakeupFailureKind {
+    fn have_errtype(_: ErrorKind, wakeup_failure_kind: WakeupFailureKind) -> Self {
+        wakeup_failure_kind
+    }
+}
+
 impl ControlPlaneError {
     pub(crate) fn get_reason(&self) -> Reason {
         self.status
             .as_ref()
             .and_then(|s| s.details.error_info.as_ref())
             .map_or(Reason::Unknown, |e| e.reason)
+    }
+
+    pub(crate) fn get_err_reason<T: FromReason>(&self) -> T {
+        let reason = self
+            .status
+            .as_ref()
+            .and_then(|s| s.details.error_info.as_ref())
+            .map_or(Reason::Unknown, |e| e.reason);
+
+        let (error_kind, wakeup_failure_kind) = map_reason(reason);
+
+        // Return the error type that matches the desired type
+        T::have_errtype(error_kind, wakeup_failure_kind)
     }
 
     pub(crate) fn get_user_facing_message(&self) -> String {
@@ -106,6 +175,7 @@ pub(crate) struct ErrorInfo {
     // Schema could also have `metadata` field, but it's not structured. Skip it for now.
 }
 
+// !!! Should be in sync with the cloud interface: internal/status/details/reason/reason.go
 #[derive(Clone, Copy, Debug, Deserialize, Default)]
 pub(crate) enum Reason {
     /// RoleProtected indicates that the role is protected and the attempted operation is not permitted on protected roles.
@@ -161,6 +231,9 @@ pub(crate) enum Reason {
     /// LockAlreadyTaken indicates that the we attempted to take a lock that was already taken.
     #[serde(rename = "LOCK_ALREADY_TAKEN")]
     LockAlreadyTaken,
+    /// ActiveEndpointsLimitExceeded indicates that the limit of concurrently active endpoints was exceeded.
+    #[serde(rename = "ACTIVE_ENDPOINTS_LIMIT_EXCEEDED")]
+    ActiveEndpointsLimitExceeded,
     #[default]
     #[serde(other)]
     Unknown,
@@ -199,7 +272,8 @@ impl Reason {
             // but might be ready soon
             Reason::RunningOperations
             | Reason::ConcurrencyLimitReached
-            | Reason::LockAlreadyTaken => true,
+            | Reason::LockAlreadyTaken
+            | Reason::ActiveEndpointsLimitExceeded => true,
             // unknown error. better not retry it.
             Reason::Unknown => false,
         }

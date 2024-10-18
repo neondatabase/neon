@@ -29,8 +29,8 @@ pub(crate) mod errors {
     use thiserror::Error;
 
     use super::ApiLockError;
-    use crate::control_plane::messages::{self, ControlPlaneError, Reason};
-    use crate::error::{io_error, ErrorKind, ReportableError, UserFacingError};
+    use crate::control_plane::messages::{self, ControlPlaneError};
+    use crate::error::{io_error, ReportableError, UserFacingError};
     use crate::proxy::retry::CouldRetry;
 
     /// A go-to error message which doesn't leak any detail.
@@ -71,53 +71,7 @@ pub(crate) mod errors {
     impl ReportableError for ApiError {
         fn get_error_kind(&self) -> crate::error::ErrorKind {
             match self {
-                ApiError::ControlPlane(e) => match e.get_reason() {
-                    Reason::RoleProtected => ErrorKind::User,
-                    Reason::ResourceNotFound => ErrorKind::User,
-                    Reason::ProjectNotFound => ErrorKind::User,
-                    Reason::EndpointNotFound => ErrorKind::User,
-                    Reason::BranchNotFound => ErrorKind::User,
-                    Reason::RateLimitExceeded => ErrorKind::ServiceRateLimit,
-                    Reason::NonDefaultBranchComputeTimeExceeded => ErrorKind::Quota,
-                    Reason::ActiveTimeQuotaExceeded => ErrorKind::Quota,
-                    Reason::ComputeTimeQuotaExceeded => ErrorKind::Quota,
-                    Reason::WrittenDataQuotaExceeded => ErrorKind::Quota,
-                    Reason::DataTransferQuotaExceeded => ErrorKind::Quota,
-                    Reason::LogicalSizeQuotaExceeded => ErrorKind::Quota,
-                    Reason::ConcurrencyLimitReached => ErrorKind::ControlPlane,
-                    Reason::LockAlreadyTaken => ErrorKind::ControlPlane,
-                    Reason::RunningOperations => ErrorKind::ControlPlane,
-                    Reason::Unknown => match &**e {
-                        ControlPlaneError {
-                            http_status_code:
-                                http::StatusCode::NOT_FOUND | http::StatusCode::NOT_ACCEPTABLE,
-                            ..
-                        } => crate::error::ErrorKind::User,
-                        ControlPlaneError {
-                            http_status_code: http::StatusCode::UNPROCESSABLE_ENTITY,
-                            error,
-                            ..
-                        } if error
-                            .contains("compute time quota of non-primary branches is exceeded") =>
-                        {
-                            crate::error::ErrorKind::Quota
-                        }
-                        ControlPlaneError {
-                            http_status_code: http::StatusCode::LOCKED,
-                            error,
-                            ..
-                        } if error.contains("quota exceeded")
-                            || error.contains("the limit for current plan reached") =>
-                        {
-                            crate::error::ErrorKind::Quota
-                        }
-                        ControlPlaneError {
-                            http_status_code: http::StatusCode::TOO_MANY_REQUESTS,
-                            ..
-                        } => crate::error::ErrorKind::ServiceRateLimit,
-                        ControlPlaneError { .. } => crate::error::ErrorKind::ControlPlane,
-                    },
-                },
+                ApiError::ControlPlane(e) => e.get_err_reason(),
                 ApiError::Transport(_) => crate::error::ErrorKind::ControlPlane,
             }
         }
