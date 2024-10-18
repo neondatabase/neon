@@ -3748,7 +3748,7 @@ class Endpoint(PgProtocol, LogUtils):
                 return
             cursor.execute("ALTER SYSTEM SET neon.file_cache_size_limit=0")
             cursor.execute("SELECT pg_reload_conf()")
-            cursor.execute(f"ALTER SYSTEM SET neon.file_cache_size_limit={file_cache_size_limit}")
+            cursor.execute(f"ALTER SYSTEM SET neon.file_cache_size_limit='{file_cache_size_limit}'")
         else:
             self.safe_psql("select clear_buffer_cache()")
             file_cache_size_limit = self.safe_psql_scalar(
@@ -3758,7 +3758,7 @@ class Endpoint(PgProtocol, LogUtils):
                 return
             self.safe_psql("ALTER SYSTEM SET neon.file_cache_size_limit=0")
             self.safe_psql("SELECT pg_reload_conf()")
-            self.safe_psql(f"ALTER SYSTEM SET neon.file_cache_size_limit={file_cache_size_limit}")
+            self.safe_psql(f"ALTER SYSTEM SET neon.file_cache_size_limit='{file_cache_size_limit}'")
             self.safe_psql("SELECT pg_reload_conf()")
 
     def log_config_value(self, param):
