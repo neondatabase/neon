@@ -201,6 +201,11 @@ struct MultiXactZeroPage {
     rpageno: u32,
 }
 
+struct RelmapRecord {
+    update: XlRelmapUpdate,
+    buf: Bytes,
+}
+
 impl WalIngest {
     pub async fn new(
         timeline: &Timeline,
@@ -373,8 +378,10 @@ impl WalIngest {
                 }
             }
             pg_constants::RM_RELMAP_ID => {
-                let xlrec = XlRelmapUpdate::decode(&mut buf);
-                self.ingest_relmap_page(modification, &xlrec, &decoded, ctx)
+                let relmap_record = Self::decode_relmap_record(&mut buf, &decoded, pg_version)
+                    .unwrap()
+                    .unwrap();
+                self.ingest_relmap_record(relmap_record, modification, ctx)
                     .await?;
             }
             pg_constants::RM_XLOG_ID => {
@@ -2173,26 +2180,35 @@ impl WalIngest {
         Ok(None)
     }
 
-    async fn ingest_relmap_page(
+    async fn ingest_relmap_record(
         &mut self,
+        record: RelmapRecord,
         modification: &mut DatadirModification<'_>,
-        xlrec: &XlRelmapUpdate,
-        decoded: &DecodedWALRecord,
         ctx: &RequestContext,
     ) -> Result<()> {
+        let RelmapRecord { update, buf } = record;
+
+        modification
+            .put_relmap_file(update.tsid, update.dbid, buf, ctx)
+            .await
+    }
+
+    fn decode_relmap_record(
+        buf: &mut Bytes,
+        decoded: &DecodedWALRecord,
+        _pg_version: u32,
+    ) -> anyhow::Result<Option<RelmapRecord>> {
+        let update = XlRelmapUpdate::decode(buf);
+
         let mut buf = decoded.record.clone();
         buf.advance(decoded.main_data_offset);
         // skip xl_relmap_update
         buf.advance(12);
 
-        modification
-            .put_relmap_file(
-                xlrec.tsid,
-                xlrec.dbid,
-                Bytes::copy_from_slice(&buf[..]),
-                ctx,
-            )
-            .await
+        Ok(Some(RelmapRecord {
+            update,
+            buf: Bytes::copy_from_slice(&buf[..]),
+        }))
     }
 
     async fn put_rel_creation(
