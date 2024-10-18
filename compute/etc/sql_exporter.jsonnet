@@ -1,4 +1,4 @@
-function(collector_file, application_name='sql_exporter') {
+function(collector_name, collector_file, application_name='sql_exporter') {
   // Configuration for sql_exporter for autoscaling-agent
   // Global defaults.
   global: {
@@ -28,7 +28,7 @@ function(collector_file, application_name='sql_exporter') {
     // Collectors (referenced by name) to execute on the target.
     // Glob patterns are supported (see <https://pkg.go.dev/path/filepath#Match> for syntax).
     collectors: [
-      'neon_collector',
+      collector_name,
     ],
   },
 

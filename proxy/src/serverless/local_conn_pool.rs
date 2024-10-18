@@ -1,3 +1,14 @@
+//! Manages the pool of connections between local_proxy and postgres.
+//!
+//! The pool is keyed by database and role_name, and can contain multiple connections
+//! shared between users.
+//!
+//! The pool manages the pg_session_jwt extension used for authorizing
+//! requests in the db.
+//!
+//! The first time a db/role pair is seen, local_proxy attempts to install the extension
+//! and grant usage to the role on the given schema.
+
 use std::collections::HashMap;
 use std::pin::pin;
 use std::sync::{Arc, Weak};
@@ -27,13 +38,14 @@ use crate::metrics::Metrics;
 use crate::usage_metrics::{Ids, MetricCounter, USAGE_METRICS};
 use crate::{DbName, RoleName};
 
+pub(crate) const EXT_NAME: &str = "pg_session_jwt";
+pub(crate) const EXT_VERSION: &str = "0.1.1";
+pub(crate) const EXT_SCHEMA: &str = "auth";
+
 struct ConnPoolEntry<C: ClientInnerExt> {
     conn: ClientInner<C>,
     _last_access: std::time::Instant,
 }
-
-// /// key id for the pg_session_jwt state
-// static PG_SESSION_JWT_KID: AtomicU64 = AtomicU64::new(1);
 
 // Per-endpoint connection pool, (dbname, username) -> DbUserConnPool
 // Number of open connections is limited by the `max_conns_per_endpoint`.
@@ -140,11 +152,18 @@ impl<C: ClientInnerExt> Drop for EndpointConnPool<C> {
 
 pub(crate) struct DbUserConnPool<C: ClientInnerExt> {
     conns: Vec<ConnPoolEntry<C>>,
+
+    // true if we have definitely installed the extension and
+    // granted the role access to the auth schema.
+    initialized: bool,
 }
 
 impl<C: ClientInnerExt> Default for DbUserConnPool<C> {
     fn default() -> Self {
-        Self { conns: Vec::new() }
+        Self {
+            conns: Vec::new(),
+            initialized: false,
+        }
     }
 }
 
@@ -199,25 +218,16 @@ impl<C: ClientInnerExt> LocalConnPool<C> {
         self.config.pool_options.idle_timeout
     }
 
-    // pub(crate) fn shutdown(&self) {
-    //     let mut pool = self.global_pool.write();
-    //     pool.pools.clear();
-    //     pool.total_conns = 0;
-    // }
-
     pub(crate) fn get(
         self: &Arc<Self>,
         ctx: &RequestMonitoring,
         conn_info: &ConnInfo,
     ) -> Result<Option<LocalClient<C>>, HttpConnError> {
-        let mut client: Option<ClientInner<C>> = None;
-        if let Some(entry) = self
+        let client = self
             .global_pool
             .write()
             .get_conn_entry(conn_info.db_and_user())
-        {
-            client = Some(entry.conn);
-        }
+            .map(|entry| entry.conn);
 
         // ok return cached connection if found and establish a new one otherwise
         if let Some(client) = client {
@@ -244,6 +254,23 @@ impl<C: ClientInnerExt> LocalConnPool<C> {
             )));
         }
         Ok(None)
+    }
+
+    pub(crate) fn initialized(self: &Arc<Self>, conn_info: &ConnInfo) -> bool {
+        self.global_pool
+            .read()
+            .pools
+            .get(&conn_info.db_and_user())
+            .map_or(false, |pool| pool.initialized)
+    }
+
+    pub(crate) fn set_initialized(self: &Arc<Self>, conn_info: &ConnInfo) {
+        self.global_pool
+            .write()
+            .pools
+            .entry(conn_info.db_and_user())
+            .or_default()
+            .initialized = true;
     }
 }
 
