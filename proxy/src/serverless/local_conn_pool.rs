@@ -39,7 +39,7 @@ use crate::usage_metrics::{Ids, MetricCounter, USAGE_METRICS};
 use crate::{DbName, RoleName};
 
 pub(crate) const EXT_NAME: &str = "pg_session_jwt";
-pub(crate) const EXT_VERSION: &str = "0.1.1";
+pub(crate) const EXT_VERSION: &str = "0.1.2";
 pub(crate) const EXT_SCHEMA: &str = "auth";
 
 struct ConnPoolEntry<C: ClientInnerExt> {
