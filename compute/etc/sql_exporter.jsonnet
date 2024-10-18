@@ -1,4 +1,4 @@
-function(collector_name, collector_file, application_name='sql_exporter') {
+function(collector_name, collector_file, connection_string) {
   // Configuration for sql_exporter for autoscaling-agent
   // Global defaults.
   global: {
@@ -23,7 +23,7 @@ function(collector_name, collector_file, application_name='sql_exporter') {
   target: {
     // Data source name always has a URI schema that matches the driver name. In some cases (e.g. MySQL)
     // the schema gets dropped or replaced to match the driver expected DSN format.
-    data_source_name: std.format('postgresql://cloud_admin@127.0.0.1:5432/postgres?sslmode=disable&application_name=%s', [application_name]),
+    data_source_name: connection_string,
 
     // Collectors (referenced by name) to execute on the target.
     // Glob patterns are supported (see <https://pkg.go.dev/path/filepath#Match> for syntax).
