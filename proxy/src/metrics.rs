@@ -333,7 +333,6 @@ pub enum WakeupFailureKind {
     QuotaExceeded,
     ApiConsoleLocked,
     ApiConsoleBadRequest,
-    ApiConsoleOtherServerError,
     ApiConsoleOtherError,
     TimeoutError,
 }
