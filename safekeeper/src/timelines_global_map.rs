@@ -143,11 +143,10 @@ impl GlobalTimelines {
     /// Loads all timelines for the given tenant to memory. Returns fs::read_dir
     /// errors if any.
     ///
-    /// It is async for update_status_notify sake. Since TIMELINES_STATE lock is
-    /// sync and there is no important reason to make it async (it is always
-    /// held for a short while) we just lock and unlock it for each timeline --
-    /// this function is called during init when nothing else is running, so
-    /// this is fine.
+    /// It is async, but TIMELINES_STATE lock is sync and there is no important
+    /// reason to make it async (it is always held for a short while), so we
+    /// just lock and unlock it for each timeline -- this function is called
+    /// during init when nothing else is running, so this is fine.
     async fn load_tenant_timelines(tenant_id: TenantId) -> Result<()> {
         let (conf, broker_active_set, partial_backup_rate_limiter) = {
             let state = TIMELINES_STATE.lock().unwrap();

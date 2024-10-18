@@ -59,7 +59,7 @@ impl GlobalMap {
 
             if state.commit_lsn < state.local_start_lsn {
                 bail!(
-                    "commit_lsn {} is higher than local_start_lsn {}",
+                    "commit_lsn {} is smaller than local_start_lsn {}",
                     state.commit_lsn,
                     state.local_start_lsn
                 );
