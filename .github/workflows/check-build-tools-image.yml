@@ -31,7 +31,7 @@ jobs:
         id: get-build-tools-tag
         env:
           IMAGE_TAG: |
-            ${{ hashFiles('Dockerfile.build-tools',
+            ${{ hashFiles('build-tools.Dockerfile',
                           '.github/workflows/check-build-tools-image.yml',
                           '.github/workflows/build-build-tools-image.yml') }}
         run: |
