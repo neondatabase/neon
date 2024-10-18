@@ -16,10 +16,9 @@ mod signature;
 pub mod threadpool;
 
 pub(crate) use exchange::{exchange, Exchange};
+use hmac::{Hmac, Mac};
 pub(crate) use key::ScramKey;
 pub(crate) use secret::ServerSecret;
-
-use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 
 const SCRAM_SHA_256: &str = "SCRAM-SHA-256";
@@ -59,13 +58,11 @@ fn sha256<'a>(parts: impl IntoIterator<Item = &'a [u8]>) -> [u8; 32] {
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        intern::EndpointIdInt,
-        sasl::{Mechanism, Step},
-        EndpointId,
-    };
-
-    use super::{threadpool::ThreadPool, Exchange, ServerSecret};
+    use super::threadpool::ThreadPool;
+    use super::{Exchange, ServerSecret};
+    use crate::intern::EndpointIdInt;
+    use crate::sasl::{Mechanism, Step};
+    use crate::EndpointId;
 
     #[test]
     fn snapshot() {

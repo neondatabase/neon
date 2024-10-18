@@ -1,9 +1,9 @@
-use measured::FixedCardinalityLabel;
-use serde::{Deserialize, Serialize};
 use std::fmt::{self, Display};
 
-use crate::auth::IpPattern;
+use measured::FixedCardinalityLabel;
+use serde::{Deserialize, Serialize};
 
+use crate::auth::IpPattern;
 use crate::intern::{BranchIdInt, EndpointIdInt, ProjectIdInt, RoleNameInt};
 use crate::proxy::retry::CouldRetry;
 
@@ -362,8 +362,9 @@ pub struct JwksSettings {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use serde_json::json;
+
+    use super::*;
 
     fn dummy_aux() -> serde_json::Value {
         json!({

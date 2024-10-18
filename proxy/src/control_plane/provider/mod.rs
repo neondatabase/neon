@@ -2,39 +2,36 @@
 pub mod mock;
 pub mod neon;
 
-use super::messages::{ControlPlaneError, MetricsAuxInfo};
-use crate::{
-    auth::{
-        backend::{
-            jwt::{AuthRule, FetchAuthRules},
-            ComputeCredentialKeys, ComputeUserInfo,
-        },
-        IpPattern,
-    },
-    cache::{endpoints::EndpointsCache, project_info::ProjectInfoCacheImpl, Cached, TimedLru},
-    compute,
-    config::{CacheOptions, EndpointCacheConfig, ProjectInfoCacheOptions},
-    context::RequestMonitoring,
-    error::ReportableError,
-    intern::ProjectIdInt,
-    metrics::ApiLockMetrics,
-    rate_limiter::{DynamicLimiter, Outcome, RateLimiterConfig, Token},
-    scram, EndpointCacheKey, EndpointId,
-};
+use std::hash::Hash;
+use std::sync::Arc;
+use std::time::Duration;
+
 use dashmap::DashMap;
-use std::{hash::Hash, sync::Arc, time::Duration};
 use tokio::time::Instant;
 use tracing::info;
 
+use super::messages::{ControlPlaneError, MetricsAuxInfo};
+use crate::auth::backend::jwt::{AuthRule, FetchAuthRules, FetchAuthRulesError};
+use crate::auth::backend::{ComputeCredentialKeys, ComputeUserInfo};
+use crate::auth::IpPattern;
+use crate::cache::endpoints::EndpointsCache;
+use crate::cache::project_info::ProjectInfoCacheImpl;
+use crate::cache::{Cached, TimedLru};
+use crate::config::{CacheOptions, EndpointCacheConfig, ProjectInfoCacheOptions};
+use crate::context::RequestMonitoring;
+use crate::error::ReportableError;
+use crate::intern::ProjectIdInt;
+use crate::metrics::ApiLockMetrics;
+use crate::rate_limiter::{DynamicLimiter, Outcome, RateLimiterConfig, Token};
+use crate::{compute, scram, EndpointCacheKey, EndpointId};
+
 pub(crate) mod errors {
-    use crate::{
-        control_plane::messages::{self, ControlPlaneError, Reason},
-        error::{io_error, ErrorKind, ReportableError, UserFacingError},
-        proxy::retry::CouldRetry,
-    };
     use thiserror::Error;
 
     use super::ApiLockError;
+    use crate::control_plane::messages::{self, ControlPlaneError, Reason};
+    use crate::error::{io_error, ErrorKind, ReportableError, UserFacingError};
+    use crate::proxy::retry::CouldRetry;
 
     /// A go-to error message which doesn't leak any detail.
     pub(crate) const REQUEST_FAILED: &str = "Console request failed";
@@ -44,7 +41,7 @@ pub(crate) mod errors {
     pub(crate) enum ApiError {
         /// Error returned by the console itself.
         #[error("{REQUEST_FAILED} with {0}")]
-        ControlPlane(ControlPlaneError),
+        ControlPlane(Box<ControlPlaneError>),
 
         /// Various IO errors like broken pipe or malformed payload.
         #[error("{REQUEST_FAILED}: {0}")]
@@ -90,7 +87,7 @@ pub(crate) mod errors {
                     Reason::ConcurrencyLimitReached => ErrorKind::ControlPlane,
                     Reason::LockAlreadyTaken => ErrorKind::ControlPlane,
                     Reason::RunningOperations => ErrorKind::ControlPlane,
-                    Reason::Unknown => match &e {
+                    Reason::Unknown => match &**e {
                         ControlPlaneError {
                             http_status_code:
                                 http::StatusCode::NOT_FOUND | http::StatusCode::NOT_ACCEPTABLE,
@@ -246,6 +243,33 @@ pub(crate) mod errors {
             }
         }
     }
+
+    #[derive(Debug, Error)]
+    pub enum GetEndpointJwksError {
+        #[error("endpoint not found")]
+        EndpointNotFound,
+
+        #[error("failed to build control plane request: {0}")]
+        RequestBuild(#[source] reqwest::Error),
+
+        #[error("failed to send control plane request: {0}")]
+        RequestExecute(#[source] reqwest_middleware::Error),
+
+        #[error(transparent)]
+        ControlPlane(#[from] ApiError),
+
+        #[cfg(any(test, feature = "testing"))]
+        #[error(transparent)]
+        TokioPostgres(#[from] tokio_postgres::Error),
+
+        #[cfg(any(test, feature = "testing"))]
+        #[error(transparent)]
+        ParseUrl(#[from] url::ParseError),
+
+        #[cfg(any(test, feature = "testing"))]
+        #[error(transparent)]
+        TaskJoin(#[from] tokio::task::JoinError),
+    }
 }
 
 /// Auth secret which is managed by the cloud.
@@ -342,7 +366,7 @@ pub(crate) trait Api {
         &self,
         ctx: &RequestMonitoring,
         endpoint: EndpointId,
-    ) -> anyhow::Result<Vec<AuthRule>>;
+    ) -> Result<Vec<AuthRule>, errors::GetEndpointJwksError>;
 
     /// Wake up the compute node and return the corresponding connection info.
     async fn wake_compute(
@@ -401,7 +425,7 @@ impl Api for ControlPlaneBackend {
         &self,
         ctx: &RequestMonitoring,
         endpoint: EndpointId,
-    ) -> anyhow::Result<Vec<AuthRule>> {
+    ) -> Result<Vec<AuthRule>, errors::GetEndpointJwksError> {
         match self {
             Self::Management(api) => api.get_endpoint_jwks(ctx, endpoint).await,
             #[cfg(any(test, feature = "testing"))]
@@ -583,7 +607,9 @@ impl FetchAuthRules for ControlPlaneBackend {
         &self,
         ctx: &RequestMonitoring,
         endpoint: EndpointId,
-    ) -> anyhow::Result<Vec<AuthRule>> {
-        self.get_endpoint_jwks(ctx, endpoint).await
+    ) -> Result<Vec<AuthRule>, FetchAuthRulesError> {
+        self.get_endpoint_jwks(ctx, endpoint)
+            .await
+            .map_err(FetchAuthRulesError::GetEndpointJwks)
     }
 }

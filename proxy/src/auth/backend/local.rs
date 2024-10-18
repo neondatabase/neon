@@ -1,28 +1,32 @@
 use std::net::SocketAddr;
 
-use anyhow::Context;
 use arc_swap::ArcSwapOption;
-
-use crate::{
-    compute::ConnCfg,
-    context::RequestMonitoring,
-    control_plane::{
-        messages::{ColdStartInfo, EndpointJwksResponse, MetricsAuxInfo},
-        NodeInfo,
-    },
-    intern::{BranchIdTag, EndpointIdTag, InternId, ProjectIdTag},
-    EndpointId,
-};
+use tokio::sync::Semaphore;
 
 use super::jwt::{AuthRule, FetchAuthRules};
+use crate::auth::backend::jwt::FetchAuthRulesError;
+use crate::compute::ConnCfg;
+use crate::compute_ctl::ComputeCtlApi;
+use crate::context::RequestMonitoring;
+use crate::control_plane::messages::{ColdStartInfo, EndpointJwksResponse, MetricsAuxInfo};
+use crate::control_plane::NodeInfo;
+use crate::intern::{BranchIdTag, EndpointIdTag, InternId, ProjectIdTag};
+use crate::url::ApiUrl;
+use crate::{http, EndpointId};
 
 pub struct LocalBackend {
+    pub(crate) initialize: Semaphore,
+    pub(crate) compute_ctl: ComputeCtlApi,
     pub(crate) node_info: NodeInfo,
 }
 
 impl LocalBackend {
-    pub fn new(postgres_addr: SocketAddr) -> Self {
+    pub fn new(postgres_addr: SocketAddr, compute_ctl: ApiUrl) -> Self {
         LocalBackend {
+            initialize: Semaphore::new(1),
+            compute_ctl: ComputeCtlApi {
+                api: http::Endpoint::new(compute_ctl, http::new_client()),
+            },
             node_info: NodeInfo {
                 config: {
                     let mut cfg = ConnCfg::new();
@@ -53,11 +57,11 @@ impl FetchAuthRules for StaticAuthRules {
         &self,
         _ctx: &RequestMonitoring,
         _endpoint: EndpointId,
-    ) -> anyhow::Result<Vec<AuthRule>> {
+    ) -> Result<Vec<AuthRule>, FetchAuthRulesError> {
         let mappings = JWKS_ROLE_MAP.load();
         let role_mappings = mappings
             .as_deref()
-            .context("JWKs settings for this role were not configured")?;
+            .ok_or(FetchAuthRulesError::RoleJwksNotConfigured)?;
         let mut rules = vec![];
         for setting in &role_mappings.jwks {
             rules.push(AuthRule {

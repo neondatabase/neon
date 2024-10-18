@@ -576,6 +576,14 @@ def test_storage_controller_compute_hook(
     env.storage_controller.consistency_check()
 
 
+NOTIFY_BLOCKED_LOG = ".*Live migration blocked.*"
+NOTIFY_FAILURE_LOGS = [
+    ".*Failed to notify compute.*",
+    ".*Reconcile error.*Cancelled",
+    ".*Reconcile error.*Control plane tenant busy",
+]
+
+
 def test_storage_controller_stuck_compute_hook(
     httpserver: HTTPServer,
     neon_env_builder: NeonEnvBuilder,
@@ -620,15 +628,8 @@ def test_storage_controller_stuck_compute_hook(
     dest_pageserver = env.get_pageserver(dest_ps_id)
     shard_0_id = TenantShardId(tenant_id, 0, 0)
 
-    NOTIFY_BLOCKED_LOG = ".*Live migration blocked.*"
-    env.storage_controller.allowed_errors.extend(
-        [
-            NOTIFY_BLOCKED_LOG,
-            ".*Failed to notify compute.*",
-            ".*Reconcile error.*Cancelled",
-            ".*Reconcile error.*Control plane tenant busy",
-        ]
-    )
+    env.storage_controller.allowed_errors.append(NOTIFY_BLOCKED_LOG)
+    env.storage_controller.allowed_errors.extend(NOTIFY_FAILURE_LOGS)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
         # We expect the controller to hit the 423 (locked) and retry.  Migration shouldn't complete until that
@@ -717,6 +718,114 @@ def test_storage_controller_stuck_compute_hook(
         env.storage_controller.reconcile_until_idle()
 
     env.storage_controller.consistency_check()
+
+
+@run_only_on_default_postgres("this test doesn't start an endpoint")
+def test_storage_controller_compute_hook_revert(
+    httpserver: HTTPServer,
+    neon_env_builder: NeonEnvBuilder,
+    httpserver_listen_address,
+):
+    """
+    'revert' in the sense of a migration which gets reversed shortly after, as may happen during
+    a rolling upgrade.
+
+    This is a reproducer for https://github.com/neondatabase/neon/issues/9417
+
+    The buggy behavior was that when the compute hook gave us errors, we assumed our last successfully
+    sent state was still in effect, so when migrating back to the original pageserver we didn't bother
+    notifying of that.  This is wrong because even a failed request might mutate the state on the server.
+    """
+
+    # We will run two pageserver to migrate and check that the storage controller sends notifications
+    # when migrating.
+    neon_env_builder.num_pageservers = 2
+    (host, port) = httpserver_listen_address
+    neon_env_builder.control_plane_compute_hook_api = f"http://{host}:{port}/notify"
+
+    # Set up fake HTTP notify endpoint
+    notifications = []
+
+    handle_params = {"status": 200}
+
+    def handler(request: Request):
+        status = handle_params["status"]
+        log.info(f"Notify request[{status}]: {request}")
+        notifications.append(request.json)
+        return Response(status=status)
+
+    httpserver.expect_request("/notify", method="PUT").respond_with_handler(handler)
+
+    # Start running
+    env = neon_env_builder.init_start(initial_tenant_conf={"lsn_lease_length": "0s"})
+    tenant_id = env.initial_tenant
+    tenant_shard_id = TenantShardId(tenant_id, 0, 0)
+
+    pageserver_a = env.get_tenant_pageserver(tenant_id)
+    pageserver_b = [p for p in env.pageservers if p.id != pageserver_a.id][0]
+
+    def notified_ps(ps_id: int) -> None:
+        latest = notifications[-1]
+        log.info(f"Waiting for {ps_id}, have {latest}")
+        assert latest is not None
+        assert latest["shards"] is not None
+        assert latest["shards"][0]["node_id"] == ps_id
+
+    wait_until(30, 1, lambda: notified_ps(pageserver_a.id))
+
+    env.storage_controller.allowed_errors.append(NOTIFY_BLOCKED_LOG)
+    env.storage_controller.allowed_errors.extend(NOTIFY_FAILURE_LOGS)
+
+    # Migrate A -> B, and make notifications fail while this is happening
+    handle_params["status"] = 423
+
+    with pytest.raises(StorageControllerApiException, match="Timeout waiting for shard"):
+        # We expect the controller to give us an error because its reconciliation timed out
+        # waiting for the compute hook.
+        env.storage_controller.tenant_shard_migrate(tenant_shard_id, pageserver_b.id)
+
+    # Although the migration API failed, the hook should still see pageserver B (it remembers what
+    # was posted even when returning an error code)
+    wait_until(30, 1, lambda: notified_ps(pageserver_b.id))
+
+    # Although the migration API failed, the tenant should still have moved to the right pageserver
+    assert len(pageserver_b.http_client().tenant_list()) == 1
+
+    # Before we clear the failure on the migration hook, we need the controller to give up
+    # trying to notify about B -- the bug case we're reproducing is when the controller
+    # _never_ successfully notified for B, then tries to notify for A.
+    #
+    # The controller will give up notifying if the origin of a migration becomes unavailable.
+    pageserver_a.stop()
+
+    # Preempt heartbeats for a faster test
+    env.storage_controller.node_configure(pageserver_a.id, {"availability": "Offline"})
+
+    def logged_giving_up():
+        env.storage_controller.assert_log_contains(".*Giving up on compute notification.*")
+
+    wait_until(30, 1, logged_giving_up)
+
+    pageserver_a.start()
+
+    # Preempt heartbeats for determinism
+    env.storage_controller.node_configure(pageserver_a.id, {"availability": "Active"})
+    # Starting node will prompt a reconcile to clean up old AttachedStale location, for a deterministic test
+    # we want that complete before we start our migration.  Tolerate failure because our compute hook is
+    # still configured to fail
+    try:
+        env.storage_controller.reconcile_all()
+    except StorageControllerApiException as e:
+        # This exception _might_ be raised: it depends if our reconcile_all hit the on-node-activation
+        # Reconciler lifetime or ran after it already completed.
+        log.info(f"Expected error from reconcile_all: {e}")
+
+    # Migrate B -> A, with a working compute hook: the controller should notify the hook because the
+    # last update it made that was acked (423) by the compute was for node B.
+    handle_params["status"] = 200
+    env.storage_controller.tenant_shard_migrate(tenant_shard_id, pageserver_a.id)
+
+    wait_until(30, 1, lambda: notified_ps(pageserver_a.id))
 
 
 def test_storage_controller_debug_apis(neon_env_builder: NeonEnvBuilder):

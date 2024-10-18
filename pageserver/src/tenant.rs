@@ -20,7 +20,6 @@ use enumset::EnumSet;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use pageserver_api::models;
-use pageserver_api::models::AuxFilePolicy;
 use pageserver_api::models::LsnLease;
 use pageserver_api::models::TimelineArchivalState;
 use pageserver_api::models::TimelineState;
@@ -67,7 +66,7 @@ use self::metadata::TimelineMetadata;
 use self::mgr::GetActiveTenantError;
 use self::mgr::GetTenantError;
 use self::remote_timeline_client::upload::upload_index_part;
-use self::remote_timeline_client::RemoteTimelineClient;
+use self::remote_timeline_client::{RemoteTimelineClient, WaitCompletionError};
 use self::timeline::uninit::TimelineCreateGuard;
 use self::timeline::uninit::TimelineExclusionError;
 use self::timeline::uninit::UninitializedTimeline;
@@ -493,6 +492,8 @@ pub struct OffloadedTimeline {
     pub tenant_shard_id: TenantShardId,
     pub timeline_id: TimelineId,
     pub ancestor_timeline_id: Option<TimelineId>,
+    /// Whether to retain the branch lsn at the ancestor or not
+    pub ancestor_retain_lsn: Option<Lsn>,
 
     // TODO: once we persist offloaded state, make this lazily constructed
     pub remote_client: Arc<RemoteTimelineClient>,
@@ -504,15 +505,25 @@ pub struct OffloadedTimeline {
 
 impl OffloadedTimeline {
     fn from_timeline(timeline: &Timeline) -> Self {
+        let ancestor_retain_lsn = timeline
+            .get_ancestor_timeline_id()
+            .map(|_timeline_id| timeline.get_ancestor_lsn());
         Self {
             tenant_shard_id: timeline.tenant_shard_id,
             timeline_id: timeline.timeline_id,
             ancestor_timeline_id: timeline.get_ancestor_timeline_id(),
+            ancestor_retain_lsn,
 
             remote_client: timeline.remote_client.clone(),
             delete_progress: timeline.delete_progress.clone(),
         }
     }
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+pub enum MaybeOffloaded {
+    Yes,
+    No,
 }
 
 #[derive(Clone)]
@@ -607,6 +618,9 @@ pub enum TimelineArchivalError {
     #[error("Timeout")]
     Timeout,
 
+    #[error("Cancelled")]
+    Cancelled,
+
     #[error("ancestor is archived: {}", .0)]
     HasArchivedParent(TimelineId),
 
@@ -617,7 +631,7 @@ pub enum TimelineArchivalError {
     AlreadyInProgress,
 
     #[error(transparent)]
-    Other(#[from] anyhow::Error),
+    Other(anyhow::Error),
 }
 
 impl Debug for TimelineArchivalError {
@@ -625,6 +639,7 @@ impl Debug for TimelineArchivalError {
         match self {
             Self::NotFound => write!(f, "NotFound"),
             Self::Timeout => write!(f, "Timeout"),
+            Self::Cancelled => write!(f, "Cancelled"),
             Self::HasArchivedParent(p) => f.debug_tuple("HasArchivedParent").field(p).finish(),
             Self::HasUnarchivedChildren(c) => {
                 f.debug_tuple("HasUnarchivedChildren").field(c).finish()
@@ -784,7 +799,6 @@ impl Tenant {
         index_part: Option<IndexPart>,
         metadata: TimelineMetadata,
         ancestor: Option<Arc<Timeline>>,
-        last_aux_file_policy: Option<AuxFilePolicy>,
         _ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         let tenant_id = self.tenant_shard_id;
@@ -795,10 +809,6 @@ impl Tenant {
             ancestor.clone(),
             resources,
             CreateTimelineCause::Load,
-            // This could be derived from ancestor branch + index part. Though the only caller of `timeline_init_and_sync` is `load_remote_timeline`,
-            // there will potentially be other caller of this function in the future, and we don't know whether `index_part` or `ancestor` takes precedence.
-            // Therefore, we pass this field explicitly for now, and remove it once we fully migrate to aux file v2.
-            last_aux_file_policy,
         )?;
         let disk_consistent_lsn = timeline.get_disk_consistent_lsn();
         anyhow::ensure!(
@@ -813,10 +823,6 @@ impl Tenant {
 
         if let Some(index_part) = index_part.as_ref() {
             timeline.remote_client.init_upload_queue(index_part)?;
-
-            timeline
-                .last_aux_file_policy
-                .store(index_part.last_aux_file_policy());
         } else {
             // No data on the remote storage, but we have local metadata file. We can end up
             // here with timeline_create being interrupted before finishing index part upload.
@@ -1387,15 +1393,12 @@ impl Tenant {
             None
         };
 
-        let last_aux_file_policy = index_part.last_aux_file_policy();
-
         self.timeline_init_and_sync(
             timeline_id,
             resources,
             Some(index_part),
             remote_metadata,
             ancestor,
-            last_aux_file_policy,
             ctx,
         )
         .await
@@ -1538,8 +1541,10 @@ impl Tenant {
     async fn unoffload_timeline(
         self: &Arc<Self>,
         timeline_id: TimelineId,
+        broker_client: storage_broker::BrokerClientChannel,
         ctx: RequestContext,
     ) -> Result<Arc<Timeline>, TimelineArchivalError> {
+        info!("unoffloading timeline");
         let cancel = self.cancel.clone();
         let timeline_preload = self
             .load_timeline_metadata(timeline_id, self.remote_storage.clone(), cancel)
@@ -1554,6 +1559,7 @@ impl Tenant {
                 error!(%timeline_id, "index_part not found on remote");
                 return Err(TimelineArchivalError::NotFound);
             }
+            Err(DownloadError::Cancelled) => return Err(TimelineArchivalError::Cancelled),
             Err(e) => {
                 // Some (possibly ephemeral) error happened during index_part download.
                 warn!(%timeline_id, "Failed to load index_part from remote storage, failed creation? ({e})");
@@ -1584,26 +1590,40 @@ impl Tenant {
                 "failed to load remote timeline {} for tenant {}",
                 timeline_id, self.tenant_shard_id
             )
-        })?;
+        })
+        .map_err(TimelineArchivalError::Other)?;
         let timelines = self.timelines.lock().unwrap();
-        if let Some(timeline) = timelines.get(&timeline_id) {
-            let mut offloaded_timelines = self.timelines_offloaded.lock().unwrap();
-            if offloaded_timelines.remove(&timeline_id).is_none() {
-                warn!("timeline already removed from offloaded timelines");
-            }
-            Ok(Arc::clone(timeline))
-        } else {
+        let Some(timeline) = timelines.get(&timeline_id) else {
             warn!("timeline not available directly after attach");
-            Err(TimelineArchivalError::Other(anyhow::anyhow!(
+            return Err(TimelineArchivalError::Other(anyhow::anyhow!(
                 "timeline not available directly after attach"
-            )))
+            )));
+        };
+        let mut offloaded_timelines = self.timelines_offloaded.lock().unwrap();
+        if offloaded_timelines.remove(&timeline_id).is_none() {
+            warn!("timeline already removed from offloaded timelines");
         }
+
+        // Activate the timeline (if it makes sense)
+        if !(timeline.is_broken() || timeline.is_stopping()) {
+            let background_jobs_can_start = None;
+            timeline.activate(
+                self.clone(),
+                broker_client.clone(),
+                background_jobs_can_start,
+                &ctx,
+            );
+        }
+
+        info!("timeline unoffloading complete");
+        Ok(Arc::clone(timeline))
     }
 
     pub(crate) async fn apply_timeline_archival_config(
         self: &Arc<Self>,
         timeline_id: TimelineId,
         new_state: TimelineArchivalState,
+        broker_client: storage_broker::BrokerClientChannel,
         ctx: RequestContext,
     ) -> Result<(), TimelineArchivalError> {
         info!("setting timeline archival config");
@@ -1644,18 +1664,29 @@ impl Tenant {
             Some(Arc::clone(timeline))
         };
 
-        // Second part: unarchive timeline (if needed)
+        // Second part: unoffload timeline (if needed)
         let timeline = if let Some(timeline) = timeline_or_unarchive_offloaded {
             timeline
         } else {
             // Turn offloaded timeline into a non-offloaded one
-            self.unoffload_timeline(timeline_id, ctx).await?
+            self.unoffload_timeline(timeline_id, broker_client, ctx)
+                .await?
         };
 
         // Third part: upload new timeline archival state and block until it is present in S3
-        let upload_needed = timeline
+        let upload_needed = match timeline
             .remote_client
-            .schedule_index_upload_for_timeline_archival_state(new_state)?;
+            .schedule_index_upload_for_timeline_archival_state(new_state)
+        {
+            Ok(upload_needed) => upload_needed,
+            Err(e) => {
+                if timeline.cancel.is_cancelled() {
+                    return Err(TimelineArchivalError::Cancelled);
+                } else {
+                    return Err(TimelineArchivalError::Other(e));
+                }
+            }
+        };
 
         if upload_needed {
             info!("Uploading new state");
@@ -1666,9 +1697,31 @@ impl Tenant {
                 tracing::warn!("reached timeout for waiting on upload queue");
                 return Err(TimelineArchivalError::Timeout);
             };
-            v.map_err(|e| TimelineArchivalError::Other(anyhow::anyhow!(e)))?;
+            v.map_err(|e| match e {
+                WaitCompletionError::NotInitialized(e) => {
+                    TimelineArchivalError::Other(anyhow::anyhow!(e))
+                }
+                WaitCompletionError::UploadQueueShutDownOrStopped => {
+                    TimelineArchivalError::Cancelled
+                }
+            })?;
         }
         Ok(())
+    }
+
+    pub fn get_offloaded_timeline(
+        &self,
+        timeline_id: TimelineId,
+    ) -> Result<Arc<OffloadedTimeline>, GetTimelineError> {
+        self.timelines_offloaded
+            .lock()
+            .unwrap()
+            .get(&timeline_id)
+            .map(Arc::clone)
+            .ok_or(GetTimelineError::NotFound {
+                tenant_id: self.tenant_shard_id,
+                timeline_id,
+            })
     }
 
     pub(crate) fn tenant_shard_id(&self) -> TenantShardId {
@@ -1757,7 +1810,6 @@ impl Tenant {
             &new_metadata,
             create_guard,
             initdb_lsn,
-            None,
             None,
         )
         .await
@@ -2121,7 +2173,8 @@ impl Tenant {
                             .iter()
                             .any(|(_id, tl)| tl.get_ancestor_timeline_id() == Some(*timeline_id))
                     };
-                    let can_offload = can_offload && has_no_unoffloaded_children;
+                    let can_offload =
+                        can_offload && has_no_unoffloaded_children && self.conf.timeline_offloading;
                     if (is_active, can_offload) == (false, false) {
                         None
                     } else {
@@ -2206,6 +2259,13 @@ impl Tenant {
         }
     }
 
+    pub fn timeline_has_no_attached_children(&self, timeline_id: TimelineId) -> bool {
+        let timelines = self.timelines.lock().unwrap();
+        !timelines
+            .iter()
+            .any(|(_id, tl)| tl.get_ancestor_timeline_id() == Some(timeline_id))
+    }
+
     pub fn current_state(&self) -> TenantState {
         self.state.borrow().clone()
     }
@@ -2253,12 +2313,13 @@ impl Tenant {
 
         if activating {
             let timelines_accessor = self.timelines.lock().unwrap();
+            let timelines_offloaded_accessor = self.timelines_offloaded.lock().unwrap();
             let timelines_to_activate = timelines_accessor
                 .values()
                 .filter(|timeline| !(timeline.is_broken() || timeline.is_stopping()));
 
             // Before activation, populate each Timeline's GcInfo with information about its children
-            self.initialize_gc_info(&timelines_accessor);
+            self.initialize_gc_info(&timelines_accessor, &timelines_offloaded_accessor);
 
             // Spawn gc and compaction loops. The loops will shut themselves
             // down when they notice that the tenant is inactive.
@@ -2957,7 +3018,6 @@ impl Tenant {
         ancestor: Option<Arc<Timeline>>,
         resources: TimelineResources,
         cause: CreateTimelineCause,
-        last_aux_file_policy: Option<AuxFilePolicy>,
     ) -> anyhow::Result<Arc<Timeline>> {
         let state = match cause {
             CreateTimelineCause::Load => {
@@ -2986,7 +3046,6 @@ impl Tenant {
             resources,
             pg_version,
             state,
-            last_aux_file_policy,
             self.attach_wal_lag_cooldown.clone(),
             self.cancel.child_token(),
         );
@@ -3294,10 +3353,11 @@ impl Tenant {
     /// Populate all Timelines' `GcInfo` with information about their children.  We do not set the
     /// PITR cutoffs here, because that requires I/O: this is done later, before GC, by [`Self::refresh_gc_info_internal`]
     ///
-    /// Subsequently, parent-child relationships are updated incrementally during timeline creation/deletion.
+    /// Subsequently, parent-child relationships are updated incrementally inside [`Timeline::new`] and [`Timeline::drop`].
     fn initialize_gc_info(
         &self,
         timelines: &std::sync::MutexGuard<HashMap<TimelineId, Arc<Timeline>>>,
+        timelines_offloaded: &std::sync::MutexGuard<HashMap<TimelineId, Arc<OffloadedTimeline>>>,
     ) {
         // This function must be called before activation: after activation timeline create/delete operations
         // might happen, and this function is not safe to run concurrently with those.
@@ -3305,20 +3365,37 @@ impl Tenant {
 
         // Scan all timelines. For each timeline, remember the timeline ID and
         // the branch point where it was created.
-        let mut all_branchpoints: BTreeMap<TimelineId, Vec<(Lsn, TimelineId)>> = BTreeMap::new();
+        let mut all_branchpoints: BTreeMap<TimelineId, Vec<(Lsn, TimelineId, MaybeOffloaded)>> =
+            BTreeMap::new();
         timelines.iter().for_each(|(timeline_id, timeline_entry)| {
             if let Some(ancestor_timeline_id) = &timeline_entry.get_ancestor_timeline_id() {
                 let ancestor_children = all_branchpoints.entry(*ancestor_timeline_id).or_default();
-                ancestor_children.push((timeline_entry.get_ancestor_lsn(), *timeline_id));
+                ancestor_children.push((
+                    timeline_entry.get_ancestor_lsn(),
+                    *timeline_id,
+                    MaybeOffloaded::No,
+                ));
             }
         });
+        timelines_offloaded
+            .iter()
+            .for_each(|(timeline_id, timeline_entry)| {
+                let Some(ancestor_timeline_id) = &timeline_entry.ancestor_timeline_id else {
+                    return;
+                };
+                let Some(retain_lsn) = timeline_entry.ancestor_retain_lsn else {
+                    return;
+                };
+                let ancestor_children = all_branchpoints.entry(*ancestor_timeline_id).or_default();
+                ancestor_children.push((retain_lsn, *timeline_id, MaybeOffloaded::Yes));
+            });
 
         // The number of bytes we always keep, irrespective of PITR: this is a constant across timelines
         let horizon = self.get_gc_horizon();
 
         // Populate each timeline's GcInfo with information about its child branches
         for timeline in timelines.values() {
-            let mut branchpoints: Vec<(Lsn, TimelineId)> = all_branchpoints
+            let mut branchpoints: Vec<(Lsn, TimelineId, MaybeOffloaded)> = all_branchpoints
                 .remove(&timeline.timeline_id)
                 .unwrap_or_default();
 
@@ -3627,7 +3704,6 @@ impl Tenant {
                 timeline_create_guard,
                 start_lsn + 1,
                 Some(Arc::clone(src_timeline)),
-                src_timeline.last_aux_file_policy.load(),
             )
             .await?;
 
@@ -3821,7 +3897,6 @@ impl Tenant {
                 timeline_create_guard,
                 pgdata_lsn,
                 None,
-                None,
             )
             .await?;
 
@@ -3893,7 +3968,6 @@ impl Tenant {
         create_guard: TimelineCreateGuard<'a>,
         start_lsn: Lsn,
         ancestor: Option<Arc<Timeline>>,
-        last_aux_file_policy: Option<AuxFilePolicy>,
     ) -> anyhow::Result<UninitializedTimeline<'a>> {
         let tenant_shard_id = self.tenant_shard_id;
 
@@ -3909,7 +3983,6 @@ impl Tenant {
                 ancestor,
                 resources,
                 CreateTimelineCause::Load,
-                last_aux_file_policy,
             )
             .context("Failed to create timeline data structure")?;
 
@@ -4507,7 +4580,6 @@ mod tests {
 
     use super::*;
     use crate::keyspace::KeySpaceAccum;
-    use crate::pgdatadir_mapping::AuxFilesDirectory;
     use crate::repository::{Key, Value};
     use crate::tenant::harness::*;
     use crate::tenant::timeline::CompactFlags;
@@ -4516,7 +4588,7 @@ mod tests {
     use bytes::{Bytes, BytesMut};
     use hex_literal::hex;
     use itertools::Itertools;
-    use pageserver_api::key::{AUX_FILES_KEY, AUX_KEY_PREFIX, NON_INHERITED_RANGE};
+    use pageserver_api::key::{AUX_KEY_PREFIX, NON_INHERITED_RANGE};
     use pageserver_api::keyspace::KeySpace;
     use pageserver_api::models::{CompactionAlgorithm, CompactionAlgorithmSettings};
     use rand::{thread_rng, Rng};
@@ -4525,7 +4597,6 @@ mod tests {
     use tests::timeline::{GetVectoredError, ShutdownMode};
     use timeline::compaction::{KeyHistoryRetention, KeyLogAtLsn};
     use timeline::{DeltaLayerTestDesc, GcInfo};
-    use utils::bin_ser::BeSer;
     use utils::id::TenantId;
 
     static TEST_KEY: Lazy<Key> =
@@ -4878,7 +4949,10 @@ mod tests {
         {
             let branchpoints = &tline.gc_info.read().unwrap().retain_lsns;
             assert_eq!(branchpoints.len(), 1);
-            assert_eq!(branchpoints[0], (Lsn(0x40), NEW_TIMELINE_ID));
+            assert_eq!(
+                branchpoints[0],
+                (Lsn(0x40), NEW_TIMELINE_ID, MaybeOffloaded::No)
+            );
         }
 
         // You can read the key from the child branch even though the parent is
@@ -6326,16 +6400,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_branch_copies_dirty_aux_file_flag() {
-        let harness = TenantHarness::create("test_branch_copies_dirty_aux_file_flag")
-            .await
-            .unwrap();
+    async fn test_aux_file_e2e() {
+        let harness = TenantHarness::create("test_aux_file_e2e").await.unwrap();
 
-        // the default aux file policy to switch is v2 if not set by the admins
-        assert_eq!(
-            harness.tenant_conf.switch_aux_file_policy,
-            AuxFilePolicy::default_tenant_config()
-        );
         let (tenant, ctx) = harness.load().await;
 
         let mut lsn = Lsn(0x08);
@@ -6344,9 +6411,6 @@ mod tests {
             .create_test_timeline(TIMELINE_ID, lsn, DEFAULT_PG_VERSION, &ctx)
             .await
             .unwrap();
-
-        // no aux file is written at this point, so the persistent flag should be unset
-        assert_eq!(tline.last_aux_file_policy.load(), None);
 
         {
             lsn += 8;
@@ -6357,30 +6421,6 @@ mod tests {
                 .unwrap();
             modification.commit(&ctx).await.unwrap();
         }
-
-        // there is no tenant manager to pass the configuration through, so lets mimic it
-        tenant.set_new_location_config(
-            AttachedTenantConf::try_from(LocationConf::attached_single(
-                TenantConfOpt {
-                    switch_aux_file_policy: Some(AuxFilePolicy::V2),
-                    ..Default::default()
-                },
-                tenant.generation,
-                &pageserver_api::models::ShardParameters::default(),
-            ))
-            .unwrap(),
-        );
-
-        assert_eq!(
-            tline.get_switch_aux_file_policy(),
-            AuxFilePolicy::V2,
-            "wanted state has been updated"
-        );
-        assert_eq!(
-            tline.last_aux_file_policy.load(),
-            Some(AuxFilePolicy::V2),
-            "aux file is written with switch_aux_file_policy unset (which is v2), so we should use v2 there"
-        );
 
         // we can read everything from the storage
         let files = tline.list_aux_files(lsn, &ctx).await.unwrap();
@@ -6399,12 +6439,6 @@ mod tests {
             modification.commit(&ctx).await.unwrap();
         }
 
-        assert_eq!(
-            tline.last_aux_file_policy.load(),
-            Some(AuxFilePolicy::V2),
-            "keep v2 storage format when new files are written"
-        );
-
         let files = tline.list_aux_files(lsn, &ctx).await.unwrap();
         assert_eq!(
             files.get("pg_logical/mappings/test2"),
@@ -6416,321 +6450,9 @@ mod tests {
             .await
             .unwrap();
 
-        // child copies the last flag even if that is not on remote storage yet
-        assert_eq!(child.get_switch_aux_file_policy(), AuxFilePolicy::V2);
-        assert_eq!(child.last_aux_file_policy.load(), Some(AuxFilePolicy::V2));
-
         let files = child.list_aux_files(lsn, &ctx).await.unwrap();
         assert_eq!(files.get("pg_logical/mappings/test1"), None);
         assert_eq!(files.get("pg_logical/mappings/test2"), None);
-
-        // even if we crash here without flushing parent timeline with it's new
-        // last_aux_file_policy we are safe, because child was never meant to access ancestor's
-        // files. the ancestor can even switch back to V1 because of a migration safely.
-    }
-
-    #[tokio::test]
-    async fn aux_file_policy_switch() {
-        let mut harness = TenantHarness::create("aux_file_policy_switch")
-            .await
-            .unwrap();
-        harness.tenant_conf.switch_aux_file_policy = AuxFilePolicy::CrossValidation; // set to cross-validation mode
-        let (tenant, ctx) = harness.load().await;
-
-        let mut lsn = Lsn(0x08);
-
-        let tline: Arc<Timeline> = tenant
-            .create_test_timeline(TIMELINE_ID, lsn, DEFAULT_PG_VERSION, &ctx)
-            .await
-            .unwrap();
-
-        assert_eq!(
-            tline.last_aux_file_policy.load(),
-            None,
-            "no aux file is written so it should be unset"
-        );
-
-        {
-            lsn += 8;
-            let mut modification = tline.begin_modification(lsn);
-            modification
-                .put_file("pg_logical/mappings/test1", b"first", &ctx)
-                .await
-                .unwrap();
-            modification.commit(&ctx).await.unwrap();
-        }
-
-        // there is no tenant manager to pass the configuration through, so lets mimic it
-        tenant.set_new_location_config(
-            AttachedTenantConf::try_from(LocationConf::attached_single(
-                TenantConfOpt {
-                    switch_aux_file_policy: Some(AuxFilePolicy::V2),
-                    ..Default::default()
-                },
-                tenant.generation,
-                &pageserver_api::models::ShardParameters::default(),
-            ))
-            .unwrap(),
-        );
-
-        assert_eq!(
-            tline.get_switch_aux_file_policy(),
-            AuxFilePolicy::V2,
-            "wanted state has been updated"
-        );
-        assert_eq!(
-            tline.last_aux_file_policy.load(),
-            Some(AuxFilePolicy::CrossValidation),
-            "dirty index_part.json reflected state is yet to be updated"
-        );
-
-        // we can still read the auxfile v1 before we ingest anything new
-        let files = tline.list_aux_files(lsn, &ctx).await.unwrap();
-        assert_eq!(
-            files.get("pg_logical/mappings/test1"),
-            Some(&bytes::Bytes::from_static(b"first"))
-        );
-
-        {
-            lsn += 8;
-            let mut modification = tline.begin_modification(lsn);
-            modification
-                .put_file("pg_logical/mappings/test2", b"second", &ctx)
-                .await
-                .unwrap();
-            modification.commit(&ctx).await.unwrap();
-        }
-
-        assert_eq!(
-            tline.last_aux_file_policy.load(),
-            Some(AuxFilePolicy::V2),
-            "ingesting a file should apply the wanted switch state when applicable"
-        );
-
-        let files = tline.list_aux_files(lsn, &ctx).await.unwrap();
-        assert_eq!(
-            files.get("pg_logical/mappings/test1"),
-            Some(&bytes::Bytes::from_static(b"first")),
-            "cross validation writes to both v1 and v2 so this should be available in v2"
-        );
-        assert_eq!(
-            files.get("pg_logical/mappings/test2"),
-            Some(&bytes::Bytes::from_static(b"second"))
-        );
-
-        // mimic again by trying to flip it from V2 to V1 (not switched to while ingesting a file)
-        tenant.set_new_location_config(
-            AttachedTenantConf::try_from(LocationConf::attached_single(
-                TenantConfOpt {
-                    switch_aux_file_policy: Some(AuxFilePolicy::V1),
-                    ..Default::default()
-                },
-                tenant.generation,
-                &pageserver_api::models::ShardParameters::default(),
-            ))
-            .unwrap(),
-        );
-
-        {
-            lsn += 8;
-            let mut modification = tline.begin_modification(lsn);
-            modification
-                .put_file("pg_logical/mappings/test2", b"third", &ctx)
-                .await
-                .unwrap();
-            modification.commit(&ctx).await.unwrap();
-        }
-
-        assert_eq!(
-            tline.get_switch_aux_file_policy(),
-            AuxFilePolicy::V1,
-            "wanted state has been updated again, even if invalid request"
-        );
-
-        assert_eq!(
-            tline.last_aux_file_policy.load(),
-            Some(AuxFilePolicy::V2),
-            "ingesting a file should apply the wanted switch state when applicable"
-        );
-
-        let files = tline.list_aux_files(lsn, &ctx).await.unwrap();
-        assert_eq!(
-            files.get("pg_logical/mappings/test1"),
-            Some(&bytes::Bytes::from_static(b"first"))
-        );
-        assert_eq!(
-            files.get("pg_logical/mappings/test2"),
-            Some(&bytes::Bytes::from_static(b"third"))
-        );
-
-        // mimic again by trying to flip it from from V1 to V2 (not switched to while ingesting a file)
-        tenant.set_new_location_config(
-            AttachedTenantConf::try_from(LocationConf::attached_single(
-                TenantConfOpt {
-                    switch_aux_file_policy: Some(AuxFilePolicy::V2),
-                    ..Default::default()
-                },
-                tenant.generation,
-                &pageserver_api::models::ShardParameters::default(),
-            ))
-            .unwrap(),
-        );
-
-        {
-            lsn += 8;
-            let mut modification = tline.begin_modification(lsn);
-            modification
-                .put_file("pg_logical/mappings/test3", b"last", &ctx)
-                .await
-                .unwrap();
-            modification.commit(&ctx).await.unwrap();
-        }
-
-        assert_eq!(tline.get_switch_aux_file_policy(), AuxFilePolicy::V2);
-
-        assert_eq!(tline.last_aux_file_policy.load(), Some(AuxFilePolicy::V2));
-
-        let files = tline.list_aux_files(lsn, &ctx).await.unwrap();
-        assert_eq!(
-            files.get("pg_logical/mappings/test1"),
-            Some(&bytes::Bytes::from_static(b"first"))
-        );
-        assert_eq!(
-            files.get("pg_logical/mappings/test2"),
-            Some(&bytes::Bytes::from_static(b"third"))
-        );
-        assert_eq!(
-            files.get("pg_logical/mappings/test3"),
-            Some(&bytes::Bytes::from_static(b"last"))
-        );
-    }
-
-    #[tokio::test]
-    async fn aux_file_policy_force_switch() {
-        let mut harness = TenantHarness::create("aux_file_policy_force_switch")
-            .await
-            .unwrap();
-        harness.tenant_conf.switch_aux_file_policy = AuxFilePolicy::V1;
-        let (tenant, ctx) = harness.load().await;
-
-        let mut lsn = Lsn(0x08);
-
-        let tline: Arc<Timeline> = tenant
-            .create_test_timeline(TIMELINE_ID, lsn, DEFAULT_PG_VERSION, &ctx)
-            .await
-            .unwrap();
-
-        assert_eq!(
-            tline.last_aux_file_policy.load(),
-            None,
-            "no aux file is written so it should be unset"
-        );
-
-        {
-            lsn += 8;
-            let mut modification = tline.begin_modification(lsn);
-            modification
-                .put_file("pg_logical/mappings/test1", b"first", &ctx)
-                .await
-                .unwrap();
-            modification.commit(&ctx).await.unwrap();
-        }
-
-        tline.do_switch_aux_policy(AuxFilePolicy::V2).unwrap();
-
-        assert_eq!(
-            tline.last_aux_file_policy.load(),
-            Some(AuxFilePolicy::V2),
-            "dirty index_part.json reflected state is yet to be updated"
-        );
-
-        // lose all data from v1
-        let files = tline.list_aux_files(lsn, &ctx).await.unwrap();
-        assert_eq!(files.get("pg_logical/mappings/test1"), None);
-
-        {
-            lsn += 8;
-            let mut modification = tline.begin_modification(lsn);
-            modification
-                .put_file("pg_logical/mappings/test2", b"second", &ctx)
-                .await
-                .unwrap();
-            modification.commit(&ctx).await.unwrap();
-        }
-
-        // read data ingested in v2
-        let files = tline.list_aux_files(lsn, &ctx).await.unwrap();
-        assert_eq!(
-            files.get("pg_logical/mappings/test2"),
-            Some(&bytes::Bytes::from_static(b"second"))
-        );
-        // lose all data from v1
-        assert_eq!(files.get("pg_logical/mappings/test1"), None);
-    }
-
-    #[tokio::test]
-    async fn aux_file_policy_auto_detect() {
-        let mut harness = TenantHarness::create("aux_file_policy_auto_detect")
-            .await
-            .unwrap();
-        harness.tenant_conf.switch_aux_file_policy = AuxFilePolicy::V2; // set to cross-validation mode
-        let (tenant, ctx) = harness.load().await;
-
-        let mut lsn = Lsn(0x08);
-
-        let tline: Arc<Timeline> = tenant
-            .create_test_timeline(TIMELINE_ID, lsn, DEFAULT_PG_VERSION, &ctx)
-            .await
-            .unwrap();
-
-        assert_eq!(
-            tline.last_aux_file_policy.load(),
-            None,
-            "no aux file is written so it should be unset"
-        );
-
-        {
-            lsn += 8;
-            let mut modification = tline.begin_modification(lsn);
-            let buf = AuxFilesDirectory::ser(&AuxFilesDirectory {
-                files: vec![(
-                    "test_file".to_string(),
-                    Bytes::copy_from_slice(b"test_file"),
-                )]
-                .into_iter()
-                .collect(),
-            })
-            .unwrap();
-            modification.put_for_test(AUX_FILES_KEY, Value::Image(Bytes::from(buf)));
-            modification.commit(&ctx).await.unwrap();
-        }
-
-        {
-            lsn += 8;
-            let mut modification = tline.begin_modification(lsn);
-            modification
-                .put_file("pg_logical/mappings/test1", b"first", &ctx)
-                .await
-                .unwrap();
-            modification.commit(&ctx).await.unwrap();
-        }
-
-        assert_eq!(
-            tline.last_aux_file_policy.load(),
-            Some(AuxFilePolicy::V1),
-            "keep using v1 because there are aux files writting with v1"
-        );
-
-        // we can still read the auxfile v1
-        let files = tline.list_aux_files(lsn, &ctx).await.unwrap();
-        assert_eq!(
-            files.get("pg_logical/mappings/test1"),
-            Some(&bytes::Bytes::from_static(b"first"))
-        );
-        assert_eq!(
-            files.get("test_file"),
-            Some(&bytes::Bytes::from_static(b"test_file"))
-        );
     }
 
     #[tokio::test]
@@ -8261,8 +7983,8 @@ mod tests {
             let mut guard = tline.gc_info.write().unwrap();
             *guard = GcInfo {
                 retain_lsns: vec![
-                    (Lsn(0x10), tline.timeline_id),
-                    (Lsn(0x20), tline.timeline_id),
+                    (Lsn(0x10), tline.timeline_id, MaybeOffloaded::No),
+                    (Lsn(0x20), tline.timeline_id, MaybeOffloaded::No),
                 ],
                 cutoffs: GcCutoffs {
                     time: Lsn(0x30),
@@ -8489,8 +8211,8 @@ mod tests {
             let mut guard = tline.gc_info.write().unwrap();
             *guard = GcInfo {
                 retain_lsns: vec![
-                    (Lsn(0x10), tline.timeline_id),
-                    (Lsn(0x20), tline.timeline_id),
+                    (Lsn(0x10), tline.timeline_id, MaybeOffloaded::No),
+                    (Lsn(0x20), tline.timeline_id, MaybeOffloaded::No),
                 ],
                 cutoffs: GcCutoffs {
                     time: Lsn(0x30),
@@ -8723,7 +8445,7 @@ mod tests {
             // Update GC info
             let mut guard = parent_tline.gc_info.write().unwrap();
             *guard = GcInfo {
-                retain_lsns: vec![(Lsn(0x18), branch_tline.timeline_id)],
+                retain_lsns: vec![(Lsn(0x18), branch_tline.timeline_id, MaybeOffloaded::No)],
                 cutoffs: GcCutoffs {
                     time: Lsn(0x10),
                     space: Lsn(0x10),
@@ -8737,7 +8459,7 @@ mod tests {
             // Update GC info
             let mut guard = branch_tline.gc_info.write().unwrap();
             *guard = GcInfo {
-                retain_lsns: vec![(Lsn(0x40), branch_tline.timeline_id)],
+                retain_lsns: vec![(Lsn(0x40), branch_tline.timeline_id, MaybeOffloaded::No)],
                 cutoffs: GcCutoffs {
                     time: Lsn(0x50),
                     space: Lsn(0x50),

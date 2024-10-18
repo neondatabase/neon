@@ -1,10 +1,10 @@
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tracing::info;
-
 use std::future::poll_fn;
 use std::io;
 use std::pin::Pin;
 use std::task::{ready, Context, Poll};
+
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tracing::info;
 
 #[derive(Debug)]
 enum TransferState {
@@ -256,8 +256,9 @@ impl CopyBuffer {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tokio::io::AsyncWriteExt;
+
+    use super::*;
 
     #[tokio::test]
     async fn test_client_to_compute() {

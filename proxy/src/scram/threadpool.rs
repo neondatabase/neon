@@ -4,28 +4,21 @@
 //! 1. Fairness per endpoint.
 //! 2. Yield support for high iteration counts.
 
-use std::{
-    cell::RefCell,
-    future::Future,
-    pin::Pin,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc, Weak,
-    },
-    task::{Context, Poll},
-};
+use std::cell::RefCell;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Weak};
+use std::task::{Context, Poll};
 
 use futures::FutureExt;
-use rand::Rng;
-use rand::{rngs::SmallRng, SeedableRng};
-
-use crate::{
-    intern::EndpointIdInt,
-    metrics::{ThreadPoolMetrics, ThreadPoolWorkerId},
-    scram::countmin::CountMinSketch,
-};
+use rand::rngs::SmallRng;
+use rand::{Rng, SeedableRng};
 
 use super::pbkdf2::Pbkdf2;
+use crate::intern::EndpointIdInt;
+use crate::metrics::{ThreadPoolMetrics, ThreadPoolWorkerId};
+use crate::scram::countmin::CountMinSketch;
 
 pub struct ThreadPool {
     runtime: Option<tokio::runtime::Runtime>,
@@ -195,9 +188,8 @@ impl Drop for JobHandle {
 
 #[cfg(test)]
 mod tests {
-    use crate::EndpointId;
-
     use super::*;
+    use crate::EndpointId;
 
     #[tokio::test]
     async fn hash_is_correct() {

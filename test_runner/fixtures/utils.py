@@ -417,7 +417,7 @@ def wait_until(
             time.sleep(interval)
             continue
         return res
-    raise Exception("timed out while waiting for %s" % func) from last_exception
+    raise Exception(f"timed out while waiting for {func}") from last_exception
 
 
 def assert_eq(a, b) -> None:

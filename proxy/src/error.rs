@@ -1,4 +1,5 @@
-use std::{error::Error as StdError, fmt, io};
+use std::error::Error as StdError;
+use std::{fmt, io};
 
 use measured::FixedCardinalityLabel;
 

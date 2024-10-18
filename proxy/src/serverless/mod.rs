@@ -5,6 +5,7 @@
 mod backend;
 pub mod cancel_set;
 mod conn_pool;
+mod conn_pool_lib;
 mod http_conn_pool;
 mod http_util;
 mod json;
@@ -12,12 +13,15 @@ mod local_conn_pool;
 mod sql_over_http;
 mod websocket;
 
+use std::net::{IpAddr, SocketAddr};
+use std::pin::{pin, Pin};
+use std::sync::Arc;
+
+use anyhow::Context;
 use async_trait::async_trait;
 use atomic_take::AtomicTake;
 use bytes::Bytes;
-pub use conn_pool::GlobalConnPoolOptions;
-
-use anyhow::Context;
+pub use conn_pool_lib::GlobalConnPoolOptions;
 use futures::future::{select, Either};
 use futures::TryFutureExt;
 use http::{Method, Response, StatusCode};
@@ -29,9 +33,13 @@ use hyper_util::server::conn::auto::Builder;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
 use tokio_rustls::TlsAcceptor;
+use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
+use tracing::{info, warn, Instrument};
+use utils::http::error::ApiError;
 
 use crate::cancellation::CancellationHandlerMain;
 use crate::config::ProxyConfig;
@@ -43,19 +51,11 @@ use crate::rate_limiter::EndpointRateLimiter;
 use crate::serverless::backend::PoolingBackend;
 use crate::serverless::http_util::{api_error_into_response, json_response};
 
-use std::net::{IpAddr, SocketAddr};
-use std::pin::{pin, Pin};
-use std::sync::Arc;
-use tokio::net::{TcpListener, TcpStream};
-use tokio_util::sync::CancellationToken;
-use tracing::{info, warn, Instrument};
-use utils::http::error::ApiError;
-
 pub(crate) const SERVERLESS_DRIVER_SNI: &str = "api";
 
 pub async fn task_main(
     config: &'static ProxyConfig,
-    auth_backend: &'static crate::auth::Backend<'static, (), ()>,
+    auth_backend: &'static crate::auth::Backend<'static, ()>,
     ws_listener: TcpListener,
     cancellation_token: CancellationToken,
     cancellation_handler: Arc<CancellationHandlerMain>,
@@ -66,7 +66,7 @@ pub async fn task_main(
     }
 
     let local_pool = local_conn_pool::LocalConnPool::new(&config.http_config);
-    let conn_pool = conn_pool::GlobalConnPool::new(&config.http_config);
+    let conn_pool = conn_pool_lib::GlobalConnPool::new(&config.http_config);
     {
         let conn_pool = Arc::clone(&conn_pool);
         tokio::spawn(async move {
