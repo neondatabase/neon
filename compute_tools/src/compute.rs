@@ -26,6 +26,7 @@ use tracing::{debug, error, info, instrument, warn};
 use utils::id::{TenantId, TimelineId};
 use utils::lsn::Lsn;
 
+use compute_api::privilege::Privilege;
 use compute_api::responses::{ComputeMetrics, ComputeStatus};
 use compute_api::spec::{ComputeFeature, ComputeMode, ComputeSpec, ExtVersion};
 use utils::measured_stream::MeasuredReader;
@@ -35,6 +36,7 @@ use nix::sys::signal::{kill, Signal};
 use remote_storage::{DownloadError, RemotePath};
 
 use crate::checker::create_availability_check_data;
+use crate::installed_extensions::get_installed_extensions_sync;
 use crate::local_proxy;
 use crate::logger::inlinify;
 use crate::pg_helpers::*;
@@ -1122,6 +1124,11 @@ impl ComputeNode {
                 self.pg_reload_conf()?;
             }
             self.post_apply_config()?;
+
+            let connstr = self.connstr.clone();
+            thread::spawn(move || {
+                get_installed_extensions_sync(connstr).context("get_installed_extensions")
+            });
         }
 
         let startup_end_time = Utc::now();
@@ -1368,6 +1375,47 @@ LIMIT 100",
         download_size
     }
 
+    pub async fn set_role_grants(
+        &self,
+        db_name: &PgIdent,
+        schema_name: &PgIdent,
+        privileges: &[Privilege],
+        role_name: &PgIdent,
+    ) -> Result<()> {
+        use tokio_postgres::config::Config;
+        use tokio_postgres::NoTls;
+
+        let mut conf = Config::from_str(self.connstr.as_str()).unwrap();
+        conf.dbname(db_name);
+
+        let (db_client, conn) = conf
+            .connect(NoTls)
+            .await
+            .context("Failed to connect to the database")?;
+        tokio::spawn(conn);
+
+        // TODO: support other types of grants apart from schemas?
+        let query = format!(
+            "GRANT {} ON SCHEMA {} TO {}",
+            privileges
+                .iter()
+                // should not be quoted as it's part of the command.
+                // is already sanitized so it's ok
+                .map(|p| p.as_str())
+                .collect::<Vec<&'static str>>()
+                .join(", "),
+            // quote the schema and role name as identifiers to sanitize them.
+            schema_name.pg_quote(),
+            role_name.pg_quote(),
+        );
+        db_client
+            .simple_query(&query)
+            .await
+            .with_context(|| format!("Failed to execute query: {}", query))?;
+
+        Ok(())
+    }
+
     pub async fn install_extension(
         &self,
         ext_name: &PgIdent,
@@ -1534,28 +1582,6 @@ LIMIT 100",
         if !unchanged {
             info!("Pageserver config changed");
         }
-    }
-
-    // Gather info about installed extensions
-    pub fn get_installed_extensions(&self) -> Result<()> {
-        let connstr = self.connstr.clone();
-
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("failed to create runtime");
-        let result = rt
-            .block_on(crate::installed_extensions::get_installed_extensions(
-                connstr,
-            ))
-            .expect("failed to get installed extensions");
-
-        info!(
-            "{}",
-            serde_json::to_string(&result).expect("failed to serialize extensions list")
-        );
-
-        Ok(())
     }
 }
 

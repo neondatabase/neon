@@ -1,6 +1,8 @@
 //! Structs representing the JSON formats used in the compute_ctl's HTTP API.
-
-use crate::spec::{ComputeSpec, ExtVersion, PgIdent};
+use crate::{
+    privilege::Privilege,
+    spec::{ComputeSpec, ExtVersion, PgIdent},
+};
 use serde::Deserialize;
 
 /// Request of the /configure API
@@ -18,4 +20,12 @@ pub struct ExtensionInstallRequest {
     pub extension: PgIdent,
     pub database: PgIdent,
     pub version: ExtVersion,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct SetRoleGrantsRequest {
+    pub database: PgIdent,
+    pub schema: PgIdent,
+    pub privileges: Vec<Privilege>,
+    pub role: PgIdent,
 }

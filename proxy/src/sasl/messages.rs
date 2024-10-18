@@ -1,7 +1,8 @@
 //! Definitions for SASL messages.
 
-use crate::parse::{split_at_const, split_cstr};
 use pq_proto::{BeAuthenticationSaslMessage, BeMessage};
+
+use crate::parse::{split_at_const, split_cstr};
 
 /// SASL-specific payload of [`PasswordMessage`](pq_proto::FeMessage::PasswordMessage).
 #[derive(Debug)]

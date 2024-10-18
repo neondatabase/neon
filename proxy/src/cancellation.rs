@@ -1,6 +1,8 @@
+use std::net::SocketAddr;
+use std::sync::Arc;
+
 use dashmap::DashMap;
 use pq_proto::CancelKeyData;
-use std::{net::SocketAddr, sync::Arc};
 use thiserror::Error;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
@@ -8,12 +10,10 @@ use tokio_postgres::{CancelToken, NoTls};
 use tracing::info;
 use uuid::Uuid;
 
-use crate::{
-    error::ReportableError,
-    metrics::{CancellationRequest, CancellationSource, Metrics},
-    redis::cancellation_publisher::{
-        CancellationPublisher, CancellationPublisherMut, RedisPublisherClient,
-    },
+use crate::error::ReportableError;
+use crate::metrics::{CancellationRequest, CancellationSource, Metrics};
+use crate::redis::cancellation_publisher::{
+    CancellationPublisher, CancellationPublisherMut, RedisPublisherClient,
 };
 
 pub type CancelMap = Arc<DashMap<CancelKeyData, Option<CancelClosure>>>;
