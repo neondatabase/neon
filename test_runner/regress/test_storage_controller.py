@@ -720,6 +720,7 @@ def test_storage_controller_stuck_compute_hook(
     env.storage_controller.consistency_check()
 
 
+@run_only_on_default_postgres("this test doesn't start an endpoint")
 def test_storage_controller_compute_hook_revert(
     httpserver: HTTPServer,
     neon_env_builder: NeonEnvBuilder,
