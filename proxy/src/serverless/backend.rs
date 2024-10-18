@@ -261,7 +261,6 @@ impl PoolingBackend {
             auth::Backend::Local(local) => local,
         };
 
-        #[allow(unreachable_code, clippy::todo)]
         if !self.local_pool.initialized(&conn_info) {
             // only install and grant usage one at a time.
             let _permit = local_backend.initialize.acquire().await.unwrap();

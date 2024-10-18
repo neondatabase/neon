@@ -48,7 +48,7 @@ pub enum ComputeCtlError {
         body: Option<GenericAPIError>,
     },
     #[error("response parsing error: {0}")]
-    ResonseError(#[source] reqwest::Error),
+    ResponseError(#[source] reqwest::Error),
 }
 
 impl ComputeCtlApi {
@@ -96,6 +96,6 @@ impl ComputeCtlApi {
             return Err(ComputeCtlError::RequestError { status, body });
         }
 
-        resp.json().await.map_err(ComputeCtlError::ResonseError)
+        resp.json().await.map_err(ComputeCtlError::ResponseError)
     }
 }
