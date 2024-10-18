@@ -254,13 +254,13 @@ def advance_multixid_to(
     # missing. That's OK for our purposes. Autovacuum will print some warnings about the
     # missing segments, but will clean it up by truncating the SLRUs up to the new value,
     # closing the gap.
-    segname = "%04X" % MultiXactIdToOffsetSegment(next_multi_xid)
+    segname = f"{MultiXactIdToOffsetSegment(next_multi_xid):04X}"
     log.info(f"Creating dummy segment pg_multixact/offsets/{segname}")
     with open(vanilla_pg.pgdatadir / "pg_multixact" / "offsets" / segname, "w") as of:
         of.write("\0" * SLRU_PAGES_PER_SEGMENT * BLCKSZ)
         of.flush()
 
-    segname = "%04X" % MXOffsetToMemberSegment(next_multi_offset)
+    segname = f"{MXOffsetToMemberSegment(next_multi_offset):04X}"
     log.info(f"Creating dummy segment pg_multixact/members/{segname}")
     with open(vanilla_pg.pgdatadir / "pg_multixact" / "members" / segname, "w") as of:
         of.write("\0" * SLRU_PAGES_PER_SEGMENT * BLCKSZ)

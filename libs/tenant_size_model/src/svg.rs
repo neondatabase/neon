@@ -97,7 +97,7 @@ pub fn draw_svg(
     Ok(result)
 }
 
-impl<'a> SvgDraw<'a> {
+impl SvgDraw<'_> {
     fn calculate_svg_layout(&mut self) {
         // Find x scale
         let segments = &self.storage.segments;

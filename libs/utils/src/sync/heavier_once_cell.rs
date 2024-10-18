@@ -219,7 +219,7 @@ impl<'a, T> CountWaitingInitializers<'a, T> {
     }
 }
 
-impl<'a, T> Drop for CountWaitingInitializers<'a, T> {
+impl<T> Drop for CountWaitingInitializers<'_, T> {
     fn drop(&mut self) {
         self.0.initializers.fetch_sub(1, Ordering::Relaxed);
     }
@@ -250,7 +250,7 @@ impl<T> std::ops::DerefMut for Guard<'_, T> {
     }
 }
 
-impl<'a, T> Guard<'a, T> {
+impl<T> Guard<'_, T> {
     /// Take the current value, and a new permit for it's deinitialization.
     ///
     /// The permit will be on a semaphore part of the new internal value, and any following
