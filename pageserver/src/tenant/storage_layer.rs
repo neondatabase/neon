@@ -8,6 +8,8 @@ pub(crate) mod layer;
 mod layer_desc;
 mod layer_name;
 pub mod merge_iterator;
+use tokio::sync::{self};
+use utils::bin_ser::BeSer;
 pub mod split_writer;
 
 use crate::context::{AccessStatsBehavior, RequestContext};
@@ -16,7 +18,7 @@ use crate::walrecord::NeonWalRecord;
 use bytes::Bytes;
 use pageserver_api::key::Key;
 use pageserver_api::keyspace::{KeySpace, KeySpaceRandomAccum};
-use std::cmp::{Ordering, Reverse};
+use std::cmp::Ordering;
 use std::collections::hash_map::Entry;
 use std::collections::{BinaryHeap, HashMap};
 use std::ops::Range;
@@ -78,30 +80,61 @@ pub(crate) enum ValueReconstructSituation {
     Continue,
 }
 
-/// Reconstruct data accumulated for a single key during a vectored get
-#[derive(Debug, Default, Clone)]
-pub(crate) struct VectoredValueReconstructState {
-    pub(crate) records: Vec<(Lsn, NeonWalRecord)>,
-    pub(crate) img: Option<(Lsn, Bytes)>,
+/// On disk representation of a value loaded in a buffer
+#[derive(Debug)]
+pub(crate) enum OnDiskValue {
+    /// Unencoded [`Value::Image`]
+    RawImage(Bytes),
+    /// Encoded [`Value`]. Can deserialize into an image or a WAL record
+    WalRecordOrImage(Bytes),
+}
 
-    situation: ValueReconstructSituation,
+/// Reconstruct data accumulated for a single key during a vectored get
+#[derive(Debug, Default)]
+pub(crate) struct VectoredValueReconstructState {
+    pub(crate) on_disk_values: Vec<(
+        Lsn,
+        tokio::sync::oneshot::Receiver<Result<OnDiskValue, std::io::Error>>,
+    )>,
+
+    pub(crate) situation: ValueReconstructSituation,
 }
 
 impl VectoredValueReconstructState {
-    fn get_cached_lsn(&self) -> Option<Lsn> {
-        self.img.as_ref().map(|img| img.0)
-    }
-}
+    pub(crate) async fn collect_pending_ios(
+        self,
+    ) -> Result<ValueReconstructState, PageReconstructError> {
+        let mut to = ValueReconstructState::default();
 
-impl From<VectoredValueReconstructState> for ValueReconstructState {
-    fn from(mut state: VectoredValueReconstructState) -> Self {
-        // walredo expects the records to be descending in terms of Lsn
-        state.records.sort_by_key(|(lsn, _)| Reverse(*lsn));
+        for (lsn, fut) in self.on_disk_values {
+            // TODO: IO futures are not failable - we could expect
+            let res = fut
+                .await
+                .map_err(|err| PageReconstructError::Other(err.into()))?;
+            let on_disk_value = res.map_err(|err| PageReconstructError::Other(err.into()))?;
 
-        ValueReconstructState {
-            records: state.records,
-            img: state.img,
+            match on_disk_value {
+                OnDiskValue::WalRecordOrImage(buf) => {
+                    let value =
+                        Value::des(&buf).map_err(|err| PageReconstructError::Other(err.into()))?;
+                    match value {
+                        Value::WalRecord(rec) => {
+                            to.records.push((lsn, rec));
+                        }
+                        Value::Image(img) => {
+                            assert!(to.img.is_none());
+                            to.img = Some((lsn, img));
+                        }
+                    }
+                }
+                OnDiskValue::RawImage(img) => {
+                    assert!(to.img.is_none());
+                    to.img = Some((lsn, img));
+                }
+            }
         }
+
+        Ok(to)
     }
 }
 
@@ -109,7 +142,7 @@ impl From<VectoredValueReconstructState> for ValueReconstructState {
 pub(crate) struct ValuesReconstructState {
     /// The keys will be removed after `get_vectored` completes. The caller outside `Timeline`
     /// should not expect to get anything from this hashmap.
-    pub(crate) keys: HashMap<Key, Result<VectoredValueReconstructState, PageReconstructError>>,
+    pub(crate) keys: HashMap<Key, VectoredValueReconstructState>,
     /// The keys which are already retrieved
     keys_done: KeySpaceRandomAccum,
 
@@ -119,6 +152,37 @@ pub(crate) struct ValuesReconstructState {
     // Statistics that are still accessible as a caller of `get_vectored_impl`.
     layers_visited: u32,
     delta_layers_visited: u32,
+
+    io_concurrency: IoConcurrency,
+}
+
+enum IoConcurrency {
+    Serial {
+        prev_io: Option<tokio::task::JoinHandle<()>>,
+    },
+    Parallel,
+}
+
+impl IoConcurrency {
+    pub(crate) fn spawn_io<F>(&mut self, fut: F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        match self {
+            IoConcurrency::Serial { prev_io } => {
+                let prev = prev_io.take();
+                *prev_io = Some(tokio::spawn(async move {
+                    if let Some(prev) = prev {
+                        prev.await.unwrap();
+                    }
+                    fut.await;
+                }));
+            }
+            IoConcurrency::Parallel => {
+                tokio::spawn(fut);
+            }
+        }
+    }
 }
 
 impl ValuesReconstructState {
@@ -129,17 +193,29 @@ impl ValuesReconstructState {
             keys_with_image_coverage: None,
             layers_visited: 0,
             delta_layers_visited: 0,
+            io_concurrency: {
+                static IO_CONCURRENCY: once_cell::sync::Lazy<String> =
+                    once_cell::sync::Lazy::new(|| {
+                        std::env::var("NEON_PAGESERVER_VALUE_RECONSTRUCT_IO_CONCURRENCY")
+                            .unwrap_or_else(|_| "serial".to_string())
+                    });
+                match IO_CONCURRENCY.as_str() {
+                    "parallel" => IoConcurrency::Parallel,
+                    "serial" => IoConcurrency::Serial { prev_io: None },
+                    x => panic!(
+                        "Invalid value for NEON_PAGESERVER_VALUE_RECONSTRUCT_IO_CONCURRENCY: {}",
+                        x
+                    ),
+                }
+            },
         }
     }
 
-    /// Associate a key with the error which it encountered and mark it as done
-    pub(crate) fn on_key_error(&mut self, key: Key, err: PageReconstructError) {
-        let previous = self.keys.insert(key, Err(err));
-        if let Some(Ok(state)) = previous {
-            if state.situation == ValueReconstructSituation::Continue {
-                self.keys_done.add_key(key);
-            }
-        }
+    pub(crate) fn spawn_io<F>(&mut self, fut: F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        self.io_concurrency.spawn_io(fut);
     }
 
     pub(crate) fn on_layer_visited(&mut self, layer: &ReadableLayer) {
@@ -157,29 +233,6 @@ impl ValuesReconstructState {
 
     pub(crate) fn get_layers_visited(&self) -> u32 {
         self.layers_visited
-    }
-
-    /// This function is called after reading a keyspace from a layer.
-    /// It checks if the read path has now moved past the cached Lsn for any keys.
-    ///
-    /// Implementation note: We intentionally iterate over the keys for which we've
-    /// already collected some reconstruct data. This avoids scaling complexity with
-    /// the size of the search space.
-    pub(crate) fn on_lsn_advanced(&mut self, keyspace: &KeySpace, advanced_to: Lsn) {
-        for (key, value) in self.keys.iter_mut() {
-            if !keyspace.contains(key) {
-                continue;
-            }
-
-            if let Ok(state) = value {
-                if state.situation != ValueReconstructSituation::Complete
-                    && state.get_cached_lsn() >= Some(advanced_to)
-                {
-                    state.situation = ValueReconstructSituation::Complete;
-                    self.keys_done.add_key(*key);
-                }
-            }
-        }
     }
 
     /// On hitting image layer, we can mark all keys in this range as done, because
@@ -200,56 +253,24 @@ impl ValuesReconstructState {
         &mut self,
         key: &Key,
         lsn: Lsn,
-        value: Value,
+        completes: bool,
+        value: sync::oneshot::Receiver<Result<OnDiskValue, std::io::Error>>,
     ) -> ValueReconstructSituation {
-        let state = self
-            .keys
-            .entry(*key)
-            .or_insert(Ok(VectoredValueReconstructState::default()));
+        let state = self.keys.entry(*key).or_default();
 
-        if let Ok(state) = state {
-            let key_done = match state.situation {
-                ValueReconstructSituation::Complete => unreachable!(),
-                ValueReconstructSituation::Continue => match value {
-                    Value::Image(img) => {
-                        state.img = Some((lsn, img));
-                        true
-                    }
-                    Value::WalRecord(rec) => {
-                        debug_assert!(
-                            Some(lsn) > state.get_cached_lsn(),
-                            "Attempt to collect a record below cached LSN for walredo: {} < {}",
-                            lsn,
-                            state
-                                .get_cached_lsn()
-                                .expect("Assertion can only fire if a cached lsn is present")
-                        );
-
-                        let will_init = rec.will_init();
-                        state.records.push((lsn, rec));
-                        will_init
-                    }
-                },
-            };
-
-            if key_done && state.situation == ValueReconstructSituation::Continue {
-                state.situation = ValueReconstructSituation::Complete;
-                self.keys_done.add_key(*key);
+        match state.situation {
+            ValueReconstructSituation::Complete => unreachable!(),
+            ValueReconstructSituation::Continue => {
+                state.on_disk_values.push((lsn, value));
             }
-
-            state.situation
-        } else {
-            ValueReconstructSituation::Complete
         }
-    }
 
-    /// Returns the Lsn at which this key is cached if one exists.
-    /// The read path should go no further than this Lsn for the given key.
-    pub(crate) fn get_cached_lsn(&self, key: &Key) -> Option<Lsn> {
-        self.keys
-            .get(key)
-            .and_then(|k| k.as_ref().ok())
-            .and_then(|state| state.get_cached_lsn())
+        if completes && state.situation == ValueReconstructSituation::Continue {
+            state.situation = ValueReconstructSituation::Complete;
+            self.keys_done.add_key(*key);
+        }
+
+        state.situation
     }
 
     /// Returns the key space describing the keys that have
