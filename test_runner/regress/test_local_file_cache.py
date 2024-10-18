@@ -19,11 +19,10 @@ def test_local_file_cache_unlink(neon_env_builder: NeonEnvBuilder):
     endpoint = env.endpoints.create_start(
         "main",
         config_lines=[
-            "shared_buffers='1MB'",
-            f"neon.file_cache_path='{cache_dir}/file.cache'",
             "neon.max_file_cache_size='64MB'",
             "neon.file_cache_size_limit='10MB'",
         ],
+        use_lfc=True,
     )
 
     cur = endpoint.connect().cursor()
