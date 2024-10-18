@@ -34,6 +34,7 @@ use nix::sys::signal::{kill, Signal};
 use remote_storage::{DownloadError, RemotePath};
 
 use crate::checker::create_availability_check_data;
+use crate::installed_extensions::get_installed_extensions_sync;
 use crate::local_proxy;
 use crate::logger::inlinify;
 use crate::pg_helpers::*;
@@ -1121,6 +1122,11 @@ impl ComputeNode {
                 self.pg_reload_conf()?;
             }
             self.post_apply_config()?;
+
+            let connstr = self.connstr.clone();
+            thread::spawn(move || {
+                get_installed_extensions_sync(connstr).context("get_installed_extensions")
+            });
         }
 
         let startup_end_time = Utc::now();
@@ -1483,28 +1489,6 @@ LIMIT 100",
         if !unchanged {
             info!("Pageserver config changed");
         }
-    }
-
-    // Gather info about installed extensions
-    pub fn get_installed_extensions(&self) -> Result<()> {
-        let connstr = self.connstr.clone();
-
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("failed to create runtime");
-        let result = rt
-            .block_on(crate::installed_extensions::get_installed_extensions(
-                connstr,
-            ))
-            .expect("failed to get installed extensions");
-
-        info!(
-            "{}",
-            serde_json::to_string(&result).expect("failed to serialize extensions list")
-        );
-
-        Ok(())
     }
 }
 

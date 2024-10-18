@@ -29,6 +29,7 @@ use utils::id::TimelineId;
 
 use crate::context::{AccessStatsBehavior, RequestContext, RequestContextBuilder};
 use crate::page_cache;
+use crate::statvfs::Statvfs;
 use crate::tenant::checks::check_valid_layermap;
 use crate::tenant::remote_timeline_client::WaitCompletionError;
 use crate::tenant::storage_layer::filter_iterator::FilterIterator;
@@ -1691,6 +1692,45 @@ impl Timeline {
         unreachable!("key retention is empty")
     }
 
+    /// Check how much space is left on the disk
+    async fn check_available_space(self: &Arc<Self>) -> anyhow::Result<u64> {
+        let tenants_dir = self.conf.tenants_path();
+
+        let stat = Statvfs::get(&tenants_dir, None)
+            .context("statvfs failed, presumably directory got unlinked")?;
+
+        let (avail_bytes, _) = stat.get_avail_total_bytes();
+
+        Ok(avail_bytes)
+    }
+
+    /// Check if the compaction can proceed safely without running out of space. We assume the size
+    /// upper bound of the produced files of a compaction job is the same as all layers involved in
+    /// the compaction. Therefore, we need `2 * layers_to_be_compacted_size` at least to do a
+    /// compaction.
+    async fn check_compaction_space(
+        self: &Arc<Self>,
+        layer_selection: &[Layer],
+    ) -> anyhow::Result<()> {
+        let available_space = self.check_available_space().await?;
+        let mut remote_layer_size = 0;
+        let mut all_layer_size = 0;
+        for layer in layer_selection {
+            let needs_download = layer.needs_download().await?;
+            if needs_download.is_some() {
+                remote_layer_size += layer.layer_desc().file_size;
+            }
+            all_layer_size += layer.layer_desc().file_size;
+        }
+        let allocated_space = (available_space as f64 * 0.8) as u64; /* reserve 20% space for other tasks */
+        if all_layer_size /* space needed for newly-generated file */ + remote_layer_size /* space for downloading layers */ > allocated_space
+        {
+            return Err(anyhow!("not enough space for compaction: available_space={}, allocated_space={}, all_layer_size={}, remote_layer_size={}, required_space={}",
+                available_space, allocated_space, all_layer_size, remote_layer_size, all_layer_size + remote_layer_size));
+        }
+        Ok(())
+    }
+
     /// An experimental compaction building block that combines compaction with garbage collection.
     ///
     /// The current implementation picks all delta + image layers that are below or intersecting with
@@ -1805,6 +1845,8 @@ impl Timeline {
             gc_cutoff,
             lowest_retain_lsn
         );
+
+        self.check_compaction_space(&layer_selection).await?;
 
         // Step 1: (In the future) construct a k-merge iterator over all layers. For now, simply collect all keys + LSNs.
         // Also, verify if the layer map can be split by drawing a horizontal line at every LSN start/end split point.
