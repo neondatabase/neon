@@ -110,6 +110,23 @@ static MAXRSS_KB: Lazy<IntGauge> = Lazy::new(|| {
 pub const DISK_FSYNC_SECONDS_BUCKETS: &[f64] =
     &[0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 30.0];
 
+/// Constructs histogram buckets that are powers of two starting at 1 (i.e. 2^0), covering the end
+/// points. For example, passing start=5,end=20 yields 4,8,16,32 as does start=4,end=32.
+pub fn pow2_buckets(start: usize, end: usize) -> Vec<f64> {
+    assert_ne!(start, 0);
+    assert!(start <= end);
+    let start = match start.checked_next_power_of_two() {
+        Some(n) if n == start => n, // start already power of two
+        Some(n) => n >> 1,          // power of two below start
+        None => panic!("start too large"),
+    };
+    let end = end.checked_next_power_of_two().expect("end too large");
+    std::iter::successors(Some(start), |n| n.checked_mul(2))
+        .take_while(|n| n <= &end)
+        .map(|n| n as f64)
+        .collect()
+}
+
 pub struct BuildInfo {
     pub revision: &'static str,
     pub build_tag: &'static str,
@@ -593,5 +610,69 @@ where
         enc: &mut Dec<T>,
     ) -> Result<(), T::Err> {
         self.dec.collect_into(metadata, labels, name, &mut enc.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const POW2_BUCKETS_MAX: usize = 1 << (usize::BITS - 1);
+
+    #[test]
+    fn pow2_buckets_cases() {
+        assert_eq!(pow2_buckets(1, 1), vec![1.0]);
+        assert_eq!(pow2_buckets(1, 2), vec![1.0, 2.0]);
+        assert_eq!(pow2_buckets(1, 3), vec![1.0, 2.0, 4.0]);
+        assert_eq!(pow2_buckets(1, 4), vec![1.0, 2.0, 4.0]);
+        assert_eq!(pow2_buckets(1, 5), vec![1.0, 2.0, 4.0, 8.0]);
+        assert_eq!(pow2_buckets(1, 6), vec![1.0, 2.0, 4.0, 8.0]);
+        assert_eq!(pow2_buckets(1, 7), vec![1.0, 2.0, 4.0, 8.0]);
+        assert_eq!(pow2_buckets(1, 8), vec![1.0, 2.0, 4.0, 8.0]);
+        assert_eq!(
+            pow2_buckets(1, 200),
+            vec![1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0]
+        );
+
+        assert_eq!(pow2_buckets(1, 8), vec![1.0, 2.0, 4.0, 8.0]);
+        assert_eq!(pow2_buckets(2, 8), vec![2.0, 4.0, 8.0]);
+        assert_eq!(pow2_buckets(3, 8), vec![2.0, 4.0, 8.0]);
+        assert_eq!(pow2_buckets(4, 8), vec![4.0, 8.0]);
+        assert_eq!(pow2_buckets(5, 8), vec![4.0, 8.0]);
+        assert_eq!(pow2_buckets(6, 8), vec![4.0, 8.0]);
+        assert_eq!(pow2_buckets(7, 8), vec![4.0, 8.0]);
+        assert_eq!(pow2_buckets(8, 8), vec![8.0]);
+        assert_eq!(pow2_buckets(20, 200), vec![16.0, 32.0, 64.0, 128.0, 256.0]);
+
+        // Largest valid values.
+        assert_eq!(
+            pow2_buckets(1, POW2_BUCKETS_MAX).len(),
+            usize::BITS as usize
+        );
+        assert_eq!(pow2_buckets(POW2_BUCKETS_MAX, POW2_BUCKETS_MAX).len(), 1);
+    }
+
+    #[test]
+    #[should_panic]
+    fn pow2_buckets_zero_start() {
+        pow2_buckets(0, 1);
+    }
+
+    #[test]
+    #[should_panic]
+    fn pow2_buckets_end_lt_start() {
+        pow2_buckets(2, 1);
+    }
+
+    #[test]
+    #[should_panic]
+    fn pow2_buckets_end_overflow_min() {
+        pow2_buckets(1, POW2_BUCKETS_MAX + 1);
+    }
+
+    #[test]
+    #[should_panic]
+    fn pow2_buckets_end_overflow_max() {
+        pow2_buckets(1, usize::MAX);
     }
 }

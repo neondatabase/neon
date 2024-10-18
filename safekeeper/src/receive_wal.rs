@@ -3,6 +3,7 @@
 //! sends replies back.
 
 use crate::handler::SafekeeperPostgresHandler;
+use crate::metrics::{WAL_RECEIVERS, WAL_RECEIVER_QUEUE_DEPTH};
 use crate::safekeeper::AcceptorProposerMessage;
 use crate::safekeeper::ProposerAcceptorMessage;
 use crate::safekeeper::ServerInfo;
@@ -85,6 +86,7 @@ impl WalReceivers {
         };
 
         self.update_num(&shared);
+        WAL_RECEIVERS.inc();
 
         WalReceiverGuard {
             id: pos,
@@ -143,6 +145,7 @@ impl WalReceivers {
         let mut shared = self.mutex.lock();
         shared.slots[id] = None;
         self.update_num(&shared);
+        WAL_RECEIVERS.dec();
     }
 
     /// Broadcast pageserver feedback to connected walproposers.
@@ -445,6 +448,12 @@ async fn network_write<IO: AsyncRead + AsyncWrite + Unpin>(
 /// walproposer, even when it's writing a steady stream of messages.
 const FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 
+/// The metrics computation interval.
+///
+/// The Prometheus poll interval is 60 seconds at the time of writing. We sample the queue depth
+/// every 5 seconds, for 12 samples per poll. This will give a count of up to 12x active timelines.
+const METRICS_INTERVAL: Duration = Duration::from_secs(5);
+
 /// Encapsulates a task which takes messages from msg_rx, processes and pushes
 /// replies to reply_tx.
 ///
@@ -491,12 +500,15 @@ impl WalAcceptor {
     async fn run(&mut self) -> anyhow::Result<()> {
         let walreceiver_guard = self.tli.get_walreceivers().register(self.conn_id);
 
-        // Periodically flush the WAL.
+        // Periodically flush the WAL and compute metrics.
         let mut flush_ticker = tokio::time::interval(FLUSH_INTERVAL);
         flush_ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
         flush_ticker.tick().await; // skip the initial, immediate tick
 
-        // Tracks unflushed appends.
+        let mut metrics_ticker = tokio::time::interval(METRICS_INTERVAL);
+        metrics_ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+        // Tracks whether we have unflushed appends.
         let mut dirty = false;
 
         loop {
@@ -543,6 +555,12 @@ impl WalAcceptor {
                     self.tli
                         .process_msg(&ProposerAcceptorMessage::FlushWAL)
                         .await?
+                }
+
+                // Update metrics periodically.
+                _ = metrics_ticker.tick() => {
+                    WAL_RECEIVER_QUEUE_DEPTH.observe(self.msg_rx.len() as f64);
+                    None // no reply
                 }
             };
 
