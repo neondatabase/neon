@@ -12,7 +12,7 @@ use crate::context::RequestContext;
 use crate::pgdatadir_mapping::CalculateLogicalSizeError;
 
 use super::{GcError, LogicalSizeCalculationCause, Tenant};
-use crate::tenant::Timeline;
+use crate::tenant::{MaybeOffloaded, Timeline};
 use utils::id::TimelineId;
 use utils::lsn::Lsn;
 
@@ -264,10 +264,12 @@ pub(super) async fn gather_inputs(
         let mut lsns: Vec<(Lsn, LsnKind)> = gc_info
             .retain_lsns
             .iter()
-            .filter(|(lsn, _child_id)| lsn > &ancestor_lsn)
+            .filter(|(lsn, _child_id, is_offloaded)| {
+                lsn > &ancestor_lsn && *is_offloaded == MaybeOffloaded::No
+            })
             .copied()
             // this assumes there are no other retain_lsns than the branchpoints
-            .map(|(lsn, _child_id)| (lsn, LsnKind::BranchPoint))
+            .map(|(lsn, _child_id, _is_offloaded)| (lsn, LsnKind::BranchPoint))
             .collect::<Vec<_>>();
 
         lsns.extend(lease_points.iter().map(|&lsn| (lsn, LsnKind::LeasePoint)));

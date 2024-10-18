@@ -246,6 +246,11 @@ fn passthrough_api_error(node: &Node, e: mgmt_api::Error) -> ApiError {
             // storage controller's auth configuration.
             ApiError::InternalServerError(anyhow::anyhow!("{node} {status}: {msg}"))
         }
+        mgmt_api::Error::ApiError(status @ StatusCode::TOO_MANY_REQUESTS, msg) => {
+            // Pass through 429 errors: if pageserver is asking us to wait + retry, we in
+            // turn ask our clients to wait + retry
+            ApiError::Conflict(format!("{node} {status}: {status} {msg}"))
+        }
         mgmt_api::Error::ApiError(status, msg) => {
             // Presume general case of pageserver API errors is that we tried to do something
             // that can't be done right now.
@@ -1069,8 +1074,9 @@ impl Service {
     /// the observed state of the tenant such that subsequent calls to [`TenantShard::get_reconcile_needed`]
     /// will indicate that reconciliation is not needed.
     #[instrument(skip_all, fields(
-        tenant_id=%result.tenant_shard_id.tenant_id, shard_id=%result.tenant_shard_id.shard_slug(),
-        sequence=%result.sequence
+        seq=%result.sequence,
+        tenant_id=%result.tenant_shard_id.tenant_id,
+        shard_id=%result.tenant_shard_id.shard_slug(),
     ))]
     fn process_result(&self, result: ReconcileResult) {
         let mut locked = self.inner.write().unwrap();

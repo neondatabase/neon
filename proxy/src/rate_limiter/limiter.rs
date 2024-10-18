@@ -1,17 +1,14 @@
-use std::{
-    borrow::Cow,
-    collections::hash_map::RandomState,
-    hash::{BuildHasher, Hash},
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Mutex,
-    },
-};
+use std::borrow::Cow;
+use std::collections::hash_map::RandomState;
+use std::hash::{BuildHasher, Hash};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 
 use anyhow::bail;
 use dashmap::DashMap;
 use itertools::Itertools;
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 use tokio::time::{Duration, Instant};
 use tracing::info;
 
@@ -243,14 +240,17 @@ impl<K: Hash + Eq, R: Rng, S: BuildHasher + Clone> BucketRateLimiter<K, R, S> {
 
 #[cfg(test)]
 mod tests {
-    use std::{hash::BuildHasherDefault, time::Duration};
+    use std::hash::BuildHasherDefault;
+    use std::time::Duration;
 
     use rand::SeedableRng;
     use rustc_hash::FxHasher;
     use tokio::time;
 
     use super::{BucketRateLimiter, WakeComputeRateLimiter};
-    use crate::{intern::EndpointIdInt, rate_limiter::RateBucketInfo, EndpointId};
+    use crate::intern::EndpointIdInt;
+    use crate::rate_limiter::RateBucketInfo;
+    use crate::EndpointId;
 
     #[test]
     fn rate_bucket_rpi() {

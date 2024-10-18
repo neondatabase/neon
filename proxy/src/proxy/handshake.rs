@@ -1,21 +1,19 @@
 use bytes::Buf;
+use pq_proto::framed::Framed;
 use pq_proto::{
-    framed::Framed, BeMessage as Be, CancelKeyData, FeStartupPacket, ProtocolVersion,
-    StartupMessageParams,
+    BeMessage as Be, CancelKeyData, FeStartupPacket, ProtocolVersion, StartupMessageParams,
 };
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{info, warn};
 
-use crate::{
-    auth::endpoint_sni,
-    config::{TlsConfig, PG_ALPN_PROTOCOL},
-    context::RequestMonitoring,
-    error::ReportableError,
-    metrics::Metrics,
-    proxy::ERR_INSECURE_CONNECTION,
-    stream::{PqStream, Stream, StreamUpgradeError},
-};
+use crate::auth::endpoint_sni;
+use crate::config::{TlsConfig, PG_ALPN_PROTOCOL};
+use crate::context::RequestMonitoring;
+use crate::error::ReportableError;
+use crate::metrics::Metrics;
+use crate::proxy::ERR_INSECURE_CONNECTION;
+use crate::stream::{PqStream, Stream, StreamUpgradeError};
 
 #[derive(Error, Debug)]
 pub(crate) enum HandshakeError {

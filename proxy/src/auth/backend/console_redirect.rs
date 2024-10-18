@@ -1,17 +1,20 @@
-use crate::{
-    auth, compute,
-    config::AuthenticationConfig,
-    context::RequestMonitoring,
-    control_plane::{self, provider::NodeInfo},
-    error::{ReportableError, UserFacingError},
-    stream::PqStream,
-    waiters,
-};
+use async_trait::async_trait;
 use pq_proto::BeMessage as Be;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_postgres::config::SslMode;
 use tracing::{info, info_span};
+
+use super::ComputeCredentialKeys;
+use crate::cache::Cached;
+use crate::config::AuthenticationConfig;
+use crate::context::RequestMonitoring;
+use crate::control_plane::provider::NodeInfo;
+use crate::control_plane::{self, CachedNodeInfo};
+use crate::error::{ReportableError, UserFacingError};
+use crate::proxy::connect_compute::ComputeConnectBackend;
+use crate::stream::PqStream;
+use crate::{auth, compute, waiters};
 
 #[derive(Debug, Error)]
 pub(crate) enum WebAuthError {
@@ -25,6 +28,7 @@ pub(crate) enum WebAuthError {
     Io(#[from] std::io::Error),
 }
 
+#[derive(Debug)]
 pub struct ConsoleRedirectBackend {
     console_uri: reqwest::Url,
 }
@@ -66,17 +70,31 @@ impl ConsoleRedirectBackend {
         Self { console_uri }
     }
 
-    pub(super) fn url(&self) -> &reqwest::Url {
-        &self.console_uri
-    }
-
     pub(crate) async fn authenticate(
         &self,
         ctx: &RequestMonitoring,
         auth_config: &'static AuthenticationConfig,
         client: &mut PqStream<impl AsyncRead + AsyncWrite + Unpin>,
-    ) -> auth::Result<NodeInfo> {
-        authenticate(ctx, auth_config, &self.console_uri, client).await
+    ) -> auth::Result<ConsoleRedirectNodeInfo> {
+        authenticate(ctx, auth_config, &self.console_uri, client)
+            .await
+            .map(ConsoleRedirectNodeInfo)
+    }
+}
+
+pub struct ConsoleRedirectNodeInfo(pub(super) NodeInfo);
+
+#[async_trait]
+impl ComputeConnectBackend for ConsoleRedirectNodeInfo {
+    async fn wake_compute(
+        &self,
+        _ctx: &RequestMonitoring,
+    ) -> Result<CachedNodeInfo, control_plane::errors::WakeComputeError> {
+        Ok(Cached::new_uncached(self.0.clone()))
+    }
+
+    fn get_keys(&self) -> &ComputeCredentialKeys {
+        &ComputeCredentialKeys::None
     }
 }
 

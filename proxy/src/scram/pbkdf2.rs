@@ -1,7 +1,6 @@
-use hmac::{
-    digest::{consts::U32, generic_array::GenericArray},
-    Hmac, Mac,
-};
+use hmac::digest::consts::U32;
+use hmac::digest::generic_array::GenericArray;
+use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
 pub(crate) struct Pbkdf2 {
@@ -66,9 +65,10 @@ impl Pbkdf2 {
 
 #[cfg(test)]
 mod tests {
-    use super::Pbkdf2;
     use pbkdf2::pbkdf2_hmac_array;
     use sha2::Sha256;
+
+    use super::Pbkdf2;
 
     #[test]
     fn works() {

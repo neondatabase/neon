@@ -1,31 +1,23 @@
-use std::{
-    convert::Infallible,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
-    time::Duration,
-};
+use std::convert::Infallible;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
 use dashmap::DashSet;
-use redis::{
-    streams::{StreamReadOptions, StreamReadReply},
-    AsyncCommands, FromRedisValue, Value,
-};
+use redis::streams::{StreamReadOptions, StreamReadReply};
+use redis::{AsyncCommands, FromRedisValue, Value};
 use serde::Deserialize;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-use crate::{
-    config::EndpointCacheConfig,
-    context::RequestMonitoring,
-    intern::{BranchIdInt, EndpointIdInt, ProjectIdInt},
-    metrics::{Metrics, RedisErrors, RedisEventsCount},
-    rate_limiter::GlobalRateLimiter,
-    redis::connection_with_credentials_provider::ConnectionWithCredentialsProvider,
-    EndpointId,
-};
+use crate::config::EndpointCacheConfig;
+use crate::context::RequestMonitoring;
+use crate::intern::{BranchIdInt, EndpointIdInt, ProjectIdInt};
+use crate::metrics::{Metrics, RedisErrors, RedisEventsCount};
+use crate::rate_limiter::GlobalRateLimiter;
+use crate::redis::connection_with_credentials_provider::ConnectionWithCredentialsProvider;
+use crate::EndpointId;
 
 #[derive(Deserialize, Debug, Clone)]
 pub(crate) struct ControlPlaneEventKey {
