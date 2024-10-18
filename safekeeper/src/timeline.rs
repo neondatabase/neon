@@ -926,6 +926,59 @@ impl Timeline {
         Ok(WalResidentTimeline::new(self.clone(), guard))
     }
 
+    /// Get the timeline guard for reading/writing WAL files if the timeline is resident,
+    /// else return None
+    pub(crate) async fn try_wal_residence_guard(
+        self: &Arc<Self>,
+    ) -> Result<Option<WalResidentTimeline>> {
+        if self.is_cancelled() {
+            bail!(TimelineError::Cancelled(self.ttid));
+        }
+
+        debug!("requesting WalResidentTimeline guard");
+        let started_at = Instant::now();
+        let status_before = self.mgr_status.get();
+
+        // Wait 30 seconds for the guard to be acquired. It can time out if someone is
+        // holding the lock (e.g. during `SafeKeeper::process_msg()`) or manager task
+        // is stuck.
+        let res = tokio::time::timeout_at(
+            started_at + Duration::from_secs(30),
+            self.manager_ctl.try_wal_residence_guard(),
+        )
+        .await;
+
+        let guard = match res {
+            Ok(Ok(guard)) => {
+                let finished_at = Instant::now();
+                let elapsed = finished_at - started_at;
+                MISC_OPERATION_SECONDS
+                    .with_label_values(&["try_wal_residence_guard"])
+                    .observe(elapsed.as_secs_f64());
+
+                guard
+            }
+            Ok(Err(e)) => {
+                warn!(
+                    "error while try-acquiring WalResidentTimeline guard, statuses {:?} => {:?}",
+                    status_before,
+                    self.mgr_status.get()
+                );
+                return Err(e);
+            }
+            Err(_) => {
+                warn!(
+                    "timeout while try-acquiring WalResidentTimeline guard, statuses {:?} => {:?}",
+                    status_before,
+                    self.mgr_status.get()
+                );
+                anyhow::bail!("timeout while try-acquiring WalResidentTimeline guard");
+            }
+        };
+
+        Ok(guard.map(|g| WalResidentTimeline::new(self.clone(), g)))
+    }
+
     pub async fn backup_partial_reset(self: &Arc<Self>) -> Result<Vec<String>> {
         self.manager_ctl.backup_partial_reset().await
     }
