@@ -828,6 +828,25 @@ impl ImageLayerWriterInner {
         ctx: &RequestContext,
         end_key: Option<Key>,
     ) -> anyhow::Result<(PersistentLayerDesc, Utf8PathBuf)> {
+        let temp_path = self.path.clone();
+        let result = self.finish0(ctx, end_key).await;
+        if let Err(ref e) = result {
+            tracing::info!(%temp_path, "cleaning up temporary file after error during writing: {e}");
+            if let Err(e) = std::fs::remove_file(&temp_path) {
+                tracing::warn!(error=%e, %temp_path, "error cleaning up temporary layer file after error during writing");
+            }
+        }
+        result
+    }
+
+    ///
+    /// Finish writing the image layer.
+    ///
+    async fn finish0(
+        self,
+        ctx: &RequestContext,
+        end_key: Option<Key>,
+    ) -> anyhow::Result<(PersistentLayerDesc, Utf8PathBuf)> {
         let index_start_blk = self.blob_writer.size().div_ceil(PAGE_SZ as u64) as u32;
 
         // Calculate compression ratio
