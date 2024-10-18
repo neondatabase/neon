@@ -10,6 +10,7 @@ use anyhow::Result;
 use futures::Future;
 use metrics::{
     core::{AtomicU64, Collector, Desc, GenericCounter, GenericGaugeVec, Opts},
+    pow2_buckets,
     proto::MetricFamily,
     register_histogram_vec, register_int_counter, register_int_counter_pair,
     register_int_counter_pair_vec, register_int_counter_vec, register_int_gauge, Gauge,
@@ -22,6 +23,7 @@ use utils::pageserver_feedback::PageserverFeedback;
 use utils::{id::TenantTimelineId, lsn::Lsn};
 
 use crate::{
+    receive_wal::MSG_QUEUE_SIZE,
     state::{TimelineMemState, TimelinePersistentState},
     GlobalTimelines,
 };
@@ -203,6 +205,14 @@ pub static WAL_BACKUP_TASKS: Lazy<IntCounterPair> = Lazy::new(|| {
         "Number of finished WAL backup tasks",
     )
     .expect("Failed to register safekeeper_wal_backup_tasks_finished_total counter")
+});
+pub static WAL_RECEIVER_QUEUE_DEPTH: Lazy<Histogram> = Lazy::new(|| {
+    register_histogram!(
+        "safekeeper_wal_receiver_queue_depth",
+        "Histogram of number of queued messages per WAL receiver",
+        pow2_buckets(MSG_QUEUE_SIZE)
+    )
+    .expect("Failed to register safekeeper_wal_receiver_queue_depth histogram")
 });
 
 // Metrics collected on operations on the storage repository.
