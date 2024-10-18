@@ -12,6 +12,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, info_span, warn, Instrument};
 use utils::backoff::{DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS};
 
+use thread_local::ThreadLocal;
 use tokio_epoll_uring::{System, SystemHandle};
 
 use crate::virtual_file::on_fatal_io_error;
@@ -44,9 +45,7 @@ impl ThreadLocalState {
 
 static THREAD_LOCAL_STATE_ID: AtomicU64 = AtomicU64::new(0);
 
-thread_local! {
-    static THREAD_LOCAL: ThreadLocalState = ThreadLocalState::new();
-}
+static THREAD_LOCAL: ThreadLocal<ThreadLocalState> = ThreadLocal::new();
 
 /// Panics if we cannot [`System::launch`].
 pub async fn thread_local_system() -> Handle {

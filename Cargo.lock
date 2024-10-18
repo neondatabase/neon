@@ -3737,6 +3737,7 @@ dependencies = [
  "sysinfo",
  "tenant_size_model",
  "thiserror",
+ "thread_local",
  "tikv-jemallocator",
  "tokio",
  "tokio-epoll-uring",
