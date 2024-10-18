@@ -649,7 +649,7 @@ def test_timeline_delete_works_for_remote_smoke(
     env = neon_env_builder.init_start()
 
     ps_http = env.pageserver.http_client()
-    pg = env.endpoints.create_start("main")
+    env.endpoints.create_start("main")
 
     tenant_id = env.initial_tenant
     timeline_id = env.initial_timeline

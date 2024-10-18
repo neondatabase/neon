@@ -25,7 +25,6 @@ use crate::context::RequestMonitoring;
 use crate::control_plane::messages::{ColdStartInfo, MetricsAuxInfo};
 use crate::metrics::Metrics;
 use crate::usage_metrics::{Ids, MetricCounter, USAGE_METRICS};
-
 use crate::{DbName, RoleName};
 
 struct ConnPoolEntry<C: ClientInnerExt> {
@@ -530,7 +529,7 @@ impl<C: ClientInnerExt> LocalClient<C> {
         })
     }
 
-    fn do_drop(&mut self) -> Option<impl FnOnce()> {
+    fn do_drop(&mut self) -> Option<impl FnOnce() + use<C>> {
         let conn_info = self.conn_info.clone();
         let client = self
             .inner

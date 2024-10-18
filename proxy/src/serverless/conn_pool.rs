@@ -11,19 +11,17 @@ use tokio_postgres::tls::NoTlsStream;
 use tokio_postgres::{AsyncMessage, Socket};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, info_span, warn, Instrument};
-
-use crate::context::RequestMonitoring;
-use crate::control_plane::messages::MetricsAuxInfo;
-use crate::metrics::Metrics;
-
-use super::conn_pool_lib::{Client, ClientInnerExt, ConnInfo, GlobalConnPool};
-
 #[cfg(test)]
 use {
     super::conn_pool_lib::GlobalConnPoolOptions,
     crate::auth::backend::ComputeUserInfo,
     std::{sync::atomic, time::Duration},
 };
+
+use super::conn_pool_lib::{Client, ClientInnerExt, ConnInfo, GlobalConnPool};
+use crate::context::RequestMonitoring;
+use crate::control_plane::messages::MetricsAuxInfo;
+use crate::metrics::Metrics;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ConnInfoWithAuth {
