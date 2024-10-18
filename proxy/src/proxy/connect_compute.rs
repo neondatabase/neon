@@ -1,24 +1,23 @@
-use crate::{
-    auth::backend::ComputeCredentialKeys,
-    compute::COULD_NOT_CONNECT,
-    compute::{self, PostgresConnection},
-    config::RetryConfig,
-    context::RequestMonitoring,
-    control_plane::{self, errors::WakeComputeError, locks::ApiLocks, CachedNodeInfo, NodeInfo},
-    error::ReportableError,
-    metrics::{ConnectOutcome, ConnectionFailureKind, Metrics, RetriesMetricGroup, RetryType},
-    proxy::{
-        retry::{retry_after, should_retry, CouldRetry},
-        wake_compute::wake_compute,
-    },
-    Host,
-};
 use async_trait::async_trait;
 use pq_proto::StartupMessageParams;
 use tokio::time;
 use tracing::{debug, info, warn};
 
 use super::retry::ShouldRetryWakeCompute;
+use crate::auth::backend::ComputeCredentialKeys;
+use crate::compute::{self, PostgresConnection, COULD_NOT_CONNECT};
+use crate::config::RetryConfig;
+use crate::context::RequestMonitoring;
+use crate::control_plane::errors::WakeComputeError;
+use crate::control_plane::locks::ApiLocks;
+use crate::control_plane::{self, CachedNodeInfo, NodeInfo};
+use crate::error::ReportableError;
+use crate::metrics::{
+    ConnectOutcome, ConnectionFailureKind, Metrics, RetriesMetricGroup, RetryType,
+};
+use crate::proxy::retry::{retry_after, should_retry, CouldRetry};
+use crate::proxy::wake_compute::wake_compute;
+use crate::Host;
 
 const CONNECT_TIMEOUT: time::Duration = time::Duration::from_secs(2);
 

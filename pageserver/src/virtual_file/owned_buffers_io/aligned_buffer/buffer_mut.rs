@@ -209,7 +209,9 @@ fn panic_advance(idx: usize, len: usize) -> ! {
 }
 
 /// Safety: [`AlignedBufferMut`] has exclusive ownership of the io buffer,
-/// and the location remains stable even if [`Self`] is moved.
+/// and the underlying pointer remains stable while io-uring is owning the buffer.
+/// The tokio-epoll-uring crate itself will not resize the buffer and will respect
+/// [`IoBuf::bytes_total`].
 unsafe impl<A: Alignment> tokio_epoll_uring::IoBuf for AlignedBufferMut<A> {
     fn stable_ptr(&self) -> *const u8 {
         self.as_ptr()

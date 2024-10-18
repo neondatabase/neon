@@ -28,7 +28,7 @@ struct UnshardedComputeHookTenant {
     node_id: NodeId,
 
     // Must hold this lock to send a notification.
-    send_lock: Arc<tokio::sync::Mutex<Option<ComputeHookNotifyRequest>>>,
+    send_lock: Arc<tokio::sync::Mutex<Option<ComputeRemoteState>>>,
 }
 struct ShardedComputeHookTenant {
     stripe_size: ShardStripeSize,
@@ -38,7 +38,22 @@ struct ShardedComputeHookTenant {
     // Must hold this lock to send a notification.  The contents represent
     // the last successfully sent notification, and are used to coalesce multiple
     // updates by only sending when there is a chance since our last successful send.
-    send_lock: Arc<tokio::sync::Mutex<Option<ComputeHookNotifyRequest>>>,
+    send_lock: Arc<tokio::sync::Mutex<Option<ComputeRemoteState>>>,
+}
+
+/// Represents our knowledge of the compute's state: we can update this when we get a
+/// response from a notify API call, which tells us what has been applied.
+///
+/// Should be wrapped in an Option<>, as we cannot always know the remote state.
+#[derive(PartialEq, Eq, Debug)]
+struct ComputeRemoteState {
+    // The request body which was acked by the compute
+    request: ComputeHookNotifyRequest,
+
+    // Whether the cplane indicated that the state was applied to running computes, or just
+    // persisted.  In the Neon control plane, this is the difference between a 423 response (meaning
+    // persisted but not applied), and a 2xx response (both persisted and applied)
+    applied: bool,
 }
 
 enum ComputeHookTenant {
@@ -64,7 +79,7 @@ impl ComputeHookTenant {
         }
     }
 
-    fn get_send_lock(&self) -> &Arc<tokio::sync::Mutex<Option<ComputeHookNotifyRequest>>> {
+    fn get_send_lock(&self) -> &Arc<tokio::sync::Mutex<Option<ComputeRemoteState>>> {
         match self {
             Self::Unsharded(unsharded_tenant) => &unsharded_tenant.send_lock,
             Self::Sharded(sharded_tenant) => &sharded_tenant.send_lock,
@@ -188,11 +203,11 @@ enum MaybeSendResult {
     Transmit(
         (
             ComputeHookNotifyRequest,
-            tokio::sync::OwnedMutexGuard<Option<ComputeHookNotifyRequest>>,
+            tokio::sync::OwnedMutexGuard<Option<ComputeRemoteState>>,
         ),
     ),
     // Something requires sending, but you must wait for a current sender then call again
-    AwaitLock(Arc<tokio::sync::Mutex<Option<ComputeHookNotifyRequest>>>),
+    AwaitLock(Arc<tokio::sync::Mutex<Option<ComputeRemoteState>>>),
     // Nothing requires sending
     Noop,
 }
@@ -201,7 +216,7 @@ impl ComputeHookTenant {
     fn maybe_send(
         &self,
         tenant_id: TenantId,
-        lock: Option<tokio::sync::OwnedMutexGuard<Option<ComputeHookNotifyRequest>>>,
+        lock: Option<tokio::sync::OwnedMutexGuard<Option<ComputeRemoteState>>>,
     ) -> MaybeSendResult {
         let locked = match lock {
             Some(already_locked) => already_locked,
@@ -257,11 +272,22 @@ impl ComputeHookTenant {
                 tracing::info!("Tenant isn't yet ready to emit a notification");
                 MaybeSendResult::Noop
             }
-            Some(request) if Some(&request) == locked.as_ref() => {
-                // No change from the last value successfully sent
+            Some(request)
+                if Some(&request) == locked.as_ref().map(|s| &s.request)
+                    && locked.as_ref().map(|s| s.applied).unwrap_or(false) =>
+            {
+                tracing::info!(
+                    "Skipping notification because remote state already matches ({:?})",
+                    &request
+                );
+                // No change from the last value successfully sent, and our state indicates that the last
+                // value sent was fully applied on the control plane side.
                 MaybeSendResult::Noop
             }
-            Some(request) => MaybeSendResult::Transmit((request, locked)),
+            Some(request) => {
+                // Our request differs from the last one sent, or the last one sent was not fully applied on the compute side
+                MaybeSendResult::Transmit((request, locked))
+            }
         }
     }
 }
@@ -550,10 +576,28 @@ impl ComputeHook {
             })
         };
 
-        if result.is_ok() {
-            // Before dropping the send lock, stash the request we just sent so that
-            // subsequent callers can avoid redundantly re-sending the same thing.
-            *send_lock_guard = Some(request);
+        match result {
+            Ok(_) => {
+                // Before dropping the send lock, stash the request we just sent so that
+                // subsequent callers can avoid redundantly re-sending the same thing.
+                *send_lock_guard = Some(ComputeRemoteState {
+                    request,
+                    applied: true,
+                });
+            }
+            Err(NotifyError::Busy) => {
+                // Busy result means that the server responded and has stored the new configuration,
+                // but was not able to fully apply it to the compute
+                *send_lock_guard = Some(ComputeRemoteState {
+                    request,
+                    applied: false,
+                });
+            }
+            Err(_) => {
+                // General error case: we can no longer know the remote state, so clear it.  This will result in
+                // the logic in maybe_send recognizing that we should call the hook again.
+                *send_lock_guard = None;
+            }
         }
         result
     }
@@ -707,7 +751,10 @@ pub(crate) mod tests {
         assert!(request.stripe_size.is_none());
 
         // Simulate successful send
-        *guard = Some(request);
+        *guard = Some(ComputeRemoteState {
+            request,
+            applied: true,
+        });
         drop(guard);
 
         // Try asking again: this should be a no-op
@@ -750,7 +797,10 @@ pub(crate) mod tests {
         assert_eq!(request.stripe_size, Some(ShardStripeSize(32768)));
 
         // Simulate successful send
-        *guard = Some(request);
+        *guard = Some(ComputeRemoteState {
+            request,
+            applied: true,
+        });
         drop(guard);
 
         Ok(())

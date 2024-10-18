@@ -1,37 +1,51 @@
-use futures::{future::poll_fn, Future};
+//! Manages the pool of connections between local_proxy and postgres.
+//!
+//! The pool is keyed by database and role_name, and can contain multiple connections
+//! shared between users.
+//!
+//! The pool manages the pg_session_jwt extension used for authorizing
+//! requests in the db.
+//!
+//! The first time a db/role pair is seen, local_proxy attempts to install the extension
+//! and grant usage to the role on the given schema.
+
+use std::collections::HashMap;
+use std::pin::pin;
+use std::sync::{Arc, Weak};
+use std::task::{ready, Poll};
+use std::time::Duration;
+
+use futures::future::poll_fn;
+use futures::Future;
+use indexmap::IndexMap;
 use jose_jwk::jose_b64::base64ct::{Base64UrlUnpadded, Encoding};
 use p256::ecdsa::{Signature, SigningKey};
 use parking_lot::RwLock;
-use rand::rngs::OsRng;
-use serde_json::Value;
+use serde_json::value::RawValue;
 use signature::Signer;
-use std::task::{ready, Poll};
-use std::{collections::HashMap, pin::pin, sync::Arc, sync::Weak, time::Duration};
 use tokio::time::Instant;
 use tokio_postgres::tls::NoTlsStream;
 use tokio_postgres::types::ToSql;
 use tokio_postgres::{AsyncMessage, ReadyForQueryStatus, Socket};
 use tokio_util::sync::CancellationToken;
-use typed_json::json;
+use tracing::{error, info, info_span, warn, Instrument, Span};
 
+use super::backend::HttpConnError;
+use super::conn_pool_lib::{ClientInnerExt, ConnInfo};
+use crate::context::RequestMonitoring;
 use crate::control_plane::messages::{ColdStartInfo, MetricsAuxInfo};
 use crate::metrics::Metrics;
 use crate::usage_metrics::{Ids, MetricCounter, USAGE_METRICS};
-use crate::{context::RequestMonitoring, DbName, RoleName};
+use crate::{DbName, RoleName};
 
-use tracing::{debug, error, warn, Span};
-use tracing::{info, info_span, Instrument};
-
-use super::backend::HttpConnError;
-use super::conn_pool::{ClientInnerExt, ConnInfo};
+pub(crate) const EXT_NAME: &str = "pg_session_jwt";
+pub(crate) const EXT_VERSION: &str = "0.1.1";
+pub(crate) const EXT_SCHEMA: &str = "auth";
 
 struct ConnPoolEntry<C: ClientInnerExt> {
     conn: ClientInner<C>,
     _last_access: std::time::Instant,
 }
-
-// /// key id for the pg_session_jwt state
-// static PG_SESSION_JWT_KID: AtomicU64 = AtomicU64::new(1);
 
 // Per-endpoint connection pool, (dbname, username) -> DbUserConnPool
 // Number of open connections is limited by the `max_conns_per_endpoint`.
@@ -138,11 +152,18 @@ impl<C: ClientInnerExt> Drop for EndpointConnPool<C> {
 
 pub(crate) struct DbUserConnPool<C: ClientInnerExt> {
     conns: Vec<ConnPoolEntry<C>>,
+
+    // true if we have definitely installed the extension and
+    // granted the role access to the auth schema.
+    initialized: bool,
 }
 
 impl<C: ClientInnerExt> Default for DbUserConnPool<C> {
     fn default() -> Self {
-        Self { conns: Vec::new() }
+        Self {
+            conns: Vec::new(),
+            initialized: false,
+        }
     }
 }
 
@@ -197,25 +218,16 @@ impl<C: ClientInnerExt> LocalConnPool<C> {
         self.config.pool_options.idle_timeout
     }
 
-    // pub(crate) fn shutdown(&self) {
-    //     let mut pool = self.global_pool.write();
-    //     pool.pools.clear();
-    //     pool.total_conns = 0;
-    // }
-
     pub(crate) fn get(
         self: &Arc<Self>,
         ctx: &RequestMonitoring,
         conn_info: &ConnInfo,
     ) -> Result<Option<LocalClient<C>>, HttpConnError> {
-        let mut client: Option<ClientInner<C>> = None;
-        if let Some(entry) = self
+        let client = self
             .global_pool
             .write()
             .get_conn_entry(conn_info.db_and_user())
-        {
-            client = Some(entry.conn);
-        }
+            .map(|entry| entry.conn);
 
         // ok return cached connection if found and establish a new one otherwise
         if let Some(client) = client {
@@ -243,14 +255,33 @@ impl<C: ClientInnerExt> LocalConnPool<C> {
         }
         Ok(None)
     }
+
+    pub(crate) fn initialized(self: &Arc<Self>, conn_info: &ConnInfo) -> bool {
+        self.global_pool
+            .read()
+            .pools
+            .get(&conn_info.db_and_user())
+            .map_or(false, |pool| pool.initialized)
+    }
+
+    pub(crate) fn set_initialized(self: &Arc<Self>, conn_info: &ConnInfo) {
+        self.global_pool
+            .write()
+            .pools
+            .entry(conn_info.db_and_user())
+            .or_default()
+            .initialized = true;
+    }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn poll_client(
     global_pool: Arc<LocalConnPool<tokio_postgres::Client>>,
     ctx: &RequestMonitoring,
     conn_info: ConnInfo,
     client: tokio_postgres::Client,
     mut connection: tokio_postgres::Connection<Socket, NoTlsStream>,
+    key: SigningKey,
     conn_id: uuid::Uuid,
     aux: MetricsAuxInfo,
 ) -> LocalClient<tokio_postgres::Client> {
@@ -346,8 +377,6 @@ pub(crate) fn poll_client(
     }
     .instrument(span));
 
-    let key = SigningKey::random(&mut OsRng);
-
     let inner = ClientInner {
         inner: client,
         session: tx,
@@ -360,7 +389,7 @@ pub(crate) fn poll_client(
     LocalClient::new(inner, conn_info, pool_clone)
 }
 
-struct ClientInner<C: ClientInnerExt> {
+pub(crate) struct ClientInner<C: ClientInnerExt> {
     inner: C,
     session: tokio::sync::watch::Sender<uuid::Uuid>,
     cancel: CancellationToken,
@@ -385,13 +414,24 @@ impl<C: ClientInnerExt> ClientInner<C> {
     }
 }
 
-impl<C: ClientInnerExt> LocalClient<C> {
-    pub(crate) fn metrics(&self) -> Arc<MetricCounter> {
-        let aux = &self.inner.as_ref().unwrap().aux;
-        USAGE_METRICS.register(Ids {
-            endpoint_id: aux.endpoint_id,
-            branch_id: aux.branch_id,
-        })
+impl ClientInner<tokio_postgres::Client> {
+    pub(crate) async fn set_jwt_session(&mut self, payload: &[u8]) -> Result<(), HttpConnError> {
+        self.jti += 1;
+        let token = resign_jwt(&self.key, payload, self.jti)?;
+
+        // initiates the auth session
+        self.inner.simple_query("discard all").await?;
+        self.inner
+            .query(
+                "select auth.jwt_session_init($1)",
+                &[&token as &(dyn ToSql + Sync)],
+            )
+            .await?;
+
+        let pid = self.inner.get_process_id();
+        info!(pid, jti = self.jti, "user session state init");
+
+        Ok(())
     }
 }
 
@@ -420,6 +460,18 @@ impl<C: ClientInnerExt> LocalClient<C> {
             pool,
         }
     }
+
+    pub(crate) fn client_inner(&mut self) -> (&mut ClientInner<C>, Discard<'_, C>) {
+        let Self {
+            inner,
+            pool,
+            conn_info,
+            span: _,
+        } = self;
+        let inner_m = inner.as_mut().expect("client inner should not be removed");
+        (inner_m, Discard { conn_info, pool })
+    }
+
     pub(crate) fn inner(&mut self) -> (&mut C, Discard<'_, C>) {
         let Self {
             inner,
@@ -430,94 +482,81 @@ impl<C: ClientInnerExt> LocalClient<C> {
         let inner = inner.as_mut().expect("client inner should not be removed");
         (&mut inner.inner, Discard { conn_info, pool })
     }
-    pub(crate) fn key(&self) -> &SigningKey {
-        let inner = &self
-            .inner
-            .as_ref()
-            .expect("client inner should not be removed");
-        &inner.key
-    }
 }
 
-impl LocalClient<tokio_postgres::Client> {
-    pub(crate) async fn set_jwt_session(&mut self, payload: &[u8]) -> Result<(), HttpConnError> {
-        let inner = self
-            .inner
-            .as_mut()
-            .expect("client inner should not be removed");
-        inner.jti += 1;
-
-        let kid = inner.inner.get_process_id();
-        let header = json!({"kid":kid}).to_string();
-
-        let mut payload = serde_json::from_slice::<serde_json::Map<String, Value>>(payload)
-            .map_err(HttpConnError::JwtPayloadError)?;
-        payload.insert("jti".to_string(), Value::Number(inner.jti.into()));
-        let payload = Value::Object(payload).to_string();
-
-        debug!(
-            kid,
-            jti = inner.jti,
-            ?header,
-            ?payload,
-            "signing new ephemeral JWT"
-        );
-
-        let token = sign_jwt(&inner.key, header, payload);
-
-        // initiates the auth session
-        inner.inner.simple_query("discard all").await?;
-        inner
-            .inner
-            .query(
-                "select auth.jwt_session_init($1)",
-                &[&token as &(dyn ToSql + Sync)],
-            )
-            .await?;
-
-        info!(kid, jti = inner.jti, "user session state init");
-
-        Ok(())
-    }
+/// implements relatively efficient in-place json object key upserting
+///
+/// only supports top-level keys
+fn upsert_json_object(
+    payload: &[u8],
+    key: &str,
+    value: &RawValue,
+) -> Result<String, serde_json::Error> {
+    let mut payload = serde_json::from_slice::<IndexMap<&str, &RawValue>>(payload)?;
+    payload.insert(key, value);
+    serde_json::to_string(&payload)
 }
 
-fn sign_jwt(sk: &SigningKey, header: String, payload: String) -> String {
-    let header = Base64UrlUnpadded::encode_string(header.as_bytes());
-    let payload = Base64UrlUnpadded::encode_string(payload.as_bytes());
+fn resign_jwt(sk: &SigningKey, payload: &[u8], jti: u64) -> Result<String, HttpConnError> {
+    let mut buffer = itoa::Buffer::new();
 
-    let message = format!("{header}.{payload}");
-    let sig: Signature = sk.sign(message.as_bytes());
-    let base64_sig = Base64UrlUnpadded::encode_string(&sig.to_bytes());
-    format!("{message}.{base64_sig}")
+    // encode the jti integer to a json rawvalue
+    let jti = serde_json::from_str::<&RawValue>(buffer.format(jti)).unwrap();
+
+    // update the jti in-place
+    let payload =
+        upsert_json_object(payload, "jti", jti).map_err(HttpConnError::JwtPayloadError)?;
+
+    // sign the jwt
+    let token = sign_jwt(sk, payload.as_bytes());
+
+    Ok(token)
 }
 
-impl<C: ClientInnerExt> Discard<'_, C> {
-    pub(crate) fn check_idle(&mut self, status: ReadyForQueryStatus) {
-        let conn_info = &self.conn_info;
-        if status != ReadyForQueryStatus::Idle && std::mem::take(self.pool).strong_count() > 0 {
-            info!(
-                "local_pool: throwing away connection '{conn_info}' because connection is not idle"
-            );
-        }
-    }
-    pub(crate) fn discard(&mut self) {
-        let conn_info = &self.conn_info;
-        if std::mem::take(self.pool).strong_count() > 0 {
-            info!("local_pool: throwing away connection '{conn_info}' because connection is potentially in a broken state");
-        }
-    }
+fn sign_jwt(sk: &SigningKey, payload: &[u8]) -> String {
+    let header_len = 20;
+    let payload_len = Base64UrlUnpadded::encoded_len(payload);
+    let signature_len = Base64UrlUnpadded::encoded_len(&[0; 64]);
+    let total_len = header_len + payload_len + signature_len + 2;
+
+    let mut jwt = String::with_capacity(total_len);
+    let cap = jwt.capacity();
+
+    // we only need an empty header with the alg specified.
+    // base64url(r#"{"alg":"ES256"}"#) == "eyJhbGciOiJFUzI1NiJ9"
+    jwt.push_str("eyJhbGciOiJFUzI1NiJ9.");
+
+    // encode the jwt payload in-place
+    base64::encode_config_buf(payload, base64::URL_SAFE_NO_PAD, &mut jwt);
+
+    // create the signature from the encoded header || payload
+    let sig: Signature = sk.sign(jwt.as_bytes());
+
+    jwt.push('.');
+
+    // encode the jwt signature in-place
+    base64::encode_config_buf(sig.to_bytes(), base64::URL_SAFE_NO_PAD, &mut jwt);
+
+    debug_assert_eq!(
+        jwt.len(),
+        total_len,
+        "the jwt len should match our expected len"
+    );
+    debug_assert_eq!(jwt.capacity(), cap, "the jwt capacity should not change");
+
+    jwt
 }
 
 impl<C: ClientInnerExt> LocalClient<C> {
-    pub fn get_client(&self) -> &C {
-        &self
-            .inner
-            .as_ref()
-            .expect("client inner should not be removed")
-            .inner
+    pub(crate) fn metrics(&self) -> Arc<MetricCounter> {
+        let aux = &self.inner.as_ref().unwrap().aux;
+        USAGE_METRICS.register(Ids {
+            endpoint_id: aux.endpoint_id,
+            branch_id: aux.branch_id,
+        })
     }
 
-    fn do_drop(&mut self) -> Option<impl FnOnce()> {
+    fn do_drop(&mut self) -> Option<impl FnOnce() + use<C>> {
         let conn_info = self.conn_info.clone();
         let client = self
             .inner
@@ -540,5 +579,49 @@ impl<C: ClientInnerExt> Drop for LocalClient<C> {
         if let Some(drop) = self.do_drop() {
             tokio::task::spawn_blocking(drop);
         }
+    }
+}
+
+impl<C: ClientInnerExt> Discard<'_, C> {
+    pub(crate) fn check_idle(&mut self, status: ReadyForQueryStatus) {
+        let conn_info = &self.conn_info;
+        if status != ReadyForQueryStatus::Idle && std::mem::take(self.pool).strong_count() > 0 {
+            info!(
+                "local_pool: throwing away connection '{conn_info}' because connection is not idle"
+            );
+        }
+    }
+    pub(crate) fn discard(&mut self) {
+        let conn_info = &self.conn_info;
+        if std::mem::take(self.pool).strong_count() > 0 {
+            info!("local_pool: throwing away connection '{conn_info}' because connection is potentially in a broken state");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use p256::ecdsa::SigningKey;
+    use typed_json::json;
+
+    use super::resign_jwt;
+
+    #[test]
+    fn jwt_token_snapshot() {
+        let key = SigningKey::from_bytes(&[1; 32].into()).unwrap();
+        let data =
+            json!({"foo":"bar","jti":"foo\nbar","nested":{"jti":"tricky nesting"}}).to_string();
+
+        let jwt = resign_jwt(&key, data.as_bytes(), 2).unwrap();
+
+        // To validate the JWT, copy the JWT string and paste it into https://jwt.io/.
+        // In the public-key box, paste the following jwk public key
+        // `{"kty":"EC","crv":"P-256","x":"b_A7lJJBzh2t1DUZ5pYOCoW0GmmgXDKBA6orzhWUyhY","y":"PE91OlW_AdxT9sCwx-7ni0DG_30lqW4igrmJzvccFEo"}`
+
+        // let pub_key = p256::ecdsa::VerifyingKey::from(&key);
+        // let pub_key = p256::PublicKey::from(pub_key);
+        // println!("{}", pub_key.to_jwk_string());
+
+        assert_eq!(jwt, "eyJhbGciOiJFUzI1NiJ9.eyJmb28iOiJiYXIiLCJqdGkiOjIsIm5lc3RlZCI6eyJqdGkiOiJ0cmlja3kgbmVzdGluZyJ9fQ.pYf0LxoJ8sDgpmsYOgrbNecOSipnPBEGwnZzB-JhW2cONrKlqRsgXwK8_cOsyolGy-hTTe8GXbWTl_UdpF5RyA");
     }
 }

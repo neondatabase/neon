@@ -743,8 +743,6 @@ pub struct TimelineInfo {
     // Forward compatibility: a previous version of the pageserver will receive a JSON. serde::Deserialize does
     // not deny unknown fields by default so it's safe to set the field to some value, though it won't be
     // read.
-    /// The last aux file policy being used on this timeline
-    pub last_aux_file_policy: Option<AuxFilePolicy>,
     pub is_archived: Option<bool>,
 }
 

@@ -45,7 +45,7 @@ kafka-python = "^2.0.2"
 
 [tool.poetry.group.dev.dependencies]
 mypy = "==1.3.0"
-ruff = "^0.2.2"
+ruff = "^0.7.0"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]

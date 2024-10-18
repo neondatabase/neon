@@ -1,5 +1,3 @@
-#![allow(unused)]
-
 use tokio_epoll_uring::IoBufMut;
 
 use crate::virtual_file::{IoBufferMut, PageWriteGuardBuf};

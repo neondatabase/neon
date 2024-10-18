@@ -738,6 +738,20 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackend<IO> {
                         QueryError::SimulatedConnectionError => {
                             return Err(QueryError::SimulatedConnectionError)
                         }
+                        err @ QueryError::Reconnect => {
+                            // Instruct the client to reconnect, stop processing messages
+                            // from this libpq connection and, finally, disconnect from the
+                            // server side (returning an Err achieves the later).
+                            //
+                            // Note the flushing is done by the caller.
+                            let reconnect_error = short_error(&err);
+                            self.write_message_noflush(&BeMessage::ErrorResponse(
+                                &reconnect_error,
+                                Some(err.pg_error_code()),
+                            ))?;
+
+                            return Err(err);
+                        }
                         e => {
                             log_query_error(query_string, &e);
                             let short_error = short_error(&e);
@@ -921,12 +935,11 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> PostgresBackendReader<IO> {
 /// A futures::AsyncWrite implementation that wraps all data written to it in CopyData
 /// messages.
 ///
-
 pub struct CopyDataWriter<'a, IO> {
     pgb: &'a mut PostgresBackend<IO>,
 }
 
-impl<'a, IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for CopyDataWriter<'a, IO> {
+impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for CopyDataWriter<'_, IO> {
     fn poll_write(
         self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,

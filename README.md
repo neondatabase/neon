@@ -31,7 +31,7 @@ See developer documentation in [SUMMARY.md](/docs/SUMMARY.md) for more informati
 ```bash
 apt install build-essential libtool libreadline-dev zlib1g-dev flex bison libseccomp-dev \
 libssl-dev clang pkg-config libpq-dev cmake postgresql-client protobuf-compiler \
-libcurl4-openssl-dev openssl python3-poetry lsof libicu-dev
+libprotobuf-dev libcurl4-openssl-dev openssl python3-poetry lsof libicu-dev
 ```
 * On Fedora, these packages are needed:
 ```bash
