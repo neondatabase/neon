@@ -10,12 +10,11 @@ use rand::Rng;
 use tokio::net::TcpStream;
 use tracing::{debug, error, info, info_span, Instrument};
 
+use super::conn_pool_lib::{ClientInnerExt, ConnInfo};
 use crate::context::RequestMonitoring;
 use crate::control_plane::messages::{ColdStartInfo, MetricsAuxInfo};
 use crate::metrics::{HttpEndpointPoolsGuard, Metrics};
 use crate::usage_metrics::{Ids, MetricCounter, USAGE_METRICS};
-
-use super::conn_pool_lib::{ClientInnerExt, ConnInfo};
 use crate::EndpointCacheKey;
 
 pub(crate) type Send = http2::SendRequest<hyper::body::Incoming>;

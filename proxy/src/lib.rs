@@ -76,11 +76,7 @@
     )
 )]
 // List of temporarily allowed lints to unblock beta/nightly.
-#![allow(
-    unknown_lints,
-    // TODO: 1.82: Add `use<T>` where necessary and remove from this list.
-    impl_trait_overcaptures,
-)]
+#![allow(unknown_lints)]
 
 use std::convert::Infallible;
 
