@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize, Serializer};
 
 use crate::{
     privilege::Privilege,
-    spec::{ComputeSpec, Database, PgIdent, Role},
+    spec::{ComputeSpec, Database, ExtVersion, PgIdent, Role},
 };
 
 #[derive(Serialize, Debug, Deserialize)]
@@ -172,6 +172,11 @@ pub struct InstalledExtensions {
     pub extensions: Vec<InstalledExtension>,
 }
 
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct ExtensionInstallResult {
+    pub extension: PgIdent,
+    pub version: ExtVersion,
+}
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct SetRoleGrantsResponse {
     pub database: PgIdent,

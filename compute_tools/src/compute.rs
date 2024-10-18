@@ -28,7 +28,7 @@ use utils::lsn::Lsn;
 
 use compute_api::privilege::Privilege;
 use compute_api::responses::{ComputeMetrics, ComputeStatus};
-use compute_api::spec::{ComputeFeature, ComputeMode, ComputeSpec};
+use compute_api::spec::{ComputeFeature, ComputeMode, ComputeSpec, ExtVersion};
 use utils::measured_stream::MeasuredReader;
 
 use nix::sys::signal::{kill, Signal};
@@ -1414,6 +1414,56 @@ LIMIT 100",
             .with_context(|| format!("Failed to execute query: {}", query))?;
 
         Ok(())
+    }
+
+    pub async fn install_extension(
+        &self,
+        ext_name: &PgIdent,
+        db_name: &PgIdent,
+        ext_version: ExtVersion,
+    ) -> Result<ExtVersion> {
+        use tokio_postgres::config::Config;
+        use tokio_postgres::NoTls;
+
+        let mut conf = Config::from_str(self.connstr.as_str()).unwrap();
+        conf.dbname(db_name);
+
+        let (db_client, conn) = conf
+            .connect(NoTls)
+            .await
+            .context("Failed to connect to the database")?;
+        tokio::spawn(conn);
+
+        let version_query = "SELECT extversion FROM pg_extension WHERE extname = $1";
+        let version: Option<ExtVersion> = db_client
+            .query_opt(version_query, &[&ext_name])
+            .await
+            .with_context(|| format!("Failed to execute query: {}", version_query))?
+            .map(|row| row.get(0));
+
+        // sanitize the inputs as postgres idents.
+        let ext_name: String = ext_name.pg_quote();
+        let quoted_version: String = ext_version.pg_quote();
+
+        if let Some(installed_version) = version {
+            if installed_version == ext_version {
+                return Ok(installed_version);
+            }
+            let query = format!("ALTER EXTENSION {ext_name} UPDATE TO {quoted_version}");
+            db_client
+                .simple_query(&query)
+                .await
+                .with_context(|| format!("Failed to execute query: {}", query))?;
+        } else {
+            let query =
+                format!("CREATE EXTENSION IF NOT EXISTS {ext_name} WITH VERSION {quoted_version}");
+            db_client
+                .simple_query(&query)
+                .await
+                .with_context(|| format!("Failed to execute query: {}", query))?;
+        }
+
+        Ok(ext_version)
     }
 
     #[tokio::main]

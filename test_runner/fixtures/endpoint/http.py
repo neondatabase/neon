@@ -29,6 +29,16 @@ class EndpointHttpClient(requests.Session):
         res.raise_for_status()
         return res.json()
 
+    def extensions(self, extension: str, version: str, database: str):
+        body = {
+            "extension": extension,
+            "version": version,
+            "database": database,
+        }
+        res = self.post(f"http://localhost:{self.port}/extensions", json=body)
+        res.raise_for_status()
+        return res.json()
+
     def set_role_grants(self, database: str, role: str, schema: str, privileges: list[str]):
         res = self.post(
             f"http://localhost:{self.port}/grants",
