@@ -90,6 +90,7 @@ pub mod auth;
 pub mod cache;
 pub mod cancellation;
 pub mod compute;
+pub mod compute_ctl;
 pub mod config;
 pub mod console_redirect_proxy;
 pub mod context;
