@@ -3630,14 +3630,21 @@ impl Service {
                 );
 
                 let client = PageserverClient::new(node.get_id(), node.base_url(), jwt.as_deref());
-                client
+                let res = client
                     .timeline_delete(tenant_shard_id, timeline_id)
-                    .await
-                    .map_err(|e| {
-                        ApiError::InternalServerError(anyhow::anyhow!(
-                            "Error deleting timeline {timeline_id} on {tenant_shard_id} on node {node}: {e}",
-                        ))
-                    })
+                    .await;
+
+                match res {
+                    Ok(ok) => Ok(ok),
+                    Err(mgmt_api::Error::ApiError(StatusCode::CONFLICT, _)) => Ok(StatusCode::CONFLICT),
+                    Err(e) => {
+                        Err(
+                            ApiError::InternalServerError(anyhow::anyhow!(
+                                "Error deleting timeline {timeline_id} on {tenant_shard_id} on node {node}: {e}",
+                            ))
+                        )
+                    }
+                }
             }
 
             let locations = targets.0.iter().map(|t| (*t.0, t.1.latest.node.clone())).collect();
@@ -3652,7 +3659,13 @@ impl Service {
                 })
                 .await?;
 
-            // If any shards >0 haven't finished deletion yet, don't start deletion on shard zero
+            // If any shards >0 haven't finished deletion yet, don't start deletion on shard zero.
+            // We return 409 (Conflict) if deletion was already in progress on any of the shards
+            // and 202 (Accepted) if deletion was not already in progress on any of the shards.
+            if statuses.iter().any(|s| s == &StatusCode::CONFLICT) {
+                return Ok(StatusCode::CONFLICT);
+            }
+
             if statuses.iter().any(|s| s != &StatusCode::NOT_FOUND) {
                 return Ok(StatusCode::ACCEPTED);
             }
