@@ -7,7 +7,7 @@ use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
-use super::{metrics::Name, Cache, MetricsKey, RawMetric};
+use super::{metrics::Name, Cache, MetricsKey, NewRawMetrics, RawMetric};
 use utils::id::{TenantId, TimelineId};
 
 /// How the metrics from pageserver are identified.
@@ -24,7 +24,7 @@ pub(super) async fn upload_metrics_http(
     client: &reqwest::Client,
     metric_collection_endpoint: &reqwest::Url,
     cancel: &CancellationToken,
-    metrics: &[RawMetric],
+    metrics: &[NewRawMetrics],
     cached_metrics: &mut Cache,
     idempotency_keys: &[IdempotencyKey<'_>],
 ) -> anyhow::Result<()> {
@@ -86,7 +86,7 @@ pub(super) async fn upload_metrics_bucket(
     client: &GenericRemoteStorage,
     cancel: &CancellationToken,
     node_id: &str,
-    metrics: &[RawMetric],
+    metrics: &[NewRawMetrics],
     idempotency_keys: &[IdempotencyKey<'_>],
 ) -> anyhow::Result<()> {
     if metrics.is_empty() {
