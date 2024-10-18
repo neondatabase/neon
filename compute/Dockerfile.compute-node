@@ -902,12 +902,10 @@ RUN case "${PG_VERSION}" in \
     "v17") \
         export PG_JSONSCHEMA_VERSION=0.3.3 \
         export PG_JSONSCHEMA_CHECKSUM=40c2cffab4187e0233cb8c3bde013be92218c282f95f4469c5282f6b30d64eac \
-        export PGRX_VERSION=0.12.6 \
     ;; \
     "v14" | "v15" | "v16") \
         export PG_JSONSCHEMA_VERSION=0.3.1 \
         export PG_JSONSCHEMA_CHECKSUM=61df3db1ed83cf24f6aa39c826f8818bfa4f0bd33b587fd6b2b1747985642297 \
-        export PGRX_VERSION=0.11.3 \
     ;; \
     *) \
         echo "unexpected PostgreSQL version" && exit 1 \
@@ -921,7 +919,14 @@ RUN case "${PG_VERSION}" in \
     # against postgres forks that decided to change their ABI name (like us).
     # With that we can build extensions without forking them and using stock
     # pgx. As this feature is new few manual version bumps were required.
-    sed -i 's/pgrx = "${PGRX_VERSION}"/pgrx = { version = "${PGRX_VERSION}", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
+    case "${PG_VERSION}" in \
+    "v17") \
+        sed -i 's/pgrx = "0.12.6"/pgrx = { version = "0.12.6", features = [ "unsafe-postgres" ] }/g' Cargo.toml \
+    ;; \
+    "v14" | "v15" | "v16") \
+        sed -i 's/pgrx = "0.11.3"/pgrx = { version = "0.11.3", features = [ "unsafe-postgres" ] }/g' Cargo.toml \
+    ;; \
+    esac && \
     cargo pgrx install --release && \
     echo "trusted = true" >> /usr/local/pgsql/share/extension/pg_jsonschema.control
 
@@ -945,12 +950,10 @@ RUN case "${PG_VERSION}" in \
     "v17") \
         export PG_GRAPHQL_VERSION=1.5.9 \
         export PG_GRAPHQL_CHECKSUM=cf768385a41278be1333472204fc0328118644ae443182cf52f7b9b23277e497 \
-        export PGRX_VERSION=0.12.6 \
     ;; \
     "v14" | "v15" | "v16") \
         export PG_GRAPHQL_VERSION=1.5.7 \
         export PG_GRAPHQL_CHECKSUM=2b3e567a5b31019cb97ae0e33263c1bcc28580be5a444ac4c8ece5c4be2aea41 \
-        export PGRX_VERSION=0.11.3 \
     ;; \
     *) \
         echo "unexpected PostgreSQL version" && exit 1 \
@@ -959,7 +962,14 @@ RUN case "${PG_VERSION}" in \
     wget https://github.com/supabase/pg_graphql/archive/refs/tags/v${PG_GRAPHQL_VERSION}.tar.gz -O pg_graphql.tar.gz && \
     echo "${PG_GRAPHQL_CHECKSUM} pg_graphql.tar.gz" | sha256sum --check && \
     mkdir pg_graphql-src && cd pg_graphql-src && tar xzf ../pg_graphql.tar.gz --strip-components=1 -C . && \
-    sed -i 's/pgrx = "=${PGRX_VERSION}"/pgrx = { version = "${PGRX_VERSION}", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
+    case "${PG_VERSION}" in \
+    "v17") \
+        sed -i 's/pgrx = "0.12.6"/pgrx = { version = "0.12.6", features = [ "unsafe-postgres" ] }/g' Cargo.toml \
+    ;; \
+    "v14" | "v15" | "v16") \
+        sed -i 's/pgrx = "0.11.3"/pgrx = { version = "0.11.3", features = [ "unsafe-postgres" ] }/g' Cargo.toml \
+    ;; \
+    esac && \
     cargo pgrx install --release && \
     # it's needed to enable extension because it uses untrusted C language
     sed -i 's/superuser = false/superuser = true/g' /usr/local/pgsql/share/extension/pg_graphql.control && \
@@ -1034,7 +1044,6 @@ RUN case "${PG_VERSION}" in \
     "v14" | "v15" | "v16") \
         export PG_SESSION_JWT_VERSION=0.1.1 \
         esport PG_SESSION_JWT_CHECKSUM=5d91b10bc1347d36cffc456cb87bec25047935d6503dc652ca046f04760828e7 \
-        export PGRX_VERSION=0.11.3 \
     ;; \
     *) \
         echo "unexpected PostgreSQL version" && exit 1 \
@@ -1043,7 +1052,14 @@ RUN case "${PG_VERSION}" in \
     wget https://github.com/neondatabase/pg_session_jwt/archive/refs/tags/v${PG_SESSION_JWT_VERSION}.tar.gz -O pg_session_jwt.tar.gz && \
     echo "${PG_SESSION_JWT_CHECKSUM} pg_session_jwt.tar.gz" | sha256sum --check && \
     mkdir pg_session_jwt-src && cd pg_session_jwt-src && tar xzf ../pg_session_jwt.tar.gz --strip-components=1 -C . && \
-    sed -i 's/pgrx = "=${PGRX_VERSION}"/pgrx = { version = "=${PGRX_VERSION}", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
+    case "${PG_VERSION}" in \
+    "v17") \
+        sed -i 's/pgrx = "0.12.6"/pgrx = { version = "0.12.6", features = [ "unsafe-postgres" ] }/g' Cargo.toml \
+    ;; \
+    "v14" | "v15" | "v16") \
+        sed -i 's/pgrx = "0.11.3"/pgrx = { version = "0.11.3", features = [ "unsafe-postgres" ] }/g' Cargo.toml \
+    ;; \
+    esac && \
     cargo pgrx install --release
 
 #########################################################################################
