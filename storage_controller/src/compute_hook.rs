@@ -50,7 +50,7 @@ struct ComputeRemoteState {
     // The request body which was acked by the compute
     request: ComputeHookNotifyRequest,
 
-    // Whether the compute indicated that the state was applied to running computes, or just
+    // Whether the cplane indicated that the state was applied to running computes, or just
     // persisted.  In the Neon control plane, this is the difference between a 423 response (meaning
     // persisted but not applied), and a 2xx response (both persisted and applied)
     applied: bool,
