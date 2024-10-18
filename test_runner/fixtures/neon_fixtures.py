@@ -3426,6 +3426,7 @@ class Endpoint(PgProtocol, LogUtils):
         config_lines: Optional[list[str]] = None,
         pageserver_id: Optional[int] = None,
         allow_multiple: bool = False,
+        use_lfc: Optional[bool] = None,
     ) -> Endpoint:
         """
         Create a new Postgres endpoint.
@@ -3455,11 +3456,33 @@ class Endpoint(PgProtocol, LogUtils):
         self.pgdata_dir = self.env.repo_dir / path
         self.logfile = self.endpoint_path() / "compute.log"
 
-        config_lines = config_lines or []
+        if use_lfc is None:
+            use_lfc = os.environ.get("NO_LFC") is None
 
         # set small 'max_replication_write_lag' to enable backpressure
         # and make tests more stable.
         config_lines = ["max_replication_write_lag=15MB"] + config_lines
+
+        # Delete file cache if it exists (and we're recreating the endpoint)
+        if use_lfc:
+            if (lfc_path := Path(self.lfc_path())).exists():
+                lfc_path.unlink()
+            else:
+                lfc_path.parent.mkdir(parents=True, exist_ok=True)
+
+            config_lines = [
+                "shared_buffers = 512kB",
+                f"neon.file_cache_path = '{self.lfc_path()}'",
+                "neon.max_file_cache_size = 32MB",
+                "neon.file_cache_size_limit = 32MB",
+            ] + config_lines
+        else:
+            config_lines = [
+                line
+                for line in config_lines
+                if not line.startswith("neon.max_file_cache_size")
+                and not line.startswith("neon.file_cache_size_limit")
+            ]
 
         self.config(config_lines)
 
@@ -3494,6 +3517,9 @@ class Endpoint(PgProtocol, LogUtils):
             basebackup_request_tries=basebackup_request_tries,
         )
         self._running.release(1)
+        self.log_config_value("shared_buffers")
+        self.log_config_value("neon.max_file_cache_size")
+        self.log_config_value("neon.file_cache_size_limit")
 
         return self
 
@@ -3518,6 +3544,10 @@ class Endpoint(PgProtocol, LogUtils):
     def config_file_path(self) -> Path:
         """Path to the postgresql.conf in the endpoint directory (not the one in pgdata)"""
         return self.endpoint_path() / "postgresql.conf"
+
+    def lfc_path(self) -> Path:
+        """Path to the lfc file"""
+        return self.endpoint_path() / "file_cache" / "file.cache"
 
     def config(self, lines: list[str]) -> Endpoint:
         """
@@ -3658,6 +3688,7 @@ class Endpoint(PgProtocol, LogUtils):
         pageserver_id: Optional[int] = None,
         allow_multiple: bool = False,
         basebackup_request_tries: Optional[int] = None,
+        use_lfc: Optional[bool] = None,
     ) -> Endpoint:
         """
         Create an endpoint, apply config, and start Postgres.
@@ -3672,6 +3703,7 @@ class Endpoint(PgProtocol, LogUtils):
             lsn=lsn,
             pageserver_id=pageserver_id,
             allow_multiple=allow_multiple,
+            use_lfc=use_lfc,
         ).start(
             remote_ext_config=remote_ext_config,
             pageserver_id=pageserver_id,
@@ -3705,10 +3737,36 @@ class Endpoint(PgProtocol, LogUtils):
 
         Might also clear LFC.
         """
+        file_cache_size_limit = 0
         if cursor is not None:
             cursor.execute("select clear_buffer_cache()")
+            cursor.execute("SHOW neon.file_cache_size_limit")
+            res = cursor.fetchone()
+            assert res, "Cannot get neon.file_cache_size_limit"
+            file_cache_size_limit = res[0]
+            if file_cache_size_limit == 0:
+                return
+            cursor.execute("ALTER SYSTEM SET neon.file_cache_size_limit=0")
+            cursor.execute("SELECT pg_reload_conf()")
+            cursor.execute(f"ALTER SYSTEM SET neon.file_cache_size_limit='{file_cache_size_limit}'")
         else:
             self.safe_psql("select clear_buffer_cache()")
+            file_cache_size_limit = self.safe_psql_scalar(
+                "SHOW neon.file_cache_size_limit", log_query=False
+            )
+            if file_cache_size_limit == 0:
+                return
+            self.safe_psql("ALTER SYSTEM SET neon.file_cache_size_limit=0")
+            self.safe_psql("SELECT pg_reload_conf()")
+            self.safe_psql(f"ALTER SYSTEM SET neon.file_cache_size_limit='{file_cache_size_limit}'")
+            self.safe_psql("SELECT pg_reload_conf()")
+
+    def log_config_value(self, param):
+        """
+        Writes the config value param to log
+        """
+        res = self.safe_psql_scalar(f"SHOW {param}", log_query=False)
+        log.info("%s = %s", param, res)
 
 
 class EndpointFactory:
@@ -3730,6 +3788,7 @@ class EndpointFactory:
         remote_ext_config: Optional[str] = None,
         pageserver_id: Optional[int] = None,
         basebackup_request_tries: Optional[int] = None,
+        use_lfc: Optional[bool] = None,
     ) -> Endpoint:
         ep = Endpoint(
             self.env,
@@ -3749,6 +3808,7 @@ class EndpointFactory:
             remote_ext_config=remote_ext_config,
             pageserver_id=pageserver_id,
             basebackup_request_tries=basebackup_request_tries,
+            use_lfc=use_lfc,
         )
 
     def create(
@@ -3760,6 +3820,7 @@ class EndpointFactory:
         hot_standby: bool = False,
         config_lines: Optional[list[str]] = None,
         pageserver_id: Optional[int] = None,
+        use_lfc: Optional[bool] = None,
     ) -> Endpoint:
         ep = Endpoint(
             self.env,
@@ -3780,6 +3841,7 @@ class EndpointFactory:
             hot_standby=hot_standby,
             config_lines=config_lines,
             pageserver_id=pageserver_id,
+            use_lfc=use_lfc,
         )
 
     def stop_all(self, fail_on_error=True) -> EndpointFactory:
