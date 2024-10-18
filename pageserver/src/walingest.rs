@@ -2188,14 +2188,12 @@ impl WalIngest {
     ) -> anyhow::Result<Option<RelmapRecord>> {
         let update = XlRelmapUpdate::decode(buf);
 
-        let mut buf = decoded.record.clone();
-        buf.advance(decoded.main_data_offset);
-        // skip xl_relmap_update
-        buf.advance(12);
+        const XL_RELMAP_UPDATE_SIZE: usize = 12;
+        let page_starts_at = decoded.main_data_offset + XL_RELMAP_UPDATE_SIZE;
 
         Ok(Some(RelmapRecord {
             update,
-            buf: Bytes::copy_from_slice(&buf[..]),
+            buf: Bytes::copy_from_slice(&buf[page_starts_at..]),
         }))
     }
 
