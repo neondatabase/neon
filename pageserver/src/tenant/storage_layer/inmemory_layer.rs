@@ -809,7 +809,6 @@ impl InMemoryLayer {
         match l0_flush_global_state {
             l0_flush::Inner::Direct { .. } => {
                 let file_contents = inner.file.load_to_io_buf(ctx).await?;
-                // TODO(yuchen): see ways to avoid this copy.
                 let file_contents = file_contents.freeze();
 
                 for (key, vec_map) in inner.index.iter() {
