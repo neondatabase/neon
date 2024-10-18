@@ -1,5 +1,5 @@
 use std::{
-    ops::{Deref, Range},
+    ops::{Deref, Range, RangeBounds},
     sync::Arc,
 };
 
@@ -49,8 +49,21 @@ impl<A: Alignment> AlignedBuffer<A> {
     }
 
     /// Returns a slice of self for the index range `[begin..end)`.
-    pub fn slice(&self, begin: usize, end: usize) -> Self {
+    pub fn slice(&self, range: impl RangeBounds<usize>) -> Self {
+        use core::ops::Bound;
         let len = self.len();
+
+        let begin = match range.start_bound() {
+            Bound::Included(&n) => n,
+            Bound::Excluded(&n) => n.checked_add(1).expect("out of range"),
+            Bound::Unbounded => 0,
+        };
+
+        let end = match range.end_bound() {
+            Bound::Included(&n) => n.checked_add(1).expect("out of range"),
+            Bound::Excluded(&n) => n,
+            Bound::Unbounded => len,
+        };
 
         assert!(
             begin <= end,

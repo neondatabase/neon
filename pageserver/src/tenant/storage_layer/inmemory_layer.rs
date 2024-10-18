@@ -823,7 +823,7 @@ impl InMemoryLayer {
                             len,
                             will_init,
                         } = entry;
-                        let buf = file_contents.slice(pos as usize, (pos + len) as usize);
+                        let buf = file_contents.slice(pos as usize..(pos + len) as usize);
                         let (_buf, res) = delta_layer_writer
                             .put_value_bytes(
                                 Key::from_compact(*key),
