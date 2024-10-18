@@ -592,12 +592,6 @@ def test_subscriber_synchronous_commit(neon_simple_env: NeonEnv, vanilla_pg):
             query = f"CREATE SUBSCRIPTION sub CONNECTION '{pub_connstr}' PUBLICATION pub with (synchronous_commit=off)"
             scur.execute(query)
             time.sleep(2)  # let initial table sync complete
-            scur.execute("SHOW shared_buffers")
-            log.info("shared_buffers = %s", scur.fetchone()[0])
-            scur.execute("SHOW neon.max_file_cache_size")
-            log.info("neon.max_file_cache_size = %s", scur.fetchone()[0])
-            scur.execute("SHOW neon.file_cache_size_limit")
-            log.info("neon.file_cache_size_limit = %s", scur.fetchone()[0])
 
     # stop safekeeper so it won't get any data
     for sk in env.safekeepers:

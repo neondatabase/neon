@@ -3517,6 +3517,9 @@ class Endpoint(PgProtocol, LogUtils):
             basebackup_request_tries=basebackup_request_tries,
         )
         self._running.release(1)
+        self.log_config_value("shared_buffers")
+        self.log_config_value("neon.max_file_cache_size")
+        self.log_config_value("neon.file_cache_size_limit")
 
         return self
 
@@ -3738,6 +3741,16 @@ class Endpoint(PgProtocol, LogUtils):
             cursor.execute("select clear_buffer_cache()")
         else:
             self.safe_psql("select clear_buffer_cache()")
+
+    def log_config_value(self, param):
+        """
+        Writes the config value param to log
+        """
+        with self.cursor() as scur:
+            scur.execute(f"SHOW {param}")
+            res = scur.fetchone()
+            assert res, f"Cannot get the value of {param}"
+            log.info("%s = %s", param, res[0])
 
 
 class EndpointFactory:
