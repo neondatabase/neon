@@ -16,6 +16,7 @@ use anyhow::{bail, Context};
 use arc_swap::ArcSwap;
 use camino::Utf8Path;
 use camino::Utf8PathBuf;
+use chrono::NaiveDateTime;
 use enumset::EnumSet;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
@@ -506,6 +507,11 @@ pub struct OffloadedTimeline {
     /// Whether to retain the branch lsn at the ancestor or not
     pub ancestor_retain_lsn: Option<Lsn>,
 
+    /// When the timeline was archived.
+    ///
+    /// Present for future flattening deliberations.
+    pub archived_at: NaiveDateTime,
+
     // TODO: once we persist offloaded state, make this lazily constructed
     pub remote_client: Arc<RemoteTimelineClient>,
 
@@ -519,11 +525,17 @@ impl OffloadedTimeline {
         let ancestor_retain_lsn = timeline
             .get_ancestor_timeline_id()
             .map(|_timeline_id| timeline.get_ancestor_lsn());
+        let archived_at = timeline
+            .remote_client
+            .archived_at()
+            .expect("timeline must have manifest available")
+            .expect("must be called on an archived timeline");
         Self {
             tenant_shard_id: timeline.tenant_shard_id,
             timeline_id: timeline.timeline_id,
             ancestor_timeline_id: timeline.get_ancestor_timeline_id(),
             ancestor_retain_lsn,
+            archived_at,
 
             remote_client: timeline.remote_client.clone(),
             delete_progress: timeline.delete_progress.clone(),
@@ -538,12 +550,14 @@ impl OffloadedTimeline {
             timeline_id,
             ancestor_timeline_id,
             ancestor_retain_lsn,
+            archived_at,
         } = manifest.clone();
         Self {
             tenant_shard_id,
             timeline_id,
             ancestor_timeline_id,
             ancestor_retain_lsn,
+            archived_at,
             remote_client: remote_timeline_client,
             delete_progress: Timeline::make_delete_progress(),
         }
@@ -553,12 +567,14 @@ impl OffloadedTimeline {
             timeline_id,
             ancestor_timeline_id,
             ancestor_retain_lsn,
+            archived_at,
             ..
         } = self;
         OffloadedTimelineManifest {
             timeline_id: timeline_id.clone(),
             ancestor_timeline_id: ancestor_timeline_id.clone(),
             ancestor_retain_lsn: ancestor_retain_lsn.clone(),
+            archived_at: archived_at.clone(),
         }
     }
 }

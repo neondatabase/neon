@@ -1,3 +1,4 @@
+use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
 use utils::{id::TimelineId, lsn::Lsn};
 
@@ -16,6 +17,8 @@ pub struct OffloadedTimelineManifest {
     pub ancestor_timeline_id: Option<TimelineId>,
     /// Whether to retain the branch lsn at the ancestor or not
     pub ancestor_retain_lsn: Option<Lsn>,
+    /// The time point when the timeline was archived
+    pub archived_at: NaiveDateTime,
 }
 
 pub const LATEST_TENANT_MANIFEST_VERSION: usize = 1;

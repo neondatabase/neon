@@ -470,6 +470,18 @@ impl RemoteTimelineClient {
             .ok()
     }
 
+    /// Returns `Some(Some(timestamp))` if the timeline has been archived, `Some(None)` if the timeline hasn't been archived.
+    ///
+    /// Return None if the remote index_part hasn't been downloaded yet.
+    pub(crate) fn archived_at(&self) -> Option<Option<NaiveDateTime>> {
+        self.upload_queue
+            .lock()
+            .unwrap()
+            .initialized_mut()
+            .map(|q| q.clean.0.archived_at)
+            .ok()
+    }
+
     fn update_remote_physical_size_gauge(&self, current_remote_index_part: Option<&IndexPart>) {
         let size: u64 = if let Some(current_remote_index_part) = current_remote_index_part {
             current_remote_index_part
