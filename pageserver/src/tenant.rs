@@ -551,7 +551,7 @@ impl OffloadedTimeline {
             ancestor_timeline_id,
             ancestor_retain_lsn,
             archived_at,
-        } = manifest.clone();
+        } = *manifest;
         Self {
             tenant_shard_id,
             timeline_id,
@@ -571,10 +571,10 @@ impl OffloadedTimeline {
             ..
         } = self;
         OffloadedTimelineManifest {
-            timeline_id: timeline_id.clone(),
-            ancestor_timeline_id: ancestor_timeline_id.clone(),
-            ancestor_retain_lsn: ancestor_retain_lsn.clone(),
-            archived_at: archived_at.clone(),
+            timeline_id: *timeline_id,
+            ancestor_timeline_id: *ancestor_timeline_id,
+            ancestor_retain_lsn: *ancestor_retain_lsn,
+            archived_at: *archived_at,
         }
     }
 }
