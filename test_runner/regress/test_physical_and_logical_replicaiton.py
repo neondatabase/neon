@@ -8,7 +8,11 @@ from fixtures.neon_fixtures import NeonEnv, logical_replication_sync
 def test_physical_and_logical_replication(neon_simple_env: NeonEnv, vanilla_pg):
     env = neon_simple_env
 
+<<<<<<< HEAD
     n_records = 100000
+=======
+    n_records = 1000000
+>>>>>>> 7fbb1d150 (Add test for combination of physical and logical replication)
 
     primary = env.endpoints.create_start(
         branch_name="main",
