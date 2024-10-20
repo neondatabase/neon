@@ -2039,7 +2039,7 @@ impl Timeline {
                     .finish_with_discard_fn(self, ctx, Key::MAX, discard)
                     .await?
             } else {
-                writer.discard();
+                drop(writer);
                 Vec::new()
             }
         } else {
