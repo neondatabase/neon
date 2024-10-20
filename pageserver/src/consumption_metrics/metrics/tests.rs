@@ -1,3 +1,5 @@
+use crate::consumption_metrics::RawMetric;
+
 use super::*;
 use std::collections::HashMap;
 
@@ -50,9 +52,9 @@ fn startup_collected_timeline_metrics_second_round() {
     let disk_consistent_lsn = Lsn(initdb_lsn.0 * 2);
 
     let mut metrics = Vec::new();
-    let cache = HashMap::from([
-        MetricsKey::written_size(tenant_id, timeline_id).at(before, disk_consistent_lsn.0)
-    ]);
+    let cache = HashMap::from([MetricsKey::written_size(tenant_id, timeline_id)
+        .at(before, disk_consistent_lsn.0)
+        .to_kv_pair()]);
 
     let snap = TimelineSnapshot {
         loaded_at: (disk_consistent_lsn, init),
@@ -89,9 +91,13 @@ fn startup_collected_timeline_metrics_nth_round_at_same_lsn() {
     let mut metrics = Vec::new();
     let cache = HashMap::from([
         // at t=before was the last time the last_record_lsn changed
-        MetricsKey::written_size(tenant_id, timeline_id).at(before, disk_consistent_lsn.0),
+        MetricsKey::written_size(tenant_id, timeline_id)
+            .at(before, disk_consistent_lsn.0)
+            .to_kv_pair(),
         // end time of this event is used for the next ones
-        MetricsKey::written_size_delta(tenant_id, timeline_id).from_until(before, just_before, 0),
+        MetricsKey::written_size_delta(tenant_id, timeline_id)
+            .from_until(before, just_before, 0)
+            .to_kv_pair(),
     ]);
 
     let snap = TimelineSnapshot {
@@ -138,13 +144,17 @@ fn post_restart_written_sizes_with_rolled_back_last_record_lsn() {
     };
 
     let mut cache = HashMap::from([
-        MetricsKey::written_size(tenant_id, timeline_id).at(before_restart, 100),
-        MetricsKey::written_size_delta(tenant_id, timeline_id).from_until(
-            way_before,
-            before_restart,
-            // not taken into account, but the timestamps are important
-            999_999_999,
-        ),
+        MetricsKey::written_size(tenant_id, timeline_id)
+            .at(before_restart, 100)
+            .to_kv_pair(),
+        MetricsKey::written_size_delta(tenant_id, timeline_id)
+            .from_until(
+                way_before,
+                before_restart,
+                // not taken into account, but the timestamps are important
+                999_999_999,
+            )
+            .to_kv_pair(),
     ]);
 
     let mut metrics = Vec::new();
@@ -163,7 +173,7 @@ fn post_restart_written_sizes_with_rolled_back_last_record_lsn() {
     );
 
     // now if we cache these metrics, and re-run while "still in recovery"
-    cache.extend(metrics.drain(..));
+    cache.extend(metrics.drain(..).map(|x| x.to_kv_pair()));
 
     // "still in recovery", because our snapshot did not change
     snap.to_metrics(tenant_id, timeline_id, later, &mut metrics, &cache);
@@ -194,14 +204,14 @@ fn post_restart_current_exact_logical_size_uses_cached() {
         current_exact_logical_size: None,
     };
 
-    let cache = HashMap::from([
-        MetricsKey::timeline_logical_size(tenant_id, timeline_id).at(before_restart, 100)
-    ]);
+    let cache = HashMap::from([MetricsKey::timeline_logical_size(tenant_id, timeline_id)
+        .at(before_restart, 100)
+        .to_kv_pair()]);
 
     let mut metrics = Vec::new();
     snap.to_metrics(tenant_id, timeline_id, now, &mut metrics, &cache);
 
-    metrics.retain(|(key, _)| key.metric == Name::LogicalSize);
+    metrics.retain(|item| item.key.metric == Name::LogicalSize);
 
     assert_eq!(
         metrics,
@@ -224,7 +234,9 @@ fn post_restart_synthetic_size_uses_cached_if_available() {
     let before_restart = DateTime::<Utc>::from(now - std::time::Duration::from_secs(5 * 60));
     let now = DateTime::<Utc>::from(now);
 
-    let cached = HashMap::from([MetricsKey::synthetic_size(tenant_id).at(before_restart, 1000)]);
+    let cached = HashMap::from([MetricsKey::synthetic_size(tenant_id)
+        .at(before_restart, 1000)
+        .to_kv_pair()]);
 
     let mut metrics = Vec::new();
     ts.to_metrics(tenant_id, now, &cached, &mut metrics);
@@ -278,12 +290,29 @@ fn time_backwards<const N: usize>() -> [std::time::SystemTime; N] {
     times
 }
 
-pub(crate) const fn metric_examples(
+pub(crate) const fn metric_examples_old(
     tenant_id: TenantId,
     timeline_id: TimelineId,
     now: DateTime<Utc>,
     before: DateTime<Utc>,
 ) -> [RawMetric; 6] {
+    [
+        MetricsKey::written_size(tenant_id, timeline_id).at_old_format(now, 0),
+        MetricsKey::written_size_delta(tenant_id, timeline_id)
+            .from_until_old_format(before, now, 0),
+        MetricsKey::timeline_logical_size(tenant_id, timeline_id).at_old_format(now, 0),
+        MetricsKey::remote_storage_size(tenant_id).at_old_format(now, 0),
+        MetricsKey::resident_size(tenant_id).at_old_format(now, 0),
+        MetricsKey::synthetic_size(tenant_id).at_old_format(now, 1),
+    ]
+}
+
+pub(crate) const fn metric_examples(
+    tenant_id: TenantId,
+    timeline_id: TimelineId,
+    now: DateTime<Utc>,
+    before: DateTime<Utc>,
+) -> [NewRawMetric; 6] {
     [
         MetricsKey::written_size(tenant_id, timeline_id).at(now, 0),
         MetricsKey::written_size_delta(tenant_id, timeline_id).from_until(before, now, 0),

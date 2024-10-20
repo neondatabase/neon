@@ -40,23 +40,30 @@ type RawMetric = (MetricsKey, (EventType, u64));
 #[derive(Serialize, Deserialize)]
 struct NewMetricsRoot {
     version: String,
-    metrics: Vec<NewRawMetrics>,
+    metrics: Vec<NewRawMetric>,
 }
 
 /// The new serializable metrics format
 #[derive(Serialize)]
 struct NewMetricsRefRoot<'a> {
     version: String,
-    metrics: &'a [NewRawMetrics],
+    metrics: &'a [NewRawMetric],
 }
 
 /// The new serializable metrics format
-#[derive(Serialize, Deserialize, Debug, Clone)]
-struct NewRawMetrics {
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+struct NewRawMetric {
     key: MetricsKey,
-    event_type: EventType,
+    kind: EventType,
     value: u64,
     // TODO: add generation field and check against generations
+}
+
+impl NewRawMetric {
+    #[cfg(test)]
+    fn to_kv_pair(&self) -> (MetricsKey, NewRawMetric) {
+        (self.key, self.clone())
+    }
 }
 
 /// Caches the [`RawMetric`]s
@@ -64,7 +71,7 @@ struct NewRawMetrics {
 /// In practice, during startup, last sent values are stored here to be used in calculating new
 /// ones. After successful uploading, the cached values are updated to cache. This used to be used
 /// for deduplication, but that is no longer needed.
-type Cache = HashMap<MetricsKey, NewRawMetrics>;
+type Cache = HashMap<MetricsKey, NewRawMetric>;
 
 pub async fn run(
     conf: &'static PageServerConf,
@@ -255,11 +262,14 @@ async fn restore_and_reschedule(
             // collect_all_metrics
             let earlier_metric_at = found_some
                 .iter()
-                .map(|item| item.event_type.recorded_at())
+                .map(|item| item.kind.recorded_at())
                 .copied()
                 .next();
 
-            let cached = found_some.into_iter().map(|item| (item.key.clone(), item)).collect::<Cache>();
+            let cached = found_some
+                .into_iter()
+                .map(|item| (item.key, item))
+                .collect::<Cache>();
 
             (cached, earlier_metric_at)
         }

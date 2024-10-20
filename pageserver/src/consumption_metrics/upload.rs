@@ -7,7 +7,7 @@ use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
-use super::{metrics::Name, Cache, MetricsKey, NewRawMetrics, RawMetric};
+use super::{metrics::Name, Cache, MetricsKey, NewRawMetric, RawMetric};
 use utils::id::{TenantId, TimelineId};
 
 /// How the metrics from pageserver are identified.
@@ -24,7 +24,7 @@ pub(super) async fn upload_metrics_http(
     client: &reqwest::Client,
     metric_collection_endpoint: &reqwest::Url,
     cancel: &CancellationToken,
-    metrics: &[NewRawMetrics],
+    metrics: &[NewRawMetric],
     cached_metrics: &mut Cache,
     idempotency_keys: &[IdempotencyKey<'_>],
 ) -> anyhow::Result<()> {
@@ -86,7 +86,7 @@ pub(super) async fn upload_metrics_bucket(
     client: &GenericRemoteStorage,
     cancel: &CancellationToken,
     node_id: &str,
-    metrics: &[NewRawMetrics],
+    metrics: &[NewRawMetric],
     idempotency_keys: &[IdempotencyKey<'_>],
 ) -> anyhow::Result<()> {
     if metrics.is_empty() {
@@ -140,16 +140,16 @@ pub(super) async fn upload_metrics_bucket(
 /// across different metrics sinks), and must have the same length as input.
 fn serialize_in_chunks<'a>(
     chunk_size: usize,
-    input: &'a [NewRawMetrics],
+    input: &'a [NewRawMetric],
     idempotency_keys: &'a [IdempotencyKey<'a>],
-) -> impl ExactSizeIterator<Item = Result<(&'a [NewRawMetrics], bytes::Bytes), serde_json::Error>> + 'a
+) -> impl ExactSizeIterator<Item = Result<(&'a [NewRawMetric], bytes::Bytes), serde_json::Error>> + 'a
 {
     use bytes::BufMut;
 
     assert_eq!(input.len(), idempotency_keys.len());
 
     struct Iter<'a> {
-        inner: std::slice::Chunks<'a, NewRawMetrics>,
+        inner: std::slice::Chunks<'a, NewRawMetric>,
         idempotency_keys: std::slice::Iter<'a, IdempotencyKey<'a>>,
         chunk_size: usize,
 
@@ -160,7 +160,7 @@ fn serialize_in_chunks<'a>(
     }
 
     impl<'a> Iterator for Iter<'a> {
-        type Item = Result<(&'a [NewRawMetrics], bytes::Bytes), serde_json::Error>;
+        type Item = Result<(&'a [NewRawMetric], bytes::Bytes), serde_json::Error>;
 
         fn next(&mut self) -> Option<Self::Item> {
             let chunk = self.inner.next()?;
@@ -269,7 +269,7 @@ impl RawMetricExt for RawMetric {
     }
 }
 
-impl RawMetricExt for NewRawMetrics {
+impl RawMetricExt for NewRawMetric {
     fn as_event(&self, key: &IdempotencyKey<'_>) -> Event<Ids, Name> {
         let MetricsKey {
             metric,
@@ -277,7 +277,7 @@ impl RawMetricExt for NewRawMetrics {
             timeline_id,
         } = self.key;
 
-        let kind = self.event_type;
+        let kind = self.kind;
         let value = self.value;
 
         Event {
@@ -301,7 +301,7 @@ impl RawMetricExt for NewRawMetrics {
             timeline_id,
         } = self.key;
 
-        let kind = self.event_type;
+        let kind = self.kind;
         let value = self.value;
 
         *event = Event {
@@ -525,23 +525,39 @@ mod tests {
         let idempotency_key = consumption_metrics::IdempotencyKey::for_tests(*SAMPLES_NOW, "1", 0);
         let examples = examples.into_iter().zip(metric_samples());
 
-        for ((line, expected), (key, (kind, value))) in examples {
+        for ((line, expected), item) in examples {
             let e = consumption_metrics::Event {
-                kind,
-                metric: key.metric,
+                kind: item.kind,
+                metric: item.key.metric,
                 idempotency_key: idempotency_key.to_string(),
-                value,
+                value: item.value,
                 extra: Ids {
-                    tenant_id: key.tenant_id,
-                    timeline_id: key.timeline_id,
+                    tenant_id: item.key.tenant_id,
+                    timeline_id: item.key.timeline_id,
                 },
             };
             let actual = serde_json::to_string(&e).unwrap();
-            assert_eq!(expected, actual, "example for {kind:?} from line {line}");
+            assert_eq!(
+                expected, actual,
+                "example for {:?} from line {line}",
+                item.kind
+            );
         }
     }
 
-    fn metric_samples() -> [RawMetric; 6] {
+    fn metric_samples_old() -> [RawMetric; 6] {
+        let tenant_id = TenantId::from_array([0; 16]);
+        let timeline_id = TimelineId::from_array([0xff; 16]);
+
+        let before = DateTime::parse_from_rfc3339("2023-09-14T00:00:00.123456789Z")
+            .unwrap()
+            .into();
+        let [now, before] = [*SAMPLES_NOW, before];
+
+        super::super::metrics::metric_examples_old(tenant_id, timeline_id, now, before)
+    }
+
+    fn metric_samples() -> [NewRawMetric; 6] {
         let tenant_id = TenantId::from_array([0; 16]);
         let timeline_id = TimelineId::from_array([0xff; 16]);
 
