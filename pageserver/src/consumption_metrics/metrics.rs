@@ -9,7 +9,7 @@ use utils::{
     lsn::Lsn,
 };
 
-use super::{Cache, RawMetric};
+use super::{Cache, NewRawMetrics, RawMetric};
 
 /// Name of the metric, used by `MetricsKey` factory methods and `deserialize_cached_events`
 /// instead of static str.
@@ -64,9 +64,13 @@ impl MetricsKey {
 struct AbsoluteValueFactory(MetricsKey);
 
 impl AbsoluteValueFactory {
-    const fn at(self, time: DateTime<Utc>, val: u64) -> RawMetric {
+    const fn at(self, time: DateTime<Utc>, val: u64) -> NewRawMetrics {
         let key = self.0;
-        (key, (EventType::Absolute { time }, val))
+        NewRawMetrics {
+            key,
+            event_type: EventType::Absolute { time },
+            value: val
+        }
     }
 
     fn key(&self) -> &MetricsKey {
@@ -185,7 +189,7 @@ pub(super) async fn collect_all_metrics(
     tenant_manager: &Arc<TenantManager>,
     cached_metrics: &Cache,
     ctx: &RequestContext,
-) -> Vec<RawMetric> {
+) -> Vec<NewRawMetrics> {
     use pageserver_api::models::TenantState;
 
     let started_at = std::time::Instant::now();
@@ -220,11 +224,11 @@ pub(super) async fn collect_all_metrics(
     res
 }
 
-async fn collect<S>(tenants: S, cache: &Cache, ctx: &RequestContext) -> Vec<RawMetric>
+async fn collect<S>(tenants: S, cache: &Cache, ctx: &RequestContext) -> Vec<NewRawMetrics>
 where
     S: futures::stream::Stream<Item = (TenantId, Arc<crate::tenant::Tenant>)>,
 {
-    let mut current_metrics: Vec<RawMetric> = Vec::new();
+    let mut current_metrics: Vec<NewRawMetrics> = Vec::new();
 
     let mut tenants = std::pin::pin!(tenants);
 
@@ -291,7 +295,7 @@ impl TenantSnapshot {
         tenant_id: TenantId,
         now: DateTime<Utc>,
         cached: &Cache,
-        metrics: &mut Vec<RawMetric>,
+        metrics: &mut Vec<NewRawMetrics>,
     ) {
         let remote_size = MetricsKey::remote_storage_size(tenant_id).at(now, self.remote_size);
 
@@ -302,9 +306,9 @@ impl TenantSnapshot {
             let mut synthetic_size = self.synthetic_size;
 
             if synthetic_size == 0 {
-                if let Some((_, value)) = cached.get(factory.key()) {
-                    // use the latest value from previous session
-                    synthetic_size = *value;
+                if let Some(item) = cached.get(factory.key()) {
+                    // use the latest value from previous session, TODO: check generation number
+                    synthetic_size = item.value;
                 }
             }
 
@@ -381,7 +385,7 @@ impl TimelineSnapshot {
         tenant_id: TenantId,
         timeline_id: TimelineId,
         now: DateTime<Utc>,
-        metrics: &mut Vec<RawMetric>,
+        metrics: &mut Vec<NewRawMetrics>,
         cache: &Cache,
     ) {
         let timeline_written_size = u64::from(self.last_record_lsn);
@@ -390,8 +394,8 @@ impl TimelineSnapshot {
 
         let last_stop_time = cache
             .get(written_size_delta_key.key())
-            .map(|(until, _val)| {
-                until
+            .map(|item| {
+                item.event_type
                     .incremental_timerange()
                     .expect("never create EventType::Absolute for written_size_delta")
                     .end
@@ -404,14 +408,14 @@ impl TimelineSnapshot {
         // calculating the delta. if we don't yet have one, use the load time value.
         let prev = cache
             .get(&key)
-            .map(|(prev_at, prev)| {
+            .map(|item| {
                 // use the prev time from our last incremental update, or default to latest
                 // absolute update on the first round.
-                let prev_at = prev_at
+                let prev_at = item.event_type
                     .absolute_time()
                     .expect("never create EventType::Incremental for written_size");
                 let prev_at = last_stop_time.unwrap_or(prev_at);
-                (*prev_at, *prev)
+                (*prev_at, item.value)
             })
             .unwrap_or_else(|| {
                 // if we don't have a previous point of comparison, compare to the load time
