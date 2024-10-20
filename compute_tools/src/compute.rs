@@ -365,7 +365,16 @@ impl ComputeNode {
 
         let basebackup_cmd = match lsn {
             // HACK We don't use compression on first start (Lsn(0)) because there's no API for it
-            Lsn(0) => format!("basebackup {} {}", spec.tenant_id, spec.timeline_id),
+            Lsn(0) => {
+                if spec.spec.mode != ComputeMode::Primary {
+                    format!(
+                        "basebackup {} {} --replica",
+                        spec.tenant_id, spec.timeline_id
+                    )
+                } else {
+                    format!("basebackup {} {}", spec.tenant_id, spec.timeline_id)
+                }
+            }
             _ => {
                 if spec.spec.mode != ComputeMode::Primary {
                     format!(
