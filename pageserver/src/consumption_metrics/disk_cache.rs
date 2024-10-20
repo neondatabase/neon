@@ -4,11 +4,11 @@ use std::sync::Arc;
 
 use crate::consumption_metrics::NewMetricsRefRoot;
 
-use super::{NewMetricsRoot, NewRawMetrics, RawMetric};
+use super::{NewMetricsRoot, NewRawMetric, RawMetric};
 
 pub(super) async fn read_metrics_from_disk(
     path: Arc<Utf8PathBuf>,
-) -> anyhow::Result<Vec<NewRawMetrics>> {
+) -> anyhow::Result<Vec<NewRawMetric>> {
     // do not add context to each error, callsite will log with full path
     let span = tracing::Span::current();
     tokio::task::spawn_blocking(move || {
@@ -38,9 +38,9 @@ pub(super) async fn read_metrics_from_disk(
             let all_metrics = serde_json::from_value::<Vec<RawMetric>>(json_value)?;
             let all_metrics = all_metrics
                 .into_iter()
-                .map(|(key, (event_type, value))| NewRawMetrics {
+                .map(|(key, (event_type, value))| NewRawMetric {
                     key,
-                    event_type,
+                    kind: event_type,
                     value,
                 })
                 .collect();
@@ -88,7 +88,7 @@ fn scan_and_delete_with_same_prefix(path: &Utf8Path) -> std::io::Result<()> {
 }
 
 pub(super) async fn flush_metrics_to_disk(
-    current_metrics: &Arc<Vec<NewRawMetrics>>,
+    current_metrics: &Arc<Vec<NewRawMetric>>,
     path: &Arc<Utf8PathBuf>,
 ) -> anyhow::Result<()> {
     use std::io::Write;
