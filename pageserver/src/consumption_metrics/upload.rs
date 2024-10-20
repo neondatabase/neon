@@ -7,7 +7,7 @@ use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
-use super::{metrics::Name, Cache, MetricsKey, RawMetric};
+use super::{metrics::Name, Cache, MetricsKey, NewRawMetrics, RawMetric};
 use utils::id::{TenantId, TimelineId};
 
 /// How the metrics from pageserver are identified.
@@ -24,7 +24,7 @@ pub(super) async fn upload_metrics_http(
     client: &reqwest::Client,
     metric_collection_endpoint: &reqwest::Url,
     cancel: &CancellationToken,
-    metrics: &[RawMetric],
+    metrics: &[NewRawMetrics],
     cached_metrics: &mut Cache,
     idempotency_keys: &[IdempotencyKey<'_>],
 ) -> anyhow::Result<()> {
@@ -53,8 +53,8 @@ pub(super) async fn upload_metrics_http(
 
         match res {
             Ok(()) => {
-                for (curr_key, curr_val) in chunk {
-                    cached_metrics.insert(*curr_key, *curr_val);
+                for item in chunk {
+                    cached_metrics.insert(item.key, item.clone());
                 }
                 uploaded += chunk.len();
             }
@@ -86,7 +86,7 @@ pub(super) async fn upload_metrics_bucket(
     client: &GenericRemoteStorage,
     cancel: &CancellationToken,
     node_id: &str,
-    metrics: &[RawMetric],
+    metrics: &[NewRawMetrics],
     idempotency_keys: &[IdempotencyKey<'_>],
 ) -> anyhow::Result<()> {
     if metrics.is_empty() {
@@ -140,16 +140,16 @@ pub(super) async fn upload_metrics_bucket(
 /// across different metrics sinks), and must have the same length as input.
 fn serialize_in_chunks<'a>(
     chunk_size: usize,
-    input: &'a [RawMetric],
+    input: &'a [NewRawMetrics],
     idempotency_keys: &'a [IdempotencyKey<'a>],
-) -> impl ExactSizeIterator<Item = Result<(&'a [RawMetric], bytes::Bytes), serde_json::Error>> + 'a
+) -> impl ExactSizeIterator<Item = Result<(&'a [NewRawMetrics], bytes::Bytes), serde_json::Error>> + 'a
 {
     use bytes::BufMut;
 
     assert_eq!(input.len(), idempotency_keys.len());
 
     struct Iter<'a> {
-        inner: std::slice::Chunks<'a, RawMetric>,
+        inner: std::slice::Chunks<'a, NewRawMetrics>,
         idempotency_keys: std::slice::Iter<'a, IdempotencyKey<'a>>,
         chunk_size: usize,
 
@@ -160,7 +160,7 @@ fn serialize_in_chunks<'a>(
     }
 
     impl<'a> Iterator for Iter<'a> {
-        type Item = Result<(&'a [RawMetric], bytes::Bytes), serde_json::Error>;
+        type Item = Result<(&'a [NewRawMetrics], bytes::Bytes), serde_json::Error>;
 
         fn next(&mut self) -> Option<Self::Item> {
             let chunk = self.inner.next()?;
@@ -251,6 +251,58 @@ impl RawMetricExt for RawMetric {
         } = self.0;
 
         let (kind, value) = self.1;
+
+        *event = Event {
+            kind,
+            metric,
+            idempotency_key: {
+                event.idempotency_key.clear();
+                write!(event.idempotency_key, "{key}").unwrap();
+                std::mem::take(&mut event.idempotency_key)
+            },
+            value,
+            extra: Ids {
+                tenant_id,
+                timeline_id,
+            },
+        };
+    }
+}
+
+impl RawMetricExt for NewRawMetrics {
+    fn as_event(&self, key: &IdempotencyKey<'_>) -> Event<Ids, Name> {
+        let MetricsKey {
+            metric,
+            tenant_id,
+            timeline_id,
+        } = self.key;
+
+        let kind = self.event_type;
+        let value = self.value;
+
+        Event {
+            kind,
+            metric,
+            idempotency_key: key.to_string(),
+            value,
+            extra: Ids {
+                tenant_id,
+                timeline_id,
+            },
+        }
+    }
+
+    fn update_in_place(&self, event: &mut Event<Ids, Name>, key: &IdempotencyKey<'_>) {
+        use std::fmt::Write;
+
+        let MetricsKey {
+            metric,
+            tenant_id,
+            timeline_id,
+        } = self.key;
+
+        let kind = self.event_type;
+        let value = self.value;
 
         *event = Event {
             kind,
