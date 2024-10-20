@@ -46,5 +46,5 @@ def test_physical_and_logical_replication(neon_simple_env: NeonEnv, vanilla_pg):
     assert vanilla_pg.safe_psql("select count(*) from t")[0][0] == n_records
 
     # Check that LR slot is not copied to replica
-    s_cur.execute("select count(*) from pg_replication_slots where slot_name = 'wal_proposer_slot'")
+    s_cur.execute("select count(*) from pg_replication_slots")
     assert s_cur.fetchall()[0][0] == 0
