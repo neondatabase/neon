@@ -1336,9 +1336,9 @@ where
             for i in 2..params.len() {
                 if let Some(param) = params.get(i) {
                     if param.starts_with("--") {
-                        match param {
-                            &"--gzip" => gzip = true,
-                            &"--replica" => replica = true,
+                        match *param {
+                            "--gzip" => gzip = true,
+                            "--replica" => replica = true,
                             _ => {
                                 return Err(QueryError::Other(anyhow::anyhow!(
                                     "Unklnown parameter {param}",
