@@ -133,10 +133,6 @@ impl IndexPart {
     pub(crate) fn example() -> Self {
         Self::empty(TimelineMetadata::example())
     }
-
-    pub(crate) fn last_aux_file_policy(&self) -> Option<AuxFilePolicy> {
-        self.last_aux_file_policy
-    }
 }
 
 /// Metadata gathered for each of the layer files.

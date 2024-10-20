@@ -724,9 +724,9 @@ impl VirtualFileInner {
 
         *handle_guard = handle;
 
-        return Ok(FileGuard {
+        Ok(FileGuard {
             slot_guard: slot_guard.downgrade(),
-        });
+        })
     }
 
     pub fn remove(self) {

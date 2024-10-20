@@ -76,11 +76,7 @@
     )
 )]
 // List of temporarily allowed lints to unblock beta/nightly.
-#![allow(
-    unknown_lints,
-    // TODO: 1.82: Add `use<T>` where necessary and remove from this list.
-    impl_trait_overcaptures,
-)]
+#![allow(unknown_lints)]
 
 use std::convert::Infallible;
 
@@ -94,6 +90,7 @@ pub mod auth;
 pub mod cache;
 pub mod cancellation;
 pub mod compute;
+pub mod compute_ctl;
 pub mod config;
 pub mod console_redirect_proxy;
 pub mod context;
