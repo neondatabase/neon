@@ -87,36 +87,8 @@ pub(crate) mod errors {
                     Reason::ConcurrencyLimitReached => ErrorKind::ControlPlane,
                     Reason::LockAlreadyTaken => ErrorKind::ControlPlane,
                     Reason::RunningOperations => ErrorKind::ControlPlane,
-                    Reason::Unknown => match &**e {
-                        ControlPlaneError {
-                            http_status_code:
-                                http::StatusCode::NOT_FOUND | http::StatusCode::NOT_ACCEPTABLE,
-                            ..
-                        } => crate::error::ErrorKind::User,
-                        ControlPlaneError {
-                            http_status_code: http::StatusCode::UNPROCESSABLE_ENTITY,
-                            error,
-                            ..
-                        } if error
-                            .contains("compute time quota of non-primary branches is exceeded") =>
-                        {
-                            crate::error::ErrorKind::Quota
-                        }
-                        ControlPlaneError {
-                            http_status_code: http::StatusCode::LOCKED,
-                            error,
-                            ..
-                        } if error.contains("quota exceeded")
-                            || error.contains("the limit for current plan reached") =>
-                        {
-                            crate::error::ErrorKind::Quota
-                        }
-                        ControlPlaneError {
-                            http_status_code: http::StatusCode::TOO_MANY_REQUESTS,
-                            ..
-                        } => crate::error::ErrorKind::ServiceRateLimit,
-                        ControlPlaneError { .. } => crate::error::ErrorKind::ControlPlane,
-                    },
+                    Reason::ActiveEndpointsLimitExceeded => ErrorKind::ControlPlane,
+                    Reason::Unknown => ErrorKind::ControlPlane,
                 },
                 ApiError::Transport(_) => crate::error::ErrorKind::ControlPlane,
             }
