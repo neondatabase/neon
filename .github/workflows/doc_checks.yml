@@ -1,0 +1,90 @@
+name: Documentation checks
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.number }}
+  cancel-in-progress: true
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "**.md"
+      - "docs/**"
+  pull_request:
+    paths:
+      - "**.md"
+      - "docs/**"
+
+jobs:
+  check-permissions:
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'run-no-ci') }}
+    uses: ./.github/workflows/check-permissions.yml
+    with:
+      github-event-name: ${{ github.event_name }}
+
+  check_docs:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Fetch all history for all branches and tags
+
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20.15.0"
+
+      - name: Install dependencies
+        run: |
+          npm install -g markdownlint-cli
+          npm install -g markdown-link-check
+
+      - name: Check Markdown formatting.
+        run: |
+          cat << EOF > markdownlint.json
+          {
+            "default": true,
+            "MD013": { "line_length": 80 },
+            "MD033": false,
+            "MD041": false
+          }
+          EOF
+
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            git diff --name-only ${{ github.event.pull_request.base.sha }} ${{ github.sha }} | grep -E '\.(md|mdx)$' | xargs -r markdownlint --config markdownlint.json
+          else
+            git diff --name-only ${{ github.event.before }} ${{ github.sha }} | grep -E '\.(md|mdx)$' | xargs -r markdownlint --config markdownlint.json
+          fi
+        continue-on-error: true
+
+      - name: Check Markdown links.
+        run: |
+
+          cat << EOF > link-check.json
+          {
+            "ignorePatterns": [
+              { "pattern": "^https://github.com/neondatabase/neon/issues/" },
+              { "pattern": "^https://github.com/neondatabase/neon/pull/" }
+            ],
+            "replacementPatterns": [
+              {
+                "pattern": "^/",
+                "replacement": "{{BASEURL}}/"
+              }
+            ],
+            "timeout": "20s",
+            "retryOn429": true,
+            "retryCount": 5,
+            "fallbackRetryDelay": "30s"
+          }
+          EOF
+
+
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            git diff --name-only ${{ github.event.pull_request.base.sha }} ${{ github.sha }} | grep -E '\.(md|mdx)$' | xargs -r markdown-link-check -c link-check.json
+          else
+
+            git diff --name-only ${{ github.event.before }} ${{ github.sha }} | grep -E '\.(md|mdx)$' | xargs -r markdown-link-check -c link-check.json
+          fi
+        continue-on-error: true
