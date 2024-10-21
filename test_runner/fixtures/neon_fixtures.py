@@ -3175,10 +3175,13 @@ class NeonProxy(PgProtocol):
     # two seconds. Raises subprocess.TimeoutExpired if the proxy does not exit in time.
     def wait_for_exit(self, timeout=2):
         if self._popen:
-            self._popen.wait(timeout=2)
+            self._popen.wait(timeout=timeout)
 
     @backoff.on_exception(backoff.expo, requests.exceptions.RequestException, max_time=10)
     def _wait_until_ready(self):
+        assert (
+            self._popen and self._popen.poll() is None
+        ), "Proxy exited unexpectedly. Check test log."
         requests.get(f"http://{self.host}:{self.http_port}/v1/status")
 
     def http_query(self, query, args, **kwargs):
