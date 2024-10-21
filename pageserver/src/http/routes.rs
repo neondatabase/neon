@@ -486,7 +486,6 @@ fn build_timeline_offloaded_info(offloaded: &Arc<OffloadedTimeline>) -> Offloade
         timeline_id,
         ancestor_retain_lsn,
         ancestor_timeline_id,
-        archived_at,
         ..
     } = offloaded.as_ref();
     OffloadedTimelineInfo {
@@ -494,7 +493,6 @@ fn build_timeline_offloaded_info(offloaded: &Arc<OffloadedTimeline>) -> Offloade
         timeline_id,
         ancestor_retain_lsn,
         ancestor_timeline_id,
-        archived_at: archived_at.and_utc(),
     }
 }
 
