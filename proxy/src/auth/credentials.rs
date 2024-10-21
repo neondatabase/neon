@@ -193,7 +193,7 @@ impl<'de> serde::de::Deserialize<'de> for IpPattern {
         D: serde::Deserializer<'de>,
     {
         struct StrVisitor;
-        impl<'de> serde::de::Visitor<'de> for StrVisitor {
+        impl serde::de::Visitor<'_> for StrVisitor {
             type Value = IpPattern;
 
             fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

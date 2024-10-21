@@ -20,19 +20,21 @@ neon_collector_autoscaling.yml: $(jsonnet_files)
 sql_exporter.yml: $(jsonnet_files)
 	JSONNET_PATH=etc jsonnet \
 		--output-file etc/$@ \
+		--tla-str collector_name=neon_collector \
 		--tla-str collector_file=neon_collector.yml \
 		etc/sql_exporter.jsonnet
 
 sql_exporter_autoscaling.yml: $(jsonnet_files)
 	JSONNET_PATH=etc jsonnet \
 		--output-file etc/$@ \
+		--tla-str collector_name=neon_collector_autoscaling \
 		--tla-str collector_file=neon_collector_autoscaling.yml \
 		--tla-str application_name=sql_exporter_autoscaling \
 		etc/sql_exporter.jsonnet
 
 .PHONY: clean
 clean:
-	rm --force \
+	rm -f \
 		etc/neon_collector.yml \
 		etc/neon_collector_autoscaling.yml \
 		etc/sql_exporter.yml \

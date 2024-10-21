@@ -684,6 +684,23 @@ pub struct TimelineArchivalConfigRequest {
     pub state: TimelineArchivalState,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct TimelinesInfoAndOffloaded {
+    pub timelines: Vec<TimelineInfo>,
+    pub offloaded: Vec<OffloadedTimelineInfo>,
+}
+
+/// Analog of [`TimelineInfo`] for offloaded timelines.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct OffloadedTimelineInfo {
+    pub tenant_id: TenantShardId,
+    pub timeline_id: TimelineId,
+    /// Whether the timeline has a parent it has been branched off from or not
+    pub ancestor_timeline_id: Option<TimelineId>,
+    /// Whether to retain the branch lsn at the ancestor or not
+    pub ancestor_retain_lsn: Option<Lsn>,
+}
+
 /// This represents the output of the "timeline_detail" and "timeline_list" API calls.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TimelineInfo {

@@ -14,10 +14,13 @@ use tracing::{debug, info};
 use super::conn_pool::poll_client;
 use super::conn_pool_lib::{Client, ConnInfo, GlobalConnPool};
 use super::http_conn_pool::{self, poll_http2_client, Send};
-use super::local_conn_pool::{self, LocalClient, LocalConnPool};
+use super::local_conn_pool::{self, LocalClient, LocalConnPool, EXT_NAME, EXT_SCHEMA, EXT_VERSION};
 use crate::auth::backend::local::StaticAuthRules;
 use crate::auth::backend::{ComputeCredentials, ComputeUserInfo};
 use crate::auth::{self, check_peer_addr_is_in_list, AuthError};
+use crate::compute_ctl::{
+    ComputeCtlError, ExtensionInstallRequest, Privilege, SetRoleGrantsRequest,
+};
 use crate::config::ProxyConfig;
 use crate::context::RequestMonitoring;
 use crate::control_plane::errors::{GetAuthInfoError, WakeComputeError};
@@ -35,6 +38,7 @@ pub(crate) struct PoolingBackend {
     pub(crate) http_conn_pool: Arc<super::http_conn_pool::GlobalConnPool<Send>>,
     pub(crate) local_pool: Arc<LocalConnPool<tokio_postgres::Client>>,
     pub(crate) pool: Arc<GlobalConnPool<tokio_postgres::Client>>,
+
     pub(crate) config: &'static ProxyConfig,
     pub(crate) auth_backend: &'static crate::auth::Backend<'static, ()>,
     pub(crate) endpoint_rate_limiter: Arc<EndpointRateLimiter>,
@@ -250,16 +254,47 @@ impl PoolingBackend {
             return Ok(client);
         }
 
+        let local_backend = match &self.auth_backend {
+            auth::Backend::ControlPlane(_, ()) => {
+                unreachable!("only local_proxy can connect to local postgres")
+            }
+            auth::Backend::Local(local) => local,
+        };
+
+        if !self.local_pool.initialized(&conn_info) {
+            // only install and grant usage one at a time.
+            let _permit = local_backend.initialize.acquire().await.unwrap();
+
+            // check again for race
+            if !self.local_pool.initialized(&conn_info) {
+                local_backend
+                    .compute_ctl
+                    .install_extension(&ExtensionInstallRequest {
+                        extension: EXT_NAME,
+                        database: conn_info.dbname.clone(),
+                        version: EXT_VERSION,
+                    })
+                    .await?;
+
+                local_backend
+                    .compute_ctl
+                    .grant_role(&SetRoleGrantsRequest {
+                        schema: EXT_SCHEMA,
+                        privileges: vec![Privilege::Usage],
+                        database: conn_info.dbname.clone(),
+                        role: conn_info.user_info.user.clone(),
+                    })
+                    .await?;
+
+                self.local_pool.set_initialized(&conn_info);
+            }
+        }
+
         let conn_id = uuid::Uuid::new_v4();
         tracing::Span::current().record("conn_id", display(conn_id));
         info!(%conn_id, "local_pool: opening a new connection '{conn_info}'");
 
-        let mut node_info = match &self.auth_backend {
-            auth::Backend::ControlPlane(_, ()) => {
-                unreachable!("only local_proxy can connect to local postgres")
-            }
-            auth::Backend::Local(local) => local.node_info.clone(),
-        };
+        let mut node_info = local_backend.node_info.clone();
 
         let (key, jwk) = create_random_jwk();
 
@@ -324,6 +359,8 @@ pub(crate) enum HttpConnError {
     #[error("could not parse JWT payload")]
     JwtPayloadError(serde_json::Error),
 
+    #[error("could not install extension: {0}")]
+    ComputeCtl(#[from] ComputeCtlError),
     #[error("could not get auth info")]
     GetAuthInfo(#[from] GetAuthInfoError),
     #[error("user not authenticated")]
@@ -348,6 +385,7 @@ impl ReportableError for HttpConnError {
             HttpConnError::ConnectionClosedAbruptly(_) => ErrorKind::Compute,
             HttpConnError::PostgresConnectionError(p) => p.get_error_kind(),
             HttpConnError::LocalProxyConnectionError(_) => ErrorKind::Compute,
+            HttpConnError::ComputeCtl(_) => ErrorKind::Service,
             HttpConnError::JwtPayloadError(_) => ErrorKind::User,
             HttpConnError::GetAuthInfo(a) => a.get_error_kind(),
             HttpConnError::AuthError(a) => a.get_error_kind(),
@@ -363,6 +401,7 @@ impl UserFacingError for HttpConnError {
             HttpConnError::ConnectionClosedAbruptly(_) => self.to_string(),
             HttpConnError::PostgresConnectionError(p) => p.to_string(),
             HttpConnError::LocalProxyConnectionError(p) => p.to_string(),
+            HttpConnError::ComputeCtl(_) => "could not set up the JWT authorization database extension".to_string(),
             HttpConnError::JwtPayloadError(p) => p.to_string(),
             HttpConnError::GetAuthInfo(c) => c.to_string_client(),
             HttpConnError::AuthError(c) => c.to_string_client(),
@@ -379,6 +418,7 @@ impl CouldRetry for HttpConnError {
         match self {
             HttpConnError::PostgresConnectionError(e) => e.could_retry(),
             HttpConnError::LocalProxyConnectionError(e) => e.could_retry(),
+            HttpConnError::ComputeCtl(_) => false,
             HttpConnError::ConnectionClosedAbruptly(_) => false,
             HttpConnError::JwtPayloadError(_) => false,
             HttpConnError::GetAuthInfo(_) => false,
