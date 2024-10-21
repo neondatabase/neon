@@ -2,7 +2,10 @@ use std::sync::Arc;
 
 use utils::generation::Generation;
 
-use crate::tenant::{remote_timeline_client, OffloadedTimeline, Tenant, TimelineOrOffloaded};
+use crate::{
+    span::debug_assert_current_span_has_tenant_and_timeline_id,
+    tenant::{remote_timeline_client, OffloadedTimeline, Tenant, TimelineOrOffloaded},
+};
 
 use super::{
     delete::{delete_local_timeline_directory, DeleteTimelineFlow, DeletionGuard},
@@ -36,7 +39,10 @@ pub(crate) async fn offload_timeline(
         let mut offloaded_timelines = tenant.timelines_offloaded.lock().unwrap();
         offloaded_timelines.insert(
             timeline.timeline_id,
-            Arc::new(OffloadedTimeline::from_timeline(&timeline)),
+            Arc::new(
+                OffloadedTimeline::from_timeline(&timeline)
+                    .expect("we checked above that timeline was ready"),
+            ),
         );
     }
 

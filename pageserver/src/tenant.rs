@@ -521,16 +521,20 @@ pub struct OffloadedTimeline {
 }
 
 impl OffloadedTimeline {
-    fn from_timeline(timeline: &Timeline) -> Self {
+    /// Obtains an offloaded timeline from a given timeline object.
+    ///
+    /// Returns `None` if the `archived_at` flag couldn't be obtained, i.e.
+    /// the timeline is not in a stopped state.
+    /// Panics if the timeline is not archived.
+    fn from_timeline(timeline: &Timeline) -> Option<Self> {
         let ancestor_retain_lsn = timeline
             .get_ancestor_timeline_id()
             .map(|_timeline_id| timeline.get_ancestor_lsn());
         let archived_at = timeline
             .remote_client
-            .archived_at()
-            .expect("timeline must have manifest available")
+            .archived_at_stopped_queue()?
             .expect("must be called on an archived timeline");
-        Self {
+        Some(Self {
             tenant_shard_id: timeline.tenant_shard_id,
             timeline_id: timeline.timeline_id,
             ancestor_timeline_id: timeline.get_ancestor_timeline_id(),
@@ -539,7 +543,7 @@ impl OffloadedTimeline {
 
             remote_client: timeline.remote_client.clone(),
             delete_progress: timeline.delete_progress.clone(),
-        }
+        })
     }
     fn from_manifest(
         tenant_shard_id: TenantShardId,
