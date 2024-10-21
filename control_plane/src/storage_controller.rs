@@ -21,8 +21,14 @@ use postgres_backend::AuthType;
 use reqwest::Method;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{
-    ffi::OsStr, fs, net::SocketAddr, path::PathBuf, process::ExitStatus, str::FromStr,
+    ffi::OsStr,
+    fs,
+    net::SocketAddr,
+    path::PathBuf,
+    process::ExitStatus,
+    str::FromStr,
     sync::OnceLock,
+    time::{Duration, Instant},
 };
 use tokio::process::Command;
 use tracing::instrument;
@@ -171,16 +177,6 @@ impl StorageController {
         .expect("non-Unicode path")
     }
 
-    /// PIDFile for the postgres instance used to store storage controller state
-    fn postgres_pid_file(&self) -> Utf8PathBuf {
-        Utf8PathBuf::from_path_buf(
-            self.env
-                .base_data_dir
-                .join("storage_controller_postgres.pid"),
-        )
-        .expect("non-Unicode path")
-    }
-
     /// Find the directory containing postgres subdirectories, such `bin` and `lib`
     ///
     /// This usually uses STORAGE_CONTROLLER_POSTGRES_VERSION of postgres, but will fall back
@@ -307,8 +303,16 @@ impl StorageController {
     {
         let pg_bin_dir = self.get_pg_bin_dir().await.unwrap();
         let bin_path = pg_bin_dir.join("pg_ctl");
+
+        let pg_lib_dir = self.get_pg_lib_dir().await.unwrap();
+        let envs = [
+            ("LD_LIBRARY_PATH".to_owned(), pg_lib_dir.to_string()),
+            ("DYLD_LIBRARY_PATH".to_owned(), pg_lib_dir.to_string()),
+        ];
+
         Command::new(bin_path)
             .args(args)
+            .envs(envs)
             .spawn()
             .expect("Failed to spawn pg_ctl, binary_missing?")
             .wait()
@@ -424,20 +428,34 @@ impl StorageController {
                 db_start_args
             );
 
-            background_process::start_process(
-                "storage_controller_db",
-                &self.env.base_data_dir,
-                pg_bin_dir.join("pg_ctl").as_std_path(),
-                db_start_args,
-                vec![
-                    ("LD_LIBRARY_PATH".to_owned(), pg_lib_dir.to_string()),
-                    ("DYLD_LIBRARY_PATH".to_owned(), pg_lib_dir.to_string()),
-                ],
-                background_process::InitialPidFile::Create(self.postgres_pid_file()),
-                &start_args.start_timeout,
-                || self.pg_isready(&pg_bin_dir, postgres_port),
-            )
-            .await?;
+            let db_start_status = self.pg_ctl(db_start_args).await;
+            let start_timeout: Duration = start_args.start_timeout.into();
+            let db_start_deadline = Instant::now() + start_timeout;
+            if !db_start_status.success() {
+                return Err(anyhow::anyhow!(
+                    "Failed to start postgres {}",
+                    db_start_status.code().unwrap()
+                ));
+            }
+
+            loop {
+                if Instant::now() > db_start_deadline {
+                    return Err(anyhow::anyhow!("Timed out waiting for postgres to start"));
+                }
+
+                match self.pg_isready(&pg_bin_dir, postgres_port).await {
+                    Ok(true) => {
+                        tracing::info!("storage controller postgres is now ready");
+                        break;
+                    }
+                    Ok(false) => {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to check postgres status: {e}")
+                    }
+                }
+            }
 
             self.setup_database(postgres_port).await?;
         }
