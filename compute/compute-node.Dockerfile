@@ -975,8 +975,8 @@ ARG PG_VERSION
 RUN case "${PG_VERSION}" in "v17") \
     echo "pg_session_jwt does not yet have a release that supports pg17" && exit 0;; \
     esac && \
-    wget https://github.com/neondatabase/pg_session_jwt/archive/e642528f429dd3f5403845a50191b78d434b84a6.tar.gz -O pg_session_jwt.tar.gz && \
-    echo "1a69210703cc91224785e59a0a67562dd9eed9a0914ac84b11447582ca0d5b93 pg_session_jwt.tar.gz" | sha256sum --check && \
+    wget https://github.com/neondatabase/pg_session_jwt/archive/a275360b9b7a89394b6768b2ca91976da78aa37a.tar.gz -O pg_session_jwt.tar.gz && \
+    echo "cd856c5d60547f6ceb8d30753b5df39a70dca4d2167a90dcd2b2254e7418694b pg_session_jwt.tar.gz" | sha256sum --check && \
     mkdir pg_session_jwt-src && cd pg_session_jwt-src && tar xzf ../pg_session_jwt.tar.gz --strip-components=1 -C . && \
     sed -i 's/pgrx = "=0.11.3"/pgrx = { version = "=0.11.3", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
     cargo pgrx install --release
