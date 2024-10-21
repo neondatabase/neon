@@ -16,13 +16,28 @@ pub(crate) async fn offload_timeline(
     tenant: &Tenant,
     timeline: &Arc<Timeline>,
 ) -> anyhow::Result<()> {
+    debug_assert_current_span_has_tenant_and_timeline_id();
     tracing::info!("offloading archived timeline");
+
     let (timeline, guard) = DeleteTimelineFlow::prepare(tenant, timeline.timeline_id)?;
 
     let TimelineOrOffloaded::Timeline(timeline) = timeline else {
         tracing::error!("timeline already offloaded, but given timeline object");
         return Ok(());
     };
+
+    let is_archived = timeline.is_archived();
+    match is_archived {
+        Some(true) => (),
+        Some(false) => {
+            tracing::warn!(?is_archived, "tried offloading a non-archived timeline");
+            anyhow::bail!("timeline isn't archived");
+        }
+        None => {
+            tracing::warn!(?is_archived, "tried offloading a timeline where manifest is not yet available");
+            anyhow::bail!("timeline manifest hasn't been loaded yet");
+        }
+    }
 
     // Now that the Timeline is in Stopping state, request all the related tasks to shut down.
     timeline.shutdown(super::ShutdownMode::Hard).await;
