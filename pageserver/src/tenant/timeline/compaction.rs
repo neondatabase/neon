@@ -2028,7 +2028,7 @@ impl Timeline {
                 .finish_with_discard_fn(self, ctx, discard)
                 .await?
         } else {
-            delta_layer_writer.discard();
+            drop(delta_layer_writer);
             Vec::new()
         };
 

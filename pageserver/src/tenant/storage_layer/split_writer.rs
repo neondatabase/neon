@@ -365,10 +365,6 @@ impl SplitDeltaLayerWriter {
         Ok(generated_layers)
     }
 
-    pub fn discard(self) {
-        // The drop handler of each `generated_layer_writers` will clean up the `.tmp` files.
-    }
-
     #[cfg(test)]
     pub(crate) async fn finish(
         self,
