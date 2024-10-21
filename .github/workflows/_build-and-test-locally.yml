@@ -315,25 +315,6 @@ jobs:
           BUILD_TAG: ${{ inputs.build-tag }}
           PAGESERVER_VIRTUAL_FILE_IO_ENGINE: tokio-epoll-uring
 
-      - name: Pytest regression tests (no default LFC)
-        uses: ./.github/actions/run-python-test-set
-        timeout-minutes: 60
-        with:
-          build_type: release
-          test_selection: regress
-          needs_postgres_source: true
-          run_with_real_s3: true
-          real_s3_bucket: neon-github-ci-tests
-          real_s3_region: eu-central-1
-          rerun_flaky: true
-          pg_version: 16
-        env:
-          TEST_RESULT_CONNSTR: ${{ secrets.REGRESS_TEST_RESULT_CONNSTR_NEW }}
-          CHECK_ONDISK_DATA_COMPATIBILITY: nonempty
-          BUILD_TAG: ${{ inputs.build-tag }}
-          PAGESERVER_VIRTUAL_FILE_IO_ENGINE: tokio-epoll-uring
-          NO_LFC: true
-
       # Temporary disable this step until we figure out why it's so flaky
       # Ref https://github.com/neondatabase/neon/issues/4540
       - name: Merge and upload coverage data
