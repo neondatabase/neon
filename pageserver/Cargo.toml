@@ -83,6 +83,7 @@ enum-map.workspace = true
 enumset = { workspace = true, features = ["serde"]}
 strum.workspace = true
 strum_macros.workspace = true
+smallvec.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 procfs.workspace = true

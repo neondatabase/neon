@@ -2098,6 +2098,11 @@ mod tests {
 
         assert_current_logical_size(&tline, Lsn(0x50));
 
+        let test_span = tracing::info_span!(parent: None, "test",
+                                            tenant_id=%tline.tenant_shard_id.tenant_id,
+                                            shard_id=%tline.tenant_shard_id.shard_slug(),
+                                            timeline_id=%tline.timeline_id);
+
         // The relation was created at LSN 2, not visible at LSN 1 yet.
         assert_eq!(
             tline
@@ -2132,6 +2137,7 @@ mod tests {
         assert_eq!(
             tline
                 .get_rel_page_at_lsn(TESTREL_A, 0, Version::Lsn(Lsn(0x20)), &ctx)
+                .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 0 at 2")
         );
@@ -2139,6 +2145,7 @@ mod tests {
         assert_eq!(
             tline
                 .get_rel_page_at_lsn(TESTREL_A, 0, Version::Lsn(Lsn(0x30)), &ctx)
+                .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 0 at 3")
         );
@@ -2146,12 +2153,14 @@ mod tests {
         assert_eq!(
             tline
                 .get_rel_page_at_lsn(TESTREL_A, 0, Version::Lsn(Lsn(0x40)), &ctx)
+                .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 0 at 3")
         );
         assert_eq!(
             tline
                 .get_rel_page_at_lsn(TESTREL_A, 1, Version::Lsn(Lsn(0x40)), &ctx)
+                .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 1 at 4")
         );
@@ -2159,18 +2168,21 @@ mod tests {
         assert_eq!(
             tline
                 .get_rel_page_at_lsn(TESTREL_A, 0, Version::Lsn(Lsn(0x50)), &ctx)
+                .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 0 at 3")
         );
         assert_eq!(
             tline
                 .get_rel_page_at_lsn(TESTREL_A, 1, Version::Lsn(Lsn(0x50)), &ctx)
+                .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 1 at 4")
         );
         assert_eq!(
             tline
                 .get_rel_page_at_lsn(TESTREL_A, 2, Version::Lsn(Lsn(0x50)), &ctx)
+                .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 2 at 5")
         );
@@ -2193,12 +2205,14 @@ mod tests {
         assert_eq!(
             tline
                 .get_rel_page_at_lsn(TESTREL_A, 0, Version::Lsn(Lsn(0x60)), &ctx)
+                .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 0 at 3")
         );
         assert_eq!(
             tline
                 .get_rel_page_at_lsn(TESTREL_A, 1, Version::Lsn(Lsn(0x60)), &ctx)
+                .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 1 at 4")
         );
@@ -2213,6 +2227,7 @@ mod tests {
         assert_eq!(
             tline
                 .get_rel_page_at_lsn(TESTREL_A, 2, Version::Lsn(Lsn(0x50)), &ctx)
+                .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 2 at 5")
         );
@@ -2246,12 +2261,14 @@ mod tests {
         assert_eq!(
             tline
                 .get_rel_page_at_lsn(TESTREL_A, 0, Version::Lsn(Lsn(0x70)), &ctx)
+                .instrument(test_span.clone())
                 .await?,
             ZERO_PAGE
         );
         assert_eq!(
             tline
                 .get_rel_page_at_lsn(TESTREL_A, 1, Version::Lsn(Lsn(0x70)), &ctx)
+                .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 1")
         );
@@ -2273,6 +2290,7 @@ mod tests {
             assert_eq!(
                 tline
                     .get_rel_page_at_lsn(TESTREL_A, blk, Version::Lsn(Lsn(0x80)), &ctx)
+                    .instrument(test_span.clone())
                     .await?,
                 ZERO_PAGE
             );
@@ -2280,6 +2298,7 @@ mod tests {
         assert_eq!(
             tline
                 .get_rel_page_at_lsn(TESTREL_A, 1500, Version::Lsn(Lsn(0x80)), &ctx)
+                .instrument(test_span.clone())
                 .await?,
             test_img("foo blk 1500")
         );
@@ -2385,6 +2404,11 @@ mod tests {
         }
         m.commit(&ctx).await?;
 
+        let test_span = tracing::info_span!(parent: None, "test",
+                                            tenant_id=%tline.tenant_shard_id.tenant_id,
+                                            shard_id=%tline.tenant_shard_id.shard_slug(),
+                                            timeline_id=%tline.timeline_id);
+
         // The relation was created at LSN 20, not visible at LSN 1 yet.
         assert_eq!(
             tline
@@ -2417,6 +2441,7 @@ mod tests {
             assert_eq!(
                 tline
                     .get_rel_page_at_lsn(TESTREL_A, blkno, Version::Lsn(lsn), &ctx)
+                    .instrument(test_span.clone())
                     .await?,
                 test_img(&data)
             );
@@ -2444,6 +2469,7 @@ mod tests {
             assert_eq!(
                 tline
                     .get_rel_page_at_lsn(TESTREL_A, blkno, Version::Lsn(Lsn(0x60)), &ctx)
+                    .instrument(test_span.clone())
                     .await?,
                 test_img(&data)
             );
@@ -2462,6 +2488,7 @@ mod tests {
             assert_eq!(
                 tline
                     .get_rel_page_at_lsn(TESTREL_A, blkno, Version::Lsn(Lsn(0x50)), &ctx)
+                    .instrument(test_span.clone())
                     .await?,
                 test_img(&data)
             );
@@ -2498,6 +2525,7 @@ mod tests {
             assert_eq!(
                 tline
                     .get_rel_page_at_lsn(TESTREL_A, blkno, Version::Lsn(Lsn(0x80)), &ctx)
+                    .instrument(test_span.clone())
                     .await?,
                 test_img(&data)
             );

@@ -1187,6 +1187,7 @@ struct GlobalAndPerTimelineHistogramTimer<'a, 'c> {
     ctx: &'c RequestContext,
     start: std::time::Instant,
     op: SmgrQueryType,
+    count: usize,
 }
 
 impl Drop for GlobalAndPerTimelineHistogramTimer<'_, '_> {
@@ -1214,10 +1215,13 @@ impl Drop for GlobalAndPerTimelineHistogramTimer<'_, '_> {
                 elapsed
             }
         };
-        self.global_latency_histo
-            .observe(ex_throttled.as_secs_f64());
-        if let Some(per_timeline_getpage_histo) = self.per_timeline_latency_histo {
-            per_timeline_getpage_histo.observe(ex_throttled.as_secs_f64());
+
+        for _ in 0..self.count {
+            self.global_latency_histo
+                .observe(ex_throttled.as_secs_f64());
+            if let Some(per_timeline_getpage_histo) = self.per_timeline_latency_histo {
+                per_timeline_getpage_histo.observe(ex_throttled.as_secs_f64());
+            }
         }
     }
 }
@@ -1386,6 +1390,14 @@ impl SmgrQueryTimePerTimeline {
         op: SmgrQueryType,
         ctx: &'c RequestContext,
     ) -> Option<impl Drop + 'a> {
+        self.start_timer_many(op, 1, ctx)
+    }
+    pub(crate) fn start_timer_many<'c: 'a, 'a>(
+        &'a self,
+        op: SmgrQueryType,
+        count: usize,
+        ctx: &'c RequestContext,
+    ) -> Option<impl Drop + 'a> {
         let start = Instant::now();
 
         self.global_started[op as usize].inc();
@@ -1422,6 +1434,7 @@ impl SmgrQueryTimePerTimeline {
             ctx,
             start,
             op,
+            count,
         })
     }
 }
