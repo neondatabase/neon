@@ -107,18 +107,19 @@ struct WarnIngestLag {
     timestamp_invalid_msg_ratelimit: RateLimit,
 }
 
-struct HeapamRecord {
+enum HeapamRecord {
+    ClearVmBits(ClearVmBits),
+}
+
+struct ClearVmBits {
     new_heap_blkno: Option<u32>,
     old_heap_blkno: Option<u32>,
     vm_rel: RelTag,
     flags: u8,
 }
 
-struct NeonrmgrRecord {
-    new_heap_blkno: Option<u32>,
-    old_heap_blkno: Option<u32>,
-    vm_rel: RelTag,
-    flags: u8,
+enum NeonrmgrRecord {
+    ClearVmBits(ClearVmBits),
 }
 
 enum SmgrRecord {
@@ -201,18 +202,30 @@ struct MultiXactZeroPage {
     rpageno: u32,
 }
 
-struct RelmapRecord {
+enum RelmapRecord {
+    Update(RelmapUpdate),
+}
+
+struct RelmapUpdate {
     update: XlRelmapUpdate,
     buf: Bytes,
 }
 
-struct XlogRecord {
+enum XlogRecord {
+    Raw(RawXlogRecord),
+}
+
+struct RawXlogRecord {
     info: u8,
     lsn: Lsn,
     buf: Bytes,
 }
 
-struct LogicalMessageRecord {
+enum LogicalMessageRecord {
+    Put(PutLogicalMessage),
+}
+
+struct PutLogicalMessage {
     buf: Bytes,
     prefix_size: usize,
 }
@@ -308,16 +321,24 @@ impl WalIngest {
                 let maybe_heapam_record =
                     Self::decode_heapam_record(&mut buf, &decoded, pg_version)?;
                 if let Some(heapam_record) = maybe_heapam_record {
-                    self.ingest_heapam_record(heapam_record, modification, ctx)
-                        .await?;
+                    match heapam_record {
+                        HeapamRecord::ClearVmBits(clear_vm_bits) => {
+                            self.ingest_heapam_record(clear_vm_bits, modification, ctx)
+                                .await?;
+                        }
+                    }
                 }
             }
             pg_constants::RM_NEON_ID => {
                 let maybe_nenonrmgr_record =
                     Self::decode_neonmgr_record(&mut buf, &decoded, pg_version)?;
                 if let Some(neonrmgr_record) = maybe_nenonrmgr_record {
-                    self.ingest_neonrmgr_record(neonrmgr_record, modification, ctx)
-                        .await?;
+                    match neonrmgr_record {
+                        NeonrmgrRecord::ClearVmBits(clear_vm_bits) => {
+                            self.ingest_neonrmgr_record(clear_vm_bits, modification, ctx)
+                                .await?;
+                        }
+                    }
                 }
             }
             // Handle other special record types
@@ -405,8 +426,11 @@ impl WalIngest {
                 let relmap_record = Self::decode_relmap_record(&mut buf, &decoded, pg_version)
                     .unwrap()
                     .unwrap();
-                self.ingest_relmap_record(relmap_record, modification, ctx)
-                    .await?;
+                match relmap_record {
+                    RelmapRecord::Update(update) => {
+                        self.ingest_relmap_record(update, modification, ctx).await?;
+                    }
+                }
             }
             // This is an odd duck. It needs to go to all shards.
             // Since it uses the checkpoint image (that's initialized from CHECKPOINT_KEY
@@ -419,15 +443,23 @@ impl WalIngest {
                 let xlog_record = Self::decode_xlog_record(&mut buf, &decoded, lsn, pg_version)
                     .unwrap()
                     .unwrap();
-                self.ingest_xlog_record(xlog_record, modification, ctx)
-                    .await?;
+
+                match xlog_record {
+                    XlogRecord::Raw(raw) => {
+                        self.ingest_xlog_record(raw, modification, ctx).await?;
+                    }
+                }
             }
             pg_constants::RM_LOGICALMSG_ID => {
                 let maybe_logical_message_record =
                     Self::decode_logical_message_record(&mut buf, &decoded, pg_version).unwrap();
                 if let Some(logical_message_record) = maybe_logical_message_record {
-                    self.ingest_logical_message_record(logical_message_record, modification, ctx)
-                        .await?;
+                    match logical_message_record {
+                        LogicalMessageRecord::Put(put) => {
+                            self.ingest_logical_message_record(put, modification, ctx)
+                                .await?;
+                        }
+                    }
                 }
             }
             pg_constants::RM_STANDBY_ID => {
@@ -605,16 +637,16 @@ impl WalIngest {
 
     async fn ingest_heapam_record(
         &mut self,
-        heapam_record: HeapamRecord,
+        clear_vm_bits: ClearVmBits,
         modification: &mut DatadirModification<'_>,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        let HeapamRecord {
+        let ClearVmBits {
             new_heap_blkno,
             old_heap_blkno,
             flags,
             vm_rel,
-        } = heapam_record;
+        } = clear_vm_bits;
         // Clear the VM bits if required.
         let mut new_vm_blk = new_heap_blkno.map(pg_constants::HEAPBLK_TO_MAPBLOCK);
         let mut old_vm_blk = old_heap_blkno.map(pg_constants::HEAPBLK_TO_MAPBLOCK);
@@ -985,12 +1017,12 @@ impl WalIngest {
                 relnode: decoded.blocks[0].rnode_relnode,
             };
 
-            Ok(Some(HeapamRecord {
+            Ok(Some(HeapamRecord::ClearVmBits(ClearVmBits {
                 new_heap_blkno,
                 old_heap_blkno,
                 vm_rel,
                 flags,
-            }))
+            })))
         } else {
             Ok(None)
         }
@@ -998,16 +1030,16 @@ impl WalIngest {
 
     async fn ingest_neonrmgr_record(
         &mut self,
-        neonrmgr_record: NeonrmgrRecord,
+        clear_vm_bits: ClearVmBits,
         modification: &mut DatadirModification<'_>,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        let NeonrmgrRecord {
+        let ClearVmBits {
             new_heap_blkno,
             old_heap_blkno,
             vm_rel,
             flags,
-        } = neonrmgr_record;
+        } = clear_vm_bits;
 
         let mut new_vm_blk = new_heap_blkno.map(pg_constants::HEAPBLK_TO_MAPBLOCK);
         let mut old_vm_blk = old_heap_blkno.map(pg_constants::HEAPBLK_TO_MAPBLOCK);
@@ -1175,12 +1207,12 @@ impl WalIngest {
                 relnode: decoded.blocks[0].rnode_relnode,
             };
 
-            Ok(Some(NeonrmgrRecord {
+            Ok(Some(NeonrmgrRecord::ClearVmBits(ClearVmBits {
                 new_heap_blkno,
                 old_heap_blkno,
                 vm_rel,
                 flags,
-            }))
+            })))
         } else {
             Ok(None)
         }
@@ -2110,11 +2142,11 @@ impl WalIngest {
 
     async fn ingest_relmap_record(
         &mut self,
-        record: RelmapRecord,
+        update: RelmapUpdate,
         modification: &mut DatadirModification<'_>,
         ctx: &RequestContext,
     ) -> Result<()> {
-        let RelmapRecord { update, buf } = record;
+        let RelmapUpdate { update, buf } = update;
 
         modification
             .put_relmap_file(update.tsid, update.dbid, buf, ctx)
@@ -2133,19 +2165,19 @@ impl WalIngest {
         // skip xl_relmap_update
         buf.advance(12);
 
-        Ok(Some(RelmapRecord {
+        Ok(Some(RelmapRecord::Update(RelmapUpdate {
             update,
             buf: Bytes::copy_from_slice(&buf[..]),
-        }))
+        })))
     }
 
     async fn ingest_xlog_record(
         &mut self,
-        record: XlogRecord,
+        raw_record: RawXlogRecord,
         modification: &mut DatadirModification<'_>,
         ctx: &RequestContext,
     ) -> Result<()> {
-        let XlogRecord { info, lsn, mut buf } = record;
+        let RawXlogRecord { info, lsn, mut buf } = raw_record;
         let pg_version = modification.tline.pg_version;
 
         if info == pg_constants::XLOG_PARAMETER_CHANGE {
@@ -2246,20 +2278,20 @@ impl WalIngest {
         _pg_version: u32,
     ) -> anyhow::Result<Option<XlogRecord>> {
         let info = decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
-        Ok(Some(XlogRecord {
+        Ok(Some(XlogRecord::Raw(RawXlogRecord {
             info,
             lsn,
             buf: buf.clone(),
-        }))
+        })))
     }
 
     async fn ingest_logical_message_record(
         &mut self,
-        record: LogicalMessageRecord,
+        put: PutLogicalMessage,
         modification: &mut DatadirModification<'_>,
         ctx: &RequestContext,
     ) -> Result<()> {
-        let LogicalMessageRecord { buf, prefix_size } = record;
+        let PutLogicalMessage { buf, prefix_size } = put;
 
         let prefix = std::str::from_utf8(&buf[0..prefix_size - 1])?;
         let message = &buf[prefix_size..];
@@ -2287,10 +2319,10 @@ impl WalIngest {
             let buf_size = xlrec.prefix_size + xlrec.message_size;
             // TODO change decode function interface to take ownership of buf
             let buf = Bytes::copy_from_slice(&buf[..buf_size]);
-            return Ok(Some(LogicalMessageRecord {
+            return Ok(Some(LogicalMessageRecord::Put(PutLogicalMessage {
                 buf,
                 prefix_size: xlrec.prefix_size,
-            }));
+            })));
         }
 
         Ok(None)
