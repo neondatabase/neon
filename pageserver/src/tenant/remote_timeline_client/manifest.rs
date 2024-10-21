@@ -2,6 +2,7 @@ use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
 use utils::{id::TimelineId, lsn::Lsn};
 
+/// Tenant-shard scoped manifest
 #[derive(Clone, Serialize, Deserialize)]
 pub struct TenantManifest {
     /// Debugging aid describing the version of this manifest.
