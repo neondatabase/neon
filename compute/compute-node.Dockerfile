@@ -874,6 +874,69 @@ USER root
 
 #########################################################################################
 #
+# Layers "pg-onnx-build" and "pgrag-pg-build"
+# Compile "pgrag" extensions
+#
+#########################################################################################
+
+FROM rust-extensions-build AS pg-onnx-build
+ARG PG_VERSION
+
+RUN apt-get update && apt-get install -y python3 python3-pip && \
+    python3 -m pip install cmake && \
+    wget https://github.com/microsoft/onnxruntime/archive/refs/tags/v1.19.2.tar.gz -O onnxruntime.tar.gz && \
+    mkdir onnxruntime-src && cd onnxruntime-src && tar xzf ../onnxruntime.tar.gz --strip-components=1 -C . && \
+    ./build.sh --config Release --parallel --skip_submodule_sync --skip_tests --allow_running_as_root
+
+
+FROM pg-onnx-build AS pgrag-pg-build
+ARG PG_VERSION
+
+# we use `rm` and two `sed` patterns to patch each of the pgrag extensions' `Cargo.toml` files for pgrx 0.11 compatibility
+
+RUN case "${PG_VERSION}" in "v17") \
+    echo "pgrag supports pg17 but we are not building with pgrx 0.12 yet" && exit 0;; \
+    esac && \
+    wget https://github.com/neondatabase/pgrag/archive/refs/heads/main.tar.gz -O pgrag.tar.gz &&  \
+    mkdir pgrag-src && cd pgrag-src && tar xzf ../pgrag.tar.gz --strip-components=1 -C . && \
+    \
+    cd exts/rag && \
+    rm src/bin/pgrx_embed.rs && \
+    sed -i \
+        -e 's/pgrx = "0.12.6"/pgrx = { version = "0.11.3", features = [ "unsafe-postgres" ] }/g' \
+        -e '/^pg17 =/d' \
+        -e '/^\[\[bin\]\]/,+2d' \
+        Cargo.toml && \
+    cargo pgrx install --release && \
+    echo "trusted = true" >> /usr/local/pgsql/share/extension/rag.control && \
+    \
+    cd ../rag_bge_small_en_v15 && \
+    rm src/bin/pgrx_embed.rs && \
+    sed -i \
+        -e 's/pgrx = "0.12.6"/pgrx = { version = "0.11.3", features = [ "unsafe-postgres" ] }/g' \
+        -e '/^pg17 =/d' \
+        -e '/^\[\[bin\]\]/,+2d' \
+        Cargo.toml && \
+    ORT_LIB_LOCATION=/home/nonroot/onnxruntime-src/build/Linux \
+        REMOTE_ONNX_URL=http://pg-ext-s3-gateway/pgrag-data/bge_small_en_v15.onnx \
+        cargo pgrx install --release --features remote_onnx && \
+    echo "trusted = true" >> /usr/local/pgsql/share/extension/rag_bge_small_en_v15.control && \
+    \
+    cd ../rag_jina_reranker_v1_tiny_en && \
+    rm src/bin/pgrx_embed.rs && \
+    sed -i \
+        -e 's/pgrx = "0.12.6"/pgrx = { version = "0.11.3", features = [ "unsafe-postgres" ] }/g' \
+        -e '/^pg17 =/d' \
+        -e '/^\[\[bin\]\]/,+2d' \
+        Cargo.toml && \
+    ORT_LIB_LOCATION=/home/nonroot/onnxruntime-src/build/Linux \
+        REMOTE_ONNX_URL=http://pg-ext-s3-gateway/pgrag-data/jina_reranker_v1_tiny_en.onnx \
+        cargo pgrx install --release --features remote_onnx && \
+    echo "trusted = true" >> /usr/local/pgsql/share/extension/rag_jina_reranker_v1_tiny_en.control
+
+
+#########################################################################################
+#
 # Layer "pg-jsonschema-pg-build"
 # Compile "pg_jsonschema" extension
 #
@@ -1059,6 +1122,7 @@ COPY --from=h3-pg-build /h3/usr /
 COPY --from=unit-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=vector-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pgjwt-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pgrag-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-jsonschema-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-graphql-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-tiktoken-pg-build /usr/local/pgsql/ /usr/local/pgsql/
@@ -1247,6 +1311,7 @@ COPY --from=unit-pg-build /postgresql-unit.tar.gz /ext-src/
 COPY --from=vector-pg-build /pgvector.tar.gz /ext-src/
 COPY --from=vector-pg-build /pgvector.patch /ext-src/
 COPY --from=pgjwt-pg-build /pgjwt.tar.gz /ext-src
+COPY --from=pgrag-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 #COPY --from=pg-jsonschema-pg-build /home/nonroot/pg_jsonschema.tar.gz /ext-src
 #COPY --from=pg-graphql-pg-build /home/nonroot/pg_graphql.tar.gz /ext-src
 #COPY --from=pg-tiktoken-pg-build /home/nonroot/pg_tiktoken.tar.gz /ext-src
