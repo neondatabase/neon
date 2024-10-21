@@ -109,6 +109,19 @@ static MAXRSS_KB: Lazy<IntGauge> = Lazy::new(|| {
 pub const DISK_FSYNC_SECONDS_BUCKETS: &[f64] =
     &[0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 30.0];
 
+/// Constructs histogram buckets that are powers of two including the end point. For example,
+/// passing end=20 yields 1,2,4,8,16,32 as does end=32.
+pub fn pow2_buckets(end: usize) -> Vec<f64> {
+    assert_ne!(end, 0);
+    let Some(end) = end.checked_next_power_of_two() else {
+        panic!("end {end} too large")
+    };
+    std::iter::successors(Some(1usize), |n| n.checked_mul(2))
+        .take_while(|n| n <= &end)
+        .map(|n| n as f64)
+        .collect()
+}
+
 pub struct BuildInfo {
     pub revision: &'static str,
     pub build_tag: &'static str,
@@ -592,5 +605,50 @@ where
         enc: &mut Dec<T>,
     ) -> Result<(), T::Err> {
         self.dec.collect_into(metadata, labels, name, &mut enc.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pow2_buckets_cases() {
+        assert_eq!(pow2_buckets(1), vec![1.0]);
+        assert_eq!(pow2_buckets(2), vec![1.0, 2.0]);
+        assert_eq!(pow2_buckets(3), vec![1.0, 2.0, 4.0]);
+        assert_eq!(pow2_buckets(4), vec![1.0, 2.0, 4.0]);
+        assert_eq!(pow2_buckets(5), vec![1.0, 2.0, 4.0, 8.0]);
+        assert_eq!(pow2_buckets(6), vec![1.0, 2.0, 4.0, 8.0]);
+        assert_eq!(pow2_buckets(7), vec![1.0, 2.0, 4.0, 8.0]);
+        assert_eq!(pow2_buckets(8), vec![1.0, 2.0, 4.0, 8.0]);
+        assert_eq!(
+            pow2_buckets(200),
+            vec![1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0]
+        );
+
+        // Largest valid value.
+        assert_eq!(
+            pow2_buckets(1 << (usize::BITS - 1)).len(),
+            usize::BITS as usize
+        )
+    }
+
+    #[test]
+    #[should_panic]
+    fn pow2_buckets_zero() {
+        pow2_buckets(0);
+    }
+
+    #[test]
+    #[should_panic]
+    fn pow2_buckets_min_illegal() {
+        pow2_buckets((1 << (usize::BITS - 1)) + 1);
+    }
+
+    #[test]
+    #[should_panic]
+    fn pow2_buckets_max_usize() {
+        pow2_buckets(usize::MAX);
     }
 }

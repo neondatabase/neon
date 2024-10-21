@@ -3,6 +3,7 @@
 //! sends replies back.
 
 use crate::handler::SafekeeperPostgresHandler;
+use crate::metrics::WAL_RECEIVER_QUEUE_DEPTH;
 use crate::safekeeper::AcceptorProposerMessage;
 use crate::safekeeper::ProposerAcceptorMessage;
 use crate::safekeeper::ServerInfo;
@@ -443,6 +444,10 @@ async fn network_write<IO: AsyncRead + AsyncWrite + Unpin>(
 /// walproposer, even when it's writing a steady stream of messages.
 const FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 
+/// The metrics computation interval.
+/// TODO: this should match the Prometheus polling interval.
+const METRICS_INTERVAL: Duration = Duration::from_secs(10);
+
 /// Encapsulates a task which takes messages from msg_rx, processes and pushes
 /// replies to reply_tx.
 ///
@@ -489,11 +494,14 @@ impl WalAcceptor {
     async fn run(&mut self) -> anyhow::Result<()> {
         let walreceiver_guard = self.tli.get_walreceivers().register(self.conn_id);
 
-        // Periodically flush the WAL.
+        // Periodically flush the WAL and compute metrics.
         let mut flush_ticker = tokio::time::interval(FLUSH_INTERVAL);
         flush_ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
-        // Tracks unflushed appends.
+        let mut metrics_ticker = tokio::time::interval(METRICS_INTERVAL);
+        metrics_ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+        // Tracks whether we have unflushed appends.
         let mut dirty = false;
 
         loop {
@@ -528,6 +536,12 @@ impl WalAcceptor {
                     self.tli
                         .process_msg(&ProposerAcceptorMessage::FlushWAL)
                         .await?
+                }
+
+                // Update metrics periodically.
+                _ = metrics_ticker.tick() => {
+                    WAL_RECEIVER_QUEUE_DEPTH.observe(self.msg_rx.len() as f64);
+                    None // no reply
                 }
             };
 
