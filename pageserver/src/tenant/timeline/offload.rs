@@ -34,7 +34,10 @@ pub(crate) async fn offload_timeline(
             anyhow::bail!("timeline isn't archived");
         }
         None => {
-            tracing::warn!(?is_archived, "tried offloading a timeline where manifest is not yet available");
+            tracing::warn!(
+                ?is_archived,
+                "tried offloading a timeline where manifest is not yet available"
+            );
             anyhow::bail!("timeline manifest hasn't been loaded yet");
         }
     }
