@@ -322,7 +322,7 @@ impl WalIngest {
                 if let Some(heapam_record) = maybe_heapam_record {
                     match heapam_record {
                         HeapamRecord::ClearVmBits(clear_vm_bits) => {
-                            self.ingest_heapam_record(clear_vm_bits, modification, ctx)
+                            self.ingest_clear_vm_bits(clear_vm_bits, modification, ctx)
                                 .await?;
                         }
                     }
@@ -334,7 +334,7 @@ impl WalIngest {
                 if let Some(neonrmgr_record) = maybe_nenonrmgr_record {
                     match neonrmgr_record {
                         NeonrmgrRecord::ClearVmBits(clear_vm_bits) => {
-                            self.ingest_neonrmgr_record(clear_vm_bits, modification, ctx)
+                            self.ingest_clear_vm_bits(clear_vm_bits, modification, ctx)
                                 .await?;
                         }
                     }
@@ -385,11 +385,11 @@ impl WalIngest {
 
                 match clog_record {
                     ClogRecord::ZeroPage(zero_page) => {
-                        self.ingest_clog_zero_page_record(zero_page, modification, ctx)
+                        self.ingest_clog_zero_page(zero_page, modification, ctx)
                             .await?;
                     }
                     ClogRecord::Truncate(truncate) => {
-                        self.ingest_clog_truncate_record(truncate, modification, ctx)
+                        self.ingest_clog_truncate(truncate, modification, ctx)
                             .await?;
                     }
                 }
@@ -408,14 +408,14 @@ impl WalIngest {
                 if let Some(multixact_record) = maybe_multixact_record {
                     match multixact_record {
                         MultiXactRecord::ZeroPage(zero_page) => {
-                            self.ingest_multixact_zero_page_record(zero_page, modification, ctx)
+                            self.ingest_multixact_zero_page(zero_page, modification, ctx)
                                 .await?;
                         }
                         MultiXactRecord::Create(create) => {
-                            self.ingest_multixact_create_record(modification, &create)?;
+                            self.ingest_multixact_create(modification, &create)?;
                         }
                         MultiXactRecord::Truncate(truncate) => {
-                            self.ingest_multixact_truncate_record(modification, &truncate, ctx)
+                            self.ingest_multixact_truncate(modification, &truncate, ctx)
                                 .await?;
                         }
                     }
@@ -427,7 +427,7 @@ impl WalIngest {
                     .unwrap();
                 match relmap_record {
                     RelmapRecord::Update(update) => {
-                        self.ingest_relmap_record(update, modification, ctx).await?;
+                        self.ingest_relmap_update(update, modification, ctx).await?;
                     }
                 }
             }
@@ -445,7 +445,7 @@ impl WalIngest {
 
                 match xlog_record {
                     XlogRecord::Raw(raw) => {
-                        self.ingest_xlog_record(raw, modification, ctx).await?;
+                        self.ingest_raw_xlog_record(raw, modification, ctx).await?;
                     }
                 }
             }
@@ -455,7 +455,7 @@ impl WalIngest {
                 if let Some(logical_message_record) = maybe_logical_message_record {
                     match logical_message_record {
                         LogicalMessageRecord::Put(put) => {
-                            self.ingest_logical_message_record(put, modification, ctx)
+                            self.ingest_logical_message_put(put, modification, ctx)
                                 .await?;
                         }
                     }
@@ -634,7 +634,7 @@ impl WalIngest {
         Ok(())
     }
 
-    async fn ingest_heapam_record(
+    async fn ingest_clear_vm_bits(
         &mut self,
         clear_vm_bits: ClearVmBits,
         modification: &mut DatadirModification<'_>,
@@ -1025,94 +1025,6 @@ impl WalIngest {
         } else {
             Ok(None)
         }
-    }
-
-    async fn ingest_neonrmgr_record(
-        &mut self,
-        clear_vm_bits: ClearVmBits,
-        modification: &mut DatadirModification<'_>,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<()> {
-        let ClearVmBits {
-            new_heap_blkno,
-            old_heap_blkno,
-            vm_rel,
-            flags,
-        } = clear_vm_bits;
-
-        let mut new_vm_blk = new_heap_blkno.map(pg_constants::HEAPBLK_TO_MAPBLOCK);
-        let mut old_vm_blk = old_heap_blkno.map(pg_constants::HEAPBLK_TO_MAPBLOCK);
-
-        // Sometimes, Postgres seems to create heap WAL records with the
-        // ALL_VISIBLE_CLEARED flag set, even though the bit in the VM page is
-        // not set. In fact, it's possible that the VM page does not exist at all.
-        // In that case, we don't want to store a record to clear the VM bit;
-        // replaying it would fail to find the previous image of the page, because
-        // it doesn't exist. So check if the VM page(s) exist, and skip the WAL
-        // record if it doesn't.
-        let vm_size = get_relsize(modification, vm_rel, ctx).await?;
-        if let Some(blknum) = new_vm_blk {
-            if blknum >= vm_size {
-                new_vm_blk = None;
-            }
-        }
-        if let Some(blknum) = old_vm_blk {
-            if blknum >= vm_size {
-                old_vm_blk = None;
-            }
-        }
-
-        if new_vm_blk.is_some() || old_vm_blk.is_some() {
-            if new_vm_blk == old_vm_blk {
-                // An UPDATE record that needs to clear the bits for both old and the
-                // new page, both of which reside on the same VM page.
-                self.put_rel_wal_record(
-                    modification,
-                    vm_rel,
-                    new_vm_blk.unwrap(),
-                    NeonWalRecord::ClearVisibilityMapFlags {
-                        new_heap_blkno,
-                        old_heap_blkno,
-                        flags,
-                    },
-                    ctx,
-                )
-                .await?;
-            } else {
-                // Clear VM bits for one heap page, or for two pages that reside on
-                // different VM pages.
-                if let Some(new_vm_blk) = new_vm_blk {
-                    self.put_rel_wal_record(
-                        modification,
-                        vm_rel,
-                        new_vm_blk,
-                        NeonWalRecord::ClearVisibilityMapFlags {
-                            new_heap_blkno,
-                            old_heap_blkno: None,
-                            flags,
-                        },
-                        ctx,
-                    )
-                    .await?;
-                }
-                if let Some(old_vm_blk) = old_vm_blk {
-                    self.put_rel_wal_record(
-                        modification,
-                        vm_rel,
-                        old_vm_blk,
-                        NeonWalRecord::ClearVisibilityMapFlags {
-                            new_heap_blkno: None,
-                            old_heap_blkno,
-                            flags,
-                        },
-                        ctx,
-                    )
-                    .await?;
-                }
-            }
-        }
-
-        Ok(())
     }
 
     fn decode_neonmgr_record(
@@ -1807,7 +1719,7 @@ impl WalIngest {
         Ok(None)
     }
 
-    async fn ingest_clog_truncate_record(
+    async fn ingest_clog_truncate(
         &mut self,
         truncate: ClogTruncate,
         modification: &mut DatadirModification<'_>,
@@ -1881,7 +1793,7 @@ impl WalIngest {
         Ok(())
     }
 
-    async fn ingest_clog_zero_page_record(
+    async fn ingest_clog_zero_page(
         &mut self,
         zero_page: ClogZeroPage,
         modification: &mut DatadirModification<'_>,
@@ -1929,7 +1841,7 @@ impl WalIngest {
         }
     }
 
-    fn ingest_multixact_create_record(
+    fn ingest_multixact_create(
         &mut self,
         modification: &mut DatadirModification,
         xlrec: &XlMultiXactCreate,
@@ -2031,7 +1943,7 @@ impl WalIngest {
         Ok(())
     }
 
-    async fn ingest_multixact_truncate_record(
+    async fn ingest_multixact_truncate(
         &mut self,
         modification: &mut DatadirModification<'_>,
         xlrec: &XlMultiXactTruncate,
@@ -2077,7 +1989,7 @@ impl WalIngest {
         Ok(())
     }
 
-    async fn ingest_multixact_zero_page_record(
+    async fn ingest_multixact_zero_page(
         &mut self,
         zero_page: MultiXactZeroPage,
         modification: &mut DatadirModification<'_>,
@@ -2128,7 +2040,7 @@ impl WalIngest {
         Ok(None)
     }
 
-    async fn ingest_relmap_record(
+    async fn ingest_relmap_update(
         &mut self,
         update: RelmapUpdate,
         modification: &mut DatadirModification<'_>,
@@ -2159,7 +2071,7 @@ impl WalIngest {
         })))
     }
 
-    async fn ingest_xlog_record(
+    async fn ingest_raw_xlog_record(
         &mut self,
         raw_record: RawXlogRecord,
         modification: &mut DatadirModification<'_>,
@@ -2273,7 +2185,7 @@ impl WalIngest {
         })))
     }
 
-    async fn ingest_logical_message_record(
+    async fn ingest_logical_message_put(
         &mut self,
         put: PutLogicalMessage,
         modification: &mut DatadirModification<'_>,
