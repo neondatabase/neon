@@ -1341,7 +1341,7 @@ where
                             "--replica" => replica = true,
                             _ => {
                                 return Err(QueryError::Other(anyhow::anyhow!(
-                                    "Unklnown parameter {param}",
+                                    "Unknown parameter {param}",
                                 )))
                             }
                         }
