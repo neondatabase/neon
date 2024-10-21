@@ -228,6 +228,25 @@ impl Timeline {
             .await?;
         }
 
+        // Correctness: before sending response, check we didn't get un-offloaded in the background,
+        // i.e. that the object we copied in S3 was not modified in a way that might be inconsistent
+        // with the control file we are sending.
+        match self.try_wal_residence_guard().await {
+            Ok(None) => {
+                // Great, we're still offloaded
+            }
+            Err(e) => {
+                return Err(anyhow::anyhow!("Failed to re-check offloaded status: {e}"));
+            }
+            Ok(Some(_)) => {
+                // TODO: a structured error type, this anyhow::Error will look like a 500 to HTTP clients.  We
+                // should give them a 503 or similar to prompt retry.
+                return Err(anyhow::anyhow!(
+                    "Timeline was un-evicted while generating snapshot, please retry"
+                ));
+            }
+        }
+
         let buf = control_store
             .write_to_buf()
             .with_context(|| "failed to serialize control store")?;
