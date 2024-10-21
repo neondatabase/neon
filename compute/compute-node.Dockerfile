@@ -882,10 +882,13 @@ USER root
 FROM rust-extensions-build AS pg-onnx-build
 ARG PG_VERSION
 
+# we download a later cmake/onnxruntime_mlas.cmake for this commit: https://github.com/microsoft/onnxruntime/commit/d539c27de82b9d1631b743b941f9c3ade49e7a05
+
 RUN apt-get update && apt-get install -y python3 python3-pip && \
     python3 -m pip install cmake && \
     wget https://github.com/microsoft/onnxruntime/archive/refs/tags/v1.19.2.tar.gz -O onnxruntime.tar.gz && \
     mkdir onnxruntime-src && cd onnxruntime-src && tar xzf ../onnxruntime.tar.gz --strip-components=1 -C . && \
+    wget https://raw.githubusercontent.com/microsoft/onnxruntime/d539c27de82b9d1631b743b941f9c3ade49e7a05/cmake/onnxruntime_mlas.cmake -O cmake/onnxruntime_mlas.cmake && \
     ./build.sh --config Release --parallel --skip_submodule_sync --skip_tests --allow_running_as_root
 
 
@@ -904,6 +907,7 @@ RUN case "${PG_VERSION}" in "v17") \
     rm src/bin/pgrx_embed.rs && \
     sed -i \
         -e 's/pgrx = "0.12.6"/pgrx = { version = "0.11.3", features = [ "unsafe-postgres" ] }/g' \
+        -e 's/pgrx-tests = "0.12.6"/pgrx-tests = "0.11.3"/' \
         -e '/^pg17 =/d' \
         -e '/^\[\[bin\]\]/,+2d' \
         Cargo.toml && \
@@ -914,6 +918,7 @@ RUN case "${PG_VERSION}" in "v17") \
     rm src/bin/pgrx_embed.rs && \
     sed -i \
         -e 's/pgrx = "0.12.6"/pgrx = { version = "0.11.3", features = [ "unsafe-postgres" ] }/g' \
+        -e 's/pgrx-tests = "0.12.6"/pgrx-tests = "0.11.3"/' \
         -e '/^pg17 =/d' \
         -e '/^\[\[bin\]\]/,+2d' \
         Cargo.toml && \
@@ -926,6 +931,7 @@ RUN case "${PG_VERSION}" in "v17") \
     rm src/bin/pgrx_embed.rs && \
     sed -i \
         -e 's/pgrx = "0.12.6"/pgrx = { version = "0.11.3", features = [ "unsafe-postgres" ] }/g' \
+        -e 's/pgrx-tests = "0.12.6"/pgrx-tests = "0.11.3"/' \
         -e '/^pg17 =/d' \
         -e '/^\[\[bin\]\]/,+2d' \
         Cargo.toml && \
