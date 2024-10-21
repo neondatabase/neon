@@ -37,6 +37,12 @@ pub(crate) struct StorageControllerMetricGroup {
     /// Count of how many times we spawn a reconcile task
     pub(crate) storage_controller_reconcile_spawn: measured::Counter,
 
+    /// Size of the in-memory map of tenant shards
+    pub(crate) storage_controller_tenant_shards: measured::Gauge,
+
+    /// Size of the in-memory map of pageserver_nodes
+    pub(crate) storage_controller_pageserver_nodes: measured::Gauge,
+
     /// Reconciler tasks completed, broken down by success/failure/cancelled
     pub(crate) storage_controller_reconcile_complete:
         measured::CounterVec<ReconcileCompleteLabelGroupSet>,
