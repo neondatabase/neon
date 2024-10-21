@@ -66,22 +66,25 @@ impl FileStorage {
         })
     }
 
-    /// Create file storage for a new timeline, but don't persist it yet.
-    pub fn create_new(
-        timeline_dir: Utf8PathBuf,
+    /// Create and reliably persist new control file at given location.
+    ///
+    /// Note: we normally call this in temp directory for atomic init, so
+    /// interested in FileStorage as a result only in tests.
+    pub async fn create_new(
+        dir: Utf8PathBuf,
         conf: &SafeKeeperConf,
         state: TimelinePersistentState,
     ) -> Result<FileStorage> {
         // we don't support creating new timelines in offloaded state
         assert!(matches!(state.eviction_state, EvictionState::Present));
 
-        let store = FileStorage {
-            timeline_dir,
+        let mut store = FileStorage {
+            timeline_dir: dir,
             no_sync: conf.no_sync,
-            state,
+            state: state.clone(),
             last_persist_at: Instant::now(),
         };
-
+        store.persist(&state).await?;
         Ok(store)
     }
 
@@ -190,8 +193,6 @@ impl TimelinePersistentState {
 
 impl Storage for FileStorage {
     /// Persists state durably to the underlying storage.
-    ///
-    /// For a description, see <https://lwn.net/Articles/457667/>.
     async fn persist(&mut self, s: &TimelinePersistentState) -> Result<()> {
         let _timer = PERSIST_CONTROL_FILE_SECONDS.start_timer();
 
@@ -269,7 +270,7 @@ mod test {
             .await
             .expect("failed to create timeline dir");
         let state = TimelinePersistentState::empty();
-        let storage = FileStorage::create_new(timeline_dir, conf, state.clone())?;
+        let storage = FileStorage::create_new(timeline_dir, conf, state.clone()).await?;
         Ok((storage, state))
     }
 
