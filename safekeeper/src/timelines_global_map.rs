@@ -569,13 +569,7 @@ pub async fn create_temp_timeline_dir(
     conf: &SafeKeeperConf,
     ttid: TenantTimelineId,
 ) -> Result<(Utf8TempDir, Utf8PathBuf)> {
-    // conf.workdir is usually /storage/safekeeper/data
-    // will try to transform it into /storage/safekeeper/tmp
-    let temp_base = conf
-        .workdir
-        .parent()
-        .ok_or(anyhow::anyhow!("workdir has no parent"))?
-        .join("tmp");
+    let temp_base = conf.workdir.join("tmp");
 
     tokio::fs::create_dir_all(&temp_base).await?;
 
