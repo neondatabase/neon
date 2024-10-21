@@ -34,10 +34,11 @@ use utils::id::{TenantId, TimelineId};
 use utils::pausable_failpoint;
 
 use super::index::{IndexPart, LayerFileMetadata};
+use super::manifest::TenantManifest;
 use super::{
     parse_remote_index_path, remote_index_path, remote_initdb_archive_path,
-    remote_initdb_preserved_archive_path, remote_tenant_path, FAILED_DOWNLOAD_WARN_THRESHOLD,
-    FAILED_REMOTE_OP_RETRIES, INITDB_PATH,
+    remote_initdb_preserved_archive_path, remote_tenant_manifest_path, remote_tenant_path,
+    FAILED_DOWNLOAD_WARN_THRESHOLD, FAILED_REMOTE_OP_RETRIES, INITDB_PATH,
 };
 
 ///
@@ -338,19 +339,15 @@ pub async fn list_remote_timelines(
     list_identifiers::<TimelineId>(storage, remote_path, cancel).await
 }
 
-async fn do_download_index_part(
+async fn do_download_remote_path_retry_forever(
     storage: &GenericRemoteStorage,
-    tenant_shard_id: &TenantShardId,
-    timeline_id: &TimelineId,
-    index_generation: Generation,
+    remote_path: &RemotePath,
     cancel: &CancellationToken,
-) -> Result<(IndexPart, Generation, SystemTime), DownloadError> {
-    let remote_path = remote_index_path(tenant_shard_id, timeline_id, index_generation);
-
-    let (index_part_bytes, index_part_mtime) = download_retry_forever(
+) -> Result<(Vec<u8>, SystemTime), DownloadError> {
+    download_retry_forever(
         || async {
             let download = storage
-                .download(&remote_path, &DownloadOpts::default(), cancel)
+                .download(remote_path, &DownloadOpts::default(), cancel)
                 .await?;
 
             let mut bytes = Vec::new();
@@ -365,7 +362,39 @@ async fn do_download_index_part(
         &format!("download {remote_path:?}"),
         cancel,
     )
-    .await?;
+    .await
+}
+
+pub async fn do_download_tenant_manifest(
+    storage: &GenericRemoteStorage,
+    tenant_shard_id: &TenantShardId,
+    cancel: &CancellationToken,
+) -> Result<(TenantManifest, Generation), DownloadError> {
+    // TODO: generation support
+    let generation = super::TENANT_MANIFEST_GENERATION;
+    let remote_path = remote_tenant_manifest_path(tenant_shard_id, generation);
+
+    let (manifest_bytes, _manifest_bytes_mtime) =
+        do_download_remote_path_retry_forever(storage, &remote_path, cancel).await?;
+
+    let tenant_manifest = TenantManifest::from_json_bytes(&manifest_bytes)
+        .with_context(|| format!("deserialize tenant manifest file at {remote_path:?}"))
+        .map_err(DownloadError::Other)?;
+
+    Ok((tenant_manifest, generation))
+}
+
+async fn do_download_index_part(
+    storage: &GenericRemoteStorage,
+    tenant_shard_id: &TenantShardId,
+    timeline_id: &TimelineId,
+    index_generation: Generation,
+    cancel: &CancellationToken,
+) -> Result<(IndexPart, Generation, SystemTime), DownloadError> {
+    let remote_path = remote_index_path(tenant_shard_id, timeline_id, index_generation);
+
+    let (index_part_bytes, index_part_mtime) =
+        do_download_remote_path_retry_forever(storage, &remote_path, cancel).await?;
 
     let index_part: IndexPart = serde_json::from_slice(&index_part_bytes)
         .with_context(|| format!("deserialize index part file at {remote_path:?}"))
