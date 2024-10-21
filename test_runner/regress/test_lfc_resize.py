@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import random
 import re
 import subprocess
@@ -18,13 +17,16 @@ def test_lfc_resize(neon_simple_env: NeonEnv, pg_bin: PgBin):
     Test resizing the Local File Cache
     """
     env = neon_simple_env
+    cache_dir = env.repo_dir / "file_cache"
+    cache_dir.mkdir(exist_ok=True)
+    env.create_branch("test_lfc_resize")
     endpoint = env.endpoints.create_start(
         "main",
         config_lines=[
-            "neon.file_cache_path='file.cache'",
-            "neon.max_file_cache_size=512MB",
-            "neon.file_cache_size_limit=512MB",
+            "neon.max_file_cache_size=1GB",
+            "neon.file_cache_size_limit=1GB",
         ],
+        use_lfc=True,
     )
     n_resize = 10
     scale = 100
@@ -63,8 +65,8 @@ def test_lfc_resize(neon_simple_env: NeonEnv, pg_bin: PgBin):
     cur.execute("select pg_reload_conf()")
     nretries = 10
     while True:
-        lfc_file_path = f"{endpoint.pg_data_dir_path()}/file.cache"
-        lfc_file_size = os.path.getsize(lfc_file_path)
+        lfc_file_path = endpoint.lfc_path()
+        lfc_file_size = lfc_file_path.stat().st_size
         res = subprocess.run(
             ["ls", "-sk", lfc_file_path], check=True, text=True, capture_output=True
         )
