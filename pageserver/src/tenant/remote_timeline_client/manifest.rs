@@ -5,8 +5,11 @@ use utils::{id::TimelineId, lsn::Lsn};
 #[derive(Clone, Serialize, Deserialize)]
 pub struct TenantManifest {
     /// Debugging aid describing the version of this manifest.
+    /// Can also be used for distinguishing breaking changes later on.
     pub version: usize,
 
+    /// The list of offloaded timelines together with enough information
+    /// to not have to actually load them.
     pub offloaded_timelines: Vec<OffloadedTimelineManifest>,
 }
 
