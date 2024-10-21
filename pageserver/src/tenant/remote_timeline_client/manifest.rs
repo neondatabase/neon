@@ -10,7 +10,7 @@ pub struct TenantManifest {
     pub offloaded_timelines: Vec<OffloadedTimelineManifest>,
 }
 
-/// The S3 level representation of an offloaded timeline.
+/// The remote level representation of an offloaded timeline.
 #[derive(Clone, Serialize, Deserialize, Copy)]
 pub struct OffloadedTimelineManifest {
     pub timeline_id: TimelineId,
@@ -25,17 +25,17 @@ pub struct OffloadedTimelineManifest {
 pub const LATEST_TENANT_MANIFEST_VERSION: usize = 1;
 
 impl TenantManifest {
-    pub fn empty() -> Self {
+    pub(crate) fn empty() -> Self {
         Self {
             version: LATEST_TENANT_MANIFEST_VERSION,
             offloaded_timelines: vec![],
         }
     }
-    pub fn from_s3_bytes(bytes: &[u8]) -> Result<Self, serde_json::Error> {
+    pub(crate) fn from_json_bytes(bytes: &[u8]) -> Result<Self, serde_json::Error> {
         serde_json::from_slice::<Self>(bytes)
     }
 
-    pub fn to_s3_bytes(&self) -> serde_json::Result<Vec<u8>> {
+    pub(crate) fn to_json_bytes(&self) -> serde_json::Result<Vec<u8>> {
         serde_json::to_vec(self)
     }
 }

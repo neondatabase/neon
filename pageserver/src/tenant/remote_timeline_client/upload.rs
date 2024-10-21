@@ -72,8 +72,7 @@ pub(crate) async fn upload_tenant_manifest(
     });
     pausable_failpoint!("before-upload-manifest-pausable");
 
-    // FIXME: this error comes too late
-    let serialized = tenant_manifest.to_s3_bytes()?;
+    let serialized = tenant_manifest.to_json_bytes()?;
     let serialized = Bytes::from(serialized);
 
     let tenant_manifest_site = serialized.len();
