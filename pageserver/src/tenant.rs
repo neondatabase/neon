@@ -512,8 +512,12 @@ pub struct OffloadedTimeline {
     /// Present for future flattening deliberations.
     pub archived_at: NaiveDateTime,
 
-    // TODO: once we persist offloaded state, make this lazily constructed
-    pub remote_client: Arc<RemoteTimelineClient>,
+    /// Lazily constructed remote client for the timeline
+    ///
+    /// If we offload a timeline, we keep around the remote client
+    /// for the duration of the process. If we find it through the
+    /// manifest, we don't construct it up until it's needed (deletion).
+    pub remote_client: Option<Arc<RemoteTimelineClient>>,
 
     /// Prevent two tasks from deleting the timeline at the same time. If held, the
     /// timeline is being deleted. If 'true', the timeline has already been deleted.
@@ -541,15 +545,11 @@ impl OffloadedTimeline {
             ancestor_retain_lsn,
             archived_at,
 
-            remote_client: timeline.remote_client.clone(),
+            remote_client: Some(timeline.remote_client.clone()),
             delete_progress: timeline.delete_progress.clone(),
         })
     }
-    fn from_manifest(
-        tenant_shard_id: TenantShardId,
-        remote_timeline_client: Arc<RemoteTimelineClient>,
-        manifest: &OffloadedTimelineManifest,
-    ) -> Self {
+    fn from_manifest(tenant_shard_id: TenantShardId, manifest: &OffloadedTimelineManifest) -> Self {
         let OffloadedTimelineManifest {
             timeline_id,
             ancestor_timeline_id,
@@ -562,7 +562,7 @@ impl OffloadedTimeline {
             ancestor_timeline_id,
             ancestor_retain_lsn,
             archived_at,
-            remote_client: remote_timeline_client,
+            remote_client: None,
             delete_progress: Timeline::make_delete_progress(),
         }
     }
@@ -614,10 +614,20 @@ impl TimelineOrOffloaded {
             TimelineOrOffloaded::Offloaded(offloaded) => &offloaded.delete_progress,
         }
     }
-    pub fn remote_client(&self) -> &Arc<RemoteTimelineClient> {
+    pub fn remote_client_maybe_construct(
+        &self,
+        tenant: &Tenant,
+    ) -> Arc<RemoteTimelineClient> {
         match self {
-            TimelineOrOffloaded::Timeline(timeline) => &timeline.remote_client,
-            TimelineOrOffloaded::Offloaded(offloaded) => &offloaded.remote_client,
+            TimelineOrOffloaded::Timeline(timeline) => timeline.remote_client.clone(),
+            TimelineOrOffloaded::Offloaded(offloaded) => match offloaded.remote_client {
+                Some(remote_client) => remote_client.clone(),
+                None => {
+                    let remote_client = tenant
+                        .build_timeline_client(offloaded.timeline_id, tenant.remote_storage.clone());
+                    Arc::new(remote_client)
+                }
+            },
         }
     }
 }
@@ -1242,13 +1252,8 @@ impl Tenant {
         let mut offloaded_timelines_list = Vec::new();
         for timeline_manifest in preload.tenant_manifest.offloaded_timelines.iter() {
             let timeline_id = timeline_manifest.timeline_id;
-            let timeline_client =
-                self.build_timeline_client(timeline_id, self.remote_storage.clone());
-            let offloaded_timeline = OffloadedTimeline::from_manifest(
-                self.tenant_shard_id,
-                Arc::new(timeline_client),
-                timeline_manifest,
-            );
+            let offloaded_timeline =
+                OffloadedTimeline::from_manifest(self.tenant_shard_id, timeline_manifest);
             offloaded_timelines_list.push((timeline_id, Arc::new(offloaded_timeline)));
             offloaded_timeline_ids.insert(timeline_id);
         }

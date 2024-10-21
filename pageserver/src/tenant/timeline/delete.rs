@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     ops::{Deref, DerefMut},
     sync::Arc,
 };
@@ -25,12 +26,9 @@ use super::{Timeline, TimelineResources};
 /// during attach or pageserver restart.
 /// See comment in persist_index_part_with_deleted_flag.
 async fn set_deleted_in_remote_index(
-    timeline: &TimelineOrOffloaded,
+    remote_client: &RemoteTimelineClient,
 ) -> Result<(), DeleteTimelineError> {
-    let res = timeline
-        .remote_client()
-        .persist_index_part_with_deleted_flag()
-        .await;
+    let res = remote_client.persist_index_part_with_deleted_flag().await;
     match res {
         // If we (now, or already) marked it successfully as deleted, we can proceed
         Ok(()) | Err(PersistIndexPartWithDeletedFlagError::AlreadyDeleted(_)) => (),
@@ -129,12 +127,10 @@ pub(super) async fn delete_local_timeline_directory(
 }
 
 /// Removes remote layers and an index file after them.
-async fn delete_remote_layers_and_index(timeline: &TimelineOrOffloaded) -> anyhow::Result<()> {
-    timeline
-        .remote_client()
-        .delete_all()
-        .await
-        .context("delete_all")
+async fn delete_remote_layers_and_index(
+    remote_client: &RemoteTimelineClient,
+) -> anyhow::Result<()> {
+    remote_client.delete_all().await.context("delete_all")
 }
 
 /// It is important that this gets called when DeletionGuard is being held.
@@ -235,7 +231,8 @@ impl DeleteTimelineFlow {
             ))?
         });
 
-        set_deleted_in_remote_index(&timeline).await?;
+        let remote_client = timeline.remote_client_maybe_construct();
+        set_deleted_in_remote_index(&remote_client).await?;
 
         fail::fail_point!("timeline-delete-before-schedule", |_| {
             Err(anyhow::anyhow!(
@@ -243,7 +240,7 @@ impl DeleteTimelineFlow {
             ))?
         });
 
-        Self::schedule_background(guard, tenant.conf, Arc::clone(tenant), timeline);
+        Self::schedule_background(guard, tenant.conf, Arc::clone(tenant), remote_client);
 
         Ok(())
     }
@@ -380,6 +377,7 @@ impl DeleteTimelineFlow {
         conf: &'static PageServerConf,
         tenant: Arc<Tenant>,
         timeline: TimelineOrOffloaded,
+        remote_client: Cow<'_, Arc<RemoteTimelineClient>>,
     ) {
         let tenant_shard_id = timeline.tenant_shard_id();
         let timeline_id = timeline.timeline_id();
@@ -391,7 +389,7 @@ impl DeleteTimelineFlow {
             Some(timeline_id),
             "timeline_delete",
             async move {
-                if let Err(err) = Self::background(guard, conf, &tenant, &timeline).await {
+                if let Err(err) = Self::background(guard, conf, &tenant, &timeline, remote_client).await {
                     error!("Error: {err:#}");
                     if let TimelineOrOffloaded::Timeline(timeline) = timeline {
                         timeline.set_broken(format!("{err:#}"))
@@ -408,6 +406,7 @@ impl DeleteTimelineFlow {
         conf: &PageServerConf,
         tenant: &Tenant,
         timeline: &TimelineOrOffloaded,
+        remote_client: Cow<'_, Arc<RemoteTimelineClient>>,
     ) -> Result<(), DeleteTimelineError> {
         // Offloaded timelines have no local state
         // TODO: once we persist offloaded information, delete the timeline from there, too
@@ -415,7 +414,7 @@ impl DeleteTimelineFlow {
             delete_local_timeline_directory(conf, tenant.tenant_shard_id, timeline).await?;
         }
 
-        delete_remote_layers_and_index(timeline).await?;
+        delete_remote_layers_and_index(remote_client).await?;
 
         pausable_failpoint!("in_progress_delete");
 
