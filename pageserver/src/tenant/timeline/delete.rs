@@ -1,5 +1,4 @@
 use std::{
-    borrow::Cow,
     ops::{Deref, DerefMut},
     sync::Arc,
 };
@@ -299,7 +298,7 @@ impl DeleteTimelineFlow {
         guard.mark_in_progress()?;
 
         let timeline = TimelineOrOffloaded::Timeline(timeline);
-        Self::schedule_background(guard, tenant.conf, tenant, timeline);
+        Self::schedule_background(guard, tenant.conf, tenant, timeline, remote_client);
 
         Ok(())
     }
@@ -377,7 +376,7 @@ impl DeleteTimelineFlow {
         conf: &'static PageServerConf,
         tenant: Arc<Tenant>,
         timeline: TimelineOrOffloaded,
-        remote_client: Cow<'_, Arc<RemoteTimelineClient>>,
+        remote_client: Arc<RemoteTimelineClient>,
     ) {
         let tenant_shard_id = timeline.tenant_shard_id();
         let timeline_id = timeline.timeline_id();
@@ -406,7 +405,7 @@ impl DeleteTimelineFlow {
         conf: &PageServerConf,
         tenant: &Tenant,
         timeline: &TimelineOrOffloaded,
-        remote_client: Cow<'_, Arc<RemoteTimelineClient>>,
+        remote_client: Arc<RemoteTimelineClient>,
     ) -> Result<(), DeleteTimelineError> {
         // Offloaded timelines have no local state
         // TODO: once we persist offloaded information, delete the timeline from there, too
