@@ -581,7 +581,13 @@ def test_subscriber_synchronous_commit(neon_simple_env: NeonEnv, vanilla_pg):
     # We want all data to fit into shared_buffers because later we stop
     # safekeeper and insert more; this shouldn't cause page requests as they
     # will be stuck.
-    sub = env.endpoints.create("subscriber", config_lines=["shared_buffers=128MB"])
+    sub = env.endpoints.create(
+        "subscriber",
+        config_lines=[
+            "neon.max_file_cache_size = 32MB",
+            "neon.file_cache_size_limit = 32MB",
+        ],
+    )
     sub.start()
 
     with vanilla_pg.cursor() as pcur:
