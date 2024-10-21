@@ -144,9 +144,10 @@ def test_subscriber_lag(
                 check_pgbench_still_running(pub_workload, "pub")
                 check_pgbench_still_running(sub_workload, "sub")
 
-                with psycopg2.connect(pub_connstr) as pub_conn, psycopg2.connect(
-                    sub_connstr
-                ) as sub_conn:
+                with (
+                    psycopg2.connect(pub_connstr) as pub_conn,
+                    psycopg2.connect(sub_connstr) as sub_conn,
+                ):
                     with pub_conn.cursor() as pub_cur, sub_conn.cursor() as sub_cur:
                         lag = measure_logical_replication_lag(sub_cur, pub_cur)
 
@@ -242,9 +243,10 @@ def test_publisher_restart(
                     ["pgbench", "-c10", pgbench_duration, "-Mprepared"],
                     env=pub_env,
                 )
-                with psycopg2.connect(pub_connstr) as pub_conn, psycopg2.connect(
-                    sub_connstr
-                ) as sub_conn:
+                with (
+                    psycopg2.connect(pub_connstr) as pub_conn,
+                    psycopg2.connect(sub_connstr) as sub_conn,
+                ):
                     with pub_conn.cursor() as pub_cur, sub_conn.cursor() as sub_cur:
                         lag = measure_logical_replication_lag(sub_cur, pub_cur)
 

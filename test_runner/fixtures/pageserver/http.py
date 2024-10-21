@@ -583,6 +583,22 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         log.info(f"Got GC request response code: {res.status_code}")
         self.verbose_error(res)
 
+    def timeline_offload(
+        self,
+        tenant_id: Union[TenantId, TenantShardId],
+        timeline_id: TimelineId,
+    ):
+        self.is_testing_enabled_or_skip()
+
+        log.info(f"Requesting offload: tenant {tenant_id}, timeline {timeline_id}")
+        res = self.put(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/offload",
+        )
+        log.info(f"Got offload request response code: {res.status_code}")
+        self.verbose_error(res)
+        res_json = res.json()
+        assert res_json is None
+
     def timeline_compact(
         self,
         tenant_id: Union[TenantId, TenantShardId],

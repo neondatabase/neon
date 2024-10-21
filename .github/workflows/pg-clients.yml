@@ -55,7 +55,7 @@ jobs:
     runs-on: ubuntu-22.04
 
     container:
-      image: ${{ needs.build-build-tools-image.outputs.image }}
+      image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
       credentials:
         username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
         password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
@@ -150,7 +150,7 @@ jobs:
     runs-on: ubuntu-22.04
 
     container:
-      image: ${{ needs.build-build-tools-image.outputs.image }}
+      image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
       credentials:
         username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
         password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}

@@ -2,6 +2,7 @@
 use once_cell::sync::Lazy;
 use postgres_backend::{AuthType, Handler, PostgresBackend, QueryError};
 use pq_proto::{BeMessage, RowDescriptor};
+use rustls::crypto::aws_lc_rs;
 use std::io::Cursor;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -92,10 +93,13 @@ static CERT: Lazy<rustls::pki_types::CertificateDer<'static>> = Lazy::new(|| {
 async fn simple_select_ssl() {
     let (client_sock, server_sock) = make_tcp_pair().await;
 
-    let server_cfg = rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(vec![CERT.clone()], KEY.clone_key())
-        .unwrap();
+    let server_cfg =
+        rustls::ServerConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
+            .with_safe_default_protocol_versions()
+            .expect("aws_lc_rs should support the default protocol versions")
+            .with_no_client_auth()
+            .with_single_cert(vec![CERT.clone()], KEY.clone_key())
+            .unwrap();
     let tls_config = Some(Arc::new(server_cfg));
     let pgbackend =
         PostgresBackend::new(server_sock, AuthType::Trust, tls_config).expect("pgbackend creation");
@@ -105,13 +109,16 @@ async fn simple_select_ssl() {
         pgbackend.run(&mut handler, &CancellationToken::new()).await
     });
 
-    let client_cfg = rustls::ClientConfig::builder()
-        .with_root_certificates({
-            let mut store = rustls::RootCertStore::empty();
-            store.add(CERT.clone()).unwrap();
-            store
-        })
-        .with_no_client_auth();
+    let client_cfg =
+        rustls::ClientConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
+            .with_safe_default_protocol_versions()
+            .expect("aws_lc_rs should support the default protocol versions")
+            .with_root_certificates({
+                let mut store = rustls::RootCertStore::empty();
+                store.add(CERT.clone()).unwrap();
+                store
+            })
+            .with_no_client_auth();
     let mut make_tls_connect = tokio_postgres_rustls::MakeRustlsConnect::new(client_cfg);
     let tls_connect = <MakeRustlsConnect as MakeTlsConnect<TcpStream>>::make_tls_connect(
         &mut make_tls_connect,

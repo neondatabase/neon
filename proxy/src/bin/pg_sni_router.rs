@@ -5,25 +5,24 @@
 /// the outside. Similar to an ingress controller for HTTPS.
 use std::{net::SocketAddr, sync::Arc};
 
+use anyhow::{anyhow, bail, ensure, Context};
+use clap::Arg;
 use futures::future::Either;
+use futures::TryFutureExt;
 use itertools::Itertools;
 use proxy::config::TlsServerEndPoint;
 use proxy::context::RequestMonitoring;
 use proxy::metrics::{Metrics, ThreadPoolMetrics};
 use proxy::proxy::{copy_bidirectional_client_compute, run_until_cancelled, ErrorSource};
-use rustls::pki_types::PrivateKeyDer;
-use tokio::net::TcpListener;
-
-use anyhow::{anyhow, bail, ensure, Context};
-use clap::Arg;
-use futures::TryFutureExt;
 use proxy::stream::{PqStream, Stream};
-
+use rustls::crypto::aws_lc_rs;
+use rustls::pki_types::PrivateKeyDer;
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
-use utils::{project_git_version, sentry_init::init_sentry};
-
 use tracing::{error, info, Instrument};
+use utils::project_git_version;
+use utils::sentry_init::init_sentry;
 
 project_git_version!(GIT_VERSION);
 
@@ -106,10 +105,11 @@ async fn main() -> anyhow::Result<()> {
             let first_cert = cert_chain.first().context("missing certificate")?;
             let tls_server_end_point = TlsServerEndPoint::new(first_cert)?;
 
-            let tls_config = rustls::ServerConfig::builder_with_protocol_versions(&[
-                &rustls::version::TLS13,
-                &rustls::version::TLS12,
-            ])
+            let tls_config = rustls::ServerConfig::builder_with_provider(Arc::new(
+                aws_lc_rs::default_provider(),
+            ))
+            .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
+            .context("aws_lc_rs should support TLS1.2 and TLS1.3")?
             .with_no_client_auth()
             .with_single_cert(cert_chain, key)?
             .into();

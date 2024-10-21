@@ -1,14 +1,10 @@
 use tracing::Subscriber;
-use tracing_subscriber::{
-    filter::{EnvFilter, LevelFilter},
-    fmt::{
-        format::{Format, Full},
-        time::SystemTime,
-        FormatEvent, FormatFields,
-    },
-    prelude::*,
-    registry::LookupSpan,
-};
+use tracing_subscriber::filter::{EnvFilter, LevelFilter};
+use tracing_subscriber::fmt::format::{Format, Full};
+use tracing_subscriber::fmt::time::SystemTime;
+use tracing_subscriber::fmt::{FormatEvent, FormatFields};
+use tracing_subscriber::prelude::*;
+use tracing_subscriber::registry::LookupSpan;
 
 /// Initialize logging and OpenTelemetry tracing and exporter.
 ///

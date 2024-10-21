@@ -73,7 +73,7 @@ impl<'a> BufView<'a> {
     }
 }
 
-impl<'a> Deref for BufView<'a> {
+impl Deref for BufView<'_> {
     type Target = [u8];
 
     fn deref(&self) -> &Self::Target {
@@ -84,7 +84,7 @@ impl<'a> Deref for BufView<'a> {
     }
 }
 
-impl<'a> AsRef<[u8]> for BufView<'a> {
+impl AsRef<[u8]> for BufView<'_> {
     fn as_ref(&self) -> &[u8] {
         match self {
             BufView::Slice(slice) => slice,
@@ -196,11 +196,6 @@ pub(crate) struct ChunkedVectoredReadBuilder {
     max_read_size: Option<usize>,
 }
 
-/// Computes x / d rounded up.
-fn div_round_up(x: usize, d: usize) -> usize {
-    (x + (d - 1)) / d
-}
-
 impl ChunkedVectoredReadBuilder {
     const CHUNK_SIZE: usize = virtual_file::get_io_buffer_alignment();
     /// Start building a new vectored read.
@@ -220,7 +215,7 @@ impl ChunkedVectoredReadBuilder {
             .expect("First insertion always succeeds");
 
         let start_blk_no = start_offset as usize / Self::CHUNK_SIZE;
-        let end_blk_no = div_round_up(end_offset as usize, Self::CHUNK_SIZE);
+        let end_blk_no = (end_offset as usize).div_ceil(Self::CHUNK_SIZE);
         Self {
             start_blk_no,
             end_blk_no,
@@ -248,7 +243,7 @@ impl ChunkedVectoredReadBuilder {
     pub(crate) fn extend(&mut self, start: u64, end: u64, meta: BlobMeta) -> VectoredReadExtended {
         tracing::trace!(start, end, "trying to extend");
         let start_blk_no = start as usize / Self::CHUNK_SIZE;
-        let end_blk_no = div_round_up(end as usize, Self::CHUNK_SIZE);
+        let end_blk_no = (end as usize).div_ceil(Self::CHUNK_SIZE);
 
         let not_limited_by_max_read_size = {
             if let Some(max_read_size) = self.max_read_size {
@@ -974,13 +969,5 @@ mod tests {
         round_trip_test_compressed(&blobs, false).await?;
         round_trip_test_compressed(&blobs, true).await?;
         Ok(())
-    }
-
-    #[test]
-    fn test_div_round_up() {
-        const CHUNK_SIZE: usize = 512;
-        assert_eq!(1, div_round_up(200, CHUNK_SIZE));
-        assert_eq!(1, div_round_up(CHUNK_SIZE, CHUNK_SIZE));
-        assert_eq!(2, div_round_up(CHUNK_SIZE + 1, CHUNK_SIZE));
     }
 }
