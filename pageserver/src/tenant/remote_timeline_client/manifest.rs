@@ -11,6 +11,10 @@ pub struct TenantManifest {
 }
 
 /// The remote level representation of an offloaded timeline.
+///
+/// Very similar to [`pageserver_api::models::OffloadedTimelineInfo`],
+/// but the two datastructures serve different needs, this is for a persistent disk format
+/// that must be backwards compatible, while the other is only for informative purposes.
 #[derive(Clone, Serialize, Deserialize, Copy)]
 pub struct OffloadedTimelineManifest {
     pub timeline_id: TimelineId,
