@@ -44,18 +44,33 @@ use utils::{
 /// Stream tar archive of timeline to tx.
 #[instrument(name = "snapshot", skip_all, fields(ttid = %tli.ttid))]
 pub async fn stream_snapshot(
-    tli: WalResidentTimeline,
+    tli: Arc<Timeline>,
     source: NodeId,
     destination: NodeId,
     tx: mpsc::Sender<Result<Bytes>>,
 ) {
-    if let Err(e) = stream_snapshot_guts(tli, source, destination, tx.clone()).await {
-        // Error type/contents don't matter as they won't can't reach the client
-        // (hyper likely doesn't do anything with it), but http stream will be
-        // prematurely terminated. It would be nice to try to send the error in
-        // trailers though.
-        tx.send(Err(anyhow!("snapshot failed"))).await.ok();
-        error!("snapshot failed: {:#}", e);
+    match tli.try_wal_residence_guard().await {
+        Err(e) => {
+            tx.send(Err(anyhow!("Error checking residence: {:#}", e)))
+                .await
+                .ok();
+        }
+        Ok(maybe_resident_tli) => {
+            if let Err(e) = match maybe_resident_tli {
+                Some(resident_tli) => {
+                    stream_snapshot_resident_guts(resident_tli, source, destination, tx.clone())
+                        .await
+                }
+                None => stream_snapshot_offloaded_guts(tli, source, destination, tx.clone()).await,
+            } {
+                // Error type/contents don't matter as they won't can't reach the client
+                // (hyper likely doesn't do anything with it), but http stream will be
+                // prematurely terminated. It would be nice to try to send the error in
+                // trailers though.
+                tx.send(Err(anyhow!("snapshot failed"))).await.ok();
+                error!("snapshot failed: {:#}", e);
+            }
+        }
     }
 }
 
@@ -81,7 +96,46 @@ impl Drop for SnapshotContext {
     }
 }
 
-pub async fn stream_snapshot_guts(
+/// Implementation of snapshot for an offloaded timeline, only reads control file
+///
+/// TODO: do we need an anti-residence guard to protect us from concurrent writes, or
+/// can we just ~atomically read the checkpoint?
+pub(crate) async fn stream_snapshot_offloaded_guts(
+    tli: Arc<Timeline>,
+    source: NodeId,
+    destination: NodeId,
+    tx: mpsc::Sender<Result<Bytes>>,
+) -> Result<()> {
+    // tokio-tar wants Write implementor, but we have mpsc tx <Result<Bytes>>;
+    // use SinkWriter as a Write impl. That is,
+    // - create Sink from the tx. It returns PollSendError if chan is closed.
+    let sink = PollSender::new(tx);
+    // - SinkWriter needs sink error to be io one, map it.
+    let sink_io_err = sink.sink_map_err(|_| io::Error::from(ErrorKind::BrokenPipe));
+    // - SinkWriter wants sink type to be just Bytes, not Result<Bytes>, so map
+    //   it with with(). Note that with() accepts async function which we don't
+    //   need and allows the map to fail, which we don't need either, but hence
+    //   two Oks.
+    let oksink = sink_io_err.with(|b: Bytes| async { io::Result::Ok(Result::Ok(b)) });
+    // - SinkWriter (not surprisingly) wants sink of &[u8], not bytes, so wrap
+    // into CopyToBytes. This is a data copy.
+    let copy_to_bytes = CopyToBytes::new(oksink);
+    let mut writer = SinkWriter::new(copy_to_bytes);
+    let pinned_writer = std::pin::pin!(writer);
+
+    // Note that tokio_tar append_* funcs use tokio::io::copy with 8KB buffer
+    // which is also likely suboptimal.
+    let mut ar = Builder::new_non_terminated(pinned_writer);
+
+    tli.snapshot_offloaded(&mut ar, source, destination).await?;
+
+    ar.finish().await?;
+
+    Ok(())
+}
+
+/// Implementation of snapshot for a timeline which is resident (includes some segment data)
+pub async fn stream_snapshot_resident_guts(
     tli: WalResidentTimeline,
     source: NodeId,
     destination: NodeId,
@@ -137,6 +191,73 @@ pub async fn stream_snapshot_guts(
     ar.finish().await?;
 
     Ok(())
+}
+
+impl Timeline {
+    /// Simple snapshot for an offloaded timeline: we will only upload a renamed partial segment and
+    /// pass a modified control file into the provided tar stream (nothing with data segments on disk, since
+    /// we are offloaded and there aren't any)
+    async fn snapshot_offloaded<W: AsyncWrite + Unpin + Send>(
+        self: &Arc<Timeline>,
+        ar: &mut tokio_tar::Builder<W>,
+        source: NodeId,
+        destination: NodeId,
+    ) -> Result<()> {
+        let shared_state = self.write_shared_state().await;
+
+        let mut control_store = TimelinePersistentState::clone(shared_state.sk.state());
+        // Modify the partial segment of the in-memory copy for the control file to
+        // point to the destination safekeeper.
+        let replace = control_store
+            .partial_backup
+            .replace_uploaded_segment(source, destination)?;
+
+        if let Some(replace) = replace {
+            // The deserialized control file has an uploaded partial. We upload a copy
+            // of it to object storage for the destination safekeeper and send an updated
+            // control file in the snapshot.
+            tracing::info!(
+                "Replacing uploaded partial segment in in-mem control file: {replace:?}"
+            );
+
+            let remote_timeline_path = &self.remote_path;
+            wal_backup::copy_partial_segment(
+                &replace.previous.remote_path(remote_timeline_path),
+                &replace.current.remote_path(remote_timeline_path),
+            )
+            .await?;
+        }
+
+        // Correctness: before sending response, check we didn't get un-offloaded in the background,
+        // i.e. that the object we copied in S3 was not modified in a way that might be inconsistent
+        // with the control file we are sending.
+        match self.try_wal_residence_guard().await {
+            Ok(None) => {
+                // Great, we're still offloaded
+            }
+            Err(e) => {
+                return Err(anyhow::anyhow!("Failed to re-check offloaded status: {e}"));
+            }
+            Ok(Some(_)) => {
+                // TODO: a structured error type, this anyhow::Error will look like a 500 to HTTP clients.  We
+                // should give them a 503 or similar to prompt retry.
+                return Err(anyhow::anyhow!(
+                    "Timeline was un-evicted while generating snapshot, please retry"
+                ));
+            }
+        }
+
+        let buf = control_store
+            .write_to_buf()
+            .with_context(|| "failed to serialize control store")?;
+        let mut header = Header::new_gnu();
+        header.set_size(buf.len().try_into().expect("never breaches u64"));
+        ar.append_data(&mut header, CONTROL_FILE_NAME, buf.as_slice())
+            .await
+            .with_context(|| "failed to append to archive")?;
+
+        Ok(())
+    }
 }
 
 impl WalResidentTimeline {
