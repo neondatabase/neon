@@ -1718,7 +1718,7 @@ impl Tenant {
         // Upload new list of offloaded timelines to S3
         let manifest = self.tenant_manifest();
         // TODO: generation support
-        let generation = Generation::none();
+        let generation = remote_timeline_client::TENANT_MANIFEST_GENERATION;
         remote_timeline_client::upload_tenant_manifest(
             &self.remote_storage,
             &self.tenant_shard_id,

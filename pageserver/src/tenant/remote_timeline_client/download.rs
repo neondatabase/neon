@@ -371,13 +371,13 @@ pub async fn do_download_tenant_manifest(
     cancel: &CancellationToken,
 ) -> Result<(TenantManifest, Generation), DownloadError> {
     // TODO: generation support
-    let generation = Generation::none();
+    let generation = super::TENANT_MANIFEST_GENERATION;
     let remote_path = remote_tenant_manifest_path(tenant_shard_id, generation);
 
     let (manifest_bytes, _manifest_bytes_mtime) =
         do_download_remote_path_retry_forever(storage, &remote_path, cancel).await?;
 
-    let tenant_manifest: TenantManifest = serde_json::from_slice(&manifest_bytes)
+    let tenant_manifest = TenantManifest::from_json_bytes(&manifest_bytes)
         .with_context(|| format!("deserialize tenant manifest file at {remote_path:?}"))
         .map_err(DownloadError::Other)?;
 
