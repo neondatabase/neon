@@ -155,10 +155,10 @@ fn pg_text_to_json(pg_value: Option<&str>, pg_type: &Type) -> Result<Value, Json
 // dimensions, we just return them as is.
 //
 fn pg_array_parse(pg_array: &str, elem_type: &Type) -> Result<Value, JsonConversionError> {
-    _pg_array_parse(pg_array, elem_type, false).map(|(v, _)| v)
+    pg_array_parse_inner(pg_array, elem_type, false).map(|(v, _)| v)
 }
 
-fn _pg_array_parse(
+fn pg_array_parse_inner(
     pg_array: &str,
     elem_type: &Type,
     nested: bool,
@@ -211,7 +211,7 @@ fn _pg_array_parse(
             '{' if !quote => {
                 level += 1;
                 if level > 1 {
-                    let (res, off) = _pg_array_parse(&pg_array[i..], elem_type, true)?;
+                    let (res, off) = pg_array_parse_inner(&pg_array[i..], elem_type, true)?;
                     entries.push(res);
                     for _ in 0..off - 1 {
                         pg_array_chr.next();
