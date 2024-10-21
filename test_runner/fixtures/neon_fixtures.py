@@ -3457,7 +3457,8 @@ class Endpoint(PgProtocol, LogUtils):
         self.logfile = self.endpoint_path() / "compute.log"
 
         if use_lfc is None:
-            use_lfc = os.environ.get("NO_LFC") is None
+            no_default_lfc_env = os.environ.get("NO_DEFAULT_LFC")
+            use_lfc = (no_default_lfc_env is None) or (no_default_lfc_env.lower() in {'no', 'false'})
 
         # set small 'max_replication_write_lag' to enable backpressure
         # and make tests more stable.
