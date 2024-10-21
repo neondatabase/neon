@@ -1755,7 +1755,7 @@ impl Tenant {
     }
 
     /// Lists timelines the tenant contains.
-    /// Up to tenant's implementation to omit certain timelines that ar not considered ready for use.
+    /// It's up to callers to omit certain timelines that are not considered ready for use.
     pub fn list_timelines(&self) -> Vec<Arc<Timeline>> {
         self.timelines
             .lock()
@@ -1763,6 +1763,29 @@ impl Tenant {
             .values()
             .map(Arc::clone)
             .collect()
+    }
+
+    /// Lists timelines the tenant manages, including offloaded ones.
+    ///
+    /// It's up to callers to omit certain timelines that are not considered ready for use.
+    pub fn list_timelines_and_offloaded(
+        &self,
+    ) -> (Vec<Arc<Timeline>>, Vec<Arc<OffloadedTimeline>>) {
+        let timelines = self
+            .timelines
+            .lock()
+            .unwrap()
+            .values()
+            .map(Arc::clone)
+            .collect();
+        let offloaded = self
+            .timelines_offloaded
+            .lock()
+            .unwrap()
+            .values()
+            .map(Arc::clone)
+            .collect();
+        (timelines, offloaded)
     }
 
     pub fn list_timeline_ids(&self) -> Vec<TimelineId> {
