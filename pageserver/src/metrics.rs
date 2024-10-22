@@ -3034,13 +3034,14 @@ impl<F: Future<Output = Result<O, E>>, O, E> Future for MeasuredRemoteOp<F> {
 }
 
 pub mod tokio_epoll_uring {
-    use metrics::{register_int_counter, UIntGauge};
+    use metrics::{register_int_counter, register_uint_gauge_vec, UIntGauge, UIntGaugeVec};
     use once_cell::sync::Lazy;
 
     pub struct Collector {
         descs: Vec<metrics::core::Desc>,
         systems_created: UIntGauge,
         systems_destroyed: UIntGauge,
+        slots_waiters_queue_depth: UIntGaugeVec,
     }
 
     impl metrics::core::Collector for Collector {
@@ -3053,17 +3054,25 @@ pub mod tokio_epoll_uring {
             let tokio_epoll_uring::metrics::Metrics {
                 systems_created,
                 systems_destroyed,
+                slots_waiters_queue_depth,
             } = tokio_epoll_uring::metrics::global();
             self.systems_created.set(systems_created);
             mfs.extend(self.systems_created.collect());
             self.systems_destroyed.set(systems_destroyed);
             mfs.extend(self.systems_destroyed.collect());
+
+            for (system_id, queue_depth) in slots_waiters_queue_depth {
+                self.slots_waiters_queue_depth
+                    .with_label_values(&[&system_id.to_string()])
+                    .set(queue_depth);
+            }
+
             mfs
         }
     }
 
     impl Collector {
-        const NMETRICS: usize = 2;
+        const NMETRICS: usize = 3;
 
         #[allow(clippy::new_without_default)]
         pub fn new() -> Self {
@@ -3091,10 +3100,23 @@ pub mod tokio_epoll_uring {
                     .cloned(),
             );
 
+            let slots_waiters_queue_depth = register_uint_gauge_vec!(
+                "pageserver_tokio_epoll_uring_slots_waiters_queue_depth",
+                "counter the slots waiter queue depth for each tokio-epoll-uring system",
+                &["system_id"]
+            )
+            .unwrap();
+            descs.extend(
+                metrics::core::Collector::desc(&slots_waiters_queue_depth)
+                    .into_iter()
+                    .cloned(),
+            );
+
             Self {
                 descs,
                 systems_created,
                 systems_destroyed,
+                slots_waiters_queue_depth,
             }
         }
     }
