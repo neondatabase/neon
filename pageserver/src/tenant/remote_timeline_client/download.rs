@@ -348,8 +348,11 @@ pub async fn do_download_tenant_manifest(
     let remote_path = remote_tenant_manifest_path(tenant_shard_id, generation);
 
     let (manifest_bytes, _manifest_bytes_mtime) = storage
-        .retry_forever_download_to_vec::<FAILED_DOWNLOAD_WARN_THRESHOLD>(&remote_path,
-            &Default::default(), cancel)
+        .retry_forever_download_to_vec::<FAILED_DOWNLOAD_WARN_THRESHOLD>(
+            &remote_path,
+            &Default::default(),
+            cancel,
+        )
         .await?;
 
     let tenant_manifest = TenantManifest::from_json_bytes(&manifest_bytes)

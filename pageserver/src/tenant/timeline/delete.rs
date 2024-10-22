@@ -239,7 +239,13 @@ impl DeleteTimelineFlow {
             ))?
         });
 
-        Self::schedule_background(guard, tenant.conf, Arc::clone(tenant), timeline, remote_client);
+        Self::schedule_background(
+            guard,
+            tenant.conf,
+            Arc::clone(tenant),
+            timeline,
+            remote_client,
+        );
 
         Ok(())
     }

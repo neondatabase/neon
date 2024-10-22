@@ -614,17 +614,16 @@ impl TimelineOrOffloaded {
             TimelineOrOffloaded::Offloaded(offloaded) => &offloaded.delete_progress,
         }
     }
-    pub fn remote_client_maybe_construct(
-        &self,
-        tenant: &Tenant,
-    ) -> Arc<RemoteTimelineClient> {
+    pub fn remote_client_maybe_construct(&self, tenant: &Tenant) -> Arc<RemoteTimelineClient> {
         match self {
             TimelineOrOffloaded::Timeline(timeline) => timeline.remote_client.clone(),
             TimelineOrOffloaded::Offloaded(offloaded) => match offloaded.remote_client.clone() {
                 Some(remote_client) => remote_client,
                 None => {
-                    let remote_client = tenant
-                        .build_timeline_client(offloaded.timeline_id, tenant.remote_storage.clone());
+                    let remote_client = tenant.build_timeline_client(
+                        offloaded.timeline_id,
+                        tenant.remote_storage.clone(),
+                    );
                     Arc::new(remote_client)
                 }
             },
