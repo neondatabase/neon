@@ -339,7 +339,8 @@ impl<'a, IO: AsyncRead + AsyncWrite + Unpin> NetworkReader<'a, IO> {
                 };
                 let tli =
                     GlobalTimelines::create(self.ttid, server_info, Lsn::INVALID, Lsn::INVALID)
-                        .await?;
+                        .await
+                        .context("create timeline")?;
                 tli.wal_residence_guard().await?
             }
             _ => {
