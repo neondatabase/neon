@@ -882,7 +882,10 @@ USER root
 FROM rust-extensions-build AS pg-onnx-build
 ARG PG_VERSION
 
-RUN apt-get update && apt-get install -y python3 python3-pip && \
+RUN case "${PG_VERSION}" in "v17") \
+    echo "pgrag supports pg17 but we are not building with pgrx 0.12 yet" && exit 0;; \
+    esac && \
+    apt-get update && apt-get install -y python3 python3-pip && \
     python3 -m pip install cmake && \
     wget https://github.com/microsoft/onnxruntime/archive/refs/tags/v1.18.1.tar.gz -O onnxruntime.tar.gz && \
     mkdir onnxruntime-src && cd onnxruntime-src && tar xzf ../onnxruntime.tar.gz --strip-components=1 -C . && \
