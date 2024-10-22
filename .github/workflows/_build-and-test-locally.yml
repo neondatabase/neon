@@ -292,9 +292,11 @@ jobs:
       fail-fast: false
       matrix:
         pg_version: ${{ fromJson(inputs.pg-versions) }}
+        build-type: ${{ fromJson(inputs.build-type) }}
         no_default_lfc: [lfc]
         include:
           - pg_version: 16
+            build-type: release
             no_default_lfc: nolfc
     steps:
       - uses: actions/checkout@v4
