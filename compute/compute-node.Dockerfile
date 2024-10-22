@@ -882,25 +882,22 @@ USER root
 FROM rust-extensions-build AS pg-onnx-build
 ARG PG_VERSION
 
-# we download a later cmake/onnxruntime_mlas.cmake for this commit: https://github.com/microsoft/onnxruntime/commit/d539c27de82b9d1631b743b941f9c3ade49e7a05
-
 RUN apt-get update && apt-get install -y python3 python3-pip && \
     python3 -m pip install cmake && \
-    wget https://github.com/microsoft/onnxruntime/archive/refs/tags/v1.19.2.tar.gz -O onnxruntime.tar.gz && \
+    wget https://github.com/microsoft/onnxruntime/archive/refs/tags/v1.18.1.tar.gz -O onnxruntime.tar.gz && \
     mkdir onnxruntime-src && cd onnxruntime-src && tar xzf ../onnxruntime.tar.gz --strip-components=1 -C . && \
-    wget https://raw.githubusercontent.com/microsoft/onnxruntime/d539c27de82b9d1631b743b941f9c3ade49e7a05/cmake/onnxruntime_mlas.cmake -O cmake/onnxruntime_mlas.cmake && \
     ./build.sh --config Release --parallel --skip_submodule_sync --skip_tests --allow_running_as_root
 
 
 FROM pg-onnx-build AS pgrag-pg-build
 ARG PG_VERSION
 
-# we use `rm` and two `sed` patterns to patch each of the pgrag extensions' `Cargo.toml` files for pgrx 0.11 compatibility
+# we use `rm` and the `sed` patterns on Cargo.toml to patch each of the pgrag extensions for pgrx 0.11 compatibility
 
 RUN case "${PG_VERSION}" in "v17") \
     echo "pgrag supports pg17 but we are not building with pgrx 0.12 yet" && exit 0;; \
     esac && \
-    wget https://github.com/neondatabase/pgrag/archive/refs/heads/main.tar.gz -O pgrag.tar.gz &&  \
+    wget https://github.com/neondatabase-labs/pgrag/archive/refs/heads/main.tar.gz -O pgrag.tar.gz &&  \
     mkdir pgrag-src && cd pgrag-src && tar xzf ../pgrag.tar.gz --strip-components=1 -C . && \
     \
     cd exts/rag && \
