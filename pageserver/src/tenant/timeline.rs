@@ -2252,7 +2252,7 @@ impl Timeline {
                 eviction_task_timeline_state: tokio::sync::Mutex::new(
                     EvictionTaskTimelineState::default(),
                 ),
-                delete_progress: Self::make_delete_progress(),
+                delete_progress: TimelineDeleteProgress::default(),
 
                 cancel,
                 gate: Gate::default(),
@@ -2651,10 +2651,6 @@ impl Timeline {
         }
 
         current_size
-    }
-
-    pub fn make_delete_progress() -> TimelineDeleteProgress {
-        Arc::new(tokio::sync::Mutex::new(DeleteTimelineFlow::default()))
     }
 
     fn spawn_initial_logical_size_computation_task(self: &Arc<Self>, ctx: &RequestContext) {

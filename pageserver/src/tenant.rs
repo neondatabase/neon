@@ -563,7 +563,7 @@ impl OffloadedTimeline {
             ancestor_retain_lsn,
             archived_at,
             remote_client: None,
-            delete_progress: Timeline::make_delete_progress(),
+            delete_progress: TimelineDeleteProgress::default(),
         }
     }
     fn manifest(&self) -> OffloadedTimelineManifest {
