@@ -1,7 +1,7 @@
 local neon = import 'neon.libsonnet';
 
-local pg_stat_bgwriter = importstr 'sql_exporter/checkpoints_req.sql';
-local pg_stat_checkpointer = importstr 'sql_exporter/checkpoints_req.17.sql';
+local pg_stat_bgwriter = importstr 'sql_exporter/checkpoints_timed.sql';
+local pg_stat_checkpointer = importstr 'sql_exporter/checkpoints_timed.17.sql';
 
 {
   metric_name: 'checkpoints_timed',
