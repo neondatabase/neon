@@ -13,6 +13,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use pageserver_api::shard::TenantShardId;
 use tokio::fs::{self, File, OpenOptions};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+use tokio_util::io::StreamReader;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 use utils::backoff;
@@ -338,6 +339,32 @@ pub async fn list_remote_timelines(
     list_identifiers::<TimelineId>(storage, remote_path, cancel).await
 }
 
+async fn do_download_remote_path_retry_forever(
+    storage: &GenericRemoteStorage,
+    remote_path: &RemotePath,
+    cancel: &CancellationToken,
+) -> Result<(Vec<u8>, SystemTime), DownloadError> {
+    download_retry_forever(
+        || async {
+            let download = storage
+                .download(remote_path, &DownloadOpts::default(), cancel)
+                .await?;
+
+            let mut bytes = Vec::new();
+
+            let stream = download.download_stream;
+            let mut stream = StreamReader::new(stream);
+
+            tokio::io::copy_buf(&mut stream, &mut bytes).await?;
+
+            Ok((bytes, download.last_modified))
+        },
+        &format!("download {remote_path:?}"),
+        cancel,
+    )
+    .await
+}
+
 pub async fn do_download_tenant_manifest(
     storage: &GenericRemoteStorage,
     tenant_shard_id: &TenantShardId,
@@ -347,13 +374,8 @@ pub async fn do_download_tenant_manifest(
     let generation = super::TENANT_MANIFEST_GENERATION;
     let remote_path = remote_tenant_manifest_path(tenant_shard_id, generation);
 
-    let (manifest_bytes, _manifest_bytes_mtime) = storage
-        .retry_forever_download_to_vec::<FAILED_DOWNLOAD_WARN_THRESHOLD>(
-            &remote_path,
-            &Default::default(),
-            cancel,
-        )
-        .await?;
+    let (manifest_bytes, _manifest_bytes_mtime) =
+        do_download_remote_path_retry_forever(storage, &remote_path, cancel).await?;
 
     let tenant_manifest = TenantManifest::from_json_bytes(&manifest_bytes)
         .with_context(|| format!("deserialize tenant manifest file at {remote_path:?}"))
@@ -371,13 +393,8 @@ async fn do_download_index_part(
 ) -> Result<(IndexPart, Generation, SystemTime), DownloadError> {
     let remote_path = remote_index_path(tenant_shard_id, timeline_id, index_generation);
 
-    let (index_part_bytes, index_part_mtime) = storage
-        .retry_forever_download_to_vec::<FAILED_DOWNLOAD_WARN_THRESHOLD>(
-            &remote_path,
-            &Default::default(),
-            cancel,
-        )
-        .await?;
+    let (index_part_bytes, index_part_mtime) =
+        do_download_remote_path_retry_forever(storage, &remote_path, cancel).await?;
 
     let index_part: IndexPart = serde_json::from_slice(&index_part_bytes)
         .with_context(|| format!("deserialize index part file at {remote_path:?}"))

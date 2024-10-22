@@ -21,7 +21,6 @@ mod support;
 use std::{
     collections::HashMap,
     fmt::Debug,
-    future::Future,
     num::NonZeroU32,
     ops::Bound,
     pin::{pin, Pin},
@@ -37,7 +36,7 @@ use futures::{stream::Stream, StreamExt};
 use itertools::Itertools as _;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
-use tokio_util::{io::StreamReader, sync::CancellationToken};
+use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 pub use self::{
@@ -631,32 +630,6 @@ impl GenericRemoteStorage {
             })
     }
 
-    /// Download the specified object into a memory buffer with infinite retries
-    pub async fn retry_forever_download_to_vec<const WARN_THRESHOLD: u32>(
-        &self,
-        remote_path: &RemotePath,
-        download_opts: &DownloadOpts,
-        cancel: &CancellationToken,
-    ) -> Result<(Vec<u8>, SystemTime), DownloadError> {
-        retry_forever::<_, _, _, WARN_THRESHOLD>(
-            || async {
-                let download = self.download(remote_path, download_opts, cancel).await?;
-
-                let mut bytes = Vec::new();
-
-                let stream = download.download_stream;
-                let mut stream = StreamReader::new(stream);
-
-                tokio::io::copy_buf(&mut stream, &mut bytes).await?;
-
-                Ok((bytes, download.last_modified))
-            },
-            &format!("download {remote_path:?}"),
-            cancel,
-        )
-        .await
-    }
-
     /// The name of the bucket/container/etc.
     pub fn bucket_name(&self) -> Option<&str> {
         match self {
@@ -666,28 +639,6 @@ impl GenericRemoteStorage {
             Self::Unreliable(_s) => None,
         }
     }
-}
-
-async fn retry_forever<T, O, F, const WARN_THRESHOLD: u32>(
-    op: O,
-    description: &str,
-    cancel: &CancellationToken,
-) -> Result<T, DownloadError>
-where
-    O: FnMut() -> F,
-    F: Future<Output = Result<T, DownloadError>>,
-{
-    utils::backoff::retry(
-        op,
-        DownloadError::is_permanent,
-        WARN_THRESHOLD,
-        u32::MAX,
-        description,
-        cancel,
-    )
-    .await
-    .ok_or_else(|| DownloadError::Cancelled)
-    .and_then(|x| x)
 }
 
 /// Extra set of key-value pairs that contain arbitrary metadata about the storage entry.
