@@ -39,6 +39,7 @@ use remote_timeline_client::UploadQueueNotReadyError;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
+use std::sync::OnceLock;
 use std::sync::Weak;
 use std::time::SystemTime;
 use storage_broker::BrokerClientChannel;
@@ -518,7 +519,7 @@ pub struct OffloadedTimeline {
     /// If we offload a timeline, we keep around the remote client
     /// for the duration of the process. If we find it through the
     /// manifest, we don't construct it up until it's needed (deletion).
-    pub remote_client: Option<Arc<RemoteTimelineClient>>,
+    pub remote_client: OnceLock<Arc<RemoteTimelineClient>>,
 
     /// Prevent two tasks from deleting the timeline at the same time. If held, the
     /// timeline is being deleted. If 'true', the timeline has already been deleted.
@@ -546,7 +547,7 @@ impl OffloadedTimeline {
             ancestor_retain_lsn,
             archived_at,
 
-            remote_client: Some(timeline.remote_client.clone()),
+            remote_client: OnceLock::from(timeline.remote_client.clone()),
             delete_progress: timeline.delete_progress.clone(),
         })
     }
@@ -563,7 +564,7 @@ impl OffloadedTimeline {
             ancestor_timeline_id,
             ancestor_retain_lsn,
             archived_at,
-            remote_client: None,
+            remote_client: OnceLock::new(),
             delete_progress: TimelineDeleteProgress::default(),
         }
     }
@@ -582,6 +583,15 @@ impl OffloadedTimeline {
             archived_at: *archived_at,
         }
     }
+    fn remote_client_maybe_construct(&self, tenant: &Tenant) -> &Arc<RemoteTimelineClient> {
+        self.remote_client.get_or_init(|| {
+            let remote_client = tenant.build_timeline_client(
+                self.timeline_id,
+                tenant.remote_storage.clone(),
+            );
+            Arc::new(remote_client)
+        })
+    }
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
@@ -597,11 +607,13 @@ pub enum TimelineOrOffloaded {
 }
 
 impl TimelineOrOffloaded {
-    pub fn arc_ref(&self) -> OffloadedTimelineArcRef<'_> {
+    pub fn arc_ref(&self) -> TimelineOrOffloadedArcRef<'_> {
         match self {
-            TimelineOrOffloaded::Timeline(timeline) => OffloadedTimelineArcRef::Timeline(timeline),
+            TimelineOrOffloaded::Timeline(timeline) => {
+                TimelineOrOffloadedArcRef::Timeline(timeline)
+            }
             TimelineOrOffloaded::Offloaded(offloaded) => {
-                OffloadedTimelineArcRef::Offloaded(offloaded)
+                TimelineOrOffloadedArcRef::Offloaded(offloaded)
             }
         }
     }
@@ -618,49 +630,43 @@ impl TimelineOrOffloaded {
         }
     }
     pub fn remote_client_maybe_construct(&self, tenant: &Tenant) -> Arc<RemoteTimelineClient> {
-        match self {
-            TimelineOrOffloaded::Timeline(timeline) => timeline.remote_client.clone(),
-            TimelineOrOffloaded::Offloaded(offloaded) => match offloaded.remote_client.clone() {
-                Some(remote_client) => remote_client,
-                None => {
-                    let remote_client = tenant.build_timeline_client(
-                        offloaded.timeline_id,
-                        tenant.remote_storage.clone(),
-                    );
-                    Arc::new(remote_client)
-                }
-            },
-        }
+        self.arc_ref().remote_client_maybe_construct(tenant)
     }
 }
 
-pub enum OffloadedTimelineArcRef<'a> {
+pub enum TimelineOrOffloadedArcRef<'a> {
     Timeline(&'a Arc<Timeline>),
     Offloaded(&'a Arc<OffloadedTimeline>),
 }
 
-impl OffloadedTimelineArcRef<'_> {
+impl TimelineOrOffloadedArcRef<'_> {
     pub fn tenant_shard_id(&self) -> TenantShardId {
         match self {
-            OffloadedTimelineArcRef::Timeline(timeline) => timeline.tenant_shard_id,
-            OffloadedTimelineArcRef::Offloaded(offloaded) => offloaded.tenant_shard_id,
+            TimelineOrOffloadedArcRef::Timeline(timeline) => timeline.tenant_shard_id,
+            TimelineOrOffloadedArcRef::Offloaded(offloaded) => offloaded.tenant_shard_id,
         }
     }
     pub fn timeline_id(&self) -> TimelineId {
         match self {
-            OffloadedTimelineArcRef::Timeline(timeline) => timeline.timeline_id,
-            OffloadedTimelineArcRef::Offloaded(offloaded) => offloaded.timeline_id,
+            TimelineOrOffloadedArcRef::Timeline(timeline) => timeline.timeline_id,
+            TimelineOrOffloadedArcRef::Offloaded(offloaded) => offloaded.timeline_id,
+        }
+    }
+    pub fn remote_client_maybe_construct(&self, tenant: &Tenant) -> Arc<RemoteTimelineClient> {
+        match self {
+            TimelineOrOffloadedArcRef::Timeline(timeline) => timeline.remote_client.clone(),
+            TimelineOrOffloadedArcRef::Offloaded(offloaded) => offloaded.remote_client_maybe_construct(tenant).clone(),
         }
     }
 }
 
-impl<'a> From<&'a Arc<Timeline>> for OffloadedTimelineArcRef<'a> {
+impl<'a> From<&'a Arc<Timeline>> for TimelineOrOffloadedArcRef<'a> {
     fn from(timeline: &'a Arc<Timeline>) -> Self {
         Self::Timeline(timeline)
     }
 }
 
-impl<'a> From<&'a Arc<OffloadedTimeline>> for OffloadedTimelineArcRef<'a> {
+impl<'a> From<&'a Arc<OffloadedTimeline>> for TimelineOrOffloadedArcRef<'a> {
     fn from(timeline: &'a Arc<OffloadedTimeline>) -> Self {
         Self::Offloaded(timeline)
     }
@@ -2951,33 +2957,51 @@ impl Tenant {
         &self,
         child_shards: &Vec<TenantShardId>,
     ) -> anyhow::Result<()> {
-        let timelines = self.timelines.lock().unwrap().clone();
-        for timeline in timelines.values() {
+        let (timelines, offloaded) = {
+            let timelines = self.timelines.lock().unwrap();
+            let offloaded = self.timelines_offloaded.lock().unwrap();
+            (timelines.clone(), offloaded.clone())
+        };
+        let timelines_iter = timelines
+            .values()
+            .map(TimelineOrOffloadedArcRef::<'_>::from)
+            .chain(
+                offloaded
+                    .values()
+                    .map(TimelineOrOffloadedArcRef::<'_>::from),
+            );
+        for timeline in timelines_iter {
             // We do not block timeline creation/deletion during splits inside the pageserver: it is up to higher levels
             // to ensure that they do not start a split if currently in the process of doing these.
 
-            // Upload an index from the parent: this is partly to provide freshness for the
-            // child tenants that will copy it, and partly for general ease-of-debugging: there will
-            // always be a parent shard index in the same generation as we wrote the child shard index.
-            tracing::info!(timeline_id=%timeline.timeline_id, "Uploading index");
-            timeline
-                .remote_client
-                .schedule_index_upload_for_file_changes()?;
-            timeline.remote_client.wait_completion().await?;
+            let timeline_id = timeline.timeline_id();
+
+            if let TimelineOrOffloadedArcRef::Timeline(timeline) = timeline {
+                // Upload an index from the parent: this is partly to provide freshness for the
+                // child tenants that will copy it, and partly for general ease-of-debugging: there will
+                // always be a parent shard index in the same generation as we wrote the child shard index.
+                tracing::info!(%timeline_id, "Uploading index");
+                timeline
+                    .remote_client
+                    .schedule_index_upload_for_file_changes()?;
+                timeline.remote_client.wait_completion().await?;
+            }
+
+            let remote_client = timeline.remote_client_maybe_construct(self);
 
             // Shut down the timeline's remote client: this means that the indices we write
             // for child shards will not be invalidated by the parent shard deleting layers.
-            tracing::info!(timeline_id=%timeline.timeline_id, "Shutting down remote storage client");
-            timeline.remote_client.shutdown().await;
+            tracing::info!(%timeline_id, "Shutting down remote storage client");
+            remote_client.shutdown().await;
 
             // Download methods can still be used after shutdown, as they don't flow through the remote client's
             // queue.  In principal the RemoteTimelineClient could provide this without downloading it, but this
             // operation is rare, so it's simpler to just download it (and robustly guarantees that the index
             // we use here really is the remotely persistent one).
-            tracing::info!(timeline_id=%timeline.timeline_id, "Downloading index_part from parent");
-            let result = timeline.remote_client
+            tracing::info!(%timeline_id, "Downloading index_part from parent");
+            let result = remote_client
                 .download_index_file(&self.cancel)
-                .instrument(info_span!("download_index_file", tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), timeline_id=%timeline.timeline_id))
+                .instrument(info_span!("download_index_file", tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), %timeline_id))
                 .await?;
             let index_part = match result {
                 MaybeDeletedIndexPart::Deleted(_) => {
@@ -2987,11 +3011,11 @@ impl Tenant {
             };
 
             for child_shard in child_shards {
-                tracing::info!(timeline_id=%timeline.timeline_id, "Uploading index_part for child {}", child_shard.to_index());
+                tracing::info!(%timeline_id, "Uploading index_part for child {}", child_shard.to_index());
                 upload_index_part(
                     &self.remote_storage,
                     child_shard,
-                    &timeline.timeline_id,
+                    &timeline_id,
                     self.generation,
                     &index_part,
                     &self.cancel,
@@ -2999,8 +3023,6 @@ impl Tenant {
                 .await?;
             }
         }
-
-        // TODO: also copy index files of offloaded timelines
 
         let tenant_manifest = self.tenant_manifest();
         // TODO: generation support
