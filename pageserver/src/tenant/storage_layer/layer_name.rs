@@ -1,7 +1,7 @@
 //!
 //! Helper functions for dealing with filenames of the image and delta layer files.
 //!
-use crate::repository::Key;
+use pageserver_api::key::Key;
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::fmt;
