@@ -317,7 +317,7 @@ impl StorageController {
             .expect("Failed to spawn pg_ctl, binary_missing?")
             .wait()
             .await
-            .expect("Failed to spawn pg_ctl, binary missing?")
+            .expect("Failed to wait for pg_ctl termination")
     }
 
     pub async fn start(&self, start_args: NeonStorageControllerStartArgs) -> anyhow::Result<()> {
