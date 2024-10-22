@@ -107,6 +107,15 @@ def test_storage_controller_smoke(neon_env_builder: NeonEnvBuilder, combination)
     for tid in tenant_ids:
         env.create_tenant(tid, shard_count=shards_per_tenant)
 
+    # Validate high level metrics
+    assert (
+        env.storage_controller.get_metric_value("storage_controller_tenant_shards")
+        == len(tenant_ids) * shards_per_tenant
+    )
+    assert env.storage_controller.get_metric_value("storage_controller_pageserver_nodes") == len(
+        env.storage_controller.node_list()
+    )
+
     # Repeating a creation should be idempotent (we are just testing it doesn't return an error)
     env.storage_controller.tenant_create(
         tenant_id=next(iter(tenant_ids)), shard_count=shards_per_tenant

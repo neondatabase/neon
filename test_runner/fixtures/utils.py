@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, Callable, TypeVar
 from urllib.parse import urlencode
 
 import allure
+import pytest
 import zstandard
 from psycopg2.extensions import cursor
 from typing_extensions import override
@@ -634,9 +635,27 @@ def allpairs_versions():
     the different versions.
     """
     ids = []
+    argvalues = []
+    compat_not_defined = (
+        os.getenv("COMPATIBILITY_POSTGRES_DISTRIB_DIR") is None
+        or os.getenv("COMPATIBILITY_NEON_BIN") is None
+    )
     for pair in VERSIONS_COMBINATIONS:
         cur_id = []
+        all_new = all(v == "new" for v in pair.values())
         for component in sorted(pair.keys()):
             cur_id.append(pair[component][0])
+        # Adding None if all versions are new, sof no need to mix at all
+        # If COMPATIBILITY_NEON_BIN or COMPATIBILITY_POSTGRES_DISTRIB_DIR are not defined,
+        # we will skip all the tests which include the versions mix.
+        argvalues.append(
+            pytest.param(
+                None if all_new else pair,
+                marks=pytest.mark.skipif(
+                    compat_not_defined and not all_new,
+                    reason="COMPATIBILITY_NEON_BIN or COMPATIBILITY_POSTGRES_DISTRIB_DIR is not set",
+                ),
+            )
+        )
         ids.append(f"combination_{''.join(cur_id)}")
-    return {"argnames": "combination", "argvalues": VERSIONS_COMBINATIONS, "ids": ids}
+    return {"argnames": "combination", "argvalues": tuple(argvalues), "ids": ids}

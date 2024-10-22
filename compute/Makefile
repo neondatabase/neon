@@ -34,7 +34,7 @@ sql_exporter_autoscaling.yml: $(jsonnet_files)
 
 .PHONY: clean
 clean:
-	rm -f \
+	$(RM) \
 		etc/neon_collector.yml \
 		etc/neon_collector_autoscaling.yml \
 		etc/sql_exporter.yml \
