@@ -118,7 +118,7 @@ fn emit_launch_failure_process_stats() {
     let tokio_epoll_uring::metrics::Metrics {
         systems_created,
         systems_destroyed,
-        slots_waiters_queue_depth,
+        slots_waiters_queue_depth: _,
     } = tokio_epoll_uring::metrics::global();
     info!(systems_created, systems_destroyed, "tokio-epoll-uring");
 
