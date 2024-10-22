@@ -645,7 +645,9 @@ def allpairs_versions():
         all_new = all(v == "new" for v in pair.values())
         for component in sorted(pair.keys()):
             cur_id.append(pair[component][0])
-            all_new = all_new and (pair[component] == "new")
+        # Adding None if all versions are new, sof no need to mix at all
+        # If COMPATIBILITY_NEON_BIN or COMPATIBILITY_POSTGRES_DISTRIB_DIR are not defined,
+        # we will skip all the tests which include the versions mix.
         argvalues.append(
             pytest.param(
                 None if all_new else pair,
