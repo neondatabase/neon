@@ -67,7 +67,9 @@ pub(crate) fn apply_in_neon(
                 let map = &mut page[pg_constants::MAXALIGN_SIZE_OF_PAGE_HEADER_DATA..];
 
                 map[map_byte as usize] &= !(flags << map_offset);
-                postgres_ffi::page_set_lsn(page, lsn);
+                if !postgres_ffi::page_is_new(page) {
+                    postgres_ffi::page_set_lsn(page, lsn);
+                }
             }
 
             // Repeat for 'old_heap_blkno', if any
@@ -81,7 +83,9 @@ pub(crate) fn apply_in_neon(
                 let map = &mut page[pg_constants::MAXALIGN_SIZE_OF_PAGE_HEADER_DATA..];
 
                 map[map_byte as usize] &= !(flags << map_offset);
-                postgres_ffi::page_set_lsn(page, lsn);
+                if !postgres_ffi::page_is_new(page) {
+                    postgres_ffi::page_set_lsn(page, lsn);
+                }
             }
         }
         // Non-relational WAL records are handled here, with custom code that has the
