@@ -841,7 +841,8 @@ jobs:
           ./vm-builder \
             -spec=compute/vm-image-spec-${{ matrix.version.debian }}.yaml \
             -src=neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }} \
-            -dst=neondatabase/vm-compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}
+            -dst=neondatabase/vm-compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }} \
+            -size=1.1G
 
       - name: Pushing vm-compute-node image
         run: |
