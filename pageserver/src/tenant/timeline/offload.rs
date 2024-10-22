@@ -67,7 +67,7 @@ pub(crate) async fn offload_timeline(
     // not our actual state of offloaded timelines.
     let manifest = tenant.tenant_manifest();
     // TODO: generation support
-    let generation = Generation::none();
+    let generation = remote_timeline_client::TENANT_MANIFEST_GENERATION;
     remote_timeline_client::upload_tenant_manifest(
         &tenant.remote_storage,
         &tenant.tenant_shard_id,

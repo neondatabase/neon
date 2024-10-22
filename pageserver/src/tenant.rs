@@ -1204,19 +1204,26 @@ impl Tenant {
             cancel.clone(),
         )
         .await?;
-        let tenant_manifest = match remote_timeline_client::do_download_tenant_manifest(
-            remote_storage,
-            &self.tenant_shard_id,
-            &cancel,
-        )
-        .await
-        {
-            Ok((tenant_manifest, _generation)) => tenant_manifest,
-            Err(DownloadError::NotFound) => TenantManifest::empty(),
-            Err(e) => Err(e)?,
-        };
+        let (offloaded_add, tenant_manifest) =
+            match remote_timeline_client::do_download_tenant_manifest(
+                remote_storage,
+                &self.tenant_shard_id,
+                &cancel,
+            )
+            .await
+            {
+                Ok((tenant_manifest, _generation)) => (
+                    format!("{} offloaded", tenant_manifest.offloaded_timelines.len()),
+                    tenant_manifest,
+                ),
+                Err(DownloadError::NotFound) => (format!("no manifest"), TenantManifest::empty()),
+                Err(e) => Err(e)?,
+            };
 
-        info!("found {} timelines", remote_timeline_ids.len());
+        info!(
+            "found {} timelines, and {offloaded_add}",
+            remote_timeline_ids.len()
+        );
 
         for k in other_keys {
             warn!("Unexpected non timeline key {k}");
@@ -1385,7 +1392,10 @@ impl Tenant {
                 !delete
         });
         if !offloaded_timelines_list.is_empty() {
-            tracing::info!("Tenant has {} offloaded timelines", offloaded_timelines_list.len());
+            tracing::info!(
+                "Tenant has {} offloaded timelines",
+                offloaded_timelines_list.len()
+            );
         }
         {
             let mut offloaded_timelines_accessor = self.timelines_offloaded.lock().unwrap();
