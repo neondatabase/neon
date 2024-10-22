@@ -666,7 +666,7 @@ RUN apt-get update && \
 #
 # Use new version only for v17
 # because Release_2024_09_1 has some backward incompatible changes
-# https://github.com/rdkit/rdkit/releases/tag/Release_2024_09_1 
+# https://github.com/rdkit/rdkit/releases/tag/Release_2024_09_1
 ENV PATH="/usr/local/pgsql/bin/:/usr/local/pgsql/:$PATH"
 RUN case "${PG_VERSION}" in \
     "v17") \
@@ -860,13 +860,14 @@ ENV PATH="/home/nonroot/.cargo/bin:/usr/local/pgsql/bin/:$PATH"
 USER nonroot
 WORKDIR /home/nonroot
 
-RUN case "${PG_VERSION}" in "v17") \
-    echo "v17 is not supported yet by pgrx. Quit" && exit 0;; \
-    esac && \
-    curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux-gnu/rustup-init && \
+RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux-gnu/rustup-init && \
     chmod +x rustup-init && \
     ./rustup-init -y --no-modify-path --profile minimal --default-toolchain stable && \
     rm rustup-init && \
+    case "${PG_VERSION}" in \
+        'v17') \
+            echo 'v17 is not supported yet by pgrx. Quit' && exit 0;; \
+    esac && \
     cargo install --locked --version 0.11.3 cargo-pgrx && \
     /bin/bash -c 'cargo pgrx init --pg${PG_VERSION:1}=/usr/local/pgsql/bin/pg_config'
 
@@ -1043,6 +1044,31 @@ RUN wget https://github.com/pgpartman/pg_partman/archive/refs/tags/v5.1.0.tar.gz
 
 #########################################################################################
 #
+# Layer "pg_mooncake"
+# compile pg_mooncake extension
+#
+#########################################################################################
+FROM rust-extensions-build AS pg-mooncake-build
+ARG PG_VERSION
+COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
+
+ENV PG_MOONCAKE_VERSION=0a7de4c0b5c7b1a5e2175e1c5f4625b97b7346f1
+ENV PATH="/usr/local/pgsql/bin/:$PATH"
+
+RUN case "${PG_VERSION}" in \
+        'v14') \
+            echo "pg_mooncake is not supported on Postgres ${PG_VERSION}" && exit 0;; \
+    esac && \
+    git clone --depth 1 --branch neon https://github.com/Mooncake-Labs/pg_mooncake.git pg_mooncake-src && \
+    cd pg_mooncake-src && \
+    git checkout "${PG_MOONCAKE_VERSION}" && \
+    git submodule update --init --depth 1 --recursive && \
+    make BUILD_TYPE=release -j $(getconf _NPROCESSORS_ONLN) && \
+    make BUILD_TYPE=release -j $(getconf _NPROCESSORS_ONLN) install && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/pg_mooncake.control
+
+#########################################################################################
+#
 # Layer "neon-pg-ext-build"
 # compile neon extensions
 #
@@ -1084,6 +1110,7 @@ COPY --from=wal2json-pg-build /usr/local/pgsql /usr/local/pgsql
 COPY --from=pg-anon-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-ivm-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-partman-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pg-mooncake-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY pgxn/ pgxn/
 
 RUN make -j $(getconf _NPROCESSORS_ONLN) \
