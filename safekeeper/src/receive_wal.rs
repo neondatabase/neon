@@ -311,7 +311,7 @@ impl SafekeeperPostgresHandler {
 
                 // Otherwise, WalAcceptor thread must have errored.
                 match wal_acceptor_res {
-                    Ok(Ok(_)) => Ok(()), // can't happen currently; would be if we add graceful termination
+                    Ok(Ok(_)) => Ok(()), // Clean shutdown
                     Ok(Err(e)) => Err(CopyStreamHandlerEnd::Other(e.context("WAL acceptor"))),
                     Err(_) => Err(CopyStreamHandlerEnd::Other(anyhow!(
                         "WalAcceptor task panicked",
