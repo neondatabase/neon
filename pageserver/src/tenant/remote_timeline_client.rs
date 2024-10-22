@@ -483,7 +483,9 @@ impl RemoteTimelineClient {
     /// Returns `Ok(Some(timestamp))` if the timeline has been archived, `Ok(None)` if the timeline hasn't been archived.
     ///
     /// Return Err(_) if the remote index_part hasn't been downloaded yet, or the timeline hasn't been stopped yet.
-    pub(crate) fn archived_at_stopped_queue(&self) -> Result<Option<NaiveDateTime>, UploadQueueNotReadyError> {
+    pub(crate) fn archived_at_stopped_queue(
+        &self,
+    ) -> Result<Option<NaiveDateTime>, UploadQueueNotReadyError> {
         self.upload_queue
             .lock()
             .unwrap()
