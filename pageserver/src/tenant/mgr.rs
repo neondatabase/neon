@@ -2836,7 +2836,7 @@ where
 }
 
 use {
-    crate::repository::GcResult, pageserver_api::models::TimelineGcRequest,
+    crate::gc_result::GcResult, pageserver_api::models::TimelineGcRequest,
     utils::http::error::ApiError,
 };
 

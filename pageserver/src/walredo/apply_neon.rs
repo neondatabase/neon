@@ -1,9 +1,9 @@
 use crate::pgdatadir_mapping::AuxFilesDirectory;
-use crate::walrecord::NeonWalRecord;
 use anyhow::Context;
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::{BufMut, BytesMut};
 use pageserver_api::key::Key;
+use pageserver_api::record::NeonWalRecord;
 use pageserver_api::reltag::SlruKind;
 use postgres_ffi::pg_constants;
 use postgres_ffi::relfile_utils::VISIBILITYMAP_FORKNUM;
@@ -244,7 +244,7 @@ pub(crate) fn apply_in_neon(
             let mut writer = page.writer();
             dir.ser_into(&mut writer)?;
         }
-        #[cfg(test)]
+        #[cfg(feature = "testing")]
         NeonWalRecord::Test {
             append,
             clear,

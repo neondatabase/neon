@@ -19,10 +19,9 @@ use crate::metrics::WAL_INGEST;
 use crate::pgdatadir_mapping::*;
 use crate::tenant::Timeline;
 use crate::walingest::WalIngest;
-use crate::walrecord::decode_wal_record;
-use crate::walrecord::DecodedWALRecord;
 use pageserver_api::reltag::{RelTag, SlruKind};
 use postgres_ffi::pg_constants;
+use postgres_ffi::record::{decode_wal_record, DecodedWALRecord};
 use postgres_ffi::relfile_utils::*;
 use postgres_ffi::waldecoder::WalStreamDecoder;
 use postgres_ffi::ControlFileData;
@@ -456,6 +455,7 @@ pub async fn import_wal_from_tar(
             if let Some((lsn, recdata)) = waldecoder.poll_decode()? {
                 let mut decoded = DecodedWALRecord::default();
                 decode_wal_record(recdata, &mut decoded, tline.pg_version)?;
+                // let (ephemeral_file_ready_buf, special_records) = decode_wal_record(recdata, tline.pg_version);
                 walingest
                     .ingest_record(decoded, lsn, &mut modification, ctx)
                     .await?;

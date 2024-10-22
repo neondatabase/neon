@@ -79,6 +79,7 @@ use crate::config::PageServerConf;
 use crate::context::{DownloadBehavior, RequestContext};
 use crate::deletion_queue::DeletionQueueClient;
 use crate::deletion_queue::DeletionQueueError;
+use crate::gc_result::GcResult;
 use crate::import_datadir;
 use crate::is_uninit_mark;
 use crate::l0_flush::L0FlushGlobalState;
@@ -87,7 +88,6 @@ use crate::metrics::{
     remove_tenant_metrics, BROKEN_TENANTS_SET, CIRCUIT_BREAKERS_BROKEN, CIRCUIT_BREAKERS_UNBROKEN,
     TENANT_STATE_METRIC, TENANT_SYNTHETIC_SIZE_METRIC,
 };
-use crate::repository::GcResult;
 use crate::task_mgr;
 use crate::task_mgr::TaskKind;
 use crate::tenant::config::LocationMode;
@@ -461,10 +461,10 @@ impl WalRedoManager {
     /// This method is cancellation-safe.
     pub async fn request_redo(
         &self,
-        key: crate::repository::Key,
+        key: pageserver_api::key::Key,
         lsn: Lsn,
         base_img: Option<(Lsn, bytes::Bytes)>,
-        records: Vec<(Lsn, crate::walrecord::NeonWalRecord)>,
+        records: Vec<(Lsn, pageserver_api::record::NeonWalRecord)>,
         pg_version: u32,
     ) -> Result<bytes::Bytes, walredo::Error> {
         match self {
@@ -4297,7 +4297,8 @@ pub(crate) mod harness {
     use crate::deletion_queue::mock::MockDeletionQueue;
     use crate::l0_flush::L0FlushConfig;
     use crate::walredo::apply_neon;
-    use crate::{repository::Key, walrecord::NeonWalRecord};
+    use pageserver_api::key::Key;
+    use pageserver_api::record::NeonWalRecord;
 
     use super::*;
     use hex_literal::hex;
@@ -4568,17 +4569,17 @@ mod tests {
     use super::*;
     use crate::keyspace::KeySpaceAccum;
     use crate::pgdatadir_mapping::AuxFilesDirectory;
-    use crate::repository::{Key, Value};
     use crate::tenant::harness::*;
     use crate::tenant::timeline::CompactFlags;
-    use crate::walrecord::NeonWalRecord;
     use crate::DEFAULT_PG_VERSION;
     use bytes::{Bytes, BytesMut};
     use hex_literal::hex;
     use itertools::Itertools;
-    use pageserver_api::key::{AUX_FILES_KEY, AUX_KEY_PREFIX, NON_INHERITED_RANGE};
+    use pageserver_api::key::{Key, AUX_FILES_KEY, AUX_KEY_PREFIX, NON_INHERITED_RANGE};
     use pageserver_api::keyspace::KeySpace;
     use pageserver_api::models::{CompactionAlgorithm, CompactionAlgorithmSettings};
+    use pageserver_api::record::NeonWalRecord;
+    use pageserver_api::value::Value;
     use rand::{thread_rng, Rng};
     use storage_layer::PersistentLayerKey;
     use tests::storage_layer::ValuesReconstructState;

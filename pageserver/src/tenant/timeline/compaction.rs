@@ -48,9 +48,10 @@ use pageserver_api::config::tenant_conf_defaults::{
     DEFAULT_CHECKPOINT_DISTANCE, DEFAULT_COMPACTION_THRESHOLD,
 };
 
-use crate::keyspace::KeySpace;
-use crate::repository::{Key, Value};
-use crate::walrecord::NeonWalRecord;
+use pageserver_api::key::Key;
+use pageserver_api::keyspace::KeySpace;
+use pageserver_api::record::NeonWalRecord;
+use pageserver_api::value::Value;
 
 use utils::lsn::Lsn;
 
@@ -2128,7 +2129,7 @@ struct ResidentDeltaLayer(ResidentLayer);
 struct ResidentImageLayer(ResidentLayer);
 
 impl CompactionJobExecutor for TimelineAdaptor {
-    type Key = crate::repository::Key;
+    type Key = pageserver_api::key::Key;
 
     type Layer = OwnArc<PersistentLayerDesc>;
     type DeltaLayer = ResidentDeltaLayer;

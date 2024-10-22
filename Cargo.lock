@@ -3656,6 +3656,7 @@ dependencies = [
  "tracing",
  "url",
  "utils",
+ "wal_decoder",
  "walkdir",
  "workspace_hack",
 ]
@@ -4093,6 +4094,7 @@ dependencies = [
  "regex",
  "serde",
  "thiserror",
+ "tracing",
  "utils",
 ]
 
@@ -6857,6 +6859,19 @@ dependencies = [
  "postgres",
  "postgres_ffi",
  "regex",
+ "utils",
+]
+
+[[package]]
+name = "wal_decoder"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "pageserver_api",
+ "postgres_ffi",
+ "serde",
+ "tracing",
  "utils",
 ]
 
