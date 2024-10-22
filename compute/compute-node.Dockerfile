@@ -1035,15 +1035,15 @@ RUN case "${PG_VERSION}" in "v17") \
 FROM rust-extensions-build AS pg-session-jwt-build
 ARG PG_VERSION
 
-# doesn't support pg17 yet
-# it depends on pgrx which doesn't support pg17
+# Both pgrx 0.12.6 and 0.11.3 are maintained in parallel, with identical extension versions and features.
 RUN case "${PG_VERSION}" in \
     "v17") \
-        echo "pg_session_jwt does not yet have a release that supports pg17" && exit 0;; \
+        export PG_SESSION_JWT_VERSION=0.1.2-v17 \
+        esport PG_SESSION_JWT_CHECKSUM=c8ecbed9cb8c6441bce5134a176002b043018adf9d05a08e457dda233090a86e \
     ;; \
     "v14" | "v15" | "v16") \
-        export PG_SESSION_JWT_VERSION=0.1.1 \
-        esport PG_SESSION_JWT_CHECKSUM=5d91b10bc1347d36cffc456cb87bec25047935d6503dc652ca046f04760828e7 \
+        export PG_SESSION_JWT_VERSION=0.1.2 \
+        esport PG_SESSION_JWT_CHECKSUM=837932a077888d5545fd54b0abcc79e5f8e37017c2769a930afc2f5c94df6f4e \
     ;; \
     *) \
         echo "unexpected PostgreSQL version" && exit 1 \
