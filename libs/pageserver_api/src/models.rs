@@ -699,6 +699,8 @@ pub struct OffloadedTimelineInfo {
     pub ancestor_timeline_id: Option<TimelineId>,
     /// Whether to retain the branch lsn at the ancestor or not
     pub ancestor_retain_lsn: Option<Lsn>,
+    /// The time point when the timeline was archived
+    pub archived_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// This represents the output of the "timeline_detail" and "timeline_list" API calls.

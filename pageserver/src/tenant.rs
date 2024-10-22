@@ -16,6 +16,7 @@ use anyhow::{bail, Context};
 use arc_swap::ArcSwap;
 use camino::Utf8Path;
 use camino::Utf8PathBuf;
+use chrono::NaiveDateTime;
 use enumset::EnumSet;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
@@ -31,6 +32,10 @@ use pageserver_api::shard::TenantShardId;
 use remote_storage::DownloadError;
 use remote_storage::GenericRemoteStorage;
 use remote_storage::TimeoutOrCancel;
+use remote_timeline_client::manifest::{
+    OffloadedTimelineManifest, TenantManifest, LATEST_TENANT_MANIFEST_VERSION,
+};
+use remote_timeline_client::UploadQueueNotReadyError;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
@@ -65,13 +70,14 @@ use self::config::TenantConf;
 use self::metadata::TimelineMetadata;
 use self::mgr::GetActiveTenantError;
 use self::mgr::GetTenantError;
-use self::remote_timeline_client::upload::upload_index_part;
+use self::remote_timeline_client::upload::{upload_index_part, upload_tenant_manifest};
 use self::remote_timeline_client::{RemoteTimelineClient, WaitCompletionError};
 use self::timeline::uninit::TimelineCreateGuard;
 use self::timeline::uninit::TimelineExclusionError;
 use self::timeline::uninit::UninitializedTimeline;
 use self::timeline::EvictionTaskTenantState;
 use self::timeline::GcCutoffs;
+use self::timeline::TimelineDeleteProgress;
 use self::timeline::TimelineResources;
 use self::timeline::WaitLsnError;
 use crate::config::PageServerConf;
@@ -240,6 +246,7 @@ struct TimelinePreload {
 }
 
 pub(crate) struct TenantPreload {
+    tenant_manifest: TenantManifest,
     timelines: HashMap<TimelineId, TimelinePreload>,
 }
 
@@ -488,6 +495,12 @@ impl WalRedoManager {
     }
 }
 
+/// A very lightweight memory representation of an offloaded timeline.
+///
+/// We need to store the list of offloaded timelines so that we can perform operations on them,
+/// like unoffloading them, or (at a later date), decide to perform flattening.
+/// This type has a much smaller memory impact than [`Timeline`], and thus we can store many
+/// more offloaded timelines than we can manage ones that aren't.
 pub struct OffloadedTimeline {
     pub tenant_shard_id: TenantShardId,
     pub timeline_id: TimelineId,
@@ -495,27 +508,78 @@ pub struct OffloadedTimeline {
     /// Whether to retain the branch lsn at the ancestor or not
     pub ancestor_retain_lsn: Option<Lsn>,
 
-    // TODO: once we persist offloaded state, make this lazily constructed
-    pub remote_client: Arc<RemoteTimelineClient>,
+    /// When the timeline was archived.
+    ///
+    /// Present for future flattening deliberations.
+    pub archived_at: NaiveDateTime,
+
+    /// Lazily constructed remote client for the timeline
+    ///
+    /// If we offload a timeline, we keep around the remote client
+    /// for the duration of the process. If we find it through the
+    /// manifest, we don't construct it up until it's needed (deletion).
+    pub remote_client: Option<Arc<RemoteTimelineClient>>,
 
     /// Prevent two tasks from deleting the timeline at the same time. If held, the
     /// timeline is being deleted. If 'true', the timeline has already been deleted.
-    pub delete_progress: Arc<tokio::sync::Mutex<DeleteTimelineFlow>>,
+    pub delete_progress: TimelineDeleteProgress,
 }
 
 impl OffloadedTimeline {
-    fn from_timeline(timeline: &Timeline) -> Self {
+    /// Obtains an offloaded timeline from a given timeline object.
+    ///
+    /// Returns `None` if the `archived_at` flag couldn't be obtained, i.e.
+    /// the timeline is not in a stopped state.
+    /// Panics if the timeline is not archived.
+    fn from_timeline(timeline: &Timeline) -> Result<Self, UploadQueueNotReadyError> {
         let ancestor_retain_lsn = timeline
             .get_ancestor_timeline_id()
             .map(|_timeline_id| timeline.get_ancestor_lsn());
-        Self {
+        let archived_at = timeline
+            .remote_client
+            .archived_at_stopped_queue()?
+            .expect("must be called on an archived timeline");
+        Ok(Self {
             tenant_shard_id: timeline.tenant_shard_id,
             timeline_id: timeline.timeline_id,
             ancestor_timeline_id: timeline.get_ancestor_timeline_id(),
             ancestor_retain_lsn,
+            archived_at,
 
-            remote_client: timeline.remote_client.clone(),
+            remote_client: Some(timeline.remote_client.clone()),
             delete_progress: timeline.delete_progress.clone(),
+        })
+    }
+    fn from_manifest(tenant_shard_id: TenantShardId, manifest: &OffloadedTimelineManifest) -> Self {
+        let OffloadedTimelineManifest {
+            timeline_id,
+            ancestor_timeline_id,
+            ancestor_retain_lsn,
+            archived_at,
+        } = *manifest;
+        Self {
+            tenant_shard_id,
+            timeline_id,
+            ancestor_timeline_id,
+            ancestor_retain_lsn,
+            archived_at,
+            remote_client: None,
+            delete_progress: TimelineDeleteProgress::default(),
+        }
+    }
+    fn manifest(&self) -> OffloadedTimelineManifest {
+        let Self {
+            timeline_id,
+            ancestor_timeline_id,
+            ancestor_retain_lsn,
+            archived_at,
+            ..
+        } = self;
+        OffloadedTimelineManifest {
+            timeline_id: *timeline_id,
+            ancestor_timeline_id: *ancestor_timeline_id,
+            ancestor_retain_lsn: *ancestor_retain_lsn,
+            archived_at: *archived_at,
         }
     }
 }
@@ -551,10 +615,19 @@ impl TimelineOrOffloaded {
             TimelineOrOffloaded::Offloaded(offloaded) => &offloaded.delete_progress,
         }
     }
-    pub fn remote_client(&self) -> &Arc<RemoteTimelineClient> {
+    pub fn remote_client_maybe_construct(&self, tenant: &Tenant) -> Arc<RemoteTimelineClient> {
         match self {
-            TimelineOrOffloaded::Timeline(timeline) => &timeline.remote_client,
-            TimelineOrOffloaded::Offloaded(offloaded) => &offloaded.remote_client,
+            TimelineOrOffloaded::Timeline(timeline) => timeline.remote_client.clone(),
+            TimelineOrOffloaded::Offloaded(offloaded) => match offloaded.remote_client.clone() {
+                Some(remote_client) => remote_client,
+                None => {
+                    let remote_client = tenant.build_timeline_client(
+                        offloaded.timeline_id,
+                        tenant.remote_storage.clone(),
+                    );
+                    Arc::new(remote_client)
+                }
+            },
         }
     }
 }
@@ -1131,14 +1204,35 @@ impl Tenant {
             cancel.clone(),
         )
         .await?;
+        let (offloaded_add, tenant_manifest) =
+            match remote_timeline_client::do_download_tenant_manifest(
+                remote_storage,
+                &self.tenant_shard_id,
+                &cancel,
+            )
+            .await
+            {
+                Ok((tenant_manifest, _generation)) => (
+                    format!("{} offloaded", tenant_manifest.offloaded_timelines.len()),
+                    tenant_manifest,
+                ),
+                Err(DownloadError::NotFound) => {
+                    ("no manifest".to_string(), TenantManifest::empty())
+                }
+                Err(e) => Err(e)?,
+            };
 
-        info!("found {} timelines", remote_timeline_ids.len(),);
+        info!(
+            "found {} timelines, and {offloaded_add}",
+            remote_timeline_ids.len()
+        );
 
         for k in other_keys {
             warn!("Unexpected non timeline key {k}");
         }
 
         Ok(TenantPreload {
+            tenant_manifest,
             timelines: self
                 .load_timelines_metadata(remote_timeline_ids, remote_storage, cancel)
                 .await?,
@@ -1163,12 +1257,26 @@ impl Tenant {
             anyhow::bail!("local-only deployment is no longer supported, https://github.com/neondatabase/neon/issues/5624");
         };
 
+        let mut offloaded_timeline_ids = HashSet::new();
+        let mut offloaded_timelines_list = Vec::new();
+        for timeline_manifest in preload.tenant_manifest.offloaded_timelines.iter() {
+            let timeline_id = timeline_manifest.timeline_id;
+            let offloaded_timeline =
+                OffloadedTimeline::from_manifest(self.tenant_shard_id, timeline_manifest);
+            offloaded_timelines_list.push((timeline_id, Arc::new(offloaded_timeline)));
+            offloaded_timeline_ids.insert(timeline_id);
+        }
+
         let mut timelines_to_resume_deletions = vec![];
 
         let mut remote_index_and_client = HashMap::new();
         let mut timeline_ancestors = HashMap::new();
         let mut existent_timelines = HashSet::new();
         for (timeline_id, preload) in preload.timelines {
+            if offloaded_timeline_ids.remove(&timeline_id) {
+                // The timeline is offloaded, skip loading it.
+                continue;
+            }
             let index_part = match preload.index_part {
                 Ok(i) => {
                     debug!("remote index part exists for timeline {timeline_id}");
@@ -1271,6 +1379,43 @@ impl Tenant {
             .await
             .context("resume_deletion")
             .map_err(LoadLocalTimelineError::ResumeDeletion)?;
+        }
+        // Complete deletions for offloaded timeline id's.
+        offloaded_timelines_list
+            .retain(|(offloaded_id, _offloaded)| {
+                // At this point, offloaded_timeline_ids has the list of all offloaded timelines
+                // without a prefix in S3, so they are inexistent.
+                // In the end, existence of a timeline is finally determined by the existence of an index-part.json in remote storage.
+                // If there is a dangling reference in another location, they need to be cleaned up.
+                let delete = offloaded_timeline_ids.contains(offloaded_id);
+                if delete {
+                    tracing::info!("Removing offloaded timeline {offloaded_id} from manifest as no remote prefix was found");
+                }
+                !delete
+        });
+        if !offloaded_timelines_list.is_empty() {
+            tracing::info!(
+                "Tenant has {} offloaded timelines",
+                offloaded_timelines_list.len()
+            );
+        }
+        {
+            let mut offloaded_timelines_accessor = self.timelines_offloaded.lock().unwrap();
+            offloaded_timelines_accessor.extend(offloaded_timelines_list.into_iter());
+        }
+        if !offloaded_timeline_ids.is_empty() {
+            let manifest = self.tenant_manifest();
+            // TODO: generation support
+            let generation = remote_timeline_client::TENANT_MANIFEST_GENERATION;
+            upload_tenant_manifest(
+                &self.remote_storage,
+                &self.tenant_shard_id,
+                generation,
+                &manifest,
+                &self.cancel,
+            )
+            .await
+            .map_err(TimelineArchivalError::Other)?;
         }
 
         // The local filesystem contents are a cache of what's in the remote IndexPart;
@@ -1443,20 +1588,28 @@ impl Tenant {
         Ok(timeline_preloads)
     }
 
-    fn load_timeline_metadata(
-        self: &Arc<Tenant>,
+    fn build_timeline_client(
+        &self,
         timeline_id: TimelineId,
         remote_storage: GenericRemoteStorage,
-        cancel: CancellationToken,
-    ) -> impl Future<Output = TimelinePreload> {
-        let client = RemoteTimelineClient::new(
+    ) -> RemoteTimelineClient {
+        RemoteTimelineClient::new(
             remote_storage.clone(),
             self.deletion_queue_client.clone(),
             self.conf,
             self.tenant_shard_id,
             timeline_id,
             self.generation,
-        );
+        )
+    }
+
+    fn load_timeline_metadata(
+        self: &Arc<Tenant>,
+        timeline_id: TimelineId,
+        remote_storage: GenericRemoteStorage,
+        cancel: CancellationToken,
+    ) -> impl Future<Output = TimelinePreload> {
+        let client = self.build_timeline_client(timeline_id, remote_storage);
         async move {
             debug_assert_current_span_has_tenant_and_timeline_id();
             debug!("starting index part download");
@@ -1547,7 +1700,7 @@ impl Tenant {
         info!("unoffloading timeline");
         let cancel = self.cancel.clone();
         let timeline_preload = self
-            .load_timeline_metadata(timeline_id, self.remote_storage.clone(), cancel)
+            .load_timeline_metadata(timeline_id, self.remote_storage.clone(), cancel.clone())
             .await;
 
         let index_part = match timeline_preload.index_part {
@@ -1592,17 +1745,37 @@ impl Tenant {
             )
         })
         .map_err(TimelineArchivalError::Other)?;
-        let timelines = self.timelines.lock().unwrap();
-        let Some(timeline) = timelines.get(&timeline_id) else {
-            warn!("timeline not available directly after attach");
-            return Err(TimelineArchivalError::Other(anyhow::anyhow!(
-                "timeline not available directly after attach"
-            )));
+
+        let timeline = {
+            let timelines = self.timelines.lock().unwrap();
+            let Some(timeline) = timelines.get(&timeline_id) else {
+                warn!("timeline not available directly after attach");
+                // This is not a panic because no locks are held between `load_remote_timeline`
+                // which puts the timeline into timelines, and our look into the timeline map.
+                return Err(TimelineArchivalError::Other(anyhow::anyhow!(
+                    "timeline not available directly after attach"
+                )));
+            };
+            let mut offloaded_timelines = self.timelines_offloaded.lock().unwrap();
+            if offloaded_timelines.remove(&timeline_id).is_none() {
+                warn!("timeline already removed from offloaded timelines");
+            }
+            Arc::clone(timeline)
         };
-        let mut offloaded_timelines = self.timelines_offloaded.lock().unwrap();
-        if offloaded_timelines.remove(&timeline_id).is_none() {
-            warn!("timeline already removed from offloaded timelines");
-        }
+
+        // Upload new list of offloaded timelines to S3
+        let manifest = self.tenant_manifest();
+        // TODO: generation support
+        let generation = remote_timeline_client::TENANT_MANIFEST_GENERATION;
+        upload_tenant_manifest(
+            &self.remote_storage,
+            &self.tenant_shard_id,
+            generation,
+            &manifest,
+            &cancel,
+        )
+        .await
+        .map_err(TimelineArchivalError::Other)?;
 
         // Activate the timeline (if it makes sense)
         if !(timeline.is_broken() || timeline.is_stopping()) {
@@ -1616,7 +1789,7 @@ impl Tenant {
         }
 
         info!("timeline unoffloading complete");
-        Ok(Arc::clone(timeline))
+        Ok(timeline)
     }
 
     pub(crate) async fn apply_timeline_archival_config(
@@ -2793,6 +2966,26 @@ impl Tenant {
             }
         }
 
+        // TODO: also copy index files of offloaded timelines
+
+        let tenant_manifest = self.tenant_manifest();
+        // TODO: generation support
+        let generation = remote_timeline_client::TENANT_MANIFEST_GENERATION;
+        for child_shard in child_shards {
+            tracing::info!(
+                "Uploading tenant manifest for child {}",
+                child_shard.to_index()
+            );
+            upload_tenant_manifest(
+                &self.remote_storage,
+                child_shard,
+                generation,
+                &tenant_manifest,
+                &self.cancel,
+            )
+            .await?;
+        }
+
         Ok(())
     }
 
@@ -2968,6 +3161,22 @@ impl Tenant {
         tenant_conf
             .lsn_lease_length
             .unwrap_or(self.conf.default_tenant_conf.lsn_lease_length)
+    }
+
+    pub(crate) fn tenant_manifest(&self) -> TenantManifest {
+        let timelines_offloaded = self.timelines_offloaded.lock().unwrap();
+
+        let mut timeline_manifests = timelines_offloaded
+            .iter()
+            .map(|(_timeline_id, offloaded)| offloaded.manifest())
+            .collect::<Vec<_>>();
+        // Sort the manifests so that our output is deterministic
+        timeline_manifests.sort_by_key(|timeline_manifest| timeline_manifest.timeline_id);
+
+        TenantManifest {
+            version: LATEST_TENANT_MANIFEST_VERSION,
+            offloaded_timelines: timeline_manifests,
+        }
     }
 
     pub fn set_new_tenant_config(&self, new_tenant_conf: TenantConfOpt) {
@@ -3962,18 +4171,21 @@ impl Tenant {
         Ok(timeline)
     }
 
-    /// Call this before constructing a timeline, to build its required structures
-    fn build_timeline_resources(&self, timeline_id: TimelineId) -> TimelineResources {
-        let remote_client = RemoteTimelineClient::new(
+    fn build_timeline_remote_client(&self, timeline_id: TimelineId) -> RemoteTimelineClient {
+        RemoteTimelineClient::new(
             self.remote_storage.clone(),
             self.deletion_queue_client.clone(),
             self.conf,
             self.tenant_shard_id,
             timeline_id,
             self.generation,
-        );
+        )
+    }
+
+    /// Call this before constructing a timeline, to build its required structures
+    fn build_timeline_resources(&self, timeline_id: TimelineId) -> TimelineResources {
         TimelineResources {
-            remote_client,
+            remote_client: self.build_timeline_remote_client(timeline_id),
             timeline_get_throttle: self.timeline_get_throttle.clone(),
             l0_flush_global_state: self.l0_flush_global_state.clone(),
         }
