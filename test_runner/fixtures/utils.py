@@ -633,9 +633,7 @@ def allpairs_versions():
     combinations were pre-computed to test all the pairs of the components with
     the different versions.
     """
-    only_new = (os.getenv("COMPATIBILITY_NEON_BIN") is None) or (
-        os.getenv("COMPATIBILITY_POSTGRES_DISTRIB_DIR") is None
-    )
+    only_new = (os.getenv('COMPATIBILITY_NEON_BIN') is None) or (os.getenv('COMPATIBILITY_POSTGRES_DISTRIB_DIR') is None)
     if only_new:
         log.info("Compatibility paths are not set, testing only new versions")
         return {"argnames": "combination", "argvalues": [None]}
