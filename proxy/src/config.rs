@@ -20,7 +20,7 @@ use crate::rate_limiter::{RateBucketInfo, RateLimitAlgorithm, RateLimiterConfig}
 use crate::scram::threadpool::ThreadPool;
 use crate::serverless::cancel_set::CancelSet;
 use crate::serverless::GlobalConnPoolOptions;
-use crate::Host;
+use crate::types::Host;
 
 pub struct ProxyConfig {
     pub tls_config: Option<TlsConfig>,

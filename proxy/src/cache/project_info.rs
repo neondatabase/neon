@@ -17,7 +17,7 @@ use crate::auth::IpPattern;
 use crate::config::ProjectInfoCacheOptions;
 use crate::control_plane::AuthSecret;
 use crate::intern::{EndpointIdInt, ProjectIdInt, RoleNameInt};
-use crate::{EndpointId, RoleName};
+use crate::types::{EndpointId, RoleName};
 
 #[async_trait]
 pub(crate) trait ProjectInfoCache {
@@ -368,7 +368,7 @@ impl Cache for ProjectInfoCacheImpl {
 mod tests {
     use super::*;
     use crate::scram::ServerSecret;
-    use crate::ProjectId;
+    use crate::types::ProjectId;
 
     #[tokio::test]
     async fn test_project_info_cache_settings() {

@@ -4,8 +4,9 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::http;
+use crate::types::{DbName, RoleName};
 use crate::url::ApiUrl;
-use crate::{http, DbName, RoleName};
 
 pub struct ComputeCtlApi {
     pub(crate) api: http::Endpoint,
