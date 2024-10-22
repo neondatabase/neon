@@ -1,7 +1,5 @@
 use std::sync::Arc;
 
-use utils::generation::Generation;
-
 use super::delete::{delete_local_timeline_directory, DeleteTimelineFlow, DeletionGuard};
 use super::Timeline;
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;

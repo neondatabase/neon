@@ -264,7 +264,7 @@ def test_timeline_offload_persist(neon_env_builder: NeonEnvBuilder):
     )
     assert_prefix_empty(
         neon_env_builder.pageserver_remote_storage,
-        prefix=f"tenants/{str(tenant_id)}/tenant-manifest.json",
+        prefix=f"tenants/{str(tenant_id)}/tenant-manifest",
     )
 
     ps_http.timeline_archival_config(
@@ -296,7 +296,7 @@ def test_timeline_offload_persist(neon_env_builder: NeonEnvBuilder):
 
     assert_prefix_not_empty(
         neon_env_builder.pageserver_remote_storage,
-        prefix=f"tenants/{str(tenant_id)}/tenant-manifest.json",
+        prefix=f"tenants/{str(tenant_id)}/tenant-manifest",
     )
 
     # Test persistence, is the timeline still offloaded?
@@ -325,7 +325,7 @@ def test_timeline_offload_persist(neon_env_builder: NeonEnvBuilder):
 
     assert_prefix_empty(
         neon_env_builder.pageserver_remote_storage,
-        prefix=f"tenants/{str(env.initial_tenant)}/tenant-manifest.json",
+        prefix=f"tenants/{str(env.initial_tenant)}/tenant-manifest",
     )
 
     assert not timeline_offloaded_api(root_timeline_id)

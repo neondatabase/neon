@@ -1216,7 +1216,9 @@ impl Tenant {
                     format!("{} offloaded", tenant_manifest.offloaded_timelines.len()),
                     tenant_manifest,
                 ),
-                Err(DownloadError::NotFound) => (format!("no manifest"), TenantManifest::empty()),
+                Err(DownloadError::NotFound) => {
+                    ("no manifest".to_string(), TenantManifest::empty())
+                }
                 Err(e) => Err(e)?,
             };
 
