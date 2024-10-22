@@ -641,7 +641,7 @@ def allpairs_versions():
     )
     for pair in VERSIONS_COMBINATIONS:
         cur_id = []
-        all_new = True
+        all_new = all(v == "new" for v in pair.values())
         for component in sorted(pair.keys()):
             cur_id.append(pair[component][0])
             all_new = all_new and (pair[component] == "new")
