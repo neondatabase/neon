@@ -636,8 +636,9 @@ def allpairs_versions():
     """
     ids = []
     argvalues = []
-    compat_not_defined = (os.getenv("COMPATIBILITY_NEON_BIN") is None) or (
+    compat_not_defined = (
         os.getenv("COMPATIBILITY_POSTGRES_DISTRIB_DIR") is None
+        or os.getenv("COMPATIBILITY_NEON_BIN") is None
     )
     for pair in VERSIONS_COMBINATIONS:
         cur_id = []
