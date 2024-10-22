@@ -292,10 +292,10 @@ jobs:
       fail-fast: false
       matrix:
         pg_version: ${{ fromJson(inputs.pg-versions) }}
-        no_default_lfc: [false]
+        no_default_lfc: [lfc]
         include:
           - pg_version: 16
-            no_default_lfc: true
+            no_default_lfc: nolfc
     steps:
       - uses: actions/checkout@v4
         with:
@@ -318,7 +318,7 @@ jobs:
           CHECK_ONDISK_DATA_COMPATIBILITY: nonempty
           BUILD_TAG: ${{ inputs.build-tag }}
           PAGESERVER_VIRTUAL_FILE_IO_ENGINE: tokio-epoll-uring
-          NO_DEFAULT_LFC: ${{ matrix.no_default_lfc }}
+          NO_DEFAULT_LFC: ${{ matrix.no_default_lfc == 'nolfc' && 'true' || false }}
 
       # Temporary disable this step until we figure out why it's so flaky
       # Ref https://github.com/neondatabase/neon/issues/4540
