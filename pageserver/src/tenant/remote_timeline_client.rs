@@ -2223,7 +2223,7 @@ pub fn remote_tenant_manifest_path(
     generation: Generation,
 ) -> RemotePath {
     let path = format!(
-        "tenants/{tenant_shard_id}/tenant-manifest.json{}",
+        "tenants/{tenant_shard_id}/tenant-manifest{}.json",
         generation.get_suffix()
     );
     RemotePath::from_string(&path).expect("Failed to construct path")

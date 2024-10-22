@@ -25,7 +25,7 @@ use super::{Timeline, TimelineResources};
 /// during attach or pageserver restart.
 /// See comment in persist_index_part_with_deleted_flag.
 async fn set_deleted_in_remote_index(
-    remote_client: &RemoteTimelineClient,
+    remote_client: &Arc<RemoteTimelineClient>,
 ) -> Result<(), DeleteTimelineError> {
     let res = remote_client.persist_index_part_with_deleted_flag().await;
     match res {
@@ -127,7 +127,7 @@ pub(super) async fn delete_local_timeline_directory(
 
 /// Removes remote layers and an index file after them.
 async fn delete_remote_layers_and_index(
-    remote_client: &RemoteTimelineClient,
+    remote_client: &Arc<RemoteTimelineClient>,
 ) -> anyhow::Result<()> {
     remote_client.delete_all().await.context("delete_all")
 }
@@ -230,7 +230,7 @@ impl DeleteTimelineFlow {
             ))?
         });
 
-        let remote_client = timeline.remote_client_maybe_construct();
+        let remote_client = timeline.remote_client_maybe_construct(tenant);
         set_deleted_in_remote_index(&remote_client).await?;
 
         fail::fail_point!("timeline-delete-before-schedule", |_| {
@@ -239,7 +239,7 @@ impl DeleteTimelineFlow {
             ))?
         });
 
-        Self::schedule_background(guard, tenant.conf, Arc::clone(tenant), remote_client);
+        Self::schedule_background(guard, tenant.conf, Arc::clone(tenant), timeline, remote_client);
 
         Ok(())
     }
@@ -297,6 +297,7 @@ impl DeleteTimelineFlow {
 
         guard.mark_in_progress()?;
 
+        let remote_client = timeline.remote_client.clone();
         let timeline = TimelineOrOffloaded::Timeline(timeline);
         Self::schedule_background(guard, tenant.conf, tenant, timeline, remote_client);
 
@@ -413,7 +414,7 @@ impl DeleteTimelineFlow {
             delete_local_timeline_directory(conf, tenant.tenant_shard_id, timeline).await?;
         }
 
-        delete_remote_layers_and_index(remote_client).await?;
+        delete_remote_layers_and_index(&remote_client).await?;
 
         pausable_failpoint!("in_progress_delete");
 
