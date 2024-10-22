@@ -597,17 +597,19 @@ pub enum TimelineOrOffloaded {
 }
 
 impl TimelineOrOffloaded {
-    pub fn tenant_shard_id(&self) -> TenantShardId {
+    pub fn arc_ref(&self) -> OffloadedTimelineArcRef<'_> {
         match self {
-            TimelineOrOffloaded::Timeline(timeline) => timeline.tenant_shard_id,
-            TimelineOrOffloaded::Offloaded(offloaded) => offloaded.tenant_shard_id,
+            TimelineOrOffloaded::Timeline(timeline) => OffloadedTimelineArcRef::Timeline(timeline),
+            TimelineOrOffloaded::Offloaded(offloaded) => {
+                OffloadedTimelineArcRef::Offloaded(offloaded)
+            }
         }
     }
+    pub fn tenant_shard_id(&self) -> TenantShardId {
+        self.arc_ref().tenant_shard_id()
+    }
     pub fn timeline_id(&self) -> TimelineId {
-        match self {
-            TimelineOrOffloaded::Timeline(timeline) => timeline.timeline_id,
-            TimelineOrOffloaded::Offloaded(offloaded) => offloaded.timeline_id,
-        }
+        self.arc_ref().timeline_id()
     }
     pub fn delete_progress(&self) -> &Arc<tokio::sync::Mutex<DeleteTimelineFlow>> {
         match self {
@@ -629,6 +631,38 @@ impl TimelineOrOffloaded {
                 }
             },
         }
+    }
+}
+
+pub enum OffloadedTimelineArcRef<'a> {
+    Timeline(&'a Arc<Timeline>),
+    Offloaded(&'a Arc<OffloadedTimeline>),
+}
+
+impl OffloadedTimelineArcRef<'_> {
+    pub fn tenant_shard_id(&self) -> TenantShardId {
+        match self {
+            OffloadedTimelineArcRef::Timeline(timeline) => timeline.tenant_shard_id,
+            OffloadedTimelineArcRef::Offloaded(offloaded) => offloaded.tenant_shard_id,
+        }
+    }
+    pub fn timeline_id(&self) -> TimelineId {
+        match self {
+            OffloadedTimelineArcRef::Timeline(timeline) => timeline.timeline_id,
+            OffloadedTimelineArcRef::Offloaded(offloaded) => offloaded.timeline_id,
+        }
+    }
+}
+
+impl<'a> From<&'a Arc<Timeline>> for OffloadedTimelineArcRef<'a> {
+    fn from(timeline: &'a Arc<Timeline>) -> Self {
+        Self::Timeline(timeline)
+    }
+}
+
+impl<'a> From<&'a Arc<OffloadedTimeline>> for OffloadedTimelineArcRef<'a> {
+    fn from(timeline: &'a Arc<OffloadedTimeline>) -> Self {
+        Self::Offloaded(timeline)
     }
 }
 
