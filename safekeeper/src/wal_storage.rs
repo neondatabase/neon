@@ -149,6 +149,8 @@ pub struct PhysicalStorage {
 impl PhysicalStorage {
     /// Create new storage. If commit_lsn is not zero, flush_lsn is tried to be restored from
     /// the disk. Otherwise, all LSNs are set to zero.
+    ///
+    /// TODO: don't take conf.
     pub fn new(
         ttid: &TenantTimelineId,
         timeline_dir: Utf8PathBuf,

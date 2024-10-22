@@ -112,8 +112,11 @@ impl SafeKeeperConf {
 }
 
 impl SafeKeeperConf {
-    #[cfg(test)]
-    fn dummy() -> Self {
+    /// Constructs a dummy config for use in tests and benchmarks.
+    ///
+    /// TODO: consider implementing Default and using that as the source of truth for
+    /// default options during startup. Tests could then start with the default.
+    pub fn for_tests() -> Self {
         SafeKeeperConf {
             workdir: Utf8PathBuf::from("./"),
             no_sync: false,

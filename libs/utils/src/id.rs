@@ -302,7 +302,7 @@ pub struct TenantTimelineId {
 }
 
 impl TenantTimelineId {
-    pub fn new(tenant_id: TenantId, timeline_id: TimelineId) -> Self {
+    pub const fn new(tenant_id: TenantId, timeline_id: TimelineId) -> Self {
         TenantTimelineId {
             tenant_id,
             timeline_id,
@@ -313,8 +313,11 @@ impl TenantTimelineId {
         Self::new(TenantId::generate(), TimelineId::generate())
     }
 
-    pub fn empty() -> Self {
-        Self::new(TenantId::from([0u8; 16]), TimelineId::from([0u8; 16]))
+    pub const fn empty() -> Self {
+        Self::new(
+            TenantId::from_array([0; 16]),
+            TimelineId::from_array([0; 16]),
+        )
     }
 }
 

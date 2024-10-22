@@ -325,8 +325,17 @@ pub struct SharedState {
 }
 
 impl SharedState {
+    /// Creates a new SharedState.
+    pub fn new(sk: StateSK) -> Self {
+        Self {
+            sk,
+            peers_info: PeersInfo(vec![]),
+            wal_removal_on_hold: false,
+        }
+    }
+
     /// Restore SharedState from control file. If file doesn't exist, bails out.
-    fn restore(conf: &SafeKeeperConf, ttid: &TenantTimelineId) -> Result<Self> {
+    pub fn restore(conf: &SafeKeeperConf, ttid: &TenantTimelineId) -> Result<Self> {
         let timeline_dir = get_timeline_dir(conf, ttid);
         let control_store = control_file::FileStorage::restore_new(ttid, conf)?;
         if control_store.server.wal_seg_size == 0 {
@@ -476,6 +485,45 @@ pub struct Timeline {
 }
 
 impl Timeline {
+    /// Constructs a new timeline.
+    pub fn new(
+        ttid: TenantTimelineId,
+        remote_path: RemotePath,
+        timeline_dir: Utf8PathBuf,
+        shared_state: SharedState,
+    ) -> Self {
+        let (commit_lsn_watch_tx, commit_lsn_watch_rx) =
+            watch::channel(shared_state.sk.state().commit_lsn);
+        let (term_flush_lsn_watch_tx, term_flush_lsn_watch_rx) = watch::channel(TermLsn::from((
+            shared_state.sk.last_log_term(),
+            shared_state.sk.flush_lsn(),
+        )));
+        let (shared_state_version_tx, shared_state_version_rx) = watch::channel(0);
+
+        let walreceivers = WalReceivers::new();
+
+        Self {
+            ttid,
+            remote_path,
+            timeline_dir,
+            commit_lsn_watch_tx,
+            commit_lsn_watch_rx,
+            term_flush_lsn_watch_tx,
+            term_flush_lsn_watch_rx,
+            shared_state_version_tx,
+            shared_state_version_rx,
+            mutex: RwLock::new(shared_state),
+            walsenders: WalSenders::new(walreceivers.clone()),
+            walreceivers,
+            cancel: CancellationToken::default(),
+            manager_ctl: ManagerCtl::new(),
+            broker_active: AtomicBool::new(false),
+            wal_backup_active: AtomicBool::new(false),
+            last_removed_segno: AtomicU64::new(0),
+            mgr_status: AtomicStatus::new(),
+        }
+    }
+
     /// Load existing timeline from disk.
     pub fn load_timeline(conf: &SafeKeeperConf, ttid: TenantTimelineId) -> Result<Arc<Timeline>> {
         let _enter = info_span!("load_timeline", timeline = %ttid.timeline_id).entered();

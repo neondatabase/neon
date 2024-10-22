@@ -16,10 +16,9 @@ use std::time::Instant;
 use crate::control_file_upgrade::downgrade_v9_to_v8;
 use crate::metrics::PERSIST_CONTROL_FILE_SECONDS;
 use crate::state::{EvictionState, TimelinePersistentState};
+use crate::SafeKeeperConf;
 use crate::{control_file_upgrade::upgrade_control_file, timeline::get_timeline_dir};
 use utils::{bin_ser::LeSer, id::TenantTimelineId};
-
-use crate::SafeKeeperConf;
 
 pub const SK_MAGIC: u32 = 0xcafeceefu32;
 pub const SK_FORMAT_VERSION: u32 = 9;
@@ -70,6 +69,8 @@ impl FileStorage {
     ///
     /// Note: we normally call this in temp directory for atomic init, so
     /// interested in FileStorage as a result only in tests.
+    ///
+    /// TODO: don't take conf.
     pub async fn create_new(
         dir: Utf8PathBuf,
         conf: &SafeKeeperConf,
@@ -243,7 +244,7 @@ mod test {
         let workdir = camino_tempfile::tempdir().unwrap().into_path();
         SafeKeeperConf {
             workdir,
-            ..SafeKeeperConf::dummy()
+            ..SafeKeeperConf::for_tests()
         }
     }
 
