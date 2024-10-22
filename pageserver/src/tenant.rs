@@ -1257,10 +1257,6 @@ impl Tenant {
             offloaded_timelines_list.push((timeline_id, Arc::new(offloaded_timeline)));
             offloaded_timeline_ids.insert(timeline_id);
         }
-        {
-            let mut offloaded_timelines_accessor = self.timelines_offloaded.lock().unwrap();
-            offloaded_timelines_accessor.extend(offloaded_timelines_list.into_iter());
-        }
 
         let mut timelines_to_resume_deletions = vec![];
 
@@ -1268,7 +1264,8 @@ impl Tenant {
         let mut timeline_ancestors = HashMap::new();
         let mut existent_timelines = HashSet::new();
         for (timeline_id, preload) in preload.timelines {
-            if offloaded_timeline_ids.contains(&timeline_id) {
+            if offloaded_timeline_ids.remove(&timeline_id) {
+                // The timeline is offloaded, skip loading it.
                 continue;
             }
             let index_part = match preload.index_part {
@@ -1373,6 +1370,37 @@ impl Tenant {
             .await
             .context("resume_deletion")
             .map_err(LoadLocalTimelineError::ResumeDeletion)?;
+        }
+        // Complete deletions for offloaded timeline id's.
+        offloaded_timelines_list
+            .retain(|(offloaded_id, _offloaded)| {
+                // At this point, offloaded_timeline_ids has the list of all offloaded timelines
+                // without a prefix in S3, so they are inexistent.
+                // In the end, existence of a timeline is finally determined by the existence of an index-part.json in remote storage.
+                // If there is a dangling reference in another location, they need to be cleaned up.
+                let delete = offloaded_timeline_ids.contains(offloaded_id);
+                if delete {
+                    tracing::info!("Deleting offloaded timeline {offloaded_id} from manifest as no prefix was found in remote storage");
+                }
+                !delete
+        });
+        {
+            let mut offloaded_timelines_accessor = self.timelines_offloaded.lock().unwrap();
+            offloaded_timelines_accessor.extend(offloaded_timelines_list.into_iter());
+        }
+        if !offloaded_timeline_ids.is_empty() {
+            let manifest = self.tenant_manifest();
+            // TODO: generation support
+            let generation = remote_timeline_client::TENANT_MANIFEST_GENERATION;
+            upload_tenant_manifest(
+                &self.remote_storage,
+                &self.tenant_shard_id,
+                generation,
+                &manifest,
+                &self.cancel,
+            )
+            .await
+            .map_err(TimelineArchivalError::Other)?;
         }
 
         // The local filesystem contents are a cache of what's in the remote IndexPart;
@@ -2929,7 +2957,10 @@ impl Tenant {
         // TODO: generation support
         let generation = remote_timeline_client::TENANT_MANIFEST_GENERATION;
         for child_shard in child_shards {
-            tracing::info!("Uploading tenant manifest for child {}", child_shard.to_index());
+            tracing::info!(
+                "Uploading tenant manifest for child {}",
+                child_shard.to_index()
+            );
             upload_tenant_manifest(
                 &self.remote_storage,
                 child_shard,
