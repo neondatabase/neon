@@ -1380,10 +1380,13 @@ impl Tenant {
                 // If there is a dangling reference in another location, they need to be cleaned up.
                 let delete = offloaded_timeline_ids.contains(offloaded_id);
                 if delete {
-                    tracing::info!("Deleting offloaded timeline {offloaded_id} from manifest as no prefix was found in remote storage");
+                    tracing::info!("Removing offloaded timeline {offloaded_id} from manifest as no remote prefix was found");
                 }
                 !delete
         });
+        if !offloaded_timelines_list.is_empty() {
+            tracing::info!("Tenant has {} offloaded timelines", offloaded_timelines_list.len());
+        }
         {
             let mut offloaded_timelines_accessor = self.timelines_offloaded.lock().unwrap();
             offloaded_timelines_accessor.extend(offloaded_timelines_list.into_iter());
