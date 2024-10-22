@@ -39,7 +39,7 @@ pub(crate) async fn upload_index_part<'a>(
     pausable_failpoint!("before-upload-index-pausable");
 
     // FIXME: this error comes too late
-    let serialized = index_part.to_s3_bytes()?;
+    let serialized = index_part.to_json_bytes()?;
     let serialized = Bytes::from(serialized);
 
     let index_part_size = serialized.len();
