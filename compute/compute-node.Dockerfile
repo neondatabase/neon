@@ -900,6 +900,7 @@ ARG PG_VERSION
 RUN case "${PG_VERSION}" in "v17") \
     echo "pgrag supports pg17 but we are not building with pgrx 0.12 yet" && exit 0;; \
     esac && \
+    apt-get install -y protobuf-compiler && \
     wget https://github.com/neondatabase-labs/pgrag/archive/refs/heads/main.tar.gz -O pgrag.tar.gz &&  \
     mkdir pgrag-src && cd pgrag-src && tar xzf ../pgrag.tar.gz --strip-components=1 -C . && \
     \
