@@ -35,6 +35,7 @@ use remote_storage::TimeoutOrCancel;
 use remote_timeline_client::manifest::{
     OffloadedTimelineManifest, TenantManifest, LATEST_TENANT_MANIFEST_VERSION,
 };
+use remote_timeline_client::UploadQueueNotReadyError;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
@@ -69,7 +70,7 @@ use self::config::TenantConf;
 use self::metadata::TimelineMetadata;
 use self::mgr::GetActiveTenantError;
 use self::mgr::GetTenantError;
-use self::remote_timeline_client::upload::upload_index_part;
+use self::remote_timeline_client::upload::{upload_index_part, upload_tenant_manifest};
 use self::remote_timeline_client::{RemoteTimelineClient, WaitCompletionError};
 use self::timeline::uninit::TimelineCreateGuard;
 use self::timeline::uninit::TimelineExclusionError;
@@ -530,7 +531,7 @@ impl OffloadedTimeline {
     /// Returns `None` if the `archived_at` flag couldn't be obtained, i.e.
     /// the timeline is not in a stopped state.
     /// Panics if the timeline is not archived.
-    fn from_timeline(timeline: &Timeline) -> Option<Self> {
+    fn from_timeline(timeline: &Timeline) -> Result<Self, UploadQueueNotReadyError> {
         let ancestor_retain_lsn = timeline
             .get_ancestor_timeline_id()
             .map(|_timeline_id| timeline.get_ancestor_lsn());
@@ -538,7 +539,7 @@ impl OffloadedTimeline {
             .remote_client
             .archived_at_stopped_queue()?
             .expect("must be called on an archived timeline");
-        Some(Self {
+        Ok(Self {
             tenant_shard_id: timeline.tenant_shard_id,
             timeline_id: timeline.timeline_id,
             ancestor_timeline_id: timeline.get_ancestor_timeline_id(),
@@ -1723,7 +1724,7 @@ impl Tenant {
         let manifest = self.tenant_manifest();
         // TODO: generation support
         let generation = remote_timeline_client::TENANT_MANIFEST_GENERATION;
-        remote_timeline_client::upload_tenant_manifest(
+        upload_tenant_manifest(
             &self.remote_storage,
             &self.tenant_shard_id,
             generation,
@@ -2920,6 +2921,23 @@ impl Tenant {
                 )
                 .await?;
             }
+        }
+
+        // TODO: also copy index files of offloaded timelines
+
+        let tenant_manifest = self.tenant_manifest();
+        // TODO: generation support
+        let generation = remote_timeline_client::TENANT_MANIFEST_GENERATION;
+        for child_shard in child_shards {
+            tracing::info!("Uploading tenant manifest for child {}", child_shard.to_index());
+            upload_tenant_manifest(
+                &self.remote_storage,
+                child_shard,
+                generation,
+                &tenant_manifest,
+                &self.cancel,
+            )
+            .await?;
         }
 
         Ok(())

@@ -303,6 +303,10 @@ pub enum WaitCompletionError {
     UploadQueueShutDownOrStopped,
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("Upload queue either in unexpected state or hasn't downloaded manifest yet")]
+pub struct UploadQueueNotReadyError;
+
 /// A client for accessing a timeline's data in remote storage.
 ///
 /// This takes care of managing the number of connections, and balancing them
@@ -476,16 +480,16 @@ impl RemoteTimelineClient {
             .ok()
     }
 
-    /// Returns `Some(Some(timestamp))` if the timeline has been archived, `Some(None)` if the timeline hasn't been archived.
+    /// Returns `Ok(Some(timestamp))` if the timeline has been archived, `Ok(None)` if the timeline hasn't been archived.
     ///
-    /// Return None if the remote index_part hasn't been downloaded yet, or the timeline hasn't been stopped yet.
-    pub(crate) fn archived_at_stopped_queue(&self) -> Option<Option<NaiveDateTime>> {
+    /// Return Err(_) if the remote index_part hasn't been downloaded yet, or the timeline hasn't been stopped yet.
+    pub(crate) fn archived_at_stopped_queue(&self) -> Result<Option<NaiveDateTime>, UploadQueueNotReadyError> {
         self.upload_queue
             .lock()
             .unwrap()
             .stopped_mut()
             .map(|q| q.upload_queue_for_deletion.clean.0.archived_at)
-            .ok()
+            .map_err(|_| UploadQueueNotReadyError)
     }
 
     fn update_remote_physical_size_gauge(&self, current_remote_index_part: Option<&IndexPart>) {
