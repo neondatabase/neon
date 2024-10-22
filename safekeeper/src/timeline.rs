@@ -591,6 +591,8 @@ impl Timeline {
         ));
     }
 
+    /// Background timeline activities (which hold Timeline::gate) will no
+    /// longer run once this function completes.
     pub async fn shutdown(&self) {
         info!("timeline {} shutting down", self.ttid);
         self.cancel.cancel();
@@ -601,7 +603,6 @@ impl Timeline {
     }
 
     /// Delete timeline from disk completely, by removing timeline directory.
-    /// Background timeline activities will stop eventually.
     ///
     /// Also deletes WAL in s3. Might fail if e.g. s3 is unavailable, but
     /// deletion API endpoint is retriable.
@@ -620,9 +621,6 @@ impl Timeline {
         // it is cancelled, so WAL storage won't be opened again.
         shared_state.sk.close_wal_store();
 
-        // TODO: It's better to wait for s3 offloader termination before
-        // removing data from s3. Though since s3 doesn't have transactions it
-        // still wouldn't guarantee absense of data after removal.
         let conf = GlobalTimelines::get_global_config();
         if !only_local && conf.is_wal_backup_enabled() {
             // Note: we concurrently delete remote storage data from multiple
