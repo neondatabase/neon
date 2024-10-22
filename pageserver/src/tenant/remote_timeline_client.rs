@@ -180,6 +180,7 @@
 
 pub(crate) mod download;
 pub mod index;
+pub mod manifest;
 pub(crate) mod upload;
 
 use anyhow::Context;
@@ -191,7 +192,6 @@ use pageserver_api::models::TimelineArchivalState;
 use pageserver_api::shard::{ShardIndex, TenantShardId};
 use scopeguard::ScopeGuard;
 use tokio_util::sync::CancellationToken;
-pub(crate) use upload::upload_initdb_dir;
 use utils::backoff::{
     self, exponential_backoff, DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS,
 };
@@ -245,9 +245,11 @@ use super::upload_queue::{NotInitialized, SetDeletedFlagProgress};
 use super::Generation;
 
 pub(crate) use download::{
-    download_index_part, is_temp_download_file, list_remote_tenant_shards, list_remote_timelines,
+    do_download_tenant_manifest, download_index_part, is_temp_download_file,
+    list_remote_tenant_shards, list_remote_timelines,
 };
 pub(crate) use index::LayerFileMetadata;
+pub(crate) use upload::{upload_initdb_dir, upload_tenant_manifest};
 
 // Occasional network issues and such can cause remote operations to fail, and
 // that's expected. If a download fails, we log it at info-level, and retry.
@@ -272,6 +274,12 @@ pub(crate) const BUFFER_SIZE: usize = 32 * 1024;
 /// which we warn and skip.
 const DELETION_QUEUE_FLUSH_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Hardcode a generation for the tenant manifest for now so that we don't
+/// need to deal with generation-less manifests in the future.
+///
+/// TODO: add proper generation support to all the places that use this.
+pub(crate) const TENANT_MANIFEST_GENERATION: Generation = Generation::new(1);
+
 pub enum MaybeDeletedIndexPart {
     IndexPart(IndexPart),
     Deleted(IndexPart),
@@ -294,6 +302,10 @@ pub enum WaitCompletionError {
     #[error("wait_completion aborted because upload queue was stopped")]
     UploadQueueShutDownOrStopped,
 }
+
+#[derive(Debug, thiserror::Error)]
+#[error("Upload queue either in unexpected state or hasn't downloaded manifest yet")]
+pub struct UploadQueueNotReadyError;
 
 /// A client for accessing a timeline's data in remote storage.
 ///
@@ -466,6 +478,20 @@ impl RemoteTimelineClient {
             .initialized_mut()
             .map(|q| q.clean.0.archived_at.is_some())
             .ok()
+    }
+
+    /// Returns `Ok(Some(timestamp))` if the timeline has been archived, `Ok(None)` if the timeline hasn't been archived.
+    ///
+    /// Return Err(_) if the remote index_part hasn't been downloaded yet, or the timeline hasn't been stopped yet.
+    pub(crate) fn archived_at_stopped_queue(
+        &self,
+    ) -> Result<Option<NaiveDateTime>, UploadQueueNotReadyError> {
+        self.upload_queue
+            .lock()
+            .unwrap()
+            .stopped_mut()
+            .map(|q| q.upload_queue_for_deletion.clean.0.archived_at)
+            .map_err(|_| UploadQueueNotReadyError)
     }
 
     fn update_remote_physical_size_gauge(&self, current_remote_index_part: Option<&IndexPart>) {
@@ -2195,6 +2221,17 @@ impl UploadQueueAccessor<'_> {
 
 pub fn remote_tenant_path(tenant_shard_id: &TenantShardId) -> RemotePath {
     let path = format!("tenants/{tenant_shard_id}");
+    RemotePath::from_string(&path).expect("Failed to construct path")
+}
+
+pub fn remote_tenant_manifest_path(
+    tenant_shard_id: &TenantShardId,
+    generation: Generation,
+) -> RemotePath {
+    let path = format!(
+        "tenants/{tenant_shard_id}/tenant-manifest{}.json",
+        generation.get_suffix()
+    );
     RemotePath::from_string(&path).expect("Failed to construct path")
 }
 
