@@ -298,11 +298,11 @@ jobs:
             no_default_lfc: nolfc
     steps:
       - uses: actions/checkout@v4
+        if: ${{ matrix.no_default_lfc == 'lfc' || inputs.build-type == 'release' }}
         with:
           submodules: true
 
       - name: Pytest regression tests
-        if: ${{ matrix.no_default_lfc == 'lfc' || inputs.build-type == 'release' }}
         uses: ./.github/actions/run-python-test-set
         timeout-minutes: 60
         with:
