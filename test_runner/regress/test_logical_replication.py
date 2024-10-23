@@ -9,7 +9,6 @@ import pytest
 from fixtures.common_types import Lsn
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
-    AuxFileStore,
     NeonEnv,
     NeonEnvBuilder,
     PgProtocol,

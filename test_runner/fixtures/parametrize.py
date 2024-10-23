@@ -13,12 +13,6 @@ from fixtures.pg_version import PgVersion
 if TYPE_CHECKING:
     from typing import Any, Optional
 
-    from fixtures.utils import AuxFileStore
-
-
-if TYPE_CHECKING:
-    from typing import Any, Optional
-
 
 """
 Dynamically parametrize tests by different parameters
@@ -48,11 +42,6 @@ def pageserver_virtual_file_io_engine() -> Optional[str]:
 @pytest.fixture(scope="function", autouse=True)
 def pageserver_virtual_file_io_mode() -> Optional[str]:
     return os.getenv("PAGESERVER_VIRTUAL_FILE_IO_MODE")
-
-
-@pytest.fixture(scope="function", autouse=True)
-def pageserver_aux_file_policy() -> Optional[AuxFileStore]:
-    return None
 
 
 def get_pageserver_default_tenant_config_compaction_algorithm() -> Optional[dict[str, Any]]:
