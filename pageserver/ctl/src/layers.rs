@@ -11,6 +11,7 @@ use pageserver::tenant::storage_layer::delta_layer::{BlobRef, Summary};
 use pageserver::tenant::storage_layer::{delta_layer, image_layer};
 use pageserver::tenant::storage_layer::{DeltaLayer, ImageLayer};
 use pageserver::tenant::{TENANTS_SEGMENT_NAME, TIMELINES_SEGMENT_NAME};
+use pageserver::{page_cache, virtual_file};
 use pageserver::{
     tenant::{
         block_io::FileBlockReader, disk_btree::VisitDirection,
@@ -19,7 +20,6 @@ use pageserver::{
     virtual_file::VirtualFile,
 };
 use pageserver_api::key::{Key, KEY_SIZE};
-use pageserver::{page_cache, virtual_file};
 use std::fs;
 use utils::bin_ser::BeSer;
 use utils::id::{TenantId, TimelineId};

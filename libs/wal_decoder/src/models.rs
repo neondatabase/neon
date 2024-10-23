@@ -2,13 +2,43 @@
 //! ready for the pageserver to interpret.
 
 use bytes::Bytes;
+use pageserver_api::key::CompactKey;
 use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
+use pageserver_api::value::Value;
 use postgres_ffi::record::{
     XlMultiXactCreate, XlMultiXactTruncate, XlRelmapUpdate, XlReploriginDrop, XlReploriginSet,
     XlXactParsedRecord,
 };
 use postgres_ffi::{Oid, TransactionId};
 use utils::lsn::Lsn;
+
+pub enum FlushUncommittedRecords {
+    Yes,
+    No,
+}
+
+pub struct InterpretedWalRecord {
+    pub metadata_record: Option<MetadataRecord>,
+    pub blocks: Vec<(CompactKey, Option<Value>)>,
+    pub lsn: Lsn,
+    pub flush_uncommitted: FlushUncommittedRecords,
+    pub xid: TransactionId,
+}
+
+pub enum MetadataRecord {
+    Heapam(HeapamRecord),
+    Neonrmgr(NeonrmgrRecord),
+    Smgr(SmgrRecord),
+    Dbase(DbaseRecord),
+    Clog(ClogRecord),
+    Xact(XactRecord),
+    MultiXact(MultiXactRecord),
+    Relmap(RelmapRecord),
+    Xlog(XlogRecord),
+    LogicalMessage(LogicalMessageRecord),
+    Standby(StandbyRecord),
+    Replorigin(ReploriginRecord),
+}
 
 pub enum HeapamRecord {
     ClearVmBits(ClearVmBits),
