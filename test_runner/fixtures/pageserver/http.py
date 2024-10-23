@@ -141,6 +141,7 @@ class TenantConfig:
             effective_config=d["effective_config"],
         )
 
+
 @dataclass
 class TimelinesInfoAndOffloaded:
     timelines: list[dict[str, Any]]
@@ -480,7 +481,6 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         self,
         tenant_id: Union[TenantId, TenantShardId],
     ) -> TimelinesInfoAndOffloaded:
-
         res = self.get(
             f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline_and_offloaded",
         )

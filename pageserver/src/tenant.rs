@@ -585,10 +585,8 @@ impl OffloadedTimeline {
     }
     fn remote_client_maybe_construct(&self, tenant: &Tenant) -> &Arc<RemoteTimelineClient> {
         self.remote_client.get_or_init(|| {
-            let remote_client = tenant.build_timeline_client(
-                self.timeline_id,
-                tenant.remote_storage.clone(),
-            );
+            let remote_client =
+                tenant.build_timeline_client(self.timeline_id, tenant.remote_storage.clone());
             Arc::new(remote_client)
         })
     }
@@ -655,7 +653,9 @@ impl TimelineOrOffloadedArcRef<'_> {
     pub fn remote_client_maybe_construct(&self, tenant: &Tenant) -> Arc<RemoteTimelineClient> {
         match self {
             TimelineOrOffloadedArcRef::Timeline(timeline) => timeline.remote_client.clone(),
-            TimelineOrOffloadedArcRef::Offloaded(offloaded) => offloaded.remote_client_maybe_construct(tenant).clone(),
+            TimelineOrOffloadedArcRef::Offloaded(offloaded) => {
+                offloaded.remote_client_maybe_construct(tenant).clone()
+            }
         }
     }
 }

@@ -24,7 +24,6 @@ from fixtures.utils import wait_until
 from fixtures.workload import Workload
 from pytest_httpserver import HTTPServer
 from typing_extensions import override
-from fixtures.pageserver.http import PageserverHttpClient
 from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
 
