@@ -303,6 +303,7 @@ jobs:
           submodules: true
 
       - name: Pytest regression tests
+        if: ${{ matrix.no_default_lfc == 'lfc' || inputs.build-type == 'release' }}
         uses: ./.github/actions/run-python-test-set
         timeout-minutes: 60
         with:
