@@ -297,7 +297,12 @@ pub async fn main_task(
                 match mgr.global_rate_limiter.try_acquire_eviction() {
                     Some(_permit) => {
                         mgr.set_status(Status::EvictTimeline);
-                        mgr.evict_timeline().await;
+                        if !mgr.evict_timeline().await {
+                            // eviction failed, try again later
+                            mgr.evict_not_before =
+                                Instant::now() + rand_duration(&mgr.conf.eviction_min_resident);
+                            update_next_event(&mut next_event, mgr.evict_not_before);
+                        }
                     }
                     None => {
                         // we can't evict timeline now, will try again later
