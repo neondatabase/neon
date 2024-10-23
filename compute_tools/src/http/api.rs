@@ -9,8 +9,11 @@ use crate::catalog::SchemaDumpError;
 use crate::catalog::{get_database_schema, get_dbs_and_roles};
 use crate::compute::forward_termination_signal;
 use crate::compute::{ComputeNode, ComputeState, ParsedSpec};
-use compute_api::requests::ConfigurationRequest;
-use compute_api::responses::{ComputeStatus, ComputeStatusResponse, GenericAPIError};
+use compute_api::requests::{ConfigurationRequest, ExtensionInstallRequest, SetRoleGrantsRequest};
+use compute_api::responses::{
+    ComputeStatus, ComputeStatusResponse, ExtensionInstallResult, GenericAPIError,
+    SetRoleGrantsResponse,
+};
 
 use anyhow::Result;
 use hyper::header::CONTENT_TYPE;
@@ -98,6 +101,38 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
             }
         }
 
+        (&Method::POST, "/extensions") => {
+            info!("serving /extensions POST request");
+            let status = compute.get_status();
+            if status != ComputeStatus::Running {
+                let msg = format!(
+                    "invalid compute status for extensions request: {:?}",
+                    status
+                );
+                error!(msg);
+                return render_json_error(&msg, StatusCode::PRECONDITION_FAILED);
+            }
+
+            let request = hyper::body::to_bytes(req.into_body()).await.unwrap();
+            let request = serde_json::from_slice::<ExtensionInstallRequest>(&request).unwrap();
+            let res = compute
+                .install_extension(&request.extension, &request.database, request.version)
+                .await;
+            match res {
+                Ok(version) => render_json(Body::from(
+                    serde_json::to_string(&ExtensionInstallResult {
+                        extension: request.extension,
+                        version,
+                    })
+                    .unwrap(),
+                )),
+                Err(e) => {
+                    error!("install_extension failed: {}", e);
+                    render_json_error(&e.to_string(), StatusCode::INTERNAL_SERVER_ERROR)
+                }
+            }
+        }
+
         (&Method::GET, "/info") => {
             let num_cpus = num_cpus::get_physical();
             info!("serving /info GET request. num_cpus: {}", num_cpus);
@@ -162,6 +197,48 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
                     error!("can't get schema dump: {}", e);
                     render_json_error("can't get schema dump", StatusCode::INTERNAL_SERVER_ERROR)
                 }
+            }
+        }
+
+        (&Method::POST, "/grants") => {
+            info!("serving /grants POST request");
+            let status = compute.get_status();
+            if status != ComputeStatus::Running {
+                let msg = format!(
+                    "invalid compute status for set_role_grants request: {:?}",
+                    status
+                );
+                error!(msg);
+                return render_json_error(&msg, StatusCode::PRECONDITION_FAILED);
+            }
+
+            let request = hyper::body::to_bytes(req.into_body()).await.unwrap();
+            let request = serde_json::from_slice::<SetRoleGrantsRequest>(&request).unwrap();
+
+            let res = compute
+                .set_role_grants(
+                    &request.database,
+                    &request.schema,
+                    &request.privileges,
+                    &request.role,
+                )
+                .await;
+            match res {
+                Ok(()) => render_json(Body::from(
+                    serde_json::to_string(&SetRoleGrantsResponse {
+                        database: request.database,
+                        schema: request.schema,
+                        role: request.role,
+                        privileges: request.privileges,
+                    })
+                    .unwrap(),
+                )),
+                Err(e) => render_json_error(
+                    &format!("could not grant role privileges to the schema: {e}"),
+                    // TODO: can we filter on role/schema not found errors
+                    // and return appropriate error code?
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                ),
             }
         }
 

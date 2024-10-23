@@ -1,25 +1,22 @@
-use crate::auth::backend::ConsoleRedirectBackend;
-use crate::config::{ProxyConfig, ProxyProtocolV2};
-use crate::proxy::{
-    prepare_client_connection, run_until_cancelled, ClientRequestError, ErrorSource,
-};
-use crate::{
-    cancellation::{CancellationHandlerMain, CancellationHandlerMainInternal},
-    context::RequestMonitoring,
-    error::ReportableError,
-    metrics::{Metrics, NumClientConnectionsGuard},
-    protocol2::read_proxy_protocol,
-    proxy::handshake::{handshake, HandshakeData},
-};
-use futures::TryFutureExt;
 use std::sync::Arc;
+
+use futures::TryFutureExt;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, Instrument};
 
+use crate::auth::backend::ConsoleRedirectBackend;
+use crate::cancellation::{CancellationHandlerMain, CancellationHandlerMainInternal};
+use crate::config::{ProxyConfig, ProxyProtocolV2};
+use crate::context::RequestMonitoring;
+use crate::error::ReportableError;
+use crate::metrics::{Metrics, NumClientConnectionsGuard};
+use crate::protocol2::read_proxy_protocol;
+use crate::proxy::connect_compute::{connect_to_compute, TcpMechanism};
+use crate::proxy::handshake::{handshake, HandshakeData};
+use crate::proxy::passthrough::ProxyPassthrough;
 use crate::proxy::{
-    connect_compute::{connect_to_compute, TcpMechanism},
-    passthrough::ProxyPassthrough,
+    prepare_client_connection, run_until_cancelled, ClientRequestError, ErrorSource,
 };
 
 pub async fn task_main(

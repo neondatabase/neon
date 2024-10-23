@@ -16,6 +16,9 @@ use remote_storage::RemotePath;
 /// intended to be used for DB / role names.
 pub type PgIdent = String;
 
+/// String type alias representing Postgres extension version
+pub type ExtVersion = String;
+
 /// Cluster spec or configuration represented as an optional number of
 /// delta operations + final cluster state description.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]

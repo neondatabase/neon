@@ -1,28 +1,26 @@
-use crate::{
-    auth::backend::{jwt::JwkCache, AuthRateLimiter},
-    control_plane::locks::ApiLocks,
-    rate_limiter::{RateBucketInfo, RateLimitAlgorithm, RateLimiterConfig},
-    scram::threadpool::ThreadPool,
-    serverless::{cancel_set::CancelSet, GlobalConnPoolOptions},
-    Host,
-};
+use std::collections::{HashMap, HashSet};
+use std::str::FromStr;
+use std::sync::Arc;
+use std::time::Duration;
+
 use anyhow::{bail, ensure, Context, Ok};
 use clap::ValueEnum;
 use itertools::Itertools;
 use remote_storage::RemoteStorageConfig;
-use rustls::{
-    crypto::ring::sign,
-    pki_types::{CertificateDer, PrivateKeyDer},
-};
+use rustls::crypto::aws_lc_rs::{self, sign};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use sha2::{Digest, Sha256};
-use std::{
-    collections::{HashMap, HashSet},
-    str::FromStr,
-    sync::Arc,
-    time::Duration,
-};
 use tracing::{error, info};
 use x509_parser::oid_registry;
+
+use crate::auth::backend::jwt::JwkCache;
+use crate::auth::backend::AuthRateLimiter;
+use crate::control_plane::locks::ApiLocks;
+use crate::rate_limiter::{RateBucketInfo, RateLimitAlgorithm, RateLimiterConfig};
+use crate::scram::threadpool::ThreadPool;
+use crate::serverless::cancel_set::CancelSet;
+use crate::serverless::GlobalConnPoolOptions;
+use crate::types::Host;
 
 pub struct ProxyConfig {
     pub tls_config: Option<TlsConfig>,
@@ -128,12 +126,12 @@ pub fn configure_tls(
     let cert_resolver = Arc::new(cert_resolver);
 
     // allow TLS 1.2 to be compatible with older client libraries
-    let mut config = rustls::ServerConfig::builder_with_protocol_versions(&[
-        &rustls::version::TLS13,
-        &rustls::version::TLS12,
-    ])
-    .with_no_client_auth()
-    .with_cert_resolver(cert_resolver.clone());
+    let mut config =
+        rustls::ServerConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
+            .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
+            .context("aws_lc_rs should support TLS1.2 and TLS1.3")?
+            .with_no_client_auth()
+            .with_cert_resolver(cert_resolver.clone());
 
     config.alpn_protocols = vec![PG_ALPN_PROTOCOL.to_vec()];
 
@@ -560,7 +558,7 @@ pub struct RetryConfig {
 }
 
 impl RetryConfig {
-    /// Default options for RetryConfig.
+    // Default options for RetryConfig.
 
     /// Total delay for 5 retries with 200ms base delay and 2 backoff factor is about 6s.
     pub const CONNECT_TO_COMPUTE_DEFAULT_VALUES: &'static str =
@@ -692,9 +690,8 @@ impl FromStr for ConcurrencyLockOptions {
 
 #[cfg(test)]
 mod tests {
-    use crate::rate_limiter::Aimd;
-
     use super::*;
+    use crate::rate_limiter::Aimd;
 
     #[test]
     fn test_parse_cache_options() -> anyhow::Result<()> {

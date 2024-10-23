@@ -1,41 +1,44 @@
-use std::{net::SocketAddr, pin::pin, str::FromStr, sync::Arc, time::Duration};
+use std::net::SocketAddr;
+use std::pin::pin;
+use std::str::FromStr;
+use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{bail, ensure, Context};
 use camino::{Utf8Path, Utf8PathBuf};
 use compute_api::spec::LocalProxySpec;
 use dashmap::DashMap;
 use futures::future::Either;
-use proxy::{
-    auth::{
-        self,
-        backend::{
-            jwt::JwkCache,
-            local::{LocalBackend, JWKS_ROLE_MAP},
-        },
-    },
-    cancellation::CancellationHandlerMain,
-    config::{self, AuthenticationConfig, HttpConfig, ProxyConfig, RetryConfig},
-    control_plane::{
-        locks::ApiLocks,
-        messages::{EndpointJwksResponse, JwksSettings},
-    },
-    http::health_server::AppMetrics,
-    intern::RoleNameInt,
-    metrics::{Metrics, ThreadPoolMetrics},
-    rate_limiter::{BucketRateLimiter, EndpointRateLimiter, LeakyBucketConfig, RateBucketInfo},
-    scram::threadpool::ThreadPool,
-    serverless::{self, cancel_set::CancelSet, GlobalConnPoolOptions},
-    RoleName,
+use proxy::auth::backend::jwt::JwkCache;
+use proxy::auth::backend::local::{LocalBackend, JWKS_ROLE_MAP};
+use proxy::auth::{self};
+use proxy::cancellation::CancellationHandlerMain;
+use proxy::config::{self, AuthenticationConfig, HttpConfig, ProxyConfig, RetryConfig};
+use proxy::control_plane::locks::ApiLocks;
+use proxy::control_plane::messages::{EndpointJwksResponse, JwksSettings};
+use proxy::http::health_server::AppMetrics;
+use proxy::intern::RoleNameInt;
+use proxy::metrics::{Metrics, ThreadPoolMetrics};
+use proxy::rate_limiter::{
+    BucketRateLimiter, EndpointRateLimiter, LeakyBucketConfig, RateBucketInfo,
 };
+use proxy::scram::threadpool::ThreadPool;
+use proxy::serverless::cancel_set::CancelSet;
+use proxy::serverless::{self, GlobalConnPoolOptions};
+use proxy::types::RoleName;
+use proxy::url::ApiUrl;
 
 project_git_version!(GIT_VERSION);
 project_build_tag!(BUILD_TAG);
 
 use clap::Parser;
-use tokio::{net::TcpListener, sync::Notify, task::JoinSet};
+use tokio::net::TcpListener;
+use tokio::sync::Notify;
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
-use utils::{pid_file, project_build_tag, project_git_version, sentry_init::init_sentry};
+use utils::sentry_init::init_sentry;
+use utils::{pid_file, project_build_tag, project_git_version};
 
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
@@ -78,7 +81,10 @@ struct LocalProxyCliArgs {
     connect_to_compute_retry: String,
     /// Address of the postgres server
     #[clap(long, default_value = "127.0.0.1:5432")]
-    compute: SocketAddr,
+    postgres: SocketAddr,
+    /// Address of the compute-ctl api service
+    #[clap(long, default_value = "http://127.0.0.1:3080/")]
+    compute_ctl: ApiUrl,
     /// Path of the local proxy config file
     #[clap(long, default_value = "./local_proxy.json")]
     config_path: Utf8PathBuf,
@@ -171,7 +177,7 @@ async fn main() -> anyhow::Result<()> {
     let mut maintenance_tasks = JoinSet::new();
 
     let refresh_config_notify = Arc::new(Notify::new());
-    maintenance_tasks.spawn(proxy::handle_signals(shutdown.clone(), {
+    maintenance_tasks.spawn(proxy::signals::handle(shutdown.clone(), {
         let refresh_config_notify = Arc::clone(&refresh_config_notify);
         move || {
             refresh_config_notify.notify_one();
@@ -210,7 +216,7 @@ async fn main() -> anyhow::Result<()> {
 
     match futures::future::select(pin!(maintenance_tasks.join_next()), pin!(task)).await {
         // exit immediately on maintenance task completion
-        Either::Left((Some(res), _)) => match proxy::flatten_err(res)? {},
+        Either::Left((Some(res), _)) => match proxy::error::flatten_err(res)? {},
         // exit with error immediately if all maintenance tasks have ceased (should be caught by branch above)
         Either::Left((None, _)) => bail!("no maintenance tasks running. invalid state"),
         // exit immediately on client task error
@@ -293,7 +299,7 @@ fn build_auth_backend(
     args: &LocalProxyCliArgs,
 ) -> anyhow::Result<&'static auth::Backend<'static, ()>> {
     let auth_backend = proxy::auth::Backend::Local(proxy::auth::backend::MaybeOwned::Owned(
-        LocalBackend::new(args.compute),
+        LocalBackend::new(args.postgres, args.compute_ctl.clone()),
     ));
 
     Ok(Box::leak(Box::new(auth_backend)))

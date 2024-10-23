@@ -199,6 +199,138 @@ async fn list_no_delimiter_works(
     Ok(())
 }
 
+/// Tests that giving a partial prefix returns all matches (e.g. "/foo" yields "/foobar/baz"),
+/// but only with NoDelimiter.
+#[test_context(MaybeEnabledStorageWithSimpleTestBlobs)]
+#[tokio::test]
+async fn list_partial_prefix(
+    ctx: &mut MaybeEnabledStorageWithSimpleTestBlobs,
+) -> anyhow::Result<()> {
+    let ctx = match ctx {
+        MaybeEnabledStorageWithSimpleTestBlobs::Enabled(ctx) => ctx,
+        MaybeEnabledStorageWithSimpleTestBlobs::Disabled => return Ok(()),
+        MaybeEnabledStorageWithSimpleTestBlobs::UploadsFailed(e, _) => {
+            anyhow::bail!("S3 init failed: {e:?}")
+        }
+    };
+
+    let cancel = CancellationToken::new();
+    let test_client = Arc::clone(&ctx.enabled.client);
+
+    // Prefix "fold" should match all "folder{i}" directories with NoDelimiter.
+    let objects: HashSet<_> = test_client
+        .list(
+            Some(&RemotePath::from_string("fold")?),
+            ListingMode::NoDelimiter,
+            None,
+            &cancel,
+        )
+        .await?
+        .keys
+        .into_iter()
+        .map(|o| o.key)
+        .collect();
+    assert_eq!(&objects, &ctx.remote_blobs);
+
+    // Prefix "fold" matches nothing with WithDelimiter.
+    let objects: HashSet<_> = test_client
+        .list(
+            Some(&RemotePath::from_string("fold")?),
+            ListingMode::WithDelimiter,
+            None,
+            &cancel,
+        )
+        .await?
+        .keys
+        .into_iter()
+        .map(|o| o.key)
+        .collect();
+    assert!(objects.is_empty());
+
+    // Prefix "" matches everything.
+    let objects: HashSet<_> = test_client
+        .list(
+            Some(&RemotePath::from_string("")?),
+            ListingMode::NoDelimiter,
+            None,
+            &cancel,
+        )
+        .await?
+        .keys
+        .into_iter()
+        .map(|o| o.key)
+        .collect();
+    assert_eq!(&objects, &ctx.remote_blobs);
+
+    // Prefix "" matches nothing with WithDelimiter.
+    let objects: HashSet<_> = test_client
+        .list(
+            Some(&RemotePath::from_string("")?),
+            ListingMode::WithDelimiter,
+            None,
+            &cancel,
+        )
+        .await?
+        .keys
+        .into_iter()
+        .map(|o| o.key)
+        .collect();
+    assert!(objects.is_empty());
+
+    // Prefix "foo" matches nothing.
+    let objects: HashSet<_> = test_client
+        .list(
+            Some(&RemotePath::from_string("foo")?),
+            ListingMode::NoDelimiter,
+            None,
+            &cancel,
+        )
+        .await?
+        .keys
+        .into_iter()
+        .map(|o| o.key)
+        .collect();
+    assert!(objects.is_empty());
+
+    // Prefix "folder2/blob" matches.
+    let objects: HashSet<_> = test_client
+        .list(
+            Some(&RemotePath::from_string("folder2/blob")?),
+            ListingMode::NoDelimiter,
+            None,
+            &cancel,
+        )
+        .await?
+        .keys
+        .into_iter()
+        .map(|o| o.key)
+        .collect();
+    let expect: HashSet<_> = ctx
+        .remote_blobs
+        .iter()
+        .filter(|o| o.get_path().starts_with("folder2"))
+        .cloned()
+        .collect();
+    assert_eq!(&objects, &expect);
+
+    // Prefix "folder2/foo" matches nothing.
+    let objects: HashSet<_> = test_client
+        .list(
+            Some(&RemotePath::from_string("folder2/foo")?),
+            ListingMode::NoDelimiter,
+            None,
+            &cancel,
+        )
+        .await?
+        .keys
+        .into_iter()
+        .map(|o| o.key)
+        .collect();
+    assert!(objects.is_empty());
+
+    Ok(())
+}
+
 #[test_context(MaybeEnabledStorage)]
 #[tokio::test]
 async fn delete_non_exising_works(ctx: &mut MaybeEnabledStorage) -> anyhow::Result<()> {
@@ -261,6 +393,80 @@ async fn delete_objects_works(ctx: &mut MaybeEnabledStorage) -> anyhow::Result<(
     assert_eq!(prefixes.len(), 1);
 
     ctx.client.delete_objects(&[path3], &cancel).await?;
+
+    Ok(())
+}
+
+/// Tests that delete_prefix() will delete all objects matching a prefix, including
+/// partial prefixes (i.e. "/foo" matches "/foobar").
+#[test_context(MaybeEnabledStorageWithSimpleTestBlobs)]
+#[tokio::test]
+async fn delete_prefix(ctx: &mut MaybeEnabledStorageWithSimpleTestBlobs) -> anyhow::Result<()> {
+    let ctx = match ctx {
+        MaybeEnabledStorageWithSimpleTestBlobs::Enabled(ctx) => ctx,
+        MaybeEnabledStorageWithSimpleTestBlobs::Disabled => return Ok(()),
+        MaybeEnabledStorageWithSimpleTestBlobs::UploadsFailed(e, _) => {
+            anyhow::bail!("S3 init failed: {e:?}")
+        }
+    };
+
+    let cancel = CancellationToken::new();
+    let test_client = Arc::clone(&ctx.enabled.client);
+
+    /// Asserts that the S3 listing matches the given paths.
+    macro_rules! assert_list {
+        ($expect:expr) => {{
+            let listing = test_client
+                .list(None, ListingMode::NoDelimiter, None, &cancel)
+                .await?
+                .keys
+                .into_iter()
+                .map(|o| o.key)
+                .collect();
+            assert_eq!($expect, listing);
+        }};
+    }
+
+    // We start with the full set of uploaded files.
+    let mut expect = ctx.remote_blobs.clone();
+
+    // Deleting a non-existing prefix should do nothing.
+    test_client
+        .delete_prefix(&RemotePath::from_string("xyz")?, &cancel)
+        .await?;
+    assert_list!(expect);
+
+    // Prefixes are case-sensitive.
+    test_client
+        .delete_prefix(&RemotePath::from_string("Folder")?, &cancel)
+        .await?;
+    assert_list!(expect);
+
+    // Deleting a path which overlaps with an existing object should do nothing. We pick the first
+    // path in the set as our common prefix.
+    let path = expect.iter().next().expect("empty set").clone().join("xyz");
+    test_client.delete_prefix(&path, &cancel).await?;
+    assert_list!(expect);
+
+    // Deleting an exact path should work. We pick the first path in the set.
+    let path = expect.iter().next().expect("empty set").clone();
+    test_client.delete_prefix(&path, &cancel).await?;
+    expect.remove(&path);
+    assert_list!(expect);
+
+    // Deleting a prefix should delete all matching objects.
+    test_client
+        .delete_prefix(&RemotePath::from_string("folder0/blob_")?, &cancel)
+        .await?;
+    expect.retain(|p| !p.get_path().as_str().starts_with("folder0/"));
+    assert_list!(expect);
+
+    // Deleting a common prefix should delete all objects.
+    test_client
+        .delete_prefix(&RemotePath::from_string("fold")?, &cancel)
+        .await?;
+    expect.clear();
+    assert_list!(expect);
 
     Ok(())
 }

@@ -339,7 +339,7 @@ impl<'de> serde::Deserialize<'de> for LayerName {
 
 struct LayerNameVisitor;
 
-impl<'de> serde::de::Visitor<'de> for LayerNameVisitor {
+impl serde::de::Visitor<'_> for LayerNameVisitor {
     type Value = LayerName;
 
     fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {

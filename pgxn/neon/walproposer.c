@@ -841,6 +841,23 @@ HandleElectedProposer(WalProposer *wp)
 		wp_log(FATAL, "failed to download WAL for logical replicaiton");
 	}
 
+	/*
+	 * Zero propEpochStartLsn means majority of safekeepers doesn't have any
+	 * WAL, timeline was just created. Compute bumps it to basebackup LSN,
+	 * otherwise we must be sync-safekeepers and we have nothing to do then.
+	 *
+	 * Proceeding is not only pointless but harmful, because we'd give
+	 * safekeepers term history starting with 0/0. These hacks will go away once
+	 * we disable implicit timeline creation on safekeepers and create it with
+	 * non zero LSN from the start.
+	 */
+	if (wp->propEpochStartLsn == InvalidXLogRecPtr)
+	{
+		Assert(wp->config->syncSafekeepers);
+		wp_log(LOG, "elected with zero propEpochStartLsn in sync-safekeepers, exiting");
+		wp->api.finish_sync_safekeepers(wp, wp->propEpochStartLsn);
+	}
+
 	if (wp->truncateLsn == wp->propEpochStartLsn && wp->config->syncSafekeepers)
 	{
 		/* Sync is not needed: just exit */
