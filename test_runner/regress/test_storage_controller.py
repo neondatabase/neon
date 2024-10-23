@@ -872,6 +872,14 @@ def test_storage_controller_debug_apis(neon_env_builder: NeonEnvBuilder):
     assert sum(v["shard_count"] for v in response.json()["nodes"].values()) == 3
     assert all(v["may_schedule"] for v in response.json()["nodes"].values())
 
+    # Reconciler cancel API should be a no-op when nothing is in flight
+    env.storage_controller.request(
+        "PUT",
+        f"{env.storage_controller_api}/control/v1/tenant/{tenant_id}-0102/cancel",
+        headers=env.storage_controller.headers(TokenScope.ADMIN),
+    )
+
+    # Node unclean drop API
     response = env.storage_controller.request(
         "POST",
         f"{env.storage_controller_api}/debug/v1/node/{env.pageservers[1].id}/drop",
@@ -879,6 +887,7 @@ def test_storage_controller_debug_apis(neon_env_builder: NeonEnvBuilder):
     )
     assert len(env.storage_controller.node_list()) == 1
 
+    # Tenant unclean drop API
     response = env.storage_controller.request(
         "POST",
         f"{env.storage_controller_api}/debug/v1/tenant/{tenant_id}/drop",
@@ -892,7 +901,6 @@ def test_storage_controller_debug_apis(neon_env_builder: NeonEnvBuilder):
         headers=env.storage_controller.headers(TokenScope.ADMIN),
     )
     assert len(response.json()) == 1
-
     # Check that the 'drop' APIs didn't leave things in a state that would fail a consistency check: they're
     # meant to be unclean wrt the pageserver state, but not leave a broken storage controller behind.
     env.storage_controller.consistency_check()
@@ -1659,6 +1667,9 @@ def test_storcon_cli(neon_env_builder: NeonEnvBuilder):
     # Pause changes on a tenant
     storcon_cli(["tenant-policy", "--tenant-id", str(env.initial_tenant), "--scheduling", "stop"])
     assert "Stop" in storcon_cli(["tenants"])[3]
+
+    # Cancel ongoing reconcile on a tenant
+    storcon_cli(["tenant-shard-cancel", "--tenant-shard-id", f"{env.initial_tenant}-0104"])
 
     # Change a tenant's placement
     storcon_cli(
