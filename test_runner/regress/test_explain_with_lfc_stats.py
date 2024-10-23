@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import pytest
+
 from pathlib import Path
 
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv
+from fixtures.utils import NO_DEFAULT_LFC
 
 
+@pytest.mark.skipif(NO_DEFAULT_LFC, reason="LFC is disabled, skipping")
 def test_explain_with_lfc_stats(neon_simple_env: NeonEnv):
     env = neon_simple_env
 

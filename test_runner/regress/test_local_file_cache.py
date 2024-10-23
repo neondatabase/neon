@@ -3,13 +3,15 @@ from __future__ import annotations
 import os
 import queue
 import random
+import pytest
 import threading
 import time
 
 from fixtures.neon_fixtures import NeonEnvBuilder
-from fixtures.utils import query_scalar
+from fixtures.utils import query_scalar, NO_DEFAULT_LFC
 
 
+@pytest.mark.skipif(NO_DEFAULT_LFC, reason="LFC is disabled, skipping")
 def test_local_file_cache_unlink(neon_env_builder: NeonEnvBuilder):
     env = neon_env_builder.init_start()
 

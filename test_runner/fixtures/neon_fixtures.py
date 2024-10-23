@@ -76,6 +76,7 @@ from fixtures.safekeeper.utils import wait_walreceivers_absent
 from fixtures.utils import (
     ATTACHMENT_NAME_REGEX,
     COMPONENT_BINARIES,
+    NO_DEFAULT_LFC,
     allure_add_grafana_links,
     assert_no_errors,
     get_dir_size,
@@ -3460,10 +3461,7 @@ class Endpoint(PgProtocol, LogUtils):
         self.logfile = self.endpoint_path() / "compute.log"
 
         if use_lfc is None:
-            no_default_lfc_env = os.environ.get("NO_DEFAULT_LFC")
-            use_lfc = (no_default_lfc_env is None) or (
-                no_default_lfc_env.lower() in {"no", "false"}
-            )
+            use_lfc = not NO_DEFAULT_LFC
 
         # set small 'max_replication_write_lag' to enable backpressure
         # and make tests more stable.

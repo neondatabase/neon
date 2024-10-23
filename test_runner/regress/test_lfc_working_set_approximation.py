@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import time
+import pytest
 from pathlib import Path
 
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv
-from fixtures.utils import query_scalar
+from fixtures.utils import query_scalar, NO_DEFAULT_LFC
 
 
+@pytest.mark.skipif(NO_DEFAULT_LFC, reason="LFC is disabled, skipping")
 def test_lfc_working_set_approximation(neon_simple_env: NeonEnv):
     env = neon_simple_env
 
@@ -74,6 +76,7 @@ WITH (fillfactor='100');
     assert blocks < 12
 
 
+@pytest.mark.skipif(NO_DEFAULT_LFC, reason="LFC is disabled, skipping")
 def test_sliding_working_set_approximation(neon_simple_env: NeonEnv):
     env = neon_simple_env
 
