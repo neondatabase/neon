@@ -62,7 +62,7 @@ mod tests {
     use super::{Exchange, ServerSecret};
     use crate::intern::EndpointIdInt;
     use crate::sasl::{Mechanism, Step};
-    use crate::EndpointId;
+    use crate::types::EndpointId;
 
     #[test]
     fn snapshot() {

@@ -271,7 +271,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::{ProjectId, RoleName};
+    use crate::types::{ProjectId, RoleName};
 
     #[test]
     fn parse_allowed_ips() -> anyhow::Result<()> {

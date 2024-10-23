@@ -250,7 +250,7 @@ mod tests {
     use super::{BucketRateLimiter, WakeComputeRateLimiter};
     use crate::intern::EndpointIdInt;
     use crate::rate_limiter::RateBucketInfo;
-    use crate::EndpointId;
+    use crate::types::EndpointId;
 
     #[test]
     fn rate_bucket_rpi() {

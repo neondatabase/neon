@@ -19,7 +19,7 @@ use crate::intern::{BranchIdInt, ProjectIdInt};
 use crate::metrics::{
     ConnectOutcome, InvalidEndpointsGroup, LatencyTimer, Metrics, Protocol, Waiting,
 };
-use crate::{DbName, EndpointId, RoleName};
+use crate::types::{DbName, EndpointId, RoleName};
 
 pub mod parquet;
 

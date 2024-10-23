@@ -23,7 +23,8 @@ use crate::error::ReportableError;
 use crate::intern::ProjectIdInt;
 use crate::metrics::ApiLockMetrics;
 use crate::rate_limiter::{DynamicLimiter, Outcome, RateLimiterConfig, Token};
-use crate::{compute, scram, EndpointCacheKey, EndpointId};
+use crate::types::{EndpointCacheKey, EndpointId};
+use crate::{compute, scram};
 
 pub(crate) mod errors {
     use thiserror::Error;
