@@ -6,6 +6,7 @@ from fixtures.neon_fixtures import NeonEnv, logical_replication_sync
 
 
 def test_physical_and_logical_replication(neon_simple_env: NeonEnv, vanilla_pg):
+    """Test read replica of a primary which has a logical replication publication"""
     env = neon_simple_env
 
 <<<<<<< HEAD
