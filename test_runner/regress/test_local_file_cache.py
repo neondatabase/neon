@@ -3,12 +3,12 @@ from __future__ import annotations
 import os
 import queue
 import random
-import pytest
 import threading
 import time
 
+import pytest
 from fixtures.neon_fixtures import NeonEnvBuilder
-from fixtures.utils import query_scalar, NO_DEFAULT_LFC
+from fixtures.utils import NO_DEFAULT_LFC, query_scalar
 
 
 @pytest.mark.skipif(NO_DEFAULT_LFC, reason="LFC is disabled, skipping")

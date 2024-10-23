@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import pytest
-
 from pathlib import Path
 
+import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv
 from fixtures.utils import NO_DEFAULT_LFC

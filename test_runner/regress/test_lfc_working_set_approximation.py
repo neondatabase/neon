@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import time
-import pytest
 from pathlib import Path
 
+import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv
-from fixtures.utils import query_scalar, NO_DEFAULT_LFC
+from fixtures.utils import NO_DEFAULT_LFC, query_scalar
 
 
 @pytest.mark.skipif(NO_DEFAULT_LFC, reason="LFC is disabled, skipping")

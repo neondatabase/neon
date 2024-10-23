@@ -57,7 +57,9 @@ VERSIONS_COMBINATIONS = (
 # fmt: on
 
 no_default_lfc_env = os.environ.get("NO_DEFAULT_LFC")
-NO_DEFAULT_LFC = (no_default_lfc_env is not None) and (no_default_lfc_env.lower() in {"yes", "true"})
+NO_DEFAULT_LFC = (no_default_lfc_env is not None) and (
+    no_default_lfc_env.lower() in {"yes", "true"}
+)
 
 
 def subprocess_capture(
