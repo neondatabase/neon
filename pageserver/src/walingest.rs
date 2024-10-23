@@ -124,16 +124,11 @@ enum NeonrmgrRecord {
 
 enum SmgrRecord {
     Create(SmgrCreate),
-    Truncate(SmgrTruncate),
+    Truncate(XlSmgrTruncate),
 }
 
 struct SmgrCreate {
     rel: RelTag,
-}
-
-struct SmgrTruncate {
-    rel: RelTag,
-    to: BlockNumber,
 }
 
 enum DbaseRecord {
@@ -1394,52 +1389,7 @@ impl WalIngest {
             return Ok(Some(SmgrRecord::Create(SmgrCreate { rel })));
         } else if info == pg_constants::XLOG_SMGR_TRUNCATE {
             let truncate = XlSmgrTruncate::decode(buf);
-
-            let spcnode = truncate.rnode.spcnode;
-            let dbnode = truncate.rnode.dbnode;
-            let relnode = truncate.rnode.relnode;
-
-            if (truncate.flags & pg_constants::SMGR_TRUNCATE_HEAP) != 0 {
-                let rel = RelTag {
-                    spcnode,
-                    dbnode,
-                    relnode,
-                    forknum: MAIN_FORKNUM,
-                };
-
-                return Ok(Some(SmgrRecord::Truncate(SmgrTruncate {
-                    rel,
-                    to: truncate.blkno,
-                })));
-            }
-
-            if (truncate.flags & pg_constants::SMGR_TRUNCATE_FSM) != 0 {
-                let rel = RelTag {
-                    spcnode,
-                    dbnode,
-                    relnode,
-                    forknum: FSM_FORKNUM,
-                };
-
-                return Ok(Some(SmgrRecord::Truncate(SmgrTruncate {
-                    rel,
-                    to: truncate.blkno,
-                })));
-            }
-
-            if (truncate.flags & pg_constants::SMGR_TRUNCATE_VM) != 0 {
-                let rel = RelTag {
-                    spcnode,
-                    dbnode,
-                    relnode,
-                    forknum: VISIBILITYMAP_FORKNUM,
-                };
-
-                return Ok(Some(SmgrRecord::Truncate(SmgrTruncate {
-                    rel,
-                    to: truncate.blkno,
-                })));
-            }
+            return Ok(Some(SmgrRecord::Truncate(truncate)));
         }
 
         Ok(None)
@@ -1450,19 +1400,42 @@ impl WalIngest {
     /// This is the same logic as in PostgreSQL's smgr_redo() function.
     async fn ingest_xlog_smgr_truncate(
         &mut self,
-        truncate: SmgrTruncate,
+        truncate: XlSmgrTruncate,
         modification: &mut DatadirModification<'_>,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        let SmgrTruncate { rel, to } = truncate;
+        let XlSmgrTruncate {
+            blkno,
+            rnode,
+            flags,
+        } = truncate;
 
-        if rel.forknum == MAIN_FORKNUM {
-            self.put_rel_truncation(modification, rel, to, ctx).await?;
+        let spcnode = rnode.spcnode;
+        let dbnode = rnode.dbnode;
+        let relnode = rnode.relnode;
+
+        if flags & pg_constants::SMGR_TRUNCATE_HEAP != 0 {
+            let rel = RelTag {
+                spcnode,
+                dbnode,
+                relnode,
+                forknum: MAIN_FORKNUM,
+            };
+
+            self.put_rel_truncation(modification, rel, blkno, ctx)
+                .await?;
         }
-        if rel.forknum == FSM_FORKNUM {
-            let fsm_logical_page_no = to / pg_constants::SLOTS_PER_FSM_PAGE;
+        if flags & pg_constants::SMGR_TRUNCATE_FSM != 0 {
+            let rel = RelTag {
+                spcnode,
+                dbnode,
+                relnode,
+                forknum: FSM_FORKNUM,
+            };
+
+            let fsm_logical_page_no = blkno / pg_constants::SLOTS_PER_FSM_PAGE;
             let mut fsm_physical_page_no = fsm_logical_to_physical(fsm_logical_page_no);
-            if to % pg_constants::SLOTS_PER_FSM_PAGE != 0 {
+            if blkno % pg_constants::SLOTS_PER_FSM_PAGE != 0 {
                 // Tail of last remaining FSM page has to be zeroed.
                 // We are not precise here and instead of digging in FSM bitmap format just clear the whole page.
                 modification.put_rel_page_image_zero(rel, fsm_physical_page_no)?;
@@ -1475,9 +1448,16 @@ impl WalIngest {
                     .await?;
             }
         }
-        if rel.forknum == VISIBILITYMAP_FORKNUM {
-            let mut vm_page_no = to / pg_constants::VM_HEAPBLOCKS_PER_PAGE;
-            if to % pg_constants::VM_HEAPBLOCKS_PER_PAGE != 0 {
+        if flags & pg_constants::SMGR_TRUNCATE_VM != 0 {
+            let rel = RelTag {
+                spcnode,
+                dbnode,
+                relnode,
+                forknum: VISIBILITYMAP_FORKNUM,
+            };
+
+            let mut vm_page_no = blkno / pg_constants::VM_HEAPBLOCKS_PER_PAGE;
+            if blkno % pg_constants::VM_HEAPBLOCKS_PER_PAGE != 0 {
                 // Tail of last remaining vm page has to be zeroed.
                 // We are not precise here and instead of digging in VM bitmap format just clear the whole page.
                 modification.put_rel_page_image_zero(rel, vm_page_no)?;
