@@ -83,6 +83,11 @@ InitBufferTag(BufferTag *tag, const RelFileNode *rnode,
 
 #define DropRelationAllLocalBuffers DropRelFileNodeAllLocalBuffers
 
+void *guc_malloc(int elevel, size_t size);
+void *guc_realloc(int elevel, void *old, size_t size);
+char *guc_strdup(int elevel, const char *src);
+void guc_free(void *ptr);
+
 #else							/* major version >= 16 */
 
 #define USE_RELFILELOCATOR

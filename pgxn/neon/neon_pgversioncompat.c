@@ -42,3 +42,59 @@ InitMaterializedSRF(FunctionCallInfo fcinfo, bits32 flags)
 	MemoryContextSwitchTo(old_context);
 }
 #endif
+
+#if PG_MAJORVERSION_NUM < 16
+/*
+ * Some infrastructure for checking malloc/strdup/realloc calls
+ */
+void *
+guc_malloc(int elevel, size_t size)
+{
+	void	   *data;
+
+	/* Avoid unportable behavior of malloc(0) */
+	if (size == 0)
+		size = 1;
+	data = malloc(size);
+	if (data == NULL)
+		ereport(elevel,
+				(errcode(ERRCODE_OUT_OF_MEMORY),
+				 errmsg("out of memory")));
+	return data;
+}
+
+void *
+guc_realloc(int elevel, void *old, size_t size)
+{
+	void	   *data;
+
+	/* Avoid unportable behavior of realloc(NULL, 0) */
+	if (old == NULL && size == 0)
+		size = 1;
+	data = realloc(old, size);
+	if (data == NULL)
+		ereport(elevel,
+				(errcode(ERRCODE_OUT_OF_MEMORY),
+				 errmsg("out of memory")));
+	return data;
+}
+
+char *
+guc_strdup(int elevel, const char *src)
+{
+	char	   *data;
+
+	data = strdup(src);
+	if (data == NULL)
+		ereport(elevel,
+				(errcode(ERRCODE_OUT_OF_MEMORY),
+				 errmsg("out of memory")));
+	return data;
+}
+
+void
+guc_free(void *ptr)
+{
+	free(ptr);
+}
+#endif
