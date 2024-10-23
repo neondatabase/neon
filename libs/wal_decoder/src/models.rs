@@ -25,13 +25,45 @@
 //!                     |--> write to KV store within the pageserver
 
 use bytes::Bytes;
+use pageserver_api::key::CompactKey;
 use pageserver_api::reltag::{RelTag, SlruKind};
+use pageserver_api::value::Value;
 use postgres_ffi::walrecord::{
     XlMultiXactCreate, XlMultiXactTruncate, XlRelmapUpdate, XlReploriginDrop, XlReploriginSet,
     XlSmgrTruncate, XlXactParsedRecord,
 };
 use postgres_ffi::{Oid, TransactionId};
 use utils::lsn::Lsn;
+
+pub enum FlushUncommittedRecords {
+    Yes,
+    No,
+}
+
+pub struct InterpretedWalRecord {
+    pub metadata_record: Option<MetadataRecord>,
+    pub blocks: Vec<(CompactKey, Option<Value>)>,
+    pub lsn: Lsn,
+    pub flush_uncommitted: FlushUncommittedRecords,
+    pub xid: TransactionId,
+}
+
+/// The interpreted part of the Postgres WAL record which requires metadata
+/// writes to the underlying storage engine.
+pub enum MetadataRecord {
+    Heapam(HeapamRecord),
+    Neonrmgr(NeonrmgrRecord),
+    Smgr(SmgrRecord),
+    Dbase(DbaseRecord),
+    Clog(ClogRecord),
+    Xact(XactRecord),
+    MultiXact(MultiXactRecord),
+    Relmap(RelmapRecord),
+    Xlog(XlogRecord),
+    LogicalMessage(LogicalMessageRecord),
+    Standby(StandbyRecord),
+    Replorigin(ReploriginRecord),
+}
 
 pub enum HeapamRecord {
     ClearVmBits(ClearVmBits),
