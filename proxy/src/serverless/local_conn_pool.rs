@@ -35,8 +35,8 @@ use super::conn_pool_lib::{ClientInnerExt, ConnInfo};
 use crate::context::RequestMonitoring;
 use crate::control_plane::messages::{ColdStartInfo, MetricsAuxInfo};
 use crate::metrics::Metrics;
+use crate::types::{DbName, RoleName};
 use crate::usage_metrics::{Ids, MetricCounter, USAGE_METRICS};
-use crate::{DbName, RoleName};
 
 pub(crate) const EXT_NAME: &str = "pg_session_jwt";
 pub(crate) const EXT_VERSION: &str = "0.1.2";

@@ -25,7 +25,7 @@ use crate::control_plane::provider::ApiLockError;
 use crate::error::{ReportableError, UserFacingError};
 use crate::metrics::{Metrics, NumDbConnectionsGuard};
 use crate::proxy::neon_option;
-use crate::Host;
+use crate::types::Host;
 
 pub const COULD_NOT_CONNECT: &str = "Couldn't connect to compute node";
 

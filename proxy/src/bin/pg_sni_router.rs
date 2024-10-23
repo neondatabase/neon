@@ -133,14 +133,14 @@ async fn main() -> anyhow::Result<()> {
         proxy_listener,
         cancellation_token.clone(),
     ));
-    let signals_task = tokio::spawn(proxy::handle_signals(cancellation_token, || {}));
+    let signals_task = tokio::spawn(proxy::signals::handle(cancellation_token, || {}));
 
     // the signal task cant ever succeed.
     // the main task can error, or can succeed on cancellation.
     // we want to immediately exit on either of these cases
     let signal = match futures::future::select(signals_task, main).await {
-        Either::Left((res, _)) => proxy::flatten_err(res)?,
-        Either::Right((res, _)) => return proxy::flatten_err(res),
+        Either::Left((res, _)) => proxy::error::flatten_err(res)?,
+        Either::Right((res, _)) => return proxy::error::flatten_err(res),
     };
 
     // maintenance tasks return `Infallible` success values, this is an impossible value

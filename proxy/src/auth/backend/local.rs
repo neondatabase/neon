@@ -10,9 +10,10 @@ use crate::compute_ctl::ComputeCtlApi;
 use crate::context::RequestMonitoring;
 use crate::control_plane::messages::{ColdStartInfo, EndpointJwksResponse, MetricsAuxInfo};
 use crate::control_plane::NodeInfo;
+use crate::http;
 use crate::intern::{BranchIdTag, EndpointIdTag, InternId, ProjectIdTag};
+use crate::types::EndpointId;
 use crate::url::ApiUrl;
-use crate::{http, EndpointId};
 
 pub struct LocalBackend {
     pub(crate) initialize: Semaphore,

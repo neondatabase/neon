@@ -15,7 +15,7 @@ use crate::error::{ReportableError, UserFacingError};
 use crate::metrics::{Metrics, SniKind};
 use crate::proxy::NeonOptions;
 use crate::serverless::SERVERLESS_DRIVER_SNI;
-use crate::{EndpointId, RoleName};
+use crate::types::{EndpointId, RoleName};
 
 #[derive(Debug, Error, PartialEq, Eq, Clone)]
 pub(crate) enum ComputeUserInfoParseError {
