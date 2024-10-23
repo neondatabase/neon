@@ -913,8 +913,12 @@ USER root
 
 FROM rust-extensions-build-pgrx12 AS pg-onnx-build
 
-RUN apt-get update && apt-get install -y python3 python3-pip && \
-    python3 -m pip install cmake && \
+# cmake 3.26 or higher is required, so installing it using pip (bullseye-backports has cmake 3.25).
+# Install it using virtual environment, because Python 3.11 (the default version on Debian 12 (Bookworm)) complains otherwise
+RUN apt-get update && apt-get install -y python3 python3-pip python3-venv && \
+    python3 -m venv venv && \
+    . venv/bin/activate && \
+    python3 -m pip install cmake==3.30.5 && \
     wget https://github.com/microsoft/onnxruntime/archive/refs/tags/v1.18.1.tar.gz -O onnxruntime.tar.gz && \
     mkdir onnxruntime-src && cd onnxruntime-src && tar xzf ../onnxruntime.tar.gz --strip-components=1 -C . && \
     ./build.sh --config Release --parallel --skip_submodule_sync --skip_tests --allow_running_as_root
