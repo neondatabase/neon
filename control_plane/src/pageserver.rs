@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use anyhow::{bail, Context};
 use camino::Utf8PathBuf;
-use pageserver_api::models::{self, AuxFilePolicy, TenantInfo, TimelineInfo};
+use pageserver_api::models::{self, TenantInfo, TimelineInfo};
 use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api;
 use postgres_backend::AuthType;
@@ -399,16 +399,12 @@ impl PageServerNode {
                 .map(serde_json::from_str)
                 .transpose()
                 .context("parse `timeline_get_throttle` from json")?,
-            switch_aux_file_policy: settings
-                .remove("switch_aux_file_policy")
-                .map(|x| x.parse::<AuxFilePolicy>())
-                .transpose()
-                .context("Failed to parse 'switch_aux_file_policy'")?,
             lsn_lease_length: settings.remove("lsn_lease_length").map(|x| x.to_string()),
             lsn_lease_length_for_ts: settings
                 .remove("lsn_lease_length_for_ts")
                 .map(|x| x.to_string()),
         };
+        settings.remove("switch_aux_file_policy");
         if !settings.is_empty() {
             bail!("Unrecognized tenant settings: {settings:?}")
         } else {
@@ -499,17 +495,14 @@ impl PageServerNode {
                     .map(serde_json::from_str)
                     .transpose()
                     .context("parse `timeline_get_throttle` from json")?,
-                switch_aux_file_policy: settings
-                    .remove("switch_aux_file_policy")
-                    .map(|x| x.parse::<AuxFilePolicy>())
-                    .transpose()
-                    .context("Failed to parse 'switch_aux_file_policy'")?,
                 lsn_lease_length: settings.remove("lsn_lease_length").map(|x| x.to_string()),
                 lsn_lease_length_for_ts: settings
                     .remove("lsn_lease_length_for_ts")
                     .map(|x| x.to_string()),
             }
         };
+
+        settings.remove("switch_aux_file_policy");
 
         if !settings.is_empty() {
             bail!("Unrecognized tenant settings: {settings:?}")

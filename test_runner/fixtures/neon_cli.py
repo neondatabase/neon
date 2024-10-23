@@ -223,13 +223,6 @@ class NeonLocalCli(AbstractNeonCli):
                 )
             )
 
-        if aux_file_policy is AuxFileStore.V2:
-            args.extend(["-c", "switch_aux_file_policy:v2"])
-        elif aux_file_policy is AuxFileStore.V1:
-            args.extend(["-c", "switch_aux_file_policy:v1"])
-        elif aux_file_policy is AuxFileStore.CrossValidation:
-            args.extend(["-c", "switch_aux_file_policy:cross-validation"])
-
         if set_default:
             args.append("--set-default")
 
