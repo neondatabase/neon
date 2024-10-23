@@ -898,7 +898,7 @@ ARG PG_VERSION
 # we use `rm` and the `sed` patterns on Cargo.toml to patch each of the pgrag extensions for pgrx 0.11 compatibility
 
 RUN case "${PG_VERSION}" in "v17") \
-    echo "pgrag supports pg17 but we are not building with pgrx 0.12 yet" && exit 0;; \
+    echo "pgrag supports pg17, but we are not building with pgrx 0.12 yet" && exit 0;; \
     esac && \
     apt-get install -y protobuf-compiler && \
     wget https://github.com/neondatabase-labs/pgrag/archive/refs/heads/main.tar.gz -O pgrag.tar.gz &&  \
