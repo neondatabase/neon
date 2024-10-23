@@ -50,6 +50,15 @@ struct NewMetricsRefRoot<'a> {
     metrics: &'a [NewRawMetric],
 }
 
+impl<'a> NewMetricsRefRoot<'a> {
+    fn new(metrics: &'a [NewRawMetric]) -> Self {
+        Self {
+            version: "v2".to_string(),
+            metrics,
+        }
+    }
+}
+
 /// The new serializable metrics format
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 struct NewRawMetric {
