@@ -6,6 +6,34 @@ use crate::consumption_metrics::NewMetricsRefRoot;
 
 use super::{NewMetricsRoot, NewRawMetric, RawMetric};
 
+pub(super) fn read_metrics_from_serde_value(
+    json_value: serde_json::Value,
+) -> anyhow::Result<Vec<NewRawMetric>> {
+    let mut decode_v2 = false;
+    if let Some(ver) = json_value.get("version") {
+        if let Some(str) = ver.as_str() {
+            if str == "v2" {
+                decode_v2 = true
+            }
+        }
+    };
+    if decode_v2 {
+        let root = serde_json::from_value::<NewMetricsRoot>(json_value)?;
+        Ok(root.metrics)
+    } else {
+        let all_metrics = serde_json::from_value::<Vec<RawMetric>>(json_value)?;
+        let all_metrics = all_metrics
+            .into_iter()
+            .map(|(key, (event_type, value))| NewRawMetric {
+                key,
+                kind: event_type,
+                value,
+            })
+            .collect();
+        Ok(all_metrics)
+    }
+}
+
 pub(super) async fn read_metrics_from_disk(
     path: Arc<Utf8PathBuf>,
 ) -> anyhow::Result<Vec<NewRawMetric>> {
@@ -23,29 +51,7 @@ pub(super) async fn read_metrics_from_disk(
         let mut file = std::fs::File::open(&*path)?;
         let reader = std::io::BufReader::new(&mut file);
         let json_value = serde_json::from_reader::<_, serde_json::Value>(reader)?;
-        let mut decode_v2 = false;
-        if let Some(ver) = json_value.get("version") {
-            if let Some(str) = ver.as_str() {
-                if str == "v2" {
-                    decode_v2 = true
-                }
-            }
-        };
-        if decode_v2 {
-            let root = serde_json::from_value::<NewMetricsRoot>(json_value)?;
-            Ok(root.metrics)
-        } else {
-            let all_metrics = serde_json::from_value::<Vec<RawMetric>>(json_value)?;
-            let all_metrics = all_metrics
-                .into_iter()
-                .map(|(key, (event_type, value))| NewRawMetric {
-                    key,
-                    kind: event_type,
-                    value,
-                })
-                .collect();
-            Ok(all_metrics)
-        }
+        read_metrics_from_serde_value(json_value)
     })
     .await
     .context("read metrics join error")
@@ -120,10 +126,7 @@ pub(super) async fn flush_metrics_to_disk(
                 let mut writer = std::io::BufWriter::new(&mut tempfile);
                 serde_json::to_writer(
                     &mut writer,
-                    &NewMetricsRefRoot {
-                        version: "v2".to_string(),
-                        metrics: current_metrics.as_ref(),
-                    },
+                    &NewMetricsRefRoot::new(current_metrics.as_ref()),
                 )
                 .context("serialize metrics")?;
                 writer

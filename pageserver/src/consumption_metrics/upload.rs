@@ -433,6 +433,10 @@ async fn upload(
 
 #[cfg(test)]
 mod tests {
+    use crate::consumption_metrics::{
+        disk_cache::read_metrics_from_serde_value, NewMetricsRefRoot,
+    };
+
     use super::*;
     use chrono::{DateTime, Utc};
     use once_cell::sync::Lazy;
@@ -543,6 +547,16 @@ mod tests {
                 item.kind
             );
         }
+    }
+
+    #[test]
+    fn disk_format_upgrade() {
+        let old_samples_json = serde_json::to_value(metric_samples_old()).unwrap();
+        let new_samples =
+            serde_json::to_value(NewMetricsRefRoot::new(metric_samples().as_ref())).unwrap();
+        let upgraded_samples = read_metrics_from_serde_value(old_samples_json).unwrap();
+        let new_samples = read_metrics_from_serde_value(new_samples).unwrap();
+        assert_eq!(upgraded_samples, new_samples);
     }
 
     fn metric_samples_old() -> [RawMetric; 6] {
