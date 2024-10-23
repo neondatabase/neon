@@ -16,7 +16,6 @@ from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.pageserver.common_types import IndexPartDump
 from fixtures.pg_version import PgVersion
-from fixtures.utils import AuxFileStore
 
 if TYPE_CHECKING:
     from typing import (
@@ -201,7 +200,6 @@ class NeonLocalCli(AbstractNeonCli):
         shard_stripe_size: Optional[int] = None,
         placement_policy: Optional[str] = None,
         set_default: bool = False,
-        aux_file_policy: Optional[AuxFileStore] = None,
     ):
         """
         Creates a new tenant, returns its id and its initial timeline's id.
