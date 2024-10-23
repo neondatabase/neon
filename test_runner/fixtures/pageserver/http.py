@@ -141,6 +141,18 @@ class TenantConfig:
             effective_config=d["effective_config"],
         )
 
+@dataclass
+class TimelinesInfoAndOffloaded:
+    timelines: list[dict[str, Any]]
+    offloaded: list[dict[str, Any]]
+
+    @classmethod
+    def from_json(cls, d: dict[str, Any]) -> TimelinesInfoAndOffloaded:
+        return TimelinesInfoAndOffloaded(
+            timelines=d["timelines"],
+            offloaded=d["offloaded"],
+        )
+
 
 class PageserverHttpClient(requests.Session, MetricsGetter):
     def __init__(
@@ -463,6 +475,19 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         res_json = res.json()
         assert isinstance(res_json, list)
         return res_json
+
+    def timeline_and_offloaded_list(
+        self,
+        tenant_id: Union[TenantId, TenantShardId],
+    ) -> TimelinesInfoAndOffloaded:
+
+        res = self.get(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline_and_offloaded",
+        )
+        self.verbose_error(res)
+        res_json = res.json()
+        assert isinstance(res_json, dict)
+        return TimelinesInfoAndOffloaded.from_json(res_json)
 
     def timeline_create(
         self,

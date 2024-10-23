@@ -1278,10 +1278,14 @@ impl RemoteTimelineClient {
         let fut = {
             let mut guard = self.upload_queue.lock().unwrap();
             let upload_queue = match &mut *guard {
-                UploadQueue::Stopped(_) => return,
+                UploadQueue::Stopped(_) => {
+                    scopeguard::ScopeGuard::into_inner(sg);
+                    return;
+                }
                 UploadQueue::Uninitialized => {
                     // transition into Stopped state
                     self.stop_impl(&mut guard);
+                    scopeguard::ScopeGuard::into_inner(sg);
                     return;
                 }
                 UploadQueue::Initialized(ref mut init) => init,
