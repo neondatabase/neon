@@ -915,6 +915,7 @@ FROM rust-extensions-build-pgrx12 AS pg-onnx-build
 
 # cmake 3.26 or higher is required, so installing it using pip (bullseye-backports has cmake 3.25).
 # Install it using virtual environment, because Python 3.11 (the default version on Debian 12 (Bookworm)) complains otherwise
+
 RUN apt-get update && apt-get install -y python3 python3-pip python3-venv && \
     python3 -m venv venv && \
     . venv/bin/activate && \
