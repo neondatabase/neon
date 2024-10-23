@@ -1915,7 +1915,9 @@ impl WalIngest {
             modification.put_rel_extend(rel, new_nblocks, ctx).await?;
 
             let mut key = rel_block_to_key(rel, blknum);
+
             // fill the gap with zeros
+            let mut gap_blocks_filled: u64 = 0;
             for gap_blknum in old_nblocks..blknum {
                 key.field6 = gap_blknum;
 
@@ -1924,7 +1926,12 @@ impl WalIngest {
                 }
 
                 modification.put_rel_page_image_zero(rel, gap_blknum)?;
+                gap_blocks_filled += 1;
             }
+
+            WAL_INGEST
+                .gap_blocks_zeroed_on_rel_extend
+                .inc_by(gap_blocks_filled);
         }
         Ok(())
     }
