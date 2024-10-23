@@ -52,8 +52,6 @@ impl LayerManager {
     }
 
     pub(crate) fn try_get_from_key(&self, key: &PersistentLayerKey) -> Option<&Layer> {
-        // The assumption for the `expect()` is that all code maintains the following invariant:
-        // A layer's descriptor is present in the LayerMap => the LayerFileManager contains a layer for the descriptor.
         self.layers().get(key)
     }
 

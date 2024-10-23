@@ -1211,7 +1211,7 @@ async fn layer_map_info_handler(
 }
 
 #[instrument(skip_all, fields(tenant_id, shard_id, timeline_id, layer_name))]
-async fn timeline_layer_file_scan_disposable_keys(
+async fn timeline_layer_scan_disposable_keys(
     request: Request<Body>,
     cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
@@ -3142,7 +3142,7 @@ pub fn make_router(
         )
         .post(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/layer/:layer_name/scan_disposable_keys",
-            |r| api_handler(r, timeline_layer_file_scan_disposable_keys),
+            |r| testing_api_handler("timeline_layer_scan_disposable_keys", r, timeline_layer_scan_disposable_keys),
         )
         .post(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/block_gc",
