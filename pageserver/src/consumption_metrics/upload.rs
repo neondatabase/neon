@@ -198,7 +198,7 @@ fn serialize_in_chunks<'a>(
         }
     }
 
-    impl<'a> ExactSizeIterator for Iter<'a> {}
+    impl ExactSizeIterator for Iter<'_> {}
 
     let buffer = bytes::BytesMut::new();
     let inner = input.chunks(chunk_size);

@@ -16,7 +16,7 @@ use crate::context::RequestMonitoring;
 use crate::control_plane::errors::GetEndpointJwksError;
 use crate::http::parse_json_body_with_limit;
 use crate::intern::RoleNameInt;
-use crate::{EndpointId, RoleName};
+use crate::types::{EndpointId, RoleName};
 
 // TODO(conrad): make these configurable.
 const CLOCK_SKEW_LEEWAY: Duration = Duration::from_secs(30);
@@ -669,7 +669,7 @@ mod tests {
     use tokio::net::TcpListener;
 
     use super::*;
-    use crate::RoleName;
+    use crate::types::RoleName;
 
     fn new_ec_jwk(kid: String) -> (p256::SecretKey, jose_jwk::Jwk) {
         let sk = p256::SecretKey::random(&mut OsRng);

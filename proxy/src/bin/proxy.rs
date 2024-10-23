@@ -495,7 +495,7 @@ async fn main() -> anyhow::Result<()> {
 
     // maintenance tasks. these never return unless there's an error
     let mut maintenance_tasks = JoinSet::new();
-    maintenance_tasks.spawn(proxy::handle_signals(cancellation_token.clone(), || {}));
+    maintenance_tasks.spawn(proxy::signals::handle(cancellation_token.clone(), || {}));
     maintenance_tasks.spawn(http::health_server::task_main(
         http_listener,
         AppMetrics {
@@ -561,11 +561,11 @@ async fn main() -> anyhow::Result<()> {
         .await
         {
             // exit immediately on maintenance task completion
-            Either::Left((Some(res), _)) => break proxy::flatten_err(res)?,
+            Either::Left((Some(res), _)) => break proxy::error::flatten_err(res)?,
             // exit with error immediately if all maintenance tasks have ceased (should be caught by branch above)
             Either::Left((None, _)) => bail!("no maintenance tasks running. invalid state"),
             // exit immediately on client task error
-            Either::Right((Some(res), _)) => proxy::flatten_err(res)?,
+            Either::Right((Some(res), _)) => proxy::error::flatten_err(res)?,
             // exit if all our client tasks have shutdown gracefully
             Either::Right((None, _)) => return Ok(()),
         }

@@ -473,6 +473,11 @@ impl TenantShard {
         shard: ShardIdentity,
         policy: PlacementPolicy,
     ) -> Self {
+        metrics::METRICS_REGISTRY
+            .metrics_group
+            .storage_controller_tenant_shards
+            .inc();
+
         Self {
             tenant_shard_id,
             policy,
@@ -1384,6 +1389,11 @@ impl TenantShard {
         let tenant_shard_id = tsp.get_tenant_shard_id()?;
         let shard_identity = tsp.get_shard_identity()?;
 
+        metrics::METRICS_REGISTRY
+            .metrics_group
+            .storage_controller_tenant_shards
+            .inc();
+
         Ok(Self {
             tenant_shard_id,
             shard: shard_identity,
@@ -1509,6 +1519,15 @@ impl TenantShard {
                 }
             }
         }
+    }
+}
+
+impl Drop for TenantShard {
+    fn drop(&mut self) {
+        metrics::METRICS_REGISTRY
+            .metrics_group
+            .storage_controller_tenant_shards
+            .dec();
     }
 }
 

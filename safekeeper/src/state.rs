@@ -3,7 +3,7 @@
 
 use std::{cmp::max, ops::Deref};
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use safekeeper_api::models::TimelineTermBumpResponse;
 use serde::{Deserialize, Serialize};
 use utils::{
@@ -13,7 +13,11 @@ use utils::{
 
 use crate::{
     control_file,
-    safekeeper::{AcceptorState, PersistedPeerInfo, PgUuid, ServerInfo, Term, TermHistory},
+    safekeeper::{
+        AcceptorState, PersistedPeerInfo, PgUuid, ServerInfo, Term, TermHistory,
+        UNKNOWN_SERVER_VERSION,
+    },
+    timeline::TimelineError,
     wal_backup_partial::{self},
 };
 
@@ -91,8 +95,24 @@ impl TimelinePersistentState {
         peers: Vec<NodeId>,
         commit_lsn: Lsn,
         local_start_lsn: Lsn,
-    ) -> TimelinePersistentState {
-        TimelinePersistentState {
+    ) -> anyhow::Result<TimelinePersistentState> {
+        if server_info.wal_seg_size == 0 {
+            bail!(TimelineError::UninitializedWalSegSize(*ttid));
+        }
+
+        if server_info.pg_version == UNKNOWN_SERVER_VERSION {
+            bail!(TimelineError::UninitialinzedPgVersion(*ttid));
+        }
+
+        if commit_lsn < local_start_lsn {
+            bail!(
+                "commit_lsn {} is smaller than local_start_lsn {}",
+                commit_lsn,
+                local_start_lsn
+            );
+        }
+
+        Ok(TimelinePersistentState {
             tenant_id: ttid.tenant_id,
             timeline_id: ttid.timeline_id,
             acceptor_state: AcceptorState {
@@ -115,24 +135,23 @@ impl TimelinePersistentState {
             ),
             partial_backup: wal_backup_partial::State::default(),
             eviction_state: EvictionState::Present,
-        }
+        })
     }
 
     #[cfg(test)]
     pub fn empty() -> Self {
-        use crate::safekeeper::UNKNOWN_SERVER_VERSION;
-
         TimelinePersistentState::new(
             &TenantTimelineId::empty(),
             ServerInfo {
-                pg_version: UNKNOWN_SERVER_VERSION, /* Postgres server version */
-                system_id: 0,                       /* Postgres system identifier */
-                wal_seg_size: 0,
+                pg_version: 17, /* Postgres server version */
+                system_id: 0,   /* Postgres system identifier */
+                wal_seg_size: 16 * 1024 * 1024,
             },
             vec![],
             Lsn::INVALID,
             Lsn::INVALID,
         )
+        .unwrap()
     }
 }
 

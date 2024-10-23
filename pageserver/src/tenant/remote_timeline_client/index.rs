@@ -121,21 +121,17 @@ impl IndexPart {
         self.disk_consistent_lsn
     }
 
-    pub fn from_s3_bytes(bytes: &[u8]) -> Result<Self, serde_json::Error> {
+    pub fn from_json_bytes(bytes: &[u8]) -> Result<Self, serde_json::Error> {
         serde_json::from_slice::<IndexPart>(bytes)
     }
 
-    pub fn to_s3_bytes(&self) -> serde_json::Result<Vec<u8>> {
+    pub fn to_json_bytes(&self) -> serde_json::Result<Vec<u8>> {
         serde_json::to_vec(self)
     }
 
     #[cfg(test)]
     pub(crate) fn example() -> Self {
         Self::empty(TimelineMetadata::example())
-    }
-
-    pub(crate) fn last_aux_file_policy(&self) -> Option<AuxFilePolicy> {
-        self.last_aux_file_policy
     }
 }
 
@@ -387,7 +383,7 @@ mod tests {
             last_aux_file_policy: None,
         };
 
-        let part = IndexPart::from_s3_bytes(example.as_bytes()).unwrap();
+        let part = IndexPart::from_json_bytes(example.as_bytes()).unwrap();
         assert_eq!(part, expected);
     }
 
@@ -431,7 +427,7 @@ mod tests {
             last_aux_file_policy: None,
         };
 
-        let part = IndexPart::from_s3_bytes(example.as_bytes()).unwrap();
+        let part = IndexPart::from_json_bytes(example.as_bytes()).unwrap();
         assert_eq!(part, expected);
     }
 
@@ -476,7 +472,7 @@ mod tests {
             last_aux_file_policy: None,
         };
 
-        let part = IndexPart::from_s3_bytes(example.as_bytes()).unwrap();
+        let part = IndexPart::from_json_bytes(example.as_bytes()).unwrap();
         assert_eq!(part, expected);
     }
 
@@ -524,7 +520,7 @@ mod tests {
             last_aux_file_policy: None,
         };
 
-        let empty_layers_parsed = IndexPart::from_s3_bytes(empty_layers_json.as_bytes()).unwrap();
+        let empty_layers_parsed = IndexPart::from_json_bytes(empty_layers_json.as_bytes()).unwrap();
 
         assert_eq!(empty_layers_parsed, expected);
     }
@@ -567,7 +563,7 @@ mod tests {
             last_aux_file_policy: None,
         };
 
-        let part = IndexPart::from_s3_bytes(example.as_bytes()).unwrap();
+        let part = IndexPart::from_json_bytes(example.as_bytes()).unwrap();
         assert_eq!(part, expected);
     }
 
@@ -613,7 +609,7 @@ mod tests {
             last_aux_file_policy: None,
         };
 
-        let part = IndexPart::from_s3_bytes(example.as_bytes()).unwrap();
+        let part = IndexPart::from_json_bytes(example.as_bytes()).unwrap();
         assert_eq!(part, expected);
     }
 
@@ -664,7 +660,7 @@ mod tests {
             last_aux_file_policy: Some(AuxFilePolicy::V2),
         };
 
-        let part = IndexPart::from_s3_bytes(example.as_bytes()).unwrap();
+        let part = IndexPart::from_json_bytes(example.as_bytes()).unwrap();
         assert_eq!(part, expected);
     }
 
@@ -720,7 +716,7 @@ mod tests {
             last_aux_file_policy: Default::default(),
         };
 
-        let part = IndexPart::from_s3_bytes(example.as_bytes()).unwrap();
+        let part = IndexPart::from_json_bytes(example.as_bytes()).unwrap();
         assert_eq!(part, expected);
     }
 
@@ -777,7 +773,7 @@ mod tests {
             last_aux_file_policy: Default::default(),
         };
 
-        let part = IndexPart::from_s3_bytes(example.as_bytes()).unwrap();
+        let part = IndexPart::from_json_bytes(example.as_bytes()).unwrap();
         assert_eq!(part, expected);
     }
 
@@ -839,7 +835,7 @@ mod tests {
             archived_at: None,
         };
 
-        let part = IndexPart::from_s3_bytes(example.as_bytes()).unwrap();
+        let part = IndexPart::from_json_bytes(example.as_bytes()).unwrap();
         assert_eq!(part, expected);
     }
 
