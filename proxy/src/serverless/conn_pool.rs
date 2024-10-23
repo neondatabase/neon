@@ -211,7 +211,7 @@ mod tests {
     use super::*;
     use crate::proxy::NeonOptions;
     use crate::serverless::cancel_set::CancelSet;
-    use crate::{BranchId, EndpointId, ProjectId};
+    use crate::types::{BranchId, EndpointId, ProjectId};
 
     struct MockClient(Arc<AtomicBool>);
     impl MockClient {

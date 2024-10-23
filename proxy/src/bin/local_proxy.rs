@@ -25,8 +25,8 @@ use proxy::rate_limiter::{
 use proxy::scram::threadpool::ThreadPool;
 use proxy::serverless::cancel_set::CancelSet;
 use proxy::serverless::{self, GlobalConnPoolOptions};
+use proxy::types::RoleName;
 use proxy::url::ApiUrl;
-use proxy::RoleName;
 
 project_git_version!(GIT_VERSION);
 project_build_tag!(BUILD_TAG);
@@ -177,7 +177,7 @@ async fn main() -> anyhow::Result<()> {
     let mut maintenance_tasks = JoinSet::new();
 
     let refresh_config_notify = Arc::new(Notify::new());
-    maintenance_tasks.spawn(proxy::handle_signals(shutdown.clone(), {
+    maintenance_tasks.spawn(proxy::signals::handle(shutdown.clone(), {
         let refresh_config_notify = Arc::clone(&refresh_config_notify);
         move || {
             refresh_config_notify.notify_one();
@@ -216,7 +216,7 @@ async fn main() -> anyhow::Result<()> {
 
     match futures::future::select(pin!(maintenance_tasks.join_next()), pin!(task)).await {
         // exit immediately on maintenance task completion
-        Either::Left((Some(res), _)) => match proxy::flatten_err(res)? {},
+        Either::Left((Some(res), _)) => match proxy::error::flatten_err(res)? {},
         // exit with error immediately if all maintenance tasks have ceased (should be caught by branch above)
         Either::Left((None, _)) => bail!("no maintenance tasks running. invalid state"),
         // exit immediately on client task error

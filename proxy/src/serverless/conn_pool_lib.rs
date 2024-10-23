@@ -16,8 +16,8 @@ use crate::auth::backend::ComputeUserInfo;
 use crate::context::RequestMonitoring;
 use crate::control_plane::messages::ColdStartInfo;
 use crate::metrics::{HttpEndpointPoolsGuard, Metrics};
+use crate::types::{DbName, EndpointCacheKey, RoleName};
 use crate::usage_metrics::{Ids, MetricCounter, USAGE_METRICS};
-use crate::{DbName, EndpointCacheKey, RoleName};
 
 #[derive(Debug, Clone)]
 pub(crate) struct ConnInfo {

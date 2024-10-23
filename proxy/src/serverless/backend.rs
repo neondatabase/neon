@@ -18,6 +18,7 @@ use super::local_conn_pool::{self, LocalClient, LocalConnPool, EXT_NAME, EXT_SCH
 use crate::auth::backend::local::StaticAuthRules;
 use crate::auth::backend::{ComputeCredentials, ComputeUserInfo};
 use crate::auth::{self, check_peer_addr_is_in_list, AuthError};
+use crate::compute;
 use crate::compute_ctl::{
     ComputeCtlError, ExtensionInstallRequest, Privilege, SetRoleGrantsRequest,
 };
@@ -32,7 +33,7 @@ use crate::intern::EndpointIdInt;
 use crate::proxy::connect_compute::ConnectMechanism;
 use crate::proxy::retry::{CouldRetry, ShouldRetryWakeCompute};
 use crate::rate_limiter::EndpointRateLimiter;
-use crate::{compute, EndpointId, Host};
+use crate::types::{EndpointId, Host};
 
 pub(crate) struct PoolingBackend {
     pub(crate) http_conn_pool: Arc<super::http_conn_pool::GlobalConnPool<Send>>,
