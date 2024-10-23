@@ -463,7 +463,7 @@ impl WalIngest {
                             // we could peek into the message and only pause if it contains
                             // a particular string, for example, but this is enough for now.
                             failpoint_support::sleep_millis_async!(
-                                "wal-ingest-logical-message-sleep"
+                                "pagserver-wal-ingest-logical-message-sleep"
                             );
                         }
                     }
