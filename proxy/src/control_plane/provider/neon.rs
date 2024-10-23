@@ -24,7 +24,8 @@ use crate::control_plane::errors::GetEndpointJwksError;
 use crate::control_plane::messages::{ColdStartInfo, EndpointJwksResponse, Reason};
 use crate::metrics::{CacheOutcome, Metrics};
 use crate::rate_limiter::WakeComputeRateLimiter;
-use crate::{compute, http, scram, EndpointCacheKey, EndpointId};
+use crate::types::{EndpointCacheKey, EndpointId};
+use crate::{compute, http, scram};
 
 const X_REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
 
