@@ -56,6 +56,8 @@ VERSIONS_COMBINATIONS = (
 )
 # fmt: on
 
+USE_LFC = os.environ.get("USE_LFC") != "false"
+
 
 def subprocess_capture(
     capture_dir: Path,

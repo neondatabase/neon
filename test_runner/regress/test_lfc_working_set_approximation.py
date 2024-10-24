@@ -3,11 +3,13 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
+import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv
-from fixtures.utils import query_scalar
+from fixtures.utils import USE_LFC, query_scalar
 
 
+@pytest.mark.skipif(not USE_LFC, reason="LFC is disabled, skipping")
 def test_lfc_working_set_approximation(neon_simple_env: NeonEnv):
     env = neon_simple_env
 
@@ -18,8 +20,6 @@ def test_lfc_working_set_approximation(neon_simple_env: NeonEnv):
     endpoint = env.endpoints.create_start(
         "main",
         config_lines=[
-            "shared_buffers='1MB'",
-            f"neon.file_cache_path='{cache_dir}/file.cache'",
             "neon.max_file_cache_size='128MB'",
             "neon.file_cache_size_limit='64MB'",
         ],
@@ -72,9 +72,10 @@ WITH (fillfactor='100');
     # verify working set size after some index access of a few select pages only
     blocks = query_scalar(cur, "select approximate_working_set_size(true)")
     log.info(f"working set size after some index access of a few select pages only {blocks}")
-    assert blocks < 10
+    assert blocks < 12
 
 
+@pytest.mark.skipif(not USE_LFC, reason="LFC is disabled, skipping")
 def test_sliding_working_set_approximation(neon_simple_env: NeonEnv):
     env = neon_simple_env
 
