@@ -666,7 +666,7 @@ RUN apt-get update && \
 #
 # Use new version only for v17
 # because Release_2024_09_1 has some backward incompatible changes
-# https://github.com/rdkit/rdkit/releases/tag/Release_2024_09_1 
+# https://github.com/rdkit/rdkit/releases/tag/Release_2024_09_1
 ENV PATH="/usr/local/pgsql/bin/:/usr/local/pgsql/:$PATH"
 RUN case "${PG_VERSION}" in \
     "v17") \
@@ -1191,6 +1191,9 @@ RUN mold -run cargo build --locked --profile release-line-debug-size-lto --bin l
 #########################################################################################
 
 FROM quay.io/prometheuscommunity/postgres-exporter:v0.12.1 AS postgres-exporter
+
+# Keep the version the same as in build-tools.Dockerfile and
+# test_runner/regress/test_compute_metrics.py.
 FROM burningalchemist/sql_exporter:0.13 AS sql-exporter
 
 #########################################################################################
