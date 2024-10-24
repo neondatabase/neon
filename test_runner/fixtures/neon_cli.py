@@ -16,7 +16,6 @@ from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import log
 from fixtures.pageserver.common_types import IndexPartDump
 from fixtures.pg_version import PgVersion
-from fixtures.utils import AuxFileStore
 
 if TYPE_CHECKING:
     from typing import (
@@ -201,7 +200,6 @@ class NeonLocalCli(AbstractNeonCli):
         shard_stripe_size: Optional[int] = None,
         placement_policy: Optional[str] = None,
         set_default: bool = False,
-        aux_file_policy: Optional[AuxFileStore] = None,
     ):
         """
         Creates a new tenant, returns its id and its initial timeline's id.
@@ -222,13 +220,6 @@ class NeonLocalCli(AbstractNeonCli):
                     product(["-c"], (f"{key}:{value}" for key, value in conf.items()))
                 )
             )
-
-        if aux_file_policy is AuxFileStore.V2:
-            args.extend(["-c", "switch_aux_file_policy:v2"])
-        elif aux_file_policy is AuxFileStore.V1:
-            args.extend(["-c", "switch_aux_file_policy:v1"])
-        elif aux_file_policy is AuxFileStore.CrossValidation:
-            args.extend(["-c", "switch_aux_file_policy:cross-validation"])
 
         if set_default:
             args.append("--set-default")
