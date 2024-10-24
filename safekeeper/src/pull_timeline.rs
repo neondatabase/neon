@@ -26,7 +26,7 @@ use crate::{
         routes::TimelineStatus,
     },
     safekeeper::Term,
-    state::TimelinePersistentState,
+    state::{EvictionState, TimelinePersistentState},
     timeline::{Timeline, WalResidentTimeline},
     timelines_global_map::{create_temp_timeline_dir, validate_temp_timeline},
     wal_backup,
@@ -203,51 +203,48 @@ impl Timeline {
         source: NodeId,
         destination: NodeId,
     ) -> Result<()> {
-        let shared_state = self.write_shared_state().await;
+        // Take initial copy of control file, then release state lock
+        let mut control_file = {
+            let shared_state = self.write_shared_state().await;
 
-        let mut control_store = TimelinePersistentState::clone(shared_state.sk.state());
+            let control_file = TimelinePersistentState::clone(shared_state.sk.state());
+
+            // Rare race: we got unevicted between entering function and reading control file.
+            // We error out and let API caller retry.
+            if !matches!(control_file.eviction_state, EvictionState::Offloaded(_)) {
+                bail!("Timeline was un-evicted during snapshot, please retry");
+            }
+
+            control_file
+        };
+
         // Modify the partial segment of the in-memory copy for the control file to
         // point to the destination safekeeper.
-        let replace = control_store
+        let replace = control_file
             .partial_backup
             .replace_uploaded_segment(source, destination)?;
 
-        if let Some(replace) = replace {
-            // The deserialized control file has an uploaded partial. We upload a copy
-            // of it to object storage for the destination safekeeper and send an updated
-            // control file in the snapshot.
-            tracing::info!(
-                "Replacing uploaded partial segment in in-mem control file: {replace:?}"
-            );
+        let Some(replace) = replace else {
+            // In Manager:: ready_for_eviction, we do not permit eviction unless the timeline
+            // has a partial segment.  It is unexpected that
+            anyhow::bail!("Timeline has no partial segment, cannot generate snapshot");
+        };
 
-            let remote_timeline_path = &self.remote_path;
-            wal_backup::copy_partial_segment(
-                &replace.previous.remote_path(remote_timeline_path),
-                &replace.current.remote_path(remote_timeline_path),
-            )
-            .await?;
-        }
+        tracing::info!("Replacing uploaded partial segment in in-mem control file: {replace:?}");
 
-        // Correctness: before sending response, check we didn't get un-offloaded in the background,
-        // i.e. that the object we copied in S3 was not modified in a way that might be inconsistent
-        // with the control file we are sending.
-        match self.try_wal_residence_guard().await {
-            Ok(None) => {
-                // Great, we're still offloaded
-            }
-            Err(e) => {
-                return Err(anyhow::anyhow!("Failed to re-check offloaded status: {e}"));
-            }
-            Ok(Some(_)) => {
-                // TODO: a structured error type, this anyhow::Error will look like a 500 to HTTP clients.  We
-                // should give them a 503 or similar to prompt retry.
-                return Err(anyhow::anyhow!(
-                    "Timeline was un-evicted while generating snapshot, please retry"
-                ));
-            }
-        }
+        // Optimistically try to copy the partial segment to the destination's path: this
+        // can fail if the timeline was un-evicted and modified in the background.
+        let remote_timeline_path = &self.remote_path;
+        wal_backup::copy_partial_segment(
+            &replace.previous.remote_path(remote_timeline_path),
+            &replace.current.remote_path(remote_timeline_path),
+        )
+        .await?;
 
-        let buf = control_store
+        // Since the S3 copy succeeded with the path given in our control file snapshot, and
+        // we are sending that snapshot in our response, we are giving the caller a consistent
+        // snapshot even if our local Timeline was unevicted or otherwise modified in the meantime.
+        let buf = control_file
             .write_to_buf()
             .with_context(|| "failed to serialize control store")?;
         let mut header = Header::new_gnu();
