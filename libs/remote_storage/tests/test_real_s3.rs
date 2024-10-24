@@ -26,7 +26,7 @@ mod common;
 #[path = "common/tests.rs"]
 mod tests_s3;
 
-use common::{cleanup, ensure_logging_ready, upload_remote_data, upload_simple_remote_data};
+use common::{cleanup, ensure_logging_ready, upload_remote_data, upload_simple_remote_data, RemoteBlobInfo};
 use utils::backoff;
 
 const ENABLE_REAL_S3_REMOTE_STORAGE_ENV_VAR_NAME: &str = "ENABLE_REAL_S3_REMOTE_STORAGE";
@@ -260,7 +260,7 @@ enum MaybeEnabledStorageWithTestBlobs {
 struct S3WithTestBlobs {
     enabled: EnabledS3,
     remote_prefixes: HashSet<RemotePath>,
-    remote_blobs: HashSet<RemotePath>,
+    remote_blobs: HashSet<RemoteBlobInfo>,
 }
 
 impl AsyncTestContext for MaybeEnabledStorageWithTestBlobs {
@@ -317,7 +317,7 @@ enum MaybeEnabledStorageWithSimpleTestBlobs {
 }
 struct S3WithSimpleTestBlobs {
     enabled: EnabledS3,
-    remote_blobs: HashSet<RemotePath>,
+    remote_blobs: HashSet<RemoteBlobInfo>,
 }
 
 impl AsyncTestContext for MaybeEnabledStorageWithSimpleTestBlobs {

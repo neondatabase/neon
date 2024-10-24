@@ -8,7 +8,7 @@ use bytes::Bytes;
 use camino::Utf8Path;
 use futures::stream::Stream;
 use once_cell::sync::OnceCell;
-use remote_storage::{Download, GenericRemoteStorage, RemotePath};
+use remote_storage::{Download, GenericRemoteStorage, ListingObject, RemotePath};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
@@ -52,11 +52,26 @@ pub(crate) async fn download_to_vec(dl: Download) -> anyhow::Result<Vec<u8>> {
     Ok(buf)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct RemoteBlobInfo {
+    pub(crate) path: RemotePath,
+    pub(crate) size: u64,
+}
+
+impl From<ListingObject> for RemoteBlobInfo {
+    fn from(listing: ListingObject) -> Self {
+        RemoteBlobInfo {
+            path: listing.key,
+            size: listing.size,
+        }
+    }
+}
+
 // Uploads files `folder{j}/blob{i}.txt`. See test description for more details.
 pub(crate) async fn upload_simple_remote_data(
     client: &Arc<GenericRemoteStorage>,
     upload_tasks_count: usize,
-) -> ControlFlow<HashSet<RemotePath>, HashSet<RemotePath>> {
+) -> ControlFlow<HashSet<RemoteBlobInfo>, HashSet<RemoteBlobInfo>> {
     info!("Creating {upload_tasks_count} remote files");
     let mut upload_tasks = JoinSet::new();
     let cancel = CancellationToken::new();
@@ -73,12 +88,16 @@ pub(crate) async fn upload_simple_remote_data(
             .with_context(|| format!("{blob_path:?} to RemotePath conversion"))?;
             debug!("Creating remote item {i} at path {blob_path:?}");
 
-            let (data, len) = upload_stream(format!("remote blob data {i}").into_bytes().into());
+            let data = format!("remote blob data {i}").into_bytes();
+            let (data, len) = upload_stream(data.into());
             task_client
                 .upload(data, len, &blob_path, None, &cancel)
                 .await?;
 
-            Ok::<_, anyhow::Error>(blob_path)
+            Ok::<_, anyhow::Error>(RemoteBlobInfo {
+                path: blob_path,
+                size: len as u64,
+            })
         });
     }
 
@@ -89,8 +108,8 @@ pub(crate) async fn upload_simple_remote_data(
             .context("task join failed")
             .and_then(|task_result| task_result.context("upload task failed"))
         {
-            Ok(upload_path) => {
-                uploaded_blobs.insert(upload_path);
+            Ok(remote_blob_info) => {
+                uploaded_blobs.insert(remote_blob_info);
             }
             Err(e) => {
                 error!("Upload task failed: {e:?}");
@@ -108,7 +127,7 @@ pub(crate) async fn upload_simple_remote_data(
 
 pub(crate) async fn cleanup(
     client: &Arc<GenericRemoteStorage>,
-    objects_to_delete: HashSet<RemotePath>,
+    objects_to_delete: HashSet<RemoteBlobInfo>,
 ) {
     info!(
         "Removing {} objects from the remote storage during cleanup",
@@ -116,7 +135,11 @@ pub(crate) async fn cleanup(
     );
     let cancel = CancellationToken::new();
     let mut delete_tasks = JoinSet::new();
-    for object_to_delete in objects_to_delete {
+    for RemoteBlobInfo {
+        path: object_to_delete,
+        ..
+    } in objects_to_delete
+    {
         let task_client = Arc::clone(client);
         let cancel = cancel.clone();
         delete_tasks.spawn(async move {
@@ -140,7 +163,7 @@ pub(crate) async fn cleanup(
 }
 pub(crate) struct Uploads {
     pub(crate) prefixes: HashSet<RemotePath>,
-    pub(crate) blobs: HashSet<RemotePath>,
+    pub(crate) blobs: HashSet<RemoteBlobInfo>,
 }
 
 pub(crate) async fn upload_remote_data(
@@ -169,7 +192,13 @@ pub(crate) async fn upload_remote_data(
                 .upload(data, data_len, &blob_path, None, &cancel)
                 .await?;
 
-            Ok::<_, anyhow::Error>((blob_prefix, blob_path))
+            anyhow::Ok((
+                blob_prefix,
+                RemoteBlobInfo {
+                    path: blob_path,
+                    size: data_len as u64,
+                },
+            ))
         });
     }
 

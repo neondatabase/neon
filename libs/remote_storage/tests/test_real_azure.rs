@@ -17,7 +17,7 @@ mod common;
 #[path = "common/tests.rs"]
 mod tests_azure;
 
-use common::{cleanup, ensure_logging_ready, upload_remote_data, upload_simple_remote_data};
+use common::{cleanup, ensure_logging_ready, upload_remote_data, upload_simple_remote_data, RemoteBlobInfo};
 
 const ENABLE_REAL_AZURE_REMOTE_STORAGE_ENV_VAR_NAME: &str = "ENABLE_REAL_AZURE_REMOTE_STORAGE";
 
@@ -83,7 +83,7 @@ enum MaybeEnabledStorageWithTestBlobs {
 struct AzureWithTestBlobs {
     enabled: EnabledAzure,
     remote_prefixes: HashSet<RemotePath>,
-    remote_blobs: HashSet<RemotePath>,
+    remote_blobs: HashSet<RemoteBlobInfo>,
 }
 
 impl AsyncTestContext for MaybeEnabledStorageWithTestBlobs {
@@ -140,7 +140,7 @@ enum MaybeEnabledStorageWithSimpleTestBlobs {
 }
 struct AzureWithSimpleTestBlobs {
     enabled: EnabledAzure,
-    remote_blobs: HashSet<RemotePath>,
+    remote_blobs: HashSet<RemoteBlobInfo>,
 }
 
 impl AsyncTestContext for MaybeEnabledStorageWithSimpleTestBlobs {
