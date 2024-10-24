@@ -2043,8 +2043,8 @@ def test_pull_timeline_while_evicted(neon_env_builder: NeonEnvBuilder):
     src_http = src_sk.http_client()
     dst_http = dst_sk.http_client()
 
-    # Wait for timeline to go into evicted state
     def evicted_on_source():
+        # Wait for timeline to go into evicted state
         assert src_http.get_eviction_state(timeline_id) != "Present"
         assert (
             src_http.get_metric_value(
@@ -2053,11 +2053,10 @@ def test_pull_timeline_while_evicted(neon_env_builder: NeonEnvBuilder):
             or 0 > 0
         )
         assert src_http.get_metric_value("safekeeper_evicted_timelines") or 0 > 0
+        # Check that on source no segment files are present
+        assert src_sk.list_segments(tenant_id, timeline_id) == []
 
     wait_until(60, 1, evicted_on_source)
-
-    # Check that on source no segment files are present
-    assert src_sk.list_segments(tenant_id, timeline_id) == []
 
     # Invoke pull_timeline: source should serve snapshot request without promoting anything to local disk,
     # destination should import the control file only & go into evicted mode immediately
@@ -2068,12 +2067,23 @@ def test_pull_timeline_while_evicted(neon_env_builder: NeonEnvBuilder):
     assert dst_sk.list_segments(tenant_id, timeline_id) == []
 
     # Check that the timeline on the destination is in the expected evicted state.
-    evicted_on_source()
-    assert dst_http.get_eviction_state(timeline_id) != "Present"
-    assert dst_http.get_metric_value("safekeeper_evicted_timelines") or 0 > 0
+    evicted_on_source()  # It should still be evicted on the source
+
+    def evicted_on_destination():
+        assert dst_http.get_eviction_state(timeline_id) != "Present"
+        assert dst_http.get_metric_value("safekeeper_evicted_timelines") or 0 > 0
+
+    # This should be fast, it is a wait_until because eviction state is updated
+    # in the background wrt pull_timeline.
+    wait_until(10, 0.1, evicted_on_destination)
+
+    # Delete the timeline on the source, to prove that deletion works on an
+    # evicted timeline _and_ that the final compute test is really not using
+    # the original location
+    src_sk.http_client().timeline_delete(tenant_id, timeline_id, only_local=True)
 
     # Check that using the timeline correctly un-evicts it on the new location
-    ep.active_safekeepers = [1, 2, 3, 4]
+    ep.active_safekeepers = [2, 3, 4]
     ep.start()
     ep.safe_psql("INSERT INTO t VALUES (0)")
     ep.stop()
