@@ -1,6 +1,7 @@
 use compute_api::responses::{InstalledExtension, InstalledExtensions};
 use std::collections::HashMap;
 use std::collections::HashSet;
+use tracing::info;
 use url::Url;
 
 use anyhow::Result;
@@ -78,4 +79,24 @@ pub async fn get_installed_extensions(connstr: Url) -> Result<InstalledExtension
         })
     })
     .await?
+}
+
+// Gather info about installed extensions
+pub fn get_installed_extensions_sync(connstr: Url) -> Result<()> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("failed to create runtime");
+    let result = rt
+        .block_on(crate::installed_extensions::get_installed_extensions(
+            connstr,
+        ))
+        .expect("failed to get installed extensions");
+
+    info!(
+        "[NEON_EXT_STAT] {}",
+        serde_json::to_string(&result).expect("failed to serialize extensions list")
+    );
+
+    Ok(())
 }

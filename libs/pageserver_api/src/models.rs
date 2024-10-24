@@ -684,6 +684,25 @@ pub struct TimelineArchivalConfigRequest {
     pub state: TimelineArchivalState,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct TimelinesInfoAndOffloaded {
+    pub timelines: Vec<TimelineInfo>,
+    pub offloaded: Vec<OffloadedTimelineInfo>,
+}
+
+/// Analog of [`TimelineInfo`] for offloaded timelines.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct OffloadedTimelineInfo {
+    pub tenant_id: TenantShardId,
+    pub timeline_id: TimelineId,
+    /// Whether the timeline has a parent it has been branched off from or not
+    pub ancestor_timeline_id: Option<TimelineId>,
+    /// Whether to retain the branch lsn at the ancestor or not
+    pub ancestor_retain_lsn: Option<Lsn>,
+    /// The time point when the timeline was archived
+    pub archived_at: chrono::DateTime<chrono::Utc>,
+}
+
 /// This represents the output of the "timeline_detail" and "timeline_list" API calls.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TimelineInfo {
@@ -743,8 +762,6 @@ pub struct TimelineInfo {
     // Forward compatibility: a previous version of the pageserver will receive a JSON. serde::Deserialize does
     // not deny unknown fields by default so it's safe to set the field to some value, though it won't be
     // read.
-    /// The last aux file policy being used on this timeline
-    pub last_aux_file_policy: Option<AuxFilePolicy>,
     pub is_archived: Option<bool>,
 }
 

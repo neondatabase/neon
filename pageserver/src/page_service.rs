@@ -1326,22 +1326,22 @@ where
                 .for_command(ComputeCommandKind::Basebackup)
                 .inc();
 
-            let lsn = if let Some(lsn_str) = params.get(2) {
-                Some(
-                    Lsn::from_str(lsn_str)
-                        .with_context(|| format!("Failed to parse Lsn from {lsn_str}"))?,
-                )
-            } else {
-                None
-            };
-
-            let gzip = match params.get(3) {
-                Some(&"--gzip") => true,
-                None => false,
-                Some(third_param) => {
-                    return Err(QueryError::Other(anyhow::anyhow!(
-                        "Parameter in position 3 unknown {third_param}",
-                    )))
+            let (lsn, gzip) = match (params.get(2), params.get(3)) {
+                (None, _) => (None, false),
+                (Some(&"--gzip"), _) => (None, true),
+                (Some(lsn_str), gzip_str_opt) => {
+                    let lsn = Lsn::from_str(lsn_str)
+                        .with_context(|| format!("Failed to parse Lsn from {lsn_str}"))?;
+                    let gzip = match gzip_str_opt {
+                        Some(&"--gzip") => true,
+                        None => false,
+                        Some(third_param) => {
+                            return Err(QueryError::Other(anyhow::anyhow!(
+                                "Parameter in position 3 unknown {third_param}",
+                            )))
+                        }
+                    };
+                    (Some(lsn), gzip)
                 }
             };
 

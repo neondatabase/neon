@@ -21,8 +21,9 @@ use crate::control_plane::messages::MetricsAuxInfo;
 use crate::control_plane::provider::{CachedAllowedIps, CachedRoleSecret};
 use crate::error::io_error;
 use crate::intern::RoleNameInt;
+use crate::types::{BranchId, EndpointId, ProjectId, RoleName};
 use crate::url::ApiUrl;
-use crate::{compute, scram, BranchId, EndpointId, ProjectId, RoleName};
+use crate::{compute, scram};
 
 #[derive(Debug, Error)]
 enum MockApiError {

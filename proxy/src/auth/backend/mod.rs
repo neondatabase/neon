@@ -32,7 +32,8 @@ use crate::proxy::connect_compute::ComputeConnectBackend;
 use crate::proxy::NeonOptions;
 use crate::rate_limiter::{BucketRateLimiter, EndpointRateLimiter, RateBucketInfo};
 use crate::stream::Stream;
-use crate::{scram, stream, EndpointCacheKey, EndpointId, RoleName};
+use crate::types::{EndpointCacheKey, EndpointId, RoleName};
+use crate::{scram, stream};
 
 /// Alternative to [`std::borrow::Cow`] but doesn't need `T: ToOwned` as we don't need that functionality
 pub enum MaybeOwned<'a, T> {
@@ -551,7 +552,7 @@ mod tests {
         async fn get_endpoint_jwks(
             &self,
             _ctx: &RequestMonitoring,
-            _endpoint: crate::EndpointId,
+            _endpoint: crate::types::EndpointId,
         ) -> Result<Vec<super::jwt::AuthRule>, control_plane::errors::GetEndpointJwksError>
         {
             unimplemented!()

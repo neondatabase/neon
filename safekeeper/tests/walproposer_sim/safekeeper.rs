@@ -59,7 +59,7 @@ impl GlobalMap {
 
             if state.commit_lsn < state.local_start_lsn {
                 bail!(
-                    "commit_lsn {} is higher than local_start_lsn {}",
+                    "commit_lsn {} is smaller than local_start_lsn {}",
                     state.commit_lsn,
                     state.local_start_lsn
                 );
@@ -96,23 +96,7 @@ impl GlobalMap {
         let local_start_lsn = Lsn::INVALID;
 
         let state =
-            TimelinePersistentState::new(&ttid, server_info, vec![], commit_lsn, local_start_lsn);
-
-        if state.server.wal_seg_size == 0 {
-            bail!(TimelineError::UninitializedWalSegSize(ttid));
-        }
-
-        if state.server.pg_version == UNKNOWN_SERVER_VERSION {
-            bail!(TimelineError::UninitialinzedPgVersion(ttid));
-        }
-
-        if state.commit_lsn < state.local_start_lsn {
-            bail!(
-                "commit_lsn {} is higher than local_start_lsn {}",
-                state.commit_lsn,
-                state.local_start_lsn
-            );
-        }
+            TimelinePersistentState::new(&ttid, server_info, vec![], commit_lsn, local_start_lsn)?;
 
         let disk_timeline = self.disk.put_state(&ttid, state);
         let control_store = DiskStateStorage::new(disk_timeline.clone());

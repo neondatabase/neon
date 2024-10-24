@@ -189,7 +189,7 @@ impl Drop for JobHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::EndpointId;
+    use crate::types::EndpointId;
 
     #[tokio::test]
     async fn hash_is_correct() {

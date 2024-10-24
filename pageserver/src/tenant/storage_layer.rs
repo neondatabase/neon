@@ -705,7 +705,7 @@ pub mod tests {
 /// Useful with `Key`, which has too verbose `{:?}` for printing multiple layers.
 struct RangeDisplayDebug<'a, T: std::fmt::Display>(&'a Range<T>);
 
-impl<'a, T: std::fmt::Display> std::fmt::Debug for RangeDisplayDebug<'a, T> {
+impl<T: std::fmt::Display> std::fmt::Debug for RangeDisplayDebug<'_, T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}..{}", self.0.start, self.0.end)
     }

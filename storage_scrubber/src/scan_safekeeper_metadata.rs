@@ -1,10 +1,12 @@
 use std::{collections::HashSet, str::FromStr, sync::Arc};
 
+use anyhow::{bail, Context};
 use futures::stream::{StreamExt, TryStreamExt};
 use once_cell::sync::OnceCell;
 use pageserver_api::shard::TenantShardId;
 use postgres_ffi::{XLogFileName, PG_TLI};
 use remote_storage::GenericRemoteStorage;
+use rustls::crypto::aws_lc_rs;
 use serde::Serialize;
 use tokio_postgres::types::PgLsn;
 use tracing::{debug, error, info};
@@ -231,10 +233,15 @@ async fn check_timeline(
     })
 }
 
-fn load_certs() -> Result<Arc<rustls::RootCertStore>, std::io::Error> {
-    let der_certs = rustls_native_certs::load_native_certs()?;
+fn load_certs() -> anyhow::Result<Arc<rustls::RootCertStore>> {
+    let der_certs = rustls_native_certs::load_native_certs();
+
+    if !der_certs.errors.is_empty() {
+        bail!("could not load native tls certs: {:?}", der_certs.errors);
+    }
+
     let mut store = rustls::RootCertStore::empty();
-    store.add_parsable_certificates(der_certs);
+    store.add_parsable_certificates(der_certs.certs);
     Ok(Arc::new(store))
 }
 static TLS_ROOTS: OnceCell<Arc<rustls::RootCertStore>> = OnceCell::new();
@@ -248,9 +255,12 @@ async fn load_timelines_from_db(
 
     // Use rustls (Neon requires TLS)
     let root_store = TLS_ROOTS.get_or_try_init(load_certs)?.clone();
-    let client_config = rustls::ClientConfig::builder()
-        .with_root_certificates(root_store)
-        .with_no_client_auth();
+    let client_config =
+        rustls::ClientConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
+            .with_safe_default_protocol_versions()
+            .context("aws_lc_rs should support the default protocol versions")?
+            .with_root_certificates(root_store)
+            .with_no_client_auth();
     let tls_connector = tokio_postgres_rustls::MakeRustlsConnect::new(client_config);
     let (client, connection) = tokio_postgres::connect(&dump_db_connstr, tls_connector).await?;
     // The connection object performs the actual communication with the database,

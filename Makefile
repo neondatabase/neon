@@ -297,7 +297,7 @@ clean: postgres-clean neon-pg-clean-ext
 # This removes everything
 .PHONY: distclean
 distclean:
-	rm -rf $(POSTGRES_INSTALL_DIR)
+	$(RM) -r $(POSTGRES_INSTALL_DIR)
 	$(CARGO_CMD_PREFIX) cargo clean
 
 .PHONY: fmt
@@ -329,7 +329,7 @@ postgres-%-pgindent: postgres-%-pg-bsd-indent postgres-%-typedefs.list
 		$(ROOT_PROJECT_DIR)/vendor/postgres-$*/src/tools/pgindent/pgindent --typedefs postgres-$*-typedefs-full.list \
 		$(ROOT_PROJECT_DIR)/vendor/postgres-$*/src/ \
 		--excludes $(ROOT_PROJECT_DIR)/vendor/postgres-$*/src/tools/pgindent/exclude_file_patterns
-	rm -f pg*.BAK
+	$(RM) pg*.BAK
 
 # Indent pxgn/neon.
 .PHONY: neon-pgindent

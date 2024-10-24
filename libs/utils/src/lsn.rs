@@ -37,7 +37,7 @@ impl<'de> Deserialize<'de> for Lsn {
             is_human_readable_deserializer: bool,
         }
 
-        impl<'de> Visitor<'de> for LsnVisitor {
+        impl Visitor<'_> for LsnVisitor {
             type Value = Lsn;
 
             fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {

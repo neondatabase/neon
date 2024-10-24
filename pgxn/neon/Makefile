@@ -54,7 +54,7 @@ walproposer-lib: libwalproposer.a;
 
 .PHONY: libwalproposer.a
 libwalproposer.a: $(WALPROP_OBJS)
-	rm -f $@
+	$(RM) $@
 	$(AR) $(AROPT) $@ $^
 
 # needs vars:

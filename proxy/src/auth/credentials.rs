@@ -15,7 +15,7 @@ use crate::error::{ReportableError, UserFacingError};
 use crate::metrics::{Metrics, SniKind};
 use crate::proxy::NeonOptions;
 use crate::serverless::SERVERLESS_DRIVER_SNI;
-use crate::{EndpointId, RoleName};
+use crate::types::{EndpointId, RoleName};
 
 #[derive(Debug, Error, PartialEq, Eq, Clone)]
 pub(crate) enum ComputeUserInfoParseError {
@@ -193,7 +193,7 @@ impl<'de> serde::de::Deserialize<'de> for IpPattern {
         D: serde::Deserializer<'de>,
     {
         struct StrVisitor;
-        impl<'de> serde::de::Visitor<'de> for StrVisitor {
+        impl serde::de::Visitor<'_> for StrVisitor {
             type Value = IpPattern;
 
             fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
