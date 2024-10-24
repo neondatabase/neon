@@ -38,8 +38,8 @@ use pageserver_api::models::TenantShardSplitRequest;
 use pageserver_api::models::TenantShardSplitResponse;
 use pageserver_api::models::TenantSorting;
 use pageserver_api::models::TimelineArchivalConfigRequest;
-use pageserver_api::models::TimelinesInfoAndOffloaded;
 use pageserver_api::models::TimelineCreateRequestMode;
+use pageserver_api::models::TimelinesInfoAndOffloaded;
 use pageserver_api::models::TopTenantShardItem;
 use pageserver_api::models::TopTenantShardsRequest;
 use pageserver_api::models::TopTenantShardsResponse;
@@ -582,7 +582,7 @@ async fn timeline_create_handler(
         tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
 
         // earlier versions of the code had pg_version and ancestor_lsn in the span
-        // => continue to provide that information, but, through a log messaget hat doesn't require us to destructure
+        // => continue to provide that information, but, through a log message that doesn't require us to destructure
         tracing::info!(?params, "creating timeline");
 
         match tenant
