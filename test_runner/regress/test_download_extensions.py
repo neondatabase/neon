@@ -74,7 +74,7 @@ def test_remote_extensions(
             mimetype="application/octet-stream",
             headers=[
                 ("Content-Length", str(file_size)),
-                ("Content-Disposition", 'attachment; filename="%s"' % file_name),
+                ("Content-Disposition", f'attachment; filename="{file_name}"'),
             ],
             direct_passthrough=True,
         )

@@ -1,6 +1,7 @@
 use compute_api::responses::{InstalledExtension, InstalledExtensions};
 use std::collections::HashMap;
 use std::collections::HashSet;
+use tracing::info;
 use url::Url;
 
 use anyhow::Result;
@@ -33,6 +34,7 @@ fn list_dbs(client: &mut Client) -> Result<Vec<String>> {
 }
 
 /// Connect to every database (see list_dbs above) and get the list of installed extensions.
+///
 /// Same extension can be installed in multiple databases with different versions,
 /// we only keep the highest and lowest version across all databases.
 pub async fn get_installed_extensions(connstr: Url) -> Result<InstalledExtensions> {
@@ -77,4 +79,24 @@ pub async fn get_installed_extensions(connstr: Url) -> Result<InstalledExtension
         })
     })
     .await?
+}
+
+// Gather info about installed extensions
+pub fn get_installed_extensions_sync(connstr: Url) -> Result<()> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("failed to create runtime");
+    let result = rt
+        .block_on(crate::installed_extensions::get_installed_extensions(
+            connstr,
+        ))
+        .expect("failed to get installed extensions");
+
+    info!(
+        "[NEON_EXT_STAT] {}",
+        serde_json::to_string(&result).expect("failed to serialize extensions list")
+    );
+
+    Ok(())
 }

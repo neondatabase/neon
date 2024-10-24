@@ -1,12 +1,7 @@
-FROM debian:bullseye-slim
+ARG DEBIAN_VERSION=bullseye
 
-# Use ARG as a build-time environment variable here to allow.
-# It's not supposed to be set outside.
-# Alternatively it can be obtained using the following command
-# ```
-# . /etc/os-release && echo "${VERSION_CODENAME}"
-# ```
-ARG DEBIAN_VERSION_CODENAME=bullseye
+FROM debian:${DEBIAN_VERSION}-slim
+ARG DEBIAN_VERSION
 
 # Add nonroot user
 RUN useradd -ms /bin/bash nonroot -b /home
@@ -32,6 +27,7 @@ RUN set -e \
         gnupg \
         gzip \
         jq \
+        jsonnet \
         libcurl4-openssl-dev \
         libbz2-dev \
         libffi-dev \
@@ -42,14 +38,14 @@ RUN set -e \
         libseccomp-dev \
         libsqlite3-dev \
         libssl-dev \
-        libstdc++-10-dev \
+        $([[ "${DEBIAN_VERSION}" = "bullseye" ]] && libstdc++-10-dev || libstdc++-11-dev) \
         libtool \
         libxml2-dev \
         libxmlsec1-dev \
         libxxhash-dev \
         lsof \
         make \
-        netcat \
+        netcat-openbsd \
         net-tools \
         openssh-client \
         parallel \
@@ -76,9 +72,9 @@ RUN curl -sL "https://github.com/peak/s5cmd/releases/download/v${S5CMD_VERSION}/
     && mv s5cmd /usr/local/bin/s5cmd
 
 # LLVM
-ENV LLVM_VERSION=18
+ENV LLVM_VERSION=19
 RUN curl -fsSL 'https://apt.llvm.org/llvm-snapshot.gpg.key' | apt-key add - \
-    && echo "deb http://apt.llvm.org/${DEBIAN_VERSION_CODENAME}/ llvm-toolchain-${DEBIAN_VERSION_CODENAME}-${LLVM_VERSION} main" > /etc/apt/sources.list.d/llvm.stable.list \
+    && echo "deb http://apt.llvm.org/${DEBIAN_VERSION}/ llvm-toolchain-${DEBIAN_VERSION}-${LLVM_VERSION} main" > /etc/apt/sources.list.d/llvm.stable.list \
     && apt update \
     && apt install -y clang-${LLVM_VERSION} llvm-${LLVM_VERSION} \
     && bash -c 'for f in /usr/bin/clang*-${LLVM_VERSION} /usr/bin/llvm*-${LLVM_VERSION}; do ln -s "${f}" "${f%-${LLVM_VERSION}}"; done' \
@@ -86,7 +82,7 @@ RUN curl -fsSL 'https://apt.llvm.org/llvm-snapshot.gpg.key' | apt-key add - \
 
 # Install docker
 RUN curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg \
-    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/debian ${DEBIAN_VERSION_CODENAME} stable" > /etc/apt/sources.list.d/docker.list \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/debian ${DEBIAN_VERSION} stable" > /etc/apt/sources.list.d/docker.list \
     && apt update \
     && apt install -y docker-ce docker-ce-cli \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
@@ -103,7 +99,7 @@ RUN curl "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" -o "aws
     && rm awscliv2.zip
 
 # Mold: A Modern Linker
-ENV MOLD_VERSION=v2.33.0
+ENV MOLD_VERSION=v2.34.1
 RUN set -e \
     && git clone https://github.com/rui314/mold.git \
     && mkdir mold/build \
@@ -146,7 +142,7 @@ RUN wget -O /tmp/openssl-${OPENSSL_VERSION}.tar.gz https://www.openssl.org/sourc
 # Use the same version of libicu as the compute nodes so that
 # clusters created using inidb on pageserver can be used by computes.
 #
-# TODO: at this time, Dockerfile.compute-node uses the debian bullseye libicu
+# TODO: at this time, compute-node.Dockerfile uses the debian bullseye libicu
 # package, which is 67.1. We're duplicating that knowledge here, and also, technically,
 # Debian has a few patches on top of 67.1 that we're not adding here.
 ENV ICU_VERSION=67.1
@@ -196,7 +192,7 @@ WORKDIR /home/nonroot
 
 # Rust
 # Please keep the version of llvm (installed above) in sync with rust llvm (`rustc --version --verbose | grep LLVM`)
-ENV RUSTC_VERSION=1.81.0
+ENV RUSTC_VERSION=1.82.0
 ENV RUSTUP_HOME="/home/nonroot/.rustup"
 ENV PATH="/home/nonroot/.cargo/bin:${PATH}"
 ARG RUSTFILT_VERSION=0.2.1

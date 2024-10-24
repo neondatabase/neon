@@ -767,7 +767,7 @@ HandleDropRole(DropRoleStmt *stmt)
 		entry->type = Op_Delete;
 		entry->password = NULL;
 		if (!found)
-			memset(entry->old_name, 0, sizeof(entry));
+			memset(entry->old_name, 0, sizeof(entry->old_name));
 	}
 }
 

@@ -1,7 +1,5 @@
-use serde_json::Map;
-use serde_json::Value;
-use tokio_postgres::types::Kind;
-use tokio_postgres::types::Type;
+use serde_json::{Map, Value};
+use tokio_postgres::types::{Kind, Type};
 use tokio_postgres::Row;
 
 //
@@ -157,10 +155,10 @@ fn pg_text_to_json(pg_value: Option<&str>, pg_type: &Type) -> Result<Value, Json
 // dimensions, we just return them as is.
 //
 fn pg_array_parse(pg_array: &str, elem_type: &Type) -> Result<Value, JsonConversionError> {
-    _pg_array_parse(pg_array, elem_type, false).map(|(v, _)| v)
+    pg_array_parse_inner(pg_array, elem_type, false).map(|(v, _)| v)
 }
 
-fn _pg_array_parse(
+fn pg_array_parse_inner(
     pg_array: &str,
     elem_type: &Type,
     nested: bool,
@@ -213,7 +211,7 @@ fn _pg_array_parse(
             '{' if !quote => {
                 level += 1;
                 if level > 1 {
-                    let (res, off) = _pg_array_parse(&pg_array[i..], elem_type, true)?;
+                    let (res, off) = pg_array_parse_inner(&pg_array[i..], elem_type, true)?;
                     entries.push(res);
                     for _ in 0..off - 1 {
                         pg_array_chr.next();
@@ -256,8 +254,9 @@ fn _pg_array_parse(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use serde_json::json;
+
+    use super::*;
 
     #[test]
     fn test_atomic_types_to_pg_params() {

@@ -1,17 +1,20 @@
 use std::sync::{Arc, OnceLock};
 
 use lasso::ThreadedRodeo;
+use measured::label::{
+    FixedCardinalitySet, LabelGroupSet, LabelName, LabelSet, LabelValue, StaticLabelSet,
+};
+use measured::metric::histogram::Thresholds;
+use measured::metric::name::MetricName;
 use measured::{
-    label::{FixedCardinalitySet, LabelGroupSet, LabelName, LabelSet, LabelValue, StaticLabelSet},
-    metric::{histogram::Thresholds, name::MetricName},
     Counter, CounterVec, FixedCardinalityLabel, Gauge, Histogram, HistogramVec, LabelGroup,
     MetricGroup,
 };
 use metrics::{CounterPairAssoc, CounterPairVec, HyperLogLog, HyperLogLogVec};
-
 use tokio::time::{self, Instant};
 
 use crate::control_plane::messages::ColdStartInfo;
+use crate::error::ErrorKind;
 
 #[derive(MetricGroup)]
 #[metric(new(thread_pool: Arc<ThreadPoolMetrics>))]
@@ -323,23 +326,10 @@ pub enum ConnectionFailureKind {
     ComputeUncached,
 }
 
-#[derive(FixedCardinalityLabel, Copy, Clone)]
-#[label(singleton = "kind")]
-pub enum WakeupFailureKind {
-    BadComputeAddress,
-    ApiTransportError,
-    QuotaExceeded,
-    ApiConsoleLocked,
-    ApiConsoleBadRequest,
-    ApiConsoleOtherServerError,
-    ApiConsoleOtherError,
-    TimeoutError,
-}
-
 #[derive(LabelGroup)]
 #[label(set = ConnectionFailuresBreakdownSet)]
 pub struct ConnectionFailuresBreakdownGroup {
-    pub kind: WakeupFailureKind,
+    pub kind: ErrorKind,
     pub retry: Bool,
 }
 
