@@ -66,15 +66,15 @@ impl Manager {
         ready
     }
 
-    /// Evict the timeline to remote storage.
+    /// Evict the timeline to remote storage. Returns whether the eviction was successful.
     #[instrument(name = "evict_timeline", skip_all)]
-    pub(crate) async fn evict_timeline(&mut self) {
+    pub(crate) async fn evict_timeline(&mut self) -> bool {
         assert!(!self.is_offloaded);
         let partial_backup_uploaded = match &self.partial_backup_uploaded {
             Some(p) => p.clone(),
             None => {
                 warn!("no partial backup uploaded, skipping eviction");
-                return;
+                return false;
             }
         };
 
@@ -91,11 +91,12 @@ impl Manager {
 
         if let Err(e) = do_eviction(self, &partial_backup_uploaded).await {
             warn!("failed to evict timeline: {:?}", e);
-            return;
+            return false;
         }
 
         info!("successfully evicted timeline");
         NUM_EVICTED_TIMELINES.inc();
+        true
     }
 
     /// Attempt to restore evicted timeline from remote storage; it must be

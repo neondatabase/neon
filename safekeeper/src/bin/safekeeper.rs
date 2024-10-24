@@ -193,6 +193,8 @@ struct Args {
     /// Usually, timeline eviction has to wait for `partial_backup_timeout` before being eligible for eviction,
     /// but if a timeline is un-evicted and then _not_ written to, it would immediately flap to evicting again,
     /// if it weren't for `eviction_min_resident` preventing that.
+    ///
+    /// Also defines interval for eviction retries.
     #[arg(long, value_parser = humantime::parse_duration, default_value = DEFAULT_EVICTION_MIN_RESIDENT)]
     eviction_min_resident: Duration,
 }
