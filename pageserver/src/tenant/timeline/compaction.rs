@@ -32,11 +32,11 @@ use crate::page_cache;
 use crate::statvfs::Statvfs;
 use crate::tenant::checks::check_valid_layermap;
 use crate::tenant::remote_timeline_client::WaitCompletionError;
+use crate::tenant::storage_layer::batch_split_writer::{
+    BatchWriterResult, SplitDeltaLayerWriter, SplitImageLayerWriter,
+};
 use crate::tenant::storage_layer::filter_iterator::FilterIterator;
 use crate::tenant::storage_layer::merge_iterator::MergeIterator;
-use crate::tenant::storage_layer::split_writer::{
-    SplitDeltaLayerWriter, SplitImageLayerWriter, SplitWriterResult,
-};
 use crate::tenant::storage_layer::{
     AsLayerDesc, PersistentLayerDesc, PersistentLayerKey, ValueReconstructState,
 };
@@ -2038,11 +2038,11 @@ impl Timeline {
         let produced_image_layers_len = produced_image_layers.len();
         for action in produced_delta_layers {
             match action {
-                SplitWriterResult::Produced(layer) => {
+                BatchWriterResult::Produced(layer) => {
                     stat.produce_delta_layer(layer.layer_desc().file_size());
                     compact_to.push(layer);
                 }
-                SplitWriterResult::Discarded(l) => {
+                BatchWriterResult::Discarded(l) => {
                     keep_layers.insert(l);
                     stat.discard_delta_layer();
                 }
@@ -2050,11 +2050,11 @@ impl Timeline {
         }
         for action in produced_image_layers {
             match action {
-                SplitWriterResult::Produced(layer) => {
+                BatchWriterResult::Produced(layer) => {
                     stat.produce_image_layer(layer.layer_desc().file_size());
                     compact_to.push(layer);
                 }
-                SplitWriterResult::Discarded(l) => {
+                BatchWriterResult::Discarded(l) => {
                     keep_layers.insert(l);
                     stat.discard_image_layer();
                 }
