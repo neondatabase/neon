@@ -3469,7 +3469,9 @@ class Endpoint(PgProtocol, LogUtils):
                 lfc_path.unlink()
             else:
                 lfc_path.parent.mkdir(parents=True, exist_ok=True)
-
+            # shared_buffers = 512kB to make postgres use LFC intensively
+            # neon.max_file_cache_size and neon.file_cache size limit are
+            # set to 512kB because small LFC is better for testing (helps to find more problems)
             config_lines = [
                 "shared_buffers = 512kB",
                 f"neon.file_cache_path = '{self.lfc_path()}'",
