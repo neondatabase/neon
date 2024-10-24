@@ -6,10 +6,10 @@ from pathlib import Path
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv
-from fixtures.utils import NO_DEFAULT_LFC, query_scalar
+from fixtures.utils import USE_LFC, query_scalar
 
 
-@pytest.mark.skipif(NO_DEFAULT_LFC, reason="LFC is disabled, skipping")
+@pytest.mark.skipif(not USE_LFC, reason="LFC is disabled, skipping")
 def test_lfc_working_set_approximation(neon_simple_env: NeonEnv):
     env = neon_simple_env
 
@@ -23,7 +23,6 @@ def test_lfc_working_set_approximation(neon_simple_env: NeonEnv):
             "neon.max_file_cache_size='128MB'",
             "neon.file_cache_size_limit='64MB'",
         ],
-        use_lfc=True,
     )
 
     cur = endpoint.connect().cursor()
@@ -76,7 +75,7 @@ WITH (fillfactor='100');
     assert blocks < 12
 
 
-@pytest.mark.skipif(NO_DEFAULT_LFC, reason="LFC is disabled, skipping")
+@pytest.mark.skipif(not USE_LFC, reason="LFC is disabled, skipping")
 def test_sliding_working_set_approximation(neon_simple_env: NeonEnv):
     env = neon_simple_env
 
@@ -88,7 +87,6 @@ def test_sliding_working_set_approximation(neon_simple_env: NeonEnv):
             "neon.max_file_cache_size=256MB",
             "neon.file_cache_size_limit=245MB",
         ],
-        use_lfc=True,
     )
     conn = endpoint.connect()
     cur = conn.cursor()

@@ -5,10 +5,10 @@ from pathlib import Path
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv
-from fixtures.utils import NO_DEFAULT_LFC
+from fixtures.utils import USE_LFC
 
 
-@pytest.mark.skipif(NO_DEFAULT_LFC, reason="LFC is disabled, skipping")
+@pytest.mark.skipif(not USE_LFC, reason="LFC is disabled, skipping")
 def test_explain_with_lfc_stats(neon_simple_env: NeonEnv):
     env = neon_simple_env
 
@@ -22,7 +22,6 @@ def test_explain_with_lfc_stats(neon_simple_env: NeonEnv):
             "neon.max_file_cache_size='128MB'",
             "neon.file_cache_size_limit='64MB'",
         ],
-        use_lfc=True,
     )
 
     cur = endpoint.connect().cursor()

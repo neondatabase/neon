@@ -76,7 +76,7 @@ from fixtures.safekeeper.utils import wait_walreceivers_absent
 from fixtures.utils import (
     ATTACHMENT_NAME_REGEX,
     COMPONENT_BINARIES,
-    NO_DEFAULT_LFC,
+    USE_LFC,
     allure_add_grafana_links,
     assert_no_errors,
     get_dir_size,
@@ -3430,7 +3430,6 @@ class Endpoint(PgProtocol, LogUtils):
         config_lines: Optional[list[str]] = None,
         pageserver_id: Optional[int] = None,
         allow_multiple: bool = False,
-        use_lfc: Optional[bool] = None,
     ) -> Endpoint:
         """
         Create a new Postgres endpoint.
@@ -3460,15 +3459,12 @@ class Endpoint(PgProtocol, LogUtils):
         self.pgdata_dir = self.env.repo_dir / path
         self.logfile = self.endpoint_path() / "compute.log"
 
-        if use_lfc is None:
-            use_lfc = not NO_DEFAULT_LFC
-
         # set small 'max_replication_write_lag' to enable backpressure
         # and make tests more stable.
         config_lines = ["max_replication_write_lag=15MB"] + config_lines
 
         # Delete file cache if it exists (and we're recreating the endpoint)
-        if use_lfc:
+        if USE_LFC:
             if (lfc_path := Path(self.lfc_path())).exists():
                 lfc_path.unlink()
             else:
@@ -3692,7 +3688,6 @@ class Endpoint(PgProtocol, LogUtils):
         pageserver_id: Optional[int] = None,
         allow_multiple: bool = False,
         basebackup_request_tries: Optional[int] = None,
-        use_lfc: Optional[bool] = None,
     ) -> Endpoint:
         """
         Create an endpoint, apply config, and start Postgres.
@@ -3707,7 +3702,6 @@ class Endpoint(PgProtocol, LogUtils):
             lsn=lsn,
             pageserver_id=pageserver_id,
             allow_multiple=allow_multiple,
-            use_lfc=use_lfc,
         ).start(
             remote_ext_config=remote_ext_config,
             pageserver_id=pageserver_id,
@@ -3792,7 +3786,6 @@ class EndpointFactory:
         remote_ext_config: Optional[str] = None,
         pageserver_id: Optional[int] = None,
         basebackup_request_tries: Optional[int] = None,
-        use_lfc: Optional[bool] = None,
     ) -> Endpoint:
         ep = Endpoint(
             self.env,
@@ -3812,7 +3805,6 @@ class EndpointFactory:
             remote_ext_config=remote_ext_config,
             pageserver_id=pageserver_id,
             basebackup_request_tries=basebackup_request_tries,
-            use_lfc=use_lfc,
         )
 
     def create(
@@ -3824,7 +3816,6 @@ class EndpointFactory:
         hot_standby: bool = False,
         config_lines: Optional[list[str]] = None,
         pageserver_id: Optional[int] = None,
-        use_lfc: Optional[bool] = None,
     ) -> Endpoint:
         ep = Endpoint(
             self.env,
@@ -3845,7 +3836,6 @@ class EndpointFactory:
             hot_standby=hot_standby,
             config_lines=config_lines,
             pageserver_id=pageserver_id,
-            use_lfc=use_lfc,
         )
 
     def stop_all(self, fail_on_error=True) -> EndpointFactory:

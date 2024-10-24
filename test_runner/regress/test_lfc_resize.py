@@ -9,11 +9,11 @@ import time
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv, PgBin
-from fixtures.utils import NO_DEFAULT_LFC
+from fixtures.utils import USE_LFC
 
 
 @pytest.mark.timeout(600)
-@pytest.mark.skipif(NO_DEFAULT_LFC, reason="LFC is disabled, skipping")
+@pytest.mark.skipif(not USE_LFC, reason="LFC is disabled, skipping")
 def test_lfc_resize(neon_simple_env: NeonEnv, pg_bin: PgBin):
     """
     Test resizing the Local File Cache
@@ -28,7 +28,6 @@ def test_lfc_resize(neon_simple_env: NeonEnv, pg_bin: PgBin):
             "neon.max_file_cache_size=1GB",
             "neon.file_cache_size_limit=1GB",
         ],
-        use_lfc=True,
     )
     n_resize = 10
     scale = 100
