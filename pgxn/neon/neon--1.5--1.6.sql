@@ -6,3 +6,11 @@ AS 'MODULE_PATHNAME', 'save_local_cache_state'
 LANGUAGE C STRICT
 PARALLEL UNSAFE;
 
+CREATE FUNCTION get_prewarm_info(out total_chunks integer, out curr_chunk integer, out prewarmed_pages integer, out skipped_pages integer)
+RETURNS record
+AS 'MODULE_PATHNAME', 'get_prewarm_info'
+LANGUAGE C STRICT
+PARALLEL SAFE;
+
+
+
