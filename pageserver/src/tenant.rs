@@ -649,6 +649,12 @@ impl Debug for SetStoppingError {
     }
 }
 
+/// Arguments to [`Tenant::create_timeline`].
+///
+/// Not usable as an idempotency key for timeline creation because if [`CreateTimelineParamsBranch::ancestor_start_lsn`]
+/// is `None`, the result of the timeline create call is not deterministic.
+///
+/// See [`CreateTimelineIdempotency`] for an idempotency key.
 #[derive(Debug)]
 pub(crate) enum CreateTimelineParams {
     Bootstrap(CreateTimelineParamsBootstrap),
@@ -669,12 +675,18 @@ pub(crate) struct CreateTimelineParamsBranch {
     pub(crate) ancestor_start_lsn: Option<Lsn>,
 }
 
-pub(crate) struct CreatingTimelineStateBootstrap {
-    pub(crate) pg_version: u32,
-}
-
-pub(crate) enum CreatingTimelineState {
-    Bootstrap(CreatingTimelineStateBootstrap),
+/// What is used to determine idempotency of a [`Tenant::create_timeline`] call.
+///
+/// Unlike [`CreateTimelineParams`], ancestor LSN is fixed, so, branching will be at a deterministic LSN.
+///
+/// We make some trade-offs though, e.g., [`CreateTimelineParamsBootstrap::existing_initdb_timeline_id`]
+/// is not considered for idempotency.
+///
+/// We can improve on this over time.
+pub(crate) enum CreateTimelineIdempotency {
+    Bootstrap {
+        pg_version: u32,
+    },
     Branch {
         ancestor_timeline_id: TimelineId,
         ancestor_start_lsn: Lsn,
@@ -3545,7 +3557,7 @@ impl Tenant {
         let timeline_create_guard = match self
             .start_creating_timeline(
                 dst_id,
-                CreatingTimelineState::Branch {
+                CreateTimelineIdempotency::Branch {
                     ancestor_timeline_id: src_timeline.timeline_id,
                     ancestor_start_lsn: start_lsn,
                 },
@@ -3696,7 +3708,7 @@ impl Tenant {
     async fn start_creating_timeline(
         &self,
         new_timeline_id: TimelineId,
-        state: CreatingTimelineState,
+        state: CreateTimelineIdempotency,
     ) -> Result<either::Either<TimelineCreateGuard<'_>, Arc<Timeline>>, CreateTimelineError> {
         match self.create_timeline_create_guard(new_timeline_id) {
             Ok(create_guard) => {
@@ -3719,9 +3731,7 @@ impl Tenant {
                 // TODO: this is a crutch; we should store the CreateTimelineState as an
                 // immutable attribute in the index part, and compare them using derive(`Eq`).
                 match state {
-                    CreatingTimelineState::Bootstrap(CreatingTimelineStateBootstrap {
-                        pg_version,
-                    }) => {
+                    CreateTimelineIdempotency::Bootstrap { pg_version } => {
                         if existing.pg_version != pg_version {
                             info!("timeline already exists with different pg_version");
                             return Err(CreateTimelineError::Conflict);
@@ -3735,7 +3745,7 @@ impl Tenant {
                             return Err(CreateTimelineError::Conflict);
                         }
                     }
-                    CreatingTimelineState::Branch {
+                    CreateTimelineIdempotency::Branch {
                         ancestor_timeline_id,
                         ancestor_start_lsn,
                     } => {
@@ -3835,7 +3845,7 @@ impl Tenant {
         let timeline_create_guard = match self
             .start_creating_timeline(
                 timeline_id,
-                CreatingTimelineState::Bootstrap(CreatingTimelineStateBootstrap { pg_version }),
+                CreateTimelineIdempotency::Bootstrap { pg_version },
             )
             .await?
         {
