@@ -229,7 +229,8 @@ pub use v14::bindings::{TimeLineID, TimestampTz, XLogRecPtr, XLogSegNo};
 pub use v14::bindings::{MultiXactOffset, MultiXactStatus};
 pub use v14::bindings::{PageHeaderData, XLogRecord};
 pub use v14::xlog_utils::{
-    XLOG_SIZE_OF_XLOG_LONG_PHD, XLOG_SIZE_OF_XLOG_RECORD, XLOG_SIZE_OF_XLOG_SHORT_PHD,
+    SIZEOF_CHECKPOINT, XLOG_SIZE_OF_XLOG_LONG_PHD, XLOG_SIZE_OF_XLOG_RECORD,
+    XLOG_SIZE_OF_XLOG_SHORT_PHD,
 };
 
 pub use v14::bindings::{CheckPoint, ControlFileData};
@@ -244,6 +245,7 @@ pub const WAL_SEGMENT_SIZE: usize = 16 * 1024 * 1024;
 pub const MAX_SEND_SIZE: usize = XLOG_BLCKSZ * 16;
 
 // Export some version independent functions that are used outside of this mod
+pub use v14::xlog_utils::calculate_walrecord_end_lsn;
 pub use v14::xlog_utils::encode_logical_message;
 pub use v14::xlog_utils::get_current_timestamp;
 pub use v14::xlog_utils::to_pg_timestamp;
