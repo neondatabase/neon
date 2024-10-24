@@ -8,6 +8,7 @@ OBJS = \
 	file_cache.o \
 	hll.o \
 	libpagestore.o \
+	logical_replication_monitor.o \
 	neon.o \
 	neon_pgversioncompat.o \
 	neon_perf_counters.o \
