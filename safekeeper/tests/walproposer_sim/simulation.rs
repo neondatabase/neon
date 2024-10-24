@@ -149,10 +149,7 @@ impl WalProposer {
         let start_lsn = self.disk.lock().flush_rec_ptr();
 
         for _ in 0..cnt {
-            self.disk
-                .lock()
-                .insert_logical_message("prefix", b"message")
-                .expect("failed to generate logical message");
+            self.disk.lock().append_record();
         }
 
         let end_lsn = self.disk.lock().flush_rec_ptr();
