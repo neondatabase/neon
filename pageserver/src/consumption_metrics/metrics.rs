@@ -9,7 +9,7 @@ use utils::{
     lsn::Lsn,
 };
 
-use super::{Cache, RawMetric};
+use super::{Cache, NewRawMetric};
 
 /// Name of the metric, used by `MetricsKey` factory methods and `deserialize_cached_events`
 /// instead of static str.
@@ -64,9 +64,19 @@ impl MetricsKey {
 struct AbsoluteValueFactory(MetricsKey);
 
 impl AbsoluteValueFactory {
-    const fn at(self, time: DateTime<Utc>, val: u64) -> RawMetric {
+    #[cfg(test)]
+    const fn at_old_format(self, time: DateTime<Utc>, val: u64) -> super::RawMetric {
         let key = self.0;
         (key, (EventType::Absolute { time }, val))
+    }
+
+    const fn at(self, time: DateTime<Utc>, val: u64) -> NewRawMetric {
+        let key = self.0;
+        NewRawMetric {
+            key,
+            kind: EventType::Absolute { time },
+            value: val,
+        }
     }
 
     fn key(&self) -> &MetricsKey {
@@ -84,7 +94,28 @@ impl IncrementalValueFactory {
         prev_end: DateTime<Utc>,
         up_to: DateTime<Utc>,
         val: u64,
-    ) -> RawMetric {
+    ) -> NewRawMetric {
+        let key = self.0;
+        // cannot assert prev_end < up_to because these are realtime clock based
+        let when = EventType::Incremental {
+            start_time: prev_end,
+            stop_time: up_to,
+        };
+        NewRawMetric {
+            key,
+            kind: when,
+            value: val,
+        }
+    }
+
+    #[allow(clippy::wrong_self_convention)]
+    #[cfg(test)]
+    const fn from_until_old_format(
+        self,
+        prev_end: DateTime<Utc>,
+        up_to: DateTime<Utc>,
+        val: u64,
+    ) -> super::RawMetric {
         let key = self.0;
         // cannot assert prev_end < up_to because these are realtime clock based
         let when = EventType::Incremental {
@@ -185,7 +216,7 @@ pub(super) async fn collect_all_metrics(
     tenant_manager: &Arc<TenantManager>,
     cached_metrics: &Cache,
     ctx: &RequestContext,
-) -> Vec<RawMetric> {
+) -> Vec<NewRawMetric> {
     use pageserver_api::models::TenantState;
 
     let started_at = std::time::Instant::now();
@@ -220,11 +251,11 @@ pub(super) async fn collect_all_metrics(
     res
 }
 
-async fn collect<S>(tenants: S, cache: &Cache, ctx: &RequestContext) -> Vec<RawMetric>
+async fn collect<S>(tenants: S, cache: &Cache, ctx: &RequestContext) -> Vec<NewRawMetric>
 where
     S: futures::stream::Stream<Item = (TenantId, Arc<crate::tenant::Tenant>)>,
 {
-    let mut current_metrics: Vec<RawMetric> = Vec::new();
+    let mut current_metrics: Vec<NewRawMetric> = Vec::new();
 
     let mut tenants = std::pin::pin!(tenants);
 
@@ -291,7 +322,7 @@ impl TenantSnapshot {
         tenant_id: TenantId,
         now: DateTime<Utc>,
         cached: &Cache,
-        metrics: &mut Vec<RawMetric>,
+        metrics: &mut Vec<NewRawMetric>,
     ) {
         let remote_size = MetricsKey::remote_storage_size(tenant_id).at(now, self.remote_size);
 
@@ -302,9 +333,9 @@ impl TenantSnapshot {
             let mut synthetic_size = self.synthetic_size;
 
             if synthetic_size == 0 {
-                if let Some((_, value)) = cached.get(factory.key()) {
-                    // use the latest value from previous session
-                    synthetic_size = *value;
+                if let Some(item) = cached.get(factory.key()) {
+                    // use the latest value from previous session, TODO: check generation number
+                    synthetic_size = item.value;
                 }
             }
 
@@ -381,37 +412,36 @@ impl TimelineSnapshot {
         tenant_id: TenantId,
         timeline_id: TimelineId,
         now: DateTime<Utc>,
-        metrics: &mut Vec<RawMetric>,
+        metrics: &mut Vec<NewRawMetric>,
         cache: &Cache,
     ) {
         let timeline_written_size = u64::from(self.last_record_lsn);
 
         let written_size_delta_key = MetricsKey::written_size_delta(tenant_id, timeline_id);
 
-        let last_stop_time = cache
-            .get(written_size_delta_key.key())
-            .map(|(until, _val)| {
-                until
-                    .incremental_timerange()
-                    .expect("never create EventType::Absolute for written_size_delta")
-                    .end
-            });
+        let last_stop_time = cache.get(written_size_delta_key.key()).map(|item| {
+            item.kind
+                .incremental_timerange()
+                .expect("never create EventType::Absolute for written_size_delta")
+                .end
+        });
 
-        let (key, written_size_now) =
+        let written_size_now =
             MetricsKey::written_size(tenant_id, timeline_id).at(now, timeline_written_size);
 
         // by default, use the last sent written_size as the basis for
         // calculating the delta. if we don't yet have one, use the load time value.
-        let prev = cache
-            .get(&key)
-            .map(|(prev_at, prev)| {
+        let prev: (DateTime<Utc>, u64) = cache
+            .get(&written_size_now.key)
+            .map(|item| {
                 // use the prev time from our last incremental update, or default to latest
                 // absolute update on the first round.
-                let prev_at = prev_at
+                let prev_at = item
+                    .kind
                     .absolute_time()
                     .expect("never create EventType::Incremental for written_size");
                 let prev_at = last_stop_time.unwrap_or(prev_at);
-                (*prev_at, *prev)
+                (*prev_at, item.value)
             })
             .unwrap_or_else(|| {
                 // if we don't have a previous point of comparison, compare to the load time
@@ -422,24 +452,28 @@ impl TimelineSnapshot {
 
         let up_to = now;
 
-        if let Some(delta) = written_size_now.1.checked_sub(prev.1) {
+        if let Some(delta) = written_size_now.value.checked_sub(prev.1) {
             let key_value = written_size_delta_key.from_until(prev.0, up_to, delta);
             // written_size_delta
             metrics.push(key_value);
             // written_size
-            metrics.push((key, written_size_now));
+            metrics.push(written_size_now);
         } else {
             // the cached value was ahead of us, report zero until we've caught up
             metrics.push(written_size_delta_key.from_until(prev.0, up_to, 0));
             // the cached value was ahead of us, report the same until we've caught up
-            metrics.push((key, (written_size_now.0, prev.1)));
+            metrics.push(NewRawMetric {
+                key: written_size_now.key,
+                kind: written_size_now.kind,
+                value: prev.1,
+            });
         }
 
         {
             let factory = MetricsKey::timeline_logical_size(tenant_id, timeline_id);
             let current_or_previous = self
                 .current_exact_logical_size
-                .or_else(|| cache.get(factory.key()).map(|(_, val)| *val));
+                .or_else(|| cache.get(factory.key()).map(|item| item.value));
 
             if let Some(size) = current_or_previous {
                 metrics.push(factory.at(now, size));
@@ -452,4 +486,4 @@ impl TimelineSnapshot {
 mod tests;
 
 #[cfg(test)]
-pub(crate) use tests::metric_examples;
+pub(crate) use tests::{metric_examples, metric_examples_old};

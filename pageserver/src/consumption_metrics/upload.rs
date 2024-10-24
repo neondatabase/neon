@@ -7,7 +7,7 @@ use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
-use super::{metrics::Name, Cache, MetricsKey, RawMetric};
+use super::{metrics::Name, Cache, MetricsKey, NewRawMetric, RawMetric};
 use utils::id::{TenantId, TimelineId};
 
 /// How the metrics from pageserver are identified.
@@ -24,7 +24,7 @@ pub(super) async fn upload_metrics_http(
     client: &reqwest::Client,
     metric_collection_endpoint: &reqwest::Url,
     cancel: &CancellationToken,
-    metrics: &[RawMetric],
+    metrics: &[NewRawMetric],
     cached_metrics: &mut Cache,
     idempotency_keys: &[IdempotencyKey<'_>],
 ) -> anyhow::Result<()> {
@@ -53,8 +53,8 @@ pub(super) async fn upload_metrics_http(
 
         match res {
             Ok(()) => {
-                for (curr_key, curr_val) in chunk {
-                    cached_metrics.insert(*curr_key, *curr_val);
+                for item in chunk {
+                    cached_metrics.insert(item.key, item.clone());
                 }
                 uploaded += chunk.len();
             }
@@ -86,7 +86,7 @@ pub(super) async fn upload_metrics_bucket(
     client: &GenericRemoteStorage,
     cancel: &CancellationToken,
     node_id: &str,
-    metrics: &[RawMetric],
+    metrics: &[NewRawMetric],
     idempotency_keys: &[IdempotencyKey<'_>],
 ) -> anyhow::Result<()> {
     if metrics.is_empty() {
@@ -140,16 +140,16 @@ pub(super) async fn upload_metrics_bucket(
 /// across different metrics sinks), and must have the same length as input.
 fn serialize_in_chunks<'a>(
     chunk_size: usize,
-    input: &'a [RawMetric],
+    input: &'a [NewRawMetric],
     idempotency_keys: &'a [IdempotencyKey<'a>],
-) -> impl ExactSizeIterator<Item = Result<(&'a [RawMetric], bytes::Bytes), serde_json::Error>> + 'a
+) -> impl ExactSizeIterator<Item = Result<(&'a [NewRawMetric], bytes::Bytes), serde_json::Error>> + 'a
 {
     use bytes::BufMut;
 
     assert_eq!(input.len(), idempotency_keys.len());
 
     struct Iter<'a> {
-        inner: std::slice::Chunks<'a, RawMetric>,
+        inner: std::slice::Chunks<'a, NewRawMetric>,
         idempotency_keys: std::slice::Iter<'a, IdempotencyKey<'a>>,
         chunk_size: usize,
 
@@ -160,7 +160,7 @@ fn serialize_in_chunks<'a>(
     }
 
     impl<'a> Iterator for Iter<'a> {
-        type Item = Result<(&'a [RawMetric], bytes::Bytes), serde_json::Error>;
+        type Item = Result<(&'a [NewRawMetric], bytes::Bytes), serde_json::Error>;
 
         fn next(&mut self) -> Option<Self::Item> {
             let chunk = self.inner.next()?;
@@ -251,6 +251,58 @@ impl RawMetricExt for RawMetric {
         } = self.0;
 
         let (kind, value) = self.1;
+
+        *event = Event {
+            kind,
+            metric,
+            idempotency_key: {
+                event.idempotency_key.clear();
+                write!(event.idempotency_key, "{key}").unwrap();
+                std::mem::take(&mut event.idempotency_key)
+            },
+            value,
+            extra: Ids {
+                tenant_id,
+                timeline_id,
+            },
+        };
+    }
+}
+
+impl RawMetricExt for NewRawMetric {
+    fn as_event(&self, key: &IdempotencyKey<'_>) -> Event<Ids, Name> {
+        let MetricsKey {
+            metric,
+            tenant_id,
+            timeline_id,
+        } = self.key;
+
+        let kind = self.kind;
+        let value = self.value;
+
+        Event {
+            kind,
+            metric,
+            idempotency_key: key.to_string(),
+            value,
+            extra: Ids {
+                tenant_id,
+                timeline_id,
+            },
+        }
+    }
+
+    fn update_in_place(&self, event: &mut Event<Ids, Name>, key: &IdempotencyKey<'_>) {
+        use std::fmt::Write;
+
+        let MetricsKey {
+            metric,
+            tenant_id,
+            timeline_id,
+        } = self.key;
+
+        let kind = self.kind;
+        let value = self.value;
 
         *event = Event {
             kind,
@@ -381,6 +433,10 @@ async fn upload(
 
 #[cfg(test)]
 mod tests {
+    use crate::consumption_metrics::{
+        disk_cache::read_metrics_from_serde_value, NewMetricsRefRoot,
+    };
+
     use super::*;
     use chrono::{DateTime, Utc};
     use once_cell::sync::Lazy;
@@ -473,23 +529,49 @@ mod tests {
         let idempotency_key = consumption_metrics::IdempotencyKey::for_tests(*SAMPLES_NOW, "1", 0);
         let examples = examples.into_iter().zip(metric_samples());
 
-        for ((line, expected), (key, (kind, value))) in examples {
+        for ((line, expected), item) in examples {
             let e = consumption_metrics::Event {
-                kind,
-                metric: key.metric,
+                kind: item.kind,
+                metric: item.key.metric,
                 idempotency_key: idempotency_key.to_string(),
-                value,
+                value: item.value,
                 extra: Ids {
-                    tenant_id: key.tenant_id,
-                    timeline_id: key.timeline_id,
+                    tenant_id: item.key.tenant_id,
+                    timeline_id: item.key.timeline_id,
                 },
             };
             let actual = serde_json::to_string(&e).unwrap();
-            assert_eq!(expected, actual, "example for {kind:?} from line {line}");
+            assert_eq!(
+                expected, actual,
+                "example for {:?} from line {line}",
+                item.kind
+            );
         }
     }
 
-    fn metric_samples() -> [RawMetric; 6] {
+    #[test]
+    fn disk_format_upgrade() {
+        let old_samples_json = serde_json::to_value(metric_samples_old()).unwrap();
+        let new_samples =
+            serde_json::to_value(NewMetricsRefRoot::new(metric_samples().as_ref())).unwrap();
+        let upgraded_samples = read_metrics_from_serde_value(old_samples_json).unwrap();
+        let new_samples = read_metrics_from_serde_value(new_samples).unwrap();
+        assert_eq!(upgraded_samples, new_samples);
+    }
+
+    fn metric_samples_old() -> [RawMetric; 6] {
+        let tenant_id = TenantId::from_array([0; 16]);
+        let timeline_id = TimelineId::from_array([0xff; 16]);
+
+        let before = DateTime::parse_from_rfc3339("2023-09-14T00:00:00.123456789Z")
+            .unwrap()
+            .into();
+        let [now, before] = [*SAMPLES_NOW, before];
+
+        super::super::metrics::metric_examples_old(tenant_id, timeline_id, now, before)
+    }
+
+    fn metric_samples() -> [NewRawMetric; 6] {
         let tenant_id = TenantId::from_array([0; 16]);
         let timeline_id = TimelineId::from_array([0xff; 16]);
 
