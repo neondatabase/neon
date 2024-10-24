@@ -756,6 +756,7 @@ pub(crate) struct CreateTimelineParamsBootstrap {
     pub(crate) pg_version: u32,
 }
 
+/// NB: See comment on [`CreateTimelineIdempotency::Branch`] for why there's no `pg_version` here.
 #[derive(Debug)]
 pub(crate) struct CreateTimelineParamsBranch {
     pub(crate) new_timeline_id: TimelineId,
@@ -775,6 +776,10 @@ pub(crate) enum CreateTimelineIdempotency {
     Bootstrap {
         pg_version: u32,
     },
+    /// NB: branches always have the same `pg_version` as their ancestor.
+    /// While [`pageserver_api::models::TimelineCreateRequestMode::Branch::pg_version`]
+    /// exists as a field, and is set by cplane, it has always been ignored by pageserver when
+    /// determining the child branch pg_version.
     Branch {
         ancestor_timeline_id: TimelineId,
         ancestor_start_lsn: Lsn,
