@@ -499,25 +499,6 @@ async fn handle_tenant_timeline_block_unblock_gc(
     json_response(StatusCode::OK, ())
 }
 
-async fn handle_tenant_timeline_import_pgdata(
-    service: Arc<Service>,
-    mut req: Request<Body>,
-) -> Result<Response<Body>, ApiError> {
-    let tenant_id: TenantId = parse_request_param(&req, "tenant_id")?;
-    check_permissions(&req, Scope::PageServerApi)?;
-
-    let timeline_id: TimelineId = parse_request_param(&req, "timeline_id")?;
-
-    // TODO: avoid duplicating body parsing between here and pageserver
-    let pgdata_path = json_request::<String>(&mut req).await?;
-
-    service
-        .tenant_timeline_import_from_pgdata(tenant_id, timeline_id, pgdata_path)
-        .await?;
-
-    json_response(StatusCode::OK, ())
-}
-
 async fn handle_tenant_timeline_passthrough(
     service: Arc<Service>,
     req: Request<Body>,
@@ -1924,16 +1905,6 @@ pub fn make_router(
                     r,
                     |s, r| handle_tenant_timeline_block_unblock_gc(s, r, BlockUnblock::Unblock),
                     RequestName("v1_tenant_timeline_block_unblock_gc"),
-                )
-            },
-        )
-        .put(
-            "/v1/tenant/:tenant_id/timeline/:timeline_id/import_pgdata",
-            |r| {
-                tenant_service_handler(
-                    r,
-                    handle_tenant_timeline_import_pgdata,
-                    RequestName("v1_tenant_timeline_import_pgdata"),
                 )
             },
         )

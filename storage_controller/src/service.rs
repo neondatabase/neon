@@ -147,7 +147,6 @@ enum TenantOperations {
     TimelineArchivalConfig,
     TimelineDetachAncestor,
     TimelineGcBlockUnblock,
-    TimelineImportFromPgdata,
 }
 
 #[derive(Clone, strum_macros::Display)]
@@ -3387,68 +3386,6 @@ impl Service {
         })
         .await??;
         Ok(())
-    }
-
-    pub(crate) async fn tenant_timeline_import_from_pgdata(
-        &self,
-        tenant_id: TenantId,
-        timeline_id: TimelineId,
-        pgdata_path: String,
-    ) -> Result<(), ApiError> {
-        tracing::info!("Importing pgdata into {tenant_id}/{timeline_id} from {pgdata_path}");
-
-        let _tenant_lock = trace_shared_lock(
-            &self.tenant_op_locks,
-            tenant_id,
-            TenantOperations::TimelineImportFromPgdata,
-        )
-        .await;
-
-        self.tenant_remote_mutation(tenant_id, move |targets| async move {
-            if targets.0.is_empty() {
-                return Err(ApiError::NotFound(
-                    anyhow::anyhow!("Tenant not found").into(),
-                ));
-            }
-
-            async fn do_one(
-                tenant_shard_id: TenantShardId,
-                timeline_id: TimelineId,
-                pgdata_path: String,
-                node: Node,
-                jwt: Option<String>,
-            ) -> Result<(), ApiError> {
-                tracing::info!(
-                    "Importing pgdata on shard {tenant_shard_id}/{timeline_id}, attached to node {node}",
-                );
-
-                let client = PageserverClient::new(node.get_id(), node.base_url(), jwt.as_deref());
-
-                client
-                    .timeline_import_pgdata(tenant_shard_id, timeline_id, pgdata_path)
-                    .await
-                    .map_err(|e| {
-                        passthrough_api_error(&node, e)
-                    })
-            }
-
-            // no shard needs to go first/last; the operation should be idempotent
-            let locations = targets.0.iter().map(|t| (*t.0, t.1.latest.node.clone())).collect();
-            let results: Vec<()> = self
-                .tenant_for_shards(locations, |tenant_shard_id, node| {
-                    futures::FutureExt::boxed(do_one(
-                        tenant_shard_id,
-                        timeline_id,
-                        pgdata_path.clone(),
-                        node,
-                        self.config.jwt_token.clone(),
-                    ))
-                })
-                .await?;
-            drop(results);
-
-            Ok(())
-        }).await?
     }
 
     /// Helper for concurrently calling a pageserver API on a number of shards, such as timeline creation.

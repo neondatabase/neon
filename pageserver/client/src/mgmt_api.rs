@@ -757,21 +757,4 @@ impl Client {
             .await
             .map_err(Error::ReceiveBody)
     }
-
-    pub async fn import_pgdata(
-        &self,
-        tenant_shard_id: TenantShardId,
-        timeline_id: TimelineId,
-        pgdata_path: String,
-    ) -> Result<()> {
-        let uri = format!(
-            "{}/v1/tenant/{tenant_shard_id}/timeline/{timeline_id}/import_pgdata",
-            self.mgmt_api_endpoint,
-        );
-        self.request(Method::PUT, uri, pgdata_path)
-            .await?
-            .json()
-            .await
-            .map_err(Error::ReceiveBody)
-    }
 }
