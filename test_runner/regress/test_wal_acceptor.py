@@ -1998,6 +1998,109 @@ def test_pull_timeline_term_change(neon_env_builder: NeonEnvBuilder):
         pt_handle.join()
 
 
+def test_pull_timeline_while_evicted(neon_env_builder: NeonEnvBuilder):
+    """
+    Verify that when pull_timeline is used on an evicted timeline, it does not result in
+    promoting any segments to local disk on the source, and the timeline is correctly instantiated
+    in evicted state on the destination.  This behavior is important to avoid ballooning disk
+    usage when doing mass migration of timelines.
+    """
+    neon_env_builder.num_safekeepers = 4
+    neon_env_builder.enable_safekeeper_remote_storage(default_remote_storage())
+
+    # Configure safekeepers with ultra-fast eviction policy
+    neon_env_builder.safekeeper_extra_opts = [
+        "--enable-offload",
+        "--partial-backup-timeout",
+        "50ms",
+        "--control-file-save-interval",
+        "1s",
+        # Safekeepers usually wait a while before evicting something: for this test we want them to
+        # evict things as soon as they are inactive.
+        "--eviction-min-resident=100ms",
+        "--delete-offloaded-wal",
+    ]
+
+    initial_tenant_conf = {"lagging_wal_timeout": "1s", "checkpoint_timeout": "100ms"}
+    env = neon_env_builder.init_start(initial_tenant_conf=initial_tenant_conf)
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    (src_sk, dst_sk) = (env.safekeepers[0], env.safekeepers[-1])
+    log.info(f"Will pull_timeline on destination {dst_sk.id} from source {src_sk.id}")
+
+    ep = env.endpoints.create("main")
+    ep.active_safekeepers = [s.id for s in env.safekeepers if s.id != dst_sk.id]
+    log.info(f"Compute writing initially to safekeepers: {ep.active_safekeepers}")
+    ep.active_safekeepers = [1, 2, 3]  # Exclude dst_sk from set written by compute initially
+    ep.start()
+    ep.safe_psql("CREATE TABLE t(i int)")
+    ep.safe_psql("INSERT INTO t VALUES (0)")
+    ep.stop()
+
+    wait_lsn_force_checkpoint_at_sk(src_sk, tenant_id, timeline_id, env.pageserver)
+
+    src_http = src_sk.http_client()
+    dst_http = dst_sk.http_client()
+
+    def evicted_on_source():
+        # Wait for timeline to go into evicted state
+        assert src_http.get_eviction_state(timeline_id) != "Present"
+        assert (
+            src_http.get_metric_value(
+                "safekeeper_eviction_events_completed_total", {"kind": "evict"}
+            )
+            or 0 > 0
+        )
+        assert src_http.get_metric_value("safekeeper_evicted_timelines") or 0 > 0
+        # Check that on source no segment files are present
+        assert src_sk.list_segments(tenant_id, timeline_id) == []
+
+    wait_until(60, 1, evicted_on_source)
+
+    # Invoke pull_timeline: source should serve snapshot request without promoting anything to local disk,
+    # destination should import the control file only & go into evicted mode immediately
+    dst_sk.pull_timeline([src_sk], tenant_id, timeline_id)
+
+    # Check that on source and destination no segment files are present
+    assert src_sk.list_segments(tenant_id, timeline_id) == []
+    assert dst_sk.list_segments(tenant_id, timeline_id) == []
+
+    # Check that the timeline on the destination is in the expected evicted state.
+    evicted_on_source()  # It should still be evicted on the source
+
+    def evicted_on_destination():
+        assert dst_http.get_eviction_state(timeline_id) != "Present"
+        assert dst_http.get_metric_value("safekeeper_evicted_timelines") or 0 > 0
+
+    # This should be fast, it is a wait_until because eviction state is updated
+    # in the background wrt pull_timeline.
+    wait_until(10, 0.1, evicted_on_destination)
+
+    # Delete the timeline on the source, to prove that deletion works on an
+    # evicted timeline _and_ that the final compute test is really not using
+    # the original location
+    src_sk.http_client().timeline_delete(tenant_id, timeline_id, only_local=True)
+
+    # Check that using the timeline correctly un-evicts it on the new location
+    ep.active_safekeepers = [2, 3, 4]
+    ep.start()
+    ep.safe_psql("INSERT INTO t VALUES (0)")
+    ep.stop()
+
+    def unevicted_on_dest():
+        assert (
+            dst_http.get_metric_value(
+                "safekeeper_eviction_events_completed_total", {"kind": "restore"}
+            )
+            or 0 > 0
+        )
+        n_evicted = dst_sk.http_client().get_metric_value("safekeeper_evicted_timelines")
+        assert n_evicted == 0
+
+    wait_until(10, 1, unevicted_on_dest)
+
+
 # In this test we check for excessive START_REPLICATION and START_WAL_PUSH queries
 # when compute is active, but there are no writes to the timeline. In that case
 # pageserver should maintain a single connection to safekeeper and don't attempt

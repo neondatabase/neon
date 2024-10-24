@@ -56,6 +56,9 @@ impl Manager {
             // This also works for the first segment despite last_removed_segno
             // being 0 on init because this 0 triggers run of wal_removal_task
             // on success of which manager updates the horizon.
+            //
+            // **Note** pull_timeline functionality assumes that evicted timelines always have
+            // a partial segment: if we ever change this condition, must also update that code.
             && self
                 .partial_backup_uploaded
                 .as_ref()
