@@ -137,14 +137,17 @@ def test_timeline_offloading(neon_env_builder: NeonEnvBuilder, manual_offload: b
         }
     )
 
-    # Create two branches and archive them
-    parent_timeline_id = env.create_branch("test_ancestor_branch_archive_parent", tenant_id)
-    leaf_timeline_id = env.create_branch(
-        "test_ancestor_branch_archive_branch1", tenant_id, "test_ancestor_branch_archive_parent"
+    # Create three branches that depend on each other, starting with two
+    grandparent_timeline_id = env.create_branch(
+        "test_ancestor_branch_archive_grandparent", tenant_id
+    )
+    parent_timeline_id = env.create_branch(
+        "test_ancestor_branch_archive_parent", tenant_id, "test_ancestor_branch_archive_grandparent"
     )
 
+    # write some stuff to the parent
     with env.endpoints.create_start(
-        "test_ancestor_branch_archive_branch1", tenant_id=tenant_id
+        "test_ancestor_branch_archive_parent", tenant_id=tenant_id
     ) as endpoint:
         endpoint.safe_psql_many(
             [
@@ -153,6 +156,11 @@ def test_timeline_offloading(neon_env_builder: NeonEnvBuilder, manual_offload: b
             ]
         )
         sum = endpoint.safe_psql("SELECT sum(key) from foo where key > 50")
+
+    # create the third branch
+    leaf_timeline_id = env.create_branch(
+        "test_ancestor_branch_archive_branch1", tenant_id, "test_ancestor_branch_archive_parent"
+    )
 
     ps_http.timeline_archival_config(
         tenant_id,
@@ -168,6 +176,12 @@ def test_timeline_offloading(neon_env_builder: NeonEnvBuilder, manual_offload: b
     ps_http.timeline_archival_config(
         tenant_id,
         parent_timeline_id,
+        state=TimelineArchivalState.ARCHIVED,
+    )
+
+    ps_http.timeline_archival_config(
+        tenant_id,
+        grandparent_timeline_id,
         state=TimelineArchivalState.ARCHIVED,
     )
 
@@ -201,25 +215,28 @@ def test_timeline_offloading(neon_env_builder: NeonEnvBuilder, manual_offload: b
 
     ps_http.timeline_archival_config(
         tenant_id,
-        parent_timeline_id,
+        grandparent_timeline_id,
         state=TimelineArchivalState.UNARCHIVED,
     )
     ps_http.timeline_archival_config(
         tenant_id,
-        leaf_timeline_id,
+        parent_timeline_id,
         state=TimelineArchivalState.UNARCHIVED,
     )
-    leaf_detail = ps_http.timeline_detail(
+    parent_detail = ps_http.timeline_detail(
         tenant_id,
-        leaf_timeline_id,
+        parent_timeline_id,
     )
-    assert leaf_detail["is_archived"] is False
+    assert parent_detail["is_archived"] is False
 
     with env.endpoints.create_start(
-        "test_ancestor_branch_archive_branch1", tenant_id=tenant_id
+        "test_ancestor_branch_archive_parent", tenant_id=tenant_id
     ) as endpoint:
         sum_again = endpoint.safe_psql("SELECT sum(key) from foo where key > 50")
         assert sum == sum_again
+
+    # Test that deletion of offloaded timelines works
+    ps_http.timeline_delete(tenant_id, leaf_timeline_id)
 
     assert not timeline_offloaded_logged(initial_timeline_id)
 
