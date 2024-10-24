@@ -152,6 +152,7 @@ static void lfc_init_prewarm(void);
 
 #define LFC_ENABLED() (lfc_ctl->limit != 0)
 
+PGDLLEXPORT void LfcPrewarmMain(Datum main_arg);
 
 static void
 LfcCheckpointHook(int flags)
