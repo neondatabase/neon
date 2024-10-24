@@ -133,7 +133,6 @@ def insert_test_elements(env: NeonEnv, tenant_id: TenantId, start: int, count: i
             log.info(
                 f"inserted {(lsn_diff / 1024 / 1024):.3f} MB of WAL in {time_diff:.3f}s, MB/s: {(lsn_diff / 1024 / 1024) / time_diff}"
             )
-            time.sleep(432432)
 
 
 future_lsn = Lsn("0/FFFFFFFF")
