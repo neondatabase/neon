@@ -222,8 +222,10 @@ pub enum TimelineCreateRequestMode {
         ancestor_timeline_id: TimelineId,
         #[serde(default)]
         ancestor_start_lsn: Option<Lsn>,
-        // TODO: cplane sets this, but, the current branching code always
-        // inherits the ancestor's pg_version. This field is effectively ignored.
+        // TODO: cplane sets this, but, the branching code always
+        // inherits the ancestor's pg_version. Earlier code wasn't
+        // using a flattened enum, so, it was an accepted field, and
+        // we continue to accept it by having it here.
         pg_version: Option<u32>,
     },
     // NB: Bootstrap is all-optional, and thus the serde(untagged) will cause serde to stop at Bootstrap.
