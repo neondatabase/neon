@@ -226,9 +226,8 @@ pub enum TimelineCreateRequestMode {
         // inherits the ancestor's pg_version. This field is effectively ignored.
         pg_version: Option<u32>,
     },
-    // NB: ordered after Branch because serde(untagged)
-    // will otherwise interpret Bootstrap as a Branch,
-    // with ignored unknown fields `ancestor_timeline_id`, `ancestor_start_lsn`.
+    // NB: Bootstrap is all-optional, and thus the serde(untagged) will cause serde to stop at Bootstrap.
+    // (serde picks the first matching enum variant, in declaration order).
     Bootstrap {
         #[serde(default)]
         existing_initdb_timeline_id: Option<TimelineId>,
