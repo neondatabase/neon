@@ -39,7 +39,6 @@ use remote_timeline_client::UploadQueueNotReadyError;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
-use std::sync::OnceLock;
 use std::sync::Weak;
 use std::time::SystemTime;
 use storage_broker::BrokerClientChannel;
@@ -519,7 +518,7 @@ pub struct OffloadedTimeline {
     /// If we offload a timeline, we keep around the remote client
     /// for the duration of the process. If we find it through the
     /// manifest, we don't construct it up until it's needed (deletion).
-    pub remote_client: OnceLock<Arc<RemoteTimelineClient>>,
+    pub remote_client: Option<Arc<RemoteTimelineClient>>,
 
     /// Prevent two tasks from deleting the timeline at the same time. If held, the
     /// timeline is being deleted. If 'true', the timeline has already been deleted.
@@ -547,7 +546,7 @@ impl OffloadedTimeline {
             ancestor_retain_lsn,
             archived_at,
 
-            remote_client: OnceLock::from(timeline.remote_client.clone()),
+            remote_client: Some(timeline.remote_client.clone()),
             delete_progress: timeline.delete_progress.clone(),
         })
     }
@@ -564,7 +563,7 @@ impl OffloadedTimeline {
             ancestor_timeline_id,
             ancestor_retain_lsn,
             archived_at,
-            remote_client: OnceLock::new(),
+            remote_client: None,
             delete_progress: TimelineDeleteProgress::default(),
         }
     }
@@ -582,13 +581,6 @@ impl OffloadedTimeline {
             ancestor_retain_lsn: *ancestor_retain_lsn,
             archived_at: *archived_at,
         }
-    }
-    fn remote_client_maybe_construct(&self, tenant: &Tenant) -> &Arc<RemoteTimelineClient> {
-        self.remote_client.get_or_init(|| {
-            let remote_client =
-                tenant.build_timeline_client(self.timeline_id, tenant.remote_storage.clone());
-            Arc::new(remote_client)
-        })
     }
 }
 
@@ -627,8 +619,20 @@ impl TimelineOrOffloaded {
             TimelineOrOffloaded::Offloaded(offloaded) => &offloaded.delete_progress,
         }
     }
-    pub fn remote_client_maybe_construct(&self, tenant: &Tenant) -> Arc<RemoteTimelineClient> {
-        self.arc_ref().remote_client_maybe_construct(tenant)
+    fn remote_client_maybe_construct(&self, tenant: &Tenant) -> Arc<RemoteTimelineClient> {
+        match self {
+            TimelineOrOffloaded::Timeline(timeline) => timeline.remote_client.clone(),
+            TimelineOrOffloaded::Offloaded(offloaded) => match offloaded.remote_client.clone() {
+                Some(remote_client) => remote_client,
+                None => {
+                    let remote_client = tenant.build_timeline_client(
+                        offloaded.timeline_id,
+                        tenant.remote_storage.clone(),
+                    );
+                    Arc::new(remote_client)
+                }
+            },
+        }
     }
 }
 
@@ -648,14 +652,6 @@ impl TimelineOrOffloadedArcRef<'_> {
         match self {
             TimelineOrOffloadedArcRef::Timeline(timeline) => timeline.timeline_id,
             TimelineOrOffloadedArcRef::Offloaded(offloaded) => offloaded.timeline_id,
-        }
-    }
-    pub fn remote_client_maybe_construct(&self, tenant: &Tenant) -> Arc<RemoteTimelineClient> {
-        match self {
-            TimelineOrOffloadedArcRef::Timeline(timeline) => timeline.remote_client.clone(),
-            TimelineOrOffloadedArcRef::Offloaded(offloaded) => {
-                offloaded.remote_client_maybe_construct(tenant).clone()
-            }
         }
     }
 }
@@ -2987,7 +2983,14 @@ impl Tenant {
                 timeline.remote_client.wait_completion().await?;
             }
 
-            let remote_client = timeline.remote_client_maybe_construct(self);
+            let remote_client = match timeline {
+                TimelineOrOffloadedArcRef::Timeline(timeline) => timeline.remote_client.clone(),
+                TimelineOrOffloadedArcRef::Offloaded(offloaded) => {
+                    let remote_client = self
+                        .build_timeline_client(offloaded.timeline_id, self.remote_storage.clone());
+                    Arc::new(remote_client)
+                }
+            };
 
             // Shut down the timeline's remote client: this means that the indices we write
             // for child shards will not be invalidated by the parent shard deleting layers.
