@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use tokio::fs::{self};
 use tokio_util::sync::CancellationToken;
 use utils::id::TenantId;
+use utils::sync::gate::Gate;
 
 use std::cmp::max;
 use std::ops::{Deref, DerefMut};
@@ -465,6 +466,10 @@ pub struct Timeline {
     timeline_dir: Utf8PathBuf,
     manager_ctl: ManagerCtl,
 
+    /// Hold this gate from code that depends on the Timeline's non-shut-down state.  While holding
+    /// this gate, you must respect [`Timeline::cancel`]
+    pub(crate) gate: Gate,
+
     /// Delete/cancel will trigger this, background tasks should drop out as soon as it fires
     pub(crate) cancel: CancellationToken,
 
@@ -503,6 +508,7 @@ impl Timeline {
             mutex: RwLock::new(shared_state),
             walsenders: WalSenders::new(walreceivers.clone()),
             walreceivers,
+            gate: Default::default(),
             cancel: CancellationToken::default(),
             timeline_dir: get_timeline_dir(conf, &ttid),
             manager_ctl: ManagerCtl::new(),
@@ -543,7 +549,7 @@ impl Timeline {
         // Write timeline to disk and start background tasks.
         if let Err(e) = shared_state.sk.state_mut().flush().await {
             // Bootstrap failed, cancel timeline and remove timeline directory.
-            self.cancel(shared_state);
+            self.cancel(shared_state).await;
 
             if let Err(fs_err) = fs::remove_dir_all(&self.timeline_dir).await {
                 warn!(
@@ -585,21 +591,36 @@ impl Timeline {
         ));
     }
 
+    /// Background timeline activities (which hold Timeline::gate) will no
+    /// longer run once this function completes.
+    pub async fn shutdown(&self) {
+        info!("timeline {} shutting down", self.ttid);
+        self.cancel.cancel();
+
+        // Wait for any concurrent tasks to stop using this timeline, to avoid e.g. attempts
+        // to read deleted files.
+        self.gate.close().await;
+    }
+
     /// Delete timeline from disk completely, by removing timeline directory.
-    /// Background timeline activities will stop eventually.
     ///
     /// Also deletes WAL in s3. Might fail if e.g. s3 is unavailable, but
     /// deletion API endpoint is retriable.
+    ///
+    /// Timeline must be in shut-down state (i.e. call [`Self::shutdown`] first)
     pub async fn delete(
         &self,
         shared_state: &mut WriteGuardSharedState<'_>,
         only_local: bool,
     ) -> Result<bool> {
-        self.cancel(shared_state);
+        // Assert that [`Self::shutdown`] was already called
+        assert!(self.cancel.is_cancelled());
+        assert!(self.gate.close_complete());
 
-        // TODO: It's better to wait for s3 offloader termination before
-        // removing data from s3. Though since s3 doesn't have transactions it
-        // still wouldn't guarantee absense of data after removal.
+        // Close associated FDs. Nobody will be able to touch timeline data once
+        // it is cancelled, so WAL storage won't be opened again.
+        shared_state.sk.close_wal_store();
+
         let conf = GlobalTimelines::get_global_config();
         if !only_local && conf.is_wal_backup_enabled() {
             // Note: we concurrently delete remote storage data from multiple
@@ -613,9 +634,10 @@ impl Timeline {
 
     /// Cancel timeline to prevent further usage. Background tasks will stop
     /// eventually after receiving cancellation signal.
-    fn cancel(&self, shared_state: &mut WriteGuardSharedState<'_>) {
+    async fn cancel(&self, shared_state: &mut WriteGuardSharedState<'_>) {
         info!("timeline {} is cancelled", self.ttid);
-        self.cancel.cancel();
+        self.shutdown().await;
+
         // Close associated FDs. Nobody will be able to touch timeline data once
         // it is cancelled, so WAL storage won't be opened again.
         shared_state.sk.close_wal_store();

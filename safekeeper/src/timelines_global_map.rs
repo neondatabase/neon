@@ -461,6 +461,7 @@ impl GlobalTimelines {
                 let mut shared_state = timeline.write_shared_state().await;
 
                 info!("deleting timeline {}, only_local={}", ttid, only_local);
+                timeline.shutdown().await;
                 let dir_existed = timeline.delete(&mut shared_state, only_local).await?;
 
                 Ok(TimelineDeleteForceResult {
