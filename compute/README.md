@@ -1,7 +1,7 @@
 This directory contains files that are needed to build the compute
 images, or included in the compute images.
 
-Dockerfile.compute-node
+compute-node.Dockerfile
 	To build the compute image
 
 vm-image-spec.yaml
@@ -14,8 +14,8 @@ etc/
 patches/
 	Some extensions need to be patched to work with Neon. This
 	directory contains such patches. They are applied to the extension
-	sources in Dockerfile.compute-node
+	sources in compute-node.Dockerfile
 
 In addition to these, postgres itself, the neon postgres extension,
 and compute_ctl are built and copied into the compute image by
-Dockerfile.compute-node.
+compute-node.Dockerfile.

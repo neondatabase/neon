@@ -1189,7 +1189,7 @@ struct GlobalAndPerTimelineHistogramTimer<'a, 'c> {
     op: SmgrQueryType,
 }
 
-impl<'a, 'c> Drop for GlobalAndPerTimelineHistogramTimer<'a, 'c> {
+impl Drop for GlobalAndPerTimelineHistogramTimer<'_, '_> {
     fn drop(&mut self) {
         let elapsed = self.start.elapsed();
         let ex_throttled = self
@@ -1560,7 +1560,7 @@ impl BasebackupQueryTime {
     }
 }
 
-impl<'a, 'c> BasebackupQueryTimeOngoingRecording<'a, 'c> {
+impl BasebackupQueryTimeOngoingRecording<'_, '_> {
     pub(crate) fn observe<T>(self, res: &Result<T, QueryError>) {
         let elapsed = self.start.elapsed();
         let ex_throttled = self
@@ -2092,6 +2092,7 @@ pub(crate) struct WalIngestMetrics {
     pub(crate) records_received: IntCounter,
     pub(crate) records_committed: IntCounter,
     pub(crate) records_filtered: IntCounter,
+    pub(crate) gap_blocks_zeroed_on_rel_extend: IntCounter,
 }
 
 pub(crate) static WAL_INGEST: Lazy<WalIngestMetrics> = Lazy::new(|| WalIngestMetrics {
@@ -2113,6 +2114,11 @@ pub(crate) static WAL_INGEST: Lazy<WalIngestMetrics> = Lazy::new(|| WalIngestMet
     records_filtered: register_int_counter!(
         "pageserver_wal_ingest_records_filtered",
         "Number of WAL records filtered out due to sharding"
+    )
+    .expect("failed to define a metric"),
+    gap_blocks_zeroed_on_rel_extend: register_int_counter!(
+        "pageserver_gap_blocks_zeroed_on_rel_extend",
+        "Total number of zero gap blocks written on relation extends"
     )
     .expect("failed to define a metric"),
 });

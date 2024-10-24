@@ -303,9 +303,10 @@ def assert_prefix_empty(
     remote_storage: Optional[RemoteStorage],
     prefix: Optional[str] = None,
     allowed_postfix: Optional[str] = None,
+    delimiter: str = "/",
 ) -> None:
     assert remote_storage is not None
-    response = list_prefix(remote_storage, prefix)
+    response = list_prefix(remote_storage, prefix, delimiter)
     keys = response["KeyCount"]
     objects: list[ObjectTypeDef] = response.get("Contents", [])
     common_prefixes = response.get("CommonPrefixes", [])
@@ -338,16 +339,18 @@ def assert_prefix_empty(
             if not (allowed_postfix.endswith(key)):
                 filtered_count += 1
 
-    assert (
-        filtered_count == 0
-    ), f"remote dir with prefix {prefix} is not empty after deletion: {objects}"
+    assert filtered_count == 0, f"remote prefix {prefix} is not empty: {objects}"
 
 
 # remote_storage must not be None, but that's easier for callers to make mypy happy
-def assert_prefix_not_empty(remote_storage: Optional[RemoteStorage], prefix: Optional[str] = None):
+def assert_prefix_not_empty(
+    remote_storage: Optional[RemoteStorage],
+    prefix: Optional[str] = None,
+    delimiter: str = "/",
+):
     assert remote_storage is not None
     response = list_prefix(remote_storage, prefix)
-    assert response["KeyCount"] != 0, f"remote dir with prefix {prefix} is empty: {response}"
+    assert response["KeyCount"] != 0, f"remote prefix {prefix} is empty: {response}"
 
 
 def list_prefix(
