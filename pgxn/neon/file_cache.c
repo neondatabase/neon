@@ -338,7 +338,7 @@ lfc_shmem_startup(void)
 			close(fd);
 			lfc_ctl->limit = SIZE_MB_TO_CHUNKS(lfc_size_limit);
 			/* Prewarming of replica has no sense because if WAL record's target page is not present in shared buffer, then correspondent LFC entry is invalidated */
-			if (LFC_ENABLED() && lfc_prewarm_limit != 0/* && !RecoveryInProgress()*/)
+			if (LFC_ENABLED() && lfc_prewarm_limit != 0)
 			{
 				lfc_init_prewarm();
 			}
@@ -710,13 +710,20 @@ lfc_load_pages(void)
 		{
 			if (fs[chunk_no].bitmap[offs_in_chunk >> 5] & (1 << (offs_in_chunk & 31)))
 			{
+				/*
+				 * In case of prewarming replica we should be careful not to load too new version
+				 * of the page - with LSN larger than current replay LSN.
+				 * At primary we are always loading latest version.
+				 */
+				XLogRecPtr req_lsn = RecoveryInProgress() ? GetXLogReplayRecPtr(NULL) : UINT64_MAX;
+
 				NeonGetPageRequest request = {
 					.req.tag = T_NeonGetPageRequest,
 					/* lsn and not_modified_since are filled in below */
 					.rinfo = BufTagGetNRelFileInfo(fs[chunk_no].key),
 					.forknum = fs[chunk_no].key.forkNum,
 					.blkno = fs[chunk_no].key.blockNum + offs_in_chunk,
-					.req.lsn = UINT64_MAX,
+					.req.lsn = req_lsn,
 					.req.not_modified_since = 0
 				};
 				shard_no = get_shard_number(&fs[chunk_no].key);
@@ -977,6 +984,7 @@ lfc_evict(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno)
 
 	/* remove the page from the cache */
 	entry->bitmap[chunk_offs >> 5] &= ~(1 << (chunk_offs & (32 - 1)));
+	entry->prewarm_requested = false; /* prohibit prewarm if LFC entry */
 
 	if (entry->access_count == 0)
 	{
@@ -1708,3 +1716,14 @@ approximate_working_set_size(PG_FUNCTION_ARGS)
 	}
 	PG_RETURN_NULL();
 }
+
+PG_FUNCTION_INFO_V1(save_local_cache_state);
+
+
+Datum
+save_local_cache_state(PG_FUNCTION_ARGS)
+{
+	lfc_save_state();
+	PG_RETURN_NULL();
+}
+
