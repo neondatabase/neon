@@ -19,8 +19,8 @@ on:
         description: 'debug or release'
         required: true
         type: string
-      pg-versions:
-        description: 'a json array of postgres versions to run regression tests on'
+      pg-versions-lfc:
+        description: 'a json object of postgres versions and lfc state to run regression tests on'
         required: true
         type: string
 
