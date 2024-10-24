@@ -3130,9 +3130,11 @@ impl Service {
             .await?;
 
             // Propagate the LSN that shard zero picked, if caller didn't provide one
-            if create_req.ancestor_timeline_id.is_some() && create_req.ancestor_start_lsn.is_none()
-            {
-                create_req.ancestor_start_lsn = timeline_info.ancestor_lsn;
+            match &mut create_req.mode {
+                models::TimelineCreateRequestMode::Branch { ancestor_start_lsn, .. } if ancestor_start_lsn.is_none() => {
+                    *ancestor_start_lsn = timeline_info.ancestor_lsn;
+                },
+                _ => {}
             }
 
             // Create timeline on remaining shards with number >0
