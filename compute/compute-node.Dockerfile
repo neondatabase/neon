@@ -666,7 +666,7 @@ RUN apt-get update && \
 #
 # Use new version only for v17
 # because Release_2024_09_1 has some backward incompatible changes
-# https://github.com/rdkit/rdkit/releases/tag/Release_2024_09_1 
+# https://github.com/rdkit/rdkit/releases/tag/Release_2024_09_1
 ENV PATH="/usr/local/pgsql/bin/:/usr/local/pgsql/:$PATH"
 RUN case "${PG_VERSION}" in \
     "v17") \
@@ -1043,6 +1043,24 @@ RUN wget https://github.com/pgpartman/pg_partman/archive/refs/tags/v5.1.0.tar.gz
 
 #########################################################################################
 #
+# Layer "pg_mooncake"
+# compile pg_mooncake extension
+#
+#########################################################################################
+FROM build-deps AS pg-mooncacke-build
+ARG PG_VERSION
+COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
+
+ENV PG_MOONCAKE_TAG=neon
+ENV PATH="/usr/local/pgsql/bin/:$PATH"
+RUN git clone --recurse-submodules --depth 1 --branch "${PG_MOONCAKE_TAG}" https://github.com/Mooncake-Labs/pg_mooncake.git pg_mooncake-src && \
+    cd pg_mooncake-src && \
+    make BUILD_TYPE=release -j $(getconf _NPROCESSORS_ONLN) && \
+    make -j $(getconf _NPROCESSORS_ONLN) install && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/pg_mooncake.control
+
+#########################################################################################
+#
 # Layer "neon-pg-ext-build"
 # compile neon extensions
 #
@@ -1084,6 +1102,7 @@ COPY --from=wal2json-pg-build /usr/local/pgsql /usr/local/pgsql
 COPY --from=pg-anon-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-ivm-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-partman-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pg-mooncacke-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY pgxn/ pgxn/
 
 RUN make -j $(getconf _NPROCESSORS_ONLN) \
