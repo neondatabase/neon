@@ -42,9 +42,10 @@ hyper0.workspace = true
 hyper = { workspace = true, features = ["server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["server", "http1", "http2", "tokio"] }
 http-body-util = { version = "0.1" }
-indexmap.workspace = true
+indexmap = { workspace = true, features = ["serde"] }
 ipnet.workspace = true
 itertools.workspace = true
+itoa.workspace = true
 lasso = { workspace = true, features = ["multi-threaded"] }
 measured = { workspace = true, features = ["lasso"] }
 metrics.workspace = true

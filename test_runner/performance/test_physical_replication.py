@@ -102,10 +102,14 @@ def test_ro_replica_lag(
                     check_pgbench_still_running(master_workload)
                     check_pgbench_still_running(replica_workload)
                     time.sleep(sync_interval_min * 60)
-                    with psycopg2.connect(master_connstr) as conn_master, psycopg2.connect(
-                        replica_connstr
-                    ) as conn_replica:
-                        with conn_master.cursor() as cur_master, conn_replica.cursor() as cur_replica:
+                    with (
+                        psycopg2.connect(master_connstr) as conn_master,
+                        psycopg2.connect(replica_connstr) as conn_replica,
+                    ):
+                        with (
+                            conn_master.cursor() as cur_master,
+                            conn_replica.cursor() as cur_replica,
+                        ):
                             lag = measure_replication_lag(cur_master, cur_replica)
                     log.info(f"Replica lagged behind master by {lag} seconds")
                     zenbenchmark.record("replica_lag", lag, "s", MetricReport.LOWER_IS_BETTER)

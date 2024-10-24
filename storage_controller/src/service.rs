@@ -246,6 +246,11 @@ fn passthrough_api_error(node: &Node, e: mgmt_api::Error) -> ApiError {
             // storage controller's auth configuration.
             ApiError::InternalServerError(anyhow::anyhow!("{node} {status}: {msg}"))
         }
+        mgmt_api::Error::ApiError(status @ StatusCode::TOO_MANY_REQUESTS, msg) => {
+            // Pass through 429 errors: if pageserver is asking us to wait + retry, we in
+            // turn ask our clients to wait + retry
+            ApiError::Conflict(format!("{node} {status}: {status} {msg}"))
+        }
         mgmt_api::Error::ApiError(status, msg) => {
             // Presume general case of pageserver API errors is that we tried to do something
             // that can't be done right now.
@@ -929,7 +934,6 @@ impl Service {
         self.startup_complete.clone().wait().await;
 
         const BACKGROUND_RECONCILE_PERIOD: Duration = Duration::from_secs(20);
-
         let mut interval = tokio::time::interval(BACKGROUND_RECONCILE_PERIOD);
         while !self.reconcilers_cancel.is_cancelled() {
             tokio::select! {
@@ -1069,8 +1073,9 @@ impl Service {
     /// the observed state of the tenant such that subsequent calls to [`TenantShard::get_reconcile_needed`]
     /// will indicate that reconciliation is not needed.
     #[instrument(skip_all, fields(
-        tenant_id=%result.tenant_shard_id.tenant_id, shard_id=%result.tenant_shard_id.shard_slug(),
-        sequence=%result.sequence
+        seq=%result.sequence,
+        tenant_id=%result.tenant_shard_id.tenant_id,
+        shard_id=%result.tenant_shard_id.shard_slug(),
     ))]
     fn process_result(&self, result: ReconcileResult) {
         let mut locked = self.inner.write().unwrap();
@@ -1266,6 +1271,10 @@ impl Service {
             .collect::<Vec<_>>();
         let nodes: HashMap<NodeId, Node> = nodes.into_iter().map(|n| (n.get_id(), n)).collect();
         tracing::info!("Loaded {} nodes from database.", nodes.len());
+        metrics::METRICS_REGISTRY
+            .metrics_group
+            .storage_controller_pageserver_nodes
+            .set(nodes.len() as i64);
 
         tracing::info!("Loading shards from database...");
         let mut tenant_shard_persistence = persistence.list_tenant_shards().await?;
@@ -2856,17 +2865,12 @@ impl Service {
         let _tenant_lock =
             trace_exclusive_lock(&self.tenant_op_locks, tenant_id, TenantOperations::Delete).await;
 
-        // Detach all shards
-        let (detach_waiters, shard_ids, node) = {
-            let mut shard_ids = Vec::new();
+        // Detach all shards. This also deletes local pageserver shard data.
+        let (detach_waiters, node) = {
             let mut detach_waiters = Vec::new();
             let mut locked = self.inner.write().unwrap();
             let (nodes, tenants, scheduler) = locked.parts_mut();
-            for (tenant_shard_id, shard) in
-                tenants.range_mut(TenantShardId::tenant_range(tenant_id))
-            {
-                shard_ids.push(*tenant_shard_id);
-
+            for (_, shard) in tenants.range_mut(TenantShardId::tenant_range(tenant_id)) {
                 // Update the tenant's intent to remove all attachments
                 shard.policy = PlacementPolicy::Detached;
                 shard
@@ -2886,7 +2890,7 @@ impl Service {
             let node = nodes
                 .get(&node_id)
                 .expect("Pageservers may not be deleted while lock is active");
-            (detach_waiters, shard_ids, node.clone())
+            (detach_waiters, node.clone())
         };
 
         // This reconcile wait can fail in a few ways:
@@ -2901,38 +2905,34 @@ impl Service {
         self.await_waiters(detach_waiters, RECONCILE_TIMEOUT)
             .await?;
 
-        let locations = shard_ids
-            .into_iter()
-            .map(|s| (s, node.clone()))
-            .collect::<Vec<_>>();
-        let results = self.tenant_for_shards_api(
-            locations,
-            |tenant_shard_id, client| async move { client.tenant_delete(tenant_shard_id).await },
-            1,
-            3,
-            RECONCILE_TIMEOUT,
-            &self.cancel,
-        )
-        .await;
-        for result in results {
-            match result {
-                Ok(StatusCode::ACCEPTED) => {
-                    // This should never happen: we waited for detaches to finish above
-                    return Err(ApiError::InternalServerError(anyhow::anyhow!(
-                        "Unexpectedly still attached on {}",
-                        node
-                    )));
-                }
-                Ok(_) => {}
-                Err(mgmt_api::Error::Cancelled) => {
-                    return Err(ApiError::ShuttingDown);
-                }
-                Err(e) => {
-                    // This is unexpected: remote deletion should be infallible, unless the object store
-                    // at large is unavailable.
-                    tracing::error!("Error deleting via node {}: {e}", node);
-                    return Err(ApiError::InternalServerError(anyhow::anyhow!(e)));
-                }
+        // Delete the entire tenant (all shards) from remote storage via a random pageserver.
+        // Passing an unsharded tenant ID will cause the pageserver to remove all remote paths with
+        // the tenant ID prefix, including all shards (even possibly stale ones).
+        match node
+            .with_client_retries(
+                |client| async move {
+                    client
+                        .tenant_delete(TenantShardId::unsharded(tenant_id))
+                        .await
+                },
+                &self.config.jwt_token,
+                1,
+                3,
+                RECONCILE_TIMEOUT,
+                &self.cancel,
+            )
+            .await
+            .unwrap_or(Err(mgmt_api::Error::Cancelled))
+        {
+            Ok(_) => {}
+            Err(mgmt_api::Error::Cancelled) => {
+                return Err(ApiError::ShuttingDown);
+            }
+            Err(e) => {
+                // This is unexpected: remote deletion should be infallible, unless the object store
+                // at large is unavailable.
+                tracing::error!("Error deleting via node {node}: {e}");
+                return Err(ApiError::InternalServerError(anyhow::anyhow!(e)));
             }
         }
 
@@ -3635,14 +3635,21 @@ impl Service {
                 );
 
                 let client = PageserverClient::new(node.get_id(), node.base_url(), jwt.as_deref());
-                client
+                let res = client
                     .timeline_delete(tenant_shard_id, timeline_id)
-                    .await
-                    .map_err(|e| {
-                        ApiError::InternalServerError(anyhow::anyhow!(
-                            "Error deleting timeline {timeline_id} on {tenant_shard_id} on node {node}: {e}",
-                        ))
-                    })
+                    .await;
+
+                match res {
+                    Ok(ok) => Ok(ok),
+                    Err(mgmt_api::Error::ApiError(StatusCode::CONFLICT, _)) => Ok(StatusCode::CONFLICT),
+                    Err(e) => {
+                        Err(
+                            ApiError::InternalServerError(anyhow::anyhow!(
+                                "Error deleting timeline {timeline_id} on {tenant_shard_id} on node {node}: {e}",
+                            ))
+                        )
+                    }
+                }
             }
 
             let locations = targets.0.iter().map(|t| (*t.0, t.1.latest.node.clone())).collect();
@@ -3657,7 +3664,13 @@ impl Service {
                 })
                 .await?;
 
-            // If any shards >0 haven't finished deletion yet, don't start deletion on shard zero
+            // If any shards >0 haven't finished deletion yet, don't start deletion on shard zero.
+            // We return 409 (Conflict) if deletion was already in progress on any of the shards
+            // and 202 (Accepted) if deletion was not already in progress on any of the shards.
+            if statuses.iter().any(|s| s == &StatusCode::CONFLICT) {
+                return Ok(StatusCode::CONFLICT);
+            }
+
             if statuses.iter().any(|s| s != &StatusCode::NOT_FOUND) {
                 return Ok(StatusCode::ACCEPTED);
             }
@@ -4102,9 +4115,9 @@ impl Service {
                     (
                         old_attached,
                         generation,
-                        old_state.policy,
+                        old_state.policy.clone(),
                         old_state.shard,
-                        old_state.config,
+                        old_state.config.clone(),
                     )
                 };
 
@@ -5067,6 +5080,10 @@ impl Service {
         let mut nodes = (*locked.nodes).clone();
         nodes.remove(&node_id);
         locked.nodes = Arc::new(nodes);
+        metrics::METRICS_REGISTRY
+            .metrics_group
+            .storage_controller_pageserver_nodes
+            .set(locked.nodes.len() as i64);
 
         locked.scheduler.node_remove(node_id);
 
@@ -5150,6 +5167,10 @@ impl Service {
                     removed_node.set_availability(NodeAvailability::Offline);
                 }
                 *nodes = Arc::new(nodes_mut);
+                metrics::METRICS_REGISTRY
+                    .metrics_group
+                    .storage_controller_pageserver_nodes
+                    .set(nodes.len() as i64);
             }
         }
 
@@ -5337,6 +5358,11 @@ impl Service {
         new_nodes.insert(register_req.node_id, new_node);
 
         locked.nodes = Arc::new(new_nodes);
+
+        metrics::METRICS_REGISTRY
+            .metrics_group
+            .storage_controller_pageserver_nodes
+            .set(locked.nodes.len() as i64);
 
         tracing::info!(
             "Registered pageserver {}, now have {} pageservers",

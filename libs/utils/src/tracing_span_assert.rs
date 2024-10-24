@@ -184,23 +184,23 @@ mod tests {
 
     struct MemoryIdentity<'a>(&'a dyn Extractor);
 
-    impl<'a> MemoryIdentity<'a> {
+    impl MemoryIdentity<'_> {
         fn as_ptr(&self) -> *const () {
             self.0 as *const _ as *const ()
         }
     }
-    impl<'a> PartialEq for MemoryIdentity<'a> {
+    impl PartialEq for MemoryIdentity<'_> {
         fn eq(&self, other: &Self) -> bool {
             self.as_ptr() == other.as_ptr()
         }
     }
-    impl<'a> Eq for MemoryIdentity<'a> {}
-    impl<'a> Hash for MemoryIdentity<'a> {
+    impl Eq for MemoryIdentity<'_> {}
+    impl Hash for MemoryIdentity<'_> {
         fn hash<H: Hasher>(&self, state: &mut H) {
             self.as_ptr().hash(state);
         }
     }
-    impl<'a> fmt::Debug for MemoryIdentity<'a> {
+    impl fmt::Debug for MemoryIdentity<'_> {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> std::fmt::Result {
             write!(f, "{:p}: {}", self.as_ptr(), self.0.id())
         }

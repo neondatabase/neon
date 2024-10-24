@@ -1,8 +1,9 @@
+use std::pin::Pin;
+use std::task;
+
 use hashbrown::HashMap;
 use parking_lot::Mutex;
 use pin_project_lite::pin_project;
-use std::pin::Pin;
-use std::task;
 use thiserror::Error;
 use tokio::sync::oneshot;
 
@@ -72,7 +73,7 @@ struct DropKey<'a, T> {
     registry: &'a Waiters<T>,
 }
 
-impl<'a, T> Drop for DropKey<'a, T> {
+impl<T> Drop for DropKey<'_, T> {
     fn drop(&mut self) {
         self.registry.0.lock().remove(&self.key);
     }
@@ -99,8 +100,9 @@ impl<T> std::future::Future for Waiter<'_, T> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::sync::Arc;
+
+    use super::*;
 
     #[tokio::test]
     async fn test_waiter() -> anyhow::Result<()> {

@@ -18,7 +18,6 @@ use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
 use metrics::launch_timestamp::LaunchTimestamp;
 use pageserver_api::models::virtual_file::IoMode;
-use pageserver_api::models::AuxFilePolicy;
 use pageserver_api::models::DownloadRemoteLayersTaskSpawnRequest;
 use pageserver_api::models::IngestAuxFilesRequest;
 use pageserver_api::models::ListAuxFilesRequest;
@@ -27,6 +26,7 @@ use pageserver_api::models::LocationConfigListResponse;
 use pageserver_api::models::LocationConfigMode;
 use pageserver_api::models::LsnLease;
 use pageserver_api::models::LsnLeaseRequest;
+use pageserver_api::models::OffloadedTimelineInfo;
 use pageserver_api::models::ShardParameters;
 use pageserver_api::models::TenantDetails;
 use pageserver_api::models::TenantLocationConfigRequest;
@@ -39,6 +39,7 @@ use pageserver_api::models::TenantShardSplitResponse;
 use pageserver_api::models::TenantSorting;
 use pageserver_api::models::TimelineArchivalConfigRequest;
 use pageserver_api::models::TimelineCreateRequestMode;
+use pageserver_api::models::TimelinesInfoAndOffloaded;
 use pageserver_api::models::TopTenantShardItem;
 use pageserver_api::models::TopTenantShardsRequest;
 use pageserver_api::models::TopTenantShardsResponse;
@@ -78,10 +79,12 @@ use crate::tenant::secondary::SecondaryController;
 use crate::tenant::size::ModelInputs;
 use crate::tenant::storage_layer::LayerAccessStatsReset;
 use crate::tenant::storage_layer::LayerName;
+use crate::tenant::timeline::offload::offload_timeline;
 use crate::tenant::timeline::CompactFlags;
 use crate::tenant::timeline::CompactionError;
 use crate::tenant::timeline::Timeline;
 use crate::tenant::GetTimelineError;
+use crate::tenant::OffloadedTimeline;
 use crate::tenant::{LogicalSizeCalculationCause, PageReconstructError};
 use crate::DEFAULT_PG_VERSION;
 use crate::{disk_usage_eviction_task, tenant};
@@ -327,6 +330,7 @@ impl From<crate::tenant::TimelineArchivalError> for ApiError {
         match value {
             NotFound => ApiError::NotFound(anyhow::anyhow!("timeline not found").into()),
             Timeout => ApiError::Timeout("hit pageserver internal timeout".into()),
+            Cancelled => ApiError::ShuttingDown,
             e @ HasArchivedParent(_) => {
                 ApiError::PreconditionFailed(e.to_string().into_boxed_str())
             }
@@ -474,10 +478,26 @@ async fn build_timeline_info_common(
         is_archived: Some(is_archived),
 
         walreceiver_status,
-
-        last_aux_file_policy: timeline.last_aux_file_policy.load(),
     };
     Ok(info)
+}
+
+fn build_timeline_offloaded_info(offloaded: &Arc<OffloadedTimeline>) -> OffloadedTimelineInfo {
+    let &OffloadedTimeline {
+        tenant_shard_id,
+        timeline_id,
+        ancestor_retain_lsn,
+        ancestor_timeline_id,
+        archived_at,
+        ..
+    } = offloaded.as_ref();
+    OffloadedTimelineInfo {
+        tenant_id: tenant_shard_id,
+        timeline_id,
+        ancestor_retain_lsn,
+        ancestor_timeline_id,
+        archived_at: archived_at.and_utc(),
+    }
 }
 
 // healthcheck handler
@@ -654,7 +674,7 @@ async fn timeline_list_handler(
             )
             .instrument(info_span!("build_timeline_info", timeline_id = %timeline.timeline_id))
             .await
-            .context("Failed to convert tenant timeline {timeline_id} into the local one: {e:?}")
+            .context("Failed to build timeline info")
             .map_err(ApiError::InternalServerError)?;
 
             response_data.push(timeline_info);
@@ -662,6 +682,62 @@ async fn timeline_list_handler(
         Ok::<Vec<TimelineInfo>, ApiError>(response_data)
     }
     .instrument(info_span!("timeline_list",
+                tenant_id = %tenant_shard_id.tenant_id,
+                shard_id = %tenant_shard_id.shard_slug()))
+    .await?;
+
+    json_response(StatusCode::OK, response_data)
+}
+
+async fn timeline_and_offloaded_list_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    let include_non_incremental_logical_size: Option<bool> =
+        parse_query_param(&request, "include-non-incremental-logical-size")?;
+    let force_await_initial_logical_size: Option<bool> =
+        parse_query_param(&request, "force-await-initial-logical-size")?;
+    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+
+    let state = get_state(&request);
+    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
+
+    let response_data = async {
+        let tenant = state
+            .tenant_manager
+            .get_attached_tenant_shard(tenant_shard_id)?;
+
+        tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
+
+        let (timelines, offloadeds) = tenant.list_timelines_and_offloaded();
+
+        let mut timeline_infos = Vec::with_capacity(timelines.len());
+        for timeline in timelines {
+            let timeline_info = build_timeline_info(
+                &timeline,
+                include_non_incremental_logical_size.unwrap_or(false),
+                force_await_initial_logical_size.unwrap_or(false),
+                &ctx,
+            )
+            .instrument(info_span!("build_timeline_info", timeline_id = %timeline.timeline_id))
+            .await
+            .context("Failed to build timeline info")
+            .map_err(ApiError::InternalServerError)?;
+
+            timeline_infos.push(timeline_info);
+        }
+        let offloaded_infos = offloadeds
+            .into_iter()
+            .map(|offloaded| build_timeline_offloaded_info(&offloaded))
+            .collect::<Vec<_>>();
+        let res = TimelinesInfoAndOffloaded {
+            timelines: timeline_infos,
+            offloaded: offloaded_infos,
+        };
+        Ok::<TimelinesInfoAndOffloaded, ApiError>(res)
+    }
+    .instrument(info_span!("timeline_and_offloaded_list",
                 tenant_id = %tenant_shard_id.tenant_id,
                 shard_id = %tenant_shard_id.shard_slug()))
     .await?;
@@ -725,8 +801,15 @@ async fn timeline_archival_config_handler(
             .tenant_manager
             .get_attached_tenant_shard(tenant_shard_id)?;
 
+        tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
+
         tenant
-            .apply_timeline_archival_config(timeline_id, request_data.state, ctx)
+            .apply_timeline_archival_config(
+                timeline_id,
+                request_data.state,
+                state.broker_client.clone(),
+                ctx,
+            )
             .await?;
         Ok::<_, ApiError>(())
     }
@@ -1886,6 +1969,49 @@ async fn timeline_compact_handler(
     .await
 }
 
+// Run offload immediately on given timeline.
+async fn timeline_offload_handler(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+
+    let state = get_state(&request);
+
+    async {
+        let tenant = state
+            .tenant_manager
+            .get_attached_tenant_shard(tenant_shard_id)?;
+
+        if tenant.get_offloaded_timeline(timeline_id).is_ok() {
+            return json_response(StatusCode::OK, ());
+        }
+        let timeline =
+            active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
+                .await?;
+
+        if !tenant.timeline_has_no_attached_children(timeline_id) {
+            return Err(ApiError::PreconditionFailed(
+                "timeline has attached children".into(),
+            ));
+        }
+        if !timeline.can_offload() {
+            return Err(ApiError::PreconditionFailed(
+                "Timeline::can_offload() returned false".into(),
+            ));
+        }
+        offload_timeline(&tenant, &timeline)
+            .await
+            .map_err(ApiError::InternalServerError)?;
+
+        json_response(StatusCode::OK, ())
+    }
+    .instrument(info_span!("manual_timeline_offload", tenant_id = %tenant_shard_id.tenant_id, shard_id = %tenant_shard_id.shard_slug(), %timeline_id))
+    .await
+}
+
 // Run checkpoint immediately on given timeline.
 async fn timeline_checkpoint_handler(
     request: Request<Body>,
@@ -2305,7 +2431,7 @@ async fn tenant_scan_remote_handler(
                          %timeline_id))
             .await
             {
-                Ok((index_part, index_generation)) => {
+                Ok((index_part, index_generation, _index_mtime)) => {
                     tracing::info!("Found timeline {tenant_shard_id}/{timeline_id} metadata (gen {index_generation:?}, {} layers, {} consistent LSN)",
                         index_part.layer_metadata.len(), index_part.metadata.disk_consistent_lsn());
                     generation = std::cmp::max(generation, index_generation);
@@ -2446,31 +2572,6 @@ async fn post_tracing_event_handler(
         Level::Debug => tracing::debug!(?body.message),
         Level::Trace => tracing::trace!(?body.message),
     }
-
-    json_response(StatusCode::OK, ())
-}
-
-async fn force_aux_policy_switch_handler(
-    mut r: Request<Body>,
-    _cancel: CancellationToken,
-) -> Result<Response<Body>, ApiError> {
-    check_permission(&r, None)?;
-    let tenant_shard_id: TenantShardId = parse_request_param(&r, "tenant_shard_id")?;
-    let timeline_id: TimelineId = parse_request_param(&r, "timeline_id")?;
-    let policy: AuxFilePolicy = json_request(&mut r).await?;
-
-    let state = get_state(&r);
-
-    let tenant = state
-        .tenant_manager
-        .get_attached_tenant_shard(tenant_shard_id)?;
-    tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
-    let timeline =
-        active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
-            .await?;
-    timeline
-        .do_switch_aux_policy(policy)
-        .map_err(ApiError::InternalServerError)?;
 
     json_response(StatusCode::OK, ())
 }
@@ -3072,6 +3173,9 @@ pub fn make_router(
         .get("/v1/tenant/:tenant_shard_id/timeline", |r| {
             api_handler(r, timeline_list_handler)
         })
+        .get("/v1/tenant/:tenant_shard_id/timeline_and_offloaded", |r| {
+            api_handler(r, timeline_and_offloaded_list_handler)
+        })
         .post("/v1/tenant/:tenant_shard_id/timeline", |r| {
             api_handler(r, timeline_create_handler)
         })
@@ -3108,6 +3212,10 @@ pub fn make_router(
         .put(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/compact",
             |r| api_handler(r, timeline_compact_handler),
+        )
+        .put(
+            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/offload",
+            |r| testing_api_handler("attempt timeline offload", r, timeline_offload_handler),
         )
         .put(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/checkpoint",
@@ -3187,10 +3295,6 @@ pub fn make_router(
         )
         .put("/v1/io_engine", |r| api_handler(r, put_io_engine_handler))
         .put("/v1/io_mode", |r| api_handler(r, put_io_mode_handler))
-        .put(
-            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/force_aux_policy_switch",
-            |r| api_handler(r, force_aux_policy_switch_handler),
-        )
         .get("/v1/utilization", |r| api_handler(r, get_utilization))
         .post(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/ingest_aux_files",

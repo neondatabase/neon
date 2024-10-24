@@ -1,14 +1,12 @@
 use std::marker::PhantomData;
 
-use measured::{
-    label::NoLabels,
-    metric::{
-        gauge::GaugeState, group::Encoding, name::MetricNameEncoder, MetricEncoding,
-        MetricFamilyEncoding, MetricType,
-    },
-    text::TextEncoder,
-    LabelGroup, MetricGroup,
-};
+use measured::label::NoLabels;
+use measured::metric::gauge::GaugeState;
+use measured::metric::group::Encoding;
+use measured::metric::name::MetricNameEncoder;
+use measured::metric::{MetricEncoding, MetricFamilyEncoding, MetricType};
+use measured::text::TextEncoder;
+use measured::{LabelGroup, MetricGroup};
 use tikv_jemalloc_ctl::{config, epoch, epoch_mib, stats, version};
 
 pub struct MetricRecorder {

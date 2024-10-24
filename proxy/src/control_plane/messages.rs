@@ -1,9 +1,9 @@
-use measured::FixedCardinalityLabel;
-use serde::{Deserialize, Serialize};
 use std::fmt::{self, Display};
 
-use crate::auth::IpPattern;
+use measured::FixedCardinalityLabel;
+use serde::{Deserialize, Serialize};
 
+use crate::auth::IpPattern;
 use crate::intern::{BranchIdInt, EndpointIdInt, ProjectIdInt, RoleNameInt};
 use crate::proxy::retry::CouldRetry;
 
@@ -161,6 +161,9 @@ pub(crate) enum Reason {
     /// LockAlreadyTaken indicates that the we attempted to take a lock that was already taken.
     #[serde(rename = "LOCK_ALREADY_TAKEN")]
     LockAlreadyTaken,
+    /// ActiveEndpointsLimitExceeded indicates that the limit of concurrently active endpoints was exceeded.
+    #[serde(rename = "ACTIVE_ENDPOINTS_LIMIT_EXCEEDED")]
+    ActiveEndpointsLimitExceeded,
     #[default]
     #[serde(other)]
     Unknown,
@@ -194,7 +197,8 @@ impl Reason {
             | Reason::ComputeTimeQuotaExceeded
             | Reason::WrittenDataQuotaExceeded
             | Reason::DataTransferQuotaExceeded
-            | Reason::LogicalSizeQuotaExceeded => false,
+            | Reason::LogicalSizeQuotaExceeded
+            | Reason::ActiveEndpointsLimitExceeded => false,
             // transitive error. control plane is currently busy
             // but might be ready soon
             Reason::RunningOperations
@@ -362,8 +366,9 @@ pub struct JwksSettings {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use serde_json::json;
+
+    use super::*;
 
     fn dummy_aux() -> serde_json::Value {
         json!({
