@@ -3737,7 +3737,6 @@ class Endpoint(PgProtocol, LogUtils):
 
         Might also clear LFC.
         """
-        file_cache_size_limit = 0
         if cursor is not None:
             cursor.execute("select clear_buffer_cache()")
             cursor.execute("SHOW neon.file_cache_size_limit")
