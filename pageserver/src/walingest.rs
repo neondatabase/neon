@@ -1932,6 +1932,26 @@ impl WalIngest {
             WAL_INGEST
                 .gap_blocks_zeroed_on_rel_extend
                 .inc_by(gap_blocks_filled);
+
+            if gap_blocks_filled > 0 {
+                use once_cell::sync::Lazy;
+                use std::sync::Mutex;
+                use utils::rate_limit::RateLimit;
+
+                static LOGGED: Lazy<Mutex<RateLimit>> =
+                    Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(30))));
+                let mut rate_limit = LOGGED.lock().unwrap();
+                rate_limit.call(|| {
+                    info!(
+                        lsn=%modification.get_lsn(),
+                        pg_version=%modification.tline.pg_version,
+                        rel=%rel,
+                        "Filled {} gap blocks on rel extend to {} from {}",
+                        gap_blocks_filled,
+                        new_nblocks,
+                        old_nblocks);
+                });
+            }
         }
         Ok(())
     }
