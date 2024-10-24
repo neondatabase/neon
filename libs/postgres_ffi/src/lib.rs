@@ -248,6 +248,7 @@ pub use v14::xlog_utils::encode_logical_message;
 pub use v14::xlog_utils::get_current_timestamp;
 pub use v14::xlog_utils::to_pg_timestamp;
 pub use v14::xlog_utils::try_from_pg_timestamp;
+pub use v14::xlog_utils::WalGenerator;
 pub use v14::xlog_utils::XLogFileName;
 
 pub use v14::bindings::DBState_DB_SHUTDOWNED;

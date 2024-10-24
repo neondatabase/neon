@@ -12,7 +12,7 @@ use crate::seqwait::MonotonicCounter;
 pub const XLOG_BLCKSZ: u32 = 8192;
 
 /// A Postgres LSN (Log Sequence Number), also known as an XLogRecPtr
-#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd, Hash)]
+#[derive(Clone, Copy, Default, Eq, Ord, PartialEq, PartialOrd, Hash)]
 pub struct Lsn(pub u64);
 
 impl Serialize for Lsn {
