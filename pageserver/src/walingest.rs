@@ -107,6 +107,10 @@ struct WarnIngestLag {
     timestamp_invalid_msg_ratelimit: RateLimit,
 }
 
+// These structs are an intermediary representation of the PostgreSQL WAL records.
+// The ones prefixed with `Xl` are lower level, while the ones that are not have
+// all the required context to be acted upon by the pageserver.
+
 enum HeapamRecord {
     ClearVmBits(ClearVmBits),
 }
