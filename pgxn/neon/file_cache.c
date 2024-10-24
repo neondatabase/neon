@@ -688,7 +688,6 @@ lfc_load_pages(void)
 	uint32 entry_offset;
 	uint32 hash;
 	int    shard_no;
-	size_t i;
 	FileCacheStateEntry* fs = lfc_state;
 	size_t max_entries = lfc_state_size;
 
