@@ -30,7 +30,7 @@ use crate::control_plane::provider::ApiLockError;
 use crate::control_plane::{Api, CachedNodeInfo};
 use crate::error::{ErrorKind, ReportableError, UserFacingError};
 use crate::intern::EndpointIdInt;
-use crate::proxy::connect_compute::ConnectMechanism;
+use crate::proxy::connect_compute::{ComputeConnectBackend, ConnectMechanism};
 use crate::proxy::retry::{CouldRetry, ShouldRetryWakeCompute};
 use crate::rate_limiter::EndpointRateLimiter;
 use crate::types::{EndpointId, Host};
@@ -190,40 +190,27 @@ impl PoolingBackend {
         tracing::Span::current().record("conn_id", display(conn_id));
         info!(%conn_id, "pool: opening a new connection '{conn_info}'");
 
-        match &self.auth_backend {
+        let api = match &self.auth_backend {
             ServerlessBackend::ControlPlane(cplane) => {
-                crate::proxy::connect_compute::connect_to_compute(
-                    ctx,
-                    &TokioMechanism {
-                        conn_id,
-                        conn_info,
-                        pool: self.pool.clone(),
-                        locks: &self.config.connect_compute_locks,
-                    },
-                    &cplane.attach_to_credentials(keys),
-                    false, // do not allow self signed compute for http flow
-                    self.config.wake_compute_retry_config,
-                    self.config.connect_to_compute_retry_config,
-                )
-                .await
+                &cplane.attach_to_credentials(keys) as &dyn ComputeConnectBackend
             }
-            ServerlessBackend::Local(local_proxy) => {
-                crate::proxy::connect_compute::connect_to_compute(
-                    ctx,
-                    &TokioMechanism {
-                        conn_id,
-                        conn_info,
-                        pool: self.pool.clone(),
-                        locks: &self.config.connect_compute_locks,
-                    },
-                    &**local_proxy,
-                    false, // do not allow self signed compute for http flow
-                    self.config.wake_compute_retry_config,
-                    self.config.connect_to_compute_retry_config,
-                )
-                .await
-            }
-        }
+            ServerlessBackend::Local(local_proxy) => &**local_proxy as &dyn ComputeConnectBackend,
+        };
+
+        crate::proxy::connect_compute::connect_to_compute(
+            ctx,
+            &TokioMechanism {
+                conn_id,
+                conn_info,
+                pool: self.pool.clone(),
+                locks: &self.config.connect_compute_locks,
+            },
+            api,
+            false, // do not allow self signed compute for http flow
+            self.config.wake_compute_retry_config,
+            self.config.connect_to_compute_retry_config,
+        )
+        .await
     }
 
     // Wake up the destination if needed

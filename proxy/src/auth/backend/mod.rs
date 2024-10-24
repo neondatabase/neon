@@ -389,7 +389,7 @@ pub struct ControlPlaneComputeBackend<'a> {
 }
 
 #[async_trait::async_trait]
-impl ComputeConnectBackend for ControlPlaneComputeBackend<'_> {
+impl ComputeConnectBackend for ControlPlaneComputeBackend<'static> {
     async fn wake_compute(
         &self,
         ctx: &RequestMonitoring,
