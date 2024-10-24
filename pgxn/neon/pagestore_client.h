@@ -276,6 +276,8 @@ extern int lfc_cache_containsv(NRelFileInfo rinfo, ForkNumber forkNum,
 							   BlockNumber blkno, int nblocks, bits8 *bitmap);
 extern void lfc_evict(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno);
 extern void lfc_init(void);
+extern void lfc_save_state(void);
+extern void lfc_load_pages(void);
 
 static inline bool
 lfc_read(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
