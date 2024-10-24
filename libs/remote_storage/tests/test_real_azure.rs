@@ -17,7 +17,9 @@ mod common;
 #[path = "common/tests.rs"]
 mod tests_azure;
 
-use common::{cleanup, ensure_logging_ready, upload_remote_data, upload_simple_remote_data, RemoteBlobInfo};
+use common::{
+    cleanup, ensure_logging_ready, upload_remote_data, upload_simple_remote_data, RemoteBlobInfo,
+};
 
 const ENABLE_REAL_AZURE_REMOTE_STORAGE_ENV_VAR_NAME: &str = "ENABLE_REAL_AZURE_REMOTE_STORAGE";
 

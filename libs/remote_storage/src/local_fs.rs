@@ -711,7 +711,7 @@ mod fs_tests {
         Ok(())
     }
 
-    fn create_storage() -> anyhow::Result<(LocalFs, CancellationToken)> {
+    pub(crate) fn create_storage() -> anyhow::Result<(LocalFs, CancellationToken)> {
         let storage_root = tempdir()?.path().to_path_buf();
         LocalFs::new(storage_root, Duration::from_secs(120)).map(|s| (s, CancellationToken::new()))
     }

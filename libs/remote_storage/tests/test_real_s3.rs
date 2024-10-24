@@ -26,7 +26,9 @@ mod common;
 #[path = "common/tests.rs"]
 mod tests_s3;
 
-use common::{cleanup, ensure_logging_ready, upload_remote_data, upload_simple_remote_data, RemoteBlobInfo};
+use common::{
+    cleanup, ensure_logging_ready, upload_remote_data, upload_simple_remote_data, RemoteBlobInfo,
+};
 use utils::backoff;
 
 const ENABLE_REAL_S3_REMOTE_STORAGE_ENV_VAR_NAME: &str = "ENABLE_REAL_S3_REMOTE_STORAGE";
