@@ -34,6 +34,7 @@ use crate::{scram, stream};
 
 /// The [crate::serverless] module can authenticate either using control-plane
 /// to get authentication state, or by using JWKs stored in the filesystem.
+#[derive(Clone, Copy)]
 pub enum ServerlessBackend<'a> {
     /// Cloud API (V2).
     ControlPlane(&'a ControlPlaneBackend),

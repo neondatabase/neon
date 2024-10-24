@@ -15,9 +15,9 @@ use super::conn_pool::poll_client;
 use super::conn_pool_lib::{Client, ConnInfo, GlobalConnPool};
 use super::http_conn_pool::{self, poll_http2_client, Send};
 use super::local_conn_pool::{self, LocalClient, LocalConnPool, EXT_NAME, EXT_SCHEMA, EXT_VERSION};
-use crate::auth::backend::local::StaticAuthRules;
+use crate::auth::backend::local::{LocalBackend, StaticAuthRules};
 use crate::auth::backend::{ComputeCredentials, ComputeUserInfo};
-use crate::auth::{self, check_peer_addr_is_in_list, AuthError, ServerlessBackend};
+use crate::auth::{check_peer_addr_is_in_list, AuthError, ServerlessBackend};
 use crate::compute;
 use crate::compute_ctl::{
     ComputeCtlError, ExtensionInstallRequest, Privilege, SetRoleGrantsRequest,
@@ -26,7 +26,7 @@ use crate::config::ProxyConfig;
 use crate::context::RequestMonitoring;
 use crate::control_plane::errors::{GetAuthInfoError, WakeComputeError};
 use crate::control_plane::locks::ApiLocks;
-use crate::control_plane::provider::ApiLockError;
+use crate::control_plane::provider::{ApiLockError, ControlPlaneBackend};
 use crate::control_plane::{Api, CachedNodeInfo};
 use crate::error::{ErrorKind, ReportableError, UserFacingError};
 use crate::intern::EndpointIdInt;
@@ -41,7 +41,6 @@ pub(crate) struct PoolingBackend {
     pub(crate) pool: Arc<GlobalConnPool<tokio_postgres::Client>>,
 
     pub(crate) config: &'static ProxyConfig,
-    pub(crate) auth_backend: ServerlessBackend<'static>,
     pub(crate) endpoint_rate_limiter: Arc<EndpointRateLimiter>,
 }
 
@@ -49,19 +48,13 @@ impl PoolingBackend {
     pub(crate) async fn authenticate_with_password(
         &self,
         ctx: &RequestMonitoring,
+        auth_backend: &ControlPlaneBackend,
         user_info: &ComputeUserInfo,
         password: &[u8],
     ) -> Result<ComputeCredentials, AuthError> {
-        let cplane = match self.auth_backend {
-            ServerlessBackend::ControlPlane(cplane) => cplane,
-            ServerlessBackend::Local(_local) => {
-                return Err(AuthError::bad_auth_method(
-                    "password authentication not supported by local_proxy",
-                ))
-            }
-        };
-
-        let (allowed_ips, maybe_secret) = cplane.get_allowed_ips_and_secret(ctx, user_info).await?;
+        let (allowed_ips, maybe_secret) = auth_backend
+            .get_allowed_ips_and_secret(ctx, user_info)
+            .await?;
         if self.config.authentication_config.ip_allowlist_check_enabled
             && !check_peer_addr_is_in_list(&ctx.peer_addr(), &allowed_ips)
         {
@@ -75,7 +68,7 @@ impl PoolingBackend {
         }
         let cached_secret = match maybe_secret {
             Some(secret) => secret,
-            None => cplane.get_role_secret(ctx, user_info).await?,
+            None => auth_backend.get_role_secret(ctx, user_info).await?,
         };
 
         let secret = match cached_secret.value.clone() {
@@ -118,10 +111,11 @@ impl PoolingBackend {
     pub(crate) async fn authenticate_with_jwt(
         &self,
         ctx: &RequestMonitoring,
+        auth_backend: ServerlessBackend<'static>,
         user_info: &ComputeUserInfo,
         jwt: String,
     ) -> Result<ComputeCredentials, AuthError> {
-        match &self.auth_backend {
+        match auth_backend {
             ServerlessBackend::ControlPlane(console) => {
                 self.config
                     .authentication_config
@@ -130,7 +124,7 @@ impl PoolingBackend {
                         ctx,
                         user_info.endpoint.clone(),
                         &user_info.user,
-                        &**console,
+                        console,
                         &jwt,
                     )
                     .await
@@ -171,6 +165,7 @@ impl PoolingBackend {
     pub(crate) async fn connect_to_compute(
         &self,
         ctx: &RequestMonitoring,
+        auth_backend: ServerlessBackend<'static>,
         conn_info: ConnInfo,
         keys: ComputeCredentials,
         force_new: bool,
@@ -190,11 +185,11 @@ impl PoolingBackend {
         tracing::Span::current().record("conn_id", display(conn_id));
         info!(%conn_id, "pool: opening a new connection '{conn_info}'");
 
-        let api = match &self.auth_backend {
+        let api = match auth_backend {
             ServerlessBackend::ControlPlane(cplane) => {
                 &cplane.attach_to_credentials(keys) as &dyn ComputeConnectBackend
             }
-            ServerlessBackend::Local(local_proxy) => &**local_proxy as &dyn ComputeConnectBackend,
+            ServerlessBackend::Local(local_proxy) => local_proxy as &dyn ComputeConnectBackend,
         };
 
         crate::proxy::connect_compute::connect_to_compute(
@@ -218,15 +213,9 @@ impl PoolingBackend {
     pub(crate) async fn connect_to_local_proxy(
         &self,
         ctx: &RequestMonitoring,
+        auth_backend: &'static ControlPlaneBackend,
         conn_info: ConnInfo,
     ) -> Result<http_conn_pool::Client<Send>, HttpConnError> {
-        let cplane = match &self.auth_backend {
-            ServerlessBackend::Local(_) => {
-                panic!("connect to local_proxy should not be called if we are already local_proxy")
-            }
-            ServerlessBackend::ControlPlane(cplane) => cplane,
-        };
-
         info!("pool: looking for an existing connection");
         if let Some(client) = self.http_conn_pool.get(ctx, &conn_info) {
             return Ok(client);
@@ -236,7 +225,7 @@ impl PoolingBackend {
         tracing::Span::current().record("conn_id", display(conn_id));
         info!(%conn_id, "pool: opening a new connection '{conn_info}'");
 
-        let backend = cplane.attach_to_credentials(ComputeCredentials {
+        let backend = auth_backend.attach_to_credentials(ComputeCredentials {
             info: ComputeUserInfo {
                 user: conn_info.user_info.user.clone(),
                 endpoint: EndpointId::from(format!("{}-local-proxy", conn_info.user_info.endpoint)),
@@ -271,26 +260,20 @@ impl PoolingBackend {
     pub(crate) async fn connect_to_local_postgres(
         &self,
         ctx: &RequestMonitoring,
+        auth_backend: &LocalBackend,
         conn_info: ConnInfo,
     ) -> Result<LocalClient<tokio_postgres::Client>, HttpConnError> {
         if let Some(client) = self.local_pool.get(ctx, &conn_info)? {
             return Ok(client);
         }
 
-        let local_backend = match &self.auth_backend {
-            auth::ServerlessBackend::ControlPlane(_) => {
-                unreachable!("only local_proxy can connect to local postgres")
-            }
-            auth::ServerlessBackend::Local(local) => local,
-        };
-
         if !self.local_pool.initialized(&conn_info) {
             // only install and grant usage one at a time.
-            let _permit = local_backend.initialize.acquire().await.unwrap();
+            let _permit = auth_backend.initialize.acquire().await.unwrap();
 
             // check again for race
             if !self.local_pool.initialized(&conn_info) {
-                local_backend
+                auth_backend
                     .compute_ctl
                     .install_extension(&ExtensionInstallRequest {
                         extension: EXT_NAME,
@@ -299,7 +282,7 @@ impl PoolingBackend {
                     })
                     .await?;
 
-                local_backend
+                auth_backend
                     .compute_ctl
                     .grant_role(&SetRoleGrantsRequest {
                         schema: EXT_SCHEMA,
@@ -317,7 +300,7 @@ impl PoolingBackend {
         tracing::Span::current().record("conn_id", display(conn_id));
         info!(%conn_id, "local_pool: opening a new connection '{conn_info}'");
 
-        let mut node_info = local_backend.node_info.clone();
+        let mut node_info = auth_backend.node_info.clone();
 
         let (key, jwk) = create_random_jwk();
 
