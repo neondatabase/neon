@@ -20,7 +20,7 @@ def test_lfc_prewarm(neon_simple_env: NeonEnv):
     )
     conn = endpoint.connect()
     cur = conn.cursor()
-    cur.execute("create extension neon")
+    cur.execute("create extension neon version '1.6'")
     cur.execute("create table t(pk integer primary key, payload text default repeat('?', 128))")
     cur.execute(f"insert into t (pk) values (generate_series(1,{n_records}))")
 
@@ -35,10 +35,18 @@ def test_lfc_prewarm(neon_simple_env: NeonEnv):
         cur.execute("select lfc_value from neon_lfc_stats where lfc_key='file_cache_used_pages'")
         lfc_used_pages = cur.fetchall()[0][0]
         log.info(f"Used LFC size: {lfc_used_pages}")
-        if lfc_used_pages > 10000:
-            break
+        cur.execute("select * from get_prewarm_info()")
+        prewarm_info = cur.fetchall()[0]
+        log.info(f"Prewrm info: {prewarm_info}")
+        if prewarm_info[0] > 0:
+            log.info(f"Prewarm progress: {prewarm_info[1]*100//prewarm_info[0]}%")
+            if prewarm_info[0] == prewarm_info[1]:
+                break
 
     assert lfc_used_pages > 10000
+    assert prewarm_info[0] > 0 and prewarm_info[0] == prewarm_info[1]:
 
     cur.execute("select sum(pk) from t")
     assert cur.fetchall()[0][0] == n_records * (n_records + 1) / 2
+
+    assert prewarm_info[1] > 0

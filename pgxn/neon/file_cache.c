@@ -43,6 +43,10 @@
 #include "utils/dynahash.h"
 #include "utils/guc.h"
 
+#if PG_VERSION_NUM >= 150000
+#include "access/xlogrecovery.h"
+#endif
+
 #include "hll.h"
 #include "bitmap.h"
 #include "neon.h"
@@ -123,6 +127,10 @@ typedef struct FileCacheControl
 	uint64		writes;			/* number of writes issued */
 	uint64		time_read;		/* time spent reading (us) */
 	uint64		time_write;		/* time spent writing (us) */
+	uint32		prewarm_total_chunks;
+	uint32		prewarm_curr_chunk;
+	uint32		prewarmed_pages;
+	uint32		skipped_pages;
 	dlist_head	lru;			/* double linked list for LRU replacement
 								 * algorithm */
 	dlist_head  holes;          /* double linked list of punched holes */
@@ -313,14 +321,7 @@ lfc_shmem_startup(void)
 								 n_chunks + 1, n_chunks + 1,
 								 &info,
 								 HASH_ELEM | HASH_BLOBS);
-		lfc_ctl->generation = 0;
-		lfc_ctl->size = 0;
-		lfc_ctl->used = 0;
-		lfc_ctl->hits = 0;
-		lfc_ctl->misses = 0;
-		lfc_ctl->writes = 0;
-		lfc_ctl->time_read = 0;
-		lfc_ctl->time_write = 0;
+		memset(lfc_ctl, 0, sizeof *lfc_ctl);
 		dlist_init(&lfc_ctl->lru);
 		dlist_init(&lfc_ctl->holes);
 
@@ -533,19 +534,8 @@ lfc_init(void)
 		BackgroundWorker bgw;
 		memset(&bgw, 0, sizeof(bgw));
 		bgw.bgw_flags = BGWORKER_SHMEM_ACCESS;
-		/*
-		 * Prewarming LFC at replica is problematic and doubtful.
-		 * 1. It has not so much sense because replica is skipping all WAL records which target pages is not present
-		 *    in shared buffers and invalidate LFC in this case. And as far as size of shared buffers is very small,
-		 *    there is really no sense to try to prewarm LFC which will be invalidated in any case.
-		 * 2. Unlike primary,it is not possible to retrieve most recent version of the page. We should follow current apply LSN.
-		 *    It significantly complicates prewarming.
-		 *
-		 *  BgWorkerStart_RecoveryFinished means we won't ever get started on a hot_standby see
-		 * https://www.postgresql.org/docs/10/static/bgworker.html as it's not
-		 * documented in bgworker.c.
-		 */
-		bgw.bgw_start_time = BgWorkerStart_RecoveryFinished;
+
+		bgw.bgw_start_time = BgWorkerStart_ConsistentState;
 		snprintf(bgw.bgw_library_name, BGW_MAXLEN, "neon");
 		snprintf(bgw.bgw_function_name, BGW_MAXLEN, "LfcPrewarmMain");
 		snprintf(bgw.bgw_name, BGW_MAXLEN, "LFC prewarm");
@@ -635,6 +625,7 @@ lfc_init_prewarm(void)
 
 	/* Do not try to load more than fits in LFC */
 	max_entries = Min(rc / sizeof(FileCacheStateEntry), lfc_ctl->limit);
+	lfc_ctl->prewarm_total_chunks = max_entries;
 	elog(LOG, "LFC: read state with %lu entries", (long)(rc / sizeof(FileCacheStateEntry)));
 
 	for (i = 0; i < max_entries; i++)
@@ -748,6 +739,7 @@ lfc_load_pages(void)
 
 			shard_no = get_shard_number(&fs[chunk_no].key);
 			resp = page_server->receive(shard_no);
+			lfc_ctl->prewarm_curr_chunk = chunk_no;
 
 			if (resp->tag != T_NeonGetPageResponse)
 			{
@@ -792,6 +784,11 @@ lfc_load_pages(void)
 						{
 							lfc_ctl->used_pages += 1 - ((entry->bitmap[offs_in_chunk >> 5] >> (offs_in_chunk & 31)) & 1);
 							entry->bitmap[offs_in_chunk >> 5] |= 1 << (offs_in_chunk & 31);
+							lfc_ctl->prewarmed_pages += 1;
+						}
+						else
+						{
+							lfc_ctl->skipped_pages += 1;
 						}
 						Assert(entry->prewarm_started);
 						entry->prewarm_started = false;
@@ -803,6 +800,7 @@ lfc_load_pages(void)
 			else
 			{
 				Assert(!entry || !entry->prewarm_started);
+				lfc_ctl->skipped_pages += 1;
 				LWLockRelease(lfc_lock);
 			}
 
@@ -812,6 +810,7 @@ lfc_load_pages(void)
 			}
 		}
 	}
+	lfc_ctl->prewarm_curr_chunk = max_entries;
 	free(fs);
 	elog(LOG, "LFC: complete prewarming: loaded %ld pages", (long)n_received);
 }
@@ -1719,11 +1718,40 @@ approximate_working_set_size(PG_FUNCTION_ARGS)
 
 PG_FUNCTION_INFO_V1(save_local_cache_state);
 
-
 Datum
 save_local_cache_state(PG_FUNCTION_ARGS)
 {
 	lfc_save_state();
 	PG_RETURN_NULL();
+}
+
+PG_FUNCTION_INFO_V1(get_prewarm_info);
+
+Datum
+get_prewarm_info(PG_FUNCTION_ARGS)
+{
+	Datum		values[4];
+	bool		nulls[4];
+	TupleDesc	tupdesc;
+
+	if (lfc_size_limit != 0)
+		PG_RETURN_NULL();
+
+	tupdesc = CreateTemplateTupleDesc(4);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 1, "total_chunks", INT4OID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 2, "curr_chunk", INT4OID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 3, "prewarmed_pages", INT4OID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 4, "skipped_pages", INT4OID, -1, 0);
+	tupdesc = BlessTupleDesc(tupdesc);
+
+	MemSet(nulls, 0, sizeof(nulls));
+	LWLockAcquire(lfc_lock, LW_SHARED);
+	values[0] = Int32GetDatum(lfc_ctl->prewarm_total_chunks);
+	values[1] = Int32GetDatum(lfc_ctl->prewarm_curr_chunk);
+	values[2] = Int32GetDatum(lfc_ctl->prewarmed_pages);
+	values[3] = Int32GetDatum(lfc_ctl->skipped_pages);
+	LWLockRelease(lfc_lock);
+
+	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
 }
 
