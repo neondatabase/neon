@@ -13,9 +13,11 @@ use tokio_util::sync::CancellationToken;
 use utils::{backoff, pausable_failpoint};
 
 use super::index::IndexPart;
+use super::manifest::TenantManifest;
 use super::Generation;
 use crate::tenant::remote_timeline_client::{
     remote_index_path, remote_initdb_archive_path, remote_initdb_preserved_archive_path,
+    remote_tenant_manifest_path,
 };
 use remote_storage::{GenericRemoteStorage, RemotePath, TimeTravelError};
 use utils::id::{TenantId, TimelineId};
@@ -39,7 +41,7 @@ pub(crate) async fn upload_index_part<'a>(
     pausable_failpoint!("before-upload-index-pausable");
 
     // FIXME: this error comes too late
-    let serialized = index_part.to_s3_bytes()?;
+    let serialized = index_part.to_json_bytes()?;
     let serialized = Bytes::from(serialized);
 
     let index_part_size = serialized.len();
@@ -54,6 +56,37 @@ pub(crate) async fn upload_index_part<'a>(
         )
         .await
         .with_context(|| format!("upload index part for '{tenant_shard_id} / {timeline_id}'"))
+}
+/// Serializes and uploads the given tenant manifest data to the remote storage.
+pub(crate) async fn upload_tenant_manifest(
+    storage: &GenericRemoteStorage,
+    tenant_shard_id: &TenantShardId,
+    generation: Generation,
+    tenant_manifest: &TenantManifest,
+    cancel: &CancellationToken,
+) -> anyhow::Result<()> {
+    tracing::trace!("uploading new tenant manifest");
+
+    fail_point!("before-upload-manifest", |_| {
+        bail!("failpoint before-upload-manifest")
+    });
+    pausable_failpoint!("before-upload-manifest-pausable");
+
+    let serialized = tenant_manifest.to_json_bytes()?;
+    let serialized = Bytes::from(serialized);
+
+    let tenant_manifest_site = serialized.len();
+
+    let remote_path = remote_tenant_manifest_path(tenant_shard_id, generation);
+    storage
+        .upload_storage_object(
+            futures::stream::once(futures::future::ready(Ok(serialized))),
+            tenant_manifest_site,
+            &remote_path,
+            cancel,
+        )
+        .await
+        .with_context(|| format!("upload tenant manifest for '{tenant_shard_id}'"))
 }
 
 /// Attempts to upload given layer files.

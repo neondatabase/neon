@@ -17,7 +17,7 @@ use crate::metrics::{
 };
 use crate::proxy::retry::{retry_after, should_retry, CouldRetry};
 use crate::proxy::wake_compute::wake_compute;
-use crate::Host;
+use crate::types::Host;
 
 const CONNECT_TIMEOUT: time::Duration = time::Duration::from_secs(2);
 

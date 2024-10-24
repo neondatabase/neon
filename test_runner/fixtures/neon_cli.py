@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import abc
 import json
 import os
 import re
@@ -30,7 +29,8 @@ if TYPE_CHECKING:
     T = TypeVar("T")
 
 
-class AbstractNeonCli(abc.ABC):
+# Used to be an ABC. abc.ABC removed due to linter without name change.
+class AbstractNeonCli:
     """
     A typed wrapper around an arbitrary Neon CLI tool.
     Supports a way to run arbitrary command directly via CLI.

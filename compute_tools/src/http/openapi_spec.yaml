@@ -127,6 +127,41 @@ paths:
               schema:
                 $ref: "#/components/schemas/GenericError"
 
+  /grants:
+    post:
+      tags:
+        - Grants
+      summary: Apply grants to the database.
+      description: ""
+      operationId: setRoleGrants
+      requestBody:
+        description: Grants request.
+        required: true
+        content:
+          application/json:
+            schema:
+                $ref: "#/components/schemas/SetRoleGrantsRequest"
+      responses:
+        200:
+          description: Grants applied.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SetRoleGrantsResponse"
+        412:
+          description: |
+            Compute is not in the right state for processing the request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericError"
+        500:
+          description: Error occurred during grants application.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericError"
+
   /check_writability:
     post:
       tags:
@@ -143,6 +178,41 @@ paths:
                 type: string
                 description: Error text or 'true' if check passed.
                 example: "true"
+
+  /extensions:
+    post:
+      tags:
+        - Extensions
+      summary: Install extension if possible.
+      description: ""
+      operationId: installExtension
+      requestBody:
+        description: Extension name and database to install it to.
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExtensionInstallRequest"
+      responses:
+        200:
+          description: Result from extension installation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExtensionInstallResult"
+        412:
+          description: |
+            Compute is in the wrong state for processing the request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericError"
+        500:
+          description: Error during extension installation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericError"
 
   /configure:
     post:
@@ -369,7 +439,7 @@ components:
             moment, when spec was received.
           example: "2022-10-12T07:20:50.52Z"
         status:
-          $ref: '#/components/schemas/ComputeStatus'
+          $ref: "#/components/schemas/ComputeStatus"
         last_active:
           type: string
           description: |
@@ -409,6 +479,38 @@ components:
         - configuration
       example: running
 
+    ExtensionInstallRequest:
+      type: object
+      required:
+        - extension
+        - database
+        - version
+      properties:
+        extension:
+          type: string
+          description: Extension name.
+          example: "pg_session_jwt"
+        version:
+          type: string
+          description: Version of the extension.
+          example: "1.0.0"
+        database:
+          type: string
+          description: Database name.
+          example: "neondb"
+
+    ExtensionInstallResult:
+      type: object
+      properties:
+        extension:
+          description: Name of the extension.
+          type: string
+          example: "pg_session_jwt"
+        version:
+          description: Version of the extension.
+          type: string
+          example: "1.0.0"
+
     InstalledExtensions:
       type: object
       properties:
@@ -426,6 +528,60 @@ components:
                   type: string
               n_databases:
                 type: integer
+
+    SetRoleGrantsRequest:
+      type: object
+      required:
+        - database
+        - schema
+        - privileges
+        - role
+      properties:
+        database:
+          type: string
+          description: Database name.
+          example: "neondb"
+        schema:
+          type: string
+          description: Schema name.
+          example: "public"
+        privileges:
+          type: array
+          items:
+            type: string
+          description: List of privileges to set.
+          example: ["SELECT", "INSERT"]
+        role:
+          type: string
+          description: Role name.
+          example: "neon"
+
+    SetRoleGrantsResponse:
+      type: object
+      required:
+        - database
+        - schema
+        - privileges
+        - role
+      properties:
+        database:
+          type: string
+          description: Database name.
+          example: "neondb"
+        schema:
+          type: string
+          description: Schema name.
+          example: "public"
+        privileges:
+          type: array
+          items:
+            type: string
+          description: List of privileges set.
+          example: ["SELECT", "INSERT"]
+        role:
+          type: string
+          description: Role name.
+          example: "neon"
 
     #
     # Errors

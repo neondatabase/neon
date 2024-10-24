@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use http::StatusCode;
 use retry::{retry_after, ShouldRetryWakeCompute};
 use rstest::rstest;
+use rustls::crypto::aws_lc_rs;
 use rustls::pki_types;
 use tokio_postgres::config::SslMode;
 use tokio_postgres::tls::{MakeTlsConnect, NoTls};
@@ -27,7 +28,8 @@ use crate::control_plane::provider::{
 };
 use crate::control_plane::{self, CachedNodeInfo, NodeInfo};
 use crate::error::ErrorKind;
-use crate::{sasl, scram, BranchId, EndpointId, ProjectId};
+use crate::types::{BranchId, EndpointId, ProjectId};
+use crate::{sasl, scram};
 
 /// Generate a set of TLS certificates: CA + server.
 fn generate_certs(
@@ -38,25 +40,27 @@ fn generate_certs(
     pki_types::CertificateDer<'static>,
     pki_types::PrivateKeyDer<'static>,
 )> {
-    let ca = rcgen::Certificate::from_params({
+    let ca_key = rcgen::KeyPair::generate()?;
+    let ca = {
         let mut params = rcgen::CertificateParams::default();
         params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
-        params
-    })?;
+        params.self_signed(&ca_key)?
+    };
 
-    let cert = rcgen::Certificate::from_params({
-        let mut params = rcgen::CertificateParams::new(vec![hostname.into()]);
+    let cert_key = rcgen::KeyPair::generate()?;
+    let cert = {
+        let mut params = rcgen::CertificateParams::new(vec![hostname.into()])?;
         params.distinguished_name = rcgen::DistinguishedName::new();
         params
             .distinguished_name
             .push(rcgen::DnType::CommonName, common_name);
-        params
-    })?;
+        params.signed_by(&cert_key, &ca, &ca_key)?
+    };
 
     Ok((
-        pki_types::CertificateDer::from(ca.serialize_der()?),
-        pki_types::CertificateDer::from(cert.serialize_der_with_signer(&ca)?),
-        pki_types::PrivateKeyDer::Pkcs8(cert.serialize_private_key_der().into()),
+        ca.der().clone(),
+        cert.der().clone(),
+        pki_types::PrivateKeyDer::Pkcs8(cert_key.serialize_der().into()),
     ))
 }
 
@@ -70,11 +74,11 @@ impl ClientConfig<'_> {
         self,
     ) -> anyhow::Result<
         impl tokio_postgres::tls::TlsConnect<
-            S,
-            Error = impl std::fmt::Debug,
-            Future = impl Send,
-            Stream = RustlsStream<S>,
-        >,
+                S,
+                Error = impl std::fmt::Debug + use<S>,
+                Future = impl Send + use<S>,
+                Stream = RustlsStream<S>,
+            > + use<S>,
     > {
         let mut mk = MakeRustlsConnect::new(self.config);
         let tls = MakeTlsConnect::<S>::make_tls_connect(&mut mk, self.hostname)?;
@@ -90,10 +94,13 @@ fn generate_tls_config<'a>(
     let (ca, cert, key) = generate_certs(hostname, common_name)?;
 
     let tls_config = {
-        let config = rustls::ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(vec![cert.clone()], key.clone_key())?
-            .into();
+        let config =
+            rustls::ServerConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
+                .with_safe_default_protocol_versions()
+                .context("aws_lc_rs should support the default protocol versions")?
+                .with_no_client_auth()
+                .with_single_cert(vec![cert.clone()], key.clone_key())?
+                .into();
 
         let mut cert_resolver = CertResolver::new();
         cert_resolver.add_cert(key, vec![cert], true)?;
@@ -108,13 +115,16 @@ fn generate_tls_config<'a>(
     };
 
     let client_config = {
-        let config = rustls::ClientConfig::builder()
-            .with_root_certificates({
-                let mut store = rustls::RootCertStore::empty();
-                store.add(ca)?;
-                store
-            })
-            .with_no_client_auth();
+        let config =
+            rustls::ClientConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
+                .with_safe_default_protocol_versions()
+                .context("aws_lc_rs should support the default protocol versions")?
+                .with_root_certificates({
+                    let mut store = rustls::RootCertStore::empty();
+                    store.add(ca)?;
+                    store
+                })
+                .with_no_client_auth();
 
         ClientConfig { config, hostname }
     };

@@ -390,9 +390,9 @@ class NeonEnvBuilder:
 
         self.pageserver_virtual_file_io_engine: Optional[str] = pageserver_virtual_file_io_engine
 
-        self.pageserver_default_tenant_config_compaction_algorithm: Optional[
-            dict[str, Any]
-        ] = pageserver_default_tenant_config_compaction_algorithm
+        self.pageserver_default_tenant_config_compaction_algorithm: Optional[dict[str, Any]] = (
+            pageserver_default_tenant_config_compaction_algorithm
+        )
         if self.pageserver_default_tenant_config_compaction_algorithm is not None:
             log.debug(
                 f"Overriding pageserver default compaction algorithm to {self.pageserver_default_tenant_config_compaction_algorithm}"
@@ -1066,9 +1066,9 @@ class NeonEnv:
                 ps_cfg["virtual_file_io_engine"] = self.pageserver_virtual_file_io_engine
             if config.pageserver_default_tenant_config_compaction_algorithm is not None:
                 tenant_config = ps_cfg.setdefault("tenant_config", {})
-                tenant_config[
-                    "compaction_algorithm"
-                ] = config.pageserver_default_tenant_config_compaction_algorithm
+                tenant_config["compaction_algorithm"] = (
+                    config.pageserver_default_tenant_config_compaction_algorithm
+                )
 
             if self.pageserver_remote_storage is not None:
                 ps_cfg["remote_storage"] = remote_storage_to_toml_dict(
@@ -1112,9 +1112,9 @@ class NeonEnv:
             if config.auth_enabled:
                 sk_cfg["auth_enabled"] = True
             if self.safekeepers_remote_storage is not None:
-                sk_cfg[
-                    "remote_storage"
-                ] = self.safekeepers_remote_storage.to_toml_inline_table().strip()
+                sk_cfg["remote_storage"] = (
+                    self.safekeepers_remote_storage.to_toml_inline_table().strip()
+                )
             self.safekeepers.append(
                 Safekeeper(env=self, id=id, port=port, extra_opts=config.safekeeper_extra_opts)
             )
@@ -3244,10 +3244,13 @@ class NeonProxy(PgProtocol):
     # two seconds. Raises subprocess.TimeoutExpired if the proxy does not exit in time.
     def wait_for_exit(self, timeout=2):
         if self._popen:
-            self._popen.wait(timeout=2)
+            self._popen.wait(timeout=timeout)
 
     @backoff.on_exception(backoff.expo, requests.exceptions.RequestException, max_time=10)
     def _wait_until_ready(self):
+        assert (
+            self._popen and self._popen.poll() is None
+        ), "Proxy exited unexpectedly. Check test log."
         requests.get(f"http://{self.host}:{self.http_port}/v1/status")
 
     def http_query(self, query, args, **kwargs):

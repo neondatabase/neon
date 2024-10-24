@@ -29,9 +29,9 @@ use pageserver_api::{
     },
     keyspace::{KeySpaceAccum, KeySpaceRandomAccum, SparseKeyPartitioning},
     models::{
-        AtomicAuxFilePolicy, AuxFilePolicy, CompactionAlgorithm, CompactionAlgorithmSettings,
-        DownloadRemoteLayersTaskInfo, DownloadRemoteLayersTaskSpawnRequest, EvictionPolicy,
-        InMemoryLayerInfo, LayerMapInfo, LsnLease, TimelineState,
+        CompactionAlgorithm, CompactionAlgorithmSettings, DownloadRemoteLayersTaskInfo,
+        DownloadRemoteLayersTaskSpawnRequest, EvictionPolicy, InMemoryLayerInfo, LayerMapInfo,
+        LsnLease, TimelineState,
     },
     reltag::BlockNumber,
     shard::{ShardIdentity, ShardNumber, TenantShardId},
@@ -99,12 +99,12 @@ use crate::{
 use crate::{
     metrics::ScanLatencyOngoingRecording, tenant::timeline::logical_size::CurrentLogicalSize,
 };
-use crate::{pgdatadir_mapping::LsnForTimestamp, tenant::tasks::BackgroundLoopKind};
-use crate::{pgdatadir_mapping::MAX_AUX_FILE_V2_DELTAS, tenant::storage_layer::PersistentLayerKey};
 use crate::{
-    pgdatadir_mapping::{AuxFilesDirectory, DirectoryKind},
+    pgdatadir_mapping::DirectoryKind,
     virtual_file::{MaybeFatalIo, VirtualFile},
 };
+use crate::{pgdatadir_mapping::LsnForTimestamp, tenant::tasks::BackgroundLoopKind};
+use crate::{pgdatadir_mapping::MAX_AUX_FILE_V2_DELTAS, tenant::storage_layer::PersistentLayerKey};
 use pageserver_api::config::tenant_conf_defaults::DEFAULT_PITR_INTERVAL;
 
 use crate::config::PageServerConf;
@@ -205,11 +205,6 @@ pub struct TimelineResources {
     pub timeline_get_throttle:
         Arc<crate::tenant::throttle::Throttle<crate::metrics::tenant_throttling::TimelineGet>>,
     pub l0_flush_global_state: l0_flush::L0FlushGlobalState,
-}
-
-pub(crate) struct AuxFilesState {
-    pub(crate) dir: Option<AuxFilesDirectory>,
-    pub(crate) n_deltas: usize,
 }
 
 /// The relation size cache caches relation sizes at the end of the timeline. It speeds up WAL
@@ -377,7 +372,7 @@ pub struct Timeline {
 
     /// Prevent two tasks from deleting the timeline at the same time. If held, the
     /// timeline is being deleted. If 'true', the timeline has already been deleted.
-    pub delete_progress: Arc<tokio::sync::Mutex<DeleteTimelineFlow>>,
+    pub delete_progress: TimelineDeleteProgress,
 
     eviction_task_timeline_state: tokio::sync::Mutex<EvictionTaskTimelineState>,
 
@@ -414,14 +409,8 @@ pub struct Timeline {
     timeline_get_throttle:
         Arc<crate::tenant::throttle::Throttle<crate::metrics::tenant_throttling::TimelineGet>>,
 
-    /// Keep aux directory cache to avoid it's reconstruction on each update
-    pub(crate) aux_files: tokio::sync::Mutex<AuxFilesState>,
-
     /// Size estimator for aux file v2
     pub(crate) aux_file_size_estimator: AuxFileSizeEstimator,
-
-    /// Indicate whether aux file v2 storage is enabled.
-    pub(crate) last_aux_file_policy: AtomicAuxFilePolicy,
 
     /// Some test cases directly place keys into the timeline without actually modifying the directory
     /// keys (i.e., DB_DIR). The test cases creating such keys will put the keyspaces here, so that
@@ -437,8 +426,11 @@ pub struct Timeline {
 
     pub(crate) attach_wal_lag_cooldown: Arc<OnceLock<WalLagCooldown>>,
 
+    /// Cf. [`crate::tenant::CreateTimelineIdempotency`].
     pub(crate) create_idempotency: crate::tenant::CreateTimelineIdempotency,
 }
+
+pub type TimelineDeleteProgress = Arc<tokio::sync::Mutex<DeleteTimelineFlow>>;
 
 pub struct WalReceiverInfo {
     pub wal_source_connconf: PgConnectionConfig,
@@ -1568,6 +1560,7 @@ impl Timeline {
     }
 
     /// Checks if the internal state of the timeline is consistent with it being able to be offloaded.
+    ///
     /// This is neccessary but not sufficient for offloading of the timeline as it might have
     /// child timelines that are not offloaded yet.
     pub(crate) fn can_offload(&self) -> bool {
@@ -2014,14 +2007,6 @@ impl Timeline {
             .unwrap_or(self.conf.default_tenant_conf.lsn_lease_length_for_ts)
     }
 
-    pub(crate) fn get_switch_aux_file_policy(&self) -> AuxFilePolicy {
-        let tenant_conf = self.tenant_conf.load();
-        tenant_conf
-            .tenant_conf
-            .switch_aux_file_policy
-            .unwrap_or(self.conf.default_tenant_conf.switch_aux_file_policy)
-    }
-
     pub(crate) fn get_lazy_slru_download(&self) -> bool {
         let tenant_conf = self.tenant_conf.load();
         tenant_conf
@@ -2154,7 +2139,6 @@ impl Timeline {
         resources: TimelineResources,
         pg_version: u32,
         state: TimelineState,
-        aux_file_policy: Option<AuxFilePolicy>,
         attach_wal_lag_cooldown: Arc<OnceLock<WalLagCooldown>>,
         create_idempotency: crate::tenant::CreateTimelineIdempotency,
         cancel: CancellationToken,
@@ -2273,7 +2257,7 @@ impl Timeline {
                 eviction_task_timeline_state: tokio::sync::Mutex::new(
                     EvictionTaskTimelineState::default(),
                 ),
-                delete_progress: Arc::new(tokio::sync::Mutex::new(DeleteTimelineFlow::default())),
+                delete_progress: TimelineDeleteProgress::default(),
 
                 cancel,
                 gate: Gate::default(),
@@ -2285,14 +2269,7 @@ impl Timeline {
 
                 timeline_get_throttle: resources.timeline_get_throttle,
 
-                aux_files: tokio::sync::Mutex::new(AuxFilesState {
-                    dir: None,
-                    n_deltas: 0,
-                }),
-
                 aux_file_size_estimator: AuxFileSizeEstimator::new(aux_file_metrics),
-
-                last_aux_file_policy: AtomicAuxFilePolicy::new(aux_file_policy),
 
                 #[cfg(test)]
                 extra_test_dense_keyspace: ArcSwap::new(Arc::new(KeySpace::default())),
@@ -2305,10 +2282,6 @@ impl Timeline {
 
                 create_idempotency,
             };
-
-            if aux_file_policy == Some(AuxFilePolicy::V1) {
-                warn!("this timeline is using deprecated aux file policy V1 (when loading the timeline)");
-            }
 
             result.repartition_threshold =
                 result.get_checkpoint_distance() / REPARTITION_FREQ_IN_CHECKPOINT_DISTANCE;
@@ -4485,14 +4458,6 @@ impl Timeline {
         ctx: &RequestContext,
     ) -> Result<(), detach_ancestor::Error> {
         detach_ancestor::complete(self, tenant, attempt, ctx).await
-    }
-
-    /// Switch aux file policy and schedule upload to the index part.
-    pub(crate) fn do_switch_aux_policy(&self, policy: AuxFilePolicy) -> anyhow::Result<()> {
-        self.last_aux_file_policy.store(Some(policy));
-        self.remote_client
-            .schedule_index_upload_for_aux_file_policy_update(Some(policy))?;
-        Ok(())
     }
 }
 

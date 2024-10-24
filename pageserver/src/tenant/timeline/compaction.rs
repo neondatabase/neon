@@ -29,6 +29,7 @@ use utils::id::TimelineId;
 
 use crate::context::{AccessStatsBehavior, RequestContext, RequestContextBuilder};
 use crate::page_cache;
+use crate::statvfs::Statvfs;
 use crate::tenant::checks::check_valid_layermap;
 use crate::tenant::remote_timeline_client::WaitCompletionError;
 use crate::tenant::storage_layer::filter_iterator::FilterIterator;
@@ -120,18 +121,12 @@ impl KeyHistoryRetention {
     async fn pipe_to(
         self,
         key: Key,
-        tline: &Arc<Timeline>,
         delta_writer: &mut SplitDeltaLayerWriter,
         mut image_writer: Option<&mut SplitImageLayerWriter>,
         stat: &mut CompactionStatistics,
-        dry_run: bool,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         let mut first_batch = true;
-        let discard = |key: &PersistentLayerKey| {
-            let key = key.clone();
-            async move { Self::discard_key(&key, tline, dry_run).await }
-        };
         for (cutoff_lsn, KeyLogAtLsn(logs)) in self.below_horizon {
             if first_batch {
                 if logs.len() == 1 && logs[0].1.is_image() {
@@ -140,45 +135,30 @@ impl KeyHistoryRetention {
                     };
                     stat.produce_image_key(img);
                     if let Some(image_writer) = image_writer.as_mut() {
-                        image_writer
-                            .put_image_with_discard_fn(key, img.clone(), tline, ctx, discard)
-                            .await?;
+                        image_writer.put_image(key, img.clone(), ctx).await?;
                     } else {
                         delta_writer
-                            .put_value_with_discard_fn(
-                                key,
-                                cutoff_lsn,
-                                Value::Image(img.clone()),
-                                tline,
-                                ctx,
-                                discard,
-                            )
+                            .put_value(key, cutoff_lsn, Value::Image(img.clone()), ctx)
                             .await?;
                     }
                 } else {
                     for (lsn, val) in logs {
                         stat.produce_key(&val);
-                        delta_writer
-                            .put_value_with_discard_fn(key, lsn, val, tline, ctx, discard)
-                            .await?;
+                        delta_writer.put_value(key, lsn, val, ctx).await?;
                     }
                 }
                 first_batch = false;
             } else {
                 for (lsn, val) in logs {
                     stat.produce_key(&val);
-                    delta_writer
-                        .put_value_with_discard_fn(key, lsn, val, tline, ctx, discard)
-                        .await?;
+                    delta_writer.put_value(key, lsn, val, ctx).await?;
                 }
             }
         }
         let KeyLogAtLsn(above_horizon_logs) = self.above_horizon;
         for (lsn, val) in above_horizon_logs {
             stat.produce_key(&val);
-            delta_writer
-                .put_value_with_discard_fn(key, lsn, val, tline, ctx, discard)
-                .await?;
+            delta_writer.put_value(key, lsn, val, ctx).await?;
         }
         Ok(())
     }
@@ -1696,6 +1676,45 @@ impl Timeline {
         unreachable!("key retention is empty")
     }
 
+    /// Check how much space is left on the disk
+    async fn check_available_space(self: &Arc<Self>) -> anyhow::Result<u64> {
+        let tenants_dir = self.conf.tenants_path();
+
+        let stat = Statvfs::get(&tenants_dir, None)
+            .context("statvfs failed, presumably directory got unlinked")?;
+
+        let (avail_bytes, _) = stat.get_avail_total_bytes();
+
+        Ok(avail_bytes)
+    }
+
+    /// Check if the compaction can proceed safely without running out of space. We assume the size
+    /// upper bound of the produced files of a compaction job is the same as all layers involved in
+    /// the compaction. Therefore, we need `2 * layers_to_be_compacted_size` at least to do a
+    /// compaction.
+    async fn check_compaction_space(
+        self: &Arc<Self>,
+        layer_selection: &[Layer],
+    ) -> anyhow::Result<()> {
+        let available_space = self.check_available_space().await?;
+        let mut remote_layer_size = 0;
+        let mut all_layer_size = 0;
+        for layer in layer_selection {
+            let needs_download = layer.needs_download().await?;
+            if needs_download.is_some() {
+                remote_layer_size += layer.layer_desc().file_size;
+            }
+            all_layer_size += layer.layer_desc().file_size;
+        }
+        let allocated_space = (available_space as f64 * 0.8) as u64; /* reserve 20% space for other tasks */
+        if all_layer_size /* space needed for newly-generated file */ + remote_layer_size /* space for downloading layers */ > allocated_space
+        {
+            return Err(anyhow!("not enough space for compaction: available_space={}, allocated_space={}, all_layer_size={}, remote_layer_size={}, required_space={}",
+                available_space, allocated_space, all_layer_size, remote_layer_size, all_layer_size + remote_layer_size));
+        }
+        Ok(())
+    }
+
     /// An experimental compaction building block that combines compaction with garbage collection.
     ///
     /// The current implementation picks all delta + image layers that are below or intersecting with
@@ -1810,6 +1829,8 @@ impl Timeline {
             gc_cutoff,
             lowest_retain_lsn
         );
+
+        self.check_compaction_space(&layer_selection).await?;
 
         // Step 1: (In the future) construct a k-merge iterator over all layers. For now, simply collect all keys + LSNs.
         // Also, verify if the layer map can be split by drawing a horizontal line at every LSN start/end split point.
@@ -1953,11 +1974,9 @@ impl Timeline {
                 retention
                     .pipe_to(
                         *last_key,
-                        self,
                         &mut delta_layer_writer,
                         image_layer_writer.as_mut(),
                         &mut stat,
-                        dry_run,
                         ctx,
                     )
                     .await?;
@@ -1984,11 +2003,9 @@ impl Timeline {
         retention
             .pipe_to(
                 last_key,
-                self,
                 &mut delta_layer_writer,
                 image_layer_writer.as_mut(),
                 &mut stat,
-                dry_run,
                 ctx,
             )
             .await?;
@@ -2004,8 +2021,7 @@ impl Timeline {
                     .finish_with_discard_fn(self, ctx, Key::MAX, discard)
                     .await?
             } else {
-                let (layers, _) = writer.take()?;
-                assert!(layers.is_empty(), "image layers produced in dry run mode?");
+                drop(writer);
                 Vec::new()
             }
         } else {
@@ -2017,8 +2033,7 @@ impl Timeline {
                 .finish_with_discard_fn(self, ctx, discard)
                 .await?
         } else {
-            let (layers, _) = delta_layer_writer.take()?;
-            assert!(layers.is_empty(), "delta layers produced in dry run mode?");
+            drop(delta_layer_writer);
             Vec::new()
         };
 

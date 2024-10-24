@@ -53,6 +53,22 @@ impl Statvfs {
             Statvfs::Mock(stat) => stat.block_size,
         }
     }
+
+    /// Get the available and total bytes on the filesystem.
+    pub fn get_avail_total_bytes(&self) -> (u64, u64) {
+        // https://unix.stackexchange.com/a/703650
+        let blocksize = if self.fragment_size() > 0 {
+            self.fragment_size()
+        } else {
+            self.block_size()
+        };
+
+        // use blocks_available (b_avail) since, pageserver runs as unprivileged user
+        let avail_bytes = self.blocks_available() * blocksize;
+        let total_bytes = self.blocks() * blocksize;
+
+        (avail_bytes, total_bytes)
+    }
 }
 
 pub mod mock {
@@ -74,7 +90,7 @@ pub mod mock {
                 let used_bytes = walk_dir_disk_usage(tenants_dir, name_filter.as_deref()).unwrap();
 
                 // round it up to the nearest block multiple
-                let used_blocks = (used_bytes + (blocksize - 1)) / blocksize;
+                let used_blocks = used_bytes.div_ceil(*blocksize);
 
                 if used_blocks > *total_blocks {
                     panic!(

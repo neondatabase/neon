@@ -341,6 +341,10 @@ impl Layer {
         Ok(())
     }
 
+    pub(crate) async fn needs_download(&self) -> Result<Option<NeedsDownload>, std::io::Error> {
+        self.0.needs_download().await
+    }
+
     /// Assuming the layer is already downloaded, returns a guard which will prohibit eviction
     /// while the guard exists.
     ///
@@ -974,7 +978,7 @@ impl LayerInner {
         let timeline = self
             .timeline
             .upgrade()
-            .ok_or_else(|| DownloadError::TimelineShutdown)?;
+            .ok_or(DownloadError::TimelineShutdown)?;
 
         // count cancellations, which currently remain largely unexpected
         let init_cancelled = scopeguard::guard((), |_| LAYER_IMPL_METRICS.inc_init_cancelled());

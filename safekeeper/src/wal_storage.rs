@@ -186,8 +186,14 @@ impl PhysicalStorage {
             "initialized storage for timeline {}, flush_lsn={}, commit_lsn={}, peer_horizon_lsn={}",
             ttid.timeline_id, flush_lsn, state.commit_lsn, state.peer_horizon_lsn,
         );
-        if flush_lsn < state.commit_lsn || flush_lsn < state.peer_horizon_lsn {
-            warn!("timeline {} potential data loss: flush_lsn by find_end_of_wal is less than either commit_lsn or peer_horizon_lsn from control file", ttid.timeline_id);
+        if flush_lsn < state.commit_lsn {
+            bail!("timeline {} potential data loss: flush_lsn {} by find_end_of_wal is less than commit_lsn  {} from control file", ttid.timeline_id, flush_lsn, state.commit_lsn);
+        }
+        if flush_lsn < state.peer_horizon_lsn {
+            warn!(
+                "timeline {}: flush_lsn {} is less than cfile peer_horizon_lsn {}",
+                ttid.timeline_id, flush_lsn, state.peer_horizon_lsn
+            );
         }
 
         Ok(PhysicalStorage {

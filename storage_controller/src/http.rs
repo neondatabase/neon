@@ -381,14 +381,16 @@ async fn handle_tenant_timeline_delete(
         R: std::future::Future<Output = Result<StatusCode, ApiError>> + Send + 'static,
         F: Fn(Arc<Service>) -> R + Send + Sync + 'static,
     {
+        // On subsequent retries, wait longer.
+        // Enable callers with a 25 second request timeout to reliably get a response
+        const MAX_WAIT: Duration = Duration::from_secs(25);
+        const MAX_RETRY_PERIOD: Duration = Duration::from_secs(5);
+
         let started_at = Instant::now();
+
         // To keep deletion reasonably snappy for small tenants, initially check after 1 second if deletion
         // completed.
         let mut retry_period = Duration::from_secs(1);
-        // On subsequent retries, wait longer.
-        let max_retry_period = Duration::from_secs(5);
-        // Enable callers with a 30 second request timeout to reliably get a response
-        let max_wait = Duration::from_secs(25);
 
         loop {
             let status = f(service.clone()).await?;
@@ -396,7 +398,11 @@ async fn handle_tenant_timeline_delete(
                 StatusCode::ACCEPTED => {
                     tracing::info!("Deletion accepted, waiting to try again...");
                     tokio::time::sleep(retry_period).await;
-                    retry_period = max_retry_period;
+                    retry_period = MAX_RETRY_PERIOD;
+                }
+                StatusCode::CONFLICT => {
+                    tracing::info!("Deletion already in progress, waiting to try again...");
+                    tokio::time::sleep(retry_period).await;
                 }
                 StatusCode::NOT_FOUND => {
                     tracing::info!("Deletion complete");
@@ -409,7 +415,7 @@ async fn handle_tenant_timeline_delete(
             }
 
             let now = Instant::now();
-            if now + retry_period > started_at + max_wait {
+            if now + retry_period > started_at + MAX_WAIT {
                 tracing::info!("Deletion timed out waiting for 404");
                 // REQUEST_TIMEOUT would be more appropriate, but CONFLICT is already part of
                 // the pageserver's swagger definition for this endpoint, and has the same desired

@@ -218,16 +218,12 @@ impl sasl::Mechanism for Exchange<'_> {
                         self.state = ExchangeState::SaltSent(sent);
                         Ok(Step::Continue(self, msg))
                     }
-                    #[allow(unreachable_patterns)] // TODO: 1.82: simply drop this match
-                    Step::Success(x, _) => match x {},
                     Step::Failure(msg) => Ok(Step::Failure(msg)),
                 }
             }
             ExchangeState::SaltSent(sent) => {
                 match sent.transition(self.secret, &self.tls_server_end_point, input)? {
                     Step::Success(keys, msg) => Ok(Step::Success(keys, msg)),
-                    #[allow(unreachable_patterns)] // TODO: 1.82: simply drop this match
-                    Step::Continue(x, _) => match x {},
                     Step::Failure(msg) => Ok(Step::Failure(msg)),
                 }
             }

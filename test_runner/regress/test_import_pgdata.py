@@ -55,7 +55,6 @@ def test_pgdata_import_smoke(
     cplane_mgmt_api_server = make_httpserver
     cplane_mgmt_api_server.expect_request(re.compile(".*")).respond_with_handler(handler)
 
-
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
     env = neon_env_builder.init_start()
 
@@ -124,14 +123,13 @@ def test_pgdata_import_smoke(
     importbucket = neon_env_builder.repo_dir / "importbucket"
     importbucket.mkdir()
     # what cplane writes before scheduling fast_import
-    specpath = importbucket/ "spec.json"
+    specpath = importbucket / "spec.json"
     specpath.write_text(json.dumps({"branch_id": "somebranch", "project_id": "someproject"}))
     # what fast_import writes
     vanilla_pg.pgdatadir.rename(importbucket / "pgdata")
     statusdir = importbucket / "status"
     statusdir.mkdir()
     (statusdir / "pgdata").write_text(json.dumps({"done": True}))
-
 
     #
     # Do the import
