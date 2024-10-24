@@ -11,11 +11,11 @@ mod layer_name;
 pub mod merge_iterator;
 
 use crate::context::{AccessStatsBehavior, RequestContext};
-use crate::repository::Value;
-use crate::walrecord::NeonWalRecord;
 use bytes::Bytes;
 use pageserver_api::key::Key;
 use pageserver_api::keyspace::{KeySpace, KeySpaceRandomAccum};
+use pageserver_api::record::NeonWalRecord;
+use pageserver_api::value::Value;
 use std::cmp::{Ordering, Reverse};
 use std::collections::hash_map::Entry;
 use std::collections::{BinaryHeap, HashMap};

@@ -6,15 +6,15 @@ use criterion::{criterion_group, criterion_main, Criterion};
 use pageserver::{
     config::PageServerConf,
     context::{DownloadBehavior, RequestContext},
+    gc_result::Value,
     l0_flush::{L0FlushConfig, L0FlushGlobalState},
     page_cache,
-    repository::Value,
     task_mgr::TaskKind,
     tenant::storage_layer::inmemory_layer::SerializedBatch,
     tenant::storage_layer::InMemoryLayer,
     virtual_file,
 };
-use pageserver_api::{key::Key, shard::TenantShardId};
+use pageserver_api::{key::Key, shard::TenantShardId, value::Value};
 use utils::{
     bin_ser::BeSer,
     id::{TenantId, TimelineId},

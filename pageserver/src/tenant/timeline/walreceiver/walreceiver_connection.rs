@@ -31,10 +31,10 @@ use crate::{
     task_mgr::{TaskKind, WALRECEIVER_RUNTIME},
     tenant::{debug_assert_current_span_has_tenant_and_timeline_id, Timeline, WalReceiverInfo},
     walingest::WalIngest,
-    walrecord::{decode_wal_record, DecodedWALRecord},
 };
 use postgres_backend::is_expected_io_error;
 use postgres_connection::PgConnectionConfig;
+use postgres_ffi::record::{decode_wal_record, DecodedWALRecord};
 use postgres_ffi::waldecoder::WalStreamDecoder;
 use utils::{id::NodeId, lsn::Lsn};
 use utils::{pageserver_feedback::PageserverFeedback, sync::gate::GateError};
@@ -343,6 +343,7 @@ pub(super) async fn handle_walreceiver_connection(
                         let mut decoded = DecodedWALRecord::default();
                         decode_wal_record(recdata, &mut decoded, modification.tline.pg_version)?;
 
+                        // TODO: Handle this. Probably flush buf + data modifications early.
                         if decoded.is_dbase_create_copy(timeline.pg_version)
                             && uncommitted_records > 0
                         {

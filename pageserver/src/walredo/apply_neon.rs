@@ -1,8 +1,8 @@
-use crate::walrecord::NeonWalRecord;
 use anyhow::Context;
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::BytesMut;
 use pageserver_api::key::Key;
+use pageserver_api::record::NeonWalRecord;
 use pageserver_api::reltag::SlruKind;
 use postgres_ffi::pg_constants;
 use postgres_ffi::relfile_utils::VISIBILITYMAP_FORKNUM;
@@ -238,7 +238,7 @@ pub(crate) fn apply_in_neon(
             // No-op: this record will never be created in aux v2.
             warn!("AuxFile record should not be created in aux v2");
         }
-        #[cfg(test)]
+        #[cfg(feature = "testing")]
         NeonWalRecord::Test {
             append,
             clear,
