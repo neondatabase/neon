@@ -273,9 +273,14 @@ jobs:
         arch: [ x64, arm64 ]
         # Do not build or run tests in debug for release branches
         build-type: ${{ fromJson((startsWith(github.ref_name, 'release') && github.event_name == 'push') && '["release"]' || '["debug", "release"]') }}
+        lfc: [lfc]
         include:
           - build-type: release
             arch: arm64
+            lfc: lfc
+          - build-type: release
+            arch: x64
+            lfc: nolfc
     uses: ./.github/workflows/_build-and-test-locally.yml
     with:
       arch: ${{ matrix.arch }}
@@ -283,7 +288,7 @@ jobs:
       build-tag: ${{ needs.tag.outputs.build-tag }}
       build-type: ${{ matrix.build-type }}
       # Run tests on all Postgres versions in release builds and only on the latest version in debug builds
-      pg-versions: ${{ matrix.build-type == 'release' && '["v14", "v15", "v16", "v17"]' || '["v17"]' }}
+      pg-versions: ${{ matrix.lfc == 'nolfc' && 'v17' || matrix.build-type == 'release' && '["v14", "v15", "v16", "v17"]' || '["v17"]' }}
     secrets: inherit
 
   # Keep `benchmarks` job outside of `build-and-test-locally` workflow to make job failures non-blocking
