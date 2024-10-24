@@ -241,7 +241,8 @@ def test_timeline_offloading(neon_env_builder: NeonEnvBuilder, manual_offload: b
     assert not timeline_offloaded_logged(initial_timeline_id)
 
 
-def test_timeline_offload_persist(neon_env_builder: NeonEnvBuilder):
+@pytest.mark.parametrize("delete_timeline", [False, True])
+def test_timeline_offload_persist(neon_env_builder: NeonEnvBuilder, delete_timeline: bool):
     """
     Test for persistence of timeline offload state
     """
@@ -323,27 +324,35 @@ def test_timeline_offload_persist(neon_env_builder: NeonEnvBuilder):
     assert timeline_offloaded_api(child_timeline_id)
     assert not timeline_offloaded_api(root_timeline_id)
 
-    ps_http.timeline_archival_config(
-        tenant_id,
-        child_timeline_id,
-        state=TimelineArchivalState.UNARCHIVED,
-    )
-    child_detail = ps_http.timeline_detail(
-        tenant_id,
-        child_timeline_id,
-    )
-    assert child_detail["is_archived"] is False
+    if delete_timeline:
+        ps_http.timeline_delete(tenant_id, child_timeline_id)
+        # with pytest.raises():
+        ps_http.timeline_detail(
+            tenant_id,
+            child_timeline_id,
+        )
+    else:
+        ps_http.timeline_archival_config(
+            tenant_id,
+            child_timeline_id,
+            state=TimelineArchivalState.UNARCHIVED,
+        )
+        child_detail = ps_http.timeline_detail(
+            tenant_id,
+            child_timeline_id,
+        )
+        assert child_detail["is_archived"] is False
 
-    with env.endpoints.create_start(
-        "test_archived_branch_persisted", tenant_id=tenant_id
-    ) as endpoint:
-        sum_again = endpoint.safe_psql("SELECT sum(key) from foo where key < 500")
-        assert sum == sum_again
+        with env.endpoints.create_start(
+            "test_archived_branch_persisted", tenant_id=tenant_id
+        ) as endpoint:
+            sum_again = endpoint.safe_psql("SELECT sum(key) from foo where key < 500")
+            assert sum == sum_again
 
-    assert_prefix_empty(
-        neon_env_builder.pageserver_remote_storage,
-        prefix=f"tenants/{str(env.initial_tenant)}/tenant-manifest",
-    )
+        assert_prefix_empty(
+            neon_env_builder.pageserver_remote_storage,
+            prefix=f"tenants/{str(env.initial_tenant)}/tenant-manifest",
+        )
 
     assert not timeline_offloaded_api(root_timeline_id)
 
