@@ -2189,6 +2189,7 @@ pub(crate) mod test {
         (k1, l1).cmp(&(k2, l2))
     }
 
+    #[cfg(feature = "testing")]
     pub(crate) fn sort_delta_value(
         (k1, l1, v1): &(Key, Lsn, Value),
         (k2, l2, v2): &(Key, Lsn, Value),

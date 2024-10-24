@@ -292,10 +292,14 @@ mod tests {
     use crate::{
         tenant::{
             harness::{TenantHarness, TIMELINE_ID},
-            storage_layer::delta_layer::test::{produce_delta_layer, sort_delta, sort_delta_value},
+            storage_layer::delta_layer::test::{produce_delta_layer, sort_delta},
         },
         DEFAULT_PG_VERSION,
     };
+
+    #[cfg(feature = "testing")]
+    use crate::tenant::storage_layer::delta_layer::test::sort_delta_value;
+    #[cfg(feature = "testing")]
     use pageserver_api::record::NeonWalRecord;
 
     async fn assert_merge_iter_equal(
@@ -459,6 +463,7 @@ mod tests {
         // TODO: test layers are loaded only when needed, reducing num of active iterators in k-merge
     }
 
+    #[cfg(feature = "testing")]
     #[tokio::test]
     async fn delta_image_mixed_merge() {
         use bytes::Bytes;
@@ -587,5 +592,6 @@ mod tests {
         is_send(merge_iter);
     }
 
+    #[cfg(feature = "testing")]
     fn is_send(_: impl Send) {}
 }

@@ -1110,8 +1110,8 @@ mod test {
     use itertools::Itertools;
     use pageserver_api::{
         key::Key,
-        value::Value,
         shard::{ShardCount, ShardIdentity, ShardNumber, ShardStripeSize},
+        value::Value,
     };
     use utils::{
         generation::Generation,

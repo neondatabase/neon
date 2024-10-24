@@ -5,7 +5,8 @@
 use bytes::Bytes;
 use pageserver_api::reltag::{RelTag, SlruKind};
 use postgres_ffi::record::{
-    XlMultiXactCreate, XlMultiXactTruncate, XlRelmapUpdate, XlReploriginDrop, XlReploriginSet, XlSmgrTruncate, XlXactParsedRecord
+    XlMultiXactCreate, XlMultiXactTruncate, XlRelmapUpdate, XlReploriginDrop, XlReploriginSet,
+    XlSmgrTruncate, XlXactParsedRecord,
 };
 use postgres_ffi::{Oid, TransactionId};
 use utils::lsn::Lsn;

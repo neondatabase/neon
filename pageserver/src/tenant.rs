@@ -4808,15 +4808,20 @@ mod tests {
     use pageserver_api::key::{Key, AUX_KEY_PREFIX, NON_INHERITED_RANGE};
     use pageserver_api::keyspace::KeySpace;
     use pageserver_api::models::{CompactionAlgorithm, CompactionAlgorithmSettings};
-    use pageserver_api::record::NeonWalRecord;
     use pageserver_api::value::Value;
     use rand::{thread_rng, Rng};
     use storage_layer::PersistentLayerKey;
     use tests::storage_layer::ValuesReconstructState;
     use tests::timeline::{GetVectoredError, ShutdownMode};
-    use timeline::compaction::{KeyHistoryRetention, KeyLogAtLsn};
-    use timeline::{DeltaLayerTestDesc, GcInfo};
+    use timeline::DeltaLayerTestDesc;
     use utils::id::TenantId;
+
+    #[cfg(feature = "testing")]
+    use pageserver_api::record::NeonWalRecord;
+    #[cfg(feature = "testing")]
+    use timeline::compaction::{KeyHistoryRetention, KeyLogAtLsn};
+    #[cfg(feature = "testing")]
+    use timeline::GcInfo;
 
     static TEST_KEY: Lazy<Key> =
         Lazy::new(|| Key::from_slice(&hex!("010000000033333333444444445500000001")));
@@ -7379,6 +7384,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "testing")]
     #[tokio::test]
     async fn test_neon_test_record() -> anyhow::Result<()> {
         let harness = TenantHarness::create("test_neon_test_record").await?;
@@ -7570,6 +7576,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "testing")]
     #[tokio::test]
     async fn test_simple_bottom_most_compaction_deltas() -> anyhow::Result<()> {
         let harness = TenantHarness::create("test_simple_bottom_most_compaction_deltas").await?;
@@ -7766,6 +7773,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "testing")]
     #[tokio::test]
     async fn test_generate_key_retention() -> anyhow::Result<()> {
         let harness = TenantHarness::create("test_generate_key_retention").await?;
@@ -8113,6 +8121,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "testing")]
     #[tokio::test]
     async fn test_simple_bottom_most_compaction_with_retain_lsns() -> anyhow::Result<()> {
         let harness =
@@ -8353,6 +8362,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "testing")]
     #[tokio::test]
     async fn test_simple_bottom_most_compaction_with_retain_lsns_single_key() -> anyhow::Result<()>
     {
@@ -8561,6 +8571,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "testing")]
     #[tokio::test]
     async fn test_simple_bottom_most_compaction_on_branch() -> anyhow::Result<()> {
         let harness = TenantHarness::create("test_simple_bottom_most_compaction_on_branch").await?;
@@ -8762,6 +8773,7 @@ mod tests {
     //
     // When querying the key range [A, B) we need to read at different LSN ranges
     // for [A, C) and [C, B). This test checks that the described edge case is handled correctly.
+    #[cfg(feature = "testing")]
     #[tokio::test]
     async fn test_vectored_read_with_nested_image_layer() -> anyhow::Result<()> {
         let harness = TenantHarness::create("test_vectored_read_with_nested_image_layer").await?;

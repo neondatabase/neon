@@ -28,10 +28,10 @@ use std::time::Instant;
 use std::time::SystemTime;
 
 use pageserver_api::shard::ShardIdentity;
+use postgres_ffi::record::*;
 use postgres_ffi::{dispatch_pgversion, enum_pgversion, enum_pgversion_dispatch, TimestampTz};
 use postgres_ffi::{fsm_logical_to_physical, page_is_new, page_set_lsn};
 use wal_decoder::models::*;
-use postgres_ffi::record::*;
 
 use anyhow::{bail, Context, Result};
 use bytes::{Buf, Bytes, BytesMut};
