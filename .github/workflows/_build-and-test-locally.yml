@@ -290,8 +290,7 @@ jobs:
       options: --init --shm-size=512mb --ulimit memlock=67108864:67108864
     strategy:
       fail-fast: false
-      matrix:
-        pg_version: ${{ fromJson(inputs.pg-versions) }}
+      matrix: ${{ fromJSON(inputs.pg-versions-lfc) }}
     steps:
       - uses: actions/checkout@v4
         with:
