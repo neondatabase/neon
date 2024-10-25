@@ -272,7 +272,7 @@ mod test {
 
         // Loading the file should fail checksum validation.
         if let Err(err) = FileStorage::load_control_file_from_dir(tempdir.path()) {
-            assert!(err.to_string().contains("failed to write control file"))
+            assert!(err.to_string().contains("control file checksum mismatch"))
         } else {
             panic!("expected checksum error")
         }
