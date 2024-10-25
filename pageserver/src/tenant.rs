@@ -810,6 +810,12 @@ enum CreateTimelineResult {
 }
 
 impl CreateTimelineResult {
+    fn discriminant(&self) -> &'static str {
+        match self {
+            Self::Created(_) => "Created",
+            Self::Idempotent(_) => "Idempotent",
+        }
+    }
     fn timeline(&self) -> &Arc<Timeline> {
         match self {
             Self::Created(t) | Self::Idempotent(t) => t,
@@ -2047,16 +2053,17 @@ impl Tenant {
         self.timelines.lock().unwrap().keys().cloned().collect()
     }
 
-    /// This is used to create the initial 'main' timeline during bootstrapping,
-    /// or when importing a new base backup. The caller is expected to load an
-    /// initial image of the datadir to the new timeline after this.
+    /// This is used by tests & import-from-basebackup.
     ///
-    /// Until that happens, the on-disk state is invalid (disk_consistent_lsn=Lsn(0))
-    /// and the timeline will fail to load at a restart.
+    /// The returned [`UninitializedTimeline`] contains no data nor metadata and it is in
+    /// a state that will fail [`Tenant::load_remote_timeline`] because `disk_consistent_lsn=Lsn(0)`.
     ///
-    /// For tests, use `DatadirModification::init_empty_test_timeline` + `commit` to setup the
-    /// minimum amount of keys required to get a writable timeline.
-    /// (Without it, `put` might fail due to `repartition` failing.)
+    /// The caller is responsible for getting the timeline into a state that will be accepted
+    /// by [`Tenant::load_remote_timeline`] / [`Tenant::attach`].
+    /// Then they may call [`UninitializedTimeline::finish_creation`] to add the timeline
+    /// to the [`Tenant::timelines`].
+    ///
+    /// Tests should use `Tenant::create_test_timeline` to set up the minimum required metadata keys.
     pub(crate) async fn create_empty_timeline(
         &self,
         new_timeline_id: TimelineId,
@@ -2288,8 +2295,17 @@ impl Tenant {
 
         // At this point we have dropped our guard on [`Self::timelines_creating`], and
         // the timeline is visible in [`Self::timelines`], but it is _not_ durable yet.  We must
-        // not send a success to the caller until it is.  The same applies to handling retries,
-        // that is done in [`Self::start_creating_timeline`].
+        // not send a success to the caller until it is.  The same applies to idempotent retries.
+        //
+        // TODO: the timeline is already visible in [`Self::timelines`]; a caller could incorrectly
+        // assume that, because they can see the timeline via API, that the creation is done and
+        // that it is durable. Ideally, we would keep the timeline hidden (in [`Self::timelines_creating`])
+        // until it is durable, e.g., by extending the time we hold the creation guard. This also
+        // interacts with UninitializedTimeline and is generally a bit tricky.
+        //
+        // To re-emphasize: the only correct way to create a timeline is to repeat calling the
+        // creation API until it returns success. Only then is durability guaranteed.
+        info!(creation_result=%result.discriminant(), "waiting for timeline to be durable");
         result
             .timeline()
             .remote_client
@@ -4019,6 +4035,8 @@ impl Tenant {
             .schedule_index_upload_for_full_metadata_update(&metadata)
             .context("branch initial metadata upload")?;
 
+        // Callers are responsible to wait for uploads to complete and for activating the timeline.
+
         Ok(CreateTimelineResult::Created(new_timeline))
     }
 
@@ -4087,24 +4105,6 @@ impl Tenant {
                         }
                     }
                 }
-
-                // Wait for uploads to complete, so that when we return Ok, the timeline
-                // is known to be durable on remote storage. Just like we do at the end of
-                // this function, after we have created the timeline ourselves.
-                //
-                // We only really care that the initial version of `index_part.json` has
-                // been uploaded. That's enough to remember that the timeline
-                // exists. However, there is no function to wait specifically for that so
-                // we just wait for all in-progress uploads to finish.
-                existing
-                    .remote_client
-                    .wait_completion()
-                    .await
-                    .context("wait for timeline uploads to complete")?;
-
-                // TODO: shouldn't we also wait for timeline to become active?
-                // Code before this(https://github.com/neondatabase/neon/pull/9366) refactoring
-                // didn't do it.
 
                 Ok(StartCreatingTimelineResult::Idempotent(existing))
             }
@@ -4317,6 +4317,8 @@ impl Tenant {
 
         // All done!
         let timeline = raw_timeline.finish_creation()?;
+
+        // Callers are responsible to wait for uploads to complete and for activating the timeline.
 
         Ok(CreateTimelineResult::Created(timeline))
     }

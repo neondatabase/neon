@@ -597,6 +597,10 @@ paths:
         Create a timeline. Returns new timeline id on success.
         Recreating the same timeline will succeed if the parameters match the existing timeline.
         If no pg_version is specified, assume DEFAULT_PG_VERSION hardcoded in the pageserver.
+
+        To ensure durability, the caller must retry the creation until success.
+        Just because the timeline is visible via other endpoints does not mean it is durable.
+        Future versions may stop showing timelines that are not yet durable.
       requestBody:
         content:
           application/json:
