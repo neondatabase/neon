@@ -4861,7 +4861,7 @@ impl Service {
         };
 
         // Cancellation should be prompt.  If this fails we have still done our job of firing the
-        // cancellatino token, but by returning an ApiError we will indicate to the caller that
+        // cancellation token, but by returning an ApiError we will indicate to the caller that
         // the Reconciler is misbehaving and not respecting the cancellation token
         self.await_waiters(vec![waiter], SHORT_RECONCILE_TIMEOUT)
             .await?;
