@@ -139,7 +139,7 @@ def test_storage_controller_many_tenants(
     tenant_timelines_count = 100
 
     # These lists are maintained for use with rng.choice
-    tenants_with_timelines = list(rng.sample(tenants.keys(), tenant_timelines_count))
+    tenants_with_timelines = list(rng.sample(list(tenants.keys()), tenant_timelines_count))
     tenants_without_timelines = list(
         tenant_id for tenant_id in tenants if tenant_id not in tenants_with_timelines
     )
