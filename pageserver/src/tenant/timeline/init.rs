@@ -125,19 +125,9 @@ pub(super) enum DismissedLayer {
 /// Merges local discoveries and remote [`IndexPart`] to a collection of decisions.
 pub(super) fn reconcile(
     local_layers: Vec<(LayerName, LocalLayerFileMetadata)>,
-    index_part: Option<&IndexPart>,
+    index_part: &IndexPart,
     disk_consistent_lsn: Lsn,
 ) -> Vec<(LayerName, Result<Decision, DismissedLayer>)> {
-    let Some(index_part) = index_part else {
-        // If we have no remote metadata, no local layer files are considered valid to load
-        return local_layers
-            .into_iter()
-            .map(|(layer_name, local_metadata)| {
-                (layer_name, Err(DismissedLayer::LocalOnly(local_metadata)))
-            })
-            .collect();
-    };
-
     let mut result = Vec::new();
 
     let mut remote_layers = HashMap::new();
