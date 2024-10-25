@@ -3050,41 +3050,21 @@ pub mod tokio_epoll_uring {
         /// List of thread local metrics observers.
         observers: Mutex<HashMap<u64, Weak<ThreadLocalMetrics>>>,
         /// A histogram shared between all thread local systems
-        /// for collecting slots waiters queue depth.
-        slots_waiters_queue_depth: Histogram,
+        /// for collecting slots submission queue depth.
+        slots_submission_queue_depth: Histogram,
     }
 
     pub struct ThreadLocalMetrics {
         /// Local observer of thread local tokio-epoll-uring system's slots waiters queue depth.
-        slots_waiters_queue_depth: Mutex<LocalHistogram>,
-    }
-
-    impl ThreadLocalMetrics {
-        pub fn new(slots_waiters_queue_depth: LocalHistogram) -> Self {
-            ThreadLocalMetrics {
-                slots_waiters_queue_depth: Mutex::new(slots_waiters_queue_depth),
-            }
-        }
-
-        /// Flushes the thread local metrics to shared aggregator.
-        pub fn flush(&self) {
-            let local = self.slots_waiters_queue_depth.lock().unwrap();
-            local.flush();
-        }
-
-        /// Observes the tokio-epoll-uring slots queue depth metrics.
-        pub fn observe_slots_queue_depth(&self, queue_depth: u64) {
-            let local = self.slots_waiters_queue_depth.lock().unwrap();
-            local.observe(queue_depth as f64);
-        }
+        slots_submission_queue_depth: Mutex<LocalHistogram>,
     }
 
     impl ThreadLocalMetricsStorage {
         pub fn new() -> Self {
             ThreadLocalMetricsStorage {
                 observers: Mutex::new(HashMap::new()),
-                slots_waiters_queue_depth: register_histogram!(
-                    "pageserver_tokio_epoll_uring_slots_waiters_queue_depth",
+                slots_submission_queue_depth: register_histogram!(
+                    "pageserver_tokio_epoll_uring_slots_submission_queue_depth",
                     "The slots waiters queue depth of each tokio_epoll_uring system",
                     vec![1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0],
                 )
@@ -3095,7 +3075,7 @@ pub mod tokio_epoll_uring {
         /// Registers a new thread local system. Returns a thread local metrics observer.
         pub fn register_system(&self, id: u64) -> Arc<ThreadLocalMetrics> {
             let per_system_metrics = Arc::new(ThreadLocalMetrics::new(
-                self.slots_waiters_queue_depth.local(),
+                self.slots_submission_queue_depth.local(),
             ));
             let mut g = self.observers.lock().unwrap();
             g.insert(id, Arc::downgrade(&per_system_metrics));
@@ -3120,9 +3100,24 @@ pub mod tokio_epoll_uring {
         }
     }
 
+    impl ThreadLocalMetrics {
+        pub fn new(slots_submission_queue_depth: LocalHistogram) -> Self {
+            ThreadLocalMetrics {
+                slots_submission_queue_depth: Mutex::new(slots_submission_queue_depth),
+            }
+        }
+
+        /// Flushes the thread local metrics to shared aggregator.
+        pub fn flush(&self) {
+            let local = self.slots_submission_queue_depth.lock().unwrap();
+            local.flush();
+        }
+    }
+
     impl tokio_epoll_uring::metrics::PerSystemMetrics for ThreadLocalMetrics {
-        fn record_slots_submission_queue_depth(&self, queue_depth: u64) {
-            self.observe_slots_queue_depth(queue_depth);
+        fn observe_slots_submission_queue_depth(&self, queue_depth: u64) {
+            let local = self.slots_submission_queue_depth.lock().unwrap();
+            local.observe(queue_depth as f64);
         }
     }
 
@@ -3154,7 +3149,7 @@ pub mod tokio_epoll_uring {
 
             mfs.extend(
                 self.thread_local_metrics_storage
-                    .slots_waiters_queue_depth
+                    .slots_submission_queue_depth
                     .collect(),
             );
             mfs
