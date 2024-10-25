@@ -2171,10 +2171,22 @@ impl Timeline {
         }
         let mut layer_selection = layer_selection;
         layer_selection.retain(|x| !keep_layers.contains(&x.layer_desc().key()));
-
         if let Some(ref compaction_key_range) = compaction_key_range {
-            // If a delta layer contains keys that are not compacted (overlapping with the key
-            // range), we should keep the layer.
+            // Partial compaction might select more data than it processes, e.g., if
+            // the compaction_key_range only partially overlaps:
+            //
+            //         [---compaction_key_range---]
+            //   [---A----][----B----][----C----][----D----]
+            //
+            // A,B,C,D are all in the `layer_selection`. The created image layers contain
+            // whatever is needed from B, C, and from `----]` of A, and from  `[--` of D.
+            //
+            // In contrast, `[--A-` and `--D----]` have not been processed, so, we must
+            // keep that data.
+            //
+            // The solution for now is to keep A and D completely.
+            // (layer_selection is what we'll remove from the layer map, so,
+            //  retain what is _not_ fully covered by compaction_key_range).
             layer_selection.retain(|x| {
                 let key_range = &x.layer_desc().key_range;
                 key_range.start >= compaction_key_range.start
