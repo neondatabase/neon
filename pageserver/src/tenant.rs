@@ -9266,10 +9266,11 @@ mod tests {
                     is_delta: false
                 },
                 PersistentLayerKey {
+                    // if (in the future) GC kicks in, this layer will be removed
                     key_range: get_key(0)..get_key(10),
                     lsn_range: Lsn(0x10)..Lsn(0x11),
                     is_delta: false
-                }, // if GC kicks in, this layer will be removed
+                },
                 PersistentLayerKey {
                     key_range: get_key(4)..get_key(10),
                     lsn_range: Lsn(0x20)..Lsn(0x21),
