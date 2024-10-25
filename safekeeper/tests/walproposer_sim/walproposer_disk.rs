@@ -53,8 +53,8 @@ impl State {
     pub fn reset_to(&mut self, lsn: Lsn) {
         self.internal_available_lsn = lsn;
         self.prev_lsn = Lsn(0); // Safekeeper doesn't care if this is omitted
-        self.wal_generator
-            .set_lsn(self.internal_available_lsn, self.prev_lsn)
+        self.wal_generator.lsn = self.internal_available_lsn;
+        self.wal_generator.prev_lsn = self.prev_lsn;
     }
 
     /// Get current LSN.

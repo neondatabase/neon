@@ -510,10 +510,14 @@ impl XlLogicalMessage {
 #[derive(Default)]
 pub struct WalGenerator {
     /// Current LSN to append the next record at.
-    lsn: Lsn,
+    ///
+    /// Callers can modify this (and prev_lsn) to restart generation at a different LSN, but should
+    /// ensure that the LSN is on a valid record boundary (i.e. we can't start appending in the
+    /// middle on an existing record or header, or beyond the end of the existing WAL)
+    pub lsn: Lsn,
     /// The starting LSN of the previous record. Used in WAL record headers. The Safekeeper doesn't
     /// care about this, unlike Postgres, but we include it for completeness.
-    prev_lsn: Lsn,
+    pub prev_lsn: Lsn,
 }
 
 impl WalGenerator {
@@ -530,17 +534,6 @@ impl WalGenerator {
     /// Creates a new WAL generator, which emits logical message records (noops).
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Sets the LSN of the next record to generate. The caller must ensure that the LSN is on a
-    /// valid record boundary (i.e. we can't start appending in the middle on an existing record or
-    /// header, or beyond the end of the existing WAL).
-    ///
-    /// prev_lsn is the LSN of the previous record. This is only used in the record header, but the
-    /// Safekeeper ignores it (unlike Postgres), so setting 0 is usually fine.
-    pub fn set_lsn(&mut self, lsn: Lsn, prev_lsn: Lsn) {
-        self.lsn = lsn;
-        self.prev_lsn = prev_lsn;
     }
 
     /// Encodes a logical message (basically a noop), with the given prefix and message.
