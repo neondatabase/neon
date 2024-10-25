@@ -313,6 +313,7 @@ impl DeleteTimelineFlow {
                 // Important. We dont pass ancestor above because it can be missing.
                 // Thus we need to skip the validation here.
                 CreateTimelineCause::Delete,
+                crate::tenant::CreateTimelineIdempotency::FailWithConflict, // doesn't matter what we put here
             )
             .context("create_timeline_struct")?;
 
