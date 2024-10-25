@@ -111,6 +111,46 @@ impl SafeKeeperConf {
     }
 }
 
+impl SafeKeeperConf {
+    #[cfg(test)]
+    #[allow(unused)]
+    fn dummy() -> Self {
+        SafeKeeperConf {
+            workdir: Utf8PathBuf::from("./"),
+            no_sync: false,
+            listen_pg_addr: defaults::DEFAULT_PG_LISTEN_ADDR.to_string(),
+            listen_pg_addr_tenant_only: None,
+            listen_http_addr: defaults::DEFAULT_HTTP_LISTEN_ADDR.to_string(),
+            advertise_pg_addr: None,
+            availability_zone: None,
+            remote_storage: None,
+            my_id: NodeId(0),
+            broker_endpoint: storage_broker::DEFAULT_ENDPOINT
+                .parse()
+                .expect("failed to parse default broker endpoint"),
+            broker_keepalive_interval: Duration::from_secs(5),
+            peer_recovery_enabled: true,
+            wal_backup_enabled: true,
+            backup_parallel_jobs: 1,
+            pg_auth: None,
+            pg_tenant_only_auth: None,
+            http_auth: None,
+            sk_auth_token: None,
+            heartbeat_timeout: Duration::new(5, 0),
+            max_offloader_lag_bytes: defaults::DEFAULT_MAX_OFFLOADER_LAG_BYTES,
+            current_thread_runtime: false,
+            walsenders_keep_horizon: false,
+            partial_backup_timeout: Duration::from_secs(0),
+            disable_periodic_broker_push: false,
+            enable_offload: false,
+            delete_offloaded_wal: false,
+            control_file_save_interval: Duration::from_secs(1),
+            partial_backup_concurrency: 1,
+            eviction_min_resident: Duration::ZERO,
+        }
+    }
+}
+
 // Tokio runtimes.
 pub static WAL_SERVICE_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
     tokio::runtime::Builder::new_multi_thread()
