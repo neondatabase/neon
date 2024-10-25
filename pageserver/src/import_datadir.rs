@@ -455,7 +455,6 @@ pub async fn import_wal_from_tar(
             if let Some((lsn, recdata)) = waldecoder.poll_decode()? {
                 let mut decoded = DecodedWALRecord::default();
                 decode_wal_record(recdata, &mut decoded, tline.pg_version)?;
-                // let (ephemeral_file_ready_buf, special_records) = decode_wal_record(recdata, tline.pg_version);
                 walingest
                     .ingest_record(decoded, lsn, &mut modification, ctx)
                     .await?;
