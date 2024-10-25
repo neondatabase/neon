@@ -405,7 +405,6 @@ impl TenantConfOpt {
             image_layer_creation_check_threshold: self
                 .image_layer_creation_check_threshold
                 .unwrap_or(global_conf.image_layer_creation_check_threshold),
-            switch_aux_file_policy: None,
             lsn_lease_length: self
                 .lsn_lease_length
                 .unwrap_or(global_conf.lsn_lease_length),

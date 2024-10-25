@@ -404,7 +404,6 @@ impl PageServerNode {
                 .remove("lsn_lease_length_for_ts")
                 .map(|x| x.to_string()),
         };
-        settings.remove("switch_aux_file_policy");
         if !settings.is_empty() {
             bail!("Unrecognized tenant settings: {settings:?}")
         } else {
@@ -501,8 +500,6 @@ impl PageServerNode {
                     .map(|x| x.to_string()),
             }
         };
-
-        settings.remove("switch_aux_file_policy");
 
         if !settings.is_empty() {
             bail!("Unrecognized tenant settings: {settings:?}")

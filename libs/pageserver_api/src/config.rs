@@ -20,8 +20,8 @@ use std::{
 };
 use utils::logging::LogFormat;
 
+use crate::models::ImageCompressionAlgorithm;
 use crate::models::LsnLease;
-use crate::models::{AuxFilePolicy, ImageCompressionAlgorithm};
 
 // Certain metadata (e.g. externally-addressable name, AZ) is delivered
 // as a separate structure.  This information is not neeed by the pageserver
@@ -250,9 +250,6 @@ pub struct TenantConfigToml {
     // Expresed in multiples of checkpoint distance.
     pub image_layer_creation_check_threshold: u8,
 
-    // Placeholder for the deprecated `switch_aux_file_policy` field.
-    pub switch_aux_file_policy: Option<AuxFilePolicy>,
-
     /// The length for an explicit LSN lease request.
     /// Layers needed to reconstruct pages at LSN will not be GC-ed during this interval.
     #[serde(with = "humantime_serde")]
@@ -472,7 +469,6 @@ impl Default for TenantConfigToml {
             lazy_slru_download: false,
             timeline_get_throttle: crate::models::ThrottleConfig::disabled(),
             image_layer_creation_check_threshold: DEFAULT_IMAGE_LAYER_CREATION_CHECK_THRESHOLD,
-            switch_aux_file_policy: None,
             lsn_lease_length: LsnLease::DEFAULT_LENGTH,
             lsn_lease_length_for_ts: LsnLease::DEFAULT_LENGTH_FOR_TS,
         }
