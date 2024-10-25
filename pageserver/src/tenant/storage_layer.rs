@@ -1,5 +1,6 @@
 //! Common traits and structs for layers
 
+pub mod batch_split_writer;
 pub mod delta_layer;
 pub mod filter_iterator;
 pub mod image_layer;
@@ -8,7 +9,6 @@ pub(crate) mod layer;
 mod layer_desc;
 mod layer_name;
 pub mod merge_iterator;
-pub mod split_writer;
 
 use crate::context::{AccessStatsBehavior, RequestContext};
 use crate::repository::Value;

@@ -44,7 +44,14 @@ from urllib3.util.retry import Retry
 
 from fixtures import overlayfs
 from fixtures.auth_tokens import AuthKeys, TokenScope
-from fixtures.common_types import Lsn, NodeId, TenantId, TenantShardId, TimelineId
+from fixtures.common_types import (
+    Lsn,
+    NodeId,
+    TenantId,
+    TenantShardId,
+    TimelineArchivalState,
+    TimelineId,
+)
 from fixtures.endpoint.http import EndpointHttpClient
 from fixtures.log_helper import log
 from fixtures.metrics import Metrics, MetricsGetter, parse_metrics
@@ -2131,6 +2138,24 @@ class NeonStorageController(MetricsGetter, LogUtils):
 
         response.raise_for_status()
         return response.json()
+
+    def timeline_archival_config(
+        self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        state: TimelineArchivalState,
+    ):
+        config = {"state": state.value}
+        log.info(
+            f"requesting timeline archival config {config} for tenant {tenant_id} and timeline {timeline_id}"
+        )
+        res = self.request(
+            "PUT",
+            f"{self.api}/v1/tenant/{tenant_id}/timeline/{timeline_id}/archival_config",
+            json=config,
+            headers=self.headers(TokenScope.ADMIN),
+        )
+        return res.json()
 
     def configure_failpoints(self, config_strings: tuple[str, str] | list[tuple[str, str]]):
         if isinstance(config_strings, tuple):

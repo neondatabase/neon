@@ -142,6 +142,19 @@ class TenantConfig:
         )
 
 
+@dataclass
+class TimelinesInfoAndOffloaded:
+    timelines: list[dict[str, Any]]
+    offloaded: list[dict[str, Any]]
+
+    @classmethod
+    def from_json(cls, d: dict[str, Any]) -> TimelinesInfoAndOffloaded:
+        return TimelinesInfoAndOffloaded(
+            timelines=d["timelines"],
+            offloaded=d["offloaded"],
+        )
+
+
 class PageserverHttpClient(requests.Session, MetricsGetter):
     def __init__(
         self,
@@ -464,6 +477,18 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         assert isinstance(res_json, list)
         return res_json
 
+    def timeline_and_offloaded_list(
+        self,
+        tenant_id: Union[TenantId, TenantShardId],
+    ) -> TimelinesInfoAndOffloaded:
+        res = self.get(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline_and_offloaded",
+        )
+        self.verbose_error(res)
+        res_json = res.json()
+        assert isinstance(res_json, dict)
+        return TimelinesInfoAndOffloaded.from_json(res_json)
+
     def timeline_create(
         self,
         pg_version: PgVersion,
@@ -476,12 +501,13 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
     ) -> dict[Any, Any]:
         body: dict[str, Any] = {
             "new_timeline_id": str(new_timeline_id),
-            "ancestor_start_lsn": str(ancestor_start_lsn) if ancestor_start_lsn else None,
-            "ancestor_timeline_id": str(ancestor_timeline_id) if ancestor_timeline_id else None,
-            "existing_initdb_timeline_id": str(existing_initdb_timeline_id)
-            if existing_initdb_timeline_id
-            else None,
         }
+        if ancestor_timeline_id:
+            body["ancestor_timeline_id"] = str(ancestor_timeline_id)
+        if ancestor_start_lsn:
+            body["ancestor_start_lsn"] = str(ancestor_start_lsn)
+        if existing_initdb_timeline_id:
+            body["existing_initdb_timeline_id"] = str(existing_initdb_timeline_id)
         if pg_version != PgVersion.NOT_SET:
             body["pg_version"] = int(pg_version)
 
