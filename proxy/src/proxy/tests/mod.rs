@@ -28,7 +28,8 @@ use crate::control_plane::provider::{
 };
 use crate::control_plane::{self, CachedNodeInfo, NodeInfo};
 use crate::error::ErrorKind;
-use crate::{sasl, scram, BranchId, EndpointId, ProjectId};
+use crate::types::{BranchId, EndpointId, ProjectId};
+use crate::{sasl, scram};
 
 /// Generate a set of TLS certificates: CA + server.
 fn generate_certs(

@@ -161,6 +161,9 @@ pub(crate) enum Reason {
     /// LockAlreadyTaken indicates that the we attempted to take a lock that was already taken.
     #[serde(rename = "LOCK_ALREADY_TAKEN")]
     LockAlreadyTaken,
+    /// ActiveEndpointsLimitExceeded indicates that the limit of concurrently active endpoints was exceeded.
+    #[serde(rename = "ACTIVE_ENDPOINTS_LIMIT_EXCEEDED")]
+    ActiveEndpointsLimitExceeded,
     #[default]
     #[serde(other)]
     Unknown,
@@ -194,7 +197,8 @@ impl Reason {
             | Reason::ComputeTimeQuotaExceeded
             | Reason::WrittenDataQuotaExceeded
             | Reason::DataTransferQuotaExceeded
-            | Reason::LogicalSizeQuotaExceeded => false,
+            | Reason::LogicalSizeQuotaExceeded
+            | Reason::ActiveEndpointsLimitExceeded => false,
             // transitive error. control plane is currently busy
             // but might be ready soon
             Reason::RunningOperations

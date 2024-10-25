@@ -934,7 +934,6 @@ impl Service {
         self.startup_complete.clone().wait().await;
 
         const BACKGROUND_RECONCILE_PERIOD: Duration = Duration::from_secs(20);
-
         let mut interval = tokio::time::interval(BACKGROUND_RECONCILE_PERIOD);
         while !self.reconcilers_cancel.is_cancelled() {
             tokio::select! {
@@ -1272,6 +1271,10 @@ impl Service {
             .collect::<Vec<_>>();
         let nodes: HashMap<NodeId, Node> = nodes.into_iter().map(|n| (n.get_id(), n)).collect();
         tracing::info!("Loaded {} nodes from database.", nodes.len());
+        metrics::METRICS_REGISTRY
+            .metrics_group
+            .storage_controller_pageserver_nodes
+            .set(nodes.len() as i64);
 
         tracing::info!("Loading shards from database...");
         let mut tenant_shard_persistence = persistence.list_tenant_shards().await?;
@@ -3127,9 +3130,11 @@ impl Service {
             .await?;
 
             // Propagate the LSN that shard zero picked, if caller didn't provide one
-            if create_req.ancestor_timeline_id.is_some() && create_req.ancestor_start_lsn.is_none()
-            {
-                create_req.ancestor_start_lsn = timeline_info.ancestor_lsn;
+            match &mut create_req.mode {
+                models::TimelineCreateRequestMode::Branch { ancestor_start_lsn, .. } if ancestor_start_lsn.is_none() => {
+                    *ancestor_start_lsn = timeline_info.ancestor_lsn;
+                },
+                _ => {}
             }
 
             // Create timeline on remaining shards with number >0
@@ -4110,9 +4115,9 @@ impl Service {
                     (
                         old_attached,
                         generation,
-                        old_state.policy,
+                        old_state.policy.clone(),
                         old_state.shard,
-                        old_state.config,
+                        old_state.config.clone(),
                     )
                 };
 
@@ -5075,6 +5080,10 @@ impl Service {
         let mut nodes = (*locked.nodes).clone();
         nodes.remove(&node_id);
         locked.nodes = Arc::new(nodes);
+        metrics::METRICS_REGISTRY
+            .metrics_group
+            .storage_controller_pageserver_nodes
+            .set(locked.nodes.len() as i64);
 
         locked.scheduler.node_remove(node_id);
 
@@ -5158,6 +5167,10 @@ impl Service {
                     removed_node.set_availability(NodeAvailability::Offline);
                 }
                 *nodes = Arc::new(nodes_mut);
+                metrics::METRICS_REGISTRY
+                    .metrics_group
+                    .storage_controller_pageserver_nodes
+                    .set(nodes.len() as i64);
             }
         }
 
@@ -5345,6 +5358,11 @@ impl Service {
         new_nodes.insert(register_req.node_id, new_node);
 
         locked.nodes = Arc::new(new_nodes);
+
+        metrics::METRICS_REGISTRY
+            .metrics_group
+            .storage_controller_pageserver_nodes
+            .set(locked.nodes.len() as i64);
 
         tracing::info!(
             "Registered pageserver {}, now have {} pageservers",

@@ -83,7 +83,7 @@ jobs:
 
     runs-on: ${{ matrix.RUNNER }}
     container:
-      image: neondatabase/build-tools:pinned
+      image: neondatabase/build-tools:pinned-bookworm
       credentials:
         username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
         password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
@@ -178,7 +178,7 @@ jobs:
 
     runs-on: [ self-hosted, us-east-2, x64 ]
     container:
-      image: neondatabase/build-tools:pinned
+      image: neondatabase/build-tools:pinned-bookworm
       credentials:
         username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
         password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
@@ -280,7 +280,7 @@ jobs:
         region_id_default=${{ env.DEFAULT_REGION_ID }}
         runner_default='["self-hosted", "us-east-2", "x64"]'
         runner_azure='["self-hosted", "eastus2", "x64"]'
-        image_default="neondatabase/build-tools:pinned"
+        image_default="neondatabase/build-tools:pinned-bookworm"
         matrix='{
           "pg_version" : [
             16
@@ -299,9 +299,9 @@ jobs:
           "include": [{ "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-freetier",       "db_size": "3gb" ,"runner": '"$runner_default"', "image": "'"$image_default"'" },
                       { "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-new",            "db_size": "10gb","runner": '"$runner_default"', "image": "'"$image_default"'" },
                       { "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-new",            "db_size": "50gb","runner": '"$runner_default"', "image": "'"$image_default"'" },
-                      { "pg_version": 16, "region_id": "azure-eastus2",          "platform": "neonvm-azure-captest-freetier", "db_size": "3gb" ,"runner": '"$runner_azure"',   "image": "neondatabase/build-tools:pinned" },
-                      { "pg_version": 16, "region_id": "azure-eastus2",          "platform": "neonvm-azure-captest-new",      "db_size": "10gb","runner": '"$runner_azure"',   "image": "neondatabase/build-tools:pinned" },
-                      { "pg_version": 16, "region_id": "azure-eastus2",          "platform": "neonvm-azure-captest-new",      "db_size": "50gb","runner": '"$runner_azure"',   "image": "neondatabase/build-tools:pinned" },
+                      { "pg_version": 16, "region_id": "azure-eastus2",          "platform": "neonvm-azure-captest-freetier", "db_size": "3gb" ,"runner": '"$runner_azure"',   "image": "neondatabase/build-tools:pinned-bookworm" },
+                      { "pg_version": 16, "region_id": "azure-eastus2",          "platform": "neonvm-azure-captest-new",      "db_size": "10gb","runner": '"$runner_azure"',   "image": "neondatabase/build-tools:pinned-bookworm" },
+                      { "pg_version": 16, "region_id": "azure-eastus2",          "platform": "neonvm-azure-captest-new",      "db_size": "50gb","runner": '"$runner_azure"',   "image": "neondatabase/build-tools:pinned-bookworm" },
                       { "pg_version": 16, "region_id": "'"$region_id_default"'", "platform": "neonvm-captest-sharding-reuse", "db_size": "50gb","runner": '"$runner_default"', "image": "'"$image_default"'" }]
         }'
 
@@ -665,7 +665,7 @@ jobs:
 
     runs-on: [ self-hosted, us-east-2, x64 ]
     container:
-      image: neondatabase/build-tools:pinned
+      image: neondatabase/build-tools:pinned-bookworm
       credentials:
         username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
         password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
@@ -772,7 +772,7 @@ jobs:
 
     runs-on: [ self-hosted, us-east-2, x64 ]
     container:
-      image: neondatabase/build-tools:pinned
+      image: neondatabase/build-tools:pinned-bookworm
       credentials:
         username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
         password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
@@ -877,7 +877,7 @@ jobs:
 
     runs-on: [ self-hosted, us-east-2, x64 ]
     container:
-      image: neondatabase/build-tools:pinned
+      image: neondatabase/build-tools:pinned-bookworm
       credentials:
         username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
         password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}

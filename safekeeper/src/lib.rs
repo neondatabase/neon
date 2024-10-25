@@ -113,6 +113,7 @@ impl SafeKeeperConf {
 
 impl SafeKeeperConf {
     #[cfg(test)]
+    #[allow(unused)]
     fn dummy() -> Self {
         SafeKeeperConf {
             workdir: Utf8PathBuf::from("./"),

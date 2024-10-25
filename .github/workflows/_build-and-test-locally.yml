@@ -53,20 +53,6 @@ jobs:
       BUILD_TAG: ${{ inputs.build-tag }}
 
     steps:
-      - name: Fix git ownership
-        run: |
-          # Workaround for `fatal: detected dubious ownership in repository at ...`
-          #
-          # Use both ${{ github.workspace }} and ${GITHUB_WORKSPACE} because they're different on host and in containers
-          #   Ref https://github.com/actions/checkout/issues/785
-          #
-          git config --global --add safe.directory ${{ github.workspace }}
-          git config --global --add safe.directory ${GITHUB_WORKSPACE}
-          for r in 14 15 16 17; do
-            git config --global --add safe.directory "${{ github.workspace }}/vendor/postgres-v$r"
-            git config --global --add safe.directory "${GITHUB_WORKSPACE}/vendor/postgres-v$r"
-          done
-
       - uses: actions/checkout@v4
         with:
           submodules: true
@@ -124,28 +110,28 @@ jobs:
         uses: actions/cache@v4
         with:
           path: pg_install/v14
-          key: v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.build-type }}-pg-${{ steps.pg_v14_rev.outputs.pg_rev }}-bookworm-${{ hashFiles('Makefile', 'Dockerfile.build-tools') }}
+          key: v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.build-type }}-pg-${{ steps.pg_v14_rev.outputs.pg_rev }}-bookworm-${{ hashFiles('Makefile', 'build-tools.Dockerfile') }}
 
       - name: Cache postgres v15 build
         id: cache_pg_15
         uses: actions/cache@v4
         with:
           path: pg_install/v15
-          key: v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.build-type }}-pg-${{ steps.pg_v15_rev.outputs.pg_rev }}-bookworm-${{ hashFiles('Makefile', 'Dockerfile.build-tools') }}
+          key: v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.build-type }}-pg-${{ steps.pg_v15_rev.outputs.pg_rev }}-bookworm-${{ hashFiles('Makefile', 'build-tools.Dockerfile') }}
 
       - name: Cache postgres v16 build
         id: cache_pg_16
         uses: actions/cache@v4
         with:
           path: pg_install/v16
-          key: v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.build-type }}-pg-${{ steps.pg_v16_rev.outputs.pg_rev }}-bookworm-${{ hashFiles('Makefile', 'Dockerfile.build-tools') }}
+          key: v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.build-type }}-pg-${{ steps.pg_v16_rev.outputs.pg_rev }}-bookworm-${{ hashFiles('Makefile', 'build-tools.Dockerfile') }}
 
       - name: Cache postgres v17 build
         id: cache_pg_17
         uses: actions/cache@v4
         with:
           path: pg_install/v17
-          key: v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.build-type }}-pg-${{ steps.pg_v17_rev.outputs.pg_rev }}-bookworm-${{ hashFiles('Makefile', 'Dockerfile.build-tools') }}
+          key: v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.build-type }}-pg-${{ steps.pg_v17_rev.outputs.pg_rev }}-bookworm-${{ hashFiles('Makefile', 'build-tools.Dockerfile') }}
 
       - name: Build postgres v14
         if: steps.cache_pg_14.outputs.cache-hit != 'true'

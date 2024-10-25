@@ -371,7 +371,7 @@ pub struct Timeline {
 
     /// Prevent two tasks from deleting the timeline at the same time. If held, the
     /// timeline is being deleted. If 'true', the timeline has already been deleted.
-    pub delete_progress: Arc<tokio::sync::Mutex<DeleteTimelineFlow>>,
+    pub delete_progress: TimelineDeleteProgress,
 
     eviction_task_timeline_state: tokio::sync::Mutex<EvictionTaskTimelineState>,
 
@@ -424,7 +424,12 @@ pub struct Timeline {
     pub(crate) handles: handle::PerTimelineState<crate::page_service::TenantManagerTypes>,
 
     pub(crate) attach_wal_lag_cooldown: Arc<OnceLock<WalLagCooldown>>,
+
+    /// Cf. [`crate::tenant::CreateTimelineIdempotency`].
+    pub(crate) create_idempotency: crate::tenant::CreateTimelineIdempotency,
 }
+
+pub type TimelineDeleteProgress = Arc<tokio::sync::Mutex<DeleteTimelineFlow>>;
 
 pub struct WalReceiverInfo {
     pub wal_source_connconf: PgConnectionConfig,
@@ -2134,6 +2139,7 @@ impl Timeline {
         pg_version: u32,
         state: TimelineState,
         attach_wal_lag_cooldown: Arc<OnceLock<WalLagCooldown>>,
+        create_idempotency: crate::tenant::CreateTimelineIdempotency,
         cancel: CancellationToken,
     ) -> Arc<Self> {
         let disk_consistent_lsn = metadata.disk_consistent_lsn();
@@ -2250,7 +2256,7 @@ impl Timeline {
                 eviction_task_timeline_state: tokio::sync::Mutex::new(
                     EvictionTaskTimelineState::default(),
                 ),
-                delete_progress: Arc::new(tokio::sync::Mutex::new(DeleteTimelineFlow::default())),
+                delete_progress: TimelineDeleteProgress::default(),
 
                 cancel,
                 gate: Gate::default(),
@@ -2272,6 +2278,8 @@ impl Timeline {
                 handles: Default::default(),
 
                 attach_wal_lag_cooldown,
+
+                create_idempotency,
             };
 
             result.repartition_threshold =
@@ -2402,7 +2410,7 @@ impl Timeline {
     pub(super) async fn load_layer_map(
         &self,
         disk_consistent_lsn: Lsn,
-        index_part: Option<IndexPart>,
+        index_part: IndexPart,
     ) -> anyhow::Result<()> {
         use init::{Decision::*, Discovered, DismissedLayer};
         use LayerName::*;
@@ -2466,8 +2474,7 @@ impl Timeline {
                     );
                 }
 
-                let decided =
-                    init::reconcile(discovered_layers, index_part.as_ref(), disk_consistent_lsn);
+                let decided = init::reconcile(discovered_layers, &index_part, disk_consistent_lsn);
 
                 let mut loaded_layers = Vec::new();
                 let mut needs_cleanup = Vec::new();

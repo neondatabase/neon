@@ -5,6 +5,7 @@ use std::time::{Duration, SystemTime};
 use arc_swap::ArcSwapOption;
 use dashmap::DashMap;
 use jose_jwk::crypto::KeyInfo;
+use reqwest::{redirect, Client};
 use serde::de::Visitor;
 use serde::{Deserialize, Deserializer};
 use signature::Verifier;
@@ -16,7 +17,7 @@ use crate::context::RequestMonitoring;
 use crate::control_plane::errors::GetEndpointJwksError;
 use crate::http::parse_json_body_with_limit;
 use crate::intern::RoleNameInt;
-use crate::{EndpointId, RoleName};
+use crate::types::{EndpointId, RoleName};
 
 // TODO(conrad): make these configurable.
 const CLOCK_SKEW_LEEWAY: Duration = Duration::from_secs(30);
@@ -24,6 +25,7 @@ const MIN_RENEW: Duration = Duration::from_secs(30);
 const AUTO_RENEW: Duration = Duration::from_secs(300);
 const MAX_RENEW: Duration = Duration::from_secs(3600);
 const MAX_JWK_BODY_SIZE: usize = 64 * 1024;
+const JWKS_USER_AGENT: &str = "neon-proxy";
 
 /// How to get the JWT auth rules
 pub(crate) trait FetchAuthRules: Clone + Send + Sync + 'static {
@@ -50,7 +52,6 @@ pub(crate) struct AuthRule {
     pub(crate) role_names: Vec<RoleNameInt>,
 }
 
-#[derive(Default)]
 pub struct JwkCache {
     client: reqwest::Client,
 
@@ -354,6 +355,20 @@ impl JwkCache {
         entry
             .check_jwt(ctx, jwt, &self.client, endpoint, role_name, fetch)
             .await
+    }
+}
+
+impl Default for JwkCache {
+    fn default() -> Self {
+        let client = Client::builder()
+            .user_agent(JWKS_USER_AGENT)
+            .redirect(redirect::Policy::none())
+            .build()
+            .expect("using &str and standard redirect::Policy");
+        JwkCache {
+            client,
+            map: DashMap::default(),
+        }
     }
 }
 
@@ -669,7 +684,7 @@ mod tests {
     use tokio::net::TcpListener;
 
     use super::*;
-    use crate::RoleName;
+    use crate::types::RoleName;
 
     fn new_ec_jwk(kid: String) -> (p256::SecretKey, jose_jwk::Jwk) {
         let sk = p256::SecretKey::random(&mut OsRng);
