@@ -16,10 +16,12 @@ pub enum Value {
 }
 
 impl Value {
+    #[inline(always)]
     pub fn is_image(&self) -> bool {
         matches!(self, Value::Image(_))
     }
 
+    #[inline(always)]
     pub fn will_init(&self) -> bool {
         match self {
             Value::Image(_) => true,
@@ -39,6 +41,7 @@ pub enum InvalidInput {
 pub struct ValueBytes;
 
 impl ValueBytes {
+    #[inline(always)]
     pub fn will_init(raw: &[u8]) -> Result<bool, InvalidInput> {
         if raw.len() < 12 {
             return Err(InvalidInput::TooShortValue);
