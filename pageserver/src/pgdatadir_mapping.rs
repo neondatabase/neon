@@ -1527,7 +1527,7 @@ impl<'a> DatadirModification<'a> {
                     let old_size = self.get(size_key, ctx).await?.get_u32_le();
                     self.pending_nblocks -= old_size as i64;
 
-                    // Remove enty from relation size cache
+                    // Remove entry from relation size cache
                     self.tline.remove_cached_rel_size(&rel_tag);
 
                     // Delete size entry, as well as all blocks
