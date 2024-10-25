@@ -1,3 +1,6 @@
+//! This module contains logic for decoding and interpreting
+//! raw bytes which represent a raw Postgres WAL record.
+
 use crate::models::*;
 use bytes::{Buf, Bytes, BytesMut};
 use pageserver_api::key::rel_block_to_key;
@@ -11,6 +14,10 @@ use postgres_ffi::{page_is_new, page_set_lsn, pg_constants, BLCKSZ};
 use utils::lsn::Lsn;
 
 impl InterpretedWalRecord {
+    /// Decode and interpreted raw bytes which represent one Postgres WAL record.
+    /// Data blocks which do not match the provided shard identity are filtered out.
+    /// Shard 0 is a special case since it tracks all relation sizes. We only give it
+    /// the keys that are being written as that is enough for updating relation sizes.
     pub fn from_bytes(
         buf: Bytes,
         shard: &ShardIdentity,

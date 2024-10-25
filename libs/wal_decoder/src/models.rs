@@ -40,11 +40,21 @@ pub enum FlushUncommittedRecords {
     No,
 }
 
+/// An interpreted Postgres WAL record, ready to be handled by the pageserver
 pub struct InterpretedWalRecord {
+    /// Optional metadata record - may cause writes to metadata keys
+    /// in the storage engine
     pub metadata_record: Option<MetadataRecord>,
+    /// Images or deltas for blocks modified in the original WAL record.
+    /// The [`Value`] is optional to avoid sending superfluous data to
+    /// shard 0 for relation size tracking.
     pub blocks: Vec<(CompactKey, Option<Value>)>,
+    /// Byte offset within WAL for the start of the original PG WAL record
     pub lsn: Lsn,
+    /// Whether to flush all uncommitted modifications to the storage engine
+    /// before ingesting this record
     pub flush_uncommitted: FlushUncommittedRecords,
+    /// Transaction id of the original PG WAL record
     pub xid: TransactionId,
 }
 
