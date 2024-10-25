@@ -427,6 +427,8 @@ impl RemoteStorage for LocalFs {
                             .next()
                             .unwrap()
                             .to_owned();
+                        dbg!(&first_part);
+                        dbg!(&prefix);
                         prefixes.insert(if let Some(prefix) = prefix {
                             prefix.join(first_part).to_string()
                         } else {
@@ -524,6 +526,9 @@ impl RemoteStorage for LocalFs {
         let target_path = from.with_base(&self.storage_root);
 
         let file_metadata = file_metadata(&target_path).await?;
+        if let Some(etag) = &opts.etag {
+
+        }
         let etag = mock_etag(&file_metadata);
 
         if opts.etag.as_ref() == Some(&etag) {
@@ -986,7 +991,7 @@ mod fs_tests {
         );
         assert_eq!(
             listing.prefixes,
-            [RemotePath::from_string("parent").unwrap()].to_vec()
+            [RemotePath::from_string("timelines/some_timeline/grandparent/parent").unwrap()].to_vec()
         );
 
         // Delimiter and prefix without a trailing slash
@@ -1001,7 +1006,7 @@ mod fs_tests {
         assert_eq!(listing.keys, vec![]);
         assert_eq!(
             listing.prefixes,
-            [RemotePath::from_string("grandparent").unwrap()].to_vec()
+            [RemotePath::from_string("timelines/some_timeline/grandparent").unwrap()].to_vec()
         );
 
         // Delimiter and prefix that's partway through a path component
@@ -1016,7 +1021,7 @@ mod fs_tests {
         assert_eq!(listing.keys, vec![]);
         assert_eq!(
             listing.prefixes,
-            [RemotePath::from_string("grandparent").unwrap()].to_vec()
+            [RemotePath::from_string("timelines/some_timeline/grandparent").unwrap()].to_vec()
         );
 
         Ok(())
