@@ -15,3 +15,4 @@ postgres_ffi.workspace = true
 serde.workspace = true
 tracing.workspace = true
 utils.workspace = true
+workspace_hack = { version = "0.1", path = "../../workspace_hack" }

@@ -6967,6 +6967,7 @@ dependencies = [
  "serde",
  "tracing",
  "utils",
+ "workspace_hack",
 ]
 
 [[package]]
