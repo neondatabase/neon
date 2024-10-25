@@ -1,8 +1,12 @@
+use std::num::NonZeroU32;
 use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::{collections::HashSet, time::Duration};
 
-use remote_storage::{GenericRemoteStorage, LocalFs, RemotePath};
+use anyhow::Context;
+use remote_storage::{
+    GenericRemoteStorage, LocalFs, RemotePath, RemoteStorageConfig, RemoteStorageKind,
+};
 use test_context::AsyncTestContext;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
@@ -24,15 +28,26 @@ struct EnabledLocalFs {
 }
 
 impl EnabledLocalFs {
-    async fn setup() -> Self {
+    async fn setup(max_keys_per_list_response: Option<u32>) -> Self {
         let storage_root = camino_tempfile::tempdir()
             .expect("create tempdir")
             .path()
             .to_path_buf();
-        let (local_fs, _) = LocalFs::new(storage_root, Duration::from_secs(120))
-            .map(|s| (s, CancellationToken::new()))
-            .expect("create LocalFs");
-        let client = Arc::new(GenericRemoteStorage::LocalFs(local_fs));
+
+        let remote_storage_config = RemoteStorageConfig {
+            storage: RemoteStorageKind::LocalFs {
+                local_path: storage_root,
+                max_keys_per_list_response: max_keys_per_list_response.and_then(NonZeroU32::new),
+            },
+            timeout: Duration::from_secs(120),
+        };
+        let client = Arc::new(
+            GenericRemoteStorage::from_config(&remote_storage_config)
+                .await
+                .context("remote storage init")
+                .unwrap(),
+        );
+
         EnabledLocalFs {
             client,
             base_prefix: &BASE_PREFIX,
@@ -48,7 +63,7 @@ enum MaybeEnabledStorage {
 impl AsyncTestContext for MaybeEnabledStorage {
     async fn setup() -> Self {
         ensure_logging_ready();
-        Self::Enabled(EnabledLocalFs::setup().await)
+        Self::Enabled(EnabledLocalFs::setup(None).await)
     }
 }
 
@@ -68,9 +83,12 @@ impl AsyncTestContext for MaybeEnabledStorageWithTestBlobs {
     async fn setup() -> Self {
         ensure_logging_ready();
 
-        let enabled = EnabledLocalFs::setup().await;
+        let max_keys_in_list_response = 10;
+        let upload_tasks_count = 1 + (2 * usize::try_from(max_keys_in_list_response).unwrap());
 
-        match upload_remote_data(&enabled.client, enabled.base_prefix, UPLOAD_TASKS_COUNT).await {
+        let enabled = EnabledLocalFs::setup(Some(max_keys_in_list_response)).await;
+
+        match upload_remote_data(&enabled.client, enabled.base_prefix, upload_tasks_count).await {
             ControlFlow::Continue(uploads) => {
                 info!("Remote objects created successfully");
 
@@ -111,14 +129,15 @@ struct LocalFsWithSimpleTestBlobs {
     remote_blobs: HashSet<RemoteBlobInfo>,
 }
 
-const UPLOAD_TASKS_COUNT: usize = 10;
-
 impl AsyncTestContext for MaybeEnabledStorageWithSimpleTestBlobs {
     async fn setup() -> Self {
         ensure_logging_ready();
-        let enabled = EnabledLocalFs::setup().await;
+        let max_keys_in_list_response = 10;
+        let upload_tasks_count = 1 + (2 * usize::try_from(max_keys_in_list_response).unwrap());
 
-        match upload_simple_remote_data(&enabled.client, UPLOAD_TASKS_COUNT).await {
+        let enabled = EnabledLocalFs::setup(Some(max_keys_in_list_response)).await;
+
+        match upload_simple_remote_data(&enabled.client, upload_tasks_count).await {
             ControlFlow::Continue(uploads) => {
                 info!("Remote objects created successfully");
 

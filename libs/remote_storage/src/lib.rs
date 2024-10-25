@@ -21,7 +21,7 @@ mod support;
 use std::{
     collections::HashMap,
     fmt::Debug,
-    num::NonZeroU32,
+    num::{NonZeroU32, NonZeroUsize},
     ops::Bound,
     pin::{pin, Pin},
     sync::Arc,
@@ -33,10 +33,10 @@ use camino::{Utf8Path, Utf8PathBuf};
 
 use bytes::Bytes;
 use futures::{stream::Stream, StreamExt};
-use itertools::Itertools as _;
+use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
-use tokio_util::sync::CancellationToken;
+use tokio_util::{either, sync::CancellationToken};
 use tracing::info;
 
 pub use self::{
@@ -162,7 +162,7 @@ pub struct ListingObject {
     pub size: u64,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct Listing {
     pub prefixes: Vec<RemotePath>,
     pub keys: Vec<ListingObject>,
@@ -585,9 +585,16 @@ impl GenericRemoteStorage {
     pub async fn from_config(storage_config: &RemoteStorageConfig) -> anyhow::Result<Self> {
         let timeout = storage_config.timeout;
         Ok(match &storage_config.storage {
-            RemoteStorageKind::LocalFs { local_path: path } => {
+            RemoteStorageKind::LocalFs {
+                local_path: path,
+                max_keys_per_list_response: max_keys_in_list_response,
+            } => {
                 info!("Using fs root '{path}' as a remote storage");
-                Self::LocalFs(LocalFs::new(path.clone(), timeout)?)
+                Self::LocalFs(LocalFs::new(
+                    path.clone(),
+                    timeout,
+                    *max_keys_in_list_response,
+                )?)
             }
             RemoteStorageKind::AwsS3(s3_config) => {
                 // The profile and access key id are only printed here for debugging purposes,
@@ -696,6 +703,60 @@ impl ConcurrencyLimiter {
             read: Arc::new(Semaphore::new(limit)),
             write: Arc::new(Semaphore::new(limit)),
         }
+    }
+}
+
+impl Listing {
+    /// For testing, slice up [`Self`] into pages with `prefixes.len() + keys.len() <= max_keys`.
+    ///
+    /// Also, when paginating, anecdotally, S3 does {prefixes \u keys} | sort | paginate.
+    /// So, do the same here
+    pub fn paginate_like_s3(self, max_keys: Option<NonZeroU32>) -> impl Iterator<Item = Self> {
+        let Some(max_keys) = max_keys else {
+            return itertools::Either::Left(std::iter::once(self));
+        };
+        enum PrefixOrKey {
+            Prefix(RemotePath),
+            Key(ListingObject),
+        }
+        impl PrefixOrKey {
+            fn key(&self) -> impl Ord {
+                match self {
+                    Self::Prefix(prefix) => prefix.0.clone(),
+                    Self::Key(o) => o.key.0.clone(),
+                }
+            }
+        }
+
+        let mut combined: Vec<_> = self
+            .prefixes
+            .into_iter()
+            .map(PrefixOrKey::Prefix)
+            .chain(self.keys.into_iter().map(PrefixOrKey::Key))
+            .collect();
+        combined.sort_by_cached_key(|combined| combined.key());
+        itertools::Either::Right(
+            combined
+                .into_iter()
+                .chunks(
+                    usize::try_from(max_keys.get())
+                        .expect("true on the architectures we care about"),
+                )
+                .into_iter()
+                .map(|chunk| {
+                    let mut prefixes = Vec::new();
+                    let mut keys = Vec::new();
+                    for item in chunk {
+                        match item {
+                            PrefixOrKey::Prefix(prefix) => prefixes.push(prefix),
+                            PrefixOrKey::Key(key) => keys.push(key),
+                        }
+                    }
+                    Listing { prefixes, keys }
+                })
+                .collect::<Vec<_>>()
+                .into_iter(),
+        )
     }
 }
 

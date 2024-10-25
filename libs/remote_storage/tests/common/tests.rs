@@ -85,7 +85,7 @@ async fn pagination_should_work(ctx: &mut MaybeEnabledStorageWithTestBlobs) -> a
         .collect::<HashSet<_>>();
     assert_eq!(
         remote_only_prefixes.len() + missing_uploaded_prefixes.len(), 0,
-        "remote storage nested prefixes list mismatches with the uploads. Remote only prefixes: {remote_only_prefixes:?}, missing uploaded prefixes: {missing_uploaded_prefixes:?}",
+        "remote storage nested prefixes list mismatches with the uploads.\n\nRemote only prefixes: {remote_only_prefixes:?}\n\nmissing uploaded prefixes: {missing_uploaded_prefixes:?}",
     );
 
     // list_streaming
@@ -102,6 +102,7 @@ async fn pagination_should_work(ctx: &mut MaybeEnabledStorageWithTestBlobs) -> a
     let mut segment_max_size = 0;
     while let Some(st) = nested_remote_prefixes_st.next().await {
         let st = st?;
+        dbg!(&st.prefixes);
         segment_max_size = segment_max_size.max(st.prefixes.len());
         nested_remote_prefixes_combined.extend(st.prefixes.into_iter());
         segments += 1;
