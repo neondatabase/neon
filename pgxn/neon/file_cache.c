@@ -1734,7 +1734,7 @@ get_prewarm_info(PG_FUNCTION_ARGS)
 	bool		nulls[4];
 	TupleDesc	tupdesc;
 
-	if (lfc_size_limit != 0)
+	if (lfc_size_limit == 0)
 		PG_RETURN_NULL();
 
 	tupdesc = CreateTemplateTupleDesc(4);
