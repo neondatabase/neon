@@ -6,7 +6,6 @@ use criterion::{criterion_group, criterion_main, Criterion};
 use pageserver::{
     config::PageServerConf,
     context::{DownloadBehavior, RequestContext},
-    gc_result::Value,
     l0_flush::{L0FlushConfig, L0FlushGlobalState},
     page_cache,
     task_mgr::TaskKind,
