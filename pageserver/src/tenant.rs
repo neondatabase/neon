@@ -1815,6 +1815,8 @@ impl Tenant {
     }
 
     /// Loads the specified (offloaded) timeline from S3 and attaches it as a loaded timeline
+    ///
+    /// Counterpart to [`offload_timeline`].
     async fn unoffload_timeline(
         self: &Arc<Self>,
         timeline_id: TimelineId,
@@ -1823,6 +1825,14 @@ impl Tenant {
     ) -> Result<Arc<Timeline>, TimelineArchivalError> {
         info!("unoffloading timeline");
         let cancel = self.cancel.clone();
+
+        // Protect against concurrent attempts to use this TimelineId
+        let _create_guard = self.create_timeline_create_guard(timeline_id).map_err(|err| match err {
+            TimelineExclusionError::AlreadyCreating => TimelineArchivalError::AlreadyInProgress,
+            TimelineExclusionError::AlreadyExists(_) => TimelineArchivalError::Other(anyhow::anyhow!("Timeline already exists")),
+            TimelineExclusionError::Other(e) => TimelineArchivalError::Other(e),
+        })?;
+
         let timeline_preload = self
             .load_timeline_metadata(timeline_id, self.remote_storage.clone(), cancel.clone())
             .await;
