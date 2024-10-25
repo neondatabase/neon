@@ -3034,14 +3034,103 @@ impl<F: Future<Output = Result<O, E>>, O, E> Future for MeasuredRemoteOp<F> {
 }
 
 pub mod tokio_epoll_uring {
-    use metrics::{register_int_counter, register_uint_gauge_vec, UIntGauge, UIntGaugeVec};
+    use std::{
+        collections::HashMap,
+        sync::{Arc, Mutex, Weak},
+    };
+
+    use metrics::{register_histogram, register_int_counter, Histogram, LocalHistogram, UIntGauge};
     use once_cell::sync::Lazy;
+
+    /// Shared storage for tokio-epoll-uring thread local metrics.
+    pub(crate) static THREAD_LOCAL_METRICS_STORAGE: Lazy<ThreadLocalMetricsStorage> =
+        Lazy::new(|| ThreadLocalMetricsStorage::new());
+
+    pub struct ThreadLocalMetricsStorage {
+        /// List of thread local metrics observers.
+        observers: Mutex<HashMap<u64, Weak<ThreadLocalMetrics>>>,
+        /// A histogram shared between all thread local systems
+        /// for collecting slots waiters queue depth.
+        slots_waiters_queue_depth: Histogram,
+    }
+
+    pub struct ThreadLocalMetrics {
+        /// Local observer of thread local tokio-epoll-uring system's slots waiters queue depth.
+        slots_waiters_queue_depth: Mutex<LocalHistogram>,
+    }
+
+    impl ThreadLocalMetrics {
+        pub fn new(slots_waiters_queue_depth: LocalHistogram) -> Self {
+            ThreadLocalMetrics {
+                slots_waiters_queue_depth: Mutex::new(slots_waiters_queue_depth),
+            }
+        }
+
+        /// Flushes the thread local metrics to shared aggregator.
+        pub fn flush(&self) {
+            let local = self.slots_waiters_queue_depth.lock().unwrap();
+            local.flush();
+        }
+
+        /// Observes the tokio-epoll-uring slots queue depth metrics.
+        pub fn observe_slots_queue_depth(&self, queue_depth: u64) {
+            let local = self.slots_waiters_queue_depth.lock().unwrap();
+            local.observe(queue_depth as f64);
+        }
+    }
+
+    impl ThreadLocalMetricsStorage {
+        pub fn new() -> Self {
+            ThreadLocalMetricsStorage {
+                observers: Mutex::new(HashMap::new()),
+                slots_waiters_queue_depth: register_histogram!(
+                    "pageserver_tokio_epoll_uring_slots_waiters_queue_depth",
+                    "The slots waiters queue depth of each tokio_epoll_uring system",
+                    vec![1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0],
+                )
+                .expect("failed to define a metric"),
+            }
+        }
+
+        /// Registers a new thread local system. Returns a thread local metrics observer.
+        pub fn register_system(&self, id: u64) -> Arc<ThreadLocalMetrics> {
+            let per_system_metrics = Arc::new(ThreadLocalMetrics::new(
+                self.slots_waiters_queue_depth.local(),
+            ));
+            let mut g = self.observers.lock().unwrap();
+            g.insert(id, Arc::downgrade(&per_system_metrics));
+            per_system_metrics
+        }
+
+        /// Removes metrics observer for a thread local system.
+        /// This should be called before dropping a thread local system.
+        pub fn remove_system(&self, id: u64) {
+            let mut g = self.observers.lock().unwrap();
+            g.remove(&id);
+        }
+
+        /// Flush all thread local metrics to the shared storage.
+        pub fn flush_thread_local_metrics(&self) {
+            let g = self.observers.lock().unwrap();
+            g.values()
+                .filter_map(|local| local.upgrade())
+                .for_each(|local| {
+                    local.flush();
+                });
+        }
+    }
+
+    impl tokio_epoll_uring::metrics::PerSystemMetrics for ThreadLocalMetrics {
+        fn record_slots_submission_queue_depth(&self, queue_depth: u64) {
+            self.observe_slots_queue_depth(queue_depth);
+        }
+    }
 
     pub struct Collector {
         descs: Vec<metrics::core::Desc>,
         systems_created: UIntGauge,
         systems_destroyed: UIntGauge,
-        slots_waiters_queue_depth: UIntGaugeVec,
+        thread_local_metrics_storage: &'static ThreadLocalMetricsStorage,
     }
 
     impl metrics::core::Collector for Collector {
@@ -3051,22 +3140,23 @@ pub mod tokio_epoll_uring {
 
         fn collect(&self) -> Vec<metrics::proto::MetricFamily> {
             let mut mfs = Vec::with_capacity(Self::NMETRICS);
-            let tokio_epoll_uring::metrics::Metrics {
+            let tokio_epoll_uring::metrics::GlobalMetrics {
                 systems_created,
                 systems_destroyed,
-                slots_waiters_queue_depth,
             } = tokio_epoll_uring::metrics::global();
             self.systems_created.set(systems_created);
             mfs.extend(self.systems_created.collect());
             self.systems_destroyed.set(systems_destroyed);
             mfs.extend(self.systems_destroyed.collect());
 
-            for (system_id, queue_depth) in slots_waiters_queue_depth {
-                self.slots_waiters_queue_depth
-                    .with_label_values(&[&system_id.to_string()])
-                    .set(queue_depth);
-            }
+            self.thread_local_metrics_storage
+                .flush_thread_local_metrics();
 
+            mfs.extend(
+                self.thread_local_metrics_storage
+                    .slots_waiters_queue_depth
+                    .collect(),
+            );
             mfs
         }
     }
@@ -3100,23 +3190,11 @@ pub mod tokio_epoll_uring {
                     .cloned(),
             );
 
-            let slots_waiters_queue_depth = register_uint_gauge_vec!(
-                "pageserver_tokio_epoll_uring_slots_waiters_queue_depth",
-                "counter the slots waiter queue depth for each tokio-epoll-uring system",
-                &["system_id"]
-            )
-            .unwrap();
-            descs.extend(
-                metrics::core::Collector::desc(&slots_waiters_queue_depth)
-                    .into_iter()
-                    .cloned(),
-            );
-
             Self {
                 descs,
                 systems_created,
                 systems_destroyed,
-                slots_waiters_queue_depth,
+                thread_local_metrics_storage: &THREAD_LOCAL_METRICS_STORAGE,
             }
         }
     }

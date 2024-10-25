@@ -109,7 +109,10 @@ pub(crate) fn get() -> IoEngine {
 
 use std::{
     os::unix::prelude::FileExt,
-    sync::atomic::{AtomicU8, Ordering},
+    sync::{
+        atomic::{AtomicU8, Ordering},
+        Arc,
+    },
 };
 
 use super::{
@@ -303,7 +306,7 @@ pub fn feature_test() -> anyhow::Result<FeatureTestResult> {
                 .enable_all()
                 .build()
                 .unwrap();
-            Ok(match rt.block_on(tokio_epoll_uring::System::launch()) {
+            Ok(match rt.block_on(tokio_epoll_uring::System::launch(Arc::new(()))) {
                 Ok(_) => FeatureTestResult::PlatformPreferred({
                     assert!(matches!(
                         IoEngineKind::TokioEpollUring,
