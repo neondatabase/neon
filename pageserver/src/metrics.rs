@@ -3065,6 +3065,15 @@ pub mod tokio_epoll_uring {
         slots_submission_queue_depth: Histogram,
     }
 
+    /// Each thread-local [`tokio_epoll_uring::System`] gets one of these as its
+    /// [`tokio_epoll_uring::metrics::PerSystemMetrics`] generic.
+    ///
+    /// The System makes observations into [`Self`] and periodically, the collector
+    /// comes along and flushes [`Self`] into the shared storage [`THREAD_LOCAL_METRICS_STORAGE`].
+    ///
+    /// [`LocalHistogram`] is `!Send`, so, we need to put it behind a [`Mutex`].
+    /// But except for the periodic flush, the lock is uncontended so there's no waiting
+    /// for cache coherence protocol to get an exclusive cache line.
     pub struct ThreadLocalMetrics {
         /// Local observer of thread local tokio-epoll-uring system's slots waiters queue depth.
         slots_submission_queue_depth: Mutex<LocalHistogram>,
