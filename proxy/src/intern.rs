@@ -7,7 +7,7 @@ use std::sync::OnceLock;
 use lasso::{Capacity, MemoryLimits, Spur, ThreadedRodeo};
 use rustc_hash::FxHasher;
 
-use crate::{BranchId, EndpointId, ProjectId, RoleName};
+use crate::types::{BranchId, EndpointId, ProjectId, RoleName};
 
 pub trait InternId: Sized + 'static {
     fn get_interner() -> &'static StringInterner<Self>;

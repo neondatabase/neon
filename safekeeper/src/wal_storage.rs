@@ -29,7 +29,6 @@ use crate::metrics::{
 };
 use crate::state::TimelinePersistentState;
 use crate::wal_backup::{read_object, remote_timeline_path};
-use crate::SafeKeeperConf;
 use postgres_ffi::waldecoder::WalStreamDecoder;
 use postgres_ffi::XLogFileName;
 use postgres_ffi::XLOG_BLCKSZ;
@@ -87,7 +86,9 @@ pub trait Storage {
 pub struct PhysicalStorage {
     metrics: WalStorageMetrics,
     timeline_dir: Utf8PathBuf,
-    conf: SafeKeeperConf,
+
+    /// Disables fsync if true.
+    no_sync: bool,
 
     /// Size of WAL segment in bytes.
     wal_seg_size: usize,
@@ -151,9 +152,9 @@ impl PhysicalStorage {
     /// the disk. Otherwise, all LSNs are set to zero.
     pub fn new(
         ttid: &TenantTimelineId,
-        timeline_dir: Utf8PathBuf,
-        conf: &SafeKeeperConf,
+        timeline_dir: &Utf8Path,
         state: &TimelinePersistentState,
+        no_sync: bool,
     ) -> Result<PhysicalStorage> {
         let wal_seg_size = state.server.wal_seg_size as usize;
 
@@ -186,14 +187,20 @@ impl PhysicalStorage {
             "initialized storage for timeline {}, flush_lsn={}, commit_lsn={}, peer_horizon_lsn={}",
             ttid.timeline_id, flush_lsn, state.commit_lsn, state.peer_horizon_lsn,
         );
-        if flush_lsn < state.commit_lsn || flush_lsn < state.peer_horizon_lsn {
-            warn!("timeline {} potential data loss: flush_lsn by find_end_of_wal is less than either commit_lsn or peer_horizon_lsn from control file", ttid.timeline_id);
+        if flush_lsn < state.commit_lsn {
+            bail!("timeline {} potential data loss: flush_lsn {} by find_end_of_wal is less than commit_lsn  {} from control file", ttid.timeline_id, flush_lsn, state.commit_lsn);
+        }
+        if flush_lsn < state.peer_horizon_lsn {
+            warn!(
+                "timeline {}: flush_lsn {} is less than cfile peer_horizon_lsn {}",
+                ttid.timeline_id, flush_lsn, state.peer_horizon_lsn
+            );
         }
 
         Ok(PhysicalStorage {
             metrics: WalStorageMetrics::default(),
-            timeline_dir,
-            conf: conf.clone(),
+            timeline_dir: timeline_dir.to_path_buf(),
+            no_sync,
             wal_seg_size,
             pg_version: state.server.pg_version,
             system_id: state.server.system_id,
@@ -218,7 +225,7 @@ impl PhysicalStorage {
 
     /// Call fdatasync if config requires so.
     async fn fdatasync_file(&mut self, file: &File) -> Result<()> {
-        if !self.conf.no_sync {
+        if !self.no_sync {
             self.metrics
                 .observe_flush_seconds(time_io_closure(file.sync_data()).await?);
         }
@@ -257,9 +264,7 @@ impl PhysicalStorage {
 
             // Note: this doesn't get into observe_flush_seconds metric. But
             // segment init should be separate metric, if any.
-            if let Err(e) =
-                durable_rename(&tmp_path, &wal_file_partial_path, !self.conf.no_sync).await
-            {
+            if let Err(e) = durable_rename(&tmp_path, &wal_file_partial_path, !self.no_sync).await {
                 // Probably rename succeeded, but fsync of it failed. Remove
                 // the file then to avoid using it.
                 remove_file(wal_file_partial_path)

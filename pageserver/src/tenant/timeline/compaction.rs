@@ -32,11 +32,11 @@ use crate::page_cache;
 use crate::statvfs::Statvfs;
 use crate::tenant::checks::check_valid_layermap;
 use crate::tenant::remote_timeline_client::WaitCompletionError;
+use crate::tenant::storage_layer::batch_split_writer::{
+    BatchWriterResult, SplitDeltaLayerWriter, SplitImageLayerWriter,
+};
 use crate::tenant::storage_layer::filter_iterator::FilterIterator;
 use crate::tenant::storage_layer::merge_iterator::MergeIterator;
-use crate::tenant::storage_layer::split_writer::{
-    SplitDeltaLayerWriter, SplitImageLayerWriter, SplitWriterResult,
-};
 use crate::tenant::storage_layer::{
     AsLayerDesc, PersistentLayerDesc, PersistentLayerKey, ValueReconstructState,
 };
@@ -121,18 +121,12 @@ impl KeyHistoryRetention {
     async fn pipe_to(
         self,
         key: Key,
-        tline: &Arc<Timeline>,
         delta_writer: &mut SplitDeltaLayerWriter,
         mut image_writer: Option<&mut SplitImageLayerWriter>,
         stat: &mut CompactionStatistics,
-        dry_run: bool,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         let mut first_batch = true;
-        let discard = |key: &PersistentLayerKey| {
-            let key = key.clone();
-            async move { Self::discard_key(&key, tline, dry_run).await }
-        };
         for (cutoff_lsn, KeyLogAtLsn(logs)) in self.below_horizon {
             if first_batch {
                 if logs.len() == 1 && logs[0].1.is_image() {
@@ -141,45 +135,30 @@ impl KeyHistoryRetention {
                     };
                     stat.produce_image_key(img);
                     if let Some(image_writer) = image_writer.as_mut() {
-                        image_writer
-                            .put_image_with_discard_fn(key, img.clone(), tline, ctx, discard)
-                            .await?;
+                        image_writer.put_image(key, img.clone(), ctx).await?;
                     } else {
                         delta_writer
-                            .put_value_with_discard_fn(
-                                key,
-                                cutoff_lsn,
-                                Value::Image(img.clone()),
-                                tline,
-                                ctx,
-                                discard,
-                            )
+                            .put_value(key, cutoff_lsn, Value::Image(img.clone()), ctx)
                             .await?;
                     }
                 } else {
                     for (lsn, val) in logs {
                         stat.produce_key(&val);
-                        delta_writer
-                            .put_value_with_discard_fn(key, lsn, val, tline, ctx, discard)
-                            .await?;
+                        delta_writer.put_value(key, lsn, val, ctx).await?;
                     }
                 }
                 first_batch = false;
             } else {
                 for (lsn, val) in logs {
                     stat.produce_key(&val);
-                    delta_writer
-                        .put_value_with_discard_fn(key, lsn, val, tline, ctx, discard)
-                        .await?;
+                    delta_writer.put_value(key, lsn, val, ctx).await?;
                 }
             }
         }
         let KeyLogAtLsn(above_horizon_logs) = self.above_horizon;
         for (lsn, val) in above_horizon_logs {
             stat.produce_key(&val);
-            delta_writer
-                .put_value_with_discard_fn(key, lsn, val, tline, ctx, discard)
-                .await?;
+            delta_writer.put_value(key, lsn, val, ctx).await?;
         }
         Ok(())
     }
@@ -855,7 +834,12 @@ impl Timeline {
                 if self.cancel.is_cancelled() {
                     return Err(CompactionError::ShuttingDown);
                 }
-                all_keys.extend(l.load_keys(ctx).await.map_err(CompactionError::Other)?);
+                let delta = l.get_as_delta(ctx).await.map_err(CompactionError::Other)?;
+                let keys = delta
+                    .index_entries(ctx)
+                    .await
+                    .map_err(CompactionError::Other)?;
+                all_keys.extend(keys);
             }
             // The current stdlib sorting implementation is designed in a way where it is
             // particularly fast where the slice is made up of sorted sub-ranges.
@@ -2055,11 +2039,9 @@ impl Timeline {
                     retention
                         .pipe_to(
                             *last_key,
-                            self,
                             &mut delta_layer_writer,
                             image_layer_writer.as_mut(),
                             &mut stat,
-                            dry_run,
                             ctx,
                         )
                         .await?;
@@ -2094,11 +2076,9 @@ impl Timeline {
             retention
                 .pipe_to(
                     last_key,
-                    self,
                     &mut delta_layer_writer,
                     image_layer_writer.as_mut(),
                     &mut stat,
-                    dry_run,
                     ctx,
                 )
                 .await?;
@@ -2119,8 +2099,7 @@ impl Timeline {
                     .finish_with_discard_fn(self, ctx, end_key, discard)
                     .await?
             } else {
-                let (layers, _) = writer.take()?;
-                assert!(layers.is_empty(), "image layers produced in dry run mode?");
+                drop(writer);
                 Vec::new()
             }
         } else {
@@ -2132,8 +2111,7 @@ impl Timeline {
                 .finish_with_discard_fn(self, ctx, discard)
                 .await?
         } else {
-            let (layers, _) = delta_layer_writer.take()?;
-            assert!(layers.is_empty(), "delta layers produced in dry run mode?");
+            drop(delta_layer_writer);
             Vec::new()
         };
 
@@ -2147,11 +2125,11 @@ impl Timeline {
         let produced_image_layers_len = produced_image_layers.len();
         for action in produced_delta_layers {
             match action {
-                SplitWriterResult::Produced(layer) => {
+                BatchWriterResult::Produced(layer) => {
                     stat.produce_delta_layer(layer.layer_desc().file_size());
                     compact_to.push(layer);
                 }
-                SplitWriterResult::Discarded(l) => {
+                BatchWriterResult::Discarded(l) => {
                     keep_layers.insert(l);
                     stat.discard_delta_layer();
                 }
@@ -2159,11 +2137,11 @@ impl Timeline {
         }
         for action in produced_image_layers {
             match action {
-                SplitWriterResult::Produced(layer) => {
+                BatchWriterResult::Produced(layer) => {
                     stat.produce_image_layer(layer.layer_desc().file_size());
                     compact_to.push(layer);
                 }
-                SplitWriterResult::Discarded(l) => {
+                BatchWriterResult::Discarded(l) => {
                     keep_layers.insert(l);
                     stat.discard_image_layer();
                 }
@@ -2569,7 +2547,7 @@ impl CompactionDeltaLayer<TimelineAdaptor> for ResidentDeltaLayer {
     type DeltaEntry<'a> = DeltaEntry<'a>;
 
     async fn load_keys<'a>(&self, ctx: &RequestContext) -> anyhow::Result<Vec<DeltaEntry<'_>>> {
-        self.0.load_keys(ctx).await
+        self.0.get_as_delta(ctx).await?.index_entries(ctx).await
     }
 }
 

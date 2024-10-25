@@ -17,7 +17,7 @@ use crate::intern::{BranchIdInt, EndpointIdInt, ProjectIdInt};
 use crate::metrics::{Metrics, RedisErrors, RedisEventsCount};
 use crate::rate_limiter::GlobalRateLimiter;
 use crate::redis::connection_with_credentials_provider::ConnectionWithCredentialsProvider;
-use crate::EndpointId;
+use crate::types::EndpointId;
 
 #[derive(Deserialize, Debug, Clone)]
 pub(crate) struct ControlPlaneEventKey {

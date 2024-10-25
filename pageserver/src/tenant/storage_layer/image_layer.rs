@@ -41,10 +41,11 @@ use crate::tenant::vectored_blob_io::{
 };
 use crate::tenant::PageReconstructError;
 use crate::virtual_file::owned_buffers_io::io_buf_ext::IoBufExt;
+use crate::virtual_file::IoBufferMut;
 use crate::virtual_file::{self, MaybeFatalIo, VirtualFile};
 use crate::{IMAGE_FILE_MAGIC, STORAGE_FORMAT_VERSION, TEMP_FILE_SUFFIX};
 use anyhow::{anyhow, bail, ensure, Context, Result};
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use camino::{Utf8Path, Utf8PathBuf};
 use hex;
 use itertools::Itertools;
@@ -547,10 +548,10 @@ impl ImageLayerInner {
         for read in plan.into_iter() {
             let buf_size = read.size();
 
-            let buf = BytesMut::with_capacity(buf_size);
+            let buf = IoBufferMut::with_capacity(buf_size);
             let blobs_buf = vectored_blob_reader.read_blobs(&read, buf, ctx).await?;
-            let frozen_buf = blobs_buf.buf.freeze();
-            let view = BufView::new_bytes(frozen_buf);
+
+            let view = BufView::new_slice(&blobs_buf.buf);
 
             for meta in blobs_buf.blobs.iter() {
                 let img_buf = meta.read(&view).await?;
@@ -609,13 +610,12 @@ impl ImageLayerInner {
                 }
             }
 
-            let buf = BytesMut::with_capacity(buf_size);
+            let buf = IoBufferMut::with_capacity(buf_size);
             let res = vectored_blob_reader.read_blobs(&read, buf, ctx).await;
 
             match res {
                 Ok(blobs_buf) => {
-                    let frozen_buf = blobs_buf.buf.freeze();
-                    let view = BufView::new_bytes(frozen_buf);
+                    let view = BufView::new_slice(&blobs_buf.buf);
                     for meta in blobs_buf.blobs.iter() {
                         let img_buf = meta.read(&view).await;
 
@@ -672,6 +672,21 @@ impl ImageLayerInner {
                 1024,        // The default value. Unit tests might use a different value
             ),
         }
+    }
+
+    /// NB: not super efficient, but not terrible either. Should prob be an iterator.
+    //
+    // We're reusing the index traversal logical in plan_reads; would be nice to
+    // factor that out.
+    pub(crate) async fn load_keys(&self, ctx: &RequestContext) -> anyhow::Result<Vec<Key>> {
+        let plan = self
+            .plan_reads(KeySpace::single(self.key_range.clone()), None, ctx)
+            .await?;
+        Ok(plan
+            .into_iter()
+            .flat_map(|read| read.blobs_at)
+            .map(|(_, blob_meta)| blob_meta.key)
+            .collect())
     }
 }
 
@@ -824,6 +839,25 @@ impl ImageLayerWriterInner {
     /// Finish writing the image layer.
     ///
     async fn finish(
+        self,
+        ctx: &RequestContext,
+        end_key: Option<Key>,
+    ) -> anyhow::Result<(PersistentLayerDesc, Utf8PathBuf)> {
+        let temp_path = self.path.clone();
+        let result = self.finish0(ctx, end_key).await;
+        if let Err(ref e) = result {
+            tracing::info!(%temp_path, "cleaning up temporary file after error during writing: {e}");
+            if let Err(e) = std::fs::remove_file(&temp_path) {
+                tracing::warn!(error=%e, %temp_path, "error cleaning up temporary layer file after error during writing");
+            }
+        }
+        result
+    }
+
+    ///
+    /// Finish writing the image layer.
+    ///
+    async fn finish0(
         self,
         ctx: &RequestContext,
         end_key: Option<Key>,
@@ -990,7 +1024,7 @@ impl ImageLayerWriter {
         self.inner.take().unwrap().finish(ctx, None).await
     }
 
-    /// Finish writing the image layer with an end key, used in [`super::split_writer::SplitImageLayerWriter`]. The end key determines the end of the image layer's covered range and is exclusive.
+    /// Finish writing the image layer with an end key, used in [`super::batch_split_writer::SplitImageLayerWriter`]. The end key determines the end of the image layer's covered range and is exclusive.
     pub(super) async fn finish_with_end_key(
         mut self,
         end_key: Key,
@@ -1050,12 +1084,11 @@ impl<'a> ImageLayerIterator<'a> {
         let vectored_blob_reader = VectoredBlobReader::new(&self.image_layer.file);
         let mut next_batch = std::collections::VecDeque::new();
         let buf_size = plan.size();
-        let buf = BytesMut::with_capacity(buf_size);
+        let buf = IoBufferMut::with_capacity(buf_size);
         let blobs_buf = vectored_blob_reader
             .read_blobs(&plan, buf, self.ctx)
             .await?;
-        let frozen_buf = blobs_buf.buf.freeze();
-        let view = BufView::new_bytes(frozen_buf);
+        let view = BufView::new_slice(&blobs_buf.buf);
         for meta in blobs_buf.blobs.iter() {
             let img_buf = meta.read(&view).await?;
             next_batch.push_back((

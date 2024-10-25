@@ -683,7 +683,7 @@ jobs:
           provenance: false
           push: true
           pull: true
-          file: compute/Dockerfile.compute-node
+          file: compute/compute-node.Dockerfile
           cache-from: type=registry,ref=cache.neon.build/compute-node-${{ matrix.version.pg }}:cache-${{ matrix.version.debian }}-${{ matrix.arch }}
           cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/compute-node-{0}:cache-{1}-{2},mode=max', matrix.version.pg, matrix.version.debian, matrix.arch) || '' }}
           tags: |
@@ -703,7 +703,7 @@ jobs:
           provenance: false
           push: true
           pull: true
-          file: compute/Dockerfile.compute-node
+          file: compute/compute-node.Dockerfile
           target: neon-pg-ext-test
           cache-from: type=registry,ref=cache.neon.build/neon-test-extensions-${{ matrix.version.pg }}:cache-${{ matrix.version.debian }}-${{ matrix.arch }}
           cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/neon-test-extensions-{0}:cache-{1}-{2},mode=max', matrix.version.pg, matrix.version.debian, matrix.arch) || '' }}
@@ -728,7 +728,7 @@ jobs:
           provenance: false
           push: true
           pull: true
-          file: compute/Dockerfile.compute-node
+          file: compute/compute-node.Dockerfile
           cache-from: type=registry,ref=cache.neon.build/neon-test-extensions-${{ matrix.version.pg }}:cache-${{ matrix.version.debian }}-${{ matrix.arch }}
           cache-to: ${{ github.ref_name == 'main' && format('type=registry,ref=cache.neon.build/compute-tools-{0}:cache-{1}-{2},mode=max', matrix.version.pg, matrix.version.debian, matrix.arch) || '' }}
           tags: |
@@ -1078,20 +1078,6 @@ jobs:
     runs-on: [ self-hosted, small ]
     container: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/ansible:latest
     steps:
-      - name: Fix git ownership
-        run: |
-          # Workaround for `fatal: detected dubious ownership in repository at ...`
-          #
-          # Use both ${{ github.workspace }} and ${GITHUB_WORKSPACE} because they're different on host and in containers
-          #   Ref https://github.com/actions/checkout/issues/785
-          #
-          git config --global --add safe.directory ${{ github.workspace }}
-          git config --global --add safe.directory ${GITHUB_WORKSPACE}
-          for r in 14 15 16 17; do
-            git config --global --add safe.directory "${{ github.workspace }}/vendor/postgres-v$r"
-            git config --global --add safe.directory "${GITHUB_WORKSPACE}/vendor/postgres-v$r"
-          done
-
       - uses: actions/checkout@v4
 
       - name: Trigger deploy workflow
