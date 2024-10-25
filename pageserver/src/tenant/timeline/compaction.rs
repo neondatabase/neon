@@ -2138,7 +2138,7 @@ impl Timeline {
         };
 
         if partial_compaction && !produced_delta_layers.is_empty() {
-            bail!("partial compaction cannot produce delta layers (for now)");
+            bail!("implementation error: partial compaction should not be producing delta layers (for now)");
         }
 
         let mut compact_to = Vec::new();
