@@ -3036,7 +3036,7 @@ impl<F: Future<Output = Result<O, E>>, O, E> Future for MeasuredRemoteOp<F> {
 pub mod tokio_epoll_uring {
     use std::{
         collections::HashMap,
-        sync::{Arc, Mutex, Weak},
+        sync::{Arc, Mutex},
     };
 
     use metrics::{register_histogram, register_int_counter, Histogram, LocalHistogram, UIntGauge};
@@ -3059,7 +3059,7 @@ pub mod tokio_epoll_uring {
 
     pub struct ThreadLocalMetricsStorage {
         /// List of thread local metrics observers.
-        observers: Mutex<HashMap<u64, Weak<ThreadLocalMetrics>>>,
+        observers: Mutex<HashMap<u64, Arc<ThreadLocalMetrics>>>,
         /// A histogram shared between all thread local systems
         /// for collecting slots submission queue depth.
         slots_submission_queue_depth: Histogram,
@@ -3077,7 +3077,7 @@ pub mod tokio_epoll_uring {
                 self.slots_submission_queue_depth.local(),
             ));
             let mut g = self.observers.lock().unwrap();
-            g.insert(id, Arc::downgrade(&per_system_metrics));
+            g.insert(id, Arc::clone(&per_system_metrics));
             per_system_metrics
         }
 
@@ -3091,11 +3091,9 @@ pub mod tokio_epoll_uring {
         /// Flush all thread local metrics to the shared storage.
         pub fn flush_thread_local_metrics(&self) {
             let g = self.observers.lock().unwrap();
-            g.values()
-                .filter_map(|local| local.upgrade())
-                .for_each(|local| {
-                    local.flush();
-                });
+            g.values().for_each(|local| {
+                local.flush();
+            });
         }
     }
 
