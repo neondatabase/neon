@@ -1833,8 +1833,9 @@ impl Tenant {
         let cancel = self.cancel.clone();
 
         // Protect against concurrent attempts to use this TimelineId
+        let allow_offloaded = true;
         let _create_guard = self
-            .create_timeline_create_guard(timeline_id, true)
+            .create_timeline_create_guard(timeline_id, allow_offloaded)
             .map_err(|err| match err {
                 TimelineExclusionError::AlreadyCreating => TimelineArchivalError::AlreadyInProgress,
                 TimelineExclusionError::AlreadyExists(_) => {
