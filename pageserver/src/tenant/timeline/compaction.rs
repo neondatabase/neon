@@ -2052,8 +2052,8 @@ impl Timeline {
             }
         }
 
+        // TODO: move the below part to the loop body
         let last_key = last_key.expect("no keys produced during compaction");
-        // TODO: move this part to the loop body
         stat.on_unique_key_visited();
 
         let skip_adding_key = if let Some(ref compaction_key_range) = compaction_key_range {
@@ -2083,6 +2083,7 @@ impl Timeline {
                 )
                 .await?;
         }
+        // end: move the above part to the loop body
 
         let discard = |key: &PersistentLayerKey| {
             let key = key.clone();
