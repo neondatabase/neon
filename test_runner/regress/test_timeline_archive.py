@@ -326,11 +326,11 @@ def test_timeline_offload_persist(neon_env_builder: NeonEnvBuilder, delete_timel
 
     if delete_timeline:
         ps_http.timeline_delete(tenant_id, child_timeline_id)
-        # with pytest.raises():
-        ps_http.timeline_detail(
-            tenant_id,
-            child_timeline_id,
-        )
+        with pytest.raises(PageserverApiException, match="not found"):
+            ps_http.timeline_detail(
+                tenant_id,
+                child_timeline_id,
+            )
     else:
         ps_http.timeline_archival_config(
             tenant_id,
