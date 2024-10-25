@@ -78,7 +78,7 @@ pub async fn thread_local_system() -> Handle {
                     )
                     .await;
                     let per_system_metrics = metrics::THREAD_LOCAL_METRICS_STORAGE.register_system(inner.thread_local_state_id);
-                    let res = System::launch(per_system_metrics)
+                    let res = System::launch_with_metrics(per_system_metrics)
                     // this might move us to another executor thread => loop outside the get_or_try_init, not inside it
                     .await;
                     match res {

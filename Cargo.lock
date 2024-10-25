@@ -6272,7 +6272,7 @@ dependencies = [
 [[package]]
 name = "tokio-epoll-uring"
 version = "0.1.0"
-source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=yuchen/expose-waiters-queue-depth-metrics#a6f38752d6477bbedfe3ee6c61091634c9c5cfd7"
+source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=yuchen/expose-waiters-queue-depth-metrics#dbec1bc6a1686817e79b110645399011ba908bec"
 dependencies = [
  "futures",
  "nix 0.26.4",
@@ -6788,7 +6788,7 @@ dependencies = [
 [[package]]
 name = "uring-common"
 version = "0.1.0"
-source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=yuchen/expose-waiters-queue-depth-metrics#a6f38752d6477bbedfe3ee6c61091634c9c5cfd7"
+source = "git+https://github.com/neondatabase/tokio-epoll-uring.git?branch=yuchen/expose-waiters-queue-depth-metrics#dbec1bc6a1686817e79b110645399011ba908bec"
 dependencies = [
  "bytes",
  "io-uring",
