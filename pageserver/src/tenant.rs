@@ -1835,10 +1835,14 @@ impl Tenant {
         // Protect against concurrent attempts to use this TimelineId
         let allow_offloaded = true;
         let _create_guard = self
-            .create_timeline_create_guard(timeline_id, allow_offloaded)
+            .create_timeline_create_guard(
+                timeline_id,
+                CreateTimelineIdempotency::FailWithConflict,
+                allow_offloaded,
+            )
             .map_err(|err| match err {
                 TimelineExclusionError::AlreadyCreating => TimelineArchivalError::AlreadyInProgress,
-                TimelineExclusionError::AlreadyExists(_) => {
+                TimelineExclusionError::AlreadyExists { .. } => {
                     TimelineArchivalError::Other(anyhow::anyhow!("Timeline already exists"))
                 }
                 TimelineExclusionError::Other(e) => TimelineArchivalError::Other(e),
@@ -2134,7 +2138,6 @@ impl Tenant {
         );
 
         // Protect against concurrent attempts to use this TimelineId
-        let allow_offloaded = false;
         let create_guard = match self
             .start_creating_timeline(new_timeline_id, CreateTimelineIdempotency::FailWithConflict)
             .await?
