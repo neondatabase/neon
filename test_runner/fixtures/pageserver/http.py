@@ -130,6 +130,26 @@ class LayerMapInfo:
 
 
 @dataclass
+class ScanDisposableKeysResponse:
+    disposable_count: int
+    not_disposable_count: int
+
+    def __add__(self, b):
+        a = self
+        assert isinstance(a, ScanDisposableKeysResponse)
+        assert isinstance(b, ScanDisposableKeysResponse)
+        return ScanDisposableKeysResponse(
+            a.disposable_count + b.disposable_count, a.not_disposable_count + b.not_disposable_count
+        )
+
+    @classmethod
+    def from_json(cls, d: dict[str, Any]) -> ScanDisposableKeysResponse:
+        disposable_count = d["disposable_count"]
+        not_disposable_count = d["not_disposable_count"]
+        return ScanDisposableKeysResponse(disposable_count, not_disposable_count)
+
+
+@dataclass
 class TenantConfig:
     tenant_specific_overrides: dict[str, Any]
     effective_config: dict[str, Any]
@@ -904,6 +924,16 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         )
         self.verbose_error(res)
         return LayerMapInfo.from_json(res.json())
+
+    def timeline_layer_scan_disposable_keys(
+        self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId, layer_name: str
+    ) -> ScanDisposableKeysResponse:
+        res = self.post(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline/{timeline_id}/layer/{layer_name}/scan_disposable_keys",
+        )
+        self.verbose_error(res)
+        assert res.status_code == 200
+        return ScanDisposableKeysResponse.from_json(res.json())
 
     def download_layer(
         self, tenant_id: Union[TenantId, TenantShardId], timeline_id: TimelineId, layer_name: str
