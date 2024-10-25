@@ -3115,15 +3115,22 @@ pub mod tokio_epoll_uring {
 
         /// Flushes the thread local metrics to shared aggregator.
         pub fn flush(&self) {
-            let local = self.slots_submission_queue_depth.lock().unwrap();
-            local.flush();
+            let Self {
+                slots_submission_queue_depth,
+            } = self;
+            slots_submission_queue_depth.lock().unwrap().flush();
         }
     }
 
     impl tokio_epoll_uring::metrics::PerSystemMetrics for ThreadLocalMetrics {
         fn observe_slots_submission_queue_depth(&self, queue_depth: u64) {
-            let local = self.slots_submission_queue_depth.lock().unwrap();
-            local.observe(queue_depth as f64);
+            let Self {
+                slots_submission_queue_depth,
+            } = self;
+            slots_submission_queue_depth
+                .lock()
+                .unwrap()
+                .observe(queue_depth as f64);
         }
     }
 
