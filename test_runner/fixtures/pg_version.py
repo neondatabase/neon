@@ -1,13 +1,8 @@
 from __future__ import annotations
 
 import enum
-from typing import TYPE_CHECKING
 
 from typing_extensions import override
-
-if TYPE_CHECKING:
-    from typing import Optional
-
 
 """
 This fixture is used to determine which version of Postgres to use for tests.
@@ -47,7 +42,7 @@ class PgVersion(str, enum.Enum):
 
     @classmethod
     @override
-    def _missing_(cls, value: object) -> Optional[PgVersion]:
+    def _missing_(cls, value: object) -> PgVersion | None:
         known_values = {v.value for _, v in cls.__members__.items()}
 
         # Allow passing version as a string with "v" prefix (e.g. "v14")

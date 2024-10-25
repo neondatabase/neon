@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import time
-from typing import Union
 
 import pytest
 from fixtures.common_types import Lsn, TenantId, TenantShardId, TimelineId
@@ -175,7 +174,7 @@ def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
 
     def get_layers_protected_by_lease(
         ps_http: PageserverHttpClient,
-        tenant_id: Union[TenantId, TenantShardId],
+        tenant_id: TenantId | TenantShardId,
         timeline_id: TimelineId,
         lease_lsn: Lsn,
     ) -> set[str]:

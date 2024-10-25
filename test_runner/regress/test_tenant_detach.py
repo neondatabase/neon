@@ -5,7 +5,6 @@ import enum
 import random
 import time
 from threading import Thread
-from typing import TYPE_CHECKING
 
 import asyncpg
 import pytest
@@ -27,10 +26,6 @@ from fixtures.remote_storage import (
 )
 from fixtures.utils import query_scalar, wait_until
 from prometheus_client.samples import Sample
-
-if TYPE_CHECKING:
-    from typing import Optional
-
 
 # In tests that overlap endpoint activity with tenant attach/detach, there are
 # a variety of warnings that the page service may emit when it cannot acquire
@@ -498,7 +493,7 @@ def test_metrics_while_ignoring_broken_tenant_and_reloading(
         r".* Changing Active tenant to Broken state, reason: broken from test"
     )
 
-    def only_int(samples: list[Sample]) -> Optional[int]:
+    def only_int(samples: list[Sample]) -> int | None:
         if len(samples) == 1:
             return int(samples[0].value)
         assert len(samples) == 0

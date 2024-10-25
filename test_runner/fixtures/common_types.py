@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, TypeVar
 from typing_extensions import override
 
 if TYPE_CHECKING:
-    from typing import Any, Union
+    from typing import Any
 
     T = TypeVar("T", bound="Id")
 
@@ -24,7 +24,7 @@ class Lsn:
     representation is like "1/0123abcd". See also pg_lsn datatype in Postgres
     """
 
-    def __init__(self, x: Union[int, str]):
+    def __init__(self, x: int | str):
         if isinstance(x, int):
             self.lsn_int = x
         else:
@@ -67,7 +67,7 @@ class Lsn:
             return NotImplemented
         return self.lsn_int - other.lsn_int
 
-    def __add__(self, other: Union[int, Lsn]) -> Lsn:
+    def __add__(self, other: int | Lsn) -> Lsn:
         if isinstance(other, int):
             return Lsn(self.lsn_int + other)
         elif isinstance(other, Lsn):
