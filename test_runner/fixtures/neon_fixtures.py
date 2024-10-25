@@ -44,7 +44,14 @@ from urllib3.util.retry import Retry
 
 from fixtures import overlayfs
 from fixtures.auth_tokens import AuthKeys, TokenScope
-from fixtures.common_types import Lsn, NodeId, TenantId, TenantShardId, TimelineId
+from fixtures.common_types import (
+    Lsn,
+    NodeId,
+    TenantId,
+    TenantShardId,
+    TimelineArchivalState,
+    TimelineId,
+)
 from fixtures.endpoint.http import EndpointHttpClient
 from fixtures.log_helper import log
 from fixtures.metrics import Metrics, MetricsGetter, parse_metrics
@@ -2146,6 +2153,24 @@ class NeonStorageController(MetricsGetter, LogUtils):
         response.raise_for_status()
         return response.json()
 
+    def timeline_archival_config(
+        self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        state: TimelineArchivalState,
+    ):
+        config = {"state": state.value}
+        log.info(
+            f"requesting timeline archival config {config} for tenant {tenant_id} and timeline {timeline_id}"
+        )
+        res = self.request(
+            "PUT",
+            f"{self.api}/v1/tenant/{tenant_id}/timeline/{timeline_id}/archival_config",
+            json=config,
+            headers=self.headers(TokenScope.ADMIN),
+        )
+        return res.json()
+
     def configure_failpoints(self, config_strings: tuple[str, str] | list[tuple[str, str]]):
         if isinstance(config_strings, tuple):
             pairs = [config_strings]
@@ -2662,6 +2687,14 @@ class NeonPageserver(PgProtocol, LogUtils):
     def timeline_scan_no_disposable_keys(
         self, tenant_shard_id: TenantShardId, timeline_id: TimelineId
     ) -> TimelineAssertNoDisposableKeysResult:
+        """
+        Scan all keys in all layers of the tenant/timeline for disposable keys.
+        Disposable keys are keys that are present in a layer referenced by the shard
+        but are not going to be accessed by the shard.
+        For example, after shard split, the child shards will reference the parent's layer
+        files until new data is ingested and/or compaction rewrites the layers.
+        """
+
         ps_http = self.http_client()
         tally = ScanDisposableKeysResponse(0, 0)
         per_layer = []

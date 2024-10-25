@@ -203,7 +203,7 @@ class LayerMapInfo:
         return set(x.layer_file_name for x in self.historic_layers)
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass
 class ScanDisposableKeysResponse:
     disposable_count: int
     not_disposable_count: int
@@ -233,6 +233,19 @@ class TenantConfig:
         return TenantConfig(
             tenant_specific_overrides=d["tenant_specific_overrides"],
             effective_config=d["effective_config"],
+        )
+
+
+@dataclass
+class TimelinesInfoAndOffloaded:
+    timelines: list[dict[str, Any]]
+    offloaded: list[dict[str, Any]]
+
+    @classmethod
+    def from_json(cls, d: dict[str, Any]) -> TimelinesInfoAndOffloaded:
+        return TimelinesInfoAndOffloaded(
+            timelines=d["timelines"],
+            offloaded=d["offloaded"],
         )
 
 
@@ -557,6 +570,18 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         res_json = res.json()
         assert isinstance(res_json, list)
         return res_json
+
+    def timeline_and_offloaded_list(
+        self,
+        tenant_id: Union[TenantId, TenantShardId],
+    ) -> TimelinesInfoAndOffloaded:
+        res = self.get(
+            f"http://localhost:{self.port}/v1/tenant/{tenant_id}/timeline_and_offloaded",
+        )
+        self.verbose_error(res)
+        res_json = res.json()
+        assert isinstance(res_json, dict)
+        return TimelinesInfoAndOffloaded.from_json(res_json)
 
     def timeline_create(
         self,

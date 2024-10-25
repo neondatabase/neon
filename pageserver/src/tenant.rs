@@ -600,17 +600,21 @@ pub enum TimelineOrOffloaded {
 }
 
 impl TimelineOrOffloaded {
-    pub fn tenant_shard_id(&self) -> TenantShardId {
+    pub fn arc_ref(&self) -> TimelineOrOffloadedArcRef<'_> {
         match self {
-            TimelineOrOffloaded::Timeline(timeline) => timeline.tenant_shard_id,
-            TimelineOrOffloaded::Offloaded(offloaded) => offloaded.tenant_shard_id,
+            TimelineOrOffloaded::Timeline(timeline) => {
+                TimelineOrOffloadedArcRef::Timeline(timeline)
+            }
+            TimelineOrOffloaded::Offloaded(offloaded) => {
+                TimelineOrOffloadedArcRef::Offloaded(offloaded)
+            }
         }
     }
+    pub fn tenant_shard_id(&self) -> TenantShardId {
+        self.arc_ref().tenant_shard_id()
+    }
     pub fn timeline_id(&self) -> TimelineId {
-        match self {
-            TimelineOrOffloaded::Timeline(timeline) => timeline.timeline_id,
-            TimelineOrOffloaded::Offloaded(offloaded) => offloaded.timeline_id,
-        }
+        self.arc_ref().timeline_id()
     }
     pub fn delete_progress(&self) -> &Arc<tokio::sync::Mutex<DeleteTimelineFlow>> {
         match self {
@@ -618,7 +622,7 @@ impl TimelineOrOffloaded {
             TimelineOrOffloaded::Offloaded(offloaded) => &offloaded.delete_progress,
         }
     }
-    pub fn remote_client_maybe_construct(&self, tenant: &Tenant) -> Arc<RemoteTimelineClient> {
+    fn remote_client_maybe_construct(&self, tenant: &Tenant) -> Arc<RemoteTimelineClient> {
         match self {
             TimelineOrOffloaded::Timeline(timeline) => timeline.remote_client.clone(),
             TimelineOrOffloaded::Offloaded(offloaded) => match offloaded.remote_client.clone() {
@@ -632,6 +636,38 @@ impl TimelineOrOffloaded {
                 }
             },
         }
+    }
+}
+
+pub enum TimelineOrOffloadedArcRef<'a> {
+    Timeline(&'a Arc<Timeline>),
+    Offloaded(&'a Arc<OffloadedTimeline>),
+}
+
+impl TimelineOrOffloadedArcRef<'_> {
+    pub fn tenant_shard_id(&self) -> TenantShardId {
+        match self {
+            TimelineOrOffloadedArcRef::Timeline(timeline) => timeline.tenant_shard_id,
+            TimelineOrOffloadedArcRef::Offloaded(offloaded) => offloaded.tenant_shard_id,
+        }
+    }
+    pub fn timeline_id(&self) -> TimelineId {
+        match self {
+            TimelineOrOffloadedArcRef::Timeline(timeline) => timeline.timeline_id,
+            TimelineOrOffloadedArcRef::Offloaded(offloaded) => offloaded.timeline_id,
+        }
+    }
+}
+
+impl<'a> From<&'a Arc<Timeline>> for TimelineOrOffloadedArcRef<'a> {
+    fn from(timeline: &'a Arc<Timeline>) -> Self {
+        Self::Timeline(timeline)
+    }
+}
+
+impl<'a> From<&'a Arc<OffloadedTimeline>> for TimelineOrOffloadedArcRef<'a> {
+    fn from(timeline: &'a Arc<OffloadedTimeline>) -> Self {
+        Self::Offloaded(timeline)
     }
 }
 
@@ -852,6 +888,13 @@ enum CreateTimelineResult {
 }
 
 impl CreateTimelineResult {
+    fn discriminant(&self) -> &'static str {
+        match self {
+            Self::Created(_) => "Created",
+            Self::Idempotent(_) => "Idempotent",
+            Self::ImportSpawned(_) => "ImportSpawned",
+        }
+    }
     fn timeline(&self) -> &Arc<Timeline> {
         match self {
             Self::Created(t) | Self::Idempotent(t) | Self::ImportSpawned(t) => t,
@@ -2169,16 +2212,17 @@ impl Tenant {
         self.timelines.lock().unwrap().keys().cloned().collect()
     }
 
-    /// This is used to create the initial 'main' timeline during bootstrapping,
-    /// or when importing a new base backup. The caller is expected to load an
-    /// initial image of the datadir to the new timeline after this.
+    /// This is used by tests & import-from-basebackup.
     ///
-    /// Until that happens, the on-disk state is invalid (disk_consistent_lsn=Lsn(0))
-    /// and the timeline will fail to load at a restart.
+    /// The returned [`UninitializedTimeline`] contains no data nor metadata and it is in
+    /// a state that will fail [`Tenant::load_remote_timeline`] because `disk_consistent_lsn=Lsn(0)`.
     ///
-    /// For tests, use `DatadirModification::init_empty_test_timeline` + `commit` to setup the
-    /// minimum amount of keys required to get a writable timeline.
-    /// (Without it, `put` might fail due to `repartition` failing.)
+    /// The caller is responsible for getting the timeline into a state that will be accepted
+    /// by [`Tenant::load_remote_timeline`] / [`Tenant::attach`].
+    /// Then they may call [`UninitializedTimeline::finish_creation`] to add the timeline
+    /// to the [`Tenant::timelines`].
+    ///
+    /// Tests should use `Tenant::create_test_timeline` to set up the minimum required metadata keys.
     pub(crate) async fn create_empty_timeline(
         &self,
         new_timeline_id: TimelineId,
@@ -2420,8 +2464,17 @@ impl Tenant {
 
         // At this point we have dropped our guard on [`Self::timelines_creating`], and
         // the timeline is visible in [`Self::timelines`], but it is _not_ durable yet.  We must
-        // not send a success to the caller until it is.  The same applies to handling retries,
-        // that is done in [`Self::start_creating_timeline`].
+        // not send a success to the caller until it is.  The same applies to idempotent retries.
+        //
+        // TODO: the timeline is already visible in [`Self::timelines`]; a caller could incorrectly
+        // assume that, because they can see the timeline via API, that the creation is done and
+        // that it is durable. Ideally, we would keep the timeline hidden (in [`Self::timelines_creating`])
+        // until it is durable, e.g., by extending the time we hold the creation guard. This also
+        // interacts with UninitializedTimeline and is generally a bit tricky.
+        //
+        // To re-emphasize: the only correct way to create a timeline is to repeat calling the
+        // creation API until it returns success. Only then is durability guaranteed.
+        info!(creation_result=%result.discriminant(), "waiting for timeline to be durable");
         result
             .timeline()
             .remote_client
@@ -3293,33 +3346,58 @@ impl Tenant {
         &self,
         child_shards: &Vec<TenantShardId>,
     ) -> anyhow::Result<()> {
-        let timelines = self.timelines.lock().unwrap().clone();
-        for timeline in timelines.values() {
+        let (timelines, offloaded) = {
+            let timelines = self.timelines.lock().unwrap();
+            let offloaded = self.timelines_offloaded.lock().unwrap();
+            (timelines.clone(), offloaded.clone())
+        };
+        let timelines_iter = timelines
+            .values()
+            .map(TimelineOrOffloadedArcRef::<'_>::from)
+            .chain(
+                offloaded
+                    .values()
+                    .map(TimelineOrOffloadedArcRef::<'_>::from),
+            );
+        for timeline in timelines_iter {
             // We do not block timeline creation/deletion during splits inside the pageserver: it is up to higher levels
             // to ensure that they do not start a split if currently in the process of doing these.
 
-            // Upload an index from the parent: this is partly to provide freshness for the
-            // child tenants that will copy it, and partly for general ease-of-debugging: there will
-            // always be a parent shard index in the same generation as we wrote the child shard index.
-            tracing::info!(timeline_id=%timeline.timeline_id, "Uploading index");
-            timeline
-                .remote_client
-                .schedule_index_upload_for_file_changes()?;
-            timeline.remote_client.wait_completion().await?;
+            let timeline_id = timeline.timeline_id();
+
+            if let TimelineOrOffloadedArcRef::Timeline(timeline) = timeline {
+                // Upload an index from the parent: this is partly to provide freshness for the
+                // child tenants that will copy it, and partly for general ease-of-debugging: there will
+                // always be a parent shard index in the same generation as we wrote the child shard index.
+                tracing::info!(%timeline_id, "Uploading index");
+                timeline
+                    .remote_client
+                    .schedule_index_upload_for_file_changes()?;
+                timeline.remote_client.wait_completion().await?;
+            }
+
+            let remote_client = match timeline {
+                TimelineOrOffloadedArcRef::Timeline(timeline) => timeline.remote_client.clone(),
+                TimelineOrOffloadedArcRef::Offloaded(offloaded) => {
+                    let remote_client = self
+                        .build_timeline_client(offloaded.timeline_id, self.remote_storage.clone());
+                    Arc::new(remote_client)
+                }
+            };
 
             // Shut down the timeline's remote client: this means that the indices we write
             // for child shards will not be invalidated by the parent shard deleting layers.
-            tracing::info!(timeline_id=%timeline.timeline_id, "Shutting down remote storage client");
-            timeline.remote_client.shutdown().await;
+            tracing::info!(%timeline_id, "Shutting down remote storage client");
+            remote_client.shutdown().await;
 
             // Download methods can still be used after shutdown, as they don't flow through the remote client's
             // queue.  In principal the RemoteTimelineClient could provide this without downloading it, but this
             // operation is rare, so it's simpler to just download it (and robustly guarantees that the index
             // we use here really is the remotely persistent one).
-            tracing::info!(timeline_id=%timeline.timeline_id, "Downloading index_part from parent");
-            let result = timeline.remote_client
+            tracing::info!(%timeline_id, "Downloading index_part from parent");
+            let result = remote_client
                 .download_index_file(&self.cancel)
-                .instrument(info_span!("download_index_file", tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), timeline_id=%timeline.timeline_id))
+                .instrument(info_span!("download_index_file", tenant_id=%self.tenant_shard_id.tenant_id, shard_id=%self.tenant_shard_id.shard_slug(), %timeline_id))
                 .await?;
             let index_part = match result {
                 MaybeDeletedIndexPart::Deleted(_) => {
@@ -3329,11 +3407,11 @@ impl Tenant {
             };
 
             for child_shard in child_shards {
-                tracing::info!(timeline_id=%timeline.timeline_id, "Uploading index_part for child {}", child_shard.to_index());
+                tracing::info!(%timeline_id, "Uploading index_part for child {}", child_shard.to_index());
                 upload_index_part(
                     &self.remote_storage,
                     child_shard,
-                    &timeline.timeline_id,
+                    &timeline_id,
                     self.generation,
                     &index_part,
                     &self.cancel,
@@ -3341,8 +3419,6 @@ impl Tenant {
                 .await?;
             }
         }
-
-        // TODO: also copy index files of offloaded timelines
 
         let tenant_manifest = self.tenant_manifest();
         // TODO: generation support
@@ -4352,6 +4428,8 @@ impl Tenant {
             .schedule_index_upload_for_full_metadata_update(&metadata)
             .context("branch initial metadata upload")?;
 
+        // Callers are responsible to wait for uploads to complete and for activating the timeline.
+
         Ok(CreateTimelineResult::Created(new_timeline))
     }
 
@@ -4421,24 +4499,6 @@ impl Tenant {
                         }
                     }
                 }
-
-                // Wait for uploads to complete, so that when we return Ok, the timeline
-                // is known to be durable on remote storage. Just like we do at the end of
-                // this function, after we have created the timeline ourselves.
-                //
-                // We only really care that the initial version of `index_part.json` has
-                // been uploaded. That's enough to remember that the timeline
-                // exists. However, there is no function to wait specifically for that so
-                // we just wait for all in-progress uploads to finish.
-                existing
-                    .remote_client
-                    .wait_completion()
-                    .await
-                    .context("wait for timeline uploads to complete")?;
-
-                // TODO: shouldn't we also wait for timeline to become active?
-                // Code before this(https://github.com/neondatabase/neon/pull/9366) refactoring
-                // didn't do it.
 
                 Ok(StartCreatingTimelineResult::Idempotent(existing))
             }
@@ -4651,6 +4711,8 @@ impl Tenant {
 
         // All done!
         let timeline = raw_timeline.finish_creation()?;
+
+        // Callers are responsible to wait for uploads to complete and for activating the timeline.
 
         Ok(CreateTimelineResult::Created(timeline))
     }
