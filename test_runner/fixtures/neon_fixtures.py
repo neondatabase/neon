@@ -17,7 +17,7 @@ from collections.abc import Iterable, Iterator
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from functools import cached_property
 from pathlib import Path
 from types import TracebackType
@@ -1567,14 +1567,13 @@ class StorageControllerApiException(Exception):
 
 # See libs/pageserver_api/src/controller_api.rs
 # for the rust definitions of the enums below
-# TODO: Replace with `StrEnum` when we upgrade to python 3.11
-class PageserverAvailability(str, Enum):
+class PageserverAvailability(StrEnum):
     ACTIVE = "Active"
     UNAVAILABLE = "Unavailable"
     OFFLINE = "Offline"
 
 
-class PageserverSchedulingPolicy(str, Enum):
+class PageserverSchedulingPolicy(StrEnum):
     ACTIVE = "Active"
     DRAINING = "Draining"
     FILLING = "Filling"
@@ -1582,7 +1581,7 @@ class PageserverSchedulingPolicy(str, Enum):
     PAUSE_FOR_RESTART = "PauseForRestart"
 
 
-class StorageControllerLeadershipStatus(str, Enum):
+class StorageControllerLeadershipStatus(StrEnum):
     LEADER = "leader"
     STEPPED_DOWN = "stepped_down"
     CANDIDATE = "candidate"
@@ -4390,8 +4389,7 @@ class NeonBroker(LogUtils):
         assert_no_errors(self.logfile, "storage_controller", [])
 
 
-# TODO: Replace with `StrEnum` when we upgrade to python 3.11
-class NodeKind(str, Enum):
+class NodeKind(StrEnum):
     PAGESERVER = "pageserver"
     SAFEKEEPER = "safekeeper"
 

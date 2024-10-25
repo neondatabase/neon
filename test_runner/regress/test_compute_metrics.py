@@ -3,6 +3,7 @@ from __future__ import annotations
 import enum
 import os
 import shutil
+from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
@@ -115,7 +116,7 @@ def evaluate_config(
 
 
 @enum.unique
-class SqlExporterProcess(str, enum.Enum):
+class SqlExporterProcess(StrEnum):
     COMPUTE = "compute"
     AUTOSCALING = "autoscaling"
 

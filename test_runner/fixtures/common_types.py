@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from functools import total_ordering
 from typing import TYPE_CHECKING, TypeVar
 
@@ -249,7 +249,6 @@ class TenantShardId:
         return hash(self._tuple())
 
 
-# TODO: Replace with `StrEnum` when we upgrade to python 3.11
-class TimelineArchivalState(str, Enum):
+class TimelineArchivalState(StrEnum):
     ARCHIVED = "Archived"
     UNARCHIVED = "Unarchived"

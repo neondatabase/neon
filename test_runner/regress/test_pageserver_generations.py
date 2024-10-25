@@ -11,10 +11,10 @@ of the pageserver are:
 
 from __future__ import annotations
 
-import enum
 import os
 import re
 import time
+from enum import StrEnum
 
 import pytest
 from fixtures.common_types import TenantId, TimelineId
@@ -281,12 +281,12 @@ def test_deferred_deletion(neon_env_builder: NeonEnvBuilder):
     assert get_deletion_queue_unexpected_errors(ps_http) == 0
 
 
-class KeepAttachment(str, enum.Enum):
+class KeepAttachment(StrEnum):
     KEEP = "keep"
     LOSE = "lose"
 
 
-class ValidateBefore(str, enum.Enum):
+class ValidateBefore(StrEnum):
     VALIDATE = "validate"
     NO_VALIDATE = "no-validate"
 

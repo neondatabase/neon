@@ -9,6 +9,7 @@ import re
 import timeit
 from contextlib import contextmanager
 from datetime import datetime
+from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -226,7 +227,7 @@ class PgBenchInitResult:
 
 
 @enum.unique
-class MetricReport(str, enum.Enum):  # str is a hack to make it json serializable
+class MetricReport(StrEnum):  # str is a hack to make it json serializable
     # this means that this is a constant test parameter
     # like number of transactions, or number of clients
     TEST_PARAM = "test_param"

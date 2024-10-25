@@ -6,6 +6,7 @@ import json
 import os
 import re
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -28,7 +29,7 @@ TENANT_HEATMAP_FILE_NAME = "heatmap-v1.json"
 
 
 @enum.unique
-class RemoteStorageUser(str, enum.Enum):
+class RemoteStorageUser(StrEnum):
     """
     Instead of using strings for the users, use a more strict enum.
     """
@@ -311,7 +312,7 @@ RemoteStorage = LocalFsStorage | S3Storage
 
 
 @enum.unique
-class RemoteStorageKind(str, enum.Enum):
+class RemoteStorageKind(StrEnum):
     LOCAL_FS = "local_fs"
     MOCK_S3 = "mock_s3"
     REAL_S3 = "real_s3"

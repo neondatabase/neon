@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-import enum
 import random
 import time
+from enum import StrEnum
 from threading import Thread
 
 import asyncpg
@@ -52,7 +52,7 @@ def do_gc_target(
         log.info("gc http thread returning")
 
 
-class ReattachMode(str, enum.Enum):
+class ReattachMode(StrEnum):
     REATTACH_EXPLICIT = "explicit"
     REATTACH_RESET = "reset"
     REATTACH_RESET_DROP = "reset_drop"
