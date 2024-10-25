@@ -4169,7 +4169,7 @@ impl Tenant {
                 ..
             }) => {
                 info!("timeline already exists but is offloaded");
-                return Err(CreateTimelineError::Conflict);
+                Err(CreateTimelineError::Conflict)
             }
             Err(TimelineExclusionError::AlreadyExists {
                 existing: TimelineOrOffloaded::Timeline(existing),
