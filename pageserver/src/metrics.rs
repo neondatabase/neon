@@ -3044,7 +3044,18 @@ pub mod tokio_epoll_uring {
 
     /// Shared storage for tokio-epoll-uring thread local metrics.
     pub(crate) static THREAD_LOCAL_METRICS_STORAGE: Lazy<ThreadLocalMetricsStorage> =
-        Lazy::new(ThreadLocalMetricsStorage::new);
+        Lazy::new(|| {
+            let slots_submission_queue_depth = register_histogram!(
+                "pageserver_tokio_epoll_uring_slots_submission_queue_depth",
+                "The slots waiters queue depth of each tokio_epoll_uring system",
+                vec![1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0],
+            )
+            .expect("failed to define a metric");
+            ThreadLocalMetricsStorage {
+                observers: Mutex::new(HashMap::new()),
+                slots_submission_queue_depth,
+            }
+        });
 
     pub struct ThreadLocalMetricsStorage {
         /// List of thread local metrics observers.
@@ -3059,25 +3070,7 @@ pub mod tokio_epoll_uring {
         slots_submission_queue_depth: Mutex<LocalHistogram>,
     }
 
-    impl Default for ThreadLocalMetricsStorage {
-        fn default() -> Self {
-            Self::new()
-        }
-    }
-
     impl ThreadLocalMetricsStorage {
-        pub fn new() -> Self {
-            ThreadLocalMetricsStorage {
-                observers: Mutex::new(HashMap::new()),
-                slots_submission_queue_depth: register_histogram!(
-                    "pageserver_tokio_epoll_uring_slots_submission_queue_depth",
-                    "The slots waiters queue depth of each tokio_epoll_uring system",
-                    vec![1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0],
-                )
-                .expect("failed to define a metric"),
-            }
-        }
-
         /// Registers a new thread local system. Returns a thread local metrics observer.
         pub fn register_system(&self, id: u64) -> Arc<ThreadLocalMetrics> {
             let per_system_metrics = Arc::new(ThreadLocalMetrics::new(
