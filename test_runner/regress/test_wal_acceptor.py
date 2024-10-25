@@ -666,7 +666,7 @@ def test_s3_wal_replay(neon_env_builder: NeonEnvBuilder):
 
     # recreate timeline on pageserver from scratch
     ps_http.timeline_create(
-        pg_version=PgVersion(pg_version),
+        pg_version=PgVersion(str(pg_version)),
         tenant_id=tenant_id,
         new_timeline_id=timeline_id,
     )

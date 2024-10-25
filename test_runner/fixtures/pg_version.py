@@ -41,15 +41,16 @@ class PgVersion(StrEnum):
     @classmethod
     @override
     def _missing_(cls, value: object) -> PgVersion | None:
+        if not isinstance(value, str):
+            return None
+
         known_values = {v.value for _, v in cls.__members__.items()}
 
-        # Allow passing version as a string with "v" prefix (e.g. "v14")
-        if isinstance(value, str) and value.lower().startswith("v") and value[1:] in known_values:
-            return cls(value[1:])
-        # Allow passing version as an int (e.g. 15 or 150002, both will be converted to PgVersion.V15)
-        elif isinstance(value, int) and str(value)[:2] in known_values:
-            return cls(str(value)[:2])
-
-        # Make mypy happy
-        # See https://github.com/python/mypy/issues/3974
-        return None
+        # Allow passing version as v-prefixed string (e.g. "v14")
+        if value.lower().startswith("v") and (v := value[1:]) in known_values:
+            return cls(v)
+        # Allow passing version as an int (i.e. both "15" and "150002" matches PgVersion.V15)
+        elif value.isdigit() and (v := value[:2]) in known_values:
+            return cls(v)
+        else:
+            return None
