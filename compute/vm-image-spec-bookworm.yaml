@@ -18,7 +18,7 @@ commands:
   - name: pgbouncer
     user: postgres
     sysvInitAction: respawn
-    shell: '/bin/sh -c "/usr/local/bin/pgbouncer /etc/pgbouncer.ini 2>&1 > /dev/virtio-ports/tech.neon.log.0"'
+    shell: '/usr/local/bin/pgbouncer /etc/pgbouncer.ini 2>&1 > /dev/virtio-ports/tech.neon.log.0'
   - name: local_proxy
     user: postgres
     sysvInitAction: respawn
