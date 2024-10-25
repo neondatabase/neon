@@ -123,9 +123,6 @@ fn prepare_tar_stream(
 }
 
 /// Implementation of snapshot for an offloaded timeline, only reads control file
-///
-/// TODO: do we need an anti-residence guard to protect us from concurrent writes, or
-/// can we just ~atomically read the checkpoint?
 pub(crate) async fn stream_snapshot_offloaded_guts(
     tli: Arc<Timeline>,
     source: NodeId,
