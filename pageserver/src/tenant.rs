@@ -294,11 +294,11 @@ pub struct Tenant {
 
     /// During timeline creation, we first insert the TimelineId to the
     /// creating map, then `timelines`, then remove it from the creating map.
-    /// **Lock order**: if acquiring both, acquire`timelines` before `timelines_creating`
+    /// **Lock order**: if acquiring all (or a subset), acquire them in order `timelines`, `timelines_offloaded`, `timelines_creating`
     timelines_creating: std::sync::Mutex<HashSet<TimelineId>>,
 
     /// Possibly offloaded and archived timelines
-    /// **Lock order**: if acquiring both, acquire`timelines` before `timelines_offloaded`
+    /// **Lock order**: if acquiring all (or a subset), acquire them in order `timelines`, `timelines_offloaded`, `timelines_creating`
     timelines_offloaded: Mutex<HashMap<TimelineId, Arc<OffloadedTimeline>>>,
 
     // This mutex prevents creation of new timelines during GC.
@@ -584,13 +584,19 @@ impl OffloadedTimeline {
     }
 }
 
+impl fmt::Debug for OffloadedTimeline {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "OffloadedTimeline<{}>", self.timeline_id)
+    }
+}
+
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub enum MaybeOffloaded {
     Yes,
     No,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum TimelineOrOffloaded {
     Timeline(Arc<Timeline>),
     Offloaded(Arc<OffloadedTimeline>),
@@ -1827,11 +1833,15 @@ impl Tenant {
         let cancel = self.cancel.clone();
 
         // Protect against concurrent attempts to use this TimelineId
-        let _create_guard = self.create_timeline_create_guard(timeline_id).map_err(|err| match err {
-            TimelineExclusionError::AlreadyCreating => TimelineArchivalError::AlreadyInProgress,
-            TimelineExclusionError::AlreadyExists(_) => TimelineArchivalError::Other(anyhow::anyhow!("Timeline already exists")),
-            TimelineExclusionError::Other(e) => TimelineArchivalError::Other(e),
-        })?;
+        let _create_guard = self
+            .create_timeline_create_guard(timeline_id, true)
+            .map_err(|err| match err {
+                TimelineExclusionError::AlreadyCreating => TimelineArchivalError::AlreadyInProgress,
+                TimelineExclusionError::AlreadyExists(_) => {
+                    TimelineArchivalError::Other(anyhow::anyhow!("Timeline already exists"))
+                }
+                TimelineExclusionError::Other(e) => TimelineArchivalError::Other(e),
+            })?;
 
         let timeline_preload = self
             .load_timeline_metadata(timeline_id, self.remote_storage.clone(), cancel.clone())
@@ -2123,6 +2133,7 @@ impl Tenant {
         );
 
         // Protect against concurrent attempts to use this TimelineId
+        let allow_offloaded = false;
         let create_guard = match self
             .start_creating_timeline(new_timeline_id, CreateTimelineIdempotency::FailWithConflict)
             .await?
@@ -4139,7 +4150,8 @@ impl Tenant {
         new_timeline_id: TimelineId,
         idempotency: CreateTimelineIdempotency,
     ) -> Result<StartCreatingTimelineResult<'_>, CreateTimelineError> {
-        match self.create_timeline_create_guard(new_timeline_id, idempotency) {
+        let allow_offloaded = false;
+        match self.create_timeline_create_guard(new_timeline_id, idempotency, allow_offloaded) {
             Ok(create_guard) => {
                 pausable_failpoint!("timeline-creation-after-uninit");
                 Ok(StartCreatingTimelineResult::CreateGuard(create_guard))
@@ -4151,10 +4163,21 @@ impl Tenant {
                 Err(CreateTimelineError::AlreadyCreating)
             }
             Err(TimelineExclusionError::Other(e)) => Err(CreateTimelineError::Other(e)),
-            Err(TimelineExclusionError::AlreadyExists { existing, arg }) => {
+            Err(TimelineExclusionError::AlreadyExists {
+                existing: TimelineOrOffloaded::Offloaded(_existing),
+                ..
+            }) => {
+                info!("timeline already exists but is offloaded");
+                return Err(CreateTimelineError::Conflict);
+            }
+            Err(TimelineExclusionError::AlreadyExists {
+                existing: TimelineOrOffloaded::Timeline(existing),
+                arg,
+            }) => {
                 {
                     let existing = &existing.create_idempotency;
                     let _span = info_span!("idempotency_check", ?existing, ?arg).entered();
+                    debug!("timeline already exists");
 
                     match (existing, &arg) {
                         // FailWithConflict => no idempotency check
@@ -4477,17 +4500,26 @@ impl Tenant {
 
     /// Get a guard that provides exclusive access to the timeline directory, preventing
     /// concurrent attempts to create the same timeline.
+    ///
+    /// The `allow_offloaded` parameter controls whether to tolerate the existence of
+    /// offloaded timelines or not.
     fn create_timeline_create_guard(
         &self,
         timeline_id: TimelineId,
         idempotency: CreateTimelineIdempotency,
+        allow_offloaded: bool,
     ) -> Result<TimelineCreateGuard, TimelineExclusionError> {
         let tenant_shard_id = self.tenant_shard_id;
 
         let timeline_path = self.conf.timeline_path(&tenant_shard_id, &timeline_id);
 
-        let create_guard =
-            TimelineCreateGuard::new(self, timeline_id, timeline_path.clone(), idempotency)?;
+        let create_guard = TimelineCreateGuard::new(
+            self,
+            timeline_id,
+            timeline_path.clone(),
+            idempotency,
+            allow_offloaded,
+        )?;
 
         // At this stage, we have got exclusive access to in-memory state for this timeline ID
         // for creation.
