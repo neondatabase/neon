@@ -3044,7 +3044,7 @@ pub mod tokio_epoll_uring {
 
     /// Shared storage for tokio-epoll-uring thread local metrics.
     pub(crate) static THREAD_LOCAL_METRICS_STORAGE: Lazy<ThreadLocalMetricsStorage> =
-        Lazy::new(|| ThreadLocalMetricsStorage::new());
+        Lazy::new(ThreadLocalMetricsStorage::new);
 
     pub struct ThreadLocalMetricsStorage {
         /// List of thread local metrics observers.
@@ -3057,6 +3057,12 @@ pub mod tokio_epoll_uring {
     pub struct ThreadLocalMetrics {
         /// Local observer of thread local tokio-epoll-uring system's slots waiters queue depth.
         slots_submission_queue_depth: Mutex<LocalHistogram>,
+    }
+
+    impl Default for ThreadLocalMetricsStorage {
+        fn default() -> Self {
+            Self::new()
+        }
     }
 
     impl ThreadLocalMetricsStorage {
