@@ -1830,6 +1830,18 @@ impl Tenant {
         ctx: RequestContext,
     ) -> Result<Arc<Timeline>, TimelineArchivalError> {
         info!("unoffloading timeline");
+
+        // We activate the timeline below manually, so this must be called on an active timeline.
+        // We expect callers of this function to ensure this.
+        match self.current_state() {
+            TenantState::Activating { .. }
+            | TenantState::Attaching
+            | TenantState::Broken { .. } => {
+                panic!("Timeline expected to be active")
+            }
+            TenantState::Stopping { .. } => return Err(TimelineArchivalError::Cancelled),
+            TenantState::Active => {}
+        }
         let cancel = self.cancel.clone();
 
         // Protect against concurrent attempts to use this TimelineId
