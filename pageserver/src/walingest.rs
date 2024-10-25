@@ -626,10 +626,10 @@ impl WalIngest {
             //
 
             // last remaining block, byte, and bit
-            let mut vm_page_no = rec.blkno / (pg_constants::VM_HEAPBLOCKS_PER_PAGE as u32);
-            let trunc_byte = rec.blkno as usize % pg_constants::VM_HEAPBLOCKS_PER_PAGE
+            let mut vm_page_no = blkno / (pg_constants::VM_HEAPBLOCKS_PER_PAGE as u32);
+            let trunc_byte = blkno as usize % pg_constants::VM_HEAPBLOCKS_PER_PAGE
                 / pg_constants::VM_HEAPBLOCKS_PER_BYTE;
-            let trunc_offset = rec.blkno as usize % pg_constants::VM_HEAPBLOCKS_PER_PAGE
+            let trunc_offset = blkno as usize % pg_constants::VM_HEAPBLOCKS_PER_BYTE
                 * pg_constants::VM_BITS_PER_HEAPBLOCK;
 
             // Unless the new size is exactly at a visibility map page boundary, the
