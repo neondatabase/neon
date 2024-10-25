@@ -15,125 +15,6 @@ use serde::{Deserialize, Serialize};
 use utils::bin_ser::DeserializeError;
 use utils::lsn::Lsn;
 
-///
-/// Note: Parsing some fields is missing, because they're not needed.
-///
-/// This is similar to the xl_xact_parsed_commit and
-/// xl_xact_parsed_abort structs in PostgreSQL, but we use the same
-/// struct for commits and aborts.
-///
-#[derive(Debug)]
-pub struct XlXactParsedRecord {
-    pub xid: TransactionId,
-    pub info: u8,
-    pub xact_time: TimestampTz,
-    pub xinfo: u32,
-
-    pub db_id: Oid,
-    /* MyDatabaseId */
-    pub ts_id: Oid,
-    /* MyDatabaseTableSpace */
-    pub subxacts: Vec<TransactionId>,
-
-    pub xnodes: Vec<RelFileNode>,
-    pub origin_lsn: Lsn,
-}
-
-impl XlXactParsedRecord {
-    /// Decode a XLOG_XACT_COMMIT/ABORT/COMMIT_PREPARED/ABORT_PREPARED
-    /// record. This should agree with the ParseCommitRecord and ParseAbortRecord
-    /// functions in PostgreSQL (in src/backend/access/rmgr/xactdesc.c)
-    pub fn decode(buf: &mut Bytes, mut xid: TransactionId, xl_info: u8) -> XlXactParsedRecord {
-        let info = xl_info & pg_constants::XLOG_XACT_OPMASK;
-        // The record starts with time of commit/abort
-        let xact_time = buf.get_i64_le();
-        let xinfo = if xl_info & pg_constants::XLOG_XACT_HAS_INFO != 0 {
-            buf.get_u32_le()
-        } else {
-            0
-        };
-        let db_id;
-        let ts_id;
-        if xinfo & pg_constants::XACT_XINFO_HAS_DBINFO != 0 {
-            db_id = buf.get_u32_le();
-            ts_id = buf.get_u32_le();
-        } else {
-            db_id = 0;
-            ts_id = 0;
-        }
-        let mut subxacts = Vec::<TransactionId>::new();
-        if xinfo & pg_constants::XACT_XINFO_HAS_SUBXACTS != 0 {
-            let nsubxacts = buf.get_i32_le();
-            for _i in 0..nsubxacts {
-                let subxact = buf.get_u32_le();
-                subxacts.push(subxact);
-            }
-        }
-        let mut xnodes = Vec::<RelFileNode>::new();
-        if xinfo & pg_constants::XACT_XINFO_HAS_RELFILENODES != 0 {
-            let nrels = buf.get_i32_le();
-            for _i in 0..nrels {
-                let spcnode = buf.get_u32_le();
-                let dbnode = buf.get_u32_le();
-                let relnode = buf.get_u32_le();
-                tracing::trace!(
-                    "XLOG_XACT_COMMIT relfilenode {}/{}/{}",
-                    spcnode,
-                    dbnode,
-                    relnode
-                );
-                xnodes.push(RelFileNode {
-                    spcnode,
-                    dbnode,
-                    relnode,
-                });
-            }
-        }
-
-        if xinfo & crate::v15::bindings::XACT_XINFO_HAS_DROPPED_STATS != 0 {
-            let nitems = buf.get_i32_le();
-            tracing::debug!(
-                "XLOG_XACT_COMMIT-XACT_XINFO_HAS_DROPPED_STAT nitems {}",
-                nitems
-            );
-            let sizeof_xl_xact_stats_item = 12;
-            buf.advance((nitems * sizeof_xl_xact_stats_item).try_into().unwrap());
-        }
-
-        if xinfo & pg_constants::XACT_XINFO_HAS_INVALS != 0 {
-            let nmsgs = buf.get_i32_le();
-            let sizeof_shared_invalidation_message = 16;
-            buf.advance(
-                (nmsgs * sizeof_shared_invalidation_message)
-                    .try_into()
-                    .unwrap(),
-            );
-        }
-
-        if xinfo & pg_constants::XACT_XINFO_HAS_TWOPHASE != 0 {
-            xid = buf.get_u32_le();
-            tracing::debug!("XLOG_XACT_COMMIT-XACT_XINFO_HAS_TWOPHASE xid {}", xid);
-        }
-
-        let origin_lsn = if xinfo & pg_constants::XACT_XINFO_HAS_ORIGIN != 0 {
-            Lsn(buf.get_u64_le())
-        } else {
-            Lsn::INVALID
-        };
-        XlXactParsedRecord {
-            xid,
-            info,
-            xact_time,
-            xinfo,
-            db_id,
-            ts_id,
-            subxacts,
-            xnodes,
-            origin_lsn,
-        }
-    }
-}
-
 #[repr(C)]
 #[derive(Debug)]
 pub struct XlMultiXactCreate {
@@ -1093,6 +974,125 @@ impl XlDropDatabase {
         }
 
         rec
+    }
+}
+
+///
+/// Note: Parsing some fields is missing, because they're not needed.
+///
+/// This is similar to the xl_xact_parsed_commit and
+/// xl_xact_parsed_abort structs in PostgreSQL, but we use the same
+/// struct for commits and aborts.
+///
+#[derive(Debug)]
+pub struct XlXactParsedRecord {
+    pub xid: TransactionId,
+    pub info: u8,
+    pub xact_time: TimestampTz,
+    pub xinfo: u32,
+
+    pub db_id: Oid,
+    /* MyDatabaseId */
+    pub ts_id: Oid,
+    /* MyDatabaseTableSpace */
+    pub subxacts: Vec<TransactionId>,
+
+    pub xnodes: Vec<RelFileNode>,
+    pub origin_lsn: Lsn,
+}
+
+impl XlXactParsedRecord {
+    /// Decode a XLOG_XACT_COMMIT/ABORT/COMMIT_PREPARED/ABORT_PREPARED
+    /// record. This should agree with the ParseCommitRecord and ParseAbortRecord
+    /// functions in PostgreSQL (in src/backend/access/rmgr/xactdesc.c)
+    pub fn decode(buf: &mut Bytes, mut xid: TransactionId, xl_info: u8) -> XlXactParsedRecord {
+        let info = xl_info & pg_constants::XLOG_XACT_OPMASK;
+        // The record starts with time of commit/abort
+        let xact_time = buf.get_i64_le();
+        let xinfo = if xl_info & pg_constants::XLOG_XACT_HAS_INFO != 0 {
+            buf.get_u32_le()
+        } else {
+            0
+        };
+        let db_id;
+        let ts_id;
+        if xinfo & pg_constants::XACT_XINFO_HAS_DBINFO != 0 {
+            db_id = buf.get_u32_le();
+            ts_id = buf.get_u32_le();
+        } else {
+            db_id = 0;
+            ts_id = 0;
+        }
+        let mut subxacts = Vec::<TransactionId>::new();
+        if xinfo & pg_constants::XACT_XINFO_HAS_SUBXACTS != 0 {
+            let nsubxacts = buf.get_i32_le();
+            for _i in 0..nsubxacts {
+                let subxact = buf.get_u32_le();
+                subxacts.push(subxact);
+            }
+        }
+        let mut xnodes = Vec::<RelFileNode>::new();
+        if xinfo & pg_constants::XACT_XINFO_HAS_RELFILENODES != 0 {
+            let nrels = buf.get_i32_le();
+            for _i in 0..nrels {
+                let spcnode = buf.get_u32_le();
+                let dbnode = buf.get_u32_le();
+                let relnode = buf.get_u32_le();
+                tracing::trace!(
+                    "XLOG_XACT_COMMIT relfilenode {}/{}/{}",
+                    spcnode,
+                    dbnode,
+                    relnode
+                );
+                xnodes.push(RelFileNode {
+                    spcnode,
+                    dbnode,
+                    relnode,
+                });
+            }
+        }
+
+        if xinfo & crate::v15::bindings::XACT_XINFO_HAS_DROPPED_STATS != 0 {
+            let nitems = buf.get_i32_le();
+            tracing::debug!(
+                "XLOG_XACT_COMMIT-XACT_XINFO_HAS_DROPPED_STAT nitems {}",
+                nitems
+            );
+            let sizeof_xl_xact_stats_item = 12;
+            buf.advance((nitems * sizeof_xl_xact_stats_item).try_into().unwrap());
+        }
+
+        if xinfo & pg_constants::XACT_XINFO_HAS_INVALS != 0 {
+            let nmsgs = buf.get_i32_le();
+            let sizeof_shared_invalidation_message = 16;
+            buf.advance(
+                (nmsgs * sizeof_shared_invalidation_message)
+                    .try_into()
+                    .unwrap(),
+            );
+        }
+
+        if xinfo & pg_constants::XACT_XINFO_HAS_TWOPHASE != 0 {
+            xid = buf.get_u32_le();
+            tracing::debug!("XLOG_XACT_COMMIT-XACT_XINFO_HAS_TWOPHASE xid {}", xid);
+        }
+
+        let origin_lsn = if xinfo & pg_constants::XACT_XINFO_HAS_ORIGIN != 0 {
+            Lsn(buf.get_u64_le())
+        } else {
+            Lsn::INVALID
+        };
+        XlXactParsedRecord {
+            xid,
+            info,
+            xact_time,
+            xinfo,
+            db_id,
+            ts_id,
+            subxacts,
+            xnodes,
+            origin_lsn,
+        }
     }
 }
 
