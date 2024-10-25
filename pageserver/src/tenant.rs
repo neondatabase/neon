@@ -1833,6 +1833,7 @@ impl Tenant {
         let cancel = self.cancel.clone();
 
         // Protect against concurrent attempts to use this TimelineId
+        // We don't care much about idempotency, as it's ensured a layer above.
         let allow_offloaded = true;
         let _create_guard = self
             .create_timeline_create_guard(
