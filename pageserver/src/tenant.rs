@@ -869,7 +869,7 @@ impl Tenant {
         &self,
         timeline_id: TimelineId,
         resources: TimelineResources,
-        index_part: Option<IndexPart>,
+        index_part: IndexPart,
         metadata: TimelineMetadata,
         ancestor: Option<Arc<Timeline>>,
         _ctx: &RequestContext,
@@ -894,24 +894,7 @@ impl Tenant {
             "these are used interchangeably"
         );
 
-        if let Some(index_part) = index_part.as_ref() {
-            timeline.remote_client.init_upload_queue(index_part)?;
-        } else {
-            // No data on the remote storage, but we have local metadata file. We can end up
-            // here with timeline_create being interrupted before finishing index part upload.
-            // By doing what we do here, the index part upload is retried.
-            // If control plane retries timeline creation in the meantime, the mgmt API handler
-            // for timeline creation will coalesce on the upload we queue here.
-
-            // FIXME: this branch should be dead code as we no longer write local metadata.
-
-            timeline
-                .remote_client
-                .init_upload_queue_for_empty_remote(&metadata)?;
-            timeline
-                .remote_client
-                .schedule_index_upload_for_full_metadata_update(&metadata)?;
-        }
+        timeline.remote_client.init_upload_queue(&index_part)?;
 
         timeline
             .load_layer_map(disk_consistent_lsn, index_part)
@@ -1541,7 +1524,7 @@ impl Tenant {
         self.timeline_init_and_sync(
             timeline_id,
             resources,
-            Some(index_part),
+            index_part,
             remote_metadata,
             ancestor,
             ctx,

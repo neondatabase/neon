@@ -1009,7 +1009,7 @@ impl ImageLayerWriter {
         self.inner.take().unwrap().finish(ctx, None).await
     }
 
-    /// Finish writing the image layer with an end key, used in [`super::split_writer::SplitImageLayerWriter`]. The end key determines the end of the image layer's covered range and is exclusive.
+    /// Finish writing the image layer with an end key, used in [`super::batch_split_writer::SplitImageLayerWriter`]. The end key determines the end of the image layer's covered range and is exclusive.
     pub(super) async fn finish_with_end_key(
         mut self,
         end_key: Key,
