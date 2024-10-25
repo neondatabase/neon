@@ -1,5 +1,5 @@
 use tokio::io::{AsyncRead, AsyncWrite};
-use tracing::{info, debug};
+use tracing::{debug, info};
 
 use super::{ComputeCredentials, ComputeUserInfo, ComputeUserInfoNoEndpoint};
 use crate::auth::{self, AuthFlow};
