@@ -3067,18 +3067,15 @@ pub mod tokio_epoll_uring {
 
     pub struct ThreadLocalMetrics {
         /// Local observer of thread local tokio-epoll-uring system's slots waiters queue depth.
-        slots_submission_queue_depth: LocalHistogram,
+        slots_submission_queue_depth: Mutex<LocalHistogram>,
     }
 
     impl ThreadLocalMetricsStorage {
         /// Registers a new thread local system. Returns a thread local metrics observer.
         pub fn register_system(&self, id: u64) -> Arc<ThreadLocalMetrics> {
-            let per_system_metrics = Arc::new({
-                let slots_submission_queue_depth = self.slots_submission_queue_depth.local();
-                ThreadLocalMetrics {
-                    slots_submission_queue_depth,
-                }
-            });
+            let per_system_metrics = Arc::new(ThreadLocalMetrics::new(
+                self.slots_submission_queue_depth.local(),
+            ));
             let mut g = self.observers.lock().unwrap();
             g.insert(id, Arc::clone(&per_system_metrics));
             per_system_metrics
@@ -3101,21 +3098,23 @@ pub mod tokio_epoll_uring {
     }
 
     impl ThreadLocalMetrics {
+        pub fn new(slots_submission_queue_depth: LocalHistogram) -> Self {
+            ThreadLocalMetrics {
+                slots_submission_queue_depth: Mutex::new(slots_submission_queue_depth),
+            }
+        }
+
         /// Flushes the thread local metrics to shared aggregator.
         pub fn flush(&self) {
-            let Self {
-                slots_submission_queue_depth,
-            } = self;
-            slots_submission_queue_depth.flush();
+            let local = self.slots_submission_queue_depth.lock().unwrap();
+            local.flush();
         }
     }
 
     impl tokio_epoll_uring::metrics::PerSystemMetrics for ThreadLocalMetrics {
         fn observe_slots_submission_queue_depth(&self, queue_depth: u64) {
-            let Self {
-                slots_submission_queue_depth,
-            } = self;
-            slots_submission_queue_depth.observe(queue_depth as f64);
+            let local = self.slots_submission_queue_depth.lock().unwrap();
+            local.observe(queue_depth as f64);
         }
     }
 
