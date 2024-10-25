@@ -112,7 +112,7 @@ enum Command {
         node: NodeId,
     },
     /// Cancel any ongoing reconciliation for this shard
-    TenantShardCancel {
+    TenantShardCancelReconcile {
         #[arg(long)]
         tenant_shard_id: TenantShardId,
     },
@@ -540,11 +540,11 @@ async fn main() -> anyhow::Result<()> {
                 )
                 .await?;
         }
-        Command::TenantShardCancel { tenant_shard_id } => {
+        Command::TenantShardCancelReconcile { tenant_shard_id } => {
             storcon_client
                 .dispatch::<(), ()>(
                     Method::PUT,
-                    format!("control/v1/tenant/{tenant_shard_id}/cancel"),
+                    format!("control/v1/tenant/{tenant_shard_id}/cancel_reconcile"),
                     None,
                 )
                 .await?;

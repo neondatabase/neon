@@ -4833,7 +4833,7 @@ impl Service {
     }
 
     /// 'cancel' in this context means cancel any ongoing reconcile
-    pub(crate) async fn tenant_shard_cancel(
+    pub(crate) async fn tenant_shard_cancel_reconcile(
         &self,
         tenant_shard_id: TenantShardId,
     ) -> Result<(), ApiError> {

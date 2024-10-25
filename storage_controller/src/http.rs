@@ -968,7 +968,7 @@ async fn handle_tenant_shard_migrate(
     )
 }
 
-async fn handle_tenant_shard_cancel(
+async fn handle_tenant_shard_cancel_reconcile(
     service: Arc<Service>,
     req: Request<Body>,
 ) -> Result<Response<Body>, ApiError> {
@@ -984,7 +984,9 @@ async fn handle_tenant_shard_cancel(
     let tenant_shard_id: TenantShardId = parse_request_param(&req, "tenant_shard_id")?;
     json_response(
         StatusCode::OK,
-        service.tenant_shard_cancel(tenant_shard_id).await?,
+        service
+            .tenant_shard_cancel_reconcile(tenant_shard_id)
+            .await?,
     )
 }
 
@@ -1796,13 +1798,16 @@ pub fn make_router(
                 RequestName("control_v1_tenant_migrate"),
             )
         })
-        .put("/control/v1/tenant/:tenant_shard_id/cancel", |r| {
-            tenant_service_handler(
-                r,
-                handle_tenant_shard_cancel,
-                RequestName("control_v1_tenant_cancel"),
-            )
-        })
+        .put(
+            "/control/v1/tenant/:tenant_shard_id/cancel_reconcile",
+            |r| {
+                tenant_service_handler(
+                    r,
+                    handle_tenant_shard_cancel_reconcile,
+                    RequestName("control_v1_tenant_cancel_reconcile"),
+                )
+            },
+        )
         .put("/control/v1/tenant/:tenant_id/shard_split", |r| {
             tenant_service_handler(
                 r,

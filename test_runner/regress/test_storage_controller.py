@@ -875,7 +875,7 @@ def test_storage_controller_debug_apis(neon_env_builder: NeonEnvBuilder):
     # Reconciler cancel API should be a no-op when nothing is in flight
     env.storage_controller.request(
         "PUT",
-        f"{env.storage_controller_api}/control/v1/tenant/{tenant_id}-0102/cancel",
+        f"{env.storage_controller_api}/control/v1/tenant/{tenant_id}-0102/cancel_reconcile",
         headers=env.storage_controller.headers(TokenScope.ADMIN),
     )
 
@@ -1669,7 +1669,9 @@ def test_storcon_cli(neon_env_builder: NeonEnvBuilder):
     assert "Stop" in storcon_cli(["tenants"])[3]
 
     # Cancel ongoing reconcile on a tenant
-    storcon_cli(["tenant-shard-cancel", "--tenant-shard-id", f"{env.initial_tenant}-0104"])
+    storcon_cli(
+        ["tenant-shard-cancel-reconcile", "--tenant-shard-id", f"{env.initial_tenant}-0104"]
+    )
 
     # Change a tenant's placement
     storcon_cli(
