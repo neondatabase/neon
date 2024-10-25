@@ -800,15 +800,25 @@ pub(crate) struct CreateTimelineParamsBranch {
     pub(crate) ancestor_start_lsn: Option<Lsn>,
 }
 
-/// What is used to determine idempotency of a [`Tenant::create_timeline`] call.
+/// What is used to determine idempotency of a [`Tenant::create_timeline`] call in  [`Tenant::start_creating_timeline`].
 ///
-/// Unlike [`CreateTimelineParams`], ancestor LSN is fixed, so, branching will be at a deterministic LSN.
+/// Each [`Timeline`] object holds [`Self`] as an immutable property in [`Timeline::create_idempotency`].
 ///
-/// We make some trade-offs though, e.g., [`CreateTimelineParamsBootstrap::existing_initdb_timeline_id`]
-/// is not considered for idempotency.
+/// We lower timeline creation requests to [`Self`], and then use [`PartialEq::eq`] to compare [`Timeline::create_idempotency`] with the request.
+/// If they are equal, we return a reference to the existing timeline, otherwise it's an idempotency conflict.
 ///
-/// We can improve on this over time.
+/// There is special treatment for [`Self::FailWithConflict`] to always return an idempotency conflict.
+/// It would be nice to have more advanced derive macros to make that special treatment declarative.
+///
+/// Notes:
+/// - Unlike [`CreateTimelineParams`], ancestor LSN is fixed, so, branching will be at a deterministic LSN.
+/// - We make some trade-offs though, e.g., [`CreateTimelineParamsBootstrap::existing_initdb_timeline_id`]
+///   is not considered for idempotency. We can improve on this over time if we deem it necessary.
+///
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CreateTimelineIdempotency {
+    /// NB: special treatment, see comment in [`Self`].
+    FailWithConflict,
     Bootstrap {
         pg_version: u32,
     },
@@ -836,6 +846,12 @@ enum CreateTimelineResult {
 }
 
 impl CreateTimelineResult {
+    fn discriminant(&self) -> &'static str {
+        match self {
+            Self::Created(_) => "Created",
+            Self::Idempotent(_) => "Idempotent",
+        }
+    }
     fn timeline(&self) -> &Arc<Timeline> {
         match self {
             Self::Created(t) | Self::Idempotent(t) => t,
@@ -989,12 +1005,24 @@ impl Tenant {
     ) -> anyhow::Result<()> {
         let tenant_id = self.tenant_shard_id;
 
+        let idempotency = if metadata.ancestor_timeline().is_none() {
+            CreateTimelineIdempotency::Bootstrap {
+                pg_version: metadata.pg_version(),
+            }
+        } else {
+            CreateTimelineIdempotency::Branch {
+                ancestor_timeline_id: metadata.ancestor_timeline().unwrap(),
+                ancestor_start_lsn: metadata.ancestor_lsn(),
+            }
+        };
+
         let timeline = self.create_timeline_struct(
             timeline_id,
             &metadata,
             ancestor.clone(),
             resources,
             CreateTimelineCause::Load,
+            idempotency.clone(),
         )?;
         let disk_consistent_lsn = timeline.get_disk_consistent_lsn();
         anyhow::ensure!(
@@ -2061,16 +2089,17 @@ impl Tenant {
         self.timelines.lock().unwrap().keys().cloned().collect()
     }
 
-    /// This is used to create the initial 'main' timeline during bootstrapping,
-    /// or when importing a new base backup. The caller is expected to load an
-    /// initial image of the datadir to the new timeline after this.
+    /// This is used by tests & import-from-basebackup.
     ///
-    /// Until that happens, the on-disk state is invalid (disk_consistent_lsn=Lsn(0))
-    /// and the timeline will fail to load at a restart.
+    /// The returned [`UninitializedTimeline`] contains no data nor metadata and it is in
+    /// a state that will fail [`Tenant::load_remote_timeline`] because `disk_consistent_lsn=Lsn(0)`.
     ///
-    /// For tests, use `DatadirModification::init_empty_test_timeline` + `commit` to setup the
-    /// minimum amount of keys required to get a writable timeline.
-    /// (Without it, `put` might fail due to `repartition` failing.)
+    /// The caller is responsible for getting the timeline into a state that will be accepted
+    /// by [`Tenant::load_remote_timeline`] / [`Tenant::attach`].
+    /// Then they may call [`UninitializedTimeline::finish_creation`] to add the timeline
+    /// to the [`Tenant::timelines`].
+    ///
+    /// Tests should use `Tenant::create_test_timeline` to set up the minimum required metadata keys.
     pub(crate) async fn create_empty_timeline(
         &self,
         new_timeline_id: TimelineId,
@@ -2084,7 +2113,15 @@ impl Tenant {
         );
 
         // Protect against concurrent attempts to use this TimelineId
-        let create_guard = self.create_timeline_create_guard(new_timeline_id)?;
+        let create_guard = match self
+            .start_creating_timeline(new_timeline_id, CreateTimelineIdempotency::FailWithConflict)
+            .await?
+        {
+            StartCreatingTimelineResult::CreateGuard(guard) => guard,
+            StartCreatingTimelineResult::Idempotent(_) => {
+                unreachable!("FailWithConflict implies we get an error instead")
+            }
+        };
 
         let new_metadata = TimelineMetadata::new(
             // Initialize disk_consistent LSN to 0, The caller must import some data to
@@ -2294,8 +2331,17 @@ impl Tenant {
 
         // At this point we have dropped our guard on [`Self::timelines_creating`], and
         // the timeline is visible in [`Self::timelines`], but it is _not_ durable yet.  We must
-        // not send a success to the caller until it is.  The same applies to handling retries,
-        // that is done in [`Self::start_creating_timeline`].
+        // not send a success to the caller until it is.  The same applies to idempotent retries.
+        //
+        // TODO: the timeline is already visible in [`Self::timelines`]; a caller could incorrectly
+        // assume that, because they can see the timeline via API, that the creation is done and
+        // that it is durable. Ideally, we would keep the timeline hidden (in [`Self::timelines_creating`])
+        // until it is durable, e.g., by extending the time we hold the creation guard. This also
+        // interacts with UninitializedTimeline and is generally a bit tricky.
+        //
+        // To re-emphasize: the only correct way to create a timeline is to repeat calling the
+        // creation API until it returns success. Only then is durability guaranteed.
+        info!(creation_result=%result.discriminant(), "waiting for timeline to be durable");
         result
             .timeline()
             .remote_client
@@ -3332,6 +3378,7 @@ impl Tenant {
         ancestor: Option<Arc<Timeline>>,
         resources: TimelineResources,
         cause: CreateTimelineCause,
+        create_idempotency: CreateTimelineIdempotency,
     ) -> anyhow::Result<Arc<Timeline>> {
         let state = match cause {
             CreateTimelineCause::Load => {
@@ -3361,6 +3408,7 @@ impl Tenant {
             pg_version,
             state,
             self.attach_wal_lag_cooldown.clone(),
+            create_idempotency,
             self.cancel.child_token(),
         );
 
@@ -4046,6 +4094,8 @@ impl Tenant {
             .schedule_index_upload_for_full_metadata_update(&metadata)
             .context("branch initial metadata upload")?;
 
+        // Callers are responsible to wait for uploads to complete and for activating the timeline.
+
         Ok(CreateTimelineResult::Created(new_timeline))
     }
 
@@ -4079,7 +4129,7 @@ impl Tenant {
         new_timeline_id: TimelineId,
         idempotency: CreateTimelineIdempotency,
     ) -> Result<StartCreatingTimelineResult<'_>, CreateTimelineError> {
-        match self.create_timeline_create_guard(new_timeline_id) {
+        match self.create_timeline_create_guard(new_timeline_id, idempotency) {
             Ok(create_guard) => {
                 pausable_failpoint!("timeline-creation-after-uninit");
                 Ok(StartCreatingTimelineResult::CreateGuard(create_guard))
@@ -4091,61 +4141,29 @@ impl Tenant {
                 Err(CreateTimelineError::AlreadyCreating)
             }
             Err(TimelineExclusionError::Other(e)) => Err(CreateTimelineError::Other(e)),
-            Err(TimelineExclusionError::AlreadyExists(existing)) => {
-                debug!("timeline already exists");
+            Err(TimelineExclusionError::AlreadyExists { existing, arg }) => {
+                {
+                    let existing = &existing.create_idempotency;
+                    let _span = info_span!("idempotency_check", ?existing, ?arg).entered();
 
-                // Idempotency: creating the same timeline twice is not an error, unless
-                // the second creation has different parameters.
-                //
-                // TODO: this is a crutch; we should store the CreateTimelineState as an
-                // immutable attribute in the index part, and compare them using derive(`Eq`).
-                match idempotency {
-                    CreateTimelineIdempotency::Bootstrap { pg_version } => {
-                        if existing.pg_version != pg_version {
-                            info!("timeline already exists with different pg_version");
+                    match (existing, &arg) {
+                        // FailWithConflict => no idempotency check
+                        (CreateTimelineIdempotency::FailWithConflict, _)
+                        | (_, CreateTimelineIdempotency::FailWithConflict) => {
+                            warn!("timeline already exists, failing request");
                             return Err(CreateTimelineError::Conflict);
                         }
-                        if existing.get_ancestor_timeline_id().is_some() {
-                            info!("timeline already exists with an ancestor");
-                            return Err(CreateTimelineError::Conflict);
+                        // Idempotent <=> CreateTimelineIdempotency is identical
+                        (x, y) if x == y => {
+                            info!("timeline already exists and idempotency matches, succeeding request");
+                            // fallthrough
                         }
-                        if existing.get_ancestor_lsn() != Lsn::INVALID {
-                            info!("timeline already exists with an ancestor LSN");
-                            return Err(CreateTimelineError::Conflict);
-                        }
-                    }
-                    CreateTimelineIdempotency::Branch {
-                        ancestor_timeline_id,
-                        ancestor_start_lsn,
-                    } => {
-                        if existing.get_ancestor_timeline_id() != Some(ancestor_timeline_id) {
-                            info!("timeline already exists with different ancestor");
-                            return Err(CreateTimelineError::Conflict);
-                        }
-                        if existing.get_ancestor_lsn() != ancestor_start_lsn {
-                            info!("timeline already exists with different ancestor LSN");
+                        (_, _) => {
+                            warn!("idempotency conflict, failing request");
                             return Err(CreateTimelineError::Conflict);
                         }
                     }
                 }
-
-                // Wait for uploads to complete, so that when we return Ok, the timeline
-                // is known to be durable on remote storage. Just like we do at the end of
-                // this function, after we have created the timeline ourselves.
-                //
-                // We only really care that the initial version of `index_part.json` has
-                // been uploaded. That's enough to remember that the timeline
-                // exists. However, there is no function to wait specifically for that so
-                // we just wait for all in-progress uploads to finish.
-                existing
-                    .remote_client
-                    .wait_completion()
-                    .await
-                    .context("wait for timeline uploads to complete")?;
-
-                // TODO: shouldn't we also wait for timeline to become active?
-                // Code before this(https://github.com/neondatabase/neon/pull/9366) refactoring
-                // didn't do it.
 
                 Ok(StartCreatingTimelineResult::Idempotent(existing))
             }
@@ -4359,6 +4377,8 @@ impl Tenant {
         // All done!
         let timeline = raw_timeline.finish_creation()?;
 
+        // Callers are responsible to wait for uploads to complete and for activating the timeline.
+
         Ok(CreateTimelineResult::Created(timeline))
     }
 
@@ -4409,6 +4429,7 @@ impl Tenant {
                 ancestor,
                 resources,
                 CreateTimelineCause::Load,
+                create_guard.idempotency.clone(),
             )
             .context("Failed to create timeline data structure")?;
 
@@ -4449,12 +4470,14 @@ impl Tenant {
     fn create_timeline_create_guard(
         &self,
         timeline_id: TimelineId,
+        idempotency: CreateTimelineIdempotency,
     ) -> Result<TimelineCreateGuard, TimelineExclusionError> {
         let tenant_shard_id = self.tenant_shard_id;
 
         let timeline_path = self.conf.timeline_path(&tenant_shard_id, &timeline_id);
 
-        let create_guard = TimelineCreateGuard::new(self, timeline_id, timeline_path.clone())?;
+        let create_guard =
+            TimelineCreateGuard::new(self, timeline_id, timeline_path.clone(), idempotency)?;
 
         // At this stage, we have got exclusive access to in-memory state for this timeline ID
         // for creation.
@@ -5090,7 +5113,10 @@ mod tests {
             .await
         {
             Ok(_) => panic!("duplicate timeline creation should fail"),
-            Err(e) => assert_eq!(e.to_string(), "Already exists".to_string()),
+            Err(e) => assert_eq!(
+                e.to_string(),
+                "timeline already exists with different parameters".to_string()
+            ),
         }
 
         Ok(())
