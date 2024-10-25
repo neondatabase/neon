@@ -129,7 +129,7 @@ class LayerMapInfo:
         return set(x.layer_file_name for x in self.historic_layers)
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass
 class ScanDisposableKeysResponse:
     disposable_count: int
     not_disposable_count: int
