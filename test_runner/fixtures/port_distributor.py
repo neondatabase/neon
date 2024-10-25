@@ -51,11 +51,13 @@ class PortDistributor:
         Replacements are memorised, so a substitution for the same port is always the same.
         """
 
-        # TODO: replace with structural pattern matching for Python >= 3.10
-        if isinstance(value, int):
-            return self._replace_port_int(value)
-
-        return self._replace_port_str(value)
+        match value:
+            case int():
+                return self._replace_port_int(value)
+            case str():
+                return self._replace_port_str(value)
+            case _:
+                raise TypeError(f"Unsupported type {type(value)}, should be int | str")
 
     def _replace_port_int(self, value: int) -> int:
         known_port = self.port_map.get(value)
