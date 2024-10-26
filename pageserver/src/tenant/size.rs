@@ -187,6 +187,8 @@ pub(super) async fn gather_inputs(
     // but it is unlikely to cause any issues. In the worst case,
     // the calculation will error out.
     timelines.retain(|t| t.is_active());
+    // Also filter out archived timelines.
+    timelines.retain(|t| t.is_archived() != Some(true));
 
     // Build a map of branch points.
     let mut branchpoints: HashMap<TimelineId, HashSet<Lsn>> = HashMap::new();
