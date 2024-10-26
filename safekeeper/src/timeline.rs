@@ -328,15 +328,19 @@ impl SharedState {
     /// Restore SharedState from control file. If file doesn't exist, bails out.
     fn restore(conf: &SafeKeeperConf, ttid: &TenantTimelineId) -> Result<Self> {
         let timeline_dir = get_timeline_dir(conf, ttid);
-        let control_store = control_file::FileStorage::restore_new(ttid, conf)?;
+        let control_store = control_file::FileStorage::restore_new(&timeline_dir, conf.no_sync)?;
         if control_store.server.wal_seg_size == 0 {
             bail!(TimelineError::UninitializedWalSegSize(*ttid));
         }
 
         let sk = match control_store.eviction_state {
             EvictionState::Present => {
-                let wal_store =
-                    wal_storage::PhysicalStorage::new(ttid, timeline_dir, conf, &control_store)?;
+                let wal_store = wal_storage::PhysicalStorage::new(
+                    ttid,
+                    &timeline_dir,
+                    &control_store,
+                    conf.no_sync,
+                )?;
                 StateSK::Loaded(SafeKeeper::new(
                     TimelineState::new(control_store),
                     wal_store,
@@ -1046,9 +1050,9 @@ impl ManagerTimeline {
         // trying to restore WAL storage
         let wal_store = wal_storage::PhysicalStorage::new(
             &self.ttid,
-            self.timeline_dir.clone(),
-            &conf,
+            &self.timeline_dir,
             shared.sk.state(),
+            conf.no_sync,
         )?;
 
         // updating control file

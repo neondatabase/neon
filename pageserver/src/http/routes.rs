@@ -38,6 +38,7 @@ use pageserver_api::models::TenantShardSplitRequest;
 use pageserver_api::models::TenantShardSplitResponse;
 use pageserver_api::models::TenantSorting;
 use pageserver_api::models::TimelineArchivalConfigRequest;
+use pageserver_api::models::TimelineCreateRequestMode;
 use pageserver_api::models::TimelinesInfoAndOffloaded;
 use pageserver_api::models::TopTenantShardItem;
 use pageserver_api::models::TopTenantShardsRequest;
@@ -85,6 +86,7 @@ use crate::tenant::timeline::Timeline;
 use crate::tenant::GetTimelineError;
 use crate::tenant::OffloadedTimeline;
 use crate::tenant::{LogicalSizeCalculationCause, PageReconstructError};
+use crate::DEFAULT_PG_VERSION;
 use crate::{disk_usage_eviction_task, tenant};
 use pageserver_api::models::{
     StatusResponse, TenantConfigRequest, TenantInfo, TimelineCreateRequest, TimelineGcRequest,
@@ -547,6 +549,26 @@ async fn timeline_create_handler(
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
 
     let new_timeline_id = request_data.new_timeline_id;
+    // fill in the default pg_version if not provided & convert request into domain model
+    let params: tenant::CreateTimelineParams = match request_data.mode {
+        TimelineCreateRequestMode::Bootstrap {
+            existing_initdb_timeline_id,
+            pg_version,
+        } => tenant::CreateTimelineParams::Bootstrap(tenant::CreateTimelineParamsBootstrap {
+            new_timeline_id,
+            existing_initdb_timeline_id,
+            pg_version: pg_version.unwrap_or(DEFAULT_PG_VERSION),
+        }),
+        TimelineCreateRequestMode::Branch {
+            ancestor_timeline_id,
+            ancestor_start_lsn,
+            pg_version: _,
+        } => tenant::CreateTimelineParams::Branch(tenant::CreateTimelineParamsBranch {
+            new_timeline_id,
+            ancestor_timeline_id,
+            ancestor_start_lsn,
+        }),
+    };
 
     let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Error);
 
@@ -559,22 +581,12 @@ async fn timeline_create_handler(
 
         tenant.wait_to_become_active(ACTIVE_TENANT_TIMEOUT).await?;
 
-        if let Some(ancestor_id) = request_data.ancestor_timeline_id.as_ref() {
-            tracing::info!(%ancestor_id, "starting to branch");
-        } else {
-            tracing::info!("bootstrapping");
-        }
+        // earlier versions of the code had pg_version and ancestor_lsn in the span
+        // => continue to provide that information, but, through a log message that doesn't require us to destructure
+        tracing::info!(?params, "creating timeline");
 
         match tenant
-            .create_timeline(
-                new_timeline_id,
-                request_data.ancestor_timeline_id,
-                request_data.ancestor_start_lsn,
-                request_data.pg_version.unwrap_or(crate::DEFAULT_PG_VERSION),
-                request_data.existing_initdb_timeline_id,
-                state.broker_client.clone(),
-                &ctx,
-            )
+            .create_timeline(params, state.broker_client.clone(), &ctx)
             .await
         {
             Ok(new_timeline) => {
@@ -625,8 +637,6 @@ async fn timeline_create_handler(
         tenant_id = %tenant_shard_id.tenant_id,
         shard_id = %tenant_shard_id.shard_slug(),
         timeline_id = %new_timeline_id,
-        lsn=?request_data.ancestor_start_lsn,
-        pg_version=?request_data.pg_version
     ))
     .await
 }
@@ -1281,6 +1291,99 @@ async fn layer_map_info_handler(
         .map_err(|_shutdown| ApiError::ShuttingDown)?;
 
     json_response(StatusCode::OK, layer_map_info)
+}
+
+#[instrument(skip_all, fields(tenant_id, shard_id, timeline_id, layer_name))]
+async fn timeline_layer_scan_disposable_keys(
+    request: Request<Body>,
+    cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let tenant_shard_id: TenantShardId = parse_request_param(&request, "tenant_shard_id")?;
+    let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
+    let layer_name: LayerName = parse_request_param(&request, "layer_name")?;
+
+    tracing::Span::current().record(
+        "tenant_id",
+        tracing::field::display(&tenant_shard_id.tenant_id),
+    );
+    tracing::Span::current().record(
+        "shard_id",
+        tracing::field::display(tenant_shard_id.shard_slug()),
+    );
+    tracing::Span::current().record("timeline_id", tracing::field::display(&timeline_id));
+    tracing::Span::current().record("layer_name", tracing::field::display(&layer_name));
+
+    let state = get_state(&request);
+
+    check_permission(&request, Some(tenant_shard_id.tenant_id))?;
+
+    // technically the timeline need not be active for this scan to complete
+    let timeline =
+        active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
+            .await?;
+
+    let ctx = RequestContext::new(TaskKind::MgmtRequest, DownloadBehavior::Download);
+
+    let guard = timeline.layers.read().await;
+    let Some(layer) = guard.try_get_from_key(&layer_name.clone().into()) else {
+        return Err(ApiError::NotFound(
+            anyhow::anyhow!("Layer {tenant_shard_id}/{timeline_id}/{layer_name} not found").into(),
+        ));
+    };
+
+    let resident_layer = layer
+        .download_and_keep_resident()
+        .await
+        .map_err(|err| match err {
+            tenant::storage_layer::layer::DownloadError::TimelineShutdown
+            | tenant::storage_layer::layer::DownloadError::DownloadCancelled => {
+                ApiError::ShuttingDown
+            }
+            tenant::storage_layer::layer::DownloadError::ContextAndConfigReallyDeniesDownloads
+            | tenant::storage_layer::layer::DownloadError::DownloadRequired
+            | tenant::storage_layer::layer::DownloadError::NotFile(_)
+            | tenant::storage_layer::layer::DownloadError::DownloadFailed
+            | tenant::storage_layer::layer::DownloadError::PreStatFailed(_) => {
+                ApiError::InternalServerError(err.into())
+            }
+            #[cfg(test)]
+            tenant::storage_layer::layer::DownloadError::Failpoint(_) => {
+                ApiError::InternalServerError(err.into())
+            }
+        })?;
+
+    let keys = resident_layer
+        .load_keys(&ctx)
+        .await
+        .map_err(ApiError::InternalServerError)?;
+
+    let shard_identity = timeline.get_shard_identity();
+
+    let mut disposable_count = 0;
+    let mut not_disposable_count = 0;
+    let cancel = cancel.clone();
+    for (i, key) in keys.into_iter().enumerate() {
+        if shard_identity.is_key_disposable(&key) {
+            disposable_count += 1;
+            tracing::debug!(key = %key, key.dbg=?key, "disposable key");
+        } else {
+            not_disposable_count += 1;
+        }
+        #[allow(clippy::collapsible_if)]
+        if i % 10000 == 0 {
+            if cancel.is_cancelled() || timeline.cancel.is_cancelled() || timeline.is_stopping() {
+                return Err(ApiError::ShuttingDown);
+            }
+        }
+    }
+
+    json_response(
+        StatusCode::OK,
+        pageserver_api::models::ScanDisposableKeysResponse {
+            disposable_count,
+            not_disposable_count,
+        },
+    )
 }
 
 async fn layer_download_handler(
@@ -3144,6 +3247,10 @@ pub fn make_router(
         .delete(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/layer/:layer_file_name",
             |r| api_handler(r, evict_timeline_layer_handler),
+        )
+        .post(
+            "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/layer/:layer_name/scan_disposable_keys",
+            |r| testing_api_handler("timeline_layer_scan_disposable_keys", r, timeline_layer_scan_disposable_keys),
         )
         .post(
             "/v1/tenant/:tenant_shard_id/timeline/:timeline_id/block_gc",

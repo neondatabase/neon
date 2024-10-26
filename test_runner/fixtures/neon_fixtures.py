@@ -44,7 +44,14 @@ from urllib3.util.retry import Retry
 
 from fixtures import overlayfs
 from fixtures.auth_tokens import AuthKeys, TokenScope
-from fixtures.common_types import Lsn, NodeId, TenantId, TenantShardId, TimelineId
+from fixtures.common_types import (
+    Lsn,
+    NodeId,
+    TenantId,
+    TenantShardId,
+    TimelineArchivalState,
+    TimelineId,
+)
 from fixtures.endpoint.http import EndpointHttpClient
 from fixtures.log_helper import log
 from fixtures.metrics import Metrics, MetricsGetter, parse_metrics
@@ -54,7 +61,11 @@ from fixtures.pageserver.allowed_errors import (
     DEFAULT_STORAGE_CONTROLLER_ALLOWED_ERRORS,
 )
 from fixtures.pageserver.common_types import LayerName, parse_layer_file_name
-from fixtures.pageserver.http import PageserverHttpClient
+from fixtures.pageserver.http import (
+    HistoricLayerInfo,
+    PageserverHttpClient,
+    ScanDisposableKeysResponse,
+)
 from fixtures.pageserver.utils import (
     wait_for_last_record_lsn,
 )
@@ -2132,6 +2143,24 @@ class NeonStorageController(MetricsGetter, LogUtils):
         response.raise_for_status()
         return response.json()
 
+    def timeline_archival_config(
+        self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        state: TimelineArchivalState,
+    ):
+        config = {"state": state.value}
+        log.info(
+            f"requesting timeline archival config {config} for tenant {tenant_id} and timeline {timeline_id}"
+        )
+        res = self.request(
+            "PUT",
+            f"{self.api}/v1/tenant/{tenant_id}/timeline/{timeline_id}/archival_config",
+            json=config,
+            headers=self.headers(TokenScope.ADMIN),
+        )
+        return res.json()
+
     def configure_failpoints(self, config_strings: tuple[str, str] | list[tuple[str, str]]):
         if isinstance(config_strings, tuple):
             pairs = [config_strings]
@@ -2644,6 +2673,51 @@ class NeonPageserver(PgProtocol, LogUtils):
     ) -> bool:
         layers = self.list_layers(tenant_id, timeline_id)
         return layer_name in [parse_layer_file_name(p.name) for p in layers]
+
+    def timeline_scan_no_disposable_keys(
+        self, tenant_shard_id: TenantShardId, timeline_id: TimelineId
+    ) -> TimelineAssertNoDisposableKeysResult:
+        """
+        Scan all keys in all layers of the tenant/timeline for disposable keys.
+        Disposable keys are keys that are present in a layer referenced by the shard
+        but are not going to be accessed by the shard.
+        For example, after shard split, the child shards will reference the parent's layer
+        files until new data is ingested and/or compaction rewrites the layers.
+        """
+
+        ps_http = self.http_client()
+        tally = ScanDisposableKeysResponse(0, 0)
+        per_layer = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+            futs = []
+            shard_layer_map = ps_http.layer_map_info(tenant_shard_id, timeline_id)
+            for layer in shard_layer_map.historic_layers:
+
+                def do_layer(
+                    shard_ps_http: PageserverHttpClient,
+                    tenant_shard_id: TenantShardId,
+                    timeline_id: TimelineId,
+                    layer: HistoricLayerInfo,
+                ) -> tuple[HistoricLayerInfo, ScanDisposableKeysResponse]:
+                    return (
+                        layer,
+                        shard_ps_http.timeline_layer_scan_disposable_keys(
+                            tenant_shard_id, timeline_id, layer.layer_file_name
+                        ),
+                    )
+
+                futs.append(executor.submit(do_layer, ps_http, tenant_shard_id, timeline_id, layer))
+            for fut in futs:
+                layer, result = fut.result()
+                tally += result
+                per_layer.append((layer, result))
+        return TimelineAssertNoDisposableKeysResult(tally, per_layer)
+
+
+@dataclass
+class TimelineAssertNoDisposableKeysResult:
+    tally: ScanDisposableKeysResponse
+    per_layer: list[tuple[HistoricLayerInfo, ScanDisposableKeysResponse]]
 
 
 class PgBin:
