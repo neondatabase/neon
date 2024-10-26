@@ -9,6 +9,7 @@ use futures::TryFutureExt;
 use tokio::time::Instant;
 use tokio_postgres::config::SslMode;
 use tracing::{debug, info, info_span, warn, Instrument};
+use url::Url;
 
 use super::super::messages::{ControlPlaneError, GetRoleSecret, WakeCompute};
 use super::errors::{ApiError, GetAuthInfoError, WakeComputeError};
@@ -21,7 +22,7 @@ use crate::auth::backend::ComputeUserInfo;
 use crate::cache::Cached;
 use crate::context::RequestMonitoring;
 use crate::control_plane::errors::GetEndpointJwksError;
-use crate::control_plane::messages::{ColdStartInfo, EndpointJwksResponse, Reason};
+use crate::control_plane::messages::{ColdStartInfo, EndpointJwksResponse, JwksSettings, Reason};
 use crate::metrics::{CacheOutcome, Metrics};
 use crate::rate_limiter::WakeComputeRateLimiter;
 use crate::types::{EndpointCacheKey, EndpointId};
@@ -178,16 +179,7 @@ impl Api {
 
             let body = parse_body::<EndpointJwksResponse>(response).await?;
 
-            let rules = body
-                .jwks
-                .into_iter()
-                .map(|jwks| AuthRule {
-                    id: jwks.id,
-                    jwks_url: jwks.jwks_url,
-                    audience: jwks.jwt_audience,
-                    role_names: jwks.role_names,
-                })
-                .collect();
+            let rules = get_auth_rules(body.jwks);
 
             Ok(rules)
         }
@@ -474,6 +466,27 @@ fn parse_host_port(input: &str) -> Option<(&str, u16)> {
     Some((host.trim_matches(ipv6_brackets), port.parse().ok()?))
 }
 
+fn get_auth_rules(jwks_settings: Vec<JwksSettings>) -> Vec<AuthRule> {
+    jwks_settings
+        .into_iter()
+        .filter(|jwks| is_jwks_url_valid(&jwks.jwks_url))
+        .map(|jwks| AuthRule {
+            id: jwks.id,
+            jwks_url: jwks.jwks_url,
+            audience: jwks.jwt_audience,
+            role_names: jwks.role_names,
+        })
+        .collect()
+}
+
+fn is_jwks_url_valid(jwks_url: &Url) -> bool {
+    // https requirement: https://datatracker.ietf.org/doc/html/rfc8414#section-2
+    jwks_url.scheme() == "https"
+        && jwks_url.port().is_none()
+        && jwks_url.domain().is_some()
+        && jwks_url.domain().unwrap_or_default() != "localhost"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -498,5 +511,29 @@ mod tests {
             .expect("failed to parse");
         assert_eq!(host, "compute-foo-bar-1234.default.svc.cluster.local");
         assert_eq!(port, 5432);
+    }
+
+    #[test]
+    fn test_get_auth_rules() {
+        let jwks_settings = vec![
+            serde_json::from_str(r#"
+{ "id": "valid", "jwks_url": "https://example.com", "provider_name": "foo", "role_names": ["foo"] }
+            "#).unwrap(),
+            serde_json::from_str(r#"
+{ "id": "insecure", "jwks_url": "http://example.com", "provider_name": "foo", "role_names": ["foo"] }
+            "#).unwrap(),
+            serde_json::from_str(r#"
+{ "id": "with_port", "jwks_url": "https://example.com:1234", "provider_name": "foo", "role_names": ["foo"] }
+            "#).unwrap(),
+            serde_json::from_str(r#"
+{ "id": "malicious_1", "jwks_url": "https://localhost", "provider_name": "foo", "role_names": ["foo"] }
+            "#).unwrap(),
+            serde_json::from_str(r#"
+{ "id": "malicious_2", "jwks_url": "https://127.0.0.1", "provider_name": "foo", "role_names": ["foo"] }
+            "#).unwrap(),
+        ];
+        let mut auth_rules = get_auth_rules(jwks_settings);
+        assert_eq!(auth_rules.len(), 1);
+        assert_eq!(auth_rules.pop().unwrap().id, "valid");
     }
 }
