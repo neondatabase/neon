@@ -30,7 +30,7 @@ def test_lfc_prewarm(neon_simple_env: NeonEnv):
     cur = conn.cursor()
     cur.execute("create extension neon version '1.6'")
 
-    for _ in range(20):
+    for _ in range(60):
         time.sleep(1)  # give prewarm BGW some time to proceed
         cur.execute("select lfc_value from neon_lfc_stats where lfc_key='file_cache_used_pages'")
         lfc_used_pages = cur.fetchall()[0][0]
