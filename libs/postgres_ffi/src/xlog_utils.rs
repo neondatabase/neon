@@ -647,6 +647,22 @@ impl WalGenerator {
         }
         [record, Bytes::from(vec![0; padding])].concat().into()
     }
+
+    /// Generates a record with an arbitrary payload at the current LSN, then increments the LSN.
+    pub fn generate_record(&mut self, data: Bytes, rmid: u8, info: u8) -> Bytes {
+        let record = Self::encode_record(data, rmid, info, self.prev_lsn);
+        let record = Self::encode_pages(record, self.lsn);
+        let record = Self::pad_record(record, self.lsn);
+        self.prev_lsn = self.lsn;
+        self.lsn += record.len() as u64;
+        record
+    }
+
+    /// Generates a logical message at the current LSN. Can be used to construct arbitrary messages.
+    pub fn generate_logical_message(&mut self, prefix: &CStr, message: &[u8]) -> Bytes {
+        let data = Self::encode_logical_message(prefix, message);
+        self.generate_record(data, RM_LOGICALMSG_ID, XLOG_LOGICAL_MESSAGE)
+    }
 }
 
 /// Generate WAL records as an iterator.
@@ -654,16 +670,7 @@ impl Iterator for WalGenerator {
     type Item = Bytes;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let data = Self::encode_logical_message(Self::PREFIX, Self::MESSAGE);
-        let record =
-            Self::encode_record(data, RM_LOGICALMSG_ID, XLOG_LOGICAL_MESSAGE, self.prev_lsn);
-        let paged_record = Self::encode_pages(record, self.lsn);
-        let bytes = Self::pad_record(paged_record, self.lsn);
-
-        self.prev_lsn = self.lsn;
-        self.lsn += bytes.len() as u64;
-
-        Some(bytes)
+        Some(self.generate_logical_message(Self::PREFIX, Self::MESSAGE))
     }
 }
 
