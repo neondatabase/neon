@@ -1049,6 +1049,12 @@ pub mod virtual_file {
     }
 
     impl IoMode {
+        #[cfg(target_os = "linux")]
+        pub const fn preferred() -> Self {
+            Self::Direct
+        }
+
+        #[cfg(target_os = "macos")]
         pub const fn preferred() -> Self {
             Self::Buffered
         }
