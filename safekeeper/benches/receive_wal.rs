@@ -1,0 +1,153 @@
+//! WAL ingestion benchmarks.
+
+#[path = "benchutils.rs"]
+mod benchutils;
+
+use benchutils::Env;
+use criterion::{criterion_group, criterion_main, BatchSize, Bencher, Criterion};
+use itertools::Itertools as _;
+use postgres_ffi::v17::wal_generator::{LogicalMessageGenerator, WalGenerator};
+use safekeeper::receive_wal::WalAcceptor;
+use safekeeper::safekeeper::{
+    AcceptorProposerMessage, AppendRequest, AppendRequestHeader, ProposerAcceptorMessage,
+};
+use utils::id::{NodeId, TenantTimelineId};
+use utils::lsn::Lsn;
+
+// Register benchmarks with Criterion.
+criterion_group!(benches, bench_process_msg, bench_wal_acceptor);
+criterion_main!(benches);
+
+/// Benchmarks SafeKeeper::process_msg() as time per message. Each message is an AppendRequest with
+/// a single WAL record containing a tiny XlLogicalMessage (~64 bytes total).
+fn bench_process_msg(c: &mut Criterion) {
+    let mut g = c.benchmark_group("process_msg");
+    for fsync in [false, true] {
+        g.bench_function(format!("fsync={fsync}"), |b| run_bench(b, fsync).unwrap());
+    }
+
+    // The actual benchmark.
+    fn run_bench(b: &mut Bencher, fsync: bool) -> anyhow::Result<()> {
+        let runtime = tokio::runtime::Builder::new_current_thread() // single is fine, sync IO only
+            .enable_all()
+            .build()?;
+
+        let env = Env::new(fsync)?;
+        let mut safekeeper =
+            runtime.block_on(env.make_safekeeper(NodeId(1), TenantTimelineId::generate()))?;
+        let mut walgen = WalGenerator::new(LogicalMessageGenerator::new(c"prefix", b"message"));
+
+        b.iter_batched_ref(
+            // Pre-construct WAL records and requests. Criterion will batch them.
+            || {
+                let (lsn, record) = walgen.next().expect("endless WAL");
+                ProposerAcceptorMessage::AppendRequest(AppendRequest {
+                    h: AppendRequestHeader {
+                        term: 1,
+                        term_start_lsn: Lsn(0),
+                        begin_lsn: lsn,
+                        end_lsn: lsn + record.len() as u64,
+                        commit_lsn: Lsn(0),
+                        truncate_lsn: Lsn(0),
+                        proposer_uuid: [0; 16],
+                    },
+                    wal_data: record,
+                })
+            },
+            // Benchmark message processing (time per message).
+            |msg| {
+                runtime
+                    .block_on(safekeeper.process_msg(msg))
+                    .expect("message failed")
+            },
+            BatchSize::SmallInput, // automatically determine a batch size
+        );
+        Ok(())
+    }
+}
+
+/// Benchmarks WalAcceptor by sending it a batch of WAL records and waiting for it to confirm that
+/// the last LSN has been flushed to storage. We pipeline a bunch of messages instead of measuring
+/// each individual message to amortize costs (e.g. fsync), which is more realistic. Records are
+/// XlLogicalMessage with a tiny payload.
+///
+/// TODO: add benchmarks with larger data volume, and measure throughput.
+/// TODO: add benchmarks with in-memory storage, see comment on `Env::make_safekeeper()`:
+fn bench_wal_acceptor(c: &mut Criterion) {
+    let mut g = c.benchmark_group("wal_acceptor");
+    for fsync in [false, true] {
+        for n in [1, 100, 10000] {
+            g.bench_function(format!("fsync={fsync}/n={n}"), |b| {
+                run_bench(b, n, fsync).unwrap()
+            });
+        }
+    }
+
+    /// The actual benchmark. n is the number of WAL records to send in a pipelined batch.
+    fn run_bench(b: &mut Bencher, n: usize, fsync: bool) -> anyhow::Result<()> {
+        let runtime = tokio::runtime::Runtime::new()?; // needs multithreaded
+
+        let env = Env::new(fsync)?;
+        let walgen = &mut WalGenerator::new(LogicalMessageGenerator::new(c"prefix", b"message"));
+
+        // Create buffered channels that can fit all requests, to avoid blocking on channels.
+        let (msg_tx, msg_rx) = tokio::sync::mpsc::channel(n);
+        let (reply_tx, mut reply_rx) = tokio::sync::mpsc::channel(n);
+
+        // Spawn the WalAcceptor task.
+        runtime.block_on(async {
+            // TODO: WalAcceptor doesn't actually need a full timeline, only
+            // Safekeeper::process_msg(). Consider decoupling them to simplify the setup.
+            let tli = env
+                .make_timeline(NodeId(1), TenantTimelineId::generate())
+                .await?
+                .wal_residence_guard()
+                .await?;
+            WalAcceptor::spawn(tli, msg_rx, reply_tx, Some(0));
+            anyhow::Ok(())
+        })?;
+
+        b.iter_batched(
+            // Pre-construct a batch of WAL records and requests.
+            || {
+                walgen
+                    .take(n)
+                    .map(|(lsn, record)| AppendRequest {
+                        h: AppendRequestHeader {
+                            term: 1,
+                            term_start_lsn: Lsn(0),
+                            begin_lsn: lsn,
+                            end_lsn: lsn + record.len() as u64,
+                            commit_lsn: Lsn(0),
+                            truncate_lsn: Lsn(0),
+                            proposer_uuid: [0; 16],
+                        },
+                        wal_data: record,
+                    })
+                    .collect_vec()
+            },
+            // Benchmark batch ingestion (time per batch).
+            |reqs| {
+                runtime.block_on(async {
+                    let final_lsn = reqs.last().unwrap().h.end_lsn;
+                    // Stuff all the messages into the buffered channel to pipeline them.
+                    for req in reqs {
+                        let msg = ProposerAcceptorMessage::AppendRequest(req);
+                        msg_tx.send(msg).await.expect("send failed");
+                    }
+                    // Wait for the last message to get flushed.
+                    while let Some(reply) = reply_rx.recv().await {
+                        if let AcceptorProposerMessage::AppendResponse(resp) = reply {
+                            if resp.flush_lsn >= final_lsn {
+                                return;
+                            }
+                        }
+                    }
+                    panic!("disconnected")
+                })
+            },
+            BatchSize::PerIteration, // only run one request batch at a time
+        );
+        Ok(())
+    }
+}

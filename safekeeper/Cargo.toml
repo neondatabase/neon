@@ -25,6 +25,7 @@ hex.workspace = true
 humantime.workspace = true
 http.workspace = true
 hyper0.workspace = true
+itertools.workspace = true
 futures.workspace = true
 once_cell.workspace = true
 parking_lot.workspace = true
@@ -61,8 +62,13 @@ utils.workspace = true
 workspace_hack.workspace = true
 
 [dev-dependencies]
+criterion.workspace = true
 walproposer.workspace = true
 rand.workspace = true
 desim.workspace = true
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["json"] }
+
+[[bench]]
+name = "receive_wal"
+harness = false
