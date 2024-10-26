@@ -138,7 +138,6 @@ impl TimelinePersistentState {
         })
     }
 
-    #[cfg(test)]
     pub fn empty() -> Self {
         TimelinePersistentState::new(
             &TenantTimelineId::empty(),
