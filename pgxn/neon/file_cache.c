@@ -109,7 +109,7 @@ typedef struct FileCacheEntry
 	uint32		offset;
 	uint32		access_count : 30;
 	uint32      prewarm_requested : 1; /* entry should be filled by prewarm */
-	uint32      prewarm_started : 1;   /* chunk is written by prewarm BGW */
+	uint32      prewarm_started : 1;   /* chunk is written by lfc_prewarm */
 	uint32		bitmap[CHUNK_BITMAP_SIZE];
 	dlist_node	list_node;		/* LRU/holes list node */
 } FileCacheEntry;
@@ -595,23 +595,22 @@ lfc_save_state(void)
 /*
  * Prewarm LFC cache to the specified state.
  *
- * Prewarming can interfere with
- * accessed to the pages by other backends. Usually access to LFC is protected by shared buffers: when Postgres
- * is reading page, it pins shared buffer  and enforces that only one backend is reading it, while other are waiting read completion.
+ * Prewarming can interfere with accesses to the pages by other backends. Usually access to LFC is protected by shared buffers: when Postgres
+ * is reading page, it pins shared buffer and enforces that only one backend is reading it, while other are waiting for read completion.
  *
  * But it is not true for prewarming: backend can fetch page itself, modify and then write it to LFC. At the
- * same time prewarm BGW tries to write deteriorated image of this page in LFC. To increase concurrency, access to LFC files (both read and write)
+ * same time `lfc_prewarm` tries to write deteriorated image of this page in LFC. To increase concurrency, access to LFC files (both read and write)
  * is performed without holding locks. So it can happen that two or more processes write different content to the same location in the LFC file.
  * Certainly we can not rely on disk content in this case.
  *
- * To solve this problem with use two flags in LFC entry: `prewarm_requested` and `prewarm_started`. First is set befroe prewarm is actually started.
- * lfc_prewarm writes to LFC file only if this flag is set. This flag is cleared if any other backend perform write to this LFC chunk.
- * In this case data loaded by prewarm BGW is considered to be deteriorated and should be just ignored.
+ * To solve this problem we use two flags in LFC entry: `prewarm_requested` and `prewarm_started`. First is set before prewarm is actually started.
+ * `lfc_prewarm` writes to LFC file only if this flag is set. This flag is cleared if any other backend performs write to this LFC chunk.
+ * In this case data loaded by `lfc_prewarm` is considered to be deteriorated and should be just ignored.
  *
- * But as bat as far as write to LFC is performed without holding lock, there is no guarantee that such write is in progress.
- * This is why second flag is used: `prewarm_started`. It is set by prewarm BGW when is starts writing page and cleared when write is completed.
- * Any other backend writing to LFC should abandon it's write to LFC file (just not mark page as loaded in bitmap) once it sees this flag.
- * So nether prewarm BGW, nether backend are saving page in LFC - it is just skipped.
+ * But as far as write to LFC is performed without holding lock, there is no guarantee that no such write is in progress.
+ * This is why second flag is used: `prewarm_started`. It is set by `lfc_prewarm` when is starts writing page and cleared when write is completed.
+ * Any other backend writing to LFC should abandon it's write to LFC file (just not mark page as loaded in bitmap) if this flag is set.
+ * So neither `lfc_prewarm`, neither backend are saving page in LFC in this case - it is just skipped.
  */
 
 static void
@@ -650,16 +649,16 @@ lfc_prewarm(FileCacheStateEntry* fs, size_t n_entries)
 		n_entries = lfc_ctl->limit - lfc_ctl->size;
 	}
 
+	/* Initialize fields used to track prewarming progress */
 	lfc_ctl->prewarm_total_chunks = n_entries;
 	lfc_ctl->prewarm_curr_chunk = 0;
 
     /*
-	 * Load LFC state and enter entries in hash table.
+	 * Load LFC state and add entries in hash table.
 	 * It is needed to track modification of prewarmed pages.
-	 * All such entries have `prewarm` flag set. When entry is updated (some backed reads or writes
-	 * some pages from this chunk), then `prewarm` flag is cleared, prohibiting prefetch for this chunk.
+	 * All such entries have `prewarm_requested` flag set. When entry is updated (some backed reads or writes
+	 * some pages from this chunk), then `prewarm_requested` flag is cleared, prohibiting prewarm of this chunk.
 	 * It prevents overwritting page updated or loaded by backend with older one, loaded by prewarm.
-	 * This function is called while LFC initialization: no synchronization is needed.
 	 */
 	for (i = 0; i < n_entries; i++)
 	{
@@ -734,7 +733,6 @@ lfc_prewarm(FileCacheStateEntry* fs, size_t n_entries)
 			if (resp->tag != T_NeonGetPageResponse)
 			{
 				elog(LOG, "LFC: unexpected response type: %d", resp->tag);
-				free(fs);
 				return;
 			}
 
@@ -794,12 +792,14 @@ lfc_prewarm(FileCacheStateEntry* fs, size_t n_entries)
 				LWLockRelease(lfc_lock);
 			}
 
-			if (n_sent == ++n_received)
+			n_received += 1;
+			if (rcv_idx >= n_entries * BLOCKS_PER_CHUNK)
 			{
 				break;
 			}
 		}
 	}
+	Assert(n_sent == n_received);
 	lfc_ctl->prewarm_curr_chunk = n_entries;
 	elog(LOG, "LFC: complete prewarming: loaded %ld pages", (long)n_received);
 }
@@ -829,14 +829,14 @@ lfc_load_pages(void)
 	{
 		elog(LOG, "LFC: Failed to read state file: %m");
 		CloseTransientFile(fd);
-		free(fs);
-		return;
 	}
-	CloseTransientFile(fd);
-	elog(LOG, "LFC: read state with %lu entries", (long)(rc / sizeof(FileCacheStateEntry)));
+	else
+	{
+		CloseTransientFile(fd);
+		elog(LOG, "LFC: read state with %lu entries", (long)(rc / sizeof(FileCacheStateEntry)));
 
-	lfc_prewarm(fs, rc / sizeof(FileCacheStateEntry));
-
+		lfc_prewarm(fs, rc / sizeof(FileCacheStateEntry));
+	}
 	pfree(fs);
 }
 
@@ -1008,7 +1008,7 @@ lfc_evict(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno)
 
 	/* remove the page from the cache */
 	entry->bitmap[chunk_offs >> 5] &= ~(1 << (chunk_offs & (32 - 1)));
-	entry->prewarm_requested = false; /* prohibit prewarm if LFC entry */
+	entry->prewarm_requested = false; /* prohibit prewarm of this LFC entry */
 
 	if (entry->access_count == 0)
 	{
@@ -1254,7 +1254,7 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 
 	CriticalAssert(BufTagGetRelNumber(&tag) != InvalidRelFileNumber);
 
-	/* 
+	/*
 	 * For every chunk that has blocks we're interested in, we
 	 * 1. get the chunk header
 	 * 2. Check if the chunk actually has the blocks we're interested in
@@ -1295,9 +1295,9 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 			if (entry->prewarm_started)
 			{
 				/*
-				 * Some page of this chunk is currently written by prewarm BGW.
+				 * Some page of this chunk is currently written by `lfc_prewarm`.
 				 * We should give-up not to interfere with it.
-				 * But clearing prewarm_requested flag also will not allow prewarm BGW to fix it result.
+				 * But clearing `prewarm_requested` flag also will not allow `lfc_prewarm` to fix it result.
 				 */
 				entry->prewarm_requested = false;
 				LWLockRelease(lfc_lock);
@@ -1332,7 +1332,7 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 			{
 				/* Cache overflow: evict least recently used chunk */
 				FileCacheEntry *victim = dlist_container(FileCacheEntry, list_node, dlist_pop_head_node(&lfc_ctl->lru));
-	
+
 				for (int i = 0; i < BLOCKS_PER_CHUNK; i++)
 				{
 					lfc_ctl->used_pages -= (victim->bitmap[i >> 5] >> (i & 31)) & 1;
@@ -1348,10 +1348,10 @@ lfc_writev(NRelFileInfo rinfo, ForkNumber forkNum, BlockNumber blkno,
 				FileCacheEntry *hole = dlist_container(FileCacheEntry, list_node, dlist_pop_head_node(&lfc_ctl->holes));
 				uint32		offset = hole->offset;
 				bool		hole_found;
-	
+
 				hash_search_with_hash_value(lfc_hash, &hole->key, hole->hash, HASH_REMOVE, &hole_found);
 				CriticalAssert(hole_found);
-	
+
 				lfc_ctl->used += 1;
 				entry->offset = offset;	/* reuse the hole */
 			}
