@@ -792,8 +792,7 @@ lfc_prewarm(FileCacheStateEntry* fs, size_t n_entries)
 				LWLockRelease(lfc_lock);
 			}
 
-			n_received += 1;
-			if (rcv_idx >= n_entries * BLOCKS_PER_CHUNK)
+			if (++n_received == n_sent && snd_idx >= n_entries * BLOCKS_PER_CHUNK)
 			{
 				break;
 			}
