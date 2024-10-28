@@ -21,6 +21,7 @@ use postgres_backend::QueryError;
 use pq_proto::BeMessage;
 use serde::Deserialize;
 use serde::Serialize;
+use std::future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::AsyncRead;
@@ -335,7 +336,8 @@ impl<'a, IO: AsyncRead + AsyncWrite + Unpin> NetworkReader<'a, IO> {
                 };
                 let tli =
                     GlobalTimelines::create(self.ttid, server_info, Lsn::INVALID, Lsn::INVALID)
-                        .await?;
+                        .await
+                        .context("create timeline")?;
                 tli.wal_residence_guard().await?
             }
             _ => {
@@ -492,6 +494,7 @@ impl WalAcceptor {
         // Periodically flush the WAL.
         let mut flush_ticker = tokio::time::interval(FLUSH_INTERVAL);
         flush_ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        flush_ticker.tick().await; // skip the initial, immediate tick
 
         // Tracks unflushed appends.
         let mut dirty = false;
@@ -529,6 +532,18 @@ impl WalAcceptor {
                         .process_msg(&ProposerAcceptorMessage::FlushWAL)
                         .await?
                 }
+
+                // If there are no pending messages, flush the WAL immediately.
+                //
+                // TODO: this should be done via flush_ticker.reset_immediately(), but that's always
+                // delayed by 1ms due to this bug: https://github.com/tokio-rs/tokio/issues/6866.
+                _ = future::ready(()), if dirty && self.msg_rx.is_empty() => {
+                    dirty = false;
+                    flush_ticker.reset();
+                    self.tli
+                        .process_msg(&ProposerAcceptorMessage::FlushWAL)
+                        .await?
+                }
             };
 
             // Send reply, if any.
@@ -536,11 +551,6 @@ impl WalAcceptor {
                 if self.reply_tx.send(reply).await.is_err() {
                     break; // disconnected, break to flush WAL and return
                 }
-            }
-
-            // If there are no further queued messages, schedule an immediate WAL flush.
-            if dirty && self.msg_rx.is_empty() {
-                flush_ticker.reset_immediately();
             }
         }
 
