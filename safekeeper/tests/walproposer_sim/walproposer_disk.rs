@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{ffi::CStr, sync::Arc};
 
 use parking_lot::{Mutex, MutexGuard};
 use postgres_ffi::v16::xlog_utils::WalGenerator;
@@ -62,9 +62,9 @@ impl State {
         self.internal_available_lsn
     }
 
-    /// Appends a record to the WAL at the current LSN.
-    pub fn append_record(&mut self) {
-        let (_, record) = self.wal_generator.next().unwrap();
+    /// Inserts a logical record in the WAL at the current LSN.
+    pub fn insert_logical_message(&mut self, prefix: &CStr, msg: &[u8]) {
+        let record = self.wal_generator.generate_logical_message(prefix, msg);
         self.disk.write(self.internal_available_lsn.into(), &record);
         self.prev_lsn = self.internal_available_lsn;
         self.internal_available_lsn += record.len() as u64;

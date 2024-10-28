@@ -149,7 +149,9 @@ impl WalProposer {
         let start_lsn = self.disk.lock().flush_rec_ptr();
 
         for _ in 0..cnt {
-            self.disk.lock().append_record();
+            self.disk
+                .lock()
+                .insert_logical_message(c"prefix", b"message");
         }
 
         let end_lsn = self.disk.lock().flush_rec_ptr();
