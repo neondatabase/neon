@@ -45,6 +45,7 @@ pub(crate) enum FetchAuthRulesError {
     RoleJwksNotConfigured,
 }
 
+#[derive(Clone)]
 pub(crate) struct AuthRule {
     pub(crate) id: String,
     pub(crate) jwks_url: url::Url,
@@ -668,9 +669,11 @@ impl From<&jose_jwk::Key> for KeyType {
 
 #[cfg(test)]
 mod tests {
-    use std::future::IntoFuture;
-    use std::net::SocketAddr;
-    use std::time::SystemTime;
+    use crate::types::RoleName;
+
+    use super::*;
+
+    use std::{future::IntoFuture, net::SocketAddr, time::SystemTime};
 
     use base64::URL_SAFE_NO_PAD;
     use bytes::Bytes;
@@ -680,11 +683,10 @@ mod tests {
     use hyper_util::rt::TokioIo;
     use rand::rngs::OsRng;
     use rsa::pkcs8::DecodePrivateKey;
+    use serde::Serialize;
+    use serde_json::json;
     use signature::Signer;
     use tokio::net::TcpListener;
-
-    use super::*;
-    use crate::types::RoleName;
 
     fn new_ec_jwk(kid: String) -> (p256::SecretKey, jose_jwk::Jwk) {
         let sk = p256::SecretKey::random(&mut OsRng);
@@ -693,6 +695,7 @@ mod tests {
             key: jose_jwk::Key::Ec(pk),
             prm: jose_jwk::Parameters {
                 kid: Some(kid),
+                alg: Some(jose_jwa::Algorithm::Signing(jose_jwa::Signing::Es256)),
                 ..Default::default()
             },
         };
@@ -706,6 +709,7 @@ mod tests {
             key: jose_jwk::Key::Rsa(pk),
             prm: jose_jwk::Parameters {
                 kid: Some(kid),
+                alg: Some(jose_jwa::Algorithm::Signing(jose_jwa::Signing::Rs256)),
                 ..Default::default()
             },
         };
@@ -713,17 +717,35 @@ mod tests {
     }
 
     fn build_jwt_payload(kid: String, sig: jose_jwa::Signing) -> String {
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let body = typed_json::json! {{
+            "exp": now + 3600,
+            "nbf": now,
+            "aud": ["audience1", "neon", "audience2"],
+            "sub": "user1",
+            "sid": "session1",
+            "jti": "token1",
+            "iss": "neon-testing",
+        }};
+        build_custom_jwt_payload(kid, body, sig)
+    }
+
+    fn build_custom_jwt_payload(
+        kid: String,
+        body: impl Serialize,
+        sig: jose_jwa::Signing,
+    ) -> String {
         let header = JwtHeader {
             algorithm: jose_jwa::Algorithm::Signing(sig),
-            key_id: Some(&kid),
+            key_id: Some(Cow::Owned(kid)),
         };
-        let body = typed_json::json! {{
-            "exp": SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs() + 3600,
-        }};
 
         let header =
             base64::encode_config(serde_json::to_string(&header).unwrap(), URL_SAFE_NO_PAD);
-        let body = base64::encode_config(body.to_string(), URL_SAFE_NO_PAD);
+        let body = base64::encode_config(serde_json::to_string(&body).unwrap(), URL_SAFE_NO_PAD);
 
         format!("{header}.{body}")
     }
@@ -732,6 +754,16 @@ mod tests {
         use p256::ecdsa::{Signature, SigningKey};
 
         let payload = build_jwt_payload(kid, jose_jwa::Signing::Es256);
+        let sig: Signature = SigningKey::from(key).sign(payload.as_bytes());
+        let sig = base64::encode_config(sig.to_bytes(), URL_SAFE_NO_PAD);
+
+        format!("{payload}.{sig}")
+    }
+
+    fn new_custom_ec_jwt(kid: String, key: &p256::SecretKey, body: impl Serialize) -> String {
+        use p256::ecdsa::{Signature, SigningKey};
+
+        let payload = build_custom_jwt_payload(kid, body, jose_jwa::Signing::Es256);
         let sig: Signature = SigningKey::from(key).sign(payload.as_bytes());
         let sig = base64::encode_config(sig.to_bytes(), URL_SAFE_NO_PAD);
 
@@ -809,37 +841,34 @@ X0n5X2/pBLJzxZc62ccvZYVnctBiFs6HbSnxpuMQCfkt/BcR/ttIepBQQIW86wHL
 -----END PRIVATE KEY-----
 ";
 
-    #[tokio::test]
-    async fn renew() {
-        let (rs1, jwk1) = new_rsa_jwk(RS1, "1".into());
-        let (rs2, jwk2) = new_rsa_jwk(RS2, "2".into());
-        let (ec1, jwk3) = new_ec_jwk("3".into());
-        let (ec2, jwk4) = new_ec_jwk("4".into());
+    #[derive(Clone)]
+    struct Fetch(Vec<AuthRule>);
 
-        let foo_jwks = jose_jwk::JwkSet {
-            keys: vec![jwk1, jwk3],
-        };
-        let bar_jwks = jose_jwk::JwkSet {
-            keys: vec![jwk2, jwk4],
-        };
+    impl FetchAuthRules for Fetch {
+        async fn fetch_auth_rules(
+            &self,
+            _ctx: &RequestMonitoring,
+            _endpoint: EndpointId,
+        ) -> Result<Vec<AuthRule>, FetchAuthRulesError> {
+            Ok(self.0.clone())
+        }
+    }
 
+    async fn jwks_server(
+        router: impl for<'a> Fn(&'a str) -> Option<Vec<u8>> + Send + Sync + 'static,
+    ) -> SocketAddr {
+        let router = Arc::new(router);
         let service = service_fn(move |req| {
-            let foo_jwks = foo_jwks.clone();
-            let bar_jwks = bar_jwks.clone();
+            let router = Arc::clone(&router);
             async move {
-                let jwks = match req.uri().path() {
-                    "/foo" => &foo_jwks,
-                    "/bar" => &bar_jwks,
-                    _ => {
-                        return Response::builder()
-                            .status(404)
-                            .body(Full::new(Bytes::new()));
-                    }
-                };
-                let body = serde_json::to_vec(jwks).unwrap();
-                Response::builder()
-                    .status(200)
-                    .body(Full::new(Bytes::from(body)))
+                match router(req.uri().path()) {
+                    Some(body) => Response::builder()
+                        .status(200)
+                        .body(Full::new(Bytes::from(body))),
+                    None => Response::builder()
+                        .status(404)
+                        .body(Full::new(Bytes::new())),
+                }
             }
         });
 
@@ -854,84 +883,61 @@ X0n5X2/pBLJzxZc62ccvZYVnctBiFs6HbSnxpuMQCfkt/BcR/ttIepBQQIW86wHL
             }
         });
 
-        let client = reqwest::Client::new();
+        addr
+    }
 
-        #[derive(Clone)]
-        struct Fetch(SocketAddr, Vec<RoleNameInt>);
+    #[tokio::test]
+    async fn check_jwt_happy_path() {
+        let (rs1, jwk1) = new_rsa_jwk(RS1, "rs1".into());
+        let (rs2, jwk2) = new_rsa_jwk(RS2, "rs2".into());
+        let (ec1, jwk3) = new_ec_jwk("ec1".into());
+        let (ec2, jwk4) = new_ec_jwk("ec2".into());
 
-        impl FetchAuthRules for Fetch {
-            async fn fetch_auth_rules(
-                &self,
-                _ctx: &RequestMonitoring,
-                _endpoint: EndpointId,
-            ) -> Result<Vec<AuthRule>, FetchAuthRulesError> {
-                Ok(vec![
-                    AuthRule {
-                        id: "foo".to_owned(),
-                        jwks_url: format!("http://{}/foo", self.0).parse().unwrap(),
-                        audience: None,
-                        role_names: self.1.clone(),
-                    },
-                    AuthRule {
-                        id: "bar".to_owned(),
-                        jwks_url: format!("http://{}/bar", self.0).parse().unwrap(),
-                        audience: None,
-                        role_names: self.1.clone(),
-                    },
-                ])
-            }
-        }
+        let foo_jwks = jose_jwk::JwkSet {
+            keys: vec![jwk1, jwk3],
+        };
+        let bar_jwks = jose_jwk::JwkSet {
+            keys: vec![jwk2, jwk4],
+        };
+
+        let jwks_addr = jwks_server(move |path| match path {
+            "/foo" => Some(serde_json::to_vec(&foo_jwks).unwrap()),
+            "/bar" => Some(serde_json::to_vec(&bar_jwks).unwrap()),
+            _ => None,
+        })
+        .await;
 
         let role_name1 = RoleName::from("anonymous");
         let role_name2 = RoleName::from("authenticated");
 
-        let fetch = Fetch(
-            addr,
-            vec![
-                RoleNameInt::from(&role_name1),
-                RoleNameInt::from(&role_name2),
-            ],
-        );
+        let roles = vec![
+            RoleNameInt::from(&role_name1),
+            RoleNameInt::from(&role_name2),
+        ];
+        let rules = vec![
+            AuthRule {
+                id: "foo".to_owned(),
+                jwks_url: format!("http://{jwks_addr}/foo").parse().unwrap(),
+                audience: None,
+                role_names: roles.clone(),
+            },
+            AuthRule {
+                id: "bar".to_owned(),
+                jwks_url: format!("http://{jwks_addr}/bar").parse().unwrap(),
+                audience: None,
+                role_names: roles.clone(),
+            },
+        ];
+
+        let fetch = Fetch(rules);
+        let jwk_cache = JwkCache::default();
 
         let endpoint = EndpointId::from("ep");
 
-        let jwk_cache = Arc::new(JwkCacheEntryLock::default());
-
-        let jwt1 = new_rsa_jwt("1".into(), rs1);
-        let jwt2 = new_rsa_jwt("2".into(), rs2);
-        let jwt3 = new_ec_jwt("3".into(), &ec1);
-        let jwt4 = new_ec_jwt("4".into(), &ec2);
-
-        // had the wrong kid, therefore will have the wrong ecdsa signature
-        let bad_jwt = new_ec_jwt("3".into(), &ec2);
-        // this role_name is not accepted
-        let bad_role_name = RoleName::from("cloud_admin");
-
-        let err = jwk_cache
-            .check_jwt(
-                &RequestMonitoring::test(),
-                &bad_jwt,
-                &client,
-                endpoint.clone(),
-                &role_name1,
-                &fetch,
-            )
-            .await
-            .unwrap_err();
-        assert!(err.to_string().contains("signature error"));
-
-        let err = jwk_cache
-            .check_jwt(
-                &RequestMonitoring::test(),
-                &jwt1,
-                &client,
-                endpoint.clone(),
-                &bad_role_name,
-                &fetch,
-            )
-            .await
-            .unwrap_err();
-        assert!(err.to_string().contains("jwk not found"));
+        let jwt1 = new_rsa_jwt("rs1".into(), rs1);
+        let jwt2 = new_rsa_jwt("rs2".into(), rs2);
+        let jwt3 = new_ec_jwt("ec1".into(), &ec1);
+        let jwt4 = new_ec_jwt("ec2".into(), &ec2);
 
         let tokens = [jwt1, jwt2, jwt3, jwt4];
         let role_names = [role_name1, role_name2];
@@ -940,14 +946,193 @@ X0n5X2/pBLJzxZc62ccvZYVnctBiFs6HbSnxpuMQCfkt/BcR/ttIepBQQIW86wHL
                 jwk_cache
                     .check_jwt(
                         &RequestMonitoring::test(),
-                        token,
-                        &client,
                         endpoint.clone(),
                         role,
                         &fetch,
+                        token,
                     )
                     .await
                     .unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn check_jwt_invalid_signature() {
+        let (_, jwk) = new_ec_jwk("1".into());
+        let (key, _) = new_ec_jwk("1".into());
+
+        // has a matching kid, but signed by the wrong key
+        let bad_jwt = new_ec_jwt("1".into(), &key);
+
+        let jwks = jose_jwk::JwkSet { keys: vec![jwk] };
+        let jwks_addr = jwks_server(move |path| match path {
+            "/" => Some(serde_json::to_vec(&jwks).unwrap()),
+            _ => None,
+        })
+        .await;
+
+        let role = RoleName::from("authenticated");
+
+        let rules = vec![AuthRule {
+            id: String::new(),
+            jwks_url: format!("http://{jwks_addr}/").parse().unwrap(),
+            audience: None,
+            role_names: vec![RoleNameInt::from(&role)],
+        }];
+
+        let fetch = Fetch(rules);
+        let jwk_cache = JwkCache::default();
+
+        let ep = EndpointId::from("ep");
+
+        let ctx = RequestMonitoring::test();
+        let err = jwk_cache
+            .check_jwt(&ctx, ep, &role, &fetch, &bad_jwt)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("signature error"),
+            "expected \"signature error\", got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn check_jwt_unknown_role() {
+        let (key, jwk) = new_rsa_jwk(RS1, "1".into());
+        let jwt = new_rsa_jwt("1".into(), key);
+
+        let jwks = jose_jwk::JwkSet { keys: vec![jwk] };
+        let jwks_addr = jwks_server(move |path| match path {
+            "/" => Some(serde_json::to_vec(&jwks).unwrap()),
+            _ => None,
+        })
+        .await;
+
+        let role = RoleName::from("authenticated");
+        let rules = vec![AuthRule {
+            id: String::new(),
+            jwks_url: format!("http://{jwks_addr}/").parse().unwrap(),
+            audience: None,
+            role_names: vec![RoleNameInt::from(&role)],
+        }];
+
+        let fetch = Fetch(rules);
+        let jwk_cache = JwkCache::default();
+
+        let ep = EndpointId::from("ep");
+
+        // this role_name is not accepted
+        let bad_role_name = RoleName::from("cloud_admin");
+
+        let ctx = RequestMonitoring::test();
+        let err = jwk_cache
+            .check_jwt(&ctx, ep, &bad_role_name, &fetch, &jwt)
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.to_string().contains("jwk not found"),
+            "expected \"jwk not found\", got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn check_jwt_invalid_claims() {
+        let (key, jwk) = new_ec_jwk("1".into());
+
+        let jwks = jose_jwk::JwkSet { keys: vec![jwk] };
+        let jwks_addr = jwks_server(move |path| match path {
+            "/" => Some(serde_json::to_vec(&jwks).unwrap()),
+            _ => None,
+        })
+        .await;
+
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        struct Test {
+            body: serde_json::Value,
+            error: &'static str,
+        }
+
+        let table = vec![
+            Test {
+                body: json! {{
+                    "nbf": now + 60,
+                    "aud": "neon",
+                }},
+                error: "JWT token is not yet ready to use",
+            },
+            Test {
+                body: json! {{
+                    "exp": now - 60,
+                    "aud": ["neon"],
+                }},
+                error: "JWT token has expired",
+            },
+            Test {
+                body: json! {{
+                }},
+                error: "invalid JWT token audience",
+            },
+            Test {
+                body: json! {{
+                    "aud": [],
+                }},
+                error: "invalid JWT token audience",
+            },
+            Test {
+                body: json! {{
+                    "aud": "foo",
+                }},
+                error: "invalid JWT token audience",
+            },
+            Test {
+                body: json! {{
+                    "aud": ["foo"],
+                }},
+                error: "invalid JWT token audience",
+            },
+            Test {
+                body: json! {{
+                    "aud": ["foo", "bar"],
+                }},
+                error: "invalid JWT token audience",
+            },
+        ];
+
+        let role = RoleName::from("authenticated");
+
+        let rules = vec![AuthRule {
+            id: String::new(),
+            jwks_url: format!("http://{jwks_addr}/").parse().unwrap(),
+            audience: Some("neon".to_string()),
+            role_names: vec![RoleNameInt::from(&role)],
+        }];
+
+        let fetch = Fetch(rules);
+        let jwk_cache = JwkCache::default();
+
+        let ep = EndpointId::from("ep");
+
+        let ctx = RequestMonitoring::test();
+        for test in table {
+            let jwt = new_custom_ec_jwt("1".into(), &key, test.body);
+
+            match jwk_cache
+                .check_jwt(&ctx, ep.clone(), &role, &fetch, &jwt)
+                .await
+            {
+                Err(err) if err.to_string().contains(test.error) => {}
+                Err(err) => {
+                    panic!("expected {:?}, got {err:?}", test.error)
+                }
+                Ok(_payload) => {
+                    panic!("expected {:?}, got ok", test.error)
+                }
             }
         }
     }
