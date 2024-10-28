@@ -473,6 +473,11 @@ impl TenantShard {
         shard: ShardIdentity,
         policy: PlacementPolicy,
     ) -> Self {
+        metrics::METRICS_REGISTRY
+            .metrics_group
+            .storage_controller_tenant_shards
+            .inc();
+
         Self {
             tenant_shard_id,
             policy,
@@ -1312,6 +1317,12 @@ impl TenantShard {
         })
     }
 
+    pub(crate) fn cancel_reconciler(&self) {
+        if let Some(handle) = self.reconciler.as_ref() {
+            handle.cancel.cancel()
+        }
+    }
+
     /// Get a waiter for any reconciliation in flight, but do not start reconciliation
     /// if it is not already running
     pub(crate) fn get_waiter(&self) -> Option<ReconcilerWaiter> {
@@ -1383,6 +1394,11 @@ impl TenantShard {
     ) -> anyhow::Result<Self> {
         let tenant_shard_id = tsp.get_tenant_shard_id()?;
         let shard_identity = tsp.get_shard_identity()?;
+
+        metrics::METRICS_REGISTRY
+            .metrics_group
+            .storage_controller_tenant_shards
+            .inc();
 
         Ok(Self {
             tenant_shard_id,
@@ -1509,6 +1525,15 @@ impl TenantShard {
                 }
             }
         }
+    }
+}
+
+impl Drop for TenantShard {
+    fn drop(&mut self) {
+        metrics::METRICS_REGISTRY
+            .metrics_group
+            .storage_controller_tenant_shards
+            .dec();
     }
 }
 

@@ -5,6 +5,7 @@
 mod backend;
 pub mod cancel_set;
 mod conn_pool;
+mod conn_pool_lib;
 mod http_conn_pool;
 mod http_util;
 mod json;
@@ -20,7 +21,7 @@ use anyhow::Context;
 use async_trait::async_trait;
 use atomic_take::AtomicTake;
 use bytes::Bytes;
-pub use conn_pool::GlobalConnPoolOptions;
+pub use conn_pool_lib::GlobalConnPoolOptions;
 use futures::future::{select, Either};
 use futures::TryFutureExt;
 use http::{Method, Response, StatusCode};
@@ -31,6 +32,7 @@ use hyper_util::rt::TokioExecutor;
 use hyper_util::server::conn::auto::Builder;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
+use sql_over_http::{uuid_to_header_value, NEON_REQUEST_ID};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
@@ -65,7 +67,7 @@ pub async fn task_main(
     }
 
     let local_pool = local_conn_pool::LocalConnPool::new(&config.http_config);
-    let conn_pool = conn_pool::GlobalConnPool::new(&config.http_config);
+    let conn_pool = conn_pool_lib::GlobalConnPool::new(&config.http_config);
     {
         let conn_pool = Arc::clone(&conn_pool);
         tokio::spawn(async move {
@@ -308,7 +310,18 @@ async fn connection_handler(
         hyper_util::rt::TokioIo::new(conn),
         hyper::service::service_fn(move |req: hyper::Request<Incoming>| {
             // First HTTP request shares the same session ID
-            let session_id = session_id.take().unwrap_or_else(uuid::Uuid::new_v4);
+            let mut session_id = session_id.take().unwrap_or_else(uuid::Uuid::new_v4);
+
+            if matches!(backend.auth_backend, crate::auth::Backend::Local(_)) {
+                // take session_id from request, if given.
+                if let Some(id) = req
+                    .headers()
+                    .get(&NEON_REQUEST_ID)
+                    .and_then(|id| uuid::Uuid::try_parse_ascii(id.as_bytes()).ok())
+                {
+                    session_id = id;
+                }
+            }
 
             // Cancel the current inflight HTTP request if the requets stream is closed.
             // This is slightly different to `_cancel_connection` in that
@@ -334,8 +347,15 @@ async fn connection_handler(
                 .map_ok_or_else(api_error_into_response, |r| r),
             );
             async move {
-                let res = handler.await;
+                let mut res = handler.await;
                 cancel_request.disarm();
+
+                // add the session ID to the response
+                if let Ok(resp) = &mut res {
+                    resp.headers_mut()
+                        .append(&NEON_REQUEST_ID, uuid_to_header_value(session_id));
+                }
+
                 res
             }
         }),

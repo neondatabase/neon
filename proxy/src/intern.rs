@@ -7,7 +7,7 @@ use std::sync::OnceLock;
 use lasso::{Capacity, MemoryLimits, Spur, ThreadedRodeo};
 use rustc_hash::FxHasher;
 
-use crate::{BranchId, EndpointId, ProjectId, RoleName};
+use crate::types::{BranchId, EndpointId, ProjectId, RoleName};
 
 pub trait InternId: Sized + 'static {
     fn get_interner() -> &'static StringInterner<Self>;
@@ -55,7 +55,7 @@ impl<Id: InternId> std::ops::Deref for InternedString<Id> {
 impl<'de, Id: InternId> serde::de::Deserialize<'de> for InternedString<Id> {
     fn deserialize<D: serde::de::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         struct Visitor<Id>(PhantomData<Id>);
-        impl<'de, Id: InternId> serde::de::Visitor<'de> for Visitor<Id> {
+        impl<Id: InternId> serde::de::Visitor<'_> for Visitor<Id> {
             type Value = InternedString<Id>;
 
             fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

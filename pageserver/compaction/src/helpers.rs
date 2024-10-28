@@ -133,7 +133,7 @@ enum LazyLoadLayer<'a, E: CompactionJobExecutor> {
     Loaded(VecDeque<<E::DeltaLayer as CompactionDeltaLayer<E>>::DeltaEntry<'a>>),
     Unloaded(&'a E::DeltaLayer),
 }
-impl<'a, E: CompactionJobExecutor> LazyLoadLayer<'a, E> {
+impl<E: CompactionJobExecutor> LazyLoadLayer<'_, E> {
     fn min_key(&self) -> E::Key {
         match self {
             Self::Loaded(entries) => entries.front().unwrap().key(),
@@ -147,23 +147,23 @@ impl<'a, E: CompactionJobExecutor> LazyLoadLayer<'a, E> {
         }
     }
 }
-impl<'a, E: CompactionJobExecutor> PartialOrd for LazyLoadLayer<'a, E> {
+impl<E: CompactionJobExecutor> PartialOrd for LazyLoadLayer<'_, E> {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
-impl<'a, E: CompactionJobExecutor> Ord for LazyLoadLayer<'a, E> {
+impl<E: CompactionJobExecutor> Ord for LazyLoadLayer<'_, E> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         // reverse order so that we get a min-heap
         (other.min_key(), other.min_lsn()).cmp(&(self.min_key(), self.min_lsn()))
     }
 }
-impl<'a, E: CompactionJobExecutor> PartialEq for LazyLoadLayer<'a, E> {
+impl<E: CompactionJobExecutor> PartialEq for LazyLoadLayer<'_, E> {
     fn eq(&self, other: &Self) -> bool {
         self.cmp(other) == std::cmp::Ordering::Equal
     }
 }
-impl<'a, E: CompactionJobExecutor> Eq for LazyLoadLayer<'a, E> {}
+impl<E: CompactionJobExecutor> Eq for LazyLoadLayer<'_, E> {}
 
 type LoadFuture<'a, E> = BoxFuture<'a, anyhow::Result<Vec<E>>>;
 

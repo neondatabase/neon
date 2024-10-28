@@ -1,5 +1,6 @@
 //! Common traits and structs for layers
 
+pub mod batch_split_writer;
 pub mod delta_layer;
 pub mod filter_iterator;
 pub mod image_layer;
@@ -8,7 +9,6 @@ pub(crate) mod layer;
 mod layer_desc;
 mod layer_name;
 pub mod merge_iterator;
-pub mod split_writer;
 
 use crate::context::{AccessStatsBehavior, RequestContext};
 use crate::repository::Value;
@@ -705,7 +705,7 @@ pub mod tests {
 /// Useful with `Key`, which has too verbose `{:?}` for printing multiple layers.
 struct RangeDisplayDebug<'a, T: std::fmt::Display>(&'a Range<T>);
 
-impl<'a, T: std::fmt::Display> std::fmt::Debug for RangeDisplayDebug<'a, T> {
+impl<T: std::fmt::Display> std::fmt::Debug for RangeDisplayDebug<'_, T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}..{}", self.0.start, self.0.end)
     }

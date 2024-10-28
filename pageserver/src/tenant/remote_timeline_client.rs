@@ -180,6 +180,7 @@
 
 pub(crate) mod download;
 pub mod index;
+pub mod manifest;
 pub(crate) mod upload;
 
 use anyhow::Context;
@@ -187,11 +188,10 @@ use camino::Utf8Path;
 use chrono::{NaiveDateTime, Utc};
 
 pub(crate) use download::download_initdb_tar_zst;
-use pageserver_api::models::{AuxFilePolicy, TimelineArchivalState};
+use pageserver_api::models::TimelineArchivalState;
 use pageserver_api::shard::{ShardIndex, TenantShardId};
 use scopeguard::ScopeGuard;
 use tokio_util::sync::CancellationToken;
-pub(crate) use upload::upload_initdb_dir;
 use utils::backoff::{
     self, exponential_backoff, DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS,
 };
@@ -245,9 +245,11 @@ use super::upload_queue::{NotInitialized, SetDeletedFlagProgress};
 use super::Generation;
 
 pub(crate) use download::{
-    download_index_part, is_temp_download_file, list_remote_tenant_shards, list_remote_timelines,
+    do_download_tenant_manifest, download_index_part, is_temp_download_file,
+    list_remote_tenant_shards, list_remote_timelines,
 };
 pub(crate) use index::LayerFileMetadata;
+pub(crate) use upload::{upload_initdb_dir, upload_tenant_manifest};
 
 // Occasional network issues and such can cause remote operations to fail, and
 // that's expected. If a download fails, we log it at info-level, and retry.
@@ -272,6 +274,12 @@ pub(crate) const BUFFER_SIZE: usize = 32 * 1024;
 /// which we warn and skip.
 const DELETION_QUEUE_FLUSH_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Hardcode a generation for the tenant manifest for now so that we don't
+/// need to deal with generation-less manifests in the future.
+///
+/// TODO: add proper generation support to all the places that use this.
+pub(crate) const TENANT_MANIFEST_GENERATION: Generation = Generation::new(1);
+
 pub enum MaybeDeletedIndexPart {
     IndexPart(IndexPart),
     Deleted(IndexPart),
@@ -294,6 +302,10 @@ pub enum WaitCompletionError {
     #[error("wait_completion aborted because upload queue was stopped")]
     UploadQueueShutDownOrStopped,
 }
+
+#[derive(Debug, thiserror::Error)]
+#[error("Upload queue either in unexpected state or hasn't downloaded manifest yet")]
+pub struct UploadQueueNotReadyError;
 
 /// A client for accessing a timeline's data in remote storage.
 ///
@@ -468,6 +480,20 @@ impl RemoteTimelineClient {
             .ok()
     }
 
+    /// Returns `Ok(Some(timestamp))` if the timeline has been archived, `Ok(None)` if the timeline hasn't been archived.
+    ///
+    /// Return Err(_) if the remote index_part hasn't been downloaded yet, or the timeline hasn't been stopped yet.
+    pub(crate) fn archived_at_stopped_queue(
+        &self,
+    ) -> Result<Option<NaiveDateTime>, UploadQueueNotReadyError> {
+        self.upload_queue
+            .lock()
+            .unwrap()
+            .stopped_mut()
+            .map(|q| q.upload_queue_for_deletion.clean.0.archived_at)
+            .map_err(|_| UploadQueueNotReadyError)
+    }
+
     fn update_remote_physical_size_gauge(&self, current_remote_index_part: Option<&IndexPart>) {
         let size: u64 = if let Some(current_remote_index_part) = current_remote_index_part {
             current_remote_index_part
@@ -505,7 +531,7 @@ impl RemoteTimelineClient {
             },
         );
 
-        let (index_part, _index_generation) = download::download_index_part(
+        let (index_part, index_generation, index_last_modified) = download::download_index_part(
             &self.storage_impl,
             &self.tenant_shard_id,
             &self.timeline_id,
@@ -518,6 +544,49 @@ impl RemoteTimelineClient {
             Arc::clone(&self.metrics),
         )
         .await?;
+
+        // Defense in depth: monotonicity of generation numbers is an important correctness guarantee, so when we see a very
+        // old index, we do extra checks in case this is the result of backward time-travel of the generation number (e.g.
+        // in case of a bug in the service that issues generation numbers). Indices are allowed to be old, but we expect that
+        // when we load an old index we are loading the _latest_ index: if we are asked to load an old index and there is
+        // also a newer index available, that is surprising.
+        const INDEX_AGE_CHECKS_THRESHOLD: Duration = Duration::from_secs(14 * 24 * 3600);
+        let index_age = index_last_modified.elapsed().unwrap_or_else(|e| {
+            if e.duration() > Duration::from_secs(5) {
+                // We only warn if the S3 clock and our local clock are >5s out: because this is a low resolution
+                // timestamp, it is common to be out by at least 1 second.
+                tracing::warn!("Index has modification time in the future: {e}");
+            }
+            Duration::ZERO
+        });
+        if index_age > INDEX_AGE_CHECKS_THRESHOLD {
+            tracing::info!(
+                ?index_generation,
+                age = index_age.as_secs_f64(),
+                "Loaded an old index, checking for other indices..."
+            );
+
+            // Find the highest-generation index
+            let (_latest_index_part, latest_index_generation, latest_index_mtime) =
+                download::download_index_part(
+                    &self.storage_impl,
+                    &self.tenant_shard_id,
+                    &self.timeline_id,
+                    Generation::MAX,
+                    cancel,
+                )
+                .await?;
+
+            if latest_index_generation > index_generation {
+                // Unexpected!  Why are we loading such an old index if a more recent one exists?
+                tracing::warn!(
+                    ?index_generation,
+                    ?latest_index_generation,
+                    ?latest_index_mtime,
+                    "Found a newer index while loading an old one"
+                );
+            }
+        }
 
         if index_part.deleted_at.is_some() {
             Ok(MaybeDeletedIndexPart::Deleted(index_part))
@@ -625,18 +694,6 @@ impl RemoteTimelineClient {
 
         self.schedule_index_upload(upload_queue)?;
 
-        Ok(())
-    }
-
-    /// Launch an index-file upload operation in the background, with only the `aux_file_policy` flag updated.
-    pub(crate) fn schedule_index_upload_for_aux_file_policy_update(
-        self: &Arc<Self>,
-        last_aux_file_policy: Option<AuxFilePolicy>,
-    ) -> anyhow::Result<()> {
-        let mut guard = self.upload_queue.lock().unwrap();
-        let upload_queue = guard.initialized_mut()?;
-        upload_queue.dirty.last_aux_file_policy = last_aux_file_policy;
-        self.schedule_index_upload(upload_queue)?;
         Ok(())
     }
 
@@ -1221,10 +1278,14 @@ impl RemoteTimelineClient {
         let fut = {
             let mut guard = self.upload_queue.lock().unwrap();
             let upload_queue = match &mut *guard {
-                UploadQueue::Stopped(_) => return,
+                UploadQueue::Stopped(_) => {
+                    scopeguard::ScopeGuard::into_inner(sg);
+                    return;
+                }
                 UploadQueue::Uninitialized => {
                     // transition into Stopped state
                     self.stop_impl(&mut guard);
+                    scopeguard::ScopeGuard::into_inner(sg);
                     return;
                 }
                 UploadQueue::Initialized(ref mut init) => init,
@@ -2151,7 +2212,7 @@ pub(crate) struct UploadQueueAccessor<'a> {
     inner: std::sync::MutexGuard<'a, UploadQueue>,
 }
 
-impl<'a> UploadQueueAccessor<'a> {
+impl UploadQueueAccessor<'_> {
     pub(crate) fn latest_uploaded_index_part(&self) -> &IndexPart {
         match &*self.inner {
             UploadQueue::Initialized(x) => &x.clean.0,
@@ -2164,6 +2225,17 @@ impl<'a> UploadQueueAccessor<'a> {
 
 pub fn remote_tenant_path(tenant_shard_id: &TenantShardId) -> RemotePath {
     let path = format!("tenants/{tenant_shard_id}");
+    RemotePath::from_string(&path).expect("Failed to construct path")
+}
+
+pub fn remote_tenant_manifest_path(
+    tenant_shard_id: &TenantShardId,
+    generation: Generation,
+) -> RemotePath {
+    let path = format!(
+        "tenants/{tenant_shard_id}/tenant-manifest{}.json",
+        generation.get_suffix()
+    );
     RemotePath::from_string(&path).expect("Failed to construct path")
 }
 

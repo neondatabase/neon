@@ -5,7 +5,7 @@
 
 use bstr::ByteSlice;
 
-use crate::EndpointId;
+use crate::types::EndpointId;
 
 pub(crate) struct PasswordHackPayload {
     pub(crate) endpoint: EndpointId,

@@ -353,13 +353,10 @@ COPY compute/patches/pgvector.patch /pgvector.patch
 # because we build the images on different machines than where we run them.
 # Pass OPTFLAGS="" to remove it.
 #
-# v17 is not supported yet because of upstream issue
-# https://github.com/pgvector/pgvector/issues/669
-RUN case "${PG_VERSION}" in "v17") \
-    echo "v17 extensions are not supported yet. Quit" && exit 0;; \
-    esac && \
-    wget https://github.com/pgvector/pgvector/archive/refs/tags/v0.7.2.tar.gz -O pgvector.tar.gz && \
-    echo "617fba855c9bcb41a2a9bc78a78567fd2e147c72afd5bf9d37b31b9591632b30 pgvector.tar.gz" | sha256sum --check && \
+# vector 0.7.4 supports v17
+# last release v0.7.4 - Aug 5, 2024
+RUN wget https://github.com/pgvector/pgvector/archive/refs/tags/v0.7.4.tar.gz -O pgvector.tar.gz && \
+    echo "0341edf89b1924ae0d552f617e14fb7f8867c0194ed775bcc44fa40288642583 pgvector.tar.gz" | sha256sum --check && \
     mkdir pgvector-src && cd pgvector-src && tar xzf ../pgvector.tar.gz --strip-components=1 -C . && \
     patch -p1 < /pgvector.patch && \
     make -j $(getconf _NPROCESSORS_ONLN) OPTFLAGS="" PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
@@ -978,8 +975,8 @@ ARG PG_VERSION
 RUN case "${PG_VERSION}" in "v17") \
     echo "pg_session_jwt does not yet have a release that supports pg17" && exit 0;; \
     esac && \
-    wget https://github.com/neondatabase/pg_session_jwt/archive/5aee2625af38213650e1a07ae038fdc427250ee4.tar.gz -O pg_session_jwt.tar.gz && \
-    echo "5d91b10bc1347d36cffc456cb87bec25047935d6503dc652ca046f04760828e7 pg_session_jwt.tar.gz" | sha256sum --check && \
+    wget https://github.com/neondatabase/pg_session_jwt/archive/e1310b08ba51377a19e0559e4d1194883b9b2ba2.tar.gz -O pg_session_jwt.tar.gz && \
+    echo "837932a077888d5545fd54b0abcc79e5f8e37017c2769a930afc2f5c94df6f4e pg_session_jwt.tar.gz" | sha256sum --check && \
     mkdir pg_session_jwt-src && cd pg_session_jwt-src && tar xzf ../pg_session_jwt.tar.gz --strip-components=1 -C . && \
     sed -i 's/pgrx = "=0.11.3"/pgrx = { version = "=0.11.3", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
     cargo pgrx install --release
@@ -1221,12 +1218,13 @@ RUN rm /usr/local/pgsql/lib/lib*.a
 #
 #########################################################################################
 FROM $REPOSITORY/$IMAGE:$TAG AS sql_exporter_preprocessor
+ARG PG_VERSION
 
 USER nonroot
 
 COPY --chown=nonroot compute compute
 
-RUN make -C compute
+RUN make PG_VERSION="${PG_VERSION}" -C compute
 
 #########################################################################################
 #

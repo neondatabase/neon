@@ -32,7 +32,8 @@ use crate::protocol2::read_proxy_protocol;
 use crate::proxy::handshake::{handshake, HandshakeData};
 use crate::rate_limiter::EndpointRateLimiter;
 use crate::stream::{PqStream, Stream};
-use crate::{auth, compute, EndpointCacheKey};
+use crate::types::EndpointCacheKey;
+use crate::{auth, compute};
 
 const ERR_INSECURE_CONNECTION: &str = "connection is insecure (try using `sslmode=require`)";
 

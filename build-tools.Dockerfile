@@ -72,7 +72,7 @@ RUN curl -sL "https://github.com/peak/s5cmd/releases/download/v${S5CMD_VERSION}/
     && mv s5cmd /usr/local/bin/s5cmd
 
 # LLVM
-ENV LLVM_VERSION=18
+ENV LLVM_VERSION=19
 RUN curl -fsSL 'https://apt.llvm.org/llvm-snapshot.gpg.key' | apt-key add - \
     && echo "deb http://apt.llvm.org/${DEBIAN_VERSION}/ llvm-toolchain-${DEBIAN_VERSION}-${LLVM_VERSION} main" > /etc/apt/sources.list.d/llvm.stable.list \
     && apt update \
@@ -99,7 +99,7 @@ RUN curl "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" -o "aws
     && rm awscliv2.zip
 
 # Mold: A Modern Linker
-ENV MOLD_VERSION=v2.33.0
+ENV MOLD_VERSION=v2.34.1
 RUN set -e \
     && git clone https://github.com/rui314/mold.git \
     && mkdir mold/build \
@@ -142,7 +142,7 @@ RUN wget -O /tmp/openssl-${OPENSSL_VERSION}.tar.gz https://www.openssl.org/sourc
 # Use the same version of libicu as the compute nodes so that
 # clusters created using inidb on pageserver can be used by computes.
 #
-# TODO: at this time, Dockerfile.compute-node uses the debian bullseye libicu
+# TODO: at this time, compute-node.Dockerfile uses the debian bullseye libicu
 # package, which is 67.1. We're duplicating that knowledge here, and also, technically,
 # Debian has a few patches on top of 67.1 that we're not adding here.
 ENV ICU_VERSION=67.1
@@ -192,7 +192,7 @@ WORKDIR /home/nonroot
 
 # Rust
 # Please keep the version of llvm (installed above) in sync with rust llvm (`rustc --version --verbose | grep LLVM`)
-ENV RUSTC_VERSION=1.81.0
+ENV RUSTC_VERSION=1.82.0
 ENV RUSTUP_HOME="/home/nonroot/.rustup"
 ENV PATH="/home/nonroot/.cargo/bin:${PATH}"
 ARG RUSTFILT_VERSION=0.2.1

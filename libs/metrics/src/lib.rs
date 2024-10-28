@@ -19,6 +19,7 @@ use once_cell::sync::Lazy;
 use prometheus::core::{
     Atomic, AtomicU64, Collector, GenericCounter, GenericCounterVec, GenericGauge, GenericGaugeVec,
 };
+pub use prometheus::local::LocalHistogram;
 pub use prometheus::opts;
 pub use prometheus::register;
 pub use prometheus::Error;

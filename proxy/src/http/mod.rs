@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use anyhow::bail;
 use bytes::Bytes;
+use http::Method;
 use http_body_util::BodyExt;
 use hyper::body::Body;
 pub(crate) use reqwest::{Request, Response};
@@ -93,9 +94,19 @@ impl Endpoint {
     /// Return a [builder](RequestBuilder) for a `GET` request,
     /// accepting a closure to modify the url path segments for more complex paths queries.
     pub(crate) fn get_with_url(&self, f: impl for<'a> FnOnce(&'a mut ApiUrl)) -> RequestBuilder {
+        self.request_with_url(Method::GET, f)
+    }
+
+    /// Return a [builder](RequestBuilder) for a request,
+    /// accepting a closure to modify the url path segments for more complex paths queries.
+    pub(crate) fn request_with_url(
+        &self,
+        method: Method,
+        f: impl for<'a> FnOnce(&'a mut ApiUrl),
+    ) -> RequestBuilder {
         let mut url = self.endpoint.clone();
         f(&mut url);
-        self.client.get(url.into_inner())
+        self.client.request(method, url.into_inner())
     }
 
     /// Execute a [request](reqwest::Request).

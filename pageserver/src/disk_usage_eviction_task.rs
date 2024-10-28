@@ -654,7 +654,7 @@ impl std::fmt::Debug for EvictionCandidate {
         let ts = chrono::DateTime::<chrono::Utc>::from(self.last_activity_ts);
         let ts = ts.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
         struct DisplayIsDebug<'a, T>(&'a T);
-        impl<'a, T: std::fmt::Display> std::fmt::Debug for DisplayIsDebug<'a, T> {
+        impl<T: std::fmt::Display> std::fmt::Debug for DisplayIsDebug<'_, T> {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 write!(f, "{}", self.0)
             }
@@ -1218,16 +1218,7 @@ mod filesystem_level_usage {
         let stat = Statvfs::get(tenants_dir, mock_config)
             .context("statvfs failed, presumably directory got unlinked")?;
 
-        // https://unix.stackexchange.com/a/703650
-        let blocksize = if stat.fragment_size() > 0 {
-            stat.fragment_size()
-        } else {
-            stat.block_size()
-        };
-
-        // use blocks_available (b_avail) since, pageserver runs as unprivileged user
-        let avail_bytes = stat.blocks_available() * blocksize;
-        let total_bytes = stat.blocks() * blocksize;
+        let (avail_bytes, total_bytes) = stat.get_avail_total_bytes();
 
         Ok(Usage {
             config,
