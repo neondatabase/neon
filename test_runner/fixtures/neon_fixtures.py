@@ -3822,6 +3822,7 @@ class Endpoint(PgProtocol, LogUtils):
             cursor.execute("ALTER SYSTEM SET neon.file_cache_size_limit=0")
             cursor.execute("SELECT pg_reload_conf()")
             cursor.execute(f"ALTER SYSTEM SET neon.file_cache_size_limit='{file_cache_size_limit}'")
+            cursor.execute("SELECT pg_reload_conf()")
         else:
             self.safe_psql("select clear_buffer_cache()")
             file_cache_size_limit = self.safe_psql_scalar(
