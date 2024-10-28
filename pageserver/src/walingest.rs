@@ -2419,6 +2419,59 @@ impl WalIngest {
             WAL_INGEST
                 .gap_blocks_zeroed_on_rel_extend
                 .inc_by(gap_blocks_filled);
+
+            // Log something when relation extends cause use to fill gaps
+            // with zero pages. Logging is rate limited per pg version to
+            // avoid skewing.
+            if gap_blocks_filled > 0 {
+                use once_cell::sync::Lazy;
+                use std::sync::Mutex;
+                use utils::rate_limit::RateLimit;
+
+                struct RateLimitPerPgVersion {
+                    rate_limiters: [Lazy<Mutex<RateLimit>>; 4],
+                }
+
+                impl RateLimitPerPgVersion {
+                    const fn new() -> Self {
+                        Self {
+                            rate_limiters: [const {
+                                Lazy::new(|| Mutex::new(RateLimit::new(Duration::from_secs(30))))
+                            }; 4],
+                        }
+                    }
+
+                    const fn rate_limiter(
+                        &self,
+                        pg_version: u32,
+                    ) -> Option<&Lazy<Mutex<RateLimit>>> {
+                        const MIN_PG_VERSION: u32 = 14;
+                        const MAX_PG_VERSION: u32 = 17;
+
+                        if pg_version < MIN_PG_VERSION || pg_version > MAX_PG_VERSION {
+                            return None;
+                        }
+
+                        Some(&self.rate_limiters[(pg_version - MIN_PG_VERSION) as usize])
+                    }
+                }
+
+                static LOGGED: RateLimitPerPgVersion = RateLimitPerPgVersion::new();
+                if let Some(rate_limiter) = LOGGED.rate_limiter(modification.tline.pg_version) {
+                    if let Ok(mut locked) = rate_limiter.try_lock() {
+                        locked.call(|| {
+                            info!(
+                                lsn=%modification.get_lsn(),
+                                pg_version=%modification.tline.pg_version,
+                                rel=%rel,
+                                "Filled {} gap blocks on rel extend to {} from {}",
+                                gap_blocks_filled,
+                                new_nblocks,
+                                old_nblocks);
+                        });
+                    }
+                }
+            }
         }
         Ok(())
     }
