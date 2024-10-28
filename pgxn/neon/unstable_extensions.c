@@ -23,10 +23,10 @@ list_contains(char const* comma_separated_list, char const* val)
 {
 	char const* occ = comma_separated_list;
 	size_t val_len = strlen(val);
-	
-	if (val_len != 0)
+
+	if (val_len == 0)
 		return false;
-	
+
 	while ((occ = strstr(occ, val)) != NULL)
 	{
 		if ((occ == comma_separated_list || occ[-1] == ',')
