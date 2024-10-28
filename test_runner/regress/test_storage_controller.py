@@ -495,6 +495,7 @@ def test_storage_controller_onboarding(neon_env_builder: NeonEnvBuilder, warm_up
     env.storage_controller.consistency_check()
 
 
+@run_only_on_default_postgres("this test doesn't start an endpoint")
 def test_storage_controller_onboard_detached(neon_env_builder: NeonEnvBuilder):
     """
     Sometimes, the control plane wants to delete a tenant that wasn't attached to any pageserver,
