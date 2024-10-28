@@ -915,7 +915,6 @@ FROM rust-extensions-build-pgrx12 AS pg-onnx-build
 
 # cmake 3.26 or higher is required, so installing it using pip (bullseye-backports has cmake 3.25).
 # Install it using virtual environment, because Python 3.11 (the default version on Debian 12 (Bookworm)) complains otherwise
-
 RUN apt-get update && apt-get install -y python3 python3-pip python3-venv && \
     python3 -m venv venv && \
     . venv/bin/activate && \
@@ -1328,7 +1327,7 @@ COPY --from=unit-pg-build /postgresql-unit.tar.gz /ext-src/
 COPY --from=vector-pg-build /pgvector.tar.gz /ext-src/
 COPY --from=vector-pg-build /pgvector.patch /ext-src/
 COPY --from=pgjwt-pg-build /pgjwt.tar.gz /ext-src
-COPY --from=pgrag-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+#COPY --from=pgrag-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 #COPY --from=pg-jsonschema-pg-build /home/nonroot/pg_jsonschema.tar.gz /ext-src
 #COPY --from=pg-graphql-pg-build /home/nonroot/pg_graphql.tar.gz /ext-src
 #COPY --from=pg-tiktoken-pg-build /home/nonroot/pg_tiktoken.tar.gz /ext-src
