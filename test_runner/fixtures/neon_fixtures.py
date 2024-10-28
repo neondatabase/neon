@@ -13,7 +13,7 @@ import threading
 import time
 import uuid
 from collections import defaultdict
-from collections.abc import Iterable, Iterator
+from collections.abc import AsyncGenerator, Iterable, Iterator
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -35,11 +35,13 @@ import toml
 from _pytest.config import Config
 from _pytest.config.argparsing import Parser
 from _pytest.fixtures import FixtureRequest
+from jwcrypto import jwk
 
 # Type-related stuff
 from psycopg2.extensions import connection as PgConnection
 from psycopg2.extensions import cursor as PgCursor
 from psycopg2.extensions import make_dsn, parse_dsn
+from pytest_httpserver import HTTPServer
 from urllib3.util.retry import Retry
 
 from fixtures import overlayfs
@@ -53,6 +55,7 @@ from fixtures.common_types import (
     TimelineId,
 )
 from fixtures.endpoint.http import EndpointHttpClient
+from fixtures.h2server import H2Server
 from fixtures.log_helper import log
 from fixtures.metrics import Metrics, MetricsGetter, parse_metrics
 from fixtures.neon_cli import NeonLocalCli, Pagectl
@@ -3139,6 +3142,20 @@ class NeonProxy(PgProtocol):
                 ]
             return args
 
+    class AuthBroker(AuthBackend):
+        def __init__(self, endpoint: str):
+            self.endpoint = endpoint
+
+        def extra_args(self) -> list[str]:
+            args = [
+                # Console auth backend params
+                *["--auth-backend", "console"],
+                *["--auth-endpoint", self.endpoint],
+                *["--sql-over-http-pool-opt-in", "false"],
+                *["--is-auth-broker", "true"],
+            ]
+            return args
+
     @dataclass(frozen=True)
     class Postgres(AuthBackend):
         pg_conn_url: str
@@ -3311,6 +3328,29 @@ class NeonProxy(PgProtocol):
                 assert response.status_code == expected_code, f"response: {response.json()}"
             return response.json()
 
+    async def auth_broker_query(self, query, args, **kwargs):
+        # TODO maybe use default values if not provided
+        user = kwargs["user"]
+        token = kwargs["token"]
+        expected_code = kwargs.get("expected_code")
+
+        log.info(f"Executing http query: {query}")
+
+        connstr = f"postgresql://{user}@{self.domain}:{self.proxy_port}/postgres"
+        async with httpx.AsyncClient(verify=str(self.test_output_dir / "proxy.crt")) as client:
+            response = await client.post(
+                f"https://{self.domain}:{self.external_http_port}/sql",
+                json={"query": query, "params": args},
+                headers={
+                    "Neon-Connection-String": connstr,
+                    "Authorization": f"Bearer {token}",
+                },
+            )
+
+            if expected_code is not None:
+                assert response.status_code == expected_code, f"response: {response.json()}"
+            return response.json()
+
     def get_metrics(self) -> str:
         request_result = requests.get(f"http://{self.host}:{self.http_port}/metrics")
         return request_result.text
@@ -3451,6 +3491,75 @@ def static_proxy(
         mgmt_port=mgmt_port,
         external_http_port=external_http_port,
         auth_backend=NeonProxy.Postgres(auth_endpoint),
+    ) as proxy:
+        proxy.start()
+        yield proxy
+
+
+@pytest.fixture(scope="function")
+def neon_authorize_jwk() -> Iterator[jwk.JWK]:
+    kid = str(uuid.uuid4())
+    key = jwk.JWK.generate(kty="RSA", size=2048, alg="RS256", use="sig", kid=kid)
+    yield key
+
+
+@pytest.fixture(scope="function")
+def static_auth_broker(
+    port_distributor: PortDistributor,
+    neon_binpath: Path,
+    test_output_dir: Path,
+    httpserver: HTTPServer,
+    neon_authorize_jwk: jwk.JWK,
+    http2_echoserver: H2Server,
+) -> Iterable[NeonProxy]:
+    """Neon proxy that routes directly to vanilla postgres."""
+
+    # local_proxy_endpoint = httpserver.url_for("/sql")
+    # local_proxy_addr = local_proxy_endpoint.removeprefix("http://").removesuffix("/sql")
+    local_proxy_addr = f"{http2_echoserver.host}:{http2_echoserver.port}"
+    log.info(f"local_proxy {local_proxy_addr}")
+
+    httpserver.expect_request("/cplane/proxy_wake_compute").respond_with_json(
+        {
+            "address": local_proxy_addr,
+            "aux": {
+                "endpoint_id": "ep-foo-bar-1234",
+                "branch_id": "br-foo-bar",
+                "project_id": "foo-bar",
+            },
+        }
+    )
+    httpserver.expect_request(re.compile("^/cplane/endpoints/.+/jwks$")).respond_with_json(
+        {
+            "jwks": [
+                {
+                    "id": "foo",
+                    "jwks_url": httpserver.url_for("/authorize/jwks.json"),
+                    "provider_name": "test",
+                    "jwt_audience": None,
+                    "role_names": ["anonymous", "authenticated"],
+                }
+            ]
+        }
+    )
+    auth_endpoint = httpserver.url_for("/cplane")
+
+    jwk = neon_authorize_jwk.export_public(as_dict=True)
+    httpserver.expect_request("/authorize/jwks.json").respond_with_json({"keys": [jwk]})
+
+    proxy_port = port_distributor.get_port()
+    mgmt_port = port_distributor.get_port()
+    http_port = port_distributor.get_port()
+    external_http_port = port_distributor.get_port()
+
+    with NeonProxy(
+        neon_binpath=neon_binpath,
+        test_output_dir=test_output_dir,
+        proxy_port=proxy_port,
+        http_port=http_port,
+        mgmt_port=mgmt_port,
+        external_http_port=external_http_port,
+        auth_backend=NeonProxy.AuthBroker(auth_endpoint),
     ) as proxy:
         proxy.start()
         yield proxy
