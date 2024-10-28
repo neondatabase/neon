@@ -7,7 +7,7 @@
 //! The ingestion code uses these structs to help with parsing the WAL records,
 //! and it splits them into a stream of modifications to the key-value pairs that
 //! are ultimately stored in delta layers.  See also the split-out counterparts in
-//! [`postgres_ffi::record`].
+//! [`postgres_ffi::walrecord`].
 //!
 //! The pipeline which processes WAL records is not super obvious, so let's follow
 //! the flow of an example XACT_COMMIT Postgres record:
