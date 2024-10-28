@@ -470,7 +470,7 @@ impl WalRedoManager {
         key: pageserver_api::key::Key,
         lsn: Lsn,
         base_img: Option<(Lsn, bytes::Bytes)>,
-        records: Vec<(Lsn, pageserver_api::record::NeonWalRecord)>,
+        records: Vec<(Lsn, crate::record::NeonWalRecord)>,
         pg_version: u32,
     ) -> Result<bytes::Bytes, walredo::Error> {
         match self {
@@ -4527,9 +4527,9 @@ pub(crate) mod harness {
 
     use crate::deletion_queue::mock::MockDeletionQueue;
     use crate::l0_flush::L0FlushConfig;
+    use crate::record::NeonWalRecord;
     use crate::walredo::apply_neon;
     use pageserver_api::key::Key;
-    use pageserver_api::record::NeonWalRecord;
 
     use super::*;
     use hex_literal::hex;
@@ -4801,6 +4801,7 @@ mod tests {
     use crate::keyspace::KeySpaceAccum;
     use crate::tenant::harness::*;
     use crate::tenant::timeline::CompactFlags;
+    use crate::value::Value;
     use crate::DEFAULT_PG_VERSION;
     use bytes::{Bytes, BytesMut};
     use hex_literal::hex;
@@ -4808,7 +4809,6 @@ mod tests {
     use pageserver_api::key::{Key, AUX_KEY_PREFIX, NON_INHERITED_RANGE};
     use pageserver_api::keyspace::KeySpace;
     use pageserver_api::models::{CompactionAlgorithm, CompactionAlgorithmSettings};
-    use pageserver_api::value::Value;
     use rand::{thread_rng, Rng};
     use storage_layer::PersistentLayerKey;
     use tests::storage_layer::ValuesReconstructState;
@@ -4816,11 +4816,8 @@ mod tests {
     use timeline::DeltaLayerTestDesc;
     use utils::id::TenantId;
 
-    #[cfg(feature = "testing")]
-    use pageserver_api::record::NeonWalRecord;
-    #[cfg(feature = "testing")]
+    use crate::record::NeonWalRecord;
     use timeline::compaction::{KeyHistoryRetention, KeyLogAtLsn};
-    #[cfg(feature = "testing")]
     use timeline::GcInfo;
 
     static TEST_KEY: Lazy<Key> =
@@ -7384,7 +7381,6 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(feature = "testing")]
     #[tokio::test]
     async fn test_neon_test_record() -> anyhow::Result<()> {
         let harness = TenantHarness::create("test_neon_test_record").await?;
@@ -7576,7 +7572,6 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(feature = "testing")]
     #[tokio::test]
     async fn test_simple_bottom_most_compaction_deltas() -> anyhow::Result<()> {
         let harness = TenantHarness::create("test_simple_bottom_most_compaction_deltas").await?;
@@ -7773,7 +7768,6 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(feature = "testing")]
     #[tokio::test]
     async fn test_generate_key_retention() -> anyhow::Result<()> {
         let harness = TenantHarness::create("test_generate_key_retention").await?;
@@ -8121,7 +8115,6 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(feature = "testing")]
     #[tokio::test]
     async fn test_simple_bottom_most_compaction_with_retain_lsns() -> anyhow::Result<()> {
         let harness =
@@ -8362,7 +8355,6 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(feature = "testing")]
     #[tokio::test]
     async fn test_simple_bottom_most_compaction_with_retain_lsns_single_key() -> anyhow::Result<()>
     {
@@ -8571,7 +8563,6 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(feature = "testing")]
     #[tokio::test]
     async fn test_simple_bottom_most_compaction_on_branch() -> anyhow::Result<()> {
         let harness = TenantHarness::create("test_simple_bottom_most_compaction_on_branch").await?;
@@ -8773,7 +8764,6 @@ mod tests {
     //
     // When querying the key range [A, B) we need to read at different LSN ranges
     // for [A, C) and [C, B). This test checks that the described edge case is handled correctly.
-    #[cfg(feature = "testing")]
     #[tokio::test]
     async fn test_vectored_read_with_nested_image_layer() -> anyhow::Result<()> {
         let harness = TenantHarness::create("test_vectored_read_with_nested_image_layer").await?;

@@ -43,7 +43,7 @@ pub enum NeonWalRecord {
     },
 
     /// A testing record for unit testing purposes. It supports append data to an existing image, or clear it.
-    #[cfg(feature = "testing")]
+    #[cfg(test)]
     Test {
         /// Append a string to the image.
         append: String,
@@ -63,14 +63,14 @@ impl NeonWalRecord {
         // If you change this function, you'll also need to change ValueBytes::will_init
         match self {
             NeonWalRecord::Postgres { will_init, rec: _ } => *will_init,
-            #[cfg(feature = "testing")]
+            #[cfg(test)]
             NeonWalRecord::Test { will_init, .. } => *will_init,
             // None of the special neon record types currently initialize the page
             _ => false,
         }
     }
 
-    #[cfg(feature = "testing")]
+    #[cfg(test)]
     pub fn wal_append(s: impl AsRef<str>) -> Self {
         Self::Test {
             append: s.as_ref().to_string(),
@@ -79,7 +79,7 @@ impl NeonWalRecord {
         }
     }
 
-    #[cfg(feature = "testing")]
+    #[cfg(test)]
     pub fn wal_clear() -> Self {
         Self::Test {
             append: "".to_string(),
@@ -88,7 +88,7 @@ impl NeonWalRecord {
         }
     }
 
-    #[cfg(feature = "testing")]
+    #[cfg(test)]
     pub fn wal_init() -> Self {
         Self::Test {
             append: "".to_string(),

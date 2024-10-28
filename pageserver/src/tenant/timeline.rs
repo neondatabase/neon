@@ -128,9 +128,9 @@ use utils::{
 use crate::gc_result::GcResult;
 use crate::task_mgr;
 use crate::task_mgr::TaskKind;
+use crate::value::Value;
 use crate::ZERO_PAGE;
 use pageserver_api::key::Key;
-use pageserver_api::value::Value;
 
 use self::delete::DeleteTimelineFlow;
 pub(super) use self::eviction_task::EvictionTaskTenantState;
@@ -5816,8 +5816,8 @@ fn is_send() {
 
 #[cfg(test)]
 mod tests {
+    use crate::value::Value;
     use pageserver_api::key::Key;
-    use pageserver_api::value::Value;
     use utils::{id::TimelineId, lsn::Lsn};
 
     use crate::tenant::{

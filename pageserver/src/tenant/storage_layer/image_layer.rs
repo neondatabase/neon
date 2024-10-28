@@ -39,6 +39,7 @@ use crate::tenant::vectored_blob_io::{
     VectoredReadPlanner,
 };
 use crate::tenant::PageReconstructError;
+use crate::value::Value;
 use crate::virtual_file::owned_buffers_io::io_buf_ext::IoBufExt;
 use crate::virtual_file::IoBufferMut;
 use crate::virtual_file::{self, MaybeFatalIo, VirtualFile};
@@ -53,7 +54,6 @@ use pageserver_api::key::DBDIR_KEY;
 use pageserver_api::key::{Key, KEY_SIZE};
 use pageserver_api::keyspace::KeySpace;
 use pageserver_api::shard::{ShardIdentity, TenantShardId};
-use pageserver_api::value::Value;
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -1111,7 +1111,6 @@ mod test {
     use pageserver_api::{
         key::Key,
         shard::{ShardCount, ShardIdentity, ShardNumber, ShardStripeSize},
-        value::Value,
     };
     use utils::{
         generation::Generation,
@@ -1128,6 +1127,7 @@ mod test {
             vectored_blob_io::StreamingVectoredReadPlanner,
             Tenant, Timeline,
         },
+        value::Value,
         DEFAULT_PG_VERSION,
     };
 

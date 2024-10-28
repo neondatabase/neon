@@ -11,9 +11,10 @@ use pageserver::{
     task_mgr::TaskKind,
     tenant::storage_layer::inmemory_layer::SerializedBatch,
     tenant::storage_layer::InMemoryLayer,
+    value::Value,
     virtual_file,
 };
-use pageserver_api::{key::Key, shard::TenantShardId, value::Value};
+use pageserver_api::{key::Key, shard::TenantShardId};
 use utils::{
     bin_ser::BeSer,
     id::{TenantId, TimelineId},

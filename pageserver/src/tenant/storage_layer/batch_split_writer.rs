@@ -5,8 +5,8 @@ use pageserver_api::key::{Key, KEY_SIZE};
 use utils::{id::TimelineId, lsn::Lsn, shard::TenantShardId};
 
 use crate::tenant::storage_layer::Layer;
+use crate::value::Value;
 use crate::{config::PageServerConf, context::RequestContext, tenant::Timeline};
-use pageserver_api::value::Value;
 
 use super::layer::S3_UPLOAD_LIMIT;
 use super::{

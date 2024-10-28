@@ -3,6 +3,7 @@ mod no_leak_child;
 mod protocol;
 
 use self::no_leak_child::NoLeakChild;
+use crate::record::NeonWalRecord;
 use crate::{
     config::PageServerConf,
     metrics::{WalRedoKillCause, WAL_REDO_PROCESS_COUNTERS, WAL_REDO_RECORD_COUNTER},
@@ -11,7 +12,6 @@ use crate::{
 };
 use anyhow::Context;
 use bytes::Bytes;
-use pageserver_api::record::NeonWalRecord;
 use pageserver_api::{reltag::RelTag, shard::TenantShardId};
 use postgres_ffi::BLCKSZ;
 #[cfg(feature = "testing")]
