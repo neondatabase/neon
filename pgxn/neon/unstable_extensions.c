@@ -13,64 +13,31 @@
 #include "neon_pgversioncompat.h"
 #include "unstable_extensions.h"
 
-typedef struct UnstableExtensions
-{
-	size_t	extc;
-	char   *extv[FLEXIBLE_ARRAY_MEMBER];
-} UnstableExtensions;
-
 static bool					allow_unstable_extensions = false;
 static char				   *unstable_extensions_str = NULL;
-static UnstableExtensions  *unstable_extensions = NULL;
 
 static ProcessUtility_hook_type PreviousProcessUtilityHook = NULL;
 
 static bool
-check_unstable_extensions(char **newval, void **extra, GucSource source)
+list_contains(char const* comma_separated_list, char const* val)
 {
-	char			   *n;
-	UnstableExtensions *exts;
-	char			   *curr_ext;
-	size_t				max_extc;
-
-	*extra = NULL;
-
-	if (*newval == NULL || (*newval)[0] == '\0')
-		return true;
-
-	/* At this point, we know we have at least 1 extension like: ext */
-	max_extc = 1;
-	for (size_t i = 0; i < strlen(*newval); ++i)
+	char const* occ = comma_separated_list;
+	size_t val_len = strlen(val);
+	if (val_len != 0)
 	{
-		if ((*newval)[i] == ',')
-			++max_extc;
+		while ((occ = strstr(occ, val)) != NULL)
+		{
+			if ((occ == comma_separated_list || occ[-1] == ',')
+				&& (occ[val_len] == '\0' || occ[val_len] == ','))
+			{
+				return true;
+			}
+			occ += val_len;
+		}
 	}
-
-	exts = guc_malloc(ERROR, sizeof(*exts) + max_extc * sizeof(char *));
-	exts->extc = 0;
-
-	n = guc_strdup(ERROR, *newval);
-	while ((curr_ext = strsep(&n, ",")))
-	{
-		/* In the event, we receive a config like: ",,ext" */
-		if (curr_ext[0] == '\0')
-			continue;
-
-		exts->extv[exts->extc++] = guc_strdup(ERROR, curr_ext);
-	}
-
-	guc_free(n);
-
-	*extra = exts;
-
-	return true;
+	return false;
 }
 
-static void
-assign_unstable_extensions(const char *newval, void *extra)
-{
-	unstable_extensions = extra;
-}
 
 static void
 CheckUnstableExtension(
@@ -85,7 +52,7 @@ CheckUnstableExtension(
 {
 	Node	   *parseTree = pstmt->utilityStmt;
 
-	if (allow_unstable_extensions || unstable_extensions == NULL)
+	if (allow_unstable_extensions || unstable_extensions_str == NULL)
 		goto process;
 
 	switch (nodeTag(parseTree))
@@ -93,16 +60,13 @@ CheckUnstableExtension(
 		case T_CreateExtensionStmt:
 		{
 			CreateExtensionStmt *stmt = castNode(CreateExtensionStmt, parseTree);
-
-			for (size_t i = 0; i < unstable_extensions->extc; ++i)
+			if (list_contains(unstable_extensions_str, stmt->extname))
 			{
-				if (strcmp(unstable_extensions->extv[i], stmt->extname) == 0)
-					ereport(ERROR,
-							(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-							 errmsg("using an unstable extension (%s) is currently prohibited", stmt->extname),
-							 errhint("Set neon.allow_unstable_extensions to true")));
+				ereport(ERROR,
+						(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+						 errmsg("using an unstable extension (%s) is currently prohibited", stmt->extname),
+						 errhint("Set neon.allow_unstable_extensions to true")));
 			}
-
 			break;
 		}
 		default:
@@ -145,7 +109,7 @@ InitUnstableExtensionsSupport(void)
 		NULL,
 		&allow_unstable_extensions,
 		false,
-		PGC_USERSET,
+		PGC_SUSET,
 		0,
 		NULL, NULL, NULL);
 
@@ -157,7 +121,7 @@ InitUnstableExtensionsSupport(void)
 		NULL,
 		PGC_SUSET,
 		0,
-		check_unstable_extensions, assign_unstable_extensions, NULL);
+		NULL, NULL, NULL);
 
 	PreviousProcessUtilityHook = ProcessUtility_hook;
 	ProcessUtility_hook = CheckUnstableExtension;
