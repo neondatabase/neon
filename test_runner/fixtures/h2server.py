@@ -8,7 +8,7 @@ import asyncio
 import collections
 import io
 import json
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncIterable
 
 import pytest_asyncio
 from h2.config import H2Configuration
@@ -43,12 +43,12 @@ class H2Protocol(asyncio.Protocol):
         self.stream_data = {}
         self.flow_control_futures = {}
 
-    def connection_made(self, transport: asyncio.Transport):
+    def connection_made(self, transport: asyncio.Transport):  # type: ignore[override]
         self.transport = transport
         self.conn.initiate_connection()
         self.transport.write(self.conn.data_to_send())
 
-    def connection_lost(self, exc):
+    def connection_lost(self, _exc):
         for future in self.flow_control_futures.values():
             future.cancel()
         self.flow_control_futures = {}
@@ -165,7 +165,7 @@ class H2Protocol(asyncio.Protocol):
         """
         Waits for a Future that fires when the flow control window is opened.
         """
-        f = asyncio.Future()
+        f: asyncio.Future[None] = asyncio.Future()
         self.flow_control_futures[stream_id] = f
         await f
 
@@ -185,7 +185,7 @@ class H2Protocol(asyncio.Protocol):
 
 
 @pytest_asyncio.fixture(scope="function")
-async def http2_echoserver() -> AsyncGenerator[H2Server]:
+async def http2_echoserver() -> AsyncIterable[H2Server]:
     loop = asyncio.get_event_loop()
     serve = await loop.create_server(H2Protocol, "127.0.0.1", 0)
     (host, port) = serve.sockets[0].getsockname()
