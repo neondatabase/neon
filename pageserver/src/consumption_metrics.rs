@@ -39,21 +39,34 @@ type RawMetric = (MetricsKey, (EventType, u64));
 /// The new serializable metrics format
 #[derive(Serialize, Deserialize)]
 struct NewMetricsRoot {
-    version: String,
+    version: usize,
     metrics: Vec<NewRawMetric>,
+}
+
+impl NewMetricsRoot {
+    pub fn is_v2_metrics(json_value: &serde_json::Value) -> bool {
+        if let Some(ver) = json_value.get("version") {
+            if let Some(version) = ver.as_u64() {
+                if version == 2 {
+                    return true;
+                }
+            }
+        }
+        false
+    }
 }
 
 /// The new serializable metrics format
 #[derive(Serialize)]
 struct NewMetricsRefRoot<'a> {
-    version: String,
+    version: usize,
     metrics: &'a [NewRawMetric],
 }
 
 impl<'a> NewMetricsRefRoot<'a> {
     fn new(metrics: &'a [NewRawMetric]) -> Self {
         Self {
-            version: "v2".to_string(),
+            version: 2,
             metrics,
         }
     }

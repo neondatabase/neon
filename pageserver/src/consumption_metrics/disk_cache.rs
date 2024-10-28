@@ -9,15 +9,7 @@ use super::{NewMetricsRoot, NewRawMetric, RawMetric};
 pub(super) fn read_metrics_from_serde_value(
     json_value: serde_json::Value,
 ) -> anyhow::Result<Vec<NewRawMetric>> {
-    let mut decode_v2 = false;
-    if let Some(ver) = json_value.get("version") {
-        if let Some(str) = ver.as_str() {
-            if str == "v2" {
-                decode_v2 = true
-            }
-        }
-    };
-    if decode_v2 {
+    if NewMetricsRoot::is_v2_metrics(&json_value) {
         let root = serde_json::from_value::<NewMetricsRoot>(json_value)?;
         Ok(root.metrics)
     } else {
