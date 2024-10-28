@@ -1,13 +1,13 @@
 import json
 
 import pytest
-from fixtures.neon_fixtures import NeonProxy
+from fixtures.neon_fixtures import NeonAuthBroker
 from jwcrypto import jwk, jwt
 
 
 @pytest.mark.asyncio
 async def test_auth_broker_happy(
-    static_auth_broker: NeonProxy,
+    static_auth_broker: NeonAuthBroker,
     neon_authorize_jwk: jwk.JWK,
 ):
     """
@@ -18,9 +18,7 @@ async def test_auth_broker_happy(
         header={"kid": neon_authorize_jwk.key_id, "alg": "RS256"}, claims={"sub": "user1"}
     )
     token.make_signed_token(neon_authorize_jwk)
-    res = await static_auth_broker.auth_broker_query(
-        "foo", ["arg1"], user="anonymous", token=token.serialize()
-    )
+    res = await static_auth_broker.query("foo", ["arg1"], user="anonymous", token=token.serialize())
 
     # local proxy mock just echos back the request
     # check that we forward the correct data
