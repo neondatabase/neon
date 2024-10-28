@@ -928,7 +928,8 @@ RUN apt-get update && apt-get install -y python3 python3-pip python3-venv && \
 FROM pg-onnx-build AS pgrag-pg-build
 
 RUN apt-get install -y protobuf-compiler && \
-    wget https://github.com/neondatabase-labs/pgrag/archive/refs/heads/main.tar.gz -O pgrag.tar.gz &&  \
+    wget https://github.com/neondatabase-labs/pgrag/archive/refs/tags/v0.0.0.tar.gz -O pgrag.tar.gz &&  \
+    echo "2cbe394c1e74fc8bcad9b52d5fbbfb783aef834ca3ce44626cfd770573700bb4 pgrag.tar.gz" | sha256sum --check && \
     mkdir pgrag-src && cd pgrag-src && tar xzf ../pgrag.tar.gz --strip-components=1 -C . && \
     \
     cd exts/rag && \
