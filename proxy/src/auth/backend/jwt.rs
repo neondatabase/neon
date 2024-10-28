@@ -314,7 +314,9 @@ impl JwkCacheEntryLock {
 
         if let Some(aud) = expected_audience {
             if payload.audience.0.iter().all(|s| s != aud) {
-                return Err(JwtError::InvalidJwtTokenAudience);
+                return Err(JwtError::InvalidClaims(
+                    JwtClaimsError::InvalidJwtTokenAudience,
+                ));
             }
         }
 
@@ -322,13 +324,15 @@ impl JwkCacheEntryLock {
 
         if let Some(exp) = payload.expiration {
             if now >= exp + CLOCK_SKEW_LEEWAY {
-                return Err(JwtError::JwtTokenHasExpired);
+                return Err(JwtError::InvalidClaims(JwtClaimsError::JwtTokenHasExpired));
             }
         }
 
         if let Some(nbf) = payload.not_before {
             if nbf >= now + CLOCK_SKEW_LEEWAY {
-                return Err(JwtError::JwtTokenNotYetReadyToUse);
+                return Err(JwtError::InvalidClaims(
+                    JwtClaimsError::JwtTokenNotYetReadyToUse,
+                ));
             }
         }
 
@@ -587,14 +591,8 @@ pub(crate) enum JwtError {
     #[error("Provided authentication token is not a valid JWT encoding")]
     JwtEncoding(#[from] JwtEncodingError),
 
-    #[error("invalid JWT token audience")]
-    InvalidJwtTokenAudience,
-
-    #[error("JWT token has expired")]
-    JwtTokenHasExpired,
-
-    #[error("JWT token is not yet ready to use")]
-    JwtTokenNotYetReadyToUse,
+    #[error("{0}")]
+    InvalidClaims(#[from] JwtClaimsError),
 
     #[error("invalid P256 key")]
     InvalidP256Key(jose_jwk::crypto::Error),
@@ -644,6 +642,19 @@ pub enum JwtEncodingError {
 
     #[error("invalid compact form")]
     InvalidCompactForm,
+}
+
+#[derive(Error, Debug, PartialEq)]
+#[non_exhaustive]
+pub enum JwtClaimsError {
+    #[error("invalid JWT token audience")]
+    InvalidJwtTokenAudience,
+
+    #[error("JWT token has expired")]
+    JwtTokenHasExpired,
+
+    #[error("JWT token is not yet ready to use")]
+    JwtTokenNotYetReadyToUse,
 }
 
 #[allow(dead_code, reason = "Debug use only")]
@@ -1054,7 +1065,7 @@ X0n5X2/pBLJzxZc62ccvZYVnctBiFs6HbSnxpuMQCfkt/BcR/ttIepBQQIW86wHL
             .await
             .unwrap_err();
         assert!(
-            err.to_string().contains("signature error"),
+            matches!(err, JwtError::Signature(_)),
             "expected \"signature error\", got {err:?}"
         );
     }
@@ -1094,7 +1105,7 @@ X0n5X2/pBLJzxZc62ccvZYVnctBiFs6HbSnxpuMQCfkt/BcR/ttIepBQQIW86wHL
             .unwrap_err();
 
         assert!(
-            err.to_string().contains("jwk not found"),
+            matches!(err, JwtError::JwkNotFound),
             "expected \"jwk not found\", got {err:?}"
         );
     }
@@ -1117,7 +1128,7 @@ X0n5X2/pBLJzxZc62ccvZYVnctBiFs6HbSnxpuMQCfkt/BcR/ttIepBQQIW86wHL
 
         struct Test {
             body: serde_json::Value,
-            error: &'static str,
+            error: JwtClaimsError,
         }
 
         let table = vec![
@@ -1126,43 +1137,43 @@ X0n5X2/pBLJzxZc62ccvZYVnctBiFs6HbSnxpuMQCfkt/BcR/ttIepBQQIW86wHL
                     "nbf": now + 60,
                     "aud": "neon",
                 }},
-                error: "JWT token is not yet ready to use",
+                error: JwtClaimsError::JwtTokenNotYetReadyToUse,
             },
             Test {
                 body: json! {{
                     "exp": now - 60,
                     "aud": ["neon"],
                 }},
-                error: "JWT token has expired",
+                error: JwtClaimsError::JwtTokenHasExpired,
             },
             Test {
                 body: json! {{
                 }},
-                error: "invalid JWT token audience",
+                error: JwtClaimsError::InvalidJwtTokenAudience,
             },
             Test {
                 body: json! {{
                     "aud": [],
                 }},
-                error: "invalid JWT token audience",
+                error: JwtClaimsError::InvalidJwtTokenAudience,
             },
             Test {
                 body: json! {{
                     "aud": "foo",
                 }},
-                error: "invalid JWT token audience",
+                error: JwtClaimsError::InvalidJwtTokenAudience,
             },
             Test {
                 body: json! {{
                     "aud": ["foo"],
                 }},
-                error: "invalid JWT token audience",
+                error: JwtClaimsError::InvalidJwtTokenAudience,
             },
             Test {
                 body: json! {{
                     "aud": ["foo", "bar"],
                 }},
-                error: "invalid JWT token audience",
+                error: JwtClaimsError::InvalidJwtTokenAudience,
             },
         ];
 
@@ -1188,7 +1199,7 @@ X0n5X2/pBLJzxZc62ccvZYVnctBiFs6HbSnxpuMQCfkt/BcR/ttIepBQQIW86wHL
                 .check_jwt(&ctx, ep.clone(), &role, &fetch, &jwt)
                 .await
             {
-                Err(err) if err.to_string().contains(test.error) => {}
+                Err(JwtError::InvalidClaims(error)) if error == test.error => {}
                 Err(err) => {
                     panic!("expected {:?}, got {err:?}", test.error)
                 }
