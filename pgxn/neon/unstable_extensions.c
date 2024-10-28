@@ -23,18 +23,20 @@ list_contains(char const* comma_separated_list, char const* val)
 {
 	char const* occ = comma_separated_list;
 	size_t val_len = strlen(val);
+	
 	if (val_len != 0)
+		return false;
+	
+	while ((occ = strstr(occ, val)) != NULL)
 	{
-		while ((occ = strstr(occ, val)) != NULL)
+		if ((occ == comma_separated_list || occ[-1] == ',')
+			&& (occ[val_len] == '\0' || occ[val_len] == ','))
 		{
-			if ((occ == comma_separated_list || occ[-1] == ',')
-				&& (occ[val_len] == '\0' || occ[val_len] == ','))
-			{
-				return true;
-			}
-			occ += val_len;
+			return true;
 		}
+		occ += val_len;
 	}
+
 	return false;
 }
 
