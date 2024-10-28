@@ -197,11 +197,11 @@ class H2Protocol(asyncio.Protocol):
 
 
 @pytest_asyncio.fixture(scope="function")
-async def http2_echoserver(http2_echoserver_listen_address: tuple[str, int]) -> AsyncGenerator[H2Server]:
-    host, port = http2_echoserver_listen_address
-
+async def http2_echoserver() -> AsyncGenerator[H2Server]:
     loop = asyncio.get_event_loop()
-    serve = await loop.create_server(H2Protocol, host, port)
+    serve = await loop.create_server(H2Protocol, "127.0.0.1", 0)
+    (host, port) = serve.sockets[0].getsockname()
+
     asyncio.create_task(serve.wait_closed())
 
     server = H2Server(host, port)
@@ -209,8 +209,3 @@ async def http2_echoserver(http2_echoserver_listen_address: tuple[str, int]) -> 
 
     serve.close()
 
-
-@pytest.fixture(scope="function")
-def http2_echoserver_listen_address(port_distributor: PortDistributor) -> tuple[str, int]:
-    port = port_distributor.get_port()
-    return ("localhost", port)
