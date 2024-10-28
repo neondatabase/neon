@@ -2811,7 +2811,7 @@ where
 }
 
 use {
-    crate::gc_result::GcResult, pageserver_api::models::TimelineGcRequest,
+    crate::tenant::gc_result::GcResult, pageserver_api::models::TimelineGcRequest,
     utils::http::error::ApiError,
 };
 

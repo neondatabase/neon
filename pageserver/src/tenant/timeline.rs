@@ -125,9 +125,9 @@ use utils::{
     simple_rcu::{Rcu, RcuReadGuard},
 };
 
-use crate::gc_result::GcResult;
 use crate::task_mgr;
 use crate::task_mgr::TaskKind;
+use crate::tenant::gc_result::GcResult;
 use crate::value::Value;
 use crate::ZERO_PAGE;
 use pageserver_api::key::Key;
