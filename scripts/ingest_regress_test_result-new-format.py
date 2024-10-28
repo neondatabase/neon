@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS results (
     duration     INT NOT NULL,
     flaky        BOOLEAN NOT NULL,
     arch         arch DEFAULT 'X64',
-    lfc          BOOLEAN NOT NULL,
+    lfc          BOOLEAN DEFAULT false NOT NULL,
     build_type   TEXT NOT NULL,
     pg_version   INT NOT NULL,
     run_id       BIGINT NOT NULL,
