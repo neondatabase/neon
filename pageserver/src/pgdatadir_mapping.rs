@@ -10,9 +10,7 @@ use super::tenant::{PageReconstructError, Timeline};
 use crate::aux_file;
 use crate::context::RequestContext;
 use crate::keyspace::{KeySpace, KeySpaceAccum};
-use crate::record::NeonWalRecord;
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id;
-use crate::value::Value;
 use anyhow::{ensure, Context};
 use bytes::{Buf, Bytes, BytesMut};
 use enum_map::Enum;
@@ -24,7 +22,9 @@ use pageserver_api::key::{
     CompactKey, AUX_FILES_KEY, CHECKPOINT_KEY, CONTROLFILE_KEY, DBDIR_KEY, TWOPHASEDIR_KEY,
 };
 use pageserver_api::keyspace::SparseKeySpace;
+use pageserver_api::record::NeonWalRecord;
 use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
+use pageserver_api::value::Value;
 use postgres_ffi::relfile_utils::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
 use postgres_ffi::BLCKSZ;
 use postgres_ffi::{Oid, RepOriginId, TimestampTz, TransactionId};

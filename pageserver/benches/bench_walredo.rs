@@ -60,8 +60,8 @@ use anyhow::Context;
 use bytes::{Buf, Bytes};
 use criterion::{BenchmarkId, Criterion};
 use once_cell::sync::Lazy;
-use pageserver::record::NeonWalRecord;
 use pageserver::{config::PageServerConf, walredo::PostgresRedoManager};
+use pageserver_api::record::NeonWalRecord;
 use pageserver_api::{key::Key, shard::TenantShardId};
 use std::{
     future::Future,

@@ -29,11 +29,11 @@ use crate::metrics::{
     WAL_REDO_BYTES_HISTOGRAM, WAL_REDO_PROCESS_LAUNCH_DURATION_HISTOGRAM,
     WAL_REDO_RECORDS_HISTOGRAM, WAL_REDO_TIME,
 };
-use crate::record::NeonWalRecord;
 use anyhow::Context;
 use bytes::{Bytes, BytesMut};
 use pageserver_api::key::Key;
 use pageserver_api::models::{WalRedoManagerProcessStatus, WalRedoManagerStatus};
+use pageserver_api::record::NeonWalRecord;
 use pageserver_api::shard::TenantShardId;
 use std::future::Future;
 use std::sync::Arc;
@@ -549,9 +549,9 @@ impl PostgresRedoManager {
 mod tests {
     use super::PostgresRedoManager;
     use crate::config::PageServerConf;
-    use crate::record::NeonWalRecord;
     use bytes::Bytes;
     use pageserver_api::key::Key;
+    use pageserver_api::record::NeonWalRecord;
     use pageserver_api::shard::TenantShardId;
     use std::str::FromStr;
     use tracing::Instrument;
