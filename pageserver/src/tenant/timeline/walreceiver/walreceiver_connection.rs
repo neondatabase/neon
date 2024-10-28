@@ -343,7 +343,6 @@ pub(super) async fn handle_walreceiver_connection(
                         let mut decoded = DecodedWALRecord::default();
                         decode_wal_record(recdata, &mut decoded, modification.tline.pg_version)?;
 
-                        // TODO: Handle this. Probably flush buf + data modifications early.
                         if decoded.is_dbase_create_copy(timeline.pg_version)
                             && uncommitted_records > 0
                         {
