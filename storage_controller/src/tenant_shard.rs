@@ -1317,6 +1317,12 @@ impl TenantShard {
         })
     }
 
+    pub(crate) fn cancel_reconciler(&self) {
+        if let Some(handle) = self.reconciler.as_ref() {
+            handle.cancel.cancel()
+        }
+    }
+
     /// Get a waiter for any reconciliation in flight, but do not start reconciliation
     /// if it is not already running
     pub(crate) fn get_waiter(&self) -> Option<ReconcilerWaiter> {

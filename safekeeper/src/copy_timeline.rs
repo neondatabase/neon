@@ -154,7 +154,7 @@ pub async fn handle_request(request: Request) -> Result<()> {
     new_state.peer_horizon_lsn = request.until_lsn;
     new_state.backup_lsn = new_backup_lsn;
 
-    FileStorage::create_new(tli_dir_path.clone(), conf, new_state.clone()).await?;
+    FileStorage::create_new(&tli_dir_path, new_state.clone(), conf.no_sync).await?;
 
     // now we have a ready timeline in a temp directory
     validate_temp_timeline(conf, request.destination_ttid, &tli_dir_path).await?;

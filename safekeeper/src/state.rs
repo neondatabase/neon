@@ -143,8 +143,8 @@ impl TimelinePersistentState {
         TimelinePersistentState::new(
             &TenantTimelineId::empty(),
             ServerInfo {
-                pg_version: 17, /* Postgres server version */
-                system_id: 0,   /* Postgres system identifier */
+                pg_version: 170000, /* Postgres server version (major * 10000) */
+                system_id: 0,       /* Postgres system identifier */
                 wal_seg_size: 16 * 1024 * 1024,
             },
             vec![],

@@ -3,11 +3,11 @@ from __future__ import annotations
 import os
 import time
 from collections import defaultdict
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 import requests
-from fixtures.common_types import Lsn, TenantId, TenantShardId, TimelineId
+from fixtures.common_types import Lsn, TenantId, TenantShardId, TimelineArchivalState, TimelineId
 from fixtures.compute_reconfigure import ComputeReconfigure
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
@@ -188,7 +188,9 @@ def test_sharding_split_unsharded(
         "compact-shard-ancestors-persistent",
     ],
 )
-def test_sharding_split_compaction(neon_env_builder: NeonEnvBuilder, failpoint: Optional[str]):
+def test_sharding_split_compaction(
+    neon_env_builder: NeonEnvBuilder, failpoint: Optional[str], build_type: str
+):
     """
     Test that after a split, we clean up parent layer data in the child shards via compaction.
     """
@@ -322,9 +324,19 @@ def test_sharding_split_compaction(neon_env_builder: NeonEnvBuilder, failpoint: 
             # Physical size should shrink because layers are smaller
             assert detail_after["current_physical_size"] < detail_before["current_physical_size"]
 
-    # Validate size statistics
+    # Validate filtering compaction actually happened
     for shard in shards:
         ps = env.get_tenant_pageserver(shard)
+
+        log.info("scan all layer files for disposable keys, there shouldn't be any")
+        result = ps.timeline_scan_no_disposable_keys(shard, timeline_id)
+        tally = result.tally
+        raw_page_count = tally.not_disposable_count + tally.disposable_count
+        assert tally.not_disposable_count > (
+            raw_page_count // 2
+        ), "compaction doesn't rewrite layers that are >=50pct local"
+
+        log.info("check sizes")
         timeline_info = ps.http_client().timeline_detail(shard, timeline_id)
         reported_size = timeline_info["current_physical_size"]
         layer_paths = ps.list_layers(shard, timeline_id)
@@ -351,6 +363,145 @@ def test_sharding_split_compaction(neon_env_builder: NeonEnvBuilder, failpoint: 
 
     # Compaction shouldn't make anything unreadable
     workload.validate()
+
+
+def test_sharding_split_offloading(neon_env_builder: NeonEnvBuilder):
+    """
+    Test that during a split, we don't miss archived and offloaded timelines.
+    """
+
+    TENANT_CONF = {
+        # small checkpointing and compaction targets to ensure we generate many upload operations
+        "checkpoint_distance": 128 * 1024,
+        "compaction_threshold": 1,
+        "compaction_target_size": 128 * 1024,
+        # no PITR horizon, we specify the horizon when we request on-demand GC
+        "pitr_interval": "3600s",
+        # disable background compaction, GC and offloading. We invoke it manually when we want it to happen.
+        "gc_period": "0s",
+        "compaction_period": "0s",
+        # Disable automatic creation of image layers, as we will create them explicitly when we want them
+        "image_creation_threshold": 9999,
+        "image_layer_creation_check_threshold": 0,
+        "lsn_lease_length": "0s",
+    }
+
+    neon_env_builder.storage_controller_config = {
+        # Default neon_local uses a small timeout: use a longer one to tolerate longer pageserver restarts.
+        "max_offline": "30s",
+        "max_warming_up": "300s",
+    }
+
+    env = neon_env_builder.init_start(initial_tenant_conf=TENANT_CONF)
+    tenant_id = env.initial_tenant
+    timeline_id_main = env.initial_timeline
+
+    # Check that we created with an unsharded TenantShardId: this is the default,
+    # but check it in case we change the default in future
+    assert env.storage_controller.inspect(TenantShardId(tenant_id, 0, 0)) is not None
+
+    workload_main = Workload(env, tenant_id, timeline_id_main, branch_name="main")
+    workload_main.init()
+    workload_main.write_rows(256)
+    workload_main.validate()
+    workload_main.stop()
+
+    # Create two timelines, archive one, offload the other
+    timeline_id_archived = env.create_branch("archived_not_offloaded")
+    timeline_id_offloaded = env.create_branch("archived_offloaded")
+
+    def timeline_id_set_for(list: list[dict[str, Any]]) -> set[TimelineId]:
+        return set(
+            map(
+                lambda t: TimelineId(t["timeline_id"]),
+                list,
+            )
+        )
+
+    expected_offloaded_set = {timeline_id_offloaded}
+    expected_timeline_set = {timeline_id_main, timeline_id_archived}
+
+    with env.get_tenant_pageserver(tenant_id).http_client() as http_client:
+        http_client.timeline_archival_config(
+            tenant_id, timeline_id_archived, TimelineArchivalState.ARCHIVED
+        )
+        http_client.timeline_archival_config(
+            tenant_id, timeline_id_offloaded, TimelineArchivalState.ARCHIVED
+        )
+        http_client.timeline_offload(tenant_id, timeline_id_offloaded)
+        list = http_client.timeline_and_offloaded_list(tenant_id)
+        assert timeline_id_set_for(list.offloaded) == expected_offloaded_set
+        assert timeline_id_set_for(list.timelines) == expected_timeline_set
+
+        # Do a full image layer generation before splitting
+        http_client.timeline_checkpoint(
+            tenant_id, timeline_id_main, force_image_layer_creation=True, wait_until_uploaded=True
+        )
+
+    # Split one shard into two
+    shards = env.storage_controller.tenant_shard_split(tenant_id, shard_count=2)
+
+    # Let all shards move into their stable locations, so that during subsequent steps we
+    # don't have reconciles in progress (simpler to reason about what messages we expect in logs)
+    env.storage_controller.reconcile_until_idle()
+
+    # Check we got the shard IDs we expected
+    assert env.storage_controller.inspect(TenantShardId(tenant_id, 0, 2)) is not None
+    assert env.storage_controller.inspect(TenantShardId(tenant_id, 1, 2)) is not None
+
+    workload_main.validate()
+    workload_main.stop()
+
+    env.storage_controller.consistency_check()
+
+    # Ensure each shard has the same list of timelines and offloaded timelines
+    for shard in shards:
+        ps = env.get_tenant_pageserver(shard)
+
+        list = ps.http_client().timeline_and_offloaded_list(shard)
+        assert timeline_id_set_for(list.offloaded) == expected_offloaded_set
+        assert timeline_id_set_for(list.timelines) == expected_timeline_set
+
+        ps.http_client().timeline_compact(shard, timeline_id_main)
+
+    # Check that we can still read all the data
+    workload_main.validate()
+
+    # Force a restart, which requires the state to be persisted.
+    env.pageserver.stop()
+    env.pageserver.start()
+
+    # Ensure each shard has the same list of timelines and offloaded timelines
+    for shard in shards:
+        ps = env.get_tenant_pageserver(shard)
+
+        list = ps.http_client().timeline_and_offloaded_list(shard)
+        assert timeline_id_set_for(list.offloaded) == expected_offloaded_set
+        assert timeline_id_set_for(list.timelines) == expected_timeline_set
+
+        ps.http_client().timeline_compact(shard, timeline_id_main)
+
+    # Compaction shouldn't make anything unreadable
+    workload_main.validate()
+
+    # Do sharded unarchival
+    env.storage_controller.timeline_archival_config(
+        tenant_id, timeline_id_offloaded, TimelineArchivalState.UNARCHIVED
+    )
+    env.storage_controller.timeline_archival_config(
+        tenant_id, timeline_id_archived, TimelineArchivalState.UNARCHIVED
+    )
+
+    for shard in shards:
+        ps = env.get_tenant_pageserver(shard)
+
+        list = ps.http_client().timeline_and_offloaded_list(shard)
+        assert timeline_id_set_for(list.offloaded) == set()
+        assert timeline_id_set_for(list.timelines) == {
+            timeline_id_main,
+            timeline_id_archived,
+            timeline_id_offloaded,
+        }
 
 
 def test_sharding_split_smoke(
