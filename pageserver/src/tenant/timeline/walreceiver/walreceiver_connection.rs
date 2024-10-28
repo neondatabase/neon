@@ -34,8 +34,8 @@ use crate::{
 };
 use postgres_backend::is_expected_io_error;
 use postgres_connection::PgConnectionConfig;
-use postgres_ffi::record::{decode_wal_record, DecodedWALRecord};
 use postgres_ffi::waldecoder::WalStreamDecoder;
+use postgres_ffi::walrecord::{decode_wal_record, DecodedWALRecord};
 use utils::{id::NodeId, lsn::Lsn};
 use utils::{pageserver_feedback::PageserverFeedback, sync::gate::GateError};
 

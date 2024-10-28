@@ -4,7 +4,7 @@
 
 use bytes::Bytes;
 use pageserver_api::reltag::{RelTag, SlruKind};
-use postgres_ffi::record::{
+use postgres_ffi::walrecord::{
     XlMultiXactCreate, XlMultiXactTruncate, XlRelmapUpdate, XlReploriginDrop, XlReploriginSet,
     XlSmgrTruncate, XlXactParsedRecord,
 };

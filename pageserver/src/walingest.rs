@@ -28,7 +28,7 @@ use std::time::Instant;
 use std::time::SystemTime;
 
 use pageserver_api::shard::ShardIdentity;
-use postgres_ffi::record::*;
+use postgres_ffi::walrecord::*;
 use postgres_ffi::{dispatch_pgversion, enum_pgversion, enum_pgversion_dispatch, TimestampTz};
 use postgres_ffi::{fsm_logical_to_physical, page_is_new, page_set_lsn};
 use wal_decoder::models::*;
@@ -2956,8 +2956,8 @@ mod tests {
     #[tokio::test]
     async fn test_ingest_real_wal() {
         use crate::tenant::harness::*;
-        use postgres_ffi::record::decode_wal_record;
         use postgres_ffi::waldecoder::WalStreamDecoder;
+        use postgres_ffi::walrecord::decode_wal_record;
         use postgres_ffi::WAL_SEGMENT_SIZE;
 
         // Define test data path and constants.
