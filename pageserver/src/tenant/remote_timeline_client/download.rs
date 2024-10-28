@@ -421,6 +421,7 @@ async fn do_download_index_part(
 ///                  [cancel] has fired.  This function does not do its own retries of GET operations, and relies
 ///                  on the function passed in to do so.
 /// * [parse_path]: parse a fully qualified remote storage path to get the generation of the object.
+#[allow(clippy::too_many_arguments)]
 #[tracing::instrument(skip_all, fields(generation=?my_generation))]
 pub(crate) async fn download_generation_object<'a, T, DF, DFF, PF>(
     storage: &'a GenericRemoteStorage,
