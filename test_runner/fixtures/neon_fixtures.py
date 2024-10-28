@@ -13,7 +13,7 @@ import threading
 import time
 import uuid
 from collections import defaultdict
-from collections.abc import AsyncGenerator, Iterable, Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from datetime import datetime

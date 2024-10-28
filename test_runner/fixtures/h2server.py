@@ -4,16 +4,12 @@ https://python-hyper.org/projects/hyper-h2/en/stable/asyncio-example.html
 auth-broker -> local-proxy needs a h2 connection, so we need a h2 server :)
 """
 
-from __future__ import annotations
-
 import asyncio
 import collections
 import io
 import json
-from collections.abc import AsyncGenerator, Iterator
-from typing import List, Tuple
+from collections.abc import AsyncGenerator
 
-import pytest
 import pytest_asyncio
 from h2.config import H2Configuration
 from h2.connection import H2Connection
@@ -30,9 +26,8 @@ from h2.events import (
 from h2.exceptions import ProtocolError, StreamClosedError
 from h2.settings import SettingCodes
 
-from fixtures.port_distributor import PortDistributor
+RequestData = collections.namedtuple("RequestData", ["headers", "data"])
 
-RequestData = collections.namedtuple('RequestData', ['headers', 'data'])
 
 class H2Server:
     def __init__(self, host, port) -> None:
@@ -42,7 +37,7 @@ class H2Server:
 
 class H2Protocol(asyncio.Protocol):
     def __init__(self):
-        config = H2Configuration(client_side=False, header_encoding='utf-8')
+        config = H2Configuration(client_side=False, header_encoding="utf-8")
         self.conn = H2Connection(config=config)
         self.transport = None
         self.stream_data = {}
@@ -62,7 +57,7 @@ class H2Protocol(asyncio.Protocol):
         assert self.transport is not None
         try:
             events = self.conn.receive_data(data)
-        except ProtocolError as e:
+        except ProtocolError:
             self.transport.write(self.conn.data_to_send())
             self.transport.close()
         else:
@@ -86,9 +81,8 @@ class H2Protocol(asyncio.Protocol):
 
                 self.transport.write(self.conn.data_to_send())
 
-    def request_received(self, headers: List[Tuple[str, str]], stream_id: int):
+    def request_received(self, headers: list[tuple[str, str]], stream_id: int):
         headers_map = collections.OrderedDict(headers)
-        # method = headers_map[':method']
 
         # Store off the request data.
         request_data = RequestData(headers_map, io.BytesIO())
@@ -105,16 +99,14 @@ class H2Protocol(asyncio.Protocol):
             return
 
         headers = request_data.headers
-        body = request_data.data.getvalue().decode('utf-8')
+        body = request_data.data.getvalue().decode("utf-8")
 
-        data = json.dumps(
-            {"headers": headers, "body": body}, indent=4
-        ).encode("utf8")
+        data = json.dumps({"headers": headers, "body": body}, indent=4).encode("utf8")
 
         response_headers = (
-            (':status', '200'),
-            ('content-type', 'application/json'),
-            ('content-length', str(len(data))),
+            (":status", "200"),
+            ("content-type", "application/json"),
+            ("content-length", str(len(data))),
         )
         self.conn.send_headers(stream_id, response_headers)
         asyncio.ensure_future(self.send_data(data, stream_id))
@@ -127,9 +119,7 @@ class H2Protocol(asyncio.Protocol):
         try:
             stream_data = self.stream_data[stream_id]
         except KeyError:
-            self.conn.reset_stream(
-                stream_id, error_code=ErrorCodes.PROTOCOL_ERROR
-            )
+            self.conn.reset_stream(stream_id, error_code=ErrorCodes.PROTOCOL_ERROR)
         else:
             stream_data.data.write(data)
 
@@ -160,9 +150,7 @@ class H2Protocol(asyncio.Protocol):
 
             try:
                 self.conn.send_data(
-                    stream_id,
-                    data[:chunk_size],
-                    end_stream=(chunk_size == len(data))
+                    stream_id, data[:chunk_size], end_stream=(chunk_size == len(data))
                 )
             except (StreamClosedError, ProtocolError):
                 # The stream got closed and we didn't get told. We're done
@@ -208,4 +196,3 @@ async def http2_echoserver() -> AsyncGenerator[H2Server]:
     yield server
 
     serve.close()
-
