@@ -64,7 +64,7 @@ impl State {
 
     /// Appends a record to the WAL at the current LSN.
     pub fn append_record(&mut self) {
-        let record = self.wal_generator.next().unwrap();
+        let (_, record) = self.wal_generator.next().unwrap();
         self.disk.write(self.internal_available_lsn.into(), &record);
         self.prev_lsn = self.internal_available_lsn;
         self.internal_available_lsn += record.len() as u64;

@@ -667,10 +667,12 @@ impl WalGenerator {
 
 /// Generate WAL records as an iterator.
 impl Iterator for WalGenerator {
-    type Item = Bytes;
+    type Item = (Lsn, Bytes);
 
     fn next(&mut self) -> Option<Self::Item> {
-        Some(self.generate_logical_message(Self::PREFIX, Self::MESSAGE))
+        let lsn = self.lsn;
+        let record = self.generate_logical_message(Self::PREFIX, Self::MESSAGE);
+        Some((lsn, record))
     }
 }
 
