@@ -5,7 +5,6 @@ from functools import partial
 from random import choice
 from string import ascii_lowercase
 
-import pytest
 from fixtures.common_types import Lsn
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
@@ -20,6 +19,7 @@ from fixtures.utils import wait_until
 
 def random_string(n: int):
     return "".join([choice(ascii_lowercase) for _ in range(n)])
+
 
 def test_logical_replication(neon_simple_env: NeonEnv, vanilla_pg):
     env = neon_simple_env
