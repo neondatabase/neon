@@ -1,6 +1,28 @@
 //! This module houses types which represent decoded PG WAL records
-//! ready for the pageserver to interpret. They are higher level
-//! than their counterparts in [`postgres_ffi::record`].
+//! ready for the pageserver to interpret. They are derived from the original
+//! WAL records, so that each struct corresponds closely to one WAL record of
+//! a specific kind. They contain the same information as the original WAL records,
+//! just decoded into structs and fields for easier access.
+//!
+//! The ingestion code uses these structs to help with parsing the WAL records,
+//! and it splits them into a stream of modifications to the key-value pairs that
+//! are ultimately stored in delta layers.  See also the split-out counterparts in
+//! [`postgres_ffi::record`].
+//!
+//! The pipeline which processes WAL records is not super obvious, so let's follow
+//! the flow of an example XACT_COMMIT Postgres record:
+//!
+//! (Postgres XACT_COMMIT record)
+//! |
+//! |--> pageserver::walingest::WalIngest::decode_xact_record
+//!      |
+//!      |--> ([`XactRecord::Commit`])
+//!           |
+//!           |--> pageserver::walingest::WalIngest::ingest_xact_record
+//!                |
+//!                |--> (NeonWalRecord::ClogSetCommitted)
+//!                     |
+//!                     |--> write to KV store within the pageserver
 
 use bytes::Bytes;
 use pageserver_api::reltag::{RelTag, SlruKind};
