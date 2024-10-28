@@ -1118,7 +1118,6 @@ jobs:
               -f deployPgSniRouter=true \
               -f deployProxyLink=true \
               -f deployPrivatelinkProxy=true \
-              -f deployLegacyProxyScram=true \
               -f deployProxyScram=true \
               -f deployProxyAuthBroker=true \
               -f branch=main \
