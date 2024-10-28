@@ -14,7 +14,7 @@
 #include "unstable_extensions.h"
 
 static bool					allow_unstable_extensions = false;
-static char				   *unstable_extensions_str = NULL;
+static char				   *unstable_extensions = NULL;
 
 static ProcessUtility_hook_type PreviousProcessUtilityHook = NULL;
 
@@ -54,7 +54,7 @@ CheckUnstableExtension(
 {
 	Node	   *parseTree = pstmt->utilityStmt;
 
-	if (allow_unstable_extensions || unstable_extensions_str == NULL)
+	if (allow_unstable_extensions || unstable_extensions == NULL)
 		goto process;
 
 	switch (nodeTag(parseTree))
@@ -62,7 +62,7 @@ CheckUnstableExtension(
 		case T_CreateExtensionStmt:
 		{
 			CreateExtensionStmt *stmt = castNode(CreateExtensionStmt, parseTree);
-			if (list_contains(unstable_extensions_str, stmt->extname))
+			if (list_contains(unstable_extensions, stmt->extname))
 			{
 				ereport(ERROR,
 						(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
@@ -119,7 +119,7 @@ InitUnstableExtensionsSupport(void)
 		"neon.unstable_extensions",
 		"Allow unstable extensions to be installed and used",
 		NULL,
-		&unstable_extensions_str,
+		&unstable_extensions,
 		NULL,
 		PGC_SUSET,
 		0,
