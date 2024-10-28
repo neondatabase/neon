@@ -1352,14 +1352,15 @@ impl Tenant {
         )
         .await?;
         let (offloaded_add, tenant_manifest) =
-            match remote_timeline_client::do_download_tenant_manifest(
+            match remote_timeline_client::download_tenant_manifest(
                 remote_storage,
                 &self.tenant_shard_id,
+                self.generation,
                 &cancel,
             )
             .await
             {
-                Ok((tenant_manifest, _generation)) => (
+                Ok((tenant_manifest, _generation, _manifest_mtime)) => (
                     format!("{} offloaded", tenant_manifest.offloaded_timelines.len()),
                     tenant_manifest,
                 ),
