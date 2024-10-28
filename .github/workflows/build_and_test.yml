@@ -1116,7 +1116,11 @@ jobs:
 
             gh workflow --repo neondatabase/infra run deploy-proxy-prod.yml --ref main \
               -f deployPgSniRouter=true \
-              -f deployProxy=true \
+              -f deployProxyLink=true \
+              -f deployPrivatelinkProxy=true \
+              -f deployLegacyProxyScram=true \
+              -f deployProxyScram=true \
+              -f deployProxyAuthBroker=true \
               -f branch=main \
               -f dockerTag=${{needs.tag.outputs.build-tag}}
           else
