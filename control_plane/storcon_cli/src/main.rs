@@ -111,6 +111,11 @@ enum Command {
         #[arg(long)]
         node: NodeId,
     },
+    /// Cancel any ongoing reconciliation for this shard
+    TenantShardCancelReconcile {
+        #[arg(long)]
+        tenant_shard_id: TenantShardId,
+    },
     /// Modify the pageserver tenant configuration of a tenant: this is the configuration structure
     /// that is passed through to pageservers, and does not affect storage controller behavior.
     TenantConfig {
@@ -532,6 +537,15 @@ async fn main() -> anyhow::Result<()> {
                     Method::PUT,
                     format!("control/v1/tenant/{tenant_shard_id}/migrate"),
                     Some(req),
+                )
+                .await?;
+        }
+        Command::TenantShardCancelReconcile { tenant_shard_id } => {
+            storcon_client
+                .dispatch::<(), ()>(
+                    Method::PUT,
+                    format!("control/v1/tenant/{tenant_shard_id}/cancel_reconcile"),
+                    None,
                 )
                 .await?;
         }
