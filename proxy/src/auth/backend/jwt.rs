@@ -670,11 +670,9 @@ impl From<&jose_jwk::Key> for KeyType {
 
 #[cfg(test)]
 mod tests {
-    use crate::types::RoleName;
-
-    use super::*;
-
-    use std::{future::IntoFuture, net::SocketAddr, time::SystemTime};
+    use std::future::IntoFuture;
+    use std::net::SocketAddr;
+    use std::time::SystemTime;
 
     use base64::URL_SAFE_NO_PAD;
     use bytes::Bytes;
@@ -688,6 +686,9 @@ mod tests {
     use serde_json::json;
     use signature::Signer;
     use tokio::net::TcpListener;
+
+    use super::*;
+    use crate::types::RoleName;
 
     fn new_ec_jwk(kid: String) -> (p256::SecretKey, jose_jwk::Jwk) {
         let sk = p256::SecretKey::random(&mut OsRng);
