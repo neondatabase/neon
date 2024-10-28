@@ -64,7 +64,7 @@ CheckUnstableExtension(
 			{
 				ereport(ERROR,
 						(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-						 errmsg("using an unstable extension (%s) is currently prohibited", stmt->extname),
+						 errmsg("installing %s is currently prohibited", stmt->extname),
 						 errhint("Set neon.allow_unstable_extensions to true")));
 			}
 			break;
