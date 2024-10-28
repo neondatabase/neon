@@ -3131,8 +3131,6 @@ impl Tenant {
         }
 
         let tenant_manifest = self.build_tenant_manifest();
-        // TODO: generation support
-        let generation = remote_timeline_client::TENANT_MANIFEST_GENERATION;
         for child_shard in child_shards {
             tracing::info!(
                 "Uploading tenant manifest for child {}",
@@ -3141,7 +3139,7 @@ impl Tenant {
             upload_tenant_manifest(
                 &self.remote_storage,
                 child_shard,
-                generation,
+                self.generation,
                 &tenant_manifest,
                 &self.cancel,
             )

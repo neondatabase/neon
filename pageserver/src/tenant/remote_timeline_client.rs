@@ -275,12 +275,6 @@ pub(crate) const BUFFER_SIZE: usize = 32 * 1024;
 /// which we warn and skip.
 const DELETION_QUEUE_FLUSH_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Hardcode a generation for the tenant manifest for now so that we don't
-/// need to deal with generation-less manifests in the future.
-///
-/// TODO: add proper generation support to all the places that use this.
-pub(crate) const TENANT_MANIFEST_GENERATION: Generation = Generation::new(1);
-
 pub enum MaybeDeletedIndexPart {
     IndexPart(IndexPart),
     Deleted(IndexPart),
