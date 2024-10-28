@@ -137,9 +137,6 @@ struct ProxyCliArgs {
     /// size of the threadpool for password hashing
     #[clap(long, default_value_t = 4)]
     scram_thread_pool_size: u8,
-    /// Disable dynamic rate limiter and store the metrics to ensure its production behaviour.
-    #[clap(long, default_value_t = true, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
-    disable_dynamic_rate_limiter: bool,
     /// Endpoint rate limiter max number of requests per second.
     ///
     /// Provided in the form `<Requests Per Second>@<Bucket Duration Size>`.
@@ -615,9 +612,6 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
              and metric-collection-interval must be specified"
         ),
     };
-    if !args.disable_dynamic_rate_limiter {
-        bail!("dynamic rate limiter should be disabled");
-    }
 
     let config::ConcurrencyLockOptions {
         shards,
