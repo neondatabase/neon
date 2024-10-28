@@ -1,4 +1,11 @@
 //! This module defines the value type used by the storage engine.
+//!
+//! A [`Value`] represents either a completely new value for one Key ([`Value::Image`]),
+//! or a "delta" of how to get from previous version of the value to the new one
+//! ([`Value::WalRecord`]])
+//!
+//! Note that the [`Value`] type is used for the permananent storage format, so any
+//! changes to it must be backwards compatible.
 
 use crate::record::NeonWalRecord;
 use bytes::Bytes;
