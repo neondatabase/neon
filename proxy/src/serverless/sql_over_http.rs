@@ -28,6 +28,7 @@ use uuid::Uuid;
 use super::backend::{LocalProxyConnError, PoolingBackend};
 use super::conn_pool::{AuthData, ConnInfoWithAuth};
 use super::conn_pool_lib::{self, ConnInfo};
+use super::error::HttpCodeError;
 use super::http_util::json_response;
 use super::json::{json_to_pg_text, pg_text_row_to_json, JsonConversionError};
 use super::local_conn_pool;
@@ -321,7 +322,7 @@ pub(crate) async fn handle(
 
             // TODO: this shouldn't always be bad request.
             json_response(
-                StatusCode::BAD_REQUEST,
+                e.get_http_status_code(),
                 json!({
                     "message": message,
                     "code": code,
@@ -401,6 +402,22 @@ impl UserFacingError for SqlOverHttpError {
             SqlOverHttpError::Postgres(p) => p.to_string(),
             SqlOverHttpError::JsonConversion(_) => "could not parse postgres response".to_string(),
             SqlOverHttpError::Cancelled(_) => self.to_string(),
+        }
+    }
+}
+
+impl HttpCodeError for SqlOverHttpError {
+    fn get_http_status_code(&self) -> StatusCode {
+        match self {
+            SqlOverHttpError::ReadPayload(_) => StatusCode::BAD_REQUEST,
+            SqlOverHttpError::ConnectCompute(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            SqlOverHttpError::ConnInfo(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            SqlOverHttpError::RequestTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
+            SqlOverHttpError::ResponseTooLarge(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            SqlOverHttpError::InvalidIsolationLevel => StatusCode::BAD_REQUEST,
+            SqlOverHttpError::Postgres(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            SqlOverHttpError::JsonConversion(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            SqlOverHttpError::Cancelled(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 }
