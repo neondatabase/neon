@@ -716,11 +716,15 @@ mod tests {
         (sk, jwk)
     }
 
-    fn build_jwt_payload(kid: String, sig: jose_jwa::Signing) -> String {
-        let now = SystemTime::now()
+    fn now() -> u64 {
+        SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap()
-            .as_secs();
+            .as_secs()
+    }
+
+    fn build_jwt_payload(kid: String, sig: jose_jwa::Signing) -> String {
+        let now = now();
         let body = typed_json::json! {{
             "exp": now + 3600,
             "nbf": now,
@@ -955,6 +959,62 @@ X0n5X2/pBLJzxZc62ccvZYVnctBiFs6HbSnxpuMQCfkt/BcR/ttIepBQQIW86wHL
                     .unwrap();
             }
         }
+    }
+
+    /// AWS Cognito escapes the `/` in the URL.
+    #[tokio::test]
+    async fn check_jwt_regression_cognito_issuer() {
+        let (key, jwk) = new_ec_jwk("key".into());
+
+        let now = now();
+        let token = new_custom_ec_jwt(
+            "key".into(),
+            &key,
+            typed_json::json! {{
+                "sub": "dd9a73fd-e785-4a13-aae1-e691ce43e89d",
+                // cognito uses `\/`. I cannot replicated that easily here as serde_json will refuse
+                // to write that escape character. instead I will make a bogus URL using `\` instead.
+                "iss": "https:\\\\cognito-idp.us-west-2.amazonaws.com\\us-west-2_abcdefgh",
+                "client_id": "abcdefghijklmnopqrstuvwxyz",
+                "origin_jti": "6759d132-3fe7-446e-9e90-2fe7e8017893",
+                "event_id": "ec9c36ab-b01d-46a0-94e4-87fde6767065",
+                "token_use": "access",
+                "scope": "aws.cognito.signin.user.admin",
+                "auth_time":now,
+                "exp":now + 60,
+                "iat":now,
+                "jti": "b241614b-0b93-4bdc-96db-0a3c7061d9c0",
+                "username": "dd9a73fd-e785-4a13-aae1-e691ce43e89d",
+            }},
+        );
+
+        let jwks = jose_jwk::JwkSet { keys: vec![jwk] };
+
+        let jwks_addr = jwks_server(move |_path| Some(serde_json::to_vec(&jwks).unwrap())).await;
+
+        let role_name = RoleName::from("anonymous");
+        let rules = vec![AuthRule {
+            id: "aws-cognito".to_owned(),
+            jwks_url: format!("http://{jwks_addr}/").parse().unwrap(),
+            audience: None,
+            role_names: vec![RoleNameInt::from(&role_name)],
+        }];
+
+        let fetch = Fetch(rules);
+        let jwk_cache = JwkCache::default();
+
+        let endpoint = EndpointId::from("ep");
+
+        jwk_cache
+            .check_jwt(
+                &RequestMonitoring::test(),
+                endpoint.clone(),
+                &role_name,
+                &fetch,
+                &token,
+            )
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
