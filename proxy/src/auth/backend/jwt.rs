@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -278,7 +279,7 @@ impl JwkCacheEntryLock {
 
         // get the key from the JWKs if possible. If not, wait for the keys to update.
         let (jwk, expected_audience) = loop {
-            match guard.find_jwk_and_audience(kid, role_name) {
+            match guard.find_jwk_and_audience(&kid, role_name) {
                 Some(jwk) => break jwk,
                 None if guard.last_retrieved.elapsed() > MIN_RENEW => {
                     let _paused = ctx.latency_timer_pause(crate::metrics::Waiting::Compute);
@@ -421,8 +422,8 @@ struct JwtHeader<'a> {
     #[serde(rename = "alg")]
     algorithm: jose_jwa::Algorithm,
     /// key id, must be provided for our usecase
-    #[serde(rename = "kid")]
-    key_id: Option<&'a str>,
+    #[serde(rename = "kid", borrow)]
+    key_id: Option<Cow<'a, str>>,
 }
 
 /// <https://datatracker.ietf.org/doc/html/rfc7519#section-4.1>
@@ -441,17 +442,17 @@ struct JwtPayload<'a> {
 
     // the following entries are only extracted for the sake of debug logging.
     /// Issuer of the JWT
-    #[serde(rename = "iss")]
-    issuer: Option<&'a str>,
+    #[serde(rename = "iss", borrow)]
+    issuer: Option<Cow<'a, str>>,
     /// Subject of the JWT (the user)
-    #[serde(rename = "sub")]
-    subject: Option<&'a str>,
+    #[serde(rename = "sub", borrow)]
+    subject: Option<Cow<'a, str>>,
     /// Unique token identifier
-    #[serde(rename = "jti")]
-    jwt_id: Option<&'a str>,
+    #[serde(rename = "jti", borrow)]
+    jwt_id: Option<Cow<'a, str>>,
     /// Unique session identifier
-    #[serde(rename = "sid")]
-    session_id: Option<&'a str>,
+    #[serde(rename = "sid", borrow)]
+    session_id: Option<Cow<'a, str>>,
 }
 
 /// `OneOrMany` supports parsing either a single item or an array of items.
