@@ -1506,34 +1506,41 @@ impl<'a> DatadirModification<'a> {
         Ok(())
     }
 
-    /// Drop a relation.
-    pub async fn put_rel_drop(&mut self, rel: RelTag, ctx: &RequestContext) -> anyhow::Result<()> {
-        anyhow::ensure!(rel.relnode != 0, RelationError::InvalidRelnode);
+    /// Drop some relations
+    pub(crate) async fn put_rel_drops(
+        &mut self,
+        drop_relations: HashMap<(u32, u32), Vec<RelTag>>,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
+        for ((spc_node, db_node), rel_tags) in drop_relations {
+            let dir_key = rel_dir_to_key(spc_node, db_node);
+            let buf = self.get(dir_key, ctx).await?;
+            let mut dir = RelDirectory::des(&buf)?;
 
-        // Remove it from the directory entry
-        let dir_key = rel_dir_to_key(rel.spcnode, rel.dbnode);
-        let buf = self.get(dir_key, ctx).await?;
-        let mut dir = RelDirectory::des(&buf)?;
+            let mut dirty = false;
+            for rel_tag in rel_tags {
+                if dir.rels.remove(&(rel_tag.relnode, rel_tag.forknum)) {
+                    dirty = true;
 
-        self.pending_directory_entries
-            .push((DirectoryKind::Rel, dir.rels.len()));
+                    // update logical size
+                    let size_key = rel_size_to_key(rel_tag);
+                    let old_size = self.get(size_key, ctx).await?.get_u32_le();
+                    self.pending_nblocks -= old_size as i64;
 
-        if dir.rels.remove(&(rel.relnode, rel.forknum)) {
-            self.put(dir_key, Value::Image(Bytes::from(RelDirectory::ser(&dir)?)));
-        } else {
-            warn!("dropped rel {} did not exist in rel directory", rel);
+                    // Remove entry from relation size cache
+                    self.tline.remove_cached_rel_size(&rel_tag);
+
+                    // Delete size entry, as well as all blocks
+                    self.delete(rel_key_range(rel_tag));
+                }
+            }
+
+            if dirty {
+                self.put(dir_key, Value::Image(Bytes::from(RelDirectory::ser(&dir)?)));
+                self.pending_directory_entries
+                    .push((DirectoryKind::Rel, dir.rels.len()));
+            }
         }
-
-        // update logical size
-        let size_key = rel_size_to_key(rel);
-        let old_size = self.get(size_key, ctx).await?.get_u32_le();
-        self.pending_nblocks -= old_size as i64;
-
-        // Remove enty from relation size cache
-        self.tline.remove_cached_rel_size(&rel);
-
-        // Delete size entry, as well as all blocks
-        self.delete(rel_key_range(rel));
 
         Ok(())
     }

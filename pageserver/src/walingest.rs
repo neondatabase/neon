@@ -21,6 +21,7 @@
 //! redo Postgres process, but some records it can handle directly with
 //! bespoken Rust code.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -1620,6 +1621,12 @@ impl WalIngest {
             },
         )?;
 
+        // Group relations to drop by dbNode.  This map will contain all relations that _might_
+        // exist, we will reduce it to which ones really exist later.  This map can be huge if
+        // the transaction touches a huge number of relations (there is no bound on this in
+        // postgres).
+        let mut drop_relations: HashMap<(u32, u32), Vec<RelTag>> = HashMap::new();
+
         for xnode in &parsed.xnodes {
             for forknum in MAIN_FORKNUM..=INIT_FORKNUM {
                 let rel = RelTag {
@@ -1628,15 +1635,16 @@ impl WalIngest {
                     dbnode: xnode.dbnode,
                     relnode: xnode.relnode,
                 };
-                if modification
-                    .tline
-                    .get_rel_exists(rel, Version::Modified(modification), ctx)
-                    .await?
-                {
-                    self.put_rel_drop(modification, rel, ctx).await?;
-                }
+                drop_relations
+                    .entry((xnode.spcnode, xnode.dbnode))
+                    .or_default()
+                    .push(rel);
             }
         }
+
+        // Execute relation drops in a batch: the number may be huge, so deleting individually is prohibitively expensive
+        modification.put_rel_drops(drop_relations, ctx).await?;
+
         if origin_id != 0 {
             modification
                 .set_replorigin(origin_id, parsed.origin_lsn)
@@ -2346,16 +2354,6 @@ impl WalIngest {
         Ok(())
     }
 
-    async fn put_rel_drop(
-        &mut self,
-        modification: &mut DatadirModification<'_>,
-        rel: RelTag,
-        ctx: &RequestContext,
-    ) -> Result<()> {
-        modification.put_rel_drop(rel, ctx).await?;
-        Ok(())
-    }
-
     async fn handle_rel_extend(
         &mut self,
         modification: &mut DatadirModification<'_>,
@@ -2869,7 +2867,9 @@ mod tests {
 
         // Drop rel
         let mut m = tline.begin_modification(Lsn(0x30));
-        walingest.put_rel_drop(&mut m, TESTREL_A, &ctx).await?;
+        let mut rel_drops = HashMap::new();
+        rel_drops.insert((TESTREL_A.spcnode, TESTREL_A.dbnode), vec![TESTREL_A]);
+        m.put_rel_drops(rel_drops, &ctx).await?;
         m.commit(&ctx).await?;
 
         // Check that rel is not visible anymore
