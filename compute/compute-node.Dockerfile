@@ -1131,14 +1131,17 @@ FROM rust-extensions-build AS pg-mooncake-build
 ARG PG_VERSION
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
-ENV PG_MOONCAKE_VERSION=882175dbba07ba2e6e59b1088d61bf325b910b9e
+# The topmost commit in the `neon` branch at the time of writing this
+# https://github.com/Mooncake-Labs/pg_mooncake/commits/neon/
+# https://github.com/Mooncake-Labs/pg_mooncake/commit/568b5a82b5fc16136bdf4ca5aac3e0cc261ab48d
+ENV PG_MOONCAKE_VERSION=568b5a82b5fc16136bdf4ca5aac3e0cc261ab48d
 ENV PATH="/usr/local/pgsql/bin/:$PATH"
 
 RUN case "${PG_VERSION}" in \
         'v14') \
             echo "pg_mooncake is not supported on Postgres ${PG_VERSION}" && exit 0;; \
     esac && \
-    git clone --depth 1 --branch neon https://github.com/kelvich/pg_mooncake.git pg_mooncake-src && \
+    git clone --depth 1 --branch neon https://github.com/Mooncake-Labs/pg_mooncake.git pg_mooncake-src && \
     cd pg_mooncake-src && \
     git checkout "${PG_MOONCAKE_VERSION}" && \
     git submodule update --init --depth 1 --recursive && \
