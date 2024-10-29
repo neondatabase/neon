@@ -92,6 +92,7 @@ from fixtures.utils import (
     assert_no_errors,
     get_dir_size,
     print_gc_result,
+    size_to_bytes,
     subprocess_capture,
     wait_until,
 )
@@ -3531,9 +3532,20 @@ class Endpoint(PgProtocol, LogUtils):
                 lfc_path.unlink()
             else:
                 lfc_path.parent.mkdir(parents=True, exist_ok=True)
+            for line in config_lines:
+                if (
+                    line.find("neon.max_file_cache_size") > -1
+                    or line.find("neon.file_cache_size_limit") > -1
+                ):
+                    m = re.search(r"=\s*(\S+)", line)
+                    assert m is not None, f"malformed config line {line}"
+                    size = m.group(1)
+                    assert size_to_bytes(size) >= size_to_bytes(
+                        "1MB"
+                    ), "LFC size cannot be set less than 1MB"
             # shared_buffers = 512kB to make postgres use LFC intensively
             # neon.max_file_cache_size and neon.file_cache size limit are
-            # set to 512kB because small LFC is better for testing (helps to find more problems)
+            # set to 1MB because small LFC is better for testing (helps to find more problems)
             config_lines = [
                 "shared_buffers = 512kB",
                 f"neon.file_cache_path = '{self.lfc_path()}'",
@@ -3541,12 +3553,13 @@ class Endpoint(PgProtocol, LogUtils):
                 "neon.file_cache_size_limit = 1MB",
             ] + config_lines
         else:
-            config_lines = [
-                line
-                for line in config_lines
-                if not line.startswith("neon.max_file_cache_size")
-                and not line.startswith("neon.file_cache_size_limit")
-            ]
+            for line in config_lines:
+                assert (
+                    line.find("neon.max_file_cache_size") == -1
+                ), "Setting LFC parameters is not allowed when LFC is disabled"
+                assert (
+                    line.find("neon.file_cache_size_limit") == -1
+                ), "Setting LFC parameters is not allowed when LFC is disabled"
 
         self.config(config_lines)
 

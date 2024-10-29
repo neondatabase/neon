@@ -14,7 +14,7 @@ from fixtures.neon_fixtures import (
     logical_replication_sync,
     wait_for_last_flush_lsn,
 )
-from fixtures.utils import wait_until
+from fixtures.utils import USE_LFC, wait_until
 
 
 def random_string(n: int):
@@ -569,7 +569,9 @@ def test_subscriber_synchronous_commit(neon_simple_env: NeonEnv, vanilla_pg):
         config_lines=[
             "neon.max_file_cache_size = 32MB",
             "neon.file_cache_size_limit = 32MB",
-        ],
+        ]
+        if USE_LFC
+        else [],
     )
     sub.start()
 
