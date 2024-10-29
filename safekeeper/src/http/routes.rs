@@ -262,14 +262,6 @@ async fn timeline_snapshot_handler(request: Request<Body>) -> Result<Response<Bo
     check_permission(&request, Some(ttid.tenant_id))?;
 
     let tli = GlobalTimelines::get(ttid).map_err(ApiError::from)?;
-    // Note: with evicted timelines it should work better then de-evict them and
-    // stream; probably start_snapshot would copy partial s3 file to dest path
-    // and stream control file, or return WalResidentTimeline if timeline is not
-    // evicted.
-    let tli = tli
-        .wal_residence_guard()
-        .await
-        .map_err(ApiError::InternalServerError)?;
 
     // To stream the body use wrap_stream which wants Stream of Result<Bytes>,
     // so create the chan and write to it in another task.

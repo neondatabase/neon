@@ -14,13 +14,13 @@ use pageserver::tenant::{TENANTS_SEGMENT_NAME, TIMELINES_SEGMENT_NAME};
 use pageserver::virtual_file::api::IoMode;
 use pageserver::{page_cache, virtual_file};
 use pageserver::{
-    repository::{Key, KEY_SIZE},
     tenant::{
         block_io::FileBlockReader, disk_btree::VisitDirection,
         storage_layer::delta_layer::DELTA_KEY_SIZE,
     },
     virtual_file::VirtualFile,
 };
+use pageserver_api::key::{Key, KEY_SIZE};
 use std::fs;
 use utils::bin_ser::BeSer;
 use utils::id::{TenantId, TimelineId};
