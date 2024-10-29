@@ -5137,8 +5137,8 @@ mod tests {
     use pageserver_api::key::{Key, AUX_KEY_PREFIX, NON_INHERITED_RANGE};
     use pageserver_api::keyspace::KeySpace;
     use pageserver_api::models::{CompactionAlgorithm, CompactionAlgorithmSettings};
-    use pageserver_compaction::helpers::overlaps_with;
     use pageserver_api::value::Value;
+    use pageserver_compaction::helpers::overlaps_with;
     use rand::{thread_rng, Rng};
     use storage_layer::PersistentLayerKey;
     use tests::storage_layer::ValuesReconstructState;
