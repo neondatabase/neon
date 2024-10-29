@@ -9233,6 +9233,7 @@ mod tests {
         all_layers
     }
 
+    #[cfg(feature = "testing")]
     #[tokio::test]
     async fn test_simple_partial_bottom_most_compaction() -> anyhow::Result<()> {
         let harness = TenantHarness::create("test_simple_partial_bottom_most_compaction").await?;
