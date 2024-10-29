@@ -1352,14 +1352,15 @@ impl Tenant {
         )
         .await?;
         let (offloaded_add, tenant_manifest) =
-            match remote_timeline_client::do_download_tenant_manifest(
+            match remote_timeline_client::download_tenant_manifest(
                 remote_storage,
                 &self.tenant_shard_id,
+                self.generation,
                 &cancel,
             )
             .await
             {
-                Ok((tenant_manifest, _generation)) => (
+                Ok((tenant_manifest, _generation, _manifest_mtime)) => (
                     format!("{} offloaded", tenant_manifest.offloaded_timelines.len()),
                     tenant_manifest,
                 ),
@@ -3130,8 +3131,6 @@ impl Tenant {
         }
 
         let tenant_manifest = self.build_tenant_manifest();
-        // TODO: generation support
-        let generation = remote_timeline_client::TENANT_MANIFEST_GENERATION;
         for child_shard in child_shards {
             tracing::info!(
                 "Uploading tenant manifest for child {}",
@@ -3140,7 +3139,7 @@ impl Tenant {
             upload_tenant_manifest(
                 &self.remote_storage,
                 child_shard,
-                generation,
+                self.generation,
                 &tenant_manifest,
                 &self.cancel,
             )
