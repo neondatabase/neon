@@ -1,1 +1,1 @@
-SELECT neon.approximate_working_set_size(false) AS approximate_working_set_size;
+SELECT COALESCE(neon.approximate_working_set_size(false), 0) AS approximate_working_set_size;

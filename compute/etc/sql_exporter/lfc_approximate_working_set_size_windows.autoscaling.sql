@@ -4,5 +4,5 @@
 
 SELECT
   x::text as duration_seconds,
-  neon.approximate_working_set_size_seconds(x) AS size
+  COALESCE(neon.approximate_working_set_size_seconds(x), 0) AS size
 FROM (SELECT generate_series * 60 AS x FROM generate_series(1, 60)) AS t (x);
