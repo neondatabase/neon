@@ -1080,6 +1080,7 @@ impl PageServerHandler {
         prev_lsn: Option<Lsn>,
         full_backup: bool,
         gzip: bool,
+        replica: bool,
         ctx: &RequestContext,
     ) -> Result<(), QueryError>
     where
@@ -1132,6 +1133,7 @@ impl PageServerHandler {
                 lsn,
                 prev_lsn,
                 full_backup,
+                replica,
                 ctx,
             )
             .await
@@ -1154,6 +1156,7 @@ impl PageServerHandler {
                     lsn,
                     prev_lsn,
                     full_backup,
+                    replica,
                     ctx,
                 )
                 .await
@@ -1170,6 +1173,7 @@ impl PageServerHandler {
                     lsn,
                     prev_lsn,
                     full_backup,
+                    replica,
                     ctx,
                 )
                 .await
@@ -1326,24 +1330,29 @@ where
                 .for_command(ComputeCommandKind::Basebackup)
                 .inc();
 
-            let (lsn, gzip) = match (params.get(2), params.get(3)) {
-                (None, _) => (None, false),
-                (Some(&"--gzip"), _) => (None, true),
-                (Some(lsn_str), gzip_str_opt) => {
-                    let lsn = Lsn::from_str(lsn_str)
-                        .with_context(|| format!("Failed to parse Lsn from {lsn_str}"))?;
-                    let gzip = match gzip_str_opt {
-                        Some(&"--gzip") => true,
-                        None => false,
-                        Some(third_param) => {
-                            return Err(QueryError::Other(anyhow::anyhow!(
-                                "Parameter in position 3 unknown {third_param}",
-                            )))
+            let mut lsn = None;
+            let mut replica = false;
+            let mut gzip = false;
+            for i in 2..params.len() {
+                if let Some(param) = params.get(i) {
+                    if param.starts_with("--") {
+                        match *param {
+                            "--gzip" => gzip = true,
+                            "--replica" => replica = true,
+                            _ => {
+                                return Err(QueryError::Other(anyhow::anyhow!(
+                                    "Unknown parameter {param}",
+                                )))
+                            }
                         }
-                    };
-                    (Some(lsn), gzip)
+                    } else {
+                        lsn = Some(
+                            Lsn::from_str(param)
+                                .with_context(|| format!("Failed to parse Lsn from {param}"))?,
+                        );
+                    }
                 }
-            };
+            }
 
             let metric_recording = metrics::BASEBACKUP_QUERY_TIME.start_recording(&ctx);
             let res = async {
@@ -1355,6 +1364,7 @@ where
                     None,
                     false,
                     gzip,
+                    replica,
                     &ctx,
                 )
                 .await?;
@@ -1414,6 +1424,7 @@ where
                 lsn,
                 prev_lsn,
                 true,
+                false,
                 false,
                 &ctx,
             )
