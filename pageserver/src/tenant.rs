@@ -305,7 +305,9 @@ pub struct Tenant {
     /// Serialize writes of the tenant manifest to remote storage.  If there are concurrent operations
     /// affecting the manifest, such as timeline deletion and timeline offload, they must wait for
     /// each other (this could be optimized to coalesce writes if necessary).
-    tenant_manifest_upload: tokio::sync::Mutex<()>,
+    ///
+    /// The contents of the Mutex are the last manifest we successfully uploaded
+    tenant_manifest_upload: tokio::sync::Mutex<Option<TenantManifest>>,
 
     // This mutex prevents creation of new timelines during GC.
     // Adding yet another mutex (in addition to `timelines`) is needed because holding
@@ -3127,7 +3129,7 @@ impl Tenant {
             }
         }
 
-        let tenant_manifest = self.tenant_manifest();
+        let tenant_manifest = self.build_tenant_manifest();
         // TODO: generation support
         let generation = remote_timeline_client::TENANT_MANIFEST_GENERATION;
         for child_shard in child_shards {
@@ -3322,7 +3324,8 @@ impl Tenant {
             .unwrap_or(self.conf.default_tenant_conf.lsn_lease_length)
     }
 
-    fn tenant_manifest(&self) -> TenantManifest {
+    /// Generate an up-to-date TenantManifest based on the state of this Tenant.
+    fn build_tenant_manifest(&self) -> TenantManifest {
         let timelines_offloaded = self.timelines_offloaded.lock().unwrap();
 
         let mut timeline_manifests = timelines_offloaded
@@ -4716,7 +4719,7 @@ impl Tenant {
         // Only one manifest write may be done at at time, and the contents of the manifest
         // must be loaded while holding this lock. This makes it safe to call this function
         // from anywhere without worrying about colliding updates.
-        let _guard = tokio::select! {
+        let mut guard = tokio::select! {
             g = self.tenant_manifest_upload.lock() => {
                 g
             },
@@ -4725,7 +4728,12 @@ impl Tenant {
             }
         };
 
-        let manifest = self.tenant_manifest();
+        let manifest = self.build_tenant_manifest();
+        if Some(&manifest) == (*guard).as_ref() {
+            // Optimisation: skip uploads that don't change anything.
+            return Ok(());
+        }
+
         upload_tenant_manifest(
             &self.remote_storage,
             &self.tenant_shard_id,
@@ -4740,7 +4748,13 @@ impl Tenant {
             } else {
                 TenantManifestError::RemoteStorage(e)
             }
-        })
+        })?;
+
+        // Store the successfully uploaded manifest, so that future callers can avoid
+        // re-uploading the same thing.
+        *guard = Some(manifest);
+
+        Ok(())
     }
 }
 
