@@ -3590,16 +3590,41 @@ def neon_authorize_jwk() -> jwk.JWK:
 
 
 @pytest.fixture(scope="function")
-def static_auth_broker(
-    port_distributor: PortDistributor,
-    neon_binpath: Path,
-    test_output_dir: Path,
+def cplane_endpoint_jwks(
     httpserver: HTTPServer,
     neon_authorize_jwk: jwk.JWK,
-    http2_echoserver: H2Server,
-) -> Iterable[NeonAuthBroker]:
-    """Neon Auth Broker that routes to a mocked local_proxy and a mocked cplane HTTP API."""
+    role_names: list[str],
+    audience: str | None,
+) -> jwk.JWK:
+    # return static fixture jwks.
+    jwk = neon_authorize_jwk.export_public(as_dict=True)
+    httpserver.expect_request("/authorize/jwks.json").respond_with_json({"keys": [jwk]})
 
+    id = str(uuid.uuid4())
+
+    # return jwks mock addr on GetEndpointJwks
+    httpserver.expect_request(re.compile("^/cplane/endpoints/.+/jwks$")).respond_with_json(
+        {
+            "jwks": [
+                {
+                    "id": id,
+                    "jwks_url": httpserver.url_for("/authorize/jwks.json"),
+                    "provider_name": "test",
+                    "jwt_audience": audience,
+                    "role_names": role_names,
+                }
+            ]
+        }
+    )
+
+    return neon_authorize_jwk
+
+
+@pytest.fixture(scope="function")
+def cplane_wake_compute_local_proxy(
+    httpserver: HTTPServer,
+    http2_echoserver: H2Server,
+) -> None:
     local_proxy_addr = f"{http2_echoserver.host}:{http2_echoserver.port}"
 
     # return local_proxy addr on ProxyWakeCompute.
@@ -3614,24 +3639,15 @@ def static_auth_broker(
         }
     )
 
-    # return jwks mock addr on GetEndpointJwks
-    httpserver.expect_request(re.compile("^/cplane/endpoints/.+/jwks$")).respond_with_json(
-        {
-            "jwks": [
-                {
-                    "id": "foo",
-                    "jwks_url": httpserver.url_for("/authorize/jwks.json"),
-                    "provider_name": "test",
-                    "jwt_audience": None,
-                    "role_names": ["anonymous", "authenticated"],
-                }
-            ]
-        }
-    )
 
-    # return static fixture jwks.
-    jwk = neon_authorize_jwk.export_public(as_dict=True)
-    httpserver.expect_request("/authorize/jwks.json").respond_with_json({"keys": [jwk]})
+@pytest.fixture(scope="function")
+def static_auth_broker(
+    port_distributor: PortDistributor,
+    neon_binpath: Path,
+    test_output_dir: Path,
+    httpserver: HTTPServer,
+) -> Iterable[NeonAuthBroker]:
+    """Neon Auth Broker that routes to a mocked local_proxy and a mocked cplane HTTP API."""
 
     mgmt_port = port_distributor.get_port()
     http_port = port_distributor.get_port()
