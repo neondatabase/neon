@@ -57,6 +57,18 @@ RUN set -e \
         zstd \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
+# sql_exporter
+
+# Keep the version the same as in compute/compute-node.Dockerfile and
+# test_runner/regress/test_compute_metrics.py.
+ENV SQL_EXPORTER_VERSION=0.13.1
+RUN curl -fsSL \
+    "https://github.com/burningalchemist/sql_exporter/releases/download/${SQL_EXPORTER_VERSION}/sql_exporter-${SQL_EXPORTER_VERSION}.linux-$(case "$(uname -m)" in x86_64) echo amd64;; aarch64) echo arm64;; esac).tar.gz" \
+    --output sql_exporter.tar.gz \
+    && mkdir /tmp/sql_exporter \
+    && tar xzvf sql_exporter.tar.gz -C /tmp/sql_exporter --strip-components=1 \
+    && mv /tmp/sql_exporter/sql_exporter /usr/local/bin/sql_exporter
+
 # protobuf-compiler (protoc)
 ENV PROTOC_VERSION=25.1
 RUN curl -fsSL "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-$(uname -m | sed 's/aarch64/aarch_64/g').zip" -o "protoc.zip" \

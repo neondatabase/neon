@@ -1131,14 +1131,14 @@ FROM rust-extensions-build AS pg-mooncake-build
 ARG PG_VERSION
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
-ENV PG_MOONCAKE_VERSION=0a7de4c0b5c7b1a5e2175e1c5f4625b97b7346f1
+ENV PG_MOONCAKE_VERSION=882175dbba07ba2e6e59b1088d61bf325b910b9e
 ENV PATH="/usr/local/pgsql/bin/:$PATH"
 
 RUN case "${PG_VERSION}" in \
         'v14') \
             echo "pg_mooncake is not supported on Postgres ${PG_VERSION}" && exit 0;; \
     esac && \
-    git clone --depth 1 --branch neon https://github.com/Mooncake-Labs/pg_mooncake.git pg_mooncake-src && \
+    git clone --depth 1 --branch neon https://github.com/kelvich/pg_mooncake.git pg_mooncake-src && \
     cd pg_mooncake-src && \
     git checkout "${PG_MOONCAKE_VERSION}" && \
     git submodule update --init --depth 1 --recursive && \
@@ -1298,7 +1298,10 @@ RUN mold -run cargo build --locked --profile release-line-debug-size-lto --bin l
 #########################################################################################
 
 FROM quay.io/prometheuscommunity/postgres-exporter:v0.12.1 AS postgres-exporter
-FROM burningalchemist/sql_exporter:0.13 AS sql-exporter
+
+# Keep the version the same as in build-tools.Dockerfile and
+# test_runner/regress/test_compute_metrics.py.
+FROM burningalchemist/sql_exporter:0.13.1 AS sql-exporter
 
 #########################################################################################
 #
