@@ -5138,6 +5138,7 @@ mod tests {
     use pageserver_api::keyspace::KeySpace;
     use pageserver_api::models::{CompactionAlgorithm, CompactionAlgorithmSettings};
     use pageserver_api::value::Value;
+    use pageserver_compaction::helpers::overlaps_with;
     use rand::{thread_rng, Rng};
     use storage_layer::PersistentLayerKey;
     use tests::storage_layer::ValuesReconstructState;
@@ -7660,23 +7661,7 @@ mod tests {
         }
 
         // Check if old layers are removed / new layers have the expected LSN
-        let mut all_layers = tline.inspect_historic_layers().await.unwrap();
-        all_layers.sort_by(|k1, k2| {
-            (
-                k1.is_delta,
-                k1.key_range.start,
-                k1.key_range.end,
-                k1.lsn_range.start,
-                k1.lsn_range.end,
-            )
-                .cmp(&(
-                    k2.is_delta,
-                    k2.key_range.start,
-                    k2.key_range.end,
-                    k2.lsn_range.start,
-                    k2.lsn_range.end,
-                ))
-        });
+        let all_layers = inspect_and_sort(&tline, None).await;
         assert_eq!(
             all_layers,
             vec![
@@ -9217,6 +9202,251 @@ mod tests {
             let expected_value = expected_key_values.remove(&key).expect("No unknown keys");
             assert_eq!(value, Bytes::from(expected_value));
         }
+
+        Ok(())
+    }
+
+    async fn inspect_and_sort(
+        tline: &Arc<Timeline>,
+        filter: Option<std::ops::Range<Key>>,
+    ) -> Vec<PersistentLayerKey> {
+        let mut all_layers = tline.inspect_historic_layers().await.unwrap();
+        if let Some(filter) = filter {
+            all_layers.retain(|layer| overlaps_with(&layer.key_range, &filter));
+        }
+        all_layers.sort_by(|k1, k2| {
+            (
+                k1.is_delta,
+                k1.key_range.start,
+                k1.key_range.end,
+                k1.lsn_range.start,
+                k1.lsn_range.end,
+            )
+                .cmp(&(
+                    k2.is_delta,
+                    k2.key_range.start,
+                    k2.key_range.end,
+                    k2.lsn_range.start,
+                    k2.lsn_range.end,
+                ))
+        });
+        all_layers
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn test_simple_partial_bottom_most_compaction() -> anyhow::Result<()> {
+        let harness = TenantHarness::create("test_simple_partial_bottom_most_compaction").await?;
+        let (tenant, ctx) = harness.load().await;
+
+        fn get_key(id: u32) -> Key {
+            // using aux key here b/c they are guaranteed to be inside `collect_keyspace`.
+            let mut key = Key::from_hex("620000000033333333444444445500000000").unwrap();
+            key.field6 = id;
+            key
+        }
+
+        // img layer at 0x10
+        let img_layer = (0..10)
+            .map(|id| (get_key(id), Bytes::from(format!("value {id}@0x10"))))
+            .collect_vec();
+
+        let delta1 = vec![
+            (
+                get_key(1),
+                Lsn(0x20),
+                Value::Image(Bytes::from("value 1@0x20")),
+            ),
+            (
+                get_key(2),
+                Lsn(0x30),
+                Value::Image(Bytes::from("value 2@0x30")),
+            ),
+            (
+                get_key(3),
+                Lsn(0x40),
+                Value::Image(Bytes::from("value 3@0x40")),
+            ),
+        ];
+        let delta2 = vec![
+            (
+                get_key(5),
+                Lsn(0x20),
+                Value::Image(Bytes::from("value 5@0x20")),
+            ),
+            (
+                get_key(6),
+                Lsn(0x20),
+                Value::Image(Bytes::from("value 6@0x20")),
+            ),
+        ];
+        let delta3 = vec![
+            (
+                get_key(8),
+                Lsn(0x48),
+                Value::Image(Bytes::from("value 8@0x48")),
+            ),
+            (
+                get_key(9),
+                Lsn(0x48),
+                Value::Image(Bytes::from("value 9@0x48")),
+            ),
+        ];
+
+        let tline = tenant
+            .create_test_timeline_with_layers(
+                TIMELINE_ID,
+                Lsn(0x10),
+                DEFAULT_PG_VERSION,
+                &ctx,
+                vec![
+                    DeltaLayerTestDesc::new_with_inferred_key_range(Lsn(0x20)..Lsn(0x48), delta1),
+                    DeltaLayerTestDesc::new_with_inferred_key_range(Lsn(0x20)..Lsn(0x48), delta2),
+                    DeltaLayerTestDesc::new_with_inferred_key_range(Lsn(0x48)..Lsn(0x50), delta3),
+                ], // delta layers
+                vec![(Lsn(0x10), img_layer)], // image layers
+                Lsn(0x50),
+            )
+            .await?;
+
+        {
+            // Update GC info
+            let mut guard = tline.gc_info.write().unwrap();
+            *guard = GcInfo {
+                retain_lsns: vec![(Lsn(0x20), tline.timeline_id, MaybeOffloaded::No)],
+                cutoffs: GcCutoffs {
+                    time: Lsn(0x30),
+                    space: Lsn(0x30),
+                },
+                leases: Default::default(),
+                within_ancestor_pitr: false,
+            };
+        }
+
+        let cancel = CancellationToken::new();
+
+        // Do a partial compaction on key range 0..4, we should generate a image layer; no other layers
+        // can be removed because they might be used for other key ranges.
+        tline
+            .partial_compact_with_gc(Some(get_key(0)..get_key(4)), &cancel, EnumSet::new(), &ctx)
+            .await
+            .unwrap();
+        let all_layers = inspect_and_sort(&tline, Some(get_key(0)..get_key(10))).await;
+        assert_eq!(
+            all_layers,
+            vec![
+                PersistentLayerKey {
+                    key_range: get_key(0)..get_key(4),
+                    lsn_range: Lsn(0x20)..Lsn(0x21),
+                    is_delta: false
+                },
+                PersistentLayerKey {
+                    key_range: get_key(0)..get_key(10),
+                    lsn_range: Lsn(0x10)..Lsn(0x11),
+                    is_delta: false
+                },
+                PersistentLayerKey {
+                    key_range: get_key(1)..get_key(4),
+                    lsn_range: Lsn(0x20)..Lsn(0x48),
+                    is_delta: true
+                },
+                PersistentLayerKey {
+                    key_range: get_key(5)..get_key(7),
+                    lsn_range: Lsn(0x20)..Lsn(0x48),
+                    is_delta: true
+                },
+                PersistentLayerKey {
+                    key_range: get_key(8)..get_key(10),
+                    lsn_range: Lsn(0x48)..Lsn(0x50),
+                    is_delta: true
+                }
+            ]
+        );
+
+        // Do a partial compaction on key range 4..10
+        tline
+            .partial_compact_with_gc(Some(get_key(4)..get_key(10)), &cancel, EnumSet::new(), &ctx)
+            .await
+            .unwrap();
+        let all_layers = inspect_and_sort(&tline, Some(get_key(0)..get_key(10))).await;
+        assert_eq!(
+            all_layers,
+            vec![
+                PersistentLayerKey {
+                    key_range: get_key(0)..get_key(4),
+                    lsn_range: Lsn(0x20)..Lsn(0x21),
+                    is_delta: false
+                },
+                PersistentLayerKey {
+                    // if (in the future) GC kicks in, this layer will be removed
+                    key_range: get_key(0)..get_key(10),
+                    lsn_range: Lsn(0x10)..Lsn(0x11),
+                    is_delta: false
+                },
+                PersistentLayerKey {
+                    key_range: get_key(4)..get_key(10),
+                    lsn_range: Lsn(0x20)..Lsn(0x21),
+                    is_delta: false
+                },
+                PersistentLayerKey {
+                    key_range: get_key(1)..get_key(4),
+                    lsn_range: Lsn(0x20)..Lsn(0x48),
+                    is_delta: true
+                },
+                PersistentLayerKey {
+                    key_range: get_key(5)..get_key(7),
+                    lsn_range: Lsn(0x20)..Lsn(0x48),
+                    is_delta: true
+                },
+                PersistentLayerKey {
+                    key_range: get_key(8)..get_key(10),
+                    lsn_range: Lsn(0x48)..Lsn(0x50),
+                    is_delta: true
+                }
+            ]
+        );
+
+        // Do a partial compaction on key range 0..10, all image layers below LSN 20 can be replaced with new ones.
+        tline
+            .partial_compact_with_gc(Some(get_key(0)..get_key(10)), &cancel, EnumSet::new(), &ctx)
+            .await
+            .unwrap();
+        let all_layers = inspect_and_sort(&tline, Some(get_key(0)..get_key(10))).await;
+        assert_eq!(
+            all_layers,
+            vec![
+                PersistentLayerKey {
+                    key_range: get_key(0)..get_key(4),
+                    lsn_range: Lsn(0x20)..Lsn(0x21),
+                    is_delta: false
+                },
+                PersistentLayerKey {
+                    key_range: get_key(0)..get_key(10),
+                    lsn_range: Lsn(0x20)..Lsn(0x21),
+                    is_delta: false
+                },
+                PersistentLayerKey {
+                    key_range: get_key(4)..get_key(10),
+                    lsn_range: Lsn(0x20)..Lsn(0x21),
+                    is_delta: false
+                },
+                PersistentLayerKey {
+                    key_range: get_key(1)..get_key(4),
+                    lsn_range: Lsn(0x20)..Lsn(0x48),
+                    is_delta: true
+                },
+                PersistentLayerKey {
+                    key_range: get_key(5)..get_key(7),
+                    lsn_range: Lsn(0x20)..Lsn(0x48),
+                    is_delta: true
+                },
+                PersistentLayerKey {
+                    key_range: get_key(8)..get_key(10),
+                    lsn_range: Lsn(0x48)..Lsn(0x50),
+                    is_delta: true
+                }
+            ]
+        );
 
         Ok(())
     }
