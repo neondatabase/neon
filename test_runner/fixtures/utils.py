@@ -658,7 +658,7 @@ def size_to_bytes(hr_size: str) -> int:
     number, m_prefix, b = match.groups()
 
     assert not (not b and m_prefix), f"'{hr_size}' is not well-formatted human-readable size"
-    if m_prefix:
+    if b:
         amp = M_PREFIXES[m_prefix]
     else:
         amp = 8192
