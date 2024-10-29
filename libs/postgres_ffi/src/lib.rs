@@ -217,6 +217,7 @@ macro_rules! enum_pgversion {
 
 pub mod pg_constants;
 pub mod relfile_utils;
+pub mod walrecord;
 
 // Export some widely used datatypes that are unlikely to change across Postgres versions
 pub use v14::bindings::RepOriginId;

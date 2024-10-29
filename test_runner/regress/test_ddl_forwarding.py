@@ -7,6 +7,7 @@ import psycopg2
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv, VanillaPostgres
+from psycopg2.errors import UndefinedObject
 from pytest_httpserver import HTTPServer
 from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response
@@ -335,3 +336,34 @@ def test_ddl_forwarding_invalid_db(neon_simple_env: NeonEnv):
         if not result:
             raise AssertionError("Could not count databases")
         assert result[0] == 0, "Database 'failure' still exists after restart"
+
+
+def test_ddl_forwarding_role_specs(neon_simple_env: NeonEnv):
+    """
+    Postgres has a concept of role specs:
+
+        ROLESPEC_CSTRING: ALTER ROLE xyz
+        ROLESPEC_CURRENT_USER: ALTER ROLE current_user
+        ROLESPEC_CURRENT_ROLE: ALTER ROLE current_role
+        ROLESPEC_SESSION_USER: ALTER ROLE session_user
+        ROLESPEC_PUBLIC: ALTER ROLE public
+
+    The extension is required to serialize these special role spec into
+    usernames for the purpose of DDL forwarding.
+    """
+    env = neon_simple_env
+
+    endpoint = env.endpoints.create_start("main")
+
+    with endpoint.cursor() as cur:
+        # ROLESPEC_CSTRING
+        cur.execute("ALTER ROLE cloud_admin WITH PASSWORD 'york'")
+        # ROLESPEC_CURRENT_USER
+        cur.execute("ALTER ROLE current_user WITH PASSWORD 'pork'")
+        # ROLESPEC_CURRENT_ROLE
+        cur.execute("ALTER ROLE current_role WITH PASSWORD 'cork'")
+        # ROLESPEC_SESSION_USER
+        cur.execute("ALTER ROLE session_user WITH PASSWORD 'bork'")
+        # ROLESPEC_PUBLIC
+        with pytest.raises(UndefinedObject):
+            cur.execute("ALTER ROLE public WITH PASSWORD 'dork'")

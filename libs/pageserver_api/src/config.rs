@@ -250,12 +250,6 @@ pub struct TenantConfigToml {
     // Expresed in multiples of checkpoint distance.
     pub image_layer_creation_check_threshold: u8,
 
-    /// Switch to a new aux file policy. Switching this flag requires the user has not written any aux file into
-    /// the storage before, and this flag cannot be switched back. Otherwise there will be data corruptions.
-    /// There is a `last_aux_file_policy` flag which gets persisted in `index_part.json` once the first aux
-    /// file is written.
-    pub switch_aux_file_policy: crate::models::AuxFilePolicy,
-
     /// The length for an explicit LSN lease request.
     /// Layers needed to reconstruct pages at LSN will not be GC-ed during this interval.
     #[serde(with = "humantime_serde")]
@@ -475,7 +469,6 @@ impl Default for TenantConfigToml {
             lazy_slru_download: false,
             timeline_get_throttle: crate::models::ThrottleConfig::disabled(),
             image_layer_creation_check_threshold: DEFAULT_IMAGE_LAYER_CREATION_CHECK_THRESHOLD,
-            switch_aux_file_policy: crate::models::AuxFilePolicy::default_tenant_config(),
             lsn_lease_length: LsnLease::DEFAULT_LENGTH,
             lsn_lease_length_for_ts: LsnLease::DEFAULT_LENGTH_FOR_TS,
         }

@@ -671,6 +671,10 @@ jobs:
         password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
       options: --init
 
+    # Increase timeout to 12h, default timeout is 6h
+    # we have regression in clickbench causing it to run 2-3x longer
+    timeout-minutes: 720
+
     steps:
     - uses: actions/checkout@v4
 
@@ -716,7 +720,7 @@ jobs:
         test_selection: performance/test_perf_olap.py
         run_in_parallel: false
         save_perf_report: ${{ env.SAVE_PERF_REPORT }}
-        extra_params: -m remote_cluster --timeout 21600 -k test_clickbench
+        extra_params: -m remote_cluster --timeout 43200 -k test_clickbench
         pg_version: ${{ env.DEFAULT_PG_VERSION }}
       env:
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"

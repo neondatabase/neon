@@ -1,9 +1,9 @@
 use criterion::measurement::WallTime;
 use pageserver::keyspace::{KeyPartitioning, KeySpace};
-use pageserver::repository::Key;
 use pageserver::tenant::layer_map::LayerMap;
 use pageserver::tenant::storage_layer::LayerName;
 use pageserver::tenant::storage_layer::PersistentLayerDesc;
+use pageserver_api::key::Key;
 use pageserver_api::shard::TenantShardId;
 use rand::prelude::{SeedableRng, SliceRandom, StdRng};
 use std::cmp::{max, min};

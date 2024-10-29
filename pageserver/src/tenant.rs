@@ -92,11 +92,11 @@ use crate::metrics::{
     remove_tenant_metrics, BROKEN_TENANTS_SET, CIRCUIT_BREAKERS_BROKEN, CIRCUIT_BREAKERS_UNBROKEN,
     TENANT_STATE_METRIC, TENANT_SYNTHETIC_SIZE_METRIC,
 };
-use crate::repository::GcResult;
 use crate::task_mgr;
 use crate::task_mgr::TaskKind;
 use crate::tenant::config::LocationMode;
 use crate::tenant::config::TenantConfOpt;
+use crate::tenant::gc_result::GcResult;
 pub use crate::tenant::remote_timeline_client::index::IndexPart;
 use crate::tenant::remote_timeline_client::remote_initdb_archive_path;
 use crate::tenant::remote_timeline_client::MaybeDeletedIndexPart;
@@ -160,6 +160,7 @@ pub(crate) mod timeline;
 pub mod size;
 
 mod gc_block;
+mod gc_result;
 pub(crate) mod throttle;
 
 pub(crate) use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
@@ -300,6 +301,13 @@ pub struct Tenant {
     /// Possibly offloaded and archived timelines
     /// **Lock order**: if acquiring all (or a subset), acquire them in order `timelines`, `timelines_offloaded`, `timelines_creating`
     timelines_offloaded: Mutex<HashMap<TimelineId, Arc<OffloadedTimeline>>>,
+
+    /// Serialize writes of the tenant manifest to remote storage.  If there are concurrent operations
+    /// affecting the manifest, such as timeline deletion and timeline offload, they must wait for
+    /// each other (this could be optimized to coalesce writes if necessary).
+    ///
+    /// The contents of the Mutex are the last manifest we successfully uploaded
+    tenant_manifest_upload: tokio::sync::Mutex<Option<TenantManifest>>,
 
     // This mutex prevents creation of new timelines during GC.
     // Adding yet another mutex (in addition to `timelines`) is needed because holding
@@ -467,10 +475,10 @@ impl WalRedoManager {
     /// This method is cancellation-safe.
     pub async fn request_redo(
         &self,
-        key: crate::repository::Key,
+        key: pageserver_api::key::Key,
         lsn: Lsn,
         base_img: Option<(Lsn, bytes::Bytes)>,
-        records: Vec<(Lsn, crate::walrecord::NeonWalRecord)>,
+        records: Vec<(Lsn, pageserver_api::record::NeonWalRecord)>,
         pg_version: u32,
     ) -> Result<bytes::Bytes, walredo::Error> {
         match self {
@@ -625,19 +633,10 @@ impl TimelineOrOffloaded {
             TimelineOrOffloaded::Offloaded(offloaded) => &offloaded.delete_progress,
         }
     }
-    fn remote_client_maybe_construct(&self, tenant: &Tenant) -> Arc<RemoteTimelineClient> {
+    fn maybe_remote_client(&self) -> Option<Arc<RemoteTimelineClient>> {
         match self {
-            TimelineOrOffloaded::Timeline(timeline) => timeline.remote_client.clone(),
-            TimelineOrOffloaded::Offloaded(offloaded) => match offloaded.remote_client.clone() {
-                Some(remote_client) => remote_client,
-                None => {
-                    let remote_client = tenant.build_timeline_client(
-                        offloaded.timeline_id,
-                        tenant.remote_storage.clone(),
-                    );
-                    Arc::new(remote_client)
-                }
-            },
+            TimelineOrOffloaded::Timeline(timeline) => Some(timeline.remote_client.clone()),
+            TimelineOrOffloaded::Offloaded(offloaded) => offloaded.remote_client.clone(),
         }
     }
 }
@@ -747,6 +746,24 @@ pub enum TimelineArchivalError {
 
     #[error(transparent)]
     Other(anyhow::Error),
+}
+
+#[derive(thiserror::Error, Debug)]
+pub(crate) enum TenantManifestError {
+    #[error("Remote storage error: {0}")]
+    RemoteStorage(anyhow::Error),
+
+    #[error("Cancelled")]
+    Cancelled,
+}
+
+impl From<TenantManifestError> for TimelineArchivalError {
+    fn from(e: TenantManifestError) -> Self {
+        match e {
+            TenantManifestError::RemoteStorage(e) => Self::Other(e),
+            TenantManifestError::Cancelled => Self::Cancelled,
+        }
+    }
 }
 
 impl Debug for TimelineArchivalError {
@@ -1534,18 +1551,7 @@ impl Tenant {
             offloaded_timelines_accessor.extend(offloaded_timelines_list.into_iter());
         }
         if !offloaded_timeline_ids.is_empty() {
-            let manifest = self.tenant_manifest();
-            // TODO: generation support
-            let generation = remote_timeline_client::TENANT_MANIFEST_GENERATION;
-            upload_tenant_manifest(
-                &self.remote_storage,
-                &self.tenant_shard_id,
-                generation,
-                &manifest,
-                &self.cancel,
-            )
-            .await
-            .map_err(TimelineArchivalError::Other)?;
+            self.store_tenant_manifest().await?;
         }
 
         // The local filesystem contents are a cache of what's in the remote IndexPart;
@@ -1830,6 +1836,18 @@ impl Tenant {
         ctx: RequestContext,
     ) -> Result<Arc<Timeline>, TimelineArchivalError> {
         info!("unoffloading timeline");
+
+        // We activate the timeline below manually, so this must be called on an active timeline.
+        // We expect callers of this function to ensure this.
+        match self.current_state() {
+            TenantState::Activating { .. }
+            | TenantState::Attaching
+            | TenantState::Broken { .. } => {
+                panic!("Timeline expected to be active")
+            }
+            TenantState::Stopping { .. } => return Err(TimelineArchivalError::Cancelled),
+            TenantState::Active => {}
+        }
         let cancel = self.cancel.clone();
 
         // Protect against concurrent attempts to use this TimelineId
@@ -1914,18 +1932,7 @@ impl Tenant {
         };
 
         // Upload new list of offloaded timelines to S3
-        let manifest = self.tenant_manifest();
-        // TODO: generation support
-        let generation = remote_timeline_client::TENANT_MANIFEST_GENERATION;
-        upload_tenant_manifest(
-            &self.remote_storage,
-            &self.tenant_shard_id,
-            generation,
-            &manifest,
-            &cancel,
-        )
-        .await
-        .map_err(TimelineArchivalError::Other)?;
+        self.store_tenant_manifest().await?;
 
         // Activate the timeline (if it makes sense)
         if !(timeline.is_broken() || timeline.is_stopping()) {
@@ -3122,7 +3129,7 @@ impl Tenant {
             }
         }
 
-        let tenant_manifest = self.tenant_manifest();
+        let tenant_manifest = self.build_tenant_manifest();
         // TODO: generation support
         let generation = remote_timeline_client::TENANT_MANIFEST_GENERATION;
         for child_shard in child_shards {
@@ -3317,7 +3324,8 @@ impl Tenant {
             .unwrap_or(self.conf.default_tenant_conf.lsn_lease_length)
     }
 
-    pub(crate) fn tenant_manifest(&self) -> TenantManifest {
+    /// Generate an up-to-date TenantManifest based on the state of this Tenant.
+    fn build_tenant_manifest(&self) -> TenantManifest {
         let timelines_offloaded = self.timelines_offloaded.lock().unwrap();
 
         let mut timeline_manifests = timelines_offloaded
@@ -3525,6 +3533,7 @@ impl Tenant {
             timelines: Mutex::new(HashMap::new()),
             timelines_creating: Mutex::new(HashSet::new()),
             timelines_offloaded: Mutex::new(HashMap::new()),
+            tenant_manifest_upload: Default::default(),
             gc_cs: tokio::sync::Mutex::new(()),
             walredo_mgr,
             remote_storage,
@@ -4704,6 +4713,49 @@ impl Tenant {
             .max()
             .unwrap_or(0)
     }
+
+    /// Serialize and write the latest TenantManifest to remote storage.
+    pub(crate) async fn store_tenant_manifest(&self) -> Result<(), TenantManifestError> {
+        // Only one manifest write may be done at at time, and the contents of the manifest
+        // must be loaded while holding this lock. This makes it safe to call this function
+        // from anywhere without worrying about colliding updates.
+        let mut guard = tokio::select! {
+            g = self.tenant_manifest_upload.lock() => {
+                g
+            },
+            _ = self.cancel.cancelled() => {
+                return Err(TenantManifestError::Cancelled);
+            }
+        };
+
+        let manifest = self.build_tenant_manifest();
+        if Some(&manifest) == (*guard).as_ref() {
+            // Optimisation: skip uploads that don't change anything.
+            return Ok(());
+        }
+
+        upload_tenant_manifest(
+            &self.remote_storage,
+            &self.tenant_shard_id,
+            self.generation,
+            &manifest,
+            &self.cancel,
+        )
+        .await
+        .map_err(|e| {
+            if self.cancel.is_cancelled() {
+                TenantManifestError::Cancelled
+            } else {
+                TenantManifestError::RemoteStorage(e)
+            }
+        })?;
+
+        // Store the successfully uploaded manifest, so that future callers can avoid
+        // re-uploading the same thing.
+        *guard = Some(manifest);
+
+        Ok(())
+    }
 }
 
 /// Create the cluster temporarily in 'initdbpath' directory inside the repository
@@ -4806,7 +4858,8 @@ pub(crate) mod harness {
     use crate::deletion_queue::mock::MockDeletionQueue;
     use crate::l0_flush::L0FlushConfig;
     use crate::walredo::apply_neon;
-    use crate::{repository::Key, walrecord::NeonWalRecord};
+    use pageserver_api::key::Key;
+    use pageserver_api::record::NeonWalRecord;
 
     use super::*;
     use hex_literal::hex;
@@ -4853,7 +4906,6 @@ pub(crate) mod harness {
                 image_layer_creation_check_threshold: Some(
                     tenant_conf.image_layer_creation_check_threshold,
                 ),
-                switch_aux_file_policy: Some(tenant_conf.switch_aux_file_policy),
                 lsn_lease_length: Some(tenant_conf.lsn_lease_length),
                 lsn_lease_length_for_ts: Some(tenant_conf.lsn_lease_length_for_ts),
             }
@@ -5076,24 +5128,29 @@ mod tests {
 
     use super::*;
     use crate::keyspace::KeySpaceAccum;
-    use crate::repository::{Key, Value};
     use crate::tenant::harness::*;
     use crate::tenant::timeline::CompactFlags;
-    use crate::walrecord::NeonWalRecord;
     use crate::DEFAULT_PG_VERSION;
     use bytes::{Bytes, BytesMut};
     use hex_literal::hex;
     use itertools::Itertools;
-    use pageserver_api::key::{AUX_KEY_PREFIX, NON_INHERITED_RANGE};
+    use pageserver_api::key::{Key, AUX_KEY_PREFIX, NON_INHERITED_RANGE};
     use pageserver_api::keyspace::KeySpace;
     use pageserver_api::models::{CompactionAlgorithm, CompactionAlgorithmSettings};
+    use pageserver_api::value::Value;
     use rand::{thread_rng, Rng};
     use storage_layer::PersistentLayerKey;
     use tests::storage_layer::ValuesReconstructState;
     use tests::timeline::{GetVectoredError, ShutdownMode};
-    use timeline::compaction::{KeyHistoryRetention, KeyLogAtLsn};
-    use timeline::{DeltaLayerTestDesc, GcInfo};
+    use timeline::DeltaLayerTestDesc;
     use utils::id::TenantId;
+
+    #[cfg(feature = "testing")]
+    use pageserver_api::record::NeonWalRecord;
+    #[cfg(feature = "testing")]
+    use timeline::compaction::{KeyHistoryRetention, KeyLogAtLsn};
+    #[cfg(feature = "testing")]
+    use timeline::GcInfo;
 
     static TEST_KEY: Lazy<Key> =
         Lazy::new(|| Key::from_slice(&hex!("010000000033333333444444445500000001")));
@@ -7659,6 +7716,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "testing")]
     #[tokio::test]
     async fn test_neon_test_record() -> anyhow::Result<()> {
         let harness = TenantHarness::create("test_neon_test_record").await?;
@@ -7850,6 +7908,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "testing")]
     #[tokio::test]
     async fn test_simple_bottom_most_compaction_deltas() -> anyhow::Result<()> {
         let harness = TenantHarness::create("test_simple_bottom_most_compaction_deltas").await?;
@@ -8046,6 +8105,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "testing")]
     #[tokio::test]
     async fn test_generate_key_retention() -> anyhow::Result<()> {
         let harness = TenantHarness::create("test_generate_key_retention").await?;
@@ -8393,6 +8453,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "testing")]
     #[tokio::test]
     async fn test_simple_bottom_most_compaction_with_retain_lsns() -> anyhow::Result<()> {
         let harness =
@@ -8633,6 +8694,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "testing")]
     #[tokio::test]
     async fn test_simple_bottom_most_compaction_with_retain_lsns_single_key() -> anyhow::Result<()>
     {
@@ -8841,6 +8903,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "testing")]
     #[tokio::test]
     async fn test_simple_bottom_most_compaction_on_branch() -> anyhow::Result<()> {
         let harness = TenantHarness::create("test_simple_bottom_most_compaction_on_branch").await?;
@@ -9042,6 +9105,7 @@ mod tests {
     //
     // When querying the key range [A, B) we need to read at different LSN ranges
     // for [A, C) and [C, B). This test checks that the described edge case is handled correctly.
+    #[cfg(feature = "testing")]
     #[tokio::test]
     async fn test_vectored_read_with_nested_image_layer() -> anyhow::Result<()> {
         let harness = TenantHarness::create("test_vectored_read_with_nested_image_layer").await?;
