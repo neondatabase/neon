@@ -3,7 +3,7 @@ use std::sync::Arc;
 use super::delete::{delete_local_timeline_directory, DeleteTimelineFlow, DeletionGuard};
 use super::Timeline;
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
-use crate::tenant::{remote_timeline_client, OffloadedTimeline, Tenant, TimelineOrOffloaded};
+use crate::tenant::{OffloadedTimeline, Tenant, TimelineOrOffloaded};
 
 pub(crate) async fn offload_timeline(
     tenant: &Tenant,
@@ -63,17 +63,10 @@ pub(crate) async fn offload_timeline(
     // at the next restart attach it again.
     // For that to happen, we'd need to make the manifest reflect our *intended* state,
     // not our actual state of offloaded timelines.
-    let manifest = tenant.tenant_manifest();
-    // TODO: generation support
-    let generation = remote_timeline_client::TENANT_MANIFEST_GENERATION;
-    remote_timeline_client::upload_tenant_manifest(
-        &tenant.remote_storage,
-        &tenant.tenant_shard_id,
-        generation,
-        &manifest,
-        &tenant.cancel,
-    )
-    .await?;
+    tenant
+        .store_tenant_manifest()
+        .await
+        .map_err(|e| anyhow::anyhow!(e))?;
 
     Ok(())
 }

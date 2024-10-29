@@ -6,6 +6,7 @@ mod backend;
 pub mod cancel_set;
 mod conn_pool;
 mod conn_pool_lib;
+mod error;
 mod http_conn_pool;
 mod http_util;
 mod json;

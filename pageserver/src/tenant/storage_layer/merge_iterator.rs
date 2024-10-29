@@ -7,7 +7,8 @@ use anyhow::bail;
 use pageserver_api::key::Key;
 use utils::lsn::Lsn;
 
-use crate::{context::RequestContext, repository::Value};
+use crate::context::RequestContext;
+use pageserver_api::value::Value;
 
 use super::{
     delta_layer::{DeltaLayerInner, DeltaLayerIterator},
@@ -291,11 +292,15 @@ mod tests {
     use crate::{
         tenant::{
             harness::{TenantHarness, TIMELINE_ID},
-            storage_layer::delta_layer::test::{produce_delta_layer, sort_delta, sort_delta_value},
+            storage_layer::delta_layer::test::{produce_delta_layer, sort_delta},
         },
-        walrecord::NeonWalRecord,
         DEFAULT_PG_VERSION,
     };
+
+    #[cfg(feature = "testing")]
+    use crate::tenant::storage_layer::delta_layer::test::sort_delta_value;
+    #[cfg(feature = "testing")]
+    use pageserver_api::record::NeonWalRecord;
 
     async fn assert_merge_iter_equal(
         merge_iter: &mut MergeIterator<'_>,
@@ -319,8 +324,8 @@ mod tests {
 
     #[tokio::test]
     async fn merge_in_between() {
-        use crate::repository::Value;
         use bytes::Bytes;
+        use pageserver_api::value::Value;
 
         let harness = TenantHarness::create("merge_iterator_merge_in_between")
             .await
@@ -384,8 +389,8 @@ mod tests {
 
     #[tokio::test]
     async fn delta_merge() {
-        use crate::repository::Value;
         use bytes::Bytes;
+        use pageserver_api::value::Value;
 
         let harness = TenantHarness::create("merge_iterator_delta_merge")
             .await
@@ -458,10 +463,11 @@ mod tests {
         // TODO: test layers are loaded only when needed, reducing num of active iterators in k-merge
     }
 
+    #[cfg(feature = "testing")]
     #[tokio::test]
     async fn delta_image_mixed_merge() {
-        use crate::repository::Value;
         use bytes::Bytes;
+        use pageserver_api::value::Value;
 
         let harness = TenantHarness::create("merge_iterator_delta_image_mixed_merge")
             .await
@@ -586,5 +592,6 @@ mod tests {
         is_send(merge_iter);
     }
 
+    #[cfg(feature = "testing")]
     fn is_send(_: impl Send) {}
 }

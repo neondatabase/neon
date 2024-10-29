@@ -249,7 +249,7 @@ pub(crate) use download::{
     list_remote_tenant_shards, list_remote_timelines,
 };
 pub(crate) use index::LayerFileMetadata;
-pub(crate) use upload::{upload_initdb_dir, upload_tenant_manifest};
+pub(crate) use upload::upload_initdb_dir;
 
 // Occasional network issues and such can cause remote operations to fail, and
 // that's expected. If a download fails, we log it at info-level, and retry.

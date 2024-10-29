@@ -3,7 +3,7 @@ use pageserver_api::shard::TenantShardId;
 use std::ops::Range;
 use utils::{id::TimelineId, lsn::Lsn};
 
-use crate::repository::Key;
+use pageserver_api::key::Key;
 
 use super::{DeltaLayerName, ImageLayerName, LayerName};
 

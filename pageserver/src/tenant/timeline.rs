@@ -125,11 +125,12 @@ use utils::{
     simple_rcu::{Rcu, RcuReadGuard},
 };
 
-use crate::repository::GcResult;
-use crate::repository::{Key, Value};
 use crate::task_mgr;
 use crate::task_mgr::TaskKind;
+use crate::tenant::gc_result::GcResult;
 use crate::ZERO_PAGE;
+use pageserver_api::key::Key;
+use pageserver_api::value::Value;
 
 use self::delete::DeleteTimelineFlow;
 pub(super) use self::eviction_task::EvictionTaskTenantState;
@@ -5822,17 +5823,15 @@ fn is_send() {
 #[cfg(test)]
 mod tests {
     use pageserver_api::key::Key;
+    use pageserver_api::value::Value;
     use utils::{id::TimelineId, lsn::Lsn};
 
-    use crate::{
-        repository::Value,
-        tenant::{
-            harness::{test_img, TenantHarness},
-            layer_map::LayerMap,
-            storage_layer::{Layer, LayerName},
-            timeline::{DeltaLayerTestDesc, EvictionError},
-            Timeline,
-        },
+    use crate::tenant::{
+        harness::{test_img, TenantHarness},
+        layer_map::LayerMap,
+        storage_layer::{Layer, LayerName},
+        timeline::{DeltaLayerTestDesc, EvictionError},
+        Timeline,
     };
 
     #[tokio::test]

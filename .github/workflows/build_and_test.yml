@@ -839,6 +839,7 @@ jobs:
       - name: Build vm image
         run: |
           ./vm-builder \
+            -size=2G \
             -spec=compute/vm-image-spec-${{ matrix.version.debian }}.yaml \
             -src=neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }} \
             -dst=neondatabase/vm-compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}
@@ -1116,7 +1117,10 @@ jobs:
 
             gh workflow --repo neondatabase/infra run deploy-proxy-prod.yml --ref main \
               -f deployPgSniRouter=true \
-              -f deployProxy=true \
+              -f deployProxyLink=true \
+              -f deployPrivatelinkProxy=true \
+              -f deployProxyScram=true \
+              -f deployProxyAuthBroker=true \
               -f branch=main \
               -f dockerTag=${{needs.tag.outputs.build-tag}}
           else

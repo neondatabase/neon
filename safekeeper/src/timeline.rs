@@ -797,14 +797,17 @@ impl Timeline {
         state.sk.term_bump(to).await
     }
 
-    /// Get the timeline guard for reading/writing WAL files.
-    /// If WAL files are not present on disk (evicted), they will be automatically
-    /// downloaded from remote storage. This is done in the manager task, which is
-    /// responsible for issuing all guards.
-    ///
-    /// NB: don't use this function from timeline_manager, it will deadlock.
-    /// NB: don't use this function while holding shared_state lock.
-    pub async fn wal_residence_guard(self: &Arc<Self>) -> Result<WalResidentTimeline> {
+    /// Guts of [`Self::wal_residence_guard`] and [`Self::try_wal_residence_guard`]
+    async fn do_wal_residence_guard(
+        self: &Arc<Self>,
+        block: bool,
+    ) -> Result<Option<WalResidentTimeline>> {
+        let op_label = if block {
+            "wal_residence_guard"
+        } else {
+            "try_wal_residence_guard"
+        };
+
         if self.is_cancelled() {
             bail!(TimelineError::Cancelled(self.ttid));
         }
@@ -816,10 +819,13 @@ impl Timeline {
         // Wait 30 seconds for the guard to be acquired. It can time out if someone is
         // holding the lock (e.g. during `SafeKeeper::process_msg()`) or manager task
         // is stuck.
-        let res = tokio::time::timeout_at(
-            started_at + Duration::from_secs(30),
-            self.manager_ctl.wal_residence_guard(),
-        )
+        let res = tokio::time::timeout_at(started_at + Duration::from_secs(30), async {
+            if block {
+                self.manager_ctl.wal_residence_guard().await.map(Some)
+            } else {
+                self.manager_ctl.try_wal_residence_guard().await
+            }
+        })
         .await;
 
         let guard = match res {
@@ -827,14 +833,14 @@ impl Timeline {
                 let finished_at = Instant::now();
                 let elapsed = finished_at - started_at;
                 MISC_OPERATION_SECONDS
-                    .with_label_values(&["wal_residence_guard"])
+                    .with_label_values(&[op_label])
                     .observe(elapsed.as_secs_f64());
 
                 guard
             }
             Ok(Err(e)) => {
                 warn!(
-                    "error while acquiring WalResidentTimeline guard, statuses {:?} => {:?}",
+                    "error acquiring in {op_label}, statuses {:?} => {:?}",
                     status_before,
                     self.mgr_status.get()
                 );
@@ -842,7 +848,7 @@ impl Timeline {
             }
             Err(_) => {
                 warn!(
-                    "timeout while acquiring WalResidentTimeline guard, statuses {:?} => {:?}",
+                    "timeout acquiring in {op_label} guard, statuses {:?} => {:?}",
                     status_before,
                     self.mgr_status.get()
                 );
@@ -850,7 +856,28 @@ impl Timeline {
             }
         };
 
-        Ok(WalResidentTimeline::new(self.clone(), guard))
+        Ok(guard.map(|g| WalResidentTimeline::new(self.clone(), g)))
+    }
+
+    /// Get the timeline guard for reading/writing WAL files.
+    /// If WAL files are not present on disk (evicted), they will be automatically
+    /// downloaded from remote storage. This is done in the manager task, which is
+    /// responsible for issuing all guards.
+    ///
+    /// NB: don't use this function from timeline_manager, it will deadlock.
+    /// NB: don't use this function while holding shared_state lock.
+    pub async fn wal_residence_guard(self: &Arc<Self>) -> Result<WalResidentTimeline> {
+        self.do_wal_residence_guard(true)
+            .await
+            .map(|m| m.expect("Always get Some in block=true mode"))
+    }
+
+    /// Get the timeline guard for reading/writing WAL files if the timeline is resident,
+    /// else return None
+    pub(crate) async fn try_wal_residence_guard(
+        self: &Arc<Self>,
+    ) -> Result<Option<WalResidentTimeline>> {
+        self.do_wal_residence_guard(false).await
     }
 
     pub async fn backup_partial_reset(self: &Arc<Self>) -> Result<Vec<String>> {

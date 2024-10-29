@@ -100,6 +100,8 @@ const REFRESH_INTERVAL: Duration = Duration::from_millis(300);
 pub enum ManagerCtlMessage {
     /// Request to get a guard for WalResidentTimeline, with WAL files available locally.
     GuardRequest(tokio::sync::oneshot::Sender<anyhow::Result<ResidenceGuard>>),
+    /// Get a guard for WalResidentTimeline if the timeline is not currently offloaded, else None
+    TryGuardRequest(tokio::sync::oneshot::Sender<Option<ResidenceGuard>>),
     /// Request to drop the guard.
     GuardDrop(GuardId),
     /// Request to reset uploaded partial backup state.
@@ -110,6 +112,7 @@ impl std::fmt::Debug for ManagerCtlMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ManagerCtlMessage::GuardRequest(_) => write!(f, "GuardRequest"),
+            ManagerCtlMessage::TryGuardRequest(_) => write!(f, "TryGuardRequest"),
             ManagerCtlMessage::GuardDrop(id) => write!(f, "GuardDrop({:?})", id),
             ManagerCtlMessage::BackupPartialReset(_) => write!(f, "BackupPartialReset"),
         }
@@ -150,6 +153,19 @@ impl ManagerCtl {
         rx.await
             .map_err(|e| anyhow::anyhow!("response read fail: {:?}", e))
             .and_then(std::convert::identity)
+    }
+
+    /// Issue a new guard if the timeline is currently not offloaded, else return None
+    /// Sends a message to the manager and waits for the response.
+    /// Can be blocked indefinitely if the manager is stuck.
+    pub async fn try_wal_residence_guard(&self) -> anyhow::Result<Option<ResidenceGuard>> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.manager_tx
+            .send(ManagerCtlMessage::TryGuardRequest(tx))?;
+
+        // wait for the manager to respond with the guard
+        rx.await
+            .map_err(|e| anyhow::anyhow!("response read fail: {:?}", e))
     }
 
     /// Request timeline manager to reset uploaded partial segment state and
@@ -671,6 +687,17 @@ impl Manager {
                 };
 
                 if tx.send(guard).is_err() {
+                    warn!("failed to reply with a guard, receiver dropped");
+                }
+            }
+            Some(ManagerCtlMessage::TryGuardRequest(tx)) => {
+                let result = if self.is_offloaded {
+                    None
+                } else {
+                    Some(self.access_service.create_guard())
+                };
+
+                if tx.send(result).is_err() {
                     warn!("failed to reply with a guard, receiver dropped");
                 }
             }

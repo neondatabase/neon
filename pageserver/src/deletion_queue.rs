@@ -696,7 +696,7 @@ impl DeletionQueue {
 mod test {
     use camino::Utf8Path;
     use hex_literal::hex;
-    use pageserver_api::{shard::ShardIndex, upcall_api::ReAttachResponseTenant};
+    use pageserver_api::{key::Key, shard::ShardIndex, upcall_api::ReAttachResponseTenant};
     use std::{io::ErrorKind, time::Duration};
     use tracing::info;
 
@@ -705,7 +705,6 @@ mod test {
 
     use crate::{
         controller_upcall_client::RetryForeverError,
-        repository::Key,
         tenant::{harness::TenantHarness, storage_layer::DeltaLayerName},
     };
 

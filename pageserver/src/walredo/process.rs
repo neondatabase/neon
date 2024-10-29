@@ -8,10 +8,10 @@ use crate::{
     metrics::{WalRedoKillCause, WAL_REDO_PROCESS_COUNTERS, WAL_REDO_RECORD_COUNTER},
     page_cache::PAGE_SZ,
     span::debug_assert_current_span_has_tenant_id,
-    walrecord::NeonWalRecord,
 };
 use anyhow::Context;
 use bytes::Bytes;
+use pageserver_api::record::NeonWalRecord;
 use pageserver_api::{reltag::RelTag, shard::TenantShardId};
 use postgres_ffi::BLCKSZ;
 #[cfg(feature = "testing")]
