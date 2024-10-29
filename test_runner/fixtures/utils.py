@@ -652,7 +652,7 @@ def size_to_bytes(hr_size: str) -> int:
     Gets human-readable size from postgresql.conf (e.g. 512kB, 10MB)
     returns size in bytes
     """
-    M_PREFIXES = {"k": 1024, "M": 1024**2, "G": 1024**3, "T": 1024**4, "P": 1024**5}
+    M_PREFIXES = {"": 1, "k": 1024, "M": 1024**2, "G": 1024**3, "T": 1024**4, "P": 1024**5}
     match = re.search(r"^\'?(\d+)\s*([kMGTP]?)(B?)\'?$", hr_size)
     assert match is not None, f"'{hr_size}' is not well-formatted human-readable size"
     number, m_prefix, b = match.groups()
