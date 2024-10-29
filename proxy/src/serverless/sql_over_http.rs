@@ -411,7 +411,7 @@ impl HttpCodeError for SqlOverHttpError {
         match self {
             SqlOverHttpError::ReadPayload(_) => StatusCode::BAD_REQUEST,
             SqlOverHttpError::ConnectCompute(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            SqlOverHttpError::ConnInfo(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            SqlOverHttpError::ConnInfo(_) => StatusCode::BAD_REQUEST,
             SqlOverHttpError::RequestTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             SqlOverHttpError::ResponseTooLarge(_) => StatusCode::INSUFFICIENT_STORAGE,
             SqlOverHttpError::InvalidIsolationLevel => StatusCode::BAD_REQUEST,
