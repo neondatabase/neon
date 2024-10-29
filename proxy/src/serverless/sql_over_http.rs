@@ -408,12 +408,15 @@ impl HttpCodeError for SqlOverHttpError {
     fn get_http_status_code(&self) -> StatusCode {
         match self {
             SqlOverHttpError::ReadPayload(_) => StatusCode::BAD_REQUEST,
-            SqlOverHttpError::ConnectCompute(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            SqlOverHttpError::ConnectCompute(h) => match h.get_error_kind() {
+                ErrorKind::User => StatusCode::BAD_REQUEST,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            },
             SqlOverHttpError::ConnInfo(_) => StatusCode::BAD_REQUEST,
             SqlOverHttpError::RequestTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             SqlOverHttpError::ResponseTooLarge(_) => StatusCode::INSUFFICIENT_STORAGE,
             SqlOverHttpError::InvalidIsolationLevel => StatusCode::BAD_REQUEST,
-            SqlOverHttpError::Postgres(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            SqlOverHttpError::Postgres(_) => StatusCode::BAD_REQUEST,
             SqlOverHttpError::JsonConversion(_) => StatusCode::INTERNAL_SERVER_ERROR,
             SqlOverHttpError::Cancelled(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
