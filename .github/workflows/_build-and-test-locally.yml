@@ -19,7 +19,7 @@ on:
         description: 'debug or release'
         required: true
         type: string
-      vers-lfc:
+      test-cfg:
         description: 'a json object of postgres versions and lfc state to run regression tests on'
         required: true
         type: string
@@ -276,7 +276,7 @@ jobs:
       options: --init --shm-size=512mb --ulimit memlock=67108864:67108864
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(inputs.vers-lfc) }}
+      matrix: ${{ fromJSON(inputs.test-cfg) }}
     steps:
       - uses: actions/checkout@v4
         with:
