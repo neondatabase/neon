@@ -10,15 +10,18 @@ def test_physical_and_logical_replication(neon_simple_env: NeonEnv, vanilla_pg):
     env = neon_simple_env
 
 <<<<<<< HEAD
+<<<<<<< HEAD
     n_records = 100000
 =======
     n_records = 1000000
 >>>>>>> 7fbb1d150 (Add test for combination of physical and logical replication)
+=======
+    n_records = 200000
+>>>>>>> 8fefd8cd6 (Update test_physical_and_logical_replicaiton.py  to reproduce the problem)
 
     primary = env.endpoints.create_start(
         branch_name="main",
         endpoint_id="primary",
-        config_lines=["min_wal_size=32MB", "max_wal_size=64MB"],
     )
     p_con = primary.connect()
     p_cur = p_con.cursor()
@@ -47,7 +50,17 @@ def test_physical_and_logical_replication(neon_simple_env: NeonEnv, vanilla_pg):
     s_cur.execute("select count(*) from t")
     assert s_cur.fetchall()[0][0] == n_records
 
+    # start replica
+    secondary = env.endpoints.new_replica_start(
+        origin=primary,
+        endpoint_id="secondary",
+    )
+
+    s_con = secondary.connect()
+    s_cur = s_con.cursor()
+
     logical_replication_sync(vanilla_pg, primary)
+
     assert vanilla_pg.safe_psql("select count(*) from t")[0][0] == n_records
 
     # Check that LR slot is not copied to replica
