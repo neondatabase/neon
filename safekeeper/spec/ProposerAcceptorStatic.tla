@@ -1,4 +1,4 @@
----- MODULE ProposerAcceptorConsensus ----
+---- MODULE ProposerAcceptorStatic ----
 
 \* Differences from current implementation:
 \* - unified not-globally-unique epoch & term (node_id)
@@ -20,12 +20,6 @@ CONSTANT
   max_term \* model constraint: max allowed term
 
 CONSTANT NULL
-
-ASSUME max_entries \in Nat /\ max_term \in Nat
-
-\* For specifying symmetry set in manual cfg file, see
-\* https://github.com/tlaplus/tlaplus/issues/404
-perms == Permutations(proposers) \union Permutations(acceptors)
 
 \********************************************************************************
 \* Helpers
@@ -73,6 +67,9 @@ Quorums == {subset \in SUBSET acceptors: Quorum(subset)}
 \* flush_lsn of acceptor a.
 FlushLsn(a) == Len(acc_state[a].wal)
 
+\* Typedefs. Note that TLA+ Nat includes zero.
+Terms == Nat
+Lsns == Nat
 
 \********************************************************************************
 \* Type assertion
@@ -88,14 +85,12 @@ TypeOk ==
       \* in campaign proposer sends RequestVote and waits for acks;
       \* in leader he is elected
       /\ prop_state[p].state \in {"campaign", "leader"}
-      \* 0..max_term should be actually Nat in the unbounded model, but TLC won't
-      \* swallow it
-      /\ prop_state[p].term \in 0..max_term
+      /\ prop_state[p].term \in Terms
       \* votes received
       /\ \A voter \in DOMAIN prop_state[p].votes:
          /\ voter \in acceptors
-         /\ prop_state[p].votes[voter] \in [epoch: 0..max_term, flush_lsn: 0..max_entries]
-      /\ prop_state[p].donor_epoch \in 0..max_term
+         /\ prop_state[p].votes[voter].epoch \in Terms /\ prop_state[p].votes[voter].flush_lsn \in Lsns
+      /\ prop_state[p].donor_epoch \in Terms
       \* wal is sequence of just <lsn, epoch of author> records
       /\ \A i \in DOMAIN prop_state[p].wal:
            prop_state[p].wal[i] \in [lsn: 1..max_entries, epoch: 1..max_term]
@@ -359,5 +354,28 @@ CommittedNotOverwritten ==
          (next_e /= NULL) =>
           ((commit_lsns[a] >= next_e.lsn) => (acc_state[a].wal[next_e.lsn] = next_e))
 
+\********************************************************************************
+\* Invariants which don't need to hold, but useful for playing/debugging.
+\********************************************************************************
+
+\* Limits max commit_lsn. That way we can check that we'are actually committing something.
+MaxCommitLsn == \A a \in acceptors: commit_lsns[a] < 2
+
+
+
+Alias ==
+  [prop_state |-> prop_state,
+   acc_state |-> acc_state,
+   commit_lsns |-> commit_lsns]
+\* Alias == [
+\*     x |-> 2
+\* ]
+    \* [
+    \*     currentTerm |-> currentTerm,
+    \*     state |-> state,
+    \*     log |-> log,
+    \*     config |-> config,
+    \*     committed |-> committed
+    \* ]
 
 ====
