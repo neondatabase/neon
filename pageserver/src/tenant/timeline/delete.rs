@@ -14,10 +14,9 @@ use crate::{
     task_mgr::{self, TaskKind},
     tenant::{
         metadata::TimelineMetadata,
-        remote_timeline_client::{
-            self, MaybeDeletedIndexPart, PersistIndexPartWithDeletedFlagError, RemoteTimelineClient,
-        },
-        CreateTimelineCause, DeleteTimelineError, Tenant, TimelineOrOffloaded,
+        remote_timeline_client::{PersistIndexPartWithDeletedFlagError, RemoteTimelineClient},
+        CreateTimelineCause, DeleteTimelineError, MaybeDeletedIndexPart, Tenant,
+        TimelineOrOffloaded,
     },
 };
 
@@ -172,32 +171,6 @@ async fn remove_maybe_offloaded_timeline_from_tenant(
 
     drop(timelines_offloaded);
     drop(timelines);
-
-    Ok(())
-}
-
-/// It is important that this gets called when DeletionGuard is being held.
-/// For more context see comments in [`DeleteTimelineFlow::prepare`]
-async fn upload_new_tenant_manifest(
-    tenant: &Tenant,
-    _: &DeletionGuard, // using it as a witness
-) -> anyhow::Result<()> {
-    // This is susceptible to race conditions, i.e. we won't continue deletions if there is a crash
-    // between the deletion of the index-part.json and reaching of this code.
-    // So indeed, the tenant manifest might refer to an offloaded timeline which has already been deleted.
-    // However, we handle this case in tenant loading code so the next time we attach, the issue is
-    // resolved.
-    let manifest = tenant.tenant_manifest();
-    // TODO: generation support
-    let generation = remote_timeline_client::TENANT_MANIFEST_GENERATION;
-    remote_timeline_client::upload_tenant_manifest(
-        &tenant.remote_storage,
-        &tenant.tenant_shard_id,
-        generation,
-        &manifest,
-        &tenant.cancel,
-    )
-    .await?;
 
     Ok(())
 }
@@ -480,7 +453,15 @@ impl DeleteTimelineFlow {
 
         remove_maybe_offloaded_timeline_from_tenant(tenant, timeline, &guard).await?;
 
-        upload_new_tenant_manifest(tenant, &guard).await?;
+        // This is susceptible to race conditions, i.e. we won't continue deletions if there is a crash
+        // between the deletion of the index-part.json and reaching of this code.
+        // So indeed, the tenant manifest might refer to an offloaded timeline which has already been deleted.
+        // However, we handle this case in tenant loading code so the next time we attach, the issue is
+        // resolved.
+        tenant
+            .store_tenant_manifest()
+            .await
+            .map_err(|e| DeleteTimelineError::Other(anyhow::anyhow!(e)))?;
 
         *guard = Self::Finished;
 
