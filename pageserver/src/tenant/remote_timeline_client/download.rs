@@ -418,7 +418,7 @@ async fn do_download_index_part(
 /// * `what`: for logging, what object are we downloading
 /// * `prefix`: when listing objects, use this prefix (i.e. the part of the object path before the generation)
 /// * `do_download`: a GET of the object in a particular generation, which should **retry indefinitely** unless
-///                  [cancel] has fired.  This function does not do its own retries of GET operations, and relies
+///                  `cancel`` has fired.  This function does not do its own retries of GET operations, and relies
 ///                  on the function passed in to do so.
 /// * `parse_path`: parse a fully qualified remote storage path to get the generation of the object.
 #[allow(clippy::too_many_arguments)]
