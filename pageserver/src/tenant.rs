@@ -302,6 +302,9 @@ pub struct Tenant {
     /// **Lock order**: if acquiring all (or a subset), acquire them in order `timelines`, `timelines_offloaded`, `timelines_creating`
     timelines_offloaded: Mutex<HashMap<TimelineId, Arc<OffloadedTimeline>>>,
 
+    /// Serialize writes of the tenant manifest to remote storage
+    tenant_manifest_upload: tokio::sync::Mutex<()>,
+
     // This mutex prevents creation of new timelines during GC.
     // Adding yet another mutex (in addition to `timelines`) is needed because holding
     // `timelines` mutex during all GC iteration
@@ -739,6 +742,15 @@ pub enum TimelineArchivalError {
 
     #[error(transparent)]
     Other(anyhow::Error),
+}
+
+#[derive(thiserror::Error, Debug)]
+pub(crate) enum TenantManifestError {
+    #[error("Remote storage error: {0}")]
+    RemoteStorage(anyhow::Error),
+
+    #[error("Cancelled")]
+    Cancelled,
 }
 
 impl Debug for TimelineArchivalError {
@@ -3529,6 +3541,7 @@ impl Tenant {
             timelines: Mutex::new(HashMap::new()),
             timelines_creating: Mutex::new(HashSet::new()),
             timelines_offloaded: Mutex::new(HashMap::new()),
+            tenant_manifest_upload: Default::default(),
             gc_cs: tokio::sync::Mutex::new(()),
             walredo_mgr,
             remote_storage,
@@ -4707,6 +4720,38 @@ impl Tenant {
             .map(|t| t.metrics.visible_physical_size_gauge.get())
             .max()
             .unwrap_or(0)
+    }
+
+    /// Serialize and write the latest TenantManifest to remote storage.
+    pub(crate) async fn store_tenant_manifest(&self) -> Result<(), TenantManifestError> {
+        // Only one manifest write may be done at at time, and the contents of the manifest
+        // must be loaded while holding this lock. This makes it safe to call this function
+        // from anywhere without worrying about colliding updates.
+        let _guard = tokio::select! {
+            g = self.tenant_manifest_upload.lock() => {
+                g
+            },
+            _ = self.cancel.cancelled() => {
+                return Err(TenantManifestError::Cancelled);
+            }
+        };
+
+        let manifest = self.tenant_manifest();
+        upload_tenant_manifest(
+            &self.remote_storage,
+            &self.tenant_shard_id,
+            self.generation,
+            &manifest,
+            &self.cancel,
+        )
+        .await
+        .map_err(|e| {
+            if self.cancel.is_cancelled() {
+                TenantManifestError::Cancelled
+            } else {
+                TenantManifestError::RemoteStorage(e)
+            }
+        })
     }
 }
 
