@@ -7,14 +7,14 @@
 //! Clarify that)
 //!
 use super::tenant::{PageReconstructError, Timeline};
+use crate::aux_file;
 use crate::context::RequestContext;
 use crate::keyspace::{KeySpace, KeySpaceAccum};
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id_no_shard_id;
-use crate::walrecord::NeonWalRecord;
-use crate::{aux_file, repository::*};
 use anyhow::{ensure, Context};
 use bytes::{Buf, Bytes, BytesMut};
 use enum_map::Enum;
+use pageserver_api::key::Key;
 use pageserver_api::key::{
     dbdir_key_range, rel_block_to_key, rel_dir_to_key, rel_key_range, rel_size_to_key,
     relmap_file_key, repl_origin_key, repl_origin_key_range, slru_block_to_key, slru_dir_to_key,
@@ -22,7 +22,9 @@ use pageserver_api::key::{
     CompactKey, AUX_FILES_KEY, CHECKPOINT_KEY, CONTROLFILE_KEY, DBDIR_KEY, TWOPHASEDIR_KEY,
 };
 use pageserver_api::keyspace::SparseKeySpace;
+use pageserver_api::record::NeonWalRecord;
 use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
+use pageserver_api::value::Value;
 use postgres_ffi::relfile_utils::{FSM_FORKNUM, VISIBILITYMAP_FORKNUM};
 use postgres_ffi::BLCKSZ;
 use postgres_ffi::{Oid, RepOriginId, TimestampTz, TransactionId};
@@ -1506,34 +1508,41 @@ impl<'a> DatadirModification<'a> {
         Ok(())
     }
 
-    /// Drop a relation.
-    pub async fn put_rel_drop(&mut self, rel: RelTag, ctx: &RequestContext) -> anyhow::Result<()> {
-        anyhow::ensure!(rel.relnode != 0, RelationError::InvalidRelnode);
+    /// Drop some relations
+    pub(crate) async fn put_rel_drops(
+        &mut self,
+        drop_relations: HashMap<(u32, u32), Vec<RelTag>>,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
+        for ((spc_node, db_node), rel_tags) in drop_relations {
+            let dir_key = rel_dir_to_key(spc_node, db_node);
+            let buf = self.get(dir_key, ctx).await?;
+            let mut dir = RelDirectory::des(&buf)?;
 
-        // Remove it from the directory entry
-        let dir_key = rel_dir_to_key(rel.spcnode, rel.dbnode);
-        let buf = self.get(dir_key, ctx).await?;
-        let mut dir = RelDirectory::des(&buf)?;
+            let mut dirty = false;
+            for rel_tag in rel_tags {
+                if dir.rels.remove(&(rel_tag.relnode, rel_tag.forknum)) {
+                    dirty = true;
 
-        self.pending_directory_entries
-            .push((DirectoryKind::Rel, dir.rels.len()));
+                    // update logical size
+                    let size_key = rel_size_to_key(rel_tag);
+                    let old_size = self.get(size_key, ctx).await?.get_u32_le();
+                    self.pending_nblocks -= old_size as i64;
 
-        if dir.rels.remove(&(rel.relnode, rel.forknum)) {
-            self.put(dir_key, Value::Image(Bytes::from(RelDirectory::ser(&dir)?)));
-        } else {
-            warn!("dropped rel {} did not exist in rel directory", rel);
+                    // Remove entry from relation size cache
+                    self.tline.remove_cached_rel_size(&rel_tag);
+
+                    // Delete size entry, as well as all blocks
+                    self.delete(rel_key_range(rel_tag));
+                }
+            }
+
+            if dirty {
+                self.put(dir_key, Value::Image(Bytes::from(RelDirectory::ser(&dir)?)));
+                self.pending_directory_entries
+                    .push((DirectoryKind::Rel, dir.rels.len()));
+            }
         }
-
-        // update logical size
-        let size_key = rel_size_to_key(rel);
-        let old_size = self.get(size_key, ctx).await?.get_u32_le();
-        self.pending_nblocks -= old_size as i64;
-
-        // Remove enty from relation size cache
-        self.tline.remove_cached_rel_size(&rel);
-
-        // Delete size entry, as well as all blocks
-        self.delete(rel_key_range(rel));
 
         Ok(())
     }

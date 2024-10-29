@@ -450,6 +450,9 @@ impl Reconciler {
         }
     }
 
+    /// This function does _not_ mutate any state, so it is cancellation safe.
+    ///
+    /// This function does not respect [`Self::cancel`], callers should handle that.
     async fn await_lsn(
         &self,
         tenant_shard_id: TenantShardId,
@@ -570,8 +573,10 @@ impl Reconciler {
 
         if let Some(baseline) = baseline_lsns {
             tracing::info!("🕑 Waiting for LSN to catch up...");
-            self.await_lsn(self.tenant_shard_id, &dest_ps, baseline)
-                .await?;
+            tokio::select! {
+                r = self.await_lsn(self.tenant_shard_id, &dest_ps, baseline) => {r?;}
+                _ = self.cancel.cancelled() => {return Err(ReconcileError::Cancel)}
+            };
         }
 
         tracing::info!("🔁 Notifying compute to use pageserver {dest_ps}");

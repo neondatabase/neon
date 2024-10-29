@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use anyhow::{bail, Context};
 use camino::Utf8PathBuf;
-use pageserver_api::models::{self, AuxFilePolicy, TenantInfo, TimelineInfo};
+use pageserver_api::models::{self, TenantInfo, TimelineInfo};
 use pageserver_api::shard::TenantShardId;
 use pageserver_client::mgmt_api;
 use postgres_backend::AuthType;
@@ -399,11 +399,6 @@ impl PageServerNode {
                 .map(serde_json::from_str)
                 .transpose()
                 .context("parse `timeline_get_throttle` from json")?,
-            switch_aux_file_policy: settings
-                .remove("switch_aux_file_policy")
-                .map(|x| x.parse::<AuxFilePolicy>())
-                .transpose()
-                .context("Failed to parse 'switch_aux_file_policy'")?,
             lsn_lease_length: settings.remove("lsn_lease_length").map(|x| x.to_string()),
             lsn_lease_length_for_ts: settings
                 .remove("lsn_lease_length_for_ts")
@@ -499,11 +494,6 @@ impl PageServerNode {
                     .map(serde_json::from_str)
                     .transpose()
                     .context("parse `timeline_get_throttle` from json")?,
-                switch_aux_file_policy: settings
-                    .remove("switch_aux_file_policy")
-                    .map(|x| x.parse::<AuxFilePolicy>())
-                    .transpose()
-                    .context("Failed to parse 'switch_aux_file_policy'")?,
                 lsn_lease_length: settings.remove("lsn_lease_length").map(|x| x.to_string()),
                 lsn_lease_length_for_ts: settings
                     .remove("lsn_lease_length_for_ts")
@@ -527,28 +517,6 @@ impl PageServerNode {
         tenant_shard_id: &TenantShardId,
     ) -> anyhow::Result<Vec<TimelineInfo>> {
         Ok(self.http_client.list_timelines(*tenant_shard_id).await?)
-    }
-
-    pub async fn timeline_create(
-        &self,
-        tenant_shard_id: TenantShardId,
-        new_timeline_id: TimelineId,
-        ancestor_start_lsn: Option<Lsn>,
-        ancestor_timeline_id: Option<TimelineId>,
-        pg_version: Option<u32>,
-        existing_initdb_timeline_id: Option<TimelineId>,
-    ) -> anyhow::Result<TimelineInfo> {
-        let req = models::TimelineCreateRequest {
-            new_timeline_id,
-            ancestor_start_lsn,
-            ancestor_timeline_id,
-            pg_version,
-            existing_initdb_timeline_id,
-        };
-        Ok(self
-            .http_client
-            .timeline_create(tenant_shard_id, &req)
-            .await?)
     }
 
     /// Import a basebackup prepared using either:

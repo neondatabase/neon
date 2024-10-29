@@ -244,7 +244,7 @@ impl GlobalTimelines {
         // immediately initialize first WAL segment as well.
         let state =
             TimelinePersistentState::new(&ttid, server_info, vec![], commit_lsn, local_start_lsn)?;
-        control_file::FileStorage::create_new(tmp_dir_path.clone(), &conf, state).await?;
+        control_file::FileStorage::create_new(&tmp_dir_path, state, conf.no_sync).await?;
         let timeline = GlobalTimelines::load_temp_timeline(ttid, &tmp_dir_path, true).await?;
         Ok(timeline)
     }
@@ -596,7 +596,7 @@ pub async fn validate_temp_timeline(
         bail!("wal_seg_size is not set");
     }
 
-    let wal_store = wal_storage::PhysicalStorage::new(&ttid, path.clone(), conf, &control_store)?;
+    let wal_store = wal_storage::PhysicalStorage::new(&ttid, path, &control_store, conf.no_sync)?;
 
     let commit_lsn = control_store.commit_lsn;
     let flush_lsn = wal_store.flush_lsn();

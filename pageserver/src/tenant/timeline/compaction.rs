@@ -32,11 +32,11 @@ use crate::page_cache;
 use crate::statvfs::Statvfs;
 use crate::tenant::checks::check_valid_layermap;
 use crate::tenant::remote_timeline_client::WaitCompletionError;
+use crate::tenant::storage_layer::batch_split_writer::{
+    BatchWriterResult, SplitDeltaLayerWriter, SplitImageLayerWriter,
+};
 use crate::tenant::storage_layer::filter_iterator::FilterIterator;
 use crate::tenant::storage_layer::merge_iterator::MergeIterator;
-use crate::tenant::storage_layer::split_writer::{
-    SplitDeltaLayerWriter, SplitImageLayerWriter, SplitWriterResult,
-};
 use crate::tenant::storage_layer::{
     AsLayerDesc, PersistentLayerDesc, PersistentLayerKey, ValueReconstructState,
 };
@@ -49,9 +49,10 @@ use pageserver_api::config::tenant_conf_defaults::{
     DEFAULT_CHECKPOINT_DISTANCE, DEFAULT_COMPACTION_THRESHOLD,
 };
 
-use crate::keyspace::KeySpace;
-use crate::repository::{Key, Value};
-use crate::walrecord::NeonWalRecord;
+use pageserver_api::key::Key;
+use pageserver_api::keyspace::KeySpace;
+use pageserver_api::record::NeonWalRecord;
+use pageserver_api::value::Value;
 
 use utils::lsn::Lsn;
 
@@ -834,7 +835,12 @@ impl Timeline {
                 if self.cancel.is_cancelled() {
                     return Err(CompactionError::ShuttingDown);
                 }
-                all_keys.extend(l.load_keys(ctx).await.map_err(CompactionError::Other)?);
+                let delta = l.get_as_delta(ctx).await.map_err(CompactionError::Other)?;
+                let keys = delta
+                    .index_entries(ctx)
+                    .await
+                    .map_err(CompactionError::Other)?;
+                all_keys.extend(keys);
             }
             // The current stdlib sorting implementation is designed in a way where it is
             // particularly fast where the slice is made up of sorted sub-ranges.
@@ -2038,11 +2044,11 @@ impl Timeline {
         let produced_image_layers_len = produced_image_layers.len();
         for action in produced_delta_layers {
             match action {
-                SplitWriterResult::Produced(layer) => {
+                BatchWriterResult::Produced(layer) => {
                     stat.produce_delta_layer(layer.layer_desc().file_size());
                     compact_to.push(layer);
                 }
-                SplitWriterResult::Discarded(l) => {
+                BatchWriterResult::Discarded(l) => {
                     keep_layers.insert(l);
                     stat.discard_delta_layer();
                 }
@@ -2050,11 +2056,11 @@ impl Timeline {
         }
         for action in produced_image_layers {
             match action {
-                SplitWriterResult::Produced(layer) => {
+                BatchWriterResult::Produced(layer) => {
                     stat.produce_image_layer(layer.layer_desc().file_size());
                     compact_to.push(layer);
                 }
-                SplitWriterResult::Discarded(l) => {
+                BatchWriterResult::Discarded(l) => {
                     keep_layers.insert(l);
                     stat.discard_image_layer();
                 }
@@ -2143,7 +2149,7 @@ struct ResidentDeltaLayer(ResidentLayer);
 struct ResidentImageLayer(ResidentLayer);
 
 impl CompactionJobExecutor for TimelineAdaptor {
-    type Key = crate::repository::Key;
+    type Key = pageserver_api::key::Key;
 
     type Layer = OwnArc<PersistentLayerDesc>;
     type DeltaLayer = ResidentDeltaLayer;
@@ -2438,7 +2444,7 @@ impl CompactionDeltaLayer<TimelineAdaptor> for ResidentDeltaLayer {
     type DeltaEntry<'a> = DeltaEntry<'a>;
 
     async fn load_keys<'a>(&self, ctx: &RequestContext) -> anyhow::Result<Vec<DeltaEntry<'_>>> {
-        self.0.load_keys(ctx).await
+        self.0.get_as_delta(ctx).await?.index_entries(ctx).await
     }
 }
 

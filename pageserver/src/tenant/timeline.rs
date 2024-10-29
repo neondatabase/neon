@@ -125,11 +125,12 @@ use utils::{
     simple_rcu::{Rcu, RcuReadGuard},
 };
 
-use crate::repository::GcResult;
-use crate::repository::{Key, Value};
 use crate::task_mgr;
 use crate::task_mgr::TaskKind;
+use crate::tenant::gc_result::GcResult;
 use crate::ZERO_PAGE;
+use pageserver_api::key::Key;
+use pageserver_api::value::Value;
 
 use self::delete::DeleteTimelineFlow;
 pub(super) use self::eviction_task::EvictionTaskTenantState;
@@ -424,6 +425,9 @@ pub struct Timeline {
     pub(crate) handles: handle::PerTimelineState<crate::page_service::TenantManagerTypes>,
 
     pub(crate) attach_wal_lag_cooldown: Arc<OnceLock<WalLagCooldown>>,
+
+    /// Cf. [`crate::tenant::CreateTimelineIdempotency`].
+    pub(crate) create_idempotency: crate::tenant::CreateTimelineIdempotency,
 }
 
 pub type TimelineDeleteProgress = Arc<tokio::sync::Mutex<DeleteTimelineFlow>>;
@@ -2136,6 +2140,7 @@ impl Timeline {
         pg_version: u32,
         state: TimelineState,
         attach_wal_lag_cooldown: Arc<OnceLock<WalLagCooldown>>,
+        create_idempotency: crate::tenant::CreateTimelineIdempotency,
         cancel: CancellationToken,
     ) -> Arc<Self> {
         let disk_consistent_lsn = metadata.disk_consistent_lsn();
@@ -2274,6 +2279,8 @@ impl Timeline {
                 handles: Default::default(),
 
                 attach_wal_lag_cooldown,
+
+                create_idempotency,
             };
 
             result.repartition_threshold =
@@ -2404,7 +2411,7 @@ impl Timeline {
     pub(super) async fn load_layer_map(
         &self,
         disk_consistent_lsn: Lsn,
-        index_part: Option<IndexPart>,
+        index_part: IndexPart,
     ) -> anyhow::Result<()> {
         use init::{Decision::*, Discovered, DismissedLayer};
         use LayerName::*;
@@ -2468,8 +2475,7 @@ impl Timeline {
                     );
                 }
 
-                let decided =
-                    init::reconcile(discovered_layers, index_part.as_ref(), disk_consistent_lsn);
+                let decided = init::reconcile(discovered_layers, &index_part, disk_consistent_lsn);
 
                 let mut loaded_layers = Vec::new();
                 let mut needs_cleanup = Vec::new();
@@ -5817,17 +5823,15 @@ fn is_send() {
 #[cfg(test)]
 mod tests {
     use pageserver_api::key::Key;
+    use pageserver_api::value::Value;
     use utils::{id::TimelineId, lsn::Lsn};
 
-    use crate::{
-        repository::Value,
-        tenant::{
-            harness::{test_img, TenantHarness},
-            layer_map::LayerMap,
-            storage_layer::{Layer, LayerName},
-            timeline::{DeltaLayerTestDesc, EvictionError},
-            Timeline,
-        },
+    use crate::tenant::{
+        harness::{test_img, TenantHarness},
+        layer_map::LayerMap,
+        storage_layer::{Layer, LayerName},
+        timeline::{DeltaLayerTestDesc, EvictionError},
+        Timeline,
     };
 
     #[tokio::test]

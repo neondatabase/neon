@@ -23,6 +23,7 @@ use typed_json::json;
 use url::Url;
 use urlencoding;
 use utils::http::error::ApiError;
+use uuid::Uuid;
 
 use super::backend::{LocalProxyConnError, PoolingBackend};
 use super::conn_pool::{AuthData, ConnInfoWithAuth};
@@ -62,6 +63,8 @@ enum Payload {
     Single(QueryData),
     Batch(BatchQueryData),
 }
+
+pub(super) static NEON_REQUEST_ID: HeaderName = HeaderName::from_static("neon-request-id");
 
 static CONN_STRING: HeaderName = HeaderName::from_static("neon-connection-string");
 static RAW_TEXT_OUTPUT: HeaderName = HeaderName::from_static("neon-raw-text-output");
@@ -706,6 +709,12 @@ static HEADERS_TO_FORWARD: &[&HeaderName] = &[
     &TXN_DEFERRABLE,
 ];
 
+pub(crate) fn uuid_to_header_value(id: Uuid) -> HeaderValue {
+    let mut uuid = [0; uuid::fmt::Hyphenated::LENGTH];
+    HeaderValue::from_str(id.as_hyphenated().encode_lower(&mut uuid[..]))
+        .expect("uuid hyphenated format should be all valid header characters")
+}
+
 async fn handle_auth_broker_inner(
     ctx: &RequestMonitoring,
     request: Request<Incoming>,
@@ -732,6 +741,7 @@ async fn handle_auth_broker_inner(
             req = req.header(h, hv);
         }
     }
+    req = req.header(&NEON_REQUEST_ID, uuid_to_header_value(ctx.session_id()));
 
     let req = req
         .body(body)

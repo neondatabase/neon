@@ -1,5 +1,5 @@
 use tokio::io::{AsyncRead, AsyncWrite};
-use tracing::{info, warn};
+use tracing::{debug, info};
 
 use super::{ComputeCredentials, ComputeUserInfo, ComputeUserInfoNoEndpoint};
 use crate::auth::{self, AuthFlow};
@@ -21,7 +21,7 @@ pub(crate) async fn authenticate_cleartext(
     secret: AuthSecret,
     config: &'static AuthenticationConfig,
 ) -> auth::Result<ComputeCredentials> {
-    warn!("cleartext auth flow override is enabled, proceeding");
+    debug!("cleartext auth flow override is enabled, proceeding");
     ctx.set_auth_method(crate::context::AuthMethod::Cleartext);
 
     // pause the timer while we communicate with the client
@@ -61,7 +61,7 @@ pub(crate) async fn password_hack_no_authentication(
     info: ComputeUserInfoNoEndpoint,
     client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
 ) -> auth::Result<(ComputeUserInfo, Vec<u8>)> {
-    warn!("project not specified, resorting to the password hack auth flow");
+    debug!("project not specified, resorting to the password hack auth flow");
     ctx.set_auth_method(crate::context::AuthMethod::Cleartext);
 
     // pause the timer while we communicate with the client
