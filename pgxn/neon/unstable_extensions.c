@@ -65,8 +65,8 @@ CheckUnstableExtension(
 			{
 				ereport(ERROR,
 						(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-						 errmsg("installing %s is currently prohibited", stmt->extname),
-						 errhint("Set neon.allow_unstable_extensions to true")));
+						 errmsg("%s extension is in beta and may be unstable or introduce backward-incompatible changes.\nWe recommend testing it in a separate, dedicated Neon project.", stmt->extname),
+						 errhint("to proceed with installation, run SET neon.allow_unstable_extensions='true'")));
 			}
 			break;
 		}
@@ -110,13 +110,13 @@ InitUnstableExtensionsSupport(void)
 		NULL,
 		&allow_unstable_extensions,
 		false,
-		PGC_SUSET,
+		PGC_USERSET,
 		0,
 		NULL, NULL, NULL);
 
 	DefineCustomStringVariable(
 		"neon.unstable_extensions",
-		"Allow unstable extensions to be installed and used",
+		"List of unstable extensions",
 		NULL,
 		&unstable_extensions,
 		NULL,
