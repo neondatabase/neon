@@ -3,6 +3,7 @@ from __future__ import annotations
 pytest_plugins = (
     "fixtures.pg_version",
     "fixtures.parametrize",
+    "fixtures.h2server",
     "fixtures.httpserver",
     "fixtures.compute_reconfigure",
     "fixtures.storage_controller_proxy",
