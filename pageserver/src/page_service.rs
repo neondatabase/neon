@@ -1333,24 +1333,22 @@ where
             let mut lsn = None;
             let mut replica = false;
             let mut gzip = false;
-            for i in 2..params.len() {
-                if let Some(param) = params.get(i) {
-                    if param.starts_with("--") {
-                        match *param {
-                            "--gzip" => gzip = true,
-                            "--replica" => replica = true,
-                            _ => {
-                                return Err(QueryError::Other(anyhow::anyhow!(
-                                    "Unknown parameter {param}",
-                                )))
-                            }
+            for param in &params[2..] {
+                if param.starts_with("--") {
+                    match *param {
+                        "--gzip" => gzip = true,
+                        "--replica" => replica = true,
+                        _ => {
+                            return Err(QueryError::Other(anyhow::anyhow!(
+                                "Unknown parameter {param}",
+                            )))
                         }
-                    } else {
-                        lsn = Some(
-                            Lsn::from_str(param)
-                                .with_context(|| format!("Failed to parse Lsn from {param}"))?,
-                        );
                     }
+                } else {
+                    lsn = Some(
+                        Lsn::from_str(param)
+                            .with_context(|| format!("Failed to parse Lsn from {param}"))?,
+                    );
                 }
             }
 
