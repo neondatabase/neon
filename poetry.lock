@@ -2924,6 +2924,20 @@ files = [
 ]
 
 [[package]]
+name = "types-jwcrypto"
+version = "1.5.0.20240925"
+description = "Typing stubs for jwcrypto"
+optional = false
+python-versions = ">=3.8"
+files = [
+    {file = "types-jwcrypto-1.5.0.20240925.tar.gz", hash = "sha256:50e17b790378c96239344476c7bd13b52d0c7eeb6d16c2d53723e48cc6bbf4fe"},
+    {file = "types_jwcrypto-1.5.0.20240925-py3-none-any.whl", hash = "sha256:2d12a2d528240d326075e896aafec7056b9136bf3207fa6ccf3fcb8fbf9e11a1"},
+]
+
+[package.dependencies]
+cryptography = "*"
+
+[[package]]
 name = "types-psutil"
 version = "5.9.5.12"
 description = "Typing stubs for psutil"
@@ -3407,4 +3421,4 @@ cffi = ["cffi (>=1.11)"]
 [metadata]
 lock-version = "2.0"
 python-versions = "^3.9"
-content-hash = "f767eaa9cb906a47372540aef37446ae55d37011be844b652eec8fb27a49d866"
+content-hash = "ad5c9ee7723359af22bbd7fa41538dcf78913c02e947a13a8f9a87eb3a59039e"

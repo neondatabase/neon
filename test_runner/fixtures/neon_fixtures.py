@@ -3585,6 +3585,7 @@ def static_proxy(
 def neon_authorize_jwk() -> jwk.JWK:
     kid = str(uuid.uuid4())
     key = jwk.JWK.generate(kty="RSA", size=2048, alg="RS256", use="sig", kid=kid)
+    assert isinstance(key, jwk.JWK)
     return key
 
 

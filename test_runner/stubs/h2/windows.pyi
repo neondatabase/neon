@@ -1,0 +1,13 @@
+from _typeshed import Incomplete
+
+from .exceptions import FlowControlError as FlowControlError
+
+LARGEST_FLOW_CONTROL_WINDOW: Incomplete
+
+class WindowManager:
+    max_window_size: Incomplete
+    current_window_size: Incomplete
+    def __init__(self, max_window_size) -> None: ...
+    def window_consumed(self, size) -> None: ...
+    def window_opened(self, size) -> None: ...
+    def process_bytes(self, size): ...
