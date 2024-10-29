@@ -14,8 +14,9 @@ use crate::{
     task_mgr::{self, TaskKind},
     tenant::{
         metadata::TimelineMetadata,
-        MaybeDeletedIndexPart, remote_timeline_client::{PersistIndexPartWithDeletedFlagError, RemoteTimelineClient},
-        CreateTimelineCause, DeleteTimelineError, Tenant, TimelineOrOffloaded,
+        remote_timeline_client::{PersistIndexPartWithDeletedFlagError, RemoteTimelineClient},
+        CreateTimelineCause, DeleteTimelineError, MaybeDeletedIndexPart, Tenant,
+        TimelineOrOffloaded,
     },
 };
 
