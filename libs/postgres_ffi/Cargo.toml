@@ -15,6 +15,7 @@ memoffset.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 utils.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 env_logger.workspace = true
