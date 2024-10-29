@@ -3410,6 +3410,7 @@ def static_proxy(
 
     port = vanilla_pg.default_options["port"]
     host = vanilla_pg.default_options["host"]
+    dbname = vanilla_pg.default_options["dbname"]
 
     vanilla_pg.start()
     vanilla_pg.safe_psql("create user proxy with login superuser password 'password'")
@@ -3454,6 +3455,7 @@ def static_proxy(
     ) as proxy:
         proxy.default_options["user"] = "proxy"
         proxy.default_options["password"] = "password"
+        proxy.default_options["dbname"] = dbname
 
         proxy.start()
         yield proxy
