@@ -3452,6 +3452,9 @@ def static_proxy(
         external_http_port=external_http_port,
         auth_backend=NeonProxy.ControlPlane(httpserver.url_for("/cplane")),
     ) as proxy:
+        proxy.default_options["user"] = "proxy"
+        proxy.default_options["password"] = "password"
+
         proxy.start()
         yield proxy
 
