@@ -239,7 +239,6 @@ fn get_conn_info(
     Ok(ConnInfoWithAuth { conn_info, auth })
 }
 
-// TODO: return different http error codes
 pub(crate) async fn handle(
     config: &'static ProxyConfig,
     ctx: RequestMonitoring,
@@ -320,7 +319,6 @@ pub(crate) async fn handle(
                 "forwarding error to user"
             );
 
-            // TODO: this shouldn't always be bad request.
             json_response(
                 e.get_http_status_code(),
                 json!({
