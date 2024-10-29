@@ -662,6 +662,8 @@ def test_timeline_ancestor_detach_errors(neon_env_builder: NeonEnvBuilder, shard
         client.detach_ancestor(env.initial_tenant, env.initial_timeline)
     assert info.value.status_code == 409
 
+    early_branch = env.create_branch("early_branch")
+
     first_branch = env.create_branch("first_branch")
 
     second_branch = env.create_branch("second_branch", ancestor_branch_name="first_branch")
@@ -674,6 +676,18 @@ def test_timeline_ancestor_detach_errors(neon_env_builder: NeonEnvBuilder, shard
     client.timeline_archival_config(
         env.initial_tenant, second_branch, TimelineArchivalState.ARCHIVED
     )
+
+    client.timeline_archival_config(
+        env.initial_tenant, early_branch, TimelineArchivalState.ARCHIVED
+    )
+
+    with pytest.raises(PageserverApiException, match=f".*archived: {early_branch}") as info:
+        client.detach_ancestor(env.initial_tenant, first_branch)
+    assert info.value.status_code == 400
+
+    if not sharded:
+        client.timeline_offload(env.initial_tenant, early_branch)
+
     client.timeline_archival_config(
         env.initial_tenant, first_branch, TimelineArchivalState.ARCHIVED
     )
