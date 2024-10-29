@@ -413,7 +413,7 @@ impl HttpCodeError for SqlOverHttpError {
             SqlOverHttpError::ConnectCompute(_) => StatusCode::INTERNAL_SERVER_ERROR,
             SqlOverHttpError::ConnInfo(_) => StatusCode::INTERNAL_SERVER_ERROR,
             SqlOverHttpError::RequestTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
-            SqlOverHttpError::ResponseTooLarge(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            SqlOverHttpError::ResponseTooLarge(_) => StatusCode::INSUFFICIENT_STORAGE,
             SqlOverHttpError::InvalidIsolationLevel => StatusCode::BAD_REQUEST,
             SqlOverHttpError::Postgres(_) => StatusCode::INTERNAL_SERVER_ERROR,
             SqlOverHttpError::JsonConversion(_) => StatusCode::INTERNAL_SERVER_ERROR,
