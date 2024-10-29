@@ -6,7 +6,7 @@ use std::{
 use anyhow::Context;
 use pageserver_api::{models::TimelineState, shard::TenantShardId};
 use tokio::sync::OwnedMutexGuard;
-use tracing::{error, info, instrument, Instrument};
+use tracing::{error, info, info_span, instrument, Instrument};
 use utils::{crashsafe, fs_ext, id::TimelineId, pausable_failpoint};
 
 use crate::{
@@ -15,7 +15,7 @@ use crate::{
     tenant::{
         metadata::TimelineMetadata,
         remote_timeline_client::{
-            self, PersistIndexPartWithDeletedFlagError, RemoteTimelineClient,
+            self, MaybeDeletedIndexPart, PersistIndexPartWithDeletedFlagError, RemoteTimelineClient,
         },
         CreateTimelineCause, DeleteTimelineError, Tenant, TimelineOrOffloaded,
     },
@@ -258,7 +258,32 @@ impl DeleteTimelineFlow {
             ))?
         });
 
-        let remote_client = timeline.remote_client_maybe_construct(tenant);
+        let remote_client = match timeline.maybe_remote_client() {
+            Some(remote_client) => remote_client,
+            None => {
+                let remote_client = tenant
+                    .build_timeline_client(timeline.timeline_id(), tenant.remote_storage.clone());
+                let result = remote_client
+                    .download_index_file(&tenant.cancel)
+                    .instrument(info_span!("download_index_file"))
+                    .await
+                    .map_err(|e| DeleteTimelineError::Other(anyhow::anyhow!("error: {:?}", e)))?;
+                let index_part = match result {
+                    MaybeDeletedIndexPart::Deleted(p) => {
+                        tracing::info!("Timeline already set as deleted in remote index");
+                        p
+                    }
+                    MaybeDeletedIndexPart::IndexPart(p) => p,
+                };
+                let remote_client = Arc::new(remote_client);
+
+                remote_client
+                    .init_upload_queue(&index_part)
+                    .map_err(DeleteTimelineError::Other)?;
+                remote_client.shutdown().await;
+                remote_client
+            }
+        };
         set_deleted_in_remote_index(&remote_client).await?;
 
         fail::fail_point!("timeline-delete-before-schedule", |_| {
