@@ -9,7 +9,6 @@
 //! may lead to a data loss.
 //!
 pub(crate) use pageserver_api::config::TenantConfigToml as TenantConf;
-use pageserver_api::models::AuxFilePolicy;
 use pageserver_api::models::CompactionAlgorithmSettings;
 use pageserver_api::models::EvictionPolicy;
 use pageserver_api::models::{self, ThrottleConfig};
@@ -342,10 +341,6 @@ pub struct TenantConfOpt {
     pub image_layer_creation_check_threshold: Option<u8>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(default)]
-    pub switch_aux_file_policy: Option<AuxFilePolicy>,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(with = "humantime_serde")]
     #[serde(default)]
     pub lsn_lease_length: Option<Duration>,
@@ -410,9 +405,6 @@ impl TenantConfOpt {
             image_layer_creation_check_threshold: self
                 .image_layer_creation_check_threshold
                 .unwrap_or(global_conf.image_layer_creation_check_threshold),
-            switch_aux_file_policy: self
-                .switch_aux_file_policy
-                .unwrap_or(global_conf.switch_aux_file_policy),
             lsn_lease_length: self
                 .lsn_lease_length
                 .unwrap_or(global_conf.lsn_lease_length),
@@ -470,7 +462,6 @@ impl From<TenantConfOpt> for models::TenantConfig {
             lazy_slru_download: value.lazy_slru_download,
             timeline_get_throttle: value.timeline_get_throttle.map(ThrottleConfig::from),
             image_layer_creation_check_threshold: value.image_layer_creation_check_threshold,
-            switch_aux_file_policy: value.switch_aux_file_policy,
             lsn_lease_length: value.lsn_lease_length.map(humantime),
             lsn_lease_length_for_ts: value.lsn_lease_length_for_ts.map(humantime),
         }

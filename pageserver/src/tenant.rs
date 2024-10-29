@@ -1830,6 +1830,18 @@ impl Tenant {
         ctx: RequestContext,
     ) -> Result<Arc<Timeline>, TimelineArchivalError> {
         info!("unoffloading timeline");
+
+        // We activate the timeline below manually, so this must be called on an active timeline.
+        // We expect callers of this function to ensure this.
+        match self.current_state() {
+            TenantState::Activating { .. }
+            | TenantState::Attaching
+            | TenantState::Broken { .. } => {
+                panic!("Timeline expected to be active")
+            }
+            TenantState::Stopping { .. } => return Err(TimelineArchivalError::Cancelled),
+            TenantState::Active => {}
+        }
         let cancel = self.cancel.clone();
 
         // Protect against concurrent attempts to use this TimelineId
@@ -4853,7 +4865,6 @@ pub(crate) mod harness {
                 image_layer_creation_check_threshold: Some(
                     tenant_conf.image_layer_creation_check_threshold,
                 ),
-                switch_aux_file_policy: Some(tenant_conf.switch_aux_file_policy),
                 lsn_lease_length: Some(tenant_conf.lsn_lease_length),
                 lsn_lease_length_for_ts: Some(tenant_conf.lsn_lease_length_for_ts),
             }

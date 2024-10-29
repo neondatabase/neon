@@ -18,6 +18,7 @@
  *
  *-------------------------------------------------------------------------
  */
+
 #include "postgres.h"
 
 #include <curl/curl.h>
@@ -508,6 +509,8 @@ NeonXactCallback(XactEvent event, void *arg)
 static bool
 RoleIsNeonSuperuser(const char *role_name)
 {
+	Assert(role_name);
+
 	return strcmp(role_name, "neon_superuser") == 0;
 }
 
@@ -670,7 +673,7 @@ HandleCreateRole(CreateRoleStmt *stmt)
 static void
 HandleAlterRole(AlterRoleStmt *stmt)
 {
-	const char *role_name = stmt->role->rolename;
+	char	   *role_name;
 	DefElem    *dpass;
 	ListCell   *option;
 	bool		found = false;
@@ -678,6 +681,7 @@ HandleAlterRole(AlterRoleStmt *stmt)
 
 	InitRoleTableIfNeeded();
 
+	role_name = get_rolespec_name(stmt->role);
 	if (RoleIsNeonSuperuser(role_name) && !superuser())
 		elog(ERROR, "can't ALTER neon_superuser");
 
@@ -689,9 +693,13 @@ HandleAlterRole(AlterRoleStmt *stmt)
 		if (strcmp(defel->defname, "password") == 0)
 			dpass = defel;
 	}
+
 	/* We only care about updates to the password */
 	if (!dpass)
+	{
+		pfree(role_name);
 		return;
+	}
 
 	entry = hash_search(CurrentDdlTable->role_table,
 						role_name,
@@ -704,6 +712,8 @@ HandleAlterRole(AlterRoleStmt *stmt)
 	else
 		entry->password = NULL;
 	entry->type = Op_Set;
+
+	pfree(role_name);
 }
 
 static void

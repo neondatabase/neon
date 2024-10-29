@@ -10,7 +10,6 @@ use std::{
     io::{BufRead, Read},
     num::{NonZeroU32, NonZeroU64, NonZeroUsize},
     str::FromStr,
-    sync::atomic::AtomicUsize,
     time::{Duration, SystemTime},
 };
 
@@ -309,7 +308,6 @@ pub struct TenantConfig {
     pub lazy_slru_download: Option<bool>,
     pub timeline_get_throttle: Option<ThrottleConfig>,
     pub image_layer_creation_check_threshold: Option<u8>,
-    pub switch_aux_file_policy: Option<AuxFilePolicy>,
     pub lsn_lease_length: Option<String>,
     pub lsn_lease_length_for_ts: Option<String>,
 }
@@ -348,68 +346,6 @@ pub enum AuxFilePolicy {
     /// on the read path.
     #[strum(ascii_case_insensitive)]
     CrossValidation,
-}
-
-impl AuxFilePolicy {
-    pub fn is_valid_migration_path(from: Option<Self>, to: Self) -> bool {
-        matches!(
-            (from, to),
-            (None, _) | (Some(AuxFilePolicy::CrossValidation), AuxFilePolicy::V2)
-        )
-    }
-
-    /// If a tenant writes aux files without setting `switch_aux_policy`, this value will be used.
-    pub fn default_tenant_config() -> Self {
-        Self::V2
-    }
-}
-
-/// The aux file policy memory flag. Users can store `Option<AuxFilePolicy>` into this atomic flag. 0 == unspecified.
-pub struct AtomicAuxFilePolicy(AtomicUsize);
-
-impl AtomicAuxFilePolicy {
-    pub fn new(policy: Option<AuxFilePolicy>) -> Self {
-        Self(AtomicUsize::new(
-            policy.map(AuxFilePolicy::to_usize).unwrap_or_default(),
-        ))
-    }
-
-    pub fn load(&self) -> Option<AuxFilePolicy> {
-        match self.0.load(std::sync::atomic::Ordering::Acquire) {
-            0 => None,
-            other => Some(AuxFilePolicy::from_usize(other)),
-        }
-    }
-
-    pub fn store(&self, policy: Option<AuxFilePolicy>) {
-        self.0.store(
-            policy.map(AuxFilePolicy::to_usize).unwrap_or_default(),
-            std::sync::atomic::Ordering::Release,
-        );
-    }
-}
-
-impl AuxFilePolicy {
-    pub fn to_usize(self) -> usize {
-        match self {
-            Self::V1 => 1,
-            Self::CrossValidation => 2,
-            Self::V2 => 3,
-        }
-    }
-
-    pub fn try_from_usize(this: usize) -> Option<Self> {
-        match this {
-            1 => Some(Self::V1),
-            2 => Some(Self::CrossValidation),
-            3 => Some(Self::V2),
-            _ => None,
-        }
-    }
-
-    pub fn from_usize(this: usize) -> Self {
-        Self::try_from_usize(this).unwrap()
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1631,71 +1567,6 @@ mod tests {
             let actual: &'static str = rendered.into();
             assert_eq!(actual, expected, "example on {line}");
         }
-    }
-
-    #[test]
-    fn test_aux_file_migration_path() {
-        assert!(AuxFilePolicy::is_valid_migration_path(
-            None,
-            AuxFilePolicy::V1
-        ));
-        assert!(AuxFilePolicy::is_valid_migration_path(
-            None,
-            AuxFilePolicy::V2
-        ));
-        assert!(AuxFilePolicy::is_valid_migration_path(
-            None,
-            AuxFilePolicy::CrossValidation
-        ));
-        // Self-migration is not a valid migration path, and the caller should handle it by itself.
-        assert!(!AuxFilePolicy::is_valid_migration_path(
-            Some(AuxFilePolicy::V1),
-            AuxFilePolicy::V1
-        ));
-        assert!(!AuxFilePolicy::is_valid_migration_path(
-            Some(AuxFilePolicy::V2),
-            AuxFilePolicy::V2
-        ));
-        assert!(!AuxFilePolicy::is_valid_migration_path(
-            Some(AuxFilePolicy::CrossValidation),
-            AuxFilePolicy::CrossValidation
-        ));
-        // Migrations not allowed
-        assert!(!AuxFilePolicy::is_valid_migration_path(
-            Some(AuxFilePolicy::CrossValidation),
-            AuxFilePolicy::V1
-        ));
-        assert!(!AuxFilePolicy::is_valid_migration_path(
-            Some(AuxFilePolicy::V1),
-            AuxFilePolicy::V2
-        ));
-        assert!(!AuxFilePolicy::is_valid_migration_path(
-            Some(AuxFilePolicy::V2),
-            AuxFilePolicy::V1
-        ));
-        assert!(!AuxFilePolicy::is_valid_migration_path(
-            Some(AuxFilePolicy::V2),
-            AuxFilePolicy::CrossValidation
-        ));
-        assert!(!AuxFilePolicy::is_valid_migration_path(
-            Some(AuxFilePolicy::V1),
-            AuxFilePolicy::CrossValidation
-        ));
-        // Migrations allowed
-        assert!(AuxFilePolicy::is_valid_migration_path(
-            Some(AuxFilePolicy::CrossValidation),
-            AuxFilePolicy::V2
-        ));
-    }
-
-    #[test]
-    fn test_aux_parse() {
-        assert_eq!(AuxFilePolicy::from_str("V2").unwrap(), AuxFilePolicy::V2);
-        assert_eq!(AuxFilePolicy::from_str("v2").unwrap(), AuxFilePolicy::V2);
-        assert_eq!(
-            AuxFilePolicy::from_str("cross-validation").unwrap(),
-            AuxFilePolicy::CrossValidation
-        );
     }
 
     #[test]

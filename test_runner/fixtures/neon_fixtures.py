@@ -95,7 +95,6 @@ from fixtures.utils import (
     subprocess_capture,
     wait_until,
 )
-from fixtures.utils import AuxFileStore as AuxFileStore  # reexport
 
 from .neon_api import NeonAPI, NeonApiEndpoint
 
@@ -354,7 +353,6 @@ class NeonEnvBuilder:
         initial_tenant: Optional[TenantId] = None,
         initial_timeline: Optional[TimelineId] = None,
         pageserver_virtual_file_io_engine: Optional[str] = None,
-        pageserver_aux_file_policy: Optional[AuxFileStore] = None,
         pageserver_default_tenant_config_compaction_algorithm: Optional[dict[str, Any]] = None,
         safekeeper_extra_opts: Optional[list[str]] = None,
         storage_controller_port_override: Optional[int] = None,
@@ -405,8 +403,6 @@ class NeonEnvBuilder:
             log.debug(
                 f"Overriding pageserver default compaction algorithm to {self.pageserver_default_tenant_config_compaction_algorithm}"
             )
-
-        self.pageserver_aux_file_policy = pageserver_aux_file_policy
 
         self.safekeeper_extra_opts = safekeeper_extra_opts
 
@@ -468,7 +464,6 @@ class NeonEnvBuilder:
             timeline_id=env.initial_timeline,
             shard_count=initial_tenant_shard_count,
             shard_stripe_size=initial_tenant_shard_stripe_size,
-            aux_file_policy=self.pageserver_aux_file_policy,
         )
         assert env.initial_tenant == initial_tenant
         assert env.initial_timeline == initial_timeline
@@ -1028,7 +1023,6 @@ class NeonEnv:
         self.control_plane_compute_hook_api = config.control_plane_compute_hook_api
 
         self.pageserver_virtual_file_io_engine = config.pageserver_virtual_file_io_engine
-        self.pageserver_aux_file_policy = config.pageserver_aux_file_policy
         self.pageserver_virtual_file_io_mode = config.pageserver_virtual_file_io_mode
 
         # Create the neon_local's `NeonLocalInitConf`
@@ -1324,7 +1318,6 @@ class NeonEnv:
         shard_stripe_size: Optional[int] = None,
         placement_policy: Optional[str] = None,
         set_default: bool = False,
-        aux_file_policy: Optional[AuxFileStore] = None,
     ) -> tuple[TenantId, TimelineId]:
         """
         Creates a new tenant, returns its id and its initial timeline's id.
@@ -1341,7 +1334,6 @@ class NeonEnv:
             shard_stripe_size=shard_stripe_size,
             placement_policy=placement_policy,
             set_default=set_default,
-            aux_file_policy=aux_file_policy,
         )
 
         return tenant_id, timeline_id
@@ -1399,7 +1391,6 @@ def neon_simple_env(
     compatibility_pg_distrib_dir: Path,
     pg_version: PgVersion,
     pageserver_virtual_file_io_engine: str,
-    pageserver_aux_file_policy: Optional[AuxFileStore],
     pageserver_default_tenant_config_compaction_algorithm: Optional[dict[str, Any]],
     pageserver_virtual_file_io_mode: Optional[str],
 ) -> Iterator[NeonEnv]:
@@ -1432,7 +1423,6 @@ def neon_simple_env(
         test_name=request.node.name,
         test_output_dir=test_output_dir,
         pageserver_virtual_file_io_engine=pageserver_virtual_file_io_engine,
-        pageserver_aux_file_policy=pageserver_aux_file_policy,
         pageserver_default_tenant_config_compaction_algorithm=pageserver_default_tenant_config_compaction_algorithm,
         pageserver_virtual_file_io_mode=pageserver_virtual_file_io_mode,
         combination=combination,
@@ -1459,7 +1449,6 @@ def neon_env_builder(
     top_output_dir: Path,
     pageserver_virtual_file_io_engine: str,
     pageserver_default_tenant_config_compaction_algorithm: Optional[dict[str, Any]],
-    pageserver_aux_file_policy: Optional[AuxFileStore],
     record_property: Callable[[str, object], None],
     pageserver_virtual_file_io_mode: Optional[str],
 ) -> Iterator[NeonEnvBuilder]:
@@ -1502,7 +1491,6 @@ def neon_env_builder(
         test_name=request.node.name,
         test_output_dir=test_output_dir,
         test_overlay_dir=test_overlay_dir,
-        pageserver_aux_file_policy=pageserver_aux_file_policy,
         pageserver_default_tenant_config_compaction_algorithm=pageserver_default_tenant_config_compaction_algorithm,
         pageserver_virtual_file_io_mode=pageserver_virtual_file_io_mode,
     ) as builder:
