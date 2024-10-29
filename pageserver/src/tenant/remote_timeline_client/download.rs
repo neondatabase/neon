@@ -414,13 +414,13 @@ async fn do_download_index_part(
 /// generation (normal case when migrating/restarting).  Only if both of these return 404 do we fall back
 /// to listing objects.
 ///
-/// * [my_generation]: the value of `[crate::tenant::Tenant::generation]`
-/// * [what]: for logging, what object are we downloading
-/// * [prefix]: when listing objects, use this prefix (i.e. the part of the object path before the generation)
-/// * [do_download]: a GET of the object in a particular generation, which should **retry indefinitely** unless
+/// * `my_generation`: the value of `[crate::tenant::Tenant::generation]`
+/// * `what`: for logging, what object are we downloading
+/// * `prefix`: when listing objects, use this prefix (i.e. the part of the object path before the generation)
+/// * `do_download`: a GET of the object in a particular generation, which should **retry indefinitely** unless
 ///                  [cancel] has fired.  This function does not do its own retries of GET operations, and relies
 ///                  on the function passed in to do so.
-/// * [parse_path]: parse a fully qualified remote storage path to get the generation of the object.
+/// * `parse_path`: parse a fully qualified remote storage path to get the generation of the object.
 #[allow(clippy::too_many_arguments)]
 #[tracing::instrument(skip_all, fields(generation=?my_generation))]
 pub(crate) async fn download_generation_object<'a, T, DF, DFF, PF>(
