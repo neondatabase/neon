@@ -760,8 +760,8 @@ async fn evict_and_wait_does_not_wait_for_download() {
 /// Also checks that the same does not happen on a non-evicted layer (regression test).
 #[tokio::test(start_paused = true)]
 async fn eviction_cancellation_on_drop() {
-    use crate::repository::Value;
     use bytes::Bytes;
+    use pageserver_api::value::Value;
 
     // this is the runtime on which Layer spawns the blocking tasks on
     let handle = tokio::runtime::Handle::current();
@@ -782,7 +782,7 @@ async fn eviction_cancellation_on_drop() {
         let mut writer = timeline.writer().await;
         writer
             .put(
-                crate::repository::Key::from_i128(5),
+                pageserver_api::key::Key::from_i128(5),
                 Lsn(0x20),
                 &Value::Image(Bytes::from_static(b"this does not matter either")),
                 &ctx,

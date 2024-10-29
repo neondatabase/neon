@@ -29,8 +29,10 @@ use std::time::Instant;
 use std::time::SystemTime;
 
 use pageserver_api::shard::ShardIdentity;
+use postgres_ffi::walrecord::*;
 use postgres_ffi::{dispatch_pgversion, enum_pgversion, enum_pgversion_dispatch, TimestampTz};
 use postgres_ffi::{fsm_logical_to_physical, page_is_new, page_set_lsn};
+use wal_decoder::models::*;
 
 use anyhow::{bail, Context, Result};
 use bytes::{Buf, Bytes, BytesMut};
@@ -44,9 +46,9 @@ use crate::pgdatadir_mapping::{DatadirModification, Version};
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
 use crate::tenant::PageReconstructError;
 use crate::tenant::Timeline;
-use crate::walrecord::*;
 use crate::ZERO_PAGE;
 use pageserver_api::key::rel_block_to_key;
+use pageserver_api::record::NeonWalRecord;
 use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
 use postgres_ffi::pg_constants;
 use postgres_ffi::relfile_utils::{FSM_FORKNUM, INIT_FORKNUM, MAIN_FORKNUM, VISIBILITYMAP_FORKNUM};
@@ -108,143 +110,6 @@ struct WarnIngestLag {
     timestamp_invalid_msg_ratelimit: RateLimit,
 }
 
-// These structs are an intermediary representation of the PostgreSQL WAL records.
-// The ones prefixed with `Xl` are lower level, while the ones that are not have
-// all the required context to be acted upon by the pageserver.
-
-enum HeapamRecord {
-    ClearVmBits(ClearVmBits),
-}
-
-struct ClearVmBits {
-    new_heap_blkno: Option<u32>,
-    old_heap_blkno: Option<u32>,
-    vm_rel: RelTag,
-    flags: u8,
-}
-
-enum NeonrmgrRecord {
-    ClearVmBits(ClearVmBits),
-}
-
-enum SmgrRecord {
-    Create(SmgrCreate),
-    Truncate(XlSmgrTruncate),
-}
-
-struct SmgrCreate {
-    rel: RelTag,
-}
-
-enum DbaseRecord {
-    Create(DbaseCreate),
-    Drop(DbaseDrop),
-}
-
-struct DbaseCreate {
-    db_id: u32,
-    tablespace_id: u32,
-    src_db_id: u32,
-    src_tablespace_id: u32,
-}
-
-struct DbaseDrop {
-    db_id: u32,
-    tablespace_ids: Vec<u32>,
-}
-
-enum ClogRecord {
-    ZeroPage(ClogZeroPage),
-    Truncate(ClogTruncate),
-}
-
-struct ClogZeroPage {
-    segno: u32,
-    rpageno: u32,
-}
-
-struct ClogTruncate {
-    pageno: u32,
-    oldest_xid: u32,
-    oldest_xid_db: u32,
-}
-
-enum XactRecord {
-    Commit(XactCommon),
-    Abort(XactCommon),
-    CommitPrepared(XactCommon),
-    AbortPrepared(XactCommon),
-    Prepare(XactPrepare),
-}
-
-struct XactCommon {
-    parsed: XlXactParsedRecord,
-    origin_id: u16,
-    // Fields below are only used for logging
-    xl_xid: u32,
-    lsn: Lsn,
-}
-
-struct XactPrepare {
-    xl_xid: u32,
-    data: Bytes,
-}
-
-enum MultiXactRecord {
-    ZeroPage(MultiXactZeroPage),
-    Create(XlMultiXactCreate),
-    Truncate(XlMultiXactTruncate),
-}
-
-struct MultiXactZeroPage {
-    slru_kind: SlruKind,
-    segno: u32,
-    rpageno: u32,
-}
-
-enum RelmapRecord {
-    Update(RelmapUpdate),
-}
-
-struct RelmapUpdate {
-    update: XlRelmapUpdate,
-    buf: Bytes,
-}
-
-enum XlogRecord {
-    Raw(RawXlogRecord),
-}
-
-struct RawXlogRecord {
-    info: u8,
-    lsn: Lsn,
-    buf: Bytes,
-}
-
-enum LogicalMessageRecord {
-    Put(PutLogicalMessage),
-    #[cfg(feature = "testing")]
-    Failpoint,
-}
-
-struct PutLogicalMessage {
-    path: String,
-    buf: Bytes,
-}
-
-enum StandbyRecord {
-    RunningXacts(StandbyRunningXacts),
-}
-
-struct StandbyRunningXacts {
-    oldest_running_xid: u32,
-}
-
-enum ReploriginRecord {
-    Set(XlReploriginSet),
-    Drop(XlReploriginDrop),
-}
-
 impl WalIngest {
     pub async fn new(
         timeline: &Timeline,
@@ -284,7 +149,6 @@ impl WalIngest {
     /// relations/pages that the record affects.
     ///
     /// This function returns `true` if the record was ingested, and `false` if it was filtered out
-    ///
     pub async fn ingest_record(
         &mut self,
         decoded: DecodedWALRecord,
@@ -2218,7 +2082,7 @@ impl WalIngest {
     ) -> anyhow::Result<Option<LogicalMessageRecord>> {
         let info = decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
         if info == pg_constants::XLOG_LOGICAL_MESSAGE {
-            let xlrec = crate::walrecord::XlLogicalMessage::decode(buf);
+            let xlrec = XlLogicalMessage::decode(buf);
             let prefix = std::str::from_utf8(&buf[0..xlrec.prefix_size - 1])?;
 
             #[cfg(feature = "testing")]
@@ -2246,7 +2110,7 @@ impl WalIngest {
     ) -> anyhow::Result<Option<StandbyRecord>> {
         let info = decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
         if info == pg_constants::XLOG_RUNNING_XACTS {
-            let xlrec = crate::walrecord::XlRunningXacts::decode(buf);
+            let xlrec = XlRunningXacts::decode(buf);
             return Ok(Some(StandbyRecord::RunningXacts(StandbyRunningXacts {
                 oldest_running_xid: xlrec.oldest_running_xid,
             })));
@@ -2276,10 +2140,10 @@ impl WalIngest {
     ) -> anyhow::Result<Option<ReploriginRecord>> {
         let info = decoded.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
         if info == pg_constants::XLOG_REPLORIGIN_SET {
-            let xlrec = crate::walrecord::XlReploriginSet::decode(buf);
+            let xlrec = XlReploriginSet::decode(buf);
             return Ok(Some(ReploriginRecord::Set(xlrec)));
         } else if info == pg_constants::XLOG_REPLORIGIN_DROP {
-            let xlrec = crate::walrecord::XlReploriginDrop::decode(buf);
+            let xlrec = XlReploriginDrop::decode(buf);
             return Ok(Some(ReploriginRecord::Drop(xlrec)));
         }
 
@@ -3146,6 +3010,7 @@ mod tests {
     async fn test_ingest_real_wal() {
         use crate::tenant::harness::*;
         use postgres_ffi::waldecoder::WalStreamDecoder;
+        use postgres_ffi::walrecord::decode_wal_record;
         use postgres_ffi::WAL_SEGMENT_SIZE;
 
         // Define test data path and constants.

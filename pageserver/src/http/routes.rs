@@ -2232,13 +2232,13 @@ async fn getpage_at_lsn_handler(
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
     let state = get_state(&request);
 
-    struct Key(crate::repository::Key);
+    struct Key(pageserver_api::key::Key);
 
     impl std::str::FromStr for Key {
         type Err = anyhow::Error;
 
         fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-            crate::repository::Key::from_hex(s).map(Key)
+            pageserver_api::key::Key::from_hex(s).map(Key)
         }
     }
 
