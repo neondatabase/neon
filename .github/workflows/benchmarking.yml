@@ -673,7 +673,7 @@ jobs:
 
     # Increase timeout to 12h, default timeout is 6h
     # we have regression in clickbench causing it to run 2-3x longer
-    timeout-minutes: 729
+    timeout-minutes: 720
 
     steps:
     - uses: actions/checkout@v4
