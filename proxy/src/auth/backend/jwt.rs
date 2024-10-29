@@ -591,7 +591,7 @@ pub(crate) enum JwtError {
     #[error("Provided authentication token is not a valid JWT encoding")]
     JwtEncoding(#[from] JwtEncodingError),
 
-    #[error("{0}")]
+    #[error(transparent)]
     InvalidClaims(#[from] JwtClaimsError),
 
     #[error("invalid P256 key")]
