@@ -29,7 +29,7 @@ pub(crate) enum Error {
     #[error("shutting down, please retry later")]
     ShuttingDown,
 
-    #[error("archived")]
+    #[error("archived: {}", .0)]
     Archived(TimelineId),
 
     #[error(transparent)]
@@ -84,7 +84,7 @@ impl From<Error> for ApiError {
             Error::NoAncestor => ApiError::Conflict(value.to_string()),
             Error::TooManyAncestors => ApiError::BadRequest(anyhow::anyhow!("{value}")),
             Error::ShuttingDown => ApiError::ShuttingDown,
-            Error::Archived(timeline) => ApiError::BadRequest(anyhow::anyhow!("{timeline}")),
+            Error::Archived(_) => ApiError::BadRequest(anyhow::anyhow!("{value}")),
             Error::OtherTimelineDetachOngoing(_) | Error::FailedToReparentAll => {
                 ApiError::ResourceUnavailable(value.to_string().into())
             }
@@ -205,8 +205,8 @@ pub(super) async fn prepare(
         }));
     };
 
-    if ancestor.is_archived() != Some(false) {
-        return Err(Archived(ancestor.timeline_id));
+    if detached.is_archived() != Some(false) {
+        return Err(Archived(detached.timeline_id));
     }
 
     if !ancestor_lsn.is_valid() {
