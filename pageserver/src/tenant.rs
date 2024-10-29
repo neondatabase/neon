@@ -302,7 +302,9 @@ pub struct Tenant {
     /// **Lock order**: if acquiring all (or a subset), acquire them in order `timelines`, `timelines_offloaded`, `timelines_creating`
     timelines_offloaded: Mutex<HashMap<TimelineId, Arc<OffloadedTimeline>>>,
 
-    /// Serialize writes of the tenant manifest to remote storage
+    /// Serialize writes of the tenant manifest to remote storage.  If there are concurrent operations
+    /// affecting the manifest, such as timeline deletion and timeline offload, they must wait for
+    /// each other (this could be optimized to coalesce writes if necessary).
     tenant_manifest_upload: tokio::sync::Mutex<()>,
 
     // This mutex prevents creation of new timelines during GC.
@@ -751,6 +753,15 @@ pub(crate) enum TenantManifestError {
 
     #[error("Cancelled")]
     Cancelled,
+}
+
+impl From<TenantManifestError> for TimelineArchivalError {
+    fn from(e: TenantManifestError) -> Self {
+        match e {
+            TenantManifestError::RemoteStorage(e) => Self::Other(e),
+            TenantManifestError::Cancelled => Self::Cancelled,
+        }
+    }
 }
 
 impl Debug for TimelineArchivalError {
@@ -1538,18 +1549,7 @@ impl Tenant {
             offloaded_timelines_accessor.extend(offloaded_timelines_list.into_iter());
         }
         if !offloaded_timeline_ids.is_empty() {
-            let manifest = self.tenant_manifest();
-            // TODO: generation support
-            let generation = remote_timeline_client::TENANT_MANIFEST_GENERATION;
-            upload_tenant_manifest(
-                &self.remote_storage,
-                &self.tenant_shard_id,
-                generation,
-                &manifest,
-                &self.cancel,
-            )
-            .await
-            .map_err(TimelineArchivalError::Other)?;
+            self.store_tenant_manifest().await?;
         }
 
         // The local filesystem contents are a cache of what's in the remote IndexPart;
@@ -1930,18 +1930,7 @@ impl Tenant {
         };
 
         // Upload new list of offloaded timelines to S3
-        let manifest = self.tenant_manifest();
-        // TODO: generation support
-        let generation = remote_timeline_client::TENANT_MANIFEST_GENERATION;
-        upload_tenant_manifest(
-            &self.remote_storage,
-            &self.tenant_shard_id,
-            generation,
-            &manifest,
-            &cancel,
-        )
-        .await
-        .map_err(TimelineArchivalError::Other)?;
+        self.store_tenant_manifest().await?;
 
         // Activate the timeline (if it makes sense)
         if !(timeline.is_broken() || timeline.is_stopping()) {
@@ -3333,7 +3322,7 @@ impl Tenant {
             .unwrap_or(self.conf.default_tenant_conf.lsn_lease_length)
     }
 
-    pub(crate) fn tenant_manifest(&self) -> TenantManifest {
+    fn tenant_manifest(&self) -> TenantManifest {
         let timelines_offloaded = self.timelines_offloaded.lock().unwrap();
 
         let mut timeline_manifests = timelines_offloaded
