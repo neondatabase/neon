@@ -38,6 +38,7 @@ use tracing::{debug, trace, warn};
 use utils::bin_ser::DeserializeError;
 use utils::pausable_failpoint;
 use utils::{bin_ser::BeSer, lsn::Lsn};
+use wal_decoder::serialized_batch::SerializedValueBatch;
 
 /// Max delta records appended to the AUX_FILES_KEY (for aux v1). The write path will write a full image once this threshold is reached.
 pub const MAX_AUX_FILE_DELTAS: usize = 1024;
@@ -1754,7 +1755,9 @@ impl<'a> DatadirModification<'a> {
 
         // This bails out on first error without modifying pending_updates.
         // That's Ok, cf this function's doc comment.
-        writer.put_batch(pending_data_pages, ctx).await?;
+        writer
+            .put_batch(SerializedValueBatch::from_values(pending_data_pages), ctx)
+            .await?;
         self.pending_bytes = 0;
 
         if pending_nblocks != 0 {
@@ -1799,7 +1802,9 @@ impl<'a> DatadirModification<'a> {
         );
 
         if !write_batch.is_empty() {
-            writer.put_batch(write_batch, ctx).await?;
+            writer
+                .put_batch(SerializedValueBatch::from_values(write_batch), ctx)
+                .await?;
         }
 
         if !self.pending_deletions.is_empty() {
