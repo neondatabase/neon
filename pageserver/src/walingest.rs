@@ -1297,36 +1297,7 @@ impl WalIngest {
         let new_nblocks = blknum + 1;
         // Check if the relation exists. We implicitly create relations on first
         // record.
-        // TODO: would be nice if to be more explicit about it
-
-        // Get current size and put rel creation if rel doesn't exist
-        //
-        // NOTE: we check the cache first even though get_rel_exists and get_rel_size would
-        //       check the cache too. This is because eagerly checking the cache results in
-        //       less work overall and 10% better performance. It's more work on cache miss
-        //       but cache miss is rare.
-        let old_nblocks = if let Some(nblocks) = modification
-            .tline
-            .get_cached_rel_size(&rel, modification.get_lsn())
-        {
-            nblocks
-        } else if !modification
-            .tline
-            .get_rel_exists(rel, Version::Modified(modification), ctx)
-            .await?
-        {
-            // create it with 0 size initially, the logic below will extend it
-            modification
-                .put_rel_creation(rel, 0, ctx)
-                .await
-                .context("Relation Error")?;
-            0
-        } else {
-            modification
-                .tline
-                .get_rel_size(rel, Version::Modified(modification), ctx)
-                .await?
-        };
+        let old_nblocks = modification.create_relation_if_required(rel, ctx).await?;
 
         if new_nblocks > old_nblocks {
             //info!("extending {} {} to {}", rel, old_nblocks, new_nblocks);

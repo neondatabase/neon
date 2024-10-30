@@ -1148,6 +1148,38 @@ impl<'a> DatadirModification<'a> {
         Ok(())
     }
 
+    /// Creates a relation if it is not already present.
+    /// Returns the current size of the relation
+    pub(crate) async fn create_relation_if_required(
+        &mut self,
+        rel: RelTag,
+        ctx: &RequestContext,
+    ) -> Result<u32, PageReconstructError> {
+        // Get current size and put rel creation if rel doesn't exist
+        //
+        // NOTE: we check the cache first even though get_rel_exists and get_rel_size would
+        //       check the cache too. This is because eagerly checking the cache results in
+        //       less work overall and 10% better performance. It's more work on cache miss
+        //       but cache miss is rare.
+        if let Some(nblocks) = self.tline.get_cached_rel_size(&rel, self.get_lsn()) {
+            Ok(nblocks)
+        } else if !self
+            .tline
+            .get_rel_exists(rel, Version::Modified(self), ctx)
+            .await?
+        {
+            // create it with 0 size initially, the logic below will extend it
+            self.put_rel_creation(rel, 0, ctx)
+                .await
+                .context("Relation Error")?;
+            Ok(0)
+        } else {
+            self.tline
+                .get_rel_size(rel, Version::Modified(self), ctx)
+                .await
+        }
+    }
+
     /// Put a new page version that can be constructed from a WAL record
     ///
     /// NOTE: this will *not* implicitly extend the relation, if the page is beyond the
