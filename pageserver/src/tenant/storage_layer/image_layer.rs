@@ -885,6 +885,7 @@ impl ImageLayerWriterInner {
         }
 
         let final_key_range = if let Some(end_key) = end_key {
+            assert!(end_key <= self.key_range.end);
             self.key_range.start..end_key
         } else {
             self.key_range.clone()
@@ -1032,6 +1033,14 @@ impl ImageLayerWriter {
         ctx: &RequestContext,
     ) -> anyhow::Result<(PersistentLayerDesc, Utf8PathBuf)> {
         self.inner.take().unwrap().finish(ctx, Some(end_key)).await
+    }
+
+    pub(crate) fn key_range(&self) -> Range<Key> {
+        self.inner.as_ref().unwrap().key_range.clone()
+    }
+
+    pub(crate) fn lsn(&self) -> Lsn {
+        self.inner.as_ref().unwrap().lsn
     }
 }
 
