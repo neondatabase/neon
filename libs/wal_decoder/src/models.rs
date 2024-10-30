@@ -49,7 +49,7 @@ pub struct InterpretedWalRecord {
     /// The [`Value`] is optional to avoid sending superfluous data to
     /// shard 0 for relation size tracking.
     pub blocks: Vec<(CompactKey, Option<Value>)>,
-    /// Byte offset within WAL for the start of the original PG WAL record
+    /// Byte offset within WAL for the end of the original PG WAL record
     pub lsn: Lsn,
     /// Whether to flush all uncommitted modifications to the storage engine
     /// before ingesting this record. This is currently only used for legacy PG
