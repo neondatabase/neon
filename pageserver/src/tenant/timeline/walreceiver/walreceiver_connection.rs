@@ -340,7 +340,7 @@ pub(super) async fn handle_walreceiver_connection(
                         }
 
                         // Deserialize and interpret WAL record
-                        let interpreted = InterpretedWalRecord::from_bytes(
+                        let interpreted = InterpretedWalRecord::from_bytes_filtered(
                             recdata,
                             modification.tline.get_shard_identity(),
                             lsn,

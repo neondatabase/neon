@@ -312,7 +312,7 @@ async fn import_wal(
         let mut modification = tline.begin_modification(last_lsn);
         while last_lsn <= endpoint {
             if let Some((lsn, recdata)) = waldecoder.poll_decode()? {
-                let interpreted = InterpretedWalRecord::from_bytes(
+                let interpreted = InterpretedWalRecord::from_bytes_filtered(
                     recdata,
                     tline.get_shard_identity(),
                     lsn,
@@ -457,7 +457,7 @@ pub async fn import_wal_from_tar(
         let mut modification = tline.begin_modification(last_lsn);
         while last_lsn <= end_lsn {
             if let Some((lsn, recdata)) = waldecoder.poll_decode()? {
-                let interpreted = InterpretedWalRecord::from_bytes(
+                let interpreted = InterpretedWalRecord::from_bytes_filtered(
                     recdata,
                     tline.get_shard_identity(),
                     lsn,

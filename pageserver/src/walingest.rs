@@ -2147,7 +2147,7 @@ mod tests {
         for chunk in bytes[xlogoff..].chunks(50) {
             decoder.feed_bytes(chunk);
             while let Some((lsn, recdata)) = decoder.poll_decode().unwrap() {
-                let interpreted = InterpretedWalRecord::from_bytes(
+                let interpreted = InterpretedWalRecord::from_bytes_filtered(
                     recdata,
                     modification.tline.get_shard_identity(),
                     lsn,

@@ -18,7 +18,7 @@ impl InterpretedWalRecord {
     /// Data blocks which do not match the provided shard identity are filtered out.
     /// Shard 0 is a special case since it tracks all relation sizes. We only give it
     /// the keys that are being written as that is enough for updating relation sizes.
-    pub fn from_bytes(
+    pub fn from_bytes_filtered(
         buf: Bytes,
         shard: &ShardIdentity,
         lsn: Lsn,
