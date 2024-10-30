@@ -23,7 +23,7 @@ use crate::{WAL_SEGMENT_SIZE, XLOG_BLCKSZ};
 /// boundaries if desired. Not optimized for performance.
 ///
 /// The WAL format is version-dependant (see e.g. `XLOG_PAGE_MAGIC`), so make sure to import this
-/// for the appropriate Postgres version (e.g. `postgres_ffi::v17::xlog_utils::WalGenerator`).
+/// for the appropriate Postgres version (e.g. `postgres_ffi::v17::wal_generator::WalGenerator`).
 ///
 /// A WAL is split into 16 MB segments. Each segment is split into 8 KB pages, with headers.
 /// Records are arbitrary length, 8-byte aligned, and may span pages. The layout is e.g.:
@@ -39,7 +39,7 @@ pub struct WalGenerator {
     ///
     /// Callers can modify this (and prev_lsn) to restart generation at a different LSN, but should
     /// ensure that the LSN is on a valid record boundary (i.e. we can't start appending in the
-    /// middle on an existing record or header, or beyond the end of the existing WAL)
+    /// middle on an existing record or header, or beyond the end of the existing WAL).
     pub lsn: Lsn,
     /// The starting LSN of the previous record. Used in WAL record headers. The Safekeeper doesn't
     /// care about this, unlike Postgres, but we include it for completeness.
