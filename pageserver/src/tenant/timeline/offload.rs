@@ -29,9 +29,10 @@ pub(crate) async fn offload_timeline(
             anyhow::bail!("timeline isn't archived");
         }
         None => {
-            tracing::warn!(
+            // This is legal: calls to this function can race with the timeline shutting down
+            tracing::info!(
                 ?is_archived,
-                "tried offloading a timeline where manifest is not yet available"
+                "tried offloading a timeline whose remote storage is not initialized"
             );
             anyhow::bail!("timeline manifest hasn't been loaded yet");
         }
