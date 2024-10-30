@@ -9,6 +9,7 @@ from fixtures.neon_fixtures import (
 from fixtures.pageserver.http import PageserverApiException
 from fixtures.pageserver.utils import assert_prefix_empty, assert_prefix_not_empty
 from fixtures.remote_storage import s3_storage
+from fixtures.log_helper import log
 from fixtures.utils import wait_until
 
 
@@ -369,3 +370,85 @@ def test_timeline_offload_persist(neon_env_builder: NeonEnvBuilder, delete_timel
         neon_env_builder.pageserver_remote_storage,
         prefix=f"tenants/{str(tenant_id)}/",
     )
+
+
+def test_timeline_offload_retain_lsn(neon_env_builder: NeonEnvBuilder):
+    """
+    Ensure that retain_lsn functionality for offloaded timelines actually works
+    """
+    env = neon_env_builder.init_start()
+    ps_http = env.pageserver.http_client()
+
+    # Turn off gc and compaction loops: we want to issue them manually for better reliability
+    tenant_id, root_timeline_id = env.create_tenant(
+        conf={
+            "gc_period": "0s",
+            "compaction_period": "0s",
+            "checkpoint_distance": f"{1024 ** 2}",
+            # Disable pitr, we only want the latest lsn
+            "pitr_interval": "0 s",
+        }
+    )
+
+    with env.endpoints.create_start("main", tenant_id=tenant_id) as endpoint:
+        endpoint.safe_psql_many(
+            [
+                "CREATE TABLE foo(v int, key serial primary key, t text default 'data_content')",
+                "SELECT setseed(0.4321)",
+                "INSERT INTO foo SELECT v FROM (SELECT generate_series(1,32768), (random() * 409600)::int as v)",
+            ]
+        )
+        pre_branch_sum = endpoint.safe_psql("SELECT sum(key) from foo where key < 51200")
+        log.info(f"Pre branch sum: {pre_branch_sum}")
+        last_flush_lsn_upload(env, endpoint, tenant_id, root_timeline_id)
+
+    # Create a branch and write some additional data to the parent
+    child_timeline_id = env.create_branch("test_archived_branch", tenant_id)
+
+    with env.endpoints.create_start("main", tenant_id=tenant_id) as endpoint:
+        endpoint.safe_psql_many(
+            [
+                "SELECT setseed(0.812345)",
+                "INSERT INTO foo SELECT v FROM (SELECT generate_series(1,32768), (random() * 409600)::int as v)",
+                "DELETE FROM foo WHERE v > 204800",
+                "VACUUM foo",
+            ]
+        )
+        post_branch_sum = endpoint.safe_psql("SELECT sum(key) from foo where key < 51200")
+        log.info(f"Post branch sum: {post_branch_sum}")
+        last_flush_lsn_upload(env, endpoint, tenant_id, root_timeline_id)
+
+    ps_http.timeline_archival_config(
+        tenant_id,
+        child_timeline_id,
+        state=TimelineArchivalState.ARCHIVED,
+    )
+    leaf_detail = ps_http.timeline_detail(
+        tenant_id,
+        child_timeline_id,
+    )
+    assert leaf_detail["is_archived"] is True
+    ps_http.timeline_offload(tenant_id, child_timeline_id)
+
+    # Do an agressive compaction of the parent branch
+    ps_http.timeline_checkpoint(
+        tenant_id,
+        root_timeline_id,
+        force_image_layer_creation=True,
+        force_l0_compaction=True,
+        force_repartition=True,
+        wait_until_uploaded=True,
+        compact=True,
+    )
+
+    ps_http.timeline_archival_config(
+        tenant_id,
+        child_timeline_id,
+        state=TimelineArchivalState.UNARCHIVED,
+    )
+
+    # Now, after unarchival, the child timeline should still have its data accessible
+    with env.endpoints.create_start("test_archived_branch", tenant_id=tenant_id) as endpoint:
+        sum = endpoint.safe_psql("SELECT sum(key) from foo where key < 51200")
+        assert sum == pre_branch_sum
+        last_flush_lsn_upload(env, endpoint, tenant_id, root_timeline_id)
