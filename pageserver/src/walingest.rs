@@ -32,7 +32,6 @@ use pageserver_api::key::Key;
 use pageserver_api::shard::ShardIdentity;
 use postgres_ffi::fsm_logical_to_physical;
 use postgres_ffi::walrecord::*;
-use postgres_ffi::BLCKSZ;
 use postgres_ffi::{dispatch_pgversion, enum_pgversion, enum_pgversion_dispatch, TimestampTz};
 use wal_decoder::models::*;
 
@@ -1258,8 +1257,6 @@ impl WalIngest {
         img: Bytes,
         ctx: &RequestContext,
     ) -> Result<(), PageReconstructError> {
-        assert_eq!(img.len(), BLCKSZ as usize);
-
         self.handle_rel_extend(modification, rel, blknum, ctx)
             .await?;
         modification.put_rel_page_image(rel, blknum, img)?;
