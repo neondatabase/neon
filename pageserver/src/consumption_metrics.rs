@@ -46,10 +46,8 @@ struct NewMetricsRoot {
 impl NewMetricsRoot {
     pub fn is_v2_metrics(json_value: &serde_json::Value) -> bool {
         if let Some(ver) = json_value.get("version") {
-            if let Some(version) = ver.as_u64() {
-                if version == 2 {
-                    return true;
-                }
+            if let Some(2) = ver.as_u64() {
+                return true;
             }
         }
         false
