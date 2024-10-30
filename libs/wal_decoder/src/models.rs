@@ -52,7 +52,9 @@ pub struct InterpretedWalRecord {
     /// Byte offset within WAL for the start of the original PG WAL record
     pub lsn: Lsn,
     /// Whether to flush all uncommitted modifications to the storage engine
-    /// before ingesting this record
+    /// before ingesting this record. This is currently only used for legacy PG
+    /// database creations which read pages from a template database. Such WAL
+    /// records require reading data blocks while ingesting, hence the need to flush.
     pub flush_uncommitted: FlushUncommittedRecords,
     /// Transaction id of the original PG WAL record
     pub xid: TransactionId,
