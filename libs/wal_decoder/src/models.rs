@@ -25,15 +25,15 @@
 //!                     |--> write to KV store within the pageserver
 
 use bytes::Bytes;
-use pageserver_api::key::CompactKey;
 use pageserver_api::reltag::{RelTag, SlruKind};
-use pageserver_api::value::Value;
 use postgres_ffi::walrecord::{
     XlMultiXactCreate, XlMultiXactTruncate, XlRelmapUpdate, XlReploriginDrop, XlReploriginSet,
     XlSmgrTruncate, XlXactParsedRecord,
 };
 use postgres_ffi::{Oid, TransactionId};
 use utils::lsn::Lsn;
+
+use crate::serialized_batch::SerializedValueBatch;
 
 pub enum FlushUncommittedRecords {
     Yes,
@@ -45,10 +45,9 @@ pub struct InterpretedWalRecord {
     /// Optional metadata record - may cause writes to metadata keys
     /// in the storage engine
     pub metadata_record: Option<MetadataRecord>,
-    /// Images or deltas for blocks modified in the original WAL record.
-    /// The [`Value`] is optional to avoid sending superfluous data to
-    /// shard 0 for relation size tracking.
-    pub blocks: Vec<(CompactKey, Option<Value>)>,
+    /// A pre-serialized batch along with the required metadata for ingestion
+    /// by the pageserver
+    pub batch: SerializedValueBatch,
     /// Byte offset within WAL for the end of the original PG WAL record
     pub lsn: Lsn,
     /// Whether to flush all uncommitted modifications to the storage engine

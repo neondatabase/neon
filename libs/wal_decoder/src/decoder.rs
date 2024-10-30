@@ -2,15 +2,13 @@
 //! raw bytes which represent a raw Postgres WAL record.
 
 use crate::models::*;
-use bytes::{Buf, Bytes, BytesMut};
-use pageserver_api::key::rel_block_to_key;
-use pageserver_api::record::NeonWalRecord;
+use crate::serialized_batch::SerializedValueBatch;
+use bytes::{Buf, Bytes};
 use pageserver_api::reltag::{RelTag, SlruKind};
 use pageserver_api::shard::ShardIdentity;
-use pageserver_api::value::Value;
+use postgres_ffi::pg_constants;
 use postgres_ffi::relfile_utils::VISIBILITYMAP_FORKNUM;
 use postgres_ffi::walrecord::*;
-use postgres_ffi::{page_is_new, page_set_lsn, pg_constants, BLCKSZ};
 use utils::lsn::Lsn;
 
 impl InterpretedWalRecord {
@@ -26,6 +24,7 @@ impl InterpretedWalRecord {
     ) -> anyhow::Result<InterpretedWalRecord> {
         let mut decoded = DecodedWALRecord::default();
         decode_wal_record(buf, &mut decoded, pg_version)?;
+        let xid = decoded.xl_xid;
 
         let flush_uncommitted = if decoded.is_dbase_create_copy(pg_version) {
             FlushUncommittedRecords::Yes
@@ -34,95 +33,14 @@ impl InterpretedWalRecord {
         };
 
         let metadata_record = MetadataRecord::from_decoded(&decoded, lsn, pg_version)?;
-
-        let mut blocks = Vec::default();
-        for blk in decoded.blocks.iter() {
-            let rel = RelTag {
-                spcnode: blk.rnode_spcnode,
-                dbnode: blk.rnode_dbnode,
-                relnode: blk.rnode_relnode,
-                forknum: blk.forknum,
-            };
-
-            let key = rel_block_to_key(rel, blk.blkno);
-
-            if !key.is_valid_key_on_write_path() {
-                anyhow::bail!("Unsupported key decoded at LSN {}: {}", lsn, key);
-            }
-
-            let key_is_local = shard.is_key_local(&key);
-
-            tracing::debug!(
-                lsn=%lsn,
-                key=%key,
-                "ingest: shard decision {}",
-                if !key_is_local { "drop" } else { "keep" },
-            );
-
-            if !key_is_local {
-                if shard.is_shard_zero() {
-                    // Shard 0 tracks relation sizes.  Although we will not store this block, we will observe
-                    // its blkno in case it implicitly extends a relation.
-                    blocks.push((key.to_compact(), None));
-                }
-
-                continue;
-            }
-
-            // Instead of storing full-page-image WAL record,
-            // it is better to store extracted image: we can skip wal-redo
-            // in this case. Also some FPI records may contain multiple (up to 32) pages,
-            // so them have to be copied multiple times.
-            //
-            let value = if blk.apply_image
-                && blk.has_image
-                && decoded.xl_rmid == pg_constants::RM_XLOG_ID
-                && (decoded.xl_info == pg_constants::XLOG_FPI
-                || decoded.xl_info == pg_constants::XLOG_FPI_FOR_HINT)
-                // compression of WAL is not yet supported: fall back to storing the original WAL record
-                && !postgres_ffi::bkpimage_is_compressed(blk.bimg_info, pg_version)
-                // do not materialize null pages because them most likely be soon replaced with real data
-                && blk.bimg_len != 0
-            {
-                // Extract page image from FPI record
-                let img_len = blk.bimg_len as usize;
-                let img_offs = blk.bimg_offset as usize;
-                let mut image = BytesMut::with_capacity(BLCKSZ as usize);
-                // TODO(vlad): skip the copy
-                image.extend_from_slice(&decoded.record[img_offs..img_offs + img_len]);
-
-                if blk.hole_length != 0 {
-                    let tail = image.split_off(blk.hole_offset as usize);
-                    image.resize(image.len() + blk.hole_length as usize, 0u8);
-                    image.unsplit(tail);
-                }
-                //
-                // Match the logic of XLogReadBufferForRedoExtended:
-                // The page may be uninitialized. If so, we can't set the LSN because
-                // that would corrupt the page.
-                //
-                if !page_is_new(&image) {
-                    page_set_lsn(&mut image, lsn)
-                }
-                assert_eq!(image.len(), BLCKSZ as usize);
-
-                Value::Image(image.freeze())
-            } else {
-                Value::WalRecord(NeonWalRecord::Postgres {
-                    will_init: blk.will_init || blk.apply_image,
-                    rec: decoded.record.clone(),
-                })
-            };
-
-            blocks.push((key.to_compact(), Some(value)));
-        }
+        let batch = SerializedValueBatch::from_decoded_filtered(decoded, shard, lsn, pg_version)?;
 
         Ok(InterpretedWalRecord {
             metadata_record,
-            blocks,
+            batch,
             lsn,
             flush_uncommitted,
-            xid: decoded.xl_xid,
+            xid,
         })
     }
 }
