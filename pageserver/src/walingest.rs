@@ -3,17 +3,17 @@
 //!
 //! The pipeline for ingesting WAL looks like this:
 //!
-//! WAL receiver  ->   WalIngest  ->   Repository
+//! WAL receiver  -> [`wal_decoder`] ->  WalIngest  ->   Repository
 //!
-//! The WAL receiver receives a stream of WAL from the WAL safekeepers,
-//! and decodes it to individual WAL records. It feeds the WAL records
-//! to WalIngest, which parses them and stores them in the Repository.
+//! The WAL receiver receives a stream of WAL from the WAL safekeepers.
+//! Records get decoded and interpreted in the [`wal_decoder`] module
+//! and then stored to the Repository by WalIngest.
 //!
 //! The neon Repository can store page versions in two formats: as
-//! page images, or a WAL records. WalIngest::ingest_record() extracts
-//! page images out of some WAL records, but most it stores as WAL
+//! page images, or a WAL records. [`wal_decoder::InterpretedWalRecord::from_bytes_filtered`] extracts
+//! page images out of some WAL records, but mostly it's WAL
 //! records. If a WAL record modifies multiple pages, WalIngest
-//! will call Repository::put_wal_record or put_page_image functions
+//! will call Repository::put_rel_wal_record or put_rel_page_image functions
 //! separately for each modified page.
 //!
 //! To reconstruct a page using a WAL record, the Repository calls the
@@ -141,13 +141,10 @@ impl WalIngest {
         })
     }
 
-    ///
-    /// Decode a PostgreSQL WAL record and store it in the repository, in the given timeline.
+    /// Ingest an interpreted PostgreSQL WAL record by doing writes to the underlying key value
+    /// storage of a given timeline.
     ///
     /// This function updates `lsn` field of `DatadirModification`
-    ///
-    /// Helper function to parse a WAL record and call the Timeline's PUT functions for all the
-    /// relations/pages that the record affects.
     ///
     /// This function returns `true` if the record was ingested, and `false` if it was filtered out
     pub async fn ingest_record(
