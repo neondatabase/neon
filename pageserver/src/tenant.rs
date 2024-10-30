@@ -620,7 +620,7 @@ impl TimelineOrOffloaded {
     fn maybe_remote_client(&self) -> Option<Arc<RemoteTimelineClient>> {
         match self {
             TimelineOrOffloaded::Timeline(timeline) => Some(timeline.remote_client.clone()),
-            TimelineOrOffloaded::Offloaded(offloaded) => None,
+            TimelineOrOffloaded::Offloaded(_offloaded) => None,
         }
     }
 }
