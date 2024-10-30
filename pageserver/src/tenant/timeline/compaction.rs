@@ -49,9 +49,10 @@ use pageserver_api::config::tenant_conf_defaults::{
     DEFAULT_CHECKPOINT_DISTANCE, DEFAULT_COMPACTION_THRESHOLD,
 };
 
-use crate::keyspace::KeySpace;
-use crate::repository::{Key, Value};
-use crate::walrecord::NeonWalRecord;
+use pageserver_api::key::Key;
+use pageserver_api::keyspace::KeySpace;
+use pageserver_api::record::NeonWalRecord;
+use pageserver_api::value::Value;
 
 use utils::lsn::Lsn;
 
@@ -1715,20 +1716,32 @@ impl Timeline {
         Ok(())
     }
 
-    /// An experimental compaction building block that combines compaction with garbage collection.
-    ///
-    /// The current implementation picks all delta + image layers that are below or intersecting with
-    /// the GC horizon without considering retain_lsns. Then, it does a full compaction over all these delta
-    /// layers and image layers, which generates image layers on the gc horizon, drop deltas below gc horizon,
-    /// and create delta layers with all deltas >= gc horizon.
     pub(crate) async fn compact_with_gc(
         self: &Arc<Self>,
         cancel: &CancellationToken,
         flags: EnumSet<CompactFlags>,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        use std::collections::BTreeSet;
+        self.partial_compact_with_gc(None, cancel, flags, ctx).await
+    }
 
+    /// An experimental compaction building block that combines compaction with garbage collection.
+    ///
+    /// The current implementation picks all delta + image layers that are below or intersecting with
+    /// the GC horizon without considering retain_lsns. Then, it does a full compaction over all these delta
+    /// layers and image layers, which generates image layers on the gc horizon, drop deltas below gc horizon,
+    /// and create delta layers with all deltas >= gc horizon.
+    ///
+    /// If `key_range`, it will only compact the keys within the range, aka partial compaction. This functionality
+    /// is not complete yet, and if it is set, only image layers will be generated.
+    ///
+    pub(crate) async fn partial_compact_with_gc(
+        self: &Arc<Self>,
+        compaction_key_range: Option<Range<Key>>,
+        cancel: &CancellationToken,
+        flags: EnumSet<CompactFlags>,
+        ctx: &RequestContext,
+    ) -> anyhow::Result<()> {
         // Block other compaction/GC tasks from running for now. GC-compaction could run along
         // with legacy compaction tasks in the future. Always ensure the lock order is compaction -> gc.
         // Note that we already acquired the compaction lock when the outer `compact` function gets called.
@@ -1749,8 +1762,13 @@ impl Timeline {
         .await?;
 
         let dry_run = flags.contains(CompactFlags::DryRun);
+        let partial_compaction = compaction_key_range.is_some();
 
-        info!("running enhanced gc bottom-most compaction, dry_run={dry_run}");
+        if let Some(ref compaction_key_range) = compaction_key_range {
+            info!("running enhanced gc bottom-most compaction, dry_run={dry_run}, compaction_key_range={}..{}", compaction_key_range.start, compaction_key_range.end);
+        } else {
+            info!("running enhanced gc bottom-most compaction, dry_run={dry_run}");
+        }
 
         scopeguard::defer! {
             info!("done enhanced gc bottom-most compaction");
@@ -1762,7 +1780,7 @@ impl Timeline {
         // The layer selection has the following properties:
         // 1. If a layer is in the selection, all layers below it are in the selection.
         // 2. Inferred from (1), for each key in the layer selection, the value can be reconstructed only with the layers in the layer selection.
-        let (layer_selection, gc_cutoff, retain_lsns_below_horizon) = {
+        let (layer_selection, gc_cutoff, retain_lsns_below_horizon) = if !partial_compaction {
             let guard = self.layers.read().await;
             let layers = guard.layer_map()?;
             let gc_info = self.gc_info.read().unwrap();
@@ -1778,7 +1796,7 @@ impl Timeline {
                     retain_lsns_below_horizon.push(*lsn);
                 }
             }
-            let mut selected_layers = Vec::new();
+            let mut selected_layers: Vec<Layer> = Vec::new();
             drop(gc_info);
             // Pick all the layers intersect or below the gc_cutoff, get the largest LSN in the selected layers.
             let Some(max_layer_lsn) = layers
@@ -1803,8 +1821,52 @@ impl Timeline {
             }
             retain_lsns_below_horizon.sort();
             (selected_layers, gc_cutoff, retain_lsns_below_horizon)
+        } else {
+            // In case of partial compaction, we currently only support generating image layers, and therefore,
+            // we pick all layers that are below the lowest retain_lsn and does not intersect with any of the layers.
+            let guard = self.layers.read().await;
+            let layers = guard.layer_map()?;
+            let gc_info = self.gc_info.read().unwrap();
+            let mut min_lsn = gc_info.cutoffs.select_min();
+            for (lsn, _, _) in &gc_info.retain_lsns {
+                if lsn < &min_lsn {
+                    min_lsn = *lsn;
+                }
+            }
+            for lsn in gc_info.leases.keys() {
+                if lsn < &min_lsn {
+                    min_lsn = *lsn;
+                }
+            }
+            let mut selected_layers = Vec::new();
+            drop(gc_info);
+            // |-------| |-------| |-------|
+            // | Delta | | Delta | | Delta | -- min_lsn could be intersecting with the layers
+            // |-------| |-------| |-------| <- we want to pick all the layers below min_lsn, so that
+            // | Delta | | Delta | | Delta |    ...we can remove them after compaction
+            // |-------| |-------| |-------|
+            // Pick all the layers intersect or below the min_lsn, get the largest LSN in the selected layers.
+            let Some(compaction_key_range) = compaction_key_range.as_ref() else {
+                unreachable!()
+            };
+            for desc in layers.iter_historic_layers() {
+                if desc.get_lsn_range().end <= min_lsn
+                    && overlaps_with(&desc.key_range, compaction_key_range)
+                {
+                    selected_layers.push(guard.get_from_desc(&desc));
+                }
+            }
+            if selected_layers.is_empty() {
+                info!("no layers to compact with gc");
+                return Ok(());
+            }
+            (selected_layers, min_lsn, Vec::new())
         };
         let lowest_retain_lsn = if self.ancestor_timeline.is_some() {
+            if partial_compaction {
+                warn!("partial compaction cannot run on child branches (for now)");
+                return Ok(());
+            }
             Lsn(self.ancestor_lsn.0 + 1)
         } else {
             let res = retain_lsns_below_horizon
@@ -1832,23 +1894,18 @@ impl Timeline {
 
         self.check_compaction_space(&layer_selection).await?;
 
-        // Step 1: (In the future) construct a k-merge iterator over all layers. For now, simply collect all keys + LSNs.
-        // Also, verify if the layer map can be split by drawing a horizontal line at every LSN start/end split point.
-        let mut lsn_split_point = BTreeSet::new(); // TODO: use a better data structure (range tree / range set?)
+        // Generate statistics for the compaction
         for layer in &layer_selection {
             let desc = layer.layer_desc();
             if desc.is_delta() {
-                // ignore single-key layer files
-                if desc.key_range.start.next() != desc.key_range.end {
-                    let lsn_range = &desc.lsn_range;
-                    lsn_split_point.insert(lsn_range.start);
-                    lsn_split_point.insert(lsn_range.end);
-                }
                 stat.visit_delta_layer(desc.file_size());
             } else {
                 stat.visit_image_layer(desc.file_size());
             }
         }
+
+        // Step 1: construct a k-merge iterator over all layers.
+        // Also, verify if the layer map can be split by drawing a horizontal line at every LSN start/end split point.
         let layer_names: Vec<crate::tenant::storage_layer::LayerName> = layer_selection
             .iter()
             .map(|layer| layer.layer_desc().layer_name())
@@ -1899,7 +1956,10 @@ impl Timeline {
                     self.conf,
                     self.timeline_id,
                     self.tenant_shard_id,
-                    Key::MIN,
+                    compaction_key_range
+                        .as_ref()
+                        .map(|x| x.start)
+                        .unwrap_or(Key::MIN),
                     lowest_retain_lsn,
                     self.get_compaction_target_size(),
                     ctx,
@@ -1960,55 +2020,71 @@ impl Timeline {
             } else {
                 let last_key = last_key.as_mut().unwrap();
                 stat.on_unique_key_visited();
-                let retention = self
-                    .generate_key_retention(
-                        *last_key,
-                        &accumulated_values,
-                        gc_cutoff,
-                        &retain_lsns_below_horizon,
-                        COMPACTION_DELTA_THRESHOLD,
-                        get_ancestor_image(self, *last_key, ctx).await?,
-                    )
-                    .await?;
-                // Put the image into the image layer. Currently we have a single big layer for the compaction.
-                retention
-                    .pipe_to(
-                        *last_key,
-                        &mut delta_layer_writer,
-                        image_layer_writer.as_mut(),
-                        &mut stat,
-                        ctx,
-                    )
-                    .await?;
+                let skip_adding_key = if let Some(ref compaction_key_range) = compaction_key_range {
+                    !compaction_key_range.contains(last_key)
+                } else {
+                    false
+                };
+                if !skip_adding_key {
+                    let retention = self
+                        .generate_key_retention(
+                            *last_key,
+                            &accumulated_values,
+                            gc_cutoff,
+                            &retain_lsns_below_horizon,
+                            COMPACTION_DELTA_THRESHOLD,
+                            get_ancestor_image(self, *last_key, ctx).await?,
+                        )
+                        .await?;
+                    // Put the image into the image layer. Currently we have a single big layer for the compaction.
+                    retention
+                        .pipe_to(
+                            *last_key,
+                            &mut delta_layer_writer,
+                            image_layer_writer.as_mut(),
+                            &mut stat,
+                            ctx,
+                        )
+                        .await?;
+                }
                 accumulated_values.clear();
                 *last_key = key;
                 accumulated_values.push((key, lsn, val));
             }
         }
 
+        // TODO: move the below part to the loop body
         let last_key = last_key.expect("no keys produced during compaction");
-        // TODO: move this part to the loop body
         stat.on_unique_key_visited();
-        let retention = self
-            .generate_key_retention(
-                last_key,
-                &accumulated_values,
-                gc_cutoff,
-                &retain_lsns_below_horizon,
-                COMPACTION_DELTA_THRESHOLD,
-                get_ancestor_image(self, last_key, ctx).await?,
-            )
-            .await?;
-        // Put the image into the image layer. Currently we have a single big layer for the compaction.
-        retention
-            .pipe_to(
-                last_key,
-                &mut delta_layer_writer,
-                image_layer_writer.as_mut(),
-                &mut stat,
-                ctx,
-            )
-            .await?;
+
+        let skip_adding_key = if let Some(ref compaction_key_range) = compaction_key_range {
+            !compaction_key_range.contains(&last_key)
+        } else {
+            false
+        };
+        if !skip_adding_key {
+            let retention = self
+                .generate_key_retention(
+                    last_key,
+                    &accumulated_values,
+                    gc_cutoff,
+                    &retain_lsns_below_horizon,
+                    COMPACTION_DELTA_THRESHOLD,
+                    get_ancestor_image(self, last_key, ctx).await?,
+                )
+                .await?;
+            // Put the image into the image layer. Currently we have a single big layer for the compaction.
+            retention
+                .pipe_to(
+                    last_key,
+                    &mut delta_layer_writer,
+                    image_layer_writer.as_mut(),
+                    &mut stat,
+                    ctx,
+                )
+                .await?;
+        }
+        // end: move the above part to the loop body
 
         let discard = |key: &PersistentLayerKey| {
             let key = key.clone();
@@ -2017,8 +2093,12 @@ impl Timeline {
 
         let produced_image_layers = if let Some(writer) = image_layer_writer {
             if !dry_run {
+                let end_key = compaction_key_range
+                    .as_ref()
+                    .map(|x| x.end)
+                    .unwrap_or(Key::MAX);
                 writer
-                    .finish_with_discard_fn(self, ctx, Key::MAX, discard)
+                    .finish_with_discard_fn(self, ctx, end_key, discard)
                     .await?
             } else {
                 drop(writer);
@@ -2036,6 +2116,10 @@ impl Timeline {
             drop(delta_layer_writer);
             Vec::new()
         };
+
+        if partial_compaction && !produced_delta_layers.is_empty() {
+            bail!("implementation error: partial compaction should not be producing delta layers (for now)");
+        }
 
         let mut compact_to = Vec::new();
         let mut keep_layers = HashSet::new();
@@ -2067,6 +2151,28 @@ impl Timeline {
         }
         let mut layer_selection = layer_selection;
         layer_selection.retain(|x| !keep_layers.contains(&x.layer_desc().key()));
+        if let Some(ref compaction_key_range) = compaction_key_range {
+            // Partial compaction might select more data than it processes, e.g., if
+            // the compaction_key_range only partially overlaps:
+            //
+            //         [---compaction_key_range---]
+            //   [---A----][----B----][----C----][----D----]
+            //
+            // A,B,C,D are all in the `layer_selection`. The created image layers contain
+            // whatever is needed from B, C, and from `----]` of A, and from  `[--` of D.
+            //
+            // In contrast, `[--A-` and `--D----]` have not been processed, so, we must
+            // keep that data.
+            //
+            // The solution for now is to keep A and D completely.
+            // (layer_selection is what we'll remove from the layer map, so,
+            //  retain what is _not_ fully covered by compaction_key_range).
+            layer_selection.retain(|x| {
+                let key_range = &x.layer_desc().key_range;
+                key_range.start >= compaction_key_range.start
+                    && key_range.end <= compaction_key_range.end
+            });
+        }
 
         info!(
             "gc-compaction statistics: {}",
@@ -2148,7 +2254,7 @@ struct ResidentDeltaLayer(ResidentLayer);
 struct ResidentImageLayer(ResidentLayer);
 
 impl CompactionJobExecutor for TimelineAdaptor {
-    type Key = crate::repository::Key;
+    type Key = pageserver_api::key::Key;
 
     type Layer = OwnArc<PersistentLayerDesc>;
     type DeltaLayer = ResidentDeltaLayer;

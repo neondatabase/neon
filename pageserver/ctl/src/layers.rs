@@ -5,24 +5,12 @@ use camino::{Utf8Path, Utf8PathBuf};
 use clap::Subcommand;
 use pageserver::context::{DownloadBehavior, RequestContext};
 use pageserver::task_mgr::TaskKind;
-use pageserver::tenant::block_io::BlockCursor;
-use pageserver::tenant::disk_btree::DiskBtreeReader;
-use pageserver::tenant::storage_layer::delta_layer::{BlobRef, Summary};
 use pageserver::tenant::storage_layer::{delta_layer, image_layer};
 use pageserver::tenant::storage_layer::{DeltaLayer, ImageLayer};
 use pageserver::tenant::{TENANTS_SEGMENT_NAME, TIMELINES_SEGMENT_NAME};
 use pageserver::virtual_file::api::IoMode;
 use pageserver::{page_cache, virtual_file};
-use pageserver::{
-    repository::{Key, KEY_SIZE},
-    tenant::{
-        block_io::FileBlockReader, disk_btree::VisitDirection,
-        storage_layer::delta_layer::DELTA_KEY_SIZE,
-    },
-    virtual_file::VirtualFile,
-};
-use std::fs;
-use utils::bin_ser::BeSer;
+use std::fs::{self, File};
 use utils::id::{TenantId, TimelineId};
 
 use crate::layer_map_analyzer::parse_filename;
@@ -59,44 +47,30 @@ pub(crate) enum LayerCmd {
 }
 
 async fn read_delta_file(path: impl AsRef<Path>, ctx: &RequestContext) -> Result<()> {
-    let path = Utf8Path::from_path(path.as_ref()).expect("non-Unicode path");
     virtual_file::init(
         10,
         virtual_file::api::IoEngineKind::StdFs,
         IoMode::preferred(),
     );
     page_cache::init(100);
-    let file = VirtualFile::open(path, ctx).await?;
-    let file_id = page_cache::next_file_id();
-    let block_reader = FileBlockReader::new(&file, file_id);
-    let summary_blk = block_reader.read_blk(0, ctx).await?;
-    let actual_summary = Summary::des_prefix(summary_blk.as_ref())?;
-    let tree_reader = DiskBtreeReader::<_, DELTA_KEY_SIZE>::new(
-        actual_summary.index_start_blk,
-        actual_summary.index_root_blk,
-        &block_reader,
+    let path = Utf8Path::from_path(path.as_ref()).expect("non-Unicode path");
+    let file = File::open(path)?;
+    let delta_layer = DeltaLayer::new_for_path(path, file)?;
+    delta_layer.dump(true, ctx).await?;
+    Ok(())
+}
+
+async fn read_image_file(path: impl AsRef<Path>, ctx: &RequestContext) -> Result<()> {
+    virtual_file::init(
+        10,
+        virtual_file::api::IoEngineKind::StdFs,
+        IoMode::preferred(),
     );
-    // TODO(chi): dedup w/ `delta_layer.rs` by exposing the API.
-    let mut all = vec![];
-    tree_reader
-        .visit(
-            &[0u8; DELTA_KEY_SIZE],
-            VisitDirection::Forwards,
-            |key, value_offset| {
-                let curr = Key::from_slice(&key[..KEY_SIZE]);
-                all.push((curr, BlobRef(value_offset)));
-                true
-            },
-            ctx,
-        )
-        .await?;
-    let cursor = BlockCursor::new_fileblockreader(&block_reader);
-    for (k, v) in all {
-        let value = cursor.read_blob(v.pos(), ctx).await?;
-        println!("key:{} value_len:{}", k, value.len());
-        assert!(k.is_i128_representable(), "invalid key: ");
-    }
-    // TODO(chi): special handling for last key?
+    page_cache::init(100);
+    let path = Utf8Path::from_path(path.as_ref()).expect("non-Unicode path");
+    let file = File::open(path)?;
+    let image_layer = ImageLayer::new_for_path(path, file)?;
+    image_layer.dump(true, ctx).await?;
     Ok(())
 }
 
@@ -133,8 +107,7 @@ pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
             let mut idx = 0;
             for layer in fs::read_dir(timeline_path)? {
                 let layer = layer?;
-                if let Some(layer_file) = parse_filename(&layer.file_name().into_string().unwrap())
-                {
+                if let Ok(layer_file) = parse_filename(&layer.file_name().into_string().unwrap()) {
                     println!(
                         "[{:3}]  key:{}-{}\n       lsn:{}-{}\n       delta:{}",
                         idx,
@@ -163,8 +136,7 @@ pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
             let mut idx = 0;
             for layer in fs::read_dir(timeline_path)? {
                 let layer = layer?;
-                if let Some(layer_file) = parse_filename(&layer.file_name().into_string().unwrap())
-                {
+                if let Ok(layer_file) = parse_filename(&layer.file_name().into_string().unwrap()) {
                     if *id == idx {
                         // TODO(chi): dedup code
                         println!(
@@ -180,7 +152,7 @@ pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
                         if layer_file.is_delta {
                             read_delta_file(layer.path(), &ctx).await?;
                         } else {
-                            anyhow::bail!("not supported yet :(");
+                            read_image_file(layer.path(), &ctx).await?;
                         }
 
                         break;

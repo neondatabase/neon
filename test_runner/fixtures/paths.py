@@ -21,6 +21,8 @@ if TYPE_CHECKING:
     from typing import Optional
 
 
+BASE_DIR = Path(__file__).parents[2]
+COMPUTE_CONFIG_DIR = BASE_DIR / "compute" / "etc"
 DEFAULT_OUTPUT_DIR: str = "test_output"
 
 
@@ -64,18 +66,17 @@ def get_test_repo_dir(request: FixtureRequest, top_output_dir: Path) -> Path:
 @pytest.fixture(scope="session")
 def base_dir() -> Iterator[Path]:
     # find the base directory (currently this is the git root)
-    base_dir = Path(__file__).parents[2]
-    log.info(f"base_dir is {base_dir}")
+    log.info(f"base_dir is {BASE_DIR}")
 
-    yield base_dir
+    yield BASE_DIR
 
 
 @pytest.fixture(scope="session")
-def compute_config_dir(base_dir: Path) -> Iterator[Path]:
+def compute_config_dir() -> Iterator[Path]:
     """
     Retrieve the path to the compute configuration directory.
     """
-    yield base_dir / "compute" / "etc"
+    yield COMPUTE_CONFIG_DIR
 
 
 @pytest.fixture(scope="function")

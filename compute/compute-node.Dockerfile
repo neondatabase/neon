@@ -875,6 +875,85 @@ USER root
 
 #########################################################################################
 #
+# Layer "rust extensions pgrx12"
+#
+# pgrx started to support Postgres 17 since version 12,
+# but some older extension aren't compatible with it.
+# This layer should be used as a base for new pgrx extensions,
+# and eventually get merged with `rust-extensions-build`
+#
+#########################################################################################
+FROM build-deps AS rust-extensions-build-pgrx12
+ARG PG_VERSION
+COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
+
+RUN apt-get update && \
+    apt-get install --no-install-recommends -y curl libclang-dev && \
+    useradd -ms /bin/bash nonroot -b /home
+
+ENV HOME=/home/nonroot
+ENV PATH="/home/nonroot/.cargo/bin:/usr/local/pgsql/bin/:$PATH"
+USER nonroot
+WORKDIR /home/nonroot
+
+RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux-gnu/rustup-init && \
+    chmod +x rustup-init && \
+    ./rustup-init -y --no-modify-path --profile minimal --default-toolchain stable && \
+    rm rustup-init && \
+    cargo install --locked --version 0.12.6 cargo-pgrx && \
+    /bin/bash -c 'cargo pgrx init --pg${PG_VERSION:1}=/usr/local/pgsql/bin/pg_config'
+
+USER root
+
+#########################################################################################
+#
+# Layers "pg-onnx-build" and "pgrag-pg-build"
+# Compile "pgrag" extensions
+#
+#########################################################################################
+
+FROM rust-extensions-build-pgrx12 AS pg-onnx-build
+
+# cmake 3.26 or higher is required, so installing it using pip (bullseye-backports has cmake 3.25).
+# Install it using virtual environment, because Python 3.11 (the default version on Debian 12 (Bookworm)) complains otherwise
+RUN apt-get update && apt-get install -y python3 python3-pip python3-venv && \
+    python3 -m venv venv && \
+    . venv/bin/activate && \
+    python3 -m pip install cmake==3.30.5 && \
+    wget https://github.com/microsoft/onnxruntime/archive/refs/tags/v1.18.1.tar.gz -O onnxruntime.tar.gz && \
+    mkdir onnxruntime-src && cd onnxruntime-src && tar xzf ../onnxruntime.tar.gz --strip-components=1 -C . && \
+    ./build.sh --config Release --parallel --skip_submodule_sync --skip_tests --allow_running_as_root
+
+
+FROM pg-onnx-build AS pgrag-pg-build
+
+RUN apt-get install -y protobuf-compiler && \
+    wget https://github.com/neondatabase-labs/pgrag/archive/refs/tags/v0.0.0.tar.gz -O pgrag.tar.gz &&  \
+    echo "2cbe394c1e74fc8bcad9b52d5fbbfb783aef834ca3ce44626cfd770573700bb4 pgrag.tar.gz" | sha256sum --check && \
+    mkdir pgrag-src && cd pgrag-src && tar xzf ../pgrag.tar.gz --strip-components=1 -C . && \
+    \
+    cd exts/rag && \
+    sed -i 's/pgrx = "0.12.6"/pgrx = { version = "0.12.6", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
+    cargo pgrx install --release && \
+    echo "trusted = true" >> /usr/local/pgsql/share/extension/rag.control && \
+    \
+    cd ../rag_bge_small_en_v15 && \
+    sed -i 's/pgrx = "0.12.6"/pgrx = { version = "0.12.6", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
+    ORT_LIB_LOCATION=/home/nonroot/onnxruntime-src/build/Linux \
+        REMOTE_ONNX_URL=http://pg-ext-s3-gateway/pgrag-data/bge_small_en_v15.onnx \
+        cargo pgrx install --release --features remote_onnx && \
+    echo "trusted = true" >> /usr/local/pgsql/share/extension/rag_bge_small_en_v15.control && \
+    \
+    cd ../rag_jina_reranker_v1_tiny_en && \
+    sed -i 's/pgrx = "0.12.6"/pgrx = { version = "0.12.6", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
+    ORT_LIB_LOCATION=/home/nonroot/onnxruntime-src/build/Linux \
+        REMOTE_ONNX_URL=http://pg-ext-s3-gateway/pgrag-data/jina_reranker_v1_tiny_en.onnx \
+        cargo pgrx install --release --features remote_onnx && \
+    echo "trusted = true" >> /usr/local/pgsql/share/extension/rag_jina_reranker_v1_tiny_en.control
+
+
+#########################################################################################
+#
 # Layer "pg-jsonschema-pg-build"
 # Compile "pg_jsonschema" extension
 #
@@ -1052,7 +1131,10 @@ FROM rust-extensions-build AS pg-mooncake-build
 ARG PG_VERSION
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
-ENV PG_MOONCAKE_VERSION=0a7de4c0b5c7b1a5e2175e1c5f4625b97b7346f1
+# The topmost commit in the `neon` branch at the time of writing this
+# https://github.com/Mooncake-Labs/pg_mooncake/commits/neon/
+# https://github.com/Mooncake-Labs/pg_mooncake/commit/568b5a82b5fc16136bdf4ca5aac3e0cc261ab48d
+ENV PG_MOONCAKE_VERSION=568b5a82b5fc16136bdf4ca5aac3e0cc261ab48d
 ENV PATH="/usr/local/pgsql/bin/:$PATH"
 
 RUN case "${PG_VERSION}" in \
@@ -1085,6 +1167,7 @@ COPY --from=h3-pg-build /h3/usr /
 COPY --from=unit-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=vector-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pgjwt-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pgrag-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-jsonschema-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-graphql-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-tiktoken-pg-build /usr/local/pgsql/ /usr/local/pgsql/
@@ -1218,7 +1301,10 @@ RUN mold -run cargo build --locked --profile release-line-debug-size-lto --bin l
 #########################################################################################
 
 FROM quay.io/prometheuscommunity/postgres-exporter:v0.12.1 AS postgres-exporter
-FROM burningalchemist/sql_exporter:0.13 AS sql-exporter
+
+# Keep the version the same as in build-tools.Dockerfile and
+# test_runner/regress/test_compute_metrics.py.
+FROM burningalchemist/sql_exporter:0.13.1 AS sql-exporter
 
 #########################################################################################
 #
@@ -1274,6 +1360,7 @@ COPY --from=unit-pg-build /postgresql-unit.tar.gz /ext-src/
 COPY --from=vector-pg-build /pgvector.tar.gz /ext-src/
 COPY --from=vector-pg-build /pgvector.patch /ext-src/
 COPY --from=pgjwt-pg-build /pgjwt.tar.gz /ext-src
+#COPY --from=pgrag-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 #COPY --from=pg-jsonschema-pg-build /home/nonroot/pg_jsonschema.tar.gz /ext-src
 #COPY --from=pg-graphql-pg-build /home/nonroot/pg_graphql.tar.gz /ext-src
 #COPY --from=pg-tiktoken-pg-build /home/nonroot/pg_tiktoken.tar.gz /ext-src

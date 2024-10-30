@@ -28,7 +28,6 @@
 use crate::config::PageServerConf;
 use crate::context::{PageContentKind, RequestContext, RequestContextBuilder};
 use crate::page_cache::{self, FileId, PAGE_SZ};
-use crate::repository::{Key, Value, KEY_SIZE};
 use crate::tenant::blob_io::BlobWriter;
 use crate::tenant::block_io::{BlockBuf, FileBlockReader};
 use crate::tenant::disk_btree::{
@@ -51,8 +50,10 @@ use hex;
 use itertools::Itertools;
 use pageserver_api::config::MaxVectoredReadBytes;
 use pageserver_api::key::DBDIR_KEY;
+use pageserver_api::key::{Key, KEY_SIZE};
 use pageserver_api::keyspace::KeySpace;
 use pageserver_api::shard::{ShardIdentity, TenantShardId};
+use pageserver_api::value::Value;
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -230,7 +231,7 @@ impl AsLayerDesc for ImageLayer {
 }
 
 impl ImageLayer {
-    pub(crate) async fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()> {
+    pub async fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()> {
         self.desc.dump();
 
         if !verbose {
@@ -1125,6 +1126,7 @@ mod test {
     use pageserver_api::{
         key::Key,
         shard::{ShardCount, ShardIdentity, ShardNumber, ShardStripeSize},
+        value::Value,
     };
     use utils::{
         generation::Generation,
@@ -1134,7 +1136,6 @@ mod test {
 
     use crate::{
         context::RequestContext,
-        repository::Value,
         tenant::{
             config::TenantConf,
             harness::{TenantHarness, TIMELINE_ID},
