@@ -31,11 +31,11 @@ use crate::{
     task_mgr::{TaskKind, WALRECEIVER_RUNTIME},
     tenant::{debug_assert_current_span_has_tenant_and_timeline_id, Timeline, WalReceiverInfo},
     walingest::WalIngest,
-    walrecord::{decode_wal_record, DecodedWALRecord},
 };
 use postgres_backend::is_expected_io_error;
 use postgres_connection::PgConnectionConfig;
 use postgres_ffi::waldecoder::WalStreamDecoder;
+use postgres_ffi::walrecord::{decode_wal_record, DecodedWALRecord};
 use utils::{id::NodeId, lsn::Lsn};
 use utils::{pageserver_feedback::PageserverFeedback, sync::gate::GateError};
 

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import contextlib
-import enum
 import json
 import os
 import re
@@ -513,21 +512,6 @@ def assert_no_errors(log_file: Path, service: str, allowed_errors: list[str]):
         log.info(f"not allowed {service} error: {error.strip()}")
 
     assert not errors, f"First log error on {service}: {errors[0]}\nHint: use scripts/check_allowed_errors.sh to test any new allowed_error you add"
-
-
-@enum.unique
-class AuxFileStore(str, enum.Enum):
-    V1 = "v1"
-    V2 = "v2"
-    CrossValidation = "cross-validation"
-
-    @override
-    def __repr__(self) -> str:
-        return f"'aux-{self.value}'"
-
-    @override
-    def __str__(self) -> str:
-        return f"'aux-{self.value}'"
 
 
 def assert_pageserver_backups_equal(left: Path, right: Path, skip_files: set[str]):

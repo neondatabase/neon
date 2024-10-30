@@ -4834,6 +4834,43 @@ impl Service {
         Ok(TenantShardMigrateResponse {})
     }
 
+    /// 'cancel' in this context means cancel any ongoing reconcile
+    pub(crate) async fn tenant_shard_cancel_reconcile(
+        &self,
+        tenant_shard_id: TenantShardId,
+    ) -> Result<(), ApiError> {
+        // Take state lock and fire the cancellation token, after which we drop lock and wait for any ongoing reconcile to complete
+        let waiter = {
+            let locked = self.inner.write().unwrap();
+            let Some(shard) = locked.tenants.get(&tenant_shard_id) else {
+                return Err(ApiError::NotFound(
+                    anyhow::anyhow!("Tenant shard not found").into(),
+                ));
+            };
+
+            let waiter = shard.get_waiter();
+            match waiter {
+                None => {
+                    tracing::info!("Shard does not have an ongoing Reconciler");
+                    return Ok(());
+                }
+                Some(waiter) => {
+                    tracing::info!("Cancelling Reconciler");
+                    shard.cancel_reconciler();
+                    waiter
+                }
+            }
+        };
+
+        // Cancellation should be prompt.  If this fails we have still done our job of firing the
+        // cancellation token, but by returning an ApiError we will indicate to the caller that
+        // the Reconciler is misbehaving and not respecting the cancellation token
+        self.await_waiters(vec![waiter], SHORT_RECONCILE_TIMEOUT)
+            .await?;
+
+        Ok(())
+    }
+
     /// This is for debug/support only: we simply drop all state for a tenant, without
     /// detaching or deleting it on pageservers.
     pub(crate) async fn tenant_drop(&self, tenant_id: TenantId) -> Result<(), ApiError> {
@@ -4921,16 +4958,7 @@ impl Service {
                     stripe_size,
                 },
                 placement_policy: Some(PlacementPolicy::Attached(0)), // No secondaries, for convenient debug/hacking
-
-                // There is no way to know what the tenant's config was: revert to defaults
-                //
-                // TODO: remove `switch_aux_file_policy` once we finish auxv2 migration
-                //
-                // we write to both v1+v2 storage, so that the test case can use either storage format for testing
-                config: TenantConfig {
-                    switch_aux_file_policy: Some(models::AuxFilePolicy::CrossValidation),
-                    ..TenantConfig::default()
-                },
+                config: TenantConfig::default(),
             })
             .await?;
 

@@ -30,7 +30,6 @@
 use crate::config::PageServerConf;
 use crate::context::{PageContentKind, RequestContext, RequestContextBuilder};
 use crate::page_cache::{self, FileId, PAGE_SZ};
-use crate::repository::{Key, Value, KEY_SIZE};
 use crate::tenant::blob_io::BlobWriter;
 use crate::tenant::block_io::{BlockBuf, BlockCursor, BlockLease, BlockReader, FileBlockReader};
 use crate::tenant::disk_btree::{
@@ -46,7 +45,7 @@ use crate::tenant::PageReconstructError;
 use crate::virtual_file::owned_buffers_io::io_buf_ext::{FullSlice, IoBufExt};
 use crate::virtual_file::IoBufferMut;
 use crate::virtual_file::{self, MaybeFatalIo, VirtualFile};
-use crate::{walrecord, TEMP_FILE_SUFFIX};
+use crate::TEMP_FILE_SUFFIX;
 use crate::{DELTA_FILE_MAGIC, STORAGE_FORMAT_VERSION};
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use camino::{Utf8Path, Utf8PathBuf};
@@ -54,9 +53,11 @@ use futures::StreamExt;
 use itertools::Itertools;
 use pageserver_api::config::MaxVectoredReadBytes;
 use pageserver_api::key::DBDIR_KEY;
+use pageserver_api::key::{Key, KEY_SIZE};
 use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::ImageCompressionAlgorithm;
 use pageserver_api::shard::TenantShardId;
+use pageserver_api::value::Value;
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -269,7 +270,7 @@ impl AsLayerDesc for DeltaLayer {
 }
 
 impl DeltaLayer {
-    pub(crate) async fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()> {
+    pub async fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()> {
         self.desc.dump();
 
         if !verbose {
@@ -1293,7 +1294,7 @@ impl DeltaLayerInner {
                     // is it an image or will_init walrecord?
                     // FIXME: this could be handled by threading the BlobRef to the
                     // VectoredReadBuilder
-                    let will_init = crate::repository::ValueBytes::will_init(&data)
+                    let will_init = pageserver_api::value::ValueBytes::will_init(&data)
                         .inspect_err(|_e| {
                             #[cfg(feature = "testing")]
                             tracing::error!(data=?utils::Hex(&data), err=?_e, %key, %lsn, "failed to parse will_init out of serialized value");
@@ -1356,7 +1357,7 @@ impl DeltaLayerInner {
                     format!(" img {} bytes", img.len())
                 }
                 Value::WalRecord(rec) => {
-                    let wal_desc = walrecord::describe_wal_record(&rec)?;
+                    let wal_desc = pageserver_api::record::describe_wal_record(&rec)?;
                     format!(
                         " rec {} bytes will_init: {} {}",
                         buf.len(),
@@ -1437,7 +1438,7 @@ impl DeltaLayerInner {
         offset
     }
 
-    pub(crate) fn iter<'a>(&'a self, ctx: &'a RequestContext) -> DeltaLayerIterator<'a> {
+    pub fn iter<'a>(&'a self, ctx: &'a RequestContext) -> DeltaLayerIterator<'a> {
         let block_reader = FileBlockReader::new(&self.file, self.file_id);
         let tree_reader =
             DiskBtreeReader::new(self.index_start_blk, self.index_root_blk, block_reader);
@@ -1610,7 +1611,6 @@ pub(crate) mod test {
     use rand::RngCore;
 
     use super::*;
-    use crate::repository::Value;
     use crate::tenant::harness::TIMELINE_ID;
     use crate::tenant::storage_layer::{Layer, ResidentLayer};
     use crate::tenant::vectored_blob_io::StreamingVectoredReadPlanner;
@@ -1622,6 +1622,7 @@ pub(crate) mod test {
         DEFAULT_PG_VERSION,
     };
     use bytes::Bytes;
+    use pageserver_api::value::Value;
 
     /// Construct an index for a fictional delta layer and and then
     /// traverse in order to plan vectored reads for a query. Finally,
@@ -1974,8 +1975,8 @@ pub(crate) mod test {
 
     #[tokio::test]
     async fn copy_delta_prefix_smoke() {
-        use crate::walrecord::NeonWalRecord;
         use bytes::Bytes;
+        use pageserver_api::record::NeonWalRecord;
 
         let h = crate::tenant::harness::TenantHarness::create("truncate_delta_smoke")
             .await
@@ -2198,6 +2199,7 @@ pub(crate) mod test {
         (k1, l1).cmp(&(k2, l2))
     }
 
+    #[cfg(feature = "testing")]
     pub(crate) fn sort_delta_value(
         (k1, l1, v1): &(Key, Lsn, Value),
         (k2, l2, v2): &(Key, Lsn, Value),

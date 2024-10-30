@@ -190,6 +190,7 @@ use chrono::{NaiveDateTime, Utc};
 pub(crate) use download::download_initdb_tar_zst;
 use pageserver_api::models::TimelineArchivalState;
 use pageserver_api::shard::{ShardIndex, TenantShardId};
+use regex::Regex;
 use scopeguard::ScopeGuard;
 use tokio_util::sync::CancellationToken;
 use utils::backoff::{
@@ -199,7 +200,7 @@ use utils::pausable_failpoint;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use remote_storage::{
@@ -245,11 +246,11 @@ use super::upload_queue::{NotInitialized, SetDeletedFlagProgress};
 use super::Generation;
 
 pub(crate) use download::{
-    do_download_tenant_manifest, download_index_part, is_temp_download_file,
+    download_index_part, download_tenant_manifest, is_temp_download_file,
     list_remote_tenant_shards, list_remote_timelines,
 };
 pub(crate) use index::LayerFileMetadata;
-pub(crate) use upload::{upload_initdb_dir, upload_tenant_manifest};
+pub(crate) use upload::upload_initdb_dir;
 
 // Occasional network issues and such can cause remote operations to fail, and
 // that's expected. If a download fails, we log it at info-level, and retry.
@@ -273,12 +274,6 @@ pub(crate) const BUFFER_SIZE: usize = 32 * 1024;
 /// Doing non-essential flushes of deletion queue is subject to this timeout, after
 /// which we warn and skip.
 const DELETION_QUEUE_FLUSH_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// Hardcode a generation for the tenant manifest for now so that we don't
-/// need to deal with generation-less manifests in the future.
-///
-/// TODO: add proper generation support to all the places that use this.
-pub(crate) const TENANT_MANIFEST_GENERATION: Generation = Generation::new(1);
 
 pub enum MaybeDeletedIndexPart {
     IndexPart(IndexPart),
@@ -2239,6 +2234,12 @@ pub fn remote_tenant_manifest_path(
     RemotePath::from_string(&path).expect("Failed to construct path")
 }
 
+/// Prefix to all generations' manifest objects in a tenant shard
+pub fn remote_tenant_manifest_prefix(tenant_shard_id: &TenantShardId) -> RemotePath {
+    let path = format!("tenants/{tenant_shard_id}/tenant-manifest",);
+    RemotePath::from_string(&path).expect("Failed to construct path")
+}
+
 pub fn remote_timelines_path(tenant_shard_id: &TenantShardId) -> RemotePath {
     let path = format!("tenants/{tenant_shard_id}/{TIMELINES_SEGMENT_NAME}");
     RemotePath::from_string(&path).expect("Failed to construct path")
@@ -2331,6 +2332,15 @@ pub fn parse_remote_index_path(path: RemotePath) -> Option<Generation> {
         Some((_, gen_suffix)) => Generation::parse_suffix(gen_suffix),
         None => None,
     }
+}
+
+/// Given the key of a tenant manifest, parse out the generation number
+pub(crate) fn parse_remote_tenant_manifest_path(path: RemotePath) -> Option<Generation> {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new(r".+tenant-manifest-([0-9a-f]{8}).json").unwrap());
+    re.captures(path.get_path().as_str())
+        .and_then(|c| c.get(1))
+        .and_then(|m| Generation::parse_suffix(m.as_str()))
 }
 
 #[cfg(test)]

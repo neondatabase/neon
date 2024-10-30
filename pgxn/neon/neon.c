@@ -30,6 +30,7 @@
 #include "neon.h"
 #include "control_plane_connector.h"
 #include "logical_replication_monitor.h"
+#include "unstable_extensions.h"
 #include "walsender_hooks.h"
 #if PG_MAJORVERSION_NUM >= 16
 #include "storage/ipc.h"
@@ -424,6 +425,7 @@ _PG_init(void)
 	LogicalFuncs_Custom_XLogReaderRoutines = NeonOnDemandXLogReaderRoutines;
 	SlotFuncs_Custom_XLogReaderRoutines = NeonOnDemandXLogReaderRoutines;
 
+	InitUnstableExtensionsSupport();
 	InitLogicalReplicationMonitor();
 	InitControlPlaneConnector();
 
