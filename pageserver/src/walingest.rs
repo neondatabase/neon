@@ -10,8 +10,8 @@
 //! and then stored to the Repository by WalIngest.
 //!
 //! The neon Repository can store page versions in two formats: as
-//! page images, or a WAL records. [`wal_decoder::InterpretedWalRecord::from_bytes_filtered`] extracts
-//! page images out of some WAL records, but mostly it's WAL
+//! page images, or a WAL records. [`wal_decoder::models::InterpretedWalRecord::from_bytes_filtered`]
+//! extracts page images out of some WAL records, but mostly it's WAL
 //! records. If a WAL record modifies multiple pages, WalIngest
 //! will call Repository::put_rel_wal_record or put_rel_page_image functions
 //! separately for each modified page.
