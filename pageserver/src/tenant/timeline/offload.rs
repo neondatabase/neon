@@ -12,7 +12,9 @@ pub(crate) async fn offload_timeline(
     debug_assert_current_span_has_tenant_and_timeline_id();
     tracing::info!("offloading archived timeline");
 
-    let (timeline, guard) = DeleteTimelineFlow::prepare(tenant, timeline.timeline_id)?;
+    let allow_offloaded_children = true;
+    let (timeline, guard) =
+        DeleteTimelineFlow::prepare(tenant, timeline.timeline_id, allow_offloaded_children)?;
 
     let TimelineOrOffloaded::Timeline(timeline) = timeline else {
         tracing::error!("timeline already offloaded, but given timeline object");

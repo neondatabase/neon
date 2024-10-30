@@ -214,7 +214,8 @@ impl DeleteTimelineFlow {
     ) -> Result<(), DeleteTimelineError> {
         super::debug_assert_current_span_has_tenant_and_timeline_id();
 
-        let (timeline, mut guard) = Self::prepare(tenant, timeline_id)?;
+        let allow_offloaded_children = false;
+        let (timeline, mut guard) = Self::prepare(tenant, timeline_id, allow_offloaded_children)?;
 
         guard.mark_in_progress()?;
 
@@ -340,6 +341,7 @@ impl DeleteTimelineFlow {
     pub(super) fn prepare(
         tenant: &Tenant,
         timeline_id: TimelineId,
+        allow_offloaded_children: bool,
     ) -> Result<(TimelineOrOffloaded, DeletionGuard), DeleteTimelineError> {
         // Note the interaction between this guard and deletion guard.
         // Here we attempt to lock deletion guard when we're holding a lock on timelines.
@@ -352,30 +354,27 @@ impl DeleteTimelineFlow {
         // T1: acquire deletion lock, do another `DeleteTimelineFlow::run`
         // For more context see this discussion: `https://github.com/neondatabase/neon/pull/4552#discussion_r1253437346`
         let timelines = tenant.timelines.lock().unwrap();
+        let timelines_offloaded = tenant.timelines_offloaded.lock().unwrap();
 
         let timeline = match timelines.get(&timeline_id) {
             Some(t) => TimelineOrOffloaded::Timeline(Arc::clone(t)),
-            None => {
-                let offloaded_timelines = tenant.timelines_offloaded.lock().unwrap();
-                match offloaded_timelines.get(&timeline_id) {
-                    Some(t) => TimelineOrOffloaded::Offloaded(Arc::clone(t)),
-                    None => return Err(DeleteTimelineError::NotFound),
-                }
-            }
+            None => match timelines_offloaded.get(&timeline_id) {
+                Some(t) => TimelineOrOffloaded::Offloaded(Arc::clone(t)),
+                None => return Err(DeleteTimelineError::NotFound),
+            },
         };
 
-        // Ensure that there are no child timelines **attached to that pageserver**,
-        // because detach removes files, which will break child branches
-        let children: Vec<TimelineId> = timelines
-            .iter()
-            .filter_map(|(id, entry)| {
-                if entry.get_ancestor_timeline_id() == Some(timeline_id) {
-                    Some(*id)
-                } else {
-                    None
-                }
-            })
-            .collect();
+        // Ensure that there are no child timelines, because we are about to remove files,
+        // which will break child branches
+        let mut children = Vec::new();
+        if !allow_offloaded_children {
+            children.extend(timelines_offloaded.iter().filter_map(|(id, entry)| {
+                (entry.ancestor_timeline_id == Some(timeline_id)).then_some(*id)
+            }));
+        }
+        children.extend(timelines.iter().filter_map(|(id, entry)| {
+            (entry.get_ancestor_timeline_id() == Some(timeline_id)).then_some(*id)
+        }));
 
         if !children.is_empty() {
             return Err(DeleteTimelineError::HasChildren(children));
