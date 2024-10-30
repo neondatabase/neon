@@ -105,7 +105,6 @@ impl InterpretedWalRecord {
             } else {
                 Value::WalRecord(NeonWalRecord::Postgres {
                     will_init: blk.will_init || blk.apply_image,
-                    // TODO(vlad): skip the copy
                     rec: decoded.record.clone(),
                 })
             };
