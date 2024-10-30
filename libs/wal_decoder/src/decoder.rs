@@ -45,6 +45,11 @@ impl InterpretedWalRecord {
             };
 
             let key = rel_block_to_key(rel, blk.blkno);
+
+            if !key.is_valid_key_on_write_path() {
+                anyhow::bail!("Unsupported key decoded at LSN {}: {}", lsn, key);
+            }
+
             let key_is_local = shard.is_key_local(&key);
 
             tracing::debug!(
