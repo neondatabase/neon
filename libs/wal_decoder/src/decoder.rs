@@ -164,9 +164,13 @@ impl MetadataRecord {
             }
             pg_constants::RM_STANDBY_ID => Self::decode_standby_record(&mut buf, decoded),
             pg_constants::RM_REPLORIGIN_ID => Self::decode_replorigin_record(&mut buf, decoded),
-            _x => {
-                // TODO: should probably log & fail here instead of blindly
-                // doing something without understanding the protocol
+            unexpected => {
+                // TODO: consider failing here instead of blindly doing something without
+                // understanding the protocol
+                tracing::warn!(
+                    "Unexpected resource manager id in PG WAL record: {}",
+                    unexpected
+                );
                 Ok(None)
             }
         }

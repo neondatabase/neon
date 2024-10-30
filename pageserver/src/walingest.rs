@@ -265,8 +265,15 @@ impl WalIngest {
                 self.ingest_replorigin_record(rec, modification).await?;
             }
             None => {
-                // TODO: [`wal_decoder::decoder`] produced a metadata record type
-                // that is not know to the pageserver ingest code. Tighten this up perhaps.
+                // There are two cases through which we end up here:
+                // 1. The resource manager for the original PG WAL record
+                //    is [`pg_constants::RM_TBLSPC_ID`]. This is not a supported
+                //    record type within Neon.
+                // 2. The resource manager id was unknown to
+                //    [`wal_decoder::decoder::MetadataRecord::from_decoded`].
+                //    An error warning is logged there in this case.
+                // TODO(vlad): Tighten this up more once we build confidence
+                // that case (2) does not happen in the field.
             }
         }
 
