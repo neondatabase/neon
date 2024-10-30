@@ -521,13 +521,6 @@ pub struct OffloadedTimeline {
     /// Present for future flattening deliberations.
     pub archived_at: NaiveDateTime,
 
-    /// Lazily constructed remote client for the timeline
-    ///
-    /// If we offload a timeline, we keep around the remote client
-    /// for the duration of the process. If we find it through the
-    /// manifest, we don't construct it up until it's needed (deletion).
-    pub remote_client: Option<Arc<RemoteTimelineClient>>,
-
     /// Prevent two tasks from deleting the timeline at the same time. If held, the
     /// timeline is being deleted. If 'true', the timeline has already been deleted.
     pub delete_progress: TimelineDeleteProgress,
@@ -554,7 +547,6 @@ impl OffloadedTimeline {
             ancestor_retain_lsn,
             archived_at,
 
-            remote_client: Some(timeline.remote_client.clone()),
             delete_progress: timeline.delete_progress.clone(),
         })
     }
@@ -571,7 +563,6 @@ impl OffloadedTimeline {
             ancestor_timeline_id,
             ancestor_retain_lsn,
             archived_at,
-            remote_client: None,
             delete_progress: TimelineDeleteProgress::default(),
         }
     }
@@ -636,7 +627,7 @@ impl TimelineOrOffloaded {
     fn maybe_remote_client(&self) -> Option<Arc<RemoteTimelineClient>> {
         match self {
             TimelineOrOffloaded::Timeline(timeline) => Some(timeline.remote_client.clone()),
-            TimelineOrOffloaded::Offloaded(offloaded) => offloaded.remote_client.clone(),
+            TimelineOrOffloaded::Offloaded(_offloaded) => None,
         }
     }
 }
