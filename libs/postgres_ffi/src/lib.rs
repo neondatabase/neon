@@ -36,6 +36,7 @@ macro_rules! postgres_ffi {
             pub mod controlfile_utils;
             pub mod nonrelfile_utils;
             pub mod wal_craft_test_export;
+            pub mod wal_generator;
             pub mod waldecoder_handler;
             pub mod xlog_utils;
 

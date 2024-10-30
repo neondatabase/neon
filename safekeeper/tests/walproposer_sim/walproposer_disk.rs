@@ -1,7 +1,7 @@
 use std::{ffi::CStr, sync::Arc};
 
 use parking_lot::{Mutex, MutexGuard};
-use postgres_ffi::v16::xlog_utils::WalGenerator;
+use postgres_ffi::v16::wal_generator::WalGenerator;
 use utils::lsn::Lsn;
 
 use super::block_storage::BlockStorage;
