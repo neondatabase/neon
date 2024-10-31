@@ -16,4 +16,11 @@ StateConstraint == \A p \in proposers:
                     /\ Len(prop_state[p].wal) <= max_entries
 ProposerAcceptorSymmetry == Permutations(proposers) \union Permutations(acceptors)
 
+\* enforce order of the vars in the error trace with ALIAS
+Alias == [
+           prop_state |-> prop_state,
+           acc_state |-> acc_state,
+           committed |-> committed
+         ]
+
 ====

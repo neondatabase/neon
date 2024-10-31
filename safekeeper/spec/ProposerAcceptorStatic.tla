@@ -11,13 +11,11 @@ EXTENDS Integers, Sequences, FiniteSets, TLC
 VARIABLES
   prop_state, \* prop_state[p] is state of proposer p
   acc_state, \* acc_state[a] is state of acceptor a
-  commit_lsns \* map of acceptor -> commit_lsn
+  committed \* bag (set) of ever committed <<term, lsn>> entries
 
 CONSTANT
   acceptors,
-  proposers,
-  max_entries, \* model constraint: max log entries acceptor/proposer can hold
-  max_term \* model constraint: max allowed term
+  proposers
 
 CONSTANT NULL
 
@@ -40,17 +38,17 @@ Minimum(S) ==
 \* Min of two numbers
 Min(a, b) == IF a < b THEN a ELSE b
 
-\* Set of values of function f. XXX is there a such builtin?
-FValues(f) == {f[a] : a \in DOMAIN f}
-
 \* Sort of 0 for functions
 EmptyF == [x \in {} |-> 42]
 IsEmptyF(f) == DOMAIN f = {}
 
+\* Set of values (image) of the function f. Apparently no such builtin.
+Range(f) == {f[x] : x \in DOMAIN f}
+
 \* Next entry proposer p will push to acceptor a or NULL.
 NextEntry(p, a) ==
   IF Len(prop_state[p].wal) >= prop_state[p].next_send_lsn[a] THEN
-    CHOOSE r \in FValues(prop_state[p].wal) : r.lsn = prop_state[p].next_send_lsn[a]
+    CHOOSE r \in Range(prop_state[p].wal) : r.lsn = prop_state[p].next_send_lsn[a]
   ELSE
     NULL
 
@@ -64,8 +62,8 @@ Quorum(acc_set) == Cardinality(acc_set) >= (NumAccs \div 2 + 1)
 \* all quorums of acceptors
 Quorums == {subset \in SUBSET acceptors: Quorum(subset)}
 
-\* flush_lsn of acceptor a.
-FlushLsn(a) == Len(acc_state[a].wal)
+\* flushLsn (end of WAL, i.e. index of next entry) of acceptor a.
+FlushLsn(a) == Len(acc_state[a].wal) + 1
 
 \* Typedefs. Note that TLA+ Nat includes zero.
 Terms == Nat
@@ -79,38 +77,57 @@ Lsns == Nat
 \* TLC to enumerate them, while they are are horribly enormous
 \* (TLC screams "Attempted to construct a set with too many elements").
 \* So instead check types manually.
+
+
+\* Term history is a sequence of <term, LSN where term begins> pairs.
+IsTermHistory(th) ==
+  \A th_entry \in Range(th): th_entry.term \in Terms /\ th_entry.lsn \in Lsns
+
+IsWal(w) == \A i \in DOMAIN w:
+              /\ i \in Lsns
+              /\ w[i] \in Terms
+
 TypeOk ==
     /\ \A p \in proposers:
-      /\ DOMAIN prop_state[p] = {"state", "term", "votes", "donor_epoch", "vcl", "wal", "next_send_lsn"}
-      \* in campaign proposer sends RequestVote and waits for acks;
-      \* in leader he is elected
+      \* '_' in field names hinders pretty printing
+      \* https://github.com/tlaplus/tlaplus/issues/1051
+      \* so use camel case.
+      /\ DOMAIN prop_state[p] = {"state", "term", "votes", "termHistory", "wal", "nextSendLsn"}
+      \* In campaign proposer sends RequestVote and waits for acks;
+      \* in leader he is elected.
       /\ prop_state[p].state \in {"campaign", "leader"}
+      \* term for which it will campaign, or won term in leader state
       /\ prop_state[p].term \in Terms
       \* votes received
-      /\ \A voter \in DOMAIN prop_state[p].votes:
-         /\ voter \in acceptors
-         /\ prop_state[p].votes[voter].epoch \in Terms /\ prop_state[p].votes[voter].flush_lsn \in Lsns
-      /\ prop_state[p].donor_epoch \in Terms
-      \* wal is sequence of just <lsn, epoch of author> records
-      /\ \A i \in DOMAIN prop_state[p].wal:
-           prop_state[p].wal[i] \in [lsn: 1..max_entries, epoch: 1..max_term]
-      \* Following implementation, we skew the original Aurora meaning of this;
-      \* here it is lsn of highest definitely committed record as set by proposer
-      \* when it is elected; it doesn't change since then
-      /\ prop_state[p].vcl \in 0..max_entries
-      \* map of acceptor -> next lsn to send
-      /\ \A a \in DOMAIN prop_state[p].next_send_lsn:
+      /\ \A voter \in DOMAIN prop_state[p].votes: voter \in acceptors
+      /\ \A vote \in Range(prop_state[p].votes):
+         /\ IsTermHistory(vote.termHistory)
+         /\ vote.flushLsn \in Lsns
+      \* Proposer's term history. Empty while proposer is in "campaign".
+      /\ IsTermHistory(prop_state[p].termHistory)
+      \* In the model we identify WAL entries only by <term, LSN> pairs 
+      \* without additional unique id, which is enough for its purposes.
+      \* It means that with term history fully modeled wal becomes 
+      \* redundant as it can be computed from term history + WAL length.
+      \* However, we still keep it here and at acceptors as explicit sequence
+      \* where index is LSN and value is the term to avoid artificial mapping to
+      \* figure out real entries. It shouldn't bloat model much because this
+      \* doesn't increase number of distinct states.
+      /\ IsWal(prop_state[p].wal)
+      \* Map of acceptor -> next lsn to send. It is set when truncate_wal is
+      \* done so sending entries is allowed only after that. In the impl TCP
+      \* ensures this ordering.
+      /\ \A a \in DOMAIN prop_state[p].nextSendLsn:
          /\ a \in acceptors
-         /\ prop_state[p].next_send_lsn[a] \in 1..(max_entries + 1)
+         /\ prop_state[p].nextSendLsn[a] \in Lsns
     /\ \A a \in acceptors:
-      /\ DOMAIN acc_state[a] = {"term", "epoch", "wal"}
-      /\ acc_state[a].term \in 0..max_term
-      /\ acc_state[a].epoch \in 0..max_term
-      /\ \A i \in DOMAIN acc_state[a].wal:
-           acc_state[a].wal[i] \in [lsn: 1..max_entries, epoch: 1..max_term]
-    /\ \A a \in DOMAIN commit_lsns:
-      /\ a \in acceptors
-      /\ commit_lsns[a] \in 0..max_entries
+      /\ DOMAIN acc_state[a] = {"term", "termHistory", "wal"}
+      /\ acc_state[a].term \in Terms
+      /\ IsTermHistory(acc_state[a].termHistory)
+      /\ IsWal(acc_state[a].wal)
+    /\ \A c \in committed:
+      /\ c.term \in Terms
+      /\ c.lsn \in Lsns
 
 \********************************************************************************
 \* Initial
@@ -121,18 +138,22 @@ Init ==
                       state |-> "campaign",
                       term |-> 1,
                       votes |-> EmptyF,
-                      donor_epoch |-> 0,
-                      vcl |-> 0,
+                      termHistory |-> << >>,
                       wal |-> << >>,
-                      next_send_lsn |-> EmptyF
+                      nextSendLsn |-> EmptyF
                   ]]
   /\ acc_state = [a \in acceptors |-> [
-                    \* there will be no leader in this term, 1 is the first real
+                    \* There will be no leader in zero term, 1 is the first
+                    \* real.
                     term |-> 0,
-                    epoch |-> 0,
+                    \* Again, leader in term 0 doesn't exist, but we initialize
+                    \* term histories with it to always have common point in
+                    \* them. Lsn is 1 because TLA+ sequences are indexed from 1 
+                    \* (we don't want to truncate WAL out of range).
+                    termHistory |-> << [term |-> 0, lsn |-> 1] >>,
                     wal |-> << >>
                  ]]
-  /\ commit_lsns = [a \in acceptors |-> 0]
+  /\ committed = {}
 
 
 \********************************************************************************
@@ -148,15 +169,18 @@ RestartProposer(p, q) ==
   /\ LET
        new_term == Maximum({acc_state[a].term : a \in q}) + 1
      IN
-       /\ new_term <= max_term
        /\ prop_state' = [prop_state EXCEPT ![p].state = "campaign",
                                            ![p].term = new_term,
                                            ![p].votes = EmptyF,
-                                           ![p].donor_epoch = 0,
-                                           ![p].vcl = 0,
+                                           ![p].termHistory = << >>,
                                            ![p].wal = << >>,
-                                           ![p].next_send_lsn = EmptyF]
-       /\ UNCHANGED <<acc_state, commit_lsns>>
+                                           ![p].nextSendLsn = EmptyF]
+       /\ UNCHANGED <<acc_state, committed>>
+
+\* Term history of acceptor a's WAL: the one saved truncated to contain only <=
+\* local FlushLsn entries.
+AcceptorTermHistory(a) ==
+    SelectSeq(acc_state[a].termHistory, LAMBDA th_entry: th_entry.lsn <= FlushLsn(a))
 
 \* Acceptor a immediately votes for proposer p.
 Vote(p, a) ==
@@ -164,140 +188,143 @@ Vote(p, a) ==
  /\ acc_state[a].term < prop_state[p].term \* main voting condition
  /\ acc_state' = [acc_state EXCEPT ![a].term = prop_state[p].term]
  /\ LET
-      vote == [epoch |-> acc_state[a].epoch, flush_lsn |-> FlushLsn(a)]
+      vote == [termHistory |-> AcceptorTermHistory(a), flushLsn |-> FlushLsn(a)]
     IN
       prop_state' = [prop_state EXCEPT ![p].votes = prop_state[p].votes @@ (a :> vote)]
- /\ UNCHANGED <<commit_lsns>>
+ /\ UNCHANGED <<committed>>
 
+
+\* Get lastLogTerm from term history th.
+LastLogTerm(th) == th[Len(th)].term
 
 \* Proposer p gets elected.
 BecomeLeader(p) ==
   /\ prop_state[p].state = "campaign"
   /\ Quorum(DOMAIN prop_state[p].votes)
   /\ LET
-       max_epoch == Maximum({v.epoch : v \in FValues(prop_state[p].votes)})
-       max_epoch_votes == {v \in FValues(prop_state[p].votes) : v.epoch = max_epoch}
-       donor == CHOOSE dv \in DOMAIN prop_state[p].votes :
-                     /\ prop_state[p].votes[dv].epoch = max_epoch
-                     /\ \A v \in max_epoch_votes:
-                       prop_state[p].votes[dv].flush_lsn >= v.flush_lsn
-       max_vote == prop_state[p].votes[donor]
-       \* Establish lsn to stream from for voters.
-       \* At some point it seemed like we can regard log as correct and only
-       \* append to it if has in the max_epoch, however TLC showed that's not
-       \* the case; we must always stream since first not matching record.
-       next_send_lsn == [voter \in DOMAIN prop_state[p].votes |-> 1]
+       \* Find acceptor with the highest <last_log_term, lsn> vote.
+       max_vote_acc == CHOOSE a \in DOMAIN prop_state[p].votes:
+                         LET v == prop_state[p].votes[a]
+                         IN \A v2 \in Range(prop_state[p].votes): 
+                              /\ LastLogTerm(v.termHistory) >= LastLogTerm(v2.termHistory)
+                              /\ (LastLogTerm(v.termHistory) = LastLogTerm(v2.termHistory) => v.flushLsn >= v2.flushLsn)
+       max_vote == prop_state[p].votes[max_vote_acc]
+       prop_th == Append(max_vote.termHistory, [term |-> prop_state[p].term, lsn |-> max_vote.flushLsn])
      IN
-          \* we fetch log from the most advanced node (this is separate
-          \* roundtrip), make sure node is still on one term with us
-       /\ acc_state[donor].term = prop_state[p].term
+        \* We copy all log preceding proposer's term from the max vote node so
+        \* make sure it is still on one term with us. This is a model
+        \* simplification which can be removed, in impl we fetch WAL on demand
+        \* later. Note though that in case of on demand fetch we must check on
+        \* donor not only term match, but that truncate_wal had already been
+        \* done (if it is not max_vote_acc).
+       /\ acc_state[max_vote_acc].term = prop_state[p].term
        /\ prop_state' = [prop_state EXCEPT ![p].state = "leader",
-                                           \* fetch the log from donor
-                                           ![p].wal = acc_state[donor].wal,
-                                           ![p].donor_epoch = max_epoch,
-                                           ![p].vcl = max_vote.flush_lsn,
-                                           ![p].next_send_lsn = next_send_lsn]
-       /\ UNCHANGED <<acc_state, commit_lsns>>
+                                           ![p].termHistory = prop_th,
+                                           ![p].wal = acc_state[max_vote_acc].wal
+                        ]
+       /\ UNCHANGED <<acc_state, committed>>
 
 
-\* acceptor a learns about elected proposer p's term.
+\* Acceptor a learns about elected proposer p's term. In impl it matches to
+\* VoteRequest/VoteResponse exchange when leader is already elected and is not
+\* interested in the vote result.
 UpdateTerm(p, a) ==
   /\ prop_state[p].state = "leader"
   /\ acc_state[a].term < prop_state[p].term
   /\ acc_state' = [acc_state EXCEPT ![a].term = prop_state[p].term]
-  /\ UNCHANGED <<prop_state, commit_lsns>>
+  /\ UNCHANGED <<prop_state, committed>>
 
 
 \* Acceptor a which didn't participate in voting connects to elected proposer p
 \* and p sets the streaming point
-HandshakeWithLeader(p, a) ==
-  /\ prop_state[p].state = "leader"
-  /\ acc_state[a].term = prop_state[p].term
-  /\ a \notin DOMAIN prop_state[p].next_send_lsn
-  /\ LET
-       next_send_lsn == prop_state[p].next_send_lsn @@ (a :> 1)
-     IN
-       prop_state' = [prop_state EXCEPT ![p].next_send_lsn = next_send_lsn]
-  /\ UNCHANGED <<acc_state, commit_lsns>>
+\* HandshakeWithLeader(p, a) ==
+\*   /\ prop_state[p].state = "leader"
+\*   /\ acc_state[a].term = prop_state[p].term
+\*   /\ a \notin DOMAIN prop_state[p].next_send_lsn
+\*   /\ LET
+\*        next_send_lsn == prop_state[p].next_send_lsn @@ (a :> 1)
+\*      IN
+\*        prop_state' = [prop_state EXCEPT ![p].next_send_lsn = next_send_lsn]
+\*   /\ UNCHANGED <<acc_state, commit_lsns>>
 
 
 \* Append new log entry to elected proposer
-NewEntry(p) ==
-  /\ prop_state[p].state = "leader"
-  /\ Len(prop_state[p].wal) < max_entries \* model constraint
-  /\ LET
-       new_lsn == IF Len(prop_state[p].wal) = 0 THEN
-                    prop_state[p].vcl + 1
-                  ELSE
-                    \* lsn of last record + 1
-                    prop_state[p].wal[Len(prop_state[p].wal)].lsn + 1
-       new_entry == [lsn |-> new_lsn, epoch |-> prop_state[p].term]
-     IN
-       /\ prop_state' = [prop_state EXCEPT ![p].wal = Append(prop_state[p].wal, new_entry)]
-       /\ UNCHANGED <<acc_state, commit_lsns>>
+\* NewEntry(p) ==
+\*   /\ prop_state[p].state = "leader"
+\*   /\ Len(prop_state[p].wal) < max_entries \* model constraint
+\*   /\ LET
+\*        new_lsn == IF Len(prop_state[p].wal) = 0 THEN
+\*                     prop_state[p].vcl + 1
+\*                   ELSE
+\*                     \* lsn of last record + 1
+\*                     prop_state[p].wal[Len(prop_state[p].wal)].lsn + 1
+\*        new_entry == [lsn |-> new_lsn, epoch |-> prop_state[p].term]
+\*      IN
+\*        /\ prop_state' = [prop_state EXCEPT ![p].wal = Append(prop_state[p].wal, new_entry)]
+\*        /\ UNCHANGED <<acc_state, commit_lsns>>
 
 
-\* Write entry new_e to log wal, rolling back all higher entries if e is different.
-\* If bump_epoch is TRUE, it means we get record with lsn=vcl and going to update
-\* the epoch. Truncate log in this case as well, as we might have correct <= vcl
-\* part and some outdated entries behind it which we want to purge before
-\* declaring us as recovered. Another way to accomplish this (in previous commit)
-\* is wait for first-entry-from-new-epoch before bumping it.
-WriteEntry(wal, new_e, bump_epoch) ==
-  (new_e.lsn :> new_e) @@
-  \* If wal has entry with such lsn and it is different, truncate all higher log.
-  IF \/ (new_e.lsn \in DOMAIN wal /\ wal[new_e.lsn] /= new_e)
-     \/ bump_epoch THEN
-    SelectSeq(wal, LAMBDA e: e.lsn < new_e.lsn)
-  ELSE
-    wal
+\* \* Write entry new_e to log wal, rolling back all higher entries if e is different.
+\* \* If bump_epoch is TRUE, it means we get record with lsn=vcl and going to update
+\* \* the epoch. Truncate log in this case as well, as we might have correct <= vcl
+\* \* part and some outdated entries behind it which we want to purge before
+\* \* declaring us as recovered. Another way to accomplish this (in previous commit)
+\* \* is wait for first-entry-from-new-epoch before bumping it.
+\* WriteEntry(wal, new_e, bump_epoch) ==
+\*   (new_e.lsn :> new_e) @@
+\*   \* If wal has entry with such lsn and it is different, truncate all higher log.
+\*   IF \/ (new_e.lsn \in DOMAIN wal /\ wal[new_e.lsn] /= new_e)
+\*      \/ bump_epoch THEN
+\*     SelectSeq(wal, LAMBDA e: e.lsn < new_e.lsn)
+\*   ELSE
+\*     wal
 
 
-\* Try to transfer entry from elected proposer p to acceptor a
-TransferEntry(p, a) ==
-  /\ prop_state[p].state = "leader"
-  /\ prop_state[p].term = acc_state[a].term
-  /\ a \in DOMAIN prop_state[p].next_send_lsn
-  /\ LET
-       next_e == NextEntry(p, a)
-     IN
-       /\ next_e /= NULL
-       /\ LET
-            \* Consider bumping epoch if getting this entry recovers the acceptor,
-            \* that is, we reach first record behind VCL.
-            new_epoch ==
-              IF /\ acc_state[a].epoch < prop_state[p].term
-                 /\ next_e.lsn >= prop_state[p].vcl
-              THEN
-                prop_state[p].term
-              ELSE
-                acc_state[a].epoch
-            \* Also check whether this entry allows to advance commit_lsn and
-            \* if so, bump it where possible. Modeling this as separate action
-            \* significantly bloats the space (5m vs 15m on max_entries=3 max_term=3,
-            \* so act immediately.
-            entry_owners == {o \in acceptors:
-                               /\ o /= a
-                               \* only recovered acceptors advance commit_lsn
-                               /\ acc_state[o].epoch = prop_state[p].term
-                               /\ next_e \in FValues(acc_state[o].wal)} \cup {a}
-          IN
-            /\ acc_state' = [acc_state EXCEPT ![a].wal = WriteEntry(acc_state[a].wal, next_e, new_epoch /= acc_state[a].epoch),
-                                              ![a].epoch = new_epoch]
-            /\ prop_state' = [prop_state EXCEPT ![p].next_send_lsn[a] =
-                                                  prop_state[p].next_send_lsn[a] + 1]
-            /\ commit_lsns' = IF /\ new_epoch = prop_state[p].term
-                                 /\ Quorum(entry_owners)
-                              THEN
-                                [acc \in acceptors |->
-                                   IF /\ acc \in entry_owners
-                                      /\ next_e.lsn > commit_lsns[acc]
-                                   THEN
-                                     next_e.lsn
-                                   ELSE
-                                       commit_lsns[acc]]
-                              ELSE
-                                commit_lsns
+\* \* Try to transfer entry from elected proposer p to acceptor a
+\* TransferEntry(p, a) ==
+\*   /\ prop_state[p].state = "leader"
+\*   /\ prop_state[p].term = acc_state[a].term
+\*   /\ a \in DOMAIN prop_state[p].next_send_lsn
+\*   /\ LET
+\*        next_e == NextEntry(p, a)
+\*      IN
+\*        /\ next_e /= NULL
+\*        /\ LET
+\*             \* Consider bumping epoch if getting this entry recovers the acceptor,
+\*             \* that is, we reach first record behind VCL.
+\*             new_epoch ==
+\*               IF /\ acc_state[a].epoch < prop_state[p].term
+\*                  /\ next_e.lsn >= prop_state[p].vcl
+\*               THEN
+\*                 prop_state[p].term
+\*               ELSE
+\*                 acc_state[a].epoch
+\*             \* Also check whether this entry allows to advance commit_lsn and
+\*             \* if so, bump it where possible. Modeling this as separate action
+\*             \* significantly bloats the space (5m vs 15m on max_entries=3 max_term=3,
+\*             \* so act immediately.
+\*             entry_owners == {o \in acceptors:
+\*                                /\ o /= a
+\*                                \* only recovered acceptors advance commit_lsn
+\*                                /\ acc_state[o].epoch = prop_state[p].term
+\*                                /\ next_e \in Range(acc_state[o].wal)} \cup {a}
+\*           IN
+\*             /\ acc_state' = [acc_state EXCEPT ![a].wal = WriteEntry(acc_state[a].wal, next_e, new_epoch /= acc_state[a].epoch),
+\*                                               ![a].epoch = new_epoch]
+\*             /\ prop_state' = [prop_state EXCEPT ![p].next_send_lsn[a] =
+\*                                                   prop_state[p].next_send_lsn[a] + 1]
+\*             /\ commit_lsns' = IF /\ new_epoch = prop_state[p].term
+\*                                  /\ Quorum(entry_owners)
+\*                               THEN
+\*                                 [acc \in acceptors |->
+\*                                    IF /\ acc \in entry_owners
+\*                                       /\ next_e.lsn > commit_lsns[acc]
+\*                                    THEN
+\*                                      next_e.lsn
+\*                                    ELSE
+\*                                        commit_lsns[acc]]
+\*                               ELSE
+\*                                 commit_lsns
 
 
 \*******************************************************************************
@@ -309,11 +336,11 @@ Next ==
   \/ \E p \in proposers: \E a \in acceptors: Vote(p, a)
   \/ \E p \in proposers: BecomeLeader(p)
   \/ \E p \in proposers: \E a \in acceptors: UpdateTerm(p, a)
-  \/ \E p \in proposers: \E a \in acceptors: HandshakeWithLeader(p, a)
-  \/ \E p \in proposers: NewEntry(p)
-  \/ \E p \in proposers: \E a \in acceptors: TransferEntry(p, a)
+\*   \/ \E p \in proposers: \E a \in acceptors: HandshakeWithLeader(p, a)
+\*   \/ \E p \in proposers: NewEntry(p)
+\*   \/ \E p \in proposers: \E a \in acceptors: TransferEntry(p, a)
 
-Spec == Init /\ [][Next]_<<prop_state, acc_state, commit_lsns>>
+Spec == Init /\ [][Next]_<<prop_state, acc_state, committed>>
 
 
 \********************************************************************************
@@ -330,52 +357,37 @@ ElectionSafety ==
 LogIsMonotonic ==
   \A a \in acceptors:
     \A i \in DOMAIN acc_state[a].wal: \A j \in DOMAIN acc_state[a].wal:
-      (i > j) => (/\ acc_state[a].wal[i].lsn > acc_state[a].wal[j].lsn
-                  /\ acc_state[a].wal[i].epoch >= acc_state[a].wal[j].epoch)
+      (i > j) => (acc_state[a].wal[i] >= acc_state[a].wal[j])
 
-\* Main invariant: log under commit_lsn must match everywhere.
+\* Main invariant: If two entries are committed at the same LSN, they must be
+\* the same entry.
 LogSafety ==
-  \A a1 \in acceptors: \A a2 \in acceptors:
-    LET
-      common_len == Min(commit_lsns[a1], commit_lsns[a2])
-    IN
-      SubSeq(acc_state[a1].wal, 1, common_len) = SubSeq(acc_state[a2].wal, 1, common_len)
+    \A c1, c2 \in committed: (c1.lsn[1] = c2.lsn) => (c1 = c2)
 
-\* Next record we are going to push to acceptor must never overwrite committed
-\* different record.
-CommittedNotOverwritten ==
-  \A p \in proposers: \A a \in acceptors:
-    (/\ prop_state[p].state = "leader"
-     /\ prop_state[p].term = acc_state[a].term
-     /\ a \in DOMAIN prop_state[p].next_send_lsn) =>
-       LET
-         next_e == NextEntry(p, a)
-       IN
-         (next_e /= NULL) =>
-          ((commit_lsns[a] >= next_e.lsn) => (acc_state[a].wal[next_e.lsn] = next_e))
+\* \* Next record we are going to push to acceptor must never overwrite committed
+\* \* different record.
+\* CommittedNotOverwritten ==
+\*   \A p \in proposers: \A a \in acceptors:
+\*     (/\ prop_state[p].state = "leader"
+\*      /\ prop_state[p].term = acc_state[a].term
+\*      /\ a \in DOMAIN prop_state[p].next_send_lsn) =>
+\*        LET
+\*          next_e == NextEntry(p, a)
+\*        IN
+\*          (next_e /= NULL) =>
+\*           ((commit_lsns[a] >= next_e.lsn) => (acc_state[a].wal[next_e.lsn] = next_e))
 
 \********************************************************************************
 \* Invariants which don't need to hold, but useful for playing/debugging.
 \********************************************************************************
 
-\* Limits max commit_lsn. That way we can check that we'are actually committing something.
-MaxCommitLsn == \A a \in acceptors: commit_lsns[a] < 2
+\* Limits term of elected proposers
+MaxTerm == \A p \in proposers: (prop_state[p].state = "leader" => prop_state[p].term < 2)
+
+\* Limits max number of committed entries. That way we can check that we'are
+\* actually committing something.
+MaxCommitLsn == Cardinality(committed) < 2
 
 
-
-Alias ==
-  [prop_state |-> prop_state,
-   acc_state |-> acc_state,
-   commit_lsns |-> commit_lsns]
-\* Alias == [
-\*     x |-> 2
-\* ]
-    \* [
-    \*     currentTerm |-> currentTerm,
-    \*     state |-> state,
-    \*     log |-> log,
-    \*     config |-> config,
-    \*     committed |-> committed
-    \* ]
 
 ====
