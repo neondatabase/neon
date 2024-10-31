@@ -374,7 +374,7 @@ def test_timeline_offload_persist(neon_env_builder: NeonEnvBuilder, delete_timel
 
 def test_timeline_offload_retain_lsn(neon_env_builder: NeonEnvBuilder):
     """
-    Ensure that retain_lsn functionality for offloaded timelines actually works
+    Ensure that retain_lsn functionality for offloaded timelines works
     """
     env = neon_env_builder.init_start()
     ps_http = env.pageserver.http_client()
@@ -382,11 +382,18 @@ def test_timeline_offload_retain_lsn(neon_env_builder: NeonEnvBuilder):
     # Turn off gc and compaction loops: we want to issue them manually for better reliability
     tenant_id, root_timeline_id = env.create_tenant(
         conf={
+            # small checkpointing and compaction targets to ensure we generate many upload operations
+            "checkpoint_distance": 128 * 1024,
+            "compaction_threshold": 1,
+            "compaction_target_size": 128 * 1024,
+            "image_creation_threshold": 1024 ** 3,
+            # disable background compaction and GC. We invoke it manually when we want it to happen.
             "gc_period": "0s",
             "compaction_period": "0s",
-            "checkpoint_distance": f"{1024 ** 2}",
             # Disable pitr, we only want the latest lsn
-            "pitr_interval": "0 s",
+            "pitr_interval": "0s",
+            # Don't rely on endpoint lsn leases
+            "lsn_lease_length": "0s",
         }
     )
 
@@ -395,7 +402,7 @@ def test_timeline_offload_retain_lsn(neon_env_builder: NeonEnvBuilder):
             [
                 "CREATE TABLE foo(v int, key serial primary key, t text default 'data_content')",
                 "SELECT setseed(0.4321)",
-                "INSERT INTO foo SELECT v FROM (SELECT generate_series(1,32768), (random() * 409600)::int as v)",
+                "INSERT INTO foo SELECT v FROM (SELECT generate_series(1,4096), (random() * 409600)::int as v)",
             ]
         )
         pre_branch_sum = endpoint.safe_psql("SELECT sum(key) from foo where key < 51200")
@@ -405,11 +412,26 @@ def test_timeline_offload_retain_lsn(neon_env_builder: NeonEnvBuilder):
     # Create a branch and write some additional data to the parent
     child_timeline_id = env.create_branch("test_archived_branch", tenant_id)
 
-    with env.endpoints.create_start("main", tenant_id=tenant_id) as endpoint:
+    """
+    with env.endpoints.create_start("test_archived_branch", tenant_id=tenant_id) as endpoint:
         endpoint.safe_psql_many(
             [
                 "SELECT setseed(0.812345)",
-                "INSERT INTO foo SELECT v FROM (SELECT generate_series(1,32768), (random() * 409600)::int as v)",
+                "INSERT INTO foo SELECT v FROM (SELECT generate_series(1,64), (random() * 409600)::int as v)",
+                "DELETE FROM foo WHERE v > 204800",
+                "VACUUM foo",
+            ]
+        )
+        child_sum = endpoint.safe_psql("SELECT sum(key) from foo where key < 51200")
+        log.info(f"Child branch sum: {child_sum}")
+        last_flush_lsn_upload(env, endpoint, tenant_id, child_timeline_id)
+    """
+
+    with env.endpoints.create_start("main", tenant_id=tenant_id) as endpoint:
+        endpoint.safe_psql_many(
+            [
+                "SELECT setseed(0.345678)",
+                "INSERT INTO foo SELECT v FROM (SELECT generate_series(1,4096), (random() * 409600)::int as v)",
                 "DELETE FROM foo WHERE v > 204800",
                 "VACUUM foo",
             ]
@@ -430,11 +452,15 @@ def test_timeline_offload_retain_lsn(neon_env_builder: NeonEnvBuilder):
     assert leaf_detail["is_archived"] is True
     ps_http.timeline_offload(tenant_id, child_timeline_id)
 
-    # Do an agressive compaction of the parent branch
+    env.pageserver.stop()
+    env.pageserver.start()
+
+    # Do an agressive gc and compaction of the parent branch
+    ps_http.timeline_gc(tenant_id=tenant_id, timeline_id=root_timeline_id, gc_horizon=0)
     ps_http.timeline_checkpoint(
         tenant_id,
         root_timeline_id,
-        force_image_layer_creation=True,
+        #force_image_layer_creation=True,
         force_l0_compaction=True,
         force_repartition=True,
         wait_until_uploaded=True,
@@ -451,4 +477,3 @@ def test_timeline_offload_retain_lsn(neon_env_builder: NeonEnvBuilder):
     with env.endpoints.create_start("test_archived_branch", tenant_id=tenant_id) as endpoint:
         sum = endpoint.safe_psql("SELECT sum(key) from foo where key < 51200")
         assert sum == pre_branch_sum
-        last_flush_lsn_upload(env, endpoint, tenant_id, root_timeline_id)
