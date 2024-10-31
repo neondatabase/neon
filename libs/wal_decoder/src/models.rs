@@ -2,7 +2,8 @@
 //! ready for the pageserver to interpret. They are derived from the original
 //! WAL records, so that each struct corresponds closely to one WAL record of
 //! a specific kind. They contain the same information as the original WAL records,
-//! just decoded into structs and fields for easier access.
+//! but the values are already serialized in a [`SerializedValueBatch`], which
+//! is the format that the pageserver is expecting them in.
 //!
 //! The ingestion code uses these structs to help with parsing the WAL records,
 //! and it splits them into a stream of modifications to the key-value pairs that
