@@ -67,9 +67,7 @@ pub(crate) async fn offload_timeline(
     // to make deletions possible while offloading is in progress
 
     let conf = &tenant.conf;
-    delete_local_timeline_directory(conf, tenant.tenant_shard_id, &timeline)
-        .await
-        .map_err(OffloadError::Other)?;
+    delete_local_timeline_directory(conf, tenant.tenant_shard_id, &timeline).await;
 
     remove_timeline_from_tenant(tenant, &timeline, &guard);
 
