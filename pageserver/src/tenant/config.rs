@@ -350,9 +350,9 @@ pub struct TenantConfOpt {
     #[serde(default)]
     pub lsn_lease_length_for_ts: Option<Duration>,
 
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
-    pub timeline_offloading: bool,
+    pub timeline_offloading: Option<bool>,
 }
 
 impl TenantConfOpt {
@@ -415,6 +415,7 @@ impl TenantConfOpt {
             lsn_lease_length_for_ts: self
                 .lsn_lease_length_for_ts
                 .unwrap_or(global_conf.lsn_lease_length_for_ts),
+            timeline_offloading: self.lazy_slru_download.unwrap_or(global_conf.timeline_offloading),
         }
     }
 }
