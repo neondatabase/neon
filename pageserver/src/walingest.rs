@@ -159,7 +159,7 @@ impl WalIngest {
         if matches!(interpreted.flush_uncommitted, FlushUncommittedRecords::Yes) {
             // Records of this type should always be preceded by a commit(), as they
             // rely on reading data pages back from the Timeline.
-            assert!(!modification.dirty());
+            assert!(!modification.has_dirty_data());
         }
 
         assert!(!self.checkpoint_modified);

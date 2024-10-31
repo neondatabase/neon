@@ -1054,7 +1054,7 @@ impl<'a> DatadirModification<'a> {
             + self.pending_metadata_bytes
     }
 
-    pub(crate) fn dirty(&self) -> bool {
+    pub(crate) fn has_dirty_data(&self) -> bool {
         !self
             .pending_data_batch
             .as_ref()
