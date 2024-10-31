@@ -157,7 +157,12 @@ def test_physical_replication_config_mismatch_too_many_known_xids(neon_simple_en
     """
     env = neon_simple_env
     primary = env.endpoints.create_start(
-        branch_name="main", endpoint_id="primary", config_lines=["max_connections=1000"]
+        branch_name="main",
+        endpoint_id="primary",
+        config_lines=[
+            "max_connections=1000",
+            "shared_buffers=128MB",  # prevent "no unpinned buffers available" error
+        ],
     )
     secondary = env.endpoints.new_replica_start(
         origin=primary,
