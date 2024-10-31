@@ -398,9 +398,7 @@ fn start_pageserver(
         ControllerUpcallClient::new(conf, &shutdown_pageserver),
         conf,
     );
-    if let Some(deletion_workers) = deletion_workers {
-        deletion_workers.spawn_with(BACKGROUND_RUNTIME.handle());
-    }
+    deletion_workers.spawn_with(BACKGROUND_RUNTIME.handle());
 
     // Up to this point no significant I/O has been done: this should have been fast.  Record
     // duration prior to starting I/O intensive phase of startup.
