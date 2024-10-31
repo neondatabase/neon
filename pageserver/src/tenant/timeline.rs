@@ -20,6 +20,7 @@ use chrono::{DateTime, Utc};
 use enumset::EnumSet;
 use fail::fail_point;
 use handle::ShardTimelineId;
+use offload::OffloadError;
 use once_cell::sync::Lazy;
 use pageserver_api::{
     key::{
@@ -4475,9 +4476,21 @@ impl Drop for Timeline {
 pub(crate) enum CompactionError {
     #[error("The timeline or pageserver is shutting down")]
     ShuttingDown,
+    /// Compaction tried to offload a timeline and failed
+    #[error("Failed to offload timeline: {0}")]
+    Offload(OffloadError),
     /// Compaction cannot be done right now; page reconstruction and so on.
     #[error(transparent)]
     Other(anyhow::Error),
+}
+
+impl From<OffloadError> for CompactionError {
+    fn from(e: OffloadError) -> Self {
+        match e {
+            OffloadError::Cancelled => Self::ShuttingDown,
+            _ => Self::Offload(e),
+        }
+    }
 }
 
 impl CompactionError {

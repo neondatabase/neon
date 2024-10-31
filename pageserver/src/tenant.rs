@@ -2529,6 +2529,11 @@ impl Tenant {
                         .await
                         .inspect_err(|e| match e {
                             timeline::CompactionError::ShuttingDown => (),
+                            timeline::CompactionError::Offload(_) => {
+                                // Failures to offload timelines do not trip the circuit breaker, because
+                                // they do not do lots of writes the way compaction itself does: it is cheap
+                                // to retry, and it would be bad to stop all compaction because of an issue with offloading.
+                            }
                             timeline::CompactionError::Other(e) => {
                                 self.compaction_circuit_breaker
                                     .lock()
@@ -2544,8 +2549,7 @@ impl Tenant {
             if pending_task_left == Some(false) && *can_offload {
                 offload_timeline(self, timeline)
                     .instrument(info_span!("offload_timeline", %timeline_id))
-                    .await
-                    .map_err(timeline::CompactionError::Other)?;
+                    .await?;
             }
         }
 
