@@ -35,17 +35,17 @@ pub enum ValueMeta {
 }
 
 impl ValueMeta {
-    pub fn key(&self) -> &CompactKey {
+    pub fn key(&self) -> CompactKey {
         match self {
-            Self::Serialized(ser) => &ser.key,
-            Self::Observed(obs) => &obs.key,
+            Self::Serialized(ser) => ser.key,
+            Self::Observed(obs) => obs.key,
         }
     }
 
-    pub fn lsn(&self) -> &Lsn {
+    pub fn lsn(&self) -> Lsn {
         match self {
-            Self::Serialized(ser) => &ser.lsn,
-            Self::Observed(obs) => &obs.lsn,
+            Self::Serialized(ser) => ser.lsn,
+            Self::Observed(obs) => obs.lsn,
         }
     }
 }
@@ -486,11 +486,11 @@ impl SerializedValueBatch {
             let lsn = meta.lsn();
             let key = meta.key();
 
-            if let Some(prev_lsn) = last_seen_lsn_per_key.insert(*key, *lsn) {
+            if let Some(prev_lsn) = last_seen_lsn_per_key.insert(key, lsn) {
                 assert!(
-                    *lsn >= prev_lsn,
+                    lsn >= prev_lsn,
                     "Ordering violated by {}: {} < {}",
-                    Key::from_compact(*key),
+                    Key::from_compact(key),
                     lsn,
                     prev_lsn
                 );
@@ -514,7 +514,7 @@ mod tests {
             let meta = batch
                 .metadata
                 .iter()
-                .find(|meta| (meta.key(), meta.lsn()) == (key, lsn))
+                .find(|meta| (meta.key(), meta.lsn()) == (*key, *lsn))
                 .unwrap();
             let meta = match meta {
                 ValueMeta::Serialized(ser) => ser,
@@ -543,7 +543,7 @@ mod tests {
                         let meta = batch
                             .metadata
                             .iter()
-                            .find(|meta| (meta.key(), meta.lsn()) == (&gap_key.to_compact(), lsn))
+                            .find(|meta| (meta.key(), meta.lsn()) == (gap_key.to_compact(), *lsn))
                             .unwrap();
                         let meta = match meta {
                             ValueMeta::Serialized(ser) => ser,

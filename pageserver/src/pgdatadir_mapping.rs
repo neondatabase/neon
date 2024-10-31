@@ -1186,7 +1186,7 @@ impl<'a> DatadirModification<'a> {
         let mut gaps_at_lsns = Vec::default();
 
         for meta in batch.metadata.iter() {
-            let (rel, blkno) = Key::from_compact(*meta.key()).to_rel_block()?;
+            let (rel, blkno) = Key::from_compact(meta.key()).to_rel_block()?;
             let new_nblocks = blkno + 1;
 
             let old_nblocks = self.create_relation_if_required(rel, ctx).await?;
@@ -1211,7 +1211,7 @@ impl<'a> DatadirModification<'a> {
                 gap_accum.to_keyspace()
             };
 
-            gaps_at_lsns.push((gaps, *meta.lsn()));
+            gaps_at_lsns.push((gaps, meta.lsn()));
         }
 
         batch.zero_gaps(gaps_at_lsns);
