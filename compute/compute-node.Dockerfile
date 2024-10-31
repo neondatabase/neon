@@ -1067,20 +1067,16 @@ RUN case "${PG_VERSION}" in "v17") \
 #
 #########################################################################################
 
-FROM rust-extensions-build AS pg-session-jwt-build
+FROM rust-extensions-build-pgrx12 AS pg-session-jwt-build
 ARG PG_VERSION
 
-# TODO use versioned releases
-# add v17 support
 # NOTE: local_proxy depends on the version of pg_session_jwt
 # Do not update without approve from proxy team
-RUN case "${PG_VERSION}" in "v17") \
-    echo "pg_session_jwt does not yet have a release that supports pg17" && exit 0;; \
-    esac && \
-    wget https://github.com/neondatabase/pg_session_jwt/archive/e1310b08ba51377a19e0559e4d1194883b9b2ba2.tar.gz -O pg_session_jwt.tar.gz && \
-    echo "837932a077888d5545fd54b0abcc79e5f8e37017c2769a930afc2f5c94df6f4e pg_session_jwt.tar.gz" | sha256sum --check && \
+# Make sure the version is reflected in proxy/src/serverless/local_conn_pool.rs
+RUN wget https://github.com/neondatabase/pg_session_jwt/archive/refs/tags/v0.1.2-v17.tar.gz -O pg_session_jwt.tar.gz && \
+    echo "c8ecbed9cb8c6441bce5134a176002b043018adf9d05a08e457dda233090a86e pg_session_jwt.tar.gz" | sha256sum --check && \
     mkdir pg_session_jwt-src && cd pg_session_jwt-src && tar xzf ../pg_session_jwt.tar.gz --strip-components=1 -C . && \
-    sed -i 's/pgrx = "=0.11.3"/pgrx = { version = "=0.11.3", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
+    sed -i 's/pgrx = "0.12.6"/pgrx = { version = "=0.12.6", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
     cargo pgrx install --release
 
 #########################################################################################
