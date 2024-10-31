@@ -1,10 +1,10 @@
 ---- MODULE ProposerAcceptorStatic ----
 
-\* Differences from current implementation:
-\* - unified not-globally-unique epoch & term (node_id)
-\* Simplifications:
-\* - instant message delivery
-\* - feedback is not modeled separately, commit_lsn is updated directly
+\* Model simplifications:
+\* - Instant message delivery. Notably, ProposerElected message (TruncateWal action) is not
+\*   delayed, so we don't attempt to truncate WAL when the same wp already appended something 
+\*   on the acceptor since common point had been calculated (this should be rejected).
+\* - old WAL is immediately copied to proposer on its election, without on-demand fetch later.
 
 EXTENDS Integers, Sequences, FiniteSets, TLC
 
@@ -190,7 +190,7 @@ Vote(p, a) ==
  /\ LET
       vote == [termHistory |-> AcceptorTermHistory(a), flushLsn |-> FlushLsn(a)]
     IN
-      prop_state' = [prop_state EXCEPT ![p].votes = prop_state[p].votes @@ (a :> vote)]
+      prop_state' = [prop_state EXCEPT ![p].votes = (a :> vote) @@ prop_state[p].votes]
  /\ UNCHANGED <<committed>>
 
 
@@ -234,50 +234,53 @@ UpdateTerm(p, a) ==
   /\ acc_state' = [acc_state EXCEPT ![a].term = prop_state[p].term]
   /\ UNCHANGED <<prop_state, committed>>
 
+\* Find highest common point in the logs of proposer p and acceptor a.
+\* Returns <term, lsn> of the highest common point.
+FindHighestCommonPoint(prop_th, acc_th, acc_flush_lsn) ==
+    LET
+      \* First find index of the highest common term. 
+      \* It must exist because we initialize th with <0, 1>.
+      last_common_idx == Maximum({i \in 1..Min(Len(prop_th), Len(acc_th)): prop_th[i].term = acc_th[i].term})
+      last_common_term == prop_th[last_common_idx].term
+      \* Now find where it ends at both prop and acc and take min. End of term
+      \* is the start of the next unless it is the last one; there it is 
+      \* flush_lsn in case of acceptor. In case of proposer it is the current 
+      \* writing position, but it can't be less than flush_lsn, so we 
+      \* take flush_lsn.
+      acc_common_term_end == IF last_common_idx = Len(acc_th) THEN acc_flush_lsn ELSE acc_th[last_common_idx + 1].lsn
+      prop_common_term_end == IF last_common_idx = Len(prop_th) THEN acc_flush_lsn ELSE prop_th[last_common_idx + 1].lsn
+    IN   
+      [term |-> last_common_term, lsn |-> Min(acc_common_term_end, prop_common_term_end)]
 
-\* Acceptor a which didn't participate in voting connects to elected proposer p
-\* and p sets the streaming point
-\* HandshakeWithLeader(p, a) ==
-\*   /\ prop_state[p].state = "leader"
-\*   /\ acc_state[a].term = prop_state[p].term
-\*   /\ a \notin DOMAIN prop_state[p].next_send_lsn
-\*   /\ LET
-\*        next_send_lsn == prop_state[p].next_send_lsn @@ (a :> 1)
-\*      IN
-\*        prop_state' = [prop_state EXCEPT ![p].next_send_lsn = next_send_lsn]
-\*   /\ UNCHANGED <<acc_state, commit_lsns>>
-
+\* Elected proposer p immediately truncates WAL (and term history) of acceptor a
+\* before starting streaming. Establishes nextSendLsn for a.
+\*
+\* In impl this happens at each reconnection, here we also allow to do it multiple times.
+TruncateWal(p, a) ==
+  /\ prop_state[p].state = "leader"
+  /\ acc_state[a].term = prop_state[p].term
+  /\ LET
+       hcp == FindHighestCommonPoint(prop_state[p].termHistory, AcceptorTermHistory(a), FlushLsn(a))
+       next_send_lsn == (a :> hcp.lsn) @@ prop_state[p].nextSendLsn
+     IN
+          \* Acceptor persists full history immediately; reads adjust it to the
+          \* really existing wal with AcceptorTermHistory.
+       /\ acc_state' = [acc_state EXCEPT ![a].termHistory = prop_state[p].termHistory,
+                                         \* note: SubSeq is inclusive, hence -1.
+                                         ![a].wal = SubSeq(acc_state[a].wal, 1, hcp.lsn - 1)
+                       ]
+       /\ prop_state' = [prop_state EXCEPT ![p].nextSendLsn = next_send_lsn]
+       /\ UNCHANGED <<committed>>
 
 \* Append new log entry to elected proposer
-\* NewEntry(p) ==
-\*   /\ prop_state[p].state = "leader"
-\*   /\ Len(prop_state[p].wal) < max_entries \* model constraint
-\*   /\ LET
-\*        new_lsn == IF Len(prop_state[p].wal) = 0 THEN
-\*                     prop_state[p].vcl + 1
-\*                   ELSE
-\*                     \* lsn of last record + 1
-\*                     prop_state[p].wal[Len(prop_state[p].wal)].lsn + 1
-\*        new_entry == [lsn |-> new_lsn, epoch |-> prop_state[p].term]
-\*      IN
-\*        /\ prop_state' = [prop_state EXCEPT ![p].wal = Append(prop_state[p].wal, new_entry)]
-\*        /\ UNCHANGED <<acc_state, commit_lsns>>
-
-
-\* \* Write entry new_e to log wal, rolling back all higher entries if e is different.
-\* \* If bump_epoch is TRUE, it means we get record with lsn=vcl and going to update
-\* \* the epoch. Truncate log in this case as well, as we might have correct <= vcl
-\* \* part and some outdated entries behind it which we want to purge before
-\* \* declaring us as recovered. Another way to accomplish this (in previous commit)
-\* \* is wait for first-entry-from-new-epoch before bumping it.
-\* WriteEntry(wal, new_e, bump_epoch) ==
-\*   (new_e.lsn :> new_e) @@
-\*   \* If wal has entry with such lsn and it is different, truncate all higher log.
-\*   IF \/ (new_e.lsn \in DOMAIN wal /\ wal[new_e.lsn] /= new_e)
-\*      \/ bump_epoch THEN
-\*     SelectSeq(wal, LAMBDA e: e.lsn < new_e.lsn)
-\*   ELSE
-\*     wal
+NewEntry(p) ==
+  /\ prop_state[p].state = "leader"
+  /\ LET
+       \* entry consists only of term, index serves as LSN.
+       new_entry == prop_state[p].term
+     IN
+       /\ prop_state' = [prop_state EXCEPT ![p].wal = Append(prop_state[p].wal, new_entry)]
+       /\ UNCHANGED <<acc_state, committed>>
 
 
 \* \* Try to transfer entry from elected proposer p to acceptor a
@@ -336,8 +339,8 @@ Next ==
   \/ \E p \in proposers: \E a \in acceptors: Vote(p, a)
   \/ \E p \in proposers: BecomeLeader(p)
   \/ \E p \in proposers: \E a \in acceptors: UpdateTerm(p, a)
-\*   \/ \E p \in proposers: \E a \in acceptors: HandshakeWithLeader(p, a)
-\*   \/ \E p \in proposers: NewEntry(p)
+  \/ \E p \in proposers: \E a \in acceptors: TruncateWal(p, a)
+  \/ \E p \in proposers: NewEntry(p)
 \*   \/ \E p \in proposers: \E a \in acceptors: TransferEntry(p, a)
 
 Spec == Init /\ [][Next]_<<prop_state, acc_state, committed>>
