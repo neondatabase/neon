@@ -1397,7 +1397,7 @@ def neon_simple_env(
     pageserver_virtual_file_io_mode: Optional[str],
 ) -> Iterator[NeonEnv]:
     """
-    Simple Neon environment, with no authentication and no safekeepers.
+    Simple Neon environment, with 1 safekeeper and 1 pageserver. No authentication, no fsync.
 
     This fixture will use RemoteStorageKind.LOCAL_FS with pageserver.
     """
@@ -4710,17 +4710,13 @@ def tenant_get_shards(
     else:
         override_pageserver = None
 
-    if len(env.pageservers) > 1:
-        return [
-            (
-                TenantShardId.parse(s["shard_id"]),
-                override_pageserver or env.get_pageserver(s["node_id"]),
-            )
-            for s in env.storage_controller.locate(tenant_id)
-        ]
-    else:
-        # Assume an unsharded tenant
-        return [(TenantShardId(tenant_id, 0, 0), override_pageserver or env.pageserver)]
+    return [
+        (
+            TenantShardId.parse(s["shard_id"]),
+            override_pageserver or env.get_pageserver(s["node_id"]),
+        )
+        for s in env.storage_controller.locate(tenant_id)
+    ]
 
 
 def wait_replica_caughtup(primary: Endpoint, secondary: Endpoint):
