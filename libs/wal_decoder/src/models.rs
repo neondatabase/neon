@@ -49,7 +49,7 @@ pub struct InterpretedWalRecord {
     /// by the pageserver
     pub batch: SerializedValueBatch,
     /// Byte offset within WAL for the end of the original PG WAL record
-    pub lsn: Lsn,
+    pub end_lsn: Lsn,
     /// Whether to flush all uncommitted modifications to the storage engine
     /// before ingesting this record. This is currently only used for legacy PG
     /// database creations which read pages from a template database. Such WAL
