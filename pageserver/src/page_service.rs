@@ -1417,14 +1417,21 @@ impl PageServiceCmd {
         let Some((cmd, other)) = query.split_once(' ') else {
             bail!("cannot parse query: {}", query)
         };
-        match cmd {
+        match cmd.to_ascii_lowercase().as_str() {
             "pagestream_v2" => Ok(Self::PageStream(PageStreamCmd::parse(other)?)),
             "basebackup" => Ok(Self::BaseBackup(BaseBackupCmd::parse(other)?)),
             "fullbackup" => Ok(Self::FullBackup(FullBackupCmd::parse(other)?)),
-            "lease" => match other.split_once(' ') {
-                Some(("lsn", other)) => Ok(Self::LeaseLsn(LeaseLsnCmd::parse(other)?)),
-                _ => bail!("invalid lease command: {}", cmd),
-            },
+            "lease" => {
+                let Some((cmd2, other)) = other.split_once(' ') else {
+                    bail!("invalid lease command: {}", cmd);
+                };
+                let cmd2 = cmd2.to_ascii_lowercase();
+                if cmd2 == "lsn" {
+                    Ok(Self::LeaseLsn(LeaseLsnCmd::parse(other)?))
+                } else {
+                    bail!("invalid lease command: {}", cmd);
+                }
+            }
             "set" => Ok(Self::Set),
             _ => Err(anyhow::anyhow!("unsupported command {} in {}", cmd, query)),
         }
@@ -1812,6 +1819,8 @@ mod tests {
         );
         let cmd = PageServiceCmd::parse("set a = b").unwrap();
         assert_eq!(cmd, PageServiceCmd::Set);
+        let cmd = PageServiceCmd::parse("SET foo").unwrap();
+        assert_eq!(cmd, PageServiceCmd::Set);
     }
 
     #[test]
@@ -1837,6 +1846,8 @@ mod tests {
         let cmd = PageServiceCmd::parse(&format!(
             "basebackup {tenant_id} {timeline_id} --gzip 0/16ABCDE"
         ));
+        assert!(cmd.is_err());
+        let cmd = PageServiceCmd::parse(&format!("lease {tenant_id} {timeline_id} gzip 0/16ABCDE"));
         assert!(cmd.is_err());
     }
 }
