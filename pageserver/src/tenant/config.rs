@@ -415,7 +415,9 @@ impl TenantConfOpt {
             lsn_lease_length_for_ts: self
                 .lsn_lease_length_for_ts
                 .unwrap_or(global_conf.lsn_lease_length_for_ts),
-            timeline_offloading: self.lazy_slru_download.unwrap_or(global_conf.timeline_offloading),
+            timeline_offloading: self
+                .lazy_slru_download
+                .unwrap_or(global_conf.timeline_offloading),
         }
     }
 }
