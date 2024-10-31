@@ -294,6 +294,11 @@ pub(crate) fn poll_http2_client(
                 conn_id,
                 aux: aux.clone(),
             });
+            Metrics::get()
+                .proxy
+                .http_pool_opened_connections
+                .get_metric()
+                .inc();
 
             Arc::downgrade(&pool)
         }
@@ -306,7 +311,7 @@ pub(crate) fn poll_http2_client(
             let res = connection.await;
             match res {
                 Ok(()) => info!("connection closed"),
-                Err(e) => error!(%session_id, "connection error: {}", e),
+                Err(e) => error!(%session_id, "connection error: {e:?}"),
             }
 
             // remove from connection pool
