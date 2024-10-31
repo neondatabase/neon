@@ -135,12 +135,12 @@ impl SerializedValueBatch {
         record_end_lsn: Lsn,
         pg_version: u32,
     ) -> anyhow::Result<SerializedValueBatch> {
-        let mut cursor = std::io::Cursor::new(Vec::<u8>::new());
+        let mut buf = Vec::<u8>::new();
         let mut metadata: Vec<ValueMeta> = Vec::with_capacity(decoded.blocks.len());
         let mut max_lsn: Lsn = Lsn(0);
         let mut len: usize = 0;
         for blk in decoded.blocks.iter() {
-            let relative_off = cursor.position();
+            let relative_off = buf.len() as u64;
 
             let rel = RelTag {
                 spcnode: blk.rnode_spcnode,
@@ -224,7 +224,7 @@ impl SerializedValueBatch {
 
             let val_ser_size = val.serialized_size().unwrap() as usize;
 
-            val.ser_into(&mut cursor)
+            val.ser_into(&mut buf)
                 .expect("Writing into in-memory buffer is infallible");
 
             metadata.push(ValueMeta::Serialized(SerializedValueMeta {
@@ -238,11 +238,9 @@ impl SerializedValueBatch {
             len += 1;
         }
 
-        let buffer = cursor.into_inner();
-
         if cfg!(any(debug_assertions, test)) {
             let batch = Self {
-                raw: buffer,
+                raw: buf,
                 metadata,
                 max_lsn,
                 len,
@@ -254,7 +252,7 @@ impl SerializedValueBatch {
         }
 
         Ok(Self {
-            raw: buffer,
+            raw: buf,
             metadata,
             max_lsn,
             len,
@@ -269,15 +267,15 @@ impl SerializedValueBatch {
         // Pre-allocate a big flat buffer to write into. This should be large but not huge: it is soft-limited in practice by
         // [`crate::pgdatadir_mapping::DatadirModification::MAX_PENDING_BYTES`]
         let buffer_size = batch.iter().map(|i| i.2).sum::<usize>();
-        let mut cursor = std::io::Cursor::new(Vec::<u8>::with_capacity(buffer_size));
+        let mut buf = Vec::<u8>::with_capacity(buffer_size);
 
         let mut metadata: Vec<ValueMeta> = Vec::with_capacity(batch.len());
         let mut max_lsn: Lsn = Lsn(0);
         let len = batch.len();
         for (key, lsn, val_ser_size, val) in batch {
-            let relative_off = cursor.position();
+            let relative_off = buf.len() as u64;
 
-            val.ser_into(&mut cursor)
+            val.ser_into(&mut buf)
                 .expect("Writing into in-memory buffer is infallible");
 
             metadata.push(ValueMeta::Serialized(SerializedValueMeta {
@@ -290,14 +288,12 @@ impl SerializedValueBatch {
             max_lsn = std::cmp::max(max_lsn, lsn);
         }
 
-        let buffer = cursor.into_inner();
-
         // Assert that we didn't do any extra allocations while building buffer.
-        debug_assert!(buffer.len() <= buffer_size);
+        debug_assert!(buf.len() <= buffer_size);
 
         if cfg!(any(debug_assertions, test)) {
             let batch = Self {
-                raw: buffer,
+                raw: buf,
                 metadata,
                 max_lsn,
                 len,
@@ -309,7 +305,7 @@ impl SerializedValueBatch {
         }
 
         Self {
-            raw: buffer,
+            raw: buf,
             metadata,
             max_lsn,
             len,
