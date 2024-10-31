@@ -270,7 +270,6 @@ impl WalIngest {
                 //    record type within Neon.
                 // 2. The resource manager id was unknown to
                 //    [`wal_decoder::decoder::MetadataRecord::from_decoded`].
-                //    An error warning is logged there in this case.
                 // TODO(vlad): Tighten this up more once we build confidence
                 // that case (2) does not happen in the field.
             }
