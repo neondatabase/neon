@@ -22,6 +22,7 @@ use tokio::{select, sync::watch, time};
 use tokio_postgres::{replication::ReplicationStream, Client};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn, Instrument};
+use wal_decoder::models::{FlushUncommittedRecords, InterpretedWalRecord};
 
 use super::TaskStateUpdate;
 use crate::{
@@ -35,7 +36,6 @@ use crate::{
 use postgres_backend::is_expected_io_error;
 use postgres_connection::PgConnectionConfig;
 use postgres_ffi::waldecoder::WalStreamDecoder;
-use postgres_ffi::walrecord::{decode_wal_record, DecodedWALRecord};
 use utils::{id::NodeId, lsn::Lsn};
 use utils::{pageserver_feedback::PageserverFeedback, sync::gate::GateError};
 
@@ -339,11 +339,15 @@ pub(super) async fn handle_walreceiver_connection(
                             return Err(WalReceiverError::Other(anyhow!("LSN not aligned")));
                         }
 
-                        // Deserialize WAL record
-                        let mut decoded = DecodedWALRecord::default();
-                        decode_wal_record(recdata, &mut decoded, modification.tline.pg_version)?;
+                        // Deserialize and interpret WAL record
+                        let interpreted = InterpretedWalRecord::from_bytes_filtered(
+                            recdata,
+                            modification.tline.get_shard_identity(),
+                            lsn,
+                            modification.tline.pg_version,
+                        )?;
 
-                        if decoded.is_dbase_create_copy(timeline.pg_version)
+                        if matches!(interpreted.flush_uncommitted, FlushUncommittedRecords::Yes)
                             && uncommitted_records > 0
                         {
                             // Special case: legacy PG database creations operate by reading pages from a 'template' database:
@@ -360,7 +364,7 @@ pub(super) async fn handle_walreceiver_connection(
 
                         // Ingest the records without immediately committing them.
                         let ingested = walingest
-                            .ingest_record(decoded, lsn, &mut modification, &ctx)
+                            .ingest_record(interpreted, &mut modification, &ctx)
                             .await
                             .with_context(|| format!("could not ingest record at {lsn}"))?;
                         if !ingested {

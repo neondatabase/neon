@@ -141,7 +141,9 @@ impl Drop for UninitializedTimeline<'_> {
     fn drop(&mut self) {
         if let Some((_, create_guard)) = self.raw_timeline.take() {
             let _entered = info_span!("drop_uninitialized_timeline", tenant_id = %self.owning_tenant.tenant_shard_id.tenant_id, shard_id = %self.owning_tenant.tenant_shard_id.shard_slug(), timeline_id = %self.timeline_id).entered();
-            error!("Timeline got dropped without initializing, cleaning its files");
+            // This is unusual, but can happen harmlessly if the pageserver is stopped while
+            // creating a timeline.
+            info!("Timeline got dropped without initializing, cleaning its files");
             cleanup_timeline_directory(create_guard);
         }
     }
