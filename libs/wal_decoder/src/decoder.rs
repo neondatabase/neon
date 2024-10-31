@@ -169,7 +169,11 @@ impl MetadataRecord {
             }
             pg_constants::RM_STANDBY_ID => Self::decode_standby_record(&mut buf, decoded),
             pg_constants::RM_REPLORIGIN_ID => Self::decode_replorigin_record(&mut buf, decoded),
-            pg_constants::RM_BTREE_ID => Ok(None),
+            pg_constants::RM_BTREE_ID => {
+                // No special handling required for these record types.
+                // We just ingest the blocks that come with it.
+                Ok(None)
+            }
             unexpected => {
                 // TODO: consider failing here instead of blindly doing something without
                 // understanding the protocol
