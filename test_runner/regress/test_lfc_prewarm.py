@@ -1,3 +1,4 @@
+import time
 
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv
@@ -30,6 +31,7 @@ def test_lfc_prewarm(neon_simple_env: NeonEnv):
 
     conn = endpoint.connect()
     cur = conn.cursor()
+    time.sleep(1)  # wait until compute_ctl complete downgrade of extension to default version
     cur.execute("alter extension neon update to '1.6'")
     cur.execute("select prewarm_local_cache(%s)", (lfc_state,))
 
