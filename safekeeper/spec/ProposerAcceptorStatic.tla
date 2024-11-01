@@ -282,53 +282,47 @@ NewEntry(p) ==
        /\ prop_state' = [prop_state EXCEPT ![p].wal = Append(prop_state[p].wal, new_entry)]
        /\ UNCHANGED <<acc_state, committed>>
 
+\* Immediately append next entry from elected proposer to acceptor a.
+AppendEntry(p, a) ==
+  /\ prop_state[p].state = "leader"
+  /\ acc_state[a].term = prop_state[p].term
+  /\ a \in DOMAIN prop_state[p].nextSendLsn \* did TruncateWal
+  /\ prop_state[p].nextSendLsn[a] <= Len(prop_state[p].wal) \* have smth to send
+  /\ LET
+       send_lsn == prop_state[p].nextSendLsn[a]
+       entry == prop_state[p].wal[send_lsn]
+       \* Since message delivery is instant we don't check that send_lsn follows
+       \* the last acc record, it must always be true.
+     IN
+       /\ prop_state' = [prop_state EXCEPT ![p].nextSendLsn[a] = send_lsn + 1]
+       /\ acc_state' = [acc_state EXCEPT ![a].wal = Append(acc_state[a].wal, entry)]
+       /\ UNCHANGED <<committed>>
 
-\* \* Try to transfer entry from elected proposer p to acceptor a
-\* TransferEntry(p, a) ==
-\*   /\ prop_state[p].state = "leader"
-\*   /\ prop_state[p].term = acc_state[a].term
-\*   /\ a \in DOMAIN prop_state[p].next_send_lsn
-\*   /\ LET
-\*        next_e == NextEntry(p, a)
-\*      IN
-\*        /\ next_e /= NULL
-\*        /\ LET
-\*             \* Consider bumping epoch if getting this entry recovers the acceptor,
-\*             \* that is, we reach first record behind VCL.
-\*             new_epoch ==
-\*               IF /\ acc_state[a].epoch < prop_state[p].term
-\*                  /\ next_e.lsn >= prop_state[p].vcl
-\*               THEN
-\*                 prop_state[p].term
-\*               ELSE
-\*                 acc_state[a].epoch
-\*             \* Also check whether this entry allows to advance commit_lsn and
-\*             \* if so, bump it where possible. Modeling this as separate action
-\*             \* significantly bloats the space (5m vs 15m on max_entries=3 max_term=3,
-\*             \* so act immediately.
-\*             entry_owners == {o \in acceptors:
-\*                                /\ o /= a
-\*                                \* only recovered acceptors advance commit_lsn
-\*                                /\ acc_state[o].epoch = prop_state[p].term
-\*                                /\ next_e \in Range(acc_state[o].wal)} \cup {a}
-\*           IN
-\*             /\ acc_state' = [acc_state EXCEPT ![a].wal = WriteEntry(acc_state[a].wal, next_e, new_epoch /= acc_state[a].epoch),
-\*                                               ![a].epoch = new_epoch]
-\*             /\ prop_state' = [prop_state EXCEPT ![p].next_send_lsn[a] =
-\*                                                   prop_state[p].next_send_lsn[a] + 1]
-\*             /\ commit_lsns' = IF /\ new_epoch = prop_state[p].term
-\*                                  /\ Quorum(entry_owners)
-\*                               THEN
-\*                                 [acc \in acceptors |->
-\*                                    IF /\ acc \in entry_owners
-\*                                       /\ next_e.lsn > commit_lsns[acc]
-\*                                    THEN
-\*                                      next_e.lsn
-\*                                    ELSE
-\*                                        commit_lsns[acc]]
-\*                               ELSE
-\*                                 commit_lsns
+\* LSN where elected proposer p starts writing its records.
+PropStartLsn(p) ==
+    prop_state[p].termHistory[Len(prop_state[p].termHistory)].lsn
 
+\* Proposer p commits all entries it can using quorum q. Note that unlike
+\* will62794/logless-reconfig this allows to commit entries from previous terms
+\* (when conditions for that are met).
+CommitEntries(p, q) ==
+  /\ prop_state[p].state = "leader"
+  /\ \A a \in q:
+    /\ acc_state[a].term = prop_state[p].term
+      \* nextSendLsn existence means TruncateWal has happened, it ensures
+      \* acceptor's WAL (and FlushLsn) are from proper proposer's history.
+      \* Alternatively we could compare LastLogTerm here, but that's closer to
+      \* what we do in the impl (we check flushLsn in AppendResponse, but 
+      \* AppendRequest is processed only if HandleElected handling was good).
+    /\ a \in DOMAIN prop_state[p].nextSendLsn
+  \* Now find the LSN present on all the quorum.    
+  /\ LET quorum_lsn == Minimum({FlushLsn(a): a \in q}) IN
+       \* This is the basic Raft rule of not committing entries from previous
+       \* terms except along with current term entry (commit them only when
+       \* quorum recovers, i.e. last_log_term on it reaches leader's term).
+       /\ quorum_lsn >= PropStartLsn(p)
+       /\ committed' = committed \cup {[term |-> prop_state[p].wal[lsn], lsn |-> lsn]: lsn \in 1..(quorum_lsn - 1)}
+       /\ UNCHANGED <<prop_state, acc_state>>
 
 \*******************************************************************************
 \* Final spec
@@ -341,7 +335,8 @@ Next ==
   \/ \E p \in proposers: \E a \in acceptors: UpdateTerm(p, a)
   \/ \E p \in proposers: \E a \in acceptors: TruncateWal(p, a)
   \/ \E p \in proposers: NewEntry(p)
-\*   \/ \E p \in proposers: \E a \in acceptors: TransferEntry(p, a)
+  \/ \E p \in proposers: \E a \in acceptors: AppendEntry(p, a)
+  \/ \E q \in Quorums: \E p \in proposers: CommitEntries(p, q)
 
 Spec == Init /\ [][Next]_<<prop_state, acc_state, committed>>
 
@@ -365,7 +360,7 @@ LogIsMonotonic ==
 \* Main invariant: If two entries are committed at the same LSN, they must be
 \* the same entry.
 LogSafety ==
-    \A c1, c2 \in committed: (c1.lsn[1] = c2.lsn) => (c1 = c2)
+    \A c1, c2 \in committed: (c1.lsn = c2.lsn) => (c1 = c2)
 
 \* \* Next record we are going to push to acceptor must never overwrite committed
 \* \* different record.
@@ -386,6 +381,8 @@ LogSafety ==
 
 \* Limits term of elected proposers
 MaxTerm == \A p \in proposers: (prop_state[p].state = "leader" => prop_state[p].term < 2)
+
+MaxAccWalLen == \A a \in acceptors: Len(acc_state[a].wal) < 2
 
 \* Limits max number of committed entries. That way we can check that we'are
 \* actually committing something.
