@@ -2,7 +2,7 @@
 
 \* Model simplifications:
 \* - Instant message delivery. Notably, ProposerElected message (TruncateWal action) is not
-\*   delayed, so we don't attempt to truncate WAL when the same wp already appended something 
+\*   delayed, so we don't attempt to truncate WAL when the same wp already appended something
 \*   on the acceptor since common point had been calculated (this should be rejected).
 \* - old WAL is immediately copied to proposer on its election, without on-demand fetch later.
 
@@ -114,9 +114,9 @@ TypeOk ==
          /\ vote.flushLsn \in Lsns
       \* Proposer's term history. Empty while proposer is in "campaign".
       /\ IsTermHistory(prop_state[p].termHistory)
-      \* In the model we identify WAL entries only by <term, LSN> pairs 
+      \* In the model we identify WAL entries only by <term, LSN> pairs
       \* without additional unique id, which is enough for its purposes.
-      \* It means that with term history fully modeled wal becomes 
+      \* It means that with term history fully modeled wal becomes
       \* redundant as it can be computed from term history + WAL length.
       \* However, we still keep it here and at acceptors as explicit sequence
       \* where index is LSN and value is the term to avoid artificial mapping to
@@ -157,7 +157,7 @@ Init ==
                     term |-> 0,
                     \* Again, leader in term 0 doesn't exist, but we initialize
                     \* term histories with it to always have common point in
-                    \* them. Lsn is 1 because TLA+ sequences are indexed from 1 
+                    \* them. Lsn is 1 because TLA+ sequences are indexed from 1
                     \* (we don't want to truncate WAL out of range).
                     termHistory |-> << [term |-> 0, lsn |-> 1] >>,
                     wal |-> << >>
@@ -214,7 +214,7 @@ BecomeLeader(p) ==
        \* Find acceptor with the highest <last_log_term, lsn> vote.
        max_vote_acc == CHOOSE a \in DOMAIN prop_state[p].votes:
                          LET v == prop_state[p].votes[a]
-                         IN \A v2 \in Range(prop_state[p].votes): 
+                         IN \A v2 \in Range(prop_state[p].votes):
                               /\ LastLogTerm(v.termHistory) >= LastLogTerm(v2.termHistory)
                               /\ (LastLogTerm(v.termHistory) = LastLogTerm(v2.termHistory) => v.flushLsn >= v2.flushLsn)
        max_vote == prop_state[p].votes[max_vote_acc]
@@ -247,18 +247,18 @@ UpdateTerm(p, a) ==
 \* proposer p and acceptor a. Returns <term, lsn> of the highest common point.
 FindHighestCommonPoint(prop_th, acc_th, acc_flush_lsn) ==
     LET
-      \* First find index of the highest common term. 
+      \* First find index of the highest common term.
       \* It must exist because we initialize th with <0, 1>.
       last_common_idx == Maximum({i \in 1..Min(Len(prop_th), Len(acc_th)): prop_th[i].term = acc_th[i].term})
       last_common_term == prop_th[last_common_idx].term
       \* Now find where it ends at both prop and acc and take min. End of term
-      \* is the start of the next unless it is the last one; there it is 
-      \* flush_lsn in case of acceptor. In case of proposer it is the current 
-      \* writing position, but it can't be less than flush_lsn, so we 
+      \* is the start of the next unless it is the last one; there it is
+      \* flush_lsn in case of acceptor. In case of proposer it is the current
+      \* writing position, but it can't be less than flush_lsn, so we
       \* take flush_lsn.
       acc_common_term_end == IF last_common_idx = Len(acc_th) THEN acc_flush_lsn ELSE acc_th[last_common_idx + 1].lsn
       prop_common_term_end == IF last_common_idx = Len(prop_th) THEN acc_flush_lsn ELSE prop_th[last_common_idx + 1].lsn
-    IN   
+    IN
       [term |-> last_common_term, lsn |-> Min(acc_common_term_end, prop_common_term_end)]
 
 \* Elected proposer p immediately truncates WAL (and term history) of acceptor a
@@ -321,10 +321,10 @@ CommitEntries(p, q) ==
       \* nextSendLsn existence means TruncateWal has happened, it ensures
       \* acceptor's WAL (and FlushLsn) are from proper proposer's history.
       \* Alternatively we could compare LastLogTerm here, but that's closer to
-      \* what we do in the impl (we check flushLsn in AppendResponse, but 
+      \* what we do in the impl (we check flushLsn in AppendResponse, but
       \* AppendRequest is processed only if HandleElected handling was good).
     /\ a \in DOMAIN prop_state[p].nextSendLsn
-  \* Now find the LSN present on all the quorum.    
+  \* Now find the LSN present on all the quorum.
   /\ LET quorum_lsn == Minimum({FlushLsn(a): a \in q}) IN
        \* This is the basic Raft rule of not committing entries from previous
        \* terms except along with current term entry (commit them only when
