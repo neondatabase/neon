@@ -19,8 +19,12 @@ on:
         description: 'debug or release'
         required: true
         type: string
-      test-cfg:
-        description: 'a json object of postgres versions and lfc state to run regression tests on'
+      pg-versions:
+        description: 'a json array of postgres versions to run regression tests on'
+        required: true
+        type: string
+      lfc-states:
+        description: 'a json array of lfc states to run regression tests on'
         required: true
         type: string
 
@@ -276,7 +280,16 @@ jobs:
       options: --init --shm-size=512mb --ulimit memlock=67108864:67108864
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(inputs.test-cfg) }}
+      matrix:
+        pg_version: ${{ fromJSON(inputs.pg-versions) }}
+        lfc_state: ${{ fromJSON(inputs.lfc-states) }}
+        exclude:
+          - pg_version: "v14"
+            lfc_state: "without-lfc"
+          - pg_version: "v15"
+            lfc_state: "without-lfc"
+          - pg_version: "v16"
+            lfc_state: "without-lfc"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -299,7 +312,7 @@ jobs:
           CHECK_ONDISK_DATA_COMPATIBILITY: nonempty
           BUILD_TAG: ${{ inputs.build-tag }}
           PAGESERVER_VIRTUAL_FILE_IO_ENGINE: tokio-epoll-uring
-          USE_LFC: ${{ matrix.lfc-state == 'with-lfc' && 'true' || 'false' }}
+          USE_LFC: ${{ matrix.lfc_state == 'with-lfc' && 'true' || 'false' }}
 
       # Temporary disable this step until we figure out why it's so flaky
       # Ref https://github.com/neondatabase/neon/issues/4540
