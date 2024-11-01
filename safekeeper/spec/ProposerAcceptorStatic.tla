@@ -387,6 +387,16 @@ MaxAccWalLen == \A a \in acceptors: Len(acc_state[a].wal) < 2
 \* actually committing something.
 MaxCommitLsn == Cardinality(committed) < 2
 
-
-
+\* How many records with different terms can be removed in single WAL
+\* truncation.
+MaxTruncatedTerms ==
+    \A p \in proposers: \A a \in acceptors:
+      (/\ prop_state[p].state = "leader"
+       /\ prop_state[p].term = acc_state[a].term) =>
+         LET
+            hcp == FindHighestCommonPoint(prop_state[p].termHistory, AcceptorTermHistory(a), FlushLsn(a))
+            truncated_lsns == {lsn \in DOMAIN acc_state[a].wal: lsn >= hcp.lsn}
+            truncated_records_terms == {acc_state[a].wal[lsn]: lsn \in truncated_lsns}
+         IN
+            Cardinality(truncated_records_terms) < 2
 ====
