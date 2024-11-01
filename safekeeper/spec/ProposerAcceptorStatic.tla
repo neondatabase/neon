@@ -1,5 +1,16 @@
 ---- MODULE ProposerAcceptorStatic ----
 
+(*
+  The protocol is very similar to Raft. The key differences are:
+  - Leaders (proposers) are separated from storage nodes (acceptors), which has
+    been already an established way to think about Paxos.
+  - We don't want to stamp each log record with term, so instead carry around
+    term histories which are sequences of <term, LSN where term begins> pairs.
+    As a bonus (and subtlety) this allows the proposer to commit entries from
+    previous terms without writing new records -- if acceptor's log is caught
+    up, update of term history on it updates last_log_term as well.
+*)
+
 \* Model simplifications:
 \* - Instant message delivery. Notably, ProposerElected message (TruncateWal action) is not
 \*   delayed, so we don't attempt to truncate WAL when the same wp already appended something
