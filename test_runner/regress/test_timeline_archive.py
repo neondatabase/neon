@@ -463,7 +463,7 @@ def test_timeline_retain_lsn(neon_env_builder: NeonEnvBuilder, offload_child: Op
         objects: list[ObjectTypeDef] = listing.get("Contents", [])
         assert len(objects) > 0
         remote_key: str = str(objects[0].get("Key", []))
-        local_path = env.repo_dir / "tenant-manifest.json"
+        local_path = str(env.repo_dir / "tenant-manifest.json")
 
         log.info(f"Downloading {remote_key} -> {local_path}")
         env.pageserver_remote_storage.client.download_file(
