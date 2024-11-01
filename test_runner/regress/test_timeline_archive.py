@@ -381,7 +381,7 @@ def test_timeline_offload_persist(neon_env_builder: NeonEnvBuilder, delete_timel
 @pytest.mark.parametrize("offload_child", ["offload", "offload-corrupt", "archive", None])
 def test_timeline_retain_lsn(neon_env_builder: NeonEnvBuilder, offload_child: Optional[str]):
     """
-    Ensure that retain_lsn functionality for offloaded timelines works
+    Ensure that retain_lsn functionality for timelines works, both for offloaded and non-offloaded ones
     """
     if offload_child == "offload-corrupt":
         # Our corruption code only works with S3 compatible storage
