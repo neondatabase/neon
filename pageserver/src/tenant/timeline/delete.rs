@@ -94,7 +94,7 @@ pub(super) async fn delete_local_timeline_directory(
     tokio::fs::remove_dir_all(local_timeline_directory)
         .await
         .or_else(fs_ext::ignore_not_found)
-        .fatal_err("Removing timeline directory");
+        .fatal_err("removing timeline directory");
 
     // Make sure previous deletions are ordered before mark removal.
     // Otherwise there is no guarantee that they reach the disk before mark deletion.
@@ -105,7 +105,7 @@ pub(super) async fn delete_local_timeline_directory(
     let timeline_path = conf.timelines_path(&tenant_shard_id);
     crashsafe::fsync_async(timeline_path)
         .await
-        .fatal_err("Fsync after removing timeline directory");
+        .fatal_err("fsync after removing timeline directory");
 
     info!("finished deleting layer files, releasing locks");
 }
