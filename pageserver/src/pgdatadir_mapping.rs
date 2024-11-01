@@ -1874,7 +1874,6 @@ impl<'a> DatadirModification<'a> {
             // data pages during ingest.
             if cfg!(debug_assertions) {
                 for (dirty_key, _, _, _) in &self.pending_data_pages {
-                    tracing::error!("dirty_key={dirty_key}");
                     debug_assert!(&key.to_compact() != dirty_key);
                 }
 

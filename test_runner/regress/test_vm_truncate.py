@@ -18,10 +18,14 @@ def test_vm_truncate(neon_simple_env: NeonEnv):
     )
     cur.execute("insert into t (pk) values (generate_series(1,1000))")
     cur.execute("delete from t where pk>10")
-    cur.execute("vacuum t")
+    cur.execute("vacuum t")  # rtruncate all forks pf reation
+    # get image of first block of VM updted by Postgres excluding page header
     cur.execute("select substr(encode(get_raw_page('t', 'vm', 0), 'hex'), 48)")
     pg_bitmap = cur.fetchall()[0][0]
+    # flush shared buffers
     cur.execute("SELECT clear_buffer_cache()")
+    # now downoad firstblock of VM from page server ...
     cur.execute("select substr(encode(get_raw_page('t', 'vm', 0), 'hex'), 48)")
     ps_bitmap = cur.fetchall()[0][0]
+    # and check that they are equal, i.e. PS is producing the same VM page as Postgres
     assert pg_bitmap == ps_bitmap
