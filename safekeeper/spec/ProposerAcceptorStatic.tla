@@ -6,6 +6,11 @@
 \*   on the acceptor since common point had been calculated (this should be rejected).
 \* - old WAL is immediately copied to proposer on its election, without on-demand fetch later.
 
+\* Some ideas how to break it to play around to get a feeling:
+\* - replace Quorums with BadQuorums.
+\* - remove 'don't commit entries from previous terms separately' rule in
+\*   CommitEntries and observe figure 8 from the raft paper.
+
 EXTENDS Integers, Sequences, FiniteSets, TLC
 
 VARIABLES
@@ -61,6 +66,10 @@ NumAccs == Cardinality(acceptors)
 Quorum(acc_set) == Cardinality(acc_set) >= (NumAccs \div 2 + 1)
 \* all quorums of acceptors
 Quorums == {subset \in SUBSET acceptors: Quorum(subset)}
+
+\* For substituting Quorums and seeing what happens.
+BadQuorum(acc_set) == Cardinality(acc_set) >= (NumAccs \div 2)
+BadQuorums == {subset \in SUBSET acceptors: BadQuorum(subset)}
 
 \* flushLsn (end of WAL, i.e. index of next entry) of acceptor a.
 FlushLsn(a) == Len(acc_state[a].wal) + 1
