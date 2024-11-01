@@ -1330,7 +1330,7 @@ impl<'a> DatadirModification<'a> {
 
         let batch = self
             .pending_data_batch
-            .get_or_insert(SerializedValueBatch::default());
+            .get_or_insert_with(SerializedValueBatch::default);
 
         batch.put(key.to_compact(), Value::Image(ZERO_PAGE.clone()), self.lsn);
 
@@ -1354,7 +1354,7 @@ impl<'a> DatadirModification<'a> {
 
         let batch = self
             .pending_data_batch
-            .get_or_insert(SerializedValueBatch::default());
+            .get_or_insert_with(SerializedValueBatch::default);
 
         batch.put(key.to_compact(), Value::Image(ZERO_PAGE.clone()), self.lsn);
 
@@ -2029,7 +2029,7 @@ impl<'a> DatadirModification<'a> {
     fn put_data(&mut self, key: CompactKey, val: Value) {
         let batch = self
             .pending_data_batch
-            .get_or_insert(SerializedValueBatch::default());
+            .get_or_insert_with(SerializedValueBatch::default);
         batch.put(key, val, self.lsn);
     }
 
