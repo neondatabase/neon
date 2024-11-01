@@ -14,7 +14,7 @@ use pageserver_api::record::NeonWalRecord;
 use pageserver_api::reltag::RelTag;
 use pageserver_api::shard::ShardIdentity;
 use pageserver_api::{key::CompactKey, value::Value};
-use postgres_ffi::walrecord::DecodedWALRecord;
+use postgres_ffi::walrecord::{DecodedBkpBlock, DecodedWALRecord};
 use postgres_ffi::{page_is_new, page_set_lsn, pg_constants, BLCKSZ};
 use utils::bin_ser::BeSer;
 use utils::lsn::Lsn;
@@ -135,7 +135,11 @@ impl SerializedValueBatch {
         record_end_lsn: Lsn,
         pg_version: u32,
     ) -> anyhow::Result<SerializedValueBatch> {
-        let mut buf = Vec::<u8>::new();
+        // First determine how big the buffer needs to be and allocate it up-front.
+        // This duplicates some of the work below, but it's empirically much faster.
+        let estimated_buffer_size = Self::estimate_buffer_size(&decoded, shard, pg_version);
+        let mut buf = Vec::<u8>::with_capacity(estimated_buffer_size);
+
         let mut metadata: Vec<ValueMeta> = Vec::with_capacity(decoded.blocks.len());
         let mut max_lsn: Lsn = Lsn(0);
         let mut len: usize = 0;
@@ -182,16 +186,7 @@ impl SerializedValueBatch {
             // in this case. Also some FPI records may contain multiple (up to 32) pages,
             // so them have to be copied multiple times.
             //
-            let val = if blk.apply_image
-                && blk.has_image
-                && decoded.xl_rmid == pg_constants::RM_XLOG_ID
-                && (decoded.xl_info == pg_constants::XLOG_FPI
-                || decoded.xl_info == pg_constants::XLOG_FPI_FOR_HINT)
-                // compression of WAL is not yet supported: fall back to storing the original WAL record
-                && !postgres_ffi::bkpimage_is_compressed(blk.bimg_info, pg_version)
-                // do not materialize null pages because them most likely be soon replaced with real data
-                && blk.bimg_len != 0
-            {
+            let val = if Self::block_is_image(&decoded, blk, pg_version) {
                 // Extract page image from FPI record
                 let img_len = blk.bimg_len as usize;
                 let img_offs = blk.bimg_offset as usize;
@@ -257,6 +252,59 @@ impl SerializedValueBatch {
             max_lsn,
             len,
         })
+    }
+
+    /// Look into the decoded PG WAL record and determine
+    /// roughly how large the buffer for serialized values needs to be.
+    fn estimate_buffer_size(
+        decoded: &DecodedWALRecord,
+        shard: &ShardIdentity,
+        pg_version: u32,
+    ) -> usize {
+        let mut estimate: usize = 0;
+
+        for blk in decoded.blocks.iter() {
+            let rel = RelTag {
+                spcnode: blk.rnode_spcnode,
+                dbnode: blk.rnode_dbnode,
+                relnode: blk.rnode_relnode,
+                forknum: blk.forknum,
+            };
+
+            let key = rel_block_to_key(rel, blk.blkno);
+
+            if !shard.is_key_local(&key) {
+                continue;
+            }
+
+            if Self::block_is_image(decoded, blk, pg_version) {
+                // 4 bytes for the Value::Image discriminator
+                // 8 bytes for encoding the size of the buffer
+                // BLCKSZ for the raw image
+                estimate += (4 + 8 + BLCKSZ) as usize;
+            } else {
+                // 4 bytes for the Value::WalRecord discriminator
+                // 4 bytes for the NeonWalRecord::Postgres discriminator
+                // 1 bytes for NeonWalRecord::Postgres::will_init
+                // 8 bytes for encoding the size of the buffer
+                // length of the raw record
+                estimate += 8 + 1 + 8 + decoded.record.len();
+            }
+        }
+
+        estimate
+    }
+
+    fn block_is_image(decoded: &DecodedWALRecord, blk: &DecodedBkpBlock, pg_version: u32) -> bool {
+        blk.apply_image
+            && blk.has_image
+            && decoded.xl_rmid == pg_constants::RM_XLOG_ID
+            && (decoded.xl_info == pg_constants::XLOG_FPI
+            || decoded.xl_info == pg_constants::XLOG_FPI_FOR_HINT)
+            // compression of WAL is not yet supported: fall back to storing the original WAL record
+            && !postgres_ffi::bkpimage_is_compressed(blk.bimg_info, pg_version)
+            // do not materialize null pages because them most likely be soon replaced with real data
+            && blk.bimg_len != 0
     }
 
     /// Encode a list of values and metadata into a serialized batch
