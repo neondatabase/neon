@@ -7,9 +7,11 @@ use hyper::client::conn::http2;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use parking_lot::RwLock;
 use rand::Rng;
+use std::result::Result::Ok;
 use tokio::net::TcpStream;
 use tracing::{debug, error, info, info_span, Instrument};
 
+use super::backend::HttpConnError;
 use super::conn_pool_lib::{ClientInnerExt, ConnInfo};
 use crate::context::RequestMonitoring;
 use crate::control_plane::messages::{ColdStartInfo, MetricsAuxInfo};
@@ -27,6 +29,8 @@ pub(crate) struct ConnPoolEntry<C: ClientInnerExt + Clone> {
     conn_id: uuid::Uuid,
     aux: MetricsAuxInfo,
 }
+
+pub(crate) struct ClientDataHttp();
 
 // Per-endpoint connection pool
 // Number of open connections is limited by the `max_conns_per_endpoint`.
@@ -206,14 +210,22 @@ impl<C: ClientInnerExt + Clone> GlobalConnPool<C> {
         }
     }
 
+    #[expect(unused_results)]
     pub(crate) fn get(
         self: &Arc<Self>,
         ctx: &RequestMonitoring,
         conn_info: &ConnInfo,
-    ) -> Option<Client<C>> {
-        let endpoint = conn_info.endpoint_cache_key()?;
+    ) -> Result<Option<Client<C>>, HttpConnError> {
+        let result: Result<Option<Client<C>>, HttpConnError>;
+        let Some(endpoint) = conn_info.endpoint_cache_key() else {
+            result = Ok(None);
+            return result;
+        };
         let endpoint_pool = self.get_or_create_endpoint_pool(&endpoint);
-        let client = endpoint_pool.write().get_conn_entry()?;
+        let Some(client) = endpoint_pool.write().get_conn_entry() else {
+            result = Ok(None);
+            return result;
+        };
 
         tracing::Span::current().record("conn_id", tracing::field::display(client.conn_id));
         info!(
@@ -222,7 +234,7 @@ impl<C: ClientInnerExt + Clone> GlobalConnPool<C> {
         );
         ctx.set_cold_start_info(ColdStartInfo::HttpPoolHit);
         ctx.success();
-        Some(Client::new(client.conn, client.aux))
+        Ok(Some(Client::new(client.conn, client.aux)))
     }
 
     fn get_or_create_endpoint_pool(
