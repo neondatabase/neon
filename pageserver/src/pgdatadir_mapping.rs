@@ -1176,6 +1176,31 @@ impl<'a> DatadirModification<'a> {
         }
     }
 
+    /// Given a block number for a relation (which represents a newly written block),
+    /// the previous block count of the relation, and the shard info, find the gaps
+    /// that were created by the newly written block if any.
+    fn find_gaps(
+        rel: RelTag,
+        blkno: u32,
+        previous_nblocks: u32,
+        shard: &ShardIdentity,
+    ) -> KeySpace {
+        let mut key = rel_block_to_key(rel, blkno);
+        let mut gap_accum = KeySpaceAccum::new();
+
+        for gap_blkno in previous_nblocks..blkno {
+            key.field6 = gap_blkno;
+
+            if shard.get_shard_number(&key) != shard.number {
+                continue;
+            }
+
+            gap_accum.add_key(key);
+        }
+
+        gap_accum.to_keyspace()
+    }
+
     pub async fn ingest_batch(
         &mut self,
         mut batch: SerializedValueBatch,
@@ -1194,23 +1219,7 @@ impl<'a> DatadirModification<'a> {
                 self.put_rel_extend(rel, new_nblocks, ctx).await?;
             }
 
-            let gaps = {
-                let mut key = rel_block_to_key(rel, blkno);
-                let mut gap_accum = KeySpaceAccum::new();
-
-                for gap_blkno in old_nblocks..blkno {
-                    key.field6 = gap_blkno;
-
-                    if shard.get_shard_number(&key) != shard.number {
-                        continue;
-                    }
-
-                    gap_accum.add_key(key);
-                }
-
-                gap_accum.to_keyspace()
-            };
-
+            let gaps = Self::find_gaps(rel, blkno, old_nblocks, shard);
             gaps_at_lsns.push((gaps, meta.lsn()));
         }
 
@@ -2151,7 +2160,11 @@ static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; BLCKSZ as usize]);
 #[cfg(test)]
 mod tests {
     use hex_literal::hex;
-    use utils::id::TimelineId;
+    use pageserver_api::{models::ShardParameters, shard::ShardStripeSize};
+    use utils::{
+        id::TimelineId,
+        shard::{ShardCount, ShardNumber},
+    };
 
     use super::*;
 
@@ -2203,6 +2216,89 @@ mod tests {
         assert_eq!(readback, expect_1008);
 
         Ok(())
+    }
+
+    #[test]
+    fn gap_finding() {
+        let rel = RelTag {
+            spcnode: 1663,
+            dbnode: 208101,
+            relnode: 2620,
+            forknum: 0,
+        };
+        let base_blkno = 1;
+
+        let base_key = rel_block_to_key(rel, base_blkno);
+        let before_base_key = rel_block_to_key(rel, base_blkno - 1);
+
+        let shard = ShardIdentity::unsharded();
+
+        let mut previous_nblocks = 0;
+        for i in 0..10 {
+            let crnt_blkno = base_blkno + i;
+            let gaps = DatadirModification::find_gaps(rel, crnt_blkno, previous_nblocks, &shard);
+
+            previous_nblocks = crnt_blkno + 1;
+
+            if i == 0 {
+                // The first block we write is 1, so we should find the gap.
+                assert_eq!(gaps, KeySpace::single(before_base_key..base_key));
+            } else {
+                assert!(gaps.ranges.is_empty());
+            }
+        }
+
+        // This is an update to an already existing block. No gaps here.
+        let update_blkno = 5;
+        let gaps = DatadirModification::find_gaps(rel, update_blkno, previous_nblocks, &shard);
+        assert!(gaps.ranges.is_empty());
+
+        // This is an update past the current end block.
+        let after_gap_blkno = 20;
+        let gaps = DatadirModification::find_gaps(rel, after_gap_blkno, previous_nblocks, &shard);
+
+        let gap_start_key = rel_block_to_key(rel, previous_nblocks);
+        let after_gap_key = rel_block_to_key(rel, after_gap_blkno);
+        assert_eq!(gaps, KeySpace::single(gap_start_key..after_gap_key));
+    }
+
+    #[test]
+    fn sharded_gap_finding() {
+        let rel = RelTag {
+            spcnode: 1663,
+            dbnode: 208101,
+            relnode: 2620,
+            forknum: 0,
+        };
+
+        let first_blkno = 6;
+
+        // This shard will get the even blocks
+        let shard = ShardIdentity::from_params(
+            ShardNumber(0),
+            &ShardParameters {
+                count: ShardCount(2),
+                stripe_size: ShardStripeSize(1),
+            },
+        );
+
+        // Only keys belonging to this shard are considered as gaps.
+        let mut previous_nblocks = 0;
+        let gaps = DatadirModification::find_gaps(rel, first_blkno, previous_nblocks, &shard);
+        assert!(!gaps.ranges.is_empty());
+        for gap_range in gaps.ranges {
+            let mut k = gap_range.start;
+            while k != gap_range.end {
+                assert_eq!(shard.get_shard_number(&k), shard.number);
+                k = k.next();
+            }
+        }
+
+        previous_nblocks = first_blkno;
+
+        let update_blkno = 2;
+        let gaps = DatadirModification::find_gaps(rel, update_blkno, previous_nblocks, &shard);
+        assert!(gaps.ranges.is_empty());
     }
 
     /*
