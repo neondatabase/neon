@@ -1184,9 +1184,9 @@ impl<'a> DatadirModification<'a> {
         blkno: u32,
         previous_nblocks: u32,
         shard: &ShardIdentity,
-    ) -> KeySpace {
+    ) -> Option<KeySpace> {
         let mut key = rel_block_to_key(rel, blkno);
-        let mut gap_accum = KeySpaceAccum::new();
+        let mut gap_accum = None;
 
         for gap_blkno in previous_nblocks..blkno {
             key.field6 = gap_blkno;
@@ -1195,10 +1195,12 @@ impl<'a> DatadirModification<'a> {
                 continue;
             }
 
-            gap_accum.add_key(key);
+            gap_accum
+                .get_or_insert_with(KeySpaceAccum::new)
+                .add_key(key);
         }
 
-        gap_accum.to_keyspace()
+        gap_accum.map(|accum| accum.to_keyspace())
     }
 
     pub async fn ingest_batch(
@@ -1219,11 +1221,14 @@ impl<'a> DatadirModification<'a> {
                 self.put_rel_extend(rel, new_nblocks, ctx).await?;
             }
 
-            let gaps = Self::find_gaps(rel, blkno, old_nblocks, shard);
-            gaps_at_lsns.push((gaps, meta.lsn()));
+            if let Some(gaps) = Self::find_gaps(rel, blkno, old_nblocks, shard) {
+                gaps_at_lsns.push((gaps, meta.lsn()));
+            }
         }
 
-        batch.zero_gaps(gaps_at_lsns);
+        if !gaps_at_lsns.is_empty() {
+            batch.zero_gaps(gaps_at_lsns);
+        }
 
         match self.pending_data_batch.as_mut() {
             Some(pending_batch) => {
@@ -2242,16 +2247,16 @@ mod tests {
 
             if i == 0 {
                 // The first block we write is 1, so we should find the gap.
-                assert_eq!(gaps, KeySpace::single(before_base_key..base_key));
+                assert_eq!(gaps.unwrap(), KeySpace::single(before_base_key..base_key));
             } else {
-                assert!(gaps.ranges.is_empty());
+                assert!(gaps.is_none());
             }
         }
 
         // This is an update to an already existing block. No gaps here.
         let update_blkno = 5;
         let gaps = DatadirModification::find_gaps(rel, update_blkno, previous_nblocks, &shard);
-        assert!(gaps.ranges.is_empty());
+        assert!(gaps.is_none());
 
         // This is an update past the current end block.
         let after_gap_blkno = 20;
@@ -2259,7 +2264,10 @@ mod tests {
 
         let gap_start_key = rel_block_to_key(rel, previous_nblocks);
         let after_gap_key = rel_block_to_key(rel, after_gap_blkno);
-        assert_eq!(gaps, KeySpace::single(gap_start_key..after_gap_key));
+        assert_eq!(
+            gaps.unwrap(),
+            KeySpace::single(gap_start_key..after_gap_key)
+        );
     }
 
     #[test]
@@ -2284,7 +2292,8 @@ mod tests {
 
         // Only keys belonging to this shard are considered as gaps.
         let mut previous_nblocks = 0;
-        let gaps = DatadirModification::find_gaps(rel, first_blkno, previous_nblocks, &shard);
+        let gaps =
+            DatadirModification::find_gaps(rel, first_blkno, previous_nblocks, &shard).unwrap();
         assert!(!gaps.ranges.is_empty());
         for gap_range in gaps.ranges {
             let mut k = gap_range.start;
@@ -2298,7 +2307,7 @@ mod tests {
 
         let update_blkno = 2;
         let gaps = DatadirModification::find_gaps(rel, update_blkno, previous_nblocks, &shard);
-        assert!(gaps.ranges.is_empty());
+        assert!(gaps.is_none());
     }
 
     /*
