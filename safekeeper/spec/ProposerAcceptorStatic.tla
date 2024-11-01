@@ -234,8 +234,8 @@ UpdateTerm(p, a) ==
   /\ acc_state' = [acc_state EXCEPT ![a].term = prop_state[p].term]
   /\ UNCHANGED <<prop_state, committed>>
 
-\* Find highest common point in the logs of proposer p and acceptor a.
-\* Returns <term, lsn> of the highest common point.
+\* Find highest common point (LSN of the first divergent record) in the logs of
+\* proposer p and acceptor a. Returns <term, lsn> of the highest common point.
 FindHighestCommonPoint(prop_th, acc_th, acc_flush_lsn) ==
     LET
       \* First find index of the highest common term. 
@@ -362,18 +362,17 @@ LogIsMonotonic ==
 LogSafety ==
     \A c1, c2 \in committed: (c1.lsn = c2.lsn) => (c1 = c2)
 
-\* \* Next record we are going to push to acceptor must never overwrite committed
-\* \* different record.
-\* CommittedNotOverwritten ==
-\*   \A p \in proposers: \A a \in acceptors:
-\*     (/\ prop_state[p].state = "leader"
-\*      /\ prop_state[p].term = acc_state[a].term
-\*      /\ a \in DOMAIN prop_state[p].next_send_lsn) =>
-\*        LET
-\*          next_e == NextEntry(p, a)
-\*        IN
-\*          (next_e /= NULL) =>
-\*           ((commit_lsns[a] >= next_e.lsn) => (acc_state[a].wal[next_e.lsn] = next_e))
+\* Sanity check: TruncateWal must never delete committed record.
+CommittedNotTruncated ==
+    \A p \in proposers: \A a \in acceptors:
+      (/\ prop_state[p].state = "leader"
+       /\ prop_state[p].term = acc_state[a].term) =>
+         LET
+            hcp == FindHighestCommonPoint(prop_state[p].termHistory, AcceptorTermHistory(a), FlushLsn(a))
+            truncated_lsns == {lsn \in DOMAIN acc_state[a].wal: lsn >= hcp.lsn}
+            truncated_records == {[term |-> acc_state[a].wal[lsn], lsn |-> lsn]: lsn \in truncated_lsns}
+         IN
+            \A r \in truncated_records: r \notin committed
 
 \********************************************************************************
 \* Invariants which don't need to hold, but useful for playing/debugging.
