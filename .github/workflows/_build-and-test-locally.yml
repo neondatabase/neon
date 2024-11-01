@@ -19,12 +19,8 @@ on:
         description: 'debug or release'
         required: true
         type: string
-      pg-versions:
-        description: 'a json array of postgres versions to run regression tests on'
-        required: true
-        type: string
-      lfc-states:
-        description: 'a json array of lfc states to run regression tests on'
+      test-cfg:
+        description: 'a json object of postgres versions and lfc states to run regression tests on'
         required: true
         type: string
 
@@ -280,16 +276,7 @@ jobs:
       options: --init --shm-size=512mb --ulimit memlock=67108864:67108864
     strategy:
       fail-fast: false
-      matrix:
-        pg_version: ${{ fromJSON(inputs.pg-versions) }}
-        lfc_state: ${{ fromJSON(inputs.lfc-states) }}
-        exclude:
-          - pg_version: "v14"
-            lfc_state: "without-lfc"
-          - pg_version: "v15"
-            lfc_state: "without-lfc"
-          - pg_version: "v16"
-            lfc_state: "without-lfc"
+      matrix: ${{ fromJSON(inputs.test-cfg) }}
     steps:
       - uses: actions/checkout@v4
         with:
