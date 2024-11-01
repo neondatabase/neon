@@ -621,15 +621,11 @@ impl WalIngest {
                 forknum: VISIBILITYMAP_FORKNUM,
             };
 
-            //
-            // Code copied from PostgreSQL `visibilitymap_prepare_truncate` function in `visibilitymap.c`
-            //
-
             // last remaining block, byte, and bit
             let mut vm_page_no = blkno / (pg_constants::VM_HEAPBLOCKS_PER_PAGE as u32);
             let trunc_byte = blkno as usize % pg_constants::VM_HEAPBLOCKS_PER_PAGE
                 / pg_constants::VM_HEAPBLOCKS_PER_BYTE;
-            let trunc_offset = blkno as usize % pg_constants::VM_HEAPBLOCKS_PER_BYTE
+            let trunc_offs = blkno as usize % pg_constants::VM_HEAPBLOCKS_PER_BYTE
                 * pg_constants::VM_BITS_PER_HEAPBLOCK;
 
             // Unless the new size is exactly at a visibility map page boundary, the
@@ -637,36 +633,19 @@ impl WalIngest {
             // blocks, need to be cleared. This is not only tidy, but also necessary
             // because we don't get a chance to clear the bits if the heap is extended
             // again.
-            if (trunc_byte != 0 || trunc_offset != 0)
+            if (trunc_byte != 0 || trunc_offs != 0)
                 && self.shard.is_key_local(&rel_block_to_key(rel, vm_page_no))
             {
-                if let Ok(old_content) = modification
-                    .tline
-                    .get_rel_page_at_lsn(rel, vm_page_no, Version::Modified(modification), ctx)
-                    .await
-                {
-                    let mut new_content = BytesMut::new();
-                    new_content.extend_from_slice(&old_content);
-                    let map = &mut new_content[pg_constants::MAXALIGN_SIZE_OF_PAGE_HEADER_DATA..];
-                    map[trunc_byte + 1..].fill(0u8);
-                    /*----
-                     * Mask out the unwanted bits of the last remaining byte.
-                     *
-                     * ((1 << 0) - 1) = 00000000
-                     * ((1 << 1) - 1) = 00000001
-                     * ...
-                     * ((1 << 6) - 1) = 00111111
-                     * ((1 << 7) - 1) = 01111111
-                     *----
-                     */
-                    map[trunc_byte] &= (1 << trunc_offset) - 1;
-                    modification.put_rel_page_image(rel, vm_page_no, new_content.freeze())?;
-                } else {
-                    modification.put_rel_page_image_zero(rel, vm_page_no)?;
-                }
+                modification.put_rel_wal_record(
+                    rel,
+                    vm_page_no,
+                    NeonWalRecord::TruncateVisibilityMap {
+                        trunc_byte,
+                        trunc_offs,
+                    },
+                )?;
                 vm_page_no += 1;
             }
-
             let nblocks = get_relsize(modification, rel, ctx).await?;
             if nblocks > vm_page_no {
                 // check if something to do: VM is larger than truncate position

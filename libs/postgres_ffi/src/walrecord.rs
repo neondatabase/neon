@@ -15,7 +15,6 @@ use serde::{Deserialize, Serialize};
 use utils::bin_ser::DeserializeError;
 use utils::lsn::Lsn;
 
-<<<<<<< HEAD:libs/postgres_ffi/src/walrecord.rs
 #[repr(C)]
 #[derive(Debug)]
 pub struct XlMultiXactCreate {
@@ -26,61 +25,6 @@ pub struct XlMultiXactCreate {
     pub nmembers: u32,
     /* number of member XIDs */
     pub members: Vec<MultiXactMember>,
-=======
-/// Each update to a page is represented by a NeonWalRecord. It can be a wrapper
-/// around a PostgreSQL WAL record, or a custom neon-specific "record".
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum NeonWalRecord {
-    /// Native PostgreSQL WAL record
-    Postgres { will_init: bool, rec: Bytes },
-
-    /// Clear bits in heap visibility map. ('flags' is bitmap of bits to clear)
-    ClearVisibilityMapFlags {
-        new_heap_blkno: Option<u32>,
-        old_heap_blkno: Option<u32>,
-        flags: u8,
-    },
-    /// Mark transaction IDs as committed on a CLOG page
-    ClogSetCommitted {
-        xids: Vec<TransactionId>,
-        timestamp: TimestampTz,
-    },
-    /// Mark transaction IDs as aborted on a CLOG page
-    ClogSetAborted { xids: Vec<TransactionId> },
-    /// Extend multixact offsets SLRU
-    MultixactOffsetCreate {
-        mid: MultiXactId,
-        moff: MultiXactOffset,
-    },
-    /// Extend multixact members SLRU.
-    MultixactMembersCreate {
-        moff: MultiXactOffset,
-        members: Vec<MultiXactMember>,
-    },
-    /// Update the map of AUX files, either writing or dropping an entry
-    AuxFile {
-        file_path: String,
-        content: Option<Bytes>,
-    },
-    // Truncate visibility map page
-    TruncateVisibilityMap {
-        trunc_byte: usize,
-        trunc_offs: usize,
-    },
-
-    /// A testing record for unit testing purposes. It supports append data to an existing image, or clear it.
-    #[cfg(test)]
-    Test {
-        /// Append a string to the image.
-        append: String,
-        /// Clear the image before appending.
-        clear: bool,
-        /// Treat this record as an init record. `clear` should be set to true if this field is set
-        /// to true. This record does not need the history WALs to reconstruct. See [`NeonWalRecord::will_init`] and
-        /// its references in `timeline.rs`.
-        will_init: bool,
-    },
->>>>>>> d09c9fca1 (Move TruncateVisibilityMap to the end of NeonWalRecord enum to preserve serialed representation of other members):pageserver/src/walrecord.rs
 }
 
 impl XlMultiXactCreate {
