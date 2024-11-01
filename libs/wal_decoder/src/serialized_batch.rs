@@ -222,10 +222,10 @@ impl SerializedValueBatch {
                 })
             };
 
-            let val_ser_size = val.serialized_size().unwrap() as usize;
-
             val.ser_into(&mut buf)
                 .expect("Writing into in-memory buffer is infallible");
+
+            let val_ser_size = buf.len() - relative_off as usize;
 
             metadata.push(ValueMeta::Serialized(SerializedValueMeta {
                 key: key.to_compact(),
