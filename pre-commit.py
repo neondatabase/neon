@@ -61,14 +61,7 @@ def get_commit_files() -> list[str]:
     return files.decode().splitlines()
 
 
-def check(
-    name: str,
-    suffix: str,
-    cmd: str,
-    changed_files: list[str],
-    env: dict[str, str],
-    no_color: bool = False,
-):
+def check(name: str, suffix: str, cmd: str, changed_files: list[str], no_color: bool = False):
     print(f"Checking: {name} ", end="")
     applicable_files = list(filter(lambda fname: fname.strip().endswith(suffix), changed_files))
     if not applicable_files:
@@ -76,11 +69,7 @@ def check(
         return
 
     cmd = f'{cmd} {" ".join(applicable_files)}'
-
-    curr_env = dict(os.environ)
-    curr_env.update(env)
-
-    res = subprocess.run(cmd.split(), capture_output=True, env=curr_env)
+    res = subprocess.run(cmd.split(), capture_output=True)
     if res.returncode != 0:
         print(colorify("[FAILED]", Color.RED, no_color))
         if name == "mypy":
@@ -119,7 +108,6 @@ if __name__ == "__main__":
         suffix=".rs",
         cmd=rustfmt(fix_inplace=args.fix_inplace, no_color=args.no_color),
         changed_files=files,
-        env={},
         no_color=args.no_color,
     )
     check(
@@ -127,7 +115,6 @@ if __name__ == "__main__":
         suffix=".py",
         cmd=ruff_check(fix_inplace=args.fix_inplace),
         changed_files=files,
-        env={},
         no_color=args.no_color,
     )
     check(
@@ -135,7 +122,6 @@ if __name__ == "__main__":
         suffix=".py",
         cmd=ruff_format(fix_inplace=args.fix_inplace),
         changed_files=files,
-        env={},
         no_color=args.no_color,
     )
     check(
@@ -143,6 +129,5 @@ if __name__ == "__main__":
         suffix=".py",
         cmd=mypy(),
         changed_files=files,
-        env={"MYPYPATH": "test_runner/stubs"},
         no_color=args.no_color,
     )
