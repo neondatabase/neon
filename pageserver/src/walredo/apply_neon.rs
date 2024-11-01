@@ -67,6 +67,7 @@ pub(crate) fn apply_in_neon(
                 let map = &mut page[pg_constants::MAXALIGN_SIZE_OF_PAGE_HEADER_DATA..];
 
                 map[map_byte as usize] &= !(flags << map_offset);
+                // The page should never be empty, but we're checking it anyway as a precaution, so that if it is empty for some reason anyway, we don't make matters worse by setting the LSN on it.
                 if !postgres_ffi::page_is_new(page) {
                     postgres_ffi::page_set_lsn(page, lsn);
                 }
@@ -83,6 +84,7 @@ pub(crate) fn apply_in_neon(
                 let map = &mut page[pg_constants::MAXALIGN_SIZE_OF_PAGE_HEADER_DATA..];
 
                 map[map_byte as usize] &= !(flags << map_offset);
+                // The page should never be empty, but we're checking it anyway as a precaution, so that if it is empty for some reason anyway, we don't make matters worse by setting the LSN on it.
                 if !postgres_ffi::page_is_new(page) {
                     postgres_ffi::page_set_lsn(page, lsn);
                 }
