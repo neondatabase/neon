@@ -414,7 +414,7 @@ def test_timeline_retain_lsn(neon_env_builder: NeonEnvBuilder, offload_child: Op
             [
                 "CREATE TABLE foo(v int, key serial primary key, t text default 'data_content')",
                 "SELECT setseed(0.4321)",
-                "INSERT INTO foo SELECT v FROM (SELECT generate_series(1,2048), (random() * 409600)::int as v)",
+                "INSERT INTO foo SELECT v FROM (SELECT generate_series(1,2048), (random() * 409600)::int as v) as random_numbers",
             ]
         )
         pre_branch_sum = endpoint.safe_psql("SELECT sum(key) from foo where key < 51200")
