@@ -105,16 +105,25 @@ def test_installed_extensions(neon_simple_env: NeonEnv):
     endpoint.stop()
     endpoint.start()
 
-    timeout = 5
+    timeout = 10
     while timeout > 0:
         try:
             res = client.metrics()
             timeout = -1
+            if len(parse_metrics(res).query_all("installed_extensions")) < 4:
+                # Assume that not all metrics that are collected yet
+                time.sleep(1)
+                timeout -= 1
+                continue
         except Exception as e:
             info("failed to get metrics, assume they are not collected yet: %s", e)
             time.sleep(1)
             timeout -= 1
             continue
+
+        assert (
+            len(parse_metrics(res).query_all("installed_extensions")) >= 4
+        ), "Not all metrics are collected"
 
         info("After restart metrics: %s", res)
         m = parse_metrics(res)
