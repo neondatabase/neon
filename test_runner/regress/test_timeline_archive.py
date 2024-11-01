@@ -496,7 +496,6 @@ def test_timeline_retain_lsn(neon_env_builder: NeonEnvBuilder, offload_child: Op
     ps_http.timeline_checkpoint(
         tenant_id,
         root_timeline_id,
-        # force_image_layer_creation=True,
         force_l0_compaction=True,
         force_repartition=True,
         wait_until_uploaded=True,
