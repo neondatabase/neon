@@ -13,25 +13,28 @@ from fixtures.neon_fixtures import (
 
 
 @pytest.mark.timeout(600)
-def test_sharded_ingest(neon_env_builder: NeonEnvBuilder, zenbenchmark: NeonBenchmarker):
+@pytest.mark.parametrize("shard_count", [1, 8, 32])
+def test_sharded_ingest(
+    neon_env_builder: NeonEnvBuilder,
+    zenbenchmark: NeonBenchmarker,
+    shard_count: int,
+):
     """
     Benchmarks sharded ingestion throughput, by ingesting a large amount of WAL into a Safekeeper
     and fanning out to a large number of shards on dedicated Pageservers. Comparing the base case
-    (SHARD_COUNT=1) to the sharded case indicates the overhead of sharding.
+    (shard_count=1) to the sharded case indicates the overhead of sharding.
     """
 
-    # Specify the shard count and WAL volume. Each shard gets a dedicated pageserver.
-    SHARD_COUNT = 10
     ROW_COUNT = 100_000_000  # about 7 GB of WAL
 
-    neon_env_builder.num_pageservers = SHARD_COUNT
+    neon_env_builder.num_pageservers = shard_count
     env = neon_env_builder.init_start()
 
     # Create a sharded tenant and timeline, and migrate it to the respective pageservers.
-    tenant_id, timeline_id = env.create_tenant(shard_count=SHARD_COUNT)
+    tenant_id, timeline_id = env.create_tenant(shard_count=shard_count)
 
-    for shard_number in range(0, SHARD_COUNT):
-        tenant_shard_id = TenantShardId(tenant_id, shard_number, SHARD_COUNT)
+    for shard_number in range(0, shard_count):
+        tenant_shard_id = TenantShardId(tenant_id, shard_number, shard_count)
         pageserver_id = shard_number + 1
         env.storage_controller.tenant_shard_migrate(tenant_shard_id, pageserver_id)
 
