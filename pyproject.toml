@@ -67,7 +67,7 @@ exclude = [
 check_untyped_defs = true
 # Help mypy find imports when running against list of individual files.
 # Without this line it would behave differently when executed on the entire project.
-mypy_path = "$MYPY_CONFIG_FILE_DIR:$MYPY_CONFIG_FILE_DIR/test_runner"
+mypy_path = "$MYPY_CONFIG_FILE_DIR:$MYPY_CONFIG_FILE_DIR/test_runner:$MYPY_CONFIG_FILE_DIR/test_runner/stubs"
 
 disallow_incomplete_defs = false
 disallow_untyped_calls = false

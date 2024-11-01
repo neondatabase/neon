@@ -3,18 +3,40 @@ use std::sync::Arc;
 use super::delete::{delete_local_timeline_directory, DeleteTimelineFlow, DeletionGuard};
 use super::Timeline;
 use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
-use crate::tenant::{OffloadedTimeline, Tenant, TimelineOrOffloaded};
+use crate::tenant::{OffloadedTimeline, Tenant, TenantManifestError, TimelineOrOffloaded};
+
+#[derive(thiserror::Error, Debug)]
+pub(crate) enum OffloadError {
+    #[error("Cancelled")]
+    Cancelled,
+    #[error("Timeline is not archived")]
+    NotArchived,
+    #[error(transparent)]
+    RemoteStorage(anyhow::Error),
+    #[error("Unexpected offload error: {0}")]
+    Other(anyhow::Error),
+}
+
+impl From<TenantManifestError> for OffloadError {
+    fn from(e: TenantManifestError) -> Self {
+        match e {
+            TenantManifestError::Cancelled => Self::Cancelled,
+            TenantManifestError::RemoteStorage(e) => Self::RemoteStorage(e),
+        }
+    }
+}
 
 pub(crate) async fn offload_timeline(
     tenant: &Tenant,
     timeline: &Arc<Timeline>,
-) -> anyhow::Result<()> {
+) -> Result<(), OffloadError> {
     debug_assert_current_span_has_tenant_and_timeline_id();
     tracing::info!("offloading archived timeline");
 
     let allow_offloaded_children = true;
     let (timeline, guard) =
-        DeleteTimelineFlow::prepare(tenant, timeline.timeline_id, allow_offloaded_children)?;
+        DeleteTimelineFlow::prepare(tenant, timeline.timeline_id, allow_offloaded_children)
+            .map_err(|e| OffloadError::Other(anyhow::anyhow!(e)))?;
 
     let TimelineOrOffloaded::Timeline(timeline) = timeline else {
         tracing::error!("timeline already offloaded, but given timeline object");
@@ -26,14 +48,15 @@ pub(crate) async fn offload_timeline(
         Some(true) => (),
         Some(false) => {
             tracing::warn!(?is_archived, "tried offloading a non-archived timeline");
-            anyhow::bail!("timeline isn't archived");
+            return Err(OffloadError::NotArchived);
         }
         None => {
-            tracing::warn!(
+            // This is legal: calls to this function can race with the timeline shutting down
+            tracing::info!(
                 ?is_archived,
-                "tried offloading a timeline where manifest is not yet available"
+                "tried offloading a timeline whose remote storage is not initialized"
             );
-            anyhow::bail!("timeline manifest hasn't been loaded yet");
+            return Err(OffloadError::Cancelled);
         }
     }
 
@@ -44,9 +67,11 @@ pub(crate) async fn offload_timeline(
     // to make deletions possible while offloading is in progress
 
     let conf = &tenant.conf;
-    delete_local_timeline_directory(conf, tenant.tenant_shard_id, &timeline).await?;
+    delete_local_timeline_directory(conf, tenant.tenant_shard_id, &timeline)
+        .await
+        .map_err(OffloadError::Other)?;
 
-    remove_timeline_from_tenant(tenant, &timeline, &guard).await?;
+    remove_timeline_from_tenant(tenant, &timeline, &guard);
 
     {
         let mut offloaded_timelines = tenant.timelines_offloaded.lock().unwrap();
@@ -65,21 +90,18 @@ pub(crate) async fn offload_timeline(
     // at the next restart attach it again.
     // For that to happen, we'd need to make the manifest reflect our *intended* state,
     // not our actual state of offloaded timelines.
-    tenant
-        .store_tenant_manifest()
-        .await
-        .map_err(|e| anyhow::anyhow!(e))?;
+    tenant.store_tenant_manifest().await?;
 
     Ok(())
 }
 
 /// It is important that this gets called when DeletionGuard is being held.
 /// For more context see comments in [`DeleteTimelineFlow::prepare`]
-async fn remove_timeline_from_tenant(
+fn remove_timeline_from_tenant(
     tenant: &Tenant,
     timeline: &Timeline,
     _: &DeletionGuard, // using it as a witness
-) -> anyhow::Result<()> {
+) {
     // Remove the timeline from the map.
     let mut timelines = tenant.timelines.lock().unwrap();
     let children_exist = timelines
@@ -95,8 +117,4 @@ async fn remove_timeline_from_tenant(
     timelines
         .remove(&timeline.timeline_id)
         .expect("timeline that we were deleting was concurrently removed from 'timelines' map");
-
-    drop(timelines);
-
-    Ok(())
 }
