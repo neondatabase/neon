@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from typing import Optional
+
 import pytest
 from fixtures.common_types import TenantId, TimelineArchivalState, TimelineId
 from fixtures.log_helper import log
@@ -8,9 +11,12 @@ from fixtures.neon_fixtures import (
     last_flush_lsn_upload,
 )
 from fixtures.pageserver.http import PageserverApiException
-from fixtures.pageserver.utils import assert_prefix_empty, assert_prefix_not_empty
-from fixtures.remote_storage import s3_storage
+from fixtures.pageserver.utils import assert_prefix_empty, assert_prefix_not_empty, list_prefix
+from fixtures.remote_storage import S3Storage, s3_storage
 from fixtures.utils import wait_until
+from mypy_boto3_s3.type_defs import (
+    ObjectTypeDef,
+)
 
 
 @pytest.mark.parametrize("shard_count", [0, 4])
@@ -372,10 +378,15 @@ def test_timeline_offload_persist(neon_env_builder: NeonEnvBuilder, delete_timel
     )
 
 
-def test_timeline_offload_retain_lsn(neon_env_builder: NeonEnvBuilder):
+@pytest.mark.parametrize("offload_child", ["offload", "offload-corrupt", "archive", None])
+def test_timeline_retain_lsn(neon_env_builder: NeonEnvBuilder, offload_child: Optional[str]):
     """
     Ensure that retain_lsn functionality for offloaded timelines works
     """
+    if offload_child == "offload-corrupt":
+        # Our corruption code only works with S3 compatible storage
+        neon_env_builder.enable_pageserver_remote_storage(s3_storage())
+
     env = neon_env_builder.init_start()
     ps_http = env.pageserver.http_client()
 
@@ -414,6 +425,7 @@ def test_timeline_offload_retain_lsn(neon_env_builder: NeonEnvBuilder):
     child_timeline_id = env.create_branch("test_archived_branch", tenant_id)
 
     with env.endpoints.create_start("main", tenant_id=tenant_id) as endpoint:
+        # Do some churn of the data. This is important so that we can overwrite image layers.
         for i in range(10):
             endpoint.safe_psql_many(
                 [
@@ -427,19 +439,56 @@ def test_timeline_offload_retain_lsn(neon_env_builder: NeonEnvBuilder):
         log.info(f"Post branch sum: {post_branch_sum}")
         last_flush_lsn_upload(env, endpoint, tenant_id, root_timeline_id)
 
-    ps_http.timeline_archival_config(
-        tenant_id,
-        child_timeline_id,
-        state=TimelineArchivalState.ARCHIVED,
-    )
-    leaf_detail = ps_http.timeline_detail(
-        tenant_id,
-        child_timeline_id,
-    )
-    assert leaf_detail["is_archived"] is True
-    ps_http.timeline_offload(tenant_id, child_timeline_id)
+    if offload_child is not None:
+        ps_http.timeline_archival_config(
+            tenant_id,
+            child_timeline_id,
+            state=TimelineArchivalState.ARCHIVED,
+        )
+        leaf_detail = ps_http.timeline_detail(
+            tenant_id,
+            child_timeline_id,
+        )
+        assert leaf_detail["is_archived"] is True
+        if "offload" in offload_child:
+            ps_http.timeline_offload(tenant_id, child_timeline_id)
 
+    # Do a restart to get rid of any in-memory objects (we only init gc info once, at attach)
     env.pageserver.stop()
+    if offload_child == "offload-corrupt":
+        assert isinstance(env.pageserver_remote_storage, S3Storage)
+        listing = list_prefix(
+            env.pageserver_remote_storage, f"tenants/{str(tenant_id)}/tenant-manifest"
+        )
+        objects: list[ObjectTypeDef] = listing.get("Contents", [])
+        assert len(objects) > 0
+        remote_key: str = str(objects[0].get("Key", []))
+        local_path = env.repo_dir / "tenant-manifest.json"
+
+        log.info(f"Downloading {remote_key} -> {local_path}")
+        env.pageserver_remote_storage.client.download_file(
+            env.pageserver_remote_storage.bucket_name, remote_key, local_path
+        )
+
+        log.info(f"Corrupting {local_path}")
+        with open(local_path) as manifest_json_file:
+            manifest_json = json.load(manifest_json_file)
+        for offloaded_timeline in manifest_json["offloaded_timelines"]:
+            offloaded_timeline["ancestor_retain_lsn"] = None
+        with open(local_path, "w") as manifest_json_file:
+            json.dump(manifest_json, manifest_json_file)
+
+        log.info(f"Uploading {local_path} -> {remote_key}")
+        env.pageserver_remote_storage.client.upload_file(
+            local_path, env.pageserver_remote_storage.bucket_name, remote_key
+        )
+        # The point of our earlier efforts was to provoke these
+        env.pageserver.allowed_errors.extend(
+            [
+                ".*initial size calculation failed: PageRead.MissingKey.could not find data for key.*",
+                ".*page_service_conn_main.*could not find data for key.*",
+            ]
+        )
     env.pageserver.start()
 
     # Do an agressive gc and compaction of the parent branch
@@ -447,20 +496,27 @@ def test_timeline_offload_retain_lsn(neon_env_builder: NeonEnvBuilder):
     ps_http.timeline_checkpoint(
         tenant_id,
         root_timeline_id,
-        #force_image_layer_creation=True,
+        # force_image_layer_creation=True,
         force_l0_compaction=True,
         force_repartition=True,
         wait_until_uploaded=True,
         compact=True,
     )
 
-    ps_http.timeline_archival_config(
-        tenant_id,
-        child_timeline_id,
-        state=TimelineArchivalState.UNARCHIVED,
-    )
+    if offload_child is not None:
+        ps_http.timeline_archival_config(
+            tenant_id,
+            child_timeline_id,
+            state=TimelineArchivalState.UNARCHIVED,
+        )
 
-    # Now, after unarchival, the child timeline should still have its data accessible
-    with env.endpoints.create_start("test_archived_branch", tenant_id=tenant_id) as endpoint:
-        sum = endpoint.safe_psql("SELECT sum(key) from foo where key < 51200")
-        assert sum == pre_branch_sum
+    # Now, after unarchival, the child timeline should still have its data accessible (or corrupted)
+    if offload_child == "offload-corrupt":
+        with pytest.raises(RuntimeError, match=".*failed to get basebackup.*"):
+            env.endpoints.create_start(
+                "test_archived_branch", tenant_id=tenant_id, basebackup_request_tries=1
+            )
+    else:
+        with env.endpoints.create_start("test_archived_branch", tenant_id=tenant_id) as endpoint:
+            sum = endpoint.safe_psql("SELECT sum(key) from foo where key < 51200")
+            assert sum == pre_branch_sum
