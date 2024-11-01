@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 from fixtures.common_types import TenantId, TimelineArchivalState, TimelineId
+from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
     last_flush_lsn_upload,
@@ -9,7 +10,6 @@ from fixtures.neon_fixtures import (
 from fixtures.pageserver.http import PageserverApiException
 from fixtures.pageserver.utils import assert_prefix_empty, assert_prefix_not_empty
 from fixtures.remote_storage import s3_storage
-from fixtures.log_helper import log
 from fixtures.utils import wait_until
 
 
@@ -386,7 +386,8 @@ def test_timeline_offload_retain_lsn(neon_env_builder: NeonEnvBuilder):
             "checkpoint_distance": 128 * 1024,
             "compaction_threshold": 1,
             "compaction_target_size": 128 * 1024,
-            "image_creation_threshold": 1024 ** 3,
+            # set small image creation thresholds so that gc deletes data
+            "image_creation_threshold": 2,
             # disable background compaction and GC. We invoke it manually when we want it to happen.
             "gc_period": "0s",
             "compaction_period": "0s",
@@ -402,7 +403,7 @@ def test_timeline_offload_retain_lsn(neon_env_builder: NeonEnvBuilder):
             [
                 "CREATE TABLE foo(v int, key serial primary key, t text default 'data_content')",
                 "SELECT setseed(0.4321)",
-                "INSERT INTO foo SELECT v FROM (SELECT generate_series(1,4096), (random() * 409600)::int as v)",
+                "INSERT INTO foo SELECT v FROM (SELECT generate_series(1,2048), (random() * 409600)::int as v)",
             ]
         )
         pre_branch_sum = endpoint.safe_psql("SELECT sum(key) from foo where key < 51200")
@@ -412,30 +413,16 @@ def test_timeline_offload_retain_lsn(neon_env_builder: NeonEnvBuilder):
     # Create a branch and write some additional data to the parent
     child_timeline_id = env.create_branch("test_archived_branch", tenant_id)
 
-    """
-    with env.endpoints.create_start("test_archived_branch", tenant_id=tenant_id) as endpoint:
-        endpoint.safe_psql_many(
-            [
-                "SELECT setseed(0.812345)",
-                "INSERT INTO foo SELECT v FROM (SELECT generate_series(1,64), (random() * 409600)::int as v)",
-                "DELETE FROM foo WHERE v > 204800",
-                "VACUUM foo",
-            ]
-        )
-        child_sum = endpoint.safe_psql("SELECT sum(key) from foo where key < 51200")
-        log.info(f"Child branch sum: {child_sum}")
-        last_flush_lsn_upload(env, endpoint, tenant_id, child_timeline_id)
-    """
-
     with env.endpoints.create_start("main", tenant_id=tenant_id) as endpoint:
-        endpoint.safe_psql_many(
-            [
-                "SELECT setseed(0.345678)",
-                "INSERT INTO foo SELECT v FROM (SELECT generate_series(1,4096), (random() * 409600)::int as v)",
-                "DELETE FROM foo WHERE v > 204800",
-                "VACUUM foo",
-            ]
-        )
+        for i in range(10):
+            endpoint.safe_psql_many(
+                [
+                    f"SELECT setseed(0.23{i})",
+                    "UPDATE foo SET v=(random() * 409600)::int WHERE v % 3 = 2",
+                    "UPDATE foo SET v=(random() * 409600)::int WHERE v % 3 = 1",
+                    "UPDATE foo SET v=(random() * 409600)::int WHERE v % 3 = 0",
+                ]
+            )
         post_branch_sum = endpoint.safe_psql("SELECT sum(key) from foo where key < 51200")
         log.info(f"Post branch sum: {post_branch_sum}")
         last_flush_lsn_upload(env, endpoint, tenant_id, root_timeline_id)
