@@ -2301,7 +2301,7 @@ class NeonProxiedStorageController(NeonStorageController):
 
     def start(
         self,
-        timeout_in_seconds: int = 60,
+        timeout_in_seconds: Optional[int] = 60,
         instance_id: Optional[int] = None,
         base_port: Optional[int] = None,
     ):
