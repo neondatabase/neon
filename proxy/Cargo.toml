@@ -74,6 +74,8 @@ sha2 = { workspace = true, features = ["asm", "oid"] }
 smol_str.workspace = true
 smallvec.workspace = true
 socket2.workspace = true
+strum.workspace = true
+strum_macros.workspace = true
 subtle.workspace = true
 thiserror.workspace = true
 tikv-jemallocator.workspace = true
