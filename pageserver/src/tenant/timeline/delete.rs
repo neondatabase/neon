@@ -89,7 +89,7 @@ pub(super) async fn delete_local_timeline_directory(
     // NB: This need not be atomic because the deleted flag in the IndexPart
     // will be observed during tenant/timeline load. The deletion will be resumed there.
     //
-    // ErrorKind::NotFound can also happen if we race with tenant detach, because,
+    // ErrorKind::NotFound can happen e.g. if we race with tenant detach, because,
     // no locks are shared.
     tokio::fs::remove_dir_all(local_timeline_directory)
         .await
