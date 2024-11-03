@@ -26,9 +26,8 @@ camino = { version = "1", default-features = false, features = ["serde1"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "wasmbind"] }
 clap = { version = "4", features = ["derive", "string"] }
 clap_builder = { version = "4", default-features = false, features = ["color", "help", "std", "string", "suggestions", "usage"] }
-const-oid = { version = "0.9", default-features = false, features = ["db", "std"] }
 crypto-bigint = { version = "0.5", features = ["generic-array", "zeroize"] }
-der = { version = "0.7", default-features = false, features = ["derive", "flagset", "oid", "pem", "std"] }
+der = { version = "0.7", default-features = false, features = ["oid", "pem", "std"] }
 deranged = { version = "0.3", default-features = false, features = ["powerfmt", "serde", "std"] }
 digest = { version = "0.10", features = ["mac", "oid", "std"] }
 either = { version = "1" }
@@ -41,6 +40,7 @@ generic-array = { version = "0.14", default-features = false, features = ["more_
 getrandom = { version = "0.2", default-features = false, features = ["std"] }
 half = { version = "2", default-features = false, features = ["num-traits"] }
 hashbrown = { version = "0.14", features = ["raw"] }
+hex = { version = "0.4", features = ["serde"] }
 hmac = { version = "0.12", default-features = false, features = ["reset"] }
 hyper-582f2526e08bb6a0 = { package = "hyper", version = "0.14", features = ["full"] }
 hyper-dff4ba8e3ae991db = { package = "hyper", version = "1", features = ["full"] }
@@ -70,6 +70,7 @@ scopeguard = { version = "1" }
 serde = { version = "1", features = ["alloc", "derive"] }
 serde_json = { version = "1", features = ["alloc", "raw_value"] }
 sha2 = { version = "0.10", features = ["asm", "oid"] }
+signature = { version = "2", default-features = false, features = ["digest", "rand_core", "std"] }
 smallvec = { version = "1", default-features = false, features = ["const_new", "write"] }
 spki = { version = "0.7", default-features = false, features = ["pem", "std"] }
 subtle = { version = "2" }
@@ -87,7 +88,7 @@ tower = { version = "0.4", default-features = false, features = ["balance", "buf
 tracing = { version = "0.1", features = ["log"] }
 tracing-core = { version = "0.1" }
 url = { version = "2", features = ["serde"] }
-zeroize = { version = "1", features = ["serde"] }
+zeroize = { version = "1", features = ["derive", "serde"] }
 zstd = { version = "0.13" }
 zstd-safe = { version = "7", default-features = false, features = ["arrays", "legacy", "std", "zdict_builder"] }
 zstd-sys = { version = "2", default-features = false, features = ["legacy", "std", "zdict_builder"] }

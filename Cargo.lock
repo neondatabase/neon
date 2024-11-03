@@ -1619,8 +1619,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fffa369a668c8af7dbf8b5e56c9f744fbd399949ed171606040001947de40b1c"
 dependencies = [
  "const-oid",
- "der_derive",
- "flagset",
  "pem-rfc7468",
  "zeroize",
 ]
@@ -1637,17 +1635,6 @@ dependencies = [
  "num-bigint",
  "num-traits",
  "rusticata-macros",
-]
-
-[[package]]
-name = "der_derive"
-version = "0.7.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8034092389675178f570469e6c3b0465d3d30b4505c294a6550db47f3c17ad18"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.52",
 ]
 
 [[package]]
@@ -2026,12 +2013,6 @@ name = "fixedbitset"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ce7134b9999ecaf8bcd65542e436736ef32ddca1b3e06094cb6ec5755203b80"
-
-[[package]]
-name = "flagset"
-version = "0.4.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b3ea1ec5f8307826a5b71094dd91fc04d4ae75d5709b20ad351c7fb4815c86ec"
 
 [[package]]
 name = "flate2"
@@ -7324,7 +7305,6 @@ dependencies = [
  "chrono",
  "clap",
  "clap_builder",
- "const-oid",
  "crypto-bigint 0.5.5",
  "der 0.7.8",
  "deranged",
@@ -7339,6 +7319,7 @@ dependencies = [
  "getrandom 0.2.11",
  "half",
  "hashbrown 0.14.5",
+ "hex",
  "hmac",
  "hyper 0.14.30",
  "hyper 1.4.1",
@@ -7371,6 +7352,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "signature 2.2.0",
  "smallvec",
  "spki 0.7.3",
  "subtle",
