@@ -25,7 +25,6 @@ hex.workspace = true
 humantime.workspace = true
 http.workspace = true
 hyper0.workspace = true
-itertools.workspace = true
 futures.workspace = true
 once_cell.workspace = true
 parking_lot.workspace = true
@@ -63,6 +62,7 @@ workspace_hack.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
+itertools.workspace = true
 walproposer.workspace = true
 rand.workspace = true
 desim.workspace = true
