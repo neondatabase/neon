@@ -105,14 +105,13 @@ async fn main() -> anyhow::Result<()> {
             let first_cert = cert_chain.first().context("missing certificate")?;
             let tls_server_end_point = TlsServerEndPoint::new(first_cert)?;
 
-            let tls_config = rustls::ServerConfig::builder_with_provider(Arc::new(
-                ring::default_provider(),
-            ))
-            .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
-            .context("ring should support TLS1.2 and TLS1.3")?
-            .with_no_client_auth()
-            .with_single_cert(cert_chain, key)?
-            .into();
+            let tls_config =
+                rustls::ServerConfig::builder_with_provider(Arc::new(ring::default_provider()))
+                    .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
+                    .context("ring should support TLS1.2 and TLS1.3")?
+                    .with_no_client_auth()
+                    .with_single_cert(cert_chain, key)?
+                    .into();
 
             (tls_config, tls_server_end_point)
         }
