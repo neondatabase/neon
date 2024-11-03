@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
 use camino_tempfile::Utf8TempDir;
+use criterion::Criterion;
+use pprof::criterion::{Output, PProfProfiler};
 use safekeeper::rate_limit::RateLimiter;
 use safekeeper::safekeeper::{ProposerAcceptorMessage, ProposerElected, SafeKeeper, TermHistory};
 use safekeeper::state::{TimelinePersistentState, TimelineState};
@@ -11,6 +13,17 @@ use safekeeper::{control_file, wal_storage, SafeKeeperConf};
 use tokio::fs::create_dir_all;
 use utils::id::{NodeId, TenantTimelineId};
 use utils::lsn::Lsn;
+
+/// Configures Criterion.
+pub fn setup_criterion() -> Criterion {
+    let mut c = Criterion::default();
+
+    // Use pprof-rs for profiles, with flamegraph SVG output in
+    // target/criterion/*/profile/flamegraph.svg
+    c = c.with_profiler(PProfProfiler::new(100, Output::Flamegraph(None)));
+
+    c
+}
 
 /// A Safekeeper benchmarking environment. Uses a tempdir for storage, removed on drop.
 pub struct Env {

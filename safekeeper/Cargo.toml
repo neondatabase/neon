@@ -63,6 +63,7 @@ workspace_hack.workspace = true
 [dev-dependencies]
 criterion.workspace = true
 itertools.workspace = true
+pprof.workspace = true
 walproposer.workspace = true
 rand.workspace = true
 desim.workspace = true

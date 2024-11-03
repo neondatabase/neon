@@ -3,7 +3,7 @@
 #[path = "benchutils.rs"]
 mod benchutils;
 
-use benchutils::Env;
+use benchutils::{setup_criterion, Env};
 use criterion::{criterion_group, criterion_main, BatchSize, Bencher, Criterion};
 use itertools::Itertools as _;
 use postgres_ffi::v17::wal_generator::{LogicalMessageGenerator, WalGenerator};
@@ -20,10 +20,9 @@ const GB: usize = 1024 * MB;
 
 // Register benchmarks with Criterion.
 criterion_group!(
-    benches,
-    bench_process_msg,
-    bench_wal_acceptor,
-    bench_wal_acceptor_throughput
+    name = benches;
+    config = setup_criterion();
+    targets = bench_process_msg, bench_wal_acceptor, bench_wal_acceptor_throughput
 );
 criterion_main!(benches);
 
