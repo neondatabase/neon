@@ -11,7 +11,6 @@ use bytes::{Buf, Bytes, BytesMut};
 use pin_project_lite::pin_project;
 use strum_macros::FromRepr;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
-use tracing::debug;
 
 pin_project! {
     /// A chained [`AsyncRead`] with [`AsyncWrite`] passthrough
@@ -62,16 +61,17 @@ const HEADER: [u8; 12] = [
     0x0D, 0x0A, 0x0D, 0x0A, 0x00, 0x0D, 0x0A, 0x51, 0x55, 0x49, 0x54, 0x0A,
 ];
 
-#[derive(Debug, PartialEq)]
-pub enum Command {
-    Local,
-    Proxy,
-}
-
 #[derive(PartialEq, Eq, Clone, Debug)]
 pub struct ConnectionInfo {
     pub addr: SocketAddr,
     pub extra: Option<ConnectionInfoExtra>,
+}
+
+#[derive(PartialEq, Eq, Clone, Debug)]
+pub enum ConnectHeader {
+    Missing,
+    Local,
+    Proxy(ConnectionInfo),
 }
 
 impl fmt::Display for ConnectionInfo {
@@ -96,7 +96,7 @@ pub enum ConnectionInfoExtra {
 
 pub(crate) async fn read_proxy_protocol<T: AsyncRead + Unpin>(
     mut read: T,
-) -> std::io::Result<(ChainRW<T>, Option<ConnectionInfo>)> {
+) -> std::io::Result<(ChainRW<T>, ConnectHeader)> {
     let mut buf = BytesMut::with_capacity(128);
     while buf.len() < 16 {
         let bytes_read = read.read_buf(&mut buf).await?;
@@ -104,33 +104,58 @@ pub(crate) async fn read_proxy_protocol<T: AsyncRead + Unpin>(
         // exit for bad header
         let len = usize::min(buf.len(), HEADER.len());
         if buf[..len] != HEADER[..len] {
-            return Ok((ChainRW { inner: read, buf }, None));
+            return Ok((ChainRW { inner: read, buf }, ConnectHeader::Missing));
         }
 
         // if no more bytes available then exit
         if bytes_read == 0 {
-            return Ok((ChainRW { inner: read, buf }, None));
+            return Ok((ChainRW { inner: read, buf }, ConnectHeader::Missing));
         };
     }
-
-    let header = buf.split_to(16);
 
     // The next byte (the 13th one) is the protocol version and command.
     // The highest four bits contains the version. As of this specification, it must
     // always be sent as \x2 and the receiver must only accept this value.
-    let vc = header[12];
-    let command = match vc {
+    let vc = buf[12];
+
+    // The 14th byte contains the transport protocol and address family. The highest 4
+    // bits contain the address family, the lowest 4 bits contain the protocol.
+    let ft = buf[13];
+
+    // The 15th and 16th bytes is the address length in bytes in network endian order.
+    // It is used so that the receiver knows how many address bytes to skip even when
+    // it does not implement the presented protocol. Thus the length of the protocol
+    // header in bytes is always exactly 16 + this value. When a sender presents a
+    // LOCAL connection, it should not present any address so it sets this field to
+    // zero. Receivers MUST always consider this field to skip the appropriate number
+    // of bytes and must not assume zero is presented for LOCAL connections. When a
+    // receiver accepts an incoming connection showing an UNSPEC address family or
+    // protocol, it may or may not decide to log the address information if present.
+    let remaining_length = u16::from_be_bytes(buf[14..16].try_into().unwrap());
+    buf.advance(16);
+
+    while buf.len() < remaining_length as usize {
+        if read.read_buf(&mut buf).await? == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "stream closed while waiting for proxy protocol addresses",
+            ));
+        }
+    }
+    let mut header = buf.split_to(usize::from(remaining_length));
+
+    match vc {
         // the connection was established on purpose by the proxy
         // without being relayed. The connection endpoints are the sender and the
         // receiver. Such connections exist when the proxy sends health-checks to the
         // server. The receiver must accept this connection as valid and must use the
         // real connection endpoints and discard the protocol block including the
         // family which is ignored.
-        0x20 => Command::Local,
+        0x20 => return Ok((ChainRW { inner: read, buf }, ConnectHeader::Local)),
         // the connection was established on behalf of another node,
         // and reflects the original connection endpoints. The receiver must then use
         // the information provided in the protocol block to get original the address.
-        0x21 => Command::Proxy,
+        0x21 => {}
         // other values are unassigned and must not be emitted by senders. Receivers
         // must drop connections presenting unexpected values here.
         _ => {
@@ -143,31 +168,50 @@ pub(crate) async fn read_proxy_protocol<T: AsyncRead + Unpin>(
         }
     };
 
-    // The 14th byte contains the transport protocol and address family. The highest 4
-    // bits contain the address family, the lowest 4 bits contain the protocol.
-    let ft = header[13];
+    // Starting from the 17th byte, addresses are presented in network byte order.
+    // The address order is always the same :
+    //   - source layer 3 address in network byte order
+    //   - destination layer 3 address in network byte order
+    //   - source layer 4 address if any, in network byte order (port)
+    //   - destination layer 4 address if any, in network byte order (port)
 
-    debug!("got command {command:?} with family 0x{ft:02X}");
-
-    let address_length = match ft {
-        // - \x00 : UNSPEC : the connection is forwarded for an unknown, unspecified
-        //   or unsupported protocol. The sender should use this family when sending
-        //   LOCAL commands or when dealing with unsupported protocol families. When
-        //   used with a LOCAL command, the receiver must accept the connection and
-        //   ignore any address information. For other commands, the receiver is free
-        //   to accept the connection anyway and use the real endpoints addresses or to
-        //   reject the connection. The receiver should ignore address information.
-        0x00 if command == Command::Local => 0,
+    let addr = match ft {
         // - \x11 : TCP over IPv4 : the forwarded connection uses TCP over the AF_INET
         //   protocol family. Address length is 2*4 + 2*2 = 12 bytes.
         // - \x12 : UDP over IPv4 : the forwarded connection uses UDP over the AF_INET
         //   protocol family. Address length is 2*4 + 2*2 = 12 bytes.
-        0x11 | 0x12 => 12,
+        0x11 | 0x12 => {
+            if header.len() < 12 {
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    "invalid proxy protocol length. not enough to fit requested IP addresses",
+                ));
+            }
+
+            let src_addr = Ipv4Addr::from_bits(header.get_u32());
+            let _dst_addr = Ipv4Addr::from_bits(header.get_u32());
+            let src_port = header.get_u16();
+            let _dst_port = header.get_u16();
+            SocketAddr::from((src_addr, src_port))
+        }
         // - \x21 : TCP over IPv6 : the forwarded connection uses TCP over the AF_INET6
         //   protocol family. Address length is 2*16 + 2*2 = 36 bytes.
         // - \x22 : UDP over IPv6 : the forwarded connection uses UDP over the AF_INET6
         //   protocol family. Address length is 2*16 + 2*2 = 36 bytes.
-        0x21 | 0x22 => 36,
+        0x21 | 0x22 => {
+            if header.len() < 36 {
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    "invalid proxy protocol length. not enough to fit requested IP addresses",
+                ));
+            }
+
+            let src_addr = Ipv6Addr::from_bits(header.get_u128());
+            let _dst_addr = Ipv6Addr::from_bits(header.get_u128());
+            let src_port = header.get_u16();
+            let _dst_port = header.get_u16();
+            SocketAddr::from((src_addr, src_port))
+        }
         // unspecified or unix stream. ignore the addresses
         _ => {
             return Err(io::Error::new(
@@ -175,59 +219,6 @@ pub(crate) async fn read_proxy_protocol<T: AsyncRead + Unpin>(
                 "invalid proxy protocol address family/transport protocol.",
             ))
         }
-    };
-
-    // The 15th and 16th bytes is the address length in bytes in network endian order.
-    // It is used so that the receiver knows how many address bytes to skip even when
-    // it does not implement the presented protocol. Thus the length of the protocol
-    // header in bytes is always exactly 16 + this value. When a sender presents a
-    // LOCAL connection, it should not present any address so it sets this field to
-    // zero. Receivers MUST always consider this field to skip the appropriate number
-    // of bytes and must not assume zero is presented for LOCAL connections. When a
-    // receiver accepts an incoming connection showing an UNSPEC address family or
-    // protocol, it may or may not decide to log the address information if present.
-    let remaining_length = u16::from_be_bytes(header[14..16].try_into().unwrap());
-    if remaining_length < address_length {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            "invalid proxy protocol length. not enough to fit requested IP addresses",
-        ));
-    }
-    drop(header);
-
-    while buf.len() < remaining_length as usize {
-        if read.read_buf(&mut buf).await? == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "stream closed while waiting for proxy protocol addresses",
-            ));
-        }
-    }
-
-    // Starting from the 17th byte, addresses are presented in network byte order.
-    // The address order is always the same :
-    //   - source layer 3 address in network byte order
-    //   - destination layer 3 address in network byte order
-    //   - source layer 4 address if any, in network byte order (port)
-    //   - destination layer 4 address if any, in network byte order (port)
-    let mut header = buf.split_to(usize::from(remaining_length));
-    let mut addr = header.split_to(usize::from(address_length));
-    let socket = match addr.len() {
-        12 => {
-            let src_addr = Ipv4Addr::from_bits(addr.get_u32());
-            let _dst_addr = Ipv4Addr::from_bits(addr.get_u32());
-            let src_port = addr.get_u16();
-            let _dst_port = addr.get_u16();
-            Some(SocketAddr::from((src_addr, src_port)))
-        }
-        36 => {
-            let src_addr = Ipv6Addr::from_bits(addr.get_u128());
-            let _dst_addr = Ipv6Addr::from_bits(addr.get_u128());
-            let src_port = addr.get_u16();
-            let _dst_port = addr.get_u16();
-            Some(SocketAddr::from((src_addr, src_port)))
-        }
-        _ => None,
     };
 
     let mut extra = None;
@@ -276,9 +267,10 @@ pub(crate) async fn read_proxy_protocol<T: AsyncRead + Unpin>(
         }
     }
 
-    let conn_info = socket.map(|addr| ConnectionInfo { addr, extra });
-
-    Ok((ChainRW { inner: read, buf }, conn_info))
+    Ok((
+        ChainRW { inner: read, buf },
+        ConnectHeader::Proxy(ConnectionInfo { addr, extra }),
+    ))
 }
 
 #[derive(FromRepr, Debug, Copy, Clone)]
@@ -370,7 +362,7 @@ fn read_tlv(b: &mut BytesMut) -> Option<Tlv> {
 mod tests {
     use tokio::io::AsyncReadExt;
 
-    use crate::protocol2::read_proxy_protocol;
+    use crate::protocol2::{read_proxy_protocol, ConnectHeader};
 
     #[tokio::test]
     async fn test_ipv4() {
@@ -401,7 +393,9 @@ mod tests {
 
         assert_eq!(bytes, extra_data);
 
-        let info = info.unwrap();
+        let ConnectHeader::Proxy(info) = info else {
+            panic!()
+        };
         assert_eq!(info.addr, ([127, 0, 0, 1], 65535).into());
     }
 
@@ -434,7 +428,9 @@ mod tests {
 
         assert_eq!(bytes, extra_data);
 
-        let info = info.unwrap();
+        let ConnectHeader::Proxy(info) = info else {
+            panic!()
+        };
         assert_eq!(
             info.addr,
             ([15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0], 257).into()
@@ -450,7 +446,7 @@ mod tests {
         let mut bytes = vec![];
         read.read_to_end(&mut bytes).await.unwrap();
         assert_eq!(bytes, data);
-        assert_eq!(info, None);
+        assert_eq!(info, ConnectHeader::Missing);
     }
 
     #[tokio::test]
@@ -462,7 +458,7 @@ mod tests {
         let mut bytes = vec![];
         read.read_to_end(&mut bytes).await.unwrap();
         assert_eq!(bytes, data);
-        assert_eq!(info, None);
+        assert_eq!(info, ConnectHeader::Missing);
     }
 
     #[tokio::test]
@@ -500,7 +496,9 @@ mod tests {
 
         assert_eq!(bytes, extra_data);
 
-        let info = info.unwrap();
+        let ConnectHeader::Proxy(info) = info else {
+            panic!()
+        };
         assert_eq!(info.addr, ([55, 56, 57, 58], 65535).into());
     }
 }

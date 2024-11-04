@@ -47,7 +47,7 @@ use crate::cancellation::CancellationHandlerMain;
 use crate::config::{ProxyConfig, ProxyProtocolV2};
 use crate::context::RequestMonitoring;
 use crate::metrics::Metrics;
-use crate::protocol2::{read_proxy_protocol, ChainRW, ConnectionInfo};
+use crate::protocol2::{read_proxy_protocol, ChainRW, ConnectHeader, ConnectionInfo};
 use crate::proxy::run_until_cancelled;
 use crate::rate_limiter::EndpointRateLimiter;
 use crate::serverless::backend::PoolingBackend;
@@ -251,16 +251,21 @@ async fn connection_startup(
     };
 
     let conn_info = match peer {
-        None if config.proxy_protocol_v2 == ProxyProtocolV2::Required => {
+        // our load balancers will not send any more data. let's just exit immediately
+        ConnectHeader::Local => {
+            tracing::debug!("healthcheck received");
+            return None;
+        }
+        ConnectHeader::Missing if config.proxy_protocol_v2 == ProxyProtocolV2::Required => {
             tracing::warn!("missing required proxy protocol header");
             return None;
         }
-        Some(_) if config.proxy_protocol_v2 == ProxyProtocolV2::Rejected => {
+        ConnectHeader::Proxy(_) if config.proxy_protocol_v2 == ProxyProtocolV2::Rejected => {
             tracing::warn!("proxy protocol header not supported");
             return None;
         }
-        Some(info) => info,
-        None => ConnectionInfo {
+        ConnectHeader::Proxy(info) => info,
+        ConnectHeader::Missing => ConnectionInfo {
             addr: peer_addr,
             extra: None,
         },
