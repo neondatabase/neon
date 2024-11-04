@@ -511,7 +511,7 @@ def test_compaction_induced_by_detaches_in_history(
 
         assert len(delta_layers(branch_timeline_id)) == 5
 
-        client.patch_tenant_config_client_side(
+        env.storage_controller.pageserver_api().patch_tenant_config_client_side(
             env.initial_tenant, {"compaction_threshold": 5}, None
         )
 
