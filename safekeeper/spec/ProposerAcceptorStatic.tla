@@ -382,17 +382,6 @@ LogIsMonotonic ==
 LogSafety ==
     \A c1, c2 \in committed: (c1.lsn = c2.lsn) => (c1 = c2)
 
-\* Sanity check: TruncateWal must never delete committed record.
-CommittedNotTruncated ==
-    \A p \in proposers: \A a \in acceptors:
-      (/\ prop_state[p].state = "leader"
-       /\ prop_state[p].term = acc_state[a].term) =>
-         LET
-            hcp == FindHighestCommonPoint(prop_state[p].termHistory, AcceptorTermHistory(a), FlushLsn(a))
-            truncated_lsns == {lsn \in DOMAIN acc_state[a].wal: lsn >= hcp.lsn}
-            truncated_records == {[term |-> acc_state[a].wal[lsn], lsn |-> lsn]: lsn \in truncated_lsns}
-         IN
-            \A r \in truncated_records: r \notin committed
 
 \********************************************************************************
 \* Invariants which don't need to hold, but useful for playing/debugging.
@@ -419,4 +408,22 @@ MaxTruncatedTerms ==
             truncated_records_terms == {acc_state[a].wal[lsn]: lsn \in truncated_lsns}
          IN
             Cardinality(truncated_records_terms) < 2
+
+\* Check that TruncateWal never deletes committed record.
+\* It might seem that this should an invariant, but it is not.
+\* With 5 nodes, it is legit to truncate record which had been
+\* globally committed: e.g. nodes abc can commit record of term 1 in 
+\* term 3, and after that leader of term 2 can delete such record 
+\* on d. On 10 cores TLC can find such a trace in ~7 hours.
+CommittedNotTruncated ==
+    \A p \in proposers: \A a \in acceptors:
+      (/\ prop_state[p].state = "leader"
+       /\ prop_state[p].term = acc_state[a].term) =>
+         LET
+            hcp == FindHighestCommonPoint(prop_state[p].termHistory, AcceptorTermHistory(a), FlushLsn(a))
+            truncated_lsns == {lsn \in DOMAIN acc_state[a].wal: lsn >= hcp.lsn}
+            truncated_records == {[term |-> acc_state[a].wal[lsn], lsn |-> lsn]: lsn \in truncated_lsns}
+         IN
+            \A r \in truncated_records: r \notin committed
+
 ====
