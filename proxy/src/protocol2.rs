@@ -62,6 +62,14 @@ const HEADER: [u8; 12] = [
     0x0D, 0x0A, 0x0D, 0x0A, 0x00, 0x0D, 0x0A, 0x51, 0x55, 0x49, 0x54, 0x0A,
 ];
 
+const LOCAL_V2: u8 = 0x20;
+const PROXY_V2: u8 = 0x21;
+
+const TCP_OVER_IPV4: u8 = 0x11;
+const UDP_OVER_IPV4: u8 = 0x12;
+const TCP_OVER_IPV6: u8 = 0x21;
+const UDP_OVER_IPV6: u8 = 0x22;
+
 #[derive(PartialEq, Eq, Clone, Debug)]
 pub struct ConnectionInfo {
     pub addr: SocketAddr,
@@ -134,11 +142,11 @@ pub(crate) async fn read_proxy_protocol<T: AsyncRead + Unpin>(
         // server. The receiver must accept this connection as valid and must use the
         // real connection endpoints and discard the protocol block including the
         // family which is ignored.
-        0x20 => return Ok((ChainRW { inner: read, buf }, ConnectHeader::Local)),
+        LOCAL_V2 => return Ok((ChainRW { inner: read, buf }, ConnectHeader::Local)),
         // the connection was established on behalf of another node,
         // and reflects the original connection endpoints. The receiver must then use
         // the information provided in the protocol block to get original the address.
-        0x21 => {}
+        PROXY_V2 => {}
         // other values are unassigned and must not be emitted by senders. Receivers
         // must drop connections presenting unexpected values here.
         _ => {
@@ -152,43 +160,20 @@ pub(crate) async fn read_proxy_protocol<T: AsyncRead + Unpin>(
         }
     };
 
-    // Starting from the 17th byte, addresses are presented in network byte order.
-    // The address order is always the same :
-    //   - source layer 3 address in network byte order
-    //   - destination layer 3 address in network byte order
-    //   - source layer 4 address if any, in network byte order (port)
-    //   - destination layer 4 address if any, in network byte order (port)
-
+    let size_err =
+        "invalid proxy protocol length. payload not large enough to fit requested IP addresses";
     let addr = match header.protocol_and_family {
-        // - \x11 : TCP over IPv4 : the forwarded connection uses TCP over the AF_INET
-        //   protocol family. Address length is 2*4 + 2*2 = 12 bytes.
-        // - \x12 : UDP over IPv4 : the forwarded connection uses UDP over the AF_INET
-        //   protocol family. Address length is 2*4 + 2*2 = 12 bytes.
-        0x11 | 0x12 => {
+        TCP_OVER_IPV4 | UDP_OVER_IPV4 => {
             let addr = payload
                 .try_get::<ProxyProtocolV2HeaderV4>()
-                .ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::Other,
-                        "invalid proxy protocol length. not enough to fit requested IP addresses",
-                    )
-                })?;
+                .ok_or_else(|| io::Error::new(io::ErrorKind::Other, size_err))?;
 
             SocketAddr::from((addr.src_addr.get(), addr.src_port.get()))
         }
-        // - \x21 : TCP over IPv6 : the forwarded connection uses TCP over the AF_INET6
-        //   protocol family. Address length is 2*16 + 2*2 = 36 bytes.
-        // - \x22 : UDP over IPv6 : the forwarded connection uses UDP over the AF_INET6
-        //   protocol family. Address length is 2*16 + 2*2 = 36 bytes.
-        0x21 | 0x22 => {
+        TCP_OVER_IPV6 | UDP_OVER_IPV6 => {
             let addr = payload
                 .try_get::<ProxyProtocolV2HeaderV6>()
-                .ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::Other,
-                        "invalid proxy protocol length. not enough to fit requested IP addresses",
-                    )
-                })?;
+                .ok_or_else(|| io::Error::new(io::ErrorKind::Other, size_err))?;
 
             SocketAddr::from((addr.src_addr.get(), addr.src_port.get()))
         }
@@ -406,7 +391,9 @@ impl NetworkEndianIpv6 {
 mod tests {
     use tokio::io::AsyncReadExt;
 
-    use crate::protocol2::{read_proxy_protocol, ConnectHeader};
+    use crate::protocol2::{
+        read_proxy_protocol, ConnectHeader, LOCAL_V2, PROXY_V2, TCP_OVER_IPV4, UDP_OVER_IPV6,
+    };
 
     #[tokio::test]
     async fn test_ipv4() {
@@ -447,7 +434,7 @@ mod tests {
     async fn test_ipv6() {
         let header = super::HEADER
             // Proxy command, IPV6 | UDP
-            .chain([(2 << 4) | 1, (2 << 4) | 2].as_slice())
+            .chain([PROXY_V2, UDP_OVER_IPV6].as_slice())
             // 36 + 3 bytes
             .chain([0, 39].as_slice())
             // src ip
@@ -513,7 +500,7 @@ mod tests {
 
         let header = super::HEADER
             // Proxy command, Inet << 4 | Stream
-            .chain([(2 << 4) | 1, (1 << 4) | 1].as_slice())
+            .chain([PROXY_V2, TCP_OVER_IPV4].as_slice())
             // 12 + 3 bytes
             .chain(len.as_slice())
             // src ip
@@ -544,5 +531,26 @@ mod tests {
             panic!()
         };
         assert_eq!(info.addr, ([55, 56, 57, 58], 65535).into());
+    }
+
+    #[tokio::test]
+    async fn test_local() {
+        let len = 0u16.to_be_bytes();
+        let header = super::HEADER
+            .chain([LOCAL_V2, 0x00].as_slice())
+            .chain(len.as_slice());
+
+        let extra_data = [0xaa; 256];
+
+        let (mut read, info) = read_proxy_protocol(header.chain(extra_data.as_slice()))
+            .await
+            .unwrap();
+
+        let mut bytes = vec![];
+        read.read_to_end(&mut bytes).await.unwrap();
+
+        assert_eq!(bytes, extra_data);
+
+        let ConnectHeader::Local = info else { panic!() };
     }
 }
