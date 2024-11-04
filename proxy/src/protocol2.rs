@@ -149,6 +149,7 @@ pub(crate) async fn read_proxy_protocol<T: AsyncRead + Unpin>(
         PROXY_V2 => {}
         // other values are unassigned and must not be emitted by senders. Receivers
         // must drop connections presenting unexpected values here.
+        #[rustfmt::skip] // https://github.com/rust-lang/rustfmt/issues/6384
         _ => return Err(io::Error::new(
             io::ErrorKind::Other,
             format!(
