@@ -62,7 +62,7 @@ const HEADER: [u8; 12] = [
     0x0D, 0x0A, 0x0D, 0x0A, 0x00, 0x0D, 0x0A, 0x51, 0x55, 0x49, 0x54, 0x0A,
 ];
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum Command {
     Local,
     Proxy,
@@ -150,6 +150,14 @@ pub(crate) async fn read_proxy_protocol<T: AsyncRead + Unpin>(
     debug!("got command {command:?} with family 0x{ft:02X}");
 
     let address_length = match ft {
+        // - \x00 : UNSPEC : the connection is forwarded for an unknown, unspecified
+        //   or unsupported protocol. The sender should use this family when sending
+        //   LOCAL commands or when dealing with unsupported protocol families. When
+        //   used with a LOCAL command, the receiver must accept the connection and
+        //   ignore any address information. For other commands, the receiver is free
+        //   to accept the connection anyway and use the real endpoints addresses or to
+        //   reject the connection. The receiver should ignore address information.
+        0x00 if command == Command::Local => 0,
         // - \x11 : TCP over IPv4 : the forwarded connection uses TCP over the AF_INET
         //   protocol family. Address length is 2*4 + 2*2 = 12 bytes.
         // - \x12 : UDP over IPv4 : the forwarded connection uses UDP over the AF_INET
