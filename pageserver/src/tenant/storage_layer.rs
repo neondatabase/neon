@@ -190,6 +190,13 @@ impl IoConcurrency {
     }
 }
 
+#[cfg(test)]
+#[derive(Debug, Copy, Clone)]
+pub(crate) enum SelectedIoConcurrency {
+    Serial,
+    Parallel,
+}
+
 impl ValuesReconstructState {
     pub(crate) fn new() -> Self {
         Self {
@@ -212,6 +219,21 @@ impl ValuesReconstructState {
                         x
                     ),
                 }
+            },
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_with_io_concurrency(io_concurrency: SelectedIoConcurrency) -> Self {
+        Self {
+            keys: HashMap::new(),
+            keys_done: KeySpaceRandomAccum::new(),
+            keys_with_image_coverage: None,
+            layers_visited: 0,
+            delta_layers_visited: 0,
+            io_concurrency: match io_concurrency {
+                SelectedIoConcurrency::Serial => IoConcurrency::Serial { prev_io: None },
+                SelectedIoConcurrency::Parallel => IoConcurrency::Parallel,
             },
         }
     }
