@@ -21,6 +21,7 @@ pub(crate) use flow::*;
 use thiserror::Error;
 use tokio::time::error::Elapsed;
 
+use crate::auth::backend::jwt::JwtError;
 use crate::control_plane;
 use crate::error::{ReportableError, UserFacingError};
 
@@ -76,6 +77,9 @@ pub(crate) enum AuthError {
 
     #[error("Disconnected due to inactivity after {0}.")]
     ConfirmationTimeout(humantime::Duration),
+
+    #[error(transparent)]
+    Jwt(#[from] JwtError),
 }
 
 impl AuthError {
@@ -123,6 +127,7 @@ impl UserFacingError for AuthError {
             Self::TooManyConnections => self.to_string(),
             Self::UserTimeout(_) => self.to_string(),
             Self::ConfirmationTimeout(_) => self.to_string(),
+            Self::Jwt(_) => self.to_string(),
         }
     }
 }
@@ -142,6 +147,7 @@ impl ReportableError for AuthError {
             Self::TooManyConnections => crate::error::ErrorKind::RateLimit,
             Self::UserTimeout(_) => crate::error::ErrorKind::User,
             Self::ConfirmationTimeout(_) => crate::error::ErrorKind::User,
+            Self::Jwt(_) => crate::error::ErrorKind::User,
         }
     }
 }

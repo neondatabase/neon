@@ -126,8 +126,7 @@ impl PoolingBackend {
                         &**console,
                         &jwt,
                     )
-                    .await
-                    .map_err(|e| AuthError::auth_failed(e.to_string()))?;
+                    .await?;
 
                 Ok(ComputeCredentials {
                     info: user_info.clone(),
@@ -146,8 +145,7 @@ impl PoolingBackend {
                         &StaticAuthRules,
                         &jwt,
                     )
-                    .await
-                    .map_err(|e| AuthError::auth_failed(e.to_string()))?;
+                    .await?;
 
                 Ok(ComputeCredentials {
                     info: user_info.clone(),
