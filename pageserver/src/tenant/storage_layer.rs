@@ -155,6 +155,11 @@ pub(crate) struct ValuesReconstructState {
     io_concurrency: IoConcurrency,
 }
 
+/// The level of IO concurrency to be used on the read path
+///
+/// The desired end state is that we always do parallel IO.
+/// This struct and the dispatching in the impl will be removed once
+/// we've built enough confidence.
 enum IoConcurrency {
     Serial {
         prev_io: Option<tokio::task::JoinHandle<()>>,
