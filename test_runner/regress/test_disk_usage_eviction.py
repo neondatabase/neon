@@ -39,9 +39,12 @@ def test_min_resident_size_override_handling(
 ):
     env = neon_env_builder.init_start()
     vps_http = env.storage_controller.pageserver_api()
+    ps_http = env.pageserver.http_client()
 
     def assert_config(tenant_id, expect_override, expect_effective):
-        config = vps_http.tenant_config(tenant_id)
+        # talk to actual pageserver to _get_ the config, workaround for
+        # https://github.com/neondatabase/neon/issues/9621
+        config = ps_http.tenant_config(tenant_id)
         assert config.tenant_specific_overrides.get("min_resident_size_override") == expect_override
         assert config.effective_config.get("min_resident_size_override") == expect_effective
 
