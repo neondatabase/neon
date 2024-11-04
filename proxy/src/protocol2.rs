@@ -198,14 +198,14 @@ pub(crate) async fn read_proxy_protocol<T: AsyncRead + Unpin>(
     let socket = match addr.len() {
         12 => {
             let src_addr = Ipv4Addr::from_bits(addr.get_u32());
-            let _dst_addr = addr.get_u32();
+            let _dst_addr = Ipv4Addr::from_bits(addr.get_u32());
             let src_port = addr.get_u16();
             let _dst_port = addr.get_u16();
             Some(SocketAddr::from((src_addr, src_port)))
         }
         36 => {
             let src_addr = Ipv6Addr::from_bits(addr.get_u128());
-            let _dst_addr = addr.get_u128();
+            let _dst_addr = Ipv6Addr::from_bits(addr.get_u128());
             let src_port = addr.get_u16();
             let _dst_port = addr.get_u16();
             Some(SocketAddr::from((src_addr, src_port)))
