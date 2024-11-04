@@ -149,15 +149,13 @@ pub(crate) async fn read_proxy_protocol<T: AsyncRead + Unpin>(
         PROXY_V2 => {}
         // other values are unassigned and must not be emitted by senders. Receivers
         // must drop connections presenting unexpected values here.
-        _ => {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!(
+        _ => return Err(io::Error::new(
+            io::ErrorKind::Other,
+            format!(
                 "invalid proxy protocol command 0x{:02X}. expected local (0x20) or proxy (0x21)",
                 header.version_and_command
             ),
-            ))
-        }
+        )),
     };
 
     let size_err =
