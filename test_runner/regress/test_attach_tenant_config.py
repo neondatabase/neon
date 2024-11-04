@@ -179,7 +179,11 @@ def test_fully_custom_config(positive_env: NeonEnv):
     vps_http = env.storage_controller.pageserver_api()
 
     initial_tenant_config = vps_http.tenant_config(env.initial_tenant)
-    assert initial_tenant_config.tenant_specific_overrides == {}
+    assert [
+        (key, val)
+        for key, val in initial_tenant_config.tenant_specific_overrides.items()
+        if val is not None
+    ] == []
     assert set(initial_tenant_config.effective_config.keys()) == set(
         fully_custom_config.keys()
     ), "ensure we cover all config options"
