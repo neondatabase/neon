@@ -471,6 +471,7 @@ impl From<TenantConfOpt> for models::TenantConfig {
             image_layer_creation_check_threshold: value.image_layer_creation_check_threshold,
             lsn_lease_length: value.lsn_lease_length.map(humantime),
             lsn_lease_length_for_ts: value.lsn_lease_length_for_ts.map(humantime),
+            timeline_offloading: value.timeline_offloading,
         }
     }
 }
