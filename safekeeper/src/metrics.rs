@@ -226,6 +226,22 @@ pub static WAL_RECEIVER_QUEUE_DEPTH: Lazy<Histogram> = Lazy::new(|| {
     )
     .expect("Failed to register safekeeper_wal_receiver_queue_depth histogram")
 });
+pub static WAL_RECEIVER_QUEUE_DEPTH_TOTAL: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "safekeeper_wal_receiver_queue_depth_total",
+        "Total number of queued messages across all WAL receivers",
+    )
+    .expect("Failed to register safekeeper_wal_receiver_queue_depth_total gauge")
+});
+// TODO: consider adding a per-receiver queue_size histogram. This will require wrapping the Tokio
+// MPSC channel to update counters on send, receive, and drop, while forwarding all other methods.
+pub static WAL_RECEIVER_QUEUE_SIZE_TOTAL: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "safekeeper_wal_receiver_queue_size_total",
+        "Total memory byte size of queued messages across all WAL receivers",
+    )
+    .expect("Failed to register safekeeper_wal_receiver_queue_size_total gauge")
+});
 
 // Metrics collected on operations on the storage repository.
 #[derive(strum_macros::EnumString, strum_macros::Display, strum_macros::IntoStaticStr)]

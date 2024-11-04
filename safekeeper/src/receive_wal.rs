@@ -3,7 +3,10 @@
 //! sends replies back.
 
 use crate::handler::SafekeeperPostgresHandler;
-use crate::metrics::{WAL_RECEIVERS, WAL_RECEIVER_QUEUE_DEPTH};
+use crate::metrics::{
+    WAL_RECEIVERS, WAL_RECEIVER_QUEUE_DEPTH, WAL_RECEIVER_QUEUE_DEPTH_TOTAL,
+    WAL_RECEIVER_QUEUE_SIZE_TOTAL,
+};
 use crate::safekeeper::AcceptorProposerMessage;
 use crate::safekeeper::ProposerAcceptorMessage;
 use crate::safekeeper::ServerInfo;
@@ -393,6 +396,7 @@ async fn read_network_loop<IO: AsyncRead + AsyncWrite + Unpin>(
 
     loop {
         let started = Instant::now();
+        let size = next_msg.size();
         match msg_tx.send_timeout(next_msg, SLOW_THRESHOLD).await {
             Ok(()) => {}
             // Slow send, log a message and keep trying. Log context has timeline ID.
@@ -412,6 +416,11 @@ async fn read_network_loop<IO: AsyncRead + AsyncWrite + Unpin>(
             // WalAcceptor terminated.
             Err(SendTimeoutError::Closed(_)) => return Ok(()),
         }
+
+        // Update metrics. Will be decremented in WalAcceptor.
+        WAL_RECEIVER_QUEUE_DEPTH_TOTAL.inc();
+        WAL_RECEIVER_QUEUE_SIZE_TOTAL.add(size as i64);
+
         next_msg = read_message(pgb_reader).await?;
     }
 }
@@ -541,6 +550,10 @@ impl WalAcceptor {
                         break;
                     };
 
+                    // Update gauge metrics.
+                    WAL_RECEIVER_QUEUE_DEPTH_TOTAL.dec();
+                    WAL_RECEIVER_QUEUE_SIZE_TOTAL.sub(msg.size() as i64);
+
                     // Update walreceiver state in shmem for reporting.
                     if let ProposerAcceptorMessage::Elected(_) = &msg {
                         walreceiver_guard.get().status = WalReceiverStatus::Streaming;
@@ -578,7 +591,7 @@ impl WalAcceptor {
                         .await?
                 }
 
-                // Update metrics periodically.
+                // Update histogram metrics periodically.
                 _ = metrics_ticker.tick() => {
                     WAL_RECEIVER_QUEUE_DEPTH.observe(self.msg_rx.len() as f64);
                     None // no reply
@@ -601,5 +614,16 @@ impl WalAcceptor {
         }
 
         Ok(())
+    }
+}
+
+/// On drop, drain msg_rx and update metrics to avoid leaks.
+impl Drop for WalAcceptor {
+    fn drop(&mut self) {
+        self.msg_rx.close(); // prevent further sends
+        while let Ok(msg) = self.msg_rx.try_recv() {
+            WAL_RECEIVER_QUEUE_DEPTH_TOTAL.dec();
+            WAL_RECEIVER_QUEUE_SIZE_TOTAL.sub(msg.size() as i64);
+        }
     }
 }
