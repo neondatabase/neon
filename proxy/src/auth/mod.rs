@@ -56,7 +56,7 @@ pub(crate) enum AuthError {
     MissingEndpointName,
 
     #[error("password authentication failed for user '{0}'")]
-    AuthFailed(Box<str>),
+    PasswordFailed(Box<str>),
 
     /// Errors produced by e.g. [`crate::stream::PqStream`].
     #[error(transparent)]
@@ -87,8 +87,8 @@ impl AuthError {
         AuthError::BadAuthMethod(name.into())
     }
 
-    pub(crate) fn auth_failed(user: impl Into<Box<str>>) -> Self {
-        AuthError::AuthFailed(user.into())
+    pub(crate) fn password_failed(user: impl Into<Box<str>>) -> Self {
+        AuthError::PasswordFailed(user.into())
     }
 
     pub(crate) fn ip_address_not_allowed(ip: IpAddr) -> Self {
@@ -99,8 +99,8 @@ impl AuthError {
         AuthError::TooManyConnections
     }
 
-    pub(crate) fn is_auth_failed(&self) -> bool {
-        matches!(self, AuthError::AuthFailed(_))
+    pub(crate) fn is_password_failed(&self) -> bool {
+        matches!(self, AuthError::PasswordFailed(_))
     }
 
     pub(crate) fn user_timeout(elapsed: Elapsed) -> Self {
@@ -118,7 +118,7 @@ impl UserFacingError for AuthError {
             Self::Web(e) => e.to_string_client(),
             Self::GetAuthInfo(e) => e.to_string_client(),
             Self::Sasl(e) => e.to_string_client(),
-            Self::AuthFailed(_) => self.to_string(),
+            Self::PasswordFailed(_) => self.to_string(),
             Self::BadAuthMethod(_) => self.to_string(),
             Self::MalformedPassword(_) => self.to_string(),
             Self::MissingEndpointName => self.to_string(),
@@ -138,7 +138,7 @@ impl ReportableError for AuthError {
             Self::Web(e) => e.get_error_kind(),
             Self::GetAuthInfo(e) => e.get_error_kind(),
             Self::Sasl(e) => e.get_error_kind(),
-            Self::AuthFailed(_) => crate::error::ErrorKind::User,
+            Self::PasswordFailed(_) => crate::error::ErrorKind::User,
             Self::BadAuthMethod(_) => crate::error::ErrorKind::User,
             Self::MalformedPassword(_) => crate::error::ErrorKind::User,
             Self::MissingEndpointName => crate::error::ErrorKind::User,
