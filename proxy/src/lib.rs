@@ -1,12 +1,6 @@
 // rustc lints/lint groups
 // https://doc.rust-lang.org/rustc/lints/groups.html
-#![deny(
-    deprecated,
-    future_incompatible,
-    let_underscore,
-    nonstandard_style,
-    rust_2024_compatibility
-)]
+#![deny(deprecated, future_incompatible, let_underscore, nonstandard_style)]
 #![warn(clippy::all, clippy::pedantic, clippy::cargo)]
 // List of denied lints from the clippy::restriction group.
 // https://rust-lang.github.io/rust-clippy/master/index.html#?groups=restriction
