@@ -8,7 +8,7 @@ use itertools::Itertools;
 use once_cell::sync::OnceCell;
 use pq_proto::StartupMessageParams;
 use rustls::client::danger::ServerCertVerifier;
-use rustls::crypto::aws_lc_rs;
+use rustls::crypto::ring;
 use rustls::pki_types::InvalidDnsNameError;
 use thiserror::Error;
 use tokio::net::TcpStream;
@@ -266,12 +266,12 @@ impl ConnCfg {
     }
 }
 
+type RustlsStream = <MakeRustlsConnect as MakeTlsConnect<tokio::net::TcpStream>>::Stream;
+
 pub(crate) struct PostgresConnection {
     /// Socket connected to a compute node.
-    pub(crate) stream: tokio_postgres::maybe_tls_stream::MaybeTlsStream<
-        tokio::net::TcpStream,
-        tokio_postgres_rustls::RustlsStream<tokio::net::TcpStream>,
-    >,
+    pub(crate) stream:
+        tokio_postgres::maybe_tls_stream::MaybeTlsStream<tokio::net::TcpStream, RustlsStream>,
     /// PostgreSQL connection parameters.
     pub(crate) params: std::collections::HashMap<String, String>,
     /// Query cancellation token.
@@ -298,9 +298,9 @@ impl ConnCfg {
         let client_config = if allow_self_signed_compute {
             // Allow all certificates for creating the connection
             let verifier = Arc::new(AcceptEverythingVerifier);
-            rustls::ClientConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
+            rustls::ClientConfig::builder_with_provider(Arc::new(ring::default_provider()))
                 .with_safe_default_protocol_versions()
-                .expect("aws_lc_rs should support the default protocol versions")
+                .expect("ring should support the default protocol versions")
                 .dangerous()
                 .with_custom_certificate_verifier(verifier)
         } else {
@@ -308,9 +308,9 @@ impl ConnCfg {
                 .get_or_try_init(load_certs)
                 .map_err(ConnectionError::TlsCertificateError)?
                 .clone();
-            rustls::ClientConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
+            rustls::ClientConfig::builder_with_provider(Arc::new(ring::default_provider()))
                 .with_safe_default_protocol_versions()
-                .expect("aws_lc_rs should support the default protocol versions")
+                .expect("ring should support the default protocol versions")
                 .with_root_certificates(root_store)
         };
         let client_config = client_config.with_no_client_auth();

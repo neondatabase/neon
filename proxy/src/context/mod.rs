@@ -19,6 +19,7 @@ use crate::intern::{BranchIdInt, ProjectIdInt};
 use crate::metrics::{
     ConnectOutcome, InvalidEndpointsGroup, LatencyTimer, Metrics, Protocol, Waiting,
 };
+use crate::protocol2::ConnectionInfo;
 use crate::types::{DbName, EndpointId, RoleName};
 
 pub mod parquet;
@@ -40,7 +41,7 @@ pub struct RequestMonitoring(
 );
 
 struct RequestMonitoringInner {
-    pub(crate) peer_addr: IpAddr,
+    pub(crate) conn_info: ConnectionInfo,
     pub(crate) session_id: Uuid,
     pub(crate) protocol: Protocol,
     first_packet: chrono::DateTime<Utc>,
@@ -84,7 +85,7 @@ impl Clone for RequestMonitoring {
     fn clone(&self) -> Self {
         let inner = self.0.try_lock().expect("should not deadlock");
         let new = RequestMonitoringInner {
-            peer_addr: inner.peer_addr,
+            conn_info: inner.conn_info.clone(),
             session_id: inner.session_id,
             protocol: inner.protocol,
             first_packet: inner.first_packet,
@@ -117,7 +118,7 @@ impl Clone for RequestMonitoring {
 impl RequestMonitoring {
     pub fn new(
         session_id: Uuid,
-        peer_addr: IpAddr,
+        conn_info: ConnectionInfo,
         protocol: Protocol,
         region: &'static str,
     ) -> Self {
@@ -125,13 +126,13 @@ impl RequestMonitoring {
             "connect_request",
             %protocol,
             ?session_id,
-            %peer_addr,
+            %conn_info,
             ep = tracing::field::Empty,
             role = tracing::field::Empty,
         );
 
         let inner = RequestMonitoringInner {
-            peer_addr,
+            conn_info,
             session_id,
             protocol,
             first_packet: Utc::now(),
@@ -162,7 +163,11 @@ impl RequestMonitoring {
 
     #[cfg(test)]
     pub(crate) fn test() -> Self {
-        RequestMonitoring::new(Uuid::now_v7(), [127, 0, 0, 1].into(), Protocol::Tcp, "test")
+        use std::net::SocketAddr;
+        let ip = IpAddr::from([127, 0, 0, 1]);
+        let addr = SocketAddr::new(ip, 5432);
+        let conn_info = ConnectionInfo { addr, extra: None };
+        RequestMonitoring::new(Uuid::now_v7(), conn_info, Protocol::Tcp, "test")
     }
 
     pub(crate) fn console_application_name(&self) -> String {
@@ -286,7 +291,12 @@ impl RequestMonitoring {
     }
 
     pub(crate) fn peer_addr(&self) -> IpAddr {
-        self.0.try_lock().expect("should not deadlock").peer_addr
+        self.0
+            .try_lock()
+            .expect("should not deadlock")
+            .conn_info
+            .addr
+            .ip()
     }
 
     pub(crate) fn cold_start_info(&self) -> ColdStartInfo {
@@ -362,7 +372,7 @@ impl RequestMonitoringInner {
     }
 
     fn has_private_peer_addr(&self) -> bool {
-        match self.peer_addr {
+        match self.conn_info.addr.ip() {
             IpAddr::V4(ip) => ip.is_private(),
             IpAddr::V6(_) => false,
         }

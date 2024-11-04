@@ -213,6 +213,13 @@ def test_timeline_offloading(neon_env_builder: NeonEnvBuilder, manual_offload: b
     wait_until(30, 1, leaf_offloaded)
     wait_until(30, 1, parent_offloaded)
 
+    # Offloaded child timelines should still prevent deletion
+    with pytest.raises(
+        PageserverApiException,
+        match=f".* timeline which has child timelines: \\[{leaf_timeline_id}\\]",
+    ):
+        ps_http.timeline_delete(tenant_id, parent_timeline_id)
+
     ps_http.timeline_archival_config(
         tenant_id,
         grandparent_timeline_id,

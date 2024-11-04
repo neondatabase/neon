@@ -7,15 +7,14 @@
 // have been named the same as the corresponding PostgreSQL functions instead.
 //
 
-use crc32c::crc32c_append;
-
 use super::super::waldecoder::WalStreamDecoder;
 use super::bindings::{
     CheckPoint, ControlFileData, DBState_DB_SHUTDOWNED, FullTransactionId, TimeLineID, TimestampTz,
     XLogLongPageHeaderData, XLogPageHeaderData, XLogRecPtr, XLogRecord, XLogSegNo, XLOG_PAGE_MAGIC,
 };
+use super::wal_generator::WalGenerator;
 use super::PG_MAJORVERSION;
-use crate::pg_constants;
+use crate::pg_constants::{self, RM_LOGICALMSG_ID, XLOG_LOGICAL_MESSAGE};
 use crate::PG_TLI;
 use crate::{uint32, uint64, Oid};
 use crate::{WAL_SEGMENT_SIZE, XLOG_BLCKSZ};
@@ -26,7 +25,7 @@ use bytes::{Buf, Bytes};
 use log::*;
 
 use serde::Serialize;
-use std::ffi::OsStr;
+use std::ffi::{CString, OsStr};
 use std::fs::File;
 use std::io::prelude::*;
 use std::io::ErrorKind;
@@ -39,6 +38,7 @@ use utils::bin_ser::SerializeError;
 use utils::lsn::Lsn;
 
 pub const XLOG_FNAME_LEN: usize = 24;
+pub const XLP_BKP_REMOVABLE: u16 = 0x0004;
 pub const XLP_FIRST_IS_CONTRECORD: u16 = 0x0001;
 pub const XLP_REM_LEN_OFFS: usize = 2 + 2 + 4 + 8;
 pub const XLOG_RECORD_CRC_OFFS: usize = 4 + 4 + 8 + 1 + 1 + 2;
@@ -489,64 +489,16 @@ impl XlLogicalMessage {
 /// Create new WAL record for non-transactional logical message.
 /// Used for creating artificial WAL for tests, as LogicalMessage
 /// record is basically no-op.
-///
-/// NOTE: This leaves the xl_prev field zero. The safekeeper and
-/// pageserver tolerate that, but PostgreSQL does not.
-pub fn encode_logical_message(prefix: &str, message: &str) -> Vec<u8> {
-    let mut prefix_bytes: Vec<u8> = Vec::with_capacity(prefix.len() + 1);
-    prefix_bytes.write_all(prefix.as_bytes()).unwrap();
-    prefix_bytes.push(0);
-
-    let message_bytes = message.as_bytes();
-
-    let logical_message = XlLogicalMessage {
-        db_id: 0,
-        transactional: 0,
-        prefix_size: prefix_bytes.len() as u64,
-        message_size: message_bytes.len() as u64,
-    };
-
-    let mainrdata = logical_message.encode();
-    let mainrdata_len: usize = mainrdata.len() + prefix_bytes.len() + message_bytes.len();
-    // only short mainrdata is supported for now
-    assert!(mainrdata_len <= 255);
-    let mainrdata_len = mainrdata_len as u8;
-
-    let mut data: Vec<u8> = vec![pg_constants::XLR_BLOCK_ID_DATA_SHORT, mainrdata_len];
-    data.extend_from_slice(&mainrdata);
-    data.extend_from_slice(&prefix_bytes);
-    data.extend_from_slice(message_bytes);
-
-    let total_len = XLOG_SIZE_OF_XLOG_RECORD + data.len();
-
-    let mut header = XLogRecord {
-        xl_tot_len: total_len as u32,
-        xl_xid: 0,
-        xl_prev: 0,
-        xl_info: 0,
-        xl_rmid: 21,
-        __bindgen_padding_0: [0u8; 2usize],
-        xl_crc: 0, // crc will be calculated later
-    };
-
-    let header_bytes = header.encode().expect("failed to encode header");
-    let crc = crc32c_append(0, &data);
-    let crc = crc32c_append(crc, &header_bytes[0..XLOG_RECORD_CRC_OFFS]);
-    header.xl_crc = crc;
-
-    let mut wal: Vec<u8> = Vec::new();
-    wal.extend_from_slice(&header.encode().expect("failed to encode header"));
-    wal.extend_from_slice(&data);
-
-    // WAL start position must be aligned at 8 bytes,
-    // this will add padding for the next WAL record.
-    const PADDING: usize = 8;
-    let padding_rem = wal.len() % PADDING;
-    if padding_rem != 0 {
-        wal.resize(wal.len() + PADDING - padding_rem, 0);
-    }
-
-    wal
+pub fn encode_logical_message(prefix: &str, message: &str) -> Bytes {
+    // This function can take untrusted input, so discard any NUL bytes in the prefix string.
+    let prefix = CString::new(prefix.replace('\0', "")).expect("no NULs");
+    let message = message.as_bytes();
+    WalGenerator::encode_record(
+        WalGenerator::encode_logical_message(&prefix, message),
+        RM_LOGICALMSG_ID,
+        XLOG_LOGICAL_MESSAGE,
+        Lsn(0),
+    )
 }
 
 #[cfg(test)]
