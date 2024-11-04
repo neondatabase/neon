@@ -4341,6 +4341,8 @@ dependencies = [
  "smallvec",
  "smol_str",
  "socket2",
+ "strum",
+ "strum_macros",
  "subtle",
  "thiserror",
  "tikv-jemalloc-ctl",

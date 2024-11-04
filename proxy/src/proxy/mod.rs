@@ -28,7 +28,7 @@ use crate::config::{ProxyConfig, ProxyProtocolV2, TlsConfig};
 use crate::context::RequestMonitoring;
 use crate::error::ReportableError;
 use crate::metrics::{Metrics, NumClientConnectionsGuard};
-use crate::protocol2::read_proxy_protocol;
+use crate::protocol2::{read_proxy_protocol, ConnectionInfo};
 use crate::proxy::handshake::{handshake, HandshakeData};
 use crate::rate_limiter::EndpointRateLimiter;
 use crate::stream::{PqStream, Stream};
@@ -87,7 +87,7 @@ pub async fn task_main(
         let endpoint_rate_limiter2 = endpoint_rate_limiter.clone();
 
         connections.spawn(async move {
-            let (socket, peer_addr) = match read_proxy_protocol(socket).await {
+            let (socket, conn_info) = match read_proxy_protocol(socket).await {
                 Err(e) => {
                     warn!("per-client task finished with an error: {e:#}");
                     return;
@@ -100,8 +100,8 @@ pub async fn task_main(
                     warn!("proxy protocol header not supported");
                     return;
                 }
-                Ok((socket, Some(addr))) => (socket, addr.ip()),
-                Ok((socket, None)) => (socket, peer_addr.ip()),
+                Ok((socket, Some(info))) => (socket, info),
+                Ok((socket, None)) => (socket, ConnectionInfo { addr: peer_addr, extra: None }),
             };
 
             match socket.inner.set_nodelay(true) {
@@ -114,7 +114,7 @@ pub async fn task_main(
 
             let ctx = RequestMonitoring::new(
                 session_id,
-                peer_addr,
+                conn_info,
                 crate::metrics::Protocol::Tcp,
                 &config.region,
             );

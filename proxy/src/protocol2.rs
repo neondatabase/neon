@@ -1,12 +1,15 @@
 //! Proxy Protocol V2 implementation
+//! Compatible with <https://www.haproxy.org/download/3.1/doc/proxy-protocol.txt>
 
+use core::fmt;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use bytes::BytesMut;
+use bytes::{Buf, Bytes, BytesMut};
 use pin_project_lite::pin_project;
+use strum_macros::FromRepr;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
 
 pin_project! {
@@ -58,9 +61,35 @@ const HEADER: [u8; 12] = [
     0x0D, 0x0A, 0x0D, 0x0A, 0x00, 0x0D, 0x0A, 0x51, 0x55, 0x49, 0x54, 0x0A,
 ];
 
+#[derive(PartialEq, Eq, Clone, Debug)]
+pub struct ConnectionInfo {
+    pub addr: SocketAddr,
+    pub extra: Option<ConnectionInfoExtra>,
+}
+
+impl fmt::Display for ConnectionInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.extra {
+            None => self.addr.ip().fmt(f),
+            Some(ConnectionInfoExtra::Aws { vpce_id }) => {
+                write!(f, "vpce_id[{vpce_id:?}]:addr[{}]", self.addr.ip())
+            }
+            Some(ConnectionInfoExtra::Azure { link_id }) => {
+                write!(f, "link_id[{link_id}]:addr[{}]", self.addr.ip())
+            }
+        }
+    }
+}
+
+#[derive(PartialEq, Eq, Clone, Debug)]
+pub enum ConnectionInfoExtra {
+    Aws { vpce_id: Bytes },
+    Azure { link_id: u32 },
+}
+
 pub(crate) async fn read_proxy_protocol<T: AsyncRead + Unpin>(
     mut read: T,
-) -> std::io::Result<(ChainRW<T>, Option<SocketAddr>)> {
+) -> std::io::Result<(ChainRW<T>, Option<ConnectionInfo>)> {
     let mut buf = BytesMut::with_capacity(128);
     while buf.len() < 16 {
         let bytes_read = read.read_buf(&mut buf).await?;
@@ -164,22 +193,107 @@ pub(crate) async fn read_proxy_protocol<T: AsyncRead + Unpin>(
     //   - destination layer 3 address in network byte order
     //   - source layer 4 address if any, in network byte order (port)
     //   - destination layer 4 address if any, in network byte order (port)
-    let addresses = buf.split_to(remaining_length as usize);
-    let socket = match address_length {
+    let mut header = buf.split_to(usize::from(remaining_length));
+    let mut addr = header.split_to(usize::from(address_length));
+    let socket = match addr.len() {
         12 => {
-            let src_addr: [u8; 4] = addresses[0..4].try_into().unwrap();
-            let src_port = u16::from_be_bytes(addresses[8..10].try_into().unwrap());
+            let src_addr = Ipv4Addr::from_bits(addr.get_u32());
+            let _dst_addr = Ipv4Addr::from_bits(addr.get_u32());
+            let src_port = addr.get_u16();
+            let _dst_port = addr.get_u16();
             Some(SocketAddr::from((src_addr, src_port)))
         }
         36 => {
-            let src_addr: [u8; 16] = addresses[0..16].try_into().unwrap();
-            let src_port = u16::from_be_bytes(addresses[32..34].try_into().unwrap());
+            let src_addr = Ipv6Addr::from_bits(addr.get_u128());
+            let _dst_addr = Ipv6Addr::from_bits(addr.get_u128());
+            let src_port = addr.get_u16();
+            let _dst_port = addr.get_u16();
             Some(SocketAddr::from((src_addr, src_port)))
         }
         _ => None,
     };
 
-    Ok((ChainRW { inner: read, buf }, socket))
+    let mut extra = None;
+
+    while let Some(mut tlv) = read_tlv(&mut header) {
+        match Pp2Kind::from_repr(tlv.kind) {
+            Some(Pp2Kind::Aws) => {
+                if tlv.value.is_empty() {
+                    tracing::warn!("invalid aws tlv: no subtype");
+                }
+                let subtype = tlv.value.get_u8();
+                match Pp2AwsType::from_repr(subtype) {
+                    Some(Pp2AwsType::VpceId) => {
+                        extra = Some(ConnectionInfoExtra::Aws { vpce_id: tlv.value });
+                    }
+                    None => {
+                        tracing::warn!("unknown aws tlv: subtype={subtype}");
+                    }
+                }
+            }
+            Some(Pp2Kind::Azure) => {
+                if tlv.value.is_empty() {
+                    tracing::warn!("invalid azure tlv: no subtype");
+                }
+                let subtype = tlv.value.get_u8();
+                match Pp2AzureType::from_repr(subtype) {
+                    Some(Pp2AzureType::PrivateEndpointLinkId) => {
+                        if tlv.value.len() != 4 {
+                            tracing::warn!("invalid azure link_id: {:?}", tlv.value);
+                        }
+                        extra = Some(ConnectionInfoExtra::Azure {
+                            link_id: tlv.value.get_u32_le(),
+                        });
+                    }
+                    None => {
+                        tracing::warn!("unknown azure tlv: subtype={subtype}");
+                    }
+                }
+            }
+            Some(kind) => {
+                tracing::debug!("unused tlv[{kind:?}]: {:?}", tlv.value);
+            }
+            None => {
+                tracing::debug!("unknown tlv: {tlv:?}");
+            }
+        }
+    }
+
+    let conn_info = socket.map(|addr| ConnectionInfo { addr, extra });
+
+    Ok((ChainRW { inner: read, buf }, conn_info))
+}
+
+#[derive(FromRepr, Debug, Copy, Clone)]
+#[repr(u8)]
+enum Pp2Kind {
+    // The following are defined by https://www.haproxy.org/download/3.1/doc/proxy-protocol.txt
+    // we don't use these but it would be interesting to know what's available
+    Alpn = 0x01,
+    Authority = 0x02,
+    Crc32C = 0x03,
+    Noop = 0x04,
+    UniqueId = 0x05,
+    Ssl = 0x20,
+    NetNs = 0x30,
+
+    /// <https://docs.aws.amazon.com/elasticloadbalancing/latest/network/edit-target-group-attributes.html#proxy-protocol>
+    Aws = 0xEA,
+
+    /// <https://learn.microsoft.com/en-us/azure/private-link/private-link-service-overview#getting-connection-information-using-tcp-proxy-v2>
+    Azure = 0xEE,
+}
+
+#[derive(FromRepr, Debug, Copy, Clone)]
+#[repr(u8)]
+enum Pp2AwsType {
+    VpceId = 0x01,
+}
+
+#[derive(FromRepr, Debug, Copy, Clone)]
+#[repr(u8)]
+enum Pp2AzureType {
+    PrivateEndpointLinkId = 0x01,
 }
 
 impl<T: AsyncRead> AsyncRead for ChainRW<T> {
@@ -216,6 +330,25 @@ impl<T: AsyncRead> ChainRW<T> {
     }
 }
 
+#[derive(Debug)]
+struct Tlv {
+    kind: u8,
+    value: Bytes,
+}
+
+fn read_tlv(b: &mut BytesMut) -> Option<Tlv> {
+    if b.len() < 3 {
+        return None;
+    }
+    let kind = b.get_u8();
+    let len = usize::from(b.get_u16());
+    if b.len() < len {
+        return None;
+    }
+    let value = b.split_to(len).freeze();
+    Some(Tlv { kind, value })
+}
+
 #[cfg(test)]
 mod tests {
     use tokio::io::AsyncReadExt;
@@ -242,7 +375,7 @@ mod tests {
 
         let extra_data = [0x55; 256];
 
-        let (mut read, addr) = read_proxy_protocol(header.chain(extra_data.as_slice()))
+        let (mut read, info) = read_proxy_protocol(header.chain(extra_data.as_slice()))
             .await
             .unwrap();
 
@@ -250,7 +383,9 @@ mod tests {
         read.read_to_end(&mut bytes).await.unwrap();
 
         assert_eq!(bytes, extra_data);
-        assert_eq!(addr, Some(([127, 0, 0, 1], 65535).into()));
+
+        let info = info.unwrap();
+        assert_eq!(info.addr, ([127, 0, 0, 1], 65535).into());
     }
 
     #[tokio::test]
@@ -273,7 +408,7 @@ mod tests {
 
         let extra_data = [0x55; 256];
 
-        let (mut read, addr) = read_proxy_protocol(header.chain(extra_data.as_slice()))
+        let (mut read, info) = read_proxy_protocol(header.chain(extra_data.as_slice()))
             .await
             .unwrap();
 
@@ -281,9 +416,11 @@ mod tests {
         read.read_to_end(&mut bytes).await.unwrap();
 
         assert_eq!(bytes, extra_data);
+
+        let info = info.unwrap();
         assert_eq!(
-            addr,
-            Some(([15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0], 257).into())
+            info.addr,
+            ([15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0], 257).into()
         );
     }
 
@@ -291,30 +428,31 @@ mod tests {
     async fn test_invalid() {
         let data = [0x55; 256];
 
-        let (mut read, addr) = read_proxy_protocol(data.as_slice()).await.unwrap();
+        let (mut read, info) = read_proxy_protocol(data.as_slice()).await.unwrap();
 
         let mut bytes = vec![];
         read.read_to_end(&mut bytes).await.unwrap();
         assert_eq!(bytes, data);
-        assert_eq!(addr, None);
+        assert_eq!(info, None);
     }
 
     #[tokio::test]
     async fn test_short() {
         let data = [0x55; 10];
 
-        let (mut read, addr) = read_proxy_protocol(data.as_slice()).await.unwrap();
+        let (mut read, info) = read_proxy_protocol(data.as_slice()).await.unwrap();
 
         let mut bytes = vec![];
         read.read_to_end(&mut bytes).await.unwrap();
         assert_eq!(bytes, data);
-        assert_eq!(addr, None);
+        assert_eq!(info, None);
     }
 
     #[tokio::test]
     async fn test_large_tlv() {
         let tlv = vec![0x55; 32768];
-        let len = (12 + tlv.len() as u16).to_be_bytes();
+        let tlv_len = (tlv.len() as u16).to_be_bytes();
+        let len = (12 + 3 + tlv.len() as u16).to_be_bytes();
 
         let header = super::HEADER
             // Proxy command, Inet << 4 | Stream
@@ -330,11 +468,13 @@ mod tests {
             // dst port
             .chain([1, 1].as_slice())
             // TLV
+            .chain([255].as_slice())
+            .chain(tlv_len.as_slice())
             .chain(tlv.as_slice());
 
         let extra_data = [0xaa; 256];
 
-        let (mut read, addr) = read_proxy_protocol(header.chain(extra_data.as_slice()))
+        let (mut read, info) = read_proxy_protocol(header.chain(extra_data.as_slice()))
             .await
             .unwrap();
 
@@ -342,6 +482,8 @@ mod tests {
         read.read_to_end(&mut bytes).await.unwrap();
 
         assert_eq!(bytes, extra_data);
-        assert_eq!(addr, Some(([55, 56, 57, 58], 65535).into()));
+
+        let info = info.unwrap();
+        assert_eq!(info.addr, ([55, 56, 57, 58], 65535).into());
     }
 }
