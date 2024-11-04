@@ -5,23 +5,23 @@ use std::{
     time::{Instant, SystemTime},
 };
 
-use ::metrics::{register_histogram, GaugeVec, Histogram, IntGauge, DISK_FSYNC_SECONDS_BUCKETS};
 use anyhow::Result;
 use futures::Future;
 use metrics::{
     core::{AtomicU64, Collector, Desc, GenericCounter, GenericGaugeVec, Opts},
+    pow2_buckets,
     proto::MetricFamily,
-    register_histogram_vec, register_int_counter, register_int_counter_pair,
-    register_int_counter_pair_vec, register_int_counter_vec, register_int_gauge, Gauge,
-    HistogramVec, IntCounter, IntCounterPair, IntCounterPairVec, IntCounterVec, IntGaugeVec,
+    register_histogram, register_histogram_vec, register_int_counter, register_int_counter_pair,
+    register_int_counter_pair_vec, register_int_counter_vec, register_int_gauge, Gauge, GaugeVec,
+    Histogram, HistogramVec, IntCounter, IntCounterPair, IntCounterPairVec, IntCounterVec,
+    IntGauge, IntGaugeVec, DISK_FSYNC_SECONDS_BUCKETS,
 };
 use once_cell::sync::Lazy;
-
 use postgres_ffi::XLogSegNo;
-use utils::pageserver_feedback::PageserverFeedback;
-use utils::{id::TenantTimelineId, lsn::Lsn};
+use utils::{id::TenantTimelineId, lsn::Lsn, pageserver_feedback::PageserverFeedback};
 
 use crate::{
+    receive_wal::MSG_QUEUE_SIZE,
     state::{TimelineMemState, TimelinePersistentState},
     GlobalTimelines,
 };
@@ -203,6 +203,44 @@ pub static WAL_BACKUP_TASKS: Lazy<IntCounterPair> = Lazy::new(|| {
         "Number of finished WAL backup tasks",
     )
     .expect("Failed to register safekeeper_wal_backup_tasks_finished_total counter")
+});
+pub static WAL_RECEIVERS: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "safekeeper_wal_receivers",
+        "Number of currently connected WAL receivers (i.e. connected computes)"
+    )
+    .expect("Failed to register safekeeper_wal_receivers")
+});
+pub static WAL_RECEIVER_QUEUE_DEPTH: Lazy<Histogram> = Lazy::new(|| {
+    // Use powers of two buckets, but add a bucket at 0 and the max queue size to track empty and
+    // full queues respectively.
+    let mut buckets = pow2_buckets(1, MSG_QUEUE_SIZE);
+    buckets.insert(0, 0.0);
+    buckets.insert(buckets.len() - 1, (MSG_QUEUE_SIZE - 1) as f64);
+    assert!(buckets.len() <= 12, "too many histogram buckets");
+
+    register_histogram!(
+        "safekeeper_wal_receiver_queue_depth",
+        "Number of queued messages per WAL receiver (sampled every 5 seconds)",
+        buckets
+    )
+    .expect("Failed to register safekeeper_wal_receiver_queue_depth histogram")
+});
+pub static WAL_RECEIVER_QUEUE_DEPTH_TOTAL: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "safekeeper_wal_receiver_queue_depth_total",
+        "Total number of queued messages across all WAL receivers",
+    )
+    .expect("Failed to register safekeeper_wal_receiver_queue_depth_total gauge")
+});
+// TODO: consider adding a per-receiver queue_size histogram. This will require wrapping the Tokio
+// MPSC channel to update counters on send, receive, and drop, while forwarding all other methods.
+pub static WAL_RECEIVER_QUEUE_SIZE_TOTAL: Lazy<IntGauge> = Lazy::new(|| {
+    register_int_gauge!(
+        "safekeeper_wal_receiver_queue_size_total",
+        "Total memory byte size of queued messages across all WAL receivers",
+    )
+    .expect("Failed to register safekeeper_wal_receiver_queue_size_total gauge")
 });
 
 // Metrics collected on operations on the storage repository.

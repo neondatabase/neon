@@ -3,6 +3,10 @@
 //! sends replies back.
 
 use crate::handler::SafekeeperPostgresHandler;
+use crate::metrics::{
+    WAL_RECEIVERS, WAL_RECEIVER_QUEUE_DEPTH, WAL_RECEIVER_QUEUE_DEPTH_TOTAL,
+    WAL_RECEIVER_QUEUE_SIZE_TOTAL,
+};
 use crate::safekeeper::AcceptorProposerMessage;
 use crate::safekeeper::ProposerAcceptorMessage;
 use crate::safekeeper::ServerInfo;
@@ -86,6 +90,7 @@ impl WalReceivers {
         };
 
         self.update_num(&shared);
+        WAL_RECEIVERS.inc();
 
         WalReceiverGuard {
             id: pos,
@@ -144,6 +149,7 @@ impl WalReceivers {
         let mut shared = self.mutex.lock();
         shared.slots[id] = None;
         self.update_num(&shared);
+        WAL_RECEIVERS.dec();
     }
 
     /// Broadcast pageserver feedback to connected walproposers.
@@ -390,6 +396,7 @@ async fn read_network_loop<IO: AsyncRead + AsyncWrite + Unpin>(
 
     loop {
         let started = Instant::now();
+        let size = next_msg.size();
         match msg_tx.send_timeout(next_msg, SLOW_THRESHOLD).await {
             Ok(()) => {}
             // Slow send, log a message and keep trying. Log context has timeline ID.
@@ -409,6 +416,11 @@ async fn read_network_loop<IO: AsyncRead + AsyncWrite + Unpin>(
             // WalAcceptor terminated.
             Err(SendTimeoutError::Closed(_)) => return Ok(()),
         }
+
+        // Update metrics. Will be decremented in WalAcceptor.
+        WAL_RECEIVER_QUEUE_DEPTH_TOTAL.inc();
+        WAL_RECEIVER_QUEUE_SIZE_TOTAL.add(size as i64);
+
         next_msg = read_message(pgb_reader).await?;
     }
 }
@@ -466,6 +478,12 @@ async fn network_write<IO: AsyncRead + AsyncWrite + Unpin>(
 /// walproposer, even when it's writing a steady stream of messages.
 const FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 
+/// The metrics computation interval.
+///
+/// The Prometheus poll interval is 60 seconds at the time of writing. We sample the queue depth
+/// every 5 seconds, for 12 samples per poll. This will give a count of up to 12x active timelines.
+const METRICS_INTERVAL: Duration = Duration::from_secs(5);
+
 /// Encapsulates a task which takes messages from msg_rx, processes and pushes
 /// replies to reply_tx.
 ///
@@ -512,12 +530,15 @@ impl WalAcceptor {
     async fn run(&mut self) -> anyhow::Result<()> {
         let walreceiver_guard = self.tli.get_walreceivers().register(self.conn_id);
 
-        // Periodically flush the WAL.
+        // Periodically flush the WAL and compute metrics.
         let mut flush_ticker = tokio::time::interval(FLUSH_INTERVAL);
         flush_ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
         flush_ticker.tick().await; // skip the initial, immediate tick
 
-        // Tracks unflushed appends.
+        let mut metrics_ticker = tokio::time::interval(METRICS_INTERVAL);
+        metrics_ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+        // Tracks whether we have unflushed appends.
         let mut dirty = false;
 
         loop {
@@ -528,6 +549,10 @@ impl WalAcceptor {
                     let Some(mut msg) = msg else {
                         break;
                     };
+
+                    // Update gauge metrics.
+                    WAL_RECEIVER_QUEUE_DEPTH_TOTAL.dec();
+                    WAL_RECEIVER_QUEUE_SIZE_TOTAL.sub(msg.size() as i64);
 
                     // Update walreceiver state in shmem for reporting.
                     if let ProposerAcceptorMessage::Elected(_) = &msg {
@@ -565,6 +590,12 @@ impl WalAcceptor {
                         .process_msg(&ProposerAcceptorMessage::FlushWAL)
                         .await?
                 }
+
+                // Update histogram metrics periodically.
+                _ = metrics_ticker.tick() => {
+                    WAL_RECEIVER_QUEUE_DEPTH.observe(self.msg_rx.len() as f64);
+                    None // no reply
+                }
             };
 
             // Send reply, if any.
@@ -583,5 +614,16 @@ impl WalAcceptor {
         }
 
         Ok(())
+    }
+}
+
+/// On drop, drain msg_rx and update metrics to avoid leaks.
+impl Drop for WalAcceptor {
+    fn drop(&mut self) {
+        self.msg_rx.close(); // prevent further sends
+        while let Ok(msg) = self.msg_rx.try_recv() {
+            WAL_RECEIVER_QUEUE_DEPTH_TOTAL.dec();
+            WAL_RECEIVER_QUEUE_SIZE_TOTAL.sub(msg.size() as i64);
+        }
     }
 }
