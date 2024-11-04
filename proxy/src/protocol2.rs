@@ -11,6 +11,7 @@ use bytes::{Buf, Bytes, BytesMut};
 use pin_project_lite::pin_project;
 use strum_macros::FromRepr;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
+use tracing::debug;
 
 pin_project! {
     /// A chained [`AsyncRead`] with [`AsyncWrite`] passthrough
@@ -60,6 +61,12 @@ impl<T: AsyncWrite> AsyncWrite for ChainRW<T> {
 const HEADER: [u8; 12] = [
     0x0D, 0x0A, 0x0D, 0x0A, 0x00, 0x0D, 0x0A, 0x51, 0x55, 0x49, 0x54, 0x0A,
 ];
+
+#[derive(Debug)]
+pub enum Command {
+    Local,
+    Proxy,
+}
 
 #[derive(PartialEq, Eq, Clone, Debug)]
 pub struct ConnectionInfo {
@@ -112,32 +119,26 @@ pub(crate) async fn read_proxy_protocol<T: AsyncRead + Unpin>(
     // The highest four bits contains the version. As of this specification, it must
     // always be sent as \x2 and the receiver must only accept this value.
     let vc = header[12];
-    let version = vc >> 4;
-    let command = vc & 0b1111;
-    if version != 2 {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            "invalid proxy protocol version. expected version 2",
-        ));
-    }
-    match command {
+    let command = match vc {
         // the connection was established on purpose by the proxy
         // without being relayed. The connection endpoints are the sender and the
         // receiver. Such connections exist when the proxy sends health-checks to the
         // server. The receiver must accept this connection as valid and must use the
         // real connection endpoints and discard the protocol block including the
         // family which is ignored.
-        0 => {}
+        0x20 => Command::Local,
         // the connection was established on behalf of another node,
         // and reflects the original connection endpoints. The receiver must then use
         // the information provided in the protocol block to get original the address.
-        1 => {}
+        0x21 => Command::Proxy,
         // other values are unassigned and must not be emitted by senders. Receivers
         // must drop connections presenting unexpected values here.
         _ => {
             return Err(io::Error::new(
                 io::ErrorKind::Other,
-                "invalid proxy protocol command. expected local (0) or proxy (1)",
+                format!(
+                "invalid proxy protocol command 0x{vc:02X}. expected local (0x20) or proxy (0x21)"
+            ),
             ))
         }
     };
@@ -145,6 +146,9 @@ pub(crate) async fn read_proxy_protocol<T: AsyncRead + Unpin>(
     // The 14th byte contains the transport protocol and address family. The highest 4
     // bits contain the address family, the lowest 4 bits contain the protocol.
     let ft = header[13];
+
+    debug!("got command {command:?} with family 0x{ft:02X}");
+
     let address_length = match ft {
         // - \x11 : TCP over IPv4 : the forwarded connection uses TCP over the AF_INET
         //   protocol family. Address length is 2*4 + 2*2 = 12 bytes.
@@ -157,7 +161,12 @@ pub(crate) async fn read_proxy_protocol<T: AsyncRead + Unpin>(
         //   protocol family. Address length is 2*16 + 2*2 = 36 bytes.
         0x21 | 0x22 => 36,
         // unspecified or unix stream. ignore the addresses
-        _ => 0,
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "invalid proxy protocol address family/transport protocol.",
+            ))
+        }
     };
 
     // The 15th and 16th bytes is the address length in bytes in network endian order.
