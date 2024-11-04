@@ -80,6 +80,7 @@ use crate::tenant::size::ModelInputs;
 use crate::tenant::storage_layer::LayerAccessStatsReset;
 use crate::tenant::storage_layer::LayerName;
 use crate::tenant::timeline::offload::offload_timeline;
+use crate::tenant::timeline::offload::OffloadError;
 use crate::tenant::timeline::CompactFlags;
 use crate::tenant::timeline::CompactionError;
 use crate::tenant::timeline::Timeline;
@@ -2004,7 +2005,12 @@ async fn timeline_offload_handler(
         }
         offload_timeline(&tenant, &timeline)
             .await
-            .map_err(ApiError::InternalServerError)?;
+            .map_err(|e| {
+                match e {
+                    OffloadError::Cancelled => ApiError::ResourceUnavailable("Timeline shutting down".into()),
+                    _ => ApiError::InternalServerError(anyhow!(e))
+                }
+            })?;
 
         json_response(StatusCode::OK, ())
     }
@@ -2060,6 +2066,7 @@ async fn timeline_checkpoint_handler(
                 .map_err(|e|
                     match e {
                         CompactionError::ShuttingDown => ApiError::ShuttingDown,
+                        CompactionError::Offload(e) => ApiError::InternalServerError(anyhow::anyhow!(e)),
                         CompactionError::Other(e) => ApiError::InternalServerError(e)
                     }
                 )?;

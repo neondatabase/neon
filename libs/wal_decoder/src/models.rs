@@ -25,13 +25,57 @@
 //!                     |--> write to KV store within the pageserver
 
 use bytes::Bytes;
+use pageserver_api::key::CompactKey;
 use pageserver_api::reltag::{RelTag, SlruKind};
+use pageserver_api::value::Value;
 use postgres_ffi::walrecord::{
     XlMultiXactCreate, XlMultiXactTruncate, XlRelmapUpdate, XlReploriginDrop, XlReploriginSet,
     XlSmgrTruncate, XlXactParsedRecord,
 };
 use postgres_ffi::{Oid, TransactionId};
 use utils::lsn::Lsn;
+
+pub enum FlushUncommittedRecords {
+    Yes,
+    No,
+}
+
+/// An interpreted Postgres WAL record, ready to be handled by the pageserver
+pub struct InterpretedWalRecord {
+    /// Optional metadata record - may cause writes to metadata keys
+    /// in the storage engine
+    pub metadata_record: Option<MetadataRecord>,
+    /// Images or deltas for blocks modified in the original WAL record.
+    /// The [`Value`] is optional to avoid sending superfluous data to
+    /// shard 0 for relation size tracking.
+    pub blocks: Vec<(CompactKey, Option<Value>)>,
+    /// Byte offset within WAL for the end of the original PG WAL record
+    pub lsn: Lsn,
+    /// Whether to flush all uncommitted modifications to the storage engine
+    /// before ingesting this record. This is currently only used for legacy PG
+    /// database creations which read pages from a template database. Such WAL
+    /// records require reading data blocks while ingesting, hence the need to flush.
+    pub flush_uncommitted: FlushUncommittedRecords,
+    /// Transaction id of the original PG WAL record
+    pub xid: TransactionId,
+}
+
+/// The interpreted part of the Postgres WAL record which requires metadata
+/// writes to the underlying storage engine.
+pub enum MetadataRecord {
+    Heapam(HeapamRecord),
+    Neonrmgr(NeonrmgrRecord),
+    Smgr(SmgrRecord),
+    Dbase(DbaseRecord),
+    Clog(ClogRecord),
+    Xact(XactRecord),
+    MultiXact(MultiXactRecord),
+    Relmap(RelmapRecord),
+    Xlog(XlogRecord),
+    LogicalMessage(LogicalMessageRecord),
+    Standby(StandbyRecord),
+    Replorigin(ReploriginRecord),
+}
 
 pub enum HeapamRecord {
     ClearVmBits(ClearVmBits),

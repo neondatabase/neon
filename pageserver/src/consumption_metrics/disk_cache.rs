@@ -2,11 +2,33 @@ use anyhow::Context;
 use camino::{Utf8Path, Utf8PathBuf};
 use std::sync::Arc;
 
-use super::RawMetric;
+use crate::consumption_metrics::NewMetricsRefRoot;
+
+use super::{NewMetricsRoot, NewRawMetric, RawMetric};
+
+pub(super) fn read_metrics_from_serde_value(
+    json_value: serde_json::Value,
+) -> anyhow::Result<Vec<NewRawMetric>> {
+    if NewMetricsRoot::is_v2_metrics(&json_value) {
+        let root = serde_json::from_value::<NewMetricsRoot>(json_value)?;
+        Ok(root.metrics)
+    } else {
+        let all_metrics = serde_json::from_value::<Vec<RawMetric>>(json_value)?;
+        let all_metrics = all_metrics
+            .into_iter()
+            .map(|(key, (event_type, value))| NewRawMetric {
+                key,
+                kind: event_type,
+                value,
+            })
+            .collect();
+        Ok(all_metrics)
+    }
+}
 
 pub(super) async fn read_metrics_from_disk(
     path: Arc<Utf8PathBuf>,
-) -> anyhow::Result<Vec<RawMetric>> {
+) -> anyhow::Result<Vec<NewRawMetric>> {
     // do not add context to each error, callsite will log with full path
     let span = tracing::Span::current();
     tokio::task::spawn_blocking(move || {
@@ -20,7 +42,8 @@ pub(super) async fn read_metrics_from_disk(
 
         let mut file = std::fs::File::open(&*path)?;
         let reader = std::io::BufReader::new(&mut file);
-        anyhow::Ok(serde_json::from_reader::<_, Vec<RawMetric>>(reader)?)
+        let json_value = serde_json::from_reader::<_, serde_json::Value>(reader)?;
+        read_metrics_from_serde_value(json_value)
     })
     .await
     .context("read metrics join error")
@@ -63,7 +86,7 @@ fn scan_and_delete_with_same_prefix(path: &Utf8Path) -> std::io::Result<()> {
 }
 
 pub(super) async fn flush_metrics_to_disk(
-    current_metrics: &Arc<Vec<RawMetric>>,
+    current_metrics: &Arc<Vec<NewRawMetric>>,
     path: &Arc<Utf8PathBuf>,
 ) -> anyhow::Result<()> {
     use std::io::Write;
@@ -93,8 +116,11 @@ pub(super) async fn flush_metrics_to_disk(
             // write out all of the raw metrics, to be read out later on restart as cached values
             {
                 let mut writer = std::io::BufWriter::new(&mut tempfile);
-                serde_json::to_writer(&mut writer, &*current_metrics)
-                    .context("serialize metrics")?;
+                serde_json::to_writer(
+                    &mut writer,
+                    &NewMetricsRefRoot::new(current_metrics.as_ref()),
+                )
+                .context("serialize metrics")?;
                 writer
                     .into_inner()
                     .map_err(|_| anyhow::anyhow!("flushing metrics failed"))?;

@@ -59,6 +59,7 @@ pub async fn send_basebackup_tarball<'a, W>(
     req_lsn: Option<Lsn>,
     prev_lsn: Option<Lsn>,
     full_backup: bool,
+    replica: bool,
     ctx: &'a RequestContext,
 ) -> Result<(), BasebackupError>
 where
@@ -110,8 +111,8 @@ where
     };
 
     info!(
-        "taking basebackup lsn={}, prev_lsn={} (full_backup={})",
-        backup_lsn, prev_lsn, full_backup
+        "taking basebackup lsn={}, prev_lsn={} (full_backup={}, replica={})",
+        backup_lsn, prev_lsn, full_backup, replica
     );
 
     let basebackup = Basebackup {
@@ -120,6 +121,7 @@ where
         lsn: backup_lsn,
         prev_record_lsn: prev_lsn,
         full_backup,
+        replica,
         ctx,
     };
     basebackup
@@ -140,6 +142,7 @@ where
     lsn: Lsn,
     prev_record_lsn: Lsn,
     full_backup: bool,
+    replica: bool,
     ctx: &'a RequestContext,
 }
 
@@ -372,6 +375,10 @@ where
 
         for (path, content) in aux_files {
             if path.starts_with("pg_replslot") {
+                // Do not create LR slots at standby because they are not used but prevent WAL truncation
+                if self.replica {
+                    continue;
+                }
                 let offs = pg_constants::REPL_SLOT_ON_DISK_OFFSETOF_RESTART_LSN;
                 let restart_lsn = Lsn(u64::from_le_bytes(
                     content[offs..offs + 8].try_into().unwrap(),
