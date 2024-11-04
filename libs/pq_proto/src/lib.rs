@@ -562,6 +562,7 @@ pub enum BeMessage<'a> {
         options: &'a [&'a str],
     },
     KeepAlive(WalSndKeepAlive),
+    NeonInterpretedWalRecord(&'a [u8]), // TODO: use appropriate fields
 }
 
 /// Common shorthands.
@@ -995,6 +996,17 @@ impl BeMessage<'_> {
                     }
                     Ok(())
                 })?
+            }
+
+            // Neon extension: send interpreted WAL records to relevant pageservers. This is
+            // temporary until we move to a different protocol for Safekeeper->Pageserver WAL
+            // (possibly gRPC).
+            BeMessage::NeonInterpretedWalRecord(data) => {
+                buf.put_u8(b'z'); // arbitrary unused value
+                write_body(buf, |buf| {
+                    buf.put_u64(data.len() as u64);
+                    buf.put_slice(data);
+                })
             }
         }
         Ok(())
