@@ -1144,10 +1144,7 @@ impl Timeline {
             futs.push({
                 let walredo_self = self.myself.upgrade().expect("&self method holds the arc");
                 async move {
-                    assert!(matches!(
-                        state.situation,
-                        ValueReconstructSituation::Complete
-                    ));
+                    assert_eq!(state.situation, ValueReconstructSituation::Complete);
 
                     let converted = match state.collect_pending_ios().await {
                         Ok(ok) => ok,
