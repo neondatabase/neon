@@ -143,7 +143,7 @@ reqwest-retry = "0.5"
 routerify = "3"
 rpds = "0.13"
 rustc-hash = "1.1.0"
-rustls = "0.23"
+rustls = { version = "0.23.16", default-features = false }
 rustls-pemfile = "2"
 scopeguard = "1.1"
 sysinfo = "0.29.2"
@@ -174,7 +174,7 @@ tokio = { version = "1.17", features = ["macros"] }
 tokio-epoll-uring = { git = "https://github.com/neondatabase/tokio-epoll-uring.git" , branch = "main" }
 tokio-io-timeout = "1.2.0"
 tokio-postgres-rustls = "0.12.0"
-tokio-rustls = "0.26"
+tokio-rustls = { version = "0.26.0", default-features = false, features = ["tls12", "ring"]}
 tokio-stream = "0.1"
 tokio-tar = "0.3"
 tokio-util = { version = "0.7.10", features = ["io", "rt"] }

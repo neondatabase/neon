@@ -44,10 +44,10 @@ use tracing::{info, warn, Instrument};
 use utils::http::error::ApiError;
 
 use crate::cancellation::CancellationHandlerMain;
-use crate::config::ProxyConfig;
+use crate::config::{ProxyConfig, ProxyProtocolV2};
 use crate::context::RequestMonitoring;
 use crate::metrics::Metrics;
-use crate::protocol2::{read_proxy_protocol, ChainRW};
+use crate::protocol2::{read_proxy_protocol, ChainRW, ConnectionInfo};
 use crate::proxy::run_until_cancelled;
 use crate::rate_limiter::EndpointRateLimiter;
 use crate::serverless::backend::PoolingBackend;
@@ -180,7 +180,7 @@ pub async fn task_main(
                     peer_addr,
                 ))
                 .await;
-                let Some((conn, peer_addr)) = startup_result else {
+                let Some((conn, conn_info)) = startup_result else {
                     return;
                 };
 
@@ -192,7 +192,7 @@ pub async fn task_main(
                     endpoint_rate_limiter,
                     conn_token,
                     conn,
-                    peer_addr,
+                    conn_info,
                     session_id,
                 ))
                 .await;
@@ -240,7 +240,7 @@ async fn connection_startup(
     session_id: uuid::Uuid,
     conn: TcpStream,
     peer_addr: SocketAddr,
-) -> Option<(AsyncRW, IpAddr)> {
+) -> Option<(AsyncRW, ConnectionInfo)> {
     // handle PROXY protocol
     let (conn, peer) = match read_proxy_protocol(conn).await {
         Ok(c) => c,
@@ -250,17 +250,32 @@ async fn connection_startup(
         }
     };
 
-    let peer_addr = peer.unwrap_or(peer_addr).ip();
-    let has_private_peer_addr = match peer_addr {
+    let conn_info = match peer {
+        None if config.proxy_protocol_v2 == ProxyProtocolV2::Required => {
+            tracing::warn!("missing required proxy protocol header");
+            return None;
+        }
+        Some(_) if config.proxy_protocol_v2 == ProxyProtocolV2::Rejected => {
+            tracing::warn!("proxy protocol header not supported");
+            return None;
+        }
+        Some(info) => info,
+        None => ConnectionInfo {
+            addr: peer_addr,
+            extra: None,
+        },
+    };
+
+    let has_private_peer_addr = match conn_info.addr.ip() {
         IpAddr::V4(ip) => ip.is_private(),
         IpAddr::V6(_) => false,
     };
-    info!(?session_id, %peer_addr, "accepted new TCP connection");
+    info!(?session_id, %conn_info, "accepted new TCP connection");
 
     // try upgrade to TLS, but with a timeout.
     let conn = match timeout(config.handshake_timeout, tls_acceptor.accept(conn)).await {
         Ok(Ok(conn)) => {
-            info!(?session_id, %peer_addr, "accepted new TLS connection");
+            info!(?session_id, %conn_info, "accepted new TLS connection");
             conn
         }
         // The handshake failed
@@ -268,7 +283,7 @@ async fn connection_startup(
             if !has_private_peer_addr {
                 Metrics::get().proxy.tls_handshake_failures.inc();
             }
-            warn!(?session_id, %peer_addr, "failed to accept TLS connection: {e:?}");
+            warn!(?session_id, %conn_info, "failed to accept TLS connection: {e:?}");
             return None;
         }
         // The handshake timed out
@@ -276,12 +291,12 @@ async fn connection_startup(
             if !has_private_peer_addr {
                 Metrics::get().proxy.tls_handshake_failures.inc();
             }
-            warn!(?session_id, %peer_addr, "failed to accept TLS connection: {e:?}");
+            warn!(?session_id, %conn_info, "failed to accept TLS connection: {e:?}");
             return None;
         }
     };
 
-    Some((conn, peer_addr))
+    Some((conn, conn_info))
 }
 
 /// Handles HTTP connection
@@ -297,7 +312,7 @@ async fn connection_handler(
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
     cancellation_token: CancellationToken,
     conn: AsyncRW,
-    peer_addr: IpAddr,
+    conn_info: ConnectionInfo,
     session_id: uuid::Uuid,
 ) {
     let session_id = AtomicTake::new(session_id);
@@ -306,6 +321,7 @@ async fn connection_handler(
     let http_cancellation_token = CancellationToken::new();
     let _cancel_connection = http_cancellation_token.clone().drop_guard();
 
+    let conn_info2 = conn_info.clone();
     let server = Builder::new(TokioExecutor::new());
     let conn = server.serve_connection_with_upgrades(
         hyper_util::rt::TokioIo::new(conn),
@@ -340,7 +356,7 @@ async fn connection_handler(
                     connections.clone(),
                     cancellation_handler.clone(),
                     session_id,
-                    peer_addr,
+                    conn_info2.clone(),
                     http_request_token,
                     endpoint_rate_limiter.clone(),
                 )
@@ -365,7 +381,7 @@ async fn connection_handler(
     // On cancellation, trigger the HTTP connection handler to shut down.
     let res = match select(pin!(cancellation_token.cancelled()), pin!(conn)).await {
         Either::Left((_cancelled, mut conn)) => {
-            tracing::debug!(%peer_addr, "cancelling connection");
+            tracing::debug!(%conn_info, "cancelling connection");
             conn.as_mut().graceful_shutdown();
             conn.await
         }
@@ -373,8 +389,8 @@ async fn connection_handler(
     };
 
     match res {
-        Ok(()) => tracing::info!(%peer_addr, "HTTP connection closed"),
-        Err(e) => tracing::warn!(%peer_addr, "HTTP connection error {e}"),
+        Ok(()) => tracing::info!(%conn_info, "HTTP connection closed"),
+        Err(e) => tracing::warn!(%conn_info, "HTTP connection error {e}"),
     }
 }
 
@@ -386,7 +402,7 @@ async fn request_handler(
     ws_connections: TaskTracker,
     cancellation_handler: Arc<CancellationHandlerMain>,
     session_id: uuid::Uuid,
-    peer_addr: IpAddr,
+    conn_info: ConnectionInfo,
     // used to cancel in-flight HTTP requests. not used to cancel websockets
     http_cancellation_token: CancellationToken,
     endpoint_rate_limiter: Arc<EndpointRateLimiter>,
@@ -404,7 +420,7 @@ async fn request_handler(
     {
         let ctx = RequestMonitoring::new(
             session_id,
-            peer_addr,
+            conn_info,
             crate::metrics::Protocol::Ws,
             &config.region,
         );
@@ -439,7 +455,7 @@ async fn request_handler(
     } else if request.uri().path() == "/sql" && *request.method() == Method::POST {
         let ctx = RequestMonitoring::new(
             session_id,
-            peer_addr,
+            conn_info,
             crate::metrics::Protocol::Http,
             &config.region,
         );
