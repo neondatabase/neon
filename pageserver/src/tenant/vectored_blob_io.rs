@@ -311,7 +311,14 @@ pub enum BlobFlag {
 /// * Iterate over the collected blobs and coalesce them into reads at the end
 pub struct VectoredReadPlanner {
     // Track all the blob offsets. Start offsets must be ordered.
-    // Note: last bool is will_init
+    // Values in the value tuples are:
+    // (
+    //   lsn of the blob,
+    //   start offset of the blob in the underlying file,
+    //   end offset of the blob in the underlying file,
+    //   whether the blob initializes the page image or not
+    //   see [`pageserver_api::record::NeonWalRecord::will_init`]
+    // )
     blobs: BTreeMap<Key, Vec<(Lsn, u64, u64, bool)>>,
     // Arguments for previous blob passed into [`VectoredReadPlanner::handle`]
     prev: Option<(Key, Lsn, u64, BlobFlag)>,
