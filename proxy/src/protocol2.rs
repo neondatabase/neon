@@ -11,6 +11,7 @@ use bytes::{Buf, Bytes, BytesMut};
 use pin_project_lite::pin_project;
 use strum_macros::FromRepr;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
+use zerocopy::{FromBytes, FromZeroes};
 
 pin_project! {
     /// A chained [`AsyncRead`] with [`AsyncWrite`] passthrough
@@ -113,28 +114,10 @@ pub(crate) async fn read_proxy_protocol<T: AsyncRead + Unpin>(
         };
     }
 
-    // The next byte (the 13th one) is the protocol version and command.
-    // The highest four bits contains the version. As of this specification, it must
-    // always be sent as \x2 and the receiver must only accept this value.
-    let vc = buf[12];
+    let header = buf.try_get::<ProxyProtocolV2Header>().unwrap();
+    let remaining_length = usize::from(header.len.get());
 
-    // The 14th byte contains the transport protocol and address family. The highest 4
-    // bits contain the address family, the lowest 4 bits contain the protocol.
-    let ft = buf[13];
-
-    // The 15th and 16th bytes is the address length in bytes in network endian order.
-    // It is used so that the receiver knows how many address bytes to skip even when
-    // it does not implement the presented protocol. Thus the length of the protocol
-    // header in bytes is always exactly 16 + this value. When a sender presents a
-    // LOCAL connection, it should not present any address so it sets this field to
-    // zero. Receivers MUST always consider this field to skip the appropriate number
-    // of bytes and must not assume zero is presented for LOCAL connections. When a
-    // receiver accepts an incoming connection showing an UNSPEC address family or
-    // protocol, it may or may not decide to log the address information if present.
-    let remaining_length = u16::from_be_bytes(buf[14..16].try_into().unwrap());
-    buf.advance(16);
-
-    while buf.len() < remaining_length as usize {
+    while buf.len() < remaining_length {
         if read.read_buf(&mut buf).await? == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
@@ -142,9 +125,9 @@ pub(crate) async fn read_proxy_protocol<T: AsyncRead + Unpin>(
             ));
         }
     }
-    let mut header = buf.split_to(usize::from(remaining_length));
+    let mut payload = buf.split_to(remaining_length);
 
-    match vc {
+    match header.version_and_command {
         // the connection was established on purpose by the proxy
         // without being relayed. The connection endpoints are the sender and the
         // receiver. Such connections exist when the proxy sends health-checks to the
@@ -162,7 +145,8 @@ pub(crate) async fn read_proxy_protocol<T: AsyncRead + Unpin>(
             return Err(io::Error::new(
                 io::ErrorKind::Other,
                 format!(
-                "invalid proxy protocol command 0x{vc:02X}. expected local (0x20) or proxy (0x21)"
+                "invalid proxy protocol command 0x{:02X}. expected local (0x20) or proxy (0x21)",
+                header.version_and_command
             ),
             ))
         }
@@ -175,42 +159,38 @@ pub(crate) async fn read_proxy_protocol<T: AsyncRead + Unpin>(
     //   - source layer 4 address if any, in network byte order (port)
     //   - destination layer 4 address if any, in network byte order (port)
 
-    let addr = match ft {
+    let addr = match header.protocol_and_family {
         // - \x11 : TCP over IPv4 : the forwarded connection uses TCP over the AF_INET
         //   protocol family. Address length is 2*4 + 2*2 = 12 bytes.
         // - \x12 : UDP over IPv4 : the forwarded connection uses UDP over the AF_INET
         //   protocol family. Address length is 2*4 + 2*2 = 12 bytes.
         0x11 | 0x12 => {
-            if header.len() < 12 {
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    "invalid proxy protocol length. not enough to fit requested IP addresses",
-                ));
-            }
+            let addr = payload
+                .try_get::<ProxyProtocolV2HeaderV4>()
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::Other,
+                        "invalid proxy protocol length. not enough to fit requested IP addresses",
+                    )
+                })?;
 
-            let src_addr = Ipv4Addr::from_bits(header.get_u32());
-            let _dst_addr = Ipv4Addr::from_bits(header.get_u32());
-            let src_port = header.get_u16();
-            let _dst_port = header.get_u16();
-            SocketAddr::from((src_addr, src_port))
+            SocketAddr::from((addr.src_addr.get(), addr.src_port.get()))
         }
         // - \x21 : TCP over IPv6 : the forwarded connection uses TCP over the AF_INET6
         //   protocol family. Address length is 2*16 + 2*2 = 36 bytes.
         // - \x22 : UDP over IPv6 : the forwarded connection uses UDP over the AF_INET6
         //   protocol family. Address length is 2*16 + 2*2 = 36 bytes.
         0x21 | 0x22 => {
-            if header.len() < 36 {
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    "invalid proxy protocol length. not enough to fit requested IP addresses",
-                ));
-            }
+            let addr = payload
+                .try_get::<ProxyProtocolV2HeaderV6>()
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::Other,
+                        "invalid proxy protocol length. not enough to fit requested IP addresses",
+                    )
+                })?;
 
-            let src_addr = Ipv6Addr::from_bits(header.get_u128());
-            let _dst_addr = Ipv6Addr::from_bits(header.get_u128());
-            let src_port = header.get_u16();
-            let _dst_port = header.get_u16();
-            SocketAddr::from((src_addr, src_port))
+            SocketAddr::from((addr.src_addr.get(), addr.src_port.get()))
         }
         // unspecified or unix stream. ignore the addresses
         _ => {
@@ -223,7 +203,7 @@ pub(crate) async fn read_proxy_protocol<T: AsyncRead + Unpin>(
 
     let mut extra = None;
 
-    while let Some(mut tlv) = read_tlv(&mut header) {
+    while let Some(mut tlv) = read_tlv(&mut payload) {
         match Pp2Kind::from_repr(tlv.kind) {
             Some(Pp2Kind::Aws) => {
                 if tlv.value.is_empty() {
@@ -346,16 +326,80 @@ struct Tlv {
 }
 
 fn read_tlv(b: &mut BytesMut) -> Option<Tlv> {
-    if b.len() < 3 {
-        return None;
-    }
-    let kind = b.get_u8();
-    let len = usize::from(b.get_u16());
+    let tlv_header = b.try_get::<TlvHeader>()?;
+    let len = usize::from(tlv_header.len.get());
     if b.len() < len {
         return None;
     }
-    let value = b.split_to(len).freeze();
-    Some(Tlv { kind, value })
+    Some(Tlv {
+        kind: tlv_header.kind,
+        value: b.split_to(len).freeze(),
+    })
+}
+
+trait BufExt: Sized {
+    fn try_get<T: FromBytes>(&mut self) -> Option<T>;
+}
+impl BufExt for BytesMut {
+    fn try_get<T: FromBytes>(&mut self) -> Option<T> {
+        let res = T::read_from_prefix(self)?;
+        self.advance(size_of::<T>());
+        Some(res)
+    }
+}
+
+#[derive(FromBytes, FromZeroes, Copy, Clone)]
+#[repr(C)]
+struct ProxyProtocolV2Header {
+    identifier: [u8; 12],
+    version_and_command: u8,
+    protocol_and_family: u8,
+    len: zerocopy::byteorder::network_endian::U16,
+}
+
+#[derive(FromBytes, FromZeroes, Copy, Clone)]
+#[repr(C)]
+struct ProxyProtocolV2HeaderV4 {
+    src_addr: NetworkEndianIpv4,
+    dst_addr: NetworkEndianIpv4,
+    src_port: zerocopy::byteorder::network_endian::U16,
+    dst_port: zerocopy::byteorder::network_endian::U16,
+}
+
+#[derive(FromBytes, FromZeroes, Copy, Clone)]
+#[repr(C)]
+struct ProxyProtocolV2HeaderV6 {
+    src_addr: NetworkEndianIpv6,
+    dst_addr: NetworkEndianIpv6,
+    src_port: zerocopy::byteorder::network_endian::U16,
+    dst_port: zerocopy::byteorder::network_endian::U16,
+}
+
+#[derive(FromBytes, FromZeroes, Copy, Clone)]
+#[repr(C)]
+struct TlvHeader {
+    kind: u8,
+    len: zerocopy::byteorder::network_endian::U16,
+}
+
+#[derive(FromBytes, FromZeroes, Copy, Clone)]
+#[repr(transparent)]
+struct NetworkEndianIpv4(zerocopy::byteorder::network_endian::U32);
+impl NetworkEndianIpv4 {
+    #[inline]
+    fn get(self) -> Ipv4Addr {
+        Ipv4Addr::from_bits(self.0.get())
+    }
+}
+
+#[derive(FromBytes, FromZeroes, Copy, Clone)]
+#[repr(transparent)]
+struct NetworkEndianIpv6(zerocopy::byteorder::network_endian::U128);
+impl NetworkEndianIpv6 {
+    #[inline]
+    fn get(self) -> Ipv6Addr {
+        Ipv6Addr::from_bits(self.0.get())
+    }
 }
 
 #[cfg(test)]

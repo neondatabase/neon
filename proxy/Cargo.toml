@@ -98,6 +98,7 @@ rustls-native-certs.workspace = true
 x509-parser.workspace = true
 postgres-protocol.workspace = true
 redis.workspace = true
+zerocopy.workspace = true
 
 # jwt stuff
 jose-jwa = "0.1.2"
