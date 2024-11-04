@@ -22,7 +22,6 @@ use std::collections::{BinaryHeap, HashMap};
 use std::ops::Range;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use utils::bin_ser::BeSer;
 
 use utils::lsn::Lsn;
 
@@ -103,6 +102,8 @@ impl VectoredValueReconstructState {
     pub(crate) async fn collect_pending_ios(
         self,
     ) -> Result<ValueReconstructState, PageReconstructError> {
+        use utils::bin_ser::BeSer;
+
         let mut to = ValueReconstructState::default();
 
         for (lsn, fut) in self.on_disk_values {
