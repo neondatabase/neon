@@ -1914,7 +1914,7 @@ impl RemoteTimelineClient {
                     //
                     // Let's think about the following operation sequence:
                     //
-                    // schedule deletion of layer A at generation 5
+                    // schedule deletion of layer A at generation 5, this can be for example a future layer
                     // schedule a barrier
                     // schedule a compaction that creates layer A at generation 5
                     // the actual deletion happens here
