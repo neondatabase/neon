@@ -13,9 +13,10 @@ use itertools::Itertools;
 use proxy::config::TlsServerEndPoint;
 use proxy::context::RequestMonitoring;
 use proxy::metrics::{Metrics, ThreadPoolMetrics};
+use proxy::protocol2::ConnectionInfo;
 use proxy::proxy::{copy_bidirectional_client_compute, run_until_cancelled, ErrorSource};
 use proxy::stream::{PqStream, Stream};
-use rustls::crypto::aws_lc_rs;
+use rustls::crypto::ring;
 use rustls::pki_types::PrivateKeyDer;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpListener;
@@ -105,14 +106,13 @@ async fn main() -> anyhow::Result<()> {
             let first_cert = cert_chain.first().context("missing certificate")?;
             let tls_server_end_point = TlsServerEndPoint::new(first_cert)?;
 
-            let tls_config = rustls::ServerConfig::builder_with_provider(Arc::new(
-                aws_lc_rs::default_provider(),
-            ))
-            .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
-            .context("aws_lc_rs should support TLS1.2 and TLS1.3")?
-            .with_no_client_auth()
-            .with_single_cert(cert_chain, key)?
-            .into();
+            let tls_config =
+                rustls::ServerConfig::builder_with_provider(Arc::new(ring::default_provider()))
+                    .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
+                    .context("ring should support TLS1.2 and TLS1.3")?
+                    .with_no_client_auth()
+                    .with_single_cert(cert_chain, key)?
+                    .into();
 
             (tls_config, tls_server_end_point)
         }
@@ -179,7 +179,10 @@ async fn task_main(
                 info!(%peer_addr, "serving");
                 let ctx = RequestMonitoring::new(
                     session_id,
-                    peer_addr.ip(),
+                    ConnectionInfo {
+                        addr: peer_addr,
+                        extra: None,
+                    },
                     proxy::metrics::Protocol::SniRouter,
                     "sni",
                 );

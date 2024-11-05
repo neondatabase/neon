@@ -1397,7 +1397,7 @@ def neon_simple_env(
     pageserver_virtual_file_io_mode: Optional[str],
 ) -> Iterator[NeonEnv]:
     """
-    Simple Neon environment, with no authentication and no safekeepers.
+    Simple Neon environment, with 1 safekeeper and 1 pageserver. No authentication, no fsync.
 
     This fixture will use RemoteStorageKind.LOCAL_FS with pageserver.
     """
@@ -4701,6 +4701,7 @@ def tenant_get_shards(
 
     If the caller provides `pageserver_id`, it will be used for all shards, even
     if the shard is indicated by storage controller to be on some other pageserver.
+    If the storage controller is not running, assume an unsharded tenant.
 
     Caller should over the response to apply their per-pageserver action to
     each shard
@@ -4710,17 +4711,17 @@ def tenant_get_shards(
     else:
         override_pageserver = None
 
-    if len(env.pageservers) > 1:
-        return [
-            (
-                TenantShardId.parse(s["shard_id"]),
-                override_pageserver or env.get_pageserver(s["node_id"]),
-            )
-            for s in env.storage_controller.locate(tenant_id)
-        ]
-    else:
-        # Assume an unsharded tenant
-        return [(TenantShardId(tenant_id, 0, 0), override_pageserver or env.pageserver)]
+    if not env.storage_controller.running and override_pageserver is not None:
+        log.warning(f"storage controller not running, assuming unsharded tenant {tenant_id}")
+        return [(TenantShardId(tenant_id, 0, 0), override_pageserver)]
+
+    return [
+        (
+            TenantShardId.parse(s["shard_id"]),
+            override_pageserver or env.get_pageserver(s["node_id"]),
+        )
+        for s in env.storage_controller.locate(tenant_id)
+    ]
 
 
 def wait_replica_caughtup(primary: Endpoint, secondary: Endpoint):

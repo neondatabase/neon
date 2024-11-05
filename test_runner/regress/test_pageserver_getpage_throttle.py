@@ -146,13 +146,13 @@ def test_throttle_fair_config_is_settable_but_ignored_in_mgmt_api(neon_env_build
     To be removed after https://github.com/neondatabase/neon/pull/8539 is rolled out.
     """
     env = neon_env_builder.init_start()
-    ps_http = env.pageserver.http_client()
+    vps_http = env.storage_controller.pageserver_api()
     # with_fair config should still be settable
-    ps_http.set_tenant_config(
+    vps_http.set_tenant_config(
         env.initial_tenant,
         {"timeline_get_throttle": throttle_config_with_field_fair_set},
     )
-    conf = ps_http.tenant_config(env.initial_tenant)
+    conf = vps_http.tenant_config(env.initial_tenant)
     assert_throttle_config_with_field_fair_set(conf.effective_config["timeline_get_throttle"])
     assert_throttle_config_with_field_fair_set(
         conf.tenant_specific_overrides["timeline_get_throttle"]

@@ -2,7 +2,7 @@
 use once_cell::sync::Lazy;
 use postgres_backend::{AuthType, Handler, PostgresBackend, QueryError};
 use pq_proto::{BeMessage, RowDescriptor};
-use rustls::crypto::aws_lc_rs;
+use rustls::crypto::ring;
 use std::io::Cursor;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -94,7 +94,7 @@ async fn simple_select_ssl() {
     let (client_sock, server_sock) = make_tcp_pair().await;
 
     let server_cfg =
-        rustls::ServerConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
+        rustls::ServerConfig::builder_with_provider(Arc::new(ring::default_provider()))
             .with_safe_default_protocol_versions()
             .expect("aws_lc_rs should support the default protocol versions")
             .with_no_client_auth()
@@ -110,7 +110,7 @@ async fn simple_select_ssl() {
     });
 
     let client_cfg =
-        rustls::ClientConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
+        rustls::ClientConfig::builder_with_provider(Arc::new(ring::default_provider()))
             .with_safe_default_protocol_versions()
             .expect("aws_lc_rs should support the default protocol versions")
             .with_root_certificates({

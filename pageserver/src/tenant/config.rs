@@ -349,6 +349,10 @@ pub struct TenantConfOpt {
     #[serde(with = "humantime_serde")]
     #[serde(default)]
     pub lsn_lease_length_for_ts: Option<Duration>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub timeline_offloading: Option<bool>,
 }
 
 impl TenantConfOpt {
@@ -411,6 +415,9 @@ impl TenantConfOpt {
             lsn_lease_length_for_ts: self
                 .lsn_lease_length_for_ts
                 .unwrap_or(global_conf.lsn_lease_length_for_ts),
+            timeline_offloading: self
+                .lazy_slru_download
+                .unwrap_or(global_conf.timeline_offloading),
         }
     }
 }
@@ -464,6 +471,7 @@ impl From<TenantConfOpt> for models::TenantConfig {
             image_layer_creation_check_threshold: value.image_layer_creation_check_threshold,
             lsn_lease_length: value.lsn_lease_length.map(humantime),
             lsn_lease_length_for_ts: value.lsn_lease_length_for_ts.map(humantime),
+            timeline_offloading: value.timeline_offloading,
         }
     }
 }

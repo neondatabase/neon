@@ -81,7 +81,7 @@ def test_ingesting_large_batches_of_images(neon_env_builder: NeonEnvBuilder, bui
     print_layer_size_histogram(post_ingest)
 
     # since all we have are L0s, we should be getting nice L1s and images out of them now
-    ps_http.patch_tenant_config_client_side(
+    env.storage_controller.pageserver_api().patch_tenant_config_client_side(
         env.initial_tenant,
         {
             "compaction_threshold": 1,

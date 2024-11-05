@@ -11,7 +11,7 @@ use crate::config::{ProxyConfig, ProxyProtocolV2};
 use crate::context::RequestMonitoring;
 use crate::error::ReportableError;
 use crate::metrics::{Metrics, NumClientConnectionsGuard};
-use crate::protocol2::read_proxy_protocol;
+use crate::protocol2::{read_proxy_protocol, ConnectionInfo};
 use crate::proxy::connect_compute::{connect_to_compute, TcpMechanism};
 use crate::proxy::handshake::{handshake, HandshakeData};
 use crate::proxy::passthrough::ProxyPassthrough;
@@ -65,8 +65,8 @@ pub async fn task_main(
                     error!("proxy protocol header not supported");
                     return;
                 }
-                Ok((socket, Some(addr))) => (socket, addr.ip()),
-                Ok((socket, None)) => (socket, peer_addr.ip()),
+                Ok((socket, Some(info))) => (socket, info),
+                Ok((socket, None)) => (socket, ConnectionInfo{ addr: peer_addr, extra: None }),
             };
 
             match socket.inner.set_nodelay(true) {

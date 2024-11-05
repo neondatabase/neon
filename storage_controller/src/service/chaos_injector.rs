@@ -1,5 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
+use pageserver_api::controller_api::ShardSchedulingPolicy;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
 use tokio_util::sync::CancellationToken;
@@ -47,6 +48,16 @@ impl ChaosInjector {
                 .get_mut(victim)
                 .expect("Held lock between choosing ID and this get");
 
+            if !matches!(shard.get_scheduling_policy(), ShardSchedulingPolicy::Active) {
+                // Skip non-active scheduling policies, so that a shard with a policy like Pause can
+                // be pinned without being disrupted by us.
+                tracing::info!(
+                    "Skipping shard {victim}: scheduling policy is {:?}",
+                    shard.get_scheduling_policy()
+                );
+                continue;
+            }
+
             // Pick a secondary to promote
             let Some(new_location) = shard
                 .intent
@@ -62,6 +73,8 @@ impl ChaosInjector {
                 tracing::info!("Skipping shard {victim}: currently has no attached location");
                 continue;
             };
+
+            tracing::info!("Injecting chaos: migrate {victim} {old_location}->{new_location}");
 
             shard.intent.demote_attached(scheduler, old_location);
             shard.intent.promote_attached(scheduler, new_location);

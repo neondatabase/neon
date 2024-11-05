@@ -9,11 +9,12 @@ use async_trait::async_trait;
 use http::StatusCode;
 use retry::{retry_after, ShouldRetryWakeCompute};
 use rstest::rstest;
-use rustls::crypto::aws_lc_rs;
+use rustls::crypto::ring;
 use rustls::pki_types;
+use tokio::io::DuplexStream;
 use tokio_postgres::config::SslMode;
 use tokio_postgres::tls::{MakeTlsConnect, NoTls};
-use tokio_postgres_rustls::{MakeRustlsConnect, RustlsStream};
+use tokio_postgres_rustls::MakeRustlsConnect;
 
 use super::connect_compute::ConnectMechanism;
 use super::retry::CouldRetry;
@@ -69,19 +70,12 @@ struct ClientConfig<'a> {
     hostname: &'a str,
 }
 
+type TlsConnect<S> = <MakeRustlsConnect as MakeTlsConnect<S>>::TlsConnect;
+
 impl ClientConfig<'_> {
-    fn make_tls_connect<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
-        self,
-    ) -> anyhow::Result<
-        impl tokio_postgres::tls::TlsConnect<
-                S,
-                Error = impl std::fmt::Debug + use<S>,
-                Future = impl Send + use<S>,
-                Stream = RustlsStream<S>,
-            > + use<S>,
-    > {
+    fn make_tls_connect(self) -> anyhow::Result<TlsConnect<DuplexStream>> {
         let mut mk = MakeRustlsConnect::new(self.config);
-        let tls = MakeTlsConnect::<S>::make_tls_connect(&mut mk, self.hostname)?;
+        let tls = MakeTlsConnect::<DuplexStream>::make_tls_connect(&mut mk, self.hostname)?;
         Ok(tls)
     }
 }
@@ -95,9 +89,9 @@ fn generate_tls_config<'a>(
 
     let tls_config = {
         let config =
-            rustls::ServerConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
+            rustls::ServerConfig::builder_with_provider(Arc::new(ring::default_provider()))
                 .with_safe_default_protocol_versions()
-                .context("aws_lc_rs should support the default protocol versions")?
+                .context("ring should support the default protocol versions")?
                 .with_no_client_auth()
                 .with_single_cert(vec![cert.clone()], key.clone_key())?
                 .into();
@@ -116,9 +110,9 @@ fn generate_tls_config<'a>(
 
     let client_config = {
         let config =
-            rustls::ClientConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
+            rustls::ClientConfig::builder_with_provider(Arc::new(ring::default_provider()))
                 .with_safe_default_protocol_versions()
-                .context("aws_lc_rs should support the default protocol versions")?
+                .context("ring should support the default protocol versions")?
                 .with_root_certificates({
                     let mut store = rustls::RootCertStore::empty();
                     store.add(ca)?;

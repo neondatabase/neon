@@ -2499,8 +2499,15 @@ impl Tenant {
                             .iter()
                             .any(|(_id, tl)| tl.get_ancestor_timeline_id() == Some(*timeline_id))
                     };
+                    let config_allows_offload = self.conf.timeline_offloading
+                        || self
+                            .tenant_conf
+                            .load()
+                            .tenant_conf
+                            .timeline_offloading
+                            .unwrap_or_default();
                     let can_offload =
-                        can_offload && has_no_unoffloaded_children && self.conf.timeline_offloading;
+                        can_offload && has_no_unoffloaded_children && config_allows_offload;
                     if (is_active, can_offload) == (false, false) {
                         None
                     } else {
@@ -4902,6 +4909,7 @@ pub(crate) mod harness {
                 ),
                 lsn_lease_length: Some(tenant_conf.lsn_lease_length),
                 lsn_lease_length_for_ts: Some(tenant_conf.lsn_lease_length_for_ts),
+                timeline_offloading: Some(tenant_conf.timeline_offloading),
             }
         }
     }
