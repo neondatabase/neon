@@ -27,9 +27,9 @@ use crate::types::EndpointId;
 
 #[non_exhaustive]
 #[derive(Clone)]
-pub enum ControlPlaneProvider {
+pub enum ControlPlaneClient {
     /// Current Management API (V2).
-    Management(neon::NeonControlPlaneClient),
+    Neon(neon::NeonControlPlaneClient),
     /// Local mock control plane.
     #[cfg(any(test, feature = "testing"))]
     PostgresMock(mock::MockControlPlane),
@@ -39,14 +39,14 @@ pub enum ControlPlaneProvider {
     Test(Box<dyn crate::auth::backend::TestBackend>),
 }
 
-impl ControlPlaneApi for ControlPlaneProvider {
+impl ControlPlaneApi for ControlPlaneClient {
     async fn get_role_secret(
         &self,
         ctx: &RequestMonitoring,
         user_info: &ComputeUserInfo,
     ) -> Result<CachedRoleSecret, errors::GetAuthInfoError> {
         match self {
-            Self::Management(api) => api.get_role_secret(ctx, user_info).await,
+            Self::Neon(api) => api.get_role_secret(ctx, user_info).await,
             #[cfg(any(test, feature = "testing"))]
             Self::PostgresMock(api) => api.get_role_secret(ctx, user_info).await,
             #[cfg(test)]
@@ -62,7 +62,7 @@ impl ControlPlaneApi for ControlPlaneProvider {
         user_info: &ComputeUserInfo,
     ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), errors::GetAuthInfoError> {
         match self {
-            Self::Management(api) => api.get_allowed_ips_and_secret(ctx, user_info).await,
+            Self::Neon(api) => api.get_allowed_ips_and_secret(ctx, user_info).await,
             #[cfg(any(test, feature = "testing"))]
             Self::PostgresMock(api) => api.get_allowed_ips_and_secret(ctx, user_info).await,
             #[cfg(test)]
@@ -76,7 +76,7 @@ impl ControlPlaneApi for ControlPlaneProvider {
         endpoint: EndpointId,
     ) -> Result<Vec<AuthRule>, errors::GetEndpointJwksError> {
         match self {
-            Self::Management(api) => api.get_endpoint_jwks(ctx, endpoint).await,
+            Self::Neon(api) => api.get_endpoint_jwks(ctx, endpoint).await,
             #[cfg(any(test, feature = "testing"))]
             Self::PostgresMock(api) => api.get_endpoint_jwks(ctx, endpoint).await,
             #[cfg(test)]
@@ -90,7 +90,7 @@ impl ControlPlaneApi for ControlPlaneProvider {
         user_info: &ComputeUserInfo,
     ) -> Result<CachedNodeInfo, errors::WakeComputeError> {
         match self {
-            Self::Management(api) => api.wake_compute(ctx, user_info).await,
+            Self::Neon(api) => api.wake_compute(ctx, user_info).await,
             #[cfg(any(test, feature = "testing"))]
             Self::PostgresMock(api) => api.wake_compute(ctx, user_info).await,
             #[cfg(test)]
@@ -251,7 +251,7 @@ impl WakeComputePermit {
     }
 }
 
-impl FetchAuthRules for ControlPlaneProvider {
+impl FetchAuthRules for ControlPlaneClient {
     async fn fetch_auth_rules(
         &self,
         ctx: &RequestMonitoring,

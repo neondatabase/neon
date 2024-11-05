@@ -21,7 +21,7 @@ use crate::auth::{self, validate_password_and_exchange, AuthError, ComputeUserIn
 use crate::cache::Cached;
 use crate::config::AuthenticationConfig;
 use crate::context::RequestMonitoring;
-use crate::control_plane::client::ControlPlaneProvider;
+use crate::control_plane::client::ControlPlaneClient;
 use crate::control_plane::errors::GetAuthInfoError;
 use crate::control_plane::{
     self, AuthSecret, CachedAllowedIps, CachedNodeInfo, CachedRoleSecret, ControlPlaneApi,
@@ -62,7 +62,7 @@ impl<T> std::ops::Deref for MaybeOwned<'_, T> {
 ///   backends which require them for the authentication process.
 pub enum Backend<'a, T> {
     /// Cloud API (V2).
-    ControlPlane(MaybeOwned<'a, ControlPlaneProvider>, T),
+    ControlPlane(MaybeOwned<'a, ControlPlaneClient>, T),
     /// Local proxy uses configured auth credentials and does not wake compute
     Local(MaybeOwned<'a, LocalBackend>),
 }
@@ -87,17 +87,17 @@ impl std::fmt::Display for Backend<'_, ()> {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::ControlPlane(api, ()) => match &**api {
-                ControlPlaneProvider::Management(endpoint) => fmt
-                    .debug_tuple("ControlPlane::Management")
+                ControlPlaneClient::Neon(endpoint) => fmt
+                    .debug_tuple("ControlPlane::Neon")
                     .field(&endpoint.url())
                     .finish(),
                 #[cfg(any(test, feature = "testing"))]
-                ControlPlaneProvider::PostgresMock(endpoint) => fmt
+                ControlPlaneClient::PostgresMock(endpoint) => fmt
                     .debug_tuple("ControlPlane::PostgresMock")
                     .field(&endpoint.url())
                     .finish(),
                 #[cfg(test)]
-                ControlPlaneProvider::Test(_) => fmt.debug_tuple("ControlPlane::Test").finish(),
+                ControlPlaneClient::Test(_) => fmt.debug_tuple("ControlPlane::Test").finish(),
             },
             Self::Local(_) => fmt.debug_tuple("Local").finish(),
         }

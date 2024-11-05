@@ -23,7 +23,7 @@ use crate::auth::backend::{
     ComputeCredentialKeys, ComputeCredentials, ComputeUserInfo, MaybeOwned, TestBackend,
 };
 use crate::config::{CertResolver, RetryConfig};
-use crate::control_plane::client::ControlPlaneProvider;
+use crate::control_plane::client::ControlPlaneClient;
 use crate::control_plane::messages::{ControlPlaneErrorMessage, Details, MetricsAuxInfo, Status};
 use crate::control_plane::{
     self, CachedAllowedIps, CachedNodeInfo, CachedRoleSecret, NodeInfo, NodeInfoCache,
@@ -564,7 +564,7 @@ fn helper_create_connect_info(
     mechanism: &TestConnectMechanism,
 ) -> auth::Backend<'static, ComputeCredentials> {
     let user_info = auth::Backend::ControlPlane(
-        MaybeOwned::Owned(ControlPlaneProvider::Test(Box::new(mechanism.clone()))),
+        MaybeOwned::Owned(ControlPlaneClient::Test(Box::new(mechanism.clone()))),
         ComputeCredentials {
             info: ComputeUserInfo {
                 endpoint: "endpoint".into(),
