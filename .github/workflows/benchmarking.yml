@@ -69,12 +69,14 @@ jobs:
       options: --init
 
     steps:
+    - uses: actions/checkout@v4
+
     - name: Configure AWS credentials # necessary on Azure runners
       uses: aws-actions/configure-aws-credentials@v4
       with:
         aws-region: eu-central-1
         role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
-        role-duration-seconds: 43199 # almost 12 hours  
+        role-duration-seconds: 43000 # almost 12 hours  
 
     - name: Download Neon artifact
       uses: ./.github/actions/download
