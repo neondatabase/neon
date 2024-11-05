@@ -36,7 +36,9 @@ use postgres_connection::PgConnectionConfig;
 use utils::backoff::{
     exponential_backoff, DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS,
 };
-use utils::postgres_client::wal_stream_connection_config;
+use utils::postgres_client::{
+    wal_stream_connection_config, ConnectionConfigArgs, PAGESERVER_SAFEKEEPER_PROTO_VERSION,
+};
 use utils::{
     id::{NodeId, TenantTimelineId},
     lsn::Lsn,
@@ -984,15 +986,19 @@ impl ConnectionManagerState {
                 if info.safekeeper_connstr.is_empty() {
                     return None; // no connection string, ignore sk
                 }
-                match wal_stream_connection_config(
-                    self.id,
-                    info.safekeeper_connstr.as_ref(),
-                    match &self.conf.auth_token {
-                        None => None,
-                        Some(x) => Some(x),
-                    },
-                    self.conf.availability_zone.as_deref(),
-                ) {
+
+                let shard_identity = self.timeline.get_shard_identity();
+                let connection_conf_args = ConnectionConfigArgs {
+                    protocol_version: PAGESERVER_SAFEKEEPER_PROTO_VERSION,
+                    ttid: self.id,
+                    shard_number: Some(shard_identity.number.0),
+                    shard_count: Some(shard_identity.count.0),
+                    shard_stripe_size: Some(shard_identity.stripe_size.0),
+                    listen_pg_addr_str: info.safekeeper_connstr.as_ref(),
+                    auth_token: self.conf.auth_token.as_ref().map(|t| t.as_str()),
+                    availability_zone: self.conf.availability_zone.as_deref()
+                };
+                match wal_stream_connection_config(connection_conf_args) {
                     Ok(connstr) => Some((*sk_id, info, connstr)),
                     Err(e) => {
                         error!("Failed to create wal receiver connection string from broker data of safekeeper node {}: {e:#}", sk_id);
