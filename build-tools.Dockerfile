@@ -55,6 +55,7 @@ RUN set -e \
         xz-utils \
         zlib1g-dev \
         zstd \
+        pgcopydb \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 # sql_exporter
