@@ -249,6 +249,7 @@ struct TimelinePreload {
 pub(crate) struct TenantPreload {
     tenant_manifest: TenantManifest,
     timelines: HashMap<TimelineId, TimelinePreload>,
+    offloaded_with_prefix: HashSet<TimelineId>,
 }
 
 /// When we spawn a tenant, there is a special mode for tenant creation that
@@ -1336,7 +1337,7 @@ impl Tenant {
         // Get list of remote timelines
         // download index files for every tenant timeline
         info!("listing remote timelines");
-        let (remote_timeline_ids, other_keys) = remote_timeline_client::list_remote_timelines(
+        let (mut remote_timeline_ids, other_keys) = remote_timeline_client::list_remote_timelines(
             remote_storage,
             self.tenant_shard_id,
             cancel.clone(),
@@ -1370,11 +1371,19 @@ impl Tenant {
             warn!("Unexpected non timeline key {k}");
         }
 
+        let mut offloaded_with_prefix = HashSet::new();
+        for offloaded in tenant_manifest.offloaded_timelines.iter() {
+            if remote_timeline_ids.remove(&offloaded.timeline_id) {
+                offloaded_with_prefix.insert(offloaded.timeline_id);
+            }
+        }
+
         Ok(TenantPreload {
             tenant_manifest,
             timelines: self
                 .load_timelines_metadata(remote_timeline_ids, remote_storage, cancel)
                 .await?,
+            offloaded_with_prefix,
         })
     }
 
@@ -1405,6 +1414,17 @@ impl Tenant {
             offloaded_timelines_list.push((timeline_id, Arc::new(offloaded_timeline)));
             offloaded_timeline_ids.insert(timeline_id);
         }
+        // Complete deletions for offloaded timeline id's.
+        offloaded_timelines_list
+            .retain(|(offloaded_id, _offloaded)| {
+                // In the end, existence of a timeline is finally determined by the existence of an index-part.json in remote storage.
+                // If there is a dangling reference in another location, they need to be cleaned up.
+                let delete = !preload.offloaded_with_prefix.contains(offloaded_id);
+                if delete {
+                    tracing::info!("Removing offloaded timeline {offloaded_id} from manifest as no remote prefix was found");
+                }
+                !delete
+        });
 
         let mut timelines_to_resume_deletions = vec![];
 
@@ -1412,10 +1432,8 @@ impl Tenant {
         let mut timeline_ancestors = HashMap::new();
         let mut existent_timelines = HashSet::new();
         for (timeline_id, preload) in preload.timelines {
-            if offloaded_timeline_ids.remove(&timeline_id) {
-                // The timeline is offloaded, skip loading it.
-                continue;
-            }
+            // This is an invariant of the `preload` function's API
+            assert!(!offloaded_timeline_ids.contains(&timeline_id));
             let index_part = match preload.index_part {
                 Ok(i) => {
                     debug!("remote index part exists for timeline {timeline_id}");
@@ -1519,30 +1537,11 @@ impl Tenant {
             .context("resume_deletion")
             .map_err(LoadLocalTimelineError::ResumeDeletion)?;
         }
-        // Complete deletions for offloaded timeline id's.
-        offloaded_timelines_list
-            .retain(|(offloaded_id, _offloaded)| {
-                // At this point, offloaded_timeline_ids has the list of all offloaded timelines
-                // without a prefix in S3, so they are inexistent.
-                // In the end, existence of a timeline is finally determined by the existence of an index-part.json in remote storage.
-                // If there is a dangling reference in another location, they need to be cleaned up.
-                let delete = offloaded_timeline_ids.contains(offloaded_id);
-                if delete {
-                    tracing::info!("Removing offloaded timeline {offloaded_id} from manifest as no remote prefix was found");
-                }
-                !delete
-        });
-        if !offloaded_timelines_list.is_empty() {
-            tracing::info!(
-                "Tenant has {} offloaded timelines",
-                offloaded_timelines_list.len()
-            );
-        }
         {
             let mut offloaded_timelines_accessor = self.timelines_offloaded.lock().unwrap();
             offloaded_timelines_accessor.extend(offloaded_timelines_list.into_iter());
         }
-        if !offloaded_timeline_ids.is_empty() {
+        if !preload.tenant_manifest.offloaded_timelines.is_empty() {
             self.store_tenant_manifest().await?;
         }
 
