@@ -43,7 +43,7 @@ use utils::{bin_ser::BeSer, lsn::Lsn};
 pub const MAX_AUX_FILE_DELTAS: usize = 1024;
 
 /// Max number of aux-file-related delta layers. The compaction will create a new image layer once this threshold is reached.
-pub const MAX_AUX_FILE_V2_DELTAS: usize = 64;
+pub const MAX_AUX_FILE_V2_DELTAS: usize = 16;
 
 #[derive(Debug)]
 pub enum LsnForTimestamp {
