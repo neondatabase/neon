@@ -58,7 +58,7 @@ impl<T: AsyncWrite> AsyncWrite for ChainRW<T> {
 }
 
 /// Proxy Protocol Version 2 Header
-const HEADER: [u8; 12] = [
+const SIGNATURE: [u8; 12] = [
     0x0D, 0x0A, 0x0D, 0x0A, 0x00, 0x0D, 0x0A, 0x51, 0x55, 0x49, 0x54, 0x0A,
 ];
 
@@ -107,12 +107,12 @@ pub(crate) async fn read_proxy_protocol<T: AsyncRead + Unpin>(
     mut read: T,
 ) -> std::io::Result<(ChainRW<T>, ConnectHeader)> {
     let mut buf = BytesMut::with_capacity(128);
-    while buf.len() < 16 {
+    let header = loop {
         let bytes_read = read.read_buf(&mut buf).await?;
 
-        // exit for bad header
-        let len = usize::min(buf.len(), HEADER.len());
-        if buf[..len] != HEADER[..len] {
+        // exit for bad header signature
+        let len = usize::min(buf.len(), SIGNATURE.len());
+        if buf[..len] != SIGNATURE[..len] {
             return Ok((ChainRW { inner: read, buf }, ConnectHeader::Missing));
         }
 
@@ -120,9 +120,13 @@ pub(crate) async fn read_proxy_protocol<T: AsyncRead + Unpin>(
         if bytes_read == 0 {
             return Ok((ChainRW { inner: read, buf }, ConnectHeader::Missing));
         };
-    }
 
-    let header = buf.try_get::<ProxyProtocolV2Header>().unwrap();
+        // check if we have enough bytes to continue
+        if let Some(header) = buf.try_get::<ProxyProtocolV2Header>() {
+            break header;
+        }
+    };
+
     let remaining_length = usize::from(header.len.get());
 
     while buf.len() < remaining_length {
@@ -133,8 +137,16 @@ pub(crate) async fn read_proxy_protocol<T: AsyncRead + Unpin>(
             ));
         }
     }
-    let mut payload = buf.split_to(remaining_length);
+    let payload = buf.split_to(remaining_length);
 
+    let res = process_proxy_payload(header, payload)?;
+    Ok((ChainRW { inner: read, buf }, res))
+}
+
+fn process_proxy_payload(
+    header: ProxyProtocolV2Header,
+    mut payload: BytesMut,
+) -> std::io::Result<ConnectHeader> {
     match header.version_and_command {
         // the connection was established on purpose by the proxy
         // without being relayed. The connection endpoints are the sender and the
@@ -142,7 +154,7 @@ pub(crate) async fn read_proxy_protocol<T: AsyncRead + Unpin>(
         // server. The receiver must accept this connection as valid and must use the
         // real connection endpoints and discard the protocol block including the
         // family which is ignored.
-        LOCAL_V2 => return Ok((ChainRW { inner: read, buf }, ConnectHeader::Local)),
+        LOCAL_V2 => return Ok(ConnectHeader::Local),
         // the connection was established on behalf of another node,
         // and reflects the original connection endpoints. The receiver must then use
         // the information provided in the protocol block to get original the address.
@@ -231,10 +243,7 @@ pub(crate) async fn read_proxy_protocol<T: AsyncRead + Unpin>(
         }
     }
 
-    Ok((
-        ChainRW { inner: read, buf },
-        ConnectHeader::Proxy(ConnectionInfo { addr, extra }),
-    ))
+    Ok(ConnectHeader::Proxy(ConnectionInfo { addr, extra }))
 }
 
 #[derive(FromRepr, Debug, Copy, Clone)]
@@ -335,7 +344,7 @@ impl BufExt for BytesMut {
 #[derive(FromBytes, FromZeroes, Copy, Clone)]
 #[repr(C)]
 struct ProxyProtocolV2Header {
-    identifier: [u8; 12],
+    signature: [u8; 12],
     version_and_command: u8,
     protocol_and_family: u8,
     len: zerocopy::byteorder::network_endian::U16,
@@ -396,7 +405,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_ipv4() {
-        let header = super::HEADER
+        let header = super::SIGNATURE
             // Proxy command, IPV4 | TCP
             .chain([(2 << 4) | 1, (1 << 4) | 1].as_slice())
             // 12 + 3 bytes
@@ -431,7 +440,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_ipv6() {
-        let header = super::HEADER
+        let header = super::SIGNATURE
             // Proxy command, IPV6 | UDP
             .chain([PROXY_V2, UDP_OVER_IPV6].as_slice())
             // 36 + 3 bytes
@@ -497,7 +506,7 @@ mod tests {
         let tlv_len = (tlv.len() as u16).to_be_bytes();
         let len = (12 + 3 + tlv.len() as u16).to_be_bytes();
 
-        let header = super::HEADER
+        let header = super::SIGNATURE
             // Proxy command, Inet << 4 | Stream
             .chain([PROXY_V2, TCP_OVER_IPV4].as_slice())
             // 12 + 3 bytes
@@ -535,7 +544,7 @@ mod tests {
     #[tokio::test]
     async fn test_local() {
         let len = 0u16.to_be_bytes();
-        let header = super::HEADER
+        let header = super::SIGNATURE
             .chain([LOCAL_V2, 0x00].as_slice())
             .chain(len.as_slice());
 
