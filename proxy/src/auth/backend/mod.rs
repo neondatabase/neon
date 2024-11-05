@@ -349,7 +349,7 @@ async fn auth_quirks(
     {
         Ok(keys) => Ok(keys),
         Err(e) => {
-            if e.is_auth_failed() {
+            if e.is_password_failed() {
                 // The password could have been changed, so we invalidate the cache.
                 cached_entry.invalidate();
             }
@@ -376,7 +376,7 @@ async fn authenticate_with_secret(
             crate::sasl::Outcome::Success(key) => key,
             crate::sasl::Outcome::Failure(reason) => {
                 info!("auth backend failed with an error: {reason}");
-                return Err(auth::AuthError::auth_failed(&*info.user));
+                return Err(auth::AuthError::password_failed(&*info.user));
             }
         };
 

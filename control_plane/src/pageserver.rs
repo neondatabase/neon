@@ -403,6 +403,11 @@ impl PageServerNode {
             lsn_lease_length_for_ts: settings
                 .remove("lsn_lease_length_for_ts")
                 .map(|x| x.to_string()),
+            timeline_offloading: settings
+                .remove("timeline_offloading")
+                .map(|x| x.parse::<bool>())
+                .transpose()
+                .context("Failed to parse 'timeline_offloading' as bool")?,
         };
         if !settings.is_empty() {
             bail!("Unrecognized tenant settings: {settings:?}")
@@ -498,6 +503,11 @@ impl PageServerNode {
                 lsn_lease_length_for_ts: settings
                     .remove("lsn_lease_length_for_ts")
                     .map(|x| x.to_string()),
+                timeline_offloading: settings
+                    .remove("timeline_offloading")
+                    .map(|x| x.parse::<bool>())
+                    .transpose()
+                    .context("Failed to parse 'timeline_offloading' as bool")?,
             }
         };
 

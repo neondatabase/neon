@@ -81,7 +81,7 @@ impl PoolingBackend {
             None => {
                 // If we don't have an authentication secret, for the http flow we can just return an error.
                 info!("authentication info not found");
-                return Err(AuthError::auth_failed(&*user_info.user));
+                return Err(AuthError::password_failed(&*user_info.user));
             }
         };
         let ep = EndpointIdInt::from(&user_info.endpoint);
@@ -99,7 +99,7 @@ impl PoolingBackend {
             }
             crate::sasl::Outcome::Failure(reason) => {
                 info!("auth backend failed with an error: {reason}");
-                Err(AuthError::auth_failed(&*user_info.user))
+                Err(AuthError::password_failed(&*user_info.user))
             }
         };
         res.map(|key| ComputeCredentials {
@@ -126,8 +126,7 @@ impl PoolingBackend {
                         &**console,
                         &jwt,
                     )
-                    .await
-                    .map_err(|e| AuthError::auth_failed(e.to_string()))?;
+                    .await?;
 
                 Ok(ComputeCredentials {
                     info: user_info.clone(),
@@ -146,8 +145,7 @@ impl PoolingBackend {
                         &StaticAuthRules,
                         &jwt,
                     )
-                    .await
-                    .map_err(|e| AuthError::auth_failed(e.to_string()))?;
+                    .await?;
 
                 Ok(ComputeCredentials {
                     info: user_info.clone(),
