@@ -1905,7 +1905,7 @@ impl RemoteTimelineClient {
                 UploadOp::Barrier(sender) => {
                     // Barrier operation needs to wait until all deletions are uploaded.
                     //
-                    // There is an optimization in the deletion queue client that if generation is enabled for a tenant,
+                    // There is an optimization in the deletion queue client that if generations are enabled for a tenant,
                     // we do not wait for the deletions to be flushed to the remote storage before we tell the user that
                     // the deletion is complete. This would cause problems for barrier semantics, as we expect all
                     // deletion to be persistent when the barrier is processed. For example, when we reload a timeline
