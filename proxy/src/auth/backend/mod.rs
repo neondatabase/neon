@@ -67,22 +67,6 @@ pub enum Backend<'a, T> {
     Local(MaybeOwned<'a, LocalBackend>),
 }
 
-#[cfg(test)]
-pub(crate) trait TestBackend: Send + Sync + 'static {
-    fn wake_compute(&self) -> Result<CachedNodeInfo, control_plane::errors::WakeComputeError>;
-    fn get_allowed_ips_and_secret(
-        &self,
-    ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), control_plane::errors::GetAuthInfoError>;
-    fn dyn_clone(&self) -> Box<dyn TestBackend>;
-}
-
-#[cfg(test)]
-impl Clone for Box<dyn TestBackend> {
-    fn clone(&self) -> Self {
-        TestBackend::dyn_clone(&**self)
-    }
-}
-
 impl std::fmt::Display for Backend<'_, ()> {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

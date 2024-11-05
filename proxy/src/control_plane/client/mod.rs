@@ -35,7 +35,7 @@ pub enum ControlPlaneClient {
     /// Internal testing
     #[cfg(test)]
     #[allow(private_interfaces)]
-    Test(Box<dyn crate::auth::backend::TestBackend>),
+    Test(Box<dyn TestControlPlaneClient>),
 }
 
 impl ControlPlaneApi for ControlPlaneClient {
@@ -95,6 +95,24 @@ impl ControlPlaneApi for ControlPlaneClient {
             #[cfg(test)]
             Self::Test(api) => api.wake_compute(),
         }
+    }
+}
+
+#[cfg(test)]
+pub(crate) trait TestControlPlaneClient: Send + Sync + 'static {
+    fn wake_compute(&self) -> Result<CachedNodeInfo, errors::WakeComputeError>;
+
+    fn get_allowed_ips_and_secret(
+        &self,
+    ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), errors::GetAuthInfoError>;
+
+    fn dyn_clone(&self) -> Box<dyn TestControlPlaneClient>;
+}
+
+#[cfg(test)]
+impl Clone for Box<dyn TestControlPlaneClient> {
+    fn clone(&self) -> Self {
+        TestControlPlaneClient::dyn_clone(&**self)
     }
 }
 

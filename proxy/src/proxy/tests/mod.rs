@@ -20,10 +20,10 @@ use super::connect_compute::ConnectMechanism;
 use super::retry::CouldRetry;
 use super::*;
 use crate::auth::backend::{
-    ComputeCredentialKeys, ComputeCredentials, ComputeUserInfo, MaybeOwned, TestBackend,
+    ComputeCredentialKeys, ComputeCredentials, ComputeUserInfo, MaybeOwned,
 };
 use crate::config::{CertResolver, RetryConfig};
-use crate::control_plane::client::ControlPlaneClient;
+use crate::control_plane::client::{ControlPlaneClient, TestControlPlaneClient};
 use crate::control_plane::messages::{ControlPlaneErrorMessage, Details, MetricsAuxInfo, Status};
 use crate::control_plane::{
     self, CachedAllowedIps, CachedNodeInfo, CachedRoleSecret, NodeInfo, NodeInfoCache,
@@ -490,7 +490,7 @@ impl ConnectMechanism for TestConnectMechanism {
     fn update_connect_config(&self, _conf: &mut compute::ConnCfg) {}
 }
 
-impl TestBackend for TestConnectMechanism {
+impl TestControlPlaneClient for TestConnectMechanism {
     fn wake_compute(&self) -> Result<CachedNodeInfo, control_plane::errors::WakeComputeError> {
         let mut counter = self.counter.lock().unwrap();
         let action = self.sequence[*counter];
@@ -540,7 +540,7 @@ impl TestBackend for TestConnectMechanism {
         unimplemented!("not used in tests")
     }
 
-    fn dyn_clone(&self) -> Box<dyn TestBackend> {
+    fn dyn_clone(&self) -> Box<dyn TestControlPlaneClient> {
         Box::new(self.clone())
     }
 }
