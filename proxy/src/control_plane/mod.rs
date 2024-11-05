@@ -6,10 +6,11 @@ pub mod messages;
 
 /// Wrappers for console APIs and their mocks.
 pub mod client;
+
+pub(crate) mod errors;
+
 use std::sync::Arc;
 use std::time::Duration;
-
-pub(crate) use client::errors;
 
 use crate::auth::backend::jwt::AuthRule;
 use crate::auth::backend::{ComputeCredentialKeys, ComputeUserInfo};

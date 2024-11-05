@@ -11,13 +11,14 @@ use tokio_postgres::config::SslMode;
 use tracing::{debug, info, info_span, warn, Instrument};
 
 use super::super::messages::{ControlPlaneErrorMessage, GetRoleSecret, WakeCompute};
-use super::errors::{ControlPlaneError, GetAuthInfoError, WakeComputeError};
 use crate::auth::backend::jwt::AuthRule;
 use crate::auth::backend::ComputeUserInfo;
 use crate::cache::Cached;
 use crate::context::RequestMonitoring;
 use crate::control_plane::caches::ApiCaches;
-use crate::control_plane::errors::GetEndpointJwksError;
+use crate::control_plane::errors::{
+    ControlPlaneError, GetAuthInfoError, GetEndpointJwksError, WakeComputeError,
+};
 use crate::control_plane::locks::ApiLocks;
 use crate::control_plane::messages::{ColdStartInfo, EndpointJwksResponse, Reason};
 use crate::control_plane::{

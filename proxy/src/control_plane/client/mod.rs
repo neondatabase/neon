@@ -1,4 +1,3 @@
-pub(crate) mod errors;
 #[cfg(any(test, feature = "testing"))]
 pub mod mock;
 pub mod neon;
@@ -18,7 +17,7 @@ use crate::cache::project_info::ProjectInfoCacheImpl;
 use crate::config::{CacheOptions, EndpointCacheConfig, ProjectInfoCacheOptions};
 use crate::context::RequestMonitoring;
 use crate::control_plane::{
-    CachedAllowedIps, CachedNodeInfo, CachedRoleSecret, ControlPlaneApi, NodeInfoCache,
+    errors, CachedAllowedIps, CachedNodeInfo, CachedRoleSecret, ControlPlaneApi, NodeInfoCache,
 };
 use crate::error::ReportableError;
 use crate::metrics::ApiLockMetrics;

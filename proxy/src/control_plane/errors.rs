@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-use super::ApiLockError;
+use crate::control_plane::client::ApiLockError;
 use crate::control_plane::messages::{self, ControlPlaneErrorMessage, Reason};
 use crate::error::{io_error, ErrorKind, ReportableError, UserFacingError};
 use crate::proxy::retry::CouldRetry;
