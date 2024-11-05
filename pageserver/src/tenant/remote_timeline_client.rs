@@ -1756,10 +1756,7 @@ impl RemoteTimelineClient {
                 UploadOp::Delete(_) => {
                     upload_queue.num_inprogress_deletions += 1;
                 }
-                UploadOp::Barrier(sender) => {
-                    sender.send_replace(());
-                    continue;
-                }
+                UploadOp::Barrier(_) => {}
                 UploadOp::Shutdown => unreachable!("shutdown is intentionally never popped off"),
             };
 
@@ -1905,7 +1902,33 @@ impl RemoteTimelineClient {
                         .await
                         .map_err(|e| anyhow::anyhow!(e))
                 }
-                unexpected @ UploadOp::Barrier(_) | unexpected @ UploadOp::Shutdown => {
+                UploadOp::Barrier(sender) => {
+                    // Barrier operation needs to wait until all deletions are uploaded.
+                    //
+                    // There is an optimization in the deletion queue client that if generation is enabled for a tenant,
+                    // we do not wait for the deletions to be flushed to the remote storage before we tell the user that
+                    // the deletion is complete. This would cause problems for barrier semantics, as we expect all
+                    // deletion to be persistent when the barrier is processed. For example, when we reload a timeline
+                    // without restarting the pageserver (i.e., offload, detach/attach, detach_ancestor), the generation
+                    // number is not bumped.
+                    //
+                    // Let's think about the following operation sequence:
+                    //
+                    // schedule deletion of layer A at generation 5
+                    // schedule a barrier
+                    // schedule a compaction that creates layer A at generation 5
+                    // the actual deletion happens here
+                    //
+                    // We don't want the actual deletion happens after the barrier.
+                    let res = self
+                        .deletion_queue_client
+                        .flush()
+                        .await
+                        .map_err(|e| anyhow::anyhow!(e));
+                    sender.send_replace(());
+                    res
+                }
+                unexpected @ UploadOp::Shutdown => {
                     // unreachable. Barrier operations are handled synchronously in
                     // launch_queued_tasks
                     warn!("unexpected {unexpected:?} operation in perform_upload_task");
