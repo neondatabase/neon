@@ -24,10 +24,10 @@ use crate::auth::backend::{
 };
 use crate::config::{CertResolver, RetryConfig};
 use crate::control_plane::messages::{ControlPlaneErrorMessage, Details, MetricsAuxInfo, Status};
-use crate::control_plane::provider::{
-    CachedAllowedIps, CachedRoleSecret, ControlPlaneBackend, NodeInfoCache,
+use crate::control_plane::provider::ControlPlaneProvider;
+use crate::control_plane::{
+    self, CachedAllowedIps, CachedNodeInfo, CachedRoleSecret, NodeInfo, NodeInfoCache,
 };
-use crate::control_plane::{self, CachedNodeInfo, NodeInfo};
 use crate::error::ErrorKind;
 use crate::types::{BranchId, EndpointId, ProjectId};
 use crate::{sasl, scram};
@@ -564,7 +564,7 @@ fn helper_create_connect_info(
     mechanism: &TestConnectMechanism,
 ) -> auth::Backend<'static, ComputeCredentials> {
     let user_info = auth::Backend::ControlPlane(
-        MaybeOwned::Owned(ControlPlaneBackend::Test(Box::new(mechanism.clone()))),
+        MaybeOwned::Owned(ControlPlaneProvider::Test(Box::new(mechanism.clone()))),
         ComputeCredentials {
             info: ComputeUserInfo {
                 endpoint: "endpoint".into(),

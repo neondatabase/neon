@@ -9,16 +9,17 @@ use tokio_postgres::config::SslMode;
 use tokio_postgres::Client;
 use tracing::{error, info, info_span, warn, Instrument};
 
-use super::errors::{ControlPlaneError, GetAuthInfoError, WakeComputeError};
-use super::{AuthInfo, AuthSecret, CachedNodeInfo, NodeInfo};
 use crate::auth::backend::jwt::AuthRule;
 use crate::auth::backend::ComputeUserInfo;
 use crate::auth::IpPattern;
 use crate::cache::Cached;
 use crate::context::RequestMonitoring;
-use crate::control_plane::errors::GetEndpointJwksError;
+use crate::control_plane::errors::{
+    ControlPlaneError, GetAuthInfoError, GetEndpointJwksError, WakeComputeError,
+};
 use crate::control_plane::messages::MetricsAuxInfo;
 use crate::control_plane::provider::{CachedAllowedIps, CachedRoleSecret};
+use crate::control_plane::{AuthInfo, AuthSecret, CachedNodeInfo, NodeInfo};
 use crate::error::io_error;
 use crate::intern::RoleNameInt;
 use crate::types::{BranchId, EndpointId, ProjectId, RoleName};
