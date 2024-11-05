@@ -20,25 +20,26 @@ use crate::redis::connection_with_credentials_provider::ConnectionWithCredential
 use crate::types::EndpointId;
 
 #[allow(clippy::enum_variant_names)]
-#[derive(Deserialize, Debug, Clone)]
-#[serde(tag = "type", rename_all(deserialize = "snake_case"))]
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+// We ignore the `type` field as it's set incorrectly for still stored events.
+#[serde(untagged)]
 enum ControlPlaneEvent {
     EndpointCreated { endpoint_created: EndpointCreated },
     BranchCreated { branch_created: BranchCreated },
     ProjectCreated { project_created: ProjectCreated },
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone, PartialEq)]
 struct EndpointCreated {
     endpoint_id: String,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone, PartialEq)]
 struct BranchCreated {
     branch_id: String,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone, PartialEq)]
 struct ProjectCreated {
     project_id: String,
 }
@@ -235,11 +236,19 @@ impl EndpointsCache {
 
 #[cfg(test)]
 mod tests {
-    use super::ControlPlaneEvent;
+    use super::*;
 
     #[test]
     fn test_parse_control_plane_event() {
         let s = r#"{"branch_created":null,"endpoint_created":{"endpoint_id":"ep-rapid-thunder-w0qqw2q9"},"project_created":null,"type":"endpoint_created"}"#;
-        serde_json::from_str::<ControlPlaneEvent>(s).unwrap();
+
+        assert_eq!(
+            serde_json::from_str::<ControlPlaneEvent>(s).unwrap(),
+            ControlPlaneEvent::EndpointCreated {
+                endpoint_created: EndpointCreated {
+                    endpoint_id: "ep-rapid-thunder-w0qqw2q9".into(),
+                }
+            },
+        );
     }
 }
