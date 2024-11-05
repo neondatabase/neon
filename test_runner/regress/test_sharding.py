@@ -256,6 +256,7 @@ def test_sharding_split_compaction(
     # Cleanup part 1: while layers are still in PITR window, we should only drop layers that are fully redundant
     for shard in shards:
         ps = env.get_tenant_pageserver(shard)
+        assert ps is not None
 
         # Invoke compaction: this should drop any layers that don't overlap with the shard's key stripes
         detail_before = ps.http_client().timeline_detail(shard, timeline_id)
