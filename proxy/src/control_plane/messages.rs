@@ -26,7 +26,7 @@ impl ControlPlaneErrorMessage {
     }
 
     pub(crate) fn get_user_facing_message(&self) -> String {
-        use super::provider::errors::REQUEST_FAILED;
+        use super::client::errors::REQUEST_FAILED;
         self.status
             .as_ref()
             .and_then(|s| s.details.user_facing_message.as_ref())

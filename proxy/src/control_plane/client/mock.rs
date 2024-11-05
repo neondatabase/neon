@@ -14,11 +14,11 @@ use crate::auth::backend::ComputeUserInfo;
 use crate::auth::IpPattern;
 use crate::cache::Cached;
 use crate::context::RequestMonitoring;
+use crate::control_plane::client::{CachedAllowedIps, CachedRoleSecret};
 use crate::control_plane::errors::{
     ControlPlaneError, GetAuthInfoError, GetEndpointJwksError, WakeComputeError,
 };
 use crate::control_plane::messages::MetricsAuxInfo;
-use crate::control_plane::provider::{CachedAllowedIps, CachedRoleSecret};
 use crate::control_plane::{AuthInfo, AuthSecret, CachedNodeInfo, NodeInfo};
 use crate::error::io_error;
 use crate::intern::RoleNameInt;

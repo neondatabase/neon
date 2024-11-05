@@ -24,9 +24,9 @@ use crate::compute_ctl::{
 };
 use crate::config::ProxyConfig;
 use crate::context::RequestMonitoring;
+use crate::control_plane::client::ApiLockError;
 use crate::control_plane::errors::{GetAuthInfoError, WakeComputeError};
 use crate::control_plane::locks::ApiLocks;
-use crate::control_plane::provider::ApiLockError;
 use crate::control_plane::CachedNodeInfo;
 use crate::error::{ErrorKind, ReportableError, UserFacingError};
 use crate::intern::EndpointIdInt;

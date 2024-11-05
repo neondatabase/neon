@@ -21,8 +21,8 @@ use crate::auth::{self, validate_password_and_exchange, AuthError, ComputeUserIn
 use crate::cache::Cached;
 use crate::config::AuthenticationConfig;
 use crate::context::RequestMonitoring;
+use crate::control_plane::client::ControlPlaneProvider;
 use crate::control_plane::errors::GetAuthInfoError;
-use crate::control_plane::provider::ControlPlaneProvider;
 use crate::control_plane::{
     self, AuthSecret, CachedAllowedIps, CachedNodeInfo, CachedRoleSecret, ControlPlaneApi,
 };

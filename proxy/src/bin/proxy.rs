@@ -513,7 +513,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     if let Either::Left(auth::Backend::ControlPlane(api, _)) = &auth_backend {
-        if let proxy::control_plane::provider::ControlPlaneProvider::Management(api) = &**api {
+        if let proxy::control_plane::client::ControlPlaneProvider::Management(api) = &**api {
             match (redis_notifications_client, regional_redis_client.clone()) {
                 (None, None) => {}
                 (client1, client2) => {
@@ -732,13 +732,13 @@ fn build_auth_backend(
             RateBucketInfo::validate(&mut wake_compute_rps_limit)?;
             let wake_compute_endpoint_rate_limiter =
                 Arc::new(WakeComputeRateLimiter::new(wake_compute_rps_limit));
-            let api = control_plane::provider::neon::NeonControlPlaneClient::new(
+            let api = control_plane::client::neon::NeonControlPlaneClient::new(
                 endpoint,
                 caches,
                 locks,
                 wake_compute_endpoint_rate_limiter,
             );
-            let api = control_plane::provider::ControlPlaneProvider::Management(api);
+            let api = control_plane::client::ControlPlaneProvider::Management(api);
             let auth_backend = auth::Backend::ControlPlane(MaybeOwned::Owned(api), ());
 
             let config = Box::leak(Box::new(auth_backend));
@@ -749,11 +749,11 @@ fn build_auth_backend(
         #[cfg(feature = "testing")]
         AuthBackendType::Postgres => {
             let url = args.auth_endpoint.parse()?;
-            let api = control_plane::provider::mock::MockControlPlane::new(
+            let api = control_plane::client::mock::MockControlPlane::new(
                 url,
                 !args.is_private_access_proxy,
             );
-            let api = control_plane::provider::ControlPlaneProvider::PostgresMock(api);
+            let api = control_plane::client::ControlPlaneProvider::PostgresMock(api);
 
             let auth_backend = auth::Backend::ControlPlane(MaybeOwned::Owned(api), ());
 

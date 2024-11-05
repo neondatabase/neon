@@ -5,11 +5,11 @@
 pub mod messages;
 
 /// Wrappers for console APIs and their mocks.
-pub mod provider;
-pub(crate) use provider::errors;
-
+pub mod client;
 use std::sync::Arc;
 use std::time::Duration;
+
+pub(crate) use client::errors;
 
 use crate::auth::backend::jwt::AuthRule;
 use crate::auth::backend::{ComputeCredentialKeys, ComputeUserInfo};
@@ -24,12 +24,12 @@ use crate::{compute, scram};
 
 /// Various cache-related types.
 pub mod caches {
-    pub use super::provider::ApiCaches;
+    pub use super::client::ApiCaches;
 }
 
 /// Various cache-related types.
 pub mod locks {
-    pub use super::provider::ApiLocks;
+    pub use super::client::ApiLocks;
 }
 
 /// Console's management API.

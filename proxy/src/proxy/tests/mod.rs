@@ -23,8 +23,8 @@ use crate::auth::backend::{
     ComputeCredentialKeys, ComputeCredentials, ComputeUserInfo, MaybeOwned, TestBackend,
 };
 use crate::config::{CertResolver, RetryConfig};
+use crate::control_plane::client::ControlPlaneProvider;
 use crate::control_plane::messages::{ControlPlaneErrorMessage, Details, MetricsAuxInfo, Status};
-use crate::control_plane::provider::ControlPlaneProvider;
 use crate::control_plane::{
     self, CachedAllowedIps, CachedNodeInfo, CachedRoleSecret, NodeInfo, NodeInfoCache,
 };
