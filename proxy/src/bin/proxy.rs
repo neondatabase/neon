@@ -732,7 +732,7 @@ fn build_auth_backend(
             RateBucketInfo::validate(&mut wake_compute_rps_limit)?;
             let wake_compute_endpoint_rate_limiter =
                 Arc::new(WakeComputeRateLimiter::new(wake_compute_rps_limit));
-            let api = control_plane::provider::neon::Api::new(
+            let api = control_plane::provider::neon::NeonControlPlaneClient::new(
                 endpoint,
                 caches,
                 locks,
@@ -749,7 +749,10 @@ fn build_auth_backend(
         #[cfg(feature = "testing")]
         AuthBackendType::Postgres => {
             let url = args.auth_endpoint.parse()?;
-            let api = control_plane::provider::mock::Api::new(url, !args.is_private_access_proxy);
+            let api = control_plane::provider::mock::MockControlPlane::new(
+                url,
+                !args.is_private_access_proxy,
+            );
             let api = control_plane::provider::ControlPlaneBackend::PostgresMock(api);
 
             let auth_backend = auth::Backend::ControlPlane(MaybeOwned::Owned(api), ());

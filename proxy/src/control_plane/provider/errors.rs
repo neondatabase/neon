@@ -1,7 +1,7 @@
 use thiserror::Error;
 
 use super::ApiLockError;
-use crate::control_plane::messages::{self, ControlPlaneError, Reason};
+use crate::control_plane::messages::{self, ControlPlaneErrorMessage, Reason};
 use crate::error::{io_error, ErrorKind, ReportableError, UserFacingError};
 use crate::proxy::retry::CouldRetry;
 
@@ -10,40 +10,40 @@ pub(crate) const REQUEST_FAILED: &str = "Console request failed";
 
 /// Common console API error.
 #[derive(Debug, Error)]
-pub(crate) enum ApiError {
+pub(crate) enum ControlPlaneError {
     /// Error returned by the console itself.
     #[error("{REQUEST_FAILED} with {0}")]
-    ControlPlane(Box<ControlPlaneError>),
+    Message(Box<ControlPlaneErrorMessage>),
 
     /// Various IO errors like broken pipe or malformed payload.
     #[error("{REQUEST_FAILED}: {0}")]
     Transport(#[from] std::io::Error),
 }
 
-impl ApiError {
+impl ControlPlaneError {
     /// Returns HTTP status code if it's the reason for failure.
     pub(crate) fn get_reason(&self) -> messages::Reason {
         match self {
-            ApiError::ControlPlane(e) => e.get_reason(),
-            ApiError::Transport(_) => messages::Reason::Unknown,
+            ControlPlaneError::Message(e) => e.get_reason(),
+            ControlPlaneError::Transport(_) => messages::Reason::Unknown,
         }
     }
 }
 
-impl UserFacingError for ApiError {
+impl UserFacingError for ControlPlaneError {
     fn to_string_client(&self) -> String {
         match self {
             // To minimize risks, only select errors are forwarded to users.
-            ApiError::ControlPlane(c) => c.get_user_facing_message(),
-            ApiError::Transport(_) => REQUEST_FAILED.to_owned(),
+            ControlPlaneError::Message(c) => c.get_user_facing_message(),
+            ControlPlaneError::Transport(_) => REQUEST_FAILED.to_owned(),
         }
     }
 }
 
-impl ReportableError for ApiError {
+impl ReportableError for ControlPlaneError {
     fn get_error_kind(&self) -> crate::error::ErrorKind {
         match self {
-            ApiError::ControlPlane(e) => match e.get_reason() {
+            ControlPlaneError::Message(e) => match e.get_reason() {
                 Reason::RoleProtected => ErrorKind::User,
                 Reason::ResourceNotFound => ErrorKind::User,
                 Reason::ProjectNotFound => ErrorKind::User,
@@ -62,28 +62,28 @@ impl ReportableError for ApiError {
                 Reason::ActiveEndpointsLimitExceeded => ErrorKind::ControlPlane,
                 Reason::Unknown => ErrorKind::ControlPlane,
             },
-            ApiError::Transport(_) => crate::error::ErrorKind::ControlPlane,
+            ControlPlaneError::Transport(_) => crate::error::ErrorKind::ControlPlane,
         }
     }
 }
 
-impl CouldRetry for ApiError {
+impl CouldRetry for ControlPlaneError {
     fn could_retry(&self) -> bool {
         match self {
             // retry some transport errors
             Self::Transport(io) => io.could_retry(),
-            Self::ControlPlane(e) => e.could_retry(),
+            Self::Message(e) => e.could_retry(),
         }
     }
 }
 
-impl From<reqwest::Error> for ApiError {
+impl From<reqwest::Error> for ControlPlaneError {
     fn from(e: reqwest::Error) -> Self {
         io_error(e).into()
     }
 }
 
-impl From<reqwest_middleware::Error> for ApiError {
+impl From<reqwest_middleware::Error> for ControlPlaneError {
     fn from(e: reqwest_middleware::Error) -> Self {
         io_error(e).into()
     }
@@ -96,11 +96,11 @@ pub(crate) enum GetAuthInfoError {
     BadSecret,
 
     #[error(transparent)]
-    ApiError(ApiError),
+    ApiError(ControlPlaneError),
 }
 
 // This allows more useful interactions than `#[from]`.
-impl<E: Into<ApiError>> From<E> for GetAuthInfoError {
+impl<E: Into<ControlPlaneError>> From<E> for GetAuthInfoError {
     fn from(e: E) -> Self {
         Self::ApiError(e.into())
     }
@@ -132,7 +132,7 @@ pub(crate) enum WakeComputeError {
     BadComputeAddress(Box<str>),
 
     #[error(transparent)]
-    ApiError(ApiError),
+    ControlPlane(ControlPlaneError),
 
     #[error("Too many connections attempts")]
     TooManyConnections,
@@ -142,9 +142,9 @@ pub(crate) enum WakeComputeError {
 }
 
 // This allows more useful interactions than `#[from]`.
-impl<E: Into<ApiError>> From<E> for WakeComputeError {
+impl<E: Into<ControlPlaneError>> From<E> for WakeComputeError {
     fn from(e: E) -> Self {
-        Self::ApiError(e.into())
+        Self::ControlPlane(e.into())
     }
 }
 
@@ -154,8 +154,8 @@ impl UserFacingError for WakeComputeError {
             // We shouldn't show user the address even if it's broken.
             // Besides, user is unlikely to care about this detail.
             Self::BadComputeAddress(_) => REQUEST_FAILED.to_owned(),
-            // However, API might return a meaningful error.
-            Self::ApiError(e) => e.to_string_client(),
+            // However, control plane might return a meaningful error.
+            Self::ControlPlane(e) => e.to_string_client(),
 
             Self::TooManyConnections => self.to_string(),
 
@@ -170,7 +170,7 @@ impl ReportableError for WakeComputeError {
     fn get_error_kind(&self) -> crate::error::ErrorKind {
         match self {
             Self::BadComputeAddress(_) => crate::error::ErrorKind::ControlPlane,
-            Self::ApiError(e) => e.get_error_kind(),
+            Self::ControlPlane(e) => e.get_error_kind(),
             Self::TooManyConnections => crate::error::ErrorKind::RateLimit,
             Self::TooManyConnectionAttempts(e) => e.get_error_kind(),
         }
@@ -181,7 +181,7 @@ impl CouldRetry for WakeComputeError {
     fn could_retry(&self) -> bool {
         match self {
             Self::BadComputeAddress(_) => false,
-            Self::ApiError(e) => e.could_retry(),
+            Self::ControlPlane(e) => e.could_retry(),
             Self::TooManyConnections => false,
             Self::TooManyConnectionAttempts(_) => false,
         }
@@ -200,7 +200,7 @@ pub enum GetEndpointJwksError {
     RequestExecute(#[source] reqwest_middleware::Error),
 
     #[error(transparent)]
-    ControlPlane(#[from] ApiError),
+    ControlPlane(#[from] ControlPlaneError),
 
     #[cfg(any(test, feature = "testing"))]
     #[error(transparent)]

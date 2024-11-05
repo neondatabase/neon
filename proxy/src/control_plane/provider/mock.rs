@@ -9,7 +9,7 @@ use tokio_postgres::config::SslMode;
 use tokio_postgres::Client;
 use tracing::{error, info, info_span, warn, Instrument};
 
-use super::errors::{ApiError, GetAuthInfoError, WakeComputeError};
+use super::errors::{ControlPlaneError, GetAuthInfoError, WakeComputeError};
 use super::{AuthInfo, AuthSecret, CachedNodeInfo, NodeInfo};
 use crate::auth::backend::jwt::AuthRule;
 use crate::auth::backend::ComputeUserInfo;
@@ -31,25 +31,25 @@ enum MockApiError {
     PasswordNotSet(tokio_postgres::Error),
 }
 
-impl From<MockApiError> for ApiError {
+impl From<MockApiError> for ControlPlaneError {
     fn from(e: MockApiError) -> Self {
         io_error(e).into()
     }
 }
 
-impl From<tokio_postgres::Error> for ApiError {
+impl From<tokio_postgres::Error> for ControlPlaneError {
     fn from(e: tokio_postgres::Error) -> Self {
         io_error(e).into()
     }
 }
 
 #[derive(Clone)]
-pub struct Api {
+pub struct MockControlPlane {
     endpoint: ApiUrl,
     ip_allowlist_check_enabled: bool,
 }
 
-impl Api {
+impl MockControlPlane {
     pub fn new(endpoint: ApiUrl, ip_allowlist_check_enabled: bool) -> Self {
         Self {
             endpoint,
@@ -201,7 +201,7 @@ async fn get_execute_postgres_query(
     Ok(Some(entry))
 }
 
-impl super::Api for Api {
+impl super::ControlPlaneApi for MockControlPlane {
     #[tracing::instrument(skip_all)]
     async fn get_role_secret(
         &self,

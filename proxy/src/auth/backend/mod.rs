@@ -25,7 +25,7 @@ use crate::control_plane::errors::GetAuthInfoError;
 use crate::control_plane::provider::{
     CachedAllowedIps, CachedNodeInfo, CachedRoleSecret, ControlPlaneBackend,
 };
-use crate::control_plane::{self, Api, AuthSecret};
+use crate::control_plane::{self, AuthSecret, ControlPlaneApi};
 use crate::intern::EndpointIdInt;
 use crate::metrics::Metrics;
 use crate::proxy::connect_compute::ComputeConnectBackend;
@@ -282,7 +282,7 @@ impl AuthenticationConfig {
 /// All authentication flows will emit an AuthenticationOk message if successful.
 async fn auth_quirks(
     ctx: &RequestMonitoring,
-    api: &impl control_plane::Api,
+    api: &impl control_plane::ControlPlaneApi,
     user_info: ComputeUserInfoMaybeEndpoint,
     client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
     allow_cleartext: bool,
@@ -526,7 +526,7 @@ mod tests {
         secret: AuthSecret,
     }
 
-    impl control_plane::Api for Auth {
+    impl control_plane::ControlPlaneApi for Auth {
         async fn get_role_secret(
             &self,
             _ctx: &RequestMonitoring,

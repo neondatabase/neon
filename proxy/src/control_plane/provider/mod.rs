@@ -11,7 +11,7 @@ use dashmap::DashMap;
 use tokio::time::Instant;
 use tracing::info;
 
-use super::messages::{ControlPlaneError, MetricsAuxInfo};
+use super::messages::{ControlPlaneErrorMessage, MetricsAuxInfo};
 use crate::auth::backend::jwt::{AuthRule, FetchAuthRules, FetchAuthRulesError};
 use crate::auth::backend::{ComputeCredentialKeys, ComputeUserInfo};
 use crate::auth::IpPattern;
@@ -94,14 +94,14 @@ impl NodeInfo {
 }
 
 pub(crate) type NodeInfoCache =
-    TimedLru<EndpointCacheKey, Result<NodeInfo, Box<ControlPlaneError>>>;
+    TimedLru<EndpointCacheKey, Result<NodeInfo, Box<ControlPlaneErrorMessage>>>;
 pub(crate) type CachedNodeInfo = Cached<&'static NodeInfoCache, NodeInfo>;
 pub(crate) type CachedRoleSecret = Cached<&'static ProjectInfoCacheImpl, Option<AuthSecret>>;
 pub(crate) type CachedAllowedIps = Cached<&'static ProjectInfoCacheImpl, Arc<Vec<IpPattern>>>;
 
 /// This will allocate per each call, but the http requests alone
 /// already require a few allocations, so it should be fine.
-pub(crate) trait Api {
+pub(crate) trait ControlPlaneApi {
     /// Get the client's auth secret for authentication.
     /// Returns option because user not found situation is special.
     /// We still have to mock the scram to avoid leaking information that user doesn't exist.
@@ -135,17 +135,17 @@ pub(crate) trait Api {
 #[derive(Clone)]
 pub enum ControlPlaneBackend {
     /// Current Management API (V2).
-    Management(neon::Api),
+    Management(neon::NeonControlPlaneClient),
     /// Local mock control plane.
     #[cfg(any(test, feature = "testing"))]
-    PostgresMock(mock::Api),
+    PostgresMock(mock::MockControlPlane),
     /// Internal testing
     #[cfg(test)]
     #[allow(private_interfaces)]
     Test(Box<dyn crate::auth::backend::TestBackend>),
 }
 
-impl Api for ControlPlaneBackend {
+impl ControlPlaneApi for ControlPlaneBackend {
     async fn get_role_secret(
         &self,
         ctx: &RequestMonitoring,

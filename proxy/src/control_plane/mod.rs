@@ -6,7 +6,7 @@ pub mod messages;
 
 /// Wrappers for console APIs and their mocks.
 pub mod provider;
-pub(crate) use provider::{errors, Api, AuthSecret, CachedNodeInfo, NodeInfo};
+pub(crate) use provider::{errors, AuthSecret, CachedNodeInfo, ControlPlaneApi, NodeInfo};
 
 /// Various cache-related types.
 pub mod caches {

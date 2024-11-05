@@ -23,7 +23,7 @@ use crate::auth::backend::{
     ComputeCredentialKeys, ComputeCredentials, ComputeUserInfo, MaybeOwned, TestBackend,
 };
 use crate::config::{CertResolver, RetryConfig};
-use crate::control_plane::messages::{ControlPlaneError, Details, MetricsAuxInfo, Status};
+use crate::control_plane::messages::{ControlPlaneErrorMessage, Details, MetricsAuxInfo, Status};
 use crate::control_plane::provider::{
     CachedAllowedIps, CachedRoleSecret, ControlPlaneBackend, NodeInfoCache,
 };
@@ -498,18 +498,19 @@ impl TestBackend for TestConnectMechanism {
         match action {
             ConnectAction::Wake => Ok(helper_create_cached_node_info(self.cache)),
             ConnectAction::WakeFail => {
-                let err =
-                    control_plane::errors::ApiError::ControlPlane(Box::new(ControlPlaneError {
+                let err = control_plane::errors::ControlPlaneError::Message(Box::new(
+                    ControlPlaneErrorMessage {
                         http_status_code: StatusCode::BAD_REQUEST,
                         error: "TEST".into(),
                         status: None,
-                    }));
+                    },
+                ));
                 assert!(!err.could_retry());
-                Err(control_plane::errors::WakeComputeError::ApiError(err))
+                Err(control_plane::errors::WakeComputeError::ControlPlane(err))
             }
             ConnectAction::WakeRetry => {
-                let err =
-                    control_plane::errors::ApiError::ControlPlane(Box::new(ControlPlaneError {
+                let err = control_plane::errors::ControlPlaneError::Message(Box::new(
+                    ControlPlaneErrorMessage {
                         http_status_code: StatusCode::BAD_REQUEST,
                         error: "TEST".into(),
                         status: Some(Status {
@@ -523,9 +524,10 @@ impl TestBackend for TestConnectMechanism {
                                 user_facing_message: None,
                             },
                         }),
-                    }));
+                    },
+                ));
                 assert!(err.could_retry());
-                Err(control_plane::errors::WakeComputeError::ApiError(err))
+                Err(control_plane::errors::WakeComputeError::ControlPlane(err))
             }
             x => panic!("expecting action {x:?}, wake_compute is called instead"),
         }
