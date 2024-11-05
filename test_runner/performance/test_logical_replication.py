@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from fixtures.benchmark_fixture import NeonBenchmarker
     from fixtures.neon_api import NeonApiEndpoint
     from fixtures.neon_fixtures import NeonEnv, PgBin, VanillaPostgres
+    from psycopg2.extensions import cursor
 
 
 @pytest.mark.timeout(1000)
@@ -63,9 +64,7 @@ def check_pgbench_still_running(pgbench: Popen[AnyStr], label: str = ""):
         raise RuntimeError(f"{label} pgbench terminated early with return code {rc}")
 
 
-def measure_logical_replication_lag(
-    sub_cur: psycopg2.cursor, pub_cur: psycopg2.cursor, timeout_sec: float = 600
-):
+def measure_logical_replication_lag(sub_cur: cursor, pub_cur: cursor, timeout_sec: float = 600):
     start = time.time()
     pub_cur.execute("SELECT pg_current_wal_flush_lsn()")
     pub_lsn = Lsn(cast("str", pub_cur.fetchall()[0][0]))
