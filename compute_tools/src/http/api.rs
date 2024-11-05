@@ -84,8 +84,9 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
             let status = compute.get_status();
             if status != ComputeStatus::Running {
                 let msg = format!(
-                    "invalid compute status for check_writability request: {:?}",
-                    status
+                    "invalid compute status for check_writability request: {}, need {}",
+                    status,
+                    ComputeStatus::Running
                 );
                 error!(msg);
                 return Response::new(Body::from(msg));
@@ -106,8 +107,9 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
             let status = compute.get_status();
             if status != ComputeStatus::Running {
                 let msg = format!(
-                    "invalid compute status for extensions request: {:?}",
-                    status
+                    "invalid compute status for extensions request: {}, need {}",
+                    status,
+                    ComputeStatus::Running
                 );
                 error!(msg);
                 return render_json_error(&msg, StatusCode::PRECONDITION_FAILED);
@@ -205,8 +207,9 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
             let status = compute.get_status();
             if status != ComputeStatus::Running {
                 let msg = format!(
-                    "invalid compute status for set_role_grants request: {:?}",
-                    status
+                    "invalid compute status for set_role_grants request: {}, need {}",
+                    status,
+                    ComputeStatus::Running
                 );
                 error!(msg);
                 return render_json_error(&msg, StatusCode::PRECONDITION_FAILED);
@@ -250,8 +253,9 @@ async fn routes(req: Request<Body>, compute: &Arc<ComputeNode>) -> Response<Body
             let status = compute.get_status();
             if status != ComputeStatus::Running {
                 let msg = format!(
-                    "invalid compute status for extensions request: {:?}",
-                    status
+                    "invalid compute status for extensions request: {}, need {}",
+                    status,
+                    ComputeStatus::Running
                 );
                 error!(msg);
                 return Response::new(Body::from(msg));
@@ -383,10 +387,12 @@ async fn handle_configure_request(
         // ```
         {
             let mut state = compute.state.lock().unwrap();
-            if state.status != ComputeStatus::Empty && state.status != ComputeStatus::Running {
+            if !matches!(state.status, ComputeStatus::Empty | ComputeStatus::Running) {
                 let msg = format!(
-                    "invalid compute status for configuration request: {:?}",
-                    state.status.clone()
+                    "invalid compute status for configuration request: {}, cannot be {} or {}",
+                    state.status,
+                    ComputeStatus::Empty,
+                    ComputeStatus::Running
                 );
                 return Err((msg, StatusCode::PRECONDITION_FAILED));
             }
@@ -462,10 +468,12 @@ async fn handle_terminate_request(compute: &Arc<ComputeNode>) -> Result<(), (Str
         if state.status == ComputeStatus::Terminated {
             return Ok(());
         }
-        if state.status != ComputeStatus::Empty && state.status != ComputeStatus::Running {
+        if !matches!(state.status, ComputeStatus::Empty | ComputeStatus::Running) {
             let msg = format!(
-                "invalid compute status for termination request: {}",
-                state.status
+                "invalid compute status for termination request: {}, cannot be {} or {}",
+                state.status,
+                ComputeStatus::Empty,
+                ComputeStatus::Running,
             );
             return Err((msg, StatusCode::PRECONDITION_FAILED));
         }
