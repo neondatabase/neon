@@ -4,8 +4,8 @@ use std::sync::Arc;
 use crate::checks::{list_timeline_blobs, BlobDataParseResult, RemoteTimelineBlobData};
 use crate::metadata_stream::{stream_tenant_shards, stream_tenant_timelines};
 use crate::{
-    download_object_to_file_s3, init_remote, init_remote_s3, BucketConfig, NodeKind, RootTarget,
-    TenantShardTimelineId,
+    download_object_to_file_s3, init_remote, init_remote_s3, BucketConfig, BucketConfigLegacy,
+    NodeKind, RootTarget, TenantShardTimelineId,
 };
 use anyhow::Context;
 use async_stream::stream;
@@ -23,7 +23,7 @@ use utils::id::TenantId;
 pub struct SnapshotDownloader {
     s3_client: Arc<Client>,
     s3_root: RootTarget,
-    bucket_config: BucketConfig,
+    bucket_config: BucketConfigLegacy,
     tenant_id: TenantId,
     output_path: Utf8PathBuf,
     concurrency: usize,
@@ -31,7 +31,7 @@ pub struct SnapshotDownloader {
 
 impl SnapshotDownloader {
     pub async fn new(
-        bucket_config: BucketConfig,
+        bucket_config: BucketConfigLegacy,
         tenant_id: TenantId,
         output_path: Utf8PathBuf,
         concurrency: usize,
@@ -218,8 +218,11 @@ impl SnapshotDownloader {
     }
 
     pub async fn download(&self) -> anyhow::Result<()> {
-        let (remote_client, target) =
-            init_remote(self.bucket_config.clone(), NodeKind::Pageserver).await?;
+        let (remote_client, target) = init_remote(
+            BucketConfig::Legacy(self.bucket_config.clone()),
+            NodeKind::Pageserver,
+        )
+        .await?;
 
         // Generate a stream of TenantShardId
         let shards = stream_tenant_shards(&remote_client, &target, self.tenant_id).await?;

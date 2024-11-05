@@ -48,7 +48,7 @@ const CLOUD_ADMIN_API_TOKEN_ENV_VAR: &str = "CLOUD_ADMIN_API_TOKEN";
 
 #[derive(Debug, Clone)]
 pub struct S3Target {
-    pub bucket_name: String,
+    pub desc_str: String,
     /// This `prefix_in_bucket` is only equal to the PS/SK config of the same
     /// name for the RootTarget: other instances of S3Target will have prefix_in_bucket
     /// with extra parts.
@@ -172,7 +172,7 @@ impl RootTarget {
         };
 
         S3Target {
-            bucket_name: root.bucket_name.clone(),
+            desc_str: root.desc_str.clone(),
             prefix_in_bucket: format!(
                 "{}/{TENANTS_SEGMENT_NAME}/{tenant_id}",
                 root.prefix_in_bucket
@@ -209,10 +209,10 @@ impl RootTarget {
         }
     }
 
-    pub fn bucket_name(&self) -> &str {
+    pub fn desc_str(&self) -> &str {
         match self {
-            Self::Pageserver(root) => &root.bucket_name,
-            Self::Safekeeper(root) => &root.bucket_name,
+            Self::Pageserver(root) => &root.desc_str,
+            Self::Safekeeper(root) => &root.desc_str,
         }
     }
 
@@ -230,13 +230,58 @@ pub fn remote_timeline_path_id(id: &TenantShardTimelineId) -> RemotePath {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct BucketConfig {
+pub enum BucketConfig {
+    Legacy(BucketConfigLegacy),
+    RemoteConfig(RemoteStorageConfig),
+}
+
+impl BucketConfig {
+    pub fn from_env() -> anyhow::Result<Self> {
+        if let Ok(legacy) = BucketConfigLegacy::from_env() {
+            return Ok(Self::Legacy(legacy));
+        }
+        let config_toml =
+            env::var("REMOTE_STORAGE_CONFIG").context("'REMOTE_STORAGE_CONFIG' retrieval")?;
+        let remote_config = RemoteStorageConfig::from_toml_str(&config_toml)?;
+        Ok(BucketConfig::RemoteConfig(remote_config))
+    }
+    pub fn desc_str(&self) -> String {
+        match self {
+            BucketConfig::Legacy(config) => {
+                format!("bucket {}, region {}", config.bucket, config.region)
+            }
+            BucketConfig::RemoteConfig(config) => match &config.storage {
+                RemoteStorageKind::LocalFs { local_path } => {
+                    format!("local path {local_path}")
+                }
+                RemoteStorageKind::AwsS3(config) => format!(
+                    "bucket {}, region {}",
+                    config.bucket_name, config.bucket_region
+                ),
+                RemoteStorageKind::AzureContainer(config) => format!(
+                    "bucket {}, storage account {:?}, region {}",
+                    config.container_name, config.storage_account, config.container_region
+                ),
+            },
+        }
+    }
+    pub fn bucket_name(&self) -> Option<&str> {
+        match self {
+            BucketConfig::Legacy(config) => Some(&config.bucket),
+            BucketConfig::RemoteConfig(config) => config.storage.bucket_name(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BucketConfigLegacy {
     pub region: String,
     pub bucket: String,
     pub prefix_in_bucket: Option<String>,
 }
 
-impl BucketConfig {
+impl BucketConfigLegacy {
     pub fn from_env() -> anyhow::Result<Self> {
         let region = env::var("REGION").context("'REGION' param retrieval")?;
         let bucket = env::var("BUCKET").context("'BUCKET' param retrieval")?;
@@ -337,13 +382,9 @@ fn default_prefix_in_bucket(node_kind: NodeKind) -> &'static str {
     }
 }
 
-fn make_root_target(
-    bucket_name: String,
-    prefix_in_bucket: String,
-    node_kind: NodeKind,
-) -> RootTarget {
+fn make_root_target(desc_str: String, prefix_in_bucket: String, node_kind: NodeKind) -> RootTarget {
     let s3_target = S3Target {
-        bucket_name,
+        desc_str,
         prefix_in_bucket,
         delimiter: "/".to_string(),
     };
@@ -354,7 +395,7 @@ fn make_root_target(
 }
 
 async fn init_remote_s3(
-    bucket_config: BucketConfig,
+    bucket_config: BucketConfigLegacy,
     node_kind: NodeKind,
 ) -> anyhow::Result<(Arc<Client>, RootTarget)> {
     let bucket_region = Region::new(bucket_config.region);
@@ -374,28 +415,34 @@ async fn init_remote(
     bucket_config: BucketConfig,
     node_kind: NodeKind,
 ) -> anyhow::Result<(GenericRemoteStorage, RootTarget)> {
-    let endpoint = env::var("AWS_ENDPOINT_URL").ok();
-    let default_prefix = default_prefix_in_bucket(node_kind).to_string();
-    let prefix_in_bucket = Some(bucket_config.prefix_in_bucket.unwrap_or(default_prefix));
-    let storage = S3Config {
-        bucket_name: bucket_config.bucket.clone(),
-        bucket_region: bucket_config.region,
-        prefix_in_bucket,
-        endpoint,
-        concurrency_limit: DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT
-            .try_into()
-            .unwrap(),
-        max_keys_per_list_response: DEFAULT_MAX_KEYS_PER_LIST_RESPONSE,
-        upload_storage_class: None,
-    };
-    let storage_config = RemoteStorageConfig {
-        storage: RemoteStorageKind::AwsS3(storage),
-        timeout: RemoteStorageConfig::DEFAULT_TIMEOUT,
+    let desc_str = bucket_config.desc_str();
+    let storage_config = match bucket_config {
+        BucketConfig::Legacy(bucket_config) => {
+            let endpoint = env::var("AWS_ENDPOINT_URL").ok();
+            let default_prefix = default_prefix_in_bucket(node_kind).to_string();
+            let prefix_in_bucket = Some(bucket_config.prefix_in_bucket.unwrap_or(default_prefix));
+            let storage = S3Config {
+                bucket_name: bucket_config.bucket.clone(),
+                bucket_region: bucket_config.region,
+                prefix_in_bucket,
+                endpoint,
+                concurrency_limit: DEFAULT_REMOTE_STORAGE_S3_CONCURRENCY_LIMIT
+                    .try_into()
+                    .unwrap(),
+                max_keys_per_list_response: DEFAULT_MAX_KEYS_PER_LIST_RESPONSE,
+                upload_storage_class: None,
+            };
+            RemoteStorageConfig {
+                storage: RemoteStorageKind::AwsS3(storage),
+                timeout: RemoteStorageConfig::DEFAULT_TIMEOUT,
+            }
+        }
+        BucketConfig::RemoteConfig(config) => config,
     };
 
     // We already pass the prefix to the remote client above
     let prefix_in_root_target = String::new();
-    let root_target = make_root_target(bucket_config.bucket, prefix_in_root_target, node_kind);
+    let root_target = make_root_target(desc_str, prefix_in_root_target, node_kind);
 
     let client = GenericRemoteStorage::from_config(&storage_config).await?;
     Ok((client, root_target))
@@ -469,7 +516,7 @@ async fn list_objects_with_retries(
                 }
                 warn!(
                     "list_objects_v2 query failed: bucket_name={}, prefix={}, delimiter={}, error={}",
-                    s3_target.bucket_name,
+                    remote_client.bucket_name().unwrap_or_default(),
                     s3_target.prefix_in_bucket,
                     s3_target.delimiter,
                     DisplayErrorContext(e),

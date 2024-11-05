@@ -84,10 +84,7 @@ pub async fn scan_safekeeper_metadata(
     bucket_config: BucketConfig,
     db_or_list: DatabaseOrList,
 ) -> anyhow::Result<MetadataSummary> {
-    info!(
-        "checking bucket {}, region {}",
-        bucket_config.bucket, bucket_config.region
-    );
+    info!("checking {}", bucket_config.desc_str());
 
     let (remote_client, target) = init_remote(bucket_config, NodeKind::Safekeeper).await?;
     let console_config = ConsoleConfig::from_env()?;
