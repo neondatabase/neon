@@ -71,7 +71,7 @@ jobs:
         aws-region: eu-central-1
         role-to-assume: ${{ vars.DEV_AWS_OIDC_ROLE_ARN }}
         role-duration-seconds: 43199 # almost 12 hours  
-        
+
     - name: Download Neon artifact
       uses: ./.github/actions/download
       with:
@@ -384,6 +384,7 @@ jobs:
         echo "matrix=$(echo "$matrix" | jq --compact-output '.')" >> $GITHUB_OUTPUT
 
   prepare_AWS_RDS_databases:
+    if: ${{ github.event.inputs.run_only_ingest_tests == 'false' || github.event.inputs.run_only_ingest_tests == null }}
     uses: ./.github/workflows/_benchmarking_preparation.yml
     secrets: inherit
 
