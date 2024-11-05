@@ -611,6 +611,17 @@ NeonWALReadLocal(NeonWALReader *state, char *buf, XLogRecPtr startptr, Size coun
 	recptr = startptr;
 	nbytes = count;
 
+/* Try to read directly from WAL buffers first. */
+#if PG_MAJORVERSION_NUM >= 17
+	{
+		Size	rbytes;
+		rbytes = WALReadFromBuffers(p, recptr, nbytes, tli);
+		recptr += rbytes;
+		nbytes -= rbytes;
+		p += rbytes;
+	}
+#endif
+
 	while (nbytes > 0)
 	{
 		uint32		startoff;
