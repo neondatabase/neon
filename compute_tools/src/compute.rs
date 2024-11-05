@@ -364,15 +364,14 @@ impl ComputeNode {
         let pageserver_connect_micros = start_time.elapsed().as_micros() as u64;
 
         let basebackup_cmd = match lsn {
-            // HACK We don't use compression on first start (Lsn(0)) because there's no API for it
             Lsn(0) => {
                 if spec.spec.mode != ComputeMode::Primary {
                     format!(
-                        "basebackup {} {} --replica",
+                        "basebackup {} {} --gzip --replica",
                         spec.tenant_id, spec.timeline_id
                     )
                 } else {
-                    format!("basebackup {} {}", spec.tenant_id, spec.timeline_id)
+                    format!("basebackup {} {} --gzip", spec.tenant_id, spec.timeline_id)
                 }
             }
             _ => {
