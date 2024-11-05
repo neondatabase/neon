@@ -16,6 +16,7 @@ use pageserver_api::shard::ShardIdentity;
 use pageserver_api::{key::CompactKey, value::Value};
 use postgres_ffi::walrecord::{DecodedBkpBlock, DecodedWALRecord};
 use postgres_ffi::{page_is_new, page_set_lsn, pg_constants, BLCKSZ};
+use serde::{Deserialize, Serialize};
 use utils::bin_ser::BeSer;
 use utils::lsn::Lsn;
 
@@ -29,6 +30,7 @@ static ZERO_PAGE: Bytes = Bytes::from_static(&[0u8; BLCKSZ as usize]);
 /// relation sizes. In the case of "observed" values, we only need to know
 /// the key and LSN, so two types of metadata are supported to save on network
 /// bandwidth.
+#[derive(Serialize, Deserialize)]
 pub enum ValueMeta {
     Serialized(SerializedValueMeta),
     Observed(ObservedValueMeta),
@@ -75,6 +77,7 @@ impl PartialEq for OrderedValueMeta {
 impl Eq for OrderedValueMeta {}
 
 /// Metadata for a [`Value`] serialized into the batch.
+#[derive(Serialize, Deserialize)]
 pub struct SerializedValueMeta {
     pub key: CompactKey,
     pub lsn: Lsn,
@@ -86,12 +89,14 @@ pub struct SerializedValueMeta {
 }
 
 /// Metadata for a [`Value`] observed by the batch
+#[derive(Serialize, Deserialize)]
 pub struct ObservedValueMeta {
     pub key: CompactKey,
     pub lsn: Lsn,
 }
 
 /// Batch of serialized [`Value`]s.
+#[derive(Serialize, Deserialize)]
 pub struct SerializedValueBatch {
     /// [`Value`]s serialized in EphemeralFile's native format,
     /// ready for disk write by the pageserver
