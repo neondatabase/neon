@@ -4,7 +4,7 @@
 //!
 //! The old legacy algorithm is implemented directly in `timeline.rs`.
 
-use std::collections::{BinaryHeap, HashSet};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::ops::{Deref, Range};
 use std::sync::Arc;
 
@@ -1991,6 +1991,12 @@ impl Timeline {
         )
         .await?;
 
+        struct RewritingLayers {
+            before: Option<DeltaLayerWriter>,
+            after: Option<DeltaLayerWriter>,
+        }
+        let mut delta_layer_rewriters = HashMap::<Arc<PersistentLayerKey>, RewritingLayers>::new();
+
         /// Returns None if there is no ancestor branch. Throw an error when the key is not found.
         ///
         /// Currently, we always get the ancestor image for each key in the child branch no matter whether the image
@@ -2016,9 +2022,54 @@ impl Timeline {
         // the key and LSN range are determined. However, to keep things simple here, we still
         // create this writer, and discard the writer in the end.
 
-        while let Some((key, lsn, val)) = merge_iter.next().await? {
+        while let Some(((key, lsn, val), desc)) = merge_iter.next_with_trace().await? {
             if cancel.is_cancelled() {
                 return Err(anyhow!("cancelled")); // TODO: refactor to CompactionError and pass cancel error
+            }
+            if let Some(compaction_key_range) = &job_desc.partial_key_range {
+                if !compaction_key_range.contains(&key) {
+                    let rewriter = delta_layer_rewriters
+                        .entry(desc.clone())
+                        .or_insert_with(|| RewritingLayers {
+                            before: None,
+                            after: None,
+                        });
+                    let rewriter = if key < compaction_key_range.start {
+                        if rewriter.before.is_none() {
+                            rewriter.before = Some(
+                                DeltaLayerWriter::new(
+                                    self.conf,
+                                    self.timeline_id,
+                                    self.tenant_shard_id,
+                                    desc.key_range.start,
+                                    desc.lsn_range.clone(),
+                                    ctx,
+                                )
+                                .await?,
+                            );
+                        }
+                        rewriter.before.as_mut().unwrap()
+                    } else if key >= compaction_key_range.end {
+                        if rewriter.after.is_none() {
+                            rewriter.after = Some(
+                                DeltaLayerWriter::new(
+                                    self.conf,
+                                    self.timeline_id,
+                                    self.tenant_shard_id,
+                                    compaction_key_range.end,
+                                    desc.lsn_range.clone(),
+                                    ctx,
+                                )
+                                .await?,
+                            );
+                        }
+                        rewriter.after.as_mut().unwrap()
+                    } else {
+                        unreachable!()
+                    };
+                    rewriter.put_value(key, lsn, val, ctx).await?;
+                    continue;
+                }
             }
             match val {
                 Value::Image(_) => stat.visit_image_key(&val),
@@ -2032,33 +2083,25 @@ impl Timeline {
             } else {
                 let last_key: &mut Key = last_key.as_mut().unwrap();
                 stat.on_unique_key_visited(); // TODO: adjust statistics for partial compaction
-                let skip_adding_key =
-                    if let Some(compaction_key_range) = &job_desc.partial_key_range {
-                        !compaction_key_range.contains(last_key)
-                    } else {
-                        false
-                    };
-                if !skip_adding_key {
-                    let retention = self
-                        .generate_key_retention(
-                            *last_key,
-                            &accumulated_values,
-                            job_desc.gc_cutoff,
-                            &job_desc.retain_lsns_below_horizon,
-                            COMPACTION_DELTA_THRESHOLD,
-                            get_ancestor_image(self, *last_key, ctx).await?,
-                        )
-                        .await?;
-                    retention
-                        .pipe_to(
-                            *last_key,
-                            &mut delta_layer_writer,
-                            image_layer_writer.as_mut(),
-                            &mut stat,
-                            ctx,
-                        )
-                        .await?;
-                }
+                let retention = self
+                    .generate_key_retention(
+                        *last_key,
+                        &accumulated_values,
+                        job_desc.gc_cutoff,
+                        &job_desc.retain_lsns_below_horizon,
+                        COMPACTION_DELTA_THRESHOLD,
+                        get_ancestor_image(self, *last_key, ctx).await?,
+                    )
+                    .await?;
+                retention
+                    .pipe_to(
+                        *last_key,
+                        &mut delta_layer_writer,
+                        image_layer_writer.as_mut(),
+                        &mut stat,
+                        ctx,
+                    )
+                    .await?;
                 accumulated_values.clear();
                 *last_key = key;
                 accumulated_values.push((key, lsn, val));
@@ -2100,47 +2143,16 @@ impl Timeline {
 
         let mut rewrote_delta_layers = Vec::new();
         if let Some(compaction_key_range) = &job_desc.partial_key_range {
-            for layer in job_desc.rewrite_layers {
-                // For each of the layer to rewrite, generate a layer with the same LSN but less key content
-                // This download should be no-op b/c it's included in selected_layer and has been downloaded before
-                let resident_layer = layer.download_and_keep_resident().await?;
-                let desc = resident_layer.layer_desc();
-                let layer = resident_layer.get_as_delta(ctx).await?;
-                let mut iter = layer.iter(ctx);
-                let mut delta_writer_before = DeltaLayerWriter::new(
-                    self.conf,
-                    self.timeline_id,
-                    self.tenant_shard_id,
-                    desc.key_range.start,
-                    desc.lsn_range.clone(),
-                    ctx,
-                )
-                .await?;
-                let mut delta_writer_after = DeltaLayerWriter::new(
-                    self.conf,
-                    self.timeline_id,
-                    self.tenant_shard_id,
-                    compaction_key_range.end,
-                    desc.lsn_range.clone(),
-                    ctx,
-                )
-                .await?;
-                while let Some((key, lsn, val)) = iter.next().await? {
-                    if key < compaction_key_range.start {
-                        delta_writer_before.put_value(key, lsn, val, ctx).await?;
-                    } else if key >= compaction_key_range.end {
-                        delta_writer_after.put_value(key, lsn, val, ctx).await?;
-                    }
-                }
-                if !delta_writer_before.is_empty() && !dry_run {
+            for (key, writers) in delta_layer_rewriters {
+                if let Some(delta_writer_before) = writers.before {
                     let (desc, path) = delta_writer_before
                         .finish(compaction_key_range.start, ctx)
                         .await?;
                     let layer = Layer::finish_creating(self.conf, self, desc, &path)?;
                     rewrote_delta_layers.push(layer);
                 }
-                if !delta_writer_after.is_empty() && !dry_run {
-                    let (desc, path) = delta_writer_after.finish(desc.key_range.end, ctx).await?;
+                if let Some(delta_writer_after) = writers.after {
+                    let (desc, path) = delta_writer_after.finish(key.key_range.end, ctx).await?;
                     let layer = Layer::finish_creating(self.conf, self, desc, &path)?;
                     rewrote_delta_layers.push(layer);
                 }
@@ -2203,28 +2215,22 @@ impl Timeline {
                 }
             }
         }
-        if cfg!(debug_assertions) {
-            for layer in &rewrote_delta_layers {
-                info!(
-                    "produced rewritten delta layer: {}",
-                    layer.layer_desc().key()
-                );
-            }
+        for layer in &rewrote_delta_layers {
+            debug!(
+                "produced rewritten delta layer: {}",
+                layer.layer_desc().key()
+            );
         }
         compact_to.extend(rewrote_delta_layers);
         for action in produced_image_layers {
             match action {
                 BatchWriterResult::Produced(layer) => {
-                    if cfg!(debug_assertions) {
-                        info!("produced image layer: {}", layer.layer_desc().key());
-                    }
+                    debug!("produced image layer: {}", layer.layer_desc().key());
                     stat.produce_image_layer(layer.layer_desc().file_size());
                     compact_to.push(layer);
                 }
                 BatchWriterResult::Discarded(l) => {
-                    if cfg!(debug_assertions) {
-                        info!("discarded image layer: {}", l);
-                    }
+                    debug!("discarded image layer: {}", l);
                     keep_layers.insert(l);
                     stat.discard_image_layer();
                 }
