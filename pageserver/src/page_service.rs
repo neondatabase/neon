@@ -1415,7 +1415,7 @@ impl PageServiceCmd {
     fn parse(query: &str) -> anyhow::Result<Self> {
         let query = query.trim();
         let Some((cmd, other)) = query.split_once(' ') else {
-            bail!("cannot parse query: {}", query)
+            bail!("cannot parse query: {query}")
         };
         match cmd.to_ascii_lowercase().as_str() {
             "pagestream_v2" => Ok(Self::PageStream(PageStreamCmd::parse(other)?)),
