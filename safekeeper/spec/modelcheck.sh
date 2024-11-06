@@ -17,7 +17,7 @@ GIT_REV=`git rev-parse --short HEAD`
 INFO=`uname -a`
 
 # First for Linux, second for Mac.
-CPUNAMELinux=`grep -m 1 'model name' /proc/cpuinfo`
+CPUNAMELinux=$(lscpu | grep 'Model name' | cut -f 2 -d ":" | awk '{$1=$1}1')
 CPUCORESLinux=`nproc`
 CPUNAMEMac=`sysctl -n machdep.cpu.brand_string`
 CPUCORESMac=`sysctl -n machdep.cpu.thread_count`
