@@ -12,7 +12,7 @@ use crate::tenant::timeline::GetVectoredError;
 use crate::tenant::PageReconstructError;
 use crate::virtual_file::owned_buffers_io::io_buf_ext::IoBufExt;
 use crate::{l0_flush, page_cache};
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use camino::Utf8PathBuf;
 use pageserver_api::key::CompactKey;
 use pageserver_api::key::Key;
@@ -25,6 +25,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 use tracing::*;
 use utils::{bin_ser::BeSer, id::TimelineId, lsn::Lsn, vec_map::VecMap};
+use wal_decoder::serialized_batch::{SerializedValueBatch, SerializedValueMeta, ValueMeta};
 // avoid binding to Write (conflicts with std::io::Write)
 // while being able to use std::fmt::Write's methods
 use crate::metrics::TIMELINE_EPHEMERAL_BYTES;
@@ -452,6 +453,7 @@ impl InMemoryLayer {
                         len,
                         will_init,
                     } = index_entry.unpack();
+
                     reads.entry(key).or_default().push(ValueRead {
                         entry_lsn: *entry_lsn,
                         read: vectored_dio_read::LogicalRead::new(
@@ -510,68 +512,6 @@ impl InMemoryLayer {
         reconstruct_state.on_lsn_advanced(&keyspace, self.start_lsn);
 
         Ok(())
-    }
-}
-
-/// Offset of a particular Value within a serialized batch.
-struct SerializedBatchOffset {
-    key: CompactKey,
-    lsn: Lsn,
-    // TODO: separate type when we start serde-serializing this value, to avoid coupling
-    // in-memory representation to serialization format.
-    index_entry: IndexEntry,
-}
-
-pub struct SerializedBatch {
-    /// Blobs serialized in EphemeralFile's native format, ready for passing to [`EphemeralFile::write_raw`].
-    pub(crate) raw: Vec<u8>,
-
-    /// Index of values in [`Self::raw`], using offsets relative to the start of the buffer.
-    offsets: Vec<SerializedBatchOffset>,
-
-    /// The highest LSN of any value in the batch
-    pub(crate) max_lsn: Lsn,
-}
-
-impl SerializedBatch {
-    pub fn from_values(batch: Vec<(CompactKey, Lsn, usize, Value)>) -> anyhow::Result<Self> {
-        // Pre-allocate a big flat buffer to write into. This should be large but not huge: it is soft-limited in practice by
-        // [`crate::pgdatadir_mapping::DatadirModification::MAX_PENDING_BYTES`]
-        let buffer_size = batch.iter().map(|i| i.2).sum::<usize>();
-        let mut cursor = std::io::Cursor::new(Vec::<u8>::with_capacity(buffer_size));
-
-        let mut offsets: Vec<SerializedBatchOffset> = Vec::with_capacity(batch.len());
-        let mut max_lsn: Lsn = Lsn(0);
-        for (key, lsn, val_ser_size, val) in batch {
-            let relative_off = cursor.position();
-
-            val.ser_into(&mut cursor)
-                .expect("Writing into in-memory buffer is infallible");
-
-            offsets.push(SerializedBatchOffset {
-                key,
-                lsn,
-                index_entry: IndexEntry::new(IndexEntryNewArgs {
-                    base_offset: 0,
-                    batch_offset: relative_off,
-                    len: val_ser_size,
-                    will_init: val.will_init(),
-                })
-                .context("higher-level code ensures that values are within supported ranges")?,
-            });
-            max_lsn = std::cmp::max(max_lsn, lsn);
-        }
-
-        let buffer = cursor.into_inner();
-
-        // Assert that we didn't do any extra allocations while building buffer.
-        debug_assert!(buffer.len() <= buffer_size);
-
-        Ok(Self {
-            raw: buffer,
-            offsets,
-            max_lsn,
-        })
     }
 }
 
@@ -642,7 +582,7 @@ impl InMemoryLayer {
     /// TODO: it can be made retryable if we aborted the process on EphemeralFile write errors.
     pub async fn put_batch(
         &self,
-        serialized_batch: SerializedBatch,
+        serialized_batch: SerializedValueBatch,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         let mut inner = self.inner.write().await;
@@ -650,26 +590,12 @@ impl InMemoryLayer {
 
         let base_offset = inner.file.len();
 
-        let SerializedBatch {
+        let SerializedValueBatch {
             raw,
-            mut offsets,
+            metadata,
             max_lsn: _,
+            len: _,
         } = serialized_batch;
-
-        // Add the base_offset to the batch's index entries which are relative to the batch start.
-        for offset in &mut offsets {
-            let IndexEntryUnpacked {
-                will_init,
-                len,
-                pos,
-            } = offset.index_entry.unpack();
-            offset.index_entry = IndexEntry::new(IndexEntryNewArgs {
-                base_offset,
-                batch_offset: pos,
-                len: len.into_usize(),
-                will_init,
-            })?;
-        }
 
         // Write the batch to the file
         inner.file.write_raw(&raw, ctx).await?;
@@ -683,12 +609,28 @@ impl InMemoryLayer {
         assert_eq!(new_size, expected_new_len);
 
         // Update the index with the new entries
-        for SerializedBatchOffset {
-            key,
-            lsn,
-            index_entry,
-        } in offsets
-        {
+        for meta in metadata {
+            let SerializedValueMeta {
+                key,
+                lsn,
+                batch_offset,
+                len,
+                will_init,
+            } = match meta {
+                ValueMeta::Serialized(ser) => ser,
+                ValueMeta::Observed(_) => {
+                    continue;
+                }
+            };
+
+            // Add the base_offset to the batch's index entries which are relative to the batch start.
+            let index_entry = IndexEntry::new(IndexEntryNewArgs {
+                base_offset,
+                batch_offset,
+                len,
+                will_init,
+            })?;
+
             let vec_map = inner.index.entry(key).or_default();
             let old = vec_map.append_or_update_last(lsn, index_entry).unwrap().0;
             if old.is_some() {
