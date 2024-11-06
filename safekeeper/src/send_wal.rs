@@ -11,10 +11,12 @@ use crate::wal_storage::WalReader;
 use crate::GlobalTimelines;
 use anyhow::{bail, Context as AnyhowContext};
 use bytes::Bytes;
+use pageserver_api::shard::ShardIdentity;
 use parking_lot::Mutex;
 use postgres_backend::PostgresBackend;
 use postgres_backend::{CopyStreamHandlerEnd, PostgresBackendReader, QueryError};
 use postgres_ffi::get_current_timestamp;
+use postgres_ffi::waldecoder::WalStreamDecoder;
 use postgres_ffi::{TimestampTz, MAX_SEND_SIZE};
 use pq_proto::{BeMessage, WalSndKeepAlive, XLogDataBody};
 use serde::{Deserialize, Serialize};
@@ -22,6 +24,8 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use utils::failpoint_support;
 use utils::id::TenantTimelineId;
 use utils::pageserver_feedback::PageserverFeedback;
+use utils::postgres_client::{PAGESERVER_SAFEKEEPER_PROTO_VERSION, POSTGRES_PROTO_VERSION};
+use wal_decoder::models::InterpretedWalRecord;
 
 use std::cmp::{max, min};
 use std::net::SocketAddr;
@@ -377,6 +381,10 @@ impl Drop for WalSenderGuard {
 }
 
 impl SafekeeperPostgresHandler {
+    pub fn protocol_version(&self) -> u8 {
+        self.protocol_version.unwrap_or(POSTGRES_PROTO_VERSION)
+    }
+
     /// Wrapper around handle_start_replication_guts handling result. Error is
     /// handled here while we're still in walsender ttid span; with API
     /// extension, this can probably be moved into postgres_backend.
@@ -412,6 +420,7 @@ impl SafekeeperPostgresHandler {
         let appname = self.appname.clone();
 
         // Use a guard object to remove our entry from the timeline when we are done.
+        // TODO(vlad): maybe thread shard stuff into here
         let ws_guard = Arc::new(tli.get_walsenders().register(
             self.ttid,
             *pgb.get_peer_addr(),
@@ -475,9 +484,10 @@ impl SafekeeperPostgresHandler {
             tli,
         };
 
+        let protocol_version = self.protocol_version();
         let res = tokio::select! {
             // todo: add read|write .context to these errors
-            r = sender.run() => r,
+            r = sender.run(protocol_version, self.shard.as_ref()) => r,
             r = reply_reader.run() => r,
         };
 
@@ -560,7 +570,120 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> WalSender<'_, IO> {
     ///
     /// Err(CopyStreamHandlerEnd) is always returned; Result is used only for ?
     /// convenience.
-    async fn run(&mut self) -> Result<(), CopyStreamHandlerEnd> {
+    /// TODO(vlad): add a run variant which accumulates a full wall record
+    /// and interprets it.
+    async fn run(
+        &mut self,
+        protocol_version: u8,
+        shard: Option<&ShardIdentity>,
+    ) -> Result<(), CopyStreamHandlerEnd> {
+        match protocol_version {
+            POSTGRES_PROTO_VERSION => self.run_wal_sender().await,
+            PAGESERVER_SAFEKEEPER_PROTO_VERSION => {
+                self.run_interpreted_record_sender(shard.unwrap()).await
+            }
+            // TODO: make the proto version an enum
+            _ => unreachable!(),
+        }
+    }
+
+    async fn run_interpreted_record_sender(
+        &mut self,
+        shard: &ShardIdentity,
+    ) -> Result<(), CopyStreamHandlerEnd> {
+        let pg_version = self.tli.tli.get_state().await.1.server.pg_version / 10000;
+        let mut wal_decoder = WalStreamDecoder::new(self.start_pos, pg_version);
+
+        loop {
+            // Wait for the next portion if it is not there yet, or just
+            // update our end of WAL available for sending value, we
+            // communicate it to the receiver.
+            self.wait_wal().await?;
+            assert!(
+                self.end_pos > self.start_pos,
+                "nothing to send after waiting for WAL"
+            );
+
+            // try to send as much as available, capped by MAX_SEND_SIZE
+            let mut chunk_end_pos = self.start_pos + MAX_SEND_SIZE as u64;
+            // if we went behind available WAL, back off
+            if chunk_end_pos >= self.end_pos {
+                chunk_end_pos = self.end_pos;
+            } else {
+                // If sending not up to end pos, round down to page boundary to
+                // avoid breaking WAL record not at page boundary, as protocol
+                // demands. See walsender.c (XLogSendPhysical).
+                chunk_end_pos = chunk_end_pos
+                    .checked_sub(chunk_end_pos.block_offset())
+                    .unwrap();
+            }
+            let send_size = (chunk_end_pos.0 - self.start_pos.0) as usize;
+            let send_buf = &mut self.send_buf[..send_size];
+            let send_size: usize;
+            {
+                // If uncommitted part is being pulled, check that the term is
+                // still the expected one.
+                let _term_guard = if let Some(t) = self.term {
+                    Some(self.tli.acquire_term(t).await?)
+                } else {
+                    None
+                };
+                // Read WAL into buffer. send_size can be additionally capped to
+                // segment boundary here.
+                send_size = self.wal_reader.read(send_buf).await?
+            };
+            let send_buf = &send_buf[..send_size];
+
+            wal_decoder.feed_bytes(send_buf);
+
+            // TODO(vlad): implement error handling here
+            while let Some((record_end_lsn, recdata)) = wal_decoder.poll_decode().unwrap() {
+                assert!(record_end_lsn.is_aligned());
+
+                // Deserialize and interpret WAL record
+                let interpreted = InterpretedWalRecord::from_bytes_filtered(
+                    recdata,
+                    shard,
+                    record_end_lsn,
+                    pg_version,
+                )
+                .unwrap();
+
+                let mut buf = Vec::new();
+                interpreted.ser_into(&mut buf).unwrap();
+
+                self.pgb
+                    .write_message(&BeMessage::InterpretedWalRecord(buf.as_slice()))
+                    .await?;
+            }
+
+            // and send it
+            // self.pgb
+            //     .write_message(&BeMessage::XLogData(XLogDataBody {
+            //         wal_start: self.start_pos.0,
+            //         wal_end: self.end_pos.0,
+            //         timestamp: get_current_timestamp(),
+            //         data: send_buf,
+            //     }))
+            //     .await?;
+
+            // if let Some(appname) = &self.appname {
+            //     if appname == "replica" {
+            //         failpoint_support::sleep_millis_async!("sk-send-wal-replica-sleep");
+            //     }
+            // }
+            // trace!(
+            //     "sent {} bytes of WAL {}-{}",
+            //     send_size,
+            //     self.start_pos,
+            //     self.start_pos + send_size as u64
+            // );
+
+            self.start_pos += send_size as u64;
+        }
+    }
+
+    async fn run_wal_sender(&mut self) -> Result<(), CopyStreamHandlerEnd> {
         loop {
             // Wait for the next portion if it is not there yet, or just
             // update our end of WAL available for sending value, we

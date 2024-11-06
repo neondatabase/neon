@@ -13,3 +13,4 @@ rand.workspace = true
 tokio = { workspace = true, features = ["io-util"] }
 thiserror.workspace = true
 serde.workspace = true
+# wal_decoder.workspace = true

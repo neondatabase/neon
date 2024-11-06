@@ -562,6 +562,7 @@ pub enum BeMessage<'a> {
         options: &'a [&'a str],
     },
     KeepAlive(WalSndKeepAlive),
+    InterpretedWalRecord(&'a [u8]),
 }
 
 /// Common shorthands.
@@ -995,6 +996,14 @@ impl BeMessage<'_> {
                     }
                     Ok(())
                 })?
+            }
+
+            BeMessage::InterpretedWalRecord(rec) => {
+                buf.put_u8(b'd'); // arbitrary?
+                write_body(buf, |buf| {
+                    buf.put_u8(b'0');
+                    buf.put_slice(rec);
+                });
             }
         }
         Ok(())

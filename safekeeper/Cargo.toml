@@ -58,6 +58,7 @@ sd-notify.workspace = true
 storage_broker.workspace = true
 tokio-stream.workspace = true
 utils.workspace = true
+wal_decoder.workspace = true
 
 workspace_hack.workspace = true
 

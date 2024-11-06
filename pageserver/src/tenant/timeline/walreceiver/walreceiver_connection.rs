@@ -36,7 +36,7 @@ use crate::{
 use postgres_backend::is_expected_io_error;
 use postgres_connection::PgConnectionConfig;
 use postgres_ffi::waldecoder::WalStreamDecoder;
-use utils::{id::NodeId, lsn::Lsn};
+use utils::{bin_ser::BeSer, id::NodeId, lsn::Lsn};
 use utils::{pageserver_feedback::PageserverFeedback, sync::gate::GateError};
 
 /// Status of the connection.
@@ -278,6 +278,7 @@ pub(super) async fn handle_walreceiver_connection(
         // fails (e.g. in walingest), we still want to know latests LSNs from the safekeeper.
         match &replication_message {
             ReplicationMessage::XLogData(xlog_data) => {
+                // TODO(vlad) Is this crap needed?
                 connection_status.latest_connection_update = now;
                 connection_status.commit_lsn = Some(Lsn::from(xlog_data.wal_end()));
                 connection_status.streaming_lsn = Some(Lsn::from(
@@ -299,6 +300,20 @@ pub(super) async fn handle_walreceiver_connection(
         }
 
         let status_update = match replication_message {
+            ReplicationMessage::RawInterpretedWalRecord(raw_interpreted) => {
+                let interpreted = InterpretedWalRecord::des(&raw_interpreted).unwrap();
+                let end_lsn = interpreted.end_lsn;
+
+                let mut modification = timeline.begin_modification(end_lsn);
+                walingest
+                    .ingest_record(interpreted, &mut modification, &ctx)
+                    .await
+                    .with_context(|| format!("could not ingest record at {}", end_lsn))?;
+                modification.commit(&ctx).await?;
+
+                Some(end_lsn)
+            }
+
             ReplicationMessage::XLogData(xlog_data) => {
                 // Pass the WAL data to the decoder, and see if we can decode
                 // more records as a result.

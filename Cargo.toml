@@ -214,10 +214,14 @@ log = "0.4"
 #
 # When those proxy changes are re-applied (see PR #8747), we can switch using
 # the tip of the 'neon' branch again.
-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev = "20031d7a9ee1addeae6e0968e3899ae6bf01cee2" }
-postgres-protocol = { git = "https://github.com/neondatabase/rust-postgres.git", rev = "20031d7a9ee1addeae6e0968e3899ae6bf01cee2" }
-postgres-types = { git = "https://github.com/neondatabase/rust-postgres.git", rev = "20031d7a9ee1addeae6e0968e3899ae6bf01cee2" }
-tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev = "20031d7a9ee1addeae6e0968e3899ae6bf01cee2" }
+# postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev = "20031d7a9ee1addeae6e0968e3899ae6bf01cee2" }
+# postgres-protocol = { git = "https://github.com/neondatabase/rust-postgres.git", rev = "20031d7a9ee1addeae6e0968e3899ae6bf01cee2" }
+# postgres-types = { git = "https://github.com/neondatabase/rust-postgres.git", rev = "20031d7a9ee1addeae6e0968e3899ae6bf01cee2" }
+# tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev = "20031d7a9ee1addeae6e0968e3899ae6bf01cee2" }
+postgres = { path = "../../.cargo/git/checkouts/rust-postgres-e2c00088c8e2b112/20031d7/postgres" }
+postgres-protocol = { path = "../../.cargo/git/checkouts/rust-postgres-e2c00088c8e2b112/20031d7/postgres-protocol" }
+postgres-types = { path = "../../.cargo/git/checkouts/rust-postgres-e2c00088c8e2b112/20031d7/postgres-types" }
+tokio-postgres = { path = "../../.cargo/git/checkouts/rust-postgres-e2c00088c8e2b112/20031d7/tokio-postgres" }
 
 ## Local libraries
 compute_api = { version = "0.1", path = "./libs/compute_api/" }
@@ -255,7 +259,8 @@ tonic-build = "0.12"
 [patch.crates-io]
 
 # Needed to get `tokio-postgres-rustls` to depend on our fork.
-tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev = "20031d7a9ee1addeae6e0968e3899ae6bf01cee2" }
+tokio-postgres = { path = "../../.cargo/git/checkouts/rust-postgres-e2c00088c8e2b112/20031d7/tokio-postgres" }
+# tokio-postgres = { git = "https://github.com/neondatabase/rust-postgres.git", rev = "20031d7a9ee1addeae6e0968e3899ae6bf01cee2" }
 
 ################# Binary contents sections
 

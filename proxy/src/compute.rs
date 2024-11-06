@@ -316,6 +316,7 @@ impl ConnCfg {
         let client_config = client_config.with_no_client_auth();
 
         let mut mk_tls = tokio_postgres_rustls::MakeRustlsConnect::new(client_config);
+        // TODO(vlad): que?
         let tls = <MakeRustlsConnect as MakeTlsConnect<tokio::net::TcpStream>>::make_tls_connect(
             &mut mk_tls,
             host,
