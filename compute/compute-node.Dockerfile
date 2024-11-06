@@ -1151,8 +1151,8 @@ COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
 # The topmost commit in the `neon` branch at the time of writing this
 # https://github.com/Mooncake-Labs/pg_mooncake/commits/neon/
-# https://github.com/Mooncake-Labs/pg_mooncake/commit/568b5a82b5fc16136bdf4ca5aac3e0cc261ab48d
-ENV PG_MOONCAKE_VERSION=568b5a82b5fc16136bdf4ca5aac3e0cc261ab48d
+# https://github.com/Mooncake-Labs/pg_mooncake/commit/077c92c452bb6896a7b7776ee95f039984f076af
+ENV PG_MOONCAKE_VERSION=077c92c452bb6896a7b7776ee95f039984f076af
 ENV PATH="/usr/local/pgsql/bin/:$PATH"
 
 RUN case "${PG_VERSION}" in \
