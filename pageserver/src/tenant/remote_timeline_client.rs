@@ -1445,7 +1445,7 @@ impl RemoteTimelineClient {
         let remote_path = remote_layer_path(
             &self.tenant_shard_id.tenant_id,
             &self.timeline_id,
-            self.tenant_shard_id.to_index(),
+            uploaded.metadata().shard,
             &uploaded.layer_desc().layer_name(),
             uploaded.metadata().generation,
         );
