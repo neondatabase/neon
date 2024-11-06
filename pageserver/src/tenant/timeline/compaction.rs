@@ -2461,7 +2461,10 @@ impl TimelineAdaptor {
             )
             .await?;
 
-        if let Some(image_layer) = image {
+        if let Some(image_layer_writer) = image {
+            let (desc, path) = image_layer_writer.finish(ctx).await?;
+            let image_layer =
+                Layer::finish_creating(self.timeline.conf, &self.timeline, desc, &path)?;
             self.new_images.push(image_layer);
         }
 

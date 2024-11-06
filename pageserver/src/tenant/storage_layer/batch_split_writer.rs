@@ -120,6 +120,8 @@ impl BatchLayerWriter {
                         writer.finish(layer_key.key_range.end, ctx).await
                     }
                     LayerWriterWrapper::Image(writer) => {
+                        assert_eq!(writer.key_range().start, layer_key.key_range.start);
+                        assert_eq!(writer.lsn(), layer_key.lsn_range.start);
                         writer
                             .finish_with_end_key(layer_key.key_range.end, ctx)
                             .await
