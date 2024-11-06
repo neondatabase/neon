@@ -34,7 +34,7 @@ criterion_main!(benches);
 fn bench_process_msg(c: &mut Criterion) {
     let mut g = c.benchmark_group("process_msg");
     for fsync in [false, true] {
-        for size in [8, KB, 8 * KB, 128 * KB] {
+        for size in [8, KB, 8 * KB, 128 * KB, MB] {
             // Kind of weird to change the group throughput per benchmark, but it's the only way to
             // vary it per benchmark. It works.
             g.throughput(criterion::Throughput::Bytes(size as u64));
