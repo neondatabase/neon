@@ -72,7 +72,6 @@ impl NeonControlPlaneClient {
             .caches
             .endpoints_cache
             .is_valid(ctx, &user_info.endpoint.normalize())
-            .await
         {
             info!("endpoint is not valid, skipping the request");
             return Ok(AuthInfo::default());
@@ -145,7 +144,6 @@ impl NeonControlPlaneClient {
             .caches
             .endpoints_cache
             .is_valid(ctx, &endpoint.normalize())
-            .await
         {
             return Err(GetEndpointJwksError::EndpointNotFound);
         }

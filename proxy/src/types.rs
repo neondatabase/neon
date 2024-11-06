@@ -64,24 +64,28 @@ macro_rules! smol_str_wrapper {
 }
 
 const POOLER_SUFFIX: &str = "-pooler";
+pub(crate) const LOCAL_PROXY_SUFFIX: &str = "-local-proxy";
 
 impl EndpointId {
     #[must_use]
-    pub fn normalize(&self) -> Self {
+    fn normalize_str(&self) -> &str {
         if let Some(stripped) = self.as_ref().strip_suffix(POOLER_SUFFIX) {
-            stripped.into()
+            stripped
+        } else if let Some(stripped) = self.as_ref().strip_suffix(LOCAL_PROXY_SUFFIX) {
+            stripped
         } else {
-            self.clone()
+            self
         }
     }
 
     #[must_use]
+    pub fn normalize(&self) -> Self {
+        self.normalize_str().into()
+    }
+
+    #[must_use]
     pub fn normalize_intern(&self) -> EndpointIdInt {
-        if let Some(stripped) = self.as_ref().strip_suffix(POOLER_SUFFIX) {
-            EndpointIdTag::get_interner().get_or_intern(stripped)
-        } else {
-            self.into()
-        }
+        EndpointIdTag::get_interner().get_or_intern(self.normalize_str())
     }
 }
 
@@ -109,14 +113,5 @@ impl EndpointId {
     }
     pub(crate) fn is_branch(&self) -> bool {
         self.0.starts_with("br-")
-    }
-    // pub(crate) fn is_project(&self) -> bool {
-    //     !self.is_endpoint() && !self.is_branch()
-    // }
-    pub(crate) fn as_branch(&self) -> BranchId {
-        BranchId(self.0.clone())
-    }
-    pub(crate) fn as_project(&self) -> ProjectId {
-        ProjectId(self.0.clone())
     }
 }
