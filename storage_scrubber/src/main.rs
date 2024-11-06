@@ -224,12 +224,6 @@ async fn main() -> anyhow::Result<()> {
             output_path,
             concurrency,
         } => {
-            let bucket_config = match bucket_config {
-                BucketConfig::Legacy(config) => config,
-                BucketConfig::RemoteConfig(_config) => {
-                    panic!("Generic remote config is not supported for snapshot downloading")
-                }
-            };
             let downloader =
                 SnapshotDownloader::new(bucket_config, tenant_id, output_path, concurrency).await?;
             downloader.download().await
