@@ -191,7 +191,7 @@ fn bench_wal_acceptor_throughput(c: &mut Criterion) {
     g.throughput(criterion::Throughput::Bytes(VOLUME as u64));
 
     for fsync in [false, true] {
-        for size in [KB, 4 * KB, 128 * KB, MB] {
+        for size in [KB, 8 * KB, 128 * KB, MB] {
             assert_eq!(VOLUME % size, 0, "volume must be divisible by size");
             let count = VOLUME / size;
             g.bench_function(format!("fsync={fsync}/size={size}"), |b| {
