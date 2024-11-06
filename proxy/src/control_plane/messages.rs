@@ -10,14 +10,14 @@ use crate::proxy::retry::CouldRetry;
 /// Generic error response with human-readable description.
 /// Note that we can't always present it to user as is.
 #[derive(Debug, Deserialize, Clone)]
-pub(crate) struct ControlPlaneError {
+pub(crate) struct ControlPlaneErrorMessage {
     pub(crate) error: Box<str>,
     #[serde(skip)]
     pub(crate) http_status_code: http::StatusCode,
     pub(crate) status: Option<Status>,
 }
 
-impl ControlPlaneError {
+impl ControlPlaneErrorMessage {
     pub(crate) fn get_reason(&self) -> Reason {
         self.status
             .as_ref()
@@ -26,7 +26,7 @@ impl ControlPlaneError {
     }
 
     pub(crate) fn get_user_facing_message(&self) -> String {
-        use super::provider::errors::REQUEST_FAILED;
+        use super::errors::REQUEST_FAILED;
         self.status
             .as_ref()
             .and_then(|s| s.details.user_facing_message.as_ref())
@@ -51,7 +51,7 @@ impl ControlPlaneError {
     }
 }
 
-impl Display for ControlPlaneError {
+impl Display for ControlPlaneErrorMessage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let msg: &str = self
             .status
@@ -62,7 +62,7 @@ impl Display for ControlPlaneError {
     }
 }
 
-impl CouldRetry for ControlPlaneError {
+impl CouldRetry for ControlPlaneErrorMessage {
     fn could_retry(&self) -> bool {
         // If the error message does not have a status,
         // the error is unknown and probably should not retry automatically

@@ -11,7 +11,8 @@
 
 use std::collections::HashMap;
 use std::pin::pin;
-use std::sync::{Arc, Weak};
+use std::sync::atomic::AtomicUsize;
+use std::sync::Arc;
 use std::task::{ready, Poll};
 use std::time::Duration;
 
@@ -26,177 +27,42 @@ use signature::Signer;
 use tokio::time::Instant;
 use tokio_postgres::tls::NoTlsStream;
 use tokio_postgres::types::ToSql;
-use tokio_postgres::{AsyncMessage, ReadyForQueryStatus, Socket};
+use tokio_postgres::{AsyncMessage, Socket};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, info_span, warn, Instrument, Span};
+use tracing::{error, info, info_span, warn, Instrument};
 
 use super::backend::HttpConnError;
-use super::conn_pool_lib::{ClientInnerExt, ConnInfo};
+use super::conn_pool_lib::{
+    Client, ClientDataEnum, ClientInnerCommon, ClientInnerExt, ConnInfo, DbUserConn,
+    EndpointConnPool,
+};
 use crate::context::RequestMonitoring;
 use crate::control_plane::messages::{ColdStartInfo, MetricsAuxInfo};
 use crate::metrics::Metrics;
-use crate::types::{DbName, RoleName};
-use crate::usage_metrics::{Ids, MetricCounter, USAGE_METRICS};
 
 pub(crate) const EXT_NAME: &str = "pg_session_jwt";
 pub(crate) const EXT_VERSION: &str = "0.1.2";
 pub(crate) const EXT_SCHEMA: &str = "auth";
 
-struct ConnPoolEntry<C: ClientInnerExt> {
-    conn: ClientInner<C>,
-    _last_access: std::time::Instant,
+pub(crate) struct ClientDataLocal {
+    session: tokio::sync::watch::Sender<uuid::Uuid>,
+    cancel: CancellationToken,
+    key: SigningKey,
+    jti: u64,
 }
 
-// Per-endpoint connection pool, (dbname, username) -> DbUserConnPool
-// Number of open connections is limited by the `max_conns_per_endpoint`.
-pub(crate) struct EndpointConnPool<C: ClientInnerExt> {
-    pools: HashMap<(DbName, RoleName), DbUserConnPool<C>>,
-    total_conns: usize,
-    max_conns: usize,
-    global_pool_size_max_conns: usize,
-}
-
-impl<C: ClientInnerExt> EndpointConnPool<C> {
-    fn get_conn_entry(&mut self, db_user: (DbName, RoleName)) -> Option<ConnPoolEntry<C>> {
-        let Self {
-            pools, total_conns, ..
-        } = self;
-        pools
-            .get_mut(&db_user)
-            .and_then(|pool_entries| pool_entries.get_conn_entry(total_conns))
+impl ClientDataLocal {
+    pub fn session(&mut self) -> &mut tokio::sync::watch::Sender<uuid::Uuid> {
+        &mut self.session
     }
 
-    fn remove_client(&mut self, db_user: (DbName, RoleName), conn_id: uuid::Uuid) -> bool {
-        let Self {
-            pools, total_conns, ..
-        } = self;
-        if let Some(pool) = pools.get_mut(&db_user) {
-            let old_len = pool.conns.len();
-            pool.conns.retain(|conn| conn.conn.conn_id != conn_id);
-            let new_len = pool.conns.len();
-            let removed = old_len - new_len;
-            if removed > 0 {
-                Metrics::get()
-                    .proxy
-                    .http_pool_opened_connections
-                    .get_metric()
-                    .dec_by(removed as i64);
-            }
-            *total_conns -= removed;
-            removed > 0
-        } else {
-            false
-        }
-    }
-
-    fn put(pool: &RwLock<Self>, conn_info: &ConnInfo, client: ClientInner<C>) {
-        let conn_id = client.conn_id;
-
-        if client.is_closed() {
-            info!(%conn_id, "local_pool: throwing away connection '{conn_info}' because connection is closed");
-            return;
-        }
-        let global_max_conn = pool.read().global_pool_size_max_conns;
-        if pool.read().total_conns >= global_max_conn {
-            info!(%conn_id, "local_pool: throwing away connection '{conn_info}' because pool is full");
-            return;
-        }
-
-        // return connection to the pool
-        let mut returned = false;
-        let mut per_db_size = 0;
-        let total_conns = {
-            let mut pool = pool.write();
-
-            if pool.total_conns < pool.max_conns {
-                let pool_entries = pool.pools.entry(conn_info.db_and_user()).or_default();
-                pool_entries.conns.push(ConnPoolEntry {
-                    conn: client,
-                    _last_access: std::time::Instant::now(),
-                });
-
-                returned = true;
-                per_db_size = pool_entries.conns.len();
-
-                pool.total_conns += 1;
-                Metrics::get()
-                    .proxy
-                    .http_pool_opened_connections
-                    .get_metric()
-                    .inc();
-            }
-
-            pool.total_conns
-        };
-
-        // do logging outside of the mutex
-        if returned {
-            info!(%conn_id, "local_pool: returning connection '{conn_info}' back to the pool, total_conns={total_conns}, for this (db, user)={per_db_size}");
-        } else {
-            info!(%conn_id, "local_pool: throwing away connection '{conn_info}' because pool is full, total_conns={total_conns}");
-        }
-    }
-}
-
-impl<C: ClientInnerExt> Drop for EndpointConnPool<C> {
-    fn drop(&mut self) {
-        if self.total_conns > 0 {
-            Metrics::get()
-                .proxy
-                .http_pool_opened_connections
-                .get_metric()
-                .dec_by(self.total_conns as i64);
-        }
-    }
-}
-
-pub(crate) struct DbUserConnPool<C: ClientInnerExt> {
-    conns: Vec<ConnPoolEntry<C>>,
-
-    // true if we have definitely installed the extension and
-    // granted the role access to the auth schema.
-    initialized: bool,
-}
-
-impl<C: ClientInnerExt> Default for DbUserConnPool<C> {
-    fn default() -> Self {
-        Self {
-            conns: Vec::new(),
-            initialized: false,
-        }
-    }
-}
-
-impl<C: ClientInnerExt> DbUserConnPool<C> {
-    fn clear_closed_clients(&mut self, conns: &mut usize) -> usize {
-        let old_len = self.conns.len();
-
-        self.conns.retain(|conn| !conn.conn.is_closed());
-
-        let new_len = self.conns.len();
-        let removed = old_len - new_len;
-        *conns -= removed;
-        removed
-    }
-
-    fn get_conn_entry(&mut self, conns: &mut usize) -> Option<ConnPoolEntry<C>> {
-        let mut removed = self.clear_closed_clients(conns);
-        let conn = self.conns.pop();
-        if conn.is_some() {
-            *conns -= 1;
-            removed += 1;
-        }
-        Metrics::get()
-            .proxy
-            .http_pool_opened_connections
-            .get_metric()
-            .dec_by(removed as i64);
-        conn
+    pub fn cancel(&mut self) {
+        self.cancel.cancel();
     }
 }
 
 pub(crate) struct LocalConnPool<C: ClientInnerExt> {
-    global_pool: RwLock<EndpointConnPool<C>>,
+    global_pool: Arc<RwLock<EndpointConnPool<C>>>,
 
     config: &'static crate::config::HttpConfig,
 }
@@ -204,12 +70,14 @@ pub(crate) struct LocalConnPool<C: ClientInnerExt> {
 impl<C: ClientInnerExt> LocalConnPool<C> {
     pub(crate) fn new(config: &'static crate::config::HttpConfig) -> Arc<Self> {
         Arc::new(Self {
-            global_pool: RwLock::new(EndpointConnPool {
-                pools: HashMap::new(),
-                total_conns: 0,
-                max_conns: config.pool_options.max_conns_per_endpoint,
-                global_pool_size_max_conns: config.pool_options.max_total_conns,
-            }),
+            global_pool: Arc::new(RwLock::new(EndpointConnPool::new(
+                HashMap::new(),
+                0,
+                config.pool_options.max_conns_per_endpoint,
+                Arc::new(AtomicUsize::new(0)),
+                config.pool_options.max_total_conns,
+                String::from("local_pool"),
+            ))),
             config,
         })
     }
@@ -222,7 +90,7 @@ impl<C: ClientInnerExt> LocalConnPool<C> {
         self: &Arc<Self>,
         ctx: &RequestMonitoring,
         conn_info: &ConnInfo,
-    ) -> Result<Option<LocalClient<C>>, HttpConnError> {
+    ) -> Result<Option<Client<C>>, HttpConnError> {
         let client = self
             .global_pool
             .write()
@@ -230,12 +98,14 @@ impl<C: ClientInnerExt> LocalConnPool<C> {
             .map(|entry| entry.conn);
 
         // ok return cached connection if found and establish a new one otherwise
-        if let Some(client) = client {
-            if client.is_closed() {
+        if let Some(mut client) = client {
+            if client.inner.is_closed() {
                 info!("local_pool: cached connection '{conn_info}' is closed, opening a new one");
                 return Ok(None);
             }
-            tracing::Span::current().record("conn_id", tracing::field::display(client.conn_id));
+
+            tracing::Span::current()
+                .record("conn_id", tracing::field::display(client.get_conn_id()));
             tracing::Span::current().record(
                 "pid",
                 tracing::field::display(client.inner.get_process_id()),
@@ -244,47 +114,59 @@ impl<C: ClientInnerExt> LocalConnPool<C> {
                 cold_start_info = ColdStartInfo::HttpPoolHit.as_str(),
                 "local_pool: reusing connection '{conn_info}'"
             );
-            client.session.send(ctx.session_id())?;
+
+            match client.get_data() {
+                ClientDataEnum::Local(data) => {
+                    data.session().send(ctx.session_id())?;
+                }
+
+                ClientDataEnum::Remote(data) => {
+                    data.session().send(ctx.session_id())?;
+                }
+                ClientDataEnum::Http(_) => (),
+            }
+
             ctx.set_cold_start_info(ColdStartInfo::HttpPoolHit);
             ctx.success();
-            return Ok(Some(LocalClient::new(
+
+            return Ok(Some(Client::new(
                 client,
                 conn_info.clone(),
-                Arc::downgrade(self),
+                Arc::downgrade(&self.global_pool),
             )));
         }
         Ok(None)
     }
 
     pub(crate) fn initialized(self: &Arc<Self>, conn_info: &ConnInfo) -> bool {
-        self.global_pool
-            .read()
-            .pools
-            .get(&conn_info.db_and_user())
-            .map_or(false, |pool| pool.initialized)
+        if let Some(pool) = self.global_pool.read().get_pool(conn_info.db_and_user()) {
+            return pool.is_initialized();
+        }
+        false
     }
 
     pub(crate) fn set_initialized(self: &Arc<Self>, conn_info: &ConnInfo) {
-        self.global_pool
+        if let Some(pool) = self
+            .global_pool
             .write()
-            .pools
-            .entry(conn_info.db_and_user())
-            .or_default()
-            .initialized = true;
+            .get_pool_mut(conn_info.db_and_user())
+        {
+            pool.set_initialized();
+        }
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn poll_client(
-    global_pool: Arc<LocalConnPool<tokio_postgres::Client>>,
+pub(crate) fn poll_client<C: ClientInnerExt>(
+    global_pool: Arc<LocalConnPool<C>>,
     ctx: &RequestMonitoring,
     conn_info: ConnInfo,
-    client: tokio_postgres::Client,
+    client: C,
     mut connection: tokio_postgres::Connection<Socket, NoTlsStream>,
     key: SigningKey,
     conn_id: uuid::Uuid,
     aux: MetricsAuxInfo,
-) -> LocalClient<tokio_postgres::Client> {
+) -> Client<C> {
     let conn_gauge = Metrics::get().proxy.db_connections.guard(ctx.protocol());
     let mut session_id = ctx.session_id();
     let (tx, mut rx) = tokio::sync::watch::channel(session_id);
@@ -377,110 +259,46 @@ pub(crate) fn poll_client(
     }
     .instrument(span));
 
-    let inner = ClientInner {
+    let inner = ClientInnerCommon {
         inner: client,
-        session: tx,
-        cancel,
         aux,
         conn_id,
-        key,
-        jti: 0,
+        data: ClientDataEnum::Local(ClientDataLocal {
+            session: tx,
+            cancel,
+            key,
+            jti: 0,
+        }),
     };
-    LocalClient::new(inner, conn_info, pool_clone)
+
+    Client::new(
+        inner,
+        conn_info,
+        Arc::downgrade(&pool_clone.upgrade().unwrap().global_pool),
+    )
 }
 
-pub(crate) struct ClientInner<C: ClientInnerExt> {
-    inner: C,
-    session: tokio::sync::watch::Sender<uuid::Uuid>,
-    cancel: CancellationToken,
-    aux: MetricsAuxInfo,
-    conn_id: uuid::Uuid,
-
-    // needed for pg_session_jwt state
-    key: SigningKey,
-    jti: u64,
-}
-
-impl<C: ClientInnerExt> Drop for ClientInner<C> {
-    fn drop(&mut self) {
-        // on client drop, tell the conn to shut down
-        self.cancel.cancel();
-    }
-}
-
-impl<C: ClientInnerExt> ClientInner<C> {
-    pub(crate) fn is_closed(&self) -> bool {
-        self.inner.is_closed()
-    }
-}
-
-impl ClientInner<tokio_postgres::Client> {
+impl ClientInnerCommon<tokio_postgres::Client> {
     pub(crate) async fn set_jwt_session(&mut self, payload: &[u8]) -> Result<(), HttpConnError> {
-        self.jti += 1;
-        let token = resign_jwt(&self.key, payload, self.jti)?;
+        if let ClientDataEnum::Local(local_data) = &mut self.data {
+            local_data.jti += 1;
+            let token = resign_jwt(&local_data.key, payload, local_data.jti)?;
 
-        // initiates the auth session
-        self.inner.simple_query("discard all").await?;
-        self.inner
-            .query(
-                "select auth.jwt_session_init($1)",
-                &[&token as &(dyn ToSql + Sync)],
-            )
-            .await?;
+            // initiates the auth session
+            self.inner.simple_query("discard all").await?;
+            self.inner
+                .query(
+                    "select auth.jwt_session_init($1)",
+                    &[&token as &(dyn ToSql + Sync)],
+                )
+                .await?;
 
-        let pid = self.inner.get_process_id();
-        info!(pid, jti = self.jti, "user session state init");
-
-        Ok(())
-    }
-}
-
-pub(crate) struct LocalClient<C: ClientInnerExt> {
-    span: Span,
-    inner: Option<ClientInner<C>>,
-    conn_info: ConnInfo,
-    pool: Weak<LocalConnPool<C>>,
-}
-
-pub(crate) struct Discard<'a, C: ClientInnerExt> {
-    conn_info: &'a ConnInfo,
-    pool: &'a mut Weak<LocalConnPool<C>>,
-}
-
-impl<C: ClientInnerExt> LocalClient<C> {
-    pub(self) fn new(
-        inner: ClientInner<C>,
-        conn_info: ConnInfo,
-        pool: Weak<LocalConnPool<C>>,
-    ) -> Self {
-        Self {
-            inner: Some(inner),
-            span: Span::current(),
-            conn_info,
-            pool,
+            let pid = self.inner.get_process_id();
+            info!(pid, jti = local_data.jti, "user session state init");
+            Ok(())
+        } else {
+            panic!("unexpected client data type");
         }
-    }
-
-    pub(crate) fn client_inner(&mut self) -> (&mut ClientInner<C>, Discard<'_, C>) {
-        let Self {
-            inner,
-            pool,
-            conn_info,
-            span: _,
-        } = self;
-        let inner_m = inner.as_mut().expect("client inner should not be removed");
-        (inner_m, Discard { conn_info, pool })
-    }
-
-    pub(crate) fn inner(&mut self) -> (&mut C, Discard<'_, C>) {
-        let Self {
-            inner,
-            pool,
-            conn_info,
-            span: _,
-        } = self;
-        let inner = inner.as_mut().expect("client inner should not be removed");
-        (&mut inner.inner, Discard { conn_info, pool })
     }
 }
 
@@ -545,58 +363,6 @@ fn sign_jwt(sk: &SigningKey, payload: &[u8]) -> String {
     debug_assert_eq!(jwt.capacity(), cap, "the jwt capacity should not change");
 
     jwt
-}
-
-impl<C: ClientInnerExt> LocalClient<C> {
-    pub(crate) fn metrics(&self) -> Arc<MetricCounter> {
-        let aux = &self.inner.as_ref().unwrap().aux;
-        USAGE_METRICS.register(Ids {
-            endpoint_id: aux.endpoint_id,
-            branch_id: aux.branch_id,
-        })
-    }
-
-    fn do_drop(&mut self) -> Option<impl FnOnce() + use<C>> {
-        let conn_info = self.conn_info.clone();
-        let client = self
-            .inner
-            .take()
-            .expect("client inner should not be removed");
-        if let Some(conn_pool) = std::mem::take(&mut self.pool).upgrade() {
-            let current_span = self.span.clone();
-            // return connection to the pool
-            return Some(move || {
-                let _span = current_span.enter();
-                EndpointConnPool::put(&conn_pool.global_pool, &conn_info, client);
-            });
-        }
-        None
-    }
-}
-
-impl<C: ClientInnerExt> Drop for LocalClient<C> {
-    fn drop(&mut self) {
-        if let Some(drop) = self.do_drop() {
-            tokio::task::spawn_blocking(drop);
-        }
-    }
-}
-
-impl<C: ClientInnerExt> Discard<'_, C> {
-    pub(crate) fn check_idle(&mut self, status: ReadyForQueryStatus) {
-        let conn_info = &self.conn_info;
-        if status != ReadyForQueryStatus::Idle && std::mem::take(self.pool).strong_count() > 0 {
-            info!(
-                "local_pool: throwing away connection '{conn_info}' because connection is not idle"
-            );
-        }
-    }
-    pub(crate) fn discard(&mut self) {
-        let conn_info = &self.conn_info;
-        if std::mem::take(self.pool).strong_count() > 0 {
-            info!("local_pool: throwing away connection '{conn_info}' because connection is potentially in a broken state");
-        }
-    }
 }
 
 #[cfg(test)]
