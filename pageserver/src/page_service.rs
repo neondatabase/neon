@@ -1429,7 +1429,7 @@ impl PageServiceCmd {
                 if cmd2 == "lsn" {
                     Ok(Self::LeaseLsn(LeaseLsnCmd::parse(other)?))
                 } else {
-                    bail!("invalid lease command: {}", cmd);
+                    bail!("invalid lease command: {cmd}");
                 }
             }
             "set" => Ok(Self::Set),
