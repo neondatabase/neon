@@ -7,7 +7,6 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from queue import Empty, Queue
 from threading import Barrier
-from typing import Tuple
 
 import pytest
 from fixtures.common_types import Lsn, TimelineArchivalState, TimelineId
@@ -580,7 +579,7 @@ def test_compaction_induced_by_detaches_in_history(
 
 @pytest.mark.parametrize("shards_initial_after", [(1, 1), (2, 2), (1, 4)])
 def test_timeline_ancestor_detach_idempotent_success(
-    neon_env_builder: NeonEnvBuilder, shards_initial_after: Tuple[int, int]
+    neon_env_builder: NeonEnvBuilder, shards_initial_after: tuple[int, int]
 ):
     shards_initial = shards_initial_after[0]
     shards_after = shards_initial_after[1]
@@ -612,9 +611,7 @@ def test_timeline_ancestor_detach_idempotent_success(
         client = env.pageserver.http_client()
 
     # Write some data so that we have some layers to copy
-    with env.endpoints.create_start(
-        "main", tenant_id=env.initial_tenant
-    ) as endpoint:
+    with env.endpoints.create_start("main", tenant_id=env.initial_tenant) as endpoint:
         endpoint.safe_psql_many(
             [
                 "CREATE TABLE foo(key serial primary key, t text default 'data_content')",
