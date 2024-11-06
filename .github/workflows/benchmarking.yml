@@ -62,7 +62,7 @@ jobs:
       PG_CONFIG: /tmp/neon/pg_install/v16/bin/pg_config
     runs-on: [ self-hosted, us-east-2, x64 ]
     container:
-      image: neondatabase/build-tools:62b0e0c53ed967d40b302d322ee0aa76626cac5f3d20b47bed6b7ee8350c78d2-bookworm-x64
+      image: neondatabase/build-tools:2bd63b9221863a3d6a791da2257a865c9eaeded538fafe4992631a707dfad2a0-bookworm-x64
       credentials:
         username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
         password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
