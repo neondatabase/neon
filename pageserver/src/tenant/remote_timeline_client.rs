@@ -1486,7 +1486,7 @@ impl RemoteTimelineClient {
             &adopted
                 .get_timeline_id()
                 .expect("Source timeline should be alive"),
-            self.tenant_shard_id.to_index(),
+            adopted.metadata().shard,
             &adopted.layer_desc().layer_name(),
             adopted.metadata().generation,
         );
