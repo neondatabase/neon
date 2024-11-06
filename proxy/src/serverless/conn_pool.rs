@@ -18,7 +18,9 @@ use {
     std::{sync::atomic, time::Duration},
 };
 
-use super::conn_pool_lib::{Client, ClientInnerExt, ConnInfo, GlobalConnPool};
+use super::conn_pool_lib::{
+    Client, ClientDataEnum, ClientInnerCommon, ClientInnerExt, ConnInfo, GlobalConnPool,
+};
 use crate::context::RequestMonitoring;
 use crate::control_plane::messages::MetricsAuxInfo;
 use crate::metrics::Metrics;
@@ -152,53 +154,30 @@ pub(crate) fn poll_client<C: ClientInnerExt>(
 
     }
     .instrument(span));
-    let inner = ClientInnerRemote {
+    let inner = ClientInnerCommon {
         inner: client,
-        session: tx,
-        cancel,
         aux,
         conn_id,
+        data: ClientDataEnum::Remote(ClientDataRemote {
+            session: tx,
+            cancel,
+        }),
     };
+
     Client::new(inner, conn_info, pool_clone)
 }
 
-pub(crate) struct ClientInnerRemote<C: ClientInnerExt> {
-    inner: C,
+pub(crate) struct ClientDataRemote {
     session: tokio::sync::watch::Sender<uuid::Uuid>,
     cancel: CancellationToken,
-    aux: MetricsAuxInfo,
-    conn_id: uuid::Uuid,
 }
 
-impl<C: ClientInnerExt> ClientInnerRemote<C> {
-    pub(crate) fn inner_mut(&mut self) -> &mut C {
-        &mut self.inner
-    }
-
-    pub(crate) fn inner(&self) -> &C {
-        &self.inner
-    }
-
-    pub(crate) fn session(&mut self) -> &mut tokio::sync::watch::Sender<uuid::Uuid> {
+impl ClientDataRemote {
+    pub fn session(&mut self) -> &mut tokio::sync::watch::Sender<uuid::Uuid> {
         &mut self.session
     }
 
-    pub(crate) fn aux(&self) -> &MetricsAuxInfo {
-        &self.aux
-    }
-
-    pub(crate) fn get_conn_id(&self) -> uuid::Uuid {
-        self.conn_id
-    }
-
-    pub(crate) fn is_closed(&self) -> bool {
-        self.inner.is_closed()
-    }
-}
-
-impl<C: ClientInnerExt> Drop for ClientInnerRemote<C> {
-    fn drop(&mut self) {
-        // on client drop, tell the conn to shut down
+    pub fn cancel(&mut self) {
         self.cancel.cancel();
     }
 }
@@ -228,15 +207,13 @@ mod tests {
         }
     }
 
-    fn create_inner() -> ClientInnerRemote<MockClient> {
+    fn create_inner() -> ClientInnerCommon<MockClient> {
         create_inner_with(MockClient::new(false))
     }
 
-    fn create_inner_with(client: MockClient) -> ClientInnerRemote<MockClient> {
-        ClientInnerRemote {
+    fn create_inner_with(client: MockClient) -> ClientInnerCommon<MockClient> {
+        ClientInnerCommon {
             inner: client,
-            session: tokio::sync::watch::Sender::new(uuid::Uuid::new_v4()),
-            cancel: CancellationToken::new(),
             aux: MetricsAuxInfo {
                 endpoint_id: (&EndpointId::from("endpoint")).into(),
                 project_id: (&ProjectId::from("project")).into(),
@@ -244,6 +221,10 @@ mod tests {
                 cold_start_info: crate::control_plane::messages::ColdStartInfo::Warm,
             },
             conn_id: uuid::Uuid::new_v4(),
+            data: ClientDataEnum::Remote(ClientDataRemote {
+                session: tokio::sync::watch::Sender::new(uuid::Uuid::new_v4()),
+                cancel: CancellationToken::new(),
+            }),
         }
     }
 
@@ -280,7 +261,7 @@ mod tests {
         {
             let mut client = Client::new(create_inner(), conn_info.clone(), ep_pool.clone());
             assert_eq!(0, pool.get_global_connections_count());
-            client.inner_mut().1.discard();
+            client.inner().1.discard();
             // Discard should not add the connection from the pool.
             assert_eq!(0, pool.get_global_connections_count());
         }

@@ -259,6 +259,10 @@ pub struct TenantConfigToml {
     /// Layers needed to reconstruct pages at LSN will not be GC-ed during this interval.
     #[serde(with = "humantime_serde")]
     pub lsn_lease_length_for_ts: Duration,
+
+    /// Enable auto-offloading of timelines.
+    /// (either this flag or the pageserver-global one need to be set)
+    pub timeline_offloading: bool,
 }
 
 pub mod defaults {
@@ -471,6 +475,7 @@ impl Default for TenantConfigToml {
             image_layer_creation_check_threshold: DEFAULT_IMAGE_LAYER_CREATION_CHECK_THRESHOLD,
             lsn_lease_length: LsnLease::DEFAULT_LENGTH,
             lsn_lease_length_for_ts: LsnLease::DEFAULT_LENGTH_FOR_TS,
+            timeline_offloading: false,
         }
     }
 }

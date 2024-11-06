@@ -4,7 +4,7 @@ use super::connect_compute::ComputeConnectBackend;
 use crate::config::RetryConfig;
 use crate::context::RequestMonitoring;
 use crate::control_plane::errors::WakeComputeError;
-use crate::control_plane::provider::CachedNodeInfo;
+use crate::control_plane::CachedNodeInfo;
 use crate::error::ReportableError;
 use crate::metrics::{
     ConnectOutcome, ConnectionFailuresBreakdownGroup, Metrics, RetriesMetricGroup, RetryType,

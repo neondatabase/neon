@@ -6,7 +6,7 @@ use once_cell::sync::OnceCell;
 use pageserver_api::shard::TenantShardId;
 use postgres_ffi::{XLogFileName, PG_TLI};
 use remote_storage::GenericRemoteStorage;
-use rustls::crypto::aws_lc_rs;
+use rustls::crypto::ring;
 use serde::Serialize;
 use tokio_postgres::types::PgLsn;
 use tracing::{debug, error, info};
@@ -256,9 +256,9 @@ async fn load_timelines_from_db(
     // Use rustls (Neon requires TLS)
     let root_store = TLS_ROOTS.get_or_try_init(load_certs)?.clone();
     let client_config =
-        rustls::ClientConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
+        rustls::ClientConfig::builder_with_provider(Arc::new(ring::default_provider()))
             .with_safe_default_protocol_versions()
-            .context("aws_lc_rs should support the default protocol versions")?
+            .context("ring should support the default protocol versions")?
             .with_root_certificates(root_store)
             .with_no_client_auth();
     let tls_connector = tokio_postgres_rustls::MakeRustlsConnect::new(client_config);

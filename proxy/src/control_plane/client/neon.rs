@@ -10,18 +10,20 @@ use tokio::time::Instant;
 use tokio_postgres::config::SslMode;
 use tracing::{debug, info, info_span, warn, Instrument};
 
-use super::super::messages::{ControlPlaneError, GetRoleSecret, WakeCompute};
-use super::errors::{ApiError, GetAuthInfoError, WakeComputeError};
-use super::{
-    ApiCaches, ApiLocks, AuthInfo, AuthSecret, CachedAllowedIps, CachedNodeInfo, CachedRoleSecret,
-    NodeInfo,
-};
+use super::super::messages::{ControlPlaneErrorMessage, GetRoleSecret, WakeCompute};
 use crate::auth::backend::jwt::AuthRule;
 use crate::auth::backend::ComputeUserInfo;
 use crate::cache::Cached;
 use crate::context::RequestMonitoring;
-use crate::control_plane::errors::GetEndpointJwksError;
+use crate::control_plane::caches::ApiCaches;
+use crate::control_plane::errors::{
+    ControlPlaneError, GetAuthInfoError, GetEndpointJwksError, WakeComputeError,
+};
+use crate::control_plane::locks::ApiLocks;
 use crate::control_plane::messages::{ColdStartInfo, EndpointJwksResponse, Reason};
+use crate::control_plane::{
+    AuthInfo, AuthSecret, CachedAllowedIps, CachedNodeInfo, CachedRoleSecret, NodeInfo,
+};
 use crate::metrics::{CacheOutcome, Metrics};
 use crate::rate_limiter::WakeComputeRateLimiter;
 use crate::types::{EndpointCacheKey, EndpointId};
@@ -30,7 +32,7 @@ use crate::{compute, http, scram};
 const X_REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
 
 #[derive(Clone)]
-pub struct Api {
+pub struct NeonControlPlaneClient {
     endpoint: http::Endpoint,
     pub caches: &'static ApiCaches,
     pub(crate) locks: &'static ApiLocks<EndpointCacheKey>,
@@ -39,7 +41,7 @@ pub struct Api {
     jwt: Arc<str>,
 }
 
-impl Api {
+impl NeonControlPlaneClient {
     /// Construct an API object containing the auth parameters.
     pub fn new(
         endpoint: http::Endpoint,
@@ -256,7 +258,7 @@ impl Api {
     }
 }
 
-impl super::Api for Api {
+impl super::ControlPlaneApi for NeonControlPlaneClient {
     #[tracing::instrument(skip_all)]
     async fn get_role_secret(
         &self,
@@ -356,7 +358,7 @@ impl super::Api for Api {
                     let (cached, info) = cached.take_value();
                     let info = info.map_err(|c| {
                         info!(key = &*key, "found cached wake_compute error");
-                        WakeComputeError::ApiError(ApiError::ControlPlane(Box::new(*c)))
+                        WakeComputeError::ControlPlane(ControlPlaneError::Message(Box::new(*c)))
                     })?;
 
                     debug!(key = &*key, "found cached compute node info");
@@ -403,9 +405,11 @@ impl super::Api for Api {
                 Ok(cached.map(|()| node))
             }
             Err(err) => match err {
-                WakeComputeError::ApiError(ApiError::ControlPlane(err)) => {
+                WakeComputeError::ControlPlane(ControlPlaneError::Message(err)) => {
                     let Some(status) = &err.status else {
-                        return Err(WakeComputeError::ApiError(ApiError::ControlPlane(err)));
+                        return Err(WakeComputeError::ControlPlane(ControlPlaneError::Message(
+                            err,
+                        )));
                     };
 
                     let reason = status
@@ -415,7 +419,9 @@ impl super::Api for Api {
 
                     // if we can retry this error, do not cache it.
                     if reason.can_retry() {
-                        return Err(WakeComputeError::ApiError(ApiError::ControlPlane(err)));
+                        return Err(WakeComputeError::ControlPlane(ControlPlaneError::Message(
+                            err,
+                        )));
                     }
 
                     // at this point, we should only have quota errors.
@@ -430,7 +436,9 @@ impl super::Api for Api {
                         Duration::from_secs(30),
                     );
 
-                    Err(WakeComputeError::ApiError(ApiError::ControlPlane(err)))
+                    Err(WakeComputeError::ControlPlane(ControlPlaneError::Message(
+                        err,
+                    )))
                 }
                 err => return Err(err),
             },
@@ -441,7 +449,7 @@ impl super::Api for Api {
 /// Parse http response body, taking status code into account.
 async fn parse_body<T: for<'a> serde::Deserialize<'a>>(
     response: http::Response,
-) -> Result<T, ApiError> {
+) -> Result<T, ControlPlaneError> {
     let status = response.status();
     if status.is_success() {
         // We shouldn't log raw body because it may contain secrets.
@@ -456,7 +464,7 @@ async fn parse_body<T: for<'a> serde::Deserialize<'a>>(
     // as the fact that the request itself has failed.
     let mut body = serde_json::from_slice(&s).unwrap_or_else(|e| {
         warn!("failed to parse error body: {e}");
-        ControlPlaneError {
+        ControlPlaneErrorMessage {
             error: "reason unclear (malformed error message)".into(),
             http_status_code: status,
             status: None,
@@ -465,7 +473,7 @@ async fn parse_body<T: for<'a> serde::Deserialize<'a>>(
     body.http_status_code = status;
 
     warn!("console responded with an error ({status}): {body:?}");
-    Err(ApiError::ControlPlane(Box::new(body)))
+    Err(ControlPlaneError::Message(Box::new(body)))
 }
 
 fn parse_host_port(input: &str) -> Option<(&str, u16)> {

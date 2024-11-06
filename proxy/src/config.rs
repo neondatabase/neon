@@ -7,7 +7,7 @@ use anyhow::{bail, ensure, Context, Ok};
 use clap::ValueEnum;
 use itertools::Itertools;
 use remote_storage::RemoteStorageConfig;
-use rustls::crypto::aws_lc_rs::{self, sign};
+use rustls::crypto::ring::{self, sign};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use sha2::{Digest, Sha256};
 use tracing::{error, info};
@@ -127,9 +127,9 @@ pub fn configure_tls(
 
     // allow TLS 1.2 to be compatible with older client libraries
     let mut config =
-        rustls::ServerConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
+        rustls::ServerConfig::builder_with_provider(Arc::new(ring::default_provider()))
             .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
-            .context("aws_lc_rs should support TLS1.2 and TLS1.3")?
+            .context("ring should support TLS1.2 and TLS1.3")?
             .with_no_client_auth()
             .with_cert_resolver(cert_resolver.clone());
 
@@ -366,7 +366,7 @@ pub struct EndpointCacheConfig {
 }
 
 impl EndpointCacheConfig {
-    /// Default options for [`crate::control_plane::provider::NodeInfoCache`].
+    /// Default options for [`crate::control_plane::NodeInfoCache`].
     /// Notice that by default the limiter is empty, which means that cache is disabled.
     pub const CACHE_DEFAULT_OPTIONS: &'static str =
         "initial_batch_size=1000,default_batch_size=10,xread_timeout=5m,stream_name=controlPlane,disable_cache=true,limiter_info=1000@1s,retry_interval=1s";
@@ -441,7 +441,7 @@ pub struct CacheOptions {
 }
 
 impl CacheOptions {
-    /// Default options for [`crate::control_plane::provider::NodeInfoCache`].
+    /// Default options for [`crate::control_plane::NodeInfoCache`].
     pub const CACHE_DEFAULT_OPTIONS: &'static str = "size=4000,ttl=4m";
 
     /// Parse cache options passed via cmdline.
@@ -497,7 +497,7 @@ pub struct ProjectInfoCacheOptions {
 }
 
 impl ProjectInfoCacheOptions {
-    /// Default options for [`crate::control_plane::provider::NodeInfoCache`].
+    /// Default options for [`crate::control_plane::NodeInfoCache`].
     pub const CACHE_DEFAULT_OPTIONS: &'static str =
         "size=10000,ttl=4m,max_roles=10,gc_interval=60m";
 
@@ -616,9 +616,9 @@ pub struct ConcurrencyLockOptions {
 }
 
 impl ConcurrencyLockOptions {
-    /// Default options for [`crate::control_plane::provider::ApiLocks`].
+    /// Default options for [`crate::control_plane::client::ApiLocks`].
     pub const DEFAULT_OPTIONS_WAKE_COMPUTE_LOCK: &'static str = "permits=0";
-    /// Default options for [`crate::control_plane::provider::ApiLocks`].
+    /// Default options for [`crate::control_plane::client::ApiLocks`].
     pub const DEFAULT_OPTIONS_CONNECT_COMPUTE_LOCK: &'static str =
         "shards=64,permits=100,epoch=10m,timeout=10ms";
 

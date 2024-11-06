@@ -121,7 +121,7 @@ impl From<&RequestMonitoringInner> for RequestData {
     fn from(value: &RequestMonitoringInner) -> Self {
         Self {
             session_id: value.session_id,
-            peer_addr: value.peer_addr.to_string(),
+            peer_addr: value.conn_info.addr.ip().to_string(),
             timestamp: value.first_packet.naive_utc(),
             username: value.user.as_deref().map(String::from),
             application_name: value.application.as_deref().map(String::from),
