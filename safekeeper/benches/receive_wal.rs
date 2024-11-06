@@ -27,24 +27,41 @@ criterion_group!(
 );
 criterion_main!(benches);
 
-/// Benchmarks SafeKeeper::process_msg() as time per message. Each message is an AppendRequest with
-/// a single WAL record containing a tiny XlLogicalMessage (~64 bytes total).
+/// Benchmarks SafeKeeper::process_msg() as time per message and throughput. Each message is an
+/// AppendRequest with a single WAL record containing an XlLogicalMessage of varying size. When
+/// measuring throughput, only the logical message payload is considered, excluding
+/// segment/page/record headers.
 fn bench_process_msg(c: &mut Criterion) {
     let mut g = c.benchmark_group("process_msg");
     for fsync in [false, true] {
-        g.bench_function(format!("fsync={fsync}"), |b| run_bench(b, fsync).unwrap());
+        for size in [8, KB, 8 * KB, 128 * KB] {
+            // Kind of weird to change the group throughput per benchmark, but it's the only way to
+            // vary it per benchmark. It works.
+            g.throughput(criterion::Throughput::Bytes(size as u64));
+            g.bench_function(format!("fsync={fsync}/size={size}"), |b| {
+                run_bench(b, size, fsync).unwrap()
+            });
+        }
     }
 
     // The actual benchmark.
-    fn run_bench(b: &mut Bencher, fsync: bool) -> anyhow::Result<()> {
+    fn run_bench(b: &mut Bencher, size: usize, fsync: bool) -> anyhow::Result<()> {
         let runtime = tokio::runtime::Builder::new_current_thread() // single is fine, sync IO only
             .enable_all()
             .build()?;
 
+        // Construct the payload. The prefix counts towards the payload (including NUL terminator).
+        let prefix = c"p";
+        let prefixlen = prefix.to_bytes_with_nul().len();
+        assert!(size >= prefixlen);
+        let message = vec![0; size - prefixlen];
+
+        let walgen = &mut WalGenerator::new(LogicalMessageGenerator::new(prefix, &message));
+
+        // Set up the Safekeeper.
         let env = Env::new(fsync)?;
         let mut safekeeper =
             runtime.block_on(env.make_safekeeper(NodeId(1), TenantTimelineId::generate()))?;
-        let mut walgen = WalGenerator::new(LogicalMessageGenerator::new(c"prefix", b"message"));
 
         b.iter_batched_ref(
             // Pre-construct WAL records and requests. Criterion will batch them.
