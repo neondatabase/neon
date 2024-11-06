@@ -1895,13 +1895,11 @@ impl Timeline {
             job_desc.partial_key_range.as_ref().map(|x| format!("{}..{}", x.start, x.end)).unwrap_or_default()
         );
 
-        if cfg!(debug_assertions) {
-            for layer in &job_desc.selected_layers {
-                info!("read layer: {}", layer.layer_desc().key());
-            }
-            for layer in &job_desc.rewrite_layers {
-                info!("rewrite layer: {}", layer.layer_desc().key());
-            }
+        for layer in &job_desc.selected_layers {
+            debug!("read layer: {}", layer.layer_desc().key());
+        }
+        for layer in &job_desc.rewrite_layers {
+            debug!("rewrite layer: {}", layer.layer_desc().key());
         }
 
         self.check_compaction_space(&job_desc.selected_layers)
