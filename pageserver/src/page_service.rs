@@ -1433,7 +1433,7 @@ impl PageServiceCmd {
                 }
             }
             "set" => Ok(Self::Set),
-            _ => Err(anyhow::anyhow!("unsupported command {} in {}", cmd, query)),
+            _ => Err(anyhow::anyhow!("unsupported command {cmd} in {query}")),
         }
     }
 }
