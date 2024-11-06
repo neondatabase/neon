@@ -190,10 +190,6 @@ class TenantTimelineId:
         )
 
 
-# Workaround for compat with python 3.9, which does not have `typing.Self`
-TTenantShardId = TypeVar("TTenantShardId", bound="TenantShardId")
-
-
 class TenantShardId:
     def __init__(self, tenant_id: TenantId, shard_number: int, shard_count: int):
         self.tenant_id = tenant_id
@@ -202,7 +198,7 @@ class TenantShardId:
         assert self.shard_number < self.shard_count or self.shard_count == 0
 
     @classmethod
-    def parse(cls: type[TTenantShardId], input: str) -> TTenantShardId:
+    def parse(cls: type[TenantShardId], input: str) -> TenantShardId:
         if len(input) == 32:
             return cls(
                 tenant_id=TenantId(input),

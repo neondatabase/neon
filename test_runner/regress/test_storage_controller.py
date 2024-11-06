@@ -2494,14 +2494,14 @@ def start_env(env: NeonEnv, storage_controller_port: int):
         for pageserver in env.pageservers:
             futs.append(
                 executor.submit(
-                    lambda ps=pageserver: ps.start(timeout_in_seconds=timeout_in_seconds)
+                    lambda ps=pageserver: ps.start(timeout_in_seconds=timeout_in_seconds)  # type: ignore[misc]
                 )
             )
 
         for safekeeper in env.safekeepers:
             futs.append(
                 executor.submit(
-                    lambda sk=safekeeper: sk.start(timeout_in_seconds=timeout_in_seconds)
+                    lambda sk=safekeeper: sk.start(timeout_in_seconds=timeout_in_seconds)  # type: ignore[misc]
                 )
             )
 

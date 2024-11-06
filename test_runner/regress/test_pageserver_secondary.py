@@ -702,7 +702,7 @@ def test_secondary_background_downloads(neon_env_builder: NeonEnvBuilder):
         else:
             timeout = int(deadline - now) + 1
             try:
-                wait_until(timeout, 1, lambda: pageserver.assert_log_contains(expression))  # type: ignore
+                wait_until(timeout, 1, lambda: pageserver.assert_log_contains(expression))
             except:
                 log.error(f"Timed out waiting for '{expression}'")
                 raise
