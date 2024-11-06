@@ -6,7 +6,7 @@ on:
       - main
       - release
       - release-proxy
-      - release-compute
+      - amasterov/release-compute
   pull_request:
 
 defaults:
