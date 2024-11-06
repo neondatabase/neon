@@ -18,7 +18,7 @@ use postgres_backend::{CopyStreamHandlerEnd, PostgresBackendReader, QueryError};
 use postgres_ffi::get_current_timestamp;
 use postgres_ffi::waldecoder::WalStreamDecoder;
 use postgres_ffi::{TimestampTz, MAX_SEND_SIZE};
-use pq_proto::{BeMessage, WalSndKeepAlive, XLogDataBody};
+use pq_proto::{BeMessage, InterpretedWalRecordBody, WalSndKeepAlive, XLogDataBody};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncWrite};
 use utils::failpoint_support;
@@ -591,6 +591,11 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> WalSender<'_, IO> {
         &mut self,
         shard: &ShardIdentity,
     ) -> Result<(), CopyStreamHandlerEnd> {
+        let mut last_logged_at = std::time::Instant::now();
+        let mut interpreted_records = 0;
+        let mut interpreted_bytes = 0;
+        let mut useful_bytes = 0;
+
         let pg_version = self.tli.tli.get_state().await.1.server.pg_version / 10000;
         let mut wal_decoder = WalStreamDecoder::new(self.start_pos, pg_version);
 
@@ -636,8 +641,16 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> WalSender<'_, IO> {
 
             wal_decoder.feed_bytes(send_buf);
 
-            // TODO(vlad): implement error handling here
-            while let Some((record_end_lsn, recdata)) = wal_decoder.poll_decode().unwrap() {
+            // How fast or slow is this. Write a little benchmark
+            // to see how quiclky we can decode 1GiB of WAL.
+            // If this is slow, then we have a problem since it bottlenecks
+            // the whole afair. SK can send about 60-70MiB of raw WAL and
+            // about 13-17MiB of useful interpreted WAL per second (these
+            // number are for one shard).
+            while let Some((record_end_lsn, recdata)) = wal_decoder
+                .poll_decode()
+                .with_context(|| "Failed to decode WAL")?
+            {
                 assert!(record_end_lsn.is_aligned());
 
                 // Deserialize and interpret WAL record
@@ -647,14 +660,27 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> WalSender<'_, IO> {
                     record_end_lsn,
                     pg_version,
                 )
-                .unwrap();
+                .with_context(|| "Failed to interpret WAL")?;
+
+                let useful_size = interpreted.batch.buffer_size();
 
                 let mut buf = Vec::new();
-                interpreted.ser_into(&mut buf).unwrap();
+                interpreted
+                    .ser_into(&mut buf)
+                    .with_context(|| "Failed to serialize interpreted WAL")?;
+
+                let size = buf.len();
 
                 self.pgb
-                    .write_message(&BeMessage::InterpretedWalRecord(buf.as_slice()))
+                    .write_message(&BeMessage::InterpretedWalRecord(InterpretedWalRecordBody {
+                        wal_end: self.end_pos.0,
+                        data: buf.as_slice(),
+                    }))
                     .await?;
+
+                interpreted_records += 1;
+                interpreted_bytes += size;
+                useful_bytes += useful_size;
             }
 
             // and send it
@@ -680,10 +706,32 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> WalSender<'_, IO> {
             // );
 
             self.start_pos += send_size as u64;
+
+            let elapsed = last_logged_at.elapsed();
+            if elapsed >= Duration::from_secs(5) {
+                let records_rate = interpreted_records / elapsed.as_millis() * 1000;
+                let bytes_rate = interpreted_bytes / elapsed.as_millis() as usize * 1000;
+                let useful_bytes_rate = useful_bytes / elapsed.as_millis() as usize * 1000;
+                tracing::info!(
+                    "Shard {} sender rate: rps={} bps={} ubps={}",
+                    shard.number.0,
+                    records_rate,
+                    bytes_rate,
+                    useful_bytes_rate
+                );
+
+                last_logged_at = std::time::Instant::now();
+                interpreted_records = 0;
+                interpreted_bytes = 0;
+                useful_bytes = 0;
+            }
         }
     }
 
     async fn run_wal_sender(&mut self) -> Result<(), CopyStreamHandlerEnd> {
+        let mut useful_bytes = 0;
+        let mut last_logged_at = std::time::Instant::now();
+
         loop {
             // Wait for the next portion if it is not there yet, or just
             // update our end of WAL available for sending value, we
@@ -724,6 +772,8 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> WalSender<'_, IO> {
             };
             let send_buf = &send_buf[..send_size];
 
+            useful_bytes += send_buf.len();
+
             // and send it
             self.pgb
                 .write_message(&BeMessage::XLogData(XLogDataBody {
@@ -746,6 +796,18 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> WalSender<'_, IO> {
                 self.start_pos + send_size as u64
             );
             self.start_pos += send_size as u64;
+
+            let elapsed = last_logged_at.elapsed();
+            if elapsed >= Duration::from_secs(5) {
+                let useful_bytes_rate = useful_bytes / elapsed.as_millis() as usize * 1000;
+                tracing::info!(
+                    "Sender rate: ubps={}",
+                    useful_bytes_rate
+                );
+
+                last_logged_at = std::time::Instant::now();
+                useful_bytes = 0;
+            }
         }
     }
 

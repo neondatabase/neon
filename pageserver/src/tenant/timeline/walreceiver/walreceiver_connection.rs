@@ -300,8 +300,12 @@ pub(super) async fn handle_walreceiver_connection(
         }
 
         let status_update = match replication_message {
-            ReplicationMessage::RawInterpretedWalRecord(raw_interpreted) => {
-                let interpreted = InterpretedWalRecord::des(&raw_interpreted).unwrap();
+            ReplicationMessage::RawInterpretedWalRecord(raw) => {
+                connection_status.latest_connection_update = now;
+                connection_status.latest_wal_update = now;
+                connection_status.commit_lsn = Some(Lsn::from(raw.wal_end()));
+
+                let interpreted = InterpretedWalRecord::des(raw.data()).unwrap();
                 let end_lsn = interpreted.end_lsn;
 
                 let mut modification = timeline.begin_modification(end_lsn);

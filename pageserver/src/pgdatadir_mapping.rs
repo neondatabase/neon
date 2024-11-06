@@ -1164,7 +1164,7 @@ impl<'a> DatadirModification<'a> {
             .get_rel_exists(rel, Version::Modified(self), ctx)
             .await?
         {
-            tracing::info!("Creating relation {rel:?} at lsn {}", self.get_lsn());
+            tracing::debug!("Creating relation {rel:?} at lsn {}", self.get_lsn());
 
             // create it with 0 size initially, the logic below will extend it
             self.put_rel_creation(rel, 0, ctx)
@@ -1172,7 +1172,7 @@ impl<'a> DatadirModification<'a> {
                 .context("Relation Error")?;
             Ok(0)
         } else {
-            tracing::info!(
+            tracing::debug!(
                 "Skipping relation {rel:?} creation at lsn {}",
                 self.get_lsn()
             );
@@ -1217,7 +1217,7 @@ impl<'a> DatadirModification<'a> {
         shard: &ShardIdentity,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        tracing::info!("Ingesting batch with metadata: {:?}", batch.metadata);
+        tracing::debug!("Ingesting batch with metadata: {:?}", batch.metadata);
 
         let mut gaps_at_lsns = Vec::default();
 

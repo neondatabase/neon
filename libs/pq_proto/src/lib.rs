@@ -562,7 +562,7 @@ pub enum BeMessage<'a> {
         options: &'a [&'a str],
     },
     KeepAlive(WalSndKeepAlive),
-    InterpretedWalRecord(&'a [u8]),
+    InterpretedWalRecord(InterpretedWalRecordBody<'a>),
 }
 
 /// Common shorthands.
@@ -663,6 +663,12 @@ pub struct XLogDataBody<'a> {
     pub wal_start: u64,
     pub wal_end: u64, // current end of WAL on the server
     pub timestamp: i64,
+    pub data: &'a [u8],
+}
+
+#[derive(Debug)]
+pub struct InterpretedWalRecordBody<'a> {
+    pub wal_end: u64,
     pub data: &'a [u8],
 }
 
@@ -1002,7 +1008,8 @@ impl BeMessage<'_> {
                 buf.put_u8(b'd'); // arbitrary?
                 write_body(buf, |buf| {
                     buf.put_u8(b'0');
-                    buf.put_slice(rec);
+                    buf.put_u64(rec.wal_end);
+                    buf.put_slice(rec.data);
                 });
             }
         }
