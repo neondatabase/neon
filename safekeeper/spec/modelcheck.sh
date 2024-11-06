@@ -9,7 +9,7 @@ MEM=7G
 TOOLSPATH="/opt/TLA+Toolbox/tla2tools.jar"
 
 mkdir -p "tlc-results"
-outfilename="$SPEC-$(date --utc +%Y-%m-%d--%H-%M-%S)".log
+outfilename="$SPEC-$CONFIG-$(date --utc +%Y-%m-%d--%H-%M-%S)".log
 outfile="tlc-results/$outfilename"
 touch $outfile
 
