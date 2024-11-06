@@ -196,6 +196,9 @@ impl ValuesReconstructState {
     /// Returns true if this was the last value needed for the key and false otherwise.
     ///
     /// If the key is done after the update, mark it as such.
+    ///
+    /// If the key is in the sparse keyspace (i.e., aux files), we do not track them in
+    /// `key_done`.
     pub(crate) fn update_key(
         &mut self,
         key: &Key,
@@ -211,7 +214,7 @@ impl ValuesReconstructState {
             let key_done = match state.situation {
                 ValueReconstructSituation::Complete => {
                     if is_sparse_key {
-                        // Sprase keyspace might be visited multiple times because
+                        // Sparse keyspace might be visited multiple times because
                         // we don't track unmapped keyspaces.
                         return ValueReconstructSituation::Complete;
                     } else {
