@@ -92,6 +92,14 @@ struct ProxyCliArgs {
         default_value = "http://localhost:3000/authenticate_proxy_request/"
     )]
     auth_endpoint: String,
+    /// JWT used to connect to control plane.
+    #[clap(
+        long,
+        value_name = "JWT",
+        default_value = "",
+        env = "NEON_PROXY_TO_CONTROLPLANE_TOKEN"
+    )]
+    control_plane_token: Arc<str>,
     /// if this is not local proxy, this toggles whether we accept jwt or passwords for http
     #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
     is_auth_broker: bool,
@@ -734,6 +742,7 @@ fn build_auth_backend(
                 Arc::new(WakeComputeRateLimiter::new(wake_compute_rps_limit));
             let api = control_plane::client::neon::NeonControlPlaneClient::new(
                 endpoint,
+                args.control_plane_token.clone(),
                 caches,
                 locks,
                 wake_compute_endpoint_rate_limiter,

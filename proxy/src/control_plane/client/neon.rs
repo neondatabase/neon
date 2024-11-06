@@ -45,13 +45,11 @@ impl NeonControlPlaneClient {
     /// Construct an API object containing the auth parameters.
     pub fn new(
         endpoint: http::Endpoint,
+        jwt: Arc<str>,
         caches: &'static ApiCaches,
         locks: &'static ApiLocks<EndpointCacheKey>,
         wake_compute_endpoint_rate_limiter: Arc<WakeComputeRateLimiter>,
     ) -> Self {
-        let jwt = std::env::var("NEON_PROXY_TO_CONTROLPLANE_TOKEN")
-            .unwrap_or_default()
-            .into();
         Self {
             endpoint,
             caches,
