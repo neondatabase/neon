@@ -55,8 +55,17 @@ RUN set -e \
         xz-utils \
         zlib1g-dev \
         zstd \
-        $([[ "${DEBIAN_VERSION}" = "bookworm" ]] && echo pgcopydb || true) \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+# Conditional installation of pgcopydb from unstable repository for Bookworm only (need version 0.17-1 or higher)
+RUN if [ "${DEBIAN_VERSION}" = "bookworm" ]; then \
+        echo "deb http://deb.debian.org/debian unstable main" > /etc/apt/sources.list.d/unstable.list \
+        && apt update \
+        && apt install -y -t unstable pgcopydb \
+        && rm /etc/apt/sources.list.d/unstable.list \
+        && apt update \
+        && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*; \
+    fi
 
 # sql_exporter
 
