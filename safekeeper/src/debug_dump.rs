@@ -383,7 +383,7 @@ pub async fn calculate_digest(
     let mut wal_reader = tli.get_walreader(request.from_lsn).await?;
 
     let mut hasher = Sha256::new();
-    let mut buf = [0u8; MAX_SEND_SIZE];
+    let mut buf = vec![0u8; MAX_SEND_SIZE];
 
     let mut bytes_left = (request.until_lsn.0 - request.from_lsn.0) as usize;
     while bytes_left > 0 {

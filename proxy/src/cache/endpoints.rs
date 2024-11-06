@@ -19,26 +19,28 @@ use crate::rate_limiter::GlobalRateLimiter;
 use crate::redis::connection_with_credentials_provider::ConnectionWithCredentialsProvider;
 use crate::types::EndpointId;
 
-#[allow(clippy::enum_variant_names)]
-#[derive(Deserialize, Debug, Clone)]
-#[serde(tag = "type", rename_all(deserialize = "snake_case"))]
-enum ControlPlaneEvent {
-    EndpointCreated { endpoint_created: EndpointCreated },
-    BranchCreated { branch_created: BranchCreated },
-    ProjectCreated { project_created: ProjectCreated },
+// TODO: this could be an enum, but events in Redis need to be fixed first.
+// ProjectCreated was sent with type:branch_created. So we ignore type.
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+struct ControlPlaneEvent {
+    endpoint_created: Option<EndpointCreated>,
+    branch_created: Option<BranchCreated>,
+    project_created: Option<ProjectCreated>,
+    #[serde(rename = "type")]
+    _type: Option<String>,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone, PartialEq)]
 struct EndpointCreated {
     endpoint_id: String,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone, PartialEq)]
 struct BranchCreated {
     branch_id: String,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone, PartialEq)]
 struct ProjectCreated {
     project_id: String,
 }
@@ -104,24 +106,28 @@ impl EndpointsCache {
     }
 
     fn insert_event(&self, event: ControlPlaneEvent) {
-        let counter = match event {
-            ControlPlaneEvent::EndpointCreated { endpoint_created } => {
-                self.endpoints
-                    .insert(EndpointIdInt::from(&endpoint_created.endpoint_id.into()));
-                RedisEventsCount::EndpointCreated
-            }
-            ControlPlaneEvent::BranchCreated { branch_created } => {
-                self.branches
-                    .insert(BranchIdInt::from(&branch_created.branch_id.into()));
-                RedisEventsCount::BranchCreated
-            }
-            ControlPlaneEvent::ProjectCreated { project_created } => {
-                self.projects
-                    .insert(ProjectIdInt::from(&project_created.project_id.into()));
-                RedisEventsCount::ProjectCreated
-            }
-        };
-        Metrics::get().proxy.redis_events_count.inc(counter);
+        if let Some(endpoint_created) = event.endpoint_created {
+            self.endpoints
+                .insert(EndpointIdInt::from(&endpoint_created.endpoint_id.into()));
+            Metrics::get()
+                .proxy
+                .redis_events_count
+                .inc(RedisEventsCount::EndpointCreated);
+        } else if let Some(branch_created) = event.branch_created {
+            self.branches
+                .insert(BranchIdInt::from(&branch_created.branch_id.into()));
+            Metrics::get()
+                .proxy
+                .redis_events_count
+                .inc(RedisEventsCount::BranchCreated);
+        } else if let Some(project_created) = event.project_created {
+            self.projects
+                .insert(ProjectIdInt::from(&project_created.project_id.into()));
+            Metrics::get()
+                .proxy
+                .redis_events_count
+                .inc(RedisEventsCount::ProjectCreated);
+        }
     }
 
     pub async fn do_read(
@@ -235,11 +241,22 @@ impl EndpointsCache {
 
 #[cfg(test)]
 mod tests {
-    use super::ControlPlaneEvent;
+    use super::*;
 
     #[test]
     fn test_parse_control_plane_event() {
         let s = r#"{"branch_created":null,"endpoint_created":{"endpoint_id":"ep-rapid-thunder-w0qqw2q9"},"project_created":null,"type":"endpoint_created"}"#;
-        serde_json::from_str::<ControlPlaneEvent>(s).unwrap();
+
+        assert_eq!(
+            serde_json::from_str::<ControlPlaneEvent>(s).unwrap(),
+            ControlPlaneEvent {
+                endpoint_created: Some(EndpointCreated {
+                    endpoint_id: "ep-rapid-thunder-w0qqw2q9".into()
+                }),
+                branch_created: None,
+                project_created: None,
+                _type: Some("endpoint_created".into()),
+            }
+        );
     }
 }

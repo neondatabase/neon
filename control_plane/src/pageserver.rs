@@ -334,17 +334,20 @@ impl PageServerNode {
             checkpoint_distance: settings
                 .remove("checkpoint_distance")
                 .map(|x| x.parse::<u64>())
-                .transpose()?,
+                .transpose()
+                .context("Failed to parse 'checkpoint_distance' as an integer")?,
             checkpoint_timeout: settings.remove("checkpoint_timeout").map(|x| x.to_string()),
             compaction_target_size: settings
                 .remove("compaction_target_size")
                 .map(|x| x.parse::<u64>())
-                .transpose()?,
+                .transpose()
+                .context("Failed to parse 'compaction_target_size' as an integer")?,
             compaction_period: settings.remove("compaction_period").map(|x| x.to_string()),
             compaction_threshold: settings
                 .remove("compaction_threshold")
                 .map(|x| x.parse::<usize>())
-                .transpose()?,
+                .transpose()
+                .context("Failed to parse 'compaction_threshold' as an integer")?,
             compaction_algorithm: settings
                 .remove("compaction_algorithm")
                 .map(serde_json::from_str)
@@ -353,16 +356,19 @@ impl PageServerNode {
             gc_horizon: settings
                 .remove("gc_horizon")
                 .map(|x| x.parse::<u64>())
-                .transpose()?,
+                .transpose()
+                .context("Failed to parse 'gc_horizon' as an integer")?,
             gc_period: settings.remove("gc_period").map(|x| x.to_string()),
             image_creation_threshold: settings
                 .remove("image_creation_threshold")
                 .map(|x| x.parse::<usize>())
-                .transpose()?,
+                .transpose()
+                .context("Failed to parse 'image_creation_threshold' as non zero integer")?,
             image_layer_creation_check_threshold: settings
                 .remove("image_layer_creation_check_threshold")
                 .map(|x| x.parse::<u8>())
-                .transpose()?,
+                .transpose()
+                .context("Failed to parse 'image_creation_check_threshold' as integer")?,
             pitr_interval: settings.remove("pitr_interval").map(|x| x.to_string()),
             walreceiver_connect_timeout: settings
                 .remove("walreceiver_connect_timeout")
@@ -419,102 +425,9 @@ impl PageServerNode {
     pub async fn tenant_config(
         &self,
         tenant_id: TenantId,
-        mut settings: HashMap<&str, &str>,
+        settings: HashMap<&str, &str>,
     ) -> anyhow::Result<()> {
-        let config = {
-            // Braces to make the diff easier to read
-            models::TenantConfig {
-                checkpoint_distance: settings
-                    .remove("checkpoint_distance")
-                    .map(|x| x.parse::<u64>())
-                    .transpose()
-                    .context("Failed to parse 'checkpoint_distance' as an integer")?,
-                checkpoint_timeout: settings.remove("checkpoint_timeout").map(|x| x.to_string()),
-                compaction_target_size: settings
-                    .remove("compaction_target_size")
-                    .map(|x| x.parse::<u64>())
-                    .transpose()
-                    .context("Failed to parse 'compaction_target_size' as an integer")?,
-                compaction_period: settings.remove("compaction_period").map(|x| x.to_string()),
-                compaction_threshold: settings
-                    .remove("compaction_threshold")
-                    .map(|x| x.parse::<usize>())
-                    .transpose()
-                    .context("Failed to parse 'compaction_threshold' as an integer")?,
-                compaction_algorithm: settings
-                    .remove("compactin_algorithm")
-                    .map(serde_json::from_str)
-                    .transpose()
-                    .context("Failed to parse 'compaction_algorithm' json")?,
-                gc_horizon: settings
-                    .remove("gc_horizon")
-                    .map(|x| x.parse::<u64>())
-                    .transpose()
-                    .context("Failed to parse 'gc_horizon' as an integer")?,
-                gc_period: settings.remove("gc_period").map(|x| x.to_string()),
-                image_creation_threshold: settings
-                    .remove("image_creation_threshold")
-                    .map(|x| x.parse::<usize>())
-                    .transpose()
-                    .context("Failed to parse 'image_creation_threshold' as non zero integer")?,
-                image_layer_creation_check_threshold: settings
-                    .remove("image_layer_creation_check_threshold")
-                    .map(|x| x.parse::<u8>())
-                    .transpose()
-                    .context("Failed to parse 'image_creation_check_threshold' as integer")?,
-
-                pitr_interval: settings.remove("pitr_interval").map(|x| x.to_string()),
-                walreceiver_connect_timeout: settings
-                    .remove("walreceiver_connect_timeout")
-                    .map(|x| x.to_string()),
-                lagging_wal_timeout: settings
-                    .remove("lagging_wal_timeout")
-                    .map(|x| x.to_string()),
-                max_lsn_wal_lag: settings
-                    .remove("max_lsn_wal_lag")
-                    .map(|x| x.parse::<NonZeroU64>())
-                    .transpose()
-                    .context("Failed to parse 'max_lsn_wal_lag' as non zero integer")?,
-                eviction_policy: settings
-                    .remove("eviction_policy")
-                    .map(serde_json::from_str)
-                    .transpose()
-                    .context("Failed to parse 'eviction_policy' json")?,
-                min_resident_size_override: settings
-                    .remove("min_resident_size_override")
-                    .map(|x| x.parse::<u64>())
-                    .transpose()
-                    .context("Failed to parse 'min_resident_size_override' as an integer")?,
-                evictions_low_residence_duration_metric_threshold: settings
-                    .remove("evictions_low_residence_duration_metric_threshold")
-                    .map(|x| x.to_string()),
-                heatmap_period: settings.remove("heatmap_period").map(|x| x.to_string()),
-                lazy_slru_download: settings
-                    .remove("lazy_slru_download")
-                    .map(|x| x.parse::<bool>())
-                    .transpose()
-                    .context("Failed to parse 'lazy_slru_download' as bool")?,
-                timeline_get_throttle: settings
-                    .remove("timeline_get_throttle")
-                    .map(serde_json::from_str)
-                    .transpose()
-                    .context("parse `timeline_get_throttle` from json")?,
-                lsn_lease_length: settings.remove("lsn_lease_length").map(|x| x.to_string()),
-                lsn_lease_length_for_ts: settings
-                    .remove("lsn_lease_length_for_ts")
-                    .map(|x| x.to_string()),
-                timeline_offloading: settings
-                    .remove("timeline_offloading")
-                    .map(|x| x.parse::<bool>())
-                    .transpose()
-                    .context("Failed to parse 'timeline_offloading' as bool")?,
-            }
-        };
-
-        if !settings.is_empty() {
-            bail!("Unrecognized tenant settings: {settings:?}")
-        }
-
+        let config = Self::parse_config(settings)?;
         self.http_client
             .tenant_config(&models::TenantConfigRequest { tenant_id, config })
             .await?;

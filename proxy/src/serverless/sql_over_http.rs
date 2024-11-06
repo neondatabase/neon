@@ -31,7 +31,6 @@ use super::conn_pool_lib::{self, ConnInfo};
 use super::error::HttpCodeError;
 use super::http_util::json_response;
 use super::json::{json_to_pg_text, pg_text_row_to_json, JsonConversionError};
-use super::local_conn_pool;
 use crate::auth::backend::{ComputeCredentialKeys, ComputeUserInfo};
 use crate::auth::{endpoint_sni, ComputeUserInfoParseError};
 use crate::config::{AuthenticationConfig, HttpConfig, ProxyConfig, TlsConfig};
@@ -1052,12 +1051,12 @@ async fn query_to_json<T: GenericClient>(
 
 enum Client {
     Remote(conn_pool_lib::Client<tokio_postgres::Client>),
-    Local(local_conn_pool::LocalClient<tokio_postgres::Client>),
+    Local(conn_pool_lib::Client<tokio_postgres::Client>),
 }
 
 enum Discard<'a> {
     Remote(conn_pool_lib::Discard<'a, tokio_postgres::Client>),
-    Local(local_conn_pool::Discard<'a, tokio_postgres::Client>),
+    Local(conn_pool_lib::Discard<'a, tokio_postgres::Client>),
 }
 
 impl Client {
@@ -1071,7 +1070,7 @@ impl Client {
     fn inner(&mut self) -> (&mut tokio_postgres::Client, Discard<'_>) {
         match self {
             Client::Remote(client) => {
-                let (c, d) = client.inner_mut();
+                let (c, d) = client.inner();
                 (c, Discard::Remote(d))
             }
             Client::Local(local_client) => {
