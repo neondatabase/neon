@@ -44,13 +44,14 @@ class PgVersion(StrEnum):
         if not isinstance(value, str):
             return None
 
-        known_values = {v.value for _, v in cls.__members__.items()}
+        known_values = set(cls.__members__.values())
 
         # Allow passing version as v-prefixed string (e.g. "v14")
         if value.lower().startswith("v") and (v := value[1:]) in known_values:
             return cls(v)
+
         # Allow passing version as an int (i.e. both "15" and "150002" matches PgVersion.V15)
-        elif value.isdigit() and (v := value[:2]) in known_values:
+        if value.isdigit() and (v := value[:2]) in known_values:
             return cls(v)
-        else:
-            return None
+
+        return None

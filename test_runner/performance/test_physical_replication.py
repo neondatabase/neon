@@ -247,7 +247,7 @@ def test_replication_start_stop(
             ],
             env=master_env,
         )
-        replica_pgbench: list[subprocess.Popen[Any] | None] = [None for _ in range(num_replicas)]
+        replica_pgbench: list[subprocess.Popen[Any] | None] = [None] * num_replicas
 
         # Use the bits of iconfig to tell us which configuration we are on. For example
         # a iconfig of 2 is 10 in binary, indicating replica 0 is suspended and replica 1 is
