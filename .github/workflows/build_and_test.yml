@@ -7,7 +7,6 @@ on:
       - release
       - release-proxy
       - amasterov/release-compute
-  pull_request:
 
 defaults:
   run:
