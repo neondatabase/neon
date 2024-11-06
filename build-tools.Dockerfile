@@ -38,7 +38,7 @@ RUN set -e \
         libseccomp-dev \
         libsqlite3-dev \
         libssl-dev \
-        $([[ "${DEBIAN_VERSION}" = "bullseye" ]] && libstdc++-10-dev || libstdc++-11-dev) \
+        $([[ "${DEBIAN_VERSION}" = "bullseye" ]] && echo libstdc++-10-dev || echo libstdc++-11-dev) \
         libtool \
         libxml2-dev \
         libxmlsec1-dev \
@@ -55,7 +55,7 @@ RUN set -e \
         xz-utils \
         zlib1g-dev \
         zstd \
-        $([[ "${DEBIAN_VERSION}" = "bookworm" ]] && pgcopydb) \
+        $([[ "${DEBIAN_VERSION}" = "bookworm" ]] && echo pgcopydb || true) \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 # sql_exporter
