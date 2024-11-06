@@ -1349,7 +1349,7 @@ impl BaseBackupCmd {
             } else {
                 lsn = Some(
                     Lsn::from_str(maybe_lsn)
-                        .with_context(|| format!("Failed to parse lsn from {}", maybe_lsn))?,
+                        .with_context(|| format!("Failed to parse lsn from {maybe_lsn}"))?,
                 );
                 flags_parse_from = 3;
             }
@@ -1365,17 +1365,17 @@ impl BaseBackupCmd {
             match param {
                 "--gzip" => {
                     if gzip {
-                        bail!("duplicate parameter for basebackup command: {}", param)
+                        bail!("duplicate parameter for basebackup command: {param}")
                     }
                     gzip = true
                 }
                 "--replica" => {
                     if replica {
-                        bail!("duplicate parameter for basebackup command: {}", param)
+                        bail!("duplicate parameter for basebackup command: {param}")
                     }
                     replica = true
                 }
-                _ => bail!("invalid parameter for basebackup command: {}", param),
+                _ => bail!("invalid parameter for basebackup command: {param}"),
             }
         }
         Ok(Self {
@@ -1423,7 +1423,7 @@ impl PageServiceCmd {
             "fullbackup" => Ok(Self::FullBackup(FullBackupCmd::parse(other)?)),
             "lease" => {
                 let Some((cmd2, other)) = other.split_once(' ') else {
-                    bail!("invalid lease command: {}", cmd);
+                    bail!("invalid lease command: {cmd}");
                 };
                 let cmd2 = cmd2.to_ascii_lowercase();
                 if cmd2 == "lsn" {
