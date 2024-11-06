@@ -1,5 +1,6 @@
 //! Common traits and structs for layers
 
+pub mod batch_split_writer;
 pub mod delta_layer;
 pub mod filter_iterator;
 pub mod image_layer;
@@ -8,14 +9,13 @@ pub(crate) mod layer;
 mod layer_desc;
 mod layer_name;
 pub mod merge_iterator;
-pub mod split_writer;
 
 use crate::context::{AccessStatsBehavior, RequestContext};
-use crate::repository::Value;
-use crate::walrecord::NeonWalRecord;
 use bytes::Bytes;
 use pageserver_api::key::Key;
 use pageserver_api::keyspace::{KeySpace, KeySpaceRandomAccum};
+use pageserver_api::record::NeonWalRecord;
+use pageserver_api::value::Value;
 use std::cmp::{Ordering, Reverse};
 use std::collections::hash_map::Entry;
 use std::collections::{BinaryHeap, HashMap};

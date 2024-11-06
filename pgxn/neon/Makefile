@@ -8,6 +8,7 @@ OBJS = \
 	file_cache.o \
 	hll.o \
 	libpagestore.o \
+	logical_replication_monitor.o \
 	neon.o \
 	neon_pgversioncompat.o \
 	neon_perf_counters.o \
@@ -15,6 +16,7 @@ OBJS = \
 	neon_walreader.o \
 	pagestore_smgr.o \
 	relsize_cache.o \
+	unstable_extensions.o \
 	walproposer.o \
 	walproposer_pg.o \
 	control_plane_connector.o \

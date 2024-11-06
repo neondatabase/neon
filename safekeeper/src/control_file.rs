@@ -14,12 +14,10 @@ use std::path::Path;
 use std::time::Instant;
 
 use crate::control_file_upgrade::downgrade_v9_to_v8;
+use crate::control_file_upgrade::upgrade_control_file;
 use crate::metrics::PERSIST_CONTROL_FILE_SECONDS;
 use crate::state::{EvictionState, TimelinePersistentState};
-use crate::{control_file_upgrade::upgrade_control_file, timeline::get_timeline_dir};
-use utils::{bin_ser::LeSer, id::TenantTimelineId};
-
-use crate::SafeKeeperConf;
+use utils::bin_ser::LeSer;
 
 pub const SK_MAGIC: u32 = 0xcafeceefu32;
 pub const SK_FORMAT_VERSION: u32 = 9;
@@ -54,13 +52,12 @@ pub struct FileStorage {
 
 impl FileStorage {
     /// Initialize storage by loading state from disk.
-    pub fn restore_new(ttid: &TenantTimelineId, conf: &SafeKeeperConf) -> Result<FileStorage> {
-        let timeline_dir = get_timeline_dir(conf, ttid);
-        let state = Self::load_control_file_from_dir(&timeline_dir)?;
+    pub fn restore_new(timeline_dir: &Utf8Path, no_sync: bool) -> Result<FileStorage> {
+        let state = Self::load_control_file_from_dir(timeline_dir)?;
 
         Ok(FileStorage {
-            timeline_dir,
-            no_sync: conf.no_sync,
+            timeline_dir: timeline_dir.to_path_buf(),
+            no_sync,
             state,
             last_persist_at: Instant::now(),
         })
@@ -71,16 +68,16 @@ impl FileStorage {
     /// Note: we normally call this in temp directory for atomic init, so
     /// interested in FileStorage as a result only in tests.
     pub async fn create_new(
-        dir: Utf8PathBuf,
-        conf: &SafeKeeperConf,
+        timeline_dir: &Utf8Path,
         state: TimelinePersistentState,
+        no_sync: bool,
     ) -> Result<FileStorage> {
         // we don't support creating new timelines in offloaded state
         assert!(matches!(state.eviction_state, EvictionState::Present));
 
         let mut store = FileStorage {
-            timeline_dir: dir,
-            no_sync: conf.no_sync,
+            timeline_dir: timeline_dir.to_path_buf(),
+            no_sync,
             state: state.clone(),
             last_persist_at: Instant::now(),
         };
@@ -239,89 +236,46 @@ mod test {
     use tokio::fs;
     use utils::lsn::Lsn;
 
-    fn stub_conf() -> SafeKeeperConf {
-        let workdir = camino_tempfile::tempdir().unwrap().into_path();
-        SafeKeeperConf {
-            workdir,
-            ..SafeKeeperConf::dummy()
-        }
-    }
+    const NO_SYNC: bool = true;
 
-    async fn load_from_control_file(
-        conf: &SafeKeeperConf,
-        ttid: &TenantTimelineId,
-    ) -> Result<(FileStorage, TimelinePersistentState)> {
-        let timeline_dir = get_timeline_dir(conf, ttid);
-        fs::create_dir_all(&timeline_dir)
-            .await
-            .expect("failed to create timeline dir");
-        Ok((
-            FileStorage::restore_new(ttid, conf)?,
-            FileStorage::load_control_file_from_dir(&timeline_dir)?,
-        ))
-    }
+    #[tokio::test]
+    async fn test_read_write_safekeeper_state() -> anyhow::Result<()> {
+        let tempdir = camino_tempfile::tempdir()?;
+        let mut state = TimelinePersistentState::empty();
+        let mut storage = FileStorage::create_new(tempdir.path(), state.clone(), NO_SYNC).await?;
 
-    async fn create(
-        conf: &SafeKeeperConf,
-        ttid: &TenantTimelineId,
-    ) -> Result<(FileStorage, TimelinePersistentState)> {
-        let timeline_dir = get_timeline_dir(conf, ttid);
-        fs::create_dir_all(&timeline_dir)
-            .await
-            .expect("failed to create timeline dir");
-        let state = TimelinePersistentState::empty();
-        let storage = FileStorage::create_new(timeline_dir, conf, state.clone()).await?;
-        Ok((storage, state))
+        // Make a change.
+        state.commit_lsn = Lsn(42);
+        storage.persist(&state).await?;
+
+        // Reload the state. It should match the previously persisted state.
+        let loaded_state = FileStorage::load_control_file_from_dir(tempdir.path())?;
+        assert_eq!(loaded_state, state);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_read_write_safekeeper_state() {
-        let conf = stub_conf();
-        let ttid = TenantTimelineId::generate();
-        {
-            let (mut storage, mut state) =
-                create(&conf, &ttid).await.expect("failed to create state");
-            // change something
-            state.commit_lsn = Lsn(42);
-            storage
-                .persist(&state)
-                .await
-                .expect("failed to persist state");
+    async fn test_safekeeper_state_checksum_mismatch() -> anyhow::Result<()> {
+        let tempdir = camino_tempfile::tempdir()?;
+        let mut state = TimelinePersistentState::empty();
+        let mut storage = FileStorage::create_new(tempdir.path(), state.clone(), NO_SYNC).await?;
+
+        // Make a change.
+        state.commit_lsn = Lsn(42);
+        storage.persist(&state).await?;
+
+        // Change the first byte to fail checksum validation.
+        let ctrl_path = tempdir.path().join(CONTROL_FILE_NAME);
+        let mut data = fs::read(&ctrl_path).await?;
+        data[0] += 1;
+        fs::write(&ctrl_path, &data).await?;
+
+        // Loading the file should fail checksum validation.
+        if let Err(err) = FileStorage::load_control_file_from_dir(tempdir.path()) {
+            assert!(err.to_string().contains("control file checksum mismatch"))
+        } else {
+            panic!("expected checksum error")
         }
-
-        let (_, state) = load_from_control_file(&conf, &ttid)
-            .await
-            .expect("failed to read state");
-        assert_eq!(state.commit_lsn, Lsn(42));
-    }
-
-    #[tokio::test]
-    async fn test_safekeeper_state_checksum_mismatch() {
-        let conf = stub_conf();
-        let ttid = TenantTimelineId::generate();
-        {
-            let (mut storage, mut state) =
-                create(&conf, &ttid).await.expect("failed to read state");
-
-            // change something
-            state.commit_lsn = Lsn(42);
-            storage
-                .persist(&state)
-                .await
-                .expect("failed to persist state");
-        }
-        let control_path = get_timeline_dir(&conf, &ttid).join(CONTROL_FILE_NAME);
-        let mut data = fs::read(&control_path).await.unwrap();
-        data[0] += 1; // change the first byte of the file to fail checksum validation
-        fs::write(&control_path, &data)
-            .await
-            .expect("failed to write control file");
-
-        match load_from_control_file(&conf, &ttid).await {
-            Err(err) => assert!(err
-                .to_string()
-                .contains("safekeeper control file checksum mismatch")),
-            Ok(_) => panic!("expected error"),
-        }
+        Ok(())
     }
 }

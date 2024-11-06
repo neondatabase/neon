@@ -279,6 +279,7 @@ fn log_compaction_error(
 
     let decision = match e {
         ShuttingDown => None,
+        Offload(_) => Some(LooksLike::Error),
         _ if task_cancelled => Some(LooksLike::Info),
         Other(e) => {
             let root_cause = e.root_cause();

@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use utils::{id::TimelineId, lsn::Lsn};
 
 /// Tenant-shard scoped manifest
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TenantManifest {
     /// Debugging aid describing the version of this manifest.
     /// Can also be used for distinguishing breaking changes later on.
@@ -23,7 +23,7 @@ pub struct TenantManifest {
 /// Very similar to [`pageserver_api::models::OffloadedTimelineInfo`],
 /// but the two datastructures serve different needs, this is for a persistent disk format
 /// that must be backwards compatible, while the other is only for informative purposes.
-#[derive(Clone, Serialize, Deserialize, Copy)]
+#[derive(Clone, Serialize, Deserialize, Copy, PartialEq, Eq)]
 pub struct OffloadedTimelineManifest {
     pub timeline_id: TimelineId,
     /// Whether the timeline has a parent it has been branched off from or not

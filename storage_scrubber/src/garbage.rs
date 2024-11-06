@@ -160,9 +160,7 @@ async fn find_garbage_inner(
     // Build a set of console-known tenants, for quickly eliminating known-active tenants without having
     // to issue O(N) console API requests.
     let console_projects: HashMap<TenantId, ProjectData> = cloud_admin_api_client
-        // FIXME: we can't just assume that all console's region ids are aws-<something>.  This hack
-        // will go away when we are talking to Control Plane APIs, which are per-region.
-        .list_projects(format!("aws-{}", bucket_config.region))
+        .list_projects()
         .await?
         .into_iter()
         .map(|t| (t.tenant, t))

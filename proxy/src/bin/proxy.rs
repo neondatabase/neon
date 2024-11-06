@@ -137,9 +137,6 @@ struct ProxyCliArgs {
     /// size of the threadpool for password hashing
     #[clap(long, default_value_t = 4)]
     scram_thread_pool_size: u8,
-    /// Disable dynamic rate limiter and store the metrics to ensure its production behaviour.
-    #[clap(long, default_value_t = true, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
-    disable_dynamic_rate_limiter: bool,
     /// Endpoint rate limiter max number of requests per second.
     ///
     /// Provided in the form `<Requests Per Second>@<Bucket Duration Size>`.
@@ -516,7 +513,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     if let Either::Left(auth::Backend::ControlPlane(api, _)) = &auth_backend {
-        if let proxy::control_plane::provider::ControlPlaneBackend::Management(api) = &**api {
+        if let proxy::control_plane::client::ControlPlaneClient::Neon(api) = &**api {
             match (redis_notifications_client, regional_redis_client.clone()) {
                 (None, None) => {}
                 (client1, client2) => {
@@ -615,9 +612,6 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
              and metric-collection-interval must be specified"
         ),
     };
-    if !args.disable_dynamic_rate_limiter {
-        bail!("dynamic rate limiter should be disabled");
-    }
 
     let config::ConcurrencyLockOptions {
         shards,
@@ -738,13 +732,13 @@ fn build_auth_backend(
             RateBucketInfo::validate(&mut wake_compute_rps_limit)?;
             let wake_compute_endpoint_rate_limiter =
                 Arc::new(WakeComputeRateLimiter::new(wake_compute_rps_limit));
-            let api = control_plane::provider::neon::Api::new(
+            let api = control_plane::client::neon::NeonControlPlaneClient::new(
                 endpoint,
                 caches,
                 locks,
                 wake_compute_endpoint_rate_limiter,
             );
-            let api = control_plane::provider::ControlPlaneBackend::Management(api);
+            let api = control_plane::client::ControlPlaneClient::Neon(api);
             let auth_backend = auth::Backend::ControlPlane(MaybeOwned::Owned(api), ());
 
             let config = Box::leak(Box::new(auth_backend));
@@ -755,8 +749,11 @@ fn build_auth_backend(
         #[cfg(feature = "testing")]
         AuthBackendType::Postgres => {
             let url = args.auth_endpoint.parse()?;
-            let api = control_plane::provider::mock::Api::new(url, !args.is_private_access_proxy);
-            let api = control_plane::provider::ControlPlaneBackend::PostgresMock(api);
+            let api = control_plane::client::mock::MockControlPlane::new(
+                url,
+                !args.is_private_access_proxy,
+            );
+            let api = control_plane::client::ControlPlaneClient::PostgresMock(api);
 
             let auth_backend = auth::Backend::ControlPlane(MaybeOwned::Owned(api), ());
 

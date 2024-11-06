@@ -2,7 +2,7 @@
 //!
 //! Currently it only analyzes holes, which are regions within the layer range that the layer contains no updates for. In the future it might do more analysis (maybe key quantiles?) but it should never return sensitive data.
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use camino::{Utf8Path, Utf8PathBuf};
 use pageserver::context::{DownloadBehavior, RequestContext};
 use pageserver::task_mgr::TaskKind;
@@ -11,15 +11,16 @@ use pageserver::virtual_file::api::IoMode;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::ops::Range;
+use std::str::FromStr;
 use std::{fs, str};
 
 use pageserver::page_cache::{self, PAGE_SZ};
-use pageserver::repository::{Key, KEY_SIZE};
 use pageserver::tenant::block_io::FileBlockReader;
 use pageserver::tenant::disk_btree::{DiskBtreeReader, VisitDirection};
 use pageserver::tenant::storage_layer::delta_layer::{Summary, DELTA_KEY_SIZE};
-use pageserver::tenant::storage_layer::range_overlaps;
+use pageserver::tenant::storage_layer::{range_overlaps, LayerName};
 use pageserver::virtual_file::{self, VirtualFile};
+use pageserver_api::key::{Key, KEY_SIZE};
 
 use utils::{bin_ser::BeSer, lsn::Lsn};
 
@@ -74,35 +75,15 @@ impl LayerFile {
     }
 }
 
-pub(crate) fn parse_filename(name: &str) -> Option<LayerFile> {
-    let split: Vec<&str> = name.split("__").collect();
-    if split.len() != 2 {
-        return None;
-    }
-    let keys: Vec<&str> = split[0].split('-').collect();
-    let lsn_and_opt_generation: Vec<&str> = split[1].split('v').collect();
-    let lsns: Vec<&str> = lsn_and_opt_generation[0].split('-').collect();
-    let the_lsns: [&str; 2];
+pub(crate) fn parse_filename(name: &str) -> anyhow::Result<LayerFile> {
+    let layer_name =
+        LayerName::from_str(name).map_err(|e| anyhow!("failed to parse layer name: {e}"))?;
 
-    /*
-     * Generations add a -vX-XXXXXX postfix, which causes issues when we try to
-     * parse 'vX' as an LSN.
-     */
-    let is_delta = if lsns.len() == 1 || lsns[1].is_empty() {
-        the_lsns = [lsns[0], lsns[0]];
-        false
-    } else {
-        the_lsns = [lsns[0], lsns[1]];
-        true
-    };
-
-    let key_range = Key::from_hex(keys[0]).unwrap()..Key::from_hex(keys[1]).unwrap();
-    let lsn_range = Lsn::from_hex(the_lsns[0]).unwrap()..Lsn::from_hex(the_lsns[1]).unwrap();
     let holes = Vec::new();
-    Some(LayerFile {
-        key_range,
-        lsn_range,
-        is_delta,
+    Ok(LayerFile {
+        key_range: layer_name.key_range().clone(),
+        lsn_range: layer_name.lsn_as_range(),
+        is_delta: layer_name.is_delta(),
         holes,
     })
 }
@@ -179,7 +160,7 @@ pub(crate) async fn main(cmd: &AnalyzeLayerMapCmd) -> Result<()> {
 
             for layer in fs::read_dir(timeline.path())? {
                 let layer = layer?;
-                if let Some(mut layer_file) =
+                if let Ok(mut layer_file) =
                     parse_filename(&layer.file_name().into_string().unwrap())
                 {
                     if layer_file.is_delta {

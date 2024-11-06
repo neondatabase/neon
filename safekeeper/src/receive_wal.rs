@@ -3,6 +3,10 @@
 //! sends replies back.
 
 use crate::handler::SafekeeperPostgresHandler;
+use crate::metrics::{
+    WAL_RECEIVERS, WAL_RECEIVER_QUEUE_DEPTH, WAL_RECEIVER_QUEUE_DEPTH_TOTAL,
+    WAL_RECEIVER_QUEUE_SIZE_TOTAL,
+};
 use crate::safekeeper::AcceptorProposerMessage;
 use crate::safekeeper::ProposerAcceptorMessage;
 use crate::safekeeper::ServerInfo;
@@ -21,18 +25,16 @@ use postgres_backend::QueryError;
 use pq_proto::BeMessage;
 use serde::Deserialize;
 use serde::Serialize;
+use std::future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::AsyncRead;
 use tokio::io::AsyncWrite;
-use tokio::sync::mpsc::channel;
-use tokio::sync::mpsc::error::TryRecvError;
-use tokio::sync::mpsc::Receiver;
-use tokio::sync::mpsc::Sender;
+use tokio::sync::mpsc::error::SendTimeoutError;
+use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::task;
 use tokio::task::JoinHandle;
-use tokio::time::Duration;
-use tokio::time::Instant;
+use tokio::time::{Duration, Instant, MissedTickBehavior};
 use tracing::*;
 use utils::id::TenantTimelineId;
 use utils::lsn::Lsn;
@@ -88,6 +90,7 @@ impl WalReceivers {
         };
 
         self.update_num(&shared);
+        WAL_RECEIVERS.inc();
 
         WalReceiverGuard {
             id: pos,
@@ -146,6 +149,7 @@ impl WalReceivers {
         let mut shared = self.mutex.lock();
         shared.slots[id] = None;
         self.update_num(&shared);
+        WAL_RECEIVERS.dec();
     }
 
     /// Broadcast pageserver feedback to connected walproposers.
@@ -387,10 +391,36 @@ async fn read_network_loop<IO: AsyncRead + AsyncWrite + Unpin>(
     msg_tx: Sender<ProposerAcceptorMessage>,
     mut next_msg: ProposerAcceptorMessage,
 ) -> Result<(), CopyStreamHandlerEnd> {
+    /// Threshold for logging slow WalAcceptor sends.
+    const SLOW_THRESHOLD: Duration = Duration::from_secs(5);
+
     loop {
-        if msg_tx.send(next_msg).await.is_err() {
-            return Ok(()); // chan closed, WalAcceptor terminated
+        let started = Instant::now();
+        let size = next_msg.size();
+        match msg_tx.send_timeout(next_msg, SLOW_THRESHOLD).await {
+            Ok(()) => {}
+            // Slow send, log a message and keep trying. Log context has timeline ID.
+            Err(SendTimeoutError::Timeout(next_msg)) => {
+                warn!(
+                    "slow WalAcceptor send blocked for {:.3}s",
+                    Instant::now().duration_since(started).as_secs_f64()
+                );
+                if msg_tx.send(next_msg).await.is_err() {
+                    return Ok(()); // WalAcceptor terminated
+                }
+                warn!(
+                    "slow WalAcceptor send completed after {:.3}s",
+                    Instant::now().duration_since(started).as_secs_f64()
+                )
+            }
+            // WalAcceptor terminated.
+            Err(SendTimeoutError::Closed(_)) => return Ok(()),
         }
+
+        // Update metrics. Will be decremented in WalAcceptor.
+        WAL_RECEIVER_QUEUE_DEPTH_TOTAL.inc();
+        WAL_RECEIVER_QUEUE_SIZE_TOTAL.add(size as i64);
+
         next_msg = read_message(pgb_reader).await?;
     }
 }
@@ -444,9 +474,15 @@ async fn network_write<IO: AsyncRead + AsyncWrite + Unpin>(
     }
 }
 
-// Send keepalive messages to walproposer, to make sure it receives updates
-// even when it writes a steady stream of messages.
-const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(1);
+/// The WAL flush interval. This ensures we periodically flush the WAL and send AppendResponses to
+/// walproposer, even when it's writing a steady stream of messages.
+const FLUSH_INTERVAL: Duration = Duration::from_secs(1);
+
+/// The metrics computation interval.
+///
+/// The Prometheus poll interval is 60 seconds at the time of writing. We sample the queue depth
+/// every 5 seconds, for 12 samples per poll. This will give a count of up to 12x active timelines.
+const METRICS_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Encapsulates a task which takes messages from msg_rx, processes and pushes
 /// replies to reply_tx.
@@ -494,67 +530,100 @@ impl WalAcceptor {
     async fn run(&mut self) -> anyhow::Result<()> {
         let walreceiver_guard = self.tli.get_walreceivers().register(self.conn_id);
 
-        // After this timestamp we will stop processing AppendRequests and send a response
-        // to the walproposer. walproposer sends at least one AppendRequest per second,
-        // we will send keepalives by replying to these requests once per second.
-        let mut next_keepalive = Instant::now();
+        // Periodically flush the WAL and compute metrics.
+        let mut flush_ticker = tokio::time::interval(FLUSH_INTERVAL);
+        flush_ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        flush_ticker.tick().await; // skip the initial, immediate tick
 
-        while let Some(mut next_msg) = self.msg_rx.recv().await {
-            // Update walreceiver state in shmem for reporting.
-            if let ProposerAcceptorMessage::Elected(_) = &next_msg {
-                walreceiver_guard.get().status = WalReceiverStatus::Streaming;
-            }
+        let mut metrics_ticker = tokio::time::interval(METRICS_INTERVAL);
+        metrics_ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
-            let reply_msg = if matches!(next_msg, ProposerAcceptorMessage::AppendRequest(_)) {
-                // Loop through AppendRequests while available to write as many WAL records as
-                // possible without fsyncing.
-                //
-                // Make sure the WAL is flushed before returning, see:
-                // https://github.com/neondatabase/neon/issues/9259
-                //
-                // Note: this will need to be rewritten if we want to read non-AppendRequest messages here.
-                // Otherwise, we might end up in a situation where we read a message, but don't
-                // process it.
-                while let ProposerAcceptorMessage::AppendRequest(append_request) = next_msg {
-                    let noflush_msg = ProposerAcceptorMessage::NoFlushAppendRequest(append_request);
+        // Tracks whether we have unflushed appends.
+        let mut dirty = false;
 
-                    if let Some(reply) = self.tli.process_msg(&noflush_msg).await? {
-                        if self.reply_tx.send(reply).await.is_err() {
-                            break; // disconnected, flush WAL and return on next send/recv
-                        }
-                    }
-
-                    // get out of this loop if keepalive time is reached
-                    if Instant::now() >= next_keepalive {
+        loop {
+            let reply = tokio::select! {
+                // Process inbound message.
+                msg = self.msg_rx.recv() => {
+                    // If disconnected, break to flush WAL and return.
+                    let Some(mut msg) = msg else {
                         break;
+                    };
+
+                    // Update gauge metrics.
+                    WAL_RECEIVER_QUEUE_DEPTH_TOTAL.dec();
+                    WAL_RECEIVER_QUEUE_SIZE_TOTAL.sub(msg.size() as i64);
+
+                    // Update walreceiver state in shmem for reporting.
+                    if let ProposerAcceptorMessage::Elected(_) = &msg {
+                        walreceiver_guard.get().status = WalReceiverStatus::Streaming;
                     }
 
-                    // continue pulling AppendRequests if available
-                    match self.msg_rx.try_recv() {
-                        Ok(msg) => next_msg = msg,
-                        Err(TryRecvError::Empty) => break,
-                        // on disconnect, flush WAL and return on next send/recv
-                        Err(TryRecvError::Disconnected) => break,
-                    };
+                    // Don't flush the WAL on every append, only periodically via flush_ticker.
+                    // This batches multiple appends per fsync. If the channel is empty after
+                    // sending the reply, we'll schedule an immediate flush.
+                    if let ProposerAcceptorMessage::AppendRequest(append_request) = msg {
+                        msg = ProposerAcceptorMessage::NoFlushAppendRequest(append_request);
+                        dirty = true;
+                    }
+
+                    self.tli.process_msg(&msg).await?
                 }
 
-                // flush all written WAL to the disk
-                self.tli
-                    .process_msg(&ProposerAcceptorMessage::FlushWAL)
-                    .await?
-            } else {
-                // process message other than AppendRequest
-                self.tli.process_msg(&next_msg).await?
+                // While receiving AppendRequests, flush the WAL periodically and respond with an
+                // AppendResponse to let walproposer know we're still alive.
+                _ = flush_ticker.tick(), if dirty => {
+                    dirty = false;
+                    self.tli
+                        .process_msg(&ProposerAcceptorMessage::FlushWAL)
+                        .await?
+                }
+
+                // If there are no pending messages, flush the WAL immediately.
+                //
+                // TODO: this should be done via flush_ticker.reset_immediately(), but that's always
+                // delayed by 1ms due to this bug: https://github.com/tokio-rs/tokio/issues/6866.
+                _ = future::ready(()), if dirty && self.msg_rx.is_empty() => {
+                    dirty = false;
+                    flush_ticker.reset();
+                    self.tli
+                        .process_msg(&ProposerAcceptorMessage::FlushWAL)
+                        .await?
+                }
+
+                // Update histogram metrics periodically.
+                _ = metrics_ticker.tick() => {
+                    WAL_RECEIVER_QUEUE_DEPTH.observe(self.msg_rx.len() as f64);
+                    None // no reply
+                }
             };
 
-            if let Some(reply) = reply_msg {
+            // Send reply, if any.
+            if let Some(reply) = reply {
                 if self.reply_tx.send(reply).await.is_err() {
-                    return Ok(()); // chan closed, streaming terminated
+                    break; // disconnected, break to flush WAL and return
                 }
-                // reset keepalive time
-                next_keepalive = Instant::now() + KEEPALIVE_INTERVAL;
             }
         }
+
+        // Flush WAL on disconnect, see https://github.com/neondatabase/neon/issues/9259.
+        if dirty {
+            self.tli
+                .process_msg(&ProposerAcceptorMessage::FlushWAL)
+                .await?;
+        }
+
         Ok(())
+    }
+}
+
+/// On drop, drain msg_rx and update metrics to avoid leaks.
+impl Drop for WalAcceptor {
+    fn drop(&mut self) {
+        self.msg_rx.close(); // prevent further sends
+        while let Ok(msg) = self.msg_rx.try_recv() {
+            WAL_RECEIVER_QUEUE_DEPTH_TOTAL.dec();
+            WAL_RECEIVER_QUEUE_SIZE_TOTAL.sub(msg.size() as i64);
+        }
     }
 }

@@ -1,107 +1,144 @@
+//! This module houses types used in decoding of PG WAL
+//! records.
 //!
-//! Functions for parsing WAL records.
-//!
+//! TODO: Generate separate types for each supported PG version
 
-use anyhow::Result;
+use crate::pg_constants;
+use crate::XLogRecord;
+use crate::{
+    BlockNumber, MultiXactId, MultiXactOffset, MultiXactStatus, Oid, RepOriginId, TimestampTz,
+    TransactionId,
+};
+use crate::{BLCKSZ, XLOG_SIZE_OF_XLOG_RECORD};
 use bytes::{Buf, Bytes};
-use postgres_ffi::dispatch_pgversion;
-use postgres_ffi::pg_constants;
-use postgres_ffi::BLCKSZ;
-use postgres_ffi::{BlockNumber, TimestampTz};
-use postgres_ffi::{MultiXactId, MultiXactOffset, MultiXactStatus, Oid, TransactionId};
-use postgres_ffi::{RepOriginId, XLogRecord, XLOG_SIZE_OF_XLOG_RECORD};
 use serde::{Deserialize, Serialize};
-use tracing::*;
-use utils::{bin_ser::DeserializeError, lsn::Lsn};
+use utils::bin_ser::DeserializeError;
+use utils::lsn::Lsn;
 
-/// Each update to a page is represented by a NeonWalRecord. It can be a wrapper
-/// around a PostgreSQL WAL record, or a custom neon-specific "record".
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum NeonWalRecord {
-    /// Native PostgreSQL WAL record
-    Postgres { will_init: bool, rec: Bytes },
-
-    /// Clear bits in heap visibility map. ('flags' is bitmap of bits to clear)
-    ClearVisibilityMapFlags {
-        new_heap_blkno: Option<u32>,
-        old_heap_blkno: Option<u32>,
-        flags: u8,
-    },
-    /// Mark transaction IDs as committed on a CLOG page
-    ClogSetCommitted {
-        xids: Vec<TransactionId>,
-        timestamp: TimestampTz,
-    },
-    /// Mark transaction IDs as aborted on a CLOG page
-    ClogSetAborted { xids: Vec<TransactionId> },
-    /// Extend multixact offsets SLRU
-    MultixactOffsetCreate {
-        mid: MultiXactId,
-        moff: MultiXactOffset,
-    },
-    /// Extend multixact members SLRU.
-    MultixactMembersCreate {
-        moff: MultiXactOffset,
-        members: Vec<MultiXactMember>,
-    },
-    /// Update the map of AUX files, either writing or dropping an entry
-    AuxFile {
-        file_path: String,
-        content: Option<Bytes>,
-    },
-
-    /// A testing record for unit testing purposes. It supports append data to an existing image, or clear it.
-    #[cfg(test)]
-    Test {
-        /// Append a string to the image.
-        append: String,
-        /// Clear the image before appending.
-        clear: bool,
-        /// Treat this record as an init record. `clear` should be set to true if this field is set
-        /// to true. This record does not need the history WALs to reconstruct. See [`NeonWalRecord::will_init`] and
-        /// its references in `timeline.rs`.
-        will_init: bool,
-    },
+#[repr(C)]
+#[derive(Debug)]
+pub struct XlMultiXactCreate {
+    pub mid: MultiXactId,
+    /* new MultiXact's ID */
+    pub moff: MultiXactOffset,
+    /* its starting offset in members file */
+    pub nmembers: u32,
+    /* number of member XIDs */
+    pub members: Vec<MultiXactMember>,
 }
 
-impl NeonWalRecord {
-    /// Does replaying this WAL record initialize the page from scratch, or does
-    /// it need to be applied over the previous image of the page?
-    pub fn will_init(&self) -> bool {
-        // If you change this function, you'll also need to change ValueBytes::will_init
-        match self {
-            NeonWalRecord::Postgres { will_init, rec: _ } => *will_init,
-            #[cfg(test)]
-            NeonWalRecord::Test { will_init, .. } => *will_init,
-            // None of the special neon record types currently initialize the page
-            _ => false,
+impl XlMultiXactCreate {
+    pub fn decode(buf: &mut Bytes) -> XlMultiXactCreate {
+        let mid = buf.get_u32_le();
+        let moff = buf.get_u32_le();
+        let nmembers = buf.get_u32_le();
+        let mut members = Vec::new();
+        for _ in 0..nmembers {
+            members.push(MultiXactMember::decode(buf));
+        }
+        XlMultiXactCreate {
+            mid,
+            moff,
+            nmembers,
+            members,
         }
     }
+}
 
-    #[cfg(test)]
-    pub(crate) fn wal_append(s: impl AsRef<str>) -> Self {
-        Self::Test {
-            append: s.as_ref().to_string(),
-            clear: false,
-            will_init: false,
+#[repr(C)]
+#[derive(Debug)]
+pub struct XlMultiXactTruncate {
+    pub oldest_multi_db: Oid,
+    /* to-be-truncated range of multixact offsets */
+    pub start_trunc_off: MultiXactId,
+    /* just for completeness' sake */
+    pub end_trunc_off: MultiXactId,
+
+    /* to-be-truncated range of multixact members */
+    pub start_trunc_memb: MultiXactOffset,
+    pub end_trunc_memb: MultiXactOffset,
+}
+
+impl XlMultiXactTruncate {
+    pub fn decode(buf: &mut Bytes) -> XlMultiXactTruncate {
+        XlMultiXactTruncate {
+            oldest_multi_db: buf.get_u32_le(),
+            start_trunc_off: buf.get_u32_le(),
+            end_trunc_off: buf.get_u32_le(),
+            start_trunc_memb: buf.get_u32_le(),
+            end_trunc_memb: buf.get_u32_le(),
         }
     }
+}
 
-    #[cfg(test)]
-    pub(crate) fn wal_clear() -> Self {
-        Self::Test {
-            append: "".to_string(),
-            clear: true,
-            will_init: false,
+#[repr(C)]
+#[derive(Debug)]
+pub struct XlRelmapUpdate {
+    pub dbid: Oid,   /* database ID, or 0 for shared map */
+    pub tsid: Oid,   /* database's tablespace, or pg_global */
+    pub nbytes: i32, /* size of relmap data */
+}
+
+impl XlRelmapUpdate {
+    pub fn decode(buf: &mut Bytes) -> XlRelmapUpdate {
+        XlRelmapUpdate {
+            dbid: buf.get_u32_le(),
+            tsid: buf.get_u32_le(),
+            nbytes: buf.get_i32_le(),
         }
     }
+}
 
-    #[cfg(test)]
-    pub(crate) fn wal_init() -> Self {
-        Self::Test {
-            append: "".to_string(),
-            clear: true,
-            will_init: true,
+#[repr(C)]
+#[derive(Debug)]
+pub struct XlReploriginDrop {
+    pub node_id: RepOriginId,
+}
+
+impl XlReploriginDrop {
+    pub fn decode(buf: &mut Bytes) -> XlReploriginDrop {
+        XlReploriginDrop {
+            node_id: buf.get_u16_le(),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug)]
+pub struct XlReploriginSet {
+    pub remote_lsn: Lsn,
+    pub node_id: RepOriginId,
+}
+
+impl XlReploriginSet {
+    pub fn decode(buf: &mut Bytes) -> XlReploriginSet {
+        XlReploriginSet {
+            remote_lsn: Lsn(buf.get_u64_le()),
+            node_id: buf.get_u16_le(),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct RelFileNode {
+    pub spcnode: Oid, /* tablespace */
+    pub dbnode: Oid,  /* database */
+    pub relnode: Oid, /* relation */
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MultiXactMember {
+    pub xid: TransactionId,
+    pub status: MultiXactStatus,
+}
+
+impl MultiXactMember {
+    pub fn decode(buf: &mut Bytes) -> MultiXactMember {
+        MultiXactMember {
+            xid: buf.get_u32_le(),
+            status: buf.get_u32_le(),
         }
     }
 }
@@ -164,17 +201,17 @@ impl DecodedWALRecord {
     /// Check if this WAL record represents a legacy "copy" database creation, which populates new relations
     /// by reading other existing relations' data blocks.  This is more complex to apply than new-style database
     /// creations which simply include all the desired blocks in the WAL, so we need a helper function to detect this case.
-    pub(crate) fn is_dbase_create_copy(&self, pg_version: u32) -> bool {
+    pub fn is_dbase_create_copy(&self, pg_version: u32) -> bool {
         if self.xl_rmid == pg_constants::RM_DBASE_ID {
             let info = self.xl_info & pg_constants::XLR_RMGR_INFO_MASK;
             match pg_version {
                 14 => {
                     // Postgres 14 database creations are always the legacy kind
-                    info == postgres_ffi::v14::bindings::XLOG_DBASE_CREATE
+                    info == crate::v14::bindings::XLOG_DBASE_CREATE
                 }
-                15 => info == postgres_ffi::v15::bindings::XLOG_DBASE_CREATE_FILE_COPY,
-                16 => info == postgres_ffi::v16::bindings::XLOG_DBASE_CREATE_FILE_COPY,
-                17 => info == postgres_ffi::v17::bindings::XLOG_DBASE_CREATE_FILE_COPY,
+                15 => info == crate::v15::bindings::XLOG_DBASE_CREATE_FILE_COPY,
+                16 => info == crate::v16::bindings::XLOG_DBASE_CREATE_FILE_COPY,
+                17 => info == crate::v17::bindings::XLOG_DBASE_CREATE_FILE_COPY,
                 _ => {
                     panic!("Unsupported postgres version {pg_version}")
                 }
@@ -185,35 +222,294 @@ impl DecodedWALRecord {
     }
 }
 
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct RelFileNode {
-    pub spcnode: Oid, /* tablespace */
-    pub dbnode: Oid,  /* database */
-    pub relnode: Oid, /* relation */
-}
+/// Main routine to decode a WAL record and figure out which blocks are modified
+//
+// See xlogrecord.h for details
+// The overall layout of an XLOG record is:
+//		Fixed-size header (XLogRecord struct)
+//      XLogRecordBlockHeader struct
+//          If pg_constants::BKPBLOCK_HAS_IMAGE, an XLogRecordBlockImageHeader struct follows
+//	           If pg_constants::BKPIMAGE_HAS_HOLE and pg_constants::BKPIMAGE_IS_COMPRESSED, an
+//	           XLogRecordBlockCompressHeader struct follows.
+//          If pg_constants::BKPBLOCK_SAME_REL is not set, a RelFileNode follows
+//          BlockNumber follows
+//      XLogRecordBlockHeader struct
+//      ...
+//      XLogRecordDataHeader[Short|Long] struct
+//      block data
+//      block data
+//      ...
+//      main data
+//
+//
+// For performance reasons, the caller provides the DecodedWALRecord struct and the function just fills it in.
+// It would be more natural for this function to return a DecodedWALRecord as return value,
+// but reusing the caller-supplied struct avoids an allocation.
+// This code is in the hot path for digesting incoming WAL, and is very performance sensitive.
+//
+pub fn decode_wal_record(
+    record: Bytes,
+    decoded: &mut DecodedWALRecord,
+    pg_version: u32,
+) -> anyhow::Result<()> {
+    let mut rnode_spcnode: u32 = 0;
+    let mut rnode_dbnode: u32 = 0;
+    let mut rnode_relnode: u32 = 0;
+    let mut got_rnode = false;
+    let mut origin_id: u16 = 0;
 
-#[repr(C)]
-#[derive(Debug)]
-pub struct XlRelmapUpdate {
-    pub dbid: Oid,   /* database ID, or 0 for shared map */
-    pub tsid: Oid,   /* database's tablespace, or pg_global */
-    pub nbytes: i32, /* size of relmap data */
-}
+    let mut buf = record.clone();
 
-impl XlRelmapUpdate {
-    pub fn decode(buf: &mut Bytes) -> XlRelmapUpdate {
-        XlRelmapUpdate {
-            dbid: buf.get_u32_le(),
-            tsid: buf.get_u32_le(),
-            nbytes: buf.get_i32_le(),
+    // 1. Parse XLogRecord struct
+
+    // FIXME: assume little-endian here
+    let xlogrec = XLogRecord::from_bytes(&mut buf)?;
+
+    tracing::trace!(
+        "decode_wal_record xl_rmid = {} xl_info = {}",
+        xlogrec.xl_rmid,
+        xlogrec.xl_info
+    );
+
+    let remaining: usize = xlogrec.xl_tot_len as usize - XLOG_SIZE_OF_XLOG_RECORD;
+
+    if buf.remaining() != remaining {
+        //TODO error
+    }
+
+    let mut max_block_id = 0;
+    let mut blocks_total_len: u32 = 0;
+    let mut main_data_len = 0;
+    let mut datatotal: u32 = 0;
+    decoded.blocks.clear();
+
+    // 2. Decode the headers.
+    // XLogRecordBlockHeaders if any,
+    // XLogRecordDataHeader[Short|Long]
+    while buf.remaining() > datatotal as usize {
+        let block_id = buf.get_u8();
+
+        match block_id {
+            pg_constants::XLR_BLOCK_ID_DATA_SHORT => {
+                /* XLogRecordDataHeaderShort */
+                main_data_len = buf.get_u8() as u32;
+                datatotal += main_data_len;
+            }
+
+            pg_constants::XLR_BLOCK_ID_DATA_LONG => {
+                /* XLogRecordDataHeaderLong */
+                main_data_len = buf.get_u32_le();
+                datatotal += main_data_len;
+            }
+
+            pg_constants::XLR_BLOCK_ID_ORIGIN => {
+                // RepOriginId is uint16
+                origin_id = buf.get_u16_le();
+            }
+
+            pg_constants::XLR_BLOCK_ID_TOPLEVEL_XID => {
+                // TransactionId is uint32
+                buf.advance(4);
+            }
+
+            0..=pg_constants::XLR_MAX_BLOCK_ID => {
+                /* XLogRecordBlockHeader */
+                let mut blk = DecodedBkpBlock::new();
+
+                if block_id <= max_block_id {
+                    // TODO
+                    //report_invalid_record(state,
+                    //			  "out-of-order block_id %u at %X/%X",
+                    //			  block_id,
+                    //			  (uint32) (state->ReadRecPtr >> 32),
+                    //			  (uint32) state->ReadRecPtr);
+                    //    goto err;
+                }
+                max_block_id = block_id;
+
+                let fork_flags: u8 = buf.get_u8();
+                blk.forknum = fork_flags & pg_constants::BKPBLOCK_FORK_MASK;
+                blk.flags = fork_flags;
+                blk.has_image = (fork_flags & pg_constants::BKPBLOCK_HAS_IMAGE) != 0;
+                blk.has_data = (fork_flags & pg_constants::BKPBLOCK_HAS_DATA) != 0;
+                blk.will_init = (fork_flags & pg_constants::BKPBLOCK_WILL_INIT) != 0;
+                blk.data_len = buf.get_u16_le();
+
+                /* TODO cross-check that the HAS_DATA flag is set iff data_length > 0 */
+
+                datatotal += blk.data_len as u32;
+                blocks_total_len += blk.data_len as u32;
+
+                if blk.has_image {
+                    blk.bimg_len = buf.get_u16_le();
+                    blk.hole_offset = buf.get_u16_le();
+                    blk.bimg_info = buf.get_u8();
+
+                    blk.apply_image = dispatch_pgversion!(
+                        pg_version,
+                        (blk.bimg_info & pgv::bindings::BKPIMAGE_APPLY) != 0
+                    );
+
+                    let blk_img_is_compressed =
+                        crate::bkpimage_is_compressed(blk.bimg_info, pg_version);
+
+                    if blk_img_is_compressed {
+                        tracing::debug!("compressed block image , pg_version = {}", pg_version);
+                    }
+
+                    if blk_img_is_compressed {
+                        if blk.bimg_info & pg_constants::BKPIMAGE_HAS_HOLE != 0 {
+                            blk.hole_length = buf.get_u16_le();
+                        } else {
+                            blk.hole_length = 0;
+                        }
+                    } else {
+                        blk.hole_length = BLCKSZ - blk.bimg_len;
+                    }
+                    datatotal += blk.bimg_len as u32;
+                    blocks_total_len += blk.bimg_len as u32;
+
+                    /*
+                     * cross-check that hole_offset > 0, hole_length > 0 and
+                     * bimg_len < BLCKSZ if the HAS_HOLE flag is set.
+                     */
+                    if blk.bimg_info & pg_constants::BKPIMAGE_HAS_HOLE != 0
+                        && (blk.hole_offset == 0 || blk.hole_length == 0 || blk.bimg_len == BLCKSZ)
+                    {
+                        // TODO
+                        /*
+                        report_invalid_record(state,
+                                      "pg_constants::BKPIMAGE_HAS_HOLE set, but hole offset %u length %u block image length %u at %X/%X",
+                                      (unsigned int) blk->hole_offset,
+                                      (unsigned int) blk->hole_length,
+                                      (unsigned int) blk->bimg_len,
+                                      (uint32) (state->ReadRecPtr >> 32), (uint32) state->ReadRecPtr);
+                        goto err;
+                                     */
+                    }
+
+                    /*
+                     * cross-check that hole_offset == 0 and hole_length == 0 if
+                     * the HAS_HOLE flag is not set.
+                     */
+                    if blk.bimg_info & pg_constants::BKPIMAGE_HAS_HOLE == 0
+                        && (blk.hole_offset != 0 || blk.hole_length != 0)
+                    {
+                        // TODO
+                        /*
+                        report_invalid_record(state,
+                                      "pg_constants::BKPIMAGE_HAS_HOLE not set, but hole offset %u length %u at %X/%X",
+                                      (unsigned int) blk->hole_offset,
+                                      (unsigned int) blk->hole_length,
+                                      (uint32) (state->ReadRecPtr >> 32), (uint32) state->ReadRecPtr);
+                        goto err;
+                                     */
+                    }
+
+                    /*
+                     * cross-check that bimg_len < BLCKSZ if the IS_COMPRESSED
+                     * flag is set.
+                     */
+                    if !blk_img_is_compressed && blk.bimg_len == BLCKSZ {
+                        // TODO
+                        /*
+                        report_invalid_record(state,
+                                      "pg_constants::BKPIMAGE_IS_COMPRESSED set, but block image length %u at %X/%X",
+                                      (unsigned int) blk->bimg_len,
+                                      (uint32) (state->ReadRecPtr >> 32), (uint32) state->ReadRecPtr);
+                        goto err;
+                                     */
+                    }
+
+                    /*
+                     * cross-check that bimg_len = BLCKSZ if neither HAS_HOLE nor
+                     * IS_COMPRESSED flag is set.
+                     */
+                    if blk.bimg_info & pg_constants::BKPIMAGE_HAS_HOLE == 0
+                        && !blk_img_is_compressed
+                        && blk.bimg_len != BLCKSZ
+                    {
+                        // TODO
+                        /*
+                        report_invalid_record(state,
+                                      "neither pg_constants::BKPIMAGE_HAS_HOLE nor pg_constants::BKPIMAGE_IS_COMPRESSED set, but block image length is %u at %X/%X",
+                                      (unsigned int) blk->data_len,
+                                      (uint32) (state->ReadRecPtr >> 32), (uint32) state->ReadRecPtr);
+                        goto err;
+                                     */
+                    }
+                }
+                if fork_flags & pg_constants::BKPBLOCK_SAME_REL == 0 {
+                    rnode_spcnode = buf.get_u32_le();
+                    rnode_dbnode = buf.get_u32_le();
+                    rnode_relnode = buf.get_u32_le();
+                    got_rnode = true;
+                } else if !got_rnode {
+                    // TODO
+                    /*
+                    report_invalid_record(state,
+                                    "pg_constants::BKPBLOCK_SAME_REL set but no previous rel at %X/%X",
+                                    (uint32) (state->ReadRecPtr >> 32), (uint32) state->ReadRecPtr);
+                    goto err;           */
+                }
+
+                blk.rnode_spcnode = rnode_spcnode;
+                blk.rnode_dbnode = rnode_dbnode;
+                blk.rnode_relnode = rnode_relnode;
+
+                blk.blkno = buf.get_u32_le();
+                tracing::trace!(
+                    "this record affects {}/{}/{} blk {}",
+                    rnode_spcnode,
+                    rnode_dbnode,
+                    rnode_relnode,
+                    blk.blkno
+                );
+
+                decoded.blocks.push(blk);
+            }
+
+            _ => {
+                // TODO: invalid block_id
+            }
         }
     }
+
+    // 3. Decode blocks.
+    let mut ptr = record.len() - buf.remaining();
+    for blk in decoded.blocks.iter_mut() {
+        if blk.has_image {
+            blk.bimg_offset = ptr as u32;
+            ptr += blk.bimg_len as usize;
+        }
+        if blk.has_data {
+            ptr += blk.data_len as usize;
+        }
+    }
+    // We don't need them, so just skip blocks_total_len bytes
+    buf.advance(blocks_total_len as usize);
+    assert_eq!(ptr, record.len() - buf.remaining());
+
+    let main_data_offset = (xlogrec.xl_tot_len - main_data_len) as usize;
+
+    // 4. Decode main_data
+    if main_data_len > 0 {
+        assert_eq!(buf.remaining(), main_data_len as usize);
+    }
+
+    decoded.xl_xid = xlogrec.xl_xid;
+    decoded.xl_info = xlogrec.xl_info;
+    decoded.xl_rmid = xlogrec.xl_rmid;
+    decoded.record = record;
+    decoded.origin_id = origin_id;
+    decoded.main_data_offset = main_data_offset;
+
+    Ok(())
 }
 
 pub mod v14 {
+    use crate::{OffsetNumber, TransactionId};
     use bytes::{Buf, Bytes};
-    use postgres_ffi::{OffsetNumber, TransactionId};
 
     #[repr(C)]
     #[derive(Debug)]
@@ -383,8 +679,8 @@ pub mod v15 {
 
 pub mod v16 {
     pub use super::v14::{XlHeapInsert, XlHeapLockUpdated, XlHeapMultiInsert, XlParameterChange};
+    use crate::{OffsetNumber, TransactionId};
     use bytes::{Buf, Bytes};
-    use postgres_ffi::{OffsetNumber, TransactionId};
 
     pub struct XlHeapDelete {
         pub xmax: TransactionId,
@@ -450,8 +746,8 @@ pub mod v16 {
 
     /* Since PG16, we have the Neon RMGR (RM_NEON_ID) to manage Neon-flavored WAL. */
     pub mod rm_neon {
+        use crate::{OffsetNumber, TransactionId};
         use bytes::{Buf, Bytes};
-        use postgres_ffi::{OffsetNumber, TransactionId};
 
         #[repr(C)]
         #[derive(Debug)]
@@ -563,8 +859,8 @@ pub mod v16 {
 
 pub mod v17 {
     pub use super::v14::XlHeapLockUpdated;
+    pub use crate::{TimeLineID, TimestampTz};
     use bytes::{Buf, Bytes};
-    pub use postgres_ffi::{TimeLineID, TimestampTz};
 
     pub use super::v16::rm_neon;
     pub use super::v16::{
@@ -742,7 +1038,7 @@ impl XlXactParsedRecord {
                 let spcnode = buf.get_u32_le();
                 let dbnode = buf.get_u32_le();
                 let relnode = buf.get_u32_le();
-                trace!(
+                tracing::trace!(
                     "XLOG_XACT_COMMIT relfilenode {}/{}/{}",
                     spcnode,
                     dbnode,
@@ -756,9 +1052,9 @@ impl XlXactParsedRecord {
             }
         }
 
-        if xinfo & postgres_ffi::v15::bindings::XACT_XINFO_HAS_DROPPED_STATS != 0 {
+        if xinfo & crate::v15::bindings::XACT_XINFO_HAS_DROPPED_STATS != 0 {
             let nitems = buf.get_i32_le();
-            debug!(
+            tracing::debug!(
                 "XLOG_XACT_COMMIT-XACT_XINFO_HAS_DROPPED_STAT nitems {}",
                 nitems
             );
@@ -778,7 +1074,7 @@ impl XlXactParsedRecord {
 
         if xinfo & pg_constants::XACT_XINFO_HAS_TWOPHASE != 0 {
             xid = buf.get_u32_le();
-            debug!("XLOG_XACT_COMMIT-XACT_XINFO_HAS_TWOPHASE xid {}", xid);
+            tracing::debug!("XLOG_XACT_COMMIT-XACT_XINFO_HAS_TWOPHASE xid {}", xid);
         }
 
         let origin_lsn = if xinfo & pg_constants::XACT_XINFO_HAS_ORIGIN != 0 {
@@ -818,78 +1114,6 @@ impl XlClogTruncate {
             },
             oldest_xid: buf.get_u32_le(),
             oldest_xid_db: buf.get_u32_le(),
-        }
-    }
-}
-
-#[repr(C)]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct MultiXactMember {
-    pub xid: TransactionId,
-    pub status: MultiXactStatus,
-}
-
-impl MultiXactMember {
-    pub fn decode(buf: &mut Bytes) -> MultiXactMember {
-        MultiXactMember {
-            xid: buf.get_u32_le(),
-            status: buf.get_u32_le(),
-        }
-    }
-}
-
-#[repr(C)]
-#[derive(Debug)]
-pub struct XlMultiXactCreate {
-    pub mid: MultiXactId,
-    /* new MultiXact's ID */
-    pub moff: MultiXactOffset,
-    /* its starting offset in members file */
-    pub nmembers: u32,
-    /* number of member XIDs */
-    pub members: Vec<MultiXactMember>,
-}
-
-impl XlMultiXactCreate {
-    pub fn decode(buf: &mut Bytes) -> XlMultiXactCreate {
-        let mid = buf.get_u32_le();
-        let moff = buf.get_u32_le();
-        let nmembers = buf.get_u32_le();
-        let mut members = Vec::new();
-        for _ in 0..nmembers {
-            members.push(MultiXactMember::decode(buf));
-        }
-        XlMultiXactCreate {
-            mid,
-            moff,
-            nmembers,
-            members,
-        }
-    }
-}
-
-#[repr(C)]
-#[derive(Debug)]
-pub struct XlMultiXactTruncate {
-    pub oldest_multi_db: Oid,
-    /* to-be-truncated range of multixact offsets */
-    pub start_trunc_off: MultiXactId,
-    /* just for completeness' sake */
-    pub end_trunc_off: MultiXactId,
-
-    /* to-be-truncated range of multixact members */
-    pub start_trunc_memb: MultiXactOffset,
-    pub end_trunc_memb: MultiXactOffset,
-}
-
-impl XlMultiXactTruncate {
-    pub fn decode(buf: &mut Bytes) -> XlMultiXactTruncate {
-        XlMultiXactTruncate {
-            oldest_multi_db: buf.get_u32_le(),
-            start_trunc_off: buf.get_u32_le(),
-            end_trunc_off: buf.get_u32_le(),
-            start_trunc_memb: buf.get_u32_le(),
-            end_trunc_memb: buf.get_u32_le(),
         }
     }
 }
@@ -950,337 +1174,7 @@ impl XlRunningXacts {
     }
 }
 
-#[repr(C)]
-#[derive(Debug)]
-pub struct XlReploriginDrop {
-    pub node_id: RepOriginId,
-}
-
-impl XlReploriginDrop {
-    pub fn decode(buf: &mut Bytes) -> XlReploriginDrop {
-        XlReploriginDrop {
-            node_id: buf.get_u16_le(),
-        }
-    }
-}
-
-#[repr(C)]
-#[derive(Debug)]
-pub struct XlReploriginSet {
-    pub remote_lsn: Lsn,
-    pub node_id: RepOriginId,
-}
-
-impl XlReploriginSet {
-    pub fn decode(buf: &mut Bytes) -> XlReploriginSet {
-        XlReploriginSet {
-            remote_lsn: Lsn(buf.get_u64_le()),
-            node_id: buf.get_u16_le(),
-        }
-    }
-}
-
-/// Main routine to decode a WAL record and figure out which blocks are modified
-//
-// See xlogrecord.h for details
-// The overall layout of an XLOG record is:
-//		Fixed-size header (XLogRecord struct)
-//      XLogRecordBlockHeader struct
-//          If pg_constants::BKPBLOCK_HAS_IMAGE, an XLogRecordBlockImageHeader struct follows
-//	           If pg_constants::BKPIMAGE_HAS_HOLE and pg_constants::BKPIMAGE_IS_COMPRESSED, an
-//	           XLogRecordBlockCompressHeader struct follows.
-//          If pg_constants::BKPBLOCK_SAME_REL is not set, a RelFileNode follows
-//          BlockNumber follows
-//      XLogRecordBlockHeader struct
-//      ...
-//      XLogRecordDataHeader[Short|Long] struct
-//      block data
-//      block data
-//      ...
-//      main data
-//
-//
-// For performance reasons, the caller provides the DecodedWALRecord struct and the function just fills it in.
-// It would be more natural for this function to return a DecodedWALRecord as return value,
-// but reusing the caller-supplied struct avoids an allocation.
-// This code is in the hot path for digesting incoming WAL, and is very performance sensitive.
-//
-pub fn decode_wal_record(
-    record: Bytes,
-    decoded: &mut DecodedWALRecord,
-    pg_version: u32,
-) -> Result<()> {
-    let mut rnode_spcnode: u32 = 0;
-    let mut rnode_dbnode: u32 = 0;
-    let mut rnode_relnode: u32 = 0;
-    let mut got_rnode = false;
-    let mut origin_id: u16 = 0;
-
-    let mut buf = record.clone();
-
-    // 1. Parse XLogRecord struct
-
-    // FIXME: assume little-endian here
-    let xlogrec = XLogRecord::from_bytes(&mut buf)?;
-
-    trace!(
-        "decode_wal_record xl_rmid = {} xl_info = {}",
-        xlogrec.xl_rmid,
-        xlogrec.xl_info
-    );
-
-    let remaining: usize = xlogrec.xl_tot_len as usize - XLOG_SIZE_OF_XLOG_RECORD;
-
-    if buf.remaining() != remaining {
-        //TODO error
-    }
-
-    let mut max_block_id = 0;
-    let mut blocks_total_len: u32 = 0;
-    let mut main_data_len = 0;
-    let mut datatotal: u32 = 0;
-    decoded.blocks.clear();
-
-    // 2. Decode the headers.
-    // XLogRecordBlockHeaders if any,
-    // XLogRecordDataHeader[Short|Long]
-    while buf.remaining() > datatotal as usize {
-        let block_id = buf.get_u8();
-
-        match block_id {
-            pg_constants::XLR_BLOCK_ID_DATA_SHORT => {
-                /* XLogRecordDataHeaderShort */
-                main_data_len = buf.get_u8() as u32;
-                datatotal += main_data_len;
-            }
-
-            pg_constants::XLR_BLOCK_ID_DATA_LONG => {
-                /* XLogRecordDataHeaderLong */
-                main_data_len = buf.get_u32_le();
-                datatotal += main_data_len;
-            }
-
-            pg_constants::XLR_BLOCK_ID_ORIGIN => {
-                // RepOriginId is uint16
-                origin_id = buf.get_u16_le();
-            }
-
-            pg_constants::XLR_BLOCK_ID_TOPLEVEL_XID => {
-                // TransactionId is uint32
-                buf.advance(4);
-            }
-
-            0..=pg_constants::XLR_MAX_BLOCK_ID => {
-                /* XLogRecordBlockHeader */
-                let mut blk = DecodedBkpBlock::new();
-
-                if block_id <= max_block_id {
-                    // TODO
-                    //report_invalid_record(state,
-                    //			  "out-of-order block_id %u at %X/%X",
-                    //			  block_id,
-                    //			  (uint32) (state->ReadRecPtr >> 32),
-                    //			  (uint32) state->ReadRecPtr);
-                    //    goto err;
-                }
-                max_block_id = block_id;
-
-                let fork_flags: u8 = buf.get_u8();
-                blk.forknum = fork_flags & pg_constants::BKPBLOCK_FORK_MASK;
-                blk.flags = fork_flags;
-                blk.has_image = (fork_flags & pg_constants::BKPBLOCK_HAS_IMAGE) != 0;
-                blk.has_data = (fork_flags & pg_constants::BKPBLOCK_HAS_DATA) != 0;
-                blk.will_init = (fork_flags & pg_constants::BKPBLOCK_WILL_INIT) != 0;
-                blk.data_len = buf.get_u16_le();
-
-                /* TODO cross-check that the HAS_DATA flag is set iff data_length > 0 */
-
-                datatotal += blk.data_len as u32;
-                blocks_total_len += blk.data_len as u32;
-
-                if blk.has_image {
-                    blk.bimg_len = buf.get_u16_le();
-                    blk.hole_offset = buf.get_u16_le();
-                    blk.bimg_info = buf.get_u8();
-
-                    blk.apply_image = dispatch_pgversion!(
-                        pg_version,
-                        (blk.bimg_info & pgv::bindings::BKPIMAGE_APPLY) != 0
-                    );
-
-                    let blk_img_is_compressed =
-                        postgres_ffi::bkpimage_is_compressed(blk.bimg_info, pg_version);
-
-                    if blk_img_is_compressed {
-                        debug!("compressed block image , pg_version = {}", pg_version);
-                    }
-
-                    if blk_img_is_compressed {
-                        if blk.bimg_info & pg_constants::BKPIMAGE_HAS_HOLE != 0 {
-                            blk.hole_length = buf.get_u16_le();
-                        } else {
-                            blk.hole_length = 0;
-                        }
-                    } else {
-                        blk.hole_length = BLCKSZ - blk.bimg_len;
-                    }
-                    datatotal += blk.bimg_len as u32;
-                    blocks_total_len += blk.bimg_len as u32;
-
-                    /*
-                     * cross-check that hole_offset > 0, hole_length > 0 and
-                     * bimg_len < BLCKSZ if the HAS_HOLE flag is set.
-                     */
-                    if blk.bimg_info & pg_constants::BKPIMAGE_HAS_HOLE != 0
-                        && (blk.hole_offset == 0 || blk.hole_length == 0 || blk.bimg_len == BLCKSZ)
-                    {
-                        // TODO
-                        /*
-                        report_invalid_record(state,
-                                      "pg_constants::BKPIMAGE_HAS_HOLE set, but hole offset %u length %u block image length %u at %X/%X",
-                                      (unsigned int) blk->hole_offset,
-                                      (unsigned int) blk->hole_length,
-                                      (unsigned int) blk->bimg_len,
-                                      (uint32) (state->ReadRecPtr >> 32), (uint32) state->ReadRecPtr);
-                        goto err;
-                                     */
-                    }
-
-                    /*
-                     * cross-check that hole_offset == 0 and hole_length == 0 if
-                     * the HAS_HOLE flag is not set.
-                     */
-                    if blk.bimg_info & pg_constants::BKPIMAGE_HAS_HOLE == 0
-                        && (blk.hole_offset != 0 || blk.hole_length != 0)
-                    {
-                        // TODO
-                        /*
-                        report_invalid_record(state,
-                                      "pg_constants::BKPIMAGE_HAS_HOLE not set, but hole offset %u length %u at %X/%X",
-                                      (unsigned int) blk->hole_offset,
-                                      (unsigned int) blk->hole_length,
-                                      (uint32) (state->ReadRecPtr >> 32), (uint32) state->ReadRecPtr);
-                        goto err;
-                                     */
-                    }
-
-                    /*
-                     * cross-check that bimg_len < BLCKSZ if the IS_COMPRESSED
-                     * flag is set.
-                     */
-                    if !blk_img_is_compressed && blk.bimg_len == BLCKSZ {
-                        // TODO
-                        /*
-                        report_invalid_record(state,
-                                      "pg_constants::BKPIMAGE_IS_COMPRESSED set, but block image length %u at %X/%X",
-                                      (unsigned int) blk->bimg_len,
-                                      (uint32) (state->ReadRecPtr >> 32), (uint32) state->ReadRecPtr);
-                        goto err;
-                                     */
-                    }
-
-                    /*
-                     * cross-check that bimg_len = BLCKSZ if neither HAS_HOLE nor
-                     * IS_COMPRESSED flag is set.
-                     */
-                    if blk.bimg_info & pg_constants::BKPIMAGE_HAS_HOLE == 0
-                        && !blk_img_is_compressed
-                        && blk.bimg_len != BLCKSZ
-                    {
-                        // TODO
-                        /*
-                        report_invalid_record(state,
-                                      "neither pg_constants::BKPIMAGE_HAS_HOLE nor pg_constants::BKPIMAGE_IS_COMPRESSED set, but block image length is %u at %X/%X",
-                                      (unsigned int) blk->data_len,
-                                      (uint32) (state->ReadRecPtr >> 32), (uint32) state->ReadRecPtr);
-                        goto err;
-                                     */
-                    }
-                }
-                if fork_flags & pg_constants::BKPBLOCK_SAME_REL == 0 {
-                    rnode_spcnode = buf.get_u32_le();
-                    rnode_dbnode = buf.get_u32_le();
-                    rnode_relnode = buf.get_u32_le();
-                    got_rnode = true;
-                } else if !got_rnode {
-                    // TODO
-                    /*
-                    report_invalid_record(state,
-                                    "pg_constants::BKPBLOCK_SAME_REL set but no previous rel at %X/%X",
-                                    (uint32) (state->ReadRecPtr >> 32), (uint32) state->ReadRecPtr);
-                    goto err;           */
-                }
-
-                blk.rnode_spcnode = rnode_spcnode;
-                blk.rnode_dbnode = rnode_dbnode;
-                blk.rnode_relnode = rnode_relnode;
-
-                blk.blkno = buf.get_u32_le();
-                trace!(
-                    "this record affects {}/{}/{} blk {}",
-                    rnode_spcnode,
-                    rnode_dbnode,
-                    rnode_relnode,
-                    blk.blkno
-                );
-
-                decoded.blocks.push(blk);
-            }
-
-            _ => {
-                // TODO: invalid block_id
-            }
-        }
-    }
-
-    // 3. Decode blocks.
-    let mut ptr = record.len() - buf.remaining();
-    for blk in decoded.blocks.iter_mut() {
-        if blk.has_image {
-            blk.bimg_offset = ptr as u32;
-            ptr += blk.bimg_len as usize;
-        }
-        if blk.has_data {
-            ptr += blk.data_len as usize;
-        }
-    }
-    // We don't need them, so just skip blocks_total_len bytes
-    buf.advance(blocks_total_len as usize);
-    assert_eq!(ptr, record.len() - buf.remaining());
-
-    let main_data_offset = (xlogrec.xl_tot_len - main_data_len) as usize;
-
-    // 4. Decode main_data
-    if main_data_len > 0 {
-        assert_eq!(buf.remaining(), main_data_len as usize);
-    }
-
-    decoded.xl_xid = xlogrec.xl_xid;
-    decoded.xl_info = xlogrec.xl_info;
-    decoded.xl_rmid = xlogrec.xl_rmid;
-    decoded.record = record;
-    decoded.origin_id = origin_id;
-    decoded.main_data_offset = main_data_offset;
-
-    Ok(())
-}
-
-///
-/// Build a human-readable string to describe a WAL record
-///
-/// For debugging purposes
-pub fn describe_wal_record(rec: &NeonWalRecord) -> Result<String, DeserializeError> {
-    match rec {
-        NeonWalRecord::Postgres { will_init, rec } => Ok(format!(
-            "will_init: {}, {}",
-            will_init,
-            describe_postgres_wal_record(rec)?
-        )),
-        _ => Ok(format!("{:?}", rec)),
-    }
-}
-
-fn describe_postgres_wal_record(record: &Bytes) -> Result<String, DeserializeError> {
+pub fn describe_postgres_wal_record(record: &Bytes) -> Result<String, DeserializeError> {
     // TODO: It would be nice to use the PostgreSQL rmgrdesc infrastructure for this.
     // Maybe use the postgres wal redo process, the same used for replaying WAL records?
     // Or could we compile the rmgrdesc routines into the dump_layer_file() binary directly,

@@ -16,16 +16,22 @@ use tokio_epoll_uring::{System, SystemHandle};
 
 use crate::virtual_file::on_fatal_io_error;
 
-use crate::metrics::tokio_epoll_uring as metrics;
+use crate::metrics::tokio_epoll_uring::{self as metrics, THREAD_LOCAL_METRICS_STORAGE};
 
 #[derive(Clone)]
 struct ThreadLocalState(Arc<ThreadLocalStateInner>);
 
 struct ThreadLocalStateInner {
-    cell: tokio::sync::OnceCell<SystemHandle>,
+    cell: tokio::sync::OnceCell<SystemHandle<metrics::ThreadLocalMetrics>>,
     launch_attempts: AtomicU32,
     /// populated through fetch_add from [`THREAD_LOCAL_STATE_ID`]
     thread_local_state_id: u64,
+}
+
+impl Drop for ThreadLocalStateInner {
+    fn drop(&mut self) {
+        THREAD_LOCAL_METRICS_STORAGE.remove_system(self.thread_local_state_id);
+    }
 }
 
 impl ThreadLocalState {
@@ -71,7 +77,8 @@ pub async fn thread_local_system() -> Handle {
                         &fake_cancel,
                     )
                     .await;
-                    let res = System::launch()
+                    let per_system_metrics = metrics::THREAD_LOCAL_METRICS_STORAGE.register_system(inner.thread_local_state_id);
+                    let res = System::launch_with_metrics(per_system_metrics)
                     // this might move us to another executor thread => loop outside the get_or_try_init, not inside it
                     .await;
                     match res {
@@ -86,6 +93,7 @@ pub async fn thread_local_system() -> Handle {
                                 emit_launch_failure_process_stats();
                             });
                             metrics::THREAD_LOCAL_LAUNCH_FAILURES.inc();
+                            metrics::THREAD_LOCAL_METRICS_STORAGE.remove_system(inner.thread_local_state_id);
                             Err(())
                         }
                         // abort the process instead of panicking because pageserver usually becomes half-broken if we panic somewhere.
@@ -115,7 +123,7 @@ fn emit_launch_failure_process_stats() {
     // number of threads
     // rss / system memory usage generally
 
-    let tokio_epoll_uring::metrics::Metrics {
+    let tokio_epoll_uring::metrics::GlobalMetrics {
         systems_created,
         systems_destroyed,
     } = tokio_epoll_uring::metrics::global();
@@ -182,7 +190,7 @@ fn emit_launch_failure_process_stats() {
 pub struct Handle(ThreadLocalState);
 
 impl std::ops::Deref for Handle {
-    type Target = SystemHandle;
+    type Target = SystemHandle<metrics::ThreadLocalMetrics>;
 
     fn deref(&self) -> &Self::Target {
         self.0

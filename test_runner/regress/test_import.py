@@ -91,7 +91,6 @@ def test_import_from_vanilla(test_output_dir, pg_bin, vanilla_pg, neon_env_build
         [
             ".*Failed to import basebackup.*",
             ".*unexpected non-zero bytes after the tar archive.*",
-            ".*Timeline got dropped without initializing, cleaning its files.*",
             ".*InternalServerError.*timeline not found.*",
             ".*InternalServerError.*Tenant .* not found.*",
             ".*InternalServerError.*Timeline .* not found.*",

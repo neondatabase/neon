@@ -35,17 +35,27 @@ import toml
 from _pytest.config import Config
 from _pytest.config.argparsing import Parser
 from _pytest.fixtures import FixtureRequest
+from jwcrypto import jwk
 
 # Type-related stuff
 from psycopg2.extensions import connection as PgConnection
 from psycopg2.extensions import cursor as PgCursor
 from psycopg2.extensions import make_dsn, parse_dsn
+from pytest_httpserver import HTTPServer
 from urllib3.util.retry import Retry
 
 from fixtures import overlayfs
 from fixtures.auth_tokens import AuthKeys, TokenScope
-from fixtures.common_types import Lsn, NodeId, TenantId, TenantShardId, TimelineId
+from fixtures.common_types import (
+    Lsn,
+    NodeId,
+    TenantId,
+    TenantShardId,
+    TimelineArchivalState,
+    TimelineId,
+)
 from fixtures.endpoint.http import EndpointHttpClient
+from fixtures.h2server import H2Server
 from fixtures.log_helper import log
 from fixtures.metrics import Metrics, MetricsGetter, parse_metrics
 from fixtures.neon_cli import NeonLocalCli, Pagectl
@@ -54,7 +64,11 @@ from fixtures.pageserver.allowed_errors import (
     DEFAULT_STORAGE_CONTROLLER_ALLOWED_ERRORS,
 )
 from fixtures.pageserver.common_types import LayerName, parse_layer_file_name
-from fixtures.pageserver.http import PageserverHttpClient
+from fixtures.pageserver.http import (
+    HistoricLayerInfo,
+    PageserverHttpClient,
+    ScanDisposableKeysResponse,
+)
 from fixtures.pageserver.utils import (
     wait_for_last_record_lsn,
 )
@@ -83,7 +97,6 @@ from fixtures.utils import (
     subprocess_capture,
     wait_until,
 )
-from fixtures.utils import AuxFileStore as AuxFileStore  # reexport
 
 from .neon_api import NeonAPI, NeonApiEndpoint
 
@@ -342,7 +355,6 @@ class NeonEnvBuilder:
         initial_tenant: Optional[TenantId] = None,
         initial_timeline: Optional[TimelineId] = None,
         pageserver_virtual_file_io_engine: Optional[str] = None,
-        pageserver_aux_file_policy: Optional[AuxFileStore] = None,
         pageserver_default_tenant_config_compaction_algorithm: Optional[dict[str, Any]] = None,
         safekeeper_extra_opts: Optional[list[str]] = None,
         storage_controller_port_override: Optional[int] = None,
@@ -393,8 +405,6 @@ class NeonEnvBuilder:
             log.debug(
                 f"Overriding pageserver default compaction algorithm to {self.pageserver_default_tenant_config_compaction_algorithm}"
             )
-
-        self.pageserver_aux_file_policy = pageserver_aux_file_policy
 
         self.safekeeper_extra_opts = safekeeper_extra_opts
 
@@ -456,7 +466,6 @@ class NeonEnvBuilder:
             timeline_id=env.initial_timeline,
             shard_count=initial_tenant_shard_count,
             shard_stripe_size=initial_tenant_shard_stripe_size,
-            aux_file_policy=self.pageserver_aux_file_policy,
         )
         assert env.initial_tenant == initial_tenant
         assert env.initial_timeline == initial_timeline
@@ -1016,7 +1025,6 @@ class NeonEnv:
         self.control_plane_compute_hook_api = config.control_plane_compute_hook_api
 
         self.pageserver_virtual_file_io_engine = config.pageserver_virtual_file_io_engine
-        self.pageserver_aux_file_policy = config.pageserver_aux_file_policy
         self.pageserver_virtual_file_io_mode = config.pageserver_virtual_file_io_mode
 
         # Create the neon_local's `NeonLocalInitConf`
@@ -1312,7 +1320,6 @@ class NeonEnv:
         shard_stripe_size: Optional[int] = None,
         placement_policy: Optional[str] = None,
         set_default: bool = False,
-        aux_file_policy: Optional[AuxFileStore] = None,
     ) -> tuple[TenantId, TimelineId]:
         """
         Creates a new tenant, returns its id and its initial timeline's id.
@@ -1329,7 +1336,6 @@ class NeonEnv:
             shard_stripe_size=shard_stripe_size,
             placement_policy=placement_policy,
             set_default=set_default,
-            aux_file_policy=aux_file_policy,
         )
 
         return tenant_id, timeline_id
@@ -1387,12 +1393,11 @@ def neon_simple_env(
     compatibility_pg_distrib_dir: Path,
     pg_version: PgVersion,
     pageserver_virtual_file_io_engine: str,
-    pageserver_aux_file_policy: Optional[AuxFileStore],
     pageserver_default_tenant_config_compaction_algorithm: Optional[dict[str, Any]],
     pageserver_virtual_file_io_mode: Optional[str],
 ) -> Iterator[NeonEnv]:
     """
-    Simple Neon environment, with no authentication and no safekeepers.
+    Simple Neon environment, with 1 safekeeper and 1 pageserver. No authentication, no fsync.
 
     This fixture will use RemoteStorageKind.LOCAL_FS with pageserver.
     """
@@ -1420,7 +1425,6 @@ def neon_simple_env(
         test_name=request.node.name,
         test_output_dir=test_output_dir,
         pageserver_virtual_file_io_engine=pageserver_virtual_file_io_engine,
-        pageserver_aux_file_policy=pageserver_aux_file_policy,
         pageserver_default_tenant_config_compaction_algorithm=pageserver_default_tenant_config_compaction_algorithm,
         pageserver_virtual_file_io_mode=pageserver_virtual_file_io_mode,
         combination=combination,
@@ -1447,7 +1451,6 @@ def neon_env_builder(
     top_output_dir: Path,
     pageserver_virtual_file_io_engine: str,
     pageserver_default_tenant_config_compaction_algorithm: Optional[dict[str, Any]],
-    pageserver_aux_file_policy: Optional[AuxFileStore],
     record_property: Callable[[str, object], None],
     pageserver_virtual_file_io_mode: Optional[str],
 ) -> Iterator[NeonEnvBuilder]:
@@ -1490,7 +1493,6 @@ def neon_env_builder(
         test_name=request.node.name,
         test_output_dir=test_output_dir,
         test_overlay_dir=test_overlay_dir,
-        pageserver_aux_file_policy=pageserver_aux_file_policy,
         pageserver_default_tenant_config_compaction_algorithm=pageserver_default_tenant_config_compaction_algorithm,
         pageserver_virtual_file_io_mode=pageserver_virtual_file_io_mode,
     ) as builder:
@@ -2132,6 +2134,24 @@ class NeonStorageController(MetricsGetter, LogUtils):
         response.raise_for_status()
         return response.json()
 
+    def timeline_archival_config(
+        self,
+        tenant_id: TenantId,
+        timeline_id: TimelineId,
+        state: TimelineArchivalState,
+    ):
+        config = {"state": state.value}
+        log.info(
+            f"requesting timeline archival config {config} for tenant {tenant_id} and timeline {timeline_id}"
+        )
+        res = self.request(
+            "PUT",
+            f"{self.api}/v1/tenant/{tenant_id}/timeline/{timeline_id}/archival_config",
+            json=config,
+            headers=self.headers(TokenScope.ADMIN),
+        )
+        return res.json()
+
     def configure_failpoints(self, config_strings: tuple[str, str] | list[tuple[str, str]]):
         if isinstance(config_strings, tuple):
             pairs = [config_strings]
@@ -2645,6 +2665,51 @@ class NeonPageserver(PgProtocol, LogUtils):
         layers = self.list_layers(tenant_id, timeline_id)
         return layer_name in [parse_layer_file_name(p.name) for p in layers]
 
+    def timeline_scan_no_disposable_keys(
+        self, tenant_shard_id: TenantShardId, timeline_id: TimelineId
+    ) -> TimelineAssertNoDisposableKeysResult:
+        """
+        Scan all keys in all layers of the tenant/timeline for disposable keys.
+        Disposable keys are keys that are present in a layer referenced by the shard
+        but are not going to be accessed by the shard.
+        For example, after shard split, the child shards will reference the parent's layer
+        files until new data is ingested and/or compaction rewrites the layers.
+        """
+
+        ps_http = self.http_client()
+        tally = ScanDisposableKeysResponse(0, 0)
+        per_layer = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+            futs = []
+            shard_layer_map = ps_http.layer_map_info(tenant_shard_id, timeline_id)
+            for layer in shard_layer_map.historic_layers:
+
+                def do_layer(
+                    shard_ps_http: PageserverHttpClient,
+                    tenant_shard_id: TenantShardId,
+                    timeline_id: TimelineId,
+                    layer: HistoricLayerInfo,
+                ) -> tuple[HistoricLayerInfo, ScanDisposableKeysResponse]:
+                    return (
+                        layer,
+                        shard_ps_http.timeline_layer_scan_disposable_keys(
+                            tenant_shard_id, timeline_id, layer.layer_file_name
+                        ),
+                    )
+
+                futs.append(executor.submit(do_layer, ps_http, tenant_shard_id, timeline_id, layer))
+            for fut in futs:
+                layer, result = fut.result()
+                tally += result
+                per_layer.append((layer, result))
+        return TimelineAssertNoDisposableKeysResult(tally, per_layer)
+
+
+@dataclass
+class TimelineAssertNoDisposableKeysResult:
+    tally: ScanDisposableKeysResponse
+    per_layer: list[tuple[HistoricLayerInfo, ScanDisposableKeysResponse]]
+
 
 class PgBin:
     """A helper class for executing postgres binaries"""
@@ -3018,6 +3083,31 @@ class PSQL:
         )
 
 
+def generate_proxy_tls_certs(common_name: str, key_path: Path, crt_path: Path):
+    if not key_path.exists():
+        r = subprocess.run(
+            [
+                "openssl",
+                "req",
+                "-new",
+                "-x509",
+                "-days",
+                "365",
+                "-nodes",
+                "-text",
+                "-out",
+                str(crt_path),
+                "-keyout",
+                str(key_path),
+                "-subj",
+                f"/CN={common_name}",
+                "-addext",
+                f"subjectAltName = DNS:{common_name}",
+            ]
+        )
+        assert r.returncode == 0
+
+
 class NeonProxy(PgProtocol):
     link_auth_uri: str = "http://dummy-uri"
 
@@ -3116,29 +3206,7 @@ class NeonProxy(PgProtocol):
         # generate key of it doesn't exist
         crt_path = self.test_output_dir / "proxy.crt"
         key_path = self.test_output_dir / "proxy.key"
-
-        if not key_path.exists():
-            r = subprocess.run(
-                [
-                    "openssl",
-                    "req",
-                    "-new",
-                    "-x509",
-                    "-days",
-                    "365",
-                    "-nodes",
-                    "-text",
-                    "-out",
-                    str(crt_path),
-                    "-keyout",
-                    str(key_path),
-                    "-subj",
-                    "/CN=*.localtest.me",
-                    "-addext",
-                    "subjectAltName = DNS:*.localtest.me",
-                ]
-            )
-            assert r.returncode == 0
+        generate_proxy_tls_certs("*.localtest.me", key_path, crt_path)
 
         args = [
             str(self.neon_binpath / "proxy"),
@@ -3318,6 +3386,125 @@ class NeonProxy(PgProtocol):
         assert out == "ok"
 
 
+class NeonAuthBroker:
+    class ControlPlane:
+        def __init__(self, endpoint: str):
+            self.endpoint = endpoint
+
+        def extra_args(self) -> list[str]:
+            args = [
+                *["--auth-backend", "console"],
+                *["--auth-endpoint", self.endpoint],
+            ]
+            return args
+
+    def __init__(
+        self,
+        neon_binpath: Path,
+        test_output_dir: Path,
+        http_port: int,
+        mgmt_port: int,
+        external_http_port: int,
+        auth_backend: NeonAuthBroker.ControlPlane,
+    ):
+        self.domain = "apiauth.localtest.me"  # resolves to 127.0.0.1
+        self.host = "127.0.0.1"
+        self.http_port = http_port
+        self.external_http_port = external_http_port
+        self.neon_binpath = neon_binpath
+        self.test_output_dir = test_output_dir
+        self.mgmt_port = mgmt_port
+        self.auth_backend = auth_backend
+        self.http_timeout_seconds = 15
+        self._popen: Optional[subprocess.Popen[bytes]] = None
+
+    def start(self) -> NeonAuthBroker:
+        assert self._popen is None
+
+        # generate key of it doesn't exist
+        crt_path = self.test_output_dir / "proxy.crt"
+        key_path = self.test_output_dir / "proxy.key"
+        generate_proxy_tls_certs("apiauth.localtest.me", key_path, crt_path)
+
+        args = [
+            str(self.neon_binpath / "proxy"),
+            *["--http", f"{self.host}:{self.http_port}"],
+            *["--mgmt", f"{self.host}:{self.mgmt_port}"],
+            *["--wss", f"{self.host}:{self.external_http_port}"],
+            *["-c", str(crt_path)],
+            *["-k", str(key_path)],
+            *["--sql-over-http-pool-opt-in", "false"],
+            *["--is-auth-broker", "true"],
+            *self.auth_backend.extra_args(),
+        ]
+
+        logfile = open(self.test_output_dir / "proxy.log", "w")
+        self._popen = subprocess.Popen(args, stdout=logfile, stderr=logfile)
+        self._wait_until_ready()
+        return self
+
+    # Sends SIGTERM to the proxy if it has been started
+    def terminate(self):
+        if self._popen:
+            self._popen.terminate()
+
+    # Waits for proxy to exit if it has been opened with a default timeout of
+    # two seconds. Raises subprocess.TimeoutExpired if the proxy does not exit in time.
+    def wait_for_exit(self, timeout=2):
+        if self._popen:
+            self._popen.wait(timeout=timeout)
+
+    @backoff.on_exception(backoff.expo, requests.exceptions.RequestException, max_time=10)
+    def _wait_until_ready(self):
+        assert (
+            self._popen and self._popen.poll() is None
+        ), "Proxy exited unexpectedly. Check test log."
+        requests.get(f"http://{self.host}:{self.http_port}/v1/status")
+
+    async def query(self, query, args, **kwargs):
+        user = kwargs["user"]
+        token = kwargs["token"]
+        expected_code = kwargs.get("expected_code")
+
+        log.info(f"Executing http query: {query}")
+
+        connstr = f"postgresql://{user}@{self.domain}/postgres"
+        async with httpx.AsyncClient(verify=str(self.test_output_dir / "proxy.crt")) as client:
+            response = await client.post(
+                f"https://{self.domain}:{self.external_http_port}/sql",
+                json={"query": query, "params": args},
+                headers={
+                    "Neon-Connection-String": connstr,
+                    "Authorization": f"Bearer {token}",
+                },
+            )
+
+            if expected_code is not None:
+                assert response.status_code == expected_code, f"response: {response.json()}"
+            return response.json()
+
+    def get_metrics(self) -> str:
+        request_result = requests.get(f"http://{self.host}:{self.http_port}/metrics")
+        return request_result.text
+
+    def __enter__(self) -> NeonAuthBroker:
+        return self
+
+    def __exit__(
+        self,
+        _exc_type: Optional[type[BaseException]],
+        _exc_value: Optional[BaseException],
+        _traceback: Optional[TracebackType],
+    ):
+        if self._popen is not None:
+            self._popen.terminate()
+            try:
+                self._popen.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                log.warning("failed to gracefully terminate proxy; killing")
+                self._popen.kill()
+
+
 @pytest.fixture(scope="function")
 def link_proxy(
     port_distributor: PortDistributor, neon_binpath: Path, test_output_dir: Path
@@ -3377,6 +3564,74 @@ def static_proxy(
         mgmt_port=mgmt_port,
         external_http_port=external_http_port,
         auth_backend=NeonProxy.Postgres(auth_endpoint),
+    ) as proxy:
+        proxy.start()
+        yield proxy
+
+
+@pytest.fixture(scope="function")
+def neon_authorize_jwk() -> jwk.JWK:
+    kid = str(uuid.uuid4())
+    key = jwk.JWK.generate(kty="RSA", size=2048, alg="RS256", use="sig", kid=kid)
+    assert isinstance(key, jwk.JWK)
+    return key
+
+
+@pytest.fixture(scope="function")
+def static_auth_broker(
+    port_distributor: PortDistributor,
+    neon_binpath: Path,
+    test_output_dir: Path,
+    httpserver: HTTPServer,
+    neon_authorize_jwk: jwk.JWK,
+    http2_echoserver: H2Server,
+) -> Iterable[NeonAuthBroker]:
+    """Neon Auth Broker that routes to a mocked local_proxy and a mocked cplane HTTP API."""
+
+    local_proxy_addr = f"{http2_echoserver.host}:{http2_echoserver.port}"
+
+    # return local_proxy addr on ProxyWakeCompute.
+    httpserver.expect_request("/cplane/proxy_wake_compute").respond_with_json(
+        {
+            "address": local_proxy_addr,
+            "aux": {
+                "endpoint_id": "ep-foo-bar-1234",
+                "branch_id": "br-foo-bar",
+                "project_id": "foo-bar",
+            },
+        }
+    )
+
+    # return jwks mock addr on GetEndpointJwks
+    httpserver.expect_request(re.compile("^/cplane/endpoints/.+/jwks$")).respond_with_json(
+        {
+            "jwks": [
+                {
+                    "id": "foo",
+                    "jwks_url": httpserver.url_for("/authorize/jwks.json"),
+                    "provider_name": "test",
+                    "jwt_audience": None,
+                    "role_names": ["anonymous", "authenticated"],
+                }
+            ]
+        }
+    )
+
+    # return static fixture jwks.
+    jwk = neon_authorize_jwk.export_public(as_dict=True)
+    httpserver.expect_request("/authorize/jwks.json").respond_with_json({"keys": [jwk]})
+
+    mgmt_port = port_distributor.get_port()
+    http_port = port_distributor.get_port()
+    external_http_port = port_distributor.get_port()
+
+    with NeonAuthBroker(
+        neon_binpath=neon_binpath,
+        test_output_dir=test_output_dir,
+        http_port=http_port,
+        mgmt_port=mgmt_port,
+        external_http_port=external_http_port,
+        auth_backend=NeonAuthBroker.ControlPlane(httpserver.url_for("/cplane")),
     ) as proxy:
         proxy.start()
         yield proxy
@@ -4446,6 +4701,7 @@ def tenant_get_shards(
 
     If the caller provides `pageserver_id`, it will be used for all shards, even
     if the shard is indicated by storage controller to be on some other pageserver.
+    If the storage controller is not running, assume an unsharded tenant.
 
     Caller should over the response to apply their per-pageserver action to
     each shard
@@ -4455,17 +4711,17 @@ def tenant_get_shards(
     else:
         override_pageserver = None
 
-    if len(env.pageservers) > 1:
-        return [
-            (
-                TenantShardId.parse(s["shard_id"]),
-                override_pageserver or env.get_pageserver(s["node_id"]),
-            )
-            for s in env.storage_controller.locate(tenant_id)
-        ]
-    else:
-        # Assume an unsharded tenant
-        return [(TenantShardId(tenant_id, 0, 0), override_pageserver or env.pageserver)]
+    if not env.storage_controller.running and override_pageserver is not None:
+        log.warning(f"storage controller not running, assuming unsharded tenant {tenant_id}")
+        return [(TenantShardId(tenant_id, 0, 0), override_pageserver)]
+
+    return [
+        (
+            TenantShardId.parse(s["shard_id"]),
+            override_pageserver or env.get_pageserver(s["node_id"]),
+        )
+        for s in env.storage_controller.locate(tenant_id)
+    ]
 
 
 def wait_replica_caughtup(primary: Endpoint, secondary: Endpoint):
