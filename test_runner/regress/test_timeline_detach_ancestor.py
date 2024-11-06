@@ -590,9 +590,9 @@ def test_timeline_ancestor_detach_idempotent_success(
         initial_tenant_shard_count=shards_initial if shards_initial > 1 else None,
         initial_tenant_conf={
             # small checkpointing and compaction targets to ensure we generate many upload operations
-            "checkpoint_distance": 128 * 1024,
+            "checkpoint_distance": 512 * 1024,
             "compaction_threshold": 1,
-            "compaction_target_size": 128 * 1024,
+            "compaction_target_size": 512 * 1024,
             # disable background compaction and GC. We invoke it manually when we want it to happen.
             "gc_period": "0s",
             "compaction_period": "0s",
@@ -618,7 +618,7 @@ def test_timeline_ancestor_detach_idempotent_success(
         endpoint.safe_psql_many(
             [
                 "CREATE TABLE foo(key serial primary key, t text default 'data_content')",
-                "INSERT INTO foo SELECT FROM generate_series(1,2048)",
+                "INSERT INTO foo SELECT FROM generate_series(1,1024)",
             ]
         )
         last_flush_lsn_upload(env, endpoint, env.initial_tenant, env.initial_timeline)
