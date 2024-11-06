@@ -6,6 +6,7 @@ CONFIG=$1
 SPEC=$2
 
 MEM=7G
+TOOLSPATH="/opt/TLA+Toolbox"
 
 mkdir -p "tlc-results"
 outfilename="$SPEC-$(date --utc +%Y-%m-%d--%H-%M-%S)".log
@@ -44,4 +45,4 @@ echo "" >> $outfile
 #
 # Add -simulate to run in infinite simulation mode.
 java -Xmx$MEM -XX:MaxDirectMemorySize=$MEM -XX:+UseParallelGC -Dtlc2.tool.fp.FPSet.impl=tlc2.tool.fp.OffHeapDiskFPSet \
-  -cp /opt/TLA+Toolbox/tla2tools.jar tlc2.TLC $SPEC -config $CONFIG -workers auto -gzip | tee -a $outfile
+  -cp "${TOOLSPATH}/tla2tools.jar" tlc2.TLC $SPEC -config $CONFIG -workers auto -gzip | tee -a $outfile
