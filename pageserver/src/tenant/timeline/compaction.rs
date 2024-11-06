@@ -2028,6 +2028,9 @@ impl Timeline {
             }
             if let Some(compaction_key_range) = &job_desc.partial_key_range {
                 if !compaction_key_range.contains(&key) {
+                    if !desc.is_delta {
+                        continue;
+                    }
                     let rewriter = delta_layer_rewriters
                         .entry(desc.clone())
                         .or_insert_with(|| RewritingLayers {
@@ -2112,33 +2115,25 @@ impl Timeline {
         let last_key = last_key.expect("no keys produced during compaction");
         stat.on_unique_key_visited();
 
-        let skip_adding_key = if let Some(ref compaction_key_range) = job_desc.partial_key_range {
-            !compaction_key_range.contains(&last_key)
-        } else {
-            false
-        };
-
-        if !skip_adding_key {
-            let retention = self
-                .generate_key_retention(
-                    last_key,
-                    &accumulated_values,
-                    job_desc.gc_cutoff,
-                    &job_desc.retain_lsns_below_horizon,
-                    COMPACTION_DELTA_THRESHOLD,
-                    get_ancestor_image(self, last_key, ctx).await?,
-                )
-                .await?;
-            retention
-                .pipe_to(
-                    last_key,
-                    &mut delta_layer_writer,
-                    image_layer_writer.as_mut(),
-                    &mut stat,
-                    ctx,
-                )
-                .await?;
-        }
+        let retention = self
+            .generate_key_retention(
+                last_key,
+                &accumulated_values,
+                job_desc.gc_cutoff,
+                &job_desc.retain_lsns_below_horizon,
+                COMPACTION_DELTA_THRESHOLD,
+                get_ancestor_image(self, last_key, ctx).await?,
+            )
+            .await?;
+        retention
+            .pipe_to(
+                last_key,
+                &mut delta_layer_writer,
+                image_layer_writer.as_mut(),
+                &mut stat,
+                ctx,
+            )
+            .await?;
         // end: move the above part to the loop body
 
         let mut rewrote_delta_layers = Vec::new();
