@@ -57,17 +57,6 @@ RUN set -e \
         zstd \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
-# Conditional installation of pgcopydb from unstable repository (need version 0.17-1 or higher) for Bookworm only 
-# pgcopydb can be used for project migration / ingest in benchmarking workflows
-RUN if [ "${DEBIAN_VERSION}" = "bookworm" ]; then \
-        echo "deb http://deb.debian.org/debian unstable main" > /etc/apt/sources.list.d/unstable.list \
-        && apt update \
-        && apt install -y -t unstable --no-upgrade pgcopydb \
-        && rm /etc/apt/sources.list.d/unstable.list \
-        && apt update \
-        && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*; \
-    fi
-
 # sql_exporter
 
 # Keep the version the same as in compute/compute-node.Dockerfile and
@@ -186,6 +175,59 @@ RUN wget -O /tmp/libicu-${ICU_VERSION}.tgz https://github.com/unicode-org/icu/re
     rm -f /tmp/libicu-${ICU_VERSION}.tgz && \
     popd
 
+# download and build pgcopydb
+RUN if [ "${DEBIAN_VERSION}" = "bookworm" ]; then \
+        set -e && \
+        wget -qO - https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor -o /usr/share/keyrings/postgresql-keyring.gpg && \
+        echo "deb [signed-by=/usr/share/keyrings/postgresql-keyring.gpg] http://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" > /etc/apt/sources.list.d/pgdg.list && \
+        apt-get update && \
+        apt install -y --no-install-recommends  \
+        autotools-dev \
+        libedit-dev \
+        libgc-dev \
+        libpam0g-dev \
+        libselinux1-dev \
+        libxslt1-dev \
+        libkrb5-dev \
+        liblz4-dev \
+        libpq5 \
+        libpq-dev \
+        libzstd-dev \
+        postgresql-16 \
+        postgresql-server-dev-16 \
+        postgresql-common  \
+        python3-sphinx && \
+        wget -O /tmp/pgcopydb.tar.gz https://github.com/dimitri/pgcopydb/archive/refs/tags/v0.17.tar.gz && \
+        mkdir /tmp/pgcopydb && \
+        pushd /tmp/pgcopydb && \
+        tar -xzf /tmp/pgcopydb.tar.gz && \
+        pushd pgcopydb-0.17 && \
+        make -s clean && \
+        make -s -j12 install && \
+        popd && \
+        rm -rf pgcopydb-0.17 && \
+        rm -f /tmp/pgcopydb.tar.gz && \
+        popd && \
+        apt purge -y --auto-remove  \
+        autotools-dev \
+        libedit-dev \
+        libgc-dev \
+        libpam0g-dev \
+        libselinux1-dev \
+        libxslt1-dev \
+        libkrb5-dev \
+        liblz4-dev \
+        libpq-dev \
+        libzstd-dev \
+        postgresql-16 \
+        postgresql-server-dev-16 \
+        postgresql-common  \
+        python3-sphinx && \
+        rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*; \
+    fi
+
+ENV PATH="${PATH}:/usr/lib/postgresql/16/bin"
+
 # Switch to nonroot user
 USER nonroot:nonroot
 WORKDIR /home/nonroot
@@ -246,7 +288,8 @@ RUN whoami \
     && cargo --version --verbose \
     && rustup --version --verbose \
     && rustc --version --verbose \
-    && clang --version
+    && clang --version \
+    && pgcopydb --version 
 
 # Set following flag to check in Makefile if its running in Docker
 RUN touch /home/nonroot/.docker_build
