@@ -20,7 +20,9 @@ use utils::backoff;
 
 use crate::config::PageServerConf;
 use crate::context::RequestContext;
-use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
+use crate::span::{
+    debug_assert_current_span_has_tenant_and_timeline_id, debug_assert_current_span_has_tenant_id,
+};
 use crate::tenant::remote_timeline_client::{remote_layer_path, remote_timelines_path};
 use crate::tenant::storage_layer::LayerName;
 use crate::tenant::Generation;
@@ -36,9 +38,10 @@ use utils::pausable_failpoint;
 use super::index::{IndexPart, LayerFileMetadata};
 use super::manifest::TenantManifest;
 use super::{
-    parse_remote_index_path, remote_index_path, remote_initdb_archive_path,
-    remote_initdb_preserved_archive_path, remote_tenant_manifest_path, remote_tenant_path,
-    FAILED_DOWNLOAD_WARN_THRESHOLD, FAILED_REMOTE_OP_RETRIES, INITDB_PATH,
+    parse_remote_index_path, parse_remote_tenant_manifest_path, remote_index_path,
+    remote_initdb_archive_path, remote_initdb_preserved_archive_path, remote_tenant_manifest_path,
+    remote_tenant_manifest_prefix, remote_tenant_path, FAILED_DOWNLOAD_WARN_THRESHOLD,
+    FAILED_REMOTE_OP_RETRIES, INITDB_PATH,
 };
 
 ///
@@ -365,32 +368,34 @@ async fn do_download_remote_path_retry_forever(
     .await
 }
 
-pub async fn do_download_tenant_manifest(
+async fn do_download_tenant_manifest(
     storage: &GenericRemoteStorage,
     tenant_shard_id: &TenantShardId,
+    _timeline_id: Option<&TimelineId>,
+    generation: Generation,
     cancel: &CancellationToken,
-) -> Result<(TenantManifest, Generation), DownloadError> {
-    // TODO: generation support
-    let generation = super::TENANT_MANIFEST_GENERATION;
+) -> Result<(TenantManifest, Generation, SystemTime), DownloadError> {
     let remote_path = remote_tenant_manifest_path(tenant_shard_id, generation);
 
-    let (manifest_bytes, _manifest_bytes_mtime) =
+    let (manifest_bytes, manifest_bytes_mtime) =
         do_download_remote_path_retry_forever(storage, &remote_path, cancel).await?;
 
     let tenant_manifest = TenantManifest::from_json_bytes(&manifest_bytes)
         .with_context(|| format!("deserialize tenant manifest file at {remote_path:?}"))
         .map_err(DownloadError::Other)?;
 
-    Ok((tenant_manifest, generation))
+    Ok((tenant_manifest, generation, manifest_bytes_mtime))
 }
 
 async fn do_download_index_part(
     storage: &GenericRemoteStorage,
     tenant_shard_id: &TenantShardId,
-    timeline_id: &TimelineId,
+    timeline_id: Option<&TimelineId>,
     index_generation: Generation,
     cancel: &CancellationToken,
 ) -> Result<(IndexPart, Generation, SystemTime), DownloadError> {
+    let timeline_id =
+        timeline_id.expect("A timeline ID is always provided when downloading an index");
     let remote_path = remote_index_path(tenant_shard_id, timeline_id, index_generation);
 
     let (index_part_bytes, index_part_mtime) =
@@ -426,7 +431,7 @@ async fn do_download_index_part(
 pub(crate) async fn download_generation_object<'a, T, DF, DFF, PF>(
     storage: &'a GenericRemoteStorage,
     tenant_shard_id: &'a TenantShardId,
-    timeline_id: &'a TimelineId,
+    timeline_id: Option<&'a TimelineId>,
     my_generation: Generation,
     what: &str,
     prefix: RemotePath,
@@ -438,7 +443,7 @@ where
     DF: Fn(
         &'a GenericRemoteStorage,
         &'a TenantShardId,
-        &'a TimelineId,
+        Option<&'a TimelineId>,
         Generation,
         &'a CancellationToken,
     ) -> DFF,
@@ -446,7 +451,7 @@ where
     PF: Fn(RemotePath) -> Option<Generation>,
     T: 'static,
 {
-    debug_assert_current_span_has_tenant_and_timeline_id();
+    debug_assert_current_span_has_tenant_id();
 
     if my_generation.is_none() {
         // Operating without generations: just fetch the generation-less path
@@ -552,16 +557,40 @@ pub(crate) async fn download_index_part(
     my_generation: Generation,
     cancel: &CancellationToken,
 ) -> Result<(IndexPart, Generation, SystemTime), DownloadError> {
+    debug_assert_current_span_has_tenant_and_timeline_id();
+
     let index_prefix = remote_index_path(tenant_shard_id, timeline_id, Generation::none());
     download_generation_object(
         storage,
         tenant_shard_id,
-        timeline_id,
+        Some(timeline_id),
         my_generation,
         "index_part",
         index_prefix,
         do_download_index_part,
         parse_remote_index_path,
+        cancel,
+    )
+    .await
+}
+
+pub(crate) async fn download_tenant_manifest(
+    storage: &GenericRemoteStorage,
+    tenant_shard_id: &TenantShardId,
+    my_generation: Generation,
+    cancel: &CancellationToken,
+) -> Result<(TenantManifest, Generation, SystemTime), DownloadError> {
+    let manifest_prefix = remote_tenant_manifest_prefix(tenant_shard_id);
+
+    download_generation_object(
+        storage,
+        tenant_shard_id,
+        None,
+        my_generation,
+        "tenant-manifest",
+        manifest_prefix,
+        do_download_tenant_manifest,
+        parse_remote_tenant_manifest_path,
         cancel,
     )
     .await

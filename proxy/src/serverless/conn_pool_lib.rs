@@ -11,10 +11,13 @@ use tokio_postgres::ReadyForQueryStatus;
 use tracing::{debug, info, Span};
 
 use super::backend::HttpConnError;
-use super::conn_pool::ClientInnerRemote;
+use super::conn_pool::ClientDataRemote;
+use super::http_conn_pool::ClientDataHttp;
+use super::local_conn_pool::ClientDataLocal;
 use crate::auth::backend::ComputeUserInfo;
 use crate::context::RequestMonitoring;
 use crate::control_plane::messages::ColdStartInfo;
+use crate::control_plane::messages::MetricsAuxInfo;
 use crate::metrics::{HttpEndpointPoolsGuard, Metrics};
 use crate::types::{DbName, EndpointCacheKey, RoleName};
 use crate::usage_metrics::{Ids, MetricCounter, USAGE_METRICS};
@@ -41,8 +44,46 @@ impl ConnInfo {
     }
 }
 
+pub(crate) enum ClientDataEnum {
+    Remote(ClientDataRemote),
+    Local(ClientDataLocal),
+    #[allow(dead_code)]
+    Http(ClientDataHttp),
+}
+
+pub(crate) struct ClientInnerCommon<C: ClientInnerExt> {
+    pub(crate) inner: C,
+    pub(crate) aux: MetricsAuxInfo,
+    pub(crate) conn_id: uuid::Uuid,
+    pub(crate) data: ClientDataEnum, // custom client data like session, key, jti
+}
+
+impl<C: ClientInnerExt> Drop for ClientInnerCommon<C> {
+    fn drop(&mut self) {
+        match &mut self.data {
+            ClientDataEnum::Remote(remote_data) => {
+                remote_data.cancel();
+            }
+            ClientDataEnum::Local(local_data) => {
+                local_data.cancel();
+            }
+            ClientDataEnum::Http(_http_data) => (),
+        }
+    }
+}
+
+impl<C: ClientInnerExt> ClientInnerCommon<C> {
+    pub(crate) fn get_conn_id(&self) -> uuid::Uuid {
+        self.conn_id
+    }
+
+    pub(crate) fn get_data(&mut self) -> &mut ClientDataEnum {
+        &mut self.data
+    }
+}
+
 pub(crate) struct ConnPoolEntry<C: ClientInnerExt> {
-    pub(crate) conn: ClientInnerRemote<C>,
+    pub(crate) conn: ClientInnerCommon<C>,
     pub(crate) _last_access: std::time::Instant,
 }
 
@@ -55,10 +96,33 @@ pub(crate) struct EndpointConnPool<C: ClientInnerExt> {
     _guard: HttpEndpointPoolsGuard<'static>,
     global_connections_count: Arc<AtomicUsize>,
     global_pool_size_max_conns: usize,
+    pool_name: String,
 }
 
 impl<C: ClientInnerExt> EndpointConnPool<C> {
-    fn get_conn_entry(&mut self, db_user: (DbName, RoleName)) -> Option<ConnPoolEntry<C>> {
+    pub(crate) fn new(
+        hmap: HashMap<(DbName, RoleName), DbUserConnPool<C>>,
+        tconns: usize,
+        max_conns_per_endpoint: usize,
+        global_connections_count: Arc<AtomicUsize>,
+        max_total_conns: usize,
+        pname: String,
+    ) -> Self {
+        Self {
+            pools: hmap,
+            total_conns: tconns,
+            max_conns: max_conns_per_endpoint,
+            _guard: Metrics::get().proxy.http_endpoint_pools.guard(),
+            global_connections_count,
+            global_pool_size_max_conns: max_total_conns,
+            pool_name: pname,
+        }
+    }
+
+    pub(crate) fn get_conn_entry(
+        &mut self,
+        db_user: (DbName, RoleName),
+    ) -> Option<ConnPoolEntry<C>> {
         let Self {
             pools,
             total_conns,
@@ -84,9 +148,10 @@ impl<C: ClientInnerExt> EndpointConnPool<C> {
             ..
         } = self;
         if let Some(pool) = pools.get_mut(&db_user) {
-            let old_len = pool.conns.len();
-            pool.conns.retain(|conn| conn.conn.get_conn_id() != conn_id);
-            let new_len = pool.conns.len();
+            let old_len = pool.get_conns().len();
+            pool.get_conns()
+                .retain(|conn| conn.conn.get_conn_id() != conn_id);
+            let new_len = pool.get_conns().len();
             let removed = old_len - new_len;
             if removed > 0 {
                 global_connections_count.fetch_sub(removed, atomic::Ordering::Relaxed);
@@ -103,11 +168,26 @@ impl<C: ClientInnerExt> EndpointConnPool<C> {
         }
     }
 
-    pub(crate) fn put(pool: &RwLock<Self>, conn_info: &ConnInfo, client: ClientInnerRemote<C>) {
-        let conn_id = client.get_conn_id();
+    pub(crate) fn get_name(&self) -> &str {
+        &self.pool_name
+    }
 
-        if client.is_closed() {
-            info!(%conn_id, "pool: throwing away connection '{conn_info}' because connection is closed");
+    pub(crate) fn get_pool(&self, db_user: (DbName, RoleName)) -> Option<&DbUserConnPool<C>> {
+        self.pools.get(&db_user)
+    }
+
+    pub(crate) fn get_pool_mut(
+        &mut self,
+        db_user: (DbName, RoleName),
+    ) -> Option<&mut DbUserConnPool<C>> {
+        self.pools.get_mut(&db_user)
+    }
+
+    pub(crate) fn put(pool: &RwLock<Self>, conn_info: &ConnInfo, client: ClientInnerCommon<C>) {
+        let conn_id = client.get_conn_id();
+        let pool_name = pool.read().get_name().to_string();
+        if client.inner.is_closed() {
+            info!(%conn_id, "{}: throwing away connection '{conn_info}' because connection is closed", pool_name);
             return;
         }
 
@@ -118,7 +198,7 @@ impl<C: ClientInnerExt> EndpointConnPool<C> {
             .load(atomic::Ordering::Relaxed)
             >= global_max_conn
         {
-            info!(%conn_id, "pool: throwing away connection '{conn_info}' because pool is full");
+            info!(%conn_id, "{}: throwing away connection '{conn_info}' because pool is full", pool_name);
             return;
         }
 
@@ -130,13 +210,13 @@ impl<C: ClientInnerExt> EndpointConnPool<C> {
 
             if pool.total_conns < pool.max_conns {
                 let pool_entries = pool.pools.entry(conn_info.db_and_user()).or_default();
-                pool_entries.conns.push(ConnPoolEntry {
+                pool_entries.get_conns().push(ConnPoolEntry {
                     conn: client,
                     _last_access: std::time::Instant::now(),
                 });
 
                 returned = true;
-                per_db_size = pool_entries.conns.len();
+                per_db_size = pool_entries.get_conns().len();
 
                 pool.total_conns += 1;
                 pool.global_connections_count
@@ -153,9 +233,9 @@ impl<C: ClientInnerExt> EndpointConnPool<C> {
 
         // do logging outside of the mutex
         if returned {
-            info!(%conn_id, "pool: returning connection '{conn_info}' back to the pool, total_conns={total_conns}, for this (db, user)={per_db_size}");
+            info!(%conn_id, "{pool_name}: returning connection '{conn_info}' back to the pool, total_conns={total_conns}, for this (db, user)={per_db_size}");
         } else {
-            info!(%conn_id, "pool: throwing away connection '{conn_info}' because pool is full, total_conns={total_conns}");
+            info!(%conn_id, "{pool_name}: throwing away connection '{conn_info}' because pool is full, total_conns={total_conns}");
         }
     }
 }
@@ -176,19 +256,39 @@ impl<C: ClientInnerExt> Drop for EndpointConnPool<C> {
 
 pub(crate) struct DbUserConnPool<C: ClientInnerExt> {
     pub(crate) conns: Vec<ConnPoolEntry<C>>,
+    pub(crate) initialized: Option<bool>, // a bit ugly, exists only for local pools
 }
 
 impl<C: ClientInnerExt> Default for DbUserConnPool<C> {
     fn default() -> Self {
-        Self { conns: Vec::new() }
+        Self {
+            conns: Vec::new(),
+            initialized: None,
+        }
     }
 }
 
-impl<C: ClientInnerExt> DbUserConnPool<C> {
+pub(crate) trait DbUserConn<C: ClientInnerExt>: Default {
+    fn set_initialized(&mut self);
+    fn is_initialized(&self) -> bool;
+    fn clear_closed_clients(&mut self, conns: &mut usize) -> usize;
+    fn get_conn_entry(&mut self, conns: &mut usize) -> (Option<ConnPoolEntry<C>>, usize);
+    fn get_conns(&mut self) -> &mut Vec<ConnPoolEntry<C>>;
+}
+
+impl<C: ClientInnerExt> DbUserConn<C> for DbUserConnPool<C> {
+    fn set_initialized(&mut self) {
+        self.initialized = Some(true);
+    }
+
+    fn is_initialized(&self) -> bool {
+        self.initialized.unwrap_or(false)
+    }
+
     fn clear_closed_clients(&mut self, conns: &mut usize) -> usize {
         let old_len = self.conns.len();
 
-        self.conns.retain(|conn| !conn.conn.is_closed());
+        self.conns.retain(|conn| !conn.conn.inner.is_closed());
 
         let new_len = self.conns.len();
         let removed = old_len - new_len;
@@ -196,10 +296,7 @@ impl<C: ClientInnerExt> DbUserConnPool<C> {
         removed
     }
 
-    pub(crate) fn get_conn_entry(
-        &mut self,
-        conns: &mut usize,
-    ) -> (Option<ConnPoolEntry<C>>, usize) {
+    fn get_conn_entry(&mut self, conns: &mut usize) -> (Option<ConnPoolEntry<C>>, usize) {
         let mut removed = self.clear_closed_clients(conns);
         let conn = self.conns.pop();
         if conn.is_some() {
@@ -214,6 +311,10 @@ impl<C: ClientInnerExt> DbUserConnPool<C> {
             .dec_by(removed as i64);
 
         (conn, removed)
+    }
+
+    fn get_conns(&mut self) -> &mut Vec<ConnPoolEntry<C>> {
+        &mut self.conns
     }
 }
 
@@ -276,6 +377,60 @@ impl<C: ClientInnerExt> GlobalConnPool<C> {
 
     pub(crate) fn get_idle_timeout(&self) -> Duration {
         self.config.pool_options.idle_timeout
+    }
+
+    pub(crate) fn get(
+        self: &Arc<Self>,
+        ctx: &RequestMonitoring,
+        conn_info: &ConnInfo,
+    ) -> Result<Option<Client<C>>, HttpConnError> {
+        let mut client: Option<ClientInnerCommon<C>> = None;
+        let Some(endpoint) = conn_info.endpoint_cache_key() else {
+            return Ok(None);
+        };
+
+        let endpoint_pool = self.get_or_create_endpoint_pool(&endpoint);
+        if let Some(entry) = endpoint_pool
+            .write()
+            .get_conn_entry(conn_info.db_and_user())
+        {
+            client = Some(entry.conn);
+        }
+        let endpoint_pool = Arc::downgrade(&endpoint_pool);
+
+        // ok return cached connection if found and establish a new one otherwise
+        if let Some(mut client) = client {
+            if client.inner.is_closed() {
+                info!("pool: cached connection '{conn_info}' is closed, opening a new one");
+                return Ok(None);
+            }
+            tracing::Span::current()
+                .record("conn_id", tracing::field::display(client.get_conn_id()));
+            tracing::Span::current().record(
+                "pid",
+                tracing::field::display(client.inner.get_process_id()),
+            );
+            info!(
+                cold_start_info = ColdStartInfo::HttpPoolHit.as_str(),
+                "pool: reusing connection '{conn_info}'"
+            );
+
+            match client.get_data() {
+                ClientDataEnum::Local(data) => {
+                    data.session().send(ctx.session_id())?;
+                }
+
+                ClientDataEnum::Remote(data) => {
+                    data.session().send(ctx.session_id())?;
+                }
+                ClientDataEnum::Http(_) => (),
+            }
+
+            ctx.set_cold_start_info(ColdStartInfo::HttpPoolHit);
+            ctx.success();
+            return Ok(Some(Client::new(client, conn_info.clone(), endpoint_pool)));
+        }
+        Ok(None)
     }
 
     pub(crate) fn shutdown(&self) {
@@ -374,6 +529,7 @@ impl<C: ClientInnerExt> GlobalConnPool<C> {
             _guard: Metrics::get().proxy.http_endpoint_pools.guard(),
             global_connections_count: self.global_connections_count.clone(),
             global_pool_size_max_conns: self.config.pool_options.max_total_conns,
+            pool_name: String::from("remote"),
         }));
 
         // find or create a pool for this endpoint
@@ -400,55 +556,23 @@ impl<C: ClientInnerExt> GlobalConnPool<C> {
 
         pool
     }
+}
 
-    pub(crate) fn get(
-        self: &Arc<Self>,
-        ctx: &RequestMonitoring,
-        conn_info: &ConnInfo,
-    ) -> Result<Option<Client<C>>, HttpConnError> {
-        let mut client: Option<ClientInnerRemote<C>> = None;
-        let Some(endpoint) = conn_info.endpoint_cache_key() else {
-            return Ok(None);
-        };
+pub(crate) struct Client<C: ClientInnerExt> {
+    span: Span,
+    inner: Option<ClientInnerCommon<C>>,
+    conn_info: ConnInfo,
+    pool: Weak<RwLock<EndpointConnPool<C>>>,
+}
 
-        let endpoint_pool = self.get_or_create_endpoint_pool(&endpoint);
-        if let Some(entry) = endpoint_pool
-            .write()
-            .get_conn_entry(conn_info.db_and_user())
-        {
-            client = Some(entry.conn);
-        }
-        let endpoint_pool = Arc::downgrade(&endpoint_pool);
-
-        // ok return cached connection if found and establish a new one otherwise
-        if let Some(mut client) = client {
-            if client.is_closed() {
-                info!("pool: cached connection '{conn_info}' is closed, opening a new one");
-                return Ok(None);
-            }
-            tracing::Span::current()
-                .record("conn_id", tracing::field::display(client.get_conn_id()));
-            tracing::Span::current().record(
-                "pid",
-                tracing::field::display(client.inner().get_process_id()),
-            );
-            info!(
-                cold_start_info = ColdStartInfo::HttpPoolHit.as_str(),
-                "pool: reusing connection '{conn_info}'"
-            );
-
-            client.session().send(ctx.session_id())?;
-            ctx.set_cold_start_info(ColdStartInfo::HttpPoolHit);
-            ctx.success();
-            return Ok(Some(Client::new(client, conn_info.clone(), endpoint_pool)));
-        }
-        Ok(None)
-    }
+pub(crate) struct Discard<'a, C: ClientInnerExt> {
+    conn_info: &'a ConnInfo,
+    pool: &'a mut Weak<RwLock<EndpointConnPool<C>>>,
 }
 
 impl<C: ClientInnerExt> Client<C> {
     pub(crate) fn new(
-        inner: ClientInnerRemote<C>,
+        inner: ClientInnerCommon<C>,
         conn_info: ConnInfo,
         pool: Weak<RwLock<EndpointConnPool<C>>>,
     ) -> Self {
@@ -460,7 +584,18 @@ impl<C: ClientInnerExt> Client<C> {
         }
     }
 
-    pub(crate) fn inner_mut(&mut self) -> (&mut C, Discard<'_, C>) {
+    pub(crate) fn client_inner(&mut self) -> (&mut ClientInnerCommon<C>, Discard<'_, C>) {
+        let Self {
+            inner,
+            pool,
+            conn_info,
+            span: _,
+        } = self;
+        let inner_m = inner.as_mut().expect("client inner should not be removed");
+        (inner_m, Discard { conn_info, pool })
+    }
+
+    pub(crate) fn inner(&mut self) -> (&mut C, Discard<'_, C>) {
         let Self {
             inner,
             pool,
@@ -468,12 +603,11 @@ impl<C: ClientInnerExt> Client<C> {
             span: _,
         } = self;
         let inner = inner.as_mut().expect("client inner should not be removed");
-        let inner_ref = inner.inner_mut();
-        (inner_ref, Discard { conn_info, pool })
+        (&mut inner.inner, Discard { conn_info, pool })
     }
 
     pub(crate) fn metrics(&self) -> Arc<MetricCounter> {
-        let aux = &self.inner.as_ref().unwrap().aux();
+        let aux = &self.inner.as_ref().unwrap().aux;
         USAGE_METRICS.register(Ids {
             endpoint_id: aux.endpoint_id,
             branch_id: aux.branch_id,
@@ -498,13 +632,6 @@ impl<C: ClientInnerExt> Client<C> {
     }
 }
 
-pub(crate) struct Client<C: ClientInnerExt> {
-    span: Span,
-    inner: Option<ClientInnerRemote<C>>,
-    conn_info: ConnInfo,
-    pool: Weak<RwLock<EndpointConnPool<C>>>,
-}
-
 impl<C: ClientInnerExt> Drop for Client<C> {
     fn drop(&mut self) {
         if let Some(drop) = self.do_drop() {
@@ -517,10 +644,11 @@ impl<C: ClientInnerExt> Deref for Client<C> {
     type Target = C;
 
     fn deref(&self) -> &Self::Target {
-        self.inner
+        &self
+            .inner
             .as_ref()
             .expect("client inner should not be removed")
-            .inner()
+            .inner
     }
 }
 
@@ -537,11 +665,6 @@ impl ClientInnerExt for tokio_postgres::Client {
     fn get_process_id(&self) -> i32 {
         self.get_process_id()
     }
-}
-
-pub(crate) struct Discard<'a, C: ClientInnerExt> {
-    conn_info: &'a ConnInfo,
-    pool: &'a mut Weak<RwLock<EndpointConnPool<C>>>,
 }
 
 impl<C: ClientInnerExt> Discard<'_, C> {

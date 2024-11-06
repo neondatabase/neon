@@ -22,6 +22,7 @@ sql_exporter.yml: $(jsonnet_files)
 		--output-file etc/$@ \
 		--tla-str collector_name=neon_collector \
 		--tla-str collector_file=neon_collector.yml \
+		--tla-str 'connection_string=postgresql://cloud_admin@127.0.0.1:5432/postgres?sslmode=disable&application_name=sql_exporter' \
 		etc/sql_exporter.jsonnet
 
 sql_exporter_autoscaling.yml: $(jsonnet_files)
@@ -29,7 +30,7 @@ sql_exporter_autoscaling.yml: $(jsonnet_files)
 		--output-file etc/$@ \
 		--tla-str collector_name=neon_collector_autoscaling \
 		--tla-str collector_file=neon_collector_autoscaling.yml \
-		--tla-str application_name=sql_exporter_autoscaling \
+		--tla-str 'connection_string=postgresql://cloud_admin@127.0.0.1:5432/postgres?sslmode=disable&application_name=sql_exporter_autoscaling' \
 		etc/sql_exporter.jsonnet
 
 .PHONY: clean

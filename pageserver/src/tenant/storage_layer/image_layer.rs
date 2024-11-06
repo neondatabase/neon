@@ -231,7 +231,7 @@ impl AsLayerDesc for ImageLayer {
 }
 
 impl ImageLayer {
-    pub(crate) async fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()> {
+    pub async fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()> {
         self.desc.dump();
 
         if !verbose {

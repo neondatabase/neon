@@ -270,7 +270,7 @@ impl AsLayerDesc for DeltaLayer {
 }
 
 impl DeltaLayer {
-    pub(crate) async fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()> {
+    pub async fn dump(&self, verbose: bool, ctx: &RequestContext) -> Result<()> {
         self.desc.dump();
 
         if !verbose {
@@ -1438,7 +1438,7 @@ impl DeltaLayerInner {
         offset
     }
 
-    pub(crate) fn iter<'a>(&'a self, ctx: &'a RequestContext) -> DeltaLayerIterator<'a> {
+    pub fn iter<'a>(&'a self, ctx: &'a RequestContext) -> DeltaLayerIterator<'a> {
         let block_reader = FileBlockReader::new(&self.file, self.file_id);
         let tree_reader =
             DiskBtreeReader::new(self.index_start_blk, self.index_root_blk, block_reader);

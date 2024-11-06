@@ -146,8 +146,6 @@ def test_long_timeline_create_cancelled_by_tenant_delete(neon_env_builder: NeonE
 
     env.pageserver.allowed_errors.extend(
         [
-            # happens with the cancellation bailing flushing loop earlier, leaving disk_consistent_lsn at zero
-            ".*Timeline got dropped without initializing, cleaning its files",
             # the response hit_pausable_failpoint_and_later_fail
             f".*Error processing HTTP request: InternalServerError\\(new timeline {env.initial_tenant}/{env.initial_timeline} has invalid disk_consistent_lsn",
         ]
