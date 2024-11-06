@@ -3,7 +3,10 @@
 #[path = "benchutils.rs"]
 mod benchutils;
 
-use benchutils::{setup_criterion, Env};
+use std::io::Write as _;
+
+use benchutils::Env;
+use camino_tempfile::tempfile;
 use criterion::{criterion_group, criterion_main, BatchSize, Bencher, Criterion};
 use itertools::Itertools as _;
 use postgres_ffi::v17::wal_generator::{LogicalMessageGenerator, WalGenerator};
@@ -11,6 +14,7 @@ use safekeeper::receive_wal::{self, WalAcceptor};
 use safekeeper::safekeeper::{
     AcceptorProposerMessage, AppendRequest, AppendRequestHeader, ProposerAcceptorMessage,
 };
+use tokio::io::AsyncWriteExt as _;
 use utils::id::{NodeId, TenantTimelineId};
 use utils::lsn::Lsn;
 
@@ -20,9 +24,11 @@ const GB: usize = 1024 * MB;
 
 // Register benchmarks with Criterion.
 criterion_group!(
-    name = benches;
-    config = setup_criterion();
-    targets = bench_process_msg, bench_wal_acceptor, bench_wal_acceptor_throughput
+    benches,
+    bench_process_msg,
+    bench_wal_acceptor,
+    bench_wal_acceptor_throughput,
+    bench_file_write
 );
 criterion_main!(benches);
 
@@ -272,6 +278,64 @@ fn bench_wal_acceptor_throughput(c: &mut Criterion) {
                 panic!("disconnected")
             })
         });
+        Ok(())
+    }
+}
+
+/// Benchmarks OS write throughput by appending blocks of a given size to a file. This is intended
+/// to compare Tokio and stdlib writes, and give a baseline for optimal WAL throughput.
+fn bench_file_write(c: &mut Criterion) {
+    let mut g = c.benchmark_group("file_write");
+
+    for kind in ["stdlib", "tokio"] {
+        for fsync in [false, true] {
+            for size in [8, KB, 8 * KB, 128 * KB, MB] {
+                // Kind of weird to change the group throughput per benchmark, but it's the only way to
+                // vary it per benchmark. It works.
+                g.throughput(criterion::Throughput::Bytes(size as u64));
+                g.bench_function(
+                    format!("{kind}/fsync={fsync}/size={size}"),
+                    |b| match kind {
+                        "stdlib" => run_bench_stdlib(b, size, fsync).unwrap(),
+                        "tokio" => run_bench_tokio(b, size, fsync).unwrap(),
+                        name => panic!("unknown kind {name}"),
+                    },
+                );
+            }
+        }
+    }
+
+    fn run_bench_stdlib(b: &mut Bencher, size: usize, fsync: bool) -> anyhow::Result<()> {
+        let mut file = tempfile()?;
+        let buf = vec![0u8; size];
+
+        b.iter(|| {
+            file.write_all(&buf).unwrap();
+            file.flush().unwrap();
+            if fsync {
+                file.sync_data().unwrap();
+            }
+        });
+
+        Ok(())
+    }
+
+    fn run_bench_tokio(b: &mut Bencher, size: usize, fsync: bool) -> anyhow::Result<()> {
+        let runtime = tokio::runtime::Runtime::new()?; // needs multithreaded
+
+        let mut file = tokio::fs::File::from_std(tempfile()?);
+        let buf = vec![0u8; size];
+
+        b.iter(|| {
+            runtime.block_on(async {
+                file.write_all(&buf).await.unwrap();
+                file.flush().await.unwrap();
+                if fsync {
+                    file.sync_data().await.unwrap();
+                }
+            })
+        });
+
         Ok(())
     }
 }
