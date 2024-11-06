@@ -3,7 +3,7 @@ use std::{
     sync::Arc,
 };
 
-use pageserver_api::controller_api::NodeSchedulingPolicy;
+use pageserver_api::controller_api::{NodeSchedulingPolicy, ShardSchedulingPolicy};
 use utils::{id::NodeId, shard::TenantShardId};
 
 use crate::{
@@ -96,6 +96,20 @@ impl TenantShardDrain {
 
         if *tenant_shard.intent.get_attached() != Some(self.drained_node) {
             return None;
+        }
+
+        // Only tenants with a normal (Active) scheduling policy are proactively moved
+        // around during a node drain.  Shards which have been manually configured to a different
+        // policy are only rescheduled by manual intervention.
+        match tenant_shard.get_scheduling_policy() {
+            ShardSchedulingPolicy::Active | ShardSchedulingPolicy::Essential => {
+                // A migration during drain is classed as 'essential' because it is required to
+                // uphold our availability goals for the tenant: this shard is elegible for migration.
+            }
+            ShardSchedulingPolicy::Pause | ShardSchedulingPolicy::Stop => {
+                // If we have been asked to avoid rescheduling this shard, then do not migrate it during a drain
+                return None;
+            }
         }
 
         match scheduler.node_preferred(tenant_shard.intent.get_secondary()) {
