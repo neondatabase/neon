@@ -546,56 +546,6 @@ impl Timeline {
         ))
     }
 
-    /// Initialize fresh timeline on disk and start background tasks. If init
-    /// fails, timeline is cancelled and cannot be used anymore.
-    ///
-    /// Init is transactional, so if it fails, created files will be deleted,
-    /// and state on disk should remain unchanged.
-    pub async fn init_new(
-        self: &Arc<Timeline>,
-        shared_state: &mut WriteGuardSharedState<'_>,
-        conf: &SafeKeeperConf,
-        broker_active_set: Arc<TimelinesSet>,
-        partial_backup_rate_limiter: RateLimiter,
-    ) -> Result<()> {
-        match fs::metadata(&self.timeline_dir).await {
-            Ok(_) => {
-                // Timeline directory exists on disk, we should leave state unchanged
-                // and return error.
-                bail!(TimelineError::Invalid(self.ttid));
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => {
-                return Err(e.into());
-            }
-        }
-
-        // Create timeline directory.
-        fs::create_dir_all(&self.timeline_dir).await?;
-
-        // Write timeline to disk and start background tasks.
-        if let Err(e) = shared_state.sk.state_mut().flush().await {
-            // Bootstrap failed, cancel timeline and remove timeline directory.
-            self.cancel(shared_state).await;
-
-            if let Err(fs_err) = fs::remove_dir_all(&self.timeline_dir).await {
-                warn!(
-                    "failed to remove timeline {} directory after bootstrap failure: {}",
-                    self.ttid, fs_err
-                );
-            }
-
-            return Err(e);
-        }
-        self.bootstrap(
-            shared_state,
-            conf,
-            broker_active_set,
-            partial_backup_rate_limiter,
-        );
-        Ok(())
-    }
-
     /// Bootstrap new or existing timeline starting background tasks.
     pub fn bootstrap(
         self: &Arc<Timeline>,
@@ -657,17 +607,6 @@ impl Timeline {
         }
         let dir_existed = delete_dir(&self.timeline_dir).await?;
         Ok(dir_existed)
-    }
-
-    /// Cancel timeline to prevent further usage. Background tasks will stop
-    /// eventually after receiving cancellation signal.
-    async fn cancel(&self, shared_state: &mut WriteGuardSharedState<'_>) {
-        info!("timeline {} is cancelled", self.ttid);
-        self.shutdown().await;
-
-        // Close associated FDs. Nobody will be able to touch timeline data once
-        // it is cancelled, so WAL storage won't be opened again.
-        shared_state.sk.close_wal_store();
     }
 
     /// Returns if timeline is cancelled.

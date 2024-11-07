@@ -25,7 +25,6 @@ use tokio::fs::File;
 use tokio::select;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::sync::{watch, OnceCell};
-use tokio::time::sleep;
 use tracing::*;
 
 use utils::{id::TenantTimelineId, lsn::Lsn};
