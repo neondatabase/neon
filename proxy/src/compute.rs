@@ -8,7 +8,7 @@ use itertools::Itertools;
 use once_cell::sync::OnceCell;
 use pq_proto::StartupMessageParams;
 use rustls::client::danger::ServerCertVerifier;
-use rustls::crypto::aws_lc_rs;
+use rustls::crypto::ring;
 use rustls::pki_types::InvalidDnsNameError;
 use thiserror::Error;
 use tokio::net::TcpStream;
@@ -19,13 +19,13 @@ use tracing::{error, info, warn};
 use crate::auth::parse_endpoint_param;
 use crate::cancellation::CancelClosure;
 use crate::context::RequestMonitoring;
+use crate::control_plane::client::ApiLockError;
 use crate::control_plane::errors::WakeComputeError;
 use crate::control_plane::messages::MetricsAuxInfo;
-use crate::control_plane::provider::ApiLockError;
 use crate::error::{ReportableError, UserFacingError};
 use crate::metrics::{Metrics, NumDbConnectionsGuard};
 use crate::proxy::neon_option;
-use crate::Host;
+use crate::types::Host;
 
 pub const COULD_NOT_CONNECT: &str = "Couldn't connect to compute node";
 
@@ -135,13 +135,13 @@ impl ConnCfg {
     /// Apply startup message params to the connection config.
     pub(crate) fn set_startup_params(&mut self, params: &StartupMessageParams) {
         // Only set `user` if it's not present in the config.
-        // Web auth flow takes username from the console's response.
+        // Console redirect auth flow takes username from the console's response.
         if let (None, Some(user)) = (self.get_user(), params.get("user")) {
             self.user(user);
         }
 
         // Only set `dbname` if it's not present in the config.
-        // Web auth flow takes dbname from the console's response.
+        // Console redirect auth flow takes dbname from the console's response.
         if let (None, Some(dbname)) = (self.get_dbname(), params.get("database")) {
             self.dbname(dbname);
         }
@@ -266,12 +266,12 @@ impl ConnCfg {
     }
 }
 
+type RustlsStream = <MakeRustlsConnect as MakeTlsConnect<tokio::net::TcpStream>>::Stream;
+
 pub(crate) struct PostgresConnection {
     /// Socket connected to a compute node.
-    pub(crate) stream: tokio_postgres::maybe_tls_stream::MaybeTlsStream<
-        tokio::net::TcpStream,
-        tokio_postgres_rustls::RustlsStream<tokio::net::TcpStream>,
-    >,
+    pub(crate) stream:
+        tokio_postgres::maybe_tls_stream::MaybeTlsStream<tokio::net::TcpStream, RustlsStream>,
     /// PostgreSQL connection parameters.
     pub(crate) params: std::collections::HashMap<String, String>,
     /// Query cancellation token.
@@ -298,9 +298,9 @@ impl ConnCfg {
         let client_config = if allow_self_signed_compute {
             // Allow all certificates for creating the connection
             let verifier = Arc::new(AcceptEverythingVerifier);
-            rustls::ClientConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
+            rustls::ClientConfig::builder_with_provider(Arc::new(ring::default_provider()))
                 .with_safe_default_protocol_versions()
-                .expect("aws_lc_rs should support the default protocol versions")
+                .expect("ring should support the default protocol versions")
                 .dangerous()
                 .with_custom_certificate_verifier(verifier)
         } else {
@@ -308,9 +308,9 @@ impl ConnCfg {
                 .get_or_try_init(load_certs)
                 .map_err(ConnectionError::TlsCertificateError)?
                 .clone();
-            rustls::ClientConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
+            rustls::ClientConfig::builder_with_provider(Arc::new(ring::default_provider()))
                 .with_safe_default_protocol_versions()
-                .expect("aws_lc_rs should support the default protocol versions")
+                .expect("ring should support the default protocol versions")
                 .with_root_certificates(root_store)
         };
         let client_config = client_config.with_no_client_auth();

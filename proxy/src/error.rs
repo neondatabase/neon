@@ -1,7 +1,9 @@
 use std::error::Error as StdError;
 use std::{fmt, io};
 
+use anyhow::Context;
 use measured::FixedCardinalityLabel;
+use tokio::task::JoinError;
 
 /// Upcast (almost) any error into an opaque [`io::Error`].
 pub(crate) fn io_error(e: impl Into<Box<dyn StdError + Send + Sync>>) -> io::Error {
@@ -96,4 +98,9 @@ impl ReportableError for tokio_postgres::error::Error {
             ErrorKind::Compute
         }
     }
+}
+
+/// Flattens `Result<Result<T>>` into `Result<T>`.
+pub fn flatten_err<T>(r: Result<anyhow::Result<T>, JoinError>) -> anyhow::Result<T> {
+    r.context("join error").and_then(|x| x)
 }

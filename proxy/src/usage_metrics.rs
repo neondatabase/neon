@@ -497,7 +497,8 @@ mod tests {
     use url::Url;
 
     use super::*;
-    use crate::{http, BranchId, EndpointId};
+    use crate::http;
+    use crate::types::{BranchId, EndpointId};
 
     #[tokio::test]
     async fn metrics() {

@@ -24,7 +24,6 @@ pub mod metrics;
 pub mod page_cache;
 pub mod page_service;
 pub mod pgdatadir_mapping;
-pub mod repository;
 pub mod span;
 pub(crate) mod statvfs;
 pub mod task_mgr;
@@ -32,7 +31,6 @@ pub mod tenant;
 pub mod utilization;
 pub mod virtual_file;
 pub mod walingest;
-pub mod walrecord;
 pub mod walredo;
 
 use camino::Utf8Path;

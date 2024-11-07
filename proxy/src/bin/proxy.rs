@@ -51,11 +51,11 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 #[derive(Clone, Debug, ValueEnum)]
 enum AuthBackendType {
-    Console,
-    // clap only shows the name, not the alias, in usage text.
-    // TODO: swap name/alias and deprecate "link"
-    #[value(name("link"), alias("web"))]
-    Web,
+    #[value(name("console"), alias("cplane"))]
+    ControlPlane,
+
+    #[value(name("link"), alias("control-redirect"))]
+    ConsoleRedirect,
 
     #[cfg(feature = "testing")]
     Postgres,
@@ -71,7 +71,7 @@ struct ProxyCliArgs {
     /// listen for incoming client connections on ip:port
     #[clap(short, long, default_value = "127.0.0.1:4432")]
     proxy: String,
-    #[clap(value_enum, long, default_value_t = AuthBackendType::Web)]
+    #[clap(value_enum, long, default_value_t = AuthBackendType::ConsoleRedirect)]
     auth_backend: AuthBackendType,
     /// listen for management callback connection on ip:port
     #[clap(short, long, default_value = "127.0.0.1:7000")]
@@ -82,7 +82,7 @@ struct ProxyCliArgs {
     /// listen for incoming wss connections on ip:port
     #[clap(long)]
     wss: Option<String>,
-    /// redirect unauthenticated users to the given uri in case of web auth
+    /// redirect unauthenticated users to the given uri in case of console redirect auth
     #[clap(short, long, default_value = "http://localhost:3000/psql_session/")]
     uri: String,
     /// cloud API endpoint for authenticating users
@@ -92,6 +92,14 @@ struct ProxyCliArgs {
         default_value = "http://localhost:3000/authenticate_proxy_request/"
     )]
     auth_endpoint: String,
+    /// JWT used to connect to control plane.
+    #[clap(
+        long,
+        value_name = "JWT",
+        default_value = "",
+        env = "NEON_PROXY_TO_CONTROLPLANE_TOKEN"
+    )]
+    control_plane_token: Arc<str>,
     /// if this is not local proxy, this toggles whether we accept jwt or passwords for http
     #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
     is_auth_broker: bool,
@@ -137,9 +145,6 @@ struct ProxyCliArgs {
     /// size of the threadpool for password hashing
     #[clap(long, default_value_t = 4)]
     scram_thread_pool_size: u8,
-    /// Disable dynamic rate limiter and store the metrics to ensure its production behaviour.
-    #[clap(long, default_value_t = true, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
-    disable_dynamic_rate_limiter: bool,
     /// Endpoint rate limiter max number of requests per second.
     ///
     /// Provided in the form `<Requests Per Second>@<Bucket Duration Size>`.
@@ -226,6 +231,7 @@ struct ProxyCliArgs {
     proxy_protocol_v2: ProxyProtocolV2,
 
     /// Time the proxy waits for the webauth session to be confirmed by the control plane.
+    // TODO: rename to `console_redirect_confirmation_timeout`.
     #[clap(long, default_value = "2m", value_parser = humantime::parse_duration)]
     webauth_confirmation_timeout: std::time::Duration,
 }
@@ -495,7 +501,7 @@ async fn main() -> anyhow::Result<()> {
 
     // maintenance tasks. these never return unless there's an error
     let mut maintenance_tasks = JoinSet::new();
-    maintenance_tasks.spawn(proxy::handle_signals(cancellation_token.clone(), || {}));
+    maintenance_tasks.spawn(proxy::signals::handle(cancellation_token.clone(), || {}));
     maintenance_tasks.spawn(http::health_server::task_main(
         http_listener,
         AppMetrics {
@@ -516,7 +522,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     if let Either::Left(auth::Backend::ControlPlane(api, _)) = &auth_backend {
-        if let proxy::control_plane::provider::ControlPlaneBackend::Management(api) = &**api {
+        if let proxy::control_plane::client::ControlPlaneClient::Neon(api) = &**api {
             match (redis_notifications_client, regional_redis_client.clone()) {
                 (None, None) => {}
                 (client1, client2) => {
@@ -561,11 +567,11 @@ async fn main() -> anyhow::Result<()> {
         .await
         {
             // exit immediately on maintenance task completion
-            Either::Left((Some(res), _)) => break proxy::flatten_err(res)?,
+            Either::Left((Some(res), _)) => break proxy::error::flatten_err(res)?,
             // exit with error immediately if all maintenance tasks have ceased (should be caught by branch above)
             Either::Left((None, _)) => bail!("no maintenance tasks running. invalid state"),
             // exit immediately on client task error
-            Either::Right((Some(res), _)) => proxy::flatten_err(res)?,
+            Either::Right((Some(res), _)) => proxy::error::flatten_err(res)?,
             // exit if all our client tasks have shutdown gracefully
             Either::Right((None, _)) => return Ok(()),
         }
@@ -615,9 +621,6 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
              and metric-collection-interval must be specified"
         ),
     };
-    if !args.disable_dynamic_rate_limiter {
-        bail!("dynamic rate limiter should be disabled");
-    }
 
     let config::ConcurrencyLockOptions {
         shards,
@@ -665,7 +668,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         ip_allowlist_check_enabled: !args.is_private_access_proxy,
         is_auth_broker: args.is_auth_broker,
         accept_jwts: args.is_auth_broker,
-        webauth_confirmation_timeout: args.webauth_confirmation_timeout,
+        console_redirect_confirmation_timeout: args.webauth_confirmation_timeout,
     };
 
     let config = ProxyConfig {
@@ -696,7 +699,7 @@ fn build_auth_backend(
     args: &ProxyCliArgs,
 ) -> anyhow::Result<Either<&'static auth::Backend<'static, ()>, &'static ConsoleRedirectBackend>> {
     match &args.auth_backend {
-        AuthBackendType::Console => {
+        AuthBackendType::ControlPlane => {
             let wake_compute_cache_config: CacheOptions = args.wake_compute_cache.parse()?;
             let project_info_cache_config: ProjectInfoCacheOptions =
                 args.project_info_cache.parse()?;
@@ -738,13 +741,14 @@ fn build_auth_backend(
             RateBucketInfo::validate(&mut wake_compute_rps_limit)?;
             let wake_compute_endpoint_rate_limiter =
                 Arc::new(WakeComputeRateLimiter::new(wake_compute_rps_limit));
-            let api = control_plane::provider::neon::Api::new(
+            let api = control_plane::client::neon::NeonControlPlaneClient::new(
                 endpoint,
+                args.control_plane_token.clone(),
                 caches,
                 locks,
                 wake_compute_endpoint_rate_limiter,
             );
-            let api = control_plane::provider::ControlPlaneBackend::Management(api);
+            let api = control_plane::client::ControlPlaneClient::Neon(api);
             let auth_backend = auth::Backend::ControlPlane(MaybeOwned::Owned(api), ());
 
             let config = Box::leak(Box::new(auth_backend));
@@ -755,8 +759,11 @@ fn build_auth_backend(
         #[cfg(feature = "testing")]
         AuthBackendType::Postgres => {
             let url = args.auth_endpoint.parse()?;
-            let api = control_plane::provider::mock::Api::new(url, !args.is_private_access_proxy);
-            let api = control_plane::provider::ControlPlaneBackend::PostgresMock(api);
+            let api = control_plane::client::mock::MockControlPlane::new(
+                url,
+                !args.is_private_access_proxy,
+            );
+            let api = control_plane::client::ControlPlaneClient::PostgresMock(api);
 
             let auth_backend = auth::Backend::ControlPlane(MaybeOwned::Owned(api), ());
 
@@ -765,7 +772,7 @@ fn build_auth_backend(
             Ok(Either::Left(config))
         }
 
-        AuthBackendType::Web => {
+        AuthBackendType::ConsoleRedirect => {
             let url = args.uri.parse()?;
             let backend = ConsoleRedirectBackend::new(url);
 

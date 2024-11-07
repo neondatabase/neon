@@ -23,13 +23,14 @@ use typed_json::json;
 use url::Url;
 use urlencoding;
 use utils::http::error::ApiError;
+use uuid::Uuid;
 
 use super::backend::{LocalProxyConnError, PoolingBackend};
 use super::conn_pool::{AuthData, ConnInfoWithAuth};
 use super::conn_pool_lib::{self, ConnInfo};
+use super::error::HttpCodeError;
 use super::http_util::json_response;
 use super::json::{json_to_pg_text, pg_text_row_to_json, JsonConversionError};
-use super::local_conn_pool;
 use crate::auth::backend::{ComputeCredentialKeys, ComputeUserInfo};
 use crate::auth::{endpoint_sni, ComputeUserInfoParseError};
 use crate::config::{AuthenticationConfig, HttpConfig, ProxyConfig, TlsConfig};
@@ -38,8 +39,8 @@ use crate::error::{ErrorKind, ReportableError, UserFacingError};
 use crate::metrics::{HttpDirection, Metrics};
 use crate::proxy::{run_until_cancelled, NeonOptions};
 use crate::serverless::backend::HttpConnError;
+use crate::types::{DbName, RoleName};
 use crate::usage_metrics::{MetricCounter, MetricCounterRecorder};
-use crate::{DbName, RoleName};
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -62,6 +63,8 @@ enum Payload {
     Single(QueryData),
     Batch(BatchQueryData),
 }
+
+pub(super) static NEON_REQUEST_ID: HeaderName = HeaderName::from_static("neon-request-id");
 
 static CONN_STRING: HeaderName = HeaderName::from_static("neon-connection-string");
 static RAW_TEXT_OUTPUT: HeaderName = HeaderName::from_static("neon-raw-text-output");
@@ -235,7 +238,6 @@ fn get_conn_info(
     Ok(ConnInfoWithAuth { conn_info, auth })
 }
 
-// TODO: return different http error codes
 pub(crate) async fn handle(
     config: &'static ProxyConfig,
     ctx: RequestMonitoring,
@@ -316,9 +318,8 @@ pub(crate) async fn handle(
                 "forwarding error to user"
             );
 
-            // TODO: this shouldn't always be bad request.
             json_response(
-                StatusCode::BAD_REQUEST,
+                e.get_http_status_code(),
                 json!({
                     "message": message,
                     "code": code,
@@ -398,6 +399,25 @@ impl UserFacingError for SqlOverHttpError {
             SqlOverHttpError::Postgres(p) => p.to_string(),
             SqlOverHttpError::JsonConversion(_) => "could not parse postgres response".to_string(),
             SqlOverHttpError::Cancelled(_) => self.to_string(),
+        }
+    }
+}
+
+impl HttpCodeError for SqlOverHttpError {
+    fn get_http_status_code(&self) -> StatusCode {
+        match self {
+            SqlOverHttpError::ReadPayload(_) => StatusCode::BAD_REQUEST,
+            SqlOverHttpError::ConnectCompute(h) => match h.get_error_kind() {
+                ErrorKind::User => StatusCode::BAD_REQUEST,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            },
+            SqlOverHttpError::ConnInfo(_) => StatusCode::BAD_REQUEST,
+            SqlOverHttpError::RequestTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
+            SqlOverHttpError::ResponseTooLarge(_) => StatusCode::INSUFFICIENT_STORAGE,
+            SqlOverHttpError::InvalidIsolationLevel => StatusCode::BAD_REQUEST,
+            SqlOverHttpError::Postgres(_) => StatusCode::BAD_REQUEST,
+            SqlOverHttpError::JsonConversion(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            SqlOverHttpError::Cancelled(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 }
@@ -706,6 +726,12 @@ static HEADERS_TO_FORWARD: &[&HeaderName] = &[
     &TXN_DEFERRABLE,
 ];
 
+pub(crate) fn uuid_to_header_value(id: Uuid) -> HeaderValue {
+    let mut uuid = [0; uuid::fmt::Hyphenated::LENGTH];
+    HeaderValue::from_str(id.as_hyphenated().encode_lower(&mut uuid[..]))
+        .expect("uuid hyphenated format should be all valid header characters")
+}
+
 async fn handle_auth_broker_inner(
     ctx: &RequestMonitoring,
     request: Request<Incoming>,
@@ -732,6 +758,7 @@ async fn handle_auth_broker_inner(
             req = req.header(h, hv);
         }
     }
+    req = req.header(&NEON_REQUEST_ID, uuid_to_header_value(ctx.session_id()));
 
     let req = req
         .body(body)
@@ -1024,12 +1051,12 @@ async fn query_to_json<T: GenericClient>(
 
 enum Client {
     Remote(conn_pool_lib::Client<tokio_postgres::Client>),
-    Local(local_conn_pool::LocalClient<tokio_postgres::Client>),
+    Local(conn_pool_lib::Client<tokio_postgres::Client>),
 }
 
 enum Discard<'a> {
     Remote(conn_pool_lib::Discard<'a, tokio_postgres::Client>),
-    Local(local_conn_pool::Discard<'a, tokio_postgres::Client>),
+    Local(conn_pool_lib::Discard<'a, tokio_postgres::Client>),
 }
 
 impl Client {
@@ -1043,7 +1070,7 @@ impl Client {
     fn inner(&mut self) -> (&mut tokio_postgres::Client, Discard<'_>) {
         match self {
             Client::Remote(client) => {
-                let (c, d) = client.inner_mut();
+                let (c, d) = client.inner();
                 (c, Discard::Remote(d))
             }
             Client::Local(local_client) => {

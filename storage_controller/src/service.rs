@@ -934,7 +934,6 @@ impl Service {
         self.startup_complete.clone().wait().await;
 
         const BACKGROUND_RECONCILE_PERIOD: Duration = Duration::from_secs(20);
-
         let mut interval = tokio::time::interval(BACKGROUND_RECONCILE_PERIOD);
         while !self.reconcilers_cancel.is_cancelled() {
             tokio::select! {
@@ -1272,6 +1271,10 @@ impl Service {
             .collect::<Vec<_>>();
         let nodes: HashMap<NodeId, Node> = nodes.into_iter().map(|n| (n.get_id(), n)).collect();
         tracing::info!("Loaded {} nodes from database.", nodes.len());
+        metrics::METRICS_REGISTRY
+            .metrics_group
+            .storage_controller_pageserver_nodes
+            .set(nodes.len() as i64);
 
         tracing::info!("Loading shards from database...");
         let mut tenant_shard_persistence = persistence.list_tenant_shards().await?;
@@ -3127,9 +3130,11 @@ impl Service {
             .await?;
 
             // Propagate the LSN that shard zero picked, if caller didn't provide one
-            if create_req.ancestor_timeline_id.is_some() && create_req.ancestor_start_lsn.is_none()
-            {
-                create_req.ancestor_start_lsn = timeline_info.ancestor_lsn;
+            match &mut create_req.mode {
+                models::TimelineCreateRequestMode::Branch { ancestor_start_lsn, .. } if ancestor_start_lsn.is_none() => {
+                    *ancestor_start_lsn = timeline_info.ancestor_lsn;
+                },
+                _ => {}
             }
 
             // Create timeline on remaining shards with number >0
@@ -4110,9 +4115,9 @@ impl Service {
                     (
                         old_attached,
                         generation,
-                        old_state.policy,
+                        old_state.policy.clone(),
                         old_state.shard,
-                        old_state.config,
+                        old_state.config.clone(),
                     )
                 };
 
@@ -4829,6 +4834,43 @@ impl Service {
         Ok(TenantShardMigrateResponse {})
     }
 
+    /// 'cancel' in this context means cancel any ongoing reconcile
+    pub(crate) async fn tenant_shard_cancel_reconcile(
+        &self,
+        tenant_shard_id: TenantShardId,
+    ) -> Result<(), ApiError> {
+        // Take state lock and fire the cancellation token, after which we drop lock and wait for any ongoing reconcile to complete
+        let waiter = {
+            let locked = self.inner.write().unwrap();
+            let Some(shard) = locked.tenants.get(&tenant_shard_id) else {
+                return Err(ApiError::NotFound(
+                    anyhow::anyhow!("Tenant shard not found").into(),
+                ));
+            };
+
+            let waiter = shard.get_waiter();
+            match waiter {
+                None => {
+                    tracing::info!("Shard does not have an ongoing Reconciler");
+                    return Ok(());
+                }
+                Some(waiter) => {
+                    tracing::info!("Cancelling Reconciler");
+                    shard.cancel_reconciler();
+                    waiter
+                }
+            }
+        };
+
+        // Cancellation should be prompt.  If this fails we have still done our job of firing the
+        // cancellation token, but by returning an ApiError we will indicate to the caller that
+        // the Reconciler is misbehaving and not respecting the cancellation token
+        self.await_waiters(vec![waiter], SHORT_RECONCILE_TIMEOUT)
+            .await?;
+
+        Ok(())
+    }
+
     /// This is for debug/support only: we simply drop all state for a tenant, without
     /// detaching or deleting it on pageservers.
     pub(crate) async fn tenant_drop(&self, tenant_id: TenantId) -> Result<(), ApiError> {
@@ -4916,16 +4958,7 @@ impl Service {
                     stripe_size,
                 },
                 placement_policy: Some(PlacementPolicy::Attached(0)), // No secondaries, for convenient debug/hacking
-
-                // There is no way to know what the tenant's config was: revert to defaults
-                //
-                // TODO: remove `switch_aux_file_policy` once we finish auxv2 migration
-                //
-                // we write to both v1+v2 storage, so that the test case can use either storage format for testing
-                config: TenantConfig {
-                    switch_aux_file_policy: Some(models::AuxFilePolicy::CrossValidation),
-                    ..TenantConfig::default()
-                },
+                config: TenantConfig::default(),
             })
             .await?;
 
@@ -5075,6 +5108,10 @@ impl Service {
         let mut nodes = (*locked.nodes).clone();
         nodes.remove(&node_id);
         locked.nodes = Arc::new(nodes);
+        metrics::METRICS_REGISTRY
+            .metrics_group
+            .storage_controller_pageserver_nodes
+            .set(locked.nodes.len() as i64);
 
         locked.scheduler.node_remove(node_id);
 
@@ -5158,6 +5195,10 @@ impl Service {
                     removed_node.set_availability(NodeAvailability::Offline);
                 }
                 *nodes = Arc::new(nodes_mut);
+                metrics::METRICS_REGISTRY
+                    .metrics_group
+                    .storage_controller_pageserver_nodes
+                    .set(nodes.len() as i64);
             }
         }
 
@@ -5345,6 +5386,11 @@ impl Service {
         new_nodes.insert(register_req.node_id, new_node);
 
         locked.nodes = Arc::new(new_nodes);
+
+        metrics::METRICS_REGISTRY
+            .metrics_group
+            .storage_controller_pageserver_nodes
+            .set(locked.nodes.len() as i64);
 
         tracing::info!(
             "Registered pageserver {}, now have {} pageservers",
@@ -6675,6 +6721,16 @@ impl Service {
             .tenants
             .iter_mut()
             .filter_map(|(tid, tenant_shard)| {
+                if !matches!(
+                    tenant_shard.get_scheduling_policy(),
+                    ShardSchedulingPolicy::Active
+                ) {
+                    // Only include tenants in fills if they have a normal (Active) scheduling policy.  We
+                    // even exclude Essential, because moving to fill a node is not essential to keeping this
+                    // tenant available.
+                    return None;
+                }
+
                 if tenant_shard.intent.get_secondary().contains(&node_id) {
                     if let Some(primary) = tenant_shard.intent.get_attached() {
                         return Some((*primary, *tid));

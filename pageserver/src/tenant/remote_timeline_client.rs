@@ -180,6 +180,7 @@
 
 pub(crate) mod download;
 pub mod index;
+pub mod manifest;
 pub(crate) mod upload;
 
 use anyhow::Context;
@@ -189,9 +190,9 @@ use chrono::{NaiveDateTime, Utc};
 pub(crate) use download::download_initdb_tar_zst;
 use pageserver_api::models::TimelineArchivalState;
 use pageserver_api::shard::{ShardIndex, TenantShardId};
+use regex::Regex;
 use scopeguard::ScopeGuard;
 use tokio_util::sync::CancellationToken;
-pub(crate) use upload::upload_initdb_dir;
 use utils::backoff::{
     self, exponential_backoff, DEFAULT_BASE_BACKOFF_SECONDS, DEFAULT_MAX_BACKOFF_SECONDS,
 };
@@ -199,7 +200,7 @@ use utils::pausable_failpoint;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use remote_storage::{
@@ -245,9 +246,11 @@ use super::upload_queue::{NotInitialized, SetDeletedFlagProgress};
 use super::Generation;
 
 pub(crate) use download::{
-    download_index_part, is_temp_download_file, list_remote_tenant_shards, list_remote_timelines,
+    download_index_part, download_tenant_manifest, is_temp_download_file,
+    list_remote_tenant_shards, list_remote_timelines,
 };
 pub(crate) use index::LayerFileMetadata;
+pub(crate) use upload::upload_initdb_dir;
 
 // Occasional network issues and such can cause remote operations to fail, and
 // that's expected. If a download fails, we log it at info-level, and retry.
@@ -294,6 +297,10 @@ pub enum WaitCompletionError {
     #[error("wait_completion aborted because upload queue was stopped")]
     UploadQueueShutDownOrStopped,
 }
+
+#[derive(Debug, thiserror::Error)]
+#[error("Upload queue either in unexpected state or hasn't downloaded manifest yet")]
+pub struct UploadQueueNotReadyError;
 
 /// A client for accessing a timeline's data in remote storage.
 ///
@@ -466,6 +473,20 @@ impl RemoteTimelineClient {
             .initialized_mut()
             .map(|q| q.clean.0.archived_at.is_some())
             .ok()
+    }
+
+    /// Returns `Ok(Some(timestamp))` if the timeline has been archived, `Ok(None)` if the timeline hasn't been archived.
+    ///
+    /// Return Err(_) if the remote index_part hasn't been downloaded yet, or the timeline hasn't been stopped yet.
+    pub(crate) fn archived_at_stopped_queue(
+        &self,
+    ) -> Result<Option<NaiveDateTime>, UploadQueueNotReadyError> {
+        self.upload_queue
+            .lock()
+            .unwrap()
+            .stopped_mut()
+            .map(|q| q.upload_queue_for_deletion.clean.0.archived_at)
+            .map_err(|_| UploadQueueNotReadyError)
     }
 
     fn update_remote_physical_size_gauge(&self, current_remote_index_part: Option<&IndexPart>) {
@@ -1252,10 +1273,14 @@ impl RemoteTimelineClient {
         let fut = {
             let mut guard = self.upload_queue.lock().unwrap();
             let upload_queue = match &mut *guard {
-                UploadQueue::Stopped(_) => return,
+                UploadQueue::Stopped(_) => {
+                    scopeguard::ScopeGuard::into_inner(sg);
+                    return;
+                }
                 UploadQueue::Uninitialized => {
                     // transition into Stopped state
                     self.stop_impl(&mut guard);
+                    scopeguard::ScopeGuard::into_inner(sg);
                     return;
                 }
                 UploadQueue::Initialized(ref mut init) => init,
@@ -1420,7 +1445,7 @@ impl RemoteTimelineClient {
         let remote_path = remote_layer_path(
             &self.tenant_shard_id.tenant_id,
             &self.timeline_id,
-            self.tenant_shard_id.to_index(),
+            uploaded.metadata().shard,
             &uploaded.layer_desc().layer_name(),
             uploaded.metadata().generation,
         );
@@ -1461,7 +1486,7 @@ impl RemoteTimelineClient {
             &adopted
                 .get_timeline_id()
                 .expect("Source timeline should be alive"),
-            self.tenant_shard_id.to_index(),
+            adopted.metadata().shard,
             &adopted.layer_desc().layer_name(),
             adopted.metadata().generation,
         );
@@ -1469,7 +1494,7 @@ impl RemoteTimelineClient {
         let target_remote_path = remote_layer_path(
             &self.tenant_shard_id.tenant_id,
             &self.timeline_id,
-            self.tenant_shard_id.to_index(),
+            adopted_as.metadata().shard,
             &adopted_as.layer_desc().layer_name(),
             adopted_as.metadata().generation,
         );
@@ -2198,6 +2223,23 @@ pub fn remote_tenant_path(tenant_shard_id: &TenantShardId) -> RemotePath {
     RemotePath::from_string(&path).expect("Failed to construct path")
 }
 
+pub fn remote_tenant_manifest_path(
+    tenant_shard_id: &TenantShardId,
+    generation: Generation,
+) -> RemotePath {
+    let path = format!(
+        "tenants/{tenant_shard_id}/tenant-manifest{}.json",
+        generation.get_suffix()
+    );
+    RemotePath::from_string(&path).expect("Failed to construct path")
+}
+
+/// Prefix to all generations' manifest objects in a tenant shard
+pub fn remote_tenant_manifest_prefix(tenant_shard_id: &TenantShardId) -> RemotePath {
+    let path = format!("tenants/{tenant_shard_id}/tenant-manifest",);
+    RemotePath::from_string(&path).expect("Failed to construct path")
+}
+
 pub fn remote_timelines_path(tenant_shard_id: &TenantShardId) -> RemotePath {
     let path = format!("tenants/{tenant_shard_id}/{TIMELINES_SEGMENT_NAME}");
     RemotePath::from_string(&path).expect("Failed to construct path")
@@ -2290,6 +2332,15 @@ pub fn parse_remote_index_path(path: RemotePath) -> Option<Generation> {
         Some((_, gen_suffix)) => Generation::parse_suffix(gen_suffix),
         None => None,
     }
+}
+
+/// Given the key of a tenant manifest, parse out the generation number
+pub(crate) fn parse_remote_tenant_manifest_path(path: RemotePath) -> Option<Generation> {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new(r".+tenant-manifest-([0-9a-f]{8}).json").unwrap());
+    re.captures(path.get_path().as_str())
+        .and_then(|c| c.get(1))
+        .and_then(|m| Generation::parse_suffix(m.as_str()))
 }
 
 #[cfg(test)]

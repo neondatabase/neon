@@ -121,7 +121,7 @@ impl From<&RequestMonitoringInner> for RequestData {
     fn from(value: &RequestMonitoringInner) -> Self {
         Self {
             session_id: value.session_id,
-            peer_addr: value.peer_addr.to_string(),
+            peer_addr: value.conn_info.addr.ip().to_string(),
             timestamp: value.first_packet.naive_utc(),
             username: value.user.as_deref().map(String::from),
             application_name: value.application.as_deref().map(String::from),
@@ -134,7 +134,7 @@ impl From<&RequestMonitoringInner> for RequestData {
                 .as_ref()
                 .and_then(|options| serde_json::to_string(&Options { options }).ok()),
             auth_method: value.auth_method.as_ref().map(|x| match x {
-                super::AuthMethod::Web => "web",
+                super::AuthMethod::ConsoleRedirect => "console_redirect",
                 super::AuthMethod::ScramSha256 => "scram_sha_256",
                 super::AuthMethod::ScramSha256Plus => "scram_sha_256_plus",
                 super::AuthMethod::Cleartext => "cleartext",

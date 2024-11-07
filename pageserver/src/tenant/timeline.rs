@@ -20,11 +20,12 @@ use chrono::{DateTime, Utc};
 use enumset::EnumSet;
 use fail::fail_point;
 use handle::ShardTimelineId;
+use offload::OffloadError;
 use once_cell::sync::Lazy;
 use pageserver_api::{
     key::{
-        CompactKey, KEY_SIZE, METADATA_KEY_BEGIN_PREFIX, METADATA_KEY_END_PREFIX,
-        NON_INHERITED_RANGE, NON_INHERITED_SPARSE_RANGE,
+        KEY_SIZE, METADATA_KEY_BEGIN_PREFIX, METADATA_KEY_END_PREFIX, NON_INHERITED_RANGE,
+        NON_INHERITED_SPARSE_RANGE,
     },
     keyspace::{KeySpaceAccum, KeySpaceRandomAccum, SparseKeyPartitioning},
     models::{
@@ -48,6 +49,7 @@ use utils::{
     fs_ext, pausable_failpoint,
     sync::gate::{Gate, GateGuard},
 };
+use wal_decoder::serialized_batch::SerializedValueBatch;
 
 use std::sync::atomic::Ordering as AtomicOrdering;
 use std::sync::{Arc, Mutex, RwLock, Weak};
@@ -125,11 +127,11 @@ use utils::{
     simple_rcu::{Rcu, RcuReadGuard},
 };
 
-use crate::repository::GcResult;
-use crate::repository::{Key, Value};
 use crate::task_mgr;
 use crate::task_mgr::TaskKind;
+use crate::tenant::gc_result::GcResult;
 use crate::ZERO_PAGE;
+use pageserver_api::key::Key;
 
 use self::delete::DeleteTimelineFlow;
 pub(super) use self::eviction_task::EvictionTaskTenantState;
@@ -139,9 +141,7 @@ use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 
 use super::{
-    config::TenantConf,
-    storage_layer::{inmemory_layer, LayerVisibilityHint},
-    upload_queue::NotInitialized,
+    config::TenantConf, storage_layer::LayerVisibilityHint, upload_queue::NotInitialized,
     MaybeOffloaded,
 };
 use super::{debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenantConf};
@@ -154,6 +154,9 @@ use super::{
     secondary::heatmap::{HeatMapLayer, HeatMapTimeline},
     GcError,
 };
+
+#[cfg(test)]
+use pageserver_api::value::Value;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub(crate) enum FlushLoopState {
@@ -371,7 +374,7 @@ pub struct Timeline {
 
     /// Prevent two tasks from deleting the timeline at the same time. If held, the
     /// timeline is being deleted. If 'true', the timeline has already been deleted.
-    pub delete_progress: Arc<tokio::sync::Mutex<DeleteTimelineFlow>>,
+    pub delete_progress: TimelineDeleteProgress,
 
     eviction_task_timeline_state: tokio::sync::Mutex<EvictionTaskTimelineState>,
 
@@ -424,7 +427,12 @@ pub struct Timeline {
     pub(crate) handles: handle::PerTimelineState<crate::page_service::TenantManagerTypes>,
 
     pub(crate) attach_wal_lag_cooldown: Arc<OnceLock<WalLagCooldown>>,
+
+    /// Cf. [`crate::tenant::CreateTimelineIdempotency`].
+    pub(crate) create_idempotency: crate::tenant::CreateTimelineIdempotency,
 }
+
+pub type TimelineDeleteProgress = Arc<tokio::sync::Mutex<DeleteTimelineFlow>>;
 
 pub struct WalReceiverInfo {
     pub wal_source_connconf: PgConnectionConfig,
@@ -2134,6 +2142,7 @@ impl Timeline {
         pg_version: u32,
         state: TimelineState,
         attach_wal_lag_cooldown: Arc<OnceLock<WalLagCooldown>>,
+        create_idempotency: crate::tenant::CreateTimelineIdempotency,
         cancel: CancellationToken,
     ) -> Arc<Self> {
         let disk_consistent_lsn = metadata.disk_consistent_lsn();
@@ -2250,7 +2259,7 @@ impl Timeline {
                 eviction_task_timeline_state: tokio::sync::Mutex::new(
                     EvictionTaskTimelineState::default(),
                 ),
-                delete_progress: Arc::new(tokio::sync::Mutex::new(DeleteTimelineFlow::default())),
+                delete_progress: TimelineDeleteProgress::default(),
 
                 cancel,
                 gate: Gate::default(),
@@ -2272,6 +2281,8 @@ impl Timeline {
                 handles: Default::default(),
 
                 attach_wal_lag_cooldown,
+
+                create_idempotency,
             };
 
             result.repartition_threshold =
@@ -2402,7 +2413,7 @@ impl Timeline {
     pub(super) async fn load_layer_map(
         &self,
         disk_consistent_lsn: Lsn,
-        index_part: Option<IndexPart>,
+        index_part: IndexPart,
     ) -> anyhow::Result<()> {
         use init::{Decision::*, Discovered, DismissedLayer};
         use LayerName::*;
@@ -2466,8 +2477,7 @@ impl Timeline {
                     );
                 }
 
-                let decided =
-                    init::reconcile(discovered_layers, index_part.as_ref(), disk_consistent_lsn);
+                let decided = init::reconcile(discovered_layers, &index_part, disk_consistent_lsn);
 
                 let mut loaded_layers = Vec::new();
                 let mut needs_cleanup = Vec::new();
@@ -4080,6 +4090,7 @@ impl Timeline {
     ) -> Result<ImageLayerCreationOutcome, CreateImageLayersError> {
         // Metadata keys image layer creation.
         let mut reconstruct_state = ValuesReconstructState::default();
+        let begin = Instant::now();
         let data = self
             .get_vectored_impl(partition.clone(), lsn, &mut reconstruct_state, ctx)
             .await?;
@@ -4096,14 +4107,11 @@ impl Timeline {
             (new_data, total_kb_retrieved / 1024, total_keys_retrieved)
         };
         let delta_files_accessed = reconstruct_state.get_delta_layers_visited();
+        let elapsed = begin.elapsed();
 
         let trigger_generation = delta_files_accessed as usize >= MAX_AUX_FILE_V2_DELTAS;
-        debug!(
-            trigger_generation,
-            delta_files_accessed,
-            total_kb_retrieved,
-            total_keys_retrieved,
-            "generate metadata images"
+        info!(
+            "metadata key compaction: trigger_generation={trigger_generation}, delta_files_accessed={delta_files_accessed}, total_kb_retrieved={total_kb_retrieved}, total_keys_retrieved={total_keys_retrieved}, read_time={}s", elapsed.as_secs_f64()
         );
 
         if !trigger_generation && mode == ImageLayerCreationMode::Try {
@@ -4467,9 +4475,21 @@ impl Drop for Timeline {
 pub(crate) enum CompactionError {
     #[error("The timeline or pageserver is shutting down")]
     ShuttingDown,
+    /// Compaction tried to offload a timeline and failed
+    #[error("Failed to offload timeline: {0}")]
+    Offload(OffloadError),
     /// Compaction cannot be done right now; page reconstruction and so on.
     #[error(transparent)]
     Other(anyhow::Error),
+}
+
+impl From<OffloadError> for CompactionError {
+    fn from(e: OffloadError) -> Self {
+        match e {
+            OffloadError::Cancelled => Self::ShuttingDown,
+            _ => Self::Offload(e),
+        }
+    }
 }
 
 impl CompactionError {
@@ -5715,23 +5735,22 @@ impl<'a> TimelineWriter<'a> {
     /// Put a batch of keys at the specified Lsns.
     pub(crate) async fn put_batch(
         &mut self,
-        batch: Vec<(CompactKey, Lsn, usize, Value)>,
+        batch: SerializedValueBatch,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         if batch.is_empty() {
             return Ok(());
         }
 
-        let serialized_batch = inmemory_layer::SerializedBatch::from_values(batch)?;
-        let batch_max_lsn = serialized_batch.max_lsn;
-        let buf_size: u64 = serialized_batch.raw.len() as u64;
+        let batch_max_lsn = batch.max_lsn;
+        let buf_size: u64 = batch.buffer_size() as u64;
 
         let action = self.get_open_layer_action(batch_max_lsn, buf_size);
         let layer = self
             .handle_open_layer_action(batch_max_lsn, action, ctx)
             .await?;
 
-        let res = layer.put_batch(serialized_batch, ctx).await;
+        let res = layer.put_batch(batch, ctx).await;
 
         if res.is_ok() {
             // Update the current size only when the entire write was ok.
@@ -5766,11 +5785,14 @@ impl<'a> TimelineWriter<'a> {
             );
         }
         let val_ser_size = value.serialized_size().unwrap() as usize;
-        self.put_batch(
-            vec![(key.to_compact(), lsn, val_ser_size, value.clone())],
-            ctx,
-        )
-        .await
+        let batch = SerializedValueBatch::from_values(vec![(
+            key.to_compact(),
+            lsn,
+            val_ser_size,
+            value.clone(),
+        )]);
+
+        self.put_batch(batch, ctx).await
     }
 
     pub(crate) async fn delete_batch(
@@ -5815,17 +5837,15 @@ fn is_send() {
 #[cfg(test)]
 mod tests {
     use pageserver_api::key::Key;
+    use pageserver_api::value::Value;
     use utils::{id::TimelineId, lsn::Lsn};
 
-    use crate::{
-        repository::Value,
-        tenant::{
-            harness::{test_img, TenantHarness},
-            layer_map::LayerMap,
-            storage_layer::{Layer, LayerName},
-            timeline::{DeltaLayerTestDesc, EvictionError},
-            Timeline,
-        },
+    use crate::tenant::{
+        harness::{test_img, TenantHarness},
+        layer_map::LayerMap,
+        storage_layer::{Layer, LayerName},
+        timeline::{DeltaLayerTestDesc, EvictionError},
+        Timeline,
     };
 
     #[tokio::test]

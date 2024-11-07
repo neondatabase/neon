@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub use console_redirect::ConsoleRedirectBackend;
-pub(crate) use console_redirect::WebAuthError;
+pub(crate) use console_redirect::ConsoleRedirectError;
 use ipnet::{Ipv4Net, Ipv6Net};
 use local::LocalBackend;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -21,18 +21,19 @@ use crate::auth::{self, validate_password_and_exchange, AuthError, ComputeUserIn
 use crate::cache::Cached;
 use crate::config::AuthenticationConfig;
 use crate::context::RequestMonitoring;
+use crate::control_plane::client::ControlPlaneClient;
 use crate::control_plane::errors::GetAuthInfoError;
-use crate::control_plane::provider::{
-    CachedAllowedIps, CachedNodeInfo, CachedRoleSecret, ControlPlaneBackend,
+use crate::control_plane::{
+    self, AuthSecret, CachedAllowedIps, CachedNodeInfo, CachedRoleSecret, ControlPlaneApi,
 };
-use crate::control_plane::{self, Api, AuthSecret};
 use crate::intern::EndpointIdInt;
 use crate::metrics::Metrics;
 use crate::proxy::connect_compute::ComputeConnectBackend;
 use crate::proxy::NeonOptions;
 use crate::rate_limiter::{BucketRateLimiter, EndpointRateLimiter, RateBucketInfo};
 use crate::stream::Stream;
-use crate::{scram, stream, EndpointCacheKey, EndpointId, RoleName};
+use crate::types::{EndpointCacheKey, EndpointId, RoleName};
+use crate::{scram, stream};
 
 /// Alternative to [`std::borrow::Cow`] but doesn't need `T: ToOwned` as we don't need that functionality
 pub enum MaybeOwned<'a, T> {
@@ -61,42 +62,26 @@ impl<T> std::ops::Deref for MaybeOwned<'_, T> {
 ///   backends which require them for the authentication process.
 pub enum Backend<'a, T> {
     /// Cloud API (V2).
-    ControlPlane(MaybeOwned<'a, ControlPlaneBackend>, T),
+    ControlPlane(MaybeOwned<'a, ControlPlaneClient>, T),
     /// Local proxy uses configured auth credentials and does not wake compute
     Local(MaybeOwned<'a, LocalBackend>),
-}
-
-#[cfg(test)]
-pub(crate) trait TestBackend: Send + Sync + 'static {
-    fn wake_compute(&self) -> Result<CachedNodeInfo, control_plane::errors::WakeComputeError>;
-    fn get_allowed_ips_and_secret(
-        &self,
-    ) -> Result<(CachedAllowedIps, Option<CachedRoleSecret>), control_plane::errors::GetAuthInfoError>;
-    fn dyn_clone(&self) -> Box<dyn TestBackend>;
-}
-
-#[cfg(test)]
-impl Clone for Box<dyn TestBackend> {
-    fn clone(&self) -> Self {
-        TestBackend::dyn_clone(&**self)
-    }
 }
 
 impl std::fmt::Display for Backend<'_, ()> {
     fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::ControlPlane(api, ()) => match &**api {
-                ControlPlaneBackend::Management(endpoint) => fmt
-                    .debug_tuple("ControlPlane::Management")
+                ControlPlaneClient::Neon(endpoint) => fmt
+                    .debug_tuple("ControlPlane::Neon")
                     .field(&endpoint.url())
                     .finish(),
                 #[cfg(any(test, feature = "testing"))]
-                ControlPlaneBackend::PostgresMock(endpoint) => fmt
+                ControlPlaneClient::PostgresMock(endpoint) => fmt
                     .debug_tuple("ControlPlane::PostgresMock")
                     .field(&endpoint.url())
                     .finish(),
                 #[cfg(test)]
-                ControlPlaneBackend::Test(_) => fmt.debug_tuple("ControlPlane::Test").finish(),
+                ControlPlaneClient::Test(_) => fmt.debug_tuple("ControlPlane::Test").finish(),
             },
             Self::Local(_) => fmt.debug_tuple("Local").finish(),
         }
@@ -281,7 +266,7 @@ impl AuthenticationConfig {
 /// All authentication flows will emit an AuthenticationOk message if successful.
 async fn auth_quirks(
     ctx: &RequestMonitoring,
-    api: &impl control_plane::Api,
+    api: &impl control_plane::ControlPlaneApi,
     user_info: ComputeUserInfoMaybeEndpoint,
     client: &mut stream::PqStream<Stream<impl AsyncRead + AsyncWrite + Unpin>>,
     allow_cleartext: bool,
@@ -348,7 +333,7 @@ async fn auth_quirks(
     {
         Ok(keys) => Ok(keys),
         Err(e) => {
-            if e.is_auth_failed() {
+            if e.is_password_failed() {
                 // The password could have been changed, so we invalidate the cache.
                 cached_entry.invalidate();
             }
@@ -375,7 +360,7 @@ async fn authenticate_with_secret(
             crate::sasl::Outcome::Success(key) => key,
             crate::sasl::Outcome::Failure(reason) => {
                 info!("auth backend failed with an error: {reason}");
-                return Err(auth::AuthError::auth_failed(&*info.user));
+                return Err(auth::AuthError::password_failed(&*info.user));
             }
         };
 
@@ -498,12 +483,12 @@ mod tests {
     use std::time::Duration;
 
     use bytes::BytesMut;
+    use control_plane::AuthSecret;
     use fallible_iterator::FallibleIterator;
     use once_cell::sync::Lazy;
     use postgres_protocol::authentication::sasl::{ChannelBinding, ScramSha256};
     use postgres_protocol::message::backend::Message as PgMessage;
     use postgres_protocol::message::frontend;
-    use provider::AuthSecret;
     use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
     use super::jwt::JwkCache;
@@ -512,8 +497,7 @@ mod tests {
     use crate::auth::{ComputeUserInfoMaybeEndpoint, IpPattern};
     use crate::config::AuthenticationConfig;
     use crate::context::RequestMonitoring;
-    use crate::control_plane::provider::{self, CachedAllowedIps, CachedRoleSecret};
-    use crate::control_plane::{self, CachedNodeInfo};
+    use crate::control_plane::{self, CachedAllowedIps, CachedNodeInfo, CachedRoleSecret};
     use crate::proxy::NeonOptions;
     use crate::rate_limiter::{EndpointRateLimiter, RateBucketInfo};
     use crate::scram::threadpool::ThreadPool;
@@ -525,7 +509,7 @@ mod tests {
         secret: AuthSecret,
     }
 
-    impl control_plane::Api for Auth {
+    impl control_plane::ControlPlaneApi for Auth {
         async fn get_role_secret(
             &self,
             _ctx: &RequestMonitoring,
@@ -551,7 +535,7 @@ mod tests {
         async fn get_endpoint_jwks(
             &self,
             _ctx: &RequestMonitoring,
-            _endpoint: crate::EndpointId,
+            _endpoint: crate::types::EndpointId,
         ) -> Result<Vec<super::jwt::AuthRule>, control_plane::errors::GetEndpointJwksError>
         {
             unimplemented!()
@@ -576,7 +560,7 @@ mod tests {
         ip_allowlist_check_enabled: true,
         is_auth_broker: false,
         accept_jwts: false,
-        webauth_confirmation_timeout: std::time::Duration::from_secs(5),
+        console_redirect_confirmation_timeout: std::time::Duration::from_secs(5),
     });
 
     async fn read_message(r: &mut (impl AsyncRead + Unpin), b: &mut BytesMut) -> PgMessage {

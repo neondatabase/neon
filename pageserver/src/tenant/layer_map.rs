@@ -48,9 +48,9 @@ mod layer_coverage;
 
 use crate::context::RequestContext;
 use crate::keyspace::KeyPartitioning;
-use crate::repository::Key;
 use crate::tenant::storage_layer::InMemoryLayer;
 use anyhow::Result;
+use pageserver_api::key::Key;
 use pageserver_api::keyspace::{KeySpace, KeySpaceAccum};
 use range_set_blaze::{CheckSortedDisjoint, RangeSetBlaze};
 use std::collections::{HashMap, VecDeque};
