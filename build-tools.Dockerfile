@@ -40,7 +40,7 @@ RUN if [ "${DEBIAN_VERSION}" = "bookworm" ]; then \
     else \
         # copy command below will faile if we don't have dummy files, so we create them for other debian versions
         mkdir -p /usr/lib/postgresql/16/bin && touch /usr/lib/postgresql/16/bin/pgcopydb && \
-        touch  /lib/aarch64-linux-gnu/libpq.so.5; \
+        mkdir -p /lib/aarch64-linux-gnu && touch  /lib/aarch64-linux-gnu/libpq.so.5; \
     fi
 
 FROM debian:${DEBIAN_VERSION}-slim AS build_tools
