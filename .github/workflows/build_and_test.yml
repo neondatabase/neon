@@ -1092,7 +1092,6 @@ jobs:
           elif [[ "$GITHUB_REF_NAME" == "release" ]]; then
             gh workflow --repo neondatabase/infra run deploy-dev.yml --ref main \
               -f deployPgSniRouter=false \
-              -f deployCompute=false \
               -f deployProxy=false \
               -f deployStorage=true \
               -f deployStorageBroker=true \
@@ -1110,7 +1109,6 @@ jobs:
           elif [[ "$GITHUB_REF_NAME" == "release-proxy" ]]; then
             gh workflow --repo neondatabase/infra run deploy-dev.yml --ref main \
               -f deployPgSniRouter=true \
-              -f deployCompute=false \
               -f deployProxy=true \
               -f deployStorage=false \
               -f deployStorageBroker=false \
@@ -1128,21 +1126,7 @@ jobs:
               -f branch=main \
               -f dockerTag=${{needs.tag.outputs.build-tag}}
           elif [[ "$GITHUB_REF_NAME" == "amasterov/release-compute" ]]; then
-            gh workflow --repo neondatabase/infra run deploy-dev.yml --ref main \
-              -f deployPgSniRouter=false \
-              -f deployCompute=true \
-              -f deployProxy=false \
-              -f deployStorage=false \
-              -f deployStorageBroker=false \
-              -f deployStorageController=false \
-              -f branch=main \
-              -f dockerTag=${{needs.tag.outputs.build-tag}} \
-              -f deployPreprodRegion=true
-
-            gh workflow --repo neondatabase/infra run deploy-compute-prod.yml --ref main \
-              -f deployCompute=true \
-              -f branch=main \
-              -f dockerTag=${{needs.tag.outputs.build-tag}}
+            echo Start here a workflow for the deployment of the compute release
           else
             echo "GITHUB_REF_NAME (value '$GITHUB_REF_NAME') is not set to either 'main' or 'release'"
             exit 1
