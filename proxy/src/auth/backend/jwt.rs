@@ -9,6 +9,7 @@ use jose_jwk::crypto::KeyInfo;
 use reqwest::{redirect, Client};
 use serde::de::Visitor;
 use serde::{Deserialize, Deserializer};
+use serde_json::value::RawValue;
 use signature::Verifier;
 use thiserror::Error;
 use tokio::time::Instant;
@@ -16,7 +17,7 @@ use tokio::time::Instant;
 use crate::auth::backend::ComputeCredentialKeys;
 use crate::context::RequestMonitoring;
 use crate::control_plane::errors::GetEndpointJwksError;
-use crate::http::parse_json_body_with_limit;
+use crate::http::read_body_with_limit;
 use crate::intern::RoleNameInt;
 use crate::types::{EndpointId, RoleName};
 
@@ -117,6 +118,14 @@ impl Default for JwkCacheEntryLock {
     }
 }
 
+#[derive(Deserialize)]
+struct JwkSet<'a> {
+    /// we parse into raw-value because not all keys in a JWKS are ones
+    /// we can parse directly, so we parse them lazily.
+    #[serde(borrow)]
+    keys: Vec<&'a RawValue>,
+}
+
 impl JwkCacheEntryLock {
     async fn acquire_permit<'a>(self: &'a Arc<Self>) -> JwkRenewalPermit<'a> {
         JwkRenewalPermit::acquire_permit(self).await
@@ -160,16 +169,39 @@ impl JwkCacheEntryLock {
                 Err(e) => tracing::warn!(url=?rule.jwks_url, error=?e, "could not fetch JWKs"),
                 Ok(r) => {
                     let resp: http::Response<reqwest::Body> = r.into();
-                    match parse_json_body_with_limit::<jose_jwk::JwkSet>(
-                        resp.into_body(),
-                        MAX_JWK_BODY_SIZE,
-                    )
-                    .await
+
+                    let bytes = match read_body_with_limit(resp.into_body(), MAX_JWK_BODY_SIZE)
+                        .await
                     {
+                        Ok(bytes) => bytes,
+                        Err(e) => {
+                            tracing::warn!(url=?rule.jwks_url, error=?e, "could not decode JWKs");
+                            continue;
+                        }
+                    };
+
+                    match serde_json::from_slice::<JwkSet>(&bytes) {
                         Err(e) => {
                             tracing::warn!(url=?rule.jwks_url, error=?e, "could not decode JWKs");
                         }
                         Ok(jwks) => {
+                            let mut keys = vec![];
+                            let mut failed = 0;
+                            for key in jwks.keys {
+                                match serde_json::from_str(key.get()) {
+                                    Ok(key) => keys.push(key),
+                                    Err(e) => {
+                                        tracing::debug!(url=?rule.jwks_url, failed=?e, "could not decode JWK");
+                                        failed += 1;
+                                    }
+                                }
+                            }
+
+                            if failed > 0 {
+                                tracing::warn!(url=?rule.jwks_url, failed, "could not decode JWKs");
+                            }
+
+                            let jwks = jose_jwk::JwkSet { keys };
                             key_sets.insert(
                                 rule.id,
                                 KeySet {
@@ -179,7 +211,7 @@ impl JwkCacheEntryLock {
                                 },
                             );
                         }
-                    }
+                    };
                 }
             }
         }
@@ -1208,5 +1240,64 @@ X0n5X2/pBLJzxZc62ccvZYVnctBiFs6HbSnxpuMQCfkt/BcR/ttIepBQQIW86wHL
                 }
             }
         }
+    }
+
+    #[tokio::test]
+    async fn check_jwk_keycloak_regression() {
+        let (rs, valid_jwk) = new_rsa_jwk(RS1, "rs1".into());
+        let valid_jwk = serde_json::to_value(valid_jwk).unwrap();
+
+        // This is valid, but we cannot parse it as we have no support for encryption JWKs, only signature based ones.
+        // This is taken directly from keycloak.
+        let invalid_jwk = serde_json::json! {
+            {
+                "kid": "U-Jc9xRli84eNqRpYQoIPF-GNuRWV3ZvAIhziRW2sbQ",
+                "kty": "RSA",
+                "alg": "RSA-OAEP",
+                "use": "enc",
+                "n": "yypYWsEKmM_wWdcPnSGLSm5ytw1WG7P7EVkKSulcDRlrM6HWj3PR68YS8LySYM2D9Z-79oAdZGKhIfzutqL8rK1vS14zDuPpAM-RWY3JuQfm1O_-1DZM8-07PmVRegP5KPxsKblLf_My8ByH6sUOIa1p2rbe2q_b0dSTXYu1t0dW-cGL5VShc400YymvTwpc-5uYNsaVxZajnB7JP1OunOiuCJ48AuVp3PqsLzgoXqlXEB1ZZdch3xT3bxaTtNruGvG4xmLZY68O_T3yrwTCNH2h_jFdGPyXdyZToCMSMK2qSbytlfwfN55pT9Vv42Lz1YmoB7XRjI9aExKPc5AxFw",
+                "e": "AQAB",
+                "x5c": [
+                    "MIICmzCCAYMCBgGS41E6azANBgkqhkiG9w0BAQsFADARMQ8wDQYDVQQDDAZtYXN0ZXIwHhcNMjQxMDMxMTYwMTQ0WhcNMzQxMDMxMTYwMzI0WjARMQ8wDQYDVQQDDAZtYXN0ZXIwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQDLKlhawQqYz/BZ1w+dIYtKbnK3DVYbs/sRWQpK6VwNGWszodaPc9HrxhLwvJJgzYP1n7v2gB1kYqEh/O62ovysrW9LXjMO4+kAz5FZjcm5B+bU7/7UNkzz7Ts+ZVF6A/ko/GwpuUt/8zLwHIfqxQ4hrWnatt7ar9vR1JNdi7W3R1b5wYvlVKFzjTRjKa9PClz7m5g2xpXFlqOcHsk/U66c6K4InjwC5Wnc+qwvOCheqVcQHVll1yHfFPdvFpO02u4a8bjGYtljrw79PfKvBMI0faH+MV0Y/Jd3JlOgIxIwrapJvK2V/B83nmlP1W/jYvPViagHtdGMj1oTEo9zkDEXAgMBAAEwDQYJKoZIhvcNAQELBQADggEBAECYX59+Q9v6c9sb6Q0/C6IgLWG2nVCgVE1YWwIzz+68WrhlmNCRuPjY94roB+tc2tdHbj+Nh3LMzJk7L1KCQoW1+LPK6A6E8W9ad0YPcuw8csV2pUA3+H56exQMH0fUAPQAU7tXWvnQ7otcpV1XA8afn/NTMTsnxi9mSkor8MLMYQ3aeRyh1+LAchHBthWiltqsSUqXrbJF59u5p0ghquuKcWR3TXsA7klGYBgGU5KAJifr9XT87rN0bOkGvbeWAgKvnQnjZwxdnLqTfp/pRY/PiJJHhgIBYPIA7STGnMPjmJ995i34zhnbnd8WHXJA3LxrIMqLW/l8eIdvtM1w8KI="
+                ],
+                "x5t": "QhfzMMnuAfkReTgZ1HtrfyOeeZs",
+                "x5t#S256": "cmHDUdKgLiRCEN28D5FBy9IJLFmR7QWfm77SLhGTCTU"
+            }
+        };
+
+        let jwks = serde_json::json! {{ "keys": [invalid_jwk, valid_jwk ] }};
+        let jwks_addr = jwks_server(move |path| match path {
+            "/" => Some(serde_json::to_vec(&jwks).unwrap()),
+            _ => None,
+        })
+        .await;
+
+        let role_name = RoleName::from("anonymous");
+        let role = RoleNameInt::from(&role_name);
+
+        let rules = vec![AuthRule {
+            id: "foo".to_owned(),
+            jwks_url: format!("http://{jwks_addr}/").parse().unwrap(),
+            audience: None,
+            role_names: vec![role],
+        }];
+
+        let fetch = Fetch(rules);
+        let jwk_cache = JwkCache::default();
+
+        let endpoint = EndpointId::from("ep");
+
+        let token = new_rsa_jwt("rs1".into(), rs);
+
+        jwk_cache
+            .check_jwt(
+                &RequestMonitoring::test(),
+                endpoint.clone(),
+                &role_name,
+                &fetch,
+                &token,
+            )
+            .await
+            .unwrap();
     }
 }

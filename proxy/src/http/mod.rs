@@ -17,6 +17,7 @@ pub(crate) use reqwest_middleware::{ClientWithMiddleware, Error};
 pub(crate) use reqwest_retry::policies::ExponentialBackoff;
 pub(crate) use reqwest_retry::RetryTransientMiddleware;
 use serde::de::DeserializeOwned;
+use thiserror::Error;
 
 use crate::metrics::{ConsoleRequest, Metrics};
 use crate::url::ApiUrl;
@@ -122,10 +123,25 @@ impl Endpoint {
     }
 }
 
-pub(crate) async fn parse_json_body_with_limit<D: DeserializeOwned>(
+#[derive(Error, Debug)]
+#[error("Content length exceeds limit of {limit} bytes")]
+pub(crate) struct BodyLengthError {
+    limit: usize,
+}
+
+#[derive(Error, Debug)]
+pub(crate) enum ReadBodyError {
+    #[error("Content length exceeds limit of {limit} bytes")]
+    BodyTooLarge { limit: usize },
+
+    #[error(transparent)]
+    Read(#[from] reqwest::Error),
+}
+
+pub(crate) async fn read_body_with_limit(
     mut b: impl Body<Data = Bytes, Error = reqwest::Error> + Unpin,
     limit: usize,
-) -> anyhow::Result<D> {
+) -> Result<Vec<u8>, ReadBodyError> {
     // We could use `b.limited().collect().await.to_bytes()` here
     // but this ends up being slightly more efficient as far as I can tell.
 
@@ -133,20 +149,20 @@ pub(crate) async fn parse_json_body_with_limit<D: DeserializeOwned>(
     // in reqwest, this value is influenced by the Content-Length header.
     let lower_bound = match usize::try_from(b.size_hint().lower()) {
         Ok(bound) if bound <= limit => bound,
-        _ => bail!("Content length exceeds limit of {limit} bytes"),
+        _ => return Err(ReadBodyError::BodyTooLarge { limit }),
     };
     let mut bytes = Vec::with_capacity(lower_bound);
 
     while let Some(frame) = b.frame().await.transpose()? {
         if let Ok(data) = frame.into_data() {
             if bytes.len() + data.len() > limit {
-                bail!("Content length exceeds limit of {limit} bytes")
+                return Err(ReadBodyError::BodyTooLarge { limit });
             }
             bytes.extend_from_slice(&data);
         }
     }
 
-    Ok(serde_json::from_slice::<D>(&bytes)?)
+    Ok(bytes)
 }
 
 #[cfg(test)]
