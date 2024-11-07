@@ -401,6 +401,7 @@ impl Default for JwkCache {
         let client = Client::builder()
             .user_agent(JWKS_USER_AGENT)
             .redirect(redirect::Policy::none())
+            .tls_built_in_native_certs(true)
             .build()
             .expect("using &str and standard redirect::Policy");
         JwkCache {
