@@ -7,6 +7,8 @@ use arc_swap::ArcSwapOption;
 use dashmap::DashMap;
 use jose_jwk::crypto::KeyInfo;
 use reqwest::{redirect, Client};
+use reqwest_retry::policies::ExponentialBackoff;
+use reqwest_retry::RetryTransientMiddleware;
 use serde::de::Visitor;
 use serde::{Deserialize, Deserializer};
 use serde_json::value::RawValue;
@@ -28,6 +30,10 @@ const AUTO_RENEW: Duration = Duration::from_secs(300);
 const MAX_RENEW: Duration = Duration::from_secs(3600);
 const MAX_JWK_BODY_SIZE: usize = 64 * 1024;
 const JWKS_USER_AGENT: &str = "neon-proxy";
+
+const JWKS_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+const JWKS_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
+const JWKS_FETCH_RETRIES: u32 = 3;
 
 /// How to get the JWT auth rules
 pub(crate) trait FetchAuthRules: Clone + Send + Sync + 'static {
@@ -56,7 +62,7 @@ pub(crate) struct AuthRule {
 }
 
 pub struct JwkCache {
-    client: reqwest::Client,
+    client: reqwest_middleware::ClientWithMiddleware,
 
     map: DashMap<(EndpointId, RoleName), Arc<JwkCacheEntryLock>>,
 }
@@ -139,7 +145,7 @@ impl JwkCacheEntryLock {
         &self,
         _permit: JwkRenewalPermit<'_>,
         ctx: &RequestMonitoring,
-        client: &reqwest::Client,
+        client: &reqwest_middleware::ClientWithMiddleware,
         endpoint: EndpointId,
         auth_rules: &F,
     ) -> Result<Arc<JwkCacheEntry>, JwtError> {
@@ -163,7 +169,10 @@ impl JwkCacheEntryLock {
             let req = client.get(rule.jwks_url.clone());
             // TODO(conrad): eventually switch to using reqwest_middleware/`new_client_with_timeout`.
             // TODO(conrad): We need to filter out URLs that point to local resources. Public internet only.
-            match req.send().await.and_then(|r| r.error_for_status()) {
+            match req.send().await.and_then(|r| {
+                r.error_for_status()
+                    .map_err(reqwest_middleware::Error::Reqwest)
+            }) {
                 // todo: should we re-insert JWKs if we want to keep this JWKs URL?
                 // I expect these failures would be quite sparse.
                 Err(e) => tracing::warn!(url=?rule.jwks_url, error=?e, "could not fetch JWKs"),
@@ -228,7 +237,7 @@ impl JwkCacheEntryLock {
     async fn get_or_update_jwk_cache<F: FetchAuthRules>(
         self: &Arc<Self>,
         ctx: &RequestMonitoring,
-        client: &reqwest::Client,
+        client: &reqwest_middleware::ClientWithMiddleware,
         endpoint: EndpointId,
         fetch: &F,
     ) -> Result<Arc<JwkCacheEntry>, JwtError> {
@@ -282,7 +291,7 @@ impl JwkCacheEntryLock {
         self: &Arc<Self>,
         ctx: &RequestMonitoring,
         jwt: &str,
-        client: &reqwest::Client,
+        client: &reqwest_middleware::ClientWithMiddleware,
         endpoint: EndpointId,
         role_name: &RoleName,
         fetch: &F,
@@ -402,8 +411,18 @@ impl Default for JwkCache {
             .user_agent(JWKS_USER_AGENT)
             .redirect(redirect::Policy::none())
             .tls_built_in_native_certs(true)
+            .connect_timeout(JWKS_CONNECT_TIMEOUT)
+            .timeout(JWKS_FETCH_TIMEOUT)
             .build()
-            .expect("using &str and standard redirect::Policy");
+            .expect("client config should be valid");
+
+        // Retry up to 3 times with increasing intervals between attempts.
+        let retry_policy = ExponentialBackoff::builder().build_with_max_retries(JWKS_FETCH_RETRIES);
+
+        let client = reqwest_middleware::ClientBuilder::new(client)
+            .with(RetryTransientMiddleware::new_with_policy(retry_policy))
+            .build();
+
         JwkCache {
             client,
             map: DashMap::default(),

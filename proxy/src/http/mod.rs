@@ -124,12 +124,6 @@ impl Endpoint {
 }
 
 #[derive(Error, Debug)]
-#[error("Content length exceeds limit of {limit} bytes")]
-pub(crate) struct BodyLengthError {
-    limit: usize,
-}
-
-#[derive(Error, Debug)]
 pub(crate) enum ReadBodyError {
     #[error("Content length exceeds limit of {limit} bytes")]
     BodyTooLarge { limit: usize },
