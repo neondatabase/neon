@@ -1745,6 +1745,12 @@ impl Timeline {
                     warn!("failed to freeze and flush: {e:#}");
                 }
             }
+
+            // `self.remote_client.shutdown().await` above should have already flushed everything from the queue, but
+            // we also do a final check here to ensure that the queue is empty.
+            if !self.remote_client.no_pending_work() {
+                warn!("still have pending work in remote upload queue, but continuing shutting down anyways");
+            }
         }
 
         // Signal any subscribers to our cancellation token to drop out
