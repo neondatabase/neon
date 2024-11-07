@@ -310,6 +310,7 @@ pub struct TenantConfig {
     pub image_layer_creation_check_threshold: Option<u8>,
     pub lsn_lease_length: Option<String>,
     pub lsn_lease_length_for_ts: Option<String>,
+    pub timeline_offloading: Option<bool>,
 }
 
 /// The policy for the aux file storage.

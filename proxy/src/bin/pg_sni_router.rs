@@ -13,6 +13,7 @@ use itertools::Itertools;
 use proxy::config::TlsServerEndPoint;
 use proxy::context::RequestMonitoring;
 use proxy::metrics::{Metrics, ThreadPoolMetrics};
+use proxy::protocol2::ConnectionInfo;
 use proxy::proxy::{copy_bidirectional_client_compute, run_until_cancelled, ErrorSource};
 use proxy::stream::{PqStream, Stream};
 use rustls::crypto::ring;
@@ -178,7 +179,10 @@ async fn task_main(
                 info!(%peer_addr, "serving");
                 let ctx = RequestMonitoring::new(
                     session_id,
-                    peer_addr.ip(),
+                    ConnectionInfo {
+                        addr: peer_addr,
+                        extra: None,
+                    },
                     proxy::metrics::Protocol::SniRouter,
                     "sni",
                 );

@@ -4341,6 +4341,8 @@ dependencies = [
  "smallvec",
  "smol_str",
  "socket2",
+ "strum",
+ "strum_macros",
  "subtle",
  "thiserror",
  "tikv-jemalloc-ctl",
@@ -4363,6 +4365,7 @@ dependencies = [
  "walkdir",
  "workspace_hack",
  "x509-parser",
+ "zerocopy",
 ]
 
 [[package]]
@@ -5143,6 +5146,7 @@ dependencies = [
  "chrono",
  "clap",
  "crc32c",
+ "criterion",
  "desim",
  "fail",
  "futures",
@@ -5150,6 +5154,7 @@ dependencies = [
  "http 1.1.0",
  "humantime",
  "hyper 0.14.30",
+ "itertools 0.10.5",
  "metrics",
  "once_cell",
  "parking_lot 0.12.1",
@@ -7372,6 +7377,7 @@ dependencies = [
  "tracing",
  "tracing-core",
  "url",
+ "zerocopy",
  "zeroize",
  "zstd",
  "zstd-safe",
@@ -7444,6 +7450,7 @@ version = "0.7.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c4061bedbb353041c12f413700357bec76df2c7e2ca8e4df8bac24c6bf68e3d"
 dependencies = [
+ "byteorder",
  "zerocopy-derive",
 ]
 

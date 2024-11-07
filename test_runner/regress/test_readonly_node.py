@@ -1,19 +1,22 @@
 from __future__ import annotations
 
 import time
+from typing import Union
 
 import pytest
-from fixtures.common_types import Lsn
+from fixtures.common_types import Lsn, TenantId, TenantShardId, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     Endpoint,
+    LogCursor,
     NeonEnv,
     NeonEnvBuilder,
     last_flush_lsn_upload,
     tenant_get_shards,
 )
+from fixtures.pageserver.http import PageserverHttpClient
 from fixtures.pageserver.utils import wait_for_last_record_lsn
-from fixtures.utils import query_scalar
+from fixtures.utils import query_scalar, wait_until
 
 
 #
@@ -169,23 +172,63 @@ def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
             )
         return last_flush_lsn
 
-    def trigger_gc_and_select(env: NeonEnv, ep_static: Endpoint, ctx: str):
+    def get_layers_protected_by_lease(
+        ps_http: PageserverHttpClient,
+        tenant_id: Union[TenantId, TenantShardId],
+        timeline_id: TimelineId,
+        lease_lsn: Lsn,
+    ) -> set[str]:
+        """Get all layers whose start_lsn is less than or equal to the lease lsn."""
+        layer_map_info = ps_http.layer_map_info(tenant_id, timeline_id)
+        return set(
+            x.layer_file_name
+            for x in layer_map_info.historic_layers
+            if Lsn(x.lsn_start) <= lease_lsn
+        )
+
+    def trigger_gc_and_select(
+        env: NeonEnv,
+        ep_static: Endpoint,
+        lease_lsn: Lsn,
+        ctx: str,
+        offset: None | LogCursor = None,
+    ) -> LogCursor:
         """
         Trigger GC manually on all pageservers. Then run an `SELECT` query.
         """
         for shard, ps in tenant_get_shards(env, env.initial_tenant):
             client = ps.http_client()
+            layers_guarded_before_gc = get_layers_protected_by_lease(
+                client, shard, env.initial_timeline, lease_lsn=lsn
+            )
             gc_result = client.timeline_gc(shard, env.initial_timeline, 0)
+            layers_guarded_after_gc = get_layers_protected_by_lease(
+                client, shard, env.initial_timeline, lease_lsn=lsn
+            )
+
             # Note: cannot assert on `layers_removed` here because it could be layers
-            # not guarded by the lease. Rely on successful execution of the query instead.
+            # not guarded by the lease. Instead, use layer map dump.
+            assert layers_guarded_before_gc.issubset(
+                layers_guarded_after_gc
+            ), "Layers guarded by lease before GC should not be removed"
+
             log.info(f"{gc_result=}")
 
+        # wait for lease renewal before running query.
+        _, offset = wait_until(
+            20,
+            0.5,
+            lambda: ep_static.assert_log_contains(
+                "lsn_lease_bg_task.*Request succeeded", offset=offset
+            ),
+        )
         with ep_static.cursor() as cur:
             # Following query should succeed if pages are properly guarded by leases.
             cur.execute("SELECT count(*) FROM t0")
             assert cur.fetchone() == (ROW_COUNT,)
 
         log.info(f"`SELECT` query succeed after GC, {ctx=}")
+        return offset
 
     # Insert some records on main branch
     with env.endpoints.create_start("main") as ep_main:
@@ -213,7 +256,9 @@ def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
 
             generate_updates_on_main(env, ep_main, 3, end=100)
 
-            trigger_gc_and_select(env, ep_static, ctx="Before pageservers restart")
+            offset = trigger_gc_and_select(
+                env, ep_static, lease_lsn=lsn, ctx="Before pageservers restart"
+            )
 
             # Trigger Pageserver restarts
             for ps in env.pageservers:
@@ -222,7 +267,13 @@ def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
                 time.sleep(LSN_LEASE_LENGTH / 2)
                 ps.start()
 
-            trigger_gc_and_select(env, ep_static, ctx="After pageservers restart")
+            trigger_gc_and_select(
+                env,
+                ep_static,
+                lease_lsn=lsn,
+                ctx="After pageservers restart",
+                offset=offset,
+            )
 
             # Reconfigure pageservers
             env.pageservers[0].stop()
@@ -231,7 +282,13 @@ def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
             )
             env.storage_controller.reconcile_until_idle()
 
-            trigger_gc_and_select(env, ep_static, ctx="After putting pageserver 0 offline")
+            trigger_gc_and_select(
+                env,
+                ep_static,
+                lease_lsn=lsn,
+                ctx="After putting pageserver 0 offline",
+                offset=offset,
+            )
 
         # Do some update so we can increment latest_gc_cutoff
         generate_updates_on_main(env, ep_main, i, end=100)

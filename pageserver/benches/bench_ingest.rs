@@ -9,7 +9,6 @@ use pageserver::{
     l0_flush::{L0FlushConfig, L0FlushGlobalState},
     page_cache,
     task_mgr::TaskKind,
-    tenant::storage_layer::inmemory_layer::SerializedBatch,
     tenant::storage_layer::InMemoryLayer,
     virtual_file,
 };
@@ -18,6 +17,7 @@ use utils::{
     bin_ser::BeSer,
     id::{TenantId, TimelineId},
 };
+use wal_decoder::serialized_batch::SerializedValueBatch;
 
 // A very cheap hash for generating non-sequential keys.
 fn murmurhash32(mut h: u32) -> u32 {
@@ -102,13 +102,13 @@ async fn ingest(
         batch.push((key.to_compact(), lsn, data_ser_size, data.clone()));
         if batch.len() >= BATCH_SIZE {
             let this_batch = std::mem::take(&mut batch);
-            let serialized = SerializedBatch::from_values(this_batch).unwrap();
+            let serialized = SerializedValueBatch::from_values(this_batch);
             layer.put_batch(serialized, &ctx).await?;
         }
     }
     if !batch.is_empty() {
         let this_batch = std::mem::take(&mut batch);
-        let serialized = SerializedBatch::from_values(this_batch).unwrap();
+        let serialized = SerializedValueBatch::from_values(this_batch);
         layer.put_batch(serialized, &ctx).await?;
     }
     layer.freeze(lsn + 1).await;

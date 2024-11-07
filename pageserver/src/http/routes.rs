@@ -37,6 +37,7 @@ use pageserver_api::models::TenantShardLocation;
 use pageserver_api::models::TenantShardSplitRequest;
 use pageserver_api::models::TenantShardSplitResponse;
 use pageserver_api::models::TenantSorting;
+use pageserver_api::models::TenantState;
 use pageserver_api::models::TimelineArchivalConfigRequest;
 use pageserver_api::models::TimelineCreateRequestMode;
 use pageserver_api::models::TimelinesInfoAndOffloaded;
@@ -294,6 +295,9 @@ impl From<GetActiveTenantError> for ApiError {
         match e {
             GetActiveTenantError::Broken(reason) => {
                 ApiError::InternalServerError(anyhow!("tenant is broken: {}", reason))
+            }
+            GetActiveTenantError::WillNotBecomeActive(TenantState::Stopping { .. }) => {
+                ApiError::ShuttingDown
             }
             GetActiveTenantError::WillNotBecomeActive(_) => ApiError::Conflict(format!("{}", e)),
             GetActiveTenantError::Cancelled => ApiError::ShuttingDown,
