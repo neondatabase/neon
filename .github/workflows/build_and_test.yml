@@ -1128,8 +1128,8 @@ jobs:
               -f branch=main \
               -f dockerTag=${{needs.tag.outputs.build-tag}}
           elif [[ "$GITHUB_REF_NAME" == "amasterov/release-compute" ]]; then
-            gh workflow --repo neondatabase/infra run deploy-dev1.yml --ref main \
-              -f deployPgSniRouter=true \
+            gh workflow --repo neondatabase/infra run deploy-dev.yml --ref main \
+              -f deployPgSniRouter=false \
               -f deployCompute=true \
               -f deployProxy=false \
               -f deployStorage=false \
