@@ -172,7 +172,7 @@ async fn copy_disk_segments(
 ) -> Result<()> {
     let mut wal_reader = tli.get_walreader(start_lsn).await?;
 
-    let mut buf = [0u8; MAX_SEND_SIZE];
+    let mut buf = vec![0u8; MAX_SEND_SIZE];
 
     let first_segment = start_lsn.segment_number(wal_seg_size);
     let last_segment = end_lsn.segment_number(wal_seg_size);

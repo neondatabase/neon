@@ -18,6 +18,7 @@ use crate::{
         CreateTimelineCause, DeleteTimelineError, MaybeDeletedIndexPart, Tenant,
         TimelineOrOffloaded,
     },
+    virtual_file::MaybeFatalIo,
 };
 
 use super::{Timeline, TimelineResources};
@@ -62,10 +63,10 @@ pub(super) async fn delete_local_timeline_directory(
     conf: &PageServerConf,
     tenant_shard_id: TenantShardId,
     timeline: &Timeline,
-) -> anyhow::Result<()> {
+) {
     // Always ensure the lock order is compaction -> gc.
     let compaction_lock = timeline.compaction_lock.lock();
-    let compaction_lock = crate::timed(
+    let _compaction_lock = crate::timed(
         compaction_lock,
         "acquires compaction lock",
         std::time::Duration::from_secs(5),
@@ -73,7 +74,7 @@ pub(super) async fn delete_local_timeline_directory(
     .await;
 
     let gc_lock = timeline.gc_lock.lock();
-    let gc_lock = crate::timed(
+    let _gc_lock = crate::timed(
         gc_lock,
         "acquires gc lock",
         std::time::Duration::from_secs(5),
@@ -85,24 +86,15 @@ pub(super) async fn delete_local_timeline_directory(
 
     let local_timeline_directory = conf.timeline_path(&tenant_shard_id, &timeline.timeline_id);
 
-    fail::fail_point!("timeline-delete-before-rm", |_| {
-        Err(anyhow::anyhow!("failpoint: timeline-delete-before-rm"))?
-    });
-
     // NB: This need not be atomic because the deleted flag in the IndexPart
     // will be observed during tenant/timeline load. The deletion will be resumed there.
     //
-    // Note that here we do not bail out on std::io::ErrorKind::NotFound.
-    // This can happen if we're called a second time, e.g.,
-    // because of a previous failure/cancellation at/after
-    // failpoint timeline-delete-after-rm.
-    //
-    // ErrorKind::NotFound can also happen if we race with tenant detach, because,
+    // ErrorKind::NotFound can happen e.g. if we race with tenant detach, because,
     // no locks are shared.
     tokio::fs::remove_dir_all(local_timeline_directory)
         .await
         .or_else(fs_ext::ignore_not_found)
-        .context("remove local timeline directory")?;
+        .fatal_err("removing timeline directory");
 
     // Make sure previous deletions are ordered before mark removal.
     // Otherwise there is no guarantee that they reach the disk before mark deletion.
@@ -113,17 +105,9 @@ pub(super) async fn delete_local_timeline_directory(
     let timeline_path = conf.timelines_path(&tenant_shard_id);
     crashsafe::fsync_async(timeline_path)
         .await
-        .context("fsync_pre_mark_remove")?;
+        .fatal_err("fsync after removing timeline directory");
 
     info!("finished deleting layer files, releasing locks");
-    drop(gc_lock);
-    drop(compaction_lock);
-
-    fail::fail_point!("timeline-delete-after-rm", |_| {
-        Err(anyhow::anyhow!("failpoint: timeline-delete-after-rm"))?
-    });
-
-    Ok(())
 }
 
 /// Removes remote layers and an index file after them.
@@ -440,11 +424,19 @@ impl DeleteTimelineFlow {
         timeline: &TimelineOrOffloaded,
         remote_client: Arc<RemoteTimelineClient>,
     ) -> Result<(), DeleteTimelineError> {
+        fail::fail_point!("timeline-delete-before-rm", |_| {
+            Err(anyhow::anyhow!("failpoint: timeline-delete-before-rm"))?
+        });
+
         // Offloaded timelines have no local state
         // TODO: once we persist offloaded information, delete the timeline from there, too
         if let TimelineOrOffloaded::Timeline(timeline) = timeline {
-            delete_local_timeline_directory(conf, tenant.tenant_shard_id, timeline).await?;
+            delete_local_timeline_directory(conf, tenant.tenant_shard_id, timeline).await;
         }
+
+        fail::fail_point!("timeline-delete-after-rm", |_| {
+            Err(anyhow::anyhow!("failpoint: timeline-delete-after-rm"))?
+        });
 
         delete_remote_layers_and_index(&remote_client).await?;
 

@@ -174,19 +174,24 @@ def test_fully_custom_config(positive_env: NeonEnv):
         "image_layer_creation_check_threshold": 1,
         "lsn_lease_length": "1m",
         "lsn_lease_length_for_ts": "5s",
+        "timeline_offloading": True,
     }
 
-    ps_http = env.pageserver.http_client()
+    vps_http = env.storage_controller.pageserver_api()
 
-    initial_tenant_config = ps_http.tenant_config(env.initial_tenant)
-    assert initial_tenant_config.tenant_specific_overrides == {}
+    initial_tenant_config = vps_http.tenant_config(env.initial_tenant)
+    assert [
+        (key, val)
+        for key, val in initial_tenant_config.tenant_specific_overrides.items()
+        if val is not None
+    ] == []
     assert set(initial_tenant_config.effective_config.keys()) == set(
         fully_custom_config.keys()
     ), "ensure we cover all config options"
 
     (tenant_id, _) = env.create_tenant()
-    ps_http.set_tenant_config(tenant_id, fully_custom_config)
-    our_tenant_config = ps_http.tenant_config(tenant_id)
+    vps_http.set_tenant_config(tenant_id, fully_custom_config)
+    our_tenant_config = vps_http.tenant_config(tenant_id)
     assert our_tenant_config.tenant_specific_overrides == fully_custom_config
     assert set(our_tenant_config.effective_config.keys()) == set(
         fully_custom_config.keys()
@@ -199,10 +204,10 @@ def test_fully_custom_config(positive_env: NeonEnv):
         == {k: True for k in fully_custom_config.keys()}
     ), "ensure our custom config has different values than the default config for all config options, so we know we overrode everything"
 
-    ps_http.tenant_detach(tenant_id)
+    env.pageserver.tenant_detach(tenant_id)
     env.pageserver.tenant_attach(tenant_id, config=fully_custom_config)
 
-    assert ps_http.tenant_config(tenant_id).tenant_specific_overrides == fully_custom_config
-    assert set(ps_http.tenant_config(tenant_id).effective_config.keys()) == set(
+    assert vps_http.tenant_config(tenant_id).tenant_specific_overrides == fully_custom_config
+    assert set(vps_http.tenant_config(tenant_id).effective_config.keys()) == set(
         fully_custom_config.keys()
     ), "ensure we cover all config options"
