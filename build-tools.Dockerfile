@@ -36,11 +36,14 @@ RUN if [ "${DEBIAN_VERSION}" = "bookworm" ]; then \
         tar -xzf /tmp/pgcopydb.tar.gz -C /tmp/pgcopydb --strip-components=1 && \
         cd /tmp/pgcopydb && \
         make -s clean && \
-        make -s -j12 install; \
+        make -s -j12 install && \
+        libpq_path=$(find /lib /usr/lib -name "libpq.so.5" | head -n 1) && \
+        mkdir -p /pgcopydb/lib && \
+        cp "$libpq_path" /pgcopydb/lib/; \
     else \
         # copy command below will faile if we don't have dummy files, so we create them for other debian versions
         mkdir -p /usr/lib/postgresql/16/bin && touch /usr/lib/postgresql/16/bin/pgcopydb && \
-        mkdir -p /lib/aarch64-linux-gnu && touch  /lib/aarch64-linux-gnu/libpq.so.5; \
+        mkdir -p mkdir -p /pgcopydb/lib && touch  /mkdir -p /pgcopydb/lib/libpq.so.5; \
     fi
 
 FROM debian:${DEBIAN_VERSION}-slim AS build_tools
@@ -56,7 +59,7 @@ RUN mkdir -p /pgcopydb/bin && \
     chown -R nonroot:nonroot /pgcopydb
         
 COPY --from=pgcopydb_builder /usr/lib/postgresql/16/bin/pgcopydb /pgcopydb/bin/pgcopydb 
-COPY --from=pgcopydb_builder /lib/aarch64-linux-gnu/libpq.so.5 /pgcopydb/lib/libpq.so.5 
+COPY --from=pgcopydb_builder /pgcopydb/lib/libpq.so.5 /pgcopydb/lib/libpq.so.5 
 
 # System deps
 #
