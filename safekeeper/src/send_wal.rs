@@ -467,7 +467,7 @@ impl SafekeeperPostgresHandler {
             end_watch,
             ws_guard: ws_guard.clone(),
             wal_reader,
-            send_buf: [0; MAX_SEND_SIZE],
+            send_buf: vec![0u8; MAX_SEND_SIZE],
         };
         let mut reply_reader = ReplyReader {
             reader,
@@ -548,7 +548,7 @@ struct WalSender<'a, IO> {
     ws_guard: Arc<WalSenderGuard>,
     wal_reader: WalReader,
     // buffer for readling WAL into to send it
-    send_buf: [u8; MAX_SEND_SIZE],
+    send_buf: Vec<u8>,
 }
 
 const POLL_STATE_TIMEOUT: Duration = Duration::from_secs(1);

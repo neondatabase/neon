@@ -12,6 +12,7 @@ use pageserver_api::key::rel_block_to_key;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio_tar::Archive;
 use tracing::*;
+use wal_decoder::models::InterpretedWalRecord;
 use walkdir::WalkDir;
 
 use crate::context::RequestContext;
@@ -23,7 +24,6 @@ use pageserver_api::reltag::{RelTag, SlruKind};
 use postgres_ffi::pg_constants;
 use postgres_ffi::relfile_utils::*;
 use postgres_ffi::waldecoder::WalStreamDecoder;
-use postgres_ffi::walrecord::{decode_wal_record, DecodedWALRecord};
 use postgres_ffi::ControlFileData;
 use postgres_ffi::DBState_DB_SHUTDOWNED;
 use postgres_ffi::Oid;
@@ -312,11 +312,15 @@ async fn import_wal(
         let mut modification = tline.begin_modification(last_lsn);
         while last_lsn <= endpoint {
             if let Some((lsn, recdata)) = waldecoder.poll_decode()? {
-                let mut decoded = DecodedWALRecord::default();
-                decode_wal_record(recdata, &mut decoded, tline.pg_version)?;
+                let interpreted = InterpretedWalRecord::from_bytes_filtered(
+                    recdata,
+                    tline.get_shard_identity(),
+                    lsn,
+                    tline.pg_version,
+                )?;
 
                 walingest
-                    .ingest_record(decoded, lsn, &mut modification, ctx)
+                    .ingest_record(interpreted, &mut modification, ctx)
                     .await?;
                 WAL_INGEST.records_committed.inc();
 
@@ -453,10 +457,15 @@ pub async fn import_wal_from_tar(
         let mut modification = tline.begin_modification(last_lsn);
         while last_lsn <= end_lsn {
             if let Some((lsn, recdata)) = waldecoder.poll_decode()? {
-                let mut decoded = DecodedWALRecord::default();
-                decode_wal_record(recdata, &mut decoded, tline.pg_version)?;
+                let interpreted = InterpretedWalRecord::from_bytes_filtered(
+                    recdata,
+                    tline.get_shard_identity(),
+                    lsn,
+                    tline.pg_version,
+                )?;
+
                 walingest
-                    .ingest_record(decoded, lsn, &mut modification, ctx)
+                    .ingest_record(interpreted, &mut modification, ctx)
                     .await?;
                 modification.commit(ctx).await?;
                 last_lsn = lsn;

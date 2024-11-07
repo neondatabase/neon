@@ -7,7 +7,6 @@
 //!
 
 use anyhow::Context;
-use bytes::Bytes;
 use postgres_backend::QueryError;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -176,7 +175,7 @@ pub async fn append_logical_message(
             truncate_lsn: msg.truncate_lsn,
             proposer_uuid: [0u8; 16],
         },
-        wal_data: Bytes::from(wal_data),
+        wal_data,
     });
 
     let response = tli.process_msg(&append_request).await?;

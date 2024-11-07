@@ -302,6 +302,13 @@ pub struct Tenant {
     /// **Lock order**: if acquiring all (or a subset), acquire them in order `timelines`, `timelines_offloaded`, `timelines_creating`
     timelines_offloaded: Mutex<HashMap<TimelineId, Arc<OffloadedTimeline>>>,
 
+    /// Serialize writes of the tenant manifest to remote storage.  If there are concurrent operations
+    /// affecting the manifest, such as timeline deletion and timeline offload, they must wait for
+    /// each other (this could be optimized to coalesce writes if necessary).
+    ///
+    /// The contents of the Mutex are the last manifest we successfully uploaded
+    tenant_manifest_upload: tokio::sync::Mutex<Option<TenantManifest>>,
+
     // This mutex prevents creation of new timelines during GC.
     // Adding yet another mutex (in addition to `timelines`) is needed because holding
     // `timelines` mutex during all GC iteration
@@ -514,13 +521,6 @@ pub struct OffloadedTimeline {
     /// Present for future flattening deliberations.
     pub archived_at: NaiveDateTime,
 
-    /// Lazily constructed remote client for the timeline
-    ///
-    /// If we offload a timeline, we keep around the remote client
-    /// for the duration of the process. If we find it through the
-    /// manifest, we don't construct it up until it's needed (deletion).
-    pub remote_client: Option<Arc<RemoteTimelineClient>>,
-
     /// Prevent two tasks from deleting the timeline at the same time. If held, the
     /// timeline is being deleted. If 'true', the timeline has already been deleted.
     pub delete_progress: TimelineDeleteProgress,
@@ -547,7 +547,6 @@ impl OffloadedTimeline {
             ancestor_retain_lsn,
             archived_at,
 
-            remote_client: Some(timeline.remote_client.clone()),
             delete_progress: timeline.delete_progress.clone(),
         })
     }
@@ -564,7 +563,6 @@ impl OffloadedTimeline {
             ancestor_timeline_id,
             ancestor_retain_lsn,
             archived_at,
-            remote_client: None,
             delete_progress: TimelineDeleteProgress::default(),
         }
     }
@@ -629,7 +627,7 @@ impl TimelineOrOffloaded {
     fn maybe_remote_client(&self) -> Option<Arc<RemoteTimelineClient>> {
         match self {
             TimelineOrOffloaded::Timeline(timeline) => Some(timeline.remote_client.clone()),
-            TimelineOrOffloaded::Offloaded(offloaded) => offloaded.remote_client.clone(),
+            TimelineOrOffloaded::Offloaded(_offloaded) => None,
         }
     }
 }
@@ -739,6 +737,24 @@ pub enum TimelineArchivalError {
 
     #[error(transparent)]
     Other(anyhow::Error),
+}
+
+#[derive(thiserror::Error, Debug)]
+pub(crate) enum TenantManifestError {
+    #[error("Remote storage error: {0}")]
+    RemoteStorage(anyhow::Error),
+
+    #[error("Cancelled")]
+    Cancelled,
+}
+
+impl From<TenantManifestError> for TimelineArchivalError {
+    fn from(e: TenantManifestError) -> Self {
+        match e {
+            TenantManifestError::RemoteStorage(e) => Self::Other(e),
+            TenantManifestError::Cancelled => Self::Cancelled,
+        }
+    }
 }
 
 impl Debug for TimelineArchivalError {
@@ -1327,14 +1343,15 @@ impl Tenant {
         )
         .await?;
         let (offloaded_add, tenant_manifest) =
-            match remote_timeline_client::do_download_tenant_manifest(
+            match remote_timeline_client::download_tenant_manifest(
                 remote_storage,
                 &self.tenant_shard_id,
+                self.generation,
                 &cancel,
             )
             .await
             {
-                Ok((tenant_manifest, _generation)) => (
+                Ok((tenant_manifest, _generation, _manifest_mtime)) => (
                     format!("{} offloaded", tenant_manifest.offloaded_timelines.len()),
                     tenant_manifest,
                 ),
@@ -1526,18 +1543,7 @@ impl Tenant {
             offloaded_timelines_accessor.extend(offloaded_timelines_list.into_iter());
         }
         if !offloaded_timeline_ids.is_empty() {
-            let manifest = self.tenant_manifest();
-            // TODO: generation support
-            let generation = remote_timeline_client::TENANT_MANIFEST_GENERATION;
-            upload_tenant_manifest(
-                &self.remote_storage,
-                &self.tenant_shard_id,
-                generation,
-                &manifest,
-                &self.cancel,
-            )
-            .await
-            .map_err(TimelineArchivalError::Other)?;
+            self.store_tenant_manifest().await?;
         }
 
         // The local filesystem contents are a cache of what's in the remote IndexPart;
@@ -1918,18 +1924,7 @@ impl Tenant {
         };
 
         // Upload new list of offloaded timelines to S3
-        let manifest = self.tenant_manifest();
-        // TODO: generation support
-        let generation = remote_timeline_client::TENANT_MANIFEST_GENERATION;
-        upload_tenant_manifest(
-            &self.remote_storage,
-            &self.tenant_shard_id,
-            generation,
-            &manifest,
-            &cancel,
-        )
-        .await
-        .map_err(TimelineArchivalError::Other)?;
+        self.store_tenant_manifest().await?;
 
         // Activate the timeline (if it makes sense)
         if !(timeline.is_broken() || timeline.is_stopping()) {
@@ -2504,8 +2499,15 @@ impl Tenant {
                             .iter()
                             .any(|(_id, tl)| tl.get_ancestor_timeline_id() == Some(*timeline_id))
                     };
+                    let config_allows_offload = self.conf.timeline_offloading
+                        || self
+                            .tenant_conf
+                            .load()
+                            .tenant_conf
+                            .timeline_offloading
+                            .unwrap_or_default();
                     let can_offload =
-                        can_offload && has_no_unoffloaded_children && self.conf.timeline_offloading;
+                        can_offload && has_no_unoffloaded_children && config_allows_offload;
                     if (is_active, can_offload) == (false, false) {
                         None
                     } else {
@@ -2534,6 +2536,11 @@ impl Tenant {
                         .await
                         .inspect_err(|e| match e {
                             timeline::CompactionError::ShuttingDown => (),
+                            timeline::CompactionError::Offload(_) => {
+                                // Failures to offload timelines do not trip the circuit breaker, because
+                                // they do not do lots of writes the way compaction itself does: it is cheap
+                                // to retry, and it would be bad to stop all compaction because of an issue with offloading.
+                            }
                             timeline::CompactionError::Other(e) => {
                                 self.compaction_circuit_breaker
                                     .lock()
@@ -2549,8 +2556,7 @@ impl Tenant {
             if pending_task_left == Some(false) && *can_offload {
                 offload_timeline(self, timeline)
                     .instrument(info_span!("offload_timeline", %timeline_id))
-                    .await
-                    .map_err(timeline::CompactionError::Other)?;
+                    .await?;
             }
         }
 
@@ -3126,9 +3132,7 @@ impl Tenant {
             }
         }
 
-        let tenant_manifest = self.tenant_manifest();
-        // TODO: generation support
-        let generation = remote_timeline_client::TENANT_MANIFEST_GENERATION;
+        let tenant_manifest = self.build_tenant_manifest();
         for child_shard in child_shards {
             tracing::info!(
                 "Uploading tenant manifest for child {}",
@@ -3137,7 +3141,7 @@ impl Tenant {
             upload_tenant_manifest(
                 &self.remote_storage,
                 child_shard,
-                generation,
+                self.generation,
                 &tenant_manifest,
                 &self.cancel,
             )
@@ -3321,7 +3325,8 @@ impl Tenant {
             .unwrap_or(self.conf.default_tenant_conf.lsn_lease_length)
     }
 
-    pub(crate) fn tenant_manifest(&self) -> TenantManifest {
+    /// Generate an up-to-date TenantManifest based on the state of this Tenant.
+    fn build_tenant_manifest(&self) -> TenantManifest {
         let timelines_offloaded = self.timelines_offloaded.lock().unwrap();
 
         let mut timeline_manifests = timelines_offloaded
@@ -3529,6 +3534,7 @@ impl Tenant {
             timelines: Mutex::new(HashMap::new()),
             timelines_creating: Mutex::new(HashSet::new()),
             timelines_offloaded: Mutex::new(HashMap::new()),
+            tenant_manifest_upload: Default::default(),
             gc_cs: tokio::sync::Mutex::new(()),
             walredo_mgr,
             remote_storage,
@@ -4708,6 +4714,49 @@ impl Tenant {
             .max()
             .unwrap_or(0)
     }
+
+    /// Serialize and write the latest TenantManifest to remote storage.
+    pub(crate) async fn store_tenant_manifest(&self) -> Result<(), TenantManifestError> {
+        // Only one manifest write may be done at at time, and the contents of the manifest
+        // must be loaded while holding this lock. This makes it safe to call this function
+        // from anywhere without worrying about colliding updates.
+        let mut guard = tokio::select! {
+            g = self.tenant_manifest_upload.lock() => {
+                g
+            },
+            _ = self.cancel.cancelled() => {
+                return Err(TenantManifestError::Cancelled);
+            }
+        };
+
+        let manifest = self.build_tenant_manifest();
+        if Some(&manifest) == (*guard).as_ref() {
+            // Optimisation: skip uploads that don't change anything.
+            return Ok(());
+        }
+
+        upload_tenant_manifest(
+            &self.remote_storage,
+            &self.tenant_shard_id,
+            self.generation,
+            &manifest,
+            &self.cancel,
+        )
+        .await
+        .map_err(|e| {
+            if self.cancel.is_cancelled() {
+                TenantManifestError::Cancelled
+            } else {
+                TenantManifestError::RemoteStorage(e)
+            }
+        })?;
+
+        // Store the successfully uploaded manifest, so that future callers can avoid
+        // re-uploading the same thing.
+        *guard = Some(manifest);
+
+        Ok(())
+    }
 }
 
 /// Create the cluster temporarily in 'initdbpath' directory inside the repository
@@ -4860,6 +4909,7 @@ pub(crate) mod harness {
                 ),
                 lsn_lease_length: Some(tenant_conf.lsn_lease_length),
                 lsn_lease_length_for_ts: Some(tenant_conf.lsn_lease_length_for_ts),
+                timeline_offloading: Some(tenant_conf.timeline_offloading),
             }
         }
     }
@@ -5090,6 +5140,7 @@ mod tests {
     use pageserver_api::keyspace::KeySpace;
     use pageserver_api::models::{CompactionAlgorithm, CompactionAlgorithmSettings};
     use pageserver_api::value::Value;
+    use pageserver_compaction::helpers::overlaps_with;
     use rand::{thread_rng, Rng};
     use storage_layer::PersistentLayerKey;
     use tests::storage_layer::ValuesReconstructState;
@@ -7612,23 +7663,7 @@ mod tests {
         }
 
         // Check if old layers are removed / new layers have the expected LSN
-        let mut all_layers = tline.inspect_historic_layers().await.unwrap();
-        all_layers.sort_by(|k1, k2| {
-            (
-                k1.is_delta,
-                k1.key_range.start,
-                k1.key_range.end,
-                k1.lsn_range.start,
-                k1.lsn_range.end,
-            )
-                .cmp(&(
-                    k2.is_delta,
-                    k2.key_range.start,
-                    k2.key_range.end,
-                    k2.lsn_range.start,
-                    k2.lsn_range.end,
-                ))
-        });
+        let all_layers = inspect_and_sort(&tline, None).await;
         assert_eq!(
             all_layers,
             vec![
@@ -9169,6 +9204,251 @@ mod tests {
             let expected_value = expected_key_values.remove(&key).expect("No unknown keys");
             assert_eq!(value, Bytes::from(expected_value));
         }
+
+        Ok(())
+    }
+
+    async fn inspect_and_sort(
+        tline: &Arc<Timeline>,
+        filter: Option<std::ops::Range<Key>>,
+    ) -> Vec<PersistentLayerKey> {
+        let mut all_layers = tline.inspect_historic_layers().await.unwrap();
+        if let Some(filter) = filter {
+            all_layers.retain(|layer| overlaps_with(&layer.key_range, &filter));
+        }
+        all_layers.sort_by(|k1, k2| {
+            (
+                k1.is_delta,
+                k1.key_range.start,
+                k1.key_range.end,
+                k1.lsn_range.start,
+                k1.lsn_range.end,
+            )
+                .cmp(&(
+                    k2.is_delta,
+                    k2.key_range.start,
+                    k2.key_range.end,
+                    k2.lsn_range.start,
+                    k2.lsn_range.end,
+                ))
+        });
+        all_layers
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn test_simple_partial_bottom_most_compaction() -> anyhow::Result<()> {
+        let harness = TenantHarness::create("test_simple_partial_bottom_most_compaction").await?;
+        let (tenant, ctx) = harness.load().await;
+
+        fn get_key(id: u32) -> Key {
+            // using aux key here b/c they are guaranteed to be inside `collect_keyspace`.
+            let mut key = Key::from_hex("620000000033333333444444445500000000").unwrap();
+            key.field6 = id;
+            key
+        }
+
+        // img layer at 0x10
+        let img_layer = (0..10)
+            .map(|id| (get_key(id), Bytes::from(format!("value {id}@0x10"))))
+            .collect_vec();
+
+        let delta1 = vec![
+            (
+                get_key(1),
+                Lsn(0x20),
+                Value::Image(Bytes::from("value 1@0x20")),
+            ),
+            (
+                get_key(2),
+                Lsn(0x30),
+                Value::Image(Bytes::from("value 2@0x30")),
+            ),
+            (
+                get_key(3),
+                Lsn(0x40),
+                Value::Image(Bytes::from("value 3@0x40")),
+            ),
+        ];
+        let delta2 = vec![
+            (
+                get_key(5),
+                Lsn(0x20),
+                Value::Image(Bytes::from("value 5@0x20")),
+            ),
+            (
+                get_key(6),
+                Lsn(0x20),
+                Value::Image(Bytes::from("value 6@0x20")),
+            ),
+        ];
+        let delta3 = vec![
+            (
+                get_key(8),
+                Lsn(0x48),
+                Value::Image(Bytes::from("value 8@0x48")),
+            ),
+            (
+                get_key(9),
+                Lsn(0x48),
+                Value::Image(Bytes::from("value 9@0x48")),
+            ),
+        ];
+
+        let tline = tenant
+            .create_test_timeline_with_layers(
+                TIMELINE_ID,
+                Lsn(0x10),
+                DEFAULT_PG_VERSION,
+                &ctx,
+                vec![
+                    DeltaLayerTestDesc::new_with_inferred_key_range(Lsn(0x20)..Lsn(0x48), delta1),
+                    DeltaLayerTestDesc::new_with_inferred_key_range(Lsn(0x20)..Lsn(0x48), delta2),
+                    DeltaLayerTestDesc::new_with_inferred_key_range(Lsn(0x48)..Lsn(0x50), delta3),
+                ], // delta layers
+                vec![(Lsn(0x10), img_layer)], // image layers
+                Lsn(0x50),
+            )
+            .await?;
+
+        {
+            // Update GC info
+            let mut guard = tline.gc_info.write().unwrap();
+            *guard = GcInfo {
+                retain_lsns: vec![(Lsn(0x20), tline.timeline_id, MaybeOffloaded::No)],
+                cutoffs: GcCutoffs {
+                    time: Lsn(0x30),
+                    space: Lsn(0x30),
+                },
+                leases: Default::default(),
+                within_ancestor_pitr: false,
+            };
+        }
+
+        let cancel = CancellationToken::new();
+
+        // Do a partial compaction on key range 0..4, we should generate a image layer; no other layers
+        // can be removed because they might be used for other key ranges.
+        tline
+            .partial_compact_with_gc(Some(get_key(0)..get_key(4)), &cancel, EnumSet::new(), &ctx)
+            .await
+            .unwrap();
+        let all_layers = inspect_and_sort(&tline, Some(get_key(0)..get_key(10))).await;
+        assert_eq!(
+            all_layers,
+            vec![
+                PersistentLayerKey {
+                    key_range: get_key(0)..get_key(4),
+                    lsn_range: Lsn(0x20)..Lsn(0x21),
+                    is_delta: false
+                },
+                PersistentLayerKey {
+                    key_range: get_key(0)..get_key(10),
+                    lsn_range: Lsn(0x10)..Lsn(0x11),
+                    is_delta: false
+                },
+                PersistentLayerKey {
+                    key_range: get_key(1)..get_key(4),
+                    lsn_range: Lsn(0x20)..Lsn(0x48),
+                    is_delta: true
+                },
+                PersistentLayerKey {
+                    key_range: get_key(5)..get_key(7),
+                    lsn_range: Lsn(0x20)..Lsn(0x48),
+                    is_delta: true
+                },
+                PersistentLayerKey {
+                    key_range: get_key(8)..get_key(10),
+                    lsn_range: Lsn(0x48)..Lsn(0x50),
+                    is_delta: true
+                }
+            ]
+        );
+
+        // Do a partial compaction on key range 4..10
+        tline
+            .partial_compact_with_gc(Some(get_key(4)..get_key(10)), &cancel, EnumSet::new(), &ctx)
+            .await
+            .unwrap();
+        let all_layers = inspect_and_sort(&tline, Some(get_key(0)..get_key(10))).await;
+        assert_eq!(
+            all_layers,
+            vec![
+                PersistentLayerKey {
+                    key_range: get_key(0)..get_key(4),
+                    lsn_range: Lsn(0x20)..Lsn(0x21),
+                    is_delta: false
+                },
+                PersistentLayerKey {
+                    // if (in the future) GC kicks in, this layer will be removed
+                    key_range: get_key(0)..get_key(10),
+                    lsn_range: Lsn(0x10)..Lsn(0x11),
+                    is_delta: false
+                },
+                PersistentLayerKey {
+                    key_range: get_key(4)..get_key(10),
+                    lsn_range: Lsn(0x20)..Lsn(0x21),
+                    is_delta: false
+                },
+                PersistentLayerKey {
+                    key_range: get_key(1)..get_key(4),
+                    lsn_range: Lsn(0x20)..Lsn(0x48),
+                    is_delta: true
+                },
+                PersistentLayerKey {
+                    key_range: get_key(5)..get_key(7),
+                    lsn_range: Lsn(0x20)..Lsn(0x48),
+                    is_delta: true
+                },
+                PersistentLayerKey {
+                    key_range: get_key(8)..get_key(10),
+                    lsn_range: Lsn(0x48)..Lsn(0x50),
+                    is_delta: true
+                }
+            ]
+        );
+
+        // Do a partial compaction on key range 0..10, all image layers below LSN 20 can be replaced with new ones.
+        tline
+            .partial_compact_with_gc(Some(get_key(0)..get_key(10)), &cancel, EnumSet::new(), &ctx)
+            .await
+            .unwrap();
+        let all_layers = inspect_and_sort(&tline, Some(get_key(0)..get_key(10))).await;
+        assert_eq!(
+            all_layers,
+            vec![
+                PersistentLayerKey {
+                    key_range: get_key(0)..get_key(4),
+                    lsn_range: Lsn(0x20)..Lsn(0x21),
+                    is_delta: false
+                },
+                PersistentLayerKey {
+                    key_range: get_key(0)..get_key(10),
+                    lsn_range: Lsn(0x20)..Lsn(0x21),
+                    is_delta: false
+                },
+                PersistentLayerKey {
+                    key_range: get_key(4)..get_key(10),
+                    lsn_range: Lsn(0x20)..Lsn(0x21),
+                    is_delta: false
+                },
+                PersistentLayerKey {
+                    key_range: get_key(1)..get_key(4),
+                    lsn_range: Lsn(0x20)..Lsn(0x48),
+                    is_delta: true
+                },
+                PersistentLayerKey {
+                    key_range: get_key(5)..get_key(7),
+                    lsn_range: Lsn(0x20)..Lsn(0x48),
+                    is_delta: true
+                },
+                PersistentLayerKey {
+                    key_range: get_key(8)..get_key(10),
+                    lsn_range: Lsn(0x48)..Lsn(0x50),
+                    is_delta: true
+                }
+            ]
+        );
 
         Ok(())
     }

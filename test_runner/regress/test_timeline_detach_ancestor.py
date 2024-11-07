@@ -9,13 +9,14 @@ from queue import Empty, Queue
 from threading import Barrier
 
 import pytest
-from fixtures.common_types import Lsn, TimelineId
+from fixtures.common_types import Lsn, TimelineArchivalState, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     LogCursor,
     NeonEnvBuilder,
     PgBin,
     flush_ep_to_pageserver,
+    last_flush_lsn_upload,
     wait_for_last_flush_lsn,
 )
 from fixtures.pageserver.http import HistoricLayerInfo, PageserverApiException
@@ -511,7 +512,7 @@ def test_compaction_induced_by_detaches_in_history(
 
         assert len(delta_layers(branch_timeline_id)) == 5
 
-        client.patch_tenant_config_client_side(
+        env.storage_controller.pageserver_api().patch_tenant_config_client_side(
             env.initial_tenant, {"compaction_threshold": 5}, None
         )
 
@@ -576,26 +577,48 @@ def test_compaction_induced_by_detaches_in_history(
     assert_pageserver_backups_equal(fullbackup_before, fullbackup_after, set())
 
 
-@pytest.mark.parametrize("sharded", [True, False])
+@pytest.mark.parametrize("shards_initial_after", [(1, 1), (2, 2), (1, 4)])
 def test_timeline_ancestor_detach_idempotent_success(
-    neon_env_builder: NeonEnvBuilder, sharded: bool
+    neon_env_builder: NeonEnvBuilder, shards_initial_after: tuple[int, int]
 ):
-    shards = 2 if sharded else 1
+    shards_initial = shards_initial_after[0]
+    shards_after = shards_initial_after[1]
 
-    neon_env_builder.num_pageservers = shards
-    env = neon_env_builder.init_start(initial_tenant_shard_count=shards if sharded else None)
+    neon_env_builder.num_pageservers = shards_after
+    env = neon_env_builder.init_start(
+        initial_tenant_shard_count=shards_initial if shards_initial > 1 else None,
+        initial_tenant_conf={
+            # small checkpointing and compaction targets to ensure we generate many upload operations
+            "checkpoint_distance": 512 * 1024,
+            "compaction_threshold": 1,
+            "compaction_target_size": 512 * 1024,
+            # disable background compaction and GC. We invoke it manually when we want it to happen.
+            "gc_period": "0s",
+            "compaction_period": "0s",
+        },
+    )
 
     pageservers = dict((int(p.id), p) for p in env.pageservers)
 
     for ps in pageservers.values():
         ps.allowed_errors.extend(SHUTDOWN_ALLOWED_ERRORS)
 
-    if sharded:
+    if shards_after > 1:
         # FIXME: should this be in the neon_env_builder.init_start?
         env.storage_controller.reconcile_until_idle()
         client = env.storage_controller.pageserver_api()
     else:
         client = env.pageserver.http_client()
+
+    # Write some data so that we have some layers to copy
+    with env.endpoints.create_start("main", tenant_id=env.initial_tenant) as endpoint:
+        endpoint.safe_psql_many(
+            [
+                "CREATE TABLE foo(key serial primary key, t text default 'data_content')",
+                "INSERT INTO foo SELECT FROM generate_series(1,1024)",
+            ]
+        )
+        last_flush_lsn_upload(env, endpoint, env.initial_tenant, env.initial_timeline)
 
     first_branch = env.create_branch("first_branch")
 
@@ -606,6 +629,12 @@ def test_timeline_ancestor_detach_idempotent_success(
     # storage controller
     reparented1 = env.create_branch("first_reparented", ancestor_branch_name="main")
     reparented2 = env.create_branch("second_reparented", ancestor_branch_name="main")
+
+    if shards_after > shards_initial:
+        # Do a shard split
+        # This is a reproducer for https://github.com/neondatabase/neon/issues/9667
+        env.storage_controller.tenant_shard_split(env.initial_tenant, shards_after)
+        env.storage_controller.reconcile_until_idle()
 
     first_reparenting_response = client.detach_ancestor(env.initial_tenant, first_branch)
     assert set(first_reparenting_response) == {reparented1, reparented2}
@@ -634,7 +663,13 @@ def test_timeline_ancestor_detach_errors(neon_env_builder: NeonEnvBuilder, shard
     shards = 2 if sharded else 1
 
     neon_env_builder.num_pageservers = shards
-    env = neon_env_builder.init_start(initial_tenant_shard_count=shards if sharded else None)
+    env = neon_env_builder.init_start(
+        initial_tenant_shard_count=shards if sharded else None,
+        initial_tenant_conf={
+            # turn off gc, we want to do manual offloading here.
+            "gc_period": "0s",
+        },
+    )
 
     pageservers = dict((int(p.id), p) for p in env.pageservers)
 
@@ -656,13 +691,38 @@ def test_timeline_ancestor_detach_errors(neon_env_builder: NeonEnvBuilder, shard
         client.detach_ancestor(env.initial_tenant, env.initial_timeline)
     assert info.value.status_code == 409
 
-    _ = env.create_branch("first_branch")
+    early_branch = env.create_branch("early_branch")
+
+    first_branch = env.create_branch("first_branch")
 
     second_branch = env.create_branch("second_branch", ancestor_branch_name="first_branch")
 
     # funnily enough this does not have a prefix
     with pytest.raises(PageserverApiException, match="too many ancestors") as info:
         client.detach_ancestor(env.initial_tenant, second_branch)
+    assert info.value.status_code == 400
+
+    client.timeline_archival_config(
+        env.initial_tenant, second_branch, TimelineArchivalState.ARCHIVED
+    )
+
+    client.timeline_archival_config(
+        env.initial_tenant, early_branch, TimelineArchivalState.ARCHIVED
+    )
+
+    with pytest.raises(PageserverApiException, match=f".*archived: {early_branch}") as info:
+        client.detach_ancestor(env.initial_tenant, first_branch)
+    assert info.value.status_code == 400
+
+    if not sharded:
+        client.timeline_offload(env.initial_tenant, early_branch)
+
+    client.timeline_archival_config(
+        env.initial_tenant, first_branch, TimelineArchivalState.ARCHIVED
+    )
+
+    with pytest.raises(PageserverApiException, match=f".*archived: {first_branch}") as info:
+        client.detach_ancestor(env.initial_tenant, first_branch)
     assert info.value.status_code == 400
 
 

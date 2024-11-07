@@ -12,7 +12,7 @@ pub mod merge_iterator;
 
 use crate::context::{AccessStatsBehavior, RequestContext};
 use bytes::Bytes;
-use pageserver_api::key::Key;
+use pageserver_api::key::{Key, NON_INHERITED_SPARSE_RANGE};
 use pageserver_api::keyspace::{KeySpace, KeySpaceRandomAccum};
 use pageserver_api::record::NeonWalRecord;
 use pageserver_api::value::Value;
@@ -196,6 +196,9 @@ impl ValuesReconstructState {
     /// Returns true if this was the last value needed for the key and false otherwise.
     ///
     /// If the key is done after the update, mark it as such.
+    ///
+    /// If the key is in the sparse keyspace (i.e., aux files), we do not track them in
+    /// `key_done`.
     pub(crate) fn update_key(
         &mut self,
         key: &Key,
@@ -206,10 +209,18 @@ impl ValuesReconstructState {
             .keys
             .entry(*key)
             .or_insert(Ok(VectoredValueReconstructState::default()));
-
+        let is_sparse_key = NON_INHERITED_SPARSE_RANGE.contains(key);
         if let Ok(state) = state {
             let key_done = match state.situation {
-                ValueReconstructSituation::Complete => unreachable!(),
+                ValueReconstructSituation::Complete => {
+                    if is_sparse_key {
+                        // Sparse keyspace might be visited multiple times because
+                        // we don't track unmapped keyspaces.
+                        return ValueReconstructSituation::Complete;
+                    } else {
+                        unreachable!()
+                    }
+                }
                 ValueReconstructSituation::Continue => match value {
                     Value::Image(img) => {
                         state.img = Some((lsn, img));
@@ -234,7 +245,9 @@ impl ValuesReconstructState {
 
             if key_done && state.situation == ValueReconstructSituation::Continue {
                 state.situation = ValueReconstructSituation::Complete;
-                self.keys_done.add_key(*key);
+                if !is_sparse_key {
+                    self.keys_done.add_key(*key);
+                }
             }
 
             state.situation
