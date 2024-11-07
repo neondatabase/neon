@@ -275,7 +275,6 @@ impl WalBackupTask {
                     // Cancellation token fired
                     break;
                 }
-                sleep(Duration::from_millis(retry_delay)).await;
             }
 
             let commit_lsn = *self.commit_lsn_watch_rx.borrow();
