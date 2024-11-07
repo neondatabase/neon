@@ -38,6 +38,7 @@ pub struct BufferedWriter<B, W> {
     ///
     /// In these exceptional cases, it's `None`.
     buf: Option<B>,
+    bytes_amount: u64,
 }
 
 impl<B, Buf, W> BufferedWriter<B, W>
@@ -50,11 +51,16 @@ where
         Self {
             writer,
             buf: Some(buf),
+            bytes_amount: 0,
         }
     }
 
     pub fn as_inner(&self) -> &W {
         &self.writer
+    }
+
+    pub fn bytes_written(&self) -> u64 {
+        self.bytes_amount
     }
 
     /// Panics if used after any of the write paths returned an error
@@ -63,12 +69,16 @@ where
     }
 
     #[cfg_attr(target_os = "macos", allow(dead_code))]
-    pub async fn flush_and_into_inner(mut self, ctx: &RequestContext) -> std::io::Result<W> {
+    pub async fn flush_and_into_inner(mut self, ctx: &RequestContext) -> std::io::Result<(u64, W)> {
         self.flush(ctx).await?;
 
-        let Self { buf, writer } = self;
+        let Self {
+            buf,
+            writer,
+            bytes_amount,
+        } = self;
         assert!(buf.is_some());
-        Ok(writer)
+        Ok((bytes_amount, writer))
     }
 
     #[inline(always)]
@@ -103,6 +113,7 @@ where
                 .writer
                 .write_all(FullSlice::must_new(chunk), ctx)
                 .await?;
+            self.bytes_amount += u64::try_from(nwritten).unwrap();
             assert_eq!(nwritten, chunk_len);
             return Ok((nwritten, chunk));
         }
@@ -160,6 +171,7 @@ where
         }
         let slice = buf.flush();
         let (nwritten, slice) = self.writer.write_all(slice, ctx).await?;
+        self.bytes_amount += u64::try_from(nwritten).unwrap();
         assert_eq!(nwritten, buf_len);
         self.buf = Some(Buffer::reuse_after_flush(
             slice.into_raw_slice().into_inner(),
@@ -274,7 +286,7 @@ mod tests {
         write!(writer, b"c");
         write!(writer, b"d");
         write!(writer, b"e");
-        let recorder = writer.flush_and_into_inner(&test_ctx()).await?;
+        let (_, recorder) = writer.flush_and_into_inner(&test_ctx()).await?;
         assert_eq!(
             recorder.writes,
             vec![Vec::from(b"ab"), Vec::from(b"cd"), Vec::from(b"e")]
@@ -290,7 +302,7 @@ mod tests {
         write!(writer, b"de");
         write!(writer, b"");
         write!(writer, b"fghijk");
-        let recorder = writer.flush_and_into_inner(&test_ctx()).await?;
+        let (_, recorder) = writer.flush_and_into_inner(&test_ctx()).await?;
         assert_eq!(
             recorder.writes,
             vec![Vec::from(b"abc"), Vec::from(b"de"), Vec::from(b"fghijk")]
@@ -306,7 +318,7 @@ mod tests {
         write!(writer, b"bc");
         write!(writer, b"d");
         write!(writer, b"e");
-        let recorder = writer.flush_and_into_inner(&test_ctx()).await?;
+        let (_, recorder) = writer.flush_and_into_inner(&test_ctx()).await?;
         assert_eq!(
             recorder.writes,
             vec![Vec::from(b"a"), Vec::from(b"bc"), Vec::from(b"de")]
@@ -329,7 +341,7 @@ mod tests {
         writer.write_buffered_borrowed(b"j", ctx).await?;
         writer.write_buffered_borrowed(b"klmno", ctx).await?;
 
-        let recorder = writer.flush_and_into_inner(ctx).await?;
+        let (_, recorder) = writer.flush_and_into_inner(ctx).await?;
         assert_eq!(
             recorder.writes,
             {

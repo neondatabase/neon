@@ -203,7 +203,7 @@ async fn download_object<'a>(
         }
         #[cfg(target_os = "linux")]
         crate::virtual_file::io_engine::IoEngine::TokioEpollUring => {
-            use crate::virtual_file::owned_buffers_io::{self, util::size_tracking_writer};
+            use crate::virtual_file::owned_buffers_io;
             use bytes::BytesMut;
             async {
                 let destination_file = VirtualFile::create(dst_path, ctx)
@@ -220,9 +220,8 @@ async fn download_object<'a>(
                 // TODO: use vectored write (writev) once supported by tokio-epoll-uring.
                 // There's chunks_vectored() on the stream.
                 let (bytes_amount, destination_file) = async {
-                    let size_tracking = size_tracking_writer::Writer::new(destination_file);
                     let mut buffered = owned_buffers_io::write::BufferedWriter::<BytesMut, _>::new(
-                        size_tracking,
+                        destination_file,
                         BytesMut::with_capacity(super::BUFFER_SIZE),
                     );
                     while let Some(res) =
@@ -234,8 +233,8 @@ async fn download_object<'a>(
                         };
                         buffered.write_buffered(chunk.slice_len(), ctx).await?;
                     }
-                    let size_tracking = buffered.flush_and_into_inner(ctx).await?;
-                    Ok(size_tracking.into_inner())
+                    let inner = buffered.flush_and_into_inner(ctx).await?;
+                    Ok(inner)
                 }
                 .await?;
 

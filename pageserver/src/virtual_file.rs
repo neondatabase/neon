@@ -63,9 +63,6 @@ pub(crate) mod owned_buffers_io {
     pub(crate) mod io_buf_ext;
     pub(crate) mod slice;
     pub(crate) mod write;
-    pub(crate) mod util {
-        pub(crate) mod size_tracking_writer;
-    }
 }
 
 #[derive(Debug)]

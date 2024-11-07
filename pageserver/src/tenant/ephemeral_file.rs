@@ -8,7 +8,6 @@ use crate::page_cache;
 use crate::tenant::storage_layer::inmemory_layer::vectored_dio_read::File;
 use crate::virtual_file::owned_buffers_io::io_buf_aligned::IoBufAlignedMut;
 use crate::virtual_file::owned_buffers_io::slice::SliceMutExt;
-use crate::virtual_file::owned_buffers_io::util::size_tracking_writer;
 use crate::virtual_file::owned_buffers_io::write::Buffer;
 use crate::virtual_file::{self, owned_buffers_io, IoBufferMut, VirtualFile};
 use bytes::BytesMut;
@@ -27,10 +26,7 @@ pub struct EphemeralFile {
     _timeline_id: TimelineId,
     page_cache_file_id: page_cache::FileId,
     bytes_written: u64,
-    buffered_writer: owned_buffers_io::write::BufferedWriter<
-        BytesMut,
-        size_tracking_writer::Writer<VirtualFile>,
-    >,
+    buffered_writer: owned_buffers_io::write::BufferedWriter<BytesMut, VirtualFile>,
     /// Gate guard is held on as long as we need to do operations in the path (delete on drop)
     _gate_guard: utils::sync::gate::GateGuard,
 }
@@ -73,7 +69,7 @@ impl EphemeralFile {
             page_cache_file_id,
             bytes_written: 0,
             buffered_writer: owned_buffers_io::write::BufferedWriter::new(
-                size_tracking_writer::Writer::new(file),
+                file,
                 BytesMut::with_capacity(TAIL_SZ),
             ),
             _gate_guard: gate_guard,
@@ -85,7 +81,7 @@ impl Drop for EphemeralFile {
     fn drop(&mut self) {
         // unlink the file
         // we are clear to do this, because we have entered a gate
-        let path = self.buffered_writer.as_inner().as_inner().path();
+        let path = self.buffered_writer.as_inner().path();
         let res = std::fs::remove_file(path);
         if let Err(e) = res {
             if e.kind() != std::io::ErrorKind::NotFound {
@@ -168,8 +164,7 @@ impl super::storage_layer::inmemory_layer::vectored_dio_read::File for Ephemeral
         dst: tokio_epoll_uring::Slice<B>,
         ctx: &'a RequestContext,
     ) -> std::io::Result<(tokio_epoll_uring::Slice<B>, usize)> {
-        let file_size_tracking_writer = self.buffered_writer.as_inner();
-        let flushed_offset = file_size_tracking_writer.bytes_written();
+        let flushed_offset = self.buffered_writer.bytes_written();
 
         let buffer = self.buffered_writer.inspect_buffer();
         let buffered = &buffer[0..buffer.pending()];
@@ -201,7 +196,7 @@ impl super::storage_layer::inmemory_layer::vectored_dio_read::File for Ephemeral
         let buffered_range = Range(std::cmp::max(start, flushed_offset), end);
 
         let dst = if written_range.len() > 0 {
-            let file: &VirtualFile = file_size_tracking_writer.as_inner();
+            let file: &VirtualFile = self.buffered_writer.as_inner();
             let bounds = dst.bounds();
             let slice = file
                 .read_exact_at(dst.slice(0..written_range.len().into_usize()), start, ctx)
@@ -359,8 +354,7 @@ mod tests {
             assert_eq!(&buf, &content[i..i + 1]);
         }
 
-        let file_contents =
-            std::fs::read(file.buffered_writer.as_inner().as_inner().path()).unwrap();
+        let file_contents = std::fs::read(file.buffered_writer.as_inner().path()).unwrap();
         assert_eq!(file_contents, &content[0..cap]);
 
         let buffer_contents = file.buffered_writer.inspect_buffer();
@@ -392,13 +386,7 @@ mod tests {
             &file.load_to_io_buf(&ctx).await.unwrap(),
             &content[0..cap + cap / 2]
         );
-        let md = file
-            .buffered_writer
-            .as_inner()
-            .as_inner()
-            .path()
-            .metadata()
-            .unwrap();
+        let md = file.buffered_writer.as_inner().path().metadata().unwrap();
         assert_eq!(
             md.len(),
             cap.into_u64(),
