@@ -222,6 +222,15 @@ impl PhysicalStorage {
         )
     }
 
+    /// Call fsync if config requires so.
+    async fn fsync_file(&mut self, file: &File) -> Result<()> {
+        if !self.no_sync {
+            self.metrics
+                .observe_flush_seconds(time_io_closure(file.sync_all()).await?);
+        }
+        Ok(())
+    }
+
     /// Call fdatasync if config requires so.
     async fn fdatasync_file(&mut self, file: &File) -> Result<()> {
         if !self.no_sync {
@@ -494,7 +503,7 @@ impl Storage for PhysicalStorage {
         // Fill end with zeroes
         file.set_len(xlogoff as u64).await?;
         file.set_len(self.wal_seg_size as u64).await?;
-        self.fdatasync_file(&file).await?;
+        self.fsync_file(&file).await?;
 
         if !is_partial {
             // Make segment partial once again
