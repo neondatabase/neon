@@ -6,7 +6,6 @@ pub mod health_server;
 
 use std::time::Duration;
 
-use anyhow::bail;
 use bytes::Bytes;
 use http::Method;
 use http_body_util::BodyExt;
@@ -16,7 +15,6 @@ use reqwest_middleware::RequestBuilder;
 pub(crate) use reqwest_middleware::{ClientWithMiddleware, Error};
 pub(crate) use reqwest_retry::policies::ExponentialBackoff;
 pub(crate) use reqwest_retry::RetryTransientMiddleware;
-use serde::de::DeserializeOwned;
 use thiserror::Error;
 
 use crate::metrics::{ConsoleRequest, Metrics};
