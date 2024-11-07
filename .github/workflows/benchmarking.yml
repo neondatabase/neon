@@ -62,7 +62,7 @@ jobs:
       PG_CONFIG: /tmp/neon/pg_install/v16/bin/pg_config
     runs-on: [ self-hosted, us-east-2, x64 ]
     container:
-      image: neondatabase/build-tools:2bd63b9221863a3d6a791da2257a865c9eaeded538fafe4992631a707dfad2a0-bookworm-x64
+      image: neondatabase/build-tools:222267ccf8fc268c0d119889d2d518264b121db3c834bc359441a9497d29e567-bookworm-x64
       credentials:
         username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
         password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
@@ -92,8 +92,8 @@ jobs:
 
     - name: Invoke pgcopydb
       run: |
-        pgcopydb --version
-        pgcopydb --help
+        LD_LIBRARY_PATH=/pgcopydb/lib /pgcopydb/bin/pgcopydb --version
+        LD_LIBRARY_PATH=/pgcopydb/lib /pgcopydb/bin/pgcopydb --help
 
   bench:
     if: ${{ github.event.inputs.run_only_ingest_tests == 'false' || github.event.inputs.run_only_ingest_tests == null }}
