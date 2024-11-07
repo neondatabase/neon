@@ -47,15 +47,12 @@ pub(crate) async fn offload_timeline(
     match is_archived {
         Some(true) => (),
         Some(false) => {
-            tracing::warn!(?is_archived, "tried offloading a non-archived timeline");
+            tracing::warn!("tried offloading a non-archived timeline");
             return Err(OffloadError::NotArchived);
         }
         None => {
             // This is legal: calls to this function can race with the timeline shutting down
-            tracing::info!(
-                ?is_archived,
-                "tried offloading a timeline whose remote storage is not initialized"
-            );
+            tracing::info!("tried offloading a timeline whose remote storage is not initialized");
             return Err(OffloadError::Cancelled);
         }
     }
