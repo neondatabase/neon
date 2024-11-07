@@ -55,13 +55,8 @@ RUN mkdir -p /pgcopydb/bin && \
     chmod -R 755 /pgcopydb && \
     chown -R nonroot:nonroot /pgcopydb
         
-# COPY --from=pgcopydb_builder \
-#     /usr/lib/postgresql/16/bin/pgcopydb /pgcopydb/bin/ \
-#     /lib/aarch64-linux-gnu/libpq.so.5 /pgcopydb/lib/ \
-#     /lib/aarch64-linux-gnu/libgc.so.1 /pgcopydb/lib/
 COPY --from=pgcopydb_builder /usr/lib/postgresql/16/bin/pgcopydb /pgcopydb/bin/pgcopydb 
 COPY --from=pgcopydb_builder /lib/aarch64-linux-gnu/libpq.so.5 /pgcopydb/lib/libpq.so.5 
-#COPY --from=pgcopydb_builder /lib/aarch64-linux-gnu/libgc.so.1 /pgcopydb/lib/libgc.so.1 
 
 # System deps
 #
