@@ -2,7 +2,7 @@
 //! to glue together SafeKeeper and all other background services.
 
 use anyhow::{anyhow, bail, Result};
-use camino::Utf8PathBuf;
+use camino::{Utf8Path, Utf8PathBuf};
 use remote_storage::RemotePath;
 use safekeeper_api::models::TimelineTermBumpResponse;
 use serde::{Deserialize, Serialize};
@@ -325,8 +325,17 @@ pub struct SharedState {
 }
 
 impl SharedState {
+    /// Creates a new SharedState.
+    pub fn new(sk: StateSK) -> Self {
+        Self {
+            sk,
+            peers_info: PeersInfo(vec![]),
+            wal_removal_on_hold: false,
+        }
+    }
+
     /// Restore SharedState from control file. If file doesn't exist, bails out.
-    fn restore(conf: &SafeKeeperConf, ttid: &TenantTimelineId) -> Result<Self> {
+    pub fn restore(conf: &SafeKeeperConf, ttid: &TenantTimelineId) -> Result<Self> {
         let timeline_dir = get_timeline_dir(conf, ttid);
         let control_store = control_file::FileStorage::restore_new(&timeline_dir, conf.no_sync)?;
         if control_store.server.wal_seg_size == 0 {
@@ -352,11 +361,7 @@ impl SharedState {
             }
         };
 
-        Ok(Self {
-            sk,
-            peers_info: PeersInfo(vec![]),
-            wal_removal_on_hold: false,
-        })
+        Ok(Self::new(sk))
     }
 
     pub(crate) fn get_wal_seg_size(&self) -> usize {
@@ -480,11 +485,13 @@ pub struct Timeline {
 }
 
 impl Timeline {
-    /// Load existing timeline from disk.
-    pub fn load_timeline(conf: &SafeKeeperConf, ttid: TenantTimelineId) -> Result<Arc<Timeline>> {
-        let _enter = info_span!("load_timeline", timeline = %ttid.timeline_id).entered();
-
-        let shared_state = SharedState::restore(conf, &ttid)?;
+    /// Constructs a new timeline.
+    pub fn new(
+        ttid: TenantTimelineId,
+        timeline_dir: &Utf8Path,
+        remote_path: &RemotePath,
+        shared_state: SharedState,
+    ) -> Arc<Self> {
         let (commit_lsn_watch_tx, commit_lsn_watch_rx) =
             watch::channel(shared_state.sk.state().commit_lsn);
         let (term_flush_lsn_watch_tx, term_flush_lsn_watch_rx) = watch::channel(TermLsn::from((
@@ -494,10 +501,11 @@ impl Timeline {
         let (shared_state_version_tx, shared_state_version_rx) = watch::channel(0);
 
         let walreceivers = WalReceivers::new();
-        let remote_path = remote_timeline_path(&ttid)?;
-        Ok(Arc::new(Timeline {
+
+        Arc::new(Self {
             ttid,
-            remote_path,
+            remote_path: remote_path.to_owned(),
+            timeline_dir: timeline_dir.to_owned(),
             commit_lsn_watch_tx,
             commit_lsn_watch_rx,
             term_flush_lsn_watch_tx,
@@ -508,13 +516,28 @@ impl Timeline {
             walsenders: WalSenders::new(walreceivers.clone()),
             walreceivers,
             cancel: CancellationToken::default(),
-            timeline_dir: get_timeline_dir(conf, &ttid),
             manager_ctl: ManagerCtl::new(),
             broker_active: AtomicBool::new(false),
             wal_backup_active: AtomicBool::new(false),
             last_removed_segno: AtomicU64::new(0),
             mgr_status: AtomicStatus::new(),
-        }))
+        })
+    }
+
+    /// Load existing timeline from disk.
+    pub fn load_timeline(conf: &SafeKeeperConf, ttid: TenantTimelineId) -> Result<Arc<Timeline>> {
+        let _enter = info_span!("load_timeline", timeline = %ttid.timeline_id).entered();
+
+        let shared_state = SharedState::restore(conf, &ttid)?;
+        let timeline_dir = get_timeline_dir(conf, &ttid);
+        let remote_path = remote_timeline_path(&ttid)?;
+
+        Ok(Timeline::new(
+            ttid,
+            &timeline_dir,
+            &remote_path,
+            shared_state,
+        ))
     }
 
     /// Initialize fresh timeline on disk and start background tasks. If init
@@ -1128,13 +1151,13 @@ async fn delete_dir(path: &Utf8PathBuf) -> Result<bool> {
 
 /// Get a path to the tenant directory. If you just need to get a timeline directory,
 /// use WalResidentTimeline::get_timeline_dir instead.
-pub(crate) fn get_tenant_dir(conf: &SafeKeeperConf, tenant_id: &TenantId) -> Utf8PathBuf {
+pub fn get_tenant_dir(conf: &SafeKeeperConf, tenant_id: &TenantId) -> Utf8PathBuf {
     conf.workdir.join(tenant_id.to_string())
 }
 
 /// Get a path to the timeline directory. If you need to read WAL files from disk,
 /// use WalResidentTimeline::get_timeline_dir instead. This function does not check
 /// timeline eviction status and WAL files might not be present on disk.
-pub(crate) fn get_timeline_dir(conf: &SafeKeeperConf, ttid: &TenantTimelineId) -> Utf8PathBuf {
+pub fn get_timeline_dir(conf: &SafeKeeperConf, ttid: &TenantTimelineId) -> Utf8PathBuf {
     get_tenant_dir(conf, &ttid.tenant_id).join(ttid.timeline_id.to_string())
 }

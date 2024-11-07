@@ -78,7 +78,7 @@ pub struct AuthenticationConfig {
     pub jwks_cache: JwkCache,
     pub is_auth_broker: bool,
     pub accept_jwts: bool,
-    pub webauth_confirmation_timeout: tokio::time::Duration,
+    pub console_redirect_confirmation_timeout: tokio::time::Duration,
 }
 
 impl TlsConfig {
@@ -271,7 +271,7 @@ impl CertResolver {
         // auth-broker does not use SNI and instead uses the Neon-Connection-String header.
         // Auth broker has the subdomain `apiauth` we need to remove for the purposes of validating the Neon-Connection-String.
         //
-        // Console Web proxy does not use any wildcard domains and does not need any certificate selection or conn string
+        // Console Redirect proxy does not use any wildcard domains and does not need any certificate selection or conn string
         // validation, so let's we can continue with any common-name
         let common_name = if let Some(s) = common_name.strip_prefix("CN=*.") {
             s.to_string()
