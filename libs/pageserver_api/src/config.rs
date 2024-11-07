@@ -106,6 +106,7 @@ pub struct ConfigToml {
     pub ephemeral_bytes_per_memory_kb: usize,
     pub l0_flush: Option<crate::models::L0FlushConfig>,
     pub virtual_file_io_mode: Option<crate::models::virtual_file::IoMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub no_sync: Option<bool>,
 }
 

@@ -251,7 +251,7 @@ pub struct NeonLocalInitPageserverConf {
     pub listen_http_addr: String,
     pub pg_auth_type: AuthType,
     pub http_auth_type: AuthType,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub no_sync: bool,
     #[serde(flatten)]
     pub other: HashMap<String, toml::Value>,
