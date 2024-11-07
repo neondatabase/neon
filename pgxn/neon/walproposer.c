@@ -1361,29 +1361,35 @@ SendAppendRequests(Safekeeper *sk)
 		if (sk->active_state == SS_ACTIVE_READ_WAL)
 		{
 			char	   *errmsg;
+			int			req_len;
 
 			req = &sk->appendRequest;
+			req_len = req->endLsn - req->beginLsn;
 
-			switch (wp->api.wal_read(sk,
-									 &sk->outbuf.data[sk->outbuf.len],
-									 req->beginLsn,
-									 req->endLsn - req->beginLsn,
-									 &errmsg))
+			/* We send zero sized AppenRequests as heartbeats; don't wal_read for these. */
+			if (req_len > 0)
 			{
-				case NEON_WALREAD_SUCCESS:
-					break;
-				case NEON_WALREAD_WOULDBLOCK:
-					return true;
-				case NEON_WALREAD_ERROR:
-					wp_log(WARNING, "WAL reading for node %s:%s failed: %s",
-						   sk->host, sk->port, errmsg);
-					ShutdownConnection(sk);
-					return false;
-				default:
-					Assert(false);
+				switch (wp->api.wal_read(sk,
+										&sk->outbuf.data[sk->outbuf.len],
+										req->beginLsn,
+										req_len,
+										&errmsg))
+				{
+					case NEON_WALREAD_SUCCESS:
+						break;
+					case NEON_WALREAD_WOULDBLOCK:
+						return true;
+					case NEON_WALREAD_ERROR:
+						wp_log(WARNING, "WAL reading for node %s:%s failed: %s",
+							sk->host, sk->port, errmsg);
+						ShutdownConnection(sk);
+						return false;
+					default:
+						Assert(false);
+				}
 			}
 
-			sk->outbuf.len += req->endLsn - req->beginLsn;
+			sk->outbuf.len += req_len;
 
 			writeResult = wp->api.conn_async_write(sk, sk->outbuf.data, sk->outbuf.len);
 
