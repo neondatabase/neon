@@ -28,14 +28,13 @@ use std::time::Duration;
 use std::time::Instant;
 use std::time::SystemTime;
 
-use pageserver_api::key::Key;
 use pageserver_api::shard::ShardIdentity;
 use postgres_ffi::fsm_logical_to_physical;
 use postgres_ffi::walrecord::*;
 use postgres_ffi::{dispatch_pgversion, enum_pgversion, enum_pgversion_dispatch, TimestampTz};
 use wal_decoder::models::*;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use bytes::{Buf, Bytes};
 use tracing::*;
 use utils::failpoint_support;
@@ -51,7 +50,6 @@ use crate::ZERO_PAGE;
 use pageserver_api::key::rel_block_to_key;
 use pageserver_api::record::NeonWalRecord;
 use pageserver_api::reltag::{BlockNumber, RelTag, SlruKind};
-use pageserver_api::value::Value;
 use postgres_ffi::pg_constants;
 use postgres_ffi::relfile_utils::{FSM_FORKNUM, INIT_FORKNUM, MAIN_FORKNUM, VISIBILITYMAP_FORKNUM};
 use postgres_ffi::TransactionId;
@@ -156,12 +154,12 @@ impl WalIngest {
         WAL_INGEST.records_received.inc();
         let prev_len = modification.len();
 
-        modification.set_lsn(interpreted.lsn)?;
+        modification.set_lsn(interpreted.end_lsn)?;
 
         if matches!(interpreted.flush_uncommitted, FlushUncommittedRecords::Yes) {
             // Records of this type should always be preceded by a commit(), as they
             // rely on reading data pages back from the Timeline.
-            assert!(!modification.has_dirty_data_pages());
+            assert!(!modification.has_dirty_data());
         }
 
         assert!(!self.checkpoint_modified);
@@ -275,28 +273,9 @@ impl WalIngest {
             }
         }
 
-        // Iterate through all the key value pairs provided in the interpreted block
-        // and update the modification currently in-flight to include them.
-        for (compact_key, maybe_value) in interpreted.blocks.into_iter() {
-            let (rel, blk) = Key::from_compact(compact_key).to_rel_block()?;
-            match maybe_value {
-                Some(Value::Image(img)) => {
-                    self.put_rel_page_image(modification, rel, blk, img, ctx)
-                        .await?;
-                }
-                Some(Value::WalRecord(rec)) => {
-                    self.put_rel_wal_record(modification, rel, blk, rec, ctx)
-                        .await?;
-                }
-                None => {
-                    // Shard 0 tracks relation sizes. We will observe
-                    // its blkno in case it implicitly extends a relation.
-                    assert!(self.shard.is_shard_zero());
-                    self.observe_decoded_block(modification, rel, blk, ctx)
-                        .await?;
-                }
-            }
-        }
+        modification
+            .ingest_batch(interpreted.batch, &self.shard, ctx)
+            .await?;
 
         // If checkpoint data was updated, store the new version in the repository
         if self.checkpoint_modified {
@@ -309,8 +288,6 @@ impl WalIngest {
         // Note that at this point this record is only cached in the modification
         // until commit() is called to flush the data into the repository and update
         // the latest LSN.
-
-        modification.on_record_end();
 
         Ok(modification.len() > prev_len)
     }
@@ -332,17 +309,6 @@ impl WalIngest {
         }
 
         Ok((epoch as u64) << 32 | xid as u64)
-    }
-
-    /// Do not store this block, but observe it for the purposes of updating our relation size state.
-    async fn observe_decoded_block(
-        &mut self,
-        modification: &mut DatadirModification<'_>,
-        rel: RelTag,
-        blkno: BlockNumber,
-        ctx: &RequestContext,
-    ) -> Result<(), PageReconstructError> {
-        self.handle_rel_extend(modification, rel, blkno, ctx).await
     }
 
     async fn ingest_clear_vm_bits(
@@ -1248,6 +1214,7 @@ impl WalIngest {
         Ok(())
     }
 
+    #[cfg(test)]
     async fn put_rel_page_image(
         &mut self,
         modification: &mut DatadirModification<'_>,
@@ -1297,36 +1264,7 @@ impl WalIngest {
         let new_nblocks = blknum + 1;
         // Check if the relation exists. We implicitly create relations on first
         // record.
-        // TODO: would be nice if to be more explicit about it
-
-        // Get current size and put rel creation if rel doesn't exist
-        //
-        // NOTE: we check the cache first even though get_rel_exists and get_rel_size would
-        //       check the cache too. This is because eagerly checking the cache results in
-        //       less work overall and 10% better performance. It's more work on cache miss
-        //       but cache miss is rare.
-        let old_nblocks = if let Some(nblocks) = modification
-            .tline
-            .get_cached_rel_size(&rel, modification.get_lsn())
-        {
-            nblocks
-        } else if !modification
-            .tline
-            .get_rel_exists(rel, Version::Modified(modification), ctx)
-            .await?
-        {
-            // create it with 0 size initially, the logic below will extend it
-            modification
-                .put_rel_creation(rel, 0, ctx)
-                .await
-                .context("Relation Error")?;
-            0
-        } else {
-            modification
-                .tline
-                .get_rel_size(rel, Version::Modified(modification), ctx)
-                .await?
-        };
+        let old_nblocks = modification.create_relation_if_required(rel, ctx).await?;
 
         if new_nblocks > old_nblocks {
             //info!("extending {} {} to {}", rel, old_nblocks, new_nblocks);
@@ -1553,25 +1491,21 @@ mod tests {
         walingest
             .put_rel_page_image(&mut m, TESTREL_A, 0, test_img("foo blk 0 at 2"), &ctx)
             .await?;
-        m.on_record_end();
         m.commit(&ctx).await?;
         let mut m = tline.begin_modification(Lsn(0x30));
         walingest
             .put_rel_page_image(&mut m, TESTREL_A, 0, test_img("foo blk 0 at 3"), &ctx)
             .await?;
-        m.on_record_end();
         m.commit(&ctx).await?;
         let mut m = tline.begin_modification(Lsn(0x40));
         walingest
             .put_rel_page_image(&mut m, TESTREL_A, 1, test_img("foo blk 1 at 4"), &ctx)
             .await?;
-        m.on_record_end();
         m.commit(&ctx).await?;
         let mut m = tline.begin_modification(Lsn(0x50));
         walingest
             .put_rel_page_image(&mut m, TESTREL_A, 2, test_img("foo blk 2 at 5"), &ctx)
             .await?;
-        m.on_record_end();
         m.commit(&ctx).await?;
 
         assert_current_logical_size(&tline, Lsn(0x50));
@@ -1713,7 +1647,6 @@ mod tests {
         walingest
             .put_rel_page_image(&mut m, TESTREL_A, 1, test_img("foo blk 1"), &ctx)
             .await?;
-        m.on_record_end();
         m.commit(&ctx).await?;
         assert_eq!(
             tline
@@ -1739,7 +1672,6 @@ mod tests {
         walingest
             .put_rel_page_image(&mut m, TESTREL_A, 1500, test_img("foo blk 1500"), &ctx)
             .await?;
-        m.on_record_end();
         m.commit(&ctx).await?;
         assert_eq!(
             tline
