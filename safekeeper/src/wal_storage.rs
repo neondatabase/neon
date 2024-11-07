@@ -18,6 +18,7 @@ use std::cmp::{max, min};
 use std::future::Future;
 use std::io::{self, SeekFrom};
 use std::pin::Pin;
+use std::time::Duration;
 use tokio::fs::{self, remove_file, File, OpenOptions};
 use tokio::io::{AsyncRead, AsyncWriteExt};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -262,15 +263,22 @@ impl PhysicalStorage {
 
             write_zeroes(&mut file, self.wal_seg_size).await?;
 
-            // Note: this doesn't get into observe_flush_seconds metric. But
-            // segment init should be separate metric, if any.
-            if let Err(e) = durable_rename(&tmp_path, &wal_file_partial_path, !self.no_sync).await {
-                // Probably rename succeeded, but fsync of it failed. Remove
-                // the file then to avoid using it.
-                remove_file(wal_file_partial_path)
-                    .await
-                    .or_else(utils::fs_ext::ignore_not_found)?;
-                return Err(e.into());
+            match durable_rename(&tmp_path, &wal_file_partial_path, !self.no_sync).await {
+                Ok(fsync_latencies) => {
+                    for latency in fsync_latencies {
+                        if latency != Duration::ZERO {
+                            self.metrics.observe_flush_seconds(latency.as_secs_f64());
+                        }
+                    }
+                }
+                Err(e) => {
+                    // Probably rename succeeded, but fsync of it failed. Remove
+                    // the file then to avoid using it.
+                    remove_file(wal_file_partial_path)
+                        .await
+                        .or_else(utils::fs_ext::ignore_not_found)?;
+                    return Err(e.into());
+                }
             }
             Ok((file, true))
         }

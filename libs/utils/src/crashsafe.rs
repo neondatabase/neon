@@ -1,4 +1,5 @@
 use std::os::fd::AsRawFd;
+use std::time::Duration;
 use std::{
     borrow::Cow,
     fs::{self, File},
@@ -125,6 +126,7 @@ pub async fn fsync_async_opt(
 
 /// Like postgres' durable_rename, renames file issuing fsyncs do make it
 /// durable. After return, file and rename are guaranteed to be persisted.
+/// Returns the fsync latencies, for metrics (this is kind of a kludge).
 ///
 /// Unlike postgres, it only does fsyncs to 1) file to be renamed to make
 /// contents durable; 2) its directory entry to make rename durable 3) again to
@@ -142,24 +144,35 @@ pub async fn durable_rename(
     old_path: impl AsRef<Utf8Path>,
     new_path: impl AsRef<Utf8Path>,
     do_fsync: bool,
-) -> io::Result<()> {
+) -> io::Result<[Duration; 3]> {
+    async fn maybe_fsync_with_latency(path: &Utf8Path, do_fsync: bool) -> io::Result<Duration> {
+        if !do_fsync {
+            return Ok(Duration::ZERO);
+        }
+        let start = std::time::Instant::now();
+        fsync_async(path).await?;
+        Ok(start.elapsed())
+    }
+
+    let mut latency = [Duration::ZERO; 3];
+
     // first fsync the file
-    fsync_async_opt(old_path.as_ref(), do_fsync).await?;
+    latency[0] = maybe_fsync_with_latency(old_path.as_ref(), do_fsync).await?;
 
     // Time to do the real deal.
     tokio::fs::rename(old_path.as_ref(), new_path.as_ref()).await?;
 
     // Postgres'ish fsync of renamed file.
-    fsync_async_opt(new_path.as_ref(), do_fsync).await?;
+    latency[1] = maybe_fsync_with_latency(new_path.as_ref(), do_fsync).await?;
 
     // Now fsync the parent
     let parent = match new_path.as_ref().parent() {
         Some(p) => p,
         None => Utf8Path::new("./"), // assume current dir if there is no parent
     };
-    fsync_async_opt(parent, do_fsync).await?;
+    latency[2] = maybe_fsync_with_latency(parent, do_fsync).await?;
 
-    Ok(())
+    Ok(latency)
 }
 
 /// Writes a file to the specified `final_path` in a crash safe fasion, using [`std::fs`].
