@@ -1959,10 +1959,7 @@ impl TenantManager {
             attempt.before_reset_tenant();
 
             let (_guard, progress) = utils::completion::channel();
-            match tenant
-                .shutdown(progress, ShutdownMode::FreezeAndFlush)
-                .await
-            {
+            match tenant.shutdown(progress, ShutdownMode::Flush).await {
                 Ok(()) => {
                     slot_guard.drop_old_value().expect("it was just shutdown");
                 }
