@@ -41,9 +41,9 @@ RUN if [ "${DEBIAN_VERSION}" = "bookworm" ]; then \
         mkdir -p /pgcopydb/lib && \
         cp "$libpq_path" /pgcopydb/lib/; \
     else \
-        # copy command below will faile if we don't have dummy files, so we create them for other debian versions
+        # copy command below will fail if we don't have dummy files, so we create them for other debian versions
         mkdir -p /usr/lib/postgresql/16/bin && touch /usr/lib/postgresql/16/bin/pgcopydb && \
-        mkdir -p mkdir -p /pgcopydb/lib && touch  /mkdir -p /pgcopydb/lib/libpq.so.5; \
+        mkdir -p mkdir -p /pgcopydb/lib && touch /pgcopydb/lib/libpq.so.5; \
     fi
 
 FROM debian:${DEBIAN_VERSION}-slim AS build_tools
