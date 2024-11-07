@@ -4090,6 +4090,7 @@ impl Timeline {
     ) -> Result<ImageLayerCreationOutcome, CreateImageLayersError> {
         // Metadata keys image layer creation.
         let mut reconstruct_state = ValuesReconstructState::default();
+        let begin = Instant::now();
         let data = self
             .get_vectored_impl(partition.clone(), lsn, &mut reconstruct_state, ctx)
             .await?;
@@ -4106,14 +4107,11 @@ impl Timeline {
             (new_data, total_kb_retrieved / 1024, total_keys_retrieved)
         };
         let delta_files_accessed = reconstruct_state.get_delta_layers_visited();
+        let elapsed = begin.elapsed();
 
         let trigger_generation = delta_files_accessed as usize >= MAX_AUX_FILE_V2_DELTAS;
-        debug!(
-            trigger_generation,
-            delta_files_accessed,
-            total_kb_retrieved,
-            total_keys_retrieved,
-            "generate metadata images"
+        info!(
+            "metadata key compaction: trigger_generation={trigger_generation}, delta_files_accessed={delta_files_accessed}, total_kb_retrieved={total_kb_retrieved}, total_keys_retrieved={total_keys_retrieved}, read_time={}s", elapsed.as_secs_f64()
         );
 
         if !trigger_generation && mode == ImageLayerCreationMode::Try {
