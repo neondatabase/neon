@@ -2004,7 +2004,7 @@ async fn timeline_offload_handler(
         }
         if let (false, reason) = timeline.can_offload() {
             return Err(ApiError::PreconditionFailed(
-                format!("Timeline::can_offload() check failed: {:?}", reason) .into(),
+                format!("Timeline::can_offload() check failed: {}", reason) .into(),
             ));
         }
         offload_timeline(&tenant, &timeline)
