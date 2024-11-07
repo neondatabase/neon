@@ -20,7 +20,8 @@
 \* Some ideas how to break it to play around to get a feeling:
 \* - replace Quorums with BadQuorums.
 \* - remove 'don't commit entries from previous terms separately' rule in
-\*   CommitEntries and observe figure 8 from the raft paper.
+\*   CommitEntries and observe figure 8 from the raft paper. 
+\*   With p2a3t4l4 32 steps error was found in 1h on 80 cores.
 
 EXTENDS Integers, Sequences, FiniteSets, TLC
 
