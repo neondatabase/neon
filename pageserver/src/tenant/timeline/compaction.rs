@@ -1991,6 +1991,7 @@ impl Timeline {
         )
         .await?;
 
+        #[derive(Default)]
         struct RewritingLayers {
             before: Option<DeltaLayerWriter>,
             after: Option<DeltaLayerWriter>,
@@ -2033,10 +2034,7 @@ impl Timeline {
                     }
                     let rewriter = delta_layer_rewriters
                         .entry(desc.clone())
-                        .or_insert_with(|| RewritingLayers {
-                            before: None,
-                            after: None,
-                        });
+                        .or_insert_with_default();
                     let rewriter = if key < compaction_key_range.start {
                         if rewriter.before.is_none() {
                             rewriter.before = Some(
