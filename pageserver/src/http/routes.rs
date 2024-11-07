@@ -2182,6 +2182,8 @@ async fn timeline_detach_ancestor_handler(
                 })?;
         }
 
+        tracing::info!("all timeline upload queues are drained");
+
         let timeline = tenant.get_timeline(timeline_id, true)?;
 
         let progress = timeline
