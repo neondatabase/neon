@@ -194,20 +194,45 @@ impl JwkCacheEntryLock {
                             tracing::warn!(url=?rule.jwks_url, error=?e, "could not decode JWKs");
                         }
                         Ok(jwks) => {
+                            // size_of::<&RawValue>() == 16
+                            // size_of::<jose_jwk::Jwk>() == 288
+                            // better to not pre-allocate this as it might be pretty large - especially if it has many
+                            // keys we don't want or need.
+                            // trivial 'attack': `{"keys":[` + repeat(`0`).take(30000).join(`,`) + `]}`
+                            // this would consume 8MiB just like that!
                             let mut keys = vec![];
                             let mut failed = 0;
                             for key in jwks.keys {
-                                match serde_json::from_str(key.get()) {
-                                    Ok(key) => keys.push(key),
+                                match serde_json::from_str::<jose_jwk::Jwk>(key.get()) {
+                                    Ok(key) => {
+                                        // if `use` (called `cls` in rust) is specified to be something other than signing,
+                                        // we can skip storing it.
+                                        if key
+                                            .prm
+                                            .cls
+                                            .as_ref()
+                                            .is_some_and(|c| *c != jose_jwk::Class::Signing)
+                                        {
+                                            continue;
+                                        }
+
+                                        keys.push(key);
+                                    }
                                     Err(e) => {
                                         tracing::debug!(url=?rule.jwks_url, failed=?e, "could not decode JWK");
                                         failed += 1;
                                     }
                                 }
                             }
+                            keys.shrink_to_fit();
 
                             if failed > 0 {
                                 tracing::warn!(url=?rule.jwks_url, failed, "could not decode JWKs");
+                            }
+
+                            if keys.is_empty() {
+                                tracing::warn!(url=?rule.jwks_url, "no valid JWKs found inside the response body");
+                                continue;
                             }
 
                             let jwks = jose_jwk::JwkSet { keys };
