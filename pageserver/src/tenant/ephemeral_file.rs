@@ -19,6 +19,7 @@ use tracing::error;
 
 use std::io;
 use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
 use utils::id::TimelineId;
 
 pub struct EphemeralFile {
@@ -51,15 +52,17 @@ impl EphemeralFile {
                 "ephemeral-{filename_disambiguator}"
             )));
 
-        let file = VirtualFile::open_with_options(
-            &filename,
-            virtual_file::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true),
-            ctx,
-        )
-        .await?;
+        let file = Arc::new(
+            VirtualFile::open_with_options(
+                &filename,
+                virtual_file::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(true),
+                ctx,
+            )
+            .await?,
+        );
 
         let page_cache_file_id = page_cache::next_file_id(); // XXX get rid, we're not page-caching anymore
 

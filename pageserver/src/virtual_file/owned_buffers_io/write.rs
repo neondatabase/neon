@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use bytes::BytesMut;
 use tokio_epoll_uring::IoBuf;
 
@@ -32,7 +34,7 @@ pub trait OwnedAsyncWriter {
 /// In such cases, a different implementation that always buffers in memory
 /// may be preferable.
 pub struct BufferedWriter<B, W> {
-    writer: W,
+    writer: Arc<W>,
     /// invariant: always remains Some(buf) except
     /// - while IO is ongoing => goes back to Some() once the IO completed successfully
     /// - after an IO error => stays `None` forever
@@ -48,7 +50,7 @@ where
     Buf: IoBuf + Send,
     W: OwnedAsyncWriter,
 {
-    pub fn new(writer: W, buf: B) -> Self {
+    pub fn new(writer: Arc<W>, buf: B) -> Self {
         Self {
             writer,
             buf: Some(buf),
@@ -70,7 +72,10 @@ where
     }
 
     #[cfg_attr(target_os = "macos", allow(dead_code))]
-    pub async fn flush_and_into_inner(mut self, ctx: &RequestContext) -> std::io::Result<(u64, W)> {
+    pub async fn flush_and_into_inner(
+        mut self,
+        ctx: &RequestContext,
+    ) -> std::io::Result<(u64, Arc<W>)> {
         self.flush(ctx).await?;
 
         let Self {
@@ -290,7 +295,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_buffered_writes_only() -> std::io::Result<()> {
-        let recorder = RecorderWriter::default();
+        let recorder = Arc::new(RecorderWriter::default());
         let mut writer = BufferedWriter::new(recorder, BytesMut::with_capacity(2));
         write!(writer, b"a");
         write!(writer, b"b");
@@ -307,7 +312,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_passthrough_writes_only() -> std::io::Result<()> {
-        let recorder = RecorderWriter::default();
+        let recorder = Arc::new(RecorderWriter::default());
         let mut writer = BufferedWriter::new(recorder, BytesMut::with_capacity(2));
         write!(writer, b"abc");
         write!(writer, b"de");
@@ -323,8 +328,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_passthrough_write_with_nonempty_buffer() -> std::io::Result<()> {
-        let recorder = RecorderWriter::default();
-        let mut writer = BufferedWriter::new(recorder, BytesMut::with_capacity(2));
+        let recorder = Arc::new(RecorderWriter::default());
+        let mut writer =
+            BufferedWriter::<_, RecorderWriter>::new(recorder, BytesMut::with_capacity(2));
         write!(writer, b"a");
         write!(writer, b"bc");
         write!(writer, b"d");
@@ -341,8 +347,9 @@ mod tests {
     async fn test_write_all_borrowed_always_goes_through_buffer() -> std::io::Result<()> {
         let ctx = test_ctx();
         let ctx = &ctx;
-        let recorder = RecorderWriter::default();
-        let mut writer = BufferedWriter::new(recorder, BytesMut::with_capacity(2));
+        let recorder = Arc::new(RecorderWriter::default());
+        let mut writer =
+            BufferedWriter::<_, RecorderWriter>::new(recorder, BytesMut::with_capacity(2));
 
         writer.write_buffered_borrowed(b"abc", ctx).await?;
         writer.write_buffered_borrowed(b"d", ctx).await?;

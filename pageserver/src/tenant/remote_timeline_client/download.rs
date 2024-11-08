@@ -6,6 +6,7 @@
 use std::collections::HashSet;
 use std::future::Future;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use anyhow::{anyhow, Context};
@@ -206,10 +207,14 @@ async fn download_object<'a>(
             use crate::virtual_file::owned_buffers_io;
             use bytes::BytesMut;
             async {
-                let destination_file = VirtualFile::create(dst_path, ctx)
-                    .await
-                    .with_context(|| format!("create a destination file for layer '{dst_path}'"))
-                    .map_err(DownloadError::Other)?;
+                let destination_file = Arc::new(
+                    VirtualFile::create(dst_path, ctx)
+                        .await
+                        .with_context(|| {
+                            format!("create a destination file for layer '{dst_path}'")
+                        })
+                        .map_err(DownloadError::Other)?,
+                );
 
                 let mut download = storage
                     .download(src_path, &DownloadOpts::default(), cancel)
