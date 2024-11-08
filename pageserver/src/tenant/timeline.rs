@@ -852,6 +852,10 @@ pub(crate) enum ShutdownMode {
     /// While we are flushing, we continue to accept read I/O for LSNs ingested before
     /// the call to [`Timeline::shutdown`].
     FreezeAndFlush,
+    /// Only flush the layers to the remote storage without freezing any open layers. This is the
+    /// mode used by ancestor detach and any other operations that reloads a tenant but not increasing
+    /// the generation number.
+    Flush,
     /// Shut down immediately, without waiting for any open layers to flush.
     Hard,
 }
@@ -1678,11 +1682,6 @@ impl Timeline {
     pub(crate) async fn shutdown(&self, mode: ShutdownMode) {
         debug_assert_current_span_has_tenant_and_timeline_id();
 
-        let try_freeze_and_flush = match mode {
-            ShutdownMode::FreezeAndFlush => true,
-            ShutdownMode::Hard => false,
-        };
-
         // Regardless of whether we're going to try_freeze_and_flush
         // or not, stop ingesting any more data. Walreceiver only provides
         // cancellation but no "wait until gone", because it uses the Timeline::gate.
@@ -1704,7 +1703,7 @@ impl Timeline {
         // ... and inform any waiters for newer LSNs that there won't be any.
         self.last_record_lsn.shutdown();
 
-        if try_freeze_and_flush {
+        if let ShutdownMode::FreezeAndFlush = mode {
             if let Some((open, frozen)) = self
                 .layers
                 .read()
@@ -1745,6 +1744,20 @@ impl Timeline {
                     // we have some extra WAL replay to do next time the timeline starts.
                     warn!("failed to freeze and flush: {e:#}");
                 }
+            }
+
+            // `self.remote_client.shutdown().await` above should have already flushed everything from the queue, but
+            // we also do a final check here to ensure that the queue is empty.
+            if !self.remote_client.no_pending_work() {
+                warn!("still have pending work in remote upload queue, but continuing shutting down anyways");
+            }
+        }
+
+        if let ShutdownMode::Flush = mode {
+            // drain the upload queue
+            self.remote_client.shutdown().await;
+            if !self.remote_client.no_pending_work() {
+                warn!("still have pending work in remote upload queue, but continuing shutting down anyways");
             }
         }
 
