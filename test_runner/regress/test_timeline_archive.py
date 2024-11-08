@@ -417,7 +417,7 @@ def test_timeline_retain_lsn(neon_env_builder: NeonEnvBuilder, offload_child: Op
                 "INSERT INTO foo SELECT v FROM (SELECT generate_series(1,2048), (random() * 409600)::int as v) as random_numbers",
             ]
         )
-        pre_branch_sum = endpoint.safe_psql("SELECT sum(key) from foo where key < 51200")
+        pre_branch_sum = endpoint.safe_psql("SELECT sum(key) from foo where v < 51200")
         log.info(f"Pre branch sum: {pre_branch_sum}")
         last_flush_lsn_upload(env, endpoint, tenant_id, root_timeline_id)
 
@@ -435,7 +435,7 @@ def test_timeline_retain_lsn(neon_env_builder: NeonEnvBuilder, offload_child: Op
                     "UPDATE foo SET v=(random() * 409600)::int WHERE v % 3 = 0",
                 ]
             )
-        post_branch_sum = endpoint.safe_psql("SELECT sum(key) from foo where key < 51200")
+        post_branch_sum = endpoint.safe_psql("SELECT sum(key) from foo where v < 51200")
         log.info(f"Post branch sum: {post_branch_sum}")
         last_flush_lsn_upload(env, endpoint, tenant_id, root_timeline_id)
 
@@ -517,5 +517,5 @@ def test_timeline_retain_lsn(neon_env_builder: NeonEnvBuilder, offload_child: Op
             )
     else:
         with env.endpoints.create_start("test_archived_branch", tenant_id=tenant_id) as endpoint:
-            sum = endpoint.safe_psql("SELECT sum(key) from foo where key < 51200")
+            sum = endpoint.safe_psql("SELECT sum(key) from foo where v < 51200")
             assert sum == pre_branch_sum
