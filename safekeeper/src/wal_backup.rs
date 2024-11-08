@@ -276,7 +276,7 @@ impl WalBackupTask {
                 {
                     retry_delay = min(retry_delay, backoff_delay);
                 }
-                tokio::time::sleep(Duration::from_millis(retry_delay));
+                tokio::time::sleep(Duration::from_millis(retry_delay)).await;
             }
 
             let commit_lsn = *self.commit_lsn_watch_rx.borrow();

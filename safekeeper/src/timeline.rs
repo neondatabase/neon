@@ -565,7 +565,7 @@ impl Timeline {
         // background tasks.
         tokio::spawn({
             let this = self.clone();
-            let conf = conf.clone;
+            let conf = conf.clone();
             async move {
                 let _gate_guard = gate_guard;
                 timeline_manager::main_task(
