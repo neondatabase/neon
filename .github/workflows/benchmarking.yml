@@ -54,6 +54,9 @@ concurrency:
 
 jobs:
   ingest:
+    strategy:
+      matrix:
+        target_project: [new_empty_project, large_existing_project]  
     permissions:
       contents: write
       statuses: write
@@ -91,15 +94,17 @@ jobs:
         prefix: latest
 
     - name: Create Neon Project
+      if: ${{ matrix.target_project == 'new_empty_project' }}
       id: create-neon-project-ingest-target
       uses: ./.github/actions/neon-project-create
       with:
         region_id: aws-us-east-2
         postgres_version: 16
-        compute_units: '[12, 12]' # we want to test large compute here to avoid compute-side bottleneck
+        compute_units: '[7, 7]' # we want to test large compute here to avoid compute-side bottleneck
         api_key: ${{ secrets.NEON_STAGING_API_KEY }}
 
     - name: Initialize Neon project and retrieve current backpressure seconds
+      if: ${{ matrix.target_project == 'new_empty_project' }}
       env:
           NEW_PROJECT_CONNSTR: ${{ steps.create-neon-project-ingest-target.outputs.dsn }}
           NEW_PROJECT_ID: ${{ steps.create-neon-project-ingest-target.outputs.project_id }}
@@ -109,6 +114,40 @@ jobs:
         ${PSQL} "${NEW_PROJECT_CONNSTR}" -c "CREATE EXTENSION neon; CREATE EXTENSION neon_utils;"
         BACKPRESSURE_TIME_BEFORE_INGEST=$(${PSQL} "${NEW_PROJECT_CONNSTR}" -t -c "select backpressure_throttling_time()/1000000;")
         echo "BACKPRESSURE_TIME_BEFORE_INGEST=${BACKPRESSURE_TIME_BEFORE_INGEST}" >> $GITHUB_ENV
+        echo "NEW_PROJECT_CONNSTR=${NEW_PROJECT_CONNSTR}" >> $GITHUB_ENV
+
+    - name: Create Neon Branch for large tenant
+      if: ${{ matrix.target_project == 'large_existing_project' }}
+      id: create-neon-branch-ingest-target
+      uses: ./.github/actions/neon-branch-create
+      with:
+        project_id: ${{ vars.BENCHMARK_INGEST_TARGET_PROJECTID }}
+        api_key: ${{ secrets.NEON_STAGING_API_KEY }}
+
+    - name: Initialize Neon project and retrieve current backpressure seconds
+      if: ${{ matrix.target_project == 'large_existing_project' }}
+      env:
+          NEW_PROJECT_CONNSTR: ${{ steps.create-neon-branch-ingest-target.outputs.dsn }}
+          NEW_BRANCH_ID: ${{ steps.create-neon-branch-ingest-target.outputs.branch_id }}
+      run: |
+        echo "Initializing Neon branch with branch_id: ${NEW_BRANCH_ID}"
+        export LD_LIBRARY_PATH=${PG_16_LIB_PATH}
+        # Extract the part before the database name
+        base_connstr="${NEW_PROJECT_CONNSTR%/*}"
+        # Extract the query parameters (if any) after the database name
+        query_params="${NEW_PROJECT_CONNSTR#*\?}"
+        # Reconstruct the new connection string
+        if [ "$query_params" != "$NEW_PROJECT_CONNSTR" ]; then
+          new_connstr="${base_connstr}/neondb?${query_params}"
+        else
+          new_connstr="${base_connstr}/neondb"
+        fi
+        ${PSQL} "${new_connstr}" -c "drop database ludicrous; CREATE DATABASE ludicrous;"
+        ${PSQL} "${NEW_PROJECT_CONNSTR}" -c "CREATE EXTENSION neon; CREATE EXTENSION neon_utils;"
+        BACKPRESSURE_TIME_BEFORE_INGEST=$(${PSQL} "${NEW_PROJECT_CONNSTR}" -t -c "select backpressure_throttling_time()/1000000;")
+        echo "BACKPRESSURE_TIME_BEFORE_INGEST=${BACKPRESSURE_TIME_BEFORE_INGEST}" >> $GITHUB_ENV
+        echo "NEW_PROJECT_CONNSTR=${NEW_PROJECT_CONNSTR}" >> $GITHUB_ENV
+      
         
     - name: Create pgcopydb filter file
       run: |
@@ -144,7 +183,6 @@ jobs:
 
     # - name: Invoke pgcopydb
     #   env:
-    #       NEW_PROJECT_CONNSTR: ${{ steps.create-neon-project-ingest-target.outputs.dsn }}
     #       BENCHMARK_INGEST_SOURCE_CONNSTR: ${{ secrets.BENCHMARK_INGEST_SOURCE_CONNSTR }}
     #   run: |
     #     export LD_LIBRARY_PATH=${PGCOPYDB_LIB_PATH}:${PG_16_LIB_PATH}
@@ -154,12 +192,12 @@ jobs:
     #     ${PGCOPYDB} --version
     #     ${PGCOPYDB} clone --skip-vacuum  --no-owner --no-acl --skip-db-properties --table-jobs 4 \
     #       --index-jobs 4 --restore-jobs 4 --split-tables-larger-than 10GB --skip-extensions \
-    #       --use-copy-binary --filters /tmp/pgcopydb_filter.txt 2>&1 | tee /tmp/pgcopydb_new_project.log
+    #       --use-copy-binary --filters /tmp/pgcopydb_filter.txt 2>&1 | tee /tmp/pgcopydb_${{ matrix.target_project }}.log
 
     # create dummy pgcopydb log to test parsing
     - name: create dummy log for parser test
       run: |
-        cat << EOF > /tmp/pgcopydb_new_project.log
+        cat << EOF > /tmp/pgcopydb_${{ matrix.target_project }}.log
         2024-11-04 18:00:53.433 500861 INFO   main.c:136                Running pgcopydb version 0.17.10.g8361a93 from "/usr/lib/postgresql/17/bin/pgcopydb"
         2024-11-04 18:00:53.434 500861 INFO   cli_common.c:1225         [SOURCE] Copying database from "postgres://neondb_owner@ep-bitter-shape-w2c1ir0a.us-east-2.aws.neon.build/neondb?sslmode=require&keepalives=1&keepalives_idle=10&keepalives_interval=10&keepalives_count=60"
         2024-11-04 18:00:53.434 500861 INFO   cli_common.c:1226         [TARGET] Copying database into "postgres://neondb_owner@ep-icy-union-w25qd5pj.us-east-2.aws.neon.build/ludicrous?sslmode=require&keepalives=1&keepalives_idle=10&keepalives_interval=10&keepalives_count=60"
@@ -244,8 +282,6 @@ jobs:
 
 
     - name: show tables sizes and retrieve current backpressure seconds
-      env:
-          NEW_PROJECT_CONNSTR: ${{ steps.create-neon-project-ingest-target.outputs.dsn }}
       run: |
         export LD_LIBRARY_PATH=${PG_16_LIB_PATH}
         ${PSQL} "${NEW_PROJECT_CONNSTR}" -c "\dt+"
@@ -259,14 +295,14 @@ jobs:
         export LD_LIBRARY_PATH=${PG_16_LIB_PATH}
 
         # Define the log file path
-        LOG_FILE="/tmp/pgcopydb_new_project.log"
+        LOG_FILE="/tmp/pgcopydb_${{ matrix.target_project }}.log"
         
         # Get the current git commit hash
         git config --global --add safe.directory /__w/neon/neon
         COMMIT_HASH=$(git rev-parse --short HEAD)
         
         # Define the platform and test suite
-        PLATFORM="pg16-new-empty-project-us-east-2-staging"
+        PLATFORM="pg16-${{ matrix.target_project }}-us-east-2-staging"
         SUIT="pgcopydb_ingest_bench"
         
         # Function to convert time (e.g., "2h47m", "4h36m", "118ms", "8s493") to seconds
@@ -329,7 +365,7 @@ jobs:
           fi
           
           # If a metric was matched, insert it into the performance database
-          if [ ! -z "$METRIC_NAME" ]; then
+          if [ -n "$METRIC_NAME" ]; then
             DURATION=$(echo "$line" | grep -oP '\d+h\d+m|\d+s|\d+ms|\d{1,2}h\d{1,2}m|\d+\.\d+s' | head -n 1)
             METRIC_VALUE=$(convert_to_seconds "$DURATION")
             PSQL_CMD="${PSQL} \"${PERF_TEST_RESULT_CONNSTR}\" -c \"
@@ -342,10 +378,18 @@ jobs:
         done < "$LOG_FILE"
       
     - name: Delete Neon Project
-      if: ${{ always() }}
+      if: ${{ always() && matrix.target_project == 'new_empty_project' }}
       uses: ./.github/actions/neon-project-delete
       with:
         project_id: ${{ steps.create-neon-project-ingest-target.outputs.project_id }}
+        api_key: ${{ secrets.NEON_STAGING_API_KEY }}
+
+    - name: Delete Neon Branch for large tenant
+      if: ${{ always() && matrix.target_project == 'large_existing_project' }}
+      uses: ./.github/actions/neon-branch-delete
+      with:
+        project_id: ${{ vars.BENCHMARK_INGEST_TARGET_PROJECTID }}
+        branch_id: ${{ steps.create-neon-branch-ingest-target.outputs.branch_id }}
         api_key: ${{ secrets.NEON_STAGING_API_KEY }}
 
   bench:
