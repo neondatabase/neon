@@ -142,7 +142,8 @@ jobs:
         else
           new_connstr="${base_connstr}/neondb"
         fi
-        ${PSQL} "${new_connstr}" -c "drop database ludicrous; CREATE DATABASE ludicrous;"
+        ${PSQL} "${new_connstr}" -c "drop database ludicrous;"
+        ${PSQL} "${new_connstr}" -c "CREATE DATABASE ludicrous;"
         ${PSQL} "${NEW_PROJECT_CONNSTR}" -c "CREATE EXTENSION neon; CREATE EXTENSION neon_utils;"
         BACKPRESSURE_TIME_BEFORE_INGEST=$(${PSQL} "${NEW_PROJECT_CONNSTR}" -t -c "select backpressure_throttling_time()/1000000;")
         echo "BACKPRESSURE_TIME_BEFORE_INGEST=${BACKPRESSURE_TIME_BEFORE_INGEST}" >> $GITHUB_ENV
