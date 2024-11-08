@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub use console_redirect::ConsoleRedirectBackend;
-pub(crate) use console_redirect::WebAuthError;
+pub(crate) use console_redirect::ConsoleRedirectError;
 use ipnet::{Ipv4Net, Ipv6Net};
 use local::LocalBackend;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -560,7 +560,7 @@ mod tests {
         ip_allowlist_check_enabled: true,
         is_auth_broker: false,
         accept_jwts: false,
-        webauth_confirmation_timeout: std::time::Duration::from_secs(5),
+        console_redirect_confirmation_timeout: std::time::Duration::from_secs(5),
     });
 
     async fn read_message(r: &mut (impl AsyncRead + Unpin), b: &mut BytesMut) -> PgMessage {

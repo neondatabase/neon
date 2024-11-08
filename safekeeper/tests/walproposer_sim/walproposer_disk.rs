@@ -1,7 +1,7 @@
 use std::{ffi::CStr, sync::Arc};
 
 use parking_lot::{Mutex, MutexGuard};
-use postgres_ffi::v16::wal_generator::WalGenerator;
+use postgres_ffi::v16::wal_generator::{LogicalMessageGenerator, WalGenerator};
 use utils::lsn::Lsn;
 
 use super::block_storage::BlockStorage;
@@ -18,7 +18,7 @@ impl DiskWalProposer {
                 internal_available_lsn: Lsn(0),
                 prev_lsn: Lsn(0),
                 disk: BlockStorage::new(),
-                wal_generator: WalGenerator::new(),
+                wal_generator: WalGenerator::new(LogicalMessageGenerator::new(c"", &[])),
             }),
         })
     }
@@ -36,7 +36,7 @@ pub struct State {
     // actual WAL storage
     disk: BlockStorage,
     // WAL record generator
-    wal_generator: WalGenerator,
+    wal_generator: WalGenerator<LogicalMessageGenerator>,
 }
 
 impl State {
@@ -64,7 +64,7 @@ impl State {
 
     /// Inserts a logical record in the WAL at the current LSN.
     pub fn insert_logical_message(&mut self, prefix: &CStr, msg: &[u8]) {
-        let record = self.wal_generator.generate_logical_message(prefix, msg);
+        let (_, record) = self.wal_generator.append_logical_message(prefix, msg);
         self.disk.write(self.internal_available_lsn.into(), &record);
         self.prev_lsn = self.internal_available_lsn;
         self.internal_available_lsn += record.len() as u64;

@@ -4177,9 +4177,15 @@ class Safekeeper(LogUtils):
         return self
 
     def assert_no_errors(self):
-        assert not self.log_contains("manager task finished prematurely")
-        assert not self.log_contains("error while acquiring WalResidentTimeline guard")
-        assert not self.log_contains("timeout while acquiring WalResidentTimeline guard")
+        not_allowed = [
+            "manager task finished prematurely",
+            "error while acquiring WalResidentTimeline guard",
+            "timeout while acquiring WalResidentTimeline guard",
+            "invalid xlog page header:",
+            "WAL record crc mismatch at",
+        ]
+        for na in not_allowed:
+            assert not self.log_contains(na)
 
     def append_logical_message(
         self, tenant_id: TenantId, timeline_id: TimelineId, request: dict[str, Any]

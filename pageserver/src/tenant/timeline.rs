@@ -24,8 +24,8 @@ use offload::OffloadError;
 use once_cell::sync::Lazy;
 use pageserver_api::{
     key::{
-        CompactKey, KEY_SIZE, METADATA_KEY_BEGIN_PREFIX, METADATA_KEY_END_PREFIX,
-        NON_INHERITED_RANGE, NON_INHERITED_SPARSE_RANGE,
+        KEY_SIZE, METADATA_KEY_BEGIN_PREFIX, METADATA_KEY_END_PREFIX, NON_INHERITED_RANGE,
+        NON_INHERITED_SPARSE_RANGE,
     },
     keyspace::{KeySpaceAccum, KeySpaceRandomAccum, SparseKeyPartitioning},
     models::{
@@ -49,6 +49,7 @@ use utils::{
     fs_ext, pausable_failpoint,
     sync::gate::{Gate, GateGuard},
 };
+use wal_decoder::serialized_batch::SerializedValueBatch;
 
 use std::sync::atomic::Ordering as AtomicOrdering;
 use std::sync::{Arc, Mutex, RwLock, Weak};
@@ -131,7 +132,6 @@ use crate::task_mgr::TaskKind;
 use crate::tenant::gc_result::GcResult;
 use crate::ZERO_PAGE;
 use pageserver_api::key::Key;
-use pageserver_api::value::Value;
 
 use self::delete::DeleteTimelineFlow;
 pub(super) use self::eviction_task::EvictionTaskTenantState;
@@ -141,9 +141,7 @@ use self::logical_size::LogicalSize;
 use self::walreceiver::{WalReceiver, WalReceiverConf};
 
 use super::{
-    config::TenantConf,
-    storage_layer::{inmemory_layer, LayerVisibilityHint},
-    upload_queue::NotInitialized,
+    config::TenantConf, storage_layer::LayerVisibilityHint, upload_queue::NotInitialized,
     MaybeOffloaded,
 };
 use super::{debug_assert_current_span_has_tenant_and_timeline_id, AttachedTenantConf};
@@ -156,6 +154,9 @@ use super::{
     secondary::heatmap::{HeatMapLayer, HeatMapTimeline},
     GcError,
 };
+
+#[cfg(test)]
+use pageserver_api::value::Value;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub(crate) enum FlushLoopState {
@@ -5736,23 +5737,22 @@ impl<'a> TimelineWriter<'a> {
     /// Put a batch of keys at the specified Lsns.
     pub(crate) async fn put_batch(
         &mut self,
-        batch: Vec<(CompactKey, Lsn, usize, Value)>,
+        batch: SerializedValueBatch,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
         if batch.is_empty() {
             return Ok(());
         }
 
-        let serialized_batch = inmemory_layer::SerializedBatch::from_values(batch)?;
-        let batch_max_lsn = serialized_batch.max_lsn;
-        let buf_size: u64 = serialized_batch.raw.len() as u64;
+        let batch_max_lsn = batch.max_lsn;
+        let buf_size: u64 = batch.buffer_size() as u64;
 
         let action = self.get_open_layer_action(batch_max_lsn, buf_size);
         let layer = self
             .handle_open_layer_action(batch_max_lsn, action, ctx)
             .await?;
 
-        let res = layer.put_batch(serialized_batch, ctx).await;
+        let res = layer.put_batch(batch, ctx).await;
 
         if res.is_ok() {
             // Update the current size only when the entire write was ok.
@@ -5787,11 +5787,14 @@ impl<'a> TimelineWriter<'a> {
             );
         }
         let val_ser_size = value.serialized_size().unwrap() as usize;
-        self.put_batch(
-            vec![(key.to_compact(), lsn, val_ser_size, value.clone())],
-            ctx,
-        )
-        .await
+        let batch = SerializedValueBatch::from_values(vec![(
+            key.to_compact(),
+            lsn,
+            val_ser_size,
+            value.clone(),
+        )]);
+
+        self.put_batch(batch, ctx).await
     }
 
     pub(crate) async fn delete_batch(

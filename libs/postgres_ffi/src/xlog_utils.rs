@@ -12,9 +12,9 @@ use super::bindings::{
     CheckPoint, ControlFileData, DBState_DB_SHUTDOWNED, FullTransactionId, TimeLineID, TimestampTz,
     XLogLongPageHeaderData, XLogPageHeaderData, XLogRecPtr, XLogRecord, XLogSegNo, XLOG_PAGE_MAGIC,
 };
-use super::wal_generator::WalGenerator;
+use super::wal_generator::LogicalMessageGenerator;
 use super::PG_MAJORVERSION;
-use crate::pg_constants::{self, RM_LOGICALMSG_ID, XLOG_LOGICAL_MESSAGE};
+use crate::pg_constants;
 use crate::PG_TLI;
 use crate::{uint32, uint64, Oid};
 use crate::{WAL_SEGMENT_SIZE, XLOG_BLCKSZ};
@@ -493,12 +493,10 @@ pub fn encode_logical_message(prefix: &str, message: &str) -> Bytes {
     // This function can take untrusted input, so discard any NUL bytes in the prefix string.
     let prefix = CString::new(prefix.replace('\0', "")).expect("no NULs");
     let message = message.as_bytes();
-    WalGenerator::encode_record(
-        WalGenerator::encode_logical_message(&prefix, message),
-        RM_LOGICALMSG_ID,
-        XLOG_LOGICAL_MESSAGE,
-        Lsn(0),
-    )
+    LogicalMessageGenerator::new(&prefix, message)
+        .next()
+        .unwrap()
+        .encode(Lsn(0))
 }
 
 #[cfg(test)]
