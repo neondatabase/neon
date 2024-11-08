@@ -450,8 +450,6 @@ impl SafekeeperPostgresHandler {
         // switch to copy
         pgb.write_message(&BeMessage::CopyBothResponse).await?;
 
-        let tli_cancel = tli.cancel.clone();
-
         let wal_reader = tli.get_walreader(start_pos).await?;
 
         // Split to concurrently receive and send data; replies are generally
@@ -481,9 +479,6 @@ impl SafekeeperPostgresHandler {
             // todo: add read|write .context to these errors
             r = sender.run() => r,
             r = reply_reader.run() => r,
-            _ = tli_cancel.cancelled() => {
-                Err(CopyStreamHandlerEnd::Cancelled)
-            }
         };
 
         let ws_state = ws_guard
