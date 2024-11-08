@@ -59,9 +59,11 @@ jobs:
       statuses: write
       id-token: write # aws-actions/configure-aws-credentials
     env:
-      PG_CONFIG: LD_LIBRARY_PATH=/tmp/neon/pg_install/v16/lib /tmp/neon/pg_install/v16/bin/pg_config
-      PSQL: LD_LIBRARY_PATH=/tmp/neon/pg_install/v16/lib /tmp/neon/pg_install/v16/bin/psql
-      PGCOPYDB: LD_LIBRARY_PATH=/pgcopydb/lib /pgcopydb/bin/pgcopydb
+      PG_CONFIG: /tmp/neon/pg_install/v16/bin/pg_config
+      PSQL: /tmp/neon/pg_install/v16/bin/psql
+      PG_16_LIB_PATH: /tmp/neon/pg_install/v16/lib
+      PGCOPYDB: /pgcopydb/bin/pgcopydb
+      PGCOPYDB_LIB_PATH: /pgcopydb/lib
     runs-on: [ self-hosted, us-east-2, x64 ]
     container:
       image: neondatabase/build-tools:pinned-bookworm
@@ -100,6 +102,7 @@ jobs:
       env:
           NEW_PROJECT_CONNSTR: ${{ steps.create-neon-project-ingest-target.outputs.dsn }}
       run: |
+        export LD_LIBRARY_PATH=${PG_16_LIB_PATH}
         ${PSQL} "${NEW_PROJECT_CONNSTR}" -c "CREATE EXTENSION neon; CREATE EXTENSION neon_utils;"
         BACKPRESSURE_TIME_BEFORE_INGEST=$(${PSQL} "${NEW_PROJECT_CONNSTR}" -t -c "select backpressure_throttling_time()/1000000;")
         echo "BACKPRESSURE_TIME_BEFORE_INGEST=${BACKPRESSURE_TIME_BEFORE_INGEST}" >> $GITHUB_ENV
@@ -112,6 +115,7 @@ jobs:
 
     - name: Invoke pgcopydb
       run: |
+        export LD_LIBRARY_PATH=${PGCOPYDB_LIB_PATH}
         ${PGCOPYDB} --version
         ${PGCOPYDB} --help
 
@@ -119,6 +123,7 @@ jobs:
       env:
           NEW_PROJECT_CONNSTR: ${{ steps.create-neon-project-ingest-target.outputs.dsn }}
       run: |
+        export LD_LIBRARY_PATH=${PG_16_LIB_PATH}
         ${PSQL} "${NEW_PROJECT_CONNSTR}" -c "dt+"
         BACKPRESSURE_TIME_AFTER_INGEST=$(${PSQL} "${NEW_PROJECT_CONNSTR}" -t -c "select backpressure_throttling_time()/1000000;")
         echo "BACKPRESSURE_TIME_AFTER_INGEST=${BACKPRESSURE_TIME_AFTER_INGEST}" >> $GITHUB_ENV
