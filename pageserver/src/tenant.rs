@@ -2493,7 +2493,8 @@ impl Tenant {
             timelines_to_compact_or_offload = timelines
                 .iter()
                 .filter_map(|(timeline_id, timeline)| {
-                    let (is_active, can_offload) = (timeline.is_active(), timeline.can_offload());
+                    let (is_active, (can_offload, _)) =
+                        (timeline.is_active(), timeline.can_offload());
                     let has_no_unoffloaded_children = {
                         !timelines
                             .iter()

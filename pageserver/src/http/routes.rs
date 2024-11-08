@@ -2002,9 +2002,9 @@ async fn timeline_offload_handler(
                 "timeline has attached children".into(),
             ));
         }
-        if !timeline.can_offload() {
+        if let (false, reason) = timeline.can_offload() {
             return Err(ApiError::PreconditionFailed(
-                "Timeline::can_offload() returned false".into(),
+                format!("Timeline::can_offload() check failed: {}", reason) .into(),
             ));
         }
         offload_timeline(&tenant, &timeline)

@@ -1570,12 +1570,16 @@ impl Timeline {
     ///
     /// This is neccessary but not sufficient for offloading of the timeline as it might have
     /// child timelines that are not offloaded yet.
-    pub(crate) fn can_offload(&self) -> bool {
+    pub(crate) fn can_offload(&self) -> (bool, &'static str) {
         if self.remote_client.is_archived() != Some(true) {
-            return false;
+            return (false, "the timeline is not archived");
+        }
+        if !self.remote_client.no_pending_work() {
+            // if the remote client is still processing some work, we can't offload
+            return (false, "the upload queue is not drained yet");
         }
 
-        true
+        (true, "ok")
     }
 
     /// Outermost timeline compaction operation; downloads needed layers. Returns whether we have pending
