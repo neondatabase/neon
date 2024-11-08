@@ -103,7 +103,7 @@ jobs:
           NEW_PROJECT_CONNSTR: ${{ steps.create-neon-project-ingest-target.outputs.dsn }}
           NEW_PROJECT_ID: ${{ steps.create-neon-project-ingest-target.outputs.project_id }}
       run: |
-        echo "Initializing Neon project with id: ${NEW_PROJECT_ID}"
+        echo "Initializing Neon project with project_id: ${NEW_PROJECT_ID}"
         export LD_LIBRARY_PATH=${PG_16_LIB_PATH}
         ${PSQL} "${NEW_PROJECT_CONNSTR}" -c "CREATE EXTENSION neon; CREATE EXTENSION neon_utils;"
         BACKPRESSURE_TIME_BEFORE_INGEST=$(${PSQL} "${NEW_PROJECT_CONNSTR}" -t -c "select backpressure_throttling_time()/1000000;")
@@ -112,22 +112,20 @@ jobs:
     - name: Create pgcopydb filter file
       run: |
         cat <<EOF > /tmp/pgcopydb_filter.txt
-        [include-only-table]
-        public.devices
-        public.courses
+          [include-only-table]
+          public.devices
+          public.courses
         EOF      
-
-    - name: invoke pg_config
-      run: |
-        ${PG_CONFIG} --bindir
 
     - name: Invoke pgcopydb
       env:
           NEW_PROJECT_CONNSTR: ${{ steps.create-neon-project-ingest-target.outputs.dsn }}
+          BENCHMARK_INGEST_SOURCE_CONNSTR: ${{ secrets.BENCHMARK_INGEST_SOURCE_CONNSTR }}
       run: |
         export LD_LIBRARY_PATH=${PGCOPYDB_LIB_PATH}:${PG_16_LIB_PATH}
         export PGCOPYDB_SOURCE_PGURI="${BENCHMARK_INGEST_SOURCE_CONNSTR}"
         export PGCOPYDB_TARGET_PGURI="${NEW_PROJECT_CONNSTR}"
+        ${PG_CONFIG} --bindir
         ${PGCOPYDB} --version
         ${PGCOPYDB} clone --skip-vacuum  --no-owner --no-acl --skip-db-properties --table-jobs 4 \
           --index-jobs 4 --restore-jobs 4 --split-tables-larger-than 10GB --skip-extensions \
