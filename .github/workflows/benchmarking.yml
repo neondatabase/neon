@@ -312,6 +312,7 @@ jobs:
 
         # Extract and process log lines
         while IFS= read -r line; do
+          METRIC_NAME=""
           # Match each desired line and extract the relevant information
           if [[ "$line" =~ COPY,\ INDEX,\ CONSTRAINTS,\ VACUUM.* ]]; then
             METRIC_NAME="COPY, INDEX, CONSTRAINTS, VACUUM (wall clock)"
@@ -337,8 +338,6 @@ jobs:
             echo "Inserting ${METRIC_NAME} with value ${METRIC_VALUE} seconds"
             eval $PSQL_CMD
           fi
-          # Reset METRIC_NAME for the next line
-          METRIC_NAME=""
         done < "$LOG_FILE"
       
     - name: Delete Neon Project
