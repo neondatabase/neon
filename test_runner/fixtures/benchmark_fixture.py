@@ -83,9 +83,9 @@ class PgBenchRunResult:
         number_of_clients = 0
         number_of_threads = 0
         number_of_transactions_actually_processed = 0
-        latency_average: float = 0
+        latency_average = 0.0
         latency_stddev = None
-        tps: float = 0
+        tps = 0.0
         scale = 0
 
         # we know significant parts of these values from test input
