@@ -262,6 +262,7 @@ jobs:
         LOG_FILE="/tmp/pgcopydb_new_project.log"
         
         # Get the current git commit hash
+        git config --global --add safe.directory /__w/neon/neon
         COMMIT_HASH=$(git rev-parse --short HEAD)
         
         # Define the platform and test suite
