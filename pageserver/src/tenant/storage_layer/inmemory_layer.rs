@@ -68,7 +68,7 @@ pub struct InMemoryLayer {
     /// All other changing parts are in `inner`, and protected by a mutex.
     inner: RwLock<InMemoryLayerInner>,
 
-    estimated_size: AtomicU64,
+    estimated_in_mem_size: AtomicU64,
 }
 
 impl std::fmt::Debug for InMemoryLayer {
@@ -546,7 +546,7 @@ impl InMemoryLayer {
     }
 
     pub fn estimated_in_mem_size(&self) -> u64 {
-        self.estimated_size.load(AtomicOrdering::Relaxed)
+        self.estimated_in_mem_size.load(AtomicOrdering::Relaxed)
     }
 
     /// Create a new, empty, in-memory layer
@@ -578,7 +578,7 @@ impl InMemoryLayer {
                 file,
                 resource_units: GlobalResourceUnits::new(),
             }),
-            estimated_size: AtomicU64::new(0),
+            estimated_in_mem_size: AtomicU64::new(0),
         })
     }
 
@@ -649,8 +649,10 @@ impl InMemoryLayer {
                 // because this case is unexpected, and we would like tests to fail if this happens.
                 warn!("Key {} at {} written twice at same LSN", key, lsn);
             }
-            self.estimated_size.fetch_add(
-                16 /* compact key */ + 8 /* LSN */ + 8, /* index entry */
+            self.estimated_in_mem_size.fetch_add(
+                (std::mem::size_of::<CompactKey>()
+                    + std::mem::size_of::<Lsn>()
+                    + std::mem::size_of::<IndexEntry>()) as u64,
                 AtomicOrdering::Relaxed,
             );
         }
