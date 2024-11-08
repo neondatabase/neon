@@ -146,6 +146,7 @@ def test_threshold_based_eviction(
                 out += [f"  {remote} {layer.layer_file_name}"]
             return "\n".join(out)
 
+    stable_for: float = 0
     observation_window = 8 * eviction_threshold
     consider_stable_when_no_change_for_seconds = 3 * eviction_threshold
     poll_interval = eviction_threshold / 3

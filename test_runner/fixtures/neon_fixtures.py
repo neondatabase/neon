@@ -1857,7 +1857,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         shard_count: Optional[int] = None,
         shard_stripe_size: Optional[int] = None,
         tenant_config: Optional[dict[Any, Any]] = None,
-        placement_policy: Optional[Union[dict[Any, Any] | str]] = None,
+        placement_policy: Optional[Union[dict[Any, Any], str]] = None,
     ):
         """
         Use this rather than pageserver_api() when you need to include shard parameters
