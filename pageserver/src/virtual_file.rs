@@ -1295,14 +1295,14 @@ impl Drop for VirtualFileInner {
 }
 
 impl OwnedAsyncWriter for VirtualFile {
-    #[inline(always)]
-    async fn write_all<Buf: IoBuf + Send>(
-        &mut self,
+    async fn write_all_at<Buf: IoBuf + Send>(
+        &self,
         buf: FullSlice<Buf>,
+        offset: u64,
         ctx: &RequestContext,
-    ) -> std::io::Result<(usize, FullSlice<Buf>)> {
-        let (buf, res) = VirtualFile::write_all(self, buf, ctx).await;
-        res.map(move |v| (v, buf))
+    ) -> std::io::Result<FullSlice<Buf>> {
+        let (buf, res) = VirtualFile::write_all_at(self, buf, offset, ctx).await;
+        res.map(|_| buf)
     }
 }
 
@@ -1560,6 +1560,7 @@ mod tests {
             &ctx,
         )
         .await?;
+
         file_a
             .write_all(b"foobar".to_vec().slice_len(), &ctx)
             .await?;
