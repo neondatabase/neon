@@ -23,6 +23,7 @@ use handle::ShardTimelineId;
 use offload::OffloadError;
 use once_cell::sync::Lazy;
 use pageserver_api::{
+    config::tenant_conf_defaults::DEFAULT_COMPACTION_THRESHOLD,
     key::{
         KEY_SIZE, METADATA_KEY_BEGIN_PREFIX, METADATA_KEY_END_PREFIX, NON_INHERITED_RANGE,
         NON_INHERITED_SPARSE_RANGE,
@@ -3521,7 +3522,13 @@ impl Timeline {
                 let Some(layer_to_flush) = layer_to_flush else {
                     break Ok(());
                 };
-                if num_frozen_layers > self.get_compaction_threshold() {
+                if num_frozen_layers
+                    > std::cmp::max(
+                        self.get_compaction_threshold(),
+                        DEFAULT_COMPACTION_THRESHOLD,
+                    )
+                    && frozen_layer_total_size >= /* 64 MB */ 64000000
+                {
                     tracing::warn!(
                         "too many frozen layers: {num_frozen_layers} layers with estimated in-mem size of {frozen_layer_total_size} bytes",
                     );
