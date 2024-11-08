@@ -947,6 +947,7 @@ where
         // while first connection still gets some packets later. It might be
         // better to not log this as error! above.
         let write_lsn = self.wal_store.write_lsn();
+        let flush_lsn = self.wal_store.flush_lsn();
         if write_lsn > msg.h.begin_lsn {
             bail!(
                 "append request rewrites WAL written before, write_lsn={}, msg lsn={}",
@@ -1012,7 +1013,9 @@ where
         );
 
         // If flush_lsn hasn't updated, AppendResponse is not very useful.
-        if !require_flush {
+        // This is the common case for !require_flush, but a flush can still
+        // happen on segment bounds.
+        if flush_lsn == self.flush_lsn() {
             return Ok(None);
         }
 
