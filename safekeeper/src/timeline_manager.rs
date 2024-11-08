@@ -377,6 +377,13 @@ pub async fn main_task(
 
     // shutdown background tasks
     if mgr.conf.is_wal_backup_enabled() {
+        if let Some(backup_task) = mgr.backup_task.take() {
+            // If we fell through here, then the timeline is shutting down. This is important
+            // because otherwise joining on the wal_backup handle might hang.
+            assert!(mgr.tli.cancel.is_cancelled());
+
+            backup_task.join().await;
+        }
         wal_backup::update_task(&mut mgr, false, &last_state).await;
     }
 

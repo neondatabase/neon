@@ -45,6 +45,14 @@ pub struct WalBackupTaskHandle {
     handle: JoinHandle<()>,
 }
 
+impl WalBackupTaskHandle {
+    pub(crate) async fn join(self) {
+        if let Err(e) = self.handle.await {
+            warn!("WAL backup task panicked: {}", e);
+        }
+    }
+}
+
 /// Do we have anything to upload to S3, i.e. should safekeepers run backup activity?
 pub(crate) fn is_wal_backup_required(
     wal_seg_size: usize,
@@ -108,9 +116,7 @@ async fn shut_down_task(entry: &mut Option<WalBackupTaskHandle>) {
         // Tell the task to shutdown. Error means task exited earlier, that's ok.
         let _ = wb_handle.shutdown_tx.send(()).await;
         // Await the task itself. TODO: restart panicked tasks earlier.
-        if let Err(e) = wb_handle.handle.await {
-            warn!("WAL backup task panicked: {}", e);
-        }
+        wb_handle.join().await;
     }
 }
 
