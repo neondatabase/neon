@@ -3501,18 +3501,31 @@ impl Timeline {
 
                 let timer = self.metrics.flush_time_histo.start_timer();
 
+                let num_frozen_layers;
+                let frozen_layer_total_size;
                 let layer_to_flush = {
                     let guard = self.layers.read().await;
                     let Ok(lm) = guard.layer_map() else {
                         info!("dropping out of flush loop for timeline shutdown");
                         return;
                     };
+                    num_frozen_layers = lm.frozen_layers.len();
+                    frozen_layer_total_size = lm
+                        .frozen_layers
+                        .iter()
+                        .map(|l| l.estimated_in_mem_size())
+                        .sum::<u64>();
                     lm.frozen_layers.front().cloned()
                     // drop 'layers' lock to allow concurrent reads and writes
                 };
                 let Some(layer_to_flush) = layer_to_flush else {
                     break Ok(());
                 };
+                if num_frozen_layers > self.get_compaction_threshold() {
+                    tracing::warn!(
+                        "too many frozen layers: {num_frozen_layers} layers with estimated in-mem size of {frozen_layer_total_size} bytes",
+                    );
+                }
                 match self.flush_frozen_layer(layer_to_flush, ctx).await {
                     Ok(this_layer_to_lsn) => {
                         flushed_to_lsn = std::cmp::max(flushed_to_lsn, this_layer_to_lsn);

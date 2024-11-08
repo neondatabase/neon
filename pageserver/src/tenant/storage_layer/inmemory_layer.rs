@@ -67,6 +67,8 @@ pub struct InMemoryLayer {
     /// The above fields never change, except for `end_lsn`, which is only set once.
     /// All other changing parts are in `inner`, and protected by a mutex.
     inner: RwLock<InMemoryLayerInner>,
+
+    estimated_size: AtomicU64,
 }
 
 impl std::fmt::Debug for InMemoryLayer {
@@ -543,6 +545,10 @@ impl InMemoryLayer {
         Ok(inner.file.len())
     }
 
+    pub fn estimated_in_mem_size(&self) -> u64 {
+        self.estimated_size.load(AtomicOrdering::Relaxed)
+    }
+
     /// Create a new, empty, in-memory layer
     pub async fn create(
         conf: &'static PageServerConf,
@@ -572,6 +578,7 @@ impl InMemoryLayer {
                 file,
                 resource_units: GlobalResourceUnits::new(),
             }),
+            estimated_size: AtomicU64::new(0),
         })
     }
 
@@ -642,6 +649,10 @@ impl InMemoryLayer {
                 // because this case is unexpected, and we would like tests to fail if this happens.
                 warn!("Key {} at {} written twice at same LSN", key, lsn);
             }
+            self.estimated_size.fetch_add(
+                16 /* compact key */ + 8 /* LSN */ + 8, /* index entry */
+                AtomicOrdering::Relaxed,
+            );
         }
 
         inner.resource_units.maybe_publish_size(new_size);
