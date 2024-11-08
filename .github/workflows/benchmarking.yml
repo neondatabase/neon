@@ -101,7 +101,9 @@ jobs:
     - name: Initialize Neon project and retrieve current backpressure seconds
       env:
           NEW_PROJECT_CONNSTR: ${{ steps.create-neon-project-ingest-target.outputs.dsn }}
+          NEW_PROJECT_ID: ${{ steps.create-neon-project-ingest-target.outputs.project_id }}
       run: |
+        echo "Initializing Neon project with id: ${NEW_PROJECT_ID}"
         export LD_LIBRARY_PATH=${PG_16_LIB_PATH}
         ${PSQL} "${NEW_PROJECT_CONNSTR}" -c "CREATE EXTENSION neon; CREATE EXTENSION neon_utils;"
         BACKPRESSURE_TIME_BEFORE_INGEST=$(${PSQL} "${NEW_PROJECT_CONNSTR}" -t -c "select backpressure_throttling_time()/1000000;")
