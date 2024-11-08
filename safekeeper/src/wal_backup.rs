@@ -214,6 +214,7 @@ async fn backup_task_main(
     let _guard = WAL_BACKUP_TASKS.guard();
     info!("started");
 
+    let cancel = tli.tli.cancel.clone();
     let mut wb = WalBackupTask {
         wal_seg_size: tli.get_wal_seg_size().await,
         commit_lsn_watch_rx: tli.get_commit_lsn_watch_rx(),
@@ -230,12 +231,20 @@ async fn backup_task_main(
         _ = wb.run() => {}
         _ = shutdown_rx.recv() => {
             canceled = true;
+        },
+        _ = cancel.cancelled() => {
+            canceled = true;
         }
     }
     info!("task {}", if canceled { "canceled" } else { "terminated" });
 }
 
 impl WalBackupTask {
+    /// This function must be called from a select! that also respects self.timeline's
+    /// cancellation token.  This is done in [`backup_task_main`].
+    ///
+    /// The future returned by this function is safe to drop at any time because it
+    /// does not write to local disk.
     async fn run(&mut self) {
         let mut backup_lsn = Lsn(0);
 
@@ -253,9 +262,6 @@ impl WalBackupTask {
                             return;
                         }
                     },
-                    _ = self.timeline.cancel.cancelled() => {
-                        break;
-                    }
                 };
             } else {
                 // or just sleep if we errored previously
@@ -264,16 +270,7 @@ impl WalBackupTask {
                 {
                     retry_delay = min(retry_delay, backoff_delay);
                 }
-                if tokio::time::timeout(
-                    Duration::from_millis(retry_delay),
-                    self.timeline.cancel.cancelled(),
-                )
-                .await
-                .is_ok()
-                {
-                    // Cancellation token fired
-                    break;
-                }
+                tokio::time::sleep(Duration::from_millis(retry_delay));
             }
 
             let commit_lsn = *self.commit_lsn_watch_rx.borrow();
