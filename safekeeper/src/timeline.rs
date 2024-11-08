@@ -556,16 +556,29 @@ impl Timeline {
     ) {
         let (tx, rx) = self.manager_ctl.bootstrap_manager();
 
+        let Ok(gate_guard) = self.gate.enter() else {
+            // Init raced with shutdown
+            return;
+        };
+
         // Start manager task which will monitor timeline state and update
         // background tasks.
-        tokio::spawn(timeline_manager::main_task(
-            ManagerTimeline { tli: self.clone() },
-            conf.clone(),
-            broker_active_set,
-            tx,
-            rx,
-            partial_backup_rate_limiter,
-        ));
+        tokio::spawn({
+            let this = self.clone();
+            let conf = conf.clone;
+            async move {
+                let _gate_guard = gate_guard;
+                timeline_manager::main_task(
+                    ManagerTimeline { tli: this },
+                    conf,
+                    broker_active_set,
+                    tx,
+                    rx,
+                    partial_backup_rate_limiter,
+                )
+                .await
+            }
+        });
     }
 
     /// Background timeline activities (which hold Timeline::gate) will no
