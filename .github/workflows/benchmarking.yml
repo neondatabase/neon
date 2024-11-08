@@ -113,8 +113,32 @@ jobs:
       run: |
         cat << EOF > /tmp/pgcopydb_filter.txt
           [include-only-table]
+          public.events
+          public.emails
+          public.email_transmissions
+          public.payments
+          public.editions
+          public.edition_modules
+          public.sp_content
+          public.email_broadcasts
+          public.user_collections
           public.devices
+          public.user_accounts
+          public.lessons
+          public.lesson_users
+          public.payment_methods
+          public.orders
+          public.course_emails
+          public.modules
+          public.users
+          public.module_users
           public.courses
+          public.payment_gateway_keys
+          public.accounts
+          public.roles
+          public.payment_gateways
+          public.management
+          public.event_names
         EOF
 
     - name: Invoke pgcopydb
