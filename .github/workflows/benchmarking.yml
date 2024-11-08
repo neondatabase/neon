@@ -318,22 +318,22 @@ jobs:
     
           # Check for hours (h)
           if [[ "$duration" =~ ([0-9]+)h ]]; then
-            total_seconds=$((total_seconds + ${BASH_REMATCH[1]} * 3600))
+            total_seconds=$((total_seconds + BASH_REMATCH[1] * 3600))
           fi
     
           # Check for minutes (m)
           if [[ "$duration" =~ ([0-9]+)m ]]; then
-            total_seconds=$((total_seconds + ${BASH_REMATCH[1]} * 60))
+            total_seconds=$((total_seconds + BASH_REMATCH[1] * 60))
           fi
     
           # Check for seconds (s)
           if [[ "$duration" =~ ([0-9]+)s ]]; then
-            total_seconds=$((total_seconds + ${BASH_REMATCH[1]}))
+            total_seconds=$((total_seconds + BASH_REMATCH[1]))
           fi
     
           # Check for milliseconds (ms) (if applicable)
           if [[ "$duration" =~ ([0-9]+)ms ]]; then
-            total_seconds=$((total_seconds + ${BASH_REMATCH[1]} / 1000))
+            total_seconds=$((total_seconds + BASH_REMATCH[1] / 1000))
           fi
     
           echo $total_seconds
@@ -343,7 +343,7 @@ jobs:
         BACKPRESSURE_TIME_DIFF=$(awk "BEGIN {print $BACKPRESSURE_TIME_AFTER_INGEST - $BACKPRESSURE_TIME_BEFORE_INGEST}")
 
         # Insert the backpressure time difference into the performance database
-        if [ ! -z "$BACKPRESSURE_TIME_DIFF" ]; then
+        if [ -n "$BACKPRESSURE_TIME_DIFF" ]; then
           PSQL_CMD="${PSQL} \"${PERF_TEST_RESULT_CONNSTR}\" -c \"
           INSERT INTO public.perf_test_results (suit, revision, platform, metric_name, metric_value, metric_unit, metric_report_type, recorded_at_timestamp)
           VALUES ('${SUIT}', '${COMMIT_HASH}', '${PLATFORM}', 'backpressure_time', ${BACKPRESSURE_TIME_DIFF}, 'seconds', 'lower_is_better', now());
