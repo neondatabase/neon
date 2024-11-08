@@ -107,24 +107,36 @@ jobs:
         BACKPRESSURE_TIME_BEFORE_INGEST=$(${PSQL} "${NEW_PROJECT_CONNSTR}" -t -c "select backpressure_throttling_time()/1000000;")
         echo "BACKPRESSURE_TIME_BEFORE_INGEST=${BACKPRESSURE_TIME_BEFORE_INGEST}" >> $GITHUB_ENV
         
+    - name: Create pgcopydb filter file
+      run: |
+        cat <<EOF > /tmp/pgcopydb_filter.txt
+        [include-only-table]
+        public.devices
+        public.courses
+        EOF      
 
     - name: invoke pg_config
       run: |
-        /tmp/neon/pg_install/v16/bin/pg_config --bindir
         ${PG_CONFIG} --bindir
 
     - name: Invoke pgcopydb
+      env:
+          NEW_PROJECT_CONNSTR: ${{ steps.create-neon-project-ingest-target.outputs.dsn }}
       run: |
-        export LD_LIBRARY_PATH=${PGCOPYDB_LIB_PATH}
+        export LD_LIBRARY_PATH=${PGCOPYDB_LIB_PATH}:${PG_16_LIB_PATH}
+        export PGCOPYDB_SOURCE_PGURI="${BENCHMARK_INGEST_SOURCE_CONNSTR}"
+        export PGCOPYDB_TARGET_PGURI="${NEW_PROJECT_CONNSTR}"
         ${PGCOPYDB} --version
-        ${PGCOPYDB} --help
+        ${PGCOPYDB} clone --skip-vacuum  --no-owner --no-acl --skip-db-properties --table-jobs 4 \
+          --index-jobs 4 --restore-jobs 4 --split-tables-larger-than 10GB --skip-extensions \
+          --use-copy-binary --filters /tmp/pgcopydb_filter.txt 2>&1 | tee /tmp/pgcopydb_new_project.log
 
     - name: show tables sizes and retrieve current backpressure seconds
       env:
           NEW_PROJECT_CONNSTR: ${{ steps.create-neon-project-ingest-target.outputs.dsn }}
       run: |
         export LD_LIBRARY_PATH=${PG_16_LIB_PATH}
-        ${PSQL} "${NEW_PROJECT_CONNSTR}" -c "dt+"
+        ${PSQL} "${NEW_PROJECT_CONNSTR}" -c "\dt+"
         BACKPRESSURE_TIME_AFTER_INGEST=$(${PSQL} "${NEW_PROJECT_CONNSTR}" -t -c "select backpressure_throttling_time()/1000000;")
         echo "BACKPRESSURE_TIME_AFTER_INGEST=${BACKPRESSURE_TIME_AFTER_INGEST}" >> $GITHUB_ENV
 
