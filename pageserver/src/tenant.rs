@@ -4779,10 +4779,18 @@ async fn run_initdb(
 
     let _permit = INIT_DB_SEMAPHORE.acquire().await;
 
-    let initdb_command = tokio::process::Command::new(&initdb_bin_path)
+    let mut initdb_command = tokio::process::Command::new(&initdb_bin_path);
+    initdb_command
         .args(["--pgdata", initdb_target_dir.as_ref()])
         .args(["--username", &conf.superuser])
         .args(["--encoding", "utf8"])
+        .args(["--locale", &conf.locale])
+        .args(["--lc-collate", &conf.locale])
+        .args(["--lc-ctype", &conf.locale])
+        .args(["--lc-messages", &conf.locale])
+        .args(["--lc-monetary", &conf.locale])
+        .args(["--lc-numeric", &conf.locale])
+        .args(["--lc-time", &conf.locale])
         .arg("--no-instructions")
         .arg("--no-sync")
         .env_clear()
@@ -4792,15 +4800,27 @@ async fn run_initdb(
         // stdout invocation produces the same output every time, we don't need it
         .stdout(std::process::Stdio::null())
         // we would be interested in the stderr output, if there was any
-        .stderr(std::process::Stdio::piped())
-        .spawn()?;
+        .stderr(std::process::Stdio::piped());
+
+    // Before version 14, only the libc provide was available.
+    if pg_version > 14 {
+        // Version 17 brought with it a builtin locale provider which only provides
+        // C and C.UTF-8. While being safer for collation purposes since it is
+        // guaranteed to be consistent throughout a major release, it is also more
+        // performant.
+        let locale_provider = if pg_version >= 17 { "builtin" } else { "libc" };
+
+        initdb_command.args(["--locale-provider", locale_provider]);
+    }
+
+    let initdb_proc = initdb_command.spawn()?;
 
     // Ideally we'd select here with the cancellation token, but the problem is that
     // we can't safely terminate initdb: it launches processes of its own, and killing
     // initdb doesn't kill them. After we return from this function, we want the target
     // directory to be able to be cleaned up.
     // See https://github.com/neondatabase/neon/issues/6385
-    let initdb_output = initdb_command.wait_with_output().await?;
+    let initdb_output = initdb_proc.wait_with_output().await?;
     if !initdb_output.status.success() {
         return Err(InitdbError::Failed(
             initdb_output.status,
