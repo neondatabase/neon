@@ -298,7 +298,7 @@ jobs:
         }
 
         # Calculate the backpressure difference in seconds
-        BACKPRESSURE_TIME_DIFF=$(echo "$BACKPRESSURE_TIME_AFTER_INGEST - $BACKPRESSURE_TIME_BEFORE_INGEST" | bc)
+        BACKPRESSURE_TIME_DIFF=$(awk "BEGIN {print $BACKPRESSURE_TIME_AFTER_INGEST - $BACKPRESSURE_TIME_BEFORE_INGEST}")
 
         # Insert the backpressure time difference into the performance database
         if [ ! -z "$BACKPRESSURE_TIME_DIFF" ]; then
