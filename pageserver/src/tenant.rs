@@ -1415,7 +1415,8 @@ impl Tenant {
             offloaded_timelines_list.push((timeline_id, Arc::new(offloaded_timeline)));
             offloaded_timeline_ids.insert(timeline_id);
         }
-        // Complete deletions for offloaded timeline id's.
+        // Complete deletions for offloaded timeline id's from manifest.
+        // The manifest will be uploaded later in this function.
         offloaded_timelines_list
             .retain(|(offloaded_id, _offloaded)| {
                 // In the end, existence of a timeline is finally determined by the existence of an index-part.json in remote storage.
