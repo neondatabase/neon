@@ -178,6 +178,9 @@ pub struct PageServerConf {
 
     /// Direct IO settings
     pub virtual_file_io_mode: virtual_file::IoMode,
+
+    /// Optionally disable disk syncs (unsafe!)
+    pub no_sync: bool,
 }
 
 /// Token for authentication to safekeepers
@@ -332,6 +335,7 @@ impl PageServerConf {
             concurrent_tenant_size_logical_size_queries,
             virtual_file_io_engine,
             tenant_config,
+            no_sync,
         } = config_toml;
 
         let mut conf = PageServerConf {
@@ -409,6 +413,7 @@ impl PageServerConf {
                 .map(crate::l0_flush::L0FlushConfig::from)
                 .unwrap_or_default(),
             virtual_file_io_mode: virtual_file_io_mode.unwrap_or(virtual_file::IoMode::preferred()),
+            no_sync: no_sync.unwrap_or(false),
         };
 
         // ------------------------------------------------------------
