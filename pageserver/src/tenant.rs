@@ -9372,7 +9372,7 @@ mod tests {
 
         // Do a partial compaction on key range 0..2
         tline
-            .partial_compact_with_gc(Some(get_key(0)..get_key(2)), &cancel, EnumSet::new(), &ctx)
+            .partial_compact_with_gc(get_key(0)..get_key(2), &cancel, EnumSet::new(), &ctx)
             .await
             .unwrap();
         let all_layers = inspect_and_sort(&tline, Some(get_key(0)..get_key(10))).await;
@@ -9411,7 +9411,7 @@ mod tests {
 
         // Do a partial compaction on key range 2..4
         tline
-            .partial_compact_with_gc(Some(get_key(2)..get_key(4)), &cancel, EnumSet::new(), &ctx)
+            .partial_compact_with_gc(get_key(2)..get_key(4), &cancel, EnumSet::new(), &ctx)
             .await
             .unwrap();
         let all_layers = inspect_and_sort(&tline, Some(get_key(0)..get_key(10))).await;
@@ -9455,7 +9455,7 @@ mod tests {
 
         // Do a partial compaction on key range 4..9
         tline
-            .partial_compact_with_gc(Some(get_key(4)..get_key(9)), &cancel, EnumSet::new(), &ctx)
+            .partial_compact_with_gc(get_key(4)..get_key(9), &cancel, EnumSet::new(), &ctx)
             .await
             .unwrap();
         let all_layers = inspect_and_sort(&tline, Some(get_key(0)..get_key(10))).await;
@@ -9498,7 +9498,7 @@ mod tests {
 
         // Do a partial compaction on key range 9..10
         tline
-            .partial_compact_with_gc(Some(get_key(9)..get_key(10)), &cancel, EnumSet::new(), &ctx)
+            .partial_compact_with_gc(get_key(9)..get_key(10), &cancel, EnumSet::new(), &ctx)
             .await
             .unwrap();
         let all_layers = inspect_and_sort(&tline, Some(get_key(0)..get_key(10))).await;
@@ -9546,7 +9546,7 @@ mod tests {
 
         // Do a partial compaction on key range 0..10, all image layers below LSN 20 can be replaced with new ones.
         tline
-            .partial_compact_with_gc(Some(get_key(0)..get_key(10)), &cancel, EnumSet::new(), &ctx)
+            .partial_compact_with_gc(get_key(0)..get_key(10), &cancel, EnumSet::new(), &ctx)
             .await
             .unwrap();
         let all_layers = inspect_and_sort(&tline, Some(get_key(0)..get_key(10))).await;
