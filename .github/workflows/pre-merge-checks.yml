@@ -1,0 +1,47 @@
+name:
+
+on:
+  merge_group:
+    branches:
+      - main
+
+# No permission for GITHUB_TOKEN by default; the **minimal required** set of permissions should be granted in each job.
+permissions: {}
+
+jobs:
+  get-changed-files:
+    runs-on: ubuntu-22.04
+    outputs:
+      any_changed: ${{ steps.src.outputs.any_changed }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: tj-actions/changed-files@c3a1bb2c992d77180ae65be6ae6c166cf40f857c # v45.0.3
+        id: src
+        with:
+          files: |
+            .github/workflows/pre-merge-checks.yml
+            **/**.py
+            poetry.lock
+            pyproject.toml
+
+      - name: PRINT ALL CHANGED FILES FOR DEBUG PURPOSES
+        env:
+          ALL_CHANGED_FILES: ${{ steps.src.outputs.all_changed_files }}
+        run: echo "${ALL_CHANGED_FILES}"
+
+  check-build-tools-image:
+    uses: ./.github/workflows/check-build-tools-image.yml
+
+  build-build-tools-image:
+    needs: [ check-build-tools-image ]
+    uses: ./.github/workflows/build-build-tools-image.yml
+    with:
+      image-tag: ${{ needs.check-build-tools-image.outputs.image-tag }}
+    secrets: inherit
+
+  check-codestyle-python:
+    needs: [ build-build-tools-image ]
+    uses: ./.github/workflows/_check-codestyle-python.yml
+    with:
+      build-tools-image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
+    secrets: inherit
