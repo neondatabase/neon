@@ -51,11 +51,11 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 #[derive(Clone, Debug, ValueEnum)]
 enum AuthBackendType {
-    Console,
-    // clap only shows the name, not the alias, in usage text.
-    // TODO: swap name/alias and deprecate "link"
-    #[value(name("link"), alias("web"))]
-    Web,
+    #[value(name("console"), alias("cplane"))]
+    ControlPlane,
+
+    #[value(name("link"), alias("control-redirect"))]
+    ConsoleRedirect,
 
     #[cfg(feature = "testing")]
     Postgres,
@@ -71,7 +71,7 @@ struct ProxyCliArgs {
     /// listen for incoming client connections on ip:port
     #[clap(short, long, default_value = "127.0.0.1:4432")]
     proxy: String,
-    #[clap(value_enum, long, default_value_t = AuthBackendType::Web)]
+    #[clap(value_enum, long, default_value_t = AuthBackendType::ConsoleRedirect)]
     auth_backend: AuthBackendType,
     /// listen for management callback connection on ip:port
     #[clap(short, long, default_value = "127.0.0.1:7000")]
@@ -82,7 +82,7 @@ struct ProxyCliArgs {
     /// listen for incoming wss connections on ip:port
     #[clap(long)]
     wss: Option<String>,
-    /// redirect unauthenticated users to the given uri in case of web auth
+    /// redirect unauthenticated users to the given uri in case of console redirect auth
     #[clap(short, long, default_value = "http://localhost:3000/psql_session/")]
     uri: String,
     /// cloud API endpoint for authenticating users
@@ -92,6 +92,14 @@ struct ProxyCliArgs {
         default_value = "http://localhost:3000/authenticate_proxy_request/"
     )]
     auth_endpoint: String,
+    /// JWT used to connect to control plane.
+    #[clap(
+        long,
+        value_name = "JWT",
+        default_value = "",
+        env = "NEON_PROXY_TO_CONTROLPLANE_TOKEN"
+    )]
+    control_plane_token: Arc<str>,
     /// if this is not local proxy, this toggles whether we accept jwt or passwords for http
     #[clap(long, default_value_t = false, value_parser = clap::builder::BoolishValueParser::new(), action = clap::ArgAction::Set)]
     is_auth_broker: bool,
@@ -223,6 +231,7 @@ struct ProxyCliArgs {
     proxy_protocol_v2: ProxyProtocolV2,
 
     /// Time the proxy waits for the webauth session to be confirmed by the control plane.
+    // TODO: rename to `console_redirect_confirmation_timeout`.
     #[clap(long, default_value = "2m", value_parser = humantime::parse_duration)]
     webauth_confirmation_timeout: std::time::Duration,
 }
@@ -659,7 +668,7 @@ fn build_config(args: &ProxyCliArgs) -> anyhow::Result<&'static ProxyConfig> {
         ip_allowlist_check_enabled: !args.is_private_access_proxy,
         is_auth_broker: args.is_auth_broker,
         accept_jwts: args.is_auth_broker,
-        webauth_confirmation_timeout: args.webauth_confirmation_timeout,
+        console_redirect_confirmation_timeout: args.webauth_confirmation_timeout,
     };
 
     let config = ProxyConfig {
@@ -690,7 +699,7 @@ fn build_auth_backend(
     args: &ProxyCliArgs,
 ) -> anyhow::Result<Either<&'static auth::Backend<'static, ()>, &'static ConsoleRedirectBackend>> {
     match &args.auth_backend {
-        AuthBackendType::Console => {
+        AuthBackendType::ControlPlane => {
             let wake_compute_cache_config: CacheOptions = args.wake_compute_cache.parse()?;
             let project_info_cache_config: ProjectInfoCacheOptions =
                 args.project_info_cache.parse()?;
@@ -734,6 +743,7 @@ fn build_auth_backend(
                 Arc::new(WakeComputeRateLimiter::new(wake_compute_rps_limit));
             let api = control_plane::client::neon::NeonControlPlaneClient::new(
                 endpoint,
+                args.control_plane_token.clone(),
                 caches,
                 locks,
                 wake_compute_endpoint_rate_limiter,
@@ -762,7 +772,7 @@ fn build_auth_backend(
             Ok(Either::Left(config))
         }
 
-        AuthBackendType::Web => {
+        AuthBackendType::ConsoleRedirect => {
             let url = args.uri.parse()?;
             let backend = ConsoleRedirectBackend::new(url);
 

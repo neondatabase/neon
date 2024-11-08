@@ -6721,6 +6721,16 @@ impl Service {
             .tenants
             .iter_mut()
             .filter_map(|(tid, tenant_shard)| {
+                if !matches!(
+                    tenant_shard.get_scheduling_policy(),
+                    ShardSchedulingPolicy::Active
+                ) {
+                    // Only include tenants in fills if they have a normal (Active) scheduling policy.  We
+                    // even exclude Essential, because moving to fill a node is not essential to keeping this
+                    // tenant available.
+                    return None;
+                }
+
                 if tenant_shard.intent.get_secondary().contains(&node_id) {
                     if let Some(primary) = tenant_shard.intent.get_attached() {
                         return Some((*primary, *tid));
