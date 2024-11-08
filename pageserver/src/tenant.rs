@@ -1371,6 +1371,7 @@ impl Tenant {
             warn!("Unexpected non timeline key {k}");
         }
 
+        // Avoid downloading IndexPart of offloaded timelines.
         let mut offloaded_with_prefix = HashSet::new();
         for offloaded in tenant_manifest.offloaded_timelines.iter() {
             if remote_timeline_ids.remove(&offloaded.timeline_id) {
