@@ -111,11 +111,11 @@ jobs:
         
     - name: Create pgcopydb filter file
       run: |
-        cat <<EOF > /tmp/pgcopydb_filter.txt
+        cat << EOF > /tmp/pgcopydb_filter.txt
           [include-only-table]
           public.devices
           public.courses
-        EOF      
+        EOF
 
     - name: Invoke pgcopydb
       env:
