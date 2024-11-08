@@ -59,7 +59,9 @@ jobs:
       statuses: write
       id-token: write # aws-actions/configure-aws-credentials
     env:
-      PG_CONFIG: /tmp/neon/pg_install/v16/bin/pg_config
+      PG_CONFIG: LD_LIBRARY_PATH=/tmp/neon/pg_install/v16/lib /tmp/neon/pg_install/v16/bin/pg_config
+      PSQL: LD_LIBRARY_PATH=/tmp/neon/pg_install/v16/lib /tmp/neon/pg_install/v16/bin/psql
+      PGCOPYDB: LD_LIBRARY_PATH=/pgcopydb/lib /pgcopydb/bin/pgcopydb
     runs-on: [ self-hosted, us-east-2, x64 ]
     container:
       image: neondatabase/build-tools:pinned-bookworm
@@ -97,7 +99,6 @@ jobs:
     - name: Initialize Neon project and retrieve current backpressure seconds
       env:
           NEW_PROJECT_CONNSTR: ${{ steps.create-neon-project-ingest-target.outputs.dsn }}
-          PSQL: /tmp/neon/pg_install/v16/bin/psql
       run: |
         ${PSQL} "${NEW_PROJECT_CONNSTR}" -c "CREATE EXTENSION neon; CREATE EXTENSION neon_utils;"
         BACKPRESSURE_TIME_BEFORE_INGEST=$(${PSQL} "${NEW_PROJECT_CONNSTR}" -t -c "select backpressure_throttling_time()/1000000;")
@@ -111,13 +112,12 @@ jobs:
 
     - name: Invoke pgcopydb
       run: |
-        LD_LIBRARY_PATH=/pgcopydb/lib /pgcopydb/bin/pgcopydb --version
-        LD_LIBRARY_PATH=/pgcopydb/lib /pgcopydb/bin/pgcopydb --help
+        ${PGCOPYDB} --version
+        ${PGCOPYDB} --help
 
     - name: show tables sizes and retrieve current backpressure seconds
       env:
           NEW_PROJECT_CONNSTR: ${{ steps.create-neon-project-ingest-target.outputs.dsn }}
-          PSQL: /tmp/neon/pg_install/v16/bin/psql
       run: |
         ${PSQL} "${NEW_PROJECT_CONNSTR}" -c "dt+"
         BACKPRESSURE_TIME_AFTER_INGEST=$(${PSQL} "${NEW_PROJECT_CONNSTR}" -t -c "select backpressure_throttling_time()/1000000;")
