@@ -331,7 +331,7 @@ jobs:
           # If a metric was matched, insert it into the performance database
           if [ ! -z "$METRIC_NAME" ]; then
             METRIC_VALUE=$(convert_to_seconds "$(echo $line | awk '{print $3}')")
-            PSQL_CMD="psql \"${{ secrets.PERF_TEST_RESULT_CONNSTR }}\" -c \"
+            PSQL_CMD="${PSQL} \"${PERF_TEST_RESULT_CONNSTR}\" -c \"
             INSERT INTO public.perf_test_results (suit, revision, platform, metric_name, metric_value, metric_unit, metric_report_type, recorded_at_timestamp)
             VALUES ('${SUIT}', '${COMMIT_HASH}', '${PLATFORM}', '${METRIC_NAME}', ${METRIC_VALUE}, 'seconds', 'lower_is_better', now());
             \""
