@@ -43,7 +43,8 @@ pub enum Scope {
 
     /// This scope is used for communication with other storage controller instances.
     /// At the time of writing, this is only used for the step down request.
-    Peer,
+    #[serde(rename = "controller_peer")]
+    ControllerPeer,
 }
 
 /// JWT payload. See docs/authentication.md for the format
