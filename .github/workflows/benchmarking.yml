@@ -62,7 +62,7 @@ jobs:
       PG_CONFIG: /tmp/neon/pg_install/v16/bin/pg_config
     runs-on: [ self-hosted, us-east-2, x64 ]
     container:
-      image: neondatabase/build-tools:222267ccf8fc268c0d119889d2d518264b121db3c834bc359441a9497d29e567-bookworm-x64
+      image: neondatabase/build-tools:pinned-bookworm
       credentials:
         username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
         password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
@@ -85,6 +85,25 @@ jobs:
         path: /tmp/neon/
         prefix: latest
 
+    - name: Create Neon Project
+      id: create-neon-project-ingest-target
+      uses: ./.github/actions/neon-project-create
+      with:
+        region_id: aws-us-east-2
+        postgres_version: 16
+        compute_units: '[12, 12]' # we want to test large compute here to avoid compute-side bottleneck
+        api_key: ${{ secrets.NEON_STAGING_API_KEY }}
+
+    - name: Initialize Neon project and retrieve current backpressure seconds
+      env:
+          NEW_PROJECT_CONNSTR: ${{ steps.create-neon-project-ingest-target.outputs.dsn }}
+          PSQL: /tmp/neon/pg_install/v16/bin/psql
+      run: |
+        ${PSQL} "${NEW_PROJECT_CONNSTR}" -c "CREATE EXTENSION neon; CREATE EXTENSION neon_utils;"
+        BACKPRESSURE_TIME_BEFORE_INGEST=$(${PSQL} "${NEW_PROJECT_CONNSTR}" -t -c "select backpressure_throttling_time()/1000000;")
+        echo "BACKPRESSURE_TIME_BEFORE_INGEST=${BACKPRESSURE_TIME_BEFORE_INGEST}" >> $GITHUB_ENV
+        
+
     - name: invoke pg_config
       run: |
         /tmp/neon/pg_install/v16/bin/pg_config --bindir
@@ -94,6 +113,22 @@ jobs:
       run: |
         LD_LIBRARY_PATH=/pgcopydb/lib /pgcopydb/bin/pgcopydb --version
         LD_LIBRARY_PATH=/pgcopydb/lib /pgcopydb/bin/pgcopydb --help
+
+    - name: show tables sizes and retrieve current backpressure seconds
+      env:
+          NEW_PROJECT_CONNSTR: ${{ steps.create-neon-project-ingest-target.outputs.dsn }}
+          PSQL: /tmp/neon/pg_install/v16/bin/psql
+      run: |
+        ${PSQL} "${NEW_PROJECT_CONNSTR}" -c "dt+"
+        BACKPRESSURE_TIME_AFTER_INGEST=$(${PSQL} "${NEW_PROJECT_CONNSTR}" -t -c "select backpressure_throttling_time()/1000000;")
+        echo "BACKPRESSURE_TIME_AFTER_INGEST=${BACKPRESSURE_TIME_AFTER_INGEST}" >> $GITHUB_ENV
+
+    - name: Delete Neon Project
+      if: ${{ always() }}
+      uses: ./.github/actions/neon-project-delete
+      with:
+        project_id: ${{ steps.create-neon-project-ingest-target.outputs.project_id }}
+        api_key: ${{ secrets.NEON_STAGING_API_KEY }}
 
   bench:
     if: ${{ github.event.inputs.run_only_ingest_tests == 'false' || github.event.inputs.run_only_ingest_tests == null }}
