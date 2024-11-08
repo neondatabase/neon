@@ -1782,7 +1782,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         self.request(
             "PUT",
             f"{self.api}/control/v1/node/{node_id}/drain",
-            headers=self.headers(TokenScope.ADMIN),
+            headers=self.headers(TokenScope.INFRA),
         )
 
     def cancel_node_drain(self, node_id):
@@ -1790,7 +1790,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         self.request(
             "DELETE",
             f"{self.api}/control/v1/node/{node_id}/drain",
-            headers=self.headers(TokenScope.ADMIN),
+            headers=self.headers(TokenScope.INFRA),
         )
 
     def node_fill(self, node_id):
@@ -1798,7 +1798,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         self.request(
             "PUT",
             f"{self.api}/control/v1/node/{node_id}/fill",
-            headers=self.headers(TokenScope.ADMIN),
+            headers=self.headers(TokenScope.INFRA),
         )
 
     def cancel_node_fill(self, node_id):
@@ -1806,14 +1806,14 @@ class NeonStorageController(MetricsGetter, LogUtils):
         self.request(
             "DELETE",
             f"{self.api}/control/v1/node/{node_id}/fill",
-            headers=self.headers(TokenScope.ADMIN),
+            headers=self.headers(TokenScope.INFRA),
         )
 
     def node_status(self, node_id):
         response = self.request(
             "GET",
             f"{self.api}/control/v1/node/{node_id}",
-            headers=self.headers(TokenScope.ADMIN),
+            headers=self.headers(TokenScope.INFRA),
         )
         return response.json()
 
@@ -1829,7 +1829,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         response = self.request(
             "GET",
             f"{self.api}/control/v1/node",
-            headers=self.headers(TokenScope.ADMIN),
+            headers=self.headers(TokenScope.INFRA),
         )
         return response.json()
 
