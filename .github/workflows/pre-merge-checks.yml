@@ -1,9 +1,13 @@
-name:
+name: Pre-merge checks
 
 on:
   merge_group:
     branches:
       - main
+
+defaults:
+  run:
+    shell: bash -euxo pipefail {0}
 
 # No permission for GITHUB_TOKEN by default; the **minimal required** set of permissions should be granted in each job.
 permissions: {}
@@ -12,11 +16,11 @@ jobs:
   get-changed-files:
     runs-on: ubuntu-22.04
     outputs:
-      any_changed: ${{ steps.src.outputs.any_changed }}
+      python-changed: ${{ steps.python-src.outputs.any_changed }}
     steps:
       - uses: actions/checkout@v4
-      - uses: tj-actions/changed-files@c3a1bb2c992d77180ae65be6ae6c166cf40f857c # v45.0.3
-        id: src
+      - uses: tj-actions/changed-files@4edd678ac3f81e2dc578756871e4d00c19191daf # v45.0.4
+        id: python-src
         with:
           files: |
             .github/workflows/pre-merge-checks.yml
@@ -26,10 +30,13 @@ jobs:
 
       - name: PRINT ALL CHANGED FILES FOR DEBUG PURPOSES
         env:
-          ALL_CHANGED_FILES: ${{ steps.src.outputs.all_changed_files }}
-        run: echo "${ALL_CHANGED_FILES}"
+          PYTHON_CHANGED_FILES: ${{ steps.python-src.outputs.all_changed_files }}
+        run: |
+          echo "${PYTHON_CHANGED_FILES}"
 
   check-build-tools-image:
+    if: needs.get-changed-files.outputs.python-changed == 'true'
+    needs: [ get-changed-files ]
     uses: ./.github/workflows/check-build-tools-image.yml
 
   build-build-tools-image:
@@ -40,8 +47,48 @@ jobs:
     secrets: inherit
 
   check-codestyle-python:
-    needs: [ build-build-tools-image ]
+    if: needs.get-changed-files.outputs.python-changed == 'true'
+    needs: [ get-changed-files, build-build-tools-image ]
     uses: ./.github/workflows/_check-codestyle-python.yml
     with:
       build-tools-image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
     secrets: inherit
+
+  # To get items from the merge queue merged into main we need to satisfy "Status checks that are required".
+  # Currently we require 2 jobs (checks with exact name):
+  # - conclusion
+  # - neon-cloud-e2e
+  conclusion:
+    if: always()
+    permissions:
+      statuses: write # for `github.repos.createCommitStatus(...)`
+    needs:
+      - get-changed-files
+      - check-codestyle-python
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Create fake `neon-cloud-e2e` check
+        uses: actions/github-script@v7
+        with:
+          # Retry script for 5XX server errors: https://github.com/actions/github-script#retries
+          retries: 5
+          script: |
+            const { repo, owner } = context.repo;
+            const targetUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+
+            await github.rest.repos.createCommitStatus({
+              owner: owner,
+              repo: repo,
+              sha: context.sha,
+              context: `neon-cloud-e2e`,
+              state: `success`,
+              target_url: targetUrl,
+              description: `fake check for merge queue`,
+            });
+
+      - name: Fail the job if any of the dependencies do not succeed or skipped
+        run: exit 1
+        if: |
+          (contains(needs.check-codestyle-python.result, 'skipped') && needs.get-changed-files.outputs.python-changed == 'true')
+          || contains(needs.*.result, 'failure')
+          || contains(needs.*.result, 'cancelled')
