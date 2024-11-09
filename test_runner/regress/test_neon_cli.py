@@ -15,7 +15,7 @@ from fixtures.neon_fixtures import (
     parse_project_git_version_output,
 )
 from fixtures.pageserver.http import PageserverHttpClient
-from fixtures.pg_version import PgVersion, skip_on_postgres
+from fixtures.pg_version import run_only_on_default_postgres
 
 
 def helper_compare_timeline_list(
@@ -195,7 +195,7 @@ def test_cli_start_stop_multi(neon_env_builder: NeonEnvBuilder):
     res.check_returncode()
 
 
-@skip_on_postgres(PgVersion.V14, reason="does not use postgres")
+@run_only_on_default_postgres(reason="does not use postgres")
 @pytest.mark.skipif(
     os.environ.get("BUILD_TYPE") == "debug", reason="unit test for test support, either build works"
 )
@@ -217,7 +217,7 @@ def test_parse_project_git_version_output_positive():
         assert parse_project_git_version_output(example) == commit
 
 
-@skip_on_postgres(PgVersion.V14, reason="does not use postgres")
+@run_only_on_default_postgres(reason="does not use postgres")
 @pytest.mark.skipif(
     os.environ.get("BUILD_TYPE") == "debug", reason="unit test for test support, either build works"
 )
@@ -234,7 +234,7 @@ def test_parse_project_git_version_output_local_docker():
     assert input in str(e)
 
 
-@skip_on_postgres(PgVersion.V14, reason="does not use postgres")
+@run_only_on_default_postgres(reason="does not use postgres")
 @pytest.mark.skipif(
     os.environ.get("BUILD_TYPE") == "debug", reason="cli api sanity, either build works"
 )

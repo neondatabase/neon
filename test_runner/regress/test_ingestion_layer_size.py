@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -14,14 +15,12 @@ if TYPE_CHECKING:
     from typing import Union
 
 
-def test_ingesting_large_batches_of_images(neon_env_builder: NeonEnvBuilder, build_type: str):
+@pytest.mark.skipif(os.getenv("BUILD_TYPE") != "release", reason="debug run is unnecessarily slow")
+def test_ingesting_large_batches_of_images(neon_env_builder: NeonEnvBuilder):
     """
     Build a non-small GIN index which includes similarly batched up images in WAL stream as does pgvector
     to show that we no longer create oversized layers.
     """
-
-    if build_type == "debug":
-        pytest.skip("debug run is unnecessarily slow")
 
     minimum_initdb_size = 20 * 1024**2
     checkpoint_distance = 32 * 1024**2
