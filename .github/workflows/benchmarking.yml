@@ -318,22 +318,22 @@ jobs:
     
           # Check for hours (h)
           if [[ "$duration" =~ ([0-9]+)h ]]; then
-            total_seconds=$((total_seconds + BASH_REMATCH[1] * 3600))
+            total_seconds=$((total_seconds + ${BASH_REMATCH[1]#0} * 3600))
           fi
     
           # Check for minutes (m)
           if [[ "$duration" =~ ([0-9]+)m ]]; then
-            total_seconds=$((total_seconds + BASH_REMATCH[1] * 60))
+            total_seconds=$((total_seconds + ${BASH_REMATCH[1]#0} * 60))
           fi
     
           # Check for seconds (s)
           if [[ "$duration" =~ ([0-9]+)s ]]; then
-            total_seconds=$((total_seconds + BASH_REMATCH[1]))
+            total_seconds=$((total_seconds + ${BASH_REMATCH[1]#0}))
           fi
     
           # Check for milliseconds (ms) (if applicable)
           if [[ "$duration" =~ ([0-9]+)ms ]]; then
-            total_seconds=$((total_seconds + BASH_REMATCH[1] / 1000))
+            total_seconds=$((total_seconds + ${BASH_REMATCH[1]#0} / 1000))
           fi
     
           echo $total_seconds
