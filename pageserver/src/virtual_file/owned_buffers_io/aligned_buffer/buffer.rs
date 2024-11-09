@@ -3,9 +3,10 @@ use std::{
     sync::Arc,
 };
 
-use super::{alignment::Alignment, raw::RawAlignedBuffer};
+use super::{alignment::Alignment, raw::RawAlignedBuffer, AlignedBufferMut};
 
 /// An shared, immutable aligned buffer type.
+#[derive(Clone)]
 pub struct AlignedBuffer<A: Alignment> {
     /// Shared raw buffer.
     raw: Arc<RawAlignedBuffer<A>>,
@@ -85,6 +86,11 @@ impl<A: Alignment> AlignedBuffer<A> {
             raw: Arc::clone(&self.raw),
             range: begin..end,
         }
+    }
+
+    pub fn into_mut(self) -> Option<AlignedBufferMut<A>> {
+        let raw = Arc::into_inner(self.raw)?;
+        Some(AlignedBufferMut::from_raw(raw))
     }
 }
 

@@ -46,6 +46,10 @@ impl<const A: usize> AlignedBufferMut<ConstAlign<A>> {
 }
 
 impl<A: Alignment> AlignedBufferMut<A> {
+    pub(super) fn from_raw(raw: RawAlignedBuffer<A>) -> Self {
+        AlignedBufferMut { raw }
+    }
+
     /// Returns the total number of bytes the buffer can hold.
     #[inline]
     pub fn capacity(&self) -> usize {

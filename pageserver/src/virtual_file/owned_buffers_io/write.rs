@@ -1,9 +1,10 @@
+mod flush;
 use std::sync::Arc;
 
-use bytes::BytesMut;
-use tokio_epoll_uring::IoBuf;
+use bytes::{BufMut, BytesMut};
+use tokio_epoll_uring::{BoundedBufMut, IoBuf};
 
-use crate::context::RequestContext;
+use crate::{context::RequestContext, virtual_file::IoBufferMut};
 
 use super::io_buf_ext::{FullSlice, IoBufExt};
 
@@ -40,7 +41,7 @@ pub struct BufferedWriter<B, W> {
     /// - after an IO error => stays `None` forever
     ///
     /// In these exceptional cases, it's `None`.
-    buf: Option<B>,
+    mutable: Option<B>,
     bytes_amount: u64,
 }
 
@@ -53,7 +54,7 @@ where
     pub fn new(writer: Arc<W>, buf: B) -> Self {
         Self {
             writer,
-            buf: Some(buf),
+            mutable: Some(buf),
             bytes_amount: 0,
         }
     }
@@ -79,7 +80,7 @@ where
         self.flush(ctx).await?;
 
         let Self {
-            buf,
+            mutable: buf,
             writer,
             bytes_amount,
         } = self;
@@ -89,7 +90,7 @@ where
 
     #[inline(always)]
     fn buf(&self) -> &B {
-        self.buf
+        self.mutable
             .as_ref()
             .expect("must not use after we returned an error")
     }
@@ -109,7 +110,7 @@ where
             self.flush(ctx).await?;
             // do a big write, bypassing `buf`
             assert_eq!(
-                self.buf
+                self.mutable
                     .as_ref()
                     .expect("must not use after an error")
                     .pending(),
@@ -126,7 +127,7 @@ where
         assert!(chunk.len() < self.buf().cap());
         let mut slice = &chunk[..];
         while !slice.is_empty() {
-            let buf = self.buf.as_mut().expect("must not use after an error");
+            let buf = self.mutable.as_mut().expect("must not use after an error");
             let need = buf.cap() - buf.pending();
             let have = slice.len();
             let n = std::cmp::min(need, have);
@@ -153,7 +154,7 @@ where
     ) -> std::io::Result<usize> {
         let chunk_len = chunk.len();
         while !chunk.is_empty() {
-            let buf = self.buf.as_mut().expect("must not use after an error");
+            let buf = self.mutable.as_mut().expect("must not use after an error");
             let need = buf.cap() - buf.pending();
             let have = chunk.len();
             let n = std::cmp::min(need, have);
@@ -168,10 +169,10 @@ where
     }
 
     async fn flush(&mut self, ctx: &RequestContext) -> std::io::Result<()> {
-        let buf = self.buf.take().expect("must not use after an error");
+        let buf = self.mutable.take().expect("must not use after an error");
         let buf_len = buf.pending();
         if buf_len == 0 {
-            self.buf = Some(buf);
+            self.mutable = Some(buf);
             return Ok(());
         }
         let slice = buf.flush();
@@ -180,7 +181,7 @@ where
             .write_all_at(slice, self.bytes_amount, ctx)
             .await?;
         self.bytes_amount += u64::try_from(buf_len).unwrap();
-        self.buf = Some(Buffer::reuse_after_flush(
+        self.mutable = Some(Buffer::reuse_after_flush(
             slice.into_raw_slice().into_inner(),
         ));
         Ok(())
@@ -233,6 +234,32 @@ impl Buffer for BytesMut {
     }
 
     fn reuse_after_flush(mut iobuf: BytesMut) -> Self {
+        iobuf.clear();
+        iobuf
+    }
+}
+
+impl Buffer for IoBufferMut {
+    type IoBuf = IoBufferMut;
+
+    fn cap(&self) -> usize {
+        self.capacity()
+    }
+
+    fn extend_from_slice(&mut self, other: &[u8]) {
+        self.reserve(other.len());
+        BoundedBufMut::put_slice(self, other);
+    }
+
+    fn pending(&self) -> usize {
+        self.len()
+    }
+
+    fn flush(self) -> FullSlice<Self::IoBuf> {
+        self.slice_len()
+    }
+
+    fn reuse_after_flush(mut iobuf: Self::IoBuf) -> Self {
         iobuf.clear();
         iobuf
     }

@@ -4,7 +4,7 @@ pub trait Alignment: std::marker::Unpin + 'static {
 }
 
 /// Alignment at compile time.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct ConstAlign<const A: usize>;
 
 impl<const A: usize> Alignment for ConstAlign<A> {
@@ -14,7 +14,7 @@ impl<const A: usize> Alignment for ConstAlign<A> {
 }
 
 /// Alignment at run time.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct RuntimeAlign {
     align: usize,
 }
