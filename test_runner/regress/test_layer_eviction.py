@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import time
 
 import pytest
@@ -16,13 +17,8 @@ from fixtures.remote_storage import RemoteStorageKind
 
 # Crates a few layers, ensures that we can evict them (removing locally but keeping track of them anyway)
 # and then download them back.
-def test_basic_eviction(
-    neon_env_builder: NeonEnvBuilder,
-    build_type: str,
-):
-    if build_type == "debug":
-        pytest.skip("times out in debug builds")
-
+@pytest.mark.skipif(os.getenv("BUILD_TYPE") != "release", reason="times out in debug builds")
+def test_basic_eviction(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 
     env = neon_env_builder.init_start(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import random
 import time
 from dataclasses import dataclass
@@ -760,10 +761,8 @@ async def run_wal_lagging(env: NeonEnv, endpoint: Endpoint, test_output_dir: Pat
 # The test takes more than default 5 minutes on Postgres 16,
 # see https://github.com/neondatabase/neon/issues/5305
 @pytest.mark.timeout(600)
+@pytest.mark.skipif(os.getenv("BUILD_TYPE") != "debug", reason="times out in debug builds")
 def test_wal_lagging(neon_env_builder: NeonEnvBuilder, test_output_dir: Path, build_type: str):
-    if build_type == "debug":
-        pytest.skip("times out in debug builds")
-
     neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.init_start()
 
