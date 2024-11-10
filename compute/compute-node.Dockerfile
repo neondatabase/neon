@@ -1068,8 +1068,9 @@ ENV PATH="/usr/local/pgsql/bin/:$PATH"
 RUN wget https://github.com/luist18/postgresql_anonymizer/archive/refs/heads/add-guc-hook.tar.gz -O pg_anon.tar.gz && \
     mkdir pg_anon-src && cd pg_anon-src && tar xzf ../pg_anon.tar.gz --strip-components=1 -C . && \
     find /usr/local/pgsql -type f | sed 's|^/usr/local/pgsql/||' > /before.txt && \
-    make -j $(getconf _NPROCESSORS_ONLN) extension PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
-    make -j $(getconf _NPROCESSORS_ONLN) install PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
+    sed -i 's/pgrx = "0.12.6"/pgrx = { version = "=0.12.6", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
+    make -j $(getconf _NPROCESSORS_ONLN) extension PG_CONFIG=/usr/local/pgsql/bin/pg_config PGVER=pg$(echo "$PG_VERSION" | sed 's/^v//') && \
+    make -j $(getconf _NPROCESSORS_ONLN) install PG_CONFIG=/usr/local/pgsql/bin/pg_config PGVER=pg$(echo "$PG_VERSION" | sed 's/^v//') && \
     echo 'trusted = true' >> /usr/local/pgsql/share/extension/anon.control && \
     find /usr/local/pgsql -type f | sed 's|^/usr/local/pgsql/||' > /after.txt &&\
     mkdir -p /extensions/anon && cp /usr/local/pgsql/share/extension/anon.control /extensions/anon && \
