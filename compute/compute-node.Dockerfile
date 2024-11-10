@@ -814,33 +814,6 @@ RUN case "${PG_VERSION}" in \
 
 #########################################################################################
 #
-# Layer "pg-anon-pg-build"
-# compile anon extension
-#
-#########################################################################################
-FROM build-deps AS pg-anon-pg-build
-ARG PG_VERSION
-COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
-
-# This is an experimental extension, never got to real production.
-# !Do not remove! It can be present in shared_preload_libraries and compute will fail to start if library is not found.
-ENV PATH="/usr/local/pgsql/bin/:$PATH"
-RUN case "${PG_VERSION}" in "v17") \
-    echo "postgresql_anonymizer does not yet support PG17" && exit 0;; \
-    esac && \
-    wget  https://github.com/neondatabase/postgresql_anonymizer/archive/refs/tags/neon_1.1.1.tar.gz -O pg_anon.tar.gz && \
-    echo "321ea8d5c1648880aafde850a2c576e4a9e7b9933a34ce272efc839328999fa9  pg_anon.tar.gz" | sha256sum --check && \
-    mkdir pg_anon-src && cd pg_anon-src && tar xzf ../pg_anon.tar.gz --strip-components=1 -C . && \
-    find /usr/local/pgsql -type f | sed 's|^/usr/local/pgsql/||' > /before.txt &&\
-    make -j $(getconf _NPROCESSORS_ONLN) install PG_CONFIG=/usr/local/pgsql/bin/pg_config && \
-    echo 'trusted = true' >> /usr/local/pgsql/share/extension/anon.control && \
-    find /usr/local/pgsql -type f | sed 's|^/usr/local/pgsql/||' > /after.txt &&\
-    mkdir -p /extensions/anon && cp /usr/local/pgsql/share/extension/anon.control /extensions/anon && \
-    sort -o /before.txt /before.txt && sort -o /after.txt /after.txt && \
-    comm -13 /before.txt /after.txt | tar --directory=/usr/local/pgsql --zstd -cf /extensions/anon.tar.zst -T -
-
-#########################################################################################
-#
 # Layer "rust extensions"
 # This layer is used to build `pgrx` deps
 #
@@ -1079,6 +1052,27 @@ RUN wget https://github.com/neondatabase/pg_session_jwt/archive/refs/tags/v0.1.2
     mkdir pg_session_jwt-src && cd pg_session_jwt-src && tar xzf ../pg_session_jwt.tar.gz --strip-components=1 -C . && \
     sed -i 's/pgrx = "0.12.6"/pgrx = { version = "=0.12.6", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
     cargo pgrx install --release
+
+#########################################################################################
+#
+# Layer "pg-anon-pg-build"
+# compile anon extension
+#
+#########################################################################################
+FROM rust-extensions-build-pgrx12 AS pg-anon-pg-build
+ARG PG_VERSION
+COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
+
+# This is an experimental extension, never got to real production.
+# !Do not remove! It can be present in shared_preload_libraries and compute will fail to start if library is not found.
+ENV PATH="/usr/local/pgsql/bin/:$PATH"
+RUN wget https://github.com/luist18/postgresql_anonymizer/archive/refs/heads/add-guc-hook.tar.gz -O pg_anon.tar.gz && \
+    mkdir pg_anon-src && cd pg_anon-src && tar xzf ../pg_anon.tar.gz --strip-components=1 -C . && \
+    find /usr/local/pgsql -type f | sed 's|^/usr/local/pgsql/||' > /before.txt && \
+    sed -i 's/pgrx = "0.12.6"/pgrx = { version = "=0.12.6", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
+    make -j $(getconf _NPROCESSORS_ONLN) extension PG_CONFIG=/usr/local/pgsql/bin/pg_config PGVER=pg$(echo "$PG_VERSION" | sed 's/^v//') && \
+    make -j $(getconf _NPROCESSORS_ONLN) install PG_CONFIG=/usr/local/pgsql/bin/pg_config PGVER=pg$(echo "$PG_VERSION" | sed 's/^v//') && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/anon.control
 
 #########################################################################################
 #
