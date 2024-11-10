@@ -227,7 +227,8 @@ async fn download_object<'a>(
                 let (bytes_amount, destination_file) = async {
                     let mut buffered = owned_buffers_io::write::BufferedWriter::<BytesMut, _>::new(
                         destination_file,
-                        BytesMut::with_capacity(super::BUFFER_SIZE),
+                        || BytesMut::with_capacity(super::BUFFER_SIZE),
+                        ctx,
                     );
                     while let Some(res) =
                         futures::StreamExt::next(&mut download.download_stream).await

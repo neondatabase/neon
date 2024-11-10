@@ -128,7 +128,7 @@ where
 
     /// Submits a buffer to be flushed in the background task.
     /// Returns a buffer that completed flushing for re-use, length reset to 0, capacity unchanged.
-    async fn flush<B>(&mut self, buf: B, offset: u64) -> std::io::Result<B>
+    pub async fn flush<B>(&mut self, buf: B, offset: u64) -> std::io::Result<B>
     where
         B: Buffer<IoBuf = Buf> + Send + 'static,
     {
@@ -155,14 +155,23 @@ where
         ))
     }
 
+    /// Cleans up the channel, join the flush task.
+    pub async fn shutdown(&mut self) -> std::io::Result<Arc<W>> {
+        let handle = self
+            .inner
+            .take()
+            .expect("must not use after we returned an error");
+        drop(handle.channel.tx);
+        handle.join_handle.await.unwrap()
+    }
+
     fn inner_mut(&mut self) -> &mut FlushHandleInner<Buf, W> {
-        self.inner.as_mut().unwrap()
+        self.inner
+            .as_mut()
+            .expect("must not use after we returned an error")
     }
 
     async fn handle_error<T>(&mut self) -> std::io::Result<T> {
-        let handle = self.inner.take().unwrap();
-        drop(handle.channel.tx);
-        let e = handle.join_handle.await.unwrap().unwrap_err();
-        return Err(e);
+        Err(self.shutdown().await.unwrap_err())
     }
 }

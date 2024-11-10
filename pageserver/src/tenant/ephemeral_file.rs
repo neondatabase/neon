@@ -73,7 +73,8 @@ impl EphemeralFile {
             bytes_written: 0,
             buffered_writer: owned_buffers_io::write::BufferedWriter::new(
                 file,
-                BytesMut::with_capacity(TAIL_SZ),
+                || BytesMut::with_capacity(TAIL_SZ),
+                ctx,
             ),
             _gate_guard: gate_guard,
         })
