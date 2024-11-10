@@ -1,22 +1,25 @@
 mod flush;
 use std::sync::Arc;
 
-use bytes::{BufMut, BytesMut};
+use bytes::BytesMut;
 use tokio_epoll_uring::{BoundedBufMut, IoBuf};
 
-use crate::{context::RequestContext, virtual_file::IoBufferMut};
+use crate::{
+    context::RequestContext,
+    virtual_file::{IoBuffer, IoBufferMut},
+};
 
 use super::io_buf_ext::{FullSlice, IoBufExt};
 
 /// A trait for doing owned-buffer write IO.
 /// Think [`tokio::io::AsyncWrite`] but with owned buffers.
 pub trait OwnedAsyncWriter {
-    async fn write_all_at<Buf: IoBuf + Send>(
+    fn write_all_at<Buf: IoBuf + Send>(
         &self,
         buf: FullSlice<Buf>,
         offset: u64,
         ctx: &RequestContext,
-    ) -> std::io::Result<FullSlice<Buf>>;
+    ) -> impl std::future::Future<Output = std::io::Result<FullSlice<Buf>>> + Send;
 }
 
 /// A wrapper aorund an [`OwnedAsyncWriter`] that uses a [`Buffer`] to batch
@@ -212,6 +215,8 @@ pub trait Buffer {
     fn reuse_after_flush(iobuf: Self::IoBuf) -> Self;
 }
 
+pub trait BufferMut: Buffer {}
+
 impl Buffer for BytesMut {
     type IoBuf = BytesMut;
 
@@ -240,7 +245,7 @@ impl Buffer for BytesMut {
 }
 
 impl Buffer for IoBufferMut {
-    type IoBuf = IoBufferMut;
+    type IoBuf = IoBuffer;
 
     fn cap(&self) -> usize {
         self.capacity()
@@ -256,12 +261,15 @@ impl Buffer for IoBufferMut {
     }
 
     fn flush(self) -> FullSlice<Self::IoBuf> {
-        self.slice_len()
+        self.freeze().slice_len()
     }
 
-    fn reuse_after_flush(mut iobuf: Self::IoBuf) -> Self {
-        iobuf.clear();
-        iobuf
+    fn reuse_after_flush(iobuf: Self::IoBuf) -> Self {
+        let mut recycled = iobuf
+            .into_mut()
+            .expect("buffer should only have one strong reference");
+        recycled.clear();
+        recycled
     }
 }
 

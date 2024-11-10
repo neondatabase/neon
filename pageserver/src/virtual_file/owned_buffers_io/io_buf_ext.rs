@@ -27,6 +27,11 @@ where
         let FullSlice { slice: s } = self;
         s
     }
+
+    pub(crate) fn as_raw_slice(&self) -> &Slice<B> {
+        let FullSlice { slice: s } = &self;
+        s
+    }
 }
 
 impl<B> Deref for FullSlice<B>
