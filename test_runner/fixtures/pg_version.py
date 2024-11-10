@@ -18,12 +18,15 @@ This fixture is used to determine which version of Postgres to use for tests.
 
 # Inherit PgVersion from str rather than int to make it easier to pass as a command-line argument
 # TODO: use enum.StrEnum for Python >= 3.11
-@enum.unique
 class PgVersion(str, enum.Enum):
     V14 = "14"
     V15 = "15"
     V16 = "16"
     V17 = "17"
+
+    # Default Postgres Version for tests that don't really depend on Postgres itself
+    DEFAULT = V16
+
     # Instead of making version an optional parameter in methods, we can use this fake entry
     # to explicitly rely on the default server version (could be different from pg_version fixture value)
     NOT_SET = "<-POSTRGRES VERSION IS NOT SET->"
@@ -61,25 +64,22 @@ class PgVersion(str, enum.Enum):
         return None
 
 
-DEFAULT_VERSION: PgVersion = PgVersion.V16
-
-
 def skip_on_postgres(version: PgVersion, reason: str):
     return pytest.mark.skipif(
-        PgVersion(os.environ.get("DEFAULT_PG_VERSION", DEFAULT_VERSION)) is version,
+        PgVersion(os.environ.get("DEFAULT_PG_VERSION", PgVersion.DEFAULT)) is version,
         reason=reason,
     )
 
 
 def xfail_on_postgres(version: PgVersion, reason: str):
     return pytest.mark.xfail(
-        PgVersion(os.environ.get("DEFAULT_PG_VERSION", DEFAULT_VERSION)) is version,
+        PgVersion(os.environ.get("DEFAULT_PG_VERSION", PgVersion.DEFAULT)) is version,
         reason=reason,
     )
 
 
 def run_only_on_default_postgres(reason: str):
     return pytest.mark.skipif(
-        PgVersion(os.environ.get("DEFAULT_PG_VERSION", DEFAULT_VERSION)) is not DEFAULT_VERSION,
+        PgVersion(os.environ.get("DEFAULT_PG_VERSION", PgVersion.DEFAULT)) is not PgVersion.DEFAULT,
         reason=reason,
     )
