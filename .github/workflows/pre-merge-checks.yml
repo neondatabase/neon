@@ -34,16 +34,10 @@ jobs:
         run: |
           echo "${PYTHON_CHANGED_FILES}"
 
-  check-build-tools-image:
+  build-build-tools-image:
     if: needs.get-changed-files.outputs.python-changed == 'true'
     needs: [ get-changed-files ]
-    uses: ./.github/workflows/check-build-tools-image.yml
-
-  build-build-tools-image:
-    needs: [ check-build-tools-image ]
     uses: ./.github/workflows/build-build-tools-image.yml
-    with:
-      image-tag: ${{ needs.check-build-tools-image.outputs.image-tag }}
     secrets: inherit
 
   check-codestyle-python:
