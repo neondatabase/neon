@@ -11,7 +11,8 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
 )
-from fixtures.pg_version import PgVersion, skip_on_postgres
+from fixtures.pg_version import PgVersion
+from fixtures.utils import skip_on_postgres
 from pytest_httpserver import HTTPServer
 from werkzeug.wrappers.request import Request
 from werkzeug.wrappers.response import Response

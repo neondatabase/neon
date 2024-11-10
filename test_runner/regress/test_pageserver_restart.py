@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import random
 from contextlib import closing
 from typing import Optional
@@ -9,7 +8,7 @@ import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder
 from fixtures.remote_storage import s3_storage
-from fixtures.utils import wait_until
+from fixtures.utils import skip_in_debug_build, wait_until
 
 
 # Test restarting page server, while safekeeper and compute node keep
@@ -156,7 +155,7 @@ def test_pageserver_restart(neon_env_builder: NeonEnvBuilder):
 # safekeeper and compute node keep running.
 @pytest.mark.timeout(540)
 @pytest.mark.parametrize("shard_count", [None, 4])
-@pytest.mark.skipif(os.getenv("BUILD_TYPE") != "release", reason="times out in debug builds")
+@skip_in_debug_build("times out in debug builds")
 def test_pageserver_chaos(neon_env_builder: NeonEnvBuilder, shard_count: Optional[int]):
     # same rationale as with the immediate stop; we might leave orphan layers behind.
     neon_env_builder.disable_scrub_on_exit()

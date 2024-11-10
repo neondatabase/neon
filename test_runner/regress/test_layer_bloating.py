@@ -8,7 +8,8 @@ from fixtures.neon_fixtures import (
     logical_replication_sync,
     wait_for_last_flush_lsn,
 )
-from fixtures.pg_version import PgVersion, skip_on_postgres
+from fixtures.pg_version import PgVersion
+from fixtures.utils import skip_on_postgres
 
 
 @skip_on_postgres(

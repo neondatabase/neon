@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import os
 import time
 
-import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
@@ -13,11 +11,12 @@ from fixtures.neon_fixtures import (
 from fixtures.pageserver.common_types import parse_layer_file_name
 from fixtures.pageserver.utils import wait_for_upload
 from fixtures.remote_storage import RemoteStorageKind
+from fixtures.utils import skip_in_debug_build
 
 
 # Crates a few layers, ensures that we can evict them (removing locally but keeping track of them anyway)
 # and then download them back.
-@pytest.mark.skipif(os.getenv("BUILD_TYPE") != "release", reason="times out in debug builds")
+@skip_in_debug_build("times out in debug builds")
 def test_basic_eviction(neon_env_builder: NeonEnvBuilder):
     neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
 

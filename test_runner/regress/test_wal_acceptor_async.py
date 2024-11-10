@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import random
 import time
 from dataclasses import dataclass
@@ -15,6 +14,7 @@ from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import getLogger
 from fixtures.neon_fixtures import Endpoint, NeonEnv, NeonEnvBuilder, Safekeeper
 from fixtures.remote_storage import RemoteStorageKind
+from fixtures.utils import skip_in_debug_build
 
 if TYPE_CHECKING:
     from typing import Optional
@@ -761,7 +761,7 @@ async def run_wal_lagging(env: NeonEnv, endpoint: Endpoint, test_output_dir: Pat
 # The test takes more than default 5 minutes on Postgres 16,
 # see https://github.com/neondatabase/neon/issues/5305
 @pytest.mark.timeout(600)
-@pytest.mark.skipif(os.getenv("BUILD_TYPE") != "debug", reason="times out in debug builds")
+@skip_in_debug_build("times out in debug builds")
 def test_wal_lagging(neon_env_builder: NeonEnvBuilder, test_output_dir: Path, build_type: str):
     neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.init_start()

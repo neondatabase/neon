@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import threading
 import time
 
@@ -9,7 +8,7 @@ from fixtures.common_types import Lsn, TimelineId
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv
 from fixtures.pageserver.http import TimelineCreate406
-from fixtures.utils import query_scalar
+from fixtures.utils import query_scalar, skip_in_debug_build
 
 
 # Test the GC implementation when running with branching.
@@ -49,7 +48,7 @@ from fixtures.utils import query_scalar
 # Because the delta layer D covering lsn1 is corrupted, creating a branch
 # starting from lsn1 should return an error as follows:
 #     could not find data for key ... at LSN ..., for request at LSN ...
-@pytest.mark.skipif(os.getenv("BUILD_TYPE") != "release", reason="times out in debug builds")
+@skip_in_debug_build("times out in debug builds")
 def test_branch_and_gc(neon_simple_env: NeonEnv):
     env = neon_simple_env
     pageserver_http_client = env.pageserver.http_client()

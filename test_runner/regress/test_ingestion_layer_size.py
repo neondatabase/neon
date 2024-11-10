@@ -1,21 +1,19 @@
 from __future__ import annotations
 
-import os
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnvBuilder, wait_for_last_flush_lsn
 from fixtures.pageserver.http import HistoricLayerInfo, LayerMapInfo
-from fixtures.utils import human_bytes
+from fixtures.utils import human_bytes, skip_in_debug_build
 
 if TYPE_CHECKING:
     from typing import Union
 
 
-@pytest.mark.skipif(os.getenv("BUILD_TYPE") != "release", reason="debug run is unnecessarily slow")
+@skip_in_debug_build("debug run is unnecessarily slow")
 def test_ingesting_large_batches_of_images(neon_env_builder: NeonEnvBuilder):
     """
     Build a non-small GIN index which includes similarly batched up images in WAL stream as does pgvector

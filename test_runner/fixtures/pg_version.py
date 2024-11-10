@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import enum
-import os
 from typing import TYPE_CHECKING
 
-import pytest
 from typing_extensions import override
 
 if TYPE_CHECKING:
@@ -62,24 +60,3 @@ class PgVersion(str, enum.Enum):
         # Make mypy happy
         # See https://github.com/python/mypy/issues/3974
         return None
-
-
-def skip_on_postgres(version: PgVersion, reason: str):
-    return pytest.mark.skipif(
-        PgVersion(os.environ.get("DEFAULT_PG_VERSION", PgVersion.DEFAULT)) is version,
-        reason=reason,
-    )
-
-
-def xfail_on_postgres(version: PgVersion, reason: str):
-    return pytest.mark.xfail(
-        PgVersion(os.environ.get("DEFAULT_PG_VERSION", PgVersion.DEFAULT)) is version,
-        reason=reason,
-    )
-
-
-def run_only_on_default_postgres(reason: str):
-    return pytest.mark.skipif(
-        PgVersion(os.environ.get("DEFAULT_PG_VERSION", PgVersion.DEFAULT)) is not PgVersion.DEFAULT,
-        reason=reason,
-    )

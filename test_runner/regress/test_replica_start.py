@@ -29,8 +29,8 @@ import psycopg2
 import pytest
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import NeonEnv, wait_for_last_flush_lsn, wait_replica_caughtup
-from fixtures.pg_version import PgVersion, skip_on_postgres
-from fixtures.utils import query_scalar, wait_until
+from fixtures.pg_version import PgVersion
+from fixtures.utils import query_scalar, skip_on_postgres, wait_until
 
 CREATE_SUBXACTS_FUNC = """
 create or replace function create_subxacts(n integer) returns void as $$
