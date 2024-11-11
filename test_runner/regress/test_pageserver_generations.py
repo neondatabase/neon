@@ -656,6 +656,7 @@ def test_upgrade_generationless_local_file_paths(
     workload.write_rows(1000)
 
     attached_pageserver = env.get_tenant_pageserver(tenant_id)
+    assert attached_pageserver is not None
     secondary_pageserver = list([ps for ps in env.pageservers if ps.id != attached_pageserver.id])[
         0
     ]

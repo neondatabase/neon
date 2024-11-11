@@ -23,7 +23,7 @@ bstr.workspace = true
 bytes = { workspace = true, features = ["serde"] }
 camino.workspace = true
 chrono.workspace = true
-clap.workspace = true
+clap = { workspace = true, features = ["derive", "env"] }
 compute_api.workspace = true
 consumption_metrics.workspace = true
 dashmap.workspace = true
@@ -60,7 +60,7 @@ prometheus.workspace = true
 rand.workspace = true
 regex.workspace = true
 remote_storage = { version = "0.1", path = "../libs/remote_storage/" }
-reqwest.workspace = true
+reqwest = { workspace = true, features = ["rustls-tls-native-roots"] }
 reqwest-middleware = { workspace = true, features = ["json"] }
 reqwest-retry.workspace = true
 reqwest-tracing.workspace = true
@@ -98,6 +98,7 @@ rustls-native-certs.workspace = true
 x509-parser.workspace = true
 postgres-protocol.workspace = true
 redis.workspace = true
+zerocopy.workspace = true
 
 # jwt stuff
 jose-jwa = "0.1.2"

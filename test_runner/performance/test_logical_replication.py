@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import psycopg2
 import psycopg2.extras
@@ -12,13 +12,17 @@ from fixtures.log_helper import log
 from fixtures.neon_fixtures import logical_replication_sync
 
 if TYPE_CHECKING:
+    from subprocess import Popen
+    from typing import AnyStr
+
     from fixtures.benchmark_fixture import NeonBenchmarker
     from fixtures.neon_api import NeonApiEndpoint
-    from fixtures.neon_fixtures import NeonEnv, PgBin
+    from fixtures.neon_fixtures import NeonEnv, PgBin, VanillaPostgres
+    from psycopg2.extensions import cursor
 
 
 @pytest.mark.timeout(1000)
-def test_logical_replication(neon_simple_env: NeonEnv, pg_bin: PgBin, vanilla_pg):
+def test_logical_replication(neon_simple_env: NeonEnv, pg_bin: PgBin, vanilla_pg: VanillaPostgres):
     env = neon_simple_env
 
     endpoint = env.endpoints.create_start("main")
@@ -47,24 +51,26 @@ def test_logical_replication(neon_simple_env: NeonEnv, pg_bin: PgBin, vanilla_pg
     logical_replication_sync(vanilla_pg, endpoint)
     log.info(f"Sync with master took {time.time() - start} seconds")
 
-    sum_master = endpoint.safe_psql("select sum(abalance) from pgbench_accounts")[0][0]
-    sum_replica = vanilla_pg.safe_psql("select sum(abalance) from pgbench_accounts")[0][0]
+    sum_master = cast("int", endpoint.safe_psql("select sum(abalance) from pgbench_accounts")[0][0])
+    sum_replica = cast(
+        "int", vanilla_pg.safe_psql("select sum(abalance) from pgbench_accounts")[0][0]
+    )
     assert sum_master == sum_replica
 
 
-def check_pgbench_still_running(pgbench, label=""):
+def check_pgbench_still_running(pgbench: Popen[AnyStr], label: str = ""):
     rc = pgbench.poll()
     if rc is not None:
         raise RuntimeError(f"{label} pgbench terminated early with return code {rc}")
 
 
-def measure_logical_replication_lag(sub_cur, pub_cur, timeout_sec=600):
+def measure_logical_replication_lag(sub_cur: cursor, pub_cur: cursor, timeout_sec: float = 600):
     start = time.time()
     pub_cur.execute("SELECT pg_current_wal_flush_lsn()")
-    pub_lsn = Lsn(pub_cur.fetchall()[0][0])
+    pub_lsn = Lsn(cast("str", pub_cur.fetchall()[0][0]))
     while (time.time() - start) < timeout_sec:
         sub_cur.execute("SELECT latest_end_lsn FROM pg_catalog.pg_stat_subscription")
-        res = sub_cur.fetchall()[0][0]
+        res = cast("str", sub_cur.fetchall()[0][0])
         if res:
             log.info(f"subscriber_lsn={res}")
             sub_lsn = Lsn(res)
@@ -286,7 +292,7 @@ def test_snap_files(
         conn.autocommit = True
         with conn.cursor() as cur:
             cur.execute("SELECT rolsuper FROM pg_roles WHERE rolname = 'neondb_owner'")
-            is_super = cur.fetchall()[0][0]
+            is_super = cast("bool", cur.fetchall()[0][0])
             assert is_super, "This benchmark won't work if we don't have superuser"
 
     pg_bin.run_capture(["pgbench", "-i", "-I", "dtGvp", "-s100"], env=env)

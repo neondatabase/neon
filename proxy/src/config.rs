@@ -78,7 +78,7 @@ pub struct AuthenticationConfig {
     pub jwks_cache: JwkCache,
     pub is_auth_broker: bool,
     pub accept_jwts: bool,
-    pub webauth_confirmation_timeout: tokio::time::Duration,
+    pub console_redirect_confirmation_timeout: tokio::time::Duration,
 }
 
 impl TlsConfig {
@@ -271,7 +271,7 @@ impl CertResolver {
         // auth-broker does not use SNI and instead uses the Neon-Connection-String header.
         // Auth broker has the subdomain `apiauth` we need to remove for the purposes of validating the Neon-Connection-String.
         //
-        // Console Web proxy does not use any wildcard domains and does not need any certificate selection or conn string
+        // Console Redirect proxy does not use any wildcard domains and does not need any certificate selection or conn string
         // validation, so let's we can continue with any common-name
         let common_name = if let Some(s) = common_name.strip_prefix("CN=*.") {
             s.to_string()
@@ -366,7 +366,7 @@ pub struct EndpointCacheConfig {
 }
 
 impl EndpointCacheConfig {
-    /// Default options for [`crate::control_plane::provider::NodeInfoCache`].
+    /// Default options for [`crate::control_plane::NodeInfoCache`].
     /// Notice that by default the limiter is empty, which means that cache is disabled.
     pub const CACHE_DEFAULT_OPTIONS: &'static str =
         "initial_batch_size=1000,default_batch_size=10,xread_timeout=5m,stream_name=controlPlane,disable_cache=true,limiter_info=1000@1s,retry_interval=1s";
@@ -441,7 +441,7 @@ pub struct CacheOptions {
 }
 
 impl CacheOptions {
-    /// Default options for [`crate::control_plane::provider::NodeInfoCache`].
+    /// Default options for [`crate::control_plane::NodeInfoCache`].
     pub const CACHE_DEFAULT_OPTIONS: &'static str = "size=4000,ttl=4m";
 
     /// Parse cache options passed via cmdline.
@@ -497,7 +497,7 @@ pub struct ProjectInfoCacheOptions {
 }
 
 impl ProjectInfoCacheOptions {
-    /// Default options for [`crate::control_plane::provider::NodeInfoCache`].
+    /// Default options for [`crate::control_plane::NodeInfoCache`].
     pub const CACHE_DEFAULT_OPTIONS: &'static str =
         "size=10000,ttl=4m,max_roles=10,gc_interval=60m";
 
@@ -616,9 +616,9 @@ pub struct ConcurrencyLockOptions {
 }
 
 impl ConcurrencyLockOptions {
-    /// Default options for [`crate::control_plane::provider::ApiLocks`].
+    /// Default options for [`crate::control_plane::client::ApiLocks`].
     pub const DEFAULT_OPTIONS_WAKE_COMPUTE_LOCK: &'static str = "permits=0";
-    /// Default options for [`crate::control_plane::provider::ApiLocks`].
+    /// Default options for [`crate::control_plane::client::ApiLocks`].
     pub const DEFAULT_OPTIONS_CONNECT_COMPUTE_LOCK: &'static str =
         "shards=64,permits=100,epoch=10m,timeout=10ms";
 
