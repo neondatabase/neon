@@ -47,29 +47,24 @@ pub(crate) async fn offload_timeline(
     match is_archived {
         Some(true) => (),
         Some(false) => {
-            tracing::warn!(?is_archived, "tried offloading a non-archived timeline");
+            tracing::warn!("tried offloading a non-archived timeline");
             return Err(OffloadError::NotArchived);
         }
         None => {
             // This is legal: calls to this function can race with the timeline shutting down
-            tracing::info!(
-                ?is_archived,
-                "tried offloading a timeline whose remote storage is not initialized"
-            );
+            tracing::info!("tried offloading a timeline whose remote storage is not initialized");
             return Err(OffloadError::Cancelled);
         }
     }
 
     // Now that the Timeline is in Stopping state, request all the related tasks to shut down.
-    timeline.shutdown(super::ShutdownMode::Hard).await;
+    timeline.shutdown(super::ShutdownMode::Flush).await;
 
     // TODO extend guard mechanism above with method
     // to make deletions possible while offloading is in progress
 
     let conf = &tenant.conf;
-    delete_local_timeline_directory(conf, tenant.tenant_shard_id, &timeline)
-        .await
-        .map_err(OffloadError::Other)?;
+    delete_local_timeline_directory(conf, tenant.tenant_shard_id, &timeline).await;
 
     remove_timeline_from_tenant(tenant, &timeline, &guard);
 

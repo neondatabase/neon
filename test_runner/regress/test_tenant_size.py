@@ -315,6 +315,7 @@ def test_single_branch_get_tenant_size_grows(
         tenant_id: TenantId,
         timeline_id: TimelineId,
     ) -> tuple[Lsn, int]:
+        size = 0
         consistent = False
         size_debug = None
 
@@ -360,7 +361,7 @@ def test_single_branch_get_tenant_size_grows(
         collected_responses.append(("CREATE", current_lsn, size))
 
         batch_size = 100
-
+        prev_size = 0
         for i in range(3):
             with endpoint.cursor() as cur:
                 cur.execute(

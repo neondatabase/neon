@@ -4,11 +4,14 @@ https://python-hyper.org/projects/hyper-h2/en/stable/asyncio-example.html
 auth-broker -> local-proxy needs a h2 connection, so we need a h2 server :)
 """
 
+from __future__ import annotations
+
 import asyncio
 import collections
 import io
 import json
 from collections.abc import AsyncIterable
+from typing import TYPE_CHECKING, final
 
 import pytest_asyncio
 from h2.config import H2Configuration
@@ -25,34 +28,45 @@ from h2.events import (
 )
 from h2.exceptions import ProtocolError, StreamClosedError
 from h2.settings import SettingCodes
+from typing_extensions import override
+
+if TYPE_CHECKING:
+    from typing import Any, Optional
+
 
 RequestData = collections.namedtuple("RequestData", ["headers", "data"])
 
 
+@final
 class H2Server:
-    def __init__(self, host, port) -> None:
+    def __init__(self, host: str, port: int) -> None:
         self.host = host
         self.port = port
 
 
+@final
 class H2Protocol(asyncio.Protocol):
     def __init__(self):
         config = H2Configuration(client_side=False, header_encoding="utf-8")
         self.conn = H2Connection(config=config)
-        self.transport = None
-        self.stream_data = {}
-        self.flow_control_futures = {}
+        self.transport: Optional[asyncio.Transport] = None
+        self.stream_data: dict[int, RequestData] = {}
+        self.flow_control_futures: dict[int, asyncio.Future[Any]] = {}
 
-    def connection_made(self, transport: asyncio.Transport):  # type: ignore[override]
+    @override
+    def connection_made(self, transport: asyncio.BaseTransport):
+        assert isinstance(transport, asyncio.Transport)
         self.transport = transport
         self.conn.initiate_connection()
         self.transport.write(self.conn.data_to_send())
 
-    def connection_lost(self, _exc):
+    @override
+    def connection_lost(self, exc: Optional[Exception]):
         for future in self.flow_control_futures.values():
             future.cancel()
         self.flow_control_futures = {}
 
+    @override
     def data_received(self, data: bytes):
         assert self.transport is not None
         try:
@@ -77,7 +91,7 @@ class H2Protocol(asyncio.Protocol):
                     self.window_updated(event.stream_id, event.delta)
                 elif isinstance(event, RemoteSettingsChanged):
                     if SettingCodes.INITIAL_WINDOW_SIZE in event.changed_settings:
-                        self.window_updated(None, 0)
+                        self.window_updated(0, 0)
 
                 self.transport.write(self.conn.data_to_send())
 
@@ -123,7 +137,7 @@ class H2Protocol(asyncio.Protocol):
         else:
             stream_data.data.write(data)
 
-    def stream_reset(self, stream_id):
+    def stream_reset(self, stream_id: int):
         """
         A stream reset was sent. Stop sending data.
         """
@@ -131,7 +145,7 @@ class H2Protocol(asyncio.Protocol):
             future = self.flow_control_futures.pop(stream_id)
             future.cancel()
 
-    async def send_data(self, data, stream_id):
+    async def send_data(self, data: bytes, stream_id: int):
         """
         Send data according to the flow control rules.
         """
@@ -161,7 +175,7 @@ class H2Protocol(asyncio.Protocol):
             self.transport.write(self.conn.data_to_send())
             data = data[chunk_size:]
 
-    async def wait_for_flow_control(self, stream_id):
+    async def wait_for_flow_control(self, stream_id: int):
         """
         Waits for a Future that fires when the flow control window is opened.
         """
@@ -169,7 +183,7 @@ class H2Protocol(asyncio.Protocol):
         self.flow_control_futures[stream_id] = f
         await f
 
-    def window_updated(self, stream_id, delta):
+    def window_updated(self, stream_id: int, delta):
         """
         A window update frame was received. Unblock some number of flow control
         Futures.

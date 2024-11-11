@@ -1445,7 +1445,7 @@ impl RemoteTimelineClient {
         let remote_path = remote_layer_path(
             &self.tenant_shard_id.tenant_id,
             &self.timeline_id,
-            self.tenant_shard_id.to_index(),
+            uploaded.metadata().shard,
             &uploaded.layer_desc().layer_name(),
             uploaded.metadata().generation,
         );
@@ -1486,7 +1486,7 @@ impl RemoteTimelineClient {
             &adopted
                 .get_timeline_id()
                 .expect("Source timeline should be alive"),
-            self.tenant_shard_id.to_index(),
+            adopted.metadata().shard,
             &adopted.layer_desc().layer_name(),
             adopted.metadata().generation,
         );
@@ -1494,7 +1494,7 @@ impl RemoteTimelineClient {
         let target_remote_path = remote_layer_path(
             &self.tenant_shard_id.tenant_id,
             &self.timeline_id,
-            self.tenant_shard_id.to_index(),
+            adopted_as.metadata().shard,
             &adopted_as.layer_desc().layer_name(),
             adopted_as.metadata().generation,
         );
@@ -2200,6 +2200,18 @@ impl RemoteTimelineClient {
         let mut inner = self.upload_queue.lock().unwrap();
         inner.initialized_mut()?;
         Ok(UploadQueueAccessor { inner })
+    }
+
+    pub(crate) fn no_pending_work(&self) -> bool {
+        let inner = self.upload_queue.lock().unwrap();
+        match &*inner {
+            UploadQueue::Uninitialized
+            | UploadQueue::Stopped(UploadQueueStopped::Uninitialized) => true,
+            UploadQueue::Stopped(UploadQueueStopped::Deletable(x)) => {
+                x.upload_queue_for_deletion.no_pending_work()
+            }
+            UploadQueue::Initialized(x) => x.no_pending_work(),
+        }
     }
 }
 

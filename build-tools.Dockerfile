@@ -1,11 +1,65 @@
 ARG DEBIAN_VERSION=bullseye
 
-FROM debian:${DEBIAN_VERSION}-slim
+FROM debian:bookworm-slim AS pgcopydb_builder
+ARG DEBIAN_VERSION
+
+RUN if [ "${DEBIAN_VERSION}" = "bookworm" ]; then \
+        set -e && \
+        apt update && \
+        apt install -y --no-install-recommends \
+        ca-certificates wget gpg && \
+        wget -qO - https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor -o /usr/share/keyrings/postgresql-keyring.gpg && \
+        echo "deb [signed-by=/usr/share/keyrings/postgresql-keyring.gpg] http://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" > /etc/apt/sources.list.d/pgdg.list && \
+        apt-get update && \
+        apt install -y --no-install-recommends \
+        build-essential \
+        autotools-dev \
+        libedit-dev \
+        libgc-dev \
+        libpam0g-dev \
+        libreadline-dev \
+        libselinux1-dev \
+        libxslt1-dev \
+        libssl-dev \
+        libkrb5-dev \
+        zlib1g-dev \
+        liblz4-dev \
+        libpq5 \
+        libpq-dev \
+        libzstd-dev \
+        postgresql-16 \
+        postgresql-server-dev-16 \
+        postgresql-common  \
+        python3-sphinx && \
+        wget -O /tmp/pgcopydb.tar.gz https://github.com/dimitri/pgcopydb/archive/refs/tags/v0.17.tar.gz && \
+        mkdir /tmp/pgcopydb && \
+        tar -xzf /tmp/pgcopydb.tar.gz -C /tmp/pgcopydb --strip-components=1 && \
+        cd /tmp/pgcopydb && \
+        make -s clean && \
+        make -s -j12 install && \
+        libpq_path=$(find /lib /usr/lib -name "libpq.so.5" | head -n 1) && \
+        mkdir -p /pgcopydb/lib && \
+        cp "$libpq_path" /pgcopydb/lib/; \
+    else \
+        # copy command below will fail if we don't have dummy files, so we create them for other debian versions
+        mkdir -p /usr/lib/postgresql/16/bin && touch /usr/lib/postgresql/16/bin/pgcopydb && \
+        mkdir -p mkdir -p /pgcopydb/lib && touch /pgcopydb/lib/libpq.so.5; \
+    fi
+
+FROM debian:${DEBIAN_VERSION}-slim AS build_tools
 ARG DEBIAN_VERSION
 
 # Add nonroot user
 RUN useradd -ms /bin/bash nonroot -b /home
 SHELL ["/bin/bash", "-c"]
+
+RUN mkdir -p /pgcopydb/bin && \
+    mkdir -p /pgcopydb/lib && \
+    chmod -R 755 /pgcopydb && \
+    chown -R nonroot:nonroot /pgcopydb
+        
+COPY --from=pgcopydb_builder /usr/lib/postgresql/16/bin/pgcopydb /pgcopydb/bin/pgcopydb 
+COPY --from=pgcopydb_builder /pgcopydb/lib/libpq.so.5 /pgcopydb/lib/libpq.so.5 
 
 # System deps
 #
@@ -38,7 +92,7 @@ RUN set -e \
         libseccomp-dev \
         libsqlite3-dev \
         libssl-dev \
-        $([[ "${DEBIAN_VERSION}" = "bullseye" ]] && libstdc++-10-dev || libstdc++-11-dev) \
+        $([[ "${DEBIAN_VERSION}" = "bullseye" ]] && echo libstdc++-10-dev || echo libstdc++-11-dev) \
         libtool \
         libxml2-dev \
         libxmlsec1-dev \
@@ -235,7 +289,13 @@ RUN whoami \
     && cargo --version --verbose \
     && rustup --version --verbose \
     && rustc --version --verbose \
-    && clang --version
+    && clang --version 
+
+RUN if [ "${DEBIAN_VERSION}" = "bookworm" ]; then \
+    LD_LIBRARY_PATH=/pgcopydb/lib /pgcopydb/bin/pgcopydb --version; \
+else \
+    echo "pgcopydb is not available for ${DEBIAN_VERSION}"; \
+fi
 
 # Set following flag to check in Makefile if its running in Docker
 RUN touch /home/nonroot/.docker_build

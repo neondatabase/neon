@@ -18,6 +18,7 @@ pub async fn init() -> anyhow::Result<LoggingGuard> {
     let env_filter = EnvFilter::builder()
         .with_default_directive(LevelFilter::INFO.into())
         .from_env_lossy()
+        .add_directive("aws_config=info".parse().unwrap())
         .add_directive("azure_core::policies::transport=off".parse().unwrap());
 
     let fmt_layer = tracing_subscriber::fmt::layer()

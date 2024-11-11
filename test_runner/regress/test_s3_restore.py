@@ -52,7 +52,9 @@ def test_tenant_s3_restore(
     tenant_id = env.initial_tenant
 
     # now lets create the small layers
-    ps_http.set_tenant_config(tenant_id, many_small_layers_tenant_config())
+    env.storage_controller.pageserver_api().set_tenant_config(
+        tenant_id, many_small_layers_tenant_config()
+    )
 
     # Default tenant and the one we created
     assert ps_http.get_metric_value("pageserver_tenant_manager_slots", {"mode": "attached"}) == 1

@@ -69,6 +69,7 @@ pub struct PageServerConf {
     pub wal_redo_timeout: Duration,
 
     pub superuser: String,
+    pub locale: String,
 
     pub page_cache_size: usize,
     pub max_file_descriptors: usize,
@@ -178,6 +179,9 @@ pub struct PageServerConf {
 
     /// Direct IO settings
     pub virtual_file_io_mode: virtual_file::IoMode,
+
+    /// Optionally disable disk syncs (unsafe!)
+    pub no_sync: bool,
 }
 
 /// Token for authentication to safekeepers
@@ -298,6 +302,7 @@ impl PageServerConf {
             wait_lsn_timeout,
             wal_redo_timeout,
             superuser,
+            locale,
             page_cache_size,
             max_file_descriptors,
             pg_distrib_dir,
@@ -332,6 +337,7 @@ impl PageServerConf {
             concurrent_tenant_size_logical_size_queries,
             virtual_file_io_engine,
             tenant_config,
+            no_sync,
         } = config_toml;
 
         let mut conf = PageServerConf {
@@ -344,6 +350,7 @@ impl PageServerConf {
             wait_lsn_timeout,
             wal_redo_timeout,
             superuser,
+            locale,
             page_cache_size,
             max_file_descriptors,
             http_auth_type,
@@ -409,6 +416,7 @@ impl PageServerConf {
                 .map(crate::l0_flush::L0FlushConfig::from)
                 .unwrap_or_default(),
             virtual_file_io_mode: virtual_file_io_mode.unwrap_or(virtual_file::IoMode::preferred()),
+            no_sync: no_sync.unwrap_or(false),
         };
 
         // ------------------------------------------------------------
