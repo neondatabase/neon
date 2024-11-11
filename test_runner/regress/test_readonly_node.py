@@ -122,7 +122,8 @@ def test_readonly_node(neon_simple_env: NeonEnv):
         )
 
 
-def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
+@pytest.mark.parametrize("iter", [i for i in range(20)])
+def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder, iter: int):
     """
     Test static endpoint is protected from GC by acquiring and renewing lsn leases.
     """
@@ -267,7 +268,7 @@ def test_readonly_node_gc(neon_env_builder: NeonEnvBuilder):
                 time.sleep(LSN_LEASE_LENGTH / 2)
                 ps.start()
 
-            trigger_gc_and_select(
+            offset = trigger_gc_and_select(
                 env,
                 ep_static,
                 lease_lsn=lsn,

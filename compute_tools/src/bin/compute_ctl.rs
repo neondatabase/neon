@@ -330,6 +330,7 @@ fn wait_spec(
         build_tag,
     };
     let compute = Arc::new(compute_node);
+    launch_lsn_lease_bg_task_for_static(&compute);
 
     // If this is a pooled VM, prewarm before starting HTTP server and becoming
     // available for binding. Prewarming helps Postgres start quicker later,
@@ -371,8 +372,6 @@ fn wait_spec(
         // not include the time that we waited for the spec.
         state.start_time = now;
     }
-
-    launch_lsn_lease_bg_task_for_static(&compute);
 
     Ok(WaitSpecResult {
         compute,
