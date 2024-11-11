@@ -67,11 +67,11 @@ for pg_version in 14 15 16; do
         # This block is required for the pg_anon extension test.
         # The test assumes that it is running on the same host with the postgres engine.
         # In our case it's not true, that's why we are copying files to the compute node
-        TMPDIR=$(mktemp -d)
-        docker cp $TEST_CONTAINER_NAME:/ext-src/pg_anon-src/data $TMPDIR/data
-        echo -e '1\t too \t many \t tabs' > $TMPDIR/data/bad.csv
-        docker cp $TMPDIR/data $COMPUTE_CONTAINER_NAME:/tmp/tmp_anon_alternate_data
-        rm -rf $TMPDIR
+        # TMPDIR=$(mktemp -d)
+        # docker cp $TEST_CONTAINER_NAME:/ext-src/pg_anon-src/data $TMPDIR/data
+        # echo -e '1\t too \t many \t tabs' > $TMPDIR/data/bad.csv
+        # docker cp $TMPDIR/data $COMPUTE_CONTAINER_NAME:/tmp/tmp_anon_alternate_data
+        # rm -rf $TMPDIR
         TMPDIR=$(mktemp -d)
         # The following block does the same for the pg_hintplan test
         docker cp $TEST_CONTAINER_NAME:/ext-src/pg_hint_plan-src/data $TMPDIR/data
