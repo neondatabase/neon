@@ -74,8 +74,13 @@ where
     }
 
     /// Panics if used after any of the write paths returned an error
-    pub fn inspect_buffer(&self) -> &B {
-        self.buf()
+    pub fn inspect_mutable(&self) -> &B {
+        self.mutable()
+    }
+
+    /// Gets a reference to the maybe flushed read-only buffer.
+    pub fn inspect_maybe_flushed(&self) -> Option<&Buf> {
+        self.flush_handle.maybe_flushed.as_ref()
     }
 
     #[cfg_attr(target_os = "macos", allow(dead_code))]
@@ -96,8 +101,9 @@ where
         Ok((bytes_amount, writer))
     }
 
+    /// Gets a reference to the mutable in-memory buffer.
     #[inline(always)]
-    fn buf(&self) -> &B {
+    fn mutable(&self) -> &B {
         self.mutable
             .as_ref()
             .expect("must not use after we returned an error")
@@ -114,7 +120,7 @@ where
 
         let chunk_len = chunk.len();
         // avoid memcpy for the middle of the chunk
-        if chunk.len() >= self.buf().cap() {
+        if chunk.len() >= self.mutable().cap() {
             // TODO(yuchen): do we still want to keep this?
             self.flush(ctx).await?;
             // do a big write, bypassing `buf`
@@ -133,7 +139,7 @@ where
             return Ok((chunk_len, chunk));
         }
         // in-memory copy the < BUFFER_SIZED tail of the chunk
-        assert!(chunk.len() < self.buf().cap());
+        assert!(chunk.len() < self.mutable().cap());
         let mut slice = &chunk[..];
         while !slice.is_empty() {
             let buf = self.mutable.as_mut().expect("must not use after an error");

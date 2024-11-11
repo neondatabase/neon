@@ -54,7 +54,7 @@ pub struct FlushHandleInner<Buf, W> {
 pub struct FlushHandle<Buf, W> {
     inner: Option<FlushHandleInner<Buf, W>>,
     /// Buffer for serving tail reads.
-    maybe_flushed: Option<Buf>,
+    pub(super) maybe_flushed: Option<Buf>,
 }
 
 pub struct FlushBackgroundTask<Buf, W> {
@@ -83,8 +83,8 @@ where
     }
 
     /// Runs the background flush task.
-    async fn run(mut self, buf: FullSlice<Buf>) -> std::io::Result<Arc<W>> {
-        self.channel.send(buf).await.map_err(|_| {
+    async fn run(mut self, slice: FullSlice<Buf>) -> std::io::Result<Arc<W>> {
+        self.channel.send(slice).await.map_err(|_| {
             std::io::Error::new(std::io::ErrorKind::BrokenPipe, "flush handle closed early")
         })?;
 
