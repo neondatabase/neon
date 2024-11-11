@@ -10,6 +10,7 @@ def test_physical_and_logical_replication_slot_not_copied(neon_simple_env: NeonE
     env = neon_simple_env
 
     n_records = 100000
+
     primary = env.endpoints.create_start(
         branch_name="main",
         endpoint_id="primary",
@@ -29,7 +30,6 @@ def test_physical_and_logical_replication_slot_not_copied(neon_simple_env: NeonE
     secondary = env.endpoints.new_replica_start(
         origin=primary,
         endpoint_id="secondary",
-        config_lines=["min_wal_size=32MB", "max_wal_size=64MB"],
     )
 
     s_con = secondary.connect()
@@ -41,17 +41,7 @@ def test_physical_and_logical_replication_slot_not_copied(neon_simple_env: NeonE
     s_cur.execute("select count(*) from t")
     assert s_cur.fetchall()[0][0] == n_records
 
-    # start replica
-    secondary = env.endpoints.new_replica_start(
-        origin=primary,
-        endpoint_id="secondary",
-    )
-
-    s_con = secondary.connect()
-    s_cur = s_con.cursor()
-
     logical_replication_sync(vanilla_pg, primary)
-
     assert vanilla_pg.safe_psql("select count(*) from t")[0][0] == n_records
 
     # Check that LR slot is not copied to replica
