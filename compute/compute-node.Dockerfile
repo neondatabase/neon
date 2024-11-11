@@ -1401,7 +1401,7 @@ COPY --from=pg-roaringbitmap-pg-build /pg_roaringbitmap.tar.gz /ext-src
 COPY --from=pg-semver-pg-build /pg_semver.tar.gz /ext-src
 #COPY --from=pg-embedding-pg-build /home/nonroot/pg_embedding-src/ /ext-src
 #COPY --from=wal2json-pg-build /wal2json_2_5.tar.gz /ext-src
-COPY --from=pg-anon-pg-build /pg_anon.tar.gz /ext-src
+#COPY --from=pg-anon-pg-build /pg_anon.tar.gz /ext-src
 COPY --from=pg-ivm-build /pg_ivm.tar.gz /ext-src
 COPY --from=pg-partman-build /pg_partman.tar.gz /ext-src
 RUN case "${PG_VERSION}" in "v17") \
