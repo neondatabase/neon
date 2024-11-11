@@ -248,8 +248,8 @@ struct TimelinePreload {
 
 pub(crate) struct TenantPreload {
     tenant_manifest: TenantManifest,
-    timelines: HashMap<TimelineId, TimelinePreload>,
-    offloaded_with_prefix: HashSet<TimelineId>,
+    /// Map from timeline ID to a possible timeline preload. It is None iff the timeline is offloaded according to the manifest.
+    timelines: HashMap<TimelineId, Option<TimelinePreload>>,
 }
 
 /// When we spawn a tenant, there is a special mode for tenant creation that
@@ -1376,15 +1376,22 @@ impl Tenant {
         for offloaded in tenant_manifest.offloaded_timelines.iter() {
             if remote_timeline_ids.remove(&offloaded.timeline_id) {
                 offloaded_with_prefix.insert(offloaded.timeline_id);
+            } else {
+                // We'll take care later of timelines in the manifest without a prefix
             }
         }
 
+        let timelines = self
+            .load_timelines_metadata(remote_timeline_ids, remote_storage, cancel)
+            .await?;
+
         Ok(TenantPreload {
             tenant_manifest,
-            timelines: self
-                .load_timelines_metadata(remote_timeline_ids, remote_storage, cancel)
-                .await?,
-            offloaded_with_prefix,
+            timelines: timelines
+                .into_iter()
+                .map(|(id, tl)| (id, Some(tl)))
+                .chain(offloaded_with_prefix.into_iter().map(|id| (id, None)))
+                .collect(),
         })
     }
 
@@ -1421,7 +1428,7 @@ impl Tenant {
             .retain(|(offloaded_id, _offloaded)| {
                 // In the end, existence of a timeline is finally determined by the existence of an index-part.json in remote storage.
                 // If there is a dangling reference in another location, they need to be cleaned up.
-                let delete = !preload.offloaded_with_prefix.contains(offloaded_id);
+                let delete = !preload.timelines.contains_key(offloaded_id);
                 if delete {
                     tracing::info!("Removing offloaded timeline {offloaded_id} from manifest as no remote prefix was found");
                 }
@@ -1434,6 +1441,7 @@ impl Tenant {
         let mut timeline_ancestors = HashMap::new();
         let mut existent_timelines = HashSet::new();
         for (timeline_id, preload) in preload.timelines {
+            let Some(preload) = preload else { continue };
             // This is an invariant of the `preload` function's API
             assert!(!offloaded_timeline_ids.contains(&timeline_id));
             let index_part = match preload.index_part {
