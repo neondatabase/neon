@@ -602,7 +602,7 @@ async def run_segment_init_failure(env: NeonEnv):
 
     sk = env.safekeepers[0]
     sk_http = sk.http_client()
-    sk_http.configure_failpoints([("sk-write-zeroes", "return")])
+    sk_http.configure_failpoints([("sk-zero-segment", "return")])
     conn = await ep.connect_async()
     ep.safe_psql("select pg_switch_wal()")  # jump to the segment boundary
     # next insertion should hang until failpoint is disabled.

@@ -45,3 +45,4 @@ class TokenScope(str, Enum):
     SAFEKEEPER_DATA = "safekeeperdata"
     TENANT = "tenant"
     SCRUBBER = "scrubber"
+    INFRA = "infra"

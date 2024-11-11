@@ -1506,15 +1506,10 @@ class SafekeeperEnv:
             port=port.http,
             auth_token=None,
         )
-        try:
-            safekeeper_process = start_in_background(
-                cmd, safekeeper_dir, "safekeeper.log", safekeeper_client.check_status
-            )
-            return safekeeper_process
-        except Exception as e:
-            log.error(e)
-            safekeeper_process.kill()
-            raise Exception(f"Failed to start safekepeer as {cmd}, reason: {e}") from e
+        safekeeper_process = start_in_background(
+            cmd, safekeeper_dir, "safekeeper.log", safekeeper_client.check_status
+        )
+        return safekeeper_process
 
     def get_safekeeper_connstrs(self):
         assert self.safekeepers is not None, "safekeepers are not initialized"
