@@ -385,7 +385,7 @@ def test_timeline_archival_chaos(neon_env_builder: NeonEnvBuilder):
     with tenant migrations and timeline deletions.
     """
 
-    # Offloading is off by default a time of writing: remove this line when it's on by default
+    # Offloading is off by default at time of writing: remove this line when it's on by default
     neon_env_builder.pageserver_config_override = "timeline_offloading = true"
     neon_env_builder.enable_pageserver_remote_storage(s3_storage())
 
@@ -454,7 +454,6 @@ def test_timeline_archival_chaos(neon_env_builder: NeonEnvBuilder):
             + "/",
         )
 
-        log.info(f"Listing {timeline_id}: {response}")
         return [k["Key"] for k in response.get("Contents", [])]
 
     def worker():
