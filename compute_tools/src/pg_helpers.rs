@@ -10,6 +10,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
+use futures::StreamExt;
 use ini::Ini;
 use notify::{RecursiveMode, Watcher};
 use postgres::{Client, Transaction};
@@ -196,6 +197,13 @@ impl Escaping for PgIdent {
     }
 }
 
+impl Escaping for &'static str {
+    fn pg_quote(&self) -> String {
+        let result = format!("\"{}\"", self.replace('"', "\"\""));
+        result
+    }
+}
+
 /// Build a list of existing Postgres roles
 pub fn get_existing_roles(xact: &mut Transaction<'_>) -> Result<Vec<Role>> {
     let postgres_roles = xact
@@ -207,6 +215,27 @@ pub fn get_existing_roles(xact: &mut Transaction<'_>) -> Result<Vec<Role>> {
             options: None,
         })
         .collect();
+
+    Ok(postgres_roles)
+}
+/// Build a list of existing Postgres roles
+pub async fn get_existing_roles_async(
+    xact: &mut tokio_postgres::Transaction<'_>,
+) -> Result<Vec<Role>> {
+    let postgres_roles = xact
+        .query_raw::<str, &String, &[String; 0]>(
+            "SELECT rolname, rolpassword FROM pg_catalog.pg_authid",
+            &[],
+        )
+        .await?
+        .filter_map(|row| async { row.ok() })
+        .map(|row| Role {
+            name: row.get("rolname"),
+            encrypted_password: row.get("rolpassword"),
+            options: None,
+        })
+        .collect()
+        .await;
 
     Ok(postgres_roles)
 }
@@ -241,6 +270,41 @@ pub fn get_existing_dbs(client: &mut Client) -> Result<HashMap<String, Database>
         .iter()
         .map(|db| (db.name.clone(), db.clone()))
         .collect::<HashMap<_, _>>();
+
+    Ok(dbs_map)
+}
+/// Build a list of existing Postgres databases
+pub async fn get_existing_dbs_async(
+    client: &mut tokio_postgres::Client,
+) -> Result<HashMap<String, Database>> {
+    // `pg_database.datconnlimit = -2` means that the database is in the
+    // invalid state. See:
+    //   https://github.com/postgres/postgres/commit/a4b4cc1d60f7e8ccfcc8ff8cb80c28ee411ad9a9
+    let rowstream = client
+        .query_raw::<str, &String, &[String; 0]>(
+            "SELECT
+                datname AS name,
+                datdba::regrole::text AS owner,
+                NOT datallowconn AS restrict_conn,
+                datconnlimit = - 2 AS invalid
+            FROM
+                pg_catalog.pg_database;",
+            &[],
+        )
+        .await?;
+
+    let dbs_map = rowstream
+        .filter_map(|r| async { r.ok() })
+        .map(|row| Database {
+            name: row.get("name"),
+            owner: row.get("owner"),
+            restrict_conn: row.get("restrict_conn"),
+            invalid: row.get("invalid"),
+            options: None,
+        })
+        .map(|db| (db.name.clone(), db.clone()))
+        .collect::<HashMap<_, _>>()
+        .await;
 
     Ok(dbs_map)
 }

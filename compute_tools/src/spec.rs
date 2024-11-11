@@ -1,12 +1,11 @@
-use std::collections::HashSet;
-use std::fs::File;
-use std::path::Path;
-use std::str::FromStr;
-
 use anyhow::{anyhow, bail, Context, Result};
 use postgres::config::Config;
 use postgres::{Client, NoTls};
 use reqwest::StatusCode;
+use std::collections::HashSet;
+use std::fs::File;
+use std::path::Path;
+use std::str::FromStr;
 use tracing::{error, info, info_span, instrument, span_enabled, warn, Level};
 
 use crate::config;
