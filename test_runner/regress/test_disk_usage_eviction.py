@@ -38,21 +38,24 @@ def test_min_resident_size_override_handling(
     neon_env_builder: NeonEnvBuilder, config_level_override: int
 ):
     env = neon_env_builder.init_start()
+    vps_http = env.storage_controller.pageserver_api()
     ps_http = env.pageserver.http_client()
 
     def assert_config(tenant_id, expect_override, expect_effective):
+        # talk to actual pageserver to _get_ the config, workaround for
+        # https://github.com/neondatabase/neon/issues/9621
         config = ps_http.tenant_config(tenant_id)
         assert config.tenant_specific_overrides.get("min_resident_size_override") == expect_override
         assert config.effective_config.get("min_resident_size_override") == expect_effective
 
     def assert_overrides(tenant_id, default_tenant_conf_value):
-        ps_http.set_tenant_config(tenant_id, {"min_resident_size_override": 200})
+        vps_http.set_tenant_config(tenant_id, {"min_resident_size_override": 200})
         assert_config(tenant_id, 200, 200)
 
-        ps_http.set_tenant_config(tenant_id, {"min_resident_size_override": 0})
+        vps_http.set_tenant_config(tenant_id, {"min_resident_size_override": 0})
         assert_config(tenant_id, 0, 0)
 
-        ps_http.set_tenant_config(tenant_id, {})
+        vps_http.set_tenant_config(tenant_id, {})
         assert_config(tenant_id, None, default_tenant_conf_value)
 
     if config_level_override is not None:
@@ -72,7 +75,7 @@ def test_min_resident_size_override_handling(
     # Also ensure that specifying the paramter to create_tenant works, in addition to http-level recconfig.
     tenant_id, _ = env.create_tenant(conf={"min_resident_size_override": "100"})
     assert_config(tenant_id, 100, 100)
-    ps_http.set_tenant_config(tenant_id, {})
+    vps_http.set_tenant_config(tenant_id, {})
     assert_config(tenant_id, None, config_level_override)
 
 
@@ -457,10 +460,10 @@ def test_pageserver_respects_overridden_resident_size(
     assert (
         du_by_timeline[large_tenant] > min_resident_size
     ), "ensure the larger tenant will get a haircut"
-    ps_http.patch_tenant_config_client_side(
+    env.neon_env.storage_controller.pageserver_api().patch_tenant_config_client_side(
         small_tenant[0], {"min_resident_size_override": min_resident_size}
     )
-    ps_http.patch_tenant_config_client_side(
+    env.neon_env.storage_controller.pageserver_api().patch_tenant_config_client_side(
         large_tenant[0], {"min_resident_size_override": min_resident_size}
     )
 

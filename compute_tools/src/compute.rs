@@ -364,11 +364,29 @@ impl ComputeNode {
         let pageserver_connect_micros = start_time.elapsed().as_micros() as u64;
 
         let basebackup_cmd = match lsn {
-            Lsn(0) => format!("basebackup {} {} --gzip", spec.tenant_id, spec.timeline_id),
-            _ => format!(
-                "basebackup {} {} {} --gzip",
-                spec.tenant_id, spec.timeline_id, lsn
-            ),
+            Lsn(0) => {
+                if spec.spec.mode != ComputeMode::Primary {
+                    format!(
+                        "basebackup {} {} --gzip --replica",
+                        spec.tenant_id, spec.timeline_id
+                    )
+                } else {
+                    format!("basebackup {} {} --gzip", spec.tenant_id, spec.timeline_id)
+                }
+            }
+            _ => {
+                if spec.spec.mode != ComputeMode::Primary {
+                    format!(
+                        "basebackup {} {} {} --gzip --replica",
+                        spec.tenant_id, spec.timeline_id, lsn
+                    )
+                } else {
+                    format!(
+                        "basebackup {} {} {} --gzip",
+                        spec.tenant_id, spec.timeline_id, lsn
+                    )
+                }
+            }
         };
 
         let copyreader = client.copy_out(basebackup_cmd.as_str())?;

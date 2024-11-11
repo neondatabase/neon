@@ -422,6 +422,70 @@ impl ProposerAcceptorMessage {
             _ => bail!("unknown proposer-acceptor message tag: {}", tag),
         }
     }
+
+    /// The memory size of the message, including byte slices.
+    pub fn size(&self) -> usize {
+        const BASE_SIZE: usize = std::mem::size_of::<ProposerAcceptorMessage>();
+
+        // For most types, the size is just the base enum size including the nested structs. Some
+        // types also contain byte slices; add them.
+        //
+        // We explicitly list all fields, to draw attention here when new fields are added.
+        let mut size = BASE_SIZE;
+        size += match self {
+            Self::Greeting(ProposerGreeting {
+                protocol_version: _,
+                pg_version: _,
+                proposer_id: _,
+                system_id: _,
+                timeline_id: _,
+                tenant_id: _,
+                tli: _,
+                wal_seg_size: _,
+            }) => 0,
+
+            Self::VoteRequest(VoteRequest { term: _ }) => 0,
+
+            Self::Elected(ProposerElected {
+                term: _,
+                start_streaming_at: _,
+                term_history: _,
+                timeline_start_lsn: _,
+            }) => 0,
+
+            Self::AppendRequest(AppendRequest {
+                h:
+                    AppendRequestHeader {
+                        term: _,
+                        term_start_lsn: _,
+                        begin_lsn: _,
+                        end_lsn: _,
+                        commit_lsn: _,
+                        truncate_lsn: _,
+                        proposer_uuid: _,
+                    },
+                wal_data,
+            }) => wal_data.len(),
+
+            Self::NoFlushAppendRequest(AppendRequest {
+                h:
+                    AppendRequestHeader {
+                        term: _,
+                        term_start_lsn: _,
+                        begin_lsn: _,
+                        end_lsn: _,
+                        commit_lsn: _,
+                        truncate_lsn: _,
+                        proposer_uuid: _,
+                    },
+                wal_data,
+            }) => wal_data.len(),
+
+            Self::FlushWAL => 0,
+        };
+
+        size
+    }
 }
 
 /// Acceptor -> Proposer messages
