@@ -194,6 +194,7 @@ jobs:
         export LD_LIBRARY_PATH=${PGCOPYDB_LIB_PATH}:${PG_16_LIB_PATH}
         export PGCOPYDB_SOURCE_PGURI="${BENCHMARK_INGEST_SOURCE_CONNSTR}"
         export PGCOPYDB_TARGET_PGURI="${NEW_PROJECT_CONNSTR}"
+        export PGOPTIONS="-c maintenance_work_mem=8388608 -c max_parallel_maintenance_workers=7"
         ${PG_CONFIG} --bindir
         ${PGCOPYDB} --version
         ${PGCOPYDB} clone --skip-vacuum  --no-owner --no-acl --skip-db-properties --table-jobs 4 \
