@@ -409,8 +409,6 @@ def test_timeline_archival_chaos(neon_env_builder: NeonEnvBuilder):
             [
                 ".*removing local file.*because it has unexpected length.*",
                 ".*__temp.*",
-                # FIXME: there is a code path in timeline deletion that maps cancellation to 500
-                ".*InternalServerError.*Cancelled.*",
                 # FIXME: there is a code path in timeline deletion that maps not yet initialized to 500
                 ".*InternalServerError.*Tenant not yet active.*",
             ]

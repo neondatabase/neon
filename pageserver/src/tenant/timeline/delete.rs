@@ -110,13 +110,6 @@ pub(super) async fn delete_local_timeline_directory(
     info!("finished deleting layer files, releasing locks");
 }
 
-/// Removes remote layers and an index file after them.
-async fn delete_remote_layers_and_index(
-    remote_client: &Arc<RemoteTimelineClient>,
-) -> anyhow::Result<()> {
-    remote_client.delete_all().await.context("delete_all")
-}
-
 /// It is important that this gets called when DeletionGuard is being held.
 /// For more context see comments in [`DeleteTimelineFlow::prepare`]
 async fn remove_maybe_offloaded_timeline_from_tenant(
@@ -438,7 +431,7 @@ impl DeleteTimelineFlow {
             Err(anyhow::anyhow!("failpoint: timeline-delete-after-rm"))?
         });
 
-        delete_remote_layers_and_index(&remote_client).await?;
+        remote_client.delete_all().await?;
 
         pausable_failpoint!("in_progress_delete");
 
