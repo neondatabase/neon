@@ -17,9 +17,9 @@ use pageserver_api::shard::TenantShardId;
 use tokio_epoll_uring::{BoundedBuf, Slice};
 use tracing::error;
 
+use std::io;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
-use std::{io, u64};
 use utils::id::TimelineId;
 
 pub struct EphemeralFile {
