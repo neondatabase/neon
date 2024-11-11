@@ -8033,7 +8033,7 @@ mod tests {
             tenant
                 .create_test_timeline_with_layers(
                     TIMELINE_ID,
-                    Lsn(0x08),
+                    Lsn(0x08c),
                     DEFAULT_PG_VERSION,
                     &ctx,
                     vec![
@@ -8193,7 +8193,7 @@ mod tests {
             (
                 key,
                 Lsn(0x10),
-                Value::Image(Bytes::copy_from_slice(b"0x10")),
+                Value::WalRecord(NeonWalRecord::wal_init("0x10")),
             ),
             (
                 key,
@@ -8255,7 +8255,7 @@ mod tests {
                     Lsn(0x20),
                     KeyLogAtLsn(vec![(
                         Lsn(0x20),
-                        Value::WalRecord(NeonWalRecord::wal_init(";0x20")),
+                        Value::Image(Bytes::from_static(b"0x10;0x20")),
                     )]),
                 ),
                 (
