@@ -7,7 +7,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use pageserver::context::{DownloadBehavior, RequestContext};
 use pageserver::task_mgr::TaskKind;
 use pageserver::tenant::{TENANTS_SEGMENT_NAME, TIMELINES_SEGMENT_NAME};
-use pageserver::virtual_file::api::IoMode;
+use pageserver::virtual_file::api::IoModeKind;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::ops::Range;
@@ -137,7 +137,7 @@ pub(crate) async fn main(cmd: &AnalyzeLayerMapCmd) -> Result<()> {
     pageserver::virtual_file::init(
         10,
         virtual_file::api::IoEngineKind::StdFs,
-        IoMode::preferred(),
+        IoModeKind::default(),
     );
     pageserver::page_cache::init(100);
 

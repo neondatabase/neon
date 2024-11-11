@@ -64,6 +64,18 @@ def main(args: argparse.Namespace):
     else:
         pageserver_virtual_file_io_engine_parameter = ""
 
+    # If a test run has non-default PAGESERVER_VIRTUAL_FILE_IO_MODE (i.e. not empty, not direct),
+    # use it to parametrize test name along with build_type and pg_version
+    #
+    # See test_runner/fixtures/parametrize.py for details
+    if (io_mode := os.getenv("PAGESERVER_VIRTUAL_FILE_IO_MODE", "")) not in (
+        "",
+        "direct",
+    ):
+        pageserver_virtual_file_io_mode_parameter = f"-{io_mode}"
+    else:
+        pageserver_virtual_file_io_mode_parameter = ""
+
     # re-use existing records of flaky tests from before parametrization by compaction_algorithm
     def get_pageserver_default_tenant_config_compaction_algorithm() -> Optional[dict[str, Any]]:
         """Duplicated from parametrize.py"""
@@ -90,10 +102,10 @@ def main(args: argparse.Namespace):
         if row["name"].endswith("]"):
             parametrized_test = row["name"].replace(
                 "[",
-                f"[{build_type}-pg{pg_version}{pageserver_virtual_file_io_engine_parameter}{pageserver_default_tenant_config_compaction_algorithm_parameter}-",
+                f"[{build_type}-pg{pg_version}{pageserver_virtual_file_io_engine_parameter}{pageserver_virtual_file_io_mode_parameter}{pageserver_default_tenant_config_compaction_algorithm_parameter}-",
             )
         else:
-            parametrized_test = f"{row['name']}[{build_type}-pg{pg_version}{pageserver_virtual_file_io_engine_parameter}{pageserver_default_tenant_config_compaction_algorithm_parameter}]"
+            parametrized_test = f"{row['name']}[{build_type}-pg{pg_version}{pageserver_virtual_file_io_engine_parameter}{pageserver_virtual_file_io_mode_parameter}{pageserver_default_tenant_config_compaction_algorithm_parameter}]"
 
         res[row["parent_suite"]][row["suite"]][parametrized_test] = True
 

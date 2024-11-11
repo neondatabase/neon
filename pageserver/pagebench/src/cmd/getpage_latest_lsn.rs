@@ -61,7 +61,7 @@ pub(crate) struct Args {
 
     /// Before starting the benchmark, live-reconfigure the pageserver to use specified io mode (buffered vs. direct).
     #[clap(long)]
-    set_io_mode: Option<pageserver_api::models::virtual_file::IoMode>,
+    set_io_mode: Option<pageserver_api::models::virtual_file::IoModeKind>,
 
     targets: Option<Vec<TenantTimelineId>>,
 }

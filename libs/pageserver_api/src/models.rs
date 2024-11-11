@@ -974,34 +974,15 @@ pub mod virtual_file {
         serde_with::DeserializeFromStr,
         serde_with::SerializeDisplay,
         Debug,
+        Default,
     )]
     #[strum(serialize_all = "kebab-case")]
-    #[repr(u8)]
-    pub enum IoMode {
+    pub enum IoModeKind {
         /// Uses buffered IO.
+        #[default]
         Buffered,
         /// Uses direct IO, error out if the operation fails.
-        #[cfg(target_os = "linux")]
         Direct,
-    }
-
-    impl IoMode {
-        pub const fn preferred() -> Self {
-            Self::Buffered
-        }
-    }
-
-    impl TryFrom<u8> for IoMode {
-        type Error = u8;
-
-        fn try_from(value: u8) -> Result<Self, Self::Error> {
-            Ok(match value {
-                v if v == (IoMode::Buffered as u8) => IoMode::Buffered,
-                #[cfg(target_os = "linux")]
-                v if v == (IoMode::Direct as u8) => IoMode::Direct,
-                x => return Err(x),
-            })
-        }
     }
 }
 

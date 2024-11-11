@@ -24,7 +24,7 @@ use pageserver::{
     page_cache,
     task_mgr::TaskKind,
     tenant::{dump_layerfile_from_path, metadata::TimelineMetadata},
-    virtual_file::{self, api::IoMode},
+    virtual_file::{self, api::IoModeKind},
 };
 use pageserver_api::shard::TenantShardId;
 use postgres_ffi::ControlFileData;
@@ -208,7 +208,7 @@ async fn print_layerfile(path: &Utf8Path) -> anyhow::Result<()> {
     virtual_file::init(
         10,
         virtual_file::api::IoEngineKind::StdFs,
-        IoMode::preferred(),
+        IoModeKind::default(),
     );
     page_cache::init(100);
     let ctx = RequestContext::new(TaskKind::DebugTool, DownloadBehavior::Error);

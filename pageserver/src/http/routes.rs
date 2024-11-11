@@ -17,7 +17,7 @@ use hyper::header;
 use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
 use metrics::launch_timestamp::LaunchTimestamp;
-use pageserver_api::models::virtual_file::IoMode;
+use pageserver_api::models::virtual_file::IoModeKind;
 use pageserver_api::models::DownloadRemoteLayersTaskSpawnRequest;
 use pageserver_api::models::IngestAuxFilesRequest;
 use pageserver_api::models::ListAuxFilesRequest;
@@ -2617,7 +2617,7 @@ async fn put_io_mode_handler(
     _cancel: CancellationToken,
 ) -> Result<Response<Body>, ApiError> {
     check_permission(&r, None)?;
-    let mode: IoMode = json_request(&mut r).await?;
+    let mode: IoModeKind = json_request(&mut r).await?;
     crate::virtual_file::set_io_mode(mode);
     json_response(StatusCode::OK, ())
 }
