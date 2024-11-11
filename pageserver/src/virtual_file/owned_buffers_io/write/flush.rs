@@ -42,6 +42,7 @@ impl<S: Send, R: Send> Duplex<S, R> {
     }
 }
 
+// TODO(yuchen): special actions in drop to clean up the join handle?
 pub struct FlushHandleInner<Buf, W> {
     /// A bi-directional channel that sends (buffer, offset) for writes,
     /// and receives recyled buffer.

@@ -121,7 +121,7 @@ where
         let chunk_len = chunk.len();
         // avoid memcpy for the middle of the chunk
         if chunk.len() >= self.mutable().cap() {
-            // TODO(yuchen): do we still want to keep this?
+            // TODO(yuchen): do we still want to keep the bypass path?
             self.flush(ctx).await?;
             // do a big write, bypassing `buf`
             assert_eq!(
