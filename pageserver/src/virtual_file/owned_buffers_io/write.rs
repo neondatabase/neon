@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use bytes::BytesMut;
 use flush::FlushHandle;
-use tokio_epoll_uring::{BoundedBufMut, IoBuf};
+use tokio_epoll_uring::IoBuf;
 
 use crate::{
     context::RequestContext,
@@ -131,10 +131,13 @@ where
                     .pending(),
                 0
             );
-            let chunk = self
-                .writer
-                .write_all_at(FullSlice::must_new(chunk), self.bytes_amount, ctx)
-                .await?;
+            let chunk = OwnedAsyncWriter::write_all_at(
+                self.writer.as_ref(),
+                FullSlice::must_new(chunk),
+                self.bytes_amount,
+                ctx,
+            )
+            .await?;
             self.bytes_amount += u64::try_from(chunk_len).unwrap();
             return Ok((chunk_len, chunk));
         }
@@ -257,7 +260,7 @@ impl Buffer for IoBufferMut {
 
     fn extend_from_slice(&mut self, other: &[u8]) {
         self.reserve(other.len());
-        BoundedBufMut::put_slice(self, other);
+        IoBufferMut::extend_from_slice(self, other);
     }
 
     fn pending(&self) -> usize {
@@ -280,8 +283,6 @@ impl Buffer for IoBufferMut {
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
-
-    use bytes::BytesMut;
 
     use super::*;
     use crate::context::{DownloadBehavior, RequestContext};
@@ -336,7 +337,7 @@ mod tests {
     async fn test_buffered_writes_only() -> std::io::Result<()> {
         let recorder = Arc::new(RecorderWriter::default());
         let ctx = RequestContext::new(TaskKind::UnitTest, DownloadBehavior::Error);
-        let mut writer = BufferedWriter::new(recorder, || BytesMut::with_capacity(2), &ctx);
+        let mut writer = BufferedWriter::new(recorder, || IoBufferMut::with_capacity(2), &ctx);
         write!(writer, b"a");
         write!(writer, b"b");
         write!(writer, b"c");
@@ -354,7 +355,7 @@ mod tests {
     async fn test_passthrough_writes_only() -> std::io::Result<()> {
         let recorder = Arc::new(RecorderWriter::default());
         let ctx = test_ctx();
-        let mut writer = BufferedWriter::new(recorder, || BytesMut::with_capacity(2), &ctx);
+        let mut writer = BufferedWriter::new(recorder, || IoBufferMut::with_capacity(2), &ctx);
         write!(writer, b"abc");
         write!(writer, b"de");
         write!(writer, b"");
@@ -371,7 +372,7 @@ mod tests {
     async fn test_passthrough_write_with_nonempty_buffer() -> std::io::Result<()> {
         let recorder = Arc::new(RecorderWriter::default());
         let ctx = test_ctx();
-        let mut writer = BufferedWriter::new(recorder, || BytesMut::with_capacity(2), &ctx);
+        let mut writer = BufferedWriter::new(recorder, || IoBufferMut::with_capacity(2), &ctx);
         write!(writer, b"a");
         write!(writer, b"bc");
         write!(writer, b"d");
@@ -389,8 +390,11 @@ mod tests {
         let ctx = test_ctx();
         let ctx = &ctx;
         let recorder = Arc::new(RecorderWriter::default());
-        let mut writer =
-            BufferedWriter::<_, RecorderWriter>::new(recorder, || BytesMut::with_capacity(2), ctx);
+        let mut writer = BufferedWriter::<_, RecorderWriter>::new(
+            recorder,
+            || IoBufferMut::with_capacity(2),
+            ctx,
+        );
 
         writer.write_buffered_borrowed(b"abc", ctx).await?;
         writer.write_buffered_borrowed(b"d", ctx).await?;

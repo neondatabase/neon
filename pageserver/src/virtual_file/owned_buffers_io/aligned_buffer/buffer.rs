@@ -6,7 +6,7 @@ use std::{
 use super::{alignment::Alignment, raw::RawAlignedBuffer, AlignedBufferMut};
 
 /// An shared, immutable aligned buffer type.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct AlignedBuffer<A: Alignment> {
     /// Shared raw buffer.
     raw: Arc<RawAlignedBuffer<A>>,

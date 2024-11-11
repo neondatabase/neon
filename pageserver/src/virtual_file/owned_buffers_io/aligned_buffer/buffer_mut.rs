@@ -1,4 +1,7 @@
-use std::ops::{Deref, DerefMut};
+use std::{
+    mem::MaybeUninit,
+    ops::{Deref, DerefMut},
+};
 
 use super::{
     alignment::{Alignment, ConstAlign},
@@ -131,6 +134,34 @@ impl<A: Alignment> AlignedBufferMut<A> {
     pub fn freeze(self) -> AlignedBuffer<A> {
         let len = self.len();
         AlignedBuffer::from_raw(self.raw, 0..len)
+    }
+
+    #[inline]
+    pub fn extend_from_slice(&mut self, extend: &[u8]) {
+        let cnt = extend.len();
+        self.reserve(cnt);
+
+        unsafe {
+            let dst = self.spare_capacity_mut();
+            // Reserved above
+            debug_assert!(dst.len() >= cnt);
+
+            core::ptr::copy_nonoverlapping(extend.as_ptr(), dst.as_mut_ptr().cast(), cnt);
+        }
+
+        unsafe {
+            bytes::BufMut::advance_mut(self, cnt);
+        }
+    }
+
+    #[inline]
+    fn spare_capacity_mut(&mut self) -> &mut [MaybeUninit<u8>] {
+        unsafe {
+            let ptr = self.as_mut_ptr().add(self.len());
+            let len = self.capacity() - self.len();
+
+            core::slice::from_raw_parts_mut(ptr.cast(), len)
+        }
     }
 }
 

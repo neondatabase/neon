@@ -10,7 +10,6 @@ use crate::virtual_file::owned_buffers_io::io_buf_aligned::IoBufAlignedMut;
 use crate::virtual_file::owned_buffers_io::slice::SliceMutExt;
 use crate::virtual_file::owned_buffers_io::write::Buffer;
 use crate::virtual_file::{self, owned_buffers_io, IoBufferMut, VirtualFile};
-use bytes::BytesMut;
 use camino::Utf8PathBuf;
 use num_traits::Num;
 use pageserver_api::shard::TenantShardId;
@@ -27,7 +26,7 @@ pub struct EphemeralFile {
     _timeline_id: TimelineId,
     page_cache_file_id: page_cache::FileId,
     bytes_written: u64,
-    buffered_writer: owned_buffers_io::write::BufferedWriter<BytesMut, VirtualFile>,
+    buffered_writer: owned_buffers_io::write::BufferedWriter<IoBufferMut, VirtualFile>,
     /// Gate guard is held on as long as we need to do operations in the path (delete on drop)
     _gate_guard: utils::sync::gate::GateGuard,
 }
@@ -73,7 +72,7 @@ impl EphemeralFile {
             bytes_written: 0,
             buffered_writer: owned_buffers_io::write::BufferedWriter::new(
                 file,
-                || BytesMut::with_capacity(TAIL_SZ),
+                || IoBufferMut::with_capacity(TAIL_SZ),
                 ctx,
             ),
             _gate_guard: gate_guard,
