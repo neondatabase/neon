@@ -8033,10 +8033,14 @@ mod tests {
             tenant
                 .create_test_timeline_with_layers(
                     TIMELINE_ID,
-                    Lsn(0x08c),
+                    Lsn(0x08),
                     DEFAULT_PG_VERSION,
                     &ctx,
                     vec![
+                        DeltaLayerTestDesc::new_with_inferred_key_range(
+                            Lsn(0x08)..Lsn(0x10),
+                            delta4,
+                        ),
                         DeltaLayerTestDesc::new_with_inferred_key_range(
                             Lsn(0x20)..Lsn(0x48),
                             delta1,
@@ -8048,10 +8052,6 @@ mod tests {
                         DeltaLayerTestDesc::new_with_inferred_key_range(
                             Lsn(0x48)..Lsn(0x50),
                             delta3,
-                        ),
-                        DeltaLayerTestDesc::new_with_inferred_key_range(
-                            Lsn(0x08)..Lsn(0x10),
-                            delta4,
                         ),
                     ], // delta layers
                     vec![], // image layers
