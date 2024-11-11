@@ -6,6 +6,7 @@ import time
 from typing import TYPE_CHECKING
 
 from fixtures.log_helper import log
+from fixtures.neon_fixtures import wait_replica_caughtup
 
 if TYPE_CHECKING:
     from fixtures.neon_fixtures import NeonEnv
@@ -206,3 +207,43 @@ def test_physical_replication_config_mismatch_too_many_known_xids(neon_simple_en
     except Exception as e:
         log.info(f"Replica crashed with {e}")
         assert secondary.log_contains("too many KnownAssignedXids")
+
+
+def test_physical_replication_config_mismatch_max_locks_per_transaction(neon_simple_env: NeonEnv):
+    """
+    Test for primary and replica with different configuration settings (max_connections).
+    In this case large difference in this setting and larger number of concurrent trsanctions at primary
+    # cause too many known xids error  at replica.
+    """
+    env = neon_simple_env
+    primary = env.endpoints.create_start(
+        branch_name="main",
+        endpoint_id="primary",
+        config_lines=[
+            "max_locks_per_transaction = 100",
+        ],
+    )
+    secondary = env.endpoints.new_replica_start(
+        origin=primary,
+        endpoint_id="secondary",
+        config_lines=[
+            "max_connections=10",
+            "max_locks_per_transaction = 10",
+        ],
+    )
+
+    n_tables = 1000
+
+    p_con = primary.connect()
+    p_cur = p_con.cursor()
+    p_cur.execute("begin")
+    for i in range(n_tables):
+        p_cur.execute(f"CREATE TABLE t_{i}(x integer)")
+    p_cur.execute("commit")
+
+    try:
+        wait_replica_caughtup(primary, secondary)
+        secondary.stop()
+    except Exception as e:
+        log.info(f"Replica crashed with {e}")
+        assert secondary.log_contains('You might need to increase "max_locks_per_transaction"')
