@@ -5248,7 +5248,7 @@ mod tests {
     use storage_layer::PersistentLayerKey;
     use tests::storage_layer::ValuesReconstructState;
     use tests::timeline::{GetVectoredError, ShutdownMode};
-    use timeline::DeltaLayerTestDesc;
+    use timeline::{CompactOptions, DeltaLayerTestDesc};
     use utils::id::TenantId;
 
     #[cfg(feature = "testing")]
@@ -7722,7 +7722,7 @@ mod tests {
 
         let cancel = CancellationToken::new();
         tline
-            .compact_with_gc(&cancel, EnumSet::new(), &ctx)
+            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
             .await
             .unwrap();
 
@@ -7799,7 +7799,7 @@ mod tests {
             guard.cutoffs.space = Lsn(0x40);
         }
         tline
-            .compact_with_gc(&cancel, EnumSet::new(), &ctx)
+            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
             .await
             .unwrap();
 

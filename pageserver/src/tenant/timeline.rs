@@ -774,6 +774,21 @@ pub(crate) enum CompactFlags {
     DryRun,
 }
 
+#[serde_with::serde_as]
+#[derive(Debug, Clone, serde::Deserialize)]
+pub(crate) struct CompactRange {
+    #[serde_as(as = "serde_with::DisplayFromStr")]
+    pub start: Key,
+    #[serde_as(as = "serde_with::DisplayFromStr")]
+    pub end: Key,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct CompactOptions {
+    pub flags: EnumSet<CompactFlags>,
+    pub compact_range: Option<CompactRange>,
+}
+
 impl std::fmt::Debug for Timeline {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "Timeline<{}>", self.timeline_id)
@@ -1613,6 +1628,25 @@ impl Timeline {
         flags: EnumSet<CompactFlags>,
         ctx: &RequestContext,
     ) -> Result<bool, CompactionError> {
+        self.compact_with_options(
+            cancel,
+            CompactOptions {
+                flags,
+                compact_range: None,
+            },
+            ctx,
+        )
+        .await
+    }
+
+    /// Outermost timeline compaction operation; downloads needed layers. Returns whether we have pending
+    /// compaction tasks.
+    pub(crate) async fn compact_with_options(
+        self: &Arc<Self>,
+        cancel: &CancellationToken,
+        options: CompactOptions,
+        ctx: &RequestContext,
+    ) -> Result<bool, CompactionError> {
         // most likely the cancellation token is from background task, but in tests it could be the
         // request task as well.
 
@@ -1649,7 +1683,7 @@ impl Timeline {
                 self.compact_tiered(cancel, ctx).await?;
                 Ok(false)
             }
-            CompactionAlgorithm::Legacy => self.compact_legacy(cancel, flags, ctx).await,
+            CompactionAlgorithm::Legacy => self.compact_legacy(cancel, options, ctx).await,
         }
     }
 

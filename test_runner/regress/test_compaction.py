@@ -223,6 +223,17 @@ def test_sharding_compaction(
         # that at least one of them has some image layers.
         assert any(shard_has_image_layers)
 
+    if gc_compaction:
+        env.pageserver.http_client().timeline_compact(
+            tenant_id,
+            timeline_id,
+            enhanced_gc_bottom_most_compaction=True,
+            body={
+                "start": "00000000000000000000000000000000",
+                "end": "30000000000000000000000000000000",
+            },
+        )
+
     # Assert that everything is still readable
     workload.validate()
 
