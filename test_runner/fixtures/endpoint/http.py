@@ -47,7 +47,7 @@ class EndpointHttpClient(requests.Session):
         res.raise_for_status()
         return res.json()
 
-    def metrics(self):
+    def metrics(self) -> str:
         res = self.get(f"http://localhost:{self.port}/metrics")
         res.raise_for_status()
         return res.text
