@@ -1,8 +1,11 @@
 import time
 from logging import info
+from typing import TYPE_CHECKING
 
 from fixtures.metrics import parse_metrics
-from fixtures.neon_fixtures import NeonEnv
+
+if TYPE_CHECKING:
+    from fixtures.neon_fixtures import NeonEnv
 
 
 def test_installed_extensions(neon_simple_env: NeonEnv):
