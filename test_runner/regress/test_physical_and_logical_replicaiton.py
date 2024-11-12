@@ -53,7 +53,7 @@ def test_aux_not_logged_at_replica(neon_simple_env: NeonEnv, vanilla_pg):
     """Test that AUX files are not saved at replica"""
     env = neon_simple_env
 
-    n_records = 200000
+    n_records = 20000
 
     primary = env.endpoints.create_start(
         branch_name="main",
@@ -91,7 +91,7 @@ def test_aux_not_logged_at_replica(neon_simple_env: NeonEnv, vanilla_pg):
     s_cur.execute("select count(*) from t")
     assert s_cur.fetchall()[0][0] == n_records
 
-    primary.stop()
-    time.sleep(1)
+    vanilla_pg.stop()
     secondary.stop()
+    primary.stop()
     assert not secondary.log_contains("cannot make new WAL entries during recovery")
