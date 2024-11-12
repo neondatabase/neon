@@ -139,11 +139,11 @@ pub async fn fsync_async_opt(
 /// * Fsyncs the file after the rename. This can be required with certain OSes or file systems (e.g.
 ///   NFS), but not on Linux with most common file systems like ext4 (which we currently use).
 ///
-/// An audit of 8 other databases found that none fsynced the file after a rename.
-/// https://github.com/neondatabase/neon/pull/9686#discussion_r1837180535
+/// An audit of 8 other databases found that none fsynced the file after a rename:
+/// <https://github.com/neondatabase/neon/pull/9686#discussion_r1837180535>
 ///
 /// eBPF probes confirmed that this is sufficient with ext4, XFS, and ZFS, but possibly not Btrfs:
-/// https://github.com/neondatabase/neon/pull/9686#discussion_r1837926218
+/// <https://github.com/neondatabase/neon/pull/9686#discussion_r1837926218>
 ///
 /// virtual_file.rs has similar code, but it doesn't use vfs.
 ///
