@@ -2,6 +2,7 @@ import time
 from logging import info
 from typing import TYPE_CHECKING
 
+from fixtures.log_helper import log
 from fixtures.metrics import parse_metrics
 
 if TYPE_CHECKING:
@@ -119,7 +120,7 @@ def test_installed_extensions(neon_simple_env: NeonEnv):
                 timeout -= 1
                 continue
         except Exception as e:
-            info("failed to get metrics, assume they are not collected yet: %s", e)
+            log.exception("failed to get metrics, assume they are not collected yet: %s", e)
             time.sleep(1)
             timeout -= 1
             continue
