@@ -56,14 +56,17 @@ pub struct FlushHandleInner<Buf, W> {
 /// A handle to the flush task.
 pub struct FlushHandle<Buf, W> {
     inner: Option<FlushHandleInner<Buf, W>>,
-    /// Buffer for serving tail reads.
+    /// Immutable buffer for serving tail reads.
+    /// `None` if no flush request has been submitted.
     pub(super) maybe_flushed: Option<Buf>,
 }
 
+/// A background task for flushing data to disk.
 pub struct FlushBackgroundTask<Buf, W> {
     /// A bi-directional channel that receives (buffer, offset) for writes,
     /// and send back recycled buffer.
     channel: Duplex<FullSlice<Buf>, (FullSlice<Buf>, u64)>,
+    /// A writter for persisting data to disk.
     writer: Arc<W>,
     ctx: RequestContext,
 }
@@ -73,6 +76,7 @@ where
     Buf: IoBufAligned + Send + Sync,
     W: OwnedAsyncWriter + Sync + 'static,
 {
+    /// Creates a new background flush task.
     fn new(
         channel: Duplex<FullSlice<Buf>, (FullSlice<Buf>, u64)>,
         file: Arc<W>,
@@ -87,14 +91,17 @@ where
 
     /// Runs the background flush task.
     async fn run(mut self, slice: FullSlice<Buf>) -> std::io::Result<Arc<W>> {
+        // Sends the extra buffer back to the handle.
         self.channel.send(slice).await.map_err(|_| {
             std::io::Error::new(std::io::ErrorKind::BrokenPipe, "flush handle closed early")
         })?;
 
         //  Exit condition: channel is closed and there is no remaining buffer to be flushed
         while let Some((slice, offset)) = self.channel.recv().await {
+            // Write slice to disk at `offset`.
             let slice = self.writer.write_all_at(slice, offset, &self.ctx).await?;
 
+            // Sends the buffer back to the handle for reuse. The handle is in charged of cleaning the buffer.
             if self.channel.send(slice).await.is_err() {
                 // Although channel is closed. Still need to finish flushing the remaining buffers.
                 continue;
@@ -131,17 +138,28 @@ where
 
     /// Submits a buffer to be flushed in the background task.
     /// Returns a buffer that completed flushing for re-use, length reset to 0, capacity unchanged.
-    pub async fn flush<B>(&mut self, buf: B, offset: u64) -> std::io::Result<B>
+    /// If `save_buf_for_read` is true, then we save the buffer in `Self::maybe_flushed`, otherwise
+    /// clear `maybe_flushed`.
+    pub async fn flush<B>(
+        &mut self,
+        buf: B,
+        offset: u64,
+        save_buf_for_read: bool,
+    ) -> std::io::Result<B>
     where
         B: Buffer<IoBuf = Buf> + Send + 'static,
     {
         let freezed = buf.flush();
 
-        self.maybe_flushed
-            .replace(freezed.as_raw_slice().get_ref().clone());
+        // Saves a buffer for read while flushing. This also removes reference to the old buffer.
+        self.maybe_flushed = if save_buf_for_read {
+            Some(freezed.as_raw_slice().get_ref().clone())
+        } else {
+            None
+        };
 
+        // Submits the buffer to the background task.
         let submit = self.inner_mut().channel.send((freezed, offset)).await;
-
         if submit.is_err() {
             return self.handle_error().await;
         }
@@ -168,6 +186,8 @@ where
         handle.join_handle.await.unwrap()
     }
 
+    /// Gets a mutable reference to the inner handle. Panics if [`Self::inner`] is `None`.
+    /// This only happens if the handle is used after an error.
     fn inner_mut(&mut self) -> &mut FlushHandleInner<Buf, W> {
         self.inner
             .as_mut()

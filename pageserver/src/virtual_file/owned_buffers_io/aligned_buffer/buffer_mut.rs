@@ -49,6 +49,7 @@ impl<const A: usize> AlignedBufferMut<ConstAlign<A>> {
 }
 
 impl<A: Alignment> AlignedBufferMut<A> {
+    /// Constructs a mutable aligned buffer from raw.
     pub(super) fn from_raw(raw: RawAlignedBuffer<A>) -> Self {
         AlignedBufferMut { raw }
     }
@@ -136,6 +137,7 @@ impl<A: Alignment> AlignedBufferMut<A> {
         AlignedBuffer::from_raw(self.raw, 0..len)
     }
 
+    /// Clones and appends all elements in a slice to the buffer. Reserves additional capacity as needed.
     #[inline]
     pub fn extend_from_slice(&mut self, extend: &[u8]) {
         let cnt = extend.len();
@@ -155,6 +157,7 @@ impl<A: Alignment> AlignedBufferMut<A> {
         }
     }
 
+    /// Returns the remaining spare capacity of the vector as a slice of `MaybeUninit<u8>`.
     #[inline]
     fn spare_capacity_mut(&mut self) -> &mut [MaybeUninit<u8>] {
         // SAFETY: we guarantees that the `Self::capacity()` bytes from

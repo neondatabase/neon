@@ -88,6 +88,8 @@ impl<A: Alignment> AlignedBuffer<A> {
         }
     }
 
+    /// Returns the mutable aligned buffer, if the immutable aligned buffer
+    /// has exactly one strong reference. Otherwise returns `None`.
     pub fn into_mut(self) -> Option<AlignedBufferMut<A>> {
         let raw = Arc::into_inner(self.raw)?;
         Some(AlignedBufferMut::from_raw(raw))

@@ -17,6 +17,7 @@ use super::{
 
 /// A trait for doing owned-buffer write IO.
 /// Think [`tokio::io::AsyncWrite`] but with owned buffers.
+/// The owned buffers need to be aligned due to Direct IO requirements.
 pub trait OwnedAsyncWriter {
     fn write_all_at<Buf: IoBufAligned + Send>(
         &self,
@@ -49,7 +50,9 @@ pub struct BufferedWriter<B: Buffer, W> {
     ///
     /// In these exceptional cases, it's `None`.
     mutable: Option<B>,
+    /// A handle to the background flush task for writting data to disk.
     flush_handle: FlushHandle<B::IoBuf, W>,
+    /// The number of bytes submitted to the background task.
     bytes_amount: u64,
 }
 
@@ -59,6 +62,9 @@ where
     Buf: IoBufAligned + Send + Sync + Clone,
     W: OwnedAsyncWriter + Send + Sync + 'static + std::fmt::Debug,
 {
+    /// Creates a new buffered writer.
+    ///
+    /// The `buf_new` function provides a way to initialize the owned buffers used by this writer.
     pub fn new(writer: Arc<W>, buf_new: impl Fn() -> B, ctx: &RequestContext) -> Self {
         Self {
             writer: writer.clone(),
@@ -72,6 +78,7 @@ where
         &self.writer
     }
 
+    /// Returns the number of bytes submitted to the background flush task.
     pub fn bytes_written(&self) -> u64 {
         self.bytes_amount
     }
@@ -82,6 +89,7 @@ where
     }
 
     /// Gets a reference to the maybe flushed read-only buffer.
+    /// Returns `None` if the writer has not submitted any flush request.
     pub fn inspect_maybe_flushed(&self) -> Option<&Buf> {
         self.flush_handle.maybe_flushed.as_ref()
     }
@@ -91,7 +99,7 @@ where
         mut self,
         ctx: &RequestContext,
     ) -> std::io::Result<(u64, Arc<W>)> {
-        self.flush(ctx).await?;
+        self.flush(true, ctx).await?;
 
         let Self {
             mutable: buf,
@@ -125,7 +133,7 @@ where
         // avoid memcpy for the middle of the chunk
         if chunk.len() >= self.mutable().cap() {
             // TODO(yuchen): do we still want to keep the bypass path?
-            self.flush(ctx).await?;
+            self.flush(false, ctx).await?;
             // do a big write, bypassing `buf`
             assert_eq!(
                 self.mutable
@@ -156,7 +164,7 @@ where
             slice = &slice[n..];
             if buf.pending() >= buf.cap() {
                 assert_eq!(buf.pending(), buf.cap());
-                self.flush(ctx).await?;
+                self.flush(true, ctx).await?;
             }
         }
         assert!(slice.is_empty(), "by now we should have drained the chunk");
@@ -183,20 +191,27 @@ where
             chunk = &chunk[n..];
             if buf.pending() >= buf.cap() {
                 assert_eq!(buf.pending(), buf.cap());
-                self.flush(ctx).await?;
+                self.flush(true, ctx).await?;
             }
         }
         Ok(chunk_len)
     }
 
-    async fn flush(&mut self, _ctx: &RequestContext) -> std::io::Result<()> {
+    async fn flush(
+        &mut self,
+        save_buf_for_read: bool,
+        _ctx: &RequestContext,
+    ) -> std::io::Result<()> {
         let buf = self.mutable.take().expect("must not use after an error");
         let buf_len = buf.pending();
         if buf_len == 0 {
             self.mutable = Some(buf);
             return Ok(());
         }
-        let recycled = self.flush_handle.flush(buf, self.bytes_amount).await?;
+        let recycled = self
+            .flush_handle
+            .flush(buf, self.bytes_amount, save_buf_for_read)
+            .await?;
         self.bytes_amount += u64::try_from(buf_len).unwrap();
         self.mutable = Some(recycled);
         Ok(())
@@ -273,6 +288,7 @@ impl Buffer for IoBufferMut {
         self.freeze().slice_len()
     }
 
+    /// Caller should make sure that `iobuf` only have one strong reference before invoking this method.
     fn reuse_after_flush(iobuf: Self::IoBuf) -> Self {
         let mut recycled = iobuf
             .into_mut()
