@@ -5161,6 +5161,7 @@ dependencies = [
  "itertools 0.10.5",
  "metrics",
  "once_cell",
+ "pageserver_api",
  "parking_lot 0.12.1",
  "postgres",
  "postgres-protocol",
