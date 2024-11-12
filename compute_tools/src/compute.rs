@@ -15,7 +15,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use compute_api::spec::{PgIdent, Role};
+use compute_api::spec::{Database, PgIdent, Role};
 use futures::future::join_all;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
@@ -34,7 +34,6 @@ use utils::measured_stream::MeasuredReader;
 use nix::sys::signal::{kill, Signal};
 use remote_storage::{DownloadError, RemotePath};
 use tokio::spawn;
-use tokio_postgres::Config;
 use url::Url;
 
 use crate::installed_extensions::get_installed_extensions_sync;
@@ -815,7 +814,7 @@ impl ComputeNode {
         Ok(())
     }
 
-    async fn get_maintenance_client(&self, url: &Url) -> Result<tokio_postgres::Client> {
+    async fn get_maintenance_client(url: &Url) -> Result<tokio_postgres::Client> {
         let mut connstr = url.clone();
 
         connstr
@@ -840,8 +839,8 @@ impl ComputeNode {
                     let mut client =
                         Client::connect(zenith_admin_connstr.as_str(), NoTls)
                             .context("broken cloud_admin credential: tried connecting with cloud_admin but could not authenticate, and zenith_admin does not work either")?;
-                    // Disable forwarding so that users don't get a cloud_admin role
 
+                    // Disable forwarding so that users don't get a cloud_admin role
                     let mut func = || {
                         client.simple_query("SET neon.forward_ddl = false")?;
                         client.simple_query("CREATE USER cloud_admin WITH SUPERUSER")?;
@@ -862,10 +861,12 @@ impl ComputeNode {
 
         spawn(async move {
             if let Err(e) = conn.await {
-                error!("connection error: {}", e);
+                error!("maintenance client connection error: {}", e);
             }
         });
 
+        // Disable DDL forwarding because control plane already knows about the roles/databases
+        // we're about to modify.
         client
             .simple_query("SET neon.forward_ddl = false")
             .await
@@ -892,9 +893,8 @@ impl ComputeNode {
         debug!("Applying config {:?}", spec);
 
         rt.block_on(async {
-            // Disable DDL forwarding because control plane already knows about these roles/databases.
             // Proceed with post-startup configuration. Note, that order of operations is important.
-            let mut client = self.get_maintenance_client(&url).await?;
+            let mut client = Self::get_maintenance_client(&url).await?;
             let spec = spec.clone();
 
             let mut xact = client.transaction().await?;
@@ -938,7 +938,7 @@ impl ComputeNode {
                     databases.clone(),
                     jwks_roles.clone(),
                     phase,
-                    &mut client,
+                    || async { Ok(&client) },
                 )
                 .await?;
             }
@@ -957,53 +957,31 @@ impl ComputeNode {
                     let roles = roles.clone();
                     let databases = databases.clone();
                     let jwks_roles = jwks_roles.clone();
-                    let url = url.clone();
+                    let mut url = url.as_ref().clone();
                     let concurrency_token = concurrency_token.clone();
                     let db = db.clone();
-
-                    let mut config = Config::from_str(url.as_str())
-                        .context("postgres connection url parsing")?;
 
                     debug!("Applying per-database phases for Database {:?}", &db);
 
                     match &db {
                         DB::SystemDB => {}
                         DB::UserDB(db) => {
-                            config.dbname(&db.name);
+                            url.set_path(db.name.as_str());
                         }
                     }
 
-                    Ok(spawn({
-                        async move {
-                            let _permit = concurrency_token.acquire().await?;
+                    let url = Arc::new(url);
+                    let fut = Self::apply_spec_sql_db(
+                        spec.clone(),
+                        url,
+                        roles.clone(),
+                        databases.clone(),
+                        jwks_roles.clone(),
+                        concurrency_token.clone(),
+                        db,
+                    );
 
-                            let (mut db_client, connection) = config.connect(NoTls).await?;
-
-                            for subphase in [
-                                DeleteDBRoleReferences,
-                                ChangeSchemaPerms,
-                                HandleAnonExtension,
-                            ] {
-                                apply_operations(
-                                    spec.clone(),
-                                    roles.clone(),
-                                    databases.clone(),
-                                    jwks_roles.clone(),
-                                    RunInEachDatabase {
-                                        db: db.clone(),
-                                        subphase,
-                                    },
-                                    &mut db_client,
-                                )
-                                .await?;
-                            }
-
-                            drop(db_client);
-                            drop(connection);
-
-                            Ok::<(), anyhow::Error>(())
-                        }
-                    }))
+                    Ok(spawn(fut))
                 })
                 .collect::<Vec<Result<_, anyhow::Error>>>();
 
@@ -1025,7 +1003,7 @@ impl ComputeNode {
                     databases.clone(),
                     jwks_roles.clone(),
                     phase,
-                    &mut client,
+                    || async { Ok(&client) },
                 )
                 .await?;
             }
@@ -1034,6 +1012,59 @@ impl ComputeNode {
         })?;
 
         Ok(())
+    }
+
+    /// Apply SQL migrations of the RunInEachDatabase phase.
+    ///
+    /// May opt to not connect to databases that don't have any scheduled
+    /// operations.  The function is concurrency-controlled with the provided
+    /// semaphore.  The caller has to make sure the semaphore isn't exhausted.
+    async fn apply_spec_sql_db(
+        spec: Arc<ComputeSpec>,
+        url: Arc<Url>,
+        roles: Arc<tokio::sync::Mutex<HashMap<String, Role>>>,
+        databases: Arc<tokio::sync::Mutex<HashMap<String, Database>>>,
+        jwks_roles: Arc<HashSet<String>>,
+        concurrency_token: Arc<tokio::sync::Semaphore>,
+        db: DB,
+    ) -> Result<()> {
+        let _permit = concurrency_token.acquire().await?;
+
+        let mut client_conn = None;
+
+        for subphase in [
+            DeleteDBRoleReferences,
+            ChangeSchemaPerms,
+            HandleAnonExtension,
+        ] {
+            apply_operations(
+                spec.clone(),
+                roles.clone(),
+                databases.clone(),
+                jwks_roles.clone(),
+                RunInEachDatabase {
+                    db: db.clone(),
+                    subphase,
+                },
+                // Only connect if apply_operation actually wants a connection.
+                // It's quite possible this database doesn't need any queries,
+                // so by not connecting we save time and effort connecting to
+                // that database.
+                || async {
+                    if client_conn.is_none() {
+                        let db_client = Self::get_maintenance_client(&url).await?;
+                        client_conn.replace(db_client);
+                    }
+                    let client = client_conn.as_ref().unwrap();
+                    Ok(client)
+                },
+            )
+            .await?;
+        }
+
+        drop(client_conn);
+
+        Ok::<(), anyhow::Error>(())
     }
 
     /// Do initial configuration of the already started Postgres.

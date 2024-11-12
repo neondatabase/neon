@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Debug, Formatter};
+use std::future::Future;
 use std::iter::empty;
 use std::iter::once;
 use std::sync::Arc;
@@ -82,14 +83,18 @@ pub struct Operation {
 ///   is processed.
 /// - No timeouts have (yet) been implemented.
 /// - The caller is responsible for limiting and/or applying concurrency.
-pub async fn apply_operations(
+pub async fn apply_operations<'a, Fut, F>(
     spec: Arc<ComputeSpec>,
     roles: Arc<Mutex<HashMap<String, Role>>>,
     databases: Arc<Mutex<HashMap<String, Database>>>,
     jwks_roles: Arc<HashSet<String>>,
     apply_spec_phase: ApplySpecPhase,
-    client: &mut Client,
-) -> Result<()> {
+    client: F,
+) -> Result<()>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<&'a Client>>,
+{
     debug!("Starting phase {:?}", &apply_spec_phase);
     let span = info_span!("db_apply_changes", phase=?apply_spec_phase);
     let span2 = span.clone();
@@ -99,13 +104,22 @@ pub async fn apply_operations(
 
         debug!("Processing phase {:?}", &apply_spec_phase);
 
-        let ops = get_operations(
+        let mut ops = get_operations(
             &spec,
             &mut roles,
             &mut dbs,
             &jwks_roles,
             apply_spec_phase.clone(),
-        )?;
+        )?
+        .peekable();
+
+        // Return (and by doing so, skip requesting the PostgreSQL client) if
+        // we don't have any operations scheduled.
+        if ops.peek().is_none() {
+            return Ok(());
+        }
+
+        let client = client().await?;
 
         debug!("Applying phase {:?}", &apply_spec_phase);
 
@@ -162,7 +176,7 @@ pub fn get_operations<'a>(
     databases: &'a mut HashMap<String, Database>,
     jwks_roles: &'a HashSet<String>,
     apply_spec_phase: ApplySpecPhase,
-) -> Result<Box<dyn Iterator<Item = Operation> + 'a>> {
+) -> Result<Box<dyn Iterator<Item = Operation> + 'a + Send>> {
     match &apply_spec_phase {
         ApplySpecPhase::CreateSuperUser => {
             let query = construct_superuser_query(spec);
