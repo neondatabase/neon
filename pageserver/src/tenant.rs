@@ -7757,13 +7757,13 @@ mod tests {
             (
                 get_key(3),
                 Lsn(0x20),
-                Value::WalRecord(NeonWalRecord::wal_clear()),
+                Value::WalRecord(NeonWalRecord::wal_clear("c")),
             ),
             (get_key(4), Lsn(0x10), Value::Image("0x10".into())),
             (
                 get_key(4),
                 Lsn(0x20),
-                Value::WalRecord(NeonWalRecord::wal_init()),
+                Value::WalRecord(NeonWalRecord::wal_init("i")),
             ),
         ];
         let image1 = vec![(get_key(1), "0x10".into())];
@@ -7912,8 +7912,30 @@ mod tests {
 
     #[cfg(feature = "testing")]
     #[tokio::test]
-    async fn test_simple_bottom_most_compaction_deltas() -> anyhow::Result<()> {
-        let harness = TenantHarness::create("test_simple_bottom_most_compaction_deltas").await?;
+    async fn test_simple_bottom_most_compaction_deltas_1() -> anyhow::Result<()> {
+        test_simple_bottom_most_compaction_deltas_helper(
+            "test_simple_bottom_most_compaction_deltas_1",
+            false,
+        )
+        .await
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn test_simple_bottom_most_compaction_deltas_2() -> anyhow::Result<()> {
+        test_simple_bottom_most_compaction_deltas_helper(
+            "test_simple_bottom_most_compaction_deltas_2",
+            true,
+        )
+        .await
+    }
+
+    #[cfg(feature = "testing")]
+    async fn test_simple_bottom_most_compaction_deltas_helper(
+        test_name: &'static str,
+        use_delta_bottom_layer: bool,
+    ) -> anyhow::Result<()> {
+        let harness = TenantHarness::create(test_name).await?;
         let (tenant, ctx) = harness.load().await;
 
         fn get_key(id: u32) -> Key {
@@ -7943,6 +7965,16 @@ mod tests {
         // img layer at 0x10
         let img_layer = (0..10)
             .map(|id| (get_key(id), Bytes::from(format!("value {id}@0x10"))))
+            .collect_vec();
+        // or, delta layer at 0x10 if `use_delta_bottom_layer` is true
+        let delta4 = (0..10)
+            .map(|id| {
+                (
+                    get_key(id),
+                    Lsn(0x08),
+                    Value::WalRecord(NeonWalRecord::wal_init(format!("value {id}@0x10"))),
+                )
+            })
             .collect_vec();
 
         let delta1 = vec![
@@ -7997,21 +8029,61 @@ mod tests {
             ),
         ];
 
-        let tline = tenant
-            .create_test_timeline_with_layers(
-                TIMELINE_ID,
-                Lsn(0x10),
-                DEFAULT_PG_VERSION,
-                &ctx,
-                vec![
-                    DeltaLayerTestDesc::new_with_inferred_key_range(Lsn(0x10)..Lsn(0x48), delta1),
-                    DeltaLayerTestDesc::new_with_inferred_key_range(Lsn(0x10)..Lsn(0x48), delta2),
-                    DeltaLayerTestDesc::new_with_inferred_key_range(Lsn(0x48)..Lsn(0x50), delta3),
-                ], // delta layers
-                vec![(Lsn(0x10), img_layer)], // image layers
-                Lsn(0x50),
-            )
-            .await?;
+        let tline = if use_delta_bottom_layer {
+            tenant
+                .create_test_timeline_with_layers(
+                    TIMELINE_ID,
+                    Lsn(0x08),
+                    DEFAULT_PG_VERSION,
+                    &ctx,
+                    vec![
+                        DeltaLayerTestDesc::new_with_inferred_key_range(
+                            Lsn(0x08)..Lsn(0x10),
+                            delta4,
+                        ),
+                        DeltaLayerTestDesc::new_with_inferred_key_range(
+                            Lsn(0x20)..Lsn(0x48),
+                            delta1,
+                        ),
+                        DeltaLayerTestDesc::new_with_inferred_key_range(
+                            Lsn(0x20)..Lsn(0x48),
+                            delta2,
+                        ),
+                        DeltaLayerTestDesc::new_with_inferred_key_range(
+                            Lsn(0x48)..Lsn(0x50),
+                            delta3,
+                        ),
+                    ], // delta layers
+                    vec![], // image layers
+                    Lsn(0x50),
+                )
+                .await?
+        } else {
+            tenant
+                .create_test_timeline_with_layers(
+                    TIMELINE_ID,
+                    Lsn(0x10),
+                    DEFAULT_PG_VERSION,
+                    &ctx,
+                    vec![
+                        DeltaLayerTestDesc::new_with_inferred_key_range(
+                            Lsn(0x10)..Lsn(0x48),
+                            delta1,
+                        ),
+                        DeltaLayerTestDesc::new_with_inferred_key_range(
+                            Lsn(0x10)..Lsn(0x48),
+                            delta2,
+                        ),
+                        DeltaLayerTestDesc::new_with_inferred_key_range(
+                            Lsn(0x48)..Lsn(0x50),
+                            delta3,
+                        ),
+                    ], // delta layers
+                    vec![(Lsn(0x10), img_layer)], // image layers
+                    Lsn(0x50),
+                )
+                .await?
+        };
         {
             // Update GC info
             let mut guard = tline.gc_info.write().unwrap();
@@ -8121,7 +8193,7 @@ mod tests {
             (
                 key,
                 Lsn(0x10),
-                Value::Image(Bytes::copy_from_slice(b"0x10")),
+                Value::WalRecord(NeonWalRecord::wal_init("0x10")),
             ),
             (
                 key,
@@ -8183,7 +8255,7 @@ mod tests {
                     Lsn(0x20),
                     KeyLogAtLsn(vec![(
                         Lsn(0x20),
-                        Value::Image(Bytes::copy_from_slice(b"0x10;0x20")),
+                        Value::Image(Bytes::from_static(b"0x10;0x20")),
                     )]),
                 ),
                 (
@@ -9165,7 +9237,7 @@ mod tests {
 
             let will_init = will_init_keys.contains(&i);
             if will_init {
-                delta_layer_spec.push((key, lsn, Value::WalRecord(NeonWalRecord::wal_init())));
+                delta_layer_spec.push((key, lsn, Value::WalRecord(NeonWalRecord::wal_init(""))));
 
                 expected_key_values.insert(key, "".to_string());
             } else {
