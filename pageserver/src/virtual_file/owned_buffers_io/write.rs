@@ -10,12 +10,15 @@ use crate::{
     virtual_file::{IoBuffer, IoBufferMut},
 };
 
-use super::io_buf_ext::{FullSlice, IoBufExt};
+use super::{
+    io_buf_aligned::IoBufAligned,
+    io_buf_ext::{FullSlice, IoBufExt},
+};
 
 /// A trait for doing owned-buffer write IO.
 /// Think [`tokio::io::AsyncWrite`] but with owned buffers.
 pub trait OwnedAsyncWriter {
-    fn write_all_at<Buf: IoBuf + Send>(
+    fn write_all_at<Buf: IoBufAligned + Send>(
         &self,
         buf: FullSlice<Buf>,
         offset: u64,
@@ -53,7 +56,7 @@ pub struct BufferedWriter<B: Buffer, W> {
 impl<B, Buf, W> BufferedWriter<B, W>
 where
     B: Buffer<IoBuf = Buf> + Send + 'static,
-    Buf: IoBuf + Send + Sync + Clone,
+    Buf: IoBufAligned + Send + Sync + Clone,
     W: OwnedAsyncWriter + Send + Sync + 'static + std::fmt::Debug,
 {
     pub fn new(writer: Arc<W>, buf_new: impl Fn() -> B, ctx: &RequestContext) -> Self {
@@ -110,8 +113,8 @@ where
     }
 
     /// Guarantees that if Ok() is returned, all bytes in `chunk` have been accepted.
-    #[cfg_attr(target_os = "macos", allow(dead_code))]
-    pub async fn write_buffered<S: IoBuf + Send>(
+    #[allow(dead_code)]
+    pub async fn write_buffered<S: IoBufAligned + Send>(
         &mut self,
         chunk: FullSlice<S>,
         ctx: &RequestContext,
@@ -259,7 +262,6 @@ impl Buffer for IoBufferMut {
     }
 
     fn extend_from_slice(&mut self, other: &[u8]) {
-        self.reserve(other.len());
         IoBufferMut::extend_from_slice(self, other);
     }
 
@@ -307,7 +309,7 @@ mod tests {
     }
 
     impl OwnedAsyncWriter for RecorderWriter {
-        async fn write_all_at<Buf: IoBuf + Send>(
+        async fn write_all_at<Buf: IoBufAligned + Send>(
             &self,
             buf: FullSlice<Buf>,
             offset: u64,
@@ -327,8 +329,10 @@ mod tests {
 
     macro_rules! write {
         ($writer:ident, $data:literal) => {{
+            let mut buf = crate::virtual_file::IoBufferMut::with_capacity(2);
+            buf.extend_from_slice($data);
             $writer
-                .write_buffered(::bytes::Bytes::from_static($data).slice_len(), &test_ctx())
+                .write_buffered(buf.freeze().slice_len(), &test_ctx())
                 .await?;
         }};
     }

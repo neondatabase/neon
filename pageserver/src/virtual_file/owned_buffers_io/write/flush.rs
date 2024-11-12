@@ -1,9 +1,11 @@
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
-use tokio_epoll_uring::IoBuf;
 
-use crate::{context::RequestContext, virtual_file::owned_buffers_io::io_buf_ext::FullSlice};
+use crate::{
+    context::RequestContext,
+    virtual_file::owned_buffers_io::{io_buf_aligned::IoBufAligned, io_buf_ext::FullSlice},
+};
 
 use super::{Buffer, OwnedAsyncWriter};
 
@@ -68,7 +70,7 @@ pub struct FlushBackgroundTask<Buf, W> {
 
 impl<Buf, W> FlushBackgroundTask<Buf, W>
 where
-    Buf: IoBuf + Send + Sync,
+    Buf: IoBufAligned + Send + Sync,
     W: OwnedAsyncWriter + Sync + 'static,
 {
     fn new(
@@ -105,7 +107,7 @@ where
 
 impl<Buf, W> FlushHandle<Buf, W>
 where
-    Buf: IoBuf + Send + Sync + Clone,
+    Buf: IoBufAligned + Send + Sync + Clone,
     W: OwnedAsyncWriter + Send + Sync + 'static + std::fmt::Debug,
 {
     /// Spawns a new background flush task and obtains a handle.

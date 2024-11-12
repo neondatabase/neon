@@ -3,7 +3,7 @@ use std::{
     sync::Arc,
 };
 
-use super::{alignment::Alignment, raw::RawAlignedBuffer, AlignedBufferMut};
+use super::{alignment::Alignment, raw::RawAlignedBuffer, AlignedBufferMut, ConstAlign};
 
 /// An shared, immutable aligned buffer type.
 #[derive(Clone, Debug)]
@@ -111,6 +111,14 @@ impl<A: Alignment> AsRef<[u8]> for AlignedBuffer<A> {
 impl<A: Alignment> PartialEq<[u8]> for AlignedBuffer<A> {
     fn eq(&self, other: &[u8]) -> bool {
         self.as_slice().eq(other)
+    }
+}
+
+impl<const A: usize, const N: usize> From<&[u8; N]> for AlignedBuffer<ConstAlign<A>> {
+    fn from(value: &[u8; N]) -> Self {
+        let mut buf = AlignedBufferMut::with_capacity(N);
+        buf.extend_from_slice(value);
+        buf.freeze()
     }
 }
 

@@ -27,9 +27,7 @@ use crate::span::{
 use crate::tenant::remote_timeline_client::{remote_layer_path, remote_timelines_path};
 use crate::tenant::storage_layer::LayerName;
 use crate::tenant::Generation;
-#[cfg_attr(target_os = "macos", allow(unused_imports))]
-use crate::virtual_file::owned_buffers_io::io_buf_ext::IoBufExt;
-use crate::virtual_file::{on_fatal_io_error, MaybeFatalIo, VirtualFile};
+use crate::virtual_file::{on_fatal_io_error, IoBufferMut, MaybeFatalIo, VirtualFile};
 use crate::TEMP_FILE_SUFFIX;
 use remote_storage::{DownloadError, DownloadOpts, GenericRemoteStorage, ListingMode, RemotePath};
 use utils::crashsafe::path_with_suffix_extension;
@@ -205,7 +203,6 @@ async fn download_object<'a>(
         #[cfg(target_os = "linux")]
         crate::virtual_file::io_engine::IoEngine::TokioEpollUring => {
             use crate::virtual_file::owned_buffers_io;
-            use bytes::BytesMut;
             async {
                 let destination_file = Arc::new(
                     VirtualFile::create(dst_path, ctx)
@@ -225,11 +222,12 @@ async fn download_object<'a>(
                 // TODO: use vectored write (writev) once supported by tokio-epoll-uring.
                 // There's chunks_vectored() on the stream.
                 let (bytes_amount, destination_file) = async {
-                    let mut buffered = owned_buffers_io::write::BufferedWriter::<BytesMut, _>::new(
-                        destination_file,
-                        || BytesMut::with_capacity(super::BUFFER_SIZE),
-                        ctx,
-                    );
+                    let mut buffered =
+                        owned_buffers_io::write::BufferedWriter::<IoBufferMut, _>::new(
+                            destination_file,
+                            || IoBufferMut::with_capacity(super::BUFFER_SIZE),
+                            ctx,
+                        );
                     while let Some(res) =
                         futures::StreamExt::next(&mut download.download_stream).await
                     {
@@ -237,7 +235,9 @@ async fn download_object<'a>(
                             Ok(chunk) => chunk,
                             Err(e) => return Err(e),
                         };
-                        buffered.write_buffered(chunk.slice_len(), ctx).await?;
+                        // TODO(yuchen): might have performance issue when using borrowed version?
+                        // Problem: input is Bytes, does not satisify IO alignment requirement.
+                        buffered.write_buffered_borrowed(&chunk, ctx).await?;
                     }
                     let inner = buffered.flush_and_into_inner(ctx).await?;
                     Ok(inner)

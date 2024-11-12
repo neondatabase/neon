@@ -20,7 +20,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use once_cell::sync::OnceCell;
 use owned_buffers_io::aligned_buffer::buffer::AlignedBuffer;
 use owned_buffers_io::aligned_buffer::{AlignedBufferMut, AlignedSlice, ConstAlign};
-use owned_buffers_io::io_buf_aligned::IoBufAlignedMut;
+use owned_buffers_io::io_buf_aligned::{IoBufAligned, IoBufAlignedMut};
 use owned_buffers_io::io_buf_ext::FullSlice;
 use pageserver_api::config::defaults::DEFAULT_IO_BUFFER_ALIGNMENT;
 use pageserver_api::shard::TenantShardId;
@@ -212,7 +212,7 @@ impl VirtualFile {
         self.inner.read_exact_at_page(page, offset, ctx).await
     }
 
-    pub async fn write_all_at<Buf: IoBuf + Send>(
+    pub async fn write_all_at<Buf: IoBufAligned + Send>(
         &self,
         buf: FullSlice<Buf>,
         offset: u64,
@@ -1295,7 +1295,7 @@ impl Drop for VirtualFileInner {
 }
 
 impl OwnedAsyncWriter for VirtualFile {
-    async fn write_all_at<Buf: IoBuf + Send>(
+    async fn write_all_at<Buf: IoBufAligned + Send>(
         &self,
         buf: FullSlice<Buf>,
         offset: u64,
@@ -1417,7 +1417,7 @@ mod tests {
                 }
             }
         }
-        async fn write_all_at<Buf: IoBuf + Send>(
+        async fn write_all_at<Buf: IoBufAligned + Send>(
             &self,
             buf: FullSlice<Buf>,
             offset: u64,
@@ -1619,10 +1619,10 @@ mod tests {
         )
         .await?;
         file_b
-            .write_all_at(b"BAR".to_vec().slice_len(), 3, &ctx)
+            .write_all_at(IoBuffer::from(b"BAR").slice_len(), 3, &ctx)
             .await?;
         file_b
-            .write_all_at(b"FOO".to_vec().slice_len(), 0, &ctx)
+            .write_all_at(IoBuffer::from(b"FOO").slice_len(), 0, &ctx)
             .await?;
 
         assert_eq!(file_b.read_string_at(2, 3, &ctx).await?, "OBA");
