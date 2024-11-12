@@ -286,7 +286,7 @@ class PgProtocol:
         return self.safe_psql_many([query], **kwargs)[0]
 
     def safe_psql_many(
-        self, queries: Iterable[str], log_query=True, **kwargs: Any
+        self, queries: Iterable[str], log_query: bool = True, **kwargs: Any
     ) -> list[list[tuple[Any, ...]]]:
         """
         Execute queries against the node and return all rows.
@@ -306,7 +306,7 @@ class PgProtocol:
                         result.append(cur.fetchall())
         return result
 
-    def safe_psql_scalar(self, query, log_query=True) -> Any:
+    def safe_psql_scalar(self, query: str, log_query: bool = True) -> Any:
         """
         Execute query returning single row with single column.
         """
