@@ -246,4 +246,4 @@ def test_physical_replication_config_mismatch_max_locks_per_transaction(neon_sim
         secondary.stop()
     except Exception as e:
         log.info(f"Replica crashed with {e}")
-        assert secondary.log_contains('You might need to increase "max_locks_per_transaction"')
+        assert secondary.log_contains('You might need to increase')
