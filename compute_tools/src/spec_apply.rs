@@ -299,21 +299,9 @@ pub fn get_operations<'a>(
                             // be a retry, so we could've already dropped the database.
                             // Check that database exists first to make it idempotent.
                             let unset_template_query: String = format!(
-                                "
-                                DO $$
-                                BEGIN
-                                    IF EXISTS(
-                                        SELECT 1
-                                        FROM pg_catalog.pg_database
-                                        WHERE datname = {}
-                                    )
-                                    THEN
-                                    ALTER DATABASE {} is_template false;
-                                    END IF;
-                                END
-                                $$;",
-                                escape_literal(&op.name),
-                                &op.name.pg_quote()
+                                include_str!("sql/unset_template_for_drop_dbs.sql"),
+                                datname_str = escape_literal(&op.name),
+                                datname = &op.name.pg_quote()
                             );
 
                             // Use FORCE to drop database even if there are active connections.
@@ -486,70 +474,16 @@ pub fn get_operations<'a>(
                         return Ok(Box::new(empty()));
                     }
 
-                    let set_public_schema_owner = format!(
-                        "DO $$\n\
-                            DECLARE\n\
-                                schema_owner TEXT;\n\
-                            BEGIN\n\
-                                IF EXISTS(\n\
-                                    SELECT nspname\n\
-                                    FROM pg_catalog.pg_namespace\n\
-                                    WHERE nspname = 'public'\n\
-                                )\n\
-                                THEN\n\
-                                    SELECT nspowner::regrole::text\n\
-                                        FROM pg_catalog.pg_namespace\n\
-                                        WHERE nspname = 'public'\n\
-                                        INTO schema_owner;\n\
-                            \n\
-                                    IF schema_owner = 'cloud_admin' OR schema_owner = 'zenith_admin'\n\
-                                    THEN\n\
-                                        ALTER SCHEMA public OWNER TO {};\n\
-                                    END IF;\n\
-                                END IF;\n\
-                            END\n\
-                        $$;",
-                        db.owner.pg_quote()
-                    );
-
-                    let grant_query =
-                        "DO $$\n\
-                            BEGIN\n\
-                                IF EXISTS(\n\
-                                    SELECT nspname\n\
-                                    FROM pg_catalog.pg_namespace\n\
-                                    WHERE nspname = 'public'\n\
-                                ) AND\n\
-                                    current_setting('server_version_num')::int/10000 >= 15\n\
-                                THEN\n\
-                                    IF EXISTS(\n\
-                                        SELECT rolname\n\
-                                        FROM pg_catalog.pg_roles\n\
-                                        WHERE rolname = 'web_access'\n\
-                                    )\n\
-                                    THEN\n\
-                                        GRANT CREATE ON SCHEMA public TO web_access;\n\
-                                    END IF;\n\
-                                END IF;\n\
-                                IF EXISTS(\n\
-                                    SELECT nspname\n\
-                                    FROM pg_catalog.pg_namespace\n\
-                                    WHERE nspname = 'public'\n\
-                                )\n\
-                                THEN\n\
-                                    ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO neon_superuser WITH GRANT OPTION;\n\
-                                    ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO neon_superuser WITH GRANT OPTION;\n\
-                                END IF;\n\
-                            END\n\
-                        $$;"
-                        .to_string();
                     let operations = vec![
                         Operation {
-                            query: set_public_schema_owner,
+                            query: format!(
+                                include_str!("sql/set_public_schema_owner.sql"),
+                                db_owner = db.owner.pg_quote()
+                            ),
                             comment: None,
                         },
                         Operation {
-                            query: grant_query,
+                            query: String::from(include_str!("sql/default_grants.sql")),
                             comment: None,
                         },
                     ]
@@ -582,7 +516,7 @@ pub fn get_operations<'a>(
 
                     let db_owner = db.owner.pg_quote();
 
-                    let operations = vec!(
+                    let operations = vec![
                         // Create anon extension if this compute needs it
                         // Users cannot create it themselves, because superuser is required.
                         Operation {
@@ -596,18 +530,19 @@ pub fn get_operations<'a>(
                             comment: Some(String::from("initializing anon extension data")),
                         },
                         Operation {
-                            query: format!(
-                                "GRANT ALL ON SCHEMA anon TO {}",
-                                db_owner
-                            ),
-                            comment: Some(String::from("granting anon extension schema permissions")),
+                            query: format!("GRANT ALL ON SCHEMA anon TO {}", db_owner),
+                            comment: Some(String::from(
+                                "granting anon extension schema permissions",
+                            )),
                         },
                         Operation {
                             query: format!(
                                 "GRANT ALL ON ALL FUNCTIONS IN SCHEMA anon TO {}",
                                 db_owner
                             ),
-                            comment: Some(String::from("granting anon extension schema functions permissions")),
+                            comment: Some(String::from(
+                                "granting anon extension schema functions permissions",
+                            )),
                         },
                         // We need this, because some functions are defined as SECURITY DEFINER.
                         // In Postgres SECURITY DEFINER functions are executed with the privileges
@@ -617,31 +552,33 @@ pub fn get_operations<'a>(
                         // So we need to change owner of these functions to db_owner.
                         Operation {
                             query: format!(
-                                "
-                                SELECT 'ALTER FUNCTION '||nsp.nspname||'.'||p.proname||'('||pg_get_function_identity_arguments(p.oid)||') OWNER TO {};'
-                                from pg_proc p
-                                join pg_namespace nsp ON p.pronamespace = nsp.oid
-                                where nsp.nspname = 'anon';
-                                ",
-                                db_owner,
+                                include_str!("sql/anon_ext_fn_reassign.sql"),
+                                db_owner = db_owner,
                             ),
-                            comment: Some(String::from("change anon extension functions owner to database_owner")),
+                            comment: Some(String::from(
+                                "change anon extension functions owner to database_owner",
+                            )),
                         },
                         Operation {
                             query: format!(
                                 "GRANT ALL ON ALL TABLES IN SCHEMA anon TO {}",
                                 db_owner,
                             ),
-                            comment: Some(String::from("granting anon extension tables permissions")),
+                            comment: Some(String::from(
+                                "granting anon extension tables permissions",
+                            )),
                         },
                         Operation {
                             query: format!(
                                 "GRANT ALL ON ALL SEQUENCES IN SCHEMA anon TO {}",
                                 db_owner,
                             ),
-                            comment: Some(String::from("granting anon extension sequences permissions")),
+                            comment: Some(String::from(
+                                "granting anon extension sequences permissions",
+                            )),
                         },
-                    ).into_iter();
+                    ]
+                    .into_iter();
 
                     Ok(Box::new(operations))
                 }
@@ -692,27 +629,7 @@ pub fn get_operations<'a>(
             Ok(Box::new(operations))
         }
         ApplySpecPhase::CreateAvailabilityCheck => Ok(Box::new(once(Operation {
-            query: String::from(
-                "
-                    DO $$
-                    BEGIN
-                        IF NOT EXISTS(
-                            SELECT 1
-                            FROM pg_catalog.pg_tables
-                            WHERE tablename = 'health_check'
-                        )
-                        THEN
-                        CREATE TABLE health_check (
-                            id serial primary key,
-                            updated_at timestamptz default now()
-                        );
-                        INSERT INTO health_check VALUES (1, now())
-                            ON CONFLICT (id) DO UPDATE
-                             SET updated_at = now();
-                        END IF;
-                    END
-                    $$;",
-            ),
+            query: String::from(include_str!("sql/add_availabilitycheck_tables.sql")),
             comment: None,
         }))),
         ApplySpecPhase::DropRoles => {
