@@ -52,7 +52,7 @@ impl EphemeralFile {
             )));
 
         let file = Arc::new(
-            VirtualFile::open_with_options(
+            VirtualFile::open_with_options_v2(
                 &filename,
                 virtual_file::OpenOptions::new()
                     .read(true)
