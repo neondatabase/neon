@@ -241,7 +241,7 @@ pub use v14::bindings::{CheckPoint, ControlFileData};
 pub const BLCKSZ: u16 = 8192;
 pub const RELSEG_SIZE: u32 = 1024 * 1024 * 1024 / (BLCKSZ as u32);
 pub const XLOG_BLCKSZ: usize = 8192;
-pub const WAL_SEGMENT_SIZE: usize = 16 * 1024 * 1024;
+pub const WAL_SEGMENT_SIZE: usize = 128 * 1024 * 1024;
 
 pub const MAX_SEND_SIZE: usize = XLOG_BLCKSZ * 16;
 

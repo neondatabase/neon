@@ -151,7 +151,7 @@ fn check_end_of_wal(
     .unwrap();
 }
 
-const_assert!(WAL_SEGMENT_SIZE == 16 * 1024 * 1024);
+const_assert!(WAL_SEGMENT_SIZE == 128 * 1024 * 1024);
 
 #[test]
 pub fn test_find_end_of_wal_simple() {
