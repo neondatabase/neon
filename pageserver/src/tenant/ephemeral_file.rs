@@ -410,7 +410,7 @@ mod tests {
         }
 
         let file_contents = std::fs::read(file.buffered_writer.as_inner().path()).unwrap();
-        assert!(file_contents == &content[0..cap] || file_contents == &content[0..cap * 2]);
+        assert!(file_contents == content[0..cap] || file_contents == content[0..cap * 2]);
 
         let maybe_flushed_buffer_contents = file.buffered_writer.inspect_maybe_flushed().unwrap();
         assert_eq!(maybe_flushed_buffer_contents, &content[cap..cap * 2]);

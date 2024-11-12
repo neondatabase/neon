@@ -141,6 +141,7 @@ impl<A: Alignment> AlignedBufferMut<A> {
         let cnt = extend.len();
         self.reserve(cnt);
 
+        // SAFETY: we already reserved additional `cnt` bytes, safe to perform memcpy.
         unsafe {
             let dst = self.spare_capacity_mut();
             // Reserved above
@@ -148,7 +149,7 @@ impl<A: Alignment> AlignedBufferMut<A> {
 
             core::ptr::copy_nonoverlapping(extend.as_ptr(), dst.as_mut_ptr().cast(), cnt);
         }
-
+        // SAFETY: We do have at least `cnt` bytes remaining before advance.
         unsafe {
             bytes::BufMut::advance_mut(self, cnt);
         }
@@ -156,6 +157,8 @@ impl<A: Alignment> AlignedBufferMut<A> {
 
     #[inline]
     fn spare_capacity_mut(&mut self) -> &mut [MaybeUninit<u8>] {
+        // SAFETY: we guarantees that the `Self::capacity()` bytes from
+        // `Self::as_mut_ptr()` are allocated.
         unsafe {
             let ptr = self.as_mut_ptr().add(self.len());
             let len = self.capacity() - self.len();
