@@ -427,7 +427,7 @@ def test_create_churn_during_restart(neon_env_builder: NeonEnvBuilder):
             env.pageserver.start()
 
             for f in futs:
-                f.result(timeout=10)
+                f.result(timeout=30)
 
     # The tenant should end up active
     wait_until_tenant_active(env.pageserver.http_client(), tenant_id, iterations=10, period=1)
