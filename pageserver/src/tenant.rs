@@ -713,7 +713,7 @@ impl Debug for DeleteTimelineError {
             Self::NotFound => write!(f, "NotFound"),
             Self::HasChildren(c) => f.debug_tuple("HasChildren").field(c).finish(),
             Self::AlreadyInProgress(_) => f.debug_tuple("AlreadyInProgress").finish(),
-            Self::Cancelled => f.debug_tuple("AlreadyInProgress").finish(),
+            Self::Cancelled => f.debug_tuple("Cancelled").finish(),
             Self::Other(e) => f.debug_tuple("Other").field(e).finish(),
         }
     }
