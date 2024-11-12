@@ -5,7 +5,7 @@ on:
     # It should be kept in sync with if-condition in jobs
     - cron: '0 6 * * MON' # Storage release
     - cron: '0 6 * * THU' # Proxy release
-    - cron: '0 6 * * TUE' # Proxy release
+    - cron: '0 6 * * TUE' # Compute release
   workflow_dispatch:
     inputs:
       create-storage-release-branch:
