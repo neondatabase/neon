@@ -2493,7 +2493,8 @@ impl Tenant {
             timelines_to_compact_or_offload = timelines
                 .iter()
                 .filter_map(|(timeline_id, timeline)| {
-                    let (is_active, can_offload) = (timeline.is_active(), timeline.can_offload());
+                    let (is_active, (can_offload, _)) =
+                        (timeline.is_active(), timeline.can_offload());
                     let has_no_unoffloaded_children = {
                         !timelines
                             .iter()
@@ -4779,10 +4780,12 @@ async fn run_initdb(
 
     let _permit = INIT_DB_SEMAPHORE.acquire().await;
 
-    let initdb_command = tokio::process::Command::new(&initdb_bin_path)
+    let mut initdb_command = tokio::process::Command::new(&initdb_bin_path);
+    initdb_command
         .args(["--pgdata", initdb_target_dir.as_ref()])
         .args(["--username", &conf.superuser])
         .args(["--encoding", "utf8"])
+        .args(["--locale", &conf.locale])
         .arg("--no-instructions")
         .arg("--no-sync")
         .env_clear()
@@ -4792,15 +4795,27 @@ async fn run_initdb(
         // stdout invocation produces the same output every time, we don't need it
         .stdout(std::process::Stdio::null())
         // we would be interested in the stderr output, if there was any
-        .stderr(std::process::Stdio::piped())
-        .spawn()?;
+        .stderr(std::process::Stdio::piped());
+
+    // Before version 14, only the libc provide was available.
+    if pg_version > 14 {
+        // Version 17 brought with it a builtin locale provider which only provides
+        // C and C.UTF-8. While being safer for collation purposes since it is
+        // guaranteed to be consistent throughout a major release, it is also more
+        // performant.
+        let locale_provider = if pg_version >= 17 { "builtin" } else { "libc" };
+
+        initdb_command.args(["--locale-provider", locale_provider]);
+    }
+
+    let initdb_proc = initdb_command.spawn()?;
 
     // Ideally we'd select here with the cancellation token, but the problem is that
     // we can't safely terminate initdb: it launches processes of its own, and killing
     // initdb doesn't kill them. After we return from this function, we want the target
     // directory to be able to be cleaned up.
     // See https://github.com/neondatabase/neon/issues/6385
-    let initdb_output = initdb_command.wait_with_output().await?;
+    let initdb_output = initdb_proc.wait_with_output().await?;
     if !initdb_output.status.success() {
         return Err(InitdbError::Failed(
             initdb_output.status,
@@ -9208,6 +9223,23 @@ mod tests {
         Ok(())
     }
 
+    fn sort_layer_key(k1: &PersistentLayerKey, k2: &PersistentLayerKey) -> std::cmp::Ordering {
+        (
+            k1.is_delta,
+            k1.key_range.start,
+            k1.key_range.end,
+            k1.lsn_range.start,
+            k1.lsn_range.end,
+        )
+            .cmp(&(
+                k2.is_delta,
+                k2.key_range.start,
+                k2.key_range.end,
+                k2.lsn_range.start,
+                k2.lsn_range.end,
+            ))
+    }
+
     async fn inspect_and_sort(
         tline: &Arc<Timeline>,
         filter: Option<std::ops::Range<Key>>,
@@ -9216,23 +9248,28 @@ mod tests {
         if let Some(filter) = filter {
             all_layers.retain(|layer| overlaps_with(&layer.key_range, &filter));
         }
-        all_layers.sort_by(|k1, k2| {
-            (
-                k1.is_delta,
-                k1.key_range.start,
-                k1.key_range.end,
-                k1.lsn_range.start,
-                k1.lsn_range.end,
-            )
-                .cmp(&(
-                    k2.is_delta,
-                    k2.key_range.start,
-                    k2.key_range.end,
-                    k2.lsn_range.start,
-                    k2.lsn_range.end,
-                ))
-        });
+        all_layers.sort_by(sort_layer_key);
         all_layers
+    }
+
+    #[cfg(feature = "testing")]
+    fn check_layer_map_key_eq(
+        mut left: Vec<PersistentLayerKey>,
+        mut right: Vec<PersistentLayerKey>,
+    ) {
+        left.sort_by(sort_layer_key);
+        right.sort_by(sort_layer_key);
+        if left != right {
+            eprintln!("---LEFT---");
+            for left in left.iter() {
+                eprintln!("{}", left);
+            }
+            eprintln!("---RIGHT---");
+            for right in right.iter() {
+                eprintln!("{}", right);
+            }
+            assert_eq!(left, right);
+        }
     }
 
     #[cfg(feature = "testing")]
@@ -9327,127 +9364,206 @@ mod tests {
 
         let cancel = CancellationToken::new();
 
-        // Do a partial compaction on key range 0..4, we should generate a image layer; no other layers
-        // can be removed because they might be used for other key ranges.
+        // Do a partial compaction on key range 0..2
         tline
-            .partial_compact_with_gc(Some(get_key(0)..get_key(4)), &cancel, EnumSet::new(), &ctx)
+            .partial_compact_with_gc(get_key(0)..get_key(2), &cancel, EnumSet::new(), &ctx)
             .await
             .unwrap();
         let all_layers = inspect_and_sort(&tline, Some(get_key(0)..get_key(10))).await;
-        assert_eq!(
+        check_layer_map_key_eq(
             all_layers,
             vec![
+                // newly-generated image layer for the partial compaction range 0-2
                 PersistentLayerKey {
-                    key_range: get_key(0)..get_key(4),
+                    key_range: get_key(0)..get_key(2),
                     lsn_range: Lsn(0x20)..Lsn(0x21),
-                    is_delta: false
+                    is_delta: false,
                 },
                 PersistentLayerKey {
                     key_range: get_key(0)..get_key(10),
                     lsn_range: Lsn(0x10)..Lsn(0x11),
-                    is_delta: false
+                    is_delta: false,
                 },
+                // delta1 is split and the second part is rewritten
                 PersistentLayerKey {
-                    key_range: get_key(1)..get_key(4),
+                    key_range: get_key(2)..get_key(4),
                     lsn_range: Lsn(0x20)..Lsn(0x48),
-                    is_delta: true
+                    is_delta: true,
                 },
                 PersistentLayerKey {
                     key_range: get_key(5)..get_key(7),
                     lsn_range: Lsn(0x20)..Lsn(0x48),
-                    is_delta: true
+                    is_delta: true,
                 },
                 PersistentLayerKey {
                     key_range: get_key(8)..get_key(10),
                     lsn_range: Lsn(0x48)..Lsn(0x50),
-                    is_delta: true
-                }
-            ]
+                    is_delta: true,
+                },
+            ],
         );
 
-        // Do a partial compaction on key range 4..10
+        // Do a partial compaction on key range 2..4
         tline
-            .partial_compact_with_gc(Some(get_key(4)..get_key(10)), &cancel, EnumSet::new(), &ctx)
+            .partial_compact_with_gc(get_key(2)..get_key(4), &cancel, EnumSet::new(), &ctx)
             .await
             .unwrap();
         let all_layers = inspect_and_sort(&tline, Some(get_key(0)..get_key(10))).await;
-        assert_eq!(
+        check_layer_map_key_eq(
             all_layers,
             vec![
                 PersistentLayerKey {
-                    key_range: get_key(0)..get_key(4),
+                    key_range: get_key(0)..get_key(2),
                     lsn_range: Lsn(0x20)..Lsn(0x21),
-                    is_delta: false
+                    is_delta: false,
                 },
                 PersistentLayerKey {
-                    // if (in the future) GC kicks in, this layer will be removed
                     key_range: get_key(0)..get_key(10),
                     lsn_range: Lsn(0x10)..Lsn(0x11),
-                    is_delta: false
+                    is_delta: false,
                 },
+                // image layer generated for the compaction range 2-4
                 PersistentLayerKey {
-                    key_range: get_key(4)..get_key(10),
+                    key_range: get_key(2)..get_key(4),
                     lsn_range: Lsn(0x20)..Lsn(0x21),
-                    is_delta: false
+                    is_delta: false,
                 },
+                // we have key2/key3 above the retain_lsn, so we still need this delta layer
                 PersistentLayerKey {
-                    key_range: get_key(1)..get_key(4),
+                    key_range: get_key(2)..get_key(4),
                     lsn_range: Lsn(0x20)..Lsn(0x48),
-                    is_delta: true
+                    is_delta: true,
                 },
                 PersistentLayerKey {
                     key_range: get_key(5)..get_key(7),
                     lsn_range: Lsn(0x20)..Lsn(0x48),
-                    is_delta: true
+                    is_delta: true,
                 },
                 PersistentLayerKey {
                     key_range: get_key(8)..get_key(10),
                     lsn_range: Lsn(0x48)..Lsn(0x50),
-                    is_delta: true
-                }
-            ]
+                    is_delta: true,
+                },
+            ],
+        );
+
+        // Do a partial compaction on key range 4..9
+        tline
+            .partial_compact_with_gc(get_key(4)..get_key(9), &cancel, EnumSet::new(), &ctx)
+            .await
+            .unwrap();
+        let all_layers = inspect_and_sort(&tline, Some(get_key(0)..get_key(10))).await;
+        check_layer_map_key_eq(
+            all_layers,
+            vec![
+                PersistentLayerKey {
+                    key_range: get_key(0)..get_key(2),
+                    lsn_range: Lsn(0x20)..Lsn(0x21),
+                    is_delta: false,
+                },
+                PersistentLayerKey {
+                    key_range: get_key(0)..get_key(10),
+                    lsn_range: Lsn(0x10)..Lsn(0x11),
+                    is_delta: false,
+                },
+                PersistentLayerKey {
+                    key_range: get_key(2)..get_key(4),
+                    lsn_range: Lsn(0x20)..Lsn(0x21),
+                    is_delta: false,
+                },
+                PersistentLayerKey {
+                    key_range: get_key(2)..get_key(4),
+                    lsn_range: Lsn(0x20)..Lsn(0x48),
+                    is_delta: true,
+                },
+                // image layer generated for this compaction range
+                PersistentLayerKey {
+                    key_range: get_key(4)..get_key(9),
+                    lsn_range: Lsn(0x20)..Lsn(0x21),
+                    is_delta: false,
+                },
+                PersistentLayerKey {
+                    key_range: get_key(8)..get_key(10),
+                    lsn_range: Lsn(0x48)..Lsn(0x50),
+                    is_delta: true,
+                },
+            ],
+        );
+
+        // Do a partial compaction on key range 9..10
+        tline
+            .partial_compact_with_gc(get_key(9)..get_key(10), &cancel, EnumSet::new(), &ctx)
+            .await
+            .unwrap();
+        let all_layers = inspect_and_sort(&tline, Some(get_key(0)..get_key(10))).await;
+        check_layer_map_key_eq(
+            all_layers,
+            vec![
+                PersistentLayerKey {
+                    key_range: get_key(0)..get_key(2),
+                    lsn_range: Lsn(0x20)..Lsn(0x21),
+                    is_delta: false,
+                },
+                PersistentLayerKey {
+                    key_range: get_key(0)..get_key(10),
+                    lsn_range: Lsn(0x10)..Lsn(0x11),
+                    is_delta: false,
+                },
+                PersistentLayerKey {
+                    key_range: get_key(2)..get_key(4),
+                    lsn_range: Lsn(0x20)..Lsn(0x21),
+                    is_delta: false,
+                },
+                PersistentLayerKey {
+                    key_range: get_key(2)..get_key(4),
+                    lsn_range: Lsn(0x20)..Lsn(0x48),
+                    is_delta: true,
+                },
+                PersistentLayerKey {
+                    key_range: get_key(4)..get_key(9),
+                    lsn_range: Lsn(0x20)..Lsn(0x21),
+                    is_delta: false,
+                },
+                // image layer generated for the compaction range
+                PersistentLayerKey {
+                    key_range: get_key(9)..get_key(10),
+                    lsn_range: Lsn(0x20)..Lsn(0x21),
+                    is_delta: false,
+                },
+                PersistentLayerKey {
+                    key_range: get_key(8)..get_key(10),
+                    lsn_range: Lsn(0x48)..Lsn(0x50),
+                    is_delta: true,
+                },
+            ],
         );
 
         // Do a partial compaction on key range 0..10, all image layers below LSN 20 can be replaced with new ones.
         tline
-            .partial_compact_with_gc(Some(get_key(0)..get_key(10)), &cancel, EnumSet::new(), &ctx)
+            .partial_compact_with_gc(get_key(0)..get_key(10), &cancel, EnumSet::new(), &ctx)
             .await
             .unwrap();
         let all_layers = inspect_and_sort(&tline, Some(get_key(0)..get_key(10))).await;
-        assert_eq!(
+        check_layer_map_key_eq(
             all_layers,
             vec![
-                PersistentLayerKey {
-                    key_range: get_key(0)..get_key(4),
-                    lsn_range: Lsn(0x20)..Lsn(0x21),
-                    is_delta: false
-                },
+                // aha, we removed all unnecessary image/delta layers and got a very clean layer map!
                 PersistentLayerKey {
                     key_range: get_key(0)..get_key(10),
                     lsn_range: Lsn(0x20)..Lsn(0x21),
-                    is_delta: false
+                    is_delta: false,
                 },
                 PersistentLayerKey {
-                    key_range: get_key(4)..get_key(10),
-                    lsn_range: Lsn(0x20)..Lsn(0x21),
-                    is_delta: false
-                },
-                PersistentLayerKey {
-                    key_range: get_key(1)..get_key(4),
+                    key_range: get_key(2)..get_key(4),
                     lsn_range: Lsn(0x20)..Lsn(0x48),
-                    is_delta: true
-                },
-                PersistentLayerKey {
-                    key_range: get_key(5)..get_key(7),
-                    lsn_range: Lsn(0x20)..Lsn(0x48),
-                    is_delta: true
+                    is_delta: true,
                 },
                 PersistentLayerKey {
                     key_range: get_key(8)..get_key(10),
                     lsn_range: Lsn(0x48)..Lsn(0x50),
-                    is_delta: true
-                }
-            ]
+                    is_delta: true,
+                },
+            ],
         );
 
         Ok(())

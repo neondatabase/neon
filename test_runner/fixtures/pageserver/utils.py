@@ -56,6 +56,8 @@ def wait_for_upload(
     lsn: Lsn,
 ):
     """waits for local timeline upload up to specified lsn"""
+
+    current_lsn = Lsn(0)
     for i in range(20):
         current_lsn = remote_consistent_lsn(pageserver_http, tenant, timeline)
         if current_lsn >= lsn:
@@ -203,6 +205,8 @@ def wait_for_last_record_lsn(
     lsn: Lsn,
 ) -> Lsn:
     """waits for pageserver to catch up to a certain lsn, returns the last observed lsn."""
+
+    current_lsn = Lsn(0)
     for i in range(1000):
         current_lsn = last_record_lsn(pageserver_http, tenant, timeline)
         if current_lsn >= lsn:

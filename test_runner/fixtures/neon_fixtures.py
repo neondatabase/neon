@@ -286,7 +286,7 @@ class PgProtocol:
         return self.safe_psql_many([query], **kwargs)[0]
 
     def safe_psql_many(
-        self, queries: Iterable[str], log_query=True, **kwargs: Any
+        self, queries: Iterable[str], log_query: bool = True, **kwargs: Any
     ) -> list[list[tuple[Any, ...]]]:
         """
         Execute queries against the node and return all rows.
@@ -306,7 +306,7 @@ class PgProtocol:
                         result.append(cur.fetchall())
         return result
 
-    def safe_psql_scalar(self, query, log_query=True) -> Any:
+    def safe_psql_scalar(self, query: str, log_query: bool = True) -> Any:
         """
         Execute query returning single row with single column.
         """
@@ -1782,7 +1782,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         self.request(
             "PUT",
             f"{self.api}/control/v1/node/{node_id}/drain",
-            headers=self.headers(TokenScope.ADMIN),
+            headers=self.headers(TokenScope.INFRA),
         )
 
     def cancel_node_drain(self, node_id):
@@ -1790,7 +1790,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         self.request(
             "DELETE",
             f"{self.api}/control/v1/node/{node_id}/drain",
-            headers=self.headers(TokenScope.ADMIN),
+            headers=self.headers(TokenScope.INFRA),
         )
 
     def node_fill(self, node_id):
@@ -1798,7 +1798,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         self.request(
             "PUT",
             f"{self.api}/control/v1/node/{node_id}/fill",
-            headers=self.headers(TokenScope.ADMIN),
+            headers=self.headers(TokenScope.INFRA),
         )
 
     def cancel_node_fill(self, node_id):
@@ -1806,14 +1806,14 @@ class NeonStorageController(MetricsGetter, LogUtils):
         self.request(
             "DELETE",
             f"{self.api}/control/v1/node/{node_id}/fill",
-            headers=self.headers(TokenScope.ADMIN),
+            headers=self.headers(TokenScope.INFRA),
         )
 
     def node_status(self, node_id):
         response = self.request(
             "GET",
             f"{self.api}/control/v1/node/{node_id}",
-            headers=self.headers(TokenScope.ADMIN),
+            headers=self.headers(TokenScope.INFRA),
         )
         return response.json()
 
@@ -1829,7 +1829,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         response = self.request(
             "GET",
             f"{self.api}/control/v1/node",
-            headers=self.headers(TokenScope.ADMIN),
+            headers=self.headers(TokenScope.INFRA),
         )
         return response.json()
 
@@ -1857,7 +1857,7 @@ class NeonStorageController(MetricsGetter, LogUtils):
         shard_count: Optional[int] = None,
         shard_stripe_size: Optional[int] = None,
         tenant_config: Optional[dict[Any, Any]] = None,
-        placement_policy: Optional[Union[dict[Any, Any] | str]] = None,
+        placement_policy: Optional[Union[dict[Any, Any], str]] = None,
     ):
         """
         Use this rather than pageserver_api() when you need to include shard parameters

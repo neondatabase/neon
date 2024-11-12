@@ -2002,9 +2002,9 @@ async fn timeline_offload_handler(
                 "timeline has attached children".into(),
             ));
         }
-        if !timeline.can_offload() {
+        if let (false, reason) = timeline.can_offload() {
             return Err(ApiError::PreconditionFailed(
-                "Timeline::can_offload() returned false".into(),
+                format!("Timeline::can_offload() check failed: {}", reason) .into(),
             ));
         }
         offload_timeline(&tenant, &timeline)
@@ -2168,6 +2168,21 @@ async fn timeline_detach_ancestor_handler(
 
         let ctx = RequestContext::new(TaskKind::DetachAncestor, DownloadBehavior::Download);
         let ctx = &ctx;
+
+        // Flush the upload queues of all timelines before detaching ancestor. We do the same thing again
+        // during shutdown. This early upload ensures the pageserver does not need to upload too many
+        // things and creates downtime during timeline reloads.
+        for timeline in tenant.list_timelines() {
+            timeline
+                .remote_client
+                .wait_completion()
+                .await
+                .map_err(|e| {
+                    ApiError::PreconditionFailed(format!("cannot drain upload queue: {e}").into())
+                })?;
+        }
+
+        tracing::info!("all timeline upload queues are drained");
 
         let timeline = tenant.get_timeline(timeline_id, true)?;
 
