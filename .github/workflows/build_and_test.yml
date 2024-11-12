@@ -133,7 +133,7 @@ jobs:
 
       - name: Check vendor/postgres-v14 submodule reference
         if: steps.check-if-submodules-changed.outputs.vendor == 'true'
-        uses: jtmullen/submodule-branch-check-action@v1
+        uses: hlinnaka/submodule-branch-check-action@main
         with:
           path: "vendor/postgres-v14"
           fetch_depth: "50"
@@ -142,7 +142,7 @@ jobs:
 
       - name: Check vendor/postgres-v15 submodule reference
         if: steps.check-if-submodules-changed.outputs.vendor == 'true'
-        uses: jtmullen/submodule-branch-check-action@v1
+        uses: hlinnaka/submodule-branch-check-action@main
         with:
           path: "vendor/postgres-v15"
           fetch_depth: "50"
@@ -151,7 +151,7 @@ jobs:
 
       - name: Check vendor/postgres-v16 submodule reference
         if: steps.check-if-submodules-changed.outputs.vendor == 'true'
-        uses: jtmullen/submodule-branch-check-action@v1
+        uses: hlinnaka/submodule-branch-check-action@main
         with:
           path: "vendor/postgres-v16"
           fetch_depth: "50"
@@ -160,7 +160,7 @@ jobs:
 
       - name: Check vendor/postgres-v17 submodule reference
         if: steps.check-if-submodules-changed.outputs.vendor == 'true'
-        uses: jtmullen/submodule-branch-check-action@v1
+        uses: hlinnaka/submodule-branch-check-action@main
         with:
           path: "vendor/postgres-v17"
           fetch_depth: "50"
