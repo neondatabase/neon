@@ -136,8 +136,8 @@ jobs:
         uses: hlinnaka/submodule-branch-check-action@main
         with:
           path: "vendor/postgres-v14"
-          fetch_depth: "50"
-          sub_fetch_depth: "50"
+          fetch_depth: "1000"
+          sub_fetch_depth: "1000"
           pass_if_unchanged: true
 
       - name: Check vendor/postgres-v15 submodule reference
@@ -145,8 +145,8 @@ jobs:
         uses: hlinnaka/submodule-branch-check-action@main
         with:
           path: "vendor/postgres-v15"
-          fetch_depth: "50"
-          sub_fetch_depth: "50"
+          fetch_depth: "1000"
+          sub_fetch_depth: "1000"
           pass_if_unchanged: true
 
       - name: Check vendor/postgres-v16 submodule reference
@@ -154,8 +154,8 @@ jobs:
         uses: hlinnaka/submodule-branch-check-action@main
         with:
           path: "vendor/postgres-v16"
-          fetch_depth: "50"
-          sub_fetch_depth: "50"
+          fetch_depth: "1000"
+          sub_fetch_depth: "1000"
           pass_if_unchanged: true
 
       - name: Check vendor/postgres-v17 submodule reference
@@ -163,8 +163,8 @@ jobs:
         uses: hlinnaka/submodule-branch-check-action@main
         with:
           path: "vendor/postgres-v17"
-          fetch_depth: "50"
-          sub_fetch_depth: "50"
+          fetch_depth: "1000"
+          sub_fetch_depth: "1000"
           pass_if_unchanged: true
 
   check-codestyle-rust:
