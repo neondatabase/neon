@@ -119,7 +119,7 @@ def test_installed_extensions(neon_simple_env: NeonEnv):
                 time.sleep(1)
                 timeout -= 1
                 continue
-        except Exception as e:
+        except Exception:
             log.exception("failed to get metrics, assume they are not collected yet")
             time.sleep(1)
             timeout -= 1
