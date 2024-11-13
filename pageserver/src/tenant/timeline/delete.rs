@@ -5,6 +5,7 @@ use std::{
 
 use anyhow::Context;
 use pageserver_api::{models::TimelineState, shard::TenantShardId};
+use remote_storage::DownloadError;
 use tokio::sync::OwnedMutexGuard;
 use tracing::{error, info, info_span, instrument, Instrument};
 use utils::{crashsafe, fs_ext, id::TimelineId, pausable_failpoint};
@@ -214,11 +215,24 @@ impl DeleteTimelineFlow {
             None => {
                 let remote_client = tenant
                     .build_timeline_client(timeline.timeline_id(), tenant.remote_storage.clone());
-                let result = remote_client
+                let result = match remote_client
                     .download_index_file(&tenant.cancel)
                     .instrument(info_span!("download_index_file"))
                     .await
-                    .map_err(|e| DeleteTimelineError::Other(anyhow::anyhow!("error: {:?}", e)))?;
+                {
+                    Ok(r) => r,
+                    Err(DownloadError::NotFound) => {
+                        // Deletion is already complete
+                        tracing::info!("Timeline already deleted in remote storage");
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        return Err(DeleteTimelineError::Other(anyhow::anyhow!(
+                            "error: {:?}",
+                            e
+                        )));
+                    }
+                };
                 let index_part = match result {
                     MaybeDeletedIndexPart::Deleted(p) => {
                         tracing::info!("Timeline already set as deleted in remote index");
