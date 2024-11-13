@@ -9646,4 +9646,48 @@ mod tests {
 
         Ok(())
     }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn test_timeline_offload_retain_lsn() -> anyhow::Result<()> {
+        let harness = TenantHarness::create("test_timeline_offload_retain_lsn")
+            .await
+            .unwrap();
+        let (tenant, ctx) = harness.load().await;
+        let tline_parent = tenant
+            .create_test_timeline(TIMELINE_ID, Lsn(0x10), DEFAULT_PG_VERSION, &ctx)
+            .await
+            .unwrap();
+        let tline_child = tenant
+            .branch_timeline_test(&tline_parent, NEW_TIMELINE_ID, Some(Lsn(0x20)), &ctx)
+            .await
+            .unwrap();
+        {
+            let gc_info_parent = tline_parent.gc_info.read().unwrap();
+            assert_eq!(
+                gc_info_parent.retain_lsns,
+                vec![(Lsn(0x20), tline_child.timeline_id, MaybeOffloaded::No)]
+            );
+        }
+        // We have to directly call the remote_client instead of using the archive function to avoid constructing broker client...
+        tline_child
+            .remote_client
+            .schedule_index_upload_for_timeline_archival_state(TimelineArchivalState::Archived)
+            .unwrap();
+        tline_child.remote_client.wait_completion().await.unwrap();
+        offload_timeline(&tenant, &tline_child)
+            .instrument(tracing::info_span!(parent: None, "offload_test", tenant_id=%"test", shard_id=%"test", timeline_id=%"test"))
+            .await.unwrap();
+        let child_timeline_id = tline_child.timeline_id;
+        Arc::try_unwrap(tline_child).unwrap();
+
+        {
+            let gc_info_parent = tline_parent.gc_info.read().unwrap();
+            assert_eq!(
+                gc_info_parent.retain_lsns,
+                vec![(Lsn(0x20), child_timeline_id, MaybeOffloaded::No)]
+            );
+        }
+        Ok(())
+    }
 }
