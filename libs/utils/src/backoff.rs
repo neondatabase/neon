@@ -84,6 +84,7 @@ where
 /// for any other error type. Final failed attempt is logged with `{:?}`.
 ///
 /// Returns `None` if cancellation was noticed during backoff or the terminal result.
+#[allow(clippy::too_many_arguments)]
 pub async fn retry_with_options<T, O, F, E>(
     mut op: O,
     is_permanent: impl Fn(&E) -> bool,
