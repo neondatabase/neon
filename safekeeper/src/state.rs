@@ -4,6 +4,7 @@
 use std::{cmp::max, ops::Deref};
 
 use anyhow::{bail, Result};
+use postgres_ffi::WAL_SEGMENT_SIZE;
 use safekeeper_api::models::TimelineTermBumpResponse;
 use serde::{Deserialize, Serialize};
 use utils::{
@@ -138,14 +139,13 @@ impl TimelinePersistentState {
         })
     }
 
-    #[cfg(test)]
     pub fn empty() -> Self {
         TimelinePersistentState::new(
             &TenantTimelineId::empty(),
             ServerInfo {
-                pg_version: 17, /* Postgres server version */
-                system_id: 0,   /* Postgres system identifier */
-                wal_seg_size: 16 * 1024 * 1024,
+                pg_version: 170000, /* Postgres server version (major * 10000) */
+                system_id: 0,       /* Postgres system identifier */
+                wal_seg_size: WAL_SEGMENT_SIZE as u32,
             },
             vec![],
             Lsn::INVALID,

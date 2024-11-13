@@ -20,7 +20,9 @@ use utils::backoff;
 
 use crate::config::PageServerConf;
 use crate::context::RequestContext;
-use crate::span::debug_assert_current_span_has_tenant_and_timeline_id;
+use crate::span::{
+    debug_assert_current_span_has_tenant_and_timeline_id, debug_assert_current_span_has_tenant_id,
+};
 use crate::tenant::remote_timeline_client::{remote_layer_path, remote_timelines_path};
 use crate::tenant::storage_layer::LayerName;
 use crate::tenant::Generation;
@@ -36,9 +38,10 @@ use utils::pausable_failpoint;
 use super::index::{IndexPart, LayerFileMetadata};
 use super::manifest::TenantManifest;
 use super::{
-    parse_remote_index_path, remote_index_path, remote_initdb_archive_path,
-    remote_initdb_preserved_archive_path, remote_tenant_manifest_path, remote_tenant_path,
-    FAILED_DOWNLOAD_WARN_THRESHOLD, FAILED_REMOTE_OP_RETRIES, INITDB_PATH,
+    parse_remote_index_path, parse_remote_tenant_manifest_path, remote_index_path,
+    remote_initdb_archive_path, remote_initdb_preserved_archive_path, remote_tenant_manifest_path,
+    remote_tenant_manifest_prefix, remote_tenant_path, FAILED_DOWNLOAD_WARN_THRESHOLD,
+    FAILED_REMOTE_OP_RETRIES, INITDB_PATH,
 };
 
 ///
@@ -365,32 +368,34 @@ async fn do_download_remote_path_retry_forever(
     .await
 }
 
-pub async fn do_download_tenant_manifest(
+async fn do_download_tenant_manifest(
     storage: &GenericRemoteStorage,
     tenant_shard_id: &TenantShardId,
+    _timeline_id: Option<&TimelineId>,
+    generation: Generation,
     cancel: &CancellationToken,
-) -> Result<(TenantManifest, Generation), DownloadError> {
-    // TODO: generation support
-    let generation = super::TENANT_MANIFEST_GENERATION;
+) -> Result<(TenantManifest, Generation, SystemTime), DownloadError> {
     let remote_path = remote_tenant_manifest_path(tenant_shard_id, generation);
 
-    let (manifest_bytes, _manifest_bytes_mtime) =
+    let (manifest_bytes, manifest_bytes_mtime) =
         do_download_remote_path_retry_forever(storage, &remote_path, cancel).await?;
 
     let tenant_manifest = TenantManifest::from_json_bytes(&manifest_bytes)
         .with_context(|| format!("deserialize tenant manifest file at {remote_path:?}"))
         .map_err(DownloadError::Other)?;
 
-    Ok((tenant_manifest, generation))
+    Ok((tenant_manifest, generation, manifest_bytes_mtime))
 }
 
 async fn do_download_index_part(
     storage: &GenericRemoteStorage,
     tenant_shard_id: &TenantShardId,
-    timeline_id: &TimelineId,
+    timeline_id: Option<&TimelineId>,
     index_generation: Generation,
     cancel: &CancellationToken,
 ) -> Result<(IndexPart, Generation, SystemTime), DownloadError> {
+    let timeline_id =
+        timeline_id.expect("A timeline ID is always provided when downloading an index");
     let remote_path = remote_index_path(tenant_shard_id, timeline_id, index_generation);
 
     let (index_part_bytes, index_part_mtime) =
@@ -403,59 +408,79 @@ async fn do_download_index_part(
     Ok((index_part, index_generation, index_part_mtime))
 }
 
-/// index_part.json objects are suffixed with a generation number, so we cannot
-/// directly GET the latest index part without doing some probing.
+/// Metadata objects are "generationed", meaning that they include a generation suffix.  This
+/// function downloads the object with the highest generation <= `my_generation`.
 ///
-/// In this function we probe for the most recent index in a generation <= our current generation.
-/// See "Finding the remote indices for timelines" in docs/rfcs/025-generation-numbers.md
+/// Data objects (layer files) also include a generation in their path, but there is no equivalent
+/// search process, because their reference from an index includes the generation.
+///
+/// An expensive object listing operation is only done if necessary: the typical fast path is to issue two
+/// GET operations, one to our own generation (stale attachment case), and one to the immediately preceding
+/// generation (normal case when migrating/restarting).  Only if both of these return 404 do we fall back
+/// to listing objects.
+///
+/// * `my_generation`: the value of `[crate::tenant::Tenant::generation]`
+/// * `what`: for logging, what object are we downloading
+/// * `prefix`: when listing objects, use this prefix (i.e. the part of the object path before the generation)
+/// * `do_download`: a GET of the object in a particular generation, which should **retry indefinitely** unless
+///                  `cancel`` has fired.  This function does not do its own retries of GET operations, and relies
+///                  on the function passed in to do so.
+/// * `parse_path`: parse a fully qualified remote storage path to get the generation of the object.
+#[allow(clippy::too_many_arguments)]
 #[tracing::instrument(skip_all, fields(generation=?my_generation))]
-pub(crate) async fn download_index_part(
-    storage: &GenericRemoteStorage,
-    tenant_shard_id: &TenantShardId,
-    timeline_id: &TimelineId,
+pub(crate) async fn download_generation_object<'a, T, DF, DFF, PF>(
+    storage: &'a GenericRemoteStorage,
+    tenant_shard_id: &'a TenantShardId,
+    timeline_id: Option<&'a TimelineId>,
     my_generation: Generation,
-    cancel: &CancellationToken,
-) -> Result<(IndexPart, Generation, SystemTime), DownloadError> {
-    debug_assert_current_span_has_tenant_and_timeline_id();
+    what: &str,
+    prefix: RemotePath,
+    do_download: DF,
+    parse_path: PF,
+    cancel: &'a CancellationToken,
+) -> Result<(T, Generation, SystemTime), DownloadError>
+where
+    DF: Fn(
+        &'a GenericRemoteStorage,
+        &'a TenantShardId,
+        Option<&'a TimelineId>,
+        Generation,
+        &'a CancellationToken,
+    ) -> DFF,
+    DFF: Future<Output = Result<(T, Generation, SystemTime), DownloadError>>,
+    PF: Fn(RemotePath) -> Option<Generation>,
+    T: 'static,
+{
+    debug_assert_current_span_has_tenant_id();
 
     if my_generation.is_none() {
         // Operating without generations: just fetch the generation-less path
-        return do_download_index_part(
-            storage,
-            tenant_shard_id,
-            timeline_id,
-            my_generation,
-            cancel,
-        )
-        .await;
+        return do_download(storage, tenant_shard_id, timeline_id, my_generation, cancel).await;
     }
 
-    // Stale case: If we were intentionally attached in a stale generation, there may already be a remote
-    // index in our generation.
+    // Stale case: If we were intentionally attached in a stale generation, the remote object may already
+    // exist in our generation.
     //
     // This is an optimization to avoid doing the listing for the general case below.
-    let res =
-        do_download_index_part(storage, tenant_shard_id, timeline_id, my_generation, cancel).await;
+    let res = do_download(storage, tenant_shard_id, timeline_id, my_generation, cancel).await;
     match res {
-        Ok(index_part) => {
-            tracing::debug!(
-                "Found index_part from current generation (this is a stale attachment)"
-            );
-            return Ok(index_part);
+        Ok(decoded) => {
+            tracing::debug!("Found {what} from current generation (this is a stale attachment)");
+            return Ok(decoded);
         }
         Err(DownloadError::NotFound) => {}
         Err(e) => return Err(e),
     };
 
-    // Typical case: the previous generation of this tenant was running healthily, and had uploaded
-    // and index part.  We may safely start from this index without doing a listing, because:
+    // Typical case: the previous generation of this tenant was running healthily, and had uploaded the object
+    // we are seeking in that generation.  We may safely start from this index without doing a listing, because:
     //  - We checked for current generation case above
     //  - generations > my_generation are to be ignored
-    //  - any other indices that exist would have an older generation than `previous_gen`, and
-    //    we want to find the most recent index from a previous generation.
+    //  - any other objects that exist would have an older generation than `previous_gen`, and
+    //    we want to find the most recent object from a previous generation.
     //
     // This is an optimization to avoid doing the listing for the general case below.
-    let res = do_download_index_part(
+    let res = do_download(
         storage,
         tenant_shard_id,
         timeline_id,
@@ -464,14 +489,12 @@ pub(crate) async fn download_index_part(
     )
     .await;
     match res {
-        Ok(index_part) => {
-            tracing::debug!("Found index_part from previous generation");
-            return Ok(index_part);
+        Ok(decoded) => {
+            tracing::debug!("Found {what} from previous generation");
+            return Ok(decoded);
         }
         Err(DownloadError::NotFound) => {
-            tracing::debug!(
-                "No index_part found from previous generation, falling back to listing"
-            );
+            tracing::debug!("No {what} found from previous generation, falling back to listing");
         }
         Err(e) => {
             return Err(e);
@@ -481,12 +504,10 @@ pub(crate) async fn download_index_part(
     // General case/fallback: if there is no index at my_generation or prev_generation, then list all index_part.json
     // objects, and select the highest one with a generation <= my_generation.  Constructing the prefix is equivalent
     // to constructing a full index path with no generation, because the generation is a suffix.
-    let index_prefix = remote_index_path(tenant_shard_id, timeline_id, Generation::none());
-
-    let indices = download_retry(
+    let paths = download_retry(
         || async {
             storage
-                .list(Some(&index_prefix), ListingMode::NoDelimiter, None, cancel)
+                .list(Some(&prefix), ListingMode::NoDelimiter, None, cancel)
                 .await
         },
         "list index_part files",
@@ -497,22 +518,22 @@ pub(crate) async fn download_index_part(
 
     // General case logic for which index to use: the latest index whose generation
     // is <= our own.  See "Finding the remote indices for timelines" in docs/rfcs/025-generation-numbers.md
-    let max_previous_generation = indices
+    let max_previous_generation = paths
         .into_iter()
-        .filter_map(|o| parse_remote_index_path(o.key))
+        .filter_map(|o| parse_path(o.key))
         .filter(|g| g <= &my_generation)
         .max();
 
     match max_previous_generation {
         Some(g) => {
-            tracing::debug!("Found index_part in generation {g:?}");
-            do_download_index_part(storage, tenant_shard_id, timeline_id, g, cancel).await
+            tracing::debug!("Found {what} in generation {g:?}");
+            do_download(storage, tenant_shard_id, timeline_id, g, cancel).await
         }
         None => {
             // Migration from legacy pre-generation state: we have a generation but no prior
             // attached pageservers did.  Try to load from a no-generation path.
-            tracing::debug!("No index_part.json* found");
-            do_download_index_part(
+            tracing::debug!("No {what}* found");
+            do_download(
                 storage,
                 tenant_shard_id,
                 timeline_id,
@@ -522,6 +543,57 @@ pub(crate) async fn download_index_part(
             .await
         }
     }
+}
+
+/// index_part.json objects are suffixed with a generation number, so we cannot
+/// directly GET the latest index part without doing some probing.
+///
+/// In this function we probe for the most recent index in a generation <= our current generation.
+/// See "Finding the remote indices for timelines" in docs/rfcs/025-generation-numbers.md
+pub(crate) async fn download_index_part(
+    storage: &GenericRemoteStorage,
+    tenant_shard_id: &TenantShardId,
+    timeline_id: &TimelineId,
+    my_generation: Generation,
+    cancel: &CancellationToken,
+) -> Result<(IndexPart, Generation, SystemTime), DownloadError> {
+    debug_assert_current_span_has_tenant_and_timeline_id();
+
+    let index_prefix = remote_index_path(tenant_shard_id, timeline_id, Generation::none());
+    download_generation_object(
+        storage,
+        tenant_shard_id,
+        Some(timeline_id),
+        my_generation,
+        "index_part",
+        index_prefix,
+        do_download_index_part,
+        parse_remote_index_path,
+        cancel,
+    )
+    .await
+}
+
+pub(crate) async fn download_tenant_manifest(
+    storage: &GenericRemoteStorage,
+    tenant_shard_id: &TenantShardId,
+    my_generation: Generation,
+    cancel: &CancellationToken,
+) -> Result<(TenantManifest, Generation, SystemTime), DownloadError> {
+    let manifest_prefix = remote_tenant_manifest_prefix(tenant_shard_id);
+
+    download_generation_object(
+        storage,
+        tenant_shard_id,
+        None,
+        my_generation,
+        "tenant-manifest",
+        manifest_prefix,
+        do_download_tenant_manifest,
+        parse_remote_tenant_manifest_path,
+        cancel,
+    )
+    .await
 }
 
 pub(crate) async fn download_initdb_tar_zst(

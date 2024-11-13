@@ -561,7 +561,7 @@ def test_sql_over_http_pool_dos(static_proxy: NeonProxy):
 
     # query generates a million rows - should hit the 10MB reponse limit quickly
     response = query(
-        400,
+        507,
         "select * from generate_series(1, 5000) a cross join generate_series(1, 5000) b cross join (select 'foo'::foo) c;",
     )
     assert "response is too large (max is 10485760 bytes)" in response["message"]

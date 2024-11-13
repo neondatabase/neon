@@ -658,7 +658,7 @@ async fn handle_node_register(req: Request<Body>) -> Result<Response<Body>, ApiE
 }
 
 async fn handle_node_list(req: Request<Body>) -> Result<Response<Body>, ApiError> {
-    check_permissions(&req, Scope::Admin)?;
+    check_permissions(&req, Scope::Infra)?;
 
     let req = match maybe_forward(req).await {
         ForwardOutcome::Forwarded(res) => {
@@ -737,7 +737,7 @@ async fn handle_node_configure(req: Request<Body>) -> Result<Response<Body>, Api
 }
 
 async fn handle_node_status(req: Request<Body>) -> Result<Response<Body>, ApiError> {
-    check_permissions(&req, Scope::Admin)?;
+    check_permissions(&req, Scope::Infra)?;
 
     let req = match maybe_forward(req).await {
         ForwardOutcome::Forwarded(res) => {
@@ -786,7 +786,7 @@ async fn handle_get_leader(req: Request<Body>) -> Result<Response<Body>, ApiErro
 }
 
 async fn handle_node_drain(req: Request<Body>) -> Result<Response<Body>, ApiError> {
-    check_permissions(&req, Scope::Admin)?;
+    check_permissions(&req, Scope::Infra)?;
 
     let req = match maybe_forward(req).await {
         ForwardOutcome::Forwarded(res) => {
@@ -804,7 +804,7 @@ async fn handle_node_drain(req: Request<Body>) -> Result<Response<Body>, ApiErro
 }
 
 async fn handle_cancel_node_drain(req: Request<Body>) -> Result<Response<Body>, ApiError> {
-    check_permissions(&req, Scope::Admin)?;
+    check_permissions(&req, Scope::Infra)?;
 
     let req = match maybe_forward(req).await {
         ForwardOutcome::Forwarded(res) => {
@@ -822,7 +822,7 @@ async fn handle_cancel_node_drain(req: Request<Body>) -> Result<Response<Body>, 
 }
 
 async fn handle_node_fill(req: Request<Body>) -> Result<Response<Body>, ApiError> {
-    check_permissions(&req, Scope::Admin)?;
+    check_permissions(&req, Scope::Infra)?;
 
     let req = match maybe_forward(req).await {
         ForwardOutcome::Forwarded(res) => {
@@ -840,7 +840,7 @@ async fn handle_node_fill(req: Request<Body>) -> Result<Response<Body>, ApiError
 }
 
 async fn handle_cancel_node_fill(req: Request<Body>) -> Result<Response<Body>, ApiError> {
-    check_permissions(&req, Scope::Admin)?;
+    check_permissions(&req, Scope::Infra)?;
 
     let req = match maybe_forward(req).await {
         ForwardOutcome::Forwarded(res) => {
@@ -968,6 +968,28 @@ async fn handle_tenant_shard_migrate(
     )
 }
 
+async fn handle_tenant_shard_cancel_reconcile(
+    service: Arc<Service>,
+    req: Request<Body>,
+) -> Result<Response<Body>, ApiError> {
+    check_permissions(&req, Scope::Admin)?;
+
+    let req = match maybe_forward(req).await {
+        ForwardOutcome::Forwarded(res) => {
+            return res;
+        }
+        ForwardOutcome::NotForwarded(req) => req,
+    };
+
+    let tenant_shard_id: TenantShardId = parse_request_param(&req, "tenant_shard_id")?;
+    json_response(
+        StatusCode::OK,
+        service
+            .tenant_shard_cancel_reconcile(tenant_shard_id)
+            .await?,
+    )
+}
+
 async fn handle_tenant_update_policy(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     check_permissions(&req, Scope::Admin)?;
 
@@ -1011,7 +1033,7 @@ async fn handle_update_preferred_azs(req: Request<Body>) -> Result<Response<Body
 }
 
 async fn handle_step_down(req: Request<Body>) -> Result<Response<Body>, ApiError> {
-    check_permissions(&req, Scope::Admin)?;
+    check_permissions(&req, Scope::ControllerPeer)?;
 
     let req = match maybe_forward(req).await {
         ForwardOutcome::Forwarded(res) => {
@@ -1776,6 +1798,16 @@ pub fn make_router(
                 RequestName("control_v1_tenant_migrate"),
             )
         })
+        .put(
+            "/control/v1/tenant/:tenant_shard_id/cancel_reconcile",
+            |r| {
+                tenant_service_handler(
+                    r,
+                    handle_tenant_shard_cancel_reconcile,
+                    RequestName("control_v1_tenant_cancel_reconcile"),
+                )
+            },
+        )
         .put("/control/v1/tenant/:tenant_id/shard_split", |r| {
             tenant_service_handler(
                 r,

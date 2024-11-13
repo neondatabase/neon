@@ -1959,7 +1959,7 @@ impl TenantManager {
             attempt.before_reset_tenant();
 
             let (_guard, progress) = utils::completion::channel();
-            match tenant.shutdown(progress, ShutdownMode::Hard).await {
+            match tenant.shutdown(progress, ShutdownMode::Flush).await {
                 Ok(()) => {
                     slot_guard.drop_old_value().expect("it was just shutdown");
                 }
@@ -2811,7 +2811,7 @@ where
 }
 
 use {
-    crate::repository::GcResult, pageserver_api::models::TimelineGcRequest,
+    crate::tenant::gc_result::GcResult, pageserver_api::models::TimelineGcRequest,
     utils::http::error::ApiError,
 };
 

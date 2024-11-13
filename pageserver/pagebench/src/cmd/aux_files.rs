@@ -1,4 +1,4 @@
-use pageserver_api::models::{AuxFilePolicy, TenantConfig, TenantConfigRequest};
+use pageserver_api::models::{TenantConfig, TenantConfigRequest};
 use pageserver_api::shard::TenantShardId;
 use utils::id::TenantTimelineId;
 use utils::lsn::Lsn;
@@ -66,10 +66,7 @@ async fn main_impl(args: Args) -> anyhow::Result<()> {
     mgmt_api_client
         .tenant_config(&TenantConfigRequest {
             tenant_id: timeline.tenant_id,
-            config: TenantConfig {
-                switch_aux_file_policy: Some(AuxFilePolicy::V2),
-                ..Default::default()
-            },
+            config: TenantConfig::default(),
         })
         .await?;
 

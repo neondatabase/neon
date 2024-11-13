@@ -8,7 +8,7 @@ use utils::{fs_ext, id::TimelineId, lsn::Lsn, sync::gate::GateGuard};
 use crate::{
     context::RequestContext,
     import_datadir,
-    tenant::{CreateTimelineIdempotency, Tenant},
+    tenant::{CreateTimelineIdempotency, Tenant, TimelineOrOffloaded},
 };
 
 use super::Timeline;
@@ -145,7 +145,9 @@ impl Drop for UninitializedTimeline<'_> {
     fn drop(&mut self) {
         if let Some((_, create_guard)) = self.raw_timeline.take() {
             let _entered = info_span!("drop_uninitialized_timeline", tenant_id = %self.owning_tenant.tenant_shard_id.tenant_id, shard_id = %self.owning_tenant.tenant_shard_id.shard_slug(), timeline_id = %self.timeline_id).entered();
-            error!("Timeline got dropped without initializing, cleaning its files");
+            // This is unusual, but can happen harmlessly if the pageserver is stopped while
+            // creating a timeline.
+            info!("Timeline got dropped without initializing, cleaning its files");
             cleanup_timeline_directory(create_guard);
         }
     }
@@ -182,7 +184,7 @@ pub(crate) struct TimelineCreateGuard {
 pub(crate) enum TimelineExclusionError {
     #[error("Already exists")]
     AlreadyExists {
-        existing: Arc<Timeline>,
+        existing: TimelineOrOffloaded,
         arg: CreateTimelineIdempotency,
     },
     #[error("Already creating")]
@@ -201,6 +203,7 @@ impl TimelineCreateGuard {
         timeline_id: TimelineId,
         timeline_path: Utf8PathBuf,
         idempotency: CreateTimelineIdempotency,
+        allow_offloaded: bool,
     ) -> Result<Self, TimelineExclusionError> {
         let owning_tenant = owning_tenant
             .myself
@@ -214,30 +217,40 @@ impl TimelineCreateGuard {
         // Lock order: this is the only place we take both locks.  During drop() we only
         // lock creating_timelines
         let timelines = owning_tenant.timelines.lock().unwrap();
+        let timelines_offloaded = owning_tenant.timelines_offloaded.lock().unwrap();
         let mut creating_timelines: std::sync::MutexGuard<
             '_,
             std::collections::HashSet<TimelineId>,
         > = owning_tenant.timelines_creating.lock().unwrap();
 
         if let Some(existing) = timelines.get(&timeline_id) {
-            Err(TimelineExclusionError::AlreadyExists {
-                existing: existing.clone(),
+            return Err(TimelineExclusionError::AlreadyExists {
+                existing: TimelineOrOffloaded::Timeline(existing.clone()),
                 arg: idempotency,
-            })
-        } else if creating_timelines.contains(&timeline_id) {
-            Err(TimelineExclusionError::AlreadyCreating)
-        } else {
-            creating_timelines.insert(timeline_id);
-            drop(timelines);
-            drop(creating_timelines);
-            Ok(Self {
-                _tenant_gate_guard,
-                owning_tenant,
-                timeline_id,
-                timeline_path,
-                idempotency,
-            })
+            });
         }
+        if !allow_offloaded {
+            if let Some(existing) = timelines_offloaded.get(&timeline_id) {
+                return Err(TimelineExclusionError::AlreadyExists {
+                    existing: TimelineOrOffloaded::Offloaded(existing.clone()),
+                    arg: idempotency,
+                });
+            }
+        }
+        if creating_timelines.contains(&timeline_id) {
+            return Err(TimelineExclusionError::AlreadyCreating);
+        }
+        creating_timelines.insert(timeline_id);
+        drop(creating_timelines);
+        drop(timelines_offloaded);
+        drop(timelines);
+        Ok(Self {
+            _tenant_gate_guard,
+            owning_tenant,
+            timeline_id,
+            timeline_path,
+            idempotency,
+        })
     }
 }
 

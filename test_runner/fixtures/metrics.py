@@ -150,6 +150,7 @@ PAGESERVER_GLOBAL_METRICS: tuple[str, ...] = (
     counter("pageserver_tenant_throttling_count_accounted_finish_global"),
     counter("pageserver_tenant_throttling_wait_usecs_sum_global"),
     counter("pageserver_tenant_throttling_count_global"),
+    *histogram("pageserver_tokio_epoll_uring_slots_submission_queue_depth"),
 )
 
 PAGESERVER_PER_TENANT_METRICS: tuple[str, ...] = (

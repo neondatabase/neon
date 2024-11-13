@@ -10,7 +10,9 @@ use camino::Utf8Path;
 
 pub struct RunInitdbArgs<'a> {
     pub superuser: &'a str,
+    pub locale: &'a str,
     pub initdb_bin: &'a Utf8Path,
+    pub pg_version: u32,
     pub library_search_path: &'a Utf8Path,
     pub pgdata: &'a Utf8Path,
 }
@@ -45,15 +47,18 @@ impl fmt::Display for Error {
 pub async fn do_run_initdb(args: RunInitdbArgs<'_>) -> Result<(), Error> {
     let RunInitdbArgs {
         superuser,
+        locale,
         initdb_bin: initdb_bin_path,
+        pg_version,
         library_search_path,
         pgdata,
     } = args;
-    let mut initdb_command_builder = tokio::process::Command::new(initdb_bin_path);
-    initdb_command_builder
+    let mut initdb_command = tokio::process::Command::new(initdb_bin_path);
+    initdb_command
         .args(["--pgdata", pgdata.as_ref()])
         .args(["--username", superuser])
         .args(["--encoding", "utf8"])
+        .args(["--locale", locale])
         .arg("--no-instructions")
         .arg("--no-sync")
         .env_clear()
@@ -65,14 +70,25 @@ pub async fn do_run_initdb(args: RunInitdbArgs<'_>) -> Result<(), Error> {
         // we would be interested in the stderr output, if there was any
         .stderr(std::process::Stdio::piped());
 
-    let initdb_command = initdb_command_builder.spawn().map_err(Error::Spawn)?;
+    // Before version 14, only the libc provide was available.
+    if pg_version > 14 {
+        // Version 17 brought with it a builtin locale provider which only provides
+        // C and C.UTF-8. While being safer for collation purposes since it is
+        // guaranteed to be consistent throughout a major release, it is also more
+        // performant.
+        let locale_provider = if pg_version >= 17 { "builtin" } else { "libc" };
+
+        initdb_command.args(["--locale-provider", locale_provider]);
+    }
+
+    let initdb_proc = initdb_command.spawn().map_err(Error::Spawn)?;
 
     // Ideally we'd select here with the cancellation token, but the problem is that
     // we can't safely terminate initdb: it launches processes of its own, and killing
     // initdb doesn't kill them. After we return from this function, we want the target
     // directory to be able to be cleaned up.
     // See https://github.com/neondatabase/neon/issues/6385
-    let initdb_output = initdb_command
+    let initdb_output = initdb_proc
         .wait_with_output()
         .await
         .map_err(Error::WaitOutput)?;

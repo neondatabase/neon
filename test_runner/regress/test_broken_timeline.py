@@ -103,7 +103,6 @@ def test_timeline_init_break_before_checkpoint(neon_env_builder: NeonEnvBuilder)
     env.pageserver.allowed_errors.extend(
         [
             ".*Failed to process timeline dir contents.*Timeline has no ancestor and no layer files.*",
-            ".*Timeline got dropped without initializing, cleaning its files.*",
         ]
     )
 
@@ -145,7 +144,6 @@ def test_timeline_init_break_before_checkpoint_recreate(
     env.pageserver.allowed_errors.extend(
         [
             ".*Failed to process timeline dir contents.*Timeline has no ancestor and no layer files.*",
-            ".*Timeline got dropped without initializing, cleaning its files.*",
             ".*Failed to load index_part from remote storage, failed creation?.*",
         ]
     )

@@ -37,6 +37,7 @@ use pageserver_api::models::TenantShardLocation;
 use pageserver_api::models::TenantShardSplitRequest;
 use pageserver_api::models::TenantShardSplitResponse;
 use pageserver_api::models::TenantSorting;
+use pageserver_api::models::TenantState;
 use pageserver_api::models::TimelineArchivalConfigRequest;
 use pageserver_api::models::TimelineCreateRequestMode;
 use pageserver_api::models::TimelineCreateRequestModeImportPgdata;
@@ -81,6 +82,7 @@ use crate::tenant::size::ModelInputs;
 use crate::tenant::storage_layer::LayerAccessStatsReset;
 use crate::tenant::storage_layer::LayerName;
 use crate::tenant::timeline::offload::offload_timeline;
+use crate::tenant::timeline::offload::OffloadError;
 use crate::tenant::timeline::CompactFlags;
 use crate::tenant::timeline::CompactionError;
 use crate::tenant::timeline::Timeline;
@@ -294,6 +296,9 @@ impl From<GetActiveTenantError> for ApiError {
         match e {
             GetActiveTenantError::Broken(reason) => {
                 ApiError::InternalServerError(anyhow!("tenant is broken: {}", reason))
+            }
+            GetActiveTenantError::WillNotBecomeActive(TenantState::Stopping { .. }) => {
+                ApiError::ShuttingDown
             }
             GetActiveTenantError::WillNotBecomeActive(_) => ApiError::Conflict(format!("{}", e)),
             GetActiveTenantError::Cancelled => ApiError::ShuttingDown,
@@ -2028,14 +2033,19 @@ async fn timeline_offload_handler(
                 "timeline has attached children".into(),
             ));
         }
-        if !timeline.can_offload() {
+        if let (false, reason) = timeline.can_offload() {
             return Err(ApiError::PreconditionFailed(
-                "Timeline::can_offload() returned false".into(),
+                format!("Timeline::can_offload() check failed: {}", reason) .into(),
             ));
         }
         offload_timeline(&tenant, &timeline)
             .await
-            .map_err(ApiError::InternalServerError)?;
+            .map_err(|e| {
+                match e {
+                    OffloadError::Cancelled => ApiError::ResourceUnavailable("Timeline shutting down".into()),
+                    _ => ApiError::InternalServerError(anyhow!(e))
+                }
+            })?;
 
         json_response(StatusCode::OK, ())
     }
@@ -2091,6 +2101,7 @@ async fn timeline_checkpoint_handler(
                 .map_err(|e|
                     match e {
                         CompactionError::ShuttingDown => ApiError::ShuttingDown,
+                        CompactionError::Offload(e) => ApiError::InternalServerError(anyhow::anyhow!(e)),
                         CompactionError::Other(e) => ApiError::InternalServerError(e)
                     }
                 )?;
@@ -2189,6 +2200,21 @@ async fn timeline_detach_ancestor_handler(
         let ctx = RequestContext::new(TaskKind::DetachAncestor, DownloadBehavior::Download);
         let ctx = &ctx;
 
+        // Flush the upload queues of all timelines before detaching ancestor. We do the same thing again
+        // during shutdown. This early upload ensures the pageserver does not need to upload too many
+        // things and creates downtime during timeline reloads.
+        for timeline in tenant.list_timelines() {
+            timeline
+                .remote_client
+                .wait_completion()
+                .await
+                .map_err(|e| {
+                    ApiError::PreconditionFailed(format!("cannot drain upload queue: {e}").into())
+                })?;
+        }
+
+        tracing::info!("all timeline upload queues are drained");
+
         let timeline = tenant.get_timeline(timeline_id, true)?;
 
         let progress = timeline
@@ -2263,13 +2289,13 @@ async fn getpage_at_lsn_handler(
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
     let state = get_state(&request);
 
-    struct Key(crate::repository::Key);
+    struct Key(pageserver_api::key::Key);
 
     impl std::str::FromStr for Key {
         type Err = anyhow::Error;
 
         fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-            crate::repository::Key::from_hex(s).map(Key)
+            pageserver_api::key::Key::from_hex(s).map(Key)
         }
     }
 

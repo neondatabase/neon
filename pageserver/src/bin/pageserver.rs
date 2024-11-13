@@ -154,13 +154,17 @@ fn main() -> anyhow::Result<()> {
             },
         };
 
-        let started = Instant::now();
-        syncfs(dirfd)?;
-        let elapsed = started.elapsed();
-        info!(
-            elapsed_ms = elapsed.as_millis(),
-            "made tenant directory contents durable"
-        );
+        if conf.no_sync {
+            info!("Skipping syncfs on startup");
+        } else {
+            let started = Instant::now();
+            syncfs(dirfd)?;
+            let elapsed = started.elapsed();
+            info!(
+                elapsed_ms = elapsed.as_millis(),
+                "made tenant directory contents durable"
+            );
+        }
     }
 
     // Initialize up failpoints support
@@ -398,9 +402,7 @@ fn start_pageserver(
         ControllerUpcallClient::new(conf, &shutdown_pageserver),
         conf,
     );
-    if let Some(deletion_workers) = deletion_workers {
-        deletion_workers.spawn_with(BACKGROUND_RUNTIME.handle());
-    }
+    deletion_workers.spawn_with(BACKGROUND_RUNTIME.handle());
 
     // Up to this point no significant I/O has been done: this should have been fast.  Record
     // duration prior to starting I/O intensive phase of startup.

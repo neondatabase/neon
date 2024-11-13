@@ -22,9 +22,11 @@ clap.workspace = true
 flate2.workspace = true
 futures.workspace = true
 hyper0 = { workspace = true, features = ["full"] }
+metrics.workspace = true
 nix.workspace = true
 notify.workspace = true
 num_cpus.workspace = true
+once_cell.workspace = true
 opentelemetry.workspace = true
 opentelemetry_sdk.workspace = true
 postgres.workspace = true
@@ -45,6 +47,7 @@ tracing-subscriber.workspace = true
 tracing-utils.workspace = true
 thiserror.workspace = true
 url.workspace = true
+prometheus.workspace = true
 
 postgres_initdb.workspace = true
 compute_api.workspace = true

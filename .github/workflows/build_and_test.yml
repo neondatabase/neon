@@ -90,35 +90,10 @@ jobs:
 
   check-codestyle-python:
     needs: [ check-permissions, build-build-tools-image ]
-    runs-on: [ self-hosted, small ]
-    container:
-      image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
-      credentials:
-        username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
-        password: ${{ secrets.NEON_DOCKERHUB_PASSWORD }}
-      options: --init
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Cache poetry deps
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pypoetry/virtualenvs
-          key: v2-${{ runner.os }}-${{ runner.arch }}-python-deps-bookworm-${{ hashFiles('poetry.lock') }}
-
-      - name: Install Python deps
-        run: ./scripts/pysync
-
-      - name: Run `ruff check` to ensure code format
-        run: poetry run ruff check .
-
-      - name: Run `ruff format` to ensure code format
-        run: poetry run ruff format --check .
-
-      - name: Run mypy to check types
-        run: poetry run mypy .
+    uses: ./.github/workflows/_check-codestyle-python.yml
+    with:
+      build-tools-image: ${{ needs.build-build-tools-image.outputs.image }}-bookworm
+    secrets: inherit
 
   check-codestyle-jsonnet:
     needs: [ check-permissions, build-build-tools-image ]
@@ -141,6 +116,7 @@ jobs:
   # Check that the vendor/postgres-* submodules point to the
   # corresponding REL_*_STABLE_neon branches.
   check-submodules:
+    needs: [ check-permissions ]
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout
@@ -521,6 +497,8 @@ jobs:
           REPORT_URL_NEW: ${{ steps.upload-coverage-report-new.outputs.report-url }}
           COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         with:
+          # Retry script for 5XX server errors: https://github.com/actions/github-script#retries
+          retries: 5
           script: |
             const { REPORT_URL_NEW, COMMIT_SHA } = process.env
 
@@ -552,7 +530,7 @@ jobs:
         with:
           submodules: true
 
-      - uses: ./.github/actions/set-docker-config-dir
+      - uses: neondatabase/dev-actions/set-docker-config-dir@6094485bf440001c94a94a3f9e221e81ff6b6193
       - uses: docker/setup-buildx-action@v3
         with:
           cache-binary: false
@@ -643,7 +621,7 @@ jobs:
         with:
           submodules: true
 
-      - uses: ./.github/actions/set-docker-config-dir
+      - uses: neondatabase/dev-actions/set-docker-config-dir@6094485bf440001c94a94a3f9e221e81ff6b6193
       - uses: docker/setup-buildx-action@v3
         with:
           cache-binary: false
@@ -824,7 +802,7 @@ jobs:
           curl -fL https://github.com/neondatabase/autoscaling/releases/download/$VM_BUILDER_VERSION/vm-builder -o vm-builder
           chmod +x vm-builder
 
-      - uses: ./.github/actions/set-docker-config-dir
+      - uses: neondatabase/dev-actions/set-docker-config-dir@6094485bf440001c94a94a3f9e221e81ff6b6193
       - uses: docker/login-action@v3
         with:
           username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
@@ -839,6 +817,7 @@ jobs:
       - name: Build vm image
         run: |
           ./vm-builder \
+            -size=2G \
             -spec=compute/vm-image-spec-${{ matrix.version.debian }}.yaml \
             -src=neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }} \
             -dst=neondatabase/vm-compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}
@@ -859,7 +838,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: ./.github/actions/set-docker-config-dir
+      - uses: neondatabase/dev-actions/set-docker-config-dir@6094485bf440001c94a94a3f9e221e81ff6b6193
       - uses: docker/login-action@v3
         with:
           username: ${{ secrets.NEON_DOCKERHUB_USERNAME }}
@@ -1116,7 +1095,10 @@ jobs:
 
             gh workflow --repo neondatabase/infra run deploy-proxy-prod.yml --ref main \
               -f deployPgSniRouter=true \
-              -f deployProxy=true \
+              -f deployProxyLink=true \
+              -f deployPrivatelinkProxy=true \
+              -f deployProxyScram=true \
+              -f deployProxyAuthBroker=true \
               -f branch=main \
               -f dockerTag=${{needs.tag.outputs.build-tag}}
           else

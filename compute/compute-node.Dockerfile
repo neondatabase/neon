@@ -431,14 +431,11 @@ COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
 COPY compute/patches/rum.patch /rum.patch
 
-# maybe version-specific
-# support for v17 is unknown
-# last release 1.3.13 - Sep 19, 2022
-RUN case "${PG_VERSION}" in "v17") \
-    echo "v17 extensions are not supported yet. Quit" && exit 0;; \
-    esac && \
-    wget https://github.com/postgrespro/rum/archive/refs/tags/1.3.13.tar.gz -O rum.tar.gz && \
-    echo "6ab370532c965568df6210bd844ac6ba649f53055e48243525b0b7e5c4d69a7d rum.tar.gz" | sha256sum --check && \
+# supports v17 since https://github.com/postgrespro/rum/commit/cb1edffc57736cd2a4455f8d0feab0d69928da25
+# doesn't use releases since 1.3.13 - Sep 19, 2022
+# use latest commit from the master branch
+RUN wget https://github.com/postgrespro/rum/archive/cb1edffc57736cd2a4455f8d0feab0d69928da25.tar.gz -O rum.tar.gz && \
+    echo "65e0a752e99f4c3226400c9b899f997049e93503db8bf5c8072efa136d32fd83 rum.tar.gz" | sha256sum --check && \
     mkdir rum-src && cd rum-src && tar xzf ../rum.tar.gz --strip-components=1 -C . && \
     patch -p1 < /rum.patch && \
     make -j $(getconf _NPROCESSORS_ONLN) PG_CONFIG=/usr/local/pgsql/bin/pg_config USE_PGXS=1 && \
@@ -562,8 +559,8 @@ RUN case "${PG_VERSION}" in \
         export TIMESCALEDB_CHECKSUM=584a351c7775f0e067eaa0e7277ea88cab9077cc4c455cbbf09a5d9723dce95d \
         ;; \
       "v17") \
-        export TIMESCALEDB_VERSION=2.17.0 \
-        export TIMESCALEDB_CHECKSUM=155bf64391d3558c42f31ca0e523cfc6252921974f75298c9039ccad1c89811a \
+        export TIMESCALEDB_VERSION=2.17.1 \
+        export TIMESCALEDB_CHECKSUM=6277cf43f5695e23dae1c5cfeba00474d730b66ed53665a84b787a6bb1a57e28 \
         ;; \
     esac && \
     wget https://github.com/timescale/timescaledb/archive/refs/tags/${TIMESCALEDB_VERSION}.tar.gz -O timescaledb.tar.gz && \
@@ -627,16 +624,12 @@ FROM build-deps AS pg-cron-pg-build
 ARG PG_VERSION
 COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
 
-# 1.6.4 available, supports v17
 # This is an experimental extension that we do not support on prod yet.
 # !Do not remove!
 # We set it in shared_preload_libraries and computes will fail to start if library is not found.
 ENV PATH="/usr/local/pgsql/bin/:$PATH"
-RUN case "${PG_VERSION}" in "v17") \
-    echo "v17 extensions are not supported yet. Quit" && exit 0;; \
-    esac && \
-    wget https://github.com/citusdata/pg_cron/archive/refs/tags/v1.6.0.tar.gz -O pg_cron.tar.gz && \
-    echo "383a627867d730222c272bfd25cd5e151c578d73f696d32910c7db8c665cc7db pg_cron.tar.gz" | sha256sum --check && \
+RUN wget https://github.com/citusdata/pg_cron/archive/refs/tags/v1.6.4.tar.gz -O pg_cron.tar.gz && \
+    echo "52d1850ee7beb85a4cb7185731ef4e5a90d1de216709d8988324b0d02e76af61 pg_cron.tar.gz" | sha256sum --check && \
     mkdir pg_cron-src && cd pg_cron-src && tar xzf ../pg_cron.tar.gz --strip-components=1 -C . && \
     make -j $(getconf _NPROCESSORS_ONLN) && \
     make -j $(getconf _NPROCESSORS_ONLN) install && \
@@ -860,17 +853,97 @@ ENV PATH="/home/nonroot/.cargo/bin:/usr/local/pgsql/bin/:$PATH"
 USER nonroot
 WORKDIR /home/nonroot
 
-RUN case "${PG_VERSION}" in "v17") \
-    echo "v17 is not supported yet by pgrx. Quit" && exit 0;; \
-    esac && \
-    curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux-gnu/rustup-init && \
+RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux-gnu/rustup-init && \
     chmod +x rustup-init && \
     ./rustup-init -y --no-modify-path --profile minimal --default-toolchain stable && \
     rm rustup-init && \
+    case "${PG_VERSION}" in \
+        'v17') \
+            echo 'v17 is not supported yet by pgrx. Quit' && exit 0;; \
+    esac && \
     cargo install --locked --version 0.11.3 cargo-pgrx && \
     /bin/bash -c 'cargo pgrx init --pg${PG_VERSION:1}=/usr/local/pgsql/bin/pg_config'
 
 USER root
+
+#########################################################################################
+#
+# Layer "rust extensions pgrx12"
+#
+# pgrx started to support Postgres 17 since version 12,
+# but some older extension aren't compatible with it.
+# This layer should be used as a base for new pgrx extensions,
+# and eventually get merged with `rust-extensions-build`
+#
+#########################################################################################
+FROM build-deps AS rust-extensions-build-pgrx12
+ARG PG_VERSION
+COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
+
+RUN apt-get update && \
+    apt-get install --no-install-recommends -y curl libclang-dev && \
+    useradd -ms /bin/bash nonroot -b /home
+
+ENV HOME=/home/nonroot
+ENV PATH="/home/nonroot/.cargo/bin:/usr/local/pgsql/bin/:$PATH"
+USER nonroot
+WORKDIR /home/nonroot
+
+RUN curl -sSO https://static.rust-lang.org/rustup/dist/$(uname -m)-unknown-linux-gnu/rustup-init && \
+    chmod +x rustup-init && \
+    ./rustup-init -y --no-modify-path --profile minimal --default-toolchain stable && \
+    rm rustup-init && \
+    cargo install --locked --version 0.12.6 cargo-pgrx && \
+    /bin/bash -c 'cargo pgrx init --pg${PG_VERSION:1}=/usr/local/pgsql/bin/pg_config'
+
+USER root
+
+#########################################################################################
+#
+# Layers "pg-onnx-build" and "pgrag-pg-build"
+# Compile "pgrag" extensions
+#
+#########################################################################################
+
+FROM rust-extensions-build-pgrx12 AS pg-onnx-build
+
+# cmake 3.26 or higher is required, so installing it using pip (bullseye-backports has cmake 3.25).
+# Install it using virtual environment, because Python 3.11 (the default version on Debian 12 (Bookworm)) complains otherwise
+RUN apt-get update && apt-get install -y python3 python3-pip python3-venv && \
+    python3 -m venv venv && \
+    . venv/bin/activate && \
+    python3 -m pip install cmake==3.30.5 && \
+    wget https://github.com/microsoft/onnxruntime/archive/refs/tags/v1.18.1.tar.gz -O onnxruntime.tar.gz && \
+    mkdir onnxruntime-src && cd onnxruntime-src && tar xzf ../onnxruntime.tar.gz --strip-components=1 -C . && \
+    ./build.sh --config Release --parallel --skip_submodule_sync --skip_tests --allow_running_as_root
+
+
+FROM pg-onnx-build AS pgrag-pg-build
+
+RUN apt-get install -y protobuf-compiler && \
+    wget https://github.com/neondatabase-labs/pgrag/archive/refs/tags/v0.0.0.tar.gz -O pgrag.tar.gz &&  \
+    echo "2cbe394c1e74fc8bcad9b52d5fbbfb783aef834ca3ce44626cfd770573700bb4 pgrag.tar.gz" | sha256sum --check && \
+    mkdir pgrag-src && cd pgrag-src && tar xzf ../pgrag.tar.gz --strip-components=1 -C . && \
+    \
+    cd exts/rag && \
+    sed -i 's/pgrx = "0.12.6"/pgrx = { version = "0.12.6", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
+    cargo pgrx install --release && \
+    echo "trusted = true" >> /usr/local/pgsql/share/extension/rag.control && \
+    \
+    cd ../rag_bge_small_en_v15 && \
+    sed -i 's/pgrx = "0.12.6"/pgrx = { version = "0.12.6", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
+    ORT_LIB_LOCATION=/home/nonroot/onnxruntime-src/build/Linux \
+        REMOTE_ONNX_URL=http://pg-ext-s3-gateway/pgrag-data/bge_small_en_v15.onnx \
+        cargo pgrx install --release --features remote_onnx && \
+    echo "trusted = true" >> /usr/local/pgsql/share/extension/rag_bge_small_en_v15.control && \
+    \
+    cd ../rag_jina_reranker_v1_tiny_en && \
+    sed -i 's/pgrx = "0.12.6"/pgrx = { version = "0.12.6", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
+    ORT_LIB_LOCATION=/home/nonroot/onnxruntime-src/build/Linux \
+        REMOTE_ONNX_URL=http://pg-ext-s3-gateway/pgrag-data/jina_reranker_v1_tiny_en.onnx \
+        cargo pgrx install --release --features remote_onnx && \
+    echo "trusted = true" >> /usr/local/pgsql/share/extension/rag_jina_reranker_v1_tiny_en.control
+
 
 #########################################################################################
 #
@@ -879,21 +952,31 @@ USER root
 #
 #########################################################################################
 
-FROM rust-extensions-build AS pg-jsonschema-pg-build
+FROM rust-extensions-build-pgrx12 AS pg-jsonschema-pg-build
 ARG PG_VERSION
-
-RUN case "${PG_VERSION}" in "v17") \
-    echo "pg_jsonschema does not yet have a release that supports pg17" && exit 0;; \
+# version 0.3.3 supports v17
+# last release v0.3.3 - Oct 16, 2024
+#
+# there were no breaking changes
+# so we can use the same version for all postgres versions
+RUN case "${PG_VERSION}" in \
+    "v14" | "v15" | "v16" | "v17") \
+        export PG_JSONSCHEMA_VERSION=0.3.3 \
+        export PG_JSONSCHEMA_CHECKSUM=40c2cffab4187e0233cb8c3bde013be92218c282f95f4469c5282f6b30d64eac \
+    ;; \
+    *) \
+        echo "unexpected PostgreSQL version" && exit 1 \
+    ;; \
     esac && \
-    wget https://github.com/supabase/pg_jsonschema/archive/refs/tags/v0.3.1.tar.gz -O pg_jsonschema.tar.gz && \
-    echo "61df3db1ed83cf24f6aa39c826f8818bfa4f0bd33b587fd6b2b1747985642297 pg_jsonschema.tar.gz" | sha256sum --check && \
+    wget https://github.com/supabase/pg_jsonschema/archive/refs/tags/v${PG_JSONSCHEMA_VERSION}.tar.gz -O pg_jsonschema.tar.gz && \
+    echo "${PG_JSONSCHEMA_CHECKSUM} pg_jsonschema.tar.gz" | sha256sum --check && \
     mkdir pg_jsonschema-src && cd pg_jsonschema-src && tar xzf ../pg_jsonschema.tar.gz --strip-components=1 -C . && \
     # see commit 252b3685a27a0f4c31a0f91e983c6314838e89e8
     # `unsafe-postgres` feature allows to build pgx extensions
     # against postgres forks that decided to change their ABI name (like us).
     # With that we can build extensions without forking them and using stock
     # pgx. As this feature is new few manual version bumps were required.
-    sed -i 's/pgrx = "0.11.3"/pgrx = { version = "0.11.3", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
+    sed -i 's/pgrx = "0.12.6"/pgrx = { version = "0.12.6", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
     cargo pgrx install --release && \
     echo "trusted = true" >> /usr/local/pgsql/share/extension/pg_jsonschema.control
 
@@ -904,16 +987,27 @@ RUN case "${PG_VERSION}" in "v17") \
 #
 #########################################################################################
 
-FROM rust-extensions-build AS pg-graphql-pg-build
+FROM rust-extensions-build-pgrx12 AS pg-graphql-pg-build
 ARG PG_VERSION
 
-RUN case "${PG_VERSION}" in "v17") \
-    echo "pg_graphql does not yet have a release that supports pg17 as of now" && exit 0;; \
+# version 1.5.9 supports v17
+# last release v1.5.9 - Oct 16, 2024
+#
+# there were no breaking changes
+# so we can use the same version for all postgres versions
+RUN case "${PG_VERSION}" in \
+    "v14" | "v15" | "v16" | "v17") \
+        export PG_GRAPHQL_VERSION=1.5.9 \
+        export PG_GRAPHQL_CHECKSUM=cf768385a41278be1333472204fc0328118644ae443182cf52f7b9b23277e497 \
+    ;; \
+    *) \
+        echo "unexpected PostgreSQL version" && exit 1 \
+    ;; \
     esac && \
-    wget https://github.com/supabase/pg_graphql/archive/refs/tags/v1.5.7.tar.gz -O pg_graphql.tar.gz && \
-    echo "2b3e567a5b31019cb97ae0e33263c1bcc28580be5a444ac4c8ece5c4be2aea41 pg_graphql.tar.gz" | sha256sum --check && \
+    wget https://github.com/supabase/pg_graphql/archive/refs/tags/v${PG_GRAPHQL_VERSION}.tar.gz -O pg_graphql.tar.gz && \
+    echo "${PG_GRAPHQL_CHECKSUM} pg_graphql.tar.gz" | sha256sum --check && \
     mkdir pg_graphql-src && cd pg_graphql-src && tar xzf ../pg_graphql.tar.gz --strip-components=1 -C . && \
-    sed -i 's/pgrx = "=0.11.3"/pgrx = { version = "0.11.3", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
+    sed -i 's/pgrx = "=0.12.6"/pgrx = { version = "0.12.6", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
     cargo pgrx install --release && \
     # it's needed to enable extension because it uses untrusted C language
     sed -i 's/superuser = false/superuser = true/g' /usr/local/pgsql/share/extension/pg_graphql.control && \
@@ -926,15 +1020,13 @@ RUN case "${PG_VERSION}" in "v17") \
 #
 #########################################################################################
 
-FROM rust-extensions-build AS pg-tiktoken-pg-build
+FROM rust-extensions-build-pgrx12 AS pg-tiktoken-pg-build
 ARG PG_VERSION
 
-# 26806147b17b60763039c6a6878884c41a262318 made on 26/09/2023
-RUN case "${PG_VERSION}" in "v17") \
-    echo "pg_tiktoken does not have versions, nor support for pg17" && exit 0;; \
-    esac && \
-    wget https://github.com/kelvich/pg_tiktoken/archive/26806147b17b60763039c6a6878884c41a262318.tar.gz -O pg_tiktoken.tar.gz && \
-    echo "e64e55aaa38c259512d3e27c572da22c4637418cf124caba904cd50944e5004e pg_tiktoken.tar.gz" | sha256sum --check && \
+# doesn't use releases
+# 9118dd4549b7d8c0bbc98e04322499f7bf2fa6f7 - on Oct 29, 2024
+RUN wget https://github.com/kelvich/pg_tiktoken/archive/9118dd4549b7d8c0bbc98e04322499f7bf2fa6f7.tar.gz -O pg_tiktoken.tar.gz && \
+    echo "a5bc447e7920ee149d3c064b8b9f0086c0e83939499753178f7d35788416f628 pg_tiktoken.tar.gz" | sha256sum --check && \
     mkdir pg_tiktoken-src && cd pg_tiktoken-src && tar xzf ../pg_tiktoken.tar.gz --strip-components=1 -C . && \
     # TODO update pgrx version in the pg_tiktoken repo and remove this line
     sed -i 's/pgrx = { version = "=0.10.2",/pgrx = { version = "0.11.3",/g' Cargo.toml && \
@@ -952,6 +1044,8 @@ RUN case "${PG_VERSION}" in "v17") \
 FROM rust-extensions-build AS pg-pgx-ulid-build
 ARG PG_VERSION
 
+# doesn't support v17 yet
+# https://github.com/pksunkara/pgx_ulid/pull/52
 RUN case "${PG_VERSION}" in "v17") \
     echo "pgx_ulid does not support pg17 as of the latest version (0.1.5)" && exit 0;; \
     esac && \
@@ -969,16 +1063,16 @@ RUN case "${PG_VERSION}" in "v17") \
 #
 #########################################################################################
 
-FROM rust-extensions-build AS pg-session-jwt-build
+FROM rust-extensions-build-pgrx12 AS pg-session-jwt-build
 ARG PG_VERSION
 
-RUN case "${PG_VERSION}" in "v17") \
-    echo "pg_session_jwt does not yet have a release that supports pg17" && exit 0;; \
-    esac && \
-    wget https://github.com/neondatabase/pg_session_jwt/archive/e1310b08ba51377a19e0559e4d1194883b9b2ba2.tar.gz -O pg_session_jwt.tar.gz && \
-    echo "837932a077888d5545fd54b0abcc79e5f8e37017c2769a930afc2f5c94df6f4e pg_session_jwt.tar.gz" | sha256sum --check && \
+# NOTE: local_proxy depends on the version of pg_session_jwt
+# Do not update without approve from proxy team
+# Make sure the version is reflected in proxy/src/serverless/local_conn_pool.rs
+RUN wget https://github.com/neondatabase/pg_session_jwt/archive/refs/tags/v0.1.2-v17.tar.gz -O pg_session_jwt.tar.gz && \
+    echo "c8ecbed9cb8c6441bce5134a176002b043018adf9d05a08e457dda233090a86e pg_session_jwt.tar.gz" | sha256sum --check && \
     mkdir pg_session_jwt-src && cd pg_session_jwt-src && tar xzf ../pg_session_jwt.tar.gz --strip-components=1 -C . && \
-    sed -i 's/pgrx = "=0.11.3"/pgrx = { version = "=0.11.3", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
+    sed -i 's/pgrx = "0.12.6"/pgrx = { version = "=0.12.6", features = [ "unsafe-postgres" ] }/g' Cargo.toml && \
     cargo pgrx install --release
 
 #########################################################################################
@@ -1043,6 +1137,34 @@ RUN wget https://github.com/pgpartman/pg_partman/archive/refs/tags/v5.1.0.tar.gz
 
 #########################################################################################
 #
+# Layer "pg_mooncake"
+# compile pg_mooncake extension
+#
+#########################################################################################
+FROM rust-extensions-build AS pg-mooncake-build
+ARG PG_VERSION
+COPY --from=pg-build /usr/local/pgsql/ /usr/local/pgsql/
+
+# The topmost commit in the `neon` branch at the time of writing this
+# https://github.com/Mooncake-Labs/pg_mooncake/commits/neon/
+# https://github.com/Mooncake-Labs/pg_mooncake/commit/077c92c452bb6896a7b7776ee95f039984f076af
+ENV PG_MOONCAKE_VERSION=077c92c452bb6896a7b7776ee95f039984f076af
+ENV PATH="/usr/local/pgsql/bin/:$PATH"
+
+RUN case "${PG_VERSION}" in \
+        'v14') \
+            echo "pg_mooncake is not supported on Postgres ${PG_VERSION}" && exit 0;; \
+    esac && \
+    git clone --depth 1 --branch neon https://github.com/Mooncake-Labs/pg_mooncake.git pg_mooncake-src && \
+    cd pg_mooncake-src && \
+    git checkout "${PG_MOONCAKE_VERSION}" && \
+    git submodule update --init --depth 1 --recursive && \
+    make BUILD_TYPE=release -j $(getconf _NPROCESSORS_ONLN) && \
+    make BUILD_TYPE=release -j $(getconf _NPROCESSORS_ONLN) install && \
+    echo 'trusted = true' >> /usr/local/pgsql/share/extension/pg_mooncake.control
+
+#########################################################################################
+#
 # Layer "neon-pg-ext-build"
 # compile neon extensions
 #
@@ -1059,6 +1181,7 @@ ARG PG_VERSION
 # COPY --from=unit-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 # COPY --from=vector-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 # COPY --from=pgjwt-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+# COPY --from=pgrag-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 # COPY --from=pg-jsonschema-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 # COPY --from=pg-graphql-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 # COPY --from=pg-tiktoken-pg-build /usr/local/pgsql/ /usr/local/pgsql/
@@ -1084,6 +1207,7 @@ COPY --from=pg-uuidv7-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 # COPY --from=pg-anon-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 # COPY --from=pg-ivm-build /usr/local/pgsql/ /usr/local/pgsql/
 # COPY --from=pg-partman-build /usr/local/pgsql/ /usr/local/pgsql/
+# COPY --from=pg-mooncake-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY pgxn/ pgxn/
 
 RUN make -j $(getconf _NPROCESSORS_ONLN) \
@@ -1192,7 +1316,10 @@ RUN mold -run cargo build --locked --bin local_proxy
 #########################################################################################
 
 FROM quay.io/prometheuscommunity/postgres-exporter:v0.12.1 AS postgres-exporter
-FROM burningalchemist/sql_exporter:0.13 AS sql-exporter
+
+# Keep the version the same as in build-tools.Dockerfile and
+# test_runner/regress/test_compute_metrics.py.
+FROM burningalchemist/sql_exporter:0.13.1 AS sql-exporter
 
 #########################################################################################
 #
@@ -1248,6 +1375,7 @@ COPY --from=unit-pg-build /postgresql-unit.tar.gz /ext-src/
 COPY --from=vector-pg-build /pgvector.tar.gz /ext-src/
 COPY --from=vector-pg-build /pgvector.patch /ext-src/
 COPY --from=pgjwt-pg-build /pgjwt.tar.gz /ext-src
+#COPY --from=pgrag-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 #COPY --from=pg-jsonschema-pg-build /home/nonroot/pg_jsonschema.tar.gz /ext-src
 #COPY --from=pg-graphql-pg-build /home/nonroot/pg_graphql.tar.gz /ext-src
 #COPY --from=pg-tiktoken-pg-build /home/nonroot/pg_tiktoken.tar.gz /ext-src
@@ -1344,6 +1472,8 @@ RUN mkdir -p /etc/local_proxy && chown postgres:postgres /etc/local_proxy
 # Metrics exporter binaries and  configuration files
 COPY --from=postgres-exporter /bin/postgres_exporter /bin/postgres_exporter
 COPY --from=sql-exporter      /bin/sql_exporter      /bin/sql_exporter
+
+COPY --chown=postgres compute/etc/postgres_exporter.yml /etc/postgres_exporter.yml
 
 COPY --from=sql_exporter_preprocessor --chmod=0644 /home/nonroot/compute/etc/sql_exporter.yml               /etc/sql_exporter.yml
 COPY --from=sql_exporter_preprocessor --chmod=0644 /home/nonroot/compute/etc/neon_collector.yml             /etc/neon_collector.yml

@@ -118,6 +118,8 @@ pub(crate) async fn main() -> anyhow::Result<()> {
     let superuser = "cloud_admin"; // XXX: this shouldn't be hard-coded
     postgres_initdb::do_run_initdb(postgres_initdb::RunInitdbArgs {
         superuser,
+        locale: "en_US.UTF-8", // XXX: this shouldn't be hard-coded,
+        pg_version: 140000, // XXX: this shouldn't be hard-coded but derived from which compute image we're running in
         initdb_bin: pg_bin_dir.join("initdb").as_ref(),
         library_search_path: &pg_lib_dir, // TODO: is this right? Prob works in compute image, not sure about neon_local.
         pgdata: &pgdata_dir,

@@ -51,7 +51,7 @@
 //!
 
 use anyhow::{Context, Result};
-use pageserver::repository::Key;
+use pageserver_api::key::Key;
 use std::cmp::Ordering;
 use std::io::{self, BufRead};
 use std::path::PathBuf;

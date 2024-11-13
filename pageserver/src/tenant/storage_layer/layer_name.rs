@@ -1,14 +1,12 @@
 //!
 //! Helper functions for dealing with filenames of the image and delta layer files.
 //!
-use crate::repository::Key;
-use std::borrow::Cow;
+use pageserver_api::key::Key;
 use std::cmp::Ordering;
 use std::fmt;
 use std::ops::Range;
 use std::str::FromStr;
 
-use regex::Regex;
 use utils::lsn::Lsn;
 
 use super::PersistentLayerDesc;
@@ -60,32 +58,31 @@ impl Ord for DeltaLayerName {
 /// Represents the region of the LSN-Key space covered by a DeltaLayer
 ///
 /// ```text
-///    <key start>-<key end>__<LSN start>-<LSN end>
+///    <key start>-<key end>__<LSN start>-<LSN end>-<generation>
 /// ```
 impl DeltaLayerName {
     /// Parse the part of a delta layer's file name that represents the LayerName. Returns None
     /// if the filename does not match the expected pattern.
     pub fn parse_str(fname: &str) -> Option<Self> {
-        let mut parts = fname.split("__");
-        let mut key_parts = parts.next()?.split('-');
-        let mut lsn_parts = parts.next()?.split('-');
-
-        let key_start_str = key_parts.next()?;
-        let key_end_str = key_parts.next()?;
-        let lsn_start_str = lsn_parts.next()?;
-        let lsn_end_str = lsn_parts.next()?;
-
-        if parts.next().is_some() || key_parts.next().is_some() || key_parts.next().is_some() {
-            return None;
-        }
-
-        if key_start_str.len() != 36
-            || key_end_str.len() != 36
-            || lsn_start_str.len() != 16
-            || lsn_end_str.len() != 16
+        let (key_parts, lsn_generation_parts) = fname.split_once("__")?;
+        let (key_start_str, key_end_str) = key_parts.split_once('-')?;
+        let (lsn_start_str, lsn_end_generation_parts) = lsn_generation_parts.split_once('-')?;
+        let lsn_end_str = if let Some((lsn_end_str, maybe_generation)) =
+            lsn_end_generation_parts.split_once('-')
         {
-            return None;
-        }
+            if maybe_generation.starts_with("v") {
+                // vY-XXXXXXXX
+                lsn_end_str
+            } else if maybe_generation.len() == 8 {
+                // XXXXXXXX
+                lsn_end_str
+            } else {
+                // no idea what this is
+                return None;
+            }
+        } else {
+            lsn_end_generation_parts
+        };
 
         let key_start = Key::from_hex(key_start_str).ok()?;
         let key_end = Key::from_hex(key_end_str).ok()?;
@@ -173,25 +170,29 @@ impl ImageLayerName {
 /// Represents the part of the Key-LSN space covered by an ImageLayer
 ///
 /// ```text
-///    <key start>-<key end>__<LSN>
+///    <key start>-<key end>__<LSN>-<generation>
 /// ```
 impl ImageLayerName {
     /// Parse a string as then LayerName part of an image layer file name. Returns None if the
     /// filename does not match the expected pattern.
     pub fn parse_str(fname: &str) -> Option<Self> {
-        let mut parts = fname.split("__");
-        let mut key_parts = parts.next()?.split('-');
-
-        let key_start_str = key_parts.next()?;
-        let key_end_str = key_parts.next()?;
-        let lsn_str = parts.next()?;
-        if parts.next().is_some() || key_parts.next().is_some() {
-            return None;
-        }
-
-        if key_start_str.len() != 36 || key_end_str.len() != 36 || lsn_str.len() != 16 {
-            return None;
-        }
+        let (key_parts, lsn_generation_parts) = fname.split_once("__")?;
+        let (key_start_str, key_end_str) = key_parts.split_once('-')?;
+        let lsn_str =
+            if let Some((lsn_str, maybe_generation)) = lsn_generation_parts.split_once('-') {
+                if maybe_generation.starts_with("v") {
+                    // vY-XXXXXXXX
+                    lsn_str
+                } else if maybe_generation.len() == 8 {
+                    // XXXXXXXX
+                    lsn_str
+                } else {
+                    // likely a delta layer
+                    return None;
+                }
+            } else {
+                lsn_generation_parts
+            };
 
         let key_start = Key::from_hex(key_start_str).ok()?;
         let key_end = Key::from_hex(key_end_str).ok()?;
@@ -258,6 +259,14 @@ impl LayerName {
         }
     }
 
+    /// Gets the LSN range encoded in the layer name.
+    pub fn lsn_as_range(&self) -> Range<Lsn> {
+        match &self {
+            LayerName::Image(layer) => layer.lsn_as_range(),
+            LayerName::Delta(layer) => layer.lsn_range.clone(),
+        }
+    }
+
     pub fn is_delta(&self) -> bool {
         matches!(self, LayerName::Delta(_))
     }
@@ -290,18 +299,8 @@ impl FromStr for LayerName {
     /// Self. When loading a physical layer filename, we drop any extra information
     /// not needed to build Self.
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        let gen_suffix_regex = Regex::new("^(?<base>.+)(?<gen>-v1-[0-9a-f]{8})$").unwrap();
-        let file_name: Cow<str> = match gen_suffix_regex.captures(value) {
-            Some(captures) => captures
-                .name("base")
-                .expect("Non-optional group")
-                .as_str()
-                .into(),
-            None => value.into(),
-        };
-
-        let delta = DeltaLayerName::parse_str(&file_name);
-        let image = ImageLayerName::parse_str(&file_name);
+        let delta = DeltaLayerName::parse_str(value);
+        let image = ImageLayerName::parse_str(value);
         let ok = match (delta, image) {
             (None, None) => {
                 return Err(format!(
@@ -367,11 +366,14 @@ mod test {
             lsn: Lsn::from_hex("00000000014FED58").unwrap(),
         });
         let parsed = LayerName::from_str("000000000000000000000000000000000000-000000067F00000001000004DF0000000006__00000000014FED58-v1-00000001").unwrap();
-        assert_eq!(parsed, expected,);
+        assert_eq!(parsed, expected);
+
+        let parsed = LayerName::from_str("000000000000000000000000000000000000-000000067F00000001000004DF0000000006__00000000014FED58-00000001").unwrap();
+        assert_eq!(parsed, expected);
 
         // Omitting generation suffix is valid
         let parsed = LayerName::from_str("000000000000000000000000000000000000-000000067F00000001000004DF0000000006__00000000014FED58").unwrap();
-        assert_eq!(parsed, expected,);
+        assert_eq!(parsed, expected);
     }
 
     #[test]
@@ -383,6 +385,9 @@ mod test {
                 ..Lsn::from_hex("000000000154C481").unwrap(),
         });
         let parsed = LayerName::from_str("000000000000000000000000000000000000-000000067F00000001000004DF0000000006__00000000014FED58-000000000154C481-v1-00000001").unwrap();
+        assert_eq!(parsed, expected);
+
+        let parsed = LayerName::from_str("000000000000000000000000000000000000-000000067F00000001000004DF0000000006__00000000014FED58-000000000154C481-00000001").unwrap();
         assert_eq!(parsed, expected);
 
         // Omitting generation suffix is valid

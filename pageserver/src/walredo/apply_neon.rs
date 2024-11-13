@@ -1,8 +1,8 @@
-use crate::walrecord::NeonWalRecord;
 use anyhow::Context;
 use byteorder::{ByteOrder, LittleEndian};
 use bytes::BytesMut;
 use pageserver_api::key::Key;
+use pageserver_api::record::NeonWalRecord;
 use pageserver_api::reltag::SlruKind;
 use postgres_ffi::pg_constants;
 use postgres_ffi::relfile_utils::VISIBILITYMAP_FORKNUM;
@@ -67,7 +67,10 @@ pub(crate) fn apply_in_neon(
                 let map = &mut page[pg_constants::MAXALIGN_SIZE_OF_PAGE_HEADER_DATA..];
 
                 map[map_byte as usize] &= !(flags << map_offset);
-                postgres_ffi::page_set_lsn(page, lsn);
+                // The page should never be empty, but we're checking it anyway as a precaution, so that if it is empty for some reason anyway, we don't make matters worse by setting the LSN on it.
+                if !postgres_ffi::page_is_new(page) {
+                    postgres_ffi::page_set_lsn(page, lsn);
+                }
             }
 
             // Repeat for 'old_heap_blkno', if any
@@ -81,7 +84,10 @@ pub(crate) fn apply_in_neon(
                 let map = &mut page[pg_constants::MAXALIGN_SIZE_OF_PAGE_HEADER_DATA..];
 
                 map[map_byte as usize] &= !(flags << map_offset);
-                postgres_ffi::page_set_lsn(page, lsn);
+                // The page should never be empty, but we're checking it anyway as a precaution, so that if it is empty for some reason anyway, we don't make matters worse by setting the LSN on it.
+                if !postgres_ffi::page_is_new(page) {
+                    postgres_ffi::page_set_lsn(page, lsn);
+                }
             }
         }
         // Non-relational WAL records are handled here, with custom code that has the
@@ -238,7 +244,7 @@ pub(crate) fn apply_in_neon(
             // No-op: this record will never be created in aux v2.
             warn!("AuxFile record should not be created in aux v2");
         }
-        #[cfg(test)]
+        #[cfg(feature = "testing")]
         NeonWalRecord::Test {
             append,
             clear,
@@ -247,6 +253,10 @@ pub(crate) fn apply_in_neon(
             use bytes::BufMut;
             if *will_init {
                 assert!(*clear, "init record must be clear to ensure correctness");
+                assert!(
+                    page.is_empty(),
+                    "init record must be the first entry to ensure correctness"
+                );
             }
             if *clear {
                 page.clear();

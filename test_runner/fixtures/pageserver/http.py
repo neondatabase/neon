@@ -390,7 +390,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
     def tenant_location_conf(
         self,
         tenant_id: Union[TenantId, TenantShardId],
-        location_conf=dict[str, Any],
+        location_conf: dict[str, Any],
         flush_ms=None,
         lazy: Optional[bool] = None,
     ):
@@ -478,6 +478,12 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         return res.json()
 
     def set_tenant_config(self, tenant_id: Union[TenantId, TenantShardId], config: dict[str, Any]):
+        """
+        Only use this via storage_controller.pageserver_api().
+
+        Storcon is the authority on tenant config - changes you make directly
+        against pageserver may be reconciled away at any time.
+        """
         assert "tenant_id" not in config.keys()
         res = self.put(
             f"http://localhost:{self.port}/v1/tenant/config",
@@ -491,6 +497,11 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
         inserts: Optional[dict[str, Any]] = None,
         removes: Optional[list[str]] = None,
     ):
+        """
+        Only use this via storage_controller.pageserver_api().
+
+        See `set_tenant_config` for more information.
+        """
         current = self.tenant_config(tenant_id).tenant_specific_overrides
         if inserts is not None:
             current.update(inserts)
