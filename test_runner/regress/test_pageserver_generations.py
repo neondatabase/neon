@@ -34,12 +34,11 @@ from fixtures.pageserver.utils import (
     wait_for_last_record_lsn,
     wait_for_upload,
 )
-from fixtures.pg_version import run_only_on_default_postgres
 from fixtures.remote_storage import (
     LocalFsStorage,
     RemoteStorageKind,
 )
-from fixtures.utils import wait_until
+from fixtures.utils import run_only_on_default_postgres, wait_until
 from fixtures.workload import Workload
 
 if TYPE_CHECKING:
