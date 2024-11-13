@@ -413,7 +413,12 @@ impl DeleteTimelineFlow {
             "timeline_delete",
             async move {
                 if let Err(err) = Self::background(guard, conf, &tenant, &timeline, remote_client).await {
-                    error!("Error: {err:#}");
+                    // Only log as an error if it's not a cancellation.
+                    if matches!(err, DeleteTimelineError::Cancelled) {
+                        info!("Shutdown during timeline deletion");
+                    }else {
+                        error!("Error: {err:#}");
+                    }
                     if let TimelineOrOffloaded::Timeline(timeline) = timeline {
                         timeline.set_broken(format!("{err:#}"))
                     }
