@@ -214,7 +214,7 @@ impl PostgresRedoManager {
     /// This method is cancellation-safe.
     pub async fn ping(&self, pg_version: u32) -> Result<(), Error> {
         self.do_with_walredo_process(pg_version, |proc| async move {
-            proc.ping(Duration::from_secs(1))
+            proc.ping(Duration::from_secs(10000))
                 .await
                 .map_err(Error::Other)
         })

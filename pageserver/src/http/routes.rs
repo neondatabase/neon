@@ -6,6 +6,7 @@ use std::collections::BinaryHeap;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
@@ -17,6 +18,7 @@ use hyper::header;
 use hyper::StatusCode;
 use hyper::{Body, Request, Response, Uri};
 use metrics::launch_timestamp::LaunchTimestamp;
+use once_cell::sync::Lazy;
 use pageserver_api::models::virtual_file::IoMode;
 use pageserver_api::models::DownloadRemoteLayersTaskSpawnRequest;
 use pageserver_api::models::IngestAuxFilesRequest;
@@ -88,6 +90,7 @@ use crate::tenant::timeline::Timeline;
 use crate::tenant::GetTimelineError;
 use crate::tenant::OffloadedTimeline;
 use crate::tenant::{LogicalSizeCalculationCause, PageReconstructError};
+use crate::walredo::PostgresRedoManager;
 use crate::DEFAULT_PG_VERSION;
 use crate::{disk_usage_eviction_task, tenant};
 use pageserver_api::models::{
@@ -2971,6 +2974,24 @@ async fn put_tenant_timeline_import_wal(
     }.instrument(span).await
 }
 
+async fn put_launch_walredo(
+    request: Request<Body>,
+    _cancel: CancellationToken,
+) -> Result<Response<Body>, ApiError> {
+    let state = get_state(&request);
+
+    let tenant_shard_id = TenantShardId::unsharded(TenantId::generate());
+    async {
+        let mgr = Box::new(PostgresRedoManager::new(state.conf, tenant_shard_id));
+        mgr.ping(DEFAULT_PG_VERSION).await.unwrap();
+        Box::leak(mgr);
+    }
+    .instrument(info_span!("launch_walredo", tenant_id=%tenant_shard_id.tenant_id, shard_id=%tenant_shard_id.shard_slug()))
+    .await;
+
+    json_response(StatusCode::OK, ())
+}
+
 /// Read the end of a tar archive.
 ///
 /// A tar archive normally ends with two consecutive blocks of zeros, 512 bytes each.
@@ -3342,6 +3363,10 @@ pub fn make_router(
         .put(
             "/v1/tenant/:tenant_id/timeline/:timeline_id/import_wal",
             |r| api_handler(r, put_tenant_timeline_import_wal),
+        )
+        .put(
+            "/launch_walredo",
+            |r| api_handler(r, put_launch_walredo)
         )
         .any(handler_404))
 }
