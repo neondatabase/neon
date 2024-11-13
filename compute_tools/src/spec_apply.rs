@@ -371,9 +371,9 @@ pub fn get_operations<'a>(
                 .filter_map(|db| {
                     if let Some(edb) = databases.get_mut(&db.name) {
                         let change_owner = if edb.owner.starts_with('"') {
-                            db.owner.pg_quote() == edb.owner
+                            db.owner.pg_quote() != edb.owner
                         } else {
-                            db.owner == edb.owner
+                            db.owner != edb.owner
                         };
 
                         edb.owner = db.owner.clone();
