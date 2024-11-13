@@ -2416,6 +2416,7 @@ impl Timeline {
         *guard = Some(WalReceiver::start(
             Arc::clone(self),
             WalReceiverConf {
+                protocol: self.conf.wal_receiver_protocol,
                 wal_connect_timeout,
                 lagging_wal_timeout,
                 max_lsn_wal_lag,

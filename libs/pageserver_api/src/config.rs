@@ -18,7 +18,7 @@ use std::{
     str::FromStr,
     time::Duration,
 };
-use utils::logging::LogFormat;
+use utils::{logging::LogFormat, postgres_client::PostgresClientProtocol};
 
 use crate::models::ImageCompressionAlgorithm;
 use crate::models::LsnLease;
@@ -109,6 +109,7 @@ pub struct ConfigToml {
     pub virtual_file_io_mode: Option<crate::models::virtual_file::IoMode>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub no_sync: Option<bool>,
+    pub wal_receiver_protocol: PostgresClientProtocol,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -317,6 +318,9 @@ pub mod defaults {
     pub const DEFAULT_EPHEMERAL_BYTES_PER_MEMORY_KB: usize = 0;
 
     pub const DEFAULT_IO_BUFFER_ALIGNMENT: usize = 512;
+
+    pub const DEFAULT_WAL_RECEIVER_PROTOCOL: utils::postgres_client::PostgresClientProtocol =
+        utils::postgres_client::PostgresClientProtocol::Vanilla;
 }
 
 impl Default for ConfigToml {
@@ -399,6 +403,7 @@ impl Default for ConfigToml {
             virtual_file_io_mode: None,
             tenant_config: TenantConfigToml::default(),
             no_sync: None,
+            wal_receiver_protocol: DEFAULT_WAL_RECEIVER_PROTOCOL,
         }
     }
 }

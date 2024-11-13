@@ -14,6 +14,7 @@ use remote_storage::{RemotePath, RemoteStorageConfig};
 use std::env;
 use storage_broker::Uri;
 use utils::logging::SecretString;
+use utils::postgres_client::PostgresClientProtocol;
 
 use once_cell::sync::OnceCell;
 use reqwest::Url;
@@ -182,6 +183,8 @@ pub struct PageServerConf {
 
     /// Optionally disable disk syncs (unsafe!)
     pub no_sync: bool,
+
+    pub wal_receiver_protocol: PostgresClientProtocol,
 }
 
 /// Token for authentication to safekeepers
@@ -338,6 +341,7 @@ impl PageServerConf {
             virtual_file_io_engine,
             tenant_config,
             no_sync,
+            wal_receiver_protocol,
         } = config_toml;
 
         let mut conf = PageServerConf {
@@ -377,6 +381,7 @@ impl PageServerConf {
             image_compression,
             timeline_offloading,
             ephemeral_bytes_per_memory_kb,
+            wal_receiver_protocol,
 
             // ------------------------------------------------------------
             // fields that require additional validation or custom handling

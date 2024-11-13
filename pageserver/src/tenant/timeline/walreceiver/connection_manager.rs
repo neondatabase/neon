@@ -987,12 +987,26 @@ impl ConnectionManagerState {
                     return None; // no connection string, ignore sk
                 }
 
+                let (shard_number, shard_count, shard_stripe_size) = match self.conf.protocol {
+                    PostgresClientProtocol::Vanilla => {
+                        (None, None, None)
+                    },
+                    PostgresClientProtocol::Interpreted => {
+                        let shard_identity = self.timeline.get_shard_identity();
+                        (
+                            Some(shard_identity.number.0),
+                            Some(shard_identity.count.0),
+                            Some(shard_identity.stripe_size.0),
+                        )
+                    }
+                };
+
                 let connection_conf_args = ConnectionConfigArgs {
-                    protocol: PostgresClientProtocol::Vanilla,
+                    protocol: self.conf.protocol,
                     ttid: self.id,
-                    shard_number: None,
-                    shard_count: None,
-                    shard_stripe_size: None,
+                    shard_number,
+                    shard_count,
+                    shard_stripe_size,
                     listen_pg_addr_str: info.safekeeper_connstr.as_ref(),
                     auth_token: self.conf.auth_token.as_ref().map(|t| t.as_str()),
                     availability_zone: self.conf.availability_zone.as_deref()
@@ -1102,6 +1116,7 @@ impl ReconnectReason {
 mod tests {
     use super::*;
     use crate::tenant::harness::{TenantHarness, TIMELINE_ID};
+    use pageserver_api::config::defaults::DEFAULT_WAL_RECEIVER_PROTOCOL;
     use url::Host;
 
     fn dummy_broker_sk_timeline(
@@ -1538,6 +1553,7 @@ mod tests {
             timeline,
             cancel: CancellationToken::new(),
             conf: WalReceiverConf {
+                protocol: DEFAULT_WAL_RECEIVER_PROTOCOL,
                 wal_connect_timeout: Duration::from_secs(1),
                 lagging_wal_timeout: Duration::from_secs(1),
                 max_lsn_wal_lag: NonZeroU64::new(1024 * 1024).unwrap(),
