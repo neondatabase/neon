@@ -154,13 +154,17 @@ fn main() -> anyhow::Result<()> {
             },
         };
 
-        let started = Instant::now();
-        syncfs(dirfd)?;
-        let elapsed = started.elapsed();
-        info!(
-            elapsed_ms = elapsed.as_millis(),
-            "made tenant directory contents durable"
-        );
+        if conf.no_sync {
+            info!("Skipping syncfs on startup");
+        } else {
+            let started = Instant::now();
+            syncfs(dirfd)?;
+            let elapsed = started.elapsed();
+            info!(
+                elapsed_ms = elapsed.as_millis(),
+                "made tenant directory contents durable"
+            );
+        }
     }
 
     // Initialize up failpoints support

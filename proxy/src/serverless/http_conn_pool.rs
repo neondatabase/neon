@@ -7,7 +7,6 @@ use hyper::client::conn::http2;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use parking_lot::RwLock;
 use rand::Rng;
-use std::result::Result::Ok;
 use tokio::net::TcpStream;
 use tracing::{debug, error, info, info_span, Instrument};
 
