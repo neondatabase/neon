@@ -80,7 +80,7 @@ impl ConnectionWithCredentialsProvider {
         redis::cmd("PING").query_async(con).await
     }
 
-    pub(crate) async fn connect(&mut self) -> anyhow::Result<()> {
+    pub async fn connect(&mut self) -> anyhow::Result<()> {
         let _guard = self.mutex.lock().await;
         if let Some(con) = self.con.as_mut() {
             match Self::ping(con).await {
