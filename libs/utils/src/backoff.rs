@@ -39,8 +39,9 @@ pub fn exponential_backoff_duration_seconds(n: u32, base_increment: f64, max_sec
     } else if base_increment == 0.0 {
         1.0
     } else {
-        (1.0 + base_increment).powf(f64::from(n)).min(max_seconds)
-            + rand::thread_rng().gen_range(0.0..base_increment)
+        ((1.0 + base_increment).powf(f64::from(n))
+            + rand::thread_rng().gen_range(0.0..base_increment))
+        .min(max_seconds)
     }
 }
 
@@ -162,7 +163,8 @@ mod tests {
 
             if let Some(old_backoff_value) = current_backoff_value.replace(new_backoff_value) {
                 assert!(
-                    old_backoff_value <= new_backoff_value,
+                    // accommodate the randomness of the backoff
+                    old_backoff_value - DEFAULT_BASE_BACKOFF_SECONDS <= new_backoff_value,
                     "{i}th backoff value {new_backoff_value} is smaller than the previous one {old_backoff_value}"
                 )
             }
