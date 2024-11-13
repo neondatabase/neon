@@ -6,6 +6,10 @@ use tokio_util::sync::CancellationToken;
 pub const DEFAULT_BASE_BACKOFF_SECONDS: f64 = 0.1;
 pub const DEFAULT_MAX_BACKOFF_SECONDS: f64 = 3.0;
 
+pub const DEFAULT_NETWORK_BASE_BACKOFF_SECONDS: f64 = 1.5;
+pub const DEFAULT_NETWORK_MAX_BACKOFF_SECONDS: f64 = 60.0;
+
+
 pub async fn exponential_backoff(
     n: u32,
     base_increment: f64,
@@ -37,6 +41,31 @@ pub fn exponential_backoff_duration_seconds(n: u32, base_increment: f64, max_sec
     }
 }
 
+pub async fn retry<T, O, F, E>(
+    op: O,
+    is_permanent: impl Fn(&E) -> bool,
+    warn_threshold: u32,
+    max_retries: u32,
+    description: &str,
+    cancel: &CancellationToken,
+) -> Option<Result<T, E>>
+where
+    E: Display + Debug + 'static,
+    O: FnMut() -> F,
+    F: Future<Output = Result<T, E>>,
+{
+    retry_with_options(
+        op,
+        is_permanent,
+        warn_threshold,
+        max_retries,
+        description,
+        cancel,
+        DEFAULT_BASE_BACKOFF_SECONDS,
+        DEFAULT_MAX_BACKOFF_SECONDS,
+    ).await
+}
+
 /// Retries passed operation until one of the following conditions are met:
 /// - encountered error is considered as permanent (non-retryable)
 /// - retries have been exhausted
@@ -51,13 +80,15 @@ pub fn exponential_backoff_duration_seconds(n: u32, base_increment: f64, max_sec
 /// for any other error type. Final failed attempt is logged with `{:?}`.
 ///
 /// Returns `None` if cancellation was noticed during backoff or the terminal result.
-pub async fn retry<T, O, F, E>(
+pub async fn retry_with_options<T, O, F, E>(
     mut op: O,
     is_permanent: impl Fn(&E) -> bool,
     warn_threshold: u32,
     max_retries: u32,
     description: &str,
     cancel: &CancellationToken,
+    base_increment: f64,
+    max_seconds: f64,
 ) -> Option<Result<T, E>>
 where
     // Not std::error::Error because anyhow::Error doesnt implement it.
@@ -104,8 +135,8 @@ where
         // sleep and retry
         exponential_backoff(
             attempts,
-            DEFAULT_BASE_BACKOFF_SECONDS,
-            DEFAULT_MAX_BACKOFF_SECONDS,
+            base_increment,
+            max_seconds,
             cancel,
         )
         .await;

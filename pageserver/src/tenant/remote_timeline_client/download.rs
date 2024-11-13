@@ -693,13 +693,15 @@ where
     O: FnMut() -> F,
     F: Future<Output = Result<T, DownloadError>>,
 {
-    backoff::retry(
+    backoff::retry_with_options(
         op,
         DownloadError::is_permanent,
         FAILED_DOWNLOAD_WARN_THRESHOLD,
         FAILED_REMOTE_OP_RETRIES,
         description,
         cancel,
+        backoff::DEFAULT_NETWORK_BASE_BACKOFF_SECONDS,
+        backoff::DEFAULT_NETWORK_MAX_BACKOFF_SECONDS,
     )
     .await
     .ok_or_else(|| DownloadError::Cancelled)
@@ -715,13 +717,15 @@ where
     O: FnMut() -> F,
     F: Future<Output = Result<T, DownloadError>>,
 {
-    backoff::retry(
+    backoff::retry_with_options(
         op,
         DownloadError::is_permanent,
         FAILED_DOWNLOAD_WARN_THRESHOLD,
         u32::MAX,
         description,
         cancel,
+        backoff::DEFAULT_NETWORK_BASE_BACKOFF_SECONDS,
+        backoff::DEFAULT_NETWORK_MAX_BACKOFF_SECONDS,
     )
     .await
     .ok_or_else(|| DownloadError::Cancelled)

@@ -3,6 +3,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use pageserver_api::keyspace::KeySpace;
 use pageserver_api::models::HistoricLayerInfo;
 use pageserver_api::shard::{ShardIdentity, ShardIndex, TenantShardId};
+use utils::backoff;
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
@@ -1204,8 +1205,8 @@ impl LayerInner {
 
                 let backoff = utils::backoff::exponential_backoff_duration_seconds(
                     consecutive_failures.min(u32::MAX as usize) as u32,
-                    1.5,
-                    60.0,
+                    backoff::DEFAULT_NETWORK_BASE_BACKOFF_SECONDS,
+                    backoff::DEFAULT_NETWORK_MAX_BACKOFF_SECONDS,
                 );
 
                 let backoff = std::time::Duration::from_secs_f64(backoff);
