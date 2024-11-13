@@ -1,6 +1,7 @@
 use std::fmt::{Debug, Display};
 
 use futures::Future;
+use rand::Rng;
 use tokio_util::sync::CancellationToken;
 
 pub const DEFAULT_BASE_BACKOFF_SECONDS: f64 = 0.1;
@@ -8,7 +9,6 @@ pub const DEFAULT_MAX_BACKOFF_SECONDS: f64 = 3.0;
 
 pub const DEFAULT_NETWORK_BASE_BACKOFF_SECONDS: f64 = 1.5;
 pub const DEFAULT_NETWORK_MAX_BACKOFF_SECONDS: f64 = 60.0;
-
 
 pub async fn exponential_backoff(
     n: u32,
@@ -36,8 +36,11 @@ pub async fn exponential_backoff(
 pub fn exponential_backoff_duration_seconds(n: u32, base_increment: f64, max_seconds: f64) -> f64 {
     if n == 0 {
         0.0
+    } else if base_increment == 0.0 {
+        1.0
     } else {
         (1.0 + base_increment).powf(f64::from(n)).min(max_seconds)
+            + rand::thread_rng().gen_range(0.0..base_increment)
     }
 }
 
@@ -63,7 +66,8 @@ where
         cancel,
         DEFAULT_BASE_BACKOFF_SECONDS,
         DEFAULT_MAX_BACKOFF_SECONDS,
-    ).await
+    )
+    .await
 }
 
 /// Retries passed operation until one of the following conditions are met:
@@ -133,13 +137,7 @@ where
             }
         }
         // sleep and retry
-        exponential_backoff(
-            attempts,
-            base_increment,
-            max_seconds,
-            cancel,
-        )
-        .await;
+        exponential_backoff(attempts, base_increment, max_seconds, cancel).await;
         attempts += 1;
     }
 }
