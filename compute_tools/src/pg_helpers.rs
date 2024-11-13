@@ -13,7 +13,6 @@ use anyhow::{bail, Result};
 use futures::StreamExt;
 use ini::Ini;
 use notify::{RecursiveMode, Watcher};
-use postgres::{Client, Transaction};
 use tokio::io::AsyncBufReadExt;
 use tokio::time::timeout;
 use tokio_postgres::NoTls;
