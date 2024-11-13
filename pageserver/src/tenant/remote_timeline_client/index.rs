@@ -40,7 +40,7 @@ pub struct IndexPart {
 
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub import_pgdata: Option<import_pgdata::flow::index_part_format::Root>,
+    pub import_pgdata: Option<import_pgdata::index_part_format::Root>,
 
     /// Per layer file name metadata, which can be present for a present or missing layer file.
     ///
@@ -921,10 +921,10 @@ mod tests {
             }),
             last_aux_file_policy: Default::default(),
             archived_at: None,
-            import_pgdata: Some(import_pgdata::flow::index_part_format::Root::V1(import_pgdata::flow::index_part_format::V1::Done(import_pgdata::flow::index_part_format::Done{
+            import_pgdata: Some(import_pgdata::index_part_format::Root::V1(import_pgdata::index_part_format::V1::Done(import_pgdata::index_part_format::Done{
                 started_at: parse_naive_datetime("2024-11-13T09:23:42.123000000"),
                 finished_at: parse_naive_datetime("2024-11-13T09:42:23.123000000"),
-                idempotency_key: import_pgdata::flow::index_part_format::IdempotencyKey::new("specified-by-client-218a5213-5044-4562-a28d-d024c5f057f5".to_string()),
+                idempotency_key: import_pgdata::index_part_format::IdempotencyKey::new("specified-by-client-218a5213-5044-4562-a28d-d024c5f057f5".to_string()),
             })))
         };
 

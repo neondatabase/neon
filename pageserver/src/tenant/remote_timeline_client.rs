@@ -737,7 +737,7 @@ impl RemoteTimelineClient {
     /// Launch an index-file upload operation in the background, setting `import_pgdata` field.
     pub(crate) fn schedule_index_upload_for_import_pgdata_state_update(
         self: &Arc<Self>,
-        state: Option<import_pgdata::flow::index_part_format::Root>,
+        state: Option<import_pgdata::index_part_format::Root>,
     ) -> anyhow::Result<()> {
         let mut guard = self.upload_queue.lock().unwrap();
         let upload_queue = guard.initialized_mut()?;

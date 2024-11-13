@@ -822,8 +822,8 @@ pub(crate) struct CreateTimelineParamsBranch {
 #[derive(Debug)]
 pub(crate) struct CreateTimelineParamsImportPgdata {
     pub(crate) new_timeline_id: TimelineId,
-    pub(crate) location: import_pgdata::flow::index_part_format::Location,
-    pub(crate) idempotency_key: import_pgdata::flow::index_part_format::IdempotencyKey,
+    pub(crate) location: import_pgdata::index_part_format::Location,
+    pub(crate) idempotency_key: import_pgdata::index_part_format::IdempotencyKey,
 }
 
 /// What is used to determine idempotency of a [`Tenant::create_timeline`] call in  [`Tenant::start_creating_timeline`] in  [`Tenant::start_creating_timeline`].
@@ -861,7 +861,7 @@ pub(crate) enum CreateTimelineIdempotency {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CreatingTimelineIdempotencyImportPgdata {
-    idempotency_key: import_pgdata::flow::index_part_format::IdempotencyKey,
+    idempotency_key: import_pgdata::index_part_format::IdempotencyKey,
 }
 
 /// What is returned by [`Tenant::start_creating_timeline`].
@@ -874,7 +874,7 @@ enum StartCreatingTimelineResult {
 #[must_use]
 struct TimelineInitAndSyncNeedsSpawnImportPgdata {
     timeline: Arc<Timeline>,
-    import_pgdata: import_pgdata::flow::index_part_format::Root,
+    import_pgdata: import_pgdata::index_part_format::Root,
     guard: TimelineCreateGuard,
 }
 
@@ -2602,13 +2602,13 @@ impl Tenant {
         }
         .await?;
 
-        let in_progress = import_pgdata::flow::index_part_format::InProgress {
+        let in_progress = import_pgdata::index_part_format::InProgress {
             idempotency_key,
             location,
             started_at,
         };
-        let index_part = import_pgdata::flow::index_part_format::Root::V1(
-            import_pgdata::flow::index_part_format::V1::InProgress(in_progress),
+        let index_part = import_pgdata::index_part_format::Root::V1(
+            import_pgdata::index_part_format::V1::InProgress(in_progress),
         );
         uninit_timeline
             .raw_timeline()
@@ -2635,7 +2635,7 @@ impl Tenant {
     async fn create_timeline_import_pgdata_task(
         self: Arc<Tenant>,
         timeline: Arc<Timeline>,
-        index_part: import_pgdata::flow::index_part_format::Root,
+        index_part: import_pgdata::index_part_format::Root,
         activate: ActivateTimelineArgs,
         timeline_create_guard: TimelineCreateGuard,
     ) {
@@ -2661,7 +2661,7 @@ impl Tenant {
     async fn create_timeline_import_pgdata_task_impl(
         self: Arc<Tenant>,
         timeline: Arc<Timeline>,
-        index_part: import_pgdata::flow::index_part_format::Root,
+        index_part: import_pgdata::index_part_format::Root,
         activate: ActivateTimelineArgs,
         timeline_create_guard: TimelineCreateGuard,
     ) -> Result<(), anyhow::Error> {

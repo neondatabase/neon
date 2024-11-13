@@ -9,14 +9,13 @@
 //! - version-specific CheckPointData (=> pgv abstraction, already exists for regular walingest)
 //! - Tenant::cancel nor Timeline::cancel are respected => shutdown not guaranteed
 
-pub(crate) mod flow;
+pub(crate) mod index_part_format;
 
 use std::{ops::Bound, sync::Arc};
 
 use anyhow::{bail, ensure, Context};
 use bytes::Bytes;
 
-use flow::index_part_format::{self, InProgress, Location};
 use itertools::Itertools;
 use once_cell::sync::Lazy;
 use pageserver_api::{
@@ -80,10 +79,10 @@ async fn make_storage_wrapper(
     let timeout = std::time::Duration::from_secs(24 * 60 * 60);
     let location_storage = match location {
         #[cfg(feature = "testing")]
-        Location::LocalFs { path } => {
+        index_part_format::Location::LocalFs { path } => {
             GenericRemoteStorage::LocalFs(remote_storage::LocalFs::new(path.clone(), timeout)?)
         }
-        Location::AwsS3 {
+        index_part_format::Location::AwsS3 {
             region,
             bucket,
             key,
@@ -168,7 +167,7 @@ pub async fn doit(
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     let index_part_format::Root::V1(v1) = index_part;
-    let InProgress {
+    let index_part_format::InProgress {
         location,
         idempotency_key,
         started_at,

@@ -582,13 +582,13 @@ async fn timeline_create_handler(
                 },
         } => tenant::CreateTimelineParams::ImportPgdata(tenant::CreateTimelineParamsImportPgdata {
             idempotency_key:
-                tenant::timeline::import_pgdata::flow::index_part_format::IdempotencyKey::new(
+                tenant::timeline::import_pgdata::index_part_format::IdempotencyKey::new(
                     idempotency_key.0,
                 ),
             new_timeline_id,
             location: {
                 use pageserver_api::models::ImportPgdataLocation;
-                use tenant::timeline::import_pgdata::flow::index_part_format::Location;
+                use tenant::timeline::import_pgdata::index_part_format::Location;
                 match location {
                     #[cfg(feature = "testing")]
                     ImportPgdataLocation::LocalFs { path } => Location::LocalFs { path },
