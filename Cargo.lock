@@ -5192,6 +5192,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "utils",
+ "wal_decoder",
  "walproposer",
  "workspace_hack",
 ]

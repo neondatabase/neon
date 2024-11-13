@@ -558,6 +558,13 @@ impl EndWatch {
     }
 }
 
+pub(crate) struct EndWatchView(EndWatch);
+
+impl EndWatchView {
+    pub(crate) fn get(&self) -> Lsn {
+        self.0.get()
+    }
+}
 /// A half driving sending WAL.
 struct WalSender<'a, IO> {
     pgb: &'a mut PostgresBackend<IO>,

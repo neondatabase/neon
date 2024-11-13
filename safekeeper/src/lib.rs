@@ -29,6 +29,7 @@ pub mod receive_wal;
 pub mod recovery;
 pub mod remove_wal;
 pub mod safekeeper;
+pub mod send_interpreted_wal;
 pub mod send_wal;
 pub mod state;
 pub mod timeline;

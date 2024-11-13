@@ -24,6 +24,12 @@ pub(crate) struct WalReaderStreamBuilder {
     pub(crate) wal_sender_guard: Arc<WalSenderGuard>,
 }
 
+impl WalReaderStreamBuilder {
+    pub(crate) fn start_pos(&self) -> Lsn {
+        self.start_pos
+    }
+}
+
 pub(crate) struct WalBytes {
     /// Raw PG WAL
     pub(crate) wal: Bytes,
