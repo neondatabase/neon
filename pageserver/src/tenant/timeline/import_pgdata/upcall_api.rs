@@ -7,7 +7,7 @@ use tracing::error;
 use crate::config::PageServerConf;
 use reqwest::Method;
 
-use super::s3_state::Spec;
+use super::importbucket_format::Spec;
 
 pub struct Client {
     base_url: String,

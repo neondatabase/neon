@@ -1,48 +1,54 @@
-//! Import a PGDATA directory into a root timeline.
+//! Import a PGDATA directory into an empty root timeline.
 //!
-//! TODO:
+//! This module is adapted hackathon code by Heikki and Stas.
+//! Other code in the parent module was written by Christian as part of a customer PoC.
+//!
+//! The hackathon code was producing image layer files as a free-standing program.
+//!
+//! It has been modified to
+//! - run inside a running Pageserver, within the proper lifecycles of Timeline -> Tenant(Shard)
+//! - => sharding-awareness: produce image layers with only the data relevant for this shard
+//! - => S3 as the source for the PGDATA instead of local filesystem
+//!
+//! TODOs before productionization:
 //! - asserts / unwraps need to be replaced with errors
-//! - prevent OOMs
-//!     - limit all in-memory buffers / download to disk and read from there
-//!     - limit task concurrency
-//! - for all other files, either download to disk or enforce size limit
+//! - don't trust remote objects will be small (=prevent OOMs in those cases)
+//!     - limit all in-memory buffers in size, or download to disk and read from there
+//! - limit task concurrency
+//! - generally play nice with other tenants in the system
+//!   - importbucket is different bucket than main pageserver storage, so, should be fine wrt S3 rate limits
+//!   - but concerns like network bandwidth, local disk write bandwidth, local disk capacity, etc
+//! - integrate with layer eviction system
+//! - audit for Tenant::cancel nor Timeline::cancel responsivity
+//! - audit for Tenant/Timeline gate holding (we spawn tokio tasks during this flow!)
+//!
+//! An incomplete set of TODOs from the Hackathon:
 //! - version-specific CheckPointData (=> pgv abstraction, already exists for regular walingest)
-//! - Tenant::cancel nor Timeline::cancel are respected => shutdown not guaranteed
 
-pub(crate) mod index_part_format;
+use std::sync::Arc;
 
-use std::{ops::Bound, sync::Arc};
-
-use anyhow::{bail, ensure, Context};
+use anyhow::{bail, ensure};
 use bytes::Bytes;
 
 use itertools::Itertools;
-use once_cell::sync::Lazy;
 use pageserver_api::{
     key::{rel_block_to_key, rel_dir_to_key, rel_size_to_key, relmap_file_key, DBDIR_KEY},
     reltag::RelTag,
     shard::ShardIdentity,
 };
-use postgres_ffi::{pg_constants, relfile_utils::parse_relfilename, ControlFileData, BLCKSZ};
-use serde::de::DeserializeOwned;
+use postgres_ffi::{pg_constants, relfile_utils::parse_relfilename, BLCKSZ};
 use tokio::task::JoinSet;
-use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, info_span, instrument, Instrument};
+use tracing::{debug, info_span, instrument, Instrument};
 
-use crate::{
-    assert_u64_eq_usize::U64IsUsize,
-    config::PageServerConf,
-    context::{DownloadBehavior, RequestContext},
-    pgdatadir_mapping::{DbDirectory, RelDirectory},
-    task_mgr::TaskKind,
-    tenant::{
-        metadata::TimelineMetadata,
-        storage_layer::{ImageLayerWriter, Layer},
-    },
-};
 use crate::{
     assert_u64_eq_usize::UsizeIsU64,
     pgdatadir_mapping::{SlruSegmentDirectory, TwoPhaseDirectory},
+};
+use crate::{
+    context::{DownloadBehavior, RequestContext},
+    pgdatadir_mapping::{DbDirectory, RelDirectory},
+    task_mgr::TaskKind,
+    tenant::storage_layer::{ImageLayerWriter, Layer},
 };
 
 use pageserver_api::key::Key;
@@ -59,329 +65,48 @@ use utils::lsn::Lsn;
 use std::collections::HashSet;
 use std::ops::Range;
 
-use super::Timeline;
-
-use remote_storage::{
-    Download, DownloadError, DownloadOpts, GenericRemoteStorage, Listing, ListingObject, RemotePath,
+use super::{
+    importbucket_client::{ControlFile, RemoteStorageWrapper},
+    Timeline,
 };
 
-static PGDATA_DIR: Lazy<RemotePath> = Lazy::new(|| RemotePath::from_string("pgdata").unwrap());
+use remote_storage::RemotePath;
 
-async fn make_storage_wrapper(
-    conf: &'static PageServerConf,
-    location: &index_part_format::Location,
-    cancel: CancellationToken,
-) -> Result<RemoteStorageWrapper, anyhow::Error> {
-    // FIXME: we probably want some timeout, and we might be able to assume the max file
-    // size on S3 is 1GiB (postgres segment size). But the problem is that the individual
-    // downloaders don't know enough about concurrent downloads to make a guess on the
-    // expected bandwidth and resulting best timeout.
-    let timeout = std::time::Duration::from_secs(24 * 60 * 60);
-    let location_storage = match location {
-        #[cfg(feature = "testing")]
-        index_part_format::Location::LocalFs { path } => {
-            GenericRemoteStorage::LocalFs(remote_storage::LocalFs::new(path.clone(), timeout)?)
-        }
-        index_part_format::Location::AwsS3 {
-            region,
-            bucket,
-            key,
-        } => {
-            // TODO: think about security implications of letting the client specify the bucket & prefix.
-            // It's the most flexible right now, but, possibly we want to move bucket name into PS conf
-            // and force the timeline_id into the prefix?
-            GenericRemoteStorage::AwsS3(Arc::new(
-                remote_storage::S3Bucket::new(
-                    &remote_storage::S3Config {
-                        bucket_name: bucket.clone(),
-                        prefix_in_bucket: Some(key.clone()),
-                        bucket_region: region.clone(),
-                        endpoint: conf
-                            .import_pgdata_aws_endpoint_url
-                            .clone()
-                            .map(|url| url.to_string()), //  by specifying None here, remote_storage/aws-sdk-rust will infer from env
-                        concurrency_limit: 100.try_into().unwrap(), // TODO: think about this
-                        max_keys_per_list_response: Some(1000),     // TODO: think about this
-                        upload_storage_class: None,                 // irrelevant
-                    },
-                    timeout,
-                )
-                .await
-                .context("setup s3 bucket")?,
-            ))
-        }
-    };
-    let storage_wrapper = RemoteStorageWrapper::new(location_storage, cancel);
-    Ok(storage_wrapper)
-}
-
-pub struct ControlFile {
-    control_file_data: ControlFileData,
-    control_file_buf: Bytes,
-}
-async fn get_control_file(
-    pgdata_dir: &RemotePath,
-    storage_wrapper: &RemoteStorageWrapper,
-) -> Result<ControlFile, anyhow::Error> {
-    let control_file_path = pgdata_dir.join("global/pg_control");
-    info!("get control file from {control_file_path}");
-    let control_file_buf = storage_wrapper.get(&control_file_path).await?;
-    let control_file_data = ControlFileData::decode(&control_file_buf)?;
-    let control_file = ControlFile {
-        control_file_data,
-        control_file_buf,
-    };
-    control_file.try_pg_version()?; // so that we can offer infallible pg_version()
-    Ok(control_file)
-}
-
-impl ControlFile {
-    pub(crate) fn base_lsn(&self) -> Lsn {
-        Lsn(self.control_file_data.checkPoint).align()
-    }
-    pub(crate) fn pg_version(&self) -> u32 {
-        self.try_pg_version()
-            .expect("prepare() checks that try_pg_version doesn't error")
-    }
-    fn try_pg_version(&self) -> anyhow::Result<u32> {
-        Ok(match self.control_file_data.catalog_version_no {
-            // thesea are from catversion.h
-            202107181 => 14,
-            202209061 => 15,
-            202307071 => 16,
-            /* XXX pg17 */
-            catversion => {
-                bail!("unrecognized catalog version {catversion}")
-            }
-        })
-    }
-}
-
-mod s3_state;
-pub(crate) mod upcall_api;
-
-pub async fn doit(
-    timeline: &Arc<Timeline>,
-    index_part: index_part_format::Root,
-    ctx: &RequestContext,
-    cancel: CancellationToken,
-) -> anyhow::Result<()> {
-    let index_part_format::Root::V1(v1) = index_part;
-    let index_part_format::InProgress {
-        location,
-        idempotency_key,
-        started_at,
-    } = match v1 {
-        index_part_format::V1::Done(_) => return Ok(()),
-        index_part_format::V1::InProgress(in_progress) => in_progress,
-    };
-
-    let storage = make_storage_wrapper(timeline.conf, &location, cancel.clone()).await?;
-
-    info!("get spec early so we know we'll be able to upcall when done");
-    let Some(spec) = get_spec(&storage).await? else {
-        bail!("spec not found")
-    };
-
-    let upcall_client =
-        upcall_api::Client::new(timeline.conf, cancel.clone()).context("create upcall client")?;
-
-    //
-    // send an early progress update to clean up k8s job early and generate potentially useful logs
-    //
-    info!("send early progress update");
-    upcall_client
-        .send_progress_until_success(&spec)
-        .instrument(info_span!("early_progress_update"))
-        .await?;
-
-    let status_prefix = RemotePath::from_string("status").unwrap();
-
-    //
-    // See if shard is done.
-    // TODO: incorporate generations into status key for split brain safety. Figure out together with checkpointing.
-    //
-    let shard_status_key =
-        status_prefix.join(format!("shard-{}", timeline.tenant_shard_id.shard_slug()));
-    let shard_status: Option<s3_state::ShardStatus> = storage.get_json(&shard_status_key).await?;
-    info!(?shard_status, "peeking shard status");
-    if shard_status.map(|st| st.done).unwrap_or(false) {
-        info!("shard status indicates that the shard is done, skipping import");
-    } else {
-        // TODO: checkpoint the progress into the IndexPart instead of restarting
-        // from the beginning.
-
-        //
-        // Wipe the slate clean
-        //
-        info!("wipe the slate clean");
-        {
-            // TODO: do we need to hold GC lock for this?
-            let mut guard = timeline.layers.write().await;
-            assert!(
-                guard.layer_map()?.open_layer.is_none(),
-                "while importing, there should be no in-memory layer" // this just seems like a good place to assert it
-            );
-            let all_layers_keys = guard.all_persistent_layers();
-            let all_layers: Vec<_> = all_layers_keys
-                .iter()
-                .map(|key| guard.get_from_key(key))
-                .collect();
-            let open = guard.open_mut().context("open_mut")?;
-
-            timeline.remote_client.schedule_gc_update(&all_layers)?;
-            open.finish_gc_timeline(&all_layers);
-        }
-
-        //
-        // Wait for pgdata to finish uploading
-        //
-        info!("wait for pgdata to reach status 'done'");
-        let pgdata_status_key = status_prefix.join("pgdata");
-        loop {
-            let res = async {
-                let pgdata_status: Option<s3_state::PgdataStatus> = storage
-                    .get_json(&pgdata_status_key)
-                    .await
-                    .context("get pgdata status")?;
-                info!(?pgdata_status, "peeking pgdata status");
-                if pgdata_status.map(|st| st.done).unwrap_or(false) {
-                    Ok(())
-                } else {
-                    Err(anyhow::anyhow!("pgdata not done yet"))
-                }
-            }
-            .await;
-            match res {
-                Ok(_) => break,
-                Err(err) => {
-                    info!(?err, "indefintely waiting for pgdata to finish");
-                    if tokio::time::timeout(std::time::Duration::from_secs(10), cancel.cancelled())
-                        .await
-                        .is_ok()
-                    {
-                        bail!("cancelled while waiting for pgdata");
-                    }
-                }
-            }
-        }
-
-        //
-        // Do the import
-        //
-        info!("do the import");
-        let control_file = get_control_file(&PGDATA_DIR, &storage).await?;
-        let base_lsn = control_file.base_lsn();
-
-        info!("update TimelineMetadata based on LSNs from control file");
-        {
-            let pg_version = control_file.pg_version();
-            let _ctx: &RequestContext = ctx;
-            async move {
-                // FIXME: The 'disk_consistent_lsn' should be the LSN at the *end* of the
-                // checkpoint record, and prev_record_lsn should point to its beginning.
-                // We should read the real end of the record from the WAL, but here we
-                // just fake it.
-                let disk_consistent_lsn = Lsn(base_lsn.0 + 8);
-                let prev_record_lsn = base_lsn;
-                let metadata = TimelineMetadata::new(
-                    disk_consistent_lsn,
-                    Some(prev_record_lsn),
-                    None,     // no ancestor
-                    Lsn(0),   // no ancestor lsn
-                    base_lsn, // latest_gc_cutoff_lsn
-                    base_lsn, // initdb_lsn
-                    pg_version,
-                );
-
-                let _start_lsn = disk_consistent_lsn + 1;
-
-                timeline
-                    .remote_client
-                    .schedule_index_upload_for_full_metadata_update(&metadata)?;
-
-                timeline.remote_client.wait_completion().await?;
-
-                anyhow::Ok(())
-            }
-        }
-        .await?;
-
-        PgImportEnv {
-            timeline: timeline.clone(),
-            pgdata_dir: PGDATA_DIR.clone(),
-            control_file,
-            pgdata_lsn: base_lsn,
-            tasks: Vec::new(),
-            storage: storage.clone(),
-        }
-        .doit(ctx)
-        .await?;
-
-        //
-        // Communicate that shard is done.
-        //
-        storage
-            .put_json(&shard_status_key, &s3_state::ShardStatus { done: true })
-            .await
-            .context("put shard status")?;
-    }
-
-    //
-    // Ensure at-least-once deliver of the upcall to cplane
-    // before we mark the task as done and never come here again.
-    //
-    info!("send final progress update");
-    upcall_client
-        .send_progress_until_success(&spec)
-        .instrument(info_span!("final_progress_update"))
-        .await?;
-
-    //
-    // Mark as done in index_part.
-    // This makes subsequent timeline loads enter the normal load code path
-    // instead of spawning the import task and calling this here function.
-    //
-    info!("mark import as complete in index part");
-    timeline
-        .remote_client
-        .schedule_index_upload_for_import_pgdata_state_update(Some(index_part_format::Root::V1(
-            index_part_format::V1::Done(index_part_format::Done {
-                idempotency_key,
-                started_at,
-                finished_at: chrono::Utc::now().naive_utc(),
-            }),
-        )))?;
-
-    timeline.remote_client.wait_completion().await?;
-
-    Ok(())
-}
-
-async fn get_spec(storage: &RemoteStorageWrapper) -> Result<Option<s3_state::Spec>, anyhow::Error> {
-    storage
-        .get_json(&RemotePath::from_string("spec.json").unwrap())
-        .await
-        .context("get spec")
-}
-
-// TODO: rename to `State`
-struct PgImportEnv {
+pub async fn run(
     timeline: Arc<Timeline>,
-    pgdata_dir: RemotePath,
+    pgdata_lsn: Lsn,
+    control_file: ControlFile,
+    storage: RemoteStorageWrapper,
+    ctx: &RequestContext,
+) -> anyhow::Result<()> {
+    Flow {
+        timeline,
+        pgdata_lsn,
+        control_file,
+        tasks: Vec::new(),
+        storage,
+    }
+    .run(ctx)
+    .await
+}
+
+struct Flow {
+    timeline: Arc<Timeline>,
     pgdata_lsn: Lsn,
     control_file: ControlFile,
     tasks: Vec<AnyImportTask>,
     storage: RemoteStorageWrapper,
 }
 
-impl PgImportEnv {
-    async fn doit(mut self, ctx: &RequestContext) -> anyhow::Result<()> {
-        let pgdata_lsn = Lsn(self.control_file.control_file_data.checkPoint).align();
+impl Flow {
+    /// Perform the ingestion into [`Self::timeline`].
+    /// Assumes the timeline is empty (= no layers).
+    pub async fn run(mut self, ctx: &RequestContext) -> anyhow::Result<()> {
+        let pgdata_lsn = Lsn(self.control_file.control_file_data().checkPoint).align();
 
         self.pgdata_lsn = pgdata_lsn;
 
-        let datadir = PgDataDir::new(&self.storage, &self.pgdata_dir).await?;
+        let datadir = PgDataDir::new(&self.storage).await?;
 
         // Import dbdir (00:00:00 keyspace)
         // This is just constructed here, but will be written to the image layer in the first call to import_db()
@@ -403,18 +128,18 @@ impl PgImportEnv {
         // Import SLRUs
 
         // pg_xact (01:00 keyspace)
-        self.import_slru(SlruKind::Clog, &self.pgdata_dir.join("pg_xact"))
+        self.import_slru(SlruKind::Clog, &self.storage.pgdata().join("pg_xact"))
             .await?;
         // pg_multixact/members (01:01 keyspace)
         self.import_slru(
             SlruKind::MultiXactMembers,
-            &self.pgdata_dir.join("pg_multixact/members"),
+            &self.storage.pgdata().join("pg_multixact/members"),
         )
         .await?;
         // pg_multixact/offsets (01:02 keyspace)
         self.import_slru(
             SlruKind::MultiXactOffsets,
-            &self.pgdata_dir.join("pg_multixact/offsets"),
+            &self.storage.pgdata().join("pg_multixact/offsets"),
         )
         .await?;
 
@@ -433,12 +158,12 @@ impl PgImportEnv {
         self.tasks
             .push(AnyImportTask::SingleKey(ImportSingleKeyTask::new(
                 CONTROLFILE_KEY,
-                self.control_file.control_file_buf.clone(),
+                self.control_file.control_file_buf().clone(),
             )));
 
         let checkpoint_buf = self
             .control_file
-            .control_file_data
+            .control_file_data()
             .checkPointCopy
             .encode()?;
         self.tasks
@@ -653,10 +378,8 @@ struct PgDataDirDbFile {
 }
 
 impl PgDataDir {
-    async fn new(
-        storage: &RemoteStorageWrapper,
-        datadir_path: &RemotePath,
-    ) -> anyhow::Result<Self> {
+    async fn new(storage: &RemoteStorageWrapper) -> anyhow::Result<Self> {
+        let datadir_path = storage.pgdata();
         // Import ordinary databases, DEFAULTTABLESPACE_OID is smaller than GLOBALTABLESPACE_OID, so import them first
         // Traverse database in increasing oid order
 
@@ -677,7 +400,7 @@ impl PgDataDir {
                     &basedir.join(dboid.to_string()),
                     pg_constants::DEFAULTTABLESPACE_OID,
                     dboid,
-                    datadir_path,
+                    &datadir_path,
                 )
                 .await?,
             );
@@ -690,7 +413,7 @@ impl PgDataDir {
                 &datadir_path.join("global"),
                 postgres_ffi::pg_constants::GLOBALTABLESPACE_OID,
                 0,
-                datadir_path,
+                &datadir_path,
             )
             .await?,
         );
@@ -1018,7 +741,7 @@ struct ChunkProcessingJob {
 }
 
 impl ChunkProcessingJob {
-    fn new(range: Range<Key>, tasks: Vec<AnyImportTask>, env: &PgImportEnv) -> Self {
+    fn new(range: Range<Key>, tasks: Vec<AnyImportTask>, env: &Flow) -> Self {
         assert!(env.pgdata_lsn.is_valid());
         Self {
             timeline: env.timeline.clone(),
@@ -1057,7 +780,7 @@ impl ChunkProcessingJob {
         guard
             .open_mut()?
             .track_new_image_layers(&[resident_layer.clone()], &self.timeline.metrics);
-        super::drop_wlock(guard);
+        crate::tenant::timeline::drop_wlock(guard);
 
         // Schedule the layer for upload but don't add barriers such as
         // wait for completion or index upload, so we don't inhibit upload parallelism.
@@ -1068,196 +791,5 @@ impl ChunkProcessingJob {
             .schedule_layer_file_upload(resident_layer)?;
 
         Ok(())
-    }
-}
-
-/// Wrap [`remote_storage`] APIs to make it look a bit more like a filesystem API
-/// such as [`tokio::fs`], which was used in the original implementation of the import code.
-#[derive(Clone)]
-struct RemoteStorageWrapper {
-    storage: GenericRemoteStorage,
-    cancel: CancellationToken,
-}
-
-impl RemoteStorageWrapper {
-    fn new(storage: GenericRemoteStorage, cancel: CancellationToken) -> Self {
-        Self { storage, cancel }
-    }
-
-    #[instrument(level = tracing::Level::DEBUG, skip_all, fields(%path))]
-    async fn listfilesindir(
-        &self,
-        path: &RemotePath,
-    ) -> Result<Vec<(RemotePath, usize)>, DownloadError> {
-        assert!(
-            path.object_name().is_some(),
-            "must specify dirname, without trailing slash"
-        );
-        let path = path.add_trailing_slash();
-
-        let res = crate::tenant::remote_timeline_client::download::download_retry_forever(
-            || async {
-                let Listing { keys, prefixes: _ } = self
-                    .storage
-                    .list(
-                        Some(&path),
-                        remote_storage::ListingMode::WithDelimiter,
-                        None,
-                        &self.cancel,
-                    )
-                    .await?;
-                let res = keys
-                    .into_iter()
-                    .map(|ListingObject { key, size, .. }| (key, size.into_usize()))
-                    .collect();
-                Ok(res)
-            },
-            &format!("listfilesindir {path:?}"),
-            &self.cancel,
-        )
-        .await;
-        debug!(?res, "returning");
-        res
-    }
-
-    #[instrument(level = tracing::Level::DEBUG, skip_all, fields(%path))]
-    async fn listdir(&self, path: &RemotePath) -> Result<Vec<RemotePath>, DownloadError> {
-        assert!(
-            path.object_name().is_some(),
-            "must specify dirname, without trailing slash"
-        );
-        let path = path.add_trailing_slash();
-
-        let res = crate::tenant::remote_timeline_client::download::download_retry_forever(
-            || async {
-                let Listing { keys, prefixes } = self
-                    .storage
-                    .list(
-                        Some(&path),
-                        remote_storage::ListingMode::WithDelimiter,
-                        None,
-                        &self.cancel,
-                    )
-                    .await?;
-                let res = keys
-                    .into_iter()
-                    .map(|ListingObject { key, .. }| key)
-                    .chain(prefixes.into_iter())
-                    .collect();
-                Ok(res)
-            },
-            &format!("listdir {path:?}"),
-            &self.cancel,
-        )
-        .await;
-        debug!(?res, "returning");
-        res
-    }
-
-    #[instrument(level = tracing::Level::DEBUG, skip_all, fields(%path))]
-    async fn get(&self, path: &RemotePath) -> Result<Bytes, DownloadError> {
-        let res = crate::tenant::remote_timeline_client::download::download_retry_forever(
-            || async {
-                let Download {
-                    download_stream, ..
-                } = self
-                    .storage
-                    .download(path, &DownloadOpts::default(), &self.cancel)
-                    .await?;
-                let mut reader = tokio_util::io::StreamReader::new(download_stream);
-
-                // XXX optimize this, can we get the capacity hint from somewhere?
-                let mut buf = Vec::new();
-                tokio::io::copy_buf(&mut reader, &mut buf).await?;
-                Ok(Bytes::from(buf))
-            },
-            &format!("download {path:?}"),
-            &self.cancel,
-        )
-        .await;
-        debug!(len = res.as_ref().ok().map(|buf| buf.len()), "done");
-        res
-    }
-
-    #[instrument(level = tracing::Level::DEBUG, skip_all, fields(%path))]
-    async fn get_json<T: DeserializeOwned>(
-        &self,
-        path: &RemotePath,
-    ) -> Result<Option<T>, DownloadError> {
-        let buf = match self.get(path).await {
-            Ok(buf) => buf,
-            Err(DownloadError::NotFound) => return Ok(None),
-            Err(err) => return Err(err),
-        };
-        let res = serde_json::from_slice(&buf)
-            .context("serialize")
-            // TODO: own error type
-            .map_err(DownloadError::Other)?;
-        Ok(Some(res))
-    }
-
-    #[instrument(level = tracing::Level::DEBUG, skip_all, fields(%path))]
-    async fn put_json<T>(&self, path: &RemotePath, value: &T) -> anyhow::Result<()>
-    where
-        T: serde::Serialize,
-    {
-        let buf = serde_json::to_vec(value)?;
-        let bytes = Bytes::from(buf);
-        utils::backoff::retry(
-            || async {
-                let size = bytes.len();
-                let bytes = futures::stream::once(futures::future::ready(Ok(bytes.clone())));
-                self.storage
-                    .upload_storage_object(bytes, size, path, &self.cancel)
-                    .await
-            },
-            remote_storage::TimeoutOrCancel::caused_by_cancel,
-            1,
-            u32::MAX,
-            &format!("put json {path}"),
-            &self.cancel,
-        )
-        .await
-        .expect("practically infinite retries")
-    }
-
-    #[instrument(level = tracing::Level::DEBUG, skip_all, fields(%path))]
-    async fn get_range(
-        &self,
-        path: &RemotePath,
-        start_inclusive: u64,
-        end_exclusive: u64,
-    ) -> Result<Vec<u8>, DownloadError> {
-        let len = end_exclusive
-            .checked_sub(start_inclusive)
-            .unwrap()
-            .into_usize();
-        let res = crate::tenant::remote_timeline_client::download::download_retry_forever(
-            || async {
-                let Download {
-                    download_stream, ..
-                } = self
-                    .storage
-                    .download(
-                        path,
-                        &DownloadOpts {
-                            etag: None,
-                            byte_start: Bound::Included(start_inclusive),
-                            byte_end: Bound::Excluded(end_exclusive)
-                        },
-                        &self.cancel)
-                    .await?;
-                let mut reader = tokio_util::io::StreamReader::new(download_stream);
-
-                let mut buf = Vec::with_capacity(len);
-                tokio::io::copy_buf(&mut reader, &mut buf).await?;
-                Ok(buf)
-            },
-            &format!("download range len=0x{len:x} [0x{start_inclusive:x},0x{end_exclusive:x}) from {path:?}"),
-            &self.cancel,
-        )
-        .await;
-        debug!(len = res.as_ref().ok().map(|buf| buf.len()), "done");
-        res
     }
 }
