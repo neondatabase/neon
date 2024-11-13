@@ -38,7 +38,6 @@ use url::Url;
 
 use crate::installed_extensions::get_installed_extensions_sync;
 use crate::local_proxy;
-use crate::logger::inlinify;
 use crate::pg_helpers::*;
 use crate::spec::*;
 use crate::spec_apply::ApplySpecPhase::{
@@ -305,21 +304,6 @@ pub(crate) fn construct_superuser_query(spec: &ComputeSpec) -> String {
     );
 
     query
-}
-
-/// Create special neon_superuser role, that's a slightly nerfed version of a real superuser
-/// that we give to customers
-#[instrument(skip_all)]
-fn create_neon_superuser(spec: &ComputeSpec, client: &mut Client) -> Result<()> {
-    let query = construct_superuser_query(spec);
-
-    info!("Neon superuser created: {}", inlinify(&query));
-
-    client
-        .simple_query(query.as_str())
-        .map_err(|e| anyhow::anyhow!(e).context(query))?;
-
-    Ok(())
 }
 
 impl ComputeNode {
@@ -897,9 +881,9 @@ impl ComputeNode {
             let mut client = Self::get_maintenance_client(&url).await?;
             let spec = spec.clone();
 
-            let mut xact = client.transaction().await?;
+            let xact = client.transaction().await?;
             let roles = Arc::new(tokio::sync::Mutex::new(
-                get_existing_roles_async(&mut xact)
+                get_existing_roles_async(&xact)
                     .await?
                     .into_iter()
                     .map(|role| (role.name.clone(), role))
@@ -909,7 +893,7 @@ impl ComputeNode {
             xact.commit().await?;
 
             let databases = Arc::new(tokio::sync::Mutex::new(
-                get_existing_dbs_async(&mut client).await?,
+                get_existing_dbs_async(&client).await?,
             ));
 
             let jwks_roles = Arc::new(

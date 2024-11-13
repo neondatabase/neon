@@ -193,6 +193,18 @@ pub fn get_operations<'a>(
                 .map(|(dbname, _)| dbname.clone())
                 .collect();
 
+            // After recent commit in Postgres, interrupted DROP DATABASE
+            // leaves the database in the invalid state. According to the
+            // commit message, the only option for user is to drop it again.
+            // See:
+            //   https://github.com/postgres/postgres/commit/a4b4cc1d60f7e8ccfcc8ff8cb80c28ee411ad9a9
+            //
+            // Postgres Neon extension is done the way, that db is de-registered
+            // in the control plane metadata only after it is dropped. So there is
+            // a chance that it still thinks that the db should exist. This means
+            // that it will be re-created by the `CreateDatabases` phase. This
+            // is fine, as user can just drop the table again (in vanilla
+            // Postgres they would need to do the same).
             let operations = keys
                 .into_iter()
                 .filter_map(|dbname| databases.remove(&dbname))
