@@ -590,7 +590,7 @@ def test_timeline_archival_chaos(neon_env_builder: NeonEnvBuilder):
     # Generate some chaos, while our workers are trying to complete their timeline operations
     rng = random.Random()
     try:
-        chaos_rounds = 32
+        chaos_rounds = 48
         for _i in range(0, chaos_rounds):
             action = rng.choice([0, 1])
             if action == 0:
