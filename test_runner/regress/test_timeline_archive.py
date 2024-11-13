@@ -18,7 +18,7 @@ from fixtures.pageserver.http import PageserverApiException
 from fixtures.pageserver.utils import assert_prefix_empty, assert_prefix_not_empty, list_prefix
 from fixtures.pg_version import PgVersion
 from fixtures.remote_storage import S3Storage, s3_storage
-from fixtures.utils import wait_until, run_only_on_default_postgres
+from fixtures.utils import run_only_on_default_postgres, wait_until
 from mypy_boto3_s3.type_defs import (
     ObjectTypeDef,
 )
