@@ -226,7 +226,7 @@ impl WalSenders {
 
     /// Get remote_consistent_lsn reported by the pageserver. Returns None if
     /// client is not pageserver.
-    fn get_ws_remote_consistent_lsn(self: &Arc<WalSenders>, id: WalSenderId) -> Option<Lsn> {
+    pub fn get_ws_remote_consistent_lsn(self: &Arc<WalSenders>, id: WalSenderId) -> Option<Lsn> {
         let shared = self.mutex.lock();
         let slot = shared.get_slot(id);
         match slot.feedback {
@@ -370,6 +370,16 @@ pub struct WalSenderGuard {
     walsenders: Arc<WalSenders>,
 }
 
+impl WalSenderGuard {
+    pub fn id(&self) -> WalSenderId {
+        self.id
+    }
+
+    pub fn walsenders(&self) -> &Arc<WalSenders> {
+        &self.walsenders
+    }
+}
+
 impl Drop for WalSenderGuard {
     fn drop(&mut self) {
         self.walsenders.unregister(self.id);
@@ -499,16 +509,17 @@ impl SafekeeperPostgresHandler {
     }
 }
 
+/// TODO(vlad): maybe lift this instead
 /// Walsender streams either up to commit_lsn (normally) or flush_lsn in the
 /// given term (recovery by walproposer or peer safekeeper).
-enum EndWatch {
+pub(crate) enum EndWatch {
     Commit(Receiver<Lsn>),
     Flush(Receiver<TermLsn>),
 }
 
 impl EndWatch {
     /// Get current end of WAL.
-    fn get(&self) -> Lsn {
+    pub(crate) fn get(&self) -> Lsn {
         match self {
             EndWatch::Commit(r) => *r.borrow(),
             EndWatch::Flush(r) => r.borrow().lsn,
@@ -516,12 +527,34 @@ impl EndWatch {
     }
 
     /// Wait for the update.
-    async fn changed(&mut self) -> anyhow::Result<()> {
+    pub(crate) async fn changed(&mut self) -> anyhow::Result<()> {
         match self {
             EndWatch::Commit(r) => r.changed().await?,
             EndWatch::Flush(r) => r.changed().await?,
         }
         Ok(())
+    }
+
+    pub(crate) async fn wait_for_lsn(
+        &mut self,
+        lsn: Lsn,
+        client_term: Option<Term>,
+    ) -> anyhow::Result<Lsn> {
+        loop {
+            let end_pos = self.get();
+            if end_pos > lsn {
+                return Ok(end_pos);
+            }
+            if let EndWatch::Flush(rx) = &self {
+                let curr_term = rx.borrow().term;
+                if let Some(client_term) = client_term {
+                    if curr_term != client_term {
+                        bail!("term changed: requested {}, now {}", client_term, curr_term);
+                    }
+                }
+            }
+            self.changed().await?;
+        }
     }
 }
 
