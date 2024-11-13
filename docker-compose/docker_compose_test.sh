@@ -30,10 +30,10 @@ cleanup() {
     docker compose --profile test-extensions -f $COMPOSE_FILE down
 }
 
-for pg_version in 14 15 16; do
+for pg_version in 14 15 16 17; do
     echo "clean up containers if exists"
     cleanup
-    PG_TEST_VERSION=$(($pg_version < 16 ? 16 : $pg_version))
+    PG_TEST_VERSION=$((pg_version < 16 ? 16 : pg_version))
     PG_VERSION=$pg_version PG_TEST_VERSION=$PG_TEST_VERSION docker compose --profile test-extensions -f $COMPOSE_FILE up --build -d
 
     echo "wait until the compute is ready. timeout after 60s. "

@@ -1403,34 +1403,16 @@ COPY --from=pg-anon-pg-build /pg_anon.tar.gz /ext-src
 COPY compute/patches/pg_anon.patch /ext-src
 COPY --from=pg-ivm-build /pg_ivm.tar.gz /ext-src
 COPY --from=pg-partman-build /pg_partman.tar.gz /ext-src
-RUN case "${PG_VERSION}" in "v17") \
-    echo "v17 extensions are not supported yet. Quit" && exit 0;; \
-    esac && \
-    cd /ext-src/ && for f in *.tar.gz; \
+RUN cd /ext-src/ && for f in *.tar.gz; \
     do echo $f; dname=$(echo $f | sed 's/\.tar.*//')-src; \
     rm -rf $dname; mkdir $dname; tar xzf $f --strip-components=1 -C $dname \
     || exit 1; rm -f $f; done
-RUN case "${PG_VERSION}" in "v17") \
-    echo "v17 extensions are not supported yet. Quit" && exit 0;; \
-    esac && \
-    cd /ext-src/rum-src && patch -p1 <../rum.patch
-RUN case "${PG_VERSION}" in "v17") \
-    echo "v17 extensions are not supported yet. Quit" && exit 0;; \
-    esac && \
-    cd /ext-src/pgvector-src && patch -p1 <../pgvector.patch
-RUN case "${PG_VERSION}" in "v17") \
-    echo "v17 extensions are not supported yet. Quit" && exit 0;; \
-    esac && \
-    cd /ext-src/pg_hint_plan-src && patch -p1 < /ext-src/pg_hint_plan.patch
+RUN cd /ext-src/rum-src && patch -p1 <../rum.patch
+RUN cd /ext-src/pgvector-src && patch -p1 <../pgvector.patch
+RUN cd /ext-src/pg_hint_plan-src && patch -p1 < /ext-src/pg_hint_plan.patch
 COPY --chmod=755 docker-compose/run-tests.sh /run-tests.sh
-RUN case "${PG_VERSION}" in "v17") \
-    echo "v17 extensions are not supported yet. Quit" && exit 0;; \
-    esac && \
-    patch -p1 </ext-src/pg_anon.patch
-RUN case "${PG_VERSION}" in "v17") \
-    echo "v17 extensions are not supported yet. Quit" && exit 0;; \
-    esac && \
-    patch -p1 </ext-src/pg_cron.patch
+RUN patch -p1 </ext-src/pg_anon.patch
+RUN patch -p1 </ext-src/pg_cron.patch
 ENV PATH=/usr/local/pgsql/bin:$PATH
 ENV PGHOST=compute
 ENV PGPORT=55433
