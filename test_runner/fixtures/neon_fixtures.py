@@ -2376,6 +2376,17 @@ class NeonPageserver(PgProtocol, LogUtils):
         #
         # The entries in the list are regular experessions.
         self.allowed_errors: list[str] = list(DEFAULT_PAGESERVER_ALLOWED_ERRORS)
+        # Store persistent failpoints that should be reapplied on each start
+        self._persistent_failpoints: dict[str, str] = {}
+
+    def add_persistent_failpoint(self, name: str, action: str):
+        """
+        Add a failpoint that will be automatically reapplied each time the pageserver starts.
+        The failpoint will be set immediately if the pageserver is running.
+        """
+        self._persistent_failpoints[name] = action
+        if self.running:
+            self.http_client().configure_failpoints([(name, action)])
 
     def timeline_dir(
         self,
@@ -2442,6 +2453,15 @@ class NeonPageserver(PgProtocol, LogUtils):
         Returns self.
         """
         assert self.running is False
+
+        if self._persistent_failpoints:
+            # Tests shouldn't use this mechanism _and_ set FAILPOINTS explicitly
+            assert extra_env_vars is None or "FAILPOINTS" not in extra_env_vars
+            if extra_env_vars is None:
+                extra_env_vars = {}
+            extra_env_vars["FAILPOINTS"] = ",".join(
+                f"{k}={v}" for (k, v) in self._persistent_failpoints.items()
+            )
 
         storage = self.env.pageserver_remote_storage
         if isinstance(storage, S3Storage):

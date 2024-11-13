@@ -414,8 +414,9 @@ def test_timeline_archival_chaos(neon_env_builder: NeonEnvBuilder):
             [
                 ".*removing local file.*because it has unexpected length.*",
                 ".*__temp.*",
-                # FIXME: there is a code path in timeline deletion that maps not yet initialized to 500
-                ".*InternalServerError.*Tenant not yet active.*",
+                # FIXME: there are still anyhow::Error paths in timeline creation/deletion which
+                # generate 500 results when called during shutdown
+                ".*InternalServerError.*",
             ]
         )
 
@@ -584,8 +585,7 @@ def test_timeline_archival_chaos(neon_env_builder: NeonEnvBuilder):
         [("reconciler-live-migrate-pre-await-lsn", "sleep(1)")]
     )
     for ps in env.pageservers:
-        # TODO: make this stick across restarts
-        ps.http_client().configure_failpoints([("in_progress_delete", "sleep(1)")])
+        ps.add_persistent_failpoint("in_progress_delete", "sleep(1)")
 
     # Generate some chaos, while our workers are trying to complete their timeline operations
     rng = random.Random()
