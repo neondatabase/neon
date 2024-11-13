@@ -297,7 +297,7 @@ class NeonLocalCli(AbstractNeonCli):
 
         return timeline_id
 
-    def timeline_create_pgdata_import(
+    def timeline_create_from_pgdata(
         self,
         new_branch_name: str,
         tenant_id: TenantId,

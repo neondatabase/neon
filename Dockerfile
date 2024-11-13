@@ -55,7 +55,7 @@ RUN set -e \
       --bin proxy  \
       --bin neon_local \
       --bin storage_scrubber \
-      --locked
+      --locked --release
 
 # Build final image
 #
@@ -73,15 +73,15 @@ RUN set -e \
     && useradd -d /data neon \
     && chown -R neon:neon /data
 
-COPY --from=build --chown=neon:neon /home/nonroot/target/debug/pg_sni_router       /usr/local/bin
-COPY --from=build --chown=neon:neon /home/nonroot/target/debug/pageserver          /usr/local/bin
-COPY --from=build --chown=neon:neon /home/nonroot/target/debug/pagectl             /usr/local/bin
-COPY --from=build --chown=neon:neon /home/nonroot/target/debug/safekeeper          /usr/local/bin
-COPY --from=build --chown=neon:neon /home/nonroot/target/debug/storage_broker      /usr/local/bin
-COPY --from=build --chown=neon:neon /home/nonroot/target/debug/storage_controller  /usr/local/bin
-COPY --from=build --chown=neon:neon /home/nonroot/target/debug/proxy               /usr/local/bin
-COPY --from=build --chown=neon:neon /home/nonroot/target/debug/neon_local          /usr/local/bin
-COPY --from=build --chown=neon:neon /home/nonroot/target/debug/storage_scrubber    /usr/local/bin
+COPY --from=build --chown=neon:neon /home/nonroot/target/release/pg_sni_router       /usr/local/bin
+COPY --from=build --chown=neon:neon /home/nonroot/target/release/pageserver          /usr/local/bin
+COPY --from=build --chown=neon:neon /home/nonroot/target/release/pagectl             /usr/local/bin
+COPY --from=build --chown=neon:neon /home/nonroot/target/release/safekeeper          /usr/local/bin
+COPY --from=build --chown=neon:neon /home/nonroot/target/release/storage_broker      /usr/local/bin
+COPY --from=build --chown=neon:neon /home/nonroot/target/release/storage_controller  /usr/local/bin
+COPY --from=build --chown=neon:neon /home/nonroot/target/release/proxy               /usr/local/bin
+COPY --from=build --chown=neon:neon /home/nonroot/target/release/neon_local          /usr/local/bin
+COPY --from=build --chown=neon:neon /home/nonroot/target/release/storage_scrubber    /usr/local/bin
 
 COPY --from=pg-build /home/nonroot/pg_install/v14 /usr/local/v14/
 COPY --from=pg-build /home/nonroot/pg_install/v15 /usr/local/v15/

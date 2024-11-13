@@ -1388,7 +1388,7 @@ class NeonEnv:
     ):
         tenant_id = tenant_id or self.initial_tenant
 
-        self.neon_cli.timeline_create_pgdata_import(new_branch_name, tenant_id, req)
+        self.neon_cli.timeline_create_from_pgdata(new_branch_name, tenant_id, req)
 
 
 @pytest.fixture(scope="function")

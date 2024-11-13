@@ -211,7 +211,7 @@ impl From<TenantSlotError> for ApiError {
         use TenantSlotError::*;
         match e {
             NotFound(tenant_id) => {
-                ApiError::NotFound(anyhow!("NotFound: tenant {tenant_id}").into())
+                ApiError::NotFound(anyhow::anyhow!("NotFound: tenant {tenant_id}").into())
             }
             InProgress => {
                 ApiError::ResourceUnavailable("Tenant is being modified concurrently".into())
@@ -225,7 +225,7 @@ impl From<TenantSlotUpsertError> for ApiError {
     fn from(e: TenantSlotUpsertError) -> ApiError {
         use TenantSlotUpsertError::*;
         match e {
-            InternalError(e) => ApiError::InternalServerError(anyhow!("{e}")),
+            InternalError(e) => ApiError::InternalServerError(anyhow::anyhow!("{e}")),
             MapState(e) => e.into(),
             ShuttingDown(_) => ApiError::ShuttingDown,
         }

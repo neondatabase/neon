@@ -1,3 +1,19 @@
+//! This program dumps a remote Postgres database into a local Postgres database
+//! and uploads the resulting PGDATA into object storage for import into a Timeline.
+//!
+//! # Context, Architecture, Design
+//!
+//! See cloud.git Fast Imports RFC (<https://github.com/neondatabase/cloud/pull/19799>)
+//! for the full picture.
+//! The RFC describing the storage pieces of importing the PGDATA dump into a Timeline
+//! is publicly accessible at <https://github.com/neondatabase/neon/pull/9538>.
+//!
+//! # This is a Prototype!
+//!
+//! This program is part of a prototype feature and not yet used in production.
+//!
+//! The cloud.git RFC contains lots of suggestions for improving e2e throughput
+//! of this step of the timeline import process.
 //!
 //! # Local Testing
 //!
@@ -5,8 +21,8 @@
 //! - Build the image with the following command:
 //!
 //! ```bash
-//! christian@neon-hetzner-dev-christian:[~/src/neon]: docker buildx build --build-arg DEBIAN_FLAVOR=bullseye-slim --build-arg GIT_VERSION=local --build-arg PG_VERSION=v14 --build-arg BUILD_TAG="$(date --iso-8601=s -u)"  -t localhost:3030/localregistry/compute-node-v14:latest -f compute/Dockerfile.com
-//! christian@neon-hetzner-dev-christian:[~/src/neon]: docker push localhost:3030/localregistry/compute-node-v14:latest
+//! docker buildx build --build-arg DEBIAN_FLAVOR=bullseye-slim --build-arg GIT_VERSION=local --build-arg PG_VERSION=v14 --build-arg BUILD_TAG="$(date --iso-8601=s -u)"  -t localhost:3030/localregistry/compute-node-v14:latest -f compute/Dockerfile.com
+//! docker push localhost:3030/localregistry/compute-node-v14:latest
 //! ```
 
 use anyhow::Context;

@@ -871,13 +871,6 @@ enum StartCreatingTimelineResult {
     Idempotent(Arc<Timeline>),
 }
 
-#[must_use]
-struct TimelineInitAndSyncNeedsSpawnImportPgdata {
-    timeline: Arc<Timeline>,
-    import_pgdata: import_pgdata::index_part_format::Root,
-    guard: TimelineCreateGuard,
-}
-
 enum TimelineInitAndSyncResult {
     ReadyToActivate(Arc<Timeline>),
     NeedsSpawnImportPgdata(TimelineInitAndSyncNeedsSpawnImportPgdata),
@@ -890,6 +883,13 @@ impl TimelineInitAndSyncResult {
             _ => None,
         }
     }
+}
+
+#[must_use]
+struct TimelineInitAndSyncNeedsSpawnImportPgdata {
+    timeline: Arc<Timeline>,
+    import_pgdata: import_pgdata::index_part_format::Root,
+    guard: TimelineCreateGuard,
 }
 
 /// What is returned by [`Tenant::create_timeline`].
@@ -3098,7 +3098,7 @@ impl Tenant {
                 let timeline_id = timeline.timeline_id;
                 let span = tracing::info_span!("timeline_shutdown", %timeline_id, ?shutdown_mode);
                 js.spawn(async move { timeline.shutdown(shutdown_mode).instrument(span).await });
-            });
+            })
         };
         // test_long_timeline_create_then_tenant_delete is leaning on this message
         tracing::info!("Waiting for timelines...");
@@ -4530,6 +4530,7 @@ impl Tenant {
                 {
                     let existing = &existing.create_idempotency;
                     let _span = info_span!("idempotency_check", ?existing, ?arg).entered();
+                    debug!("timeline already exists");
 
                     match (existing, &arg) {
                         // FailWithConflict => no idempotency check

@@ -35,7 +35,7 @@ use tracing::instrument;
 use url::Url;
 use utils::{
     auth::{encode_from_key_file, Claims, Scope},
-    id::{NodeId, TenantId, TimelineId},
+    id::{NodeId, TenantId},
 };
 use whoami::username;
 
@@ -889,20 +889,6 @@ impl StorageController {
             Method::POST,
             format!("v1/tenant/{tenant_id}/timeline"),
             Some(req),
-        )
-        .await
-    }
-
-    pub async fn tenant_timeline_import_from_pgdata(
-        &self,
-        tenant_id: TenantId,
-        timeline_id: TimelineId,
-        pgdata_path: &Utf8Path,
-    ) -> anyhow::Result<()> {
-        self.dispatch(
-            Method::PUT,
-            format!("v1/tenant/{tenant_id}/timeline/{timeline_id}/import_pgdata"),
-            Some(pgdata_path),
         )
         .await
     }

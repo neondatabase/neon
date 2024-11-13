@@ -1173,41 +1173,41 @@ FROM build-deps AS neon-pg-ext-build
 ARG PG_VERSION
 
 # Public extensions
-#COPY --from=postgis-build /usr/local/pgsql/ /usr/local/pgsql/
-# COPY --from=postgis-build /sfcgal/* /
-# COPY --from=plv8-build /usr/local/pgsql/ /usr/local/pgsql/
-# COPY --from=h3-pg-build /usr/local/pgsql/ /usr/local/pgsql/
-# COPY --from=h3-pg-build /h3/usr /
-# COPY --from=unit-pg-build /usr/local/pgsql/ /usr/local/pgsql/
-# COPY --from=vector-pg-build /usr/local/pgsql/ /usr/local/pgsql/
-# COPY --from=pgjwt-pg-build /usr/local/pgsql/ /usr/local/pgsql/
-# COPY --from=pgrag-pg-build /usr/local/pgsql/ /usr/local/pgsql/
-# COPY --from=pg-jsonschema-pg-build /usr/local/pgsql/ /usr/local/pgsql/
-# COPY --from=pg-graphql-pg-build /usr/local/pgsql/ /usr/local/pgsql/
-# COPY --from=pg-tiktoken-pg-build /usr/local/pgsql/ /usr/local/pgsql/
-# COPY --from=hypopg-pg-build /usr/local/pgsql/ /usr/local/pgsql/
-# COPY --from=pg-hashids-pg-build /usr/local/pgsql/ /usr/local/pgsql/
-# COPY --from=rum-pg-build /usr/local/pgsql/ /usr/local/pgsql/
-# COPY --from=pgtap-pg-build /usr/local/pgsql/ /usr/local/pgsql/
-# COPY --from=ip4r-pg-build /usr/local/pgsql/ /usr/local/pgsql/
-# COPY --from=prefix-pg-build /usr/local/pgsql/ /usr/local/pgsql/
-# COPY --from=hll-pg-build /usr/local/pgsql/ /usr/local/pgsql/
-# COPY --from=plpgsql-check-pg-build /usr/local/pgsql/ /usr/local/pgsql/
-# COPY --from=timescaledb-pg-build /usr/local/pgsql/ /usr/local/pgsql/
-# COPY --from=pg-hint-plan-pg-build /usr/local/pgsql/ /usr/local/pgsql/
-# COPY --from=pg-cron-pg-build /usr/local/pgsql/ /usr/local/pgsql/
-# COPY --from=pg-pgx-ulid-build /usr/local/pgsql/ /usr/local/pgsql/
-# COPY --from=pg-session-jwt-build /usr/local/pgsql/ /usr/local/pgsql/
-# COPY --from=rdkit-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=postgis-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=postgis-build /sfcgal/* /
+COPY --from=plv8-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=h3-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=h3-pg-build /h3/usr /
+COPY --from=unit-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=vector-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pgjwt-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pgrag-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pg-jsonschema-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pg-graphql-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pg-tiktoken-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=hypopg-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pg-hashids-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=rum-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pgtap-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=ip4r-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=prefix-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=hll-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=plpgsql-check-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=timescaledb-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pg-hint-plan-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pg-cron-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pg-pgx-ulid-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pg-session-jwt-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=rdkit-pg-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY --from=pg-uuidv7-pg-build /usr/local/pgsql/ /usr/local/pgsql/
-# COPY --from=pg-roaringbitmap-pg-build /usr/local/pgsql/ /usr/local/pgsql/
-# COPY --from=pg-semver-pg-build /usr/local/pgsql/ /usr/local/pgsql/
-# COPY --from=pg-embedding-pg-build /usr/local/pgsql/ /usr/local/pgsql/
-# COPY --from=wal2json-pg-build /usr/local/pgsql /usr/local/pgsql
-# COPY --from=pg-anon-pg-build /usr/local/pgsql/ /usr/local/pgsql/
-# COPY --from=pg-ivm-build /usr/local/pgsql/ /usr/local/pgsql/
-# COPY --from=pg-partman-build /usr/local/pgsql/ /usr/local/pgsql/
-# COPY --from=pg-mooncake-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pg-roaringbitmap-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pg-semver-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pg-embedding-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=wal2json-pg-build /usr/local/pgsql /usr/local/pgsql
+COPY --from=pg-anon-pg-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pg-ivm-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pg-partman-build /usr/local/pgsql/ /usr/local/pgsql/
+COPY --from=pg-mooncake-build /usr/local/pgsql/ /usr/local/pgsql/
 COPY pgxn/ pgxn/
 
 RUN make -j $(getconf _NPROCESSORS_ONLN) \
@@ -1253,7 +1253,7 @@ ENV BUILD_TAG=$BUILD_TAG
 USER nonroot
 # Copy entire project to get Cargo.* files with proper dependencies for the whole project
 COPY --chown=nonroot . .
-RUN cd compute_tools && mold -run cargo build --locked
+RUN cd compute_tools && mold -run cargo build --locked --profile release-line-debug-size-lto
 
 #########################################################################################
 #
@@ -1263,8 +1263,8 @@ RUN cd compute_tools && mold -run cargo build --locked
 
 FROM debian:$DEBIAN_FLAVOR AS compute-tools-image
 
-COPY --from=compute-tools /home/nonroot/target/debug/compute_ctl /usr/local/bin/compute_ctl
-COPY --from=compute-tools /home/nonroot/target/debug/fast_import /usr/local/bin/fast_import
+COPY --from=compute-tools /home/nonroot/target/release-line-debug-size-lto/compute_ctl /usr/local/bin/compute_ctl
+COPY --from=compute-tools /home/nonroot/target/release-line-debug-size-lto/fast_import /usr/local/bin/fast_import
 
 #########################################################################################
 #
@@ -1307,7 +1307,7 @@ ENV BUILD_TAG=$BUILD_TAG
 USER nonroot
 # Copy entire project to get Cargo.* files with proper dependencies for the whole project
 COPY --chown=nonroot . .
-RUN mold -run cargo build --locked --bin local_proxy
+RUN mold -run cargo build --locked --profile release-line-debug-size-lto --bin local_proxy
 
 #########################################################################################
 #
@@ -1458,15 +1458,15 @@ RUN mkdir /var/db && useradd -m -d /var/db/postgres postgres && \
     mkdir -p -m 777 /neon/cache
 
 COPY --from=postgres-cleanup-layer --chown=postgres /usr/local/pgsql /usr/local
-COPY --from=compute-tools-image --chown=postgres /usr/local/bin/compute_ctl /usr/local/bin/compute_ctl
-COPY --from=compute-tools-image --chown=postgres /usr/local/bin/fast_import /usr/local/bin/fast_import
+COPY --from=compute-tools --chown=postgres /home/nonroot/target/release-line-debug-size-lto/compute_ctl /usr/local/bin/compute_ctl
+COPY --from=compute-tools --chown=postgres /home/nonroot/target/release-line-debug-size-lto/fast_import /usr/local/bin/fast_import
 
 # pgbouncer and its config
 COPY --from=pgbouncer         /usr/local/pgbouncer/bin/pgbouncer /usr/local/bin/pgbouncer
 COPY --chmod=0666 --chown=postgres compute/etc/pgbouncer.ini /etc/pgbouncer.ini
 
 # local_proxy and its config
-COPY --from=local_proxy --chown=postgres /home/nonroot/target/debug/local_proxy /usr/local/bin/local_proxy
+COPY --from=local_proxy --chown=postgres /home/nonroot/target/release-line-debug-size-lto/local_proxy /usr/local/bin/local_proxy
 RUN mkdir -p /etc/local_proxy && chown postgres:postgres /etc/local_proxy
 
 # Metrics exporter binaries and  configuration files
@@ -1536,6 +1536,7 @@ RUN apt update && \
     localedef -i en_US -c -f UTF-8 -A /usr/share/locale/locale.alias en_US.UTF-8
 
 # s5cmd 2.2.2 from https://github.com/peak/s5cmd/releases/tag/v2.2.2
+# used by fast_import
 ARG TARGETARCH
 ADD https://github.com/peak/s5cmd/releases/download/v2.2.2/s5cmd_2.2.2_linux_$TARGETARCH.deb /tmp/s5cmd.deb
 RUN set -ex; \

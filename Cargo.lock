@@ -1229,7 +1229,6 @@ name = "compute_api"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "camino",
  "chrono",
  "regex",
  "remote_storage",
