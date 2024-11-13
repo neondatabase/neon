@@ -6,6 +6,7 @@ from pathlib import Path
 
 import psycopg2
 import pytest
+from typing import cast
 
 
 def setup_environment():
@@ -45,8 +46,8 @@ def setup_environment():
     os.environ["LD_LIBRARY_PATH"] = (
         f"{os.getenv('PGCOPYDB_LIB_PATH')}:{os.getenv('PG_16_LIB_PATH')}"
     )
-    os.environ["PGCOPYDB_SOURCE_PGURI"] = os.getenv("BENCHMARK_INGEST_SOURCE_CONNSTR")
-    os.environ["PGCOPYDB_TARGET_PGURI"] = os.getenv("NEW_PROJECT_CONNSTR")
+    os.environ["PGCOPYDB_SOURCE_PGURI"] = cast(str, os.getenv("BENCHMARK_INGEST_SOURCE_CONNSTR"))
+    os.environ["PGCOPYDB_TARGET_PGURI"] = cast(str, os.getenv("NEW_PROJECT_CONNSTR"))
     os.environ["PGOPTIONS"] = (
         "-c maintenance_work_mem=8388608 -c max_parallel_maintenance_workers=7"
     )
@@ -118,8 +119,11 @@ public.event_names
 def get_backpressure_time(connstr):
     """Executes a query to get the backpressure throttling time in seconds."""
     query = "select backpressure_throttling_time()/1000000;"
+    psql_path = os.getenv("PSQL")
+    if psql_path is None:
+        raise EnvironmentError("The PSQL environment variable is not set.")
     result = subprocess.run(
-        [os.getenv("PSQL"), connstr, "-t", "-c", query], capture_output=True, text=True, check=True
+        [psql_path, connstr, "-t", "-c", query], capture_output=True, text=True, check=True
     )
     return float(result.stdout.strip())
 
@@ -136,6 +140,8 @@ def run_command_and_log_output(command, log_file_path: Path):
         process = subprocess.Popen(
             command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
         )
+
+        assert process.stdout is not None, "process.stdout should not be None"
 
         # Stream output to both log file and console
         for line in process.stdout:
