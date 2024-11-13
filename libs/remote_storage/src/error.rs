@@ -1,5 +1,3 @@
-use std::borrow::Cow;
-
 /// Reasons for downloads or listings to fail.
 #[derive(Debug)]
 pub enum DownloadError {
@@ -19,7 +17,7 @@ pub enum DownloadError {
     Timeout,
     /// Some integrity/consistency check failed during download. This is used during
     /// timeline loads to cancel the load of a tenant if some timeline detects fatal corruption.
-    Fatal(Cow<'static, str>),
+    Fatal(String),
     /// The file was found in the remote storage, but the download failed.
     Other(anyhow::Error),
 }
