@@ -1891,7 +1891,7 @@ impl Timeline {
         }
     }
 
-    pub(crate) async fn scan_for_shard_notlocal_keys(
+    pub(crate) async fn layer_map_info(
         &self,
         reset: LayerAccessStatsReset,
     ) -> Result<LayerMapInfo, layer_manager::Shutdown> {
@@ -4750,7 +4750,7 @@ impl Timeline {
     }
 
     /// Schedules the uploads of the given image layers
-    pub(self) fn upload_new_image_layers(
+    fn upload_new_image_layers(
         self: &Arc<Self>,
         new_images: impl IntoIterator<Item = ResidentLayer>,
     ) -> Result<(), super::upload_queue::NotInitialized> {

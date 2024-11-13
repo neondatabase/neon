@@ -1322,7 +1322,7 @@ async fn layer_map_info_handler(
         active_timeline_of_active_tenant(&state.tenant_manager, tenant_shard_id, timeline_id)
             .await?;
     let layer_map_info = timeline
-        .scan_for_shard_notlocal_keys(reset)
+        .layer_map_info(reset)
         .await
         .map_err(|_shutdown| ApiError::ShuttingDown)?;
 
