@@ -3,6 +3,7 @@ import re
 import subprocess
 from datetime import datetime
 from pathlib import Path
+import sys
 import time
 
 import psycopg2
@@ -142,6 +143,7 @@ def run_command_and_log_output(command, log_file_path: Path):
     count = 0
     while count < 10:
         print("hello world")
+        sys.stdout.flush() 
         time.sleep(5)
         count += 1
 
