@@ -139,30 +139,22 @@ def run_command_and_log_output(command, log_file_path: Path):
         command (list): The command to execute.
         log_file_path (Path): Path object for the log file where output is written.
     """
-    # while loop that prints hello world every 5 seconds for 10 times
-    count = 0
-    while count < 10:
-        print("hello world")
-        sys.stdout.flush() 
-        time.sleep(5)
-        count += 1
+    with log_file_path.open("w") as log_file:
+        process = subprocess.Popen(
+            command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+        )
 
+        assert process.stdout is not None, "process.stdout should not be None"
 
-    # with log_file_path.open("w") as log_file:
-    #     process = subprocess.Popen(
-    #         command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
-    #     )
+        # Stream output to both log file and console
+        for line in process.stdout:
+            print(line, end="")  # Stream to GitHub Actions log
+            sys.stdout.flush()
+            log_file.write(line)  # Write to log file
 
-    #     assert process.stdout is not None, "process.stdout should not be None"
-
-    #     # Stream output to both log file and console
-    #     for line in process.stdout:
-    #         print(line, end="")  # Stream to GitHub Actions log
-    #         log_file.write(line)  # Write to log file
-
-    #     process.wait()  # Wait for the process to finish
-    #     if process.returncode != 0:
-    #         raise subprocess.CalledProcessError(process.returncode, command)
+        process.wait()  # Wait for the process to finish
+        if process.returncode != 0:
+            raise subprocess.CalledProcessError(process.returncode, command)
 
 
 def convert_to_seconds(duration_str):
