@@ -5,7 +5,6 @@ on:
     # It should be kept in sync with if-condition in jobs
     - cron: '0 6 * * MON' # Storage release
     - cron: '0 6 * * THU' # Proxy release
-    - cron: '0 6 * * TUE' # Compute release
   workflow_dispatch:
     inputs:
       create-storage-release-branch:
@@ -111,7 +110,7 @@ jobs:
                      --head "${RELEASE_BRANCH}" \
                      --base "release-proxy"
   create-compute-release-branch:
-    if: ${{ github.event.schedule == '0 6 * * TUE' || format('{0}', inputs.create-compute-release-branch) == 'true' }}
+    if: ${{ format('{0}', inputs.create-compute-release-branch) == 'true' }}
     runs-on: ubuntu-22.04
 
     permissions:
