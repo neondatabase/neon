@@ -4,6 +4,7 @@
   help: 'Connection counts',
   key_labels: [
     'datname',
+    'application_name',
     'state',
   ],
   values: [
