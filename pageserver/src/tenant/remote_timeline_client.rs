@@ -574,12 +574,18 @@ impl RemoteTimelineClient {
 
             if latest_index_generation > index_generation {
                 // Unexpected!  Why are we loading such an old index if a more recent one exists?
-                tracing::warn!(
+                // We will refuse to proceed, as there is no reasonable scenario where this should happen, but
+                // there _is_ a clear bug/corruption scenario where it would happen (controller sets the generation
+                // backwards).
+                tracing::error!(
                     ?index_generation,
                     ?latest_index_generation,
                     ?latest_index_mtime,
                     "Found a newer index while loading an old one"
                 );
+                return Err(DownloadError::Fatal(
+                    "Index age exceeds threshold and a newer index exists".into(),
+                ));
             }
         }
 
