@@ -1988,6 +1988,9 @@ impl Tenant {
                 }
                 None => warn!("timeline already removed from offloaded timelines"),
             }
+
+            self.initialize_gc_info(&timelines, &offloaded_timelines, Some(timeline_id));
+
             Arc::clone(timeline)
         };
 
@@ -2725,7 +2728,7 @@ impl Tenant {
                 .filter(|timeline| !(timeline.is_broken() || timeline.is_stopping()));
 
             // Before activation, populate each Timeline's GcInfo with information about its children
-            self.initialize_gc_info(&timelines_accessor, &timelines_offloaded_accessor);
+            self.initialize_gc_info(&timelines_accessor, &timelines_offloaded_accessor, None);
 
             // Spawn gc and compaction loops. The loops will shut themselves
             // down when they notice that the tenant is inactive.
@@ -3831,10 +3834,13 @@ impl Tenant {
         &self,
         timelines: &std::sync::MutexGuard<HashMap<TimelineId, Arc<Timeline>>>,
         timelines_offloaded: &std::sync::MutexGuard<HashMap<TimelineId, Arc<OffloadedTimeline>>>,
+        restrict_to_timeline: Option<TimelineId>,
     ) {
-        // This function must be called before activation: after activation timeline create/delete operations
-        // might happen, and this function is not safe to run concurrently with those.
-        assert!(!self.is_active());
+        if restrict_to_timeline.is_none() {
+            // This function must be called before activation: after activation timeline create/delete operations
+            // might happen, and this function is not safe to run concurrently with those.
+            assert!(!self.is_active());
+        }
 
         // Scan all timelines. For each timeline, remember the timeline ID and
         // the branch point where it was created.
@@ -3867,7 +3873,12 @@ impl Tenant {
         let horizon = self.get_gc_horizon();
 
         // Populate each timeline's GcInfo with information about its child branches
-        for timeline in timelines.values() {
+        let timelines_to_write = if let Some(timeline_id) = restrict_to_timeline {
+            itertools::Either::Left(timelines.get(&timeline_id).into_iter())
+        } else {
+            itertools::Either::Right(timelines.values())
+        };
+        for timeline in timelines_to_write {
             let mut branchpoints: Vec<(Lsn, TimelineId, MaybeOffloaded)> = all_branchpoints
                 .remove(&timeline.timeline_id)
                 .unwrap_or_default();
@@ -9753,9 +9764,15 @@ mod tests {
             let gc_info_parent = tline_parent.gc_info.read().unwrap();
             assert_eq!(
                 gc_info_parent.retain_lsns,
-                vec![(Lsn(0x20), child_timeline_id, MaybeOffloaded::No)]
+                vec![(Lsn(0x20), child_timeline_id, MaybeOffloaded::Yes)]
             );
         }
+
+        tenant
+            .get_offloaded_timeline(child_timeline_id)
+            .unwrap()
+            .defuse_for_tenant_drop();
+
         Ok(())
     }
 }
