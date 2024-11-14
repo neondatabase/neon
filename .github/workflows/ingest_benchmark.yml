@@ -121,19 +121,42 @@ jobs:
         ${PSQL} "${BENCHMARK_INGEST_TARGET_CONNSTR}" -c "CREATE EXTENSION IF NOT EXISTS neon; CREATE EXTENSION IF NOT EXISTS neon_utils;"
         echo "BENCHMARK_INGEST_TARGET_CONNSTR=${BENCHMARK_INGEST_TARGET_CONNSTR}" >> $GITHUB_ENV
 
-    - name: Invoke pgcopydb  
-      uses: ./.github/actions/run-python-test-set
+    - name: Cache poetry deps
+      uses: actions/cache@v4
       with:
-        build_type: remote
-        test_selection: performance/test_perf_ingest_using_pgcopydb.py
-        run_in_parallel: false
-        extra_params: -s -m remote_cluster --timeout 86400 -k test_ingest_performance_using_pgcopydb
-        pg_version: v16
+        path: ~/.cache/pypoetry/virtualenvs
+        key: v2-${{ runner.os }}-${{ runner.arch }}-python-deps-bookworm-${{ hashFiles('poetry.lock') }}
+  
+    - name: Install Python deps
+      shell: bash -euxo pipefail {0}
+      run: ./scripts/pysync
+
+    - name: Invoke pytest for pgcopydb
       env:
         BENCHMARK_INGEST_SOURCE_CONNSTR: ${{ secrets.BENCHMARK_INGEST_SOURCE_CONNSTR }}
         PGCOPYDB_LOG_FILE_NAME: ${{ matrix.target_project }}.log
         COMMIT_HASH: ${{ github.sha }}
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
+        BUILD_TYPE: remote
+        DEFAULT_PG_VERSION: v16 
+      run: |
+        ./scripts/pytest \
+        test_runner/performance/test_perf_ingest_using_pgcopydb.py  \
+        -s -m remote_cluster --timeout 86400 -k test_ingest_performance_using_pgcopydb 
+
+    # - name: Invoke pgcopydb  
+    #   uses: ./.github/actions/run-python-test-set
+    #   with:
+    #     build_type: remote
+    #     test_selection: performance/test_perf_ingest_using_pgcopydb.py
+    #     run_in_parallel: false
+    #     extra_params: -s -m remote_cluster --timeout 86400 -k test_ingest_performance_using_pgcopydb
+    #     pg_version: v16
+    #   env:
+    #     BENCHMARK_INGEST_SOURCE_CONNSTR: ${{ secrets.BENCHMARK_INGEST_SOURCE_CONNSTR }}
+    #     PGCOPYDB_LOG_FILE_NAME: ${{ matrix.target_project }}.log
+    #     COMMIT_HASH: ${{ github.sha }}
+    #     PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
 
     - name: show tables sizes after ingest
       run: |
