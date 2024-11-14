@@ -11,6 +11,9 @@
 //! - => S3 as the source for the PGDATA instead of local filesystem
 //!
 //! TODOs before productionization:
+//! - ChunkProcessingJob size / ImportJob::total_size does not account for sharding.
+//!   => produced image layers likely too small.
+//! - ChunkProcessingJob should cut up an ImportJob to hit exactly target image layer size.
 //! - asserts / unwraps need to be replaced with errors
 //! - don't trust remote objects will be small (=prevent OOMs in those cases)
 //!     - limit all in-memory buffers in size, or download to disk and read from there
