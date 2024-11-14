@@ -146,7 +146,6 @@ impl VirtualFile {
                     _mode: IoMode::Buffered,
                 }
             }
-            #[cfg(target_os = "linux")]
             IoMode::Direct => {
                 let inner = VirtualFileInner::open_with_options(
                     path,
