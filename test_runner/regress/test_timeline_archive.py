@@ -417,6 +417,9 @@ def test_timeline_archival_chaos(neon_env_builder: NeonEnvBuilder):
                 # FIXME: there are still anyhow::Error paths in timeline creation/deletion which
                 # generate 500 results when called during shutdown
                 ".*InternalServerError.*",
+                # FIXME: there are still anyhow::Error paths in timeline deletion that generate
+                # log lines at error severity
+                ".*delete_timeline.*Error",
             ]
         )
 
