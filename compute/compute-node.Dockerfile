@@ -1407,7 +1407,7 @@ RUN cd /ext-src/ && for f in *.tar.gz; \
     || exit 1; rm -f $f; done
 RUN cd /ext-src/rum-src && patch -p1 <../rum.patch
 RUN cd /ext-src/pgvector-src && patch -p1 <../pgvector.patch
-RUN cd /ext-src/pg_hint_plan-src && patch -p1 < /ext-src/pg_hint_plan.patch
+#RUN cd /ext-src/pg_hint_plan-src && patch -p1 < /ext-src/pg_hint_plan.patch
 COPY --chmod=755 docker-compose/run-tests.sh /run-tests.sh
 RUN patch -p1 </ext-src/pg_anon.patch
 RUN patch -p1 </ext-src/pg_cron.patch
