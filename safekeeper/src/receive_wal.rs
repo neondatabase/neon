@@ -258,13 +258,9 @@ impl SafekeeperPostgresHandler {
         let mut pgb_reader = pgb.split().context("START_WAL_PUSH split")?;
         let peer_addr = *pgb.get_peer_addr();
 
-        let reader_cancel = match tli {
-            Some(tli) => tli.tli.cancel.clone(),
-            None => {
-                // Timeline not yet created, can't be cancelled, use a dummy token
-                CancellationToken::new()
-            }
-        };
+        // The `tli` parameter is only used for passing _out_ a timeline, one should
+        // not have been passed in.
+        assert!(tli.is_none());
 
         let mut network_reader = NetworkReader {
             ttid: self.ttid,
@@ -272,7 +268,6 @@ impl SafekeeperPostgresHandler {
             pgb_reader: &mut pgb_reader,
             peer_addr,
             acceptor_handle: &mut acceptor_handle,
-            cancel: reader_cancel,
         };
 
         // Read first message and create timeline if needed.
@@ -334,15 +329,15 @@ struct NetworkReader<'a, IO> {
     // WalAcceptor is spawned when we learn server info from walproposer and
     // create timeline; handle is put here.
     acceptor_handle: &'a mut Option<JoinHandle<anyhow::Result<()>>>,
-    cancel: CancellationToken,
 }
 
 impl<'a, IO: AsyncRead + AsyncWrite + Unpin> NetworkReader<'a, IO> {
     async fn read_first_message(
         &mut self,
     ) -> Result<(WalResidentTimeline, ProposerAcceptorMessage), CopyStreamHandlerEnd> {
-        // Receive information about server to create timeline, if not yet.
-        let next_msg = read_message(self.pgb_reader, &self.cancel).await?;
+        // Receive information about server to create timeline, if not yet.  Use a dummy
+        // cancellation token because we aren't holding a Timeline ref yet.
+        let next_msg = read_message(self.pgb_reader, &CancellationToken::new()).await?;
         let tli = match next_msg {
             ProposerAcceptorMessage::Greeting(ref greeting) => {
                 info!(
