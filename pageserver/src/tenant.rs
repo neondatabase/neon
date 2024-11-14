@@ -8231,7 +8231,7 @@ mod tests {
 
         let cancel = CancellationToken::new();
         tline
-            .compact_with_gc(&cancel, EnumSet::new(), &ctx)
+            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
             .await
             .unwrap();
 
@@ -8260,7 +8260,7 @@ mod tests {
             guard.cutoffs.space = Lsn(0x40);
         }
         tline
-            .compact_with_gc(&cancel, EnumSet::new(), &ctx)
+            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
             .await
             .unwrap();
 
@@ -8813,7 +8813,14 @@ mod tests {
         dryrun_flags.insert(CompactFlags::DryRun);
 
         tline
-            .compact_with_gc(&cancel, dryrun_flags, &ctx)
+            .compact_with_gc(
+                &cancel,
+                CompactOptions {
+                    flags: dryrun_flags,
+                    compact_range: None,
+                },
+                &ctx,
+            )
             .await
             .unwrap();
         // We expect layer map to be the same b/c the dry run flag, but we don't know whether there will be other background jobs
@@ -8821,14 +8828,14 @@ mod tests {
         verify_result().await;
 
         tline
-            .compact_with_gc(&cancel, EnumSet::new(), &ctx)
+            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
             .await
             .unwrap();
         verify_result().await;
 
         // compact again
         tline
-            .compact_with_gc(&cancel, EnumSet::new(), &ctx)
+            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
             .await
             .unwrap();
         verify_result().await;
@@ -8841,14 +8848,14 @@ mod tests {
             guard.cutoffs.space = Lsn(0x38);
         }
         tline
-            .compact_with_gc(&cancel, EnumSet::new(), &ctx)
+            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
             .await
             .unwrap();
         verify_result().await; // no wals between 0x30 and 0x38, so we should obtain the same result
 
         // not increasing the GC horizon and compact again
         tline
-            .compact_with_gc(&cancel, EnumSet::new(), &ctx)
+            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
             .await
             .unwrap();
         verify_result().await;
@@ -9042,7 +9049,14 @@ mod tests {
         dryrun_flags.insert(CompactFlags::DryRun);
 
         tline
-            .compact_with_gc(&cancel, dryrun_flags, &ctx)
+            .compact_with_gc(
+                &cancel,
+                CompactOptions {
+                    flags: dryrun_flags,
+                    compact_range: None,
+                },
+                &ctx,
+            )
             .await
             .unwrap();
         // We expect layer map to be the same b/c the dry run flag, but we don't know whether there will be other background jobs
@@ -9050,14 +9064,14 @@ mod tests {
         verify_result().await;
 
         tline
-            .compact_with_gc(&cancel, EnumSet::new(), &ctx)
+            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
             .await
             .unwrap();
         verify_result().await;
 
         // compact again
         tline
-            .compact_with_gc(&cancel, EnumSet::new(), &ctx)
+            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
             .await
             .unwrap();
         verify_result().await;
@@ -9242,7 +9256,7 @@ mod tests {
 
         let cancel = CancellationToken::new();
         branch_tline
-            .compact_with_gc(&cancel, EnumSet::new(), &ctx)
+            .compact_with_gc(&cancel, CompactOptions::default(), &ctx)
             .await
             .unwrap();
 
