@@ -131,7 +131,7 @@ jobs:
         pg_version: v16
       env:
         BENCHMARK_INGEST_SOURCE_CONNSTR: ${{ secrets.BENCHMARK_INGEST_SOURCE_CONNSTR }}
-        PGCOPYDB_LOG_FILE_NAME: ${{ matrix.target_project }}.log
+        TARGET_PROJECT_TYPE: ${{ matrix.target_project }}
         COMMIT_HASH: ${{ github.sha }}
         PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
 

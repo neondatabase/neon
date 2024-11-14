@@ -1,15 +1,14 @@
 import os
 import re
 import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
-import sys
-import time
+from typing import cast
+from urllib.parse import urlparse
 
 import psycopg2
 import pytest
-from typing import cast
-from urllib.parse import urlparse
 
 
 def setup_environment():
@@ -24,7 +23,7 @@ def setup_environment():
     - BENCHMARK_INGEST_SOURCE_CONNSTR
     - BENCHMARK_INGEST_TARGET_CONNSTR
     - PERF_TEST_RESULT_CONNSTR
-    - PGCOPYDB_LOG_FILE_NAME
+    - TARGET_PROJECT_TYPE
     - COMMIT_HASH
 
     """
@@ -38,7 +37,7 @@ def setup_environment():
         "BENCHMARK_INGEST_SOURCE_CONNSTR",
         "BENCHMARK_INGEST_TARGET_CONNSTR",
         "PERF_TEST_RESULT_CONNSTR",
-        "PGCOPYDB_LOG_FILE_NAME",
+        "TARGET_PROJECT_TYPE",
         "COMMIT_HASH",
     ]
     for var in required_env_vars:
@@ -124,7 +123,7 @@ def get_backpressure_time(connstr):
     query = "select backpressure_throttling_time()/1000000;"
     psql_path = os.getenv("PSQL")
     if psql_path is None:
-        raise EnvironmentError("The PSQL environment variable is not set.")
+        raise OSError("The PSQL environment variable is not set.")
     result = subprocess.run(
         [psql_path, connstr, "-t", "-c", query], capture_output=True, text=True, check=True
     )
@@ -236,23 +235,24 @@ def parse_log_and_report_metrics(log_file_path: Path, backpressure_time_diff: fl
     # Report metrics to the database
     report_metrics_to_db(metrics)
 
+
 def get_endpoint_id():
     """Extracts and returns the first segment of the hostname from the PostgreSQL URI stored in BENCHMARK_INGEST_TARGET_CONNSTR."""
     connstr = os.getenv("BENCHMARK_INGEST_TARGET_CONNSTR")
     if connstr is None:
-        raise EnvironmentError("BENCHMARK_INGEST_TARGET_CONNSTR environment variable is not set.")
-    
+        raise OSError("BENCHMARK_INGEST_TARGET_CONNSTR environment variable is not set.")
+
     # Parse the URI
     parsed_url = urlparse(connstr)
-    
+
     # Extract the hostname and split to get the first segment
     hostname = parsed_url.hostname
     if hostname is None:
         raise ValueError("Unable to parse hostname from BENCHMARK_INGEST_TARGET_CONNSTR")
-    
+
     # Split the hostname by dots and take the first segment
-    endpoint_id = hostname.split('.')[0]
-    
+    endpoint_id = hostname.split(".")[0]
+
     return endpoint_id
 
 
@@ -266,6 +266,10 @@ def report_metrics_to_db(metrics):
     if not commit_hash:
         raise OSError("COMMIT_HASH environment variable is not set.")
     endpoint_id = get_endpoint_id()
+    project_type = os.getenv("TARGET_PROJECT_TYPE")
+    if not project_type:
+        raise OSError("TARGET_PROJECT_TYPE environment variable is not set.")
+    platform = f"pg16-{project_type}-us-east-2-staging"
 
     # Connect to the database
     with psycopg2.connect(connstr) as conn:
@@ -277,11 +281,11 @@ def report_metrics_to_db(metrics):
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                     (
-                        "pgcopydb_ingest_bench_test",  # Suit
+                        "pgcopydb_ingest_bench",  # Suit
                         commit_hash,  # Revision (example value, replace as needed)
-                        "pg16-ingest-bench",  # Platform (example value, replace as needed)
-                        metric_name,  # Metric name
-                        metric_value,  # Metric value (in seconds)
+                        platform,
+                        metric_name,
+                        metric_value,  # in seconds
                         "seconds",  # Metric unit
                         "lower_is_better",  # Metric report type
                         datetime.now(),  # Recorded timestamp
@@ -294,11 +298,10 @@ def report_metrics_to_db(metrics):
 @pytest.fixture
 def log_file_path(tmp_path):
     """Fixture to provide a temporary log file path."""
-    if not os.getenv("PGCOPYDB_LOG_FILE_NAME"):
-        raise OSError(
-            "Required environment variable 'PGCOPYDB_LOG_FILE_NAME' is not set."
-        )
-    return tmp_path / os.getenv("PGCOPYDB_LOG_FILE_NAME")
+    if not os.getenv("TARGET_PROJECT_TYPE"):
+        raise OSError("Required environment variable 'TARGET_PROJECT_TYPE' is not set.")
+    return (tmp_path / os.getenv("TARGET_PROJECT_TYPE")).with_suffix(".log")
+
 
 @pytest.mark.remote_cluster
 def test_ingest_performance_using_pgcopydb(log_file_path: Path):
