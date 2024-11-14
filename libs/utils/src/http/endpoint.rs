@@ -334,13 +334,22 @@ pub async fn prometheus_metrics_handler(_req: Request<Body>) -> Result<Response<
 /// Generates pprof CPU profiles.
 pub async fn pprof_profile_handler(req: Request<Body>) -> Result<Response<Body>, ApiError> {
     // Parameters.
-    const FREQUENCY: i32 = 100;
-    let seconds = parse_query_param(&req, "seconds")?.unwrap_or(5);
     let protobuf = match get_query_param(&req, "format")?.as_deref() {
         Some("flamegraph") => false,
         Some("protobuf") => true,
         Some(format) => return Err(ApiError::BadRequest(anyhow!("invalid format {format}"))),
         None => false,
+    };
+    let seconds = match parse_query_param(&req, "seconds")? {
+        Some(0) => return Err(ApiError::BadRequest(anyhow!("duration can't be 0"))),
+        Some(s @ 1..=30) => s,
+        Some(_) => return Err(ApiError::BadRequest(anyhow!("max duration is 30 seconds"))),
+        None => 5,
+    };
+    let frequency = match parse_query_param(&req, "frequency")? {
+        Some(0..100) => return Err(ApiError::BadRequest(anyhow!("frequency must be >=100"))),
+        Some(frequency) => frequency,
+        None => 100,
     };
 
     // Only allow one profiler at a time.
@@ -352,7 +361,7 @@ pub async fn pprof_profile_handler(req: Request<Body>) -> Result<Response<Body>,
     // Take the profile.
     let report = tokio::task::spawn_blocking(move || {
         let guard = pprof::ProfilerGuardBuilder::default()
-            .frequency(FREQUENCY)
+            .frequency(frequency)
             .blocklist(&["libc", "libgcc", "pthread", "vdso"])
             .build()?;
         std::thread::sleep(Duration::from_secs(seconds));
