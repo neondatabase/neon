@@ -25,7 +25,8 @@ CREATE TABLE IF NOT EXISTS perf_test_results (
     metric_value NUMERIC,
     metric_unit VARCHAR(10),
     metric_report_type TEXT,
-    recorded_at_timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    recorded_at_timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    label_1 TEXT
 )
 """
 

@@ -355,6 +355,10 @@ jobs:
             eval $PSQL_CMD
           fi
         done < "$LOG_FILE"
+
+    - name: copy pgcopydb summary.json into workflow log
+      run: |
+        cat /tmp/pgcopydb/summary.json
       
     - name: Delete Neon Project
       if: ${{ always() && matrix.target_project == 'new_empty_project' }}

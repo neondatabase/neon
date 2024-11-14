@@ -7,6 +7,7 @@ from pathlib import Path
 import psycopg2
 import pytest
 from typing import cast
+from urllib.parse import urlparse
 
 
 def setup_environment():
@@ -19,7 +20,7 @@ def setup_environment():
     - PGCOPYDB: e.g. /pgcopydb/bin/pgcopydb
     - PGCOPYDB_LIB_PATH: e.g. /pgcopydb/lib
     - BENCHMARK_INGEST_SOURCE_CONNSTR
-    - NEW_PROJECT_CONNSTR
+    - BENCHMARK_INGEST_TARGET_CONNSTR
     - PERF_TEST_RESULT_CONNSTR
     - PGCOPYDB_LOG_FILE_NAME
     - COMMIT_HASH
@@ -33,7 +34,7 @@ def setup_environment():
         "PSQL",
         "PG_16_LIB_PATH",
         "BENCHMARK_INGEST_SOURCE_CONNSTR",
-        "NEW_PROJECT_CONNSTR",
+        "BENCHMARK_INGEST_TARGET_CONNSTR",
         "PERF_TEST_RESULT_CONNSTR",
         "PGCOPYDB_LOG_FILE_NAME",
         "COMMIT_HASH",
@@ -47,7 +48,7 @@ def setup_environment():
         f"{os.getenv('PGCOPYDB_LIB_PATH')}:{os.getenv('PG_16_LIB_PATH')}"
     )
     os.environ["PGCOPYDB_SOURCE_PGURI"] = cast(str, os.getenv("BENCHMARK_INGEST_SOURCE_CONNSTR"))
-    os.environ["PGCOPYDB_TARGET_PGURI"] = cast(str, os.getenv("NEW_PROJECT_CONNSTR"))
+    os.environ["PGCOPYDB_TARGET_PGURI"] = cast(str, os.getenv("BENCHMARK_INGEST_TARGET_CONNSTR"))
     os.environ["PGOPTIONS"] = (
         "-c maintenance_work_mem=8388608 -c max_parallel_maintenance_workers=7"
     )
@@ -232,6 +233,25 @@ def parse_log_and_report_metrics(log_file_path: Path, backpressure_time_diff: fl
     # Report metrics to the database
     report_metrics_to_db(metrics)
 
+def get_endpoint_id():
+    """Extracts and returns the first segment of the hostname from the PostgreSQL URI stored in BENCHMARK_INGEST_TARGET_CONNSTR."""
+    connstr = os.getenv("BENCHMARK_INGEST_TARGET_CONNSTR")
+    if connstr is None:
+        raise EnvironmentError("BENCHMARK_INGEST_TARGET_CONNSTR environment variable is not set.")
+    
+    # Parse the URI
+    parsed_url = urlparse(connstr)
+    
+    # Extract the hostname and split to get the first segment
+    hostname = parsed_url.hostname
+    if hostname is None:
+        raise ValueError("Unable to parse hostname from BENCHMARK_INGEST_TARGET_CONNSTR")
+    
+    # Split the hostname by dots and take the first segment
+    endpoint_id = hostname.split('.')[0]
+    
+    return endpoint_id
+
 
 def report_metrics_to_db(metrics):
     """Inserts parsed metrics into the performance database."""
@@ -242,6 +262,7 @@ def report_metrics_to_db(metrics):
     commit_hash = os.getenv("COMMIT_HASH")
     if not commit_hash:
         raise OSError("COMMIT_HASH environment variable is not set.")
+    endpoint_id = get_endpoint_id()
 
     # Connect to the database
     with psycopg2.connect(connstr) as conn:
@@ -249,11 +270,11 @@ def report_metrics_to_db(metrics):
             for metric_name, metric_value in metrics.items():
                 cur.execute(
                     """
-                    INSERT INTO public.perf_test_results (suit, revision, platform, metric_name, metric_value, metric_unit, metric_report_type, recorded_at_timestamp)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    INSERT INTO public.perf_test_results (suit, revision, platform, metric_name, metric_value, metric_unit, metric_report_type, recorded_at_timestamp, label_1)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                     (
-                        "pgcopydb_ingest_bench",  # Suit
+                        "pgcopydb_ingest_bench_test",  # Suit
                         commit_hash,  # Revision (example value, replace as needed)
                         "pg16-ingest-bench",  # Platform (example value, replace as needed)
                         metric_name,  # Metric name
@@ -261,6 +282,7 @@ def report_metrics_to_db(metrics):
                         "seconds",  # Metric unit
                         "lower_is_better",  # Metric report type
                         datetime.now(),  # Recorded timestamp
+                        endpoint_id,  # Label 1
                     ),
                 )
             conn.commit()
@@ -294,7 +316,7 @@ def test_ingest_performance_using_pgcopydb(log_file_path: Path):
     create_pgcopydb_filter_file()
 
     # Get backpressure time before ingest
-    backpressure_time_before = get_backpressure_time(os.getenv("NEW_PROJECT_CONNSTR"))
+    backpressure_time_before = get_backpressure_time(os.getenv("BENCHMARK_INGEST_TARGET_CONNSTR"))
 
     # Build and run the pgcopydb command
     command = build_pgcopydb_command()
@@ -304,7 +326,7 @@ def test_ingest_performance_using_pgcopydb(log_file_path: Path):
         pytest.fail(f"pgcopydb command failed with error: {e}")
 
     # Get backpressure time after ingest and calculate the difference
-    backpressure_time_after = get_backpressure_time(os.getenv("NEW_PROJECT_CONNSTR"))
+    backpressure_time_after = get_backpressure_time(os.getenv("BENCHMARK_INGEST_TARGET_CONNSTR"))
     backpressure_time_diff = backpressure_time_after - backpressure_time_before
 
     # Parse log file and report metrics, including backpressure time difference
