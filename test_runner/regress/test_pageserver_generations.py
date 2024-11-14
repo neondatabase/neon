@@ -35,9 +35,10 @@ from fixtures.pageserver.utils import (
     wait_for_upload,
 )
 from fixtures.remote_storage import (
+    LocalFsStorage,
     RemoteStorageKind,
 )
-from fixtures.utils import wait_until
+from fixtures.utils import run_only_on_default_postgres, wait_until
 from fixtures.workload import Workload
 
 if TYPE_CHECKING:
@@ -728,3 +729,68 @@ def test_upgrade_generationless_local_file_paths(
     )
     # We should download into the same local path we started with
     assert os.path.exists(victim_path)
+
+
+@run_only_on_default_postgres("Only tests index logic")
+def test_old_index_time_threshold(
+    neon_env_builder: NeonEnvBuilder,
+):
+    """
+    Exercise pageserver's detection of trying to load an ancient non-latest index.
+    (see https://github.com/neondatabase/neon/issues/6951)
+    """
+
+    # Run with local_fs because we will interfere with mtimes by local filesystem access
+    neon_env_builder.enable_pageserver_remote_storage(RemoteStorageKind.LOCAL_FS)
+    env = neon_env_builder.init_start()
+    tenant_id = env.initial_tenant
+    timeline_id = env.initial_timeline
+
+    workload = Workload(env, tenant_id, timeline_id)
+    workload.init()
+    workload.write_rows(32)
+
+    # Remember generation 1's index path
+    assert isinstance(env.pageserver_remote_storage, LocalFsStorage)
+    index_path = env.pageserver_remote_storage.index_path(tenant_id, timeline_id)
+
+    # Increment generation by detaching+attaching, and write+flush some data to get a new remote index
+    env.storage_controller.tenant_policy_update(tenant_id, {"placement": "Detached"})
+    env.storage_controller.tenant_policy_update(tenant_id, {"placement": {"Attached": 0}})
+    env.storage_controller.reconcile_until_idle()
+    workload.churn_rows(32)
+
+    # A new index should have been written
+    assert env.pageserver_remote_storage.index_path(tenant_id, timeline_id) != index_path
+
+    # Hack the mtime on the generation 1 index
+    log.info(f"Setting old mtime on {index_path}")
+    os.utime(index_path, times=(time.time(), time.time() - 30 * 24 * 3600))
+    env.pageserver.allowed_errors.extend(
+        [
+            ".*Found a newer index while loading an old one.*",
+            ".*Index age exceeds threshold and a newer index exists.*",
+        ]
+    )
+
+    # Detach from storage controller + attach in an old generation directly on the pageserver.
+    workload.stop()
+    env.storage_controller.tenant_policy_update(tenant_id, {"placement": "Detached"})
+    env.storage_controller.reconcile_until_idle()
+    env.storage_controller.tenant_policy_update(tenant_id, {"scheduling": "Stop"})
+    env.storage_controller.allowed_errors.append(".*Scheduling is disabled by policy")
+
+    # The controller would not do this (attach in an old generation): we are doing it to simulate
+    # a hypothetical profound bug in the controller.
+    env.pageserver.http_client().tenant_location_conf(
+        tenant_id, {"generation": 1, "mode": "AttachedSingle", "tenant_conf": {}}
+    )
+
+    # The pageserver should react to this situation by refusing to attach the tenant and putting
+    # it into Broken state
+    env.pageserver.allowed_errors.append(".*tenant is broken.*")
+    with pytest.raises(
+        PageserverApiException,
+        match="tenant is broken: Index age exceeds threshold and a newer index exists",
+    ):
+        env.pageserver.http_client().timeline_detail(tenant_id, timeline_id)

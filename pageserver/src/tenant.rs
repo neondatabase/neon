@@ -1433,6 +1433,12 @@ impl Tenant {
                     info!(%timeline_id, "index_part not found on remote");
                     continue;
                 }
+                Err(DownloadError::Fatal(why)) => {
+                    // If, while loading one remote timeline, we saw an indication that our generation
+                    // number is likely invalid, then we should not load the whole tenant.
+                    error!(%timeline_id, "Fatal error loading timeline: {why}");
+                    anyhow::bail!(why.to_string());
+                }
                 Err(e) => {
                     // Some (possibly ephemeral) error happened during index_part download.
                     // Pretend the timeline exists to not delete the timeline directory,
