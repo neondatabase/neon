@@ -127,7 +127,7 @@ jobs:
         build_type: remote
         test_selection: performance/test_perf_ingest_using_pgcopydb.py
         run_in_parallel: false
-        extra_params: -s -m remote_cluster --timeout 86400 -k test_ingest_performance_using_pgcopydb
+        extra_params: -s --capture=tee-sys -m remote_cluster --timeout 86400 -k test_ingest_performance_using_pgcopydb
         pg_version: v16
       env:
         BENCHMARK_INGEST_SOURCE_CONNSTR: ${{ secrets.BENCHMARK_INGEST_SOURCE_CONNSTR }}
