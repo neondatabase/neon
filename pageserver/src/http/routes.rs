@@ -102,7 +102,7 @@ use utils::{
     http::{
         endpoint::{self, attach_openapi_ui, auth_middleware, check_permission_with},
         error::{ApiError, HttpErrorBody},
-        json::{json_request, json_response},
+        json::{json_request, json_request_maybe, json_response},
         request::parse_request_param,
         RequestExt, RouterBuilder,
     },
@@ -1936,7 +1936,7 @@ async fn timeline_compact_handler(
     let timeline_id: TimelineId = parse_request_param(&request, "timeline_id")?;
     check_permission(&request, Some(tenant_shard_id.tenant_id))?;
 
-    let compact_range = json_request::<Option<CompactRange>>(&mut request).await?;
+    let compact_range = json_request_maybe::<Option<CompactRange>>(&mut request).await?;
 
     let state = get_state(&request);
 
