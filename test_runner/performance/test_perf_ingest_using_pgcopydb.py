@@ -297,7 +297,7 @@ def log_file_path(tmp_path):
         )
     return tmp_path / os.getenv("PGCOPYDB_LOG_FILE_NAME")
 
-
+@pytest.mark.remote_cluster
 def test_ingest_performance_using_pgcopydb(log_file_path: Path):
     """
     Simulate project migration from another PostgreSQL provider to Neon.
