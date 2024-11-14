@@ -378,7 +378,17 @@ def test_timeline_offload_persist(neon_env_builder: NeonEnvBuilder, delete_timel
     )
 
 
-@pytest.mark.parametrize("offload_child", ["offload", "offload-corrupt", "offload-no-restart", "archive", None])
+@pytest.mark.parametrize(
+    "offload_child",
+    [
+        "offload",
+        "offload-corrupt",
+        "offload-no-restart",
+        "offload-parent-no-restart",
+        "archive",
+        None,
+    ],
+)
 def test_timeline_retain_lsn(neon_env_builder: NeonEnvBuilder, offload_child: Optional[str]):
     """
     Ensure that retain_lsn functionality for timelines works, both for offloaded and non-offloaded ones
@@ -452,9 +462,23 @@ def test_timeline_retain_lsn(neon_env_builder: NeonEnvBuilder, offload_child: Op
         assert leaf_detail["is_archived"] is True
         if "offload" in offload_child:
             ps_http.timeline_offload(tenant_id, child_timeline_id)
+        if "offload-parent" in offload_child:
+            # Do a cycle of offload then unoffload to ensure the retain_lsn of the child
+            # is entered in the parent at unoffloading
+            ps_http.timeline_archival_config(
+                tenant_id,
+                root_timeline_id,
+                state=TimelineArchivalState.ARCHIVED,
+            )
+            ps_http.timeline_offload(tenant_id, root_timeline_id)
+            ps_http.timeline_archival_config(
+                tenant_id,
+                root_timeline_id,
+                state=TimelineArchivalState.UNARCHIVED,
+            )
 
     # Do a restart to get rid of any in-memory objects (we only init gc info once, at attach)
-    if offload_child != "offload-no-restart":
+    if offload_child is None or not ("no-restart" in offload_child):
         env.pageserver.stop()
     if offload_child == "offload-corrupt":
         assert isinstance(env.pageserver_remote_storage, S3Storage)
@@ -490,7 +514,7 @@ def test_timeline_retain_lsn(neon_env_builder: NeonEnvBuilder, offload_child: Op
                 ".*page_service_conn_main.*could not find data for key.*",
             ]
         )
-    if offload_child != "offload-no-restart":
+    if offload_child is None or not ("no-restart" in offload_child):
         env.pageserver.start()
 
     # Do an agressive gc and compaction of the parent branch
