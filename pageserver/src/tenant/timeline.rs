@@ -489,6 +489,10 @@ impl GcInfo {
     pub(super) fn remove_child_not_offloaded(&mut self, child_id: TimelineId) {
         self.remove_child_maybe_offloaded(child_id, MaybeOffloaded::No);
     }
+
+    pub(super) fn remove_child_offloaded(&mut self, child_id: TimelineId) {
+        self.remove_child_maybe_offloaded(child_id, MaybeOffloaded::Yes);
+    }
 }
 
 /// The `GcInfo` component describing which Lsns need to be retained.  Functionally, this

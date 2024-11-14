@@ -39,6 +39,7 @@ use remote_timeline_client::UploadQueueNotReadyError;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
+use std::sync::atomic::AtomicBool;
 use std::sync::Weak;
 use std::time::SystemTime;
 use storage_broker::BrokerClientChannel;
@@ -524,6 +525,9 @@ pub struct OffloadedTimeline {
     /// Prevent two tasks from deleting the timeline at the same time. If held, the
     /// timeline is being deleted. If 'true', the timeline has already been deleted.
     pub delete_progress: TimelineDeleteProgress,
+
+    /// Part of the `OffloadedTimeline` object's lifecycle: this needs to be set before we drop it
+    pub deleted_from_ancestor: AtomicBool,
 }
 
 impl OffloadedTimeline {
@@ -533,9 +537,16 @@ impl OffloadedTimeline {
     /// the timeline is not in a stopped state.
     /// Panics if the timeline is not archived.
     fn from_timeline(timeline: &Timeline) -> Result<Self, UploadQueueNotReadyError> {
-        let ancestor_retain_lsn = timeline
-            .get_ancestor_timeline_id()
-            .map(|_timeline_id| timeline.get_ancestor_lsn());
+        let (ancestor_retain_lsn, ancestor_timeline_id) =
+            if let Some(ancestor_timeline) = timeline.ancestor_timeline() {
+                let ancestor_lsn = timeline.get_ancestor_lsn();
+                let ancestor_timeline_id = ancestor_timeline.timeline_id;
+                let mut gc_info = ancestor_timeline.gc_info.write().unwrap();
+                gc_info.insert_child(timeline.timeline_id, ancestor_lsn, MaybeOffloaded::Yes);
+                (Some(ancestor_lsn), Some(ancestor_timeline_id))
+            } else {
+                (None, None)
+            };
         let archived_at = timeline
             .remote_client
             .archived_at_stopped_queue()?
@@ -543,14 +554,17 @@ impl OffloadedTimeline {
         Ok(Self {
             tenant_shard_id: timeline.tenant_shard_id,
             timeline_id: timeline.timeline_id,
-            ancestor_timeline_id: timeline.get_ancestor_timeline_id(),
+            ancestor_timeline_id,
             ancestor_retain_lsn,
             archived_at,
 
             delete_progress: timeline.delete_progress.clone(),
+            deleted_from_ancestor: AtomicBool::new(false),
         })
     }
     fn from_manifest(tenant_shard_id: TenantShardId, manifest: &OffloadedTimelineManifest) -> Self {
+        // We expect to reach this case in tenant loading, where the `retain_lsn` is populated in the parent's `gc_info`
+        // by the `initialize_gc_info` function.
         let OffloadedTimelineManifest {
             timeline_id,
             ancestor_timeline_id,
@@ -564,6 +578,7 @@ impl OffloadedTimeline {
             ancestor_retain_lsn,
             archived_at,
             delete_progress: TimelineDeleteProgress::default(),
+            deleted_from_ancestor: AtomicBool::new(false),
         }
     }
     fn manifest(&self) -> OffloadedTimelineManifest {
@@ -581,11 +596,55 @@ impl OffloadedTimeline {
             archived_at: *archived_at,
         }
     }
+    /// Delete this timeline's retain_lsn from its ancestor, if present in the given tenant
+    fn delete_from_ancestor_with_timelines(
+        &self,
+        timelines: &std::sync::MutexGuard<'_, HashMap<TimelineId, Arc<Timeline>>>,
+    ) {
+        if let (Some(_retain_lsn), Some(ancestor_timeline_id)) =
+            (self.ancestor_retain_lsn, self.ancestor_timeline_id)
+        {
+            if let Some((_, ancestor_timeline)) = timelines
+                .iter()
+                .find(|(tid, _tl)| **tid == ancestor_timeline_id)
+            {
+                ancestor_timeline
+                    .gc_info
+                    .write()
+                    .unwrap()
+                    .remove_child_offloaded(self.timeline_id);
+            }
+        }
+        self.deleted_from_ancestor.store(true, Ordering::Release);
+    }
+    /// Call [`Self::delete_from_ancestor_with_timelines`] instead if possible.
+    ///
+    /// As the entire tenant is being dropped, don't bother deregistering the `retain_lsn` from the ancestor.
+    fn defuse_for_tenant_drop(&self) {
+        self.deleted_from_ancestor.store(true, Ordering::Release);
+    }
 }
 
 impl fmt::Debug for OffloadedTimeline {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "OffloadedTimeline<{}>", self.timeline_id)
+    }
+}
+
+impl Drop for OffloadedTimeline {
+    fn drop(&mut self) {
+        let deleted_from_ancestor = self.deleted_from_ancestor.load(Ordering::Acquire);
+        debug_assert!(
+            deleted_from_ancestor,
+            "OffloadedTimeline {} was dropped without having cleaned it up at the ancestor",
+            self.timeline_id
+        );
+        if !deleted_from_ancestor {
+            tracing::warn!(
+                "OffloadedTimeline {} was dropped without having cleaned it up at the ancestor",
+                self.timeline_id
+            );
+        }
     }
 }
 
@@ -1923,8 +1982,11 @@ impl Tenant {
                 )));
             };
             let mut offloaded_timelines = self.timelines_offloaded.lock().unwrap();
-            if offloaded_timelines.remove(&timeline_id).is_none() {
-                warn!("timeline already removed from offloaded timelines");
+            match offloaded_timelines.remove(&timeline_id) {
+                Some(offloaded) => {
+                    offloaded.delete_from_ancestor_with_timelines(&timelines);
+                }
+                None => warn!("timeline already removed from offloaded timelines"),
             }
             Arc::clone(timeline)
         };
@@ -2778,8 +2840,14 @@ impl Tenant {
                 let timeline_id = timeline.timeline_id;
                 let span = tracing::info_span!("timeline_shutdown", %timeline_id, ?shutdown_mode);
                 js.spawn(async move { timeline.shutdown(shutdown_mode).instrument(span).await });
-            })
-        };
+            });
+        }
+        {
+            let timelines_offloaded = self.timelines_offloaded.lock().unwrap();
+            timelines_offloaded.values().for_each(|timeline| {
+                timeline.defuse_for_tenant_drop();
+            });
+        }
         // test_long_timeline_create_then_tenant_delete is leaning on this message
         tracing::info!("Waiting for timelines...");
         while let Some(res) = js.join_next().await {
