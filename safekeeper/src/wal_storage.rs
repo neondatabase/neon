@@ -127,23 +127,29 @@ pub struct PhysicalStorage {
     /// - doesn't point to the end of the segment
     file: Option<File>,
 
-    /// When false, we have just initialized storage using the LSN from find_end_of_wal().
-    /// In this case, [`write_lsn`] can be less than actually written WAL on disk. In particular,
-    /// there can be a case with unexpected .partial file.
+    /// When true, WAL truncation potentially has been interrupted and we need
+    /// to finish it before allowing WAL writes; see truncate_wal for details.
+    /// In this case [`write_lsn`] can be less than actually written WAL on
+    /// disk. In particular, there can be a case with unexpected .partial file.
     ///
     /// Imagine the following:
     /// - 000000010000000000000001
-    ///   - it was fully written, but the last record is split between 2 segments
-    ///   - after restart, `find_end_of_wal()` returned 0/1FFFFF0, which is in the end of this segment
-    ///   - `write_lsn`, `write_record_lsn` and `flush_record_lsn` were initialized to 0/1FFFFF0
+    ///   - it was fully written, but the last record is split between 2
+    ///     segments
+    ///   - after restart, `find_end_of_wal()` returned 0/1FFFFF0, which is in
+    ///     the end of this segment
+    ///   - `write_lsn`, `write_record_lsn` and `flush_record_lsn` were
+    ///     initialized to 0/1FFFFF0
     /// - 000000010000000000000002.partial
-    ///   - it has only 1 byte written, which is not enough to make a full WAL record
+    ///   - it has only 1 byte written, which is not enough to make a full WAL
+    ///     record
     ///
-    /// Partial segment 002 has no WAL records, and it will be removed by the next truncate_wal().
-    /// This flag will be set to true after the first truncate_wal() call.
+    /// Partial segment 002 has no WAL records, and it will be removed by the
+    /// next truncate_wal(). This flag will be set to true after the first
+    /// truncate_wal() call.
     ///
     /// [`write_lsn`]: Self::write_lsn
-    is_truncated_after_restart: bool,
+    pending_wal_truncation: bool,
 }
 
 impl PhysicalStorage {
@@ -208,7 +214,7 @@ impl PhysicalStorage {
             flush_record_lsn: flush_lsn,
             decoder: WalStreamDecoder::new(write_lsn, state.server.pg_version / 10000),
             file: None,
-            is_truncated_after_restart: false,
+            pending_wal_truncation: true,
         })
     }
 
@@ -405,6 +411,13 @@ impl Storage for PhysicalStorage {
                 startpos
             );
         }
+        if self.pending_wal_truncation {
+            bail!(
+                "write_wal called with pending WAL truncation, write_lsn={}, startpos={}",
+                self.write_lsn,
+                startpos
+            );
+        }
 
         let write_seconds = time_io_closure(self.write_exact(startpos, buf)).await?;
         // WAL is written, updating write metrics
@@ -479,14 +492,33 @@ impl Storage for PhysicalStorage {
             );
         }
 
-        // Quick exit if nothing to do to avoid writing up to 16 MiB of zeros on
-        // disk (this happens on each connect).
-        if self.is_truncated_after_restart
+        // Quick exit if nothing to do and we know that the state is clean to
+        // avoid writing up to 16 MiB of zeros on disk (this happens on each
+        // connect).
+        if !self.pending_wal_truncation
             && end_pos == self.write_lsn
             && end_pos == self.flush_record_lsn
         {
             return Ok(());
         }
+
+        // Atomicity: we start with LSNs reset because once on disk deletion is
+        // started it can't be reversed. However, we might crash/error in the
+        // middle, leaving garbage above the truncation point. In theory,
+        // concatenated with previous records it might form bogus WAL (though
+        // very unlikely in practice because CRC would guard from that). To
+        // protect, set pending_wal_truncation flag before beginning: it means
+        // truncation must be retried and WAL writes are prohibited until it
+        // succeeds. Flag is also set on boot because we don't know if the last
+        // state was clean.
+        //
+        // Protocol (HandleElected before first AppendRequest) ensures we'll
+        // always try to ensure clean truncation before any writes.
+        self.pending_wal_truncation = true;
+
+        self.write_lsn = end_pos;
+        self.write_record_lsn = end_pos;
+        self.flush_record_lsn = end_pos;
 
         // Close previously opened file, if any
         if let Some(unflushed_file) = self.file.take() {
@@ -513,11 +545,7 @@ impl Storage for PhysicalStorage {
             fs::rename(wal_file_path, wal_file_partial_path).await?;
         }
 
-        // Update LSNs
-        self.write_lsn = end_pos;
-        self.write_record_lsn = end_pos;
-        self.flush_record_lsn = end_pos;
-        self.is_truncated_after_restart = true;
+        self.pending_wal_truncation = false;
         Ok(())
     }
 
