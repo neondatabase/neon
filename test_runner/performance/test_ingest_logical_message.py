@@ -8,6 +8,7 @@ from fixtures.common_types import Lsn
 from fixtures.log_helper import log
 from fixtures.neon_fixtures import (
     NeonEnvBuilder,
+    wait_for_commit_lsn,
     wait_for_last_flush_lsn,
 )
 
@@ -54,15 +55,15 @@ def test_ingest_logical_message(
                             from generate_series(1, {count})
                         """)
 
-                    # Send a transactional message to synchronize with the Safekeeper.
+                        end_lsn = Lsn(endpoint.safe_psql("select pg_current_wal_lsn()")[0][0])
+
+                    # Wait for Safekeeper.
                     log.info("Waiting for Safekeeper to catch up")
-                    cur.execute("select pg_logical_emit_message(true, 'sync', '')")
+                    wait_for_commit_lsn(env, env.initial_tenant, env.initial_timeline, end_lsn)
 
                 # Wait for Pageserver ingestion.
                 log.info("Waiting for Pageserver to catch up")
                 wait_for_last_flush_lsn(env, endpoint, env.initial_tenant, env.initial_timeline)
-
-    end_lsn = Lsn(endpoint.safe_psql("select pg_current_wal_lsn()")[0][0])
 
     # Emit metrics.
     wal_written_mb = round((end_lsn - start_lsn) / (1024 * 1024))
