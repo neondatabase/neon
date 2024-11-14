@@ -133,6 +133,7 @@ jobs:
           --ignore test_runner/performance/test_perf_pgvector_queries.py
           --ignore test_runner/performance/test_logical_replication.py
           --ignore test_runner/performance/test_physical_replication.py
+          --ignore test_runner/performance/test_perf_ingest_using_pgcopydb.py
       env:
         BENCHMARK_CONNSTR: ${{ steps.create-neon-project.outputs.dsn }}
         VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
