@@ -496,7 +496,12 @@ lfc_get_state(size_t* n_entries)
 {
 	size_t max_entries = *n_entries;
 	size_t i = 0;
-	FileCacheStateEntry* fs = (FileCacheStateEntry*)palloc(sizeof(FileCacheStateEntry) * max_entries);
+	FileCacheStateEntry* fs;
+
+	if (lfc_maybe_disabled() || max_entries == 0)	/* fast exit if file cache is disabled */
+		return NULL;
+
+	fs = (FileCacheStateEntry*)palloc(sizeof(FileCacheStateEntry) * max_entries);
 
 	LWLockAcquire(lfc_lock, LW_SHARED);
 
@@ -1639,14 +1644,18 @@ get_local_cache_state(PG_FUNCTION_ARGS)
 {
 	size_t n_entries = PG_ARGISNULL(0) ? lfc_prewarm_limit : PG_GETARG_INT32(0);
 	FileCacheStateEntry* fs = lfc_get_state(&n_entries);
-	size_t size_in_bytes = sizeof(FileCacheStateEntry) * n_entries;
-	bytea* res = (bytea*)palloc(VARHDRSZ + size_in_bytes);
+	if (fs != NULL)
+	{
+		size_t size_in_bytes = sizeof(FileCacheStateEntry) * n_entries;
+		bytea* res = (bytea*)palloc(VARHDRSZ + size_in_bytes);
 
-	SET_VARSIZE(res, VARHDRSZ + size_in_bytes);
-	memcpy(VARDATA(res), fs, size_in_bytes);
-	pfree(fs);
+		SET_VARSIZE(res, VARHDRSZ + size_in_bytes);
+		memcpy(VARDATA(res), fs, size_in_bytes);
+		pfree(fs);
 
-	PG_RETURN_BYTEA_P(res);
+		PG_RETURN_BYTEA_P(res);
+	}
+	PG_RETURN_NULL();
 }
 
 PG_FUNCTION_INFO_V1(prewarm_local_cache);
