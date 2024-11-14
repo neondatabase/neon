@@ -378,7 +378,7 @@ def test_timeline_offload_persist(neon_env_builder: NeonEnvBuilder, delete_timel
     )
 
 
-@pytest.mark.parametrize("offload_child", ["offload", "offload-corrupt", "archive", None])
+@pytest.mark.parametrize("offload_child", ["offload", "offload-corrupt", "offload-no-restart", "archive", None])
 def test_timeline_retain_lsn(neon_env_builder: NeonEnvBuilder, offload_child: Optional[str]):
     """
     Ensure that retain_lsn functionality for timelines works, both for offloaded and non-offloaded ones
@@ -454,7 +454,8 @@ def test_timeline_retain_lsn(neon_env_builder: NeonEnvBuilder, offload_child: Op
             ps_http.timeline_offload(tenant_id, child_timeline_id)
 
     # Do a restart to get rid of any in-memory objects (we only init gc info once, at attach)
-    env.pageserver.stop()
+    if offload_child != "offload-no-restart":
+        env.pageserver.stop()
     if offload_child == "offload-corrupt":
         assert isinstance(env.pageserver_remote_storage, S3Storage)
         listing = list_prefix(
@@ -489,7 +490,8 @@ def test_timeline_retain_lsn(neon_env_builder: NeonEnvBuilder, offload_child: Op
                 ".*page_service_conn_main.*could not find data for key.*",
             ]
         )
-    env.pageserver.start()
+    if offload_child != "offload-no-restart":
+        env.pageserver.start()
 
     # Do an agressive gc and compaction of the parent branch
     ps_http.timeline_gc(tenant_id=tenant_id, timeline_id=root_timeline_id, gc_horizon=0)
