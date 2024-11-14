@@ -5,6 +5,7 @@ use std::{
 
 use anyhow::Context;
 use pageserver_api::{models::TimelineState, shard::TenantShardId};
+use remote_storage::DownloadError;
 use tokio::sync::OwnedMutexGuard;
 use tracing::{error, info, info_span, instrument, Instrument};
 use utils::{crashsafe, fs_ext, id::TimelineId, pausable_failpoint};
@@ -16,7 +17,7 @@ use crate::{
         metadata::TimelineMetadata,
         remote_timeline_client::{PersistIndexPartWithDeletedFlagError, RemoteTimelineClient},
         CreateTimelineCause, DeleteTimelineError, MaybeDeletedIndexPart, Tenant,
-        TimelineOrOffloaded,
+        TenantManifestError, TimelineOrOffloaded,
     },
     virtual_file::MaybeFatalIo,
 };
@@ -108,13 +109,6 @@ pub(super) async fn delete_local_timeline_directory(
         .fatal_err("fsync after removing timeline directory");
 
     info!("finished deleting layer files, releasing locks");
-}
-
-/// Removes remote layers and an index file after them.
-async fn delete_remote_layers_and_index(
-    remote_client: &Arc<RemoteTimelineClient>,
-) -> anyhow::Result<()> {
-    remote_client.delete_all().await.context("delete_all")
 }
 
 /// It is important that this gets called when DeletionGuard is being held.
@@ -221,11 +215,24 @@ impl DeleteTimelineFlow {
             None => {
                 let remote_client = tenant
                     .build_timeline_client(timeline.timeline_id(), tenant.remote_storage.clone());
-                let result = remote_client
+                let result = match remote_client
                     .download_index_file(&tenant.cancel)
                     .instrument(info_span!("download_index_file"))
                     .await
-                    .map_err(|e| DeleteTimelineError::Other(anyhow::anyhow!("error: {:?}", e)))?;
+                {
+                    Ok(r) => r,
+                    Err(DownloadError::NotFound) => {
+                        // Deletion is already complete
+                        tracing::info!("Timeline already deleted in remote storage");
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        return Err(DeleteTimelineError::Other(anyhow::anyhow!(
+                            "error: {:?}",
+                            e
+                        )));
+                    }
+                };
                 let index_part = match result {
                     MaybeDeletedIndexPart::Deleted(p) => {
                         tracing::info!("Timeline already set as deleted in remote index");
@@ -406,7 +413,12 @@ impl DeleteTimelineFlow {
             "timeline_delete",
             async move {
                 if let Err(err) = Self::background(guard, conf, &tenant, &timeline, remote_client).await {
-                    error!("Error: {err:#}");
+                    // Only log as an error if it's not a cancellation.
+                    if matches!(err, DeleteTimelineError::Cancelled) {
+                        info!("Shutdown during timeline deletion");
+                    }else {
+                        error!("Error: {err:#}");
+                    }
                     if let TimelineOrOffloaded::Timeline(timeline) = timeline {
                         timeline.set_broken(format!("{err:#}"))
                     }
@@ -438,7 +450,7 @@ impl DeleteTimelineFlow {
             Err(anyhow::anyhow!("failpoint: timeline-delete-after-rm"))?
         });
 
-        delete_remote_layers_and_index(&remote_client).await?;
+        remote_client.delete_all().await?;
 
         pausable_failpoint!("in_progress_delete");
 
@@ -449,10 +461,10 @@ impl DeleteTimelineFlow {
         // So indeed, the tenant manifest might refer to an offloaded timeline which has already been deleted.
         // However, we handle this case in tenant loading code so the next time we attach, the issue is
         // resolved.
-        tenant
-            .store_tenant_manifest()
-            .await
-            .map_err(|e| DeleteTimelineError::Other(anyhow::anyhow!(e)))?;
+        tenant.store_tenant_manifest().await.map_err(|e| match e {
+            TenantManifestError::Cancelled => DeleteTimelineError::Cancelled,
+            _ => DeleteTimelineError::Other(e.into()),
+        })?;
 
         *guard = Self::Finished;
 
