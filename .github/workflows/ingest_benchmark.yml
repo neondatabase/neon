@@ -1,4 +1,4 @@
-name: Benchmarking
+name: benchmarking ingest
 
 on:
   # uncomment to run on push for debugging your PR
