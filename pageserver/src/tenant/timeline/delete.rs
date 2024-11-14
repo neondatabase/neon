@@ -17,7 +17,7 @@ use crate::{
         metadata::TimelineMetadata,
         remote_timeline_client::{PersistIndexPartWithDeletedFlagError, RemoteTimelineClient},
         CreateTimelineCause, DeleteTimelineError, MaybeDeletedIndexPart, Tenant,
-        TimelineOrOffloaded,
+        TenantManifestError, TimelineOrOffloaded,
     },
     virtual_file::MaybeFatalIo,
 };
@@ -461,10 +461,10 @@ impl DeleteTimelineFlow {
         // So indeed, the tenant manifest might refer to an offloaded timeline which has already been deleted.
         // However, we handle this case in tenant loading code so the next time we attach, the issue is
         // resolved.
-        tenant
-            .store_tenant_manifest()
-            .await
-            .map_err(|e| DeleteTimelineError::Other(anyhow::anyhow!(e)))?;
+        tenant.store_tenant_manifest().await.map_err(|e| match e {
+            TenantManifestError::Cancelled => DeleteTimelineError::Cancelled,
+            _ => DeleteTimelineError::Other(e.into()),
+        })?;
 
         *guard = Self::Finished;
 
