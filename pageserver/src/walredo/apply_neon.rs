@@ -42,6 +42,34 @@ pub(crate) fn apply_in_neon(
         } => {
             anyhow::bail!("tried to pass postgres wal record to neon WAL redo");
         }
+        //
+        // Code copied from PostgreSQL `visibilitymap_prepare_truncate` function in `visibilitymap.c`
+        //
+        NeonWalRecord::TruncateVisibilityMap {
+            trunc_byte,
+            trunc_offs,
+        } => {
+            // sanity check that this is modifying the correct relation
+            let (rel, _) = key.to_rel_block().context("invalid record")?;
+            assert!(
+                rel.forknum == VISIBILITYMAP_FORKNUM,
+                "TruncateVisibilityMap record on unexpected rel {}",
+                rel
+            );
+            let map = &mut page[pg_constants::MAXALIGN_SIZE_OF_PAGE_HEADER_DATA..];
+            map[*trunc_byte + 1..].fill(0u8);
+            /*----
+             * Mask out the unwanted bits of the last remaining byte.
+             *
+             * ((1 << 0) - 1) = 00000000
+             * ((1 << 1) - 1) = 00000001
+             * ...
+             * ((1 << 6) - 1) = 00111111
+             * ((1 << 7) - 1) = 01111111
+             *----
+             */
+            map[*trunc_byte] &= (1 << *trunc_offs) - 1;
+        }
         NeonWalRecord::ClearVisibilityMapFlags {
             new_heap_blkno,
             old_heap_blkno,
