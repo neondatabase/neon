@@ -3354,7 +3354,8 @@ impl Tenant {
         // this race is not possible if both request types come from the storage
         // controller (as they should!) because an exclusive op lock is required
         // on the storage controller side.
-        let updated = self.tenant_conf.rcu(|inner| {
+
+        self.tenant_conf.rcu(|inner| {
             Arc::new(AttachedTenantConf {
                 tenant_conf: new_tenant_conf.clone(),
                 location: inner.location,
@@ -3362,6 +3363,8 @@ impl Tenant {
                 lsn_lease_deadline: inner.lsn_lease_deadline,
             })
         });
+
+        let updated = self.tenant_conf.load().clone();
 
         self.tenant_conf_updated(&new_tenant_conf);
         // Don't hold self.timelines.lock() during the notifies.
