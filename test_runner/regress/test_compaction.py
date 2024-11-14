@@ -115,6 +115,17 @@ page_cache_size=10
     assert non_vectored_average < 8
     assert vectored_average < 8
 
+    # run a gc-compaction in the end for the rel data range
+    ps_http.timeline_compact(
+        tenant_id,
+        timeline_id,
+        enhanced_gc_bottom_most_compaction=True,
+        body={
+            "start": "000000000000000000000000000000000000",
+            "end": "030000000000000000000000000000000000",
+        },
+    )
+
 
 # Stripe sizes in number of pages.
 TINY_STRIPES = 16
@@ -122,19 +133,10 @@ LARGE_STRIPES = 32768
 
 
 @pytest.mark.parametrize(
-    "shard_count,stripe_size,gc_compaction",
-    [
-        (None, None, False),
-        (4, TINY_STRIPES, False),
-        (4, LARGE_STRIPES, False),
-        (4, LARGE_STRIPES, True),
-    ],
+    "shard_count,stripe_size", [(None, None), (4, TINY_STRIPES), (4, LARGE_STRIPES)]
 )
 def test_sharding_compaction(
-    neon_env_builder: NeonEnvBuilder,
-    stripe_size: int,
-    shard_count: Optional[int],
-    gc_compaction: bool,
+    neon_env_builder: NeonEnvBuilder, stripe_size: int, shard_count: Optional[int]
 ):
     """
     Use small stripes, small layers, and small compaction thresholds to exercise how compaction
@@ -222,17 +224,6 @@ def test_sharding_compaction(
         # With large stripes, it is expected that most of our writes went to one pageserver, so we just require
         # that at least one of them has some image layers.
         assert any(shard_has_image_layers)
-
-    if gc_compaction:
-        env.pageserver.http_client().timeline_compact(
-            tenant_id,
-            timeline_id,
-            enhanced_gc_bottom_most_compaction=True,
-            body={
-                "start": "00000000000000000000000000000000",
-                "end": "30000000000000000000000000000000",
-            },
-        )
 
     # Assert that everything is still readable
     workload.validate()
