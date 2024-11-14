@@ -1386,7 +1386,7 @@ COPY --from=hll-pg-build /hll.tar.gz /ext-src
 COPY --from=plpgsql-check-pg-build /plpgsql_check.tar.gz /ext-src
 #COPY --from=timescaledb-pg-build /timescaledb.tar.gz /ext-src
 COPY --from=pg-hint-plan-pg-build /pg_hint_plan.tar.gz /ext-src
-COPY compute/patches/pg_hint_plan.patch /ext-src
+COPY compute/patches/pg_hint_plan_${PG_VERSION}.patc? /ext-src
 COPY --from=pg-cron-pg-build /pg_cron.tar.gz /ext-src
 COPY compute/patches/pg_cron.patch /ext-src
 #COPY --from=pg-pgx-ulid-build /home/nonroot/pgx_ulid.tar.gz /ext-src
@@ -1407,7 +1407,9 @@ RUN cd /ext-src/ && for f in *.tar.gz; \
     || exit 1; rm -f $f; done
 RUN cd /ext-src/rum-src && patch -p1 <../rum.patch
 RUN cd /ext-src/pgvector-src && patch -p1 <../pgvector.patch
-#RUN cd /ext-src/pg_hint_plan-src && patch -p1 < /ext-src/pg_hint_plan.patch
+RUN case "${PG_VERSION}" in "v16") \
+     echo Skip for PG17 for now ;; \
+    esac && cd /ext-src/pg_hint_plan-src && patch -p1 < /ext-src/pg_hint_plan_${PG_VERSION}.patch
 COPY --chmod=755 docker-compose/run-tests.sh /run-tests.sh
 RUN case "${PG_VERSION}" in "v17") \
     echo "postgresql_anonymizer does not yet support PG17" && exit 0;; \
