@@ -316,7 +316,7 @@ class PageserverHttpClient(requests.Session, MetricsGetter):
     def tenant_location_conf(
         self,
         tenant_id: Union[TenantId, TenantShardId],
-        location_conf=dict[str, Any],
+        location_conf: dict[str, Any],
         flush_ms=None,
         lazy: Optional[bool] = None,
     ):

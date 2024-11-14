@@ -574,12 +574,18 @@ impl RemoteTimelineClient {
 
             if latest_index_generation > index_generation {
                 // Unexpected!  Why are we loading such an old index if a more recent one exists?
-                tracing::warn!(
+                // We will refuse to proceed, as there is no reasonable scenario where this should happen, but
+                // there _is_ a clear bug/corruption scenario where it would happen (controller sets the generation
+                // backwards).
+                tracing::error!(
                     ?index_generation,
                     ?latest_index_generation,
                     ?latest_index_mtime,
                     "Found a newer index while loading an old one"
                 );
+                return Err(DownloadError::Fatal(
+                    "Index age exceeds threshold and a newer index exists".into(),
+                ));
             }
         }
 
@@ -2200,6 +2206,18 @@ impl RemoteTimelineClient {
         let mut inner = self.upload_queue.lock().unwrap();
         inner.initialized_mut()?;
         Ok(UploadQueueAccessor { inner })
+    }
+
+    pub(crate) fn no_pending_work(&self) -> bool {
+        let inner = self.upload_queue.lock().unwrap();
+        match &*inner {
+            UploadQueue::Uninitialized
+            | UploadQueue::Stopped(UploadQueueStopped::Uninitialized) => true,
+            UploadQueue::Stopped(UploadQueueStopped::Deletable(x)) => {
+                x.upload_queue_for_deletion.no_pending_work()
+            }
+            UploadQueue::Initialized(x) => x.no_pending_work(),
+        }
     }
 }
 

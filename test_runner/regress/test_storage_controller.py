@@ -36,11 +36,12 @@ from fixtures.pageserver.utils import (
     remote_storage_delete_key,
     timeline_delete_wait_completed,
 )
-from fixtures.pg_version import PgVersion, run_only_on_default_postgres
+from fixtures.pg_version import PgVersion
 from fixtures.port_distributor import PortDistributor
 from fixtures.remote_storage import RemoteStorageKind, s3_storage
 from fixtures.storage_controller_proxy import StorageControllerProxy
 from fixtures.utils import (
+    run_only_on_default_postgres,
     run_pg_bench_small,
     subprocess_capture,
     wait_until,
@@ -1237,6 +1238,7 @@ def test_storage_controller_tenant_deletion(
     # Assert attachments all have local content
     for shard_id in shard_ids:
         pageserver = env.get_tenant_pageserver(shard_id)
+        assert pageserver is not None
         assert pageserver.tenant_dir(shard_id).exists()
 
     # Assert all shards have some content in remote storage
@@ -2745,6 +2747,7 @@ def test_storage_controller_validate_during_migration(neon_env_builder: NeonEnvB
 
     # Upload but don't compact
     origin_pageserver = env.get_tenant_pageserver(tenant_id)
+    assert origin_pageserver is not None
     dest_ps_id = [p.id for p in env.pageservers if p.id != origin_pageserver.id][0]
     origin_pageserver.http_client().timeline_checkpoint(
         tenant_id, timeline_id, wait_until_uploaded=True, compact=False

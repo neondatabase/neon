@@ -14,6 +14,7 @@ from fixtures.common_types import Lsn, TenantId, TimelineId
 from fixtures.log_helper import getLogger
 from fixtures.neon_fixtures import Endpoint, NeonEnv, NeonEnvBuilder, Safekeeper
 from fixtures.remote_storage import RemoteStorageKind
+from fixtures.utils import skip_in_debug_build
 
 if TYPE_CHECKING:
     from typing import Optional
@@ -602,7 +603,7 @@ async def run_segment_init_failure(env: NeonEnv):
 
     sk = env.safekeepers[0]
     sk_http = sk.http_client()
-    sk_http.configure_failpoints([("sk-write-zeroes", "return")])
+    sk_http.configure_failpoints([("sk-zero-segment", "return")])
     conn = await ep.connect_async()
     ep.safe_psql("select pg_switch_wal()")  # jump to the segment boundary
     # next insertion should hang until failpoint is disabled.
@@ -760,10 +761,8 @@ async def run_wal_lagging(env: NeonEnv, endpoint: Endpoint, test_output_dir: Pat
 # The test takes more than default 5 minutes on Postgres 16,
 # see https://github.com/neondatabase/neon/issues/5305
 @pytest.mark.timeout(600)
+@skip_in_debug_build("times out in debug builds")
 def test_wal_lagging(neon_env_builder: NeonEnvBuilder, test_output_dir: Path, build_type: str):
-    if build_type == "debug":
-        pytest.skip("times out in debug builds")
-
     neon_env_builder.num_safekeepers = 3
     env = neon_env_builder.init_start()
 

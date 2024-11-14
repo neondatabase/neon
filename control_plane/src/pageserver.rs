@@ -273,6 +273,7 @@ impl PageServerNode {
             )
         })?;
         let args = vec!["-D", datadir_path_str];
+
         background_process::start_process(
             "pageserver",
             &datadir,
