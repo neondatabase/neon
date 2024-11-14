@@ -62,14 +62,6 @@ IsEmptyF(f) == DOMAIN f = {}
 \* Set of values (image) of the function f. Apparently no such builtin.
 Range(f) == {f[x] : x \in DOMAIN f}
 
-\* Next entry proposer p will push to acceptor a or NULL.
-NextEntry(p, a) ==
-  IF Len(prop_state[p].wal) >= prop_state[p].next_send_lsn[a] THEN
-    CHOOSE r \in Range(prop_state[p].wal) : r.lsn = prop_state[p].next_send_lsn[a]
-  ELSE
-    NULL
-
-
 \*****************
 
 NumAccs == Cardinality(acceptors)
