@@ -115,6 +115,7 @@ page_cache_size=10
     assert non_vectored_average < 8
     assert vectored_average < 8
 
+
 def test_pageserver_gc_compaction_smoke(neon_env_builder: NeonEnvBuilder):
     # Effectively disable the page cache to rely only on image layers
     # to shorten reads.
