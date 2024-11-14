@@ -5788,7 +5788,7 @@ impl<'a> TimelineWriter<'a> {
         batch: SerializedValueBatch,
         ctx: &RequestContext,
     ) -> anyhow::Result<()> {
-        if batch.is_empty() {
+        if !batch.has_data() {
             return Ok(());
         }
 
