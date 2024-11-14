@@ -477,8 +477,17 @@ impl GcInfo {
         self.retain_lsns.sort_by_key(|i| i.0);
     }
 
-    pub(super) fn remove_child(&mut self, child_id: TimelineId) {
-        self.retain_lsns.retain(|i| i.1 != child_id);
+    pub(super) fn remove_child_maybe_offloaded(
+        &mut self,
+        child_id: TimelineId,
+        maybe_offloaded: MaybeOffloaded,
+    ) {
+        self.retain_lsns
+            .retain(|i| !(i.1 == child_id && i.2 == maybe_offloaded));
+    }
+
+    pub(super) fn remove_child_not_offloaded(&mut self, child_id: TimelineId) {
+        self.remove_child_maybe_offloaded(child_id, MaybeOffloaded::No);
     }
 }
 
@@ -4501,7 +4510,7 @@ impl Drop for Timeline {
             // This lock should never be poisoned, but in case it is we do a .map() instead of
             // an unwrap(), to avoid panicking in a destructor and thereby aborting the process.
             if let Ok(mut gc_info) = ancestor.gc_info.write() {
-                gc_info.remove_child(self.timeline_id)
+                gc_info.remove_child_not_offloaded(self.timeline_id)
             }
         }
     }
