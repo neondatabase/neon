@@ -974,15 +974,27 @@ pub mod virtual_file {
         serde_with::DeserializeFromStr,
         serde_with::SerializeDisplay,
         Debug,
-        Default,
     )]
     #[strum(serialize_all = "kebab-case")]
     pub enum IoModeKind {
         /// Uses buffered IO.
-        #[default]
         Buffered,
         /// Uses direct IO, error out if the operation fails.
+        #[cfg(target_os = "linux")]
         Direct,
+    }
+
+    impl IoModeKind {
+        // TODO(yuchen): change to [`Self::Direct`] once finish rollout.
+        #[cfg(target_os = "linux")]
+        pub const fn preferred() -> Self {
+            Self::Buffered
+        }
+
+        #[cfg(target_os = "macos")]
+        pub const fn preferred() -> Self {
+            Self::Buffered
+        }
     }
 }
 

@@ -416,7 +416,7 @@ impl PageServerConf {
                 .map(crate::l0_flush::L0FlushConfig::from)
                 .unwrap_or_default(),
             virtual_file_io_mode: virtual_file_io_mode
-                .unwrap_or(virtual_file::IoModeKind::default()),
+                .unwrap_or(virtual_file::IoModeKind::preferred()),
             no_sync: no_sync.unwrap_or(false),
         };
 

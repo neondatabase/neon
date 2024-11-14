@@ -50,7 +50,7 @@ async fn read_delta_file(path: impl AsRef<Path>, ctx: &RequestContext) -> Result
     virtual_file::init(
         10,
         virtual_file::api::IoEngineKind::StdFs,
-        IoModeKind::default(),
+        IoModeKind::preferred(),
     );
     page_cache::init(100);
     let path = Utf8Path::from_path(path.as_ref()).expect("non-Unicode path");
@@ -64,7 +64,7 @@ async fn read_image_file(path: impl AsRef<Path>, ctx: &RequestContext) -> Result
     virtual_file::init(
         10,
         virtual_file::api::IoEngineKind::StdFs,
-        IoModeKind::default(),
+        IoModeKind::preferred(),
     );
     page_cache::init(100);
     let path = Utf8Path::from_path(path.as_ref()).expect("non-Unicode path");
@@ -170,7 +170,7 @@ pub(crate) async fn main(cmd: &LayerCmd) -> Result<()> {
             pageserver::virtual_file::init(
                 10,
                 virtual_file::api::IoEngineKind::StdFs,
-                IoModeKind::default(),
+                IoModeKind::preferred(),
             );
             pageserver::page_cache::init(100);
 

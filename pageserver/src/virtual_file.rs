@@ -146,6 +146,7 @@ impl VirtualFile {
                     _mode: IoMode::Buffered,
                 }
             }
+            #[cfg(target_os = "linux")]
             IoMode::Direct => {
                 let inner = VirtualFileInner::open_with_options(
                     path,
@@ -1375,6 +1376,7 @@ pub(crate) type IoPageSlice<'a> =
 pub(crate) enum IoMode {
     NotSet,
     Buffered,
+    #[cfg(target_os = "linux")]
     Direct,
 }
 
@@ -1385,6 +1387,7 @@ impl TryFrom<u8> for IoMode {
         Ok(match value {
             v if v == (IoMode::NotSet as u8) => IoMode::NotSet,
             v if v == (IoMode::Buffered as u8) => IoMode::Buffered,
+            #[cfg(target_os = "linux")]
             v if v == (IoMode::Direct as u8) => IoMode::Direct,
             x => return Err(x),
         })
@@ -1395,6 +1398,7 @@ impl From<IoModeKind> for IoMode {
     fn from(value: IoModeKind) -> Self {
         match value {
             IoModeKind::Buffered => IoMode::Buffered,
+            #[cfg(target_os = "linux")]
             IoModeKind::Direct => IoMode::Direct,
         }
     }
@@ -1420,7 +1424,7 @@ fn get_io_mode() -> IoMode {
                             panic!("invalid VirtualFile io mode for env var {env_var_name}: {e:#}: {v:?}")
                         }
                     },
-                    Err(std::env::VarError::NotPresent) => IoModeKind::Direct,
+                    Err(std::env::VarError::NotPresent) => IoModeKind::preferred(),
                     Err(std::env::VarError::NotUnicode(_)) => {
                         panic!("env var {env_var_name} is not unicode");
                     }
