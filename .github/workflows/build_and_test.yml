@@ -742,7 +742,7 @@ jobs:
                                              neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}-${{ matrix.version.debian }}-arm64
 
       - name: Create multi-arch neon-test-extensions image
-        if: matrix.version.pg == 'v16'
+        if: matrix.version.pg >= 'v16'
         run: |
           docker buildx imagetools create -t neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }} \
                                           -t neondatabase/neon-test-extensions-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}-${{ matrix.version.debian }} \
