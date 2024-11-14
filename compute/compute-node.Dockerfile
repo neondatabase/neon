@@ -1361,10 +1361,7 @@ RUN make PG_VERSION="${PG_VERSION}" -C compute
 
 FROM neon-pg-ext-build AS neon-pg-ext-test
 ARG PG_VERSION
-RUN case "${PG_VERSION}" in "v17") \
-    echo "v17 extensions are not supported yet. Quit" && exit 0;; \
-    esac && \
-    mkdir /ext-src
+RUN mkdir /ext-src
 
 #COPY --from=postgis-build /postgis.tar.gz /ext-src/
 #COPY --from=postgis-build /sfcgal/* /usr
@@ -1399,7 +1396,8 @@ COPY --from=pg-roaringbitmap-pg-build /pg_roaringbitmap.tar.gz /ext-src
 COPY --from=pg-semver-pg-build /pg_semver.tar.gz /ext-src
 #COPY --from=pg-embedding-pg-build /home/nonroot/pg_embedding-src/ /ext-src
 #COPY --from=wal2json-pg-build /wal2json_2_5.tar.gz /ext-src
-COPY --from=pg-anon-pg-build /pg_anon.tar.gz /ext-src
+#gp_anon is not supported yet for pg v17 so, don't fail if nothing found
+COPY --from=pg-anon-pg-build /pg_anon.tar.g? /ext-src
 COPY compute/patches/pg_anon.patch /ext-src
 COPY --from=pg-ivm-build /pg_ivm.tar.gz /ext-src
 COPY --from=pg-partman-build /pg_partman.tar.gz /ext-src

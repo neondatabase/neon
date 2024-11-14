@@ -668,7 +668,7 @@ jobs:
             neondatabase/compute-node-${{ matrix.version.pg }}:${{ needs.tag.outputs.build-tag }}-${{ matrix.version.debian }}-${{ matrix.arch }}
 
       - name: Build neon extensions test image
-        if: matrix.version.pg == 'v17'
+        if: matrix.version.pg >= 'v16'
         uses: docker/build-push-action@v6
         with:
           context: .
