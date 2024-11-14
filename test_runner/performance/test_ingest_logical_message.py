@@ -59,5 +59,9 @@ def test_ingest_logical_message(
     zenbenchmark.record("message_count", count, "messages", MetricReport.TEST_PARAM)
 
     props = {p["name"]: p["value"] for _, p in request.node.user_properties}
-    throughput = int(wal_written_mb / props["pageserver_ingest"])
-    zenbenchmark.record("throughput", throughput, "MB/s", MetricReport.HIGHER_IS_BETTER)
+    wal_throughput = int(wal_written_mb / props["wal_ingest"])
+    pageserver_throughput = int(wal_written_mb / props["pageserver_ingest"])
+    zenbenchmark.record("wal_throughput", wal_throughput, "MB/s", MetricReport.HIGHER_IS_BETTER)
+    zenbenchmark.record(
+        "pageserver_throughput", pageserver_throughput, "MB/s", MetricReport.HIGHER_IS_BETTER
+    )
