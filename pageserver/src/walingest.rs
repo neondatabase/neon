@@ -587,11 +587,29 @@ impl WalIngest {
                 forknum: VISIBILITYMAP_FORKNUM,
             };
 
-            let mut vm_page_no = blkno / pg_constants::VM_HEAPBLOCKS_PER_PAGE;
-            if blkno % pg_constants::VM_HEAPBLOCKS_PER_PAGE != 0 {
-                // Tail of last remaining vm page has to be zeroed.
-                // We are not precise here and instead of digging in VM bitmap format just clear the whole page.
-                modification.put_rel_page_image_zero(rel, vm_page_no)?;
+            // last remaining block, byte, and bit
+            let mut vm_page_no = blkno / (pg_constants::VM_HEAPBLOCKS_PER_PAGE as u32);
+            let trunc_byte = blkno as usize % pg_constants::VM_HEAPBLOCKS_PER_PAGE
+                / pg_constants::VM_HEAPBLOCKS_PER_BYTE;
+            let trunc_offs = blkno as usize % pg_constants::VM_HEAPBLOCKS_PER_BYTE
+                * pg_constants::VM_BITS_PER_HEAPBLOCK;
+
+            // Unless the new size is exactly at a visibility map page boundary, the
+            // tail bits in the last remaining map page, representing truncated heap
+            // blocks, need to be cleared. This is not only tidy, but also necessary
+            // because we don't get a chance to clear the bits if the heap is extended
+            // again.
+            if (trunc_byte != 0 || trunc_offs != 0)
+                && self.shard.is_key_local(&rel_block_to_key(rel, vm_page_no))
+            {
+                modification.put_rel_wal_record(
+                    rel,
+                    vm_page_no,
+                    NeonWalRecord::TruncateVisibilityMap {
+                        trunc_byte,
+                        trunc_offs,
+                    },
+                )?;
                 vm_page_no += 1;
             }
             let nblocks = get_relsize(modification, rel, ctx).await?;

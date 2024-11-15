@@ -5043,7 +5043,7 @@ impl Timeline {
 
             // 1. Is it newer than GC horizon cutoff point?
             if l.get_lsn_range().end > space_cutoff {
-                debug!(
+                info!(
                     "keeping {} because it's newer than space_cutoff {}",
                     l.layer_name(),
                     space_cutoff,
@@ -5054,7 +5054,7 @@ impl Timeline {
 
             // 2. It is newer than PiTR cutoff point?
             if l.get_lsn_range().end > time_cutoff {
-                debug!(
+                info!(
                     "keeping {} because it's newer than time_cutoff {}",
                     l.layer_name(),
                     time_cutoff,
@@ -5073,7 +5073,7 @@ impl Timeline {
             for retain_lsn in &retain_lsns {
                 // start_lsn is inclusive
                 if &l.get_lsn_range().start <= retain_lsn {
-                    debug!(
+                    info!(
                         "keeping {} because it's still might be referenced by child branch forked at {} is_dropped: xx is_incremental: {}",
                         l.layer_name(),
                         retain_lsn,
@@ -5088,7 +5088,7 @@ impl Timeline {
             if let Some(lsn) = &max_lsn_with_valid_lease {
                 // keep if layer start <= any of the lease
                 if &l.get_lsn_range().start <= lsn {
-                    debug!(
+                    info!(
                         "keeping {} because there is a valid lease preventing GC at {}",
                         l.layer_name(),
                         lsn,
@@ -5120,13 +5120,13 @@ impl Timeline {
             if !layers
                 .image_layer_exists(&l.get_key_range(), &(l.get_lsn_range().end..new_gc_cutoff))
             {
-                debug!("keeping {} because it is the latest layer", l.layer_name());
+                info!("keeping {} because it is the latest layer", l.layer_name());
                 result.layers_not_updated += 1;
                 continue 'outer;
             }
 
             // We didn't find any reason to keep this file, so remove it.
-            debug!(
+            info!(
                 "garbage collecting {} is_dropped: xx is_incremental: {}",
                 l.layer_name(),
                 l.is_incremental(),
