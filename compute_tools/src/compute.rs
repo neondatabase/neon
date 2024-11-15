@@ -899,7 +899,7 @@ impl ComputeNode {
                     .cloned()
                     .collect::<HashSet<_>>(),
             );
-            
+
             let ctx = Arc::new(tokio::sync::RwLock::new(MutableApplyContext {
                 roles,
                 dbs: databases,
@@ -1068,7 +1068,8 @@ impl ComputeNode {
 
         let max_concurrent_connections = if compute_state.status != ComputeStatus::Running {
             if let Some(config) = spec.cluster.settings.find("max_connections") {
-                config.parse::<usize>()
+                config
+                    .parse::<usize>()
                     .ok()
                     .map(|limit| match limit {
                         0..10 => limit,
@@ -1077,7 +1078,8 @@ impl ComputeNode {
                     })
                     .unwrap_or(10)
             } else {
-                spec.cluster.postgresql_conf
+                spec.cluster
+                    .postgresql_conf
                     .iter()
                     .flat_map(|conf| conf.split("\n"))
                     .filter_map(|line| {

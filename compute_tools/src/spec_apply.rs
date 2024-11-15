@@ -103,15 +103,10 @@ where
     let span = info_span!("db_apply_changes", phase=?apply_spec_phase);
     let span2 = span.clone();
     async move {
-         debug!("Processing phase {:?}", &apply_spec_phase);
+        debug!("Processing phase {:?}", &apply_spec_phase);
         let ctx = ctx;
 
-        let mut ops = get_operations(
-            &spec,
-            &ctx,
-            &jwks_roles,
-            &apply_spec_phase,
-        )
+        let mut ops = get_operations(&spec, &ctx, &jwks_roles, &apply_spec_phase)
             .await?
             .peekable();
 
@@ -189,7 +184,7 @@ async fn get_operations<'a>(
         ApplySpecPhase::DropInvalidDatabases => {
             let mut ctx = ctx.write().await;
             let databases = &mut ctx.dbs;
-            
+
             let keys: Vec<_> = databases
                 .iter()
                 .filter(|(_, db)| db.invalid)
@@ -220,7 +215,7 @@ async fn get_operations<'a>(
         }
         ApplySpecPhase::RenameRoles => {
             let mut ctx = ctx.write().await;
-            
+
             let operations = spec
                 .delta_operations
                 .iter()
