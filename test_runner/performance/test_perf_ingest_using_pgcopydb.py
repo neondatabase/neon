@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 
 import psycopg2
 import pytest
-
+from fixtures.utils import humantime_to_ms
 
 def setup_environment():
     """Set up necessary environment variables for pgcopydb execution.
@@ -155,55 +155,6 @@ def run_command_and_log_output(command, log_file_path: Path):
         if process.returncode != 0:
             raise subprocess.CalledProcessError(process.returncode, command)
 
-
-def convert_to_seconds(duration_str):
-    """
-    Converts a duration string with hours, minutes, seconds, and milliseconds
-    (e.g., '2h47m3s044ms') to total seconds as a floating-point number.
-
-    Args:
-        duration_str (str): Duration string containing 'h', 'm', 's', 'ms' components.
-
-    Returns:
-        float: Total duration in seconds.
-    """
-    total_seconds = 0.0
-
-    # Regex patterns for hours, minutes, seconds, and milliseconds
-    hours_pattern = re.compile(r"([0-9]+)h")
-    minutes_pattern = re.compile(r"([0-9]+)m")
-    seconds_pattern = re.compile(r"([0-9]+)s")
-    milliseconds_pattern = re.compile(r"([0-9]+)ms")
-
-    # Convert and add milliseconds (ms) first to avoid double-counting with 'm'
-    ms_match = milliseconds_pattern.search(duration_str)
-    if ms_match:
-        milliseconds = int(ms_match.group(1))
-        total_seconds += milliseconds / 1000.0
-        # Remove 'ms' part from the string to prevent double-counting
-        duration_str = duration_str.replace(ms_match.group(0), "")
-
-    # Convert and add hours
-    h_match = hours_pattern.search(duration_str)
-    if h_match:
-        hours = int(h_match.group(1))
-        total_seconds += hours * 3600
-
-    # Convert and add minutes
-    m_match = minutes_pattern.search(duration_str)
-    if m_match:
-        minutes = int(m_match.group(1))
-        total_seconds += minutes * 60
-
-    # Convert and add seconds
-    s_match = seconds_pattern.search(duration_str)
-    if s_match:
-        seconds = int(s_match.group(1))
-        total_seconds += seconds
-
-    return total_seconds
-
-
 def parse_log_and_report_metrics(log_file_path: Path, backpressure_time_diff: float):
     """Parses the pgcopydb log file for performance metrics and reports them to the database."""
     metrics = {"backpressure_time": backpressure_time_diff}
@@ -229,7 +180,9 @@ def parse_log_and_report_metrics(log_file_path: Path, backpressure_time_diff: fl
                     duration_match = re.search(r"\d+h\d+m|\d+s|\d+ms|\d+\.\d+s", line)
                     if duration_match:
                         duration_str = duration_match.group(0)
-                        duration_seconds = convert_to_seconds(duration_str)
+                        parts = re.findall(r'\d+[a-zA-Z]+', duration_str)
+                        rust_like_humantime = ' '.join(parts)
+                        duration_seconds = humantime_to_ms(rust_like_humantime)/1000.0
                         metrics[metric_name] = duration_seconds
 
     # Report metrics to the database
@@ -324,20 +277,20 @@ def test_ingest_performance_using_pgcopydb(log_file_path: Path):
     # Get backpressure time before ingest
     backpressure_time_before = get_backpressure_time(os.getenv("BENCHMARK_INGEST_TARGET_CONNSTR"))
 
-    # # Build and run the pgcopydb command
-    # command = build_pgcopydb_command()
-    # try:
-    #     run_command_and_log_output(command, log_file_path)
-    # except subprocess.CalledProcessError as e:
-    #     pytest.fail(f"pgcopydb command failed with error: {e}")
+    # Build and run the pgcopydb command
+    command = build_pgcopydb_command()
+    try:
+        run_command_and_log_output(command, log_file_path)
+    except subprocess.CalledProcessError as e:
+        pytest.fail(f"pgcopydb command failed with error: {e}")
 
-    # # Get backpressure time after ingest and calculate the difference
-    # backpressure_time_after = get_backpressure_time(os.getenv("BENCHMARK_INGEST_TARGET_CONNSTR"))
-    # backpressure_time_diff = backpressure_time_after - backpressure_time_before
+    # Get backpressure time after ingest and calculate the difference
+    backpressure_time_after = get_backpressure_time(os.getenv("BENCHMARK_INGEST_TARGET_CONNSTR"))
+    backpressure_time_diff = backpressure_time_after - backpressure_time_before
 
-    # # Parse log file and report metrics, including backpressure time difference
-    # parse_log_and_report_metrics(log_file_path, backpressure_time_diff)
+    # Parse log file and report metrics, including backpressure time difference
+    parse_log_and_report_metrics(log_file_path, backpressure_time_diff)
 
-    # # Check log file creation and content
-    # assert log_file_path.exists(), "Log file should be created"
-    # assert log_file_path.stat().st_size > 0, "Log file should not be empty"
+    # Check log file creation and content
+    assert log_file_path.exists(), "Log file should be created"
+    assert log_file_path.stat().st_size > 0, "Log file should not be empty"
