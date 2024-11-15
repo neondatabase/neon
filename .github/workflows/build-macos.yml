@@ -70,6 +70,6 @@ jobs:
           make "neon-pg-ext-${{ matrix.postgres-version }}"
 
       - name: Build walproposer-lib (only for v17)
-        if: ${{ matrix.postgres-version}} == "v17"
+        if: ${{ matrix.postgres-version }} == "v17"
         run:
           make walproposer-lib
