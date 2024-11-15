@@ -154,7 +154,7 @@ impl WalIngest {
         WAL_INGEST.records_received.inc();
         let prev_len = modification.len();
 
-        modification.set_lsn(interpreted.end_lsn)?;
+        modification.set_lsn(interpreted.next_record_lsn)?;
 
         if matches!(interpreted.flush_uncommitted, FlushUncommittedRecords::Yes) {
             // Records of this type should always be preceded by a commit(), as they

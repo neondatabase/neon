@@ -132,7 +132,7 @@ impl SerializedValueBatch {
     pub(crate) fn from_decoded_filtered(
         decoded: DecodedWALRecord,
         shard: &ShardIdentity,
-        record_end_lsn: Lsn,
+        next_record_lsn: Lsn,
         pg_version: u32,
     ) -> anyhow::Result<SerializedValueBatch> {
         // First determine how big the buffer needs to be and allocate it up-front.
@@ -156,13 +156,17 @@ impl SerializedValueBatch {
             let key = rel_block_to_key(rel, blk.blkno);
 
             if !key.is_valid_key_on_write_path() {
-                anyhow::bail!("Unsupported key decoded at LSN {}: {}", record_end_lsn, key);
+                anyhow::bail!(
+                    "Unsupported key decoded at LSN {}: {}",
+                    next_record_lsn,
+                    key
+                );
             }
 
             let key_is_local = shard.is_key_local(&key);
 
             tracing::debug!(
-                lsn=%record_end_lsn,
+                lsn=%next_record_lsn,
                 key=%key,
                 "ingest: shard decision {}",
                 if !key_is_local { "drop" } else { "keep" },
@@ -174,7 +178,7 @@ impl SerializedValueBatch {
                     // its blkno in case it implicitly extends a relation.
                     metadata.push(ValueMeta::Observed(ObservedValueMeta {
                         key: key.to_compact(),
-                        lsn: record_end_lsn,
+                        lsn: next_record_lsn,
                     }))
                 }
 
@@ -205,7 +209,7 @@ impl SerializedValueBatch {
                 // that would corrupt the page.
                 //
                 if !page_is_new(&image) {
-                    page_set_lsn(&mut image, record_end_lsn)
+                    page_set_lsn(&mut image, next_record_lsn)
                 }
                 assert_eq!(image.len(), BLCKSZ as usize);
 
@@ -224,12 +228,12 @@ impl SerializedValueBatch {
 
             metadata.push(ValueMeta::Serialized(SerializedValueMeta {
                 key: key.to_compact(),
-                lsn: record_end_lsn,
+                lsn: next_record_lsn,
                 batch_offset: relative_off,
                 len: val_ser_size,
                 will_init: val.will_init(),
             }));
-            max_lsn = std::cmp::max(max_lsn, record_end_lsn);
+            max_lsn = std::cmp::max(max_lsn, next_record_lsn);
             len += 1;
         }
 
