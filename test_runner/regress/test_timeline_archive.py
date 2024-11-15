@@ -22,6 +22,7 @@ from fixtures.utils import wait_until
 from mypy_boto3_s3.type_defs import (
     ObjectTypeDef,
 )
+from psycopg2.errors import IoError
 
 
 @pytest.mark.parametrize("shard_count", [0, 4])
@@ -492,7 +493,7 @@ def test_timeline_retain_lsn(
             ps_http.timeline_offload(tenant_id, parent_timeline_id)
 
     # Do a restart to get rid of any in-memory objects (we only init gc info once, at attach)
-    if offload_child is None or not ("no-restart" in offload_child):
+    if offload_child is None or "no-restart" not in offload_child:
         env.pageserver.stop()
     if offload_child == "offload-corrupt":
         assert isinstance(env.pageserver_remote_storage, S3Storage)
@@ -528,7 +529,7 @@ def test_timeline_retain_lsn(
                 ".*page_service_conn_main.*could not find data for key.*",
             ]
         )
-    if offload_child is None or not ("no-restart" in offload_child):
+    if offload_child is None or "no-restart" not in offload_child:
         env.pageserver.start()
         if offload_child == "offload-parent":
             wait_until_tenant_active(ps_http, tenant_id=tenant_id)
@@ -558,10 +559,17 @@ def test_timeline_retain_lsn(
 
     # Now, after unarchival, the child timeline should still have its data accessible (or corrupted)
     if offload_child == "offload-corrupt":
-        with pytest.raises(RuntimeError, match=".*failed to get basebackup.*"):
-            env.endpoints.create_start(
+        if with_intermediary:
+            error_class = IoError
+            error_regex = ".*could not read block .* from page server.*"
+        else:
+            error_class = RuntimeError
+            error_regex = ".*failed to get basebackup.*"
+        with pytest.raises(error_class, match=error_regex):
+            with env.endpoints.create_start(
                 "test_archived_branch", tenant_id=tenant_id, basebackup_request_tries=1
-            )
+            ) as endpoint:
+                endpoint.safe_psql("SELECT sum(key) from foo where v < 51200")
     else:
         with env.endpoints.create_start("test_archived_branch", tenant_id=tenant_id) as endpoint:
             sum = endpoint.safe_psql("SELECT sum(key) from foo where v < 51200")
