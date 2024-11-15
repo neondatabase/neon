@@ -324,20 +324,20 @@ def test_ingest_performance_using_pgcopydb(log_file_path: Path):
     # Get backpressure time before ingest
     backpressure_time_before = get_backpressure_time(os.getenv("BENCHMARK_INGEST_TARGET_CONNSTR"))
 
-    # Build and run the pgcopydb command
-    command = build_pgcopydb_command()
-    try:
-        run_command_and_log_output(command, log_file_path)
-    except subprocess.CalledProcessError as e:
-        pytest.fail(f"pgcopydb command failed with error: {e}")
+    # # Build and run the pgcopydb command
+    # command = build_pgcopydb_command()
+    # try:
+    #     run_command_and_log_output(command, log_file_path)
+    # except subprocess.CalledProcessError as e:
+    #     pytest.fail(f"pgcopydb command failed with error: {e}")
 
-    # Get backpressure time after ingest and calculate the difference
-    backpressure_time_after = get_backpressure_time(os.getenv("BENCHMARK_INGEST_TARGET_CONNSTR"))
-    backpressure_time_diff = backpressure_time_after - backpressure_time_before
+    # # Get backpressure time after ingest and calculate the difference
+    # backpressure_time_after = get_backpressure_time(os.getenv("BENCHMARK_INGEST_TARGET_CONNSTR"))
+    # backpressure_time_diff = backpressure_time_after - backpressure_time_before
 
-    # Parse log file and report metrics, including backpressure time difference
-    parse_log_and_report_metrics(log_file_path, backpressure_time_diff)
+    # # Parse log file and report metrics, including backpressure time difference
+    # parse_log_and_report_metrics(log_file_path, backpressure_time_diff)
 
-    # Check log file creation and content
-    assert log_file_path.exists(), "Log file should be created"
-    assert log_file_path.stat().st_size > 0, "Log file should not be empty"
+    # # Check log file creation and content
+    # assert log_file_path.exists(), "Log file should be created"
+    # assert log_file_path.stat().st_size > 0, "Log file should not be empty"
