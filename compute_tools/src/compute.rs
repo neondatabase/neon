@@ -879,19 +879,15 @@ impl ComputeNode {
 
         rt.block_on(async {
             // Proceed with post-startup configuration. Note, that order of operations is important.
-            let mut client = Self::get_maintenance_client(&url).await?;
+            let client = Self::get_maintenance_client(&url).await?;
             let spec = spec.clone();
 
-            let xact = client.transaction().await?;
-            let roles = get_existing_roles_async(&xact)
+            let databases = get_existing_dbs_async(&client).await?;
+            let roles = get_existing_roles_async(&client)
                 .await?
                 .into_iter()
                 .map(|role| (role.name.clone(), role))
                 .collect::<HashMap<String, Role>>();
-
-            xact.commit().await?;
-
-            let databases = get_existing_dbs_async(&client).await?;
 
             let jwks_roles = Arc::new(
                 spec.as_ref()

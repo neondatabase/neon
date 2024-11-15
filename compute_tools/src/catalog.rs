@@ -18,7 +18,7 @@ use crate::pg_helpers::{get_existing_dbs_async, get_existing_roles_async};
 pub async fn get_dbs_and_roles(compute: &Arc<ComputeNode>) -> anyhow::Result<CatalogObjects> {
     let connstr = compute.connstr.clone();
 
-    let (mut client, connection): (tokio_postgres::Client, _) =
+    let (client, connection): (tokio_postgres::Client, _) =
         connect(connstr.as_str(), NoTls).await?;
 
     spawn(async move {
@@ -27,13 +27,7 @@ pub async fn get_dbs_and_roles(compute: &Arc<ComputeNode>) -> anyhow::Result<Cat
         }
     });
 
-    let roles = {
-        let xact = client.transaction().await?;
-        let roles = get_existing_roles_async(&xact).await?;
-        xact.commit().await?;
-
-        roles
-    };
+    let roles = get_existing_roles_async(&client).await?;
 
     let databases = get_existing_dbs_async(&client)
         .await?

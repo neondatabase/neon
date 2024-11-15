@@ -204,8 +204,8 @@ impl Escaping for &'static str {
 }
 
 /// Build a list of existing Postgres roles
-pub async fn get_existing_roles_async(xact: &tokio_postgres::Transaction<'_>) -> Result<Vec<Role>> {
-    let postgres_roles = xact
+pub async fn get_existing_roles_async(client: &tokio_postgres::Client) -> Result<Vec<Role>> {
+    let postgres_roles = client
         .query_raw::<str, &String, &[String; 0]>(
             "SELECT rolname, rolpassword FROM pg_catalog.pg_authid",
             &[],
