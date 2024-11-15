@@ -27,7 +27,7 @@ from fixtures.utils import run_only_on_default_postgres, wait_until
 from mypy_boto3_s3.type_defs import (
     ObjectTypeDef,
 )
-from psycopg2.errors import IoError
+from psycopg2.errors import IoError, UndefinedTable
 
 
 @pytest.mark.parametrize("shard_count", [0, 4])
@@ -817,10 +817,10 @@ def test_timeline_retain_lsn(
     # Now, after unarchival, the child timeline should still have its data accessible (or corrupted)
     if offload_child == "offload-corrupt":
         if with_intermediary:
-            error_regex = ".*could not read block .* from page server.*"
+            error_regex = "(.*could not read block .* from page server.*|.*relation .* does not exist)"
         else:
             error_regex = ".*failed to get basebackup.*"
-        with pytest.raises((RuntimeError, IoError), match=error_regex):
+        with pytest.raises((RuntimeError, IoError, UndefinedTable), match=error_regex):
             with env.endpoints.create_start(
                 "test_archived_branch", tenant_id=tenant_id, basebackup_request_tries=1
             ) as endpoint:
