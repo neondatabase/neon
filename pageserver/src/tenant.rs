@@ -1584,7 +1584,7 @@ impl Tenant {
         }
         // Complete deletions for offloaded timeline id's.
         offloaded_timelines_list
-            .retain(|(offloaded_id, _offloaded)| {
+            .retain(|(offloaded_id, offloaded)| {
                 // At this point, offloaded_timeline_ids has the list of all offloaded timelines
                 // without a prefix in S3, so they are inexistent.
                 // In the end, existence of a timeline is finally determined by the existence of an index-part.json in remote storage.
@@ -1592,6 +1592,7 @@ impl Tenant {
                 let delete = offloaded_timeline_ids.contains(offloaded_id);
                 if delete {
                     tracing::info!("Removing offloaded timeline {offloaded_id} from manifest as no remote prefix was found");
+                    offloaded.defuse_for_tenant_drop();
                 }
                 !delete
         });
