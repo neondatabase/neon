@@ -231,7 +231,7 @@ runs:
         skip-if-does-not-exist: true
 
     - name: (Re-)configure AWS credentials # necessary to upload reports to S3 after a long-running test
-      if: ${{ !cancelled() and inputs.reacquire_s3_credentials == 'true' }}
+      if: ${{ !cancelled() && (inputs.reacquire_s3_credentials == 'true') }}
       uses: aws-actions/configure-aws-credentials@v4
       with:
         aws-region: eu-central-1
