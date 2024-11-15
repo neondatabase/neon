@@ -1917,6 +1917,19 @@ index b79fe9a1c0..e29fab88ab 100644
  ALTER DEFAULT PRIVILEGES FOR ROLE regress_selinto_user
  	  REVOKE INSERT ON TABLES FROM regress_selinto_user;
  GRANT ALL ON SCHEMA selinto_schema TO public;
+diff --git a/src/test/regress/expected/select_parallel.out b/src/test/regress/expected/select_parallel.out
+index afc6ab08c2..dfcd891af3 100644
+--- a/src/test/regress/expected/select_parallel.out
++++ b/src/test/regress/expected/select_parallel.out
+@@ -1220,7 +1220,7 @@ SELECT 1 FROM tenk1_vw_sec
+ 
+ rollback;
+ -- test that function option SET ROLE works in parallel workers.
+-create role regress_parallel_worker;
++create role regress_parallel_worker PASSWORD NEON_PASSWORD_PLACEHOLDER;
+ create function set_and_report_role() returns text as
+   $$ select current_setting('role') $$ language sql parallel safe
+   set role = regress_parallel_worker;
 diff --git a/src/test/regress/expected/select_views.out b/src/test/regress/expected/select_views.out
 index 1aeed8452b..7d9427d070 100644
 --- a/src/test/regress/expected/select_views.out
