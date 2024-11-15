@@ -167,7 +167,7 @@ impl super::storage_layer::inmemory_layer::vectored_dio_read::File for Ephemeral
         dst: tokio_epoll_uring::Slice<B>,
         ctx: &'a RequestContext,
     ) -> std::io::Result<(tokio_epoll_uring::Slice<B>, usize)> {
-        let flushed_offset = self.buffered_writer.bytes_written();
+        let submitted_offset = self.buffered_writer.bytes_submitted();
 
         let mutable = self.buffered_writer.inspect_mutable();
         let mutable = &mutable[0..mutable.pending()];
@@ -208,23 +208,23 @@ impl super::storage_layer::inmemory_layer::vectored_dio_read::File for Ephemeral
                 (
                     Range(
                         start,
-                        std::cmp::min(end, flushed_offset.saturating_sub(TAIL_SZ as u64)),
+                        std::cmp::min(end, submitted_offset.saturating_sub(TAIL_SZ as u64)),
                     ),
                     Range(
-                        std::cmp::max(start, flushed_offset.saturating_sub(TAIL_SZ as u64)),
-                        std::cmp::min(end, flushed_offset),
+                        std::cmp::max(start, submitted_offset.saturating_sub(TAIL_SZ as u64)),
+                        std::cmp::min(end, submitted_offset),
                     ),
                 )
             } else {
                 (
-                    Range(start, std::cmp::min(end, flushed_offset)),
+                    Range(start, std::cmp::min(end, submitted_offset)),
                     // zero len
-                    Range(flushed_offset, u64::MIN),
+                    Range(submitted_offset, u64::MIN),
                 )
             }
         };
 
-        let mutable_range = Range(std::cmp::max(start, flushed_offset), end);
+        let mutable_range = Range(std::cmp::max(start, submitted_offset), end);
 
         let dst = if written_range.len() > 0 {
             let file: &VirtualFile = self.buffered_writer.as_inner();
@@ -240,7 +240,7 @@ impl super::storage_layer::inmemory_layer::vectored_dio_read::File for Ephemeral
         let dst = if maybe_flushed_range.len() > 0 {
             let offset_in_buffer = maybe_flushed_range
                 .0
-                .checked_sub(flushed_offset.saturating_sub(TAIL_SZ as u64))
+                .checked_sub(submitted_offset.saturating_sub(TAIL_SZ as u64))
                 .unwrap()
                 .into_usize();
             // Checked previously the buffer is Some.
@@ -265,7 +265,7 @@ impl super::storage_layer::inmemory_layer::vectored_dio_read::File for Ephemeral
         let dst = if mutable_range.len() > 0 {
             let offset_in_buffer = mutable_range
                 .0
-                .checked_sub(flushed_offset)
+                .checked_sub(submitted_offset)
                 .unwrap()
                 .into_usize();
             let to_copy =

@@ -53,7 +53,7 @@ pub struct BufferedWriter<B: Buffer, W> {
     /// A handle to the background flush task for writting data to disk.
     flush_handle: FlushHandle<B::IoBuf, W>,
     /// The number of bytes submitted to the background task.
-    bytes_amount: u64,
+    bytes_submitted: u64,
 }
 
 impl<B, Buf, W> BufferedWriter<B, W>
@@ -70,7 +70,7 @@ where
             writer: writer.clone(),
             mutable: Some(buf_new()),
             flush_handle: FlushHandle::spawn_new(writer, buf_new(), ctx.attached_child()),
-            bytes_amount: 0,
+            bytes_submitted: 0,
         }
     }
 
@@ -79,8 +79,8 @@ where
     }
 
     /// Returns the number of bytes submitted to the background flush task.
-    pub fn bytes_written(&self) -> u64 {
-        self.bytes_amount
+    pub fn bytes_submitted(&self) -> u64 {
+        self.bytes_submitted
     }
 
     /// Panics if used after any of the write paths returned an error
@@ -105,7 +105,7 @@ where
             mutable: buf,
             writer,
             mut flush_handle,
-            bytes_amount,
+            bytes_submitted: bytes_amount,
         } = self;
         flush_handle.shutdown().await?;
         assert!(buf.is_some());
@@ -145,11 +145,11 @@ where
             let chunk = OwnedAsyncWriter::write_all_at(
                 self.writer.as_ref(),
                 FullSlice::must_new(chunk),
-                self.bytes_amount,
+                self.bytes_submitted,
                 ctx,
             )
             .await?;
-            self.bytes_amount += u64::try_from(chunk_len).unwrap();
+            self.bytes_submitted += u64::try_from(chunk_len).unwrap();
             return Ok((chunk_len, chunk));
         }
         // in-memory copy the < BUFFER_SIZED tail of the chunk
@@ -210,9 +210,9 @@ where
         }
         let recycled = self
             .flush_handle
-            .flush(buf, self.bytes_amount, save_buf_for_read)
+            .flush(buf, self.bytes_submitted, save_buf_for_read)
             .await?;
-        self.bytes_amount += u64::try_from(buf_len).unwrap();
+        self.bytes_submitted += u64::try_from(buf_len).unwrap();
         self.mutable = Some(recycled);
         Ok(())
     }
