@@ -453,7 +453,7 @@ async fn get_operations<'a>(
                             .flatten()
                             .filter(|op| op.action == "delete_role")
                             .filter_map(move |op| {
-                                if !db.is_owned_by(&op.name) {
+                                if db.is_owned_by(&op.name) {
                                     return None;
                                 }
                                 if !ctx.roles.contains_key(&op.name) {
