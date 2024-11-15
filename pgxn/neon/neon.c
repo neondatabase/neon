@@ -512,7 +512,7 @@ neon_shmem_startup_hook(void)
 	if (prev_shmem_startup_hook)
 		prev_shmem_startup_hook();
 
-#if PG_PG_MAJORVERSION_NUM >= 17
+#if PG_MAJORVERSION_NUM >= 17
 	WAIT_EVENT_NEON_LFC_MAINTENANCE = WaitEventExtensionNew("Neon/FileCache_Maintenance");
 	WAIT_EVENT_NEON_LFC_READ = WaitEventExtensionNew("Neon/FileCache_Read");
 	WAIT_EVENT_NEON_LFC_TRUNCATE = WaitEventExtensionNew("Neon/FileCache_Truncate");
