@@ -141,10 +141,6 @@ jobs:
       run: |
         export LD_LIBRARY_PATH=${PG_16_LIB_PATH}
         ${PSQL} "${BENCHMARK_INGEST_TARGET_CONNSTR}" -c "\dt+"
-
-    - name: copy pgcopydb summary.json into workflow log
-      run: |
-        cat /tmp/pgcopydb/summary.json
       
     - name: Delete Neon Project
       if: ${{ always() && matrix.target_project == 'new_empty_project' }}

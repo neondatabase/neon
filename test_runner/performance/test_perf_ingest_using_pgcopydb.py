@@ -45,7 +45,7 @@ def setup_environment():
             raise OSError(f"Required environment variable '{var}' is not set.")
 
 
-def build_pgcopydb_command(pgcopydb_filter_file: Path):
+def build_pgcopydb_command(pgcopydb_filter_file: Path, test_output_dir: Path):
     """Builds the pgcopydb command to execute using existing environment variables."""
     pgcopydb_executable = os.getenv("PGCOPYDB")
     if not pgcopydb_executable:
@@ -54,6 +54,8 @@ def build_pgcopydb_command(pgcopydb_filter_file: Path):
     return [
         pgcopydb_executable,
         "clone",
+        "--dir",
+        str(test_output_dir),
         "--skip-vacuum",
         "--no-owner",
         "--no-acl",
@@ -259,7 +261,7 @@ def log_file_path(test_output_dir):
 
 
 @pytest.mark.remote_cluster
-def test_ingest_performance_using_pgcopydb(log_file_path: Path, pgcopydb_filter_file: Path):
+def test_ingest_performance_using_pgcopydb(log_file_path: Path, pgcopydb_filter_file: Path, test_output_dir: Path):
     """
     Simulate project migration from another PostgreSQL provider to Neon.
 
@@ -279,7 +281,7 @@ def test_ingest_performance_using_pgcopydb(log_file_path: Path, pgcopydb_filter_
     backpressure_time_before = get_backpressure_time(os.getenv("BENCHMARK_INGEST_TARGET_CONNSTR"))
 
     # Build and run the pgcopydb command
-    command = build_pgcopydb_command(pgcopydb_filter_file)
+    command = build_pgcopydb_command(pgcopydb_filter_file, test_output_dir)
     try:
         run_command_and_log_output(command, log_file_path)
     except subprocess.CalledProcessError as e:
